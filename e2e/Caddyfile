@@ -1,0 +1,34 @@
+# e2e config: plain HTTP inside the compose network. The admin API is
+# exposed so the reload-survival scenario can POST this same file to
+# /load mid-traffic.
+{
+	admin 0.0.0.0:2019
+	auto_https off
+
+	hotswap {
+		root /var/lib/hotswap
+		allow_insecure_http
+		webhook_secret {env.HOTSWAP_SECRET}
+
+		app demo {
+			command ./server
+			health_interval 250ms
+			health_timeout 1s
+			soak 1s
+			deadline 10s
+			drain 500ms
+			grace 3s
+			keep 2
+		}
+	}
+}
+
+:8080 {
+	reverse_proxy {
+		dynamic hotswap demo
+	}
+}
+
+:8081 {
+	hotswap_webhook
+}

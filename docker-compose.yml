@@ -45,12 +45,15 @@ services:
       - e2e-artifacts
 
   # Runs the deploy-scenario assertions; its exit code gates `make e2e`.
+  # The Caddyfile is mounted so the reload scenario can POST it to the
+  # admin API mid-traffic.
   e2e-runner:
     image: curlimages/curl:8.14.1
     depends_on:
       - e2e-caddy
     volumes:
       - ./e2e/run.sh:/run.sh:ro
+      - ./e2e/Caddyfile:/Caddyfile:ro
     entrypoint: ["/bin/sh", "/run.sh"]
 
 volumes:
