@@ -28,7 +28,7 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 	})
 	http.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprintf(w, "hello %s pid %d", version, os.Getpid())
+		_, _ = fmt.Fprintf(w, "hello %s pid %d", version, os.Getpid())
 	})
 	if err := http.ListenAndServe("127.0.0.1:"+os.Getenv("PORT"), nil); err != nil {
 		fmt.Fprintln(os.Stderr, err)
