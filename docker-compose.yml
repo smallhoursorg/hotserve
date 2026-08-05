@@ -1,0 +1,59 @@
+services:
+  # Go toolchain for unit/integration tests, vet, tidy. The image is the
+  # toolchain pin — no Go install needed on the host. Integration tests
+  # spawn real child processes (the test app), which is why this service
+  # has no read_only hardening: the tests exercise process management.
+  dev:
+    image: golang:1.25-bookworm
+    working_dir: /src
+    environment:
+      GOFLAGS: -buildvcs=false
+    volumes:
+      - .:/src
+      - gomodcache:/go/pkg/mod
+      - gobuildcache:/root/.cache/go-build
+
+  lint:
+    image: golangci/golangci-lint:v2.6.2
+    working_dir: /src
+    environment:
+      GOFLAGS: -buildvcs=false
+    volumes:
+      - .:/src
+      - gomodcache:/go/pkg/mod
+      - gobuildcache:/root/.cache/go-build
+      - golangcicache:/root/.cache/golangci-lint
+
+  # Serves the demo app tarballs (v1, v2, and a broken v3) that the e2e
+  # scenarios deploy through the webhook — standing in for a GitHub or
+  # GitLab release asset URL.
+  e2e-artifacts:
+    build:
+      context: e2e
+      dockerfile: artifacts.Dockerfile
+
+  # The module-enabled Caddy under test, built with xcaddy from this repo.
+  # This container also runs the deployed demo app as child processes of
+  # Caddy — exactly like a production VPS.
+  e2e-caddy:
+    build:
+      context: .
+      dockerfile: e2e/Dockerfile
+    environment:
+      HOTSWAP_SECRET: e2e-secret
+    depends_on:
+      - e2e-artifacts
+
+  # Runs the deploy-scenario assertions; its exit code gates `make e2e`.
+  e2e-runner:
+    image: curlimages/curl:8.14.1
+    depends_on:
+      - e2e-caddy
+    volumes:
+      - ./e2e/run.sh:/run.sh:ro
+    entrypoint: ["/bin/sh", "/run.sh"]
+
+volumes:
+  gomodcache:
+  gobuildcache:
+  golangcicache:
