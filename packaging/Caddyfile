@@ -1,0 +1,45 @@
+# /etc/hotserve/Caddyfile — hotserve starter configuration.
+#
+# hotserve speaks standard Caddyfile (it IS Caddy under the hood) plus
+# the built-in modules: liveswap (zero-downtime deploys), penaltybox
+# (rate-limit hint enforcement) and cache (Souin + Otter).
+#
+# Reload after editing:  sudo systemctl reload hotserve
+
+# ── Replace with your domain once DNS points here — hotserve then
+#    provisions TLS automatically. ──
+:80 {
+	respond "hotserve is running. Edit /etc/hotserve/Caddyfile to serve your apps."
+}
+
+# ── Example: a Node.js app with zero-downtime deploys ──
+#
+# {
+# 	liveswap {
+# 		webhook_secret {env.LIVESWAP_SECRET}
+#
+# 		app myapp {
+# 			command node server.js
+# 			env_file /etc/hotserve/myapp.env
+# 			# pre_start node migrate.js
+# 		}
+# 	}
+#
+# 	# Page cache (Souin + in-memory Otter storage):
+# 	# cache {
+# 	# 	ttl 60s
+# 	# 	otter
+# 	# }
+# }
+#
+# myapp.example.com {
+# 	# hint_penaltybox        # rate limiting driven by app hint headers
+# 	# cache                  # serve cached pages
+# 	reverse_proxy {
+# 		dynamic liveswap myapp
+# 	}
+# }
+#
+# deploy.example.com {
+# 	liveswap_webhook         # POST /myapp {url, version} from CI
+# }

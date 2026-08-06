@@ -24,6 +24,13 @@ services:
       - gobuildcache:/root/.cache/go-build
       - golangcicache:/root/.cache/golangci-lint
 
+  # Packager for the release .deb/.apk artifacts (`make package`).
+  nfpm:
+    image: goreleaser/nfpm:v2.47.0
+    working_dir: /src
+    volumes:
+      - .:/src
+
   # Serves the demo app tarballs (v1, v2, and a broken v3) that the
   # liveswap scenarios deploy through the webhook — standing in for a
   # GitHub or GitLab release asset URL.

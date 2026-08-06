@@ -1,0 +1,30 @@
+# hotserve systemd unit, modeled on Caddy's official dist unit.
+#
+# Note on hardening: liveswap runs your deployed apps as child
+# processes of hotserve, so PrivateTmp/ProtectSystem apply to them too.
+# /var/lib/liveswap (where releases, shared data and state live) and
+# /var/lib/hotserve (TLS certificates etc.) stay writable — that is
+# where apps are meant to keep their files.
+
+[Unit]
+Description=hotserve — the Hot Source server, powered by Caddy
+Documentation=https://github.com/hotsauce-team/hotserve
+After=network.target network-online.target
+Requires=network-online.target
+
+[Service]
+Type=notify
+User=hotserve
+Group=hotserve
+Environment=XDG_DATA_HOME=/var/lib
+Environment=XDG_CONFIG_HOME=/etc
+ExecStart=/usr/bin/hotserve run --environ --config /etc/hotserve/Caddyfile
+ExecReload=/usr/bin/hotserve reload --config /etc/hotserve/Caddyfile --force
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+PrivateTmp=true
+ProtectSystem=full
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

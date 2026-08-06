@@ -6,7 +6,11 @@ COMPOSE ?= docker compose
 # drives the per-module tidy/lint loops).
 MODULES ?= . liveswap penaltybox
 
-.PHONY: test test-integration vet tidy lint build e2e e2e-logs clean
+# Release version: the tag when present (release.yml passes it in),
+# else a digit-leading dev placeholder that deb/apk version rules accept.
+VERSION ?= $(shell (git describe --tags --exact-match 2>/dev/null || echo v0.0.0-dev) | sed 's/^v//')
+
+.PHONY: test test-integration vet tidy lint build package e2e e2e-logs clean
 
 test:
 	$(COMPOSE) run --rm dev go test -race -cover ./...
@@ -36,6 +40,20 @@ build:
 		for a in amd64 arm64; do \
 			GOOS=linux GOARCH=$$a go build -trimpath -ldflags "-s -w" -o build/hotserve-linux-$$a ./cmd/hotserve || exit 1; \
 		done'
+
+# Builds .deb and .apk for both arches into dist/. The packages carry
+# the systemd unit, the starter /etc/hotserve/Caddyfile and the data
+# dirs; postinstall creates the hotserve system user.
+package: build
+	mkdir -p dist
+	for a in amd64 arm64; do \
+		cp build/hotserve-linux-$$a build/hotserve; \
+		for f in deb apk; do \
+			$(COMPOSE) run --rm -e NFPM_ARCH=$$a -e NFPM_VERSION=$(VERSION) nfpm \
+				package -f packaging/nfpm.yaml -p $$f -t dist/ || exit 1; \
+		done; \
+	done; \
+	rm -f build/hotserve
 
 e2e:
 	$(COMPOSE) up --build --exit-code-from e2e-runner e2e-runner; \

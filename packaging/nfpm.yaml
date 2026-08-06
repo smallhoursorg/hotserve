@@ -1,0 +1,43 @@
+# nfpm packaging definition — one file for both .deb and .apk, run once
+# per arch × format by `make package`. Env: NFPM_ARCH, NFPM_VERSION.
+#
+# The .apk note: Alpine runs OpenRC, so the shipped systemd unit is
+# inert there; an OpenRC init script arrives with the hosted APT/APK
+# repository phase.
+name: hotserve
+arch: "${NFPM_ARCH}"
+platform: linux
+version: "${NFPM_VERSION}"
+section: web
+priority: optional
+maintainer: "Hot Sauce Team <davey@web-shed.com>"
+description: |
+  hotserve — the Hot Source server, powered by Caddy.
+  Zero-downtime app deploys (liveswap), rate-limit hint enforcement
+  (penaltybox) and HTTP caching (Souin + Otter) in one binary.
+vendor: Hot Sauce Team
+homepage: https://github.com/hotsauce-team/hotserve
+license: Apache-2.0
+
+contents:
+  # `make package` stages the right arch's binary at this fixed path
+  # before each nfpm run (nfpm does not env-expand contents paths).
+  - src: build/hotserve
+    dst: /usr/bin/hotserve
+  - src: packaging/hotserve.service
+    dst: /lib/systemd/system/hotserve.service
+  - src: packaging/Caddyfile
+    dst: /etc/hotserve/Caddyfile
+    type: config|noreplace
+  - dst: /var/lib/hotserve
+    type: dir
+    file_info:
+      mode: 0750
+  - dst: /var/lib/liveswap
+    type: dir
+    file_info:
+      mode: 0750
+
+scripts:
+  postinstall: packaging/postinstall.sh
+  preremove: packaging/preremove.sh
