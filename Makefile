@@ -28,12 +28,12 @@ lint:
 e2e:
 	$(COMPOSE) up --build --exit-code-from e2e-runner e2e-runner; \
 	status=$$?; \
-	if [ $$status -ne 0 ]; then $(COMPOSE) logs e2e-caddy e2e-artifacts; fi; \
+	if [ $$status -ne 0 ]; then $(COMPOSE) logs e2e-hotserve e2e-upstream e2e-artifacts; fi; \
 	$(COMPOSE) down --remove-orphans; \
 	exit $$status
 
 e2e-logs:
-	$(COMPOSE) logs e2e-caddy e2e-artifacts
+	$(COMPOSE) logs e2e-hotserve e2e-upstream e2e-artifacts
 
 clean:
 	$(COMPOSE) down -v --remove-orphans

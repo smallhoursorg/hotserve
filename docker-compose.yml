@@ -24,35 +24,51 @@ services:
       - gobuildcache:/root/.cache/go-build
       - golangcicache:/root/.cache/golangci-lint
 
-  # Serves the demo app tarballs (v1, v2, and a broken v3) that the e2e
-  # scenarios deploy through the webhook — standing in for a GitHub or
-  # GitLab release asset URL.
+  # Serves the demo app tarballs (v1, v2, and a broken v3) that the
+  # liveswap scenarios deploy through the webhook — standing in for a
+  # GitHub or GitLab release asset URL.
   e2e-artifacts:
     build:
-      context: e2e
+      context: e2e/liveswap
       dockerfile: artifacts.Dockerfile
 
-  # The module-enabled Caddy under test, built with xcaddy from this repo.
-  # This container also runs the deployed demo app as child processes of
-  # Caddy — exactly like a production VPS.
-  e2e-caddy:
+  # The hotserve product binary under test (built from cmd/hotserve).
+  # This container plays the production VPS: it terminates HTTP,
+  # receives deploy webhooks, runs the deployed demo app as its own
+  # child processes, rate-limits and caches.
+  e2e-hotserve:
     build:
       context: .
       dockerfile: e2e/Dockerfile
+    image: hotserve-e2e
     environment:
       LIVESWAP_SECRET: e2e-secret
     depends_on:
       - e2e-artifacts
+      - e2e-upstream
 
-  # Runs the deploy-scenario assertions; its exit code gates `make e2e`.
-  # The Caddyfile is mounted so the reload scenario can POST it to the
-  # admin API mid-traffic.
+  # Stub origin for the penaltybox scenarios: echoes the requested hint
+  # level back as the response header. Reuses the product image with a
+  # different config.
+  e2e-upstream:
+    build:
+      context: .
+      dockerfile: e2e/Dockerfile
+    image: hotserve-e2e
+    volumes:
+      - ./e2e/penaltybox/upstream.Caddyfile:/etc/hotserve/Caddyfile:ro
+
+  # Runs both scenario suites; its exit code gates `make e2e`. The
+  # merged Caddyfile is mounted so the reload scenario can POST it to
+  # the admin API mid-traffic.
   e2e-runner:
     image: curlimages/curl:8.14.1
     depends_on:
-      - e2e-caddy
+      - e2e-hotserve
     volumes:
       - ./e2e/run.sh:/run.sh:ro
+      - ./e2e/liveswap/run.sh:/suite-liveswap.sh:ro
+      - ./e2e/penaltybox/run.sh:/suite-penaltybox.sh:ro
       - ./e2e/Caddyfile:/Caddyfile:ro
     entrypoint: ["/bin/sh", "/run.sh"]
 

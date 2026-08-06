@@ -1,7 +1,7 @@
 # Builds the demo app once, packs three release tarballs (v1, v2, and a
 # v3 whose health check always fails), and serves them over HTTP — the
 # stand-in for a GitHub/GitLab release asset URL.
-FROM golang:1.25-bookworm AS build
+FROM golang:1.26-bookworm AS build
 WORKDIR /build
 COPY testapp/main.go .
 RUN CGO_ENABLED=0 go build -o server main.go

@@ -1,9 +1,26 @@
-# e2e config: plain HTTP inside the compose network. The admin API is
-# exposed so the reload-survival scenario can POST this same file to
-# /load mid-traffic.
+# e2e config for the hotserve product binary: both modules' scenario
+# suites run against this one config. Plain HTTP inside the compose
+# network. The admin API is exposed so the reload-survival scenario can
+# POST this same file to /load mid-traffic.
+#
+# Listeners: 8080/8081 = liveswap (proxy + webhook),
+#            9080/9090/9091 = penaltybox (plain / cached / tiered).
 {
 	admin 0.0.0.0:2019
 	auto_https off
+
+	# Souin HTTP cache backed by Otter (in-memory) storage.
+	cache {
+		ttl 30s
+		otter
+	}
+
+	servers {
+		# The e2e runner lives on the compose network (private range), so
+		# its X-Forwarded-For is trusted and {client_ip} resolves to it —
+		# this exercises penaltybox's real client-key path.
+		trusted_proxies static private_ranges
+	}
 
 	liveswap {
 		root /var/lib/liveswap
@@ -23,6 +40,8 @@
 	}
 }
 
+# ── liveswap: zero-downtime deploys ────────────────────────────────
+
 :8080 {
 	reverse_proxy {
 		dynamic liveswap demo
@@ -31,4 +50,56 @@
 
 :8081 {
 	liveswap_webhook
+}
+
+# ── penaltybox: rate-limit hint enforcement ────────────────────────
+
+# Plain penalty box, no caching. Budgets tuned small so the scenario
+# script boxes quickly and recovers within seconds.
+:9080 {
+	route {
+		hint_penaltybox {
+			min_level 2
+			window 10s
+			limit 6
+			penalty_ttl 3s
+		}
+		reverse_proxy e2e-upstream:8081
+	}
+}
+
+# Penalty box in front of the Souin cache: boxed clients are rejected
+# before the cache, stored responses replay their hint header through
+# the module (so cache hits count and stay stripped).
+:9090 {
+	route {
+		hint_penaltybox {
+			min_level 2
+			window 10s
+			limit 6
+			penalty_ttl 3s
+		}
+		cache
+		reverse_proxy e2e-upstream:8081
+	}
+}
+
+# Two-tier policy: tight tier-3 budget, loose tier-2 budget, enforced
+# independently per client.
+:9091 {
+	route {
+		hint_penaltybox {
+			tier 3 {
+				window 30s
+				limit 2
+				penalty_ttl 3s
+			}
+			tier 2 {
+				window 30s
+				limit 50
+				penalty_ttl 1m
+			}
+		}
+		reverse_proxy e2e-upstream:8081
+	}
 }

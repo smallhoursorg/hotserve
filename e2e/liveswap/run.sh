@@ -5,9 +5,9 @@
 # and config-reload survival.
 set -u
 
-PROXY="http://e2e-caddy:8080"
-HOOK="http://e2e-caddy:8081/demo"
-ADMIN="http://e2e-caddy:2019"
+PROXY="http://e2e-hotserve:8080"
+HOOK="http://e2e-hotserve:8081/demo"
+ADMIN="http://e2e-hotserve:2019"
 ART="http://e2e-artifacts:8080/artifacts"
 SECRET="e2e-secret"
 FAILURES=0
@@ -52,7 +52,7 @@ assert_all_200() { # <file> <label>
 	fi
 }
 
-echo "=== waiting for e2e-caddy and e2e-artifacts to become ready ==="
+echo "=== waiting for e2e-hotserve and e2e-artifacts to become ready ==="
 i=0
 until curl -fs -o /dev/null "$ART/demo-v1.tar.gz" \
 	&& [ "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Liveswap-Secret: $SECRET" "$HOOK")" = "200" ]; do
