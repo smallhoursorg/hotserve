@@ -5,10 +5,10 @@
 	admin 0.0.0.0:2019
 	auto_https off
 
-	hotswap {
-		root /var/lib/hotswap
+	liveswap {
+		root /var/lib/liveswap
 		allow_insecure_http
-		webhook_secret {env.HOTSWAP_SECRET}
+		webhook_secret {env.LIVESWAP_SECRET}
 
 		app demo {
 			command ./server
@@ -25,10 +25,10 @@
 
 :8080 {
 	reverse_proxy {
-		dynamic hotswap demo
+		dynamic liveswap demo
 	}
 }
 
 :8081 {
-	hotswap_webhook
+	liveswap_webhook
 }

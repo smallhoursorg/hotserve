@@ -40,7 +40,7 @@ services:
       context: .
       dockerfile: e2e/Dockerfile
     environment:
-      HOTSWAP_SECRET: e2e-secret
+      LIVESWAP_SECRET: e2e-secret
     depends_on:
       - e2e-artifacts
 
