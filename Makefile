@@ -2,22 +2,22 @@
 # CI overrides COMPOSE to add docker-compose.ci.yml (bind-mounted caches).
 COMPOSE ?= docker compose
 
-# The workspace modules (go.work makes one invocation span them all).
-MODULES ?= liveswap penaltybox
-PKGS = $(MODULES:%=./%/...)
+# The workspace modules (go.work makes `./...` span them all; the list
+# drives the per-module tidy/lint loops).
+MODULES ?= . liveswap penaltybox
 
 .PHONY: test test-integration vet tidy lint e2e e2e-logs clean
 
 test:
-	$(COMPOSE) run --rm dev go test -race -cover $(PKGS)
+	$(COMPOSE) run --rm dev go test -race -cover ./...
 
 # -p 1: the modules' caddytest suites all pin admin :2999 / http :9080,
 # so their test binaries must not run in parallel with each other.
 test-integration:
-	$(COMPOSE) run --rm dev go test -race -tags integration -v -run Integration -p 1 $(PKGS)
+	$(COMPOSE) run --rm dev go test -race -tags integration -v -run Integration -p 1 ./liveswap/... ./penaltybox/...
 
 vet:
-	$(COMPOSE) run --rm dev go vet $(PKGS)
+	$(COMPOSE) run --rm dev go vet ./...
 
 tidy:
 	for m in $(MODULES); do $(COMPOSE) run --rm -w /src/$$m dev go mod tidy || exit 1; done

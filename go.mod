@@ -1,14 +1,18 @@
-module github.com/hotsauce-team/hotserve/liveswap
+// The hotserve product module: builds the shipped binary (cmd/hotserve).
+// The liveswap and penaltybox modules stay independent so standalone
+// xcaddy users don't inherit Souin/Otter's dependency graphs; replace
+// directives are fine here because this module is only ever built from
+// this repo, never fetched with `go get`.
+module github.com/hotsauce-team/hotserve
 
-// The Go toolchain is pinned by the container images in
-// docker-compose.yml (golang:1.26 for tests, caddy:2.11.4-builder for
-// xcaddy builds) — no toolchain directive needed here.
-go 1.25.1
+go 1.26.1
 
 require (
 	github.com/caddyserver/caddy/v2 v2.11.4
-	github.com/dustin/go-humanize v1.0.1
-	go.uber.org/zap v1.28.0
+	github.com/darkweak/souin/plugins/caddy v1.7.8
+	github.com/darkweak/storages/otter/caddy v0.0.19
+	github.com/hotsauce-team/hotserve/liveswap v0.0.0
+	github.com/hotsauce-team/hotserve/penaltybox v0.0.0
 )
 
 require (
@@ -40,13 +44,20 @@ require (
 	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/coreos/go-oidc/v3 v3.17.0 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.7 // indirect
+	github.com/darkweak/go-esi v0.0.6 // indirect
+	github.com/darkweak/souin v1.7.8 // indirect
+	github.com/darkweak/storages/core v0.0.19 // indirect
+	github.com/darkweak/storages/otter v0.0.19 // indirect
 	github.com/dgraph-io/badger v1.6.2 // indirect
 	github.com/dgraph-io/badger/v2 v2.2007.4 // indirect
 	github.com/dgraph-io/ristretto v0.2.0 // indirect
 	github.com/dgryski/go-farm v0.0.0-20240924180020-3414d57e47da // indirect
 	github.com/dlclark/regexp2 v1.12.0 // indirect
+	github.com/dolthub/maphash v0.1.0 // indirect
+	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
+	github.com/gammazero/deque v0.2.1 // indirect
 	github.com/go-chi/chi/v5 v5.2.5 // indirect
 	github.com/go-jose/go-jose/v3 v3.0.5 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
@@ -76,6 +87,7 @@ require (
 	github.com/manifoldco/promptui v0.9.0 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/maypok86/otter v1.2.4 // indirect
 	github.com/mgutz/ansi v0.0.0-20200706080929-d51e80ef957d // indirect
 	github.com/mholt/acmez/v3 v3.1.6 // indirect
 	github.com/miekg/dns v1.1.72 // indirect
@@ -84,8 +96,10 @@ require (
 	github.com/mitchellh/reflectwalk v1.0.2 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pbnjay/memory v0.0.0-20210728143218-7b4eea64cf58 // indirect
+	github.com/pierrec/lz4/v4 v4.1.23 // indirect
 	github.com/pires/go-proxyproto v0.12.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
+	github.com/pquerna/cachecontrol v0.2.0 // indirect
 	github.com/prometheus/client_golang v1.23.2 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.67.5 // indirect
@@ -149,6 +163,7 @@ require (
 	go.step.sm/crypto v0.81.0 // indirect
 	go.uber.org/automaxprocs v1.6.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
+	go.uber.org/zap v1.28.0 // indirect
 	go.uber.org/zap/exp v0.3.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
@@ -172,4 +187,9 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	howett.net/plist v1.0.1 // indirect
+)
+
+replace (
+	github.com/hotsauce-team/hotserve/liveswap => ./liveswap
+	github.com/hotsauce-team/hotserve/penaltybox => ./penaltybox
 )
