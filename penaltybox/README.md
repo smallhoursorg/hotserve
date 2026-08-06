@@ -221,13 +221,15 @@ clients can keep reading cached pages and hits never count.)
 
 ## Development
 
-No local Go toolchain needed — everything runs in Docker:
+penaltybox lives in the [hotserve](../) monorepo; the make targets at
+the repo root cover it (no local Go toolchain needed — everything runs
+in Docker):
 
 ```sh
-make test              # unit tests (race detector, coverage)
+make test              # unit tests, all modules (race detector, coverage)
 make test-integration  # caddytest harness against an in-process Caddy
-make e2e               # xcaddy build (incl. Souin+Otter) + stub origin + curl scenarios
-make lint              # golangci-lint
+make e2e               # both module suites against the hotserve binary (incl. Souin+Otter)
+make lint vet tidy
 ```
 
 CI runs the identical targets.

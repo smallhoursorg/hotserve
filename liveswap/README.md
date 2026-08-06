@@ -1,6 +1,6 @@
-# caddy-liveswap
+# liveswap
 
-**Your reverse proxy is your deploy pipeline.** caddy-liveswap turns a
+**Your reverse proxy is your deploy pipeline.** liveswap turns a
 single Caddy server into a zero-downtime deploy orchestrator for the
 apps it fronts — Node.js, Go, anything that listens on a port. CI
 builds a tarball, POSTs a webhook with its URL, and Caddy does the
@@ -36,7 +36,7 @@ working. Rollback is one curl: re-POST the previous version.
 
 If you know Nomad, the concept map is:
 
-| Nomad | caddy-liveswap |
+| Nomad | liveswap |
 |---|---|
 | `canary = 1` + `auto_promote` | start new → health gate → atomic cutover |
 | `min_healthy_time` | `soak` |
@@ -271,14 +271,15 @@ failure the previous version never stopped serving.
 
 ## Development
 
-No local Go toolchain needed — everything runs in Docker:
+liveswap lives in the [hotserve](../) monorepo; the make targets at the
+repo root cover it (no local Go toolchain needed — everything runs in
+Docker):
 
 ```sh
-make test              # unit tests (race + coverage)
+make test              # unit tests, all modules (race + coverage)
 make test-integration  # real Caddy + real processes via caddytest
-make e2e               # full compose stack: webhook deploys under live traffic
-make lint              # golangci-lint
-make vet tidy
+make e2e               # both module suites against the hotserve binary
+make lint vet tidy
 ```
 
 ## License

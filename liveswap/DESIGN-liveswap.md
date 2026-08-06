@@ -1,4 +1,4 @@
-# DESIGN — caddy-liveswap
+# DESIGN — liveswap
 
 Status: v1 implemented. This document is the handover brief: why the
 module exists, its normative behavior, the architecture decisions and
@@ -14,7 +14,7 @@ upstreams from the service catalog. It worked, but three systems and a
 custom webhook existed to deliver one behavior: *start the new version,
 health-check it, move traffic, stop the old one.*
 
-caddy-liveswap folds that entire loop into the reverse proxy that was
+liveswap folds that entire loop into the reverse proxy that was
 already there. The webhook, the artifact fetch, the health gate, the
 cutover and the process supervision are one Caddy module set. Target
 user: indie hackers, solo devs and small businesses deploying from
@@ -23,7 +23,7 @@ but powerful and helpful.**
 
 Concept map from the Nomad-era stack:
 
-| Nomad-era piece | caddy-liveswap replacement |
+| Nomad-era piece | liveswap replacement |
 |---|---|
 | `update { canary = 1, auto_promote }` | deploy pipeline: start → gate → atomic cutover |
 | `min_healthy_time = "30s"` | `soak` (default 15s) |

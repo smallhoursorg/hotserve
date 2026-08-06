@@ -1,0 +1,29 @@
+# Product releases: push a tag like v0.1.0 and this builds the binaries
+# and OS packages and attaches them to the GitHub release.
+# (Submodule tags like liveswap/v0.1.0 do not match the v* filter.)
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history + tags so the build stamps the version from VCS.
+          fetch-depth: 0
+      - run: make build
+      - run: make package VERSION="${GITHUB_REF_NAME#v}"
+      - run: |
+          cp build/hotserve-linux-* dist/
+          cd dist && sha256sum * > checksums.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

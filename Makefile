@@ -2,9 +2,12 @@
 # CI overrides COMPOSE to add docker-compose.ci.yml (bind-mounted caches).
 COMPOSE ?= docker compose
 
-# The workspace modules (go.work makes `./...` span them all; the list
-# drives the per-module tidy/lint loops).
+# The workspace modules. NOTE: `./...` from the repo root matches only
+# the root module — nested modules are excluded from a parent module's
+# pattern even in workspace mode — so test/vet name each module's tree
+# explicitly.
 MODULES ?= . liveswap penaltybox
+PKGS = ./... ./liveswap/... ./penaltybox/...
 
 # Release version: the tag when present (release.yml passes it in),
 # else a digit-leading dev placeholder that deb/apk version rules accept.
@@ -13,7 +16,7 @@ VERSION ?= $(shell (git describe --tags --exact-match 2>/dev/null || echo v0.0.0
 .PHONY: test test-integration vet tidy lint build package e2e e2e-logs clean
 
 test:
-	$(COMPOSE) run --rm dev go test -race -cover ./...
+	$(COMPOSE) run --rm dev go test -race -cover $(PKGS)
 
 # -p 1: the modules' caddytest suites all pin admin :2999 / http :9080,
 # so their test binaries must not run in parallel with each other.
@@ -21,7 +24,7 @@ test-integration:
 	$(COMPOSE) run --rm dev go test -race -tags integration -v -run Integration -p 1 ./liveswap/... ./penaltybox/...
 
 vet:
-	$(COMPOSE) run --rm dev go vet ./...
+	$(COMPOSE) run --rm dev go vet $(PKGS)
 
 tidy:
 	for m in $(MODULES); do $(COMPOSE) run --rm -w /src/$$m dev go mod tidy || exit 1; done
