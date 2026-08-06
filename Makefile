@@ -3,7 +3,7 @@
 COMPOSE ?= docker compose
 
 # The workspace modules (go.work makes one invocation span them all).
-MODULES ?= liveswap
+MODULES ?= liveswap penaltybox
 PKGS = $(MODULES:%=./%/...)
 
 .PHONY: test test-integration vet tidy lint e2e e2e-logs clean
