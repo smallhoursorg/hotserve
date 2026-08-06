@@ -6,7 +6,7 @@ COMPOSE ?= docker compose
 # drives the per-module tidy/lint loops).
 MODULES ?= . liveswap penaltybox
 
-.PHONY: test test-integration vet tidy lint e2e e2e-logs clean
+.PHONY: test test-integration vet tidy lint build e2e e2e-logs clean
 
 test:
 	$(COMPOSE) run --rm dev go test -race -cover ./...
@@ -24,6 +24,18 @@ tidy:
 
 lint:
 	for m in $(MODULES); do $(COMPOSE) run --rm -w /src/$$m lint golangci-lint run || exit 1; done
+
+# Cross-compiles the product binary for the release targets. GOFLAGS is
+# cleared so -buildvcs is back on: caddycmd stamps the version from the
+# checked-out tag via build info (the dev service disables it for test
+# cache friendliness). safe.directory is needed because /src is a bind
+# mount owned by a different uid than the container's root.
+build:
+	$(COMPOSE) run --rm -e GOFLAGS= -e CGO_ENABLED=0 dev sh -c '\
+		git config --global --add safe.directory /src; \
+		for a in amd64 arm64; do \
+			GOOS=linux GOARCH=$$a go build -trimpath -ldflags "-s -w" -o build/hotserve-linux-$$a ./cmd/hotserve || exit 1; \
+		done'
 
 e2e:
 	$(COMPOSE) up --build --exit-code-from e2e-runner e2e-runner; \

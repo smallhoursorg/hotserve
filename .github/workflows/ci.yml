@@ -20,7 +20,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: .cache
-          key: lint-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          key: lint-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
           restore-keys: lint-${{ runner.os }}-
       - run: make lint COMPOSE="$COMPOSE"
 
@@ -31,16 +31,20 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: .cache
-          key: test-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          key: test-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
           restore-keys: test-${{ runner.os }}-
       - run: make vet COMPOSE="$COMPOSE"
       - run: make test COMPOSE="$COMPOSE"
       - run: make test-integration COMPOSE="$COMPOSE"
+      # Cross-compiling both release targets catches arch-specific
+      # breakage before a tag does.
+      - run: make build COMPOSE="$COMPOSE"
 
   e2e:
     runs-on: ubuntu-latest
     needs: [test]
     steps:
       - uses: actions/checkout@v4
-      # make e2e dumps caddy/artifact logs itself when scenarios fail.
+      # make e2e dumps hotserve/upstream/artifact logs itself when
+      # scenarios fail.
       - run: make e2e
