@@ -54,7 +54,7 @@ func (h *execHandle) state() handleState {
 // Start launches the command in its own process group so Stop can
 // signal the whole tree (Node apps routinely spawn children).
 func (r *execRunner) Start(spec startSpec) (handle, error) {
-	cmd := exec.Command(spec.command[0], spec.command[1:]...)
+	cmd := exec.Command(spec.command[0], spec.command[1:]...) //nolint:gosec // running the operator's configured app command is this module's purpose
 	cmd.Dir = spec.dir
 	cmd.Env = spec.env
 	setProcessGroup(cmd)
@@ -88,7 +88,7 @@ func (r *execRunner) Start(spec startSpec) (handle, error) {
 // logs. Cancellation (deploy deadline, client gone) kills the whole
 // process group, not just the direct child.
 func (r *execRunner) RunOnce(ctx context.Context, spec startSpec) error {
-	cmd := exec.Command(spec.command[0], spec.command[1:]...)
+	cmd := exec.Command(spec.command[0], spec.command[1:]...) //nolint:gosec // running the operator's configured pre_start command is this module's purpose
 	cmd.Dir = spec.dir
 	cmd.Env = spec.env
 	setProcessGroup(cmd)

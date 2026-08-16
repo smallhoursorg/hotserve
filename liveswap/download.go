@@ -33,7 +33,7 @@ type downloadOpts struct {
 func downloadArtifact(ctx context.Context, opts downloadOpts) (string, error) {
 	u, err := url.Parse(opts.url)
 	if err != nil {
-		return "", fmt.Errorf("invalid artifact url: %v", err)
+		return "", fmt.Errorf("invalid artifact url: %w", err)
 	}
 	switch u.Scheme {
 	case "https":
@@ -66,7 +66,7 @@ func downloadArtifact(ctx context.Context, opts downloadOpts) (string, error) {
 
 	resp, err := opts.client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("download %s: %v", redactURL(u), err)
+		return "", fmt.Errorf("download %s: %w", redactURL(u), err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
@@ -76,7 +76,7 @@ func downloadArtifact(ctx context.Context, opts downloadOpts) (string, error) {
 		return "", fmt.Errorf("artifact too large: %d bytes (max %d)", resp.ContentLength, opts.maxBytes)
 	}
 
-	if err := os.MkdirAll(opts.destDir, 0o755); err != nil {
+	if err := os.MkdirAll(opts.destDir, 0o750); err != nil {
 		return "", err
 	}
 	f, err := os.CreateTemp(opts.destDir, "artifact-*.tar.gz")
@@ -116,7 +116,10 @@ func newDownloadClient() *http.Client {
 // redactURL renders a URL safe for logs and errors: scheme, host and
 // path only. Query strings can carry signed tokens (S3, GitLab).
 func redactURL(u *url.URL) string {
-	return u.Scheme + "://" + u.Host + u.Path
+	// EscapedPath, not Path: the decoded path could reintroduce
+	// characters like '?' or '#' that make the logged string read as
+	// having a query or fragment it never had.
+	return u.Scheme + "://" + u.Host + u.EscapedPath()
 }
 
 // fetcher turns a webhook request into an extracted release directory.

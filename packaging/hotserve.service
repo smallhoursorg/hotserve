@@ -7,7 +7,7 @@
 # where apps are meant to keep their files.
 
 [Unit]
-Description=hotserve — the Hot Source server, powered by Caddy
+Description=hotserve — the Hot Sauce server, powered by Caddy
 Documentation=https://github.com/hotsauce-team/hotserve
 After=network.target network-online.target
 Requires=network-online.target
@@ -16,9 +16,23 @@ Requires=network-online.target
 Type=notify
 User=hotserve
 Group=hotserve
-Environment=XDG_DATA_HOME=/var/lib
-Environment=XDG_CONFIG_HOME=/etc
-ExecStart=/usr/bin/hotserve run --environ --config /etc/hotserve/Caddyfile
+# Caddy resolves its dirs to $XDG_.../caddy, so both land inside
+# /var/lib/hotserve (which the package owns and chowns): TLS material
+# and storage in /var/lib/hotserve/caddy, config autosave alongside it.
+# Pointing these anywhere the hotserve user cannot write breaks ACME
+# cert persistence.
+Environment=XDG_DATA_HOME=/var/lib/hotserve
+Environment=XDG_CONFIG_HOME=/var/lib/hotserve
+# /run/hotserve holds the admin API's unix socket (see the starter
+# Caddyfile for why the admin API is not on TCP). Created at start,
+# owned by the service user, removed on stop.
+RuntimeDirectory=hotserve
+RuntimeDirectoryMode=0750
+# No --environ (unlike Caddy's dist unit): it would print every
+# environment variable — LIVESWAP_SECRET, ACME DNS tokens — into the
+# journal at each start, and journals get pasted into bug reports.
+# Add it back temporarily if you need to debug environment issues.
+ExecStart=/usr/bin/hotserve run --config /etc/hotserve/Caddyfile
 ExecReload=/usr/bin/hotserve reload --config /etc/hotserve/Caddyfile --force
 TimeoutStopSec=5s
 LimitNOFILE=1048576

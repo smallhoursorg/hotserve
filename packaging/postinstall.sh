@@ -21,6 +21,10 @@ chown hotserve:hotserve /var/lib/hotserve /var/lib/liveswap
 
 if command -v systemctl >/dev/null 2>&1; then
 	systemctl daemon-reload || true
+	# On upgrade, swap the running service onto the new binary (deployed
+	# apps relaunch from state.json). No-op when the service isn't
+	# running, i.e. on fresh installs.
+	systemctl try-restart hotserve 2>/dev/null || true
 	echo "hotserve installed. Start it with:"
 	echo "  sudo systemctl enable --now hotserve"
 fi

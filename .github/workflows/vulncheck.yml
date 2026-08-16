@@ -1,0 +1,16 @@
+# Weekly govulncheck sweep: the vulnerability database updates even when
+# the code doesn't, so PR-time checks (the govulncheck job in ci.yml)
+# aren't enough on their own.
+name: vulncheck
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: make vulncheck COMPOSE="docker compose -f docker-compose.yml -f docker-compose.ci.yml"

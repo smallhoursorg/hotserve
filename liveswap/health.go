@@ -50,7 +50,7 @@ func (p *httpProber) waitHealthy(ctx context.Context, baseURL string, alive func
 		}
 		now := p.clock.Now()
 		if now.After(deadline) {
-			return fmt.Errorf("not healthy within deadline %v: %v", hc.deadline, lastErr)
+			return fmt.Errorf("not healthy within deadline %v: %w", hc.deadline, lastErr)
 		}
 
 		if hc.path == "" {

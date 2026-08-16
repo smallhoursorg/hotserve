@@ -1,0 +1,63 @@
+# Hands-off dependency updates. The design, together with
+# workflows/dependabot-automerge.yml:
+#
+#   - Weekly grouped PRs (one per ecosystem, not one per dep) so there
+#     is never a backlog to triage.
+#   - A 7-day cooldown on routine version bumps: compromised upstream
+#     releases are almost always yanked within days, so waiting is the
+#     cheapest supply-chain defense there is. Security updates BYPASS
+#     the cooldown and arrive immediately.
+#   - Patch/minor updates auto-merge once the full CI graph (tests,
+#     e2e, package install matrix, govulncheck) passes; majors stay
+#     open for human review.
+#
+# GitHub-side switches this file cannot set (do once, in repo
+# Settings): "Allow auto-merge"; a branch ruleset on main requiring
+# the "ci-ok" status check; Dependabot alerts + security updates.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directories: ["/", "/liveswap", "/penaltybox"]
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      go-deps:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Dockerfile base images (e2e builder/runtime, artifacts server,
+  # install-test systemd image).
+  - package-ecosystem: docker
+    directories: ["/e2e", "/e2e/liveswap", "/packaging/test"]
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      dockerfiles:
+        patterns: ["*"]
+
+  # Image pins in docker-compose.yml (golang toolchain, golangci-lint,
+  # nfpm, curl). If your GitHub instance predates docker-compose
+  # support in Dependabot, delete this block and bump those four pins
+  # by hand now and then.
+  - package-ecosystem: docker-compose
+    directory: "/"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      compose-images:
+        patterns: ["*"]

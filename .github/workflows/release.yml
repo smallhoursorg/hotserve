@@ -7,14 +7,22 @@ on:
   push:
     tags: ['v*']
 
-permissions:
-  contents: write
-
 jobs:
+  # The full CI graph (lint, tests, e2e, install-test matrix) must pass
+  # on the tagged commit before anything is published.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   release:
+    needs: [ci]
     runs-on: ubuntu-latest
+    # The write token is scoped to this job only: the CI jobs above run
+    # with read permissions, and publishing uses the preinstalled gh CLI
+    # rather than third-party action code.
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # Full history + tags so the build stamps the version from VCS.
           fetch-depth: 0
@@ -22,8 +30,7 @@ jobs:
       - run: make package VERSION="${GITHUB_REF_NAME#v}"
       - run: |
           cp build/hotserve-linux-* dist/
-          cd dist && sha256sum * > checksums.txt
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*
-          generate_release_notes: true
+          cd dist && sha256sum -- * > checksums.txt
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --verify-tag

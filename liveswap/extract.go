@@ -27,7 +27,7 @@ func extractArchive(archivePath, destDir string, maxDecompressed int64) error {
 	if err := walkArchive(archivePath, maxDecompressed, validateEntry); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(destDir, 0o755); err != nil {
+	if err := os.MkdirAll(destDir, 0o750); err != nil {
 		return err
 	}
 	return walkArchive(archivePath, maxDecompressed, func(hdr *tar.Header, r io.Reader) error {
@@ -38,14 +38,14 @@ func extractArchive(archivePath, destDir string, maxDecompressed int64) error {
 // walkArchive iterates the archive's entries, capping the total bytes
 // read out of the gzip stream so header floods and bombs stop early.
 func walkArchive(archivePath string, maxDecompressed int64, fn func(*tar.Header, io.Reader) error) error {
-	f, err := os.Open(archivePath)
+	f, err := os.Open(archivePath) //nolint:gosec // path is our own just-downloaded temp file, not request input
 	if err != nil {
 		return err
 	}
 	defer func() { _ = f.Close() }()
 	gz, err := gzip.NewReader(f)
 	if err != nil {
-		return fmt.Errorf("not a gzip archive: %v", err)
+		return fmt.Errorf("not a gzip archive: %w", err)
 	}
 	defer func() { _ = gz.Close() }()
 
@@ -60,7 +60,7 @@ func walkArchive(archivePath string, maxDecompressed int64, fn func(*tar.Header,
 			return fmt.Errorf("archive decompresses beyond the %d-byte cap", maxDecompressed)
 		}
 		if err != nil {
-			return fmt.Errorf("corrupt archive: %v", err)
+			return fmt.Errorf("corrupt archive: %w", err)
 		}
 		if hdr.Typeflag == tar.TypeXGlobalHeader {
 			continue
@@ -81,18 +81,18 @@ func walkArchive(archivePath string, maxDecompressed int64, fn func(*tar.Header,
 func validateEntry(hdr *tar.Header, r io.Reader) error {
 	name, err := safeRelPath(hdr.Name)
 	if err != nil {
-		return fmt.Errorf("archive entry %q: %v", hdr.Name, err)
+		return fmt.Errorf("archive entry %q: %w", hdr.Name, err)
 	}
 	switch hdr.Typeflag {
 	case tar.TypeReg, tar.TypeDir:
 		// fine
 	case tar.TypeSymlink:
 		if err := linkTargetStaysInside(name, hdr.Linkname, true); err != nil {
-			return fmt.Errorf("archive symlink %q -> %q: %v", hdr.Name, hdr.Linkname, err)
+			return fmt.Errorf("archive symlink %q -> %q: %w", hdr.Name, hdr.Linkname, err)
 		}
 	case tar.TypeLink:
 		if err := linkTargetStaysInside(name, hdr.Linkname, false); err != nil {
-			return fmt.Errorf("archive hardlink %q -> %q: %v", hdr.Name, hdr.Linkname, err)
+			return fmt.Errorf("archive hardlink %q -> %q: %w", hdr.Name, hdr.Linkname, err)
 		}
 	default:
 		return fmt.Errorf("archive entry %q has unsupported type %q", hdr.Name, hdr.Typeflag)
@@ -112,16 +112,16 @@ func writeEntry(destDir string, hdr *tar.Header, r io.Reader) error {
 	target := filepath.Join(destDir, filepath.FromSlash(name))
 	switch hdr.Typeflag {
 	case tar.TypeDir:
-		return os.MkdirAll(target, 0o755)
+		return os.MkdirAll(target, 0o750)
 	case tar.TypeReg:
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 			return err
 		}
 		// Perm() keeps rwx bits only — setuid/setgid/sticky never
 		// survive extraction. Owner rwx is forced so the app user can
 		// always read (and re-deploys can delete) what it shipped.
 		mode := hdr.FileInfo().Mode().Perm() | 0o600
-		f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+		f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode) //nolint:gosec // target passed safeRelPath containment in validateEntry
 		if err != nil {
 			return err
 		}
@@ -131,7 +131,7 @@ func writeEntry(destDir string, hdr *tar.Header, r io.Reader) error {
 		}
 		return err
 	case tar.TypeSymlink:
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 			return err
 		}
 		return os.Symlink(hdr.Linkname, target)
@@ -140,7 +140,7 @@ func writeEntry(destDir string, hdr *tar.Header, r io.Reader) error {
 		if err != nil {
 			return err
 		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 			return err
 		}
 		return os.Link(filepath.Join(destDir, filepath.FromSlash(linkSrc)), target)

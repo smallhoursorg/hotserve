@@ -1,0 +1,30 @@
+# Weekly leak-hunting soak (~15-20 min): deploy/reload/traffic churn
+# against the product binary, then goroutine/fd return-to-baseline
+# assertions. Deliberately NOT part of ci-ok — soaks are the flakiest
+# test class, and a wolf-crying soak in the merge path would be worse
+# than none. A red run here means: read the log, grab a heap/goroutine
+# profile via the admin API, and treat it as a bug report.
+name: soak
+
+on:
+  schedule:
+    - cron: "43 5 * * 1"
+  workflow_dispatch:
+    inputs:
+      deploys:
+        description: "Deploy cycles"
+        default: "300"
+      reloads:
+        description: "Config reloads"
+        default: "300"
+
+jobs:
+  soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - env:
+          SOAK_DEPLOYS: ${{ inputs.deploys || '300' }}
+          SOAK_RELOADS: ${{ inputs.reloads || '300' }}
+        run: make soak

@@ -42,8 +42,20 @@ func poolKey(name string) string { return "liveswap:app:" + name }
 var appNameRe = regexp.MustCompile(`^[a-z0-9-]{1,63}$`)
 
 // versionRe matches the same tag alphabet the Nomad-era webhook
-// allowed; it is also filesystem-safe by construction.
+// allowed. The alphabet has no path separator, but "." and ".." still
+// match it, so validVersion — not the regex alone — is the check to
+// use before a version reaches a filesystem path.
 var versionRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+// validVersion reports whether v is an acceptable version tag. It must
+// match the tag alphabet and must not be "." or ".." — both match the
+// alphabet but resolve releases/<version> to the releases dir itself
+// or its parent (the app root), turning a deploy's release-replace
+// (os.RemoveAll of releaseDir in download.go) into deletion of every
+// release or of the app's persistent shared/ data.
+func validVersion(v string) bool {
+	return versionRe.MatchString(v) && v != "." && v != ".."
+}
 
 // App is the `liveswap` Caddy app module: the deploy orchestrator.
 type App struct {

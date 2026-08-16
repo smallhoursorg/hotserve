@@ -70,6 +70,10 @@ c=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "X-Liveswap-Secret: wrong"
 [ "$c" = "401" ] && pass "wrong secret gets 401" || fail "wrong secret: expected 401, got $c"
 c=$(curl -s -o /dev/null -w '%{http_code}' -X POST -d '{}' "$HOOK")
 [ "$c" = "401" ] && pass "missing secret gets 401" || fail "missing secret: expected 401, got $c"
+c=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer wrong" "$HOOK")
+[ "$c" = "401" ] && pass "wrong bearer token gets 401" || fail "wrong bearer: expected 401, got $c"
+c=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $SECRET" "$HOOK")
+[ "$c" = "200" ] && pass "valid bearer token accepted" || fail "valid bearer: expected 200, got $c"
 
 echo "=== scenario 2: nothing deployed yet -> proxy 5xx, not a hang ==="
 c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$PROXY/")

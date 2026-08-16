@@ -12,7 +12,7 @@ section: web
 priority: optional
 maintainer: "Hot Sauce Team <davey@web-shed.com>"
 description: |
-  hotserve — the Hot Source server, powered by Caddy.
+  hotserve — the Hot Sauce server, powered by Caddy.
   Zero-downtime app deploys (liveswap), rate-limit hint enforcement
   (penaltybox) and HTTP caching (Souin + Otter) in one binary.
 vendor: Hot Sauce Team

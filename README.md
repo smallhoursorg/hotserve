@@ -1,6 +1,6 @@
 # hotserve
 
-**The Hot Source server.** One binary that is your reverse proxy, your
+**The Hot Sauce server.** One binary that is your reverse proxy, your
 deploy pipeline, your rate limiter, and your page cache — for indie
 hackers, solo devs, and small businesses running real apps on cheap
 servers. No Docker, no Kubernetes, no SSH keys in CI. Powered by
@@ -72,7 +72,7 @@ deploy.example.com {
 Then from CI (GitHub Actions, GitLab CI, anything that can curl):
 
 ```sh
-curl --fail -X POST -H "X-Liveswap-Secret: $SECRET" \
+curl --fail -X POST -H "Authorization: Bearer $SECRET" \
   -d '{"url":"https://…/myapp.tar.gz","version":"v1.4.2"}' \
   https://deploy.example.com/myapp
 ```
@@ -94,9 +94,33 @@ snippets, and every option: [liveswap/README.md](liveswap/README.md).
   anywhere. That's why there's deliberately no Docker image.
 - **Not a cluster.** Single-node by design. If you outgrow one server,
   you've outgrown hotserve — a good problem.
+- **One box, one trust domain.** The systemd sandbox protects the
+  *system* from your apps, and the admin API lives on a unix socket
+  rather than TCP — otherwise "localhost-only" would include every app
+  you run, and one SSRF bug in an app could reconfigure the server.
+  But apps currently run as one shared user, so hotserve does not
+  protect your apps *from each other*: run only workloads you trust
+  together, or reach for containers. Per-app sandboxing (bubblewrap,
+  Flatpak-style) is designed and next up —
+  [liveswap/DESIGN-sandbox.md](liveswap/DESIGN-sandbox.md).
 
 ## Roadmap
 
+- **[High priority] Per-app sandboxing / isolation by default**
+  (bubblewrap: mount + PID + user namespaces, no containers) —
+  designed, see
+  [liveswap/DESIGN-sandbox.md](liveswap/DESIGN-sandbox.md). The
+  concrete gap driving the priority: because every app currently runs
+  as the shared `hotserve` UID, a compromised app can read the
+  supervisor's own environment via `/proc/<hotserve-pid>/environ`
+  (which holds `LIVESWAP_SECRET` and ACME DNS tokens), connect to the
+  admin unix socket, and read the TLS private keys and sibling apps'
+  files. Scrubbing the child environment (done) stops direct
+  inheritance but not the `/proc` and filesystem routes — only a real
+  isolation boundary (bubblewrap's PID + mount namespaces hide
+  `/proc/<supervisor>` and the socket/key paths entirely; a per-app
+  UID via the future systemd runner is the alternative) closes it.
+  This is the next security milestone, ahead of the items below.
 - Hosted APT/APK repositories with package signing and auto-updates
 - Continuous watchdog: restart a running app on crash or sustained
   health failure (today apps are relaunched at boot and replaced on
@@ -110,16 +134,53 @@ No local Go toolchain needed — everything runs in Docker:
 ```sh
 make test              # unit tests, all modules (race + coverage)
 make test-integration  # real deploys through caddytest
-make e2e               # full stack: both module suites against the shipped binary
+make e2e               # full stack: both module suites against the shipped binary, then crash recovery
 make lint vet tidy
+make vulncheck         # govulncheck, all modules
+make fuzz              # fuzz the untrusted-input surfaces (FUZZTIME=2m per target)
+make soak              # ~20min leak hunt: deploy/reload churn, goroutine/fd assertions
 make build             # cross-compile linux amd64/arm64
 make package           # .deb/.apk via nfpm
+make install-test      # install the .deb under real systemd (DISTRO=debian:12 etc.)
 ```
 
 The repo is a Go multi-module workspace: `liveswap/` and `penaltybox/`
 are lean, independently usable Caddy modules
 (`xcaddy build --with github.com/hotsauce-team/hotserve/liveswap`),
 and the root module builds the product binary from `cmd/hotserve`.
+
+## Dependencies
+
+You're being asked to run this as root on a production server, so
+here's exactly what's in the binary and what it drags in. Module counts
+are measured from `go mod graph` (deduplicated by module path); the
+"pulls in" column shows what each dependency adds *beyond* what's
+already in the tree above it, because the trees overlap almost
+entirely.
+
+| Dependency | Pulls in (~modules) | hotserve | liveswap | penaltybox | Notes |
+|---|---|:-:|:-:|:-:|---|
+| [Caddy](https://github.com/caddyserver/caddy) | ~565 | ✓ | ✓ | ✓ | The foundation — hotserve *is* a Caddy distribution. Commercially sponsored, strong security track record. Nearly the entire dependency tree is Caddy's. |
+| [Souin](https://github.com/darkweak/souin) (`cache`) | +24 | ✓ | — | — | HTTP cache (RFC 7234). Solo-maintained; the e2e suite exercises it directly so drift is caught in CI. The riskiest dependency here, and still better than an in-house HTTP cache. |
+| [darkweak/storages/otter](https://github.com/darkweak/storages) | +6 | ✓ | — | — | In-memory storage backend for Souin, wrapping [maypok86/otter](https://github.com/maypok86/otter). |
+| [zap](https://github.com/uber-go/zap) | 0 (already in Caddy's tree) | ✓ | ✓ | ✓ | Caddy's module logging API is zap; not optional for a Caddy module. |
+| [go-humanize](https://github.com/dustin/go-humanize) | 0 (already in Caddy's tree) | ✓ | ✓ | — | A few formatting helpers in liveswap. |
+
+The liveswap and penaltybox columns are what a standalone
+`xcaddy build --with ...` of that module pulls in; the hotserve binary
+contains everything.
+
+Build and CI tooling never ships to users and is pinned by image tag
+in `docker-compose.yml`: `golang` (toolchain), `golangci-lint`,
+`nfpm` (deb/apk packaging), `curl` (e2e runner). GitHub Actions are
+pinned to commit SHAs.
+
+What keeps this honest: `govulncheck` gates every PR and runs weekly
+against the fresh vulnerability database (reachable-code analysis, all
+modules), every release is blocked until the full test matrix passes —
+including installing the actual `.deb` under systemd on Debian and
+Ubuntu — and any dependency bump has to survive all of the above
+before it merges.
 
 ## License
 

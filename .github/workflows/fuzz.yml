@@ -1,0 +1,31 @@
+# Weekly fuzzing of the untrusted-input surfaces (artifact tarball
+# extraction, path containment, URL redaction, hint-header parsing).
+# Seed corpora already run in every PR via `make test`; this lane does
+# real coverage-guided fuzzing. Like soak, deliberately NOT part of
+# ci-ok. A failure attaches the crashing input in the log — add it to
+# the seed corpus (f.Add) as a regression test when fixing.
+name: fuzz
+
+on:
+  schedule:
+    - cron: "29 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: "Time per fuzz target (Go duration)"
+        default: "5m"
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .cache
+          key: fuzz-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: fuzz-${{ runner.os }}-
+      - env:
+          COMPOSE: docker compose -f docker-compose.yml -f docker-compose.ci.yml
+        run: make fuzz FUZZTIME="${{ inputs.fuzztime || '5m' }}" COMPOSE="$COMPOSE"

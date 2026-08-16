@@ -24,14 +24,14 @@ func newTestHandler(clk clock, cfg storeConfig) (*Handler, *store) {
 	return h, st
 }
 
-func interceptorFor(h *Handler, key string, w http.ResponseWriter) *hintInterceptor {
-	return &hintInterceptor{ResponseWriter: w, handler: h, key: key}
+func interceptorFor(h *Handler, w http.ResponseWriter) *hintInterceptor {
+	return &hintInterceptor{ResponseWriter: w, handler: h, key: "k"}
 }
 
 func TestInterceptExplicitWriteHeader(t *testing.T) {
 	h, st := newTestHandler(newFakeClock(), storeConfig{})
 	rec := httptest.NewRecorder()
-	rw := interceptorFor(h, "k", rec)
+	rw := interceptorFor(h, rec)
 
 	rw.Header().Set("X-Rate-Limit-Level", "3")
 	rw.WriteHeader(http.StatusOK)
@@ -47,7 +47,7 @@ func TestInterceptExplicitWriteHeader(t *testing.T) {
 func TestInterceptImplicitWriteHeaderOnWrite(t *testing.T) {
 	h, st := newTestHandler(newFakeClock(), storeConfig{})
 	rec := httptest.NewRecorder()
-	rw := interceptorFor(h, "k", rec)
+	rw := interceptorFor(h, rec)
 
 	rw.Header().Set("X-Rate-Limit-Level", "2")
 	if _, err := rw.Write([]byte("body")); err != nil {
@@ -68,7 +68,7 @@ func TestInterceptImplicitWriteHeaderOnWrite(t *testing.T) {
 func TestInterceptNoWriteAtAll(t *testing.T) {
 	h, st := newTestHandler(newFakeClock(), storeConfig{})
 	rec := httptest.NewRecorder()
-	rw := interceptorFor(h, "k", rec)
+	rw := interceptorFor(h, rec)
 
 	// Handler set the header but returned without writing.
 	rw.Header().Set("X-Rate-Limit-Level", "3")
@@ -85,7 +85,7 @@ func TestInterceptNoWriteAtAll(t *testing.T) {
 func TestInterceptIdempotent(t *testing.T) {
 	h, st := newTestHandler(newFakeClock(), storeConfig{})
 	rec := httptest.NewRecorder()
-	rw := interceptorFor(h, "k", rec)
+	rw := interceptorFor(h, rec)
 
 	rw.Header().Set("X-Rate-Limit-Level", "3")
 	rw.WriteHeader(http.StatusOK)
@@ -101,7 +101,7 @@ func TestInterceptIdempotent(t *testing.T) {
 func TestIntercept1xxPassthrough(t *testing.T) {
 	h, st := newTestHandler(newFakeClock(), storeConfig{})
 	rec := httptest.NewRecorder()
-	rw := interceptorFor(h, "k", rec)
+	rw := interceptorFor(h, rec)
 
 	// An informational response before the final one must not trigger
 	// interception; the hint arrives with the final header set.
@@ -128,7 +128,7 @@ func TestIntercept101IsFinal(t *testing.T) {
 	// an interim 1xx: the hint must be counted and stripped.
 	h, st := newTestHandler(newFakeClock(), storeConfig{})
 	rec := httptest.NewRecorder()
-	rw := interceptorFor(h, "k", rec)
+	rw := interceptorFor(h, rec)
 
 	rw.Header().Set("X-Rate-Limit-Level", "3")
 	rw.WriteHeader(http.StatusSwitchingProtocols)
@@ -148,7 +148,7 @@ func TestStripDisabled(t *testing.T) {
 	h, _ := newTestHandler(newFakeClock(), storeConfig{})
 	h.stripOn = false
 	rec := httptest.NewRecorder()
-	rw := interceptorFor(h, "k", rec)
+	rw := interceptorFor(h, rec)
 
 	rw.Header().Set("X-Rate-Limit-Level", "3")
 	rw.WriteHeader(http.StatusOK)
@@ -161,7 +161,7 @@ func TestStripDisabled(t *testing.T) {
 func TestStripRemovesAllValues(t *testing.T) {
 	h, st := newTestHandler(newFakeClock(), storeConfig{})
 	rec := httptest.NewRecorder()
-	rw := interceptorFor(h, "k", rec)
+	rw := interceptorFor(h, rec)
 
 	rw.Header().Add("X-Rate-Limit-Level", "3")
 	rw.Header().Add("X-Rate-Limit-Level", "3")
@@ -180,12 +180,12 @@ func TestBelowMinLevelNeverAllocates(t *testing.T) {
 	h, st := newTestHandler(newFakeClock(), storeConfig{})
 	for i := 0; i < 100; i++ {
 		rec := httptest.NewRecorder()
-		rw := interceptorFor(h, "k", rec)
+		rw := interceptorFor(h, rec)
 		rw.Header().Set("X-Rate-Limit-Level", "1")
 		rw.WriteHeader(http.StatusOK)
 
 		rec2 := httptest.NewRecorder()
-		rw2 := interceptorFor(h, "k", rec2)
+		rw2 := interceptorFor(h, rec2)
 		rw2.WriteHeader(http.StatusOK) // absent header = level 1
 	}
 	if got := st.size(); got != 0 {
@@ -196,7 +196,7 @@ func TestBelowMinLevelNeverAllocates(t *testing.T) {
 func TestFlushReachesUnderlyingWriter(t *testing.T) {
 	h, _ := newTestHandler(newFakeClock(), storeConfig{})
 	rec := httptest.NewRecorder()
-	rw := interceptorFor(h, "k", rec)
+	rw := interceptorFor(h, rec)
 
 	// Caddy ≥2.7 flushes via http.NewResponseController, which follows
 	// Unwrap chains; the shim must not break streaming.
@@ -220,7 +220,7 @@ func TestBoxingHappensAtHeaderTime(t *testing.T) {
 	// second response's WriteHeader — that response itself still passes.
 	for i := 0; i < 2; i++ {
 		rec := httptest.NewRecorder()
-		rw := interceptorFor(h, "k", rec)
+		rw := interceptorFor(h, rec)
 		rw.Header().Set("X-Rate-Limit-Level", "3")
 		rw.WriteHeader(http.StatusOK)
 		if rec.Code != http.StatusOK {

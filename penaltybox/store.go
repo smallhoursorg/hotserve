@@ -103,7 +103,7 @@ func newStore(cfg storeConfig, clk clock) *store {
 	// Slot 0: the default budget, weighted for backward compatibility.
 	s.budgets = []tierBudget{{
 		window:     cfg.window,
-		limit:      uint64(cfg.limit),
+		limit:      uint64(cfg.limit), //nolint:gosec // Provision rejects non-positive limits
 		penaltyTTL: cfg.penaltyTTL,
 		bucketDur:  max(cfg.window/numBuckets, 1),
 		weighted:   true,
@@ -119,7 +119,7 @@ func newStore(cfg storeConfig, clk clock) *store {
 		}
 		s.budgets = append(s.budgets, tierBudget{
 			window:     spec.window,
-			limit:      uint64(spec.limit),
+			limit:      uint64(spec.limit), //nolint:gosec // Provision rejects non-positive tier limits
 			penaltyTTL: spec.penaltyTTL,
 			bucketDur:  max(spec.window/numBuckets, 1),
 		})

@@ -6,6 +6,9 @@
 # Listeners: 8080/8081 = liveswap (proxy + webhook),
 #            9080/9090/9091 = penaltybox (plain / cached / tiered).
 {
+	# TCP admin is TEST-ONLY (the runner container drives /load and
+	# reads /metrics over the network). Production ships the admin API
+	# on a unix socket — see packaging/Caddyfile for why.
 	admin 0.0.0.0:2019
 	auto_https off
 

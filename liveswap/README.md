@@ -115,8 +115,12 @@ deploy.example.com {
 ```
 
 Apps must listen on `127.0.0.1` at the injected `PORT`. Their
-environment is, lowest precedence first: Caddy's own environment →
-`env_file` → inline `env` → injected `PORT` and `HOST=127.0.0.1`.
+environment is, lowest precedence first: an allowlisted slice of
+Caddy's environment (`PATH`, `HOME`, `LANG`, `TZ`, `LC_*` — nothing
+else, so supervisor credentials like `LIVESWAP_SECRET` never reach
+apps) → `env_file` → inline `env` → injected `PORT` and
+`HOST=127.0.0.1`. Anything more an app needs must be passed
+explicitly via `env` or `env_file`.
 
 ### Placeholders
 
@@ -148,8 +152,16 @@ resolved at config load.
 
 ## Webhook API
 
-`POST https://deploy.example.com/<app>` with header
-`X-Liveswap-Secret: <secret>` and JSON body:
+`POST https://deploy.example.com/<app>`, authenticated with either
+header:
+
+- `Authorization: Bearer <secret>` — **recommended**: Caddy access
+  logs redact the `Authorization` header automatically.
+- `X-Liveswap-Secret: <secret>` — same effect, but if you enable
+  access logging on the webhook site, this custom header is logged in
+  plaintext (see [Secrets and logs](#secrets-and-logs)).
+
+JSON body:
 
 ```json
 {
@@ -178,6 +190,41 @@ version, port, pid, last deploy result.
 The tarball's contents must sit at the archive root (`tar -czf
 app.tar.gz -C dist .`), with versions matching `[A-Za-z0-9._-]{1,64}`.
 
+## Secrets and logs
+
+What liveswap does for you:
+
+- Deploy logs record the artifact **host only**; download errors go
+  through a redactor that drops credentials and query strings (where
+  presigned-URL and token secrets live).
+- The packaged systemd unit deliberately does **not** use `--environ`
+  (unlike Caddy's dist unit), so `LIVESWAP_SECRET` and any ACME DNS
+  tokens never land in the journal — journals get pasted into bug
+  reports. The package smoke test asserts this.
+- Config keeps `{env.LIVESWAP_SECRET}` as a placeholder, so config
+  dumps and the admin API never contain the value.
+
+What's yours to handle:
+
+- If you enable **access logging** on the webhook site, use
+  `Authorization: Bearer` (redacted by Caddy automatically). If you
+  must use `X-Liveswap-Secret` with access logs, filter it:
+
+  ```caddyfile
+  deploy.example.com {
+  	log {
+  		format filter {
+  			request>headers>X-Liveswap-Secret delete
+  		}
+  	}
+  	liveswap_webhook
+  }
+  ```
+
+- Your app's **stdout/stderr is relayed** into hotserve's log. If your
+  app prints its own secrets at startup, they end up in the journal —
+  that one's on the app.
+
 ## Deploying from CI
 
 ### GitHub Actions
@@ -197,7 +244,7 @@ app.tar.gz -C dist .`), with versions matching `[A-Za-z0-9._-]{1,64}`.
 - name: Deploy
   run: |
     curl --fail --max-time 600 -X POST \
-      -H "X-Liveswap-Secret: ${{ secrets.LIVESWAP_SECRET }}" \
+      -H "Authorization: Bearer ${{ secrets.LIVESWAP_SECRET }}" \
       -d '{
         "url": "https://api.github.com/repos/${{ github.repository }}/releases/assets/'"$ASSET_ID"'",
         "version": "build-${{ github.run_number }}",
@@ -222,7 +269,7 @@ deploy:
         "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/blog/$CI_COMMIT_SHORT_SHA/blog.tar.gz"
     - |
       curl --fail --max-time 600 -X POST \
-        -H "X-Liveswap-Secret: $LIVESWAP_SECRET" \
+        -H "Authorization: Bearer $LIVESWAP_SECRET" \
         -d "{
           \"url\": \"$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/blog/$CI_COMMIT_SHORT_SHA/blog.tar.gz\",
           \"version\": \"$CI_COMMIT_SHORT_SHA\",

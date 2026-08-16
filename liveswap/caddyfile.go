@@ -1,6 +1,7 @@
 package liveswap
 
 import (
+	"math"
 	"strconv"
 
 	"github.com/caddyserver/caddy/v2"
@@ -201,6 +202,9 @@ func (cfg *AppConfig) unmarshalBlock(d *caddyfile.Dispenser) error {
 			size, err := humanize.ParseBytes(d.Val())
 			if err != nil {
 				return d.Errf("invalid max_artifact_size %q: %v", d.Val(), err)
+			}
+			if size > math.MaxInt64 {
+				return d.Errf("max_artifact_size %q overflows", d.Val())
 			}
 			cfg.MaxArtifactSize = int64(size)
 		default:

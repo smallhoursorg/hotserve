@@ -8,6 +8,7 @@ go 1.25.1
 require (
 	github.com/caddyserver/caddy/v2 v2.11.4
 	github.com/dustin/go-humanize v1.0.1
+	go.uber.org/goleak v1.3.0
 	go.uber.org/zap v1.28.0
 )
 

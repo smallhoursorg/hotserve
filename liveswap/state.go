@@ -43,7 +43,7 @@ func (s *fileStateStore) load() (appState, bool, error) {
 		return st, false, err
 	}
 	if err := json.Unmarshal(data, &st); err != nil {
-		return st, false, fmt.Errorf("corrupt state file %s: %v", s.path, err)
+		return st, false, fmt.Errorf("corrupt state file %s: %w", s.path, err)
 	}
 	return st, true, nil
 }
@@ -51,7 +51,7 @@ func (s *fileStateStore) load() (appState, bool, error) {
 // save writes atomically (temp file + rename) so a crash mid-write
 // never leaves a truncated state file.
 func (s *fileStateStore) save(st appState) error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o750); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(st, "", "  ")

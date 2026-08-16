@@ -1,4 +1,32 @@
+# Curated on top of the standard set (errcheck, govet, staticcheck,
+# ineffassign, unused):
+#   errorlint  — broken %w chains and direct err comparisons
+#   gosec      — security antipatterns (this thing runs as root)
+#   misspell   — docs and comments are part of the product
+#   gocritic   — style + performance diagnostics
+#   unconvert  — redundant conversions
+#   unparam    — unused function parameters
+#   nolintlint — every //nolint must name its linter and carry a reason
 version: "2"
 
 linters:
   default: standard
+  enable:
+    - errorlint
+    - gosec
+    - misspell
+    - gocritic
+    - unconvert
+    - unparam
+    - nolintlint
+  exclusions:
+    rules:
+      # Tests legitimately use predictable temp paths, lenient perms
+      # and unchecked cleanup.
+      - path: _test\.go
+        linters:
+          - gosec
+  settings:
+    nolintlint:
+      require-explanation: true
+      require-specific: true

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -466,6 +467,34 @@ func TestBuildEnvPrecedenceAndPlaceholders(t *testing.T) {
 	}
 }
 
+func TestBuildEnvDoesNotLeakSupervisorSecrets(t *testing.T) {
+	t.Setenv("LIVESWAP_SECRET", "hunter2")
+	t.Setenv("SOME_ACME_TOKEN", "tok")
+	t.Setenv("PATH", "/usr/bin:/bin")
+	t.Setenv("LC_ALL", "C.UTF-8")
+
+	env, err := buildEnv(testSpec(t, "demo"), "v1", 8123, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	byKey := map[string]string{}
+	for _, kv := range env {
+		k, v, _ := stringsCut(kv)
+		byKey[k] = v
+	}
+	for _, k := range []string{"LIVESWAP_SECRET", "SOME_ACME_TOKEN"} {
+		if _, leaked := byKey[k]; leaked {
+			t.Errorf("%s must not leak from the supervisor env into apps", k)
+		}
+	}
+	if byKey["PATH"] != "/usr/bin:/bin" {
+		t.Errorf("PATH = %q, want inherited /usr/bin:/bin", byKey["PATH"])
+	}
+	if byKey["LC_ALL"] != "C.UTF-8" {
+		t.Errorf("LC_ALL = %q, want inherited C.UTF-8", byKey["LC_ALL"])
+	}
+}
+
 func stringsCut(kv string) (string, string, bool) {
 	for i := 0; i < len(kv); i++ {
 		if kv[i] == '=' {
@@ -480,6 +509,37 @@ func TestParseEnvFileRejectsGarbage(t *testing.T) {
 	must(t, os.WriteFile(p, []byte("NOT A VAR LINE\n"), 0o600))
 	if _, err := parseEnvFile(p); err == nil {
 		t.Fatal("expected error for malformed env file")
+	}
+}
+
+func TestHostOfStripsUserinfoCredentials(t *testing.T) {
+	cases := map[string]string{
+		"https://example.com/artifact.tar.gz":             "example.com",
+		"https://example.com:8443/a?token=x":              "example.com:8443",
+		"https://user:s3cr3t@example.com/artifact.tar.gz": "example.com",
+		"https://ci-token@host:443/x":                     "host:443",
+		"not a url":                                       "",
+	}
+	for in, want := range cases {
+		if got := hostOf(in); got != want {
+			t.Errorf("hostOf(%q) = %q, want %q", in, got, want)
+		}
+		if got := hostOf(in); strings.Contains(got, "@") || strings.Contains(got, "s3cr3t") || strings.Contains(got, "ci-token") {
+			t.Errorf("hostOf(%q) = %q leaks credentials", in, got)
+		}
+	}
+}
+
+func TestValidVersionRejectsDotSegments(t *testing.T) {
+	for _, v := range []string{"v1", "1.2.3", "release_2024-01-01", "..foo", "..."} {
+		if !validVersion(v) {
+			t.Errorf("validVersion(%q) = false, want true", v)
+		}
+	}
+	for _, v := range []string{".", "..", "", "has/slash", "with space", "..\x00"} {
+		if validVersion(v) {
+			t.Errorf("validVersion(%q) = true, want false (path-unsafe)", v)
+		}
 	}
 }
 

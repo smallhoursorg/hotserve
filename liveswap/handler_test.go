@@ -39,6 +39,55 @@ func do(t *testing.T, h *Handler, method, path, secret, body string) *httptest.R
 	return w
 }
 
+func TestWebhookBearerAuth(t *testing.T) {
+	h, _ := newTestHandler(t)
+	bearer := func(auth string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/demo", nil)
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		w := httptest.NewRecorder()
+		var next caddyhttp.Handler = caddyhttp.HandlerFunc(func(http.ResponseWriter, *http.Request) error { return nil })
+		if err := h.ServeHTTP(w, req, next); err != nil {
+			t.Fatalf("ServeHTTP returned error: %v", err)
+		}
+		return w
+	}
+
+	if w := bearer("Bearer s3cret"); w.Code != http.StatusOK {
+		t.Errorf("valid Bearer: got %d, want 200", w.Code)
+	}
+	if w := bearer("bearer s3cret"); w.Code != http.StatusOK {
+		t.Errorf("scheme is case-insensitive: got %d, want 200", w.Code)
+	}
+	if w := bearer("Bearer wrong"); w.Code != http.StatusUnauthorized {
+		t.Errorf("wrong Bearer: got %d, want 401", w.Code)
+	}
+	if w := bearer("Basic s3cret"); w.Code != http.StatusUnauthorized {
+		t.Errorf("non-Bearer scheme: got %d, want 401", w.Code)
+	}
+	if w := bearer("Bearer"); w.Code != http.StatusUnauthorized {
+		t.Errorf("empty Bearer: got %d, want 401", w.Code)
+	}
+}
+
+func TestWebhookCustomHeaderTakesPrecedenceOverBearer(t *testing.T) {
+	h, _ := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodGet, "/demo", nil)
+	req.Header.Set(secretHeader, "wrong")
+	req.Header.Set("Authorization", "Bearer s3cret")
+	w := httptest.NewRecorder()
+	var next caddyhttp.Handler = caddyhttp.HandlerFunc(func(http.ResponseWriter, *http.Request) error { return nil })
+	if err := h.ServeHTTP(w, req, next); err != nil {
+		t.Fatalf("ServeHTTP returned error: %v", err)
+	}
+	// A present custom header is authoritative — a wrong value must not
+	// fall through to a different credential.
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("wrong custom header with valid Bearer: got %d, want 401", w.Code)
+	}
+}
+
 func TestWebhookRejectsBadSecret(t *testing.T) {
 	h, _ := newTestHandler(t)
 	for name, secret := range map[string]string{"missing": "", "wrong": "nope"} {

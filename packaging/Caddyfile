@@ -6,6 +6,18 @@
 #
 # Reload after editing:  sudo systemctl reload hotserve
 
+{
+	# Admin API on a unix socket instead of the default localhost:2019.
+	# "localhost" includes every app hotserve runs: an SSRF bug in any
+	# deployed app could otherwise be steered at the TCP admin API and
+	# reconfigure the whole server. HTTP clients can't be steered at a
+	# unix socket. (Apps currently share the hotserve user, so this
+	# stops network-borne access, not a fully compromised app — see the
+	# trust model in the README.) `systemctl reload hotserve` finds the
+	# socket via this config; keep the line if you edit this block.
+	admin unix//run/hotserve/admin.sock
+}
+
 # ── Replace with your domain once DNS points here — hotserve then
 #    provisions TLS automatically. ──
 :80 {

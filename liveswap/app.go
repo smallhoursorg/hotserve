@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,7 +50,7 @@ func (d appDirs) release(version string) string {
 
 func (d appDirs) ensure() error {
 	for _, dir := range []string{d.releases, d.shared, d.tmp} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return err
 		}
 	}
@@ -378,7 +379,7 @@ func (ma *managedApp) ensureRunning() error {
 	}
 	releaseDir := spec.dirs.release(st.CurrentVersion)
 	if _, err := os.Stat(releaseDir); err != nil {
-		return fmt.Errorf("state names version %s but its release dir is missing: %v", st.CurrentVersion, err)
+		return fmt.Errorf("state names version %s but its release dir is missing: %w", st.CurrentVersion, err)
 	}
 
 	if h, ok := c.runner.Reattach(st.Handle); ok {
@@ -483,11 +484,35 @@ func (ma *managedApp) Destruct() error {
 	return c.runner.Stop(inst.handle, c.spec.grace)
 }
 
+// envAllowlist is the only part of Caddy's own environment that apps
+// inherit. Everything else is withheld: the supervisor's env holds
+// deploy credentials (LIVESWAP_SECRET, ACME DNS tokens), and handing
+// those to every app defeats the isolation story — env-dumping
+// supply-chain payloads read process.env before they read files.
+// Operators pass anything extra explicitly via env_file or env.
+var envAllowlist = []string{"PATH", "HOME", "LANG", "TZ"}
+
+func inheritedEnv() []string {
+	var env []string
+	for _, key := range envAllowlist {
+		if v, ok := os.LookupEnv(key); ok {
+			env = append(env, key+"="+v)
+		}
+	}
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "LC_") {
+			env = append(env, kv)
+		}
+	}
+	return env
+}
+
 // buildEnv assembles the child environment. Precedence, lowest to
-// highest: Caddy's own environment (PATH, HOME — needed by node etc.),
-// env_file, inline env, then the injected PORT/HOST contract.
+// highest: the allowlisted slice of Caddy's environment (PATH, HOME —
+// needed by node etc.), env_file, inline env, then the injected
+// PORT/HOST contract.
 func buildEnv(spec *appSpec, version string, port int, releaseDir string) ([]string, error) {
-	env := os.Environ()
+	env := inheritedEnv()
 	if spec.envFile != "" {
 		fileVars, err := parseEnvFile(spec.envFile)
 		if err != nil {
@@ -509,7 +534,7 @@ func buildEnv(spec *appSpec, version string, port int, releaseDir string) ([]str
 // skipped, an optional `export ` prefix tolerated, and single or
 // double quotes around the value stripped. Deliberately not a shell.
 func parseEnvFile(path string) ([]string, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // path is the operator's env_file config value, not request input
 	if err != nil {
 		return nil, err
 	}
@@ -558,15 +583,17 @@ func expandArgs(args []string, spec *appSpec, version string, port int, releaseD
 	return out
 }
 
+// hostOf returns the host[:port] of a raw URL for logging. It parses
+// with net/url so any userinfo credentials (user:pass@host, e.g. a
+// tokenised artifact URL from CI) are excluded — url.URL keeps those in
+// .User, never in .Host — rather than slicing the raw string, which
+// would log the secret. Empty string if the URL does not parse.
 func hostOf(rawURL string) string {
-	if i := strings.Index(rawURL, "://"); i >= 0 {
-		rest := rawURL[i+3:]
-		if j := strings.IndexAny(rest, "/?"); j >= 0 {
-			return rest[:j]
-		}
-		return rest
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
 	}
-	return ""
+	return u.Host
 }
 
 // fetchClients bundles the shared HTTP clients handed to each

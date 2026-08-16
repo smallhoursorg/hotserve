@@ -13,7 +13,10 @@ PKGS = ./... ./liveswap/... ./penaltybox/...
 # else a digit-leading dev placeholder that deb/apk version rules accept.
 VERSION ?= $(shell (git describe --tags --exact-match 2>/dev/null || echo v0.0.0-dev) | sed 's/^v//')
 
-.PHONY: test test-integration vet tidy lint build package e2e e2e-logs clean
+# Distro image for the package install smoke test (install-test).
+DISTRO ?= debian:12
+
+.PHONY: test test-integration vet tidy lint fuzz vulncheck build package install-test e2e soak e2e-logs clean
 
 test:
 	$(COMPOSE) run --rm dev go test -race -cover $(PKGS)
@@ -31,6 +34,28 @@ tidy:
 
 lint:
 	for m in $(MODULES); do $(COMPOSE) run --rm -w /src/$$m lint golangci-lint run || exit 1; done
+
+# Real fuzzing of the untrusted-input surfaces (seed corpora already
+# run inside `make test`). One target at a time — Go allows a single
+# -fuzz pattern per invocation. The corpus accumulates in the
+# gobuildcache volume across runs.
+FUZZTIME ?= 2m
+fuzz:
+	for t in FuzzExtractArchive FuzzSafeRelPath FuzzRedactURL; do \
+		$(COMPOSE) run --rm -w /src/liveswap dev \
+			go test -run '^$$' -fuzz "^$$t$$" -fuzztime $(FUZZTIME) . || exit 1; \
+	done
+	$(COMPOSE) run --rm -w /src/penaltybox dev \
+		go test -run '^$$' -fuzz '^FuzzParseLevel$$' -fuzztime $(FUZZTIME) .
+
+# Known-vulnerability scan per module. The tool version is pinned so CI
+# stays reproducible; the vuln database itself always updates (which is
+# why vulncheck.yml also runs this on a weekly cron).
+vulncheck:
+	for m in $(MODULES); do \
+		$(COMPOSE) run --rm -w /src/$$m dev \
+			go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./... || exit 1; \
+	done
 
 # Cross-compiles the product binary for the release targets. GOFLAGS is
 # cleared so -buildvcs is back on: caddycmd stamps the version from the
@@ -58,10 +83,59 @@ package: build
 	done; \
 	rm -f build/hotserve
 
+# Installs the freshly built .deb inside a systemd container (DISTRO
+# picks the base image) and runs the staged smoke test: install, unit
+# boot, a real liveswap deploy under the sandbox, reinstall, remove.
+# Needs dist/ populated first (make package). --privileged +
+# --cgroupns=host with the cgroup mount is the reliable
+# systemd-in-docker recipe on cgroup-v2 hosts (GitHub runners and
+# Docker Desktop alike).
+install-test:
+	docker build -t hotserve-install-test-$(subst :,-,$(DISTRO)) \
+		--build-arg BASE_IMAGE=$(DISTRO) packaging/test
+	docker rm -f hotserve-smoke >/dev/null 2>&1 || true
+	docker run -d --name hotserve-smoke --privileged --cgroupns=host \
+		--tmpfs /run --tmpfs /run/lock \
+		-v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+		-v $(CURDIR)/dist:/dist:ro \
+		-v $(CURDIR)/packaging/test/smoke.sh:/smoke.sh:ro \
+		hotserve-install-test-$(subst :,-,$(DISTRO))
+	docker exec hotserve-smoke /bin/bash /smoke.sh; status=$$?; \
+	if [ $$status -ne 0 ]; then \
+		docker exec hotserve-smoke journalctl -u hotserve --no-pager || true; \
+	fi; \
+	docker rm -f hotserve-smoke >/dev/null; \
+	exit $$status
+
+# The main suites run via the e2e-runner entrypoint; then hotserve is
+# SIGKILLed and started again so the recovery suite can prove the
+# crash-recovery path: apps relaunch from state.json with the last
+# deployed version. The kill is orchestrated here because the runner
+# has no docker socket, and `up --exit-code-from` would tear the stack
+# down the moment any container exits.
 e2e:
-	$(COMPOSE) up --build --exit-code-from e2e-runner e2e-runner; \
-	status=$$?; \
+	$(COMPOSE) up --build -d e2e-hotserve e2e-upstream e2e-artifacts
+	status=0; \
+	$(COMPOSE) run --rm e2e-runner || status=1; \
+	echo "════ recovery suite: SIGKILL hotserve, relaunch from state.json ════"; \
+	$(COMPOSE) kill -s SIGKILL e2e-hotserve; \
+	$(COMPOSE) start e2e-hotserve; \
+	$(COMPOSE) run --rm --entrypoint "/bin/sh /suite-recovery.sh" e2e-runner || status=1; \
 	if [ $$status -ne 0 ]; then $(COMPOSE) logs e2e-hotserve e2e-upstream e2e-artifacts; fi; \
+	$(COMPOSE) down --remove-orphans; \
+	exit $$status
+
+# Leak-hunting soak against the product binary: deploy/reload/traffic
+# churn, then goroutine/fd return-to-baseline assertions over the admin
+# metrics endpoint. ~15-20 min at defaults; tune with SOAK_DEPLOYS,
+# SOAK_RELOADS, SOAK_CLIENTS, SOAK_REQS. Runs weekly in CI (soak.yml),
+# never in the PR path.
+soak:
+	$(COMPOSE) up --build -d e2e-hotserve e2e-upstream e2e-artifacts
+	status=0; \
+	$(COMPOSE) run --rm -e SOAK_DEPLOYS -e SOAK_RELOADS -e SOAK_CLIENTS -e SOAK_REQS \
+		--entrypoint "/bin/sh /soak.sh" e2e-runner || status=1; \
+	if [ $$status -ne 0 ]; then $(COMPOSE) logs --tail 200 e2e-hotserve; fi; \
 	$(COMPOSE) down --remove-orphans; \
 	exit $$status
 
