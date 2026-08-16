@@ -115,9 +115,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 
 func (h *Handler) deploy(w http.ResponseWriter, r *http.Request, ma *managedApp) error {
 	var req deployRequest
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxPayloadBytes))
+	// Read one byte past the cap: exceeding it proves the payload is
+	// oversized, which deserves an honest 413 — truncating at the cap
+	// would surface as a misleading "invalid JSON" 400.
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxPayloadBytes+1))
 	if err != nil {
 		return respondJSON(w, http.StatusBadRequest, map[string]string{"error": "reading body: " + err.Error()})
+	}
+	if len(body) > maxPayloadBytes {
+		return respondJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
+			"error": fmt.Sprintf("payload exceeds %d bytes", maxPayloadBytes)})
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		return respondJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON payload: " + err.Error()})
@@ -131,12 +138,13 @@ func (h *Handler) deploy(w http.ResponseWriter, r *http.Request, ma *managedApp)
 
 	err = ma.Deploy(r.Context(), req)
 	status := ma.status()
+	var vErr validationError
 	switch {
 	case err == nil:
 		return respondJSON(w, http.StatusOK, status)
 	case errors.Is(err, errDeployInProgress):
 		return respondJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
-	case errors.As(err, &validationError{}):
+	case errors.As(err, &vErr):
 		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 	case errors.Is(err, context.Canceled):
 		// The CI client hung up mid-deploy; nobody is reading this.

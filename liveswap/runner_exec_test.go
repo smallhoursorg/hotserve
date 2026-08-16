@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func testExecRunner() *execRunner { return newExecRunner(zap.NewNop()) }
@@ -136,5 +137,34 @@ func TestFreePortAllocates(t *testing.T) {
 	must(t, err)
 	if p1 <= 0 || p1 > 65535 {
 		t.Fatalf("bogus port %d", p1)
+	}
+}
+
+// Regression for the log-pipe liveness bug: a single line beyond the
+// scanner's 1MB cap used to kill the pipe-draining goroutine, after
+// which the child filled the ~64KB OS pipe buffer and blocked forever
+// on its next write. The fix logs the scan error and drains to EOF;
+// this test wedges permanently without it.
+func TestPipeLinesSurvivesOversizedLine(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	r := newExecRunner(zap.New(core))
+	// One 2MB line, then ~150KB of ordinary output — more than any OS
+	// pipe buffer, so an undrained pipe guarantees a blocked child.
+	script := `head -c 2097152 /dev/zero | tr '\0' a; echo; i=0; ` +
+		`while [ $i -lt 10000 ]; do echo "filler line $i"; i=$((i+1)); done`
+	h, err := r.Start(startSpec{command: []string{"sh", "-c", script}, dir: t.TempDir(), env: os.Environ()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for r.Alive(h) {
+		if time.Now().After(deadline) {
+			_ = r.Stop(h, 0)
+			t.Fatal("child still running: log pipe wedged after oversized line")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if logs.FilterMessageSnippet("log pipe scan failed").Len() == 0 {
+		t.Fatal("expected a scan-failure warning to be logged")
 	}
 }
