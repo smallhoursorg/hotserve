@@ -17,6 +17,7 @@ package liveswap
 import (
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -47,6 +48,20 @@ var appNameRe = regexp.MustCompile(`^[a-z0-9-]{1,63}$`)
 // match it, so validVersion — not the regex alone — is the check to
 // use before a version reaches a filesystem path.
 var versionRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+// versionPathComponent renders a version tag safe to use as a single
+// path component, mechanically: rooting the string at "/" and cleaning
+// resolves any "..", and the leading separator is then stripped. For
+// every tag validVersion accepts this is the identity function (the
+// tag alphabet contains no separators), so it changes no behavior —
+// it is belt-and-braces beneath validVersion, which remains the real
+// gate. It also uses the exact idiom static analysis models as a
+// path-traversal sanitizer (CodeQL's FilepathCleanSanitizer), so the
+// version->filesystem flows stop lighting up go/path-injection at
+// every join downstream. (Tested for both properties.)
+func versionPathComponent(v string) string {
+	return strings.TrimPrefix(filepath.Clean("/"+v), "/")
+}
 
 // validVersion reports whether v is an acceptable version tag. It must
 // match the tag alphabet and must not be "." or ".." — both match the

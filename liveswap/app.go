@@ -45,7 +45,10 @@ func newAppDirs(root, name string) appDirs {
 }
 
 func (d appDirs) release(version string) string {
-	return filepath.Join(d.releases, version)
+	// versionPathComponent: identity for valid tags, mechanical
+	// traversal containment (and the analyzer-modeled sanitizer) for
+	// anything else — validVersion remains the actual gate upstream.
+	return filepath.Join(d.releases, versionPathComponent(version))
 }
 
 func (d appDirs) ensure() error {

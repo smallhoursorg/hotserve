@@ -122,3 +122,32 @@ func TestHealthPathOffIsValid(t *testing.T) {
 		t.Fatalf("health_path off must validate: %v", err)
 	}
 }
+
+// versionPathComponent must be the identity for every tag validVersion
+// accepts (no behavior change for real deploys) and must mechanically
+// neutralize traversal for anything hostile (defense-in-depth beneath
+// the validVersion gate).
+func TestVersionPathComponent(t *testing.T) {
+	for _, v := range []string{"v1.2.3", "2026-08-16", "a_b-c.d", "...", "v1..2", "A"} {
+		if !validVersion(v) {
+			t.Fatalf("test premise broken: %q should be a valid version", v)
+		}
+		if got := versionPathComponent(v); got != v {
+			t.Errorf("versionPathComponent(%q) = %q, want identity", v, got)
+		}
+	}
+	for in, want := range map[string]string{
+		"../../etc/passwd": "etc/passwd",
+		"..":               "",
+		".":                "",
+		"/abs":             "abs",
+		"a/../../b":        "b",
+	} {
+		if got := versionPathComponent(in); got != want {
+			t.Errorf("versionPathComponent(%q) = %q, want %q (contained)", in, got, want)
+		}
+		if got := versionPathComponent(in); strings.Contains(got, "..") || strings.HasPrefix(got, "/") {
+			t.Errorf("versionPathComponent(%q) = %q escapes", in, got)
+		}
+	}
+}
