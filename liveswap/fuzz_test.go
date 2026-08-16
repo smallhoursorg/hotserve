@@ -9,6 +9,8 @@
 package liveswap
 
 import (
+	"fmt"
+	"path"
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
@@ -105,7 +107,35 @@ func FuzzSafeRelPath(f *testing.F) {
 		if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 			t.Errorf("safeRelPath(%q) returned escaping path %q", name, rel)
 		}
+		// Differential guard against LOOSENING: everything the IsLocal
+		// gate accepts must also have been accepted by the pre-IsLocal
+		// implementation (kept below as the reference), with an
+		// identical normalized result. The converse is deliberately
+		// not asserted — the new gate is allowed to be stricter.
+		refRel, refErr := referenceSafeRelPath(name)
+		if refErr != nil {
+			t.Errorf("LOOSENED: safeRelPath(%q) accepts %q but the reference rejected it (%v)", name, rel, refErr)
+		} else if refRel != rel {
+			t.Errorf("DRIFT: safeRelPath(%q) = %q, reference = %q", name, rel, refRel)
+		}
 	})
+}
+
+// referenceSafeRelPath is the pre-filepath.IsLocal implementation,
+// frozen verbatim as the differential-fuzz reference. Do not "fix" it:
+// its whole value is being exactly what shipped before the swap.
+func referenceSafeRelPath(name string) (string, error) {
+	if strings.HasPrefix(name, "/") {
+		return "", fmt.Errorf("absolute path")
+	}
+	clean := path.Clean(name)
+	if clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("path traversal")
+	}
+	if clean == "." {
+		return ".", nil
+	}
+	return clean, nil
 }
 
 func FuzzRedactURL(f *testing.F) {

@@ -86,9 +86,9 @@ func TestExtractRejectsMaliciousArchives(t *testing.T) {
 		entries []tarEntry
 		want    string
 	}{
-		{"absolute path", []tarEntry{{name: "/etc/passwd", body: "x"}}, "absolute path"},
-		{"dotdot traversal", []tarEntry{{name: "../../evil", body: "x"}}, "path traversal"},
-		{"sneaky traversal", []tarEntry{{name: "ok/../../evil", body: "x"}}, "path traversal"},
+		{"not local", []tarEntry{{name: "/etc/passwd", body: "x"}}, "not local"},
+		{"dotdot traversal", []tarEntry{{name: "../../evil", body: "x"}}, "not local"},
+		{"sneaky traversal", []tarEntry{{name: "ok/../../evil", body: "x"}}, "not local"},
 		{"absolute symlink", []tarEntry{{name: "l", typeflag: tar.TypeSymlink, linkname: "/etc/passwd"}}, "absolute target"},
 		{"escaping symlink", []tarEntry{{name: "l", typeflag: tar.TypeSymlink, linkname: "../outside"}}, "escapes archive root"},
 		{"nested escaping symlink", []tarEntry{{name: "a/b/l", typeflag: tar.TypeSymlink, linkname: "../../../outside"}}, "escapes archive root"},
@@ -153,6 +153,11 @@ func TestSafeRelPath(t *testing.T) {
 		"a/../../out":   true,
 		"a/./b/../c":    false,
 		"trailing/../..": true,
+		"":               false, // cleans to "." — the archive root, accepted
+		"./":             false, // ditto
+		"a/..":           false, // cleans to "."
+		"a//b/":          false, // cleaned to a/b
+		"..\\up":         false, // backslash is an ordinary byte in tar names on unix
 	} {
 		_, err := safeRelPath(input)
 		if (err != nil) != wantErr {

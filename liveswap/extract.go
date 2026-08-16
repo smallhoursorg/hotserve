@@ -149,19 +149,29 @@ func writeEntry(destDir string, hdr *tar.Header, r io.Reader) error {
 	}
 }
 
-// safeRelPath normalizes an archive path and rejects absolute paths
-// and any `..` traversal. Returned paths are slash-separated and
-// relative to the archive root.
+// safeRelPath normalizes an archive path and rejects anything that
+// could resolve outside the extraction root. The gate is the standard
+// library's filepath.IsLocal — the canonical "not absolute, cannot
+// traverse out" validator — applied to the cleaned path. On unix this
+// accepts exactly what the previous hand-rolled prefix checks did
+// (FuzzSafeRelPath differentially proves nothing newly accepted, and
+// identical results, against the old implementation kept as a
+// reference); where the two differ, IsLocal is strictly tighter
+// (Windows reserved device names, embedded NUL). Using the stdlib
+// validator also lets static analysis recognize the sanitization
+// (CodeQL models IsLocal as a path-injection barrier) instead of
+// flagging every downstream use of the returned path.
+// Returned paths are slash-separated and relative to the archive root.
 func safeRelPath(name string) (string, error) {
-	if strings.HasPrefix(name, "/") {
-		return "", fmt.Errorf("absolute path")
-	}
 	clean := path.Clean(name)
-	if clean == ".." || strings.HasPrefix(clean, "../") {
-		return "", fmt.Errorf("path traversal")
-	}
 	if clean == "." {
+		// The archive root itself ("." / "./" — common as a tarball's
+		// first entry); callers just MkdirAll it. An explicit accept
+		// because filepath.IsLocal(".") is false by definition.
 		return ".", nil
+	}
+	if !filepath.IsLocal(clean) {
+		return "", fmt.Errorf("path is not local to the archive root")
 	}
 	return clean, nil
 }
