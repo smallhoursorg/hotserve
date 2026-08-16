@@ -217,3 +217,18 @@ var errTest = errTestType{}
 type errTestType struct{}
 
 func (errTestType) Error() string { return "test error" }
+
+// An oversized payload must get an honest 413, not a misleading
+// "invalid JSON" 400 from silent truncation at the cap.
+func TestWebhookOversizedPayloadIs413(t *testing.T) {
+	h, _ := newTestHandler(t)
+	big := `{"url":"https://x/a.tgz","version":"v1","pad":"` +
+		strings.Repeat("a", maxPayloadBytes) + `"}`
+	w := do(t, h, http.MethodPost, "/demo", "s3cret", big)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413; body: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "payload exceeds") {
+		t.Fatalf("body should name the limit: %s", w.Body.String())
+	}
+}

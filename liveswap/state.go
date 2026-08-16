@@ -85,8 +85,23 @@ func gcReleases(releasesDir string, keep int, protect string, logger *zap.Logger
 	}
 	var rels []rel
 	for _, e := range entries {
+		if e.IsDir() && strings.HasPrefix(e.Name(), ".extract-") {
+			// A staging dir still present here is a crash orphan:
+			// deploys are serialized per app (deployMu), and the deploy
+			// running this GC renamed its own staging away before the
+			// call. Left alone they accumulate forever, invisible —
+			// hidden by the same dot-prefix that exempts them below.
+			if err := os.RemoveAll(filepath.Join(releasesDir, e.Name())); err != nil {
+				logger.Warn("release GC: cannot remove orphaned staging dir",
+					zap.String("dir", e.Name()), zap.Error(err))
+			} else {
+				logger.Info("release GC: removed orphaned staging dir",
+					zap.String("dir", e.Name()))
+			}
+			continue
+		}
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
-			continue // staging dirs and strays
+			continue // dotfile strays are not ours to manage
 		}
 		info, err := e.Info()
 		if err != nil {

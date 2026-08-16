@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"os/exec"
 	"strconv"
@@ -142,6 +143,12 @@ func (r *execRunner) Stop(h handle, grace time.Duration) error {
 		return nil // already exited
 	default:
 	}
+	// Between the done-check above and this signal the child can exit
+	// and the kernel can recycle the pgid, landing our SIGTERM/SIGKILL
+	// on an unrelated process group. The window is unavoidable for
+	// process *groups* (pidfd covers only the direct child); it is
+	// narrow, and every pgid we ever signal was one of our own app
+	// instances moments earlier.
 	if err := signalGroup(eh.pid, syscall.SIGTERM); err != nil {
 		return err
 	}
@@ -162,11 +169,20 @@ func (r *execRunner) Reattach(_ handleState) (handle, bool) {
 	return nil, false
 }
 
-func (r *execRunner) pipeLines(pipe interface{ Read([]byte) (int, error) }, stream string) {
+func (r *execRunner) pipeLines(pipe io.Reader, stream string) {
 	sc := bufio.NewScanner(pipe)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for sc.Scan() {
 		r.log().Info(sc.Text(), zap.String("stream", stream))
+	}
+	if err := sc.Err(); err != nil {
+		// A line beyond the buffer cap (or any read error) stops the
+		// scanner — but this goroutine must never stop READING: an
+		// undrained pipe fills within ~64KB and the child then blocks
+		// forever on its next write. Log once, drain to EOF.
+		r.log().Warn("log pipe scan failed; draining without logging",
+			zap.String("stream", stream), zap.Error(err))
+		_, _ = io.Copy(io.Discard, pipe)
 	}
 }
 

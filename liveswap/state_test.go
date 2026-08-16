@@ -56,6 +56,7 @@ func TestGCReleases(t *testing.T) {
 		must(t, os.Chtimes(p, mt, mt))
 	}
 	must(t, os.MkdirAll(filepath.Join(dir, ".extract-v5"), 0o755))
+	must(t, os.MkdirAll(filepath.Join(dir, ".hidden"), 0o755))
 	must(t, os.WriteFile(filepath.Join(dir, "README"), []byte("x"), 0o600))
 
 	// keep 2, protect the OLDEST (simulating a rollback still serving v1).
@@ -69,8 +70,11 @@ func TestGCReleases(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "v2")); !os.IsNotExist(err) {
 		t.Error("v2 should have been pruned")
 	}
-	if _, err := os.Stat(filepath.Join(dir, ".extract-v5")); err != nil {
-		t.Error("staging dirs are not GC's business")
+	if _, err := os.Stat(filepath.Join(dir, ".extract-v5")); !os.IsNotExist(err) {
+		t.Error("orphaned staging dir should have been removed (deploys are serialized, so any .extract-* seen by GC is a crash leftover)")
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".hidden")); err != nil {
+		t.Error("non-staging dotdirs are not GC's business")
 	}
 	if _, err := os.Stat(filepath.Join(dir, "README")); err != nil {
 		t.Error("plain files are not GC's business")
