@@ -25,6 +25,12 @@ updates:
     groups:
       go-deps:
         patterns: ["*"]
+    ignore:
+      # caddy v2.11.x does not compile against cel-go >= 0.29 (the
+      # interpreter.NewCall signature changed); the bump to 0.29.0
+      # broke main on 2026-08-16. Remove when a caddy release
+      # supports it — caddy's own go.mod is the tell.
+      - dependency-name: "github.com/google/cel-go"
 
   - package-ecosystem: github-actions
     directory: "/"

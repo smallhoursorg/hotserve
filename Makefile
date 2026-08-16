@@ -65,12 +65,14 @@ vulncheck:
 # The trailing chmod is for Linux CI runners: the container runs as
 # root, so without it the bind-mounted build/ is unwritable to the
 # host user and package's cp/rm staging fails (macOS masks this).
+# The two arch builds run concurrently: cache-warm, wall time is
+# mostly the two large links, and those overlap cleanly.
 build:
 	$(COMPOSE) run --rm -e GOFLAGS= -e CGO_ENABLED=0 dev sh -c '\
 		git config --global --add safe.directory /src; \
-		for a in amd64 arm64; do \
-			GOOS=linux GOARCH=$$a go build -trimpath -ldflags "-s -w" -o build/hotserve-linux-$$a ./cmd/hotserve || exit 1; \
-		done; \
+		GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o build/hotserve-linux-amd64 ./cmd/hotserve & p1=$$!; \
+		GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o build/hotserve-linux-arm64 ./cmd/hotserve & p2=$$!; \
+		wait $$p1 || exit 1; wait $$p2 || exit 1; \
 		chmod -R a+rwX build'
 
 # Builds .deb and .apk for both arches into dist/. The packages carry
