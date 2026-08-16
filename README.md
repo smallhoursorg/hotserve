@@ -149,6 +149,27 @@ are lean, independently usable Caddy modules
 (`xcaddy build --with github.com/smallhoursorg/hotserve/liveswap`),
 and the root module builds the product binary from `cmd/hotserve`.
 
+### Dependency policy
+
+Dependabot opens weekly grouped PRs per ecosystem with a 7-day
+cooldown (security updates bypass it); patch/minor bumps auto-merge
+once the full CI graph is green. Two escape hatches, both declared in
+[`.github/pin-watch.yml`](.github/pin-watch.yml) and enforced by the
+weekly `pin-watch` workflow:
+
+- **Pins.** Every `ignore` in `dependabot.yml` must have a `watches`
+  entry declaring the machine-checkable condition under which the pin
+  is lifted (e.g. "caddy's latest release requires cel-go ≥ 0.29").
+  The workflow opens an issue when a condition is met, and flags any
+  ignore↔watch drift — a pin can never rot silently.
+- **Alert triage.** `alert_dismissals` entries auto-dismiss Dependabot
+  alerts by GHSA id with a reviewed reason and evidence comment, so
+  triage decisions are versioned instead of buried in the UI. Unlisted
+  alerts stay open and notify as normal. This needs the
+  `DEPENDABOT_ALERTS_TOKEN` Actions secret — a fine-grained PAT with
+  **Dependabot alerts: read-write** on this repository only — because
+  the Actions `GITHUB_TOKEN` cannot access the alerts API.
+
 ## Dependencies
 
 You're being asked to run this as root on a production server, so

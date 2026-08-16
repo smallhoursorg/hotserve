@@ -26,3 +26,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           PIN_WATCH_CREATE_ISSUES: "1"
+          # Fine-grained PAT, "Dependabot alerts: read-write" on this
+          # repo only — GITHUB_TOKEN cannot access the alerts API.
+          # Absent, alert reconciliation degrades to a setup-issue.
+          DEPENDABOT_ALERTS_TOKEN: ${{ secrets.DEPENDABOT_ALERTS_TOKEN }}

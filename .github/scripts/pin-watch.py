@@ -115,8 +115,81 @@ def open_issues(findings):
         print(f"opened issue: {title}")
 
 
+VALID_DISMISS_REASONS = {
+    "fix_started", "inaccurate", "no_bandwidth", "not_used", "tolerable_risk"}
+
+
+def gh(args, token=None):
+    env = dict(os.environ)
+    if token:
+        env["GH_TOKEN"] = token
+    return subprocess.check_output(["gh", *args], env=env)
+
+
+def reconcile_alerts(dismissals, findings):
+    """Dismiss open Dependabot alerts whose GHSA is declared in the
+    manifest. Needs DEPENDABOT_ALERTS_TOKEN (the Actions GITHUB_TOKEN
+    cannot access the Dependabot alerts API); without it, one
+    deduplicated issue points at the setup instructions instead."""
+    if not dismissals:
+        return
+    token = os.environ.get("DEPENDABOT_ALERTS_TOKEN")
+    if not token:
+        findings.append((
+            "pin-watch: alert reconciliation is unconfigured",
+            f"`{MANIFEST}` declares alert dismissals, but the "
+            "`DEPENDABOT_ALERTS_TOKEN` secret is not set, and the Actions "
+            "GITHUB_TOKEN cannot access the Dependabot alerts API.\n\n"
+            "Create a fine-grained PAT with **Dependabot alerts: read-write** "
+            "on this repository only and add it as an Actions secret named "
+            "`DEPENDABOT_ALERTS_TOKEN` (see README → Dependency policy).",
+        ))
+        return
+    live = os.environ.get("PIN_WATCH_CREATE_ISSUES") == "1"
+    alerts = json.loads(gh(
+        ["api", "--paginate",
+         f"repos/{os.environ['GH_REPO']}/dependabot/alerts?per_page=100",
+         "--jq",
+         "[.[] | {number, state, ghsa: .security_advisory.ghsa_id}]"],
+        token=token))
+    by_ghsa = {}
+    for a in alerts:
+        by_ghsa.setdefault(a["ghsa"], []).append(a)
+    for d in dismissals:
+        ghsa, reason = d.get("ghsa"), d.get("reason")
+        if reason not in VALID_DISMISS_REASONS:
+            findings.append((
+                f"pin-watch: dismissal {ghsa} has invalid reason",
+                f"`{reason}` is not one of {sorted(VALID_DISMISS_REASONS)}.",
+            ))
+            continue
+        matched = by_ghsa.get(ghsa)
+        if not matched:
+            findings.append((
+                f"pin-watch: dismissal {ghsa} matches no alert",
+                f"No Dependabot alert in any state has GHSA `{ghsa}` — "
+                f"stale entry in `{MANIFEST}`, delete it.",
+            ))
+            continue
+        for a in matched:
+            if a["state"] != "open":
+                continue
+            if not live:
+                print(f"dry run: would dismiss alert #{a['number']} "
+                      f"({ghsa}) as {reason}")
+                continue
+            gh(["api", "-X", "PATCH",
+                f"repos/{os.environ['GH_REPO']}/dependabot/alerts/{a['number']}",
+                "-f", "state=dismissed",
+                "-f", f"dismissed_reason={reason}",
+                "-f", f"dismissed_comment={d.get('comment', '')[:280]}"],
+               token=token)
+            print(f"dismissed alert #{a['number']} ({ghsa}) as {reason}")
+
+
 def main():
-    watches = load(MANIFEST).get("watches") or []
+    manifest = load(MANIFEST)
+    watches = manifest.get("watches") or []
     ignores = set()
     for update in load(DEPENDABOT).get("updates") or []:
         for ig in update.get("ignore") or []:
@@ -141,6 +214,8 @@ def main():
 
     for w in watches:
         evaluate(w, findings)
+
+    reconcile_alerts(manifest.get("alert_dismissals") or [], findings)
 
     if not findings:
         print("pin-watch: every pin accounted for, no conditions met")

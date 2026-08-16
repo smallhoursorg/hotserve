@@ -31,3 +31,31 @@ watches:
     action: >-
       Delete this watch and the cel-go ignore in .github/dependabot.yml,
       then let Dependabot bump cel-go together with caddy.
+
+# Dependabot alert triage as code: alerts whose GHSA is listed here are
+# auto-dismissed by the pin-watch workflow with the given reason and
+# comment — so every dismissal is PR-reviewed and its evidence is
+# versioned. Alerts NOT listed stay open and notify as normal; this
+# section can only silence what a PR has reviewed.
+# reason must be one of GitHub's dismissed_reason values:
+#   fix_started | inaccurate | no_bandwidth | not_used | tolerable_risk
+# Requires the DEPENDABOT_ALERTS_TOKEN secret (fine-grained PAT,
+# "Dependabot alerts: read-write" on this repo only) — the Actions
+# GITHUB_TOKEN cannot access the Dependabot alerts API.
+
+alert_dismissals:
+  - ghsa: GHSA-gcjh-h69q-9w9g
+    reason: not_used
+    # GitHub caps dismissal comments at 280 chars; the full evidence
+    # lives here, versioned: the only cel-go consumer in this build is
+    # caddy's celmatcher, which registers ext.Strings/Bindings/Lists/
+    # Math — ext.NativeTypes (the vulnerable feature) appears nowhere
+    # in caddyserver/caddy — and CEL expressions are operator-written
+    # config, not request input. This GHSA is not in the Go vulndb, so
+    # govulncheck cannot vouch; triaged manually 2026-08-16. Cleared
+    # for real when caddy releases with cel-go >= 0.29.
+    comment: >-
+      Unreachable: caddy's celmatcher (the only cel-go consumer here)
+      never uses ext.NativeTypes, and CEL expressions are operator
+      config, not request input. Evidence + exit condition versioned
+      in .github/pin-watch.yml (cel-go watch).
