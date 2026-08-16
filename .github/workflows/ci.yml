@@ -120,13 +120,40 @@ jobs:
           path: dist
       - run: make install-test DISTRO=${{ matrix.distro }}
 
+  # Full-history secret scan: catches keys/tokens in the changes being
+  # merged AND anything already buried in history before it ships.
+  # Container is the pin, same as the rest of the graph.
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - run: docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 detect --source /repo --redact -v
+
+  # PR-only: fails when a PR introduces dependencies with known vulns
+  # (or surprise licenses). Deliberately NOT in ci-ok's needs — it is
+  # skipped on push/workflow_call events, and a skipped need would leave
+  # ci-ok permanently unsatisfied there. To make it merge-blocking, add
+  # "dependency-review" as a second required check in the main ruleset
+  # (it always runs on PRs, so it can never wedge the gate). Needs the
+  # dependency graph: public repo or GHAS.
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+
   # Aggregate gate: the ONE status check to mark required in the main
   # branch ruleset (auto-merge and humans alike wait on it). If any
   # needed job fails or is skipped, this job never runs and the check
   # stays unsatisfied — listing individual matrix cells as required
   # checks is not needed and would rot when cells change.
   ci-ok:
-    needs: [lint, test, govulncheck, e2e, package, install-test]
+    needs: [lint, test, govulncheck, e2e, package, install-test, gitleaks]
     runs-on: ubuntu-latest
     steps:
       - run: echo "all CI jobs green"
