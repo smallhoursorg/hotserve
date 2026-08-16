@@ -22,7 +22,7 @@ Built in:
 ## Install
 
 Grab the `.deb` or `.apk` for your architecture from
-[releases](https://github.com/hotsauce-team/hotserve/releases):
+[releases](https://github.com/smallhoursorg/hotserve/releases):
 
 ```sh
 sudo apt install ./hotserve_*_amd64.deb
@@ -146,7 +146,7 @@ make install-test      # install the .deb under real systemd (DISTRO=debian:12 e
 
 The repo is a Go multi-module workspace: `liveswap/` and `penaltybox/`
 are lean, independently usable Caddy modules
-(`xcaddy build --with github.com/hotsauce-team/hotserve/liveswap`),
+(`xcaddy build --with github.com/smallhoursorg/hotserve/liveswap`),
 and the root module builds the product binary from `cmd/hotserve`.
 
 ## Dependencies

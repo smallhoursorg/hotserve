@@ -51,14 +51,14 @@ endpoints, expensive queries) with higher levels.
 ## Install
 
 ```sh
-xcaddy build --with github.com/hotsauce-team/hotserve/penaltybox
+xcaddy build --with github.com/smallhoursorg/hotserve/penaltybox
 ```
 
 Or with the Caddy builder image:
 
 ```dockerfile
 FROM caddy:2.11.4-builder AS builder
-RUN xcaddy build --with github.com/hotsauce-team/hotserve/penaltybox
+RUN xcaddy build --with github.com/smallhoursorg/hotserve/penaltybox
 
 FROM caddy:2.11.4
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy

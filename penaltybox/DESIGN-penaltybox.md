@@ -113,8 +113,8 @@ JSON config mirrors the same fields under `http.handlers.hint_penaltybox`.
 
 ## Implementation guidance
 
-- **Repo:** lives in the `hotsauce-team/hotserve` monorepo as the
-  `penaltybox/` Go module (`github.com/hotsauce-team/hotserve/penaltybox`),
+- **Repo:** lives in the `smallhoursorg/hotserve` monorepo as the
+  `penaltybox/` Go module (`github.com/smallhoursorg/hotserve/penaltybox`),
   alongside the liveswap module and the hotserve product build. Also
   usable standalone via `xcaddy build --with` that module path.
   Apache-2.0, matching the repo. (Originally shipped as the standalone

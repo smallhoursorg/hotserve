@@ -8,7 +8,7 @@
 
 [Unit]
 Description=hotserve — the Hot Sauce server, powered by Caddy
-Documentation=https://github.com/hotsauce-team/hotserve
+Documentation=https://github.com/smallhoursorg/hotserve
 After=network.target network-online.target
 Requires=network-online.target
 

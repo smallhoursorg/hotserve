@@ -16,7 +16,7 @@ description: |
   Zero-downtime app deploys (liveswap), rate-limit hint enforcement
   (penaltybox) and HTTP caching (Souin + Otter) in one binary.
 vendor: Hot Sauce Team
-homepage: https://github.com/hotsauce-team/hotserve
+homepage: https://github.com/smallhoursorg/hotserve
 license: Apache-2.0
 
 contents:

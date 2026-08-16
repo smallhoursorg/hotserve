@@ -15,8 +15,8 @@ import (
 	_ "github.com/caddyserver/caddy/v2/modules/standard"
 
 	// hotserve modules.
-	_ "github.com/hotsauce-team/hotserve/liveswap"
-	_ "github.com/hotsauce-team/hotserve/penaltybox"
+	_ "github.com/smallhoursorg/hotserve/liveswap"
+	_ "github.com/smallhoursorg/hotserve/penaltybox"
 
 	// HTTP cache (Souin) with in-memory Otter storage.
 	_ "github.com/darkweak/souin/plugins/caddy"

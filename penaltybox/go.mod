@@ -1,4 +1,4 @@
-module github.com/hotsauce-team/hotserve/penaltybox
+module github.com/smallhoursorg/hotserve/penaltybox
 
 // The Go toolchain is pinned by the container images in
 // docker-compose.yml (golang:1.26 for tests, caddy:2.11.4-builder for

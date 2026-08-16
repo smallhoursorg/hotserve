@@ -3,7 +3,7 @@
 // xcaddy users don't inherit Souin/Otter's dependency graphs; replace
 // directives are fine here because this module is only ever built from
 // this repo, never fetched with `go get`.
-module github.com/hotsauce-team/hotserve
+module github.com/smallhoursorg/hotserve
 
 go 1.26.1
 
@@ -11,8 +11,8 @@ require (
 	github.com/caddyserver/caddy/v2 v2.11.4
 	github.com/darkweak/souin/plugins/caddy v1.7.8
 	github.com/darkweak/storages/otter/caddy v0.0.19
-	github.com/hotsauce-team/hotserve/liveswap v0.0.0
-	github.com/hotsauce-team/hotserve/penaltybox v0.0.0
+	github.com/smallhoursorg/hotserve/liveswap v0.0.0
+	github.com/smallhoursorg/hotserve/penaltybox v0.0.0
 )
 
 require (
@@ -190,6 +190,6 @@ require (
 )
 
 replace (
-	github.com/hotsauce-team/hotserve/liveswap => ./liveswap
-	github.com/hotsauce-team/hotserve/penaltybox => ./penaltybox
+	github.com/smallhoursorg/hotserve/liveswap => ./liveswap
+	github.com/smallhoursorg/hotserve/penaltybox => ./penaltybox
 )

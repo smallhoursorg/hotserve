@@ -7,7 +7,7 @@ builds a tarball, POSTs a webhook with its URL, and Caddy does the
 rest: download, migrate, start the new version on a fresh localhost
 port, health-gate it, atomically cut traffic over, gracefully stop the
 old one. No Kubernetes, no Nomad, no SSH keys in CI, no extra daemons.
-One binary. Part of the [Hot Source Stack](https://github.com/hotsauce-team).
+One binary. Part of the [Hot Source Stack](https://github.com/smallhoursorg).
 
 ```
 git push → CI builds app.tar.gz → uploads it → curl webhook → Caddy hot-swaps it
@@ -49,14 +49,14 @@ If you know Nomad, the concept map is:
 Build Caddy with the module (nothing else to install on the server):
 
 ```sh
-xcaddy build --with github.com/hotsauce-team/hotserve/liveswap
+xcaddy build --with github.com/smallhoursorg/hotserve/liveswap
 ```
 
 Or in a Dockerfile:
 
 ```dockerfile
 FROM caddy:2.11.4-builder AS builder
-RUN xcaddy build v2.11.4 --with github.com/hotsauce-team/hotserve/liveswap
+RUN xcaddy build v2.11.4 --with github.com/smallhoursorg/hotserve/liveswap
 
 FROM caddy:2.11.4
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
