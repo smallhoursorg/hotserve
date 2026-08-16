@@ -11,8 +11,8 @@ require (
 	github.com/caddyserver/caddy/v2 v2.11.4
 	github.com/darkweak/souin/plugins/caddy v1.7.8
 	github.com/darkweak/storages/otter/caddy v0.0.19
-	github.com/smallhoursorg/hotserve/liveswap v0.0.0
-	github.com/smallhoursorg/hotserve/penaltybox v0.0.0
+	github.com/smallhoursorg/hotserve/liveswap v0.0.0-00010101000000-000000000000
+	github.com/smallhoursorg/hotserve/penaltybox v0.0.0-00010101000000-000000000000
 )
 
 require (
@@ -66,7 +66,7 @@ require (
 	github.com/go-sql-driver/mysql v1.9.3 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/golang/snappy v1.0.0 // indirect
-	github.com/google/cel-go v0.29.0 // indirect
+	github.com/google/cel-go v0.28.1 // indirect
 	github.com/google/certificate-transparency-go v1.1.8-0.20240110162603-74a5dd331745 // indirect
 	github.com/google/go-tpm v0.9.8 // indirect
 	github.com/google/go-tspi v0.3.0 // indirect

@@ -16,16 +16,24 @@ env:
   COMPOSE: docker compose -f docker-compose.yml -f docker-compose.ci.yml
 
 jobs:
+  # One cell per module: the three golangci runs share no state, so
+  # they parallelize cleanly (serial they were the slowest lane). Cache
+  # keys are per-module so each cell restores exactly its own objects.
   lint:
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [".", "liveswap", "penaltybox"]
     runs-on: ubuntu-latest
+    name: lint (${{ matrix.module }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .cache
-          key: lint-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
-          restore-keys: lint-${{ runner.os }}-
-      - run: make lint COMPOSE="$COMPOSE"
+          key: lint-${{ matrix.module }}-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: lint-${{ matrix.module }}-${{ runner.os }}-
+      - run: make lint COMPOSE="$COMPOSE" MODULES="${{ matrix.module }}"
 
   # Unit + integration on both architectures: arm64 is a first-class
   # deploy target (cheap ARM VPSes), and the race detector plus the
@@ -148,12 +156,21 @@ jobs:
           fail-on-severity: high
 
   # Aggregate gate: the ONE status check to mark required in the main
-  # branch ruleset (auto-merge and humans alike wait on it). If any
-  # needed job fails or is skipped, this job never runs and the check
-  # stays unsatisfied — listing individual matrix cells as required
-  # checks is not needed and would rot when cells change.
+  # branch ruleset (auto-merge and humans alike wait on it). It runs
+  # UNCONDITIONALLY (if: always()) and asserts every needed job
+  # succeeded, so a broken graph produces an explicit red ci-ok —
+  # never a missing check. (The previous design let ci-ok silently
+  # not run when a need failed; PR #4 auto-merged through exactly
+  # that gap and broke main.) Listing individual matrix cells as
+  # required checks is still not needed and would rot when cells
+  # change.
   ci-ok:
+    if: always()
     needs: [lint, test, govulncheck, e2e, package, install-test, gitleaks]
     runs-on: ubuntu-latest
     steps:
-      - run: echo "all CI jobs green"
+      - name: assert every needed job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -e 'to_entries | map(select(.value.result != "success")) | if length == 0 then "all CI jobs green" else error("failed: \(map(.key) | join(", "))") end'
