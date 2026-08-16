@@ -104,11 +104,32 @@ func downloadArtifact(ctx context.Context, opts downloadOpts) (string, error) {
 // timeout — large artifacts on slow links are legitimate — but a
 // server that accepts the connection and then stalls is cut off at the
 // header stage, and the request context bounds the rest.
-func newDownloadClient() *http.Client {
+//
+// CheckRedirect enforces the scheme policy on EVERY hop: Go's client
+// happily follows an https -> http redirect (it strips Authorization
+// cross-host, but not the scheme), which would let a permitted-looking
+// https URL downgrade the fetch to cleartext — quietly defeating both
+// the encrypted-artifacts promise and the accidental SSRF barrier that
+// https-only provides (metadata/LAN endpoints are typically plain
+// http). allowed_artifact_hosts is deliberately NOT re-checked per
+// hop: the GitHub -> S3 redirect pattern is load-bearing, so the
+// allowlist governs the first hop only (documented in the README).
+func newDownloadClient(allowInsecure bool) *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
 			ResponseHeaderTimeout: 30 * time.Second,
 			Proxy:                 http.ProxyFromEnvironment,
+		},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				// Go's default cap, made explicit and testable.
+				return fmt.Errorf("stopped after 10 redirects")
+			}
+			if req.URL.Scheme != "https" && !allowInsecure {
+				return fmt.Errorf("redirect to %s downgrades to %s; artifacts must stay on https (or set allow_insecure_http)",
+					redactURL(req.URL), req.URL.Scheme)
+			}
+			return nil
 		},
 	}
 }
