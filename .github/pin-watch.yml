@@ -1,0 +1,33 @@
+# pin-watch manifest: every Dependabot *ignore* must have an entry
+# here declaring the condition under which the pin should be lifted.
+# The pin-watch workflow evaluates these weekly and opens an issue
+# when a condition is met — and flags any ignore without a watch (or
+# watch without an ignore), so a pin can never rot silently.
+#
+# Schema per watch:
+#   id:          short slug, used in issue titles
+#   ignores:     dependency-name exactly as it appears in a
+#                dependabot.yml ignore entry
+#   reason:      why the pin exists (human context for the issue)
+#   unblock:     the machine-checkable exit condition
+#     type: upstream-gomod-requires   # the only type implemented so far:
+#     repo:        <owner/name>        #   latest release of this repo…
+#     module:      <module path>       #   …requires this module…
+#     min_version: <vX.Y.Z>            #   …at at least this version
+#   action:      what to do when the condition fires
+
+watches:
+  - id: cel-go
+    ignores: "github.com/google/cel-go"
+    reason: >-
+      caddy v2.11.x does not compile against cel-go >= 0.29 (the
+      interpreter.NewCall signature changed); the 0.29.0 bump broke
+      main on 2026-08-16.
+    unblock:
+      type: upstream-gomod-requires
+      repo: caddyserver/caddy
+      module: github.com/google/cel-go
+      min_version: v0.29.0
+    action: >-
+      Delete this watch and the cel-go ignore in .github/dependabot.yml,
+      then let Dependabot bump cel-go together with caddy.
