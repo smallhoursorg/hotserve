@@ -7,7 +7,7 @@ builds a tarball, POSTs a webhook with its URL, and Caddy does the
 rest: download, migrate, start the new version on a fresh localhost
 port, health-gate it, atomically cut traffic over, gracefully stop the
 old one. No Kubernetes, no Nomad, no SSH keys in CI, no extra daemons.
-One binary. Part of the [Hot Source Stack](https://github.com/smallhoursorg).
+One binary. Part of [hotserve](https://github.com/smallhoursorg/hotserve), from [smallhours](https://github.com/smallhoursorg).
 
 ```
 git push → CI builds app.tar.gz → uploads it → curl webhook → Caddy hot-swaps it
@@ -183,6 +183,13 @@ so GitHub's S3 redirect works). The response is synchronous:
 | 409 | A deploy is already running for this app (retry) |
 | 422 | Bad payload (missing url, invalid version, version already running) |
 | 5xx | Deploy failed — **the old version is still serving**; body says why |
+
+Because the response is synchronous through the whole pipeline, the
+POST's wall time includes the health soak, the `drain` pause and the
+old version's graceful stop — with defaults, a healthy deploy answers
+in roughly soak + drain (~20s). Budget your CI step timeout for
+`deadline` plus drain and grace, and expect a concurrent deploy to
+409 until the first one finishes.
 
 `GET /<app>` (same secret header) returns status: phase, current
 version, port, pid, last deploy result.

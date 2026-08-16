@@ -3,7 +3,8 @@
 // URL and version; Caddy downloads it, runs an optional pre-start
 // command (migrations), starts the new version as a child process on a
 // fresh localhost port, health-gates it, atomically cuts traffic over,
-// then gracefully stops the old version. Part of the Hot Source Stack.
+// then gracefully stops the old version. Part of hotserve, from
+// smallhours.
 //
 // Three cooperating modules:
 //   - liveswap (this file): the app module holding app definitions and
