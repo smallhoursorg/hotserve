@@ -62,12 +62,16 @@ vulncheck:
 # checked-out tag via build info (the dev service disables it for test
 # cache friendliness). safe.directory is needed because /src is a bind
 # mount owned by a different uid than the container's root.
+# The trailing chmod is for Linux CI runners: the container runs as
+# root, so without it the bind-mounted build/ is unwritable to the
+# host user and package's cp/rm staging fails (macOS masks this).
 build:
 	$(COMPOSE) run --rm -e GOFLAGS= -e CGO_ENABLED=0 dev sh -c '\
 		git config --global --add safe.directory /src; \
 		for a in amd64 arm64; do \
 			GOOS=linux GOARCH=$$a go build -trimpath -ldflags "-s -w" -o build/hotserve-linux-$$a ./cmd/hotserve || exit 1; \
-		done'
+		done; \
+		chmod -R a+rwX build'
 
 # Builds .deb and .apk for both arches into dist/. The packages carry
 # the systemd unit, the starter /etc/hotserve/Caddyfile and the data

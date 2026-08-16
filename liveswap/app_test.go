@@ -178,11 +178,11 @@ func (s *fakeStore) save(st appState) error {
 }
 
 // testSpec builds a fully-populated spec rooted in a temp dir.
-func testSpec(t *testing.T, name string) *appSpec {
+func testSpec(t *testing.T) *appSpec {
 	t.Helper()
 	root := t.TempDir()
 	return &appSpec{
-		name:            name,
+		name:            "demo",
 		command:         []string{"./server", "--version", "{version}"},
 		env:             map[string]string{"DATA": "{shared_dir}/db"},
 		secret:          "s3cret",
@@ -195,7 +195,7 @@ func testSpec(t *testing.T, name string) *appSpec {
 		grace:           10 * time.Second,
 		keep:            2,
 		maxArtifactSize: 1 << 20,
-		dirs:            newAppDirs(root, name),
+		dirs:            newAppDirs(root, "demo"),
 	}
 }
 
@@ -217,7 +217,7 @@ func newTestRig(t *testing.T) *testRig {
 		fetch:  &fakeFetcher{},
 		clock:  newFakeClock(),
 		store:  &fakeStore{},
-		spec:   testSpec(t, "demo"),
+		spec:   testSpec(t),
 	}
 	ma := newManagedApp("demo")
 	ma.spec = rig.spec
@@ -438,7 +438,7 @@ func TestDestructStopsCurrentInstance(t *testing.T) {
 }
 
 func TestBuildEnvPrecedenceAndPlaceholders(t *testing.T) {
-	spec := testSpec(t, "demo")
+	spec := testSpec(t)
 	envFile := filepath.Join(t.TempDir(), "app.env")
 	must(t, os.WriteFile(envFile, []byte("# comment\nexport FROM_FILE=yes\nOVERRIDE=\"file\"\n\n"), 0o600))
 	spec.envFile = envFile
@@ -450,7 +450,7 @@ func TestBuildEnvPrecedenceAndPlaceholders(t *testing.T) {
 	}
 	byKey := map[string]string{}
 	for _, kv := range env {
-		k, v, _ := stringsCut(kv)
+		k, v := stringsCut(kv)
 		byKey[k] = v // later entries win, matching exec env semantics
 	}
 	for k, want := range map[string]string{
@@ -473,13 +473,13 @@ func TestBuildEnvDoesNotLeakSupervisorSecrets(t *testing.T) {
 	t.Setenv("PATH", "/usr/bin:/bin")
 	t.Setenv("LC_ALL", "C.UTF-8")
 
-	env, err := buildEnv(testSpec(t, "demo"), "v1", 8123, t.TempDir())
+	env, err := buildEnv(testSpec(t), "v1", 8123, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	byKey := map[string]string{}
 	for _, kv := range env {
-		k, v, _ := stringsCut(kv)
+		k, v := stringsCut(kv)
 		byKey[k] = v
 	}
 	for _, k := range []string{"LIVESWAP_SECRET", "SOME_ACME_TOKEN"} {
@@ -495,13 +495,13 @@ func TestBuildEnvDoesNotLeakSupervisorSecrets(t *testing.T) {
 	}
 }
 
-func stringsCut(kv string) (string, string, bool) {
+func stringsCut(kv string) (string, string) {
 	for i := 0; i < len(kv); i++ {
 		if kv[i] == '=' {
-			return kv[:i], kv[i+1:], true
+			return kv[:i], kv[i+1:]
 		}
 	}
-	return kv, "", false
+	return kv, ""
 }
 
 func TestParseEnvFileRejectsGarbage(t *testing.T) {
@@ -544,7 +544,7 @@ func TestValidVersionRejectsDotSegments(t *testing.T) {
 }
 
 func TestExpandArgs(t *testing.T) {
-	spec := testSpec(t, "demo")
+	spec := testSpec(t)
 	got := expandArgs([]string{"run", "--rel={release_dir}", "{version}"}, spec, "v2", 9000, "/rel/v2")
 	if got[1] != "--rel=/rel/v2" || got[2] != "v2" {
 		t.Fatalf("placeholders not expanded: %v", got)
