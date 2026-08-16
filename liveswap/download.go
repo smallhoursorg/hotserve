@@ -155,7 +155,7 @@ func (rf *releaseFetcher) fetch(ctx context.Context, spec *appSpec, req deployRe
 
 	progress("extracting")
 	releaseDir := spec.dirs.release(req.Version)
-	staging := filepath.Join(spec.dirs.releases, ".extract-"+req.Version)
+	staging := filepath.Join(spec.dirs.releases, ".extract-"+versionPathComponent(req.Version))
 	if err := os.RemoveAll(staging); err != nil {
 		return "", err
 	}
