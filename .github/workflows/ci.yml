@@ -68,6 +68,13 @@ jobs:
           restore-keys: vuln-${{ runner.os }}-
       - run: make vulncheck COMPOSE="$COMPOSE"
 
+  # No needs: e2e shares no artifacts or caches with test (it builds
+  # its own compose stack from source), so it runs in parallel — on
+  # green runs that removes the whole test->e2e serial leg from the
+  # critical path. The trade: a red unit test now burns (free) e2e
+  # minutes alongside, and peak arm-runner demand is higher — if
+  # arm cells start sitting in "queued", restoring `needs: [test]`
+  # here is the first lever.
   e2e:
     strategy:
       fail-fast: false
@@ -75,7 +82,6 @@ jobs:
         runner: [ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
     name: e2e (${{ matrix.runner }})
-    needs: [test]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # make e2e dumps hotserve/upstream/artifact logs itself when
