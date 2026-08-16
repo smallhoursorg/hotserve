@@ -16,7 +16,7 @@ VERSION ?= $(shell (git describe --tags --exact-match 2>/dev/null || echo v0.0.0
 # Distro image for the package install smoke test (install-test).
 DISTRO ?= debian:12
 
-.PHONY: test test-integration vet tidy lint fuzz vulncheck build package install-test e2e soak e2e-logs clean
+.PHONY: test test-integration vet tidy lint fuzz vulncheck secretscan build package install-test e2e soak e2e-logs clean
 
 test:
 	$(COMPOSE) run --rm dev go test -race -cover $(PKGS)
@@ -48,14 +48,24 @@ fuzz:
 	$(COMPOSE) run --rm -w /src/penaltybox dev \
 		go test -run '^$$' -fuzz '^FuzzParseLevel$$' -fuzztime $(FUZZTIME) .
 
-# Known-vulnerability scan per module. The tool version is pinned so CI
-# stays reproducible; the vuln database itself always updates (which is
-# why vulncheck.yml also runs this on a weekly cron).
+# Known-vulnerability scan per module. govulncheck is a `tool`
+# dependency in each module's go.mod — never compiled into the product,
+# invisible to importers — so Dependabot bumps it like any require. A
+# version literal here (`go run ...@vX`) would be a pin nothing
+# watches: no ecosystem parses shell strings. The vuln database itself
+# always updates regardless of tool version, which is why vulncheck.yml
+# also runs this on a weekly cron.
 vulncheck:
 	for m in $(MODULES); do \
 		$(COMPOSE) run --rm -w /src/$$m dev \
-			go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./... || exit 1; \
+			go tool govulncheck ./... || exit 1; \
 	done
+
+# Full-history secret scan — the same engine and image as CI's gitleaks
+# gate (the image is pinned in docker-compose.yml, where Dependabot
+# watches it), so local and CI can never drift.
+secretscan:
+	$(COMPOSE) run --rm gitleaks detect --source /src --redact -v
 
 # Cross-compiles the product binary for the release targets. GOFLAGS is
 # cleared so -buildvcs is back on: caddycmd stamps the version from the
