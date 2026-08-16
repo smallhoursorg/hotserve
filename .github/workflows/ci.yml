@@ -10,6 +10,12 @@ on:
   pull_request:
   workflow_call:
 
+# Least-privilege token for every job: the graph only ever reads the
+# repo (checkout, caches, artifacts use the runtime token, not this
+# one). Jobs that need more must say so at job level.
+permissions:
+  contents: read
+
 env:
   # Adds the CI override that bind-mounts Go caches under ./.cache so
   # actions/cache can persist them.
