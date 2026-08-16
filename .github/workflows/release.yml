@@ -7,6 +7,11 @@ on:
   push:
     tags: ['v*']
 
+# Least-privilege default; the release job alone elevates to
+# contents: write at job level (see its comment).
+permissions:
+  contents: read
+
 jobs:
   # The full CI graph (lint, tests, e2e, install-test matrix) must pass
   # on the tagged commit before anything is published.

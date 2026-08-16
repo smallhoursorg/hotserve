@@ -15,6 +15,10 @@ on:
         description: "Time per fuzz target (Go duration)"
         default: "5m"
 
+# Least-privilege token: this workflow only checks out and runs make.
+permissions:
+  contents: read
+
 jobs:
   fuzz:
     runs-on: ubuntu-latest
