@@ -1,4 +1,4 @@
-// Command hotserve is the Hot Source Stack server: Caddy with
+// Command hotserve is the Hot Sauce server from smallhours: Caddy with
 // zero-downtime app deploys (liveswap), rate-limit hint enforcement
 // (penaltybox) and HTTP caching (Souin + Otter storage) compiled in.
 // It is distributed as its own binary and OS packages — see the repo

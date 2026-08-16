@@ -182,6 +182,28 @@ vendors' documentation — that is a stated product goal, not nice-to-have:
   boxing) and the per-instance state limitation.
 - `xcaddy` build one-liner + minimal Caddyfile.
 
+## Config reloads: state lifetime (a deliberate v1 trade-off)
+
+The store lives on the handler, and the handler is a per-config
+module — so **every config reload builds a fresh store: all penalty
+boxes and counters are forgotten**, and boxed clients get amnesty.
+This is the opposite of liveswap's UsagePool design, and the asymmetry
+is deliberate rather than accidental:
+
+- liveswap has a natural pool key (the app name) and an unacceptable
+  cost to losing state (a running child process). penaltybox's handler
+  is anonymous — one site block can mount several with different
+  budgets — so a stable pool identity would have to be invented, and
+  the cost of losing state is bounded: budgets refill within one
+  `window` (seconds to minutes) and an abusive client re-boxes itself
+  within a few requests.
+- Reloads are rare, operator-initiated events on this product; an
+  attacker cannot trigger one.
+
+If pooled-across-reload state ever becomes worth that key-design work,
+it slots in behind the `boxStore` interface without touching handler
+code — the same seam reserved for the distributed store below.
+
 ## Non-goals (v1)
 
 - **No distributed state.** Multi-instance Caddy means per-instance
