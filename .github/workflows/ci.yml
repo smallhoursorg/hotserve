@@ -136,14 +136,18 @@ jobs:
 
   # Full-history secret scan: catches keys/tokens in the changes being
   # merged AND anything already buried in history before it ships.
-  # Container is the pin, same as the rest of the graph.
+  # Runs via make + compose like every other job — the image pin lives
+  # in docker-compose.yml where Dependabot's compose-images group bumps
+  # it (a tag inside a raw `docker run` here would be a pin nothing
+  # watches, and a secret scanner's value is its rule set staying
+  # current).
   gitleaks:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - run: docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 detect --source /repo --redact -v
+      - run: make secretscan COMPOSE="$COMPOSE"
 
   # PR-only: fails when a PR introduces dependencies with known vulns
   # (or surprise licenses). Deliberately NOT in ci-ok's needs — it is

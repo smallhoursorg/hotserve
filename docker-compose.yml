@@ -24,6 +24,17 @@ services:
       - gobuildcache:/root/.cache/go-build
       - golangcicache:/root/.cache/golangci-lint
 
+  # Secret scanner for `make secretscan` and CI's gitleaks job. Lives
+  # here — not as a raw `docker run` in the workflow — because
+  # Dependabot only parses structured fields (compose image: keys,
+  # Dockerfile FROMs, go.mod requires, workflow uses:), never shell
+  # strings: an image tag inside a run: line is a pin nothing watches,
+  # and a secret scanner's value is its rule set staying current.
+  gitleaks:
+    image: ghcr.io/gitleaks/gitleaks:v8.30.1
+    volumes:
+      - .:/src
+
   # Packager for the release .deb/.apk artifacts (`make package`).
   nfpm:
     image: goreleaser/nfpm:v2.47.0

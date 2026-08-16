@@ -36,11 +36,29 @@ func TestGetUpstreamsSeesCutover(t *testing.T) {
 	rig := newTestRig(t)
 	u := &Upstreams{App: "demo", ma: rig.ma}
 	ctx := context.Background()
-	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/1.tgz", Version: "v1"}))
-	first, _ := u.GetUpstreams(httptest.NewRequest("GET", "/", nil))
-	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/2.tgz", Version: "v2"}))
-	second, _ := u.GetUpstreams(httptest.NewRequest("GET", "/", nil))
-	if first[0].Dial == second[0].Dial {
-		t.Fatal("cutover not visible through GetUpstreams")
+
+	// Assert that GetUpstreams follows the active instance, not that
+	// two deploys get different ports: freePort's probe listener is
+	// closed and the fake runner binds nothing, so the kernel may hand
+	// v2 the very port v1 had — an inequality assertion is flaky (it
+	// failed exactly that way on a quiet arm runner).
+	assertDial := func(version string) {
+		t.Helper()
+		ups, err := u.GetUpstreams(httptest.NewRequest("GET", "/", nil))
+		if err != nil {
+			t.Fatalf("GetUpstreams: %v", err)
+		}
+		inst := rig.ma.currentInstance()
+		if inst == nil || inst.version != version {
+			t.Fatalf("current instance = %+v, want version %s", inst, version)
+		}
+		if want := "127.0.0.1:" + portString(inst.port); ups[0].Dial != want {
+			t.Fatalf("GetUpstreams dial = %s, want %s", ups[0].Dial, want)
+		}
 	}
+
+	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/1.tgz", Version: "v1"}))
+	assertDial("v1")
+	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/2.tgz", Version: "v2"}))
+	assertDial("v2")
 }

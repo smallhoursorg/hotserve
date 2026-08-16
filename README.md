@@ -136,7 +136,8 @@ make test              # unit tests, all modules (race + coverage)
 make test-integration  # real deploys through caddytest
 make e2e               # full stack: both module suites against the shipped binary, then crash recovery
 make lint vet tidy
-make vulncheck         # govulncheck, all modules
+make vulncheck         # govulncheck, all modules (tool dep in go.mod — Dependabot-bumped)
+make secretscan        # gitleaks full-history secret scan (same image as the CI gate)
 make fuzz              # fuzz the untrusted-input surfaces (FUZZTIME=2m per target)
 make soak              # ~20min leak hunt: deploy/reload churn, goroutine/fd assertions
 make build             # cross-compile linux amd64/arm64
@@ -177,7 +178,10 @@ here's exactly what's in the binary and what it drags in. Module counts
 are measured from `go mod graph` (deduplicated by module path); the
 "pulls in" column shows what each dependency adds *beyond* what's
 already in the tree above it, because the trees overlap almost
-entirely.
+entirely. (Counts exclude the `govulncheck` tool dependency — a
+`tool` directive is never compiled into the product and never
+inherited by importers; it exists in go.mod so Dependabot can bump
+the scanner.)
 
 | Dependency | Pulls in (~modules) | hotserve | liveswap | penaltybox | Notes |
 |---|---|:-:|:-:|:-:|---|
