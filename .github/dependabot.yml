@@ -26,11 +26,15 @@ updates:
       go-deps:
         patterns: ["*"]
     ignore:
-      # caddy v2.11.x does not compile against cel-go >= 0.29 (the
-      # interpreter.NewCall signature changed); the bump to 0.29.0
-      # broke main on 2026-08-16. Remove when a caddy release
-      # supports it — caddy's own go.mod is the tell.
+      # Every ignore here MUST have a matching watch declaring its exit
+      # condition in .github/pin-watch.yml — the pin-watch workflow
+      # opens an issue when the condition is met, and flags any ignore
+      # without a watch.
+      #
+      # cel-go: caddy v2.11.x does not compile against >= 0.29; only
+      # the incompatible line is blocked so 0.28.x patches still flow.
       - dependency-name: "github.com/google/cel-go"
+        versions: [">= 0.29.0"]
 
   - package-ecosystem: github-actions
     directory: "/"

@@ -1,0 +1,28 @@
+# Watches every Dependabot *ignore* for its declared exit condition.
+# Dependabot covers pins it can see; this covers the exceptions we tell
+# it to ignore — each one must carry a machine-checkable unblock
+# condition in .github/pin-watch.yml, and the script also flags any
+# ignore/watch drift between that manifest and dependabot.yml.
+# Findings become labeled issues (not red runs — quiet-repo crons that
+# fail red get ignored; issues land in notifications and stay open).
+name: pin-watch
+
+on:
+  schedule:
+    - cron: "29 6 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  pin-watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: python3 .github/scripts/pin-watch.py
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PIN_WATCH_CREATE_ISSUES: "1"
