@@ -6,12 +6,14 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -168,6 +170,23 @@ func getBody(t *testing.T, url string) (int, string) {
 
 var pidRe = regexp.MustCompile(`pid (\d+)`)
 
+var portRe = regexp.MustCompile(`"port":(\d+)`)
+
+// portFromStatus extracts the active instance's port from the webhook
+// status JSON.
+func portFromStatus(t *testing.T, status string) int {
+	t.Helper()
+	m := portRe.FindStringSubmatch(status)
+	if m == nil {
+		t.Fatalf("no port in status: %s", status)
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		t.Fatalf("bad port %q in status: %v", m[1], err)
+	}
+	return n
+}
+
 func TestIntegrationDeployLifecycle(t *testing.T) {
 	bin := buildTestApp(t)
 	root := t.TempDir()
@@ -226,6 +245,9 @@ func TestIntegrationDeployLifecycle(t *testing.T) {
 
 	t.Run("deploy v2 cuts over and stops v1", func(t *testing.T) {
 		_, prev := getBody(t, "http://localhost:9080/")
+		_, statusBefore := getStatus(t)
+		v1Port := portFromStatus(t, statusBefore)
+
 		resp, body := postDeploy(t, artifactSrv.URL+"/demo-v2.tar.gz", "v2")
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("deploy v2: %d %s", resp.StatusCode, body)
@@ -237,11 +259,27 @@ func TestIntegrationDeployLifecycle(t *testing.T) {
 		if page == prev {
 			t.Fatal("response did not change after cutover")
 		}
-		// The old process must be gone (its pid differs and v1 port is
-		// no longer serving) — asserted indirectly: status shows v2.
 		_, status := getStatus(t)
 		if !strings.Contains(status, `"current_version":"v2"`) {
 			t.Fatalf("status after v2: %s", status)
+		}
+
+		// The old port must be RELEASED, not merely unrouted. Port
+		// inequality is asserted here — and only here — because with
+		// real processes it is a true invariant: v1 was still listening
+		// when v2's port was allocated, so the kernel cannot have
+		// reused it. (On the unit tests' fake runner nothing binds, so
+		// the same assertion is flaky there — see
+		// TestGetUpstreamsSeesCutover's history.) The deploy response
+		// returns only after drain + stop-old, so by now a connect to
+		// v1's port must be refused.
+		v2Port := portFromStatus(t, status)
+		if v2Port == v1Port {
+			t.Fatalf("v2 was allocated v1's port %d while v1 was alive", v1Port)
+		}
+		if conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", v1Port), time.Second); err == nil {
+			_ = conn.Close()
+			t.Fatalf("old v1 port %d still accepting connections after stop", v1Port)
 		}
 	})
 
