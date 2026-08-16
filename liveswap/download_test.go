@@ -1,6 +1,8 @@
 package liveswap
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -134,5 +136,76 @@ func TestRedactURLDropsQuery(t *testing.T) {
 	got := redactURL(u)
 	if strings.Contains(got, "SECRET") || !strings.Contains(got, "gitlab.com/api/artifacts/7") {
 		t.Fatalf("redactURL leaked or mangled: %q", got)
+	}
+}
+
+// A permitted-looking https URL must not be able to downgrade the
+// fetch to cleartext via a redirect: Go's client follows https->http
+// redirects by default, so the scheme policy is enforced per hop in
+// CheckRedirect.
+func TestDownloadRefusesHTTPSToHTTPDowngrade(t *testing.T) {
+	// The cleartext destination that must never be reached.
+	reached := false
+	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached = true
+		_, _ = w.Write([]byte("plaintext"))
+	}))
+	defer httpSrv.Close()
+	// The https entry point that tries the downgrade.
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, httpSrv.URL, http.StatusFound)
+	}))
+	defer tlsSrv.Close()
+
+	client := newDownloadClient(false)
+	// Trust the httptest TLS cert on our transport (and only ours —
+	// the CheckRedirect under test must be the real one).
+	pool := x509.NewCertPool()
+	pool.AddCert(tlsSrv.Certificate())
+	client.Transport.(*http.Transport).TLSClientConfig = &tls.Config{RootCAs: pool}
+
+	_, err := downloadArtifact(context.Background(), downloadOpts{
+		url:      tlsSrv.URL + "/artifact.tar.gz",
+		destDir:  t.TempDir(),
+		maxBytes: 1 << 20,
+		client:   client,
+	})
+	if err == nil || !strings.Contains(err.Error(), "downgrades") {
+		t.Fatalf("want downgrade refusal, got %v", err)
+	}
+	if reached {
+		t.Fatal("the cleartext destination was contacted despite the refusal")
+	}
+}
+
+// With allow_insecure_http the same redirect is permitted — the policy
+// belongs to the operator, per hop.
+func TestDownloadAllowsDowngradeWhenInsecureAllowed(t *testing.T) {
+	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("payload"))
+	}))
+	defer httpSrv.Close()
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, httpSrv.URL, http.StatusFound)
+	}))
+	defer tlsSrv.Close()
+
+	client := newDownloadClient(true)
+	pool := x509.NewCertPool()
+	pool.AddCert(tlsSrv.Certificate())
+	client.Transport.(*http.Transport).TLSClientConfig = &tls.Config{RootCAs: pool}
+
+	path, err := downloadArtifact(context.Background(), downloadOpts{
+		url:           tlsSrv.URL + "/artifact.tar.gz",
+		destDir:       t.TempDir(),
+		maxBytes:      1 << 20,
+		allowInsecure: true,
+		client:        client,
+	})
+	if err != nil {
+		t.Fatalf("downgrade should be permitted with allow_insecure_http: %v", err)
+	}
+	if path == "" {
+		t.Fatal("no artifact path returned")
 	}
 }

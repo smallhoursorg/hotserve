@@ -190,7 +190,7 @@ func (a *App) Provision(ctx caddy.Context) error {
 	}
 
 	clients := &fetchClients{
-		download: newDownloadClient(),
+		download: newDownloadClient(a.AllowInsecureHTTP),
 		health:   &http.Client{},
 	}
 
