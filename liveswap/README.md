@@ -181,7 +181,7 @@ so GitHub's S3 redirect works). The response is synchronous:
 | 401 | Bad or missing secret |
 | 404 | Unknown app |
 | 409 | A deploy is already running for this app (retry) |
-| 422 | Bad payload (missing url, invalid version, version already running) |
+| 422 | Bad payload — missing url, invalid version, version already running, or the artifact url was refused by `artifact_allowlist` (host, path, port, or an undeclared query parameter; the body names exactly what tripped and how the entry would declare it) |
 | 5xx | Deploy failed — **the old version is still serving**; body says why |
 
 Because the response is synchronous through the whole pipeline, the
