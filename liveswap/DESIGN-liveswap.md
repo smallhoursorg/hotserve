@@ -45,8 +45,13 @@ Concept map from the Nomad-era stack:
 - Artifact downloads MUST enforce `max_artifact_size` both via
   Content-Length and the streamed byte count, MUST default to https
   only (enforced on every redirect hop), and MUST match the required
-  `artifact_allowlist` — host, or host + path prefix on multi-tenant
-  hosts, first hop only.
+  `artifact_allowlist` — host, optionally with a literal port (no
+  wildcards; default-port-only otherwise), a path prefix (mandatory in
+  spirit on multi-tenant hosts), and declared query parameter names
+  (queries are refused unless every name is vouched for) — first hop
+  only. The outgoing URL is constructed from the entry's own config
+  bytes; the payload contributes only the canonical-form path suffix
+  and vetted query.
 - Extraction MUST reject: absolute paths, `..` traversal, symlink and
   hardlink targets resolving outside the archive root, special files
   (devices/FIFOs), setuid/setgid bits, and decompressed content beyond
