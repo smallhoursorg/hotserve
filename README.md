@@ -165,9 +165,12 @@ weekly `pin-watch` workflow:
   The workflow opens an issue when a condition is met, and flags any
   ignore↔watch drift — a pin can never rot silently.
 - **Alert triage.** `alert_dismissals` entries auto-dismiss Dependabot
-  alerts by GHSA id with a reviewed reason and evidence comment, so
-  triage decisions are versioned instead of buried in the UI. Unlisted
-  alerts stay open and notify as normal. This needs the
+  alerts by GHSA id, and `code_scanning_dismissals` entries do the same
+  for CodeQL alerts by rule + file (with an `expect` cap so a new flow
+  in the same file is never silently swallowed) — each with a reviewed
+  reason and evidence comment, so triage decisions are versioned
+  instead of buried in the UI. Unlisted alerts stay open and notify as
+  normal. This needs the
   `DEPENDABOT_ALERTS_TOKEN` Actions secret — a fine-grained PAT with
   **Dependabot alerts: read-write** on this repository only — because
   the Actions `GITHUB_TOKEN` cannot access the alerts API.

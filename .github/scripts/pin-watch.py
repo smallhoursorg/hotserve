@@ -187,6 +187,69 @@ def reconcile_alerts(dismissals, findings):
             print(f"dismissed alert #{a['number']} ({ghsa}) as {reason}")
 
 
+VALID_CODE_SCANNING_REASONS = {"false positive", "won't fix", "used in tests"}
+
+
+def reconcile_code_scanning(dismissals, findings):
+    """Dismiss open code-scanning alerts matching a declared rule+path.
+    Uses the workflow's own GITHUB_TOKEN (security-events: write is
+    grantable to it, unlike the Dependabot alerts API). Entries are
+    keyed on rule + file, never alert number — numbers change when a
+    refactor re-detects the same flow — and `expect` caps how many
+    open alerts one entry may silence: more matches means a NEW flow
+    appeared, so nothing is dismissed and an issue says why."""
+    if not dismissals:
+        return
+    live = os.environ.get("PIN_WATCH_CREATE_ISSUES") == "1"
+    alerts = json.loads(gh(
+        ["api", "--paginate",
+         f"repos/{os.environ['GH_REPO']}/code-scanning/alerts?per_page=100",
+         "--jq",
+         "[.[] | {number, state, rule: .rule.id, "
+         "path: .most_recent_instance.location.path}]"]))
+    for d in dismissals:
+        rule, path_, reason = d.get("rule"), d.get("path"), d.get("reason")
+        key = f"{rule} in {path_}"
+        if reason not in VALID_CODE_SCANNING_REASONS:
+            findings.append((
+                f"pin-watch: code-scanning dismissal {key} has invalid reason",
+                f"`{reason}` is not one of {sorted(VALID_CODE_SCANNING_REASONS)}.",
+            ))
+            continue
+        matched = [a for a in alerts if a["rule"] == rule and a["path"] == path_]
+        if not matched:
+            findings.append((
+                f"pin-watch: code-scanning dismissal {key} matches no alert",
+                f"No code-scanning alert in any state matches rule `{rule}` in "
+                f"`{path_}` — stale entry in `{MANIFEST}`, delete it.",
+            ))
+            continue
+        open_matches = [a for a in matched if a["state"] == "open"]
+        expect = int(d.get("expect", 1))
+        if len(open_matches) > expect:
+            findings.append((
+                f"pin-watch: code-scanning dismissal {key} matched "
+                f"{len(open_matches)} open alerts (expect {expect})",
+                "More open alerts than the entry declares — a NEW flow has "
+                f"appeared in `{path_}`. Refusing to dismiss any of them; "
+                "triage the new alert, then raise `expect` (or fix the code) "
+                f"in `{MANIFEST}`.\n\nAlert numbers: "
+                + ", ".join(f"#{a['number']}" for a in open_matches),
+            ))
+            continue
+        for a in open_matches:
+            if not live:
+                print(f"dry run: would dismiss code-scanning alert "
+                      f"#{a['number']} ({key}) as {reason}")
+                continue
+            gh(["api", "-X", "PATCH",
+                f"repos/{os.environ['GH_REPO']}/code-scanning/alerts/{a['number']}",
+                "-f", "state=dismissed",
+                "-f", f"dismissed_reason={reason}",
+                "-f", f"dismissed_comment={d.get('comment', '')[:280]}"])
+            print(f"dismissed code-scanning alert #{a['number']} ({key}) as {reason}")
+
+
 def main():
     manifest = load(MANIFEST)
     watches = manifest.get("watches") or []
@@ -216,6 +279,7 @@ def main():
         evaluate(w, findings)
 
     reconcile_alerts(manifest.get("alert_dismissals") or [], findings)
+    reconcile_code_scanning(manifest.get("code_scanning_dismissals") or [], findings)
 
     if not findings:
         print("pin-watch: every pin accounted for, no conditions met")

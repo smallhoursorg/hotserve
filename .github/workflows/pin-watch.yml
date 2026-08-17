@@ -15,6 +15,9 @@ on:
 permissions:
   contents: read
   issues: write
+  # For code_scanning_dismissals: unlike the Dependabot alerts API,
+  # the code-scanning API IS reachable with the workflow token.
+  security-events: write
 
 jobs:
   pin-watch:
