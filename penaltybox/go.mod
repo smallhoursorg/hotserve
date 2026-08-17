@@ -3,7 +3,7 @@ module github.com/smallhoursorg/hotserve/penaltybox
 // The Go toolchain is pinned by the container images in
 // docker-compose.yml (golang:1.26 for tests, caddy:2.11.4-builder for
 // xcaddy builds) — no toolchain directive needed here.
-go 1.25.1
+go 1.26.1
 
 require (
 	github.com/caddyserver/caddy/v2 v2.11.4
