@@ -35,6 +35,16 @@ jobs:
       - run: make package VERSION="${GITHUB_REF_NAME#v}"
       - run: |
           cp build/hotserve-linux-* dist/
+          # GitHub mangles "~" in asset filenames to "." — so rename
+          # prerelease packages (0.0.1~rc1 -> 0.0.1.rc1) BEFORE
+          # checksumming, or checksums.txt records names that do not
+          # match what GitHub serves and sha256sum -c fails. Filename
+          # only: the version inside the package metadata keeps the
+          # dpkg-correct ~rc1 (which sorts BEFORE the real release —
+          # that is where apt actually reads it). "." is what GitHub
+          # would render anyway; never "_", which is the deb filename
+          # field separator.
+          for f in dist/*~*; do [ -e "$f" ] && mv "$f" "${f//\~/.}"; done
           cd dist && sha256sum -- * > checksums.txt
       - env:
           GH_TOKEN: ${{ github.token }}
