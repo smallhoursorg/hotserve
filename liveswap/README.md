@@ -69,7 +69,7 @@ COPY --from=builder /usr/bin/caddy /usr/bin/caddy
 	liveswap {
 		# root /var/lib/liveswap                # where releases/state live (default)
 		webhook_secret {env.LIVESWAP_SECRET}    # default secret for all apps
-		# allowed_artifact_hosts github.com objects.githubusercontent.com
+		artifact_allowlist github.com/your-org/ # required: where artifacts may come from
 		# allow_insecure_http                  # permit http:// artifact URLs (off by default)
 
 		app blog {                             # a Node.js app
@@ -137,7 +137,7 @@ resolved at config load.
 | `root` | `/var/lib/liveswap` | Releases, shared data, state per app |
 | `webhook_secret` | — (required) | Shared secret; global default or per app |
 | `allow_insecure_http` | off | Permit plain-http artifact URLs |
-| `allowed_artifact_hosts` | any | Restrict artifact URL hostnames. First hop only, by design — GitHub asset URLs redirect to S3; every hop must still be https unless `allow_insecure_http` |
+| `artifact_allowlist` | — (required) | Where artifacts may be fetched from. Entries are a host (`artifacts.corp`) or a host + path prefix (`github.com/your-org/`). Pin the path on multi-tenant hosts — a bare `github.com` admits anyone's artifacts. First hop only, by design (GitHub asset URLs redirect to S3); every hop must still be https unless `allow_insecure_http`. Apps may override |
 | `command` | — (required) | argv to start the app, CWD = release dir |
 | `pre_start` | — | Run-to-completion hook; failure aborts deploy |
 | `env`, `env_file` | — | Extra environment |

@@ -28,6 +28,7 @@
 	liveswap {
 		root /var/lib/liveswap
 		allow_insecure_http
+		artifact_allowlist e2e-artifacts
 		webhook_secret {env.LIVESWAP_SECRET}
 
 		app demo {
