@@ -182,6 +182,7 @@ func FuzzPinnedURL(f *testing.F) {
 		"https://artifacts.corp/x?X-Amz-Signature=abc&X-Amz-Date=1",
 		"https://github.com/smallhoursorg/x?sig=a b",
 		"https://github.com/smallhoursorg/x?sig=%zz",
+		"https://github.com/smallhoursorg/x?sig=ok;p=2",
 		"https://github.com@evil.com/smallhoursorg/x",
 		"https://github.com/smallhoursorg/a%2fb%00c",
 		"http://artifacts.corp:9/x//y",
@@ -259,14 +260,19 @@ func TestMatchAllowlistQuery(t *testing.T) {
 		"https://bucket.s3.corp/releases/a.tgz?X-Amz-Signature=abc&versionId=9":  false,
 		// values: never re-encoded, but bytes must be RFC 3986 query
 		// characters — anything outside would hit the request line raw
-		"https://gitlab.corp/api/v4/projects/42/download?job=a%2Fb%20c":       true,  // escapes pass through
-		"https://gitlab.corp/api/v4/projects/42/download?job=a!$'()*+,;:@/?b": true,  // sub-delims + extra pchars
-		"https://gitlab.corp/api/v4/projects/42/download?job=a b":             false, // raw space
-		"https://gitlab.corp/api/v4/projects/42/download?job=a\"b":            false, // raw quote
-		"https://gitlab.corp/api/v4/projects/42/download?job=<a>":             false,
-		"https://gitlab.corp/api/v4/projects/42/download?job=a|b":             false,
-		"https://gitlab.corp/api/v4/projects/42/download?job=a\\b":            false, // raw backslash
-		"https://gitlab.corp/api/v4/projects/42/download?job=caf\u00e9":       false, // non-ASCII
+		"https://gitlab.corp/api/v4/projects/42/download?job=a%2Fb%20c":      true,  // escapes pass through
+		"https://gitlab.corp/api/v4/projects/42/download?job=a!$'()*+,:@/?b": true,  // sub-delims + extra pchars
+		"https://gitlab.corp/api/v4/projects/42/download?job=a b":            false, // raw space
+		"https://gitlab.corp/api/v4/projects/42/download?job=a\"b":           false, // raw quote
+		"https://gitlab.corp/api/v4/projects/42/download?job=<a>":            false,
+		"https://gitlab.corp/api/v4/projects/42/download?job=a|b":            false,
+		"https://gitlab.corp/api/v4/projects/42/download?job=a\\b":           false, // raw backslash
+		"https://gitlab.corp/api/v4/projects/42/download?job=caf\u00e9":      false, // non-ASCII
+		// semicolon-separator differential: some servers split on ";"
+		// too, so a raw semicolon would smuggle an undeclared name
+		"https://gitlab.corp/api/v4/projects/42/download?job=ok;p=2":   false,
+		"https://gitlab.corp/api/v4/projects/42/download?job=ok%3Bp=2": true, // encoded is unambiguous
+		"https://gitlab.corp/api/v4/projects/42/download?job;p=2":      false,
 	} {
 		u, err := url.Parse(rawURL)
 		if err != nil {

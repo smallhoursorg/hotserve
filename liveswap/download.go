@@ -83,11 +83,13 @@ func downloadArtifact(ctx context.Context, opts downloadOpts) (string, error) {
 
 	resp, err := opts.client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("download %s: %w", redactURL(u), err)
+		// req.URL, not u: report the pinned URL the request actually
+		// went to (host casing comes from config, not the payload).
+		return "", fmt.Errorf("download %s: %w", redactURL(req.URL), err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return "", fmt.Errorf("download %s: HTTP %d", redactURL(u), resp.StatusCode)
+		return "", fmt.Errorf("download %s: HTTP %d", redactURL(req.URL), resp.StatusCode)
 	}
 	if resp.ContentLength > opts.maxBytes {
 		return "", fmt.Errorf("artifact too large: %d bytes (max %d)", resp.ContentLength, opts.maxBytes)

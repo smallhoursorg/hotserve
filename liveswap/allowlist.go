@@ -216,7 +216,18 @@ func (e artifactAllowEntry) vetQuery(rawQuery string) error {
 	if rawQuery == "" {
 		return nil
 	}
-	// Character allowlist first: every byte must be an RFC 3986 query
+	// Semicolons are legal RFC 3986 query bytes but ambiguous
+	// separators: some servers split parameters on ";" as well as "&"
+	// (the pre-2014 W3C recommendation; PHP's arg_separator.input), so
+	// "?job=ok;p=2" reads here as one declared parameter while such a
+	// server sees the undeclared name "p" — a parser differential that
+	// would smuggle a routing-capable name past the gate. Go's own
+	// url.ParseQuery rejects semicolons for the same reason. Refuse
+	// the ambiguity rather than resolve it.
+	if i := strings.IndexByte(rawQuery, ';'); i >= 0 {
+		return fmt.Errorf("query string contains a raw semicolon at byte %d, which some servers treat as a parameter separator; percent-encode it (%%3B)", i)
+	}
+	// Character allowlist: every byte must be an RFC 3986 query
 	// character. Legitimate URLs are properly encoded by definition —
 	// presigned and API URLs never carry raw spaces or quotes — so
 	// this refuses only URLs that were already broken, and it is the

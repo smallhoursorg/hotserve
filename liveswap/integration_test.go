@@ -346,8 +346,8 @@ func TestIntegrationDeployLifecycle(t *testing.T) {
 	})
 
 	t.Run("un-allowed query parameter is a 422 that names the parameter", func(t *testing.T) {
-		// The config's entry is bare "127.0.0.1" — it declares no query
-		// parameters, so ?p=2 must be refused before any request leaves
+		// The config's entry is "127.0.0.1:*" — any port, but it
+		// declares no query parameters, so ?p=2 must be refused before any request leaves
 		// the box, as a 422 whose body tells the CI author exactly what
 		// tripped and how the entry would declare it.
 		resp, body := postDeploy(t, artifactSrv.URL+"/demo-v1.tar.gz?p=2", "v5")
