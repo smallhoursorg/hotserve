@@ -1,9 +1,11 @@
-# nfpm packaging definition — one file for both .deb and .apk, run once
+# nfpm packaging definition — currently .deb only, run once
 # per arch × format by `make package`. Env: NFPM_ARCH, NFPM_VERSION.
 #
-# The .apk note: Alpine runs OpenRC, so the shipped systemd unit is
-# inert there; an OpenRC init script arrives with the hosted APT/APK
-# repository phase.
+# No .apk: Alpine runs OpenRC, so the shipped systemd unit would be
+# inert there — a package that installs but starts nothing. The .apk
+# returns with an OpenRC script and an Alpine install-test lane in the
+# hosted APT/APK repository phase; Alpine users take the raw-binary
+# tarball path meanwhile (documented in the README).
 name: hotserve
 arch: "${NFPM_ARCH}"
 platform: linux

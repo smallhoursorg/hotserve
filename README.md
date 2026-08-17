@@ -21,7 +21,7 @@ Built in:
 
 ## Install
 
-Grab the `.deb` or `.apk` for your architecture from
+Grab the `.deb` for your architecture from
 [releases](https://github.com/smallhoursorg/hotserve/releases):
 
 ```sh
@@ -142,7 +142,7 @@ make secretscan        # gitleaks full-history secret scan (same image as the CI
 make fuzz              # fuzz the untrusted-input surfaces (FUZZTIME=2m per target)
 make soak              # ~20min leak hunt: deploy/reload churn, goroutine/fd assertions
 make build             # cross-compile linux amd64/arm64
-make package           # .deb/.apk via nfpm
+make package           # .deb via nfpm
 make install-test      # install the .deb under real systemd (DISTRO=debian:12 etc.)
 ```
 
@@ -201,7 +201,7 @@ contains everything.
 
 Build and CI tooling never ships to users and is pinned by image tag
 in `docker-compose.yml`: `golang` (toolchain), `golangci-lint`,
-`nfpm` (deb/apk packaging), `curl` (e2e runner). GitHub Actions are
+`nfpm` (deb packaging), `curl` (e2e runner). GitHub Actions are
 pinned to commit SHAs.
 
 What keeps this honest: `govulncheck` gates every PR and runs weekly

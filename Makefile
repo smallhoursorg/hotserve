@@ -10,7 +10,7 @@ MODULES ?= . liveswap penaltybox
 PKGS = ./... ./liveswap/... ./penaltybox/...
 
 # Release version: the tag when present (release.yml passes it in),
-# else a digit-leading dev placeholder that deb/apk version rules accept.
+# else a digit-leading dev placeholder that deb version rules accept.
 VERSION ?= $(shell (git describe --tags --exact-match 2>/dev/null || echo v0.0.0-dev) | sed 's/^v//')
 
 # Distro image for the package install smoke test (install-test).
@@ -85,14 +85,17 @@ build:
 		wait $$p1 || exit 1; wait $$p2 || exit 1; \
 		chmod -R a+rwX build'
 
-# Builds .deb and .apk for both arches into dist/. The packages carry
+# Builds .deb for both arches into dist/. (.apk dropped until it can
+# ship a working OpenRC service and an Alpine install-test lane — a
+# package that installs but starts nothing is worse than the raw
+# tarball; returns with the hosted-repo phase.) The packages carry
 # the systemd unit, the starter /etc/hotserve/Caddyfile and the data
 # dirs; postinstall creates the hotserve system user.
 package: build
 	mkdir -p dist
 	for a in amd64 arm64; do \
 		cp build/hotserve-linux-$$a build/hotserve; \
-		for f in deb apk; do \
+		for f in deb; do \
 			$(COMPOSE) run --rm -e NFPM_ARCH=$$a -e NFPM_VERSION=$(VERSION) nfpm \
 				package -f packaging/nfpm.yaml -p $$f -t dist/ || exit 1; \
 		done; \
