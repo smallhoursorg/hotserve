@@ -59,3 +59,44 @@ alert_dismissals:
       never uses ext.NativeTypes, and CEL expressions are operator
       config, not request input. Evidence + exit condition versioned
       in .github/pin-watch.yml (cel-go watch).
+
+# Code-scanning (CodeQL) triage as code, same contract as above: alerts
+# matching rule + file are auto-dismissed by the pin-watch workflow, so
+# the dismissal is PR-reviewed and its evidence versioned. Keyed on
+# rule + path (never the alert number — numbers change when refactors
+# re-detect the same flow). `expect` caps how many open alerts one
+# entry may dismiss: more matches than expected means a NEW flow
+# appeared in that file, and the workflow refuses to dismiss and opens
+# an issue instead. reason must be one of GitHub's values:
+#   false positive | won't fix | used in tests
+# Uses the workflow's own GITHUB_TOKEN (security-events: write IS
+# grantable, unlike the Dependabot alerts API).
+
+code_scanning_dismissals:
+  - rule: go/request-forgery
+    path: liveswap/download.go
+    expect: 1
+    reason: won't fix
+    # Permanent by design — the flagged dataflow is the artifact path
+    # suffix, which IS payload input: a deploy webhook whose caller
+    # cannot name the artifact is not a deploy webhook. What the rule
+    # implies (payload steering the request's destination) is closed
+    # structurally: scheme constant; host, port and tenant prefix are
+    # the allowlist entry's own config bytes (no wildcards); the path
+    # suffix passes canonicalEscapedPath (dot segments in any spelling,
+    # encoded/doubled slashes, backslashes, overlong UTF-8, control
+    # bytes all refused); query parameter names must be entry-declared
+    # and query bytes RFC 3986-only; userinfo/fragment structurally
+    # absent; https enforced per redirect hop. All of it re-enforced
+    # inside pinnedURLString independently of the matcher, and fuzzed
+    # with reparse invariants. CodeQL cannot see this because its
+    # path-position sanitizer requires a compile-time-constant host,
+    # and a config-driven host is the feature. Full trace reviewed
+    # 2026-08-17 (PR #19). Revisit if liveswap/download.go grows a
+    # second request site (expect: 1 will refuse and open an issue).
+    comment: >-
+      Accepted by design: the flow is the artifact path suffix inside a
+      config-pinned tenant. Host/port/prefix are allowlist config bytes
+      (pinnedURLString); suffix and query are gated by
+      canonicalEscapedPath/vetQuery, builder-enforced and fuzzed.
+      Evidence: .github/pin-watch.yml
