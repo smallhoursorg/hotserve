@@ -13,6 +13,22 @@ import (
 	"testing"
 )
 
+// entryFor derives the literal allowlist entry covering rawURL —
+// host plus the exact port. There is no port wildcard, so tests
+// declare the httptest server's real port the same way an operator
+// declares a known port.
+func entryFor(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "127.0.0.1"
+	}
+	entry := u.Hostname()
+	if p := u.Port(); p != "" {
+		entry += ":" + p
+	}
+	return entry
+}
+
 func testDownloadOpts(t *testing.T, rawURL string) downloadOpts {
 	t.Helper()
 	return downloadOpts{
@@ -20,7 +36,7 @@ func testDownloadOpts(t *testing.T, rawURL string) downloadOpts {
 		destDir:       t.TempDir(),
 		maxBytes:      1024,
 		allowInsecure: true, // httptest servers are plain http
-		allowlist:     mustAllowlist(t, "127.0.0.1:*"),
+		allowlist:     mustAllowlist(t, entryFor(rawURL)),
 		client:        &http.Client{},
 	}
 }
@@ -148,7 +164,7 @@ func TestDownloadArtifactHostAllowlist(t *testing.T) {
 		t.Fatalf("want allowlist error, got %v", err)
 	}
 
-	opts.allowlist = mustAllowlist(t, "github.com/smallhoursorg/", "127.0.0.1:*")
+	opts.allowlist = mustAllowlist(t, "github.com/smallhoursorg/", entryFor(srv.URL))
 	if _, err := downloadArtifact(context.Background(), opts); err != nil {
 		t.Fatalf("allowlisted host rejected: %v", err)
 	}
@@ -232,7 +248,7 @@ func TestDownloadRejectsUnallowedQueryParam(t *testing.T) {
 	}
 
 	// Declaring the names in the entry admits the same URL.
-	opts.allowlist = mustAllowlist(t, "127.0.0.1:*?p&token")
+	opts.allowlist = mustAllowlist(t, entryFor(srv.URL)+"?p&token")
 	if _, err := downloadArtifact(context.Background(), opts); err != nil {
 		t.Fatalf("declared params should admit: %v", err)
 	}
@@ -278,7 +294,7 @@ func TestDownloadRefusesHTTPSToHTTPDowngrade(t *testing.T) {
 		url:       tlsSrv.URL + "/artifact.tar.gz",
 		destDir:   t.TempDir(),
 		maxBytes:  1 << 20,
-		allowlist: mustAllowlist(t, "127.0.0.1:*"),
+		allowlist: mustAllowlist(t, entryFor(tlsSrv.URL)),
 		client:    client,
 	})
 	if err == nil || !strings.Contains(err.Error(), "downgrades") {
@@ -311,7 +327,7 @@ func TestDownloadAllowsDowngradeWhenInsecureAllowed(t *testing.T) {
 		destDir:       t.TempDir(),
 		maxBytes:      1 << 20,
 		allowInsecure: true,
-		allowlist:     mustAllowlist(t, "127.0.0.1:*"),
+		allowlist:     mustAllowlist(t, entryFor(tlsSrv.URL)),
 		client:        client,
 	})
 	if err != nil {

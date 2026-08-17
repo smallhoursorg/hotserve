@@ -21,8 +21,8 @@ func TestParseAllowlistEntry(t *testing.T) {
 		"github.com:8443/org":        false, // declared port pin
 		"github.com/org%2f":          true,  // entries are literal bytes only
 		// port declarations
-		"artifacts.corp:*":    false, // any port (loopback/dev)
-		"127.0.0.1:*?p":       false, // wildcard port + query decl
+		"artifacts.corp:*":    true,  // wildcards removed — declare the literal port
+		"127.0.0.1:8200?p":    false, // literal port + query decl
 		"pinned.corp:8443/a/": false,
 		"github.com:":         true, // dangling colon
 		"github.com:0":        true,
@@ -107,7 +107,7 @@ func TestMatchAllowlist(t *testing.T) {
 // The constructed URL is asserted byte-for-byte: everything before
 // the input's suffix must be constants and the entry's config bytes.
 func TestPinnedURLString(t *testing.T) {
-	entries := mustAllowlist(t, "github.com/smallhoursorg/?sig", "artifacts.corp:*?x", "pinned.corp:8443")
+	entries := mustAllowlist(t, "github.com/smallhoursorg/?sig", "artifacts.corp?x", "ports.corp:8443?x")
 
 	for rawURL, want := range map[string]string{
 		// host case comes from config, not from the caller
@@ -116,11 +116,10 @@ func TestPinnedURLString(t *testing.T) {
 		"https://github.com/smallhoursorg": "https://github.com/smallhoursorg",
 		// query survives (signed URLs), fragment and userinfo do not
 		"https://leak:hunter2@github.com/smallhoursorg/a.tgz?sig=abc#frag": "https://github.com/smallhoursorg/a.tgz?sig=abc",
-		// under a declared :* the input port rides along; encoding
-		// in the suffix is preserved literally, never re-encoded
-		"https://ARTIFACTS.CORP:8443/dir/a%20b.tgz?x=1": "https://artifacts.corp:8443/dir/a%20b.tgz?x=1",
-		// a declared port is emitted from the entry's own config bytes
-		"https://PINNED.CORP:8443/a.tgz": "https://pinned.corp:8443/a.tgz",
+		// encoding in the suffix is preserved literally, never
+		// re-encoded; a declared port is the entry's own config bytes
+		"https://ARTIFACTS.CORP/dir/a%20b.tgz?x=1": "https://artifacts.corp/dir/a%20b.tgz?x=1",
+		"https://PORTS.CORP:8443/a.tgz?x=1":        "https://ports.corp:8443/a.tgz?x=1",
 		// http passes through only as the literal alternative arm
 		"http://artifacts.corp/a.tgz": "http://artifacts.corp/a.tgz",
 	} {
@@ -186,6 +185,8 @@ func FuzzPinnedURL(f *testing.F) {
 		"https://github.com@evil.com/smallhoursorg/x",
 		"https://github.com/smallhoursorg/a%2fb%00c",
 		"http://artifacts.corp:9/x//y",
+		"https://ports.corp:8443/x?X-Amz-Date=1",
+		"https://ports.corp:9/x",
 	} {
 		f.Add(s)
 	}
@@ -196,7 +197,8 @@ func FuzzPinnedURL(f *testing.F) {
 		}
 		entries := []artifactAllowEntry{
 			{host: "github.com", pathPrefix: "/smallhoursorg/", queryParams: []string{"sig"}},
-			{host: "artifacts.corp", port: "*", queryParams: []string{"X-Amz-*"}},
+			{host: "artifacts.corp", queryParams: []string{"X-Amz-*"}},
+			{host: "ports.corp", port: "8443", queryParams: []string{"X-Amz-*"}},
 		}
 		entry, ep, err := matchAllowlist(entries, u)
 		if err != nil {
@@ -341,7 +343,7 @@ func TestPinnedURLStringRefusesUnvettedQuery(t *testing.T) {
 // the scheme default unless it declares a port, or :* for the
 // loopback/dev case where test servers bind randomly.
 func TestMatchAllowlistPort(t *testing.T) {
-	entries := mustAllowlist(t, "plain.corp/dl/", "pinned.corp:8443", "any.corp:*")
+	entries := mustAllowlist(t, "plain.corp/dl/", "pinned.corp:8443")
 
 	for rawURL, wantAdmitted := range map[string]bool{
 		"https://plain.corp/dl/a.tgz":      true,
@@ -350,8 +352,6 @@ func TestMatchAllowlistPort(t *testing.T) {
 		"https://pinned.corp:8443/a.tgz":   true,
 		"https://pinned.corp/a.tgz":        false, // pin means exactly that port
 		"https://pinned.corp:9/a.tgz":      false,
-		"https://any.corp:31337/a.tgz":     true,
-		"https://any.corp/a.tgz":           true, // wildcard includes the default
 	} {
 		u, err := url.Parse(rawURL)
 		if err != nil {

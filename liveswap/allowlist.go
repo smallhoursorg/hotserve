@@ -19,11 +19,12 @@ type artifactAllowEntry struct {
 	pathPrefix string // "" = any path; else cleaned, "/"-wrapped
 	// port pins which port on the host may be fetched from: "" admits
 	// only the scheme default (no explicit port in the URL), a number
-	// admits exactly that port, and "*" admits any (loopback/dev,
-	// where test servers bind randomly). Closed by default for the
-	// same reason as the path and query: the port selects which
-	// SERVICE on the host answers, and that choice belongs to the
-	// operator, not the webhook payload.
+	// admits exactly that port. No wildcard — every admissible port is
+	// a literal declaration, so the outgoing URL's host:port is always
+	// the entry's own config bytes. Closed by default for the same
+	// reason as the path and query: the port selects which SERVICE on
+	// the host answers, and that choice belongs to the operator, not
+	// the webhook payload.
 	port string
 	// queryParams are the query parameter NAMES this entry vouches
 	// for, closed by default: an entry that declares none admits no
@@ -91,11 +92,13 @@ func parseAllowlistEntry(s string) (artifactAllowEntry, error) {
 }
 
 // validPortDecl vets a declared port: a literal port number the
-// input URL must match byte-for-byte, or * to admit any port (for
-// loopback and test hosts where servers bind randomly).
+// input URL must match byte-for-byte. There is deliberately no
+// wildcard — even dev/test flows know their port before they write
+// their config, and a literal declaration keeps the constructed
+// URL's host:port pure config bytes.
 func validPortDecl(port string) error {
 	if port == "*" {
-		return nil
+		return fmt.Errorf("port wildcards are not supported; declare the literal port (e.g. :8443)")
 	}
 	if port == "" {
 		return fmt.Errorf("dangling colon — declare a port number (e.g. :8443), :* for any, or drop the colon")
@@ -122,14 +125,7 @@ func validPortDecl(port string) error {
 // spells the default out and literal comparison is the fail-closed
 // direction.
 func (e artifactAllowEntry) portAllowed(u *url.URL) bool {
-	switch e.port {
-	case "*":
-		return true
-	case "":
-		return u.Port() == ""
-	default:
-		return u.Port() == e.port
-	}
+	return u.Port() == e.port
 }
 
 // validQueryParamDecl vets one declared parameter name: unreserved
@@ -377,25 +373,26 @@ func (e artifactAllowEntry) pinnedURLString(u *url.URL, escapedPath string) (str
 	if u.Scheme == "http" { // both arms are literals; vetted upstream
 		scheme = "http"
 	}
-	host := e.host
-	switch e.port {
-	case "*":
-		if p := u.Port(); p != "" {
-			host += ":" + p
-		}
-	case "":
-		// Self-defense, like the path boundary and query re-vet: an
-		// entry that pins the default port must never emit another.
-		if u.Port() != "" {
-			return "", fmt.Errorf("internal: url port %q was not admitted by entry %q", u.Port(), e.String())
-		}
-	default:
-		host += ":" + e.port // the config's own bytes
+	// Self-defense, like the boundary and query guards below: the
+	// builder emits only the entry's own port declaration, so a URL
+	// port the matcher did not admit can never reach the wire even if
+	// a future caller skips matchAllowlist.
+	if !e.portAllowed(u) {
+		return "", fmt.Errorf("internal: url port %q was not admitted by entry %q", u.Port(), e.String())
 	}
-	var b strings.Builder
-	b.WriteString(scheme)
-	b.WriteString("://")
-	b.WriteString(host)
+	hostport := e.host
+	if e.port != "" {
+		hostport += ":" + e.port // the config's own bytes
+	}
+	query := ""
+	if u.RawQuery != "" {
+		// The builder re-vets the query itself, so an unvetted query
+		// can never be emitted even if the matcher was bypassed.
+		if err := e.vetQuery(u.RawQuery); err != nil {
+			return "", fmt.Errorf("internal: %w", err)
+		}
+		query = "?" + u.RawQuery
+	}
 	if e.pathPrefix != "" {
 		cfg := strings.TrimSuffix(e.pathPrefix, "/")
 		suffix := strings.TrimPrefix(escapedPath, cfg)
@@ -409,22 +406,19 @@ func (e artifactAllowEntry) pinnedURLString(u *url.URL, escapedPath string) (str
 		if suffix != "" && !strings.HasPrefix(suffix, "/") {
 			return "", fmt.Errorf("internal: path %q does not sit on the pinned prefix boundary %q", escapedPath, e.pathPrefix)
 		}
-		b.WriteString(cfg)    // the config's own bytes
-		b.WriteString(suffix) // the input's suffix: "" or "/..."
-	} else {
-		b.WriteString(escapedPath)
+		// One plain concatenation, provenance left to right: constant
+		// scheme, config host:port, config prefix (its own leading "/"
+		// keeps everything after it in path position), then the vetted
+		// input suffix and query.
+		return scheme + "://" + hostport + cfg + suffix + query, nil
 	}
-	if u.RawQuery != "" {
-		// Same self-defense as the path boundary above: the builder
-		// re-vets the query itself, so an unvetted query can never be
-		// emitted even if a future caller skips the matcher.
-		if err := e.vetQuery(u.RawQuery); err != nil {
-			return "", fmt.Errorf("internal: %w", err)
-		}
-		b.WriteString("?")
-		b.WriteString(u.RawQuery)
+	if escapedPath == "" {
+		return scheme + "://" + hostport + query, nil
 	}
-	return b.String(), nil
+	// escapedPath is rooted (canonicalEscapedPath enforces it), so the
+	// literal "/" reconstructs it byte-identically while making the
+	// path position explicit in the concatenation itself.
+	return scheme + "://" + hostport + "/" + escapedPath[1:] + query, nil
 }
 
 // describeAllowlist renders the entries for error messages.
