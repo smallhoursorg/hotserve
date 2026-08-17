@@ -44,7 +44,9 @@ Concept map from the Nomad-era stack:
   app; other apps' deploys proceed independently.
 - Artifact downloads MUST enforce `max_artifact_size` both via
   Content-Length and the streamed byte count, MUST default to https
-  only, and MUST honor `allowed_artifact_hosts` when set.
+  only (enforced on every redirect hop), and MUST match the required
+  `artifact_allowlist` — host, or host + path prefix on multi-tenant
+  hosts, first hop only.
 - Extraction MUST reject: absolute paths, `..` traversal, symlink and
   hardlink targets resolving outside the archive root, special files
   (devices/FIFOs), setuid/setgid bits, and decompressed content beyond
@@ -179,7 +181,12 @@ reloads (the common operation) are unaffected.
 - Apps bind 127.0.0.1 only; `PORT`/`HOST` are injected.
 - `Authorization` is dropped by Go's HTTP client on cross-host
   redirects — exactly right for GitHub's asset→S3 redirect.
-- Optional `allowed_artifact_hosts` closes "deploy from anywhere".
+- `artifact_allowlist` is required — there is no "deploy from
+  anywhere" mode. Host+path entries pin the tenant on shared hosts
+  (a bare `github.com` would admit anyone's artifacts), and the
+  request host is rebuilt from the config's own string after the
+  match, so the attacker-steerable part of a deploy URL is a path
+  suffix under an operator-pinned origin.
 - Nothing secret is logged: URL query strings are redacted, provided
   secrets are never echoed.
 

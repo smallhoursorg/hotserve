@@ -81,7 +81,7 @@ type appSpec struct {
 	keep            int
 	maxArtifactSize int64
 	allowInsecure   bool
-	allowedHosts    map[string]struct{}
+	allowlist       []artifactAllowEntry
 	dirs            appDirs
 }
 

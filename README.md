@@ -42,6 +42,7 @@ repositories with automatic updates are on the roadmap.)
 {
 	liveswap {
 		webhook_secret {env.LIVESWAP_SECRET}
+		artifact_allowlist github.com/your-org/   # required: pin artifact origins
 
 		app myapp {
 			command node server.js          # runs in the release dir, PORT injected

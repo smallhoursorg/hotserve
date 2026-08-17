@@ -14,7 +14,7 @@ func TestCaddyfileUnmarshalFullConfig(t *testing.T) {
 		root /srv/liveswap
 		webhook_secret {env.LIVESWAP_SECRET}
 		allow_insecure_http
-		allowed_artifact_hosts github.com objects.githubusercontent.com
+		artifact_allowlist github.com/smallhoursorg/ artifacts.corp
 
 		app blog {
 			command node server.js
@@ -46,8 +46,8 @@ func TestCaddyfileUnmarshalFullConfig(t *testing.T) {
 	if a.Root != "/srv/liveswap" || a.WebhookSecret != "{env.LIVESWAP_SECRET}" || !a.AllowInsecureHTTP {
 		t.Fatalf("globals wrong: %+v", a)
 	}
-	if len(a.AllowedArtifactHosts) != 2 {
-		t.Fatalf("allowed hosts: %v", a.AllowedArtifactHosts)
+	if len(a.ArtifactAllowlist) != 2 {
+		t.Fatalf("artifact allowlist: %v", a.ArtifactAllowlist)
 	}
 
 	blog := a.Apps["blog"]
@@ -161,5 +161,16 @@ func TestCaddyfileDynamicUpstreams(t *testing.T) {
 	}
 	if err := new(Upstreams).UnmarshalCaddyfile(caddyfile.NewTestDispenser("liveswap a b")); err == nil {
 		t.Fatal("expected error for extra argument")
+	}
+}
+
+func TestCaddyfileOldAllowlistDirectiveIsHelpful(t *testing.T) {
+	d := caddyfile.NewTestDispenser(`liveswap {
+		allowed_artifact_hosts github.com
+	}`)
+	a := new(App)
+	err := a.UnmarshalCaddyfile(d)
+	if err == nil || !strings.Contains(err.Error(), "artifact_allowlist") {
+		t.Fatalf("want rename hint, got %v", err)
 	}
 }

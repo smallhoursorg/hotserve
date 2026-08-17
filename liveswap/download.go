@@ -17,8 +17,8 @@ type downloadOpts struct {
 	authHeader    string // full Authorization value ("Bearer x", "token y"); optional
 	destDir       string // staging dir (the app's tmp/); created if missing
 	maxBytes      int64
-	allowInsecure bool                // permit plain http URLs
-	allowedHosts  map[string]struct{} // empty = any host
+	allowInsecure bool                 // permit plain http URLs
+	allowlist     []artifactAllowEntry // required; no any-origin mode
 	client        *http.Client
 }
 
@@ -44,13 +44,22 @@ func downloadArtifact(ctx context.Context, opts downloadOpts) (string, error) {
 	default:
 		return "", fmt.Errorf("artifact url %s has unsupported scheme %q", redactURL(u), u.Scheme)
 	}
-	if len(opts.allowedHosts) > 0 {
-		if _, ok := opts.allowedHosts[u.Hostname()]; !ok {
-			return "", fmt.Errorf("artifact host %q is not in allowed_artifact_hosts", u.Hostname())
-		}
+	entry, ok := matchAllowlist(opts.allowlist, u)
+	if !ok {
+		return "", fmt.Errorf("artifact url %s is not covered by artifact_allowlist (%s)",
+			redactURL(u), describeAllowlist(opts.allowlist))
+	}
+	// Rebuild the request host from the allowlist entry's own string:
+	// the outgoing host is then config-sourced, not request-sourced —
+	// the attacker-steerable part of the URL shrinks to a path suffix
+	// under an operator-pinned origin. (Also canonicalizes case.)
+	if p := u.Port(); p != "" {
+		u.Host = entry.host + ":" + p
+	} else {
+		u.Host = entry.host
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, opts.url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return "", err
 	}
@@ -166,7 +175,7 @@ func (rf *releaseFetcher) fetch(ctx context.Context, spec *appSpec, req deployRe
 		destDir:       spec.dirs.tmp,
 		maxBytes:      spec.maxArtifactSize,
 		allowInsecure: spec.allowInsecure,
-		allowedHosts:  spec.allowedHosts,
+		allowlist:     spec.allowlist,
 		client:        rf.client,
 	})
 	if err != nil {

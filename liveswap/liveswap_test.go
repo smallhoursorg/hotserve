@@ -53,21 +53,28 @@ func TestApplyDefaultsKeepsExplicitValues(t *testing.T) {
 
 func TestBuildSpecTranslatesConfig(t *testing.T) {
 	a := &App{
-		Root:                 "/var/lib/liveswap",
-		AllowInsecureHTTP:    true,
-		AllowedArtifactHosts: []string{"github.com"},
+		Root:              "/var/lib/liveswap",
+		AllowInsecureHTTP: true,
+		ArtifactAllowlist: []string{"github.com/smallhoursorg/"},
+	}
+	var err error
+	if a.allowlist, err = parseAllowlist(a.ArtifactAllowlist); err != nil {
+		t.Fatal(err)
 	}
 	cfg := defaultedApp(t)
 	cfg.HealthPath = "off"
-	spec := a.buildSpec("blog", cfg)
+	spec, err := a.buildSpec("blog", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if spec.healthPath != "" {
 		t.Errorf("health_path off must become empty, got %q", spec.healthPath)
 	}
 	if !spec.allowInsecure {
 		t.Error("allowInsecure not carried over")
 	}
-	if _, ok := spec.allowedHosts["github.com"]; !ok {
-		t.Error("allowed hosts not carried over")
+	if len(spec.allowlist) != 1 || spec.allowlist[0].host != "github.com" || spec.allowlist[0].pathPrefix != "/smallhoursorg/" {
+		t.Errorf("allowlist not carried over: %+v", spec.allowlist)
 	}
 	if spec.dirs.releases != "/var/lib/liveswap/blog/releases" {
 		t.Errorf("dirs wrong: %+v", spec.dirs)
@@ -80,8 +87,9 @@ func TestBuildSpecTranslatesConfig(t *testing.T) {
 func TestValidate(t *testing.T) {
 	valid := func() *App {
 		return &App{
-			Root: "/var/lib/liveswap",
-			Apps: map[string]*AppConfig{"blog": defaultedApp(t)},
+			Root:              "/var/lib/liveswap",
+			ArtifactAllowlist: []string{"github.com/smallhoursorg/"},
+			Apps:              map[string]*AppConfig{"blog": defaultedApp(t)},
 		}
 	}
 	if err := valid().Validate(); err != nil {
@@ -102,6 +110,7 @@ func TestValidate(t *testing.T) {
 		{"negative soak", func(a *App) { a.Apps["blog"].Soak = caddy.Duration(-time.Second) }, "soak and drain"},
 		{"zero keep", func(a *App) { a.Apps["blog"].Keep = 0 }, "keep must be at least 1"},
 		{"zero size", func(a *App) { a.Apps["blog"].MaxArtifactSize = 0 }, "max_artifact_size must be positive"},
+		{"no allowlist anywhere", func(a *App) { a.ArtifactAllowlist = nil }, "artifact_allowlist is required"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -116,7 +125,7 @@ func TestValidate(t *testing.T) {
 }
 
 func TestHealthPathOffIsValid(t *testing.T) {
-	a := &App{Root: "/x", Apps: map[string]*AppConfig{"w": defaultedApp(t)}}
+	a := &App{Root: "/x", ArtifactAllowlist: []string{"h"}, Apps: map[string]*AppConfig{"w": defaultedApp(t)}}
 	a.Apps["w"].HealthPath = "off"
 	if err := a.Validate(); err != nil {
 		t.Fatalf("health_path off must validate: %v", err)

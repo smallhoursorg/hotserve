@@ -90,18 +90,25 @@ type App struct {
 	// Default false (https only). Exists for test rigs and LAN setups.
 	AllowInsecureHTTP bool `json:"allow_insecure_http,omitempty"`
 
-	// AllowedArtifactHosts, when non-empty, restricts artifact URLs to
-	// these hostnames. Default empty = any host.
-	AllowedArtifactHosts []string `json:"allowed_artifact_hosts,omitempty"`
+	// ArtifactAllowlist declares where artifacts may be fetched from —
+	// required: there is no "any origin" mode. Entries are host
+	// ("artifacts.corp", single-tenant) or host+path prefix
+	// ("github.com/your-org/"): on multi-tenant platforms the tenant
+	// lives in the path, so a host-only rule would admit anyone's
+	// artifacts. Governs the first hop only (GitHub asset URLs
+	// redirect to S3); every hop must still be https unless
+	// AllowInsecureHTTP. Apps may override.
+	ArtifactAllowlist []string `json:"artifact_allowlist,omitempty"`
 
 	// Apps defines the managed applications, keyed by name
 	// ([a-z0-9-]). The name is the webhook path segment and the
 	// argument to `dynamic liveswap <name>`.
 	Apps map[string]*AppConfig `json:"apps,omitempty"`
 
-	logger  *zap.Logger
-	managed map[string]*managedApp
-	pooled  []string // pool keys this config instance holds references to
+	logger    *zap.Logger
+	managed   map[string]*managedApp
+	pooled    []string // pool keys this config instance holds references to
+	allowlist []artifactAllowEntry
 }
 
 // AppConfig defines one managed application.
@@ -127,6 +134,10 @@ type AppConfig struct {
 
 	// WebhookSecret overrides the global default for this app.
 	WebhookSecret string `json:"webhook_secret,omitempty"`
+
+	// ArtifactAllowlist overrides the global allowlist for this app
+	// (same entry syntax; replaces, not appends).
+	ArtifactAllowlist []string `json:"artifact_allowlist,omitempty"`
 
 	// HealthPath is GET-probed on the new instance; 2xx = healthy.
 	// "off" disables HTTP probing (the gate becomes "process stays
@@ -185,8 +196,16 @@ func (a *App) Provision(ctx caddy.Context) error {
 	// placeholders ({version}, {port}, ...) untouched for app.go.
 	a.Root = repl.ReplaceKnown(a.Root, "")
 	a.WebhookSecret = repl.ReplaceKnown(a.WebhookSecret, "")
+	for i, e := range a.ArtifactAllowlist {
+		a.ArtifactAllowlist[i] = repl.ReplaceKnown(e, "")
+	}
 	if a.Root == "" {
 		a.Root = "/var/lib/liveswap"
+	}
+
+	var err error
+	if a.allowlist, err = parseAllowlist(a.ArtifactAllowlist); err != nil {
+		return err
 	}
 
 	clients := &fetchClients{
@@ -201,7 +220,10 @@ func (a *App) Provision(ctx caddy.Context) error {
 			a.Apps[name] = cfg
 		}
 		cfg.applyDefaults(repl, a.WebhookSecret)
-		spec := a.buildSpec(name, cfg)
+		spec, err := a.buildSpec(name, cfg)
+		if err != nil {
+			return err
+		}
 
 		val, _ := appPool.LoadOrStore(poolKey(name), newManagedApp(name))
 		ma := val.(*managedApp)
@@ -218,6 +240,9 @@ func (cfg *AppConfig) applyDefaults(repl *caddy.Replacer, defaultSecret string) 
 		cfg.WebhookSecret = defaultSecret
 	}
 	cfg.EnvFile = repl.ReplaceKnown(cfg.EnvFile, "")
+	for i, e := range cfg.ArtifactAllowlist {
+		cfg.ArtifactAllowlist[i] = repl.ReplaceKnown(e, "")
+	}
 	for i, arg := range cfg.Command {
 		cfg.Command[i] = repl.ReplaceKnown(arg, "")
 	}
@@ -256,16 +281,16 @@ func (cfg *AppConfig) applyDefaults(repl *caddy.Replacer, defaultSecret string) 
 	}
 }
 
-func (a *App) buildSpec(name string, cfg *AppConfig) *appSpec {
+func (a *App) buildSpec(name string, cfg *AppConfig) (*appSpec, error) {
 	healthPath := cfg.HealthPath
 	if healthPath == "off" {
 		healthPath = ""
 	}
-	var allowedHosts map[string]struct{}
-	if len(a.AllowedArtifactHosts) > 0 {
-		allowedHosts = make(map[string]struct{}, len(a.AllowedArtifactHosts))
-		for _, h := range a.AllowedArtifactHosts {
-			allowedHosts[h] = struct{}{}
+	allowlist := a.allowlist
+	if len(cfg.ArtifactAllowlist) > 0 {
+		var err error
+		if allowlist, err = parseAllowlist(cfg.ArtifactAllowlist); err != nil {
+			return nil, fmt.Errorf("app %s: %w", name, err)
 		}
 	}
 	return &appSpec{
@@ -285,9 +310,9 @@ func (a *App) buildSpec(name string, cfg *AppConfig) *appSpec {
 		keep:            cfg.Keep,
 		maxArtifactSize: cfg.MaxArtifactSize,
 		allowInsecure:   a.AllowInsecureHTTP,
-		allowedHosts:    allowedHosts,
+		allowlist:       allowlist,
 		dirs:            newAppDirs(a.Root, name),
-	}
+	}, nil
 }
 
 // Validate enforces semantic invariants (runs after Provision has
@@ -305,6 +330,13 @@ func (a *App) Validate() error {
 		}
 		if cfg.WebhookSecret == "" {
 			return fmt.Errorf("app %s: no webhook secret configured (set webhook_secret globally or per app; if it references {env.*}, the variable is empty)", name)
+		}
+		// Closed by default, deliberately without an "any origin"
+		// escape hatch: a deploy webhook that fetches from anywhere is
+		// an SSRF primitive, and on multi-tenant hosts anything short
+		// of a tenant pin is theater.
+		if len(a.ArtifactAllowlist) == 0 && len(cfg.ArtifactAllowlist) == 0 {
+			return fmt.Errorf("app %s: artifact_allowlist is required — declare where artifacts may be fetched from, e.g. `artifact_allowlist github.com/your-org/` (host-only entries suit single-tenant hosts)", name)
 		}
 		if cfg.HealthPath != "off" && !strings.HasPrefix(cfg.HealthPath, "/") {
 			return fmt.Errorf("app %s: health_path must start with / (or be \"off\"), got %q", name, cfg.HealthPath)

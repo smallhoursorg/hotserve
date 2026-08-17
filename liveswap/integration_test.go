@@ -112,6 +112,7 @@ func integrationConfig(root string) string {
 	liveswap {
 		root %s
 		allow_insecure_http
+		artifact_allowlist 127.0.0.1
 		webhook_secret itest-secret
 
 		app demo {

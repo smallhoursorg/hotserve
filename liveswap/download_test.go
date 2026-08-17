@@ -19,8 +19,18 @@ func testDownloadOpts(t *testing.T, rawURL string) downloadOpts {
 		destDir:       t.TempDir(),
 		maxBytes:      1024,
 		allowInsecure: true, // httptest servers are plain http
+		allowlist:     mustAllowlist(t, "127.0.0.1"),
 		client:        &http.Client{},
 	}
+}
+
+func mustAllowlist(t *testing.T, entries ...string) []artifactAllowEntry {
+	t.Helper()
+	parsed, err := parseAllowlist(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return parsed
 }
 
 func TestDownloadArtifactHappyPath(t *testing.T) {
@@ -73,13 +83,13 @@ func TestDownloadArtifactHostAllowlist(t *testing.T) {
 	defer srv.Close()
 
 	opts := testDownloadOpts(t, srv.URL+"/a.tgz")
-	opts.allowedHosts = map[string]struct{}{"github.com": {}}
+	opts.allowlist = mustAllowlist(t, "github.com/smallhoursorg/")
 	_, err := downloadArtifact(context.Background(), opts)
-	if err == nil || !strings.Contains(err.Error(), "allowed_artifact_hosts") {
+	if err == nil || !strings.Contains(err.Error(), "artifact_allowlist") {
 		t.Fatalf("want allowlist error, got %v", err)
 	}
 
-	opts.allowedHosts = map[string]struct{}{"127.0.0.1": {}}
+	opts.allowlist = mustAllowlist(t, "github.com/smallhoursorg/", "127.0.0.1")
 	if _, err := downloadArtifact(context.Background(), opts); err != nil {
 		t.Fatalf("allowlisted host rejected: %v", err)
 	}
@@ -165,10 +175,11 @@ func TestDownloadRefusesHTTPSToHTTPDowngrade(t *testing.T) {
 	client.Transport.(*http.Transport).TLSClientConfig = &tls.Config{RootCAs: pool}
 
 	_, err := downloadArtifact(context.Background(), downloadOpts{
-		url:      tlsSrv.URL + "/artifact.tar.gz",
-		destDir:  t.TempDir(),
-		maxBytes: 1 << 20,
-		client:   client,
+		url:       tlsSrv.URL + "/artifact.tar.gz",
+		destDir:   t.TempDir(),
+		maxBytes:  1 << 20,
+		allowlist: mustAllowlist(t, "127.0.0.1"),
+		client:    client,
 	})
 	if err == nil || !strings.Contains(err.Error(), "downgrades") {
 		t.Fatalf("want downgrade refusal, got %v", err)
@@ -200,6 +211,7 @@ func TestDownloadAllowsDowngradeWhenInsecureAllowed(t *testing.T) {
 		destDir:       t.TempDir(),
 		maxBytes:      1 << 20,
 		allowInsecure: true,
+		allowlist:     mustAllowlist(t, "127.0.0.1"),
 		client:        client,
 	})
 	if err != nil {

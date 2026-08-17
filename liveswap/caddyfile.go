@@ -45,13 +45,14 @@ func parseWebhookDirective(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler,
 //	    root                   <path>
 //	    webhook_secret         <secret>
 //	    allow_insecure_http
-//	    allowed_artifact_hosts <host...>
+//	    artifact_allowlist     <host[/path/]...>
 //	    app <name> {
 //	        command           <cmd> [args...]
 //	        pre_start         <cmd> [args...]
 //	        env               <KEY> <value>
 //	        env_file          <path>
 //	        webhook_secret    <secret>
+//	        artifact_allowlist <host[/path/]...>
 //	        health_path       <path|off>
 //	        health_interval   <duration>
 //	        health_timeout    <duration>
@@ -82,12 +83,14 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			a.WebhookSecret = d.Val()
 		case "allow_insecure_http":
 			a.AllowInsecureHTTP = true
-		case "allowed_artifact_hosts":
-			hosts := d.RemainingArgs()
-			if len(hosts) == 0 {
+		case "artifact_allowlist":
+			entries := d.RemainingArgs()
+			if len(entries) == 0 {
 				return d.ArgErr()
 			}
-			a.AllowedArtifactHosts = append(a.AllowedArtifactHosts, hosts...)
+			a.ArtifactAllowlist = append(a.ArtifactAllowlist, entries...)
+		case "allowed_artifact_hosts":
+			return d.Errf("allowed_artifact_hosts was replaced by artifact_allowlist; entries may now pin a path prefix (github.com/your-org/), which is the recommended form on multi-tenant hosts")
 		case "app":
 			if !d.NextArg() {
 				return d.ArgErr()
@@ -157,6 +160,13 @@ func (cfg *AppConfig) unmarshalBlock(d *caddyfile.Dispenser) error {
 				return d.ArgErr()
 			}
 			cfg.WebhookSecret = d.Val()
+		case "artifact_allowlist":
+			entries := d.RemainingArgs()
+			if len(entries) == 0 {
+				return d.ArgErr()
+			}
+			cfg.ArtifactAllowlist = append(cfg.ArtifactAllowlist, entries...)
+			continue
 		case "health_path":
 			if !d.NextArg() {
 				return d.ArgErr()
