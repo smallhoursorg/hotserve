@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"unicode/utf8"
 )
 
 // artifactAllowEntry is one parsed artifact_allowlist entry: a host,
@@ -184,8 +185,17 @@ func canonicalEscapedPath(u *url.URL) (string, error) {
 	if !strings.HasPrefix(ep, "/") {
 		return "", fmt.Errorf("path %q is not rooted", ep)
 	}
-	if strings.Contains(strings.ToLower(ep), "%2f") {
+	low := strings.ToLower(ep)
+	if strings.Contains(low, "%2f") {
 		return "", fmt.Errorf("path contains an encoded slash")
+	}
+	// Backslash is the other separator byte: origins that normalize
+	// "\" to "/" (IIS-style) would resolve "%5C..%5C" as a dot
+	// segment and escape the tenant prefix. A raw backslash cannot
+	// appear here — EscapedPath renders it as %5C — so this one check
+	// covers both spellings.
+	if strings.Contains(low, "%5c") {
+		return "", fmt.Errorf("path contains a backslash")
 	}
 	for _, seg := range strings.Split(ep[1:], "/") {
 		if seg == "" {
@@ -194,6 +204,23 @@ func canonicalEscapedPath(u *url.URL) (string, error) {
 		dec, err := url.PathUnescape(seg)
 		if err != nil || dec == "." || dec == ".." {
 			return "", fmt.Errorf("path has a dot segment")
+		}
+		// Lenient decoders are the enemy: PathUnescape accepts overlong
+		// sequences like %c0%af — invalid UTF-8 that IIS-era decoders
+		// read as "/" — and control bytes have no place in a filename.
+		// Segments are compared here as decoded strings, so any decoded
+		// byte that a sloppier origin could read differently must be
+		// refused rather than reasoned about.
+		if strings.ContainsRune(dec, '\\') {
+			return "", fmt.Errorf("path segment contains a backslash")
+		}
+		if !utf8.ValidString(dec) {
+			return "", fmt.Errorf("path segment does not decode to valid UTF-8")
+		}
+		for i := 0; i < len(dec); i++ {
+			if dec[i] < 0x20 || dec[i] == 0x7f {
+				return "", fmt.Errorf("path segment contains a control byte")
+			}
 		}
 	}
 	return ep, nil

@@ -84,7 +84,16 @@ func TestMatchAllowlist(t *testing.T) {
 		"https://github.com/smallhoursorg//x":               nonCanonical, // doubled slash
 		"https://github.com/smallhoursorg/x/":               nonCanonical, // trailing slash
 		"https://github.com/smallhoursorg/a%2fb":            nonCanonical, // encoded slash
-		"https://artifacts.corp/./x":                        nonCanonical,
+		// backslash: the other separator byte — IIS-style origins
+		// normalize \ to /, turning %5C..%5C into a dot segment
+		"https://github.com/smallhoursorg/%5C..%5Cetc/x": nonCanonical,
+		"https://github.com/smallhoursorg/a%5cb":         nonCanonical, // lowercase spelling
+		"https://github.com/smallhoursorg/a\\b":          nonCanonical, // raw backslash (EscapedPath renders %5C)
+		// lenient-decoder differentials: overlong UTF-8 and control bytes
+		"https://github.com/smallhoursorg/%c0%af.tgz":    nonCanonical, // overlong "/" (IIS-era traversal)
+		"https://github.com/smallhoursorg/a%00b.tgz":     nonCanonical, // control byte
+		"https://github.com/smallhoursorg/caf%C3%A9.tgz": admitted,     // real UTF-8 names stay legal
+		"https://artifacts.corp/./x":                     nonCanonical,
 	} {
 		u, err := url.Parse(rawURL)
 		if err != nil {
@@ -184,6 +193,8 @@ func FuzzPinnedURL(f *testing.F) {
 		"https://github.com/smallhoursorg/x?sig=ok;p=2",
 		"https://github.com@evil.com/smallhoursorg/x",
 		"https://github.com/smallhoursorg/a%2fb%00c",
+		"https://github.com/smallhoursorg/%5C..%5Cetc/x",
+		"https://github.com/smallhoursorg/%c0%af",
 		"http://artifacts.corp:9/x//y",
 		"https://ports.corp:8443/x?X-Amz-Date=1",
 		"https://ports.corp:9/x",
