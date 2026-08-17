@@ -108,7 +108,7 @@ cat > /etc/hotserve/Caddyfile <<'EOF'
 	liveswap {
 		root /var/lib/liveswap
 		allow_insecure_http
-		artifact_allowlist 127.0.0.1
+		artifact_allowlist 127.0.0.1:8200
 		webhook_secret {env.LIVESWAP_SECRET}
 
 		app demo {

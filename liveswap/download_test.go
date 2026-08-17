@@ -1,9 +1,10 @@
 package liveswap
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -12,6 +13,22 @@ import (
 	"testing"
 )
 
+// entryFor derives the literal allowlist entry covering rawURL —
+// host plus the exact port. There is no port wildcard, so tests
+// declare the httptest server's real port the same way an operator
+// declares a known port.
+func entryFor(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "127.0.0.1"
+	}
+	entry := u.Hostname()
+	if p := u.Port(); p != "" {
+		entry += ":" + p
+	}
+	return entry
+}
+
 func testDownloadOpts(t *testing.T, rawURL string) downloadOpts {
 	t.Helper()
 	return downloadOpts{
@@ -19,7 +36,7 @@ func testDownloadOpts(t *testing.T, rawURL string) downloadOpts {
 		destDir:       t.TempDir(),
 		maxBytes:      1024,
 		allowInsecure: true, // httptest servers are plain http
-		allowlist:     mustAllowlist(t, "127.0.0.1"),
+		allowlist:     mustAllowlist(t, entryFor(rawURL)),
 		client:        &http.Client{},
 	}
 }
@@ -76,6 +93,64 @@ func TestDownloadArtifactRejectsWeirdScheme(t *testing.T) {
 	}
 }
 
+// Every payload-caused refusal is a validationError, so the webhook
+// answers 422 with the reason — never a generic 500 the CI author
+// cannot act on.
+func TestDownloadPayloadRefusalsAreValidationErrors(t *testing.T) {
+	for name, rawURL := range map[string]string{
+		"unparseable url": "https://exa mple.com/x",
+		"weird scheme":    "ftp://example.com/a.tgz",
+		"plain http":      "http://example.com/a.tgz",
+		"not allowlisted": "https://evil.example/a.tgz",
+		"undeclared port": "https://127.0.0.1:1234/a.tgz",
+	} {
+		opts := testDownloadOpts(t, rawURL)
+		opts.allowInsecure = false
+		opts.allowlist = mustAllowlist(t, "127.0.0.1")
+		_, err := downloadArtifact(context.Background(), opts)
+		var vErr validationError
+		if err == nil || !errors.As(err, &vErr) {
+			t.Errorf("%s: want validationError, got %T: %v", name, err, err)
+		}
+	}
+}
+
+// Go's client drops Authorization when a redirect changes the host —
+// the GitHub -> S3 pattern depends on the credential NOT following the
+// redirect. That stdlib behavior is load-bearing for credential scope,
+// so pin it: 127.0.0.1 and localhost are the same server here but
+// different hostnames, which is exactly what a cross-host hop is.
+func TestDownloadDropsAuthHeaderOnCrossHostRedirect(t *testing.T) {
+	authByPath := map[string]string{}
+	var srvURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authByPath[r.URL.Path] = r.Header.Get("Authorization")
+		if r.URL.Path == "/hop1.tgz" {
+			u, _ := url.Parse(srvURL)
+			http.Redirect(w, r, "http://localhost:"+u.Port()+"/hop2.tgz", http.StatusFound)
+			return
+		}
+		_, _ = w.Write([]byte("x"))
+	}))
+	defer srv.Close()
+	srvURL = srv.URL
+
+	opts := testDownloadOpts(t, srv.URL+"/hop1.tgz")
+	opts.authHeader = "Bearer tok123"
+	opts.client = newDownloadClient(true)
+	if _, err := downloadArtifact(context.Background(), opts); err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	if authByPath["/hop1.tgz"] != "Bearer tok123" {
+		t.Fatalf("first hop should carry the credential, got %q", authByPath["/hop1.tgz"])
+	}
+	if got, ok := authByPath["/hop2.tgz"]; !ok {
+		t.Fatal("redirect target never reached")
+	} else if got != "" {
+		t.Fatalf("credential followed a cross-host redirect: %q", got)
+	}
+}
+
 func TestDownloadArtifactHostAllowlist(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("x"))
@@ -89,7 +164,7 @@ func TestDownloadArtifactHostAllowlist(t *testing.T) {
 		t.Fatalf("want allowlist error, got %v", err)
 	}
 
-	opts.allowlist = mustAllowlist(t, "github.com/smallhoursorg/", "127.0.0.1")
+	opts.allowlist = mustAllowlist(t, "github.com/smallhoursorg/", entryFor(srv.URL))
 	if _, err := downloadArtifact(context.Background(), opts); err != nil {
 		t.Fatalf("allowlisted host rejected: %v", err)
 	}
@@ -141,6 +216,47 @@ func TestDownloadArtifactHTTPError(t *testing.T) {
 	}
 }
 
+// An un-allowed query parameter must be refused BEFORE any request
+// leaves the box, and the refusal must be a validationError — that is
+// what makes the webhook answer 422 with the explanation in the body,
+// so the CI author sees exactly which parameter tripped the gate.
+func TestDownloadRejectsUnallowedQueryParam(t *testing.T) {
+	contacted := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		contacted = true
+		_, _ = w.Write([]byte("x"))
+	}))
+	defer srv.Close()
+
+	opts := testDownloadOpts(t, srv.URL+"/a.tgz?p=2&token=SECRETVALUE")
+	_, err := downloadArtifact(context.Background(), opts)
+	if err == nil {
+		t.Fatal("un-allowed query admitted")
+	}
+	var vErr validationError
+	if !errors.As(err, &vErr) {
+		t.Fatalf("refusal must be a validationError (422 to the caller), got %T: %v", err, err)
+	}
+	if !strings.Contains(err.Error(), `"p"`) || !strings.Contains(err.Error(), "query parameter") {
+		t.Fatalf("refusal should name the parameter: %v", err)
+	}
+	if strings.Contains(err.Error(), "SECRETVALUE") {
+		t.Fatalf("refusal leaked a query value: %v", err)
+	}
+	if contacted {
+		t.Fatal("artifact server was contacted despite the refusal")
+	}
+
+	// Declaring the names in the entry admits the same URL.
+	opts.allowlist = mustAllowlist(t, entryFor(srv.URL)+"?p&token")
+	if _, err := downloadArtifact(context.Background(), opts); err != nil {
+		t.Fatalf("declared params should admit: %v", err)
+	}
+	if !contacted {
+		t.Fatal("download did not happen after declaring the params")
+	}
+}
+
 func TestRedactURLDropsQuery(t *testing.T) {
 	u, _ := url.Parse("https://gitlab.com/api/artifacts/7?private_token=SECRET")
 	got := redactURL(u)
@@ -178,7 +294,7 @@ func TestDownloadRefusesHTTPSToHTTPDowngrade(t *testing.T) {
 		url:       tlsSrv.URL + "/artifact.tar.gz",
 		destDir:   t.TempDir(),
 		maxBytes:  1 << 20,
-		allowlist: mustAllowlist(t, "127.0.0.1"),
+		allowlist: mustAllowlist(t, entryFor(tlsSrv.URL)),
 		client:    client,
 	})
 	if err == nil || !strings.Contains(err.Error(), "downgrades") {
@@ -211,7 +327,7 @@ func TestDownloadAllowsDowngradeWhenInsecureAllowed(t *testing.T) {
 		destDir:       t.TempDir(),
 		maxBytes:      1 << 20,
 		allowInsecure: true,
-		allowlist:     mustAllowlist(t, "127.0.0.1"),
+		allowlist:     mustAllowlist(t, entryFor(tlsSrv.URL)),
 		client:        client,
 	})
 	if err != nil {

@@ -151,6 +151,7 @@ func TestWebhookValidatesPayload(t *testing.T) {
 		{"missing url", `{"version":"v1"}`, http.StatusUnprocessableEntity},
 		{"missing version", `{"url":"https://x/a.tgz"}`, http.StatusUnprocessableEntity},
 		{"evil version", `{"url":"https://x/a.tgz","version":"../../etc"}`, http.StatusUnprocessableEntity},
+		{"auth_header with CRLF", `{"url":"https://x/a.tgz","version":"v1","auth_header":"Bearer a\r\nX-Evil: 1"}`, http.StatusUnprocessableEntity},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

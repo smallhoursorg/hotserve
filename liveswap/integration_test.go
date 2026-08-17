@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -102,7 +103,7 @@ func packRelease(t *testing.T, bin, version string, broken bool) []byte {
 	return data
 }
 
-func integrationConfig(root string) string {
+func integrationConfig(root, artifactPort string) string {
 	return fmt.Sprintf(`{
 	skip_install_trust
 	admin localhost:2999
@@ -112,7 +113,7 @@ func integrationConfig(root string) string {
 	liveswap {
 		root %s
 		allow_insecure_http
-		artifact_allowlist 127.0.0.1
+		artifact_allowlist 127.0.0.1:%s
 		webhook_secret itest-secret
 
 		app demo {
@@ -136,7 +137,7 @@ http://localhost:9080 {
 http://localhost:9081 {
 	liveswap_webhook
 }
-`, root)
+`, root, artifactPort)
 }
 
 func postDeploy(t *testing.T, artifactURL, version string) (*http.Response, string) {
@@ -209,8 +210,14 @@ func TestIntegrationDeployLifecycle(t *testing.T) {
 	}))
 	defer artifactSrv.Close()
 
+	// The allowlist entry declares the artifact server's literal port
+	// (there is no wildcard), so the config is built after the server.
+	artifactURL, err := url.Parse(artifactSrv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
 	tester := caddytest.NewTester(t)
-	tester.InitServer(integrationConfig(root), "caddyfile")
+	tester.InitServer(integrationConfig(root, artifactURL.Port()), "caddyfile")
 
 	t.Run("proxy errors before first deploy", func(t *testing.T) {
 		code, _ := getBody(t, "http://localhost:9080/")
@@ -307,7 +314,7 @@ func TestIntegrationDeployLifecycle(t *testing.T) {
 
 		// Reload the SAME config through the admin API. The UsagePool
 		// must carry the running child across the reload untouched.
-		tester.InitServer(integrationConfig(root), "caddyfile")
+		tester.InitServer(integrationConfig(root, artifactURL.Port()), "caddyfile")
 
 		code, after := getBody(t, "http://localhost:9080/")
 		if code != http.StatusOK {
@@ -342,6 +349,26 @@ func TestIntegrationDeployLifecycle(t *testing.T) {
 		}
 		if _, err := os.Stat(filepath.Join(root, "demo", "releases", "v4")); err != nil {
 			t.Fatalf("current release v4 missing: %v", err)
+		}
+	})
+
+	t.Run("un-allowed query parameter is a 422 that names the parameter", func(t *testing.T) {
+		// The config's entry pins the artifact server's literal port
+		// but declares no query parameters, so ?p=2 must be refused before any request leaves
+		// the box, as a 422 whose body tells the CI author exactly what
+		// tripped and how the entry would declare it.
+		resp, body := postDeploy(t, artifactSrv.URL+"/demo-v1.tar.gz?p=2", "v5")
+		if resp.StatusCode != http.StatusUnprocessableEntity {
+			t.Fatalf("query refusal: got %d %s, want 422", resp.StatusCode, body)
+		}
+		for _, want := range []string{`\"p\"`, "declares no query parameters"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("422 body should contain %s: %s", want, body)
+			}
+		}
+		// The refusal must not have disturbed the running version.
+		if _, status := getStatus(t); !strings.Contains(status, `"current_version":"v4"`) {
+			t.Fatalf("v4 no longer serving after refused deploy: %s", status)
 		}
 	})
 }

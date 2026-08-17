@@ -9,14 +9,14 @@
 package liveswap
 
 import (
-	"fmt"
-	"path"
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"fmt"
 	"io/fs"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"

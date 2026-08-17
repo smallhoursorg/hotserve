@@ -144,14 +144,14 @@ func TestExtractRejectsNonGzip(t *testing.T) {
 
 func TestSafeRelPath(t *testing.T) {
 	for input, wantErr := range map[string]bool{
-		"ok.txt":        false,
-		"a/b/c":         false,
-		"./fine":        false,
-		"/abs":          true,
-		"..":            true,
-		"../up":         true,
-		"a/../../out":   true,
-		"a/./b/../c":    false,
+		"ok.txt":         false,
+		"a/b/c":          false,
+		"./fine":         false,
+		"/abs":           true,
+		"..":             true,
+		"../up":          true,
+		"a/../../out":    true,
+		"a/./b/../c":     false,
 		"trailing/../..": true,
 		"":               false, // cleans to "." — the archive root, accepted
 		"./":             false, // ditto
