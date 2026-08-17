@@ -221,3 +221,26 @@ func TestDownloadAllowsDowngradeWhenInsecureAllowed(t *testing.T) {
 		t.Fatal("no artifact path returned")
 	}
 }
+
+// Userinfo embedded in a webhook URL must never reach the wire: the
+// outgoing URL is rebuilt field-by-field from the matched allowlist
+// entry, and userinfo is deliberately not among the fields —
+// credentials travel via auth_header only.
+func TestDownloadDropsURLUserinfo(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte("x"))
+	}))
+	defer srv.Close()
+
+	u, _ := url.Parse(srv.URL)
+	withUser := "http://leak:hunter2@" + u.Host + "/a.tgz"
+	opts := testDownloadOpts(t, withUser)
+	if _, err := downloadArtifact(context.Background(), opts); err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	if gotAuth != "" {
+		t.Fatalf("userinfo leaked as Authorization: %q", gotAuth)
+	}
+}

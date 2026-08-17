@@ -49,17 +49,14 @@ func downloadArtifact(ctx context.Context, opts downloadOpts) (string, error) {
 		return "", fmt.Errorf("artifact url %s is not covered by artifact_allowlist (%s)",
 			redactURL(u), describeAllowlist(opts.allowlist))
 	}
-	// Rebuild the request host from the allowlist entry's own string:
-	// the outgoing host is then config-sourced, not request-sourced —
-	// the attacker-steerable part of the URL shrinks to a path suffix
-	// under an operator-pinned origin. (Also canonicalizes case.)
-	if p := u.Port(); p != "" {
-		u.Host = entry.host + ":" + p
-	} else {
-		u.Host = entry.host
-	}
+	// From here on the request's URL is never used directly: pinned is
+	// rebuilt field-by-field, with the host taken from the allowlist
+	// entry's own config string — see pinnedRequestURL for the full
+	// provenance of every field. The attacker-steerable part of a
+	// deploy URL is a path suffix under an operator-pinned origin.
+	pinned := entry.pinnedRequestURL(u)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pinned.String(), nil)
 	if err != nil {
 		return "", err
 	}
@@ -75,11 +72,11 @@ func downloadArtifact(ctx context.Context, opts downloadOpts) (string, error) {
 
 	resp, err := opts.client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("download %s: %w", redactURL(u), err)
+		return "", fmt.Errorf("download %s: %w", redactURL(pinned), err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return "", fmt.Errorf("download %s: HTTP %d", redactURL(u), resp.StatusCode)
+		return "", fmt.Errorf("download %s: HTTP %d", redactURL(pinned), resp.StatusCode)
 	}
 	if resp.ContentLength > opts.maxBytes {
 		return "", fmt.Errorf("artifact too large: %d bytes (max %d)", resp.ContentLength, opts.maxBytes)
