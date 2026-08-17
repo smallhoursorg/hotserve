@@ -33,8 +33,42 @@ jobs:
           fetch-depth: 0
       - run: make build
       - run: make package VERSION="${GITHUB_REF_NAME#v}"
+      # Raw binaries ship as per-arch tar.gz (binary + LICENSE + a
+      # README saying what the packages would have done for you):
+      # Apache-2.0 redistribution should carry the license text, the
+      # compressed download is a third the size, and the shape matches
+      # what Caddy itself ships.
       - run: |
-          cp build/hotserve-linux-* dist/
+          for arch in amd64 arm64; do
+            staging=$(mktemp -d)
+            cp "build/hotserve-linux-$arch" "$staging/hotserve"
+            cp LICENSE "$staging/LICENSE"
+            cat > "$staging/README.txt" <<'EOF'
+          hotserve — raw binary distribution
+          ==================================
+
+          This archive contains the bare hotserve executable. It is for
+          systems where you manage the service yourself (your own
+          systemd unit, NixOS-style distros, containers).
+
+          If you are on Debian or Ubuntu, use the .deb from the same
+          release instead — it installs everything below for you and is
+          what the test matrix certifies.
+
+          What the package would have set up, and you now own:
+            - a dedicated system user/group (hotserve) to run as
+            - a systemd unit (Type=notify) running:
+                hotserve run --config /etc/hotserve/Caddyfile
+              with XDG_DATA_HOME/XDG_CONFIG_HOME pointed somewhere the
+              service user can write (TLS certificates live there)
+            - a starter config at /etc/hotserve/Caddyfile
+
+          Docs: https://github.com/smallhoursorg/hotserve
+          EOF
+            chmod 0755 "$staging/hotserve"
+            tar -czf "dist/hotserve_${GITHUB_REF_NAME#v}_linux_${arch}.tar.gz" \
+              -C "$staging" hotserve LICENSE README.txt
+          done
           # GitHub mangles "~" in asset filenames to "." — so rename
           # prerelease packages (0.0.1~rc1 -> 0.0.1.rc1) BEFORE
           # checksumming, or checksums.txt records names that do not

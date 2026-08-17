@@ -31,7 +31,13 @@ sudo systemctl enable --now hotserve
 
 That gives you `/usr/bin/hotserve`, a systemd service running as the
 `hotserve` user, and a starter config at `/etc/hotserve/Caddyfile`.
-Raw binaries are on the releases page too. (Hosted APT/APK
+Prefer the packages — they set up everything above for you. The
+`hotserve_<version>_linux_<arch>.tar.gz` archives on the same page
+contain the **raw binary** (plus LICENSE and a README) for systems
+where you manage the service yourself — your own systemd unit,
+NixOS-style distros, containers. Going that route, you own what the
+package would have done: a dedicated `hotserve` user, a `Type=notify`
+unit, and the config at `/etc/hotserve/Caddyfile`. (Hosted APT/APK
 repositories with automatic updates are on the roadmap.)
 
 ## Quickstart: deploy an app with zero downtime
