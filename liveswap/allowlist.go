@@ -80,6 +80,34 @@ func (e artifactAllowEntry) matches(u *url.URL) bool {
 	return p == strings.TrimSuffix(e.pathPrefix, "/") || strings.HasPrefix(p, e.pathPrefix)
 }
 
+// pinnedRequestURL builds the URL the fetch will actually use, from
+// scratch, so every field's provenance is explicit at its definition:
+//
+//	Scheme — the request's, already vetted by the scheme policy
+//	Host   — THE ALLOWLIST ENTRY'S OWN CONFIG STRING, never the
+//	         request's (the request contributes only its numeric
+//	         port, if any); this also canonicalizes case
+//	Path   — the request's, which matches() has constrained to a
+//	         suffix under the entry's pinned prefix
+//	Query  — the request's (signed URLs need it)
+//
+// Deliberately absent: userinfo (a user:pass@ in the webhook URL must
+// not become an implicit Basic-Auth header — credentials travel via
+// auth_header only) and fragment (never sent on the wire anyway).
+func (e artifactAllowEntry) pinnedRequestURL(u *url.URL) *url.URL {
+	host := e.host
+	if p := u.Port(); p != "" {
+		host += ":" + p
+	}
+	return &url.URL{
+		Scheme:   u.Scheme,
+		Host:     host,
+		Path:     u.Path,
+		RawPath:  u.RawPath,
+		RawQuery: u.RawQuery,
+	}
+}
+
 // matchAllowlist returns the first entry admitting u.
 func matchAllowlist(entries []artifactAllowEntry, u *url.URL) (artifactAllowEntry, bool) {
 	for _, e := range entries {
