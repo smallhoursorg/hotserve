@@ -112,7 +112,7 @@ func integrationConfig(root string) string {
 	liveswap {
 		root %s
 		allow_insecure_http
-		artifact_allowlist 127.0.0.1
+		artifact_allowlist 127.0.0.1:*
 		webhook_secret itest-secret
 
 		app demo {
@@ -342,6 +342,26 @@ func TestIntegrationDeployLifecycle(t *testing.T) {
 		}
 		if _, err := os.Stat(filepath.Join(root, "demo", "releases", "v4")); err != nil {
 			t.Fatalf("current release v4 missing: %v", err)
+		}
+	})
+
+	t.Run("un-allowed query parameter is a 422 that names the parameter", func(t *testing.T) {
+		// The config's entry is bare "127.0.0.1" — it declares no query
+		// parameters, so ?p=2 must be refused before any request leaves
+		// the box, as a 422 whose body tells the CI author exactly what
+		// tripped and how the entry would declare it.
+		resp, body := postDeploy(t, artifactSrv.URL+"/demo-v1.tar.gz?p=2", "v5")
+		if resp.StatusCode != http.StatusUnprocessableEntity {
+			t.Fatalf("query refusal: got %d %s, want 422", resp.StatusCode, body)
+		}
+		for _, want := range []string{`\"p\"`, "declares no query parameters"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("422 body should contain %s: %s", want, body)
+			}
+		}
+		// The refusal must not have disturbed the running version.
+		if _, status := getStatus(t); !strings.Contains(status, `"current_version":"v4"`) {
+			t.Fatalf("v4 no longer serving after refused deploy: %s", status)
 		}
 	})
 }

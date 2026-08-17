@@ -45,14 +45,14 @@ func parseWebhookDirective(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler,
 //	    root                   <path>
 //	    webhook_secret         <secret>
 //	    allow_insecure_http
-//	    artifact_allowlist     <host[/path/]...>
+//	    artifact_allowlist     <host[:port][/path/][?param&param...]...>
 //	    app <name> {
 //	        command           <cmd> [args...]
 //	        pre_start         <cmd> [args...]
 //	        env               <KEY> <value>
 //	        env_file          <path>
 //	        webhook_secret    <secret>
-//	        artifact_allowlist <host[/path/]...>
+//	        artifact_allowlist <host[:port][/path/][?param&param...]...>
 //	        health_path       <path|off>
 //	        health_interval   <duration>
 //	        health_timeout    <duration>

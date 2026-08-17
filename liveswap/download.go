@@ -31,32 +31,43 @@ type downloadOpts struct {
 // Secrets never reach the logs from here: errors carry the URL's host
 // and path only, never its query string or the auth header.
 func downloadArtifact(ctx context.Context, opts downloadOpts) (string, error) {
+	// Every refusal below is a validationError: an unusable URL is the
+	// payload's problem, and 422-with-the-reason is what lets the CI
+	// author fix it without an operator reading server logs.
 	u, err := url.Parse(opts.url)
 	if err != nil {
-		return "", fmt.Errorf("invalid artifact url: %w", err)
+		return "", validationError{fmt.Sprintf("invalid artifact url: %v", err)}
 	}
 	switch u.Scheme {
 	case "https":
 	case "http":
 		if !opts.allowInsecure {
-			return "", fmt.Errorf("artifact url %s is plain http; use https or set allow_insecure_http", redactURL(u))
+			return "", validationError{fmt.Sprintf("artifact url %s is plain http; use https or set allow_insecure_http", redactURL(u))}
 		}
 	default:
-		return "", fmt.Errorf("artifact url %s has unsupported scheme %q", redactURL(u), u.Scheme)
+		return "", validationError{fmt.Sprintf("artifact url %s has unsupported scheme %q", redactURL(u), u.Scheme)}
 	}
-	entry, ok := matchAllowlist(opts.allowlist, u)
-	if !ok {
-		return "", fmt.Errorf("artifact url %s is not covered by artifact_allowlist (%s)",
-			redactURL(u), describeAllowlist(opts.allowlist))
+	entry, escapedPath, err := matchAllowlist(opts.allowlist, u)
+	if err != nil {
+		// A validationError so the webhook answers 422 with this exact
+		// message in the body: an allowlist refusal is the payload's
+		// problem, and the CI caller — who chose the URL — is the one
+		// who can fix it (or ask the operator to extend the entry).
+		return "", validationError{fmt.Sprintf("artifact url %s refused: %v", redactURL(u), err)}
 	}
-	// From here on the request's URL is never used directly: pinned is
-	// rebuilt field-by-field, with the host taken from the allowlist
-	// entry's own config string — see pinnedRequestURL for the full
-	// provenance of every field. The attacker-steerable part of a
-	// deploy URL is a path suffix under an operator-pinned origin.
-	pinned := entry.pinnedRequestURL(u)
+	// From here on the request's URL is never used directly. The URL
+	// the fetch uses is a single concatenation whose provenance reads
+	// left to right — scheme (constant), host and port (THE ALLOWLIST
+	// ENTRY'S OWN CONFIG BYTES; the request's port bytes only under a
+	// declared :* wildcard), the pinned prefix (config bytes again),
+	// and only then the request's path suffix and vetted query. See
+	// pinnedURLString.
+	pinned, err := entry.pinnedURLString(u, escapedPath)
+	if err != nil {
+		return "", err
+	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pinned.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pinned, nil)
 	if err != nil {
 		return "", err
 	}
@@ -72,11 +83,11 @@ func downloadArtifact(ctx context.Context, opts downloadOpts) (string, error) {
 
 	resp, err := opts.client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("download %s: %w", redactURL(pinned), err)
+		return "", fmt.Errorf("download %s: %w", redactURL(u), err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return "", fmt.Errorf("download %s: HTTP %d", redactURL(pinned), resp.StatusCode)
+		return "", fmt.Errorf("download %s: HTTP %d", redactURL(u), resp.StatusCode)
 	}
 	if resp.ContentLength > opts.maxBytes {
 		return "", fmt.Errorf("artifact too large: %d bytes (max %d)", resp.ContentLength, opts.maxBytes)

@@ -135,6 +135,12 @@ func (h *Handler) deploy(w http.ResponseWriter, r *http.Request, ma *managedApp)
 	if !validVersion(req.Version) {
 		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("version must match %s and not be . or ..", versionRe)})
 	}
+	// Go's transport would refuse a control character in the header
+	// value anyway, but as an opaque 500 at fetch time; catching it
+	// here names the field while it is still cheap to fix.
+	if strings.ContainsFunc(req.AuthHeader, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "auth_header contains control characters"})
+	}
 
 	err = ma.Deploy(r.Context(), req)
 	status := ma.status()
