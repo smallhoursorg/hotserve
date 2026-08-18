@@ -133,6 +133,14 @@ func (r *execRunner) Alive(h handle) bool {
 	}
 }
 
+func (r *execRunner) Wait(h handle) <-chan struct{} {
+	eh, ok := h.(*execHandle)
+	if !ok {
+		return nil
+	}
+	return eh.done
+}
+
 func (r *execRunner) Stop(h handle, grace time.Duration) error {
 	eh, ok := h.(*execHandle)
 	if !ok {

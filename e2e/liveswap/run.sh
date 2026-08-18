@@ -155,6 +155,70 @@ case "$s" in
 *) fail "unexpected status: $s" ;;
 esac
 
+echo "=== scenario 9: watchdog restarts the app after a crash ==="
+pid_before=$(body | sed 's/.*pid //')
+curl -s -o /dev/null --max-time 2 "$PROXY/boom"
+i=0
+new_pid=""
+while [ "$i" -lt 60 ]; do
+	b=$(body)
+	case "$b" in
+	"hello v1"*)
+		new_pid="${b##*pid }"
+		[ "$new_pid" != "$pid_before" ] && break
+		;;
+	esac
+	new_pid=""
+	i=$((i + 1))
+	sleep 0.5
+done
+if [ -n "$new_pid" ]; then
+	pass "watchdog relaunched after crash (pid $pid_before -> $new_pid)"
+else
+	fail "app did not come back after /boom (last body: '$b')"
+fi
+s=$(curl -s -H "X-Liveswap-Secret: $SECRET" "$HOOK")
+case "$s" in
+*'"last_restart_cause":"crash"'*) pass "status reports the crash restart" ;;
+*) fail "status missing crash restart: $s" ;;
+esac
+
+echo "=== scenario 10: watchdog restarts the app on sustained health failure ==="
+pid_before=$(body | sed 's/.*pid //')
+curl -s -o /dev/null --max-time 2 "$PROXY/break"
+i=0
+new_pid=""
+while [ "$i" -lt 90 ]; do
+	b=$(body)
+	case "$b" in
+	"hello v1"*)
+		new_pid="${b##*pid }"
+		if [ "$new_pid" != "$pid_before" ]; then
+			# Heal the release inside the replacement's watchdog grace
+			# so it does not inherit the failure.
+			curl -s -o /dev/null --max-time 2 "$PROXY/heal"
+			break
+		fi
+		;;
+	esac
+	new_pid=""
+	i=$((i + 1))
+	sleep 0.5
+done
+if [ -n "$new_pid" ]; then
+	pass "watchdog relaunched on health failure (pid $pid_before -> $new_pid)"
+else
+	fail "app was not restarted after /break (last body: '$b')"
+fi
+s=$(curl -s -H "X-Liveswap-Secret: $SECRET" "$HOOK")
+case "$s" in
+*'"last_restart_cause":"health"'*) pass "status reports the health restart" ;;
+*) fail "status missing health restart: $s" ;;
+esac
+c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "$PROXY/health")
+[ "$c" = "200" ] && pass "app is healthy again after the heal" \
+	|| fail "health still failing after heal: $c"
+
 echo ""
 if [ "$FAILURES" -eq 0 ]; then
 	echo "ALL E2E SCENARIOS PASSED"

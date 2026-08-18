@@ -199,11 +199,14 @@ discover at 3am. The governing asymmetry:
   automatic fallback). A wrong sandbox profile (a missing `extra_path`
   for a DB socket, a DNS break, a scrubbed env var an app leaned on)
   fails *here*, harmlessly.
-- On a **restart / boot relaunch from `state.json`**, there is no
-  previous instance to fall back to — the old process died with the
-  supervisor, and there is no watchdog yet (crash/health restart is a
-  separate roadmap item). A sandboxed relaunch that fails its health
-  gate leaves the app simply **down, with nothing to roll back to**.
+- On a **restart / boot relaunch from `state.json`** — and equally on
+  a **watchdog restart** (crash/health, `watchdog.go`), which is the
+  same `launchVersion` path — there is no previous instance to fall
+  back to. A sandboxed relaunch that fails leaves the app simply
+  **down, with nothing to roll back to**, and a watchdog restart that
+  newly engages a sandbox would burn the restart budget on a profile
+  mistake. Both are why the sandbox-disposition rule below applies to
+  every relaunch, not just boot.
 
 A hotserve binary upgrade triggers the second path for every app at
 once (postinstall `try-restart` → supervisor restart → `--die-with-parent`

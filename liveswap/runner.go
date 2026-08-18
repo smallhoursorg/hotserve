@@ -20,6 +20,12 @@ type runner interface {
 	// Alive reports whether the instance is still running.
 	Alive(h handle) bool
 
+	// Wait returns a channel that is closed once the instance exits.
+	// It may return nil when the runner cannot wait on this handle (a
+	// reattached instance the runner did not spawn); callers must then
+	// fall back to polling Alive.
+	Wait(h handle) <-chan struct{}
+
 	// Stop terminates gracefully: SIGTERM to the process group, wait up
 	// to grace, then SIGKILL. Returns once the process has exited.
 	Stop(h handle, grace time.Duration) error

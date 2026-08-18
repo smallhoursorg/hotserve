@@ -60,6 +60,11 @@ func parseWebhookDirective(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler,
 //	        deadline          <duration>
 //	        drain             <duration>
 //	        grace             <duration>
+//	        watchdog          <on|off>
+//	        watchdog_failures <n>
+//	        watchdog_grace    <duration>
+//	        watchdog_restarts <n>
+//	        watchdog_window   <duration>
 //	        keep              <n>
 //	        max_artifact_size <size>
 //	    }
@@ -196,6 +201,27 @@ func (cfg *AppConfig) unmarshalBlock(d *caddyfile.Dispenser) error {
 			if err := parseDurationArg(d, &cfg.Grace); err != nil {
 				return err
 			}
+		case "watchdog":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			cfg.Watchdog = d.Val()
+		case "watchdog_failures":
+			if err := parseCountArg(d, &cfg.WatchdogFailures); err != nil {
+				return err
+			}
+		case "watchdog_grace":
+			if err := parseDurationArg(d, &cfg.WatchdogGrace); err != nil {
+				return err
+			}
+		case "watchdog_restarts":
+			if err := parseCountArg(d, &cfg.WatchdogRestarts); err != nil {
+				return err
+			}
+		case "watchdog_window":
+			if err := parseDurationArg(d, &cfg.WatchdogWindow); err != nil {
+				return err
+			}
 		case "keep":
 			if !d.NextArg() {
 				return d.ArgErr()
@@ -224,6 +250,19 @@ func (cfg *AppConfig) unmarshalBlock(d *caddyfile.Dispenser) error {
 			return d.ArgErr() // no subdirective takes more args than consumed
 		}
 	}
+	return nil
+}
+
+func parseCountArg(d *caddyfile.Dispenser, out *int) error {
+	name := d.Val()
+	if !d.NextArg() {
+		return d.ArgErr()
+	}
+	n, err := strconv.Atoi(d.Val())
+	if err != nil {
+		return d.Errf("invalid %s %q: %v", name, d.Val(), err)
+	}
+	*out = n
 	return nil
 }
 

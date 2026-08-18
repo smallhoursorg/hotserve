@@ -21,10 +21,13 @@ type healthConfig struct {
 	deadline time.Duration
 }
 
-// prober is the health gate seam; the deploy pipeline's unit tests use
-// a fake, httpProber is the real thing.
+// prober is the health seam; the deploy pipeline's unit tests use a
+// fake, httpProber is the real thing. waitHealthy is the
+// converge-then-return deploy gate; probeOnce is the steady-state
+// single shot the watchdog paces itself.
 type prober interface {
 	waitHealthy(ctx context.Context, baseURL string, alive func() bool, hc healthConfig) error
+	probeOnce(ctx context.Context, url string, timeout time.Duration) error
 }
 
 // httpProber polls the new instance until it has been continuously
@@ -59,7 +62,7 @@ func (p *httpProber) waitHealthy(ctx context.Context, baseURL string, alive func
 				healthySince = now
 			}
 			lastErr = nil
-		} else if err := p.probe(ctx, baseURL+hc.path, hc.timeout); err != nil {
+		} else if err := p.probeOnce(ctx, baseURL+hc.path, hc.timeout); err != nil {
 			healthySince = time.Time{} // health must be continuous
 			lastErr = err
 		} else if healthySince.IsZero() {
@@ -74,10 +77,10 @@ func (p *httpProber) waitHealthy(ctx context.Context, baseURL string, alive func
 	}
 }
 
-// probe issues one GET and demands a 2xx. The per-probe timeout is a
-// real wall-clock context — an unresponsive app must not wedge the
+// probeOnce issues one GET and demands a 2xx. The per-probe timeout is
+// a real wall-clock context — an unresponsive app must not wedge the
 // prober loop.
-func (p *httpProber) probe(ctx context.Context, url string, timeout time.Duration) error {
+func (p *httpProber) probeOnce(ctx context.Context, url string, timeout time.Duration) error {
 	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, url, nil)

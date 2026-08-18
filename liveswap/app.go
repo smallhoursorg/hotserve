@@ -78,6 +78,11 @@ type appSpec struct {
 	deadline        time.Duration
 	drain           time.Duration
 	grace           time.Duration
+	watchdogOn      bool
+	wdFailures      int
+	wdGrace         time.Duration
+	wdRestarts      int
+	wdWindow        time.Duration
 	keep            int
 	maxArtifactSize int64
 	allowInsecure   bool
@@ -153,10 +158,20 @@ type managedApp struct {
 	// activePort is what GetUpstreams reads on every request; storing
 	// it is the cutover. 0 = nothing serving yet.
 	activePort atomic.Int64
+
+	// Watchdog plumbing. The goroutine is pool-scoped like everything
+	// else here: started once (first Provision), never touched by
+	// reloads, torn down in Destruct BEFORE the child is stopped so a
+	// mid-restart watchdog can never orphan a fresh process.
+	wdStarted bool // under specMu
+	wdCancel  context.CancelFunc
+	wdWG      sync.WaitGroup
+	wdNotify  chan struct{} // buffered(1); poked whenever current changes
+	wd        watchdogState
 }
 
 func newManagedApp(name string) *managedApp {
-	return &managedApp{name: name, phase: "idle"}
+	return &managedApp{name: name, phase: "idle", wdNotify: make(chan struct{}, 1)}
 }
 
 // configure installs the latest spec and (re)wires collaborators. On
@@ -338,6 +353,12 @@ func (ma *managedApp) Deploy(ctx context.Context, req deployRequest) (err error)
 	ma.mu.Unlock()
 	ma.activePort.Store(int64(port)) // ← the cutover
 
+	// A successful deploy is the fast path out of any watchdog wait:
+	// it clears the failure count, restart budget and backoff, then
+	// wakes the loop to adopt the new instance.
+	ma.wd.reset()
+	ma.pokeWatchdog()
+
 	if err := ma.persistState(c, newInst); err != nil {
 		logger.Error("state persistence failed; deploys still work but a Caddy restart will not know about this version", zap.Error(err))
 	}
@@ -392,36 +413,63 @@ func (ma *managedApp) ensureRunning() error {
 		ma.mu.Unlock()
 		ma.activePort.Store(int64(st.Port))
 		c.logger.Info("reattached to running instance", zap.String("version", st.CurrentVersion))
+		ma.pokeWatchdog()
 		return nil
 	}
 
+	inst, err := ma.launchVersion(c, st.CurrentVersion)
+	if err != nil {
+		return fmt.Errorf("relaunching %s: %w", st.CurrentVersion, err)
+	}
+	ma.publishInstance(c, inst)
+	c.logger.Info("relaunched current version after restart",
+		zap.String("version", st.CurrentVersion), zap.Int("port", inst.port))
+	ma.pokeWatchdog()
+	return nil
+}
+
+// launchVersion starts an already-on-disk version on a fresh port and
+// returns the new instance without publishing it. It relaunches what
+// was recorded as running — the version comes from the caller's record
+// (state.json, or the live instance the watchdog is replacing), never
+// from a re-read of config-level launch policy — so recovery and
+// watchdog restarts reproduce the instance that existed, and a changed
+// app definition still takes effect only on the next deploy.
+func (ma *managedApp) launchVersion(c collaborators, version string) (*instance, error) {
+	spec := c.spec
+	releaseDir := spec.dirs.release(version)
+	if _, err := os.Stat(releaseDir); err != nil {
+		return nil, fmt.Errorf("release dir for version %s is missing: %w", version, err)
+	}
 	port, err := freePort()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	env, err := buildEnv(spec, st.CurrentVersion, port, releaseDir)
+	env, err := buildEnv(spec, version, port, releaseDir)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	h, err := c.runner.Start(startSpec{
-		command: expandArgs(spec.command, spec, st.CurrentVersion, port, releaseDir),
+		command: expandArgs(spec.command, spec, version, port, releaseDir),
 		dir:     releaseDir,
 		env:     env,
 	})
 	if err != nil {
-		return fmt.Errorf("relaunching %s: %w", st.CurrentVersion, err)
+		return nil, err
 	}
-	inst := &instance{version: st.CurrentVersion, port: port, handle: h}
+	return &instance{version: version, port: port, handle: h}, nil
+}
+
+// publishInstance installs inst as current, cuts traffic over to it
+// and persists it for the next restart.
+func (ma *managedApp) publishInstance(c collaborators, inst *instance) {
 	ma.mu.Lock()
 	ma.current = inst
 	ma.mu.Unlock()
-	ma.activePort.Store(int64(port))
+	ma.activePort.Store(int64(inst.port))
 	if err := ma.persistState(c, inst); err != nil {
-		c.logger.Warn("persisting recovered state", zap.Error(err))
+		c.logger.Warn("persisting instance state", zap.Error(err))
 	}
-	c.logger.Info("relaunched current version after restart",
-		zap.String("version", st.CurrentVersion), zap.Int("port", port))
-	return nil
 }
 
 func (ma *managedApp) persistState(c collaborators, inst *instance) error {
@@ -451,20 +499,25 @@ func (ma *managedApp) currentInstance() *instance {
 
 // statusSnapshot backs the webhook's GET endpoint.
 type statusSnapshot struct {
-	App            string        `json:"app"`
-	Phase          string        `json:"phase"`
-	CurrentVersion string        `json:"current_version,omitempty"`
-	Port           int           `json:"port,omitempty"`
-	PID            int           `json:"pid,omitempty"`
-	Running        bool          `json:"running"`
-	LastDeploy     *deployResult `json:"last_deploy,omitempty"`
+	App            string            `json:"app"`
+	Phase          string            `json:"phase"`
+	CurrentVersion string            `json:"current_version,omitempty"`
+	Port           int               `json:"port,omitempty"`
+	PID            int               `json:"pid,omitempty"`
+	Running        bool              `json:"running"`
+	LastDeploy     *deployResult     `json:"last_deploy,omitempty"`
+	Watchdog       *watchdogSnapshot `json:"watchdog,omitempty"`
 }
 
 func (ma *managedApp) status() statusSnapshot {
 	c := ma.snapshot()
+	var wd *watchdogSnapshot
+	if c.clock != nil && c.spec != nil {
+		wd = ma.wd.statusSnapshot(c.clock.Now(), c.spec.wdWindow)
+	}
 	ma.mu.Lock()
 	defer ma.mu.Unlock()
-	s := statusSnapshot{App: ma.name, Phase: ma.phase, LastDeploy: ma.lastDeploy}
+	s := statusSnapshot{App: ma.name, Phase: ma.phase, LastDeploy: ma.lastDeploy, Watchdog: wd}
 	if ma.current != nil {
 		s.CurrentVersion = ma.current.version
 		s.Port = ma.current.port
@@ -476,8 +529,11 @@ func (ma *managedApp) status() statusSnapshot {
 
 // Destruct is called by the UsagePool when the last config referencing
 // this app is unloaded — i.e. real shutdown or the app being removed
-// from the Caddyfile, never a plain reload. It stops the child.
+// from the Caddyfile, never a plain reload. The watchdog is stopped
+// FIRST and waited for: only then is it impossible for a restart in
+// flight to spawn a fresh process after the one below is stopped.
 func (ma *managedApp) Destruct() error {
+	ma.stopWatchdog()
 	c := ma.snapshot()
 	inst := ma.currentInstance()
 	if inst == nil {
@@ -485,6 +541,48 @@ func (ma *managedApp) Destruct() error {
 	}
 	c.logger.Info("shutting down app", zap.String("version", inst.version))
 	return c.runner.Stop(inst.handle, c.spec.grace)
+}
+
+// startWatchdog launches the supervision goroutine once per pooled
+// app; reloads find wdStarted already set and leave it alone. The loop
+// re-snapshots the spec every cycle, so config changes (including
+// `watchdog off`) apply on its next iteration without a restart.
+func (ma *managedApp) startWatchdog() {
+	ma.specMu.Lock()
+	defer ma.specMu.Unlock()
+	if ma.wdStarted {
+		return
+	}
+	ma.wdStarted = true
+	ctx, cancel := context.WithCancel(context.Background())
+	ma.wdCancel = cancel
+	ma.wdWG.Add(1)
+	go func() {
+		defer ma.wdWG.Done()
+		ma.watchdogLoop(ctx)
+	}()
+}
+
+// stopWatchdog cancels the supervision goroutine and blocks until it
+// has fully exited. Safe to call when the watchdog never started.
+func (ma *managedApp) stopWatchdog() {
+	ma.specMu.Lock()
+	cancel := ma.wdCancel
+	ma.specMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	ma.wdWG.Wait()
+}
+
+// pokeWatchdog wakes the supervision loop after current changed
+// (promote, recovery). Non-blocking: the channel is buffered and a
+// pending poke already means "re-examine the world".
+func (ma *managedApp) pokeWatchdog() {
+	select {
+	case ma.wdNotify <- struct{}{}:
+	default:
+	}
 }
 
 // envAllowlist is the only part of Caddy's own environment that apps

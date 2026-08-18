@@ -33,6 +33,13 @@ func TestApplyDefaults(t *testing.T) {
 	if cfg.Keep != 5 || cfg.MaxArtifactSize != 100_000_000 {
 		t.Errorf("keep/size defaults wrong: %+v", cfg)
 	}
+	if cfg.Watchdog != "on" ||
+		cfg.WatchdogFailures != 3 ||
+		cfg.WatchdogGrace != caddy.Duration(30*time.Second) ||
+		cfg.WatchdogRestarts != 5 ||
+		cfg.WatchdogWindow != caddy.Duration(10*time.Minute) {
+		t.Errorf("watchdog defaults wrong: %+v", cfg)
+	}
 	if cfg.WebhookSecret != "global-secret" {
 		t.Errorf("secret should inherit the global default, got %q", cfg.WebhookSecret)
 	}
@@ -82,6 +89,19 @@ func TestBuildSpecTranslatesConfig(t *testing.T) {
 	if spec.soak != 15*time.Second || spec.keep != 5 {
 		t.Errorf("spec values wrong: %+v", spec)
 	}
+	if !spec.watchdogOn || spec.wdFailures != 3 || spec.wdGrace != 30*time.Second ||
+		spec.wdRestarts != 5 || spec.wdWindow != 10*time.Minute {
+		t.Errorf("watchdog spec values wrong: %+v", spec)
+	}
+
+	cfg.Watchdog = "off"
+	spec, err = a.buildSpec("blog", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.watchdogOn {
+		t.Error("watchdog off must map to watchdogOn=false")
+	}
 }
 
 func TestValidate(t *testing.T) {
@@ -111,6 +131,11 @@ func TestValidate(t *testing.T) {
 		{"zero keep", func(a *App) { a.Apps["blog"].Keep = 0 }, "keep must be at least 1"},
 		{"zero size", func(a *App) { a.Apps["blog"].MaxArtifactSize = 0 }, "max_artifact_size must be positive"},
 		{"no allowlist anywhere", func(a *App) { a.ArtifactAllowlist = nil }, "artifact_allowlist is required"},
+		{"bad watchdog value", func(a *App) { a.Apps["blog"].Watchdog = "auto" }, "watchdog must be"},
+		{"zero watchdog failures", func(a *App) { a.Apps["blog"].WatchdogFailures = -1 }, "watchdog_failures must be at least 1"},
+		{"zero watchdog restarts", func(a *App) { a.Apps["blog"].WatchdogRestarts = -1 }, "watchdog_restarts must be at least 1"},
+		{"negative watchdog grace", func(a *App) { a.Apps["blog"].WatchdogGrace = caddy.Duration(-time.Second) }, "watchdog_grace must not be negative"},
+		{"negative watchdog window", func(a *App) { a.Apps["blog"].WatchdogWindow = caddy.Duration(-time.Second) }, "watchdog_window must be positive"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

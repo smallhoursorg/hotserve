@@ -167,6 +167,34 @@ type AppConfig struct {
 	// SIGKILL. Default 10s.
 	Grace caddy.Duration `json:"grace,omitempty"`
 
+	// Watchdog enables continuous supervision of the running instance:
+	// a crash, or WatchdogFailures consecutive failed health probes,
+	// restarts the current version (with backoff, within the
+	// WatchdogRestarts/WatchdogWindow budget). "off" disables it.
+	// Default "on".
+	Watchdog string `json:"watchdog,omitempty"`
+
+	// WatchdogFailures is how many consecutive health probes must fail
+	// before the watchdog restarts the app; a single passing probe
+	// resets the count. Default 3.
+	WatchdogFailures int `json:"watchdog_failures,omitempty"`
+
+	// WatchdogGrace is how long after every (re)start probe failures
+	// are ignored, giving the app time to boot; it re-arms on each
+	// watchdog restart. A process exit always counts, grace or not.
+	// Default 30s.
+	WatchdogGrace caddy.Duration `json:"watchdog_grace,omitempty"`
+
+	// WatchdogRestarts is how many watchdog restarts (crash and health
+	// triggered alike) are allowed within WatchdogWindow before the
+	// watchdog gives up; a successful deploy resets the budget.
+	// Default 5.
+	WatchdogRestarts int `json:"watchdog_restarts,omitempty"`
+
+	// WatchdogWindow is the sliding window the restart budget is
+	// counted over. Default 10m.
+	WatchdogWindow caddy.Duration `json:"watchdog_window,omitempty"`
+
 	// Keep is how many release directories to retain on disk,
 	// including the current one. Default 5.
 	Keep int `json:"keep,omitempty"`
@@ -210,7 +238,15 @@ func (a *App) Provision(ctx caddy.Context) error {
 
 	clients := &fetchClients{
 		download: newDownloadClient(a.AllowInsecureHTTP),
-		health:   &http.Client{},
+		// The health client never follows redirects: the probe is a
+		// control signal from supervisor to app, and an app answering
+		// 3xx must read as "not 2xx", not steer the supervisor's
+		// request elsewhere.
+		health: &http.Client{
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 	}
 
 	a.managed = make(map[string]*managedApp, len(a.Apps))
@@ -228,6 +264,7 @@ func (a *App) Provision(ctx caddy.Context) error {
 		val, _ := appPool.LoadOrStore(poolKey(name), newManagedApp(name))
 		ma := val.(*managedApp)
 		ma.configure(spec, a.logger.Named(name), clients)
+		ma.startWatchdog()
 		a.managed[name] = ma
 		a.pooled = append(a.pooled, poolKey(name))
 	}
@@ -273,6 +310,21 @@ func (cfg *AppConfig) applyDefaults(repl *caddy.Replacer, defaultSecret string) 
 	if cfg.Grace == 0 {
 		cfg.Grace = caddy.Duration(10 * time.Second)
 	}
+	if cfg.Watchdog == "" {
+		cfg.Watchdog = "on"
+	}
+	if cfg.WatchdogFailures == 0 {
+		cfg.WatchdogFailures = 3
+	}
+	if cfg.WatchdogGrace == 0 {
+		cfg.WatchdogGrace = caddy.Duration(30 * time.Second)
+	}
+	if cfg.WatchdogRestarts == 0 {
+		cfg.WatchdogRestarts = 5
+	}
+	if cfg.WatchdogWindow == 0 {
+		cfg.WatchdogWindow = caddy.Duration(10 * time.Minute)
+	}
 	if cfg.Keep == 0 {
 		cfg.Keep = 5
 	}
@@ -307,6 +359,11 @@ func (a *App) buildSpec(name string, cfg *AppConfig) (*appSpec, error) {
 		deadline:        time.Duration(cfg.Deadline),
 		drain:           time.Duration(cfg.Drain),
 		grace:           time.Duration(cfg.Grace),
+		watchdogOn:      cfg.Watchdog != "off",
+		wdFailures:      cfg.WatchdogFailures,
+		wdGrace:         time.Duration(cfg.WatchdogGrace),
+		wdRestarts:      cfg.WatchdogRestarts,
+		wdWindow:        time.Duration(cfg.WatchdogWindow),
 		keep:            cfg.Keep,
 		maxArtifactSize: cfg.MaxArtifactSize,
 		allowInsecure:   a.AllowInsecureHTTP,
@@ -353,6 +410,21 @@ func (a *App) Validate() error {
 		}
 		if cfg.Soak < 0 || cfg.Drain < 0 {
 			return fmt.Errorf("app %s: soak and drain must not be negative", name)
+		}
+		if cfg.Watchdog != "on" && cfg.Watchdog != "off" {
+			return fmt.Errorf("app %s: watchdog must be \"on\" or \"off\", got %q", name, cfg.Watchdog)
+		}
+		if cfg.WatchdogFailures < 1 {
+			return fmt.Errorf("app %s: watchdog_failures must be at least 1, got %d", name, cfg.WatchdogFailures)
+		}
+		if cfg.WatchdogRestarts < 1 {
+			return fmt.Errorf("app %s: watchdog_restarts must be at least 1, got %d", name, cfg.WatchdogRestarts)
+		}
+		if cfg.WatchdogGrace < 0 {
+			return fmt.Errorf("app %s: watchdog_grace must not be negative, got %v", name, time.Duration(cfg.WatchdogGrace))
+		}
+		if cfg.WatchdogWindow <= 0 {
+			return fmt.Errorf("app %s: watchdog_window must be positive, got %v", name, time.Duration(cfg.WatchdogWindow))
 		}
 		if cfg.Keep < 1 {
 			return fmt.Errorf("app %s: keep must be at least 1, got %d", name, cfg.Keep)

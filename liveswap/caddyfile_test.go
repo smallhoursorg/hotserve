@@ -30,6 +30,11 @@ func TestCaddyfileUnmarshalFullConfig(t *testing.T) {
 			deadline 2m
 			drain 2s
 			grace 20s
+			watchdog off
+			watchdog_failures 4
+			watchdog_grace 45s
+			watchdog_restarts 7
+			watchdog_window 15m
 			keep 3
 			max_artifact_size 50MB
 		}
@@ -78,6 +83,13 @@ func TestCaddyfileUnmarshalFullConfig(t *testing.T) {
 	if blog.Keep != 3 || blog.MaxArtifactSize != 50_000_000 {
 		t.Fatalf("keep/max wrong: %+v", blog)
 	}
+	if blog.Watchdog != "off" ||
+		blog.WatchdogFailures != 4 ||
+		blog.WatchdogGrace != caddy.Duration(45*time.Second) ||
+		blog.WatchdogRestarts != 7 ||
+		blog.WatchdogWindow != caddy.Duration(15*time.Minute) {
+		t.Fatalf("watchdog options wrong: %+v", blog)
+	}
 
 	api := a.Apps["api"]
 	if api == nil || strings.Join(api.Command, " ") != "./server --config config.yaml" {
@@ -102,6 +114,10 @@ func TestCaddyfileUnmarshalEmptyAppBlockLeavesDefaultsToProvision(t *testing.T) 
 		blog.Deadline != 0 || blog.Drain != 0 || blog.Grace != 0 ||
 		blog.Keep != 0 || blog.MaxArtifactSize != 0 || blog.WebhookSecret != "" {
 		t.Fatalf("parser applied defaults it must not: %+v", blog)
+	}
+	if blog.Watchdog != "" || blog.WatchdogFailures != 0 || blog.WatchdogGrace != 0 ||
+		blog.WatchdogRestarts != 0 || blog.WatchdogWindow != 0 {
+		t.Fatalf("parser applied watchdog defaults it must not: %+v", blog)
 	}
 	if a.Root != "" {
 		t.Fatalf("root should be zero, got %q", a.Root)

@@ -172,6 +172,7 @@ reloads (the common operation) are unaffected.
 | `download.go` | capped, redacted artifact download; `releaseFetcher` (download+extract orchestration) |
 | `extract.go` | validate-then-extract hardened tar handling |
 | `health.go` | prober with soak/deadline arithmetic on an injected clock |
+| `watchdog.go` | continuous crash/health supervision: per-app loop, restart budget, backoff |
 | `state.go` | `state.json` atomic persistence, keep-N GC |
 | `secret.go` | hashed constant-time compare |
 | `clock.go` | `Now()`/`Sleep()` clock seam |
@@ -213,10 +214,49 @@ reloads (the common operation) are unaffected.
    containment under traffic; 409 mid-deploy; **admin-API reload under
    traffic with zero non-200s and unchanged app PID**; status endpoint.
 
+## Watchdog (added after v1)
+
+The continuous watchdog — originally the first v1 non-goal below —
+shipped as a follow-up. Design summary (full operator docs in
+README.md "Watchdog"):
+
+- One goroutine per pooled `managedApp` (`watchdog.go`), started at
+  first Provision, torn down in `Destruct` **before** the child is
+  stopped — that ordering is the invariant that makes a mid-restart
+  watchdog unable to orphan a freshly started process. Reloads never
+  touch the goroutine; it re-snapshots the spec every cycle.
+- Triggers: process exit (the exec runner's reaper channel, exposed as
+  `runner.Wait`; a nil channel degrades to `Alive` polling for future
+  reattached handles) or `watchdog_failures` consecutive failed
+  probes. `watchdog_grace` re-arms after every start; crashes count
+  even during grace.
+- Restarts take `deployMu` (TryLock, yielding to deploys) and re-check
+  instance identity — promote swaps `current` before stopping the old
+  handle, so a deploy-stopped handle never reads as a crash. The
+  relaunch path is `launchVersion`, shared with boot recovery: it
+  reproduces the recorded instance, never re-reads config-level launch
+  policy.
+- Pacing is fixed: 1s exponential backoff, 60s cap, ±20% jitter,
+  reset only after sustained health. The budget
+  (`watchdog_restarts`/`watchdog_window`, shared by crash and health
+  triggers) is a rate limiter, not a give-up point — Nomad's
+  `mode="delay"`, chosen over hard-fail so an app killed by a
+  transient incident recovers unattended once the incident ends. A
+  full window throttles (dead instances are unrouted during the wait)
+  until the oldest restart slides out; a successful deploy resets the
+  budget immediately. The rate bound is also the DoS bound on induced
+  health failures. Alerting on a sustained restart loop is deferred
+  to the events/metrics milestone.
+- The watchdog is the **single restart authority**: the v2 systemd
+  runner must create transient units with `Restart=no`, or systemd
+  and liveswap would fight over the same failure.
+
 ## Non-goals (v1)
 
-- Post-promote auto-revert / continuous health watchdog. Rollback is
-  re-POSTing the previous version.
+- Post-promote auto-revert. Rollback is re-POSTing the previous
+  version. (The continuous health watchdog, originally part of this
+  non-goal, has since shipped — see "Watchdog" above. It restarts the
+  same version; it still never auto-reverts.)
 - Multi-node or any cluster awareness.
 - Resource limits (cgroups) — that arrives with the systemd runner.
 - Prometheus metrics (deploys_total, duration) — v1.1 candidate.
