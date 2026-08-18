@@ -349,6 +349,127 @@ func TestWatchdogReloadAppliesWithoutRestart(t *testing.T) {
 	})
 }
 
+// reloadSpec simulates a config reload: installs a modified copy of
+// the rig's spec (as configure does) and pokes the loop.
+func reloadSpec(rig *testRig, mutate func(*appSpec)) {
+	s := *rig.spec
+	mutate(&s)
+	rig.ma.specMu.Lock()
+	rig.ma.spec = &s
+	rig.ma.specMu.Unlock()
+	rig.ma.pokeWatchdog()
+}
+
+func TestWatchdogOffDuringBackoffCancelsRestart(t *testing.T) {
+	rig := newTestRig(t)
+	deployV1(t, rig)
+	rig.startWatchdogT(t)
+	waitUntil(t, "watchdog to arm", func() bool {
+		s := rig.ma.wd.currentState()
+		return s == wdStateGrace || s == wdStateWatching
+	})
+
+	rig.runner.handleAt(0).kill()
+	waitUntil(t, "loop enters backoff", func() bool {
+		return rig.ma.wd.currentState() == wdStateBackoff
+	})
+	// Reload to watchdog off while the restart is pending: the pending
+	// restart must be abandoned, and its claimed budget slot refunded.
+	reloadSpec(rig, func(s *appSpec) { s.watchdogOn = false })
+	waitUntil(t, "watchdog parks disabled", func() bool {
+		return rig.ma.wd.currentState() == wdStateDisabled
+	})
+	rig.clock.Advance(5 * time.Minute)
+	time.Sleep(10 * time.Millisecond)
+	if got := rig.runner.startCount(); got != 1 {
+		t.Fatalf("watchdog off mid-backoff must cancel the pending restart, got %d starts", got)
+	}
+	if s := rig.ma.status(); s.Watchdog.RestartsInWindow != 0 {
+		t.Fatalf("abandoned attempt must refund its budget slot: %+v", s.Watchdog)
+	}
+}
+
+func TestWatchdogOffDuringThrottleCancelsRestart(t *testing.T) {
+	rig := newTestRig(t)
+	rig.spec.wdRestarts = 1
+	deployV1(t, rig)
+	rig.startWatchdogT(t)
+	waitUntil(t, "watchdog to arm", func() bool {
+		s := rig.ma.wd.currentState()
+		return s == wdStateGrace || s == wdStateWatching
+	})
+
+	rig.runner.handleAt(0).kill()
+	advanceUntil(t, rig, time.Second, "the single budgeted restart", func() bool {
+		return rig.runner.startCount() == 2
+	})
+	rig.runner.handleAt(1).kill()
+	advanceUntil(t, rig, time.Second, "throttle once the window is full", func() bool {
+		return rig.ma.wd.currentState() == wdStateThrottled
+	})
+	reloadSpec(rig, func(s *appSpec) { s.watchdogOn = false })
+	waitUntil(t, "watchdog parks disabled", func() bool {
+		return rig.ma.wd.currentState() == wdStateDisabled
+	})
+	rig.clock.Advance(time.Hour) // far past the throttle window
+	time.Sleep(10 * time.Millisecond)
+	if got := rig.runner.startCount(); got != 2 {
+		t.Fatalf("watchdog off mid-throttle must cancel the pending restart, got %d starts", got)
+	}
+}
+
+func TestWatchdogUnroutesDeadInstanceDuringBackoff(t *testing.T) {
+	rig := newTestRig(t)
+	deployV1(t, rig)
+	rig.startWatchdogT(t)
+	waitUntil(t, "watchdog to arm", func() bool {
+		s := rig.ma.wd.currentState()
+		return s == wdStateGrace || s == wdStateWatching
+	})
+
+	rig.runner.handleAt(0).kill()
+	// Without advancing the clock the loop sits in backoff: the dead
+	// port must already be unrouted (clean 5xx, and the freed port
+	// cannot leak another app's traffic here if reused).
+	waitUntil(t, "dead instance unrouted before the restart", func() bool {
+		return rig.ma.activePort.Load() == 0
+	})
+	if got := rig.runner.startCount(); got != 1 {
+		t.Fatalf("unroute must happen before any restart, got %d starts", got)
+	}
+	advanceUntil(t, rig, time.Second, "restart republishes the port", func() bool {
+		return rig.ma.activePort.Load() != 0 && rig.runner.startCount() == 2
+	})
+}
+
+func TestWatchdogUnroutesWhenRelaunchKeepsFailing(t *testing.T) {
+	rig := newTestRig(t)
+	// Wider than the cumulative backoff (1+2+4+8+16s), or slots slide
+	// out before the window fills and the loop never throttles.
+	rig.spec.wdWindow = 5 * time.Minute
+	deployV1(t, rig)
+	rig.startWatchdogT(t)
+	waitUntil(t, "watchdog to arm", func() bool {
+		s := rig.ma.wd.currentState()
+		return s == wdStateGrace || s == wdStateWatching
+	})
+
+	rig.runner.setStartErr(errors.New("no such binary"))
+	rig.runner.handleAt(0).kill()
+	advanceUntil(t, rig, time.Second, "launch failures drain into throttle", func() bool {
+		return rig.ma.wd.currentState() == wdStateThrottled
+	})
+	if rig.ma.activePort.Load() != 0 {
+		t.Fatal("port must stay unrouted while relaunches fail")
+	}
+	// Heal the launcher: the next budgeted attempt must recover and
+	// route the app again.
+	rig.runner.setStartErr(nil)
+	advanceUntil(t, rig, 5*time.Second, "recovery once launches succeed again", func() bool {
+		return rig.ma.activePort.Load() != 0 && rig.ma.status().Running
+	})
+}
+
 func TestWatchdogGraceFlapBreaksHealthyStreak(t *testing.T) {
 	w := &watchdogState{jitter: func() float64 { return 0.5 }}
 	base := time.Unix(1_700_000_000, 0)

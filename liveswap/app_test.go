@@ -177,6 +177,12 @@ func (r *fakeRunner) stopCount() int {
 	return len(r.stopped)
 }
 
+func (r *fakeRunner) setStartErr(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.startErr = err
+}
+
 func (r *fakeRunner) startCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()

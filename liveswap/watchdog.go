@@ -377,6 +377,12 @@ func (ma *managedApp) superviseInstance(ctx context.Context, c collaborators, in
 // "a deploy already replaced it" and the watchdog stands down.
 func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *instance, kind failureKind) bool {
 	spec := c.spec
+	if !c.runner.Alive(inst.handle) {
+		// Never route to a dead port while pacing the restart: a fast
+		// clean 5xx beats dialing it, and the freed port could be
+		// re-bound by another app's deploy in the meantime.
+		ma.unrouteIf(inst)
+	}
 	// The window is a rate limiter, not a give-up point: when it is
 	// full, throttle until the oldest restart slides out, then keep
 	// going. An app taken down by a transient incident comes back on
@@ -387,7 +393,6 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 		ma.wd.setState(wdStateThrottled)
 		alive := c.runner.Alive(inst.handle)
 		if !alive {
-			// Do not route to a dead port while waiting.
 			ma.unrouteIf(inst)
 		}
 		c.logger.Error("watchdog: restart budget exhausted; throttling before the next restart",
@@ -402,6 +407,9 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 		case <-ma.wdNotify:
 			if ma.currentInstance() != inst {
 				return true // a deploy replaced the instance and reset the budget
+			}
+			if ma.watchdogDisabled() {
+				return true // reload turned the watchdog off mid-wait; no slot was claimed
 			}
 			continue // config nudge: recompute the wait, keep throttling
 		case <-c.clock.After(wait):
@@ -424,6 +432,10 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 			if ma.currentInstance() != inst {
 				return true // deploy replaced the instance; its reset cleared the window anyway
 			}
+			if ma.watchdogDisabled() {
+				ma.wd.refundBudget()
+				return true // reload turned the watchdog off mid-wait
+			}
 			continue // config nudge: keep waiting out the backoff
 		case <-c.clock.After(wait):
 		}
@@ -445,6 +457,14 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 	if ma.currentInstance() != inst {
 		return true // deploy replaced the instance; its reset cleared the window anyway
 	}
+	if ma.watchdogDisabled() {
+		// A reload during the final wait can land without its poke
+		// being consumed (the timer may fire first). Re-check before
+		// acting: `watchdog off` must never be followed by one more
+		// restart — least of all one that kills a live process.
+		ma.wd.refundBudget()
+		return true
+	}
 
 	if c.runner.Alive(inst.handle) {
 		if err := c.runner.Stop(inst.handle, spec.grace); err != nil {
@@ -455,7 +475,10 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 	if err != nil {
 		// The budget slot stays consumed, so a launch that fails
 		// instantly is bounded exactly like any other restart storm;
-		// the next cycle sees the dead instance and tries again.
+		// the next cycle sees the dead instance and tries again. The
+		// instance is gone either way (crashed, or stopped above), so
+		// stop routing to its port.
+		ma.unrouteIf(inst)
 		c.logger.Error("watchdog: restart failed",
 			zap.String("version", inst.version), zap.Error(err))
 		return true
@@ -469,6 +492,15 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 		zap.Int("pid", newInst.handle.state().PID),
 		zap.Duration("backoff_was", d))
 	return true
+}
+
+// watchdogDisabled re-reads the live spec: the answer to "may I still
+// restart?" must come from the config as it is NOW, not from the
+// snapshot taken when the failure was detected — an operator flipping
+// `watchdog off` mid-wait means it.
+func (ma *managedApp) watchdogDisabled() bool {
+	s := ma.snapshot().spec
+	return s == nil || !s.watchdogOn
 }
 
 func backoffResetAfter(spec *appSpec) time.Duration {
