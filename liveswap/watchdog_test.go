@@ -302,6 +302,94 @@ func TestWatchdogYieldsWhileDeployHoldsLock(t *testing.T) {
 	advanceUntil(t, rig, time.Second, "restart after the lock is released", func() bool {
 		return rig.runner.startCount() == 2
 	})
+	// Every yielded cycle must refund its claimed slot: only the one
+	// restart that actually happened may count against the window.
+	waitUntil(t, "budget reflects only the real restart", func() bool {
+		s := rig.ma.status()
+		return s.Watchdog != nil && s.Watchdog.RestartsInWindow == 1
+	})
+}
+
+func TestWatchdogReloadAppliesWithoutRestart(t *testing.T) {
+	rig := newTestRig(t)
+	deployV1(t, rig)
+	rig.startWatchdogT(t)
+	waitUntil(t, "watchdog to arm", func() bool {
+		s := rig.ma.wd.currentState()
+		return s == wdStateGrace || s == wdStateWatching
+	})
+
+	// Simulate a config reload flipping watchdog off: install a new
+	// spec (as configure does) and poke. The loop must adopt it while
+	// the instance is healthy — not wait for the next restart.
+	off := *rig.spec
+	off.watchdogOn = false
+	rig.ma.specMu.Lock()
+	rig.ma.spec = &off
+	rig.ma.specMu.Unlock()
+	rig.ma.pokeWatchdog()
+	waitUntil(t, "watchdog parks disabled after the reload", func() bool {
+		return rig.ma.wd.currentState() == wdStateDisabled
+	})
+	rig.runner.handleAt(0).kill()
+	rig.clock.Advance(time.Minute)
+	time.Sleep(10 * time.Millisecond)
+	if got := rig.runner.startCount(); got != 1 {
+		t.Fatalf("watchdog off (via reload) must not restart, got %d starts", got)
+	}
+
+	// Reload it back on: the parked loop must wake and resume — and
+	// then recover the crashed instance.
+	rig.ma.specMu.Lock()
+	rig.ma.spec = rig.spec
+	rig.ma.specMu.Unlock()
+	rig.ma.pokeWatchdog()
+	advanceUntil(t, rig, time.Second, "supervision resumes after re-enable", func() bool {
+		return rig.runner.startCount() == 2
+	})
+}
+
+func TestWatchdogGraceFlapBreaksHealthyStreak(t *testing.T) {
+	w := &watchdogState{jitter: func() float64 { return 0.5 }}
+	base := time.Unix(1_700_000_000, 0)
+	// Grow the backoff, then: pass, flap (grace failure), pass 31s
+	// later. The flap must have broken the streak, so the late pass
+	// must NOT reset the backoff off the pre-flap timestamp.
+	w.backoffStep = 6 // next nominal backoff = 60s cap
+	w.recordHealthy(base, 30*time.Second)
+	w.noteFlap()
+	w.recordHealthy(base.Add(31*time.Second), 30*time.Second)
+	if got := w.nextBackoff(); got != time.Minute {
+		t.Fatalf("flap-interrupted streak must not reset backoff, got %v", got)
+	}
+	// An uninterrupted 31s streak does reset it.
+	w.reset()
+	w.backoffStep = 6
+	w.recordHealthy(base, 30*time.Second)
+	w.recordHealthy(base.Add(31*time.Second), 30*time.Second)
+	if got := w.nextBackoff(); got != time.Second {
+		t.Fatalf("uninterrupted streak must reset backoff to the floor, got %v", got)
+	}
+}
+
+func TestWatchdogRefundBudget(t *testing.T) {
+	w := &watchdogState{}
+	base := time.Unix(1_700_000_000, 0)
+	if !w.consumeBudget(base, 1, 10*time.Minute) {
+		t.Fatal("first claim must fit")
+	}
+	if w.consumeBudget(base, 1, 10*time.Minute) {
+		t.Fatal("window of 1 must refuse a second claim")
+	}
+	w.refundBudget()
+	if !w.consumeBudget(base, 1, 10*time.Minute) {
+		t.Fatal("a refunded slot must be claimable again")
+	}
+	w.reset()
+	w.refundBudget() // refund after a deploy's reset must be a safe no-op
+	if !w.consumeBudget(base, 1, 10*time.Minute) {
+		t.Fatal("budget must be intact after a no-op refund")
+	}
 }
 
 func TestWatchdogDestructDuringBackoffExitsCleanly(t *testing.T) {

@@ -198,6 +198,11 @@ func (ma *managedApp) configure(spec *appSpec, logger *zap.Logger, clients *fetc
 	if changed {
 		logger.Info("app definition changed; it will apply on the next deploy")
 	}
+	// Wake the watchdog so a reload's spec (watchdog off, new
+	// intervals) applies promptly even while the instance is healthy
+	// or the loop is parked. The loop treats a poke with an unchanged
+	// instance as a re-read, not a new instance — no grace re-arm.
+	ma.pokeWatchdog()
 }
 
 // specEqual is a shallow inequality check good enough for the "config
@@ -469,6 +474,19 @@ func (ma *managedApp) publishInstance(c collaborators, inst *instance) {
 	ma.activePort.Store(int64(inst.port))
 	if err := ma.persistState(c, inst); err != nil {
 		c.logger.Warn("persisting instance state", zap.Error(err))
+	}
+}
+
+// unrouteIf clears activePort only while inst is still current, under
+// the same lock that guards the current swap. Check-then-store without
+// the lock races promote: a deploy could install and route a healthy
+// instance between the check and the store, and the store would then
+// unroute it permanently.
+func (ma *managedApp) unrouteIf(inst *instance) {
+	ma.mu.Lock()
+	defer ma.mu.Unlock()
+	if ma.current == inst {
+		ma.activePort.Store(0)
 	}
 }
 

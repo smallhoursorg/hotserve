@@ -186,9 +186,10 @@ type AppConfig struct {
 	WatchdogGrace caddy.Duration `json:"watchdog_grace,omitempty"`
 
 	// WatchdogRestarts is how many watchdog restarts (crash and health
-	// triggered alike) are allowed within WatchdogWindow before the
-	// watchdog gives up; a successful deploy resets the budget.
-	// Default 5.
+	// triggered alike) may happen within WatchdogWindow. The budget is
+	// a rate limiter, not a give-up point: when the window is full the
+	// watchdog throttles until the oldest restart slides out, then
+	// keeps trying. A successful deploy resets the budget. Default 5.
 	WatchdogRestarts int `json:"watchdog_restarts,omitempty"`
 
 	// WatchdogWindow is the sliding window the restart budget is

@@ -129,6 +129,16 @@ func (w *watchdogState) recordFailure(desc string) int {
 	return w.failures
 }
 
+// noteFlap breaks the continuous-health streak without counting toward
+// the failure threshold. Used for probe failures during grace: they
+// must not trigger a restart, but they also must not let a pre-flap
+// pass keep an old streak alive and reset the backoff.
+func (w *watchdogState) noteFlap() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.healthySince = time.Time{}
+}
+
 // consumeBudget prunes restarts that have slid out of the window and,
 // if there is room left, claims a slot for the restart about to
 // happen. Claiming before the restart (not after it succeeds) is what
@@ -148,6 +158,20 @@ func (w *watchdogState) consumeBudget(now time.Time, budget int, window time.Dur
 	}
 	w.restarts = append(w.restarts, now)
 	return true
+}
+
+// refundBudget returns the most recently claimed slot. Called when a
+// claimed restart is abandoned without a Start ever happening (a
+// deploy owns the lifecycle, or replaced the instance): those cycles
+// must not drain the budget, or a long deploy over a dead instance
+// exhausts it with zero restarts performed. No-op if a deploy's reset
+// already cleared the window.
+func (w *watchdogState) refundBudget() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if n := len(w.restarts); n > 0 {
+		w.restarts = w.restarts[:n-1]
+	}
 }
 
 // untilBudgetFrees returns how long until the oldest in-window restart
@@ -268,12 +292,20 @@ func (ma *managedApp) parkWatchdog(ctx context.Context, c collaborators) {
 // watchdog acts on a failure, or ctx ends. Returns false only when the
 // loop should exit entirely (ctx canceled).
 func (ma *managedApp) superviseInstance(ctx context.Context, c collaborators, inst *instance) bool {
-	spec := c.spec
 	waitCh := c.runner.Wait(inst.handle) // nil ⇒ Alive polling on the tick below
-	graceUntil := c.clock.Now().Add(spec.wdGrace)
+	graceUntil := c.clock.Now().Add(c.spec.wdGrace)
 	ma.wd.arm()
 
 	for {
+		// Re-snapshot every cycle: a healthy instance can be watched
+		// for weeks, and a reload's new spec (watchdog off, changed
+		// intervals/thresholds) must apply on the next tick, not on
+		// the next restart.
+		c = ma.snapshot()
+		spec := c.spec
+		if spec == nil || !spec.watchdogOn {
+			return true // outer loop parks as disabled
+		}
 		if c.clock.Now().Before(graceUntil) {
 			ma.wd.setState(wdStateGrace)
 		} else {
@@ -283,7 +315,10 @@ func (ma *managedApp) superviseInstance(ctx context.Context, c collaborators, in
 		case <-ctx.Done():
 			return false
 		case <-ma.wdNotify:
-			return true // current changed (promote/recovery); re-arm on it
+			if ma.currentInstance() != inst {
+				return true // promote/recovery installed a new instance; re-arm on it
+			}
+			continue // config nudge: re-snapshot without re-arming grace
 		case <-waitCh:
 			if ma.currentInstance() != inst {
 				return true // deploy stopped the old handle; not a crash
@@ -306,11 +341,18 @@ func (ma *managedApp) superviseInstance(ctx context.Context, c collaborators, in
 				continue
 			}
 			err := c.prober.probeOnce(ctx, "http://127.0.0.1:"+portString(inst.port)+spec.healthPath, spec.healthTimeout)
+			if ma.currentInstance() != inst {
+				// A deploy replaced the instance while the probe was in
+				// flight; its result belongs to the old era and must not
+				// touch the freshly reset counters.
+				return true
+			}
 			if err == nil {
 				ma.wd.recordHealthy(c.clock.Now(), backoffResetAfter(spec))
 				continue
 			}
 			if c.clock.Now().Before(graceUntil) {
+				ma.wd.noteFlap() // don't count, but break the healthy streak
 				c.logger.Debug("watchdog: probe failed during grace", zap.Error(err))
 				continue
 			}
@@ -344,9 +386,9 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 		wait := ma.wd.untilBudgetFrees(c.clock.Now(), spec.wdWindow)
 		ma.wd.setState(wdStateThrottled)
 		alive := c.runner.Alive(inst.handle)
-		if !alive && ma.currentInstance() == inst {
+		if !alive {
 			// Do not route to a dead port while waiting.
-			ma.activePort.Store(0)
+			ma.unrouteIf(inst)
 		}
 		c.logger.Error("watchdog: restart budget exhausted; throttling before the next restart",
 			zap.String("cause", kind.String()),
@@ -358,30 +400,50 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 		case <-ctx.Done():
 			return false
 		case <-ma.wdNotify:
-			return true // a deploy replaced the instance and reset the budget
+			if ma.currentInstance() != inst {
+				return true // a deploy replaced the instance and reset the budget
+			}
+			continue // config nudge: recompute the wait, keep throttling
 		case <-c.clock.After(wait):
 		}
 	}
 
 	d := ma.wd.nextBackoff()
 	ma.wd.setState(wdStateBackoff)
-	select {
-	case <-ctx.Done():
-		return false
-	case <-ma.wdNotify:
-		return true // a deploy replaced the instance during backoff
-	case <-c.clock.After(d):
+	deadline := c.clock.Now().Add(d)
+	for {
+		wait := deadline.Sub(c.clock.Now())
+		if wait <= 0 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			ma.wd.refundBudget()
+			return false
+		case <-ma.wdNotify:
+			if ma.currentInstance() != inst {
+				return true // deploy replaced the instance; its reset cleared the window anyway
+			}
+			continue // config nudge: keep waiting out the backoff
+		case <-c.clock.After(wait):
+		}
 	}
 
 	if !ma.deployMu.TryLock() {
-		return true // a running deploy owns the lifecycle and will poke wdNotify
+		// A running deploy owns the lifecycle and will poke wdNotify.
+		// Give the claimed slot back: no restart happened, and without
+		// the refund a long deploy over a dead instance would drain
+		// the whole budget with zero restarts performed.
+		ma.wd.refundBudget()
+		return true
 	}
 	defer ma.deployMu.Unlock()
 	if ctx.Err() != nil {
+		ma.wd.refundBudget()
 		return false // Destruct won the race; it waits for this goroutine before stopping the child
 	}
 	if ma.currentInstance() != inst {
-		return true
+		return true // deploy replaced the instance; its reset cleared the window anyway
 	}
 
 	if c.runner.Alive(inst.handle) {
