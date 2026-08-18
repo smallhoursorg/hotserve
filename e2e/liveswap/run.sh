@@ -156,7 +156,10 @@ case "$s" in
 esac
 
 echo "=== scenario 9: watchdog restarts the app after a crash ==="
-pid_before=$(body | sed 's/.*pid //')
+# Strict numeric capture: a 502 page must yield empty, never a bogus
+# "pid" that would make the new-pid comparison pass vacuously.
+pid_before=$(body | sed -n 's/.*pid \([0-9][0-9]*\)$/\1/p')
+[ -n "$pid_before" ] || fail "could not capture the app pid before /boom"
 curl -s -o /dev/null --max-time 2 "$PROXY/boom"
 i=0
 new_pid=""
@@ -165,7 +168,7 @@ while [ "$i" -lt 60 ]; do
 	case "$b" in
 	"hello v1"*)
 		new_pid="${b##*pid }"
-		[ "$new_pid" != "$pid_before" ] && break
+		[ -n "$pid_before" ] && [ "$new_pid" != "$pid_before" ] && break
 		;;
 	esac
 	new_pid=""
@@ -184,7 +187,8 @@ case "$s" in
 esac
 
 echo "=== scenario 10: watchdog restarts the app on sustained health failure ==="
-pid_before=$(body | sed 's/.*pid //')
+pid_before=$(body | sed -n 's/.*pid \([0-9][0-9]*\)$/\1/p')
+[ -n "$pid_before" ] || fail "could not capture the app pid before /break"
 curl -s -o /dev/null --max-time 2 "$PROXY/break"
 i=0
 new_pid=""
@@ -193,7 +197,7 @@ while [ "$i" -lt 90 ]; do
 	case "$b" in
 	"hello v1"*)
 		new_pid="${b##*pid }"
-		if [ "$new_pid" != "$pid_before" ]; then
+		if [ -n "$pid_before" ] && [ "$new_pid" != "$pid_before" ]; then
 			# Heal the release inside the replacement's watchdog grace
 			# so it does not inherit the failure.
 			curl -s -o /dev/null --max-time 2 "$PROXY/heal"

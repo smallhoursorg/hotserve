@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 )
@@ -91,7 +92,14 @@ func (p *httpProber) probeOnce(ctx context.Context, url string, timeout time.Dur
 	if err != nil {
 		return err
 	}
-	defer func() { _ = resp.Body.Close() }()
+	// Drain a bounded slice of the body before closing so the
+	// transport can reuse the connection: the watchdog probes forever,
+	// and an undrained body means a fresh TCP handshake per probe. The
+	// cap also means a huge body is discarded, never buffered.
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return fmt.Errorf("health check returned %d", resp.StatusCode)
 	}

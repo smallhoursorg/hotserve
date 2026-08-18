@@ -205,6 +205,10 @@ touched until the next deploy; now a process that exits, or whose
 restarted. If your health endpoint can be slow under load, raise
 `health_timeout` (probe timeouts count as failures) — or set
 `watchdog off` on apps that must keep the old hands-off behavior.
+Health probes also no longer follow redirects (a 3xx now reads as
+unhealthy, for the deploy gate too): if your health endpoint
+redirects — a `/health` → `/health/` trailing slash is the classic —
+point `health_path` at the final path.
 
 ## Webhook API
 

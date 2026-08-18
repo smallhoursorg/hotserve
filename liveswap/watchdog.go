@@ -294,6 +294,10 @@ func (ma *managedApp) parkWatchdog(ctx context.Context, c collaborators) {
 func (ma *managedApp) superviseInstance(ctx context.Context, c collaborators, inst *instance) bool {
 	waitCh := c.runner.Wait(inst.handle) // nil ⇒ Alive polling on the tick below
 	graceUntil := c.clock.Now().Add(c.spec.wdGrace)
+	// The next-probe deadline survives non-tick wakeups: re-arming a
+	// full interval on every wdNotify poke would let sustained config
+	// reload churn postpone health probing indefinitely.
+	tickAt := c.clock.Now().Add(c.spec.healthInterval)
 	ma.wd.arm()
 
 	for {
@@ -311,6 +315,10 @@ func (ma *managedApp) superviseInstance(ctx context.Context, c collaborators, in
 		} else {
 			ma.wd.setState(wdStateWatching)
 		}
+		tickWait := tickAt.Sub(c.clock.Now())
+		if tickWait < 0 {
+			tickWait = 0
+		}
 		select {
 		case <-ctx.Done():
 			return false
@@ -326,7 +334,8 @@ func (ma *managedApp) superviseInstance(ctx context.Context, c collaborators, in
 			c.logger.Warn("watchdog: process exited unexpectedly",
 				zap.String("version", inst.version), zap.Int("pid", inst.handle.state().PID))
 			return ma.handleFailure(ctx, c, inst, failureCrash)
-		case <-c.clock.After(spec.healthInterval):
+		case <-c.clock.After(tickWait):
+			tickAt = c.clock.Now().Add(spec.healthInterval)
 			if ma.currentInstance() != inst {
 				return true
 			}
@@ -376,7 +385,7 @@ func (ma *managedApp) superviseInstance(ctx context.Context, c collaborators, in
 // before stopping the old handle, so a stale instance here always means
 // "a deploy already replaced it" and the watchdog stands down.
 func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *instance, kind failureKind) bool {
-	spec := c.spec
+	var spec *appSpec // (re)read from the live snapshot in the loop below
 	if !c.runner.Alive(inst.handle) {
 		// Never route to a dead port while pacing the restart: a fast
 		// clean 5xx beats dialing it, and the freed port could be
@@ -387,8 +396,18 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 	// full, throttle until the oldest restart slides out, then keep
 	// going. An app taken down by a transient incident comes back on
 	// its own once the incident ends; a deploy (wdNotify) is the
-	// fast path out of the wait.
-	for !ma.wd.consumeBudget(c.clock.Now(), spec.wdRestarts, spec.wdWindow) {
+	// fast path out of the wait. Every iteration re-reads the live
+	// spec: an operator reloading a bigger budget to revive a
+	// throttled app means it NOW, not after the old window drains.
+	for {
+		c = ma.snapshot()
+		spec = c.spec
+		if spec == nil || !spec.watchdogOn {
+			return true // reload turned the watchdog off mid-wait; no slot was claimed
+		}
+		if ma.wd.consumeBudget(c.clock.Now(), spec.wdRestarts, spec.wdWindow) {
+			break
+		}
 		wait := ma.wd.untilBudgetFrees(c.clock.Now(), spec.wdWindow)
 		ma.wd.setState(wdStateThrottled)
 		alive := c.runner.Alive(inst.handle)
@@ -408,10 +427,7 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 			if ma.currentInstance() != inst {
 				return true // a deploy replaced the instance and reset the budget
 			}
-			if ma.watchdogDisabled() {
-				return true // reload turned the watchdog off mid-wait; no slot was claimed
-			}
-			continue // config nudge: recompute the wait, keep throttling
+			continue // config nudge: re-read the spec, recompute the wait
 		case <-c.clock.After(wait):
 		}
 	}
@@ -430,7 +446,13 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 			return false
 		case <-ma.wdNotify:
 			if ma.currentInstance() != inst {
-				return true // deploy replaced the instance; its reset cleared the window anyway
+				// Replaced mid-wait. A deploy's reset makes the refund
+				// a no-op; an ensureRunning relaunch (reload during
+				// the wait) does NOT reset, and without the refund its
+				// unbudgeted restart would leave a phantom slot in the
+				// window.
+				ma.wd.refundBudget()
+				return true
 			}
 			if ma.watchdogDisabled() {
 				ma.wd.refundBudget()
@@ -455,15 +477,32 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 		return false // Destruct won the race; it waits for this goroutine before stopping the child
 	}
 	if ma.currentInstance() != inst {
-		return true // deploy replaced the instance; its reset cleared the window anyway
+		ma.wd.refundBudget() // replaced mid-wait (see the backoff arm); no restart happened
+		return true
 	}
-	if ma.watchdogDisabled() {
-		// A reload during the final wait can land without its poke
-		// being consumed (the timer may fire first). Re-check before
-		// acting: `watchdog off` must never be followed by one more
-		// restart — least of all one that kills a live process.
+	// A reload during the final wait can land without its poke being
+	// consumed (the timer may fire first). Re-read the live spec
+	// before acting: `watchdog off` must never be followed by one more
+	// restart — least of all one that kills a live process.
+	c = ma.snapshot()
+	spec = c.spec
+	if spec == nil || !spec.watchdogOn {
 		ma.wd.refundBudget()
 		return true
+	}
+
+	// A health verdict ages while we wait: the dependency outage that
+	// failed the probes may be long over, and killing a process that
+	// has been serving fine for the last nine minutes of a ten-minute
+	// throttle helps nobody. One fresh probe settles it.
+	if kind == failureHealth && spec.healthPath != "" && c.runner.Alive(inst.handle) {
+		if err := c.prober.probeOnce(ctx,
+			"http://127.0.0.1:"+portString(inst.port)+spec.healthPath, spec.healthTimeout); err == nil {
+			ma.wd.refundBudget()
+			c.logger.Info("watchdog: instance recovered during the restart wait; restart canceled",
+				zap.String("version", inst.version))
+			return true // re-arm and keep watching the recovered instance
+		}
 	}
 
 	// Stop can block for up to `grace` while deployMu is held, so a

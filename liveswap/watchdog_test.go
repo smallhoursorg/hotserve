@@ -479,6 +479,95 @@ func TestWatchdogUnroutesWhenRelaunchKeepsFailing(t *testing.T) {
 	})
 }
 
+func TestWatchdogCancelsRestartWhenInstanceRecovers(t *testing.T) {
+	rig := newTestRig(t)
+	rig.spec.wdGrace = 0
+	deployV1(t, rig)
+	rig.prober.setProbeErr(errors.New("dependency outage"))
+	rig.startWatchdogT(t)
+
+	advanceUntil(t, rig, rig.spec.healthInterval, "threshold reached, backoff pending", func() bool {
+		return rig.ma.wd.currentState() == wdStateBackoff
+	})
+	// The outage ends while the restart is pending: the fresh re-probe
+	// must cancel the restart instead of killing a recovered process.
+	rig.prober.setProbeErr(nil)
+	advanceUntil(t, rig, time.Second, "restart canceled, back to watching", func() bool {
+		return rig.ma.wd.currentState() == wdStateWatching
+	})
+	if got := rig.runner.startCount(); got != 1 {
+		t.Fatalf("recovered instance must not be restarted, got %d starts", got)
+	}
+	if got := rig.runner.stopCount(); got != 0 {
+		t.Fatalf("recovered instance must not be stopped, got %d stops", got)
+	}
+	if s := rig.ma.status(); s.Watchdog.RestartsInWindow != 0 {
+		t.Fatalf("canceled restart must refund its budget slot: %+v", s.Watchdog)
+	}
+}
+
+func TestWatchdogReloadRaisingBudgetEndsThrottle(t *testing.T) {
+	rig := newTestRig(t)
+	rig.spec.wdRestarts = 1 // default 10m window: the throttle wait is long
+	deployV1(t, rig)
+	rig.startWatchdogT(t)
+	waitUntil(t, "watchdog to arm", func() bool {
+		s := rig.ma.wd.currentState()
+		return s == wdStateGrace || s == wdStateWatching
+	})
+
+	rig.runner.handleAt(0).kill()
+	advanceUntil(t, rig, time.Second, "the single budgeted restart", func() bool {
+		return rig.runner.startCount() == 2
+	})
+	rig.runner.handleAt(1).kill()
+	advanceUntil(t, rig, time.Second, "throttle once the window is full", func() bool {
+		return rig.ma.wd.currentState() == wdStateThrottled
+	})
+
+	// The operator reloads a bigger budget to revive the app: the
+	// throttle loop must re-read the live spec and restart now — not
+	// after the old 10m window drains.
+	reloadSpec(rig, func(s *appSpec) { s.wdRestarts = 5 })
+	advanceUntil(t, rig, time.Second, "restart under the raised budget", func() bool {
+		return rig.runner.startCount() == 3
+	})
+}
+
+func TestWatchdogRefundsSlotWhenRecoveryReplacesInstance(t *testing.T) {
+	rig := newTestRig(t)
+	rig.spec.wdRestarts = 1
+	deployV1(t, rig)
+	rig.startWatchdogT(t)
+	waitUntil(t, "watchdog to arm", func() bool {
+		s := rig.ma.wd.currentState()
+		return s == wdStateGrace || s == wdStateWatching
+	})
+
+	rig.runner.handleAt(0).kill()
+	waitUntil(t, "backoff pending with the slot claimed", func() bool {
+		return rig.ma.wd.currentState() == wdStateBackoff
+	})
+	// A reload-triggered ensureRunning relaunches the dead instance
+	// outside the watchdog (no wd.reset on that path). The claimed
+	// slot must be refunded, or this unbudgeted restart leaves a
+	// phantom in the window.
+	must(t, rig.ma.ensureRunning())
+	waitUntil(t, "watchdog adopts the recovered instance", func() bool {
+		s := rig.ma.wd.currentState()
+		return s == wdStateGrace || s == wdStateWatching
+	})
+	if s := rig.ma.status(); s.Watchdog.RestartsInWindow != 0 {
+		t.Fatalf("abandoned slot must be refunded after recovery replaced the instance: %+v", s.Watchdog)
+	}
+
+	// The refunded slot must be spendable on the next genuine crash.
+	rig.runner.handleAt(rig.runner.startCount() - 1).kill()
+	advanceUntil(t, rig, time.Second, "budgeted restart still available", func() bool {
+		return rig.ma.status().Running && rig.ma.status().Watchdog.RestartsInWindow == 1
+	})
+}
+
 func TestWatchdogGraceFlapBreaksHealthyStreak(t *testing.T) {
 	w := &watchdogState{jitter: func() float64 { return 0.5 }}
 	base := time.Unix(1_700_000_000, 0)
