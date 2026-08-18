@@ -15,9 +15,17 @@ import (
 )
 
 // fakeClock advances instantly on Sleep so pipeline tests never wait.
+// After registers a waiter that Advance/Sleep fire once the fake time
+// passes its deadline, which is how watchdog tests drive the loop.
 type fakeClock struct {
-	mu  sync.Mutex
-	now time.Time
+	mu      sync.Mutex
+	now     time.Time
+	waiters []fakeWaiter
+}
+
+type fakeWaiter struct {
+	at time.Time
+	ch chan time.Time
 }
 
 func newFakeClock() *fakeClock {
@@ -33,19 +41,48 @@ func (c *fakeClock) Now() time.Time {
 func (c *fakeClock) Sleep(d time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.now = c.now.Add(d)
+	c.advanceLocked(d)
 }
 
 func (c *fakeClock) Advance(d time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.now = c.now.Add(d)
+	c.advanceLocked(d)
 }
 
-// fakeHandle is a runner handle whose liveness tests control.
+func (c *fakeClock) advanceLocked(d time.Duration) {
+	c.now = c.now.Add(d)
+	kept := c.waiters[:0]
+	for _, w := range c.waiters {
+		if !w.at.After(c.now) {
+			w.ch <- c.now
+		} else {
+			kept = append(kept, w)
+		}
+	}
+	c.waiters = kept
+}
+
+func (c *fakeClock) After(d time.Duration) <-chan time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ch := make(chan time.Time, 1)
+	if d <= 0 {
+		ch <- c.now
+		return ch
+	}
+	c.waiters = append(c.waiters, fakeWaiter{at: c.now.Add(d), ch: ch})
+	return ch
+}
+
+// fakeHandle is a runner handle whose liveness tests control. done
+// mirrors execHandle's reaper channel: closed once the process "dies".
+// Handles built as bare literals (no done channel) exercise the
+// Wait-returns-nil polling fallback.
 type fakeHandle struct {
 	id    string
 	alive bool
+	done  chan struct{}
 	mu    sync.Mutex
 }
 
@@ -57,10 +94,17 @@ func (h *fakeHandle) isAlive() bool {
 	return h.alive
 }
 
-func (h *fakeHandle) setAlive(v bool) {
+func (h *fakeHandle) kill() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.alive = v
+	h.alive = false
+	if h.done != nil {
+		select {
+		case <-h.done:
+		default:
+			close(h.done)
+		}
+	}
 }
 
 // fakeRunner records starts and stops; RunOnce failure is scriptable.
@@ -80,7 +124,7 @@ func (r *fakeRunner) Start(spec startSpec) (handle, error) {
 	if r.startErr != nil {
 		return nil, r.startErr
 	}
-	h := &fakeHandle{id: fmt.Sprintf("h%d", len(r.handles)), alive: true}
+	h := &fakeHandle{id: fmt.Sprintf("h%d", len(r.handles)), alive: true, done: make(chan struct{})}
 	r.started = append(r.started, spec)
 	r.handles = append(r.handles, h)
 	return h, nil
@@ -103,9 +147,17 @@ func (r *fakeRunner) Stop(h handle, _ time.Duration) error {
 	r.stopped = append(r.stopped, h)
 	r.mu.Unlock()
 	if fh, ok := h.(*fakeHandle); ok {
-		fh.setAlive(false)
+		fh.kill()
 	}
 	return nil
+}
+
+func (r *fakeRunner) Wait(h handle) <-chan struct{} {
+	fh, ok := h.(*fakeHandle)
+	if !ok || fh.done == nil {
+		return nil
+	}
+	return fh.done
 }
 
 func (r *fakeRunner) Reattach(_ handleState) (handle, bool) {
@@ -125,9 +177,34 @@ func (r *fakeRunner) stopCount() int {
 	return len(r.stopped)
 }
 
-// fakeProber approves or rejects the health gate by script.
+func (r *fakeRunner) setStartErr(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.startErr = err
+}
+
+func (r *fakeRunner) startCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.started)
+}
+
+func (r *fakeRunner) handleAt(i int) *fakeHandle {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.handles[i]
+}
+
+// fakeProber approves or rejects the health gate by script. probeOnce
+// (the watchdog path) consumes the result queue first, then repeats
+// probeErr; both are settable while the watchdog goroutine runs.
 type fakeProber struct {
 	err error
+
+	mu           sync.Mutex
+	probeErr     error
+	probeResults []error
+	probeCalls   int
 }
 
 func (p *fakeProber) waitHealthy(_ context.Context, _ string, alive func() bool, _ healthConfig) error {
@@ -135,6 +212,30 @@ func (p *fakeProber) waitHealthy(_ context.Context, _ string, alive func() bool,
 		return errors.New("process exited before becoming healthy")
 	}
 	return p.err
+}
+
+func (p *fakeProber) probeOnce(_ context.Context, _ string, _ time.Duration) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.probeCalls++
+	if len(p.probeResults) > 0 {
+		err := p.probeResults[0]
+		p.probeResults = p.probeResults[1:]
+		return err
+	}
+	return p.probeErr
+}
+
+func (p *fakeProber) setProbeErr(err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.probeErr = err
+}
+
+func (p *fakeProber) calls() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.probeCalls
 }
 
 // fakeFetcher materializes a release dir without any network.
@@ -193,6 +294,11 @@ func testSpec(t *testing.T) *appSpec {
 		deadline:        5 * time.Minute,
 		drain:           5 * time.Second,
 		grace:           10 * time.Second,
+		watchdogOn:      true,
+		wdFailures:      3,
+		wdGrace:         30 * time.Second,
+		wdRestarts:      5,
+		wdWindow:        10 * time.Minute,
 		keep:            2,
 		maxArtifactSize: 1 << 20,
 		dirs:            newAppDirs(root, "demo"),

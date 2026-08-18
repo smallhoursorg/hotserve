@@ -35,6 +35,13 @@
 # 			command node server.js
 # 			env_file /etc/hotserve/myapp.env
 # 			# pre_start node migrate.js
+#
+# 			# Crash/health watchdog (on by default). Defaults shown:
+# 			# watchdog          on     # off = never auto-restart
+# 			# watchdog_failures 3      # consecutive failed health probes
+# 			# watchdog_grace    30s    # post-start probe-failure amnesty
+# 			# watchdog_restarts 5      # budget per watchdog_window
+# 			# watchdog_window   10m
 # 		}
 # 	}
 #

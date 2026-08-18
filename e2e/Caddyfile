@@ -39,6 +39,9 @@
 			deadline 10s
 			drain 500ms
 			grace 3s
+			# Short watchdog grace so the health-restart scenario can
+			# heal the replacement (and re-probe) within seconds.
+			watchdog_grace 5s
 			keep 2
 		}
 	}

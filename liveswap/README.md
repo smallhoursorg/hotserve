@@ -86,6 +86,11 @@ COPY --from=builder /usr/bin/caddy /usr/bin/caddy
 			# deadline          5m              # abort if not healthy in time
 			# drain             5s              # pause between cutover and SIGTERM
 			# grace             10s             # SIGTERM → grace → SIGKILL
+			# watchdog          on              # restart on crash / sustained health failure
+			# watchdog_failures 3               # consecutive failed probes before a restart
+			# watchdog_grace    30s             # post-start window where probe failures don't count
+			# watchdog_restarts 5               # restart budget within watchdog_window
+			# watchdog_window   10m             # sliding window for the budget
 			# keep              5               # release dirs retained on disk
 			# max_artifact_size 100MB
 		}
@@ -147,8 +152,63 @@ resolved at config load.
 | `deadline` | `5m` | Bound on pre_start and the health gate |
 | `drain` | `5s` | In-flight grace after cutover, before SIGTERM |
 | `grace` | `10s` | SIGTERM → SIGKILL window |
+| `watchdog` | `on` | Continuous supervision: restart on crash or sustained health failure (`off` to disable) |
+| `watchdog_failures` | `3` | Consecutive failed probes before a restart; one pass resets the count |
+| `watchdog_grace` | `30s` | After every (re)start, probe failures don't count until this elapses; a crash always counts |
+| `watchdog_restarts` | `5` | Restart budget within `watchdog_window`; crash and health restarts share it |
+| `watchdog_window` | `10m` | Sliding window for the restart budget |
 | `keep` | `5` | Release dirs retained (GC after success) |
 | `max_artifact_size` | `100MB` | Download cap; decompressed cap is 10× |
+
+## Watchdog
+
+Deploys and boot recovery start instances; the watchdog keeps them
+running. It watches the current instance continuously and relaunches
+the **same version** when the process exits, or when the health
+endpoint (`health_path`, probed every `health_interval`) fails
+`watchdog_failures` consecutive probes. With `health_path off` the
+watchdog is liveness-only: crashes still restart, health does not
+apply.
+
+Restart pacing is deliberately not configurable: exponential backoff
+from 1s, doubling to a 60s cap, with ±20% jitter; the backoff resets
+only after the app has been continuously healthy for
+`max(30s, watchdog_grace)`. Every restart re-arms `watchdog_grace`, so
+a slow-booting app is not probed into a kill loop.
+
+The watchdog **never gives up**. The restart budget is a rate
+limiter, not a give-up point: after `watchdog_restarts` restarts
+inside `watchdog_window` it *throttles* — logs an error, reports
+`"state":"throttled"` in the status JSON, unroutes a dead instance so
+the proxy fails cleanly instead of dialing a dead port, waits for the
+oldest restart to slide out of the window, and tries again. An app
+taken down by a transient incident (a traffic flood, a dependency
+outage) therefore comes back on its own once the incident ends, with
+nobody at the keyboard; a persistent crash loop costs at most
+`watchdog_restarts` restarts per `watchdog_window`, forever — which is
+also the bound on anyone who can make your health endpoint fail. A
+successful deploy is the fast path out of a throttle wait: it resets
+the budget and backoff immediately. A long-running throttle loop means
+the release itself is broken — watch `restarts_in_window` in the
+status JSON (loop alerting is on the roadmap). Health probes never
+follow redirects: a 3xx answer is simply "not 2xx".
+
+The status JSON's `watchdog` object reports `state`
+(`grace|watching|backoff|throttled|disabled|idle`),
+`consecutive_failures`, `restarts_in_window`, `last_restart_at`,
+`last_restart_cause` (`crash|health`) and `last_failure`.
+
+**Upgrading from v0.1.0:** the watchdog is new and **on by default**,
+which changes one promise: previously a promoted process was never
+touched until the next deploy; now a process that exits, or whose
+`health_path` fails `watchdog_failures` consecutive probes, is
+restarted. If your health endpoint can be slow under load, raise
+`health_timeout` (probe timeouts count as failures) — or set
+`watchdog off` on apps that must keep the old hands-off behavior.
+Health probes also no longer follow redirects (a 3xx now reads as
+unhealthy, for the deploy gate too): if your health endpoint
+redirects — a `/health` → `/health/` trailing slash is the classic —
+point `health_path` at the final path.
 
 ## Webhook API
 
@@ -192,7 +252,8 @@ in roughly soak + drain (~20s). Budget your CI step timeout for
 409 until the first one finishes.
 
 `GET /<app>` (same secret header) returns status: phase, current
-version, port, pid, last deploy result.
+version, port, pid, last deploy result, and the watchdog's state
+(restart counts, last restart cause).
 
 The tarball's contents must sit at the archive root (`tar -czf
 app.tar.gz -C dist .`), with versions matching `[A-Za-z0-9._-]{1,64}`.
@@ -315,7 +376,9 @@ failure the previous version never stopped serving.
 - **No post-promote auto-revert.** Once traffic cuts over, the deploy
   is done; if the new version misbehaves later, re-POST the previous
   version (its release dir is still on disk — that's what `keep` is
-  for). Everything *before* promote is automatically contained.
+  for). Everything *before* promote is automatically contained. The
+  watchdog restarts the *same* version on crash or sustained health
+  failure — it never reverts to an older one.
 - **One deploy at a time per app** — concurrent webhooks get 409, and
   CI retries are the queue. Different apps deploy in parallel.
 - **Single node by design.** This is for the 1-server indie stack, not

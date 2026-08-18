@@ -14,7 +14,7 @@ Built in:
 
 | Module | What it does |
 |---|---|
-| **[liveswap](liveswap/)** | Zero-downtime app deploys: webhook from CI, artifact download, migrations, health-gated start, atomic traffic cutover, graceful stop, versioned releases with rollback. Your apps run as supervised child processes — Node.js, Go, anything that listens on a port. |
+| **[liveswap](liveswap/)** | Zero-downtime app deploys: webhook from CI, artifact download, migrations, health-gated start, atomic traffic cutover, graceful stop, versioned releases with rollback. Your apps run as supervised child processes — Node.js, Go, anything that listens on a port — with a continuous watchdog that restarts them on crash or sustained health failure (bounded by a restart budget, with backoff). |
 | **[penaltybox](penaltybox/)** | Rate limiting driven by your app's `X-Rate-Limit-Level` hint headers — weighted sliding-window budgets, tiers, and a penalty box for clients that cross them. |
 | **cache** | HTTP page caching via [Souin](https://github.com/darkweak/souin) with in-memory [Otter](https://github.com/darkweak/storages) storage. |
 | everything Caddy has | Automatic HTTPS, HTTP/2 + HTTP/3, the Caddyfile, the admin API — hotserve *is* Caddy underneath, with the modules above compiled in. |
@@ -129,10 +129,10 @@ snippets, and every option: [liveswap/README.md](liveswap/README.md).
   UID via the future systemd runner is the alternative) closes it.
   This is the next security milestone, ahead of the items below.
 - Hosted APT/APK repositories with package signing and auto-updates
-- Continuous watchdog: restart a running app on crash or sustained
-  health failure (today apps are relaunched at boot and replaced on
-  deploy)
-- A metrics/alerts module to sit alongside liveswap and penaltybox
+- A metrics/alerts module to sit alongside liveswap and penaltybox —
+  first customer: alerting when the watchdog is stuck in a restart
+  loop (it retries forever by design, so the loop itself is the signal
+  that a release is broken)
 
 ## Development
 

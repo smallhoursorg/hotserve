@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -42,12 +43,10 @@ func main() {
 	if b, err := os.ReadFile("version.txt"); err == nil {
 		version = strings.TrimSpace(string(b))
 	}
-	_, broken := os.LookupEnv("NEVER_SET")
-	if _, err := os.Stat("broken"); err == nil {
-		broken = true
-	}
 	http.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
-		if broken {
+		// Checked per request (not once at boot) so tests can break and
+		// heal a RUNNING instance, which is what a watchdog reacts to.
+		if _, err := os.Stat("broken"); err == nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
@@ -142,20 +141,7 @@ http://localhost:9081 {
 
 func postDeploy(t *testing.T, artifactURL, version string) (*http.Response, string) {
 	t.Helper()
-	body := fmt.Sprintf(`{"url":%q,"version":%q}`, artifactURL, version)
-	req, err := http.NewRequest(http.MethodPost, "http://localhost:9081/demo", strings.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set(secretHeader, "itest-secret")
-	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	data, _ := io.ReadAll(resp.Body)
-	return resp, string(data)
+	return postDeployApp(t, "demo", artifactURL, version)
 }
 
 func getBody(t *testing.T, url string) (int, string) {
@@ -200,15 +186,7 @@ func TestIntegrationDeployLifecycle(t *testing.T) {
 		"/demo-v2.tar.gz":        packRelease(t, bin, "v2", false),
 		"/demo-v3-broken.tar.gz": packRelease(t, bin, "v3", true),
 	}
-	artifactSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		data, ok := artifacts[r.URL.Path]
-		if !ok {
-			http.NotFound(w, r)
-			return
-		}
-		_, _ = w.Write(data)
-	}))
-	defer artifactSrv.Close()
+	artifactSrv := serveArtifacts(t, artifacts)
 
 	// The allowlist entry declares the artifact server's literal port
 	// (there is no wildcard), so the config is built after the server.
@@ -373,9 +351,71 @@ func TestIntegrationDeployLifecycle(t *testing.T) {
 	})
 }
 
-func getStatus(t *testing.T) (int, string) {
+// watchdogConfig is integrationConfig with fast watchdog settings and
+// a configurable restart budget/window. The app name must be unique
+// per test function: the UsagePool is process-global, so a `demo`
+// still running from another test would be adopted here.
+func watchdogConfig(root, artifactPort, app string, restarts int, window string) string {
+	return fmt.Sprintf(`{
+	skip_install_trust
+	admin localhost:2999
+	http_port 9080
+	grace_period 1ns
+
+	liveswap {
+		root %[1]s
+		allow_insecure_http
+		artifact_allowlist 127.0.0.1:%[2]s
+		webhook_secret itest-secret
+
+		app %[3]s {
+			command ./server
+			health_interval 50ms
+			health_timeout 1s
+			soak 100ms
+			deadline 5s
+			drain 1ms
+			grace 1s
+			watchdog_grace 200ms
+			watchdog_failures 3
+			watchdog_restarts %[4]d
+			watchdog_window %[5]s
+			keep 2
+		}
+	}
+}
+http://localhost:9080 {
+	reverse_proxy {
+		dynamic liveswap %[3]s
+	}
+}
+http://localhost:9081 {
+	liveswap_webhook
+}
+`, root, artifactPort, app, restarts, window)
+}
+
+func postDeployApp(t *testing.T, app, artifactURL, version string) (*http.Response, string) {
 	t.Helper()
-	req, _ := http.NewRequest(http.MethodGet, "http://localhost:9081/demo", nil)
+	body := fmt.Sprintf(`{"url":%q,"version":%q}`, artifactURL, version)
+	req, err := http.NewRequest(http.MethodPost, "http://localhost:9081/"+app, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(secretHeader, "itest-secret")
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	return resp, string(data)
+}
+
+func getStatusApp(t *testing.T, app string) (int, string) {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodGet, "http://localhost:9081/"+app, nil)
 	req.Header.Set(secretHeader, "itest-secret")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -385,4 +425,178 @@ func getStatus(t *testing.T) (int, string) {
 	var buf bytes.Buffer
 	_, _ = buf.ReadFrom(resp.Body)
 	return resp.StatusCode, buf.String()
+}
+
+func serveArtifacts(t *testing.T, artifacts map[string][]byte) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, ok := artifacts[r.URL.Path]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write(data)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// tryBody is getBody without the fatals, for polling through the
+// window in which the proxy legitimately 502s.
+func tryBody() (int, string) {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get("http://localhost:9080/")
+	if err != nil {
+		return 0, ""
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(data)
+}
+
+func currentPID(t *testing.T) int {
+	t.Helper()
+	code, page := getBody(t, "http://localhost:9080/")
+	m := pidRe.FindStringSubmatch(page)
+	if code != http.StatusOK || m == nil {
+		t.Fatalf("no pid in proxied response: %d %q", code, page)
+	}
+	pid, err := strconv.Atoi(m[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pid
+}
+
+func pollUntil(t *testing.T, timeout time.Duration, desc string, cond func() bool) {
+	t.Helper()
+	pollFor(t, timeout, 25*time.Millisecond, desc, cond)
+}
+
+func TestIntegrationWatchdogRestarts(t *testing.T) {
+	bin := buildTestApp(t)
+	root := t.TempDir()
+	artifactSrv := serveArtifacts(t, map[string][]byte{
+		"/demo-v1.tar.gz": packRelease(t, bin, "v1", false),
+	})
+	artifactURL, err := url.Parse(artifactSrv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const app = "wdcrash"
+	tester := caddytest.NewTester(t)
+	tester.InitServer(watchdogConfig(root, artifactURL.Port(), app, 50, "10m"), "caddyfile")
+
+	if resp, body := postDeployApp(t, app, artifactSrv.URL+"/demo-v1.tar.gz", "v1"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("deploy v1: %d %s", resp.StatusCode, body)
+	}
+
+	t.Run("SIGKILLed app comes back with a new pid", func(t *testing.T) {
+		pid := currentPID(t)
+		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+			t.Fatal(err)
+		}
+		pollUntil(t, 15*time.Second, "restart with a new pid", func() bool {
+			code, page := tryBody()
+			if code != http.StatusOK {
+				return false
+			}
+			m := pidRe.FindStringSubmatch(page)
+			return m != nil && m[1] != strconv.Itoa(pid)
+		})
+		_, status := getStatusApp(t, app)
+		if !strings.Contains(status, `"last_restart_cause":"crash"`) {
+			t.Fatalf("status after crash restart: %s", status)
+		}
+	})
+
+	t.Run("sustained health failure triggers a restart", func(t *testing.T) {
+		pid := currentPID(t)
+		brokenPath := filepath.Join(root, app, "releases", "v1", "broken")
+		if err := os.WriteFile(brokenPath, []byte("1"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		pollUntil(t, 20*time.Second, "health-triggered restart", func() bool {
+			code, page := tryBody()
+			if code != http.StatusOK {
+				return false
+			}
+			m := pidRe.FindStringSubmatch(page)
+			return m != nil && m[1] != strconv.Itoa(pid)
+		})
+		// Heal the release so the replacement stays up.
+		if err := os.Remove(brokenPath); err != nil {
+			t.Fatal(err)
+		}
+		_, status := getStatusApp(t, app)
+		if !strings.Contains(status, `"last_restart_cause":"health"`) {
+			t.Fatalf("status after health restart: %s", status)
+		}
+	})
+}
+
+func TestIntegrationWatchdogThrottleAutoRecovers(t *testing.T) {
+	bin := buildTestApp(t)
+	root := t.TempDir()
+	artifactSrv := serveArtifacts(t, map[string][]byte{
+		"/demo-v1.tar.gz": packRelease(t, bin, "v1", false),
+	})
+	artifactURL, err := url.Parse(artifactSrv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const app = "wdex"
+	tester := caddytest.NewTester(t)
+	tester.InitServer(watchdogConfig(root, artifactURL.Port(), app, 1, "10s"), "caddyfile")
+
+	if resp, body := postDeployApp(t, app, artifactSrv.URL+"/demo-v1.tar.gz", "v1"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("deploy v1: %d %s", resp.StatusCode, body)
+	}
+
+	// Budget is 1 per 10s window: the first kill restarts immediately,
+	// the second throttles until the window frees.
+	pid := currentPID(t)
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	pollUntil(t, 15*time.Second, "the single budgeted restart", func() bool {
+		code, page := tryBody()
+		if code != http.StatusOK {
+			return false
+		}
+		m := pidRe.FindStringSubmatch(page)
+		return m != nil && m[1] != strconv.Itoa(pid)
+	})
+	secondPID := currentPID(t)
+	if err := syscall.Kill(secondPID, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	pollUntil(t, 15*time.Second, "throttle once the window is full", func() bool {
+		_, status := getStatusApp(t, app)
+		return strings.Contains(status, `"state":"throttled"`)
+	})
+	pollUntil(t, 5*time.Second, "clean 5xx while the dead app waits", func() bool {
+		code, _ := tryBody()
+		return code >= 500
+	})
+
+	// Never give up: with no deploy and no operator, the watchdog
+	// restarts on its own once the oldest restart slides out of the
+	// window (~10s), and the app serves again.
+	pollUntil(t, 30*time.Second, "auto-recovery without a deploy", func() bool {
+		code, page := tryBody()
+		if code != http.StatusOK || !strings.Contains(page, "hello v1") {
+			return false
+		}
+		m := pidRe.FindStringSubmatch(page)
+		return m != nil && m[1] != strconv.Itoa(secondPID)
+	})
+	if _, status := getStatusApp(t, app); strings.Contains(status, `"state":"throttled"`) {
+		t.Fatalf("throttle must clear after the auto-recovery: %s", status)
+	}
+}
+
+func getStatus(t *testing.T) (int, string) {
+	t.Helper()
+	return getStatusApp(t, "demo")
 }
