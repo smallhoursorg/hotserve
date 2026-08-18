@@ -466,6 +466,11 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 		return true
 	}
 
+	// Stop can block for up to `grace` while deployMu is held, so a
+	// webhook landing in that window gets a 409 — the same contract as
+	// a deploy's own drain+stop-old phase (one lifecycle operation at
+	// a time), and the same bound Destruct accepts when it waits for
+	// this goroutine at shutdown.
 	if c.runner.Alive(inst.handle) {
 		if err := c.runner.Stop(inst.handle, spec.grace); err != nil {
 			c.logger.Warn("watchdog: stopping unhealthy instance", zap.Error(err))
@@ -483,7 +488,9 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 			zap.String("version", inst.version), zap.Error(err))
 		return true
 	}
-	ma.publishInstance(c, newInst)
+	if err := ma.publishInstance(c, newInst); err != nil {
+		c.logger.Warn("persisting restarted instance state", zap.Error(err))
+	}
 	ma.wd.recordRestart(c.clock.Now(), kind)
 	c.logger.Warn("watchdog: restarted app",
 		zap.String("cause", kind.String()),

@@ -198,6 +198,14 @@ The status JSON's `watchdog` object reports `state`
 `consecutive_failures`, `restarts_in_window`, `last_restart_at`,
 `last_restart_cause` (`crash|health`) and `last_failure`.
 
+**Upgrading from v0.1.0:** the watchdog is new and **on by default**,
+which changes one promise: previously a promoted process was never
+touched until the next deploy; now a process that exits, or whose
+`health_path` fails `watchdog_failures` consecutive probes, is
+restarted. If your health endpoint can be slow under load, raise
+`health_timeout` (probe timeouts count as failures) — or set
+`watchdog off` on apps that must keep the old hands-off behavior.
+
 ## Webhook API
 
 `POST https://deploy.example.com/<app>`, authenticated with either

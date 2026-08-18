@@ -353,20 +353,15 @@ func (ma *managedApp) Deploy(ctx context.Context, req deployRequest) (err error)
 	// ignored: a CI client hanging up must not abort stop-old or GC.
 	ma.setPhase(c, "promoting")
 	newInst := &instance{version: req.Version, port: port, handle: newHandle}
-	ma.mu.Lock()
-	ma.current = newInst
-	ma.mu.Unlock()
-	ma.activePort.Store(int64(port)) // ← the cutover
+	if err := ma.publishInstance(c, newInst); err != nil { // ← the cutover
+		logger.Error("state persistence failed; deploys still work but a Caddy restart will not know about this version", zap.Error(err))
+	}
 
 	// A successful deploy is the fast path out of any watchdog wait:
 	// it clears the failure count, restart budget and backoff, then
 	// wakes the loop to adopt the new instance.
 	ma.wd.reset()
 	ma.pokeWatchdog()
-
-	if err := ma.persistState(c, newInst); err != nil {
-		logger.Error("state persistence failed; deploys still work but a Caddy restart will not know about this version", zap.Error(err))
-	}
 
 	if old != nil && c.runner.Alive(old.handle) {
 		ma.setPhase(c, "draining")
@@ -426,7 +421,9 @@ func (ma *managedApp) ensureRunning() error {
 	if err != nil {
 		return fmt.Errorf("relaunching %s: %w", st.CurrentVersion, err)
 	}
-	ma.publishInstance(c, inst)
+	if err := ma.publishInstance(c, inst); err != nil {
+		c.logger.Warn("persisting recovered state", zap.Error(err))
+	}
 	c.logger.Info("relaunched current version after restart",
 		zap.String("version", st.CurrentVersion), zap.Int("port", inst.port))
 	ma.pokeWatchdog()
@@ -466,15 +463,17 @@ func (ma *managedApp) launchVersion(c collaborators, version string) (*instance,
 }
 
 // publishInstance installs inst as current, cuts traffic over to it
-// and persists it for the next restart.
-func (ma *managedApp) publishInstance(c collaborators, inst *instance) {
+// and persists it for the next restart. It is the ONLY place current
+// and activePort are installed — the watchdog's stale-instance guards
+// depend on the swap-before-route ordering here, so promote, recovery
+// and watchdog restarts must all go through it. A persist failure is
+// returned, not logged: each caller has its own severity and message.
+func (ma *managedApp) publishInstance(c collaborators, inst *instance) error {
 	ma.mu.Lock()
 	ma.current = inst
 	ma.mu.Unlock()
 	ma.activePort.Store(int64(inst.port))
-	if err := ma.persistState(c, inst); err != nil {
-		c.logger.Warn("persisting instance state", zap.Error(err))
-	}
+	return ma.persistState(c, inst)
 }
 
 // unrouteIf clears activePort only while inst is still current, under

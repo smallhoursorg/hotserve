@@ -31,18 +31,26 @@ func (rig *testRig) startWatchdogT(t *testing.T) {
 	t.Cleanup(rig.ma.stopWatchdog)
 }
 
-// waitUntil polls (real time) for an observable side effect of the
-// watchdog goroutine.
-func waitUntil(t *testing.T, desc string, cond func() bool) {
+// pollFor is the one real-time poll loop behind both test builds:
+// waitUntil (unit: fake clock, tight cadence) and the integration
+// suite's pollUntil (real processes, coarser cadence) delegate here.
+func pollFor(t *testing.T, timeout, step time.Duration, desc string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return
 		}
-		time.Sleep(2 * time.Millisecond)
+		time.Sleep(step)
 	}
 	t.Fatalf("timed out waiting for %s", desc)
+}
+
+// waitUntil polls (real time) for an observable side effect of the
+// watchdog goroutine.
+func waitUntil(t *testing.T, desc string, cond func() bool) {
+	t.Helper()
+	pollFor(t, 5*time.Second, 2*time.Millisecond, desc, cond)
 }
 
 // advanceUntil repeatedly advances the fake clock in step increments
@@ -265,8 +273,9 @@ func TestWatchdogIgnoresDeployStoppedOldInstance(t *testing.T) {
 		s := rig.ma.wd.currentState()
 		return s == wdStateGrace || s == wdStateWatching
 	})
-	rig.clock.Advance(rig.spec.healthInterval * 3)
-	waitUntil(t, "a probe on the new instance", func() bool { return rig.prober.calls() >= 1 })
+	advanceUntil(t, rig, rig.spec.healthInterval, "a probe on the new instance", func() bool {
+		return rig.prober.calls() >= 1
+	})
 	if got := rig.runner.startCount(); got != 2 {
 		t.Fatalf("old instance's exit must not trigger a restart, got %d starts", got)
 	}

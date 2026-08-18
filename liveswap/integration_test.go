@@ -141,20 +141,7 @@ http://localhost:9081 {
 
 func postDeploy(t *testing.T, artifactURL, version string) (*http.Response, string) {
 	t.Helper()
-	body := fmt.Sprintf(`{"url":%q,"version":%q}`, artifactURL, version)
-	req, err := http.NewRequest(http.MethodPost, "http://localhost:9081/demo", strings.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set(secretHeader, "itest-secret")
-	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	data, _ := io.ReadAll(resp.Body)
-	return resp, string(data)
+	return postDeployApp(t, "demo", artifactURL, version)
 }
 
 func getBody(t *testing.T, url string) (int, string) {
@@ -199,15 +186,7 @@ func TestIntegrationDeployLifecycle(t *testing.T) {
 		"/demo-v2.tar.gz":        packRelease(t, bin, "v2", false),
 		"/demo-v3-broken.tar.gz": packRelease(t, bin, "v3", true),
 	}
-	artifactSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		data, ok := artifacts[r.URL.Path]
-		if !ok {
-			http.NotFound(w, r)
-			return
-		}
-		_, _ = w.Write(data)
-	}))
-	defer artifactSrv.Close()
+	artifactSrv := serveArtifacts(t, artifacts)
 
 	// The allowlist entry declares the artifact server's literal port
 	// (there is no wildcard), so the config is built after the server.
@@ -491,14 +470,7 @@ func currentPID(t *testing.T) int {
 
 func pollUntil(t *testing.T, timeout time.Duration, desc string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for %s", desc)
+	pollFor(t, timeout, 25*time.Millisecond, desc, cond)
 }
 
 func TestIntegrationWatchdogRestarts(t *testing.T) {
@@ -626,14 +598,5 @@ func TestIntegrationWatchdogThrottleAutoRecovers(t *testing.T) {
 
 func getStatus(t *testing.T) (int, string) {
 	t.Helper()
-	req, _ := http.NewRequest(http.MethodGet, "http://localhost:9081/demo", nil)
-	req.Header.Set(secretHeader, "itest-secret")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	var buf bytes.Buffer
-	_, _ = buf.ReadFrom(resp.Body)
-	return resp.StatusCode, buf.String()
+	return getStatusApp(t, "demo")
 }
