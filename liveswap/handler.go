@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path"
 	"strings"
 
@@ -108,7 +109,24 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 	}
 }
 
+// deploy dispatches on the request shape:
+//   - a gzip body  → push an uploaded artifact  (POST /<app>?version=v2)
+//   - ?rollback=v1 → relaunch an on-disk release (POST /<app>?rollback=v1)
+//   - otherwise    → pull from a URL             (JSON {url, version})
 func (h *Handler) deploy(w http.ResponseWriter, r *http.Request, ma *managedApp, by string) error {
+	switch {
+	case isGzipUpload(r):
+		return h.deployPush(w, r, ma, by)
+	case r.URL.Query().Get("rollback") != "":
+		return h.deployRollback(w, r, ma, by)
+	default:
+		return h.deployURL(w, r, ma, by)
+	}
+}
+
+// deployURL is the default path: a JSON body naming an artifact URL to
+// pull, size-capped like any control payload.
+func (h *Handler) deployURL(w http.ResponseWriter, r *http.Request, ma *managedApp, by string) error {
 	var req deployRequest
 	// Read one byte past the cap: exceeding it proves the payload is
 	// oversized, which deserves an honest 413 — truncating at the cap
@@ -136,11 +154,49 @@ func (h *Handler) deploy(w http.ResponseWriter, r *http.Request, ma *managedApp,
 	if strings.ContainsFunc(req.AuthHeader, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
 		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "auth_header contains control characters"})
 	}
+	return h.runDeploy(w, r, ma, req, by)
+}
 
-	h.logger.Info("deploy authorized",
-		zap.String("app", ma.name), zap.String("via", by), zap.String("remote", r.RemoteAddr))
+// deployPush streams an uploaded gzip tarball to a staging file and
+// deploys it — no artifact host needed. Version comes from the query
+// string because the body is the artifact.
+func (h *Handler) deployPush(w http.ResponseWriter, r *http.Request, ma *managedApp, by string) error {
+	version := r.URL.Query().Get("version")
+	if !validVersion(version) {
+		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("version query param must match %s and not be . or ..", versionRe)})
+	}
+	spec := ma.currentSpec()
+	archive, err := stageUpload(r.Body, spec.dirs.tmp, spec.maxArtifactSize)
+	if errors.Is(err, errArtifactTooLarge) {
+		return respondJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
+			"error": fmt.Sprintf("uploaded artifact exceeds max_artifact_size (%d bytes)", spec.maxArtifactSize)})
+	}
+	if err != nil {
+		return respondJSON(w, http.StatusBadRequest, map[string]string{"error": "reading upload: " + err.Error()})
+	}
+	// Backstop cleanup: fetch removes the archive once it extracts it,
+	// but if Deploy returns before fetch (e.g. a 409/422) it would leak.
+	defer func() { _ = os.Remove(archive) }()
+	return h.runDeploy(w, r, ma, deployRequest{Version: version, localArchive: archive}, by)
+}
+
+// deployRollback relaunches an already-extracted on-disk release.
+func (h *Handler) deployRollback(w http.ResponseWriter, r *http.Request, ma *managedApp, by string) error {
+	version := r.URL.Query().Get("rollback")
+	if !validVersion(version) {
+		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("rollback version must match %s and not be . or ..", versionRe)})
+	}
+	return h.runDeploy(w, r, ma, deployRequest{Version: version, rollback: true}, by)
+}
+
+// runDeploy records the authorizing source, runs the pipeline, and maps
+// the outcome to a status code.
+func (h *Handler) runDeploy(w http.ResponseWriter, r *http.Request, ma *managedApp, req deployRequest, by string) error {
 	req.by = by
-	err = ma.Deploy(r.Context(), req)
+	h.logger.Info("deploy authorized",
+		zap.String("app", ma.name), zap.String("via", by),
+		zap.String("source", req.source()), zap.String("remote", r.RemoteAddr))
+	err := ma.Deploy(r.Context(), req)
 	status := ma.status()
 	var vErr validationError
 	switch {
@@ -151,7 +207,7 @@ func (h *Handler) deploy(w http.ResponseWriter, r *http.Request, ma *managedApp,
 	case errors.As(err, &vErr):
 		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 	case errors.Is(err, context.Canceled):
-		// The CI client hung up mid-deploy; nobody is reading this.
+		// The client hung up mid-deploy; nobody is reading this.
 		return nil
 	default:
 		return respondJSON(w, http.StatusInternalServerError, map[string]any{
@@ -159,6 +215,49 @@ func (h *Handler) deploy(w http.ResponseWriter, r *http.Request, ma *managedApp,
 			"status": status, // shows the old version still serving
 		})
 	}
+}
+
+// isGzipUpload reports whether the request body is a pushed artifact.
+func isGzipUpload(r *http.Request) bool {
+	ct := r.Header.Get("Content-Type")
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = ct[:i]
+	}
+	switch strings.TrimSpace(ct) {
+	case "application/gzip", "application/x-gzip", "application/octet-stream":
+		return true
+	}
+	return false
+}
+
+// errArtifactTooLarge signals a pushed upload that exceeded the cap.
+var errArtifactTooLarge = errors.New("artifact too large")
+
+// stageUpload streams the request body to a temp file, capped at
+// maxBytes. Returns the path; the caller owns cleanup.
+func stageUpload(body io.Reader, tmpDir string, maxBytes int64) (string, error) {
+	if err := os.MkdirAll(tmpDir, 0o750); err != nil {
+		return "", err
+	}
+	f, err := os.CreateTemp(tmpDir, "push-*.tar.gz")
+	if err != nil {
+		return "", err
+	}
+	path := f.Name()
+	// One byte past the cap proves it is oversized.
+	n, err := io.Copy(f, io.LimitReader(body, maxBytes+1))
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	if n > maxBytes {
+		_ = os.Remove(path)
+		return "", errArtifactTooLarge
+	}
+	return path, nil
 }
 
 func respondJSON(w http.ResponseWriter, code int, v any) error {

@@ -90,14 +90,35 @@ type appSpec struct {
 	dirs            appDirs
 }
 
-// deployRequest is the validated webhook payload.
+// deployRequest is the validated webhook payload. The three sources are
+// mutually exclusive: a URL to pull (the default), a pushed archive
+// already staged on disk (localArchive), or a rollback to an existing
+// on-disk release (rollback). URL and AuthHeader come from the JSON
+// body; the rest are set server-side by the handler.
 type deployRequest struct {
 	URL        string `json:"url"`
 	Version    string `json:"version"`
 	AuthHeader string `json:"auth_header,omitempty"`
+	// localArchive is a path to an already-staged pushed tarball (the
+	// upload path); empty for a URL pull.
+	localArchive string
+	// rollback relaunches an existing on-disk release/<Version> without
+	// fetching or extracting anything.
+	rollback bool
 	// by is the label of the trust source that authorized this deploy.
-	// Set by the handler after auth, never unmarshaled from the payload.
 	by string
+}
+
+// source names the deploy's artifact source, for the audit log.
+func (r deployRequest) source() string {
+	switch {
+	case r.rollback:
+		return "rollback"
+	case r.localArchive != "":
+		return "push"
+	default:
+		return "url"
+	}
 }
 
 // deployResult records the outcome of the most recent deploy attempt
@@ -217,6 +238,14 @@ func (ma *managedApp) configure(spec *appSpec, logger *zap.Logger, clients *fetc
 // changed" notice; false negatives only cost a log line.
 func specEqual(a, b *appSpec) bool {
 	return fmt.Sprintf("%+v", a) == fmt.Sprintf("%+v", b)
+}
+
+// currentSpec snapshots the app's spec (the handler needs the tmp dir
+// and size cap to stage a pushed upload).
+func (ma *managedApp) currentSpec() *appSpec {
+	ma.specMu.RLock()
+	defer ma.specMu.RUnlock()
+	return ma.spec
 }
 
 // currentVerifiers snapshots the app's deploy-auth trust sources.

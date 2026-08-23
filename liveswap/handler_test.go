@@ -225,3 +225,78 @@ func TestWebhookOversizedPayloadIs413(t *testing.T) {
 		t.Fatalf("body should name the limit: %s", w.Body.String())
 	}
 }
+
+// send runs one request through the handler.
+func send(t *testing.T, h *Handler, req *http.Request) *httptest.ResponseRecorder {
+	t.Helper()
+	w := httptest.NewRecorder()
+	var next caddyhttp.Handler = caddyhttp.HandlerFunc(func(http.ResponseWriter, *http.Request) error { return nil })
+	if err := h.ServeHTTP(w, req, next); err != nil {
+		t.Fatalf("ServeHTTP returned error: %v", err)
+	}
+	return w
+}
+
+func gzipDeploy(t *testing.T, target, token, body string) *http.Request {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, target, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/gzip")
+	return req
+}
+
+func TestWebhookPushRoutesAndDeploys(t *testing.T) {
+	h, rig := newTestHandler(t)
+	w := send(t, h, gzipDeploy(t, "/demo?version=v9", appToken(t), "tarball-bytes"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("push: got %d %s", w.Code, w.Body.String())
+	}
+	got := rig.fetch.lastReq
+	if got.source() != "push" || got.localArchive == "" || got.Version != "v9" {
+		t.Fatalf("push not routed correctly: %+v", got)
+	}
+}
+
+func TestWebhookPushRequiresValidVersion(t *testing.T) {
+	h, _ := newTestHandler(t)
+	// missing version
+	if w := send(t, h, gzipDeploy(t, "/demo", appToken(t), "x")); w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("missing version: got %d", w.Code)
+	}
+	// traversal version
+	if w := send(t, h, gzipDeploy(t, "/demo?version=../etc", appToken(t), "x")); w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("evil version: got %d", w.Code)
+	}
+}
+
+func TestWebhookPushOversizedIs413(t *testing.T) {
+	h, rig := newTestHandler(t)
+	rig.spec.maxArtifactSize = 8 // tiny cap for the test
+	w := send(t, h, gzipDeploy(t, "/demo?version=v1", appToken(t), "way past eight bytes"))
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized push: got %d, want 413", w.Code)
+	}
+}
+
+func TestWebhookRollbackRoutes(t *testing.T) {
+	h, rig := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodPost, "/demo?rollback=v3", nil)
+	req.Header.Set("Authorization", "Bearer "+appToken(t))
+	w := send(t, h, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("rollback: got %d %s", w.Code, w.Body.String())
+	}
+	got := rig.fetch.lastReq
+	if got.source() != "rollback" || !got.rollback || got.Version != "v3" {
+		t.Fatalf("rollback not routed correctly: %+v", got)
+	}
+}
+
+func TestWebhookRollbackRequiresValidVersion(t *testing.T) {
+	h, _ := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodPost, "/demo?rollback=..", nil)
+	req.Header.Set("Authorization", "Bearer "+appToken(t))
+	if w := send(t, h, req); w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("evil rollback version: got %d", w.Code)
+	}
+}

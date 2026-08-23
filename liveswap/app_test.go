@@ -240,10 +240,12 @@ func (p *fakeProber) calls() int {
 
 // fakeFetcher materializes a release dir without any network.
 type fakeFetcher struct {
-	err error
+	err     error
+	lastReq deployRequest
 }
 
 func (f *fakeFetcher) fetch(_ context.Context, spec *appSpec, req deployRequest, progress func(string)) (string, error) {
+	f.lastReq = req
 	progress("downloading")
 	progress("extracting")
 	if f.err != nil {

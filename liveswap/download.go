@@ -178,18 +178,34 @@ type releaseFetcher struct {
 // dir that is renamed into place only on success, so releases/ never
 // contains a half-extracted version.
 func (rf *releaseFetcher) fetch(ctx context.Context, spec *appSpec, req deployRequest, progress func(string)) (string, error) {
-	progress("downloading")
-	archive, err := downloadArtifact(ctx, downloadOpts{
-		url:           req.URL,
-		authHeader:    req.AuthHeader,
-		destDir:       spec.dirs.tmp,
-		maxBytes:      spec.maxArtifactSize,
-		allowInsecure: spec.allowInsecure,
-		allowlist:     spec.allowlist,
-		client:        rf.client,
-	})
-	if err != nil {
-		return "", err
+	// Rollback: the release is already extracted on disk from a prior
+	// deploy — no fetch, no extract, just relaunch it.
+	if req.rollback {
+		releaseDir := spec.dirs.release(req.Version)
+		if _, err := os.Stat(releaseDir); err != nil {
+			return "", validationError{fmt.Sprintf("no on-disk release %q to roll back to (it may have been pruned by keep)", req.Version)}
+		}
+		return releaseDir, nil
+	}
+
+	// Source the archive: a pushed upload already staged on disk, or a
+	// pull from the artifact URL.
+	archive := req.localArchive
+	if archive == "" {
+		progress("downloading")
+		var err error
+		archive, err = downloadArtifact(ctx, downloadOpts{
+			url:           req.URL,
+			authHeader:    req.AuthHeader,
+			destDir:       spec.dirs.tmp,
+			maxBytes:      spec.maxArtifactSize,
+			allowInsecure: spec.allowInsecure,
+			allowlist:     spec.allowlist,
+			client:        rf.client,
+		})
+		if err != nil {
+			return "", err
+		}
 	}
 	defer func() { _ = os.Remove(archive) }()
 

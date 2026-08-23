@@ -238,6 +238,40 @@ c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "$PROXY/health")
 [ "$c" = "200" ] && pass "app is healthy again after the heal" \
 	|| fail "health still failing after heal: $c"
 
+echo "=== scenario 11: push an uploaded artifact (no artifact host) ==="
+curl -fs "$ART/demo-v1.tar.gz" -o /tmp/px1.tgz || fail "could not fetch a tarball to push"
+c=$(curl -s -o /tmp/deploy-body -w '%{http_code}' --max-time 60 \
+	-X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/gzip" \
+	--data-binary @/tmp/px1.tgz "$HOOK?version=px1")
+[ "$c" = "200" ] || fail "push px1: expected 200, got $c ($(cat /tmp/deploy-body))"
+b=$(body)
+case "$b" in
+"hello v1"*) pass "pushed artifact deploys and serves: '$b'" ;;
+*) fail "expected 'hello v1 ...' after push, got '$b'" ;;
+esac
+
+echo "=== scenario 12: push a second version, then roll back to the first ==="
+curl -fs "$ART/demo-v2.tar.gz" -o /tmp/px2.tgz || fail "could not fetch the second tarball"
+c=$(curl -s -o /tmp/deploy-body -w '%{http_code}' --max-time 60 \
+	-X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/gzip" \
+	--data-binary @/tmp/px2.tgz "$HOOK?version=px2")
+[ "$c" = "200" ] || fail "push px2: expected 200, got $c ($(cat /tmp/deploy-body))"
+b=$(body)
+case "$b" in "hello v2"*) pass "second push serves v2: '$b'" ;; *) fail "expected 'hello v2 ...', got '$b'" ;; esac
+
+# Rollback relaunches px1's on-disk release — no fetch, no upload.
+c=$(curl -s -o /tmp/deploy-body -w '%{http_code}' --max-time 60 \
+	-X POST -H "Authorization: Bearer $TOKEN" "$HOOK?rollback=px1")
+[ "$c" = "200" ] || fail "rollback px1: expected 200, got $c ($(cat /tmp/deploy-body))"
+b=$(body)
+case "$b" in
+"hello v1"*) pass "rollback relaunches the on-disk release: '$b'" ;;
+*) fail "expected 'hello v1 ...' after rollback, got '$b'" ;;
+esac
+# Rollback to a version that was never deployed is a 422.
+c=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" "$HOOK?rollback=nope")
+[ "$c" = "422" ] && pass "rollback to a missing release gets 422" || fail "missing rollback: expected 422, got $c"
+
 echo ""
 if [ "$FAILURES" -eq 0 ]; then
 	echo "ALL E2E SCENARIOS PASSED"

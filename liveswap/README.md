@@ -295,7 +295,10 @@ names the person.
 ## Webhook API
 
 `POST https://deploy.example.com/<app>`, with `Authorization: Bearer
-<JWT>` (see `deploy_trust` above). JSON body:
+<JWT>` (see `deploy_trust` above). There are three ways to supply the
+release, all through the same endpoint and the same auth:
+
+**1. Pull from a URL** (the default — a JSON body):
 
 ```json
 {
@@ -307,7 +310,37 @@ names the person.
 
 `auth_header` is optional and is sent verbatim as `Authorization` on
 the artifact download (dropped automatically on cross-host redirects,
-so GitHub's S3 redirect works). The response is synchronous:
+so GitHub's S3 redirect works). The URL must pass `artifact_allowlist`.
+
+**2. Push an uploaded tarball** — no artifact host needed. Stream the
+`.tar.gz` as the request body with a gzip content type; the version is
+a query parameter:
+
+```sh
+curl --fail -X POST -H "Authorization: Bearer $JWT" \
+  -H "Content-Type: application/gzip" --data-binary @blog.tgz \
+  "https://deploy.example.com/blog?version=v1.4.2"
+```
+
+The upload is capped at `max_artifact_size`. No `artifact_allowlist` is
+consulted (there is no URL to pin — the bytes come straight from an
+authenticated caller), and there is no SSRF surface on this path. This
+is the path for deploying a local build directly (a laptop, an
+air-gapped or egress-locked box) without hosting the artifact anywhere.
+
+**3. Roll back to an on-disk release** — relaunch a version still on
+disk (retained by `keep`), with no fetch or upload:
+
+```sh
+curl --fail -X POST -H "Authorization: Bearer $JWT" \
+  "https://deploy.example.com/blog?rollback=v1.4.1"
+```
+
+Rollback runs the same blue/green pipeline (start, health-gate, cut
+over), so it is zero-downtime too. A `404`-style `422` is returned if
+that version is no longer on disk.
+
+The response is synchronous:
 
 | Code | Meaning |
 |---|---|
@@ -315,7 +348,8 @@ so GitHub's S3 redirect works). The response is synchronous:
 | 401 | Bad or missing token |
 | 404 | Unknown app |
 | 409 | A deploy is already running for this app (retry) |
-| 422 | Bad payload — missing url, invalid version, version already running, or the artifact url was refused by `artifact_allowlist` (host, path, port, or an undeclared query parameter; the body names exactly what tripped and how the entry would declare it) |
+| 413 | Pushed upload exceeded `max_artifact_size` |
+| 422 | Bad request — missing/invalid version, version already running, a rollback target no longer on disk, or (URL path) an artifact url refused by `artifact_allowlist` (host, path, port, or an undeclared query parameter; the body names exactly what tripped and how the entry would declare it) |
 | 5xx | Deploy failed — **the old version is still serving**; body says why |
 
 Because the response is synchronous through the whole pipeline, the
