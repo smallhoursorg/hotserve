@@ -19,17 +19,11 @@ func init() {
 	caddy.RegisterModule(Handler{})
 }
 
-// secretHeader carries the shared deploy secret from CI.
-const secretHeader = "X-Liveswap-Secret" //nolint:gosec // header name, not a credential
-
-// providedSecret extracts the deploy secret from the request: the
-// custom header, or standard `Authorization: Bearer <secret>`. Docs
-// recommend Bearer — Caddy access logs redact the Authorization header
-// automatically, while custom headers are logged in plaintext.
-func providedSecret(r *http.Request) string {
-	if s := r.Header.Get(secretHeader); s != "" {
-		return s
-	}
+// bearerToken extracts the deploy JWT from `Authorization: Bearer
+// <jwt>`. Bearer is the only accepted transport: Caddy redacts the
+// Authorization header from access logs automatically (the retired
+// X-Liveswap-Secret custom header did not, which leaked it).
+func bearerToken(r *http.Request) string {
 	const prefix = "Bearer "
 	if auth := r.Header.Get("Authorization"); len(auth) > len(prefix) &&
 		strings.EqualFold(auth[:len(prefix)], prefix) {
@@ -83,19 +77,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 	ma := h.app.managedApp(name)
 
 	// Authenticate before revealing whether the app exists. For an
-	// unknown app the provided secret is compared against the global
-	// default so the timing and status never leak valid app names to
-	// unauthenticated callers.
-	configured := h.app.WebhookSecret
+	// unknown app the token is verified against the global trust
+	// sources, so timing and status never leak valid app names to
+	// unauthenticated callers (with no global trust configured, an
+	// unknown app is simply unauthenticable → 401, still no leak).
+	verifiers := h.app.globalVerifiers
 	if ma != nil {
-		configured = ma.currentSpec().secret
+		verifiers = ma.currentVerifiers()
 	}
-	provided := providedSecret(r)
-	if configured == "" || !secretsEqual(provided, configured) {
+	if !authorize(r.Context(), verifiers, bearerToken(r)) {
 		h.logger.Warn("webhook auth failed",
 			zap.String("app", name), zap.String("remote", r.RemoteAddr))
 		return respondJSON(w, http.StatusUnauthorized, map[string]string{
-			"error": "invalid or missing deploy secret (" + secretHeader + " or Authorization: Bearer)",
+			"error": "invalid or missing deploy token (Authorization: Bearer <jwt>)",
 		})
 	}
 	if ma == nil {

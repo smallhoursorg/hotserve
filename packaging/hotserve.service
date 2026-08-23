@@ -29,9 +29,9 @@ Environment=XDG_CONFIG_HOME=/var/lib/hotserve
 RuntimeDirectory=hotserve
 RuntimeDirectoryMode=0750
 # No --environ (unlike Caddy's dist unit): it would print every
-# environment variable — LIVESWAP_SECRET, ACME DNS tokens — into the
-# journal at each start, and journals get pasted into bug reports.
-# Add it back temporarily if you need to debug environment issues.
+# environment variable — ACME DNS tokens and any other supervisor
+# secrets — into the journal at each start, and journals get pasted
+# into bug reports. Add it back temporarily to debug environment issues.
 ExecStart=/usr/bin/hotserve run --config /etc/hotserve/Caddyfile
 ExecReload=/usr/bin/hotserve reload --config /etc/hotserve/Caddyfile --force
 TimeoutStopSec=5s

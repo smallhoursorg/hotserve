@@ -29,7 +29,10 @@
 		root /var/lib/liveswap
 		allow_insecure_http
 		artifact_allowlist e2e-artifacts:8080
-		webhook_secret {env.LIVESWAP_SECRET}
+		deploy_trust local {
+			public_key /shared/deploy.pub
+			audience e2e
+		}
 
 		app demo {
 			command ./server

@@ -35,11 +35,14 @@ Concept map from the Nomad-era stack:
 
 ## Behavior specification (normative)
 
-- The webhook MUST authenticate every request with a constant-time
-  comparison of `X-Liveswap-Secret`, and MUST NOT reveal whether an app
-  exists to unauthenticated callers (unknown apps authenticate against
-  the global secret, then 404).
-- Config load MUST fail if any app lacks an effective secret.
+- The webhook MUST authenticate every request by verifying an
+  `Authorization: Bearer <JWT>` against the app's `deploy_trust`
+  sources (OIDC against an issuer's public JWKS, or a local public
+  key), and MUST NOT reveal whether an app exists to unauthenticated
+  callers (unknown apps verify against the global trust sources, then
+  404). No shared secret is stored on the box.
+- Config load MUST fail if any app resolves to zero `deploy_trust`
+  sources.
 - The deploy MUST be rejected (409) if one is already running for that
   app; other apps' deploys proceed independently.
 - Artifact downloads MUST enforce `max_artifact_size` both via
@@ -174,13 +177,16 @@ reloads (the common operation) are unaffected.
 | `health.go` | prober with soak/deadline arithmetic on an injected clock |
 | `watchdog.go` | continuous crash/health supervision: per-app loop, restart budget, backoff |
 | `state.go` | `state.json` atomic persistence, keep-N GC |
-| `secret.go` | hashed constant-time compare |
+| `deploytrust.go` | deploy-auth: OIDC + local-key JWT verification |
 | `clock.go` | `Now()`/`Sleep()` clock seam |
 
 ## Security posture
 
-- Shared-secret webhook; CI never gets SSH. Secrets compared over
-  SHA-256 digests with `subtle.ConstantTimeCompare` (length-blind).
+- Keyless webhook auth; CI never gets SSH, and no shared secret lives
+  on the box. Deploys carry a short-lived JWT verified against public
+  material only — CI OIDC (issuer JWKS + a claim allowlist) or a local
+  public key. Verification uses vetted libraries (`go-oidc`,
+  `go-jose`), never hand-rolled JWT crypto.
 - Tar hardening is a pure-Go port of the predecessor webhook's
   `validateArchive`, extended with a decompression-ratio cap and
   setuid stripping, and unit-tested against crafted malicious archives.
@@ -193,8 +199,8 @@ reloads (the common operation) are unaffected.
   request host is rebuilt from the config's own string after the
   match, so the attacker-steerable part of a deploy URL is a path
   suffix under an operator-pinned origin.
-- Nothing secret is logged: URL query strings are redacted, provided
-  secrets are never echoed.
+- Nothing secret is logged: URL query strings are redacted, and the
+  deploy token arrives via `Authorization: Bearer` (Caddy-redacted).
 
 ## Testing acceptance criteria (all implemented)
 

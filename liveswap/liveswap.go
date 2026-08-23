@@ -80,11 +80,13 @@ type App struct {
 	// Default "/var/lib/liveswap".
 	Root string `json:"root,omitempty"`
 
-	// WebhookSecret is the default shared secret for all apps; each app
-	// may override it. Use a placeholder like {env.LIVESWAP_SECRET} to
-	// keep it out of the Caddyfile. Every app must end up with a
-	// non-empty secret — config load fails otherwise.
-	WebhookSecret string `json:"webhook_secret,omitempty"`
+	// DeployTrust is the default set of deploy-auth trust sources for
+	// all apps; each app may override it. A deploy request carries an
+	// `Authorization: Bearer <JWT>` and is authorized if any source
+	// verifies it (OIDC against an issuer's public JWKS, or a local
+	// public key). No shared secret ever lives on the box. Every app
+	// must resolve to at least one source — config load fails otherwise.
+	DeployTrust []TrustConfig `json:"deploy_trust,omitempty"`
 
 	// AllowInsecureHTTP permits artifact downloads over plain http.
 	// Default false (https only). Exists for test rigs and LAN setups.
@@ -105,10 +107,12 @@ type App struct {
 	// argument to `dynamic liveswap <name>`.
 	Apps map[string]*AppConfig `json:"apps,omitempty"`
 
-	logger    *zap.Logger
-	managed   map[string]*managedApp
-	pooled    []string // pool keys this config instance holds references to
-	allowlist []artifactAllowEntry
+	logger          *zap.Logger
+	managed         map[string]*managedApp
+	pooled          []string // pool keys this config instance holds references to
+	allowlist       []artifactAllowEntry
+	globalTrust     []trustSource // resolved global DeployTrust, for the unknown-app path
+	globalVerifiers []verifier
 }
 
 // AppConfig defines one managed application.
@@ -132,8 +136,9 @@ type AppConfig struct {
 	// the app's environment. Optional; missing file fails the deploy.
 	EnvFile string `json:"env_file,omitempty"`
 
-	// WebhookSecret overrides the global default for this app.
-	WebhookSecret string `json:"webhook_secret,omitempty"`
+	// DeployTrust overrides the global deploy-auth trust sources for
+	// this app (replaces, not appends).
+	DeployTrust []TrustConfig `json:"deploy_trust,omitempty"`
 
 	// ArtifactAllowlist overrides the global allowlist for this app
 	// (same entry syntax; replaces, not appends).
@@ -224,16 +229,23 @@ func (a *App) Provision(ctx caddy.Context) error {
 	// ReplaceKnown resolves {env.*} now but leaves the deploy-time
 	// placeholders ({version}, {port}, ...) untouched for app.go.
 	a.Root = repl.ReplaceKnown(a.Root, "")
-	a.WebhookSecret = repl.ReplaceKnown(a.WebhookSecret, "")
 	for i, e := range a.ArtifactAllowlist {
 		a.ArtifactAllowlist[i] = repl.ReplaceKnown(e, "")
 	}
+	resolveTrustPlaceholders(repl, a.DeployTrust)
 	if a.Root == "" {
 		a.Root = "/var/lib/liveswap"
 	}
 
 	var err error
 	if a.allowlist, err = parseAllowlist(a.ArtifactAllowlist); err != nil {
+		return err
+	}
+	// Global trust sources back the unknown-app path: a request for an
+	// app that does not exist is still authenticated (against the
+	// global sources) before its 404, so app names never leak to
+	// unauthenticated callers.
+	if a.globalTrust, err = buildTrust(a.DeployTrust, nil); err != nil {
 		return err
 	}
 
@@ -248,7 +260,15 @@ func (a *App) Provision(ctx caddy.Context) error {
 				return http.ErrUseLastResponse
 			},
 		},
+		// The JWKS client fetches OIDC issuers' public keys. Unlike the
+		// artifact download it is a small control request, so it takes a
+		// bounded overall timeout.
+		jwks: &http.Client{
+			Timeout:   30 * time.Second,
+			Transport: &http.Transport{Proxy: http.ProxyFromEnvironment},
+		},
 	}
+	a.globalVerifiers = resolveVerifiers(a.globalTrust, clients.jwks)
 
 	a.managed = make(map[string]*managedApp, len(a.Apps))
 	for name, cfg := range a.Apps {
@@ -256,7 +276,7 @@ func (a *App) Provision(ctx caddy.Context) error {
 			cfg = new(AppConfig)
 			a.Apps[name] = cfg
 		}
-		cfg.applyDefaults(repl, a.WebhookSecret)
+		cfg.applyDefaults(repl)
 		spec, err := a.buildSpec(name, cfg)
 		if err != nil {
 			return err
@@ -272,11 +292,8 @@ func (a *App) Provision(ctx caddy.Context) error {
 	return nil
 }
 
-func (cfg *AppConfig) applyDefaults(repl *caddy.Replacer, defaultSecret string) {
-	cfg.WebhookSecret = repl.ReplaceKnown(cfg.WebhookSecret, "")
-	if cfg.WebhookSecret == "" {
-		cfg.WebhookSecret = defaultSecret
-	}
+func (cfg *AppConfig) applyDefaults(repl *caddy.Replacer) {
+	resolveTrustPlaceholders(repl, cfg.DeployTrust)
 	cfg.EnvFile = repl.ReplaceKnown(cfg.EnvFile, "")
 	for i, e := range cfg.ArtifactAllowlist {
 		cfg.ArtifactAllowlist[i] = repl.ReplaceKnown(e, "")
@@ -346,13 +363,17 @@ func (a *App) buildSpec(name string, cfg *AppConfig) (*appSpec, error) {
 			return nil, fmt.Errorf("app %s: %w", name, err)
 		}
 	}
+	trust, err := buildTrust(a.DeployTrust, cfg.DeployTrust)
+	if err != nil {
+		return nil, fmt.Errorf("app %s: %w", name, err)
+	}
 	return &appSpec{
 		name:            name,
 		command:         cfg.Command,
 		preStart:        cfg.PreStart,
 		env:             cfg.Env,
 		envFile:         cfg.EnvFile,
-		secret:          cfg.WebhookSecret,
+		trust:           trust,
 		healthPath:      healthPath,
 		healthInterval:  time.Duration(cfg.HealthInterval),
 		healthTimeout:   time.Duration(cfg.HealthTimeout),
@@ -386,8 +407,8 @@ func (a *App) Validate() error {
 		if len(cfg.Command) == 0 {
 			return fmt.Errorf("app %s: command is required", name)
 		}
-		if cfg.WebhookSecret == "" {
-			return fmt.Errorf("app %s: no webhook secret configured (set webhook_secret globally or per app; if it references {env.*}, the variable is empty)", name)
+		if len(a.DeployTrust) == 0 && len(cfg.DeployTrust) == 0 {
+			return fmt.Errorf("app %s: no deploy_trust configured — declare who may deploy, e.g. a `deploy_trust github { audience ...; claim repository your-org/%s }` block or a `deploy_trust local { public_key ... }` fallback (globally or per app)", name, name)
 		}
 		// Closed by default, deliberately without an "any origin"
 		// escape hatch: a deploy webhook that fetches from anywhere is

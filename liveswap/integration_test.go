@@ -4,6 +4,8 @@ package liveswap
 
 import (
 	"bytes"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net"
@@ -16,12 +18,48 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/caddyserver/caddy/v2/caddytest"
 )
+
+// The integration suite authenticates deploys with a local trust key:
+// one ed25519 keypair is generated per test binary, its public half
+// written to a temp file the Caddyfile's `deploy_trust local` block
+// points at, and deploy requests carry a token minted with the private
+// half (audience "itest"). itestPriv/itestPub reuse the shared
+// authtest helpers.
+var (
+	itestPriv, itestPub = mustGenTestKey()
+	itestPubPath        string
+	itestPubOnce        sync.Once
+)
+
+func itestPubKeyPath() string {
+	itestPubOnce.Do(func() {
+		der, err := x509.MarshalPKIXPublicKey(itestPub)
+		if err != nil {
+			panic(err)
+		}
+		f, err := os.CreateTemp("", "itest-deploy-*.pub")
+		if err != nil {
+			panic(err)
+		}
+		if _, err := f.Write(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})); err != nil {
+			panic(err)
+		}
+		if err := f.Close(); err != nil {
+			panic(err)
+		}
+		itestPubPath = f.Name()
+	})
+	return itestPubPath
+}
+
+func itestToken(t *testing.T) string { return mintTestToken(t, itestPriv, "itest", nil) }
 
 // The integration suite runs a real Caddy (in-process via caddytest)
 // with the module loaded, deploys a real compiled test app through the
@@ -113,7 +151,10 @@ func integrationConfig(root, artifactPort string) string {
 		root %s
 		allow_insecure_http
 		artifact_allowlist 127.0.0.1:%s
-		webhook_secret itest-secret
+		deploy_trust local {
+			public_key %s
+			audience itest
+		}
 
 		app demo {
 			command ./server
@@ -136,7 +177,7 @@ http://localhost:9080 {
 http://localhost:9081 {
 	liveswap_webhook
 }
-`, root, artifactPort)
+`, root, artifactPort, itestPubKeyPath())
 }
 
 func postDeploy(t *testing.T, artifactURL, version string) (*http.Response, string) {
@@ -204,10 +245,10 @@ func TestIntegrationDeployLifecycle(t *testing.T) {
 		}
 	})
 
-	t.Run("webhook rejects a bad secret", func(t *testing.T) {
+	t.Run("webhook rejects a bad token", func(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodPost, "http://localhost:9081/demo",
 			strings.NewReader(`{"url":"https://x/a.tgz","version":"v0"}`))
-		req.Header.Set(secretHeader, "wrong")
+		req.Header.Set("Authorization", "Bearer not-a-jwt")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -366,7 +407,10 @@ func watchdogConfig(root, artifactPort, app string, restarts int, window string)
 		root %[1]s
 		allow_insecure_http
 		artifact_allowlist 127.0.0.1:%[2]s
-		webhook_secret itest-secret
+		deploy_trust local {
+			public_key %[6]s
+			audience itest
+		}
 
 		app %[3]s {
 			command ./server
@@ -392,7 +436,7 @@ http://localhost:9080 {
 http://localhost:9081 {
 	liveswap_webhook
 }
-`, root, artifactPort, app, restarts, window)
+`, root, artifactPort, app, restarts, window, itestPubKeyPath())
 }
 
 func postDeployApp(t *testing.T, app, artifactURL, version string) (*http.Response, string) {
@@ -402,7 +446,7 @@ func postDeployApp(t *testing.T, app, artifactURL, version string) (*http.Respon
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set(secretHeader, "itest-secret")
+	req.Header.Set("Authorization", "Bearer "+itestToken(t))
 	client := &http.Client{Timeout: 60 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -416,7 +460,7 @@ func postDeployApp(t *testing.T, app, artifactURL, version string) (*http.Respon
 func getStatusApp(t *testing.T, app string) (int, string) {
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodGet, "http://localhost:9081/"+app, nil)
-	req.Header.Set(secretHeader, "itest-secret")
+	req.Header.Set("Authorization", "Bearer "+itestToken(t))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)

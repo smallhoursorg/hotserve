@@ -59,8 +59,11 @@ services:
       context: .
       dockerfile: e2e/Dockerfile
     image: hotserve-e2e
-    environment:
-      LIVESWAP_SECRET: e2e-secret
+    # The entrypoint mints a local deploy keypair + token into this
+    # shared volume at startup (no OIDC provider on the offline compose
+    # network); the runner reads the token as its deploy bearer.
+    volumes:
+      - e2e-deploy:/shared
     depends_on:
       - e2e-artifacts
       - e2e-upstream
@@ -90,9 +93,11 @@ services:
       - ./e2e/soak.sh:/soak.sh:ro
       - ./e2e/penaltybox/run.sh:/suite-penaltybox.sh:ro
       - ./e2e/Caddyfile:/Caddyfile:ro
+      - e2e-deploy:/shared:ro
     entrypoint: ["/bin/sh", "/run.sh"]
 
 volumes:
   gomodcache:
   gobuildcache:
   golangcicache:
+  e2e-deploy:

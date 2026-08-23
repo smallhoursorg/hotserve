@@ -70,7 +70,7 @@ type appSpec struct {
 	preStart        []string
 	env             map[string]string
 	envFile         string
-	secret          string
+	trust           []trustSource
 	healthPath      string // "" = no HTTP check (health_path off)
 	healthInterval  time.Duration
 	healthTimeout   time.Duration
@@ -136,9 +136,10 @@ type managedApp struct {
 	// specMu guards spec and every collaborator below it: they are all
 	// (re)wired on config load while deploys may be reading them, so
 	// readers take the snapshot accessors, never the fields.
-	specMu sync.RWMutex
-	spec   *appSpec
-	runner runner
+	specMu    sync.RWMutex
+	spec      *appSpec
+	verifiers []verifier // resolved deploy-auth trust sources; rewired every reload
+	runner    runner
 	prober prober
 	fetch  fetcher
 	clock  clock
@@ -185,6 +186,9 @@ func (ma *managedApp) configure(spec *appSpec, logger *zap.Logger, clients *fetc
 	defer ma.specMu.Unlock()
 	changed := ma.spec != nil && !specEqual(ma.spec, spec)
 	ma.spec = spec
+	// Deploy auth is not tied to the running process, so — unlike the
+	// runner — it is rewired on every reload and takes effect at once.
+	ma.verifiers = resolveVerifiers(spec.trust, clients.jwks)
 	ma.logger = logger
 	if ma.runner == nil {
 		ma.runner = newExecRunner(logger)
@@ -211,10 +215,11 @@ func specEqual(a, b *appSpec) bool {
 	return fmt.Sprintf("%+v", a) == fmt.Sprintf("%+v", b)
 }
 
-func (ma *managedApp) currentSpec() *appSpec {
+// currentVerifiers snapshots the app's deploy-auth trust sources.
+func (ma *managedApp) currentVerifiers() []verifier {
 	ma.specMu.RLock()
 	defer ma.specMu.RUnlock()
-	return ma.spec
+	return ma.verifiers
 }
 
 // snapshot returns a consistent view of the spec and collaborators for
@@ -604,8 +609,8 @@ func (ma *managedApp) pokeWatchdog() {
 
 // envAllowlist is the only part of Caddy's own environment that apps
 // inherit. Everything else is withheld: the supervisor's env holds
-// deploy credentials (LIVESWAP_SECRET, ACME DNS tokens), and handing
-// those to every app defeats the isolation story — env-dumping
+// secrets (ACME DNS tokens, and whatever the operator sets), and
+// handing those to every app defeats the isolation story — env-dumping
 // supply-chain payloads read process.env before they read files.
 // Operators pass anything extra explicitly via env_file or env.
 var envAllowlist = []string{"PATH", "HOME", "LANG", "TZ"}
@@ -719,4 +724,5 @@ func hostOf(rawURL string) string {
 type fetchClients struct {
 	download *http.Client
 	health   *http.Client
+	jwks     *http.Client // fetches OIDC issuers' public keys for deploy auth
 }

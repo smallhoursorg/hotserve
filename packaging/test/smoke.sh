@@ -13,7 +13,9 @@
 # other test layer exercises.
 set -eu
 
-SECRET=smoke-secret
+# TOKEN is minted in stage 2 with a local deploy key (deploy_trust
+# local), once the binary is installed.
+TOKEN=""
 HOOK="http://127.0.0.1:8081/demo"
 PROXY="http://127.0.0.1:8080"
 
@@ -92,11 +94,11 @@ journalctl -u hotserve --no-pager \
 echo "reload OK, journal clean"
 
 stage "stage 2: liveswap deploy under the systemd sandbox"
-mkdir -p /etc/systemd/system/hotserve.service.d
-cat > /etc/systemd/system/hotserve.service.d/smoke.conf <<EOF
-[Service]
-Environment=LIVESWAP_SECRET=$SECRET
-EOF
+# Generate a local deploy keypair; the app trusts the public half, and
+# we mint the deploy bearer with the private half. The service (User=
+# hotserve) reads the 0644 public key; the 0600 private key stays with
+# root here, standing in for the operator's token-minting machine.
+hotserve deploy-keygen --out /etc/hotserve/deploy.key
 
 # Overwriting the packaged conffile doubles as the modification marker
 # for the stage-3 config|noreplace assertion.
@@ -109,7 +111,10 @@ cat > /etc/hotserve/Caddyfile <<'EOF'
 		root /var/lib/liveswap
 		allow_insecure_http
 		artifact_allowlist 127.0.0.1:8200
-		webhook_secret {env.LIVESWAP_SECRET}
+		deploy_trust local {
+			public_key /etc/hotserve/deploy.key.pub
+			audience smoke
+		}
 
 		app demo {
 			command ./server
@@ -134,8 +139,14 @@ EOF
 
 systemctl daemon-reload
 timeout 120 systemctl restart hotserve || die "restart with liveswap config failed"
+
+# Mint the deploy bearer with the private key (audience must match the
+# deploy_trust block).
+TOKEN=$(hotserve deploy-token --key /etc/hotserve/deploy.key --audience smoke --ttl 10m) \
+	|| die "deploy-token failed"
+
 i=0
-until [ "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Liveswap-Secret: $SECRET" "$HOOK")" = "200" ]; do
+until [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$HOOK")" = "200" ]; do
 	i=$((i + 1))
 	[ "$i" -ge 30 ] && die "webhook status endpoint not ready within 30s"
 	sleep 1
@@ -164,11 +175,10 @@ until curl -fs -o /dev/null http://127.0.0.1:8200/demo.tar.gz; do
 	sleep 1
 done
 
-# Deploy via Authorization: Bearer — the recommended header (Caddy
-# access logs redact it automatically), exercised here under the real
-# unit; the e2e suite covers the X-Liveswap-Secret path.
+# Deploy via Authorization: Bearer — Caddy access logs redact it
+# automatically — exercised here under the real unit.
 code=$(curl -s -o /tmp/deploy-body -w '%{http_code}' --max-time 90 \
-	-X POST -H "Authorization: Bearer $SECRET" \
+	-X POST -H "Authorization: Bearer $TOKEN" \
 	-d '{"url":"http://127.0.0.1:8200/demo.tar.gz","version":"s1"}' "$HOOK")
 [ "$code" = "200" ] || {
 	echo "deploy response: $(cat /tmp/deploy-body)"
@@ -176,7 +186,7 @@ code=$(curl -s -o /tmp/deploy-body -w '%{http_code}' --max-time 90 \
 }
 curl -fsS --max-time 5 "$PROXY/" | grep -q "hello smoke" \
 	|| die "proxy does not serve the deployed app"
-status=$(curl -s -H "X-Liveswap-Secret: $SECRET" "$HOOK")
+status=$(curl -s -H "Authorization: Bearer $TOKEN" "$HOOK")
 case "$status" in
 *'"current_version":"s1"'*) : ;;
 *) die "status missing current_version s1: $status" ;;
@@ -187,12 +197,11 @@ case "$status" in
 esac
 echo "deployed, served and reported under ProtectSystem=full as the hotserve user"
 
-# The secret must never reach the journal: not via --environ (removed
-# from the unit for exactly this reason — journals get pasted into bug
-# reports), not via access logs, not via any error path above.
-journalctl -u hotserve --no-pager | grep -q "$SECRET" \
-	&& die "deploy secret leaked into the journal" || true
-echo "journal is free of the deploy secret"
+# The deploy token must never reach the journal: not via access logs
+# (Authorization is redacted), not via any error path above.
+journalctl -u hotserve --no-pager | grep -q "$TOKEN" \
+	&& die "deploy token leaked into the journal" || true
+echo "journal is free of the deploy token"
 
 stage "stage 3: reinstall — upgrade path and conffile preservation"
 dpkg -i "$deb"

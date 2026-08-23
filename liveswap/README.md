@@ -17,7 +17,7 @@ git push → CI builds app.tar.gz → uploads it → curl webhook → Caddy hot-
 
 ```
 POST /blog {url, version}
-  │ downloading   stream the artifact (size-capped, https, secret-gated)
+  │ downloading   stream the artifact (size-capped, https, token-gated)
   │ extracting    hardened tar extraction into releases/<version>/
   │ preparing     pre_start command (migrations) — non-zero exit aborts
   │ starting      spawn the app on a fresh 127.0.0.1 port, PORT injected
@@ -68,16 +68,25 @@ COPY --from=builder /usr/bin/caddy /usr/bin/caddy
 {
 	liveswap {
 		# root /var/lib/liveswap                # where releases/state live (default)
-		webhook_secret {env.LIVESWAP_SECRET}    # default secret for all apps
 		artifact_allowlist github.com/your-org/ # required: where artifacts may come from
 		# allow_insecure_http                  # permit http:// artifact URLs (off by default)
+
+		# Who may deploy — required (globally or per app). A deploy
+		# carries an `Authorization: Bearer <JWT>`; it is authorized if
+		# any deploy_trust source verifies it. No shared secret is ever
+		# stored on the box.
+		deploy_trust github {                  # preset: GitHub Actions OIDC
+			audience hotserve
+			claim repository your-org/blog     # pin who may deploy
+			claim ref        refs/heads/main
+		}
 
 		app blog {                             # a Node.js app
 			command node server.js             # runs with CWD = the release dir
 			pre_start node migrate.js          # optional; non-zero exit aborts the deploy
 			env_file /etc/liveswap/blog.env     # optional KEY=VALUE file
 			env NODE_ENV production            # inline env, repeatable
-			# webhook_secret {env.BLOG_SECRET} # per-app override
+			# deploy_trust local { public_key /etc/hotserve/blog.pub }  # per-app override
 			# Everything below is a default, shown for reference:
 			# health_path       /health        # GET must return 2xx ("off" = liveness only)
 			# health_interval   5s
@@ -122,7 +131,7 @@ deploy.example.com {
 Apps must listen on `127.0.0.1` at the injected `PORT`. Their
 environment is, lowest precedence first: an allowlisted slice of
 Caddy's environment (`PATH`, `HOME`, `LANG`, `TZ`, `LC_*` — nothing
-else, so supervisor credentials like `LIVESWAP_SECRET` never reach
+else, so supervisor credentials like ACME DNS tokens never reach
 apps) → `env_file` → inline `env` → injected `PORT` and
 `HOST=127.0.0.1`. Anything more an app needs must be passed
 explicitly via `env` or `env_file`.
@@ -140,7 +149,7 @@ resolved at config load.
 | Option | Default | Meaning |
 |---|---|---|
 | `root` | `/var/lib/liveswap` | Releases, shared data, state per app |
-| `webhook_secret` | — (required) | Shared secret; global default or per app |
+| `deploy_trust <preset> { … }` | — (required) | Who may deploy; global default or per app (see [Deploy authentication](#deploy-authentication-deploy_trust)) |
 | `allow_insecure_http` | off | Permit plain-http artifact URLs |
 | `artifact_allowlist` | — (required) | Where artifacts may be fetched from. Entries are a host (`artifacts.corp`) or a host + path prefix (`github.com/your-org/`). An entry admits only the scheme's default port unless it declares one (`minio.corp:9000`) — no wildcards; the port picks which service on the host answers, so it belongs to the operator, not the payload. Pin the path on multi-tenant hosts — a bare `github.com` admits anyone's artifacts. Query strings are refused unless the entry declares the parameter names it vouches for: `gitlab.com/api/v4/projects/42/?job` allows `?job=build`, `bucket.s3.corp/releases/?X-Amz-*` allows the presigned-URL family (a trailing `*` declares a prefix; values are never re-encoded — signed queries pass through byte-identical — but every query byte must be a legal RFC 3986 query character, so percent-encode anything exotic). Closed by default because on some servers a query *name* can override path routing entirely (WordPress-style `?p=2`), which would defeat the path pin. A refused URL fails the deploy with a 422 naming the offending parameter. First hop only, by design (GitHub asset URLs redirect to S3); every hop must still be https unless `allow_insecure_http`. Apps may override |
 | `command` | — (required) | argv to start the app, CWD = release dir |
@@ -210,18 +219,39 @@ unhealthy, for the deploy gate too): if your health endpoint
 redirects — a `/health` → `/health/` trailing slash is the classic —
 point `health_path` at the final path.
 
+## Deploy authentication (`deploy_trust`)
+
+Deploys are authenticated with a short-lived **JWT**, verified against
+public material only — there is no shared secret on the box. Every app
+must resolve to at least one `deploy_trust` source (globally or per
+app), or config load fails. A request is authorized if **any** source
+verifies its `Authorization: Bearer <JWT>` and **all** that source's
+claim constraints match.
+
+Presets:
+
+- `deploy_trust github { audience <a>; claim … }` — GitHub Actions
+  OIDC (`issuer https://token.actions.githubusercontent.com`, fixed).
+- `deploy_trust gitlab { audience <a>; … }` — GitLab CI; add
+  `issuer https://gitlab.example.com` for self-hosted.
+- `deploy_trust oidc { issuer <url>; audience <a>; … }` — any OIDC
+  provider (CircleCI, Buildkite, k8s, …).
+- `deploy_trust local { public_key <path> }` — a key you control, for
+  non-CI deploys. Generate it with `hotserve deploy-keygen`, mint
+  tokens with `hotserve deploy-token`.
+
+Sub-directives: `audience` (required for OIDC — never trust an
+unaudienced token), `claim <name> <value>` (exact-match, repeatable —
+pin `repository`, `ref`, `environment`, etc.), `subject` (sugar for
+`claim sub`), `issuer` (oidc/gitlab), `public_key` (local).
+
+`Authorization: Bearer` is the only accepted transport — Caddy redacts
+it from access logs automatically.
+
 ## Webhook API
 
-`POST https://deploy.example.com/<app>`, authenticated with either
-header:
-
-- `Authorization: Bearer <secret>` — **recommended**: Caddy access
-  logs redact the `Authorization` header automatically.
-- `X-Liveswap-Secret: <secret>` — same effect, but if you enable
-  access logging on the webhook site, this custom header is logged in
-  plaintext (see [Secrets and logs](#secrets-and-logs)).
-
-JSON body:
+`POST https://deploy.example.com/<app>`, with `Authorization: Bearer
+<JWT>` (see `deploy_trust` above). JSON body:
 
 ```json
 {
@@ -238,7 +268,7 @@ so GitHub's S3 redirect works). The response is synchronous:
 | Code | Meaning |
 |---|---|
 | 200 | Deployed; body is the app's status JSON |
-| 401 | Bad or missing secret |
+| 401 | Bad or missing token |
 | 404 | Unknown app |
 | 409 | A deploy is already running for this app (retry) |
 | 422 | Bad payload — missing url, invalid version, version already running, or the artifact url was refused by `artifact_allowlist` (host, path, port, or an undeclared query parameter; the body names exactly what tripped and how the entry would declare it) |
@@ -251,7 +281,7 @@ in roughly soak + drain (~20s). Budget your CI step timeout for
 `deadline` plus drain and grace, and expect a concurrent deploy to
 409 until the first one finishes.
 
-`GET /<app>` (same secret header) returns status: phase, current
+`GET /<app>` (same bearer token) returns status: phase, current
 version, port, pid, last deploy result, and the watchdog's state
 (restart counts, last restart cause).
 
@@ -265,30 +295,20 @@ What liveswap does for you:
 - Deploy logs record the artifact **host only**; download errors go
   through a redactor that drops credentials and query strings (where
   presigned-URL and token secrets live).
+- Deploy auth stores no secret on the box: the config holds only an
+  OIDC issuer + claim allowlist, or a public key. The deploy token
+  arrives per request as `Authorization: Bearer`, which Caddy redacts
+  from access logs automatically.
 - The packaged systemd unit deliberately does **not** use `--environ`
-  (unlike Caddy's dist unit), so `LIVESWAP_SECRET` and any ACME DNS
-  tokens never land in the journal — journals get pasted into bug
-  reports. The package smoke test asserts this.
-- Config keeps `{env.LIVESWAP_SECRET}` as a placeholder, so config
-  dumps and the admin API never contain the value.
+  (unlike Caddy's dist unit), so ACME DNS tokens and any other
+  supervisor secrets never land in the journal — journals get pasted
+  into bug reports. The package smoke test asserts this.
 
 What's yours to handle:
 
-- If you enable **access logging** on the webhook site, use
-  `Authorization: Bearer` (redacted by Caddy automatically). If you
-  must use `X-Liveswap-Secret` with access logs, filter it:
-
-  ```caddyfile
-  deploy.example.com {
-  	log {
-  		format filter {
-  			request>headers>X-Liveswap-Secret delete
-  		}
-  	}
-  	liveswap_webhook
-  }
-  ```
-
+- Keep the **local signing key** (`deploy_trust local`) off the box —
+  it belongs on the machine that mints tokens. The box needs only the
+  `.pub`. (CI OIDC avoids a stored key entirely.)
 - Your app's **stdout/stderr is relayed** into hotserve's log. If your
   app prints its own secrets at startup, they end up in the journal —
   that one's on the app.
@@ -297,7 +317,16 @@ What's yours to handle:
 
 ### GitHub Actions
 
+No deploy secret to store — the job mints an OIDC token per run
+(matching a `deploy_trust github { audience hotserve; claim repository
+your-org/blog }` block on the box):
+
 ```yaml
+permissions:
+  id-token: write               # required to mint the OIDC token
+  contents: write               # (for the release upload below)
+
+steps:
 - name: Build artifact
   run: |
     npm ci && npm run build
@@ -311,8 +340,10 @@ What's yours to handle:
 
 - name: Deploy
   run: |
+    JWT=$(curl -sH "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+      "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=hotserve" | jq -r .value)
     curl --fail --max-time 600 -X POST \
-      -H "Authorization: Bearer ${{ secrets.LIVESWAP_SECRET }}" \
+      -H "Authorization: Bearer $JWT" \
       -d '{
         "url": "https://api.github.com/repos/${{ github.repository }}/releases/assets/'"$ASSET_ID"'",
         "version": "build-${{ github.run_number }}",
@@ -320,6 +351,9 @@ What's yours to handle:
       }' \
       https://deploy.example.com/blog
 ```
+
+(`auth_header` is a separate, artifact-download credential — the token
+that reads a private release asset — not the deploy token.)
 
 (For public repos, the plain `browser_download_url` works and needs no
 `auth_header`.)
@@ -329,6 +363,9 @@ What's yours to handle:
 ```yaml
 deploy:
   stage: deploy
+  id_tokens:
+    HOTSERVE_JWT:               # verified by `deploy_trust gitlab { audience hotserve }`
+      aud: hotserve
   script:
     - tar -czf blog.tar.gz -C dist .
     - |
@@ -337,7 +374,7 @@ deploy:
         "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/blog/$CI_COMMIT_SHORT_SHA/blog.tar.gz"
     - |
       curl --fail --max-time 600 -X POST \
-        -H "Authorization: Bearer $LIVESWAP_SECRET" \
+        -H "Authorization: Bearer $HOTSERVE_JWT" \
         -d "{
           \"url\": \"$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/blog/$CI_COMMIT_SHORT_SHA/blog.tar.gz\",
           \"version\": \"$CI_COMMIT_SHORT_SHA\",
@@ -384,7 +421,7 @@ failure the previous version never stopped serving.
 - **Single node by design.** This is for the 1-server indie stack, not
   a cluster.
 - **Unix only** (Linux servers, macOS dev). Windows is not supported.
-- Deploy secrets and artifact-URL query strings never appear in logs.
+- Deploy tokens and artifact-URL query strings never appear in logs.
 
 ## Development
 

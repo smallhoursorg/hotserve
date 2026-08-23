@@ -13,7 +13,7 @@ import (
 func defaultedApp(t *testing.T) *AppConfig {
 	t.Helper()
 	cfg := &AppConfig{Command: []string{"node", "server.js"}}
-	cfg.applyDefaults(caddy.NewReplacer(), "global-secret")
+	cfg.applyDefaults(caddy.NewReplacer())
 	return cfg
 }
 
@@ -40,20 +40,16 @@ func TestApplyDefaults(t *testing.T) {
 		cfg.WatchdogWindow != caddy.Duration(10*time.Minute) {
 		t.Errorf("watchdog defaults wrong: %+v", cfg)
 	}
-	if cfg.WebhookSecret != "global-secret" {
-		t.Errorf("secret should inherit the global default, got %q", cfg.WebhookSecret)
-	}
 }
 
 func TestApplyDefaultsKeepsExplicitValues(t *testing.T) {
 	cfg := &AppConfig{
-		Command:       []string{"x"},
-		WebhookSecret: "own",
-		HealthPath:    "off",
-		Soak:          caddy.Duration(time.Second),
+		Command:    []string{"x"},
+		HealthPath: "off",
+		Soak:       caddy.Duration(time.Second),
 	}
-	cfg.applyDefaults(caddy.NewReplacer(), "global")
-	if cfg.WebhookSecret != "own" || cfg.HealthPath != "off" || cfg.Soak != caddy.Duration(time.Second) {
+	cfg.applyDefaults(caddy.NewReplacer())
+	if cfg.HealthPath != "off" || cfg.Soak != caddy.Duration(time.Second) {
 		t.Fatalf("explicit values overwritten: %+v", cfg)
 	}
 }
@@ -63,6 +59,7 @@ func TestBuildSpecTranslatesConfig(t *testing.T) {
 		Root:              "/var/lib/liveswap",
 		AllowInsecureHTTP: true,
 		ArtifactAllowlist: []string{"github.com/smallhoursorg/"},
+		DeployTrust:       githubTrust(),
 	}
 	var err error
 	if a.allowlist, err = parseAllowlist(a.ArtifactAllowlist); err != nil {
@@ -85,6 +82,9 @@ func TestBuildSpecTranslatesConfig(t *testing.T) {
 	}
 	if spec.dirs.releases != "/var/lib/liveswap/blog/releases" {
 		t.Errorf("dirs wrong: %+v", spec.dirs)
+	}
+	if len(spec.trust) != 1 || spec.trust[0].kind != "oidc" {
+		t.Errorf("trust not carried over: %+v", spec.trust)
 	}
 	if spec.soak != 15*time.Second || spec.keep != 5 {
 		t.Errorf("spec values wrong: %+v", spec)
@@ -109,6 +109,7 @@ func TestValidate(t *testing.T) {
 		return &App{
 			Root:              "/var/lib/liveswap",
 			ArtifactAllowlist: []string{"github.com/smallhoursorg/"},
+			DeployTrust:       githubTrust(),
 			Apps:              map[string]*AppConfig{"blog": defaultedApp(t)},
 		}
 	}
@@ -124,7 +125,7 @@ func TestValidate(t *testing.T) {
 		{"relative root", func(a *App) { a.Root = "var/liveswap" }, "root must be an absolute path"},
 		{"bad app name", func(a *App) { a.Apps["Bad_Name"] = defaultedApp(t) }, "app name"},
 		{"missing command", func(a *App) { a.Apps["blog"].Command = nil }, "command is required"},
-		{"missing secret", func(a *App) { a.Apps["blog"].WebhookSecret = "" }, "no webhook secret"},
+		{"no deploy_trust anywhere", func(a *App) { a.DeployTrust = nil }, "no deploy_trust"},
 		{"bad health path", func(a *App) { a.Apps["blog"].HealthPath = "health" }, "health_path must start with /"},
 		{"zero interval", func(a *App) { a.Apps["blog"].HealthInterval = 0 }, "health_interval must be positive"},
 		{"negative soak", func(a *App) { a.Apps["blog"].Soak = caddy.Duration(-time.Second) }, "soak and drain"},
@@ -150,7 +151,7 @@ func TestValidate(t *testing.T) {
 }
 
 func TestHealthPathOffIsValid(t *testing.T) {
-	a := &App{Root: "/x", ArtifactAllowlist: []string{"h"}, Apps: map[string]*AppConfig{"w": defaultedApp(t)}}
+	a := &App{Root: "/x", ArtifactAllowlist: []string{"h"}, DeployTrust: githubTrust(), Apps: map[string]*AppConfig{"w": defaultedApp(t)}}
 	a.Apps["w"].HealthPath = "off"
 	if err := a.Validate(); err != nil {
 		t.Fatalf("health_path off must validate: %v", err)
