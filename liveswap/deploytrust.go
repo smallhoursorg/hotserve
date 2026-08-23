@@ -280,17 +280,18 @@ func warmVerifiers(verifierSets ...[]verifier) {
 	}
 }
 
-// authorize reports whether any verifier accepts the token.
-func authorize(ctx context.Context, verifiers []verifier, rawToken string) bool {
+// authorize returns the label of the first verifier that accepts the
+// token (for the deploy audit log), and whether any did.
+func authorize(ctx context.Context, verifiers []verifier, rawToken string) (string, bool) {
 	if rawToken == "" {
-		return false
+		return "", false
 	}
 	for _, v := range verifiers {
 		if err := v.verify(ctx, rawToken); err == nil {
-			return true
+			return v.label(), true
 		}
 	}
-	return false
+	return "", false
 }
 
 // oidcVerifier validates a provider-issued OIDC token against the

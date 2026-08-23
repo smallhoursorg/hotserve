@@ -245,8 +245,52 @@ unaudienced token), `claim <name> <value>` (exact-match, repeatable —
 pin `repository`, `ref`, `environment`, etc.), `subject` (sugar for
 `claim sub`), `issuer` (oidc/gitlab), `public_key` (local).
 
+The OIDC presets also **require an identity claim** — one of
+`repository`/`repository_id`/… (github), `project_path`/`project_id`/…
+(gitlab), or `sub` (oidc). An audience alone is not identity: any
+repo/project on the issuer can mint a token for any audience, so a
+source with only an audience would authorize the whole issuer. Config
+load fails without one.
+
 `Authorization: Bearer` is the only accepted transport — Caddy redacts
 it from access logs automatically.
+
+### Multiple sources (teams)
+
+`deploy_trust` is repeatable, and a request is authorized if **any**
+block accepts it. That is how a team combines CI with per-developer
+break-glass keys — think of the `local` blocks as an `authorized_keys`
+list:
+
+```caddyfile
+liveswap {
+	# Everyday path: CI deploys on merge, no secret anywhere.
+	deploy_trust github {
+		audience blog
+		claim repository your-org/blog
+		claim ref        refs/heads/main
+	}
+	# Break-glass: each dev registers their own public key (they keep
+	# the private half on their laptop). Revoke one by deleting its
+	# block; no shared secret, no effect on the others.
+	deploy_trust local { public_key /etc/hotserve/alice.pub  subject alice }
+	deploy_trust local { public_key /etc/hotserve/bob.pub    subject bob }
+
+	app blog { command node server.js }
+}
+```
+
+Each dev runs `hotserve deploy-keygen` once and hands you the `.pub`
+(public — safe to share); you add a block and reload. Use OIDC in CI,
+never a `local` key in CI (that would store a long-lived private key in
+CI secrets — the thing OIDC exists to avoid).
+
+Every successful deploy records **which source authorized it**: a
+`deploy authorized` log line (`via` = the source label, e.g.
+`local:/etc/hotserve/alice.pub` or `oidc:https://token.actions…`) and a
+`deployed_by` field in the status JSON. That is your audit trail for
+hand deploys — pin `subject <name>` on each dev's block so the label
+names the person.
 
 ## Webhook API
 

@@ -116,6 +116,10 @@ func TestWebhookDeployHappyPath(t *testing.T) {
 	if rig.ma.activePort.Load() == 0 {
 		t.Fatal("deploy did not publish a port")
 	}
+	// The status records which trust source authorized the deploy.
+	if status.LastDeploy == nil || status.LastDeploy.By != "local:test-key" {
+		t.Fatalf("deployed_by not recorded: %+v", status.LastDeploy)
+	}
 }
 
 func TestWebhookUsesPerAppTrust(t *testing.T) {

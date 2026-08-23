@@ -85,7 +85,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 	if ma != nil {
 		verifiers = ma.currentVerifiers()
 	}
-	if !authorize(r.Context(), verifiers, bearerToken(r)) {
+	who, ok := authorize(r.Context(), verifiers, bearerToken(r))
+	if !ok {
 		h.logger.Warn("webhook auth failed",
 			zap.String("app", name), zap.String("remote", r.RemoteAddr))
 		return respondJSON(w, http.StatusUnauthorized, map[string]string{
@@ -100,14 +101,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 	case http.MethodGet:
 		return respondJSON(w, http.StatusOK, ma.status())
 	case http.MethodPost:
-		return h.deploy(w, r, ma)
+		return h.deploy(w, r, ma, who)
 	default:
 		w.Header().Set("Allow", "GET, POST")
 		return respondJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 	}
 }
 
-func (h *Handler) deploy(w http.ResponseWriter, r *http.Request, ma *managedApp) error {
+func (h *Handler) deploy(w http.ResponseWriter, r *http.Request, ma *managedApp, by string) error {
 	var req deployRequest
 	// Read one byte past the cap: exceeding it proves the payload is
 	// oversized, which deserves an honest 413 — truncating at the cap
@@ -136,6 +137,9 @@ func (h *Handler) deploy(w http.ResponseWriter, r *http.Request, ma *managedApp)
 		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "auth_header contains control characters"})
 	}
 
+	h.logger.Info("deploy authorized",
+		zap.String("app", ma.name), zap.String("via", by), zap.String("remote", r.RemoteAddr))
+	req.by = by
 	err = ma.Deploy(r.Context(), req)
 	status := ma.status()
 	var vErr validationError

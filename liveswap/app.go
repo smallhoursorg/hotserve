@@ -95,6 +95,9 @@ type deployRequest struct {
 	URL        string `json:"url"`
 	Version    string `json:"version"`
 	AuthHeader string `json:"auth_header,omitempty"`
+	// by is the label of the trust source that authorized this deploy.
+	// Set by the handler after auth, never unmarshaled from the payload.
+	by string
 }
 
 // deployResult records the outcome of the most recent deploy attempt
@@ -104,6 +107,7 @@ type deployResult struct {
 	Status     string    `json:"status"` // "succeeded" | "failed"
 	Error      string    `json:"error,omitempty"`
 	Phase      string    `json:"phase,omitempty"` // phase reached when it failed
+	By         string    `json:"deployed_by,omitempty"` // the trust source that authorized it
 	StartedAt  time.Time `json:"started_at"`
 	FinishedAt time.Time `json:"finished_at"`
 }
@@ -275,6 +279,7 @@ func (ma *managedApp) Deploy(ctx context.Context, req deployRequest) (err error)
 		result := deployResult{
 			Version:    req.Version,
 			Status:     "succeeded",
+			By:         req.by,
 			StartedAt:  started,
 			FinishedAt: c.clock.Now(),
 		}
