@@ -644,3 +644,121 @@ func getStatus(t *testing.T) (int, string) {
 	t.Helper()
 	return getStatusApp(t, "demo")
 }
+
+// oidcConfig runs an app whose deploys are authenticated by an OIDC
+// provider (our own in-process mock issuer), exercising the production
+// OIDC path — Caddyfile parsing, Provision wiring, the JWKS client,
+// discovery and token verification — end to end through the real
+// binary, which the local-key e2e path does not.
+func oidcConfig(root, artifactPort, issuer string) string {
+	return fmt.Sprintf(`{
+	skip_install_trust
+	admin localhost:2999
+	http_port 9080
+	grace_period 1ns
+
+	liveswap {
+		root %[1]s
+		allow_insecure_http
+		artifact_allowlist 127.0.0.1:%[2]s
+		deploy_trust oidc {
+			issuer %[3]s
+			audience e2e
+			claim sub ci
+		}
+
+		app oidcdemo {
+			command ./server
+			health_interval 50ms
+			health_timeout 1s
+			soak 100ms
+			deadline 5s
+			drain 1ms
+			grace 2s
+			keep 2
+		}
+	}
+}
+http://localhost:9080 {
+	reverse_proxy {
+		dynamic liveswap oidcdemo
+	}
+}
+http://localhost:9081 {
+	liveswap_webhook
+}
+`, root, artifactPort, issuer)
+}
+
+func TestIntegrationOIDCDeploy(t *testing.T) {
+	bin := buildTestApp(t)
+	root := t.TempDir()
+	artifacts := map[string][]byte{"/demo-v1.tar.gz": packRelease(t, bin, "v1", false)}
+	artifactSrv := serveArtifacts(t, artifacts)
+	artifactURL, err := url.Parse(artifactSrv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Our own OIDC provider, in-process: serves discovery + JWKS and
+	// signs tokens, standing in for GitHub/GitLab.
+	iss := newMockIssuer(t)
+
+	tester := caddytest.NewTester(t)
+	tester.InitServer(oidcConfig(root, artifactURL.Port(), iss.url), "caddyfile")
+
+	hook := "http://localhost:9081/oidcdemo"
+	deploy := func(token string) (int, string) {
+		body := fmt.Sprintf(`{"url":%q,"version":"v1"}`, artifactSrv.URL+"/demo-v1.tar.gz")
+		req, _ := http.NewRequest(http.MethodPost, hook, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		data, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(data)
+	}
+	future := time.Now().Add(5 * time.Minute)
+
+	t.Run("valid OIDC token deploys and serves", func(t *testing.T) {
+		tok := iss.mint(t, iss.priv, "e2e", map[string]string{"sub": "ci"}, future)
+		if code, body := deploy(tok); code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", code, body)
+		}
+		code, b := getBody(t, "http://localhost:9080/")
+		if code != http.StatusOK || !strings.HasPrefix(b, "hello v1") {
+			t.Fatalf("proxy did not serve v1: %d %q", code, b)
+		}
+	})
+
+	// Each negative case is a validly-signed token that must still be
+	// rejected — the whole point of the claim allowlist.
+	t.Run("wrong identity claim is rejected", func(t *testing.T) {
+		tok := iss.mint(t, iss.priv, "e2e", map[string]string{"sub": "attacker"}, future)
+		if code, _ := deploy(tok); code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 for wrong sub, got %d", code)
+		}
+	})
+
+	t.Run("wrong audience is rejected", func(t *testing.T) {
+		tok := iss.mint(t, iss.priv, "other", map[string]string{"sub": "ci"}, future)
+		if code, _ := deploy(tok); code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 for wrong audience, got %d", code)
+		}
+	})
+
+	t.Run("expired token is rejected", func(t *testing.T) {
+		tok := iss.mint(t, iss.priv, "e2e", map[string]string{"sub": "ci"}, time.Now().Add(-time.Hour))
+		if code, _ := deploy(tok); code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 for expired token, got %d", code)
+		}
+	})
+
+	t.Run("garbage token is rejected", func(t *testing.T) {
+		if code, _ := deploy("not-a-jwt"); code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 for garbage token, got %d", code)
+		}
+	})
+}

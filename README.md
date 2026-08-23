@@ -226,6 +226,7 @@ the scanner.)
 | [darkweak/storages/otter](https://github.com/darkweak/storages) | +6 | ✓ | — | — | In-memory storage backend for Souin, wrapping [maypok86/otter](https://github.com/maypok86/otter). |
 | [zap](https://github.com/uber-go/zap) | 0 (already in Caddy's tree) | ✓ | ✓ | ✓ | Caddy's module logging API is zap; not optional for a Caddy module. |
 | [go-humanize](https://github.com/dustin/go-humanize) | 0 (already in Caddy's tree) | ✓ | ✓ | — | A few formatting helpers in liveswap. |
+| [go-oidc](https://github.com/coreos/go-oidc) + [go-jose](https://github.com/go-jose/go-jose) | 0 (already in Caddy's tree) | ✓ | ✓ | — | Deploy authentication (`deploy_trust`): OIDC discovery/JWKS verification and JWT signing/verification. Both were already transitive dependencies of Caddy; liveswap now requires them directly. Vetted and widely used — the deliberate alternative to hand-rolling JWT crypto. |
 
 The liveswap and penaltybox columns are what a standalone
 `xcaddy build --with ...` of that module pulls in; the hotserve binary
