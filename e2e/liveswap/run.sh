@@ -259,6 +259,13 @@ c=$(curl -s -o /tmp/deploy-body -w '%{http_code}' --max-time 60 \
 b=$(body)
 case "$b" in "hello v2"*) pass "second push serves v2: '$b'" ;; *) fail "expected 'hello v2 ...', got '$b'" ;; esac
 
+# Discover what's available to roll back to, then roll back.
+s=$(curl -s -H "Authorization: Bearer $TOKEN" "$HOOK")
+case "$s" in
+*'"available_versions"'*'px1'*) pass "status lists available_versions for rollback" ;;
+*) fail "status missing px1 in available_versions: $s" ;;
+esac
+
 # Rollback relaunches px1's on-disk release — no fetch, no upload.
 c=$(curl -s -o /tmp/deploy-body -w '%{http_code}' --max-time 60 \
 	-X POST -H "Authorization: Bearer $TOKEN" "$HOOK?rollback=px1")

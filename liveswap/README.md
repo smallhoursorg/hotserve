@@ -337,8 +337,10 @@ curl --fail -X POST -H "Authorization: Bearer $JWT" \
 ```
 
 Rollback runs the same blue/green pipeline (start, health-gate, cut
-over), so it is zero-downtime too. A `404`-style `422` is returned if
-that version is no longer on disk.
+over), so it is zero-downtime too. A `422` is returned if that version
+is no longer on disk. To see what you can roll back to, `GET /<app>`
+returns `available_versions` — the on-disk releases, newest-first
+(bounded by `keep`).
 
 The response is synchronous:
 
@@ -360,8 +362,10 @@ in roughly soak + drain (~20s). Budget your CI step timeout for
 409 until the first one finishes.
 
 `GET /<app>` (same bearer token) returns status: phase, current
-version, port, pid, last deploy result, and the watchdog's state
-(restart counts, last restart cause).
+version, port, pid, last deploy result (including `deployed_by`), the
+watchdog's state (restart counts, last restart cause), and
+`available_versions` — the on-disk releases you can roll back to,
+newest-first.
 
 The tarball's contents must sit at the archive root (`tar -czf
 app.tar.gz -C dist .`), with versions matching `[A-Za-z0-9._-]{1,64}`.

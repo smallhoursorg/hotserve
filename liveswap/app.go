@@ -563,17 +563,25 @@ type statusSnapshot struct {
 	Running        bool              `json:"running"`
 	LastDeploy     *deployResult     `json:"last_deploy,omitempty"`
 	Watchdog       *watchdogSnapshot `json:"watchdog,omitempty"`
+	// AvailableVersions lists the on-disk releases, newest-first — the
+	// versions `?rollback=<version>` can relaunch.
+	AvailableVersions []string `json:"available_versions,omitempty"`
 }
 
 func (ma *managedApp) status() statusSnapshot {
 	c := ma.snapshot()
 	var wd *watchdogSnapshot
-	if c.clock != nil && c.spec != nil {
-		wd = ma.wd.statusSnapshot(c.clock.Now(), c.spec.wdWindow)
+	var available []string
+	if c.spec != nil {
+		if c.clock != nil {
+			wd = ma.wd.statusSnapshot(c.clock.Now(), c.spec.wdWindow)
+		}
+		// Read releases outside ma.mu — it is disk I/O, and status is polled.
+		available = listReleases(c.spec.dirs.releases)
 	}
 	ma.mu.Lock()
 	defer ma.mu.Unlock()
-	s := statusSnapshot{App: ma.name, Phase: ma.phase, LastDeploy: ma.lastDeploy, Watchdog: wd}
+	s := statusSnapshot{App: ma.name, Phase: ma.phase, LastDeploy: ma.lastDeploy, Watchdog: wd, AvailableVersions: available}
 	if ma.current != nil {
 		s.CurrentVersion = ma.current.version
 		s.Port = ma.current.port

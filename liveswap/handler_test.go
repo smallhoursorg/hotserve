@@ -300,3 +300,22 @@ func TestWebhookRollbackRequiresValidVersion(t *testing.T) {
 		t.Fatalf("evil rollback version: got %d", w.Code)
 	}
 }
+
+func TestWebhookStatusListsAvailableVersions(t *testing.T) {
+	h, _ := newTestHandler(t)
+	do(t, h, http.MethodPost, "/demo", appToken(t), `{"url":"https://x/1.tgz","version":"v1"}`)
+	do(t, h, http.MethodPost, "/demo", appToken(t), `{"url":"https://x/2.tgz","version":"v2"}`)
+	w := do(t, h, http.MethodGet, "/demo", appToken(t), "")
+	var status statusSnapshot
+	must(t, json.Unmarshal(w.Body.Bytes(), &status))
+	if len(status.AvailableVersions) != 2 {
+		t.Fatalf("available_versions = %v, want two entries", status.AvailableVersions)
+	}
+	set := map[string]bool{}
+	for _, v := range status.AvailableVersions {
+		set[v] = true
+	}
+	if !set["v1"] || !set["v2"] {
+		t.Fatalf("available_versions missing a release: %v", status.AvailableVersions)
+	}
+}

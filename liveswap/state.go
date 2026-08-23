@@ -73,6 +73,39 @@ var _ stateStore = (*fileStateStore)(nil)
 // version — the one currently serving — is never deleted regardless of
 // age. Failures are logged, not fatal: GC must never break a deploy
 // that already succeeded.
+// listReleases returns the on-disk release versions, newest-first, so
+// the status endpoint can tell an operator what is available to roll
+// back to. Best-effort: a read error yields nil and status still
+// renders. Same enumeration rules as gcReleases (skip dotfiles and
+// staging dirs).
+func listReleases(releasesDir string) []string {
+	entries, err := os.ReadDir(releasesDir)
+	if err != nil {
+		return nil
+	}
+	type rel struct {
+		name    string
+		modTime time.Time
+	}
+	var rels []rel
+	for _, e := range entries {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		rels = append(rels, rel{e.Name(), info.ModTime()})
+	}
+	sort.Slice(rels, func(i, j int) bool { return rels[i].modTime.After(rels[j].modTime) })
+	out := make([]string, len(rels))
+	for i, r := range rels {
+		out[i] = r.name
+	}
+	return out
+}
+
 func gcReleases(releasesDir string, keep int, protect string, logger *zap.Logger) {
 	entries, err := os.ReadDir(releasesDir)
 	if err != nil {
