@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -132,6 +133,9 @@ func resolveTrustConfig(tc TrustConfig) (trustSource, error) {
 		if tc.PublicKey != "" {
 			return trustSource{}, fmt.Errorf("%s does not take a public_key", tc.Kind)
 		}
+		if err := requireIdentityClaim(tc.Kind, claims); err != nil {
+			return trustSource{}, err
+		}
 		return trustSource{kind: "oidc", issuer: issuer, audience: tc.Audience, claims: claims}, nil
 
 	case "local":
@@ -152,6 +156,55 @@ func resolveTrustConfig(tc TrustConfig) (trustSource, error) {
 	default:
 		return trustSource{}, fmt.Errorf("unknown preset %q (use github|gitlab|oidc|local)", tc.Kind)
 	}
+}
+
+// identityClaims lists, per preset, the claims that scope a token to a
+// specific deployer. An audience alone is NOT identity: both GitHub and
+// GitLab let any project mint a token for any audience, so a source with
+// only an audience would authorize every repository on the issuer.
+var identityClaims = map[string][]string{
+	"github": {"repository", "repository_id", "repository_owner", "repository_owner_id", "sub"},
+	"gitlab": {"project_path", "project_id", "namespace_path", "namespace_id", "sub"},
+}
+
+// requireIdentityClaim fails closed when an OIDC source pins no identity.
+func requireIdentityClaim(kind string, claims map[string]string) error {
+	if kind == "oidc" {
+		if _, ok := claims["sub"]; ok {
+			return nil
+		}
+		return fmt.Errorf("oidc requires an identity constraint — pin `subject`/`claim sub` (every OIDC token has one); an audience alone lets any workload of this issuer deploy")
+	}
+	for _, name := range identityClaims[kind] {
+		if _, ok := claims[name]; ok {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s requires an identity claim (one of: %s) — an audience alone authorizes every %s project", kind, strings.Join(identityClaims[kind], ", "), kind)
+}
+
+// newJWKSClient builds the HTTP client the OIDC verifier uses for
+// discovery and JWKS fetches. It refuses plain-http requests (and
+// https→http redirects) so a network attacker cannot swap the
+// verification keys and forge deploy tokens — unless allow_insecure_http
+// is set, the documented escape hatch for test rigs and LANs.
+func newJWKSClient(allowInsecure bool) *http.Client {
+	var rt http.RoundTripper = &http.Transport{Proxy: http.ProxyFromEnvironment}
+	if !allowInsecure {
+		rt = httpsOnlyTransport{base: rt}
+	}
+	// A small control request, so unlike the artifact download it takes
+	// a bounded overall timeout.
+	return &http.Client{Timeout: 30 * time.Second, Transport: rt}
+}
+
+type httpsOnlyTransport struct{ base http.RoundTripper }
+
+func (t httpsOnlyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.URL.Scheme != "https" {
+		return nil, fmt.Errorf("refusing non-https OIDC request to %s (set allow_insecure_http for test rigs)", r.URL.Redacted())
+	}
+	return t.base.RoundTrip(r)
 }
 
 // loadEd25519PublicKey reads a PKIX PEM file (as emitted by
@@ -206,6 +259,25 @@ func resolveVerifiers(sources []trustSource, jwksClient *http.Client) []verifier
 		}
 	}
 	return out
+}
+
+// warmVerifiers best-effort pre-fetches OIDC discovery/JWKS in the
+// background so the first real deploy — and, importantly, the first
+// verification of a *known* app — does not pay the discovery latency
+// that would otherwise distinguish it (by timing) from an unknown app.
+// Errors are ignored; a real request retries.
+func warmVerifiers(verifierSets ...[]verifier) {
+	for _, set := range verifierSets {
+		for _, v := range set {
+			if ov, ok := v.(*oidcVerifier); ok {
+				go func(ov *oidcVerifier) {
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					defer cancel()
+					_, _ = ov.ensure(ctx)
+				}(ov)
+			}
+		}
+	}
 }
 
 // authorize reports whether any verifier accepts the token.
@@ -292,6 +364,12 @@ func (v *localVerifier) verify(_ context.Context, rawToken string) error {
 	// payload into both the standard-claims struct and the full map.
 	if err := tok.Claims(v.pub, &std, &all); err != nil {
 		return err
+	}
+	// ValidateWithLeeway only checks exp when present, so a local token
+	// with no expiry would be accepted forever. Require it — the
+	// short-lived-token guarantee depends on it.
+	if std.Expiry == nil {
+		return fmt.Errorf("local token has no exp claim")
 	}
 	expected := jwt.Expected{Time: time.Now()}
 	if v.audience != "" {

@@ -325,7 +325,17 @@ func parseDeployTrust(d *caddyfile.Dispenser) (TrustConfig, error) {
 			if !d.NextArg() {
 				return tc, d.ArgErr()
 			}
-			tc.Subject = d.Val()
+			// Route to a `sub` claim rather than the Subject sugar field:
+			// if the value is a placeholder that resolves empty, it then
+			// stays a (fail-closed) sub="" constraint instead of silently
+			// dropping — dropping would broaden the trust source.
+			if tc.Claims == nil {
+				tc.Claims = make(map[string]string)
+			}
+			if _, dup := tc.Claims["sub"]; dup {
+				return tc, d.Err("subject and `claim sub` are both set")
+			}
+			tc.Claims["sub"] = d.Val()
 		case "claim":
 			if !d.NextArg() {
 				return tc, d.ArgErr()

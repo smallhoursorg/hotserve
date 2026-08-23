@@ -84,7 +84,7 @@ func TestCaddyfileUnmarshalFullConfig(t *testing.T) {
 	}
 	if len(blog.DeployTrust) != 1 || blog.DeployTrust[0].Kind != "local" ||
 		blog.DeployTrust[0].PublicKey != "/etc/hotserve/blog.pub" ||
-		blog.DeployTrust[0].Subject != "ci@smallhours" {
+		blog.DeployTrust[0].Claims["sub"] != "ci@smallhours" {
 		t.Fatalf("per-app deploy_trust wrong: %+v", blog.DeployTrust)
 	}
 	if blog.HealthPath != "/healthz" ||

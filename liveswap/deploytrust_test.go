@@ -67,6 +67,57 @@ func TestLocalVerifier(t *testing.T) {
 	}
 }
 
+func TestOIDCPresetRequiresIdentityClaim(t *testing.T) {
+	// Audience alone must be rejected — any repo/project can mint a token
+	// for an arbitrary audience.
+	for _, tc := range []TrustConfig{
+		{Kind: "github", Audience: "hotserve"},
+		{Kind: "gitlab", Audience: "hotserve"},
+		{Kind: "oidc", Issuer: "https://idp.example", Audience: "hotserve"},
+	} {
+		if _, err := buildTrust([]TrustConfig{tc}, nil); err == nil {
+			t.Errorf("%s with only an audience must be rejected", tc.Kind)
+		}
+	}
+	// With an identity claim it is accepted.
+	ok := []TrustConfig{
+		{Kind: "github", Audience: "hotserve", Claims: map[string]string{"repository": "o/r"}},
+		{Kind: "gitlab", Audience: "hotserve", Claims: map[string]string{"project_path": "o/r"}},
+		{Kind: "oidc", Issuer: "https://idp.example", Audience: "hotserve", Claims: map[string]string{"sub": "ci"}},
+	}
+	for _, tc := range ok {
+		if _, err := buildTrust([]TrustConfig{tc}, nil); err != nil {
+			t.Errorf("%s with an identity claim rejected: %v", tc.Kind, err)
+		}
+	}
+}
+
+func TestLocalTokenRequiresExp(t *testing.T) {
+	priv, pub := mustGenTestKey()
+	noExp := signEdDSA(t, priv, map[string]any{
+		"aud": "a", "iat": jwt.NewNumericDate(time.Now()),
+	})
+	v := &localVerifier{audience: "a", pub: pub}
+	if err := v.verify(context.Background(), noExp); err == nil {
+		t.Fatal("local token without exp must be rejected")
+	}
+}
+
+func TestNewJWKSClientEnforcesHTTPS(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	defer srv.Close() // plain http
+
+	if _, err := newJWKSClient(false).Get(srv.URL); err == nil {
+		t.Error("newJWKSClient(false) must refuse a plain-http request")
+	}
+	resp, err := newJWKSClient(true).Get(srv.URL)
+	if err != nil {
+		t.Errorf("newJWKSClient(true) must allow http: %v", err)
+	} else {
+		_ = resp.Body.Close()
+	}
+}
+
 // TestLocalKeyFileRoundtrip proves the on-disk PEM formats produced by
 // `deploy-keygen` load back through loadEd25519PublicKey /
 // loadEd25519PrivateKey and interoperate with the local verifier.

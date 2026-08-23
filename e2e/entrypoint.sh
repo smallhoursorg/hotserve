@@ -8,9 +8,15 @@
 set -e
 
 if [ -d /shared ] && [ ! -f /shared/deploy.token ]; then
+	# Clear any partial state (deploy-keygen refuses to overwrite), mint a
+	# far-future token so a persisted volume never serves a stale one, and
+	# publish the token atomically so the recovery runner can't read a
+	# half-written file.
+	rm -f /shared/deploy.key /shared/deploy.key.pub /shared/deploy.pub
 	hotserve deploy-keygen --out /shared/deploy.key >/dev/null 2>&1
 	cp /shared/deploy.key.pub /shared/deploy.pub
-	hotserve deploy-token --key /shared/deploy.key --audience e2e --ttl 24h >/shared/deploy.token
+	hotserve deploy-token --key /shared/deploy.key --audience e2e --ttl 87600h >/shared/deploy.token.tmp
+	mv /shared/deploy.token.tmp /shared/deploy.token
 fi
 
 exec hotserve run --config /etc/hotserve/Caddyfile --adapter caddyfile

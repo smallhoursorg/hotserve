@@ -260,17 +260,20 @@ func (a *App) Provision(ctx caddy.Context) error {
 				return http.ErrUseLastResponse
 			},
 		},
-		// The JWKS client fetches OIDC issuers' public keys. Unlike the
-		// artifact download it is a small control request, so it takes a
-		// bounded overall timeout.
-		jwks: &http.Client{
-			Timeout:   30 * time.Second,
-			Transport: &http.Transport{Proxy: http.ProxyFromEnvironment},
-		},
+		// The JWKS client fetches OIDC issuers' public keys over https
+		// only (unless allow_insecure_http), with a bounded timeout.
+		jwks: newJWKSClient(a.AllowInsecureHTTP),
 	}
 	a.globalVerifiers = resolveVerifiers(a.globalTrust, clients.jwks)
 
+	// Build every spec first, then validate, and only then commit to the
+	// process-global pool. Caddy calls Validate *after* Provision, but a
+	// managedApp is shared across config loads — so if we mutated it here
+	// and Validate then rejected the config, the rejected policy (its
+	// deploy-auth verifiers included) would already be live on the pooled
+	// object. Validate-before-commit keeps a bad reload from taking effect.
 	a.managed = make(map[string]*managedApp, len(a.Apps))
+	specs := make(map[string]*appSpec, len(a.Apps))
 	for name, cfg := range a.Apps {
 		if cfg == nil {
 			cfg = new(AppConfig)
@@ -281,7 +284,12 @@ func (a *App) Provision(ctx caddy.Context) error {
 		if err != nil {
 			return err
 		}
-
+		specs[name] = spec
+	}
+	if err := a.Validate(); err != nil {
+		return err
+	}
+	for name, spec := range specs {
 		val, _ := appPool.LoadOrStore(poolKey(name), newManagedApp(name))
 		ma := val.(*managedApp)
 		ma.configure(spec, a.logger.Named(name), clients)
@@ -289,6 +297,13 @@ func (a *App) Provision(ctx caddy.Context) error {
 		a.managed[name] = ma
 		a.pooled = append(a.pooled, poolKey(name))
 	}
+	// Warm OIDC discovery in the background so the first verification of a
+	// known app is not slower (by JWKS-fetch latency) than an unknown one.
+	sets := [][]verifier{a.globalVerifiers}
+	for _, ma := range a.managed {
+		sets = append(sets, ma.currentVerifiers())
+	}
+	warmVerifiers(sets...)
 	return nil
 }
 

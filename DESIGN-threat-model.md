@@ -67,10 +67,11 @@ Properties that matter to the model:
   POST deploys, all else 405 ([handler.go:105-113](liveswap/handler.go)).
   The status endpoint is authenticated — not public.
 - **No rate limiting anywhere on the auth path.** No throttle, lockout,
-  or backoff. Each failure logs at Warn with `app`+`remote`
-  ([handler.go:95-96](liveswap/handler.go)) — so an unauthenticated
-  attacker gets *both* unlimited secret-guessing *and* an
-  unauthenticated log-amplification / disk-fill primitive. Body is
+  or backoff. Token *forgery* is infeasible (no private key), so this is
+  not a guessing oracle — but each failure logs at Warn with `app`+`remote`
+  ([handler.go:95-96](liveswap/handler.go)), an unauthenticated
+  log-amplification / disk-fill primitive, and every attempt costs a
+  JWT/JWKS verification. Body is
   capped at 64 KiB → 413 ([handler.go:42,121-128](liveswap/handler.go));
   `deployMu.TryLock()` → 409 serializes deploys
   ([app.go:258-260](liveswap/app.go)) but does nothing for auth attempts.
@@ -140,7 +141,7 @@ per hop, because the GitHub→S3 redirect is load-bearing
 host can redirect the fetch to *any* https host — LAN, internal, an
 https metadata endpoint. "https-only" is a partial SSRF barrier (it
 stops plain-http metadata endpoints, not an attacker's https target).
-Reaching it requires a valid secret **and** an allowlisted first hop.
+Reaching it requires a valid deploy token **and** an allowlisted first hop.
 Secondary: a malicious host can trickle bytes under the cap (only a
 30 s `ResponseHeaderTimeout`, [download.go:136-141](liveswap/download.go))
 to hold the per-app deploy lock open — DoS-of-deploys, not of serving.
@@ -235,9 +236,10 @@ scope for the runtime model, in scope for release signing (roadmap).
   pin. Controls tarball bytes, status, redirect targets (any https
   host), timing. Faces `extract.go` and the first-hop SSRF gap.
 - **T4 — Unauthenticated network attacker** on the public webhook/proxy.
-  Faces the secret gate (no rate limit → online guessing, but a
-  high-entropy secret makes this impractical; the realer wins are
-  log-amplification and any pre-auth proxy/Caddy surface).
+  Faces the token gate — forgery needs a private key, so there is no
+  guessing oracle; the realer wins are log-amplification, the CPU cost of
+  JWT/JWKS verification (no rate limit), and any pre-auth proxy/Caddy
+  surface.
 - **T5 — RCE in the supervisor itself** (a Caddy or liveswap bug). Low
   probability, catastrophic: it *is* the `hotserve` user, so it already
   holds every asset short of root. No app-isolation design prevents
