@@ -206,7 +206,15 @@ func (r *execRunner) Stop(h handle, grace time.Duration) (err error) {
 	// narrow, and every pgid we ever signal was one of our own app
 	// instances moments earlier.
 	if err := signalGroup(eh.pid, syscall.SIGTERM); err != nil {
-		return err // ESRCH: the group emptied under us; the reaper finds nothing to sweep
+		if errors.Is(err, syscall.ESRCH) {
+			// The group emptied between the done check and the signal:
+			// not even a zombie is left, so the leader has been reaped
+			// and the reaper is about to close done. A clean stop.
+			<-eh.done
+			eh.swept = true
+			return nil
+		}
+		return err // not swept: the reaper will try, and record its verdict
 	}
 	// Every path below ends with the group swept: a confirmed-empty
 	// group, or SIGKILL with its verdict. Record both before unlocking

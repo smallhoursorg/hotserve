@@ -31,8 +31,34 @@ func groupAlive(pgid int) bool {
 	if alive {
 		return true
 	}
-	if !complete {
+	if !complete || procHidesPIDs("/proc/self/mounts") {
 		return groupSignalable(pgid)
+	}
+	return false
+}
+
+// procHidesPIDs reports whether /proc is mounted with hidepid, in which
+// case other users' processes are missing from the listing altogether
+// (hidepid=2/invisible) rather than present-but-unreadable, and a
+// negative scan proves nothing about a worker that changed uid. Any
+// value other than 0/off counts; an unreadable mounts file counts too.
+func procHidesPIDs(mountsPath string) bool {
+	data, err := os.ReadFile(mountsPath) //nolint:gosec // /proc/self/mounts or a test fixture
+	if err != nil {
+		return true
+	}
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		f := bytes.Fields(line)
+		if len(f) < 4 || string(f[1]) != "/proc" || string(f[2]) != "proc" {
+			continue
+		}
+		for _, opt := range bytes.Split(f[3], []byte(",")) {
+			if v, ok := bytes.CutPrefix(opt, []byte("hidepid=")); ok {
+				if s := string(v); s != "0" && s != "off" {
+					return true
+				}
+			}
+		}
 	}
 	return false
 }

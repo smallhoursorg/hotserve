@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -259,6 +260,28 @@ func TestExecRunnerStopOnSweptHandleNeverSignals(t *testing.T) {
 		t.Fatal("Stop did not record the sweep")
 	}
 	must(t, r.Stop(victim, time.Second))
+}
+
+// A group that empties between Stop's done check and its SIGTERM is a
+// clean stop, not an error: reporting ESRCH would make callers skip
+// release GC or keep a fully stopped release on disk.
+func TestExecRunnerStopTreatsVanishedGroupAsStopped(t *testing.T) {
+	r := testExecRunner()
+	// A fully reaped process whose pid (and so pgid) no longer exists.
+	cmd := exec.Command("true")
+	setProcessGroup(cmd)
+	must(t, cmd.Start())
+	must(t, cmd.Wait())
+	done := make(chan struct{})
+	h := &execHandle{pid: cmd.Process.Pid, done: done}
+	// Stand in for the reaper: done closes shortly after the signal.
+	go func() { time.Sleep(50 * time.Millisecond); close(done) }()
+	if err := r.Stop(h, time.Second); err != nil {
+		t.Fatalf("ESRCH on the initial SIGTERM must be a clean stop, got %v", err)
+	}
+	if !h.swept {
+		t.Fatal("a vanished group must be recorded as swept")
+	}
 }
 
 func TestExecRunnerRunOnceSuccessAndFailure(t *testing.T) {
