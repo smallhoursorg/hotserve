@@ -76,6 +76,29 @@ func TestExecRunnerStopEscalatesToSIGKILL(t *testing.T) {
 	}
 }
 
+// waitForFile polls until path exists: the worker scripts below touch a
+// readiness marker once their trap is installed, so a signal can never
+// race the trap (a fixed sleep flaked under -race on a loaded host).
+//
+// The workers then park in `sleep 30 & wait` rather than looping over
+// short foreground sleeps: POSIX guarantees traps run promptly inside
+// the wait builtin, whereas a SIGTERM landing while the shell is
+// forking its next foreground child was occasionally lost — by both
+// dash and bash — which made the trap-based assertions flaky.
+func waitForFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s never appeared", path)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // waitGroupDead polls until no live member of pgid remains, failing the
 // test if the group is still populated at the deadline.
 func waitGroupDead(t *testing.T, pgid int, within time.Duration, what string) {
@@ -150,13 +173,14 @@ func TestExecRunnerStopWaitsForGroupWithinGrace(t *testing.T) {
 	r := testExecRunner()
 	dir := t.TempDir()
 	clean := filepath.Join(dir, "clean-shutdown")
-	script := `(trap "touch ` + clean + `; exit 0" TERM; while true; do sleep 0.1; done) & wait`
+	ready := filepath.Join(dir, "ready")
+	script := `(trap "touch ` + clean + `; exit 0" TERM; touch ` + ready + `; sleep 30 & wait) & wait`
 	h, err := r.Start(startSpec{command: []string{"sh", "-c", script}, dir: dir, env: os.Environ(), grace: 5 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
 	pid := h.state().PID
-	time.Sleep(300 * time.Millisecond) // let the trap install
+	waitForFile(t, ready) // the trap is installed
 	start := time.Now()
 	must(t, r.Stop(h, 5*time.Second))
 	elapsed := time.Since(start)
@@ -174,13 +198,15 @@ func TestExecRunnerStopWaitsForGroupWithinGrace(t *testing.T) {
 // SIGKILLs the survivors.
 func TestExecRunnerStopKillsGroupSurvivorsAfterGrace(t *testing.T) {
 	r := testExecRunner()
-	script := `(trap "" TERM; while true; do sleep 0.2; done) & wait`
-	h, err := r.Start(startSpec{command: []string{"sh", "-c", script}, dir: t.TempDir(), env: os.Environ(), grace: 5 * time.Second})
+	dir := t.TempDir()
+	ready := filepath.Join(dir, "ready")
+	script := `(trap "" TERM; touch ` + ready + `; sleep 30 & wait) & wait`
+	h, err := r.Start(startSpec{command: []string{"sh", "-c", script}, dir: dir, env: os.Environ(), grace: 5 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
 	pid := h.state().PID
-	time.Sleep(300 * time.Millisecond)
+	waitForFile(t, ready) // TERM is ignored from here on
 	start := time.Now()
 	must(t, r.Stop(h, 500*time.Millisecond))
 	if elapsed := time.Since(start); elapsed < 400*time.Millisecond {
