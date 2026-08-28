@@ -174,13 +174,22 @@ func (h *Handler) deployPush(w http.ResponseWriter, r *http.Request, ma *managed
 	}
 	defer ma.deployMu.Unlock()
 
-	spec := ma.currentSpec()
+	// One snapshot for both staging and the pipeline, so a reload during
+	// the upload can't stage under one spec and extract under another.
+	c := ma.snapshot()
+	spec := c.spec
 	archive, err := stageUpload(r.Body, spec.dirs.tmp, spec.maxArtifactSize)
-	if errors.Is(err, errArtifactTooLarge) {
+	var stgErr *stagingError
+	switch {
+	case errors.Is(err, errArtifactTooLarge):
 		return respondJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
 			"error": fmt.Sprintf("uploaded artifact exceeds max_artifact_size (%d bytes)", spec.maxArtifactSize)})
-	}
-	if err != nil {
+	case errors.As(err, &stgErr):
+		// A local filesystem failure (mkdir/create/write/close, e.g. a
+		// full disk) is a server error, like a failed URL download.
+		return respondJSON(w, http.StatusInternalServerError, map[string]string{"error": "staging upload: " + err.Error()})
+	case err != nil:
+		// Otherwise the body read itself failed — a bad request.
 		return respondJSON(w, http.StatusBadRequest, map[string]string{"error": "reading upload: " + err.Error()})
 	}
 	// Backstop cleanup: fetch removes the archive once it extracts it,
@@ -188,7 +197,7 @@ func (h *Handler) deployPush(w http.ResponseWriter, r *http.Request, ma *managed
 	defer func() { _ = os.Remove(archive) }()
 	req := deployRequest{Version: version, localArchive: archive, by: by}
 	h.logDeployAuthorized(r, ma, req)
-	return h.mapDeployResult(w, ma, ma.deployLocked(r.Context(), req))
+	return h.mapDeployResult(w, ma, ma.deployLocked(r.Context(), req, c))
 }
 
 // deployRollback relaunches an already-extracted on-disk release.
@@ -252,25 +261,57 @@ func isGzipUpload(r *http.Request) bool {
 // errArtifactTooLarge signals a pushed upload that exceeded the cap.
 var errArtifactTooLarge = errors.New("artifact too large")
 
+// stagingError marks an upload failure that is a local filesystem/server
+// fault (mkdir, create, disk write, close), as opposed to a bad request
+// body — so the handler can answer 5xx vs 400.
+type stagingError struct{ err error }
+
+func (e *stagingError) Error() string { return e.err.Error() }
+func (e *stagingError) Unwrap() error { return e.err }
+
+// writeTracker records whether a write to the underlying file failed, so
+// io.Copy's combined error can be attributed to the disk (server) rather
+// than the request body (client).
+type writeTracker struct {
+	w      io.Writer
+	failed bool
+}
+
+func (t *writeTracker) Write(p []byte) (int, error) {
+	n, err := t.w.Write(p)
+	if err != nil {
+		t.failed = true
+	}
+	return n, err
+}
+
 // stageUpload streams the request body to a temp file, capped at
-// maxBytes. Returns the path; the caller owns cleanup.
+// maxBytes. Returns the path; the caller owns cleanup. Local filesystem
+// failures come back wrapped in *stagingError (→ 5xx); a body-read
+// failure comes back bare (→ 400); an over-cap body → errArtifactTooLarge.
 func stageUpload(body io.Reader, tmpDir string, maxBytes int64) (string, error) {
 	if err := os.MkdirAll(tmpDir, 0o750); err != nil {
-		return "", err
+		return "", &stagingError{err}
 	}
 	f, err := os.CreateTemp(tmpDir, "push-*.tar.gz")
 	if err != nil {
-		return "", err
+		return "", &stagingError{err}
 	}
 	path := f.Name()
 	// One byte past the cap proves it is oversized.
-	n, err := io.Copy(f, io.LimitReader(body, maxBytes+1))
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
+	wt := &writeTracker{w: f}
+	n, copyErr := io.Copy(wt, io.LimitReader(body, maxBytes+1))
+	closeErr := f.Close()
+	if copyErr != nil {
 		_ = os.Remove(path)
-		return "", err
+		if wt.failed {
+			return "", &stagingError{copyErr} // disk write failed
+		}
+		return "", copyErr // request body read failed
+	}
+	if closeErr != nil {
+		_ = os.Remove(path)
+		return "", &stagingError{closeErr}
 	}
 	if n > maxBytes {
 		_ = os.Remove(path)

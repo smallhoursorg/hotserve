@@ -756,3 +756,29 @@ func TestFailedRollbackKeepsRelease(t *testing.T) {
 		t.Fatalf("failed rollback must not delete the on-disk release: %v", err)
 	}
 }
+
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, errors.New("body read boom") }
+
+func TestStageUploadClassifiesErrors(t *testing.T) {
+	var se *stagingError
+
+	// A body-read failure is a client fault — bare error, not stagingError.
+	if _, err := stageUpload(errReader{}, t.TempDir(), 100); err == nil || errors.As(err, &se) {
+		t.Fatalf("body-read error should be a bare (client) error, got %v", err)
+	}
+	// A local filesystem failure (tmpDir is actually a file → MkdirAll
+	// fails) is a server fault — *stagingError.
+	notADir := filepath.Join(t.TempDir(), "afile")
+	if err := os.WriteFile(notADir, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stageUpload(strings.NewReader("data"), notADir, 100); !errors.As(err, &se) {
+		t.Fatalf("a local FS failure should be a *stagingError (server), got %v", err)
+	}
+	// Happy path still works.
+	if _, err := stageUpload(strings.NewReader("data"), t.TempDir(), 100); err != nil {
+		t.Fatalf("valid upload should stage: %v", err)
+	}
+}

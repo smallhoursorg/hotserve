@@ -240,14 +240,6 @@ func specEqual(a, b *appSpec) bool {
 	return fmt.Sprintf("%+v", a) == fmt.Sprintf("%+v", b)
 }
 
-// currentSpec snapshots the app's spec (the handler needs the tmp dir
-// and size cap to stage a pushed upload).
-func (ma *managedApp) currentSpec() *appSpec {
-	ma.specMu.RLock()
-	defer ma.specMu.RUnlock()
-	return ma.spec
-}
-
 // currentVerifiers snapshots the app's deploy-auth trust sources.
 func (ma *managedApp) currentVerifiers() []verifier {
 	ma.specMu.RLock()
@@ -297,17 +289,20 @@ func (ma *managedApp) Deploy(ctx context.Context, req deployRequest) error {
 		return errDeployInProgress
 	}
 	defer ma.deployMu.Unlock()
-	return ma.deployLocked(ctx, req)
+	return ma.deployLocked(ctx, req, ma.snapshot())
 }
 
 // deployLocked runs the blue/green pipeline. The caller MUST already
 // hold deployMu: URL/rollback go through Deploy, while the push handler
-// acquires the lock BEFORE staging the upload, so a concurrent push
-// gets an immediate 409 rather than streaming a whole tarball to disk
-// only to lose the lock (which would also make aggregate staging
-// unbounded by the per-request cap).
-func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest) (err error) {
-	c := ma.snapshot()
+// acquires the lock BEFORE staging the upload, so a concurrent push gets
+// an immediate 409 rather than streaming a whole tarball to disk only to
+// lose the lock (which would also make aggregate staging unbounded).
+//
+// It runs against the single collaborators snapshot `c` the caller took,
+// so a config reload mid-flight can never split one deploy across two app
+// definitions (e.g. staging a push under the old size cap/root and
+// extracting it under the new).
+func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c collaborators) (err error) {
 	spec := c.spec
 	started := c.clock.Now()
 	logger := c.logger.With(zap.String("version", req.Version))
