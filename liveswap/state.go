@@ -67,12 +67,6 @@ func (s *fileStateStore) save(st appState) error {
 
 var _ stateStore = (*fileStateStore)(nil)
 
-// gcReleases prunes the releases directory down to the newest keep
-// entries by modification time (extraction time = deploy order, which
-// is robust against arbitrary version naming schemes). The protected
-// version — the one currently serving — is never deleted regardless of
-// age. Failures are logged, not fatal: GC must never break a deploy
-// that already succeeded.
 // listReleases returns the on-disk release versions, newest-first, so
 // the status endpoint can tell an operator what is available to roll
 // back to. Best-effort: a read error yields nil and status still
@@ -106,6 +100,12 @@ func listReleases(releasesDir string) []string {
 	return out
 }
 
+// gcReleases prunes the releases directory down to the newest keep
+// entries by modification time (extraction time = deploy order, which
+// is robust against arbitrary version naming schemes). The protected
+// version — the one currently serving — is never deleted regardless of
+// age. Failures are logged, not fatal: GC must never break a deploy
+// that already succeeded.
 func gcReleases(releasesDir string, keep int, protect string, logger *zap.Logger) {
 	entries, err := os.ReadDir(releasesDir)
 	if err != nil {

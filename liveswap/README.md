@@ -347,7 +347,8 @@ Rollback runs the same blue/green pipeline (start, health-gate, cut
 over), so it is zero-downtime too. A `422` is returned if that version
 is no longer on disk. To see what you can roll back to, `GET /<app>`
 returns `available_versions` — the on-disk releases, newest-first
-(bounded by `keep`).
+(`keep` of them, plus the running version when it is older than those —
+see the `keep` note above, so the list can briefly hold `keep+1`).
 
 **Versions are immutable.** A deploy (URL or push) never overwrites an
 existing on-disk release, so a version you can roll back to can't be

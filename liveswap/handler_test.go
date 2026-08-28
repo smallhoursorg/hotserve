@@ -350,3 +350,17 @@ func TestWebhookAvailableVersionsIsArrayWhenEmpty(t *testing.T) {
 		t.Fatalf("empty available_versions should serialize as [], not null/absent: %s", w.Body.String())
 	}
 }
+
+func TestWebhookPushContentTypeCaseInsensitive(t *testing.T) {
+	h, rig := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodPost, "/demo?version=v1", strings.NewReader("tarball"))
+	req.Header.Set("Authorization", "Bearer "+appToken(t))
+	req.Header.Set("Content-Type", "Application/GZIP; charset=x") // mixed case + parameter
+	w := send(t, h, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("mixed-case gzip Content-Type must route to push (200), got %d %s", w.Code, w.Body.String())
+	}
+	if rig.fetch.lastReq.source() != "push" {
+		t.Fatalf("expected push routing, got %q", rig.fetch.lastReq.source())
+	}
+}

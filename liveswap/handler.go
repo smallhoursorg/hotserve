@@ -251,7 +251,10 @@ func isGzipUpload(r *http.Request) bool {
 	if i := strings.IndexByte(ct, ';'); i >= 0 {
 		ct = ct[:i]
 	}
-	switch strings.TrimSpace(ct) {
+	// Media types are case-insensitive (RFC 7231), so normalize before
+	// matching — otherwise `Application/Gzip` would fall through to the
+	// JSON URL path and fail as invalid JSON.
+	switch strings.ToLower(strings.TrimSpace(ct)) {
 	case "application/gzip", "application/x-gzip", "application/octet-stream":
 		return true
 	}
