@@ -33,7 +33,9 @@ type runner interface {
 	// to grace for the whole group to exit, then SIGKILL the survivors.
 	// Returns once the leader has exited and the group has been swept
 	// (a SIGKILLed survivor may still be mid-teardown in the kernel).
-	// Safe on an already-exited handle: it sweeps whatever is left.
+	// Safe on an already-exited handle: the group is swept at most
+	// once (by Stop or by the runner at exit time), and every later
+	// Stop is a no-op — the pgid may have been recycled by then.
 	Stop(h handle, grace time.Duration) error
 
 	// Reattach tries to re-adopt an instance from persisted state after

@@ -189,6 +189,39 @@ func TestExecRunnerStopKillsGroupSurvivorsAfterGrace(t *testing.T) {
 	waitGroupDead(t, pid, 2*time.Second, "stop survivors")
 }
 
+// Once a handle's group has been swept its pgid is dead to us: the
+// kernel may have reassigned the number to an unrelated process group,
+// and a late Stop (Destruct with the watchdog off, hours later) must
+// not signal it. The "unrelated group" here is a live sleep whose pid
+// we borrow as the swept handle's pgid.
+func TestExecRunnerStopOnSweptHandleNeverSignals(t *testing.T) {
+	r := testExecRunner()
+	bystander, err := r.Start(startSpec{command: []string{"sleep", "30"}, dir: t.TempDir(), env: os.Environ()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.Stop(bystander, time.Second) })
+
+	done := make(chan struct{})
+	close(done)
+	stale := &execHandle{pid: bystander.state().PID, done: done, swept: true}
+	must(t, r.Stop(stale, 100*time.Millisecond))
+	time.Sleep(100 * time.Millisecond)
+	if !r.Alive(bystander) {
+		t.Fatal("Stop on a swept handle signalled a recycled pgid")
+	}
+
+	// Belt and braces: a second Stop on a handle Stop itself swept is
+	// also a no-op, so a real sequence (Stop, Destruct) is safe too.
+	victim, err := r.Start(startSpec{command: []string{"sleep", "30"}, dir: t.TempDir(), env: os.Environ()})
+	must(t, err)
+	must(t, r.Stop(victim, time.Second))
+	if !victim.(*execHandle).swept {
+		t.Fatal("Stop did not record the sweep")
+	}
+	must(t, r.Stop(victim, time.Second))
+}
+
 func TestExecRunnerRunOnceSuccessAndFailure(t *testing.T) {
 	r := testExecRunner()
 	ctx := context.Background()
