@@ -12,24 +12,28 @@ import (
 )
 
 // newTestHandler wires a Handler to an App backed by one fake-driven
-// managed app, bypassing caddy.Context entirely.
+// managed app, bypassing caddy.Context entirely. The app trusts
+// appTestPub for its own deploys; the App's global trust (for the
+// unknown-app path) is globalTestPub.
 func newTestHandler(t *testing.T) (*Handler, *testRig) {
 	t.Helper()
 	rig := newTestRig(t)
 	app := &App{
-		WebhookSecret: "global-secret",
-		managed:       map[string]*managedApp{"demo": rig.ma},
+		managed:         map[string]*managedApp{"demo": rig.ma},
+		globalVerifiers: resolveVerifiers([]trustSource{localTrust(globalTestPub, "global")}, nil),
 	}
 	h := &Handler{app: app, logger: zap.NewNop()}
 	return h, rig
 }
 
-func do(t *testing.T, h *Handler, method, path, secret, body string) *httptest.ResponseRecorder {
+// do sends a request with token as the Authorization bearer (empty =
+// no Authorization header).
+func do(t *testing.T, h *Handler, method, path, token, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	reader := strings.NewReader(body)
 	req := httptest.NewRequest(method, path, reader)
-	if secret != "" {
-		req.Header.Set(secretHeader, secret)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	w := httptest.NewRecorder()
 	var next caddyhttp.Handler = caddyhttp.HandlerFunc(func(http.ResponseWriter, *http.Request) error { return nil })
@@ -41,6 +45,7 @@ func do(t *testing.T, h *Handler, method, path, secret, body string) *httptest.R
 
 func TestWebhookBearerAuth(t *testing.T) {
 	h, _ := newTestHandler(t)
+	valid := appToken(t)
 	bearer := func(auth string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, "/demo", nil)
 		if auth != "" {
@@ -54,16 +59,16 @@ func TestWebhookBearerAuth(t *testing.T) {
 		return w
 	}
 
-	if w := bearer("Bearer s3cret"); w.Code != http.StatusOK {
+	if w := bearer("Bearer " + valid); w.Code != http.StatusOK {
 		t.Errorf("valid Bearer: got %d, want 200", w.Code)
 	}
-	if w := bearer("bearer s3cret"); w.Code != http.StatusOK {
+	if w := bearer("bearer " + valid); w.Code != http.StatusOK {
 		t.Errorf("scheme is case-insensitive: got %d, want 200", w.Code)
 	}
-	if w := bearer("Bearer wrong"); w.Code != http.StatusUnauthorized {
-		t.Errorf("wrong Bearer: got %d, want 401", w.Code)
+	if w := bearer("Bearer not-a-jwt"); w.Code != http.StatusUnauthorized {
+		t.Errorf("garbage Bearer: got %d, want 401", w.Code)
 	}
-	if w := bearer("Basic s3cret"); w.Code != http.StatusUnauthorized {
+	if w := bearer("Basic " + valid); w.Code != http.StatusUnauthorized {
 		t.Errorf("non-Bearer scheme: got %d, want 401", w.Code)
 	}
 	if w := bearer("Bearer"); w.Code != http.StatusUnauthorized {
@@ -71,28 +76,11 @@ func TestWebhookBearerAuth(t *testing.T) {
 	}
 }
 
-func TestWebhookCustomHeaderTakesPrecedenceOverBearer(t *testing.T) {
+func TestWebhookRejectsBadToken(t *testing.T) {
 	h, _ := newTestHandler(t)
-	req := httptest.NewRequest(http.MethodGet, "/demo", nil)
-	req.Header.Set(secretHeader, "wrong")
-	req.Header.Set("Authorization", "Bearer s3cret")
-	w := httptest.NewRecorder()
-	var next caddyhttp.Handler = caddyhttp.HandlerFunc(func(http.ResponseWriter, *http.Request) error { return nil })
-	if err := h.ServeHTTP(w, req, next); err != nil {
-		t.Fatalf("ServeHTTP returned error: %v", err)
-	}
-	// A present custom header is authoritative — a wrong value must not
-	// fall through to a different credential.
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("wrong custom header with valid Bearer: got %d, want 401", w.Code)
-	}
-}
-
-func TestWebhookRejectsBadSecret(t *testing.T) {
-	h, _ := newTestHandler(t)
-	for name, secret := range map[string]string{"missing": "", "wrong": "nope"} {
+	for name, token := range map[string]string{"missing": "", "garbage": "not-a-jwt"} {
 		t.Run(name, func(t *testing.T) {
-			w := do(t, h, http.MethodPost, "/demo", secret, `{"url":"https://x/a.tgz","version":"v1"}`)
+			w := do(t, h, http.MethodPost, "/demo", token, `{"url":"https://x/a.tgz","version":"v1"}`)
 			if w.Code != http.StatusUnauthorized {
 				t.Fatalf("code = %d, want 401", w.Code)
 			}
@@ -102,13 +90,13 @@ func TestWebhookRejectsBadSecret(t *testing.T) {
 
 func TestWebhookUnknownAppIs404OnlyWhenAuthenticated(t *testing.T) {
 	h, _ := newTestHandler(t)
-	// Wrong secret + unknown app: still 401, no name enumeration.
-	w := do(t, h, http.MethodPost, "/ghost", "nope", "{}")
+	// Garbage token + unknown app: still 401, no name enumeration.
+	w := do(t, h, http.MethodPost, "/ghost", "not-a-jwt", "{}")
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated unknown app must 401, got %d", w.Code)
 	}
-	// Correct global secret + unknown app: 404.
-	w = do(t, h, http.MethodPost, "/ghost", "global-secret", "{}")
+	// Valid global token + unknown app: 404.
+	w = do(t, h, http.MethodPost, "/ghost", globalToken(t), "{}")
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("authenticated unknown app must 404, got %d", w.Code)
 	}
@@ -116,7 +104,7 @@ func TestWebhookUnknownAppIs404OnlyWhenAuthenticated(t *testing.T) {
 
 func TestWebhookDeployHappyPath(t *testing.T) {
 	h, rig := newTestHandler(t)
-	w := do(t, h, http.MethodPost, "/demo", "s3cret", `{"url":"https://x/a.tgz","version":"v1"}`)
+	w := do(t, h, http.MethodPost, "/demo", appToken(t), `{"url":"https://x/a.tgz","version":"v1"}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("code = %d body=%s", w.Code, w.Body.String())
 	}
@@ -128,15 +116,19 @@ func TestWebhookDeployHappyPath(t *testing.T) {
 	if rig.ma.activePort.Load() == 0 {
 		t.Fatal("deploy did not publish a port")
 	}
+	// The status records which trust source authorized the deploy.
+	if status.LastDeploy == nil || status.LastDeploy.By != "local:test-key" {
+		t.Fatalf("deployed_by not recorded: %+v", status.LastDeploy)
+	}
 }
 
-func TestWebhookUsesPerAppSecret(t *testing.T) {
+func TestWebhookUsesPerAppTrust(t *testing.T) {
 	h, _ := newTestHandler(t)
-	// The app's own secret is "s3cret" (testSpec); the global secret
-	// must NOT authenticate against a known app.
-	w := do(t, h, http.MethodPost, "/demo", "global-secret", `{"url":"https://x/a.tgz","version":"v1"}`)
+	// The app trusts appTestPub (audience "demo"); a token valid only
+	// under the GLOBAL trust must NOT authenticate against a known app.
+	w := do(t, h, http.MethodPost, "/demo", globalToken(t), `{"url":"https://x/a.tgz","version":"v1"}`)
 	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("global secret must not open a per-secret app, got %d", w.Code)
+		t.Fatalf("global token must not open a per-app-trust app, got %d", w.Code)
 	}
 }
 
@@ -155,7 +147,7 @@ func TestWebhookValidatesPayload(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			w := do(t, h, http.MethodPost, "/demo", "s3cret", tc.body)
+			w := do(t, h, http.MethodPost, "/demo", appToken(t), tc.body)
 			if w.Code != tc.want {
 				t.Fatalf("code = %d, want %d (body %s)", w.Code, tc.want, w.Body.String())
 			}
@@ -167,7 +159,7 @@ func TestWebhookConflictWhileDeploying(t *testing.T) {
 	h, rig := newTestHandler(t)
 	rig.ma.deployMu.Lock()
 	defer rig.ma.deployMu.Unlock()
-	w := do(t, h, http.MethodPost, "/demo", "s3cret", `{"url":"https://x/a.tgz","version":"v1"}`)
+	w := do(t, h, http.MethodPost, "/demo", appToken(t), `{"url":"https://x/a.tgz","version":"v1"}`)
 	if w.Code != http.StatusConflict {
 		t.Fatalf("code = %d, want 409", w.Code)
 	}
@@ -175,9 +167,9 @@ func TestWebhookConflictWhileDeploying(t *testing.T) {
 
 func TestWebhookDeployFailureReturns500WithOldStatus(t *testing.T) {
 	h, rig := newTestHandler(t)
-	do(t, h, http.MethodPost, "/demo", "s3cret", `{"url":"https://x/1.tgz","version":"v1"}`)
+	do(t, h, http.MethodPost, "/demo", appToken(t), `{"url":"https://x/1.tgz","version":"v1"}`)
 	rig.prober.err = errTest
-	w := do(t, h, http.MethodPost, "/demo", "s3cret", `{"url":"https://x/2.tgz","version":"v2"}`)
+	w := do(t, h, http.MethodPost, "/demo", appToken(t), `{"url":"https://x/2.tgz","version":"v2"}`)
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("code = %d, want 500", w.Code)
 	}
@@ -188,8 +180,8 @@ func TestWebhookDeployFailureReturns500WithOldStatus(t *testing.T) {
 
 func TestWebhookGetStatus(t *testing.T) {
 	h, _ := newTestHandler(t)
-	do(t, h, http.MethodPost, "/demo", "s3cret", `{"url":"https://x/1.tgz","version":"v1"}`)
-	w := do(t, h, http.MethodGet, "/demo", "s3cret", "")
+	do(t, h, http.MethodPost, "/demo", appToken(t), `{"url":"https://x/1.tgz","version":"v1"}`)
+	w := do(t, h, http.MethodGet, "/demo", appToken(t), "")
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"current_version":"v1"`) {
 		t.Fatalf("status GET wrong: %d %s", w.Code, w.Body.String())
 	}
@@ -197,7 +189,7 @@ func TestWebhookGetStatus(t *testing.T) {
 
 func TestWebhookMethodNotAllowed(t *testing.T) {
 	h, _ := newTestHandler(t)
-	w := do(t, h, http.MethodDelete, "/demo", "s3cret", "")
+	w := do(t, h, http.MethodDelete, "/demo", appToken(t), "")
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("code = %d, want 405", w.Code)
 	}
@@ -207,7 +199,7 @@ func TestWebhookMethodNotAllowed(t *testing.T) {
 // like handle /deploy/* works.
 func TestWebhookAppNameFromLastSegment(t *testing.T) {
 	h, _ := newTestHandler(t)
-	w := do(t, h, http.MethodGet, "/deploy/demo", "s3cret", "")
+	w := do(t, h, http.MethodGet, "/deploy/demo", appToken(t), "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("prefixed path should resolve the app, got %d", w.Code)
 	}
@@ -225,7 +217,7 @@ func TestWebhookOversizedPayloadIs413(t *testing.T) {
 	h, _ := newTestHandler(t)
 	big := `{"url":"https://x/a.tgz","version":"v1","pad":"` +
 		strings.Repeat("a", maxPayloadBytes) + `"}`
-	w := do(t, h, http.MethodPost, "/demo", "s3cret", big)
+	w := do(t, h, http.MethodPost, "/demo", appToken(t), big)
 	if w.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want 413; body: %s", w.Code, w.Body.String())
 	}

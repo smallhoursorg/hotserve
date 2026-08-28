@@ -33,14 +33,15 @@ in CI, not on the box).
 
 The mount namespace alone does not close the threat model. `buildEnv`
 originally seeded every app's environment with hotserve's own
-(`os.Environ()`) — which under the packaged unit includes
-`LIVESWAP_SECRET` and any ACME DNS tokens. The attacker we just
-described dumps `process.env` first; a stolen `LIVESWAP_SECRET` signs
-webhook deploys, i.e. deploys arbitrary code, which would defeat the
-sandbox entirely. That leak is FIXED ahead of M8: `buildEnv` now
-inherits only an allowlist (PATH, HOME, LANG, TZ, LC_*), pinned by
-`TestBuildEnvDoesNotLeakSupervisorSecrets`. The normative requirement
-below stands as the contract the sandbox path must keep.
+(`os.Environ()`) — which under the packaged unit includes any ACME DNS
+tokens (and, before deploy auth went keyless, the deploy secret too).
+The attacker we just described dumps `process.env` first; a stolen ACME
+token lets them issue or alter certificates. That leak is FIXED ahead
+of M8: `buildEnv` now inherits only an allowlist (PATH, HOME, LANG, TZ,
+LC_*), pinned by `TestBuildEnvDoesNotLeakSupervisorSecrets`. (Deploy
+auth is now asymmetric — no shared secret lives on the box at all; see
+[DESIGN-threat-model.md](../DESIGN-threat-model.md).) The normative
+requirement below stands as the contract the sandbox path must keep.
 
 ## Behavior specification (normative)
 
@@ -77,8 +78,9 @@ below stands as the contract the sandbox path must keep.
   and sandboxed spawns alike): an allowlist of inherited variables
   (`PATH`, `HOME`, `LANG`, `TZ`, `LC_*`), then env_file, then inline
   `env`, then the `PORT`/`HOST` contract — never a blanket
-  `os.Environ()` inheritance, which would leak `LIVESWAP_SECRET` and
-  ACME tokens into every app. The sandbox path MUST NOT regress this.
+  `os.Environ()` inheritance, which would leak ACME tokens (and any
+  other supervisor secrets) into every app. The sandbox path MUST NOT
+  regress this.
 - `HOME`, `XDG_DATA_HOME` and `XDG_CONFIG_HOME` MUST be set to a
   writable in-sandbox path (the app's shared dir, or tmp). Inherited
   they point at `/var/lib/hotserve` — outside the view — and every
@@ -273,7 +275,8 @@ data loss.
   positive contract: a DNS lookup and an outbound HTTP fetch succeed
   (no current test app makes any outbound call, so the resolv.conf
   trap would otherwise ship silently), `$HOME` is writable, and the
-  scrubbed env does NOT contain `LIVESWAP_SECRET`.
+  scrubbed env does NOT contain a seeded supervisor secret (e.g. a
+  test ACME token).
 - install-test: smoke stage 2 asserts `"sandboxed": true` in the
   status response on every distro cell — this is where Ubuntu's
   AppArmor userns policy is proven per-release, per-arch, under the

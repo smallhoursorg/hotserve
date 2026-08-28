@@ -20,4 +20,6 @@ RUN hotserve list-modules | grep -qx liveswap \
 	&& hotserve list-modules | grep -qx http.handlers.cache \
 	&& hotserve list-modules | grep -qx storages.cache.otter
 COPY e2e/Caddyfile /etc/hotserve/Caddyfile
-CMD ["hotserve", "run", "--config", "/etc/hotserve/Caddyfile", "--adapter", "caddyfile"]
+COPY e2e/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+CMD ["/bin/sh", "/usr/local/bin/entrypoint.sh"]

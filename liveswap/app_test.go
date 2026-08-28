@@ -286,7 +286,7 @@ func testSpec(t *testing.T) *appSpec {
 		name:            "demo",
 		command:         []string{"./server", "--version", "{version}"},
 		env:             map[string]string{"DATA": "{shared_dir}/db"},
-		secret:          "s3cret",
+		trust:           []trustSource{localTrust(appTestPub, "demo")},
 		healthPath:      "/health",
 		healthInterval:  5 * time.Second,
 		healthTimeout:   2 * time.Second,
@@ -327,6 +327,7 @@ func newTestRig(t *testing.T) *testRig {
 	}
 	ma := newManagedApp("demo")
 	ma.spec = rig.spec
+	ma.verifiers = resolveVerifiers(rig.spec.trust, nil)
 	ma.runner = rig.runner
 	ma.prober = rig.prober
 	ma.fetch = rig.fetch
@@ -574,8 +575,8 @@ func TestBuildEnvPrecedenceAndPlaceholders(t *testing.T) {
 }
 
 func TestBuildEnvDoesNotLeakSupervisorSecrets(t *testing.T) {
-	t.Setenv("LIVESWAP_SECRET", "hunter2")
-	t.Setenv("SOME_ACME_TOKEN", "tok")
+	t.Setenv("ACME_DNS_API_TOKEN", "hunter2")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "tok")
 	t.Setenv("PATH", "/usr/bin:/bin")
 	t.Setenv("LC_ALL", "C.UTF-8")
 
@@ -588,7 +589,7 @@ func TestBuildEnvDoesNotLeakSupervisorSecrets(t *testing.T) {
 		k, v := stringsCut(kv)
 		byKey[k] = v
 	}
-	for _, k := range []string{"LIVESWAP_SECRET", "SOME_ACME_TOKEN"} {
+	for _, k := range []string{"ACME_DNS_API_TOKEN", "AWS_SECRET_ACCESS_KEY"} {
 		if _, leaked := byKey[k]; leaked {
 			t.Errorf("%s must not leak from the supervisor env into apps", k)
 		}

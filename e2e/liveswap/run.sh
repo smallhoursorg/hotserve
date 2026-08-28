@@ -9,16 +9,33 @@ PROXY="http://e2e-hotserve:8080"
 HOOK="http://e2e-hotserve:8081/demo"
 ADMIN="http://e2e-hotserve:2019"
 ART="http://e2e-artifacts:8080/artifacts"
-SECRET="e2e-secret"
+TOKEN_FILE="${DEPLOY_TOKEN_FILE:-/shared/deploy.token}"
 FAILURES=0
 
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAILURES=$((FAILURES + 1)); }
 
+# The hotserve container mints a local deploy token into the shared
+# volume at startup (see e2e/entrypoint.sh); wait for it, then use it as
+# the deploy bearer. This is the `deploy_trust local` path standing in
+# for a real CI OIDC provider, which the offline compose network has no
+# way to reach.
+echo "=== waiting for the deploy token ==="
+i=0
+until [ -s "$TOKEN_FILE" ]; do
+	i=$((i + 1))
+	if [ "$i" -ge 60 ]; then
+		echo "FATAL: no deploy token at $TOKEN_FILE within 60s"
+		exit 1
+	fi
+	sleep 1
+done
+TOKEN=$(cat "$TOKEN_FILE")
+
 # deploy <artifact-file> <version> -> prints HTTP status code
 deploy() {
 	curl -s -o /tmp/deploy-body -w '%{http_code}' --max-time 60 \
-		-X POST -H "X-Liveswap-Secret: $SECRET" \
+		-X POST -H "Authorization: Bearer $TOKEN" \
 		-d "{\"url\":\"$ART/$1\",\"version\":\"$2\"}" "$HOOK"
 }
 
@@ -55,7 +72,7 @@ assert_all_200() { # <file> <label>
 echo "=== waiting for e2e-hotserve and e2e-artifacts to become ready ==="
 i=0
 until curl -fs -o /dev/null "$ART/demo-v1.tar.gz" \
-	&& [ "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Liveswap-Secret: $SECRET" "$HOOK")" = "200" ]; do
+	&& [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$HOOK")" = "200" ]; do
 	i=$((i + 1))
 	if [ "$i" -ge 60 ]; then
 		echo "FATAL: services not ready within 60s"
@@ -65,15 +82,13 @@ until curl -fs -o /dev/null "$ART/demo-v1.tar.gz" \
 done
 echo "ready after ${i}s"
 
-echo "=== scenario 1: auth — wrong and missing secrets are rejected ==="
-c=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "X-Liveswap-Secret: wrong" -d '{}' "$HOOK")
-[ "$c" = "401" ] && pass "wrong secret gets 401" || fail "wrong secret: expected 401, got $c"
+echo "=== scenario 1: auth — invalid and missing tokens are rejected ==="
+c=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer not-a-jwt" -d '{}' "$HOOK")
+[ "$c" = "401" ] && pass "garbage token gets 401" || fail "garbage token: expected 401, got $c"
 c=$(curl -s -o /dev/null -w '%{http_code}' -X POST -d '{}' "$HOOK")
-[ "$c" = "401" ] && pass "missing secret gets 401" || fail "missing secret: expected 401, got $c"
-c=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer wrong" "$HOOK")
-[ "$c" = "401" ] && pass "wrong bearer token gets 401" || fail "wrong bearer: expected 401, got $c"
-c=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $SECRET" "$HOOK")
-[ "$c" = "200" ] && pass "valid bearer token accepted" || fail "valid bearer: expected 200, got $c"
+[ "$c" = "401" ] && pass "missing token gets 401" || fail "missing token: expected 401, got $c"
+c=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$HOOK")
+[ "$c" = "200" ] && pass "valid token accepted" || fail "valid token: expected 200, got $c"
 
 echo "=== scenario 2: nothing deployed yet -> proxy 5xx, not a hang ==="
 c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$PROXY/")
@@ -148,7 +163,7 @@ else
 fi
 
 echo "=== scenario 8: deploy status endpoint ==="
-s=$(curl -s -H "X-Liveswap-Secret: $SECRET" "$HOOK")
+s=$(curl -s -H "Authorization: Bearer $TOKEN" "$HOOK")
 case "$s" in
 *'"current_version":"v4"'*'"running":true'*|*'"running":true'*'"current_version":"v4"'*)
 	pass "status reports v4 running" ;;
@@ -180,7 +195,7 @@ if [ -n "$new_pid" ]; then
 else
 	fail "app did not come back after /boom (last body: '$b')"
 fi
-s=$(curl -s -H "X-Liveswap-Secret: $SECRET" "$HOOK")
+s=$(curl -s -H "Authorization: Bearer $TOKEN" "$HOOK")
 case "$s" in
 *'"last_restart_cause":"crash"'*) pass "status reports the crash restart" ;;
 *) fail "status missing crash restart: $s" ;;
@@ -214,7 +229,7 @@ if [ -n "$new_pid" ]; then
 else
 	fail "app was not restarted after /break (last body: '$b')"
 fi
-s=$(curl -s -H "X-Liveswap-Secret: $SECRET" "$HOOK")
+s=$(curl -s -H "Authorization: Bearer $TOKEN" "$HOOK")
 case "$s" in
 *'"last_restart_cause":"health"'*) pass "status reports the health restart" ;;
 *) fail "status missing health restart: $s" ;;

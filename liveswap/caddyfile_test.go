@@ -12,7 +12,10 @@ import (
 func TestCaddyfileUnmarshalFullConfig(t *testing.T) {
 	d := caddyfile.NewTestDispenser(`liveswap {
 		root /srv/liveswap
-		webhook_secret {env.LIVESWAP_SECRET}
+		deploy_trust github {
+			audience hotserve
+			claim repository smallhoursorg/site
+		}
 		allow_insecure_http
 		artifact_allowlist github.com/smallhoursorg/ artifacts.corp
 
@@ -22,7 +25,10 @@ func TestCaddyfileUnmarshalFullConfig(t *testing.T) {
 			env NODE_ENV production
 			env DB sqlite:{shared_dir}/blog.db
 			env_file /etc/liveswap/blog.env
-			webhook_secret blog-secret
+			deploy_trust local {
+				public_key /etc/hotserve/blog.pub
+				subject ci@smallhours
+			}
 			health_path /healthz
 			health_interval 3s
 			health_timeout 1s
@@ -48,8 +54,13 @@ func TestCaddyfileUnmarshalFullConfig(t *testing.T) {
 	if err := a.UnmarshalCaddyfile(d); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if a.Root != "/srv/liveswap" || a.WebhookSecret != "{env.LIVESWAP_SECRET}" || !a.AllowInsecureHTTP {
+	if a.Root != "/srv/liveswap" || !a.AllowInsecureHTTP {
 		t.Fatalf("globals wrong: %+v", a)
+	}
+	if len(a.DeployTrust) != 1 || a.DeployTrust[0].Kind != "github" ||
+		a.DeployTrust[0].Audience != "hotserve" ||
+		a.DeployTrust[0].Claims["repository"] != "smallhoursorg/site" {
+		t.Fatalf("global deploy_trust wrong: %+v", a.DeployTrust)
 	}
 	if len(a.ArtifactAllowlist) != 2 {
 		t.Fatalf("artifact allowlist: %v", a.ArtifactAllowlist)
@@ -68,8 +79,13 @@ func TestCaddyfileUnmarshalFullConfig(t *testing.T) {
 	if blog.Env["NODE_ENV"] != "production" || blog.Env["DB"] != "sqlite:{shared_dir}/blog.db" {
 		t.Fatalf("env = %v", blog.Env)
 	}
-	if blog.EnvFile != "/etc/liveswap/blog.env" || blog.WebhookSecret != "blog-secret" {
-		t.Fatalf("env_file/secret wrong: %+v", blog)
+	if blog.EnvFile != "/etc/liveswap/blog.env" {
+		t.Fatalf("env_file wrong: %+v", blog)
+	}
+	if len(blog.DeployTrust) != 1 || blog.DeployTrust[0].Kind != "local" ||
+		blog.DeployTrust[0].PublicKey != "/etc/hotserve/blog.pub" ||
+		blog.DeployTrust[0].Claims["sub"] != "ci@smallhours" {
+		t.Fatalf("per-app deploy_trust wrong: %+v", blog.DeployTrust)
 	}
 	if blog.HealthPath != "/healthz" ||
 		blog.HealthInterval != caddy.Duration(3*time.Second) ||
@@ -112,7 +128,7 @@ func TestCaddyfileUnmarshalEmptyAppBlockLeavesDefaultsToProvision(t *testing.T) 
 	blog := a.Apps["blog"]
 	if blog.HealthPath != "" || blog.HealthInterval != 0 || blog.Soak != 0 ||
 		blog.Deadline != 0 || blog.Drain != 0 || blog.Grace != 0 ||
-		blog.Keep != 0 || blog.MaxArtifactSize != 0 || blog.WebhookSecret != "" {
+		blog.Keep != 0 || blog.MaxArtifactSize != 0 || len(blog.DeployTrust) != 0 {
 		t.Fatalf("parser applied defaults it must not: %+v", blog)
 	}
 	if blog.Watchdog != "" || blog.WatchdogFailures != 0 || blog.WatchdogGrace != 0 ||

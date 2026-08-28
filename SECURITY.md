@@ -35,15 +35,20 @@ through it.
 
 ## Scope notes for researchers
 
-- Anything reachable from the webhook endpoint or with a compromised
-  webhook secret is squarely in scope — the design intends secret
-  compromise to be contained by `artifact_allowlist` (see
+- Anything reachable from the webhook endpoint is squarely in scope.
+  Deploys are authenticated by a verifiable token (`deploy_trust`:
+  CI OIDC or a local public key), so there is no shared deploy secret
+  on the box to steal; a forged or replayed token, or a way to deploy
+  outside the configured trust claims, is in scope — as is any deploy
+  reaching outside `artifact_allowlist` (see
   [liveswap/README.md](liveswap/README.md)).
 - Apps deployed by liveswap currently run as one shared user; hotserve
   does not yet protect apps *from each other* on the same box. That
   boundary is a known limitation with a designed fix
   ([liveswap/DESIGN-sandbox.md](liveswap/DESIGN-sandbox.md)), not a
   vulnerability — but escapes from an app to the *supervisor or
-  system* absolutely are in scope.
+  system* absolutely are in scope. The full attacker/asset/attack-path
+  analysis, and how the candidate isolation stacks score against it,
+  is in [DESIGN-threat-model.md](DESIGN-threat-model.md).
 - Vulnerabilities in Caddy itself belong upstream:
   [caddyserver/caddy security policy](https://github.com/caddyserver/caddy/security/policy).

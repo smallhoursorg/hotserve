@@ -28,8 +28,17 @@
 #
 # {
 # 	liveswap {
-# 		webhook_secret {env.LIVESWAP_SECRET}
 # 		artifact_allowlist github.com/your-org/   # required: pin artifact origins
+#
+# 		# Who may deploy (required). CI sends an OIDC token; the box
+# 		# verifies it against the provider's public keys — no shared
+# 		# secret on the server. For non-CI deploys use a local key:
+# 		# `hotserve deploy-keygen`, then `deploy_trust local { public_key … }`.
+# 		deploy_trust github {
+# 			audience hotserve
+# 			claim repository your-org/myapp
+# 			claim ref        refs/heads/main
+# 		}
 #
 # 		app myapp {
 # 			command node server.js

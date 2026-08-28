@@ -47,8 +47,16 @@ repositories with automatic updates are on the roadmap.)
 ```caddyfile
 {
 	liveswap {
-		webhook_secret {env.LIVESWAP_SECRET}
 		artifact_allowlist github.com/your-org/   # required: pin artifact origins
+
+		# Who may deploy. A deploy carries an OIDC token from CI; the box
+		# verifies it against the provider's public keys — no shared
+		# secret ever lives on the server. (required, globally or per app)
+		deploy_trust github {
+			audience hotserve
+			claim repository your-org/myapp
+			claim ref        refs/heads/main
+		}
 
 		app myapp {
 			command node server.js          # runs in the release dir, PORT injected
@@ -76,13 +84,25 @@ deploy.example.com {
 }
 ```
 
-Then from CI (GitHub Actions, GitLab CI, anything that can curl):
+Then from CI. On GitHub Actions, request an OIDC token per run — no
+stored secret, on the box or in CI:
 
-```sh
-curl --fail -X POST -H "Authorization: Bearer $SECRET" \
-  -d '{"url":"https://…/myapp.tar.gz","version":"v1.4.2"}' \
-  https://deploy.example.com/myapp
+```yaml
+permissions:
+  id-token: write               # let the job mint an OIDC token
+steps:
+  - id: tok
+    run: echo "jwt=$(curl -sH "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+      "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=hotserve" | jq -r .value)" >> "$GITHUB_OUTPUT"
+  - run: |
+      curl --fail -X POST -H "Authorization: Bearer ${{ steps.tok.outputs.jwt }}" \
+        -d '{"url":"https://…/myapp.tar.gz","version":"v1.4.2"}' \
+        https://deploy.example.com/myapp
 ```
+
+For non-CI deploys (a laptop, a cron box), use a local key instead:
+`hotserve deploy-keygen`, point a `deploy_trust local { public_key … }`
+block at the `.pub`, and mint tokens with `hotserve deploy-token`.
 
 hotserve downloads the artifact, runs your migration, starts the new
 version on a private port, health-checks it until it has been solidly
@@ -110,6 +130,11 @@ snippets, and every option: [liveswap/README.md](liveswap/README.md).
   together, or reach for containers. Per-app sandboxing (bubblewrap,
   Flatpak-style) is designed and next up —
   [liveswap/DESIGN-sandbox.md](liveswap/DESIGN-sandbox.md).
+- **Deploys are authenticated without a shared secret.** A deploy
+  carries a short-lived token — an OIDC token from CI, verified against
+  the provider's public keys, or one signed by a local key whose public
+  half the box holds. Nothing an attacker can steal off the box lets
+  them deploy; see [DESIGN-threat-model.md](DESIGN-threat-model.md).
 
 ## Roadmap
 
@@ -120,9 +145,10 @@ snippets, and every option: [liveswap/README.md](liveswap/README.md).
   concrete gap driving the priority: because every app currently runs
   as the shared `hotserve` UID, a compromised app can read the
   supervisor's own environment via `/proc/<hotserve-pid>/environ`
-  (which holds `LIVESWAP_SECRET` and ACME DNS tokens), connect to the
-  admin unix socket, and read the TLS private keys and sibling apps'
-  files. Scrubbing the child environment (done) stops direct
+  (which holds ACME DNS tokens — deploy auth no longer keeps a secret
+  on the box, see below), connect to the admin unix socket, and read
+  the TLS private keys and sibling apps' files. Scrubbing the child
+  environment (done) stops direct
   inheritance but not the `/proc` and filesystem routes — only a real
   isolation boundary (bubblewrap's PID + mount namespaces hide
   `/proc/<supervisor>` and the socket/key paths entirely; a per-app
@@ -200,6 +226,7 @@ the scanner.)
 | [darkweak/storages/otter](https://github.com/darkweak/storages) | +6 | ✓ | — | — | In-memory storage backend for Souin, wrapping [maypok86/otter](https://github.com/maypok86/otter). |
 | [zap](https://github.com/uber-go/zap) | 0 (already in Caddy's tree) | ✓ | ✓ | ✓ | Caddy's module logging API is zap; not optional for a Caddy module. |
 | [go-humanize](https://github.com/dustin/go-humanize) | 0 (already in Caddy's tree) | ✓ | ✓ | — | A few formatting helpers in liveswap. |
+| [go-oidc](https://github.com/coreos/go-oidc) + [go-jose](https://github.com/go-jose/go-jose) | 0 (already in Caddy's tree) | ✓ | ✓ | — | Deploy authentication (`deploy_trust`): OIDC discovery/JWKS verification and JWT signing/verification. Both were already transitive dependencies of Caddy; liveswap now requires them directly. Vetted and widely used — the deliberate alternative to hand-rolling JWT crypto. |
 
 The liveswap and penaltybox columns are what a standalone
 `xcaddy build --with ...` of that module pulls in; the hotserve binary

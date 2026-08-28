@@ -4,6 +4,8 @@ package liveswap
 
 import (
 	"bytes"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net"
@@ -16,12 +18,48 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/caddyserver/caddy/v2/caddytest"
 )
+
+// The integration suite authenticates deploys with a local trust key:
+// one ed25519 keypair is generated per test binary, its public half
+// written to a temp file the Caddyfile's `deploy_trust local` block
+// points at, and deploy requests carry a token minted with the private
+// half (audience "itest"). itestPriv/itestPub reuse the shared
+// authtest helpers.
+var (
+	itestPriv, itestPub = mustGenTestKey()
+	itestPubPath        string
+	itestPubOnce        sync.Once
+)
+
+func itestPubKeyPath() string {
+	itestPubOnce.Do(func() {
+		der, err := x509.MarshalPKIXPublicKey(itestPub)
+		if err != nil {
+			panic(err)
+		}
+		f, err := os.CreateTemp("", "itest-deploy-*.pub")
+		if err != nil {
+			panic(err)
+		}
+		if _, err := f.Write(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})); err != nil {
+			panic(err)
+		}
+		if err := f.Close(); err != nil {
+			panic(err)
+		}
+		itestPubPath = f.Name()
+	})
+	return itestPubPath
+}
+
+func itestToken(t *testing.T) string { return mintTestToken(t, itestPriv, "itest", nil) }
 
 // The integration suite runs a real Caddy (in-process via caddytest)
 // with the module loaded, deploys a real compiled test app through the
@@ -113,7 +151,10 @@ func integrationConfig(root, artifactPort string) string {
 		root %s
 		allow_insecure_http
 		artifact_allowlist 127.0.0.1:%s
-		webhook_secret itest-secret
+		deploy_trust local {
+			public_key %s
+			audience itest
+		}
 
 		app demo {
 			command ./server
@@ -136,7 +177,7 @@ http://localhost:9080 {
 http://localhost:9081 {
 	liveswap_webhook
 }
-`, root, artifactPort)
+`, root, artifactPort, itestPubKeyPath())
 }
 
 func postDeploy(t *testing.T, artifactURL, version string) (*http.Response, string) {
@@ -204,10 +245,10 @@ func TestIntegrationDeployLifecycle(t *testing.T) {
 		}
 	})
 
-	t.Run("webhook rejects a bad secret", func(t *testing.T) {
+	t.Run("webhook rejects a bad token", func(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodPost, "http://localhost:9081/demo",
 			strings.NewReader(`{"url":"https://x/a.tgz","version":"v0"}`))
-		req.Header.Set(secretHeader, "wrong")
+		req.Header.Set("Authorization", "Bearer not-a-jwt")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -366,7 +407,10 @@ func watchdogConfig(root, artifactPort, app string, restarts int, window string)
 		root %[1]s
 		allow_insecure_http
 		artifact_allowlist 127.0.0.1:%[2]s
-		webhook_secret itest-secret
+		deploy_trust local {
+			public_key %[6]s
+			audience itest
+		}
 
 		app %[3]s {
 			command ./server
@@ -392,7 +436,7 @@ http://localhost:9080 {
 http://localhost:9081 {
 	liveswap_webhook
 }
-`, root, artifactPort, app, restarts, window)
+`, root, artifactPort, app, restarts, window, itestPubKeyPath())
 }
 
 func postDeployApp(t *testing.T, app, artifactURL, version string) (*http.Response, string) {
@@ -402,7 +446,7 @@ func postDeployApp(t *testing.T, app, artifactURL, version string) (*http.Respon
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set(secretHeader, "itest-secret")
+	req.Header.Set("Authorization", "Bearer "+itestToken(t))
 	client := &http.Client{Timeout: 60 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -416,7 +460,7 @@ func postDeployApp(t *testing.T, app, artifactURL, version string) (*http.Respon
 func getStatusApp(t *testing.T, app string) (int, string) {
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodGet, "http://localhost:9081/"+app, nil)
-	req.Header.Set(secretHeader, "itest-secret")
+	req.Header.Set("Authorization", "Bearer "+itestToken(t))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -599,4 +643,122 @@ func TestIntegrationWatchdogThrottleAutoRecovers(t *testing.T) {
 func getStatus(t *testing.T) (int, string) {
 	t.Helper()
 	return getStatusApp(t, "demo")
+}
+
+// oidcConfig runs an app whose deploys are authenticated by an OIDC
+// provider (our own in-process mock issuer), exercising the production
+// OIDC path — Caddyfile parsing, Provision wiring, the JWKS client,
+// discovery and token verification — end to end through the real
+// binary, which the local-key e2e path does not.
+func oidcConfig(root, artifactPort, issuer string) string {
+	return fmt.Sprintf(`{
+	skip_install_trust
+	admin localhost:2999
+	http_port 9080
+	grace_period 1ns
+
+	liveswap {
+		root %[1]s
+		allow_insecure_http
+		artifact_allowlist 127.0.0.1:%[2]s
+		deploy_trust oidc {
+			issuer %[3]s
+			audience e2e
+			claim sub ci
+		}
+
+		app oidcdemo {
+			command ./server
+			health_interval 50ms
+			health_timeout 1s
+			soak 100ms
+			deadline 5s
+			drain 1ms
+			grace 2s
+			keep 2
+		}
+	}
+}
+http://localhost:9080 {
+	reverse_proxy {
+		dynamic liveswap oidcdemo
+	}
+}
+http://localhost:9081 {
+	liveswap_webhook
+}
+`, root, artifactPort, issuer)
+}
+
+func TestIntegrationOIDCDeploy(t *testing.T) {
+	bin := buildTestApp(t)
+	root := t.TempDir()
+	artifacts := map[string][]byte{"/demo-v1.tar.gz": packRelease(t, bin, "v1", false)}
+	artifactSrv := serveArtifacts(t, artifacts)
+	artifactURL, err := url.Parse(artifactSrv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Our own OIDC provider, in-process: serves discovery + JWKS and
+	// signs tokens, standing in for GitHub/GitLab.
+	iss := newMockIssuer(t)
+
+	tester := caddytest.NewTester(t)
+	tester.InitServer(oidcConfig(root, artifactURL.Port(), iss.url), "caddyfile")
+
+	hook := "http://localhost:9081/oidcdemo"
+	deploy := func(token string) (int, string) {
+		body := fmt.Sprintf(`{"url":%q,"version":"v1"}`, artifactSrv.URL+"/demo-v1.tar.gz")
+		req, _ := http.NewRequest(http.MethodPost, hook, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		data, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(data)
+	}
+	future := time.Now().Add(5 * time.Minute)
+
+	t.Run("valid OIDC token deploys and serves", func(t *testing.T) {
+		tok := iss.mint(t, iss.priv, "e2e", map[string]string{"sub": "ci"}, future)
+		if code, body := deploy(tok); code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", code, body)
+		}
+		code, b := getBody(t, "http://localhost:9080/")
+		if code != http.StatusOK || !strings.HasPrefix(b, "hello v1") {
+			t.Fatalf("proxy did not serve v1: %d %q", code, b)
+		}
+	})
+
+	// Each negative case is a validly-signed token that must still be
+	// rejected — the whole point of the claim allowlist.
+	t.Run("wrong identity claim is rejected", func(t *testing.T) {
+		tok := iss.mint(t, iss.priv, "e2e", map[string]string{"sub": "attacker"}, future)
+		if code, _ := deploy(tok); code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 for wrong sub, got %d", code)
+		}
+	})
+
+	t.Run("wrong audience is rejected", func(t *testing.T) {
+		tok := iss.mint(t, iss.priv, "other", map[string]string{"sub": "ci"}, future)
+		if code, _ := deploy(tok); code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 for wrong audience, got %d", code)
+		}
+	})
+
+	t.Run("expired token is rejected", func(t *testing.T) {
+		tok := iss.mint(t, iss.priv, "e2e", map[string]string{"sub": "ci"}, time.Now().Add(-time.Hour))
+		if code, _ := deploy(tok); code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 for expired token, got %d", code)
+		}
+	})
+
+	t.Run("garbage token is rejected", func(t *testing.T) {
+		if code, _ := deploy("not-a-jwt"); code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 for garbage token, got %d", code)
+		}
+	})
 }

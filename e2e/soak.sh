@@ -25,7 +25,20 @@ HOOK="http://e2e-hotserve:8081/demo"
 ADMIN="http://e2e-hotserve:2019"
 PB="http://e2e-hotserve:9080"
 ART="http://e2e-artifacts:8080/artifacts"
-SECRET="e2e-secret"
+TOKEN_FILE="${DEPLOY_TOKEN_FILE:-/shared/deploy.token}"
+
+# Wait for the hotserve container's minted local deploy token (see
+# e2e/entrypoint.sh), then use it as the deploy bearer.
+i=0
+until [ -s "$TOKEN_FILE" ]; do
+	i=$((i + 1))
+	if [ "$i" -ge 60 ]; then
+		echo "FATAL: no deploy token at $TOKEN_FILE within 60s"
+		exit 1
+	fi
+	sleep 1
+done
+TOKEN=$(cat "$TOKEN_FILE")
 
 DEPLOYS="${SOAK_DEPLOYS:-300}"
 RELOADS="${SOAK_RELOADS:-300}"
@@ -62,14 +75,14 @@ measure() { # <label> -> sets G_<label>, FD_<label>, RSS_<label>
 
 deploy() { # <artifact> <version> -> status code
 	curl -s -o /tmp/deploy-body -w '%{http_code}' --max-time 60 \
-		-X POST -H "X-Liveswap-Secret: $SECRET" \
+		-X POST -H "Authorization: Bearer $TOKEN" \
 		-d "{\"url\":\"$ART/$1\",\"version\":\"$2\"}" "$HOOK"
 }
 
 echo "=== soak: waiting for services ==="
 i=0
 until curl -fs -o /dev/null "$ART/demo-v1.tar.gz" \
-	&& [ "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Liveswap-Secret: $SECRET" "$HOOK")" = "200" ]; do
+	&& [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$HOOK")" = "200" ]; do
 	i=$((i + 1))
 	[ "$i" -ge 60 ] && { echo "FATAL: services not ready within 60s"; exit 1; }
 	sleep 1

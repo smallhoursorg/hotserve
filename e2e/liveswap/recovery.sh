@@ -10,15 +10,28 @@ set -u
 PROXY="http://e2e-hotserve:8080"
 HOOK="http://e2e-hotserve:8081/demo"
 ART="http://e2e-artifacts:8080/artifacts"
-SECRET="e2e-secret"
+TOKEN_FILE="${DEPLOY_TOKEN_FILE:-/shared/deploy.token}"
 FAILURES=0
+
+# Wait for the hotserve container's minted local deploy token (see
+# e2e/entrypoint.sh), then use it as the deploy bearer.
+i=0
+until [ -s "$TOKEN_FILE" ]; do
+	i=$((i + 1))
+	if [ "$i" -ge 60 ]; then
+		echo "FATAL: no deploy token at $TOKEN_FILE within 60s"
+		exit 1
+	fi
+	sleep 1
+done
+TOKEN=$(cat "$TOKEN_FILE")
 
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAILURES=$((FAILURES + 1)); }
 
 deploy() { # <artifact-file> <version> -> prints HTTP status code
 	curl -s -o /tmp/deploy-body -w '%{http_code}' --max-time 60 \
-		-X POST -H "X-Liveswap-Secret: $SECRET" \
+		-X POST -H "Authorization: Bearer $TOKEN" \
 		-d "{\"url\":\"$ART/$1\",\"version\":\"$2\"}" "$HOOK"
 }
 
@@ -44,7 +57,7 @@ case "$b" in
 esac
 
 echo "=== recovery 2: status endpoint reports the recovered deploy ==="
-s=$(curl -s -H "X-Liveswap-Secret: $SECRET" "$HOOK")
+s=$(curl -s -H "Authorization: Bearer $TOKEN" "$HOOK")
 case "$s" in
 *'"current_version":"v4"'*'"running":true'*|*'"running":true'*'"current_version":"v4"'*)
 	pass "status reports v4 running after crash" ;;
