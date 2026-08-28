@@ -317,7 +317,13 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	// App.Start's recovery goroutine may lose deployMu to an early
 	// webhook; restore the durable leaked set here too, so this deploy
 	// can never persist an empty set over it or GC a protected release.
-	ma.restoreLeaked(c)
+	// An unreadable record is a hard stop: proceeding would overwrite
+	// it at promotion and GC blind. Prune before the fetch can recreate
+	// a release dir the operator just removed to clear its marker.
+	if err := ma.restoreLeaked(c); err != nil {
+		return fmt.Errorf("cannot read app state: %w", err)
+	}
+	ma.pruneLeaked(c)
 	started := c.clock.Now()
 	logger := c.logger.With(zap.String("version", req.Version))
 	logger.Info("deploy started", zap.String("artifact_host", hostOf(req.URL)))
@@ -534,24 +540,32 @@ func (ma *managedApp) persistLeaked(c collaborators) {
 	}
 }
 
-// restoreLeaked merges the persisted leaked set into memory. Called on
-// start before anything can run GC; a union, so nothing recorded in
-// this process is ever dropped by an older file.
-func (ma *managedApp) restoreLeaked(c collaborators) {
+// restoreLeaked merges the persisted leaked set into memory. Called
+// before anything can run GC; a union, so nothing recorded in this
+// process is ever dropped by an older file. A load error is returned,
+// not swallowed: a caller that cannot read the record must not go on
+// to overwrite it or GC without it.
+func (ma *managedApp) restoreLeaked(c collaborators) error {
 	st, ok, err := c.store.load()
-	if err != nil || !ok {
-		return
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
 	}
 	ma.mu.Lock()
 	defer ma.mu.Unlock()
 	for _, v := range st.LeakedReleases {
 		ma.leaked[v] = struct{}{}
 	}
+	return nil
 }
 
 // pruneLeaked drops entries whose release dir no longer exists: the
 // defined way to clear one is to kill the stray processes and remove
-// the release dir by hand. Runs after GC (which never touches them).
+// the release dir by hand. Runs right after restore — before a deploy
+// could recreate that very dir and make a stale marker permanent —
+// and again after GC (which never touches them).
 func (ma *managedApp) pruneLeaked(c collaborators) {
 	changed := false
 	ma.mu.Lock()
@@ -594,7 +608,10 @@ func (ma *managedApp) ensureRunning() error {
 
 	c := ma.snapshot()
 	spec := c.spec
-	ma.restoreLeaked(c) // before any path that could lead to a GC
+	if err := ma.restoreLeaked(c); err != nil { // before any path that could lead to a GC
+		return fmt.Errorf("cannot read app state: %w", err)
+	}
+	ma.pruneLeaked(c)
 	if inst := ma.currentInstance(); inst != nil {
 		if c.runner.Alive(inst.handle) {
 			return nil

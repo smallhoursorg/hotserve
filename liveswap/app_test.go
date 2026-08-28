@@ -636,6 +636,41 @@ func TestDeployRestoresPersistedLeaksFirst(t *testing.T) {
 	}
 }
 
+// An unreadable state record must stop a deploy before it can overwrite
+// the record at promotion or GC without the leaked set.
+func TestDeployAbortsWhenStateUnreadable(t *testing.T) {
+	rig := newTestRig(t)
+	rig.store.err = errTest
+	err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"})
+	if !errors.Is(err, errTest) || !strings.Contains(err.Error(), "cannot read app state") {
+		t.Fatalf("deploy should abort on an unreadable state record, got %v", err)
+	}
+	if rig.runner.startCount() != 0 {
+		t.Fatal("nothing must be started when the state record cannot be read")
+	}
+}
+
+// Clearing a leak is "kill the strays, remove the release dir". If the
+// operator then immediately redeploys that same version, the deploy
+// must drop the stale marker BEFORE the fetch recreates the dir —
+// otherwise the post-GC prune sees the new dir and the marker is
+// permanent.
+func TestRedeployOfRemovedLeakedReleaseClearsMarker(t *testing.T) {
+	rig := newTestRig(t)
+	rig.store.state = appState{LeakedReleases: []string{"v1"}} // dir already removed by the operator
+	rig.store.ok = true
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	if got := rig.ma.status().LeakedReleases; len(got) != 0 {
+		t.Fatalf("stale marker survived a redeploy of the removed release: %v", got)
+	}
+	if st, _, _ := rig.store.load(); len(st.LeakedReleases) != 0 {
+		t.Fatalf("stale marker persisted: %v", st.LeakedReleases)
+	}
+	if _, err := os.Stat(rig.spec.dirs.release("v1")); err != nil {
+		t.Fatalf("the redeployed release should exist: %v", err)
+	}
+}
+
 // Whatever survives a failed shutdown stop outlives this Caddy, so
 // Destruct must persist the leak for the next one.
 func TestDestructMarksLeakOnStopError(t *testing.T) {
