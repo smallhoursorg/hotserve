@@ -254,15 +254,27 @@ func (r *execRunner) sweepGroup(pgid int, grace time.Duration, why string) error
 	return killGroup(pgid)
 }
 
-// killGroup SIGKILLs process group pgid. An already-empty group is not
-// an error; anything else (EPERM) is a leak the caller must report.
+// killGroup SIGKILLs process group pgid and confirms it emptied. The
+// confirmation matters: kill(2) on a group succeeds if it reached *any*
+// member, so in a mixed-credential group the leader can die while a
+// worker that switched uid is denied. An already-empty group is not an
+// error; anything still live afterwards is a leak the caller reports.
 func killGroup(pgid int) error {
 	err := signalGroup(pgid, syscall.SIGKILL)
-	if err == nil || errors.Is(err, syscall.ESRCH) {
-		return nil
+	if err != nil && !errors.Is(err, syscall.ESRCH) {
+		return fmt.Errorf("SIGKILL process group %d: %w", pgid, err)
 	}
-	return fmt.Errorf("SIGKILL process group %d: %w", pgid, err)
+	// SIGKILL is not instantaneous; a bound covers a member stuck in
+	// uninterruptible sleep without letting Stop hang on it.
+	if !waitGroupGone(pgid, time.Now().Add(killConfirm)) {
+		return fmt.Errorf("process group %d still has live members after SIGKILL", pgid)
+	}
+	return nil
 }
+
+// killConfirm bounds how long killGroup waits for a SIGKILLed group to
+// disappear before reporting survivors.
+const killConfirm = time.Second
 
 // waitGroupGone polls until no live member of pgid remains or the
 // deadline passes, reporting whether the group emptied in time.

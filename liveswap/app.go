@@ -466,9 +466,15 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	ma.wd.reset()
 	ma.pokeWatchdog()
 
-	if old != nil && c.runner.Alive(old.handle) {
-		ma.setPhase(c, "draining")
-		c.clock.Sleep(spec.drain)
+	if old != nil {
+		if c.runner.Alive(old.handle) {
+			ma.setPhase(c, "draining")
+			c.clock.Sleep(spec.drain)
+		}
+		// Stop even a dead leader: its workers may still be draining
+		// under the runner's crash sweep, and Stop blocks until that
+		// sweep is done — so the release GC below never deletes a
+		// release dir from under processes still running out of it.
 		ma.setPhase(c, "stopping_old")
 		if err := c.runner.Stop(old.handle, spec.grace); err != nil {
 			logger.Warn("stopping old version", zap.Error(err))

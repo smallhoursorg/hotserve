@@ -392,6 +392,32 @@ func TestDeploySecondVersionStopsOldAfterDrain(t *testing.T) {
 	}
 }
 
+// A crashed old leader still gets a Stop on promote: with the exec
+// runner, Stop blocks until the reaper's sweep of the old process group
+// is done, so the release GC that follows never deletes a release dir
+// from under workers that are still draining. Only the drain sleep is
+// skipped — there is nothing left serving to drain.
+func TestDeployStopsDeadOldLeaderBeforeGC(t *testing.T) {
+	rig := newTestRig(t)
+	rig.spec.watchdogOn = false // keep the watchdog's own restart out of the count
+	ctx := context.Background()
+	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/1", Version: "v1"}))
+	oldHandle := rig.runner.handles[0]
+	oldHandle.kill() // leader crashed; its group may still be draining
+	before := rig.clock.Now()
+
+	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/2", Version: "v2"}))
+	if rig.runner.stopCount() != 1 || rig.runner.stopped[0] != oldHandle {
+		t.Fatalf("dead old leader must still be stopped exactly once before release GC: %d stops", rig.runner.stopCount())
+	}
+	if got := rig.ma.status().CurrentVersion; got != "v2" {
+		t.Fatalf("current version = %s, want v2", got)
+	}
+	if rig.clock.Now().Sub(before) >= rig.spec.drain {
+		t.Fatal("drain period must be skipped for a dead leader")
+	}
+}
+
 func TestDeployPreStartFailureKeepsOldServing(t *testing.T) {
 	rig := newTestRig(t)
 	ctx := context.Background()
