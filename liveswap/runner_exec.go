@@ -5,6 +5,7 @@ package liveswap
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -107,7 +108,10 @@ func (r *execRunner) Start(spec startSpec) (handle, error) {
 		h.teardownMu.Lock()
 		defer h.teardownMu.Unlock()
 		if !h.swept {
-			r.sweepGroup(h.pid, h.grace, "leader exited unsolicited")
+			if err := r.sweepGroup(h.pid, h.grace, "leader exited unsolicited"); err != nil {
+				r.log().Error("orphaned process group could not be signalled; its workers may have leaked",
+					zap.Int("pgid", h.pid), zap.Error(err))
+			}
 			h.swept = true
 		}
 	}()
@@ -185,9 +189,9 @@ func (r *execRunner) Stop(h handle, grace time.Duration) error {
 		// Leader just exited and we beat the reaper to the lock: the
 		// group is still ours (live members keep the pgid reserved), so
 		// sweep it with the caller's grace and let the reaper stand down.
-		r.sweepGroup(eh.pid, grace, "stop after leader exit")
+		err := r.sweepGroup(eh.pid, grace, "stop after leader exit")
 		eh.swept = true
-		return nil
+		return err
 	default:
 	}
 	// Between the done-check above and this signal the child can exit
@@ -209,9 +213,9 @@ func (r *execRunner) Stop(h handle, grace time.Duration) error {
 	case <-eh.done:
 	case <-time.After(grace):
 		r.log().Warn("grace period expired, killing process group", zap.Int("pid", eh.pid))
-		_ = signalGroup(eh.pid, syscall.SIGKILL)
+		err := killGroup(eh.pid)
 		<-eh.done
-		return nil
+		return err
 	}
 	// The leader went quietly; its workers get the rest of the grace
 	// before the survivors are killed. `npm start` forwards SIGTERM and
@@ -220,27 +224,44 @@ func (r *execRunner) Stop(h handle, grace time.Duration) error {
 		return nil
 	}
 	r.log().Warn("grace period expired for process group survivors, killing them", zap.Int("pgid", eh.pid))
-	_ = signalGroup(eh.pid, syscall.SIGKILL)
-	return nil
+	return killGroup(eh.pid)
 }
 
 // sweepGroup terminates whatever is left of process group pgid after
 // its leader has exited: SIGTERM, up to grace for the members to leave
 // on their own, then SIGKILL the survivors. Nothing to do is the common
-// case and stays silent.
-func (r *execRunner) sweepGroup(pgid int, grace time.Duration, why string) {
+// case and stays silent. A non-nil error means live members remain
+// that we could not signal at all (kill(2) fails with EPERM only when
+// *every* member refuses it — e.g. workers that changed credentials);
+// callers still record the group as swept, because retrying later is
+// futile and, once the pgid is recycled, dangerous — but they must
+// not pretend it was clean.
+func (r *execRunner) sweepGroup(pgid int, grace time.Duration, why string) error {
 	if !groupAlive(pgid) {
-		return
+		return nil
 	}
 	r.log().Info("sweeping orphaned process group", zap.Int("pgid", pgid), zap.String("cause", why))
 	if err := signalGroup(pgid, syscall.SIGTERM); err != nil {
-		return // ESRCH: gone between the check and the signal
+		if errors.Is(err, syscall.ESRCH) {
+			return nil // gone between the check and the signal
+		}
+		return fmt.Errorf("SIGTERM process group %d: %w", pgid, err)
 	}
 	if waitGroupGone(pgid, time.Now().Add(grace)) {
-		return
+		return nil
 	}
 	r.log().Warn("grace period expired for orphaned process group, killing it", zap.Int("pgid", pgid), zap.String("cause", why))
-	_ = signalGroup(pgid, syscall.SIGKILL)
+	return killGroup(pgid)
+}
+
+// killGroup SIGKILLs process group pgid. An already-empty group is not
+// an error; anything else (EPERM) is a leak the caller must report.
+func killGroup(pgid int) error {
+	err := signalGroup(pgid, syscall.SIGKILL)
+	if err == nil || errors.Is(err, syscall.ESRCH) {
+		return nil
+	}
+	return fmt.Errorf("SIGKILL process group %d: %w", pgid, err)
 }
 
 // waitGroupGone polls until no live member of pgid remains or the
