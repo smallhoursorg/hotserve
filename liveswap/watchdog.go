@@ -509,7 +509,8 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 	// webhook landing in that window gets a 409 — the same contract as
 	// a deploy's own drain+stop-old phase (one lifecycle operation at
 	// a time), and the same bound Destruct accepts when it waits for
-	// this goroutine at shutdown.
+	// this goroutine at shutdown. A dead leader needs no Stop: the
+	// runner swept its process group the moment it was reaped.
 	if c.runner.Alive(inst.handle) {
 		if err := c.runner.Stop(inst.handle, spec.grace); err != nil {
 			c.logger.Warn("watchdog: stopping unhealthy instance", zap.Error(err))

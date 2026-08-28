@@ -424,6 +424,7 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		command: expandArgs(spec.command, spec, req.Version, port, releaseDir),
 		dir:     releaseDir,
 		env:     env,
+		grace:   spec.grace,
 	})
 	if err != nil {
 		return fmt.Errorf("start failed: %w", err)
@@ -557,6 +558,7 @@ func (ma *managedApp) launchVersion(c collaborators, version string) (*instance,
 		command: expandArgs(spec.command, spec, version, port, releaseDir),
 		dir:     releaseDir,
 		env:     env,
+		grace:   spec.grace,
 	})
 	if err != nil {
 		return nil, err

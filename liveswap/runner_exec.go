@@ -10,6 +10,7 @@ import (
 	"net"
 	"os/exec"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -40,20 +41,33 @@ func newExecRunner(logger *zap.Logger) *execRunner {
 func (r *execRunner) setLogger(logger *zap.Logger) { r.logger.Store(logger) }
 func (r *execRunner) log() *zap.Logger             { return r.logger.Load() }
 
-// execHandle tracks one spawned process. done is closed by the reaper
+// execHandle tracks one spawned process — the *leader* of its process
+// group (pgid == pid, see setProcessGroup). done is closed by the reaper
 // goroutine once Wait returns, so Alive/Stop never race on Wait.
+//
+// The leader's exit is not the group's: npm/node workers it spawned
+// keep running (and keep the port) after it crashes. Exactly one party
+// sweeps the group after the leader is gone — Stop if it was called,
+// else the reaper — coordinated by teardownMu/stopping: Stop holds the
+// mutex for its whole run, and the reaper takes it only after closing
+// done (Stop waits on done while holding the lock).
 type execHandle struct {
 	pid       int
 	startedAt time.Time
+	grace     time.Duration // group grace for an unsolicited (crash) sweep
 	done      chan struct{}
+
+	teardownMu sync.Mutex
+	stopping   bool // Stop owns the sweep; the reaper must not
 }
 
 func (h *execHandle) state() handleState {
 	return handleState{PID: h.pid, StartedAt: h.startedAt}
 }
 
-// Start launches the command in its own process group so Stop can
-// signal the whole tree (Node apps routinely spawn children).
+// Start launches the command in its own process group so Stop — or the
+// reaper, if the leader dies first — can signal the whole tree (Node
+// apps routinely spawn children).
 func (r *execRunner) Start(spec startSpec) (handle, error) {
 	cmd := exec.Command(spec.command[0], spec.command[1:]...) //nolint:gosec // running the operator's configured app command is this module's purpose
 	cmd.Dir = spec.dir
@@ -75,12 +89,21 @@ func (r *execRunner) Start(spec startSpec) (handle, error) {
 	go r.pipeLines(stdout, "stdout")
 	go r.pipeLines(stderr, "stderr")
 
-	h := &execHandle{pid: cmd.Process.Pid, startedAt: time.Now(), done: make(chan struct{})}
+	h := &execHandle{pid: cmd.Process.Pid, startedAt: time.Now(), grace: spec.grace, done: make(chan struct{})}
 	go func() {
 		// Reap the child; its exit is observable via the closed channel.
 		err := cmd.Wait()
 		r.log().Info("process exited", zap.Int("pid", h.pid), zap.Error(err))
 		close(h.done)
+		// A leader that exited on its own (crash, clean exit) leaves its
+		// group unsupervised: callers gate Stop behind Alive, so nobody
+		// else will ever signal these processes. Sweep them here, now,
+		// while the pgid is still ours (live members keep it reserved).
+		h.teardownMu.Lock()
+		defer h.teardownMu.Unlock()
+		if !h.stopping {
+			r.sweepGroup(h.pid, h.grace, "leader exited unsolicited")
+		}
 	}()
 	return h, nil
 }
@@ -146,9 +169,16 @@ func (r *execRunner) Stop(h handle, grace time.Duration) error {
 	if !ok {
 		return fmt.Errorf("not an exec handle")
 	}
+	eh.teardownMu.Lock()
+	defer eh.teardownMu.Unlock()
+	eh.stopping = true
 	select {
 	case <-eh.done:
-		return nil // already exited
+		// Leader already gone. The reaper swept (or is about to find
+		// stopping set and leave it to us); either way, a sweep of an
+		// empty group is a cheap no-op, so make the guarantee explicit.
+		r.sweepGroup(eh.pid, grace, "stop after leader exit")
+		return nil
 	default:
 	}
 	// Between the done-check above and this signal the child can exit
@@ -160,15 +190,59 @@ func (r *execRunner) Stop(h handle, grace time.Duration) error {
 	if err := signalGroup(eh.pid, syscall.SIGTERM); err != nil {
 		return err
 	}
+	deadline := time.Now().Add(grace)
 	select {
 	case <-eh.done:
-		return nil
 	case <-time.After(grace):
+		r.log().Warn("grace period expired, killing process group", zap.Int("pid", eh.pid))
+		_ = signalGroup(eh.pid, syscall.SIGKILL)
+		<-eh.done
+		return nil
 	}
-	r.log().Warn("grace period expired, killing process group", zap.Int("pid", eh.pid))
+	// The leader went quietly; its workers get the rest of the grace
+	// before the survivors are killed. `npm start` forwards SIGTERM and
+	// outlives node, so this is usually already empty.
+	if waitGroupGone(eh.pid, deadline) {
+		return nil
+	}
+	r.log().Warn("grace period expired for process group survivors, killing them", zap.Int("pgid", eh.pid))
 	_ = signalGroup(eh.pid, syscall.SIGKILL)
-	<-eh.done
 	return nil
+}
+
+// sweepGroup terminates whatever is left of process group pgid after
+// its leader has exited: SIGTERM, up to grace for the members to leave
+// on their own, then SIGKILL the survivors. Nothing to do is the common
+// case and stays silent.
+func (r *execRunner) sweepGroup(pgid int, grace time.Duration, why string) {
+	if !groupAlive(pgid) {
+		return
+	}
+	r.log().Info("sweeping orphaned process group", zap.Int("pgid", pgid), zap.String("cause", why))
+	if err := signalGroup(pgid, syscall.SIGTERM); err != nil {
+		return // ESRCH: gone between the check and the signal
+	}
+	if waitGroupGone(pgid, time.Now().Add(grace)) {
+		return
+	}
+	r.log().Warn("grace period expired for orphaned process group, killing it", zap.Int("pgid", pgid), zap.String("cause", why))
+	_ = signalGroup(pgid, syscall.SIGKILL)
+}
+
+// waitGroupGone polls until no live member of pgid remains or the
+// deadline passes, reporting whether the group emptied in time.
+func waitGroupGone(pgid int, deadline time.Time) bool {
+	const poll = 25 * time.Millisecond
+	for {
+		if !groupAlive(pgid) {
+			return true
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false
+		}
+		time.Sleep(min(poll, remaining))
+	}
 }
 
 // Reattach always fails for exec: children of the previous Caddy

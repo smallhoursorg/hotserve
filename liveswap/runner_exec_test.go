@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -73,6 +74,119 @@ func TestExecRunnerStopEscalatesToSIGKILL(t *testing.T) {
 	if elapsed := time.Since(start); elapsed < 400*time.Millisecond {
 		t.Fatalf("SIGKILL fired before the grace period: %v", elapsed)
 	}
+}
+
+// waitGroupDead polls until no live member of pgid remains, failing the
+// test if the group is still populated at the deadline.
+func waitGroupDead(t *testing.T, pgid int, within time.Duration, what string) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for groupAlive(pgid) {
+		if time.Now().After(deadline) {
+			_ = signalGroup(pgid, syscall.SIGKILL) // don't leak it past the test
+			t.Fatalf("%s: process group %d still alive after %v", what, pgid, within)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// Regression for S2: a leader that exits on its own used to leave its
+// workers running forever — callers gate Stop behind Alive, so nothing
+// ever signalled the group. The reaper now sweeps it at crash time.
+func TestExecRunnerCrashSweepsProcessGroup(t *testing.T) {
+	r := testExecRunner()
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "grandchild-alive")
+	// The grandchild keeps refreshing the marker; the leader exits
+	// non-zero almost immediately, orphaning it inside the group.
+	script := `(while true; do sleep 0.1; date > ` + marker + `; done) & sleep 0.2; exit 3`
+	h, err := r.Start(startSpec{command: []string{"sh", "-c", script}, dir: dir, env: os.Environ(), grace: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid := h.state().PID
+	select {
+	case <-r.Wait(h):
+	case <-time.After(5 * time.Second):
+		t.Fatal("leader did not exit")
+	}
+	if r.Alive(h) {
+		t.Fatal("Alive must report the leader dead")
+	}
+	// Cooperative grandchild: SIGTERM ends it well inside the grace.
+	waitGroupDead(t, pid, time.Second, "crash sweep")
+	_ = os.Remove(marker)
+	time.Sleep(300 * time.Millisecond)
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("grandchild survived the crash sweep")
+	}
+	// Stop on the already-exited handle is a harmless no-op.
+	must(t, r.Stop(h, time.Second))
+}
+
+// The crash sweep escalates like Stop does: a worker that ignores
+// SIGTERM is SIGKILLed once the spec's grace runs out.
+func TestExecRunnerCrashSweepEscalatesToSIGKILL(t *testing.T) {
+	r := testExecRunner()
+	script := `(trap "" TERM; while true; do sleep 0.2; done) & sleep 0.2; exit 1`
+	h, err := r.Start(startSpec{command: []string{"sh", "-c", script}, dir: t.TempDir(), env: os.Environ(), grace: 300 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid := h.state().PID
+	<-r.Wait(h)
+	start := time.Now()
+	waitGroupDead(t, pid, 3*time.Second, "crash sweep escalation")
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("survivor outlived the grace by too much: %v", elapsed)
+	}
+}
+
+// Stop gives the whole group its grace: a leader that dies instantly on
+// SIGTERM must not cut short a worker that is still shutting down
+// cleanly. The worker's TERM handler leaves a marker; it must exist by
+// the time Stop returns, and no SIGKILL may have been needed.
+func TestExecRunnerStopWaitsForGroupWithinGrace(t *testing.T) {
+	r := testExecRunner()
+	dir := t.TempDir()
+	clean := filepath.Join(dir, "clean-shutdown")
+	script := `(trap "touch ` + clean + `; exit 0" TERM; while true; do sleep 0.1; done) & wait`
+	h, err := r.Start(startSpec{command: []string{"sh", "-c", script}, dir: dir, env: os.Environ(), grace: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid := h.state().PID
+	time.Sleep(300 * time.Millisecond) // let the trap install
+	start := time.Now()
+	must(t, r.Stop(h, 5*time.Second))
+	elapsed := time.Since(start)
+	if _, err := os.Stat(clean); err != nil {
+		t.Fatalf("Stop returned before the worker finished its clean shutdown: %v", err)
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("Stop waited out the grace instead of returning when the group emptied: %v", elapsed)
+	}
+	waitGroupDead(t, pid, time.Second, "stop")
+}
+
+// A worker that ignores SIGTERM after its leader is already gone is
+// still swept: Stop spends the remaining grace on the group, then
+// SIGKILLs the survivors.
+func TestExecRunnerStopKillsGroupSurvivorsAfterGrace(t *testing.T) {
+	r := testExecRunner()
+	script := `(trap "" TERM; while true; do sleep 0.2; done) & wait`
+	h, err := r.Start(startSpec{command: []string{"sh", "-c", script}, dir: t.TempDir(), env: os.Environ(), grace: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid := h.state().PID
+	time.Sleep(300 * time.Millisecond)
+	start := time.Now()
+	must(t, r.Stop(h, 500*time.Millisecond))
+	if elapsed := time.Since(start); elapsed < 400*time.Millisecond {
+		t.Fatalf("survivors were killed before the grace period: %v", elapsed)
+	}
+	waitGroupDead(t, pid, 2*time.Second, "stop survivors")
 }
 
 func TestExecRunnerRunOnceSuccessAndFailure(t *testing.T) {

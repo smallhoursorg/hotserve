@@ -17,17 +17,23 @@ type runner interface {
 	// error includes non-zero exits; ctx cancellation kills the process.
 	RunOnce(ctx context.Context, spec startSpec) error
 
-	// Alive reports whether the instance is still running.
+	// Alive reports whether the instance's leader process is still
+	// running. It says nothing about the rest of its process group:
+	// workers can outlive a crashed leader, which is why the runner
+	// itself sweeps the group when the leader exits on its own.
 	Alive(h handle) bool
 
-	// Wait returns a channel that is closed once the instance exits.
+	// Wait returns a channel that is closed once the leader exits.
 	// It may return nil when the runner cannot wait on this handle (a
 	// reattached instance the runner did not spawn); callers must then
 	// fall back to polling Alive.
 	Wait(h handle) <-chan struct{}
 
 	// Stop terminates gracefully: SIGTERM to the process group, wait up
-	// to grace, then SIGKILL. Returns once the process has exited.
+	// to grace for the whole group to exit, then SIGKILL the survivors.
+	// Returns once the leader has exited and the group has been swept
+	// (a SIGKILLed survivor may still be mid-teardown in the kernel).
+	// Safe on an already-exited handle: it sweeps whatever is left.
 	Stop(h handle, grace time.Duration) error
 
 	// Reattach tries to re-adopt an instance from persisted state after
@@ -42,6 +48,11 @@ type startSpec struct {
 	command []string // argv; command[0] looked up in PATH unless it contains a slash
 	dir     string   // working directory (the release dir)
 	env     []string // complete environment, KEY=VALUE form
+	// grace bounds the runner's own sweep of the process group when the
+	// leader exits without a Stop (crash): SIGTERM, wait grace, SIGKILL.
+	// Stop takes its grace as an argument; this one covers the path on
+	// which nobody calls Stop. Unused by RunOnce.
+	grace time.Duration
 }
 
 // handle identifies a running instance to its runner.
