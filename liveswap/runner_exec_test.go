@@ -54,6 +54,33 @@ func TestExecRunnerStopKillsProcessGroup(t *testing.T) {
 	}
 }
 
+// TestExecRunnerReaperSweepsGroupOnCrash covers the crash path: the
+// leader exits on its own (no Stop), leaving a child it spawned into its
+// process group. Without the reaper's group sweep that child is orphaned
+// and keeps refreshing the marker forever.
+func TestExecRunnerReaperSweepsGroupOnCrash(t *testing.T) {
+	r := testExecRunner()
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "orphan-alive")
+	// Spawn a grandchild into the group, then let the leader exit by
+	// itself — no Stop is ever called.
+	script := `(while true; do sleep 0.1; date > ` + marker + `; done) & sleep 0.3; exit 0`
+	h, err := r.Start(startSpec{command: []string{"sh", "-c", script}, dir: dir, env: os.Environ()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-r.Wait(h) // leader exits on its own; the reaper sweeps before closing done
+	if r.Alive(h) {
+		t.Fatal("leader should have exited")
+	}
+	// If the orphan survived it would recreate the marker after this.
+	_ = os.Remove(marker)
+	time.Sleep(400 * time.Millisecond)
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("orphaned grandchild survived the leader's crash")
+	}
+}
+
 func TestExecRunnerStopEscalatesToSIGKILL(t *testing.T) {
 	r := testExecRunner()
 	// Trap and ignore TERM; only SIGKILL can end this.

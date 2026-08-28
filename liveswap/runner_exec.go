@@ -10,6 +10,7 @@ import (
 	"net"
 	"os/exec"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -42,14 +43,46 @@ func (r *execRunner) log() *zap.Logger             { return r.logger.Load() }
 
 // execHandle tracks one spawned process. done is closed by the reaper
 // goroutine once Wait returns, so Alive/Stop never race on Wait.
+//
+// A leader can spawn children into its own process group (Node/npm
+// workers) that outlive it. mu guards the two latches that make the
+// group sweep happen exactly once: stopping (a Stop owns the teardown,
+// so the reaper must not SIGKILL survivors and cut its grace short) and
+// swept (the group-sweeping SIGKILL has already been sent).
 type execHandle struct {
 	pid       int
 	startedAt time.Time
 	done      chan struct{}
+
+	mu       sync.Mutex
+	stopping bool
+	swept    bool
 }
 
 func (h *execHandle) state() handleState {
 	return handleState{PID: h.pid, StartedAt: h.startedAt}
+}
+
+// markStopping records that a Stop is managing this instance's teardown,
+// so the reaper defers the group sweep to Stop's grace.
+func (h *execHandle) markStopping() {
+	h.mu.Lock()
+	h.stopping = true
+	h.mu.Unlock()
+}
+
+// beginSweep reports whether the caller should send the group-sweeping
+// SIGKILL now, latching swept so only one caller ever does. force skips
+// the stopping guard: the reaper passes force=false (it must defer to an
+// in-flight Stop), Stop passes force=true (it *is* the teardown).
+func (h *execHandle) beginSweep(force bool) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.swept || (!force && h.stopping) {
+		return false
+	}
+	h.swept = true
+	return true
 }
 
 // Start launches the command in its own process group so Stop can
@@ -79,6 +112,16 @@ func (r *execRunner) Start(spec startSpec) (handle, error) {
 	go func() {
 		// Reap the child; its exit is observable via the closed channel.
 		err := cmd.Wait()
+		// A leader that exits with no Stop in flight has crashed. Sweep
+		// its process group so children it spawned don't survive as
+		// orphans (leaking resources, holding ports). The leader was just
+		// reaped, so any surviving member keeps the pgid live — not yet
+		// recyclable — and the SIGKILL targets exactly those orphans; an
+		// already-empty group makes it a harmless no-op. A graceful Stop
+		// sets stopping so its own grace is honored instead.
+		if h.beginSweep(false) {
+			_ = signalGroup(h.pid, syscall.SIGKILL)
+		}
 		r.log().Info("process exited", zap.Int("pid", h.pid), zap.Error(err))
 		close(h.done)
 	}()
@@ -146,9 +189,19 @@ func (r *execRunner) Stop(h handle, grace time.Duration) error {
 	if !ok {
 		return fmt.Errorf("not an exec handle")
 	}
+	// Claim the teardown so the reaper defers its crash sweep to our
+	// grace rather than SIGKILLing survivors the instant the leader exits.
+	eh.markStopping()
 	select {
 	case <-eh.done:
-		return nil // already exited
+		// The leader already exited. The reaper normally swept it at that
+		// moment; sweep here only if it didn't (it saw stopping set and
+		// deferred, because we raced the reap) — still crash-time-tight,
+		// so the pgid is ours.
+		if eh.beginSweep(true) {
+			_ = signalGroup(eh.pid, syscall.SIGKILL)
+		}
+		return nil
 	default:
 	}
 	// Between the done-check above and this signal the child can exit
@@ -162,11 +215,17 @@ func (r *execRunner) Stop(h handle, grace time.Duration) error {
 	}
 	select {
 	case <-eh.done:
-		return nil
 	case <-time.After(grace):
+		r.log().Warn("grace period expired, killing process group", zap.Int("pid", eh.pid))
 	}
-	r.log().Warn("grace period expired, killing process group", zap.Int("pid", eh.pid))
-	_ = signalGroup(eh.pid, syscall.SIGKILL)
+	// The leader is gone (exited within grace) or about to be (grace
+	// expired); SIGKILL sweeps any surviving group members — workers the
+	// leader spawned that outlived it. Sent within grace of our SIGTERM,
+	// so the pgid is still ours. done-close tracks only the leader, so
+	// this is what actually guarantees the group is clean on return.
+	if eh.beginSweep(true) {
+		_ = signalGroup(eh.pid, syscall.SIGKILL)
+	}
 	<-eh.done
 	return nil
 }

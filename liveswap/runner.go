@@ -17,7 +17,10 @@ type runner interface {
 	// error includes non-zero exits; ctx cancellation kills the process.
 	RunOnce(ctx context.Context, spec startSpec) error
 
-	// Alive reports whether the instance is still running.
+	// Alive reports whether the instance's group leader is still running.
+	// Children the leader spawned into its process group are not tracked
+	// here; a crashed leader's orphans are swept by the runner, not
+	// reported by Alive.
 	Alive(h handle) bool
 
 	// Wait returns a channel that is closed once the instance exits.
@@ -27,7 +30,9 @@ type runner interface {
 	Wait(h handle) <-chan struct{}
 
 	// Stop terminates gracefully: SIGTERM to the process group, wait up
-	// to grace, then SIGKILL. Returns once the process has exited.
+	// to grace, then SIGKILL the group. Returns once the leader has
+	// exited and its process group has been swept, so no worker the
+	// leader spawned outlives the call.
 	Stop(h handle, grace time.Duration) error
 
 	// Reattach tries to re-adopt an instance from persisted state after
