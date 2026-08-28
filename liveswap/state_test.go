@@ -60,7 +60,7 @@ func TestGCReleases(t *testing.T) {
 	must(t, os.WriteFile(filepath.Join(dir, "README"), []byte("x"), 0o600))
 
 	// keep 2, protect the OLDEST (simulating a rollback still serving v1).
-	gcReleases(dir, 2, "v1", zap.NewNop())
+	gcReleases(dir, 2, zap.NewNop(), "v1")
 
 	for _, v := range []string{"v1", "v3", "v4"} {
 		if _, err := os.Stat(filepath.Join(dir, v)); err != nil {

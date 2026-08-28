@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -175,11 +177,33 @@ type managedApp struct {
 	// concurrent webhook gets an immediate 409 and CI can retry.
 	deployMu sync.Mutex
 
-	// mu guards current, phase and lastDeploy.
+	// mu guards current, phase, lastDeploy and leaked.
 	mu         sync.Mutex
 	current    *instance
 	phase      string
 	lastDeploy *deployResult
+	// leaked is the set of release versions whose processes could not
+	// be confirmed stopped (a Stop error, or the runner's own report of
+	// a failed crash sweep). Invariants:
+	//
+	//  1. A release dir is deleted only by the failed-deploy cleanup,
+	//     once its instance is confirmed stopped, or by release GC —
+	//     which never touches the current version or this set.
+	//  2. Every source of a leak verdict lands here durably: failed
+	//     deploy, stop-old on promote, watchdog restart, recovery,
+	//     Destruct, and the runner's onSweepFailure callback.
+	//  3. The set is restored from state.json — and pruned of entries
+	//     whose release dir is gone, the operator's way to clear one —
+	//     before any path that can run GC (deployLocked, ensureRunning).
+	//     An unreadable record aborts rather than proceeds blind.
+	//  4. Every state.json read-modify-write goes through stateMu: the
+	//     runner's callback runs off deployMu.
+	//
+	// Surfaced as leaked_releases in status.
+	leaked map[string]struct{}
+	// stateMu serializes state.json transactions (persistState,
+	// persistLeaked, restoreLeaked); see leaked invariant 4.
+	stateMu sync.Mutex
 
 	// activePort is what GetUpstreams reads on every request; storing
 	// it is the cutover. 0 = nothing serving yet.
@@ -197,7 +221,7 @@ type managedApp struct {
 }
 
 func newManagedApp(name string) *managedApp {
-	return &managedApp{name: name, phase: "idle", wdNotify: make(chan struct{}, 1)}
+	return &managedApp{name: name, phase: "idle", wdNotify: make(chan struct{}, 1), leaked: map[string]struct{}{}}
 }
 
 // configure installs the latest spec and (re)wires collaborators. On
@@ -304,6 +328,16 @@ func (ma *managedApp) Deploy(ctx context.Context, req deployRequest) error {
 // extracting it under the new).
 func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c collaborators) (err error) {
 	spec := c.spec
+	// App.Start's recovery goroutine may lose deployMu to an early
+	// webhook; restore the durable leaked set here too, so this deploy
+	// can never persist an empty set over it or GC a protected release.
+	// An unreadable record is a hard stop: proceeding would overwrite
+	// it at promotion and GC blind. Prune before the fetch can recreate
+	// a release dir the operator just removed to clear its marker.
+	if err := ma.restoreLeaked(c); err != nil {
+		return fmt.Errorf("cannot read app state: %w", err)
+	}
+	ma.pruneLeaked(c)
 	started := c.clock.Now()
 	logger := c.logger.With(zap.String("version", req.Version))
 	logger.Info("deploy started", zap.String("artifact_host", hostOf(req.URL)))
@@ -369,16 +403,21 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	// instance is really gone before deleting its release.
 	var newHandle handle
 	promoted := false
+	stopUnconfirmed := false // Stop could not vouch that the whole process group is gone
 	if !req.rollback {
 		defer func() {
 			if err == nil || promoted {
 				return
 			}
 			// Never delete a release out from under a failed instance that
-			// is still running (Stop may not have confirmed its exit) —
-			// that would pull files from beneath a live, leaked process.
-			if newHandle != nil && c.runner.Alive(newHandle) {
-				err = errors.Join(err, fmt.Errorf("release %s left on disk: the failed instance is still running", req.Version))
+			// may still be running — Alive covers the leader, and a Stop
+			// error covers workers that outlived it — that would pull
+			// files from beneath a live, leaked process.
+			if newHandle != nil && (stopUnconfirmed || c.runner.Alive(newHandle)) {
+				err = errors.Join(err, fmt.Errorf("release %s left on disk: the failed instance may still be running", req.Version))
+				if perr := ma.markLeaked(c, req.Version); perr != nil {
+					err = errors.Join(err, perr)
+				}
 				return
 			}
 			// Surface a cleanup failure: otherwise the release lingers and
@@ -421,9 +460,11 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 
 	ma.setPhase(c, "starting")
 	newHandle, err = c.runner.Start(startSpec{
-		command: expandArgs(spec.command, spec, req.Version, port, releaseDir),
-		dir:     releaseDir,
-		env:     env,
+		command:        expandArgs(spec.command, spec, req.Version, port, releaseDir),
+		dir:            releaseDir,
+		env:            env,
+		grace:          spec.grace,
+		onSweepFailure: ma.sweepFailureRecorder(c, req.Version),
 	})
 	if err != nil {
 		return fmt.Errorf("start failed: %w", err)
@@ -440,11 +481,12 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		deadline: spec.deadline,
 	}); err != nil {
 		deployErr := fmt.Errorf("health gate: %w", err)
-		// If Stop can't confirm the instance exited (its SIGTERM failed
-		// and the process is still alive), surface that — and the cleanup
-		// defer will then leave the release in place rather than delete it
-		// beneath the live process.
-		if stopErr := c.runner.Stop(newHandle, spec.grace); stopErr != nil && c.runner.Alive(newHandle) {
+		// If Stop can't confirm the instance is gone — its signal failed,
+		// or workers survived the sweep of its process group even though
+		// the leader is dead — surface that, and the cleanup defer leaves
+		// the release in place rather than delete it beneath them.
+		if stopErr := c.runner.Stop(newHandle, spec.grace); stopErr != nil {
+			stopUnconfirmed = true
 			deployErr = errors.Join(deployErr, fmt.Errorf("failed instance could not be stopped: %w", stopErr))
 		}
 		return deployErr
@@ -465,17 +507,132 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	ma.wd.reset()
 	ma.pokeWatchdog()
 
-	if old != nil && c.runner.Alive(old.handle) {
-		ma.setPhase(c, "draining")
-		c.clock.Sleep(spec.drain)
+	if old != nil {
+		if c.runner.Alive(old.handle) {
+			ma.setPhase(c, "draining")
+			c.clock.Sleep(spec.drain)
+		}
+		// Stop even a dead leader: its workers may still be draining
+		// under the runner's crash sweep, and Stop blocks until that
+		// sweep is done — so the release GC below never deletes a
+		// release dir from under processes still running out of it.
 		ma.setPhase(c, "stopping_old")
 		if err := c.runner.Stop(old.handle, spec.grace); err != nil {
-			logger.Warn("stopping old version", zap.Error(err))
+			// Some of the old instance may still be running out of its
+			// release dir. Protect that release from this and every
+			// later GC — a later deploy's GC has no other way to know.
+			ma.noteLeak(c, old.version, err, "stopping old version")
 		}
 	}
 
-	gcReleases(spec.dirs.releases, spec.keep, req.Version, logger)
+	gcReleases(spec.dirs.releases, spec.keep, logger, append(ma.leakedReleases(), req.Version)...)
 	return nil
+}
+
+// sweepFailureRecorder gives the runner a way to publish a crash
+// sweep's failure the moment it happens: a durable mark that does not
+// depend on some later Stop reaching the handle before Caddy is killed.
+func (ma *managedApp) sweepFailureRecorder(c collaborators, version string) func(error) {
+	return func(cause error) { ma.noteLeak(c, version, cause, "crash sweep") }
+}
+
+// markLeaked records that version's processes could not be confirmed
+// stopped, so its release dir must never be deleted by GC — and
+// persists that immediately, since the stray processes outlive us.
+// The in-memory mark always lands; the returned error means it is NOT
+// durable, and the caller must say so rather than claim protection.
+func (ma *managedApp) markLeaked(c collaborators, version string) error {
+	ma.mu.Lock()
+	ma.leaked[version] = struct{}{}
+	ma.mu.Unlock()
+	if err := ma.persistLeaked(c); err != nil {
+		return fmt.Errorf("release %s is protected from GC in memory only — the leak could not be persisted and will be forgotten at restart: %w", version, err)
+	}
+	return nil
+}
+
+// noteLeak is markLeaked for the post-cutover paths, where an error can
+// only be logged: the mark is made, and a persistence failure is
+// shouted rather than swallowed.
+func (ma *managedApp) noteLeak(c collaborators, version string, cause error, where string) {
+	c.logger.Warn(where+": instance could not be confirmed stopped; its release is protected from GC",
+		zap.String("version", version), zap.Error(cause))
+	if err := ma.markLeaked(c, version); err != nil {
+		c.logger.Error(where+": leak protection is not durable", zap.String("version", version), zap.Error(err))
+	}
+}
+
+// persistLeaked writes the leaked set into state.json without
+// disturbing the rest of the record (there may be none yet: a first
+// deploy can fail and leak before anything was ever published).
+func (ma *managedApp) persistLeaked(c collaborators) error {
+	ma.stateMu.Lock()
+	defer ma.stateMu.Unlock()
+	st, _, err := c.store.load()
+	if err != nil {
+		return fmt.Errorf("cannot read state: %w", err)
+	}
+	st.LeakedReleases = ma.leakedReleases()
+	if err := c.store.save(st); err != nil {
+		return fmt.Errorf("cannot save state: %w", err)
+	}
+	return nil
+}
+
+// restoreLeaked merges the persisted leaked set into memory. Called
+// before anything can run GC; a union, so nothing recorded in this
+// process is ever dropped by an older file. A load error is returned,
+// not swallowed: a caller that cannot read the record must not go on
+// to overwrite it or GC without it.
+func (ma *managedApp) restoreLeaked(c collaborators) error {
+	ma.stateMu.Lock()
+	st, ok, err := c.store.load()
+	ma.stateMu.Unlock()
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	ma.mu.Lock()
+	defer ma.mu.Unlock()
+	for _, v := range st.LeakedReleases {
+		ma.leaked[v] = struct{}{}
+	}
+	return nil
+}
+
+// pruneLeaked drops entries whose release dir no longer exists: the
+// defined way to clear one is to kill the stray processes and remove
+// the release dir by hand. Runs right after restore — before a deploy
+// could recreate that very dir and make a stale marker permanent.
+func (ma *managedApp) pruneLeaked(c collaborators) {
+	changed := false
+	ma.mu.Lock()
+	for v := range ma.leaked {
+		if _, err := os.Stat(c.spec.dirs.release(v)); errors.Is(err, fs.ErrNotExist) {
+			delete(ma.leaked, v)
+			changed = true
+		}
+	}
+	ma.mu.Unlock()
+	if changed {
+		if err := ma.persistLeaked(c); err != nil {
+			c.logger.Warn("clearing leaked releases", zap.Error(err))
+		}
+	}
+}
+
+// leakedReleases returns the protected versions, sorted, for GC and status.
+func (ma *managedApp) leakedReleases() []string {
+	ma.mu.Lock()
+	defer ma.mu.Unlock()
+	out := make([]string, 0, len(ma.leaked))
+	for v := range ma.leaked {
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ensureRunning is crash/restart recovery, called from App.Start. If
@@ -493,8 +650,20 @@ func (ma *managedApp) ensureRunning() error {
 
 	c := ma.snapshot()
 	spec := c.spec
-	if inst := ma.currentInstance(); inst != nil && c.runner.Alive(inst.handle) {
-		return nil
+	if err := ma.restoreLeaked(c); err != nil { // before any path that could lead to a GC
+		return fmt.Errorf("cannot read app state: %w", err)
+	}
+	ma.pruneLeaked(c)
+	if inst := ma.currentInstance(); inst != nil {
+		if c.runner.Alive(inst.handle) {
+			return nil
+		}
+		// Dead in memory (a reload with the watchdog off): the handle
+		// is about to be replaced, and it is the only thing that can
+		// replay its crash sweep's verdict. Collect it first.
+		if err := c.runner.Stop(inst.handle, spec.grace); err != nil {
+			ma.noteLeak(c, inst.version, err, "recovery")
+		}
 	}
 	st, ok, err := c.store.load()
 	if err != nil {
@@ -554,9 +723,11 @@ func (ma *managedApp) launchVersion(c collaborators, version string) (*instance,
 		return nil, err
 	}
 	h, err := c.runner.Start(startSpec{
-		command: expandArgs(spec.command, spec, version, port, releaseDir),
-		dir:     releaseDir,
-		env:     env,
+		command:        expandArgs(spec.command, spec, version, port, releaseDir),
+		dir:            releaseDir,
+		env:            env,
+		grace:          spec.grace,
+		onSweepFailure: ma.sweepFailureRecorder(c, version),
 	})
 	if err != nil {
 		return nil, err
@@ -592,11 +763,14 @@ func (ma *managedApp) unrouteIf(inst *instance) {
 }
 
 func (ma *managedApp) persistState(c collaborators, inst *instance) error {
+	ma.stateMu.Lock()
+	defer ma.stateMu.Unlock()
 	if err := c.store.save(appState{
 		CurrentVersion: inst.version,
 		Port:           inst.port,
 		Handle:         inst.handle.state(),
 		UpdatedAt:      c.clock.Now(),
+		LeakedReleases: ma.leakedReleases(),
 	}); err != nil {
 		return err
 	}
@@ -631,6 +805,11 @@ type statusSnapshot struct {
 	// healthy app with no releases reports []), so an empty set is
 	// distinguishable from a server that doesn't report the field.
 	AvailableVersions []string `json:"available_versions"`
+	// LeakedReleases lists releases whose processes could not be
+	// confirmed stopped. They are exempt from GC — across restarts too,
+	// via state.json — until the operator kills the strays and removes
+	// the release dir, at which point the entry clears itself.
+	LeakedReleases []string `json:"leaked_releases,omitempty"`
 }
 
 func (ma *managedApp) status() statusSnapshot {
@@ -649,6 +828,10 @@ func (ma *managedApp) status() statusSnapshot {
 	ma.mu.Lock()
 	defer ma.mu.Unlock()
 	s := statusSnapshot{App: ma.name, Phase: ma.phase, LastDeploy: ma.lastDeploy, Watchdog: wd, AvailableVersions: available}
+	for v := range ma.leaked {
+		s.LeakedReleases = append(s.LeakedReleases, v)
+	}
+	sort.Strings(s.LeakedReleases)
 	if ma.current != nil {
 		s.CurrentVersion = ma.current.version
 		s.Port = ma.current.port
@@ -671,7 +854,15 @@ func (ma *managedApp) Destruct() error {
 		return nil
 	}
 	c.logger.Info("shutting down app", zap.String("version", inst.version))
-	return c.runner.Stop(inst.handle, c.spec.grace)
+	err := c.runner.Stop(inst.handle, c.spec.grace)
+	if err != nil {
+		// Whatever survived outlives this Caddy; the next one must
+		// still know not to GC its release.
+		if perr := ma.markLeaked(c, inst.version); perr != nil {
+			err = errors.Join(err, perr)
+		}
+	}
+	return err
 }
 
 // startWatchdog launches the supervision goroutine once per pooled

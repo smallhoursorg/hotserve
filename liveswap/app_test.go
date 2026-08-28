@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -80,10 +81,11 @@ func (c *fakeClock) After(d time.Duration) <-chan time.Time {
 // Handles built as bare literals (no done channel) exercise the
 // Wait-returns-nil polling fallback.
 type fakeHandle struct {
-	id    string
-	alive bool
-	done  chan struct{}
-	mu    sync.Mutex
+	id      string
+	alive   bool
+	done    chan struct{}
+	mu      sync.Mutex
+	onCrash func() // set by fakeRunner.Start
 }
 
 func (h *fakeHandle) state() handleState { return handleState{PID: 4242} }
@@ -96,7 +98,6 @@ func (h *fakeHandle) isAlive() bool {
 
 func (h *fakeHandle) kill() {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.alive = false
 	if h.done != nil {
 		select {
@@ -104,6 +105,11 @@ func (h *fakeHandle) kill() {
 		default:
 			close(h.done)
 		}
+	}
+	onCrash := h.onCrash
+	h.mu.Unlock()
+	if onCrash != nil {
+		onCrash() // the exec runner's reaper reporting a failed crash sweep
 	}
 }
 
@@ -119,6 +125,7 @@ type fakeRunner struct {
 	reattachOK      bool
 	stopErr         error // Stop returns this
 	stopLeavesAlive bool  // Stop does not actually kill the handle
+	crashSweepErr   error // a killed handle reports this via startSpec.onSweepFailure
 }
 
 func (r *fakeRunner) Start(spec startSpec) (handle, error) {
@@ -128,6 +135,14 @@ func (r *fakeRunner) Start(spec startSpec) (handle, error) {
 		return nil, r.startErr
 	}
 	h := &fakeHandle{id: fmt.Sprintf("h%d", len(r.handles)), alive: true, done: make(chan struct{})}
+	h.onCrash = func() {
+		r.mu.Lock()
+		err := r.crashSweepErr
+		r.mu.Unlock()
+		if err != nil && spec.onSweepFailure != nil {
+			spec.onSweepFailure(err)
+		}
+	}
 	r.started = append(r.started, spec)
 	r.handles = append(r.handles, h)
 	return h, nil
@@ -265,10 +280,11 @@ func (f *fakeFetcher) fetch(_ context.Context, spec *appSpec, req deployRequest,
 
 // fakeStore is an in-memory stateStore.
 type fakeStore struct {
-	mu    sync.Mutex
-	state appState
-	ok    bool
-	err   error
+	mu      sync.Mutex
+	state   appState
+	ok      bool
+	err     error
+	saveErr error
 }
 
 func (s *fakeStore) load() (appState, bool, error) {
@@ -280,6 +296,9 @@ func (s *fakeStore) load() (appState, bool, error) {
 func (s *fakeStore) save(st appState) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.saveErr != nil {
+		return s.saveErr
+	}
 	s.state = st
 	s.ok = true
 	return nil
@@ -392,6 +411,75 @@ func TestDeploySecondVersionStopsOldAfterDrain(t *testing.T) {
 	}
 }
 
+// A crashed old leader still gets a Stop on promote: with the exec
+// runner, Stop blocks until the reaper's sweep of the old process group
+// is done, so the release GC that follows never deletes a release dir
+// from under workers that are still draining. Only the drain sleep is
+// skipped — there is nothing left serving to drain.
+func TestDeployStopsDeadOldLeaderBeforeGC(t *testing.T) {
+	rig := newTestRig(t)
+	rig.spec.watchdogOn = false // keep the watchdog's own restart out of the count
+	ctx := context.Background()
+	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/1", Version: "v1"}))
+	oldHandle := rig.runner.handles[0]
+	oldHandle.kill() // leader crashed; its group may still be draining
+	before := rig.clock.Now()
+
+	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/2", Version: "v2"}))
+	if rig.runner.stopCount() != 1 || rig.runner.stopped[0] != oldHandle {
+		t.Fatalf("dead old leader must still be stopped exactly once before release GC: %d stops", rig.runner.stopCount())
+	}
+	if got := rig.ma.status().CurrentVersion; got != "v2" {
+		t.Fatalf("current version = %s, want v2", got)
+	}
+	if rig.clock.Now().Sub(before) >= rig.spec.drain {
+		t.Fatal("drain period must be skipped for a dead leader")
+	}
+}
+
+// A release whose old-instance stop could not be confirmed stays
+// protected from GC across LATER deploys, not just the one that saw
+// the failure: with keep=2, v1's failed stop during the v2 promote must
+// still shield v1 when the v3 promote (whose own stop-old succeeds)
+// runs GC — the point at which v1 would otherwise fall out of keep.
+func TestLeakedReleaseSurvivesLaterGC(t *testing.T) {
+	ctx := context.Background()
+	backdate := func(t *testing.T, rig *testRig, v string, i int) {
+		t.Helper()
+		mt := time.Now().Add(time.Duration(i-10) * time.Minute)
+		must(t, os.Chtimes(rig.spec.dirs.release(v), mt, mt))
+	}
+	run := func(t *testing.T, leakV1 bool) *testRig {
+		rig := newTestRig(t)
+		must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/v1", Version: "v1"}))
+		backdate(t, rig, "v1", 0)
+		if leakV1 {
+			rig.runner.stopErr = errTest // v1's stop during the v2 promote fails
+		}
+		must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/v2", Version: "v2"}))
+		backdate(t, rig, "v2", 1)
+		rig.runner.stopErr = nil // v2's stop during the v3 promote is fine
+		must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/v3", Version: "v3"}))
+		return rig
+	}
+	// Control: v1 is GC'd on the third deploy when nothing leaked.
+	ctl := run(t, false)
+	if _, err := os.Stat(ctl.spec.dirs.release("v1")); !os.IsNotExist(err) {
+		t.Fatalf("test premise: v1 should have been GC'd on the third deploy (stat err=%v)", err)
+	}
+	if got := ctl.ma.status().LeakedReleases; len(got) != 0 {
+		t.Fatalf("nothing leaked, status reports %v", got)
+	}
+
+	rig := run(t, true)
+	if _, err := os.Stat(rig.spec.dirs.release("v1")); err != nil {
+		t.Fatalf("a leaked release must survive a later deploy's GC: %v", err)
+	}
+	if got := rig.ma.status(); got.CurrentVersion != "v3" || !reflect.DeepEqual(got.LeakedReleases, []string{"v1"}) {
+		t.Fatalf("deploys must still succeed and status must name the leak: %+v", got)
+	}
+}
+
 func TestDeployPreStartFailureKeepsOldServing(t *testing.T) {
 	rig := newTestRig(t)
 	ctx := context.Background()
@@ -469,7 +557,7 @@ func TestDeployGCKeepsNewestReleases(t *testing.T) {
 	}
 	// The final GC ran before v3 was backdated; run it once more the
 	// way the next deploy would see the world.
-	gcReleases(rig.spec.dirs.releases, rig.spec.keep, "v3", zap.NewNop())
+	gcReleases(rig.spec.dirs.releases, rig.spec.keep, zap.NewNop(), "v3")
 	entries, err := os.ReadDir(rig.spec.dirs.releases)
 	if err != nil {
 		t.Fatal(err)
@@ -529,6 +617,128 @@ func TestEnsureRunningNoStateIsNoop(t *testing.T) {
 	must(t, rig.ma.ensureRunning())
 	if rig.ma.activePort.Load() != 0 || len(rig.runner.started) != 0 {
 		t.Fatal("nothing should happen without persisted state")
+	}
+}
+
+// A dead in-memory handle (a reload with the watchdog off) is the only
+// thing that can replay its crash sweep's verdict: recovery must Stop
+// it — and record a leak on error — before replacing it.
+func TestEnsureRunningStopsDeadInMemoryHandle(t *testing.T) {
+	rig := newTestRig(t)
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	rig.runner.handles[0].kill()
+	rig.runner.stopErr = errTest
+	must(t, rig.ma.ensureRunning())
+	if rig.runner.stopCount() != 1 || rig.runner.startCount() != 2 {
+		t.Fatalf("want 1 stop then a relaunch, got %d stops / %d starts", rig.runner.stopCount(), rig.runner.startCount())
+	}
+	if got := rig.ma.status().LeakedReleases; !reflect.DeepEqual(got, []string{"v1"}) {
+		t.Fatalf("failed stop must mark the version leaked, got %v", got)
+	}
+}
+
+// Recovery runs in a goroutine and can lose deployMu to an early
+// webhook; the deploy itself must restore the durable leaked set before
+// it persists anything or runs GC.
+func TestDeployRestoresPersistedLeaksFirst(t *testing.T) {
+	rig := newTestRig(t)
+	must(t, os.MkdirAll(rig.spec.dirs.release("v0"), 0o755)) // still on disk, still protected
+	rig.store.state = appState{LeakedReleases: []string{"v0"}}
+	rig.store.ok = true
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	if st, _, _ := rig.store.load(); !reflect.DeepEqual(st.LeakedReleases, []string{"v0"}) {
+		t.Fatalf("deploy overwrote the persisted leaked set: %v", st.LeakedReleases)
+	}
+	if got := rig.ma.status().LeakedReleases; !reflect.DeepEqual(got, []string{"v0"}) {
+		t.Fatalf("leaked set not restored into memory: %v", got)
+	}
+}
+
+// An unreadable state record must stop a deploy before it can overwrite
+// the record at promotion or GC without the leaked set.
+func TestDeployAbortsWhenStateUnreadable(t *testing.T) {
+	rig := newTestRig(t)
+	rig.store.err = errTest
+	err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"})
+	if !errors.Is(err, errTest) || !strings.Contains(err.Error(), "cannot read app state") {
+		t.Fatalf("deploy should abort on an unreadable state record, got %v", err)
+	}
+	if rig.runner.startCount() != 0 {
+		t.Fatal("nothing must be started when the state record cannot be read")
+	}
+}
+
+// Clearing a leak is "kill the strays, remove the release dir". If the
+// operator then immediately redeploys that same version, the deploy
+// must drop the stale marker BEFORE the fetch recreates the dir —
+// otherwise the post-GC prune sees the new dir and the marker is
+// permanent.
+func TestRedeployOfRemovedLeakedReleaseClearsMarker(t *testing.T) {
+	rig := newTestRig(t)
+	rig.store.state = appState{LeakedReleases: []string{"v1"}} // dir already removed by the operator
+	rig.store.ok = true
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	if got := rig.ma.status().LeakedReleases; len(got) != 0 {
+		t.Fatalf("stale marker survived a redeploy of the removed release: %v", got)
+	}
+	if st, _, _ := rig.store.load(); len(st.LeakedReleases) != 0 {
+		t.Fatalf("stale marker persisted: %v", st.LeakedReleases)
+	}
+	if _, err := os.Stat(rig.spec.dirs.release("v1")); err != nil {
+		t.Fatalf("the redeployed release should exist: %v", err)
+	}
+}
+
+// The runner reports a failed crash sweep the moment it happens, and the
+// app records it durably right then — no Stop has to reach the handle
+// first, so a Caddy killed before the watchdog acts cannot lose it.
+func TestCrashSweepFailureIsPersistedWithoutStop(t *testing.T) {
+	rig := newTestRig(t)
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	rig.runner.crashSweepErr = errTest
+	rig.runner.handles[0].kill() // crash; the reaper's sweep leaves workers behind
+	if rig.runner.stopCount() != 0 {
+		t.Fatal("test premise: nothing has called Stop")
+	}
+	if got := rig.ma.status().LeakedReleases; !reflect.DeepEqual(got, []string{"v1"}) {
+		t.Fatalf("crash sweep failure must mark the version leaked immediately, got %v", got)
+	}
+	if st, _, _ := rig.store.load(); !reflect.DeepEqual(st.LeakedReleases, []string{"v1"}) {
+		t.Fatalf("...and persist it, state has %v", st.LeakedReleases)
+	}
+}
+
+// A leak that could not be persisted must not be reported as protected:
+// the failed-deploy error says so, and Destruct's does too.
+func TestLeakPersistenceFailureIsSurfaced(t *testing.T) {
+	rig := newTestRig(t)
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	rig.store.saveErr = errTest
+	rig.prober.err, rig.runner.stopErr = errTest, errTest
+	err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/2", Version: "v2"})
+	if err == nil || !strings.Contains(err.Error(), "in memory only") {
+		t.Fatalf("failed deploy must say the leak protection is not durable, got %v", err)
+	}
+	if got := rig.ma.status().LeakedReleases; !reflect.DeepEqual(got, []string{"v2"}) {
+		t.Fatalf("the in-memory mark must still land, got %v", got)
+	}
+	rig.runner.stopErr = errTest
+	if err := rig.ma.Destruct(); err == nil || !strings.Contains(err.Error(), "in memory only") {
+		t.Fatalf("Destruct must surface a non-durable leak, got %v", err)
+	}
+}
+
+// Whatever survives a failed shutdown stop outlives this Caddy, so
+// Destruct must persist the leak for the next one.
+func TestDestructMarksLeakOnStopError(t *testing.T) {
+	rig := newTestRig(t)
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	rig.runner.stopErr = errTest
+	if err := rig.ma.Destruct(); !errors.Is(err, errTest) {
+		t.Fatalf("Destruct should surface the stop error, got %v", err)
+	}
+	if st, _, _ := rig.store.load(); !reflect.DeepEqual(st.LeakedReleases, []string{"v1"}) {
+		t.Fatalf("leak must be persisted at shutdown, state has %v", st.LeakedReleases)
 	}
 }
 
@@ -786,6 +996,99 @@ func TestStageUploadClassifiesErrors(t *testing.T) {
 	}
 }
 
+// Same guarantee when the leader is dead but Stop still reports an
+// error: with the exec runner that means workers survived the sweep of
+// its process group, and they are still running out of the release.
+func TestFailedDeployKeepsReleaseWhenGroupStopUnconfirmed(t *testing.T) {
+	rig := newTestRig(t)
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/a.tgz", Version: "v1"}))
+	rig.prober.err = errTest
+	rig.runner.stopErr = errTest // leader is killed by the fake, but the sweep verdict is an error
+	err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/b.tgz", Version: "v2"})
+	if err == nil {
+		t.Fatal("deploy v2 should have failed")
+	}
+	if rig.runner.Alive(rig.runner.handles[1]) {
+		t.Fatal("test premise: the failed leader should be dead")
+	}
+	if !strings.Contains(err.Error(), "could not be stopped") || !strings.Contains(err.Error(), "left on disk") {
+		t.Fatalf("error should carry the stop failure and note the release was kept: %v", err)
+	}
+	if _, statErr := os.Stat(rig.spec.dirs.release("v2")); statErr != nil {
+		t.Fatalf("release must not be deleted while the failed instance's group may still be running: %v", statErr)
+	}
+	// ...and not by any later deploy's GC either: with keep=2, two more
+	// successful deploys push v2 (and v1) out of the keep window.
+	rig.prober.err, rig.runner.stopErr = nil, nil
+	for i, v := range []string{"v1", "v2"} {
+		mt := time.Now().Add(time.Duration(i-10) * time.Minute)
+		must(t, os.Chtimes(rig.spec.dirs.release(v), mt, mt))
+	}
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/c.tgz", Version: "v3"}))
+	mt := time.Now().Add(-8 * time.Minute)
+	must(t, os.Chtimes(rig.spec.dirs.release("v3"), mt, mt))
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/d.tgz", Version: "v4"}))
+	if _, statErr := os.Stat(rig.spec.dirs.release("v1")); !os.IsNotExist(statErr) {
+		t.Fatalf("test premise: v1 (cleanly stopped) should have been GC'd (stat err=%v)", statErr)
+	}
+	if _, statErr := os.Stat(rig.spec.dirs.release("v2")); statErr != nil {
+		t.Fatalf("leaked release v2 must survive later GC runs: %v", statErr)
+	}
+	if got := rig.ma.status().LeakedReleases; !reflect.DeepEqual(got, []string{"v2"}) {
+		t.Fatalf("status should name the leaked release, got %v", got)
+	}
+	if st, _, _ := rig.store.load(); !reflect.DeepEqual(st.LeakedReleases, []string{"v2"}) {
+		t.Fatalf("leaked set must be persisted, state has %v", st.LeakedReleases)
+	}
+}
+
+// The stray processes behind a leaked release outlive a Caddy restart
+// (Pdeathsig reaches only the direct leader, and only on Linux), so the
+// protection must come back from state.json before any GC can run.
+func TestLeakedReleasesSurviveRestart(t *testing.T) {
+	ctx := context.Background()
+	rig := newTestRig(t)
+	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/v1", Version: "v1"}))
+	rig.prober.err, rig.runner.stopErr = errTest, errTest
+	if err := rig.ma.Deploy(ctx, deployRequest{URL: "https://x/v2", Version: "v2"}); err == nil {
+		t.Fatal("v2 should have failed")
+	}
+	for i, v := range []string{"v1", "v2"} {
+		mt := time.Now().Add(time.Duration(i-10) * time.Minute)
+		must(t, os.Chtimes(rig.spec.dirs.release(v), mt, mt))
+	}
+
+	// "Restart": a fresh managedApp over the same state file and dirs.
+	fresh := newTestRig(t)
+	fresh.spec, fresh.store = rig.spec, rig.store
+	fresh.ma.spec, fresh.ma.store = rig.spec, rig.store
+	must(t, fresh.ma.ensureRunning())
+	if got := fresh.ma.status().LeakedReleases; !reflect.DeepEqual(got, []string{"v2"}) {
+		t.Fatalf("leaked set not restored after restart: %v", got)
+	}
+	must(t, fresh.ma.Deploy(ctx, deployRequest{URL: "https://x/v3", Version: "v3"}))
+	mt := time.Now().Add(-8 * time.Minute)
+	must(t, os.Chtimes(fresh.spec.dirs.release("v3"), mt, mt))
+	must(t, fresh.ma.Deploy(ctx, deployRequest{URL: "https://x/v4", Version: "v4"}))
+	if _, err := os.Stat(fresh.spec.dirs.release("v1")); !os.IsNotExist(err) {
+		t.Fatalf("test premise: v1 should have been GC'd (stat err=%v)", err)
+	}
+	if _, err := os.Stat(fresh.spec.dirs.release("v2")); err != nil {
+		t.Fatalf("leaked release must survive GC after a restart: %v", err)
+	}
+
+	// The defined way to clear it: deal with the strays and remove the
+	// release dir; the next GC pass drops the entry, in memory and on disk.
+	must(t, os.RemoveAll(fresh.spec.dirs.release("v2")))
+	must(t, fresh.ma.Deploy(ctx, deployRequest{URL: "https://x/v5", Version: "v5"}))
+	if got := fresh.ma.status().LeakedReleases; len(got) != 0 {
+		t.Fatalf("removed release should drop out of the leaked set, got %v", got)
+	}
+	if st, _, _ := fresh.store.load(); len(st.LeakedReleases) != 0 {
+		t.Fatalf("cleared entry must be persisted as cleared, state has %v", st.LeakedReleases)
+	}
+}
+
 func TestFailedDeployKeepsReleaseWhenStopUnconfirmed(t *testing.T) {
 	rig := newTestRig(t)
 	if err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/a.tgz", Version: "v1"}); err != nil {
@@ -800,7 +1103,7 @@ func TestFailedDeployKeepsReleaseWhenStopUnconfirmed(t *testing.T) {
 	if err == nil {
 		t.Fatal("deploy v2 should have failed")
 	}
-	if !strings.Contains(err.Error(), "still running") {
+	if !strings.Contains(err.Error(), "left on disk") {
 		t.Fatalf("error should note the release was left in place: %v", err)
 	}
 	if _, statErr := os.Stat(rig.spec.dirs.release("v2")); statErr != nil {

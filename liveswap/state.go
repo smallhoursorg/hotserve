@@ -19,6 +19,11 @@ type appState struct {
 	Port           int         `json:"port"`
 	Handle         handleState `json:"handle"`
 	UpdatedAt      time.Time   `json:"updated_at"`
+	// LeakedReleases are versions whose processes could not be
+	// confirmed stopped. Persisted because such a process also survives
+	// a Caddy restart (Pdeathsig reaches only the direct leader, and
+	// only on Linux), so GC after a restart must still spare them.
+	LeakedReleases []string `json:"leaked_releases,omitempty"`
 }
 
 // stateStore persists appState; an interface so pipeline unit tests
@@ -102,11 +107,16 @@ func listReleases(releasesDir string) []string {
 
 // gcReleases prunes the releases directory down to the newest keep
 // entries by modification time (extraction time = deploy order, which
-// is robust against arbitrary version naming schemes). The protected
-// version — the one currently serving — is never deleted regardless of
-// age. Failures are logged, not fatal: GC must never break a deploy
-// that already succeeded.
-func gcReleases(releasesDir string, keep int, protect string, logger *zap.Logger) {
+// is robust against arbitrary version naming schemes). Protected
+// versions — the one currently serving, and any release whose
+// processes could not be confirmed stopped — are never deleted
+// regardless of age. Failures are logged, not fatal: GC must never
+// break a deploy that already succeeded.
+func gcReleases(releasesDir string, keep int, logger *zap.Logger, protect ...string) {
+	protected := make(map[string]struct{}, len(protect))
+	for _, v := range protect {
+		protected[v] = struct{}{}
+	}
 	entries, err := os.ReadDir(releasesDir)
 	if err != nil {
 		logger.Warn("release GC: cannot list releases", zap.Error(err))
@@ -144,7 +154,7 @@ func gcReleases(releasesDir string, keep int, protect string, logger *zap.Logger
 	}
 	sort.Slice(rels, func(i, j int) bool { return rels[i].modTime.After(rels[j].modTime) })
 	for i, r := range rels {
-		if i < keep || r.name == protect {
+		if _, keepIt := protected[r.name]; i < keep || keepIt {
 			continue
 		}
 		if err := os.RemoveAll(filepath.Join(releasesDir, r.name)); err != nil {
