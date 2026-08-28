@@ -342,6 +342,12 @@ is no longer on disk. To see what you can roll back to, `GET /<app>`
 returns `available_versions` — the on-disk releases, newest-first
 (bounded by `keep`).
 
+**Versions are immutable.** A deploy (URL or push) never overwrites an
+existing on-disk release, so a version you can roll back to can't be
+silently replaced — re-deploying an existing version is a `422`. Use a
+new version, or roll back to relaunch an existing one. (A deploy that
+*fails* before cutover is cleaned up, so that version stays retriable.)
+
 The response is synchronous:
 
 | Code | Meaning |
@@ -351,7 +357,7 @@ The response is synchronous:
 | 404 | Unknown app |
 | 409 | A deploy is already running for this app (retry) |
 | 413 | Pushed upload exceeded `max_artifact_size` |
-| 422 | Bad request — missing/invalid version, version already running, a rollback target no longer on disk, or (URL path) an artifact url refused by `artifact_allowlist` (host, path, port, or an undeclared query parameter; the body names exactly what tripped and how the entry would declare it) |
+| 422 | Bad request — missing/invalid version, version already running, **version already exists** (versions are immutable — deploy a new version or roll back to relaunch it), a rollback target no longer on disk, or (URL path) an artifact url refused by `artifact_allowlist` (host, path, port, or an undeclared query parameter; the body names exactly what tripped and how the entry would declare it) |
 | 5xx | Deploy failed — **the old version is still serving**; body says why |
 
 Because the response is synchronous through the whole pipeline, the

@@ -127,7 +127,7 @@ type deployResult struct {
 	Version    string    `json:"version"`
 	Status     string    `json:"status"` // "succeeded" | "failed"
 	Error      string    `json:"error,omitempty"`
-	Phase      string    `json:"phase,omitempty"` // phase reached when it failed
+	Phase      string    `json:"phase,omitempty"`       // phase reached when it failed
 	By         string    `json:"deployed_by,omitempty"` // the trust source that authorized it
 	StartedAt  time.Time `json:"started_at"`
 	FinishedAt time.Time `json:"finished_at"`
@@ -165,11 +165,11 @@ type managedApp struct {
 	spec      *appSpec
 	verifiers []verifier // resolved deploy-auth trust sources; rewired every reload
 	runner    runner
-	prober prober
-	fetch  fetcher
-	clock  clock
-	store  stateStore
-	logger *zap.Logger
+	prober    prober
+	fetch     fetcher
+	clock     clock
+	store     stateStore
+	logger    *zap.Logger
 
 	// deployMu serializes deploys per app. TryLock (not a queue): a
 	// concurrent webhook gets an immediate 409 and CI can retry.
@@ -335,10 +335,33 @@ func (ma *managedApp) Deploy(ctx context.Context, req deployRequest) (err error)
 	if err := spec.dirs.ensure(); err != nil {
 		return err
 	}
+	// Versions are immutable: a deploy (URL or push) never overwrites an
+	// existing on-disk release, so a version you can roll back to can't be
+	// silently replaced with different content. Rollback is exempt — it
+	// relaunches an existing release by design. Deploys are serialized per
+	// app (deployMu), so this check-then-create has no race.
+	if !req.rollback {
+		if _, err := os.Stat(spec.dirs.release(req.Version)); err == nil {
+			return validationError{fmt.Sprintf("version %s already exists — versions are immutable; deploy a new version, or roll back to relaunch this one", req.Version)}
+		}
+	}
 
 	releaseDir, err := c.fetch.fetch(ctx, spec, req, func(phase string) { ma.setPhase(c, phase) })
 	if err != nil {
 		return err
+	}
+	// If this freshly-extracted release never promotes (pre_start, start
+	// or health-gate failure), remove it: a failed attempt must not
+	// permanently reserve its immutable version or leave disk litter, so
+	// the same version stays retriable. Rollback is excluded — it
+	// relaunches a pre-existing release it must never delete.
+	promoted := false
+	if !req.rollback {
+		defer func() {
+			if err != nil && !promoted {
+				_ = os.RemoveAll(releaseDir)
+			}
+		}()
 	}
 
 	port, err := freePort()
@@ -350,7 +373,13 @@ func (ma *managedApp) Deploy(ctx context.Context, req deployRequest) (err error)
 		return err
 	}
 
-	if len(spec.preStart) > 0 {
+	// pre_start is deploy-time preparation; its outputs (migrations,
+	// generated config, warmed caches) persist, so a rollback — which
+	// relaunches an already-prepared on-disk release, like crash
+	// recovery — must NOT re-run it. Re-running an old forward migration
+	// would be wrong, and a flaky preflight check must never block an
+	// emergency rollback.
+	if len(spec.preStart) > 0 && !req.rollback {
 		ma.setPhase(c, "preparing")
 		preCtx, cancel := context.WithTimeout(ctx, spec.deadline)
 		err := c.runner.RunOnce(preCtx, startSpec{
@@ -395,6 +424,7 @@ func (ma *managedApp) Deploy(ctx context.Context, req deployRequest) (err error)
 	if err := ma.publishInstance(c, newInst); err != nil { // ← the cutover
 		logger.Error("state persistence failed; deploys still work but a Caddy restart will not know about this version", zap.Error(err))
 	}
+	promoted = true // past the cutover: never clean up the now-live release
 
 	// A successful deploy is the fast path out of any watchdog wait:
 	// it clears the failure count, restart budget and backoff, then

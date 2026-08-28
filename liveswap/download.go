@@ -219,7 +219,9 @@ func (rf *releaseFetcher) fetch(ctx context.Context, spec *appSpec, req deployRe
 		_ = os.RemoveAll(staging)
 		return "", err
 	}
-	// A re-deploy of a non-running version replaces its directory.
+	// Defensive: versions are immutable, so Deploy rejects an existing
+	// version before we get here — releaseDir normally does not exist.
+	// Kept so a stray leftover can't fail the rename.
 	if err := os.RemoveAll(releaseDir); err != nil {
 		_ = os.RemoveAll(staging)
 		return "", err
