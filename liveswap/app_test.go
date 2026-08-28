@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -418,37 +419,46 @@ func TestDeployStopsDeadOldLeaderBeforeGC(t *testing.T) {
 	}
 }
 
-// When stopping the old instance cannot be confirmed (its group may
-// still be running out of its release dir), the promote path must skip
-// release GC entirely rather than delete files from under it.
-func TestDeploySkipsReleaseGCWhenOldStopFails(t *testing.T) {
+// A release whose old-instance stop could not be confirmed stays
+// protected from GC across LATER deploys, not just the one that saw
+// the failure: with keep=2, v1's failed stop during the v2 promote must
+// still shield v1 when the v3 promote (whose own stop-old succeeds)
+// runs GC — the point at which v1 would otherwise fall out of keep.
+func TestLeakedReleaseSurvivesLaterGC(t *testing.T) {
 	ctx := context.Background()
-	// Deploy v1 and v2, backdating each so the GC inside the third
-	// deploy sees deterministic mtime ordering (v1 oldest).
-	twoOld := func(rig *testRig) {
-		for i, v := range []string{"v1", "v2"} {
-			must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/" + v, Version: v}))
-			mt := time.Now().Add(time.Duration(i-10) * time.Minute)
-			must(t, os.Chtimes(rig.spec.dirs.release(v), mt, mt))
-		}
+	backdate := func(t *testing.T, rig *testRig, v string, i int) {
+		t.Helper()
+		mt := time.Now().Add(time.Duration(i-10) * time.Minute)
+		must(t, os.Chtimes(rig.spec.dirs.release(v), mt, mt))
 	}
-	// Control: with keep=2 the third deploy normally GCs v1.
-	ctl := newTestRig(t)
-	twoOld(ctl)
-	must(t, ctl.ma.Deploy(ctx, deployRequest{URL: "https://x/3", Version: "v3"}))
+	run := func(t *testing.T, leakV1 bool) *testRig {
+		rig := newTestRig(t)
+		must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/v1", Version: "v1"}))
+		backdate(t, rig, "v1", 0)
+		if leakV1 {
+			rig.runner.stopErr = errTest // v1's stop during the v2 promote fails
+		}
+		must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/v2", Version: "v2"}))
+		backdate(t, rig, "v2", 1)
+		rig.runner.stopErr = nil // v2's stop during the v3 promote is fine
+		must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/v3", Version: "v3"}))
+		return rig
+	}
+	// Control: v1 is GC'd on the third deploy when nothing leaked.
+	ctl := run(t, false)
 	if _, err := os.Stat(ctl.spec.dirs.release("v1")); !os.IsNotExist(err) {
 		t.Fatalf("test premise: v1 should have been GC'd on the third deploy (stat err=%v)", err)
 	}
-
-	rig := newTestRig(t)
-	twoOld(rig)
-	rig.runner.stopErr = errTest // v2's stop cannot be confirmed
-	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/3", Version: "v3"}))
-	if _, err := os.Stat(rig.spec.dirs.release("v1")); err != nil {
-		t.Fatalf("release GC must be skipped when the old instance could not be confirmed stopped: %v", err)
+	if got := ctl.ma.status().LeakedReleases; len(got) != 0 {
+		t.Fatalf("nothing leaked, status reports %v", got)
 	}
-	if got := rig.ma.status().CurrentVersion; got != "v3" {
-		t.Fatalf("the deploy itself must still succeed; current = %s", got)
+
+	rig := run(t, true)
+	if _, err := os.Stat(rig.spec.dirs.release("v1")); err != nil {
+		t.Fatalf("a leaked release must survive a later deploy's GC: %v", err)
+	}
+	if got := rig.ma.status(); got.CurrentVersion != "v3" || !reflect.DeepEqual(got.LeakedReleases, []string{"v1"}) {
+		t.Fatalf("deploys must still succeed and status must name the leak: %+v", got)
 	}
 }
 
@@ -529,7 +539,7 @@ func TestDeployGCKeepsNewestReleases(t *testing.T) {
 	}
 	// The final GC ran before v3 was backdated; run it once more the
 	// way the next deploy would see the world.
-	gcReleases(rig.spec.dirs.releases, rig.spec.keep, "v3", zap.NewNop())
+	gcReleases(rig.spec.dirs.releases, rig.spec.keep, zap.NewNop(), "v3")
 	entries, err := os.ReadDir(rig.spec.dirs.releases)
 	if err != nil {
 		t.Fatal(err)
@@ -866,6 +876,26 @@ func TestFailedDeployKeepsReleaseWhenGroupStopUnconfirmed(t *testing.T) {
 	}
 	if _, statErr := os.Stat(rig.spec.dirs.release("v2")); statErr != nil {
 		t.Fatalf("release must not be deleted while the failed instance's group may still be running: %v", statErr)
+	}
+	// ...and not by any later deploy's GC either: with keep=2, two more
+	// successful deploys push v2 (and v1) out of the keep window.
+	rig.prober.err, rig.runner.stopErr = nil, nil
+	for i, v := range []string{"v1", "v2"} {
+		mt := time.Now().Add(time.Duration(i-10) * time.Minute)
+		must(t, os.Chtimes(rig.spec.dirs.release(v), mt, mt))
+	}
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/c.tgz", Version: "v3"}))
+	mt := time.Now().Add(-8 * time.Minute)
+	must(t, os.Chtimes(rig.spec.dirs.release("v3"), mt, mt))
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/d.tgz", Version: "v4"}))
+	if _, statErr := os.Stat(rig.spec.dirs.release("v1")); !os.IsNotExist(statErr) {
+		t.Fatalf("test premise: v1 (cleanly stopped) should have been GC'd (stat err=%v)", statErr)
+	}
+	if _, statErr := os.Stat(rig.spec.dirs.release("v2")); statErr != nil {
+		t.Fatalf("leaked release v2 must survive later GC runs: %v", statErr)
+	}
+	if got := rig.ma.status().LeakedReleases; !reflect.DeepEqual(got, []string{"v2"}) {
+		t.Fatalf("status should name the leaked release, got %v", got)
 	}
 }
 

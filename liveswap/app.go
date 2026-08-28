@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -175,11 +176,18 @@ type managedApp struct {
 	// concurrent webhook gets an immediate 409 and CI can retry.
 	deployMu sync.Mutex
 
-	// mu guards current, phase and lastDeploy.
+	// mu guards current, phase, lastDeploy and leaked.
 	mu         sync.Mutex
 	current    *instance
 	phase      string
 	lastDeploy *deployResult
+	// leaked is the set of release versions whose processes could not
+	// be confirmed stopped (a Stop error: workers that survived their
+	// group's sweep). Every release GC leaves them alone, however old
+	// they get. In-memory on purpose: exec-runner children never
+	// outlive Caddy, so a restart resolves the leak and the protection
+	// rightly goes with it. Surfaced as leaked_releases in status.
+	leaked map[string]struct{}
 
 	// activePort is what GetUpstreams reads on every request; storing
 	// it is the cutover. 0 = nothing serving yet.
@@ -197,7 +205,7 @@ type managedApp struct {
 }
 
 func newManagedApp(name string) *managedApp {
-	return &managedApp{name: name, phase: "idle", wdNotify: make(chan struct{}, 1)}
+	return &managedApp{name: name, phase: "idle", wdNotify: make(chan struct{}, 1), leaked: map[string]struct{}{}}
 }
 
 // configure installs the latest spec and (re)wires collaborators. On
@@ -380,6 +388,7 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 			// error covers workers that outlived it — that would pull
 			// files from beneath a live, leaked process.
 			if newHandle != nil && (stopUnconfirmed || c.runner.Alive(newHandle)) {
+				ma.markLeaked(req.Version)
 				err = errors.Join(err, fmt.Errorf("release %s left on disk: the failed instance may still be running", req.Version))
 				return
 			}
@@ -481,15 +490,36 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		ma.setPhase(c, "stopping_old")
 		if err := c.runner.Stop(old.handle, spec.grace); err != nil {
 			// Some of the old instance may still be running out of its
-			// release dir: leave every release alone this time round.
-			// The next successful stop-old runs GC again.
-			logger.Warn("stopping old version failed; skipping release GC", zap.Error(err))
-			return nil
+			// release dir. Protect that release from this and every
+			// later GC — a later deploy's GC has no other way to know.
+			ma.markLeaked(old.version)
+			logger.Warn("stopping old version failed; its release is protected from GC until restart",
+				zap.String("version", old.version), zap.Error(err))
 		}
 	}
 
-	gcReleases(spec.dirs.releases, spec.keep, req.Version, logger)
+	gcReleases(spec.dirs.releases, spec.keep, logger, append(ma.leakedReleases(), req.Version)...)
 	return nil
+}
+
+// markLeaked records that version's processes could not be confirmed
+// stopped, so its release dir must never be deleted by GC.
+func (ma *managedApp) markLeaked(version string) {
+	ma.mu.Lock()
+	defer ma.mu.Unlock()
+	ma.leaked[version] = struct{}{}
+}
+
+// leakedReleases returns the protected versions, sorted, for GC and status.
+func (ma *managedApp) leakedReleases() []string {
+	ma.mu.Lock()
+	defer ma.mu.Unlock()
+	out := make([]string, 0, len(ma.leaked))
+	for v := range ma.leaked {
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ensureRunning is crash/restart recovery, called from App.Start. If
@@ -646,6 +676,10 @@ type statusSnapshot struct {
 	// healthy app with no releases reports []), so an empty set is
 	// distinguishable from a server that doesn't report the field.
 	AvailableVersions []string `json:"available_versions"`
+	// LeakedReleases lists releases whose processes could not be
+	// confirmed stopped; they are exempt from GC until Caddy restarts.
+	// An operator seeing one here has stray processes to hunt down.
+	LeakedReleases []string `json:"leaked_releases,omitempty"`
 }
 
 func (ma *managedApp) status() statusSnapshot {
@@ -664,6 +698,10 @@ func (ma *managedApp) status() statusSnapshot {
 	ma.mu.Lock()
 	defer ma.mu.Unlock()
 	s := statusSnapshot{App: ma.name, Phase: ma.phase, LastDeploy: ma.lastDeploy, Watchdog: wd, AvailableVersions: available}
+	for v := range ma.leaked {
+		s.LeakedReleases = append(s.LeakedReleases, v)
+	}
+	sort.Strings(s.LeakedReleases)
 	if ma.current != nil {
 		s.CurrentVersion = ma.current.version
 		s.Port = ma.current.port

@@ -295,9 +295,13 @@ func killGroup(pgid int) error {
 const killConfirm = time.Second
 
 // waitGroupGone polls until no live member of pgid remains or the
-// deadline passes, reporting whether the group emptied in time.
+// deadline passes, reporting whether the group emptied in time. Each
+// poll is a /proc walk on Linux, so the interval backs off: fast for
+// the common case of workers that leave within milliseconds, slow for
+// a TERM-ignoring worker that will use the whole grace anyway.
 func waitGroupGone(pgid int, deadline time.Time) bool {
-	const poll = 25 * time.Millisecond
+	const minPoll, maxPoll = 25 * time.Millisecond, 250 * time.Millisecond
+	poll := minPoll
 	for {
 		if !groupAlive(pgid) {
 			return true
@@ -307,6 +311,7 @@ func waitGroupGone(pgid int, deadline time.Time) bool {
 			return false
 		}
 		time.Sleep(min(poll, remaining))
+		poll = min(poll*2, maxPoll)
 	}
 }
 
