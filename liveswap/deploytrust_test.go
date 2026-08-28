@@ -195,6 +195,49 @@ func TestOIDCVerifier(t *testing.T) {
 	}
 }
 
+// TestOIDCVerifierNumericClaim pins a numeric identity claim
+// (repository_id, one of the documented GitHub identity claims). The
+// value arrives in the token as a JSON number, and the verifier must
+// compare it by its exact decimal digits. A round-numbered id decoded to
+// float64 would stringify as "1e+08" and never match — the S1 bug — so
+// this guards the json.Number decode path.
+func TestOIDCVerifierNumericClaim(t *testing.T) {
+	iss := newMockIssuer(t)
+	v := &oidcVerifier{
+		issuer: iss.url, audience: "hotserve",
+		claims: map[string]string{"repository_id": "100000000"},
+		client: iss.client,
+	}
+	tok := iss.mintClaims(t, "hotserve", time.Now().Add(5*time.Minute),
+		map[string]any{"repository_id": 100000000})
+	if err := v.verify(context.Background(), tok); err != nil {
+		t.Fatalf("token with numeric repository_id rejected: %v", err)
+	}
+	// A different numeric id must still be rejected.
+	bad := iss.mintClaims(t, "hotserve", time.Now().Add(5*time.Minute),
+		map[string]any{"repository_id": 999})
+	if err := v.verify(context.Background(), bad); err == nil {
+		t.Fatal("wrong repository_id must be rejected")
+	}
+}
+
+// TestMatchClaimsNumeric exercises the stringification directly across
+// the number representations a claim set can carry.
+func TestMatchClaimsNumeric(t *testing.T) {
+	want := map[string]string{"repository_id": "100000000"}
+	// The decodeClaims path yields json.Number.
+	if err := matchClaims(want, map[string]any{"repository_id": json.Number("100000000")}); err != nil {
+		t.Errorf("json.Number claim rejected: %v", err)
+	}
+	// Defensive float64 path must format as a plain decimal, not "1e+08".
+	if err := matchClaims(want, map[string]any{"repository_id": float64(100000000)}); err != nil {
+		t.Errorf("float64 claim rejected: %v", err)
+	}
+	if err := matchClaims(want, map[string]any{"repository_id": json.Number("99")}); err == nil {
+		t.Error("mismatched numeric claim must be rejected")
+	}
+}
+
 // mockIssuer is a minimal OIDC provider: a discovery document and a
 // JWKS, backed by an RSA key, so oidcVerifier can be exercised offline.
 type mockIssuer struct {
@@ -243,6 +286,34 @@ func (iss *mockIssuer) mint(t *testing.T, priv *rsa.PrivateKey, audience string,
 		t.Fatal(err)
 	}
 	tok, err := jwt.Signed(signer).Claims(claimMap(iss.url, audience, time.Now(), exp, claims)).Serialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tok
+}
+
+// mintClaims signs a token as this issuer with arbitrary custom claims,
+// so a test can carry a JSON number (not just string claims) in the
+// payload.
+func (iss *mockIssuer) mintClaims(t *testing.T, audience string, exp time.Time, custom map[string]any) string {
+	t.Helper()
+	signer, err := jose.NewSigner(
+		jose.SigningKey{Algorithm: jose.RS256, Key: jose.JSONWebKey{Key: iss.priv, KeyID: iss.kid}},
+		(&jose.SignerOptions{}).WithType("JWT"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := map[string]any{
+		"iss": iss.url,
+		"aud": audience,
+		"iat": jwt.NewNumericDate(time.Now()),
+		"exp": jwt.NewNumericDate(exp),
+	}
+	for k, v := range custom {
+		m[k] = v
+	}
+	tok, err := jwt.Signed(signer).Claims(m).Serialize()
 	if err != nil {
 		t.Fatal(err)
 	}

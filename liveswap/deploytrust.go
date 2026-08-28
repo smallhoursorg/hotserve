@@ -1,14 +1,17 @@
 package liveswap
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -334,11 +337,35 @@ func (v *oidcVerifier) verify(ctx context.Context, rawToken string) error {
 	if err != nil {
 		return err
 	}
-	var claims map[string]any
-	if err := tok.Claims(&claims); err != nil {
+	// go-oidc unmarshals into json.RawMessage by copying the verified
+	// claim bytes; decodeClaims then re-parses them with numbers kept as
+	// json.Number (see decodeClaims for why %v on a float64 is unsafe).
+	var raw json.RawMessage
+	if err := tok.Claims(&raw); err != nil {
+		return err
+	}
+	claims, err := decodeClaims(raw)
+	if err != nil {
 		return err
 	}
 	return matchClaims(v.claims, claims)
+}
+
+// decodeClaims unmarshals a JWT claim set with numbers preserved as
+// json.Number instead of float64. matchClaims stringifies each claim to
+// compare it, and %v on a float64 mangles numeric identity claims:
+// round-numbered IDs render in scientific notation (100000000 → "1e+08")
+// and integers above 2^53 lose precision, so a pinned `claim
+// repository_id 100000000` (a documented identity constraint) would
+// silently never match. json.Number carries the exact source digits.
+func decodeClaims(raw []byte) (map[string]any, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var m map[string]any
+	if err := dec.Decode(&m); err != nil {
+		return nil, err
+	}
+	return m, nil
 }
 
 // localVerifier validates a JWT signed by the operator's local private
@@ -360,10 +387,16 @@ func (v *localVerifier) verify(_ context.Context, rawToken string) error {
 		return err
 	}
 	var std jwt.Claims
-	var all map[string]any
+	var raw json.RawMessage
 	// Claims verifies the signature against v.pub, then unmarshals the
-	// payload into both the standard-claims struct and the full map.
-	if err := tok.Claims(v.pub, &std, &all); err != nil {
+	// payload into both the standard-claims struct and the raw bytes.
+	if err := tok.Claims(v.pub, &std, &raw); err != nil {
+		return err
+	}
+	// Decode with numbers kept as json.Number, so a numeric claim in a
+	// hand-minted local token compares the same way as an OIDC one.
+	all, err := decodeClaims(raw)
+	if err != nil {
 		return err
 	}
 	// ValidateWithLeeway only checks exp when present, so a local token
@@ -391,11 +424,33 @@ func matchClaims(want map[string]string, got map[string]any) error {
 		if !ok {
 			return fmt.Errorf("claim %q absent from token", name)
 		}
-		if fmt.Sprintf("%v", got) != want[name] {
+		if claimString(got) != want[name] {
 			return fmt.Errorf("claim %q mismatch", name)
 		}
 	}
 	return nil
+}
+
+// claimString renders a token claim value for exact-string comparison
+// against the operator's config. Scalars format canonically —
+// json.Number by its source digits (see decodeClaims), never via %v on a
+// float64. Non-scalars (arrays/objects) fall through to %v: they are not
+// meaningful identity constraints, so this only makes them not-match.
+func claimString(v any) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case json.Number:
+		return t.String()
+	case bool:
+		return strconv.FormatBool(t)
+	case float64:
+		// Defensive: a claim set reached here without UseNumber. Format
+		// as a plain decimal, never scientific notation.
+		return strconv.FormatFloat(t, 'f', -1, 64)
+	default:
+		return fmt.Sprintf("%v", t)
+	}
 }
 
 func sortedKeys(m map[string]string) []string {
