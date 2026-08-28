@@ -420,36 +420,44 @@ func (v *localVerifier) verify(_ context.Context, rawToken string) error {
 // first offending claim, so a misconfigured allowlist is diagnosable.
 func matchClaims(want map[string]string, got map[string]any) error {
 	for _, name := range sortedKeys(want) {
-		got, ok := got[name]
+		v, ok := got[name]
 		if !ok {
 			return fmt.Errorf("claim %q absent from token", name)
 		}
-		if claimString(got) != want[name] {
+		s, ok := claimScalar(v)
+		if !ok {
+			// An array/object/null claim is not an identity value; it must
+			// never match a configured string. (Falling through to
+			// fmt.Sprintf("%v", …) would let a config value like "[admin]"
+			// match the array claim ["admin"].)
+			return fmt.Errorf("claim %q is not a scalar; identity constraints match scalar claims only", name)
+		}
+		if s != want[name] {
 			return fmt.Errorf("claim %q mismatch", name)
 		}
 	}
 	return nil
 }
 
-// claimString renders a token claim value for exact-string comparison
-// against the operator's config. Scalars format canonically —
-// json.Number by its source digits (see decodeClaims), never via %v on a
-// float64. Non-scalars (arrays/objects) fall through to %v: they are not
-// meaningful identity constraints, so this only makes them not-match.
-func claimString(v any) string {
+// claimScalar renders a scalar token claim for exact-string comparison
+// against the operator's config, reporting ok=false for composite
+// (array/object) or null claims — which are never a meaningful identity
+// constraint. Scalars format canonically: json.Number by its source
+// digits (see decodeClaims), never via %v on a float64.
+func claimScalar(v any) (string, bool) {
 	switch t := v.(type) {
 	case string:
-		return t
+		return t, true
 	case json.Number:
-		return t.String()
+		return t.String(), true
 	case bool:
-		return strconv.FormatBool(t)
+		return strconv.FormatBool(t), true
 	case float64:
 		// Defensive: a claim set reached here without UseNumber. Format
 		// as a plain decimal, never scientific notation.
-		return strconv.FormatFloat(t, 'f', -1, 64)
+		return strconv.FormatFloat(t, 'f', -1, 64), true
 	default:
-		return fmt.Sprintf("%v", t)
+		return "", false
 	}
 }
 

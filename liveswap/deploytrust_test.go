@@ -219,6 +219,22 @@ func TestOIDCVerifierNumericClaim(t *testing.T) {
 	if err := v.verify(context.Background(), bad); err == nil {
 		t.Fatal("wrong repository_id must be rejected")
 	}
+
+	// An integer beyond 2^53 (float64's exact-integer ceiling): this only
+	// verifies if the claim kept its exact digits through decoding, so it
+	// guards the json.Number path against any regression to float64
+	// reformatting (which would round 2^53+1 down to 2^53).
+	const big = int64(9007199254740993) // 2^53 + 1
+	bigV := &oidcVerifier{
+		issuer: iss.url, audience: "hotserve",
+		claims: map[string]string{"repository_id": "9007199254740993"},
+		client: iss.client,
+	}
+	bigTok := iss.mintClaims(t, "hotserve", time.Now().Add(5*time.Minute),
+		map[string]any{"repository_id": big})
+	if err := bigV.verify(context.Background(), bigTok); err != nil {
+		t.Fatalf("token with a >2^53 repository_id rejected: %v", err)
+	}
 }
 
 // TestMatchClaimsNumeric exercises the stringification directly across
@@ -235,6 +251,17 @@ func TestMatchClaimsNumeric(t *testing.T) {
 	}
 	if err := matchClaims(want, map[string]any{"repository_id": json.Number("99")}); err == nil {
 		t.Error("mismatched numeric claim must be rejected")
+	}
+	// A 2^53+1 integer survives json.Number exactly (float64 would not).
+	big := map[string]string{"repository_id": "9007199254740993"}
+	if err := matchClaims(big, map[string]any{"repository_id": json.Number("9007199254740993")}); err != nil {
+		t.Errorf("exact big-int claim rejected: %v", err)
+	}
+	// A composite (array) claim must never match a configured string, even
+	// one spelled like its %v rendering.
+	if err := matchClaims(map[string]string{"groups": "[admin]"},
+		map[string]any{"groups": []any{"admin"}}); err == nil {
+		t.Error("array-valued claim must not match a string constraint")
 	}
 }
 
