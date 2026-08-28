@@ -51,8 +51,8 @@ func TestScanProcGroupIncompleteIsNotGone(t *testing.T) {
 		must(t, os.WriteFile(filepath.Join(dir, "stat"), []byte(stat), 0o644))
 	}
 	cases := []struct {
-		name           string
-		setup          func(t *testing.T, root string)
+		name            string
+		setup           func(t *testing.T, root string)
 		alive, complete bool
 	}{
 		{"live member", func(t *testing.T, root string) {
@@ -81,8 +81,8 @@ func TestScanProcGroupIncompleteIsNotGone(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
 			tc.setup(t, root)
-			alive, complete := scanProcGroup(root, 100)
-			if alive != tc.alive || complete != tc.complete {
+			members, complete := scanProcGroup(root, 100)
+			if alive := members.anyLive(); alive != tc.alive || complete != tc.complete {
 				t.Fatalf("alive=%v complete=%v, want alive=%v complete=%v", alive, complete, tc.alive, tc.complete)
 			}
 		})
@@ -95,13 +95,13 @@ func TestScanProcGroupIncompleteIsNotGone(t *testing.T) {
 // trust in a negative scan.
 func TestProcHidesPIDs(t *testing.T) {
 	cases := map[string]bool{
-		"proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0\n":                      false,
-		"proc /proc proc rw,nosuid,nodev,noexec,relatime,hidepid=0 0 0\n":            false,
-		"proc /proc proc rw,relatime,hidepid=off,subset=pid 0 0\n":                   false,
-		"proc /proc proc rw,nosuid,nodev,noexec,relatime,hidepid=2,gid=26 0 0\n":     true,
-		"proc /proc proc rw,relatime,hidepid=invisible 0 0\n":                        true,
-		"proc /proc proc rw,relatime,hidepid=1 0 0\n":                                true,
-		"sysfs /sys sysfs rw 0 0\nproc /proc proc rw,hidepid=ptraceable 0 0\n":      true,
+		"proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0\n":                        false,
+		"proc /proc proc rw,nosuid,nodev,noexec,relatime,hidepid=0 0 0\n":              false,
+		"proc /proc proc rw,relatime,hidepid=off,subset=pid 0 0\n":                     false,
+		"proc /proc proc rw,nosuid,nodev,noexec,relatime,hidepid=2,gid=26 0 0\n":       true,
+		"proc /proc proc rw,relatime,hidepid=invisible 0 0\n":                          true,
+		"proc /proc proc rw,relatime,hidepid=1 0 0\n":                                  true,
+		"sysfs /sys sysfs rw 0 0\nproc /proc proc rw,hidepid=ptraceable 0 0\n":         true,
 		"proc /run/proc-copy proc rw,hidepid=2 0 0\nproc /proc proc rw,relatime 0 0\n": false, // only the /proc mount matters
 	}
 	for content, want := range cases {
@@ -114,4 +114,61 @@ func TestProcHidesPIDs(t *testing.T) {
 	if !procHidesPIDs(filepath.Join(t.TempDir(), "missing")) {
 		t.Error("an unreadable mounts file must be treated conservatively")
 	}
+}
+
+// groupAliveWith accepts "gone" only from an atomic kernel ESRCH or two
+// identical zombie-only snapshots; a view that keeps changing is
+// reported ALIVE, never gone.
+func TestGroupAliveWithConvergence(t *testing.T) {
+	seq := func(snaps ...groupSnapshot) func() (groupSnapshot, bool) {
+		i := 0
+		return func() (groupSnapshot, bool) {
+			s := snaps[min(i, len(snaps)-1)]
+			i++
+			return s, true
+		}
+	}
+	yes, no := func() bool { return true }, func() bool { return false }
+	cases := []struct {
+		name string
+		scan func() (groupSnapshot, bool)
+		sig  func() bool
+		want bool
+	}{
+		{"live member", seq(groupSnapshot{1: 'S'}), yes, true},
+		{"kernel says nothing left", seq(groupSnapshot{}), no, false},
+		{"stable zombies", seq(groupSnapshot{1: 'Z'}, groupSnapshot{1: 'Z'}), yes, false},
+		{"child appears on second pass", seq(groupSnapshot{1: 'Z'}, groupSnapshot{1: 'Z', 2: 'S'}), yes, true},
+		{"never settles", seq(groupSnapshot{1: 'Z'}, groupSnapshot{1: 'Z', 2: 'Z'}, groupSnapshot{1: 'Z', 2: 'Z', 3: 'Z'},
+			groupSnapshot{1: 'Z', 2: 'Z', 3: 'Z', 4: 'Z'}, groupSnapshot{1: 'Z', 2: 'Z', 3: 'Z', 4: 'Z', 5: 'Z'}), yes, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := groupAliveWith(tc.scan, tc.sig, false); got != tc.want {
+				t.Fatalf("got %v want %v", got, tc.want)
+			}
+		})
+	}
+	incomplete := func() (groupSnapshot, bool) { return groupSnapshot{}, false }
+	if !groupAliveWith(incomplete, yes, false) || groupAliveWith(incomplete, no, false) {
+		t.Fatal("an incomplete scan must defer to the signal test")
+	}
+	if !groupAliveWith(seq(groupSnapshot{}), yes, true) {
+		t.Fatal("hidepid must defer to the signal test")
+	}
+}
+
+// With waitid(WNOWAIT) the exited leader stays a zombie — its pgid
+// reserved — until the sweep has settled and the reaper reaps it.
+func TestAwaitExitUnreapedLeavesZombie(t *testing.T) {
+	cmd := exec.Command("true")
+	setProcessGroup(cmd)
+	must(t, cmd.Start())
+	if !awaitExitUnreaped(cmd.Process.Pid) {
+		t.Fatal("waitid(WNOWAIT) should be available on Linux")
+	}
+	if !groupSignalable(cmd.Process.Pid) {
+		t.Fatal("unreaped leader must still reserve its pgid")
+	}
+	must(t, cmd.Wait())
 }

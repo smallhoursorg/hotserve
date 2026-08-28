@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"sort"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -314,6 +314,10 @@ func (ma *managedApp) Deploy(ctx context.Context, req deployRequest) error {
 // extracting it under the new).
 func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c collaborators) (err error) {
 	spec := c.spec
+	// App.Start's recovery goroutine may lose deployMu to an early
+	// webhook; restore the durable leaked set here too, so this deploy
+	// can never persist an empty set over it or GC a protected release.
+	ma.restoreLeaked(c)
 	started := c.clock.Now()
 	logger := c.logger.With(zap.String("version", req.Version))
 	logger.Info("deploy started", zap.String("artifact_host", hostOf(req.URL)))
@@ -591,8 +595,18 @@ func (ma *managedApp) ensureRunning() error {
 	c := ma.snapshot()
 	spec := c.spec
 	ma.restoreLeaked(c) // before any path that could lead to a GC
-	if inst := ma.currentInstance(); inst != nil && c.runner.Alive(inst.handle) {
-		return nil
+	if inst := ma.currentInstance(); inst != nil {
+		if c.runner.Alive(inst.handle) {
+			return nil
+		}
+		// Dead in memory (a reload with the watchdog off): the handle
+		// is about to be replaced, and it is the only thing that can
+		// replay its crash sweep's verdict. Collect it first.
+		if err := c.runner.Stop(inst.handle, spec.grace); err != nil {
+			ma.markLeaked(c, inst.version)
+			c.logger.Warn("recovery: dead instance could not be confirmed stopped; its release is protected from GC",
+				zap.String("version", inst.version), zap.Error(err))
+		}
 	}
 	st, ok, err := c.store.load()
 	if err != nil {
@@ -732,8 +746,9 @@ type statusSnapshot struct {
 	// distinguishable from a server that doesn't report the field.
 	AvailableVersions []string `json:"available_versions"`
 	// LeakedReleases lists releases whose processes could not be
-	// confirmed stopped; they are exempt from GC until Caddy restarts.
-	// An operator seeing one here has stray processes to hunt down.
+	// confirmed stopped. They are exempt from GC — across restarts too,
+	// via state.json — until the operator kills the strays and removes
+	// the release dir, at which point the entry clears itself.
 	LeakedReleases []string `json:"leaked_releases,omitempty"`
 }
 
@@ -779,7 +794,13 @@ func (ma *managedApp) Destruct() error {
 		return nil
 	}
 	c.logger.Info("shutting down app", zap.String("version", inst.version))
-	return c.runner.Stop(inst.handle, c.spec.grace)
+	err := c.runner.Stop(inst.handle, c.spec.grace)
+	if err != nil {
+		// Whatever survived outlives this Caddy; the next one must
+		// still know not to GC its release.
+		ma.markLeaked(c, inst.version)
+	}
+	return err
 }
 
 // startWatchdog launches the supervision goroutine once per pooled

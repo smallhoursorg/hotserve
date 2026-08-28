@@ -97,17 +97,26 @@ func (r *execRunner) Start(spec startSpec) (handle, error) {
 
 	h := &execHandle{pid: cmd.Process.Pid, startedAt: time.Now(), grace: spec.grace, done: make(chan struct{})}
 	go func() {
-		// Reap the child; its exit is observable via the closed channel.
-		err := cmd.Wait()
-		r.log().Info("process exited", zap.Int("pid", h.pid), zap.Error(err))
+		// Observe the exit WITHOUT reaping where the OS allows it
+		// (Linux: waitid WNOWAIT). The leader then stays a zombie until
+		// after the sweep, and a zombie keeps its pgid reserved — so the
+		// kernel cannot hand that pgid to an unrelated process group in
+		// the window between "leader gone" and "group signalled". Where
+		// that is unavailable the old order (reap first) is the fallback,
+		// with the narrow window it implies.
+		var exitErr error
+		reaped := !awaitExitUnreaped(h.pid)
+		if reaped {
+			exitErr = cmd.Wait()
+		}
+		r.log().Info("process exited", zap.Int("pid", h.pid), zap.Error(exitErr))
 		close(h.done)
 		// A leader that exited on its own (crash, clean exit) leaves its
 		// group unsupervised: callers gate Stop behind Alive, so nobody
 		// else will ever signal these processes. Sweep them here, now,
-		// while the pgid is still ours (live members keep it reserved).
-		// If a Stop was in flight it holds the lock until it has swept.
+		// while the pgid is still ours. If a Stop was in flight it holds
+		// the lock until it has swept.
 		h.teardownMu.Lock()
-		defer h.teardownMu.Unlock()
 		if !h.swept {
 			h.sweepErr = r.sweepGroup(h.pid, h.grace, "leader exited unsolicited")
 			if h.sweepErr != nil {
@@ -115,6 +124,13 @@ func (r *execRunner) Start(spec startSpec) (handle, error) {
 					zap.Int("pgid", h.pid), zap.Error(h.sweepErr))
 			}
 			h.swept = true
+		}
+		h.teardownMu.Unlock()
+		if !reaped {
+			// Teardown is settled; now release the pid.
+			if err := cmd.Wait(); err != nil {
+				r.log().Info("process exit status", zap.Int("pid", h.pid), zap.Error(err))
+			}
 		}
 	}()
 	return h, nil
@@ -199,12 +215,12 @@ func (r *execRunner) Stop(h handle, grace time.Duration) (err error) {
 		return err
 	default:
 	}
-	// Between the done-check above and this signal the child can exit
-	// and the kernel can recycle the pgid, landing our SIGTERM/SIGKILL
-	// on an unrelated process group. The window is unavoidable for
-	// process *groups* (pidfd covers only the direct child); it is
-	// narrow, and every pgid we ever signal was one of our own app
-	// instances moments earlier.
+	// On Linux the reaper leaves an exited leader unreaped until the
+	// sweep is settled, so the pgid stays reserved and this signal can
+	// only ever reach our own group. Elsewhere (macOS dev) the child
+	// can exit and be reaped between the done-check and this signal,
+	// and the kernel could in principle recycle the pgid; that window
+	// is narrow and unavoidable without waitid(WNOWAIT).
 	if err := signalGroup(eh.pid, syscall.SIGTERM); err != nil {
 		if errors.Is(err, syscall.ESRCH) {
 			// The group emptied between the done check and the signal:

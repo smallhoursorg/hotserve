@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"reflect"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -599,6 +599,54 @@ func TestEnsureRunningNoStateIsNoop(t *testing.T) {
 	must(t, rig.ma.ensureRunning())
 	if rig.ma.activePort.Load() != 0 || len(rig.runner.started) != 0 {
 		t.Fatal("nothing should happen without persisted state")
+	}
+}
+
+// A dead in-memory handle (a reload with the watchdog off) is the only
+// thing that can replay its crash sweep's verdict: recovery must Stop
+// it — and record a leak on error — before replacing it.
+func TestEnsureRunningStopsDeadInMemoryHandle(t *testing.T) {
+	rig := newTestRig(t)
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	rig.runner.handles[0].kill()
+	rig.runner.stopErr = errTest
+	must(t, rig.ma.ensureRunning())
+	if rig.runner.stopCount() != 1 || rig.runner.startCount() != 2 {
+		t.Fatalf("want 1 stop then a relaunch, got %d stops / %d starts", rig.runner.stopCount(), rig.runner.startCount())
+	}
+	if got := rig.ma.status().LeakedReleases; !reflect.DeepEqual(got, []string{"v1"}) {
+		t.Fatalf("failed stop must mark the version leaked, got %v", got)
+	}
+}
+
+// Recovery runs in a goroutine and can lose deployMu to an early
+// webhook; the deploy itself must restore the durable leaked set before
+// it persists anything or runs GC.
+func TestDeployRestoresPersistedLeaksFirst(t *testing.T) {
+	rig := newTestRig(t)
+	must(t, os.MkdirAll(rig.spec.dirs.release("v0"), 0o755)) // still on disk, still protected
+	rig.store.state = appState{LeakedReleases: []string{"v0"}}
+	rig.store.ok = true
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	if st, _, _ := rig.store.load(); !reflect.DeepEqual(st.LeakedReleases, []string{"v0"}) {
+		t.Fatalf("deploy overwrote the persisted leaked set: %v", st.LeakedReleases)
+	}
+	if got := rig.ma.status().LeakedReleases; !reflect.DeepEqual(got, []string{"v0"}) {
+		t.Fatalf("leaked set not restored into memory: %v", got)
+	}
+}
+
+// Whatever survives a failed shutdown stop outlives this Caddy, so
+// Destruct must persist the leak for the next one.
+func TestDestructMarksLeakOnStopError(t *testing.T) {
+	rig := newTestRig(t)
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	rig.runner.stopErr = errTest
+	if err := rig.ma.Destruct(); !errors.Is(err, errTest) {
+		t.Fatalf("Destruct should surface the stop error, got %v", err)
+	}
+	if st, _, _ := rig.store.load(); !reflect.DeepEqual(st.LeakedReleases, []string{"v1"}) {
+		t.Fatalf("leak must be persisted at shutdown, state has %v", st.LeakedReleases)
 	}
 }
 

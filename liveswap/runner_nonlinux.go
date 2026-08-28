@@ -12,3 +12,7 @@ func applyPdeathsig(_ *syscall.SysProcAttr) {}
 // Without /proc this is the signal test; on macOS orphans re-parent to
 // launchd, which reaps them promptly, so zombies do not linger.
 func groupAlive(pgid int) bool { return groupSignalable(pgid) }
+
+// awaitExitUnreaped is unavailable without waitid(WNOWAIT): the reaper
+// reaps first and accepts the narrow pgid-reuse window.
+func awaitExitUnreaped(_ int) bool { return false }
