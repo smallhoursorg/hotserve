@@ -380,7 +380,7 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 			// error covers workers that outlived it — that would pull
 			// files from beneath a live, leaked process.
 			if newHandle != nil && (stopUnconfirmed || c.runner.Alive(newHandle)) {
-				err = errors.Join(err, fmt.Errorf("release %s left on disk: the failed instance may be still running", req.Version))
+				err = errors.Join(err, fmt.Errorf("release %s left on disk: the failed instance may still be running", req.Version))
 				return
 			}
 			// Surface a cleanup failure: otherwise the release lingers and

@@ -2,6 +2,8 @@ package liveswap
 
 import (
 	"bytes"
+	"errors"
+	"io/fs"
 	"os"
 	"strconv"
 	"syscall"
@@ -20,12 +22,31 @@ func applyPdeathsig(attr *syscall.SysProcAttr) {
 // --init) orphaned grandchildren re-parent to it and stay zombies —
 // Go never reaps children it did not spawn — and they would keep the
 // group "signalable" forever, turning every stop into a full-grace
-// wait. Falls back to the signal test if /proc is unreadable.
+// wait. A scan that could not see every process (unreadable /proc, a
+// hidepid mount hiding a worker that changed uid) must not conclude
+// "gone": it falls back to the signal test, which over-reports but
+// never misses a live member.
 func groupAlive(pgid int) bool {
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
+	alive, complete := scanProcGroup("/proc", pgid)
+	if alive {
+		return true
+	}
+	if !complete {
 		return groupSignalable(pgid)
 	}
+	return false
+}
+
+// scanProcGroup walks a procfs root for live members of pgid. alive is
+// true as soon as one is found; complete is false if any entry could
+// not be read or parsed (other than a process that exited mid-scan),
+// meaning a negative answer is not trustworthy.
+func scanProcGroup(root string, pgid int) (alive, complete bool) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return false, false
+	}
+	complete = true
 	for _, e := range entries {
 		pid, err := strconv.Atoi(e.Name())
 		if err != nil || pid <= 0 {
@@ -33,16 +54,22 @@ func groupAlive(pgid int) bool {
 		}
 		// /proc/<pid>/stat: "pid (comm) state ppid pgrp ..." — comm may
 		// contain spaces or parens, so split after the LAST ')'.
-		stat, err := os.ReadFile("/proc/" + e.Name() + "/stat")
+		stat, err := os.ReadFile(root + "/" + e.Name() + "/stat")
 		if err != nil {
-			continue // raced with exit, or not ours to read
+			if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
+				continue // exited between the listing and the read
+			}
+			complete = false // hidden from us: cannot rule it out
+			continue
 		}
 		i := bytes.LastIndexByte(stat, ')')
 		if i < 0 {
+			complete = false
 			continue
 		}
 		fields := bytes.Fields(stat[i+1:])
-		if len(fields) < 3 {
+		if len(fields) < 3 || len(fields[0]) == 0 {
+			complete = false
 			continue
 		}
 		state := fields[0][0]
@@ -50,8 +77,8 @@ func groupAlive(pgid int) bool {
 			continue
 		}
 		if g, err := strconv.Atoi(string(fields[2])); err == nil && g == pgid {
-			return true
+			return true, complete
 		}
 	}
-	return false
+	return false, complete
 }

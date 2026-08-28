@@ -218,9 +218,14 @@ func (r *execRunner) Stop(h handle, grace time.Duration) (err error) {
 	case <-eh.done:
 	case <-time.After(grace):
 		r.log().Warn("grace period expired, killing process group", zap.Int("pid", eh.pid))
-		err = killGroup(eh.pid)
-		<-eh.done
-		return err
+		if err = killGroup(eh.pid); err != nil {
+			// The leader may be among the survivors (uninterruptible
+			// sleep, changed credentials): waiting on done here could
+			// block forever while holding teardownMu.
+			return err
+		}
+		<-eh.done // group confirmed empty, so the reaper is about to close it
+		return nil
 	}
 	// The leader went quietly; its workers get the rest of the grace
 	// before the survivors are killed. `npm start` forwards SIGTERM and

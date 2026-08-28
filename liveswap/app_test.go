@@ -883,7 +883,7 @@ func TestFailedDeployKeepsReleaseWhenStopUnconfirmed(t *testing.T) {
 	if err == nil {
 		t.Fatal("deploy v2 should have failed")
 	}
-	if !strings.Contains(err.Error(), "still running") {
+	if !strings.Contains(err.Error(), "left on disk") {
 		t.Fatalf("error should note the release was left in place: %v", err)
 	}
 	if _, statErr := os.Stat(rig.spec.dirs.release("v2")); statErr != nil {
