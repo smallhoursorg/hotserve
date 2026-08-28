@@ -90,14 +90,35 @@ type appSpec struct {
 	dirs            appDirs
 }
 
-// deployRequest is the validated webhook payload.
+// deployRequest is the validated webhook payload. The three sources are
+// mutually exclusive: a URL to pull (the default), a pushed archive
+// already staged on disk (localArchive), or a rollback to an existing
+// on-disk release (rollback). URL and AuthHeader come from the JSON
+// body; the rest are set server-side by the handler.
 type deployRequest struct {
 	URL        string `json:"url"`
 	Version    string `json:"version"`
 	AuthHeader string `json:"auth_header,omitempty"`
+	// localArchive is a path to an already-staged pushed tarball (the
+	// upload path); empty for a URL pull.
+	localArchive string
+	// rollback relaunches an existing on-disk release/<Version> without
+	// fetching or extracting anything.
+	rollback bool
 	// by is the label of the trust source that authorized this deploy.
-	// Set by the handler after auth, never unmarshaled from the payload.
 	by string
+}
+
+// source names the deploy's artifact source, for the audit log.
+func (r deployRequest) source() string {
+	switch {
+	case r.rollback:
+		return "rollback"
+	case r.localArchive != "":
+		return "push"
+	default:
+		return "url"
+	}
 }
 
 // deployResult records the outcome of the most recent deploy attempt
@@ -106,7 +127,7 @@ type deployResult struct {
 	Version    string    `json:"version"`
 	Status     string    `json:"status"` // "succeeded" | "failed"
 	Error      string    `json:"error,omitempty"`
-	Phase      string    `json:"phase,omitempty"` // phase reached when it failed
+	Phase      string    `json:"phase,omitempty"`       // phase reached when it failed
 	By         string    `json:"deployed_by,omitempty"` // the trust source that authorized it
 	StartedAt  time.Time `json:"started_at"`
 	FinishedAt time.Time `json:"finished_at"`
@@ -144,11 +165,11 @@ type managedApp struct {
 	spec      *appSpec
 	verifiers []verifier // resolved deploy-auth trust sources; rewired every reload
 	runner    runner
-	prober prober
-	fetch  fetcher
-	clock  clock
-	store  stateStore
-	logger *zap.Logger
+	prober    prober
+	fetch     fetcher
+	clock     clock
+	store     stateStore
+	logger    *zap.Logger
 
 	// deployMu serializes deploys per app. TryLock (not a queue): a
 	// concurrent webhook gets an immediate 409 and CI can retry.
@@ -263,13 +284,25 @@ func (ma *managedApp) setPhase(c collaborators, phase string) {
 // promote step leaves the old version serving untouched — that is the
 // rollback story. There is deliberately no post-promote auto-revert:
 // rolling back is re-POSTing the previous version.
-func (ma *managedApp) Deploy(ctx context.Context, req deployRequest) (err error) {
+func (ma *managedApp) Deploy(ctx context.Context, req deployRequest) error {
 	if !ma.deployMu.TryLock() {
 		return errDeployInProgress
 	}
 	defer ma.deployMu.Unlock()
+	return ma.deployLocked(ctx, req, ma.snapshot())
+}
 
-	c := ma.snapshot()
+// deployLocked runs the blue/green pipeline. The caller MUST already
+// hold deployMu: URL/rollback go through Deploy, while the push handler
+// acquires the lock BEFORE staging the upload, so a concurrent push gets
+// an immediate 409 rather than streaming a whole tarball to disk only to
+// lose the lock (which would also make aggregate staging unbounded).
+//
+// It runs against the single collaborators snapshot `c` the caller took,
+// so a config reload mid-flight can never split one deploy across two app
+// definitions (e.g. staging a push under the old size cap/root and
+// extracting it under the new).
+func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c collaborators) (err error) {
 	spec := c.spec
 	started := c.clock.Now()
 	logger := c.logger.With(zap.String("version", req.Version))
@@ -306,10 +339,55 @@ func (ma *managedApp) Deploy(ctx context.Context, req deployRequest) (err error)
 	if err := spec.dirs.ensure(); err != nil {
 		return err
 	}
+	// Versions are immutable: a deploy (URL or push) never overwrites an
+	// existing on-disk release, so a version you can roll back to can't be
+	// silently replaced with different content. Rollback is exempt — it
+	// relaunches an existing release by design. Deploys are serialized per
+	// app (deployMu), so this check-then-create has no race.
+	if !req.rollback {
+		switch _, statErr := os.Stat(spec.dirs.release(req.Version)); {
+		case statErr == nil:
+			return validationError{fmt.Sprintf("version %s already exists — versions are immutable; deploy a new version, or roll back to relaunch this one", req.Version)}
+		case !os.IsNotExist(statErr):
+			// A real I/O/permission error must not be read as "absent"
+			// and fall through to fetch, whose RemoveAll would then
+			// overwrite the existing release.
+			return fmt.Errorf("checking release %s: %w", req.Version, statErr)
+		}
+	}
 
 	releaseDir, err := c.fetch.fetch(ctx, spec, req, func(phase string) { ma.setPhase(c, phase) })
 	if err != nil {
 		return err
+	}
+	// If this freshly-extracted release never promotes (pre_start, start
+	// or health-gate failure), remove it: a failed attempt must not
+	// permanently reserve its immutable version or leave disk litter, so
+	// the same version stays retriable. Rollback is excluded — it
+	// relaunches a pre-existing release it must never delete.
+	// newHandle is predeclared so the cleanup defer can confirm the failed
+	// instance is really gone before deleting its release.
+	var newHandle handle
+	promoted := false
+	if !req.rollback {
+		defer func() {
+			if err == nil || promoted {
+				return
+			}
+			// Never delete a release out from under a failed instance that
+			// is still running (Stop may not have confirmed its exit) —
+			// that would pull files from beneath a live, leaked process.
+			if newHandle != nil && c.runner.Alive(newHandle) {
+				err = errors.Join(err, fmt.Errorf("release %s left on disk: the failed instance is still running", req.Version))
+				return
+			}
+			// Surface a cleanup failure: otherwise the release lingers and
+			// the next attempt at this version 422s (immutable) with no
+			// explanation of why.
+			if rmErr := os.RemoveAll(releaseDir); rmErr != nil {
+				err = errors.Join(err, fmt.Errorf("cleanup of failed release %s: %w", req.Version, rmErr))
+			}
+		}()
 	}
 
 	port, err := freePort()
@@ -321,7 +399,13 @@ func (ma *managedApp) Deploy(ctx context.Context, req deployRequest) (err error)
 		return err
 	}
 
-	if len(spec.preStart) > 0 {
+	// pre_start is deploy-time preparation; its outputs (migrations,
+	// generated config, warmed caches) persist, so a rollback — which
+	// relaunches an already-prepared on-disk release, like crash
+	// recovery — must NOT re-run it. Re-running an old forward migration
+	// would be wrong, and a flaky preflight check must never block an
+	// emergency rollback.
+	if len(spec.preStart) > 0 && !req.rollback {
 		ma.setPhase(c, "preparing")
 		preCtx, cancel := context.WithTimeout(ctx, spec.deadline)
 		err := c.runner.RunOnce(preCtx, startSpec{
@@ -336,7 +420,7 @@ func (ma *managedApp) Deploy(ctx context.Context, req deployRequest) (err error)
 	}
 
 	ma.setPhase(c, "starting")
-	newHandle, err := c.runner.Start(startSpec{
+	newHandle, err = c.runner.Start(startSpec{
 		command: expandArgs(spec.command, spec, req.Version, port, releaseDir),
 		dir:     releaseDir,
 		env:     env,
@@ -355,8 +439,15 @@ func (ma *managedApp) Deploy(ctx context.Context, req deployRequest) (err error)
 		soak:     spec.soak,
 		deadline: spec.deadline,
 	}); err != nil {
-		_ = c.runner.Stop(newHandle, spec.grace)
-		return fmt.Errorf("health gate: %w", err)
+		deployErr := fmt.Errorf("health gate: %w", err)
+		// If Stop can't confirm the instance exited (its SIGTERM failed
+		// and the process is still alive), surface that — and the cleanup
+		// defer will then leave the release in place rather than delete it
+		// beneath the live process.
+		if stopErr := c.runner.Stop(newHandle, spec.grace); stopErr != nil && c.runner.Alive(newHandle) {
+			deployErr = errors.Join(deployErr, fmt.Errorf("failed instance could not be stopped: %w", stopErr))
+		}
+		return deployErr
 	}
 
 	// The point of no return. From here on the request context is
@@ -366,6 +457,7 @@ func (ma *managedApp) Deploy(ctx context.Context, req deployRequest) (err error)
 	if err := ma.publishInstance(c, newInst); err != nil { // ← the cutover
 		logger.Error("state persistence failed; deploys still work but a Caddy restart will not know about this version", zap.Error(err))
 	}
+	promoted = true // past the cutover: never clean up the now-live release
 
 	// A successful deploy is the fast path out of any watchdog wait:
 	// it clears the failure count, restart budget and backoff, then
@@ -534,17 +626,29 @@ type statusSnapshot struct {
 	Running        bool              `json:"running"`
 	LastDeploy     *deployResult     `json:"last_deploy,omitempty"`
 	Watchdog       *watchdogSnapshot `json:"watchdog,omitempty"`
+	// AvailableVersions lists the on-disk releases, newest-first — the
+	// versions `?rollback=<version>` can relaunch. Always serialized (a
+	// healthy app with no releases reports []), so an empty set is
+	// distinguishable from a server that doesn't report the field.
+	AvailableVersions []string `json:"available_versions"`
 }
 
 func (ma *managedApp) status() statusSnapshot {
 	c := ma.snapshot()
 	var wd *watchdogSnapshot
-	if c.clock != nil && c.spec != nil {
-		wd = ma.wd.statusSnapshot(c.clock.Now(), c.spec.wdWindow)
+	available := []string{} // always an array in the JSON, never null
+	if c.spec != nil {
+		if c.clock != nil {
+			wd = ma.wd.statusSnapshot(c.clock.Now(), c.spec.wdWindow)
+		}
+		// Read releases outside ma.mu — it is disk I/O, and status is polled.
+		if rels := listReleases(c.spec.dirs.releases); rels != nil {
+			available = rels
+		}
 	}
 	ma.mu.Lock()
 	defer ma.mu.Unlock()
-	s := statusSnapshot{App: ma.name, Phase: ma.phase, LastDeploy: ma.lastDeploy, Watchdog: wd}
+	s := statusSnapshot{App: ma.name, Phase: ma.phase, LastDeploy: ma.lastDeploy, Watchdog: wd, AvailableVersions: available}
 	if ma.current != nil {
 		s.CurrentVersion = ma.current.version
 		s.Port = ma.current.port

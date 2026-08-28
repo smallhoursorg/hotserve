@@ -202,7 +202,10 @@ type AppConfig struct {
 	WatchdogWindow caddy.Duration `json:"watchdog_window,omitempty"`
 
 	// Keep is how many release directories to retain on disk,
-	// including the current one. Default 5.
+	// including the current one. Default 5. The running version is
+	// always retained even if it is older than the newest `keep` (e.g.
+	// after rolling back to an old release), so on-disk releases can
+	// briefly be `keep+1`.
 	Keep int `json:"keep,omitempty"`
 
 	// MaxArtifactSize caps the artifact download, in bytes (the

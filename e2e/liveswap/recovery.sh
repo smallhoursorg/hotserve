@@ -1,10 +1,10 @@
 #!/bin/sh
 # Crash-recovery suite, run by `make e2e` AFTER the main suites and
 # after hotserve has been SIGKILLed and started again. Proves the
-# state.json relaunch path: the last deployed release (v4, shipped with
-# demo-v1 content by main-suite scenario 6) comes back without any
-# webhook call, and the deploy machinery isn't wedged by the unclean
-# death.
+# state.json relaunch path: the last deployed release (px1 — the
+# rollback target from main-suite scenario 12, demo-v1 content) comes
+# back without any webhook call, and the deploy machinery isn't wedged
+# by the unclean death.
 set -u
 
 PROXY="http://e2e-hotserve:8080"
@@ -53,14 +53,14 @@ pass "proxy serving again ${i}s after restart"
 b=$(body)
 case "$b" in
 "hello v1"*) pass "relaunched app serves the last deployed release: '$b'" ;;
-*) fail "expected v4's content ('hello v1 ...'), got '$b'" ;;
+*) fail "expected px1's content ('hello v1 ...'), got '$b'" ;;
 esac
 
 echo "=== recovery 2: status endpoint reports the recovered deploy ==="
 s=$(curl -s -H "Authorization: Bearer $TOKEN" "$HOOK")
 case "$s" in
-*'"current_version":"v4"'*'"running":true'*|*'"running":true'*'"current_version":"v4"'*)
-	pass "status reports v4 running after crash" ;;
+*'"current_version":"px1"'*'"running":true'*|*'"running":true'*'"current_version":"px1"'*)
+	pass "status reports px1 running after crash" ;;
 *) fail "unexpected status after crash: $s" ;;
 esac
 

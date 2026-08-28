@@ -2,6 +2,7 @@ package liveswap
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -223,5 +224,143 @@ func TestWebhookOversizedPayloadIs413(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "payload exceeds") {
 		t.Fatalf("body should name the limit: %s", w.Body.String())
+	}
+}
+
+// send runs one request through the handler.
+func send(t *testing.T, h *Handler, req *http.Request) *httptest.ResponseRecorder {
+	t.Helper()
+	w := httptest.NewRecorder()
+	var next caddyhttp.Handler = caddyhttp.HandlerFunc(func(http.ResponseWriter, *http.Request) error { return nil })
+	if err := h.ServeHTTP(w, req, next); err != nil {
+		t.Fatalf("ServeHTTP returned error: %v", err)
+	}
+	return w
+}
+
+func gzipDeploy(t *testing.T, target, token, body string) *http.Request {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, target, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/gzip")
+	return req
+}
+
+func TestWebhookPushRoutesAndDeploys(t *testing.T) {
+	h, rig := newTestHandler(t)
+	w := send(t, h, gzipDeploy(t, "/demo?version=v9", appToken(t), "tarball-bytes"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("push: got %d %s", w.Code, w.Body.String())
+	}
+	got := rig.fetch.lastReq
+	if got.source() != "push" || got.localArchive == "" || got.Version != "v9" {
+		t.Fatalf("push not routed correctly: %+v", got)
+	}
+}
+
+func TestWebhookPushRequiresValidVersion(t *testing.T) {
+	h, _ := newTestHandler(t)
+	// missing version
+	if w := send(t, h, gzipDeploy(t, "/demo", appToken(t), "x")); w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("missing version: got %d", w.Code)
+	}
+	// traversal version
+	if w := send(t, h, gzipDeploy(t, "/demo?version=../etc", appToken(t), "x")); w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("evil version: got %d", w.Code)
+	}
+}
+
+func TestWebhookPushOversizedIs413(t *testing.T) {
+	h, rig := newTestHandler(t)
+	rig.spec.maxArtifactSize = 8 // tiny cap for the test
+	w := send(t, h, gzipDeploy(t, "/demo?version=v1", appToken(t), "way past eight bytes"))
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized push: got %d, want 413", w.Code)
+	}
+}
+
+func TestWebhookRollbackRoutes(t *testing.T) {
+	h, rig := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodPost, "/demo?rollback=v3", nil)
+	req.Header.Set("Authorization", "Bearer "+appToken(t))
+	w := send(t, h, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("rollback: got %d %s", w.Code, w.Body.String())
+	}
+	got := rig.fetch.lastReq
+	if got.source() != "rollback" || !got.rollback || got.Version != "v3" {
+		t.Fatalf("rollback not routed correctly: %+v", got)
+	}
+}
+
+func TestWebhookRollbackRequiresValidVersion(t *testing.T) {
+	h, _ := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodPost, "/demo?rollback=..", nil)
+	req.Header.Set("Authorization", "Bearer "+appToken(t))
+	if w := send(t, h, req); w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("evil rollback version: got %d", w.Code)
+	}
+}
+
+func TestWebhookStatusListsAvailableVersions(t *testing.T) {
+	h, _ := newTestHandler(t)
+	do(t, h, http.MethodPost, "/demo", appToken(t), `{"url":"https://x/1.tgz","version":"v1"}`)
+	do(t, h, http.MethodPost, "/demo", appToken(t), `{"url":"https://x/2.tgz","version":"v2"}`)
+	w := do(t, h, http.MethodGet, "/demo", appToken(t), "")
+	var status statusSnapshot
+	must(t, json.Unmarshal(w.Body.Bytes(), &status))
+	if len(status.AvailableVersions) != 2 {
+		t.Fatalf("available_versions = %v, want two entries", status.AvailableVersions)
+	}
+	set := map[string]bool{}
+	for _, v := range status.AvailableVersions {
+		set[v] = true
+	}
+	if !set["v1"] || !set["v2"] {
+		t.Fatalf("available_versions missing a release: %v", status.AvailableVersions)
+	}
+}
+
+// trackReader records whether its body was read.
+type trackReader struct{ read bool }
+
+func (t *trackReader) Read(p []byte) (int, error) { t.read = true; return 0, io.EOF }
+
+func TestWebhookPushLocksBeforeStaging(t *testing.T) {
+	h, rig := newTestHandler(t)
+	rig.ma.deployMu.Lock() // simulate an in-progress deploy
+	defer rig.ma.deployMu.Unlock()
+	tr := &trackReader{}
+	req := httptest.NewRequest(http.MethodPost, "/demo?version=v1", tr)
+	req.Header.Set("Authorization", "Bearer "+appToken(t))
+	req.Header.Set("Content-Type", "application/gzip")
+	w := send(t, h, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("push during an in-progress deploy should be 409, got %d", w.Code)
+	}
+	if tr.read {
+		t.Fatal("push body must not be staged before the deploy lock is acquired")
+	}
+}
+
+func TestWebhookAvailableVersionsIsArrayWhenEmpty(t *testing.T) {
+	h, _ := newTestHandler(t)
+	w := do(t, h, http.MethodGet, "/demo", appToken(t), "")
+	if !strings.Contains(w.Body.String(), `"available_versions":[]`) {
+		t.Fatalf("empty available_versions should serialize as [], not null/absent: %s", w.Body.String())
+	}
+}
+
+func TestWebhookPushContentTypeCaseInsensitive(t *testing.T) {
+	h, rig := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodPost, "/demo?version=v1", strings.NewReader("tarball"))
+	req.Header.Set("Authorization", "Bearer "+appToken(t))
+	req.Header.Set("Content-Type", "Application/GZIP; charset=x") // mixed case + parameter
+	w := send(t, h, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("mixed-case gzip Content-Type must route to push (200), got %d %s", w.Code, w.Body.String())
+	}
+	if rig.fetch.lastReq.source() != "push" {
+		t.Fatalf("expected push routing, got %q", rig.fetch.lastReq.source())
 	}
 }

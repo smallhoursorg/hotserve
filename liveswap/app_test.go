@@ -109,13 +109,16 @@ func (h *fakeHandle) kill() {
 
 // fakeRunner records starts and stops; RunOnce failure is scriptable.
 type fakeRunner struct {
-	mu         sync.Mutex
-	started    []startSpec
-	handles    []*fakeHandle
-	stopped    []handle
-	runOnceErr error
-	startErr   error
-	reattachOK bool
+	mu              sync.Mutex
+	started         []startSpec
+	handles         []*fakeHandle
+	stopped         []handle
+	runOnceErr      error
+	runOnceCount    int
+	startErr        error
+	reattachOK      bool
+	stopErr         error // Stop returns this
+	stopLeavesAlive bool  // Stop does not actually kill the handle
 }
 
 func (r *fakeRunner) Start(spec startSpec) (handle, error) {
@@ -134,6 +137,7 @@ func (r *fakeRunner) RunOnce(_ context.Context, spec startSpec) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.started = append(r.started, spec)
+	r.runOnceCount++
 	return r.runOnceErr
 }
 
@@ -145,11 +149,12 @@ func (r *fakeRunner) Alive(h handle) bool {
 func (r *fakeRunner) Stop(h handle, _ time.Duration) error {
 	r.mu.Lock()
 	r.stopped = append(r.stopped, h)
+	leave, serr := r.stopLeavesAlive, r.stopErr
 	r.mu.Unlock()
-	if fh, ok := h.(*fakeHandle); ok {
+	if fh, ok := h.(*fakeHandle); ok && !leave {
 		fh.kill()
 	}
-	return nil
+	return serr
 }
 
 func (r *fakeRunner) Wait(h handle) <-chan struct{} {
@@ -240,10 +245,12 @@ func (p *fakeProber) calls() int {
 
 // fakeFetcher materializes a release dir without any network.
 type fakeFetcher struct {
-	err error
+	err     error
+	lastReq deployRequest
 }
 
 func (f *fakeFetcher) fetch(_ context.Context, spec *appSpec, req deployRequest, progress func(string)) (string, error) {
+	f.lastReq = req
 	progress("downloading")
 	progress("extracting")
 	if f.err != nil {
@@ -662,5 +669,141 @@ func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRollbackSkipsPreStart(t *testing.T) {
+	rig := newTestRig(t)
+	rig.spec.preStart = []string{"./migrate"}
+
+	// A normal deploy runs pre_start.
+	if err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/a.tgz", Version: "v1"}); err != nil {
+		t.Fatalf("deploy v1: %v", err)
+	}
+	if rig.runner.runOnceCount != 1 {
+		t.Fatalf("deploy should run pre_start once, got %d", rig.runner.runOnceCount)
+	}
+
+	// Deploy a second version so v1 is no longer the running one.
+	if err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/b.tgz", Version: "v2"}); err != nil {
+		t.Fatalf("deploy v2: %v", err)
+	}
+	if rig.runner.runOnceCount != 2 {
+		t.Fatalf("second deploy should run pre_start, got %d", rig.runner.runOnceCount)
+	}
+	if err := rig.ma.Deploy(context.Background(), deployRequest{Version: "v1", rollback: true}); err != nil {
+		t.Fatalf("rollback to v1: %v", err)
+	}
+	if rig.runner.runOnceCount != 2 {
+		t.Fatalf("rollback must not run pre_start; count = %d, want 2", rig.runner.runOnceCount)
+	}
+}
+
+func TestDeployRejectsExistingVersion(t *testing.T) {
+	rig := newTestRig(t)
+	if err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/a.tgz", Version: "v1"}); err != nil {
+		t.Fatalf("deploy v1: %v", err)
+	}
+	// Deploy a second version so v1 is on disk but not running.
+	if err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/b.tgz", Version: "v2"}); err != nil {
+		t.Fatalf("deploy v2: %v", err)
+	}
+	// Re-deploying v1 (URL) must be rejected — versions are immutable.
+	err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/a.tgz", Version: "v1"})
+	var vErr validationError
+	if !errors.As(err, &vErr) || !strings.Contains(err.Error(), "immutable") {
+		t.Fatalf("re-deploy of existing version should be a validation error about immutability, got %v", err)
+	}
+	// But rollback to v1 (which exists) is allowed.
+	if err := rig.ma.Deploy(context.Background(), deployRequest{Version: "v1", rollback: true}); err != nil {
+		t.Fatalf("rollback to existing v1 should succeed, got %v", err)
+	}
+}
+
+func TestFailedDeployCleansUpRelease(t *testing.T) {
+	rig := newTestRig(t)
+	if err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/a.tgz", Version: "v1"}); err != nil {
+		t.Fatalf("deploy v1: %v", err)
+	}
+	// v2 fails its health gate.
+	rig.prober.err = errTest
+	if err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/b.tgz", Version: "v2"}); err == nil {
+		t.Fatal("deploy v2 should have failed the health gate")
+	}
+	// Its freshly-extracted release must be gone.
+	if _, err := os.Stat(rig.spec.dirs.release("v2")); !os.IsNotExist(err) {
+		t.Fatalf("failed deploy should remove its release dir, stat err = %v", err)
+	}
+	// So the same version is retriable once healthy.
+	rig.prober.err = nil
+	if err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/b.tgz", Version: "v2"}); err != nil {
+		t.Fatalf("re-deploy of a cleaned-up failed version should succeed: %v", err)
+	}
+}
+
+func TestFailedRollbackKeepsRelease(t *testing.T) {
+	rig := newTestRig(t)
+	if err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/a.tgz", Version: "v1"}); err != nil {
+		t.Fatalf("deploy v1: %v", err)
+	}
+	if err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/b.tgz", Version: "v2"}); err != nil {
+		t.Fatalf("deploy v2: %v", err)
+	}
+	// A rollback to v1 that fails its health gate must NOT delete v1's
+	// pre-existing release.
+	rig.prober.err = errTest
+	if err := rig.ma.Deploy(context.Background(), deployRequest{Version: "v1", rollback: true}); err == nil {
+		t.Fatal("rollback should have failed the health gate")
+	}
+	if _, err := os.Stat(rig.spec.dirs.release("v1")); err != nil {
+		t.Fatalf("failed rollback must not delete the on-disk release: %v", err)
+	}
+}
+
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, errors.New("body read boom") }
+
+func TestStageUploadClassifiesErrors(t *testing.T) {
+	var se *stagingError
+
+	// A body-read failure is a client fault — bare error, not stagingError.
+	if _, err := stageUpload(errReader{}, t.TempDir(), 100); err == nil || errors.As(err, &se) {
+		t.Fatalf("body-read error should be a bare (client) error, got %v", err)
+	}
+	// A local filesystem failure (tmpDir is actually a file → MkdirAll
+	// fails) is a server fault — *stagingError.
+	notADir := filepath.Join(t.TempDir(), "afile")
+	if err := os.WriteFile(notADir, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stageUpload(strings.NewReader("data"), notADir, 100); !errors.As(err, &se) {
+		t.Fatalf("a local FS failure should be a *stagingError (server), got %v", err)
+	}
+	// Happy path still works.
+	if _, err := stageUpload(strings.NewReader("data"), t.TempDir(), 100); err != nil {
+		t.Fatalf("valid upload should stage: %v", err)
+	}
+}
+
+func TestFailedDeployKeepsReleaseWhenStopUnconfirmed(t *testing.T) {
+	rig := newTestRig(t)
+	if err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/a.tgz", Version: "v1"}); err != nil {
+		t.Fatalf("deploy v1: %v", err)
+	}
+	// v2 fails the health gate, and Stop can't confirm the instance
+	// exited (it stays alive) — the release must NOT be deleted beneath it.
+	rig.prober.err = errTest
+	rig.runner.stopErr = errTest
+	rig.runner.stopLeavesAlive = true
+	err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/b.tgz", Version: "v2"})
+	if err == nil {
+		t.Fatal("deploy v2 should have failed")
+	}
+	if !strings.Contains(err.Error(), "still running") {
+		t.Fatalf("error should note the release was left in place: %v", err)
+	}
+	if _, statErr := os.Stat(rig.spec.dirs.release("v2")); statErr != nil {
+		t.Fatalf("release must not be deleted under a still-running failed instance: %v", statErr)
 	}
 }

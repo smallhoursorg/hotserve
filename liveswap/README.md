@@ -29,10 +29,17 @@ POST /blog {url, version}
                    stopped serving, webhook returns 5xx, CI goes red)
 ```
 
+The diagram shows a **URL pull**; the same pipeline serves two more
+sources (see [Webhook API](#webhook-api)): a **push** streams the
+tarball in the request body (skips `downloading`), and a **rollback**
+relaunches an on-disk release (skips `downloading`/`extracting`/
+`preparing`). Versions are immutable — a re-deploy of an existing
+version is rejected; rollback is how you relaunch one.
+
 The cutover is an atomic pointer swap inside a `reverse_proxy` dynamic
 upstream source — no config reload, no socket juggling, and every
 reverse_proxy feature (WebSockets, HTTP/2, streaming, retries) keeps
-working. Rollback is one curl: re-POST the previous version.
+working. Rollback is one curl: `POST /<app>?rollback=<version>`.
 
 If you know Nomad, the concept map is:
 
@@ -166,7 +173,7 @@ resolved at config load.
 | `watchdog_grace` | `30s` | After every (re)start, probe failures don't count until this elapses; a crash always counts |
 | `watchdog_restarts` | `5` | Restart budget within `watchdog_window`; crash and health restarts share it |
 | `watchdog_window` | `10m` | Sliding window for the restart budget |
-| `keep` | `5` | Release dirs retained (GC after success) |
+| `keep` | `5` | Release dirs retained (GC after success). The running version is always kept, so this can be `keep+1` after rolling back to an old release |
 | `max_artifact_size` | `100MB` | Download cap; decompressed cap is 10× |
 
 ## Watchdog
@@ -295,7 +302,10 @@ names the person.
 ## Webhook API
 
 `POST https://deploy.example.com/<app>`, with `Authorization: Bearer
-<JWT>` (see `deploy_trust` above). JSON body:
+<JWT>` (see `deploy_trust` above). There are three ways to supply the
+release, all through the same endpoint and the same auth:
+
+**1. Pull from a URL** (the default — a JSON body):
 
 ```json
 {
@@ -307,7 +317,46 @@ names the person.
 
 `auth_header` is optional and is sent verbatim as `Authorization` on
 the artifact download (dropped automatically on cross-host redirects,
-so GitHub's S3 redirect works). The response is synchronous:
+so GitHub's S3 redirect works). The URL must pass `artifact_allowlist`.
+
+**2. Push an uploaded tarball** — no artifact host needed. Stream the
+`.tar.gz` as the request body with a gzip content type; the version is
+a query parameter:
+
+```sh
+curl --fail -X POST -H "Authorization: Bearer $JWT" \
+  -H "Content-Type: application/gzip" --data-binary @blog.tgz \
+  "https://deploy.example.com/blog?version=v1.4.2"
+```
+
+The upload is capped at `max_artifact_size`. No `artifact_allowlist` is
+consulted (there is no URL to pin — the bytes come straight from an
+authenticated caller), and there is no SSRF surface on this path. This
+is the path for deploying a local build directly (a laptop, an
+air-gapped or egress-locked box) without hosting the artifact anywhere.
+
+**3. Roll back to an on-disk release** — relaunch a version still on
+disk (retained by `keep`), with no fetch or upload:
+
+```sh
+curl --fail -X POST -H "Authorization: Bearer $JWT" \
+  "https://deploy.example.com/blog?rollback=v1.4.1"
+```
+
+Rollback runs the same blue/green pipeline (start, health-gate, cut
+over), so it is zero-downtime too. A `422` is returned if that version
+is no longer on disk. To see what you can roll back to, `GET /<app>`
+returns `available_versions` — the on-disk releases, newest-first
+(`keep` of them, plus the running version when it is older than those —
+see the `keep` note above, so the list can briefly hold `keep+1`).
+
+**Versions are immutable.** A deploy (URL or push) never overwrites an
+existing on-disk release, so a version you can roll back to can't be
+silently replaced — re-deploying an existing version is a `422`. Use a
+new version, or roll back to relaunch an existing one. (A deploy that
+*fails* before cutover is cleaned up, so that version stays retriable.)
+
+The response is synchronous:
 
 | Code | Meaning |
 |---|---|
@@ -315,7 +364,8 @@ so GitHub's S3 redirect works). The response is synchronous:
 | 401 | Bad or missing token |
 | 404 | Unknown app |
 | 409 | A deploy is already running for this app (retry) |
-| 422 | Bad payload — missing url, invalid version, version already running, or the artifact url was refused by `artifact_allowlist` (host, path, port, or an undeclared query parameter; the body names exactly what tripped and how the entry would declare it) |
+| 413 | Pushed upload exceeded `max_artifact_size` |
+| 422 | Bad request — missing/invalid version, version already running, **version already exists** (versions are immutable — deploy a new version or roll back to relaunch it), a rollback target no longer on disk, or (URL path) an artifact url refused by `artifact_allowlist` (host, path, port, or an undeclared query parameter; the body names exactly what tripped and how the entry would declare it) |
 | 5xx | Deploy failed — **the old version is still serving**; body says why |
 
 Because the response is synchronous through the whole pipeline, the
@@ -326,8 +376,10 @@ in roughly soak + drain (~20s). Budget your CI step timeout for
 409 until the first one finishes.
 
 `GET /<app>` (same bearer token) returns status: phase, current
-version, port, pid, last deploy result, and the watchdog's state
-(restart counts, last restart cause).
+version, port, pid, last deploy result (including `deployed_by`), the
+watchdog's state (restart counts, last restart cause), and
+`available_versions` — the on-disk releases you can roll back to,
+newest-first.
 
 The tarball's contents must sit at the archive root (`tar -czf
 app.tar.gz -C dist .`), with versions matching `[A-Za-z0-9._-]{1,64}`.
@@ -454,10 +506,11 @@ failure the previous version never stopped serving.
   Caddy restarts is a designed-for v2 extension.
 - **Changed app definitions apply on the next deploy**, never by
   restarting a running app mid-reload.
-- **No post-promote auto-revert.** Once traffic cuts over, the deploy
-  is done; if the new version misbehaves later, re-POST the previous
-  version (its release dir is still on disk — that's what `keep` is
-  for). Everything *before* promote is automatically contained. The
+- **No post-promote *auto*-revert.** Once traffic cuts over, the deploy
+  is done; if the new version misbehaves later, roll back explicitly
+  with `?rollback=<version>` (its release dir is still on disk — that's
+  what `keep` is for). Everything *before* promote is automatically
+  contained. The
   watchdog restarts the *same* version on crash or sustained health
   failure — it never reverts to an older one.
 - **One deploy at a time per app** — concurrent webhooks get 409, and

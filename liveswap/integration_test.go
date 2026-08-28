@@ -762,3 +762,143 @@ func TestIntegrationOIDCDeploy(t *testing.T) {
 		}
 	})
 }
+
+// appConfig is integrationConfig parameterized by app name, for the
+// push/rollback suites (which must use unique app names — the pool is
+// process-global).
+func appConfig(root, artifactPort, app string) string {
+	return fmt.Sprintf(`{
+	skip_install_trust
+	admin localhost:2999
+	http_port 9080
+	grace_period 1ns
+
+	liveswap {
+		root %[1]s
+		allow_insecure_http
+		artifact_allowlist 127.0.0.1:%[2]s
+		deploy_trust local {
+			public_key %[4]s
+			audience itest
+		}
+
+		app %[3]s {
+			command ./server
+			health_interval 50ms
+			health_timeout 1s
+			soak 100ms
+			deadline 5s
+			drain 1ms
+			grace 2s
+			keep 3
+		}
+	}
+}
+http://localhost:9080 {
+	reverse_proxy {
+		dynamic liveswap %[3]s
+	}
+}
+http://localhost:9081 {
+	liveswap_webhook
+}
+`, root, artifactPort, app, itestPubKeyPath())
+}
+
+func TestIntegrationPushDeploy(t *testing.T) {
+	bin := buildTestApp(t)
+	root := t.TempDir()
+
+	tester := caddytest.NewTester(t)
+	// No artifact server: push provides the bytes directly. The
+	// allowlist entry is required by config but unused on this path.
+	tester.InitServer(appConfig(root, "9999", "pushdemo"), "caddyfile")
+
+	push := func(version string, tarball []byte) (int, string) {
+		req, _ := http.NewRequest(http.MethodPost,
+			"http://localhost:9081/pushdemo?version="+version, bytes.NewReader(tarball))
+		req.Header.Set("Authorization", "Bearer "+itestToken(t))
+		req.Header.Set("Content-Type", "application/gzip")
+		resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		data, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(data)
+	}
+
+	t.Run("streamed tarball deploys and serves", func(t *testing.T) {
+		if code, body := push("v1", packRelease(t, bin, "v1", false)); code != http.StatusOK {
+			t.Fatalf("push v1: %d %s", code, body)
+		}
+		code, page := getBody(t, "http://localhost:9080/")
+		if code != http.StatusOK || !strings.HasPrefix(page, "hello v1") {
+			t.Fatalf("proxy did not serve pushed v1: %d %q", code, page)
+		}
+	})
+
+	t.Run("a non-gzip / garbage body fails the deploy, old keeps serving", func(t *testing.T) {
+		if code, _ := push("v2", []byte("not a tarball")); code < 500 {
+			t.Fatalf("garbage push should 5xx, got %d", code)
+		}
+		code, page := getBody(t, "http://localhost:9080/")
+		if code != http.StatusOK || !strings.HasPrefix(page, "hello v1") {
+			t.Fatalf("v1 should still serve after a bad push: %d %q", code, page)
+		}
+	})
+}
+
+func TestIntegrationRollback(t *testing.T) {
+	bin := buildTestApp(t)
+	root := t.TempDir()
+	artifacts := map[string][]byte{
+		"/demo-v1.tar.gz": packRelease(t, bin, "v1", false),
+		"/demo-v2.tar.gz": packRelease(t, bin, "v2", false),
+	}
+	artifactSrv := serveArtifacts(t, artifacts)
+	artifactURL, err := url.Parse(artifactSrv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tester := caddytest.NewTester(t)
+	tester.InitServer(appConfig(root, artifactURL.Port(), "rollbackdemo"), "caddyfile")
+
+	rollback := func(version string) (int, string) {
+		req, _ := http.NewRequest(http.MethodPost, "http://localhost:9081/rollbackdemo?rollback="+version, nil)
+		req.Header.Set("Authorization", "Bearer "+itestToken(t))
+		resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		data, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(data)
+	}
+
+	// Deploy v1 then v2 (both real URL pulls).
+	if resp, body := postDeployApp(t, "rollbackdemo", artifactSrv.URL+"/demo-v1.tar.gz", "v1"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("deploy v1: %d %s", resp.StatusCode, body)
+	}
+	if resp, body := postDeployApp(t, "rollbackdemo", artifactSrv.URL+"/demo-v2.tar.gz", "v2"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("deploy v2: %d %s", resp.StatusCode, body)
+	}
+	if _, page := getBody(t, "http://localhost:9080/"); !strings.HasPrefix(page, "hello v2") {
+		t.Fatalf("expected v2 serving, got %q", page)
+	}
+
+	t.Run("rollback relaunches the on-disk v1 without a fetch", func(t *testing.T) {
+		if code, body := rollback("v1"); code != http.StatusOK {
+			t.Fatalf("rollback v1: %d %s", code, body)
+		}
+		if _, page := getBody(t, "http://localhost:9080/"); !strings.HasPrefix(page, "hello v1") {
+			t.Fatalf("expected v1 after rollback, got %q", page)
+		}
+	})
+
+	t.Run("rollback to a version not on disk is 422", func(t *testing.T) {
+		if code, _ := rollback("v99"); code != http.StatusUnprocessableEntity {
+			t.Fatalf("rollback to missing version: got %d, want 422", code)
+		}
+	})
+}
