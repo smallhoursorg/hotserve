@@ -418,6 +418,40 @@ func TestDeployStopsDeadOldLeaderBeforeGC(t *testing.T) {
 	}
 }
 
+// When stopping the old instance cannot be confirmed (its group may
+// still be running out of its release dir), the promote path must skip
+// release GC entirely rather than delete files from under it.
+func TestDeploySkipsReleaseGCWhenOldStopFails(t *testing.T) {
+	ctx := context.Background()
+	// Deploy v1 and v2, backdating each so the GC inside the third
+	// deploy sees deterministic mtime ordering (v1 oldest).
+	twoOld := func(rig *testRig) {
+		for i, v := range []string{"v1", "v2"} {
+			must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/" + v, Version: v}))
+			mt := time.Now().Add(time.Duration(i-10) * time.Minute)
+			must(t, os.Chtimes(rig.spec.dirs.release(v), mt, mt))
+		}
+	}
+	// Control: with keep=2 the third deploy normally GCs v1.
+	ctl := newTestRig(t)
+	twoOld(ctl)
+	must(t, ctl.ma.Deploy(ctx, deployRequest{URL: "https://x/3", Version: "v3"}))
+	if _, err := os.Stat(ctl.spec.dirs.release("v1")); !os.IsNotExist(err) {
+		t.Fatalf("test premise: v1 should have been GC'd on the third deploy (stat err=%v)", err)
+	}
+
+	rig := newTestRig(t)
+	twoOld(rig)
+	rig.runner.stopErr = errTest // v2's stop cannot be confirmed
+	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/3", Version: "v3"}))
+	if _, err := os.Stat(rig.spec.dirs.release("v1")); err != nil {
+		t.Fatalf("release GC must be skipped when the old instance could not be confirmed stopped: %v", err)
+	}
+	if got := rig.ma.status().CurrentVersion; got != "v3" {
+		t.Fatalf("the deploy itself must still succeed; current = %s", got)
+	}
+}
+
 func TestDeployPreStartFailureKeepsOldServing(t *testing.T) {
 	rig := newTestRig(t)
 	ctx := context.Background()
@@ -809,6 +843,29 @@ func TestStageUploadClassifiesErrors(t *testing.T) {
 	// Happy path still works.
 	if _, err := stageUpload(strings.NewReader("data"), t.TempDir(), 100); err != nil {
 		t.Fatalf("valid upload should stage: %v", err)
+	}
+}
+
+// Same guarantee when the leader is dead but Stop still reports an
+// error: with the exec runner that means workers survived the sweep of
+// its process group, and they are still running out of the release.
+func TestFailedDeployKeepsReleaseWhenGroupStopUnconfirmed(t *testing.T) {
+	rig := newTestRig(t)
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/a.tgz", Version: "v1"}))
+	rig.prober.err = errTest
+	rig.runner.stopErr = errTest // leader is killed by the fake, but the sweep verdict is an error
+	err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/b.tgz", Version: "v2"})
+	if err == nil {
+		t.Fatal("deploy v2 should have failed")
+	}
+	if rig.runner.Alive(rig.runner.handles[1]) {
+		t.Fatal("test premise: the failed leader should be dead")
+	}
+	if !strings.Contains(err.Error(), "could not be stopped") || !strings.Contains(err.Error(), "left on disk") {
+		t.Fatalf("error should carry the stop failure and note the release was kept: %v", err)
+	}
+	if _, statErr := os.Stat(rig.spec.dirs.release("v2")); statErr != nil {
+		t.Fatalf("release must not be deleted while the failed instance's group may still be running: %v", statErr)
 	}
 }
 

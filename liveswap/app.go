@@ -369,16 +369,18 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	// instance is really gone before deleting its release.
 	var newHandle handle
 	promoted := false
+	stopUnconfirmed := false // Stop could not vouch that the whole process group is gone
 	if !req.rollback {
 		defer func() {
 			if err == nil || promoted {
 				return
 			}
 			// Never delete a release out from under a failed instance that
-			// is still running (Stop may not have confirmed its exit) —
-			// that would pull files from beneath a live, leaked process.
-			if newHandle != nil && c.runner.Alive(newHandle) {
-				err = errors.Join(err, fmt.Errorf("release %s left on disk: the failed instance is still running", req.Version))
+			// may still be running — Alive covers the leader, and a Stop
+			// error covers workers that outlived it — that would pull
+			// files from beneath a live, leaked process.
+			if newHandle != nil && (stopUnconfirmed || c.runner.Alive(newHandle)) {
+				err = errors.Join(err, fmt.Errorf("release %s left on disk: the failed instance may be still running", req.Version))
 				return
 			}
 			// Surface a cleanup failure: otherwise the release lingers and
@@ -441,11 +443,12 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		deadline: spec.deadline,
 	}); err != nil {
 		deployErr := fmt.Errorf("health gate: %w", err)
-		// If Stop can't confirm the instance exited (its SIGTERM failed
-		// and the process is still alive), surface that — and the cleanup
-		// defer will then leave the release in place rather than delete it
-		// beneath the live process.
-		if stopErr := c.runner.Stop(newHandle, spec.grace); stopErr != nil && c.runner.Alive(newHandle) {
+		// If Stop can't confirm the instance is gone — its signal failed,
+		// or workers survived the sweep of its process group even though
+		// the leader is dead — surface that, and the cleanup defer leaves
+		// the release in place rather than delete it beneath them.
+		if stopErr := c.runner.Stop(newHandle, spec.grace); stopErr != nil {
+			stopUnconfirmed = true
 			deployErr = errors.Join(deployErr, fmt.Errorf("failed instance could not be stopped: %w", stopErr))
 		}
 		return deployErr
@@ -477,7 +480,11 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		// release dir from under processes still running out of it.
 		ma.setPhase(c, "stopping_old")
 		if err := c.runner.Stop(old.handle, spec.grace); err != nil {
-			logger.Warn("stopping old version", zap.Error(err))
+			// Some of the old instance may still be running out of its
+			// release dir: leave every release alone this time round.
+			// The next successful stop-old runs GC again.
+			logger.Warn("stopping old version failed; skipping release GC", zap.Error(err))
+			return nil
 		}
 	}
 

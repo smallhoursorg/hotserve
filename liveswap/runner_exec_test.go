@@ -4,6 +4,7 @@ package liveswap
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -235,6 +236,18 @@ func TestExecRunnerStopOnSweptHandleNeverSignals(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if !r.Alive(bystander) {
 		t.Fatal("Stop on a swept handle signalled a recycled pgid")
+	}
+
+	// A swept handle replays its sweep's verdict, so a caller that
+	// synchronises on Stop before deleting the release learns about
+	// leaked workers without anything being signalled.
+	wantErr := errors.New("workers leaked")
+	stale = &execHandle{pid: bystander.state().PID, done: done, swept: true, sweepErr: wantErr}
+	if err := r.Stop(stale, 100*time.Millisecond); !errors.Is(err, wantErr) {
+		t.Fatalf("Stop on a swept handle should replay its sweep error, got %v", err)
+	}
+	if !r.Alive(bystander) {
+		t.Fatal("replaying a sweep error must not signal the pgid")
 	}
 
 	// Belt and braces: a second Stop on a handle Stop itself swept is

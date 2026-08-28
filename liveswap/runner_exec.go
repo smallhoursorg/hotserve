@@ -63,7 +63,8 @@ type execHandle struct {
 	done      chan struct{}
 
 	teardownMu sync.Mutex
-	swept      bool // the group has been swept; never signal the pgid again
+	swept      bool  // the group has been swept; never signal the pgid again
+	sweepErr   error // the sweep's verdict, replayed by every later Stop
 }
 
 func (h *execHandle) state() handleState {
@@ -108,9 +109,10 @@ func (r *execRunner) Start(spec startSpec) (handle, error) {
 		h.teardownMu.Lock()
 		defer h.teardownMu.Unlock()
 		if !h.swept {
-			if err := r.sweepGroup(h.pid, h.grace, "leader exited unsolicited"); err != nil {
-				r.log().Error("orphaned process group could not be signalled; its workers may have leaked",
-					zap.Int("pgid", h.pid), zap.Error(err))
+			h.sweepErr = r.sweepGroup(h.pid, h.grace, "leader exited unsolicited")
+			if h.sweepErr != nil {
+				r.log().Error("orphaned process group could not be swept; its workers may have leaked",
+					zap.Int("pgid", h.pid), zap.Error(h.sweepErr))
 			}
 			h.swept = true
 		}
@@ -174,7 +176,7 @@ func (r *execRunner) Wait(h handle) <-chan struct{} {
 	return eh.done
 }
 
-func (r *execRunner) Stop(h handle, grace time.Duration) error {
+func (r *execRunner) Stop(h handle, grace time.Duration) (err error) {
 	eh, ok := h.(*execHandle)
 	if !ok {
 		return fmt.Errorf("not an exec handle")
@@ -182,15 +184,18 @@ func (r *execRunner) Stop(h handle, grace time.Duration) error {
 	eh.teardownMu.Lock()
 	defer eh.teardownMu.Unlock()
 	if eh.swept {
-		return nil // the pgid may belong to someone else by now
+		// The pgid may belong to someone else by now: never signal it
+		// again. But replay the verdict — a caller synchronising before
+		// release cleanup must learn that workers were left behind.
+		return eh.sweepErr
 	}
 	select {
 	case <-eh.done:
 		// Leader just exited and we beat the reaper to the lock: the
 		// group is still ours (live members keep the pgid reserved), so
 		// sweep it with the caller's grace and let the reaper stand down.
-		err := r.sweepGroup(eh.pid, grace, "stop after leader exit")
-		eh.swept = true
+		err = r.sweepGroup(eh.pid, grace, "stop after leader exit")
+		eh.swept, eh.sweepErr = true, err
 		return err
 	default:
 	}
@@ -203,17 +208,17 @@ func (r *execRunner) Stop(h handle, grace time.Duration) error {
 	if err := signalGroup(eh.pid, syscall.SIGTERM); err != nil {
 		return err // ESRCH: the group emptied under us; the reaper finds nothing to sweep
 	}
-	// Every path below ends with the group swept: SIGKILL to the whole
-	// group, or a confirmed-empty group. Record that before unlocking so
-	// the reaper (blocked on the lock if the leader dies during the
-	// wait) and any later Stop leave the pgid alone.
-	defer func() { eh.swept = true }()
+	// Every path below ends with the group swept: a confirmed-empty
+	// group, or SIGKILL with its verdict. Record both before unlocking
+	// so the reaper (blocked on the lock if the leader dies during the
+	// wait) and any later Stop leave the pgid alone and see the result.
+	defer func() { eh.swept, eh.sweepErr = true, err }()
 	deadline := time.Now().Add(grace)
 	select {
 	case <-eh.done:
 	case <-time.After(grace):
 		r.log().Warn("grace period expired, killing process group", zap.Int("pid", eh.pid))
-		err := killGroup(eh.pid)
+		err = killGroup(eh.pid)
 		<-eh.done
 		return err
 	}

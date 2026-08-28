@@ -34,8 +34,10 @@ type runner interface {
 	// Returns once the leader has exited and the group has been swept
 	// (a SIGKILLed survivor may still be mid-teardown in the kernel).
 	// Safe on an already-exited handle: the group is swept at most
-	// once (by Stop or by the runner at exit time), and every later
-	// Stop is a no-op — the pgid may have been recycled by then.
+	// once (by Stop or by the runner at exit time) — the pgid may have
+	// been recycled by then — and every later Stop just replays that
+	// sweep's result. A non-nil error means processes of this instance
+	// may still be running; callers must not delete its release.
 	Stop(h handle, grace time.Duration) error
 
 	// Reattach tries to re-adopt an instance from persisted state after
