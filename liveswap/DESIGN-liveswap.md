@@ -259,8 +259,9 @@ README.md "Watchdog"):
 
 ## Non-goals (v1)
 
-- Post-promote auto-revert. Rollback is re-POSTing the previous
-  version. (The continuous health watchdog, originally part of this
+- Post-promote *auto*-revert. Rollback is an explicit operation —
+  `POST /<app>?rollback=<version>` relaunches an on-disk release. (The
+  continuous health watchdog, originally part of this
   non-goal, has since shipped — see "Watchdog" above. It restarts the
   same version; it still never auto-reverts.)
 - Multi-node or any cluster awareness.

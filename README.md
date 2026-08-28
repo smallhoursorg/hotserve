@@ -108,8 +108,9 @@ hotserve downloads the artifact, runs your migration, starts the new
 version on a private port, health-checks it until it has been solidly
 up, atomically moves traffic over, and gracefully stops the old one.
 If anything fails, the old version never stops serving and CI goes
-red. Rollback is re-POSTing the previous version. Full details, CI
-snippets, and every option: [liveswap/README.md](liveswap/README.md).
+red. Rollback is one call — `POST /<app>?rollback=<version>` relaunches
+an on-disk release. Full details, CI snippets, and every option:
+[liveswap/README.md](liveswap/README.md).
 
 ## What hotserve is (and isn't)
 

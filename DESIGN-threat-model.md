@@ -96,13 +96,14 @@ Properties that matter to the model:
   [watchdog.go:234-254](liveswap/watchdog.go)). Artifact URLs *are*
   redacted before logs/errors ([download.go:158-163](liveswap/download.go)),
   so query signatures do not leak — handled well.
-- **Replay / downgrade:** bearer secret only — no nonce, timestamp, or
-  body signature. A captured request replays indefinitely if TLS is
-  stripped or the secret leaks. Re-deploying the *running* version is
-  refused 422 ([app.go:293-295](liveswap/app.go)), but replaying an
-  *older* version's payload succeeds and rolls the app back — a
-  **downgrade primitive** for any secret-holder (arguably intentional:
-  the documented rollback story is "re-POST the previous version").
+- **Replay / downgrade — now bounded.** The bearer JWT is short-lived
+  (`exp`), so a captured request is replayable only within that window,
+  not indefinitely. And versions are immutable: re-deploying an existing
+  version (running or not) is refused 422, so replaying an *older*
+  deploy's payload no longer downgrades the app. A token-holder can
+  still downgrade deliberately via `?rollback=<version>` — but that is an
+  explicit, audited operation (`deployed_by` + a `source:rollback` log),
+  not a silent replay side-effect.
 - **Header-in-logs footgun — fixed.** The custom `X-Liveswap-Secret`
   header (logged in plaintext, unlike the redacted `Authorization`) has
   been removed; Bearer is the only transport. (Deploy tokens are also

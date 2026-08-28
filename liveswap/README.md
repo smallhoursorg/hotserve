@@ -29,10 +29,17 @@ POST /blog {url, version}
                    stopped serving, webhook returns 5xx, CI goes red)
 ```
 
+The diagram shows a **URL pull**; the same pipeline serves two more
+sources (see [Webhook API](#webhook-api)): a **push** streams the
+tarball in the request body (skips `downloading`), and a **rollback**
+relaunches an on-disk release (skips `downloading`/`extracting`/
+`preparing`). Versions are immutable — a re-deploy of an existing
+version is rejected; rollback is how you relaunch one.
+
 The cutover is an atomic pointer swap inside a `reverse_proxy` dynamic
 upstream source — no config reload, no socket juggling, and every
 reverse_proxy feature (WebSockets, HTTP/2, streaming, retries) keeps
-working. Rollback is one curl: re-POST the previous version.
+working. Rollback is one curl: `POST /<app>?rollback=<version>`.
 
 If you know Nomad, the concept map is:
 
@@ -498,10 +505,11 @@ failure the previous version never stopped serving.
   Caddy restarts is a designed-for v2 extension.
 - **Changed app definitions apply on the next deploy**, never by
   restarting a running app mid-reload.
-- **No post-promote auto-revert.** Once traffic cuts over, the deploy
-  is done; if the new version misbehaves later, re-POST the previous
-  version (its release dir is still on disk — that's what `keep` is
-  for). Everything *before* promote is automatically contained. The
+- **No post-promote *auto*-revert.** Once traffic cuts over, the deploy
+  is done; if the new version misbehaves later, roll back explicitly
+  with `?rollback=<version>` (its release dir is still on disk — that's
+  what `keep` is for). Everything *before* promote is automatically
+  contained. The
   watchdog restarts the *same* version on crash or sustained health
   failure — it never reverts to an older one.
 - **One deploy at a time per app** — concurrent webhooks get 409, and
