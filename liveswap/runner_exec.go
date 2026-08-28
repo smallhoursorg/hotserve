@@ -126,6 +126,9 @@ func (r *execRunner) Start(spec startSpec) (handle, error) {
 			h.swept = true
 		}
 		h.teardownMu.Unlock()
+		if h.sweepErr != nil && spec.onSweepFailure != nil {
+			spec.onSweepFailure(h.sweepErr) // durable record now, not at some future Stop
+		}
 		if !reaped {
 			// Teardown is settled; now release the pid.
 			if err := cmd.Wait(); err != nil {

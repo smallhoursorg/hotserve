@@ -515,9 +515,7 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 	// its verdict — the only way to learn that workers survived, so
 	// the version can be protected from release GC.
 	if err := c.runner.Stop(inst.handle, spec.grace); err != nil {
-		ma.markLeaked(c, inst.version)
-		c.logger.Warn("watchdog: stopping failed instance could not be confirmed; its release is protected from GC",
-			zap.String("version", inst.version), zap.Error(err))
+		ma.noteLeak(c, inst.version, err, "watchdog")
 	}
 	newInst, err := ma.launchVersion(c, inst.version)
 	if err != nil {

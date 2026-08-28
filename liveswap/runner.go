@@ -57,6 +57,12 @@ type startSpec struct {
 	// Stop takes its grace as an argument; this one covers the path on
 	// which nobody calls Stop. Unused by RunOnce.
 	grace time.Duration
+	// onSweepFailure, if set, is called (off the runner's locks) when
+	// that unsolicited sweep leaves processes behind — the same verdict
+	// a later Stop replays, delivered immediately so the app can record
+	// it durably even if no Stop ever reaches this handle (Caddy killed
+	// or OOMed first). Unused by RunOnce.
+	onSweepFailure func(error)
 }
 
 // handle identifies a running instance to its runner.

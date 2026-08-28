@@ -400,8 +400,10 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 			// error covers workers that outlived it — that would pull
 			// files from beneath a live, leaked process.
 			if newHandle != nil && (stopUnconfirmed || c.runner.Alive(newHandle)) {
-				ma.markLeaked(c, req.Version)
 				err = errors.Join(err, fmt.Errorf("release %s left on disk: the failed instance may still be running", req.Version))
+				if perr := ma.markLeaked(c, req.Version); perr != nil {
+					err = errors.Join(err, perr)
+				}
 				return
 			}
 			// Surface a cleanup failure: otherwise the release lingers and
@@ -444,10 +446,11 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 
 	ma.setPhase(c, "starting")
 	newHandle, err = c.runner.Start(startSpec{
-		command: expandArgs(spec.command, spec, req.Version, port, releaseDir),
-		dir:     releaseDir,
-		env:     env,
-		grace:   spec.grace,
+		command:        expandArgs(spec.command, spec, req.Version, port, releaseDir),
+		dir:            releaseDir,
+		env:            env,
+		grace:          spec.grace,
+		onSweepFailure: ma.sweepFailureRecorder(c, req.Version),
 	})
 	if err != nil {
 		return fmt.Errorf("start failed: %w", err)
@@ -504,9 +507,7 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 			// Some of the old instance may still be running out of its
 			// release dir. Protect that release from this and every
 			// later GC — a later deploy's GC has no other way to know.
-			ma.markLeaked(c, old.version)
-			logger.Warn("stopping old version failed; its release is protected from GC",
-				zap.String("version", old.version), zap.Error(err))
+			ma.noteLeak(c, old.version, err, "stopping old version")
 		}
 	}
 
@@ -515,29 +516,52 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	return nil
 }
 
+// sweepFailureRecorder gives the runner a way to publish a crash
+// sweep's failure the moment it happens: a durable mark that does not
+// depend on some later Stop reaching the handle before Caddy is killed.
+func (ma *managedApp) sweepFailureRecorder(c collaborators, version string) func(error) {
+	return func(cause error) { ma.noteLeak(c, version, cause, "crash sweep") }
+}
+
 // markLeaked records that version's processes could not be confirmed
 // stopped, so its release dir must never be deleted by GC — and
 // persists that immediately, since the stray processes outlive us.
-func (ma *managedApp) markLeaked(c collaborators, version string) {
+// The in-memory mark always lands; the returned error means it is NOT
+// durable, and the caller must say so rather than claim protection.
+func (ma *managedApp) markLeaked(c collaborators, version string) error {
 	ma.mu.Lock()
 	ma.leaked[version] = struct{}{}
 	ma.mu.Unlock()
-	ma.persistLeaked(c)
+	if err := ma.persistLeaked(c); err != nil {
+		return fmt.Errorf("release %s is protected from GC in memory only — the leak could not be persisted and will be forgotten at restart: %w", version, err)
+	}
+	return nil
+}
+
+// noteLeak is markLeaked for the post-cutover paths, where an error can
+// only be logged: the mark is made, and a persistence failure is
+// shouted rather than swallowed.
+func (ma *managedApp) noteLeak(c collaborators, version string, cause error, where string) {
+	c.logger.Warn(where+": instance could not be confirmed stopped; its release is protected from GC",
+		zap.String("version", version), zap.Error(cause))
+	if err := ma.markLeaked(c, version); err != nil {
+		c.logger.Error(where+": leak protection is not durable", zap.String("version", version), zap.Error(err))
+	}
 }
 
 // persistLeaked writes the leaked set into state.json without
 // disturbing the rest of the record (there may be none yet: a first
 // deploy can fail and leak before anything was ever published).
-func (ma *managedApp) persistLeaked(c collaborators) {
+func (ma *managedApp) persistLeaked(c collaborators) error {
 	st, _, err := c.store.load()
 	if err != nil {
-		c.logger.Warn("persisting leaked releases: cannot read state", zap.Error(err))
-		return
+		return fmt.Errorf("cannot read state: %w", err)
 	}
 	st.LeakedReleases = ma.leakedReleases()
 	if err := c.store.save(st); err != nil {
-		c.logger.Warn("persisting leaked releases", zap.Error(err))
+		return fmt.Errorf("cannot save state: %w", err)
 	}
+	return nil
 }
 
 // restoreLeaked merges the persisted leaked set into memory. Called
@@ -577,7 +601,9 @@ func (ma *managedApp) pruneLeaked(c collaborators) {
 	}
 	ma.mu.Unlock()
 	if changed {
-		ma.persistLeaked(c)
+		if err := ma.persistLeaked(c); err != nil {
+			c.logger.Warn("clearing leaked releases", zap.Error(err))
+		}
 	}
 }
 
@@ -620,9 +646,7 @@ func (ma *managedApp) ensureRunning() error {
 		// is about to be replaced, and it is the only thing that can
 		// replay its crash sweep's verdict. Collect it first.
 		if err := c.runner.Stop(inst.handle, spec.grace); err != nil {
-			ma.markLeaked(c, inst.version)
-			c.logger.Warn("recovery: dead instance could not be confirmed stopped; its release is protected from GC",
-				zap.String("version", inst.version), zap.Error(err))
+			ma.noteLeak(c, inst.version, err, "recovery")
 		}
 	}
 	st, ok, err := c.store.load()
@@ -683,10 +707,11 @@ func (ma *managedApp) launchVersion(c collaborators, version string) (*instance,
 		return nil, err
 	}
 	h, err := c.runner.Start(startSpec{
-		command: expandArgs(spec.command, spec, version, port, releaseDir),
-		dir:     releaseDir,
-		env:     env,
-		grace:   spec.grace,
+		command:        expandArgs(spec.command, spec, version, port, releaseDir),
+		dir:            releaseDir,
+		env:            env,
+		grace:          spec.grace,
+		onSweepFailure: ma.sweepFailureRecorder(c, version),
 	})
 	if err != nil {
 		return nil, err
@@ -815,7 +840,9 @@ func (ma *managedApp) Destruct() error {
 	if err != nil {
 		// Whatever survived outlives this Caddy; the next one must
 		// still know not to GC its release.
-		ma.markLeaked(c, inst.version)
+		if perr := ma.markLeaked(c, inst.version); perr != nil {
+			err = errors.Join(err, perr)
+		}
 	}
 	return err
 }

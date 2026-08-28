@@ -81,10 +81,11 @@ func (c *fakeClock) After(d time.Duration) <-chan time.Time {
 // Handles built as bare literals (no done channel) exercise the
 // Wait-returns-nil polling fallback.
 type fakeHandle struct {
-	id    string
-	alive bool
-	done  chan struct{}
-	mu    sync.Mutex
+	id      string
+	alive   bool
+	done    chan struct{}
+	mu      sync.Mutex
+	onCrash func() // set by fakeRunner.Start
 }
 
 func (h *fakeHandle) state() handleState { return handleState{PID: 4242} }
@@ -97,7 +98,6 @@ func (h *fakeHandle) isAlive() bool {
 
 func (h *fakeHandle) kill() {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.alive = false
 	if h.done != nil {
 		select {
@@ -105,6 +105,11 @@ func (h *fakeHandle) kill() {
 		default:
 			close(h.done)
 		}
+	}
+	onCrash := h.onCrash
+	h.mu.Unlock()
+	if onCrash != nil {
+		onCrash() // the exec runner's reaper reporting a failed crash sweep
 	}
 }
 
@@ -120,6 +125,7 @@ type fakeRunner struct {
 	reattachOK      bool
 	stopErr         error // Stop returns this
 	stopLeavesAlive bool  // Stop does not actually kill the handle
+	crashSweepErr   error // a killed handle reports this via startSpec.onSweepFailure
 }
 
 func (r *fakeRunner) Start(spec startSpec) (handle, error) {
@@ -129,6 +135,14 @@ func (r *fakeRunner) Start(spec startSpec) (handle, error) {
 		return nil, r.startErr
 	}
 	h := &fakeHandle{id: fmt.Sprintf("h%d", len(r.handles)), alive: true, done: make(chan struct{})}
+	h.onCrash = func() {
+		r.mu.Lock()
+		err := r.crashSweepErr
+		r.mu.Unlock()
+		if err != nil && spec.onSweepFailure != nil {
+			spec.onSweepFailure(err)
+		}
+	}
 	r.started = append(r.started, spec)
 	r.handles = append(r.handles, h)
 	return h, nil
@@ -266,10 +280,11 @@ func (f *fakeFetcher) fetch(_ context.Context, spec *appSpec, req deployRequest,
 
 // fakeStore is an in-memory stateStore.
 type fakeStore struct {
-	mu    sync.Mutex
-	state appState
-	ok    bool
-	err   error
+	mu      sync.Mutex
+	state   appState
+	ok      bool
+	err     error
+	saveErr error
 }
 
 func (s *fakeStore) load() (appState, bool, error) {
@@ -281,6 +296,9 @@ func (s *fakeStore) load() (appState, bool, error) {
 func (s *fakeStore) save(st appState) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.saveErr != nil {
+		return s.saveErr
+	}
 	s.state = st
 	s.ok = true
 	return nil
@@ -668,6 +686,45 @@ func TestRedeployOfRemovedLeakedReleaseClearsMarker(t *testing.T) {
 	}
 	if _, err := os.Stat(rig.spec.dirs.release("v1")); err != nil {
 		t.Fatalf("the redeployed release should exist: %v", err)
+	}
+}
+
+// The runner reports a failed crash sweep the moment it happens, and the
+// app records it durably right then — no Stop has to reach the handle
+// first, so a Caddy killed before the watchdog acts cannot lose it.
+func TestCrashSweepFailureIsPersistedWithoutStop(t *testing.T) {
+	rig := newTestRig(t)
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	rig.runner.crashSweepErr = errTest
+	rig.runner.handles[0].kill() // crash; the reaper's sweep leaves workers behind
+	if rig.runner.stopCount() != 0 {
+		t.Fatal("test premise: nothing has called Stop")
+	}
+	if got := rig.ma.status().LeakedReleases; !reflect.DeepEqual(got, []string{"v1"}) {
+		t.Fatalf("crash sweep failure must mark the version leaked immediately, got %v", got)
+	}
+	if st, _, _ := rig.store.load(); !reflect.DeepEqual(st.LeakedReleases, []string{"v1"}) {
+		t.Fatalf("...and persist it, state has %v", st.LeakedReleases)
+	}
+}
+
+// A leak that could not be persisted must not be reported as protected:
+// the failed-deploy error says so, and Destruct's does too.
+func TestLeakPersistenceFailureIsSurfaced(t *testing.T) {
+	rig := newTestRig(t)
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	rig.store.saveErr = errTest
+	rig.prober.err, rig.runner.stopErr = errTest, errTest
+	err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/2", Version: "v2"})
+	if err == nil || !strings.Contains(err.Error(), "in memory only") {
+		t.Fatalf("failed deploy must say the leak protection is not durable, got %v", err)
+	}
+	if got := rig.ma.status().LeakedReleases; !reflect.DeepEqual(got, []string{"v2"}) {
+		t.Fatalf("the in-memory mark must still land, got %v", got)
+	}
+	rig.runner.stopErr = errTest
+	if err := rig.ma.Destruct(); err == nil || !strings.Contains(err.Error(), "in memory only") {
+		t.Fatalf("Destruct must surface a non-durable leak, got %v", err)
 	}
 }
 
