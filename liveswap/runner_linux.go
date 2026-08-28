@@ -54,7 +54,7 @@ func scanProcGroup(root string, pgid int) (alive, complete bool) {
 		}
 		// /proc/<pid>/stat: "pid (comm) state ppid pgrp ..." — comm may
 		// contain spaces or parens, so split after the LAST ')'.
-		stat, err := os.ReadFile(root + "/" + e.Name() + "/stat")
+		stat, err := os.ReadFile(root + "/" + e.Name() + "/stat") //nolint:gosec // root is /proc (or a test fixture) and e.Name() a pid directory entry; nothing here is user input
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
 				continue // exited between the listing and the read
