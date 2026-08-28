@@ -43,19 +43,31 @@ func (r *execRunner) setLogger(logger *zap.Logger) { r.logger.Store(logger) }
 func (r *execRunner) log() *zap.Logger             { return r.logger.Load() }
 
 // execHandle tracks one spawned process — the *leader* of its process
-// group (pgid == pid, see setProcessGroup). done is closed by the reaper
-// goroutine once Wait returns, so Alive/Stop never race on Wait.
+// group (pgid == pid, see setProcessGroup). The leader's exit is not the
+// group's: npm/node workers it spawned keep running (and keep the port)
+// after it crashes. Invariants, in the order they matter:
 //
-// The leader's exit is not the group's: npm/node workers it spawned
-// keep running (and keep the port) after it crashes. The group is
-// swept exactly once after the leader is gone — by Stop if it was
-// called, else by the reaper — coordinated by teardownMu/swept: Stop
-// holds the mutex for its whole run, and the reaper takes it only
-// after closing done (Stop waits on done while holding the lock).
-// Once swept, the pgid is never touched again: an exited handle can
-// stay current indefinitely (watchdog off) and the kernel is free to
-// hand its pgid to an unrelated process group in the meantime, so a
-// late Stop (Destruct, hours later) must be a no-op, not a re-sweep.
+//  1. The group is swept exactly once after the leader is gone — by Stop
+//     if it holds teardownMu when the leader exits, else by the reaper —
+//     and never signalled again once `swept` is set: an exited handle can
+//     stay current indefinitely (watchdog off) and the kernel may hand
+//     its pgid to an unrelated group in the meantime.
+//  2. While the group is swept the leader is left unreaped (Linux:
+//     waitid WNOWAIT), so its pid — and therefore the pgid — stays
+//     reserved: a signal can only ever reach our own group.
+//  3. Alive and Wait (done) describe the leader only; done is closed
+//     before the reaper takes teardownMu, and Stop waits on done while
+//     holding it, so the two never deadlock.
+//  4. Stop returns nil only when the group is confirmed free of live
+//     members. A non-nil result means processes of this instance may
+//     remain, and every later Stop replays that verdict (sweepErr).
+//  5. A sweep the reaper had to perform on its own reports a failure
+//     once, via startSpec.onSweepFailure, so the app can record it
+//     durably without waiting for a Stop that may never come.
+//
+// Threat model: apps run as hotserve's own unprivileged user, so group
+// members cannot change credentials and every member is signalable and
+// visible; EPERM paths are reported as leaks, not defended against.
 type execHandle struct {
 	pid       int
 	startedAt time.Time
@@ -117,17 +129,19 @@ func (r *execRunner) Start(spec startSpec) (handle, error) {
 		// while the pgid is still ours. If a Stop was in flight it holds
 		// the lock until it has swept.
 		h.teardownMu.Lock()
+		var unsolicited error // the verdict, only if THIS goroutine swept
 		if !h.swept {
 			h.sweepErr = r.sweepGroup(h.pid, h.grace, "leader exited unsolicited")
-			if h.sweepErr != nil {
-				r.log().Error("orphaned process group could not be swept; its workers may have leaked",
-					zap.Int("pgid", h.pid), zap.Error(h.sweepErr))
-			}
 			h.swept = true
+			unsolicited = h.sweepErr
 		}
 		h.teardownMu.Unlock()
-		if h.sweepErr != nil && spec.onSweepFailure != nil {
-			spec.onSweepFailure(h.sweepErr) // durable record now, not at some future Stop
+		if unsolicited != nil {
+			r.log().Error("orphaned process group could not be swept; its workers may have leaked",
+				zap.Int("pgid", h.pid), zap.Error(unsolicited))
+			if spec.onSweepFailure != nil {
+				spec.onSweepFailure(unsolicited) // durable record now, not at some future Stop
+			}
 		}
 		if !reaped {
 			// Teardown is settled; now release the pid.
@@ -268,11 +282,11 @@ func (r *execRunner) Stop(h handle, grace time.Duration) (err error) {
 // its leader has exited: SIGTERM, up to grace for the members to leave
 // on their own, then SIGKILL the survivors. Nothing to do is the common
 // case and stays silent. A non-nil error means live members remain
-// that we could not signal at all (kill(2) fails with EPERM only when
-// *every* member refuses it — e.g. workers that changed credentials);
-// callers still record the group as swept, because retrying later is
-// futile and, once the pgid is recycled, dangerous — but they must
-// not pretend it was clean.
+// that we could not kill (EPERM — outside the threat model, see
+// execHandle — or a member stuck in uninterruptible sleep); callers
+// still record the group as swept, because retrying later is futile
+// and, once the pgid is recycled, dangerous — but they must not
+// pretend it was clean.
 func (r *execRunner) sweepGroup(pgid int, grace time.Duration, why string) error {
 	if !groupAlive(pgid) {
 		return nil
@@ -291,11 +305,10 @@ func (r *execRunner) sweepGroup(pgid int, grace time.Duration, why string) error
 	return killGroup(pgid)
 }
 
-// killGroup SIGKILLs process group pgid and confirms it emptied. The
-// confirmation matters: kill(2) on a group succeeds if it reached *any*
-// member, so in a mixed-credential group the leader can die while a
-// worker that switched uid is denied. An already-empty group is not an
-// error; anything still live afterwards is a leak the caller reports.
+// killGroup SIGKILLs process group pgid and confirms it emptied: kill(2)
+// on a group succeeds if it reached *any* member, and SIGKILL is not
+// instantaneous. An already-empty group is not an error; anything still
+// live afterwards is a leak the caller reports.
 func killGroup(pgid int) error {
 	err := signalGroup(pgid, syscall.SIGKILL)
 	if err != nil && !errors.Is(err, syscall.ESRCH) {

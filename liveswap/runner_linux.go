@@ -49,45 +49,37 @@ func (g groupSnapshot) anyLive() bool {
 
 // groupAlive reports whether any live (non-zombie) process remains in
 // process group pgid. It scans /proc rather than trusting kill(-pgid,
-// 0): when hotserve is PID 1 (the e2e container, a Docker image without
-// --init) orphaned grandchildren re-parent to it and stay zombies —
-// Go never reaps children it did not spawn — and they would keep the
-// group "signalable" forever, turning every stop into a full-grace
-// wait; the exited leader itself is deliberately left a zombie while
-// its group is swept. A scan that could not see every process
-// (unreadable /proc, a hidepid mount hiding a worker that changed uid)
-// must not conclude "gone": it falls back to the signal test, which
-// over-reports but never misses a live member.
+// 0): zombies keep a group signalable — the exited leader itself is
+// deliberately left one while its group is swept (execHandle invariant
+// 2), and when hotserve is PID 1 (the e2e container, a Docker image
+// without --init) orphaned grandchildren re-parent to it and are never
+// reaped — so the signal test alone would turn every stop into a
+// full-grace wait.
 func groupAlive(pgid int) bool {
 	return groupAliveWith(
 		func() (groupSnapshot, bool) { return scanProcGroup("/proc", pgid) },
-		func() bool { return groupSignalable(pgid) },
-		procHidesPIDs("/proc/self/mounts"))
+		func() bool { return groupSignalable(pgid) })
 }
 
 // maxScanPasses bounds groupAliveWith's search for a stable snapshot.
 const maxScanPasses = 4
 
-// groupAliveWith is groupAlive over injectable primitives. A negative
-// snapshot is proof only when the kernel agrees nothing is left
-// (kill(-pgid, 0) → ESRCH, atomic). Otherwise the group is signalable
-// — zombies, or a race: the listing and the per-pid reads are not
-// atomic, so a member can fork a same-group child after the listing
-// and die before its own read, leaving the child unseen. Such a child
-// shows up in the next listing, so "gone" is accepted only once two
-// consecutive snapshots are identical and zombie-only. If the view
-// keeps changing (something keeps forking), the answer is ALIVE: the
-// callers then wait, escalate, or report a leak — every one of which
-// is safe, where a wrong "gone" is not.
-func groupAliveWith(scan func() (groupSnapshot, bool), signalable func() bool, hidden bool) bool {
+// groupAliveWith is groupAlive over injectable primitives. "Gone" is
+// accepted from exactly two sources: the kernel saying nothing is left
+// (kill(-pgid, 0) → ESRCH, which is atomic), or two consecutive
+// identical zombie-only snapshots. One snapshot is not enough: the
+// listing and the per-pid reads are not atomic, so a member can fork a
+// same-group child after the listing and die before its own read,
+// leaving the child unseen — it shows up in the next listing. A scan
+// that could not read every entry, or a view that keeps changing within
+// maxScanPasses, is reported ALIVE: the callers then wait, escalate or
+// record a leak, all of which are safe where a wrong "gone" is not.
+func groupAliveWith(scan func() (groupSnapshot, bool), signalable func() bool) bool {
 	var prev groupSnapshot
 	for pass := 0; pass < maxScanPasses; pass++ {
 		snap, complete := scan()
-		if snap.anyLive() {
+		if snap.anyLive() || !complete {
 			return true
-		}
-		if !complete || hidden {
-			return signalable()
 		}
 		if !signalable() {
 			return false // nothing left, not even zombies
@@ -98,32 +90,6 @@ func groupAliveWith(scan func() (groupSnapshot, bool), signalable func() bool, h
 		prev = snap
 	}
 	return true // never settled; assume a live member is hiding in the churn
-}
-
-// procHidesPIDs reports whether /proc is mounted with hidepid, in which
-// case other users' processes are missing from the listing altogether
-// (hidepid=2/invisible) rather than present-but-unreadable, and a
-// negative scan proves nothing about a worker that changed uid. Any
-// value other than 0/off counts; an unreadable mounts file counts too.
-func procHidesPIDs(mountsPath string) bool {
-	data, err := os.ReadFile(mountsPath) //nolint:gosec // /proc/self/mounts or a test fixture
-	if err != nil {
-		return true
-	}
-	for _, line := range bytes.Split(data, []byte("\n")) {
-		f := bytes.Fields(line)
-		if len(f) < 4 || string(f[1]) != "/proc" || string(f[2]) != "proc" {
-			continue
-		}
-		for _, opt := range bytes.Split(f[3], []byte(",")) {
-			if v, ok := bytes.CutPrefix(opt, []byte("hidepid=")); ok {
-				if s := string(v); s != "0" && s != "off" {
-					return true
-				}
-			}
-		}
-	}
-	return false
 }
 
 // scanProcGroup walks a procfs root for members of pgid. complete is

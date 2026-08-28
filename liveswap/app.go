@@ -183,13 +183,27 @@ type managedApp struct {
 	phase      string
 	lastDeploy *deployResult
 	// leaked is the set of release versions whose processes could not
-	// be confirmed stopped (a Stop error: workers that survived their
-	// group's sweep). Every release GC leaves them alone, however old
-	// they get. Persisted in state.json and restored on start, because
-	// such a worker outlives a Caddy restart too. An entry clears when
-	// its release dir is gone — the operator's signal that the strays
-	// were dealt with. Surfaced as leaked_releases in status.
+	// be confirmed stopped (a Stop error, or the runner's own report of
+	// a failed crash sweep). Invariants:
+	//
+	//  1. A release dir is deleted only by the failed-deploy cleanup,
+	//     once its instance is confirmed stopped, or by release GC —
+	//     which never touches the current version or this set.
+	//  2. Every source of a leak verdict lands here durably: failed
+	//     deploy, stop-old on promote, watchdog restart, recovery,
+	//     Destruct, and the runner's onSweepFailure callback.
+	//  3. The set is restored from state.json — and pruned of entries
+	//     whose release dir is gone, the operator's way to clear one —
+	//     before any path that can run GC (deployLocked, ensureRunning).
+	//     An unreadable record aborts rather than proceeds blind.
+	//  4. Every state.json read-modify-write goes through stateMu: the
+	//     runner's callback runs off deployMu.
+	//
+	// Surfaced as leaked_releases in status.
 	leaked map[string]struct{}
+	// stateMu serializes state.json transactions (persistState,
+	// persistLeaked, restoreLeaked); see leaked invariant 4.
+	stateMu sync.Mutex
 
 	// activePort is what GetUpstreams reads on every request; storing
 	// it is the cutover. 0 = nothing serving yet.
@@ -512,7 +526,6 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	}
 
 	gcReleases(spec.dirs.releases, spec.keep, logger, append(ma.leakedReleases(), req.Version)...)
-	ma.pruneLeaked(c)
 	return nil
 }
 
@@ -553,6 +566,8 @@ func (ma *managedApp) noteLeak(c collaborators, version string, cause error, whe
 // disturbing the rest of the record (there may be none yet: a first
 // deploy can fail and leak before anything was ever published).
 func (ma *managedApp) persistLeaked(c collaborators) error {
+	ma.stateMu.Lock()
+	defer ma.stateMu.Unlock()
 	st, _, err := c.store.load()
 	if err != nil {
 		return fmt.Errorf("cannot read state: %w", err)
@@ -570,7 +585,9 @@ func (ma *managedApp) persistLeaked(c collaborators) error {
 // not swallowed: a caller that cannot read the record must not go on
 // to overwrite it or GC without it.
 func (ma *managedApp) restoreLeaked(c collaborators) error {
+	ma.stateMu.Lock()
 	st, ok, err := c.store.load()
+	ma.stateMu.Unlock()
 	if err != nil {
 		return err
 	}
@@ -588,8 +605,7 @@ func (ma *managedApp) restoreLeaked(c collaborators) error {
 // pruneLeaked drops entries whose release dir no longer exists: the
 // defined way to clear one is to kill the stray processes and remove
 // the release dir by hand. Runs right after restore — before a deploy
-// could recreate that very dir and make a stale marker permanent —
-// and again after GC (which never touches them).
+// could recreate that very dir and make a stale marker permanent.
 func (ma *managedApp) pruneLeaked(c collaborators) {
 	changed := false
 	ma.mu.Lock()
@@ -747,6 +763,8 @@ func (ma *managedApp) unrouteIf(inst *instance) {
 }
 
 func (ma *managedApp) persistState(c collaborators, inst *instance) error {
+	ma.stateMu.Lock()
+	defer ma.stateMu.Unlock()
 	if err := c.store.save(appState{
 		CurrentVersion: inst.version,
 		Port:           inst.port,

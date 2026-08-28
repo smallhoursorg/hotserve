@@ -89,33 +89,6 @@ func TestScanProcGroupIncompleteIsNotGone(t *testing.T) {
 	}
 }
 
-// hidepid=2 omits other users' processes from the /proc listing rather
-// than making them unreadable, so it must be detected from the mount
-// options; anything but 0/off (or an unreadable mounts file) disables
-// trust in a negative scan.
-func TestProcHidesPIDs(t *testing.T) {
-	cases := map[string]bool{
-		"proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0\n":                        false,
-		"proc /proc proc rw,nosuid,nodev,noexec,relatime,hidepid=0 0 0\n":              false,
-		"proc /proc proc rw,relatime,hidepid=off,subset=pid 0 0\n":                     false,
-		"proc /proc proc rw,nosuid,nodev,noexec,relatime,hidepid=2,gid=26 0 0\n":       true,
-		"proc /proc proc rw,relatime,hidepid=invisible 0 0\n":                          true,
-		"proc /proc proc rw,relatime,hidepid=1 0 0\n":                                  true,
-		"sysfs /sys sysfs rw 0 0\nproc /proc proc rw,hidepid=ptraceable 0 0\n":         true,
-		"proc /run/proc-copy proc rw,hidepid=2 0 0\nproc /proc proc rw,relatime 0 0\n": false, // only the /proc mount matters
-	}
-	for content, want := range cases {
-		path := filepath.Join(t.TempDir(), "mounts")
-		must(t, os.WriteFile(path, []byte(content), 0o644))
-		if got := procHidesPIDs(path); got != want {
-			t.Errorf("%q: got %v want %v", content, got, want)
-		}
-	}
-	if !procHidesPIDs(filepath.Join(t.TempDir(), "missing")) {
-		t.Error("an unreadable mounts file must be treated conservatively")
-	}
-}
-
 // groupAliveWith accepts "gone" only from an atomic kernel ESRCH or two
 // identical zombie-only snapshots; a view that keeps changing is
 // reported ALIVE, never gone.
@@ -144,17 +117,14 @@ func TestGroupAliveWithConvergence(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := groupAliveWith(tc.scan, tc.sig, false); got != tc.want {
+			if got := groupAliveWith(tc.scan, tc.sig); got != tc.want {
 				t.Fatalf("got %v want %v", got, tc.want)
 			}
 		})
 	}
 	incomplete := func() (groupSnapshot, bool) { return groupSnapshot{}, false }
-	if !groupAliveWith(incomplete, yes, false) || groupAliveWith(incomplete, no, false) {
-		t.Fatal("an incomplete scan must defer to the signal test")
-	}
-	if !groupAliveWith(seq(groupSnapshot{}), yes, true) {
-		t.Fatal("hidepid must defer to the signal test")
+	if !groupAliveWith(incomplete, yes) || !groupAliveWith(incomplete, no) {
+		t.Fatal("an incomplete scan must be reported alive")
 	}
 }
 
