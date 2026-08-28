@@ -109,14 +109,16 @@ func (h *fakeHandle) kill() {
 
 // fakeRunner records starts and stops; RunOnce failure is scriptable.
 type fakeRunner struct {
-	mu           sync.Mutex
-	started      []startSpec
-	handles      []*fakeHandle
-	stopped      []handle
-	runOnceErr   error
-	runOnceCount int
-	startErr     error
-	reattachOK   bool
+	mu              sync.Mutex
+	started         []startSpec
+	handles         []*fakeHandle
+	stopped         []handle
+	runOnceErr      error
+	runOnceCount    int
+	startErr        error
+	reattachOK      bool
+	stopErr         error // Stop returns this
+	stopLeavesAlive bool  // Stop does not actually kill the handle
 }
 
 func (r *fakeRunner) Start(spec startSpec) (handle, error) {
@@ -147,11 +149,12 @@ func (r *fakeRunner) Alive(h handle) bool {
 func (r *fakeRunner) Stop(h handle, _ time.Duration) error {
 	r.mu.Lock()
 	r.stopped = append(r.stopped, h)
+	leave, serr := r.stopLeavesAlive, r.stopErr
 	r.mu.Unlock()
-	if fh, ok := h.(*fakeHandle); ok {
+	if fh, ok := h.(*fakeHandle); ok && !leave {
 		fh.kill()
 	}
-	return nil
+	return serr
 }
 
 func (r *fakeRunner) Wait(h handle) <-chan struct{} {
@@ -780,5 +783,27 @@ func TestStageUploadClassifiesErrors(t *testing.T) {
 	// Happy path still works.
 	if _, err := stageUpload(strings.NewReader("data"), t.TempDir(), 100); err != nil {
 		t.Fatalf("valid upload should stage: %v", err)
+	}
+}
+
+func TestFailedDeployKeepsReleaseWhenStopUnconfirmed(t *testing.T) {
+	rig := newTestRig(t)
+	if err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/a.tgz", Version: "v1"}); err != nil {
+		t.Fatalf("deploy v1: %v", err)
+	}
+	// v2 fails the health gate, and Stop can't confirm the instance
+	// exited (it stays alive) — the release must NOT be deleted beneath it.
+	rig.prober.err = errTest
+	rig.runner.stopErr = errTest
+	rig.runner.stopLeavesAlive = true
+	err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/b.tgz", Version: "v2"})
+	if err == nil {
+		t.Fatal("deploy v2 should have failed")
+	}
+	if !strings.Contains(err.Error(), "still running") {
+		t.Fatalf("error should note the release was left in place: %v", err)
+	}
+	if _, statErr := os.Stat(rig.spec.dirs.release("v2")); statErr != nil {
+		t.Fatalf("release must not be deleted under a still-running failed instance: %v", statErr)
 	}
 }

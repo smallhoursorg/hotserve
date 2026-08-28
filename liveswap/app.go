@@ -365,16 +365,27 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	// permanently reserve its immutable version or leave disk litter, so
 	// the same version stays retriable. Rollback is excluded — it
 	// relaunches a pre-existing release it must never delete.
+	// newHandle is predeclared so the cleanup defer can confirm the failed
+	// instance is really gone before deleting its release.
+	var newHandle handle
 	promoted := false
 	if !req.rollback {
 		defer func() {
-			if err != nil && !promoted {
-				// Surface a cleanup failure: otherwise the release
-				// lingers and the next attempt at this version 422s
-				// (immutable) with no explanation of why.
-				if rmErr := os.RemoveAll(releaseDir); rmErr != nil {
-					err = errors.Join(err, fmt.Errorf("cleanup of failed release %s: %w", req.Version, rmErr))
-				}
+			if err == nil || promoted {
+				return
+			}
+			// Never delete a release out from under a failed instance that
+			// is still running (Stop may not have confirmed its exit) —
+			// that would pull files from beneath a live, leaked process.
+			if newHandle != nil && c.runner.Alive(newHandle) {
+				err = errors.Join(err, fmt.Errorf("release %s left on disk: the failed instance is still running", req.Version))
+				return
+			}
+			// Surface a cleanup failure: otherwise the release lingers and
+			// the next attempt at this version 422s (immutable) with no
+			// explanation of why.
+			if rmErr := os.RemoveAll(releaseDir); rmErr != nil {
+				err = errors.Join(err, fmt.Errorf("cleanup of failed release %s: %w", req.Version, rmErr))
 			}
 		}()
 	}
@@ -409,7 +420,7 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	}
 
 	ma.setPhase(c, "starting")
-	newHandle, err := c.runner.Start(startSpec{
+	newHandle, err = c.runner.Start(startSpec{
 		command: expandArgs(spec.command, spec, req.Version, port, releaseDir),
 		dir:     releaseDir,
 		env:     env,
@@ -428,8 +439,15 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		soak:     spec.soak,
 		deadline: spec.deadline,
 	}); err != nil {
-		_ = c.runner.Stop(newHandle, spec.grace)
-		return fmt.Errorf("health gate: %w", err)
+		deployErr := fmt.Errorf("health gate: %w", err)
+		// If Stop can't confirm the instance exited (its SIGTERM failed
+		// and the process is still alive), surface that — and the cleanup
+		// defer will then leave the release in place rather than delete it
+		// beneath the live process.
+		if stopErr := c.runner.Stop(newHandle, spec.grace); stopErr != nil && c.runner.Alive(newHandle) {
+			deployErr = errors.Join(deployErr, fmt.Errorf("failed instance could not be stopped: %w", stopErr))
+		}
+		return deployErr
 	}
 
 	// The point of no return. From here on the request context is
