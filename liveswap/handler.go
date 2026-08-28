@@ -165,6 +165,15 @@ func (h *Handler) deployPush(w http.ResponseWriter, r *http.Request, ma *managed
 	if !validVersion(version) {
 		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("version query param must match %s and not be . or ..", versionRe)})
 	}
+	// Acquire the per-app deploy lock BEFORE staging the upload: a
+	// concurrent push then gets an immediate 409 instead of streaming a
+	// full tarball to disk only to lose the lock, and total staged bytes
+	// stay bounded to a single upload.
+	if !ma.deployMu.TryLock() {
+		return h.mapDeployResult(w, ma, errDeployInProgress)
+	}
+	defer ma.deployMu.Unlock()
+
 	spec := ma.currentSpec()
 	archive, err := stageUpload(r.Body, spec.dirs.tmp, spec.maxArtifactSize)
 	if errors.Is(err, errArtifactTooLarge) {
@@ -175,9 +184,11 @@ func (h *Handler) deployPush(w http.ResponseWriter, r *http.Request, ma *managed
 		return respondJSON(w, http.StatusBadRequest, map[string]string{"error": "reading upload: " + err.Error()})
 	}
 	// Backstop cleanup: fetch removes the archive once it extracts it,
-	// but if Deploy returns before fetch (e.g. a 409/422) it would leak.
+	// but if the pipeline returns before fetch it would leak.
 	defer func() { _ = os.Remove(archive) }()
-	return h.runDeploy(w, r, ma, deployRequest{Version: version, localArchive: archive}, by)
+	req := deployRequest{Version: version, localArchive: archive, by: by}
+	h.logDeployAuthorized(r, ma, req)
+	return h.mapDeployResult(w, ma, ma.deployLocked(r.Context(), req))
 }
 
 // deployRollback relaunches an already-extracted on-disk release.
@@ -193,10 +204,18 @@ func (h *Handler) deployRollback(w http.ResponseWriter, r *http.Request, ma *man
 // the outcome to a status code.
 func (h *Handler) runDeploy(w http.ResponseWriter, r *http.Request, ma *managedApp, req deployRequest, by string) error {
 	req.by = by
+	h.logDeployAuthorized(r, ma, req)
+	return h.mapDeployResult(w, ma, ma.Deploy(r.Context(), req))
+}
+
+func (h *Handler) logDeployAuthorized(r *http.Request, ma *managedApp, req deployRequest) {
 	h.logger.Info("deploy authorized",
-		zap.String("app", ma.name), zap.String("via", by),
+		zap.String("app", ma.name), zap.String("via", req.by),
 		zap.String("source", req.source()), zap.String("remote", r.RemoteAddr))
-	err := ma.Deploy(r.Context(), req)
+}
+
+// mapDeployResult turns a pipeline outcome into the webhook response.
+func (h *Handler) mapDeployResult(w http.ResponseWriter, ma *managedApp, err error) error {
 	status := ma.status()
 	var vErr validationError
 	switch {

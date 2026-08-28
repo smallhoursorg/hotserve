@@ -183,7 +183,10 @@ func (rf *releaseFetcher) fetch(ctx context.Context, spec *appSpec, req deployRe
 	if req.rollback {
 		releaseDir := spec.dirs.release(req.Version)
 		if _, err := os.Stat(releaseDir); err != nil {
-			return "", validationError{fmt.Sprintf("no on-disk release %q to roll back to (it may have been pruned by keep)", req.Version)}
+			if os.IsNotExist(err) {
+				return "", validationError{fmt.Sprintf("no on-disk release %q to roll back to (it may have been pruned by keep)", req.Version)}
+			}
+			return "", err // a real I/O/permission error is a server failure, not a missing target
 		}
 		return releaseDir, nil
 	}

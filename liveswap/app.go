@@ -292,12 +292,21 @@ func (ma *managedApp) setPhase(c collaborators, phase string) {
 // promote step leaves the old version serving untouched — that is the
 // rollback story. There is deliberately no post-promote auto-revert:
 // rolling back is re-POSTing the previous version.
-func (ma *managedApp) Deploy(ctx context.Context, req deployRequest) (err error) {
+func (ma *managedApp) Deploy(ctx context.Context, req deployRequest) error {
 	if !ma.deployMu.TryLock() {
 		return errDeployInProgress
 	}
 	defer ma.deployMu.Unlock()
+	return ma.deployLocked(ctx, req)
+}
 
+// deployLocked runs the blue/green pipeline. The caller MUST already
+// hold deployMu: URL/rollback go through Deploy, while the push handler
+// acquires the lock BEFORE staging the upload, so a concurrent push
+// gets an immediate 409 rather than streaming a whole tarball to disk
+// only to lose the lock (which would also make aggregate staging
+// unbounded by the per-request cap).
+func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest) (err error) {
 	c := ma.snapshot()
 	spec := c.spec
 	started := c.clock.Now()
@@ -341,8 +350,14 @@ func (ma *managedApp) Deploy(ctx context.Context, req deployRequest) (err error)
 	// relaunches an existing release by design. Deploys are serialized per
 	// app (deployMu), so this check-then-create has no race.
 	if !req.rollback {
-		if _, err := os.Stat(spec.dirs.release(req.Version)); err == nil {
+		switch _, statErr := os.Stat(spec.dirs.release(req.Version)); {
+		case statErr == nil:
 			return validationError{fmt.Sprintf("version %s already exists — versions are immutable; deploy a new version, or roll back to relaunch this one", req.Version)}
+		case !os.IsNotExist(statErr):
+			// A real I/O/permission error must not be read as "absent"
+			// and fall through to fetch, whose RemoveAll would then
+			// overwrite the existing release.
+			return fmt.Errorf("checking release %s: %w", req.Version, statErr)
 		}
 	}
 
@@ -359,7 +374,12 @@ func (ma *managedApp) Deploy(ctx context.Context, req deployRequest) (err error)
 	if !req.rollback {
 		defer func() {
 			if err != nil && !promoted {
-				_ = os.RemoveAll(releaseDir)
+				// Surface a cleanup failure: otherwise the release
+				// lingers and the next attempt at this version 422s
+				// (immutable) with no explanation of why.
+				if rmErr := os.RemoveAll(releaseDir); rmErr != nil {
+					err = errors.Join(err, fmt.Errorf("cleanup of failed release %s: %w", req.Version, rmErr))
+				}
 			}
 		}()
 	}
@@ -594,20 +614,24 @@ type statusSnapshot struct {
 	LastDeploy     *deployResult     `json:"last_deploy,omitempty"`
 	Watchdog       *watchdogSnapshot `json:"watchdog,omitempty"`
 	// AvailableVersions lists the on-disk releases, newest-first — the
-	// versions `?rollback=<version>` can relaunch.
-	AvailableVersions []string `json:"available_versions,omitempty"`
+	// versions `?rollback=<version>` can relaunch. Always serialized (a
+	// healthy app with no releases reports []), so an empty set is
+	// distinguishable from a server that doesn't report the field.
+	AvailableVersions []string `json:"available_versions"`
 }
 
 func (ma *managedApp) status() statusSnapshot {
 	c := ma.snapshot()
 	var wd *watchdogSnapshot
-	var available []string
+	available := []string{} // always an array in the JSON, never null
 	if c.spec != nil {
 		if c.clock != nil {
 			wd = ma.wd.statusSnapshot(c.clock.Now(), c.spec.wdWindow)
 		}
 		// Read releases outside ma.mu — it is disk I/O, and status is polled.
-		available = listReleases(c.spec.dirs.releases)
+		if rels := listReleases(c.spec.dirs.releases); rels != nil {
+			available = rels
+		}
 	}
 	ma.mu.Lock()
 	defer ma.mu.Unlock()

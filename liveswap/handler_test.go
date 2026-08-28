@@ -2,6 +2,7 @@ package liveswap
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -317,5 +318,35 @@ func TestWebhookStatusListsAvailableVersions(t *testing.T) {
 	}
 	if !set["v1"] || !set["v2"] {
 		t.Fatalf("available_versions missing a release: %v", status.AvailableVersions)
+	}
+}
+
+// trackReader records whether its body was read.
+type trackReader struct{ read bool }
+
+func (t *trackReader) Read(p []byte) (int, error) { t.read = true; return 0, io.EOF }
+
+func TestWebhookPushLocksBeforeStaging(t *testing.T) {
+	h, rig := newTestHandler(t)
+	rig.ma.deployMu.Lock() // simulate an in-progress deploy
+	defer rig.ma.deployMu.Unlock()
+	tr := &trackReader{}
+	req := httptest.NewRequest(http.MethodPost, "/demo?version=v1", tr)
+	req.Header.Set("Authorization", "Bearer "+appToken(t))
+	req.Header.Set("Content-Type", "application/gzip")
+	w := send(t, h, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("push during an in-progress deploy should be 409, got %d", w.Code)
+	}
+	if tr.read {
+		t.Fatal("push body must not be staged before the deploy lock is acquired")
+	}
+}
+
+func TestWebhookAvailableVersionsIsArrayWhenEmpty(t *testing.T) {
+	h, _ := newTestHandler(t)
+	w := do(t, h, http.MethodGet, "/demo", appToken(t), "")
+	if !strings.Contains(w.Body.String(), `"available_versions":[]`) {
+		t.Fatalf("empty available_versions should serialize as [], not null/absent: %s", w.Body.String())
 	}
 }

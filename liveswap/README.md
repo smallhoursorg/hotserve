@@ -173,7 +173,7 @@ resolved at config load.
 | `watchdog_grace` | `30s` | After every (re)start, probe failures don't count until this elapses; a crash always counts |
 | `watchdog_restarts` | `5` | Restart budget within `watchdog_window`; crash and health restarts share it |
 | `watchdog_window` | `10m` | Sliding window for the restart budget |
-| `keep` | `5` | Release dirs retained (GC after success) |
+| `keep` | `5` | Release dirs retained (GC after success). The running version is always kept, so this can be `keep+1` after rolling back to an old release |
 | `max_artifact_size` | `100MB` | Download cap; decompressed cap is 10× |
 
 ## Watchdog
