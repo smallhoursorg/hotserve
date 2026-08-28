@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -184,9 +185,10 @@ type managedApp struct {
 	// leaked is the set of release versions whose processes could not
 	// be confirmed stopped (a Stop error: workers that survived their
 	// group's sweep). Every release GC leaves them alone, however old
-	// they get. In-memory on purpose: exec-runner children never
-	// outlive Caddy, so a restart resolves the leak and the protection
-	// rightly goes with it. Surfaced as leaked_releases in status.
+	// they get. Persisted in state.json and restored on start, because
+	// such a worker outlives a Caddy restart too. An entry clears when
+	// its release dir is gone — the operator's signal that the strays
+	// were dealt with. Surfaced as leaked_releases in status.
 	leaked map[string]struct{}
 
 	// activePort is what GetUpstreams reads on every request; storing
@@ -388,7 +390,7 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 			// error covers workers that outlived it — that would pull
 			// files from beneath a live, leaked process.
 			if newHandle != nil && (stopUnconfirmed || c.runner.Alive(newHandle)) {
-				ma.markLeaked(req.Version)
+				ma.markLeaked(c, req.Version)
 				err = errors.Join(err, fmt.Errorf("release %s left on disk: the failed instance may still be running", req.Version))
 				return
 			}
@@ -492,22 +494,73 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 			// Some of the old instance may still be running out of its
 			// release dir. Protect that release from this and every
 			// later GC — a later deploy's GC has no other way to know.
-			ma.markLeaked(old.version)
-			logger.Warn("stopping old version failed; its release is protected from GC until restart",
+			ma.markLeaked(c, old.version)
+			logger.Warn("stopping old version failed; its release is protected from GC",
 				zap.String("version", old.version), zap.Error(err))
 		}
 	}
 
 	gcReleases(spec.dirs.releases, spec.keep, logger, append(ma.leakedReleases(), req.Version)...)
+	ma.pruneLeaked(c)
 	return nil
 }
 
 // markLeaked records that version's processes could not be confirmed
-// stopped, so its release dir must never be deleted by GC.
-func (ma *managedApp) markLeaked(version string) {
+// stopped, so its release dir must never be deleted by GC — and
+// persists that immediately, since the stray processes outlive us.
+func (ma *managedApp) markLeaked(c collaborators, version string) {
+	ma.mu.Lock()
+	ma.leaked[version] = struct{}{}
+	ma.mu.Unlock()
+	ma.persistLeaked(c)
+}
+
+// persistLeaked writes the leaked set into state.json without
+// disturbing the rest of the record (there may be none yet: a first
+// deploy can fail and leak before anything was ever published).
+func (ma *managedApp) persistLeaked(c collaborators) {
+	st, _, err := c.store.load()
+	if err != nil {
+		c.logger.Warn("persisting leaked releases: cannot read state", zap.Error(err))
+		return
+	}
+	st.LeakedReleases = ma.leakedReleases()
+	if err := c.store.save(st); err != nil {
+		c.logger.Warn("persisting leaked releases", zap.Error(err))
+	}
+}
+
+// restoreLeaked merges the persisted leaked set into memory. Called on
+// start before anything can run GC; a union, so nothing recorded in
+// this process is ever dropped by an older file.
+func (ma *managedApp) restoreLeaked(c collaborators) {
+	st, ok, err := c.store.load()
+	if err != nil || !ok {
+		return
+	}
 	ma.mu.Lock()
 	defer ma.mu.Unlock()
-	ma.leaked[version] = struct{}{}
+	for _, v := range st.LeakedReleases {
+		ma.leaked[v] = struct{}{}
+	}
+}
+
+// pruneLeaked drops entries whose release dir no longer exists: the
+// defined way to clear one is to kill the stray processes and remove
+// the release dir by hand. Runs after GC (which never touches them).
+func (ma *managedApp) pruneLeaked(c collaborators) {
+	changed := false
+	ma.mu.Lock()
+	for v := range ma.leaked {
+		if _, err := os.Stat(c.spec.dirs.release(v)); errors.Is(err, fs.ErrNotExist) {
+			delete(ma.leaked, v)
+			changed = true
+		}
+	}
+	ma.mu.Unlock()
+	if changed {
+		ma.persistLeaked(c)
+	}
 }
 
 // leakedReleases returns the protected versions, sorted, for GC and status.
@@ -537,6 +590,7 @@ func (ma *managedApp) ensureRunning() error {
 
 	c := ma.snapshot()
 	spec := c.spec
+	ma.restoreLeaked(c) // before any path that could lead to a GC
 	if inst := ma.currentInstance(); inst != nil && c.runner.Alive(inst.handle) {
 		return nil
 	}
@@ -642,6 +696,7 @@ func (ma *managedApp) persistState(c collaborators, inst *instance) error {
 		Port:           inst.port,
 		Handle:         inst.handle.state(),
 		UpdatedAt:      c.clock.Now(),
+		LeakedReleases: ma.leakedReleases(),
 	}); err != nil {
 		return err
 	}

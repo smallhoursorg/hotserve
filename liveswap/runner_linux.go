@@ -26,15 +26,29 @@ func applyPdeathsig(attr *syscall.SysProcAttr) {
 // hidepid mount hiding a worker that changed uid) must not conclude
 // "gone": it falls back to the signal test, which over-reports but
 // never misses a live member.
+//
+// A negative scan is trusted only when the kernel agrees nothing is
+// left (kill(-pgid, 0) → ESRCH, which is atomic), or when a second
+// listing agrees. The listing and the per-pid reads are not atomic: a
+// member can fork a same-group child after the listing and die before
+// its own read, so one pass would skip the parent as a zombie and never
+// see the child. The child is in the next listing.
 func groupAlive(pgid int) bool {
-	alive, complete := scanProcGroup("/proc", pgid)
-	if alive {
-		return true
+	hidden := procHidesPIDs("/proc/self/mounts")
+	for pass := 0; pass < 2; pass++ {
+		alive, complete := scanProcGroup("/proc", pgid)
+		if alive {
+			return true
+		}
+		if !complete || hidden {
+			return groupSignalable(pgid)
+		}
+		if !groupSignalable(pgid) {
+			return false // nothing left, not even zombies
+		}
+		// Still signalable: zombies only — or the fork race above.
 	}
-	if !complete || procHidesPIDs("/proc/self/mounts") {
-		return groupSignalable(pgid)
-	}
-	return false
+	return false // two consecutive listings saw no live member
 }
 
 // procHidesPIDs reports whether /proc is mounted with hidepid, in which

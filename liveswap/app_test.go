@@ -897,6 +897,56 @@ func TestFailedDeployKeepsReleaseWhenGroupStopUnconfirmed(t *testing.T) {
 	if got := rig.ma.status().LeakedReleases; !reflect.DeepEqual(got, []string{"v2"}) {
 		t.Fatalf("status should name the leaked release, got %v", got)
 	}
+	if st, _, _ := rig.store.load(); !reflect.DeepEqual(st.LeakedReleases, []string{"v2"}) {
+		t.Fatalf("leaked set must be persisted, state has %v", st.LeakedReleases)
+	}
+}
+
+// The stray processes behind a leaked release outlive a Caddy restart
+// (Pdeathsig reaches only the direct leader, and only on Linux), so the
+// protection must come back from state.json before any GC can run.
+func TestLeakedReleasesSurviveRestart(t *testing.T) {
+	ctx := context.Background()
+	rig := newTestRig(t)
+	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/v1", Version: "v1"}))
+	rig.prober.err, rig.runner.stopErr = errTest, errTest
+	if err := rig.ma.Deploy(ctx, deployRequest{URL: "https://x/v2", Version: "v2"}); err == nil {
+		t.Fatal("v2 should have failed")
+	}
+	for i, v := range []string{"v1", "v2"} {
+		mt := time.Now().Add(time.Duration(i-10) * time.Minute)
+		must(t, os.Chtimes(rig.spec.dirs.release(v), mt, mt))
+	}
+
+	// "Restart": a fresh managedApp over the same state file and dirs.
+	fresh := newTestRig(t)
+	fresh.spec, fresh.store = rig.spec, rig.store
+	fresh.ma.spec, fresh.ma.store = rig.spec, rig.store
+	must(t, fresh.ma.ensureRunning())
+	if got := fresh.ma.status().LeakedReleases; !reflect.DeepEqual(got, []string{"v2"}) {
+		t.Fatalf("leaked set not restored after restart: %v", got)
+	}
+	must(t, fresh.ma.Deploy(ctx, deployRequest{URL: "https://x/v3", Version: "v3"}))
+	mt := time.Now().Add(-8 * time.Minute)
+	must(t, os.Chtimes(fresh.spec.dirs.release("v3"), mt, mt))
+	must(t, fresh.ma.Deploy(ctx, deployRequest{URL: "https://x/v4", Version: "v4"}))
+	if _, err := os.Stat(fresh.spec.dirs.release("v1")); !os.IsNotExist(err) {
+		t.Fatalf("test premise: v1 should have been GC'd (stat err=%v)", err)
+	}
+	if _, err := os.Stat(fresh.spec.dirs.release("v2")); err != nil {
+		t.Fatalf("leaked release must survive GC after a restart: %v", err)
+	}
+
+	// The defined way to clear it: deal with the strays and remove the
+	// release dir; the next GC pass drops the entry, in memory and on disk.
+	must(t, os.RemoveAll(fresh.spec.dirs.release("v2")))
+	must(t, fresh.ma.Deploy(ctx, deployRequest{URL: "https://x/v5", Version: "v5"}))
+	if got := fresh.ma.status().LeakedReleases; len(got) != 0 {
+		t.Fatalf("removed release should drop out of the leaked set, got %v", got)
+	}
+	if st, _, _ := fresh.store.load(); len(st.LeakedReleases) != 0 {
+		t.Fatalf("cleared entry must be persisted as cleared, state has %v", st.LeakedReleases)
+	}
 }
 
 func TestFailedDeployKeepsReleaseWhenStopUnconfirmed(t *testing.T) {

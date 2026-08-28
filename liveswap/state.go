@@ -19,6 +19,11 @@ type appState struct {
 	Port           int         `json:"port"`
 	Handle         handleState `json:"handle"`
 	UpdatedAt      time.Time   `json:"updated_at"`
+	// LeakedReleases are versions whose processes could not be
+	// confirmed stopped. Persisted because such a process also survives
+	// a Caddy restart (Pdeathsig reaches only the direct leader, and
+	// only on Linux), so GC after a restart must still spare them.
+	LeakedReleases []string `json:"leaked_releases,omitempty"`
 }
 
 // stateStore persists appState; an interface so pipeline unit tests

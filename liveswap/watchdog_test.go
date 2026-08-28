@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -100,6 +101,33 @@ func TestWatchdogRestartsOnCrash(t *testing.T) {
 	status := rig.ma.status()
 	if status.Watchdog == nil || status.Watchdog.RestartsInWindow != 1 || status.Watchdog.LastRestartCause != "crash" {
 		t.Fatalf("watchdog status not recorded: %+v", status.Watchdog)
+	}
+}
+
+// A crashed leader still gets a Stop on the restart path: it replays
+// the crash sweep's verdict, and a failed one marks the version leaked
+// so no later GC deletes the release beneath the surviving workers.
+func TestWatchdogMarksLeakedWhenCrashSweepFails(t *testing.T) {
+	rig := newTestRig(t)
+	deployV1(t, rig)
+	rig.startWatchdogT(t)
+	waitUntil(t, "watchdog to arm", func() bool {
+		s := rig.ma.wd.currentState()
+		return s == wdStateGrace || s == wdStateWatching
+	})
+	rig.runner.stopErr = errTest // the sweep left workers behind
+	rig.runner.handleAt(0).kill()
+	advanceUntil(t, rig, time.Second, "restart after crash", func() bool {
+		return rig.runner.startCount() == 2
+	})
+	waitUntil(t, "leak recorded", func() bool {
+		return reflect.DeepEqual(rig.ma.status().LeakedReleases, []string{"v1"})
+	})
+	if rig.runner.stopCount() != 1 {
+		t.Fatalf("dead leader must still be stopped once to collect the sweep verdict, got %d", rig.runner.stopCount())
+	}
+	if st, _, _ := rig.store.load(); !reflect.DeepEqual(st.LeakedReleases, []string{"v1"}) {
+		t.Fatalf("leak must be persisted, state has %v", st.LeakedReleases)
 	}
 }
 

@@ -509,14 +509,15 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 	// webhook landing in that window gets a 409 — the same contract as
 	// a deploy's own drain+stop-old phase (one lifecycle operation at
 	// a time), and the same bound Destruct accepts when it waits for
-	// this goroutine at shutdown. A dead leader needs no Stop: the
-	// runner owns the sweep of its process group, started the moment
-	// the leader was reaped — the old workers may still be draining
-	// within their grace while the replacement starts on a fresh port.
-	if c.runner.Alive(inst.handle) {
-		if err := c.runner.Stop(inst.handle, spec.grace); err != nil {
-			c.logger.Warn("watchdog: stopping unhealthy instance", zap.Error(err))
-		}
+	// this goroutine at shutdown. Even a dead leader gets a Stop: the
+	// runner started sweeping its process group the moment the leader
+	// was reaped, and Stop synchronises with that sweep and replays
+	// its verdict — the only way to learn that workers survived, so
+	// the version can be protected from release GC.
+	if err := c.runner.Stop(inst.handle, spec.grace); err != nil {
+		ma.markLeaked(c, inst.version)
+		c.logger.Warn("watchdog: stopping failed instance could not be confirmed; its release is protected from GC",
+			zap.String("version", inst.version), zap.Error(err))
 	}
 	newInst, err := ma.launchVersion(c, inst.version)
 	if err != nil {
