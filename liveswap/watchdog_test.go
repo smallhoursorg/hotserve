@@ -103,6 +103,32 @@ func TestWatchdogRestartsOnCrash(t *testing.T) {
 	}
 }
 
+// A health verdict whose instance turns out dead by restart time is
+// recorded as a crash: which signal noticed first is an accident of
+// probe interval versus the runner's unit-state poll.
+func TestWatchdogHealthFailureOnDeadInstanceIsACrash(t *testing.T) {
+	rig := newTestRig(t)
+	rig.spec.wdGrace = 0
+	deployV1(t, rig)
+	rig.prober.setProbeErr(errors.New("connection refused"))
+	rig.startWatchdogT(t)
+
+	advanceUntil(t, rig, rig.spec.healthInterval, "health verdict reached", func() bool {
+		return rig.ma.wd.currentState() == wdStateBackoff
+	})
+	rig.runner.handleAt(0).dieQuietly()
+	rig.prober.setProbeErr(nil)
+	advanceUntil(t, rig, time.Second, "restart", func() bool {
+		return rig.runner.startCount() == 2
+	})
+	if rig.runner.stopCount() != 0 {
+		t.Fatalf("a dead instance must not be stopped, got %d stops", rig.runner.stopCount())
+	}
+	if status := rig.ma.status(); status.Watchdog == nil || status.Watchdog.LastRestartCause != "crash" {
+		t.Fatalf("a dead instance's restart must be recorded as a crash: %+v", status.Watchdog)
+	}
+}
+
 func TestWatchdogHealthFailuresBelowThresholdReset(t *testing.T) {
 	rig := newTestRig(t)
 	rig.spec.wdGrace = 0

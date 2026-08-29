@@ -1,7 +1,7 @@
 // Package liveswap turns Caddy into a zero-downtime deploy orchestrator
 // for a single server. CI builds a tarball and POSTs a webhook with its
 // URL and version; Caddy downloads it, runs an optional pre-start
-// command (migrations), starts the new version as a child process on a
+// command (migrations), starts the new version as a systemd unit on a
 // fresh localhost port, health-gates it, atomically cuts traffic over,
 // then gracefully stops the old version. Part of hotserve, from
 // smallhours.
@@ -34,9 +34,9 @@ func init() {
 // instance. This is what makes app processes survive config reloads:
 // Caddy provisions the new config (which takes a pool reference) before
 // it cleans up the old one (which releases its reference), so the
-// refcount never touches zero across a reload and Destruct — which
-// stops the child process — only runs at real shutdown or when an app
-// is removed from the config.
+// refcount never touches zero across a reload and Destruct only runs
+// at real shutdown (where it leaves the unit running for reattach) or
+// when an app is removed from the config (where it stops it).
 var appPool = caddy.NewUsagePool()
 
 func poolKey(name string) string { return "liveswap:app:" + name }
@@ -292,6 +292,14 @@ func (a *App) Provision(ctx caddy.Context) error {
 	if err := a.Validate(); err != nil {
 		return err
 	}
+	// Apps run as transient units under this user's systemd manager.
+	// Prove it answers before anything is committed, with an error
+	// that says what to fix; there is deliberately no fallback runner.
+	if len(specs) > 0 {
+		if err := probeUserManager(); err != nil {
+			return err
+		}
+	}
 	for name, spec := range specs {
 		val, _ := appPool.LoadOrStore(poolKey(name), newManagedApp(name))
 		ma := val.(*managedApp)
@@ -499,7 +507,8 @@ func (a *App) Stop() error { return nil }
 
 // Cleanup releases this config's pool references. When the last
 // reference goes (shutdown, or an app removed from the config), the
-// pool calls managedApp.Destruct, which stops the child process.
+// pool calls managedApp.Destruct: an app removed from the config is
+// stopped; on process exit the units stay up for the next start.
 func (a *App) Cleanup() error {
 	var firstErr error
 	for _, key := range a.pooled {

@@ -94,6 +94,15 @@ func (h *fakeHandle) isAlive() bool {
 	return h.alive
 }
 
+// dieQuietly makes the handle read as dead without closing done —
+// the shape of a systemd unit whose exit the runner's state poll has
+// not yet observed while health probes are already failing.
+func (h *fakeHandle) dieQuietly() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.alive = false
+}
+
 func (h *fakeHandle) kill() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -800,10 +809,81 @@ func TestFailedDeployKeepsReleaseWhenStopUnconfirmed(t *testing.T) {
 	if err == nil {
 		t.Fatal("deploy v2 should have failed")
 	}
-	if !strings.Contains(err.Error(), "still running") {
+	if !strings.Contains(err.Error(), "may still be running") {
 		t.Fatalf("error should note the release was left in place: %v", err)
 	}
 	if _, statErr := os.Stat(rig.spec.dirs.release("v2")); statErr != nil {
 		t.Fatalf("release must not be deleted under a still-running failed instance: %v", statErr)
+	}
+}
+
+func TestFailedDeployKeepsReleaseWhenStopErrorsEvenIfDead(t *testing.T) {
+	rig := newTestRig(t)
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/a.tgz", Version: "v1"}))
+	// v2 fails the health gate and Stop reports an error even though
+	// the handle then reads as dead. Under cgroup kill "Stop errored"
+	// is the only signal a caller gets, so the release stays on disk.
+	rig.prober.err = errTest
+	rig.runner.stopErr = errTest
+	err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/b.tgz", Version: "v2"})
+	if err == nil || !strings.Contains(err.Error(), "left on disk") {
+		t.Fatalf("expected the release to be kept: %v", err)
+	}
+	if _, statErr := os.Stat(rig.spec.dirs.release("v2")); statErr != nil {
+		t.Fatalf("release must survive an unconfirmed stop: %v", statErr)
+	}
+}
+
+func TestDeploySkipsGCWhenStopOldUnconfirmed(t *testing.T) {
+	rig := newTestRig(t)
+	ctx := context.Background()
+	for i, v := range []string{"v1", "v2"} {
+		must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/a", Version: v}))
+		mt := time.Now().Add(time.Duration(i-10) * time.Minute)
+		_ = os.Chtimes(rig.spec.dirs.release(v), mt, mt)
+	}
+	// keep=2: deploying v3 would normally GC v1. With the stop of v2
+	// unconfirmed, nothing may be deleted — v2 might still be running
+	// out of its release dir, and v1's fate is decided by a later deploy.
+	rig.runner.stopErr = errTest
+	rig.runner.stopLeavesAlive = true
+	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/a", Version: "v3"}))
+	for _, v := range []string{"v1", "v2", "v3"} {
+		if _, err := os.Stat(rig.spec.dirs.release(v)); err != nil {
+			t.Fatalf("release %s must survive a deploy whose stop-old was unconfirmed: %v", v, err)
+		}
+	}
+	if rig.ma.currentInstance().version != "v3" {
+		t.Fatal("the deploy itself still succeeds; only GC is skipped")
+	}
+}
+
+func TestDestructLeavesInstanceRunningOnProcessExit(t *testing.T) {
+	rig := newTestRig(t)
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	orig := caddyExiting
+	caddyExiting = func() bool { return true }
+	t.Cleanup(func() { caddyExiting = orig })
+	must(t, rig.ma.Destruct())
+	if rig.runner.stopCount() != 0 {
+		t.Fatal("on process exit the unit must be left running for reattach")
+	}
+	if !rig.runner.Alive(rig.runner.handleAt(0)) {
+		t.Fatal("instance must still be alive after Destruct on exit")
+	}
+}
+
+func TestStartSpecCarriesUnitIdentity(t *testing.T) {
+	rig := newTestRig(t)
+	rig.spec.preStart = []string{"true"}
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	if rig.runner.startCount() != 2 {
+		t.Fatalf("expected pre_start + start, got %d", rig.runner.startCount())
+	}
+	for i := range 2 {
+		s := rig.runner.started[i]
+		if s.app != "demo" || s.version != "v1" || s.grace != rig.spec.grace {
+			t.Fatalf("startSpec %d lacks unit identity: %+v", i, s)
+		}
 	}
 }

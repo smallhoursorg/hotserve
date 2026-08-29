@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/caddyserver/caddy/v2"
 	"go.uber.org/zap"
 )
 
@@ -203,7 +204,7 @@ func newManagedApp(name string) *managedApp {
 // configure installs the latest spec and (re)wires collaborators. On
 // the first provision the runner/prober/etc. are created; on reloads
 // the spec, logger and state path are refreshed while the runner — and
-// with it any running child process — is left untouched: a changed
+// with it any running unit — is left untouched: a changed
 // definition takes effect on the next deploy, never by restarting a
 // running app.
 func (ma *managedApp) configure(spec *appSpec, logger *zap.Logger, clients *fetchClients) {
@@ -216,12 +217,12 @@ func (ma *managedApp) configure(spec *appSpec, logger *zap.Logger, clients *fetc
 	ma.verifiers = resolveVerifiers(spec.trust, clients.jwks)
 	ma.logger = logger
 	if ma.runner == nil {
-		ma.runner = newExecRunner(logger)
+		ma.runner = newSystemdRunner(userManager, logger)
 		ma.prober = &httpProber{client: clients.health, clock: realClock{}}
 		ma.fetch = &releaseFetcher{client: clients.download}
 		ma.clock = realClock{}
-	} else if er, ok := ma.runner.(*execRunner); ok {
-		er.setLogger(logger)
+	} else if sr, ok := ma.runner.(*systemdRunner); ok {
+		sr.setLogger(logger)
 	}
 	ma.store = &fileStateStore{path: spec.dirs.state}
 	if changed {
@@ -369,16 +370,17 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	// instance is really gone before deleting its release.
 	var newHandle handle
 	promoted := false
+	stopUnconfirmed := false // Stop of the failed instance returned an error
 	if !req.rollback {
 		defer func() {
 			if err == nil || promoted {
 				return
 			}
 			// Never delete a release out from under a failed instance that
-			// is still running (Stop may not have confirmed its exit) —
-			// that would pull files from beneath a live, leaked process.
-			if newHandle != nil && c.runner.Alive(newHandle) {
-				err = errors.Join(err, fmt.Errorf("release %s left on disk: the failed instance is still running", req.Version))
+			// may still be running (Stop errored, or the handle is still
+			// alive) — that would pull files from beneath a live process.
+			if newHandle != nil && (stopUnconfirmed || c.runner.Alive(newHandle)) {
+				err = errors.Join(err, fmt.Errorf("release %s left on disk: the failed instance may still be running", req.Version))
 				return
 			}
 			// Surface a cleanup failure: otherwise the release lingers and
@@ -409,9 +411,12 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		ma.setPhase(c, "preparing")
 		preCtx, cancel := context.WithTimeout(ctx, spec.deadline)
 		err := c.runner.RunOnce(preCtx, startSpec{
+			app:     spec.name,
+			version: req.Version,
 			command: expandArgs(spec.preStart, spec, req.Version, port, releaseDir),
 			dir:     releaseDir,
 			env:     env,
+			grace:   spec.grace,
 		})
 		cancel()
 		if err != nil {
@@ -421,9 +426,12 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 
 	ma.setPhase(c, "starting")
 	newHandle, err = c.runner.Start(startSpec{
+		app:     spec.name,
+		version: req.Version,
 		command: expandArgs(spec.command, spec, req.Version, port, releaseDir),
 		dir:     releaseDir,
 		env:     env,
+		grace:   spec.grace,
 	})
 	if err != nil {
 		return fmt.Errorf("start failed: %w", err)
@@ -440,11 +448,11 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		deadline: spec.deadline,
 	}); err != nil {
 		deployErr := fmt.Errorf("health gate: %w", err)
-		// If Stop can't confirm the instance exited (its SIGTERM failed
-		// and the process is still alive), surface that — and the cleanup
-		// defer will then leave the release in place rather than delete it
-		// beneath the live process.
-		if stopErr := c.runner.Stop(newHandle, spec.grace); stopErr != nil && c.runner.Alive(newHandle) {
+		// If Stop can't confirm the instance is gone, surface that — and
+		// the cleanup defer then leaves the release in place rather than
+		// delete it beneath a possibly live process.
+		if stopErr := c.runner.Stop(newHandle, spec.grace); stopErr != nil {
+			stopUnconfirmed = true
 			deployErr = errors.Join(deployErr, fmt.Errorf("failed instance could not be stopped: %w", stopErr))
 		}
 		return deployErr
@@ -470,7 +478,11 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		c.clock.Sleep(spec.drain)
 		ma.setPhase(c, "stopping_old")
 		if err := c.runner.Stop(old.handle, spec.grace); err != nil {
-			logger.Warn("stopping old version", zap.Error(err))
+			// Unconfirmed stop: the old instance may still be running
+			// out of its release dir, so this deploy must not GC any
+			// release. The next successful deploy's GC catches up.
+			logger.Warn("stopping old version failed; skipping release GC for this deploy", zap.String("version", old.version), zap.Error(err))
+			return nil
 		}
 	}
 
@@ -554,9 +566,12 @@ func (ma *managedApp) launchVersion(c collaborators, version string) (*instance,
 		return nil, err
 	}
 	h, err := c.runner.Start(startSpec{
+		app:     spec.name,
+		version: version,
 		command: expandArgs(spec.command, spec, version, port, releaseDir),
 		dir:     releaseDir,
 		env:     env,
+		grace:   spec.grace,
 	})
 	if err != nil {
 		return nil, err
@@ -618,14 +633,17 @@ func (ma *managedApp) currentInstance() *instance {
 
 // statusSnapshot backs the webhook's GET endpoint.
 type statusSnapshot struct {
-	App            string            `json:"app"`
-	Phase          string            `json:"phase"`
-	CurrentVersion string            `json:"current_version,omitempty"`
-	Port           int               `json:"port,omitempty"`
-	PID            int               `json:"pid,omitempty"`
-	Running        bool              `json:"running"`
-	LastDeploy     *deployResult     `json:"last_deploy,omitempty"`
-	Watchdog       *watchdogSnapshot `json:"watchdog,omitempty"`
+	App            string `json:"app"`
+	Phase          string `json:"phase"`
+	CurrentVersion string `json:"current_version,omitempty"`
+	Port           int    `json:"port,omitempty"`
+	PID            int    `json:"pid,omitempty"`
+	// Unit is the systemd unit running the instance — what to pass to
+	// journalctl for the app's own output.
+	Unit       string            `json:"unit,omitempty"`
+	Running    bool              `json:"running"`
+	LastDeploy *deployResult     `json:"last_deploy,omitempty"`
+	Watchdog   *watchdogSnapshot `json:"watchdog,omitempty"`
 	// AvailableVersions lists the on-disk releases, newest-first — the
 	// versions `?rollback=<version>` can relaunch. Always serialized (a
 	// healthy app with no releases reports []), so an empty set is
@@ -652,17 +670,29 @@ func (ma *managedApp) status() statusSnapshot {
 	if ma.current != nil {
 		s.CurrentVersion = ma.current.version
 		s.Port = ma.current.port
-		s.PID = ma.current.handle.state().PID
+		hs := ma.current.handle.state()
+		s.PID = hs.PID
+		s.Unit = hs.Unit
 		s.Running = c.runner.Alive(ma.current.handle)
 	}
 	return s
 }
+
+// caddyExiting reports whether the whole process is shutting down (as
+// opposed to a config unloading an app); a variable so tests can flip it.
+var caddyExiting = caddy.Exiting
 
 // Destruct is called by the UsagePool when the last config referencing
 // this app is unloaded — i.e. real shutdown or the app being removed
 // from the Caddyfile, never a plain reload. The watchdog is stopped
 // FIRST and waited for: only then is it impossible for a restart in
 // flight to spawn a fresh process after the one below is stopped.
+//
+// On process exit the instance is deliberately left running: it is a
+// systemd unit that does not depend on hotserve, state.json names it,
+// and the next hotserve start reattaches to it — that is how apps
+// survive hotserve restarts and upgrades. Only removing the app from
+// the config stops it.
 func (ma *managedApp) Destruct() error {
 	ma.stopWatchdog()
 	c := ma.snapshot()
@@ -670,7 +700,11 @@ func (ma *managedApp) Destruct() error {
 	if inst == nil {
 		return nil
 	}
-	c.logger.Info("shutting down app", zap.String("version", inst.version))
+	if caddyExiting() {
+		c.logger.Info("hotserve exiting; app keeps running for reattach", zap.String("version", inst.version), zap.String("unit", inst.handle.state().Unit))
+		return nil
+	}
+	c.logger.Info("app removed from config; stopping it", zap.String("version", inst.version))
 	return c.runner.Stop(inst.handle, c.spec.grace)
 }
 

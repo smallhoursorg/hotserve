@@ -491,6 +491,13 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 		return true
 	}
 
+	// A health verdict on an instance that is in fact dead is a crash:
+	// the probes merely noticed before the runner's unit-state poll
+	// did. Record the real cause.
+	if kind == failureHealth && !c.runner.Alive(inst.handle) {
+		kind = failureCrash
+	}
+
 	// A health verdict ages while we wait: the dependency outage that
 	// failed the probes may be long over, and killing a process that
 	// has been serving fine for the last nine minutes of a ten-minute
