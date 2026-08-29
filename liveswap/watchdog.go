@@ -537,7 +537,7 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 		}
 	}
 
-	// Stop can block for for the unit's own stop budget while deployMu is held, so a
+	// Stop can block for the unit's own stop budget while deployMu is held, so a
 	// webhook landing in that window gets a 409 — the same contract as
 	// a deploy's own drain+stop-old phase (one lifecycle operation at
 	// a time), and the same bound Destruct accepts when it waits for

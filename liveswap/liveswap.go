@@ -514,7 +514,7 @@ func (a *App) Start() error {
 		}
 	}
 	for name, ma := range a.managed {
-		ma.configure(a.specs[name], a.logger.Named(name), a.clients)
+		ma.configure(a, a.specs[name], a.logger.Named(name), a.clients)
 		ma.startWatchdog()
 	}
 	a.started = true
@@ -559,6 +559,18 @@ func (a *App) Cleanup() error {
 	if a.started {
 		a.started = false
 		liveStartedApps.Add(-1)
+		// A candidate Caddy rejected after our Start (another app's
+		// Start failed) is cleaned up while the config it would have
+		// replaced still holds the apps: give them back the serving
+		// definition. A config replaced by a successful reload is not
+		// the last writer, so this is a no-op for it.
+		for name, ma := range a.managed {
+			if refs, ok := appPool.References(poolKey(name)); ok && refs > 1 {
+				if ma.rollbackConfig(a) {
+					a.logger.Warn("config rejected after start; restored the serving definition", zap.String("app", name))
+				}
+			}
+		}
 	}
 	var firstErr error
 	for _, key := range a.pooled {

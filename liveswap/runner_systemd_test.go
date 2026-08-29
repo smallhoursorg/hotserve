@@ -778,6 +778,20 @@ func TestSweepUnknownApps(t *testing.T) {
 	}
 }
 
+func TestSweepUnknownAppsDoesNothingWhileExiting(t *testing.T) {
+	conn := newFakeSystemdConn()
+	conn.setStatus("hotserve-old.v3.0a1b2c3d.service", unitStatus{LoadState: "loaded", ActiveState: "active"})
+	orig := caddyExiting
+	caddyExiting = func() bool { return true }
+	t.Cleanup(func() { caddyExiting = orig })
+	if err := sweepUnknownApps(context.Background(), conn, zap.NewNop()); err != nil {
+		t.Fatal(err)
+	}
+	if len(conn.stops()) != 0 {
+		t.Fatalf("shutdown drops pool references; units must survive it, stops=%v", conn.stops())
+	}
+}
+
 func TestSweepUnknownAppsJudgesAgainstLiveConfig(t *testing.T) {
 	// A reload adds "late" back while the sweep is still listing: the
 	// sweep must judge against the ledger as it is right before acting

@@ -1055,6 +1055,54 @@ func markLive(t *testing.T) {
 	t.Cleanup(func() { liveStartedApps.Add(-1) })
 }
 
+func TestDestructOnUnconfiguredAppIsANoop(t *testing.T) {
+	// A pooled app whose config's Start failed before configuring it
+	// (the manager probe, on a reload adding the app) has no runner.
+	markLive(t)
+	ma := newManagedApp("fresh")
+	must(t, ma.Destruct())
+}
+
+func TestRollbackConfigRestoresTheServingDefinition(t *testing.T) {
+	rig := newTestRig(t)
+	clients := &fetchClients{}
+	specA, specB := testSpec(t), testSpec(t)
+	specB.grace = 99 * time.Second
+	ownerA, ownerB := new(int), new(int)
+	rig.ma.configure(ownerA, specA, zap.NewNop(), clients)
+	rig.ma.configure(ownerB, specB, zap.NewNop(), clients)
+	// A successful reload: A is cleaned up after B configured — not
+	// the last writer, nothing happens.
+	if rig.ma.rollbackConfig(ownerA) || rig.ma.snapshot().spec != specB {
+		t.Fatal("a replaced config must not roll back the newer one")
+	}
+	// A rejected candidate: B is cleaned up while A still serves.
+	if !rig.ma.rollbackConfig(ownerB) || rig.ma.snapshot().spec != specA {
+		t.Fatal("a rejected candidate must restore the serving definition")
+	}
+	if rig.ma.rollbackConfig(ownerB) {
+		t.Fatal("rollback is one-shot")
+	}
+}
+
+func TestDeploySweepsBeforePreStart(t *testing.T) {
+	rig := newTestRig(t)
+	rig.spec.preStart = []string{"migrate"}
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	// pre-pre_start (keep old=nil), pre-Start (keep old=nil), pre-GC (keep new).
+	if n := rig.runner.sweepCount(); n != 3 {
+		t.Fatalf("expected 3 sweeps, got %d", n)
+	}
+	rig.runner.sweepErr = errTest
+	err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/2", Version: "v2"})
+	if err == nil || !strings.Contains(err.Error(), "not running pre_start") {
+		t.Fatalf("an unconfirmed ledger must block the migration too, got %v", err)
+	}
+	if rig.runner.runOnceCount != 1 {
+		t.Fatalf("no second pre_start may run, got %d", rig.runner.runOnceCount)
+	}
+}
+
 func TestDestructBeforeStartTouchesNothing(t *testing.T) {
 	// `hotserve validate`, and a candidate config that never became
 	// the serving one (another app's Start failed): no started config

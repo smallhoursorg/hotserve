@@ -298,6 +298,9 @@ var unknownSweepMu sync.Mutex
 func sweepUnknownApps(ctx context.Context, conn systemdConn, logger *zap.Logger) error {
 	unknownSweepMu.Lock()
 	defer unknownSweepMu.Unlock()
+	if caddyExiting() {
+		return nil // shutdown drops pool references; the units are meant to survive
+	}
 	units, err := conn.ListUnits(ctx, unitPrefix+"*.service")
 	if err != nil {
 		return fmt.Errorf("listing hotserve units: %w", err)
@@ -322,7 +325,7 @@ func sweepUnknownApps(ctx context.Context, conn systemdConn, logger *zap.Logger)
 		// manager cannot hold the start-time sweep open indefinitely;
 		// each stop re-checks the pool first, so a reload adopting the
 		// app between listing and stopping keeps its unit.
-		if serr := r.sweep(ctx, app, nil, func() bool { return !appConfigured(app) }); serr != nil {
+		if serr := r.sweep(ctx, app, nil, func() bool { return !caddyExiting() && !appConfigured(app) }); serr != nil {
 			errs = append(errs, serr)
 		}
 	}

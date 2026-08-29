@@ -199,9 +199,17 @@ type managedApp struct {
 	wdStarted bool // under specMu
 	wdCtx     context.Context
 	wdCancel  context.CancelFunc
-	wdWG      sync.WaitGroup
-	wdNotify  chan struct{} // buffered(1); poked whenever current changes
-	wd        watchdogState
+
+	// configuredBy is the config that installed the current spec, and
+	// prev what it replaced — so a candidate config Caddy rejects
+	// after our Start (another app's Start failed) can be rolled back
+	// by its Cleanup, leaving the still-serving config's definition in
+	// place. Under specMu.
+	configuredBy any
+	prev         *appConfigState
+	wdWG         sync.WaitGroup
+	wdNotify     chan struct{} // buffered(1); poked whenever current changes
+	wd           watchdogState
 }
 
 func newManagedApp(name string) *managedApp {
@@ -214,10 +222,24 @@ func newManagedApp(name string) *managedApp {
 // with it any running unit — is left untouched: a changed
 // definition takes effect on the next deploy, never by restarting a
 // running app.
-func (ma *managedApp) configure(spec *appSpec, logger *zap.Logger, clients *fetchClients) {
+// appConfigState is what a config installs on a pooled app and what
+// a rollback restores.
+type appConfigState struct {
+	spec      *appSpec
+	verifiers []verifier
+	logger    *zap.Logger
+	store     stateStore
+}
+
+// owner is the config installing this definition (see rollbackConfig).
+func (ma *managedApp) configure(owner any, spec *appSpec, logger *zap.Logger, clients *fetchClients) {
 	ma.specMu.Lock()
 	defer ma.specMu.Unlock()
 	changed := ma.spec != nil && !specEqual(ma.spec, spec)
+	if ma.spec != nil {
+		ma.prev = &appConfigState{spec: ma.spec, verifiers: ma.verifiers, logger: ma.logger, store: ma.store}
+	}
+	ma.configuredBy = owner
 	ma.spec = spec
 	// Deploy auth is not tied to the running process, so — unlike the
 	// runner — it is rewired on every reload and takes effect at once.
@@ -417,6 +439,12 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	// would be wrong, and a flaky preflight check must never block an
 	// emergency rollback.
 	if len(spec.preStart) > 0 && !req.rollback {
+		// A previous deploy's pre_start whose outcome could not be
+		// observed may still be running; settle the ledger before
+		// starting another migration beside it.
+		if !ma.sweep(c, oldHandle(old)) {
+			return fmt.Errorf("%w; not running pre_start", errSweepUnconfirmed)
+		}
 		ma.setPhase(c, "preparing")
 		preCtx, cancel := context.WithTimeout(ctx, spec.deadline)
 		err := c.runner.RunOnce(preCtx, startSpec{
@@ -833,6 +861,25 @@ func (ma *managedApp) status() statusSnapshot {
 	return s
 }
 
+// rollbackConfig restores the definition owner replaced, if owner's is
+// still the one installed (a later config's stays). Used when a
+// candidate is cleaned up while another config still holds the app.
+func (ma *managedApp) rollbackConfig(owner any) bool {
+	ma.specMu.Lock()
+	defer ma.specMu.Unlock()
+	if ma.configuredBy != owner || ma.prev == nil {
+		return false
+	}
+	p := ma.prev
+	ma.spec, ma.verifiers, ma.logger, ma.store = p.spec, p.verifiers, p.logger, p.store
+	ma.prev = nil
+	ma.configuredBy = nil
+	if sr, ok := ma.runner.(*systemdRunner); ok {
+		sr.setLogger(p.logger)
+	}
+	return true
+}
+
 // caddyExiting reports whether the whole process is shutting down (as
 // opposed to a config unloading an app); a variable so tests can flip it.
 var caddyExiting = caddy.Exiting
@@ -852,6 +899,9 @@ func (ma *managedApp) Destruct() error {
 	ma.stopWatchdog()
 	c := ma.snapshot()
 	inst := ma.currentInstance()
+	if c.runner == nil {
+		return nil // pooled but never configured (a Start that failed before ours ran)
+	}
 	if caddyExiting() || liveStartedApps.Load() == 0 {
 		// Process exit, `validate`, or a candidate config that never
 		// became the serving one (another app's Start failed): the
