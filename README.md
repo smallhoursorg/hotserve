@@ -14,7 +14,7 @@ Built in:
 
 | Module | What it does |
 |---|---|
-| **[liveswap](liveswap/)** | Zero-downtime app deploys: webhook from CI, artifact download, migrations, health-gated start, atomic traffic cutover, graceful stop, versioned releases with rollback. Your apps run as supervised child processes — Node.js, Go, anything that listens on a port — with a continuous watchdog that restarts them on crash or sustained health failure (bounded by a restart budget, with backoff). |
+| **[liveswap](liveswap/)** | Zero-downtime app deploys: webhook from CI, artifact download, migrations, health-gated start, atomic traffic cutover, graceful stop, versioned releases with rollback. Your apps run as systemd units under the hotserve user's own service manager — Node.js, Go, anything that listens on a port — surviving hotserve restarts and upgrades, with a continuous watchdog that restarts them on crash or sustained health failure (bounded by a restart budget, with backoff). |
 | **[penaltybox](penaltybox/)** | Rate limiting driven by your app's `X-Rate-Limit-Level` hint headers — weighted sliding-window budgets, tiers, and a penalty box for clients that cross them. |
 | **cache** | HTTP page caching via [Souin](https://github.com/darkweak/souin) with in-memory [Otter](https://github.com/darkweak/storages) storage. |
 | everything Caddy has | Automatic HTTPS, HTTP/2 + HTTP/3, the Caddyfile, the admin API — hotserve *is* Caddy underneath, with the modules above compiled in. |
@@ -31,14 +31,21 @@ sudo systemctl enable --now hotserve
 
 That gives you `/usr/bin/hotserve`, a systemd service running as the
 `hotserve` user, and a starter config at `/etc/hotserve/Caddyfile`.
+The package depends on `libpam-systemd` and `dbus` (present on any
+stock Debian/Ubuntu server): liveswap runs your apps as systemd units
+under the `hotserve` user's own service manager, which needs
+`pam_systemd` to start and `loginctl` to be kept alive without a
+login — the package enables that lingering for you.
 Prefer the packages — they set up everything above for you. The
 `hotserve_<version>_linux_<arch>.tar.gz` archives on the same page
 contain the **raw binary** (plus LICENSE and a README) for systems
 where you manage the service yourself — your own systemd unit,
 NixOS-style distros, containers. Going that route, you own what the
 package would have done: a dedicated `hotserve` user, a `Type=notify`
-unit, and the config at `/etc/hotserve/Caddyfile`. (Hosted APT/APK
-repositories with automatic updates are on the roadmap.)
+unit, `loginctl enable-linger hotserve` (with `libpam-systemd`
+installed) so the user's manager exists for the apps, and the config
+at `/etc/hotserve/Caddyfile`. (Hosted APT/APK repositories with
+automatic updates are on the roadmap.)
 
 ## Quickstart: deploy an app with zero downtime
 
@@ -151,9 +158,14 @@ an on-disk release. Full details, CI snippets, and every option:
   the TLS private keys and sibling apps' files. Scrubbing the child
   environment (done) stops direct
   inheritance but not the `/proc` and filesystem routes — only a real
-  isolation boundary (bubblewrap's PID + mount namespaces hide
-  `/proc/<supervisor>` and the socket/key paths entirely; a per-app
-  UID via the future systemd runner is the alternative) closes it.
+  isolation boundary closes it. Apps now run as transient units under
+  the hotserve user's own systemd manager (chosen over the system
+  manager: a polkit grant to manage units is root-equivalent), so that
+  boundary can come from systemd's per-unit sandboxing
+  (`ProtectProc=invisible`, `InaccessiblePaths=`, `ProtectSystem=strict`,
+  resource caps — probe-gated, since they need unprivileged user
+  namespaces) or from bubblewrap; per-app UIDs would need a small
+  privileged helper and stay a later milestone.
   This is the next security milestone, ahead of the items below.
 - Hosted APT/APK repositories with package signing and auto-updates
 - A metrics/alerts module to sit alongside liveswap and penaltybox —
@@ -167,8 +179,8 @@ No local Go toolchain needed — everything runs in Docker:
 
 ```sh
 make test              # unit tests, all modules (race + coverage)
-make test-integration  # real deploys through caddytest
-make e2e               # full stack: both module suites against the shipped binary, then crash recovery
+make test-integration  # real deploys through caddytest, under a real systemd user manager
+make e2e               # full stack: both module suites against the shipped binary under systemd, then restart survival + crash recovery
 make lint vet tidy
 make vulncheck         # govulncheck, all modules (tool dep in go.mod — Dependabot-bumped)
 make secretscan        # gitleaks full-history secret scan (same image as the CI gate)
@@ -178,6 +190,12 @@ make build             # cross-compile linux amd64/arm64
 make package           # .deb via nfpm
 make install-test      # install the .deb under real systemd (DISTRO=debian:12 etc.)
 ```
+
+`test-integration`, `e2e` and `install-test` boot systemd inside a
+privileged container, which needs a cgroup-v2 Docker host — Docker
+Desktop (macOS/Windows) or Linux with systemd both qualify; the targets
+check and say so up front. That is also how liveswap's systemd runner
+is developed and tested on a Mac: nothing here needs a Linux VM.
 
 The repo is a Go multi-module workspace: `liveswap/` and `penaltybox/`
 are lean, independently usable Caddy modules
@@ -227,6 +245,7 @@ the scanner.)
 | [darkweak/storages/otter](https://github.com/darkweak/storages) | +6 | ✓ | — | — | In-memory storage backend for Souin, wrapping [maypok86/otter](https://github.com/maypok86/otter). |
 | [zap](https://github.com/uber-go/zap) | 0 (already in Caddy's tree) | ✓ | ✓ | ✓ | Caddy's module logging API is zap; not optional for a Caddy module. |
 | [go-humanize](https://github.com/dustin/go-humanize) | 0 (already in Caddy's tree) | ✓ | ✓ | — | A few formatting helpers in liveswap. |
+| [go-systemd](https://github.com/coreos/go-systemd) (`dbus`) + [godbus](https://github.com/godbus/dbus) | +1 | ✓ | ✓ | — | liveswap's runner: apps are transient units created over systemd's D-Bus API on the hotserve user's own manager (no polkit, no root). go-systemd was already in the workspace graph; godbus is its one dependency, pure Go. |
 | [go-oidc](https://github.com/coreos/go-oidc) + [go-jose](https://github.com/go-jose/go-jose) | 0 (already in Caddy's tree) | ✓ | ✓ | — | Deploy authentication (`deploy_trust`): OIDC discovery/JWKS verification and JWT signing/verification. Both were already transitive dependencies of Caddy; liveswap now requires them directly. Vetted and widely used — the deliberate alternative to hand-rolling JWT crypto. |
 
 The liveswap and penaltybox columns are what a standalone

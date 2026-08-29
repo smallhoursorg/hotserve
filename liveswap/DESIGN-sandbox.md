@@ -135,7 +135,20 @@ mode of hand-rolled flag soup.
 
 ## Architecture
 
-### Spawn path (runner_exec.go)
+### Spawn path (runner_systemd.go)
+
+> Note (systemd runner): apps are now transient systemd units, so the
+> spawn is `ExecStart=` on the unit and bwrap becomes its argv prefix;
+> the process-group discussion below is moot — the unit's cgroup is
+> what Stop signals, bwrap or not. On hosts with unprivileged user
+> namespaces, systemd's own per-unit sandboxing (`ProtectProc=`,
+> `InaccessiblePaths=`, `ProtectSystem=strict`) may cover much of this
+> without bwrap; reconciling the two is the next design pass. Until
+> then apps run with **no** sandbox at all: unlike the exec runner's
+> children they no longer inherit hotserve.service's PrivateTmp /
+> ProtectSystem, and their environment is the user manager's defaults
+> plus the allowlisted slice — the isolation milestone is more urgent
+> under this runner, not less.
 
 `startSpec` gains a `sandbox *sandboxSpec` (nil = bare). The exec
 runner, when the spec is non-nil, prepends the bwrap argv produced by

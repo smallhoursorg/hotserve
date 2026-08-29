@@ -72,7 +72,8 @@ Concept map from the Nomad-era stack:
 - The cutover MUST NOT trigger a config reload; it is an atomic value
   swap read per-request by the upstream source.
 - After cutover the pipeline MUST wait `drain`, then SIGTERM the old
-  instance's process group, then SIGKILL after `grace`.
+  instance's unit — SIGTERM to its whole cgroup, then SIGKILL after
+  `grace`.
 - Release GC MUST run only after successful deploys, keep the newest
   `keep` dirs by mtime, and never delete the currently-serving version.
   Failed versions' dirs are kept (until GC'd by age) for debugging.
@@ -129,8 +130,8 @@ there would defeat the pool.
 - `deployMu.TryLock` serializes deploys per app; 409 instead of queue.
 - `mu` guards current instance/phase/last-deploy.
 - `activePort` is the single atomic the proxy hot path reads.
-- The exec runner's logger sits behind an atomic pointer because child
-  output-piping goroutines outlive the config that created them.
+- The runner's logger sits behind an atomic pointer because the
+  per-unit watcher goroutines outlive the config that created them.
 
 ### Runner abstraction (`runner.go`)
 
@@ -139,28 +140,87 @@ type runner interface {
 	Start(spec startSpec) (handle, error)
 	RunOnce(ctx context.Context, spec startSpec) error
 	Alive(h handle) bool
+	Wait(h handle) <-chan struct{}
 	Stop(h handle, grace time.Duration) error
-	Reattach(st handleState) (handle, bool)
+	Reattach(st handleState) (handle, bool, error)
+	Sweep(app string, keep handle) error
 }
 ```
 
-v1 ships `execRunner` (`runner_exec.go`): apps as child processes in
-their own process group (`Setpgid`, so SIGTERM/SIGKILL reach npm's
-grandchildren), stdout/stderr scanned line-wise into the app's zap
-logger, `Pdeathsig` on Linux as an orphan safety net. Chosen over
-systemd-first because it needs zero privileges, works identically on
-macOS dev machines and inside the Docker e2e harness (systemd cannot
-run in plain containers), and keeps the single-binary story.
+The one implementation is `systemdRunner` (`runner_systemd.go`, D-Bus
+client in `systemd_dbus.go`): every instance is a transient service
+unit under the **hotserve user's own systemd manager**
+(`user@<uid>.service`), reached over that manager's private socket
+(`/run/user/<uid>/systemd/private` — no session bus, no polkit, no
+root). v1 shipped an exec runner (apps as child processes in their own
+process group); it was replaced, not fixed, once it needed a page of
+init-system emulation for what cgroups do natively, and it took the
+"apps restart with the binary" trade-off with it.
 
-The v2 path is `runner_systemd.go`: `systemd-run` transient units that
-survive Caddy restarts. `handleState` (persisted in `state.json`) and
-`Reattach` exist precisely so that runner can adopt a still-running
-unit after a restart; the exec runner always answers "cannot reattach"
-and recovery relaunches instead.
+What the unit gives us: `KillMode=control-group` makes stop and crash
+cleanup mean the whole process tree (npm → node → workers), the
+journal captures stdout/stderr under `SyslogIdentifier=hotserve-<app>`,
+`Restart=no` keeps the watchdog the sole restart authority, and
+`NoNewPrivileges` is on. `handleState.Unit` (persisted in
+`state.json`) is what `Reattach` looks up after a hotserve restart: a
+running unit is adopted with its port from state, a failed one is
+logged, reset and relaunched. On process exit `Destruct` leaves units
+running for exactly that reason; only removing an app from the config
+stops it.
 
-Known trade-off: with exec, apps restart when the Caddy *binary*
-restarts. Recovery in `App.Start` makes this a brief blip, and config
-reloads (the common operation) are unaffected.
+The runner's invariants are written in its doc comment. The ones the
+state machine leans on: a handle is declared dead only on an
+*observed* terminal unit state (a D-Bus outage never becomes a phantom
+crash and a duplicate instance); `Reattach` reports an unreadable unit
+as an error, and recovery retries rather than launching beside it;
+`Stop` returns nil only once the unit is observed gone; a start or
+pre_start whose D-Bus call failed is reconciled by unit name and, if
+even that is impossible, reported as "may still be running" so the
+deploy keeps the release; and **the manager is the ledger** — every
+unit is named `hotserve-<app>.<version>.<nonce>.service` (the `.`
+after the app is the one character an app name cannot contain), and
+`Sweep(app, keep)` stops every other unit of the app. Recovery sweeps
+after reattach/relaunch, deploys sweep before GC, removing an app
+from the config sweeps all of it, and `App.Start` sweeps the units of
+any app the config no longer names — so nothing hotserve lost track
+of (a failed `state.json` write, an unconfirmed stop, an app renamed
+while hotserve was down) survives the next start or the next deploy,
+and no release is deleted while the manager still runs something out
+of it. There is
+deliberately no persisted "leaked releases" ledger: systemd already
+knows what is running, and asking it is cheaper and truer than
+remembering.
+
+Why the user manager and not the system one: a polkit rule granting
+`org.freedesktop.systemd1.manage-units` cannot inspect unit
+properties, so it would let a compromised hotserve start a root unit;
+Ubuntu 22.04's polkit 0.105 cannot even filter by unit name. Per-app
+UIDs — the one thing the system manager would buy — are a later
+milestone behind a small privileged helper. Isolation between apps
+and hotserve comes from per-unit sandboxing (probe-gated, needs
+unprivileged user namespaces) or bubblewrap, see `DESIGN-sandbox.md`
+and `DESIGN-threat-model.md`.
+
+Packaging consequences: `libpam-systemd` (pam_systemd hands the user
+manager its `XDG_RUNTIME_DIR`) and `dbus` are hard dependencies;
+postinstall enables lingering and drops in `Wants=/After=user@<uid>`
+on `hotserve.service`; preremove stops the user manager (and with it
+every app) on real removal only. Start fails loudly if the manager is
+unreachable — there is deliberately no fallback runner; the check is
+in Start rather than Provision so `hotserve validate` (which
+provisions and cleans up without starting) works as any user.
+
+Config commit is transactional in the way Caddy's activation demands:
+Provision only takes pool references, Start installs the definition
+on the pooled app, and a candidate Caddy rejects after our Start
+(another app's Start failing) has its definition rolled back by its
+own Cleanup — last-writer semantics, so a config replaced by a
+successful reload is untouched. Destruct stops a removed app's units
+only when another *started* config is live; a rejected candidate,
+`validate`, and process exit leave them to whoever is or will be
+serving them. Boot recovery is owned by the config that started it,
+retried with backoff for anything not explicitly permanent, and
+cancelled/joined by that config's Cleanup.
 
 ### File-by-file
 
@@ -171,7 +231,7 @@ reloads (the common operation) are unaffected.
 | `caddyfile.go` | all Caddyfile parsing (global option, directive, upstreams); NO defaults here — Provision owns them |
 | `handler.go` | webhook auth, payload validation, status endpoint |
 | `upstreams.go` | dynamic upstream source (the cutover read side) |
-| `runner.go` / `runner_exec.go` / `runner_unix.go` / `runner_linux.go` / `runner_nonlinux.go` | runner interface + exec implementation + platform bits |
+| `runner.go` / `runner_systemd.go` / `systemd_dbus.go` / `port.go` | runner interface + the systemd transient-unit implementation + its D-Bus client + port helpers |
 | `download.go` | capped, redacted artifact download; `releaseFetcher` (download+extract orchestration) |
 | `extract.go` | validate-then-extract hardened tar handling |
 | `health.go` | prober with soak/deadline arithmetic on an injected clock |
@@ -204,21 +264,64 @@ reloads (the common operation) are unaffected.
 
 ## Testing acceptance criteria (all implemented)
 
-1. Unit (`make test`, race): state machine happy path; pre_start abort;
-   health abort keeps old serving; 409; same-version rejection; GC;
-   recovery (relaunch + reattach + no-op); env precedence and
-   placeholders; malicious-tar table; download caps/allowlist/redaction;
-   prober soak/flap/deadline/liveness; parser tables incl. the
-   "empty block leaves defaults to Provision" rule; Validate table.
-2. Integration (`make test-integration`, caddytest, real processes):
-   webhook deploy v1 → proxied body; v2 cutover; broken v3 → 500 and v2
-   still serving; **reload via admin API keeps the app PID**; keep-N
-   after a subsequent successful deploy.
-3. e2e (`make e2e`, compose, xcaddy-built binary): module-linked build
-   guard; auth; 5xx-before-first-deploy; v1 deploy; **continuous curl
-   loop through the v2 cutover with zero non-200s**; broken-v3
-   containment under traffic; 409 mid-deploy; **admin-API reload under
-   traffic with zero non-200s and unchanged app PID**; status endpoint.
+Every lane but the first runs against **real systemd** (a privileged
+container with the host cgroup namespace); only unit tests use a fake
+D-Bus connection. Tests are written from the invariants, adversarially
+where the real system can be made to misbehave — a fake encodes the
+author's beliefs about systemd, and only the real thing corrects them.
+
+1. Unit (`make test`, race, goleak): the deploy state machine (happy
+   path; pre_start abort; health abort keeps old serving; 409;
+   same-version rejection; GC gated on a confirmed sweep); recovery
+   (reattach, relaunch, no-state sweep, transient vs permanent
+   classification, retry loop on the fake clock, refusal of a foreign
+   unit name in state.json, Cleanup joining recovery); Destruct's
+   live-config gate and rollback of a rejected candidate's definition;
+   the runner over a scripted manager (unit properties and naming,
+   watcher terminal states and transport-error immunity, PID backfill,
+   Stop/RunOnce outcomes, reconcile of an ambiguous start, concurrent
+   guarded sweeps, unknown-app sweep judged against the live pool);
+   watchdog crash/health/throttle/unconfirmed-stop paths; env
+   precedence, placeholders and key validation; malicious-tar table;
+   download caps/allowlist/redaction; prober soak/flap/deadline;
+   parser and Validate tables.
+2. Fuzz (`make fuzz`, weekly in CI; seed corpora run in `make test`):
+   artifact extraction, path containment, URL redaction — and, for the
+   runner: unit-name round-trip (a name parses back to exactly its app
+   and never matches a sibling; anything invalid is refused),
+   env_file keys (every key handed to a unit is one systemd accepts),
+   and the D-Bus value parsers (no overflowed budgets, no "infinity"
+   sentinel, no panics).
+3. Integration (`make test-integration`, caddytest under a real user
+   manager): webhook deploy v1 → proxied body; v2 cutover; broken v3 →
+   500 and v2 still serving; reload keeps the app PID; keep-N; OIDC,
+   push and rollback deploys; watchdog restart and throttle recovery.
+   The runner's own suite: a leader+worker tree is gone after Stop and
+   after a leader crash; SIGKILL lands after grace, not before; exit
+   statuses as systemd reports them; a second runner adopts a live
+   unit and never a failed one; Sweep stops strays; a manager
+   SIGSTOPped past a poll timeout is not a crash.
+4. e2e (`make e2e`, the packaged unit under systemd as `User=hotserve`,
+   laid out by `packaging/postinstall.sh`): module-linked build guard;
+   auth; 5xx-before-first-deploy; **continuous curl loop through the
+   v2 cutover with zero non-200s**; broken-v3 containment; 409;
+   **admin-API reload under traffic with unchanged app PID**; status;
+   watchdog after crash and after health failure; push and rollback.
+   Then, inside the container: the app is a unit under `user@<uid>`
+   with `Restart=no`; `systemctl restart hotserve` and SIGKILL+start
+   keep the same PID (reattach); stopping a version takes its whole
+   process tree; a crash leaves no failed unit; a unit gone behind
+   hotserve's back is relaunched on start; removing the app via reload
+   stops its units and re-adding it relaunches; an app removed while
+   hotserve was down is swept on the next start; app output is in the
+   journal. Finally the recovery suite from the runner's side.
+5. Package (`make install-test`, the built `.deb` on debian:12/13,
+   ubuntu:22.04/24.04/26.04): Depends resolution (`libpam-systemd`,
+   `dbus`), user manager active with lingering, a deploy under the
+   shipped unit as a transient unit with its output and `LimitNOFILE`
+   in the journal, `hotserve validate` as root and as hotserve leaving
+   the running app alone, the app keeping its PID across the upgrade
+   restart, and removal taking the apps, drop-ins and linger flag.
 
 ## Watchdog (added after v1)
 
@@ -231,10 +334,11 @@ README.md "Watchdog"):
   stopped — that ordering is the invariant that makes a mid-restart
   watchdog unable to orphan a freshly started process. Reloads never
   touch the goroutine; it re-snapshots the spec every cycle.
-- Triggers: process exit (the exec runner's reaper channel, exposed as
-  `runner.Wait`; a nil channel degrades to `Alive` polling for future
-  reattached handles) or `watchdog_failures` consecutive failed
-  probes. `watchdog_grace` re-arms after every start; crashes count
+- Triggers: unit exit (the runner's per-unit watcher, exposed as
+  `runner.Wait`; a nil channel degrades to `Alive` polling) or
+  `watchdog_failures` consecutive failed probes. A health verdict on
+  an instance that is dead by restart time is recorded as a crash —
+  which signal noticed first is only probe interval vs. unit poll. `watchdog_grace` re-arms after every start; crashes count
   even during grace.
 - Restarts take `deployMu` (TryLock, yielding to deploys) and re-check
   instance identity — promote swaps `current` before stopping the old
@@ -253,9 +357,9 @@ README.md "Watchdog"):
   budget immediately. The rate bound is also the DoS bound on induced
   health failures. Alerting on a sustained restart loop is deferred
   to the events/metrics milestone.
-- The watchdog is the **single restart authority**: the v2 systemd
-  runner must create transient units with `Restart=no`, or systemd
-  and liveswap would fight over the same failure.
+- The watchdog is the **single restart authority**: the systemd
+  runner creates every unit with `Restart=no`, or systemd and
+  liveswap would fight over the same failure.
 
 ## Non-goals (v1)
 
@@ -265,7 +369,9 @@ README.md "Watchdog"):
   non-goal, has since shipped — see "Watchdog" above. It restarts the
   same version; it still never auto-reverts.)
 - Multi-node or any cluster awareness.
-- Resource limits (cgroups) — that arrives with the systemd runner.
+- Resource limits — now one unit property away (`MemoryMax=`,
+  `TasksMax=`, `CPUQuota=`; the user manager delegates those
+  controllers); not yet exposed in config.
 - Prometheus metrics (deploys_total, duration) — v1.1 candidate.
 - Deploy queueing; 409 + CI retry is the queue.
 - Windows.
@@ -274,9 +380,9 @@ README.md "Watchdog"):
 
 ## Open questions for v2 (with leans)
 
-1. **systemd runner** — transient units via `systemd-run`, reattach on
-   boot from `handleState.Unit`. Lean: yes, as opt-in `runner systemd`
-   per app; needs a Linux-VM test lane outside compose.
+1. ~~**systemd runner**~~ — shipped, and as the only runner rather than
+   an opt-in: see "Runner abstraction". The test lane it needed is a
+   privileged systemd container, which Docker Desktop runs fine.
 2. **Deploy events** — emit Caddy events (deploy_succeeded/_failed) so
    users can wire notifications. Lean: yes, cheap and composable.
 3. **Admin endpoints** (`caddy liveswap status/rollback`) alongside the
