@@ -10,8 +10,9 @@ work in the wider attack surface rather than restating it.
 
 Scope: a single Debian/Ubuntu box running `hotserve` (a Caddy
 distribution) as the `hotserve` system user, supervising deployed apps
-as child processes via liveswap's `execRunner`
-([liveswap/runner_exec.go](liveswap/runner_exec.go)). Multi-node,
+as transient systemd units under the hotserve user's own service
+manager via liveswap's `systemdRunner`
+([liveswap/runner_systemd.go](liveswap/runner_systemd.go)). Multi-node,
 Windows, and macOS-as-a-server are out of scope by product design.
 
 > **Update — the deploy secret has been removed from the box.** Deploy
@@ -204,11 +205,15 @@ denial-of-protection under bad config, not injection or exhaustion.
 
 ### Supervisor⇄app and app⇄app boundaries — **currently none**
 
-Every app runs as `hotserve`, in the supervisor's mount, PID, and
-network namespaces ([runner_exec.go](liveswap/runner_exec.go),
-[runner_unix.go](liveswap/runner_unix.go)). The child environment is
-scrubbed to an allowlist (`PATH, HOME, LANG, TZ, LC_*`,
-[app.go:611-626](liveswap/app.go)) — closing *direct* inheritance of
+Every app runs as `hotserve`, in the host's mount, PID, and network
+namespaces ([runner_systemd.go](liveswap/runner_systemd.go) — a
+transient unit under the user manager gives a cgroup, not a
+namespace, and unlike the exec runner's children the apps no longer
+sit inside hotserve.service's `PrivateTmp`/`ProtectSystem`). The unit
+environment is the user manager's defaults (`XDG_RUNTIME_DIR`,
+`INVOCATION_ID`, …) plus an allowlisted slice of hotserve's (`PATH,
+HOME, LANG, TZ, LC_*`, [app.go](liveswap/app.go) `inheritedEnv`) —
+closing *direct* inheritance of
 ACME tokens (and any other supervisor secrets), but not the `/proc` or filesystem routes
 to the same values. This is the boundary the whole evaluation exists to
 build.
@@ -371,6 +376,24 @@ design) and **network egress** — both explicit non-goals, the port gap
 addressable later by a unix-socket upstream contract.
 
 ### C — "systemd template-unit runner"
+
+> **Status (2026-08-29): what shipped is neither B nor C.** liveswap
+> now runs every app as a transient unit on the **hotserve user's own
+> manager** (`user@<uid>.service`, private socket, no polkit, no
+> grant of any kind). The escalation trap this section warns about is
+> real and was the reason for that choice: it exists only when the
+> supervisor holds a `manage-units` grant on the *system* manager,
+> and hotserve holds none — it can create units only as itself, under
+> `NoNewPrivileges`, so a supervisor RCE gains nothing it did not
+> already have (T5 unchanged: `◐`). What C alone can buy — per-app
+> `User=`, `IPAddressDeny=` egress filtering — remains future work
+> and, if wanted, must arrive as a root-owned template or a minimal
+> privileged helper, never as a system-manager transient grant.
+> Restart-survival (`Reattach`) shipped with the runner. The
+> "unprivileged compose" testability row below is stale: `make e2e`
+> now runs hotserve under real systemd in a privileged container.
+> Isolation (A/B or systemd's per-unit sandboxing on the user
+> manager, probe-gated on unprivileged userns) is the next milestone.
 
 A packaged `hotserve-app@.service` template with **root-owned**
 properties: per-app `User=`, `ProtectSystem=strict`,

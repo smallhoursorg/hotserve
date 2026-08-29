@@ -7,10 +7,7 @@ set -u
 
 BASE="http://e2e-hotserve:9080"
 CACHED_BASE="http://e2e-hotserve:9090" # same module + Souin cache (Otter storage)
-FAILURES=0
-
-pass() { echo "PASS: $1"; }
-fail() { echo "FAIL: $1"; FAILURES=$((FAILURES + 1)); }
+. /lib.sh
 
 # code <client-ip> <query> -> prints HTTP status code
 code() {

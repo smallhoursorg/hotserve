@@ -25,20 +25,8 @@ HOOK="http://e2e-hotserve:8081/demo"
 ADMIN="http://e2e-hotserve:2019"
 PB="http://e2e-hotserve:9080"
 ART="http://e2e-artifacts:8080/artifacts"
-TOKEN_FILE="${DEPLOY_TOKEN_FILE:-/shared/deploy.token}"
-
-# Wait for the hotserve container's minted local deploy token (see
-# e2e/entrypoint.sh), then use it as the deploy bearer.
-i=0
-until [ -s "$TOKEN_FILE" ]; do
-	i=$((i + 1))
-	if [ "$i" -ge 60 ]; then
-		echo "FATAL: no deploy token at $TOKEN_FILE within 60s"
-		exit 1
-	fi
-	sleep 1
-done
-TOKEN=$(cat "$TOKEN_FILE")
+. /lib.sh
+wait_for_token
 
 DEPLOYS="${SOAK_DEPLOYS:-300}"
 RELOADS="${SOAK_RELOADS:-300}"
@@ -49,10 +37,6 @@ REQS="${SOAK_REQS:-10}"
 # (connection pools, GC workers), but a leak of one goroutine per
 # deploy would show up as +hundreds.
 SLACK=15
-
-FAILURES=0
-pass() { echo "PASS: $1"; }
-fail() { echo "FAIL: $1"; FAILURES=$((FAILURES + 1)); }
 
 metric() { # <prometheus metric name> -> integer value (empty if absent)
 	curl -s --max-time 5 "$ADMIN/metrics" | awk -v m="$1" '$1 == m {printf "%d\n", $2; exit}'
@@ -71,12 +55,6 @@ measure() { # <label> -> sets G_<label>, FD_<label>, RSS_<label>
 	eval "RSS_$1=\$(curl -s --max-time 5 \"$ADMIN/metrics\" \
 		| awk '\$1 == \"process_resident_memory_bytes\" {print \$2; exit}')"
 	eval "echo \"[$1] goroutines=\$G_$1 fds=\$FD_$1 rss_bytes=\$RSS_$1\""
-}
-
-deploy() { # <artifact> <version> -> status code
-	curl -s -o /tmp/deploy-body -w '%{http_code}' --max-time 60 \
-		-X POST -H "Authorization: Bearer $TOKEN" \
-		-d "{\"url\":\"$ART/$1\",\"version\":\"$2\"}" "$HOOK"
 }
 
 echo "=== soak: waiting for services ==="

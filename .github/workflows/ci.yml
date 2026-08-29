@@ -61,6 +61,10 @@ jobs:
           restore-keys: test-${{ runner.os }}-${{ runner.arch }}-
       - run: make vet COMPOSE="$COMPOSE"
       - run: make test COMPOSE="$COMPOSE"
+      # Deterministic half of fuzzing: every Fuzz target is discovered
+      # (so the weekly run cannot skip one) and every committed crasher
+      # corpus still has a target to replay it.
+      - run: make fuzz-list COMPOSE="$COMPOSE"
       - run: make test-integration COMPOSE="$COMPOSE"
 
   govulncheck:

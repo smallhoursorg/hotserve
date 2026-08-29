@@ -21,6 +21,14 @@ vendor: Hot Sauce Team
 homepage: https://github.com/smallhoursorg/hotserve
 license: Apache-2.0
 
+# liveswap runs deployed apps as transient units under the hotserve
+# user's systemd manager (user@<uid>.service). pam_systemd is what
+# gives that manager its runtime directory; without libpam-systemd it
+# cannot start at all. dbus: loginctl (lingering) needs the system bus.
+depends:
+  - libpam-systemd
+  - dbus
+
 contents:
   # `make package` stages the right arch's binary at this fixed path
   # before each nfpm run (nfpm does not env-expand contents paths).

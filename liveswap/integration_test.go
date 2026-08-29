@@ -548,10 +548,13 @@ func TestIntegrationWatchdogRestarts(t *testing.T) {
 			m := pidRe.FindStringSubmatch(page)
 			return m != nil && m[1] != strconv.Itoa(pid)
 		})
-		_, status := getStatusApp(t, app)
-		if !strings.Contains(status, `"last_restart_cause":"crash"`) {
-			t.Fatalf("status after crash restart: %s", status)
-		}
+		// The new instance is published a beat before the restart is
+		// recorded, so poll for the record rather than read it once.
+		var status string
+		pollUntil(t, 5*time.Second, "crash restart recorded", func() bool {
+			_, status = getStatusApp(t, app)
+			return strings.Contains(status, `"last_restart_cause":"crash"`)
+		})
 	})
 
 	t.Run("sustained health failure triggers a restart", func(t *testing.T) {
@@ -572,10 +575,11 @@ func TestIntegrationWatchdogRestarts(t *testing.T) {
 		if err := os.Remove(brokenPath); err != nil {
 			t.Fatal(err)
 		}
-		_, status := getStatusApp(t, app)
-		if !strings.Contains(status, `"last_restart_cause":"health"`) {
-			t.Fatalf("status after health restart: %s", status)
-		}
+		var status string
+		pollUntil(t, 5*time.Second, "health restart recorded", func() bool {
+			_, status = getStatusApp(t, app)
+			return strings.Contains(status, `"last_restart_cause":"health"`)
+		})
 	})
 }
 

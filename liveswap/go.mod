@@ -8,8 +8,10 @@ go 1.26.1
 require (
 	github.com/caddyserver/caddy/v2 v2.11.4
 	github.com/coreos/go-oidc/v3 v3.17.0
+	github.com/coreos/go-systemd/v22 v22.7.0
 	github.com/dustin/go-humanize v1.0.1
 	github.com/go-jose/go-jose/v4 v4.1.4
+	github.com/godbus/dbus/v5 v5.1.0
 	go.uber.org/goleak v1.3.0
 	go.uber.org/zap v1.28.0
 )
