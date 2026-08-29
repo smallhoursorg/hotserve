@@ -1,9 +1,20 @@
 # DESIGN — per-app sandboxing (M8)
 
-Status: proposed. This document is the implementation brief for
-sandboxing deployed apps with bubblewrap: the threat model, the
-normative behavior, the architecture decisions and their traps, and
-what is deliberately left out.
+Status: behaviour spec current, mechanism superseded (2026-08-29).
+This document was the implementation brief for sandboxing deployed
+apps with bubblewrap. The mechanism is now systemd's own per-unit
+sandboxing on the user-manager runner (`PrivatePIDs=`,
+`ProtectSystem=strict`, `PrivateTmp=`, `InaccessiblePaths=`,
+`ProtectControlGroups=`, `SystemCallFilter=@system-service`),
+probe-gated on the manager being systemd ≥ 256 (Debian 13, Ubuntu
+26.04); Debian 12 and Ubuntu 24.04 run floor-only with a WARN — see
+[DESIGN-threat-model.md](../DESIGN-threat-model.md), "The shared-UID
+rule" and the option-C status note. What remains normative here: the
+threat model, the behaviour specification, the config surface, the
+rollout/upgrade semantics and the testing criteria — all written
+backend-agnostic on purpose. The bubblewrap mechanics ("Spawn path",
+"Signal trap", "Probe and fallback ladder", "Packaging") are
+historical; issue #35 carries the systemd-property equivalents.
 
 ## Why this feature exists
 
@@ -45,8 +56,9 @@ requirement below stands as the contract the sandbox path must keep.
 
 ## Behavior specification (normative)
 
-- Sandboxing MUST default to on (`sandbox auto`) when bubblewrap and
-  user namespaces are available, and MUST be per-app configurable:
+- Sandboxing MUST default to on (`sandbox auto`) when the user manager
+  is systemd ≥ 256 and the kernel permits the namespaces, and MUST be
+  per-app configurable:
   `auto` (sandbox if available, else run bare with a prominent WARN at
   provision and at every spawn), `require` (provision fails if the
   sandbox cannot engage), `off`.
@@ -140,15 +152,23 @@ mode of hand-rolled flag soup.
 > Note (systemd runner): apps are now transient systemd units, so the
 > spawn is `ExecStart=` on the unit and bwrap becomes its argv prefix;
 > the process-group discussion below is moot — the unit's cgroup is
-> what Stop signals, bwrap or not. On hosts with unprivileged user
-> namespaces, systemd's own per-unit sandboxing (`ProtectProc=`,
-> `InaccessiblePaths=`, `ProtectSystem=strict`) may cover much of this
-> without bwrap; reconciling the two is the next design pass. Until
-> then apps run with **no** sandbox at all: unlike the exec runner's
-> children they no longer inherit hotserve.service's PrivateTmp /
-> ProtectSystem, and their environment is the user manager's defaults
-> plus the allowlisted slice — the isolation milestone is more urgent
-> under this runner, not less.
+> what Stop signals, bwrap or not. systemd's own per-unit sandboxing
+> (`ProtectSystem=strict`, `InaccessiblePaths=`, `ProtectProc=`) is
+> **not** an alternative: under the shared UID a mount sandbox holds
+> only inside a PID namespace (`/proc/<any same-UID pid>/root` walks
+> the host otherwise — the user manager is always such a pid), and
+> systemd delivers one only via `PrivatePIDs=` on ≥ 256; `hidepid`
+> hides other users' processes, of which there are none. See
+> DESIGN-threat-model.md, "The shared-UID rule". On systemd ≥ 256
+> `PrivatePIDs=` provides that namespace and the unit properties
+> become the whole mechanism — bwrap is dropped, not layered; below
+> 256 `auto` runs floor-only with a WARN. `/sys/fs/cgroup` must be read-only
+> in the unit (`ProtectControlGroups=`): the delegated subtree is
+> writable by the app's own UID otherwise. Until then apps run with
+> **no** sandbox beyond the non-dumpable supervisor: they no longer
+> inherit hotserve.service's PrivateTmp / ProtectSystem, and their
+> environment is the user manager's defaults plus the allowlisted
+> slice.
 
 `startSpec` gains a `sandbox *sandboxSpec` (nil = bare). The exec
 runner, when the spec is non-nil, prepends the bwrap argv produced by

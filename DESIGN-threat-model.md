@@ -5,10 +5,13 @@ the attacker is, the concrete paths from an entry point to an asset,
 and how three candidate isolation/hardening stacks score against those
 paths. It is the decision record behind the "per-app sandboxing"
 roadmap item; [DESIGN-sandbox.md](liveswap/DESIGN-sandbox.md) remains
-authoritative for bubblewrap mechanics, and this document places that
-work in the wider attack surface rather than restating it.
+authoritative for the sandbox's behaviour spec, config surface and
+rollout semantics (its bubblewrap mechanics are superseded — see "The
+shared-UID rule"), and this document places that work in the wider
+attack surface rather than restating it.
 
-Scope: a single Debian/Ubuntu box running `hotserve` (a Caddy
+Scope: a single Debian 12/13 or Ubuntu 24.04/26.04 box (the support
+matrix) running `hotserve` (a Caddy
 distribution) as the `hotserve` system user, supervising deployed apps
 as transient systemd units under the hotserve user's own service
 manager via liveswap's `systemdRunner`
@@ -32,7 +35,10 @@ Windows, and macOS-as-a-server are out of scope by product design.
    short-lived and audience/claim-scoped, and the verifier holds only
    public keys.
 2. **ACME DNS tokens** — in the supervisor env; issue/alter certs.
-   Now the highest-value item reachable via `/proc/<supervisor>/environ`.
+   The highest-value item on the box. Was reachable via
+   `/proc/<supervisor>/environ`; closed by the non-dumpable supervisor
+   ("The shared-UID rule"). Still on disk wherever Caddy persists
+   config (`/var/lib/hotserve/caddy/autosave.json`) — a filesystem route.
 3. **TLS private keys** — `/var/lib/hotserve/caddy/**`, mode `0750`
    owned by `hotserve`.
 4. **Admin API socket** — `/run/hotserve/admin.sock`
@@ -214,9 +220,10 @@ environment is the user manager's defaults (`XDG_RUNTIME_DIR`,
 `INVOCATION_ID`, …) plus an allowlisted slice of hotserve's (`PATH,
 HOME, LANG, TZ, LC_*`, [app.go](liveswap/app.go) `inheritedEnv`) —
 closing *direct* inheritance of
-ACME tokens (and any other supervisor secrets), but not the `/proc` or filesystem routes
-to the same values. This is the boundary the whole evaluation exists to
-build.
+ACME tokens (and any other supervisor secrets); the `/proc` route is
+closed by the non-dumpable supervisor ("The shared-UID rule" below);
+the filesystem routes remain. This is the boundary the whole
+evaluation exists to build.
 
 ### Install-time — `packaging/postinstall.sh`
 
@@ -258,7 +265,7 @@ For **T1**, the reachable-today set — the boundary matrix:
 
 | Path | Reachable today | Mechanism |
 |---|---|---|
-| `/proc/<supervisor>/environ` → ACME tokens | ✔ | same UID |
+| `/proc/<supervisor>/environ` → ACME tokens | ✘ closed | same UID, but hotserve is non-dumpable (see "The shared-UID rule") |
 | connect admin socket → reconfigure server | ✔ | dir `0750`, same UID |
 | read TLS private keys | ✔ | same UID, `/var/lib/hotserve` |
 | read/write sibling releases, `shared`, `state.json` | ✔ | same UID |
@@ -275,6 +282,51 @@ link-TOCTOU shape (unproven); first-hop→any-https SSRF. For **T4**:
 log-amplification disk-fill (online *token forgery* is infeasible —
 see below). For **T5**: total, by definition — the containment
 question is root-vs-not-root.
+
+## The shared-UID rule (normative for every approach)
+
+Everything liveswap touches runs as one UID: hotserve, the hotserve
+user's `systemd --user` manager, and every app. The kernel gates
+`/proc/<pid>/{environ,root,cwd,mem,fd,maps}` on
+`ptrace_may_access(PTRACE_MODE_READ)`, which any same-UID caller passes
+while the target is dumpable — regardless of the caller's mount
+namespace, user namespace or seccomp filter. Three consequences, and
+they decide the mechanism before any spike:
+
+1. **No mount sandbox without a PID namespace.** A sandboxed app that
+   can see any same-UID PID outside its sandbox opens
+   `/proc/<that-pid>/root/…` and walks the host filesystem. The user
+   manager (host root, same UID, always running) is a permanent such
+   target; every sibling app is another. `ProtectSystem=strict`,
+   `InaccessiblePaths=`, a bubblewrap `--ro-bind` view are all void
+   without a PID namespace. `ProtectProc=invisible` does not
+   substitute: `hidepid` hides other *users'* processes, and there are
+   no other users here. systemd delivers the namespace as
+   `PrivatePIDs=yes` from 256: Debian 13 and Ubuntu 26.04. Decision
+   (2026-08-29): the isolation is systemd-native and **probe-gated on
+   the manager's version**; on Debian 12 (252) and Ubuntu 24.04 (255)
+   apps run with the floor only (item 2 plus `NoNewPrivileges`) and a
+   WARN at every start, `sandbox require` refuses. Bubblewrap is not
+   carried as a second mechanism for those hosts — "full isolation
+   needs systemd ≥ 256" is the documented line. Ubuntu 22.04 is
+   dropped from the matrix.
+2. **A non-dumpable supervisor is the unconditional floor.**
+   `prctl(PR_SET_DUMPABLE, 0)` makes hotserve's `/proc` entries require
+   `CAP_SYS_PTRACE`, which apps under `NoNewPrivileges` never hold — on
+   every host, with or without user namespaces. **Shipped:**
+   `liveswap.HardenProcess`, called at `cmd/hotserve`'s entry and again
+   in `App.Start` (so an xcaddy build importing the module gets it
+   too), pinned by a unit test and by the real-systemd e2e suite
+   (scenario 10). The package declares `systemd (>= 256)`. It closes the
+   `/proc/<supervisor>/environ` and `/proc/<supervisor>/root` routes
+   only; TLS keys on disk, the admin socket and sibling files still
+   need the mount namespace.
+3. **Resource caps need a read-only cgroupfs inside the sandbox.** The
+   cgroup subtree under `user@<uid>.service` is delegated to — owned
+   by — the hotserve UID, so `MemoryMax=`/`TasksMax=` on a user-manager
+   unit is a limit the app can rewrite in `/sys/fs/cgroup` (or escape
+   by migrating its PIDs) unless that tree is read-only in its view.
+   Runtimes only ever *read* it.
 
 ## Reducing the asset (deploy auth) — shipped
 
@@ -392,8 +444,19 @@ addressable later by a unix-socket upstream contract.
 > Restart-survival (`Reattach`) shipped with the runner. The
 > "unprivileged compose" testability row below is stale: `make e2e`
 > now runs hotserve under real systemd in a privileged container.
-> Isolation (A/B or systemd's per-unit sandboxing on the user
-> manager, probe-gated on unprivileged userns) is the next milestone.
+> Isolation is the next milestone, and "The shared-UID rule" above
+> settles its mechanism: systemd's own per-unit sandboxing on the
+> user manager, which holds only with `PrivatePIDs=` (systemd ≥ 256)
+> — so it is probe-gated: full on Debian 13 / Ubuntu 26.04, floor-only
+> with a WARN on Debian 12 / Ubuntu 24.04. The property set is C's,
+> minus `User=` and the polkit/template machinery:
+> `PrivatePIDs=`, `ProtectSystem=strict` + `ReadWritePaths=`,
+> `PrivateTmp=`, `InaccessiblePaths=`, `ProtectControlGroups=` (so
+> caps are real), `SystemCallFilter=@system-service`, resource caps.
+> No bubblewrap. Still to prove on both cells, inside the *user*
+> manager: that the set applies to a transient unit, and that
+> Ubuntu's AppArmor user-namespace restriction does not block
+> `systemd --user` (bwrap had a dedicated profile; systemd does not).
 
 A packaged `hotserve-app@.service` template with **root-owned**
 properties: per-app `User=`, `ProtectSystem=strict`,
@@ -434,7 +497,7 @@ LXC VPS / locked-down kernel.
 
 | Attack path (attacker) | Today | A | B | C |
 |---|---|---|---|---|
-| `/proc/<sup>/environ` (ACME tokens) (T1) | ○ | ● | ● | ● |
+| `/proc/<sup>/environ` (ACME tokens) (T1) | ●¹¹ | ● | ● | ● |
 | admin socket connect (T1) | ○ | ● | ● | ● |
 | TLS private key read (T1) | ○ | ● | ● | ● |
 | sibling file read/write (T1) | ○ | ◐¹ | ● | ● |
@@ -463,7 +526,9 @@ LXC VPS / locked-down kernel.
    the real fix and is isolation-independent. 10. C is the only approach
    that can make T5 *worse* (polkit root-escalation) if built as
    transient units — the template design avoids it, hence `◐` not `○`,
-   but it is the row that demands the most care.
+   but it is the row that demands the most care. 11. Closed by the
+   non-dumpable supervisor (shared-UID rule, item 2) independently of
+   any approach; the "Today" column otherwise predates isolation.
 
 Cost / lock-in rows:
 
@@ -520,6 +585,20 @@ specifically earn the polkit/template work — those are C's only
 capabilities B cannot reach, and both are one-way doors. When C does
 land, it MUST be the root-owned template, never supervisor-shaped
 transient units.
+
+> **Where this stands (2026-08-29).** Restart-survival arrived without
+> C (the user-manager runner, #34). The non-dumpable floor is shipped.
+> The isolation will be systemd-native on the user manager — C's
+> property set without C's privilege: `PrivatePIDs=` for the PID
+> namespace the shared-UID rule demands, `ProtectControlGroups=` so
+> resource caps are real, the curated `@system-service` seccomp
+> filter — probe-gated on the manager being ≥ 256 (Debian 13, Ubuntu
+> 26.04); Debian 12 and Ubuntu 24.04 stay supported and run floor-only
+> with a WARN. B's bubblewrap is dropped rather than carried as a
+> second mechanism. DESIGN-sandbox.md's behaviour spec, config surface
+> and rollout semantics (engage on next deploy, record the disposition
+> in `state.json`, `auto`/`require`/`off`) carry over unchanged; its
+> bwrap mechanics do not. Per-app UIDs stay the later milestone.
 
 Independently of which approach lands, do the three non-isolation
 hardening items above — they are cheaper than any of A/B/C and address

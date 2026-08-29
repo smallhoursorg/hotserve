@@ -7,6 +7,9 @@
 package main
 
 import (
+	"fmt"
+	"os"
+
 	caddycmd "github.com/caddyserver/caddy/v2/cmd"
 
 	// Standard Caddy modules — this is what makes the binary equivalent
@@ -15,7 +18,7 @@ import (
 	_ "github.com/caddyserver/caddy/v2/modules/standard"
 
 	// hotserve modules.
-	_ "github.com/smallhoursorg/hotserve/liveswap"
+	"github.com/smallhoursorg/hotserve/liveswap"
 	_ "github.com/smallhoursorg/hotserve/penaltybox"
 
 	// HTTP cache (Souin) with in-memory Otter storage.
@@ -24,5 +27,11 @@ import (
 )
 
 func main() {
+	// Before anything else: deployed apps share this process's UID, and
+	// only a non-dumpable process keeps its /proc closed to them. Not
+	// fatal — a server that cannot start protects nothing — but loud.
+	if err := liveswap.HardenProcess(); err != nil {
+		fmt.Fprintf(os.Stderr, "hotserve: cannot mark the process non-dumpable (%v): processes running as this user can read its environment via /proc\n", err)
+	}
 	caddycmd.Main()
 }

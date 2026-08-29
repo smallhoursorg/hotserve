@@ -219,6 +219,32 @@ journalctl --no-pager -t hotserve-demo | grep -q "workers up" \
 	&& pass "app stdout is in the journal under identifier hotserve-demo" \
 	|| fail "no app output in the journal for -t hotserve-demo"
 
+echo "=== systemd 10: hotserve is non-dumpable — its /proc is closed to its own UID ==="
+# Apps run as the hotserve user. The kernel opens /proc/<pid>/environ
+# and /proc/<pid>/root to any same-UID reader of a dumpable process —
+# whatever sandbox that reader sits in — so without this floor every
+# app could read the supervisor's environment (ACME DNS tokens) or walk
+# the host filesystem through /proc/<hotserve>/root. cmd/hotserve marks
+# itself non-dumpable at entry; this proves it under the packaged unit.
+as_hotserve() { su -s /bin/sh hotserve -c "$*"; }
+hpid=$(systemctl show -p MainPID --value hotserve)
+[ -n "$hpid" ] && [ "$hpid" != "0" ] || fail "no MainPID for hotserve.service"
+# (The /proc/<pid> directory itself keeps the task's uid so `ps` can
+# stat it; the per-process files inside are what turn root-owned.)
+[ "$(stat -c %U "/proc/$hpid/environ")" = "root" ] \
+	&& pass "/proc/$hpid/environ is root-owned (hotserve is non-dumpable)" \
+	|| fail "/proc/$hpid/environ is owned by $(stat -c %U "/proc/$hpid/environ"): hotserve is dumpable"
+# Each denial is asserted by its reason, not by a non-zero exit: a
+# broken `su` would otherwise pass these vacuously.
+out=$(as_hotserve "cat /proc/$hpid/environ" 2>&1)
+case "$out" in *"Permission denied"*) pass "hotserve's environ is unreadable to the hotserve user" ;; *) fail "expected EACCES reading hotserve's environ as the hotserve user, got: $out" ;; esac
+out=$(as_hotserve "ls /proc/$hpid/root/" 2>&1)
+case "$out" in *"Permission denied"*) pass "/proc/$hpid/root is closed to the hotserve user" ;; *) fail "expected EACCES traversing /proc/$hpid/root as the hotserve user, got: $out" ;; esac
+apid=$(json_num "$(status)" pid)
+as_hotserve "cat /proc/$apid/environ" >/dev/null 2>&1 \
+	&& pass "control: the app's own environ is still readable to its uid (the floor is hotserve's alone)" \
+	|| fail "control: the app's environ (pid $apid) is unreadable to its own uid"
+
 echo ""
 if [ "$FAILURES" -eq 0 ]; then
 	echo "ALL SYSTEMD SCENARIOS PASSED"
