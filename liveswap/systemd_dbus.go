@@ -110,8 +110,9 @@ func (c *userManagerClient) get() (*sddbus.Conn, error) {
 	// what the manager permits. Read while the handshake deadlines are
 	// still armed, so a manager that stops answering here cannot hang
 	// every caller; unknown just means "leave the limits alone".
+	var nofile uint64 // 0 = unknown: leave units' limits alone
 	if v, err := conn.GetManagerProperty("DefaultLimitNOFILE"); err == nil {
-		c.nofile.Store(parseManagerUint(v))
+		nofile = parseManagerUint(v)
 	} else if !conn.Connected() {
 		conn.Close()
 		return nil, err
@@ -126,10 +127,11 @@ func (c *userManagerClient) get() (*sddbus.Conn, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.conn != nil && c.conn.Connected() {
-		conn.Close() // another caller won the redial
+		conn.Close() // another caller won the redial; its limit stands
 		return c.conn, nil
 	}
 	c.conn = conn
+	c.nofile.Store(nofile) // published with the connection it was read from
 	return conn, nil
 }
 

@@ -971,7 +971,7 @@ func TestRecoverRetriesTransientErrorsUntilReattached(t *testing.T) {
 	rig.runner.reattachErrs = []error{errTest, errTest}
 	rig.runner.reattachOK = true
 	done := make(chan struct{})
-	go func() { rig.ma.recover(zap.NewNop()); close(done) }()
+	go func() { rig.ma.recover(context.Background(), zap.NewNop()); close(done) }()
 	advanceUntil(t, rig, recoveryBackoffFloor, "reattach after two transient failures", func() bool {
 		return rig.ma.activePort.Load() == 12345
 	})
@@ -992,7 +992,7 @@ func TestRecoverGivesUpOnPermanentErrors(t *testing.T) {
 	rig.store.state = appState{CurrentVersion: "v7", Port: 12345, Handle: handleState{PID: 1}}
 	rig.store.ok = true // release dir deliberately missing: not something a retry fixes
 	done := make(chan struct{})
-	go func() { rig.ma.recover(zap.NewNop()); close(done) }()
+	go func() { rig.ma.recover(context.Background(), zap.NewNop()); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
@@ -1022,28 +1022,31 @@ func TestEnsureRunningReattachSweepFailureIsTransient(t *testing.T) {
 	}
 }
 
-func TestDestructWaitsForRecovery(t *testing.T) {
+func TestCleanupJoinsRecoveryBeforeReleasing(t *testing.T) {
 	rig := newTestRig(t)
-	markLive(t)
 	rig.store.state = appState{CurrentVersion: "v7", Port: 12345, Handle: handleState{Unit: "u.service"}}
 	rig.store.ok = true
 	must(t, os.MkdirAll(rig.spec.dirs.release("v7"), 0o755))
 	rig.runner.reattachErrs = []error{errTest, errTest, errTest, errTest, errTest, errTest}
-	rig.ma.recoveryWG.Add(1)
+	// What App.Start does for its apps: recovery owned by the config.
+	a := &App{logger: zap.NewNop(), managed: map[string]*managedApp{"demo": rig.ma}}
+	ctx, cancel := context.WithCancel(context.Background())
+	a.recoverCancel = cancel
+	a.recoverWG = new(sync.WaitGroup)
+	a.recoverWG.Add(1)
 	exited := make(chan struct{})
-	go func() { defer rig.ma.recoveryWG.Done(); rig.ma.recover(zap.NewNop()); close(exited) }()
+	go func() { defer a.recoverWG.Done(); rig.ma.recover(ctx, zap.NewNop()); close(exited) }()
 	waitUntil(t, "first attempt", func() bool { return rig.runner.reattachCount() >= 1 })
-	// The app is removed while recovery is parked in backoff: Destruct
-	// must end recovery before its final sweep, and recovery must not
-	// launch anything afterwards.
-	must(t, rig.ma.Destruct())
+	// The config is cleaned up while recovery is parked in backoff:
+	// Cleanup must end it before anything else happens.
+	must(t, a.Cleanup())
 	select {
 	case <-exited:
 	case <-time.After(2 * time.Second):
-		t.Fatal("recovery must have exited by the time Destruct returns")
+		t.Fatal("recovery must have exited by the time Cleanup returns")
 	}
-	if rig.runner.startCount() != 0 || rig.runner.lastSweep() != nil {
-		t.Fatalf("starts=%d lastSweep=%v", rig.runner.startCount(), rig.runner.lastSweep())
+	if rig.runner.startCount() != 0 {
+		t.Fatal("nothing may be launched by a cancelled recovery")
 	}
 }
 

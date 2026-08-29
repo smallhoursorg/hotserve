@@ -178,10 +178,6 @@ type managedApp struct {
 	// concurrent webhook gets an immediate 409 and CI can retry.
 	deployMu sync.Mutex
 
-	// recoveryWG tracks the boot-recovery goroutine (App.Start) so
-	// removal can wait for it; exit deliberately does not.
-	recoveryWG sync.WaitGroup
-
 	// mu guards current, phase and lastDeploy.
 	mu         sync.Mutex
 	current    *instance
@@ -668,13 +664,9 @@ const (
 // recover runs ensureRunning until it succeeds or fails for a reason a
 // retry cannot fix, backing off on transient manager trouble. A boot
 // where the user manager is briefly unresponsive must not leave a
-// healthy app unrouted until an operator reloads. Stops when the app
-// is destructed (its watchdog context ends).
-func (ma *managedApp) recover(logger *zap.Logger) {
-	ctx := ma.wdCtx
-	if ctx == nil {
-		ctx = context.Background()
-	}
+// healthy app unrouted until an operator reloads. ctx belongs to the
+// config that started it and ends at that config's Cleanup.
+func (ma *managedApp) recover(ctx context.Context, logger *zap.Logger) {
 	delay := recoveryBackoffFloor
 	for attempt := 1; ; attempt++ {
 		if ctx.Err() != nil {
@@ -914,9 +906,8 @@ func (ma *managedApp) Destruct() error {
 		return nil
 	}
 	// Removed by a reload that is now serving: no unit may outlive
-	// the definition. Recovery must be finished first, or it could
-	// launch after the sweep.
-	ma.recoveryWG.Wait()
+	// the definition. (The removing config's Cleanup has already
+	// joined its recovery, so nothing can launch after this sweep.)
 	// Stop what we track (if anything), then everything else the
 	// manager holds for this app: a removed app must leave no unit
 	// behind, tracked or not — an ambiguous start may have left one

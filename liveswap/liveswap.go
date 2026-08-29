@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -109,12 +110,17 @@ type App struct {
 	// argument to `dynamic liveswap <name>`.
 	Apps map[string]*AppConfig `json:"apps,omitempty"`
 
-	logger          *zap.Logger
-	managed         map[string]*managedApp
-	specs           map[string]*appSpec // built in Provision, installed at Start
-	clients         *fetchClients
-	started         bool     // Start ran: this config counts as live until Cleanup
-	pooled          []string // pool keys this config instance holds references to
+	logger  *zap.Logger
+	managed map[string]*managedApp
+	specs   map[string]*appSpec // built in Provision, installed at Start
+	clients *fetchClients
+	started bool     // Start ran: this config counts as live until Cleanup
+	pooled  []string // pool keys this config instance holds references to
+	// recoverCancel/recoverWG own the boot-recovery goroutines this
+	// config started, so Cleanup can end them before rolling back or
+	// releasing anything.
+	recoverCancel   context.CancelFunc
+	recoverWG       *sync.WaitGroup // pointer: App values are copied by Caddy
 	allowlist       []artifactAllowEntry
 	globalTrust     []trustSource // resolved global DeployTrust, for the unknown-app path
 	globalVerifiers []verifier
@@ -532,14 +538,19 @@ func (a *App) Start() error {
 			a.logger.Error("sweeping units of apps no longer configured", zap.Error(err))
 		}
 	}()
+	// Recovery belongs to this config: Cleanup cancels and joins it
+	// before rolling a rejected definition back or releasing pool
+	// references, so a recovery that snapshotted a rejected spec can
+	// never launch with it, and a removed app's final sweep runs after
+	// its recovery, not before.
+	ctx, cancel := context.WithCancel(context.Background())
+	a.recoverCancel = cancel
+	a.recoverWG = new(sync.WaitGroup)
 	for name, ma := range a.managed {
-		// Tracked so Destruct-on-removal can wait for an in-flight
-		// recovery before its final sweep (exit does not wait: the
-		// process is going, and the next start's sweep settles it).
-		ma.recoveryWG.Add(1)
+		a.recoverWG.Add(1)
 		go func(name string, ma *managedApp) {
-			defer ma.recoveryWG.Done()
-			ma.recover(a.logger.Named(name))
+			defer a.recoverWG.Done()
+			ma.recover(ctx, a.logger.Named(name))
 		}(name, ma)
 	}
 	return nil
@@ -556,6 +567,15 @@ func (a *App) Stop() error { return nil }
 // pool calls managedApp.Destruct: an app removed from the config is
 // stopped; on process exit the units stay up for the next start.
 func (a *App) Cleanup() error {
+	if a.recoverCancel != nil {
+		a.recoverCancel()
+		// An attempt in flight is bounded by the runner's own
+		// deadlines; on process exit it is not worth waiting for
+		// (the next start's sweep settles anything it leaves).
+		if !caddyExiting() {
+			a.recoverWG.Wait()
+		}
+	}
 	if a.started {
 		a.started = false
 		liveStartedApps.Add(-1)
