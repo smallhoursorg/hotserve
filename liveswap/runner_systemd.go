@@ -271,28 +271,16 @@ func unitApp(name string) (string, bool) {
 	return m[1], true
 }
 
-// configuredApps is the set of app names the live config declares —
-// process-wide, because the sweep below runs detached from any one
-// config. Publishing a new set never waits for a sweep: the sweep
-// re-reads the set immediately before acting on each app, so a reload
-// that adds an app back is honoured by any sweep still in flight, and
-// an obsolete sweep can never stop a unit the live config wants.
-var configuredApps = struct {
-	sync.Mutex
-	names map[string]bool
-}{names: map[string]bool{}}
-
-// setConfiguredApps publishes the current config's app names.
-func setConfiguredApps(names map[string]bool) {
-	configuredApps.Lock()
-	defer configuredApps.Unlock()
-	configuredApps.names = names
-}
-
-func appConfigured(app string) bool {
-	configuredApps.Lock()
-	defer configuredApps.Unlock()
-	return configuredApps.names[app]
+// appConfigured reports whether any loaded config — the live one, or
+// a candidate being provisioned — holds the app. The pool is the
+// authority: a candidate that later fails to activate still holds its
+// pool references until its Cleanup, and the config it would have
+// replaced holds its own throughout, so nothing a sweep judges
+// "unknown" can belong to a config that is or may yet be serving. A
+// variable so tests can substitute their own ledger.
+var appConfigured = func(app string) bool {
+	refs, ok := appPool.References(poolKey(app))
+	return ok && refs > 0
 }
 
 // unknownSweepMu serializes start-time sweeps with each other (two

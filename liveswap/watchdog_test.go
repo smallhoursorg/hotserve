@@ -137,7 +137,7 @@ func TestWatchdogUnconfirmedStopAbortsRestart(t *testing.T) {
 	// already known unhealthy), which is what proves skipNextGrace.
 	rig.spec.wdGrace = time.Hour
 	deployV1(t, rig)
-	rig.ma.wd.skipNextGrace() // the first pass probes immediately; only the retry proves the skip
+	rig.ma.wd.skipNextGrace(rig.runner.handleAt(0)) // the first pass probes immediately; only the retry proves the skip
 	port := rig.ma.activePort.Load()
 	rig.prober.setProbeErr(errors.New("health check returned 500"))
 	rig.runner.stopErr = errTest
@@ -187,6 +187,26 @@ func TestWatchdogRestartAbortsWhenSweepUnconfirmed(t *testing.T) {
 	advanceUntil(t, rig, time.Second, "restart once the sweep confirms", func() bool {
 		return rig.runner.startCount() == 2
 	})
+}
+
+func TestWatchdogSkipGraceIsScopedToTheHandle(t *testing.T) {
+	var w watchdogState
+	h1, h2 := &fakeHandle{id: "1"}, &fakeHandle{id: "2"}
+	w.skipNextGrace(h1)
+	if w.takeSkipGrace(h2) {
+		t.Fatal("another instance must get its full grace")
+	}
+	if !w.takeSkipGrace(h1) {
+		t.Fatal("the flagged instance must skip grace (once)")
+	}
+	if w.takeSkipGrace(h1) {
+		t.Fatal("consumed")
+	}
+	w.skipNextGrace(h1)
+	w.reset() // a successful deploy
+	if w.takeSkipGrace(h1) {
+		t.Fatal("a deploy reset must clear a pending skip")
+	}
 }
 
 func TestWatchdogHealthFailuresBelowThresholdReset(t *testing.T) {

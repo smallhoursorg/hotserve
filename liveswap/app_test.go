@@ -196,6 +196,12 @@ func (r *fakeRunner) Reattach(_ handleState) (handle, bool, error) {
 	return h, true, nil
 }
 
+func (r *fakeRunner) reattachCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.reattachCalls
+}
+
 func (r *fakeRunner) Sweep(_ string, keep handle) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -385,6 +391,8 @@ func newTestRig(t *testing.T) *testRig {
 	ma.clock = rig.clock
 	ma.store = rig.store
 	ma.logger = zap.NewNop()
+	ma.wdCtx, ma.wdCancel = context.WithCancel(context.Background())
+	t.Cleanup(ma.wdCancel)
 	rig.ma = ma
 	return rig
 }
@@ -989,6 +997,53 @@ func TestRecoverGivesUpOnPermanentErrors(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("recover must return on a permanent error, not retry forever")
+	}
+}
+
+func TestEnsureRunningReattachSweepFailureIsTransient(t *testing.T) {
+	rig := newTestRig(t)
+	rig.store.state = appState{CurrentVersion: "v7", Port: 12345, Handle: handleState{Unit: "u.service"}}
+	rig.store.ok = true
+	must(t, os.MkdirAll(rig.spec.dirs.release("v7"), 0o755))
+	rig.runner.reattachOK = true
+	rig.runner.sweepErr = errTest
+	err := rig.ma.ensureRunning()
+	if !transientRecovery(err) {
+		t.Fatalf("an unsettled ledger after reattach must be reported as transient, got %v", err)
+	}
+	if rig.ma.activePort.Load() != 12345 {
+		t.Fatal("the reattached instance still serves meanwhile")
+	}
+	// The retry path (instance alive) sweeps again and succeeds.
+	rig.runner.sweepErr = nil
+	must(t, rig.ma.ensureRunning())
+	if rig.runner.sweepCount() != 2 || rig.runner.lastSweep() != rig.runner.handleAt(0) {
+		t.Fatalf("retry must sweep keeping the live instance, sweeps=%v", rig.runner.sweeps)
+	}
+}
+
+func TestDestructWaitsForRecovery(t *testing.T) {
+	rig := newTestRig(t)
+	rig.ma.started.Store(true)
+	rig.store.state = appState{CurrentVersion: "v7", Port: 12345, Handle: handleState{Unit: "u.service"}}
+	rig.store.ok = true
+	must(t, os.MkdirAll(rig.spec.dirs.release("v7"), 0o755))
+	rig.runner.reattachErrs = []error{errTest, errTest, errTest, errTest, errTest, errTest}
+	rig.ma.wdWG.Add(1)
+	exited := make(chan struct{})
+	go func() { defer rig.ma.wdWG.Done(); rig.ma.recover(zap.NewNop()); close(exited) }()
+	waitUntil(t, "first attempt", func() bool { return rig.runner.reattachCount() >= 1 })
+	// The app is removed while recovery is parked in backoff: Destruct
+	// must end recovery before its final sweep, and recovery must not
+	// launch anything afterwards.
+	must(t, rig.ma.Destruct())
+	select {
+	case <-exited:
+	case <-time.After(2 * time.Second):
+		t.Fatal("recovery must have exited by the time Destruct returns")
+	}
+	if rig.runner.startCount() != 0 || rig.runner.lastSweep() != nil {
+		t.Fatalf("starts=%d lastSweep=%v", rig.runner.startCount(), rig.runner.lastSweep())
 	}
 }
 

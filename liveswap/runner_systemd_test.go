@@ -743,8 +743,10 @@ func TestSweepUnknownApps(t *testing.T) {
 	conn.setStatus("hotserve-old.v2.0a1b2c3e.service", failedStatus) // removed app: reset
 	conn.setStatus("hotserve-demo-api.v1.0a1b2c3d.service", running) // another configured app: keep
 	conn.setStatus("hotserve-weird.service", running)                // not ours: ignore
-	setConfiguredApps(map[string]bool{"demo": true, "demo-api": true})
-	t.Cleanup(func() { setConfiguredApps(map[string]bool{}) })
+	configured := map[string]bool{"demo": true, "demo-api": true}
+	orig := appConfigured
+	appConfigured = func(app string) bool { return configured[app] }
+	t.Cleanup(func() { appConfigured = orig })
 	err := sweepUnknownApps(context.Background(), conn, zap.NewNop())
 	if err != nil {
 		t.Fatal(err)
@@ -771,15 +773,18 @@ func TestSweepUnknownApps(t *testing.T) {
 
 func TestSweepUnknownAppsJudgesAgainstLiveConfig(t *testing.T) {
 	// A reload adds "late" back while the sweep is still listing: the
-	// publication must not wait for the sweep, and the sweep must judge
-	// against the set as published — never a capture from before.
+	// sweep must judge against the ledger as it is right before acting
+	// — never a capture from before.
 	conn := newFakeSystemdConn()
 	running := unitStatus{LoadState: "loaded", ActiveState: "active"}
 	conn.setStatus("hotserve-late.v1.0a1b2c3d.service", running)
-	setConfiguredApps(map[string]bool{}) // "late" is not configured when the sweep starts
-	t.Cleanup(func() { setConfiguredApps(map[string]bool{}) })
+	var mu sync.Mutex
+	configured := map[string]bool{} // "late" is not configured when the sweep starts
+	orig := appConfigured
+	appConfigured = func(app string) bool { mu.Lock(); defer mu.Unlock(); return configured[app] }
+	t.Cleanup(func() { appConfigured = orig })
 	conn.mu.Lock()
-	conn.listHook = func() { setConfiguredApps(map[string]bool{"late": true}) } // the reload lands mid-listing
+	conn.listHook = func() { mu.Lock(); configured["late"] = true; mu.Unlock() } // the reload lands mid-listing
 	conn.mu.Unlock()
 	if err := sweepUnknownApps(context.Background(), conn, zap.NewNop()); err != nil {
 		t.Fatal(err)

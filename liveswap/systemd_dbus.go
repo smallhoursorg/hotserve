@@ -102,21 +102,25 @@ func (c *userManagerClient) get() (*sddbus.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, nc := range raws {
-		if derr := nc.SetDeadline(time.Time{}); derr != nil {
-			conn.Close()
-			return nil, derr
-		}
-	}
-
 	// systemd gives services soft NOFILE 1024 by default however high
 	// the hard limit is; the exec runner's children inherited
 	// hotserve.service's soft=hard. Units are created with both set to
 	// the manager's hard ceiling (which the package raises via a
 	// user@<uid>.service.d drop-in), so a setrlimit can never exceed
-	// what the manager permits.
+	// what the manager permits. Read while the handshake deadlines are
+	// still armed, so a manager that stops answering here cannot hang
+	// every caller; unknown just means "leave the limits alone".
 	if v, err := conn.GetManagerProperty("DefaultLimitNOFILE"); err == nil {
 		c.nofile.Store(parseManagerUint(v))
+	} else if !conn.Connected() {
+		conn.Close()
+		return nil, err
+	}
+	for _, nc := range raws {
+		if derr := nc.SetDeadline(time.Time{}); derr != nil {
+			conn.Close()
+			return nil, derr
+		}
 	}
 
 	c.mu.Lock()

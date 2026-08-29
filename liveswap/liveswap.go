@@ -500,17 +500,12 @@ func (a *App) Start() error {
 	for _, ma := range a.managed {
 		ma.started.Store(true)
 	}
-	// Units of apps this config no longer names have no managedApp to
-	// sweep them (removed or renamed while hotserve was down): settle
-	// them against the manager's own listing. Background, like
-	// recovery; publishing the set never waits for a sweep, and the
-	// sweep judges every app against the set as it is right before
-	// acting, so a reload racing it cannot lose an app it just added.
-	known := make(map[string]bool, len(a.managed))
-	for name := range a.managed {
-		known[name] = true
-	}
-	setConfiguredApps(known)
+	// Units of apps no loaded config names have no managedApp to sweep
+	// them (removed or renamed while hotserve was down): settle them
+	// against the manager's own listing. Background, like recovery;
+	// the sweep judges each app against the pool right before acting,
+	// so neither a reload racing it nor a candidate config that later
+	// fails to activate can lose an app someone still holds.
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), unknownAppSweepTimeout)
 		defer cancel()
@@ -519,7 +514,14 @@ func (a *App) Start() error {
 		}
 	}()
 	for name, ma := range a.managed {
-		go ma.recover(a.logger.Named(name))
+		// Joined to the watchdog wait group: Destruct (stopWatchdog)
+		// waits for an in-flight recovery before its final sweep, so
+		// recovery can never launch a unit for an app being removed.
+		ma.wdWG.Add(1)
+		go func(name string, ma *managedApp) {
+			defer ma.wdWG.Done()
+			ma.recover(a.logger.Named(name))
+		}(name, ma)
 	}
 	return nil
 }

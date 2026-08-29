@@ -76,7 +76,7 @@ type watchdogState struct {
 	healthySince     time.Time
 	lastRestartAt    time.Time
 	lastRestartCause string
-	skipGrace        bool // next superviseInstance re-arms no grace window
+	skipGraceFor     handle // superviseInstance re-arms no grace for this handle
 	lastFailure      string
 	jitter           func() float64 // test seam; nil = rand.Float64
 }
@@ -167,20 +167,23 @@ func (w *watchdogState) consumeBudget(now time.Time, budget int, window time.Dur
 // must not drain the budget, or a long deploy over a dead instance
 // exhausts it with zero restarts performed. No-op if a deploy's reset
 // already cleared the window.
-// skipNextGrace asks the next supervision pass not to re-arm the grace
-// window: the instance is already known unhealthy.
-func (w *watchdogState) skipNextGrace() {
+// skipNextGrace asks the next supervision pass of h not to re-arm the
+// grace window: that instance is already known unhealthy. Tied to the
+// handle so a deploy that replaces it meanwhile gets its full grace.
+func (w *watchdogState) skipNextGrace(h handle) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.skipGrace = true
+	w.skipGraceFor = h
 }
 
-func (w *watchdogState) takeSkipGrace() bool {
+func (w *watchdogState) takeSkipGrace(h handle) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	s := w.skipGrace
-	w.skipGrace = false
-	return s
+	if w.skipGraceFor == nil || w.skipGraceFor != h {
+		return false // another instance's flag (or none) stays put
+	}
+	w.skipGraceFor = nil
+	return true
 }
 
 func (w *watchdogState) refundBudget() {
@@ -246,6 +249,7 @@ func (w *watchdogState) reset() {
 	w.backoffStep = 0
 	w.healthySince = time.Time{}
 	w.lastFailure = ""
+	w.skipGraceFor = nil
 }
 
 func (w *watchdogState) statusSnapshot(now time.Time, window time.Duration) *watchdogSnapshot {
@@ -311,7 +315,7 @@ func (ma *managedApp) parkWatchdog(ctx context.Context, c collaborators) {
 func (ma *managedApp) superviseInstance(ctx context.Context, c collaborators, inst *instance) bool {
 	waitCh := c.runner.Wait(inst.handle) // nil ⇒ Alive polling on the tick below
 	grace := c.spec.wdGrace
-	if ma.wd.takeSkipGrace() {
+	if ma.wd.takeSkipGrace(inst.handle) {
 		grace = 0 // re-supervising a known-unhealthy instance whose stop failed
 	}
 	graceUntil := c.clock.Now().Add(grace)
@@ -548,7 +552,7 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 			// window so the failure is re-detected and the stop
 			// retried promptly rather than after wdGrace.
 			ma.wd.refundBudget()
-			ma.wd.skipNextGrace()
+			ma.wd.skipNextGrace(inst.handle)
 			c.logger.Error("watchdog: cannot confirm the unhealthy instance stopped; not launching a replacement",
 				zap.String("version", inst.version), zap.Error(err))
 			return true

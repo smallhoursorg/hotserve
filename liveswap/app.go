@@ -528,6 +528,11 @@ func (ma *managedApp) ensureRunning() error {
 	c := ma.snapshot()
 	spec := c.spec
 	if inst := ma.currentInstance(); inst != nil && c.runner.Alive(inst.handle) {
+		// Reload, or a retry after an earlier sweep could not confirm:
+		// the instance is fine; the ledger must still be settled.
+		if !ma.sweep(c, inst.handle) {
+			return &transientRecoveryError{fmt.Errorf("instance %s running; %w", inst.version, errSweepUnconfirmed)}
+		}
 		return nil
 	}
 	st, ok, err := c.store.load()
@@ -562,7 +567,11 @@ func (ma *managedApp) ensureRunning() error {
 		ma.activePort.Store(int64(st.Port))
 		c.logger.Info("reattached to running instance", zap.String("version", st.CurrentVersion))
 		ma.pokeWatchdog()
-		ma.sweep(c, h)
+		if !ma.sweep(c, h) {
+			// Serving, but the ledger is unsettled: recover() retries
+			// and the retry path above sweeps again.
+			return &transientRecoveryError{fmt.Errorf("reattached %s; %w", st.CurrentVersion, errSweepUnconfirmed)}
+		}
 		return nil
 	}
 
@@ -626,6 +635,9 @@ func (ma *managedApp) recover(logger *zap.Logger) {
 	}
 	delay := recoveryBackoffFloor
 	for {
+		if ctx.Err() != nil {
+			return // destructed before this attempt
+		}
 		err := ma.ensureRunning()
 		if err == nil {
 			return
