@@ -5,14 +5,17 @@
 #
 # networkd/resolved are deliberately NOT installed: with no wait-online
 # unit enabled, network-online.target (which hotserve.service Requires=)
-# is reached trivially inside the container.
+# is reached trivially inside the container. dbus is here because
+# logind (loginctl enable-linger in postinstall) needs the system bus;
+# libpam-systemd is NOT — it is a package Depends, and the smoke test
+# proves apt resolves it.
 ARG BASE_IMAGE=debian:12
 FROM ${BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends \
-		systemd systemd-sysv ca-certificates curl \
+		systemd systemd-sysv dbus ca-certificates curl \
 	&& rm -rf /var/lib/apt/lists/*
 
 # Units that cannot work in a container and would otherwise leave the

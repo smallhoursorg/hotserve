@@ -1,10 +1,14 @@
 # hotserve systemd unit, modeled on Caddy's official dist unit.
 #
-# Note on hardening: liveswap runs your deployed apps as child
-# processes of hotserve, so PrivateTmp/ProtectSystem apply to them too.
-# /var/lib/liveswap (where releases, shared data and state live) and
-# /var/lib/hotserve (TLS certificates etc.) stay writable — that is
-# where apps are meant to keep their files.
+# Note on hardening: deployed apps do NOT run inside this unit. liveswap
+# starts them as transient units under the hotserve user's own systemd
+# manager (user@<uid>.service; postinstall enables lingering and adds a
+# drop-in that starts it with this unit), so they outlive hotserve
+# restarts and upgrades, and PrivateTmp/ProtectSystem here apply to
+# hotserve alone. TimeoutStopSec bounds only hotserve's own shutdown;
+# each app's stop budget is its `grace`. /var/lib/liveswap (releases,
+# shared data, state) and /var/lib/hotserve (TLS certificates etc.)
+# stay writable — that is where hotserve and the apps keep their files.
 
 [Unit]
 Description=hotserve — the Hot Sauce server, powered by Caddy

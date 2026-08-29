@@ -7,10 +7,12 @@
 # hotserve journal on any failure.
 #
 # Stage 2 is the one that earns its keep: a real liveswap deploy under
-# the shipped systemd unit proves that download + extract + spawn work
-# in /var/lib/liveswap as the sandboxed hotserve user — the exact
-# interaction (ProtectSystem=full, PrivateTmp, User=hotserve) that no
-# other test layer exercises.
+# the shipped systemd unit proves that download + extract work in
+# /var/lib/liveswap as the sandboxed hotserve user and that the app
+# comes up as a transient unit under that user's own systemd manager —
+# the exact packaging interaction (ProtectSystem=full, User=hotserve,
+# lingering, the user@<uid> drop-in) no other test layer exercises.
+# Stage 3 then proves the app survives the upgrade restart.
 set -eu
 
 # TOKEN is minted in stage 2 with a local deploy key (deploy_trust
@@ -46,6 +48,10 @@ deb=$1
 echo "package under test: $deb"
 
 stage "stage 1: install, service basics, reload"
+# The image ships without apt lists; refresh them so the package's
+# Depends (libpam-systemd, dbus) resolve the way they would on a real
+# box — that resolution is part of what this stage proves.
+apt-get update -qq
 apt-get install -y "$deb"
 
 id hotserve >/dev/null || die "postinstall did not create the hotserve user"
@@ -69,6 +75,14 @@ timeout 120 systemctl enable --now hotserve || die "systemctl enable --now hotse
 curl -fsS --max-time 5 http://127.0.0.1:80/ | grep -q "hotserve is running" \
 	|| die "starter Caddyfile not serving on :80"
 echo "unit started and starter config answers on :80"
+
+uid=$(id -u hotserve)
+systemctl is-active --quiet "user@$uid.service" \
+	|| die "hotserve's systemd user manager (user@$uid) is not active — postinstall linger/drop-in broken (is libpam-systemd installed?)"
+[ -f /var/lib/systemd/linger/hotserve ] || die "lingering not enabled for hotserve"
+[ -f /etc/systemd/system/hotserve.service.d/10-user-manager.conf ] || die "user-manager drop-in missing"
+[ -S "/run/user/$uid/systemd/private" ] || die "user manager private socket missing"
+echo "user manager user@$uid active with lingering"
 
 # ExecReload connects through the admin unix socket — this call IS the
 # socket's functional test.
@@ -158,6 +172,7 @@ done
 workdir=$(mktemp -d)
 cat > "$workdir/server" <<'EOF'
 #!/bin/sh
+echo "smoke app starting on $PORT"
 exec /usr/bin/hotserve respond --listen 127.0.0.1:"$PORT" "hello smoke"
 EOF
 chmod +x "$workdir/server"
@@ -195,7 +210,18 @@ case "$status" in
 *'"running":true'*) : ;;
 *) die "status missing running:true: $status" ;;
 esac
-echo "deployed, served and reported under ProtectSystem=full as the hotserve user"
+unit=$(printf '%s' "$status" | sed -n 's/.*"unit":"\([^"]*\)".*/\1/p')
+[ -n "$unit" ] || die "status missing the app's systemd unit: $status"
+# systemctl --user for a nologin system user: same trick hotserve
+# itself uses — its own manager's private socket under /run/user/<uid>.
+user_systemctl() { su -s /bin/sh hotserve -c "XDG_RUNTIME_DIR=/run/user/$uid systemctl --user $*"; }
+user_systemctl is-active --quiet "$unit" \
+	|| die "app unit $unit is not active under hotserve's user manager"
+[ "$(user_systemctl show -p Restart --value "$unit")" = "no" ] \
+	|| die "app unit must have Restart=no (the liveswap watchdog is the only restarter)"
+journalctl --no-pager -t hotserve-demo | grep -q "smoke app starting" \
+	|| die "app stdout did not reach the journal under identifier hotserve-demo"
+echo "deployed as unit $unit under user@$uid; app output in the journal"
 
 # The deploy token must never reach the journal: not via access logs
 # (Authorization is redacted), not via any error path above.
@@ -203,29 +229,43 @@ journalctl -u hotserve --no-pager | grep -q "$TOKEN" \
 	&& die "deploy token leaked into the journal" || true
 echo "journal is free of the deploy token"
 
-stage "stage 3: reinstall — upgrade path and conffile preservation"
+stage "stage 3: reinstall — upgrade path, conffile preservation, app survival"
+pid_before=$(printf '%s' "$status" | sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p')
+[ -n "$pid_before" ] || die "status missing pid: $status"
 dpkg -i "$deb"
 grep -q liveswap_webhook /etc/hotserve/Caddyfile \
 	|| die "reinstall clobbered the modified /etc/hotserve/Caddyfile (config|noreplace broken)"
 systemctl is-active --quiet hotserve \
 	|| die "service not active after reinstall — an upgrade must not leave the server down (preremove stop / missing postinstall restart)"
 id hotserve >/dev/null || die "hotserve user gone after reinstall (postinstall not idempotent)"
-# postinstall's try-restart swapped onto the new binary, killing the
-# deployed app with it; it must come back from state.json on its own.
+# postinstall's try-restart swapped hotserve onto the new binary. The
+# deployed app is a unit under the user manager, not a child of
+# hotserve: it must still be the SAME process, reattached from
+# state.json, and serving throughout.
 i=0
-until curl -fs --max-time 2 "$PROXY/" | grep -q "hello smoke"; do
+until [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$HOOK")" = "200" ]; do
 	i=$((i + 1))
-	[ "$i" -ge 30 ] && die "deployed app did not relaunch from state.json after the upgrade restart"
+	[ "$i" -ge 30 ] && die "webhook not back within 30s of the upgrade restart"
 	sleep 1
 done
-echo "reinstall preserved config and user; service restarted and the app relaunched from state.json"
+status=$(curl -s -H "Authorization: Bearer $TOKEN" "$HOOK")
+pid_after=$(printf '%s' "$status" | sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p')
+[ "$pid_after" = "$pid_before" ] \
+	|| die "app pid changed across the upgrade restart ($pid_before -> $pid_after): reattach failed, the app was relaunched (or is gone): $status"
+case "$status" in *'"running":true'*) : ;; *) die "reattached app not running: $status" ;; esac
+curl -fsS --max-time 5 "$PROXY/" | grep -q "hello smoke" || die "reattached app not served"
+echo "reinstall preserved config and user; hotserve restarted and reattached to the running app (pid $pid_after)"
 
 stage "stage 4: removal"
 apt-get remove -y hotserve
 systemctl is-active --quiet hotserve && die "service still active after remove (preremove did not stop it)" || true
 [ ! -e /usr/bin/hotserve ] || die "/usr/bin/hotserve still present after remove"
 [ -f /etc/hotserve/Caddyfile ] || die "conffile deleted on remove (should survive until purge)"
-echo "removal stopped the service, kept the conffile"
+systemctl is-active --quiet "user@$uid.service" && die "user manager still running after remove (apps would linger)" || true
+[ ! -e /etc/systemd/system/hotserve.service.d/10-user-manager.conf ] || die "user-manager drop-in left behind"
+[ ! -e /var/lib/systemd/linger/hotserve ] || die "lingering left enabled"
+kill -0 "$pid_after" 2>/dev/null && die "deployed app (pid $pid_after) survived package removal" || true
+echo "removal stopped the service and the apps, kept the conffile"
 
 echo ""
 echo "ALL PACKAGE SMOKE STAGES PASSED ($deb on $(. /etc/os-release && echo "$PRETTY_NAME"))"
