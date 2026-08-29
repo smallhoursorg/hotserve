@@ -48,11 +48,16 @@ func userManagerSocket() string {
 	return filepath.Join(dir, "systemd", "private")
 }
 
-// probe proves the manager answers and reports a useful version.
+// probeTimeout bounds the Provision-time round trip to the manager.
+const probeTimeout = 10 * time.Second
+
+// probe proves the manager answers a real request within a deadline.
 func (c *userManagerClient) probe() error {
 	conn, err := c.get()
 	if err == nil {
-		_, err = conn.GetManagerProperty("Version")
+		ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+		_, err = conn.ListUnitsByPatternsContext(ctx, nil, []string{unitPrefix + "*.service"})
+		cancel()
 		c.dropIfDisconnected(conn, err)
 	}
 	if err != nil {

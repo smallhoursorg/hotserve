@@ -427,6 +427,12 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	}
 
 	ma.setPhase(c, "starting")
+	// No Start without a confirmed sweep (keeping the version that is
+	// serving): the new instance must not come up beside a unit the
+	// manager still holds for this app.
+	if !ma.sweep(c, oldHandle(old)) {
+		return errors.New("cannot confirm no other instance is running; not starting")
+	}
 	newHandle, err = c.runner.Start(startSpec{
 		app:     spec.name,
 		version: req.Version,
@@ -572,8 +578,16 @@ func (ma *managedApp) ensureRunning() error {
 	c.logger.Info("relaunched current version after restart",
 		zap.String("version", st.CurrentVersion), zap.Int("port", inst.port))
 	ma.pokeWatchdog()
-	ma.sweep(c, inst.handle)
 	return nil
+}
+
+// oldHandle is the handle of a possibly-nil instance, as a nil-safe
+// Sweep keep argument.
+func oldHandle(inst *instance) handle {
+	if inst == nil {
+		return nil
+	}
+	return inst.handle
 }
 
 const (
@@ -615,6 +629,13 @@ func (ma *managedApp) launchVersion(c collaborators, version string) (*instance,
 	env, err := buildEnv(spec, version, port, releaseDir)
 	if err != nil {
 		return nil, err
+	}
+	// No Start without a confirmed sweep: whatever the manager still
+	// runs for this app (a unit an earlier hotserve lost track of, a
+	// stop that could not be confirmed) is settled first, or nothing
+	// is launched beside it.
+	if !ma.sweep(c, nil) {
+		return nil, errors.New("cannot confirm no other instance is running; not launching")
 	}
 	h, err := c.runner.Start(startSpec{
 		app:     spec.name,
@@ -748,17 +769,22 @@ func (ma *managedApp) Destruct() error {
 	ma.stopWatchdog()
 	c := ma.snapshot()
 	inst := ma.currentInstance()
-	if inst == nil {
-		return nil
-	}
 	if caddyExiting() {
-		c.logger.Info("hotserve exiting; app keeps running for reattach", zap.String("version", inst.version), zap.String("unit", inst.handle.state().Unit))
+		if inst != nil {
+			c.logger.Info("hotserve exiting; app keeps running for reattach", zap.String("version", inst.version), zap.String("unit", inst.handle.state().Unit))
+		}
 		return nil
 	}
-	c.logger.Info("app removed from config; stopping it", zap.String("version", inst.version))
-	// Stop what we track, then everything else the manager holds for
-	// this app: a removed app must leave no unit behind, tracked or not.
-	return errors.Join(c.runner.Stop(inst.handle, c.spec.grace), c.runner.Sweep(ma.name, nil))
+	// Stop what we track (if anything), then everything else the
+	// manager holds for this app: a removed app must leave no unit
+	// behind, tracked or not — an ambiguous start may have left one
+	// that never became current.
+	var stopErr error
+	if inst != nil {
+		c.logger.Info("app removed from config; stopping it", zap.String("version", inst.version))
+		stopErr = c.runner.Stop(inst.handle, c.spec.grace)
+	}
+	return errors.Join(stopErr, c.runner.Sweep(ma.name, nil))
 }
 
 // startWatchdog launches the supervision goroutine once per pooled

@@ -159,6 +159,30 @@ func TestWatchdogUnconfirmedStopAbortsRestart(t *testing.T) {
 	}
 }
 
+// A crash restart is a launch like any other: without a confirmed
+// sweep nothing is started, and the next cycle tries again.
+func TestWatchdogRestartAbortsWhenSweepUnconfirmed(t *testing.T) {
+	rig := newTestRig(t)
+	deployV1(t, rig)
+	rig.startWatchdogT(t)
+	waitUntil(t, "watchdog to arm", func() bool {
+		s := rig.ma.wd.currentState()
+		return s == wdStateGrace || s == wdStateWatching
+	})
+	rig.runner.sweepErr = errTest
+	rig.runner.handleAt(0).kill()
+	advanceUntil(t, rig, time.Second, "restart attempted (sweep called)", func() bool {
+		return rig.runner.sweepCount() >= 3 // 2 from the deploy, then the restart's
+	})
+	if rig.runner.startCount() != 1 {
+		t.Fatalf("no launch without a confirmed sweep, got %d starts", rig.runner.startCount())
+	}
+	rig.runner.sweepErr = nil
+	advanceUntil(t, rig, time.Second, "restart once the sweep confirms", func() bool {
+		return rig.runner.startCount() == 2
+	})
+}
+
 func TestWatchdogHealthFailuresBelowThresholdReset(t *testing.T) {
 	rig := newTestRig(t)
 	rig.spec.wdGrace = 0

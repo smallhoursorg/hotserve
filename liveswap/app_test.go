@@ -128,9 +128,10 @@ type fakeRunner struct {
 	reattachOK      bool
 	reattachErrs    []error // consumed one per Reattach call before reattachOK applies
 	reattachCalls   int
-	stopErr         error // Stop returns this
-	stopLeavesAlive bool  // Stop does not actually kill the handle
-	sweepErr        error // Sweep returns this
+	stopErr         error   // Stop returns this
+	stopLeavesAlive bool    // Stop does not actually kill the handle
+	sweepErr        error   // Sweep returns this
+	sweepErrs       []error // consumed one per Sweep call before sweepErr applies
 	sweeps          []handle
 }
 
@@ -199,7 +200,18 @@ func (r *fakeRunner) Sweep(_ string, keep handle) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.sweeps = append(r.sweeps, keep)
+	if len(r.sweepErrs) > 0 {
+		err := r.sweepErrs[0]
+		r.sweepErrs = r.sweepErrs[1:]
+		return err
+	}
 	return r.sweepErr
+}
+
+func (r *fakeRunner) lastSweep() handle {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.sweeps[len(r.sweeps)-1]
 }
 
 func (r *fakeRunner) sweepCount() int {
@@ -871,8 +883,8 @@ func TestDeployStopOldErrorDefersToSweep(t *testing.T) {
 	rig.runner.stopErr = errTest
 	rig.runner.stopLeavesAlive = true
 	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/a", Version: "v3"}))
-	if rig.runner.sweeps[2] != rig.runner.handleAt(2) {
-		t.Fatal("the sweep must keep the just-promoted instance")
+	if rig.runner.lastSweep() != rig.runner.handleAt(2) {
+		t.Fatal("the pre-GC sweep must keep the just-promoted instance")
 	}
 	if _, err := os.Stat(rig.spec.dirs.release("v1")); err == nil {
 		t.Fatal("with the sweep vouching, GC runs as usual")
@@ -889,8 +901,8 @@ func TestDestructOnRemovalSweepsWholeApp(t *testing.T) {
 	if rig.runner.stopCount() != 1 {
 		t.Fatalf("Destruct must stop the tracked instance, got %d stops", rig.runner.stopCount())
 	}
-	// Deploy swept once (keep=new); removal sweeps everything (keep=nil).
-	if n := rig.runner.sweepCount(); n != 2 || rig.runner.sweeps[1] != nil {
+	// Deploy swept twice (pre-start, pre-GC); removal sweeps everything (keep=nil).
+	if n := rig.runner.sweepCount(); n != 3 || rig.runner.lastSweep() != nil {
 		t.Fatalf("removal must sweep the whole app with keep=nil, sweeps=%d last=%v", n, rig.runner.sweeps)
 	}
 }
@@ -983,8 +995,52 @@ func TestEnsureRunningRelaunchSweepsStrays(t *testing.T) {
 	rig.store.ok = true
 	must(t, os.MkdirAll(rig.spec.dirs.release("v7"), 0o755))
 	must(t, rig.ma.ensureRunning())
-	if rig.runner.sweepCount() != 1 || rig.runner.sweeps[0] != rig.runner.handleAt(0) {
-		t.Fatal("recovery must sweep stray units, keeping the relaunched one")
+	if rig.runner.sweepCount() != 1 || rig.runner.sweeps[0] != nil {
+		t.Fatal("relaunch must sweep everything before starting")
+	}
+	if rig.runner.startCount() != 1 {
+		t.Fatal("relaunched once")
+	}
+}
+
+func TestEnsureRunningDoesNotRelaunchWhenSweepUnconfirmed(t *testing.T) {
+	rig := newTestRig(t)
+	rig.store.state = appState{CurrentVersion: "v7", Port: 12345, Handle: handleState{PID: 1}}
+	rig.store.ok = true
+	must(t, os.MkdirAll(rig.spec.dirs.release("v7"), 0o755))
+	rig.runner.sweepErr = errTest
+	if err := rig.ma.ensureRunning(); err == nil || !strings.Contains(err.Error(), "not launching") {
+		t.Fatalf("expected a refusal to launch, got %v", err)
+	}
+	if rig.runner.startCount() != 0 || rig.ma.activePort.Load() != 0 {
+		t.Fatal("nothing may be launched or published beside a possibly-running unit")
+	}
+}
+
+func TestDeployAbortsStartWhenSweepUnconfirmed(t *testing.T) {
+	rig := newTestRig(t)
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	rig.runner.sweepErr = errTest
+	err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/2", Version: "v2"})
+	if err == nil || !strings.Contains(err.Error(), "not starting") {
+		t.Fatalf("expected the deploy to abort before Start, got %v", err)
+	}
+	if rig.runner.startCount() != 1 {
+		t.Fatal("no second instance may be started")
+	}
+	if rig.runner.lastSweep() != rig.runner.handleAt(0) {
+		t.Fatal("the pre-start sweep must keep the serving instance")
+	}
+	if rig.ma.currentInstance().version != "v1" {
+		t.Fatal("v1 keeps serving")
+	}
+}
+
+func TestDestructOnRemovalSweepsEvenWithoutInstance(t *testing.T) {
+	rig := newTestRig(t)
+	must(t, rig.ma.Destruct())
+	if rig.runner.stopCount() != 0 || rig.runner.sweepCount() != 1 || rig.runner.sweeps[0] != nil {
+		t.Fatalf("removal with nothing tracked must still sweep the app: stops=%d sweeps=%v", rig.runner.stopCount(), rig.runner.sweeps)
 	}
 }
 
@@ -996,22 +1052,23 @@ func TestDeploySweepsBeforeGCAndSkipsGCWhenSweepFails(t *testing.T) {
 		mt := time.Now().Add(time.Duration(i-10) * time.Minute)
 		_ = os.Chtimes(rig.spec.dirs.release(v), mt, mt)
 	}
-	if rig.runner.sweepCount() != 2 {
-		t.Fatalf("every deploy sweeps before GC, got %d sweeps", rig.runner.sweepCount())
+	// Each deploy sweeps twice: before Start (keeping the serving
+	// instance) and before GC (keeping the promoted one).
+	if rig.runner.sweepCount() != 4 || rig.runner.sweeps[0] != nil || rig.runner.sweeps[2] != rig.runner.handleAt(0) {
+		t.Fatalf("sweeps %v", rig.runner.sweeps)
 	}
-	// keep=2: v3 would GC v1 — unless the sweep cannot vouch that
-	// nothing else is running.
-	rig.runner.sweepErr = errTest
+	// keep=2: v3 would GC v1 — unless the pre-GC sweep cannot vouch
+	// that nothing else is running.
+	rig.runner.sweepErrs = []error{nil, errTest}
 	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/a", Version: "v3"}))
 	for _, v := range []string{"v1", "v2", "v3"} {
 		if _, err := os.Stat(rig.spec.dirs.release(v)); err != nil {
 			t.Fatalf("release %s must survive a deploy whose sweep failed: %v", v, err)
 		}
 	}
-	if rig.runner.sweeps[2] != rig.runner.handleAt(2) {
-		t.Fatal("the sweep must keep the just-promoted instance")
+	if rig.runner.lastSweep() != rig.runner.handleAt(2) {
+		t.Fatal("the pre-GC sweep must keep the just-promoted instance")
 	}
-	rig.runner.sweepErr = nil
 	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/a", Version: "v4"}))
 	if _, err := os.Stat(rig.spec.dirs.release("v1")); err == nil {
 		t.Fatal("once the sweep vouches, GC catches up")

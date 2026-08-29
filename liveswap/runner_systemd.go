@@ -52,10 +52,15 @@ import (
 //     nil only when keep is the only loaded unit of app; recovery and
 //     GC both sweep first, so nothing hotserve forgot (a unit whose
 //     state.json write failed, a stop that could not be confirmed)
-//     survives the next start or the next deploy. Removing an app from
-//     the config sweeps all of it, and every start sweeps the units of
-//     apps the config no longer names (sweepUnknownApps), so a unit
-//     cannot outlive its app definition either.
+//     survives the next start or the next deploy — and nothing is ever
+//     launched beside one: every Start is preceded by a sweep that
+//     must confirm. Removing an app from the config sweeps all of it,
+//     and every start sweeps the units of apps the config no longer
+//     names (sweepUnknownApps), so a unit cannot outlive its app
+//     definition either. (Removing the whole liveswap block and then
+//     restarting hotserve is the one path that leaves units running:
+//     on exit they are kept for reattach by design, and no liveswap
+//     code runs afterwards to judge them — documented for operators.)
 //  8. A unit's environment is exactly the env the caller built
 //     (Environment=) on top of the manager's defaults; hotserve's own
 //     environment is never inherited.

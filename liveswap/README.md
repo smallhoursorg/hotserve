@@ -510,7 +510,12 @@ failure the previous version never stopped serving.
   and serves it immediately; only if that unit is gone (reboot, or it
   died meanwhile) is the current version relaunched. Stopping hotserve
   therefore leaves apps running until the next start; removing the
-  package stops them. Units are created with `Restart=no` — the
+  package stops them. Removing an app (or the whole `liveswap` block)
+  via a **reload** stops its units; if you instead edit the file and
+  *restart* hotserve with the whole block gone, nothing is left to
+  judge the old units and they keep running — decommission them
+  explicitly: `sudo -u hotserve XDG_RUNTIME_DIR=/run/user/$(id -u
+  hotserve) systemctl --user stop 'hotserve-*'`. Units are created with `Restart=no` — the
   watchdog is the only restarter — and stopping a version kills its
   whole cgroup, so worker trees never outlive it.
 - **Changed app definitions apply on the next deploy**, never by
