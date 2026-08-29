@@ -6,6 +6,12 @@ services:
       - .:/src
       - ./.cache/gomod:/go/pkg/mod
       - ./.cache/gobuild:/root/.cache/go-build
+  dev-systemd:
+    volumes:
+      - .:/src
+      - ./.cache/gomod:/go/pkg/mod
+      - ./.cache/gobuild:/root/.cache/go-build
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
   lint:
     volumes:
       - .:/src

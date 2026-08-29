@@ -13,6 +13,32 @@ services:
       - gomodcache:/go/pkg/mod
       - gobuildcache:/root/.cache/go-build
 
+  # The same toolchain with systemd as PID 1, for `make test-integration`:
+  # liveswap runs apps as transient units under a real systemd user
+  # manager, so the integration suite (the runner's own tests plus the
+  # caddytest scenarios that deploy a real app) needs one. Privileged +
+  # host cgroup namespace + the cgroup mount is the systemd-in-docker
+  # recipe that works on cgroup-v2 hosts (GitHub runners, Docker
+  # Desktop). Caches are shared with `dev`.
+  dev-systemd:
+    build:
+      context: test/systemd
+    image: hotserve-dev-systemd
+    working_dir: /src
+    environment:
+      GOFLAGS: -buildvcs=false
+    privileged: true
+    cgroup: host
+    stop_signal: SIGRTMIN+3
+    tmpfs:
+      - /run
+      - /run/lock
+    volumes:
+      - .:/src
+      - gomodcache:/go/pkg/mod
+      - gobuildcache:/root/.cache/go-build
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+
   lint:
     image: golangci/golangci-lint:v2.12.2
     working_dir: /src
@@ -51,19 +77,33 @@ services:
       dockerfile: artifacts.Dockerfile
 
   # The hotserve product binary under test (built from cmd/hotserve).
-  # This container plays the production VPS: it terminates HTTP,
-  # receives deploy webhooks, runs the deployed demo app as its own
-  # child processes, rate-limits and caches.
+  # This container plays the production VPS: systemd as PID 1 running
+  # the packaged hotserve.service as the hotserve user; it terminates
+  # HTTP, receives deploy webhooks, runs the deployed demo app as a
+  # transient unit under the hotserve user's systemd manager,
+  # rate-limits and caches. Privileged + host cgroup namespace + the
+  # cgroup mount is the systemd-in-docker recipe (cgroup-v2 hosts).
   e2e-hotserve:
     build:
       context: .
       dockerfile: e2e/Dockerfile
     image: hotserve-e2e
-    # The entrypoint mints a local deploy keypair + token into this
-    # shared volume at startup (no OIDC provider on the offline compose
-    # network); the runner reads the token as its deploy bearer.
+    privileged: true
+    cgroup: host
+    stop_signal: SIGRTMIN+3
+    tmpfs:
+      - /run
+      - /run/lock
+    # e2e-token.service mints a local deploy keypair + token into the
+    # shared volume before hotserve starts (no OIDC provider on the
+    # offline compose network); the runner reads the token as its
+    # deploy bearer. lib.sh + the systemd suite are for `make e2e`'s
+    # in-container step.
     volumes:
       - e2e-deploy:/shared
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      - ./e2e/lib.sh:/lib.sh:ro
+      - ./e2e/liveswap/systemd.sh:/suite-systemd.sh:ro
     depends_on:
       - e2e-artifacts
       - e2e-upstream
@@ -76,6 +116,7 @@ services:
       context: .
       dockerfile: e2e/Dockerfile
     image: hotserve-e2e
+    command: ["/usr/bin/hotserve", "run", "--config", "/etc/hotserve/Caddyfile"]
     volumes:
       - ./e2e/penaltybox/upstream.Caddyfile:/etc/hotserve/Caddyfile:ro
 
@@ -88,6 +129,7 @@ services:
       - e2e-hotserve
     volumes:
       - ./e2e/run.sh:/run.sh:ro
+      - ./e2e/lib.sh:/lib.sh:ro
       - ./e2e/liveswap/run.sh:/suite-liveswap.sh:ro
       - ./e2e/liveswap/recovery.sh:/suite-recovery.sh:ro
       - ./e2e/soak.sh:/soak.sh:ro

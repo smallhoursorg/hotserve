@@ -21,10 +21,35 @@ DISTRO ?= debian:12
 test:
 	$(COMPOSE) run --rm dev go test -race -cover $(PKGS)
 
-# -p 1: the modules' caddytest suites all pin admin :2999 / http :9080,
-# so their test binaries must not run in parallel with each other.
+# The privileged systemd lanes (test-integration, e2e, install-test)
+# need a cgroup-v2 Docker host: Docker Desktop, or Linux with systemd.
+# Checked up front so a plain cgroup-v1 daemon fails with one clear
+# line instead of an opaque systemd boot error.
+define cgroup2_preflight
+	@v=$$(docker info --format '{{.CgroupVersion}}' 2>/dev/null); \
+	if [ "$$v" != "2" ]; then \
+		echo "this target runs systemd inside a privileged container and needs a cgroup-v2 Docker host (got CgroupVersion=$${v:-unknown}): Docker Desktop, or Linux with systemd"; \
+		exit 1; \
+	fi
+endef
+
+# Runs inside the dev-systemd container (systemd as PID 1, root's user
+# manager started by test/systemd/ready.sh): liveswap's runner creates
+# real transient units, and the caddytest scenarios deploy a real app
+# through them. -p 1: the modules' caddytest suites all pin admin :2999
+# / http :9080, so their test binaries must not run in parallel.
 test-integration:
-	$(COMPOSE) run --rm dev go test -race -tags integration -v -run Integration -p 1 ./liveswap/... ./penaltybox/...
+	$(cgroup2_preflight)
+	$(COMPOSE) up --build -d dev-systemd
+	status=0; \
+	$(COMPOSE) exec -T dev-systemd /bin/sh /src/test/systemd/ready.sh || status=1; \
+	if [ $$status -eq 0 ]; then \
+		$(COMPOSE) exec -T -e XDG_RUNTIME_DIR=/run/user/0 dev-systemd \
+			go test -race -tags integration -v -run Integration -p 1 ./liveswap/... ./penaltybox/... || status=1; \
+	fi; \
+	if [ $$status -ne 0 ]; then $(COMPOSE) exec -T dev-systemd journalctl --no-pager -n 100 || true; fi; \
+	$(COMPOSE) rm -sf dev-systemd >/dev/null; \
+	exit $$status
 
 vet:
 	$(COMPOSE) run --rm dev go vet $(PKGS)
@@ -110,6 +135,7 @@ package: build
 # systemd-in-docker recipe on cgroup-v2 hosts (GitHub runners and
 # Docker Desktop alike).
 install-test:
+	$(cgroup2_preflight)
 	docker build -t hotserve-install-test-$(subst :,-,$(DISTRO)) \
 		--build-arg BASE_IMAGE=$(DISTRO) packaging/test
 	docker rm -f hotserve-smoke >/dev/null 2>&1 || true
@@ -126,21 +152,25 @@ install-test:
 	docker rm -f hotserve-smoke >/dev/null; \
 	exit $$status
 
-# The main suites run via the e2e-runner entrypoint; then hotserve is
-# SIGKILLed and started again so the recovery suite can prove the
-# crash-recovery path: apps relaunch from state.json with the last
-# deployed version. The kill is orchestrated here because the runner
-# has no docker socket, and `up --exit-code-from` would tear the stack
-# down the moment any container exits.
+# The main suites run via the e2e-runner entrypoint. Then the systemd
+# suite runs INSIDE the hotserve container (it needs systemctl,
+# journalctl and the process tree): restart survival, SIGKILL of
+# hotserve + reattach, cgroup teardown of a worker tree, crash
+# cleanup, journal output. The recovery suite is the runner's view
+# after all that: still serving, deploys still work.
 e2e:
+	$(cgroup2_preflight)
 	$(COMPOSE) up --build -d e2e-hotserve e2e-upstream e2e-artifacts
 	status=0; \
 	$(COMPOSE) run --rm e2e-runner || status=1; \
-	echo "════ recovery suite: SIGKILL hotserve, relaunch from state.json ════"; \
-	$(COMPOSE) kill -s SIGKILL e2e-hotserve; \
-	$(COMPOSE) start e2e-hotserve; \
+	echo "════ systemd suite: restart survival, reattach, cgroup teardown ════"; \
+	$(COMPOSE) exec -T e2e-hotserve /bin/sh /suite-systemd.sh || status=1; \
+	echo "════ recovery suite: the runner's view after hotserve's unclean death ════"; \
 	$(COMPOSE) run --rm --entrypoint "/bin/sh /suite-recovery.sh" e2e-runner || status=1; \
-	if [ $$status -ne 0 ]; then $(COMPOSE) logs e2e-hotserve e2e-upstream e2e-artifacts; fi; \
+	if [ $$status -ne 0 ]; then \
+		$(COMPOSE) logs e2e-upstream e2e-artifacts; \
+		$(COMPOSE) exec -T e2e-hotserve journalctl --no-pager -n 300 || true; \
+	fi; \
 	$(COMPOSE) down --remove-orphans; \
 	exit $$status
 
@@ -159,7 +189,8 @@ soak:
 	exit $$status
 
 e2e-logs:
-	$(COMPOSE) logs e2e-hotserve e2e-upstream e2e-artifacts
+	$(COMPOSE) logs e2e-upstream e2e-artifacts
+	$(COMPOSE) exec -T e2e-hotserve journalctl --no-pager -n 300
 
 clean:
 	$(COMPOSE) down -v --remove-orphans
