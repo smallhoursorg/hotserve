@@ -334,8 +334,18 @@ func statusFromProps(props map[string]any) unitStatus {
 		MainPID:        propInt(props, "MainPID"),
 		ExecMainCode:   propInt(props, "ExecMainCode"),
 		ExecMainStatus: propInt(props, "ExecMainStatus"),
-		StopTimeout:    time.Duration(propInt(props, "TimeoutStopUSec")) * time.Microsecond,
+		StopTimeout:    usecDuration(propInt(props, "TimeoutStopUSec")),
 	}
+}
+
+// usecDuration converts a systemd USec property; "infinity" (uint64
+// max, negative once narrowed) and anything that would overflow a
+// Duration read as unknown (0) rather than as a bogus budget.
+func usecDuration(usec int) time.Duration {
+	if usec <= 0 || usec > int(time.Duration(1<<62)/time.Microsecond) {
+		return 0
+	}
+	return time.Duration(usec) * time.Microsecond
 }
 
 // ListUnits returns the loaded units whose names match pattern, with

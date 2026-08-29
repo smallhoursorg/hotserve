@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -177,12 +178,9 @@ type managedApp struct {
 	// concurrent webhook gets an immediate 409 and CI can retry.
 	deployMu sync.Mutex
 
-	// started is set by App.Start: this process has actually managed
-	// the app (recovered or served it). Destruct acts on the manager
-	// only when that is true — Caddy also provisions-then-cleans-up
-	// for `hotserve validate` and for a config load that fails
-	// elsewhere, and neither may touch running units.
-	started atomic.Bool
+	// recoveryWG tracks the boot-recovery goroutine (App.Start) so
+	// removal can wait for it; exit deliberately does not.
+	recoveryWG sync.WaitGroup
 
 	// mu guards current, phase and lastDeploy.
 	mu         sync.Mutex
@@ -521,7 +519,9 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 // as the process is up.
 func (ma *managedApp) ensureRunning() error {
 	if !ma.deployMu.TryLock() {
-		return nil // a deploy is running; it owns the lifecycle
+		// A deploy owns the lifecycle right now; it may still fail
+		// before publishing anything, so recovery must look again.
+		return &transientRecoveryError{errors.New("a deploy is in progress")}
 	}
 	defer ma.deployMu.Unlock()
 
@@ -537,18 +537,20 @@ func (ma *managedApp) ensureRunning() error {
 	}
 	st, ok, err := c.store.load()
 	if err != nil {
-		return err
+		return &permanentRecoveryError{err} // corrupt state: never silently reset
 	}
 	if !ok || st.CurrentVersion == "" {
 		// Nothing recorded — but a deploy whose state write failed may
 		// have left a unit behind; the manager's ledger decides, not
 		// the absence of a file.
-		ma.sweep(c, nil)
+		if !ma.sweep(c, nil) {
+			return &transientRecoveryError{errSweepUnconfirmed}
+		}
 		return nil
 	}
 	releaseDir := spec.dirs.release(st.CurrentVersion)
 	if _, err := os.Stat(releaseDir); err != nil {
-		return fmt.Errorf("state names version %s but its release dir is missing: %w", st.CurrentVersion, err)
+		return &permanentRecoveryError{fmt.Errorf("state names version %s but its release dir is missing: %w", st.CurrentVersion, err)}
 	}
 
 	// An unreadable unit state is not "not running": launching beside
@@ -577,10 +579,13 @@ func (ma *managedApp) ensureRunning() error {
 
 	inst, err := ma.launchVersion(c, st.CurrentVersion)
 	if err != nil {
-		if errors.Is(err, errSweepUnconfirmed) {
-			return &transientRecoveryError{fmt.Errorf("relaunching %s: %w", st.CurrentVersion, err)}
+		// A binary that cannot be found will not appear by retrying;
+		// everything else here (sweep, manager, unit reconcile) can.
+		var execErr *exec.Error
+		if errors.As(err, &execErr) {
+			return &permanentRecoveryError{fmt.Errorf("relaunching %s: %w", st.CurrentVersion, err)}
 		}
-		return fmt.Errorf("relaunching %s: %w", st.CurrentVersion, err)
+		return &transientRecoveryError{fmt.Errorf("relaunching %s: %w", st.CurrentVersion, err)}
 	}
 	if err := ma.publishInstance(c, inst); err != nil {
 		c.logger.Warn("persisting recovered state", zap.Error(err))
@@ -600,18 +605,27 @@ func oldHandle(inst *instance) handle {
 	return inst.handle
 }
 
-// transientRecoveryError marks a recovery failure worth retrying: the
-// manager could not be asked (unit state unreadable, sweep unconfirmed)
-// rather than the answer being bad (release dir missing, corrupt state).
+// Recovery errors come in two kinds. transient: the manager could not
+// be asked, a deploy held the lock, a unit could not be reconciled —
+// retrying can fix it. permanent: the answer itself is bad (corrupt
+// state, missing release dir, command not found) and no retry will
+// change it. Anything not marked permanent is retried: an app down
+// for an unclassified reason costs a log line a minute, an app left
+// down for a transient one costs an outage.
 type transientRecoveryError struct{ err error }
 
 func (e *transientRecoveryError) Error() string { return e.err.Error() }
 func (e *transientRecoveryError) Unwrap() error { return e.err }
 
+type permanentRecoveryError struct{ err error }
+
+func (e *permanentRecoveryError) Error() string { return e.err.Error() }
+func (e *permanentRecoveryError) Unwrap() error { return e.err }
+
 // transientRecovery reports whether err is worth retrying.
 func transientRecovery(err error) bool {
-	var t *transientRecoveryError
-	return errors.As(err, &t)
+	var p *permanentRecoveryError
+	return err != nil && !errors.As(err, &p)
 }
 
 // errSweepUnconfirmed is the launch refusal when a pre-start sweep
@@ -634,7 +648,7 @@ func (ma *managedApp) recover(logger *zap.Logger) {
 		ctx = context.Background()
 	}
 	delay := recoveryBackoffFloor
-	for {
+	for attempt := 1; ; attempt++ {
 		if ctx.Err() != nil {
 			return // destructed before this attempt
 		}
@@ -646,7 +660,13 @@ func (ma *managedApp) recover(logger *zap.Logger) {
 			logger.Error("recovery failed", zap.Error(err))
 			return
 		}
-		logger.Error("recovery deferred; retrying", zap.Duration("in", delay), zap.Error(err))
+		// Loud once, then a heartbeat: a manager that is down for an
+		// hour should not fill the journal with sixty errors.
+		level := zap.WarnLevel
+		if attempt == 1 {
+			level = zap.ErrorLevel
+		}
+		logger.Log(level, "recovery deferred; retrying", zap.Int("attempt", attempt), zap.Duration("in", delay), zap.Error(err))
 		select {
 		case <-ctx.Done():
 			return
@@ -832,18 +852,21 @@ func (ma *managedApp) Destruct() error {
 	ma.stopWatchdog()
 	c := ma.snapshot()
 	inst := ma.currentInstance()
-	if !ma.started.Load() {
-		// Never started in this process (validate, or a load that
-		// failed before Start): the units belong to whoever is
-		// serving them; leave them alone.
-		return nil
-	}
-	if caddyExiting() {
+	if caddyExiting() || liveStartedApps.Load() == 0 {
+		// Process exit, `validate`, or a candidate config that never
+		// became the serving one (another app's Start failed): the
+		// units belong to whoever is or will be serving them. Leave
+		// them; the next start's sweep settles any that are truly
+		// orphaned.
 		if inst != nil {
-			c.logger.Info("hotserve exiting; app keeps running for reattach", zap.String("version", inst.version), zap.String("unit", inst.handle.state().Unit))
+			c.logger.Info("app keeps running for reattach", zap.String("version", inst.version), zap.String("unit", inst.handle.state().Unit))
 		}
 		return nil
 	}
+	// Removed by a reload that is now serving: no unit may outlive
+	// the definition. Recovery must be finished first, or it could
+	// launch after the sweep.
+	ma.recoveryWG.Wait()
 	// Stop what we track (if anything), then everything else the
 	// manager holds for this app: a removed app must leave no unit
 	// behind, tracked or not — an ambiguous start may have left one

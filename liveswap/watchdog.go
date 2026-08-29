@@ -161,12 +161,6 @@ func (w *watchdogState) consumeBudget(now time.Time, budget int, window time.Dur
 	return true
 }
 
-// refundBudget returns the most recently claimed slot. Called when a
-// claimed restart is abandoned without a Start ever happening (a
-// deploy owns the lifecycle, or replaced the instance): those cycles
-// must not drain the budget, or a long deploy over a dead instance
-// exhausts it with zero restarts performed. No-op if a deploy's reset
-// already cleared the window.
 // skipNextGrace asks the next supervision pass of h not to re-arm the
 // grace window: that instance is already known unhealthy. Tied to the
 // handle so a deploy that replaces it meanwhile gets its full grace.
@@ -186,6 +180,12 @@ func (w *watchdogState) takeSkipGrace(h handle) bool {
 	return true
 }
 
+// refundBudget returns the most recently claimed slot. Called when a
+// claimed restart is abandoned without a Start ever happening (a
+// deploy owns the lifecycle, or replaced the instance): those cycles
+// must not drain the budget, or a long deploy over a dead instance
+// exhausts it with zero restarts performed. No-op if a deploy's reset
+// already cleared the window.
 func (w *watchdogState) refundBudget() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -537,7 +537,7 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 		}
 	}
 
-	// Stop can block for up to `grace` while deployMu is held, so a
+	// Stop can block for for the unit's own stop budget while deployMu is held, so a
 	// webhook landing in that window gets a 409 — the same contract as
 	// a deploy's own drain+stop-old phase (one lifecycle operation at
 	// a time), and the same bound Destruct accepts when it waits for

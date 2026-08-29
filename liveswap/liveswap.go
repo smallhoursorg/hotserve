@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
@@ -110,6 +111,9 @@ type App struct {
 
 	logger          *zap.Logger
 	managed         map[string]*managedApp
+	specs           map[string]*appSpec // built in Provision, installed at Start
+	clients         *fetchClients
+	started         bool     // Start ran: this config counts as live until Cleanup
 	pooled          []string // pool keys this config instance holds references to
 	allowlist       []artifactAllowEntry
 	globalTrust     []trustSource // resolved global DeployTrust, for the unknown-app path
@@ -293,23 +297,35 @@ func (a *App) Provision(ctx caddy.Context) error {
 	if err := a.Validate(); err != nil {
 		return err
 	}
-	for name, spec := range specs {
+	// Take pool references now (so a reload never drops the refcount to
+	// zero) but install nothing on the pooled apps until Start: Caddy
+	// keeps the old config if any app's Start fails, and `validate`
+	// never starts at all — neither may leave a rejected spec live on
+	// an app that is still serving under the previous config.
+	a.specs = specs
+	a.clients = clients
+	for name := range specs {
 		val, _ := appPool.LoadOrStore(poolKey(name), newManagedApp(name))
-		ma := val.(*managedApp)
-		ma.configure(spec, a.logger.Named(name), clients)
-		ma.startWatchdog()
-		a.managed[name] = ma
+		a.managed[name] = val.(*managedApp)
 		a.pooled = append(a.pooled, poolKey(name))
 	}
 	// Warm OIDC discovery in the background so the first verification of a
 	// known app is not slower (by JWKS-fetch latency) than an unknown one.
 	sets := [][]verifier{a.globalVerifiers}
-	for _, ma := range a.managed {
-		sets = append(sets, ma.currentVerifiers())
+	for _, spec := range specs {
+		sets = append(sets, resolveVerifiers(spec.trust, clients.jwks))
 	}
 	warmVerifiers(sets...)
 	return nil
 }
+
+// liveStartedApps counts liveswap configs that have Started and not
+// yet been Cleaned up. It is how Destruct tells "an app was removed by
+// a reload that is now serving" (another started config is live: stop
+// the units) from "this config never became the serving one" — a
+// candidate rejected by another app's Start, `validate`, or process
+// exit — where the units belong to whoever is or will be serving them.
+var liveStartedApps atomic.Int32
 
 func (cfg *AppConfig) applyDefaults(repl *caddy.Replacer) {
 	resolveTrustPlaceholders(repl, cfg.DeployTrust)
@@ -497,9 +513,12 @@ func (a *App) Start() error {
 			return err
 		}
 	}
-	for _, ma := range a.managed {
-		ma.started.Store(true)
+	for name, ma := range a.managed {
+		ma.configure(a.specs[name], a.logger.Named(name), a.clients)
+		ma.startWatchdog()
 	}
+	a.started = true
+	liveStartedApps.Add(1)
 	// Units of apps no loaded config names have no managedApp to sweep
 	// them (removed or renamed while hotserve was down): settle them
 	// against the manager's own listing. Background, like recovery;
@@ -514,12 +533,12 @@ func (a *App) Start() error {
 		}
 	}()
 	for name, ma := range a.managed {
-		// Joined to the watchdog wait group: Destruct (stopWatchdog)
-		// waits for an in-flight recovery before its final sweep, so
-		// recovery can never launch a unit for an app being removed.
-		ma.wdWG.Add(1)
+		// Tracked so Destruct-on-removal can wait for an in-flight
+		// recovery before its final sweep (exit does not wait: the
+		// process is going, and the next start's sweep settles it).
+		ma.recoveryWG.Add(1)
 		go func(name string, ma *managedApp) {
-			defer ma.wdWG.Done()
+			defer ma.recoveryWG.Done()
 			ma.recover(a.logger.Named(name))
 		}(name, ma)
 	}
@@ -537,6 +556,10 @@ func (a *App) Stop() error { return nil }
 // pool calls managedApp.Destruct: an app removed from the config is
 // stopped; on process exit the units stay up for the next start.
 func (a *App) Cleanup() error {
+	if a.started {
+		a.started = false
+		liveStartedApps.Add(-1)
+	}
 	var firstErr error
 	for _, key := range a.pooled {
 		if _, err := appPool.Delete(key); err != nil && firstErr == nil {

@@ -37,7 +37,8 @@ type fakeSystemdConn struct {
 	listErr    error
 	resetErr   error
 	listCalls  int
-	listHook   func() // runs inside ListUnits, before it returns (interleaving tests)
+	listHook   func()        // runs inside ListUnits, before it returns (interleaving tests)
+	stopDelay  time.Duration // StopUnit sleeps this long (concurrency tests)
 }
 
 func newFakeSystemdConn() *fakeSystemdConn {
@@ -72,6 +73,12 @@ func (f *fakeSystemdConn) StartTransientUnit(ctx context.Context, u unitSpec) (s
 }
 
 func (f *fakeSystemdConn) StopUnit(_ context.Context, name string) (string, error) {
+	f.mu.Lock()
+	delay := f.stopDelay
+	f.mu.Unlock()
+	if delay > 0 {
+		time.Sleep(delay)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.stopped = append(f.stopped, name)
@@ -805,6 +812,67 @@ func TestUnitApp(t *testing.T) {
 		if got != want || ok != (want != "") {
 			t.Errorf("unitApp(%q) = %q,%v want %q", name, got, ok, want)
 		}
+	}
+}
+
+func TestSystemdRunnerSweepStopsStraysConcurrentlyAndHonoursTheGuard(t *testing.T) {
+	r, conn := newTestSystemdRunner(t)
+	running := unitStatus{LoadState: "loaded", ActiveState: "active"}
+	conn.setStatus("hotserve-demo.v1.11111111.service", running)
+	conn.setStatus("hotserve-demo.v2.22222222.service", running)
+	// A guard that turns false after the listing: nothing may be stopped.
+	if err := r.sweep(context.Background(), "demo", nil, func() bool { return false }); err != nil {
+		t.Fatal(err)
+	}
+	if len(conn.stops()) != 0 {
+		t.Fatalf("guard says the app is owned now; stops=%v", conn.stops())
+	}
+	// Without the guard both strays go, and the sweep is one round of
+	// stops, not two in sequence: a slow StopUnit is paid once.
+	conn.mu.Lock()
+	conn.stopDelay = 150 * time.Millisecond
+	conn.mu.Unlock()
+	started := time.Now()
+	if err := r.sweep(context.Background(), "demo", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(started); took > 280*time.Millisecond {
+		t.Fatalf("strays must be stopped concurrently; two sequential stops would take ~300ms, took %s", took)
+	}
+	if len(conn.stops()) != 2 {
+		t.Fatalf("both strays must be stopped, got %v", conn.stops())
+	}
+}
+
+func TestSystemdRunnerHandleRecordsStopBudget(t *testing.T) {
+	r, conn := newTestSystemdRunner(t)
+	spec := testApp(t)
+	spec.grace = 42 * time.Second
+	h, err := r.Start(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.(*systemdHandle).stopTimeout != 42*time.Second {
+		t.Fatalf("Start must record the unit's stop budget, got %s", h.(*systemdHandle).stopTimeout)
+	}
+	conn.setStatus("old.service", unitStatus{LoadState: "loaded", ActiveState: "active", StopTimeout: 7 * time.Minute})
+	h2, ok, err := r.Reattach(handleState{Unit: "old.service"})
+	if !ok || err != nil {
+		t.Fatal("adopt")
+	}
+	if h2.(*systemdHandle).stopTimeout != 7*time.Minute {
+		t.Fatalf("Reattach must record the unit's own budget, got %s", h2.(*systemdHandle).stopTimeout)
+	}
+	conn.setStatus("old.service", unitStatus{LoadState: "not-found"})
+	waitDone(t, r, h2)
+}
+
+func TestUsecDuration(t *testing.T) {
+	if usecDuration(60_000_000) != time.Minute || usecDuration(0) != 0 || usecDuration(-1) != 0 {
+		t.Fatal("usec conversion")
+	}
+	if usecDuration(int(^uint64(0)>>1)) != 0 {
+		t.Fatal("an overflowing (infinity) budget must read as unknown, not negative")
 	}
 }
 

@@ -596,7 +596,7 @@ func TestEnsureRunningSkipsWhenAlreadyAlive(t *testing.T) {
 
 func TestDestructStopsCurrentInstance(t *testing.T) {
 	rig := newTestRig(t)
-	rig.ma.started.Store(true) // as App.Start would
+	markLive(t)
 	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
 	must(t, rig.ma.Destruct())
 	if rig.runner.stopCount() != 1 {
@@ -905,7 +905,7 @@ func TestDeployStopOldErrorDefersToSweep(t *testing.T) {
 
 func TestDestructOnRemovalSweepsWholeApp(t *testing.T) {
 	rig := newTestRig(t)
-	rig.ma.started.Store(true) // as App.Start would
+	markLive(t)
 	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
 	must(t, rig.ma.Destruct())
 	if rig.runner.stopCount() != 1 {
@@ -919,7 +919,7 @@ func TestDestructOnRemovalSweepsWholeApp(t *testing.T) {
 
 func TestDestructLeavesInstanceRunningOnProcessExit(t *testing.T) {
 	rig := newTestRig(t)
-	rig.ma.started.Store(true) // as App.Start would
+	markLive(t)
 	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
 	orig := caddyExiting
 	caddyExiting = func() bool { return true }
@@ -1024,14 +1024,14 @@ func TestEnsureRunningReattachSweepFailureIsTransient(t *testing.T) {
 
 func TestDestructWaitsForRecovery(t *testing.T) {
 	rig := newTestRig(t)
-	rig.ma.started.Store(true)
+	markLive(t)
 	rig.store.state = appState{CurrentVersion: "v7", Port: 12345, Handle: handleState{Unit: "u.service"}}
 	rig.store.ok = true
 	must(t, os.MkdirAll(rig.spec.dirs.release("v7"), 0o755))
 	rig.runner.reattachErrs = []error{errTest, errTest, errTest, errTest, errTest, errTest}
-	rig.ma.wdWG.Add(1)
+	rig.ma.recoveryWG.Add(1)
 	exited := make(chan struct{})
-	go func() { defer rig.ma.wdWG.Done(); rig.ma.recover(zap.NewNop()); close(exited) }()
+	go func() { defer rig.ma.recoveryWG.Done(); rig.ma.recover(zap.NewNop()); close(exited) }()
 	waitUntil(t, "first attempt", func() bool { return rig.runner.reattachCount() >= 1 })
 	// The app is removed while recovery is parked in backoff: Destruct
 	// must end recovery before its final sweep, and recovery must not
@@ -1047,10 +1047,19 @@ func TestDestructWaitsForRecovery(t *testing.T) {
 	}
 }
 
+// markLive stands in for a started liveswap config being live for the
+// rest of the test (what App.Start/Cleanup maintain).
+func markLive(t *testing.T) {
+	t.Helper()
+	liveStartedApps.Add(1)
+	t.Cleanup(func() { liveStartedApps.Add(-1) })
+}
+
 func TestDestructBeforeStartTouchesNothing(t *testing.T) {
-	// `hotserve validate` and a config load that fails elsewhere both
-	// provision and then clean up without Start: whatever the manager
-	// runs belongs to the serving process and must be left alone.
+	// `hotserve validate`, and a candidate config that never became
+	// the serving one (another app's Start failed): no started config
+	// is live, so whatever the manager runs belongs to whoever is or
+	// will be serving it and must be left alone.
 	rig := newTestRig(t)
 	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
 	before := rig.runner.sweepCount()
@@ -1069,6 +1078,42 @@ func TestParseEnvFileRejectsInvalidKeys(t *testing.T) {
 	_, err := parseEnvFile(envFile)
 	if err == nil || !strings.Contains(err.Error(), `"my-var"`) || !strings.Contains(err.Error(), ":2:") {
 		t.Fatalf("an invalid key must be named with its line, got %v", err)
+	}
+}
+
+func TestEnsureRunningNoStateStillSweeps(t *testing.T) {
+	rig := newTestRig(t)
+	must(t, rig.ma.ensureRunning())
+	if rig.runner.startCount() != 0 {
+		t.Fatal("nothing recorded ⇒ nothing launched")
+	}
+	if n := rig.runner.sweepCount(); n != 1 || rig.runner.sweeps[0] != nil {
+		t.Fatalf("with no state the manager must still be swept with keep=nil, sweeps=%d", n)
+	}
+	rig.runner.sweepErr = errTest
+	if err := rig.ma.ensureRunning(); !transientRecovery(err) {
+		t.Fatalf("an unconfirmed no-state sweep must be retried, got %v", err)
+	}
+}
+
+func TestEnsureRunningDeployInProgressIsTransient(t *testing.T) {
+	rig := newTestRig(t)
+	rig.ma.deployMu.Lock()
+	defer rig.ma.deployMu.Unlock()
+	if err := rig.ma.ensureRunning(); !transientRecovery(err) {
+		t.Fatalf("a deploy holding the lock must make recovery look again later, got %v", err)
+	}
+}
+
+func TestRecoveryErrorClassification(t *testing.T) {
+	if transientRecovery(nil) {
+		t.Fatal("nil is not an error")
+	}
+	if !transientRecovery(errTest) || !transientRecovery(&unitUnconfirmedError{unit: "u", err: errTest}) {
+		t.Fatal("unclassified and unconfirmed errors are retried")
+	}
+	if transientRecovery(&permanentRecoveryError{errTest}) {
+		t.Fatal("permanent errors are not retried")
 	}
 }
 
@@ -1121,7 +1166,7 @@ func TestDeployAbortsStartWhenSweepUnconfirmed(t *testing.T) {
 
 func TestDestructOnRemovalSweepsEvenWithoutInstance(t *testing.T) {
 	rig := newTestRig(t)
-	rig.ma.started.Store(true) // as App.Start would
+	markLive(t)
 	must(t, rig.ma.Destruct())
 	if rig.runner.stopCount() != 0 || rig.runner.sweepCount() != 1 || rig.runner.sweeps[0] != nil {
 		t.Fatalf("removal with nothing tracked must still sweep the app: stops=%d sweeps=%v", rig.runner.stopCount(), rig.runner.sweeps)

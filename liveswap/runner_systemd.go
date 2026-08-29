@@ -216,8 +216,12 @@ type systemdHandle struct {
 	unit      string
 	pid       atomic.Int64 // MainPID; 0 until read, backfilled by the watcher
 	startedAt time.Time
-	done      chan struct{}
-	exit      atomic.Pointer[unitStatus] // final status, set before done closes
+	// stopTimeout is the unit's own SIGTERM→SIGKILL budget as known
+	// when the handle was made (the start spec's grace, or the value
+	// read at reattach) — the fallback when a fresh read fails.
+	stopTimeout time.Duration
+	done        chan struct{}
+	exit        atomic.Pointer[unitStatus] // final status, set before done closes
 }
 
 func (h *systemdHandle) state() handleState {
@@ -315,8 +319,10 @@ func sweepUnknownApps(ctx context.Context, conn systemdConn, logger *zap.Logger)
 		}
 		logger.Warn("stopping units of an app no longer in the config", zap.String("app", app), zap.String("unit", u.Name))
 		// The caller's deadline bounds the whole sweep, so a slow
-		// manager cannot hold the start-time sweep open indefinitely.
-		if serr := r.sweep(ctx, app, nil); serr != nil {
+		// manager cannot hold the start-time sweep open indefinitely;
+		// each stop re-checks the pool first, so a reload adopting the
+		// app between listing and stopping keeps its unit.
+		if serr := r.sweep(ctx, app, nil, func() bool { return !appConfigured(app) }); serr != nil {
 			errs = append(errs, serr)
 		}
 	}
@@ -387,18 +393,18 @@ func (r *systemdRunner) Start(spec startSpec) (handle, error) {
 	if err != nil {
 		// The request may or may not have reached the manager
 		// (invariant 5): reconcile by name rather than guess.
-		return r.reconcileStart(u.Name, fmt.Errorf("starting unit %s: %w", u.Name, err))
+		return r.reconcileStart(u, fmt.Errorf("starting unit %s: %w", u.Name, err))
 	}
 	if res != "done" {
 		st := r.reapFailed(ctx, u.Name)
 		return nil, fmt.Errorf("unit %s: start job %s (%s)", u.Name, res, st.exitString())
 	}
-	return r.adopt(ctx, u.Name, time.Now()), nil
+	return r.adopt(ctx, u.Name, time.Now(), u.StopTimeout), nil
 }
 
 // adopt builds a watched handle for a unit known to be running.
-func (r *systemdRunner) adopt(ctx context.Context, unit string, startedAt time.Time) *systemdHandle {
-	h := &systemdHandle{unit: unit, startedAt: startedAt, done: make(chan struct{})}
+func (r *systemdRunner) adopt(ctx context.Context, unit string, startedAt time.Time, stopTimeout time.Duration) *systemdHandle {
+	h := &systemdHandle{unit: unit, startedAt: startedAt, stopTimeout: stopTimeout, done: make(chan struct{})}
 	if st, err := r.conn.UnitStatus(ctx, unit); err == nil {
 		h.pid.Store(int64(st.MainPID))
 	} else {
@@ -413,22 +419,30 @@ func (r *systemdRunner) adopt(ctx context.Context, unit string, startedAt time.T
 // running (adopted — the deploy proceeds), observed gone (a plain
 // failure), or, when the manager cannot even be asked, stopped on a
 // best-effort basis and reported as possibly running.
-func (r *systemdRunner) reconcileStart(unit string, cause error) (handle, error) {
-	ctx, cancel := context.WithTimeout(r.ctx, stopSlack)
-	defer cancel()
-	st, err := r.conn.UnitStatus(ctx, unit)
+func (r *systemdRunner) reconcileStart(u unitSpec, cause error) (handle, error) {
+	unit := u.Name
+	readCtx, readCancel := context.WithTimeout(r.ctx, pollTimeout)
+	st, err := r.conn.UnitStatus(readCtx, unit)
+	readCancel()
 	switch {
 	case err == nil && st.running():
 		r.log().Warn("start reported an error but the unit is running; adopting it", zap.String("unit", unit), zap.Error(cause))
-		return r.adopt(ctx, unit, time.Now()), nil
+		ctx, cancel := context.WithTimeout(r.ctx, pollTimeout)
+		defer cancel()
+		return r.adopt(ctx, unit, time.Now(), u.StopTimeout), nil
 	case err == nil:
 		if st.loaded() {
+			ctx, cancel := context.WithTimeout(r.ctx, pollTimeout)
 			_ = r.resetFailed(ctx, unit)
+			cancel()
 		}
 		return nil, cause
 	}
 	// The manager cannot be asked: stop by name and confirm, or report
-	// the unit as possibly running — the same sequence RunOnce uses.
+	// the unit as possibly running — the same sequence RunOnce uses,
+	// given the stop budget the unit was created with.
+	ctx, cancel := context.WithTimeout(r.ctx, u.StopTimeout+stopSlack)
+	defer cancel()
 	return nil, r.stopUnobserved(ctx, unit, cause)
 }
 
@@ -450,7 +464,7 @@ func (r *systemdRunner) RunOnce(ctx context.Context, spec startSpec) error {
 		// the unit may be running, and a pre_start whose outcome we
 		// cannot observe is a failed pre_start. Stop it and confirm,
 		// on the runner's own context — the caller's is already done.
-		stopCtx, cancel := context.WithTimeout(r.ctx, stopSlack)
+		stopCtx, cancel := context.WithTimeout(r.ctx, u.StopTimeout+stopSlack)
 		defer cancel()
 		return r.stopUnobserved(stopCtx, u.Name, cause)
 	}
@@ -523,10 +537,16 @@ func (r *systemdRunner) Stop(h handle, grace time.Duration) error {
 		return nil
 	default:
 	}
-	// The wait is sized from the unit's own TimeoutStopSec (a reattached
-	// unit keeps the grace it was created with, which may exceed the
-	// current config's), falling back to the caller's grace.
-	budget := r.stopBudgetFor(r.ctx, sh.unit, grace)
+	// The wait is sized from the unit's own TimeoutStopSec — a
+	// reattached unit keeps the grace it was created with, whatever
+	// the config says now — read fresh, else as recorded on the
+	// handle, else the caller's grace. Callers hold deployMu for this
+	// long, which is the operator's grace by construction.
+	fallback := sh.stopTimeout
+	if grace > fallback {
+		fallback = grace
+	}
+	budget := r.stopBudgetFor(r.ctx, sh.unit, fallback)
 	ctx, cancel := context.WithTimeout(r.ctx, budget+stopSlack)
 	defer cancel()
 	res, err := r.conn.StopUnit(ctx, sh.unit)
@@ -560,7 +580,7 @@ func (r *systemdRunner) Reattach(st handleState) (handle, bool, error) {
 		return nil, false, fmt.Errorf("reading recorded unit %s: %w", st.Unit, err)
 	}
 	if us.running() {
-		h := &systemdHandle{unit: st.Unit, startedAt: st.StartedAt, done: make(chan struct{})}
+		h := &systemdHandle{unit: st.Unit, startedAt: st.StartedAt, stopTimeout: us.StopTimeout, done: make(chan struct{})}
 		h.pid.Store(int64(us.MainPID))
 		go r.watch(h)
 		return h, true, nil
@@ -578,14 +598,17 @@ func (r *systemdRunner) Reattach(st handleState) (handle, bool, error) {
 // leftovers are reset; running ones are stopped and confirmed gone.
 // nil only when, afterwards, keep is the only loaded unit of app.
 func (r *systemdRunner) Sweep(app string, keep handle) error {
-	return r.sweep(r.ctx, app, keep)
+	return r.sweep(r.ctx, app, keep, nil)
 }
 
 // sweep is Sweep under a parent context. Listing and each reset are
-// bounded by pollTimeout; each stop by the unit's own stop budget plus
-// slack — a stray with a long TimeoutStopSec gets the time it was
-// promised rather than a flat cap that would report it unconfirmed.
-func (r *systemdRunner) sweep(parent context.Context, app string, keep handle) error {
+// bounded by pollTimeout. Strays are stopped concurrently, each under
+// its own stop budget plus slack, so a sweep takes as long as its
+// longest stray's TimeoutStopSec — never the sum, and never a flat cap
+// that would report a slow-draining unit unconfirmed. still, when
+// given, is consulted immediately before each stop; a false answer
+// means someone now owns the app and that stray is left alone.
+func (r *systemdRunner) sweep(parent context.Context, app string, keep handle, still func() bool) error {
 	keepUnit := ""
 	if kh, ok := keep.(*systemdHandle); ok {
 		keepUnit = kh.unit
@@ -596,7 +619,16 @@ func (r *systemdRunner) sweep(parent context.Context, app string, keep handle) e
 	if err != nil {
 		return fmt.Errorf("listing units of %s: %w", app, err)
 	}
-	var errs []error
+	var (
+		mu   sync.Mutex
+		errs []error
+		wg   sync.WaitGroup
+	)
+	record := func(err error) {
+		mu.Lock()
+		errs = append(errs, err)
+		mu.Unlock()
+	}
 	for _, u := range units {
 		if u.Name == keepUnit || !unitBelongsTo(u.Name, app) {
 			continue
@@ -605,22 +637,30 @@ func (r *systemdRunner) sweep(parent context.Context, app string, keep handle) e
 			if u.loaded() {
 				r.log().Warn("resetting leftover unit", zap.String("unit", u.Name), zap.String("active_state", u.ActiveState), zap.String("exit", u.exitString()))
 				ctx, cancel := context.WithTimeout(parent, pollTimeout)
-				rerr := r.resetFailed(ctx, u.Name)
-				cancel()
-				if rerr != nil {
-					errs = append(errs, rerr)
+				if rerr := r.resetFailed(ctx, u.Name); rerr != nil {
+					record(rerr)
 				}
+				cancel()
 			}
 			continue
 		}
-		r.log().Warn("stopping stray unit not owned by this instance", zap.String("unit", u.Name), zap.Int("pid", u.MainPID))
-		ctx, cancel := context.WithTimeout(parent, r.stopBudgetFor(parent, u.Name, 0)+stopSlack)
-		serr := r.stopUnobserved(ctx, u.Name, fmt.Errorf("stray unit %s", u.Name))
-		cancel()
-		if unitUnconfirmed(serr) {
-			errs = append(errs, serr)
-		}
+		wg.Add(1)
+		go func(u unitStatus) {
+			defer wg.Done()
+			budget := r.stopBudgetFor(parent, u.Name, 0)
+			if still != nil && !still() {
+				r.log().Info("stray unit adopted by a config meanwhile; leaving it", zap.String("unit", u.Name))
+				return
+			}
+			r.log().Warn("stopping stray unit not owned by this instance", zap.String("unit", u.Name), zap.Int("pid", u.MainPID))
+			ctx, cancel := context.WithTimeout(parent, budget+stopSlack)
+			defer cancel()
+			if serr := r.stopUnobserved(ctx, u.Name, fmt.Errorf("stray unit %s", u.Name)); unitUnconfirmed(serr) {
+				record(serr)
+			}
+		}(u)
 	}
+	wg.Wait()
 	return errors.Join(errs...)
 }
 
