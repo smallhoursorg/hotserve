@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -94,16 +95,35 @@ func (c *userManagerClient) dropIfDisconnected(conn *sddbus.Conn, err error) {
 	}
 }
 
+// dialTimeout bounds connecting to and authenticating with the private
+// socket, so a manager that accepts the connection but never finishes
+// the handshake cannot hang a call that advertises a deadline.
+const dialTimeout = 10 * time.Second
+
 // dialPrivate mirrors go-systemd's own private-socket dial for
 // /run/systemd/private: EXTERNAL auth with our uid and no Hello (the
-// private socket is not a bus daemon). godbus binds a connection to
-// the context it is dialed with, hence Background, not a call context.
+// private socket is not a bus daemon). The socket deadline covers only
+// the handshake; the established connection lives for the process
+// (godbus would close it with a call-scoped context, hence Background).
 func dialPrivate(socket string) (*godbus.Conn, error) {
-	conn, err := godbus.Dial("unix:path="+socket, godbus.WithContext(context.Background()))
+	nc, err := net.DialTimeout("unix", socket, dialTimeout)
 	if err != nil {
 		return nil, err
 	}
+	if err := nc.SetDeadline(time.Now().Add(dialTimeout)); err != nil {
+		_ = nc.Close()
+		return nil, err
+	}
+	conn, err := godbus.NewConn(nc, godbus.WithContext(context.Background()))
+	if err != nil {
+		_ = nc.Close()
+		return nil, err
+	}
 	if err := conn.Auth([]godbus.Auth{godbus.AuthExternal(strconv.Itoa(os.Getuid()))}); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	if err := nc.SetDeadline(time.Time{}); err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
@@ -124,6 +144,12 @@ func unitProperties(u unitSpec) []sddbus.Property {
 	if env == nil {
 		env = []string{}
 	}
+	// TimeoutStopUSec=0 means "never SIGKILL"; a sub-microsecond grace
+	// must not truncate into that.
+	stopUSec := uint64(u.StopTimeout / time.Microsecond) //nolint:gosec // durations here are small positive config values
+	if stopUSec == 0 {
+		stopUSec = 1
+	}
 	return []sddbus.Property{
 		sddbus.PropDescription(u.Description),
 		sddbus.PropType(typ),
@@ -133,7 +159,7 @@ func unitProperties(u unitSpec) []sddbus.Property {
 		{Name: "Restart", Value: godbus.MakeVariant("no")},
 		{Name: "KillMode", Value: godbus.MakeVariant("control-group")},
 		{Name: "NoNewPrivileges", Value: godbus.MakeVariant(true)},
-		{Name: "TimeoutStopUSec", Value: godbus.MakeVariant(uint64(u.StopTimeout / time.Microsecond))}, //nolint:gosec // durations here are small positive config values
+		{Name: "TimeoutStopUSec", Value: godbus.MakeVariant(stopUSec)},
 		{Name: "SyslogIdentifier", Value: godbus.MakeVariant(u.SyslogIdentifier)},
 		{Name: "StandardOutput", Value: godbus.MakeVariant("journal")},
 		{Name: "StandardError", Value: godbus.MakeVariant("journal")},

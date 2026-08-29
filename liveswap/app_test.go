@@ -966,6 +966,17 @@ func TestEnsureRunningReattachRecoversAfterTransientError(t *testing.T) {
 	}
 }
 
+func TestEnsureRunningNoStateStillSweeps(t *testing.T) {
+	rig := newTestRig(t)
+	must(t, rig.ma.ensureRunning())
+	if rig.runner.startCount() != 0 {
+		t.Fatal("nothing recorded ⇒ nothing launched")
+	}
+	if n := rig.runner.sweepCount(); n != 1 || rig.runner.sweeps[0] != nil {
+		t.Fatalf("with no state the manager must still be swept with keep=nil, sweeps=%d", n)
+	}
+}
+
 func TestEnsureRunningRelaunchSweepsStrays(t *testing.T) {
 	rig := newTestRig(t)
 	rig.store.state = appState{CurrentVersion: "v7", Port: 12345, Handle: handleState{PID: 1}}

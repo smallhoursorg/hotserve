@@ -520,7 +520,11 @@ func (ma *managedApp) ensureRunning() error {
 		return err
 	}
 	if !ok || st.CurrentVersion == "" {
-		return nil // nothing was ever deployed
+		// Nothing recorded — but a deploy whose state write failed may
+		// have left a unit behind; the manager's ledger decides, not
+		// the absence of a file.
+		ma.sweep(c, nil)
+		return nil
 	}
 	releaseDir := spec.dirs.release(st.CurrentVersion)
 	if _, err := os.Stat(releaseDir); err != nil {

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -246,11 +247,31 @@ func unitApp(name string) (string, bool) {
 	return app, app != ""
 }
 
+// configuredApps is the set of app names the live config declares —
+// process-wide, because the sweep below runs detached from any one
+// config. Its mutex is held for a whole sweep, so a reload that adds
+// an app waits for an in-flight sweep to finish before publishing the
+// new set, and a sweep started under an older config can never act on
+// a stale view: each unit is judged against the set as it is now.
+var configuredApps = struct {
+	sync.Mutex
+	names map[string]bool
+}{names: map[string]bool{}}
+
+// setConfiguredApps publishes the current config's app names.
+func setConfiguredApps(names map[string]bool) {
+	configuredApps.Lock()
+	defer configuredApps.Unlock()
+	configuredApps.names = names
+}
+
 // sweepUnknownApps stops every hotserve unit whose app the current
 // config does not name (invariant 7): an app removed or renamed while
 // hotserve was down has no managedApp left to sweep it, so App.Start
 // does it here against the manager's own listing.
-func sweepUnknownApps(ctx context.Context, conn systemdConn, known map[string]bool, logger *zap.Logger) error {
+func sweepUnknownApps(ctx context.Context, conn systemdConn, logger *zap.Logger) error {
+	configuredApps.Lock()
+	defer configuredApps.Unlock()
 	units, err := conn.ListUnits(ctx, unitPrefix+"*.service")
 	if err != nil {
 		return fmt.Errorf("listing hotserve units: %w", err)
@@ -260,7 +281,7 @@ func sweepUnknownApps(ctx context.Context, conn systemdConn, known map[string]bo
 	var errs []error
 	for _, u := range units {
 		app, ok := unitApp(u.Name)
-		if !ok || known[app] {
+		if !ok || configuredApps.names[app] {
 			continue
 		}
 		logger.Warn("stopping unit of an app no longer in the config", zap.String("app", app), zap.String("unit", u.Name))

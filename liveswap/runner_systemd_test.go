@@ -289,6 +289,11 @@ func TestUnitPropertiesApplyHardening(t *testing.T) {
 	if _, ok := got["ExecStart"]; !ok {
 		t.Error("ExecStart missing")
 	}
+	for _, p := range unitProperties(unitSpec{ExecStart: []string{"/bin/true"}, StopTimeout: 500 * time.Nanosecond}) {
+		if p.Name == "TimeoutStopUSec" && p.Value.Value() != uint64(1) {
+			t.Errorf("a sub-microsecond grace must clamp to 1µs, not 0 (= never SIGKILL); got %v", p.Value.Value())
+		}
+	}
 	_ = godbus.MakeVariant // keep the import honest: properties are godbus variants
 }
 
@@ -639,7 +644,9 @@ func TestSweepUnknownApps(t *testing.T) {
 	conn.setStatus("hotserve-old.v2.0a1b2c3e.service", failedStatus) // removed app: reset
 	conn.setStatus("hotserve-demo-api.v1.0a1b2c3d.service", running) // another configured app: keep
 	conn.setStatus("hotserve-weird.service", running)                // not ours: ignore
-	err := sweepUnknownApps(context.Background(), conn, map[string]bool{"demo": true, "demo-api": true}, zap.NewNop())
+	setConfiguredApps(map[string]bool{"demo": true, "demo-api": true})
+	t.Cleanup(func() { setConfiguredApps(map[string]bool{}) })
+	err := sweepUnknownApps(context.Background(), conn, zap.NewNop())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -652,8 +659,25 @@ func TestSweepUnknownApps(t *testing.T) {
 	conn.mu.Lock()
 	conn.listErr = errors.New("dbus down")
 	conn.mu.Unlock()
-	if err := sweepUnknownApps(context.Background(), conn, nil, zap.NewNop()); err == nil {
+	if err := sweepUnknownApps(context.Background(), conn, zap.NewNop()); err == nil {
 		t.Fatal("a listing failure must be reported")
+	}
+}
+
+func TestSweepUnknownAppsJudgesAgainstLiveConfig(t *testing.T) {
+	// A sweep in flight must not act on a stale app set: a reload that
+	// adds "late" while the sweep is listing waits for the sweep, and
+	// the sweep sees the set as published, never an older capture.
+	conn := newFakeSystemdConn()
+	running := unitStatus{LoadState: "loaded", ActiveState: "active"}
+	conn.setStatus("hotserve-late.v1.0a1b2c3d.service", running)
+	setConfiguredApps(map[string]bool{"late": true})
+	t.Cleanup(func() { setConfiguredApps(map[string]bool{}) })
+	if err := sweepUnknownApps(context.Background(), conn, zap.NewNop()); err != nil {
+		t.Fatal(err)
+	}
+	if len(conn.stops()) != 0 {
+		t.Fatalf("a configured app's unit must never be swept, got %v", conn.stops())
 	}
 }
 

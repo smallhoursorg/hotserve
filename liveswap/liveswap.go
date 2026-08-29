@@ -492,15 +492,19 @@ func (a *App) Validate() error {
 func (a *App) Start() error {
 	// Units of apps this config no longer names have no managedApp to
 	// sweep them (removed or renamed while hotserve was down): settle
-	// them against the manager's own listing. Background, like recovery.
+	// them against the manager's own listing. Background, like
+	// recovery; the sweep judges every unit against the set as it is
+	// at that moment (and waits for any sweep already running), so a
+	// reload racing it cannot lose an app it just added.
 	known := make(map[string]bool, len(a.managed))
 	for name := range a.managed {
 		known[name] = true
 	}
+	setConfiguredApps(known)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), unknownAppSweepTimeout)
 		defer cancel()
-		if err := sweepUnknownApps(ctx, userManager, known, a.logger); err != nil {
+		if err := sweepUnknownApps(ctx, userManager, a.logger); err != nil {
 			a.logger.Error("sweeping units of apps no longer configured", zap.Error(err))
 		}
 	}()
