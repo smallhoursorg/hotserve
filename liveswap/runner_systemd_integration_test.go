@@ -262,9 +262,9 @@ func TestIntegrationSystemdReattachAdoptsLiveUnit(t *testing.T) {
 	r2 := newSystemdRunner(userManager, zap.NewNop())
 	r2.poll = 50 * time.Millisecond
 	t.Cleanup(r2.close)
-	h2, ok := r2.Reattach(st)
-	if !ok {
-		t.Fatal("live unit must be adopted")
+	h2, ok, err := r2.Reattach(st)
+	if !ok || err != nil {
+		t.Fatalf("live unit must be adopted: ok=%v err=%v", ok, err)
 	}
 	if h2.state().PID != pids[0] || h2.state().Unit != st.Unit {
 		t.Fatalf("adopted %+v, want pid %d unit %s", h2.state(), pids[0], st.Unit)
@@ -279,8 +279,8 @@ func TestIntegrationSystemdReattachAdoptsLiveUnit(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("original handle never saw the unit go")
 	}
-	if _, ok := r2.Reattach(st); ok {
-		t.Fatal("a stopped unit must not be adoptable")
+	if _, ok, err := r2.Reattach(st); ok || err != nil {
+		t.Fatalf("a stopped unit must not be adoptable: ok=%v err=%v", ok, err)
 	}
 }
 
@@ -307,11 +307,49 @@ func TestIntegrationSystemdReattachResetsFailedUnit(t *testing.T) {
 	}
 	r2 := newSystemdRunner(userManager, zap.NewNop())
 	t.Cleanup(r2.close)
-	if _, ok := r2.Reattach(h.state()); ok {
-		t.Fatal("a failed unit must never be adopted")
+	if _, ok, err := r2.Reattach(h.state()); ok || err != nil {
+		t.Fatalf("a failed unit must never be adopted: ok=%v err=%v", ok, err)
 	}
 	st, err := userManager.UnitStatus(context.Background(), h.state().Unit)
 	if err != nil || st.loaded() {
 		t.Fatalf("failed unit must be reset on discovery, got %+v (%v)", st, err)
+	}
+}
+
+func TestIntegrationSystemdSweepStopsStrays(t *testing.T) {
+	r := integrationRunner(t)
+	spec := scriptApp(t, workerTree)
+	keep, err := r.Start(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	strayDir := t.TempDir()
+	straySpec := spec
+	straySpec.dir = strayDir
+	if err := os.WriteFile(filepath.Join(strayDir, "server"), []byte("#!/bin/sh\n"+workerTree), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stray, err := r.Start(straySpec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	strayPIDs := readPIDs(t, strayDir)
+	keepPIDs := readPIDs(t, spec.dir)
+	if err := r.Sweep(spec.app, keep); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	waitPIDsGone(t, strayPIDs, 200*time.Millisecond)
+	for _, p := range keepPIDs {
+		if !alivePID(p) {
+			t.Fatalf("keep's process %d was killed by the sweep", p)
+		}
+	}
+	select {
+	case <-r.Wait(stray):
+	case <-time.After(5 * time.Second):
+		t.Fatal("stray handle never saw its unit go")
+	}
+	if err := r.Stop(keep, spec.grace); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -5,7 +5,11 @@
 # "degraded" is normal in a container: masked units count as failed.
 set -eu
 i=0
-until state=$(systemctl is-system-running 2>/dev/null) && { [ "$state" = running ] || [ "$state" = degraded ]; }; do
+# is-system-running exits non-zero for every state but "running", so
+# decide on its output, not its status.
+while :; do
+	state=$(systemctl is-system-running 2>/dev/null || true)
+	case "$state" in running|degraded) break ;; esac
 	i=$((i + 1))
 	if [ "$i" -ge 60 ]; then
 		echo "systemd did not reach running/degraded within 60s (state: ${state:-unknown})" >&2

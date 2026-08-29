@@ -167,13 +167,25 @@ logged, reset and relaunched. On process exit `Destruct` leaves units
 running for exactly that reason; only removing an app from the config
 stops it.
 
-The runner's invariants are written in its doc comment; the two that
-matter most to the state machine are that a handle is declared dead
-only on an *observed* terminal unit state (a D-Bus outage never
-becomes a phantom crash and a duplicate instance), and that `Stop`
-returns nil only once the unit is observed gone — any other outcome
-is an error, on which the deploy pipeline keeps the release on disk
-and skips GC.
+The runner's invariants are written in its doc comment. The ones the
+state machine leans on: a handle is declared dead only on an
+*observed* terminal unit state (a D-Bus outage never becomes a phantom
+crash and a duplicate instance); `Reattach` reports an unreadable unit
+as an error, and recovery retries rather than launching beside it;
+`Stop` returns nil only once the unit is observed gone; a start or
+pre_start whose D-Bus call failed is reconciled by unit name and, if
+even that is impossible, reported as "may still be running" so the
+deploy keeps the release; and **the manager is the ledger** — every
+unit is named `hotserve-<app>.<version>.<nonce>.service` (the `.`
+after the app is the one character an app name cannot contain), and
+`Sweep(app, keep)` stops every other unit of the app. Recovery sweeps
+after reattach/relaunch and deploys sweep before GC, so nothing
+hotserve lost track of (a failed `state.json` write, an unconfirmed
+stop) survives the next start or the next deploy, and no release is
+deleted while the manager still runs something out of it. There is
+deliberately no persisted "leaked releases" ledger: systemd already
+knows what is running, and asking it is cheaper and truer than
+remembering.
 
 Why the user manager and not the system one: a polkit rule granting
 `org.freedesktop.systemd1.manage-units` cannot inspect unit

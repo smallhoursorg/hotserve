@@ -376,10 +376,12 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 			if err == nil || promoted {
 				return
 			}
-			// Never delete a release out from under a failed instance that
-			// may still be running (Stop errored, or the handle is still
-			// alive) — that would pull files from beneath a live process.
-			if newHandle != nil && (stopUnconfirmed || c.runner.Alive(newHandle)) {
+			// Never delete a release out from under an instance that may
+			// still be running (a Stop that errored, a start or pre_start
+			// the runner could not reconcile, a handle still alive) —
+			// that would pull files from beneath a live process. The
+			// next deploy's sweep settles it against the runner.
+			if unitUnconfirmed(err) || (newHandle != nil && (stopUnconfirmed || c.runner.Alive(newHandle))) {
 				err = errors.Join(err, fmt.Errorf("release %s left on disk: the failed instance may still be running", req.Version))
 				return
 			}
@@ -478,14 +480,19 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		c.clock.Sleep(spec.drain)
 		ma.setPhase(c, "stopping_old")
 		if err := c.runner.Stop(old.handle, spec.grace); err != nil {
-			// Unconfirmed stop: the old instance may still be running
-			// out of its release dir, so this deploy must not GC any
-			// release. The next successful deploy's GC catches up.
-			logger.Warn("stopping old version failed; skipping release GC for this deploy", zap.String("version", old.version), zap.Error(err))
-			return nil
+			logger.Warn("stopping old version failed; the sweep below retries it", zap.String("version", old.version), zap.Error(err))
 		}
 	}
 
+	// Nothing is deleted while anything but the new instance may be
+	// running out of a release dir: the sweep settles that against
+	// the runner's own ledger (an unconfirmed stop above, a unit an
+	// earlier hotserve left behind), and any doubt skips GC — the next
+	// successful deploy catches up.
+	if !ma.sweep(c, newHandle) {
+		logger.Warn("skipping release GC for this deploy")
+		return nil
+	}
 	gcReleases(spec.dirs.releases, spec.keep, req.Version, logger)
 	return nil
 }
@@ -520,7 +527,26 @@ func (ma *managedApp) ensureRunning() error {
 		return fmt.Errorf("state names version %s but its release dir is missing: %w", st.CurrentVersion, err)
 	}
 
-	if h, ok := c.runner.Reattach(st.Handle); ok {
+	// An unreadable unit state is not "not running": launching beside
+	// a unit that may still be up would duplicate the app. Retry a
+	// few times (Provision just proved the manager reachable, so this
+	// is a blip) and otherwise give up loudly rather than guess.
+	var (
+		h        handle
+		attached bool
+	)
+	for attempt := 1; ; attempt++ {
+		h, attached, err = c.runner.Reattach(st.Handle)
+		if err == nil {
+			break
+		}
+		if attempt >= reattachAttempts {
+			return fmt.Errorf("cannot tell whether %s is still running; not relaunching: %w", st.CurrentVersion, err)
+		}
+		c.logger.Warn("reattach: unit state unreadable; retrying", zap.Int("attempt", attempt), zap.Error(err))
+		c.clock.Sleep(reattachRetryDelay)
+	}
+	if attached {
 		inst := &instance{version: st.CurrentVersion, port: st.Port, handle: h}
 		ma.mu.Lock()
 		ma.current = inst
@@ -528,6 +554,7 @@ func (ma *managedApp) ensureRunning() error {
 		ma.activePort.Store(int64(st.Port))
 		c.logger.Info("reattached to running instance", zap.String("version", st.CurrentVersion))
 		ma.pokeWatchdog()
+		ma.sweep(c, h)
 		return nil
 	}
 
@@ -541,7 +568,27 @@ func (ma *managedApp) ensureRunning() error {
 	c.logger.Info("relaunched current version after restart",
 		zap.String("version", st.CurrentVersion), zap.Int("port", inst.port))
 	ma.pokeWatchdog()
+	ma.sweep(c, inst.handle)
 	return nil
+}
+
+const (
+	reattachAttempts   = 5
+	reattachRetryDelay = 2 * time.Second
+)
+
+// sweep stops every unit of this app other than keep — the runner's
+// ledger, not ours, decides what is running. Recovery calls it so a
+// unit hotserve lost track of (a state.json write that failed, an
+// earlier stop that could not be confirmed) does not outlive the next
+// start; deploys call it before GC. Returns false if something may
+// still be running, in which case callers must not delete anything.
+func (ma *managedApp) sweep(c collaborators, keep handle) bool {
+	if err := c.runner.Sweep(ma.name, keep); err != nil {
+		c.logger.Error("sweeping stray instances", zap.Error(err))
+		return false
+	}
+	return true
 }
 
 // launchVersion starts an already-on-disk version on a fresh port and

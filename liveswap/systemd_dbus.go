@@ -219,6 +219,25 @@ func (c *userManagerClient) UnitStatus(ctx context.Context, name string) (unitSt
 	}, nil
 }
 
+// ListUnits returns the loaded units whose names match pattern, with
+// only the fields the manager's listing carries (name and states).
+func (c *userManagerClient) ListUnits(ctx context.Context, pattern string) ([]unitStatus, error) {
+	conn, err := c.get()
+	if err != nil {
+		return nil, err
+	}
+	units, err := conn.ListUnitsByPatternsContext(ctx, nil, []string{pattern})
+	if err != nil {
+		c.dropIfDisconnected(conn, err)
+		return nil, err
+	}
+	out := make([]unitStatus, 0, len(units))
+	for _, u := range units {
+		out = append(out, unitStatus{Name: u.Name, LoadState: u.LoadState, ActiveState: u.ActiveState, SubState: u.SubState})
+	}
+	return out, nil
+}
+
 func propString(props map[string]any, key string) string {
 	s, _ := props[key].(string)
 	return s

@@ -32,16 +32,27 @@ import (
 //     unit state (inactive, failed, or no longer loaded). A D-Bus or
 //     transport error never marks a handle dead: declaring a live app
 //     dead would make the watchdog launch a duplicate.
-//  3. Unit names are unique per Start (random nonce) and recorded in
-//     state.json. Reattach adopts only a running unit; a failed one is
-//     logged with its exit status, reset, and never adopted.
+//  3. Unit names are unique per Start (random nonce), name their app
+//     unambiguously (see unitName), and are recorded in state.json.
+//     Reattach adopts only a unit observed running; a failed one is
+//     logged with its exit status, reset, and never adopted; a unit
+//     whose state cannot be read is an error, never "not running".
 //  4. Stop returns nil only when the stop job reported "done" and the
 //     unit was then observed gone — with KillMode=control-group and
 //     SendSIGKILL the cgroup is empty at that point. Any other outcome
 //     is an error, and callers keep the release on disk and skip GC.
-//  5. Failed units are always reset after their exit status has been
+//  5. Once a start request may have reached the manager, the unit is
+//     reconciled by name: an ambiguous failure ends with the unit
+//     observed running (adopted), observed gone, or reported as
+//     unitUnconfirmedError — never silently dropped.
+//  6. Failed units are always reset after their exit status has been
 //     recorded, so the manager never accumulates dead units.
-//  6. A unit's environment is exactly the env the caller built
+//  7. The manager is the ledger of what runs. Sweep(app, keep) returns
+//     nil only when keep is the only loaded unit of app; recovery and
+//     GC both sweep first, so nothing hotserve forgot (a unit whose
+//     state.json write failed, a stop that could not be confirmed)
+//     survives the next start or the next deploy.
+//  8. A unit's environment is exactly the env the caller built
 //     (Environment=) on top of the manager's defaults; hotserve's own
 //     environment is never inherited.
 //
@@ -75,6 +86,8 @@ type systemdConn interface {
 	UnitStatus(ctx context.Context, name string) (unitStatus, error)
 	// ResetFailedUnit clears a failed unit so the manager unloads it.
 	ResetFailedUnit(ctx context.Context, name string) error
+	// ListUnits returns the loaded units whose names match the glob.
+	ListUnits(ctx context.Context, pattern string) ([]unitStatus, error)
 }
 
 // unitSpec is a transient service unit as the runner wants it. The
@@ -94,6 +107,7 @@ type unitSpec struct {
 
 // unitStatus is a snapshot of one unit as the manager reports it.
 type unitStatus struct {
+	Name        string
 	LoadState   string // "loaded", "not-found", ...
 	ActiveState string // "active", "activating", "deactivating", "inactive", "failed"
 	SubState    string
@@ -175,25 +189,38 @@ func (h *systemdHandle) state() handleState {
 	return handleState{PID: h.pid, StartedAt: h.startedAt, Unit: h.unit}
 }
 
-// unitNameRe is the subset of systemd's unit-name alphabet the runner
-// produces: app names and version tags are already validated to
-// [A-Za-z0-9._-] in liveswap.go, so no escaping is ever needed.
-var unitNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]+\.service$`)
+// Unit naming: hotserve-<app>.<version>.<nonce>[.prestart].service.
+// App names are [a-z0-9-] and version tags [A-Za-z0-9._-] (validated
+// in liveswap.go), all legal unit-name characters, so nothing is ever
+// escaped. The "." after the app is the one character an app name
+// cannot contain, which is what lets Sweep match "blog" without also
+// matching "blog-api"; the nonce makes every Start unique.
+const unitPrefix = "hotserve-"
+
+var (
+	unitNameRe  = regexp.MustCompile(`^hotserve-[a-z0-9-]+\.[A-Za-z0-9._-]+\.[0-9a-f]{8}(\.prestart)?\.service$`)
+	unitNonceRe = regexp.MustCompile(`\.[0-9a-f]{8}(\.prestart)?\.service$`)
+)
 
 func unitName(spec startSpec, oneshot bool) (string, error) {
 	var nonce [4]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return "", err
 	}
-	name := "hotserve-" + spec.app + "-" + spec.version + "-" + hex.EncodeToString(nonce[:])
+	name := unitPrefix + spec.app + "." + spec.version + "." + hex.EncodeToString(nonce[:])
 	if oneshot {
-		name += "-prestart"
+		name += ".prestart"
 	}
 	name += ".service"
 	if !unitNameRe.MatchString(name) {
 		return "", fmt.Errorf("cannot derive a unit name from app %q version %q", spec.app, spec.version)
 	}
 	return name, nil
+}
+
+// unitBelongsTo reports whether name is one of app's units.
+func unitBelongsTo(name, app string) bool {
+	return strings.HasPrefix(name, unitPrefix+app+".") && unitNameRe.MatchString(name) && unitNonceRe.MatchString(name)
 }
 
 // resolveCommand turns command[0] into the absolute path a transient
@@ -203,11 +230,8 @@ func unitName(spec startSpec, oneshot bool) (string, error) {
 // missing or non-executable binary into a clear Start error instead of
 // a unit that fails a moment later with status 203.
 func resolveCommand(cmd, dir string) (string, error) {
-	if strings.Contains(cmd, "/") {
-		if !filepath.IsAbs(cmd) {
-			cmd = filepath.Join(dir, cmd)
-		}
-		return exec.LookPath(cmd)
+	if strings.Contains(cmd, "/") && !filepath.IsAbs(cmd) {
+		cmd = filepath.Join(dir, cmd)
 	}
 	return exec.LookPath(cmd)
 }
@@ -261,21 +285,52 @@ func (r *systemdRunner) Start(spec startSpec) (handle, error) {
 	defer cancel()
 	res, err := r.conn.StartTransientUnit(ctx, u)
 	if err != nil {
-		return nil, fmt.Errorf("starting unit %s: %w", u.Name, err)
+		// The request may or may not have reached the manager
+		// (invariant 5): reconcile by name rather than guess.
+		return r.reconcileStart(u.Name, fmt.Errorf("starting unit %s: %w", u.Name, err))
 	}
 	if res != "done" {
 		st := r.reapFailed(ctx, u.Name)
 		return nil, fmt.Errorf("unit %s: start job %s (%s)", u.Name, res, st.exitString())
 	}
-	h := &systemdHandle{unit: u.Name, startedAt: time.Now(), done: make(chan struct{})}
-	if st, err := r.conn.UnitStatus(ctx, u.Name); err == nil {
+	return r.adopt(ctx, u.Name, time.Now()), nil
+}
+
+// adopt builds a watched handle for a unit known to be running.
+func (r *systemdRunner) adopt(ctx context.Context, unit string, startedAt time.Time) *systemdHandle {
+	h := &systemdHandle{unit: unit, startedAt: startedAt, done: make(chan struct{})}
+	if st, err := r.conn.UnitStatus(ctx, unit); err == nil {
 		h.pid = st.MainPID
 	} else {
-		r.log().Warn("unit started but its main PID could not be read", zap.String("unit", u.Name), zap.Error(err))
+		r.log().Warn("unit started but its main PID could not be read", zap.String("unit", unit), zap.Error(err))
 	}
-	r.log().Info("instance started", zap.String("unit", u.Name), zap.Int("pid", h.pid))
+	r.log().Info("instance started", zap.String("unit", unit), zap.Int("pid", h.pid))
 	go r.watch(h)
-	return h, nil
+	return h
+}
+
+// reconcileStart settles an ambiguous start: the unit is observed
+// running (adopted — the deploy proceeds), observed gone (a plain
+// failure), or, when the manager cannot even be asked, stopped on a
+// best-effort basis and reported as possibly running.
+func (r *systemdRunner) reconcileStart(unit string, cause error) (handle, error) {
+	ctx, cancel := context.WithTimeout(r.ctx, stopSlack)
+	defer cancel()
+	st, err := r.conn.UnitStatus(ctx, unit)
+	switch {
+	case err == nil && st.running():
+		r.log().Warn("start reported an error but the unit is running; adopting it", zap.String("unit", unit), zap.Error(cause))
+		return r.adopt(ctx, unit, time.Now()), nil
+	case err == nil:
+		if st.loaded() {
+			r.resetFailed(ctx, unit)
+		}
+		return nil, cause
+	}
+	if res, serr := r.conn.StopUnit(ctx, unit); serr == nil && res == "done" {
+		return nil, cause
+	}
+	return nil, &unitUnconfirmedError{unit: unit, err: cause}
 }
 
 // RunOnce runs a oneshot unit to completion. Its start job only
@@ -288,18 +343,14 @@ func (r *systemdRunner) RunOnce(ctx context.Context, spec startSpec) error {
 	}
 	res, err := r.conn.StartTransientUnit(ctx, u)
 	if err != nil {
+		cause := fmt.Errorf("starting unit %s: %w", u.Name, err)
 		if ctx.Err() != nil {
-			// Cancelled (deadline or aborted deploy): the unit may still
-			// be running. Stop it on the runner's own context — the
-			// caller's is already done.
-			stopCtx, cancel := context.WithTimeout(r.ctx, stopSlack)
-			defer cancel()
-			if _, serr := r.conn.StopUnit(stopCtx, u.Name); serr != nil {
-				r.log().Warn("stopping cancelled pre_start unit", zap.String("unit", u.Name), zap.Error(serr))
-			}
-			return ctx.Err()
+			cause = ctx.Err()
 		}
-		return fmt.Errorf("starting unit %s: %w", u.Name, err)
+		// Cancelled, or the transport failed mid-flight: either way
+		// the unit may be running, and a pre_start whose outcome we
+		// cannot observe is a failed pre_start. Stop it and confirm.
+		return r.stopUnobserved(u.Name, cause)
 	}
 	if res == "done" {
 		return nil
@@ -308,6 +359,28 @@ func (r *systemdRunner) RunOnce(ctx context.Context, spec startSpec) error {
 	defer cancel()
 	st := r.reapFailed(reapCtx, u.Name)
 	return fmt.Errorf("%s (unit %s: job %s)", st.exitString(), u.Name, res)
+}
+
+// stopUnobserved stops a unit on the runner's own context and returns
+// cause if the unit is confirmed gone, or an unconfirmed error if not.
+func (r *systemdRunner) stopUnobserved(unit string, cause error) error {
+	ctx, cancel := context.WithTimeout(r.ctx, stopSlack)
+	defer cancel()
+	res, err := r.conn.StopUnit(ctx, unit)
+	if err != nil {
+		return &unitUnconfirmedError{unit: unit, err: cause}
+	}
+	if res != "done" {
+		return &unitUnconfirmedError{unit: unit, err: fmt.Errorf("%w (stop job %s)", cause, res)}
+	}
+	st, err := r.conn.UnitStatus(ctx, unit)
+	if err != nil || st.running() {
+		return &unitUnconfirmedError{unit: unit, err: cause}
+	}
+	if st.loaded() {
+		r.resetFailed(ctx, unit)
+	}
+	return cause
 }
 
 // Alive reports whether the watcher has not yet seen the unit gone.
@@ -371,24 +444,22 @@ func (r *systemdRunner) Stop(h handle, grace time.Duration) error {
 // Reattach adopts the unit recorded in state.json if the manager still
 // runs it. Whatever happened to it while hotserve was away is logged;
 // a failed unit is reset so it cannot linger, and the caller relaunches.
-func (r *systemdRunner) Reattach(st handleState) (handle, bool) {
+// A unit whose state cannot be read is an error: the caller must not
+// launch beside a unit that may be running (invariant 3).
+func (r *systemdRunner) Reattach(st handleState) (handle, bool, error) {
 	if st.Unit == "" {
-		return nil, false
+		return nil, false, nil
 	}
 	ctx, cancel := context.WithTimeout(r.ctx, startJobTimeout)
 	defer cancel()
 	us, err := r.conn.UnitStatus(ctx, st.Unit)
 	if err != nil {
-		// Reported, not defended: Provision has just proven the manager
-		// reachable, so this is unexpected. Relaunching is the safe
-		// side — a unit that does survive stays visible in the manager.
-		r.log().Error("cannot read recorded unit; relaunching instead of reattaching", zap.String("unit", st.Unit), zap.Error(err))
-		return nil, false
+		return nil, false, fmt.Errorf("reading recorded unit %s: %w", st.Unit, err)
 	}
 	if us.running() {
 		h := &systemdHandle{unit: st.Unit, pid: us.MainPID, startedAt: st.StartedAt, done: make(chan struct{})}
 		go r.watch(h)
-		return h, true
+		return h, true, nil
 	}
 	if us.ActiveState == "failed" {
 		r.log().Warn("recorded instance died while hotserve was down", zap.String("unit", st.Unit), zap.String("exit", us.exitString()), zap.String("result", us.Result))
@@ -396,7 +467,40 @@ func (r *systemdRunner) Reattach(st handleState) (handle, bool) {
 	} else {
 		r.log().Info("recorded unit is no longer running", zap.String("unit", st.Unit), zap.String("load_state", us.LoadState), zap.String("active_state", us.ActiveState))
 	}
-	return nil, false
+	return nil, false, nil
+}
+
+// Sweep stops every unit of app except keep (invariant 7). Failed
+// leftovers are reset; running ones are stopped and confirmed gone.
+func (r *systemdRunner) Sweep(app string, keep handle) error {
+	keepUnit := ""
+	if kh, ok := keep.(*systemdHandle); ok {
+		keepUnit = kh.unit
+	}
+	ctx, cancel := context.WithTimeout(r.ctx, defaultStopTimeout+stopSlack)
+	defer cancel()
+	units, err := r.conn.ListUnits(ctx, unitPrefix+app+".*.service")
+	if err != nil {
+		return fmt.Errorf("listing units of %s: %w", app, err)
+	}
+	var errs []error
+	for _, u := range units {
+		if u.Name == keepUnit || !unitBelongsTo(u.Name, app) {
+			continue
+		}
+		if !u.running() {
+			if u.loaded() {
+				r.log().Warn("resetting leftover unit", zap.String("unit", u.Name), zap.String("active_state", u.ActiveState), zap.String("exit", u.exitString()))
+				r.resetFailed(ctx, u.Name)
+			}
+			continue
+		}
+		r.log().Warn("stopping stray unit not owned by this instance", zap.String("unit", u.Name), zap.Int("pid", u.MainPID))
+		if serr := r.stopUnobserved(u.Name, fmt.Errorf("stray unit %s", u.Name)); unitUnconfirmed(serr) {
+			errs = append(errs, serr)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // watch polls the unit until it is observed in a terminal state, then

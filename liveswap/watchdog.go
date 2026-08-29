@@ -519,7 +519,15 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 	// this goroutine at shutdown.
 	if c.runner.Alive(inst.handle) {
 		if err := c.runner.Stop(inst.handle, spec.grace); err != nil {
-			c.logger.Warn("watchdog: stopping unhealthy instance", zap.Error(err))
+			// The runner could not confirm the instance is gone, so a
+			// replacement could run beside it. Leave things as they
+			// are (still routed if it is alive, unhealthy as it may
+			// be); the next cycle re-detects the failure and retries.
+			// The budget slot stays consumed, so this is rate-limited
+			// like any other restart.
+			c.logger.Error("watchdog: cannot confirm the unhealthy instance stopped; not launching a replacement",
+				zap.String("version", inst.version), zap.Error(err))
+			return true
 		}
 	}
 	newInst, err := ma.launchVersion(c, inst.version)

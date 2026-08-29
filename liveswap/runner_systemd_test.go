@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -33,6 +34,7 @@ type fakeSystemdConn struct {
 	stopResult string
 	stopErr    error
 	stopLeaves bool // StopUnit does not mark the unit gone
+	listErr    error
 }
 
 func newFakeSystemdConn() *fakeSystemdConn {
@@ -47,9 +49,9 @@ func (f *fakeSystemdConn) StartTransientUnit(ctx context.Context, u unitSpec) (s
 		res = "done"
 	}
 	switch {
-	case startErr != nil:
-	case res != "done" && f.failStatus != nil:
+	case (startErr != nil || res != "done") && f.failStatus != nil:
 		f.status[u.Name] = *f.failStatus
+	case startErr != nil:
 	case !u.Oneshot:
 		if _, preset := f.status[u.Name]; !preset {
 			f.status[u.Name] = unitStatus{LoadState: "loaded", ActiveState: "active", SubState: "running", MainPID: 4242}
@@ -101,6 +103,22 @@ func (f *fakeSystemdConn) ResetFailedUnit(_ context.Context, name string) error 
 	f.reset = append(f.reset, name)
 	delete(f.status, name)
 	return nil
+}
+
+func (f *fakeSystemdConn) ListUnits(_ context.Context, pattern string) ([]unitStatus, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	var out []unitStatus
+	for name, st := range f.status {
+		if ok, _ := path.Match(pattern, name); ok {
+			st.Name = name
+			out = append(out, st)
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeSystemdConn) setStatus(name string, st unitStatus) {
@@ -171,7 +189,7 @@ func waitDone(t *testing.T, r *systemdRunner, h handle) {
 	}
 }
 
-var unitNamePattern = regexp.MustCompile(`^hotserve-demo-v1\.2-[0-9a-f]{8}\.service$`)
+var unitNamePattern = regexp.MustCompile(`^hotserve-demo\.v1\.2\.[0-9a-f]{8}\.service$`)
 
 func TestSystemdRunnerStartBuildsUnit(t *testing.T) {
 	r, conn := newTestSystemdRunner(t)
@@ -419,7 +437,7 @@ func TestSystemdRunnerRunOnce(t *testing.T) {
 		t.Fatalf("RunOnce success: %v", err)
 	}
 	u := conn.unit(0)
-	if !u.Oneshot || !strings.HasSuffix(u.Name, "-prestart.service") {
+	if !u.Oneshot || !strings.HasSuffix(u.Name, ".prestart.service") || !unitBelongsTo(u.Name, "demo") {
 		t.Fatalf("pre_start must be a oneshot unit, got %+v", u)
 	}
 	if u.SyslogIdentifier != "hotserve-demo" || u.StopTimeout != spec.grace {
@@ -463,17 +481,17 @@ func TestSystemdRunnerReattach(t *testing.T) {
 	r, conn := newTestSystemdRunner(t)
 	started := time.Now().Add(-time.Hour)
 
-	if _, ok := r.Reattach(handleState{PID: 1}); ok {
-		t.Fatal("no unit recorded ⇒ cannot reattach")
+	if _, ok, err := r.Reattach(handleState{PID: 1}); ok || err != nil {
+		t.Fatal("no unit recorded ⇒ cannot reattach, not an error")
 	}
-	if _, ok := r.Reattach(handleState{Unit: "hotserve-demo-v1-aaaaaaaa.service"}); ok {
-		t.Fatal("unknown unit ⇒ cannot reattach")
+	if _, ok, err := r.Reattach(handleState{Unit: "hotserve-demo.v1.aaaaaaaa.service"}); ok || err != nil {
+		t.Fatal("unknown unit ⇒ observed not running")
 	}
 
 	conn.setStatus("live.service", unitStatus{LoadState: "loaded", ActiveState: "active", SubState: "running", MainPID: 77})
-	h, ok := r.Reattach(handleState{Unit: "live.service", StartedAt: started})
-	if !ok {
-		t.Fatal("running unit must be adopted")
+	h, ok, err := r.Reattach(handleState{Unit: "live.service", StartedAt: started})
+	if !ok || err != nil {
+		t.Fatalf("running unit must be adopted: ok=%v err=%v", ok, err)
 	}
 	if st := h.state(); st.PID != 77 || st.Unit != "live.service" || !st.StartedAt.Equal(started) {
 		t.Fatalf("adopted state %+v", st)
@@ -485,16 +503,146 @@ func TestSystemdRunnerReattach(t *testing.T) {
 	waitDone(t, r, h)
 
 	conn.setStatus("dead.service", failedStatus)
-	if _, ok := r.Reattach(handleState{Unit: "dead.service"}); ok {
-		t.Fatal("a failed unit must never be adopted")
+	if _, ok, err := r.Reattach(handleState{Unit: "dead.service"}); ok || err != nil {
+		t.Fatal("a failed unit must never be adopted, and is not an error")
 	}
 	if rs := conn.resets(); len(rs) != 1 || rs[0] != "dead.service" {
 		t.Fatalf("failed unit must be reset on discovery, got %v", rs)
 	}
 
 	conn.setStatusErr(errors.New("dbus down"))
-	if _, ok := r.Reattach(handleState{Unit: "live.service"}); ok {
-		t.Fatal("an unreadable unit is not adopted")
+	if _, ok, err := r.Reattach(handleState{Unit: "live.service"}); ok || err == nil {
+		t.Fatal("an unreadable unit is an error, never 'not running'")
+	}
+}
+
+func TestSystemdRunnerStartReconcilesAmbiguousFailure(t *testing.T) {
+	// The D-Bus call errors but the unit is running: adopt it.
+	r, conn := newTestSystemdRunner(t)
+	running := unitStatus{LoadState: "loaded", ActiveState: "active", MainPID: 99}
+	conn.mu.Lock()
+	conn.startErr = errors.New("dbus: reply lost")
+	conn.failStatus = &running
+	conn.mu.Unlock()
+	spec := testApp(t)
+	h, err := r.Start(spec)
+	if err != nil || h == nil {
+		t.Fatalf("a unit observed running after an ambiguous start must be adopted: %v", err)
+	}
+	if h.state().PID != 99 || !r.Alive(h) {
+		t.Fatalf("adopted handle %+v", h.state())
+	}
+
+	// The unit is observed absent: a plain failure, no unconfirmed flag.
+	r2, conn2 := newTestSystemdRunner(t)
+	conn2.mu.Lock()
+	conn2.startErr = errors.New("dbus: reply lost")
+	conn2.mu.Unlock()
+	_, err = r2.Start(spec)
+	if err == nil || unitUnconfirmed(err) {
+		t.Fatalf("unit observed gone ⇒ ordinary error, got %v", err)
+	}
+
+	// Nothing can be read and the stop fails too: unconfirmed.
+	r3, conn3 := newTestSystemdRunner(t)
+	conn3.mu.Lock()
+	conn3.startErr = errors.New("dbus: reply lost")
+	conn3.statusErr = errors.New("dbus down")
+	conn3.stopErr = errors.New("dbus down")
+	conn3.mu.Unlock()
+	_, err = r3.Start(spec)
+	if !unitUnconfirmed(err) {
+		t.Fatalf("unreadable + unstoppable ⇒ unconfirmed, got %v", err)
+	}
+	if len(conn3.stops()) != 1 {
+		t.Fatal("a best-effort stop must be attempted")
+	}
+
+	// Nothing can be read but the stop confirms: ordinary error.
+	r4, conn4 := newTestSystemdRunner(t)
+	conn4.mu.Lock()
+	conn4.startErr = errors.New("dbus: reply lost")
+	conn4.statusErr = errors.New("dbus down")
+	conn4.mu.Unlock()
+	_, err = r4.Start(spec)
+	if err == nil || unitUnconfirmed(err) {
+		t.Fatalf("stop job done ⇒ confirmed gone ⇒ ordinary error, got %v", err)
+	}
+}
+
+func TestSystemdRunnerRunOnceCancelUnconfirmedWhenStopFails(t *testing.T) {
+	r, conn := newTestSystemdRunner(t)
+	conn.mu.Lock()
+	conn.blockStart = true
+	conn.stopErr = errors.New("dbus down")
+	conn.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	err := r.RunOnce(ctx, testApp(t))
+	if !unitUnconfirmed(err) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a cancelled pre_start that could not be stopped is unconfirmed and still carries the cause, got %v", err)
+	}
+}
+
+func TestSystemdRunnerSweep(t *testing.T) {
+	r, conn := newTestSystemdRunner(t)
+	spec := testApp(t)
+	keep, err := r.Start(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stray, err := r.Start(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.setStatus("hotserve-demo.v0.9.11111111.service", failedStatus) // leftover failed unit of ours
+	conn.setStatus("hotserve-demo-api.v1.22222222.service", unitStatus{LoadState: "loaded", ActiveState: "active"})
+	conn.setStatus("hotserve-demo.v1.notanonce.service", unitStatus{LoadState: "loaded", ActiveState: "active"})
+
+	if err := r.Sweep("demo", keep); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	stops := conn.stops()
+	if len(stops) != 1 || stops[0] != stray.state().Unit {
+		t.Fatalf("exactly the stray unit of this app must be stopped, got %v", stops)
+	}
+	if rs := conn.resets(); len(rs) != 1 || rs[0] != "hotserve-demo.v0.9.11111111.service" {
+		t.Fatalf("the failed leftover must be reset, got %v", rs)
+	}
+	waitDone(t, r, stray)
+	if !r.Alive(keep) {
+		t.Fatal("keep must be untouched")
+	}
+
+	// A stop that cannot be confirmed is an error: nothing may be GC'd.
+	conn.setStatus("hotserve-demo.v2.33333333.service", unitStatus{LoadState: "loaded", ActiveState: "active"})
+	conn.mu.Lock()
+	conn.stopErr = errors.New("dbus down")
+	conn.mu.Unlock()
+	if err := r.Sweep("demo", keep); !unitUnconfirmed(err) {
+		t.Fatalf("unconfirmed stray stop must surface, got %v", err)
+	}
+	conn.mu.Lock()
+	conn.stopErr = nil
+	conn.listErr = errors.New("dbus down")
+	conn.mu.Unlock()
+	if err := r.Sweep("demo", keep); err == nil {
+		t.Fatal("a listing failure is an error")
+	}
+}
+
+func TestUnitBelongsTo(t *testing.T) {
+	for name, want := range map[string]bool{
+		"hotserve-blog.v1.4.2.0a1b2c3d.service":          true,
+		"hotserve-blog.v1.4.2.0a1b2c3d.prestart.service": true,
+		"hotserve-blog-api.v1.0a1b2c3d.service":          false, // another app
+		"hotserve-blog.v1.service":                       false, // no nonce
+		"hotserve-blogx.v1.0a1b2c3d.service":             false,
+		"blog.v1.0a1b2c3d.service":                       false,
+	} {
+		if got := unitBelongsTo(name, "blog"); got != want {
+			t.Errorf("unitBelongsTo(%q, blog) = %v, want %v", name, got, want)
+		}
 	}
 }
 

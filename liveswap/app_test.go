@@ -126,8 +126,12 @@ type fakeRunner struct {
 	runOnceCount    int
 	startErr        error
 	reattachOK      bool
+	reattachErrs    []error // consumed one per Reattach call before reattachOK applies
+	reattachCalls   int
 	stopErr         error // Stop returns this
 	stopLeavesAlive bool  // Stop does not actually kill the handle
+	sweepErr        error // Sweep returns this
+	sweeps          []handle
 }
 
 func (r *fakeRunner) Start(spec startSpec) (handle, error) {
@@ -174,15 +178,34 @@ func (r *fakeRunner) Wait(h handle) <-chan struct{} {
 	return fh.done
 }
 
-func (r *fakeRunner) Reattach(_ handleState) (handle, bool) {
+func (r *fakeRunner) Reattach(_ handleState) (handle, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reattachCalls++
+	if len(r.reattachErrs) > 0 {
+		err := r.reattachErrs[0]
+		r.reattachErrs = r.reattachErrs[1:]
+		return nil, false, err
+	}
 	if !r.reattachOK {
-		return nil, false
+		return nil, false, nil
 	}
 	h := &fakeHandle{id: "reattached", alive: true}
-	r.mu.Lock()
 	r.handles = append(r.handles, h)
-	r.mu.Unlock()
-	return h, true
+	return h, true, nil
+}
+
+func (r *fakeRunner) Sweep(_ string, keep handle) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sweeps = append(r.sweeps, keep)
+	return r.sweepErr
+}
+
+func (r *fakeRunner) sweepCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.sweeps)
 }
 
 func (r *fakeRunner) stopCount() int {
@@ -834,7 +857,7 @@ func TestFailedDeployKeepsReleaseWhenStopErrorsEvenIfDead(t *testing.T) {
 	}
 }
 
-func TestDeploySkipsGCWhenStopOldUnconfirmed(t *testing.T) {
+func TestDeployStopOldErrorDefersToSweep(t *testing.T) {
 	rig := newTestRig(t)
 	ctx := context.Background()
 	for i, v := range []string{"v1", "v2"} {
@@ -842,19 +865,20 @@ func TestDeploySkipsGCWhenStopOldUnconfirmed(t *testing.T) {
 		mt := time.Now().Add(time.Duration(i-10) * time.Minute)
 		_ = os.Chtimes(rig.spec.dirs.release(v), mt, mt)
 	}
-	// keep=2: deploying v3 would normally GC v1. With the stop of v2
-	// unconfirmed, nothing may be deleted — v2 might still be running
-	// out of its release dir, and v1's fate is decided by a later deploy.
+	// Stopping v2 errors, but the sweep — the runner's own ledger —
+	// vouches that only v3 remains, so keep=2 GC proceeds: our memory
+	// of a failed stop is not the source of truth, the manager is.
 	rig.runner.stopErr = errTest
 	rig.runner.stopLeavesAlive = true
 	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/a", Version: "v3"}))
-	for _, v := range []string{"v1", "v2", "v3"} {
-		if _, err := os.Stat(rig.spec.dirs.release(v)); err != nil {
-			t.Fatalf("release %s must survive a deploy whose stop-old was unconfirmed: %v", v, err)
-		}
+	if rig.runner.sweeps[2] != rig.runner.handleAt(2) {
+		t.Fatal("the sweep must keep the just-promoted instance")
+	}
+	if _, err := os.Stat(rig.spec.dirs.release("v1")); err == nil {
+		t.Fatal("with the sweep vouching, GC runs as usual")
 	}
 	if rig.ma.currentInstance().version != "v3" {
-		t.Fatal("the deploy itself still succeeds; only GC is skipped")
+		t.Fatal("the deploy itself succeeds regardless")
 	}
 }
 
@@ -885,5 +909,107 @@ func TestStartSpecCarriesUnitIdentity(t *testing.T) {
 		if s.app != "demo" || s.version != "v1" || s.grace != rig.spec.grace {
 			t.Fatalf("startSpec %d lacks unit identity: %+v", i, s)
 		}
+	}
+}
+
+func TestEnsureRunningRetriesUnreadableReattachThenGivesUp(t *testing.T) {
+	rig := newTestRig(t)
+	rig.store.state = appState{CurrentVersion: "v7", Port: 12345, Handle: handleState{Unit: "u.service"}}
+	rig.store.ok = true
+	must(t, os.MkdirAll(rig.spec.dirs.release("v7"), 0o755))
+	// Every read fails: the recorded unit may well be running, so
+	// recovery must never launch beside it.
+	for range reattachAttempts + 1 {
+		rig.runner.reattachErrs = append(rig.runner.reattachErrs, errTest)
+	}
+	err := rig.ma.ensureRunning()
+	if err == nil || !strings.Contains(err.Error(), "not relaunching") {
+		t.Fatalf("expected a loud give-up, got %v", err)
+	}
+	if rig.runner.startCount() != 0 {
+		t.Fatal("must not launch while the recorded unit's state is unknown")
+	}
+	if rig.runner.reattachCalls != reattachAttempts {
+		t.Fatalf("expected %d reattach attempts, got %d", reattachAttempts, rig.runner.reattachCalls)
+	}
+	if rig.ma.activePort.Load() != 0 {
+		t.Fatal("nothing may be published")
+	}
+}
+
+func TestEnsureRunningReattachRecoversAfterTransientError(t *testing.T) {
+	rig := newTestRig(t)
+	rig.store.state = appState{CurrentVersion: "v7", Port: 12345, Handle: handleState{Unit: "u.service"}}
+	rig.store.ok = true
+	must(t, os.MkdirAll(rig.spec.dirs.release("v7"), 0o755))
+	rig.runner.reattachErrs = []error{errTest, errTest}
+	rig.runner.reattachOK = true
+	must(t, rig.ma.ensureRunning())
+	if rig.runner.startCount() != 0 || rig.ma.activePort.Load() != 12345 {
+		t.Fatalf("expected a reattach on the third try, starts=%d port=%d", rig.runner.startCount(), rig.ma.activePort.Load())
+	}
+	if rig.runner.sweepCount() != 1 || rig.runner.sweeps[0] != rig.runner.handleAt(0) {
+		t.Fatal("recovery must sweep stray units, keeping the adopted one")
+	}
+}
+
+func TestEnsureRunningRelaunchSweepsStrays(t *testing.T) {
+	rig := newTestRig(t)
+	rig.store.state = appState{CurrentVersion: "v7", Port: 12345, Handle: handleState{PID: 1}}
+	rig.store.ok = true
+	must(t, os.MkdirAll(rig.spec.dirs.release("v7"), 0o755))
+	must(t, rig.ma.ensureRunning())
+	if rig.runner.sweepCount() != 1 || rig.runner.sweeps[0] != rig.runner.handleAt(0) {
+		t.Fatal("recovery must sweep stray units, keeping the relaunched one")
+	}
+}
+
+func TestDeploySweepsBeforeGCAndSkipsGCWhenSweepFails(t *testing.T) {
+	rig := newTestRig(t)
+	ctx := context.Background()
+	for i, v := range []string{"v1", "v2"} {
+		must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/a", Version: v}))
+		mt := time.Now().Add(time.Duration(i-10) * time.Minute)
+		_ = os.Chtimes(rig.spec.dirs.release(v), mt, mt)
+	}
+	if rig.runner.sweepCount() != 2 {
+		t.Fatalf("every deploy sweeps before GC, got %d sweeps", rig.runner.sweepCount())
+	}
+	// keep=2: v3 would GC v1 — unless the sweep cannot vouch that
+	// nothing else is running.
+	rig.runner.sweepErr = errTest
+	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/a", Version: "v3"}))
+	for _, v := range []string{"v1", "v2", "v3"} {
+		if _, err := os.Stat(rig.spec.dirs.release(v)); err != nil {
+			t.Fatalf("release %s must survive a deploy whose sweep failed: %v", v, err)
+		}
+	}
+	if rig.runner.sweeps[2] != rig.runner.handleAt(2) {
+		t.Fatal("the sweep must keep the just-promoted instance")
+	}
+	rig.runner.sweepErr = nil
+	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/a", Version: "v4"}))
+	if _, err := os.Stat(rig.spec.dirs.release("v1")); err == nil {
+		t.Fatal("once the sweep vouches, GC catches up")
+	}
+}
+
+func TestFailedDeployKeepsReleaseWhenStartUnconfirmed(t *testing.T) {
+	rig := newTestRig(t)
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/a.tgz", Version: "v1"}))
+	rig.runner.setStartErr(&unitUnconfirmedError{unit: "hotserve-demo.v2.deadbeef.service", err: errTest})
+	err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/b.tgz", Version: "v2"})
+	if err == nil || !strings.Contains(err.Error(), "left on disk") {
+		t.Fatalf("an unreconciled start must keep the release: %v", err)
+	}
+	if _, statErr := os.Stat(rig.spec.dirs.release("v2")); statErr != nil {
+		t.Fatalf("release must survive an unconfirmed start: %v", statErr)
+	}
+	rig.runner.setStartErr(nil)
+	rig.runner.runOnceErr = &unitUnconfirmedError{unit: "hotserve-demo.v3.deadbeef.prestart.service", err: errTest}
+	rig.spec.preStart = []string{"migrate"}
+	err = rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/c.tgz", Version: "v3"})
+	if err == nil || !strings.Contains(err.Error(), "left on disk") {
+		t.Fatalf("an unreconciled pre_start must keep the release: %v", err)
 	}
 }

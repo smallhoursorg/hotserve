@@ -129,6 +129,36 @@ func TestWatchdogHealthFailureOnDeadInstanceIsACrash(t *testing.T) {
 	}
 }
 
+// An unhealthy instance the runner cannot confirm stopped is left in
+// place: launching a replacement beside it would be two instances.
+func TestWatchdogUnconfirmedStopAbortsRestart(t *testing.T) {
+	rig := newTestRig(t)
+	rig.spec.wdGrace = 0
+	deployV1(t, rig)
+	port := rig.ma.activePort.Load()
+	rig.prober.setProbeErr(errors.New("health check returned 500"))
+	rig.runner.stopErr = errTest
+	rig.runner.stopLeavesAlive = true
+	rig.startWatchdogT(t)
+
+	advanceUntil(t, rig, rig.spec.healthInterval, "stop attempted", func() bool {
+		return rig.runner.stopCount() >= 1
+	})
+	// Give the loop every chance to (wrongly) launch.
+	advanceUntil(t, rig, rig.spec.healthInterval, "several more probes", func() bool {
+		return rig.prober.calls() >= rig.spec.wdFailures*3
+	})
+	if rig.runner.startCount() != 1 {
+		t.Fatalf("no replacement may be launched beside an unconfirmed instance, got %d starts", rig.runner.startCount())
+	}
+	if rig.ma.activePort.Load() != port {
+		t.Fatal("the still-alive instance stays routed")
+	}
+	if rig.runner.stopCount() < 2 {
+		t.Fatalf("the next cycle must retry the stop, got %d stops", rig.runner.stopCount())
+	}
+}
+
 func TestWatchdogHealthFailuresBelowThresholdReset(t *testing.T) {
 	rig := newTestRig(t)
 	rig.spec.wdGrace = 0
