@@ -198,14 +198,14 @@ func (r *systemdRunner) close() { r.cancel() }
 // goroutine — and only by it — once the unit is observed gone.
 type systemdHandle struct {
 	unit      string
-	pid       int
+	pid       atomic.Int64 // MainPID; 0 until read, backfilled by the watcher
 	startedAt time.Time
 	done      chan struct{}
 	exit      atomic.Pointer[unitStatus] // final status, set before done closes
 }
 
 func (h *systemdHandle) state() handleState {
-	return handleState{PID: h.pid, StartedAt: h.startedAt, Unit: h.unit}
+	return handleState{PID: int(h.pid.Load()), StartedAt: h.startedAt, Unit: h.unit}
 }
 
 // Unit naming: hotserve-<app>.<version>.<nonce>[.prestart].service.
@@ -284,13 +284,17 @@ func sweepUnknownApps(ctx context.Context, conn systemdConn, logger *zap.Logger)
 	r := newSystemdRunner(conn, logger)
 	defer r.close()
 	var errs []error
+	seen := map[string]bool{}
 	for _, u := range units {
 		app, ok := unitApp(u.Name)
-		if !ok || configuredApps.names[app] {
+		if !ok || configuredApps.names[app] || seen[app] {
 			continue
 		}
-		logger.Warn("stopping unit of an app no longer in the config", zap.String("app", app), zap.String("unit", u.Name))
-		if serr := r.Sweep(app, nil); serr != nil {
+		seen[app] = true
+		logger.Warn("stopping units of an app no longer in the config", zap.String("app", app), zap.String("unit", u.Name))
+		// The caller's deadline bounds the whole sweep, mutex held and
+		// all — a slow manager must not stall later config starts.
+		if serr := r.sweep(ctx, app, nil); serr != nil {
 			errs = append(errs, serr)
 		}
 	}
@@ -374,11 +378,11 @@ func (r *systemdRunner) Start(spec startSpec) (handle, error) {
 func (r *systemdRunner) adopt(ctx context.Context, unit string, startedAt time.Time) *systemdHandle {
 	h := &systemdHandle{unit: unit, startedAt: startedAt, done: make(chan struct{})}
 	if st, err := r.conn.UnitStatus(ctx, unit); err == nil {
-		h.pid = st.MainPID
+		h.pid.Store(int64(st.MainPID))
 	} else {
-		r.log().Warn("unit started but its main PID could not be read", zap.String("unit", unit), zap.Error(err))
+		r.log().Warn("unit started but its main PID could not be read yet", zap.String("unit", unit), zap.Error(err))
 	}
-	r.log().Info("instance started", zap.String("unit", unit), zap.Int("pid", h.pid))
+	r.log().Info("instance started", zap.String("unit", unit), zap.Int64("pid", h.pid.Load()))
 	go r.watch(h)
 	return h
 }
@@ -397,7 +401,7 @@ func (r *systemdRunner) reconcileStart(unit string, cause error) (handle, error)
 		return r.adopt(ctx, unit, time.Now()), nil
 	case err == nil:
 		if st.loaded() {
-			r.resetFailed(ctx, unit)
+			_ = r.resetFailed(ctx, unit)
 		}
 		return nil, cause
 	}
@@ -423,8 +427,11 @@ func (r *systemdRunner) RunOnce(ctx context.Context, spec startSpec) error {
 		}
 		// Cancelled, or the transport failed mid-flight: either way
 		// the unit may be running, and a pre_start whose outcome we
-		// cannot observe is a failed pre_start. Stop it and confirm.
-		return r.stopUnobserved(u.Name, cause)
+		// cannot observe is a failed pre_start. Stop it and confirm,
+		// on the runner's own context — the caller's is already done.
+		stopCtx, cancel := context.WithTimeout(r.ctx, stopSlack)
+		defer cancel()
+		return r.stopUnobserved(stopCtx, u.Name, cause)
 	}
 	if res == "done" {
 		return nil
@@ -435,11 +442,9 @@ func (r *systemdRunner) RunOnce(ctx context.Context, spec startSpec) error {
 	return fmt.Errorf("%s (unit %s: job %s)", st.exitString(), u.Name, res)
 }
 
-// stopUnobserved stops a unit on the runner's own context and returns
-// cause if the unit is confirmed gone, or an unconfirmed error if not.
-func (r *systemdRunner) stopUnobserved(unit string, cause error) error {
-	ctx, cancel := context.WithTimeout(r.ctx, stopSlack)
-	defer cancel()
+// stopUnobserved stops a unit and returns cause if the unit is
+// confirmed gone, or an unconfirmed error if not.
+func (r *systemdRunner) stopUnobserved(ctx context.Context, unit string, cause error) error {
 	res, err := r.conn.StopUnit(ctx, unit)
 	if err != nil {
 		return &unitUnconfirmedError{unit: unit, err: cause}
@@ -452,7 +457,9 @@ func (r *systemdRunner) stopUnobserved(unit string, cause error) error {
 		return &unitUnconfirmedError{unit: unit, err: cause}
 	}
 	if st.loaded() {
-		r.resetFailed(ctx, unit)
+		if rerr := r.resetFailed(ctx, unit); rerr != nil {
+			return &unitUnconfirmedError{unit: unit, err: errors.Join(cause, rerr)}
+		}
 	}
 	return cause
 }
@@ -531,13 +538,14 @@ func (r *systemdRunner) Reattach(st handleState) (handle, bool, error) {
 		return nil, false, fmt.Errorf("reading recorded unit %s: %w", st.Unit, err)
 	}
 	if us.running() {
-		h := &systemdHandle{unit: st.Unit, pid: us.MainPID, startedAt: st.StartedAt, done: make(chan struct{})}
+		h := &systemdHandle{unit: st.Unit, startedAt: st.StartedAt, done: make(chan struct{})}
+		h.pid.Store(int64(us.MainPID))
 		go r.watch(h)
 		return h, true, nil
 	}
 	if us.ActiveState == "failed" {
 		r.log().Warn("recorded instance died while hotserve was down", zap.String("unit", st.Unit), zap.String("exit", us.exitString()), zap.String("result", us.Result))
-		r.resetFailed(ctx, st.Unit)
+		_ = r.resetFailed(ctx, st.Unit) // Sweep reports it if it stays loaded
 	} else {
 		r.log().Info("recorded unit is no longer running", zap.String("unit", st.Unit), zap.String("load_state", us.LoadState), zap.String("active_state", us.ActiveState))
 	}
@@ -546,13 +554,18 @@ func (r *systemdRunner) Reattach(st handleState) (handle, bool, error) {
 
 // Sweep stops every unit of app except keep (invariant 7). Failed
 // leftovers are reset; running ones are stopped and confirmed gone.
+// nil only when, afterwards, keep is the only loaded unit of app.
 func (r *systemdRunner) Sweep(app string, keep handle) error {
+	ctx, cancel := context.WithTimeout(r.ctx, defaultStopTimeout+stopSlack)
+	defer cancel()
+	return r.sweep(ctx, app, keep)
+}
+
+func (r *systemdRunner) sweep(ctx context.Context, app string, keep handle) error {
 	keepUnit := ""
 	if kh, ok := keep.(*systemdHandle); ok {
 		keepUnit = kh.unit
 	}
-	ctx, cancel := context.WithTimeout(r.ctx, defaultStopTimeout+stopSlack)
-	defer cancel()
 	units, err := r.conn.ListUnits(ctx, unitPrefix+app+".*.service")
 	if err != nil {
 		return fmt.Errorf("listing units of %s: %w", app, err)
@@ -565,12 +578,14 @@ func (r *systemdRunner) Sweep(app string, keep handle) error {
 		if !u.running() {
 			if u.loaded() {
 				r.log().Warn("resetting leftover unit", zap.String("unit", u.Name), zap.String("active_state", u.ActiveState), zap.String("exit", u.exitString()))
-				r.resetFailed(ctx, u.Name)
+				if rerr := r.resetFailed(ctx, u.Name); rerr != nil {
+					errs = append(errs, rerr)
+				}
 			}
 			continue
 		}
 		r.log().Warn("stopping stray unit not owned by this instance", zap.String("unit", u.Name), zap.Int("pid", u.MainPID))
-		if serr := r.stopUnobserved(u.Name, fmt.Errorf("stray unit %s", u.Name)); unitUnconfirmed(serr) {
+		if serr := r.stopUnobserved(ctx, u.Name, fmt.Errorf("stray unit %s", u.Name)); unitUnconfirmed(serr) {
 			errs = append(errs, serr)
 		}
 	}
@@ -611,6 +626,10 @@ func (r *systemdRunner) watch(h *systemdHandle) {
 			r.log().Info("unit state readable again", zap.String("unit", h.unit))
 		}
 		if st.running() {
+			// A PID read that failed right after start is repaired here.
+			if h.pid.Load() == 0 && st.MainPID != 0 {
+				h.pid.Store(int64(st.MainPID))
+			}
 			continue
 		}
 		r.finish(h, st)
@@ -620,13 +639,13 @@ func (r *systemdRunner) watch(h *systemdHandle) {
 
 // finish is the single place a handle is declared dead.
 func (r *systemdRunner) finish(h *systemdHandle, st unitStatus) {
-	fields := []zap.Field{zap.String("unit", h.unit), zap.Int("pid", h.pid)}
+	fields := []zap.Field{zap.String("unit", h.unit), zap.Int64("pid", h.pid.Load())}
 	switch {
 	case st.ActiveState == "failed":
 		fields = append(fields, zap.String("exit", st.exitString()), zap.String("result", st.Result))
 		r.log().Warn("instance exited", fields...)
 		ctx, cancel := context.WithTimeout(r.ctx, stopSlack)
-		r.resetFailed(ctx, h.unit)
+		_ = r.resetFailed(ctx, h.unit) // logged; the next Sweep reports a leftover
 		cancel()
 	case st.loaded():
 		r.log().Info("instance exited", append(fields, zap.String("exit", st.exitString()))...)
@@ -646,15 +665,17 @@ func (r *systemdRunner) reapFailed(ctx context.Context, name string) unitStatus 
 		r.log().Warn("cannot read failed unit", zap.String("unit", name), zap.Error(err))
 	}
 	if st.loaded() {
-		r.resetFailed(ctx, name)
+		_ = r.resetFailed(ctx, name)
 	}
 	return st
 }
 
-func (r *systemdRunner) resetFailed(ctx context.Context, name string) {
+func (r *systemdRunner) resetFailed(ctx context.Context, name string) error {
 	if err := r.conn.ResetFailedUnit(ctx, name); err != nil {
 		r.log().Warn("resetting failed unit", zap.String("unit", name), zap.Error(err))
+		return fmt.Errorf("resetting failed unit %s: %w", name, err)
 	}
+	return nil
 }
 
 var _ runner = (*systemdRunner)(nil)

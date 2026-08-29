@@ -35,6 +35,8 @@ type fakeSystemdConn struct {
 	stopErr    error
 	stopLeaves bool // StopUnit does not mark the unit gone
 	listErr    error
+	resetErr   error
+	listCalls  int
 }
 
 func newFakeSystemdConn() *fakeSystemdConn {
@@ -101,6 +103,9 @@ func (f *fakeSystemdConn) ResetFailedUnit(_ context.Context, name string) error 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reset = append(f.reset, name)
+	if f.resetErr != nil {
+		return f.resetErr
+	}
 	delete(f.status, name)
 	return nil
 }
@@ -108,6 +113,7 @@ func (f *fakeSystemdConn) ResetFailedUnit(_ context.Context, name string) error 
 func (f *fakeSystemdConn) ListUnits(_ context.Context, pattern string) ([]unitStatus, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.listCalls++
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
@@ -634,6 +640,51 @@ func TestSystemdRunnerSweep(t *testing.T) {
 	if err := r.Sweep("demo", keep); err == nil {
 		t.Fatal("a listing failure is an error")
 	}
+
+	// A failed unit that cannot be reset stays loaded: not a clean sweep.
+	conn.mu.Lock()
+	conn.listErr = nil
+	conn.resetErr = errors.New("dbus down")
+	conn.mu.Unlock()
+	conn.setStatus("hotserve-demo.v3.44444444.service", failedStatus)
+	if err := r.Sweep("demo", keep); err == nil {
+		t.Fatal("a reset failure must be reported: the unit is still loaded")
+	}
+}
+
+func TestSystemdRunnerWatcherBackfillsPID(t *testing.T) {
+	r, conn := newTestSystemdRunner(t)
+	// Start succeeds but the immediate MainPID read fails: the unit is
+	// fine, hotserve just could not ask. The watcher repairs the PID
+	// once the manager answers again.
+	running := unitStatus{LoadState: "loaded", ActiveState: "active", MainPID: 4242}
+	conn.mu.Lock()
+	conn.failStatus = &running
+	conn.mu.Unlock()
+	h, err := r.Start(testApp(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.state().PID != 4242 {
+		t.Fatalf("sanity: pid read at start, got %d", h.state().PID)
+	}
+	// Now the same with the read failing at start.
+	conn.setStatusErr(errors.New("dbus hiccup"))
+	h2, err := r.Start(testApp(t))
+	if err != nil {
+		t.Fatalf("the start job succeeded; a failed PID read must not fail Start: %v", err)
+	}
+	if h2.state().PID != 0 {
+		t.Fatalf("PID should be unknown after a failed read, got %d", h2.state().PID)
+	}
+	conn.setStatusErr(nil)
+	deadline := time.Now().Add(2 * time.Second)
+	for h2.state().PID != 4242 {
+		if time.Now().After(deadline) {
+			t.Fatalf("watcher never backfilled the PID, still %d", h2.state().PID)
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func TestSweepUnknownApps(t *testing.T) {
@@ -652,6 +703,12 @@ func TestSweepUnknownApps(t *testing.T) {
 	}
 	if stops := conn.stops(); len(stops) != 1 || stops[0] != "hotserve-old.v3.0a1b2c3d.service" {
 		t.Fatalf("only the removed app's running unit must be stopped, got %v", stops)
+	}
+	conn.mu.Lock()
+	lists := conn.listCalls
+	conn.mu.Unlock()
+	if lists != 2 { // one global listing + one per unknown app, not per unit
+		t.Fatalf("each unknown app must be swept once, got %d listings", lists)
 	}
 	if rs := conn.resets(); len(rs) != 1 || rs[0] != "hotserve-old.v2.0a1b2c3e.service" {
 		t.Fatalf("the removed app's failed unit must be reset, got %v", rs)
