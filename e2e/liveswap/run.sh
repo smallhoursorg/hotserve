@@ -9,37 +9,15 @@ PROXY="http://e2e-hotserve:8080"
 HOOK="http://e2e-hotserve:8081/demo"
 ADMIN="http://e2e-hotserve:2019"
 ART="http://e2e-artifacts:8080/artifacts"
-TOKEN_FILE="${DEPLOY_TOKEN_FILE:-/shared/deploy.token}"
-FAILURES=0
-
-pass() { echo "PASS: $1"; }
-fail() { echo "FAIL: $1"; FAILURES=$((FAILURES + 1)); }
+. /lib.sh
 
 # The hotserve container mints a local deploy token into the shared
-# volume at startup (see e2e/entrypoint.sh); wait for it, then use it as
-# the deploy bearer. This is the `deploy_trust local` path standing in
-# for a real CI OIDC provider, which the offline compose network has no
-# way to reach.
+# volume at startup (see e2e/mint-token.sh); wait for it, then use it
+# as the deploy bearer. This is the `deploy_trust local` path standing
+# in for a real CI OIDC provider, which the offline compose network has
+# no way to reach.
 echo "=== waiting for the deploy token ==="
-i=0
-until [ -s "$TOKEN_FILE" ]; do
-	i=$((i + 1))
-	if [ "$i" -ge 60 ]; then
-		echo "FATAL: no deploy token at $TOKEN_FILE within 60s"
-		exit 1
-	fi
-	sleep 1
-done
-TOKEN=$(cat "$TOKEN_FILE")
-
-# deploy <artifact-file> <version> -> prints HTTP status code
-deploy() {
-	curl -s -o /tmp/deploy-body -w '%{http_code}' --max-time 60 \
-		-X POST -H "Authorization: Bearer $TOKEN" \
-		-d "{\"url\":\"$ART/$1\",\"version\":\"$2\"}" "$HOOK"
-}
-
-body() { curl -s --max-time 5 "$PROXY/"; }
+wait_for_token
 
 # traffic_start <file>: continuous requests, one status code per line
 traffic_start() {

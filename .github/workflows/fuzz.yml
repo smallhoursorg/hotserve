@@ -1,9 +1,11 @@
 # Weekly fuzzing of the untrusted-input surfaces (artifact tarball
 # extraction, path containment, URL redaction, hint-header parsing).
-# Seed corpora already run in every PR via `make test`; this lane does
-# real coverage-guided fuzzing. Like soak, deliberately NOT part of
-# ci-ok. A failure attaches the crashing input in the log — add it to
-# the seed corpus (f.Add) as a regression test when fixing.
+# Seed corpora already run in every PR via `make test`, and `make
+# fuzz-list` there guarantees every target is discovered; this lane
+# does real coverage-guided fuzzing. Like soak, deliberately NOT part
+# of ci-ok. A failure writes the crashing input to
+# <module>/testdata/fuzz/<Target>/ — uploaded below as an artifact —
+# commit it there so `make test` replays it deterministically forever.
 name: fuzz
 
 on:
@@ -33,3 +35,9 @@ jobs:
       - env:
           COMPOSE: docker compose -f docker-compose.yml -f docker-compose.ci.yml
         run: make fuzz FUZZTIME="${{ inputs.fuzztime || '5m' }}" COMPOSE="$COMPOSE"
+      - if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-crashers
+          path: "*/testdata/fuzz/"
+          if-no-files-found: ignore

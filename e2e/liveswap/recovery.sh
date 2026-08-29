@@ -1,43 +1,20 @@
 #!/bin/sh
-# Crash-recovery suite, run by `make e2e` AFTER the main suites and
-# after hotserve has been SIGKILLed and started again. Proves the
-# state.json relaunch path: the last deployed release (px1 — the
-# rollback target from main-suite scenario 12, demo-v1 content) comes
-# back without any webhook call, and the deploy machinery isn't wedged
-# by the unclean death.
+# Recovery suite, run by `make e2e` LAST — after the main suites and
+# after the in-container systemd suite has SIGKILLed hotserve and
+# started it again. This is the runner's view of that: the app that
+# was serving (sd-final, demo-v1 content, the last deploy the systemd
+# suite made) is still there without any webhook call — reattached,
+# not relaunched — and the deploy machinery isn't wedged by the
+# unclean death.
 set -u
 
 PROXY="http://e2e-hotserve:8080"
 HOOK="http://e2e-hotserve:8081/demo"
 ART="http://e2e-artifacts:8080/artifacts"
-TOKEN_FILE="${DEPLOY_TOKEN_FILE:-/shared/deploy.token}"
-FAILURES=0
+. /lib.sh
+wait_for_token
 
-# Wait for the hotserve container's minted local deploy token (see
-# e2e/entrypoint.sh), then use it as the deploy bearer.
-i=0
-until [ -s "$TOKEN_FILE" ]; do
-	i=$((i + 1))
-	if [ "$i" -ge 60 ]; then
-		echo "FATAL: no deploy token at $TOKEN_FILE within 60s"
-		exit 1
-	fi
-	sleep 1
-done
-TOKEN=$(cat "$TOKEN_FILE")
-
-pass() { echo "PASS: $1"; }
-fail() { echo "FAIL: $1"; FAILURES=$((FAILURES + 1)); }
-
-deploy() { # <artifact-file> <version> -> prints HTTP status code
-	curl -s -o /tmp/deploy-body -w '%{http_code}' --max-time 60 \
-		-X POST -H "Authorization: Bearer $TOKEN" \
-		-d "{\"url\":\"$ART/$1\",\"version\":\"$2\"}" "$HOOK"
-}
-
-body() { curl -s --max-time 5 "$PROXY/"; }
-
-echo "=== recovery 1: app relaunches from state.json after SIGKILL ==="
+echo "=== recovery 1: the app is still served after hotserve's SIGKILL + start ==="
 i=0
 until [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "$PROXY/")" = "200" ]; do
 	i=$((i + 1))
@@ -52,15 +29,15 @@ pass "proxy serving again ${i}s after restart"
 
 b=$(body)
 case "$b" in
-"hello v1"*) pass "relaunched app serves the last deployed release: '$b'" ;;
-*) fail "expected px1's content ('hello v1 ...'), got '$b'" ;;
+"hello v1"*) pass "reattached app serves the last deployed release: '$b'" ;;
+*) fail "expected sd-final's content ('hello v1 ...'), got '$b'" ;;
 esac
 
 echo "=== recovery 2: status endpoint reports the recovered deploy ==="
-s=$(curl -s -H "Authorization: Bearer $TOKEN" "$HOOK")
+s=$(status)
 case "$s" in
-*'"current_version":"px1"'*'"running":true'*|*'"running":true'*'"current_version":"px1"'*)
-	pass "status reports px1 running after crash" ;;
+*'"current_version":"sd-final"'*'"running":true'*|*'"running":true'*'"current_version":"sd-final"'*)
+	pass "status reports sd-final running after the unclean death" ;;
 *) fail "unexpected status after crash: $s" ;;
 esac
 
