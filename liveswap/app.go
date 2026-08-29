@@ -752,7 +752,9 @@ func (ma *managedApp) Destruct() error {
 		return nil
 	}
 	c.logger.Info("app removed from config; stopping it", zap.String("version", inst.version))
-	return c.runner.Stop(inst.handle, c.spec.grace)
+	// Stop what we track, then everything else the manager holds for
+	// this app: a removed app must leave no unit behind, tracked or not.
+	return errors.Join(c.runner.Stop(inst.handle, c.spec.grace), c.runner.Sweep(ma.name, nil))
 }
 
 // startWatchdog launches the supervision goroutine once per pooled

@@ -15,6 +15,7 @@
 package liveswap
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -489,6 +490,20 @@ func (a *App) Validate() error {
 // the background so a slow app cannot stall config load; the health
 // gate is a deploy gate, not a boot gate.
 func (a *App) Start() error {
+	// Units of apps this config no longer names have no managedApp to
+	// sweep them (removed or renamed while hotserve was down): settle
+	// them against the manager's own listing. Background, like recovery.
+	known := make(map[string]bool, len(a.managed))
+	for name := range a.managed {
+		known[name] = true
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), unknownAppSweepTimeout)
+		defer cancel()
+		if err := sweepUnknownApps(ctx, userManager, known, a.logger); err != nil {
+			a.logger.Error("sweeping units of apps no longer configured", zap.Error(err))
+		}
+	}()
 	for name, ma := range a.managed {
 		go func(name string, ma *managedApp) {
 			if err := ma.ensureRunning(); err != nil {
@@ -524,6 +539,10 @@ func (a *App) Cleanup() error {
 func (a *App) managedApp(name string) *managedApp {
 	return a.managed[name]
 }
+
+// unknownAppSweepTimeout bounds the start-time sweep of units whose
+// apps are no longer configured.
+const unknownAppSweepTimeout = 2 * time.Minute
 
 // Interface guards.
 var (

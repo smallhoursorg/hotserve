@@ -51,7 +51,10 @@ import (
 //     nil only when keep is the only loaded unit of app; recovery and
 //     GC both sweep first, so nothing hotserve forgot (a unit whose
 //     state.json write failed, a stop that could not be confirmed)
-//     survives the next start or the next deploy.
+//     survives the next start or the next deploy. Removing an app from
+//     the config sweeps all of it, and every start sweeps the units of
+//     apps the config no longer names (sweepUnknownApps), so a unit
+//     cannot outlive its app definition either.
 //  8. A unit's environment is exactly the env the caller built
 //     (Environment=) on top of the manager's defaults; hotserve's own
 //     environment is never inherited.
@@ -136,14 +139,22 @@ func (s unitStatus) running() bool {
 	return true
 }
 
-// exitString renders the main process's end for logs and errors.
+// exitString renders the main process's end for logs and errors. An
+// ExecMainCode of 0 means the manager recorded no exit at all (the
+// unit never got as far as a process — a start job that was canceled,
+// skipped or failed a dependency), which must not read as "exit 0".
 func (s unitStatus) exitString() string {
 	switch s.ExecMainCode {
+	case 1: // CLD_EXITED
+		return fmt.Sprintf("exit status %d", s.ExecMainStatus)
 	case 2, 3: // CLD_KILLED, CLD_DUMPED
 		sig := syscall.Signal(s.ExecMainStatus)
 		return fmt.Sprintf("killed by signal %d (%s)", s.ExecMainStatus, sig)
 	default:
-		return fmt.Sprintf("exit status %d", s.ExecMainStatus)
+		if s.Result != "" && s.Result != "success" {
+			return "no process exit recorded (result " + s.Result + ")"
+		}
+		return "no process exit recorded"
 	}
 }
 
@@ -160,6 +171,8 @@ const (
 	// defaultStopTimeout backs a zero grace so a unit never gets
 	// TimeoutStopSec=0, which systemd reads as "wait forever".
 	defaultStopTimeout = 10 * time.Second
+	// pollTimeout bounds one watcher status read.
+	pollTimeout = 10 * time.Second
 )
 
 func newSystemdRunner(conn systemdConn, logger *zap.Logger) *systemdRunner {
@@ -221,6 +234,41 @@ func unitName(spec startSpec, oneshot bool) (string, error) {
 // unitBelongsTo reports whether name is one of app's units.
 func unitBelongsTo(name, app string) bool {
 	return strings.HasPrefix(name, unitPrefix+app+".") && unitNameRe.MatchString(name) && unitNonceRe.MatchString(name)
+}
+
+// unitApp extracts the app name from one of our unit names.
+func unitApp(name string) (string, bool) {
+	if !unitNameRe.MatchString(name) {
+		return "", false
+	}
+	rest := strings.TrimPrefix(name, unitPrefix)
+	app, _, _ := strings.Cut(rest, ".")
+	return app, app != ""
+}
+
+// sweepUnknownApps stops every hotserve unit whose app the current
+// config does not name (invariant 7): an app removed or renamed while
+// hotserve was down has no managedApp left to sweep it, so App.Start
+// does it here against the manager's own listing.
+func sweepUnknownApps(ctx context.Context, conn systemdConn, known map[string]bool, logger *zap.Logger) error {
+	units, err := conn.ListUnits(ctx, unitPrefix+"*.service")
+	if err != nil {
+		return fmt.Errorf("listing hotserve units: %w", err)
+	}
+	r := newSystemdRunner(conn, logger)
+	defer r.close()
+	var errs []error
+	for _, u := range units {
+		app, ok := unitApp(u.Name)
+		if !ok || known[app] {
+			continue
+		}
+		logger.Warn("stopping unit of an app no longer in the config", zap.String("app", app), zap.String("unit", u.Name))
+		if serr := r.Sweep(app, nil); serr != nil {
+			errs = append(errs, serr)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // resolveCommand turns command[0] into the absolute path a transient
@@ -516,7 +564,12 @@ func (r *systemdRunner) watch(h *systemdHandle) {
 			return
 		case <-t.C:
 		}
-		st, err := r.conn.UnitStatus(r.ctx, h.unit)
+		// Each poll is bounded on its own: a manager that accepts the
+		// request but never answers must not freeze the watch forever
+		// (a crash would then never be observed).
+		pollCtx, cancel := context.WithTimeout(r.ctx, pollTimeout)
+		st, err := r.conn.UnitStatus(pollCtx, h.unit)
+		cancel()
 		if err != nil {
 			if r.ctx.Err() != nil {
 				return

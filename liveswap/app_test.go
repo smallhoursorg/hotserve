@@ -882,6 +882,19 @@ func TestDeployStopOldErrorDefersToSweep(t *testing.T) {
 	}
 }
 
+func TestDestructOnRemovalSweepsWholeApp(t *testing.T) {
+	rig := newTestRig(t)
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	must(t, rig.ma.Destruct())
+	if rig.runner.stopCount() != 1 {
+		t.Fatalf("Destruct must stop the tracked instance, got %d stops", rig.runner.stopCount())
+	}
+	// Deploy swept once (keep=new); removal sweeps everything (keep=nil).
+	if n := rig.runner.sweepCount(); n != 2 || rig.runner.sweeps[1] != nil {
+		t.Fatalf("removal must sweep the whole app with keep=nil, sweeps=%d last=%v", n, rig.runner.sweeps)
+	}
+}
+
 func TestDestructLeavesInstanceRunningOnProcessExit(t *testing.T) {
 	rig := newTestRig(t)
 	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))

@@ -142,7 +142,8 @@ type runner interface {
 	Alive(h handle) bool
 	Wait(h handle) <-chan struct{}
 	Stop(h handle, grace time.Duration) error
-	Reattach(st handleState) (handle, bool)
+	Reattach(st handleState) (handle, bool, error)
+	Sweep(app string, keep handle) error
 }
 ```
 
@@ -179,10 +180,13 @@ deploy keeps the release; and **the manager is the ledger** — every
 unit is named `hotserve-<app>.<version>.<nonce>.service` (the `.`
 after the app is the one character an app name cannot contain), and
 `Sweep(app, keep)` stops every other unit of the app. Recovery sweeps
-after reattach/relaunch and deploys sweep before GC, so nothing
-hotserve lost track of (a failed `state.json` write, an unconfirmed
-stop) survives the next start or the next deploy, and no release is
-deleted while the manager still runs something out of it. There is
+after reattach/relaunch, deploys sweep before GC, removing an app
+from the config sweeps all of it, and `App.Start` sweeps the units of
+any app the config no longer names — so nothing hotserve lost track
+of (a failed `state.json` write, an unconfirmed stop, an app renamed
+while hotserve was down) survives the next start or the next deploy,
+and no release is deleted while the manager still runs something out
+of it. There is
 deliberately no persisted "leaked releases" ledger: systemd already
 knows what is running, and asking it is cheaper and truer than
 remembering.

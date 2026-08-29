@@ -631,6 +631,46 @@ func TestSystemdRunnerSweep(t *testing.T) {
 	}
 }
 
+func TestSweepUnknownApps(t *testing.T) {
+	conn := newFakeSystemdConn()
+	running := unitStatus{LoadState: "loaded", ActiveState: "active"}
+	conn.setStatus("hotserve-demo.v1.0a1b2c3d.service", running)     // configured: keep
+	conn.setStatus("hotserve-old.v3.0a1b2c3d.service", running)      // removed app: stop
+	conn.setStatus("hotserve-old.v2.0a1b2c3e.service", failedStatus) // removed app: reset
+	conn.setStatus("hotserve-demo-api.v1.0a1b2c3d.service", running) // another configured app: keep
+	conn.setStatus("hotserve-weird.service", running)                // not ours: ignore
+	err := sweepUnknownApps(context.Background(), conn, map[string]bool{"demo": true, "demo-api": true}, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stops := conn.stops(); len(stops) != 1 || stops[0] != "hotserve-old.v3.0a1b2c3d.service" {
+		t.Fatalf("only the removed app's running unit must be stopped, got %v", stops)
+	}
+	if rs := conn.resets(); len(rs) != 1 || rs[0] != "hotserve-old.v2.0a1b2c3e.service" {
+		t.Fatalf("the removed app's failed unit must be reset, got %v", rs)
+	}
+	conn.mu.Lock()
+	conn.listErr = errors.New("dbus down")
+	conn.mu.Unlock()
+	if err := sweepUnknownApps(context.Background(), conn, nil, zap.NewNop()); err == nil {
+		t.Fatal("a listing failure must be reported")
+	}
+}
+
+func TestUnitApp(t *testing.T) {
+	for name, want := range map[string]string{
+		"hotserve-blog.v1.4.2.0a1b2c3d.service":          "blog",
+		"hotserve-blog-api.v1.0a1b2c3d.prestart.service": "blog-api",
+		"hotserve-blog.service":                          "",
+		"dbus.service":                                   "",
+	} {
+		got, ok := unitApp(name)
+		if got != want || ok != (want != "") {
+			t.Errorf("unitApp(%q) = %q,%v want %q", name, got, ok, want)
+		}
+	}
+}
+
 func TestUnitBelongsTo(t *testing.T) {
 	for name, want := range map[string]bool{
 		"hotserve-blog.v1.4.2.0a1b2c3d.service":          true,
@@ -662,7 +702,15 @@ func TestUnitStatusRunning(t *testing.T) {
 			t.Errorf("%+v running=%v want %v", tc.st, got, tc.want)
 		}
 	}
-	if s := (unitStatus{ExecMainCode: 2, ExecMainStatus: 9}).exitString(); s != "killed by signal 9 (killed)" {
-		t.Errorf("exitString = %q", s)
+	for st, want := range map[unitStatus]string{
+		{ExecMainCode: 1, ExecMainStatus: 3}:                           "exit status 3",
+		{ExecMainCode: 1, ExecMainStatus: 0}:                           "exit status 0",
+		{ExecMainCode: 2, ExecMainStatus: 9}:                           "killed by signal 9 (killed)",
+		{ExecMainCode: 0, ExecMainStatus: 0}:                           "no process exit recorded",
+		{ExecMainCode: 0, ExecMainStatus: 0, Result: "exec-condition"}: "no process exit recorded (result exec-condition)",
+	} {
+		if got := st.exitString(); got != want {
+			t.Errorf("%+v exitString = %q want %q", st, got, want)
+		}
 	}
 }
