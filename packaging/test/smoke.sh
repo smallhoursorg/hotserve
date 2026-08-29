@@ -221,8 +221,17 @@ user_systemctl is-active --quiet "$unit" \
 	|| die "app unit must have Restart=no (the liveswap watchdog is the only restarter)"
 journalctl --no-pager -t hotserve-demo | grep -q "smoke app starting" \
 	|| die "app stdout did not reach the journal under identifier hotserve-demo"
-journalctl --no-pager -t hotserve-demo | grep -q "nofile=1048576" \
-	|| die "app soft NOFILE is not 1048576 (user@ drop-in + per-unit limit): $(journalctl --no-pager -t hotserve-demo | grep -o 'nofile=[0-9]*' | tail -1)"
+# The runner's contract: every unit's NOFILE (soft and hard) is the
+# user manager's own ceiling. Assert against the live manager, not a
+# constant — what the manager is born with depends on the host (and,
+# below systemd 256, the user@ drop-in does not reach it: #37), and a
+# constant that happened to match Docker's PID 1 limit passed vacuously.
+mgr_pid=$(systemctl show -p MainPID --value "user@$uid.service")
+mgr_nofile=$(awk '/^Max open files/ {print $5}' "/proc/$mgr_pid/limits")
+app_nofile=$(journalctl --no-pager -t hotserve-demo | grep -o 'nofile=[0-9]*' | tail -1 | cut -d= -f2)
+[ -n "$mgr_nofile" ] && [ "$app_nofile" = "$mgr_nofile" ] \
+	|| die "app soft NOFILE ($app_nofile) is not the user manager's ceiling ($mgr_nofile)"
+echo "app NOFILE $app_nofile = user@$uid ceiling"
 echo "deployed as unit $unit under user@$uid; app output in the journal"
 
 # `hotserve validate` provisions and cleans up without starting: run

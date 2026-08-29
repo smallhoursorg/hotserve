@@ -1,7 +1,9 @@
 # Systemd-in-docker image for the package install smoke test
 # (`make install-test`). One Dockerfile serves every matrix cell:
-# BASE_IMAGE picks the distro (debian:12, debian:13, ubuntu:22.04,
-# ubuntu:24.04 — all share the same apt invocation).
+# BASE_IMAGE picks the distro: debian:12, debian:13, ubuntu:24.04 or
+# ubuntu:26.04 — the support matrix; all share the same apt invocation.
+# (Only the last two have systemd >= 256, i.e. full per-app isolation;
+# the first two prove the floor-only degraded path.)
 #
 # networkd/resolved are deliberately NOT installed: with no wait-online
 # unit enabled, network-online.target (which hotserve.service Requires=)

@@ -10,7 +10,7 @@
 # libpam-systemd: pam_systemd is what hands user@<uid>.service its
 # XDG_RUNTIME_DIR; without it no user manager can start. dbus: logind.
 # procps: pgrep/ps for the process-tree assertions.
-FROM golang:1.26-bookworm
+FROM golang:1.26-trixie
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
