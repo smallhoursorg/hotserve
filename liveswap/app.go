@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -176,6 +177,13 @@ type managedApp struct {
 	// concurrent webhook gets an immediate 409 and CI can retry.
 	deployMu sync.Mutex
 
+	// started is set by App.Start: this process has actually managed
+	// the app (recovered or served it). Destruct acts on the manager
+	// only when that is true — Caddy also provisions-then-cleans-up
+	// for `hotserve validate` and for a config load that fails
+	// elsewhere, and neither may touch running units.
+	started atomic.Bool
+
 	// mu guards current, phase and lastDeploy.
 	mu         sync.Mutex
 	current    *instance
@@ -191,6 +199,7 @@ type managedApp struct {
 	// reloads, torn down in Destruct BEFORE the child is stopped so a
 	// mid-restart watchdog can never orphan a fresh process.
 	wdStarted bool // under specMu
+	wdCtx     context.Context
 	wdCancel  context.CancelFunc
 	wdWG      sync.WaitGroup
 	wdNotify  chan struct{} // buffered(1); poked whenever current changes
@@ -431,7 +440,7 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	// serving): the new instance must not come up beside a unit the
 	// manager still holds for this app.
 	if !ma.sweep(c, oldHandle(old)) {
-		return errors.New("cannot confirm no other instance is running; not starting")
+		return fmt.Errorf("%w; not starting", errSweepUnconfirmed)
 	}
 	newHandle, err = c.runner.Start(startSpec{
 		app:     spec.name,
@@ -538,23 +547,12 @@ func (ma *managedApp) ensureRunning() error {
 	}
 
 	// An unreadable unit state is not "not running": launching beside
-	// a unit that may still be up would duplicate the app. Retry a
-	// few times (Provision just proved the manager reachable, so this
-	// is a blip) and otherwise give up loudly rather than guess.
-	var (
-		h        handle
-		attached bool
-	)
-	for attempt := 1; ; attempt++ {
-		h, attached, err = c.runner.Reattach(st.Handle)
-		if err == nil {
-			break
-		}
-		if attempt >= reattachAttempts {
-			return fmt.Errorf("cannot tell whether %s is still running; not relaunching: %w", st.CurrentVersion, err)
-		}
-		c.logger.Warn("reattach: unit state unreadable; retrying", zap.Int("attempt", attempt), zap.Error(err))
-		c.clock.Sleep(reattachRetryDelay)
+	// a unit that may still be up would duplicate the app. Report it
+	// as transient; recover() retries with backoff until the manager
+	// answers, rather than guessing.
+	h, attached, err := c.runner.Reattach(st.Handle)
+	if err != nil {
+		return &transientRecoveryError{fmt.Errorf("cannot tell whether %s is still running; not relaunching: %w", st.CurrentVersion, err)}
 	}
 	if attached {
 		inst := &instance{version: st.CurrentVersion, port: st.Port, handle: h}
@@ -570,6 +568,9 @@ func (ma *managedApp) ensureRunning() error {
 
 	inst, err := ma.launchVersion(c, st.CurrentVersion)
 	if err != nil {
+		if errors.Is(err, errSweepUnconfirmed) {
+			return &transientRecoveryError{fmt.Errorf("relaunching %s: %w", st.CurrentVersion, err)}
+		}
 		return fmt.Errorf("relaunching %s: %w", st.CurrentVersion, err)
 	}
 	if err := ma.publishInstance(c, inst); err != nil {
@@ -590,10 +591,60 @@ func oldHandle(inst *instance) handle {
 	return inst.handle
 }
 
+// transientRecoveryError marks a recovery failure worth retrying: the
+// manager could not be asked (unit state unreadable, sweep unconfirmed)
+// rather than the answer being bad (release dir missing, corrupt state).
+type transientRecoveryError struct{ err error }
+
+func (e *transientRecoveryError) Error() string { return e.err.Error() }
+func (e *transientRecoveryError) Unwrap() error { return e.err }
+
+// transientRecovery reports whether err is worth retrying.
+func transientRecovery(err error) bool {
+	var t *transientRecoveryError
+	return errors.As(err, &t)
+}
+
+// errSweepUnconfirmed is the launch refusal when a pre-start sweep
+// cannot confirm the app has no other unit running.
+var errSweepUnconfirmed = errors.New("cannot confirm no other instance is running")
+
 const (
-	reattachAttempts   = 5
-	reattachRetryDelay = 2 * time.Second
+	recoveryBackoffFloor = 2 * time.Second
+	recoveryBackoffCap   = time.Minute
 )
+
+// recover runs ensureRunning until it succeeds or fails for a reason a
+// retry cannot fix, backing off on transient manager trouble. A boot
+// where the user manager is briefly unresponsive must not leave a
+// healthy app unrouted until an operator reloads. Stops when the app
+// is destructed (its watchdog context ends).
+func (ma *managedApp) recover(logger *zap.Logger) {
+	ctx := ma.wdCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	delay := recoveryBackoffFloor
+	for {
+		err := ma.ensureRunning()
+		if err == nil {
+			return
+		}
+		if !transientRecovery(err) {
+			logger.Error("recovery failed", zap.Error(err))
+			return
+		}
+		logger.Error("recovery deferred; retrying", zap.Duration("in", delay), zap.Error(err))
+		select {
+		case <-ctx.Done():
+			return
+		case <-ma.snapshot().clock.After(delay):
+		}
+		if delay *= 2; delay > recoveryBackoffCap {
+			delay = recoveryBackoffCap
+		}
+	}
+}
 
 // sweep stops every unit of this app other than keep — the runner's
 // ledger, not ours, decides what is running. Recovery calls it so a
@@ -635,7 +686,7 @@ func (ma *managedApp) launchVersion(c collaborators, version string) (*instance,
 	// stop that could not be confirmed) is settled first, or nothing
 	// is launched beside it.
 	if !ma.sweep(c, nil) {
-		return nil, errors.New("cannot confirm no other instance is running; not launching")
+		return nil, fmt.Errorf("%w; not launching", errSweepUnconfirmed)
 	}
 	h, err := c.runner.Start(startSpec{
 		app:     spec.name,
@@ -769,6 +820,12 @@ func (ma *managedApp) Destruct() error {
 	ma.stopWatchdog()
 	c := ma.snapshot()
 	inst := ma.currentInstance()
+	if !ma.started.Load() {
+		// Never started in this process (validate, or a load that
+		// failed before Start): the units belong to whoever is
+		// serving them; leave them alone.
+		return nil
+	}
 	if caddyExiting() {
 		if inst != nil {
 			c.logger.Info("hotserve exiting; app keeps running for reattach", zap.String("version", inst.version), zap.String("unit", inst.handle.state().Unit))
@@ -799,6 +856,7 @@ func (ma *managedApp) startWatchdog() {
 	}
 	ma.wdStarted = true
 	ctx, cancel := context.WithCancel(context.Background())
+	ma.wdCtx = ctx
 	ma.wdCancel = cancel
 	ma.wdWG.Add(1)
 	go func() {
@@ -875,6 +933,13 @@ func buildEnv(spec *appSpec, version string, port int, releaseDir string) ([]str
 	return env, nil
 }
 
+// envKeyRe is what systemd accepts in Environment=; the exec runner
+// let anything through to execve, so it is validated explicitly now —
+// at config load for inline env, at deploy time for env_file.
+var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+func validEnvKey(key string) bool { return envKeyRe.MatchString(key) }
+
 // parseEnvFile reads simple KEY=VALUE lines: blank lines and #comments
 // skipped, an optional `export ` prefix tolerated, and single or
 // double quotes around the value stripped. Deliberately not a shell.
@@ -894,6 +959,9 @@ func parseEnvFile(path string) ([]string, error) {
 		key = strings.TrimSpace(key)
 		if !found || key == "" {
 			return nil, fmt.Errorf("%s:%d: not KEY=VALUE", path, i+1)
+		}
+		if !validEnvKey(key) {
+			return nil, fmt.Errorf("%s:%d: %q is not a valid environment variable name (systemd requires %s)", path, i+1, key, envKeyRe)
 		}
 		value = strings.TrimSpace(value)
 		if len(value) >= 2 {

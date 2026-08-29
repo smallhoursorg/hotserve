@@ -205,11 +205,15 @@ denial-of-protection under bad config, not injection or exhaustion.
 
 ### Supervisor⇄app and app⇄app boundaries — **currently none**
 
-Every app runs as `hotserve`, in the supervisor's mount, PID, and
-network namespaces ([runner_systemd.go](liveswap/runner_systemd.go)
-— the unit gives a cgroup, not a namespace). The child environment is
-scrubbed to an allowlist (`PATH, HOME, LANG, TZ, LC_*`,
-[app.go:611-626](liveswap/app.go)) — closing *direct* inheritance of
+Every app runs as `hotserve`, in the host's mount, PID, and network
+namespaces ([runner_systemd.go](liveswap/runner_systemd.go) — a
+transient unit under the user manager gives a cgroup, not a
+namespace, and unlike the exec runner's children the apps no longer
+sit inside hotserve.service's `PrivateTmp`/`ProtectSystem`). The unit
+environment is the user manager's defaults (`XDG_RUNTIME_DIR`,
+`INVOCATION_ID`, …) plus an allowlisted slice of hotserve's (`PATH,
+HOME, LANG, TZ, LC_*`, [app.go](liveswap/app.go) `inheritedEnv`) —
+closing *direct* inheritance of
 ACME tokens (and any other supervisor secrets), but not the `/proc` or filesystem routes
 to the same values. This is the boundary the whole evaluation exists to
 build.

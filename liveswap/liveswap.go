@@ -293,14 +293,6 @@ func (a *App) Provision(ctx caddy.Context) error {
 	if err := a.Validate(); err != nil {
 		return err
 	}
-	// Apps run as transient units under this user's systemd manager.
-	// Prove it answers before anything is committed, with an error
-	// that says what to fix; there is deliberately no fallback runner.
-	if len(specs) > 0 {
-		if err := probeUserManager(); err != nil {
-			return err
-		}
-	}
 	for name, spec := range specs {
 		val, _ := appPool.LoadOrStore(poolKey(name), newManagedApp(name))
 		ma := val.(*managedApp)
@@ -431,6 +423,11 @@ func (a *App) Validate() error {
 		if !appNameRe.MatchString(name) {
 			return fmt.Errorf("app name %q must match %s", name, appNameRe)
 		}
+		for k := range cfg.Env {
+			if !validEnvKey(k) {
+				return fmt.Errorf("app %s: env key %q is not a valid environment variable name (must match %s)", name, k, envKeyRe)
+			}
+		}
 		if len(cfg.Command) == 0 {
 			return fmt.Errorf("app %s: command is required", name)
 		}
@@ -490,12 +487,25 @@ func (a *App) Validate() error {
 // the background so a slow app cannot stall config load; the health
 // gate is a deploy gate, not a boot gate.
 func (a *App) Start() error {
+	// Apps run as transient units under this user's systemd manager.
+	// Prove it answers before anything runs, with an error that says
+	// what to fix; there is deliberately no fallback runner. Checked
+	// here rather than in Provision so `hotserve validate` — which
+	// provisions and cleans up without starting — works as any user.
+	if len(a.managed) > 0 {
+		if err := probeUserManager(); err != nil {
+			return err
+		}
+	}
+	for _, ma := range a.managed {
+		ma.started.Store(true)
+	}
 	// Units of apps this config no longer names have no managedApp to
 	// sweep them (removed or renamed while hotserve was down): settle
 	// them against the manager's own listing. Background, like
-	// recovery; the sweep judges every unit against the set as it is
-	// at that moment (and waits for any sweep already running), so a
-	// reload racing it cannot lose an app it just added.
+	// recovery; publishing the set never waits for a sweep, and the
+	// sweep judges every app against the set as it is right before
+	// acting, so a reload racing it cannot lose an app it just added.
 	known := make(map[string]bool, len(a.managed))
 	for name := range a.managed {
 		known[name] = true
@@ -509,11 +519,7 @@ func (a *App) Start() error {
 		}
 	}()
 	for name, ma := range a.managed {
-		go func(name string, ma *managedApp) {
-			if err := ma.ensureRunning(); err != nil {
-				a.logger.Error("recovery failed", zap.String("app", name), zap.Error(err))
-			}
-		}(name, ma)
+		go ma.recover(a.logger.Named(name))
 	}
 	return nil
 }

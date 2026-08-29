@@ -38,23 +38,19 @@ RUN hotserve list-modules | grep -qx liveswap \
 	&& hotserve list-modules | grep -qx http.handlers.cache \
 	&& hotserve list-modules | grep -qx storages.cache.otter
 
-# What packaging/postinstall.sh does on a real box: the hotserve user
-# and data dirs, lingering, and the drop-in that starts the user's
-# manager with hotserve.
-RUN groupadd --system hotserve \
-	&& useradd --system --gid hotserve --home-dir /var/lib/hotserve \
-		--shell /usr/sbin/nologin --comment "hotserve server" hotserve \
-	&& mkdir -p /var/lib/hotserve /var/lib/liveswap /var/lib/systemd/linger \
-	&& chown hotserve:hotserve /var/lib/hotserve /var/lib/liveswap \
-	&& chmod 750 /var/lib/hotserve /var/lib/liveswap \
-	&& touch /var/lib/systemd/linger/hotserve
+# The production layout, produced by the package's own postinstall
+# (user, data dirs, lingering, the user@<uid> drop-ins) so the e2e
+# container is what a .deb install is — never a re-implementation.
+# systemd is not running at build time; postinstall tolerates that
+# (linger-file fallback, daemon-reload/try-restart ignored).
 COPY packaging/hotserve.service /etc/systemd/system/hotserve.service
+COPY packaging/postinstall.sh /tmp/postinstall.sh
+RUN mkdir -p /var/lib/hotserve /var/lib/liveswap \
+	&& chmod 750 /var/lib/hotserve /var/lib/liveswap \
+	&& sh /tmp/postinstall.sh && rm /tmp/postinstall.sh
 COPY e2e/systemd/e2e.conf /etc/systemd/system/hotserve.service.d/e2e.conf
 COPY e2e/systemd/e2e-token.service /etc/systemd/system/e2e-token.service
-RUN uid=$(id -u hotserve) \
-	&& printf '[Unit]\nWants=user@%s.service\nAfter=user@%s.service\n' "$uid" "$uid" \
-		> /etc/systemd/system/hotserve.service.d/10-user-manager.conf \
-	&& systemctl enable hotserve.service e2e-token.service
+RUN systemctl enable hotserve.service e2e-token.service
 COPY e2e/Caddyfile /etc/hotserve/Caddyfile
 COPY e2e/mint-token.sh /usr/local/bin/mint-token.sh
 RUN chmod +x /usr/local/bin/mint-token.sh

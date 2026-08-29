@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -352,4 +353,56 @@ func TestIntegrationSystemdSweepStopsStrays(t *testing.T) {
 	if err := r.Stop(keep, spec.grace); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// managerPID is the user manager's own process, for the stall test.
+func managerPID(t *testing.T) int {
+	t.Helper()
+	out, err := exec.Command("systemctl", "show", "-p", "MainPID", "--value", "user@"+strconv.Itoa(os.Getuid())+".service").Output()
+	if err != nil {
+		t.Fatalf("systemctl show user@: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil || pid == 0 {
+		t.Fatalf("no user manager pid: %q", out)
+	}
+	return pid
+}
+
+// The manager stops answering (SIGSTOP) for longer than a poll timeout:
+// invariant 2 says the handle stays alive, and once the manager is
+// back the watcher resumes and a Stop is honoured.
+func TestIntegrationSystemdManagerStallIsNotACrash(t *testing.T) {
+	r := integrationRunner(t)
+	spec := scriptApp(t, workerTree)
+	h, err := r.Start(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pids := readPIDs(t, spec.dir)
+	mgr := managerPID(t)
+	if err := syscall.Kill(mgr, syscall.SIGSTOP); err != nil {
+		t.Fatal(err)
+	}
+	resumed := false
+	resume := func() {
+		if !resumed {
+			resumed = true
+			_ = syscall.Kill(mgr, syscall.SIGCONT)
+		}
+	}
+	defer resume()
+	// Longer than pollTimeout: at least one poll must time out.
+	deadline := time.Now().Add(pollTimeout + 3*time.Second)
+	for time.Now().Before(deadline) {
+		if !r.Alive(h) {
+			t.Fatal("a stalled manager was reported as an instance exit")
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	resume()
+	if err := r.Stop(h, spec.grace); err != nil {
+		t.Fatalf("Stop after the manager resumed: %v", err)
+	}
+	waitPIDsGone(t, pids, 2*time.Second)
 }

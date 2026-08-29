@@ -172,7 +172,7 @@ done
 workdir=$(mktemp -d)
 cat > "$workdir/server" <<'EOF'
 #!/bin/sh
-echo "smoke app starting on $PORT"
+echo "smoke app starting on $PORT nofile=$(ulimit -n)"
 exec /usr/bin/hotserve respond --listen 127.0.0.1:"$PORT" "hello smoke"
 EOF
 chmod +x "$workdir/server"
@@ -221,7 +221,24 @@ user_systemctl is-active --quiet "$unit" \
 	|| die "app unit must have Restart=no (the liveswap watchdog is the only restarter)"
 journalctl --no-pager -t hotserve-demo | grep -q "smoke app starting" \
 	|| die "app stdout did not reach the journal under identifier hotserve-demo"
+journalctl --no-pager -t hotserve-demo | grep -q "nofile=1048576" \
+	|| die "app soft NOFILE is not 1048576 (user@ drop-in + per-unit limit): $(journalctl --no-pager -t hotserve-demo | grep -o 'nofile=[0-9]*' | tail -1)"
 echo "deployed as unit $unit under user@$uid; app output in the journal"
+
+# `hotserve validate` provisions and cleans up without starting: run
+# as root (no user manager for uid 0) and as the hotserve user (the
+# live manager) against the serving config, and the app must be
+# untouched either way.
+pid_live=$(printf '%s' "$status" | sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p')
+hotserve validate --config /etc/hotserve/Caddyfile >/dev/null 2>&1 \
+	|| die "hotserve validate as root failed against a valid config"
+su -s /bin/sh hotserve -c "hotserve validate --config /etc/hotserve/Caddyfile" >/dev/null 2>&1 \
+	|| die "hotserve validate as the hotserve user failed against a valid config"
+sleep 1
+kill -0 "$pid_live" 2>/dev/null || die "hotserve validate stopped the running app (pid $pid_live)"
+user_systemctl is-active --quiet "$unit" || die "hotserve validate left the app unit inactive"
+curl -fsS --max-time 5 "$PROXY/" | grep -q "hello smoke" || die "app not served after validate"
+echo "validate (root and hotserve) left the running app alone"
 
 # The deploy token must never reach the journal: not via access logs
 # (Authorization is redacted), not via any error path above.
@@ -263,6 +280,7 @@ systemctl is-active --quiet hotserve && die "service still active after remove (
 [ -f /etc/hotserve/Caddyfile ] || die "conffile deleted on remove (should survive until purge)"
 systemctl is-active --quiet "user@$uid.service" && die "user manager still running after remove (apps would linger)" || true
 [ ! -e /etc/systemd/system/hotserve.service.d/10-user-manager.conf ] || die "user-manager drop-in left behind"
+[ ! -e "/etc/systemd/system/user@$uid.service.d/10-hotserve.conf" ] || die "user@ limits drop-in left behind"
 [ ! -e /var/lib/systemd/linger/hotserve ] || die "lingering left enabled"
 kill -0 "$pid_after" 2>/dev/null && die "deployed app (pid $pid_after) survived package removal" || true
 echo "removal stopped the service and the apps, kept the conffile"

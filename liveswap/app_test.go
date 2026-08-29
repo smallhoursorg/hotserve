@@ -588,6 +588,7 @@ func TestEnsureRunningSkipsWhenAlreadyAlive(t *testing.T) {
 
 func TestDestructStopsCurrentInstance(t *testing.T) {
 	rig := newTestRig(t)
+	rig.ma.started.Store(true) // as App.Start would
 	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
 	must(t, rig.ma.Destruct())
 	if rig.runner.stopCount() != 1 {
@@ -896,6 +897,7 @@ func TestDeployStopOldErrorDefersToSweep(t *testing.T) {
 
 func TestDestructOnRemovalSweepsWholeApp(t *testing.T) {
 	rig := newTestRig(t)
+	rig.ma.started.Store(true) // as App.Start would
 	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
 	must(t, rig.ma.Destruct())
 	if rig.runner.stopCount() != 1 {
@@ -909,6 +911,7 @@ func TestDestructOnRemovalSweepsWholeApp(t *testing.T) {
 
 func TestDestructLeavesInstanceRunningOnProcessExit(t *testing.T) {
 	rig := newTestRig(t)
+	rig.ma.started.Store(true) // as App.Start would
 	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
 	orig := caddyExiting
 	caddyExiting = func() bool { return true }
@@ -937,55 +940,80 @@ func TestStartSpecCarriesUnitIdentity(t *testing.T) {
 	}
 }
 
-func TestEnsureRunningRetriesUnreadableReattachThenGivesUp(t *testing.T) {
+func TestEnsureRunningUnreadableReattachIsTransientAndLaunchesNothing(t *testing.T) {
 	rig := newTestRig(t)
 	rig.store.state = appState{CurrentVersion: "v7", Port: 12345, Handle: handleState{Unit: "u.service"}}
 	rig.store.ok = true
 	must(t, os.MkdirAll(rig.spec.dirs.release("v7"), 0o755))
-	// Every read fails: the recorded unit may well be running, so
-	// recovery must never launch beside it.
-	for range reattachAttempts + 1 {
-		rig.runner.reattachErrs = append(rig.runner.reattachErrs, errTest)
-	}
+	rig.runner.reattachErrs = []error{errTest}
 	err := rig.ma.ensureRunning()
-	if err == nil || !strings.Contains(err.Error(), "not relaunching") {
-		t.Fatalf("expected a loud give-up, got %v", err)
+	if !transientRecovery(err) || !strings.Contains(err.Error(), "not relaunching") {
+		t.Fatalf("expected a transient refusal, got %v", err)
 	}
-	if rig.runner.startCount() != 0 {
-		t.Fatal("must not launch while the recorded unit's state is unknown")
-	}
-	if rig.runner.reattachCalls != reattachAttempts {
-		t.Fatalf("expected %d reattach attempts, got %d", reattachAttempts, rig.runner.reattachCalls)
-	}
-	if rig.ma.activePort.Load() != 0 {
-		t.Fatal("nothing may be published")
+	if rig.runner.startCount() != 0 || rig.ma.activePort.Load() != 0 {
+		t.Fatal("must not launch or publish while the recorded unit's state is unknown")
 	}
 }
 
-func TestEnsureRunningReattachRecoversAfterTransientError(t *testing.T) {
+func TestRecoverRetriesTransientErrorsUntilReattached(t *testing.T) {
 	rig := newTestRig(t)
 	rig.store.state = appState{CurrentVersion: "v7", Port: 12345, Handle: handleState{Unit: "u.service"}}
 	rig.store.ok = true
 	must(t, os.MkdirAll(rig.spec.dirs.release("v7"), 0o755))
 	rig.runner.reattachErrs = []error{errTest, errTest}
 	rig.runner.reattachOK = true
-	must(t, rig.ma.ensureRunning())
+	done := make(chan struct{})
+	go func() { rig.ma.recover(zap.NewNop()); close(done) }()
+	advanceUntil(t, rig, recoveryBackoffFloor, "reattach after two transient failures", func() bool {
+		return rig.ma.activePort.Load() == 12345
+	})
+	<-done
 	if rig.runner.startCount() != 0 || rig.ma.activePort.Load() != 12345 {
 		t.Fatalf("expected a reattach on the third try, starts=%d port=%d", rig.runner.startCount(), rig.ma.activePort.Load())
+	}
+	if rig.runner.reattachCalls != 3 {
+		t.Fatalf("expected 3 reattach attempts, got %d", rig.runner.reattachCalls)
 	}
 	if rig.runner.sweepCount() != 1 || rig.runner.sweeps[0] != rig.runner.handleAt(0) {
 		t.Fatal("recovery must sweep stray units, keeping the adopted one")
 	}
 }
 
-func TestEnsureRunningNoStateStillSweeps(t *testing.T) {
+func TestRecoverGivesUpOnPermanentErrors(t *testing.T) {
 	rig := newTestRig(t)
-	must(t, rig.ma.ensureRunning())
-	if rig.runner.startCount() != 0 {
-		t.Fatal("nothing recorded ⇒ nothing launched")
+	rig.store.state = appState{CurrentVersion: "v7", Port: 12345, Handle: handleState{PID: 1}}
+	rig.store.ok = true // release dir deliberately missing: not something a retry fixes
+	done := make(chan struct{})
+	go func() { rig.ma.recover(zap.NewNop()); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("recover must return on a permanent error, not retry forever")
 	}
-	if n := rig.runner.sweepCount(); n != 1 || rig.runner.sweeps[0] != nil {
-		t.Fatalf("with no state the manager must still be swept with keep=nil, sweeps=%d", n)
+}
+
+func TestDestructBeforeStartTouchesNothing(t *testing.T) {
+	// `hotserve validate` and a config load that fails elsewhere both
+	// provision and then clean up without Start: whatever the manager
+	// runs belongs to the serving process and must be left alone.
+	rig := newTestRig(t)
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	before := rig.runner.sweepCount()
+	must(t, rig.ma.Destruct())
+	if rig.runner.stopCount() != 0 || rig.runner.sweepCount() != before {
+		t.Fatalf("Destruct without Start must not stop or sweep: stops=%d sweeps=%d", rig.runner.stopCount(), rig.runner.sweepCount()-before)
+	}
+	if !rig.runner.Alive(rig.runner.handleAt(0)) {
+		t.Fatal("the instance must still be running")
+	}
+}
+
+func TestParseEnvFileRejectsInvalidKeys(t *testing.T) {
+	envFile := filepath.Join(t.TempDir(), "app.env")
+	must(t, os.WriteFile(envFile, []byte("GOOD=1\nmy-var=2\n"), 0o600))
+	_, err := parseEnvFile(envFile)
+	if err == nil || !strings.Contains(err.Error(), `"my-var"`) || !strings.Contains(err.Error(), ":2:") {
+		t.Fatalf("an invalid key must be named with its line, got %v", err)
 	}
 }
 
@@ -1038,6 +1066,7 @@ func TestDeployAbortsStartWhenSweepUnconfirmed(t *testing.T) {
 
 func TestDestructOnRemovalSweepsEvenWithoutInstance(t *testing.T) {
 	rig := newTestRig(t)
+	rig.ma.started.Store(true) // as App.Start would
 	must(t, rig.ma.Destruct())
 	if rig.runner.stopCount() != 0 || rig.runner.sweepCount() != 1 || rig.runner.sweeps[0] != nil {
 		t.Fatalf("removal with nothing tracked must still sweep the app: stops=%d sweeps=%v", rig.runner.stopCount(), rig.runner.sweeps)

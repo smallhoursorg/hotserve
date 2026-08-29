@@ -127,6 +127,22 @@ type unitStatus struct {
 	// 2 = killed and 3 = dumped (status is the signal number).
 	ExecMainCode   int
 	ExecMainStatus int
+	// StopTimeout is the unit's own TimeoutStopSec — the SIGTERM→SIGKILL
+	// budget it was created with, which is what bounds a stop of it.
+	StopTimeout time.Duration
+}
+
+// stopBudget is how long a stop of this unit can take before the
+// manager's SIGKILL lands: its own TimeoutStopSec, or the caller's
+// grace when that is unknown or larger.
+func (s unitStatus) stopBudget(grace time.Duration) time.Duration {
+	if s.StopTimeout > grace {
+		return s.StopTimeout
+	}
+	if grace <= 0 {
+		return defaultStopTimeout
+	}
+	return grace
 }
 
 func (s unitStatus) loaded() bool { return s.LoadState == "loaded" }
@@ -216,10 +232,13 @@ func (h *systemdHandle) state() handleState {
 // matching "blog-api"; the nonce makes every Start unique.
 const unitPrefix = "hotserve-"
 
-var (
-	unitNameRe  = regexp.MustCompile(`^hotserve-[a-z0-9-]+\.[A-Za-z0-9._-]+\.[0-9a-f]{8}(\.prestart)?\.service$`)
-	unitNonceRe = regexp.MustCompile(`\.[0-9a-f]{8}(\.prestart)?\.service$`)
-)
+// unitNameRe is derived from the app-name and version alphabets in
+// liveswap.go so the three can never drift apart.
+var unitNameRe = regexp.MustCompile(
+	`^` + regexp.QuoteMeta(unitPrefix) +
+		`(` + strings.Trim(appNameRe.String(), "^$") + `)` +
+		`\.(` + strings.Trim(versionRe.String(), "^$") + `)` +
+		`\.[0-9a-f]{8}(\.prestart)?\.service$`)
 
 func unitName(spec startSpec, oneshot bool) (string, error) {
 	var nonce [4]byte
@@ -239,25 +258,25 @@ func unitName(spec startSpec, oneshot bool) (string, error) {
 
 // unitBelongsTo reports whether name is one of app's units.
 func unitBelongsTo(name, app string) bool {
-	return strings.HasPrefix(name, unitPrefix+app+".") && unitNameRe.MatchString(name) && unitNonceRe.MatchString(name)
+	got, ok := unitApp(name)
+	return ok && got == app
 }
 
 // unitApp extracts the app name from one of our unit names.
 func unitApp(name string) (string, bool) {
-	if !unitNameRe.MatchString(name) {
+	m := unitNameRe.FindStringSubmatch(name)
+	if m == nil {
 		return "", false
 	}
-	rest := strings.TrimPrefix(name, unitPrefix)
-	app, _, _ := strings.Cut(rest, ".")
-	return app, app != ""
+	return m[1], true
 }
 
 // configuredApps is the set of app names the live config declares —
 // process-wide, because the sweep below runs detached from any one
-// config. Its mutex is held for a whole sweep, so a reload that adds
-// an app waits for an in-flight sweep to finish before publishing the
-// new set, and a sweep started under an older config can never act on
-// a stale view: each unit is judged against the set as it is now.
+// config. Publishing a new set never waits for a sweep: the sweep
+// re-reads the set immediately before acting on each app, so a reload
+// that adds an app back is honoured by any sweep still in flight, and
+// an obsolete sweep can never stop a unit the live config wants.
 var configuredApps = struct {
 	sync.Mutex
 	names map[string]bool
@@ -270,13 +289,23 @@ func setConfiguredApps(names map[string]bool) {
 	configuredApps.names = names
 }
 
+func appConfigured(app string) bool {
+	configuredApps.Lock()
+	defer configuredApps.Unlock()
+	return configuredApps.names[app]
+}
+
+// unknownSweepMu serializes start-time sweeps with each other (two
+// configs starting back to back), never with config publication.
+var unknownSweepMu sync.Mutex
+
 // sweepUnknownApps stops every hotserve unit whose app the current
 // config does not name (invariant 7): an app removed or renamed while
 // hotserve was down has no managedApp left to sweep it, so App.Start
 // does it here against the manager's own listing.
 func sweepUnknownApps(ctx context.Context, conn systemdConn, logger *zap.Logger) error {
-	configuredApps.Lock()
-	defer configuredApps.Unlock()
+	unknownSweepMu.Lock()
+	defer unknownSweepMu.Unlock()
 	units, err := conn.ListUnits(ctx, unitPrefix+"*.service")
 	if err != nil {
 		return fmt.Errorf("listing hotserve units: %w", err)
@@ -287,13 +316,18 @@ func sweepUnknownApps(ctx context.Context, conn systemdConn, logger *zap.Logger)
 	seen := map[string]bool{}
 	for _, u := range units {
 		app, ok := unitApp(u.Name)
-		if !ok || configuredApps.names[app] || seen[app] {
+		if !ok || seen[app] {
 			continue
 		}
 		seen[app] = true
+		// Judged now, not at listing time: a reload may have added the
+		// app back while the listing was in flight.
+		if appConfigured(app) {
+			continue
+		}
 		logger.Warn("stopping units of an app no longer in the config", zap.String("app", app), zap.String("unit", u.Name))
-		// The caller's deadline bounds the whole sweep, mutex held and
-		// all — a slow manager must not stall later config starts.
+		// The caller's deadline bounds the whole sweep, so a slow
+		// manager cannot hold the start-time sweep open indefinitely.
 		if serr := r.sweep(ctx, app, nil); serr != nil {
 			errs = append(errs, serr)
 		}
@@ -405,10 +439,9 @@ func (r *systemdRunner) reconcileStart(unit string, cause error) (handle, error)
 		}
 		return nil, cause
 	}
-	if res, serr := r.conn.StopUnit(ctx, unit); serr == nil && res == "done" {
-		return nil, cause
-	}
-	return nil, &unitUnconfirmedError{unit: unit, err: cause}
+	// The manager cannot be asked: stop by name and confirm, or report
+	// the unit as possibly running — the same sequence RunOnce uses.
+	return nil, r.stopUnobserved(ctx, unit, cause)
 }
 
 // RunOnce runs a oneshot unit to completion. Its start job only
@@ -502,10 +535,11 @@ func (r *systemdRunner) Stop(h handle, grace time.Duration) error {
 		return nil
 	default:
 	}
-	if grace <= 0 {
-		grace = defaultStopTimeout
-	}
-	ctx, cancel := context.WithTimeout(r.ctx, grace+stopSlack)
+	// The wait is sized from the unit's own TimeoutStopSec (a reattached
+	// unit keeps the grace it was created with, which may exceed the
+	// current config's), falling back to the caller's grace.
+	budget := r.stopBudgetFor(r.ctx, sh.unit, grace)
+	ctx, cancel := context.WithTimeout(r.ctx, budget+stopSlack)
 	defer cancel()
 	res, err := r.conn.StopUnit(ctx, sh.unit)
 	if err != nil {
@@ -518,7 +552,7 @@ func (r *systemdRunner) Stop(h handle, grace time.Duration) error {
 	case <-sh.done:
 		return nil
 	case <-ctx.Done():
-		return fmt.Errorf("unit %s: stop job done but the unit was not observed gone within %s", sh.unit, grace+stopSlack)
+		return fmt.Errorf("unit %s: stop job done but the unit was not observed gone within %s", sh.unit, budget+stopSlack)
 	}
 }
 
@@ -556,17 +590,21 @@ func (r *systemdRunner) Reattach(st handleState) (handle, bool, error) {
 // leftovers are reset; running ones are stopped and confirmed gone.
 // nil only when, afterwards, keep is the only loaded unit of app.
 func (r *systemdRunner) Sweep(app string, keep handle) error {
-	ctx, cancel := context.WithTimeout(r.ctx, defaultStopTimeout+stopSlack)
-	defer cancel()
-	return r.sweep(ctx, app, keep)
+	return r.sweep(r.ctx, app, keep)
 }
 
-func (r *systemdRunner) sweep(ctx context.Context, app string, keep handle) error {
+// sweep is Sweep under a parent context. Listing and each reset are
+// bounded by pollTimeout; each stop by the unit's own stop budget plus
+// slack — a stray with a long TimeoutStopSec gets the time it was
+// promised rather than a flat cap that would report it unconfirmed.
+func (r *systemdRunner) sweep(parent context.Context, app string, keep handle) error {
 	keepUnit := ""
 	if kh, ok := keep.(*systemdHandle); ok {
 		keepUnit = kh.unit
 	}
-	units, err := r.conn.ListUnits(ctx, unitPrefix+app+".*.service")
+	listCtx, listCancel := context.WithTimeout(parent, pollTimeout)
+	units, err := r.conn.ListUnits(listCtx, unitPrefix+app+".*.service")
+	listCancel()
 	if err != nil {
 		return fmt.Errorf("listing units of %s: %w", app, err)
 	}
@@ -578,14 +616,20 @@ func (r *systemdRunner) sweep(ctx context.Context, app string, keep handle) erro
 		if !u.running() {
 			if u.loaded() {
 				r.log().Warn("resetting leftover unit", zap.String("unit", u.Name), zap.String("active_state", u.ActiveState), zap.String("exit", u.exitString()))
-				if rerr := r.resetFailed(ctx, u.Name); rerr != nil {
+				ctx, cancel := context.WithTimeout(parent, pollTimeout)
+				rerr := r.resetFailed(ctx, u.Name)
+				cancel()
+				if rerr != nil {
 					errs = append(errs, rerr)
 				}
 			}
 			continue
 		}
 		r.log().Warn("stopping stray unit not owned by this instance", zap.String("unit", u.Name), zap.Int("pid", u.MainPID))
-		if serr := r.stopUnobserved(ctx, u.Name, fmt.Errorf("stray unit %s", u.Name)); unitUnconfirmed(serr) {
+		ctx, cancel := context.WithTimeout(parent, r.stopBudgetFor(parent, u.Name, 0)+stopSlack)
+		serr := r.stopUnobserved(ctx, u.Name, fmt.Errorf("stray unit %s", u.Name))
+		cancel()
+		if unitUnconfirmed(serr) {
 			errs = append(errs, serr)
 		}
 	}
@@ -656,6 +700,19 @@ func (r *systemdRunner) finish(h *systemdHandle, st unitStatus) {
 	}
 	h.exit.Store(&st)
 	close(h.done)
+}
+
+// stopBudgetFor is how long stopping unit may take before SIGKILL: its
+// own TimeoutStopSec when readable, else the caller's grace, else the
+// default — one policy for Stop and sweep alike.
+func (r *systemdRunner) stopBudgetFor(parent context.Context, unit string, grace time.Duration) time.Duration {
+	ctx, cancel := context.WithTimeout(parent, pollTimeout)
+	defer cancel()
+	st, err := r.conn.UnitStatus(ctx, unit)
+	if err != nil {
+		st = unitStatus{}
+	}
+	return st.stopBudget(grace)
 }
 
 // reapFailed reads a failed unit's exit facts and resets it.

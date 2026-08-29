@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	sddbus "github.com/coreos/go-systemd/v22/dbus"
@@ -30,6 +32,9 @@ import (
 type userManagerClient struct {
 	mu   sync.Mutex
 	conn *sddbus.Conn
+	// nofile is the manager's DefaultLimitNOFILE (its hard ceiling for
+	// units), read once per connection; 0 = unknown, leave units alone.
+	nofile atomic.Uint64
 }
 
 // userManager is the process-wide client every systemdRunner shares.
@@ -69,21 +74,71 @@ func (c *userManagerClient) probe() error {
 
 func (c *userManagerClient) get() (*sddbus.Conn, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.conn != nil {
 		if c.conn.Connected() {
-			return c.conn, nil
+			conn := c.conn
+			c.mu.Unlock()
+			return conn, nil
 		}
 		c.conn.Close()
 		c.conn = nil
 	}
+	c.mu.Unlock()
+
+	// Dial outside the lock: a slow or wedged manager must not make
+	// every caller queue behind one redial past their own deadlines.
+	// The socket deadlines set in dialPrivate stay in force until
+	// NewConnection has finished (it dials twice and then installs its
+	// signal match), so the whole establishment is bounded.
 	sock := userManagerSocket()
-	conn, err := sddbus.NewConnection(func() (*godbus.Conn, error) { return dialPrivate(sock) })
+	var raws []net.Conn
+	conn, err := sddbus.NewConnection(func() (*godbus.Conn, error) {
+		dc, nc, err := dialPrivate(sock)
+		if err == nil {
+			raws = append(raws, nc)
+		}
+		return dc, err
+	})
 	if err != nil {
 		return nil, err
 	}
+	for _, nc := range raws {
+		if derr := nc.SetDeadline(time.Time{}); derr != nil {
+			conn.Close()
+			return nil, derr
+		}
+	}
+
+	// systemd gives services soft NOFILE 1024 by default however high
+	// the hard limit is; the exec runner's children inherited
+	// hotserve.service's soft=hard. Units are created with both set to
+	// the manager's hard ceiling (which the package raises via a
+	// user@<uid>.service.d drop-in), so a setrlimit can never exceed
+	// what the manager permits.
+	if v, err := conn.GetManagerProperty("DefaultLimitNOFILE"); err == nil {
+		c.nofile.Store(parseManagerUint(v))
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conn != nil && c.conn.Connected() {
+		conn.Close() // another caller won the redial
+		return c.conn, nil
+	}
 	c.conn = conn
 	return conn, nil
+}
+
+// parseManagerUint reads go-systemd's string rendering of a uint64
+// manager property ("@t 524288"); 0 for anything unparseable or
+// unlimited, which callers treat as "don't set".
+func parseManagerUint(s string) uint64 {
+	s = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(s), "@t"))
+	n, err := strconv.ParseUint(s, 10, 64)
+	if err != nil || n == ^uint64(0) {
+		return 0
+	}
+	return n
 }
 
 // dropIfDisconnected forgets a connection that a failed call has
@@ -107,32 +162,29 @@ const dialTimeout = 10 * time.Second
 
 // dialPrivate mirrors go-systemd's own private-socket dial for
 // /run/systemd/private: EXTERNAL auth with our uid and no Hello (the
-// private socket is not a bus daemon). The socket deadline covers only
-// the handshake; the established connection lives for the process
-// (godbus would close it with a call-scoped context, hence Background).
-func dialPrivate(socket string) (*godbus.Conn, error) {
+// private socket is not a bus daemon). The returned net.Conn carries a
+// deadline the caller clears once the connection is fully set up; the
+// established connection then lives for the process (godbus would
+// close it with a call-scoped context, hence Background).
+func dialPrivate(socket string) (*godbus.Conn, net.Conn, error) {
 	nc, err := net.DialTimeout("unix", socket, dialTimeout)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := nc.SetDeadline(time.Now().Add(dialTimeout)); err != nil {
 		_ = nc.Close()
-		return nil, err
+		return nil, nil, err
 	}
 	conn, err := godbus.NewConn(nc, godbus.WithContext(context.Background()))
 	if err != nil {
 		_ = nc.Close()
-		return nil, err
+		return nil, nil, err
 	}
 	if err := conn.Auth([]godbus.Auth{godbus.AuthExternal(strconv.Itoa(os.Getuid()))}); err != nil {
 		_ = conn.Close()
-		return nil, err
+		return nil, nil, err
 	}
-	if err := nc.SetDeadline(time.Time{}); err != nil {
-		_ = conn.Close()
-		return nil, err
-	}
-	return conn, nil
+	return conn, nc, nil
 }
 
 // unitProperties renders a unitSpec as transient-unit properties. The
@@ -176,10 +228,17 @@ func (c *userManagerClient) StartTransientUnit(ctx context.Context, u unitSpec) 
 	if err != nil {
 		return "", err
 	}
+	props := unitProperties(u)
+	if n := c.nofile.Load(); n > 0 {
+		props = append(props,
+			sddbus.Property{Name: "LimitNOFILE", Value: godbus.MakeVariant(n)},
+			sddbus.Property{Name: "LimitNOFILESoft", Value: godbus.MakeVariant(n)},
+		)
+	}
 	// go-systemd delivers the result with its listener lock held, so
 	// the channel must never block: buffer it.
 	ch := make(chan string, 1)
-	if _, err := conn.StartTransientUnitContext(ctx, u.Name, "fail", unitProperties(u), ch); err != nil {
+	if _, err := conn.StartTransientUnitContext(ctx, u.Name, "fail", props, ch); err != nil {
 		c.dropIfDisconnected(conn, err)
 		return "", err
 	}
@@ -198,6 +257,9 @@ func (c *userManagerClient) StopUnit(ctx context.Context, name string) (string, 
 	}
 	ch := make(chan string, 1)
 	if _, err := conn.StopUnitContext(ctx, name, "replace", ch); err != nil {
+		if isNoSuchUnit(err) {
+			return "done", nil // already unloaded: stopped by definition
+		}
 		c.dropIfDisconnected(conn, err)
 		return "", err
 	}
@@ -215,6 +277,9 @@ func (c *userManagerClient) ResetFailedUnit(ctx context.Context, name string) er
 		return err
 	}
 	err = conn.ResetFailedUnitContext(ctx, name)
+	if isNoSuchUnit(err) {
+		return nil // already unloaded: nothing left to reset
+	}
 	c.dropIfDisconnected(conn, err)
 	return err
 }
@@ -229,16 +294,34 @@ func (c *userManagerClient) UnitStatus(ctx context.Context, name string) (unitSt
 	}
 	props, err := conn.GetAllPropertiesContext(ctx, name)
 	if err != nil {
-		var derr godbus.Error
-		if errors.As(err, &derr) {
-			switch derr.Name {
-			case "org.freedesktop.systemd1.NoSuchUnit", "org.freedesktop.DBus.Error.UnknownObject":
-				return unitStatus{LoadState: "not-found"}, nil
-			}
+		if isNoSuchUnit(err) {
+			return unitStatus{Name: name, LoadState: "not-found"}, nil
 		}
 		c.dropIfDisconnected(conn, err)
 		return unitStatus{}, err
 	}
+	st := statusFromProps(props)
+	st.Name = name
+	return st, nil
+}
+
+// isNoSuchUnit reports the manager saying it does not know the unit —
+// for our purposes "not loaded", never a transport failure.
+func isNoSuchUnit(err error) bool {
+	var derr godbus.Error
+	if !errors.As(err, &derr) {
+		return false
+	}
+	switch derr.Name {
+	case "org.freedesktop.systemd1.NoSuchUnit", "org.freedesktop.DBus.Error.UnknownObject":
+		return true
+	}
+	return false
+}
+
+// statusFromProps reads the fields the runner needs out of a unit's
+// full property map (Unit + Service interfaces).
+func statusFromProps(props map[string]any) unitStatus {
 	return unitStatus{
 		LoadState:      propString(props, "LoadState"),
 		ActiveState:    propString(props, "ActiveState"),
@@ -247,7 +330,8 @@ func (c *userManagerClient) UnitStatus(ctx context.Context, name string) (unitSt
 		MainPID:        propInt(props, "MainPID"),
 		ExecMainCode:   propInt(props, "ExecMainCode"),
 		ExecMainStatus: propInt(props, "ExecMainStatus"),
-	}, nil
+		StopTimeout:    time.Duration(propInt(props, "TimeoutStopUSec")) * time.Microsecond,
+	}
 }
 
 // ListUnits returns the loaded units whose names match pattern, with

@@ -22,6 +22,10 @@ upgrade|failed-upgrade)
 		fi
 		rm -f /etc/systemd/system/hotserve.service.d/10-user-manager.conf
 		rmdir /etc/systemd/system/hotserve.service.d 2>/dev/null || true
+		if [ -n "${uid:-}" ]; then
+			rm -f "/etc/systemd/system/user@$uid.service.d/10-hotserve.conf"
+			rmdir "/etc/systemd/system/user@$uid.service.d" 2>/dev/null || true
+		fi
 		systemctl daemon-reload 2>/dev/null || true
 	fi
 	;;

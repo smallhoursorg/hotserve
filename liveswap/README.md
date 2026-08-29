@@ -140,8 +140,14 @@ environment is, lowest precedence first: an allowlisted slice of
 Caddy's environment (`PATH`, `HOME`, `LANG`, `TZ`, `LC_*` — nothing
 else, so supervisor credentials like ACME DNS tokens never reach
 apps) → `env_file` → inline `env` → injected `PORT` and
-`HOST=127.0.0.1`. Anything more an app needs must be passed
-explicitly via `env` or `env_file`.
+`HOST=127.0.0.1`, all layered on the systemd user manager's own
+defaults (`XDG_RUNTIME_DIR`, `INVOCATION_ID`, …). Keys must be valid
+variable names (`[A-Za-z_][A-Za-z0-9_]*`) — systemd rejects anything
+else, so config load does too. Anything more an app needs must be
+passed explicitly via `env` or `env_file`. Apps get the user manager's
+resource limits; each unit sets its open-files limit (soft and hard)
+to the manager's ceiling, which the package raises to match
+`hotserve.service` (1048576) via a `user@<uid>.service.d` drop-in.
 
 ### Placeholders
 

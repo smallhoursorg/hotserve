@@ -117,6 +117,9 @@ services:
       dockerfile: e2e/Dockerfile
     image: hotserve-e2e
     command: ["/usr/bin/hotserve", "run", "--config", "/etc/hotserve/Caddyfile"]
+    # Plain `hotserve run`, not systemd: the image's SIGRTMIN+3 stop
+    # signal would be ignored and cost a 10s SIGKILL wait on teardown.
+    stop_signal: SIGTERM
     volumes:
       - ./e2e/penaltybox/upstream.Caddyfile:/etc/hotserve/Caddyfile:ro
 

@@ -37,6 +37,7 @@ type fakeSystemdConn struct {
 	listErr    error
 	resetErr   error
 	listCalls  int
+	listHook   func() // runs inside ListUnits, before it returns (interleaving tests)
 }
 
 func newFakeSystemdConn() *fakeSystemdConn {
@@ -114,6 +115,9 @@ func (f *fakeSystemdConn) ListUnits(_ context.Context, pattern string) ([]unitSt
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.listCalls++
+	if f.listHook != nil {
+		f.listHook()
+	}
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
@@ -569,15 +573,59 @@ func TestSystemdRunnerStartReconcilesAmbiguousFailure(t *testing.T) {
 		t.Fatal("a best-effort stop must be attempted")
 	}
 
-	// Nothing can be read but the stop confirms: ordinary error.
+	// Nothing can be read; the stop job says done but the unit can
+	// still not be observed: unconfirmed (invariant 4 wants an
+	// observation, not a job result).
 	r4, conn4 := newTestSystemdRunner(t)
 	conn4.mu.Lock()
 	conn4.startErr = errors.New("dbus: reply lost")
 	conn4.statusErr = errors.New("dbus down")
 	conn4.mu.Unlock()
 	_, err = r4.Start(spec)
-	if err == nil || unitUnconfirmed(err) {
-		t.Fatalf("stop job done ⇒ confirmed gone ⇒ ordinary error, got %v", err)
+	if !unitUnconfirmed(err) {
+		t.Fatalf("unobservable after stop ⇒ unconfirmed, got %v", err)
+	}
+}
+
+func TestParseManagerUint(t *testing.T) {
+	for in, want := range map[string]uint64{
+		"@t 524288":               524288,
+		"524288":                  524288,
+		"@t 18446744073709551615": 0, // unlimited: leave the unit alone
+		"garbage":                 0,
+		"":                        0,
+	} {
+		if got := parseManagerUint(in); got != want {
+			t.Errorf("parseManagerUint(%q) = %d, want %d", in, got, want)
+		}
+	}
+}
+
+func TestIsNoSuchUnit(t *testing.T) {
+	if !isNoSuchUnit(godbus.Error{Name: "org.freedesktop.systemd1.NoSuchUnit"}) || !isNoSuchUnit(godbus.Error{Name: "org.freedesktop.DBus.Error.UnknownObject"}) {
+		t.Fatal("systemd's not-loaded errors must map to not-found")
+	}
+	if isNoSuchUnit(errors.New("dbus: connection closed")) || isNoSuchUnit(godbus.Error{Name: "org.freedesktop.DBus.Error.NoReply"}) {
+		t.Fatal("transport failures must not read as not-found")
+	}
+}
+
+func TestStatusFromPropsAndStopBudget(t *testing.T) {
+	st := statusFromProps(map[string]any{
+		"LoadState": "loaded", "ActiveState": "active", "SubState": "running",
+		"MainPID": uint32(77), "ExecMainCode": int32(1), "ExecMainStatus": int32(3),
+		"TimeoutStopUSec": uint64(60_000_000),
+	})
+	if st.MainPID != 77 || st.ExecMainStatus != 3 || st.StopTimeout != time.Minute {
+		t.Fatalf("parsed %+v", st)
+	}
+	// The unit's own budget wins over a smaller caller grace; a larger
+	// caller grace wins; nothing known ⇒ default, never zero.
+	if st.stopBudget(3*time.Second) != time.Minute || st.stopBudget(2*time.Minute) != 2*time.Minute {
+		t.Fatal("stopBudget must take the larger of unit budget and grace")
+	}
+	if (unitStatus{}).stopBudget(0) != defaultStopTimeout {
+		t.Fatal("unknown budget and zero grace must fall back to the default")
 	}
 }
 
@@ -722,19 +770,22 @@ func TestSweepUnknownApps(t *testing.T) {
 }
 
 func TestSweepUnknownAppsJudgesAgainstLiveConfig(t *testing.T) {
-	// A sweep in flight must not act on a stale app set: a reload that
-	// adds "late" while the sweep is listing waits for the sweep, and
-	// the sweep sees the set as published, never an older capture.
+	// A reload adds "late" back while the sweep is still listing: the
+	// publication must not wait for the sweep, and the sweep must judge
+	// against the set as published — never a capture from before.
 	conn := newFakeSystemdConn()
 	running := unitStatus{LoadState: "loaded", ActiveState: "active"}
 	conn.setStatus("hotserve-late.v1.0a1b2c3d.service", running)
-	setConfiguredApps(map[string]bool{"late": true})
+	setConfiguredApps(map[string]bool{}) // "late" is not configured when the sweep starts
 	t.Cleanup(func() { setConfiguredApps(map[string]bool{}) })
+	conn.mu.Lock()
+	conn.listHook = func() { setConfiguredApps(map[string]bool{"late": true}) } // the reload lands mid-listing
+	conn.mu.Unlock()
 	if err := sweepUnknownApps(context.Background(), conn, zap.NewNop()); err != nil {
 		t.Fatal(err)
 	}
 	if len(conn.stops()) != 0 {
-		t.Fatalf("a configured app's unit must never be swept, got %v", conn.stops())
+		t.Fatalf("an app the live config names must never be swept, got %v", conn.stops())
 	}
 }
 

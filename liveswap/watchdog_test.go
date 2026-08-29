@@ -133,8 +133,11 @@ func TestWatchdogHealthFailureOnDeadInstanceIsACrash(t *testing.T) {
 // place: launching a replacement beside it would be two instances.
 func TestWatchdogUnconfirmedStopAbortsRestart(t *testing.T) {
 	rig := newTestRig(t)
-	rig.spec.wdGrace = 0
+	// A long grace: the retry must not wait for it (the instance is
+	// already known unhealthy), which is what proves skipNextGrace.
+	rig.spec.wdGrace = time.Hour
 	deployV1(t, rig)
+	rig.ma.wd.skipNextGrace() // the first pass probes immediately; only the retry proves the skip
 	port := rig.ma.activePort.Load()
 	rig.prober.setProbeErr(errors.New("health check returned 500"))
 	rig.runner.stopErr = errTest
@@ -156,6 +159,9 @@ func TestWatchdogUnconfirmedStopAbortsRestart(t *testing.T) {
 	}
 	if rig.runner.stopCount() < 2 {
 		t.Fatalf("the next cycle must retry the stop, got %d stops", rig.runner.stopCount())
+	}
+	if wd := rig.ma.status().Watchdog; wd == nil || wd.RestartsInWindow != 0 {
+		t.Fatalf("no restart happened, so no budget may be consumed: %+v", wd)
 	}
 }
 

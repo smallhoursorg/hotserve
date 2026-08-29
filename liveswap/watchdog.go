@@ -76,6 +76,7 @@ type watchdogState struct {
 	healthySince     time.Time
 	lastRestartAt    time.Time
 	lastRestartCause string
+	skipGrace        bool // next superviseInstance re-arms no grace window
 	lastFailure      string
 	jitter           func() float64 // test seam; nil = rand.Float64
 }
@@ -166,6 +167,22 @@ func (w *watchdogState) consumeBudget(now time.Time, budget int, window time.Dur
 // must not drain the budget, or a long deploy over a dead instance
 // exhausts it with zero restarts performed. No-op if a deploy's reset
 // already cleared the window.
+// skipNextGrace asks the next supervision pass not to re-arm the grace
+// window: the instance is already known unhealthy.
+func (w *watchdogState) skipNextGrace() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.skipGrace = true
+}
+
+func (w *watchdogState) takeSkipGrace() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	s := w.skipGrace
+	w.skipGrace = false
+	return s
+}
+
 func (w *watchdogState) refundBudget() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -293,7 +310,11 @@ func (ma *managedApp) parkWatchdog(ctx context.Context, c collaborators) {
 // loop should exit entirely (ctx canceled).
 func (ma *managedApp) superviseInstance(ctx context.Context, c collaborators, inst *instance) bool {
 	waitCh := c.runner.Wait(inst.handle) // nil ⇒ Alive polling on the tick below
-	graceUntil := c.clock.Now().Add(c.spec.wdGrace)
+	grace := c.spec.wdGrace
+	if ma.wd.takeSkipGrace() {
+		grace = 0 // re-supervising a known-unhealthy instance whose stop failed
+	}
+	graceUntil := c.clock.Now().Add(grace)
 	// The next-probe deadline survives non-tick wakeups: re-arming a
 	// full interval on every wdNotify poke would let sustained config
 	// reload churn postpone health probing indefinitely.
@@ -522,9 +543,12 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 			// The runner could not confirm the instance is gone, so a
 			// replacement could run beside it. Leave things as they
 			// are (still routed if it is alive, unhealthy as it may
-			// be); the next cycle re-detects the failure and retries.
-			// The budget slot stays consumed, so this is rate-limited
-			// like any other restart.
+			// be). Nothing was restarted, so the budget slot is
+			// refunded, and the next supervision pass skips its grace
+			// window so the failure is re-detected and the stop
+			// retried promptly rather than after wdGrace.
+			ma.wd.refundBudget()
+			ma.wd.skipNextGrace()
 			c.logger.Error("watchdog: cannot confirm the unhealthy instance stopped; not launching a replacement",
 				zap.String("version", inst.version), zap.Error(err))
 			return true

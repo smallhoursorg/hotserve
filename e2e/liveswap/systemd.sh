@@ -109,7 +109,33 @@ sleep 1
 n=$(user_systemctl list-units --all --no-legend --plain "'hotserve-*'" | wc -l)
 [ "$n" = "1" ] && pass "exactly one hotserve unit loaded" || fail "expected 1 loaded hotserve unit, found $n"
 
-echo "=== systemd 6: app output reaches the journal ==="
+echo "=== systemd 6: a unit gone behind hotserve's back is relaunched on start ==="
+# The cold path recovery takes when the recorded unit no longer exists
+# (a reboot, a manual stop — and a v0.1.0 state.json with no unit at
+# all): not reattach, but launch. Stop the unit as the operator might,
+# restart hotserve, and expect the same version back on a new pid.
+s=$(status)
+gunit=$(json_str "$s" unit)
+gpid=$(json_num "$s" pid)
+user_systemctl stop "$gunit"
+systemctl restart hotserve || fail "systemctl restart hotserve failed"
+wait_hook || fail "webhook not back within 30s of restart"
+i=0
+until [ -n "$(json_num "$(status)" pid)" ] && [ "$(json_num "$(status)" pid)" != "$gpid" ]; do
+	i=$((i + 1))
+	[ "$i" -ge 60 ] && break
+	sleep 0.5
+done
+s=$(status)
+if [ -n "$(json_num "$s" pid)" ] && [ "$(json_num "$s" pid)" != "$gpid" ] && [ "$(json_str "$s" unit)" != "$gunit" ]; then
+	pass "recovery relaunched the recorded version as a new unit (pid $gpid -> $(json_num "$s" pid))"
+else
+	fail "no relaunch after the unit was stopped behind hotserve's back: $s"
+fi
+case "$s" in *'"current_version":"sd-final"'*) pass "the relaunched instance is the recorded version" ;; *) fail "unexpected version after relaunch: $s" ;; esac
+case "$(body)" in "hello v1"*) pass "proxy serves the relaunched instance" ;; *) fail "proxy not serving after relaunch" ;; esac
+
+echo "=== systemd 7: app output reaches the journal ==="
 journalctl --no-pager -t hotserve-demo | grep -q "workers up" \
 	&& pass "app stdout is in the journal under identifier hotserve-demo" \
 	|| fail "no app output in the journal for -t hotserve-demo"
