@@ -24,7 +24,7 @@ POST /blog {url, version}
   │ soaking       GET /health until continuously healthy for `soak`
   │ promoting     atomic cutover — new requests hit the new version
   │ draining      wait `drain` for in-flight requests on the old one
-  │ stopping_old  SIGTERM the old process group, SIGKILL after `grace`
+  │ stopping_old  stop the old unit: SIGTERM its whole cgroup, SIGKILL after `grace`
   └ 200 OK        (any failure before "promoting" → old version never
                    stopped serving, webhook returns 5xx, CI goes red)
 ```
@@ -405,9 +405,10 @@ What's yours to handle:
 - Keep the **local signing key** (`deploy_trust local`) off the box —
   it belongs on the machine that mints tokens. The box needs only the
   `.pub`. (CI OIDC avoids a stored key entirely.)
-- Your app's **stdout/stderr is relayed** into hotserve's log. If your
-  app prints its own secrets at startup, they end up in the journal —
-  that one's on the app.
+- Your app's **stdout/stderr go to the journal** under the identifier
+  `hotserve-<app>` (`journalctl -t hotserve-blog`, or by unit name —
+  the status endpoint reports it). If your app prints its own secrets
+  at startup, they end up in the journal — that one's on the app.
 
 ## Deploying from CI
 
@@ -496,14 +497,22 @@ failure the previous version never stopped serving.
 
 ## Semantics and trade-offs (read this)
 
-- **Apps are child processes of Caddy.** Config reloads never touch
-  them (deploy state lives outside the config, reference-counted across
-  reloads — proven by an e2e scenario that reloads mid-traffic and
-  asserts the app's PID is unchanged). But when the **Caddy binary
-  itself** restarts (upgrade, reboot), apps restart with it: on boot,
-  liveswap relaunches each app's recorded current version and serves it
-  as soon as the process is up. A systemd-backed runner that survives
-  Caddy restarts is a designed-for v2 extension.
+- **Apps are systemd units, not children of hotserve.** Each instance
+  is a transient service under the hotserve user's own systemd manager
+  (`user@<uid>.service`, kept alive by lingering — the package sets
+  this up; self-managed installs need `loginctl enable-linger
+  hotserve` and `libpam-systemd`, and hotserve refuses to start apps
+  without that manager). Config reloads never touch them (deploy state
+  lives outside the config, reference-counted across reloads — proven
+  by an e2e scenario that reloads mid-traffic and asserts the app's
+  PID is unchanged), and neither do **hotserve restarts and upgrades**:
+  on start, liveswap reattaches to the unit recorded in `state.json`
+  and serves it immediately; only if that unit is gone (reboot, or it
+  died meanwhile) is the current version relaunched. Stopping hotserve
+  therefore leaves apps running until the next start; removing the
+  package stops them. Units are created with `Restart=no` — the
+  watchdog is the only restarter — and stopping a version kills its
+  whole cgroup, so worker trees never outlive it.
 - **Changed app definitions apply on the next deploy**, never by
   restarting a running app mid-reload.
 - **No post-promote *auto*-revert.** Once traffic cuts over, the deploy
@@ -517,7 +526,9 @@ failure the previous version never stopped serving.
   CI retries are the queue. Different apps deploy in parallel.
 - **Single node by design.** This is for the 1-server indie stack, not
   a cluster.
-- **Unix only** (Linux servers, macOS dev). Windows is not supported.
+- **Linux with systemd only.** liveswap talks to the systemd user
+  manager over D-Bus; there is no other process runner. Development on
+  macOS happens in Docker (see below).
 - Deploy tokens and artifact-URL query strings never appear in logs.
 
 ## Development
@@ -528,7 +539,7 @@ Docker):
 
 ```sh
 make test              # unit tests, all modules (race + coverage)
-make test-integration  # real Caddy + real processes via caddytest
+make test-integration  # real Caddy + real systemd units via caddytest (privileged systemd container)
 make e2e               # both module suites against the hotserve binary
 make lint vet tidy
 ```
