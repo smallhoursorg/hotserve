@@ -137,6 +137,7 @@ func TestValidate(t *testing.T) {
 		{"zero watchdog restarts", func(a *App) { a.Apps["blog"].WatchdogRestarts = -1 }, "watchdog_restarts must be at least 1"},
 		{"negative watchdog grace", func(a *App) { a.Apps["blog"].WatchdogGrace = caddy.Duration(-time.Second) }, "watchdog_grace must not be negative"},
 		{"negative watchdog window", func(a *App) { a.Apps["blog"].WatchdogWindow = caddy.Duration(-time.Second) }, "watchdog_window must be positive"},
+		{"bad env key", func(a *App) { a.Apps["blog"].Env = map[string]string{"my-var": "1"} }, `env key "my-var"`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

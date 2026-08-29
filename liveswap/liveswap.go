@@ -1,7 +1,7 @@
 // Package liveswap turns Caddy into a zero-downtime deploy orchestrator
 // for a single server. CI builds a tarball and POSTs a webhook with its
 // URL and version; Caddy downloads it, runs an optional pre-start
-// command (migrations), starts the new version as a child process on a
+// command (migrations), starts the new version as a systemd unit on a
 // fresh localhost port, health-gates it, atomically cuts traffic over,
 // then gracefully stops the old version. Part of hotserve, from
 // smallhours.
@@ -15,11 +15,14 @@
 package liveswap
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
@@ -34,9 +37,9 @@ func init() {
 // instance. This is what makes app processes survive config reloads:
 // Caddy provisions the new config (which takes a pool reference) before
 // it cleans up the old one (which releases its reference), so the
-// refcount never touches zero across a reload and Destruct — which
-// stops the child process — only runs at real shutdown or when an app
-// is removed from the config.
+// refcount never touches zero across a reload and Destruct only runs
+// at real shutdown (where it leaves the unit running for reattach) or
+// when an app is removed from the config (where it stops it).
 var appPool = caddy.NewUsagePool()
 
 func poolKey(name string) string { return "liveswap:app:" + name }
@@ -107,9 +110,17 @@ type App struct {
 	// argument to `dynamic liveswap <name>`.
 	Apps map[string]*AppConfig `json:"apps,omitempty"`
 
-	logger          *zap.Logger
-	managed         map[string]*managedApp
-	pooled          []string // pool keys this config instance holds references to
+	logger  *zap.Logger
+	managed map[string]*managedApp
+	specs   map[string]*appSpec // built in Provision, installed at Start
+	clients *fetchClients
+	started bool     // Start ran: this config counts as live until Cleanup
+	pooled  []string // pool keys this config instance holds references to
+	// recoverCancel/recoverWG own the boot-recovery goroutines this
+	// config started, so Cleanup can end them before rolling back or
+	// releasing anything.
+	recoverCancel   context.CancelFunc
+	recoverWG       *sync.WaitGroup // pointer: App values are copied by Caddy
 	allowlist       []artifactAllowEntry
 	globalTrust     []trustSource // resolved global DeployTrust, for the unknown-app path
 	globalVerifiers []verifier
@@ -292,23 +303,35 @@ func (a *App) Provision(ctx caddy.Context) error {
 	if err := a.Validate(); err != nil {
 		return err
 	}
-	for name, spec := range specs {
+	// Take pool references now (so a reload never drops the refcount to
+	// zero) but install nothing on the pooled apps until Start: Caddy
+	// keeps the old config if any app's Start fails, and `validate`
+	// never starts at all — neither may leave a rejected spec live on
+	// an app that is still serving under the previous config.
+	a.specs = specs
+	a.clients = clients
+	for name := range specs {
 		val, _ := appPool.LoadOrStore(poolKey(name), newManagedApp(name))
-		ma := val.(*managedApp)
-		ma.configure(spec, a.logger.Named(name), clients)
-		ma.startWatchdog()
-		a.managed[name] = ma
+		a.managed[name] = val.(*managedApp)
 		a.pooled = append(a.pooled, poolKey(name))
 	}
 	// Warm OIDC discovery in the background so the first verification of a
 	// known app is not slower (by JWKS-fetch latency) than an unknown one.
 	sets := [][]verifier{a.globalVerifiers}
-	for _, ma := range a.managed {
-		sets = append(sets, ma.currentVerifiers())
+	for _, spec := range specs {
+		sets = append(sets, resolveVerifiers(spec.trust, clients.jwks))
 	}
 	warmVerifiers(sets...)
 	return nil
 }
+
+// liveStartedApps counts liveswap configs that have Started and not
+// yet been Cleaned up. It is how Destruct tells "an app was removed by
+// a reload that is now serving" (another started config is live: stop
+// the units) from "this config never became the serving one" — a
+// candidate rejected by another app's Start, `validate`, or process
+// exit — where the units belong to whoever is or will be serving them.
+var liveStartedApps atomic.Int32
 
 func (cfg *AppConfig) applyDefaults(repl *caddy.Replacer) {
 	resolveTrustPlaceholders(repl, cfg.DeployTrust)
@@ -422,6 +445,11 @@ func (a *App) Validate() error {
 		if !appNameRe.MatchString(name) {
 			return fmt.Errorf("app name %q must match %s", name, appNameRe)
 		}
+		for k := range cfg.Env {
+			if !validEnvKey(k) {
+				return fmt.Errorf("app %s: env key %q is not a valid environment variable name (must match %s)", name, k, envKeyRe)
+			}
+		}
 		if len(cfg.Command) == 0 {
 			return fmt.Errorf("app %s: command is required", name)
 		}
@@ -481,11 +509,48 @@ func (a *App) Validate() error {
 // the background so a slow app cannot stall config load; the health
 // gate is a deploy gate, not a boot gate.
 func (a *App) Start() error {
+	// Apps run as transient units under this user's systemd manager.
+	// Prove it answers before anything runs, with an error that says
+	// what to fix; there is deliberately no fallback runner. Checked
+	// here rather than in Provision so `hotserve validate` — which
+	// provisions and cleans up without starting — works as any user.
+	if len(a.managed) > 0 {
+		if err := probeUserManager(); err != nil {
+			return err
+		}
+	}
 	for name, ma := range a.managed {
+		ma.configure(a, a.specs[name], a.logger.Named(name), a.clients)
+		ma.startWatchdog()
+	}
+	a.started = true
+	liveStartedApps.Add(1)
+	// Units of apps no loaded config names have no managedApp to sweep
+	// them (removed or renamed while hotserve was down): settle them
+	// against the manager's own listing. Background, like recovery;
+	// the sweep judges each app against the pool right before acting,
+	// so neither a reload racing it nor a candidate config that later
+	// fails to activate can lose an app someone still holds.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), unknownAppSweepTimeout)
+		defer cancel()
+		if err := sweepUnknownApps(ctx, userManager, a.logger); err != nil {
+			a.logger.Error("sweeping units of apps no longer configured", zap.Error(err))
+		}
+	}()
+	// Recovery belongs to this config: Cleanup cancels and joins it
+	// before rolling a rejected definition back or releasing pool
+	// references, so a recovery that snapshotted a rejected spec can
+	// never launch with it, and a removed app's final sweep runs after
+	// its recovery, not before.
+	ctx, cancel := context.WithCancel(context.Background())
+	a.recoverCancel = cancel
+	a.recoverWG = new(sync.WaitGroup)
+	for name, ma := range a.managed {
+		a.recoverWG.Add(1)
 		go func(name string, ma *managedApp) {
-			if err := ma.ensureRunning(); err != nil {
-				a.logger.Error("recovery failed", zap.String("app", name), zap.Error(err))
-			}
+			defer a.recoverWG.Done()
+			ma.recover(ctx, a.logger.Named(name))
 		}(name, ma)
 	}
 	return nil
@@ -499,8 +564,34 @@ func (a *App) Stop() error { return nil }
 
 // Cleanup releases this config's pool references. When the last
 // reference goes (shutdown, or an app removed from the config), the
-// pool calls managedApp.Destruct, which stops the child process.
+// pool calls managedApp.Destruct: an app removed from the config is
+// stopped; on process exit the units stay up for the next start.
 func (a *App) Cleanup() error {
+	if a.recoverCancel != nil {
+		a.recoverCancel()
+		// An attempt in flight is bounded by the runner's own
+		// deadlines; on process exit it is not worth waiting for
+		// (the next start's sweep settles anything it leaves).
+		if !caddyExiting() {
+			a.recoverWG.Wait()
+		}
+	}
+	if a.started {
+		a.started = false
+		liveStartedApps.Add(-1)
+		// A candidate Caddy rejected after our Start (another app's
+		// Start failed) is cleaned up while the config it would have
+		// replaced still holds the apps: give them back the serving
+		// definition. A config replaced by a successful reload is not
+		// the last writer, so this is a no-op for it.
+		for name, ma := range a.managed {
+			if refs, ok := appPool.References(poolKey(name)); ok && refs > 1 {
+				if ma.rollbackConfig(a) {
+					a.logger.Warn("config rejected after start; restored the serving definition", zap.String("app", name))
+				}
+			}
+		}
+	}
 	var firstErr error
 	for _, key := range a.pooled {
 		if _, err := appPool.Delete(key); err != nil && firstErr == nil {
@@ -515,6 +606,10 @@ func (a *App) Cleanup() error {
 func (a *App) managedApp(name string) *managedApp {
 	return a.managed[name]
 }
+
+// unknownAppSweepTimeout bounds the start-time sweep of units whose
+// apps are no longer configured.
+const unknownAppSweepTimeout = 2 * time.Minute
 
 // Interface guards.
 var (

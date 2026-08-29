@@ -103,6 +103,112 @@ func TestWatchdogRestartsOnCrash(t *testing.T) {
 	}
 }
 
+// A health verdict whose instance turns out dead by restart time is
+// recorded as a crash: which signal noticed first is an accident of
+// probe interval versus the runner's unit-state poll.
+func TestWatchdogHealthFailureOnDeadInstanceIsACrash(t *testing.T) {
+	rig := newTestRig(t)
+	rig.spec.wdGrace = 0
+	deployV1(t, rig)
+	rig.prober.setProbeErr(errors.New("connection refused"))
+	rig.startWatchdogT(t)
+
+	advanceUntil(t, rig, rig.spec.healthInterval, "health verdict reached", func() bool {
+		return rig.ma.wd.currentState() == wdStateBackoff
+	})
+	rig.runner.handleAt(0).dieQuietly()
+	rig.prober.setProbeErr(nil)
+	advanceUntil(t, rig, time.Second, "restart", func() bool {
+		return rig.runner.startCount() == 2
+	})
+	if rig.runner.stopCount() != 0 {
+		t.Fatalf("a dead instance must not be stopped, got %d stops", rig.runner.stopCount())
+	}
+	if status := rig.ma.status(); status.Watchdog == nil || status.Watchdog.LastRestartCause != "crash" {
+		t.Fatalf("a dead instance's restart must be recorded as a crash: %+v", status.Watchdog)
+	}
+}
+
+// An unhealthy instance the runner cannot confirm stopped is left in
+// place: launching a replacement beside it would be two instances.
+func TestWatchdogUnconfirmedStopAbortsRestart(t *testing.T) {
+	rig := newTestRig(t)
+	// A long grace: the retry must not wait for it (the instance is
+	// already known unhealthy), which is what proves skipNextGrace.
+	rig.spec.wdGrace = time.Hour
+	deployV1(t, rig)
+	rig.ma.wd.skipNextGrace(rig.runner.handleAt(0)) // the first pass probes immediately; only the retry proves the skip
+	port := rig.ma.activePort.Load()
+	rig.prober.setProbeErr(errors.New("health check returned 500"))
+	rig.runner.stopErr = errTest
+	rig.runner.stopLeavesAlive = true
+	rig.startWatchdogT(t)
+
+	advanceUntil(t, rig, rig.spec.healthInterval, "stop attempted", func() bool {
+		return rig.runner.stopCount() >= 1
+	})
+	// Give the loop every chance to (wrongly) launch.
+	advanceUntil(t, rig, rig.spec.healthInterval, "several more probes", func() bool {
+		return rig.prober.calls() >= rig.spec.wdFailures*3
+	})
+	if rig.runner.startCount() != 1 {
+		t.Fatalf("no replacement may be launched beside an unconfirmed instance, got %d starts", rig.runner.startCount())
+	}
+	if rig.ma.activePort.Load() != port {
+		t.Fatal("the still-alive instance stays routed")
+	}
+	if rig.runner.stopCount() < 2 {
+		t.Fatalf("the next cycle must retry the stop, got %d stops", rig.runner.stopCount())
+	}
+	if wd := rig.ma.status().Watchdog; wd == nil || wd.RestartsInWindow != 0 {
+		t.Fatalf("no restart happened, so no budget may be consumed: %+v", wd)
+	}
+}
+
+// A crash restart is a launch like any other: without a confirmed
+// sweep nothing is started, and the next cycle tries again.
+func TestWatchdogRestartAbortsWhenSweepUnconfirmed(t *testing.T) {
+	rig := newTestRig(t)
+	deployV1(t, rig)
+	rig.startWatchdogT(t)
+	waitUntil(t, "watchdog to arm", func() bool {
+		s := rig.ma.wd.currentState()
+		return s == wdStateGrace || s == wdStateWatching
+	})
+	rig.runner.sweepErr = errTest
+	rig.runner.handleAt(0).kill()
+	advanceUntil(t, rig, time.Second, "restart attempted (sweep called)", func() bool {
+		return rig.runner.sweepCount() >= 3 // 2 from the deploy, then the restart's
+	})
+	if rig.runner.startCount() != 1 {
+		t.Fatalf("no launch without a confirmed sweep, got %d starts", rig.runner.startCount())
+	}
+	rig.runner.sweepErr = nil
+	advanceUntil(t, rig, time.Second, "restart once the sweep confirms", func() bool {
+		return rig.runner.startCount() == 2
+	})
+}
+
+func TestWatchdogSkipGraceIsScopedToTheHandle(t *testing.T) {
+	var w watchdogState
+	h1, h2 := &fakeHandle{id: "1"}, &fakeHandle{id: "2"}
+	w.skipNextGrace(h1)
+	if w.takeSkipGrace(h2) {
+		t.Fatal("another instance must get its full grace")
+	}
+	if !w.takeSkipGrace(h1) {
+		t.Fatal("the flagged instance must skip grace (once)")
+	}
+	if w.takeSkipGrace(h1) {
+		t.Fatal("consumed")
+	}
+	w.skipNextGrace(h1)
+	w.reset() // a successful deploy
+	if w.takeSkipGrace(h1) {
+		t.Fatal("a deploy reset must clear a pending skip")
+	}
+}
+
 func TestWatchdogHealthFailuresBelowThresholdReset(t *testing.T) {
 	rig := newTestRig(t)
 	rig.spec.wdGrace = 0

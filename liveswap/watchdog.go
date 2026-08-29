@@ -76,6 +76,7 @@ type watchdogState struct {
 	healthySince     time.Time
 	lastRestartAt    time.Time
 	lastRestartCause string
+	skipGraceFor     handle // superviseInstance re-arms no grace for this handle
 	lastFailure      string
 	jitter           func() float64 // test seam; nil = rand.Float64
 }
@@ -160,6 +161,25 @@ func (w *watchdogState) consumeBudget(now time.Time, budget int, window time.Dur
 	return true
 }
 
+// skipNextGrace asks the next supervision pass of h not to re-arm the
+// grace window: that instance is already known unhealthy. Tied to the
+// handle so a deploy that replaces it meanwhile gets its full grace.
+func (w *watchdogState) skipNextGrace(h handle) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.skipGraceFor = h
+}
+
+func (w *watchdogState) takeSkipGrace(h handle) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.skipGraceFor == nil || w.skipGraceFor != h {
+		return false // another instance's flag (or none) stays put
+	}
+	w.skipGraceFor = nil
+	return true
+}
+
 // refundBudget returns the most recently claimed slot. Called when a
 // claimed restart is abandoned without a Start ever happening (a
 // deploy owns the lifecycle, or replaced the instance): those cycles
@@ -229,6 +249,7 @@ func (w *watchdogState) reset() {
 	w.backoffStep = 0
 	w.healthySince = time.Time{}
 	w.lastFailure = ""
+	w.skipGraceFor = nil
 }
 
 func (w *watchdogState) statusSnapshot(now time.Time, window time.Duration) *watchdogSnapshot {
@@ -293,7 +314,11 @@ func (ma *managedApp) parkWatchdog(ctx context.Context, c collaborators) {
 // loop should exit entirely (ctx canceled).
 func (ma *managedApp) superviseInstance(ctx context.Context, c collaborators, inst *instance) bool {
 	waitCh := c.runner.Wait(inst.handle) // nil ⇒ Alive polling on the tick below
-	graceUntil := c.clock.Now().Add(c.spec.wdGrace)
+	grace := c.spec.wdGrace
+	if ma.wd.takeSkipGrace(inst.handle) {
+		grace = 0 // re-supervising a known-unhealthy instance whose stop failed
+	}
+	graceUntil := c.clock.Now().Add(grace)
 	// The next-probe deadline survives non-tick wakeups: re-arming a
 	// full interval on every wdNotify poke would let sustained config
 	// reload churn postpone health probing indefinitely.
@@ -491,6 +516,13 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 		return true
 	}
 
+	// A health verdict on an instance that is in fact dead is a crash:
+	// the probes merely noticed before the runner's unit-state poll
+	// did. Record the real cause.
+	if kind == failureHealth && !c.runner.Alive(inst.handle) {
+		kind = failureCrash
+	}
+
 	// A health verdict ages while we wait: the dependency outage that
 	// failed the probes may be long over, and killing a process that
 	// has been serving fine for the last nine minutes of a ten-minute
@@ -505,14 +537,25 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 		}
 	}
 
-	// Stop can block for up to `grace` while deployMu is held, so a
+	// Stop can block for the unit's own stop budget while deployMu is held, so a
 	// webhook landing in that window gets a 409 — the same contract as
 	// a deploy's own drain+stop-old phase (one lifecycle operation at
 	// a time), and the same bound Destruct accepts when it waits for
 	// this goroutine at shutdown.
 	if c.runner.Alive(inst.handle) {
 		if err := c.runner.Stop(inst.handle, spec.grace); err != nil {
-			c.logger.Warn("watchdog: stopping unhealthy instance", zap.Error(err))
+			// The runner could not confirm the instance is gone, so a
+			// replacement could run beside it. Leave things as they
+			// are (still routed if it is alive, unhealthy as it may
+			// be). Nothing was restarted, so the budget slot is
+			// refunded, and the next supervision pass skips its grace
+			// window so the failure is re-detected and the stop
+			// retried promptly rather than after wdGrace.
+			ma.wd.refundBudget()
+			ma.wd.skipNextGrace(inst.handle)
+			c.logger.Error("watchdog: cannot confirm the unhealthy instance stopped; not launching a replacement",
+				zap.String("version", inst.version), zap.Error(err))
+			return true
 		}
 	}
 	newInst, err := ma.launchVersion(c, inst.version)

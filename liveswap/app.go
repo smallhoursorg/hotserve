@@ -7,12 +7,15 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/caddyserver/caddy/v2"
 	"go.uber.org/zap"
 )
 
@@ -190,10 +193,19 @@ type managedApp struct {
 	// reloads, torn down in Destruct BEFORE the child is stopped so a
 	// mid-restart watchdog can never orphan a fresh process.
 	wdStarted bool // under specMu
+	wdCtx     context.Context
 	wdCancel  context.CancelFunc
-	wdWG      sync.WaitGroup
-	wdNotify  chan struct{} // buffered(1); poked whenever current changes
-	wd        watchdogState
+
+	// configuredBy is the config that installed the current spec, and
+	// prev what it replaced — so a candidate config Caddy rejects
+	// after our Start (another app's Start failed) can be rolled back
+	// by its Cleanup, leaving the still-serving config's definition in
+	// place. Under specMu.
+	configuredBy any
+	prev         *appConfigState
+	wdWG         sync.WaitGroup
+	wdNotify     chan struct{} // buffered(1); poked whenever current changes
+	wd           watchdogState
 }
 
 func newManagedApp(name string) *managedApp {
@@ -203,25 +215,39 @@ func newManagedApp(name string) *managedApp {
 // configure installs the latest spec and (re)wires collaborators. On
 // the first provision the runner/prober/etc. are created; on reloads
 // the spec, logger and state path are refreshed while the runner — and
-// with it any running child process — is left untouched: a changed
+// with it any running unit — is left untouched: a changed
 // definition takes effect on the next deploy, never by restarting a
 // running app.
-func (ma *managedApp) configure(spec *appSpec, logger *zap.Logger, clients *fetchClients) {
+// appConfigState is what a config installs on a pooled app and what
+// a rollback restores.
+type appConfigState struct {
+	spec      *appSpec
+	verifiers []verifier
+	logger    *zap.Logger
+	store     stateStore
+}
+
+// owner is the config installing this definition (see rollbackConfig).
+func (ma *managedApp) configure(owner any, spec *appSpec, logger *zap.Logger, clients *fetchClients) {
 	ma.specMu.Lock()
 	defer ma.specMu.Unlock()
 	changed := ma.spec != nil && !specEqual(ma.spec, spec)
+	if ma.spec != nil {
+		ma.prev = &appConfigState{spec: ma.spec, verifiers: ma.verifiers, logger: ma.logger, store: ma.store}
+	}
+	ma.configuredBy = owner
 	ma.spec = spec
 	// Deploy auth is not tied to the running process, so — unlike the
 	// runner — it is rewired on every reload and takes effect at once.
 	ma.verifiers = resolveVerifiers(spec.trust, clients.jwks)
 	ma.logger = logger
 	if ma.runner == nil {
-		ma.runner = newExecRunner(logger)
+		ma.runner = newSystemdRunner(userManager, logger)
 		ma.prober = &httpProber{client: clients.health, clock: realClock{}}
 		ma.fetch = &releaseFetcher{client: clients.download}
 		ma.clock = realClock{}
-	} else if er, ok := ma.runner.(*execRunner); ok {
-		er.setLogger(logger)
+	} else if sr, ok := ma.runner.(*systemdRunner); ok {
+		sr.setLogger(logger)
 	}
 	ma.store = &fileStateStore{path: spec.dirs.state}
 	if changed {
@@ -369,16 +395,19 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	// instance is really gone before deleting its release.
 	var newHandle handle
 	promoted := false
+	stopUnconfirmed := false // Stop of the failed instance returned an error
 	if !req.rollback {
 		defer func() {
 			if err == nil || promoted {
 				return
 			}
-			// Never delete a release out from under a failed instance that
-			// is still running (Stop may not have confirmed its exit) —
-			// that would pull files from beneath a live, leaked process.
-			if newHandle != nil && c.runner.Alive(newHandle) {
-				err = errors.Join(err, fmt.Errorf("release %s left on disk: the failed instance is still running", req.Version))
+			// Never delete a release out from under an instance that may
+			// still be running (a Stop that errored, a start or pre_start
+			// the runner could not reconcile, a handle still alive) —
+			// that would pull files from beneath a live process. The
+			// next deploy's sweep settles it against the runner.
+			if unitUnconfirmed(err) || (newHandle != nil && (stopUnconfirmed || c.runner.Alive(newHandle))) {
+				err = errors.Join(err, fmt.Errorf("release %s left on disk: the failed instance may still be running", req.Version))
 				return
 			}
 			// Surface a cleanup failure: otherwise the release lingers and
@@ -406,12 +435,21 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	// would be wrong, and a flaky preflight check must never block an
 	// emergency rollback.
 	if len(spec.preStart) > 0 && !req.rollback {
+		// A previous deploy's pre_start whose outcome could not be
+		// observed may still be running; settle the ledger before
+		// starting another migration beside it.
+		if !ma.sweep(c, oldHandle(old)) {
+			return fmt.Errorf("%w; not running pre_start", errSweepUnconfirmed)
+		}
 		ma.setPhase(c, "preparing")
 		preCtx, cancel := context.WithTimeout(ctx, spec.deadline)
 		err := c.runner.RunOnce(preCtx, startSpec{
+			app:     spec.name,
+			version: req.Version,
 			command: expandArgs(spec.preStart, spec, req.Version, port, releaseDir),
 			dir:     releaseDir,
 			env:     env,
+			grace:   spec.grace,
 		})
 		cancel()
 		if err != nil {
@@ -420,10 +458,19 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	}
 
 	ma.setPhase(c, "starting")
+	// No Start without a confirmed sweep (keeping the version that is
+	// serving): the new instance must not come up beside a unit the
+	// manager still holds for this app.
+	if !ma.sweep(c, oldHandle(old)) {
+		return fmt.Errorf("%w; not starting", errSweepUnconfirmed)
+	}
 	newHandle, err = c.runner.Start(startSpec{
+		app:     spec.name,
+		version: req.Version,
 		command: expandArgs(spec.command, spec, req.Version, port, releaseDir),
 		dir:     releaseDir,
 		env:     env,
+		grace:   spec.grace,
 	})
 	if err != nil {
 		return fmt.Errorf("start failed: %w", err)
@@ -440,11 +487,11 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		deadline: spec.deadline,
 	}); err != nil {
 		deployErr := fmt.Errorf("health gate: %w", err)
-		// If Stop can't confirm the instance exited (its SIGTERM failed
-		// and the process is still alive), surface that — and the cleanup
-		// defer will then leave the release in place rather than delete it
-		// beneath the live process.
-		if stopErr := c.runner.Stop(newHandle, spec.grace); stopErr != nil && c.runner.Alive(newHandle) {
+		// If Stop can't confirm the instance is gone, surface that — and
+		// the cleanup defer then leaves the release in place rather than
+		// delete it beneath a possibly live process.
+		if stopErr := c.runner.Stop(newHandle, spec.grace); stopErr != nil {
+			stopUnconfirmed = true
 			deployErr = errors.Join(deployErr, fmt.Errorf("failed instance could not be stopped: %w", stopErr))
 		}
 		return deployErr
@@ -470,10 +517,19 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		c.clock.Sleep(spec.drain)
 		ma.setPhase(c, "stopping_old")
 		if err := c.runner.Stop(old.handle, spec.grace); err != nil {
-			logger.Warn("stopping old version", zap.Error(err))
+			logger.Warn("stopping old version failed; the sweep below retries it", zap.String("version", old.version), zap.Error(err))
 		}
 	}
 
+	// Nothing is deleted while anything but the new instance may be
+	// running out of a release dir: the sweep settles that against
+	// the runner's own ledger (an unconfirmed stop above, a unit an
+	// earlier hotserve left behind), and any doubt skips GC — the next
+	// successful deploy catches up.
+	if !ma.sweep(c, newHandle) {
+		logger.Warn("skipping release GC for this deploy")
+		return nil
+	}
 	gcReleases(spec.dirs.releases, spec.keep, req.Version, logger)
 	return nil
 }
@@ -487,28 +543,56 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 // as the process is up.
 func (ma *managedApp) ensureRunning() error {
 	if !ma.deployMu.TryLock() {
-		return nil // a deploy is running; it owns the lifecycle
+		// A deploy owns the lifecycle right now; it may still fail
+		// before publishing anything, so recovery must look again.
+		return &transientRecoveryError{errors.New("a deploy is in progress")}
 	}
 	defer ma.deployMu.Unlock()
 
 	c := ma.snapshot()
 	spec := c.spec
 	if inst := ma.currentInstance(); inst != nil && c.runner.Alive(inst.handle) {
+		// Reload, or a retry after an earlier sweep could not confirm:
+		// the instance is fine; the ledger must still be settled.
+		if !ma.sweep(c, inst.handle) {
+			return &transientRecoveryError{fmt.Errorf("instance %s running; %w", inst.version, errSweepUnconfirmed)}
+		}
 		return nil
 	}
 	st, ok, err := c.store.load()
 	if err != nil {
-		return err
+		return &permanentRecoveryError{err} // corrupt state: never silently reset
 	}
 	if !ok || st.CurrentVersion == "" {
-		return nil // nothing was ever deployed
+		// Nothing recorded — but a deploy whose state write failed may
+		// have left a unit behind; the manager's ledger decides, not
+		// the absence of a file.
+		if !ma.sweep(c, nil) {
+			return &transientRecoveryError{errSweepUnconfirmed}
+		}
+		return nil
 	}
 	releaseDir := spec.dirs.release(st.CurrentVersion)
 	if _, err := os.Stat(releaseDir); err != nil {
-		return fmt.Errorf("state names version %s but its release dir is missing: %w", st.CurrentVersion, err)
+		return &permanentRecoveryError{fmt.Errorf("state names version %s but its release dir is missing: %w", st.CurrentVersion, err)}
 	}
 
-	if h, ok := c.runner.Reattach(st.Handle); ok {
+	// state.json is ours, but it is a file: a recorded unit name that
+	// is not one of this app's units is never handed to the manager
+	// (it could be a sibling's). Treat it as "nothing recorded".
+	if u := st.Handle.Unit; u != "" && !unitBelongsTo(u, ma.name) {
+		c.logger.Error("state.json names a unit that is not this app's; ignoring it", zap.String("unit", u))
+		st.Handle.Unit = ""
+	}
+	// An unreadable unit state is not "not running": launching beside
+	// a unit that may still be up would duplicate the app. Report it
+	// as transient; recover() retries with backoff until the manager
+	// answers, rather than guessing.
+	h, attached, err := c.runner.Reattach(st.Handle)
+	if err != nil {
+		return &transientRecoveryError{fmt.Errorf("cannot tell whether %s is still running; not relaunching: %w", st.CurrentVersion, err)}
+	}
+	if attached {
 		inst := &instance{version: st.CurrentVersion, port: st.Port, handle: h}
 		ma.mu.Lock()
 		ma.current = inst
@@ -516,12 +600,23 @@ func (ma *managedApp) ensureRunning() error {
 		ma.activePort.Store(int64(st.Port))
 		c.logger.Info("reattached to running instance", zap.String("version", st.CurrentVersion))
 		ma.pokeWatchdog()
+		if !ma.sweep(c, h) {
+			// Serving, but the ledger is unsettled: recover() retries
+			// and the retry path above sweeps again.
+			return &transientRecoveryError{fmt.Errorf("reattached %s; %w", st.CurrentVersion, errSweepUnconfirmed)}
+		}
 		return nil
 	}
 
 	inst, err := ma.launchVersion(c, st.CurrentVersion)
 	if err != nil {
-		return fmt.Errorf("relaunching %s: %w", st.CurrentVersion, err)
+		// A binary that cannot be found will not appear by retrying;
+		// everything else here (sweep, manager, unit reconcile) can.
+		var execErr *exec.Error
+		if errors.As(err, &execErr) {
+			return &permanentRecoveryError{fmt.Errorf("relaunching %s: %w", st.CurrentVersion, err)}
+		}
+		return &transientRecoveryError{fmt.Errorf("relaunching %s: %w", st.CurrentVersion, err)}
 	}
 	if err := ma.publishInstance(c, inst); err != nil {
 		c.logger.Warn("persisting recovered state", zap.Error(err))
@@ -530,6 +625,98 @@ func (ma *managedApp) ensureRunning() error {
 		zap.String("version", st.CurrentVersion), zap.Int("port", inst.port))
 	ma.pokeWatchdog()
 	return nil
+}
+
+// oldHandle is the handle of a possibly-nil instance, as a nil-safe
+// Sweep keep argument.
+func oldHandle(inst *instance) handle {
+	if inst == nil {
+		return nil
+	}
+	return inst.handle
+}
+
+// Recovery errors come in two kinds. transient: the manager could not
+// be asked, a deploy held the lock, a unit could not be reconciled —
+// retrying can fix it. permanent: the answer itself is bad (corrupt
+// state, missing release dir, command not found) and no retry will
+// change it. Anything not marked permanent is retried: an app down
+// for an unclassified reason costs a log line a minute, an app left
+// down for a transient one costs an outage.
+type transientRecoveryError struct{ err error }
+
+func (e *transientRecoveryError) Error() string { return e.err.Error() }
+func (e *transientRecoveryError) Unwrap() error { return e.err }
+
+type permanentRecoveryError struct{ err error }
+
+func (e *permanentRecoveryError) Error() string { return e.err.Error() }
+func (e *permanentRecoveryError) Unwrap() error { return e.err }
+
+// transientRecovery reports whether err is worth retrying.
+func transientRecovery(err error) bool {
+	var p *permanentRecoveryError
+	return err != nil && !errors.As(err, &p)
+}
+
+// errSweepUnconfirmed is the launch refusal when a pre-start sweep
+// cannot confirm the app has no other unit running.
+var errSweepUnconfirmed = errors.New("cannot confirm no other instance is running")
+
+const (
+	recoveryBackoffFloor = 2 * time.Second
+	recoveryBackoffCap   = time.Minute
+)
+
+// recover runs ensureRunning until it succeeds or fails for a reason a
+// retry cannot fix, backing off on transient manager trouble. A boot
+// where the user manager is briefly unresponsive must not leave a
+// healthy app unrouted until an operator reloads. ctx belongs to the
+// config that started it and ends at that config's Cleanup.
+func (ma *managedApp) recover(ctx context.Context, logger *zap.Logger) {
+	delay := recoveryBackoffFloor
+	for attempt := 1; ; attempt++ {
+		if ctx.Err() != nil {
+			return // destructed before this attempt
+		}
+		err := ma.ensureRunning()
+		if err == nil {
+			return
+		}
+		if !transientRecovery(err) {
+			logger.Error("recovery failed", zap.Error(err))
+			return
+		}
+		// Loud once, then a heartbeat: a manager that is down for an
+		// hour should not fill the journal with sixty errors.
+		level := zap.WarnLevel
+		if attempt == 1 {
+			level = zap.ErrorLevel
+		}
+		logger.Log(level, "recovery deferred; retrying", zap.Int("attempt", attempt), zap.Duration("in", delay), zap.Error(err))
+		select {
+		case <-ctx.Done():
+			return
+		case <-ma.snapshot().clock.After(delay):
+		}
+		if delay *= 2; delay > recoveryBackoffCap {
+			delay = recoveryBackoffCap
+		}
+	}
+}
+
+// sweep stops every unit of this app other than keep — the runner's
+// ledger, not ours, decides what is running. Recovery calls it so a
+// unit hotserve lost track of (a state.json write that failed, an
+// earlier stop that could not be confirmed) does not outlive the next
+// start; deploys call it before GC. Returns false if something may
+// still be running, in which case callers must not delete anything.
+func (ma *managedApp) sweep(c collaborators, keep handle) bool {
+	if err := c.runner.Sweep(ma.name, keep); err != nil {
+		c.logger.Error("sweeping stray instances", zap.Error(err))
+		return false
+	}
+	return true
 }
 
 // launchVersion starts an already-on-disk version on a fresh port and
@@ -553,10 +740,20 @@ func (ma *managedApp) launchVersion(c collaborators, version string) (*instance,
 	if err != nil {
 		return nil, err
 	}
+	// No Start without a confirmed sweep: whatever the manager still
+	// runs for this app (a unit an earlier hotserve lost track of, a
+	// stop that could not be confirmed) is settled first, or nothing
+	// is launched beside it.
+	if !ma.sweep(c, nil) {
+		return nil, fmt.Errorf("%w; not launching", errSweepUnconfirmed)
+	}
 	h, err := c.runner.Start(startSpec{
+		app:     spec.name,
+		version: version,
 		command: expandArgs(spec.command, spec, version, port, releaseDir),
 		dir:     releaseDir,
 		env:     env,
+		grace:   spec.grace,
 	})
 	if err != nil {
 		return nil, err
@@ -618,14 +815,17 @@ func (ma *managedApp) currentInstance() *instance {
 
 // statusSnapshot backs the webhook's GET endpoint.
 type statusSnapshot struct {
-	App            string            `json:"app"`
-	Phase          string            `json:"phase"`
-	CurrentVersion string            `json:"current_version,omitempty"`
-	Port           int               `json:"port,omitempty"`
-	PID            int               `json:"pid,omitempty"`
-	Running        bool              `json:"running"`
-	LastDeploy     *deployResult     `json:"last_deploy,omitempty"`
-	Watchdog       *watchdogSnapshot `json:"watchdog,omitempty"`
+	App            string `json:"app"`
+	Phase          string `json:"phase"`
+	CurrentVersion string `json:"current_version,omitempty"`
+	Port           int    `json:"port,omitempty"`
+	PID            int    `json:"pid,omitempty"`
+	// Unit is the systemd unit running the instance — what to pass to
+	// journalctl for the app's own output.
+	Unit       string            `json:"unit,omitempty"`
+	Running    bool              `json:"running"`
+	LastDeploy *deployResult     `json:"last_deploy,omitempty"`
+	Watchdog   *watchdogSnapshot `json:"watchdog,omitempty"`
 	// AvailableVersions lists the on-disk releases, newest-first — the
 	// versions `?rollback=<version>` can relaunch. Always serialized (a
 	// healthy app with no releases reports []), so an empty set is
@@ -652,26 +852,91 @@ func (ma *managedApp) status() statusSnapshot {
 	if ma.current != nil {
 		s.CurrentVersion = ma.current.version
 		s.Port = ma.current.port
-		s.PID = ma.current.handle.state().PID
+		hs := ma.current.handle.state()
+		s.PID = hs.PID
+		s.Unit = hs.Unit
 		s.Running = c.runner.Alive(ma.current.handle)
 	}
 	return s
 }
+
+// rollbackConfig restores the definition owner replaced, if owner's is
+// still the one installed (a later config's stays). Used when a
+// candidate is cleaned up while another config still holds the app.
+func (ma *managedApp) rollbackConfig(owner any) bool {
+	ma.specMu.Lock()
+	defer ma.specMu.Unlock()
+	if ma.configuredBy != owner || ma.prev == nil {
+		return false
+	}
+	p := ma.prev
+	ma.spec, ma.verifiers, ma.logger, ma.store = p.spec, p.verifiers, p.logger, p.store
+	ma.prev = nil
+	ma.configuredBy = nil
+	if sr, ok := ma.runner.(*systemdRunner); ok {
+		sr.setLogger(p.logger)
+	}
+	// The watchdog re-snapshots the spec on a poke; without one, a
+	// candidate that had turned it off could leave it parked on the
+	// restored (watchdog on) definition.
+	ma.pokeWatchdog()
+	return true
+}
+
+// Known limitation, accepted: Caddy offers apps no "config accepted"
+// hook, so between this app's Start and the whole config's activation
+// the watchdog and recovery act on the candidate definition. Rollback
+// restores the definition; it cannot undo an action taken in that
+// window (a restart with the candidate's settings). Closing it would
+// mean suspending supervision during every reload, which is worse
+// than the milliseconds-wide window it removes.
+
+// caddyExiting reports whether the whole process is shutting down (as
+// opposed to a config unloading an app); a variable so tests can flip it.
+var caddyExiting = caddy.Exiting
 
 // Destruct is called by the UsagePool when the last config referencing
 // this app is unloaded — i.e. real shutdown or the app being removed
 // from the Caddyfile, never a plain reload. The watchdog is stopped
 // FIRST and waited for: only then is it impossible for a restart in
 // flight to spawn a fresh process after the one below is stopped.
+//
+// On process exit the instance is deliberately left running: it is a
+// systemd unit that does not depend on hotserve, state.json names it,
+// and the next hotserve start reattaches to it — that is how apps
+// survive hotserve restarts and upgrades. Only removing the app from
+// the config stops it.
 func (ma *managedApp) Destruct() error {
 	ma.stopWatchdog()
 	c := ma.snapshot()
 	inst := ma.currentInstance()
-	if inst == nil {
+	if c.runner == nil {
+		return nil // pooled but never configured (a Start that failed before ours ran)
+	}
+	if caddyExiting() || liveStartedApps.Load() == 0 {
+		// Process exit, `validate`, or a candidate config that never
+		// became the serving one (another app's Start failed): the
+		// units belong to whoever is or will be serving them. Leave
+		// them; the next start's sweep settles any that are truly
+		// orphaned.
+		if inst != nil {
+			c.logger.Info("app keeps running for reattach", zap.String("version", inst.version), zap.String("unit", inst.handle.state().Unit))
+		}
 		return nil
 	}
-	c.logger.Info("shutting down app", zap.String("version", inst.version))
-	return c.runner.Stop(inst.handle, c.spec.grace)
+	// Removed by a reload that is now serving: no unit may outlive
+	// the definition. (The removing config's Cleanup has already
+	// joined its recovery, so nothing can launch after this sweep.)
+	// Stop what we track (if anything), then everything else the
+	// manager holds for this app: a removed app must leave no unit
+	// behind, tracked or not — an ambiguous start may have left one
+	// that never became current.
+	var stopErr error
+	if inst != nil {
+		c.logger.Info("app removed from config; stopping it", zap.String("version", inst.version))
+		stopErr = c.runner.Stop(inst.handle, c.spec.grace)
+	}
+	return errors.Join(stopErr, c.runner.Sweep(ma.name, nil))
 }
 
 // startWatchdog launches the supervision goroutine once per pooled
@@ -686,6 +951,7 @@ func (ma *managedApp) startWatchdog() {
 	}
 	ma.wdStarted = true
 	ctx, cancel := context.WithCancel(context.Background())
+	ma.wdCtx = ctx
 	ma.wdCancel = cancel
 	ma.wdWG.Add(1)
 	go func() {
@@ -762,6 +1028,13 @@ func buildEnv(spec *appSpec, version string, port int, releaseDir string) ([]str
 	return env, nil
 }
 
+// envKeyRe is what systemd accepts in Environment=; the exec runner
+// let anything through to execve, so it is validated explicitly now —
+// at config load for inline env, at deploy time for env_file.
+var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+func validEnvKey(key string) bool { return envKeyRe.MatchString(key) }
+
 // parseEnvFile reads simple KEY=VALUE lines: blank lines and #comments
 // skipped, an optional `export ` prefix tolerated, and single or
 // double quotes around the value stripped. Deliberately not a shell.
@@ -781,6 +1054,9 @@ func parseEnvFile(path string) ([]string, error) {
 		key = strings.TrimSpace(key)
 		if !found || key == "" {
 			return nil, fmt.Errorf("%s:%d: not KEY=VALUE", path, i+1)
+		}
+		if !validEnvKey(key) {
+			return nil, fmt.Errorf("%s:%d: %q is not a valid environment variable name (systemd requires %s)", path, i+1, key, envKeyRe)
 		}
 		value = strings.TrimSpace(value)
 		if len(value) >= 2 {

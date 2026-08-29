@@ -94,6 +94,15 @@ func (h *fakeHandle) isAlive() bool {
 	return h.alive
 }
 
+// dieQuietly makes the handle read as dead without closing done —
+// the shape of a systemd unit whose exit the runner's state poll has
+// not yet observed while health probes are already failing.
+func (h *fakeHandle) dieQuietly() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.alive = false
+}
+
 func (h *fakeHandle) kill() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -117,8 +126,14 @@ type fakeRunner struct {
 	runOnceCount    int
 	startErr        error
 	reattachOK      bool
-	stopErr         error // Stop returns this
-	stopLeavesAlive bool  // Stop does not actually kill the handle
+	reattachErrs    []error // consumed one per Reattach call before reattachOK applies
+	reattachCalls   int
+	reattachSeen    []handleState
+	stopErr         error   // Stop returns this
+	stopLeavesAlive bool    // Stop does not actually kill the handle
+	sweepErr        error   // Sweep returns this
+	sweepErrs       []error // consumed one per Sweep call before sweepErr applies
+	sweeps          []handle
 }
 
 func (r *fakeRunner) Start(spec startSpec) (handle, error) {
@@ -165,15 +180,52 @@ func (r *fakeRunner) Wait(h handle) <-chan struct{} {
 	return fh.done
 }
 
-func (r *fakeRunner) Reattach(_ handleState) (handle, bool) {
+func (r *fakeRunner) Reattach(st handleState) (handle, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reattachCalls++
+	r.reattachSeen = append(r.reattachSeen, st)
+	if len(r.reattachErrs) > 0 {
+		err := r.reattachErrs[0]
+		r.reattachErrs = r.reattachErrs[1:]
+		return nil, false, err
+	}
 	if !r.reattachOK {
-		return nil, false
+		return nil, false, nil
 	}
 	h := &fakeHandle{id: "reattached", alive: true}
-	r.mu.Lock()
 	r.handles = append(r.handles, h)
-	r.mu.Unlock()
-	return h, true
+	return h, true, nil
+}
+
+func (r *fakeRunner) reattachCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.reattachCalls
+}
+
+func (r *fakeRunner) Sweep(_ string, keep handle) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sweeps = append(r.sweeps, keep)
+	if len(r.sweepErrs) > 0 {
+		err := r.sweepErrs[0]
+		r.sweepErrs = r.sweepErrs[1:]
+		return err
+	}
+	return r.sweepErr
+}
+
+func (r *fakeRunner) lastSweep() handle {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.sweeps[len(r.sweeps)-1]
+}
+
+func (r *fakeRunner) sweepCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.sweeps)
 }
 
 func (r *fakeRunner) stopCount() int {
@@ -341,6 +393,8 @@ func newTestRig(t *testing.T) *testRig {
 	ma.clock = rig.clock
 	ma.store = rig.store
 	ma.logger = zap.NewNop()
+	ma.wdCtx, ma.wdCancel = context.WithCancel(context.Background())
+	t.Cleanup(ma.wdCancel)
 	rig.ma = ma
 	return rig
 }
@@ -544,6 +598,7 @@ func TestEnsureRunningSkipsWhenAlreadyAlive(t *testing.T) {
 
 func TestDestructStopsCurrentInstance(t *testing.T) {
 	rig := newTestRig(t)
+	markLive(t)
 	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
 	must(t, rig.ma.Destruct())
 	if rig.runner.stopCount() != 1 {
@@ -800,10 +855,461 @@ func TestFailedDeployKeepsReleaseWhenStopUnconfirmed(t *testing.T) {
 	if err == nil {
 		t.Fatal("deploy v2 should have failed")
 	}
-	if !strings.Contains(err.Error(), "still running") {
+	if !strings.Contains(err.Error(), "may still be running") {
 		t.Fatalf("error should note the release was left in place: %v", err)
 	}
 	if _, statErr := os.Stat(rig.spec.dirs.release("v2")); statErr != nil {
 		t.Fatalf("release must not be deleted under a still-running failed instance: %v", statErr)
+	}
+}
+
+func TestFailedDeployKeepsReleaseWhenStopErrorsEvenIfDead(t *testing.T) {
+	rig := newTestRig(t)
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/a.tgz", Version: "v1"}))
+	// v2 fails the health gate and Stop reports an error even though
+	// the handle then reads as dead. Under cgroup kill "Stop errored"
+	// is the only signal a caller gets, so the release stays on disk.
+	rig.prober.err = errTest
+	rig.runner.stopErr = errTest
+	err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/b.tgz", Version: "v2"})
+	if err == nil || !strings.Contains(err.Error(), "left on disk") {
+		t.Fatalf("expected the release to be kept: %v", err)
+	}
+	if _, statErr := os.Stat(rig.spec.dirs.release("v2")); statErr != nil {
+		t.Fatalf("release must survive an unconfirmed stop: %v", statErr)
+	}
+}
+
+func TestDeployStopOldErrorDefersToSweep(t *testing.T) {
+	rig := newTestRig(t)
+	ctx := context.Background()
+	for i, v := range []string{"v1", "v2"} {
+		must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/a", Version: v}))
+		mt := time.Now().Add(time.Duration(i-10) * time.Minute)
+		_ = os.Chtimes(rig.spec.dirs.release(v), mt, mt)
+	}
+	// Stopping v2 errors, but the sweep — the runner's own ledger —
+	// vouches that only v3 remains, so keep=2 GC proceeds: our memory
+	// of a failed stop is not the source of truth, the manager is.
+	rig.runner.stopErr = errTest
+	rig.runner.stopLeavesAlive = true
+	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/a", Version: "v3"}))
+	if rig.runner.lastSweep() != rig.runner.handleAt(2) {
+		t.Fatal("the pre-GC sweep must keep the just-promoted instance")
+	}
+	if _, err := os.Stat(rig.spec.dirs.release("v1")); err == nil {
+		t.Fatal("with the sweep vouching, GC runs as usual")
+	}
+	if rig.ma.currentInstance().version != "v3" {
+		t.Fatal("the deploy itself succeeds regardless")
+	}
+}
+
+func TestDestructOnRemovalSweepsWholeApp(t *testing.T) {
+	rig := newTestRig(t)
+	markLive(t)
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	must(t, rig.ma.Destruct())
+	if rig.runner.stopCount() != 1 {
+		t.Fatalf("Destruct must stop the tracked instance, got %d stops", rig.runner.stopCount())
+	}
+	// Deploy swept twice (pre-start, pre-GC); removal sweeps everything (keep=nil).
+	if n := rig.runner.sweepCount(); n != 3 || rig.runner.lastSweep() != nil {
+		t.Fatalf("removal must sweep the whole app with keep=nil, sweeps=%d last=%v", n, rig.runner.sweeps)
+	}
+}
+
+func TestDestructLeavesInstanceRunningOnProcessExit(t *testing.T) {
+	rig := newTestRig(t)
+	markLive(t)
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	orig := caddyExiting
+	caddyExiting = func() bool { return true }
+	t.Cleanup(func() { caddyExiting = orig })
+	must(t, rig.ma.Destruct())
+	if rig.runner.stopCount() != 0 {
+		t.Fatal("on process exit the unit must be left running for reattach")
+	}
+	if !rig.runner.Alive(rig.runner.handleAt(0)) {
+		t.Fatal("instance must still be alive after Destruct on exit")
+	}
+}
+
+func TestStartSpecCarriesUnitIdentity(t *testing.T) {
+	rig := newTestRig(t)
+	rig.spec.preStart = []string{"true"}
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	if rig.runner.startCount() != 2 {
+		t.Fatalf("expected pre_start + start, got %d", rig.runner.startCount())
+	}
+	for i := range 2 {
+		s := rig.runner.started[i]
+		if s.app != "demo" || s.version != "v1" || s.grace != rig.spec.grace {
+			t.Fatalf("startSpec %d lacks unit identity: %+v", i, s)
+		}
+	}
+}
+
+func TestEnsureRunningUnreadableReattachIsTransientAndLaunchesNothing(t *testing.T) {
+	rig := newTestRig(t)
+	rig.store.state = appState{CurrentVersion: "v7", Port: 12345, Handle: handleState{Unit: "u.service"}}
+	rig.store.ok = true
+	must(t, os.MkdirAll(rig.spec.dirs.release("v7"), 0o755))
+	rig.runner.reattachErrs = []error{errTest}
+	err := rig.ma.ensureRunning()
+	if !transientRecovery(err) || !strings.Contains(err.Error(), "not relaunching") {
+		t.Fatalf("expected a transient refusal, got %v", err)
+	}
+	if rig.runner.startCount() != 0 || rig.ma.activePort.Load() != 0 {
+		t.Fatal("must not launch or publish while the recorded unit's state is unknown")
+	}
+}
+
+func TestRecoverRetriesTransientErrorsUntilReattached(t *testing.T) {
+	rig := newTestRig(t)
+	rig.store.state = appState{CurrentVersion: "v7", Port: 12345, Handle: handleState{Unit: "u.service"}}
+	rig.store.ok = true
+	must(t, os.MkdirAll(rig.spec.dirs.release("v7"), 0o755))
+	rig.runner.reattachErrs = []error{errTest, errTest}
+	rig.runner.reattachOK = true
+	done := make(chan struct{})
+	go func() { rig.ma.recover(context.Background(), zap.NewNop()); close(done) }()
+	advanceUntil(t, rig, recoveryBackoffFloor, "reattach after two transient failures", func() bool {
+		return rig.ma.activePort.Load() == 12345
+	})
+	<-done
+	if rig.runner.startCount() != 0 || rig.ma.activePort.Load() != 12345 {
+		t.Fatalf("expected a reattach on the third try, starts=%d port=%d", rig.runner.startCount(), rig.ma.activePort.Load())
+	}
+	if rig.runner.reattachCalls != 3 {
+		t.Fatalf("expected 3 reattach attempts, got %d", rig.runner.reattachCalls)
+	}
+	if rig.runner.sweepCount() != 1 || rig.runner.sweeps[0] != rig.runner.handleAt(0) {
+		t.Fatal("recovery must sweep stray units, keeping the adopted one")
+	}
+}
+
+func TestRecoverGivesUpOnPermanentErrors(t *testing.T) {
+	rig := newTestRig(t)
+	rig.store.state = appState{CurrentVersion: "v7", Port: 12345, Handle: handleState{PID: 1}}
+	rig.store.ok = true // release dir deliberately missing: not something a retry fixes
+	done := make(chan struct{})
+	go func() { rig.ma.recover(context.Background(), zap.NewNop()); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("recover must return on a permanent error, not retry forever")
+	}
+}
+
+func TestEnsureRunningReattachSweepFailureIsTransient(t *testing.T) {
+	rig := newTestRig(t)
+	rig.store.state = appState{CurrentVersion: "v7", Port: 12345, Handle: handleState{Unit: "u.service"}}
+	rig.store.ok = true
+	must(t, os.MkdirAll(rig.spec.dirs.release("v7"), 0o755))
+	rig.runner.reattachOK = true
+	rig.runner.sweepErr = errTest
+	err := rig.ma.ensureRunning()
+	if !transientRecovery(err) {
+		t.Fatalf("an unsettled ledger after reattach must be reported as transient, got %v", err)
+	}
+	if rig.ma.activePort.Load() != 12345 {
+		t.Fatal("the reattached instance still serves meanwhile")
+	}
+	// The retry path (instance alive) sweeps again and succeeds.
+	rig.runner.sweepErr = nil
+	must(t, rig.ma.ensureRunning())
+	if rig.runner.sweepCount() != 2 || rig.runner.lastSweep() != rig.runner.handleAt(0) {
+		t.Fatalf("retry must sweep keeping the live instance, sweeps=%v", rig.runner.sweeps)
+	}
+}
+
+func TestCleanupJoinsRecoveryBeforeReleasing(t *testing.T) {
+	rig := newTestRig(t)
+	rig.store.state = appState{CurrentVersion: "v7", Port: 12345, Handle: handleState{Unit: "u.service"}}
+	rig.store.ok = true
+	must(t, os.MkdirAll(rig.spec.dirs.release("v7"), 0o755))
+	rig.runner.reattachErrs = []error{errTest, errTest, errTest, errTest, errTest, errTest}
+	// What App.Start does for its apps: recovery owned by the config.
+	a := &App{logger: zap.NewNop(), managed: map[string]*managedApp{"demo": rig.ma}}
+	ctx, cancel := context.WithCancel(context.Background())
+	a.recoverCancel = cancel
+	a.recoverWG = new(sync.WaitGroup)
+	a.recoverWG.Add(1)
+	exited := make(chan struct{})
+	go func() { defer a.recoverWG.Done(); rig.ma.recover(ctx, zap.NewNop()); close(exited) }()
+	waitUntil(t, "first attempt", func() bool { return rig.runner.reattachCount() >= 1 })
+	// The config is cleaned up while recovery is parked in backoff:
+	// Cleanup must end it before anything else happens.
+	must(t, a.Cleanup())
+	select {
+	case <-exited:
+	case <-time.After(2 * time.Second):
+		t.Fatal("recovery must have exited by the time Cleanup returns")
+	}
+	if rig.runner.startCount() != 0 {
+		t.Fatal("nothing may be launched by a cancelled recovery")
+	}
+}
+
+// markLive stands in for a started liveswap config being live for the
+// rest of the test (what App.Start/Cleanup maintain).
+func markLive(t *testing.T) {
+	t.Helper()
+	liveStartedApps.Add(1)
+	t.Cleanup(func() { liveStartedApps.Add(-1) })
+}
+
+func TestDestructOnUnconfiguredAppIsANoop(t *testing.T) {
+	// A pooled app whose config's Start failed before configuring it
+	// (the manager probe, on a reload adding the app) has no runner.
+	markLive(t)
+	ma := newManagedApp("fresh")
+	must(t, ma.Destruct())
+}
+
+func TestRollbackConfigRestoresTheServingDefinition(t *testing.T) {
+	rig := newTestRig(t)
+	clients := &fetchClients{}
+	specA, specB := testSpec(t), testSpec(t)
+	specB.grace = 99 * time.Second
+	ownerA, ownerB := new(int), new(int)
+	rig.ma.configure(ownerA, specA, zap.NewNop(), clients)
+	rig.ma.configure(ownerB, specB, zap.NewNop(), clients)
+	// A successful reload: A is cleaned up after B configured — not
+	// the last writer, nothing happens.
+	if rig.ma.rollbackConfig(ownerA) || rig.ma.snapshot().spec != specB {
+		t.Fatal("a replaced config must not roll back the newer one")
+	}
+	// A rejected candidate: B is cleaned up while A still serves.
+	if !rig.ma.rollbackConfig(ownerB) || rig.ma.snapshot().spec != specA {
+		t.Fatal("a rejected candidate must restore the serving definition")
+	}
+	if rig.ma.rollbackConfig(ownerB) {
+		t.Fatal("rollback is one-shot")
+	}
+}
+
+func TestRollbackConfigWakesTheWatchdog(t *testing.T) {
+	rig := newTestRig(t)
+	clients := &fetchClients{}
+	on, off := testSpec(t), testSpec(t)
+	off.watchdogOn = false
+	ownerA, ownerB := new(int), new(int)
+	rig.ma.configure(ownerA, on, zap.NewNop(), clients)
+	rig.ma.configure(ownerB, off, zap.NewNop(), clients)
+	// Drain the pokes configure sent, then roll back: the rollback
+	// itself must poke, or a parked loop never re-reads watchdog=on.
+	for len(rig.ma.wdNotify) > 0 {
+		<-rig.ma.wdNotify
+	}
+	if !rig.ma.rollbackConfig(ownerB) {
+		t.Fatal("rollback expected")
+	}
+	select {
+	case <-rig.ma.wdNotify:
+	default:
+		t.Fatal("rollback must wake the watchdog so it re-snapshots the restored definition")
+	}
+}
+
+func TestDeploySweepsBeforePreStart(t *testing.T) {
+	rig := newTestRig(t)
+	rig.spec.preStart = []string{"migrate"}
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	// pre-pre_start (keep old=nil), pre-Start (keep old=nil), pre-GC (keep new).
+	if n := rig.runner.sweepCount(); n != 3 {
+		t.Fatalf("expected 3 sweeps, got %d", n)
+	}
+	rig.runner.sweepErr = errTest
+	err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/2", Version: "v2"})
+	if err == nil || !strings.Contains(err.Error(), "not running pre_start") {
+		t.Fatalf("an unconfirmed ledger must block the migration too, got %v", err)
+	}
+	if rig.runner.runOnceCount != 1 {
+		t.Fatalf("no second pre_start may run, got %d", rig.runner.runOnceCount)
+	}
+}
+
+func TestDestructBeforeStartTouchesNothing(t *testing.T) {
+	// `hotserve validate`, and a candidate config that never became
+	// the serving one (another app's Start failed): no started config
+	// is live, so whatever the manager runs belongs to whoever is or
+	// will be serving it and must be left alone.
+	rig := newTestRig(t)
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	before := rig.runner.sweepCount()
+	must(t, rig.ma.Destruct())
+	if rig.runner.stopCount() != 0 || rig.runner.sweepCount() != before {
+		t.Fatalf("Destruct without Start must not stop or sweep: stops=%d sweeps=%d", rig.runner.stopCount(), rig.runner.sweepCount()-before)
+	}
+	if !rig.runner.Alive(rig.runner.handleAt(0)) {
+		t.Fatal("the instance must still be running")
+	}
+}
+
+func TestParseEnvFileRejectsInvalidKeys(t *testing.T) {
+	envFile := filepath.Join(t.TempDir(), "app.env")
+	must(t, os.WriteFile(envFile, []byte("GOOD=1\nmy-var=2\n"), 0o600))
+	_, err := parseEnvFile(envFile)
+	if err == nil || !strings.Contains(err.Error(), `"my-var"`) || !strings.Contains(err.Error(), ":2:") {
+		t.Fatalf("an invalid key must be named with its line, got %v", err)
+	}
+}
+
+func TestEnsureRunningRefusesAForeignUnitName(t *testing.T) {
+	rig := newTestRig(t)
+	rig.store.state = appState{CurrentVersion: "v7", Port: 12345, Handle: handleState{Unit: "hotserve-other.v1.0a1b2c3d.service"}}
+	rig.store.ok = true
+	must(t, os.MkdirAll(rig.spec.dirs.release("v7"), 0o755))
+	must(t, rig.ma.ensureRunning())
+	if len(rig.runner.reattachSeen) != 1 || rig.runner.reattachSeen[0].Unit != "" {
+		t.Fatalf("a unit that is not ours must never reach the manager: %+v", rig.runner.reattachSeen)
+	}
+	if rig.runner.startCount() != 1 {
+		t.Fatal("the recorded version is relaunched instead")
+	}
+}
+
+func TestEnsureRunningNoStateStillSweeps(t *testing.T) {
+	rig := newTestRig(t)
+	must(t, rig.ma.ensureRunning())
+	if rig.runner.startCount() != 0 {
+		t.Fatal("nothing recorded ⇒ nothing launched")
+	}
+	if n := rig.runner.sweepCount(); n != 1 || rig.runner.sweeps[0] != nil {
+		t.Fatalf("with no state the manager must still be swept with keep=nil, sweeps=%d", n)
+	}
+	rig.runner.sweepErr = errTest
+	if err := rig.ma.ensureRunning(); !transientRecovery(err) {
+		t.Fatalf("an unconfirmed no-state sweep must be retried, got %v", err)
+	}
+}
+
+func TestEnsureRunningDeployInProgressIsTransient(t *testing.T) {
+	rig := newTestRig(t)
+	rig.ma.deployMu.Lock()
+	defer rig.ma.deployMu.Unlock()
+	if err := rig.ma.ensureRunning(); !transientRecovery(err) {
+		t.Fatalf("a deploy holding the lock must make recovery look again later, got %v", err)
+	}
+}
+
+func TestRecoveryErrorClassification(t *testing.T) {
+	if transientRecovery(nil) {
+		t.Fatal("nil is not an error")
+	}
+	if !transientRecovery(errTest) || !transientRecovery(&unitUnconfirmedError{unit: "u", err: errTest}) {
+		t.Fatal("unclassified and unconfirmed errors are retried")
+	}
+	if transientRecovery(&permanentRecoveryError{errTest}) {
+		t.Fatal("permanent errors are not retried")
+	}
+}
+
+func TestEnsureRunningRelaunchSweepsStrays(t *testing.T) {
+	rig := newTestRig(t)
+	rig.store.state = appState{CurrentVersion: "v7", Port: 12345, Handle: handleState{PID: 1}}
+	rig.store.ok = true
+	must(t, os.MkdirAll(rig.spec.dirs.release("v7"), 0o755))
+	must(t, rig.ma.ensureRunning())
+	if rig.runner.sweepCount() != 1 || rig.runner.sweeps[0] != nil {
+		t.Fatal("relaunch must sweep everything before starting")
+	}
+	if rig.runner.startCount() != 1 {
+		t.Fatal("relaunched once")
+	}
+}
+
+func TestEnsureRunningDoesNotRelaunchWhenSweepUnconfirmed(t *testing.T) {
+	rig := newTestRig(t)
+	rig.store.state = appState{CurrentVersion: "v7", Port: 12345, Handle: handleState{PID: 1}}
+	rig.store.ok = true
+	must(t, os.MkdirAll(rig.spec.dirs.release("v7"), 0o755))
+	rig.runner.sweepErr = errTest
+	if err := rig.ma.ensureRunning(); err == nil || !strings.Contains(err.Error(), "not launching") {
+		t.Fatalf("expected a refusal to launch, got %v", err)
+	}
+	if rig.runner.startCount() != 0 || rig.ma.activePort.Load() != 0 {
+		t.Fatal("nothing may be launched or published beside a possibly-running unit")
+	}
+}
+
+func TestDeployAbortsStartWhenSweepUnconfirmed(t *testing.T) {
+	rig := newTestRig(t)
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	rig.runner.sweepErr = errTest
+	err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/2", Version: "v2"})
+	if err == nil || !strings.Contains(err.Error(), "not starting") {
+		t.Fatalf("expected the deploy to abort before Start, got %v", err)
+	}
+	if rig.runner.startCount() != 1 {
+		t.Fatal("no second instance may be started")
+	}
+	if rig.runner.lastSweep() != rig.runner.handleAt(0) {
+		t.Fatal("the pre-start sweep must keep the serving instance")
+	}
+	if rig.ma.currentInstance().version != "v1" {
+		t.Fatal("v1 keeps serving")
+	}
+}
+
+func TestDestructOnRemovalSweepsEvenWithoutInstance(t *testing.T) {
+	rig := newTestRig(t)
+	markLive(t)
+	must(t, rig.ma.Destruct())
+	if rig.runner.stopCount() != 0 || rig.runner.sweepCount() != 1 || rig.runner.sweeps[0] != nil {
+		t.Fatalf("removal with nothing tracked must still sweep the app: stops=%d sweeps=%v", rig.runner.stopCount(), rig.runner.sweeps)
+	}
+}
+
+func TestDeploySweepsBeforeGCAndSkipsGCWhenSweepFails(t *testing.T) {
+	rig := newTestRig(t)
+	ctx := context.Background()
+	for i, v := range []string{"v1", "v2"} {
+		must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/a", Version: v}))
+		mt := time.Now().Add(time.Duration(i-10) * time.Minute)
+		_ = os.Chtimes(rig.spec.dirs.release(v), mt, mt)
+	}
+	// Each deploy sweeps twice: before Start (keeping the serving
+	// instance) and before GC (keeping the promoted one).
+	if rig.runner.sweepCount() != 4 || rig.runner.sweeps[0] != nil || rig.runner.sweeps[2] != rig.runner.handleAt(0) {
+		t.Fatalf("sweeps %v", rig.runner.sweeps)
+	}
+	// keep=2: v3 would GC v1 — unless the pre-GC sweep cannot vouch
+	// that nothing else is running.
+	rig.runner.sweepErrs = []error{nil, errTest}
+	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/a", Version: "v3"}))
+	for _, v := range []string{"v1", "v2", "v3"} {
+		if _, err := os.Stat(rig.spec.dirs.release(v)); err != nil {
+			t.Fatalf("release %s must survive a deploy whose sweep failed: %v", v, err)
+		}
+	}
+	if rig.runner.lastSweep() != rig.runner.handleAt(2) {
+		t.Fatal("the pre-GC sweep must keep the just-promoted instance")
+	}
+	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/a", Version: "v4"}))
+	if _, err := os.Stat(rig.spec.dirs.release("v1")); err == nil {
+		t.Fatal("once the sweep vouches, GC catches up")
+	}
+}
+
+func TestFailedDeployKeepsReleaseWhenStartUnconfirmed(t *testing.T) {
+	rig := newTestRig(t)
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/a.tgz", Version: "v1"}))
+	rig.runner.setStartErr(&unitUnconfirmedError{unit: "hotserve-demo.v2.deadbeef.service", err: errTest})
+	err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/b.tgz", Version: "v2"})
+	if err == nil || !strings.Contains(err.Error(), "left on disk") {
+		t.Fatalf("an unreconciled start must keep the release: %v", err)
+	}
+	if _, statErr := os.Stat(rig.spec.dirs.release("v2")); statErr != nil {
+		t.Fatalf("release must survive an unconfirmed start: %v", statErr)
+	}
+	rig.runner.setStartErr(nil)
+	rig.runner.runOnceErr = &unitUnconfirmedError{unit: "hotserve-demo.v3.deadbeef.prestart.service", err: errTest}
+	rig.spec.preStart = []string{"migrate"}
+	err = rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/c.tgz", Version: "v3"})
+	if err == nil || !strings.Contains(err.Error(), "left on disk") {
+		t.Fatalf("an unreconciled pre_start must keep the release: %v", err)
 	}
 }
