@@ -306,8 +306,12 @@ func sandboxProperties(s *sandboxSpec) []sddbus.Property {
 		hidden = append(hidden, "-"+p) // "-": absent on this host is fine
 	}
 	writable := make([]bindMount, 0, len(s.writable)+len(s.extra))
-	for _, p := range s.writable {
-		writable = append(writable, bindMount{Source: p, Destination: p, Flags: mountRecursive})
+	for _, b := range s.writable {
+		src := b.source
+		if src == "" {
+			src = b.dest
+		}
+		writable = append(writable, bindMount{Source: src, Destination: b.dest, Flags: mountRecursive})
 	}
 	readOnly := []bindMount{
 		// systemd-resolved hosts symlink /etc/resolv.conf into here;
@@ -315,7 +319,13 @@ func sandboxProperties(s *sandboxSpec) []sddbus.Property {
 		{Source: "/run/systemd/resolve", Destination: "/run/systemd/resolve", IgnoreENOENT: true, Flags: mountRecursive},
 	}
 	for _, e := range s.extra {
-		m := bindMount{Source: e.path, Destination: e.path, Flags: mountRecursive}
+		src := e.source
+		if src == "" {
+			src = e.path
+		}
+		// Destination is always the configured path: that is where the
+		// app expects to find it, whatever it resolves to on the host.
+		m := bindMount{Source: src, Destination: e.path, Flags: mountRecursive}
 		if e.rw {
 			writable = append(writable, m)
 		} else {

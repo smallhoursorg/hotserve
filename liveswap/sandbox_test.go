@@ -220,7 +220,8 @@ func TestSandboxPropertiesFilesystemAndFull(t *testing.T) {
 	spec := &sandboxSpec{
 		tier:     sandboxFilesystem,
 		root:     "/var/lib/liveswap",
-		writable: []string{"/var/lib/liveswap/blog/releases/v3", "/var/lib/liveswap/blog/shared"},
+		writable: []bindPath{{dest: "/var/lib/liveswap/blog/releases/v3", source: "/var/lib/liveswap/blog/releases/v3"},
+			{dest: "/var/lib/liveswap/blog/shared", source: "/var/lib/liveswap/blog/shared"}},
 		extra:    []extraPath{{path: "/run/postgresql"}, {path: "/var/cache/blog", rw: true}},
 		hidden:   append(append([]string{}, sandboxHiddenFloor...), "/var/lib/hotserve/caddy", "/etc/blog/blog.env"),
 	}
@@ -318,14 +319,14 @@ func TestSandboxSpecFor(t *testing.T) {
 	if got.tier != sandboxFull || got.root != spec.dirs.root {
 		t.Fatalf("tier/root wrong: %+v", got)
 	}
-	if !reflect.DeepEqual(got.writable, []string{rel, spec.dirs.shared}) {
+	if !reflect.DeepEqual(got.writable, []bindPath{{dest: rel, source: rel}, {dest: spec.dirs.shared, source: spec.dirs.shared}}) {
 		t.Fatalf("writable = %v", got.writable)
 	}
 	// The view never includes state.json, tmp/ (upload staging) or
 	// the other releases: nothing but the two dirs above is bound.
 	for _, p := range []string{spec.dirs.state, spec.dirs.tmp, spec.dirs.releases, spec.dirs.app} {
 		for _, w := range got.writable {
-			if w == p {
+			if w.dest == p || w.source == p {
 				t.Errorf("%s must not be in the writable view", p)
 			}
 		}
@@ -867,14 +868,15 @@ func TestResolveBindSourcesRefusesPlantedSymlink(t *testing.T) {
 	hidden := []string{hotserveState}
 	spec := func(sharedPath string) *sandboxSpec {
 		return &sandboxSpec{tier: sandboxFull, root: root, appDir: appDir,
-			writable: []string{release, sharedPath}, hidden: hidden}
+			writable: []bindPath{{dest: release, source: release}, {dest: sharedPath, source: sharedPath}},
+			hidden:   hidden}
 	}
 	// Baseline: real directories resolve to themselves and are kept.
 	s := spec(shared)
 	if err := s.resolveBindSources(hidden); err != nil {
 		t.Fatalf("plain directories refused: %v", err)
 	}
-	if !reflect.DeepEqual(s.writable, []string{release, shared}) {
+	if !reflect.DeepEqual(s.writable, []bindPath{{dest: release, source: release}, {dest: shared, source: shared}}) {
 		t.Fatalf("writable rewritten unnecessarily: %v", s.writable)
 	}
 
@@ -916,8 +918,17 @@ func TestResolveBindSourcesRefusesPlantedSymlink(t *testing.T) {
 		t.Fatalf("a shared dir on another path was refused: %v", err)
 	}
 	resolved, _ := filepath.EvalSymlinks(elsewhere)
-	if s.writable[1] != resolved {
-		t.Fatalf("bind source not rewritten to the resolved path: %v", s.writable)
+	// Only the SOURCE moves. The destination stays the configured path,
+	// because that is what WorkingDirectory, HOME and the
+	// {release_dir}/{shared_dir} placeholders name — binding the
+	// resolved path at the resolved path would put the data somewhere
+	// the app never looks, and its own spelling would be gone with the
+	// tmpfs that masks the root.
+	if s.writable[1].source != resolved {
+		t.Fatalf("bind source not rewritten to the resolved path: %+v", s.writable)
+	}
+	if s.writable[1].dest != link {
+		t.Fatalf("bind destination moved to %q; the app expects its shared dir at %q", s.writable[1].dest, link)
 	}
 
 	// A missing bind source is an error, not a silently skipped bind.
@@ -949,12 +960,65 @@ func TestUnitForResolvesBindSources(t *testing.T) {
 	spec := startSpec{
 		app: "blog", version: "v1", command: []string{"./server"}, dir: release,
 		sandbox: &sandboxSpec{tier: sandboxFull, root: root, appDir: appDir,
-			writable: []string{release, shared}, hidden: sandboxHiddenFloor},
+			writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}},
+			hidden:   sandboxHiddenFloor},
 	}
 	if _, err := r.unitFor(spec, false); err == nil || !strings.Contains(err.Error(), "sandbox itself closes") {
 		t.Fatalf("unitFor must refuse a planted bind source, got %v", err)
 	}
 	if _, err := r.Start(spec); err == nil {
 		t.Fatal("Start must fail rather than launch with the planted bind")
+	}
+}
+
+// TestBindDestinationsAreTheConfiguredPaths: a permitted symlink (the
+// operator's `shared` on another disk) must change only where the data
+// is read FROM. The app is told about its directories by
+// WorkingDirectory, HOME and the {release_dir}/{shared_dir}
+// placeholders, all of which name the configured path — and that path
+// lives under the liveswap root, which the sandbox replaces with an
+// empty tmpfs, so a bind that moved the destination would leave the
+// app pointing at something that no longer exists inside its view.
+func TestBindDestinationsAreTheConfiguredPaths(t *testing.T) {
+	root := t.TempDir()
+	appDir := filepath.Join(root, "blog")
+	release := filepath.Join(appDir, "releases", "v1")
+	shared := filepath.Join(appDir, "shared")
+	outside, err := os.MkdirTemp("/run", "binddest-")
+	if err != nil {
+		t.Skipf("no writable dir outside the closed prefixes: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(outside) })
+	elsewhere := filepath.Join(outside, "blog-data")
+	for _, d := range []string{release, elsewhere} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(elsewhere, shared); err != nil {
+		t.Fatal(err)
+	}
+	s := &sandboxSpec{tier: sandboxFull, root: root, appDir: appDir,
+		writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}},
+		extra:    []extraPath{{path: "/run/postgresql"}},
+		hidden:   sandboxHiddenFloor}
+	if err := s.resolveBindSources(sandboxHiddenFloor); err != nil {
+		t.Fatalf("a shared dir on another disk was refused: %v", err)
+	}
+	got := propMap(unitSpec{ExecStart: []string{"/bin/true"}, Sandbox: s})
+	binds := map[string]bindMount{}
+	for _, b := range got["BindPaths"].([]bindMount) {
+		binds[b.Destination] = b
+	}
+	b, ok := binds[shared]
+	if !ok {
+		t.Fatalf("the shared dir is not bound where the app expects it (%s): %+v", shared, binds)
+	}
+	resolved, _ := filepath.EvalSymlinks(elsewhere)
+	if b.Source != resolved {
+		t.Fatalf("shared bound from %q, want the resolved %q", b.Source, resolved)
+	}
+	if _, moved := binds[resolved]; moved {
+		t.Fatal("the shared dir was bound at its resolved path: the app would never find it")
 	}
 }

@@ -115,6 +115,24 @@ func resolveSandboxTier(mode string, c sandboxCapability) (tier sandboxTier, war
 type extraPath struct {
 	path string
 	rw   bool
+	// source is what actually gets bound at path: the same thing,
+	// unless path is a symlink, in which case resolveBindSources fills
+	// in what it resolved to. The app still sees it at path — the name
+	// it was configured with and the name everything else refers to.
+	source string
+}
+
+// bindPath is one of the app's own directories bound back into its
+// view: dest is where the app sees it (and what WorkingDirectory,
+// HOME and the {release_dir}/{shared_dir} placeholders name), source
+// is what is mounted there. They differ only when the operator has
+// pointed one of those directories somewhere else with a symlink —
+// binding the resolved path at the resolved path would put the
+// directory somewhere the app has no reason to look, and its own
+// spelling would be gone with the tmpfs that masks the root.
+type bindPath struct {
+	dest   string
+	source string
 }
 
 // sandboxHiddenFloor is the packaged install's layout: hotserve's own
@@ -227,7 +245,7 @@ type sandboxSpec struct {
 	// writable are this app's own directories bound back at their real
 	// paths, read-write (BindPaths=): the release being started and
 	// the shared dir.
-	writable []string
+	writable []bindPath
 	extra    []extraPath
 	// hidden is what no app may see on this host (App.hiddenPaths).
 	hidden []string
@@ -296,16 +314,19 @@ func (s *sandboxSpec) resolveBindSources(hidden []string) error {
 		}
 		return closedOrHidden(resolved, hidden)
 	}
-	for i, p := range s.writable {
-		resolved, err := filepath.EvalSymlinks(p)
+	for i, b := range s.writable {
+		resolved, err := filepath.EvalSymlinks(b.dest)
 		if err != nil {
-			return fmt.Errorf("resolving %q before binding it into the sandbox: %w", p, err)
+			return fmt.Errorf("resolving %q before binding it into the sandbox: %w", b.dest, err)
 		}
-		if resolved != p {
-			if err := own(p, resolved); err != nil {
+		if resolved != b.dest {
+			if err := own(b.dest, resolved); err != nil {
 				return fmt.Errorf("refusing to launch sandboxed: %w", err)
 			}
-			s.writable[i] = resolved
+			// Only the source moves: the app must still find its
+			// release and data where its command line, HOME and
+			// placeholders say they are.
+			s.writable[i].source = resolved
 		}
 	}
 	for i, e := range s.extra {
@@ -316,7 +337,7 @@ func (s *sandboxSpec) resolveBindSources(hidden []string) error {
 		if err := checkExtraPathContainment(resolved, s.root, hidden); err != nil {
 			return fmt.Errorf("refusing to launch sandboxed: extra_path %q resolves to %q: %w", e.path, resolved, err)
 		}
-		s.extra[i].path = resolved
+		s.extra[i].source = resolved
 	}
 	return nil
 }
@@ -347,7 +368,7 @@ func (s *appSpec) sandboxSpecFor(releaseDir string, tier sandboxTier) *sandboxSp
 		tier:     tier,
 		root:     s.dirs.root,
 		appDir:   s.dirs.app,
-		writable: []string{releaseDir, s.dirs.shared},
+		writable: []bindPath{{dest: releaseDir, source: releaseDir}, {dest: s.dirs.shared, source: s.dirs.shared}},
 		// Copied: resolveBindSources rewrites entries to what they
 		// resolve to, and the spec must not mutate the app's config.
 		extra:  append([]extraPath{}, s.extraPaths...),
