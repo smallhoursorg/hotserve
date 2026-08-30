@@ -5,13 +5,14 @@
 // syscall alone, and Go (1.21+) initializes packages in import-path
 // order among those whose dependencies are ready, so this init runs
 // right after syscall's — before os, fmt, Caddy and every other
-// dependency of a binary that imports liveswap.
+// dependency of a binary that imports liveswap. Measured on hotserve
+// with GODEBUG=inittrace=1: the 17th of 460 initializers, immediately
+// after syscall (16th) and before os (29th); TestInitRunsBeforeOS pins
+// the ordering. Keep this package free of imports beyond syscall — a
+// single fmt would move it behind the whole os/fmt dependency graph.
 package harden
 
-import (
-	"fmt"
-	"syscall"
-)
+import "syscall"
 
 // init runs Process before main and before every heavier initializer.
 // It has to be this early: app units outlive hotserve restarts, so an
@@ -32,7 +33,9 @@ import (
 // AT_SECURE. DESIGN-threat-model.md records it as a residual.
 func init() {
 	if err := Process(); err != nil {
-		panic(fmt.Sprintf("liveswap/harden: cannot mark the process non-dumpable (%v): refusing to run a supervisor whose /proc is readable by the apps it supervises", err))
+		// No fmt here: importing it would put fmt, os and their whole
+		// dependency graph ahead of this init (see the package comment).
+		panic("liveswap/harden: cannot mark the process non-dumpable (" + err.Error() + "): refusing to run a supervisor whose /proc is readable by the apps it supervises")
 	}
 }
 

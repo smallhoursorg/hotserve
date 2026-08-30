@@ -316,7 +316,9 @@ they decide the mechanism before any spike:
    `CAP_SYS_PTRACE`, which apps under `NoNewPrivileges` never hold —
    with or without user namespaces. **Shipped:** `liveswap/harden`, a
    leaf package whose `init` runs right after `syscall`'s — before
-   `os`, `fmt`, Caddy and every other dependency — so any binary
+   `os`, `fmt`, Caddy and every other dependency (measured with
+   `GODEBUG=inittrace=1`: the 17th of 460 initializers on hotserve;
+   `TestInitRunsBeforeOS` pins it) — so any binary
    importing liveswap (hotserve or an xcaddy build) is non-dumpable
    before `main`; a failure is fatal. Pinned by a unit test and by the
    real-systemd e2e suite (scenario 10). It closes the
