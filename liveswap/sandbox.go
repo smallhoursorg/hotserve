@@ -304,13 +304,24 @@ func (s *sandboxSpec) resolveBindSources(hidden []string) error {
 	if c, err := filepath.EvalSymlinks(s.appDir); err == nil {
 		appC = c
 	}
-	own := func(p, resolved string) error {
-		// A mandatory bind may resolve out of the root (another disk),
-		// but if it stays inside the root it must stay inside this
-		// app's own directory: anything else is a sibling's data.
-		if (pathWithin(resolved, s.root) || pathWithin(resolved, rootC)) &&
-			!pathWithin(resolved, s.appDir) && !pathWithin(resolved, appC) {
-			return fmt.Errorf("%q resolves to %q, which belongs to another app under %s", p, resolved, s.root)
+	own := func(dest, resolved string) error {
+		// Inside the root, the only difference a mandatory bind may
+		// have from its configured path is one an ancestor's symlink
+		// explains — the root or the app dir being a link. Resolving
+		// to some *other* place under the root is the app pointing at
+		// data that is not the directory we meant to bind: its own app
+		// dir or releases/ (whose recursive bind would carry
+		// state.json, the upload staging dir and every other release
+		// in under `shared`), or a sibling's. Outside the root
+		// entirely — `shared` moved to another disk — is legitimate,
+		// subject to the checks below.
+		rel, err := filepath.Rel(s.appDir, dest)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("%q is not inside the app's own directory %s", dest, s.appDir)
+		}
+		if expected := filepath.Join(appC, rel); resolved != expected &&
+			(overlaps(resolved, s.root) || overlaps(resolved, rootC)) {
+			return fmt.Errorf("%q resolves to %q, which is not the directory it names and overlaps the liveswap root %s (expected %q, or a path outside the root entirely)", dest, resolved, s.root, expected)
 		}
 		return closedOrHidden(resolved, hidden)
 	}
@@ -342,20 +353,30 @@ func (s *sandboxSpec) resolveBindSources(hidden []string) error {
 	return nil
 }
 
-// closedOrHidden refuses a path the sandbox is meant to keep out.
+// closedOrHidden refuses a path that overlaps anything the sandbox is
+// meant to keep out — in either direction. Being *inside* a protected
+// path is the obvious case; *containing* one is just as bad, because
+// these binds are recursive: `shared -> /run` would carry /run/user
+// (the manager's socket) and /run/hotserve (the admin socket) in with
+// it, and `shared -> /etc` every configured env file.
 func closedOrHidden(p string, hidden []string) error {
 	for _, h := range hidden {
-		if pathWithin(p, h) {
-			return fmt.Errorf("%q is inside %s, which is hidden from every app", p, h)
+		if overlaps(p, h) {
+			return fmt.Errorf("%q overlaps %s, which is hidden from every app", p, h)
 		}
 	}
 	for _, c := range sandboxClosedPrefixes {
-		if pathWithin(p, c) {
-			return fmt.Errorf("%q is inside %s, which the sandbox itself closes", p, c)
+		if overlaps(p, c) {
+			return fmt.Errorf("%q overlaps %s, which the sandbox itself closes", p, c)
 		}
 	}
 	return nil
 }
+
+// overlaps reports whether two paths are the same or either contains
+// the other. Containment in one direction hides a path; in the other
+// it carries it along.
+func overlaps(a, b string) bool { return pathWithin(a, b) || pathWithin(b, a) }
 
 // sandboxSpecFor is the sandbox of one instance of this app at the
 // given tier: its release being started and its shared dir writable,
@@ -512,17 +533,20 @@ func validateExtraPath(p, root string, hidden []string) error {
 // checkExtraPathContainment is the lexical half of validateExtraPath,
 // applied to the path as written and to what it resolves to.
 func checkExtraPathContainment(p, root string, hidden []string) error {
-	if pathWithin(p, root) {
-		return fmt.Errorf("extra_path %q is inside the liveswap root %s, which the sandbox replaces with an empty tmpfs; an app already sees its own release and shared dirs", p, root)
+	// Overlap in either direction: an extra_path *inside* a protected
+	// tree exposes that part of it, and one *containing* a protected
+	// tree carries the whole thing in, since the binds are recursive.
+	if overlaps(p, root) {
+		return fmt.Errorf("extra_path %q overlaps the liveswap root %s, which the sandbox replaces with an empty tmpfs; an app already sees its own release and shared dirs", p, root)
 	}
 	for _, h := range hidden {
-		if pathWithin(p, h) {
-			return fmt.Errorf("extra_path %q is inside %s, which is hidden from every app (hotserve's own keys, sockets and env files)", p, h)
+		if overlaps(p, h) {
+			return fmt.Errorf("extra_path %q overlaps %s, which is hidden from every app (hotserve's own keys, sockets and env files)", p, h)
 		}
 	}
 	for _, c := range sandboxClosedPrefixes {
-		if pathWithin(p, c) {
-			return fmt.Errorf("extra_path %q is inside %s, which the sandbox itself closes — binding it back would undo the sandbox for this app; use `sandbox off` if the app genuinely needs it", p, c)
+		if overlaps(p, c) {
+			return fmt.Errorf("extra_path %q overlaps %s, which the sandbox itself closes — binding it back would undo the sandbox for this app; use `sandbox off` if the app genuinely needs it", p, c)
 		}
 	}
 	return nil

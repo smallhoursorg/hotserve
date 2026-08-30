@@ -744,9 +744,15 @@ func TestValidateExtraPathFollowsSymlinks(t *testing.T) {
 			t.Errorf("symlink to %s refused without naming the resolution: %v", target, err)
 		}
 	}
-	// A link to somewhere legitimate still passes.
+	// A link to somewhere legitimate still passes. It must not be the
+	// parent of `secrets`: with overlap checked in both directions,
+	// binding a directory that CONTAINS a hidden path carries it in.
+	allowed := filepath.Join(dir, "data")
+	if err := os.MkdirAll(allowed, 0o750); err != nil {
+		t.Fatal(err)
+	}
 	ok := filepath.Join(dir, "fine")
-	if err := os.Symlink(dir, ok); err != nil {
+	if err := os.Symlink(allowed, ok); err != nil {
 		t.Fatal(err)
 	}
 	if err := validateExtraPath(ok, "/var/lib/liveswap", hidden); err != nil {
@@ -886,10 +892,13 @@ func TestResolveBindSourcesRefusesPlantedSymlink(t *testing.T) {
 	// does not resolve is refused too, by the missing-source case at
 	// the end — fail-closed either way.)
 	for _, tc := range []struct{ name, target, wantIn string }{
-		{"a closed tree", "/dev", "sandbox itself closes"},
-		{"the private tmp", "/tmp", "sandbox itself closes"},
+		{"a closed tree", "/dev", "overlaps"},
+		// /tmp contains the test's own root, so the "not the directory
+		// it names" rule catches it first — either refusal is correct,
+		// both say "overlaps".
+		{"the private tmp", "/tmp", "overlaps"},
 		{"hotserve's own state", hotserveState, "hidden from every app"},
-		{"a sibling app's data", sibling, "belongs to another app"},
+		{"a sibling app's data", sibling, "not the directory it names"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_ = os.Remove(link)
@@ -1020,5 +1029,106 @@ func TestBindDestinationsAreTheConfiguredPaths(t *testing.T) {
 	}
 	if _, moved := binds[resolved]; moved {
 		t.Fatal("the shared dir was bound at its resolved path: the app would never find it")
+	}
+}
+
+// TestOverlapIsSymmetric: a path that CONTAINS a protected tree
+// exposes it exactly as surely as one inside it, because the binds are
+// recursive — `shared -> /run` carries /run/user (the manager's
+// socket) and /run/hotserve (the admin socket) in with it, and
+// `extra_path /etc` carries every configured env file.
+func TestOverlapIsSymmetric(t *testing.T) {
+	hidden := append(append([]string{}, sandboxHiddenFloor...), "/etc/blog/blog.env")
+	for _, ancestor := range []string{"/run", "/var/lib", "/etc", "/var"} {
+		if err := validateExtraPath(ancestor, "/var/lib/liveswap", hidden); err == nil {
+			t.Errorf("extra_path %s accepted: it contains something the sandbox closes or hides", ancestor)
+		}
+	}
+	// The liveswap root's own ancestors go too: binding them back would
+	// carry every app's data in.
+	if err := validateExtraPath("/var/lib", "/var/lib/liveswap", hidden); err == nil {
+		t.Error("an ancestor of the liveswap root was accepted")
+	}
+	// Siblings that merely share a prefix are still fine.
+	for _, ok := range []string{"/run/postgresql", "/var/cache/blog", "/etc/ssl/certs", "/srv/data"} {
+		if err := validateExtraPath(ok, "/var/lib/liveswap", hidden); err != nil {
+			t.Errorf("%s rejected: %v", ok, err)
+		}
+	}
+	if err := closedOrHidden("/run", hidden); err == nil {
+		t.Error("a bind source containing /run/user was accepted at launch time")
+	}
+	if err := closedOrHidden("/etc", hidden); err == nil {
+		t.Error("a bind source containing hotserve's env files was accepted at launch time")
+	}
+}
+
+// TestMandatoryBindMustBeTheDirectoryItNames: inside the root, a
+// mandatory bind may differ from its configured path only by an
+// ancestor's symlink. Pointing `shared` at the app's own dir or its
+// releases passes a naive "is it inside appDir" test, and the
+// recursive bind then carries state.json, the upload staging dir and
+// every other release in under the shared path — the integrity
+// boundary the design states as normative.
+func TestMandatoryBindMustBeTheDirectoryItNames(t *testing.T) {
+	root := t.TempDir()
+	appDir := filepath.Join(root, "blog")
+	release := filepath.Join(appDir, "releases", "v1")
+	shared := filepath.Join(appDir, "shared")
+	for _, d := range []string{release, shared, filepath.Join(appDir, "tmp")} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(appDir, "state.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(appDir, "shared-link")
+	spec := func(sharedPath string) *sandboxSpec {
+		return &sandboxSpec{tier: sandboxFull, root: root, appDir: appDir,
+			writable: []bindPath{{dest: release, source: release}, {dest: sharedPath, source: sharedPath}},
+			hidden:   sandboxHiddenFloor}
+	}
+	for _, target := range []string{appDir, filepath.Join(appDir, "releases"), filepath.Join(appDir, "tmp"), root} {
+		_ = os.Remove(link)
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		err := spec(link).resolveBindSources(sandboxHiddenFloor)
+		if err == nil {
+			t.Errorf("a shared dir pointing at %s was accepted; its recursive bind would expose state.json, tmp/ and other releases", target)
+			continue
+		}
+		if !strings.Contains(err.Error(), "not the directory it names") {
+			t.Errorf("refused for the wrong reason: %v", err)
+		}
+	}
+	// The legitimate difference — an ancestor is itself a symlink — must
+	// still resolve cleanly. Built under /run: a t.TempDir root lives
+	// under /tmp, which the sandbox replaces, so a source resolving back
+	// into it would be refused for that reason instead of this one.
+	base, err := os.MkdirTemp("/run", "rootalias-")
+	if err != nil {
+		t.Skipf("no writable dir outside the closed prefixes: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	realRoot := filepath.Join(base, "real")
+	realShared := filepath.Join(realRoot, "blog", "shared")
+	if err := os.MkdirAll(realShared, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	aliasRoot := filepath.Join(base, "liveswap")
+	if err := os.Symlink(realRoot, aliasRoot); err != nil {
+		t.Fatal(err)
+	}
+	aliasShared := filepath.Join(aliasRoot, "blog", "shared")
+	viaAlias := &sandboxSpec{tier: sandboxFull, root: aliasRoot, appDir: filepath.Join(aliasRoot, "blog"),
+		writable: []bindPath{{dest: aliasShared, source: aliasShared}},
+		hidden:   sandboxHiddenFloor}
+	if err := viaAlias.resolveBindSources(sandboxHiddenFloor); err != nil {
+		t.Fatalf("a symlinked root must still work: %v", err)
+	}
+	if got := viaAlias.writable[0]; got.dest != aliasShared || got.source != filepath.Join(realRoot, "blog", "shared") {
+		t.Fatalf("through a symlinked root the app must still see its dir where it names it, bound from the real one: %+v", got)
 	}
 }

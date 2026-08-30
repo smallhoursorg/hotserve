@@ -127,6 +127,12 @@ stage "stage 2: liveswap deploy under the systemd sandbox"
 # root here, standing in for the operator's token-minting machine.
 hotserve deploy-keygen --out /etc/hotserve/deploy.key
 
+# The user manager's PID, handed to the app so it can try the routes
+# the sandbox is supposed to close. Captured before the config is
+# written; the manager has been running since stage 1.
+mgr_pid=$(systemctl show -p MainPID --value "user@$uid.service")
+[ -n "$mgr_pid" ] && [ "$mgr_pid" != "0" ] || die "no MainPID for user@$uid.service"
+
 # Overwriting the packaged conffile doubles as the modification marker
 # for the stage-3 config|noreplace assertion.
 cat > /etc/hotserve/Caddyfile <<'EOF'
@@ -145,6 +151,8 @@ cat > /etc/hotserve/Caddyfile <<'EOF'
 
 		app demo {
 			command ./server
+			env MGR_PID $mgr_pid
+			env HOTSERVE_UID $uid
 			health_interval 250ms
 			health_timeout 1s
 			soak 1s
@@ -191,7 +199,17 @@ cat > "$workdir/server" <<'EOF'
 #!/bin/sh
 read _ _ uidmap < /proc/self/uid_map
 [ -r /var/lib/hotserve ] && hslib=open || hslib=closed
-echo "smoke app starting on $PORT nofile_soft=$(ulimit -Sn) nofile_hard=$(ulimit -Hn) uidmap=$uidmap pid=$$ nprocs=$(ls /proc | grep -c '^[0-9]') hotserve_lib=$hslib"
+# The routes the sandbox exists to close. On the filesystem tier
+# (systemd 252/255) their closure rests on the user namespace alone —
+# the kernel refusing ptrace-class access across user namespaces —
+# so every cell must try them, not only the ones that also get a PID
+# namespace and would close them twice over.
+ls "/proc/$MGR_PID/root/" >/dev/null 2>&1 && mgrroot=open || mgrroot=closed
+cat "/proc/$MGR_PID/environ" >/dev/null 2>&1 && mgrenv=open || mgrenv=closed
+[ -r "/run/user/$HOTSERVE_UID/systemd/private" ] && mgrsock=open || mgrsock=closed
+[ -r /run/hotserve/admin.sock ] && adminsock=open || adminsock=closed
+[ -r /var/lib/liveswap/demo/state.json ] && state=open || state=closed
+echo "smoke app starting on $PORT nofile_soft=$(ulimit -Sn) nofile_hard=$(ulimit -Hn) uidmap=$uidmap pid=$$ nprocs=$(ls /proc | grep -c '^[0-9]') hotserve_lib=$hslib mgr_root=$mgrroot mgr_environ=$mgrenv mgr_socket=$mgrsock admin_socket=$adminsock state_json=$state"
 exec /usr/bin/hotserve respond --listen 127.0.0.1:"$PORT" "hello smoke"
 EOF
 chmod +x "$workdir/server"
@@ -307,6 +325,17 @@ else
 fi
 [ "$app_uidmap" != "4294967295" ] && [ -n "$app_uidmap" ] || die "no user namespace inside the unit (uid_map range $app_uidmap)"
 [ "$app_hslib" = "closed" ] || die "/var/lib/hotserve is visible inside the sandboxed unit"
+# Every cell, both tiers: these are the acceptance paths from
+# DESIGN-sandbox.md, and on 252/255 they are closed by the user
+# namespace with no PID namespace behind it — precisely the claim the
+# two-tier design rests on, which the trixie e2e (full tier) cannot
+# test in isolation because there both namespaces close them.
+for route in mgr_root mgr_environ mgr_socket admin_socket state_json; do
+	got=$(printf '%s' "$app_line" | grep -o "$route=[a-z]*" | cut -d= -f2)
+	[ "$got" = "closed" ] \
+		|| die "$route is '$got' inside the $sandbox-tier unit: a route the design says is closed is open"
+done
+echo "in-unit routes closed: manager /proc root+environ, manager socket, admin socket, state.json"
 [ "$(user_systemctl show -p PrivateUsers --value "$unit")" = "yes" ] || die "unit lacks PrivateUsers=yes"
 [ "$(user_systemctl show -p ProtectSystem --value "$unit")" = "strict" ] || die "unit lacks ProtectSystem=strict"
 journalctl --no-pager -u hotserve | grep -q "launching without the full sandbox" && degraded=yes || degraded=no
