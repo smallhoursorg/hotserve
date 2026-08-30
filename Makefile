@@ -157,6 +157,11 @@ package: build
 # --cgroupns=host with the cgroup mount is the reliable
 # systemd-in-docker recipe on cgroup-v2 hosts (GitHub runners and
 # Docker Desktop alike).
+# /sys/kernel/security (securityfs) is bound from the host so the
+# package's AppArmor profile can be loaded from inside the container
+# into the host kernel's policy — that is how the cells prove the
+# sandbox under an Ubuntu kernel's user-namespace restriction (CI's
+# runners); on a host without AppArmor the mount is inert.
 install-test:
 	$(cgroup2_preflight)
 	docker build -t hotserve-install-test-$(subst :,-,$(DISTRO)) \
@@ -165,6 +170,7 @@ install-test:
 	docker run -d --name hotserve-smoke --privileged --cgroupns=host \
 		--tmpfs /run --tmpfs /run/lock \
 		-v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+		-v /sys/kernel/security:/sys/kernel/security \
 		-v $(CURDIR)/dist:/dist:ro \
 		-v $(CURDIR)/packaging/test/smoke.sh:/smoke.sh:ro \
 		hotserve-install-test-$(subst :,-,$(DISTRO))
