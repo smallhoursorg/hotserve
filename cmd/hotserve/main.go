@@ -14,7 +14,8 @@ import (
 	// adapter, ...); upstream cmd/caddy/main.go does exactly this.
 	_ "github.com/caddyserver/caddy/v2/modules/standard"
 
-	// hotserve modules.
+	// hotserve modules. Importing liveswap also makes this process
+	// non-dumpable before main runs (see liveswap/harden).
 	_ "github.com/smallhoursorg/hotserve/liveswap"
 	_ "github.com/smallhoursorg/hotserve/penaltybox"
 

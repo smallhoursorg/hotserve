@@ -5,12 +5,12 @@
 # with deployed apps as transient units under that user's own systemd
 # manager — exactly the layout the .deb's postinstall produces.
 # (e2e-upstream reuses the image as a plain `hotserve run` container.)
-FROM golang:1.26-bookworm AS builder
+FROM golang:1.26-trixie AS builder
 WORKDIR /src
 COPY . .
 RUN CGO_ENABLED=0 GOFLAGS=-buildvcs=false go build -trimpath -o /hotserve ./cmd/hotserve
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 ENV DEBIAN_FRONTEND=noninteractive
 # libpam-systemd: pam_systemd gives user@<uid>.service its runtime dir;
 # dbus: logind; procps + curl: the in-container systemd suite.

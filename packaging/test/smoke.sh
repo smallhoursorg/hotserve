@@ -172,7 +172,7 @@ done
 workdir=$(mktemp -d)
 cat > "$workdir/server" <<'EOF'
 #!/bin/sh
-echo "smoke app starting on $PORT nofile=$(ulimit -n)"
+echo "smoke app starting on $PORT nofile_soft=$(ulimit -Sn) nofile_hard=$(ulimit -Hn)"
 exec /usr/bin/hotserve respond --listen 127.0.0.1:"$PORT" "hello smoke"
 EOF
 chmod +x "$workdir/server"
@@ -221,8 +221,29 @@ user_systemctl is-active --quiet "$unit" \
 	|| die "app unit must have Restart=no (the liveswap watchdog is the only restarter)"
 journalctl --no-pager -t hotserve-demo | grep -q "smoke app starting" \
 	|| die "app stdout did not reach the journal under identifier hotserve-demo"
-journalctl --no-pager -t hotserve-demo | grep -q "nofile=1048576" \
-	|| die "app soft NOFILE is not 1048576 (user@ drop-in + per-unit limit): $(journalctl --no-pager -t hotserve-demo | grep -o 'nofile=[0-9]*' | tail -1)"
+# The runner's contract: every unit's NOFILE (soft and hard) is the
+# user manager's DefaultLimitNOFILE — the very property it reads
+# (liveswap/systemd_dbus.go). Assert against that, not a constant: a
+# constant that happened to match Docker's PID 1 limit passed
+# vacuously. Where the manager is systemd >= 256 the postinstall
+# drop-in is what sets that ceiling, so pin it there; below 256 the
+# drop-in does not reach the manager and the value is whatever PID 1
+# had (#37).
+mgr_nofile=$(user_systemctl show -p DefaultLimitNOFILE --value)
+app_line=$(journalctl --no-pager -t hotserve-demo | grep 'smoke app starting' | tail -1)
+app_soft=$(printf '%s' "$app_line" | grep -o 'nofile_soft=[0-9]*' | cut -d= -f2)
+app_hard=$(printf '%s' "$app_line" | grep -o 'nofile_hard=[0-9]*' | cut -d= -f2)
+[ -n "$mgr_nofile" ] && [ "$app_soft" = "$mgr_nofile" ] && [ "$app_hard" = "$mgr_nofile" ] \
+	|| die "app NOFILE soft=$app_soft hard=$app_hard is not the user manager's DefaultLimitNOFILE ($mgr_nofile) on both"
+app_nofile=$app_soft
+sd_version=$(systemctl --version | awk 'NR==1 {print $2}')
+if [ "${sd_version%%[!0-9]*}" -ge 256 ]; then
+	[ "$mgr_nofile" = "1048576" ] \
+		|| die "systemd $sd_version: user@$uid DefaultLimitNOFILE is $mgr_nofile, not the drop-in's 1048576"
+	echo "app NOFILE $app_nofile = user@$uid DefaultLimitNOFILE = the drop-in's 1048576 (systemd $sd_version)"
+else
+	echo "app NOFILE $app_nofile = user@$uid DefaultLimitNOFILE (systemd $sd_version < 256: drop-in not applied, #37)"
+fi
 echo "deployed as unit $unit under user@$uid; app output in the journal"
 
 # `hotserve validate` provisions and cleans up without starting: run

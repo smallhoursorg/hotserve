@@ -4,7 +4,7 @@ services:
   # spawn real child processes (the test app), which is why this service
   # has no read_only hardening: the tests exercise process management.
   dev:
-    image: golang:1.26-bookworm
+    image: golang:1.26-trixie
     working_dir: /src
     environment:
       GOFLAGS: -buildvcs=false
