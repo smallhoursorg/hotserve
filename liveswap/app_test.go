@@ -308,7 +308,7 @@ func (f *fakeFetcher) fetch(_ context.Context, spec *appSpec, req deployRequest,
 	if f.err != nil {
 		return "", f.err
 	}
-	dir := spec.dirs.release(req.Version)
+	dir := spec.dirs.release(req.version)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
@@ -401,7 +401,7 @@ func newTestRig(t *testing.T) *testRig {
 
 func TestDeployFirstVersion(t *testing.T) {
 	rig := newTestRig(t)
-	if err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/a.tgz", Version: "v1"}); err != nil {
+	if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/a.tgz", version: "v1"}); err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
 	if got := rig.ma.activePort.Load(); got == 0 {
@@ -426,11 +426,11 @@ func TestDeployFirstVersion(t *testing.T) {
 func TestDeploySecondVersionStopsOldAfterDrain(t *testing.T) {
 	rig := newTestRig(t)
 	ctx := context.Background()
-	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/1", Version: "v1"}))
+	must(t, rig.ma.Deploy(ctx, deployRequest{url: "https://x/1", version: "v1"}))
 	portV1 := rig.ma.activePort.Load()
 	before := rig.clock.Now()
 
-	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/2", Version: "v2"}))
+	must(t, rig.ma.Deploy(ctx, deployRequest{url: "https://x/2", version: "v2"}))
 	if rig.ma.activePort.Load() == portV1 {
 		t.Fatal("cutover did not change the active port")
 	}
@@ -449,12 +449,12 @@ func TestDeploySecondVersionStopsOldAfterDrain(t *testing.T) {
 func TestDeployPreStartFailureKeepsOldServing(t *testing.T) {
 	rig := newTestRig(t)
 	ctx := context.Background()
-	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/1", Version: "v1"}))
+	must(t, rig.ma.Deploy(ctx, deployRequest{url: "https://x/1", version: "v1"}))
 	portV1 := rig.ma.activePort.Load()
 
 	rig.spec.preStart = []string{"./migrate"}
 	rig.runner.runOnceErr = errors.New("migration exploded")
-	err := rig.ma.Deploy(ctx, deployRequest{URL: "https://x/2", Version: "v2"})
+	err := rig.ma.Deploy(ctx, deployRequest{url: "https://x/2", version: "v2"})
 	if err == nil || rig.ma.activePort.Load() != portV1 {
 		t.Fatalf("pre_start failure must abort and keep old port; err=%v", err)
 	}
@@ -469,11 +469,11 @@ func TestDeployPreStartFailureKeepsOldServing(t *testing.T) {
 func TestDeployHealthFailureStopsNewKeepsOld(t *testing.T) {
 	rig := newTestRig(t)
 	ctx := context.Background()
-	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/1", Version: "v1"}))
+	must(t, rig.ma.Deploy(ctx, deployRequest{url: "https://x/1", version: "v1"}))
 	portV1 := rig.ma.activePort.Load()
 
 	rig.prober.err = errors.New("never became healthy")
-	err := rig.ma.Deploy(ctx, deployRequest{URL: "https://x/2", Version: "v2"})
+	err := rig.ma.Deploy(ctx, deployRequest{url: "https://x/2", version: "v2"})
 	if err == nil {
 		t.Fatal("expected health-gate failure")
 	}
@@ -492,8 +492,8 @@ func TestDeployHealthFailureStopsNewKeepsOld(t *testing.T) {
 func TestDeployRejectsSameRunningVersion(t *testing.T) {
 	rig := newTestRig(t)
 	ctx := context.Background()
-	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/1", Version: "v1"}))
-	err := rig.ma.Deploy(ctx, deployRequest{URL: "https://x/1", Version: "v1"})
+	must(t, rig.ma.Deploy(ctx, deployRequest{url: "https://x/1", version: "v1"}))
+	err := rig.ma.Deploy(ctx, deployRequest{url: "https://x/1", version: "v1"})
 	var vErr validationError
 	if !errors.As(err, &vErr) {
 		t.Fatalf("expected validationError, got %v", err)
@@ -504,7 +504,7 @@ func TestDeployConcurrentGets409Error(t *testing.T) {
 	rig := newTestRig(t)
 	rig.ma.deployMu.Lock()
 	defer rig.ma.deployMu.Unlock()
-	err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"})
+	err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/1", version: "v1"})
 	if !errors.Is(err, errDeployInProgress) {
 		t.Fatalf("expected errDeployInProgress, got %v", err)
 	}
@@ -517,7 +517,7 @@ func TestDeployGCKeepsNewestReleases(t *testing.T) {
 	// BEFORE the next deploy so the GC that runs inside Deploy sees
 	// deterministic mtime ordering (v1 oldest, v3 newest).
 	for i, v := range []string{"v1", "v2", "v3"} {
-		must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/a", Version: v}))
+		must(t, rig.ma.Deploy(ctx, deployRequest{url: "https://x/a", version: v}))
 		mt := time.Now().Add(time.Duration(i-10) * time.Minute)
 		_ = os.Chtimes(rig.spec.dirs.release(v), mt, mt)
 	}
@@ -588,7 +588,7 @@ func TestEnsureRunningNoStateIsNoop(t *testing.T) {
 
 func TestEnsureRunningSkipsWhenAlreadyAlive(t *testing.T) {
 	rig := newTestRig(t)
-	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/1", version: "v1"}))
 	started := len(rig.runner.started)
 	must(t, rig.ma.ensureRunning())
 	if len(rig.runner.started) != started {
@@ -599,7 +599,7 @@ func TestEnsureRunningSkipsWhenAlreadyAlive(t *testing.T) {
 func TestDestructStopsCurrentInstance(t *testing.T) {
 	rig := newTestRig(t)
 	markLive(t)
-	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/1", version: "v1"}))
 	must(t, rig.ma.Destruct())
 	if rig.runner.stopCount() != 1 {
 		t.Fatalf("Destruct must stop the running instance, got %d stops", rig.runner.stopCount())
@@ -732,7 +732,7 @@ func TestRollbackSkipsPreStart(t *testing.T) {
 	rig.spec.preStart = []string{"./migrate"}
 
 	// A normal deploy runs pre_start.
-	if err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/a.tgz", Version: "v1"}); err != nil {
+	if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/a.tgz", version: "v1"}); err != nil {
 		t.Fatalf("deploy v1: %v", err)
 	}
 	if rig.runner.runOnceCount != 1 {
@@ -740,13 +740,13 @@ func TestRollbackSkipsPreStart(t *testing.T) {
 	}
 
 	// Deploy a second version so v1 is no longer the running one.
-	if err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/b.tgz", Version: "v2"}); err != nil {
+	if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/b.tgz", version: "v2"}); err != nil {
 		t.Fatalf("deploy v2: %v", err)
 	}
 	if rig.runner.runOnceCount != 2 {
 		t.Fatalf("second deploy should run pre_start, got %d", rig.runner.runOnceCount)
 	}
-	if err := rig.ma.Deploy(context.Background(), deployRequest{Version: "v1", rollback: true}); err != nil {
+	if err := rig.ma.Deploy(context.Background(), deployRequest{version: "v1", rollback: true}); err != nil {
 		t.Fatalf("rollback to v1: %v", err)
 	}
 	if rig.runner.runOnceCount != 2 {
@@ -756,33 +756,33 @@ func TestRollbackSkipsPreStart(t *testing.T) {
 
 func TestDeployRejectsExistingVersion(t *testing.T) {
 	rig := newTestRig(t)
-	if err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/a.tgz", Version: "v1"}); err != nil {
+	if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/a.tgz", version: "v1"}); err != nil {
 		t.Fatalf("deploy v1: %v", err)
 	}
 	// Deploy a second version so v1 is on disk but not running.
-	if err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/b.tgz", Version: "v2"}); err != nil {
+	if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/b.tgz", version: "v2"}); err != nil {
 		t.Fatalf("deploy v2: %v", err)
 	}
 	// Re-deploying v1 (URL) must be rejected — versions are immutable.
-	err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/a.tgz", Version: "v1"})
+	err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/a.tgz", version: "v1"})
 	var vErr validationError
 	if !errors.As(err, &vErr) || !strings.Contains(err.Error(), "immutable") {
 		t.Fatalf("re-deploy of existing version should be a validation error about immutability, got %v", err)
 	}
 	// But rollback to v1 (which exists) is allowed.
-	if err := rig.ma.Deploy(context.Background(), deployRequest{Version: "v1", rollback: true}); err != nil {
+	if err := rig.ma.Deploy(context.Background(), deployRequest{version: "v1", rollback: true}); err != nil {
 		t.Fatalf("rollback to existing v1 should succeed, got %v", err)
 	}
 }
 
 func TestFailedDeployCleansUpRelease(t *testing.T) {
 	rig := newTestRig(t)
-	if err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/a.tgz", Version: "v1"}); err != nil {
+	if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/a.tgz", version: "v1"}); err != nil {
 		t.Fatalf("deploy v1: %v", err)
 	}
 	// v2 fails its health gate.
 	rig.prober.err = errTest
-	if err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/b.tgz", Version: "v2"}); err == nil {
+	if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/b.tgz", version: "v2"}); err == nil {
 		t.Fatal("deploy v2 should have failed the health gate")
 	}
 	// Its freshly-extracted release must be gone.
@@ -791,23 +791,23 @@ func TestFailedDeployCleansUpRelease(t *testing.T) {
 	}
 	// So the same version is retriable once healthy.
 	rig.prober.err = nil
-	if err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/b.tgz", Version: "v2"}); err != nil {
+	if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/b.tgz", version: "v2"}); err != nil {
 		t.Fatalf("re-deploy of a cleaned-up failed version should succeed: %v", err)
 	}
 }
 
 func TestFailedRollbackKeepsRelease(t *testing.T) {
 	rig := newTestRig(t)
-	if err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/a.tgz", Version: "v1"}); err != nil {
+	if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/a.tgz", version: "v1"}); err != nil {
 		t.Fatalf("deploy v1: %v", err)
 	}
-	if err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/b.tgz", Version: "v2"}); err != nil {
+	if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/b.tgz", version: "v2"}); err != nil {
 		t.Fatalf("deploy v2: %v", err)
 	}
 	// A rollback to v1 that fails its health gate must NOT delete v1's
 	// pre-existing release.
 	rig.prober.err = errTest
-	if err := rig.ma.Deploy(context.Background(), deployRequest{Version: "v1", rollback: true}); err == nil {
+	if err := rig.ma.Deploy(context.Background(), deployRequest{version: "v1", rollback: true}); err == nil {
 		t.Fatal("rollback should have failed the health gate")
 	}
 	if _, err := os.Stat(rig.spec.dirs.release("v1")); err != nil {
@@ -843,7 +843,7 @@ func TestStageUploadClassifiesErrors(t *testing.T) {
 
 func TestFailedDeployKeepsReleaseWhenStopUnconfirmed(t *testing.T) {
 	rig := newTestRig(t)
-	if err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/a.tgz", Version: "v1"}); err != nil {
+	if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/a.tgz", version: "v1"}); err != nil {
 		t.Fatalf("deploy v1: %v", err)
 	}
 	// v2 fails the health gate, and Stop can't confirm the instance
@@ -851,7 +851,7 @@ func TestFailedDeployKeepsReleaseWhenStopUnconfirmed(t *testing.T) {
 	rig.prober.err = errTest
 	rig.runner.stopErr = errTest
 	rig.runner.stopLeavesAlive = true
-	err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/b.tgz", Version: "v2"})
+	err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/b.tgz", version: "v2"})
 	if err == nil {
 		t.Fatal("deploy v2 should have failed")
 	}
@@ -865,13 +865,13 @@ func TestFailedDeployKeepsReleaseWhenStopUnconfirmed(t *testing.T) {
 
 func TestFailedDeployKeepsReleaseWhenStopErrorsEvenIfDead(t *testing.T) {
 	rig := newTestRig(t)
-	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/a.tgz", Version: "v1"}))
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/a.tgz", version: "v1"}))
 	// v2 fails the health gate and Stop reports an error even though
 	// the handle then reads as dead. Under cgroup kill "Stop errored"
 	// is the only signal a caller gets, so the release stays on disk.
 	rig.prober.err = errTest
 	rig.runner.stopErr = errTest
-	err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/b.tgz", Version: "v2"})
+	err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/b.tgz", version: "v2"})
 	if err == nil || !strings.Contains(err.Error(), "left on disk") {
 		t.Fatalf("expected the release to be kept: %v", err)
 	}
@@ -884,7 +884,7 @@ func TestDeployStopOldErrorDefersToSweep(t *testing.T) {
 	rig := newTestRig(t)
 	ctx := context.Background()
 	for i, v := range []string{"v1", "v2"} {
-		must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/a", Version: v}))
+		must(t, rig.ma.Deploy(ctx, deployRequest{url: "https://x/a", version: v}))
 		mt := time.Now().Add(time.Duration(i-10) * time.Minute)
 		_ = os.Chtimes(rig.spec.dirs.release(v), mt, mt)
 	}
@@ -893,7 +893,7 @@ func TestDeployStopOldErrorDefersToSweep(t *testing.T) {
 	// of a failed stop is not the source of truth, the manager is.
 	rig.runner.stopErr = errTest
 	rig.runner.stopLeavesAlive = true
-	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/a", Version: "v3"}))
+	must(t, rig.ma.Deploy(ctx, deployRequest{url: "https://x/a", version: "v3"}))
 	if rig.runner.lastSweep() != rig.runner.handleAt(2) {
 		t.Fatal("the pre-GC sweep must keep the just-promoted instance")
 	}
@@ -908,7 +908,7 @@ func TestDeployStopOldErrorDefersToSweep(t *testing.T) {
 func TestDestructOnRemovalSweepsWholeApp(t *testing.T) {
 	rig := newTestRig(t)
 	markLive(t)
-	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/1", version: "v1"}))
 	must(t, rig.ma.Destruct())
 	if rig.runner.stopCount() != 1 {
 		t.Fatalf("Destruct must stop the tracked instance, got %d stops", rig.runner.stopCount())
@@ -922,7 +922,7 @@ func TestDestructOnRemovalSweepsWholeApp(t *testing.T) {
 func TestDestructLeavesInstanceRunningOnProcessExit(t *testing.T) {
 	rig := newTestRig(t)
 	markLive(t)
-	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/1", version: "v1"}))
 	orig := caddyExiting
 	caddyExiting = func() bool { return true }
 	t.Cleanup(func() { caddyExiting = orig })
@@ -938,7 +938,7 @@ func TestDestructLeavesInstanceRunningOnProcessExit(t *testing.T) {
 func TestStartSpecCarriesUnitIdentity(t *testing.T) {
 	rig := newTestRig(t)
 	rig.spec.preStart = []string{"true"}
-	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/1", version: "v1"}))
 	if rig.runner.startCount() != 2 {
 		t.Fatalf("expected pre_start + start, got %d", rig.runner.startCount())
 	}
@@ -1116,13 +1116,13 @@ func TestRollbackConfigWakesTheWatchdog(t *testing.T) {
 func TestDeploySweepsBeforePreStart(t *testing.T) {
 	rig := newTestRig(t)
 	rig.spec.preStart = []string{"migrate"}
-	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/1", version: "v1"}))
 	// pre-pre_start (keep old=nil), pre-Start (keep old=nil), pre-GC (keep new).
 	if n := rig.runner.sweepCount(); n != 3 {
 		t.Fatalf("expected 3 sweeps, got %d", n)
 	}
 	rig.runner.sweepErr = errTest
-	err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/2", Version: "v2"})
+	err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/2", version: "v2"})
 	if err == nil || !strings.Contains(err.Error(), "not running pre_start") {
 		t.Fatalf("an unconfirmed ledger must block the migration too, got %v", err)
 	}
@@ -1137,7 +1137,7 @@ func TestDestructBeforeStartTouchesNothing(t *testing.T) {
 	// is live, so whatever the manager runs belongs to whoever is or
 	// will be serving it and must be left alone.
 	rig := newTestRig(t)
-	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/1", version: "v1"}))
 	before := rig.runner.sweepCount()
 	must(t, rig.ma.Destruct())
 	if rig.runner.stopCount() != 0 || rig.runner.sweepCount() != before {
@@ -1237,9 +1237,9 @@ func TestEnsureRunningDoesNotRelaunchWhenSweepUnconfirmed(t *testing.T) {
 
 func TestDeployAbortsStartWhenSweepUnconfirmed(t *testing.T) {
 	rig := newTestRig(t)
-	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/1", version: "v1"}))
 	rig.runner.sweepErr = errTest
-	err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/2", Version: "v2"})
+	err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/2", version: "v2"})
 	if err == nil || !strings.Contains(err.Error(), "not starting") {
 		t.Fatalf("expected the deploy to abort before Start, got %v", err)
 	}
@@ -1267,7 +1267,7 @@ func TestDeploySweepsBeforeGCAndSkipsGCWhenSweepFails(t *testing.T) {
 	rig := newTestRig(t)
 	ctx := context.Background()
 	for i, v := range []string{"v1", "v2"} {
-		must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/a", Version: v}))
+		must(t, rig.ma.Deploy(ctx, deployRequest{url: "https://x/a", version: v}))
 		mt := time.Now().Add(time.Duration(i-10) * time.Minute)
 		_ = os.Chtimes(rig.spec.dirs.release(v), mt, mt)
 	}
@@ -1279,7 +1279,7 @@ func TestDeploySweepsBeforeGCAndSkipsGCWhenSweepFails(t *testing.T) {
 	// keep=2: v3 would GC v1 — unless the pre-GC sweep cannot vouch
 	// that nothing else is running.
 	rig.runner.sweepErrs = []error{nil, errTest}
-	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/a", Version: "v3"}))
+	must(t, rig.ma.Deploy(ctx, deployRequest{url: "https://x/a", version: "v3"}))
 	for _, v := range []string{"v1", "v2", "v3"} {
 		if _, err := os.Stat(rig.spec.dirs.release(v)); err != nil {
 			t.Fatalf("release %s must survive a deploy whose sweep failed: %v", v, err)
@@ -1288,7 +1288,7 @@ func TestDeploySweepsBeforeGCAndSkipsGCWhenSweepFails(t *testing.T) {
 	if rig.runner.lastSweep() != rig.runner.handleAt(2) {
 		t.Fatal("the pre-GC sweep must keep the just-promoted instance")
 	}
-	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/a", Version: "v4"}))
+	must(t, rig.ma.Deploy(ctx, deployRequest{url: "https://x/a", version: "v4"}))
 	if _, err := os.Stat(rig.spec.dirs.release("v1")); err == nil {
 		t.Fatal("once the sweep vouches, GC catches up")
 	}
@@ -1296,9 +1296,9 @@ func TestDeploySweepsBeforeGCAndSkipsGCWhenSweepFails(t *testing.T) {
 
 func TestFailedDeployKeepsReleaseWhenStartUnconfirmed(t *testing.T) {
 	rig := newTestRig(t)
-	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/a.tgz", Version: "v1"}))
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/a.tgz", version: "v1"}))
 	rig.runner.setStartErr(&unitUnconfirmedError{unit: "hotserve-demo.v2.deadbeef.service", err: errTest})
-	err := rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/b.tgz", Version: "v2"})
+	err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/b.tgz", version: "v2"})
 	if err == nil || !strings.Contains(err.Error(), "left on disk") {
 		t.Fatalf("an unreconciled start must keep the release: %v", err)
 	}
@@ -1308,7 +1308,7 @@ func TestFailedDeployKeepsReleaseWhenStartUnconfirmed(t *testing.T) {
 	rig.runner.setStartErr(nil)
 	rig.runner.runOnceErr = &unitUnconfirmedError{unit: "hotserve-demo.v3.deadbeef.prestart.service", err: errTest}
 	rig.spec.preStart = []string{"migrate"}
-	err = rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/c.tgz", Version: "v3"})
+	err = rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/c.tgz", version: "v3"})
 	if err == nil || !strings.Contains(err.Error(), "left on disk") {
 		t.Fatalf("an unreconciled pre_start must keep the release: %v", err)
 	}

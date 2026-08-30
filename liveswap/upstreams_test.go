@@ -18,7 +18,7 @@ func TestGetUpstreamsBeforeFirstDeploy(t *testing.T) {
 
 func TestGetUpstreamsReturnsActivePort(t *testing.T) {
 	rig := newTestRig(t)
-	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1.tgz", Version: "v1"}))
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/1.tgz", version: "v1"}))
 	u := &Upstreams{App: "demo", ma: rig.ma}
 	ups, err := u.GetUpstreams(httptest.NewRequest("GET", "/", nil))
 	if err != nil || len(ups) != 1 {
@@ -57,8 +57,8 @@ func TestGetUpstreamsSeesCutover(t *testing.T) {
 		}
 	}
 
-	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/1.tgz", Version: "v1"}))
+	must(t, rig.ma.Deploy(ctx, deployRequest{url: "https://x/1.tgz", version: "v1"}))
 	assertDial("v1")
-	must(t, rig.ma.Deploy(ctx, deployRequest{URL: "https://x/2.tgz", Version: "v2"}))
+	must(t, rig.ma.Deploy(ctx, deployRequest{url: "https://x/2.tgz", version: "v2"}))
 	assertDial("v2")
 }

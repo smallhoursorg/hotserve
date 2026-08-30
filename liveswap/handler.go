@@ -127,7 +127,7 @@ func (h *Handler) deploy(w http.ResponseWriter, r *http.Request, ma *managedApp,
 // deployURL is the default path: a JSON body naming an artifact URL to
 // pull, size-capped like any control payload.
 func (h *Handler) deployURL(w http.ResponseWriter, r *http.Request, ma *managedApp, by string) error {
-	var req deployRequest
+	var p deployPayload
 	// Read one byte past the cap: exceeding it proves the payload is
 	// oversized, which deserves an honest 413 — truncating at the cap
 	// would surface as a misleading "invalid JSON" 400.
@@ -139,22 +139,22 @@ func (h *Handler) deployURL(w http.ResponseWriter, r *http.Request, ma *managedA
 		return respondJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
 			"error": fmt.Sprintf("payload exceeds %d bytes", maxPayloadBytes)})
 	}
-	if err := json.Unmarshal(body, &req); err != nil {
+	if err := json.Unmarshal(body, &p); err != nil {
 		return respondJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON payload: " + err.Error()})
 	}
-	if req.URL == "" {
+	if p.URL == "" {
 		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "url is required"})
 	}
-	if !validVersion(req.Version) {
+	if !validVersion(p.Version) {
 		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("version must match %s and not be . or ..", versionRe)})
 	}
 	// Go's transport would refuse a control character in the header
 	// value anyway, but as an opaque 500 at fetch time; catching it
 	// here names the field while it is still cheap to fix.
-	if strings.ContainsFunc(req.AuthHeader, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+	if strings.ContainsFunc(p.AuthHeader, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
 		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "auth_header contains control characters"})
 	}
-	return h.runDeploy(w, r, ma, req, by)
+	return h.runDeploy(w, r, ma, p.request(), by)
 }
 
 // deployPush streams an uploaded gzip tarball to a staging file and
@@ -195,7 +195,7 @@ func (h *Handler) deployPush(w http.ResponseWriter, r *http.Request, ma *managed
 	// Backstop cleanup: fetch removes the archive once it extracts it,
 	// but if the pipeline returns before fetch it would leak.
 	defer func() { _ = os.Remove(archive) }()
-	req := deployRequest{Version: version, localArchive: archive, by: by}
+	req := deployRequest{version: version, localArchive: archive, by: by}
 	h.logDeployAuthorized(r, ma, req)
 	return h.mapDeployResult(w, ma, ma.deployLocked(r.Context(), req, c))
 }
@@ -206,7 +206,7 @@ func (h *Handler) deployRollback(w http.ResponseWriter, r *http.Request, ma *man
 	if !validVersion(version) {
 		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("rollback version must match %s and not be . or ..", versionRe)})
 	}
-	return h.runDeploy(w, r, ma, deployRequest{Version: version, rollback: true}, by)
+	return h.runDeploy(w, r, ma, deployRequest{version: version, rollback: true}, by)
 }
 
 // runDeploy records the authorizing source, runs the pipeline, and maps

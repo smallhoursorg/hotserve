@@ -93,17 +93,39 @@ type appSpec struct {
 	dirs            appDirs
 }
 
-// deployRequest is the validated webhook payload. The three sources are
-// mutually exclusive: a URL to pull (the default), a pushed archive
-// already staged on disk (localArchive), or a rollback to an existing
-// on-disk release (rollback). URL and AuthHeader come from the JSON
-// body; the rest are set server-side by the handler.
-type deployRequest struct {
+// deployPayload is the JSON body of a URL deploy — the only request
+// body the webhook ever decodes into a struct. It is deliberately a
+// separate type from deployRequest: the request carries server-side
+// fields (the staged upload path, the rollback flag, the authorizing
+// source) that must never be reachable from a body, and keeping them
+// out of the decoded type makes that structural rather than a matter
+// of field visibility — for readers and for static analysis alike,
+// which otherwise taints every field of a decoded struct.
+// TestDeployPayloadIsTheOnlyWireType pins the split.
+type deployPayload struct {
 	URL        string `json:"url"`
 	Version    string `json:"version"`
-	AuthHeader string `json:"auth_header,omitempty"`
-	// localArchive is a path to an already-staged pushed tarball (the
-	// upload path); empty for a URL pull.
+	AuthHeader string `json:"auth_header"`
+}
+
+// request is the one place a payload becomes a request: exactly the
+// three wire fields cross over, everything else stays zero.
+func (p deployPayload) request() deployRequest {
+	return deployRequest{url: p.URL, version: p.Version, authHeader: p.AuthHeader}
+}
+
+// deployRequest is the validated deploy request handed to the
+// pipeline. It is never decoded from the wire (see deployPayload). The
+// three sources are mutually exclusive: a URL to pull (the default), a
+// pushed archive already staged on disk (localArchive), or a rollback
+// to an existing on-disk release (rollback).
+type deployRequest struct {
+	url        string
+	version    string
+	authHeader string
+	// localArchive is the path of an already-staged pushed tarball (an
+	// os.CreateTemp name under the app's own tmp dir, chosen by the
+	// handler — never request input); empty for a URL pull.
 	localArchive string
 	// rollback relaunches an existing on-disk release/<Version> without
 	// fetching or extracting anything.
@@ -331,12 +353,12 @@ func (ma *managedApp) Deploy(ctx context.Context, req deployRequest) error {
 func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c collaborators) (err error) {
 	spec := c.spec
 	started := c.clock.Now()
-	logger := c.logger.With(zap.String("version", req.Version))
-	logger.Info("deploy started", zap.String("artifact_host", hostOf(req.URL)))
+	logger := c.logger.With(zap.String("version", req.version))
+	logger.Info("deploy started", zap.String("artifact_host", hostOf(req.url)))
 
 	defer func() {
 		result := deployResult{
-			Version:    req.Version,
+			Version:    req.version,
 			Status:     "succeeded",
 			By:         req.by,
 			StartedAt:  started,
@@ -359,8 +381,8 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	}()
 
 	old := ma.currentInstance()
-	if old != nil && old.version == req.Version && c.runner.Alive(old.handle) {
-		return validationError{fmt.Sprintf("version %s is already running; bump the version to redeploy", req.Version)}
+	if old != nil && old.version == req.version && c.runner.Alive(old.handle) {
+		return validationError{fmt.Sprintf("version %s is already running; bump the version to redeploy", req.version)}
 	}
 	if err := spec.dirs.ensure(); err != nil {
 		return err
@@ -371,14 +393,14 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	// relaunches an existing release by design. Deploys are serialized per
 	// app (deployMu), so this check-then-create has no race.
 	if !req.rollback {
-		switch _, statErr := os.Stat(spec.dirs.release(req.Version)); {
+		switch _, statErr := os.Stat(spec.dirs.release(req.version)); {
 		case statErr == nil:
-			return validationError{fmt.Sprintf("version %s already exists — versions are immutable; deploy a new version, or roll back to relaunch this one", req.Version)}
+			return validationError{fmt.Sprintf("version %s already exists — versions are immutable; deploy a new version, or roll back to relaunch this one", req.version)}
 		case !os.IsNotExist(statErr):
 			// A real I/O/permission error must not be read as "absent"
 			// and fall through to fetch, whose RemoveAll would then
 			// overwrite the existing release.
-			return fmt.Errorf("checking release %s: %w", req.Version, statErr)
+			return fmt.Errorf("checking release %s: %w", req.version, statErr)
 		}
 	}
 
@@ -407,14 +429,14 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 			// that would pull files from beneath a live process. The
 			// next deploy's sweep settles it against the runner.
 			if unitUnconfirmed(err) || (newHandle != nil && (stopUnconfirmed || c.runner.Alive(newHandle))) {
-				err = errors.Join(err, fmt.Errorf("release %s left on disk: the failed instance may still be running", req.Version))
+				err = errors.Join(err, fmt.Errorf("release %s left on disk: the failed instance may still be running", req.version))
 				return
 			}
 			// Surface a cleanup failure: otherwise the release lingers and
 			// the next attempt at this version 422s (immutable) with no
 			// explanation of why.
 			if rmErr := os.RemoveAll(releaseDir); rmErr != nil {
-				err = errors.Join(err, fmt.Errorf("cleanup of failed release %s: %w", req.Version, rmErr))
+				err = errors.Join(err, fmt.Errorf("cleanup of failed release %s: %w", req.version, rmErr))
 			}
 		}()
 	}
@@ -423,7 +445,7 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	if err != nil {
 		return err
 	}
-	env, err := buildEnv(spec, req.Version, port, releaseDir)
+	env, err := buildEnv(spec, req.version, port, releaseDir)
 	if err != nil {
 		return err
 	}
@@ -445,8 +467,8 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		preCtx, cancel := context.WithTimeout(ctx, spec.deadline)
 		err := c.runner.RunOnce(preCtx, startSpec{
 			app:     spec.name,
-			version: req.Version,
-			command: expandArgs(spec.preStart, spec, req.Version, port, releaseDir),
+			version: req.version,
+			command: expandArgs(spec.preStart, spec, req.version, port, releaseDir),
 			dir:     releaseDir,
 			env:     env,
 			grace:   spec.grace,
@@ -466,8 +488,8 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	}
 	newHandle, err = c.runner.Start(startSpec{
 		app:     spec.name,
-		version: req.Version,
-		command: expandArgs(spec.command, spec, req.Version, port, releaseDir),
+		version: req.version,
+		command: expandArgs(spec.command, spec, req.version, port, releaseDir),
 		dir:     releaseDir,
 		env:     env,
 		grace:   spec.grace,
@@ -500,7 +522,7 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	// The point of no return. From here on the request context is
 	// ignored: a CI client hanging up must not abort stop-old or GC.
 	ma.setPhase(c, "promoting")
-	newInst := &instance{version: req.Version, port: port, handle: newHandle}
+	newInst := &instance{version: req.version, port: port, handle: newHandle}
 	if err := ma.publishInstance(c, newInst); err != nil { // ← the cutover
 		logger.Error("state persistence failed; deploys still work but a Caddy restart will not know about this version", zap.Error(err))
 	}
@@ -530,7 +552,7 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		logger.Warn("skipping release GC for this deploy")
 		return nil
 	}
-	gcReleases(spec.dirs.releases, spec.keep, req.Version, logger)
+	gcReleases(spec.dirs.releases, spec.keep, req.version, logger)
 	return nil
 }
 
