@@ -195,7 +195,7 @@ func (h *Handler) deployPush(w http.ResponseWriter, r *http.Request, ma *managed
 	// Backstop cleanup: fetch removes the archive once it extracts it,
 	// but if the pipeline returns before fetch it would leak.
 	defer func() { _ = os.Remove(archive) }()
-	req := deployRequest{Version: version, localArchive: archive, by: by}
+	req := deployRequest{version: version, localArchive: archive, by: by}
 	h.logDeployAuthorized(r, ma, req)
 	return h.mapDeployResult(w, ma, ma.deployLocked(r.Context(), req, c))
 }
@@ -206,7 +206,7 @@ func (h *Handler) deployRollback(w http.ResponseWriter, r *http.Request, ma *man
 	if !validVersion(version) {
 		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("rollback version must match %s and not be . or ..", versionRe)})
 	}
-	return h.runDeploy(w, r, ma, deployRequest{Version: version, rollback: true}, by)
+	return h.runDeploy(w, r, ma, deployRequest{version: version, rollback: true}, by)
 }
 
 // runDeploy records the authorizing source, runs the pipeline, and maps

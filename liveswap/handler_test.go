@@ -254,7 +254,7 @@ func TestWebhookPushRoutesAndDeploys(t *testing.T) {
 		t.Fatalf("push: got %d %s", w.Code, w.Body.String())
 	}
 	got := rig.fetch.lastReq
-	if got.source() != "push" || got.localArchive == "" || got.Version != "v9" {
+	if got.source() != "push" || got.localArchive == "" || got.version != "v9" {
 		t.Fatalf("push not routed correctly: %+v", got)
 	}
 }
@@ -289,7 +289,7 @@ func TestWebhookRollbackRoutes(t *testing.T) {
 		t.Fatalf("rollback: got %d %s", w.Code, w.Body.String())
 	}
 	got := rig.fetch.lastReq
-	if got.source() != "rollback" || !got.rollback || got.Version != "v3" {
+	if got.source() != "rollback" || !got.rollback || got.version != "v3" {
 		t.Fatalf("rollback not routed correctly: %+v", got)
 	}
 }
@@ -368,9 +368,11 @@ func TestWebhookPushContentTypeCaseInsensitive(t *testing.T) {
 
 // TestDeployPayloadIsTheOnlyWireType pins the deployPayload /
 // deployRequest split structurally (see deployPayload): the wire type
-// carries exactly the three body fields, and the request type carries
-// no json tag at all — so reverting to one decoded struct, or growing
-// the request with a tagged field, fails here rather than in a CodeQL
+// carries exactly the three body fields, and the request type has no
+// exported field at all — encoding/json cannot set an unexported
+// field, so decoding a body into a deployRequest is a no-op by
+// language rule, not by convention. Reverting to one decoded struct,
+// or exporting a request field, fails here rather than in a CodeQL
 // alert. (rollback and version still arrive, validated, via the query
 // string; that path builds the request as a literal.)
 func TestDeployPayloadIsTheOnlyWireType(t *testing.T) {
@@ -386,9 +388,19 @@ func TestDeployPayloadIsTheOnlyWireType(t *testing.T) {
 	}
 	rt := reflect.TypeFor[deployRequest]()
 	for i := 0; i < rt.NumField(); i++ {
-		if f := rt.Field(i); f.Tag.Get("json") != "" {
-			t.Fatalf("deployRequest.%s carries a json tag (%q); the request type must not be decodable from the wire", f.Name, f.Tag)
+		if f := rt.Field(i); f.IsExported() || f.Tag.Get("json") != "" {
+			t.Fatalf("deployRequest.%s is exported or tagged (%q); the request type must not be decodable from the wire", f.Name, f.Tag)
 		}
+	}
+	// And the property itself, end to end: a body naming every field
+	// by its wire name (and its Go name) leaves a deployRequest zero.
+	var req deployRequest
+	body := `{"url":"https://x/a.tgz","version":"v1","auth_header":"Bearer t",` +
+		`"URL":"https://x/a.tgz","Version":"v1","AuthHeader":"Bearer t",` +
+		`"localArchive":"/etc/passwd","rollback":true,"by":"forged"}`
+	must(t, json.Unmarshal([]byte(body), &req)) //nolint:staticcheck // SA9005 is the property under test: nothing on the wire can land in deployRequest
+	if req != (deployRequest{}) {
+		t.Fatalf("a body reached deployRequest fields: %+v", req)
 	}
 }
 
@@ -404,7 +416,7 @@ func TestWebhookURLDeployForwardsWireFields(t *testing.T) {
 		t.Fatalf("code = %d body=%s", w.Code, w.Body.String())
 	}
 	got := rig.fetch.lastReq
-	if got.URL != "https://x/private.tgz" || got.Version != "v7" || got.AuthHeader != "Bearer artifact-token" {
+	if got.url != "https://x/private.tgz" || got.version != "v7" || got.authHeader != "Bearer artifact-token" {
 		t.Fatalf("wire fields did not reach the fetcher: %+v", got)
 	}
 	if got.localArchive != "" || got.rollback {
