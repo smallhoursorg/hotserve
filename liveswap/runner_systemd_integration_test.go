@@ -443,7 +443,7 @@ func TestIntegrationSystemdSandboxProbe(t *testing.T) {
 	if version == 0 {
 		t.Fatal("manager version not read")
 	}
-	got := probeSandboxCapability(r, version, root)
+	got := probeSandboxCapability(r, version, root, sandboxHiddenFloor)
 	t.Logf("systemd %d: tier=%s reason=%q", version, got.tier, got.reason)
 	switch {
 	case version >= 256 && got.tier != sandboxFull:
@@ -524,7 +524,7 @@ func TestIntegrationSystemdSandboxedUnit(t *testing.T) {
 		dir:     release,
 		env:     []string{"PATH=" + os.Getenv("PATH"), "HOME=" + shared},
 		grace:   2 * time.Second,
-		sandbox: &sandboxSpec{tier: sandboxFull, root: root, writable: []string{release, shared}},
+		sandbox: &sandboxSpec{tier: sandboxFull, root: root, writable: []string{release, shared}, hidden: sandboxHiddenFloor},
 	}
 	h, err := r.Start(spec)
 	if err != nil {

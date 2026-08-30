@@ -80,30 +80,99 @@ func TestResolveSandboxTier(t *testing.T) {
 
 func TestValidateExtraPathAndRoot(t *testing.T) {
 	root := "/var/lib/liveswap"
-	for _, ok := range []string{"/run/postgresql", "/opt/geoip", "/var/cache/blog", "/home/deploy/data"} {
-		if err := validateExtraPath(ok, root); err != nil {
+	hidden := append(append([]string{}, sandboxHiddenFloor...), "/var/lib/hotserve/caddy", "/etc/blog/blog.env")
+	for _, ok := range []string{"/run/postgresql", "/opt/geoip", "/var/cache/blog", "/srv/media"} {
+		if err := validateExtraPath(ok, root, hidden); err != nil {
 			t.Errorf("%s rejected: %v", ok, err)
 		}
 	}
 	for _, bad := range []string{
 		"relative/path", "/opt/../etc", "/opt/", "/",
 		"/var/lib/liveswap", "/var/lib/liveswap/other/shared", // the root: siblings live there
-		"/var/lib/hotserve", "/var/lib/hotserve/.local", // TLS keys
+		"/var/lib/hotserve", "/var/lib/hotserve/caddy", // TLS keys
 		"/run/hotserve", "/etc/hotserve", "/etc/liveswap/blog.env",
+		"/etc/blog/blog.env", // a derived hidden path (another app's env_file)
 	} {
-		if err := validateExtraPath(bad, root); err == nil {
+		if err := validateExtraPath(bad, root, hidden); err == nil {
 			t.Errorf("%s accepted", bad)
 		}
 	}
-	// A prefix that merely shares characters with a hidden path is fine.
-	if err := validateExtraPath("/var/lib/hotserve-data", root); err != nil {
-		t.Errorf("/var/lib/hotserve-data rejected: %v", err)
+	// The sharp cases: anything the sandbox options close by themselves
+	// must not be bindable back — /run/user is the manager's private
+	// socket (a sandbox escape), /sys/fs/cgroup undoes the read-only
+	// cgroupfs the resource caps will rely on. Read-only is no defence:
+	// connecting to a unix socket is not a filesystem write.
+	for _, closed := range []string{
+		"/run/user", "/run/user/997", "/run/user/997/systemd/private",
+		"/home", "/home/deploy/data", "/root",
+		"/tmp", "/var/tmp/build", "/dev", "/dev/shm",
+		"/sys", "/sys/fs/cgroup", "/proc", "/proc/self",
+	} {
+		err := validateExtraPath(closed, root, hidden)
+		if err == nil {
+			t.Errorf("%s accepted: it would hand back what the sandbox closes", closed)
+			continue
+		}
+		if !strings.Contains(err.Error(), "sandbox itself closes") {
+			t.Errorf("%s refused for the wrong reason: %v", closed, err)
+		}
 	}
-	if err := validateSandboxRoot("/var/lib/liveswap"); err != nil {
+	// A prefix that merely shares characters with a closed or hidden
+	// path is fine.
+	for _, ok := range []string{"/var/lib/hotserve-data", "/tmpfiles", "/devices", "/run/userdata"} {
+		if err := validateExtraPath(ok, root, hidden); err != nil {
+			t.Errorf("%s rejected: %v", ok, err)
+		}
+	}
+	if err := validateSandboxRoot("/var/lib/liveswap", hidden); err != nil {
 		t.Errorf("default root rejected: %v", err)
 	}
-	if err := validateSandboxRoot("/var/lib/hotserve/apps"); err == nil {
-		t.Error("a root under a hidden path must be rejected")
+	for _, bad := range []string{"/var/lib/hotserve/apps", "/tmp/liveswap", "/home/deploy/apps"} {
+		if err := validateSandboxRoot(bad, hidden); err == nil {
+			t.Errorf("root %s accepted: nothing could be bound back under it", bad)
+		}
+	}
+}
+
+// TestHiddenPathsDerived: the hidden set is what this hotserve actually
+// uses, not the packaged layout's literals — otherwise an env_file or a
+// Caddy data dir outside the convention stays readable by every sibling
+// while the status endpoint reports the app as sandboxed.
+func TestHiddenPathsDerived(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", "/srv/hotserve-data")
+	t.Setenv("XDG_CONFIG_HOME", "/srv/hotserve-config")
+	t.Setenv("RUNTIME_DIRECTORY", "/run/hotserve-alt")
+	a := &App{Apps: map[string]*AppConfig{
+		"blog": {EnvFile: "/etc/blog/blog.env"},
+		"shop": {EnvFile: "/srv/shop/.env"},
+		"bare": {},
+	}}
+	got := a.hiddenPaths()
+	for _, want := range append(append([]string{}, sandboxHiddenFloor...),
+		"/srv/hotserve-data/caddy", "/srv/hotserve-config/caddy", "/run/hotserve-alt",
+		"/etc/blog/blog.env", "/srv/shop/.env") {
+		found := false
+		for _, h := range got {
+			if h == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("hidden set lacks %s: %v", want, got)
+		}
+	}
+	// Deterministic: specEqual compares specs by their rendering, so a
+	// map-order-dependent set would make every reload look like a
+	// config change.
+	if second := a.hiddenPaths(); !reflect.DeepEqual(got, second) {
+		t.Fatalf("hiddenPaths is not deterministic:\n%v\n%v", got, second)
+	}
+	// An app's env_file is hidden as the file, not its directory: an
+	// operator's /etc/blog/blog.env must not take /etc/blog with it.
+	for _, h := range got {
+		if h == "/etc/blog" || h == "/srv/shop" {
+			t.Errorf("hidden set contains the env_file's whole directory %s: %v", h, got)
+		}
 	}
 }
 
@@ -148,6 +217,7 @@ func TestSandboxPropertiesFilesystemAndFull(t *testing.T) {
 		root:     "/var/lib/liveswap",
 		writable: []string{"/var/lib/liveswap/blog/releases/v3", "/var/lib/liveswap/blog/shared"},
 		extra:    []extraPath{{path: "/run/postgresql"}, {path: "/var/cache/blog", rw: true}},
+		hidden:   append(append([]string{}, sandboxHiddenFloor...), "/var/lib/hotserve/caddy", "/etc/blog/blog.env"),
 	}
 	got := propMap(unitSpec{ExecStart: []string{"/bin/true"}, Sandbox: spec})
 	for _, name := range sandboxPropertyNames {
@@ -179,7 +249,7 @@ func TestSandboxPropertiesFilesystemAndFull(t *testing.T) {
 		t.Errorf("SystemCallFilter = %+v", got["SystemCallFilter"])
 	}
 	hidden, _ := got["InaccessiblePaths"].([]string)
-	for _, p := range sandboxHiddenPaths {
+	for _, p := range spec.hidden {
 		found := false
 		for _, h := range hidden {
 			if h == "-"+p {
@@ -234,6 +304,7 @@ func TestSandboxPropertiesFilesystemAndFull(t *testing.T) {
 func TestSandboxSpecFor(t *testing.T) {
 	spec := testSpec(t)
 	spec.extraPaths = []extraPath{{path: "/run/postgresql"}}
+	spec.sandboxHidden = []string{"/var/lib/hotserve", "/etc/blog/blog.env"}
 	if spec.sandboxSpecFor("/x", sandboxNone) != nil {
 		t.Fatal("none must render no spec")
 	}
@@ -256,6 +327,9 @@ func TestSandboxSpecFor(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.extra, spec.extraPaths) {
 		t.Fatalf("extra = %v", got.extra)
+	}
+	if !reflect.DeepEqual(got.hidden, spec.sandboxHidden) {
+		t.Fatalf("hidden = %v, want %v", got.hidden, spec.sandboxHidden)
 	}
 	if !filepath.IsAbs(got.root) {
 		t.Fatalf("root must be absolute: %q", got.root)
@@ -318,7 +392,7 @@ func TestProbeSandboxCapability(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &probeRunner{fakeRunner: &fakeRunner{}, fail: tc.fail}
-			got := probeSandboxCapability(r, tc.version, "/var/lib/liveswap")
+			got := probeSandboxCapability(r, tc.version, "/var/lib/liveswap", sandboxHiddenFloor)
 			if got.tier != tc.wantTier {
 				t.Fatalf("tier = %v (%s), want %v", got.tier, got.reason, tc.wantTier)
 			}
@@ -334,8 +408,9 @@ func TestProbeSandboxCapability(t *testing.T) {
 				t.Errorf("full needs no reason, got %q", got.reason)
 			}
 			for _, s := range r.specs {
-				if s.sandbox == nil || s.sandbox.root != "/var/lib/liveswap" || len(s.sandbox.writable) != 0 {
-					t.Errorf("probe unit must carry the tier's sandbox over the root and expose nothing: %+v", s.sandbox)
+				if s.sandbox == nil || s.sandbox.root != "/var/lib/liveswap" || len(s.sandbox.writable) != 0 ||
+					!reflect.DeepEqual(s.sandbox.hidden, sandboxHiddenFloor) {
+					t.Errorf("probe unit must carry the tier's sandbox over the root and hidden set, exposing nothing: %+v", s.sandbox)
 				}
 				if !reflect.DeepEqual(s.command, sandboxProbeCommand(s.sandbox.tier)) {
 					t.Errorf("probe command mismatch for %v", s.sandbox.tier)
@@ -535,7 +610,7 @@ func TestStartResolvesSandboxPolicy(t *testing.T) {
 	t.Cleanup(func() { probeSandbox, probeUserManager = origProbe, origManager })
 	probeUserManager = func() error { return nil }
 	probes := 0
-	probeSandbox = func(string, *zap.Logger) sandboxCapability {
+	probeSandbox = func(string, []string, *zap.Logger) sandboxCapability {
 		probes++
 		return sandboxCapability{tier: sandboxFilesystem, reason: "full tier: the user manager is systemd 255, PrivatePIDs= needs 256"}
 	}

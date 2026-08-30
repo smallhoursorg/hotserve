@@ -301,8 +301,8 @@ func sandboxProperties(s *sandboxSpec) []sddbus.Property {
 	if s == nil || s.tier == sandboxNone {
 		return nil
 	}
-	hidden := make([]string, 0, len(sandboxHiddenPaths))
-	for _, p := range sandboxHiddenPaths {
+	hidden := make([]string, 0, len(s.hidden))
+	for _, p := range s.hidden {
 		hidden = append(hidden, "-"+p) // "-": absent on this host is fine
 	}
 	writable := make([]bindMount, 0, len(s.writable)+len(s.extra))

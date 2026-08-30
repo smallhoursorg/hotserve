@@ -476,6 +476,7 @@ func (a *App) buildSpec(name string, cfg *AppConfig) (*appSpec, error) {
 		dirs:            newAppDirs(a.Root, name),
 		sandboxMode:     sandboxMode,
 		extraPaths:      extra,
+		sandboxHidden:   a.hiddenPaths(),
 	}, nil
 }
 
@@ -485,7 +486,8 @@ func (a *App) Validate() error {
 	if !strings.HasPrefix(a.Root, "/") {
 		return fmt.Errorf("root must be an absolute path, got %q", a.Root)
 	}
-	if err := validateSandboxRoot(a.Root); err != nil {
+	hidden := a.hiddenPaths()
+	if err := validateSandboxRoot(a.Root, hidden); err != nil {
 		return err
 	}
 	if a.Sandbox != "" && !validSandboxMode(a.Sandbox) { // "" = the default Provision applies (auto)
@@ -496,7 +498,7 @@ func (a *App) Validate() error {
 			return fmt.Errorf("app %s: sandbox must be \"auto\", \"require\" or \"off\", got %q", name, cfg.Sandbox)
 		}
 		for _, e := range cfg.ExtraPaths {
-			if err := validateExtraPath(e.Path, a.Root); err != nil {
+			if err := validateExtraPath(e.Path, a.Root, hidden); err != nil {
 				return fmt.Errorf("app %s: %w", name, err)
 			}
 		}
@@ -583,7 +585,7 @@ func (a *App) Start() error {
 	// host that falls short fails the start — by design, and documented
 	// as such — so it is checked before any app is configured.
 	if a.sandboxWanted() {
-		capability := probeSandbox(a.Root, a.logger)
+		capability := probeSandbox(a.Root, a.hiddenPaths(), a.logger)
 		for name, spec := range a.specs {
 			tier, warn, err := resolveSandboxTier(spec.sandboxMode, capability)
 			if err != nil {
@@ -645,10 +647,10 @@ func (a *App) sandboxWanted() bool {
 
 // probeSandbox measures what the user manager can deliver (sandbox.go);
 // a variable so unit tests can script the host.
-var probeSandbox = func(root string, logger *zap.Logger) sandboxCapability {
+var probeSandbox = func(root string, hidden []string, logger *zap.Logger) sandboxCapability {
 	r := newSystemdRunner(userManager, logger)
 	defer r.cancel()
-	return probeSandboxCapability(r, userManager.ManagerVersion(), root)
+	return probeSandboxCapability(r, userManager.ManagerVersion(), root, hidden)
 }
 
 // Stop intentionally does NOT stop app processes: on a config reload

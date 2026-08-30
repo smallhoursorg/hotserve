@@ -95,6 +95,7 @@ type appSpec struct {
 	dirs            appDirs
 	sandboxMode     string      // auto | require | off (policy, from config)
 	extraPaths      []extraPath // host paths exposed inside the sandbox
+	sandboxHidden   []string    // paths no app may see (App.hiddenPaths)
 	// sandboxTier is the tier new instances of this app get: policy
 	// resolved against the host at App.Start. Relaunches ignore it and
 	// reproduce the recorded tier of the instance they replace.
@@ -759,14 +760,21 @@ func (ma *managedApp) sweep(c collaborators, keep handle) bool {
 }
 
 // launchVersion starts an already-on-disk version on a fresh port and
-// returns the new instance without publishing it. It relaunches what
-// was recorded as running — the version and the sandbox tier come
-// from the caller's record (state.json, or the live instance the
-// watchdog is replacing), never from a re-read of config-level launch
-// policy — so recovery and watchdog restarts reproduce the instance
-// that existed, and a changed app definition (a newly enabled
-// sandbox included) still takes effect only on the next deploy, the
-// path that has a fallback.
+// returns the new instance without publishing it. The version and the
+// sandbox tier come from the caller's record (state.json, or the live
+// instance the watchdog is replacing), never from a re-read of
+// config-level launch policy, so enabling the sandbox takes effect on
+// the next deploy — the path with a fallback — and never on a
+// recovery or watchdog relaunch, which has none.
+//
+// Only those two are pinned: the command, the environment and the
+// sandbox's extra paths are rendered from the CURRENT spec, so an
+// edited app definition does reach a relaunch. That is the same
+// exposure a reload has always had here (a changed command relaunches
+// on the next crash), and the tier is pinned because engaging a
+// sandbox is the change most likely to make a relaunch fail with
+// nothing to fall back to. Recording the whole launch disposition is
+// the fuller answer — see #35.
 func (ma *managedApp) launchVersion(c collaborators, version string, tier sandboxTier) (*instance, error) {
 	spec := c.spec
 	releaseDir := spec.dirs.release(version)
