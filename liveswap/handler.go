@@ -154,9 +154,7 @@ func (h *Handler) deployURL(w http.ResponseWriter, r *http.Request, ma *managedA
 	if strings.ContainsFunc(p.AuthHeader, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
 		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "auth_header contains control characters"})
 	}
-	// Only the three wire fields cross over; the server-side fields of
-	// deployRequest stay at their zero values by construction.
-	return h.runDeploy(w, r, ma, deployRequest{URL: p.URL, Version: p.Version, AuthHeader: p.AuthHeader}, by)
+	return h.runDeploy(w, r, ma, p.request(), by)
 }
 
 // deployPush streams an uploaded gzip tarball to a staging file and

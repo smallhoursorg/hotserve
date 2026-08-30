@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -365,26 +366,48 @@ func TestWebhookPushContentTypeCaseInsensitive(t *testing.T) {
 	}
 }
 
-// TestWebhookBodyCannotSetServerSideFields pins the deployPayload /
-// deployRequest split: a URL deploy body that also spells the
-// server-side request fields (the staged-upload path, the rollback
-// flag, the authorizing source) is decoded as a plain URL deploy —
-// those fields are not on the wire type, so nothing a caller sends can
-// reach them.
-func TestWebhookBodyCannotSetServerSideFields(t *testing.T) {
+// TestDeployPayloadIsTheOnlyWireType pins the deployPayload /
+// deployRequest split structurally (see deployPayload): the wire type
+// carries exactly the three body fields, and the request type carries
+// no json tag at all — so reverting to one decoded struct, or growing
+// the request with a tagged field, fails here rather than in a CodeQL
+// alert. (rollback and version still arrive, validated, via the query
+// string; that path builds the request as a literal.)
+func TestDeployPayloadIsTheOnlyWireType(t *testing.T) {
+	wire := map[string]string{}
+	pt := reflect.TypeFor[deployPayload]()
+	for i := 0; i < pt.NumField(); i++ {
+		f := pt.Field(i)
+		wire[f.Name] = f.Tag.Get("json")
+	}
+	want := map[string]string{"URL": "url", "Version": "version", "AuthHeader": "auth_header"}
+	if !reflect.DeepEqual(wire, want) {
+		t.Fatalf("deployPayload wire fields = %v, want %v", wire, want)
+	}
+	rt := reflect.TypeFor[deployRequest]()
+	for i := 0; i < rt.NumField(); i++ {
+		if f := rt.Field(i); f.Tag.Get("json") != "" {
+			t.Fatalf("deployRequest.%s carries a json tag (%q); the request type must not be decodable from the wire", f.Name, f.Tag)
+		}
+	}
+}
+
+// TestWebhookURLDeployForwardsWireFields is the positive half of the
+// split: every wire field a caller sends reaches the fetcher, and the
+// server-side ones stay zero however the body spells them.
+func TestWebhookURLDeployForwardsWireFields(t *testing.T) {
 	h, rig := newTestHandler(t)
-	body := `{"url":"https://x/a.tgz","version":"v1",` +
-		`"localArchive":"/etc/passwd","local_archive":"/etc/passwd",` +
-		`"rollback":true,"by":"forged"}`
+	body := `{"url":"https://x/private.tgz","version":"v7","auth_header":"Bearer artifact-token",` +
+		`"localArchive":"/etc/passwd","local_archive":"/etc/passwd","rollback":true}`
 	w := do(t, h, http.MethodPost, "/demo", appToken(t), body)
 	if w.Code != http.StatusOK {
 		t.Fatalf("code = %d body=%s", w.Code, w.Body.String())
 	}
 	got := rig.fetch.lastReq
-	if got.localArchive != "" || got.rollback || got.by != "local:test-key" {
-		t.Fatalf("server-side fields reachable from the body: %+v", got)
+	if got.URL != "https://x/private.tgz" || got.Version != "v7" || got.AuthHeader != "Bearer artifact-token" {
+		t.Fatalf("wire fields did not reach the fetcher: %+v", got)
 	}
-	if got.source() != "url" {
-		t.Fatalf("source = %q, want url", got.source())
+	if got.localArchive != "" || got.rollback {
+		t.Fatalf("server-side fields reachable from the body: %+v", got)
 	}
 }

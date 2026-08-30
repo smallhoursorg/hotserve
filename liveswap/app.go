@@ -93,18 +93,25 @@ type appSpec struct {
 	dirs            appDirs
 }
 
-// deployPayload is the JSON body of a URL deploy — the only thing the
-// webhook ever decodes from the wire. It is deliberately a separate
-// type from deployRequest: the request carries server-side fields
-// (the staged upload path, the rollback flag, the authorizing source)
-// that must never be reachable from a body, and keeping them out of
-// the decoded type makes that structural rather than a matter of
-// field visibility — for readers and for static analysis alike, which
-// otherwise taints every field of a decoded struct.
+// deployPayload is the JSON body of a URL deploy — the only request
+// body the webhook ever decodes into a struct. It is deliberately a
+// separate type from deployRequest: the request carries server-side
+// fields (the staged upload path, the rollback flag, the authorizing
+// source) that must never be reachable from a body, and keeping them
+// out of the decoded type makes that structural rather than a matter
+// of field visibility — for readers and for static analysis alike,
+// which otherwise taints every field of a decoded struct.
+// TestDeployPayloadIsTheOnlyWireType pins the split.
 type deployPayload struct {
 	URL        string `json:"url"`
 	Version    string `json:"version"`
-	AuthHeader string `json:"auth_header,omitempty"`
+	AuthHeader string `json:"auth_header"`
+}
+
+// request is the one place a payload becomes a request: exactly the
+// three wire fields cross over, everything else stays zero.
+func (p deployPayload) request() deployRequest {
+	return deployRequest{URL: p.URL, Version: p.Version, AuthHeader: p.AuthHeader}
 }
 
 // deployRequest is the validated deploy request handed to the
