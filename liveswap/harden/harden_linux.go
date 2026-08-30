@@ -28,9 +28,18 @@ import "syscall"
 // the Go runtime's own start-up plus the initializers of syscall's
 // dependencies, well under a millisecond — during which a same-UID
 // process racing on /proc could still read the new supervisor's
-// environment. Only the kernel can close that: a PID namespace for
-// hotserve.service (PrivatePIDs=, systemd >= 256) or an exec under
-// AT_SECURE. DESIGN-threat-model.md records it as a residual.
+// environment. On the support matrix that is a read race only: Yama's
+// default ptrace_scope=1 forbids a non-descendant from PTRACE_ATTACH
+// or PTRACE_SEIZE at any time (Yama gates PTRACE_MODE_ATTACH, which
+// the dumpable flag does not govern), so an app cannot take control
+// of the supervisor in that window; on a host with ptrace_scope=0 an
+// attach made then would survive this call. Only the kernel closes
+// the window, and only from the app's side: app units in their own
+// PID namespace (PrivatePIDs= on the units, #35) cannot see the
+// supervisor at all — a namespace on hotserve.service would not help,
+// since a parent PID namespace sees its children's processes — or an
+// exec under AT_SECURE. DESIGN-threat-model.md records it as a
+// residual.
 func init() {
 	if err := Process(); err != nil {
 		// No fmt here: importing it would put fmt, os and their whole

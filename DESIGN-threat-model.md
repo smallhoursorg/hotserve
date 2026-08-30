@@ -329,11 +329,21 @@ they decide the mechanism before any spike:
    app already running can race the interval between `execve` and
    that `init` — the Go runtime's start-up plus `syscall`'s own
    dependencies, well under a millisecond — and read the new
-   supervisor's environment. Only the kernel closes it: a PID
-   namespace for `hotserve.service` (`PrivatePIDs=`, systemd ≥ 256,
-   which #35's property work should apply to hotserve itself where
-   available) or an exec under `AT_SECURE`. Accepted for now and
-   stated here rather than in the README's one-line claim.
+   supervisor's environment. On the support matrix that is a *read*
+   race: Yama's default `kernel.yama.ptrace_scope=1` forbids a
+   non-descendant from `PTRACE_ATTACH`/`PTRACE_SEIZE` at any time
+   (Yama gates `PTRACE_MODE_ATTACH`, which the dumpable flag does not
+   govern), so an app cannot seize the supervisor in the window; on a
+   host set to `ptrace_scope=0` an attach made in the window would
+   survive `PR_SET_DUMPABLE=0` and amount to persistent supervisor
+   compromise — such hosts are outside this model. Only the kernel
+   closes the window, and only from the app's side: app units in
+   their own PID namespace (`PrivatePIDs=` on the *units*, #35) cannot
+   see the supervisor's PID at all — a namespace on `hotserve.service`
+   would not help, because a parent PID namespace sees its children's
+   processes — or an exec under `AT_SECURE`. Until #35 lands, and on
+   hosts below systemd 256 afterwards, the read race stands; accepted
+   and stated here rather than in the README's one-line claim.
 3. **Resource caps need a read-only cgroupfs inside the sandbox.** The
    cgroup subtree under `user@<uid>.service` is delegated to — owned
    by — the hotserve UID, so `MemoryMax=`/`TasksMax=` on a user-manager
