@@ -127,9 +127,12 @@ func TestValidateExtraPathAndRoot(t *testing.T) {
 	if err := validateSandboxRoot("/var/lib/liveswap", hidden); err != nil {
 		t.Errorf("default root rejected: %v", err)
 	}
-	for _, bad := range []string{"/var/lib/hotserve/apps", "/tmp/liveswap", "/home/deploy/apps"} {
+	// A root inside hotserve's own state is a config error worth
+	// failing on; a root the sandbox merely cannot mount over degrades
+	// the tier instead (TestSandboxRootDegradesRatherThanRefusing).
+	for _, bad := range []string{"/var/lib/hotserve/apps", "/etc/hotserve/apps"} {
 		if err := validateSandboxRoot(bad, hidden); err == nil {
-			t.Errorf("root %s accepted: nothing could be bound back under it", bad)
+			t.Errorf("root %s accepted: it is inside hotserve's own state", bad)
 		}
 	}
 }
@@ -649,6 +652,21 @@ func TestStartResolvesSandboxPolicy(t *testing.T) {
 		t.Fatalf("off tier = %v", a.specs["demo"].sandboxTier)
 	}
 	_ = a.Cleanup()
+}
+
+// TestSandboxRootUnderTmpIsAllowed: only hotserve's own state is a
+// root worth failing config load over. A root under a path the sandbox
+// replaces (/tmp, /var/tmp — every t.TempDir, and the real-systemd
+// integration lane's own root) still works, because systemd creates
+// the mount point for TemporaryFileSystem= and BindPaths= inside the
+// namespace; refusing it would have turned an odd-but-working setup
+// into a server that will not start.
+func TestSandboxRootUnderTmpIsAllowed(t *testing.T) {
+	for _, root := range []string{"/tmp/liveswap-test", "/var/tmp/x", "/home/deploy/apps", "/srv/apps"} {
+		if err := validateSandboxRoot(root, sandboxHiddenFloor); err != nil {
+			t.Errorf("root %s must not fail config load: %v", root, err)
+		}
+	}
 }
 
 // TestRelaunchBelowFullWarns pins the "prominent WARN at every spawn":

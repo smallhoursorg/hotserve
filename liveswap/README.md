@@ -304,12 +304,25 @@ app blog {
 }
 ```
 
-Paths inside the liveswap root or hotserve's own directories are
-refused. `sandbox off` per app is the escape hatch while you find the
-missing path — and the answer for the few workloads the sandbox
-cannot host at all: anything that creates its own namespaces
-(Chromium's sandbox under Puppeteer, nested containers) or needs
-devices beyond `/dev/null`-class ones.
+Three kinds of path are refused, each with an error saying which:
+inside the **liveswap root** (the app already sees its own release and
+`shared/`; everything else there is another app), inside **hotserve's
+own** directories and files (TLS keys, the admin socket, any app's
+`env_file` — the set is derived from what this hotserve actually uses,
+not from the packaged paths), and inside anything the **sandbox itself
+closes**: `/home`, `/root`, `/run/user`, `/tmp`, `/var/tmp`, `/dev`,
+`/sys`, `/proc`. That last group is a hard boundary, not a
+convenience: a bind nests *into* the overmount the sandbox installed,
+so `extra_path /run/user/<uid>` would return the user manager's
+private socket and let the app start an unsandboxed unit of its own —
+read-only included, since connecting to a unix socket is not a
+filesystem write.
+
+`sandbox off` per app is the escape hatch while you find a missing
+path — and the answer for the few workloads the sandbox cannot host at
+all: anything that creates its own namespaces (Chromium's sandbox
+under Puppeteer, nested containers) or needs devices beyond
+`/dev/null`-class ones.
 
 **Hosts.** The sandbox is built on unprivileged user namespaces.
 Ubuntu 24.04+ refuses those to unconfined processes

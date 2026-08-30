@@ -366,17 +366,27 @@ func validateExtraPath(p, root string, hidden []string) error {
 	return nil
 }
 
-// validateSandboxRoot rejects a liveswap root inside a hidden or
-// sandbox-closed path: the overmount would sit above the root and no
-// app directory could be bound back into view.
+// validateSandboxRoot rejects a liveswap root inside a hidden path:
+// the inaccessible overmount would sit above the root, no app
+// directory could be bound back into view, and the root holds the
+// apps' own data — putting it inside hotserve's private state is a
+// configuration mistake worth failing on, sandbox or no sandbox.
 func validateSandboxRoot(root string, hidden []string) error {
-	for _, h := range append(append([]string{}, hidden...), sandboxClosedPrefixes...) {
+	for _, h := range hidden {
 		if pathWithin(root, h) {
 			return fmt.Errorf("root %q is inside %s, which the sandbox hides from every app; use a root outside it (the default is /var/lib/liveswap)", root, h)
 		}
 	}
 	return nil
 }
+
+// A root inside one of sandboxClosedPrefixes is deliberately NOT
+// refused: systemd creates the mount point for TemporaryFileSystem=
+// and BindPaths= inside the namespace, so a root under /tmp or
+// /var/tmp is masked and the app's own dirs bind back into it exactly
+// as they do under /var/lib — the real-systemd integration lane runs
+// with a /var/tmp root and asserts the full tier. Only hotserve's own
+// state is a mistake worth failing on.
 
 // pathWithin reports whether p equals dir or lies beneath it.
 func pathWithin(p, dir string) bool {
