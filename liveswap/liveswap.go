@@ -15,6 +15,10 @@
 package liveswap
 
 import (
+	// Blank import: harden's init makes this process non-dumpable before
+	// main, ahead of every other initializer (see liveswap/harden).
+	_ "github.com/smallhoursorg/hotserve/liveswap/harden"
+
 	"context"
 	"fmt"
 	"net/http"

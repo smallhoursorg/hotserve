@@ -311,18 +311,27 @@ they decide the mechanism before any spike:
    carried as a second mechanism for those hosts — "full isolation
    needs systemd ≥ 256" is the documented line. Ubuntu 22.04 is
    dropped from the matrix.
-2. **A non-dumpable supervisor is the unconditional floor.**
+2. **A non-dumpable supervisor is the floor on every host.**
    `prctl(PR_SET_DUMPABLE, 0)` makes hotserve's `/proc` entries require
-   `CAP_SYS_PTRACE`, which apps under `NoNewPrivileges` never hold — on
-   every host, with or without user namespaces. **Shipped:**
-   `liveswap.HardenProcess`, run from the package's `init` so any
-   binary importing the module — hotserve or an xcaddy build — is
-   non-dumpable before `main` (app units outlive supervisor restarts,
-   so anything later leaves a window); a failure is fatal. Pinned by a
-   unit test and by the real-systemd e2e suite (scenario 10). It closes the
+   `CAP_SYS_PTRACE`, which apps under `NoNewPrivileges` never hold —
+   with or without user namespaces. **Shipped:** `liveswap/harden`, a
+   leaf package whose `init` runs right after `syscall`'s — before
+   `os`, `fmt`, Caddy and every other dependency — so any binary
+   importing liveswap (hotserve or an xcaddy build) is non-dumpable
+   before `main`; a failure is fatal. Pinned by a unit test and by the
+   real-systemd e2e suite (scenario 10). It closes the
    `/proc/<supervisor>/environ` and `/proc/<supervisor>/root` routes
    only; TLS keys on disk, the admin socket and sibling files still
    need the mount namespace.
+   *Residual:* app units outlive supervisor restarts, so a same-UID
+   app already running can race the interval between `execve` and
+   that `init` — the Go runtime's start-up plus `syscall`'s own
+   dependencies, well under a millisecond — and read the new
+   supervisor's environment. Only the kernel closes it: a PID
+   namespace for `hotserve.service` (`PrivatePIDs=`, systemd ≥ 256,
+   which #35's property work should apply to hotserve itself where
+   available) or an exec under `AT_SECURE`. Accepted for now and
+   stated here rather than in the README's one-line claim.
 3. **Resource caps need a read-only cgroupfs inside the sandbox.** The
    cgroup subtree under `user@<uid>.service` is delegated to — owned
    by — the hotserve UID, so `MemoryMax=`/`TasksMax=` on a user-manager
@@ -569,38 +578,33 @@ Cost / lock-in rows:
 
 ## Recommendation
 
-Ship **B**, phased so each piece stands alone:
+**Decided (2026-08-29): systemd's own per-unit sandboxing on the
+user-manager runner, probe-gated on the manager being ≥ 256.** That
+is C's property set without C's privilege — `PrivatePIDs=` for the
+PID namespace the shared-UID rule demands, `ProtectSystem=strict` +
+`ReadWritePaths=`, `PrivateTmp=`, `InaccessiblePaths=`,
+`ProtectControlGroups=` so resource caps are real, and the curated
+`SystemCallFilter=@system-service` — issued as transient-unit
+properties by a supervisor that holds no grant, so a supervisor RCE
+still gains nothing (T5 unchanged). Full on Debian 13 / Ubuntu 26.04;
+Debian 12 and Ubuntu 24.04 stay supported and run floor-only with a
+WARN until upgraded. Bubblewrap is dropped rather than carried as a
+second mechanism; per-app UIDs, egress filtering and the root-owned
+template stay later milestones, and if they land they MUST be the
+template or a minimal privileged helper, never supervisor-shaped
+transient units on the system manager. DESIGN-sandbox.md's behaviour
+spec, config surface and rollout semantics (engage on next deploy,
+record the disposition in `state.json`, `auto`/`require`/`off`) carry
+over unchanged; its bwrap mechanics do not. Tracked in #35.
 
-1. **A's items first, independently** — `no_new_privs`, per-app UIDs
-   (with the ambient-cap clearing test), group-based release access,
-   `RLIMIT_NPROC`, the AppArmor profile. This closes the highest-value,
-   unconditional rows (supervisor secrets, admin socket, TLS keys,
-   setuid) and works on the cheap LXC VPSes the product targets.
-2. **Then bubblewrap + `Delegate` cgroups** per DESIGN-sandbox.md, with
-   AppArmor as the no-userns fallback rung, engaging on next deploy (the
-   path with health-gate fallback) exactly as that doc's rollout section
-   specifies. Its engage-on-next-deploy / record-disposition-in-state
-   semantics carry over unchanged.
-
-Defer **C** until **egress filtering** or **restart-survival**
-specifically earn the polkit/template work — those are C's only
-capabilities B cannot reach, and both are one-way doors. When C does
-land, it MUST be the root-owned template, never supervisor-shaped
-transient units.
-
-> **Where this stands (2026-08-29).** Restart-survival arrived without
-> C (the user-manager runner, #34). The non-dumpable floor is shipped.
-> The isolation will be systemd-native on the user manager — C's
-> property set without C's privilege: `PrivatePIDs=` for the PID
-> namespace the shared-UID rule demands, `ProtectControlGroups=` so
-> resource caps are real, the curated `@system-service` seccomp
-> filter — probe-gated on the manager being ≥ 256 (Debian 13, Ubuntu
-> 26.04); Debian 12 and Ubuntu 24.04 stay supported and run floor-only
-> with a WARN. B's bubblewrap is dropped rather than carried as a
-> second mechanism. DESIGN-sandbox.md's behaviour spec, config surface
-> and rollout semantics (engage on next deploy, record the disposition
-> in `state.json`, `auto`/`require`/`off`) carry over unchanged; its
-> bwrap mechanics do not. Per-app UIDs stay the later milestone.
+*Superseded (kept for the record):* the earlier recommendation was B
+— A's items first (`no_new_privs`, per-app UIDs, group-based release
+access, `RLIMIT_NPROC`, an AppArmor profile), then bubblewrap +
+`Delegate` cgroups with AppArmor as the no-userns rung, deferring C
+until egress filtering or restart-survival earned it. Restart-survival
+arrived without C (the user-manager runner, #34), the non-dumpable
+floor is shipped, and the shared-UID rule made bubblewrap's PID
+namespace the load-bearing piece — which systemd now provides itself.
 
 Independently of which approach lands, do the three non-isolation
 hardening items above — they are cheaper than any of A/B/C and address

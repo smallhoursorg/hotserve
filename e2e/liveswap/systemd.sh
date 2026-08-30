@@ -225,9 +225,9 @@ echo "=== systemd 10: hotserve is non-dumpable — its /proc is closed to its ow
 # and /proc/<pid>/root to any same-UID reader of a dumpable process —
 # whatever sandbox that reader sits in — so without this floor every
 # app could read the supervisor's environment (ACME DNS tokens) or walk
-# the host filesystem through /proc/<hotserve>/root. liveswap's init
-# marks the process non-dumpable before main; this proves it under the
-# packaged unit.
+# the host filesystem through /proc/<hotserve>/root. liveswap/harden's
+# init marks the process non-dumpable before main; this proves it
+# under the packaged unit.
 hpid=$(systemctl show -p MainPID --value hotserve)
 [ -n "$hpid" ] && [ "$hpid" != "0" ] || fail "no MainPID for hotserve.service"
 # (The /proc/<pid> directory itself keeps the task's uid so `ps` can

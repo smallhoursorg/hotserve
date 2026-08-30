@@ -15,7 +15,7 @@ import (
 	_ "github.com/caddyserver/caddy/v2/modules/standard"
 
 	// hotserve modules. Importing liveswap also makes this process
-	// non-dumpable before main runs (its init; see HardenProcess).
+	// non-dumpable before main runs (see liveswap/harden).
 	_ "github.com/smallhoursorg/hotserve/liveswap"
 	_ "github.com/smallhoursorg/hotserve/penaltybox"
 

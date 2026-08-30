@@ -172,7 +172,7 @@ done
 workdir=$(mktemp -d)
 cat > "$workdir/server" <<'EOF'
 #!/bin/sh
-echo "smoke app starting on $PORT nofile=$(ulimit -n)"
+echo "smoke app starting on $PORT nofile_soft=$(ulimit -Sn) nofile_hard=$(ulimit -Hn)"
 exec /usr/bin/hotserve respond --listen 127.0.0.1:"$PORT" "hello smoke"
 EOF
 chmod +x "$workdir/server"
@@ -230,9 +230,12 @@ journalctl --no-pager -t hotserve-demo | grep -q "smoke app starting" \
 # drop-in does not reach the manager and the value is whatever PID 1
 # had (#37).
 mgr_nofile=$(user_systemctl show -p DefaultLimitNOFILE --value)
-app_nofile=$(journalctl --no-pager -t hotserve-demo | grep -o 'nofile=[0-9]*' | tail -1 | cut -d= -f2)
-[ -n "$mgr_nofile" ] && [ "$app_nofile" = "$mgr_nofile" ] \
-	|| die "app soft NOFILE ($app_nofile) is not the user manager's DefaultLimitNOFILE ($mgr_nofile)"
+app_line=$(journalctl --no-pager -t hotserve-demo | grep 'smoke app starting' | tail -1)
+app_soft=$(printf '%s' "$app_line" | grep -o 'nofile_soft=[0-9]*' | cut -d= -f2)
+app_hard=$(printf '%s' "$app_line" | grep -o 'nofile_hard=[0-9]*' | cut -d= -f2)
+[ -n "$mgr_nofile" ] && [ "$app_soft" = "$mgr_nofile" ] && [ "$app_hard" = "$mgr_nofile" ] \
+	|| die "app NOFILE soft=$app_soft hard=$app_hard is not the user manager's DefaultLimitNOFILE ($mgr_nofile) on both"
+app_nofile=$app_soft
 sd_version=$(systemctl --version | awk 'NR==1 {print $2}')
 if [ "${sd_version%%[!0-9]*}" -ge 256 ]; then
 	[ "$mgr_nofile" = "1048576" ] \

@@ -161,9 +161,11 @@ an on-disk release. Full details, CI snippets, and every option:
   Two routes are already closed: the child environment is scrubbed
   (no direct inheritance of ACME DNS tokens — deploy auth no longer
   keeps a secret on the box, see below), and hotserve runs
-  non-dumpable, so `/proc/<hotserve-pid>/environ` and
-  `/proc/<hotserve-pid>/root` need `CAP_SYS_PTRACE` even from its own
-  UID. The filesystem routes need a real boundary. Apps run as
+  non-dumpable from its first milliseconds, so
+  `/proc/<hotserve-pid>/environ` and `/proc/<hotserve-pid>/root` need
+  `CAP_SYS_PTRACE` even from its own UID (the exec-time residual is
+  recorded in the threat model). The filesystem routes need a real
+  boundary. Apps run as
   transient units under the hotserve user's own systemd manager
   (chosen over the system manager: a polkit grant to manage units is
   root-equivalent), and the boundary will be systemd's own per-unit

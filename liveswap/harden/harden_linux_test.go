@@ -1,6 +1,6 @@
 //go:build linux
 
-package liveswap
+package harden
 
 import (
 	"syscall"
@@ -16,19 +16,19 @@ func dumpable(t *testing.T) uintptr {
 	return got
 }
 
-// TestHardenProcessNonDumpable pins the floor of the threat model: the
+// TestProcessNonDumpable pins the floor of the threat model: the
 // package's init has already made this test binary non-dumpable before
 // any test ran (so /proc/<pid>/environ and /proc/<pid>/root need
 // CAP_SYS_PTRACE from any other process, same UID included), and
-// HardenProcess is idempotent on top of it.
-func TestHardenProcessNonDumpable(t *testing.T) {
+// Process is idempotent on top of it.
+func TestProcessNonDumpable(t *testing.T) {
 	if got := dumpable(t); got != 0 {
 		t.Fatalf("dumpable = %d before any call: init did not harden the process", got)
 	}
-	if err := HardenProcess(); err != nil {
-		t.Fatalf("HardenProcess: %v", err)
+	if err := Process(); err != nil {
+		t.Fatalf("Process: %v", err)
 	}
 	if got := dumpable(t); got != 0 {
-		t.Fatalf("dumpable = %d after HardenProcess, want 0", got)
+		t.Fatalf("dumpable = %d after Process, want 0", got)
 	}
 }
