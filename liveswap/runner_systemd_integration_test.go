@@ -576,3 +576,50 @@ func run(t *testing.T, name string, args ...string) string {
 	}
 	return string(out)
 }
+
+// TestIntegrationSystemdSIGTERMReachesNamespaceInit pins a property the
+// full tier could plausibly have broken: with PrivatePIDs= the app is
+// PID 1 of its own namespace, and the kernel discards signals sent to a
+// namespace init from an ancestor namespace when the handler is SIG_DFL
+// (the classic "docker stop takes ten seconds" behaviour). If that
+// applied here, every cutover, drain and watchdog stop on Debian 13 and
+// Ubuntu 26.04 would silently wait out `grace` and end in SIGKILL,
+// losing in-flight requests — the e2e cannot see it because its app is
+// a Go binary, whose runtime installs handlers for every signal.
+func TestIntegrationSystemdSIGTERMReachesNamespaceInit(t *testing.T) {
+	r := integrationRunner(t)
+	if userManager.ManagerVersion() < 256 {
+		t.Skip("full tier needs systemd >= 256")
+	}
+	root, release, shared := sandboxRoot(t)
+	// A shell that handles SIGTERM and takes its time about it, the way
+	// a draining server does.
+	body := "trap 'echo drained > " + shared + "/drained.txt; sleep 2; exit 0' TERM\nwhile :; do sleep 0.2; done\n"
+	if err := os.WriteFile(filepath.Join(release, "server"), []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	spec := startSpec{
+		app: "itest", version: "sigterm", command: []string{"./server"}, dir: release,
+		env: []string{"PATH=" + os.Getenv("PATH")}, grace: 10 * time.Second,
+		sandbox: &sandboxSpec{tier: sandboxFull, root: root, appDir: filepath.Join(root, "itest"),
+			writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}},
+			hidden:   sandboxHiddenFloor},
+	}
+	h, err := r.Start(spec)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	started := time.Now()
+	if err := r.Stop(h, spec.grace); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	took := time.Since(started)
+	if _, err := os.Stat(filepath.Join(shared, "drained.txt")); err != nil {
+		t.Fatalf("the app's SIGTERM handler never ran inside its PID namespace: %v", err)
+	}
+	if took >= spec.grace {
+		t.Fatalf("stop took %s, the whole grace — SIGTERM was discarded and SIGKILL did the work", took)
+	}
+	t.Logf("SIGTERM honoured inside the PID namespace: handler ran, stop took %s of a %s grace", took, spec.grace)
+}

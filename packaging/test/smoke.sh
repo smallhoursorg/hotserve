@@ -151,8 +151,8 @@ cat > /etc/hotserve/Caddyfile <<'EOF'
 
 		app demo {
 			command ./server
-			env MGR_PID $mgr_pid
-			env HOTSERVE_UID $uid
+			env MGR_PID __MGR_PID__
+			env HOTSERVE_UID __HOTSERVE_UID__
 			health_interval 250ms
 			health_timeout 1s
 			soak 1s
@@ -171,6 +171,14 @@ cat > /etc/hotserve/Caddyfile <<'EOF'
 	liveswap_webhook
 }
 EOF
+
+# The heredoc above is quoted — it has to be, it carries Caddy's own
+# {...} placeholders — so the two runtime values are substituted here.
+# Without this the app receives the literal strings and every /proc
+# probe below tests a path that cannot exist, passing vacuously.
+sed -i "s|__MGR_PID__|$mgr_pid|; s|__HOTSERVE_UID__|$uid|" /etc/hotserve/Caddyfile
+grep -q '__MGR_PID__\|__HOTSERVE_UID__' /etc/hotserve/Caddyfile \
+	&& die "placeholder substitution failed; the sandbox probes would test nothing"
 
 systemctl daemon-reload
 timeout 120 systemctl restart hotserve || die "restart with liveswap config failed"
@@ -209,7 +217,7 @@ cat "/proc/$MGR_PID/environ" >/dev/null 2>&1 && mgrenv=open || mgrenv=closed
 [ -r "/run/user/$HOTSERVE_UID/systemd/private" ] && mgrsock=open || mgrsock=closed
 [ -r /run/hotserve/admin.sock ] && adminsock=open || adminsock=closed
 [ -r /var/lib/liveswap/demo/state.json ] && state=open || state=closed
-echo "smoke app starting on $PORT nofile_soft=$(ulimit -Sn) nofile_hard=$(ulimit -Hn) uidmap=$uidmap pid=$$ nprocs=$(ls /proc | grep -c '^[0-9]') hotserve_lib=$hslib mgr_root=$mgrroot mgr_environ=$mgrenv mgr_socket=$mgrsock admin_socket=$adminsock state_json=$state"
+echo "smoke app starting on $PORT nofile_soft=$(ulimit -Sn) nofile_hard=$(ulimit -Hn) uidmap=$uidmap pid=$$ nprocs=$(ls /proc | grep -c '^[0-9]') hotserve_lib=$hslib mgr_root=$mgrroot mgr_environ=$mgrenv mgr_socket=$mgrsock admin_socket=$adminsock state_json=$state saw_mgr_pid=$MGR_PID saw_uid=$HOTSERVE_UID"
 exec /usr/bin/hotserve respond --listen 127.0.0.1:"$PORT" "hello smoke"
 EOF
 chmod +x "$workdir/server"
@@ -330,6 +338,20 @@ fi
 # namespace with no PID namespace behind it — precisely the claim the
 # two-tier design rests on, which the trixie e2e (full tier) cannot
 # test in isolation because there both namespaces close them.
+# The probes are only worth anything if the app was handed the real
+# values: a literal "$mgr_pid" would make every /proc check below pass
+# by testing a path that cannot exist.
+saw_pid=$(printf '%s' "$app_line" | grep -o 'saw_mgr_pid=[^ ]*' | cut -d= -f2)
+saw_uid=$(printf '%s' "$app_line" | grep -o 'saw_uid=[^ ]*' | cut -d= -f2)
+[ "$saw_pid" = "$mgr_pid" ] \
+	|| die "the app was given MGR_PID='$saw_pid', not the manager's real pid $mgr_pid — the /proc probes would be vacuous"
+[ "$saw_uid" = "$uid" ] \
+	|| die "the app was given HOTSERVE_UID='$saw_uid', not $uid — the manager-socket probe would be vacuous"
+# And prove the routes are reachable at all from outside the sandbox,
+# so "closed" means the sandbox closed it rather than the path being
+# absent on this host.
+[ -r "/proc/$mgr_pid/environ" ] || die "/proc/$mgr_pid/environ is unreadable even to root; the in-unit probe would prove nothing"
+[ -e "/run/user/$uid/systemd/private" ] || die "the manager socket does not exist; the in-unit probe would prove nothing"
 for route in mgr_root mgr_environ mgr_socket admin_socket state_json; do
 	got=$(printf '%s' "$app_line" | grep -o "$route=[a-z]*" | cut -d= -f2)
 	[ "$got" = "closed" ] \
