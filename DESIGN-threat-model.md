@@ -290,26 +290,45 @@ user's `systemd --user` manager, and every app. The kernel gates
 `/proc/<pid>/{environ,root,cwd,mem,fd,maps}` on
 `ptrace_may_access(PTRACE_MODE_READ)`, which any same-UID caller passes
 while the target is dumpable — regardless of the caller's mount
-namespace, user namespace or seccomp filter. Three consequences, and
-they decide the mechanism before any spike:
+namespace or seccomp filter, **but not across user namespaces**: after
+the uid and dumpable checks the LSM hook runs, and commoncap's
+`cap_ptrace_access_check` refuses a caller whose `user_ns` differs
+from the target's unless the caller holds `CAP_SYS_PTRACE` *in the
+target's namespace*, which an app in a child namespace never does.
+(An earlier version of this section said "regardless of user
+namespace"; the 2026-08-30 spike on #35 measured otherwise — bare:
+`/proc/<manager>/root` open; `PrivateUsers=yes` alone: denied.) Three
+consequences, and they decide the mechanism:
 
-1. **No mount sandbox without a PID namespace.** A sandboxed app that
-   can see any same-UID PID outside its sandbox opens
-   `/proc/<that-pid>/root/…` and walks the host filesystem. The user
-   manager (host root, same UID, always running) is a permanent such
-   target; every sibling app is another. `ProtectSystem=strict`,
-   `InaccessiblePaths=`, a bubblewrap `--ro-bind` view are all void
-   without a PID namespace. `ProtectProc=invisible` does not
-   substitute: `hidepid` hides other *users'* processes, and there are
-   no other users here. systemd delivers the namespace as
-   `PrivatePIDs=yes` from 256: Debian 13 and Ubuntu 26.04. Decision
-   (2026-08-29, not yet implemented — #35): the isolation is
-   systemd-native and **probe-gated on the manager's version**; on
-   Debian 12 (252) and Ubuntu 24.04 (255) apps will run with the floor
-   only (item 2 plus `NoNewPrivileges`) and a WARN at every start,
-   `sandbox require` will refuse. Bubblewrap is not
-   carried as a second mechanism for those hosts — "full isolation
-   needs systemd ≥ 256" is the documented line. Ubuntu 22.04 is
+1. **No mount sandbox without a namespace the ptrace check honours.**
+   A sandboxed app that can `ptrace`-read any same-UID PID outside its
+   sandbox opens `/proc/<that-pid>/root/…` and walks the host
+   filesystem. The user manager (host root, same UID, always running)
+   is a permanent such target; every sibling app is another.
+   `ProtectSystem=strict`, `InaccessiblePaths=`, a bubblewrap
+   `--ro-bind` view are all void without one. `ProtectProc=invisible`
+   does not substitute: `hidepid` hides other *users'* processes, and
+   there are no other users here. Two namespaces do, and they close
+   different things:
+   - a **user namespace** (`PrivateUsers=yes`) closes the `/proc`
+     reads — `root`, `environ`, `cwd`, `mem`, `fd` — of every process
+     outside it, so the mount restrictions hold. Signals still
+     deliver: `kill` checks uids, not namespaces. Available on every
+     user manager in the support matrix (explicit on 252; implied by
+     the mount options from 253).
+   - a **PID namespace** (`PrivatePIDs=yes`, systemd ≥ 256) makes
+     those processes invisible and unsignalable, and gives the unit
+     an in-namespace init. Debian 13 and Ubuntu 26.04.
+
+   **Shipped (#35 phase 1, 2026-08-30):** two tiers, probe-gated at
+   Start. *filesystem* — user namespace plus the mount, device,
+   cgroup, seccomp and capability set — on every cell; *full* —
+   filesystem plus the PID namespace — where the manager is ≥ 256.
+   Below 256 the residual is DoS-class (a compromised app can
+   enumerate and `kill` same-UID processes; hotserve.service and the
+   watchdog restart what it kills), not data access, and is warned
+   about at every launch; `sandbox require` accepts only *full*.
+   Bubblewrap is not carried as a second mechanism. Ubuntu 22.04 is
    dropped from the matrix.
 2. **A non-dumpable supervisor is the floor on every host.**
    `prctl(PR_SET_DUMPABLE, 0)` makes hotserve's `/proc` entries require
@@ -324,7 +343,7 @@ they decide the mechanism before any spike:
    binary that runs it) — so any binary
    importing liveswap (hotserve or an xcaddy build) is non-dumpable
    before `main`; a failure is fatal. Pinned by a unit test and by the
-   real-systemd e2e suite (scenario 10). It closes the
+   real-systemd e2e suite (scenario 12). It closes the
    `/proc/<supervisor>/environ` and `/proc/<supervisor>/root` routes
    only; TLS keys on disk, the admin socket and sibling files still
    need the mount namespace.
@@ -340,13 +359,17 @@ they decide the mechanism before any spike:
    host set to `ptrace_scope=0` an attach made in the window would
    survive `PR_SET_DUMPABLE=0` and amount to persistent supervisor
    compromise — such hosts are outside this model. Only the kernel
-   closes the window, and only from the app's side: app units in
-   their own PID namespace (`PrivatePIDs=` on the *units*, #35) cannot
-   see the supervisor's PID at all — a namespace on `hotserve.service`
-   would not help, because a parent PID namespace sees its children's
-   processes — or an exec under `AT_SECURE`. Until #35 lands, and on
-   hosts below systemd 256 afterwards, the read race stands; accepted
-   and stated here rather than in the README's one-line claim.
+   closes the window, and only from the app's side: an app unit in
+   its own user namespace cannot read the supervisor's `/proc` at all
+   (the cross-namespace refusal above is not gated on the dumpable
+   flag), and one in its own PID namespace cannot see the
+   supervisor's PID — a namespace on `hotserve.service` would not
+   help, because a parent PID namespace sees its children's processes.
+   With #35 phase 1 the window is closed for every sandboxed app on
+   every cell of the matrix (the *filesystem* tier suffices); it
+   stands only for apps running with `sandbox off` or on a host where
+   the probe found no usable user namespace — accepted and stated
+   here rather than in the README's one-line claim.
 3. **Resource caps need a read-only cgroupfs inside the sandbox.** The
    cgroup subtree under `user@<uid>.service` is delegated to — owned
    by — the hotserve UID, so `MemoryMax=`/`TasksMax=` on a user-manager
@@ -521,23 +544,26 @@ outside compose" note.
 `●` closed · `◐` partial · `○` open · `—` n/a. "userns-denied host" =
 LXC VPS / locked-down kernel.
 
-| Attack path (attacker) | Today | A | B | C |
-|---|---|---|---|---|
-| `/proc/<sup>/environ` (ACME tokens) (T1) | ●¹¹ | ● | ● | ● |
-| admin socket connect (T1) | ○ | ● | ● | ● |
-| TLS private key read (T1) | ○ | ● | ● | ● |
-| sibling file read/write (T1) | ○ | ◐¹ | ● | ● |
-| sibling `127.0.0.1:$PORT` (T1) | ○ | ○ | ○² | ◐³ |
-| sibling PID signal/inspect (T1) | ○ | ◐⁴ | ● | ●⁵ |
-| setuid-binary escalation (T1) | ○ | ● | ● | ● |
-| fork-bomb / mem exhaust (T1) | ○ | ◐⁶ | ● | ● |
-| network exfiltration (T1) | ○ | ○ | ○ | ●⁷ |
-| deploy arbitrary code (T2) | ○⁸ | ○⁸ | ○⁸ | ○⁸ |
-| version downgrade (T2) | ○ | ○ | ○ | ○ |
-| archive CPU/inode exhaust (T3) | ○ | ○ | ◐⁹ | ◐⁹ |
-| first-hop→any-https SSRF (T3) | ◐ | ◐ | ◐ | ●⁷ |
-| webhook log-amplification (T4) | ○ | ○ | ○ | ○ |
-| **supervisor RCE → root? (T5)** | ◐ | ◐ | ◐ | ◐¹⁰ |
+"Shipped" is #35 phase 1 (2026-08-30): the systemd-native tiers on
+the user-manager runner; *full* on systemd ≥ 256, *filesystem* below.
+
+| Attack path (attacker) | Before #35 | Shipped | A | B | C |
+|---|---|---|---|---|---|
+| `/proc/<sup>/environ` (ACME tokens) (T1) | ●¹¹ | ● | ● | ● | ● |
+| admin socket connect (T1) | ○ | ● | ● | ● | ● |
+| TLS private key read (T1) | ○ | ● | ● | ● | ● |
+| sibling file read/write (T1) | ○ | ● | ◐¹ | ● | ● |
+| sibling `127.0.0.1:$PORT` (T1) | ○ | ○² | ○ | ○² | ◐³ |
+| sibling PID signal/inspect (T1) | ○ | ●/◐¹² | ◐⁴ | ● | ●⁵ |
+| setuid-binary escalation (T1) | ○ | ● | ● | ● | ● |
+| fork-bomb / mem exhaust (T1) | ○ | ○¹³ | ◐⁶ | ● | ● |
+| network exfiltration (T1) | ○ | ○ | ○ | ○ | ●⁷ |
+| deploy arbitrary code (T2) | ○⁸ | ○⁸ | ○⁸ | ○⁸ | ○⁸ |
+| version downgrade (T2) | ○ | ○ | ○ | ○ | ○ |
+| archive CPU/inode exhaust (T3) | ○ | ○ | ○ | ◐⁹ | ◐⁹ |
+| first-hop→any-https SSRF (T3) | ◐ | ◐ | ◐ | ◐ | ●⁷ |
+| webhook log-amplification (T4) | ○ | ○ | ○ | ○ | ○ |
+| **supervisor RCE → root? (T5)** | ◐ | ◐ | ◐ | ◐ | ◐¹⁰ |
 
 1. Supervisor-vs-app via one static profile + group perms; not per-app
    path isolation. 2. Netns shared by design; future unix-socket
@@ -554,7 +580,13 @@ LXC VPS / locked-down kernel.
    transient units — the template design avoids it, hence `◐` not `○`,
    but it is the row that demands the most care. 11. Closed by the
    non-dumpable supervisor (shared-UID rule, item 2) independently of
-   any approach; the "Today" column otherwise predates isolation.
+   any approach; the "Before #35" column otherwise predates isolation.
+   12. `●` on the *full* tier (systemd ≥ 256, PID namespace); `◐` on
+   the *filesystem* tier — `/proc` inspection is closed by the user
+   namespace, signals are not (DoS class, warned at every launch).
+   13. Deferred to #35 phase 2: `ProtectControlGroups=` already makes
+   the cgroup tree read-only inside the unit, so `MemoryMax=`/
+   `TasksMax=`/`CPUQuota=` will be real when they land.
 
 Cost / lock-in rows:
 
@@ -581,11 +613,15 @@ Cost / lock-in rows:
   which also enables a per-app netns later. Decide it explicitly rather
   than inheriting the gap.
 - **`state.json` must stay outside any writable sandbox view**
-  ([liveswap/state.go:16-20](liveswap/state.go) is trusted on relaunch;
-  the sandbox-disposition field M8 adds lives there too). Today only
-  `releases/`+`shared/` are bound, so it falls outside — but that is an
-  accident of the path list, not a stated invariant. Make it normative:
-  the app dir *root* MUST NOT be bound writable.
+  ([liveswap/state.go](liveswap/state.go) is trusted on relaunch; the
+  recorded sandbox tier lives there too). Normative and shipped: the
+  liveswap root is replaced by an empty read-only tmpfs in the unit's
+  view (`TemporaryFileSystem=<root>:ro`) and only the release being
+  started and `shared/` are bound back — the app dir root, `state.json`,
+  `tmp/` (the upload staging dir: a running instance must not be able
+  to rewrite the next version's tarball) and the other releases do not
+  exist inside. `sandboxSpecFor` in liveswap/sandbox.go is the single
+  place that list is built; `TestSandboxSpecFor` pins it.
 - **Non-isolation hardening is still owed regardless of approach:**
   webhook rate limiting (T4 log-amplification) and the `extract.go`
   entry-count cap (T3). (The Bearer-only / no-shared-secret and
@@ -593,24 +629,29 @@ Cost / lock-in rows:
 
 ## Recommendation
 
-**Decided (2026-08-29): systemd's own per-unit sandboxing on the
-user-manager runner, probe-gated on the manager being ≥ 256.** That
-is C's property set without C's privilege — `PrivatePIDs=` for the
-PID namespace the shared-UID rule demands, `ProtectSystem=strict` +
-`ReadWritePaths=`, `PrivateTmp=`, `InaccessiblePaths=`,
-`ProtectControlGroups=` so resource caps are real, and the curated
+**Decided (2026-08-29) and shipped (2026-08-30, #35 phase 1):
+systemd's own per-unit sandboxing on the user-manager runner, in two
+probe-gated tiers.** That is C's property set without C's privilege —
+`PrivateUsers=` for the user namespace that closes cross-process
+`/proc` reads (the shared-UID rule as corrected), `PrivatePIDs=` for
+the PID namespace that closes visibility and signals where the manager
+is ≥ 256, `ProtectSystem=strict` with `TemporaryFileSystem=<root>:ro`
++ `BindPaths=` for the app's own two directories, `PrivateTmp=`,
+`InaccessiblePaths=` for hotserve's own paths, `ProtectControlGroups=`
+so resource caps will be real, and the curated
 `SystemCallFilter=@system-service` — issued as transient-unit
 properties by a supervisor that holds no grant, so a supervisor RCE
-still gains nothing (T5 unchanged). Full on Debian 13 / Ubuntu 26.04;
-Debian 12 and Ubuntu 24.04 stay supported and run floor-only with a
-WARN until upgraded. Bubblewrap is dropped rather than carried as a
-second mechanism; per-app UIDs, egress filtering and the root-owned
-template stay later milestones, and if they land they MUST be the
-template or a minimal privileged helper, never supervisor-shaped
-transient units on the system manager. DESIGN-sandbox.md's behaviour
-spec, config surface and rollout semantics (engage on next deploy,
-record the disposition in `state.json`, `auto`/`require`/`off`) carry
-over unchanged; its bwrap mechanics do not. Tracked in #35.
+still gains nothing (T5 unchanged). *full* on Debian 13 / Ubuntu
+26.04; *filesystem* on Debian 12 / Ubuntu 24.04 with a WARN at every
+launch naming the residual. Bubblewrap is dropped rather than carried
+as a second mechanism; per-app UIDs, egress filtering and the
+root-owned template stay later milestones, and if they land they MUST
+be the template or a minimal privileged helper, never
+supervisor-shaped transient units on the system manager.
+DESIGN-sandbox.md's behaviour spec, config surface and rollout
+semantics (engage on next deploy, record the tier in `state.json`,
+`auto`/`require`/`off`) are what shipped; its bwrap mechanics did not.
+Resource caps are #35 phase 2.
 
 *Superseded (kept for the record):* the earlier recommendation was B
 — A's items first (`no_new_privs`, per-app UIDs, group-based release

@@ -35,6 +35,16 @@ type userManagerClient struct {
 	// nofile is the manager's DefaultLimitNOFILE (its hard ceiling for
 	// units), read once per connection; 0 = unknown, leave units alone.
 	nofile atomic.Uint64
+	// version is the manager's major systemd version, read once per
+	// connection; 0 = unknown.
+	version atomic.Int64
+}
+
+// ManagerVersion is the major version of the manager behind the
+// current connection (0 until one has been established or when the
+// property could not be read).
+func (c *userManagerClient) ManagerVersion() int {
+	return int(c.version.Load())
 }
 
 // userManager is the process-wide client every systemdRunner shares.
@@ -117,6 +127,15 @@ func (c *userManagerClient) get() (*sddbus.Conn, error) {
 		conn.Close()
 		return nil, err
 	}
+	// The version decides which sandbox properties exist to be set
+	// (sandbox.go); unknown reads as 0 and the probe then settles it.
+	var version int
+	if v, err := conn.GetManagerProperty("Version"); err == nil {
+		version = parseManagerVersion(v)
+	} else if !conn.Connected() {
+		conn.Close()
+		return nil, err
+	}
 	for _, nc := range raws {
 		if derr := nc.SetDeadline(time.Time{}); derr != nil {
 			conn.Close()
@@ -132,6 +151,7 @@ func (c *userManagerClient) get() (*sddbus.Conn, error) {
 	}
 	c.conn = conn
 	c.nofile.Store(nofile) // published with the connection it was read from
+	c.version.Store(int64(version))
 	return conn, nil
 }
 
@@ -142,6 +162,25 @@ func parseManagerUint(s string) uint64 {
 	s = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(s), "@t"))
 	n, err := strconv.ParseUint(s, 10, 64)
 	if err != nil || n == ^uint64(0) {
+		return 0
+	}
+	return n
+}
+
+// parseManagerVersion reads the major version out of go-systemd's
+// rendering of the manager's Version property — a quoted string such
+// as "257.13-1~deb13u1", "255.4-1ubuntu8.17" or "v252.39"; 0 when no
+// leading number can be found.
+func parseManagerVersion(s string) int {
+	s = strings.TrimSpace(s)
+	s = strings.Trim(s, `"`)
+	s = strings.TrimPrefix(s, "v")
+	end := 0
+	for end < len(s) && s[end] >= '0' && s[end] <= '9' {
+		end++
+	}
+	n, err := strconv.Atoi(s[:end])
+	if err != nil || n < 0 {
 		return 0
 	}
 	return n
@@ -213,7 +252,7 @@ func unitProperties(u unitSpec) []sddbus.Property {
 	if stopUSec == 0 {
 		stopUSec = 1
 	}
-	return []sddbus.Property{
+	props := []sddbus.Property{
 		sddbus.PropDescription(u.Description),
 		sddbus.PropType(typ),
 		sddbus.PropExecStart(u.ExecStart, false),
@@ -227,6 +266,107 @@ func unitProperties(u unitSpec) []sddbus.Property {
 		{Name: "StandardOutput", Value: godbus.MakeVariant("journal")},
 		{Name: "StandardError", Value: godbus.MakeVariant("journal")},
 	}
+	return append(props, sandboxProperties(u.Sandbox)...)
+}
+
+// D-Bus shapes of the sandbox properties, as systemd's own
+// bus-unit-util renders the unit-file syntax: list-valued path
+// options are "(ssbt)" bind tuples or "a(ss)" (path, options) pairs,
+// the allow-list options are "(bas)", and the flag/capability sets
+// are uint64 masks.
+type (
+	bindMount struct {
+		Source, Destination string
+		IgnoreENOENT        bool
+		Flags               uint64 // mount flags: mountRecursive for rbind
+	}
+	tmpfsMount struct{ Path, Options string }
+	allowList  struct {
+		AllowList bool
+		Names     []string
+	}
+)
+
+const (
+	mountRecursive uint64 = 0x4000 // MS_REC: BindPaths=' default "rbind"
+	errnoEPERM     int32  = 1      // SystemCallErrorNumber=EPERM, every Linux arch
+)
+
+// sandboxProperties renders a sandboxSpec (nil: nothing). The set is
+// the one measured in issue #35 on Debian 12/13 and Ubuntu 24.04;
+// see sandbox.go for what each tier closes. Properties that need a
+// newer manager than the tier implies are not emitted, so a manager
+// never rejects a unit for an unknown property.
+func sandboxProperties(s *sandboxSpec) []sddbus.Property {
+	if s == nil || s.tier == sandboxNone {
+		return nil
+	}
+	hidden := make([]string, 0, len(sandboxHiddenPaths))
+	for _, p := range sandboxHiddenPaths {
+		hidden = append(hidden, "-"+p) // "-": absent on this host is fine
+	}
+	writable := make([]bindMount, 0, len(s.writable)+len(s.extra))
+	for _, p := range s.writable {
+		writable = append(writable, bindMount{Source: p, Destination: p, Flags: mountRecursive})
+	}
+	readOnly := []bindMount{
+		// systemd-resolved hosts symlink /etc/resolv.conf into here;
+		// without it every DNS lookup inside the unit fails.
+		{Source: "/run/systemd/resolve", Destination: "/run/systemd/resolve", IgnoreENOENT: true, Flags: mountRecursive},
+	}
+	for _, e := range s.extra {
+		m := bindMount{Source: e.path, Destination: e.path, Flags: mountRecursive}
+		if e.rw {
+			writable = append(writable, m)
+		} else {
+			readOnly = append(readOnly, m)
+		}
+	}
+	props := []sddbus.Property{
+		// Explicit on purpose: 252 does not imply it for the mount
+		// options below (the unit fails to exec), and it is the piece
+		// that closes /proc reads of processes outside the namespace.
+		{Name: "PrivateUsers", Value: godbus.MakeVariant(true)},
+		{Name: "ProtectSystem", Value: godbus.MakeVariant("strict")},
+		// Empty tmpfs over /home, /root and /run/user — the last hides
+		// the manager's private socket and the session bus. "tmpfs"
+		// rather than "yes" so an extra_path under /home can still be
+		// bound in (BindPaths= nests into a tmpfs; it cannot nest into
+		// the inaccessible overmount "yes" installs).
+		{Name: "ProtectHome", Value: godbus.MakeVariant("tmpfs")},
+		{Name: "PrivateTmp", Value: godbus.MakeVariant(true)},
+		{Name: "PrivateDevices", Value: godbus.MakeVariant(true)},
+		// Read-only cgroupfs: the delegated subtree is owned by the
+		// app's own uid, so resource caps are otherwise rewritable.
+		{Name: "ProtectControlGroups", Value: godbus.MakeVariant(true)},
+		{Name: "ProtectKernelTunables", Value: godbus.MakeVariant(true)},
+		{Name: "ProtectKernelModules", Value: godbus.MakeVariant(true)},
+		{Name: "ProtectKernelLogs", Value: godbus.MakeVariant(true)},
+		// RestrictNamespaces=yes: the allowed set is empty.
+		{Name: "RestrictNamespaces", Value: godbus.MakeVariant(uint64(0))},
+		{Name: "RestrictRealtime", Value: godbus.MakeVariant(true)},
+		{Name: "RestrictSUIDSGID", Value: godbus.MakeVariant(true)},
+		{Name: "LockPersonality", Value: godbus.MakeVariant(true)},
+		// AF_NETLINK stays: getifaddrs() — Node's os.networkInterfaces(),
+		// Go's net.Interfaces(), which frameworks call at startup — needs
+		// a read-only netlink socket, and with an empty capability set
+		// netlink cannot change anything.
+		{Name: "RestrictAddressFamilies", Value: godbus.MakeVariant(allowList{true, []string{"AF_INET", "AF_INET6", "AF_UNIX", "AF_NETLINK"}})},
+		{Name: "SystemCallFilter", Value: godbus.MakeVariant(allowList{true, []string{"@system-service"}})},
+		{Name: "SystemCallErrorNumber", Value: godbus.MakeVariant(errnoEPERM)},
+		{Name: "CapabilityBoundingSet", Value: godbus.MakeVariant(uint64(0))},
+		{Name: "InaccessiblePaths", Value: godbus.MakeVariant(hidden)},
+		{Name: "TemporaryFileSystem", Value: godbus.MakeVariant([]tmpfsMount{{s.root, "ro"}})},
+		{Name: "BindPaths", Value: godbus.MakeVariant(writable)},
+		{Name: "BindReadOnlyPaths", Value: godbus.MakeVariant(readOnly)},
+		// The manager hands every unit its own XDG_RUNTIME_DIR and bus
+		// address; both point into the hidden /run/user/<uid>.
+		{Name: "UnsetEnvironment", Value: godbus.MakeVariant([]string{"XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"})},
+	}
+	if s.tier == sandboxFull {
+		props = append(props, sddbus.Property{Name: "PrivatePIDs", Value: godbus.MakeVariant("yes")})
+	}
+	return props
 }
 
 func (c *userManagerClient) StartTransientUnit(ctx context.Context, u unitSpec) (string, error) {

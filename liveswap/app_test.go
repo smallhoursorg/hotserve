@@ -80,13 +80,20 @@ func (c *fakeClock) After(d time.Duration) <-chan time.Time {
 // Handles built as bare literals (no done channel) exercise the
 // Wait-returns-nil polling fallback.
 type fakeHandle struct {
-	id    string
-	alive bool
-	done  chan struct{}
-	mu    sync.Mutex
+	id      string
+	alive   bool
+	done    chan struct{}
+	mu      sync.Mutex
+	sandbox sandboxTier // the tier Start was asked for, persisted like the real runner does
 }
 
-func (h *fakeHandle) state() handleState { return handleState{PID: 4242} }
+func (h *fakeHandle) state() handleState {
+	st := handleState{PID: 4242}
+	if h.sandbox != sandboxNone {
+		st.Sandbox = h.sandbox.String()
+	}
+	return st
+}
 
 func (h *fakeHandle) isAlive() bool {
 	h.mu.Lock()
@@ -142,7 +149,7 @@ func (r *fakeRunner) Start(spec startSpec) (handle, error) {
 	if r.startErr != nil {
 		return nil, r.startErr
 	}
-	h := &fakeHandle{id: fmt.Sprintf("h%d", len(r.handles)), alive: true, done: make(chan struct{})}
+	h := &fakeHandle{id: fmt.Sprintf("h%d", len(r.handles)), alive: true, done: make(chan struct{}), sandbox: sandboxTierOf(spec)}
 	r.started = append(r.started, spec)
 	r.handles = append(r.handles, h)
 	return h, nil
@@ -613,7 +620,7 @@ func TestBuildEnvPrecedenceAndPlaceholders(t *testing.T) {
 	spec.envFile = envFile
 	spec.env = map[string]string{"OVERRIDE": "inline", "DB": "sqlite:{shared_dir}/app.db", "V": "{version}:{port}"}
 
-	env, err := buildEnv(spec, "v9", 8123, spec.dirs.release("v9"))
+	env, err := buildEnv(spec, "v9", 8123, spec.dirs.release("v9"), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -642,7 +649,7 @@ func TestBuildEnvDoesNotLeakSupervisorSecrets(t *testing.T) {
 	t.Setenv("PATH", "/usr/bin:/bin")
 	t.Setenv("LC_ALL", "C.UTF-8")
 
-	env, err := buildEnv(testSpec(t), "v1", 8123, t.TempDir())
+	env, err := buildEnv(testSpec(t), "v1", 8123, t.TempDir(), false)
 	if err != nil {
 		t.Fatal(err)
 	}

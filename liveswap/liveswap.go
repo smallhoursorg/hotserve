@@ -110,6 +110,14 @@ type App struct {
 	// AllowInsecureHTTP. Apps may override.
 	ArtifactAllowlist []string `json:"artifact_allowlist,omitempty"`
 
+	// Sandbox is the default per-app sandbox policy: "auto" (the best
+	// tier this host delivers, with a WARN when that is not the full
+	// one), "require" (the full tier or refuse to start — this can keep
+	// the whole server from starting on a host that cannot deliver it;
+	// tighten to it only after auto has been proven per app), or
+	// "off". Default "auto". Apps may override. See liveswap/README.md.
+	Sandbox string `json:"sandbox,omitempty"`
+
 	// Apps defines the managed applications, keyed by name
 	// ([a-z0-9-]). The name is the webhook path segment and the
 	// argument to `dynamic liveswap <name>`.
@@ -228,6 +236,24 @@ type AppConfig struct {
 	// Caddyfile accepts human forms like 100MB). Decompressed content
 	// is additionally capped at 10x this. Default 100MB.
 	MaxArtifactSize int64 `json:"max_artifact_size,omitempty"`
+
+	// Sandbox overrides the global sandbox policy for this app:
+	// "auto", "require" or "off". Default: the global setting.
+	Sandbox string `json:"sandbox,omitempty"`
+
+	// ExtraPaths are host paths the sandboxed app may see besides its
+	// own release and shared directories — read-only unless Writable.
+	// The canonical use is a same-box database's unix socket directory
+	// (/run/postgresql). Paths inside the liveswap root or hotserve's
+	// own directories are refused. Ignored when the app runs without a
+	// sandbox.
+	ExtraPaths []ExtraPathConfig `json:"extra_paths,omitempty"`
+}
+
+// ExtraPathConfig is one `extra_path <path> [rw]` entry.
+type ExtraPathConfig struct {
+	Path     string `json:"path"`
+	Writable bool   `json:"writable,omitempty"`
 }
 
 // CaddyModule returns the Caddy module information.
@@ -252,6 +278,9 @@ func (a *App) Provision(ctx caddy.Context) error {
 		a.ArtifactAllowlist[i] = repl.ReplaceKnown(e, "")
 	}
 	resolveTrustPlaceholders(repl, a.DeployTrust)
+	if a.Sandbox == "" {
+		a.Sandbox = sandboxAuto
+	}
 	if a.Root == "" {
 		a.Root = "/var/lib/liveswap"
 	}
@@ -413,6 +442,14 @@ func (a *App) buildSpec(name string, cfg *AppConfig) (*appSpec, error) {
 	if err != nil {
 		return nil, fmt.Errorf("app %s: %w", name, err)
 	}
+	sandboxMode := cfg.Sandbox
+	if sandboxMode == "" {
+		sandboxMode = a.Sandbox
+	}
+	var extra []extraPath
+	for _, e := range cfg.ExtraPaths {
+		extra = append(extra, extraPath{path: e.Path, rw: e.Writable})
+	}
 	return &appSpec{
 		name:            name,
 		command:         cfg.Command,
@@ -437,6 +474,8 @@ func (a *App) buildSpec(name string, cfg *AppConfig) (*appSpec, error) {
 		allowInsecure:   a.AllowInsecureHTTP,
 		allowlist:       allowlist,
 		dirs:            newAppDirs(a.Root, name),
+		sandboxMode:     sandboxMode,
+		extraPaths:      extra,
 	}, nil
 }
 
@@ -446,7 +485,21 @@ func (a *App) Validate() error {
 	if !strings.HasPrefix(a.Root, "/") {
 		return fmt.Errorf("root must be an absolute path, got %q", a.Root)
 	}
+	if err := validateSandboxRoot(a.Root); err != nil {
+		return err
+	}
+	if a.Sandbox != "" && !validSandboxMode(a.Sandbox) { // "" = the default Provision applies (auto)
+		return fmt.Errorf("sandbox must be \"auto\", \"require\" or \"off\", got %q", a.Sandbox)
+	}
 	for name, cfg := range a.Apps {
+		if cfg.Sandbox != "" && !validSandboxMode(cfg.Sandbox) {
+			return fmt.Errorf("app %s: sandbox must be \"auto\", \"require\" or \"off\", got %q", name, cfg.Sandbox)
+		}
+		for _, e := range cfg.ExtraPaths {
+			if err := validateExtraPath(e.Path, a.Root); err != nil {
+				return fmt.Errorf("app %s: %w", name, err)
+			}
+		}
 		if !appNameRe.MatchString(name) {
 			return fmt.Errorf("app name %q must match %s", name, appNameRe)
 		}
@@ -524,6 +577,24 @@ func (a *App) Start() error {
 			return err
 		}
 	}
+	// Sandbox policy is settled here, once per start, against what this
+	// host delivers: the probe runs a throwaway unit with the sandbox
+	// applied and checks the namespaces from inside. `require` on a
+	// host that falls short fails the start — by design, and documented
+	// as such — so it is checked before any app is configured.
+	if a.sandboxWanted() {
+		capability := probeSandbox(a.Root, a.logger)
+		for name, spec := range a.specs {
+			tier, warn, err := resolveSandboxTier(spec.sandboxMode, capability)
+			if err != nil {
+				return fmt.Errorf("app %s: %w", name, err)
+			}
+			spec.sandboxTier = tier
+			if warn != "" {
+				a.logger.Warn(warn, zap.String("app", name), zap.String("tier", tier.String()))
+			}
+		}
+	}
 	for name, ma := range a.managed {
 		ma.configure(a, a.specs[name], a.logger.Named(name), a.clients)
 		ma.startWatchdog()
@@ -559,6 +630,25 @@ func (a *App) Start() error {
 		}(name, ma)
 	}
 	return nil
+}
+
+// sandboxWanted reports whether any app's policy is not "off" — the
+// only case the capability probe is worth running.
+func (a *App) sandboxWanted() bool {
+	for _, spec := range a.specs {
+		if spec.sandboxMode != sandboxOff {
+			return true
+		}
+	}
+	return false
+}
+
+// probeSandbox measures what the user manager can deliver (sandbox.go);
+// a variable so unit tests can script the host.
+var probeSandbox = func(root string, logger *zap.Logger) sandboxCapability {
+	r := newSystemdRunner(userManager, logger)
+	defer r.cancel()
+	return probeSandboxCapability(r, userManager.ManagerVersion(), root)
 }
 
 // Stop intentionally does NOT stop app processes: on a config reload

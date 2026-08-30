@@ -60,6 +60,12 @@ until curl -fs -o /dev/null "$ART/demo-v1.tar.gz" \
 done
 echo "ready after ${i}s"
 
+# app_pid is the running instance's host pid as the status endpoint
+# reports it (the unit's MainPID). Inside its sandbox the app is pid 1
+# of its own PID namespace, so the pid it prints is useless for
+# telling instances apart; this one changes on every (re)start.
+app_pid() { json_num "$(status)" pid; }
+
 echo "=== scenario 1: auth — invalid and missing tokens are rejected ==="
 c=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer not-a-jwt" -d '{}' "$HOOK")
 [ "$c" = "401" ] && pass "garbage token gets 401" || fail "garbage token: expected 401, got $c"
@@ -125,7 +131,8 @@ c=$(cat /tmp/first-deploy-code)
 [ "$c" = "200" ] && pass "first deploy still completed ($c)" || fail "first deploy: expected 200, got $c"
 
 echo "=== scenario 7: config reload mid-traffic — app survives, zero dropped requests ==="
-pid_before=$(body | sed 's/.*pid //')
+pid_before=$(app_pid)
+[ -n "$pid_before" ] || fail "could not read the app pid from the status endpoint"
 traffic_start /tmp/codes-reload
 c=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
 	-H "Content-Type: text/caddyfile" --data-binary @/Caddyfile "$ADMIN/load")
@@ -133,7 +140,7 @@ sleep 1
 traffic_stop
 [ "$c" = "200" ] && pass "admin /load accepted the config" || fail "reload: expected 200, got $c"
 assert_all_200 /tmp/codes-reload "reload"
-pid_after=$(body | sed 's/.*pid //')
+pid_after=$(app_pid)
 if [ -n "$pid_before" ] && [ "$pid_before" = "$pid_after" ]; then
 	pass "app process survived the reload (pid $pid_before)"
 else
@@ -149,9 +156,10 @@ case "$s" in
 esac
 
 echo "=== scenario 9: watchdog restarts the app after a crash ==="
-# Strict numeric capture: a 502 page must yield empty, never a bogus
-# "pid" that would make the new-pid comparison pass vacuously.
-pid_before=$(body | sed -n 's/.*pid \([0-9][0-9]*\)$/\1/p')
+# The pid is the host pid from the status endpoint (the unit's
+# MainPID), not the one the app prints: inside its PID namespace every
+# instance is pid 1, so the body cannot tell a restart from no restart.
+pid_before=$(app_pid)
 [ -n "$pid_before" ] || fail "could not capture the app pid before /boom"
 curl -s -o /dev/null --max-time 2 "$PROXY/boom"
 i=0
@@ -160,8 +168,8 @@ while [ "$i" -lt 60 ]; do
 	b=$(body)
 	case "$b" in
 	"hello v1"*)
-		new_pid="${b##*pid }"
-		[ -n "$pid_before" ] && [ "$new_pid" != "$pid_before" ] && break
+		new_pid=$(app_pid)
+		[ -n "$pid_before" ] && [ -n "$new_pid" ] && [ "$new_pid" != "$pid_before" ] && break
 		;;
 	esac
 	new_pid=""
@@ -180,7 +188,7 @@ case "$s" in
 esac
 
 echo "=== scenario 10: watchdog restarts the app on sustained health failure ==="
-pid_before=$(body | sed -n 's/.*pid \([0-9][0-9]*\)$/\1/p')
+pid_before=$(app_pid)
 [ -n "$pid_before" ] || fail "could not capture the app pid before /break"
 curl -s -o /dev/null --max-time 2 "$PROXY/break"
 i=0
@@ -189,8 +197,8 @@ while [ "$i" -lt 90 ]; do
 	b=$(body)
 	case "$b" in
 	"hello v1"*)
-		new_pid="${b##*pid }"
-		if [ -n "$pid_before" ] && [ "$new_pid" != "$pid_before" ]; then
+		new_pid=$(app_pid)
+		if [ -n "$pid_before" ] && [ -n "$new_pid" ] && [ "$new_pid" != "$pid_before" ]; then
 			# Heal the release inside the replacement's watchdog grace
 			# so it does not inherit the failure.
 			curl -s -o /dev/null --max-time 2 "$PROXY/heal"

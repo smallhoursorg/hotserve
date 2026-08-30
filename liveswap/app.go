@@ -27,6 +27,7 @@ import (
 //	<root>/<app>/state.json            current version + process handle
 //	<root>/<app>/current -> releases/<version>   convenience symlink
 type appDirs struct {
+	root     string // the liveswap root every app lives under
 	app      string
 	releases string
 	shared   string
@@ -38,6 +39,7 @@ type appDirs struct {
 func newAppDirs(root, name string) appDirs {
 	app := filepath.Join(root, name)
 	return appDirs{
+		root:     root,
 		app:      app,
 		releases: filepath.Join(app, "releases"),
 		shared:   filepath.Join(app, "shared"),
@@ -91,6 +93,12 @@ type appSpec struct {
 	allowInsecure   bool
 	allowlist       []artifactAllowEntry
 	dirs            appDirs
+	sandboxMode     string      // auto | require | off (policy, from config)
+	extraPaths      []extraPath // host paths exposed inside the sandbox
+	// sandboxTier is the tier new instances of this app get: policy
+	// resolved against the host at App.Start. Relaunches ignore it and
+	// reproduce the recorded tier of the instance they replace.
+	sandboxTier sandboxTier
 }
 
 // deployPayload is the JSON body of a URL deploy — the only request
@@ -445,7 +453,12 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	if err != nil {
 		return err
 	}
-	env, err := buildEnv(spec, req.version, port, releaseDir)
+	// A deploy is where the configured policy engages (the path with a
+	// fallback: a sandbox the app cannot live in fails the health gate
+	// while the old version keeps serving).
+	tier := spec.sandboxTier
+	warnSandboxTier(c, spec, tier)
+	env, err := buildEnv(spec, req.version, port, releaseDir, tier != sandboxNone)
 	if err != nil {
 		return err
 	}
@@ -465,6 +478,8 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		}
 		ma.setPhase(c, "preparing")
 		preCtx, cancel := context.WithTimeout(ctx, spec.deadline)
+		// Under the same sandbox as the app it precedes: a migration
+		// that writes where the app cannot read fails here, not at 3am.
 		err := c.runner.RunOnce(preCtx, startSpec{
 			app:     spec.name,
 			version: req.version,
@@ -472,6 +487,7 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 			dir:     releaseDir,
 			env:     env,
 			grace:   spec.grace,
+			sandbox: spec.sandboxSpecFor(releaseDir, tier),
 		})
 		cancel()
 		if err != nil {
@@ -489,6 +505,7 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	newHandle, err = c.runner.Start(startSpec{
 		app:     spec.name,
 		version: req.version,
+		sandbox: spec.sandboxSpecFor(releaseDir, tier),
 		command: expandArgs(spec.command, spec, req.version, port, releaseDir),
 		dir:     releaseDir,
 		env:     env,
@@ -630,7 +647,7 @@ func (ma *managedApp) ensureRunning() error {
 		return nil
 	}
 
-	inst, err := ma.launchVersion(c, st.CurrentVersion)
+	inst, err := ma.launchVersion(c, st.CurrentVersion, parseSandboxTier(st.Handle.Sandbox))
 	if err != nil {
 		// A binary that cannot be found will not appear by retrying;
 		// everything else here (sweep, manager, unit reconcile) can.
@@ -743,12 +760,14 @@ func (ma *managedApp) sweep(c collaborators, keep handle) bool {
 
 // launchVersion starts an already-on-disk version on a fresh port and
 // returns the new instance without publishing it. It relaunches what
-// was recorded as running — the version comes from the caller's record
-// (state.json, or the live instance the watchdog is replacing), never
-// from a re-read of config-level launch policy — so recovery and
-// watchdog restarts reproduce the instance that existed, and a changed
-// app definition still takes effect only on the next deploy.
-func (ma *managedApp) launchVersion(c collaborators, version string) (*instance, error) {
+// was recorded as running — the version and the sandbox tier come
+// from the caller's record (state.json, or the live instance the
+// watchdog is replacing), never from a re-read of config-level launch
+// policy — so recovery and watchdog restarts reproduce the instance
+// that existed, and a changed app definition (a newly enabled
+// sandbox included) still takes effect only on the next deploy, the
+// path that has a fallback.
+func (ma *managedApp) launchVersion(c collaborators, version string, tier sandboxTier) (*instance, error) {
 	spec := c.spec
 	releaseDir := spec.dirs.release(version)
 	if _, err := os.Stat(releaseDir); err != nil {
@@ -758,7 +777,8 @@ func (ma *managedApp) launchVersion(c collaborators, version string) (*instance,
 	if err != nil {
 		return nil, err
 	}
-	env, err := buildEnv(spec, version, port, releaseDir)
+	warnSandboxTier(c, spec, tier)
+	env, err := buildEnv(spec, version, port, releaseDir, tier != sandboxNone)
 	if err != nil {
 		return nil, err
 	}
@@ -772,6 +792,7 @@ func (ma *managedApp) launchVersion(c collaborators, version string) (*instance,
 	h, err := c.runner.Start(startSpec{
 		app:     spec.name,
 		version: version,
+		sandbox: spec.sandboxSpecFor(releaseDir, tier),
 		command: expandArgs(spec.command, spec, version, port, releaseDir),
 		dir:     releaseDir,
 		env:     env,
@@ -844,7 +865,11 @@ type statusSnapshot struct {
 	PID            int    `json:"pid,omitempty"`
 	// Unit is the systemd unit running the instance — what to pass to
 	// journalctl for the app's own output.
-	Unit       string            `json:"unit,omitempty"`
+	Unit string `json:"unit,omitempty"`
+	// Sandbox is the sandbox tier the running instance has: "full",
+	// "filesystem" or "none" (see liveswap/README.md). Always present
+	// when an instance is, so operators and smoke tests can assert it.
+	Sandbox    string            `json:"sandbox,omitempty"`
 	Running    bool              `json:"running"`
 	LastDeploy *deployResult     `json:"last_deploy,omitempty"`
 	Watchdog   *watchdogSnapshot `json:"watchdog,omitempty"`
@@ -877,6 +902,7 @@ func (ma *managedApp) status() statusSnapshot {
 		hs := ma.current.handle.state()
 		s.PID = hs.PID
 		s.Unit = hs.Unit
+		s.Sandbox = parseSandboxTier(hs.Sandbox).String()
 		s.Running = c.runner.Alive(ma.current.handle)
 	}
 	return s
@@ -1030,9 +1056,22 @@ func inheritedEnv() []string {
 // buildEnv assembles the child environment. Precedence, lowest to
 // highest: the allowlisted slice of Caddy's environment (PATH, HOME —
 // needed by node etc.), env_file, inline env, then the injected
-// PORT/HOST contract.
-func buildEnv(spec *appSpec, version string, port int, releaseDir string) ([]string, error) {
+// PORT/HOST contract. Sandboxed, the inherited HOME (hotserve's own
+// state dir, hidden from the app) is replaced by the shared dir — the
+// one writable, persistent place in the view — before env_file and
+// env, so an operator can still point it elsewhere.
+func buildEnv(spec *appSpec, version string, port int, releaseDir string, sandboxed bool) ([]string, error) {
 	env := inheritedEnv()
+	if sandboxed {
+		var kept []string
+		for _, kv := range env {
+			if !strings.HasPrefix(kv, "HOME=") {
+				kept = append(kept, kv)
+			}
+		}
+		kept = append(kept, "HOME="+spec.dirs.shared)
+		env = kept
+	}
 	if spec.envFile != "" {
 		fileVars, err := parseEnvFile(spec.envFile)
 		if err != nil {

@@ -170,9 +170,15 @@ done
 # `hotserve respond`, honoring liveswap's PORT contract and answering
 # 200 on every path (which satisfies the health gate).
 workdir=$(mktemp -d)
+# Besides the NOFILE contract the wrapper reports what its sandbox
+# looks like from inside: the uid_map range (1 in a user namespace,
+# 2^32-1 in none), its own pid (1 in a PID namespace), how many pids
+# /proc shows, and whether hotserve's own state dir exists in its view.
 cat > "$workdir/server" <<'EOF'
 #!/bin/sh
-echo "smoke app starting on $PORT nofile_soft=$(ulimit -Sn) nofile_hard=$(ulimit -Hn)"
+read _ _ uidmap < /proc/self/uid_map
+[ -r /var/lib/hotserve ] && hslib=open || hslib=closed
+echo "smoke app starting on $PORT nofile_soft=$(ulimit -Sn) nofile_hard=$(ulimit -Hn) uidmap=$uidmap pid=$$ nprocs=$(ls /proc | grep -c '^[0-9]') hotserve_lib=$hslib"
 exec /usr/bin/hotserve respond --listen 127.0.0.1:"$PORT" "hello smoke"
 EOF
 chmod +x "$workdir/server"
@@ -245,6 +251,38 @@ else
 	echo "app NOFILE $app_nofile = user@$uid DefaultLimitNOFILE (systemd $sd_version < 256: drop-in not applied, #37)"
 fi
 echo "deployed as unit $unit under user@$uid; app output in the journal"
+
+# The sandbox tier: full (PID + user namespace) on systemd >= 256,
+# filesystem (user namespace + mount set) below — the status endpoint
+# reports it and the app's own view must agree. The host kernel's
+# stance on unprivileged user namespaces is printed for the record:
+# Ubuntu's AppArmor restriction (kernel.apparmor_restrict_unprivileged_userns)
+# lives in the host kernel, not the container image, so a CI runner
+# that restricts them would fail every cell here, not just Ubuntu's.
+echo "host: $(uname -r); apparmor_restrict_unprivileged_userns=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo absent); virt=$(systemd-detect-virt 2>/dev/null || echo unknown)"
+sandbox=$(printf '%s' "$status" | sed -n 's/.*"sandbox":"\([a-z]*\)".*/\1/p')
+app_uidmap=$(printf '%s' "$app_line" | grep -o 'uidmap=[0-9]*' | cut -d= -f2)
+app_pid=$(printf '%s' "$app_line" | grep -o ' pid=[0-9]*' | cut -d= -f2)
+app_nprocs=$(printf '%s' "$app_line" | grep -o 'nprocs=[0-9]*' | cut -d= -f2)
+app_hslib=$(printf '%s' "$app_line" | grep -o 'hotserve_lib=[a-z]*' | cut -d= -f2)
+if [ "${sd_version%%[!0-9]*}" -ge 256 ]; then
+	[ "$sandbox" = "full" ] || die "systemd $sd_version: status sandbox is '$sandbox', want full"
+	[ "$app_pid" = "1" ] || die "full tier but the app is pid $app_pid inside its unit, not 1 (no PID namespace)"
+	[ -n "$app_nprocs" ] && [ "$app_nprocs" -le 8 ] || die "full tier but /proc shows $app_nprocs pids inside the unit"
+else
+	[ "$sandbox" = "filesystem" ] || die "systemd $sd_version: status sandbox is '$sandbox', want filesystem"
+fi
+[ "$app_uidmap" != "4294967295" ] && [ -n "$app_uidmap" ] || die "no user namespace inside the unit (uid_map range $app_uidmap)"
+[ "$app_hslib" = "closed" ] || die "/var/lib/hotserve is visible inside the sandboxed unit"
+[ "$(user_systemctl show -p PrivateUsers --value "$unit")" = "yes" ] || die "unit lacks PrivateUsers=yes"
+[ "$(user_systemctl show -p ProtectSystem --value "$unit")" = "strict" ] || die "unit lacks ProtectSystem=strict"
+journalctl --no-pager -u hotserve | grep -q "launching without the full sandbox" && degraded=yes || degraded=no
+if [ "$sandbox" = "full" ]; then
+	[ "$degraded" = "no" ] || die "full tier must not log the degraded WARN"
+else
+	[ "$degraded" = "yes" ] || die "$sandbox tier must be warned about at launch"
+fi
+echo "sandbox tier $sandbox (systemd $sd_version): uid_map range $app_uidmap, pid $app_pid, $app_nprocs pids visible, /var/lib/hotserve $app_hslib"
 
 # `hotserve validate` provisions and cleans up without starting: run
 # as root (no user manager for uid 0) and as the hotserve user (the
