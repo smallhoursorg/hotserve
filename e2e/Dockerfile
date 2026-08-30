@@ -52,7 +52,8 @@ RUN mkdir -p /var/lib/hotserve /var/lib/liveswap \
 	&& sh /tmp/postinstall.sh && rm /tmp/postinstall.sh
 COPY e2e/systemd/e2e.conf /etc/systemd/system/hotserve.service.d/e2e.conf
 COPY e2e/systemd/e2e-token.service /etc/systemd/system/e2e-token.service
-RUN systemctl enable hotserve.service e2e-token.service
+COPY e2e/systemd/e2e-apparmor.service /etc/systemd/system/e2e-apparmor.service
+RUN systemctl enable hotserve.service e2e-token.service e2e-apparmor.service
 COPY e2e/Caddyfile /etc/hotserve/Caddyfile
 COPY e2e/mint-token.sh /usr/local/bin/mint-token.sh
 RUN chmod +x /usr/local/bin/mint-token.sh
