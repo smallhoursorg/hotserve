@@ -27,9 +27,12 @@ license: Apache-2.0
 # cannot start at all. dbus: loginctl (lingering) needs the system bus.
 depends:
   # No systemd version floor: the runner works on 252+ (Debian 12,
-  # Ubuntu 24.04). The planned per-app isolation needs 256+ and will be
-  # probe-gated at runtime, not at install (DESIGN-threat-model.md,
-  # "The shared-UID rule").
+  # Ubuntu 24.04), and the per-app sandbox is probe-gated at runtime
+  # into two tiers (full on 256+, filesystem below) rather than at
+  # install (DESIGN-threat-model.md, "The shared-UID rule"). No
+  # apparmor dependency either: the shipped profile only matters on
+  # hosts that restrict user namespaces (Ubuntu), where apparmor is
+  # already installed.
   - libpam-systemd
   - dbus
 
@@ -42,6 +45,12 @@ contents:
     dst: /lib/systemd/system/hotserve.service
   - src: packaging/Caddyfile
     dst: /etc/hotserve/Caddyfile
+    type: config|noreplace
+  # Grants `userns` to the hotserve user's systemd manager, which the
+  # app sandbox needs and Ubuntu 24.04+ otherwise refuses to unconfined
+  # processes; loaded by postinstall and by apparmor.service at boot.
+  - src: packaging/apparmor/hotserve-user-manager
+    dst: /etc/apparmor.d/hotserve-user-manager
     type: config|noreplace
   - dst: /var/lib/hotserve
     type: dir

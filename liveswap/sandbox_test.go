@@ -396,7 +396,7 @@ func TestDeployUsesPolicyRelaunchUsesRecord(t *testing.T) {
 	rig := newTestRig(t)
 	rig.spec.sandboxMode = sandboxAuto
 	rig.spec.sandboxTier = sandboxFull
-	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/a.tgz", Version: "v1"}))
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/a.tgz", version: "v1"}))
 	if got := rig.runner.started[0].sandbox; got == nil || got.tier != sandboxFull {
 		t.Fatalf("deploy must apply the policy tier: %+v", got)
 	}
@@ -405,7 +405,7 @@ func TestDeployUsesPolicyRelaunchUsesRecord(t *testing.T) {
 	}
 	// pre_start runs under the same sandbox.
 	rig.spec.preStart = []string{"./migrate"}
-	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/b.tgz", Version: "v2"}))
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/b.tgz", version: "v2"}))
 	// The fake records RunOnce beside Start: pre_start, then the app.
 	if n := len(rig.runner.started); n != 3 {
 		t.Fatalf("started = %d, want deploy, pre_start, deploy", n)

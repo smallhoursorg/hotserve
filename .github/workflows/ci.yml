@@ -142,6 +142,16 @@ jobs:
         with:
           name: dist
           path: dist
+      # The runner's kernel is Ubuntu's, which refuses unprivileged user
+      # namespaces to unconfined processes; the package's AppArmor
+      # profile is what lifts that for hotserve's user manager, and the
+      # Ubuntu and Debian 13 cells prove it under the real restriction.
+      # Debian 12's AppArmor 3 parser cannot load the rule (its own
+      # kernel has no such restriction), so that one artificial
+      # combination — Debian 12 userland on an Ubuntu kernel — gets the
+      # restriction lifted on the runner instead.
+      - if: matrix.distro == 'debian:12'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: make install-test DISTRO=${{ matrix.distro }}
 
   # Full-history secret scan: catches keys/tokens in the changes being

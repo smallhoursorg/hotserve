@@ -1,0 +1,27 @@
+# hotserve: let the hotserve user's systemd manager create the user
+# namespaces the app sandbox is built on (liveswap/README.md, "Sandbox").
+#
+# Ubuntu 24.04+ refuses unprivileged user namespaces to unconfined
+# processes (kernel.apparmor_restrict_unprivileged_userns=1); a profile
+# granting `userns` is the supported exception. This one is applied to
+# user@<uid>.service for the hotserve user only — via AppArmorProfile=
+# in the drop-in the package's postinstall writes — never to PID 1 or
+# to other users' managers. flags=(unconfined): it confines nothing;
+# it only lifts that one restriction for that one manager. The app
+# units themselves carry RestrictNamespaces=, so a sandboxed app cannot
+# create namespaces of its own.
+#
+# Needs an AppArmor 4.x parser (Ubuntu 24.04+, Debian 13). Debian 12's
+# 3.x parser rejects `userns` — and its kernel does not restrict user
+# namespaces, so the profile is unnecessary there; postinstall loads it
+# best-effort and the drop-in's "-" prefix ignores a missing profile.
+abi <abi/4.0>,
+
+include <tunables/global>
+
+profile hotserve-user-manager flags=(unconfined) {
+  userns,
+
+  # Site-specific additions and overrides.
+  include if exists <local/hotserve-user-manager>
+}

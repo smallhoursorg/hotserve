@@ -311,14 +311,24 @@ cannot host at all: anything that creates its own namespaces
 (Chromium's sandbox under Puppeteer, nested containers) or needs
 devices beyond `/dev/null`-class ones.
 
-**Hosts.** The probe needs unprivileged user namespaces. Ubuntu
-restricts them for unconfined processes by default
-(`kernel.apparmor_restrict_unprivileged_userns=1`, 24.04+); whether
-that reaches `systemd --user` is being verified — if it does, the
-package will ship the AppArmor profile or sysctl needed, and until
-then a host where the probe finds no usable user namespace runs apps
-with `"sandbox": "none"` and a warning (the non-dumpable supervisor
-and `NoNewPrivileges` remain).
+**Hosts.** The sandbox is built on unprivileged user namespaces.
+Ubuntu 24.04+ refuses those to unconfined processes
+(`kernel.apparmor_restrict_unprivileged_userns=1`), which would leave
+`systemd --user` unable to build the sandbox; the package therefore
+ships an AppArmor profile, `hotserve-user-manager`, that grants
+`userns` to hotserve's user manager only (applied through
+`AppArmorProfile=` in the `user@<uid>.service` drop-in postinstall
+writes — never to PID 1 or other users' managers; the app units carry
+`RestrictNamespaces=`, so a sandboxed app still cannot create
+namespaces). Raw-binary installs on Ubuntu need the same: copy
+`packaging/apparmor/hotserve-user-manager` to `/etc/apparmor.d/`,
+`apparmor_parser -r` it, and add `AppArmorProfile=-hotserve-user-manager`
+to the manager's drop-in — or, bluntly, set that sysctl to 0
+host-wide. Debian's kernel has no such restriction. A host where the
+probe still finds no usable user namespace runs apps with
+`"sandbox": "none"` and a warning (the non-dumpable supervisor and
+`NoNewPrivileges` remain); `journalctl -t hotserve-sandbox-probe`
+says why.
 
 ## Deploy authentication (`deploy_trust`)
 

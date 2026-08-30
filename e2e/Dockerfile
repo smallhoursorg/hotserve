@@ -16,7 +16,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # dbus: logind; procps + curl: the in-container systemd suite.
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends \
-		systemd systemd-sysv dbus libpam-systemd procps curl ca-certificates \
+		systemd systemd-sysv dbus libpam-systemd procps curl ca-certificates apparmor \
 	&& rm -rf /var/lib/apt/lists/*
 RUN systemctl mask \
 	systemd-udevd.service \
@@ -44,6 +44,7 @@ RUN hotserve list-modules | grep -qx liveswap \
 # systemd is not running at build time; postinstall tolerates that
 # (linger-file fallback, daemon-reload/try-restart ignored).
 COPY packaging/hotserve.service /etc/systemd/system/hotserve.service
+COPY packaging/apparmor/hotserve-user-manager /etc/apparmor.d/hotserve-user-manager
 COPY packaging/postinstall.sh /tmp/postinstall.sh
 RUN mkdir -p /var/lib/hotserve /var/lib/liveswap \
 	&& chmod 750 /var/lib/hotserve /var/lib/liveswap \

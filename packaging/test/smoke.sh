@@ -261,6 +261,18 @@ echo "deployed as unit $unit under user@$uid; app output in the journal"
 # that restricts them would fail every cell here, not just Ubuntu's.
 echo "host: $(uname -r); apparmor_restrict_unprivileged_userns=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo absent); virt=$(systemd-detect-virt 2>/dev/null || echo unknown)"
 sandbox=$(printf '%s' "$status" | sed -n 's/.*"sandbox":"\([a-z]*\)".*/\1/p')
+# Where the kernel restricts unprivileged user namespaces, the user
+# manager must be running under the shipped profile — that is the
+# package's whole answer to Ubuntu 24.04+ — and the tier below proves
+# the profile actually lifts the restriction.
+if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = "1" ]; then
+	mgr_pid=$(systemctl show -p MainPID --value "user@$uid.service")
+	mgr_label=$(cat "/proc/$mgr_pid/attr/apparmor/current" 2>/dev/null || cat "/proc/$mgr_pid/attr/current" 2>/dev/null)
+	case "$mgr_label" in
+	hotserve-user-manager*) echo "user@$uid runs under the hotserve-user-manager AppArmor profile ($mgr_label)" ;;
+	*) die "kernel restricts unprivileged user namespaces but user@$uid is not under the hotserve-user-manager profile (label '$mgr_label'); the sandbox would be off" ;;
+	esac
+fi
 app_uidmap=$(printf '%s' "$app_line" | grep -o 'uidmap=[0-9]*' | cut -d= -f2)
 app_pid=$(printf '%s' "$app_line" | grep -o ' pid=[0-9]*' | cut -d= -f2)
 app_nprocs=$(printf '%s' "$app_line" | grep -o 'nprocs=[0-9]*' | cut -d= -f2)

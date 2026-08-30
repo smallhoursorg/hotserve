@@ -329,7 +329,15 @@ consequences, and they decide the mechanism:
    watchdog restart what it kills), not data access, and is warned
    about at every launch; `sandbox require` accepts only *full*.
    Bubblewrap is not carried as a second mechanism. Ubuntu 22.04 is
-   dropped from the matrix.
+   dropped from the matrix. Ubuntu 24.04+ restricts unprivileged user
+   namespaces to unconfined processes (measured on CI's Ubuntu-kernel
+   runner: probe exit 226, tier none); the package ships an AppArmor
+   profile granting `userns` to hotserve's user manager alone
+   (`AppArmorProfile=` on `user@<uid>.service`). Residual: that
+   permission is inherited by the manager's children, so an app run
+   with `sandbox off` on such a host may create user namespaces where
+   the distro default would refuse — sandboxed apps cannot
+   (`RestrictNamespaces=`).
 2. **A non-dumpable supervisor is the floor on every host.**
    `prctl(PR_SET_DUMPABLE, 0)` makes hotserve's `/proc` entries require
    `CAP_SYS_PTRACE`, which apps under `NoNewPrivileges` never hold —
