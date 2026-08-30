@@ -75,6 +75,13 @@ fi
 case "$s" in *'"running":true'*) pass "status reports the reattached app running" ;; *) fail "reattached app not running: $s" ;; esac
 
 echo "=== systemd 4: the app runs in its sandbox — the view from inside ==="
+# Host-side facts first (never assertions): they explain a tier below
+# full on a kernel that restricts unprivileged user namespaces.
+echo "host: $(uname -r); apparmor_restrict_unprivileged_userns=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo absent)"
+echo "apparmor: enabled=$(cat /sys/module/apparmor/parameters/enabled 2>&1); securityfs=$(ls -d /sys/kernel/security/apparmor 2>&1); service=$(systemctl is-active apparmor 2>&1); profiles matching hotserve: $(grep -c hotserve /sys/kernel/security/apparmor/profiles 2>&1)"
+echo "user@$uid: ExecStart=$(systemctl show -p ExecStart --value "user@$uid.service" | head -c 120); label=$(cat "/proc/$(systemctl show -p MainPID --value "user@$uid.service")/attr/apparmor/current" 2>&1)"
+ls -l /usr/libexec/hotserve/user-manager /etc/apparmor.d/hotserve-user-manager 2>&1
+journalctl --no-pager -u apparmor 2>/dev/null | tail -3
 # The probe release's ./server records its view into its shared dir
 # (e2e/liveswap/probe.sh), then becomes the app. This image is trixie
 # (systemd 257), so the tier is full: a PID namespace on top of the
