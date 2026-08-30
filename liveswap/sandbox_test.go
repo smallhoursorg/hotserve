@@ -834,3 +834,127 @@ func TestValidateRejectsUncleanRoot(t *testing.T) {
 		}
 	}
 }
+
+// TestResolveBindSourcesRefusesPlantedSymlink is the escape a bare app
+// could arrange for its own sandboxed future: `shared` and the release
+// dirs live under the shared hotserve UID and appDirs.ensure's MkdirAll
+// succeeds on a symlink, so an app running with `sandbox off` (or on a
+// host stuck at the none tier, or simply before its first sandboxed
+// deploy — the documented rollout) can point its own shared dir at the
+// user manager's socket directory and have BindPaths= mount it inside
+// the sandbox on the next launch.
+func TestResolveBindSourcesRefusesPlantedSymlink(t *testing.T) {
+	root := t.TempDir()
+	appDir := filepath.Join(root, "blog")
+	release := filepath.Join(appDir, "releases", "v1")
+	shared := filepath.Join(appDir, "shared")
+	sibling := filepath.Join(root, "shop", "shared")
+	// "Outside" areas live under /run: the root itself is a t.TempDir
+	// under /tmp, which is a closed prefix, so a link resolving there
+	// would be refused for that reason instead of the one under test.
+	outside, err := os.MkdirTemp("/run", "bindsrc-")
+	if err != nil {
+		t.Skipf("no writable dir outside the closed prefixes: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(outside) })
+	hotserveState := filepath.Join(outside, "fake-hotserve")
+	elsewhere := filepath.Join(outside, "data")
+	for _, d := range []string{release, shared, sibling, hotserveState, elsewhere} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hidden := []string{hotserveState}
+	spec := func(sharedPath string) *sandboxSpec {
+		return &sandboxSpec{tier: sandboxFull, root: root, appDir: appDir,
+			writable: []string{release, sharedPath}, hidden: hidden}
+	}
+	// Baseline: real directories resolve to themselves and are kept.
+	s := spec(shared)
+	if err := s.resolveBindSources(hidden); err != nil {
+		t.Fatalf("plain directories refused: %v", err)
+	}
+	if !reflect.DeepEqual(s.writable, []string{release, shared}) {
+		t.Fatalf("writable rewritten unnecessarily: %v", s.writable)
+	}
+
+	link := filepath.Join(appDir, "shared-link")
+	// Targets that exist here, so resolution succeeds and the
+	// containment check is what refuses them. (A link to a target that
+	// does not resolve is refused too, by the missing-source case at
+	// the end — fail-closed either way.)
+	for _, tc := range []struct{ name, target, wantIn string }{
+		{"a closed tree", "/dev", "sandbox itself closes"},
+		{"the private tmp", "/tmp", "sandbox itself closes"},
+		{"hotserve's own state", hotserveState, "hidden from every app"},
+		{"a sibling app's data", sibling, "belongs to another app"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_ = os.Remove(link)
+			if err := os.Symlink(tc.target, link); err != nil {
+				t.Fatal(err)
+			}
+			err := spec(link).resolveBindSources(hidden)
+			if err == nil {
+				t.Fatalf("a shared dir pointing at %s was bound into the sandbox", tc.target)
+			}
+			if !strings.Contains(err.Error(), tc.wantIn) {
+				t.Fatalf("refused for the wrong reason: %v", err)
+			}
+		})
+	}
+
+	// A shared dir legitimately moved to another disk (outside the
+	// root, and nowhere the sandbox protects) is allowed, and what gets
+	// bound is what it resolves to.
+	_ = os.Remove(link)
+	if err := os.Symlink(elsewhere, link); err != nil {
+		t.Fatal(err)
+	}
+	s = spec(link)
+	if err := s.resolveBindSources(hidden); err != nil {
+		t.Fatalf("a shared dir on another path was refused: %v", err)
+	}
+	resolved, _ := filepath.EvalSymlinks(elsewhere)
+	if s.writable[1] != resolved {
+		t.Fatalf("bind source not rewritten to the resolved path: %v", s.writable)
+	}
+
+	// A missing bind source is an error, not a silently skipped bind.
+	if err := spec(filepath.Join(appDir, "gone")).resolveBindSources(hidden); err == nil {
+		t.Fatal("a missing shared dir must fail the launch")
+	}
+}
+
+// TestUnitForResolvesBindSources: the check runs at unit creation, the
+// last point before systemd follows the paths, so a launch whose bind
+// source was replaced after config load fails instead of mounting it.
+func TestUnitForResolvesBindSources(t *testing.T) {
+	r, _ := newTestSystemdRunner(t)
+	root := t.TempDir()
+	appDir := filepath.Join(root, "blog")
+	release := filepath.Join(appDir, "releases", "v1")
+	if err := os.MkdirAll(release, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(release, "server"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	shared := filepath.Join(appDir, "shared")
+	// /dev stands in for /run/user/<uid> — the real target on a live
+	// host, absent in the test container; both are closed prefixes.
+	if err := os.Symlink("/dev", shared); err != nil {
+		t.Fatal(err)
+	}
+	spec := startSpec{
+		app: "blog", version: "v1", command: []string{"./server"}, dir: release,
+		sandbox: &sandboxSpec{tier: sandboxFull, root: root, appDir: appDir,
+			writable: []string{release, shared}, hidden: sandboxHiddenFloor},
+	}
+	if _, err := r.unitFor(spec, false); err == nil || !strings.Contains(err.Error(), "sandbox itself closes") {
+		t.Fatalf("unitFor must refuse a planted bind source, got %v", err)
+	}
+	if _, err := r.Start(spec); err == nil {
+		t.Fatal("Start must fail rather than launch with the planted bind")
+	}
+}

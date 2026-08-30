@@ -376,6 +376,15 @@ func (r *systemdRunner) unitFor(spec startSpec, oneshot bool) (unitSpec, error) 
 	if err != nil {
 		return unitSpec{}, err
 	}
+	// As late as possible, and before the manager follows any of them:
+	// what a bind source points at is only knowable now (see
+	// resolveBindSources). A refusal fails the launch — a deploy falls
+	// back to the version still serving.
+	if spec.sandbox != nil {
+		if err := spec.sandbox.resolveBindSources(spec.sandbox.hidden); err != nil {
+			return unitSpec{}, err
+		}
+	}
 	desc := "hotserve app " + spec.app + " " + spec.version
 	if oneshot {
 		desc += " (pre_start)"

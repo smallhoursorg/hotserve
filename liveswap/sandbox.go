@@ -231,6 +231,81 @@ type sandboxSpec struct {
 	extra    []extraPath
 	// hidden is what no app may see on this host (App.hiddenPaths).
 	hidden []string
+	// appDir is this app's own directory under the root: a writable
+	// bind that resolves inside the root must stay inside it, or one
+	// app would be binding another's data.
+	appDir string
+}
+
+// resolveBindSources resolves every path this unit will bind and
+// re-checks it, immediately before the unit is created — the last
+// moment before systemd follows these paths, and the only check that
+// sees what they point at *now*.
+//
+// The mandatory binds need this as much as extra_path does, and are
+// the easier target: `shared` and the release dirs live under the
+// shared hotserve UID, and appDirs.ensure's MkdirAll succeeds on a
+// symlink. An app running bare — `sandbox off`, a host stuck at the
+// none tier, or simply an app that has not had its first sandboxed
+// deploy yet, which is the documented rollout — can therefore replace
+// its own `shared` with a link to /run/user/<uid> and have BindPaths=
+// mount the user manager's private socket inside the sandbox on the
+// next launch, while the status endpoint reports it as sandboxed.
+//
+// Resolution is allowed and useful (an operator may legitimately put
+// `shared` on another disk); what is refused is a resolution that
+// lands somewhere the sandbox exists to keep out. Paths that do not
+// resolve — an extra_path for a socket directory that appears later —
+// are left as written, having already passed the same checks
+// lexically at config load.
+func (s *sandboxSpec) resolveBindSources(hidden []string) error {
+	own := func(p, resolved string) error {
+		// A mandatory bind may resolve out of the root (another disk),
+		// but if it stays inside the root it must stay inside this
+		// app's own directory: anything else is a sibling's data.
+		if pathWithin(resolved, s.root) && !pathWithin(resolved, s.appDir) {
+			return fmt.Errorf("%q resolves to %q, which belongs to another app under %s", p, resolved, s.root)
+		}
+		return closedOrHidden(resolved, hidden)
+	}
+	for i, p := range s.writable {
+		resolved, err := filepath.EvalSymlinks(p)
+		if err != nil {
+			return fmt.Errorf("resolving %q before binding it into the sandbox: %w", p, err)
+		}
+		if resolved != p {
+			if err := own(p, resolved); err != nil {
+				return fmt.Errorf("refusing to launch sandboxed: %w", err)
+			}
+			s.writable[i] = resolved
+		}
+	}
+	for i, e := range s.extra {
+		resolved, err := filepath.EvalSymlinks(e.path)
+		if err != nil || resolved == e.path {
+			continue // absent (checked as written at config load), or itself
+		}
+		if err := checkExtraPathContainment(resolved, s.root, hidden); err != nil {
+			return fmt.Errorf("refusing to launch sandboxed: extra_path %q resolves to %q: %w", e.path, resolved, err)
+		}
+		s.extra[i].path = resolved
+	}
+	return nil
+}
+
+// closedOrHidden refuses a path the sandbox is meant to keep out.
+func closedOrHidden(p string, hidden []string) error {
+	for _, h := range hidden {
+		if pathWithin(p, h) {
+			return fmt.Errorf("%q is inside %s, which is hidden from every app", p, h)
+		}
+	}
+	for _, c := range sandboxClosedPrefixes {
+		if pathWithin(p, c) {
+			return fmt.Errorf("%q is inside %s, which the sandbox itself closes", p, c)
+		}
+	}
+	return nil
 }
 
 // sandboxSpecFor is the sandbox of one instance of this app at the
@@ -243,9 +318,12 @@ func (s *appSpec) sandboxSpecFor(releaseDir string, tier sandboxTier) *sandboxSp
 	return &sandboxSpec{
 		tier:     tier,
 		root:     s.dirs.root,
+		appDir:   s.dirs.app,
 		writable: []string{releaseDir, s.dirs.shared},
-		extra:    s.extraPaths,
-		hidden:   s.sandboxHidden,
+		// Copied: resolveBindSources rewrites entries to what they
+		// resolve to, and the spec must not mutate the app's config.
+		extra:  append([]extraPath{}, s.extraPaths...),
+		hidden: s.sandboxHidden,
 	}
 }
 

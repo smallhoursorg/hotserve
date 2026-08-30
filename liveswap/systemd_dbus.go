@@ -330,9 +330,12 @@ func sandboxProperties(s *sandboxSpec) []sddbus.Property {
 		{Name: "ProtectSystem", Value: godbus.MakeVariant("strict")},
 		// Empty tmpfs over /home, /root and /run/user — the last hides
 		// the manager's private socket and the session bus. "tmpfs"
-		// rather than "yes" so an extra_path under /home can still be
-		// bound in (BindPaths= nests into a tmpfs; it cannot nest into
-		// the inaccessible overmount "yes" installs).
+		// rather than "yes" so the app's own release and shared dirs
+		// can still be bound back when the liveswap root lives under
+		// one of those trees (BindPaths= nests into a tmpfs; it cannot
+		// nest into the inaccessible overmount "yes" installs). An
+		// extra_path there is refused outright — see
+		// sandboxClosedPrefixes.
 		{Name: "ProtectHome", Value: godbus.MakeVariant("tmpfs")},
 		{Name: "PrivateTmp", Value: godbus.MakeVariant(true)},
 		{Name: "PrivateDevices", Value: godbus.MakeVariant(true)},

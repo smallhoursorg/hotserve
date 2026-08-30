@@ -84,8 +84,10 @@ requirement below stands as the contract the sandbox path must keep.
 - The view MUST NOT contain: other apps' directories, `/var/lib`
   outside the app's own subtree (TLS keys live there), `/run/hotserve`
   (admin socket), `/run/user/<uid>` (the user manager's private
-  socket and session bus; `ProtectHome=tmpfs` covers it, a tmpfs so
-  an `extra_path` under `/home` can still be bound in), and
+  socket and session bus; `ProtectHome=tmpfs` covers it — a tmpfs
+  rather than `yes` so the app's own release and shared dirs can still
+  be bound back when the liveswap root lives under one of those trees;
+  an `extra_path` there is refused outright), and
   `/etc/hotserve` (env files; apps never legitimately read their env
   *file*, they receive env *variables*). *Amended 2026-08-30:* the
   liveswap root is replaced by an empty read-only tmpfs
