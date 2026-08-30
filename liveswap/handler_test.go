@@ -364,3 +364,27 @@ func TestWebhookPushContentTypeCaseInsensitive(t *testing.T) {
 		t.Fatalf("expected push routing, got %q", rig.fetch.lastReq.source())
 	}
 }
+
+// TestWebhookBodyCannotSetServerSideFields pins the deployPayload /
+// deployRequest split: a URL deploy body that also spells the
+// server-side request fields (the staged-upload path, the rollback
+// flag, the authorizing source) is decoded as a plain URL deploy —
+// those fields are not on the wire type, so nothing a caller sends can
+// reach them.
+func TestWebhookBodyCannotSetServerSideFields(t *testing.T) {
+	h, rig := newTestHandler(t)
+	body := `{"url":"https://x/a.tgz","version":"v1",` +
+		`"localArchive":"/etc/passwd","local_archive":"/etc/passwd",` +
+		`"rollback":true,"by":"forged"}`
+	w := do(t, h, http.MethodPost, "/demo", appToken(t), body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code = %d body=%s", w.Code, w.Body.String())
+	}
+	got := rig.fetch.lastReq
+	if got.localArchive != "" || got.rollback || got.by != "local:test-key" {
+		t.Fatalf("server-side fields reachable from the body: %+v", got)
+	}
+	if got.source() != "url" {
+		t.Fatalf("source = %q, want url", got.source())
+	}
+}

@@ -93,17 +93,32 @@ type appSpec struct {
 	dirs            appDirs
 }
 
-// deployRequest is the validated webhook payload. The three sources are
-// mutually exclusive: a URL to pull (the default), a pushed archive
-// already staged on disk (localArchive), or a rollback to an existing
-// on-disk release (rollback). URL and AuthHeader come from the JSON
-// body; the rest are set server-side by the handler.
-type deployRequest struct {
+// deployPayload is the JSON body of a URL deploy — the only thing the
+// webhook ever decodes from the wire. It is deliberately a separate
+// type from deployRequest: the request carries server-side fields
+// (the staged upload path, the rollback flag, the authorizing source)
+// that must never be reachable from a body, and keeping them out of
+// the decoded type makes that structural rather than a matter of
+// field visibility — for readers and for static analysis alike, which
+// otherwise taints every field of a decoded struct.
+type deployPayload struct {
 	URL        string `json:"url"`
 	Version    string `json:"version"`
 	AuthHeader string `json:"auth_header,omitempty"`
-	// localArchive is a path to an already-staged pushed tarball (the
-	// upload path); empty for a URL pull.
+}
+
+// deployRequest is the validated deploy request handed to the
+// pipeline. It is never decoded from the wire (see deployPayload). The
+// three sources are mutually exclusive: a URL to pull (the default), a
+// pushed archive already staged on disk (localArchive), or a rollback
+// to an existing on-disk release (rollback).
+type deployRequest struct {
+	URL        string
+	Version    string
+	AuthHeader string
+	// localArchive is the path of an already-staged pushed tarball (an
+	// os.CreateTemp name under the app's own tmp dir, chosen by the
+	// handler — never request input); empty for a URL pull.
 	localArchive string
 	// rollback relaunches an existing on-disk release/<Version> without
 	// fetching or extracting anything.
