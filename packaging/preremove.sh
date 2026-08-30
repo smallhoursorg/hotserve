@@ -26,6 +26,11 @@ upgrade|failed-upgrade)
 			rm -f "/etc/systemd/system/user@$uid.service.d/10-hotserve.conf"
 			rmdir "/etc/systemd/system/user@$uid.service.d" 2>/dev/null || true
 		fi
+		# The profile file goes with the package; unload it from the
+		# kernel too (the manager it was for is stopped above).
+		if [ -d /sys/kernel/security/apparmor ] && command -v apparmor_parser >/dev/null 2>&1; then
+			apparmor_parser -R /etc/apparmor.d/hotserve-user-manager 2>/dev/null || true
+		fi
 		systemctl daemon-reload 2>/dev/null || true
 	fi
 	;;

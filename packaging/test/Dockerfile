@@ -18,7 +18,7 @@ FROM ${BASE_IMAGE}
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends \
-		systemd systemd-sysv dbus ca-certificates curl \
+		systemd systemd-sysv dbus ca-certificates curl apparmor \
 	&& rm -rf /var/lib/apt/lists/*
 
 # Units that cannot work in a container and would otherwise leave the

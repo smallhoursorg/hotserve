@@ -32,8 +32,10 @@ sudo systemctl enable --now hotserve
 That gives you `/usr/bin/hotserve`, a systemd service running as the
 `hotserve` user, and a starter config at `/etc/hotserve/Caddyfile`.
 **Supported: Debian 12 and 13, Ubuntu 24.04 and 26.04.** Per-app
-isolation, the next milestone on the roadmap below, will need
-systemd ≥ 256 (Debian 13, Ubuntu 26.04); the older two will stay
+sandboxing runs at its *full* tier (PID + user namespace) on
+systemd ≥ 256 (Debian 13, Ubuntu 26.04) and at the *filesystem* tier
+(user namespace, no PID namespace) on Debian 12 and Ubuntu 24.04 —
+see [liveswap/README.md](liveswap/README.md#sandbox); the older two will stay
 supported and keep today's behaviour.
 The package depends on `libpam-systemd` and `dbus` (present on any
 stock Debian/Ubuntu server): liveswap runs your apps as systemd units
@@ -128,9 +130,9 @@ an on-disk release. Full details, CI snippets, and every option:
 - **A server product, distributed like Caddy.** Same CLI, same
   Caddyfile, same admin API — `hotserve run`, `hotserve reload`,
   `hotserve validate` all behave exactly as Caddy's do.
-- **Made for one cheap server.** Apps run as supervised child
-  processes of hotserve on localhost ports; no container runtime
-  anywhere. That's why there's deliberately no Docker image.
+- **Made for one cheap server.** Apps run as systemd units under
+  hotserve's own user manager, on localhost ports; no container
+  runtime anywhere. That's why there's deliberately no Docker image.
 - **Not a cluster.** Single-node by design. If you outgrow one server,
   you've outgrown hotserve — a good problem.
 - **One box, one trust domain.** Apps run without privileges
@@ -138,11 +140,16 @@ an on-disk release. Full details, CI snippets, and every option:
   a unix socket rather than TCP — otherwise "localhost-only" would
   include every app you run, and one SSRF bug in an app could
   reconfigure the server.
-  But apps currently run as one shared user, so hotserve does not
-  protect your apps *from each other*: run only workloads you trust
-  together, or reach for containers. Per-app sandboxing (systemd's
-  per-unit namespaces and seccomp) is designed and next up —
-  [liveswap/DESIGN-sandbox.md](liveswap/DESIGN-sandbox.md).
+  Apps run as one shared user, but each in its own systemd sandbox:
+  a user namespace, a filesystem view holding only its own release and
+  data, no access to hotserve's keys, sockets or `/proc`, and — on
+  systemd ≥ 256 — its own PID namespace, so apps cannot read, reach or
+  (on the *full* tier) even see each other. What stays shared by
+  design is the network namespace: sibling `127.0.0.1` ports are
+  reachable, and on older systemd same-UID processes can still be
+  signalled. Details and the rollout rules:
+  [liveswap/README.md](liveswap/README.md#sandbox); the reasoning:
+  [DESIGN-threat-model.md](DESIGN-threat-model.md).
 - **Deploys are authenticated without a shared secret.** A deploy
   carries a short-lived token — an OIDC token from CI, verified against
   the provider's public keys, or one signed by a local key whose public
@@ -151,36 +158,35 @@ an on-disk release. Full details, CI snippets, and every option:
 
 ## Roadmap
 
-- **[High priority] Per-app sandboxing / isolation by default**
-  (systemd per-unit sandboxing: PID + mount namespaces, seccomp,
-  resource caps — no containers) — designed, see
-  [liveswap/DESIGN-sandbox.md](liveswap/DESIGN-sandbox.md). The
-  concrete gap driving the priority: because every app runs as the
-  shared `hotserve` UID, a compromised app can connect to the admin
-  unix socket and read the TLS private keys and sibling apps' files.
-  Two routes are already closed: the child environment is scrubbed
-  (no direct inheritance of ACME DNS tokens — deploy auth no longer
-  keeps a secret on the box, see below), and hotserve runs
-  non-dumpable from its first milliseconds, so
-  `/proc/<hotserve-pid>/environ` and `/proc/<hotserve-pid>/root` need
-  `CAP_SYS_PTRACE` even from its own UID (the exec-time residual is
-  recorded in the threat model). The filesystem routes need a real
-  boundary. Apps run as
-  transient units under the hotserve user's own systemd manager
-  (chosen over the system manager: a polkit grant to manage units is
-  root-equivalent), and the boundary will be systemd's own per-unit
-  sandboxing on those units: `PrivatePIDs=` (the PID namespace that,
-  under a shared UID, a mount sandbox cannot hold without — see
+- **Per-app sandboxing — shipped in two tiers; resource caps next.**
+  Every app runs as a transient unit under the hotserve user's own
+  systemd manager (chosen over the system manager: a polkit grant to
+  manage units is root-equivalent), and each unit carries systemd's
+  own sandboxing: a user namespace (`PrivateUsers=`), a read-only
+  system with the liveswap root replaced by an empty tmpfs and only
+  the app's own release and `shared/` bound back, `PrivateTmp=`,
+  `PrivateDevices=`, hotserve's own directories and sockets
+  inaccessible, a read-only cgroupfs, no capabilities, and systemd's
+  curated `SystemCallFilter=@system-service` — no containers, no
+  bubblewrap. On systemd ≥ 256 (Debian 13, Ubuntu 26.04) the unit also
+  gets a PID namespace (`PrivatePIDs=`): the *full* tier, where the
+  supervisor, the user manager and sibling apps are invisible and
+  unsignalable. Debian 12 and Ubuntu 24.04 get the *filesystem* tier
+  — everything above except the PID namespace, so a compromised app
+  can still `kill` same-UID processes (which restart) but cannot read
+  their files, sockets or `/proc` — with a warning at every launch.
+  Why the user namespace matters: under a shared UID the kernel would
+  otherwise let any app walk the host through
+  `/proc/<user-manager>/root`; see
   [DESIGN-threat-model.md](DESIGN-threat-model.md) "The shared-UID
-  rule"), `ProtectSystem=strict`, `PrivateTmp=`, `InaccessiblePaths=`,
-  a read-only cgroupfs so resource caps are real, and systemd's
-  curated `SystemCallFilter=@system-service` — no bubblewrap. That set
-  needs systemd ≥ 256, so it will be probe-gated: Debian 13 and
-  Ubuntu 26.04 will get all of it; Debian 12 and Ubuntu 24.04 will
-  keep today's floor (non-dumpable supervisor, `NoNewPrivileges`) with
-  a warning at every start until upgraded. Per-app UIDs would need a small
-  privileged helper and stay a later milestone. This is the next
-  security milestone, ahead of the items below.
+  rule". hotserve itself additionally runs non-dumpable from its
+  first milliseconds. Policy is `sandbox auto` (default) / `require` /
+  `off`, engaging on each app's **next deploy** (never on an upgrade
+  relaunch) — [liveswap/README.md](liveswap/README.md#sandbox).
+  **Next:** resource caps (`MemoryMax=`, `TasksMax=`, `CPUQuota=`) with
+  a config surface — real now that cgroupfs is read-only inside the
+  unit. Per-app UIDs would need a small privileged helper and stay a
+  later milestone.
 - Hosted APT/APK repositories with package signing and auto-updates
 - A metrics/alerts module to sit alongside liveswap and penaltybox —
   first customer: alerting when the watchdog is stuck in a restart

@@ -39,11 +39,14 @@ type fakeSystemdConn struct {
 	listCalls  int
 	listHook   func()        // runs inside ListUnits, before it returns (interleaving tests)
 	stopDelay  time.Duration // StopUnit sleeps this long (concurrency tests)
+	version    int           // ManagerVersion (0 = unknown)
 }
 
 func newFakeSystemdConn() *fakeSystemdConn {
-	return &fakeSystemdConn{status: map[string]unitStatus{}}
+	return &fakeSystemdConn{status: map[string]unitStatus{}, version: 257}
 }
+
+func (f *fakeSystemdConn) ManagerVersion() int { return f.version }
 
 func (f *fakeSystemdConn) StartTransientUnit(ctx context.Context, u unitSpec) (string, error) {
 	f.mu.Lock()
@@ -931,5 +934,63 @@ func TestUnitStatusRunning(t *testing.T) {
 		if got := st.exitString(); got != want {
 			t.Errorf("%+v exitString = %q want %q", st, got, want)
 		}
+	}
+}
+
+// TestSystemdRunnerWatcherFollowsMainPID: a sandboxed unit's MainPID
+// changes shortly after start (PrivatePIDs= makes the manager fork an
+// intermediate that sets the namespace up, then report its child), so
+// the handle must track the manager's current MainPID, not the first
+// value it read.
+func TestSystemdRunnerWatcherFollowsMainPID(t *testing.T) {
+	r, conn := newTestSystemdRunner(t)
+	h, err := r.Start(testApp(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.state().PID != 4242 { // the fake's MainPID for a started unit
+		t.Fatalf("sanity: pid read at start, got %d", h.state().PID)
+	}
+	conn.setStatus(h.state().Unit, unitStatus{LoadState: "loaded", ActiveState: "active", MainPID: 4243})
+	deadline := time.Now().Add(2 * time.Second)
+	for h.state().PID != 4243 {
+		if time.Now().After(deadline) {
+			t.Fatalf("watcher did not follow the MainPID change, still %d", h.state().PID)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if r.Alive(h) != true {
+		t.Fatal("a MainPID change must not read as an exit")
+	}
+}
+
+// TestSystemdRunnerStartSettlesMainPIDForFullTier: a full-tier start
+// returns with the app's pid, not the intermediate the manager reports
+// for its first few milliseconds; other tiers take the first read.
+func TestSystemdRunnerStartSettlesMainPIDForFullTier(t *testing.T) {
+	r, conn := newTestSystemdRunner(t)
+	spec := testApp(t)
+	spec.sandbox = &sandboxSpec{tier: sandboxFull, root: "/var/lib/liveswap"}
+	// The fake presets MainPID 4242 at start; flip it to 4243 shortly
+	// after, like the manager does once the namespace is set up.
+	go func() {
+		for {
+			time.Sleep(5 * time.Millisecond)
+			conn.mu.Lock()
+			n := len(conn.started)
+			conn.mu.Unlock()
+			if n > 0 {
+				break
+			}
+		}
+		time.Sleep(30 * time.Millisecond)
+		conn.setStatus(conn.unit(0).Name, unitStatus{LoadState: "loaded", ActiveState: "active", MainPID: 4243})
+	}()
+	h, err := r.Start(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.state().PID != 4243 {
+		t.Fatalf("full-tier start returned the intermediate pid %d, want the settled 4243", h.state().PID)
 	}
 }

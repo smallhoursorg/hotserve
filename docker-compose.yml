@@ -102,6 +102,11 @@ services:
     volumes:
       - e2e-deploy:/shared
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      # securityfs from the host: lets the AppArmor profile the package
+      # ships be loaded into the host kernel's policy from inside, which
+      # is what makes the sandbox work under an Ubuntu kernel's
+      # user-namespace restriction (see Makefile install-test).
+      - /sys/kernel/security:/sys/kernel/security
       - ./e2e/lib.sh:/lib.sh:ro
       - ./e2e/liveswap/systemd.sh:/suite-systemd.sh:ro
     depends_on:

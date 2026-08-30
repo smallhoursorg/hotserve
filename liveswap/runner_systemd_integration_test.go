@@ -406,3 +406,171 @@ func TestIntegrationSystemdManagerStallIsNotACrash(t *testing.T) {
 	}
 	waitPIDsGone(t, pids, 2*time.Second)
 }
+
+// sandboxRoot makes a liveswap-style root outside /tmp (PrivateTmp=
+// would hide a t.TempDir) with one app's release and shared dirs, a
+// sibling app, and a state.json — the layout the sandbox must slice.
+func sandboxRoot(t *testing.T) (root, release, shared string) {
+	t.Helper()
+	root, err := os.MkdirTemp("/var/tmp", "liveswap-itest-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	release = filepath.Join(root, "itest", "releases", "v1")
+	shared = filepath.Join(root, "itest", "shared")
+	for _, d := range []string{release, shared, filepath.Join(root, "itest", "tmp"), filepath.Join(root, "other", "shared")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range []string{filepath.Join(root, "itest", "state.json"), filepath.Join(root, "other", "shared", "secret")} {
+		if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root, release, shared
+}
+
+// TestIntegrationSystemdSandboxProbe: the capability probe against the
+// real manager. The dev-systemd image is trixie (systemd 257), so the
+// answer is full; on anything older the test still asserts the probe
+// reached a consistent verdict rather than a specific one.
+func TestIntegrationSystemdSandboxProbe(t *testing.T) {
+	r := integrationRunner(t)
+	root, _, _ := sandboxRoot(t)
+	version := userManager.ManagerVersion()
+	if version == 0 {
+		t.Fatal("manager version not read")
+	}
+	got := probeSandboxCapability(r, version, root, sandboxHiddenFloor)
+	t.Logf("systemd %d: tier=%s reason=%q", version, got.tier, got.reason)
+	switch {
+	case version >= 256 && got.tier != sandboxFull:
+		t.Fatalf("systemd %d should deliver the full tier, got %s (%s)", version, got.tier, got.reason)
+	case version < 256 && got.tier != sandboxFilesystem:
+		t.Fatalf("systemd %d should deliver the filesystem tier, got %s (%s)", version, got.tier, got.reason)
+	}
+}
+
+// sandboxProbeScript writes one line per check into $1 (the shared
+// dir, the only writable persistent path in the view). MGR and HS are
+// the user manager's and a bystander's PIDs.
+const sandboxProbeScript = `out="$1/probe.txt"; MGR=$2; ROOT=$3
+: > "$out"
+echo "pid=$$" >> "$out"
+read _ _ n < /proc/self/uid_map; echo "uidmap=$n" >> "$out"
+echo "nprocs=$(ls /proc | grep -c '^[0-9]')" >> "$out"
+ls /proc/$MGR/root/ >/dev/null 2>&1 && echo "mgr_root=open" >> "$out" || echo "mgr_root=closed" >> "$out"
+cat /proc/$MGR/environ >/dev/null 2>&1 && echo "mgr_environ=open" >> "$out" || echo "mgr_environ=closed" >> "$out"
+[ -e "$ROOT/other" ] && echo "sibling=open" >> "$out" || echo "sibling=closed" >> "$out"
+[ -e "$ROOT/itest/state.json" ] && echo "state=open" >> "$out" || echo "state=closed" >> "$out"
+[ -e "$ROOT/itest/tmp" ] && echo "apptmp=open" >> "$out" || echo "apptmp=closed" >> "$out"
+touch "$ROOT/itest/releases/v1/w" 2>/dev/null && echo "release=writable" >> "$out" || echo "release=readonly" >> "$out"
+touch "$ROOT/newfile" 2>/dev/null && echo "root=writable" >> "$out" || echo "root=readonly" >> "$out"
+[ -r /var/lib/hotserve ] && echo "hotserve_lib=open" >> "$out" || echo "hotserve_lib=closed" >> "$out"
+[ -r /run/user/$(id -u)/systemd/private ] && echo "mgr_socket=open" >> "$out" || echo "mgr_socket=closed" >> "$out"
+cg=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup); (echo max > "$cg/memory.max") 2>/dev/null && echo "cgroup=writable" >> "$out" || echo "cgroup=readonly" >> "$out"
+touch /tmp/w 2>/dev/null && echo "tmp=writable" >> "$out" || echo "tmp=readonly" >> "$out"
+echo "home=$HOME" >> "$out"
+[ -n "$XDG_RUNTIME_DIR" ] && echo "xdg_runtime=set" >> "$out" || echo "xdg_runtime=unset" >> "$out"
+echo "done=1" >> "$out"
+sleep 300
+`
+
+func readProbe(t *testing.T, shared string) map[string]string {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		b, err := os.ReadFile(filepath.Join(shared, "probe.txt"))
+		if err == nil && strings.Contains(string(b), "done=1") {
+			m := map[string]string{}
+			for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+				k, v, _ := strings.Cut(line, "=")
+				m[k] = v
+			}
+			return m
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("probe.txt not written: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestIntegrationSystemdSandboxedUnit starts a unit with the full
+// sandbox and reads the view from inside: the namespaces are in
+// effect, the root shows only the app's own dirs, hidden paths and
+// the manager's /proc are closed, cgroupfs is read-only, /tmp is
+// private and writable, HOME is the shared dir. Then the unit is
+// stopped through the runner like any other.
+func TestIntegrationSystemdSandboxedUnit(t *testing.T) {
+	r := integrationRunner(t)
+	if userManager.ManagerVersion() < 256 {
+		t.Skip("full tier needs systemd >= 256")
+	}
+	root, release, shared := sandboxRoot(t)
+	if err := os.WriteFile(filepath.Join(release, "server"), []byte("#!/bin/sh\n"+sandboxProbeScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mgrPID := strings.TrimSpace(run(t, "systemctl", "show", "-p", "MainPID", "--value", "user@"+strconv.Itoa(os.Getuid())+".service"))
+	if mgrPID == "" || mgrPID == "0" {
+		mgrPID = strconv.Itoa(os.Getppid())
+	}
+	spec := startSpec{
+		app:     "itest",
+		version: "sandboxed",
+		command: []string{"./server", shared, mgrPID, root},
+		dir:     release,
+		env:     []string{"PATH=" + os.Getenv("PATH"), "HOME=" + shared},
+		grace:   2 * time.Second,
+		sandbox: &sandboxSpec{tier: sandboxFull, root: root, writable: []string{release, shared}, hidden: sandboxHiddenFloor},
+	}
+	h, err := r.Start(spec)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = r.Stop(h, 2*time.Second) })
+	got := readProbe(t, shared)
+	t.Logf("probe: %v", got)
+	for k, want := range map[string]string{
+		"pid": "1", "mgr_root": "closed", "mgr_environ": "closed",
+		"sibling": "closed", "state": "closed", "apptmp": "closed",
+		"release": "writable", "root": "readonly", "hotserve_lib": "closed", "mgr_socket": "closed",
+		"cgroup": "readonly", "tmp": "writable", "home": shared, "xdg_runtime": "unset",
+	} {
+		if got[k] != want {
+			t.Errorf("%s = %q, want %q", k, got[k], want)
+		}
+	}
+	if got["uidmap"] == "4294967295" {
+		t.Error("no user namespace: uid_map covers the whole id space")
+	}
+	if n, _ := strconv.Atoi(got["nprocs"]); n == 0 || n > 8 {
+		t.Errorf("nprocs = %q, want a handful (own PID namespace)", got["nprocs"])
+	}
+	unit := h.state().Unit
+	props := run(t, "systemctl", "--user", "show", unit, "-p", "PrivatePIDs,PrivateUsers,ProtectSystem,ProtectControlGroups,TemporaryFileSystem,BindPaths")
+	for _, want := range []string{"PrivatePIDs=yes", "PrivateUsers=yes", "ProtectSystem=strict", "ProtectControlGroups=yes", "TemporaryFileSystem=" + root + ":ro"} {
+		if !strings.Contains(props, want) {
+			t.Errorf("unit lacks %s:\n%s", want, props)
+		}
+	}
+	if h.state().Sandbox != "full" {
+		t.Errorf("handle state sandbox = %q", h.state().Sandbox)
+	}
+	if err := r.Stop(h, 2*time.Second); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+}
+
+// run executes a command and returns its stdout, failing the test on
+// error.
+func run(t *testing.T, name string, args ...string) string {
+	t.Helper()
+	out, err := exec.Command(name, args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s %v: %v\n%s", name, args, err, out)
+	}
+	return string(out)
+}

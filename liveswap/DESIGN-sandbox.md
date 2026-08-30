@@ -1,21 +1,21 @@
 # DESIGN — per-app sandboxing (M8)
 
-Status: behaviour spec current, mechanism superseded (2026-08-29).
-This document was the implementation brief for sandboxing deployed
-apps with bubblewrap. The mechanism is now systemd's own per-unit
-sandboxing on the user-manager runner (`PrivatePIDs=`,
-`ProtectSystem=strict`, `PrivateTmp=`, `InaccessiblePaths=`,
-`ProtectControlGroups=`, `SystemCallFilter=@system-service`),
-to be probe-gated on the manager being systemd ≥ 256 (Debian 13,
-Ubuntu 26.04); Debian 12 and Ubuntu 24.04 will run floor-only with a
-WARN — see
+Status: shipped (2026-08-30, #35 phase 1) as systemd's own per-unit
+sandboxing on the user-manager runner, in two probe-gated tiers —
+*filesystem* (user namespace + the mount/device/cgroup/seccomp/caps
+set; systemd ≥ 252, every cell of the support matrix) and *full*
+(filesystem + PID namespace; systemd ≥ 256: Debian 13, Ubuntu 26.04).
+Resource caps are phase 2. This document was the implementation brief
+for bubblewrap; what remains normative is the threat model, the
+behaviour specification (amended below where the measured mechanism
+differs), the config surface, the rollout/upgrade semantics and the
+testing criteria. The bubblewrap mechanics ("Spawn path", "Signal
+trap", "Probe and fallback ladder", "Packaging") are historical. The
+implementation is `liveswap/sandbox.go` (tiers, policy, spec, probe)
+and `sandboxProperties` in `liveswap/systemd_dbus.go`; the measured
+basis is the 2026-08-30 spike comment on #35 and
 [DESIGN-threat-model.md](../DESIGN-threat-model.md), "The shared-UID
-rule" and the option-C status note. What remains normative here: the
-threat model, the behaviour specification, the config surface, the
-rollout/upgrade semantics and the testing criteria — all written
-backend-agnostic on purpose. The bubblewrap mechanics ("Spawn path",
-"Signal trap", "Probe and fallback ladder", "Packaging") are
-historical; issue #35 carries the systemd-property equivalents.
+rule".
 
 ## Why this feature exists
 
@@ -57,22 +57,25 @@ requirement below stands as the contract the sandbox path must keep.
 
 ## Behavior specification (normative)
 
-- Sandboxing MUST default to on (`sandbox auto`) when the user manager
-  is systemd ≥ 256 and the kernel permits the namespaces, and MUST be
-  per-app configurable:
-  `auto` (sandbox if available, else run bare with a prominent WARN at
-  provision and at every spawn), `require` (provision fails if the
-  sandbox cannot engage), `off`.
+- Sandboxing MUST default to on (`sandbox auto`): the best tier the
+  user manager and kernel deliver, probed at start by running a
+  throwaway unit and checking the namespaces from inside (the manager
+  silently ignores `PrivatePIDs=` on a kernel without PID namespaces,
+  so accepting the property proves nothing). It MUST be configurable
+  globally and per app: `auto` (best tier, with a prominent WARN at
+  start and at every spawn that runs below *full*), `require` (start
+  fails unless the *full* tier is available — a weaker tier accepted
+  silently is the "looks configured, quietly weaker" trap), `off`.
 - The sandboxed filesystem view MUST contain, at their REAL host paths
   (no remapping — `current` symlinks, state paths and operator
   debugging all assume real paths):
   - the app's release dir (rw), shared dir (rw), and the release
     being started;
-  - the app's own tmp dir (`appDirs.tmp`) bound as `/tmp` (rw,
-    `BindPaths=`): per-app private, on the app's own disk, and
-    surviving unit restarts like today. (`PrivateTmp=` is the
-    alternative: a private directory under the host's `/tmp`, on
-    whatever backs that mount, removed when the unit stops.)
+  - a private `/tmp` (`PrivateTmp=`: a directory under the host's
+    `/tmp`, removed when the unit stops). *Amended 2026-08-30:* the
+    app's own `tmp/` (`appDirs.tmp`) is NOT bound — it is the upload
+    staging dir, and a running instance that could see it could
+    rewrite the next version's tarball before extraction.
   - read-only system paths (`ProtectSystem=strict`: `/usr`, `/etc`,
     `/boot`, `/efi` read-only, everything else as declared), plus a
     fresh `/proc` for the unit's PID namespace (`PrivatePIDs=`) and a
@@ -81,10 +84,16 @@ requirement below stands as the contract the sandbox path must keep.
 - The view MUST NOT contain: other apps' directories, `/var/lib`
   outside the app's own subtree (TLS keys live there), `/run/hotserve`
   (admin socket), `/run/user/<uid>` (the user manager's private
-  socket and session bus), and `/etc/hotserve` (env files; apps never
-  legitimately read their env *file*, they receive env *variables*) —
-  all via `InaccessiblePaths=`, with `ReadWritePaths=` re-opening only
-  the app's own release and shared dirs. `/sys/fs/cgroup` MUST be
+  socket and session bus; `ProtectHome=tmpfs` covers it, a tmpfs so
+  an `extra_path` under `/home` can still be bound in), and
+  `/etc/hotserve` (env files; apps never legitimately read their env
+  *file*, they receive env *variables*). *Amended 2026-08-30:* the
+  liveswap root is replaced by an empty read-only tmpfs
+  (`TemporaryFileSystem=<root>:ro`) with the app's release and shared
+  dirs bound back (`BindPaths=`); `ReadWritePaths=` nested under an
+  `InaccessiblePaths=` parent does not re-open the child (measured),
+  so that idiom is not used. hotserve's own paths are
+  `InaccessiblePaths=` with the `-` prefix. `/sys/fs/cgroup` MUST be
   read-only (`ProtectControlGroups=`): the delegated subtree is owned
   by the app's own UID, so resource caps are otherwise rewritable.
 - `/run/systemd/resolve` MUST stay reachable (read-only) when it
@@ -106,12 +115,19 @@ requirement below stands as the contract the sandbox path must keep.
   writable in-sandbox path (the app's shared dir, or tmp). Inherited
   they point at `/var/lib/hotserve` — outside the view — and every
   runtime that touches `$HOME` (npm, corepack, pip) would ENOENT.
-- The app MUST run inside a new PID namespace (`PrivatePIDs=yes`,
-  systemd ≥ 256): the supervisor, the user manager and every sibling
-  are invisible and unsignalable, and systemd's in-namespace stub
-  init reaps orphaned grandchildren. This is the load-bearing
-  property — see DESIGN-threat-model.md, "The shared-UID rule": under
-  a shared UID, every mount restriction above is void without it.
+- The app MUST run inside a new user namespace (`PrivateUsers=yes`,
+  set explicitly — systemd 252 does not imply it): this is the
+  load-bearing property for the filesystem rows — see
+  DESIGN-threat-model.md, "The shared-UID rule": under a shared UID,
+  every mount restriction above is void without a namespace the
+  kernel's ptrace check honours, and the user namespace is the one it
+  does, on every cell of the matrix. On systemd ≥ 256 the app MUST
+  additionally run inside a new PID namespace (`PrivatePIDs=yes`, the
+  *full* tier): the supervisor, the user manager and every sibling
+  become invisible and unsignalable, and systemd's in-namespace stub
+  init reaps orphaned grandchildren. Below 256 signals and process
+  visibility remain open (DoS class) and MUST be warned about at
+  every launch.
 - The unit's cgroup is the lifetime boundary (`KillMode=control-group`,
   already in force for every unit): nothing outlives the unit, which
   is what `--die-with-parent` provided under bubblewrap. A unit has no
@@ -119,7 +135,8 @@ requirement below stands as the contract the sandbox path must keep.
   (CVE-2017-5226 class).
 - Privilege and system-call surface: `NoNewPrivileges=yes` (already
   in force), `CapabilityBoundingSet=` (empty),
-  `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX`,
+  `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK` (netlink
+  read-only for `getifaddrs()`, which runtimes call at startup),
   `ProtectKernelTunables=`, and `SystemCallFilter=@system-service` —
   systemd's curated allowlist, adopted wholesale, which is the bar the
   non-goals below set for any seccomp filter.
@@ -133,9 +150,9 @@ requirement below stands as the contract the sandbox path must keep.
   the backstop (killing the in-namespace init kills everything in the
   namespace; no survivor is possible). The existing escalation tests
   define the contract.
-- The status endpoint MUST report whether the running instance is
-  sandboxed (`"sandboxed": true|false`) — observability for operators
-  and the assertion hook for smoke tests.
+- The status endpoint MUST report the tier the running instance has
+  (`"sandbox": "full" | "filesystem" | "none"`) — observability for
+  operators and the assertion hook for smoke tests.
 - When a deploy fails its health gate and the app is sandboxed, the
   webhook error body SHOULD hint at `extra_path` (the "file/socket
   exists on the host but not in the sandbox" ENOENT is the one support

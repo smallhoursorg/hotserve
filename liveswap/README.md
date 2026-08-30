@@ -186,6 +186,8 @@ resolved at config load.
 | `watchdog_window` | `10m` | Sliding window for the restart budget |
 | `keep` | `5` | Release dirs retained (GC after success). The running version is always kept, so this can be `keep+1` after rolling back to an old release |
 | `max_artifact_size` | `100MB` | Download cap; decompressed cap is 10× |
+| `sandbox` | `auto` | Per-unit sandbox policy: `auto` (best tier the host delivers, warning when it is not `full`), `require` (`full` or refuse to start — see the hazard under [Sandbox](#sandbox)), `off`. Global default, per-app override |
+| `extra_path <path> [rw]` | — | Host path the sandboxed app may see besides its own dirs; read-only unless `rw`. Repeatable. The recipe for a same-box database socket dir (`/run/postgresql`) |
 
 ## Watchdog
 
@@ -236,6 +238,113 @@ Health probes also no longer follow redirects (a 3xx now reads as
 unhealthy, for the deploy gate too): if your health endpoint
 redirects — a `/health` → `/health/` trailing slash is the classic —
 point `health_path` at the final path.
+
+## Sandbox
+
+Every instance runs inside systemd's own per-unit sandbox, in one of
+two tiers depending on the host's systemd:
+
+| | `filesystem` (systemd 252–255: Debian 12, Ubuntu 24.04) | `full` (systemd ≥ 256: Debian 13, Ubuntu 26.04) |
+|---|---|---|
+| User namespace (`PrivateUsers=`) | ● | ● |
+| PID namespace (`PrivatePIDs=`) | — | ● |
+| Read-only system; liveswap root replaced by an empty tmpfs; only the app's release and `shared/` bound back writable | ● | ● |
+| `/var/lib/hotserve` (TLS keys), `/run/hotserve` (admin socket), `/etc/hotserve`, `/run/user/<uid>` (manager socket) inaccessible | ● | ● |
+| Private `/tmp`, minimal `/dev`, read-only cgroupfs, no capabilities, `@system-service` syscall filter, `AF_INET`/`AF_INET6`/`AF_UNIX`/`AF_NETLINK` only, no nested namespaces | ● | ● |
+| Supervisor, user manager and siblings **invisible and unsignalable** | — (they stay visible and can be signalled: a DoS residual, not data access) | ● |
+
+What the app sees: its release dir (working directory, writable), its
+`shared/` dir (writable; `HOME` points there), a private `/tmp`, the
+read-only system, and whatever `extra_path` declares. It does not see
+`state.json`, `tmp/` (the upload staging dir), other releases, or any
+other app. The network namespace is shared by design — the app binds
+`127.0.0.1:$PORT` as before, and sibling ports remain reachable.
+
+Both tiers close the routes the threat model ranks first: reading the
+supervisor's environment or walking the host through
+`/proc/<pid>/root` (the user namespace is what closes them — the
+kernel refuses `ptrace`-class access across user namespaces even for
+the same uid), the admin socket, the TLS keys, sibling files. The
+`full` tier additionally removes process visibility and signals.
+
+**Policy and rollout.** `sandbox auto` (the default) applies the best
+tier the host delivers, and logs a warning at start and at every
+launch that runs below `full`, naming what stays open. The tier is
+probed once per start by running a throwaway unit and checking the
+namespaces from inside (`journalctl -t hotserve-sandbox-probe` shows
+what it saw). The tier an instance got is recorded in `state.json`
+and reported by the status endpoint (`"sandbox": "full" | "filesystem"
+| "none"`).
+
+Sandboxing engages on each app's **next deploy** — the path with a
+fallback (a version that cannot live in its sandbox fails the health
+gate while the old one keeps serving) — never on a supervisor
+restart, a boot recovery or a watchdog restart: those reproduce the
+tier the instance was recorded with, so upgrading hotserve does not
+turn into a fleet-wide, no-fallback restart into sandboxes. The
+supported rollout: upgrade, confirm apps healthy; declare each app's
+`extra_path` needs; deploy each app and watch `"sandbox"` in its
+status; only then, optionally, `sandbox require`.
+
+**`require` is the one setting that can keep the whole server from
+starting**: it fails the start (admin socket and proxy included) when
+the host cannot deliver the `full` tier — a manager below 256, or a
+kernel/LSM that refuses the namespaces. Use it only once `auto` has
+been proven on that host.
+
+**When an app breaks under the sandbox** the symptom is usually an
+`ENOENT` for something that exists on the host: a database's unix
+socket, a data directory outside the app's own. Declare it:
+
+```caddyfile
+app blog {
+	command node server.js
+	extra_path /run/postgresql        # same-box Postgres over its socket (ro suffices)
+	extra_path /var/cache/blog rw
+}
+```
+
+Three kinds of path are refused, each with an error saying which:
+inside the **liveswap root** (the app already sees its own release and
+`shared/`; everything else there is another app), inside **hotserve's
+own** directories and files (TLS keys, the admin socket, any app's
+`env_file` — the set is derived from what this hotserve actually uses,
+not from the packaged paths), and inside anything the **sandbox itself
+closes**: `/home`, `/root`, `/run/user`, `/tmp`, `/var/tmp`, `/dev`,
+`/sys`, `/proc`. That last group is a hard boundary, not a
+convenience: a bind nests *into* the overmount the sandbox installed,
+so `extra_path /run/user/<uid>` would return the user manager's
+private socket and let the app start an unsandboxed unit of its own —
+read-only included, since connecting to a unix socket is not a
+filesystem write.
+
+`sandbox off` per app is the escape hatch while you find a missing
+path — and the answer for the few workloads the sandbox cannot host at
+all: anything that creates its own namespaces (Chromium's sandbox
+under Puppeteer, nested containers) or needs devices beyond
+`/dev/null`-class ones.
+
+**Hosts.** The sandbox is built on unprivileged user namespaces.
+Ubuntu 24.04+ refuses those to unconfined processes
+(`kernel.apparmor_restrict_unprivileged_userns=1`), which would leave
+`systemd --user` unable to build the sandbox; the package therefore
+ships an AppArmor profile, `hotserve-user-manager`, that grants
+`userns` to hotserve's user manager only: the package starts
+`user@<uid>.service` for the hotserve user through
+`/usr/libexec/hotserve/user-manager` (an `ExecStart=` override in the
+drop-in postinstall writes) and the profile attaches to that path —
+never to PID 1 or other users' managers; the app units carry
+`RestrictNamespaces=`, so a sandboxed app still cannot create
+namespaces. (Attachment by path rather than `AppArmorProfile=`: newer
+AppArmor turns a profile change requested by an unprivileged unit into
+a stack with `unconfined`, which stays restricted.) Raw-binary
+installs on Ubuntu need the same three pieces — the wrapper, the
+profile in `/etc/apparmor.d/` (`apparmor_parser -r` it), and the
+`ExecStart=` override — or, bluntly, that sysctl set to 0 host-wide. Debian's kernel has no such restriction. A host where the
+probe still finds no usable user namespace runs apps with
+`"sandbox": "none"` and a warning (the non-dumpable supervisor and
+`NoNewPrivileges` remain); `journalctl -t hotserve-sandbox-probe`
+says why.
 
 ## Deploy authentication (`deploy_trust`)
 
@@ -501,10 +610,13 @@ failure the previous version never stopped serving.
   releases/v1.4.2/        one dir per deployed version
   releases/v1.4.1/
   current -> releases/v1.4.2   (convenience symlink; state.json is truth)
-  shared/                 persistent data, survives deploys
-  state.json              current version + process handle
+  shared/                 persistent data, survives deploys (the app's HOME)
+  state.json              current version + process handle + sandbox tier
   tmp/                    download staging
 ```
+
+Inside its sandbox an instance sees only `releases/<its version>/`
+and `shared/` of this tree (see [Sandbox](#sandbox)).
 
 ## Semantics and trade-offs (read this)
 
@@ -530,7 +642,8 @@ failure the previous version never stopped serving.
   watchdog is the only restarter — and stopping a version kills its
   whole cgroup, so worker trees never outlive it.
 - **Changed app definitions apply on the next deploy**, never by
-  restarting a running app mid-reload.
+  restarting a running app mid-reload — the sandbox tier included: a
+  relaunch reproduces the tier the instance was recorded with.
 - **No post-promote *auto*-revert.** Once traffic cuts over, the deploy
   is done; if the new version misbehaves later, roll back explicitly
   with `?rollback=<version>` (its release dir is still on disk — that's

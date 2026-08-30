@@ -97,12 +97,17 @@ type systemdConn interface {
 	ResetFailedUnit(ctx context.Context, name string) error
 	// ListUnits returns the loaded units whose names match the glob.
 	ListUnits(ctx context.Context, pattern string) ([]unitStatus, error)
+	// ManagerVersion is the manager's major systemd version (e.g. 257),
+	// or 0 when it could not be read. It gates which sandbox properties
+	// exist to be set (PrivatePIDs= from 256).
+	ManagerVersion() int
 }
 
 // unitSpec is a transient service unit as the runner wants it. The
 // D-Bus client turns it into properties; the fixed hardening set
 // (Restart=no, KillMode=control-group, NoNewPrivileges) is applied by
 // the client to every unit and is not configurable here on purpose.
+// Sandbox adds the per-unit isolation set (sandbox.go); nil = none.
 type unitSpec struct {
 	Name             string
 	Description      string
@@ -112,6 +117,7 @@ type unitSpec struct {
 	Environment      []string
 	Oneshot          bool // Type=oneshot (pre_start) instead of simple
 	StopTimeout      time.Duration
+	Sandbox          *sandboxSpec
 }
 
 // unitStatus is a snapshot of one unit as the manager reports it.
@@ -220,12 +226,19 @@ type systemdHandle struct {
 	// when the handle was made (the start spec's grace, or the value
 	// read at reattach) — the fallback when a fresh read fails.
 	stopTimeout time.Duration
-	done        chan struct{}
-	exit        atomic.Pointer[unitStatus] // final status, set before done closes
+	// sandbox is the tier the unit was started with (or recorded with,
+	// at reattach) — persisted so a relaunch reproduces it.
+	sandbox sandboxTier
+	done    chan struct{}
+	exit    atomic.Pointer[unitStatus] // final status, set before done closes
 }
 
 func (h *systemdHandle) state() handleState {
-	return handleState{PID: int(h.pid.Load()), StartedAt: h.startedAt, Unit: h.unit}
+	st := handleState{PID: int(h.pid.Load()), StartedAt: h.startedAt, Unit: h.unit}
+	if h.sandbox != sandboxNone {
+		st.Sandbox = h.sandbox.String()
+	}
+	return st
 }
 
 // Unit naming: hotserve-<app>.<version>.<nonce>[.prestart].service.
@@ -384,7 +397,16 @@ func (r *systemdRunner) unitFor(spec startSpec, oneshot bool) (unitSpec, error) 
 		Environment:      env,
 		Oneshot:          oneshot,
 		StopTimeout:      grace,
+		Sandbox:          spec.sandbox,
 	}, nil
+}
+
+// sandboxTierOf is the tier a start spec asks for (none when nil).
+func sandboxTierOf(spec startSpec) sandboxTier {
+	if spec.sandbox == nil {
+		return sandboxNone
+	}
+	return spec.sandbox.tier
 }
 
 // Start creates the unit; the start job of a simple service completes
@@ -408,14 +430,17 @@ func (r *systemdRunner) Start(spec startSpec) (handle, error) {
 		st := r.reapFailed(ctx, u.Name)
 		return nil, fmt.Errorf("unit %s: start job %s (%s)", u.Name, res, st.exitString())
 	}
-	return r.adopt(ctx, u.Name, time.Now(), u.StopTimeout), nil
+	return r.adopt(ctx, u.Name, time.Now(), u.StopTimeout, sandboxTierOf(spec)), nil
 }
 
 // adopt builds a watched handle for a unit known to be running.
-func (r *systemdRunner) adopt(ctx context.Context, unit string, startedAt time.Time, stopTimeout time.Duration) *systemdHandle {
-	h := &systemdHandle{unit: unit, startedAt: startedAt, stopTimeout: stopTimeout, done: make(chan struct{})}
+func (r *systemdRunner) adopt(ctx context.Context, unit string, startedAt time.Time, stopTimeout time.Duration, tier sandboxTier) *systemdHandle {
+	h := &systemdHandle{unit: unit, startedAt: startedAt, stopTimeout: stopTimeout, sandbox: tier, done: make(chan struct{})}
 	if st, err := r.conn.UnitStatus(ctx, unit); err == nil {
 		h.pid.Store(int64(st.MainPID))
+		if tier == sandboxFull {
+			r.settleMainPID(ctx, h, st.MainPID)
+		}
 	} else {
 		r.log().Warn("unit started but its main PID could not be read yet", zap.String("unit", unit), zap.Error(err))
 	}
@@ -423,6 +448,39 @@ func (r *systemdRunner) adopt(ctx context.Context, unit string, startedAt time.T
 	go r.watch(h)
 	return h
 }
+
+// settleMainPID waits, briefly, for the MainPID of a unit in its own
+// PID namespace to be the app's: with PrivatePIDs= the manager first
+// reports the intermediate it forked to set the namespace up, and
+// switches to that intermediate's child — the app — a few
+// milliseconds later. A pid read in between is stale (and dead almost
+// at once); status, state.json and the watchdog all read the handle,
+// so the switch is awaited here rather than at the next watcher poll.
+// Bounded: if the manager never changes its mind the first value
+// stands and the watcher keeps following it.
+func (r *systemdRunner) settleMainPID(ctx context.Context, h *systemdHandle, first int) {
+	deadline := time.Now().Add(mainPIDSettle)
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(mainPIDSettleStep):
+		}
+		st, err := r.conn.UnitStatus(ctx, h.unit)
+		if err != nil || !st.running() {
+			return
+		}
+		if st.MainPID != 0 && st.MainPID != first {
+			h.pid.Store(int64(st.MainPID))
+			return
+		}
+	}
+}
+
+const (
+	mainPIDSettle     = 500 * time.Millisecond
+	mainPIDSettleStep = 10 * time.Millisecond
+)
 
 // reconcileStart settles an ambiguous start: the unit is observed
 // running (adopted — the deploy proceeds), observed gone (a plain
@@ -438,7 +496,11 @@ func (r *systemdRunner) reconcileStart(u unitSpec, cause error) (handle, error) 
 		r.log().Warn("start reported an error but the unit is running; adopting it", zap.String("unit", unit), zap.Error(cause))
 		ctx, cancel := context.WithTimeout(r.ctx, pollTimeout)
 		defer cancel()
-		return r.adopt(ctx, unit, time.Now(), u.StopTimeout), nil
+		tier := sandboxNone
+		if u.Sandbox != nil {
+			tier = u.Sandbox.tier
+		}
+		return r.adopt(ctx, unit, time.Now(), u.StopTimeout, tier), nil
 	case err == nil:
 		if st.loaded() {
 			ctx, cancel := context.WithTimeout(r.ctx, pollTimeout)
@@ -589,7 +651,7 @@ func (r *systemdRunner) Reattach(st handleState) (handle, bool, error) {
 		return nil, false, fmt.Errorf("reading recorded unit %s: %w", st.Unit, err)
 	}
 	if us.running() {
-		h := &systemdHandle{unit: st.Unit, startedAt: st.StartedAt, stopTimeout: us.StopTimeout, done: make(chan struct{})}
+		h := &systemdHandle{unit: st.Unit, startedAt: st.StartedAt, stopTimeout: us.StopTimeout, sandbox: parseSandboxTier(st.Sandbox), done: make(chan struct{})}
 		h.pid.Store(int64(us.MainPID))
 		go r.watch(h)
 		return h, true, nil
@@ -707,8 +769,13 @@ func (r *systemdRunner) watch(h *systemdHandle) {
 			r.log().Info("unit state readable again", zap.String("unit", h.unit))
 		}
 		if st.running() {
-			// A PID read that failed right after start is repaired here.
-			if h.pid.Load() == 0 && st.MainPID != 0 {
+			// The handle follows the unit's MainPID: a read that failed
+			// right after start is repaired here, and so is the pid of a
+			// sandboxed unit — with PrivatePIDs= the manager forks an
+			// intermediate that sets the namespace up and then reports
+			// its child (the app, "supervising a process which is not
+			// our child" in the journal) as MainPID a moment later.
+			if st.MainPID != 0 && int64(st.MainPID) != h.pid.Load() {
 				h.pid.Store(int64(st.MainPID))
 			}
 			continue

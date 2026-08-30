@@ -16,7 +16,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # dbus: logind; procps + curl: the in-container systemd suite.
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends \
-		systemd systemd-sysv dbus libpam-systemd procps curl ca-certificates \
+		systemd systemd-sysv dbus libpam-systemd procps curl ca-certificates apparmor \
 	&& rm -rf /var/lib/apt/lists/*
 RUN systemctl mask \
 	systemd-udevd.service \
@@ -44,13 +44,16 @@ RUN hotserve list-modules | grep -qx liveswap \
 # systemd is not running at build time; postinstall tolerates that
 # (linger-file fallback, daemon-reload/try-restart ignored).
 COPY packaging/hotserve.service /etc/systemd/system/hotserve.service
+COPY packaging/apparmor/hotserve-user-manager /etc/apparmor.d/hotserve-user-manager
+COPY packaging/user-manager.sh /usr/libexec/hotserve/user-manager
 COPY packaging/postinstall.sh /tmp/postinstall.sh
 RUN mkdir -p /var/lib/hotserve /var/lib/liveswap \
 	&& chmod 750 /var/lib/hotserve /var/lib/liveswap \
 	&& sh /tmp/postinstall.sh && rm /tmp/postinstall.sh
 COPY e2e/systemd/e2e.conf /etc/systemd/system/hotserve.service.d/e2e.conf
 COPY e2e/systemd/e2e-token.service /etc/systemd/system/e2e-token.service
-RUN systemctl enable hotserve.service e2e-token.service
+COPY e2e/systemd/e2e-apparmor.service /etc/systemd/system/e2e-apparmor.service
+RUN systemctl enable hotserve.service e2e-token.service e2e-apparmor.service
 COPY e2e/Caddyfile /etc/hotserve/Caddyfile
 COPY e2e/mint-token.sh /usr/local/bin/mint-token.sh
 RUN chmod +x /usr/local/bin/mint-token.sh
