@@ -266,6 +266,14 @@ sandbox=$(printf '%s' "$status" | sed -n 's/.*"sandbox":"\([a-z]*\)".*/\1/p')
 # package's whole answer to Ubuntu 24.04+ — and the tier below proves
 # the profile actually lifts the restriction.
 if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = "1" ]; then
+	# Diagnostics first: which link of the chain (securityfs → parser
+	# → loaded profile → AppArmorProfile= on the unit) is missing shows
+	# up here rather than as a bare label mismatch.
+	echo "apparmor: enabled=$(cat /sys/module/apparmor/parameters/enabled 2>&1); securityfs=$(ls -d /sys/kernel/security/apparmor 2>&1); parser=$(command -v apparmor_parser || echo none)"
+	echo "apparmor: loaded profiles matching hotserve: $(grep -c hotserve /sys/kernel/security/apparmor/profiles 2>&1)"
+	echo "apparmor: parser says: $(apparmor_parser -r /etc/apparmor.d/hotserve-user-manager 2>&1 | head -c 300)"
+	echo "apparmor: unit property: $(systemctl show -p AppArmorProfile --value "user@$uid.service")"
+	journalctl --no-pager -b | grep -i "apparmor" | tail -5 || true
 	mgr_pid=$(systemctl show -p MainPID --value "user@$uid.service")
 	mgr_label=$(cat "/proc/$mgr_pid/attr/apparmor/current" 2>/dev/null || cat "/proc/$mgr_pid/attr/current" 2>/dev/null)
 	case "$mgr_label" in
