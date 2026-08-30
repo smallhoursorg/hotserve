@@ -994,3 +994,32 @@ func TestSystemdRunnerStartSettlesMainPIDForFullTier(t *testing.T) {
 		t.Fatalf("full-tier start returned the intermediate pid %d, want the settled 4243", h.state().PID)
 	}
 }
+
+// TestProbeUnitsAreNotAppUnits: the capability probe's unit must sit
+// outside the app-name grammar, or a concurrent sweepUnknownApps would
+// stop it mid-probe — or an app legitimately called "sandbox-probe"
+// would collide with it — downgrading the tier, or failing `sandbox
+// require`, for no reason at all.
+func TestProbeUnitsAreNotAppUnits(t *testing.T) {
+	name, err := unitName(startSpec{app: "sandbox-probe", version: "full", probe: true}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(name, unitPrefix) || !strings.HasSuffix(name, ".service") {
+		t.Fatalf("probe unit name %q is not a hotserve unit", name)
+	}
+	if app, ok := unitApp(name); ok {
+		t.Fatalf("probe unit %q parses as app %q; a sweep would stop it", name, app)
+	}
+	// And an app really named sandbox-probe gets its own, distinct units.
+	appUnit, err := unitName(startSpec{app: "sandbox-probe", version: "v1"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := unitApp(appUnit); !ok || got != "sandbox-probe" {
+		t.Fatalf("a configured app must still parse: %q -> %q %v", appUnit, got, ok)
+	}
+	if strings.HasPrefix(appUnit, unitPrefix+"sandboxprobe_") {
+		t.Fatal("a configured app collides with the probe namespace")
+	}
+}

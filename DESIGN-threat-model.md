@@ -381,6 +381,20 @@ consequences, and they decide the mechanism:
    stands only for apps running with `sandbox off` or on a host where
    the probe found no usable user namespace — accepted and stated
    here rather than in the README's one-line claim.
+*Residual the sandbox cannot close by itself:* every path a unit binds
+is checked by name, and between that check and the manager following
+it, any process sharing the hotserve UID can swap what it points at.
+During the documented bare-to-sandbox rollout the old bare instance is
+still running — a deploy stops it only once the new one is healthy —
+so that process can be the very app being sandboxed. hotserve resolves
+and re-checks each bind source at unit creation, the last moment
+before the manager acts, which closes the planted-symlink case and
+leaves only this race; no pathname check can close the race itself
+while the supervisor and its apps are the same principal. A sandboxed
+app cannot reach the mount points at all, so the exposure is bounded
+to apps already running unsandboxed on a box this model treats as one
+trust domain. Per-app UIDs are what closes it.
+
 3. **Resource caps need a read-only cgroupfs inside the sandbox.** The
    cgroup subtree under `user@<uid>.service` is delegated to — owned
    by — the hotserve UID, so `MemoryMax=`/`TasksMax=` on a user-manager

@@ -258,12 +258,40 @@ type sandboxSpec struct {
 // resolve — an extra_path for a socket directory that appears later —
 // are left as written, having already passed the same checks
 // lexically at config load.
+//
+// Residual, stated rather than papered over: this is a check on a
+// pathname, and between it and the manager following that pathname a
+// process sharing the hotserve UID can swap what it points at. During
+// the documented bare-to-sandbox rollout the old bare instance is
+// still running (a deploy stops it only once the new one is healthy),
+// so that process may be the very app being sandboxed. Nothing a
+// supervisor can do to a pathname closes this while it and its apps
+// share a UID — the check has to hold an object, or the app has to
+// stop being the same principal. It is the shared-UID rule again (see
+// DESIGN-threat-model.md), and per-app UIDs are what closes it; a
+// sandboxed app cannot reach the mount points at all, so the exposure
+// is bounded to apps that are already running unsandboxed on a box
+// the threat model treats as one trust domain until then.
 func (s *sandboxSpec) resolveBindSources(hidden []string) error {
+	// Compare canonical against canonical: a resolved bind source is
+	// canonical, so a lexical root would miss a sibling reached through
+	// a link when the root itself is one (/srv/liveswap ->
+	// /mnt/liveswap: a planted shared -> /mnt/liveswap/shop/shared
+	// resolves *outside* the lexical root and the sibling check would
+	// never fire). Unresolvable falls back to the lexical value.
+	rootC, appC := s.root, s.appDir
+	if c, err := filepath.EvalSymlinks(s.root); err == nil {
+		rootC = c
+	}
+	if c, err := filepath.EvalSymlinks(s.appDir); err == nil {
+		appC = c
+	}
 	own := func(p, resolved string) error {
 		// A mandatory bind may resolve out of the root (another disk),
 		// but if it stays inside the root it must stay inside this
 		// app's own directory: anything else is a sibling's data.
-		if pathWithin(resolved, s.root) && !pathWithin(resolved, s.appDir) {
+		if (pathWithin(resolved, s.root) || pathWithin(resolved, rootC)) &&
+			!pathWithin(resolved, s.appDir) && !pathWithin(resolved, appC) {
 			return fmt.Errorf("%q resolves to %q, which belongs to another app under %s", p, resolved, s.root)
 		}
 		return closedOrHidden(resolved, hidden)
@@ -404,6 +432,7 @@ func probeSandboxCapability(r runner, managerVersion int, root string, hidden []
 			env:     []string{"PATH=/usr/bin:/bin"},
 			grace:   5 * time.Second,
 			sandbox: probeSandboxSpec(tier, root, hidden),
+			probe:   true,
 		})
 		if err != nil {
 			reasons = append(reasons, fmt.Sprintf("%s tier: %v", tier, err))

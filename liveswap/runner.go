@@ -84,6 +84,11 @@ type startSpec struct {
 	// capability, or the disposition recorded for a relaunch); the
 	// runner only renders it.
 	sandbox *sandboxSpec
+	// probe marks the throwaway unit the sandbox capability probe runs.
+	// It is named outside the app grammar (see unitName) so no sweep
+	// can mistake it for an app's unit — and so a configured app can
+	// never collide with it.
+	probe bool
 }
 
 // handle identifies a running instance to its runner.

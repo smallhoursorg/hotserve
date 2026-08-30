@@ -261,12 +261,22 @@ func unitName(spec startSpec, oneshot bool) (string, error) {
 	// The webhook validates both before a deploy gets this far; the
 	// runner enforces its own precondition anyway ("." and ".." match
 	// the version alphabet but are not versions).
-	if !appNameRe.MatchString(spec.app) || !validVersion(spec.version) {
+	if !spec.probe && (!appNameRe.MatchString(spec.app) || !validVersion(spec.version)) {
 		return "", fmt.Errorf("cannot derive a unit name from app %q version %q", spec.app, spec.version)
 	}
 	var nonce [4]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return "", err
+	}
+	if spec.probe {
+		// Underscores are outside the app-name alphabet, so this name
+		// can never be produced from config and unitNameRe never
+		// matches it: unitApp reports "not an app unit" and every
+		// sweep skips it (a probe named like an app would be stopped
+		// by a concurrent sweepUnknownApps, or collide with an app
+		// actually called "sandbox-probe", downgrading the tier or
+		// failing `sandbox require` for no reason).
+		return unitPrefix + "sandboxprobe_" + hex.EncodeToString(nonce[:]) + ".service", nil
 	}
 	name := unitPrefix + spec.app + "." + spec.version + "." + hex.EncodeToString(nonce[:])
 	if oneshot {
