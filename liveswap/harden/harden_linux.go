@@ -4,12 +4,19 @@
 // early as Go allows. It is a leaf package on purpose: it depends on
 // syscall alone, and Go (1.21+) initializes packages in import-path
 // order among those whose dependencies are ready, so this init runs
-// right after syscall's — before os, fmt, Caddy and every other
-// dependency of a binary that imports liveswap. Measured on hotserve
-// with GODEBUG=inittrace=1: the 17th of 460 initializers, immediately
-// after syscall (16th) and before os (29th); TestInitRunsBeforeOS pins
-// the ordering. Keep this package free of imports beyond syscall — a
-// single fmt would move it behind the whole os/fmt dependency graph.
+// right after syscall's — before os, fmt, Caddy and every package
+// that depends on any of them, which is every package that does real
+// work. What can still precede it: packages that depend on nothing
+// beyond syscall's own closure and whose import path sorts before
+// github.com/smallhoursorg — leaf tables and the like, which cannot
+// read /proc without os. Measured on hotserve with
+// GODEBUG=inittrace=1: the 17th of 460 initializers, immediately after
+// syscall (16th) and before os (29th), preceded by two such leaves (a
+// cel-go operator table, a pgx buffer pool); an xcaddy build with
+// other modules may add leaves of that kind, never os-dependent ones.
+// TestInitRunsBeforeOS pins syscall < harden < os for whatever binary
+// runs it. Keep this package free of imports beyond syscall — a single
+// fmt would move it behind the whole os/fmt dependency graph.
 package harden
 
 import "syscall"
