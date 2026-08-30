@@ -58,10 +58,16 @@ contents:
     dst: /usr/share/hotserve/apparmor/hotserve-user-manager
   # The wrapper the profile attaches to; user@<uid>.service for the
   # hotserve user is started through it (postinstall drop-in).
+  # NOT world-executable: the AppArmor profile attaches to this path,
+  # so anyone able to execute it would enter a profile granting
+  # `userns` and get back the unprivileged user namespaces Ubuntu
+  # restricts host-wide. Shipped 0750 root:root and regrouped to
+  # hotserve by postinstall, once that group exists — dpkg unpacks
+  # before the account is created.
   - src: packaging/user-manager.sh
     dst: /usr/libexec/hotserve/user-manager
     file_info:
-      mode: 0755
+      mode: 0750
   - dst: /var/lib/hotserve
     type: dir
     file_info:

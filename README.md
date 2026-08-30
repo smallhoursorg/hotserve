@@ -140,11 +140,16 @@ an on-disk release. Full details, CI snippets, and every option:
   a unix socket rather than TCP — otherwise "localhost-only" would
   include every app you run, and one SSRF bug in an app could
   reconfigure the server.
-  Apps run as one shared user, but each in its own systemd sandbox:
-  a user namespace, a filesystem view holding only its own release and
-  data, no access to hotserve's keys, sockets or `/proc`, and — on
-  systemd ≥ 256 — its own PID namespace, so apps cannot read, reach or
-  (on the *full* tier) even see each other. What stays shared by
+  Apps run as one shared user, but each in its own systemd sandbox: a
+  user namespace, a read-only system with the app data area masked so
+  it holds only that app's own release and files, hotserve's keys,
+  sockets and env files made inaccessible, its `/proc` entries closed
+  — and, on systemd ≥ 256, its own PID namespace, so siblings are not
+  merely unreadable but invisible. What is *not* claimed: the rest of
+  the host filesystem stays readable (`ProtectSystem=strict` makes it
+  read-only, not absent), and below systemd 256 the host process list
+  is still visible in `/proc` even though other processes' contents
+  are not. What stays shared by
   design is the network namespace: sibling `127.0.0.1` ports are
   reachable, and on older systemd same-UID processes can still be
   signalled. Details and the rollout rules:

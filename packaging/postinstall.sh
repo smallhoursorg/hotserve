@@ -15,6 +15,15 @@ if ! uid=$(id -u hotserve 2>/dev/null); then
 	exit 1
 fi
 chown hotserve:hotserve /var/lib/hotserve /var/lib/liveswap
+# The user-manager wrapper is the path the AppArmor profile attaches
+# to, and that profile grants `userns` — so execution must be limited
+# to the account it is for. dpkg unpacked it 0750 root:root before this
+# group existed; give it to the group now. (Re-applied on every
+# upgrade, so a package that shipped it 0755 is corrected here.)
+wrapper=/usr/libexec/hotserve/user-manager
+if [ -f "$wrapper" ]; then
+	chgrp hotserve "$wrapper" && chmod 0750 "$wrapper"
+fi
 if command -v systemctl >/dev/null 2>&1; then
 	# liveswap runs deployed apps as transient units under the hotserve
 	# user's own systemd manager (user@$uid.service), so they outlive

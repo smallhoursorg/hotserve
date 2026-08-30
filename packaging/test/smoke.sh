@@ -55,6 +55,14 @@ apt-get update -qq
 apt-get install -y "$deb"
 
 id hotserve >/dev/null || die "postinstall did not create the hotserve user"
+# The AppArmor profile attaches to the wrapper's path and grants
+# `userns`; anyone who can execute it gets the user namespaces the
+# host restricts, so it must not be executable by other accounts.
+wrapper=/usr/libexec/hotserve/user-manager
+[ -f "$wrapper" ] || die "the user-manager wrapper is missing"
+wmode=$(stat -c '%U:%G %a' "$wrapper")
+[ "$wmode" = "root:hotserve 750" ] \
+	|| die "$wrapper is '$wmode', want 'root:hotserve 750' — a world-executable wrapper would hand its AppArmor userns grant to every local account"
 getent group hotserve >/dev/null || die "postinstall did not create the hotserve group"
 for d in /var/lib/hotserve /var/lib/liveswap; do
 	got=$(stat -c '%U:%G %a' "$d")

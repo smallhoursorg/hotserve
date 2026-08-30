@@ -46,6 +46,8 @@ RUN hotserve list-modules | grep -qx liveswap \
 COPY packaging/hotserve.service /etc/systemd/system/hotserve.service
 COPY packaging/apparmor/hotserve-user-manager /usr/share/hotserve/apparmor/hotserve-user-manager
 COPY packaging/user-manager.sh /usr/libexec/hotserve/user-manager
+# Permissions as the package ships them (postinstall regroups it).
+RUN chmod 0750 /usr/libexec/hotserve/user-manager
 COPY packaging/postinstall.sh /tmp/postinstall.sh
 RUN mkdir -p /var/lib/hotserve /var/lib/liveswap \
 	&& chmod 750 /var/lib/hotserve /var/lib/liveswap \
