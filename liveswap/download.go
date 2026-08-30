@@ -181,10 +181,10 @@ func (rf *releaseFetcher) fetch(ctx context.Context, spec *appSpec, req deployRe
 	// Rollback: the release is already extracted on disk from a prior
 	// deploy — no fetch, no extract, just relaunch it.
 	if req.rollback {
-		releaseDir := spec.dirs.release(req.Version)
+		releaseDir := spec.dirs.release(req.version)
 		if _, err := os.Stat(releaseDir); err != nil {
 			if os.IsNotExist(err) {
-				return "", validationError{fmt.Sprintf("no on-disk release %q to roll back to (it may have been pruned by keep)", req.Version)}
+				return "", validationError{fmt.Sprintf("no on-disk release %q to roll back to (it may have been pruned by keep)", req.version)}
 			}
 			return "", err // a real I/O/permission error is a server failure, not a missing target
 		}
@@ -198,8 +198,8 @@ func (rf *releaseFetcher) fetch(ctx context.Context, spec *appSpec, req deployRe
 		progress("downloading")
 		var err error
 		archive, err = downloadArtifact(ctx, downloadOpts{
-			url:           req.URL,
-			authHeader:    req.AuthHeader,
+			url:           req.url,
+			authHeader:    req.authHeader,
 			destDir:       spec.dirs.tmp,
 			maxBytes:      spec.maxArtifactSize,
 			allowInsecure: spec.allowInsecure,
@@ -213,8 +213,8 @@ func (rf *releaseFetcher) fetch(ctx context.Context, spec *appSpec, req deployRe
 	defer func() { _ = os.Remove(archive) }()
 
 	progress("extracting")
-	releaseDir := spec.dirs.release(req.Version)
-	staging := filepath.Join(spec.dirs.releases, ".extract-"+versionPathComponent(req.Version))
+	releaseDir := spec.dirs.release(req.version)
+	staging := filepath.Join(spec.dirs.releases, ".extract-"+versionPathComponent(req.version))
 	if err := os.RemoveAll(staging); err != nil {
 		return "", err
 	}

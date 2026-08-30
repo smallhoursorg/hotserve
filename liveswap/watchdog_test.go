@@ -71,7 +71,7 @@ func advanceUntil(t *testing.T, rig *testRig, step time.Duration, desc string, c
 
 func deployV1(t *testing.T, rig *testRig) {
 	t.Helper()
-	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/1", Version: "v1"}))
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/1", version: "v1"}))
 }
 
 func TestWatchdogRestartsOnCrash(t *testing.T) {
@@ -352,7 +352,7 @@ func TestWatchdogDeployCutsThrottleShort(t *testing.T) {
 
 	// A deploy is the fast path out of the wait: it resets the budget
 	// and installs a fresh instance immediately.
-	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/2", Version: "v2"}))
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/2", version: "v2"}))
 	waitUntil(t, "watchdog re-arms on the new instance", func() bool {
 		s := rig.ma.wd.currentState()
 		return s == wdStateGrace || s == wdStateWatching
@@ -374,7 +374,7 @@ func TestWatchdogIgnoresDeployStoppedOldInstance(t *testing.T) {
 
 	// The deploy stops the old handle after promote; its Wait channel
 	// closing must read as "replaced", never as a crash.
-	must(t, rig.ma.Deploy(context.Background(), deployRequest{URL: "https://x/2", Version: "v2"}))
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/2", version: "v2"}))
 	waitUntil(t, "watchdog adopts v2", func() bool {
 		s := rig.ma.wd.currentState()
 		return s == wdStateGrace || s == wdStateWatching
