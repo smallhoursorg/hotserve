@@ -3,7 +3,7 @@
 # ./server is a shell leader that forks a worker before exec'ing the
 # app — the process-tree shape the systemd suite kills), and serves
 # them over HTTP — the stand-in for a GitHub/GitLab release asset URL.
-FROM golang:1.26-trixie AS build
+FROM golang:1.27-trixie AS build
 WORKDIR /build
 COPY testapp/main.go workers.sh ./
 RUN CGO_ENABLED=0 go build -o server main.go
