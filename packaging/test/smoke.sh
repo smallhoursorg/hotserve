@@ -272,7 +272,7 @@ if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)"
 	echo "apparmor: enabled=$(cat /sys/module/apparmor/parameters/enabled 2>&1); securityfs=$(ls -d /sys/kernel/security/apparmor 2>&1); parser=$(command -v apparmor_parser || echo none)"
 	echo "apparmor: loaded profiles matching hotserve: $(grep -c hotserve /sys/kernel/security/apparmor/profiles 2>&1)"
 	echo "apparmor: parser says: $(apparmor_parser -r /etc/apparmor.d/hotserve-user-manager 2>&1 | head -c 300)"
-	echo "apparmor: unit property: $(systemctl show -p AppArmorProfile --value "user@$uid.service")"
+	echo "apparmor: unit ExecStart: $(systemctl show -p ExecStart --value "user@$uid.service" | head -c 160)"
 	journalctl --no-pager -b | grep -i "apparmor" | tail -5 || true
 	mgr_pid=$(systemctl show -p MainPID --value "user@$uid.service")
 	mgr_label=$(cat "/proc/$mgr_pid/attr/apparmor/current" 2>/dev/null || cat "/proc/$mgr_pid/attr/current" 2>/dev/null)

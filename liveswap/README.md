@@ -316,15 +316,18 @@ Ubuntu 24.04+ refuses those to unconfined processes
 (`kernel.apparmor_restrict_unprivileged_userns=1`), which would leave
 `systemd --user` unable to build the sandbox; the package therefore
 ships an AppArmor profile, `hotserve-user-manager`, that grants
-`userns` to hotserve's user manager only (applied through
-`AppArmorProfile=` in the `user@<uid>.service` drop-in postinstall
-writes — never to PID 1 or other users' managers; the app units carry
+`userns` to hotserve's user manager only: the package starts
+`user@<uid>.service` for the hotserve user through
+`/usr/libexec/hotserve/user-manager` (an `ExecStart=` override in the
+drop-in postinstall writes) and the profile attaches to that path —
+never to PID 1 or other users' managers; the app units carry
 `RestrictNamespaces=`, so a sandboxed app still cannot create
-namespaces). Raw-binary installs on Ubuntu need the same: copy
-`packaging/apparmor/hotserve-user-manager` to `/etc/apparmor.d/`,
-`apparmor_parser -r` it, and add `AppArmorProfile=-hotserve-user-manager`
-to the manager's drop-in — or, bluntly, set that sysctl to 0
-host-wide. Debian's kernel has no such restriction. A host where the
+namespaces. (Attachment by path rather than `AppArmorProfile=`: newer
+AppArmor turns a profile change requested by an unprivileged unit into
+a stack with `unconfined`, which stays restricted.) Raw-binary
+installs on Ubuntu need the same three pieces — the wrapper, the
+profile in `/etc/apparmor.d/` (`apparmor_parser -r` it), and the
+`ExecStart=` override — or, bluntly, that sysctl set to 0 host-wide. Debian's kernel has no such restriction. A host where the
 probe still finds no usable user namespace runs apps with
 `"sandbox": "none"` and a warning (the non-dumpable supervisor and
 `NoNewPrivileges` remain); `journalctl -t hotserve-sandbox-probe`

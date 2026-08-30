@@ -332,8 +332,11 @@ consequences, and they decide the mechanism:
    dropped from the matrix. Ubuntu 24.04+ restricts unprivileged user
    namespaces to unconfined processes (measured on CI's Ubuntu-kernel
    runner: probe exit 226, tier none); the package ships an AppArmor
-   profile granting `userns` to hotserve's user manager alone
-   (`AppArmorProfile=` on `user@<uid>.service`). Residual: that
+   profile granting `userns` to hotserve's user manager alone,
+   attached by path to the wrapper `user@<uid>.service` is started
+   through (`AppArmorProfile=` cannot be used: for an unprivileged unit
+   newer AppArmor converts it into a stack with `unconfined`, which
+   stays restricted — seen on Ubuntu 26.04). Residual: that
    permission is inherited by the manager's children, so an app run
    with `sandbox off` on such a host may create user namespaces where
    the distro default would refuse — sandboxed apps cannot

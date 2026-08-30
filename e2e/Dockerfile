@@ -45,6 +45,7 @@ RUN hotserve list-modules | grep -qx liveswap \
 # (linger-file fallback, daemon-reload/try-restart ignored).
 COPY packaging/hotserve.service /etc/systemd/system/hotserve.service
 COPY packaging/apparmor/hotserve-user-manager /etc/apparmor.d/hotserve-user-manager
+COPY packaging/user-manager.sh /usr/libexec/hotserve/user-manager
 COPY packaging/postinstall.sh /tmp/postinstall.sh
 RUN mkdir -p /var/lib/hotserve /var/lib/liveswap \
 	&& chmod 750 /var/lib/hotserve /var/lib/liveswap \

@@ -52,6 +52,12 @@ contents:
   - src: packaging/apparmor/hotserve-user-manager
     dst: /etc/apparmor.d/hotserve-user-manager
     type: config|noreplace
+  # The wrapper the profile attaches to; user@<uid>.service for the
+  # hotserve user is started through it (postinstall drop-in).
+  - src: packaging/user-manager.sh
+    dst: /usr/libexec/hotserve/user-manager
+    file_info:
+      mode: 0755
   - dst: /var/lib/hotserve
     type: dir
     file_info:
