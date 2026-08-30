@@ -31,10 +31,10 @@ sudo systemctl enable --now hotserve
 
 That gives you `/usr/bin/hotserve`, a systemd service running as the
 `hotserve` user, and a starter config at `/etc/hotserve/Caddyfile`.
-**Supported: Debian 12 and 13, Ubuntu 24.04 and 26.04.** Full
-per-app isolation needs systemd ≥ 256 (Debian 13, Ubuntu 26.04); on
-the older two, apps run with the floor only (see the roadmap) and a
-warning at every start until the host is upgraded.
+**Supported: Debian 12 and 13, Ubuntu 24.04 and 26.04.** Per-app
+isolation, the next milestone on the roadmap below, will need
+systemd ≥ 256 (Debian 13, Ubuntu 26.04); the older two will stay
+supported and keep today's behaviour.
 The package depends on `libpam-systemd` and `dbus` (present on any
 stock Debian/Ubuntu server): liveswap runs your apps as systemd units
 under the `hotserve` user's own service manager, which needs
@@ -173,10 +173,10 @@ an on-disk release. Full details, CI snippets, and every option:
   rule"), `ProtectSystem=strict`, `PrivateTmp=`, `InaccessiblePaths=`,
   a read-only cgroupfs so resource caps are real, and systemd's
   curated `SystemCallFilter=@system-service` — no bubblewrap. That set
-  needs systemd ≥ 256, so it is probe-gated: Debian 13 and Ubuntu
-  26.04 get all of it; Debian 12 and Ubuntu 24.04 run apps with the
-  floor only (non-dumpable supervisor, `NoNewPrivileges`) and a WARN
-  at every start until upgraded. Per-app UIDs would need a small
+  needs systemd ≥ 256, so it will be probe-gated: Debian 13 and
+  Ubuntu 26.04 will get all of it; Debian 12 and Ubuntu 24.04 will
+  keep today's floor (non-dumpable supervisor, `NoNewPrivileges`) with
+  a warning at every start until upgraded. Per-app UIDs would need a small
   privileged helper and stay a later milestone. This is the next
   security milestone, ahead of the items below.
 - Hosted APT/APK repositories with package signing and auto-updates

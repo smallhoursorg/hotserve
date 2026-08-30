@@ -222,16 +222,25 @@ user_systemctl is-active --quiet "$unit" \
 journalctl --no-pager -t hotserve-demo | grep -q "smoke app starting" \
 	|| die "app stdout did not reach the journal under identifier hotserve-demo"
 # The runner's contract: every unit's NOFILE (soft and hard) is the
-# user manager's own ceiling. Assert against the live manager, not a
-# constant — what the manager is born with depends on the host (and,
-# below systemd 256, the user@ drop-in does not reach it: #37), and a
-# constant that happened to match Docker's PID 1 limit passed vacuously.
-mgr_pid=$(systemctl show -p MainPID --value "user@$uid.service")
-mgr_nofile=$(awk '/^Max open files/ {print $5}' "/proc/$mgr_pid/limits")
+# user manager's DefaultLimitNOFILE — the very property it reads
+# (liveswap/systemd_dbus.go). Assert against that, not a constant: a
+# constant that happened to match Docker's PID 1 limit passed
+# vacuously. Where the manager is systemd >= 256 the postinstall
+# drop-in is what sets that ceiling, so pin it there; below 256 the
+# drop-in does not reach the manager and the value is whatever PID 1
+# had (#37).
+mgr_nofile=$(user_systemctl show -p DefaultLimitNOFILE --value)
 app_nofile=$(journalctl --no-pager -t hotserve-demo | grep -o 'nofile=[0-9]*' | tail -1 | cut -d= -f2)
 [ -n "$mgr_nofile" ] && [ "$app_nofile" = "$mgr_nofile" ] \
-	|| die "app soft NOFILE ($app_nofile) is not the user manager's ceiling ($mgr_nofile)"
-echo "app NOFILE $app_nofile = user@$uid ceiling"
+	|| die "app soft NOFILE ($app_nofile) is not the user manager's DefaultLimitNOFILE ($mgr_nofile)"
+sd_version=$(systemctl --version | awk 'NR==1 {print $2}')
+if [ "${sd_version%%[!0-9]*}" -ge 256 ]; then
+	[ "$mgr_nofile" = "1048576" ] \
+		|| die "systemd $sd_version: user@$uid DefaultLimitNOFILE is $mgr_nofile, not the drop-in's 1048576"
+	echo "app NOFILE $app_nofile = user@$uid DefaultLimitNOFILE = the drop-in's 1048576 (systemd $sd_version)"
+else
+	echo "app NOFILE $app_nofile = user@$uid DefaultLimitNOFILE (systemd $sd_version < 256: drop-in not applied, #37)"
+fi
 echo "deployed as unit $unit under user@$uid; app output in the journal"
 
 # `hotserve validate` provisions and cleans up without starting: run

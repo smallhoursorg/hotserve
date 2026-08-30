@@ -2,8 +2,9 @@
 # (`make install-test`). One Dockerfile serves every matrix cell:
 # BASE_IMAGE picks the distro: debian:12, debian:13, ubuntu:24.04 or
 # ubuntu:26.04 — the support matrix; all share the same apt invocation.
-# (Only the last two have systemd >= 256, i.e. full per-app isolation;
-# the first two prove the floor-only degraded path.)
+# systemd is 252 / 257 / 255 / 257 respectively: debian:13 and
+# ubuntu:26.04 are the >= 256 cells that the planned per-app isolation
+# will need, the other two the older-systemd compatibility path.
 #
 # networkd/resolved are deliberately NOT installed: with no wait-online
 # unit enabled, network-online.target (which hotserve.service Requires=)

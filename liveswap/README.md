@@ -147,7 +147,9 @@ else, so config load does too. Anything more an app needs must be
 passed explicitly via `env` or `env_file`. Apps get the user manager's
 resource limits; each unit sets its open-files limit (soft and hard)
 to the manager's ceiling, which the package raises to match
-`hotserve.service` (1048576) via a `user@<uid>.service.d` drop-in.
+`hotserve.service` (1048576) via a `user@<uid>.service.d` drop-in —
+effective on systemd ≥ 256; below that the manager inherits its
+ceiling from PID 1 instead (#37).
 
 ### Placeholders
 

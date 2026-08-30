@@ -509,13 +509,6 @@ func (a *App) Validate() error {
 // the background so a slow app cannot stall config load; the health
 // gate is a deploy gate, not a boot gate.
 func (a *App) Start() error {
-	// The supervisor must be non-dumpable before it supervises anything
-	// (see HardenProcess). hotserve's own entry point already did this;
-	// a Caddy built with xcaddy gets it here. Not fatal — a server that
-	// cannot start protects nothing — but loud.
-	if err := HardenProcess(); err != nil {
-		a.logger.Error("cannot mark the process non-dumpable: processes running as this user can read its environment via /proc", zap.Error(err))
-	}
 	// Apps run as transient units under this user's systemd manager.
 	// Prove it answers before anything runs, with an error that says
 	// what to fix; there is deliberately no fallback runner. Checked

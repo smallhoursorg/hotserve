@@ -6,8 +6,9 @@ apps with bubblewrap. The mechanism is now systemd's own per-unit
 sandboxing on the user-manager runner (`PrivatePIDs=`,
 `ProtectSystem=strict`, `PrivateTmp=`, `InaccessiblePaths=`,
 `ProtectControlGroups=`, `SystemCallFilter=@system-service`),
-probe-gated on the manager being systemd ≥ 256 (Debian 13, Ubuntu
-26.04); Debian 12 and Ubuntu 24.04 run floor-only with a WARN — see
+to be probe-gated on the manager being systemd ≥ 256 (Debian 13,
+Ubuntu 26.04); Debian 12 and Ubuntu 24.04 will run floor-only with a
+WARN — see
 [DESIGN-threat-model.md](../DESIGN-threat-model.md), "The shared-UID
 rule" and the option-C status note. What remains normative here: the
 threat model, the behaviour specification, the config surface, the
@@ -162,7 +163,7 @@ mode of hand-rolled flag soup.
 > DESIGN-threat-model.md, "The shared-UID rule". On systemd ≥ 256
 > `PrivatePIDs=` provides that namespace and the unit properties
 > become the whole mechanism — bwrap is dropped, not layered; below
-> 256 `auto` runs floor-only with a WARN. `/sys/fs/cgroup` must be read-only
+> 256 `auto` will run floor-only with a WARN. `/sys/fs/cgroup` must be read-only
 > in the unit (`ProtectControlGroups=`): the delegated subtree is
 > writable by the app's own UID otherwise. Until then apps run with
 > **no** sandbox beyond the non-dumpable supervisor: they no longer

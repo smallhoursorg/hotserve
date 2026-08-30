@@ -16,9 +16,10 @@ ART="http://e2e-artifacts:8080/artifacts"
 wait_for_token
 
 uid=$(id -u hotserve)
+as_hotserve() { su -s /bin/sh hotserve -c "$*"; }
 # systemctl --user for a nologin system user: hotserve's own trick —
 # its manager's private socket under /run/user/<uid>.
-user_systemctl() { su -s /bin/sh hotserve -c "XDG_RUNTIME_DIR=/run/user/$uid systemctl --user $*"; }
+user_systemctl() { as_hotserve "XDG_RUNTIME_DIR=/run/user/$uid systemctl --user $*"; }
 
 wait_hook() { # -> 0 once the webhook answers 200, 1 after 30s
 	i=0
@@ -224,9 +225,9 @@ echo "=== systemd 10: hotserve is non-dumpable — its /proc is closed to its ow
 # and /proc/<pid>/root to any same-UID reader of a dumpable process —
 # whatever sandbox that reader sits in — so without this floor every
 # app could read the supervisor's environment (ACME DNS tokens) or walk
-# the host filesystem through /proc/<hotserve>/root. cmd/hotserve marks
-# itself non-dumpable at entry; this proves it under the packaged unit.
-as_hotserve() { su -s /bin/sh hotserve -c "$*"; }
+# the host filesystem through /proc/<hotserve>/root. liveswap's init
+# marks the process non-dumpable before main; this proves it under the
+# packaged unit.
 hpid=$(systemctl show -p MainPID --value hotserve)
 [ -n "$hpid" ] && [ "$hpid" != "0" ] || fail "no MainPID for hotserve.service"
 # (The /proc/<pid> directory itself keeps the task's uid so `ps` can
@@ -236,10 +237,16 @@ hpid=$(systemctl show -p MainPID --value hotserve)
 	|| fail "/proc/$hpid/environ is owned by $(stat -c %U "/proc/$hpid/environ"): hotserve is dumpable"
 # Each denial is asserted by its reason, not by a non-zero exit: a
 # broken `su` would otherwise pass these vacuously.
-out=$(as_hotserve "cat /proc/$hpid/environ" 2>&1)
-case "$out" in *"Permission denied"*) pass "hotserve's environ is unreadable to the hotserve user" ;; *) fail "expected EACCES reading hotserve's environ as the hotserve user, got: $out" ;; esac
-out=$(as_hotserve "ls /proc/$hpid/root/" 2>&1)
-case "$out" in *"Permission denied"*) pass "/proc/$hpid/root is closed to the hotserve user" ;; *) fail "expected EACCES traversing /proc/$hpid/root as the hotserve user, got: $out" ;; esac
+denied_to_hotserve() { # <what> <command...> -> pass if the command fails with EACCES
+	what=$1; shift
+	out=$(as_hotserve "$*" 2>&1)
+	case "$out" in
+	*"Permission denied"*) pass "$what is closed to the hotserve user" ;;
+	*) fail "expected EACCES: $what as the hotserve user, got: $out" ;;
+	esac
+}
+denied_to_hotserve "hotserve's environ" cat "/proc/$hpid/environ"
+denied_to_hotserve "/proc/$hpid/root" ls "/proc/$hpid/root/"
 apid=$(json_num "$(status)" pid)
 as_hotserve "cat /proc/$apid/environ" >/dev/null 2>&1 \
 	&& pass "control: the app's own environ is still readable to its uid (the floor is hotserve's alone)" \

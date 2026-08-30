@@ -303,10 +303,11 @@ they decide the mechanism before any spike:
    substitute: `hidepid` hides other *users'* processes, and there are
    no other users here. systemd delivers the namespace as
    `PrivatePIDs=yes` from 256: Debian 13 and Ubuntu 26.04. Decision
-   (2026-08-29): the isolation is systemd-native and **probe-gated on
-   the manager's version**; on Debian 12 (252) and Ubuntu 24.04 (255)
-   apps run with the floor only (item 2 plus `NoNewPrivileges`) and a
-   WARN at every start, `sandbox require` refuses. Bubblewrap is not
+   (2026-08-29, not yet implemented — #35): the isolation is
+   systemd-native and **probe-gated on the manager's version**; on
+   Debian 12 (252) and Ubuntu 24.04 (255) apps will run with the floor
+   only (item 2 plus `NoNewPrivileges`) and a WARN at every start,
+   `sandbox require` will refuse. Bubblewrap is not
    carried as a second mechanism for those hosts — "full isolation
    needs systemd ≥ 256" is the documented line. Ubuntu 22.04 is
    dropped from the matrix.
@@ -314,10 +315,11 @@ they decide the mechanism before any spike:
    `prctl(PR_SET_DUMPABLE, 0)` makes hotserve's `/proc` entries require
    `CAP_SYS_PTRACE`, which apps under `NoNewPrivileges` never hold — on
    every host, with or without user namespaces. **Shipped:**
-   `liveswap.HardenProcess`, called at `cmd/hotserve`'s entry and again
-   in `App.Start` (so an xcaddy build importing the module gets it
-   too), pinned by a unit test and by the real-systemd e2e suite
-   (scenario 10). The package declares `systemd (>= 256)`. It closes the
+   `liveswap.HardenProcess`, run from the package's `init` so any
+   binary importing the module — hotserve or an xcaddy build — is
+   non-dumpable before `main` (app units outlive supervisor restarts,
+   so anything later leaves a window); a failure is fatal. Pinned by a
+   unit test and by the real-systemd e2e suite (scenario 10). It closes the
    `/proc/<supervisor>/environ` and `/proc/<supervisor>/root` routes
    only; TLS keys on disk, the admin socket and sibling files still
    need the mount namespace.
