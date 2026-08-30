@@ -148,8 +148,11 @@ passed explicitly via `env` or `env_file`. Apps get the user manager's
 resource limits; each unit sets its open-files limit (soft and hard)
 to the manager's ceiling, which the package raises to match
 `hotserve.service` (1048576) via a `user@<uid>.service.d` drop-in —
-effective on systemd ≥ 256; below that the manager inherits its
-ceiling from PID 1 instead (#37).
+effective on systemd ≥ 256 and from the manager's next start: an
+upgrade installs the drop-in but deliberately does not restart a
+running manager (that would stop every app), so the ceiling changes
+at the next boot or manual restart. Below 256 the manager inherits
+its ceiling from PID 1 instead (#37).
 
 ### Placeholders
 

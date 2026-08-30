@@ -69,8 +69,10 @@ requirement below stands as the contract the sandbox path must keep.
   - the app's release dir (rw), shared dir (rw), and the release
     being started;
   - the app's own tmp dir (`appDirs.tmp`) bound as `/tmp` (rw,
-    `BindPaths=`): disk-backed like today, per-app private, no tmpfs
-    RAM surprise (`PrivateTmp=` would be the RAM-backed alternative);
+    `BindPaths=`): per-app private, on the app's own disk, and
+    surviving unit restarts like today. (`PrivateTmp=` is the
+    alternative: a private directory under the host's `/tmp`, on
+    whatever backs that mount, removed when the unit stops.)
   - read-only system paths (`ProtectSystem=strict`: `/usr`, `/etc`,
     `/boot`, `/efi` read-only, everything else as declared), plus a
     fresh `/proc` for the unit's PID namespace (`PrivatePIDs=`) and a
