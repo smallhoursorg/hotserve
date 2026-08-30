@@ -26,6 +26,10 @@ license: Apache-2.0
 # gives that manager its runtime directory; without libpam-systemd it
 # cannot start at all. dbus: loginctl (lingering) needs the system bus.
 depends:
+  # No systemd version floor: the runner works on 252+ (Debian 12,
+  # Ubuntu 24.04). The planned per-app isolation needs 256+ and will be
+  # probe-gated at runtime, not at install (DESIGN-threat-model.md,
+  # "The shared-UID rule").
   - libpam-systemd
   - dbus
 

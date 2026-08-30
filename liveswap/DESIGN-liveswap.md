@@ -315,8 +315,8 @@ author's beliefs about systemd, and only the real thing corrects them.
    stops its units and re-adding it relaunches; an app removed while
    hotserve was down is swept on the next start; app output is in the
    journal. Finally the recovery suite from the runner's side.
-5. Package (`make install-test`, the built `.deb` on debian:12/13,
-   ubuntu:22.04/24.04/26.04): Depends resolution (`libpam-systemd`,
+5. Package (`make install-test`, the built `.deb` on debian:12/13 and
+   ubuntu:24.04/26.04 — the support matrix): Depends resolution (`libpam-systemd`,
    `dbus`), user manager active with lingering, a deploy under the
    shipped unit as a transient unit with its output and `LimitNOFILE`
    in the journal, `hotserve validate` as root and as hotserve leaving
