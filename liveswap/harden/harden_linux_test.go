@@ -43,8 +43,10 @@ func TestProcessNonDumpable(t *testing.T) {
 }
 
 // TestInitRunsBeforeOS pins the ordering the package comment promises:
-// under Go's init order this package initializes right after syscall
-// and before os (hence before fmt, Caddy and everything else). It
+// syscall < harden < os — this package initializes after syscall and
+// before os (hence before fmt, Caddy and everything depending on
+// them). It does not assert that nothing runs between syscall and
+// harden: syscall-closure-only leaves that sort earlier may. It
 // re-runs this test binary with GODEBUG=inittrace=1, which prints one
 // "init <pkg>" line per initializer in execution order.
 func TestInitRunsBeforeOS(t *testing.T) {

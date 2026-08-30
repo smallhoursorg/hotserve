@@ -16,7 +16,8 @@ package liveswap
 
 import (
 	// Blank import: harden's init makes this process non-dumpable before
-	// main, ahead of every other initializer (see liveswap/harden).
+	// main — before os, fmt and every initializer that depends on them
+	// (see liveswap/harden for the exact guarantee).
 	_ "github.com/smallhoursorg/hotserve/liveswap/harden"
 
 	"context"
