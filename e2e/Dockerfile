@@ -44,7 +44,7 @@ RUN hotserve list-modules | grep -qx liveswap \
 # systemd is not running at build time; postinstall tolerates that
 # (linger-file fallback, daemon-reload/try-restart ignored).
 COPY packaging/hotserve.service /etc/systemd/system/hotserve.service
-COPY packaging/apparmor/hotserve-user-manager /etc/apparmor.d/hotserve-user-manager
+COPY packaging/apparmor/hotserve-user-manager /usr/share/hotserve/apparmor/hotserve-user-manager
 COPY packaging/user-manager.sh /usr/libexec/hotserve/user-manager
 COPY packaging/postinstall.sh /tmp/postinstall.sh
 RUN mkdir -p /var/lib/hotserve /var/lib/liveswap \

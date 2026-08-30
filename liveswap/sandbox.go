@@ -146,7 +146,22 @@ func (a *App) hiddenPaths() []string {
 	seen := map[string]bool{}
 	var out []string
 	add := func(p string) {
-		if p == "" || !filepath.IsAbs(p) || seen[p] {
+		if p == "" {
+			return
+		}
+		// A relative env_file is valid configuration — parseEnvFile
+		// reads it through os.ReadFile, i.e. against this process's
+		// working directory — so resolve it the same way rather than
+		// dropping it, which would leave that file visible to siblings.
+		if !filepath.IsAbs(p) {
+			abs, err := filepath.Abs(p)
+			if err != nil {
+				return
+			}
+			p = abs
+		}
+		p = filepath.Clean(p)
+		if seen[p] {
 			return
 		}
 		seen[p] = true
@@ -350,6 +365,25 @@ func validateExtraPath(p, root string, hidden []string) error {
 	if p == "/" {
 		return errors.New("extra_path / would expose the whole host")
 	}
+	// Follow symlinks before the containment checks: they are lexical,
+	// and BindPaths= binds what the path resolves to, so a link such as
+	// /srv/db-socket -> /run/user/<uid> would otherwise walk straight
+	// past them and hand back the very socket they exist to protect.
+	// A path that does not resolve (not created yet — /run/postgresql
+	// before postgres starts) is checked as written; and a link swapped
+	// between config load and unit start is not covered here, which
+	// needs write access outside every sandbox to arrange.
+	if resolved, err := filepath.EvalSymlinks(p); err == nil && resolved != p {
+		if err := checkExtraPathContainment(resolved, root, hidden); err != nil {
+			return fmt.Errorf("extra_path %q resolves to %q: %w", p, resolved, err)
+		}
+	}
+	return checkExtraPathContainment(p, root, hidden)
+}
+
+// checkExtraPathContainment is the lexical half of validateExtraPath,
+// applied to the path as written and to what it resolves to.
+func checkExtraPathContainment(p, root string, hidden []string) error {
 	if pathWithin(p, root) {
 		return fmt.Errorf("extra_path %q is inside the liveswap root %s, which the sandbox replaces with an empty tmpfs; an app already sees its own release and shared dirs", p, root)
 	}

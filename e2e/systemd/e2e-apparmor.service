@@ -11,6 +11,8 @@ Description=e2e: load the hotserve-user-manager AppArmor profile
 DefaultDependencies=no
 ConditionSecurity=apparmor
 ConditionPathExists=/sys/kernel/security/apparmor/.load
+# postinstall installs the profile only where the parser accepts it.
+ConditionPathExists=/etc/apparmor.d/hotserve-user-manager
 Before=sysinit.target
 
 [Service]

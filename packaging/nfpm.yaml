@@ -48,10 +48,14 @@ contents:
     type: config|noreplace
   # Grants `userns` to the hotserve user's systemd manager, which the
   # app sandbox needs and Ubuntu 24.04+ otherwise refuses to unconfined
-  # processes; loaded by postinstall and by apparmor.service at boot.
+  # processes. Shipped here, NOT in /etc/apparmor.d: postinstall copies
+  # it there only where the host's parser accepts it (the `userns` rule
+  # needs AppArmor 4; Debian 12's 3.x parser rejects the file, and
+  # apparmor.service parses that whole directory at every boot — an
+  # unconditional install would break policy loading on a distro that
+  # does not even need the profile).
   - src: packaging/apparmor/hotserve-user-manager
-    dst: /etc/apparmor.d/hotserve-user-manager
-    type: config|noreplace
+    dst: /usr/share/hotserve/apparmor/hotserve-user-manager
   # The wrapper the profile attaches to; user@<uid>.service for the
   # hotserve user is started through it (postinstall drop-in).
   - src: packaging/user-manager.sh

@@ -48,13 +48,28 @@ LimitNOFILE=1048576
 ExecStart=
 ExecStart=/usr/libexec/hotserve/user-manager --user
 EOF
-	# Load the profile into the running kernel now (apparmor.service
-	# reloads /etc/apparmor.d on every boot). Best-effort: Debian 12's
-	# AppArmor 3 parser cannot express the rule, and its kernel does
-	# not need it.
-	if [ -d /sys/kernel/security/apparmor ] && command -v apparmor_parser >/dev/null 2>&1; then
-		apparmor_parser -r /etc/apparmor.d/hotserve-user-manager 2>/dev/null \
-			|| echo "hotserve: could not load the hotserve-user-manager AppArmor profile (needed only where the kernel restricts unprivileged user namespaces)" >&2
+	# Install the AppArmor profile into /etc/apparmor.d — which
+	# apparmor.service parses in full at every boot — only where this
+	# host's parser accepts it. The `userns` rule needs an AppArmor 4
+	# parser; Debian 12 ships 3.x, which would reject the file and take
+	# the whole policy load down with it, on a distro whose kernel does
+	# not restrict user namespaces and therefore does not need the
+	# profile at all. -Q parses without loading, so this is a real
+	# compatibility test and not a guess at distro versions.
+	src=/usr/share/hotserve/apparmor/hotserve-user-manager
+	dst=/etc/apparmor.d/hotserve-user-manager
+	if command -v apparmor_parser >/dev/null 2>&1 && [ -f "$src" ]; then
+		if apparmor_parser -Q "$src" >/dev/null 2>&1; then
+			install -m 0644 "$src" "$dst"
+			# Load it now too; apparmor.service will reload it at boot.
+			if [ -d /sys/kernel/security/apparmor ]; then
+				apparmor_parser -r "$dst" 2>/dev/null \
+					|| echo "hotserve: the hotserve-user-manager AppArmor profile could not be loaded; apps will run without the sandbox until it is" >&2
+			fi
+		else
+			rm -f "$dst" # an upgrade from a package that installed it unconditionally
+			echo "hotserve: this host's apparmor_parser does not support the profile hotserve ships (it needs AppArmor 4); not installing it — only kernels that restrict unprivileged user namespaces need it" >&2
+		fi
 	fi
 	systemctl daemon-reload || true
 	# Lingering starts user@$uid.service at once, so it comes after the

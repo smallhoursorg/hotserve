@@ -3,11 +3,13 @@ package liveswap
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
@@ -701,5 +703,134 @@ func TestRelaunchBelowFullWarns(t *testing.T) {
 				t.Fatalf("warned %d times, want %d: %v", got, tc.want, logs.All())
 			}
 		})
+	}
+}
+
+// TestValidateExtraPathFollowsSymlinks: the containment checks are
+// lexical, but BindPaths= binds what a path resolves to, so a link
+// pointing into a closed or hidden area must be refused by what it
+// resolves to, not by how it is spelled.
+func TestValidateExtraPathFollowsSymlinks(t *testing.T) {
+	// The link itself must live outside every closed prefix, or the
+	// lexical check would refuse it before symlinks matter — /run
+	// qualifies (only /run/user is closed).
+	dir, err := os.MkdirTemp("/run", "extrapath-")
+	if err != nil {
+		t.Skipf("no writable dir outside the closed prefixes: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	// A real directory standing in for hotserve's own state, so the
+	// hidden branch is exercised by something that actually resolves
+	// (EvalSymlinks needs every component to exist; a link to a path
+	// that does not is checked as written — the documented limit).
+	secrets := filepath.Join(dir, "secrets")
+	if err := os.MkdirAll(secrets, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	hidden := append(append([]string{}, sandboxHiddenFloor...), secrets)
+	for _, target := range []string{"/dev", "/tmp", secrets} {
+		link := filepath.Join(dir, "link")
+		_ = os.Remove(link)
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		err := validateExtraPath(link, "/var/lib/liveswap", hidden)
+		if err == nil {
+			t.Errorf("a symlink to %s was accepted: BindPaths would follow it", target)
+			continue
+		}
+		if !strings.Contains(err.Error(), "resolves to") {
+			t.Errorf("symlink to %s refused without naming the resolution: %v", target, err)
+		}
+	}
+	// A link to somewhere legitimate still passes.
+	ok := filepath.Join(dir, "fine")
+	if err := os.Symlink(dir, ok); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateExtraPath(ok, "/var/lib/liveswap", hidden); err != nil {
+		t.Errorf("a symlink to an allowed path was refused: %v", err)
+	}
+}
+
+// TestHiddenPathsResolvesRelativeEnvFile: a relative env_file is valid
+// configuration (parseEnvFile reads it through os.ReadFile, against
+// this process's working directory), so the hidden set must resolve it
+// the same way rather than drop it and leave the file readable by
+// every sibling.
+func TestHiddenPathsResolvesRelativeEnvFile(t *testing.T) {
+	a := &App{Apps: map[string]*AppConfig{"blog": {EnvFile: "secrets/blog.env"}}}
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(wd, "secrets/blog.env")
+	found := false
+	for _, h := range a.hiddenPaths() {
+		if h == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("relative env_file not resolved into the hidden set (want %s): %v", want, a.hiddenPaths())
+	}
+}
+
+// TestSpecsHideEveryAppsResolvedEnvFile is the ordering invariant
+// Provision relies on: the hidden set is derived from every app's
+// env_file, so defaults (which resolve {env.*}) must be applied to all
+// apps before the first spec is built. Building in one pass over an
+// unordered map recorded a sibling's unresolved path and left that
+// app's real env file visible.
+func TestSpecsHideEveryAppsResolvedEnvFile(t *testing.T) {
+	t.Setenv("SECRETS", "/etc/secrets")
+	a := &App{
+		Root:              "/var/lib/liveswap",
+		ArtifactAllowlist: []string{"github.com/smallhoursorg/"},
+		DeployTrust:       githubTrust(),
+		Apps: map[string]*AppConfig{
+			"blog": {Command: []string{"x"}, EnvFile: "{env.SECRETS}/blog.env"},
+			"shop": {Command: []string{"x"}, EnvFile: "{env.SECRETS}/shop.env"},
+		},
+	}
+	repl := caddy.NewReplacer()
+	for _, cfg := range a.Apps { // pass one: defaults for every app
+		cfg.applyDefaults(repl)
+	}
+	for name, cfg := range a.Apps { // pass two: specs
+		spec, err := a.buildSpec(name, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"/etc/secrets/blog.env", "/etc/secrets/shop.env"} {
+			found := false
+			for _, h := range spec.sandboxHidden {
+				if h == want {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("%s's sandbox does not hide %s: %v", name, want, spec.sandboxHidden)
+			}
+		}
+	}
+}
+
+// TestValidateRejectsUncleanRoot: every containment check is lexical,
+// so a root spelled with .. would let an extra_path name a sibling
+// through a spelling the check never sees.
+func TestValidateRejectsUncleanRoot(t *testing.T) {
+	base := func(root string) *App {
+		a := &App{Root: root, ArtifactAllowlist: []string{"github.com/smallhoursorg/"},
+			DeployTrust: githubTrust(), Apps: map[string]*AppConfig{"blog": defaultedApp(t)}}
+		return a
+	}
+	if err := base("/var/lib/liveswap").Validate(); err != nil {
+		t.Fatalf("clean root rejected: %v", err)
+	}
+	for _, bad := range []string{"/srv/liveswap/../liveswap", "/srv//liveswap", "/srv/liveswap/."} {
+		if err := base(bad).Validate(); err == nil {
+			t.Errorf("unclean root %q accepted", bad)
+		}
 	}
 }

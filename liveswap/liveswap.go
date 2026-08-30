@@ -322,12 +322,20 @@ func (a *App) Provision(ctx caddy.Context) error {
 	// object. Validate-before-commit keeps a bad reload from taking effect.
 	a.managed = make(map[string]*managedApp, len(a.Apps))
 	specs := make(map[string]*appSpec, len(a.Apps))
+	// Two passes, and the order matters: buildSpec derives the sandbox's
+	// hidden set from EVERY app's env_file (hiddenPaths), so all of them
+	// must have had their {env.*} placeholders resolved before the first
+	// spec is built. One pass over an unordered map would record a
+	// sibling's unresolved path and leave that app's real env file
+	// visible inside the sandbox.
 	for name, cfg := range a.Apps {
 		if cfg == nil {
 			cfg = new(AppConfig)
 			a.Apps[name] = cfg
 		}
 		cfg.applyDefaults(repl)
+	}
+	for name, cfg := range a.Apps {
 		spec, err := a.buildSpec(name, cfg)
 		if err != nil {
 			return err
@@ -485,6 +493,13 @@ func (a *App) buildSpec(name string, cfg *AppConfig) (*appSpec, error) {
 func (a *App) Validate() error {
 	if !strings.HasPrefix(a.Root, "/") {
 		return fmt.Errorf("root must be an absolute path, got %q", a.Root)
+	}
+	// Clean, not merely absolute: every containment check below (and the
+	// sandbox's own masking) compares paths lexically, so an uncleaned
+	// root like /srv/liveswap/../liveswap would let an extra_path name a
+	// sibling's directory through the spelling the check never sees.
+	if filepath.Clean(a.Root) != a.Root {
+		return fmt.Errorf("root must be a clean path (no . , .. or doubled separators): %q resolves to %q", a.Root, filepath.Clean(a.Root))
 	}
 	hidden := a.hiddenPaths()
 	if err := validateSandboxRoot(a.Root, hidden); err != nil {
