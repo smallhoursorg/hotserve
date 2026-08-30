@@ -137,14 +137,16 @@ app blog {
 }
 ```
 
-Raw bubblewrap arguments are deliberately NOT exposed. The
-declarations are the stable contract; bubblewrap is the current
-backend. The same declarations must be implementable by Landlock (the
-no-dependency fallback candidate) and by the v2 systemd runner's
-sandbox directives — locking users to `--bind` flags would foreclose
-both. This mirrors how Flatpak and systemd treat their sandbox
-plumbing, and prevents the "looks configured, quietly weaker" failure
-mode of hand-rolled flag soup.
+Raw sandbox plumbing is deliberately NOT exposed — neither bubblewrap
+arguments (the backend this document was written for) nor systemd
+unit directives (the backend chosen since; see the status note at the
+top). The declarations are the stable contract: `extra_path` becomes
+`BindReadOnlyPaths=`/`BindPaths=` on the unit, and the same
+declarations would remain implementable by Landlock or bubblewrap.
+Locking users to one backend's flags would foreclose the others. This
+mirrors how Flatpak and systemd treat their sandbox plumbing, and
+prevents the "looks configured, quietly weaker" failure mode of
+hand-rolled flag soup.
 
 ## Architecture
 

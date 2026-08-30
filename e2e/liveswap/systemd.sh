@@ -237,9 +237,12 @@ hpid=$(systemctl show -p MainPID --value hotserve)
 	|| fail "/proc/$hpid/environ is owned by $(stat -c %U "/proc/$hpid/environ"): hotserve is dumpable"
 # Each denial is asserted by its reason, not by a non-zero exit: a
 # broken `su` would otherwise pass these vacuously.
-denied_to_hotserve() { # <what> <command...> -> pass if the command fails with EACCES
+denied_to_hotserve() { # <what> <command...> -> pass only if the command fails AND reports EACCES
 	what=$1; shift
-	out=$(as_hotserve "$*" 2>&1)
+	if out=$(as_hotserve "$*" 2>&1); then
+		fail "$what is readable to the hotserve user (command succeeded): $out"
+		return
+	fi
 	case "$out" in
 	*"Permission denied"*) pass "$what is closed to the hotserve user" ;;
 	*) fail "expected EACCES: $what as the hotserve user, got: $out" ;;
