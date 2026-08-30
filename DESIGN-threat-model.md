@@ -395,6 +395,19 @@ app cannot reach the mount points at all, so the exposure is bounded
 to apps already running unsandboxed on a box this model treats as one
 trust domain. Per-app UIDs are what closes it.
 
+*A unit's view is a snapshot, not a policy.* systemd builds the mount
+namespace at unit start and hotserve never rebuilds it under a running
+app (reloads leave instances alone by design). So the hidden set is
+whatever it was when that instance launched: an `env_file` belonging
+to an app added later is read-only inside older siblings' sandboxes
+rather than absent, and a hidden path created after a unit started is
+not masked in it at all. Redeploying rebuilds the view; until then the
+sibling-secret row holds only for instances launched after the secret
+was declared. The structural answer is a deny-by-default view
+(`TemporaryFileSystem=/` plus explicit binds) rather than a list of
+things to hide, which is where DESIGN-sandbox.md's open question on
+the read-only path set already leans; tracked in #35.
+
 3. **Resource caps need a read-only cgroupfs inside the sandbox.** The
    cgroup subtree under `user@<uid>.service` is delegated to — owned
    by — the hotserve UID, so `MemoryMax=`/`TasksMax=` on a user-manager

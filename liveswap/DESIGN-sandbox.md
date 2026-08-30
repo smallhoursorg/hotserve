@@ -152,6 +152,12 @@ requirement below stands as the contract the sandbox path must keep.
   the backstop (killing the in-namespace init kills everything in the
   namespace; no survivor is possible). The existing escalation tests
   define the contract.
+- The view a unit gets is fixed at its start: hidden paths declared
+  afterwards (a new app's `env_file`) are NOT masked in instances
+  already running, and the operator MUST be told to redeploy them.
+  This is the same "engage on the next deploy" rule the tier follows,
+  applied to the rest of the view; a deny-by-default filesystem view
+  is what would remove the asymmetry (#35).
 - The status endpoint MUST report the tier the running instance has
   (`"sandbox": "full" | "filesystem" | "none"`) — observability for
   operators and the assertion hook for smoke tests.

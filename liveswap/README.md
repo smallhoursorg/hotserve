@@ -286,6 +286,20 @@ supported rollout: upgrade, confirm apps healthy; declare each app's
 `extra_path` needs; deploy each app and watch `"sandbox"` in its
 status; only then, optionally, `sandbox require`.
 
+**What a running instance's sandbox is fixed to.** A unit's view is
+built when it starts and is never rebuilt under it — reloads
+deliberately leave running apps alone. That applies to the hidden set
+as much as to the tier: if you add an app whose `env_file` is
+`/etc/blog/blog.env`, instances that were already running keep the
+view they started with, in which that file is merely read-only
+(`ProtectSystem=strict`) rather than absent, and their status still
+reports the tier they have. The same is true of any hidden path
+created after a unit started. **After adding an app that carries
+secrets, redeploy the others** — a deploy is what rebuilds the view,
+exactly as it is for engaging the sandbox in the first place. A
+deny-by-default filesystem view would remove this asymmetry and is the
+structural fix (#35); today it is a property to know about.
+
 **`require` is the one setting that can keep the whole server from
 starting**: it fails the start (admin socket and proxy included) when
 the host cannot deliver the `full` tier — a manager below 256, or a
