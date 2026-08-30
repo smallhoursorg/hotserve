@@ -36,16 +36,27 @@ depends:
   - libpam-systemd
   - dbus
 
+# Every entry pins its mode. Without file_info nfpm copies the mode of
+# the file on the build host, so the package would carry whatever the
+# builder's umask happened to be — `make package` under umask 0002
+# shipped /usr/bin/hotserve group-writable (0775). A permission that
+# arrives by accident is one nobody reviewed.
 contents:
   # `make package` stages the right arch's binary at this fixed path
   # before each nfpm run (nfpm does not env-expand contents paths).
   - src: build/hotserve
     dst: /usr/bin/hotserve
+    file_info:
+      mode: 0755
   - src: packaging/hotserve.service
     dst: /lib/systemd/system/hotserve.service
+    file_info:
+      mode: 0644
   - src: packaging/Caddyfile
     dst: /etc/hotserve/Caddyfile
     type: config|noreplace
+    file_info:
+      mode: 0644
   # Grants `userns` to the hotserve user's systemd manager, which the
   # app sandbox needs and Ubuntu 24.04+ otherwise refuses to unconfined
   # processes. Shipped here, NOT in /etc/apparmor.d: postinstall copies
@@ -56,6 +67,8 @@ contents:
   # does not even need the profile).
   - src: packaging/apparmor/hotserve-user-manager
     dst: /usr/share/hotserve/apparmor/hotserve-user-manager
+    file_info:
+      mode: 0644
   # The wrapper the profile attaches to; user@<uid>.service for the
   # hotserve user is started through it (postinstall drop-in).
   # NOT world-executable: the AppArmor profile attaches to this path,

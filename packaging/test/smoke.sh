@@ -60,6 +60,11 @@ id hotserve >/dev/null || die "postinstall did not create the hotserve user"
 # host restricts, so it must not be executable by other accounts.
 wrapper=/usr/libexec/hotserve/user-manager
 [ -f "$wrapper" ] || die "the user-manager wrapper is missing"
+# Every packaged file's mode is pinned in nfpm.yaml rather than
+# inherited from the build host's umask; check the two that matter.
+bmode=$(stat -c '%U:%G %a' /usr/bin/hotserve)
+[ "$bmode" = "root:root 755" ] \
+	|| die "/usr/bin/hotserve is '$bmode', want 'root:root 755' — an unpinned mode follows the builder's umask"
 wmode=$(stat -c '%U:%G %a' "$wrapper")
 [ "$wmode" = "root:hotserve 750" ] \
 	|| die "$wrapper is '$wmode', want 'root:hotserve 750' — a world-executable wrapper would hand its AppArmor userns grant to every local account"
