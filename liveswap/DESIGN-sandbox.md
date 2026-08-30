@@ -68,25 +68,31 @@ requirement below stands as the contract the sandbox path must keep.
   debugging all assume real paths):
   - the app's release dir (rw), shared dir (rw), and the release
     being started;
-  - the app's own tmp dir (`appDirs.tmp`) bind-mounted as `/tmp` (rw):
-    disk-backed like today, per-app private, no tmpfs RAM surprise;
-  - read-only system paths: `/usr`, `/bin`, `/sbin`, `/lib*`, `/etc`,
-    plus a fresh `--proc /proc` and minimal `--dev /dev`;
+  - the app's own tmp dir (`appDirs.tmp`) bound as `/tmp` (rw,
+    `BindPaths=`): disk-backed like today, per-app private, no tmpfs
+    RAM surprise (`PrivateTmp=` would be the RAM-backed alternative);
+  - read-only system paths (`ProtectSystem=strict`: `/usr`, `/etc`,
+    `/boot`, `/efi` read-only, everything else as declared), plus a
+    fresh `/proc` for the unit's PID namespace (`PrivatePIDs=`) and a
+    minimal `/dev` (`PrivateDevices=`);
   - each configured `extra_path` (ro by default, rw when declared).
 - The view MUST NOT contain: other apps' directories, `/var/lib`
   outside the app's own subtree (TLS keys live there), `/run/hotserve`
-  (admin socket), and `/etc/hotserve` (env files — masked with a
-  tmpfs over the ro `/etc` bind; apps never legitimately read their
-  env *file*, they receive env *variables*).
-- `/run` MUST NOT be bound wholesale — the admin socket is masked by
-  absence, which is the strong form of masking. But
-  `/run/systemd/resolve` MUST be bound ro when it exists: on
-  systemd-resolved hosts (every Ubuntu in the support matrix)
-  `/etc/resolv.conf` is a symlink into that directory, and without the
-  bind it dangles — all DNS inside the sandbox fails, silently, on the
-  most common distro. Local unix sockets (`/run/postgresql`,
-  `/run/mysqld`, …) are deliberately absent; `extra_path` is the
-  documented recipe (see config surface).
+  (admin socket), `/run/user/<uid>` (the user manager's private
+  socket and session bus), and `/etc/hotserve` (env files; apps never
+  legitimately read their env *file*, they receive env *variables*) —
+  all via `InaccessiblePaths=`, with `ReadWritePaths=` re-opening only
+  the app's own release and shared dirs. `/sys/fs/cgroup` MUST be
+  read-only (`ProtectControlGroups=`): the delegated subtree is owned
+  by the app's own UID, so resource caps are otherwise rewritable.
+- `/run/systemd/resolve` MUST stay reachable (read-only) when it
+  exists: on systemd-resolved hosts (every Ubuntu in the support
+  matrix) `/etc/resolv.conf` is a symlink into that directory, and if
+  the masking of `/run` takes it away the link dangles — all DNS
+  inside the sandbox fails, silently, on the most common distro. Local
+  unix sockets (`/run/postgresql`, `/run/mysqld`, …) are deliberately
+  not reachable unless declared; `extra_path` is the documented recipe
+  (see config surface).
 - The app environment MUST be scrubbed (already implemented, for bare
   and sandboxed spawns alike): an allowlist of inherited variables
   (`PATH`, `HOME`, `LANG`, `TZ`, `LC_*`), then env_file, then inline
@@ -98,21 +104,33 @@ requirement below stands as the contract the sandbox path must keep.
   writable in-sandbox path (the app's shared dir, or tmp). Inherited
   they point at `/var/lib/hotserve` — outside the view — and every
   runtime that touches `$HOME` (npm, corepack, pip) would ENOENT.
-- The app MUST run inside a new PID namespace with bubblewrap's
-  reaper as in-namespace init (NOT `--as-pid-1`): siblings are
-  invisible and unsignalable, and orphaned grandchildren are reaped.
-- `--die-with-parent` MUST be set (supersedes Pdeathsig for the
-  sandboxed path) and `--new-session` MUST be set (CVE-2017-5226
-  class: terminal injection).
+- The app MUST run inside a new PID namespace (`PrivatePIDs=yes`,
+  systemd ≥ 256): the supervisor, the user manager and every sibling
+  are invisible and unsignalable, and systemd's in-namespace stub
+  init reaps orphaned grandchildren. This is the load-bearing
+  property — see DESIGN-threat-model.md, "The shared-UID rule": under
+  a shared UID, every mount restriction above is void without it.
+- The unit's cgroup is the lifetime boundary (`KillMode=control-group`,
+  already in force for every unit): nothing outlives the unit, which
+  is what `--die-with-parent` provided under bubblewrap. A unit has no
+  controlling terminal, which is what `--new-session` guarded against
+  (CVE-2017-5226 class).
+- Privilege and system-call surface: `NoNewPrivileges=yes` (already
+  in force), `CapabilityBoundingSet=` (empty),
+  `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX`,
+  `ProtectKernelTunables=`, and `SystemCallFilter=@system-service` —
+  systemd's curated allowlist, adopted wholesale, which is the bar the
+  non-goals below set for any seccomp filter.
 - The network namespace MUST be shared: the app binds 127.0.0.1:$PORT
   and hotserve proxies to it, unchanged.
 - `pre_start` MUST run under the same sandbox as the app it precedes
   (a migration that writes where the app cannot read is a bug caught
   at deploy time, not 3am).
-- Stop semantics MUST remain: SIGTERM to the process group, `grace`,
-  then SIGKILL — with namespace teardown as the backstop (killing the
-  in-namespace init kills everything in the namespace; no survivor is
-  possible). The existing escalation tests define the contract.
+- Stop semantics MUST remain: SIGTERM to the whole cgroup, `grace`
+  (`TimeoutStopSec=`), then SIGKILL — with PID-namespace teardown as
+  the backstop (killing the in-namespace init kills everything in the
+  namespace; no survivor is possible). The existing escalation tests
+  define the contract.
 - The status endpoint MUST report whether the running instance is
   sandboxed (`"sandboxed": true|false`) — observability for operators
   and the assertion hook for smoke tests.
@@ -246,9 +264,11 @@ discover at 3am. The governing asymmetry:
   mistake. Both are why the sandbox-disposition rule below applies to
   every relaunch, not just boot.
 
-A hotserve binary upgrade triggers the second path for every app at
-once (postinstall `try-restart` → supervisor restart → `--die-with-parent`
-kills the children → relaunch from `state.json`). Therefore:
+Under the systemd runner a hotserve restart or upgrade no longer
+relaunches apps at all — units survive and are reattached — so the
+second path is reached by a reboot, a unit stopped behind hotserve's
+back, and every watchdog restart. Those are not rare, and a watchdog
+restart is exactly when an app is already in trouble. Therefore:
 
 - Enabling sandboxing MUST NOT force an already-running app into a
   sandbox on the upgrade's restart relaunch. Sandbox engagement for an
@@ -259,15 +279,17 @@ kills the children → relaunch from `state.json`). Therefore:
   cutover, where the health gate protects it. Record the sandbox
   disposition of the running instance in `state.json` so a relaunch
   reproduces what was actually running, not what config now wants.
-- `auto`'s graceful degrade covers **host incapability only** (no
-  bwrap / userns denied → bare + WARN). It does NOT cover a per-app
+- `auto`'s graceful degrade covers **host incapability only** (a user
+  manager below systemd 256, or a kernel that forbids the namespaces
+  → floor-only + WARN). It does NOT cover a per-app
   misconfiguration on a capable host — a missing `extra_path` still
   fails the app. The doc must not imply `auto` is a safety net for
   profile mistakes; the deploy-path fallback is that net.
 - A global `sandbox require` is the one setting that can take down the
   **whole server** rather than one app: `require` fails *provision*, so
-  on a host without working userns (LXC VPS, locked-down kernel)
-  hotserve does not come up at all — admin socket and proxy included.
+  on a host that cannot sandbox (systemd < 256, an LXC VPS or
+  locked-down kernel without the namespaces) hotserve does not come up
+  at all — admin socket and proxy included.
   `require` MUST therefore be reachable only after `auto` has been
   proven per-app on that host, and this hazard MUST be documented at
   the config surface, not just here.
@@ -295,28 +317,35 @@ data loss.
 
 ## Testing acceptance criteria
 
-- Unit: `buildBwrapArgs` table tests (paths, masking, extra_path
-  ro/rw, real-path invariants); fallback ladder with a fake prober
+- Unit: the unit-property builder's table tests (paths, masking,
+  extra_path ro/rw, real-path invariants) against the fake D-Bus
+  connection; fallback ladder with a fake manager version
   (auto-degrade warns, require fails provision).
-- Integration: real bwrap in the dev container (compose `security_opt`
-  to permit userns under Docker's default seccomp; skip-guard when
-  unavailable) — spawn, group-SIGTERM reaches the app, escalation,
-  no orphans after SIGKILL.
-- e2e: bwrap installed in the e2e image + `security_opt` on
-  e2e-hotserve; ALL existing scenarios pass sandboxed (the
-  zero-downtime suite doubles as sandbox-compat proof); one new
-  scenario deploys a probe app that attempts to read a sibling's
-  release dir, a sibling's env file path, and the admin socket, and
-  asserts every attempt fails. The probe app MUST also assert the
+- Integration: real systemd ≥ 256 in the dev-systemd container — the
+  property set is read back from the transient unit, SIGTERM reaches
+  the app inside its PID namespace, escalation, no orphans after
+  SIGKILL; and once during development, the same run with
+  `PrivatePIDs=` removed MUST make the `/proc/<manager-pid>/root`
+  assertion below fail, proving the PID namespace is the load-bearing
+  piece.
+- e2e: ALL existing scenarios pass sandboxed (the zero-downtime suite
+  doubles as sandbox-compat proof); one new scenario deploys a probe
+  app that attempts to read a sibling's release dir, a sibling's env
+  file path, the admin socket, the user manager's private socket,
+  `/proc/<hotserve-pid>/environ` and `/proc/<user-manager-pid>/root`,
+  and asserts every attempt fails and that `/proc` lists only
+  in-namespace PIDs. The probe app MUST also assert the
   positive contract: a DNS lookup and an outbound HTTP fetch succeed
   (no current test app makes any outbound call, so the resolv.conf
   trap would otherwise ship silently), `$HOME` is writable, and the
   scrubbed env does NOT contain a seeded supervisor secret (e.g. a
   test ACME token).
 - install-test: smoke stage 2 asserts `"sandboxed": true` in the
-  status response on every distro cell — this is where Ubuntu's
-  AppArmor userns policy is proven per-release, per-arch, under the
-  real systemd unit.
+  status response on the systemd ≥ 256 cells (Debian 13, Ubuntu
+  26.04) — this is where Ubuntu's AppArmor user-namespace policy is
+  proven for `systemd --user` per-release, per-arch, under the real
+  unit — and `"sandboxed": false` with the WARN in the journal on the
+  older cells (Debian 12, Ubuntu 24.04).
 - soak: full churn with sandbox on; RSS/goroutine/fd deltas quantify
   the (expected ~zero) overhead as a measured claim.
 - Upgrade contract: a test proves that an app whose recorded running
@@ -338,16 +367,19 @@ data loss.
 
 ## Non-goals (M8)
 
-- Resource limits (memory/CPU) — the v2 systemd-transient-units
-  runner tier; bubblewrap has no cgroup story.
+- Resource limits (memory/CPU) — *no longer a non-goal*: unit
+  properties (`MemoryMax=`, `TasksMax=`, `CPUQuota=`) come with the
+  mechanism, once `/sys/fs/cgroup` is read-only in the unit (above).
+  Defaults and the config surface are decided in #35.
 - Network egress control — kernel sandboxes cannot scope by hostname;
   document Deno/Node permission flags as the per-runtime option.
-- Per-app UIDs — the systemd runner; bubblewrap's mount/PID
-  namespaces deliver the file/process isolation without them.
-- seccomp filtering — Flatpak ships a curated, battle-tested filter;
-  hand-rolling one here is exactly the "looks configured, quietly
-  weaker" trap this document warns about. Revisit only if a vetted
-  filter can be adopted wholesale.
+- Per-app UIDs — a later milestone behind a root-owned template or a
+  minimal privileged helper; the unit's mount/PID namespaces deliver
+  the file/process isolation without them.
+- Hand-rolled seccomp filtering — exactly the "looks configured,
+  quietly weaker" trap this document warns about. systemd's curated
+  `@system-service` set is a vetted filter adopted wholesale, which is
+  why it appears in the specification above.
 - Protecting an app from itself — its own env and its own database
   are legitimately reachable by definition.
 - macOS/Windows sandboxing — `auto` is a documented no-op off-Linux
