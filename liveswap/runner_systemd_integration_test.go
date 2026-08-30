@@ -524,7 +524,9 @@ func TestIntegrationSystemdSandboxedUnit(t *testing.T) {
 		dir:     release,
 		env:     []string{"PATH=" + os.Getenv("PATH"), "HOME=" + shared},
 		grace:   2 * time.Second,
-		sandbox: &sandboxSpec{tier: sandboxFull, root: root, writable: []string{release, shared}, hidden: sandboxHiddenFloor},
+		sandbox: &sandboxSpec{tier: sandboxFull, root: root, appDir: filepath.Join(root, "itest"),
+			writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}},
+			hidden:   sandboxHiddenFloor},
 	}
 	h, err := r.Start(spec)
 	if err != nil {

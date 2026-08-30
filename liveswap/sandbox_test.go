@@ -218,12 +218,12 @@ func TestSandboxPropertiesNoneWhenUnsandboxed(t *testing.T) {
 
 func TestSandboxPropertiesFilesystemAndFull(t *testing.T) {
 	spec := &sandboxSpec{
-		tier:     sandboxFilesystem,
-		root:     "/var/lib/liveswap",
+		tier: sandboxFilesystem,
+		root: "/var/lib/liveswap",
 		writable: []bindPath{{dest: "/var/lib/liveswap/blog/releases/v3", source: "/var/lib/liveswap/blog/releases/v3"},
 			{dest: "/var/lib/liveswap/blog/shared", source: "/var/lib/liveswap/blog/shared"}},
-		extra:    []extraPath{{path: "/run/postgresql"}, {path: "/var/cache/blog", rw: true}},
-		hidden:   append(append([]string{}, sandboxHiddenFloor...), "/var/lib/hotserve/caddy", "/etc/blog/blog.env"),
+		extra:  []extraPath{{path: "/run/postgresql"}, {path: "/var/cache/blog", rw: true}},
+		hidden: append(append([]string{}, sandboxHiddenFloor...), "/var/lib/hotserve/caddy", "/etc/blog/blog.env"),
 	}
 	got := propMap(unitSpec{ExecStart: []string{"/bin/true"}, Sandbox: spec})
 	for _, name := range sandboxPropertyNames {

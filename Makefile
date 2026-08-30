@@ -51,8 +51,13 @@ test-integration:
 	$(COMPOSE) rm -sf dev-systemd >/dev/null; \
 	exit $$status
 
+# Both tag sets: the integration-tagged files are not compiled by
+# `make test` or a bare vet, so a signature change that breaks them
+# stays invisible until the integration lane boots a whole systemd
+# container to find out.
 vet:
 	$(COMPOSE) run --rm dev go vet $(PKGS)
+	$(COMPOSE) run --rm dev go vet -tags integration $(PKGS)
 
 tidy:
 	for m in $(MODULES); do $(COMPOSE) run --rm -w /src/$$m dev go mod tidy || exit 1; done
