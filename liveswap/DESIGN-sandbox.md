@@ -171,10 +171,17 @@ requirement below stands as the contract the sandbox path must keep.
   `os.Environ()` inheritance, which would leak ACME tokens (and any
   other supervisor secrets) into every app. The sandbox path MUST NOT
   regress this.
-- `HOME`, `XDG_DATA_HOME` and `XDG_CONFIG_HOME` MUST be set to a
-  writable in-sandbox path (the app's shared dir, or tmp). Inherited
-  they point at `/var/lib/hotserve` — outside the view — and every
-  runtime that touches `$HOME` (npm, corepack, pip) would ENOENT.
+- Nothing in the app's environment may name a path outside its view.
+  `HOME` MUST be set to a writable in-sandbox path (the app's shared
+  dir): inherited it points at `/var/lib/hotserve`, and every runtime
+  that touches `$HOME` (npm, corepack, pip) would ENOENT.
+  `XDG_DATA_HOME` and `XDG_CONFIG_HOME` MUST NOT be inherited —
+  *amended 2026-08-31, this bullet previously said they must be set*.
+  Leaving them unset is what satisfies the rule: the XDG base-directory
+  spec then makes every runtime derive them from `$HOME`, which is
+  already correct, so there are two fewer values to keep right. They
+  are not in `envAllowlist`, which is what enforces it.
+  Pinned by `TestSandboxedEnvNamesNoPathOutsideTheView`.
 - The app MUST run inside a new user namespace (`PrivateUsers=yes`,
   set explicitly — systemd 252 does not imply it): this is the
   load-bearing property for the filesystem rows — see
@@ -409,6 +416,15 @@ and restarting. The failure mode this section exists to prevent is a
 data loss.
 
 ## Testing acceptance criteria
+
+**Every promise above is asserted somewhere, and a promise that is not
+asserted is not a promise.** Three review rounds on this feature found
+the same class of defect — one app reaching another's data — by
+inspection, one instance at a time, because the model's guarantees
+lived in prose while the tests checked the diff. `liveswap/sandbox_promises_test.go`
+carries the ones whose only other statement was prose, and its header
+maps every other normative bullet to the test that pins it. Adding a
+MUST here means adding its assertion in the same change.
 
 - Unit: the unit-property builder's table tests (the base view,
   extra_path ro/rw, real-path invariants, and above all that the set
