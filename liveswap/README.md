@@ -267,14 +267,16 @@ socket), `/etc/hotserve`, `/home`, `/opt`, `/srv` and every operator
 to be kept current for that to stay true.
 
 "The OS runtime" is a named set, not the host: `/usr` and its usrmerge
-aliases (`/bin`, `/sbin`, `/lib*`), the TLS trust store, and fourteen
-individual `/etc` entries for name and user resolution, timezone and
-the dynamic linker (`sandboxBaseView` in `sandbox.go` is the list).
-`/etc` is deliberately **not** bound whole — that would hand every app
-every other app's `env_file`. Each entry is optional, since no distro
-has all fourteen, so inside a unit `ls /etc` lists however many of
-them this host actually has — a dozen or so — and `ls /var/lib` lists
-exactly one, the liveswap root.
+aliases (`/bin`, `/sbin`, `/lib*`), the certificate directories of the
+TLS trust store, and the individual `/etc` entries needed for name and
+user resolution, timezone and the dynamic linker. `sandboxBaseView` in
+`sandbox.go` is the list, and it names entries rather than the trees
+containing them: `/etc` is not bound whole (that would hand every app
+every other app'"'"'s `env_file`), and neither is `/etc/ssl`, which also
+holds `/etc/ssl/private`. Every entry is optional, since no distro has
+all of them, so inside a unit `ls /etc` shows however many this host
+actually has — a dozen or so — and `ls /var/lib` shows exactly one,
+the liveswap root.
 
 The working directory is the release dir and `HOME` is `shared/`; both
 are writable. The network namespace is shared by design — the app

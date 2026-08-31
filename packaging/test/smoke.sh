@@ -232,10 +232,11 @@ cat "/proc/$MGR_PID/environ" >/dev/null 2>&1 && mgrenv=open || mgrenv=closed
 # above would be satisfied by a unit that has nothing in it at all.
 [ -x /bin/sh ] && binsh=ok || binsh=MISSING
 [ -x /usr/bin/hotserve ] && hsbin=ok || hsbin=MISSING
-[ -e /etc/ssl ] && etcssl=ok || etcssl=MISSING
+[ -e /etc/ssl/certs ] && etcssl=ok || etcssl=MISSING
+[ -e /etc/ssl/private ] && sslpriv=present || sslpriv=absent
 etclist=$(ls /etc 2>/dev/null | tr '\n' ',')
 varliblist=$(ls /var/lib 2>/dev/null | tr '\n' ',')
-echo "smoke app starting on $PORT nofile_soft=$(ulimit -Sn) nofile_hard=$(ulimit -Hn) uidmap=$uidmap pid=$$ nprocs=$(ls /proc | grep -c '^[0-9]') hotserve_lib=$hslib mgr_root=$mgrroot mgr_environ=$mgrenv mgr_socket=$mgrsock admin_socket=$adminsock state_json=$state etc_hotserve=$etchs binsh=$binsh hsbin=$hsbin etcssl=$etcssl etclist=$etclist varliblist=$varliblist saw_mgr_pid=$MGR_PID saw_uid=$HOTSERVE_UID"
+echo "smoke app starting on $PORT nofile_soft=$(ulimit -Sn) nofile_hard=$(ulimit -Hn) uidmap=$uidmap pid=$$ nprocs=$(ls /proc | grep -c '^[0-9]') hotserve_lib=$hslib mgr_root=$mgrroot mgr_environ=$mgrenv mgr_socket=$mgrsock admin_socket=$adminsock state_json=$state etc_hotserve=$etchs binsh=$binsh hsbin=$hsbin etcssl=$etcssl sslprivate=$sslpriv etclist=$etclist varliblist=$varliblist saw_mgr_pid=$MGR_PID saw_uid=$HOTSERVE_UID"
 exec /usr/bin/hotserve respond --listen 127.0.0.1:"$PORT" "hello smoke"
 EOF
 chmod +x "$workdir/server"
@@ -379,6 +380,9 @@ saw_uid=$(printf '%s' "$app_line" | grep -o 'saw_uid=[^ ]*' | cut -d= -f2)
 # absent on this host.
 [ -r "/proc/$mgr_pid/environ" ] || die "/proc/$mgr_pid/environ is unreadable even to root; the in-unit probe would prove nothing"
 [ -e "/run/user/$uid/systemd/private" ] || die "the manager socket does not exist; the in-unit probe would prove nothing"
+sslpriv_seen=$(printf '%s' "$app_line" | grep -o 'sslprivate=[a-z]*' | cut -d= -f2)
+[ "$sslpriv_seen" = "absent" ] \
+	|| die "/etc/ssl/private is inside the unit: the base view binds the trust store, not the whole /etc/ssl tree"
 for route in mgr_root mgr_environ mgr_socket admin_socket state_json etc_hotserve; do
 	got=$(printf '%s' "$app_line" | grep -o "$route=[a-z_]*" | cut -d= -f2)
 	[ "$got" = "closed" ] \

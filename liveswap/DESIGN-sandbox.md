@@ -99,7 +99,9 @@ requirement below stands as the contract the sandbox path must keep.
   - a **base view** of the OS, bound read-only, named entry by entry
     in `sandboxBaseView` (liveswap/sandbox.go): `/usr` and the usrmerge
     aliases (`/bin`, `/sbin`, `/lib*`), the TLS trust store
-    (`/etc/ssl`, `/etc/ca-certificates`, `/etc/pki`), name and user
+    (`/etc/ssl/certs`, `/etc/ssl/openssl.cnf`, `/etc/ca-certificates`,
+    `/etc/pki/tls/certs` — the certificate directories themselves, never
+    the `/etc/ssl` tree that also holds `/etc/ssl/private`), name and user
     resolution (`/etc/resolv.conf`, `/etc/hosts`, `/etc/hostname`,
     `/etc/nsswitch.conf`, `/etc/passwd`, `/etc/group`), `/etc/localtime`,
     `/etc/alternatives`, the linker's cache and configuration

@@ -171,7 +171,8 @@ an on-disk release. Full details, CI snippets, and every option:
   own sandboxing: a user namespace (`PrivateUsers=`), a
   deny-by-default filesystem view — the whole host filesystem replaced
   by an empty read-only tmpfs (`TemporaryFileSystem=/:ro`), with only
-  the OS the app needs to run, its own release and `shared/`, and its
+  the OS the app needs to run — named entry by entry, never whole
+  trees — its own release and `shared/`, and its
   declared `extra_path`s bound back, so hotserve's directories and
   sockets and every other app are *absent* rather than merely
   unreadable — `PrivateTmp=`, `PrivateDevices=`, a read-only cgroupfs,

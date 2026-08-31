@@ -296,7 +296,7 @@ func TestSandboxPropertiesFilesystemAndFull(t *testing.T) {
 	// and must NOT carry /etc wholesale — that would hand every app
 	// every other app's env_file, which is the derived hidden set this
 	// model deletes.
-	for _, needed := range []string{"/usr", "/bin", "/etc/resolv.conf", "/etc/ssl", "/run/systemd/resolve"} {
+	for _, needed := range []string{"/usr", "/bin", "/etc/resolv.conf", "/etc/ssl/certs", "/run/systemd/resolve"} {
 		if _, ok := ro[needed]; !ok {
 			t.Errorf("base view lacks %s: apps cannot run without it", needed)
 		}
@@ -1487,5 +1487,149 @@ func TestUnitForResolvesTheCommandBeforeTestingTheView(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), realBin) || !strings.Contains(err.Error(), "extra_path") {
 		t.Fatalf("the refusal must name the resolved target and the fix: %v", err)
+	}
+}
+
+// TestBaseViewNamesTheTrustStoreNotTheTree: /etc/ssl also holds
+// /etc/ssl/private. It is 0700 root:root on every cell of the support
+// matrix, so binding /etc/ssl disclosed nothing — but a base view
+// should name what apps need rather than depend on the permissions of
+// what it sweeps up, and the narrower bind costs nothing.
+func TestBaseViewNamesTheTrustStoreNotTheTree(t *testing.T) {
+	for _, tree := range []string{"/etc/ssl", "/etc/pki", "/etc"} {
+		for _, e := range sandboxBaseView {
+			if e == tree {
+				t.Errorf("base view binds the whole %s tree; name the entries apps need instead", tree)
+			}
+		}
+	}
+	for _, needed := range []string{"/etc/ssl/certs", "/etc/pki/tls/certs"} {
+		found := false
+		for _, e := range sandboxBaseView {
+			if e == needed {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("base view lacks %s: TLS verification would fail inside the sandbox", needed)
+		}
+	}
+	// And the private-key directory must not be reachable through any
+	// base-view entry, by prefix or otherwise.
+	spec := &sandboxSpec{tier: sandboxFull, root: "/var/lib/liveswap", appDir: "/var/lib/liveswap/blog", appName: "blog"}
+	if spec.inView("/etc/ssl/private") || spec.inView("/etc/ssl/private/host.key") {
+		t.Error("/etc/ssl/private is inside the view")
+	}
+}
+
+// TestBindSourceInsideTheBaseViewRefused: the base view is the one part
+// of the host every unit shares, so an app whose own data resolves into
+// it is readable by every sibling — silently, with status still
+// reporting the tier as applied. Both the per-app bind and the liveswap
+// root itself must refuse it.
+func TestBindSourceInsideTheBaseViewRefused(t *testing.T) {
+	for _, p := range []string{"/usr/local/app-data", "/usr", "/etc/ssl/certs/x", "/bin/data"} {
+		if err := closedPath(p); err == nil {
+			t.Errorf("a mandatory bind source at %s was accepted: every other app can read it", p)
+		} else if !strings.Contains(err.Error(), "EVERY app's sandbox") {
+			t.Errorf("%s refused for the wrong reason: %v", p, err)
+		}
+	}
+	// Somewhere genuinely outside the view is still fine — that is the
+	// supported "shared moved to another disk" case.
+	for _, p := range []string{"/mnt/blog-data", "/srv/blog-data", "/var/cache/blog"} {
+		if err := closedPath(p); err != nil {
+			t.Errorf("%s refused, but it is outside every app's view: %v", p, err)
+		}
+	}
+	for _, bad := range []string{"/usr/local/liveswap", "/usr/share/liveswap", "/etc/ssl/certs/apps"} {
+		if err := validateSandboxRoot(bad); err == nil {
+			t.Errorf("root %s accepted: every app's data would be readable by every other app", bad)
+		}
+	}
+	for _, ok := range []string{"/var/lib/liveswap", "/srv/apps", "/mnt/apps", "/tmp/liveswap-test"} {
+		if err := validateSandboxRoot(ok); err != nil {
+			t.Errorf("root %s refused: %v", ok, err)
+		}
+	}
+}
+
+// TestValidateSandboxRootFollowsSymlinks: the root check is lexical, so
+// `/srv/liveswap -> /var/lib/hotserve/apps` would otherwise walk past
+// the hotserve-state refusal entirely.
+func TestValidateSandboxRootFollowsSymlinks(t *testing.T) {
+	base, err := os.MkdirTemp("/var", "rootalias-")
+	if err != nil {
+		t.Skipf("no writable dir for the alias: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	for _, target := range []string{"/var/lib/hotserve", "/usr/local"} {
+		if _, err := os.Stat(target); os.IsNotExist(err) {
+			if err := os.MkdirAll(target, 0o750); err != nil {
+				t.Skipf("cannot create %s: %v", target, err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(target) })
+		}
+		link := filepath.Join(base, "liveswap")
+		_ = os.Remove(link)
+		if err := os.Symlink(target, link); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		if err := validateSandboxRoot(link); err == nil {
+			t.Errorf("a root symlinked to %s was accepted: the lexical spelling hides it", target)
+		}
+	}
+}
+
+// TestUnitForAcceptsACommandUnderASymlinkedRoot: LookPath is resolved
+// before the view test, and a resolved path is canonical — so with a
+// symlinked liveswap root the command resolves to the bind's SOURCE
+// while the destination keeps the configured spelling. Testing
+// destinations alone would refuse every launch on such a host.
+func TestUnitForAcceptsACommandUnderASymlinkedRoot(t *testing.T) {
+	r, _ := newTestSystemdRunner(t)
+	base, err := os.MkdirTemp("/var", "symroot-")
+	if err != nil {
+		t.Skipf("no writable dir outside the refused prefixes: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	real := filepath.Join(base, "mnt-liveswap")
+	release := filepath.Join(real, "blog", "releases", "v1")
+	shared := filepath.Join(real, "blog", "shared")
+	for _, d := range []string{release, shared} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(release, "server"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(base, "srv-liveswap")
+	if err := os.Symlink(real, root); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	aliasRelease := filepath.Join(root, "blog", "releases", "v1")
+	spec := startSpec{app: "blog", version: "v1", dir: aliasRelease, command: []string{"./server"},
+		sandbox: &sandboxSpec{tier: sandboxFull, root: root, appDir: filepath.Join(root, "blog"), appName: "blog",
+			writable: []bindPath{{dest: aliasRelease, source: aliasRelease},
+				{dest: filepath.Join(root, "blog", "shared"), source: filepath.Join(root, "blog", "shared")}}}}
+	if _, err := r.unitFor(spec, false); err != nil {
+		t.Fatalf("a command under a symlinked root must launch, exactly as under an unaliased one: %v", err)
+	}
+	// The escape this check exists for still fails: a shim inside the
+	// release dir pointing at a target outside every bind.
+	outside := filepath.Join(base, "runtime")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "node"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "node"), filepath.Join(release, "node")); err != nil {
+		t.Fatal(err)
+	}
+	spec.command = []string{"./node"}
+	if _, err := r.unitFor(spec, false); err == nil {
+		t.Error("a shim pointing outside every bind was accepted under a symlinked root")
 	}
 }

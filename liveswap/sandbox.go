@@ -166,10 +166,15 @@ var sandboxBaseView = []string{
 	// hard-coded /bin/sh or an interpreter's own ld path resolves to
 	// the spelling it was written with.
 	"/bin", "/sbin", "/lib", "/lib64", "/lib32", "/libx32",
-	// The TLS trust store, under all three spellings in the matrix.
-	// Recursive, so the /etc/ssl/certs symlinks into /usr/share
-	// resolve to the /usr bound above.
-	"/etc/ssl", "/etc/ca-certificates", "/etc/pki",
+	// The TLS trust store — the certificate directories themselves, not
+	// the trees that contain them. /etc/ssl also holds /etc/ssl/private,
+	// which nothing in an app needs: it is 0700 root:root on every cell
+	// of the matrix, so binding /etc/ssl disclosed nothing today, but a
+	// base view should name what apps need rather than rely on the
+	// permissions of what it sweeps up. Recursive, so the hashed
+	// symlinks under certs/ resolve into the /usr bound above.
+	"/etc/ssl/certs", "/etc/ssl/openssl.cnf",
+	"/etc/ca-certificates", "/etc/pki/tls/certs",
 	// Name resolution and user lookup: getaddrinfo reads all four, and
 	// without them every DNS lookup and every getpwuid fails.
 	"/etc/resolv.conf", "/etc/hosts", "/etc/hostname", "/etc/nsswitch.conf",
@@ -376,6 +381,18 @@ func closedPath(p string) error {
 	for _, c := range sandboxNeverBound {
 		if overlaps(p, c) {
 			return fmt.Errorf("%q overlaps %s, which no app may be given", p, c)
+		}
+	}
+	// The base view is the one part of the host every unit shares, so a
+	// bind source inside it is readable by every OTHER app whether or
+	// not this app binds it — `shared -> /usr/local/app-data` would put
+	// this app's data somewhere all its siblings can read, silently and
+	// with the status endpoint still reporting the tier as applied. The
+	// app-to-app boundary is exactly what the sandbox exists to build,
+	// so this is a configuration error, not a choice.
+	for _, b := range sandboxBaseView {
+		if overlaps(p, b) {
+			return fmt.Errorf("%q overlaps %s, which is bound read-only into EVERY app's sandbox — data placed there is readable by every other app; put it somewhere outside the base view", p, b)
 		}
 	}
 	return nil
@@ -588,9 +605,28 @@ func checkExtraPathContainment(p, root, rootC string) error {
 // asserts the full tier. Refusing those would turn an odd-but-working
 // setup into a server that will not start.
 func validateSandboxRoot(root string) error {
-	for _, h := range sandboxHotservePaths {
-		if pathWithin(root, h) {
-			return fmt.Errorf("root %q is inside %s, which holds hotserve's own keys, sockets and env files; use a root outside it (the default is /var/lib/liveswap)", root, h)
+	// Both spellings: the check is lexical, so `/srv/liveswap ->
+	// /var/lib/hotserve/apps` would otherwise walk straight past it.
+	// An unresolvable root (not created yet, which is the normal case
+	// at first config load) falls back to the lexical value.
+	roots := []string{root}
+	if c, err := filepath.EvalSymlinks(root); err == nil && c != root {
+		roots = append(roots, c)
+	}
+	for _, r := range roots {
+		for _, h := range sandboxHotservePaths {
+			if pathWithin(r, h) {
+				return fmt.Errorf("root %q is inside %s, which holds hotserve's own keys, sockets and env files; use a root outside it (the default is /var/lib/liveswap)", root, h)
+			}
+		}
+		// A root inside the base view would put EVERY app's state and
+		// every app's data under a tree bound read-only into every
+		// other app's sandbox — the app-to-app boundary gone wholesale,
+		// which is worse than the single-app case closedPath refuses.
+		for _, b := range sandboxBaseView {
+			if pathWithin(r, b) {
+				return fmt.Errorf("root %q is inside %s, which is bound read-only into every app's sandbox — every app's data would be readable by every other; use a root outside the base view (the default is /var/lib/liveswap)", root, b)
+			}
 		}
 	}
 	return nil
@@ -607,13 +643,25 @@ func pathWithin(p, dir string) bool {
 // the whole of the view — the same three sources sandboxProperties
 // renders, and the reason it can be answered without asking systemd.
 func (s *sandboxSpec) inView(p string) bool {
+	// Destination AND source. The caller resolves symlinks before
+	// asking, and a resolved path is canonical, so a bind whose source
+	// differs from its destination — a symlinked liveswap root, or an
+	// extra_path that resolves elsewhere — is only recognisable by its
+	// source. Testing destinations alone would refuse `./server` under
+	// a root like /srv/liveswap -> /mnt/liveswap on every launch.
+	both := func(dest, source string) bool {
+		if source == "" {
+			source = dest
+		}
+		return pathWithin(p, dest) || pathWithin(p, source)
+	}
 	for _, b := range s.writable {
-		if pathWithin(p, b.dest) {
+		if both(b.dest, b.source) {
 			return true
 		}
 	}
 	for _, e := range s.extra {
-		if pathWithin(p, e.path) {
+		if both(e.path, e.source) {
 			return true
 		}
 	}

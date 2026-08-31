@@ -424,8 +424,8 @@ still fixed at a unit's start is the tier and the set of paths an
 operator asked to be let IN, both of which fail safe and both of which
 a redeploy refreshes. Measured on all four cells of the support matrix
 (systemd 252/255/257/259): inside a unit, `/etc` holds only the named
-base-view entries this host actually has — a dozen or so of the
-fourteen — and `/var/lib` holds the liveswap root alone.
+base-view entries this host actually has — a dozen or so — and
+`/var/lib` holds the liveswap root alone.
 
 3. **Resource caps need a read-only cgroupfs inside the sandbox.** The
    cgroup subtree under `user@<uid>.service` is delegated to — owned

@@ -133,6 +133,7 @@ expect_probe dns ok
 expect_probe binsh ok
 expect_probe usrbinenv ok
 expect_probe etcssl ok
+expect_probe sslprivate absent
 # Deny-by-default: nothing bound these, so they do not exist inside the
 # unit — not "present but inaccessible", which is what the hidden-set
 # model left behind and what could go stale between deploys.

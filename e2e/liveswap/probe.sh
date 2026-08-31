@@ -43,7 +43,10 @@ echo "varlib_listing=$(ls /var/lib 2>/dev/null | tr '\n' ' ')" >> "$out"
 # actually run on, so "absent" above cannot mean "the unit is empty".
 [ -x /bin/sh ] && echo "binsh=ok" >> "$out" || echo "binsh=MISSING" >> "$out"
 [ -x /usr/bin/env ] && echo "usrbinenv=ok" >> "$out" || echo "usrbinenv=MISSING" >> "$out"
-[ -e /etc/ssl ] && echo "etcssl=ok" >> "$out" || echo "etcssl=MISSING" >> "$out"
+[ -e /etc/ssl/certs ] && echo "etcssl=ok" >> "$out" || echo "etcssl=MISSING" >> "$out"
+# The trust store is named, not the tree that contains it: /etc/ssl also
+# holds /etc/ssl/private, which nothing in an app needs.
+[ -e /etc/ssl/private ] && echo "sslprivate=present" >> "$out" || echo "sslprivate=absent" >> "$out"
 cg="/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)"
 (echo max > "$cg/memory.max") 2>/dev/null && echo "cgroup=writable" >> "$out" || echo "cgroup=readonly" >> "$out"
 touch /tmp/.probe-w 2>/dev/null && echo "tmp=writable" >> "$out" || echo "tmp=readonly" >> "$out"
