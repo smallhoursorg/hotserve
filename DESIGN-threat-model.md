@@ -427,6 +427,40 @@ a redeploy refreshes. Measured on all four cells of the support matrix
 base-view entries this host actually has — a dozen or so — and
 `/var/lib` holds the liveswap root alone.
 
+*What a bare app leaves behind, the sandbox keeps.* The sandbox
+restricts **reachability**; it cannot un-copy. `shared/` is the one
+directory that survives every deploy and is bound read-write into the
+new sandbox, so anything a bare instance put there — `sandbox off`, a
+host at the `none` tier, or simply any app before its first sandboxed
+deploy, which is the documented rollout — is inside the sandboxed
+app's view afterwards, legitimately, with every check passing because
+the bind resolves to exactly the directory it names. As the shared uid
+a bare app can `cp` the supervisor's TLS keys, a sibling's release or
+`shared` contents, or any readable `env_file` into its own `shared/`.
+Worse, it can `link(2)` them: the shared uid owns those files, so the
+hardlink is a live view of the inode, and an operator who later
+rotates a secret **in place** publishes the new value into the sandbox
+too — only replace-by-rename breaks the link. The operational
+consequence, stated in liveswap/README.md's rollout section: sandboxing
+an app that may have been compromised while bare is not containment;
+clear its `shared/` and rotate anything it could read first.
+
+*The recorded tier is app-writable.* A relaunch reproduces the tier
+from `state.json`, which lives under the shared uid and outside every
+sandboxed view — but a *bare* app can write any app's `state.json` and
+pin it to `none` across every supervisor restart, boot recovery and
+watchdog relaunch, with the status endpoint then honestly reporting
+`none`. It cannot redirect `CurrentVersion` out of the app
+(`versionPathComponent`, the `os.Stat` on the release dir, and
+`unitBelongsTo` each refuse). The signal is the WARN every such launch
+emits; the fix is per-app UIDs.
+
+*The capability probe runs under the shared uid.* It starts a real
+transient unit for up to 30s per start, so any process holding that uid
+can interfere with it: under `auto` a failed probe degrades every app
+to `none` with a WARN, under `require` it fails the whole server start.
+The tier is therefore not solely a property of the host.
+
 3. **Resource caps need a read-only cgroupfs inside the sandbox.** The
    cgroup subtree under `user@<uid>.service` is delegated to — owned
    by — the hotserve UID, so `MemoryMax=`/`TasksMax=` on a user-manager

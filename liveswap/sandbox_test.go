@@ -1157,8 +1157,10 @@ func TestOverlapIsSymmetric(t *testing.T) {
 	if err := validateExtraPath("/var/lib", "/var/lib/liveswap"); err == nil {
 		t.Error("an ancestor of the liveswap root was accepted")
 	}
-	// Siblings that merely share a prefix are still fine.
-	for _, ok := range []string{"/run/postgresql", "/var/cache/blog", "/etc/ssl/certs", "/srv/data"} {
+	// Siblings that merely share a prefix are still fine. (Not
+	// /etc/ssl/certs — that IS a base-view entry now, so naming it is
+	// refused for granting nothing; see TestExtraPathMayNotOverlapTheBaseView.)
+	for _, ok := range []string{"/run/postgresql", "/var/cache/blog", "/etc/myapp", "/srv/data"} {
 		if err := validateExtraPath(ok, "/var/lib/liveswap"); err != nil {
 			t.Errorf("%s rejected: %v", ok, err)
 		}
@@ -1763,5 +1765,179 @@ func TestBindOntoASiblingsExternalDataRefused(t *testing.T) {
 	}
 	if err := spec.resolveBindSources(); err == nil {
 		t.Errorf("blog was allowed to bind another app's env_file directory %s", secrets)
+	}
+}
+
+// TestAppViewsAreDisjointExceptTheBaseView is the app-to-app boundary
+// as an executable invariant rather than something a reviewer has to
+// notice. Three separate review findings on this PR were the same
+// defect wearing different clothes — one app reaching another's data,
+// via an out-of-root bind, via the shared base view, via a root inside
+// it — and each was caught one at a time by inspection. This asserts
+// the property directly: for any two apps, the only paths their views
+// share are the base view, which is read-only and identical for
+// everyone by design.
+//
+// It is deliberately written over the whole rendered property set, not
+// over sandboxSpec, so it also covers how the binds are emitted.
+func TestAppViewsAreDisjointExceptTheBaseView(t *testing.T) {
+	root := t.TempDir()
+	view := func(name string, extras []extraPath) map[string]bindMount {
+		spec := &appSpec{name: name, dirs: newAppDirs(root, name), extraPaths: extras}
+		sb := spec.sandboxSpecFor(spec.dirs.release("v1"), sandboxFull)
+		got := propMap(unitSpec{ExecStart: []string{"/bin/true"}, Sandbox: sb})
+		m := map[string]bindMount{}
+		for _, prop := range []string{"BindPaths", "BindReadOnlyPaths"} {
+			if bs, ok := got[prop].([]bindMount); ok {
+				for _, b := range bs {
+					m[b.Destination] = b
+				}
+			}
+		}
+		return m
+	}
+	base := map[string]bool{}
+	for _, p := range sandboxBaseView {
+		base[p] = true
+	}
+
+	blog := view("blog", nil)
+	shop := view("shop", nil)
+	for dest, b := range blog {
+		if base[dest] {
+			if !b.IgnoreENOENT {
+				t.Errorf("base-view entry %s is not optional", dest)
+			}
+			continue
+		}
+		// Not a base-view entry: it must be blog's own, and it must not
+		// appear in shop's view at all.
+		if _, shared := shop[dest]; shared {
+			t.Errorf("%s is in both blog's and shop's view", dest)
+		}
+		if !strings.HasPrefix(dest, filepath.Join(root, "blog")+"/") && dest != filepath.Join(root, "blog") {
+			t.Errorf("blog's view contains %s, which is not under its own app directory", dest)
+		}
+	}
+	// Every writable path in a view must be the app's own. This is the
+	// half that matters: a read-only leak is a disclosure, a writable
+	// one lets an app corrupt a sibling.
+	for name, other := range map[string]string{"blog": "shop", "shop": "blog"} {
+		got := propMap(unitSpec{ExecStart: []string{"/bin/true"},
+			Sandbox: (&appSpec{name: name, dirs: newAppDirs(root, name)}).sandboxSpecFor(
+				newAppDirs(root, name).release("v1"), sandboxFull)})
+		for _, b := range got["BindPaths"].([]bindMount) {
+			if !strings.HasPrefix(b.Destination, filepath.Join(root, name)+"/") {
+				t.Errorf("%s has a writable bind at %s, outside its own app directory", name, b.Destination)
+			}
+			if strings.HasPrefix(b.Destination, filepath.Join(root, other)+"/") {
+				t.Errorf("%s has a writable bind into %s's directory: %s", name, other, b.Destination)
+			}
+			if b.Source != b.Destination && strings.HasPrefix(b.Source, filepath.Join(root, other)) {
+				t.Errorf("%s's bind at %s is taken FROM %s's data (%s)", name, b.Destination, other, b.Source)
+			}
+		}
+	}
+	// And an app's own state must not be in its own view either — the
+	// integrity boundary the design states as normative.
+	d := newAppDirs(root, "blog")
+	for _, p := range []string{d.app, d.state, d.tmp, d.current, d.releases} {
+		if _, present := blog[p]; present {
+			t.Errorf("blog's view contains %s", p)
+		}
+	}
+}
+
+// TestExtraPathMayNotOverlapTheBaseView: the base view is bound
+// read-only into every unit, so a writable bind inside it is a
+// cross-app WRITE channel — the write goes through to the host inode
+// that every sibling's own /usr bind exposes. I first allowed this,
+// reasoning that the base view already makes such a path readable and
+// so refusing changed nothing. That accounted for the read direction
+// only. The sharp end is `extra_path /usr/local/bin rw`: that
+// directory is on the PATH the supervisor searches with exec.LookPath,
+// so one app could choose the binary another app runs.
+func TestExtraPathMayNotOverlapTheBaseView(t *testing.T) {
+	for _, p := range []string{
+		"/usr/local/bin", "/usr/local/share/assets", "/usr",
+		"/etc/alternatives", "/etc/ld.so.conf.d", "/etc/ssl/certs",
+	} {
+		err := validateExtraPath(p, "/var/lib/liveswap")
+		if err == nil {
+			t.Errorf("extra_path %s accepted: it is inside the view every app shares", p)
+			continue
+		}
+		if !strings.Contains(err.Error(), "EVERY app's sandbox") {
+			t.Errorf("%s refused for the wrong reason: %v", p, err)
+		}
+	}
+	// The documented recipes are unaffected — none of them overlaps a
+	// base-view entry, including the /run one, which sits beside
+	// /run/systemd/resolve rather than under it.
+	for _, p := range []string{"/run/postgresql", "/var/cache/blog", "/srv/media", "/opt/geoip"} {
+		if err := validateExtraPath(p, "/var/lib/liveswap"); err != nil {
+			t.Errorf("documented extra_path %s refused: %v", p, err)
+		}
+	}
+	// And nothing hotserve derives may land there either.
+	root := t.TempDir()
+	spec := &appSpec{name: "blog", dirs: newAppDirs(root, "blog")}
+	sb := spec.sandboxSpecFor(spec.dirs.release("v1"), sandboxFull)
+	for _, b := range sb.writable {
+		for _, base := range sandboxBaseView {
+			if overlaps(b.dest, base) {
+				t.Errorf("a derived writable bind %s lands in the base view %s", b.dest, base)
+			}
+		}
+	}
+}
+
+// TestWarnExtraPathOverAnotherAppsEnvFile: an env_file is absent from
+// every view unless something names its directory — and an extra_path
+// is something. The documented locations are refused outright, but an
+// operator keeping env files elsewhere can hand one app another's
+// secrets with a wide extra_path, silently.
+func TestWarnExtraPathOverAnotherAppsEnvFile(t *testing.T) {
+	root := t.TempDir()
+	mk := func(name, envFile string, extras ...string) *appSpec {
+		s := &appSpec{name: name, dirs: newAppDirs(root, name), envFile: envFile, sandboxMode: sandboxAuto}
+		for _, e := range extras {
+			s.extraPaths = append(s.extraPaths, extraPath{path: e})
+		}
+		return s
+	}
+	for _, tc := range []struct {
+		name  string
+		specs map[string]*appSpec
+		want  int
+	}{
+		{"extra_path covers a sibling's env_file", map[string]*appSpec{
+			"blog": mk("blog", "/srv/env/blog.env", "/srv/env"),
+			"shop": mk("shop", "/srv/env/shop.env"),
+		}, 1},
+		{"an ancestor counts too", map[string]*appSpec{
+			"blog": mk("blog", "", "/srv"),
+			"shop": mk("shop", "/srv/env/shop.env"),
+		}, 1},
+		{"its own env_file is not a warning", map[string]*appSpec{
+			"blog": mk("blog", "/srv/env/blog.env", "/srv/env"),
+		}, 0},
+		{"unrelated extra_path", map[string]*appSpec{
+			"blog": mk("blog", "", "/run/postgresql"),
+			"shop": mk("shop", "/srv/env/shop.env"),
+		}, 0},
+		{"sandbox off does not warn", map[string]*appSpec{
+			"blog": func() *appSpec { s := mk("blog", "", "/srv"); s.sandboxMode = sandboxOff; return s }(),
+			"shop": mk("shop", "/srv/env/shop.env"),
+		}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			core, logs := observer.New(zap.WarnLevel)
+			warnEnvFileInView(zap.New(core), tc.specs)
+			got := logs.FilterMessage("an extra_path puts another app's env_file inside this app's sandbox").Len()
+			if got != tc.want {
+				t.Fatalf("warned %d times, want %d: %v", got, tc.want, logs.All())
+			}
+		})
 	}
 }

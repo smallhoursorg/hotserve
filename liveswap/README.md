@@ -340,6 +340,18 @@ thing that ages now, and it fails safe: a secret belonging to an app
 you add tomorrow is already absent from every unit running today,
 because nothing ever bound it.
 
+**Sandboxing an app is not containment for what it did while bare.**
+The sandbox restricts what an app can *reach*; it cannot un-copy. Its
+`shared/` dir survives every deploy and is bound writable into the new
+sandbox, so anything the bare instance put there is inside the
+sandboxed view afterwards — and because every app runs as the same
+user, a bare app could read hotserve's keys, a sibling's files or any
+`env_file` and copy them there. A hardlink is worse than a copy: it
+stays a live view of the file, so rotating a secret by editing it in
+place republishes it. If an app may have been compromised while
+running bare, clear its `shared/` and rotate anything it could read —
+deploying it sandboxed does not undo the access it already had.
+
 **`require` is the one setting that can keep the whole server from
 starting**: it fails the start (admin socket and proxy included) when
 the host cannot deliver the `full` tier — a manager below 256, or a
@@ -366,6 +378,13 @@ that would give back what the sandbox just took — hotserve's own
 and `/home`, `/root`, `/run/user`, `/tmp`, `/var/tmp`, `/dev`, `/sys`,
 `/proc`. Overlap counts in both directions, since the binds are
 recursive: `extra_path /etc` would carry every env file in with it.
+
+`extra_path` may not name anything in the OS base view either. Those
+paths are bound into *every* app's sandbox, so read-only the
+declaration grants nothing, and writable it would let one app write
+where every other app reads — including directories on the executable
+search path, which would let it choose the binary another app runs.
+Put shared data somewhere outside the base view.
 
 An app's own `releases/<version>` and `shared/` must **be** the
 directories they name. hotserve resolves them immediately before the

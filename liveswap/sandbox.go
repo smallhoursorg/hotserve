@@ -516,7 +516,7 @@ func warnSandboxTier(c collaborators, spec *appSpec, tier sandboxTier) {
 func sandboxResidual(tier sandboxTier) string {
 	switch tier {
 	case sandboxFilesystem:
-		return "same-UID processes (hotserve, the user manager, sibling apps) remain visible and signalable; files, /proc and the admin and manager sockets are closed"
+		return "same-UID processes (hotserve, the user manager, sibling apps) remain visible and signalable, and their /proc entries that are not ptrace-gated — cmdline, status, cgroup — remain readable, so a sibling's or the supervisor's argv is disclosed; files, the ptrace-gated /proc entries (root, environ, cwd, mem, fd, maps) and the admin and manager sockets are closed"
 	default:
 		return "no per-unit sandbox: the app shares the hotserve UID's files, sockets and processes (non-dumpable supervisor and NoNewPrivileges only)"
 	}
@@ -659,6 +659,20 @@ func checkExtraPathContainment(p, root, rootC string) error {
 	if overlaps(p, root) || overlaps(p, rootC) {
 		return fmt.Errorf("extra_path %q overlaps the liveswap root %s, which no app sees beyond its own release and shared dirs", p, root)
 	}
+	// The base view is bound read-only into EVERY unit, so a writable
+	// bind inside it is a cross-app write channel, not the harmless
+	// redundancy a read-only one would be: whatever this app writes
+	// goes through the bind to the host inode, where every sibling's
+	// own /usr (or /etc/...) bind exposes it. `extra_path /usr/local/bin
+	// rw` is the sharp end — that directory is on the PATH the
+	// supervisor searches with exec.LookPath, so one app could choose
+	// the binary another app runs. Read-only overlap is refused too,
+	// because it grants nothing: the path is already in every view.
+	for _, b := range sandboxBaseView {
+		if overlaps(p, b) {
+			return fmt.Errorf("extra_path %q overlaps %s, which is bound read-only into EVERY app's sandbox — read-only it grants nothing (the path is already in every view), and writable it lets this app write where every other app reads, including directories on the executable search path; put shared data somewhere outside the base view", p, b)
+		}
+	}
 	for _, c := range append(supervisorPaths(), sandboxNeverBound...) {
 		if overlaps(p, c) {
 			return fmt.Errorf("extra_path %q overlaps %s, which no app may be given — binding it back would undo the sandbox for this app; use `sandbox off` if the app genuinely needs it", p, c)
@@ -689,8 +703,9 @@ func validateSandboxRoot(root string) error {
 	if c, err := filepath.EvalSymlinks(root); err == nil && c != root {
 		roots = append(roots, c)
 	}
+	supervisor := supervisorPaths()
 	for _, r := range roots {
-		for _, h := range sandboxHotservePaths {
+		for _, h := range supervisor {
 			if pathWithin(r, h) {
 				return fmt.Errorf("root %q is inside %s, which holds hotserve's own keys, sockets and env files; use a root outside it (the default is /var/lib/liveswap)", root, h)
 			}
@@ -763,19 +778,52 @@ func warnEnvFileInView(logger *zap.Logger, specs map[string]*appSpec) {
 	if logger == nil {
 		return
 	}
+	// An env_file is absent from every view unless something names its
+	// directory — and an extra_path is something. This is a cross-app
+	// question, so it is answered here, at config load, over the whole
+	// set, and recomputed on every reload; it is a warning about a
+	// declaration, never state carried into a unit, so unlike the
+	// derived hidden set this replaced it cannot go stale.
+	abs := func(p string) string {
+		if p == "" {
+			return ""
+		}
+		if !filepath.IsAbs(p) {
+			a, err := filepath.Abs(p)
+			if err != nil {
+				return ""
+			}
+			p = a
+		}
+		return filepath.Clean(p)
+	}
+	for name, spec := range specs {
+		if spec.sandboxMode == sandboxOff {
+			continue
+		}
+		for _, e := range spec.extraPaths {
+			for other, os := range specs {
+				if other == name || os.envFile == "" {
+					continue
+				}
+				f := abs(os.envFile)
+				if f != "" && pathWithin(f, abs(e.path)) {
+					logger.Warn("an extra_path puts another app's env_file inside this app's sandbox",
+						zap.String("app", name), zap.String("extra_path", e.path),
+						zap.String("other_app", other), zap.String("env_file", f),
+						zap.String("fix", "narrow the extra_path, or move that env_file outside it (the documented location is /etc/hotserve, which no extra_path may name)"))
+				}
+			}
+		}
+	}
 	for name, spec := range specs {
 		if spec.envFile == "" || spec.sandboxMode == sandboxOff {
 			continue
 		}
-		f := spec.envFile
-		if !filepath.IsAbs(f) {
-			abs, err := filepath.Abs(f)
-			if err != nil {
-				continue
-			}
-			f = abs
+		f := abs(spec.envFile)
+		if f == "" {
+			continue
 		}
-		f = filepath.Clean(f)
 		switch {
 		case pathWithin(f, spec.dirs.shared):
 			logger.Warn("env_file is inside the app's shared dir, which the app can read and rewrite inside its sandbox",
