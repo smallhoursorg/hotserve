@@ -272,7 +272,7 @@ TLS trust store, and the individual `/etc` entries needed for name and
 user resolution, timezone and the dynamic linker. `sandboxBaseView` in
 `sandbox.go` is the list, and it names entries rather than the trees
 containing them: `/etc` is not bound whole (that would hand every app
-every other app'"'"'s `env_file`), and neither is `/etc/ssl`, which also
+every other app's `env_file`), and neither is `/etc/ssl`, which also
 holds `/etc/ssl/private`. Every entry is optional, since no distro has
 all of them, so inside a unit `ls /etc` shows however many this host
 actually has — a dozen or so — and `ls /var/lib` shows exactly one,
@@ -367,14 +367,18 @@ and `/home`, `/root`, `/run/user`, `/tmp`, `/var/tmp`, `/dev`, `/sys`,
 `/proc`. Overlap counts in both directions, since the binds are
 recursive: `extra_path /etc` would carry every env file in with it.
 
-The second list is a typo guard rather than the thing that makes the
-sandbox hold — the view is deny-by-default, so a path missing from the
-list is still absent unless you name it. But naming one of these
-genuinely would undo the sandbox: a bind nests *into* the overmount,
-so `extra_path /run/user/<uid>` returns the user manager's private
-socket and lets the app start an unsandboxed unit of its own —
-read-only included, since connecting to a unix socket is not a
-filesystem write.
+The second list is not what makes the sandbox hold — the view is
+deny-by-default, so a path missing from it is still absent until
+something names it. But naming is the point: `extra_path
+/run/user/<uid>` returns the user manager's private socket and lets the
+app start an unsandboxed unit of its own, read-only included, since
+connecting to a unix socket is not a filesystem write. The same check
+guards the app's own release and `shared/` binds, which a bare app can
+aim elsewhere with a symlink — so it is applied to what those paths
+*resolve to*, and it covers the directories this hotserve is actually
+using (Caddy's data and config dirs wherever `XDG_DATA_HOME` puts them,
+and the runtime directory systemd gave it), not just the packaged
+locations.
 
 `sandbox off` per app is the escape hatch while you find a missing
 path — and the answer for the few workloads the sandbox cannot host at

@@ -1633,3 +1633,70 @@ func TestUnitForAcceptsACommandUnderASymlinkedRoot(t *testing.T) {
 		t.Error("a shim pointing outside every bind was accepted under a symlinked root")
 	}
 }
+
+// TestPlantedBindOntoTheSupervisorsRealStateRefused: the refusal list
+// is advisory for the VIEW — a path it omits is absent anyway, because
+// nothing binds it — but a mandatory bind that resolves onto such a
+// path *names* it, and naming is what puts something in the view. So
+// here the list must be both canonical and derived from where this
+// hotserve actually keeps its state, not a set of literals.
+func TestPlantedBindOntoTheSupervisorsRealStateRefused(t *testing.T) {
+	base, err := os.MkdirTemp("/var", "supervisor-")
+	if err != nil {
+		t.Skipf("no writable dir outside the refused prefixes: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+
+	// (a) A protected path reached through its canonical spelling: the
+	// literal is /var/lib/hotserve, the keys are really elsewhere.
+	realState := filepath.Join(base, "srv-hotserve")
+	if err := os.MkdirAll(realState, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat("/var/lib/hotserve"); os.IsNotExist(err) {
+		if err := os.MkdirAll("/var/lib", 0o755); err != nil {
+			t.Skipf("cannot prepare /var/lib: %v", err)
+		}
+		if err := os.Symlink(realState, "/var/lib/hotserve"); err != nil {
+			t.Skipf("cannot alias /var/lib/hotserve: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Remove("/var/lib/hotserve") })
+		if err := closedPath(realState); err == nil {
+			t.Errorf("a bind onto %s was accepted, but /var/lib/hotserve resolves there — the supervisor's keys", realState)
+		}
+	}
+
+	// (b) Caddy's data dir where XDG actually points it, which no
+	// literal in the package mentions.
+	xdg := filepath.Join(base, "xdg-data")
+	if err := os.MkdirAll(filepath.Join(xdg, "caddy"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_DATA_HOME", xdg)
+	dataDir := caddy.AppDataDir()
+	if !strings.HasPrefix(dataDir, xdg) {
+		t.Skipf("caddy.AppDataDir() does not follow XDG_DATA_HOME here (%s)", dataDir)
+	}
+	if err := closedPath(dataDir); err == nil {
+		t.Errorf("a bind onto %s was accepted: that is where this hotserve keeps its TLS keys", dataDir)
+	}
+	// And through extra_path, which asks the same question.
+	if err := validateExtraPath(dataDir, "/var/lib/liveswap"); err == nil {
+		t.Errorf("extra_path %s accepted: the supervisor's own data dir", dataDir)
+	}
+
+	// (c) The admin socket directory as systemd actually made it.
+	runtimeDir := filepath.Join(base, "run-hotserve")
+	if err := os.MkdirAll(runtimeDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("RUNTIME_DIRECTORY", runtimeDir)
+	if err := closedPath(runtimeDir); err == nil {
+		t.Errorf("a bind onto RUNTIME_DIRECTORY %s was accepted: the admin socket lives there", runtimeDir)
+	}
+
+	// A neighbour that merely shares a prefix is still fine.
+	if err := closedPath(filepath.Join(base, "xdg-data-elsewhere")); err != nil {
+		t.Errorf("an unrelated sibling path was refused: %v", err)
+	}
+}

@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/caddyserver/caddy/v2"
 	"go.uber.org/zap"
 )
 
@@ -192,15 +194,17 @@ var sandboxBaseView = []string{
 
 // sandboxNeverBound are the names an extra_path may never take.
 //
-// With a deny-by-default view this list is no longer what makes the
-// sandbox hold — nothing is in a unit's view unless something names
-// it, so a path missing from this list is still absent. What the list
-// does is refuse the names that, once named, would give back what the
-// sandbox just took: it turns an operator's mistake into a config
-// error instead of a quietly weaker sandbox. That is why it can be a
-// static literal with no derivation behind it, and why a hotserve
-// pointed at a non-default XDG data dir does not need it enumerated
-// here — that directory is absent from every view regardless.
+// With a deny-by-default view this list is not what makes the sandbox
+// hold — nothing is in a unit's view unless something names it, so a
+// path missing here is still absent. What the list does is refuse the
+// names that, once named, would give back what the sandbox just took.
+//
+// "Once named" is the whole of it, and it is why these literals are
+// not the last word: a mandatory bind that RESOLVES onto a protected
+// path names it just as surely as an operator typing it. See
+// protectedFromBinds, which is what the checks actually use — this
+// list is its static floor, canonicalised and extended there with the
+// directories this hotserve is really pointed at.
 //
 // The sharpest case is /run/user: an extra_path there returns the user
 // manager's private socket, and since PrivateUsers= maps the app's uid
@@ -378,7 +382,7 @@ func (s *sandboxSpec) resolveBindSources() error {
 // socket) and /run/hotserve (the admin socket) in with it, and
 // `shared -> /etc` every configured env file.
 func closedPath(p string) error {
-	for _, c := range sandboxNeverBound {
+	for _, c := range protectedFromBinds() {
 		if overlaps(p, c) {
 			return fmt.Errorf("%q overlaps %s, which no app may be given", p, c)
 		}
@@ -396,6 +400,61 @@ func closedPath(p string) error {
 		}
 	}
 	return nil
+}
+
+// protectedFromBinds is what a bind may never name: sandboxNeverBound
+// plus this supervisor's *actual* state directories, each in both its
+// configured and its canonical spelling.
+//
+// The static list is not sufficient here, and this is the one place the
+// distinction matters. A path missing from it is still absent from
+// every unit — nothing binds it — so for the VIEW the list is advisory.
+// But a mandatory bind that resolves onto such a path *names* it, and
+// naming is exactly what puts something in the view. Two ways that bit:
+// `/var/lib/hotserve -> /srv/hotserve` made the lexical entry miss a
+// planted `shared -> /srv/hotserve`, and a hotserve pointed at a
+// non-default XDG data dir has its keys somewhere no literal mentions
+// at all. Both hand the supervisor's TLS keys to an app that plants one
+// symlink while running bare.
+//
+// Resolved on each call rather than cached: this runs at most twice per
+// launch (only for a bind whose source moved), and the answer must be
+// what the filesystem says now, not what it said at config load — the
+// same reason resolveBindSources exists at all.
+func protectedFromBinds() []string {
+	out := make([]string, 0, len(sandboxNeverBound)+8)
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		if !filepath.IsAbs(p) {
+			abs, err := filepath.Abs(p)
+			if err != nil {
+				return
+			}
+			p = abs
+		}
+		p = filepath.Clean(p)
+		out = append(out, p)
+		if c, err := filepath.EvalSymlinks(p); err == nil && c != p {
+			out = append(out, c)
+		}
+	}
+	for _, p := range sandboxNeverBound {
+		add(p)
+	}
+	// Caddy's data and config dirs follow XDG_DATA_HOME/XDG_CONFIG_HOME,
+	// so the TLS keys and the config autosave are not always where the
+	// packaged layout puts them.
+	add(caddy.AppDataDir())
+	add(caddy.AppConfigDir())
+	// systemd sets RUNTIME_DIRECTORY for RuntimeDirectory= (a
+	// colon-separated list when there is more than one): the admin
+	// socket, as the manager actually made it.
+	for _, d := range filepath.SplitList(os.Getenv("RUNTIME_DIRECTORY")) {
+		add(d)
+	}
+	return out
 }
 
 // overlaps reports whether two paths are the same or either contains
@@ -583,7 +642,7 @@ func checkExtraPathContainment(p, root, rootC string) error {
 	if overlaps(p, root) || overlaps(p, rootC) {
 		return fmt.Errorf("extra_path %q overlaps the liveswap root %s, which no app sees beyond its own release and shared dirs", p, root)
 	}
-	for _, c := range sandboxNeverBound {
+	for _, c := range protectedFromBinds() {
 		if overlaps(p, c) {
 			return fmt.Errorf("extra_path %q overlaps %s, which no app may be given — binding it back would undo the sandbox for this app; use `sandbox off` if the app genuinely needs it", p, c)
 		}
