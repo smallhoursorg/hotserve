@@ -367,6 +367,16 @@ and `/home`, `/root`, `/run/user`, `/tmp`, `/var/tmp`, `/dev`, `/sys`,
 `/proc`. Overlap counts in both directions, since the binds are
 recursive: `extra_path /etc` would carry every env file in with it.
 
+An app's own `releases/<version>` and `shared/` must **be** the
+directories they name. hotserve resolves them immediately before the
+unit is created and refuses to launch if either points somewhere else,
+because the app dir is writable by the app: a symlink placed there
+cannot be told from one you meant. To put an app's data on another
+disk, bind-mount it at the same path (`mount --bind /mnt/blog-data
+/var/lib/liveswap/blog/shared`, or the equivalent fstab entry) — a
+mount resolves to itself, so it is invisible to that check, and an app
+cannot forge one.
+
 The second list is not what makes the sandbox hold — the view is
 deny-by-default, so a path missing from it is still absent until
 something names it. But naming is the point: `extra_path

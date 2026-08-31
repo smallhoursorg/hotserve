@@ -132,6 +132,23 @@ requirement below stands as the contract the sandbox path must keep.
   fails `203/EXEC` — measured, and exactly what the capability probe
   (which has no directories of its own) would otherwise do. Empty list
   properties MUST NOT be emitted.
+- An app's mandatory binds — the release being started and `shared/` —
+  MUST resolve to the directories they name, and a launch whose bind
+  source resolves anywhere else MUST be refused. The only permitted
+  difference is one an alias on the liveswap root itself explains.
+  *Amended 2026-08-31 (#35):* resolution to a path outside the root
+  was previously allowed as "the operator moved `shared` to another
+  disk", subject to deny lists. That is unsound: the app's own
+  directory is writable by the app, so a symlink placed there cannot
+  be distinguished from one the operator meant, and a sibling's
+  legitimate external data (`shop/shared -> /mnt/shop-data`) was
+  therefore an acceptable target for a bare `blog` to aim at.
+  Enumerating other apps' data and `env_file` locations cannot close
+  it — incomplete by construction, and stale by the same mechanism as
+  the hidden set this design deleted. **The supported way to put an
+  app's data on another disk is a bind mount at the same path**: a
+  mount resolves to itself, so it never reaches the check, and an app
+  cannot forge one.
 - A command that resolves outside the view MUST be refused at launch
   with a message naming `extra_path`, not left to fail as a bare
   `203/EXEC`: `exec.LookPath` runs in the supervisor's view, so a

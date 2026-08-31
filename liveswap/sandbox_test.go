@@ -996,15 +996,17 @@ func TestResolveBindSourcesRefusesPlantedSymlink(t *testing.T) {
 	// containment check is what refuses them. (A link to a target that
 	// does not resolve is refused too, by the missing-source case at
 	// the end — fail-closed either way.)
+	// Every planted target is refused by the same rule now: a mandatory
+	// bind must BE the directory it names. The deny lists are no longer
+	// what catches these — they are the backstop for a root re-aimed
+	// after config load, tested directly elsewhere.
 	for _, tc := range []struct{ name, target, wantIn string }{
-		{"a closed tree", "/dev", "overlaps"},
-		// /tmp contains the test's own root, so the "not the directory
-		// it names" rule catches it first — either refusal is correct,
-		// both say "overlaps".
-		{"the private tmp", "/tmp", "overlaps"},
-		{"hotserve's own state", "/run/hotserve", "overlaps"},
-		{"the manager's socket dir", "/run/user", "overlaps"},
+		{"a closed tree", "/dev", "not the directory it names"},
+		{"the private tmp", "/tmp", "not the directory it names"},
+		{"hotserve's own state", "/run/hotserve", "not the directory it names"},
+		{"the manager's socket dir", "/run/user", "not the directory it names"},
 		{"a sibling app's data", sibling, "not the directory it names"},
+		{"a sibling's data on another disk", elsewhere, "not the directory it names"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_ = os.Remove(link)
@@ -1021,29 +1023,21 @@ func TestResolveBindSourcesRefusesPlantedSymlink(t *testing.T) {
 		})
 	}
 
-	// A shared dir legitimately moved to another disk (outside the
-	// root, and nowhere the sandbox protects) is allowed, and what gets
-	// bound is what it resolves to.
+	// A shared dir symlinked anywhere outside the root is refused too —
+	// including somewhere that looks perfectly innocent. The app's own
+	// directory is writable by the app, so a symlink placed there
+	// cannot be told from one the operator meant; the refusal names the
+	// mechanism that CAN be told apart.
 	_ = os.Remove(link)
 	if err := os.Symlink(elsewhere, link); err != nil {
 		t.Fatal(err)
 	}
-	s = spec(link)
-	if err := s.resolveBindSources(); err != nil {
-		t.Fatalf("a shared dir on another path was refused: %v", err)
+	err = spec(link).resolveBindSources()
+	if err == nil {
+		t.Fatal("a shared dir symlinked outside the root was accepted; an app can plant that symlink itself")
 	}
-	resolved, _ := filepath.EvalSymlinks(elsewhere)
-	// Only the SOURCE moves. The destination stays the configured path,
-	// because that is what WorkingDirectory, HOME and the
-	// {release_dir}/{shared_dir} placeholders name — binding the
-	// resolved path at the resolved path would put the data somewhere
-	// the app never looks, and its own spelling would be gone with the
-	// tmpfs that masks the root.
-	if s.writable[1].source != resolved {
-		t.Fatalf("bind source not rewritten to the resolved path: %+v", s.writable)
-	}
-	if s.writable[1].dest != link {
-		t.Fatalf("bind destination moved to %q; the app expects its shared dir at %q", s.writable[1].dest, link)
+	if !strings.Contains(err.Error(), "bind-mount") {
+		t.Fatalf("the refusal must name the supported alternative: %v", err)
 	}
 
 	// A missing bind source is an error, not a silently skipped bind.
@@ -1077,7 +1071,7 @@ func TestUnitForResolvesBindSources(t *testing.T) {
 		sandbox: &sandboxSpec{tier: sandboxFull, root: root, appDir: appDir, appName: "blog",
 			writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}}},
 	}
-	if _, err := r.unitFor(spec, false); err == nil || !strings.Contains(err.Error(), "no app may be given") {
+	if _, err := r.unitFor(spec, false); err == nil || !strings.Contains(err.Error(), "not the directory it names") {
 		t.Fatalf("unitFor must refuse a planted bind source, got %v", err)
 	}
 	if _, err := r.Start(spec); err == nil {
@@ -1094,44 +1088,55 @@ func TestUnitForResolvesBindSources(t *testing.T) {
 // empty tmpfs, so a bind that moved the destination would leave the
 // app pointing at something that no longer exists inside its view.
 func TestBindDestinationsAreTheConfiguredPaths(t *testing.T) {
-	root := t.TempDir()
-	appDir := filepath.Join(root, "blog")
-	release := filepath.Join(appDir, "releases", "v1")
-	shared := filepath.Join(appDir, "shared")
-	outside, err := os.MkdirTemp("/run", "binddest-")
+	// The one way a bind source may legitimately differ from its
+	// destination is an alias on the liveswap root itself, so that is
+	// what this exercises. Built under /var: a t.TempDir root lives
+	// under /tmp, and the app dirs must resolve somewhere the deny list
+	// for bind sources does not object to.
+	base, err := os.MkdirTemp("/var", "binddest-")
 	if err != nil {
-		t.Skipf("no writable dir outside the closed prefixes: %v", err)
+		t.Skipf("no writable dir outside the refused prefixes: %v", err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(outside) })
-	elsewhere := filepath.Join(outside, "blog-data")
-	for _, d := range []string{release, elsewhere} {
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	real := filepath.Join(base, "mnt-liveswap")
+	release := filepath.Join(real, "blog", "releases", "v1")
+	shared := filepath.Join(real, "blog", "shared")
+	for _, d := range []string{release, shared} {
 		if err := os.MkdirAll(d, 0o750); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(elsewhere, shared); err != nil {
-		t.Fatal(err)
+	root := filepath.Join(base, "srv-liveswap")
+	if err := os.Symlink(real, root); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
 	}
-	s := &sandboxSpec{tier: sandboxFull, root: root, appDir: appDir, appName: "blog",
-		writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}},
+	aliasRelease := filepath.Join(root, "blog", "releases", "v1")
+	aliasShared := filepath.Join(root, "blog", "shared")
+	sb := &sandboxSpec{tier: sandboxFull, root: root, appDir: filepath.Join(root, "blog"), appName: "blog",
+		writable: []bindPath{{dest: aliasRelease, source: aliasRelease}, {dest: aliasShared, source: aliasShared}},
 		extra:    []extraPath{{path: "/run/postgresql"}}}
-	if err := s.resolveBindSources(); err != nil {
-		t.Fatalf("a shared dir on another disk was refused: %v", err)
+	if err := sb.resolveBindSources(); err != nil {
+		t.Fatalf("a symlinked root was refused: %v", err)
 	}
-	got := propMap(unitSpec{ExecStart: []string{"/bin/true"}, Sandbox: s})
+	got := propMap(unitSpec{ExecStart: []string{"/bin/true"}, Sandbox: sb})
 	binds := map[string]bindMount{}
 	for _, b := range got["BindPaths"].([]bindMount) {
 		binds[b.Destination] = b
 	}
-	b, ok := binds[shared]
+	b, ok := binds[aliasShared]
 	if !ok {
-		t.Fatalf("the shared dir is not bound where the app expects it (%s): %+v", shared, binds)
+		t.Fatalf("the shared dir is not bound where the app expects it (%s): %+v", aliasShared, binds)
 	}
-	resolved, _ := filepath.EvalSymlinks(elsewhere)
-	if b.Source != resolved {
-		t.Fatalf("shared bound from %q, want the resolved %q", b.Source, resolved)
+	// Only the SOURCE moves. The destination stays the configured path,
+	// because that is what WorkingDirectory, HOME and the
+	// {release_dir}/{shared_dir} placeholders name — binding the
+	// resolved path at the resolved path would put the data somewhere
+	// the app never looks, and its own spelling would be gone with the
+	// tmpfs that replaces the filesystem.
+	if b.Source != shared {
+		t.Fatalf("shared bound from %q, want the resolved %q", b.Source, shared)
 	}
-	if _, moved := binds[resolved]; moved {
+	if _, moved := binds[shared]; moved {
 		t.Fatal("the shared dir was bound at its resolved path: the app would never find it")
 	}
 }
@@ -1158,10 +1163,10 @@ func TestOverlapIsSymmetric(t *testing.T) {
 			t.Errorf("%s rejected: %v", ok, err)
 		}
 	}
-	if err := closedPath("/run"); err == nil {
+	if err := refusedAsBindSource("/run"); err == nil {
 		t.Error("a bind source containing /run/user was accepted at launch time")
 	}
-	if err := closedPath("/etc"); err == nil {
+	if err := refusedAsBindSource("/etc"); err == nil {
 		t.Error("a bind source containing hotserve's own config was accepted at launch time")
 	}
 }
@@ -1529,7 +1534,7 @@ func TestBaseViewNamesTheTrustStoreNotTheTree(t *testing.T) {
 // root itself must refuse it.
 func TestBindSourceInsideTheBaseViewRefused(t *testing.T) {
 	for _, p := range []string{"/usr/local/app-data", "/usr", "/etc/ssl/certs/x", "/bin/data"} {
-		if err := closedPath(p); err == nil {
+		if err := refusedAsBindSource(p); err == nil {
 			t.Errorf("a mandatory bind source at %s was accepted: every other app can read it", p)
 		} else if !strings.Contains(err.Error(), "EVERY app's sandbox") {
 			t.Errorf("%s refused for the wrong reason: %v", p, err)
@@ -1538,7 +1543,7 @@ func TestBindSourceInsideTheBaseViewRefused(t *testing.T) {
 	// Somewhere genuinely outside the view is still fine — that is the
 	// supported "shared moved to another disk" case.
 	for _, p := range []string{"/mnt/blog-data", "/srv/blog-data", "/var/cache/blog"} {
-		if err := closedPath(p); err != nil {
+		if err := refusedAsBindSource(p); err != nil {
 			t.Errorf("%s refused, but it is outside every app's view: %v", p, err)
 		}
 	}
@@ -1661,7 +1666,7 @@ func TestPlantedBindOntoTheSupervisorsRealStateRefused(t *testing.T) {
 			t.Skipf("cannot alias /var/lib/hotserve: %v", err)
 		}
 		t.Cleanup(func() { _ = os.Remove("/var/lib/hotserve") })
-		if err := closedPath(realState); err == nil {
+		if err := refusedAsBindSource(realState); err == nil {
 			t.Errorf("a bind onto %s was accepted, but /var/lib/hotserve resolves there — the supervisor's keys", realState)
 		}
 	}
@@ -1677,7 +1682,7 @@ func TestPlantedBindOntoTheSupervisorsRealStateRefused(t *testing.T) {
 	if !strings.HasPrefix(dataDir, xdg) {
 		t.Skipf("caddy.AppDataDir() does not follow XDG_DATA_HOME here (%s)", dataDir)
 	}
-	if err := closedPath(dataDir); err == nil {
+	if err := refusedAsBindSource(dataDir); err == nil {
 		t.Errorf("a bind onto %s was accepted: that is where this hotserve keeps its TLS keys", dataDir)
 	}
 	// And through extra_path, which asks the same question.
@@ -1691,12 +1696,72 @@ func TestPlantedBindOntoTheSupervisorsRealStateRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("RUNTIME_DIRECTORY", runtimeDir)
-	if err := closedPath(runtimeDir); err == nil {
+	if err := refusedAsBindSource(runtimeDir); err == nil {
 		t.Errorf("a bind onto RUNTIME_DIRECTORY %s was accepted: the admin socket lives there", runtimeDir)
 	}
 
 	// A neighbour that merely shares a prefix is still fine.
-	if err := closedPath(filepath.Join(base, "xdg-data-elsewhere")); err != nil {
+	if err := refusedAsBindSource(filepath.Join(base, "xdg-data-elsewhere")); err != nil {
 		t.Errorf("an unrelated sibling path was refused: %v", err)
+	}
+}
+
+// TestBindOntoASiblingsExternalDataRefused is the finding that removed
+// the out-of-root escape hatch. `shop/shared` legitimately resolving to
+// /mnt/shop-data used to make /mnt/shop-data an acceptable target for
+// ANY app: a bare `blog` could aim its own shared symlink there and
+// bind the sibling's data — read-write — into a unit whose status
+// reported it sandboxed. Enumerating every other app's external
+// locations cannot fix that (it is incomplete by construction, and it
+// is the derived, ageing set this model exists to delete); the answer
+// is that a mandatory bind must be the directory it names.
+func TestBindOntoASiblingsExternalDataRefused(t *testing.T) {
+	base, err := os.MkdirTemp("/var", "sibling-")
+	if err != nil {
+		t.Skipf("no writable dir outside the refused prefixes: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	root := filepath.Join(base, "liveswap")
+	shopData := filepath.Join(base, "mnt-shop-data")
+	blogRelease := filepath.Join(root, "blog", "releases", "v1")
+	for _, d := range []string{blogRelease, shopData} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(shopData, "shop.db"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// blog, running bare, aims its own shared dir at shop's data.
+	blogShared := filepath.Join(root, "blog", "shared")
+	if err := os.Symlink(shopData, blogShared); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	spec := &sandboxSpec{tier: sandboxFull, root: root, appDir: filepath.Join(root, "blog"), appName: "blog",
+		writable: []bindPath{{dest: blogRelease, source: blogRelease}, {dest: blogShared, source: blogShared}}}
+	err = spec.resolveBindSources()
+	if err == nil {
+		t.Fatalf("blog was allowed to bind %s — a sibling's data — as its own shared dir", shopData)
+	}
+	if !strings.Contains(err.Error(), "not the directory it names") {
+		t.Fatalf("refused for the wrong reason: %v", err)
+	}
+	// Nothing was rewritten: the launch fails rather than mounting.
+	if spec.writable[1].source != blogShared {
+		t.Errorf("bind source was rewritten despite the refusal: %+v", spec.writable)
+	}
+	// An env_file directory belonging to another app is the same shape
+	// and is refused by the same rule — no list of secret locations to
+	// keep current.
+	secrets := filepath.Join(base, "etc-shop")
+	if err := os.MkdirAll(secrets, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(blogShared)
+	if err := os.Symlink(secrets, blogShared); err != nil {
+		t.Fatal(err)
+	}
+	if err := spec.resolveBindSources(); err == nil {
+		t.Errorf("blog was allowed to bind another app's env_file directory %s", secrets)
 	}
 }

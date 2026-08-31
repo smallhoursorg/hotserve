@@ -212,16 +212,25 @@ var sandboxBaseView = []string{
 // its own with no sandbox at all. Read-only does not help — connecting
 // to a unix socket is not a filesystem write. `sandbox off` is the
 // escape hatch for a workload that genuinely needs one of these.
-var sandboxNeverBound = append(append([]string{}, sandboxHotservePaths...),
-	// The user manager's private socket and session bus, and the home
-	// directories of every same-UID neighbour.
-	"/home", "/root", "/run/user",
-	// The kernel interfaces and scratch space the unit gets its own
-	// copies of (PrivateTmp=, PrivateDevices=, the API VFS): a bind
-	// here would hand back the host's, nested into the unit's own.
-	"/tmp", "/var/tmp",
-	"/dev", "/sys", "/proc",
-)
+var sandboxNeverBound = append(append(append([]string{},
+	sandboxHotservePaths...), sandboxPrivateCopies...), sandboxNeverReachable...)
+
+// sandboxPrivateCopies are the trees a unit gets its own copy of, or
+// simply does without: an extra_path may not name them, because a bind
+// would hand back the host's nested inside the unit's own. They are
+// NOT refused as a mandatory bind source, though — validateSandboxRoot
+// deliberately permits a liveswap root under /tmp, /var/tmp or /home,
+// and the app's own dirs then nest there exactly as they do under
+// /var/lib. The integration lane runs from /var/tmp.
+var sandboxPrivateCopies = []string{"/home", "/root", "/tmp", "/var/tmp"}
+
+// sandboxNeverReachable is what nothing an app runs may hold, by any
+// route: the user manager's private socket and session bus (with
+// PrivateUsers= mapping the app's uid one-to-one, reaching it lets the
+// app ask the manager for a unit with no sandbox at all — read-only is
+// no defence, since connecting to a socket is not a write) and the
+// kernel interfaces the unit gets its own.
+var sandboxNeverReachable = []string{"/run/user", "/dev", "/sys", "/proc"}
 
 // sandboxHotservePaths is the supervisor's own state on a packaged
 // install: TLS keys and certificates, the admin socket's directory,
@@ -273,12 +282,26 @@ type sandboxSpec struct {
 // mount the user manager's private socket inside the sandbox on the
 // next launch, while the status endpoint reports it as sandboxed.
 //
-// Resolution is allowed and useful (an operator may legitimately put
-// `shared` on another disk); what is refused is a resolution that
-// lands somewhere the sandbox exists to keep out. Paths that do not
-// resolve — an extra_path for a socket directory that appears later —
-// are left as written, having already passed the same checks
-// lexically at config load.
+// A mandatory bind must therefore resolve to the directory it NAMES.
+// The only difference permitted is one an alias on the liveswap root
+// itself explains; anything else is refused, including targets that
+// look innocent. That is not conservatism, it is the only line that
+// can be drawn: the app's own directory is writable by the app, so a
+// symlink placed there cannot be distinguished from one the operator
+// meant. `shop/shared -> /mnt/shop-data` being a legitimate layout is
+// exactly what made /mnt/shop-data an acceptable target for a bare
+// `blog` to aim at, and no list of other apps' data and env_file
+// locations can close that — it would be incomplete by construction
+// and would go stale, which is the derived set this model deletes.
+//
+// An operator putting an app's data on another disk uses a bind mount
+// at the same path (`mount --bind`, or an fstab entry). A mount
+// resolves to itself, so it never reaches this check at all — and an
+// app cannot forge one.
+//
+// Paths that do not resolve — an extra_path for a socket directory
+// that appears later — are left as written, having already passed the
+// same checks lexically at config load.
 //
 // Residual, stated rather than papered over: this is a check on a
 // pathname, and between it and the manager following that pathname a
@@ -313,39 +336,27 @@ func (s *sandboxSpec) resolveBindSources() error {
 	// and shared data to the new sandbox.
 	appC := filepath.Join(rootC, s.appName)
 	own := func(dest, resolved string) error {
-		// Inside the root, the only difference a mandatory bind may
-		// have from its configured path is one an ancestor's symlink
-		// explains — the root being a link. Resolving to some *other*
-		// place under the root is the app pointing at data that is not
-		// the directory we meant to bind: its own app dir or releases/
+		// The only difference a mandatory bind may have from its
+		// configured path is one an alias on the root explains.
+		// Anywhere else is the app pointing at data that is not the
+		// directory we meant to bind: its own app dir or releases/
 		// (whose recursive bind would carry state.json, the upload
-		// staging dir and every other release in under `shared`), or a
-		// sibling's. Outside the root entirely — `shared` moved to
-		// another disk — is legitimate, subject to the checks below.
+		// staging dir and every other release in under `shared`), a
+		// sibling's, or somewhere outside the root entirely — which
+		// used to be permitted as "moved to another disk" and was the
+		// hole that let one app alias another's external data.
 		rel, err := filepath.Rel(s.appDir, dest)
 		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return fmt.Errorf("%q is not inside the app's own directory %s", dest, s.appDir)
 		}
 		expected := filepath.Join(appC, rel)
-		if resolved == expected {
-			// It IS the directory it names, reached through an alias on
-			// the root itself. Nothing further to check, and in
-			// particular NOT closedPath: validateSandboxRoot
-			// deliberately allows a root under /tmp, /var/tmp or /home
-			// (the binds nest into the unit's own private copies, and
-			// the integration lane runs from /var/tmp), so refusing here
-			// would make a symlinked root fail every launch while the
-			// same root spelled directly works.
-			return nil
+		if resolved != expected {
+			return fmt.Errorf("%q resolves to %q, which is not the directory it names (expected %q). A mandatory bind may differ from its configured path only by an alias on the liveswap root itself; to put an app's data on another disk, bind-mount it at %q instead of symlinking — a mount resolves to itself, and an app cannot forge one", dest, resolved, expected, dest)
 		}
-		if overlaps(resolved, s.root) || overlaps(resolved, rootC) {
-			return fmt.Errorf("%q resolves to %q, which is not the directory it names and overlaps the liveswap root %s (expected %q, or a path outside the root entirely)", dest, resolved, s.root, expected)
-		}
-		// Outside the root: `shared` legitimately moved to another disk.
-		// Here the deny list does apply — this is a path the operator
-		// (or a bare app's planted symlink) chose, not one the root's
-		// own spelling implies.
-		return closedPath(resolved)
+		// It IS the directory it names. The root was vetted at config
+		// load, but rootC is read from the live filesystem every launch,
+		// so re-check what it actually points at now.
+		return refusedAsBindSource(resolved)
 	}
 	for i, b := range s.writable {
 		resolved, err := filepath.EvalSymlinks(b.dest)
@@ -375,14 +386,21 @@ func (s *sandboxSpec) resolveBindSources() error {
 	return nil
 }
 
-// closedPath refuses a path that overlaps anything an app may never be
-// given — in either direction. Being *inside* a protected path is the
-// obvious case; *containing* one is just as bad, because these binds
-// are recursive: `shared -> /run` would carry /run/user (the manager's
-// socket) and /run/hotserve (the admin socket) in with it, and
-// `shared -> /etc` every configured env file.
-func closedPath(p string) error {
-	for _, c := range protectedFromBinds() {
+// refusedAsBindSource refuses a resolved mandatory bind source that
+// reaches something no app may hold, in either direction — being
+// *inside* a protected path is the obvious case, *containing* one just
+// as bad, since these binds are recursive.
+//
+// Deliberately narrower than the extra_path list: sandboxPrivateCopies
+// is absent, because a liveswap root may legitimately live under /tmp,
+// /var/tmp or /home and every bind under it would then "overlap" one.
+func refusedAsBindSource(p string) error {
+	for _, c := range supervisorPaths() {
+		if overlaps(p, c) {
+			return fmt.Errorf("%q overlaps %s, which holds hotserve's own keys, sockets or config", p, c)
+		}
+	}
+	for _, c := range sandboxNeverReachable {
 		if overlaps(p, c) {
 			return fmt.Errorf("%q overlaps %s, which no app may be given", p, c)
 		}
@@ -402,8 +420,7 @@ func closedPath(p string) error {
 	return nil
 }
 
-// protectedFromBinds is what a bind may never name: sandboxNeverBound
-// plus this supervisor's *actual* state directories, each in both its
+// supervisorPaths is hotserve's own state, each entry in both its
 // configured and its canonical spelling.
 //
 // The static list is not sufficient here, and this is the one place the
@@ -421,8 +438,8 @@ func closedPath(p string) error {
 // launch (only for a bind whose source moved), and the answer must be
 // what the filesystem says now, not what it said at config load — the
 // same reason resolveBindSources exists at all.
-func protectedFromBinds() []string {
-	out := make([]string, 0, len(sandboxNeverBound)+8)
+func supervisorPaths() []string {
+	out := make([]string, 0, len(sandboxHotservePaths)+8)
 	add := func(p string) {
 		if p == "" {
 			return
@@ -440,7 +457,7 @@ func protectedFromBinds() []string {
 			out = append(out, c)
 		}
 	}
-	for _, p := range sandboxNeverBound {
+	for _, p := range sandboxHotservePaths {
 		add(p)
 	}
 	// Caddy's data and config dirs follow XDG_DATA_HOME/XDG_CONFIG_HOME,
@@ -642,7 +659,7 @@ func checkExtraPathContainment(p, root, rootC string) error {
 	if overlaps(p, root) || overlaps(p, rootC) {
 		return fmt.Errorf("extra_path %q overlaps the liveswap root %s, which no app sees beyond its own release and shared dirs", p, root)
 	}
-	for _, c := range protectedFromBinds() {
+	for _, c := range append(supervisorPaths(), sandboxNeverBound...) {
 		if overlaps(p, c) {
 			return fmt.Errorf("extra_path %q overlaps %s, which no app may be given — binding it back would undo the sandbox for this app; use `sandbox off` if the app genuinely needs it", p, c)
 		}
