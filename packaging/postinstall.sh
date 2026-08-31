@@ -14,6 +14,31 @@ if ! uid=$(id -u hotserve 2>/dev/null); then
 	echo "hotserve: the hotserve system user does not exist and could not be created" >&2
 	exit 1
 fi
+# The account must be IN the hotserve group, whether this script created
+# it or found it already there. Both branches above set the group only
+# when they create the account, so an account that already existed — an
+# admin's, or one from another package — keeps whatever groups it had.
+# That matters because the user-manager wrapper below is root-owned and
+# executable by its group alone: without the membership,
+# user@$uid.service cannot exec its own ExecStart, and every deployed
+# app stops at the next manager start or reboot.
+in_group() { id -nG hotserve 2>/dev/null | tr ' ' '\n' | grep -qx hotserve; }
+if ! in_group; then
+	if command -v usermod >/dev/null 2>&1; then
+		usermod -aG hotserve hotserve || true
+	else
+		addgroup hotserve hotserve 2>/dev/null || true # busybox
+	fi
+fi
+# Fail the install rather than leave a host whose user manager cannot
+# start: a package that installs and then silently stops every app at
+# the next boot is the worse outcome by far.
+if ! in_group; then
+	echo "hotserve: the hotserve user is not a member of the hotserve group and could not be added." >&2
+	echo "hotserve: the user manager could not execute /usr/libexec/hotserve/user-manager, so no app would start." >&2
+	echo "hotserve: add it with \`usermod -aG hotserve hotserve\` and reinstall." >&2
+	exit 1
+fi
 chown hotserve:hotserve /var/lib/hotserve /var/lib/liveswap
 # The user-manager wrapper is the path the AppArmor profile attaches
 # to, and that profile grants `userns` — so execution must be limited

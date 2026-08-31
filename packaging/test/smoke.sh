@@ -69,6 +69,13 @@ wmode=$(stat -c '%U:%G %a' "$wrapper")
 [ "$wmode" = "root:hotserve 750" ] \
 	|| die "$wrapper is '$wmode', want 'root:hotserve 750' — a world-executable wrapper would hand its AppArmor userns grant to every local account"
 getent group hotserve >/dev/null || die "postinstall did not create the hotserve group"
+# 0750 root:hotserve only works if the account is IN that group, and
+# that is the whole reason user@<uid>.service can exec its ExecStart.
+# Assert what the manager actually needs, not just how the modes read.
+id -nG hotserve | tr ' ' '\n' | grep -qx hotserve \
+	|| die "the hotserve user is not in the hotserve group: it could not execute $wrapper, so user@<uid>.service would fail and no app would start"
+su -s /bin/sh hotserve -c "test -x $wrapper" \
+	|| die "the hotserve user cannot execute $wrapper — user@<uid>.service cannot exec its own ExecStart"
 for d in /var/lib/hotserve /var/lib/liveswap; do
 	got=$(stat -c '%U:%G %a' "$d")
 	[ "$got" = "hotserve:hotserve 750" ] || die "$d is '$got', want 'hotserve:hotserve 750'"
@@ -439,7 +446,25 @@ echo "journal is free of the deploy token"
 stage "stage 3: reinstall — upgrade path, conffile preservation, app survival"
 pid_before=$(printf '%s' "$status" | sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p')
 [ -n "$pid_before" ] || die "status missing pid: $status"
+# The account already exists by definition on a reinstall, which is the
+# path that used to set the group only when it CREATED the user. Strip
+# the membership first, the way a hotserve account made by an admin (or
+# another package) would arrive: postinstall must establish it rather
+# than assume it, or this host boots with a user manager that cannot
+# exec its own wrapper and every app is gone.
+# postinstall's useradd makes hotserve the account's PRIMARY group, so
+# it cannot simply be removed; move the account to another primary
+# group instead, which is exactly the shape a pre-existing account has.
+groupadd --system smoketest-other 2>/dev/null || true
+usermod -g smoketest-other hotserve \
+	|| die "could not move the hotserve account off its primary group; the reinstall assertion below would be vacuous"
+id -nG hotserve | tr ' ' '\n' | grep -qx hotserve \
+	&& die "the hotserve account is still in the hotserve group; the reinstall assertion below would be vacuous"
 dpkg -i "$deb"
+id -nG hotserve | tr ' ' '\n' | grep -qx hotserve \
+	|| die "reinstall did not restore the hotserve user's group membership: user@<uid>.service could not exec $wrapper and no app would start after a reboot"
+su -s /bin/sh hotserve -c "test -x $wrapper" \
+	|| die "after reinstall the hotserve user still cannot execute $wrapper"
 grep -q liveswap_webhook /etc/hotserve/Caddyfile \
 	|| die "reinstall clobbered the modified /etc/hotserve/Caddyfile (config|noreplace broken)"
 systemctl is-active --quiet hotserve \
