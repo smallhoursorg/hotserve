@@ -297,13 +297,19 @@ const (
 // see sandbox.go for what each tier closes. Properties that need a
 // newer manager than the tier implies are not emitted, so a manager
 // never rejects a unit for an unknown property.
+//
+// The view is deny-by-default: TemporaryFileSystem=/ replaces the
+// whole filesystem with an empty read-only tmpfs, and the binds below
+// are the only things that exist inside the unit. There is no
+// InaccessiblePaths= and no ProtectSystem= because there is nothing
+// left for either to act on — an unnamed path is absent, not merely
+// unreadable, which is a stronger statement than either option makes
+// and one that cannot go stale. MountAPIVFS= is not set: /proc, /sys
+// and /dev are mounted inside the tmpfs by PrivateDevices= (and, at
+// the full tier, PrivatePIDs=), measured on both tiers.
 func sandboxProperties(s *sandboxSpec) []sddbus.Property {
 	if s == nil || s.tier == sandboxNone {
 		return nil
-	}
-	hidden := make([]string, 0, len(s.hidden))
-	for _, p := range s.hidden {
-		hidden = append(hidden, "-"+p) // "-": absent on this host is fine
 	}
 	writable := make([]bindMount, 0, len(s.writable)+len(s.extra))
 	for _, b := range s.writable {
@@ -313,10 +319,11 @@ func sandboxProperties(s *sandboxSpec) []sddbus.Property {
 		}
 		writable = append(writable, bindMount{Source: src, Destination: b.dest, Flags: mountRecursive})
 	}
-	readOnly := []bindMount{
-		// systemd-resolved hosts symlink /etc/resolv.conf into here;
-		// without it every DNS lookup inside the unit fails.
-		{Source: "/run/systemd/resolve", Destination: "/run/systemd/resolve", IgnoreENOENT: true, Flags: mountRecursive},
+	// The base view first: every entry optional, because the list spans
+	// four distros and none of them has all of it.
+	readOnly := make([]bindMount, 0, len(sandboxBaseView)+len(s.extra))
+	for _, p := range sandboxBaseView {
+		readOnly = append(readOnly, bindMount{Source: p, Destination: p, IgnoreENOENT: true, Flags: mountRecursive})
 	}
 	for _, e := range s.extra {
 		src := e.source
@@ -337,16 +344,6 @@ func sandboxProperties(s *sandboxSpec) []sddbus.Property {
 		// options below (the unit fails to exec), and it is the piece
 		// that closes /proc reads of processes outside the namespace.
 		{Name: "PrivateUsers", Value: godbus.MakeVariant(true)},
-		{Name: "ProtectSystem", Value: godbus.MakeVariant("strict")},
-		// Empty tmpfs over /home, /root and /run/user — the last hides
-		// the manager's private socket and the session bus. "tmpfs"
-		// rather than "yes" so the app's own release and shared dirs
-		// can still be bound back when the liveswap root lives under
-		// one of those trees (BindPaths= nests into a tmpfs; it cannot
-		// nest into the inaccessible overmount "yes" installs). An
-		// extra_path there is refused outright — see
-		// sandboxClosedPrefixes.
-		{Name: "ProtectHome", Value: godbus.MakeVariant("tmpfs")},
 		{Name: "PrivateTmp", Value: godbus.MakeVariant(true)},
 		{Name: "PrivateDevices", Value: godbus.MakeVariant(true)},
 		// Read-only cgroupfs: the delegated subtree is owned by the
@@ -368,18 +365,36 @@ func sandboxProperties(s *sandboxSpec) []sddbus.Property {
 		{Name: "SystemCallFilter", Value: godbus.MakeVariant(allowList{true, []string{"@system-service"}})},
 		{Name: "SystemCallErrorNumber", Value: godbus.MakeVariant(errnoEPERM)},
 		{Name: "CapabilityBoundingSet", Value: godbus.MakeVariant(uint64(0))},
-		{Name: "InaccessiblePaths", Value: godbus.MakeVariant(hidden)},
-		{Name: "TemporaryFileSystem", Value: godbus.MakeVariant([]tmpfsMount{{s.root, "ro"}})},
-		{Name: "BindPaths", Value: godbus.MakeVariant(writable)},
-		{Name: "BindReadOnlyPaths", Value: godbus.MakeVariant(readOnly)},
+		// Start from nothing. The two bind properties appended below
+		// put back the OS the app needs to run and the app's own
+		// directories, and between them they are the whole view.
+		{Name: "TemporaryFileSystem", Value: godbus.MakeVariant([]tmpfsMount{{"/", "ro"}})},
 		// The manager hands every unit its own XDG_RUNTIME_DIR and bus
-		// address; both point into the hidden /run/user/<uid>.
+		// address; both point into a /run/user that is not in the view.
 		{Name: "UnsetEnvironment", Value: godbus.MakeVariant([]string{"XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"})},
 	}
+	// BindPaths= and BindReadOnlyPaths= are two views of ONE list in the
+	// manager, and setting either to an empty array does not mean "add
+	// nothing" — it resets the whole list, read-only entries included.
+	// Emitting an empty BindPaths= after the base view would therefore
+	// take /usr and /bin away again and every unit would fail
+	// 203/EXEC — measured, and exactly what the capability probe (which
+	// has no directories of its own) used to do. Omit what is empty.
+	props = appendIfAny(props, "BindReadOnlyPaths", readOnly)
+	props = appendIfAny(props, "BindPaths", writable)
 	if s.tier == sandboxFull {
 		props = append(props, sddbus.Property{Name: "PrivatePIDs", Value: godbus.MakeVariant("yes")})
 	}
 	return props
+}
+
+// appendIfAny adds a list-valued property only when it has entries;
+// see the reset semantics noted in sandboxProperties.
+func appendIfAny(props []sddbus.Property, name string, binds []bindMount) []sddbus.Property {
+	if len(binds) == 0 {
+		return props
+	}
+	return append(props, sddbus.Property{Name: name, Value: godbus.MakeVariant(binds)})
 }
 
 func (c *userManagerClient) StartTransientUnit(ctx context.Context, u unitSpec) (string, error) {

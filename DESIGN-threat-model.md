@@ -209,11 +209,20 @@ bounded by `max_keys` (default 100 000, idle-eviction). The origin's
 hint header is strict-parsed and fails open. It is a minor surface:
 denial-of-protection under bad config, not injection or exhaustion.
 
-### Supervisor⇄app and app⇄app boundaries — **currently none**
+### Supervisor⇄app and app⇄app boundaries — **built (2026-08-31, #35)**
 
-Every app runs as `hotserve`, in the host's mount, PID, and network
-namespaces ([runner_systemd.go](liveswap/runner_systemd.go) — a
-transient unit under the user manager gives a cgroup, not a
+> **Status:** this section described the state before per-app
+> sandboxing shipped, when a transient unit gave a cgroup and nothing
+> else. It is kept for the reasoning that follows; what it says is
+> *missing* is now in place. Every app unit runs in its own user
+> namespace (and, on systemd ≥ 256, its own PID namespace) with a
+> deny-by-default filesystem view — see "The shared-UID rule" below
+> and the Recommendation at the end. The network namespace is still
+> shared, by design.
+
+Every app runs as `hotserve`. Before #35 that meant the host's mount,
+PID and network namespaces ([runner_systemd.go](liveswap/runner_systemd.go)
+— a transient unit under the user manager gives a cgroup, not a
 namespace, and unlike the exec runner's children the apps no longer
 sit inside hotserve.service's `PrivateTmp`/`ProtectSystem`). The unit
 environment is the user manager's defaults (`XDG_RUNTIME_DIR`,
@@ -222,8 +231,8 @@ HOME, LANG, TZ, LC_*`, [app.go](liveswap/app.go) `inheritedEnv`) —
 closing *direct* inheritance of
 ACME tokens (and any other supervisor secrets); the `/proc` route is
 closed by the non-dumpable supervisor ("The shared-UID rule" below);
-the filesystem routes remain. This is the boundary the whole
-evaluation exists to build.
+the filesystem routes were what remained. This is the boundary the
+whole evaluation existed to build, and #35 phase 1 builds it.
 
 ### Install-time — `packaging/postinstall.sh`
 
@@ -395,18 +404,28 @@ app cannot reach the mount points at all, so the exposure is bounded
 to apps already running unsandboxed on a box this model treats as one
 trust domain. Per-app UIDs are what closes it.
 
-*A unit's view is a snapshot, not a policy.* systemd builds the mount
-namespace at unit start and hotserve never rebuilds it under a running
-app (reloads leave instances alone by design). So the hidden set is
-whatever it was when that instance launched: an `env_file` belonging
-to an app added later is read-only inside older siblings' sandboxes
-rather than absent, and a hidden path created after a unit started is
-not masked in it at all. Redeploying rebuilds the view; until then the
-sibling-secret row holds only for instances launched after the secret
-was declared. The structural answer is a deny-by-default view
-(`TemporaryFileSystem=/` plus explicit binds) rather than a list of
-things to hide, which is where DESIGN-sandbox.md's open question on
-the read-only path set already leans; tracked in #35.
+*A unit's view is a policy, not a snapshot.* **Closed 2026-08-31
+(#35).** This row used to record the opposite. systemd builds a unit's
+mount namespace at start and hotserve never rebuilds it under a
+running app (reloads leave instances alone by design), so while the
+view was *the host, minus a set of paths derived from the running
+configuration*, that set aged: an `env_file` belonging to an app added
+later was merely read-only inside older siblings' sandboxes rather
+than absent, and a path created after a unit started was not masked in
+it at all. The sibling-secret row therefore held only for instances
+launched after the secret was declared.
+
+The view is now deny-by-default — `TemporaryFileSystem=/:ro` plus an
+explicit base view, the app's own two directories, and its declared
+`extra_path`s — so nothing is derived and nothing ages. A secret
+declared tomorrow is absent from a unit started yesterday for exactly
+the same reason every other path is: nothing ever bound it. What is
+still fixed at a unit's start is the tier and the set of paths an
+operator asked to be let IN, both of which fail safe and both of which
+a redeploy refreshes. Measured on all four cells of the support matrix
+(systemd 252/255/257/259): inside a unit, `/etc` holds only the named
+base-view entries this host actually has — a dozen or so of the
+fourteen — and `/var/lib` holds the liveswap root alone.
 
 3. **Resource caps need a read-only cgroupfs inside the sandbox.** The
    cgroup subtree under `user@<uid>.service` is delegated to — owned
@@ -653,13 +672,17 @@ Cost / lock-in rows:
 - **`state.json` must stay outside any writable sandbox view**
   ([liveswap/state.go](liveswap/state.go) is trusted on relaunch; the
   recorded sandbox tier lives there too). Normative and shipped: the
-  liveswap root is replaced by an empty read-only tmpfs in the unit's
-  view (`TemporaryFileSystem=<root>:ro`) and only the release being
-  started and `shared/` are bound back — the app dir root, `state.json`,
-  `tmp/` (the upload staging dir: a running instance must not be able
-  to rewrite the next version's tarball) and the other releases do not
-  exist inside. `sandboxSpecFor` in liveswap/sandbox.go is the single
-  place that list is built; `TestSandboxSpecFor` pins it.
+  whole filesystem is replaced by an empty read-only tmpfs in the
+  unit's view (`TemporaryFileSystem=/:ro`) and only the release being
+  started, `shared/`, the OS base view and the declared `extra_path`s
+  are bound back — the app dir root, `state.json`, `tmp/` (the upload
+  staging dir: a running instance must not be able to rewrite the next
+  version's tarball) and the other releases do not exist inside, along
+  with everything else on the host. `sandboxSpecFor` in
+  liveswap/sandbox.go is the single place that list is built;
+  `TestSandboxSpecFor` and `TestSandboxViewIsExactlyWhatIsNamed` pin
+  it — the latter asserts the rendered set of bind destinations IS the
+  view, so an accidental widening fails there.
 - **Non-isolation hardening is still owed regardless of approach:**
   webhook rate limiting (T4 log-amplification) and the `extract.go`
   entry-count cap (T3). (The Bearer-only / no-shared-secret and
@@ -673,10 +696,12 @@ probe-gated tiers.** That is C's property set without C's privilege —
 `PrivateUsers=` for the user namespace that closes cross-process
 `/proc` reads (the shared-UID rule as corrected), `PrivatePIDs=` for
 the PID namespace that closes visibility and signals where the manager
-is ≥ 256, `ProtectSystem=strict` with `TemporaryFileSystem=<root>:ro`
-+ `BindPaths=` for the app's own two directories, `PrivateTmp=`,
-`InaccessiblePaths=` for hotserve's own paths, `ProtectControlGroups=`
-so resource caps will be real, and the curated
+is ≥ 256, a deny-by-default filesystem view (`TemporaryFileSystem=/:ro`
+plus `BindReadOnlyPaths=` for a named OS base view and `BindPaths=`
+for the app's own two directories — amended 2026-08-31 from
+`ProtectSystem=strict` plus a derived `InaccessiblePaths=` set, which
+could be incomplete and went stale between deploys), `PrivateTmp=`,
+`ProtectControlGroups=` so resource caps will be real, and the curated
 `SystemCallFilter=@system-service` — issued as transient-unit
 properties by a supervisor that holds no grant, so a supervisor RCE
 still gains nothing (T5 unchanged). *full* on Debian 13 / Ubuntu

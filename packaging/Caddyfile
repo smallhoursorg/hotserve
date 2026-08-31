@@ -45,6 +45,20 @@
 # 			env_file /etc/hotserve/myapp.env
 # 			# pre_start node migrate.js
 #
+# 			# Each app runs in its own systemd sandbox, and the
+# 			# filesystem it sees is deny-by-default: its release dir,
+# 			# its shared/ dir, a private /tmp, the OS runtime (/usr and
+# 			# a named handful of /etc) — and nothing else on this host
+# 			# exists inside it. If your app needs a path outside that,
+# 			# name it; otherwise it is ENOENT, not a permission error.
+# 			# Read-only unless you add `rw`. Repeatable.
+# 			# extra_path /run/postgresql     # same-box DB over its socket
+# 			# extra_path /var/cache/myapp rw
+# 			# A runtime installed outside /usr (a vendored Node, an
+# 			# nvm/asdf shim) needs its directory named the same way —
+# 			# the deploy is refused up front, naming extra_path, rather
+# 			# than failing later. `sandbox off` is the escape hatch.
+#
 # 			# Crash/health watchdog (on by default). Defaults shown:
 # 			# watchdog          on     # off = never auto-restart
 # 			# watchdog_failures 3      # consecutive failed health probes

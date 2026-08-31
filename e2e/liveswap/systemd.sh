@@ -128,17 +128,48 @@ expect_probe home /var/lib/liveswap/demo/shared
 expect_probe xdg_runtime unset
 expect_probe acme_token absent
 expect_probe dns ok
+# The base view: an OS the app can run on. Asserted first, because
+# without it every "absent" below would pass on an empty unit.
+expect_probe binsh ok
+expect_probe usrbinenv ok
+expect_probe etcssl ok
+# Deny-by-default: nothing bound these, so they do not exist inside the
+# unit — not "present but inaccessible", which is what the hidden-set
+# model left behind and what could go stale between deploys.
+for d in opt srv home root mnt media varlibhotserve etcliveswap; do
+	expect_probe "abs_$d" absent
+done
+# /etc is named entry by entry, never bound whole: an app that could
+# list all of /etc would see every other app's env_file.
+case " $(probe_val etc_listing)" in
+*" hotserve "* | *" liveswap "* | *" shadow "*)
+	fail "inside the sandbox: /etc carries more than the named entries: $(probe_val etc_listing)" ;;
+*) pass "inside the sandbox: /etc is only the named entries ($(probe_val etc_listing))" ;;
+esac
+# And /var/lib holds nothing but the path to this app's own dirs — the
+# TLS keys next door on the host are not in the view at all.
+[ "$(probe_val varlib_listing)" = "liveswap " ] \
+	&& pass "inside the sandbox: /var/lib shows only the liveswap root" \
+	|| fail "inside the sandbox: /var/lib listing is '$(probe_val varlib_listing)', want only 'liveswap'"
 # The sandboxed app still serves through hotserve like any other.
 curl -fsS --max-time 5 http://127.0.0.1:8080/ | grep -q "probe" \
 	&& pass "the sandboxed release serves through the proxy" \
 	|| fail "the sandboxed release does not serve"
 # And the unit carries the properties the runner set.
 sunit=$(json_str "$(status)" unit)
-props=$(user_systemctl show "$sunit" -p PrivatePIDs,PrivateUsers,ProtectSystem,ProtectControlGroups,TemporaryFileSystem)
-for want in "PrivatePIDs=yes" "PrivateUsers=yes" "ProtectSystem=strict" "ProtectControlGroups=yes" "TemporaryFileSystem=/var/lib/liveswap:ro"; do
+props=$(user_systemctl show "$sunit" -p PrivatePIDs,PrivateUsers,ProtectSystem,ProtectControlGroups,TemporaryFileSystem,InaccessiblePaths)
+for want in "PrivatePIDs=yes" "PrivateUsers=yes" "ProtectControlGroups=yes" "TemporaryFileSystem=/:ro"; do
 	case "$props" in
 	*"$want"*) pass "unit property $want" ;;
 	*) fail "unit lacks $want: $props" ;;
+	esac
+done
+# The retired half of the old model, read back off the live unit: the
+# view names what exists rather than masking a list of names.
+for gone in "ProtectSystem=strict" "InaccessiblePaths=/"; do
+	case "$props" in
+	*"$gone"*) fail "unit still carries $gone: $props" ;;
+	*) pass "unit no longer carries $gone" ;;
 	esac
 done
 

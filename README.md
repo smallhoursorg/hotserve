@@ -35,8 +35,9 @@ That gives you `/usr/bin/hotserve`, a systemd service running as the
 sandboxing runs at its *full* tier (PID + user namespace) on
 systemd ≥ 256 (Debian 13, Ubuntu 26.04) and at the *filesystem* tier
 (user namespace, no PID namespace) on Debian 12 and Ubuntu 24.04 —
-see [liveswap/README.md](liveswap/README.md#sandbox); the older two will stay
-supported and keep today's behaviour.
+see [liveswap/README.md](liveswap/README.md#sandbox). All four stay
+supported; the older two get every part of the sandbox except the PID
+namespace, which is what the *full* tier adds.
 The package depends on `libpam-systemd` and `dbus` (present on any
 stock Debian/Ubuntu server): liveswap runs your apps as systemd units
 under the `hotserve` user's own service manager, which needs
@@ -140,18 +141,18 @@ an on-disk release. Full details, CI snippets, and every option:
   a unix socket rather than TCP — otherwise "localhost-only" would
   include every app you run, and one SSRF bug in an app could
   reconfigure the server.
-  Apps run as one shared user, but each in its own systemd sandbox: a
-  user namespace, a read-only system with the app data area masked so
-  it holds only that app's own release and files, hotserve's keys,
-  sockets and env files made inaccessible, its `/proc` entries closed
-  — and, on systemd ≥ 256, its own PID namespace, so siblings are not
-  merely unreadable but invisible. What is *not* claimed: the rest of
-  the host filesystem stays readable (`ProtectSystem=strict` makes it
-  read-only, not absent), and below systemd 256 the host process list
-  is still visible in `/proc` even though other processes' contents
-  are not. What stays shared by
-  design is the network namespace: sibling `127.0.0.1` ports are
-  reachable, and on older systemd same-UID processes can still be
+  Apps run as one shared user, but each in its own systemd sandbox
+  with a deny-by-default filesystem view: a user namespace, and a
+  filesystem that holds nothing but that app's own release and data,
+  the parts of the OS it needs to run, and whatever it was explicitly
+  given. hotserve's keys, sockets and env files, the other apps, and
+  the rest of the host are not made unreadable — they are *absent*.
+  On systemd ≥ 256 the app also gets its own PID namespace, so
+  siblings are invisible rather than merely unreadable. What is *not*
+  claimed: below systemd 256 the host process list is still visible in
+  `/proc`, even though other processes' contents are not. What stays
+  shared by design is the network namespace: sibling `127.0.0.1` ports
+  are reachable, and on older systemd same-UID processes can still be
   signalled. Details and the rollout rules:
   [liveswap/README.md](liveswap/README.md#sandbox); the reasoning:
   [DESIGN-threat-model.md](DESIGN-threat-model.md).
@@ -167,13 +168,16 @@ an on-disk release. Full details, CI snippets, and every option:
   Every app runs as a transient unit under the hotserve user's own
   systemd manager (chosen over the system manager: a polkit grant to
   manage units is root-equivalent), and each unit carries systemd's
-  own sandboxing: a user namespace (`PrivateUsers=`), a read-only
-  system with the liveswap root replaced by an empty tmpfs and only
-  the app's own release and `shared/` bound back, `PrivateTmp=`,
-  `PrivateDevices=`, hotserve's own directories and sockets
-  inaccessible, a read-only cgroupfs, no capabilities, and systemd's
-  curated `SystemCallFilter=@system-service` — no containers, no
-  bubblewrap. On systemd ≥ 256 (Debian 13, Ubuntu 26.04) the unit also
+  own sandboxing: a user namespace (`PrivateUsers=`), a
+  deny-by-default filesystem view — the whole host filesystem replaced
+  by an empty read-only tmpfs (`TemporaryFileSystem=/:ro`), with only
+  the OS the app needs to run, its own release and `shared/`, and its
+  declared `extra_path`s bound back, so hotserve's directories and
+  sockets and every other app are *absent* rather than merely
+  unreadable — `PrivateTmp=`, `PrivateDevices=`, a read-only cgroupfs,
+  no capabilities, and systemd's curated
+  `SystemCallFilter=@system-service` — no containers, no bubblewrap.
+  On systemd ≥ 256 (Debian 13, Ubuntu 26.04) the unit also
   gets a PID namespace (`PrivatePIDs=`): the *full* tier, where the
   supervisor, the user manager and sibling apps are invisible and
   unsignalable. Debian 12 and Ubuntu 24.04 get the *filesystem* tier

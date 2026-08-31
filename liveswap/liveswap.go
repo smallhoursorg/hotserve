@@ -241,12 +241,15 @@ type AppConfig struct {
 	// "auto", "require" or "off". Default: the global setting.
 	Sandbox string `json:"sandbox,omitempty"`
 
-	// ExtraPaths are host paths the sandboxed app may see besides its
-	// own release and shared directories — read-only unless Writable.
+	// ExtraPaths are host paths the sandboxed app may see in addition
+	// to its own release and shared directories and the OS runtime
+	// (/usr plus a named handful of /etc) — read-only unless Writable.
+	// The view is deny-by-default, so nothing else on the host exists
+	// inside the unit and this is the only way to let something in.
 	// The canonical use is a same-box database's unix socket directory
-	// (/run/postgresql). Paths inside the liveswap root or hotserve's
-	// own directories are refused. Ignored when the app runs without a
-	// sandbox.
+	// (/run/postgresql). Paths inside the liveswap root, and the names
+	// that would give back what the sandbox took, are refused. Ignored
+	// when the app runs without a sandbox.
 	ExtraPaths []ExtraPathConfig `json:"extra_paths,omitempty"`
 }
 
@@ -322,20 +325,17 @@ func (a *App) Provision(ctx caddy.Context) error {
 	// object. Validate-before-commit keeps a bad reload from taking effect.
 	a.managed = make(map[string]*managedApp, len(a.Apps))
 	specs := make(map[string]*appSpec, len(a.Apps))
-	// Two passes, and the order matters: buildSpec derives the sandbox's
-	// hidden set from EVERY app's env_file (hiddenPaths), so all of them
-	// must have had their {env.*} placeholders resolved before the first
-	// spec is built. One pass over an unordered map would record a
-	// sibling's unresolved path and leave that app's real env file
-	// visible inside the sandbox.
+	// One pass: a spec is built from its own app's config alone. This
+	// used to need two — the sandbox's hidden set was derived from
+	// EVERY app's env_file, so all of them had to have their {env.*}
+	// placeholders resolved before the first spec was built — but the
+	// view is deny-by-default now and derives nothing from siblings.
 	for name, cfg := range a.Apps {
 		if cfg == nil {
 			cfg = new(AppConfig)
 			a.Apps[name] = cfg
 		}
 		cfg.applyDefaults(repl)
-	}
-	for name, cfg := range a.Apps {
 		spec, err := a.buildSpec(name, cfg)
 		if err != nil {
 			return err
@@ -345,6 +345,7 @@ func (a *App) Provision(ctx caddy.Context) error {
 	if err := a.Validate(); err != nil {
 		return err
 	}
+	warnEnvFileInView(a.logger, specs)
 	// Take pool references now (so a reload never drops the refcount to
 	// zero) but install nothing on the pooled apps until Start: Caddy
 	// keeps the old config if any app's Start fails, and `validate`
@@ -484,7 +485,6 @@ func (a *App) buildSpec(name string, cfg *AppConfig) (*appSpec, error) {
 		dirs:            newAppDirs(a.Root, name),
 		sandboxMode:     sandboxMode,
 		extraPaths:      extra,
-		sandboxHidden:   a.hiddenPaths(),
 	}, nil
 }
 
@@ -494,15 +494,14 @@ func (a *App) Validate() error {
 	if !strings.HasPrefix(a.Root, "/") {
 		return fmt.Errorf("root must be an absolute path, got %q", a.Root)
 	}
-	// Clean, not merely absolute: every containment check below (and the
-	// sandbox's own masking) compares paths lexically, so an uncleaned
-	// root like /srv/liveswap/../liveswap would let an extra_path name a
+	// Clean, not merely absolute: the containment checks below and in
+	// sandbox.go compare paths lexically, so an uncleaned root like
+	// /srv/liveswap/../liveswap would let an extra_path name a
 	// sibling's directory through the spelling the check never sees.
 	if filepath.Clean(a.Root) != a.Root {
 		return fmt.Errorf("root must be a clean path (no . , .. or doubled separators): %q resolves to %q", a.Root, filepath.Clean(a.Root))
 	}
-	hidden := a.hiddenPaths()
-	if err := validateSandboxRoot(a.Root, hidden); err != nil {
+	if err := validateSandboxRoot(a.Root); err != nil {
 		return err
 	}
 	if a.Sandbox != "" && !validSandboxMode(a.Sandbox) { // "" = the default Provision applies (auto)
@@ -513,7 +512,7 @@ func (a *App) Validate() error {
 			return fmt.Errorf("app %s: sandbox must be \"auto\", \"require\" or \"off\", got %q", name, cfg.Sandbox)
 		}
 		for _, e := range cfg.ExtraPaths {
-			if err := validateExtraPath(e.Path, a.Root, hidden); err != nil {
+			if err := validateExtraPath(e.Path, a.Root); err != nil {
 				return fmt.Errorf("app %s: %w", name, err)
 			}
 		}
@@ -600,7 +599,7 @@ func (a *App) Start() error {
 	// host that falls short fails the start — by design, and documented
 	// as such — so it is checked before any app is configured.
 	if a.sandboxWanted() {
-		capability := probeSandbox(a.Root, a.hiddenPaths(), a.logger)
+		capability := probeSandbox(a.logger)
 		for name, spec := range a.specs {
 			tier, warn, err := resolveSandboxTier(spec.sandboxMode, capability)
 			if err != nil {
@@ -662,10 +661,10 @@ func (a *App) sandboxWanted() bool {
 
 // probeSandbox measures what the user manager can deliver (sandbox.go);
 // a variable so unit tests can script the host.
-var probeSandbox = func(root string, hidden []string, logger *zap.Logger) sandboxCapability {
+var probeSandbox = func(logger *zap.Logger) sandboxCapability {
 	r := newSystemdRunner(userManager, logger)
 	defer r.cancel()
-	return probeSandboxCapability(r, userManager.ManagerVersion(), root, hidden)
+	return probeSandboxCapability(r, userManager.ManagerVersion())
 }
 
 // Stop intentionally does NOT stop app processes: on a config reload

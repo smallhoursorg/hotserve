@@ -4,13 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
-	"github.com/caddyserver/caddy/v2"
 	"go.uber.org/zap"
 )
 
@@ -31,6 +28,17 @@ import (
 //     invisible and unsignalable. Without it a compromised app can
 //     still enumerate and signal (kill) same-UID processes — a
 //     denial-of-service residual, not a data-access one.
+//
+// The filesystem view is deny-by-default. An empty read-only tmpfs
+// replaces the whole root (TemporaryFileSystem=/) and the only things
+// that exist inside a unit are the ones this file names:
+// sandboxBaseView, the app's own release and shared dirs, and its
+// extra_paths. The guarantee is one sentence — anything not named is
+// absent — and it holds by construction rather than by a list of
+// things to hide being complete. Nothing has to be derived from the
+// running configuration, and nothing ages: a secret that appears on
+// the host after a unit started is absent from it for exactly the same
+// reason every other path is.
 //
 // The policy (auto/require/off) is resolved per app at Start against a
 // host capability probed once per Start; the tier an instance actually
@@ -135,100 +143,84 @@ type bindPath struct {
 	source string
 }
 
-// sandboxHiddenFloor is the packaged install's layout: hotserve's own
-// state (TLS keys, certificates), the admin socket's directory, and the
-// documented env-file directories. It is a floor, not the whole set —
-// hiddenPaths adds what this process actually uses, because none of
-// these paths is fixed by anything but convention.
-var sandboxHiddenFloor = []string{
-	"/var/lib/hotserve",
-	"/run/hotserve",
-	"/etc/hotserve",
-	"/etc/liveswap",
+// sandboxBaseView is everything an app sees of the host besides its
+// own directories: the parts of the OS a program needs in order to
+// execute at all. Under TemporaryFileSystem=/ this list, plus the
+// app's own dirs and its extra_paths, *is* the view — anything not
+// named here is absent, not merely unreadable.
+//
+// /etc is named entry by entry rather than bound whole. Binding /etc
+// would hand every app every other app's env_file and hotserve's own
+// configuration, which is precisely the derived, ageing hidden set
+// this model exists to delete; naming the dozen entries a runtime
+// actually needs keeps the guarantee free of exceptions.
+//
+// Every entry is bound with IgnoreENOENT: the list spans four distros
+// and no single one has all of it (a merged-/usr host has no real
+// /lib64, Debian has no /etc/pki, a host without systemd-resolved has
+// no /run/systemd/resolve). A missing entry must not fail the unit.
+var sandboxBaseView = []string{
+	"/usr",
+	// The usrmerge aliases: symlinks into /usr on modern distros, real
+	// directories on older ones. Bound by name so a #! line, a
+	// hard-coded /bin/sh or an interpreter's own ld path resolves to
+	// the spelling it was written with.
+	"/bin", "/sbin", "/lib", "/lib64", "/lib32", "/libx32",
+	// The TLS trust store, under all three spellings in the matrix.
+	// Recursive, so the /etc/ssl/certs symlinks into /usr/share
+	// resolve to the /usr bound above.
+	"/etc/ssl", "/etc/ca-certificates", "/etc/pki",
+	// Name resolution and user lookup: getaddrinfo reads all four, and
+	// without them every DNS lookup and every getpwuid fails.
+	"/etc/resolv.conf", "/etc/hosts", "/etc/hostname", "/etc/nsswitch.conf",
+	"/etc/passwd", "/etc/group",
+	"/etc/localtime", "/etc/alternatives",
+	// The dynamic linker's cache and configuration: without ld.so.cache
+	// every dynamically-linked binary falls back to a search that
+	// misses the distro's multiarch directories.
+	"/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d",
+	// systemd-resolved hosts symlink /etc/resolv.conf into here; if the
+	// target is missing the link dangles and DNS fails silently on the
+	// most common distro in the matrix.
+	"/run/systemd/resolve",
 }
 
-// hiddenPaths is what no app may see, for this running configuration:
-// the floor above plus the directories this hotserve was actually
-// pointed at — Caddy's data and config dirs (TLS keys and the config
-// autosave, which follow XDG_DATA_HOME/XDG_CONFIG_HOME), the systemd
-// runtime directory (RuntimeDirectory=hotserve — the admin socket),
-// and every app's env_file, each hidden as the file it is so an
-// operator's `/etc/blog/blog.env` does not require hiding all of
-// `/etc/blog`. An app never legitimately reads its env *file*; it
-// receives env *variables*. Rendered as InaccessiblePaths= with the
-// "-" prefix, so a path absent on this host is not an error.
+// sandboxNeverBound are the names an extra_path may never take.
 //
-// Deterministic order: the floor, then the runtime dirs, then env
-// files sorted — specEqual compares specs by their rendering.
-func (a *App) hiddenPaths() []string {
-	seen := map[string]bool{}
-	var out []string
-	add := func(p string) {
-		if p == "" {
-			return
-		}
-		// A relative env_file is valid configuration — parseEnvFile
-		// reads it through os.ReadFile, i.e. against this process's
-		// working directory — so resolve it the same way rather than
-		// dropping it, which would leave that file visible to siblings.
-		if !filepath.IsAbs(p) {
-			abs, err := filepath.Abs(p)
-			if err != nil {
-				return
-			}
-			p = abs
-		}
-		p = filepath.Clean(p)
-		if seen[p] {
-			return
-		}
-		seen[p] = true
-		out = append(out, p)
-	}
-	for _, p := range sandboxHiddenFloor {
-		add(p)
-	}
-	add(caddy.AppDataDir())
-	add(caddy.AppConfigDir())
-	// systemd sets RUNTIME_DIRECTORY for RuntimeDirectory= (a
-	// colon-separated list when there is more than one).
-	for _, d := range filepath.SplitList(os.Getenv("RUNTIME_DIRECTORY")) {
-		add(d)
-	}
-	var envFiles []string
-	for _, cfg := range a.Apps {
-		if cfg.EnvFile != "" {
-			envFiles = append(envFiles, cfg.EnvFile)
-		}
-	}
-	sort.Strings(envFiles)
-	for _, f := range envFiles {
-		add(f)
-	}
-	return out
-}
-
-// sandboxClosedPrefixes are the paths the sandbox options take away by
-// themselves: ProtectHome=tmpfs (/home, /root, /run/user — the user
-// manager's private socket and session bus), PrivateTmp= (/tmp,
-// /var/tmp), PrivateDevices= (/dev), ProtectControlGroups= and
-// ProtectKernelTunables= (/sys), PrivatePIDs=/MountAPIVFS (/proc).
+// With a deny-by-default view this list is no longer what makes the
+// sandbox hold — nothing is in a unit's view unless something names
+// it, so a path missing from this list is still absent. What the list
+// does is refuse the names that, once named, would give back what the
+// sandbox just took: it turns an operator's mistake into a config
+// error instead of a quietly weaker sandbox. That is why it can be a
+// static literal with no derivation behind it, and why a hotserve
+// pointed at a non-default XDG data dir does not need it enumerated
+// here — that directory is absent from every view regardless.
 //
-// An extra_path may not name anything within them. BindPaths= nests
-// *into* those overmounts — that is exactly why the app's own dirs can
-// be bound back under the tmpfs that replaces the liveswap root — so a
-// bind here would hand back precisely what the option closed, while
-// the status endpoint still reported the tier as applied. The sharpest
-// case: `extra_path /run/user/<uid>` returns the manager's private
-// socket, and since PrivateUsers= maps the app's uid one-to-one, the
-// app could then ask the manager to start a unit of its own with no
-// sandbox at all. Read-only does not help: connecting to a unix socket
-// is not a filesystem write. `sandbox off` is the escape hatch for a
-// workload that genuinely needs one of these.
-var sandboxClosedPrefixes = []string{
+// The sharpest case is /run/user: an extra_path there returns the user
+// manager's private socket, and since PrivateUsers= maps the app's uid
+// one-to-one, the app could then ask the manager to start a unit of
+// its own with no sandbox at all. Read-only does not help — connecting
+// to a unix socket is not a filesystem write. `sandbox off` is the
+// escape hatch for a workload that genuinely needs one of these.
+var sandboxNeverBound = append(append([]string{}, sandboxHotservePaths...),
+	// The user manager's private socket and session bus, and the home
+	// directories of every same-UID neighbour.
 	"/home", "/root", "/run/user",
+	// The kernel interfaces and scratch space the unit gets its own
+	// copies of (PrivateTmp=, PrivateDevices=, the API VFS): a bind
+	// here would hand back the host's, nested into the unit's own.
 	"/tmp", "/var/tmp",
 	"/dev", "/sys", "/proc",
+)
+
+// sandboxHotservePaths is the supervisor's own state on a packaged
+// install: TLS keys and certificates, the admin socket's directory,
+// the documented env-file directories. It is the subset of
+// sandboxNeverBound that is a mistake to put the liveswap *root*
+// inside of, not merely to name in an extra_path.
+var sandboxHotservePaths = []string{
+	"/var/lib/hotserve", "/run/hotserve", "/etc/hotserve", "/etc/liveswap",
 }
 
 // sandboxSpec is what the runner needs to render the sandbox
@@ -236,23 +228,25 @@ var sandboxClosedPrefixes = []string{
 // remapped.
 type sandboxSpec struct {
 	tier sandboxTier
-	// root is the liveswap root: an empty read-only tmpfs replaces it
-	// in the unit's view (TemporaryFileSystem=), so sibling apps, this
-	// app's state.json, its tmp/ (the upload staging dir — a running
-	// instance must never be able to rewrite the next version's
-	// tarball) and its other releases do not exist there.
+	// root is the liveswap root. It is not masked as such any more —
+	// the whole filesystem is — but it is still what the containment
+	// checks measure against: a bind that reaches under it is one app
+	// reaching into another's data.
 	root string
 	// writable are this app's own directories bound back at their real
 	// paths, read-write (BindPaths=): the release being started and
-	// the shared dir.
+	// the shared dir. Its state.json, its tmp/ (the upload staging dir
+	// — a running instance must never be able to rewrite the next
+	// version's tarball) and its other releases are simply not named,
+	// so they do not exist inside the unit.
 	writable []bindPath
 	extra    []extraPath
-	// hidden is what no app may see on this host (App.hiddenPaths).
-	hidden []string
-	// appDir is this app's own directory under the root: a writable
-	// bind that resolves inside the root must stay inside it, or one
+	// appDir is this app's own directory under the root, and appName
+	// the name it was configured with: a writable bind that resolves
+	// inside the root must stay inside *this* app's directory, or one
 	// app would be binding another's data.
-	appDir string
+	appDir  string
+	appName string
 }
 
 // resolveBindSources resolves every path this unit will bind and
@@ -290,40 +284,59 @@ type sandboxSpec struct {
 // sandboxed app cannot reach the mount points at all, so the exposure
 // is bounded to apps that are already running unsandboxed on a box
 // the threat model treats as one trust domain until then.
-func (s *sandboxSpec) resolveBindSources(hidden []string) error {
+func (s *sandboxSpec) resolveBindSources() error {
 	// Compare canonical against canonical: a resolved bind source is
 	// canonical, so a lexical root would miss a sibling reached through
 	// a link when the root itself is one (/srv/liveswap ->
 	// /mnt/liveswap: a planted shared -> /mnt/liveswap/shop/shared
 	// resolves *outside* the lexical root and the sibling check would
 	// never fire). Unresolvable falls back to the lexical value.
-	rootC, appC := s.root, s.appDir
+	rootC := s.root
 	if c, err := filepath.EvalSymlinks(s.root); err == nil {
 		rootC = c
 	}
-	if c, err := filepath.EvalSymlinks(s.appDir); err == nil {
-		appC = c
-	}
+	// The expected app directory is derived from the canonical root and
+	// the configured app name, NOT from what appDir itself resolves to.
+	// Resolving appDir would let the alias vouch for itself: a bare app
+	// that replaces <root>/blog with a link to <root>/shop would make
+	// shop's directory the expected base, and both of blog's mandatory
+	// binds would then match it exactly — handing the sibling's release
+	// and shared data to the new sandbox.
+	appC := filepath.Join(rootC, s.appName)
 	own := func(dest, resolved string) error {
 		// Inside the root, the only difference a mandatory bind may
 		// have from its configured path is one an ancestor's symlink
-		// explains — the root or the app dir being a link. Resolving
-		// to some *other* place under the root is the app pointing at
-		// data that is not the directory we meant to bind: its own app
-		// dir or releases/ (whose recursive bind would carry
-		// state.json, the upload staging dir and every other release
-		// in under `shared`), or a sibling's. Outside the root
-		// entirely — `shared` moved to another disk — is legitimate,
-		// subject to the checks below.
+		// explains — the root being a link. Resolving to some *other*
+		// place under the root is the app pointing at data that is not
+		// the directory we meant to bind: its own app dir or releases/
+		// (whose recursive bind would carry state.json, the upload
+		// staging dir and every other release in under `shared`), or a
+		// sibling's. Outside the root entirely — `shared` moved to
+		// another disk — is legitimate, subject to the checks below.
 		rel, err := filepath.Rel(s.appDir, dest)
 		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return fmt.Errorf("%q is not inside the app's own directory %s", dest, s.appDir)
 		}
-		if expected := filepath.Join(appC, rel); resolved != expected &&
-			(overlaps(resolved, s.root) || overlaps(resolved, rootC)) {
+		expected := filepath.Join(appC, rel)
+		if resolved == expected {
+			// It IS the directory it names, reached through an alias on
+			// the root itself. Nothing further to check, and in
+			// particular NOT closedPath: validateSandboxRoot
+			// deliberately allows a root under /tmp, /var/tmp or /home
+			// (the binds nest into the unit's own private copies, and
+			// the integration lane runs from /var/tmp), so refusing here
+			// would make a symlinked root fail every launch while the
+			// same root spelled directly works.
+			return nil
+		}
+		if overlaps(resolved, s.root) || overlaps(resolved, rootC) {
 			return fmt.Errorf("%q resolves to %q, which is not the directory it names and overlaps the liveswap root %s (expected %q, or a path outside the root entirely)", dest, resolved, s.root, expected)
 		}
-		return closedOrHidden(resolved, hidden)
+		// Outside the root: `shared` legitimately moved to another disk.
+		// Here the deny list does apply — this is a path the operator
+		// (or a bare app's planted symlink) chose, not one the root's
+		// own spelling implies.
+		return closedPath(resolved)
 	}
 	for i, b := range s.writable {
 		resolved, err := filepath.EvalSymlinks(b.dest)
@@ -345,7 +358,7 @@ func (s *sandboxSpec) resolveBindSources(hidden []string) error {
 		if err != nil || resolved == e.path {
 			continue // absent (checked as written at config load), or itself
 		}
-		if err := checkExtraPathContainment(resolved, s.root, hidden); err != nil {
+		if err := checkExtraPathContainment(resolved, s.root, rootC); err != nil {
 			return fmt.Errorf("refusing to launch sandboxed: extra_path %q resolves to %q: %w", e.path, resolved, err)
 		}
 		s.extra[i].source = resolved
@@ -353,21 +366,16 @@ func (s *sandboxSpec) resolveBindSources(hidden []string) error {
 	return nil
 }
 
-// closedOrHidden refuses a path that overlaps anything the sandbox is
-// meant to keep out — in either direction. Being *inside* a protected
-// path is the obvious case; *containing* one is just as bad, because
-// these binds are recursive: `shared -> /run` would carry /run/user
-// (the manager's socket) and /run/hotserve (the admin socket) in with
-// it, and `shared -> /etc` every configured env file.
-func closedOrHidden(p string, hidden []string) error {
-	for _, h := range hidden {
-		if overlaps(p, h) {
-			return fmt.Errorf("%q overlaps %s, which is hidden from every app", p, h)
-		}
-	}
-	for _, c := range sandboxClosedPrefixes {
+// closedPath refuses a path that overlaps anything an app may never be
+// given — in either direction. Being *inside* a protected path is the
+// obvious case; *containing* one is just as bad, because these binds
+// are recursive: `shared -> /run` would carry /run/user (the manager's
+// socket) and /run/hotserve (the admin socket) in with it, and
+// `shared -> /etc` every configured env file.
+func closedPath(p string) error {
+	for _, c := range sandboxNeverBound {
 		if overlaps(p, c) {
-			return fmt.Errorf("%q overlaps %s, which the sandbox itself closes", p, c)
+			return fmt.Errorf("%q overlaps %s, which no app may be given", p, c)
 		}
 	}
 	return nil
@@ -380,7 +388,9 @@ func overlaps(a, b string) bool { return pathWithin(a, b) || pathWithin(b, a) }
 
 // sandboxSpecFor is the sandbox of one instance of this app at the
 // given tier: its release being started and its shared dir writable,
-// its extra paths, everything else under the root gone. nil for none.
+// its extra paths, and the base view. Everything else on the host —
+// every other app, every other release, hotserve's own state — is
+// absent because nothing names it. nil for none.
 func (s *appSpec) sandboxSpecFor(releaseDir string, tier sandboxTier) *sandboxSpec {
 	if tier == sandboxNone {
 		return nil
@@ -389,11 +399,11 @@ func (s *appSpec) sandboxSpecFor(releaseDir string, tier sandboxTier) *sandboxSp
 		tier:     tier,
 		root:     s.dirs.root,
 		appDir:   s.dirs.app,
+		appName:  s.name,
 		writable: []bindPath{{dest: releaseDir, source: releaseDir}, {dest: s.dirs.shared, source: s.dirs.shared}},
 		// Copied: resolveBindSources rewrites entries to what they
 		// resolve to, and the spec must not mutate the app's config.
-		extra:  append([]extraPath{}, s.extraPaths...),
-		hidden: s.sandboxHidden,
+		extra: append([]extraPath{}, s.extraPaths...),
 	}
 }
 
@@ -420,10 +430,13 @@ func sandboxResidual(tier sandboxTier) string {
 }
 
 // probeSandboxSpec is the spec the capability probe runs with: the
-// tier under test over the same root and hidden set as a real app
-// unit, nothing exposed.
-func probeSandboxSpec(tier sandboxTier, root string, hidden []string) *sandboxSpec {
-	return &sandboxSpec{tier: tier, root: root, hidden: hidden}
+// tier under test with the same deny-by-default view as a real app
+// unit, and nothing of its own bound into it. The probe needs no root
+// and no per-config state — the view is a policy, not a derivation,
+// so there is nothing about this host's configuration for it to
+// reproduce.
+func probeSandboxSpec(tier sandboxTier) *sandboxSpec {
+	return &sandboxSpec{tier: tier}
 }
 
 // sandboxProbeCommand is the command the capability probe runs inside
@@ -461,7 +474,11 @@ const sandboxProbeTimeout = 30 * time.Second
 // manager refuses (a kernel or LSM that denies the namespaces), or a
 // probe that exits non-zero (a property silently ignored), fails the
 // candidate with the reason kept for the WARN and the require error.
-func probeSandboxCapability(r runner, managerVersion int, root string, hidden []string) sandboxCapability {
+//
+// The probe also proves the base view: /bin/sh has to exist inside the
+// unit for the script to run at all, so a host whose runtime the base
+// view fails to name cannot report a tier it does not have.
+func probeSandboxCapability(r runner, managerVersion int) sandboxCapability {
 	var reasons []string
 	try := func(tier sandboxTier) bool {
 		ctx, cancel := context.WithTimeout(context.Background(), sandboxProbeTimeout)
@@ -473,7 +490,7 @@ func probeSandboxCapability(r runner, managerVersion int, root string, hidden []
 			dir:     "/",
 			env:     []string{"PATH=/usr/bin:/bin"},
 			grace:   5 * time.Second,
-			sandbox: probeSandboxSpec(tier, root, hidden),
+			sandbox: probeSandboxSpec(tier),
 			probe:   true,
 		})
 		if err != nil {
@@ -500,19 +517,27 @@ func probeSandboxCapability(r runner, managerVersion int, root string, hidden []
 
 // validateExtraPath enforces what an extra_path may name: an absolute,
 // clean path that is neither inside the liveswap root (whose other
-// contents are exactly what the sandbox exists to hide; the app's own
-// directories are already in its view), nor inside the hidden set, nor
-// inside anything the sandbox options close by themselves — a bind
-// under any of those re-opens what the sandbox just shut, which is the
-// "looks configured, quietly weaker" failure this feature must not
-// have. The refusal names the reason so an operator can tell a typo
-// from a boundary.
-func validateExtraPath(p, root string, hidden []string) error {
+// contents are exactly what the sandbox exists to keep out; the app's
+// own directories are already in its view) nor one of the names that
+// would give back what the sandbox took. The refusal names the reason
+// so an operator can tell a typo from a boundary.
+func validateExtraPath(p, root string) error {
 	if !filepath.IsAbs(p) || filepath.Clean(p) != p {
 		return fmt.Errorf("extra_path %q must be an absolute, clean path", p)
 	}
 	if p == "/" {
 		return errors.New("extra_path / would expose the whole host")
+	}
+	// The root's own canonical spelling, for the containment checks: a
+	// resolved extra_path is canonical, so comparing it only against a
+	// lexical root would miss a sibling reached the other way round
+	// (with /srv/liveswap -> /mnt/liveswap, `extra_path
+	// /mnt/liveswap/shop/shared` already resolves to itself and would
+	// pass, then bind the sibling back). This is the same
+	// canonicalisation resolveBindSources does for mandatory binds.
+	rootC := root
+	if c, err := filepath.EvalSymlinks(root); err == nil {
+		rootC = c
 	}
 	// Follow symlinks before the containment checks: they are lexical,
 	// and BindPaths= binds what the path resolves to, so a link such as
@@ -523,58 +548,119 @@ func validateExtraPath(p, root string, hidden []string) error {
 	// between config load and unit start is not covered here, which
 	// needs write access outside every sandbox to arrange.
 	if resolved, err := filepath.EvalSymlinks(p); err == nil && resolved != p {
-		if err := checkExtraPathContainment(resolved, root, hidden); err != nil {
+		if err := checkExtraPathContainment(resolved, root, rootC); err != nil {
 			return fmt.Errorf("extra_path %q resolves to %q: %w", p, resolved, err)
 		}
 	}
-	return checkExtraPathContainment(p, root, hidden)
+	return checkExtraPathContainment(p, root, rootC)
 }
 
 // checkExtraPathContainment is the lexical half of validateExtraPath,
-// applied to the path as written and to what it resolves to.
-func checkExtraPathContainment(p, root string, hidden []string) error {
-	// Overlap in either direction: an extra_path *inside* a protected
-	// tree exposes that part of it, and one *containing* a protected
-	// tree carries the whole thing in, since the binds are recursive.
-	if overlaps(p, root) {
-		return fmt.Errorf("extra_path %q overlaps the liveswap root %s, which the sandbox replaces with an empty tmpfs; an app already sees its own release and shared dirs", p, root)
+// applied to the path as written and to what it resolves to. root and
+// rootC are the liveswap root's configured and canonical spellings;
+// either one reaching the path is a refusal.
+func checkExtraPathContainment(p, root, rootC string) error {
+	// Overlap in either direction: an extra_path *inside* the root
+	// exposes another app's data, and one *containing* the root carries
+	// the whole tree in, since the binds are recursive.
+	if overlaps(p, root) || overlaps(p, rootC) {
+		return fmt.Errorf("extra_path %q overlaps the liveswap root %s, which no app sees beyond its own release and shared dirs", p, root)
 	}
-	for _, h := range hidden {
-		if overlaps(p, h) {
-			return fmt.Errorf("extra_path %q overlaps %s, which is hidden from every app (hotserve's own keys, sockets and env files)", p, h)
-		}
-	}
-	for _, c := range sandboxClosedPrefixes {
+	for _, c := range sandboxNeverBound {
 		if overlaps(p, c) {
-			return fmt.Errorf("extra_path %q overlaps %s, which the sandbox itself closes — binding it back would undo the sandbox for this app; use `sandbox off` if the app genuinely needs it", p, c)
+			return fmt.Errorf("extra_path %q overlaps %s, which no app may be given — binding it back would undo the sandbox for this app; use `sandbox off` if the app genuinely needs it", p, c)
 		}
 	}
 	return nil
 }
 
-// validateSandboxRoot rejects a liveswap root inside a hidden path:
-// the inaccessible overmount would sit above the root, no app
-// directory could be bound back into view, and the root holds the
-// apps' own data — putting it inside hotserve's private state is a
-// configuration mistake worth failing on, sandbox or no sandbox.
-func validateSandboxRoot(root string, hidden []string) error {
-	for _, h := range hidden {
+// validateSandboxRoot rejects a liveswap root inside hotserve's own
+// state: the root holds the apps' own data, and putting it inside the
+// supervisor's TLS keys or env files is a configuration mistake worth
+// failing on, sandbox or no sandbox.
+//
+// A root inside one of the *other* sandboxNeverBound entries is
+// deliberately NOT refused: systemd creates the mount points for
+// TemporaryFileSystem= and BindPaths= inside the namespace, so a root
+// under /tmp, /var/tmp or /home is masked with everything else and the
+// app's own dirs bind back into it exactly as they do under /var/lib.
+// The real-systemd integration lane runs with a /var/tmp root and
+// asserts the full tier. Refusing those would turn an odd-but-working
+// setup into a server that will not start.
+func validateSandboxRoot(root string) error {
+	for _, h := range sandboxHotservePaths {
 		if pathWithin(root, h) {
-			return fmt.Errorf("root %q is inside %s, which the sandbox hides from every app; use a root outside it (the default is /var/lib/liveswap)", root, h)
+			return fmt.Errorf("root %q is inside %s, which holds hotserve's own keys, sockets and env files; use a root outside it (the default is /var/lib/liveswap)", root, h)
 		}
 	}
 	return nil
 }
-
-// A root inside one of sandboxClosedPrefixes is deliberately NOT
-// refused: systemd creates the mount point for TemporaryFileSystem=
-// and BindPaths= inside the namespace, so a root under /tmp or
-// /var/tmp is masked and the app's own dirs bind back into it exactly
-// as they do under /var/lib — the real-systemd integration lane runs
-// with a /var/tmp root and asserts the full tier. Only hotserve's own
-// state is a mistake worth failing on.
 
 // pathWithin reports whether p equals dir or lies beneath it.
 func pathWithin(p, dir string) bool {
 	return p == dir || strings.HasPrefix(p, strings.TrimSuffix(dir, "/")+"/")
+}
+
+// inView reports whether p exists inside a unit built from this spec:
+// under one of the app's own directories, in the base view, or named
+// by an extra_path. Everything else on the host is absent, so this is
+// the whole of the view — the same three sources sandboxProperties
+// renders, and the reason it can be answered without asking systemd.
+func (s *sandboxSpec) inView(p string) bool {
+	for _, b := range s.writable {
+		if pathWithin(p, b.dest) {
+			return true
+		}
+	}
+	for _, e := range s.extra {
+		if pathWithin(p, e.path) {
+			return true
+		}
+	}
+	for _, base := range sandboxBaseView {
+		if pathWithin(p, base) {
+			return true
+		}
+	}
+	return false
+}
+
+// warnEnvFileInView warns about the one place an env_file can still
+// land inside a sandbox view: the app's own directories, which are the
+// only host paths bound writable. An app's own environment is
+// legitimately reachable — protecting an app from itself is a stated
+// non-goal — but the *file* is a different thing from the variables.
+// Under `shared/` the app can rewrite it and so choose the environment
+// of its own next launch, which outlives the compromise that arranged
+// it. Everywhere else an env_file is simply absent from every view,
+// which is why this is the whole of what used to be a derived,
+// per-config hidden set.
+func warnEnvFileInView(logger *zap.Logger, specs map[string]*appSpec) {
+	if logger == nil {
+		return
+	}
+	for name, spec := range specs {
+		if spec.envFile == "" || spec.sandboxMode == sandboxOff {
+			continue
+		}
+		f := spec.envFile
+		if !filepath.IsAbs(f) {
+			abs, err := filepath.Abs(f)
+			if err != nil {
+				continue
+			}
+			f = abs
+		}
+		f = filepath.Clean(f)
+		switch {
+		case pathWithin(f, spec.dirs.shared):
+			logger.Warn("env_file is inside the app's shared dir, which the app can read and rewrite inside its sandbox",
+				zap.String("app", name), zap.String("env_file", f),
+				zap.String("fix", "move it outside the liveswap root (the documented location is /etc/hotserve), where no app can see it"))
+		case pathWithin(f, spec.dirs.releases):
+			logger.Warn("env_file is inside the app's release dir, so the app can read the file as well as receive its variables",
+				zap.String("app", name), zap.String("env_file", f),
+				zap.String("fix", "move it outside the liveswap root (the documented location is /etc/hotserve), where no app can see it"))
+		}
+	}
 }

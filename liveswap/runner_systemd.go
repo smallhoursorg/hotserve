@@ -391,8 +391,31 @@ func (r *systemdRunner) unitFor(spec startSpec, oneshot bool) (unitSpec, error) 
 	// resolveBindSources). A refusal fails the launch — a deploy falls
 	// back to the version still serving.
 	if spec.sandbox != nil {
-		if err := spec.sandbox.resolveBindSources(spec.sandbox.hidden); err != nil {
+		if err := spec.sandbox.resolveBindSources(); err != nil {
 			return unitSpec{}, err
+		}
+		// LookPath above ran in *this* process's view of the filesystem,
+		// which under a deny-by-default sandbox is not the unit's: a
+		// runtime installed outside /usr — /opt/node/bin/node, an asdf
+		// or nvm shim under a home directory — resolves here and then
+		// does not exist in there. systemd would report that as a bare
+		// status=203/EXEC after the unit has already been created, so
+		// say it now, in the language the operator can act on.
+		// Resolved, because LookPath does not follow symlinks: a shim at
+		// /usr/local/bin/node -> /opt/node/bin/node is under the /usr
+		// base entry and would pass unresolved, then die as the very
+		// 203/EXEC this check exists to replace — the symlink is inside
+		// the view, its target is not.
+		target := argv0
+		if t, err := filepath.EvalSymlinks(argv0); err == nil {
+			target = t
+		}
+		if !spec.sandbox.inView(target) {
+			via := ""
+			if target != argv0 {
+				via = fmt.Sprintf(" (via %s, which is)", argv0)
+			}
+			return unitSpec{}, fmt.Errorf("%s is not inside the sandbox view of app %s%s: an app sees its release dir, its shared dir, the OS runtime (/usr and a named handful of /etc) and its extra_paths, and nothing else on this host — declare the directory holding it with `extra_path`, or use `sandbox off` for this app", target, spec.app, via)
 		}
 	}
 	desc := "hotserve app " + spec.app + " " + spec.version

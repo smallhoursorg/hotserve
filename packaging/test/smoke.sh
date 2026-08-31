@@ -206,7 +206,10 @@ workdir=$(mktemp -d)
 cat > "$workdir/server" <<'EOF'
 #!/bin/sh
 read _ _ uidmap < /proc/self/uid_map
-[ -r /var/lib/hotserve ] && hslib=open || hslib=closed
+# Filesystem routes are tested for EXISTENCE: the view is
+# deny-by-default (TemporaryFileSystem=/ plus explicit binds), so a
+# path nothing named is absent rather than present-but-unreadable.
+[ -e /var/lib/hotserve ] && hslib=open || hslib=closed
 # The routes the sandbox exists to close. On the filesystem tier
 # (systemd 252/255) their closure rests on the user namespace alone —
 # the kernel refusing ptrace-class access across user namespaces —
@@ -214,10 +217,18 @@ read _ _ uidmap < /proc/self/uid_map
 # namespace and would close them twice over.
 ls "/proc/$MGR_PID/root/" >/dev/null 2>&1 && mgrroot=open || mgrroot=closed
 cat "/proc/$MGR_PID/environ" >/dev/null 2>&1 && mgrenv=open || mgrenv=closed
-[ -r "/run/user/$HOTSERVE_UID/systemd/private" ] && mgrsock=open || mgrsock=closed
-[ -r /run/hotserve/admin.sock ] && adminsock=open || adminsock=closed
-[ -r /var/lib/liveswap/demo/state.json ] && state=open || state=closed
-echo "smoke app starting on $PORT nofile_soft=$(ulimit -Sn) nofile_hard=$(ulimit -Hn) uidmap=$uidmap pid=$$ nprocs=$(ls /proc | grep -c '^[0-9]') hotserve_lib=$hslib mgr_root=$mgrroot mgr_environ=$mgrenv mgr_socket=$mgrsock admin_socket=$adminsock state_json=$state saw_mgr_pid=$MGR_PID saw_uid=$HOTSERVE_UID"
+[ -e "/run/user/$HOTSERVE_UID/systemd/private" ] && mgrsock=open || mgrsock=closed
+[ -e /run/hotserve/admin.sock ] && adminsock=open || adminsock=closed
+[ -e /var/lib/liveswap/demo/state.json ] && state=open || state=closed
+[ -e /etc/hotserve ] && etchs=open || etchs=closed
+# The base view: an OS the app can run on. Without it every "closed"
+# above would be satisfied by a unit that has nothing in it at all.
+[ -x /bin/sh ] && binsh=ok || binsh=MISSING
+[ -x /usr/bin/hotserve ] && hsbin=ok || hsbin=MISSING
+[ -e /etc/ssl ] && etcssl=ok || etcssl=MISSING
+etclist=$(ls /etc 2>/dev/null | tr '\n' ',')
+varliblist=$(ls /var/lib 2>/dev/null | tr '\n' ',')
+echo "smoke app starting on $PORT nofile_soft=$(ulimit -Sn) nofile_hard=$(ulimit -Hn) uidmap=$uidmap pid=$$ nprocs=$(ls /proc | grep -c '^[0-9]') hotserve_lib=$hslib mgr_root=$mgrroot mgr_environ=$mgrenv mgr_socket=$mgrsock admin_socket=$adminsock state_json=$state etc_hotserve=$etchs binsh=$binsh hsbin=$hsbin etcssl=$etcssl etclist=$etclist varliblist=$varliblist saw_mgr_pid=$MGR_PID saw_uid=$HOTSERVE_UID"
 exec /usr/bin/hotserve respond --listen 127.0.0.1:"$PORT" "hello smoke"
 EOF
 chmod +x "$workdir/server"
@@ -242,7 +253,7 @@ code=$(curl -s -o /tmp/deploy-body -w '%{http_code}' --max-time 90 \
 	-d '{"url":"http://127.0.0.1:8200/demo.tar.gz","version":"s1"}' "$HOOK")
 [ "$code" = "200" ] || {
 	echo "deploy response: $(cat /tmp/deploy-body)"
-	die "deploy under systemd sandbox failed with HTTP $code — if the journal shows a permission error, suspect the unit's sandboxing (ProtectSystem/XDG dirs) vs the packaged /var/lib dirs"
+	die "deploy under systemd sandbox failed with HTTP $code — a deny-by-default view fails with ENOENT (or 203/EXEC for the command itself), not a permission error, so if the journal shows a missing path suspect the unit's base view or a missing extra_path rather than file modes"
 }
 curl -fsS --max-time 5 "$PROXY/" | grep -q "hello smoke" \
 	|| die "proxy does not serve the deployed app"
@@ -276,6 +287,10 @@ journalctl --no-pager -t hotserve-demo | grep -q "smoke app starting" \
 # had (#37).
 mgr_nofile=$(user_systemctl show -p DefaultLimitNOFILE --value)
 app_line=$(journalctl --no-pager -t hotserve-demo | grep 'smoke app starting' | tail -1)
+# The evidence behind every in-unit assertion below, printed whether or
+# not one fails: a cell that dies on one field is much easier to read
+# next to the whole view the app actually saw.
+echo "in-unit view: ${app_line#*smoke app starting }"
 app_soft=$(printf '%s' "$app_line" | grep -o 'nofile_soft=[0-9]*' | cut -d= -f2)
 app_hard=$(printf '%s' "$app_line" | grep -o 'nofile_hard=[0-9]*' | cut -d= -f2)
 [ -n "$mgr_nofile" ] && [ "$app_soft" = "$mgr_nofile" ] && [ "$app_hard" = "$mgr_nofile" ] \
@@ -313,8 +328,13 @@ if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)"
 	echo "apparmor: parser says: $(apparmor_parser -r /etc/apparmor.d/hotserve-user-manager 2>&1 | head -c 300)"
 	echo "apparmor: unit ExecStart: $(systemctl show -p ExecStart --value "user@$uid.service" | head -c 160)"
 	journalctl --no-pager -b | grep -i "apparmor" | tail -5 || true
-	mgr_pid=$(systemctl show -p MainPID --value "user@$uid.service")
-	mgr_label=$(cat "/proc/$mgr_pid/attr/apparmor/current" 2>/dev/null || cat "/proc/$mgr_pid/attr/current" 2>/dev/null)
+	# A distinct name: $mgr_pid was captured before the Caddyfile was
+	# written and is what the app was handed, and the anti-vacuity
+	# assertions below compare against exactly that. Re-reading it into
+	# the same variable would report a manager restart as "the app was
+	# given the wrong pid", which describes the wrong problem.
+	label_pid=$(systemctl show -p MainPID --value "user@$uid.service")
+	mgr_label=$(cat "/proc/$label_pid/attr/apparmor/current" 2>/dev/null || cat "/proc/$label_pid/attr/current" 2>/dev/null)
 	case "$mgr_label" in
 	hotserve-user-manager*) echo "user@$uid runs under the hotserve-user-manager AppArmor profile ($mgr_label)" ;;
 	*) die "kernel restricts unprivileged user namespaces but user@$uid is not under the hotserve-user-manager profile (label '$mgr_label'); the sandbox would be off" ;;
@@ -352,14 +372,41 @@ saw_uid=$(printf '%s' "$app_line" | grep -o 'saw_uid=[^ ]*' | cut -d= -f2)
 # absent on this host.
 [ -r "/proc/$mgr_pid/environ" ] || die "/proc/$mgr_pid/environ is unreadable even to root; the in-unit probe would prove nothing"
 [ -e "/run/user/$uid/systemd/private" ] || die "the manager socket does not exist; the in-unit probe would prove nothing"
-for route in mgr_root mgr_environ mgr_socket admin_socket state_json; do
-	got=$(printf '%s' "$app_line" | grep -o "$route=[a-z]*" | cut -d= -f2)
+for route in mgr_root mgr_environ mgr_socket admin_socket state_json etc_hotserve; do
+	got=$(printf '%s' "$app_line" | grep -o "$route=[a-z_]*" | cut -d= -f2)
 	[ "$got" = "closed" ] \
 		|| die "$route is '$got' inside the $sandbox-tier unit: a route the design says is closed is open"
 done
-echo "in-unit routes closed: manager /proc root+environ, manager socket, admin socket, state.json"
+echo "in-unit routes closed: manager /proc root+environ, manager socket, admin socket, state.json, /etc/hotserve"
+# The other half of the deny-by-default claim, and the one that keeps
+# "closed" from being satisfied by an empty unit: the base view carries
+# an OS the app can execute in, /etc is only the named entries (never
+# the whole tree, which would hand every app every other app's
+# env_file), and /var/lib holds nothing but the path to this app's own
+# directories — hotserve's TLS keys sit next door on the host.
+for present in binsh hsbin etcssl; do
+	got=$(printf '%s' "$app_line" | grep -o "$present=[A-Za-z]*" | cut -d= -f2)
+	[ "$got" = "ok" ] \
+		|| die "$present is '$got' inside the unit: the base view does not carry a runnable OS, so the closed routes above prove nothing"
+done
+etclist=$(printf '%s' "$app_line" | grep -o 'etclist=[^ ]*' | cut -d= -f2)
+case ",$etclist" in
+*,hotserve,* | *,liveswap,* | *,shadow,*)
+	die "/etc inside the unit carries more than the named entries ($etclist): every app would see every other app's env_file" ;;
+esac
+varliblist=$(printf '%s' "$app_line" | grep -o 'varliblist=[^ ]*' | cut -d= -f2)
+[ "$varliblist" = "liveswap," ] \
+	|| die "/var/lib inside the unit is '$varliblist', want only 'liveswap': anything else is a path nothing named"
+echo "in-unit base view: /bin/sh, /usr/bin/hotserve, /etc/ssl; /etc=$etclist /var/lib=$varliblist"
 [ "$(user_systemctl show -p PrivateUsers --value "$unit")" = "yes" ] || die "unit lacks PrivateUsers=yes"
-[ "$(user_systemctl show -p ProtectSystem --value "$unit")" = "strict" ] || die "unit lacks ProtectSystem=strict"
+[ "$(user_systemctl show -p TemporaryFileSystem --value "$unit")" = "/:ro" ] || die "unit lacks TemporaryFileSystem=/:ro — the view is not deny-by-default"
+# The retired half of the old model, read back off the live unit. Both
+# properties still exist on every service, so test the value rather
+# than its presence: what must be gone is the setting, not the row.
+[ "$(user_systemctl show -p ProtectSystem --value "$unit")" != "strict" ] || die "unit still sets ProtectSystem=strict; the view names what exists rather than making the rest read-only"
+case "$(user_systemctl show -p InaccessiblePaths --value "$unit")" in
+*/*) die "unit still masks a list with InaccessiblePaths=" ;;
+esac
 journalctl --no-pager -u hotserve | grep -q "launching without the full sandbox" && degraded=yes || degraded=no
 if [ "$sandbox" = "full" ]; then
 	[ "$degraded" = "no" ] || die "full tier must not log the degraded WARN"

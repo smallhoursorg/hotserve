@@ -82,9 +82,8 @@ func TestResolveSandboxTier(t *testing.T) {
 
 func TestValidateExtraPathAndRoot(t *testing.T) {
 	root := "/var/lib/liveswap"
-	hidden := append(append([]string{}, sandboxHiddenFloor...), "/var/lib/hotserve/caddy", "/etc/blog/blog.env")
 	for _, ok := range []string{"/run/postgresql", "/opt/geoip", "/var/cache/blog", "/srv/media"} {
-		if err := validateExtraPath(ok, root, hidden); err != nil {
+		if err := validateExtraPath(ok, root); err != nil {
 			t.Errorf("%s rejected: %v", ok, err)
 		}
 	}
@@ -93,103 +92,103 @@ func TestValidateExtraPathAndRoot(t *testing.T) {
 		"/var/lib/liveswap", "/var/lib/liveswap/other/shared", // the root: siblings live there
 		"/var/lib/hotserve", "/var/lib/hotserve/caddy", // TLS keys
 		"/run/hotserve", "/etc/hotserve", "/etc/liveswap/blog.env",
-		"/etc/blog/blog.env", // a derived hidden path (another app's env_file)
 	} {
-		if err := validateExtraPath(bad, root, hidden); err == nil {
+		if err := validateExtraPath(bad, root); err == nil {
 			t.Errorf("%s accepted", bad)
 		}
 	}
-	// The sharp cases: anything the sandbox options close by themselves
-	// must not be bindable back — /run/user is the manager's private
-	// socket (a sandbox escape), /sys/fs/cgroup undoes the read-only
-	// cgroupfs the resource caps will rely on. Read-only is no defence:
-	// connecting to a unix socket is not a filesystem write.
+	// The sharp cases: anything the unit gets its own copy of, or that
+	// would hand back a route out, must not be bindable — /run/user is
+	// the manager's private socket (a sandbox escape), /sys/fs/cgroup
+	// undoes the read-only cgroupfs the resource caps will rely on.
+	// Read-only is no defence: connecting to a unix socket is not a
+	// filesystem write.
 	for _, closed := range []string{
 		"/run/user", "/run/user/997", "/run/user/997/systemd/private",
 		"/home", "/home/deploy/data", "/root",
 		"/tmp", "/var/tmp/build", "/dev", "/dev/shm",
 		"/sys", "/sys/fs/cgroup", "/proc", "/proc/self",
 	} {
-		err := validateExtraPath(closed, root, hidden)
+		err := validateExtraPath(closed, root)
 		if err == nil {
 			t.Errorf("%s accepted: it would hand back what the sandbox closes", closed)
 			continue
 		}
-		if !strings.Contains(err.Error(), "sandbox itself closes") {
+		if !strings.Contains(err.Error(), "no app may be given") {
 			t.Errorf("%s refused for the wrong reason: %v", closed, err)
 		}
 	}
-	// A prefix that merely shares characters with a closed or hidden
-	// path is fine.
+	// A prefix that merely shares characters with a refused path is fine.
 	for _, ok := range []string{"/var/lib/hotserve-data", "/tmpfiles", "/devices", "/run/userdata"} {
-		if err := validateExtraPath(ok, root, hidden); err != nil {
+		if err := validateExtraPath(ok, root); err != nil {
 			t.Errorf("%s rejected: %v", ok, err)
 		}
 	}
-	if err := validateSandboxRoot("/var/lib/liveswap", hidden); err != nil {
+	if err := validateSandboxRoot("/var/lib/liveswap"); err != nil {
 		t.Errorf("default root rejected: %v", err)
 	}
 	// A root inside hotserve's own state is a config error worth
-	// failing on; a root the sandbox merely cannot mount over degrades
-	// the tier instead (TestSandboxRootDegradesRatherThanRefusing).
-	for _, bad := range []string{"/var/lib/hotserve/apps", "/etc/hotserve/apps"} {
-		if err := validateSandboxRoot(bad, hidden); err == nil {
+	// failing on; a root under /tmp or /var/tmp is deliberately fine —
+	// binds nest into the unit's private tmp, and the integration lane
+	// runs that way.
+	for _, bad := range []string{"/var/lib/hotserve/apps", "/etc/hotserve/apps", "/etc/liveswap/apps"} {
+		if err := validateSandboxRoot(bad); err == nil {
 			t.Errorf("root %s accepted: it is inside hotserve's own state", bad)
 		}
 	}
 }
 
-// TestHiddenPathsDerived: the hidden set is what this hotserve actually
-// uses, not the packaged layout's literals — otherwise an env_file or a
-// Caddy data dir outside the convention stays readable by every sibling
-// while the status endpoint reports the app as sandboxed.
-func TestHiddenPathsDerived(t *testing.T) {
-	t.Setenv("XDG_DATA_HOME", "/srv/hotserve-data")
-	t.Setenv("XDG_CONFIG_HOME", "/srv/hotserve-config")
-	t.Setenv("RUNTIME_DIRECTORY", "/run/hotserve-alt")
-	a := &App{Apps: map[string]*AppConfig{
-		"blog": {EnvFile: "/etc/blog/blog.env"},
-		"shop": {EnvFile: "/srv/shop/.env"},
-		"bare": {},
-	}}
-	got := a.hiddenPaths()
-	for _, want := range append(append([]string{}, sandboxHiddenFloor...),
-		"/srv/hotserve-data/caddy", "/srv/hotserve-config/caddy", "/run/hotserve-alt",
-		"/etc/blog/blog.env", "/srv/shop/.env") {
-		found := false
-		for _, h := range got {
-			if h == want {
-				found = true
-			}
-		}
-		if !found {
-			t.Errorf("hidden set lacks %s: %v", want, got)
+// TestValidateExtraPathComparesTheResolvedRoot: with a symlinked root,
+// an extra_path spelled the *canonical* way already resolves to itself,
+// so following symlinks does not help — only comparing against the
+// resolved root does. Without it `extra_path /mnt/liveswap/shop/shared`
+// passes validation and then binds a sibling's data back in.
+func TestValidateExtraPathComparesTheResolvedRoot(t *testing.T) {
+	// Outside /tmp: it is a never-bound prefix, so every path under a
+	// t.TempDir would be refused for that reason instead of this one.
+	base, err := os.MkdirTemp("/var", "resolvedroot-")
+	if err != nil {
+		t.Skipf("no writable dir outside the refused prefixes: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	real := filepath.Join(base, "mnt-liveswap")
+	if err := os.MkdirAll(filepath.Join(real, "shop", "shared"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(base, "srv-liveswap")
+	if err := os.Symlink(real, root); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	for _, spelling := range []string{
+		filepath.Join(real, "shop", "shared"), // the canonical sibling
+		filepath.Join(root, "shop", "shared"), // the configured spelling
+		real,                                  // the root itself, canonically
+	} {
+		if err := validateExtraPath(spelling, root); err == nil {
+			t.Errorf("extra_path %q accepted: it reaches under the liveswap root %s", spelling, root)
 		}
 	}
-	// Deterministic: specEqual compares specs by their rendering, so a
-	// map-order-dependent set would make every reload look like a
-	// config change.
-	if second := a.hiddenPaths(); !reflect.DeepEqual(got, second) {
-		t.Fatalf("hiddenPaths is not deterministic:\n%v\n%v", got, second)
-	}
-	// An app's env_file is hidden as the file, not its directory: an
-	// operator's /etc/blog/blog.env must not take /etc/blog with it.
-	for _, h := range got {
-		if h == "/etc/blog" || h == "/srv/shop" {
-			t.Errorf("hidden set contains the env_file's whole directory %s: %v", h, got)
-		}
+	// A neighbour of the canonical root is still fine.
+	if err := validateExtraPath(filepath.Join(base, "mnt-liveswap-cache"), root); err != nil {
+		t.Errorf("path beside the canonical root rejected: %v", err)
 	}
 }
 
 // sandboxPropertyNames is the set sandboxProperties emits; the test
 // pins it so a property can neither disappear nor appear unnoticed.
 var sandboxPropertyNames = []string{
-	"PrivateUsers", "ProtectSystem", "ProtectHome", "PrivateTmp", "PrivateDevices",
+	"PrivateUsers", "PrivateTmp", "PrivateDevices",
 	"ProtectControlGroups", "ProtectKernelTunables", "ProtectKernelModules", "ProtectKernelLogs",
 	"RestrictNamespaces", "RestrictRealtime", "RestrictSUIDSGID", "LockPersonality",
 	"RestrictAddressFamilies", "SystemCallFilter", "SystemCallErrorNumber", "CapabilityBoundingSet",
-	"InaccessiblePaths", "TemporaryFileSystem", "BindPaths", "BindReadOnlyPaths", "UnsetEnvironment",
+	"TemporaryFileSystem", "BindPaths", "BindReadOnlyPaths", "UnsetEnvironment",
 }
+
+// retiredSandboxPropertyNames are the properties the deny-by-default
+// view removed. Nothing is left for them to act on — an unnamed path is
+// absent, not merely unreadable — and emitting them again would be a
+// silent return to masking a list.
+var retiredSandboxPropertyNames = []string{"InaccessiblePaths", "ProtectSystem", "ProtectHome"}
 
 func propMap(u unitSpec) map[string]any {
 	got := map[string]any{}
@@ -218,12 +217,13 @@ func TestSandboxPropertiesNoneWhenUnsandboxed(t *testing.T) {
 
 func TestSandboxPropertiesFilesystemAndFull(t *testing.T) {
 	spec := &sandboxSpec{
-		tier: sandboxFilesystem,
-		root: "/var/lib/liveswap",
+		tier:    sandboxFilesystem,
+		root:    "/var/lib/liveswap",
+		appDir:  "/var/lib/liveswap/blog",
+		appName: "blog",
 		writable: []bindPath{{dest: "/var/lib/liveswap/blog/releases/v3", source: "/var/lib/liveswap/blog/releases/v3"},
 			{dest: "/var/lib/liveswap/blog/shared", source: "/var/lib/liveswap/blog/shared"}},
-		extra:  []extraPath{{path: "/run/postgresql"}, {path: "/var/cache/blog", rw: true}},
-		hidden: append(append([]string{}, sandboxHiddenFloor...), "/var/lib/hotserve/caddy", "/etc/blog/blog.env"),
+		extra: []extraPath{{path: "/run/postgresql"}, {path: "/var/cache/blog", rw: true}},
 	}
 	got := propMap(unitSpec{ExecStart: []string{"/bin/true"}, Sandbox: spec})
 	for _, name := range sandboxPropertyNames {
@@ -231,13 +231,18 @@ func TestSandboxPropertiesFilesystemAndFull(t *testing.T) {
 			t.Errorf("%s missing", name)
 		}
 	}
+	for _, name := range retiredSandboxPropertyNames {
+		if _, present := got[name]; present {
+			t.Errorf("%s is set: the deny-by-default view masks nothing, it names what exists", name)
+		}
+	}
 	if _, present := got["PrivatePIDs"]; present {
 		t.Error("PrivatePIDs must not be set on the filesystem tier (unknown property below systemd 256)")
 	}
 	for name, want := range map[string]any{
 		"PrivateUsers":          true,
-		"ProtectSystem":         "strict",
-		"ProtectHome":           "tmpfs",
+		"PrivateTmp":            true,
+		"PrivateDevices":        true,
 		"ProtectControlGroups":  true,
 		"RestrictNamespaces":    uint64(0),
 		"CapabilityBoundingSet": uint64(0),
@@ -254,20 +259,11 @@ func TestSandboxPropertiesFilesystemAndFull(t *testing.T) {
 	if f, _ := got["SystemCallFilter"].(allowList); !f.AllowList || !reflect.DeepEqual(f.Names, []string{"@system-service"}) {
 		t.Errorf("SystemCallFilter = %+v", got["SystemCallFilter"])
 	}
-	hidden, _ := got["InaccessiblePaths"].([]string)
-	for _, p := range spec.hidden {
-		found := false
-		for _, h := range hidden {
-			if h == "-"+p {
-				found = true
-			}
-		}
-		if !found {
-			t.Errorf("InaccessiblePaths lacks -%s: %v", p, hidden)
-		}
-	}
-	if tmp, _ := got["TemporaryFileSystem"].([]tmpfsMount); !reflect.DeepEqual(tmp, []tmpfsMount{{"/var/lib/liveswap", "ro"}}) {
-		t.Errorf("TemporaryFileSystem = %+v", got["TemporaryFileSystem"])
+	// The whole filesystem, not just the liveswap root: this one line is
+	// the difference between "these paths are hidden" and "only these
+	// paths exist".
+	if tmp, _ := got["TemporaryFileSystem"].([]tmpfsMount); !reflect.DeepEqual(tmp, []tmpfsMount{{"/", "ro"}}) {
+		t.Errorf("TemporaryFileSystem = %+v, want the whole root replaced", got["TemporaryFileSystem"])
 	}
 	binds := func(name string) map[string]bindMount {
 		m := map[string]bindMount{}
@@ -284,11 +280,32 @@ func TestSandboxPropertiesFilesystemAndFull(t *testing.T) {
 		}
 	}
 	ro := binds("BindReadOnlyPaths")
+	// The base view: every entry present, and every one optional — the
+	// list spans four distros and none of them has all of it.
+	for _, p := range sandboxBaseView {
+		b, ok := ro[p]
+		if !ok {
+			t.Errorf("BindReadOnlyPaths lacks the base-view entry %s", p)
+			continue
+		}
+		if b.Source != p || !b.IgnoreENOENT || b.Flags != mountRecursive {
+			t.Errorf("base-view entry %s = %+v, want a recursive optional bind at its own path", p, b)
+		}
+	}
+	// The base view must carry the runtime an app needs to exec at all,
+	// and must NOT carry /etc wholesale — that would hand every app
+	// every other app's env_file, which is the derived hidden set this
+	// model deletes.
+	for _, needed := range []string{"/usr", "/bin", "/etc/resolv.conf", "/etc/ssl", "/run/systemd/resolve"} {
+		if _, ok := ro[needed]; !ok {
+			t.Errorf("base view lacks %s: apps cannot run without it", needed)
+		}
+	}
+	if _, whole := ro["/etc"]; whole {
+		t.Error("/etc is bound wholesale: every app would see every other app's env_file")
+	}
 	if b, ok := ro["/run/postgresql"]; !ok || b.Source != "/run/postgresql" || b.IgnoreENOENT {
 		t.Errorf("ro extra_path missing or optional: %+v", ro)
-	}
-	if b, ok := ro["/run/systemd/resolve"]; !ok || !b.IgnoreENOENT {
-		t.Errorf("/run/systemd/resolve must be bound read-only, optional: %+v", ro)
 	}
 	if _, leaked := rw["/run/postgresql"]; leaked {
 		t.Error("a read-only extra_path must not be in BindPaths")
@@ -307,10 +324,84 @@ func TestSandboxPropertiesFilesystemAndFull(t *testing.T) {
 	}
 }
 
+// TestSandboxViewIsExactlyWhatIsNamed is the guarantee as an assertion:
+// with TemporaryFileSystem=/ the set of bind destinations IS the view,
+// so anything that widens it accidentally fails here rather than in
+// production. A path that is not a bind destination does not exist
+// inside the unit.
+func TestSandboxViewIsExactlyWhatIsNamed(t *testing.T) {
+	spec := &sandboxSpec{
+		tier:    sandboxFull,
+		root:    "/var/lib/liveswap",
+		appDir:  "/var/lib/liveswap/blog",
+		appName: "blog",
+		writable: []bindPath{{dest: "/var/lib/liveswap/blog/releases/v3"},
+			{dest: "/var/lib/liveswap/blog/shared"}},
+		extra: []extraPath{{path: "/run/postgresql"}, {path: "/var/cache/blog", rw: true}},
+	}
+	got := propMap(unitSpec{ExecStart: []string{"/bin/true"}, Sandbox: spec})
+	if tmp, _ := got["TemporaryFileSystem"].([]tmpfsMount); !reflect.DeepEqual(tmp, []tmpfsMount{{"/", "ro"}}) {
+		t.Fatalf("the view is not deny-by-default: TemporaryFileSystem = %+v", tmp)
+	}
+	view := map[string]bool{}
+	for _, name := range []string{"BindPaths", "BindReadOnlyPaths"} {
+		for _, b := range got[name].([]bindMount) {
+			if view[b.Destination] {
+				t.Errorf("%s is bound twice", b.Destination)
+			}
+			view[b.Destination] = true
+		}
+	}
+	want := map[string]bool{
+		"/var/lib/liveswap/blog/releases/v3": true,
+		"/var/lib/liveswap/blog/shared":      true,
+		"/run/postgresql":                    true,
+		"/var/cache/blog":                    true,
+	}
+	for _, p := range sandboxBaseView {
+		want[p] = true
+	}
+	if !reflect.DeepEqual(view, want) {
+		for p := range view {
+			if !want[p] {
+				t.Errorf("the view contains %s, which nothing named", p)
+			}
+		}
+		for p := range want {
+			if !view[p] {
+				t.Errorf("the view lacks %s", p)
+			}
+		}
+	}
+	// The named consequences: not one of these is bound, so not one of
+	// them exists inside the unit — no InaccessiblePaths= entry needed,
+	// and no way for the list to go stale.
+	for _, absent := range []string{
+		"/var/lib/liveswap", "/var/lib/liveswap/blog", "/var/lib/liveswap/blog/state.json",
+		"/var/lib/liveswap/blog/tmp", "/var/lib/liveswap/shop",
+		"/var/lib/hotserve", "/run/hotserve", "/etc/hotserve", "/etc/liveswap",
+		"/etc/blog/blog.env", "/run/user", "/home", "/opt", "/srv", "/var/lib",
+	} {
+		if view[absent] {
+			t.Errorf("%s is in the view", absent)
+		}
+		if spec.inView(absent) {
+			t.Errorf("inView says %s is in the view, but nothing binds it", absent)
+		}
+	}
+	for _, present := range []string{
+		"/var/lib/liveswap/blog/releases/v3/server", "/var/lib/liveswap/blog/shared/db.sqlite",
+		"/usr/bin/node", "/bin/sh", "/run/postgresql/.s.PGSQL.5432", "/etc/ssl/certs",
+	} {
+		if !spec.inView(present) {
+			t.Errorf("inView says %s is absent, but it is under a bind", present)
+		}
+	}
+}
+
 func TestSandboxSpecFor(t *testing.T) {
 	spec := testSpec(t)
 	spec.extraPaths = []extraPath{{path: "/run/postgresql"}}
-	spec.sandboxHidden = []string{"/var/lib/hotserve", "/etc/blog/blog.env"}
 	if spec.sandboxSpecFor("/x", sandboxNone) != nil {
 		t.Fatal("none must render no spec")
 	}
@@ -334,8 +425,10 @@ func TestSandboxSpecFor(t *testing.T) {
 	if !reflect.DeepEqual(got.extra, spec.extraPaths) {
 		t.Fatalf("extra = %v", got.extra)
 	}
-	if !reflect.DeepEqual(got.hidden, spec.sandboxHidden) {
-		t.Fatalf("hidden = %v, want %v", got.hidden, spec.sandboxHidden)
+	// appName, not the resolved app dir, is what the launch-time check
+	// derives its expected base from — see resolveBindSources.
+	if got.appName != spec.name || got.appDir != spec.dirs.app {
+		t.Fatalf("appName/appDir = %q/%q, want %q/%q", got.appName, got.appDir, spec.name, spec.dirs.app)
 	}
 	if !filepath.IsAbs(got.root) {
 		t.Fatalf("root must be absolute: %q", got.root)
@@ -398,7 +491,7 @@ func TestProbeSandboxCapability(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &probeRunner{fakeRunner: &fakeRunner{}, fail: tc.fail}
-			got := probeSandboxCapability(r, tc.version, "/var/lib/liveswap", sandboxHiddenFloor)
+			got := probeSandboxCapability(r, tc.version)
 			if got.tier != tc.wantTier {
 				t.Fatalf("tier = %v (%s), want %v", got.tier, got.reason, tc.wantTier)
 			}
@@ -414,9 +507,11 @@ func TestProbeSandboxCapability(t *testing.T) {
 				t.Errorf("full needs no reason, got %q", got.reason)
 			}
 			for _, s := range r.specs {
-				if s.sandbox == nil || s.sandbox.root != "/var/lib/liveswap" || len(s.sandbox.writable) != 0 ||
-					!reflect.DeepEqual(s.sandbox.hidden, sandboxHiddenFloor) {
-					t.Errorf("probe unit must carry the tier's sandbox over the root and hidden set, exposing nothing: %+v", s.sandbox)
+				// The probe carries the tier and nothing else: with a
+				// deny-by-default view there is no per-host state for it
+				// to reproduce, and it exposes not one path of its own.
+				if s.sandbox == nil || len(s.sandbox.writable) != 0 || len(s.sandbox.extra) != 0 || s.sandbox.root != "" {
+					t.Errorf("probe unit must carry the tier's sandbox and expose nothing: %+v", s.sandbox)
 				}
 				if !reflect.DeepEqual(s.command, sandboxProbeCommand(s.sandbox.tier)) {
 					t.Errorf("probe command mismatch for %v", s.sandbox.tier)
@@ -595,8 +690,8 @@ func TestValidateSandboxConfig(t *testing.T) {
 		"bad app mode":    func(a *App) { a.Apps["blog"].Sandbox = "on" },
 		"relative extra":  func(a *App) { a.Apps["blog"].ExtraPaths = []ExtraPathConfig{{Path: "data"}} },
 		"extra in root":   func(a *App) { a.Apps["blog"].ExtraPaths = []ExtraPathConfig{{Path: "/var/lib/liveswap/api/shared"}} },
-		"extra hidden":    func(a *App) { a.Apps["blog"].ExtraPaths = []ExtraPathConfig{{Path: "/run/hotserve"}} },
-		"root hidden":     func(a *App) { a.Root = "/var/lib/hotserve/apps" },
+		"extra refused":   func(a *App) { a.Apps["blog"].ExtraPaths = []ExtraPathConfig{{Path: "/run/hotserve"}} },
+		"root in state":   func(a *App) { a.Root = "/var/lib/hotserve/apps" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			a := base()
@@ -616,7 +711,7 @@ func TestStartResolvesSandboxPolicy(t *testing.T) {
 	t.Cleanup(func() { probeSandbox, probeUserManager = origProbe, origManager })
 	probeUserManager = func() error { return nil }
 	probes := 0
-	probeSandbox = func(string, []string, *zap.Logger) sandboxCapability {
+	probeSandbox = func(*zap.Logger) sandboxCapability {
 		probes++
 		return sandboxCapability{tier: sandboxFilesystem, reason: "full tier: the user manager is systemd 255, PrivatePIDs= needs 256"}
 	}
@@ -666,7 +761,7 @@ func TestStartResolvesSandboxPolicy(t *testing.T) {
 // into a server that will not start.
 func TestSandboxRootUnderTmpIsAllowed(t *testing.T) {
 	for _, root := range []string{"/tmp/liveswap-test", "/var/tmp/x", "/home/deploy/apps", "/srv/apps"} {
-		if err := validateSandboxRoot(root, sandboxHiddenFloor); err != nil {
+		if err := validateSandboxRoot(root); err != nil {
 			t.Errorf("root %s must not fail config load: %v", root, err)
 		}
 	}
@@ -709,33 +804,24 @@ func TestRelaunchBelowFullWarns(t *testing.T) {
 
 // TestValidateExtraPathFollowsSymlinks: the containment checks are
 // lexical, but BindPaths= binds what a path resolves to, so a link
-// pointing into a closed or hidden area must be refused by what it
+// pointing at a name no app may be given must be refused by what it
 // resolves to, not by how it is spelled.
 func TestValidateExtraPathFollowsSymlinks(t *testing.T) {
-	// The link itself must live outside every closed prefix, or the
+	// The link itself must live outside every refused prefix, or the
 	// lexical check would refuse it before symlinks matter — /run
-	// qualifies (only /run/user is closed).
+	// qualifies (only /run/user and /run/hotserve are refused).
 	dir, err := os.MkdirTemp("/run", "extrapath-")
 	if err != nil {
-		t.Skipf("no writable dir outside the closed prefixes: %v", err)
+		t.Skipf("no writable dir outside the refused prefixes: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	// A real directory standing in for hotserve's own state, so the
-	// hidden branch is exercised by something that actually resolves
-	// (EvalSymlinks needs every component to exist; a link to a path
-	// that does not is checked as written — the documented limit).
-	secrets := filepath.Join(dir, "secrets")
-	if err := os.MkdirAll(secrets, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	hidden := append(append([]string{}, sandboxHiddenFloor...), secrets)
-	for _, target := range []string{"/dev", "/tmp", secrets} {
+	for _, target := range []string{"/dev", "/tmp"} {
 		link := filepath.Join(dir, "link")
 		_ = os.Remove(link)
 		if err := os.Symlink(target, link); err != nil {
 			t.Fatal(err)
 		}
-		err := validateExtraPath(link, "/var/lib/liveswap", hidden)
+		err := validateExtraPath(link, "/var/lib/liveswap")
 		if err == nil {
 			t.Errorf("a symlink to %s was accepted: BindPaths would follow it", target)
 			continue
@@ -744,9 +830,7 @@ func TestValidateExtraPathFollowsSymlinks(t *testing.T) {
 			t.Errorf("symlink to %s refused without naming the resolution: %v", target, err)
 		}
 	}
-	// A link to somewhere legitimate still passes. It must not be the
-	// parent of `secrets`: with overlap checked in both directions,
-	// binding a directory that CONTAINS a hidden path carries it in.
+	// A link to somewhere legitimate still passes.
 	allowed := filepath.Join(dir, "data")
 	if err := os.MkdirAll(allowed, 0o750); err != nil {
 		t.Fatal(err)
@@ -755,41 +839,18 @@ func TestValidateExtraPathFollowsSymlinks(t *testing.T) {
 	if err := os.Symlink(allowed, ok); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateExtraPath(ok, "/var/lib/liveswap", hidden); err != nil {
+	if err := validateExtraPath(ok, "/var/lib/liveswap"); err != nil {
 		t.Errorf("a symlink to an allowed path was refused: %v", err)
 	}
 }
 
-// TestHiddenPathsResolvesRelativeEnvFile: a relative env_file is valid
-// configuration (parseEnvFile reads it through os.ReadFile, against
-// this process's working directory), so the hidden set must resolve it
-// the same way rather than drop it and leave the file readable by
-// every sibling.
-func TestHiddenPathsResolvesRelativeEnvFile(t *testing.T) {
-	a := &App{Apps: map[string]*AppConfig{"blog": {EnvFile: "secrets/blog.env"}}}
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := filepath.Join(wd, "secrets/blog.env")
-	found := false
-	for _, h := range a.hiddenPaths() {
-		if h == want {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("relative env_file not resolved into the hidden set (want %s): %v", want, a.hiddenPaths())
-	}
-}
-
-// TestSpecsHideEveryAppsResolvedEnvFile is the ordering invariant
-// Provision relies on: the hidden set is derived from every app's
-// env_file, so defaults (which resolve {env.*}) must be applied to all
-// apps before the first spec is built. Building in one pass over an
-// unordered map recorded a sibling's unresolved path and left that
-// app's real env file visible.
-func TestSpecsHideEveryAppsResolvedEnvFile(t *testing.T) {
+// TestEnvFilesAreAbsentWithoutBeingListed is what replaced the derived
+// hidden set: no app's env_file is named anywhere in a sibling's spec,
+// and none of them is reachable inside its view — not because they
+// were enumerated and masked, but because nothing bound them. This is
+// the same guarantee the old set gave only for the paths it happened
+// to know about, and only for units started after they were declared.
+func TestEnvFilesAreAbsentWithoutBeingListed(t *testing.T) {
 	t.Setenv("SECRETS", "/etc/secrets")
 	a := &App{
 		Root:              "/var/lib/liveswap",
@@ -801,26 +862,59 @@ func TestSpecsHideEveryAppsResolvedEnvFile(t *testing.T) {
 		},
 	}
 	repl := caddy.NewReplacer()
-	for _, cfg := range a.Apps { // pass one: defaults for every app
+	for name, cfg := range a.Apps {
 		cfg.applyDefaults(repl)
-	}
-	for name, cfg := range a.Apps { // pass two: specs
 		spec, err := a.buildSpec(name, cfg)
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, want := range []string{"/etc/secrets/blog.env", "/etc/secrets/shop.env"} {
-			found := false
-			for _, h := range spec.sandboxHidden {
-				if h == want {
-					found = true
-				}
-			}
-			if !found {
-				t.Errorf("%s's sandbox does not hide %s: %v", name, want, spec.sandboxHidden)
+		sb := spec.sandboxSpecFor(spec.dirs.release("v1"), sandboxFull)
+		for _, secret := range []string{"/etc/secrets/blog.env", "/etc/secrets/shop.env", "/etc/secrets"} {
+			if sb.inView(secret) {
+				t.Errorf("%s's view reaches %s", name, secret)
 			}
 		}
+		// And an env_file declared *later* — the case the snapshot
+		// model could not cover, because a running unit's view is never
+		// rebuilt — is absent for exactly the same reason.
+		if sb.inView("/etc/secrets/added-tomorrow.env") {
+			t.Errorf("%s's view reaches an env_file that does not exist yet", name)
+		}
 	}
+}
+
+// TestWarnEnvFileInView: the one place an env_file can still land in a
+// view is the app's own directories, which are the only host paths
+// bound writable. Its own environment is legitimately reachable, but
+// under shared/ the app can rewrite the file and so choose its own
+// next launch's environment — worth saying out loud at config load.
+func TestWarnEnvFileInView(t *testing.T) {
+	spec := testSpec(t)
+	for _, tc := range []struct {
+		name    string
+		envFile string
+		mode    string
+		want    int
+	}{
+		{"outside every view", "/etc/hotserve/demo.env", sandboxAuto, 0},
+		{"in shared", filepath.Join(spec.dirs.shared, "demo.env"), sandboxAuto, 1},
+		{"in releases", filepath.Join(spec.dirs.releases, "v1", "demo.env"), sandboxAuto, 1},
+		{"in shared but unsandboxed", filepath.Join(spec.dirs.shared, "demo.env"), sandboxOff, 0},
+		{"no env_file", "", sandboxAuto, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			core, logs := observer.New(zap.WarnLevel)
+			s := *spec
+			s.envFile, s.sandboxMode = tc.envFile, tc.mode
+			warnEnvFileInView(zap.New(core), map[string]*appSpec{"demo": &s})
+			if got := logs.Len(); got != tc.want {
+				t.Fatalf("warned %d times, want %d: %v", got, tc.want, logs.All())
+			}
+		})
+	}
+	// A nil logger is the pre-Provision case (Validate called directly
+	// by a test or by `caddy validate`); it must not panic.
+	warnEnvFileInView(nil, map[string]*appSpec{"demo": spec})
 }
 
 // TestValidateRejectsUncleanRoot: every containment check is lexical,
@@ -864,22 +958,33 @@ func TestResolveBindSourcesRefusesPlantedSymlink(t *testing.T) {
 		t.Skipf("no writable dir outside the closed prefixes: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(outside) })
-	hotserveState := filepath.Join(outside, "fake-hotserve")
 	elsewhere := filepath.Join(outside, "data")
-	for _, d := range []string{release, shared, sibling, hotserveState, elsewhere} {
+	for _, d := range []string{release, shared, sibling, elsewhere} {
 		if err := os.MkdirAll(d, 0o750); err != nil {
 			t.Fatal(err)
 		}
 	}
-	hidden := []string{hotserveState}
+	// These have to exist for the containment branch to be the one that
+	// refuses them: a link to a path that does not resolve is refused
+	// by the missing-source case instead — fail-closed either way, but
+	// a different rule than the one under test. Neither is present in
+	// the plain build container.
+	for _, p := range []string{"/run/hotserve", "/run/user"} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			continue
+		}
+		if err := os.MkdirAll(p, 0o750); err != nil {
+			t.Skipf("cannot create %s: %v", p, err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(p) })
+	}
 	spec := func(sharedPath string) *sandboxSpec {
-		return &sandboxSpec{tier: sandboxFull, root: root, appDir: appDir,
-			writable: []bindPath{{dest: release, source: release}, {dest: sharedPath, source: sharedPath}},
-			hidden:   hidden}
+		return &sandboxSpec{tier: sandboxFull, root: root, appDir: appDir, appName: "blog",
+			writable: []bindPath{{dest: release, source: release}, {dest: sharedPath, source: sharedPath}}}
 	}
 	// Baseline: real directories resolve to themselves and are kept.
 	s := spec(shared)
-	if err := s.resolveBindSources(hidden); err != nil {
+	if err := s.resolveBindSources(); err != nil {
 		t.Fatalf("plain directories refused: %v", err)
 	}
 	if !reflect.DeepEqual(s.writable, []bindPath{{dest: release, source: release}, {dest: shared, source: shared}}) {
@@ -897,7 +1002,8 @@ func TestResolveBindSourcesRefusesPlantedSymlink(t *testing.T) {
 		// it names" rule catches it first — either refusal is correct,
 		// both say "overlaps".
 		{"the private tmp", "/tmp", "overlaps"},
-		{"hotserve's own state", hotserveState, "hidden from every app"},
+		{"hotserve's own state", "/run/hotserve", "overlaps"},
+		{"the manager's socket dir", "/run/user", "overlaps"},
 		{"a sibling app's data", sibling, "not the directory it names"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -905,7 +1011,7 @@ func TestResolveBindSourcesRefusesPlantedSymlink(t *testing.T) {
 			if err := os.Symlink(tc.target, link); err != nil {
 				t.Fatal(err)
 			}
-			err := spec(link).resolveBindSources(hidden)
+			err := spec(link).resolveBindSources()
 			if err == nil {
 				t.Fatalf("a shared dir pointing at %s was bound into the sandbox", tc.target)
 			}
@@ -923,7 +1029,7 @@ func TestResolveBindSourcesRefusesPlantedSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	s = spec(link)
-	if err := s.resolveBindSources(hidden); err != nil {
+	if err := s.resolveBindSources(); err != nil {
 		t.Fatalf("a shared dir on another path was refused: %v", err)
 	}
 	resolved, _ := filepath.EvalSymlinks(elsewhere)
@@ -941,7 +1047,7 @@ func TestResolveBindSourcesRefusesPlantedSymlink(t *testing.T) {
 	}
 
 	// A missing bind source is an error, not a silently skipped bind.
-	if err := spec(filepath.Join(appDir, "gone")).resolveBindSources(hidden); err == nil {
+	if err := spec(filepath.Join(appDir, "gone")).resolveBindSources(); err == nil {
 		t.Fatal("a missing shared dir must fail the launch")
 	}
 }
@@ -968,11 +1074,10 @@ func TestUnitForResolvesBindSources(t *testing.T) {
 	}
 	spec := startSpec{
 		app: "blog", version: "v1", command: []string{"./server"}, dir: release,
-		sandbox: &sandboxSpec{tier: sandboxFull, root: root, appDir: appDir,
-			writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}},
-			hidden:   sandboxHiddenFloor},
+		sandbox: &sandboxSpec{tier: sandboxFull, root: root, appDir: appDir, appName: "blog",
+			writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}}},
 	}
-	if _, err := r.unitFor(spec, false); err == nil || !strings.Contains(err.Error(), "sandbox itself closes") {
+	if _, err := r.unitFor(spec, false); err == nil || !strings.Contains(err.Error(), "no app may be given") {
 		t.Fatalf("unitFor must refuse a planted bind source, got %v", err)
 	}
 	if _, err := r.Start(spec); err == nil {
@@ -1007,11 +1112,10 @@ func TestBindDestinationsAreTheConfiguredPaths(t *testing.T) {
 	if err := os.Symlink(elsewhere, shared); err != nil {
 		t.Fatal(err)
 	}
-	s := &sandboxSpec{tier: sandboxFull, root: root, appDir: appDir,
+	s := &sandboxSpec{tier: sandboxFull, root: root, appDir: appDir, appName: "blog",
 		writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}},
-		extra:    []extraPath{{path: "/run/postgresql"}},
-		hidden:   sandboxHiddenFloor}
-	if err := s.resolveBindSources(sandboxHiddenFloor); err != nil {
+		extra:    []extraPath{{path: "/run/postgresql"}}}
+	if err := s.resolveBindSources(); err != nil {
 		t.Fatalf("a shared dir on another disk was refused: %v", err)
 	}
 	got := propMap(unitSpec{ExecStart: []string{"/bin/true"}, Sandbox: s})
@@ -1038,28 +1142,27 @@ func TestBindDestinationsAreTheConfiguredPaths(t *testing.T) {
 // socket) and /run/hotserve (the admin socket) in with it, and
 // `extra_path /etc` carries every configured env file.
 func TestOverlapIsSymmetric(t *testing.T) {
-	hidden := append(append([]string{}, sandboxHiddenFloor...), "/etc/blog/blog.env")
 	for _, ancestor := range []string{"/run", "/var/lib", "/etc", "/var"} {
-		if err := validateExtraPath(ancestor, "/var/lib/liveswap", hidden); err == nil {
-			t.Errorf("extra_path %s accepted: it contains something the sandbox closes or hides", ancestor)
+		if err := validateExtraPath(ancestor, "/var/lib/liveswap"); err == nil {
+			t.Errorf("extra_path %s accepted: it contains something no app may be given", ancestor)
 		}
 	}
 	// The liveswap root's own ancestors go too: binding them back would
 	// carry every app's data in.
-	if err := validateExtraPath("/var/lib", "/var/lib/liveswap", hidden); err == nil {
+	if err := validateExtraPath("/var/lib", "/var/lib/liveswap"); err == nil {
 		t.Error("an ancestor of the liveswap root was accepted")
 	}
 	// Siblings that merely share a prefix are still fine.
 	for _, ok := range []string{"/run/postgresql", "/var/cache/blog", "/etc/ssl/certs", "/srv/data"} {
-		if err := validateExtraPath(ok, "/var/lib/liveswap", hidden); err != nil {
+		if err := validateExtraPath(ok, "/var/lib/liveswap"); err != nil {
 			t.Errorf("%s rejected: %v", ok, err)
 		}
 	}
-	if err := closedOrHidden("/run", hidden); err == nil {
+	if err := closedPath("/run"); err == nil {
 		t.Error("a bind source containing /run/user was accepted at launch time")
 	}
-	if err := closedOrHidden("/etc", hidden); err == nil {
-		t.Error("a bind source containing hotserve's env files was accepted at launch time")
+	if err := closedPath("/etc"); err == nil {
+		t.Error("a bind source containing hotserve's own config was accepted at launch time")
 	}
 }
 
@@ -1085,16 +1188,15 @@ func TestMandatoryBindMustBeTheDirectoryItNames(t *testing.T) {
 	}
 	link := filepath.Join(appDir, "shared-link")
 	spec := func(sharedPath string) *sandboxSpec {
-		return &sandboxSpec{tier: sandboxFull, root: root, appDir: appDir,
-			writable: []bindPath{{dest: release, source: release}, {dest: sharedPath, source: sharedPath}},
-			hidden:   sandboxHiddenFloor}
+		return &sandboxSpec{tier: sandboxFull, root: root, appDir: appDir, appName: "blog",
+			writable: []bindPath{{dest: release, source: release}, {dest: sharedPath, source: sharedPath}}}
 	}
 	for _, target := range []string{appDir, filepath.Join(appDir, "releases"), filepath.Join(appDir, "tmp"), root} {
 		_ = os.Remove(link)
 		if err := os.Symlink(target, link); err != nil {
 			t.Fatal(err)
 		}
-		err := spec(link).resolveBindSources(sandboxHiddenFloor)
+		err := spec(link).resolveBindSources()
 		if err == nil {
 			t.Errorf("a shared dir pointing at %s was accepted; its recursive bind would expose state.json, tmp/ and other releases", target)
 			continue
@@ -1122,13 +1224,268 @@ func TestMandatoryBindMustBeTheDirectoryItNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	aliasShared := filepath.Join(aliasRoot, "blog", "shared")
-	viaAlias := &sandboxSpec{tier: sandboxFull, root: aliasRoot, appDir: filepath.Join(aliasRoot, "blog"),
-		writable: []bindPath{{dest: aliasShared, source: aliasShared}},
-		hidden:   sandboxHiddenFloor}
-	if err := viaAlias.resolveBindSources(sandboxHiddenFloor); err != nil {
+	viaAlias := &sandboxSpec{tier: sandboxFull, root: aliasRoot, appDir: filepath.Join(aliasRoot, "blog"), appName: "blog",
+		writable: []bindPath{{dest: aliasShared, source: aliasShared}}}
+	if err := viaAlias.resolveBindSources(); err != nil {
 		t.Fatalf("a symlinked root must still work: %v", err)
 	}
 	if got := viaAlias.writable[0]; got.dest != aliasShared || got.source != filepath.Join(realRoot, "blog", "shared") {
 		t.Fatalf("through a symlinked root the app must still see its dir where it names it, bound from the real one: %+v", got)
+	}
+}
+
+// TestAppDirAliasToSiblingRefused: the expected base for a mandatory
+// bind is derived from the canonical root plus the configured app
+// name, never from what the app's own directory resolves to. Resolving
+// appDir would let the alias vouch for itself — a bare app that
+// replaces <root>/blog with a link to <root>/shop makes shop's
+// directory the expected base, and both of blog's binds then match it
+// exactly, handing the sibling's release and shared data to the new
+// sandbox.
+func TestAppDirAliasToSiblingRefused(t *testing.T) {
+	root := t.TempDir()
+	sibling := filepath.Join(root, "shop")
+	for _, d := range []string{filepath.Join(sibling, "releases", "v1"), filepath.Join(sibling, "shared")} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appDir := filepath.Join(root, "blog")
+	if err := os.Symlink(sibling, appDir); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	release := filepath.Join(appDir, "releases", "v1")
+	shared := filepath.Join(appDir, "shared")
+	s := &sandboxSpec{tier: sandboxFull, root: root, appDir: appDir, appName: "blog",
+		writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}}}
+	err := s.resolveBindSources()
+	if err == nil {
+		t.Fatalf("an app dir aliased to the sibling %s was accepted: blog would bind shop's release and shared data", sibling)
+	}
+	if !strings.Contains(err.Error(), "not the directory it names") {
+		t.Fatalf("refused for the wrong reason: %v", err)
+	}
+}
+
+// TestUnitForRefusesCommandOutsideTheView: LookPath runs in the
+// supervisor's view of the filesystem, which under a deny-by-default
+// sandbox is not the unit's. A runtime installed outside /usr —
+// /opt/node/bin/node, an nvm shim under a home directory — resolves
+// here and then does not exist in there, and systemd reports that as a
+// bare status=203/EXEC after the unit has already been created.
+func TestUnitForRefusesCommandOutsideTheView(t *testing.T) {
+	r, _ := newTestSystemdRunner(t)
+	root := t.TempDir()
+	appDir := filepath.Join(root, "blog")
+	release := filepath.Join(appDir, "releases", "v1")
+	shared := filepath.Join(appDir, "shared")
+	for _, d := range []string{release, shared} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A runtime outside the base view. Under /var, which is not bound
+	// at all (/run is, but the container mounts it noexec, so LookPath
+	// would fail there for the wrong reason).
+	outside, err := os.MkdirTemp("/var", "runtime-")
+	if err != nil {
+		t.Skipf("no writable dir outside the base view: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(outside) })
+	runtime := filepath.Join(outside, "node")
+	if err := os.WriteFile(runtime, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(release, "server"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sb := func() *sandboxSpec {
+		return &sandboxSpec{tier: sandboxFull, root: root, appDir: appDir, appName: "blog",
+			writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}}}
+	}
+	base := startSpec{app: "blog", version: "v1", dir: release}
+
+	spec := base
+	spec.command, spec.sandbox = []string{runtime}, sb()
+	_, err = r.unitFor(spec, false)
+	if err == nil || !strings.Contains(err.Error(), "extra_path") {
+		t.Fatalf("unitFor must refuse a command outside the view and name the fix, got %v", err)
+	}
+	// Declaring it is the documented answer, and it must then be accepted.
+	spec.sandbox = sb()
+	spec.sandbox.extra = []extraPath{{path: outside}}
+	if _, err := r.unitFor(spec, false); err != nil {
+		t.Fatalf("an extra_path covering the runtime must make it reachable: %v", err)
+	}
+	// The ordinary cases still pass: a binary in the release dir, and
+	// one in the base view.
+	for _, cmd := range []string{"./server", "/bin/sh"} {
+		spec := base
+		spec.command, spec.sandbox = []string{cmd}, sb()
+		if _, err := r.unitFor(spec, false); err != nil {
+			t.Errorf("%s refused: %v", cmd, err)
+		}
+	}
+	// Unsandboxed, the check does not apply at all.
+	spec = base
+	spec.command = []string{runtime}
+	if _, err := r.unitFor(spec, false); err != nil {
+		t.Errorf("an unsandboxed unit must not be subject to the view check: %v", err)
+	}
+}
+
+// TestSandboxPropertiesNeverEmitsAnEmptyBindList: BindPaths= and
+// BindReadOnlyPaths= are two views of one list in the manager, and
+// setting either to an empty array resets the whole list rather than
+// adding nothing — taking the base view back out and failing every
+// such unit with 203/EXEC. The capability probe is exactly this case:
+// it has no directories of its own.
+func TestSandboxPropertiesNeverEmitsAnEmptyBindList(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		spec *sandboxSpec
+		want []string // properties that must be present
+		gone []string // properties that must not be emitted at all
+	}{
+		{"the capability probe: nothing of its own", probeSandboxSpec(sandboxFilesystem),
+			[]string{"BindReadOnlyPaths", "TemporaryFileSystem"}, []string{"BindPaths"}},
+		{"an app with no ro extra_path", &sandboxSpec{tier: sandboxFull, root: "/var/lib/liveswap",
+			writable: []bindPath{{dest: "/var/lib/liveswap/blog/shared"}}},
+			[]string{"BindPaths", "BindReadOnlyPaths"}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := propMap(unitSpec{ExecStart: []string{"/bin/true"}, Sandbox: tc.spec})
+			for _, name := range tc.want {
+				if _, ok := got[name]; !ok {
+					t.Errorf("%s missing", name)
+				}
+			}
+			for _, name := range tc.gone {
+				if _, ok := got[name]; ok {
+					t.Errorf("%s emitted empty: it resets the manager's whole bind list, base view included", name)
+				}
+			}
+			for _, name := range []string{"BindPaths", "BindReadOnlyPaths"} {
+				if b, ok := got[name].([]bindMount); ok && len(b) == 0 {
+					t.Errorf("%s emitted as an empty list", name)
+				}
+			}
+			// Whatever else is missing, the probe must still get an OS
+			// it can exec in.
+			ro, _ := got["BindReadOnlyPaths"].([]bindMount)
+			var sawUsr bool
+			for _, b := range ro {
+				if b.Destination == "/usr" {
+					sawUsr = true
+				}
+			}
+			if !sawUsr {
+				t.Error("the base view is missing /usr: the unit cannot exec anything")
+			}
+		})
+	}
+}
+
+// TestSymlinkedRootUnderPrivateTmpLaunches: validateSandboxRoot
+// deliberately allows a liveswap root under /tmp, /var/tmp or /home —
+// the binds nest into the unit's own private copies, and the
+// real-systemd integration lane runs from /var/tmp. The launch-time
+// check must agree: a root reached through a symlink resolves into one
+// of those trees, and refusing it there would make the same root fail
+// every launch merely for being spelled with a link.
+func TestSymlinkedRootUnderPrivateTmpLaunches(t *testing.T) {
+	for _, under := range []string{"/var/tmp", "/tmp"} {
+		t.Run(under, func(t *testing.T) {
+			real, err := os.MkdirTemp(under, "liveswap-real-")
+			if err != nil {
+				t.Skipf("cannot create a root under %s: %v", under, err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(real) })
+			// The alias lives outside the tree it points at, the way
+			// /srv/liveswap -> /var/tmp/ls would.
+			base, err := os.MkdirTemp("/var", "liveswap-alias-")
+			if err != nil {
+				t.Skipf("no writable dir for the alias: %v", err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(base) })
+			root := filepath.Join(base, "liveswap")
+			if err := os.Symlink(real, root); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			release := filepath.Join(root, "blog", "releases", "v1")
+			shared := filepath.Join(root, "blog", "shared")
+			for _, d := range []string{release, shared} {
+				if err := os.MkdirAll(d, 0o750); err != nil {
+					t.Fatal(err)
+				}
+			}
+			s := &sandboxSpec{tier: sandboxFull, root: root, appDir: filepath.Join(root, "blog"), appName: "blog",
+				writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}}}
+			if err := s.resolveBindSources(); err != nil {
+				t.Fatalf("a symlinked root under %s must launch, exactly as an unaliased one does: %v", under, err)
+			}
+			// Only the source moves; the app still finds its dirs where
+			// its command line and HOME name them.
+			for i, want := range []string{release, shared} {
+				if s.writable[i].dest != want {
+					t.Errorf("bind %d destination moved to %q, want %q", i, s.writable[i].dest, want)
+				}
+				if !strings.HasPrefix(s.writable[i].source, real) {
+					t.Errorf("bind %d source %q is not under the real root %q", i, s.writable[i].source, real)
+				}
+			}
+			// The deny list still applies to a source that is NOT the
+			// directory it names — that is the planted-symlink case, and
+			// it must not be let through with the root's alias.
+			planted := filepath.Join(root, "blog", "shared-link")
+			if err := os.Symlink("/dev", planted); err != nil {
+				t.Fatal(err)
+			}
+			bad := &sandboxSpec{tier: sandboxFull, root: root, appDir: filepath.Join(root, "blog"), appName: "blog",
+				writable: []bindPath{{dest: release, source: release}, {dest: planted, source: planted}}}
+			if err := bad.resolveBindSources(); err == nil {
+				t.Error("a planted shared -> /dev was accepted under a symlinked root")
+			}
+		})
+	}
+}
+
+// TestUnitForResolvesTheCommandBeforeTestingTheView: LookPath does not
+// follow symlinks, so a shim under a bound directory pointing at an
+// unbound one (the vendored-runtime layout /usr/local/bin/node ->
+// /opt/node/bin/node) would pass an unresolved check and then die as
+// the bare 203/EXEC the check exists to replace.
+func TestUnitForResolvesTheCommandBeforeTestingTheView(t *testing.T) {
+	r, _ := newTestSystemdRunner(t)
+	root := t.TempDir()
+	appDir := filepath.Join(root, "blog")
+	release := filepath.Join(appDir, "releases", "v1")
+	if err := os.MkdirAll(release, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// The real runtime, outside the base view; /var is bound nowhere.
+	outside, err := os.MkdirTemp("/var", "runtime-")
+	if err != nil {
+		t.Skipf("no writable dir outside the base view: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(outside) })
+	realBin := filepath.Join(outside, "node")
+	if err := os.WriteFile(realBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The shim, inside the release dir (which IS bound), pointing out.
+	shim := filepath.Join(release, "node")
+	if err := os.Symlink(realBin, shim); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	spec := startSpec{app: "blog", version: "v1", dir: release, command: []string{shim},
+		sandbox: &sandboxSpec{tier: sandboxFull, root: root, appDir: appDir, appName: "blog",
+			writable: []bindPath{{dest: release, source: release}}}}
+	_, err = r.unitFor(spec, false)
+	if err == nil {
+		t.Fatal("a shim inside the view pointing at a target outside it was accepted")
+	}
+	if !strings.Contains(err.Error(), realBin) || !strings.Contains(err.Error(), "extra_path") {
+		t.Fatalf("the refusal must name the resolved target and the fix: %v", err)
 	}
 }

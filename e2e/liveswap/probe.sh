@@ -11,8 +11,11 @@ root=$(cd "$app/.." && pwd)         # <root>
 shared="$app/shared"
 out="$shared/probe.txt"
 : > "$out"
-# Hidden paths are tested for readability, not existence: an
-# InaccessiblePaths= entry is an inaccessible node that still *exists*.
+# Paths the sandbox keeps out are tested for EXISTENCE, not merely
+# readability: the view is deny-by-default (TemporaryFileSystem=/ plus
+# explicit binds), so anything nothing named is absent — a stronger
+# statement than the inaccessible-but-present node InaccessiblePaths=
+# used to leave behind, and the one this suite must pin.
 echo "pid=$$" >> "$out"
 read _ _ n < /proc/self/uid_map; echo "uidmap=$n" >> "$out"
 echo "nprocs=$(ls /proc | grep -c '^[0-9]')" >> "$out"
@@ -22,10 +25,25 @@ echo "root_listing=$(ls "$root" | tr '\n' ' ')" >> "$out"
 [ -e "$app/current" ] && echo "current=open" >> "$out" || echo "current=closed" >> "$out"
 touch "$release/.probe-w" 2>/dev/null && echo "release=writable" >> "$out" || echo "release=readonly" >> "$out"
 touch "$root/.probe-w" 2>/dev/null && echo "root=writable" >> "$out" || echo "root=readonly" >> "$out"
-[ -r /var/lib/hotserve ] && echo "hotserve_lib=open" >> "$out" || echo "hotserve_lib=closed" >> "$out"
-[ -r /run/hotserve ] && echo "run_hotserve=open" >> "$out" || echo "run_hotserve=closed" >> "$out"
-[ -r "/run/user/$(id -u)/systemd/private" ] && echo "mgr_socket=open" >> "$out" || echo "mgr_socket=closed" >> "$out"
-[ -r /etc/hotserve ] && echo "etc_hotserve=open" >> "$out" || echo "etc_hotserve=closed" >> "$out"
+[ -e /var/lib/hotserve ] && echo "hotserve_lib=open" >> "$out" || echo "hotserve_lib=closed" >> "$out"
+[ -e /run/hotserve ] && echo "run_hotserve=open" >> "$out" || echo "run_hotserve=closed" >> "$out"
+[ -e "/run/user/$(id -u)/systemd/private" ] && echo "mgr_socket=open" >> "$out" || echo "mgr_socket=closed" >> "$out"
+[ -e /etc/hotserve ] && echo "etc_hotserve=open" >> "$out" || echo "etc_hotserve=closed" >> "$out"
+# The rest of the host, which no bind names and which therefore is not
+# there at all. /var/lib is the sharp one: it holds hotserve's own TLS
+# keys, and the only thing under it in the view is the liveswap root's
+# path to this app's own dirs.
+for d in /opt /srv /home /root /mnt /media /var/lib/hotserve /etc/liveswap; do
+	k=$(echo "$d" | tr -d /)
+	[ -e "$d" ] && echo "abs_$k=present" >> "$out" || echo "abs_$k=absent" >> "$out"
+done
+echo "etc_listing=$(ls /etc 2>/dev/null | tr '\n' ' ')" >> "$out"
+echo "varlib_listing=$(ls /var/lib 2>/dev/null | tr '\n' ' ')" >> "$out"
+# The other half of the claim: the base view carries an OS the app can
+# actually run on, so "absent" above cannot mean "the unit is empty".
+[ -x /bin/sh ] && echo "binsh=ok" >> "$out" || echo "binsh=MISSING" >> "$out"
+[ -x /usr/bin/env ] && echo "usrbinenv=ok" >> "$out" || echo "usrbinenv=MISSING" >> "$out"
+[ -e /etc/ssl ] && echo "etcssl=ok" >> "$out" || echo "etcssl=MISSING" >> "$out"
 cg="/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)"
 (echo max > "$cg/memory.max") 2>/dev/null && echo "cgroup=writable" >> "$out" || echo "cgroup=readonly" >> "$out"
 touch /tmp/.probe-w 2>/dev/null && echo "tmp=writable" >> "$out" || echo "tmp=readonly" >> "$out"

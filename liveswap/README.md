@@ -248,17 +248,37 @@ two tiers depending on the host's systemd:
 |---|---|---|
 | User namespace (`PrivateUsers=`) | ● | ● |
 | PID namespace (`PrivatePIDs=`) | — | ● |
-| Read-only system; liveswap root replaced by an empty tmpfs; only the app's release and `shared/` bound back writable | ● | ● |
-| `/var/lib/hotserve` (TLS keys), `/run/hotserve` (admin socket), `/etc/hotserve`, `/run/user/<uid>` (manager socket) inaccessible | ● | ● |
+| Deny-by-default filesystem: the whole host filesystem replaced by an empty read-only tmpfs, only named paths bound back | ● | ● |
+| hotserve's keys and sockets, other apps, and every path nothing named — **absent**, not merely unreadable | ● | ● |
 | Private `/tmp`, minimal `/dev`, read-only cgroupfs, no capabilities, `@system-service` syscall filter, `AF_INET`/`AF_INET6`/`AF_UNIX`/`AF_NETLINK` only, no nested namespaces | ● | ● |
 | Supervisor, user manager and siblings **invisible and unsignalable** | — (they stay visible and can be signalled: a DoS residual, not data access) | ● |
 
-What the app sees: its release dir (working directory, writable), its
-`shared/` dir (writable; `HOME` points there), a private `/tmp`, the
-read-only system, and whatever `extra_path` declares. It does not see
-`state.json`, `tmp/` (the upload staging dir), other releases, or any
-other app. The network namespace is shared by design — the app binds
-`127.0.0.1:$PORT` as before, and sibling ports remain reachable.
+**An app sees its release dir, its `shared/`, a private `/tmp`, the OS
+runtime, and whatever `extra_path` names. Nothing else on the host
+exists in its view.**
+
+That is the whole guarantee. The view is built deny-by-default
+(`TemporaryFileSystem=/:ro` plus explicit binds), so it is a policy
+rather than a list of things to hide: `state.json`, `tmp/` (the upload
+staging dir), other releases, other apps, `/var/lib/hotserve` (TLS
+keys), `/run/hotserve` (admin socket), `/run/user/<uid>` (the manager
+socket), `/etc/hotserve`, `/home`, `/opt`, `/srv` and every operator
+`env_file` are absent — not present-but-unreadable — and no list has
+to be kept current for that to stay true.
+
+"The OS runtime" is a named set, not the host: `/usr` and its usrmerge
+aliases (`/bin`, `/sbin`, `/lib*`), the TLS trust store, and fourteen
+individual `/etc` entries for name and user resolution, timezone and
+the dynamic linker (`sandboxBaseView` in `sandbox.go` is the list).
+`/etc` is deliberately **not** bound whole — that would hand every app
+every other app's `env_file`. Each entry is optional, since no distro
+has all fourteen, so inside a unit `ls /etc` lists however many of
+them this host actually has — a dozen or so — and `ls /var/lib` lists
+exactly one, the liveswap root.
+
+The working directory is the release dir and `HOME` is `shared/`; both
+are writable. The network namespace is shared by design — the app
+binds `127.0.0.1:$PORT` as before, and sibling ports remain reachable.
 
 Both tiers close the routes the threat model ranks first: reading the
 supervisor's environment or walking the host through
@@ -266,6 +286,16 @@ supervisor's environment or walking the host through
 kernel refuses `ptrace`-class access across user namespaces even for
 the same uid), the admin socket, the TLS keys, sibling files. The
 `full` tier additionally removes process visibility and signals.
+
+**What this costs you.** An app that reads something under `/opt`,
+`/srv` or `/var/lib`, or whose runtime lives outside `/usr` (a
+vendored Node, an `nvm`/`asdf` shim), needs an `extra_path` for it —
+those paths do not exist inside the unit. The sandbox engages on an
+app's **next deploy**, so this surfaces where it has a fallback: the
+health gate fails the new version while the old one keeps serving. A
+command that is not in the view is refused before the unit is even
+created, with a message naming `extra_path`, rather than failing as a
+bare `203/EXEC`.
 
 **Policy and rollout.** `sandbox auto` (the default) applies the best
 tier the host delivers, and logs a warning at start and at every
@@ -282,23 +312,31 @@ gate while the old one keeps serving) — never on a supervisor
 restart, a boot recovery or a watchdog restart: those reproduce the
 tier the instance was recorded with, so upgrading hotserve does not
 turn into a fleet-wide, no-fallback restart into sandboxes. The
-supported rollout: upgrade, confirm apps healthy; declare each app's
-`extra_path` needs; deploy each app and watch `"sandbox"` in its
-status; only then, optionally, `sandbox require`.
+supported rollout: upgrade; **on Ubuntu, reboot (or restart
+`user@<uid>.service`) before going further** — see below; confirm apps
+healthy; declare each app's `extra_path` needs; deploy each app and
+watch `"sandbox"` in its status; only then, optionally,
+`sandbox require`.
+
+**Ubuntu, on an upgrade of an existing install:** the sandbox needs
+unprivileged user namespaces, which Ubuntu 24.04+ restricts unless the
+process is under an AppArmor profile that grants `userns`. The package
+ships that profile attached to the user-manager wrapper by path — but
+the manager already running was started before the wrapper existed,
+and path-attached AppArmor policy is not applied retroactively;
+postinstall deliberately does not restart it, because that would kill
+every running app. Until both the user manager and hotserve restart
+(a reboot does both), the probe records `none` and every deploy stays
+bare, whatever the config says. `journalctl -t hotserve-sandbox-probe`
+shows the probe's verdict.
 
 **What a running instance's sandbox is fixed to.** A unit's view is
 built when it starts and is never rebuilt under it — reloads
-deliberately leave running apps alone. That applies to the hidden set
-as much as to the tier: if you add an app whose `env_file` is
-`/etc/blog/blog.env`, instances that were already running keep the
-view they started with, in which that file is merely read-only
-(`ProtectSystem=strict`) rather than absent, and their status still
-reports the tier they have. The same is true of any hidden path
-created after a unit started. **After adding an app that carries
-secrets, redeploy the others** — a deploy is what rebuilds the view,
-exactly as it is for engaging the sandbox in the first place. A
-deny-by-default filesystem view would remove this asymmetry and is the
-structural fix (#35); today it is a property to know about.
+deliberately leave running apps alone — so an `extra_path` added by a
+reload reaches an app on its next deploy, not before. That is the only
+thing that ages now, and it fails safe: a secret belonging to an app
+you add tomorrow is already absent from every unit running today,
+because nothing ever bound it.
 
 **`require` is the one setting that can keep the whole server from
 starting**: it fails the start (admin socket and proxy included) when
@@ -318,17 +356,21 @@ app blog {
 }
 ```
 
-Three kinds of path are refused, each with an error saying which:
+Two kinds of path are refused, each with an error saying which:
 inside the **liveswap root** (the app already sees its own release and
-`shared/`; everything else there is another app), inside **hotserve's
-own** directories and files (TLS keys, the admin socket, any app's
-`env_file` — the set is derived from what this hotserve actually uses,
-not from the packaged paths), and inside anything the **sandbox itself
-closes**: `/home`, `/root`, `/run/user`, `/tmp`, `/var/tmp`, `/dev`,
-`/sys`, `/proc`. That last group is a hard boundary, not a
-convenience: a bind nests *into* the overmount the sandbox installed,
-so `extra_path /run/user/<uid>` would return the user manager's
-private socket and let the app start an unsandboxed unit of its own —
+`shared/`; everything else there is another app), and any of the names
+that would give back what the sandbox just took — hotserve's own
+`/var/lib/hotserve`, `/run/hotserve`, `/etc/hotserve`, `/etc/liveswap`,
+and `/home`, `/root`, `/run/user`, `/tmp`, `/var/tmp`, `/dev`, `/sys`,
+`/proc`. Overlap counts in both directions, since the binds are
+recursive: `extra_path /etc` would carry every env file in with it.
+
+The second list is a typo guard rather than the thing that makes the
+sandbox hold — the view is deny-by-default, so a path missing from the
+list is still absent unless you name it. But naming one of these
+genuinely would undo the sandbox: a bind nests *into* the overmount,
+so `extra_path /run/user/<uid>` returns the user manager's private
+socket and lets the app start an unsandboxed unit of its own —
 read-only included, since connecting to a unix socket is not a
 filesystem write.
 

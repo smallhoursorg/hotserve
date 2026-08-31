@@ -66,43 +66,82 @@ requirement below stands as the contract the sandbox path must keep.
   start and at every spawn that runs below *full*), `require` (start
   fails unless the *full* tier is available — a weaker tier accepted
   silently is the "looks configured, quietly weaker" trap), `off`.
-- The sandboxed filesystem view MUST contain, at their REAL host paths
-  (no remapping — `current` symlinks, state paths and operator
-  debugging all assume real paths):
-  - the app's release dir (rw), shared dir (rw), and the release
-    being started;
-  - a private `/tmp` (`PrivateTmp=`: a directory under the host's
-    `/tmp`, removed when the unit stops). *Amended 2026-08-30:* the
-    app's own `tmp/` (`appDirs.tmp`) is NOT bound — it is the upload
-    staging dir, and a running instance that could see it could
-    rewrite the next version's tarball before extraction.
-  - read-only system paths (`ProtectSystem=strict`: `/usr`, `/etc`,
-    `/boot`, `/efi` read-only, everything else as declared), plus a
-    fresh `/proc` for the unit's PID namespace (`PrivatePIDs=`) and a
-    minimal `/dev` (`PrivateDevices=`);
+- The sandboxed filesystem view MUST be **deny-by-default**: an empty
+  read-only tmpfs replaces the whole filesystem
+  (`TemporaryFileSystem=/:ro`) and the only things that exist inside a
+  unit are the ones explicitly bound. The guarantee is one sentence —
+  *anything not named is absent* — and it holds by construction rather
+  than by a list of things to hide being complete and current.
+  *Amended 2026-08-31 (#35):* this replaces the earlier model, which
+  left the host readable (`ProtectSystem=strict`) and masked a set
+  derived from the running configuration (`InaccessiblePaths=` over
+  hotserve's own paths plus every app's `env_file`). That set could be
+  incomplete, and — because a unit's mount namespace is built once at
+  start and never rebuilt — it aged: an `env_file` belonging to an app
+  added later was merely read-only inside older siblings' views. There
+  is no set now, so there is nothing to keep current.
+  `ProtectSystem=` and `ProtectHome=` are NOT set: nothing is left for
+  either to act on, and "absent" is the stronger statement.
+- What a unit's view MUST contain, at REAL host paths (no remapping —
+  `current` symlinks, state paths and operator debugging all assume
+  real paths):
+  - the app's release dir being started (rw) and its shared dir (rw),
+    and nothing else of the liveswap root. Its `state.json`, its
+    `tmp/` (the upload staging dir — a running instance must never be
+    able to rewrite the next version's tarball), its `current` symlink
+    and its other releases are simply never named, so they do not
+    exist inside the unit;
+  - a private `/tmp` and `/var/tmp` (`PrivateTmp=`), a minimal `/dev`
+    (`PrivateDevices=`) and the API VFS. `MountAPIVFS=` is NOT set:
+    `/proc`, `/sys` and `/dev` are mounted inside the tmpfs by
+    `PrivateDevices=` (and, at the *full* tier, `PrivatePIDs=`) —
+    measured on 252, 255, 257 and 259;
+  - a **base view** of the OS, bound read-only, named entry by entry
+    in `sandboxBaseView` (liveswap/sandbox.go): `/usr` and the usrmerge
+    aliases (`/bin`, `/sbin`, `/lib*`), the TLS trust store
+    (`/etc/ssl`, `/etc/ca-certificates`, `/etc/pki`), name and user
+    resolution (`/etc/resolv.conf`, `/etc/hosts`, `/etc/hostname`,
+    `/etc/nsswitch.conf`, `/etc/passwd`, `/etc/group`), `/etc/localtime`,
+    `/etc/alternatives`, the linker's cache and configuration
+    (`/etc/ld.so.cache`, `/etc/ld.so.conf`, `/etc/ld.so.conf.d`), and
+    `/run/systemd/resolve`. Every entry is bound with `IgnoreENOENT`:
+    the list spans four distros and none has all of it (Ubuntu 24.04
+    and 26.04 ship no `/etc/localtime`, Debian no `/etc/pki`, a merged
+    host no real `/lib64`);
   - each configured `extra_path` (ro by default, rw when declared).
-- The view MUST NOT contain: other apps' directories, `/var/lib`
-  outside the app's own subtree (TLS keys live there), `/run/hotserve`
-  (admin socket), `/run/user/<uid>` (the user manager's private
-  socket and session bus; `ProtectHome=tmpfs` covers it — a tmpfs
-  rather than `yes` so the app's own release and shared dirs can still
-  be bound back when the liveswap root lives under one of those trees;
-  an `extra_path` there is refused outright), and
-  `/etc/hotserve` (env files; apps never legitimately read their env
-  *file*, they receive env *variables*). *Amended 2026-08-30:* the
-  liveswap root is replaced by an empty read-only tmpfs
-  (`TemporaryFileSystem=<root>:ro`) with the app's release and shared
-  dirs bound back (`BindPaths=`); `ReadWritePaths=` nested under an
-  `InaccessiblePaths=` parent does not re-open the child (measured),
-  so that idiom is not used. hotserve's own paths are
-  `InaccessiblePaths=` with the `-` prefix. `/sys/fs/cgroup` MUST be
+- `/etc` MUST NOT be bound whole. Binding it would hand every app
+  every other app's `env_file` and hotserve's own configuration —
+  precisely the derived, ageing hidden set this model exists to
+  delete. Naming the dozen entries a runtime actually needs is what
+  keeps the guarantee free of exceptions.
+- The view therefore MUST NOT contain, without anything having to
+  enumerate them: other apps' directories, `/var/lib` outside the
+  liveswap root's path to this app's own dirs (hotserve's TLS keys
+  live there), `/run/hotserve` (admin socket), `/run/user/<uid>` (the
+  user manager's private socket and session bus), `/etc/hotserve` and
+  `/etc/liveswap` (env files), `/home`, `/root`, `/opt`, `/srv`, or
+  any operator `env_file` wherever it lives. `/sys/fs/cgroup` MUST be
   read-only (`ProtectControlGroups=`): the delegated subtree is owned
   by the app's own UID, so resource caps are otherwise rewritable.
+- `BindPaths=` and `BindReadOnlyPaths=` are two views of ONE list in
+  the manager, and setting either to an empty array RESETS that list
+  rather than adding nothing. An empty `BindPaths=` emitted after the
+  base view therefore takes `/usr` and `/bin` away again and the unit
+  fails `203/EXEC` — measured, and exactly what the capability probe
+  (which has no directories of its own) would otherwise do. Empty list
+  properties MUST NOT be emitted.
+- A command that resolves outside the view MUST be refused at launch
+  with a message naming `extra_path`, not left to fail as a bare
+  `203/EXEC`: `exec.LookPath` runs in the supervisor's view, so a
+  runtime installed outside `/usr` (`/opt/node/bin/node`, an nvm or
+  asdf shim under a home directory) resolves for the supervisor and
+  then does not exist inside the unit.
 - `/run/systemd/resolve` MUST stay reachable (read-only) when it
   exists: on systemd-resolved hosts (every Ubuntu in the support
-  matrix) `/etc/resolv.conf` is a symlink into that directory, and if
-  the masking of `/run` takes it away the link dangles — all DNS
-  inside the sandbox fails, silently, on the most common distro. Local
+  matrix) `/etc/resolv.conf` is a symlink into that directory, and
+  since nothing else under `/run` is in the view the link would
+  otherwise dangle — all DNS inside the sandbox failing, silently, on
+  the most common distro. Local
   unix sockets (`/run/postgresql`, `/run/mysqld`, …) are deliberately
   not reachable unless declared; `extra_path` is the documented recipe
   (see config surface).
@@ -152,12 +191,16 @@ requirement below stands as the contract the sandbox path must keep.
   the backstop (killing the in-namespace init kills everything in the
   namespace; no survivor is possible). The existing escalation tests
   define the contract.
-- The view a unit gets is fixed at its start: hidden paths declared
-  afterwards (a new app's `env_file`) are NOT masked in instances
-  already running, and the operator MUST be told to redeploy them.
-  This is the same "engage on the next deploy" rule the tier follows,
-  applied to the rest of the view; a deny-by-default filesystem view
-  is what would remove the asymmetry (#35).
+- The view a unit gets is fixed at its start: an `extra_path` added by
+  a later reload does not appear inside instances already running, and
+  the operator MUST be told to redeploy them. This is the same "engage
+  on the next deploy" rule the tier follows. *Amended 2026-08-31:* it
+  is no longer a **security** asymmetry. Under the previous
+  hidden-set model a secret declared after a unit started stayed
+  readable inside it; under the deny-by-default view that secret is
+  absent from every view, old units included, because nothing ever
+  bound it. What ages now is only what an operator asked to be let
+  IN, which fails safe.
 - The status endpoint MUST report the tier the running instance has
   (`"sandbox": "full" | "filesystem" | "none"`) — observability for
   operators and the assertion hook for smoke tests.
@@ -331,12 +374,16 @@ The supported operator rollout, which the product docs MUST describe:
    restart), so nothing changes yet.
 3. Let the sandbox engage on that app's **next deploy**, where a broken
    profile fails safe and surfaces the `extra_path` hint. Roll
-   app-by-app, watching `"sandboxed": true`.
+   app-by-app, watching `"sandbox"` in each app's status (the shipped
+   field is a tier string — `"full"`, `"filesystem"` or `"none"` — not
+   a boolean; a boolean cannot express the two tiers).
 4. Only after every app is proven, optionally tighten to `require`.
 
-Nothing here is destructive: releases, `shared/`, and `state.json` are
-bind-mounted at real paths (visibility is restricted, nothing is
-deleted or rewritten), hotserve itself is never sandboxed (certs and
+Nothing here is destructive: the release being started and `shared/`
+are bind-mounted at their real paths and everything else is simply
+absent from the unit's view — `state.json` included, which the
+supervisor still reads and writes as itself; nothing on disk is
+deleted or rewritten. hotserve itself is never sandboxed (certs and
 admin are untouched), and rollback is reinstalling the prior package
 and restarting. The failure mode this section exists to prevent is a
 **correlated, no-fallback availability outage at upgrade time**, not
@@ -344,9 +391,11 @@ data loss.
 
 ## Testing acceptance criteria
 
-- Unit: the unit-property builder's table tests (paths, masking,
-  extra_path ro/rw, real-path invariants) against the fake D-Bus
-  connection; fallback ladder with a fake manager version
+- Unit: the unit-property builder's table tests (the base view,
+  extra_path ro/rw, real-path invariants, and above all that the set
+  of bind destinations IS the view — nothing named that should not be)
+  against the fake D-Bus connection; fallback ladder with a fake
+  manager version
   (auto-degrade warns, require fails provision).
 - Integration: real systemd ≥ 256 in the dev-systemd container — the
   property set is read back from the transient unit, SIGTERM reaches
@@ -367,12 +416,15 @@ data loss.
   trap would otherwise ship silently), `$HOME` is writable, and the
   scrubbed env does NOT contain a seeded supervisor secret (e.g. a
   test ACME token).
-- install-test: smoke stage 2 asserts `"sandboxed": true` in the
+- install-test: smoke stage 2 asserts `"sandbox": "full"` in the
   status response on the systemd ≥ 256 cells (Debian 13, Ubuntu
   26.04) — this is where Ubuntu's AppArmor user-namespace policy is
   proven for `systemd --user` per-release, per-arch, under the real
-  unit — and `"sandboxed": false` with the WARN in the journal on the
-  older cells (Debian 12, Ubuntu 24.04).
+  unit — and `"sandbox": "filesystem"` with the WARN in the journal on
+  the older cells (Debian 12, Ubuntu 24.04). Both cells additionally
+  assert the view from inside the unit: hotserve's state, sockets and
+  a sibling's files absent, `/etc` only the base-view entries, and a
+  runnable OS present so "absent" cannot mean "empty unit".
 - soak: full churn with sandbox on; RSS/goroutine/fd deltas quantify
   the (expected ~zero) overhead as a measured claim.
 - Upgrade contract: a test proves that an app whose recorded running
@@ -382,15 +434,20 @@ data loss.
   relaunch" rule). This asserts the `state.json` sandbox-disposition
   field is honored on relaunch — the invariant that keeps an upgrade
   from being a fleet-wide no-fallback restart into sandboxes.
-- Negative test once during development: break the masking (expose
-  /etc/hotserve) and confirm the e2e isolation scenario fails.
-- Watch the install-test's journal greps (`permission denied`,
-  `read-only file system` in packaging/test/smoke.sh): sandboxed
-  runtimes legitimately probe paths that are now masked, and any
-  isolation assertion added to the smoke stage intentionally
-  *generates* denial lines — scope the greps to the stages they guard
-  so they keep catching real regressions without tripping on the
-  sandbox working as designed.
+- Negative test once during development: widen the view (add a bind
+  for /etc/hotserve) and confirm the e2e isolation scenario fails.
+  Under a deny-by-default view the mutation to make is *adding* a
+  name, not removing a mask.
+- Mind the failure *signature*: under a deny-by-default view a
+  runtime that probes a path nobody named gets **ENOENT** ("no such
+  file or directory"), not EACCES or EROFS. That is the opposite of
+  the masking model, where the path existed and the denial was a
+  permission error, and it is why a missing runtime surfaces as
+  `203/EXEC` rather than a permission complaint. Any journal grep in
+  packaging/test/smoke.sh that scans for denial strings must be scoped
+  to the stage it guards: sandboxed runtimes legitimately probe absent
+  paths at startup, and the isolation assertions intentionally
+  generate such lines.
 
 ## Non-goals (M8)
 
@@ -414,19 +471,27 @@ data loss.
 
 ## Open questions (with leans)
 
-- Exact ro system-path set: bind the conventional list (`/usr`,
+- ~~Exact ro system-path set: bind the conventional list (`/usr`,
   `/bin`, `/sbin`, `/lib*`, `/etc`) vs `--ro-bind / /` + masks. Lean:
   explicit allowlist — masking-the-world inverts the failure mode to
-  "quietly exposed".
+  "quietly exposed".~~ **DECIDED 2026-08-31 (#35): explicit allowlist**,
+  as the lean said, and for the reason it gave — the masking model did
+  fail exactly that way in review. `/etc` is named entry by entry
+  rather than bound whole, because binding it would reintroduce the
+  per-config hidden set for everything under it. See `sandboxBaseView`
+  and the behaviour spec above.
 - Global `sandbox require` default in the `liveswap` block (fleet
   policy vs per-app)? Lean: yes, per-app overrides a global default;
   cheap to add at config level.
-- Operator env_files outside `/etc/hotserve`: masked dir covers the
-  documented location only — and the docs currently disagree with
-  themselves (liveswap.go's example says `/etc/liveswap/blog.env`,
-  packaging/Caddyfile says `/etc/hotserve/myapp.env`). Lean: unify the
-  documentation on `/etc/hotserve`, mask both dirs, and WARN at
-  provision when an app's `env_file` path would be readable inside its
-  own sandbox view; do not chase arbitrary paths in M8.
+- ~~Operator env_files outside `/etc/hotserve`: masked dir covers the
+  documented location only…~~ **DISSOLVED 2026-08-31 (#35).** With a
+  deny-by-default view an `env_file` is absent from every unit
+  wherever it lives — there is no location to chase and no directory
+  to mask. The one place one can still land inside a view is the app's
+  own directories, which are the only host paths bound writable; that
+  is warned about at config load (`warnEnvFileInView`), because under
+  `shared/` an app can rewrite the file and so choose the environment
+  of its own next launch. An app's own environment being reachable is
+  a stated non-goal to defend against.
 - Landlock as a same-config fallback backend where userns is
   unavailable: keep the config surface compatible, defer the backend.

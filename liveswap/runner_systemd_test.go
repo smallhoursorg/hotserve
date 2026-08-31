@@ -970,7 +970,10 @@ func TestSystemdRunnerWatcherFollowsMainPID(t *testing.T) {
 func TestSystemdRunnerStartSettlesMainPIDForFullTier(t *testing.T) {
 	r, conn := newTestSystemdRunner(t)
 	spec := testApp(t)
-	spec.sandbox = &sandboxSpec{tier: sandboxFull, root: "/var/lib/liveswap"}
+	// A realistic spec: the release dir is always a writable bind, which
+	// is also what puts the command inside the unit's view.
+	spec.sandbox = &sandboxSpec{tier: sandboxFull, root: "/var/lib/liveswap",
+		writable: []bindPath{{dest: spec.dir, source: spec.dir}}}
 	// The fake presets MainPID 4242 at start; flip it to 4243 shortly
 	// after, like the manager does once the namespace is set up.
 	go func() {

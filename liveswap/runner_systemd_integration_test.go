@@ -438,12 +438,11 @@ func sandboxRoot(t *testing.T) (root, release, shared string) {
 // reached a consistent verdict rather than a specific one.
 func TestIntegrationSystemdSandboxProbe(t *testing.T) {
 	r := integrationRunner(t)
-	root, _, _ := sandboxRoot(t)
 	version := userManager.ManagerVersion()
 	if version == 0 {
 		t.Fatal("manager version not read")
 	}
-	got := probeSandboxCapability(r, version, root, sandboxHiddenFloor)
+	got := probeSandboxCapability(r, version)
 	t.Logf("systemd %d: tier=%s reason=%q", version, got.tier, got.reason)
 	switch {
 	case version >= 256 && got.tier != sandboxFull:
@@ -468,8 +467,21 @@ cat /proc/$MGR/environ >/dev/null 2>&1 && echo "mgr_environ=open" >> "$out" || e
 [ -e "$ROOT/itest/tmp" ] && echo "apptmp=open" >> "$out" || echo "apptmp=closed" >> "$out"
 touch "$ROOT/itest/releases/v1/w" 2>/dev/null && echo "release=writable" >> "$out" || echo "release=readonly" >> "$out"
 touch "$ROOT/newfile" 2>/dev/null && echo "root=writable" >> "$out" || echo "root=readonly" >> "$out"
-[ -r /var/lib/hotserve ] && echo "hotserve_lib=open" >> "$out" || echo "hotserve_lib=closed" >> "$out"
-[ -r /run/user/$(id -u)/systemd/private ] && echo "mgr_socket=open" >> "$out" || echo "mgr_socket=closed" >> "$out"
+# Absence, not unreadability: under a deny-by-default view an unnamed
+# path does not exist inside the unit, which is a stronger statement
+# than the InaccessiblePaths= node this used to test for readability.
+[ -e /var/lib/hotserve ] && echo "hotserve_lib=open" >> "$out" || echo "hotserve_lib=closed" >> "$out"
+[ -e /run/user/$(id -u)/systemd/private ] && echo "mgr_socket=open" >> "$out" || echo "mgr_socket=closed" >> "$out"
+for d in /var/lib /etc/hotserve /etc/liveswap /run/hotserve /opt /srv /home /root /mnt; do
+  k=$(echo "$d" | tr -d /); [ -e "$d" ] && echo "abs_$k=present" >> "$out" || echo "abs_$k=absent" >> "$out"
+done
+echo "etc_listing=$(ls /etc | tr '\n' ' ')" >> "$out"
+# And the base view must actually carry a runnable OS, or "absent"
+# would only mean the unit has nothing at all.
+[ -x /bin/sh ] && echo "binsh=ok" >> "$out" || echo "binsh=MISSING" >> "$out"
+[ -x /usr/bin/env ] && echo "usrbinenv=ok" >> "$out" || echo "usrbinenv=MISSING" >> "$out"
+[ -e /etc/ssl ] && echo "etcssl=ok" >> "$out" || echo "etcssl=MISSING" >> "$out"
+[ -r /etc/resolv.conf ] && echo "resolvconf=ok" >> "$out" || echo "resolvconf=MISSING" >> "$out"
 cg=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup); (echo max > "$cg/memory.max") 2>/dev/null && echo "cgroup=writable" >> "$out" || echo "cgroup=readonly" >> "$out"
 touch /tmp/w 2>/dev/null && echo "tmp=writable" >> "$out" || echo "tmp=readonly" >> "$out"
 echo "home=$HOME" >> "$out"
@@ -500,10 +512,11 @@ func readProbe(t *testing.T, shared string) map[string]string {
 
 // TestIntegrationSystemdSandboxedUnit starts a unit with the full
 // sandbox and reads the view from inside: the namespaces are in
-// effect, the root shows only the app's own dirs, hidden paths and
-// the manager's /proc are closed, cgroupfs is read-only, /tmp is
-// private and writable, HOME is the shared dir. Then the unit is
-// stopped through the runner like any other.
+// effect, the root shows only the app's own dirs, everything nothing
+// named is absent (not merely unreadable), the manager's /proc is
+// closed, cgroupfs is read-only, /tmp is private and writable, HOME is
+// the shared dir. Then the unit is stopped through the runner like any
+// other.
 func TestIntegrationSystemdSandboxedUnit(t *testing.T) {
 	r := integrationRunner(t)
 	if userManager.ManagerVersion() < 256 {
@@ -524,9 +537,8 @@ func TestIntegrationSystemdSandboxedUnit(t *testing.T) {
 		dir:     release,
 		env:     []string{"PATH=" + os.Getenv("PATH"), "HOME=" + shared},
 		grace:   2 * time.Second,
-		sandbox: &sandboxSpec{tier: sandboxFull, root: root, appDir: filepath.Join(root, "itest"),
-			writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}},
-			hidden:   sandboxHiddenFloor},
+		sandbox: &sandboxSpec{tier: sandboxFull, root: root, appDir: filepath.Join(root, "itest"), appName: "itest",
+			writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}}},
 	}
 	h, err := r.Start(spec)
 	if err != nil {
@@ -538,11 +550,31 @@ func TestIntegrationSystemdSandboxedUnit(t *testing.T) {
 	for k, want := range map[string]string{
 		"pid": "1", "mgr_root": "closed", "mgr_environ": "closed",
 		"sibling": "closed", "state": "closed", "apptmp": "closed",
-		"release": "writable", "root": "readonly", "hotserve_lib": "closed", "mgr_socket": "closed",
+		"release": "writable", "hotserve_lib": "closed", "mgr_socket": "closed",
 		"cgroup": "readonly", "tmp": "writable", "home": shared, "xdg_runtime": "unset",
+		// The base view: an OS the app can actually run on. Without
+		// these, "absent" below would only mean the unit is empty.
+		"binsh": "ok", "usrbinenv": "ok", "etcssl": "ok", "resolvconf": "ok",
 	} {
 		if got[k] != want {
 			t.Errorf("%s = %q, want %q", k, got[k], want)
+		}
+	}
+	// Deny-by-default: not one of these is bound, so not one of them
+	// exists — no InaccessiblePaths= entry, and no list to keep current.
+	for _, k := range []string{
+		"abs_varlib", "abs_etchotserve", "abs_etcliveswap", "abs_runhotserve",
+		"abs_opt", "abs_srv", "abs_home", "abs_root", "abs_mnt",
+	} {
+		if got[k] != "absent" {
+			t.Errorf("%s = %q, want absent", k, got[k])
+		}
+	}
+	// /etc is named entry by entry, never bound whole: an app that could
+	// list all of /etc would see every other app's env_file.
+	for _, unwanted := range []string{"hotserve", "liveswap", "shadow", "sudoers"} {
+		if strings.Contains(" "+got["etc_listing"], " "+unwanted+" ") {
+			t.Errorf("/etc inside the unit contains %s: %q", unwanted, got["etc_listing"])
 		}
 	}
 	if got["uidmap"] == "4294967295" {
@@ -552,10 +584,16 @@ func TestIntegrationSystemdSandboxedUnit(t *testing.T) {
 		t.Errorf("nprocs = %q, want a handful (own PID namespace)", got["nprocs"])
 	}
 	unit := h.state().Unit
-	props := run(t, "systemctl", "--user", "show", unit, "-p", "PrivatePIDs,PrivateUsers,ProtectSystem,ProtectControlGroups,TemporaryFileSystem,BindPaths")
-	for _, want := range []string{"PrivatePIDs=yes", "PrivateUsers=yes", "ProtectSystem=strict", "ProtectControlGroups=yes", "TemporaryFileSystem=" + root + ":ro"} {
+	props := run(t, "systemctl", "--user", "show", unit, "-p", "PrivatePIDs,PrivateUsers,ProtectSystem,ProtectControlGroups,TemporaryFileSystem,BindPaths,BindReadOnlyPaths,InaccessiblePaths")
+	for _, want := range []string{"PrivatePIDs=yes", "PrivateUsers=yes", "ProtectControlGroups=yes", "TemporaryFileSystem=/:ro"} {
 		if !strings.Contains(props, want) {
 			t.Errorf("unit lacks %s:\n%s", want, props)
+		}
+	}
+	// The retired half of the old model, read back off the live unit.
+	for _, gone := range []string{"ProtectSystem=strict", "InaccessiblePaths=/"} {
+		if strings.Contains(props, gone) {
+			t.Errorf("unit still carries %s: the view names what exists, it does not mask a list\n%s", gone, props)
 		}
 	}
 	if h.state().Sandbox != "full" {
@@ -601,9 +639,8 @@ func TestIntegrationSystemdSIGTERMReachesNamespaceInit(t *testing.T) {
 	spec := startSpec{
 		app: "itest", version: "sigterm", command: []string{"./server"}, dir: release,
 		env: []string{"PATH=" + os.Getenv("PATH")}, grace: 10 * time.Second,
-		sandbox: &sandboxSpec{tier: sandboxFull, root: root, appDir: filepath.Join(root, "itest"),
-			writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}},
-			hidden:   sandboxHiddenFloor},
+		sandbox: &sandboxSpec{tier: sandboxFull, root: root, appDir: filepath.Join(root, "itest"), appName: "itest",
+			writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}}},
 	}
 	h, err := r.Start(spec)
 	if err != nil {

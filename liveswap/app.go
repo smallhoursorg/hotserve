@@ -95,7 +95,6 @@ type appSpec struct {
 	dirs            appDirs
 	sandboxMode     string      // auto | require | off (policy, from config)
 	extraPaths      []extraPath // host paths exposed inside the sandbox
-	sandboxHidden   []string    // paths no app may see (App.hiddenPaths)
 	// sandboxTier is the tier new instances of this app get: policy
 	// resolved against the host at App.Start. Relaunches ignore it and
 	// reproduce the recorded tier of the instance they replace.
@@ -1065,9 +1064,11 @@ func inheritedEnv() []string {
 // highest: the allowlisted slice of Caddy's environment (PATH, HOME —
 // needed by node etc.), env_file, inline env, then the injected
 // PORT/HOST contract. Sandboxed, the inherited HOME (hotserve's own
-// state dir, hidden from the app) is replaced by the shared dir — the
-// one writable, persistent place in the view — before env_file and
-// env, so an operator can still point it elsewhere.
+// state dir, which does not exist inside the unit at all) is replaced
+// by the shared dir — the one writable, persistent place in the view.
+// Not a nicety: every runtime that touches $HOME would ENOENT, which
+// is the shape a deny-by-default view fails in. Applied before
+// env_file and env, so an operator can still point it elsewhere.
 func buildEnv(spec *appSpec, version string, port int, releaseDir string, sandboxed bool) ([]string, error) {
 	env := inheritedEnv()
 	if sandboxed {
