@@ -141,7 +141,12 @@ Caddy's environment (`PATH`, `HOME`, `LANG`, `TZ`, `LC_*` — nothing
 else, so supervisor credentials like ACME DNS tokens never reach
 apps) → `env_file` → inline `env` → injected `PORT` and
 `HOST=127.0.0.1`, all layered on the systemd user manager's own
-defaults (`XDG_RUNTIME_DIR`, `INVOCATION_ID`, …). Keys must be valid
+defaults (`XDG_RUNTIME_DIR`, `INVOCATION_ID`, …). Two of those
+defaults are **reserved** in a sandboxed unit and cannot be set by
+`env` or `env_file`: `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`
+are unset after everything else, because they name the user manager's
+own runtime directory and bus — the sockets a sandboxed app must not
+hold. Setting either has no effect rather than an error. Keys must be valid
 variable names (`[A-Za-z_][A-Za-z0-9_]*`) — systemd rejects anything
 else, so config load does too. Anything more an app needs must be
 passed explicitly via `env` or `env_file`. Apps get the user manager's
@@ -494,7 +499,7 @@ app example {
         --allow-write={shared_dir} \
         --allow-env=DATABASE_URL \
         main.ts
-    env DENO_DIR {shared_dir}/.deno
+    env DENO_DIR {release_dir}/.deno
     env DATABASE_URL {shared_dir}/app.db
     health_path /health
 }
@@ -517,9 +522,14 @@ app example {
   variables liveswap injected. Name only what the app actually needs.
 - Remote imports are governed by `--allow-import`, **not**
   `--allow-net`. Leave it off and add `--cached-only` so the serving
-  process can never fetch a module: vendor dependencies at build time
-  and ship the populated `DENO_DIR` in the tarball, or warm it in
-  `pre_start`.
+  process can never fetch a module. Vendor dependencies at build time
+  and ship the populated cache **inside the tarball**, with `DENO_DIR`
+  pointing into the release dir as above — the tarball is extracted
+  there, so a cache shipped in it is the one Deno reads. Pointing
+  `DENO_DIR` at `{shared_dir}` instead means the shipped cache is never
+  consulted and a first `--cached-only` start fails; if you want the
+  cache to survive deploys, warm it into `{shared_dir}` from
+  `pre_start` and point `DENO_DIR` there.
 
 **No `extra_path` is needed for the runtime.** The sandbox base view
 binds `/usr`, so a normal `/usr/local/bin/deno` (or an apt-installed

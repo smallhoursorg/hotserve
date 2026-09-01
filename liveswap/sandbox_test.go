@@ -1034,6 +1034,31 @@ func TestWarnEnvFileInView(t *testing.T) {
 	// A nil logger is the pre-Provision case (Validate called directly
 	// by a test or by `caddy validate`); it must not panic.
 	warnEnvFileInView(nil, map[string]*appSpec{"demo": spec})
+
+	// A symlink must not walk past the warning. An env_file that only
+	// reaches shared/ through a link is exactly as rewritable by the
+	// app, and a warning a symlink defeats is worse than none: it reads
+	// as "checked, and fine".
+	t.Run("through a symlink into shared", func(t *testing.T) {
+		outside, err := os.MkdirTemp("/var", "envlink-")
+		if err != nil {
+			t.Skipf("no writable dir outside the refused prefixes: %v", err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(outside) })
+		must(t, os.MkdirAll(spec.dirs.shared, 0o750))
+		target := filepath.Join(spec.dirs.shared, "demo.env")
+		must(t, os.WriteFile(target, []byte("A=1\n"), 0o600))
+		link := filepath.Join(outside, "demo.env")
+		must(t, os.Symlink(target, link))
+
+		core, logs := observer.New(zap.WarnLevel)
+		s := *spec
+		s.envFile, s.sandboxMode = link, sandboxAuto
+		warnEnvFileInView(zap.New(core), map[string]*appSpec{"demo": &s})
+		if logs.Len() != 1 {
+			t.Fatalf("an env_file linked into shared/ must warn: %v", logs.All())
+		}
+	})
 }
 
 // TestValidateRejectsUncleanRoot: every containment check is lexical,

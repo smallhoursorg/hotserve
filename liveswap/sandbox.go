@@ -873,33 +873,33 @@ func warnEnvFileInView(logger *zap.Logger, specs map[string]*appSpec) {
 	if logger == nil {
 		return
 	}
-	abs := func(p string) string {
-		if p == "" {
-			return ""
-		}
-		if !filepath.IsAbs(p) {
-			a, err := filepath.Abs(p)
-			if err != nil {
-				return ""
-			}
-			p = a
-		}
-		return filepath.Clean(p)
-	}
 	for name, spec := range specs {
 		if spec.envFile == "" || spec.sandboxMode == sandboxOff {
 			continue
 		}
-		f := abs(spec.envFile)
-		if f == "" {
-			continue
+		// Both spellings of both sides, as validateEnvFileIsolation
+		// does: comparing lexically alone misses an env_file that is a
+		// link into the app's own shared dir, and misses the canonical
+		// spelling of one under a symlinked liveswap root. A warning
+		// that a symlink walks past is worse than none — it reads as
+		// "checked, and fine".
+		within := func(dir string) bool {
+			for _, f := range absAndCanonical(spec.envFile) {
+				for _, d := range absAndCanonical(dir) {
+					if pathWithin(f, d) {
+						return true
+					}
+				}
+			}
+			return false
 		}
+		f := spec.envFile
 		switch {
-		case pathWithin(f, spec.dirs.shared):
+		case within(spec.dirs.shared):
 			logger.Warn("env_file is inside the app's shared dir, which the app can read and rewrite inside its sandbox",
 				zap.String("app", name), zap.String("env_file", f),
 				zap.String("fix", "move it outside the liveswap root (the documented location is /etc/hotserve), where no app can see it"))
-		case pathWithin(f, spec.dirs.releases):
+		case within(spec.dirs.releases):
 			logger.Warn("env_file is inside the app's release dir, so the app can read the file as well as receive its variables",
 				zap.String("app", name), zap.String("env_file", f),
 				zap.String("fix", "move it outside the liveswap root (the documented location is /etc/hotserve), where no app can see it"))
