@@ -40,8 +40,11 @@ func TestSandboxTierRoundTrip(t *testing.T) {
 
 func TestResolveSandboxTier(t *testing.T) {
 	full := sandboxCapability{tier: sandboxFull}
-	fs := sandboxCapability{tier: sandboxFilesystem, reason: "full tier: the user manager is systemd 255, PrivatePIDs= needs 256"}
-	none := sandboxCapability{tier: sandboxNone, reason: "filesystem tier: unit failed"}
+	// The two capabilities the probe can actually report. `filesystem`
+	// survives only as a value state.json may already hold (see
+	// validSandboxTierRecord); it is never a probe result, so driving
+	// the policy with it would test a path no host can reach.
+	none := sandboxCapability{tier: sandboxNone, reason: "full tier: unit failed: Failed to set up user namespacing: Permission denied"}
 	cases := []struct {
 		name     string
 		mode     string
@@ -51,10 +54,8 @@ func TestResolveSandboxTier(t *testing.T) {
 		wantErr  bool
 	}{
 		{"auto full", sandboxAuto, full, sandboxFull, false, false},
-		{"auto filesystem warns", sandboxAuto, fs, sandboxFilesystem, true, false},
 		{"auto none warns", sandboxAuto, none, sandboxNone, true, false},
 		{"require full", sandboxRequire, full, sandboxFull, false, false},
-		{"require refuses filesystem", sandboxRequire, fs, sandboxNone, false, true},
 		{"require refuses none", sandboxRequire, none, sandboxNone, false, true},
 		{"off ignores capability", sandboxOff, full, sandboxNone, false, false},
 	}
@@ -273,15 +274,25 @@ func TestSandboxPropertiesFilesystemAndFull(t *testing.T) {
 		return m
 	}
 	rw := binds("BindPaths")
-	for _, p := range []string{"/var/lib/liveswap/blog/releases/v3", "/var/lib/liveswap/blog/shared", "/var/cache/blog"} {
+	// The app's OWN directories are mandatory: a release or shared dir
+	// that is not there is a broken deploy, not a boot-order race, and
+	// starting without it would give the app an empty tmpfs where its
+	// code and data should be.
+	for _, p := range []string{"/var/lib/liveswap/blog/releases/v3", "/var/lib/liveswap/blog/shared"} {
 		b, ok := rw[p]
 		if !ok || b.Source != p || b.Flags != mountRecursive || b.IgnoreENOENT {
 			t.Errorf("BindPaths lacks a recursive, mandatory bind of %s at its real path: %+v", p, rw)
 		}
 	}
+	// An extra_path is optional, rw or not: config load accepts one
+	// that does not exist yet, so the launch must not contradict it.
+	// The runner warns instead (resolveBindSources records it).
+	if b, ok := rw["/var/cache/blog"]; !ok || b.Source != "/var/cache/blog" || b.Flags != mountRecursive || !b.IgnoreENOENT {
+		t.Errorf("rw extra_path must be a recursive OPTIONAL bind at its real path: %+v", rw)
+	}
 	ro := binds("BindReadOnlyPaths")
-	// The base view: every entry present, and every one optional — the
-	// list spans four distros and none of them has all of it.
+	// The base view: every entry present, and every one optional — no
+	// host has all of it (see sandboxBaseView).
 	for _, p := range sandboxBaseView {
 		b, ok := ro[p]
 		if !ok {
@@ -304,8 +315,8 @@ func TestSandboxPropertiesFilesystemAndFull(t *testing.T) {
 	if _, whole := ro["/etc"]; whole {
 		t.Error("/etc is bound wholesale: every app would see every other app's env_file")
 	}
-	if b, ok := ro["/run/postgresql"]; !ok || b.Source != "/run/postgresql" || b.IgnoreENOENT {
-		t.Errorf("ro extra_path missing or optional: %+v", ro)
+	if b, ok := ro["/run/postgresql"]; !ok || b.Source != "/run/postgresql" || !b.IgnoreENOENT {
+		t.Errorf("ro extra_path missing, or mandatory when it should be optional: %+v", ro)
 	}
 	if _, leaked := rw["/run/postgresql"]; leaked {
 		t.Error("a read-only extra_path must not be in BindPaths")
@@ -435,6 +446,83 @@ func TestSandboxSpecFor(t *testing.T) {
 	}
 }
 
+// An extra_path that does not exist at launch is tolerated — it is
+// bound with IgnoreENOENT so a boot-order race (the documented
+// /run/postgresql recipe: postgres creates the directory from its own
+// unit) starts the app instead of failing its unit. Tolerated is not
+// silent: resolveBindSources records it so the runner can warn, and a
+// recorded-but-never-reported absence would be exactly the quiet
+// degradation this design refuses.
+func TestAbsentExtraPathIsToleratedAndRecorded(t *testing.T) {
+	root := t.TempDir()
+	appDir := filepath.Join(root, "blog")
+	release := filepath.Join(appDir, "releases", "v1")
+	shared := filepath.Join(appDir, "shared")
+	present := filepath.Join(root, "..", "present-extra")
+	present, err := filepath.Abs(present)
+	must(t, err)
+	for _, d := range []string{release, shared, present} {
+		must(t, os.MkdirAll(d, 0o750))
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(present) })
+	absent := filepath.Join(present, "never-created")
+
+	newSpec := func(extras ...extraPath) *sandboxSpec {
+		return &sandboxSpec{
+			tier: sandboxFull, root: root, appDir: appDir, appName: "blog",
+			writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}},
+			extra:    extras,
+		}
+	}
+
+	// Present only: nothing to report.
+	s := newSpec(extraPath{path: present})
+	must(t, s.resolveBindSources())
+	if len(s.absentExtra) != 0 {
+		t.Fatalf("an extra_path that exists must not be reported absent: %v", s.absentExtra)
+	}
+
+	// Absent: the launch still succeeds, and the path is named.
+	s = newSpec(extraPath{path: present}, extraPath{path: absent, rw: true})
+	if err := s.resolveBindSources(); err != nil {
+		t.Fatalf("an absent extra_path must not fail the launch: %v", err)
+	}
+	if !reflect.DeepEqual(s.absentExtra, []string{absent}) {
+		t.Fatalf("absentExtra = %v, want exactly [%s]", s.absentExtra, absent)
+	}
+
+	// And the rendered unit marks every extra optional, so systemd does
+	// not fail the unit on the missing mount the warning describes.
+	byDest := map[string]bindMount{}
+	for _, name := range []string{"BindPaths", "BindReadOnlyPaths"} {
+		for _, prop := range sandboxProperties(s) {
+			if prop.Name != name {
+				continue
+			}
+			mounts, ok := prop.Value.Value().([]bindMount)
+			if !ok {
+				t.Fatalf("%s is not a []bindMount", name)
+			}
+			for _, m := range mounts {
+				byDest[m.Destination] = m
+			}
+		}
+	}
+	for _, e := range []string{present, absent} {
+		b, ok := byDest[e]
+		if !ok {
+			t.Fatalf("extra_path %s is not in the rendered view: %v", e, byDest)
+		}
+		if !b.IgnoreENOENT {
+			t.Errorf("extra_path %s is a mandatory bind: a missing one would fail the whole unit", e)
+		}
+	}
+	// The app's own directories keep the opposite rule.
+	if b, ok := byDest[release]; !ok || b.IgnoreENOENT {
+		t.Errorf("the release bind must stay mandatory: %+v", b)
+	}
+}
+
 func TestSandboxProbeCommand(t *testing.T) {
 	fs := sandboxProbeCommand(sandboxFilesystem)
 	full := sandboxProbeCommand(sandboxFull)
@@ -475,28 +563,32 @@ func TestProbeSandboxCapability(t *testing.T) {
 	denied := errors.New("unit failed: Failed to set up user namespacing: Permission denied")
 	cases := []struct {
 		name      string
-		version   int
 		fail      map[sandboxTier]error
 		wantTier  sandboxTier
-		wantTried []sandboxTier
 		wantWords []string
 	}{
-		{"257 full", 257, nil, sandboxFull, []sandboxTier{sandboxFull}, nil},
-		{"257 kernel ignores PID ns", 257, map[sandboxTier]error{sandboxFull: errors.New("exit status 1")}, sandboxFilesystem, []sandboxTier{sandboxFull, sandboxFilesystem}, []string{"full tier", "exit status 1"}},
-		{"255 filesystem", 255, nil, sandboxFilesystem, []sandboxTier{sandboxFilesystem}, []string{"systemd 255", "256"}},
-		{"252 filesystem", 252, nil, sandboxFilesystem, []sandboxTier{sandboxFilesystem}, []string{"systemd 252"}},
-		{"unknown version never tries PrivatePIDs", 0, nil, sandboxFilesystem, []sandboxTier{sandboxFilesystem}, nil},
-		{"userns denied", 257, map[sandboxTier]error{sandboxFull: denied, sandboxFilesystem: denied}, sandboxNone, []sandboxTier{sandboxFull, sandboxFilesystem}, []string{"Permission denied", "filesystem tier"}},
+		{"host delivers it", nil, sandboxFull, nil},
+		// A manager that accepts the properties but a kernel that
+		// silently ignores PrivatePIDs=: the probe exits non-zero
+		// because the process is not pid 1. There is no lower tier to
+		// fall to, so this is `none` — the operator must see the reason.
+		{"kernel ignores the PID namespace", map[sandboxTier]error{sandboxFull: errors.New("exit status 1")}, sandboxNone, []string{"full tier", "exit status 1", "Debian 13"}},
+		// A container, an LXC VPS, or a kernel built without user
+		// namespaces: the manager refuses the unit outright.
+		{"userns denied", map[sandboxTier]error{sandboxFull: denied}, sandboxNone, []string{"Permission denied", "Debian 13"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &probeRunner{fakeRunner: &fakeRunner{}, fail: tc.fail}
-			got := probeSandboxCapability(r, tc.version)
+			got := probeSandboxCapability(r)
 			if got.tier != tc.wantTier {
 				t.Fatalf("tier = %v (%s), want %v", got.tier, got.reason, tc.wantTier)
 			}
-			if !reflect.DeepEqual(r.tried, tc.wantTried) {
-				t.Fatalf("tried %v, want %v", r.tried, tc.wantTried)
+			// One supported tier means exactly one candidate: a probe
+			// that tried the retired filesystem tier would be reporting
+			// a capability nothing can be launched with.
+			if !reflect.DeepEqual(r.tried, []sandboxTier{sandboxFull}) {
+				t.Fatalf("tried %v, want exactly [full]", r.tried)
 			}
 			for _, w := range tc.wantWords {
 				if !strings.Contains(got.reason, w) {
@@ -703,9 +795,10 @@ func TestValidateSandboxConfig(t *testing.T) {
 	}
 }
 
-// TestStartResolvesSandboxPolicy drives App.Start with a scripted host:
-// require on a filesystem-only host refuses to start; auto starts and
-// warns; off never probes.
+// TestStartResolvesSandboxPolicy drives App.Start with a scripted host
+// that cannot deliver the sandbox — a container, or a kernel that
+// refuses user namespaces: require refuses to start and names the
+// reason; auto starts unsandboxed and warns; off never probes.
 func TestStartResolvesSandboxPolicy(t *testing.T) {
 	origProbe, origManager := probeSandbox, probeUserManager
 	t.Cleanup(func() { probeSandbox, probeUserManager = origProbe, origManager })
@@ -713,7 +806,7 @@ func TestStartResolvesSandboxPolicy(t *testing.T) {
 	probes := 0
 	probeSandbox = func(*zap.Logger) sandboxCapability {
 		probes++
-		return sandboxCapability{tier: sandboxFilesystem, reason: "full tier: the user manager is systemd 255, PrivatePIDs= needs 256"}
+		return sandboxCapability{tier: sandboxNone, reason: "full tier: unit failed: Failed to set up user namespacing: Permission denied"}
 	}
 	newApp := func(mode string) *App {
 		spec := testSpec(t)
@@ -727,14 +820,14 @@ func TestStartResolvesSandboxPolicy(t *testing.T) {
 		}
 	}
 	a := newApp(sandboxRequire)
-	if err := a.Start(); err == nil || !strings.Contains(err.Error(), "systemd 255") {
-		t.Fatalf("require on a filesystem-only host must refuse with the reason, got %v", err)
+	if err := a.Start(); err == nil || !strings.Contains(err.Error(), "Permission denied") {
+		t.Fatalf("require on a host without the sandbox must refuse with the reason, got %v", err)
 	}
 	a = newApp(sandboxAuto)
 	if err := a.Start(); err != nil {
 		t.Fatalf("auto must start: %v", err)
 	}
-	if a.specs["demo"].sandboxTier != sandboxFilesystem {
+	if a.specs["demo"].sandboxTier != sandboxNone {
 		t.Fatalf("auto tier = %v", a.specs["demo"].sandboxTier)
 	}
 	_ = a.Cleanup()

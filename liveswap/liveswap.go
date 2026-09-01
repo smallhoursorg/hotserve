@@ -667,7 +667,7 @@ func (a *App) sandboxWanted() bool {
 var probeSandbox = func(logger *zap.Logger) sandboxCapability {
 	r := newSystemdRunner(userManager, logger)
 	defer r.cancel()
-	return probeSandboxCapability(r, userManager.ManagerVersion())
+	return probeSandboxCapability(r)
 }
 
 // Stop intentionally does NOT stop app processes: on a config reload

@@ -186,8 +186,8 @@ resolved at config load.
 | `watchdog_window` | `10m` | Sliding window for the restart budget |
 | `keep` | `5` | Release dirs retained (GC after success). The running version is always kept, so this can be `keep+1` after rolling back to an old release |
 | `max_artifact_size` | `100MB` | Download cap; decompressed cap is 10× |
-| `sandbox` | `auto` | Per-unit sandbox policy: `auto` (best tier the host delivers, warning when it is not `full`), `require` (`full` or refuse to start — see the hazard under [Sandbox](#sandbox)), `off`. Global default, per-app override |
-| `extra_path <path> [rw]` | — | Host path the sandboxed app may see besides its own dirs; read-only unless `rw`. Repeatable. The recipe for a same-box database socket dir (`/run/postgresql`) |
+| `sandbox` | `auto` | Per-unit sandbox policy: `auto` (sandbox where the host delivers it, warning at every launch where it does not), `require` (sandbox or refuse to start — see the hazard under [Sandbox](#sandbox)), `off`. Global default, per-app override |
+| `extra_path <path> [rw]` | — | Host path the sandboxed app may see besides its own dirs; read-only unless `rw`. Repeatable. The recipe for a same-box database socket dir (`/run/postgresql`). Need not exist yet — see below |
 
 ## Watchdog
 
@@ -241,17 +241,25 @@ point `health_path` at the final path.
 
 ## Sandbox
 
-Every instance runs inside systemd's own per-unit sandbox, in one of
-two tiers depending on the host's systemd:
+Every instance runs inside systemd's own per-unit sandbox. There is
+one tier, `full`, and a host either delivers it or gets nothing:
 
-| | `filesystem` (systemd 252–255: Debian 12, Ubuntu 24.04) | `full` (systemd ≥ 256: Debian 13, Ubuntu 26.04) |
-|---|---|---|
-| User namespace (`PrivateUsers=`) | ● | ● |
-| PID namespace (`PrivatePIDs=`) | — | ● |
-| Deny-by-default filesystem: the whole host filesystem replaced by an empty read-only tmpfs, only named paths bound back | ● | ● |
-| hotserve's keys and sockets, other apps, and every path nothing named — **absent**, not merely unreadable | ● | ● |
-| Private `/tmp`, minimal `/dev`, read-only cgroupfs, no capabilities, `@system-service` syscall filter, `AF_INET`/`AF_INET6`/`AF_UNIX`/`AF_NETLINK` only, no nested namespaces | ● | ● |
-| Supervisor, user manager and siblings **invisible and unsignalable** | — (they stay visible and can be signalled: a DoS residual, not data access) | ● |
+| `full` — what every sandboxed unit gets |
+|---|
+| User namespace (`PrivateUsers=`) |
+| PID namespace (`PrivatePIDs=`) — supervisor, user manager and siblings **invisible and unsignalable** |
+| Deny-by-default filesystem: the whole host filesystem replaced by an empty read-only tmpfs, only named paths bound back |
+| hotserve's keys and sockets, other apps, and every path nothing named — **absent**, not merely unreadable |
+| Private `/tmp`, minimal `/dev`, read-only cgroupfs, no capabilities, `@system-service` syscall filter, `AF_INET`/`AF_INET6`/`AF_UNIX`/`AF_NETLINK` only, no nested namespaces |
+
+`PrivatePIDs=` needs systemd 256; Debian 13 — the supported host —
+ships 257. Where the namespaces cannot be had at all (a container, an
+LXC VPS, a kernel built without user namespaces, an LSM that refuses
+them) the status endpoint reports `"sandbox": "none"` and every launch
+warns. It is deliberately not a ladder: a weaker sandbox wearing the
+same name is the "looks configured, quietly weaker" failure this
+design refuses. Use `sandbox require` to turn that into a refusal to
+start.
 
 **An app sees its release dir, its `shared/`, a private `/tmp`, the OS
 runtime, and whatever `extra_path` names. Nothing else on the host
@@ -282,12 +290,14 @@ The working directory is the release dir and `HOME` is `shared/`; both
 are writable. The network namespace is shared by design — the app
 binds `127.0.0.1:$PORT` as before, and sibling ports remain reachable.
 
-Both tiers close the routes the threat model ranks first: reading the
+This closes the routes the threat model ranks first: reading the
 supervisor's environment or walking the host through
-`/proc/<pid>/root` (the user namespace is what closes them — the
+`/proc/<pid>/root` (the **user** namespace is what closes them — the
 kernel refuses `ptrace`-class access across user namespaces even for
 the same uid), the admin socket, the TLS keys, sibling files. The
-`full` tier additionally removes process visibility and signals.
+**PID** namespace adds the rest: process visibility and signals. Worth
+keeping straight, because it is why a host that delivers neither gets
+`none` rather than something in between.
 
 **What this costs you.** An app that reads something under `/opt`,
 `/srv` or `/var/lib`, or whose runtime lives outside `/usr` (a
@@ -314,23 +324,11 @@ gate while the old one keeps serving) — never on a supervisor
 restart, a boot recovery or a watchdog restart: those reproduce the
 tier the instance was recorded with, so upgrading hotserve does not
 turn into a fleet-wide, no-fallback restart into sandboxes. The
-supported rollout: upgrade; **on Ubuntu, reboot (or restart
-`user@<uid>.service`) before going further** — see below; confirm apps
-healthy; declare each app's `extra_path` needs; deploy each app and
-watch `"sandbox"` in its status; only then, optionally,
-`sandbox require`.
-
-**Ubuntu, on an upgrade of an existing install:** the sandbox needs
-unprivileged user namespaces, which Ubuntu 24.04+ restricts unless the
-process is under an AppArmor profile that grants `userns`. The package
-ships that profile attached to the user-manager wrapper by path — but
-the manager already running was started before the wrapper existed,
-and path-attached AppArmor policy is not applied retroactively;
-postinstall deliberately does not restart it, because that would kill
-every running app. Until both the user manager and hotserve restart
-(a reboot does both), the probe records `none` and every deploy stays
-bare, whatever the config says. `journalctl -t hotserve-sandbox-probe`
-shows the probe's verdict.
+supported rollout: upgrade; confirm apps healthy; declare each app's
+`extra_path` needs; deploy each app and watch `"sandbox"` in its
+status; only then, optionally, `sandbox require`.
+`journalctl -t hotserve-sandbox-probe` shows the probe's verdict on
+this host.
 
 **What a running instance's sandbox is fixed to.** A unit's view is
 built when it starts and is never rebuilt under it — reloads
@@ -380,6 +378,17 @@ app blog {
 }
 ```
 
+**An `extra_path` that does not exist yet is allowed, at load *and* at
+launch.** `/run/postgresql` is created by postgres' own unit, so on a
+reboot hotserve can recover an app before the directory is there.
+Failing the unit on that race would kill an app that only needed to
+retry its connection, so the bind is optional and the app starts
+without it — with a WARN naming the path, so a permanent typo does not
+pass as a temporary race. The app's **own** release and `shared` dirs
+are the opposite: mandatory, because a missing one is a broken deploy,
+not a race, and starting without it would hand the app an empty tmpfs
+where its code should be.
+
 Two kinds of path are refused, each with an error saying which:
 inside the **liveswap root** (the app already sees its own release and
 `shared/`; everything else there is another app), and any of the names
@@ -426,26 +435,92 @@ under Puppeteer, nested containers) or needs devices beyond
 `/dev/null`-class ones.
 
 **Hosts.** The sandbox is built on unprivileged user namespaces.
-Ubuntu 24.04+ refuses those to unconfined processes
-(`kernel.apparmor_restrict_unprivileged_userns=1`), which would leave
-`systemd --user` unable to build the sandbox; the package therefore
-ships an AppArmor profile, `hotserve-user-manager`, that grants
-`userns` to hotserve's user manager only: the package starts
-`user@<uid>.service` for the hotserve user through
-`/usr/libexec/hotserve/user-manager` (an `ExecStart=` override in the
-drop-in postinstall writes) and the profile attaches to that path —
-never to PID 1 or other users' managers; the app units carry
-`RestrictNamespaces=`, so a sandboxed app still cannot create
-namespaces. (Attachment by path rather than `AppArmorProfile=`: newer
-AppArmor turns a profile change requested by an unprivileged unit into
-a stack with `unconfined`, which stays restricted.) Raw-binary
-installs on Ubuntu need the same three pieces — the wrapper, the
-profile in `/etc/apparmor.d/` (`apparmor_parser -r` it), and the
-`ExecStart=` override — or, bluntly, that sysctl set to 0 host-wide. Debian's kernel has no such restriction. A host where the
-probe still finds no usable user namespace runs apps with
-`"sandbox": "none"` and a warning (the non-dumpable supervisor and
-`NoNewPrivileges` remain); `journalctl -t hotserve-sandbox-probe`
-says why.
+Debian 13's kernel permits them, which is why it is the supported
+host and why the package ships no LSM policy of its own. Some kernels
+refuse them — Ubuntu 24.04+ restricts them to processes under an
+AppArmor profile granting `userns`
+(`kernel.apparmor_restrict_unprivileged_userns=1`), and container and
+LXC hosts often have them off entirely. hotserve does not work around
+that: it probes, and a host that cannot deliver the namespaces runs
+apps with `"sandbox": "none"` and a warning at every launch (the
+non-dumpable supervisor and `NoNewPrivileges` remain).
+`journalctl -t hotserve-sandbox-probe` says why. If you are on such a
+host and want the sandbox, the fix is the host's: permit unprivileged
+user namespaces for hotserve's user manager, or move to Debian 13.
+
+## Runtime permissions (Deno, Node)
+
+The sandbox above is the **ceiling**: it is enforced by the kernel, it
+is decided by your Caddyfile, and it survives a compromised artifact.
+A runtime with its own permission model lets the app **narrow itself
+further inside that ceiling** — and it can express things a mount
+namespace cannot, most importantly *which network addresses the
+process may reach*.
+
+liveswap does not parse, synthesize or verify these flags. They are
+just part of `command`, which is the point: `command` lives in your
+Caddyfile on the box, so a deployed tarball cannot widen its own
+permissions the way it could if they lived in the artifact.
+
+A Deno app, with the placeholders from [Placeholders](#placeholders):
+
+```
+app example {
+    command deno serve --port {port} --host 127.0.0.1 \
+        --cached-only \
+        --allow-net=127.0.0.1:{port} \
+        --allow-read={release_dir},{shared_dir} \
+        --allow-write={shared_dir} \
+        --allow-env=DATABASE_URL \
+        main.ts
+    env DENO_DIR {shared_dir}/.deno
+    env DATABASE_URL {shared_dir}/app.db
+    health_path /health
+}
+```
+
+**What that buys you** (measured against Deno 2.8.3; re-check with
+`deno serve --help=full` when you upgrade):
+
+- `--allow-net=127.0.0.1:{port}` is enough for `deno serve` to bind and
+  serve. Every *other* address is refused with `NotCapable` — so a
+  dependency that wakes up and tries to POST your secrets somewhere
+  fails at the runtime boundary. Note it is an **address allowlist,
+  not a direction**: it does not distinguish listening from
+  connecting. Scoping it to the app's own port works because the only
+  address left to reach is itself — which also closes the sibling
+  `127.0.0.1` ports the sandbox leaves open (all apps share a network
+  namespace).
+- Without `--allow-read` the app cannot read `/etc/hosts`, and without
+  `--allow-env` it cannot read its own environment — including the
+  variables liveswap injected. Name only what the app actually needs.
+- Remote imports are governed by `--allow-import`, **not**
+  `--allow-net`. Leave it off and add `--cached-only` so the serving
+  process can never fetch a module: vendor dependencies at build time
+  and ship the populated `DENO_DIR` in the tarball, or warm it in
+  `pre_start`.
+
+**No `extra_path` is needed for the runtime.** The sandbox base view
+binds `/usr`, so a normal `/usr/local/bin/deno` (or an apt-installed
+one) is already inside every unit. Only a runtime somewhere else —
+`/opt/node/bin/node`, an nvm or asdf shim — needs one.
+
+**What it does not buy you.** These flags are enforced *in-process* by
+the runtime, so they hold exactly as long as the runtime does: `-A` /
+`--allow-all`, `--allow-run` or `--allow-ffi` hand it all back, and a
+bug in the runtime itself is outside their reach. That is why they are
+the inner layer and not the only one — the user and PID namespaces and
+the deny-by-default view are what still stand if the runtime is the
+thing that breaks. Use both; do not trade one for the other.
+
+**Health.** `deno serve` hands every path to your default export's
+`fetch`, so `health_path` only works if your handler answers 2xx on
+it. If it does not, set `health_path off` and the deploy gate falls
+back to "the process is still alive after `soak`".
+
+Node's `--permission` model layers the same way. The principle is
+identical whatever the runtime: the ceiling is liveswap's, the
+narrowing is the app's, and neither substitutes for the other.
 
 ## Deploy authentication (`deploy_trust`)
 

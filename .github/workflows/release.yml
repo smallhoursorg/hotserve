@@ -51,9 +51,11 @@ jobs:
           systems where you manage the service yourself (your own
           systemd unit, NixOS-style distros, containers).
 
-          If you are on Debian or Ubuntu, use the .deb from the same
-          release instead — it installs everything below for you and is
-          what the test matrix certifies.
+          If you are on Debian 13, use the .deb from the same release
+          instead — it installs everything below for you and is what the
+          test matrix certifies. Other systemd distributions can use
+          this archive, but nothing else is tested, and a host that
+          cannot deliver the per-app sandbox reports `sandbox: none`.
 
           What the package would have set up, and you now own:
             - a dedicated system user/group (hotserve) to run as

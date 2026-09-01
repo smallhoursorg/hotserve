@@ -433,22 +433,17 @@ func sandboxRoot(t *testing.T) (root, release, shared string) {
 }
 
 // TestIntegrationSystemdSandboxProbe: the capability probe against the
-// real manager. The dev-systemd image is trixie (systemd 257), so the
-// answer is full; on anything older the test still asserts the probe
-// reached a consistent verdict rather than a specific one.
+// real manager. The dev-systemd image is trixie (systemd 257) — the
+// support matrix — so the answer is full, unconditionally. A `none`
+// here is a real failure and not a host to accommodate: either the
+// kernel under the test container refuses user namespaces, or the
+// sandbox regressed.
 func TestIntegrationSystemdSandboxProbe(t *testing.T) {
 	r := integrationRunner(t)
-	version := userManager.ManagerVersion()
-	if version == 0 {
-		t.Fatal("manager version not read")
-	}
-	got := probeSandboxCapability(r, version)
-	t.Logf("systemd %d: tier=%s reason=%q", version, got.tier, got.reason)
-	switch {
-	case version >= 256 && got.tier != sandboxFull:
-		t.Fatalf("systemd %d should deliver the full tier, got %s (%s)", version, got.tier, got.reason)
-	case version < 256 && got.tier != sandboxFilesystem:
-		t.Fatalf("systemd %d should deliver the filesystem tier, got %s (%s)", version, got.tier, got.reason)
+	got := probeSandboxCapability(r)
+	t.Logf("tier=%s reason=%q", got.tier, got.reason)
+	if got.tier != sandboxFull {
+		t.Fatalf("the supported host must deliver the full tier, got %s (%s)", got.tier, got.reason)
 	}
 }
 
@@ -519,9 +514,6 @@ func readProbe(t *testing.T, shared string) map[string]string {
 // other.
 func TestIntegrationSystemdSandboxedUnit(t *testing.T) {
 	r := integrationRunner(t)
-	if userManager.ManagerVersion() < 256 {
-		t.Skip("full tier needs systemd >= 256")
-	}
 	root, release, shared := sandboxRoot(t)
 	if err := os.WriteFile(filepath.Join(release, "server"), []byte("#!/bin/sh\n"+sandboxProbeScript), 0o755); err != nil {
 		t.Fatal(err)
@@ -620,15 +612,12 @@ func run(t *testing.T, name string, args ...string) string {
 // PID 1 of its own namespace, and the kernel discards signals sent to a
 // namespace init from an ancestor namespace when the handler is SIG_DFL
 // (the classic "docker stop takes ten seconds" behaviour). If that
-// applied here, every cutover, drain and watchdog stop on Debian 13 and
-// Ubuntu 26.04 would silently wait out `grace` and end in SIGKILL,
+// applied here, every cutover, drain and watchdog stop would silently
+// wait out `grace` and end in SIGKILL,
 // losing in-flight requests — the e2e cannot see it because its app is
 // a Go binary, whose runtime installs handlers for every signal.
 func TestIntegrationSystemdSIGTERMReachesNamespaceInit(t *testing.T) {
 	r := integrationRunner(t)
-	if userManager.ManagerVersion() < 256 {
-		t.Skip("full tier needs systemd >= 256")
-	}
 	root, release, shared := sandboxRoot(t)
 	// A shell that handles SIGTERM and takes its time about it, the way
 	// a draining server does.

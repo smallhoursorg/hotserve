@@ -35,16 +35,6 @@ type userManagerClient struct {
 	// nofile is the manager's DefaultLimitNOFILE (its hard ceiling for
 	// units), read once per connection; 0 = unknown, leave units alone.
 	nofile atomic.Uint64
-	// version is the manager's major systemd version, read once per
-	// connection; 0 = unknown.
-	version atomic.Int64
-}
-
-// ManagerVersion is the major version of the manager behind the
-// current connection (0 until one has been established or when the
-// property could not be read).
-func (c *userManagerClient) ManagerVersion() int {
-	return int(c.version.Load())
 }
 
 // userManager is the process-wide client every systemdRunner shares.
@@ -127,15 +117,6 @@ func (c *userManagerClient) get() (*sddbus.Conn, error) {
 		conn.Close()
 		return nil, err
 	}
-	// The version decides which sandbox properties exist to be set
-	// (sandbox.go); unknown reads as 0 and the probe then settles it.
-	var version int
-	if v, err := conn.GetManagerProperty("Version"); err == nil {
-		version = parseManagerVersion(v)
-	} else if !conn.Connected() {
-		conn.Close()
-		return nil, err
-	}
 	for _, nc := range raws {
 		if derr := nc.SetDeadline(time.Time{}); derr != nil {
 			conn.Close()
@@ -151,7 +132,6 @@ func (c *userManagerClient) get() (*sddbus.Conn, error) {
 	}
 	c.conn = conn
 	c.nofile.Store(nofile) // published with the connection it was read from
-	c.version.Store(int64(version))
 	return conn, nil
 }
 
@@ -162,25 +142,6 @@ func parseManagerUint(s string) uint64 {
 	s = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(s), "@t"))
 	n, err := strconv.ParseUint(s, 10, 64)
 	if err != nil || n == ^uint64(0) {
-		return 0
-	}
-	return n
-}
-
-// parseManagerVersion reads the major version out of go-systemd's
-// rendering of the manager's Version property — a quoted string such
-// as "257.13-1~deb13u1", "255.4-1ubuntu8.17" or "v252.39"; 0 when no
-// leading number can be found.
-func parseManagerVersion(s string) int {
-	s = strings.TrimSpace(s)
-	s = strings.Trim(s, `"`)
-	s = strings.TrimPrefix(s, "v")
-	end := 0
-	for end < len(s) && s[end] >= '0' && s[end] <= '9' {
-		end++
-	}
-	n, err := strconv.Atoi(s[:end])
-	if err != nil || n < 0 {
 		return 0
 	}
 	return n
@@ -293,10 +254,10 @@ const (
 )
 
 // sandboxProperties renders a sandboxSpec (nil: nothing). The set is
-// the one measured in issue #35 on Debian 12/13 and Ubuntu 24.04;
-// see sandbox.go for what each tier closes. Properties that need a
-// newer manager than the tier implies are not emitted, so a manager
-// never rejects a unit for an unknown property.
+// the one measured in issue #35; see sandbox.go for what it closes.
+// PrivatePIDs= is emitted only for the full tier, so a unit relaunched
+// from a legacy "filesystem" record is never handed a property its
+// recorded tier does not include.
 //
 // The view is deny-by-default: TemporaryFileSystem=/ replaces the
 // whole filesystem with an empty read-only tmpfs, and the binds below
@@ -306,7 +267,7 @@ const (
 // unreadable, which is a stronger statement than either option makes
 // and one that cannot go stale. MountAPIVFS= is not set: /proc, /sys
 // and /dev are mounted inside the tmpfs by PrivateDevices= (and, at
-// the full tier, PrivatePIDs=), measured on both tiers.
+// the full tier, PrivatePIDs=), measured on 252/255/257/259.
 func sandboxProperties(s *sandboxSpec) []sddbus.Property {
 	if s == nil || s.tier == sandboxNone {
 		return nil
@@ -319,8 +280,10 @@ func sandboxProperties(s *sandboxSpec) []sddbus.Property {
 		}
 		writable = append(writable, bindMount{Source: src, Destination: b.dest, Flags: mountRecursive})
 	}
-	// The base view first: every entry optional, because the list spans
-	// four distros and none of them has all of it.
+	// The base view first: every entry optional. Debian 13 is merged-/usr
+	// and has no /etc/pki, so several names are aliases or simply absent
+	// — and /run/systemd/resolve exists only where resolved runs. A
+	// missing entry must not fail the unit (see sandboxBaseView).
 	readOnly := make([]bindMount, 0, len(sandboxBaseView)+len(s.extra))
 	for _, p := range sandboxBaseView {
 		readOnly = append(readOnly, bindMount{Source: p, Destination: p, IgnoreENOENT: true, Flags: mountRecursive})
@@ -332,7 +295,14 @@ func sandboxProperties(s *sandboxSpec) []sddbus.Property {
 		}
 		// Destination is always the configured path: that is where the
 		// app expects to find it, whatever it resolves to on the host.
-		m := bindMount{Source: src, Destination: e.path, Flags: mountRecursive}
+		// IgnoreENOENT, as for the base view: an extra_path is accepted
+		// at config load before it exists (the documented
+		// /run/postgresql recipe — postgres creates it from its own
+		// unit), so failing the whole unit on a boot-order race would
+		// kill an app that only needed to retry its connection.
+		// resolveBindSources records the absent ones and the runner
+		// warns, so this is tolerant rather than silent.
+		m := bindMount{Source: src, Destination: e.path, IgnoreENOENT: true, Flags: mountRecursive}
 		if e.rw {
 			writable = append(writable, m)
 		} else {
@@ -340,9 +310,9 @@ func sandboxProperties(s *sandboxSpec) []sddbus.Property {
 		}
 	}
 	props := []sddbus.Property{
-		// Explicit on purpose: 252 does not imply it for the mount
-		// options below (the unit fails to exec), and it is the piece
-		// that closes /proc reads of processes outside the namespace.
+		// Explicit on purpose: the mount options below do not imply it
+		// (without it the unit fails to exec), and it is the piece that
+		// closes /proc reads of processes outside the namespace.
 		{Name: "PrivateUsers", Value: godbus.MakeVariant(true)},
 		{Name: "PrivateTmp", Value: godbus.MakeVariant(true)},
 		{Name: "PrivateDevices", Value: godbus.MakeVariant(true)},

@@ -97,10 +97,6 @@ type systemdConn interface {
 	ResetFailedUnit(ctx context.Context, name string) error
 	// ListUnits returns the loaded units whose names match the glob.
 	ListUnits(ctx context.Context, pattern string) ([]unitStatus, error)
-	// ManagerVersion is the manager's major systemd version (e.g. 257),
-	// or 0 when it could not be read. It gates which sandbox properties
-	// exist to be set (PrivatePIDs= from 256).
-	ManagerVersion() int
 }
 
 // unitSpec is a transient service unit as the runner wants it. The
@@ -393,6 +389,16 @@ func (r *systemdRunner) unitFor(spec startSpec, oneshot bool) (unitSpec, error) 
 	if spec.sandbox != nil {
 		if err := spec.sandbox.resolveBindSources(); err != nil {
 			return unitSpec{}, err
+		}
+		// Bound with IgnoreENOENT so the unit still starts, but never
+		// silently: an extra_path the app was promised and did not get
+		// is the difference between "my database is down" and "my
+		// database socket was never in my view".
+		if len(spec.sandbox.absentExtra) > 0 {
+			r.log().Warn("extra_path does not exist on the host; it is absent from the app's sandbox",
+				zap.String("app", spec.app),
+				zap.Strings("extra_path", spec.sandbox.absentExtra),
+				zap.String("effect", "the unit starts without it; if the app needs it, expect a connection or file error from the app itself"))
 		}
 		// LookPath above ran in *this* process's view of the filesystem,
 		// which under a deny-by-default sandbox is not the unit's: a

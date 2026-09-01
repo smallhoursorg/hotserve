@@ -39,14 +39,11 @@ type fakeSystemdConn struct {
 	listCalls  int
 	listHook   func()        // runs inside ListUnits, before it returns (interleaving tests)
 	stopDelay  time.Duration // StopUnit sleeps this long (concurrency tests)
-	version    int           // ManagerVersion (0 = unknown)
 }
 
 func newFakeSystemdConn() *fakeSystemdConn {
-	return &fakeSystemdConn{status: map[string]unitStatus{}, version: 257}
+	return &fakeSystemdConn{status: map[string]unitStatus{}}
 }
-
-func (f *fakeSystemdConn) ManagerVersion() int { return f.version }
 
 func (f *fakeSystemdConn) StartTransientUnit(ctx context.Context, u unitSpec) (string, error) {
 	f.mu.Lock()

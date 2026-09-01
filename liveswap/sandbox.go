@@ -14,22 +14,27 @@ import (
 )
 
 // Per-app sandboxing (issue #35) is systemd's own per-unit sandboxing
-// on the user-manager runner, in two tiers that follow what the kernel
-// gates and what the manager can express (measured on Debian 12/13 and
-// Ubuntu 24.04, see the issue):
+// on the user-manager runner: a user namespace (PrivateUsers=) plus a
+// PID namespace (PrivatePIDs=, systemd 256+) on top of the mount,
+// device, cgroup, seccomp and capability set.
 //
-//   - filesystem: a user namespace (PrivateUsers=) plus the mount,
-//     device, cgroup, seccomp and capability set. The user namespace
-//     is what closes /proc/<pid>/{root,environ,cwd} of every process
-//     outside it — commoncap refuses cross-user-namespace ptrace access
-//     whatever the uid — so the mount restrictions cannot be walked
-//     around via a same-UID neighbour's /proc. Available on every
-//     user manager in the support matrix (systemd ≥ 252).
-//   - full: filesystem plus a PID namespace (PrivatePIDs=, systemd ≥
-//     256): the supervisor, the user manager and every sibling become
-//     invisible and unsignalable. Without it a compromised app can
-//     still enumerate and signal (kill) same-UID processes — a
-//     denial-of-service residual, not a data-access one.
+// The user namespace is what closes /proc/<pid>/{root,environ,cwd} of
+// every process outside it — commoncap refuses cross-user-namespace
+// ptrace access whatever the uid — so the mount restrictions cannot be
+// walked around via a same-UID neighbour's /proc. The PID namespace
+// closes what is left: the supervisor, the user manager and every
+// sibling become invisible and unsignalable.
+//
+// One tier, because the support matrix is one release: Debian 13 ships
+// systemd 257 and does not restrict unprivileged user namespaces. A
+// host that cannot deliver it gets no sandbox at all rather than a
+// lesser one — `sandbox require` refuses to start, `auto` launches with
+// a WARN naming the residual. (An earlier "filesystem" tier — the user
+// namespace without the PID namespace — was what Debian 12 and Ubuntu
+// 24.04 could manage. It is no longer probed for or offered, but it
+// survives as a value state.json may already hold: see
+// validSandboxTierRecord and sandboxResidual, which still describe it
+// so an instance recorded at that tier relaunches faithfully.)
 //
 // The filesystem view is deny-by-default. An empty read-only tmpfs
 // replaces the whole root (TemporaryFileSystem=/) and the only things
@@ -53,8 +58,8 @@ type sandboxTier int
 
 const (
 	sandboxNone       sandboxTier = iota // floor only: non-dumpable supervisor, NoNewPrivileges
-	sandboxFilesystem                    // user namespace + mount/device/cgroup/seccomp/caps set
-	sandboxFull                          // filesystem + PID namespace
+	sandboxFilesystem                    // retired: user namespace + mount set, no PID namespace — legacy state.json records only
+	sandboxFull                          // sandboxFilesystem + PID namespace; the one tier a host is probed for
 )
 
 func (t sandboxTier) String() string {
@@ -182,16 +187,17 @@ type bindPath struct {
 // this model exists to delete; naming the dozen entries a runtime
 // actually needs keeps the guarantee free of exceptions.
 //
-// Every entry is bound with IgnoreENOENT: the list spans four distros
-// and no single one has all of it (a merged-/usr host has no real
-// /lib64, Debian has no /etc/pki, a host without systemd-resolved has
-// no /run/systemd/resolve). A missing entry must not fail the unit.
+// Every entry is bound with IgnoreENOENT: no host has all of it
+// (Debian 13 is merged-/usr, so /bin and /lib64 are symlinks rather
+// than real directories and there is no /etc/pki; a host without
+// systemd-resolved has no /run/systemd/resolve). A missing entry must
+// not fail the unit. The names stay even where this distro does not
+// use them: they are bound by name so a #! line or an interpreter's
+// own ld path resolves to the spelling it was written with, and an
+// app's tarball is not obliged to know which spelling its host uses.
 var sandboxBaseView = []string{
 	"/usr",
-	// The usrmerge aliases: symlinks into /usr on modern distros, real
-	// directories on older ones. Bound by name so a #! line, a
-	// hard-coded /bin/sh or an interpreter's own ld path resolves to
-	// the spelling it was written with.
+	// The usrmerge aliases: symlinks into /usr on Debian 13.
 	"/bin", "/sbin", "/lib", "/lib64", "/lib32", "/libx32",
 	// The TLS trust store — the certificate directories themselves, not
 	// the trees that contain them. /etc/ssl also holds /etc/ssl/private,
@@ -290,6 +296,13 @@ type sandboxSpec struct {
 	// app would be binding another's data.
 	appDir  string
 	appName string
+	// absentExtra are the extra_paths that did not exist when this unit
+	// was launched. They are bound with IgnoreENOENT (systemd_dbus.go)
+	// so a boot-order race — the documented /run/postgresql recipe,
+	// where postgres creates the directory from its own unit — starts
+	// the app instead of failing it. Filled by resolveBindSources and
+	// logged by the runner: tolerated is not the same as silent.
+	absentExtra []string
 }
 
 // resolveBindSources resolves every path this unit will bind and
@@ -398,10 +411,23 @@ func (s *sandboxSpec) resolveBindSources() error {
 			s.writable[i].source = resolved
 		}
 	}
+	s.absentExtra = nil
 	for i, e := range s.extra {
 		resolved, err := filepath.EvalSymlinks(e.path)
-		if err != nil || resolved == e.path {
-			continue // absent (checked as written at config load), or itself
+		if err != nil {
+			// Absent is tolerated, not fatal: config load already
+			// accepted a path that does not exist yet, and the bind
+			// carries IgnoreENOENT so the unit still starts. The caller
+			// warns. Any other error (a permission denial on a parent)
+			// is left alone here for the same reason it always was —
+			// the path is checked as written at config load.
+			if errors.Is(err, os.ErrNotExist) {
+				s.absentExtra = append(s.absentExtra, e.path)
+			}
+			continue
+		}
+		if resolved == e.path {
+			continue // itself
 		}
 		if err := checkExtraPathContainment(resolved, s.root, rootC); err != nil {
 			return fmt.Errorf("refusing to launch sandboxed: extra_path %q resolves to %q: %w", e.path, resolved, err)
@@ -561,10 +587,10 @@ func probeSandboxSpec(tier sandboxTier) *sandboxSpec {
 // a unit built with probeSandboxSpec. It checks the namespaces are in
 // effect — not merely that the manager accepted the properties: the
 // manager ignores PrivatePIDs= on a kernel without PID namespaces, and
-// a user namespace the kernel or an LSM (Ubuntu's AppArmor userns
-// restriction) refuses fails the unit outright. In a user namespace
-// the process's own uid_map covers a single id, not the 2^32-1 of the
-// initial namespace; in a PID namespace the executed process is PID 1.
+// a user namespace the kernel or an LSM refuses fails the unit
+// outright. In a user namespace the process's own uid_map covers a
+// single id, not the 2^32-1 of the initial namespace; in a PID
+// namespace the executed process is PID 1.
 func sandboxProbeCommand(tier sandboxTier) []string {
 	// The echo lands in the journal under the probe unit's identifier
 	// (hotserve-sandbox-probe), so a degraded host can be diagnosed
@@ -584,19 +610,23 @@ func sandboxProbeCommand(tier sandboxTier) []string {
 // once, plus the manager's namespace setup.
 const sandboxProbeTimeout = 30 * time.Second
 
-// probeSandboxCapability finds the best tier the host delivers, from
-// the top down: full needs a manager ≥ 256 (PrivatePIDs= is otherwise
-// an unknown property) and a kernel that honours it; filesystem needs
-// the user namespace. Each candidate is proven by running
-// sandboxProbeCommand inside a unit built with that tier — a unit the
-// manager refuses (a kernel or LSM that denies the namespaces), or a
-// probe that exits non-zero (a property silently ignored), fails the
-// candidate with the reason kept for the WARN and the require error.
+// probeSandboxCapability reports whether the host delivers the full
+// sandbox. There is one supported tier, so there is one candidate: the
+// support matrix is Debian 13 (systemd 257), where PrivatePIDs= exists
+// and the kernel does not restrict unprivileged user namespaces.
+//
+// It stays a measurement rather than a version check because the host
+// still gets a vote: a container or LXC VPS, a kernel built without
+// user namespaces, or an LSM that refuses them all fail the unit on a
+// manager whose version says it should have worked. A unit the manager
+// refuses, or a probe that exits non-zero (a property silently
+// ignored), fails with the reason kept for the WARN and the require
+// error.
 //
 // The probe also proves the base view: /bin/sh has to exist inside the
 // unit for the script to run at all, so a host whose runtime the base
 // view fails to name cannot report a tier it does not have.
-func probeSandboxCapability(r runner, managerVersion int) sandboxCapability {
+func probeSandboxCapability(r runner) sandboxCapability {
 	var reasons []string
 	try := func(tier sandboxTier) bool {
 		ctx, cancel := context.WithTimeout(context.Background(), sandboxProbeTimeout)
@@ -617,19 +647,10 @@ func probeSandboxCapability(r runner, managerVersion int) sandboxCapability {
 		}
 		return true
 	}
-	switch {
-	case managerVersion >= 256:
-		if try(sandboxFull) {
-			return sandboxCapability{tier: sandboxFull}
-		}
-	case managerVersion == 0:
-		reasons = append(reasons, "full tier: the user manager's systemd version is unknown, PrivatePIDs= needs 256")
-	default:
-		reasons = append(reasons, fmt.Sprintf("full tier: the user manager is systemd %d, PrivatePIDs= needs 256", managerVersion))
+	if try(sandboxFull) {
+		return sandboxCapability{tier: sandboxFull}
 	}
-	if try(sandboxFilesystem) {
-		return sandboxCapability{tier: sandboxFilesystem, reason: strings.Join(reasons, "; ")}
-	}
+	reasons = append(reasons, "the supported host is Debian 13 (systemd 257); PrivatePIDs= needs systemd 256 and both namespaces need a kernel that permits them")
 	return sandboxCapability{tier: sandboxNone, reason: strings.Join(reasons, "; ")}
 }
 
@@ -874,13 +895,47 @@ func absAndCanonical(p string) []string {
 //     env_file under /usr or a named /etc entry is readable by every
 //     app on the box;
 //   - another app's extra_path, which can cover the directory the env
-//     file sits in — and read-write, can rewrite it.
+//     file sits in — and read-write, can rewrite it;
+//   - another app's OWN directories, which sandboxSpecFor binds into
+//     its unit — `shared/` read-WRITE. An env file parked in a
+//     neighbour's shared dir is readable and rewritable by that
+//     neighbour, which is the same exposure by a shorter route.
 //
 // A hard error rather than a warning: the alternative is documenting
 // that env files are only usually isolated. Validate runs before a
 // reload is committed, so a configuration rejected here leaves the
 // previous one serving.
+//
+// Every branch is judged against the EFFECTIVE policy, not the raw
+// per-app field: `sandbox off` set globally leaves every app's own
+// setting empty, and reading that as "not off" would reject a working
+// config over views that are not being built.
 func validateEnvFileIsolation(a *App) error {
+	// The same resolution buildSpec does: the app's own setting, else
+	// the global default, else auto (what Provision fills in).
+	effective := func(cfg *AppConfig) string {
+		if cfg.Sandbox != "" {
+			return cfg.Sandbox
+		}
+		if a.Sandbox != "" {
+			return a.Sandbox
+		}
+		return sandboxAuto
+	}
+	sandboxed := false
+	for _, cfg := range a.Apps {
+		if cfg != nil && effective(cfg) != sandboxOff {
+			sandboxed = true
+			break
+		}
+	}
+	if !sandboxed {
+		// No unit gets a view, so there is nothing for an env file to
+		// land in: every app already sees the whole filesystem as the
+		// hotserve uid, and refusing the config here would block a
+		// working one over an exposure sandboxing did not create.
+		return nil
+	}
 	for name, cfg := range a.Apps {
 		if cfg == nil || cfg.EnvFile == "" {
 			continue
@@ -892,7 +947,10 @@ func validateEnvFileIsolation(a *App) error {
 				}
 			}
 			for other, ocfg := range a.Apps {
-				if other == name || ocfg == nil || ocfg.Sandbox == sandboxOff {
+				// An app running unsandboxed reads the whole filesystem
+				// as the hotserve uid; refusing this config would not
+				// close anything for it.
+				if other == name || ocfg == nil || effective(ocfg) == sandboxOff {
 					continue
 				}
 				for _, e := range ocfg.ExtraPaths {
@@ -904,6 +962,19 @@ func validateEnvFileIsolation(a *App) error {
 							}
 							return fmt.Errorf("app %s: env_file %q is inside app %s's extra_path %q, so %s could %s it; narrow that extra_path, or move the env file outside it (the documented location is /etc/hotserve)", name, cfg.EnvFile, other, e.Path, other, rw)
 						}
+					}
+				}
+				// The neighbour's own bound directories. Its release
+				// dirs are read-only in its unit and its shared dir is
+				// read-write, so this is the one route on which the
+				// file can also be REWRITTEN by another app.
+				od := newAppDirs(a.Root, other)
+				for _, d := range []struct{ path, what, rw string }{
+					{od.shared, "shared dir", "read and rewrite"},
+					{od.releases, "release dirs", "read"},
+				} {
+					if pathWithin(f, d.path) {
+						return fmt.Errorf("app %s: env_file %q is inside app %s's %s %q, which is bound into %s's own sandbox — %s could %s it; move the env file outside the liveswap root (the documented location is /etc/hotserve)", name, cfg.EnvFile, other, d.what, d.path, other, other, d.rw)
 					}
 				}
 			}

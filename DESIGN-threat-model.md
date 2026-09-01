@@ -10,8 +10,9 @@ rollout semantics (its bubblewrap mechanics are superseded — see "The
 shared-UID rule"), and this document places that work in the wider
 attack surface rather than restating it.
 
-Scope: a single Debian 12/13 or Ubuntu 24.04/26.04 box (the support
-matrix) running `hotserve` (a Caddy
+Scope: a single Debian 13 box (the support matrix; narrowed from
+Debian 12/13 + Ubuntu 24.04/26.04 on 2026-09-01 — see "Amendment" at
+the end of the Recommendation) running `hotserve` (a Caddy
 distribution) as the `hotserve` system user, supervising deployed apps
 as transient systemd units under the hotserve user's own service
 manager via liveswap's `systemdRunner`
@@ -350,6 +351,21 @@ consequences, and they decide the mechanism:
    with `sandbox off` on such a host may create user namespaces where
    the distro default would refuse — sandboxed apps cannot
    (`RestrictNamespaces=`).
+
+   **Superseded 2026-09-01 (matrix narrowed to Debian 13):** the
+   second tier and the AppArmor profile are gone. There is one tier,
+   *full*, and one candidate in the probe; a host that cannot deliver
+   both namespaces gets `none` with a WARN, and `sandbox require`
+   refuses to start. The paragraph above is kept because the
+   measurements behind it — that a user namespace alone closes the
+   `/proc` routes, that AppArmor path-attachment is the only way to
+   grant `userns` to one manager — are what the current design rests
+   on, and because they are the evidence for readmitting Ubuntu should
+   that ever be wanted. Consequence accepted: a Debian 12 host that
+   upgrades hotserve drops from *filesystem* to `none` rather than
+   degrading gracefully. That is what dropping support means, and it
+   is loud (WARN at every launch, `"sandbox":"none"` in status) rather
+   than silent.
 2. **A non-dumpable supervisor is the floor on every host.**
    `prctl(PR_SET_DUMPABLE, 0)` makes hotserve's `/proc` entries require
    `CAP_SYS_PTRACE`, which apps under `NoNewPrivileges` never hold —
@@ -726,7 +742,8 @@ Cost / lock-in rows:
 
 **Decided (2026-08-29) and shipped (2026-08-30, #35 phase 1):
 systemd's own per-unit sandboxing on the user-manager runner, in two
-probe-gated tiers.** That is C's property set without C's privilege —
+probe-gated tiers** — narrowed to one tier on 2026-09-01, see the
+Amendment below. That is C's property set without C's privilege —
 `PrivateUsers=` for the user namespace that closes cross-process
 `/proc` reads (the shared-UID rule as corrected), `PrivatePIDs=` for
 the PID namespace that closes visibility and signals where the manager
@@ -762,3 +779,36 @@ namespace the load-bearing piece — which systemd now provides itself.
 Independently of which approach lands, do the three non-isolation
 hardening items above — they are cheaper than any of A/B/C and address
 rows (T3, T4) that no isolation approach touches.
+
+
+### Amendment (2026-09-01): one host, one tier
+
+The support matrix is Debian 13 alone. Two things follow, and neither
+changes the property set above:
+
+- **One tier.** `PrivatePIDs=` exists on every supported manager
+  (systemd 257), so *filesystem* is no longer probed for or offered.
+  It survives only as a value `state.json` may already hold, so an
+  instance recorded at that tier relaunches faithfully instead of
+  being silently upgraded or silently dropped
+  (`validSandboxTierRecord` in [liveswap/sandbox.go](liveswap/sandbox.go)).
+- **No AppArmor profile.** Debian's kernel does not restrict
+  unprivileged user namespaces, so the profile and the user-manager
+  wrapper it attached to are removed along with the privilege they
+  carried — the residual noted above (an app under `sandbox off`
+  inheriting `userns` from the manager) is gone with them.
+
+What deliberately does **not** change: the probe. It was never a proxy
+for the systemd version — it is what catches a container, an LXC VPS
+or a kernel built without user namespaces, all of which can present a
+supported manager version and still refuse the unit. Deleting it would
+turn a measurement into a claim.
+
+The cost is CI fidelity: GitHub's runners boot an Ubuntu kernel, and
+the profile was what let the Debian cells prove the sandbox under a
+real userns restriction. With it gone, CI sets
+`kernel.apparmor_restrict_unprivileged_userns=0` on the runner to make
+it behave like a Debian host, and no lane exercises a restricted
+kernel any more. The probe is the only thing standing between such a
+host and a silent loss of isolation, which is the second reason it
+stays.

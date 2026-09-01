@@ -55,27 +55,26 @@ apt-get update -qq
 apt-get install -y "$deb"
 
 id hotserve >/dev/null || die "postinstall did not create the hotserve user"
-# The AppArmor profile attaches to the wrapper's path and grants
-# `userns`; anyone who can execute it gets the user namespaces the
-# host restricts, so it must not be executable by other accounts.
-wrapper=/usr/libexec/hotserve/user-manager
-[ -f "$wrapper" ] || die "the user-manager wrapper is missing"
+# The package ships no user-manager wrapper and no AppArmor profile:
+# the support matrix is Debian 13, whose kernel does not restrict
+# unprivileged user namespaces, so user@<uid>.service runs stock. A
+# leftover from an older package would mean postinstall's cleanup did
+# not run.
+[ ! -e /usr/libexec/hotserve/user-manager ] \
+	|| die "the retired user-manager wrapper is installed; the package should ship no such path"
+[ ! -e /etc/apparmor.d/hotserve-user-manager ] \
+	|| die "the retired AppArmor profile is installed; postinstall should have removed it"
 # Every packaged file's mode is pinned in nfpm.yaml rather than
-# inherited from the build host's umask; check the two that matter.
+# inherited from the build host's umask; check the one that matters.
 bmode=$(stat -c '%U:%G %a' /usr/bin/hotserve)
 [ "$bmode" = "root:root 755" ] \
 	|| die "/usr/bin/hotserve is '$bmode', want 'root:root 755' — an unpinned mode follows the builder's umask"
-wmode=$(stat -c '%U:%G %a' "$wrapper")
-[ "$wmode" = "root:hotserve 750" ] \
-	|| die "$wrapper is '$wmode', want 'root:hotserve 750' — a world-executable wrapper would hand its AppArmor userns grant to every local account"
 getent group hotserve >/dev/null || die "postinstall did not create the hotserve group"
-# 0750 root:hotserve only works if the account is IN that group, and
-# that is the whole reason user@<uid>.service can exec its ExecStart.
-# Assert what the manager actually needs, not just how the modes read.
+# The package's directories are group-hotserve, so postinstall must
+# ESTABLISH the account's membership rather than assume it — an account
+# an admin or another package created keeps whatever groups it had.
 id -nG hotserve | tr ' ' '\n' | grep -qx hotserve \
-	|| die "the hotserve user is not in the hotserve group: it could not execute $wrapper, so user@<uid>.service would fail and no app would start"
-su -s /bin/sh hotserve -c "test -x $wrapper" \
-	|| die "the hotserve user cannot execute $wrapper — user@<uid>.service cannot exec its own ExecStart"
+	|| die "the hotserve user is not in the hotserve group; postinstall must add it, not assume it"
 for d in /var/lib/hotserve /var/lib/liveswap; do
 	got=$(stat -c '%U:%G %a' "$d")
 	[ "$got" = "hotserve:hotserve 750" ] || die "$d is '$got', want 'hotserve:hotserve 750'"
@@ -217,11 +216,11 @@ read _ _ uidmap < /proc/self/uid_map
 # deny-by-default (TemporaryFileSystem=/ plus explicit binds), so a
 # path nothing named is absent rather than present-but-unreadable.
 [ -e /var/lib/hotserve ] && hslib=open || hslib=closed
-# The routes the sandbox exists to close. On the filesystem tier
-# (systemd 252/255) their closure rests on the user namespace alone —
-# the kernel refusing ptrace-class access across user namespaces —
-# so every cell must try them, not only the ones that also get a PID
-# namespace and would close them twice over.
+# The routes the sandbox exists to close. Their closure rests on the
+# user namespace alone — the kernel refusing ptrace-class access across
+# user namespaces — with the PID namespace closing them a second time
+# over. Probing them here keeps the user-namespace claim tested in its
+# own right rather than only through the namespace stacked on top.
 ls "/proc/$MGR_PID/root/" >/dev/null 2>&1 && mgrroot=open || mgrroot=closed
 cat "/proc/$MGR_PID/environ" >/dev/null 2>&1 && mgrenv=open || mgrenv=closed
 [ -e "/run/user/$HOTSERVE_UID/systemd/private" ] && mgrsock=open || mgrsock=closed
@@ -305,67 +304,37 @@ app_hard=$(printf '%s' "$app_line" | grep -o 'nofile_hard=[0-9]*' | cut -d= -f2)
 	|| die "app NOFILE soft=$app_soft hard=$app_hard is not the user manager's DefaultLimitNOFILE ($mgr_nofile) on both"
 app_nofile=$app_soft
 sd_version=$(systemctl --version | awk 'NR==1 {print $2}')
-if [ "${sd_version%%[!0-9]*}" -ge 256 ]; then
-	[ "$mgr_nofile" = "1048576" ] \
-		|| die "systemd $sd_version: user@$uid DefaultLimitNOFILE is $mgr_nofile, not the drop-in's 1048576"
-	echo "app NOFILE $app_nofile = user@$uid DefaultLimitNOFILE = the drop-in's 1048576 (systemd $sd_version)"
-else
-	echo "app NOFILE $app_nofile = user@$uid DefaultLimitNOFILE (systemd $sd_version < 256: drop-in not applied, #37)"
-fi
+# The user@<uid> drop-in only reaches the manager from systemd 256 (#37);
+# the support matrix is Debian 13 (257), so this is unconditional.
+[ "${sd_version%%[!0-9]*}" -ge 256 ] \
+	|| die "systemd $sd_version is below the supported floor of 256 (Debian 13 ships 257)"
+[ "$mgr_nofile" = "1048576" ] \
+	|| die "systemd $sd_version: user@$uid DefaultLimitNOFILE is $mgr_nofile, not the drop-in's 1048576"
+echo "app NOFILE $app_nofile = user@$uid DefaultLimitNOFILE = the drop-in's 1048576 (systemd $sd_version)"
 echo "deployed as unit $unit under user@$uid; app output in the journal"
 
-# The sandbox tier: full (PID + user namespace) on systemd >= 256,
-# filesystem (user namespace + mount set) below — the status endpoint
-# reports it and the app's own view must agree. The host kernel's
-# stance on unprivileged user namespaces is printed for the record:
-# Ubuntu's AppArmor restriction (kernel.apparmor_restrict_unprivileged_userns)
-# lives in the host kernel, not the container image, so a CI runner
-# that restricts them would fail every cell here, not just Ubuntu's.
+# The sandbox tier: full — a PID namespace on top of the user namespace
+# and the mount set. Debian 13 is systemd 257, so there is one tier and
+# the status endpoint must report it; the app's own view must agree.
+# The host kernel's stance on unprivileged user namespaces is printed
+# for the record: it lives in the host kernel, not the container image,
+# so a CI runner that restricts them fails this cell even though Debian
+# itself does not restrict them.
 echo "host: $(uname -r); apparmor_restrict_unprivileged_userns=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo absent); virt=$(systemd-detect-virt 2>/dev/null || echo unknown)"
 sandbox=$(printf '%s' "$status" | sed -n 's/.*"sandbox":"\([a-z]*\)".*/\1/p')
-# Where the kernel restricts unprivileged user namespaces, the user
-# manager must be running under the shipped profile — that is the
-# package's whole answer to Ubuntu 24.04+ — and the tier below proves
-# the profile actually lifts the restriction.
-if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = "1" ]; then
-	# Diagnostics first: which link of the chain (securityfs → parser
-	# → loaded profile → AppArmorProfile= on the unit) is missing shows
-	# up here rather than as a bare label mismatch.
-	echo "apparmor: enabled=$(cat /sys/module/apparmor/parameters/enabled 2>&1); securityfs=$(ls -d /sys/kernel/security/apparmor 2>&1); parser=$(command -v apparmor_parser || echo none)"
-	echo "apparmor: loaded profiles matching hotserve: $(grep -c hotserve /sys/kernel/security/apparmor/profiles 2>&1)"
-	echo "apparmor: parser says: $(apparmor_parser -r /etc/apparmor.d/hotserve-user-manager 2>&1 | head -c 300)"
-	echo "apparmor: unit ExecStart: $(systemctl show -p ExecStart --value "user@$uid.service" | head -c 160)"
-	journalctl --no-pager -b | grep -i "apparmor" | tail -5 || true
-	# A distinct name: $mgr_pid was captured before the Caddyfile was
-	# written and is what the app was handed, and the anti-vacuity
-	# assertions below compare against exactly that. Re-reading it into
-	# the same variable would report a manager restart as "the app was
-	# given the wrong pid", which describes the wrong problem.
-	label_pid=$(systemctl show -p MainPID --value "user@$uid.service")
-	mgr_label=$(cat "/proc/$label_pid/attr/apparmor/current" 2>/dev/null || cat "/proc/$label_pid/attr/current" 2>/dev/null)
-	case "$mgr_label" in
-	hotserve-user-manager*) echo "user@$uid runs under the hotserve-user-manager AppArmor profile ($mgr_label)" ;;
-	*) die "kernel restricts unprivileged user namespaces but user@$uid is not under the hotserve-user-manager profile (label '$mgr_label'); the sandbox would be off" ;;
-	esac
-fi
 app_uidmap=$(printf '%s' "$app_line" | grep -o 'uidmap=[0-9]*' | cut -d= -f2)
 app_pid=$(printf '%s' "$app_line" | grep -o ' pid=[0-9]*' | cut -d= -f2)
 app_nprocs=$(printf '%s' "$app_line" | grep -o 'nprocs=[0-9]*' | cut -d= -f2)
 app_hslib=$(printf '%s' "$app_line" | grep -o 'hotserve_lib=[a-z]*' | cut -d= -f2)
-if [ "${sd_version%%[!0-9]*}" -ge 256 ]; then
-	[ "$sandbox" = "full" ] || die "systemd $sd_version: status sandbox is '$sandbox', want full"
-	[ "$app_pid" = "1" ] || die "full tier but the app is pid $app_pid inside its unit, not 1 (no PID namespace)"
-	[ -n "$app_nprocs" ] && [ "$app_nprocs" -le 8 ] || die "full tier but /proc shows $app_nprocs pids inside the unit"
-else
-	[ "$sandbox" = "filesystem" ] || die "systemd $sd_version: status sandbox is '$sandbox', want filesystem"
-fi
+[ "$sandbox" = "full" ] || die "status sandbox is '$sandbox', want full"
+[ "$app_pid" = "1" ] || die "full tier but the app is pid $app_pid inside its unit, not 1 (no PID namespace)"
+[ -n "$app_nprocs" ] && [ "$app_nprocs" -le 8 ] || die "full tier but /proc shows $app_nprocs pids inside the unit"
 [ "$app_uidmap" != "4294967295" ] && [ -n "$app_uidmap" ] || die "no user namespace inside the unit (uid_map range $app_uidmap)"
 [ "$app_hslib" = "closed" ] || die "/var/lib/hotserve is visible inside the sandboxed unit"
-# Every cell, both tiers: these are the acceptance paths from
-# DESIGN-sandbox.md, and on 252/255 they are closed by the user
-# namespace with no PID namespace behind it — precisely the claim the
-# two-tier design rests on, which the trixie e2e (full tier) cannot
-# test in isolation because there both namespaces close them.
+# These are the acceptance paths from DESIGN-sandbox.md. They are
+# closed by the user namespace alone — the PID namespace on top is what
+# additionally hides and protects sibling processes — so they are the
+# assertions that must hold even if a host ever delivers less.
 # The probes are only worth anything if the app was handed the real
 # values: a literal "$mgr_pid" would make every /proc check below pass
 # by testing a path that cannot exist.
@@ -454,8 +423,7 @@ pid_before=$(printf '%s' "$status" | sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p')
 # path that used to set the group only when it CREATED the user. Strip
 # the membership first, the way a hotserve account made by an admin (or
 # another package) would arrive: postinstall must establish it rather
-# than assume it, or this host boots with a user manager that cannot
-# exec its own wrapper and every app is gone.
+# than assume it.
 # postinstall's useradd makes hotserve the account's PRIMARY group, so
 # it cannot simply be removed; move the account to another primary
 # group instead, which is exactly the shape a pre-existing account has.
@@ -466,9 +434,7 @@ id -nG hotserve | tr ' ' '\n' | grep -qx hotserve \
 	&& die "the hotserve account is still in the hotserve group; the reinstall assertion below would be vacuous"
 dpkg -i "$deb"
 id -nG hotserve | tr ' ' '\n' | grep -qx hotserve \
-	|| die "reinstall did not restore the hotserve user's group membership: user@<uid>.service could not exec $wrapper and no app would start after a reboot"
-su -s /bin/sh hotserve -c "test -x $wrapper" \
-	|| die "after reinstall the hotserve user still cannot execute $wrapper"
+	|| die "reinstall did not restore the hotserve user's group membership: the package's group-owned directories would be unreachable"
 grep -q liveswap_webhook /etc/hotserve/Caddyfile \
 	|| die "reinstall clobbered the modified /etc/hotserve/Caddyfile (config|noreplace broken)"
 systemctl is-active --quiet hotserve \

@@ -31,15 +31,15 @@ sudo systemctl enable --now hotserve
 
 That gives you `/usr/bin/hotserve`, a systemd service running as the
 `hotserve` user, and a starter config at `/etc/hotserve/Caddyfile`.
-**Supported: Debian 12 and 13, Ubuntu 24.04 and 26.04.** Per-app
-sandboxing runs at its *full* tier (PID + user namespace) on
-systemd ≥ 256 (Debian 13, Ubuntu 26.04) and at the *filesystem* tier
-(user namespace, no PID namespace) on Debian 12 and Ubuntu 24.04 —
-see [liveswap/README.md](liveswap/README.md#sandbox). All four stay
-supported; the older two get every part of the sandbox except the PID
-namespace, which is what the *full* tier adds.
+**Supported: Debian 13.** One release, one sandbox: every app unit
+gets a PID *and* a user namespace on top of the deny-by-default
+filesystem view — see [liveswap/README.md](liveswap/README.md#sandbox).
+hotserve still installs and serves on other systemd distributions, but
+nothing else is tested, and a host that cannot deliver the sandbox
+reports `sandbox: none` rather than something weaker (`sandbox
+require` refuses to start there).
 The package depends on `libpam-systemd` and `dbus` (present on any
-stock Debian/Ubuntu server): liveswap runs your apps as systemd units
+stock Debian server): liveswap runs your apps as systemd units
 under the `hotserve` user's own service manager, which needs
 `pam_systemd` to start and `loginctl` to be kept alive without a
 login — the package enables that lingering for you.
@@ -164,7 +164,7 @@ an on-disk release. Full details, CI snippets, and every option:
 
 ## Roadmap
 
-- **Per-app sandboxing — shipped in two tiers; resource caps next.**
+- **Per-app sandboxing — shipped; resource caps next.**
   Every app runs as a transient unit under the hotserve user's own
   systemd manager (chosen over the system manager: a polkit grant to
   manage units is root-equivalent), and each unit carries systemd's
@@ -178,13 +178,12 @@ an on-disk release. Full details, CI snippets, and every option:
   unreadable — `PrivateTmp=`, `PrivateDevices=`, a read-only cgroupfs,
   no capabilities, and systemd's curated
   `SystemCallFilter=@system-service` — no containers, no bubblewrap.
-  On systemd ≥ 256 (Debian 13, Ubuntu 26.04) the unit also
-  gets a PID namespace (`PrivatePIDs=`): the *full* tier, where the
-  supervisor, the user manager and sibling apps are invisible and
-  unsignalable. Debian 12 and Ubuntu 24.04 get the *filesystem* tier
-  — everything above except the PID namespace, so a compromised app
-  can still `kill` same-UID processes (which restart) but cannot read
-  their files, sockets or `/proc` — with a warning at every launch.
+  The unit also gets a PID namespace (`PrivatePIDs=`, systemd 256+;
+  Debian 13 ships 257), so the supervisor, the user manager and
+  sibling apps are invisible and unsignalable. A host that cannot
+  deliver either namespace — a container, an LXC VPS, a kernel built
+  without them — gets no sandbox and says so at every launch, rather
+  than something weaker wearing the same name.
   Why the user namespace matters: under a shared UID the kernel would
   otherwise let any app walk the host through
   `/proc/<user-manager>/root`; see
@@ -290,8 +289,9 @@ pinned to commit SHAs.
 What keeps this honest: `govulncheck` gates every PR and runs weekly
 against the fresh vulnerability database (reachable-code analysis, all
 modules), every release is blocked until the full test matrix passes —
-including installing the actual `.deb` under systemd on Debian and
-Ubuntu — and any dependency bump has to survive all of the above
+including installing the actual `.deb` under systemd on Debian 13,
+on both architectures — and any dependency bump has to survive all of
+the above
 before it merges.
 
 ## License

@@ -1,11 +1,12 @@
 # DESIGN — per-app sandboxing (M8)
 
 Status: shipped (2026-08-30, #35 phase 1) as systemd's own per-unit
-sandboxing on the user-manager runner, in two probe-gated tiers —
-*filesystem* (user namespace + the mount/device/cgroup/seccomp/caps
-set; systemd ≥ 252, every cell of the support matrix) and *full*
-(filesystem + PID namespace; systemd ≥ 256: Debian 13, Ubuntu 26.04).
-Resource caps are phase 2. This document was the implementation brief
+sandboxing on the user-manager runner. **Narrowed 2026-09-01** to a
+single probe-gated tier, *full* (user namespace + PID namespace + the
+mount/device/cgroup/seccomp/caps set), when the support matrix became
+Debian 13 alone — see "Amendment: one host, one tier" below, which
+supersedes every two-tier statement in this document. Resource caps
+are phase 2. This document was the implementation brief
 for bubblewrap; what remains normative is the threat model, the
 behaviour specification (amended below where the measured mechanism
 differs), the config surface, the rollout/upgrade semantics and the
@@ -57,15 +58,15 @@ requirement below stands as the contract the sandbox path must keep.
 
 ## Behavior specification (normative)
 
-- Sandboxing MUST default to on (`sandbox auto`): the best tier the
-  user manager and kernel deliver, probed at start by running a
-  throwaway unit and checking the namespaces from inside (the manager
-  silently ignores `PrivatePIDs=` on a kernel without PID namespaces,
-  so accepting the property proves nothing). It MUST be configurable
-  globally and per app: `auto` (best tier, with a prominent WARN at
-  start and at every spawn that runs below *full*), `require` (start
-  fails unless the *full* tier is available — a weaker tier accepted
-  silently is the "looks configured, quietly weaker" trap), `off`.
+- Sandboxing MUST default to on (`sandbox auto`), probed at start by
+  running a throwaway unit and checking the namespaces from inside
+  (the manager silently ignores `PrivatePIDs=` on a kernel without PID
+  namespaces, so accepting the property proves nothing). It MUST be
+  configurable globally and per app: `auto` (sandbox where the host
+  delivers it, with a prominent WARN at start and at every spawn that
+  runs below *full*), `require` (start fails unless the *full* tier is
+  available — a weaker tier accepted silently is the "looks
+  configured, quietly weaker" trap), `off`.
 - The sandboxed filesystem view MUST be **deny-by-default**: an empty
   read-only tmpfs replaces the whole filesystem
   (`TemporaryFileSystem=/:ro`) and the only things that exist inside a
@@ -508,6 +509,16 @@ MUST here means adding its assertion in the same change.
   Defaults and the config surface are decided in #35.
 - Network egress control — kernel sandboxes cannot scope by hostname;
   document Deno/Node permission flags as the per-runtime option.
+  *Discharged 2026-09-01:* liveswap/README.md, "Runtime permissions",
+  with the layering stated (the sandbox is the kernel-enforced ceiling
+  decided by the Caddyfile; the runtime's `--allow-*` flags are the
+  app narrowing itself inside it, enforced in-process and therefore
+  not a substitute). Measured on Deno 2.8.3: `--allow-net=<addr:port>`
+  is sufficient for `deno serve` to bind and refuses every other
+  address, which also closes the sibling-localhost residual named in
+  DESIGN-threat-model.md for apps that adopt it. liveswap stays
+  runtime-agnostic — no `deno` app type, no flag synthesis, no
+  parsing of `command`.
 - Per-app UIDs — a later milestone behind a root-owned template or a
   minimal privileged helper; the unit's mount/PID namespaces deliver
   the file/process isolation without them.
@@ -546,3 +557,57 @@ MUST here means adding its assertion in the same change.
   a stated non-goal to defend against.
 - Landlock as a same-config fallback backend where userns is
   unavailable: keep the config surface compatible, defer the backend.
+
+## Amendment: one host, one tier (2026-09-01)
+
+The support matrix narrowed to **Debian 13** (systemd 257). Where this
+document says "two tiers", "the best tier", "*filesystem*" or names
+Debian 12 / Ubuntu, read the following instead. Nothing in the
+property set, the deny-by-default view, the config surface or the
+rollout semantics changes.
+
+**One tier is probed for.** `probeSandboxCapability` has a single
+candidate, *full*. A host either delivers both namespaces or reports
+`none`: `auto` launches bare with a WARN naming the residual,
+`require` refuses to start. There is deliberately no fallback rung —
+on a matrix of one, a second tier would be a path no supported host
+takes and no lane tests.
+
+**`filesystem` survives as a record, not a capability.** An instance
+started before this change may have `"sandbox":"filesystem"` in
+`state.json`. `validSandboxTierRecord` still accepts it and
+`sandboxProperties` still renders it, so such an instance relaunches
+at the tier it actually has. Reading it as `none` would silently drop
+a running app's isolation; reading it as `full` would silently claim
+one it never got. Both are the failure this document exists to
+prevent, so the value stays until every instance has redeployed.
+
+**The AppArmor profile is gone.** Debian's kernel does not restrict
+unprivileged user namespaces, so the profile granting `userns` to
+hotserve's user manager, and the wrapper it attached to by path, are
+removed. The residual they carried — the manager's children inheriting
+that permission, so an app under `sandbox off` could create user
+namespaces the distro default would refuse — goes with them.
+
+**The probe stays, and this is the load-bearing decision.** It was
+never a proxy for the systemd version, which is why removing version
+detection did not remove it: a container, an LXC VPS, or a kernel
+built without user namespaces presents a supported manager and still
+fails the unit. The probe is what keeps `"sandbox":"full"` a
+measurement rather than an inference from `/etc/os-release`.
+
+**Accepted costs**, both stated so they are not rediscovered as bugs:
+
+- A Debian 12 host that upgrades hotserve drops from *filesystem* to
+  `none` — not to a lesser sandbox, to no sandbox. It is loud (WARN at
+  every launch, `"sandbox":"none"` in status, `require` refusing to
+  start) but it is a real reduction, and it is what dropping support
+  means.
+- CI no longer exercises a userns-restricted kernel. GitHub's runners
+  boot an Ubuntu kernel, and the profile was what let the Debian cells
+  prove the sandbox under a real restriction; CI now sets
+  `kernel.apparmor_restrict_unprivileged_userns=0` to make the runner
+  behave like a Debian host. Readmitting Ubuntu would mean restoring
+  the profile, the wrapper, and that coverage together — the
+  measurements justifying all three are kept above rather than
+  deleted.

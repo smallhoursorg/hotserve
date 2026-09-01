@@ -240,6 +240,26 @@ func TestEnvFileMayNotLandInAnotherAppsView(t *testing.T) {
 			"blog": app("/etc/hotserve/blog.env", "/run/postgresql"),
 			"shop": app("/etc/hotserve/shop.env"),
 		}, ""},
+		// A neighbour's own dirs are bound into its unit without any
+		// extra_path naming them: shared/ read-WRITE, releases/
+		// read-only. Both are the same cross-app exposure by a shorter
+		// route, and neither loop above looks at them.
+		{"a sibling's shared dir is bound read-write into its unit", map[string]*AppConfig{
+			"blog": app(""),
+			"shop": app("/var/lib/liveswap/blog/shared/shop.env"),
+		}, "read and rewrite"},
+		{"a sibling's release dirs are bound too", map[string]*AppConfig{
+			"blog": app(""),
+			"shop": app("/var/lib/liveswap/blog/releases/v1/shop.env"),
+		}, "release dirs"},
+		{"an app's own shared dir is not cross-app", map[string]*AppConfig{
+			"blog": app(""),
+			"shop": app("/var/lib/liveswap/shop/shared/shop.env"),
+		}, ""},
+		{"an unsandboxed sibling's dirs add no exposure", map[string]*AppConfig{
+			"blog": func() *AppConfig { c := app(""); c.Sandbox = sandboxOff; return c }(),
+			"shop": app("/var/lib/liveswap/blog/shared/shop.env"),
+		}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := &App{
@@ -258,6 +278,46 @@ func TestEnvFileMayNotLandInAnotherAppsView(t *testing.T) {
 				t.Fatalf("refused for the wrong reason: %v", err)
 			}
 		})
+	}
+}
+
+// Promise: with sandboxing turned off GLOBALLY, the env-file isolation
+// rules do not reject the configuration. `sandbox off` in the liveswap
+// block leaves every app's own Sandbox field empty, so a check that
+// reads the raw per-app value sees "" — not "off" — and refuses to load
+// a config over views it is not building. The effective policy is the
+// only one that means anything here, and buildSpec resolves it the
+// same way (liveswap.go).
+func TestEnvFileIsolationHonoursTheGlobalSandboxSetting(t *testing.T) {
+	apps := func() map[string]*AppConfig {
+		blog := defaultedApp(t)
+		blog.ExtraPaths = []ExtraPathConfig{{Path: "/srv/common"}}
+		shop := defaultedApp(t)
+		shop.EnvFile = "/srv/common/shop.env"
+		return map[string]*AppConfig{"blog": blog, "shop": shop}
+	}
+	newApp := func(global string) *App {
+		return &App{
+			Root:              "/var/lib/liveswap",
+			Sandbox:           global,
+			ArtifactAllowlist: []string{"github.com/smallhoursorg/"},
+			DeployTrust:       githubTrust(),
+			Apps:              apps(),
+		}
+	}
+	// The control: the same config with sandboxing on must still be
+	// refused, or the case below proves nothing.
+	if err := newApp(sandboxAuto).Validate(); err == nil {
+		t.Fatal("sandbox auto: a sibling's extra_path covering an env_file must be refused")
+	}
+	if err := newApp(sandboxOff).Validate(); err != nil {
+		t.Fatalf("sandbox off globally: no unit gets a view, so nothing is exposed by one; refused anyway: %v", err)
+	}
+	// And the base-view branch, which consults no per-app field at all.
+	a := newApp(sandboxOff)
+	a.Apps["shop"].EnvFile = "/usr/local/etc/shop.env"
+	if err := a.Validate(); err != nil {
+		t.Fatalf("sandbox off globally: the base view is bound into no unit; refused anyway: %v", err)
 	}
 }
 

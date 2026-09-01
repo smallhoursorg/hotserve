@@ -26,13 +26,11 @@ license: Apache-2.0
 # gives that manager its runtime directory; without libpam-systemd it
 # cannot start at all. dbus: loginctl (lingering) needs the system bus.
 depends:
-  # No systemd version floor: the runner works on 252+ (Debian 12,
-  # Ubuntu 24.04), and the per-app sandbox is probe-gated at runtime
-  # into two tiers (full on 256+, filesystem below) rather than at
-  # install (DESIGN-threat-model.md, "The shared-UID rule"). No
-  # apparmor dependency either: the shipped profile only matters on
-  # hosts that restrict user namespaces (Ubuntu), where apparmor is
-  # already installed.
+  # No systemd version floor is declared even though the sandbox needs
+  # 256+ (Debian 13 ships 257): the per-app sandbox is probe-gated at
+  # runtime rather than at install, so a host that cannot deliver it
+  # still installs and still serves — it just reports `sandbox: none`
+  # (DESIGN-threat-model.md, "The shared-UID rule").
   - libpam-systemd
   - dbus
 
@@ -57,30 +55,6 @@ contents:
     type: config|noreplace
     file_info:
       mode: 0644
-  # Grants `userns` to the hotserve user's systemd manager, which the
-  # app sandbox needs and Ubuntu 24.04+ otherwise refuses to unconfined
-  # processes. Shipped here, NOT in /etc/apparmor.d: postinstall copies
-  # it there only where the host's parser accepts it (the `userns` rule
-  # needs AppArmor 4; Debian 12's 3.x parser rejects the file, and
-  # apparmor.service parses that whole directory at every boot — an
-  # unconditional install would break policy loading on a distro that
-  # does not even need the profile).
-  - src: packaging/apparmor/hotserve-user-manager
-    dst: /usr/share/hotserve/apparmor/hotserve-user-manager
-    file_info:
-      mode: 0644
-  # The wrapper the profile attaches to; user@<uid>.service for the
-  # hotserve user is started through it (postinstall drop-in).
-  # NOT world-executable: the AppArmor profile attaches to this path,
-  # so anyone able to execute it would enter a profile granting
-  # `userns` and get back the unprivileged user namespaces Ubuntu
-  # restricts host-wide. Shipped 0750 root:root and regrouped to
-  # hotserve by postinstall, once that group exists — dpkg unpacks
-  # before the account is created.
-  - src: packaging/user-manager.sh
-    dst: /usr/libexec/hotserve/user-manager
-    file_info:
-      mode: 0750
   - dst: /var/lib/hotserve
     type: dir
     file_info:
