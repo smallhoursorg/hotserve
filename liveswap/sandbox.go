@@ -764,6 +764,16 @@ func validateSandboxRoot(root string) error {
 			if pathWithin(r, b) {
 				return fmt.Errorf("root %q is inside %s, which is bound read-only into every app's sandbox — every app's data would be readable by every other; use a root outside the base view (the default is /var/lib/liveswap)", root, b)
 			}
+			// Overlap is symmetric here as it is for binds: a root that
+			// CONTAINS a base-view entry is the same exposure reached
+			// from the other side, because an app's directory is derived
+			// from the root and its name. `root /etc/ssl` passes the
+			// check above, and then an app called `certs` puts its
+			// releases and shared dir at /etc/ssl/certs — an entry every
+			// sandbox binds read-only and recursively.
+			if pathWithin(b, r) {
+				return fmt.Errorf("root %q contains %s, which is bound read-only into every app's sandbox — an app whose name lands on that path would have its releases and shared dir readable by every other app; use a root that neither sits inside nor contains a base-view entry (the default is /var/lib/liveswap)", root, b)
+			}
 		}
 	}
 	return nil
@@ -973,8 +983,15 @@ func validateEnvFileIsolation(a *App) error {
 					{od.shared, "shared dir", "read and rewrite"},
 					{od.releases, "release dirs", "read"},
 				} {
-					if pathWithin(f, d.path) {
-						return fmt.Errorf("app %s: env_file %q is inside app %s's %s %q, which is bound into %s's own sandbox — %s could %s it; move the env file outside the liveswap root (the documented location is /etc/hotserve)", name, cfg.EnvFile, other, d.what, d.path, other, other, d.rw)
+					// Both spellings, as the extra_path branch above:
+					// the env file is compared canonically, so a lexical
+					// app dir alone would miss it whenever the root is a
+					// symlink (/srv/liveswap -> /mnt/liveswap, an env
+					// file configured as /mnt/liveswap/blog/shared/...).
+					for _, dp := range absAndCanonical(d.path) {
+						if pathWithin(f, dp) {
+							return fmt.Errorf("app %s: env_file %q is inside app %s's %s %q, which is bound into %s's own sandbox — %s could %s it; move the env file outside the liveswap root (the documented location is /etc/hotserve)", name, cfg.EnvFile, other, d.what, d.path, other, other, d.rw)
+						}
 					}
 				}
 			}

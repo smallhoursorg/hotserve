@@ -3,6 +3,8 @@ package liveswap
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -278,6 +280,43 @@ func TestEnvFileMayNotLandInAnotherAppsView(t *testing.T) {
 				t.Fatalf("refused for the wrong reason: %v", err)
 			}
 		})
+	}
+}
+
+// Promise: a sibling's own directories are compared in BOTH spellings.
+// The env file is canonicalised before the comparison, so matching it
+// against a lexical app directory alone misses the case where the
+// liveswap root is a symlink — the app dir the operator configured and
+// the one the bind actually exposes are then different strings, and
+// only one of them is ever tested. The extra_path branch has always
+// canonicalised both sides; this is the same rule for the route added
+// alongside it.
+func TestEnvFileIsolationComparesBothSpellingsOfASiblingsDirs(t *testing.T) {
+	// A real symlinked root: <tmp>/link -> <tmp>/real, with blog's
+	// shared dir existing so EvalSymlinks has something to resolve.
+	tmp := t.TempDir()
+	real := filepath.Join(tmp, "real")
+	link := filepath.Join(tmp, "link")
+	must(t, os.MkdirAll(filepath.Join(real, "blog", "shared"), 0o750))
+	must(t, os.Symlink(real, link))
+
+	blog := defaultedApp(t)
+	shop := defaultedApp(t)
+	// Configured through the RESOLVED spelling, while the root — and so
+	// every derived app dir — is the link.
+	shop.EnvFile = filepath.Join(real, "blog", "shared", "shop.env")
+	a := &App{
+		Root:              link,
+		ArtifactAllowlist: []string{"github.com/smallhoursorg/"},
+		DeployTrust:       githubTrust(),
+		Apps:              map[string]*AppConfig{"blog": blog, "shop": shop},
+	}
+	err := a.Validate()
+	if err == nil {
+		t.Fatal("accepted an env_file inside a sibling's shared dir reached through the root's other spelling; blog's bind exposes and can rewrite it")
+	}
+	if !strings.Contains(err.Error(), "shared dir") {
+		t.Fatalf("refused for the wrong reason: %v", err)
 	}
 }
 

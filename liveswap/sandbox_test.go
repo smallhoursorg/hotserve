@@ -1647,6 +1647,17 @@ func TestBindSourceInsideTheBaseViewRefused(t *testing.T) {
 			t.Errorf("root %s accepted: every app's data would be readable by every other app", bad)
 		}
 	}
+	// Overlap is symmetric: a root that CONTAINS a base-view entry is
+	// the same exposure from the other side, because an app's own
+	// directory is derived from the root plus its name. `root /etc/ssl`
+	// sits inside nothing, and then an app named `certs` lands its
+	// releases and shared dir on /etc/ssl/certs — bound read-only and
+	// recursively into every sandbox on the box.
+	for _, bad := range []string{"/etc/ssl", "/etc", "/"} {
+		if err := validateSandboxRoot(bad); err == nil {
+			t.Errorf("root %s accepted: it contains a base-view entry, so an app named for that entry would be readable by every other app", bad)
+		}
+	}
 	for _, ok := range []string{"/var/lib/liveswap", "/srv/apps", "/mnt/apps", "/tmp/liveswap-test"} {
 		if err := validateSandboxRoot(ok); err != nil {
 			t.Errorf("root %s refused: %v", ok, err)
