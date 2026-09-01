@@ -286,8 +286,12 @@ all of them, so inside a unit `ls /etc` shows however many this host
 actually has — a dozen or so — and `ls /var/lib` shows exactly one,
 the liveswap root.
 
-The working directory is the release dir and `HOME` is `shared/`; both
-are writable. The network namespace is shared by design — the app
+The working directory is the release dir and `HOME` defaults to
+`shared/`; both are writable. `HOME` is applied before `env_file` and
+inline `env`, so you can point it elsewhere — at an `extra_path` you
+declared `rw`, say. Point it somewhere the sandbox does not bind and
+the app gets a `HOME` that does not exist inside its unit; liveswap
+warns at every launch rather than refusing, since you asked for it. The network namespace is shared by design — the app
 binds `127.0.0.1:$PORT` as before, and sibling ports remain reachable.
 
 This closes the routes the threat model ranks first: reading the

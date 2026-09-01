@@ -779,6 +779,40 @@ func validateSandboxRoot(root string) error {
 	return nil
 }
 
+// homeOutsideView reports an operator-set HOME that the unit's view
+// does not contain. buildEnv applies the sandbox HOME (the shared dir)
+// BEFORE env_file and inline env so an operator can point it elsewhere
+// — at an rw extra_path, say — which is deliberate. What is not
+// deliberate is doing it by accident: a HOME that is absent inside the
+// unit surfaces as an ENOENT from whichever runtime touches $HOME
+// first, naming no cause. The last assignment wins, as it does for
+// systemd's Environment=.
+func homeOutsideView(env []string, s *sandboxSpec) (string, bool) {
+	if s == nil || s.tier == sandboxNone {
+		return "", false // no view to be outside of
+	}
+	home := ""
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "HOME="); ok {
+			home = v
+		}
+	}
+	if home == "" {
+		return "", false
+	}
+	// Resolved, because the view is recognised by its bind sources and
+	// a symlink would walk straight past a lexical comparison — the
+	// same reason resolveBindSources canonicalises before checking.
+	resolved := home
+	if c, err := filepath.EvalSymlinks(home); err == nil {
+		resolved = c
+	}
+	if s.inView(resolved) {
+		return "", false
+	}
+	return home, true
+}
+
 // pathWithin reports whether p equals dir or lies beneath it.
 func pathWithin(p, dir string) bool {
 	return p == dir || strings.HasPrefix(p, strings.TrimSuffix(dir, "/")+"/")

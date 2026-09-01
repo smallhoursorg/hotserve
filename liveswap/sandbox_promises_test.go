@@ -283,6 +283,66 @@ func TestEnvFileMayNotLandInAnotherAppsView(t *testing.T) {
 	}
 }
 
+// Promise: the sandbox HOME is a DEFAULT, not a fixed value — buildEnv
+// applies it before env_file and inline env on purpose — but an
+// override the view does not contain is reported rather than left to
+// surface as an unexplained ENOENT from the first runtime that touches
+// $HOME. DESIGN-sandbox.md, "Nothing in the app's environment may name
+// a path outside its view".
+func TestHomeOutsideTheViewIsReported(t *testing.T) {
+	root := t.TempDir()
+	appDir := filepath.Join(root, "blog")
+	release := filepath.Join(appDir, "releases", "v1")
+	shared := filepath.Join(appDir, "shared")
+	extra := filepath.Join(root, "..", "cache-blog")
+	extra, err := filepath.Abs(extra)
+	must(t, err)
+	for _, d := range []string{release, shared, extra} {
+		must(t, os.MkdirAll(d, 0o750))
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(extra) })
+	sb := &sandboxSpec{
+		tier: sandboxFull, root: root, appDir: appDir, appName: "blog",
+		writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}},
+		extra:    []extraPath{{path: extra, rw: true}},
+	}
+	env := func(home string) []string {
+		return []string{"PATH=/usr/bin", "HOME=" + home, "PORT=8080"}
+	}
+	for _, tc := range []struct {
+		name string
+		home string
+		want bool
+	}{
+		{"the default shared dir is in view", shared, false},
+		{"a release dir is in view", release, false},
+		{"an rw extra_path is a legitimate override", extra, false},
+		{"the base view is in view", "/usr/share", false},
+		{"a path nothing binds is not", "/opt/app", true},
+		{"the app dir root is not bound", appDir, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, outside := homeOutsideView(env(tc.home), sb)
+			if outside != tc.want {
+				t.Fatalf("homeOutsideView(%q) = %q,%v; want outside=%v", tc.home, got, outside, tc.want)
+			}
+			if outside && got != tc.home {
+				t.Fatalf("reported %q, want the configured spelling %q", got, tc.home)
+			}
+		})
+	}
+	// The LAST assignment wins, as it does for systemd's Environment=:
+	// buildEnv appends the sandbox HOME first, then env_file, then
+	// inline env, so checking the first one would clear an override.
+	if _, outside := homeOutsideView([]string{"HOME=" + shared, "HOME=/opt/app"}, sb); !outside {
+		t.Fatal("an override appended after the default must be the one checked")
+	}
+	// An unsandboxed launch has no view to be outside of.
+	if _, outside := homeOutsideView(env("/opt/app"), nil); outside {
+		t.Fatal("a bare launch has no view; nothing can be outside it")
+	}
+}
+
 // Promise: a sibling's own directories are compared in BOTH spellings.
 // The env file is canonicalised before the comparison, so matching it
 // against a lexical app directory alone misses the case where the

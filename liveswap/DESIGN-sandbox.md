@@ -189,9 +189,17 @@ requirement below stands as the contract the sandbox path must keep.
   other supervisor secrets) into every app. The sandbox path MUST NOT
   regress this.
 - Nothing in the app's environment may name a path outside its view.
-  `HOME` MUST be set to a writable in-sandbox path (the app's shared
+  `HOME` MUST DEFAULT to a writable in-sandbox path (the app's shared
   dir): inherited it points at `/var/lib/hotserve`, and every runtime
-  that touches `$HOME` (npm, corepack, pip) would ENOENT.
+  that touches `$HOME` (npm, corepack, pip) would ENOENT. It is applied
+  before `env_file` and inline `env`, so an operator can still point it
+  elsewhere — deliberately, since an app may want its cache on another
+  bound path. An override that lands OUTSIDE the view is not refused
+  (the operator asked for it, and a config-load check cannot see a view
+  that is built per launch) but MUST be reported at launch, or the app
+  fails later with an ENOENT that names no cause.
+  *Amended 2026-09-01: this bullet said "MUST be set", which the
+  implementation never did — the override is intentional.*
   `XDG_DATA_HOME` and `XDG_CONFIG_HOME` MUST NOT be inherited —
   *amended 2026-08-31, this bullet previously said they must be set*.
   Leaving them unset is what satisfies the rule: the XDG base-directory

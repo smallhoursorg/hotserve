@@ -147,13 +147,16 @@ an on-disk release. Full details, CI snippets, and every option:
   the parts of the OS it needs to run, and whatever it was explicitly
   given. hotserve's keys, sockets and env files, the other apps, and
   the rest of the host are not made unreadable — they are *absent*.
-  On systemd ≥ 256 the app also gets its own PID namespace, so
-  siblings are invisible rather than merely unreadable. What is *not*
-  claimed: below systemd 256 the host process list is still visible in
-  `/proc`, even though other processes' contents are not. What stays
-  shared by design is the network namespace: sibling `127.0.0.1` ports
-  are reachable, and on older systemd same-UID processes can still be
-  signalled. Details and the rollout rules:
+  The app also gets its own PID namespace, so siblings are invisible
+  rather than merely unreadable. What is *not* claimed: both
+  namespaces are required, and a host that cannot deliver them gets no
+  per-unit sandbox at all — `"sandbox": "none"`, warned at every
+  launch, with sibling files, sockets and process contents exposed as
+  they were before this existed. There is no middle tier. What stays
+  shared by design even when the sandbox is on is the network
+  namespace: sibling `127.0.0.1` ports are reachable (a runtime's own
+  permission flags can close that — see liveswap's "Runtime
+  permissions"). Details and the rollout rules:
   [liveswap/README.md](liveswap/README.md#sandbox); the reasoning:
   [DESIGN-threat-model.md](DESIGN-threat-model.md).
 - **Deploys are authenticated without a shared secret.** A deploy

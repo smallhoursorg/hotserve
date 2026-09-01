@@ -394,6 +394,13 @@ func (r *systemdRunner) unitFor(spec startSpec, oneshot bool) (unitSpec, error) 
 		// silently: an extra_path the app was promised and did not get
 		// is the difference between "my database is down" and "my
 		// database socket was never in my view".
+		if home, outside := homeOutsideView(spec.env, spec.sandbox); outside {
+			r.log().Warn("HOME is set to a path the sandbox does not bind; it does not exist inside the unit",
+				zap.String("app", spec.app),
+				zap.String("home", home),
+				zap.String("effect", "any runtime that touches $HOME (npm, corepack, pip) will fail with ENOENT naming no cause"),
+				zap.String("fix", "leave HOME unset to get the app's shared dir, or declare the path as an rw extra_path"))
+		}
 		if len(spec.sandbox.absentExtra) > 0 {
 			r.log().Warn("extra_path does not exist on the host; it is absent from the app's sandbox",
 				zap.String("app", spec.app),
