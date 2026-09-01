@@ -391,6 +391,13 @@ func (cfg *AppConfig) applyDefaults(repl *caddy.Replacer) {
 	for k, v := range cfg.Env {
 		cfg.Env[k] = repl.ReplaceKnown(v, "")
 	}
+	// extra_path too, or the documented "{env.*} resolves at config
+	// load" rule holds for every path option except the newest one —
+	// and `extra_path {env.DB_SOCKET_DIR}` reaches Validate as a
+	// literal and is refused for not being absolute.
+	for i, e := range cfg.ExtraPaths {
+		cfg.ExtraPaths[i].Path = repl.ReplaceKnown(e.Path, "")
+	}
 	if cfg.HealthPath == "" {
 		cfg.HealthPath = "/health"
 	}

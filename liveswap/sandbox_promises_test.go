@@ -8,6 +8,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/caddyserver/caddy/v2"
 )
 
 // Each test in this file pins ONE normative promise from
@@ -340,6 +342,34 @@ func TestHomeOutsideTheViewIsReported(t *testing.T) {
 	// An unsandboxed launch has no view to be outside of.
 	if _, outside := homeOutsideView(env("/opt/app"), nil); outside {
 		t.Fatal("a bare launch has no view; nothing can be outside it")
+	}
+}
+
+// Promise: `{env.*}` resolves at config load for extra_path as it does
+// for every other path option (liveswap/README.md). A literal reaching
+// Validate is refused for not being absolute, so the failure is a
+// config that will not load rather than a path quietly unexpanded.
+func TestExtraPathResolvesConfigLoadPlaceholders(t *testing.T) {
+	t.Setenv("DB_SOCKET_DIR", "/run/postgresql")
+	cfg := defaultedApp(t)
+	cfg.ExtraPaths = []ExtraPathConfig{{Path: "{env.DB_SOCKET_DIR}"}, {Path: "/var/cache/blog", Writable: true}}
+	cfg.applyDefaults(caddy.NewReplacer())
+	if got := cfg.ExtraPaths[0].Path; got != "/run/postgresql" {
+		t.Fatalf("extra_path[0] = %q, want the expanded /run/postgresql", got)
+	}
+	if got := cfg.ExtraPaths[1].Path; got != "/var/cache/blog" {
+		t.Fatalf("a literal extra_path must survive expansion unchanged, got %q", got)
+	}
+	// And it must reach Validate expanded: unexpanded it is not
+	// absolute, so the whole config would be refused.
+	a := &App{
+		Root:              "/var/lib/liveswap",
+		ArtifactAllowlist: []string{"github.com/smallhoursorg/"},
+		DeployTrust:       githubTrust(),
+		Apps:              map[string]*AppConfig{"blog": cfg},
+	}
+	if err := a.Validate(); err != nil {
+		t.Fatalf("a config whose extra_path came from {env.*} must load: %v", err)
 	}
 }
 
