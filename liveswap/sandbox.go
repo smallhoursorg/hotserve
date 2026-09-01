@@ -296,13 +296,6 @@ type sandboxSpec struct {
 	// app would be binding another's data.
 	appDir  string
 	appName string
-	// absentExtra are the extra_paths that did not exist when this unit
-	// was launched. They are bound with IgnoreENOENT (systemd_dbus.go)
-	// so a boot-order race — the documented /run/postgresql recipe,
-	// where postgres creates the directory from its own unit — starts
-	// the app instead of failing it. Filled by resolveBindSources and
-	// logged by the runner: tolerated is not the same as silent.
-	absentExtra []string
 }
 
 // resolveBindSources resolves every path this unit will bind and
@@ -411,23 +404,16 @@ func (s *sandboxSpec) resolveBindSources() error {
 			s.writable[i].source = resolved
 		}
 	}
-	s.absentExtra = nil
 	for i, e := range s.extra {
 		resolved, err := filepath.EvalSymlinks(e.path)
-		if err != nil {
-			// Absent is tolerated, not fatal: config load already
-			// accepted a path that does not exist yet, and the bind
-			// carries IgnoreENOENT so the unit still starts. The caller
-			// warns. Any other error (a permission denial on a parent)
-			// is left alone here for the same reason it always was —
-			// the path is checked as written at config load.
-			if errors.Is(err, os.ErrNotExist) {
-				s.absentExtra = append(s.absentExtra, e.path)
-			}
+		if err != nil || resolved == e.path {
+			// Absent (checked as written at config load), or itself.
+			// An absent source is not tolerated — the bind is
+			// mandatory, so the manager refuses the unit rather than
+			// dropping it, which is what keeps an app from serving
+			// permanently blind to a path it declared. Nothing to
+			// resolve here either way.
 			continue
-		}
-		if resolved == e.path {
-			continue // itself
 		}
 		if err := checkExtraPathContainment(resolved, s.root, rootC); err != nil {
 			return fmt.Errorf("refusing to launch sandboxed: extra_path %q resolves to %q: %w", e.path, resolved, err)

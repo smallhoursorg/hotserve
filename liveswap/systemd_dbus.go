@@ -295,14 +295,15 @@ func sandboxProperties(s *sandboxSpec) []sddbus.Property {
 		}
 		// Destination is always the configured path: that is where the
 		// app expects to find it, whatever it resolves to on the host.
-		// IgnoreENOENT, as for the base view: an extra_path is accepted
-		// at config load before it exists (the documented
-		// /run/postgresql recipe — postgres creates it from its own
-		// unit), so failing the whole unit on a boot-order race would
-		// kill an app that only needed to retry its connection.
-		// resolveBindSources records the absent ones and the runner
-		// warns, so this is tolerant rather than silent.
-		m := bindMount{Source: src, Destination: e.path, IgnoreENOENT: true, Flags: mountRecursive}
+		// Mandatory, unlike the base view. IgnoreENOENT would not
+		// DEFER a missing extra_path, it would DROP it: the mount
+		// namespace is built once and / is a private tmpfs, so a
+		// directory the host gains a moment later can never appear
+		// inside a unit already running. The app would come up
+		// permanently missing a path it declared, and no retry of its
+		// own could recover. The manager refusing the unit is what
+		// makes that impossible.
+		m := bindMount{Source: src, Destination: e.path, Flags: mountRecursive}
 		if e.rw {
 			writable = append(writable, m)
 		} else {

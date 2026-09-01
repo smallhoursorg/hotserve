@@ -390,22 +390,17 @@ func (r *systemdRunner) unitFor(spec startSpec, oneshot bool) (unitSpec, error) 
 		if err := spec.sandbox.resolveBindSources(); err != nil {
 			return unitSpec{}, err
 		}
-		// Bound with IgnoreENOENT so the unit still starts, but never
-		// silently: an extra_path the app was promised and did not get
-		// is the difference between "my database is down" and "my
-		// database socket was never in my view".
+		// HOME is a default buildEnv applies before env_file and inline
+		// env, so an operator may point it elsewhere on purpose. One
+		// pointed outside the view is allowed and reported: it is the
+		// difference between "npm failed" and "npm's HOME was never in
+		// my view".
 		if home, outside := homeOutsideView(spec.env, spec.sandbox); outside {
 			r.log().Warn("HOME is set to a path the sandbox does not bind; it does not exist inside the unit",
 				zap.String("app", spec.app),
 				zap.String("home", home),
 				zap.String("effect", "any runtime that touches $HOME (npm, corepack, pip) will fail with ENOENT naming no cause"),
 				zap.String("fix", "leave HOME unset to get the app's shared dir, or declare the path as an rw extra_path"))
-		}
-		if len(spec.sandbox.absentExtra) > 0 {
-			r.log().Warn("extra_path does not exist on the host; it is absent from the app's sandbox",
-				zap.String("app", spec.app),
-				zap.Strings("extra_path", spec.sandbox.absentExtra),
-				zap.String("effect", "the unit starts without it; if the app needs it, expect a connection or file error from the app itself"))
 		}
 		// LookPath above ran in *this* process's view of the filesystem,
 		// which under a deny-by-default sandbox is not the unit's: a

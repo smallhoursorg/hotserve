@@ -284,11 +284,11 @@ func TestSandboxPropertiesFilesystemAndFull(t *testing.T) {
 			t.Errorf("BindPaths lacks a recursive, mandatory bind of %s at its real path: %+v", p, rw)
 		}
 	}
-	// An extra_path is optional, rw or not: config load accepts one
-	// that does not exist yet, so the launch must not contradict it.
-	// The runner warns instead (resolveBindSources records it).
-	if b, ok := rw["/var/cache/blog"]; !ok || b.Source != "/var/cache/blog" || b.Flags != mountRecursive || !b.IgnoreENOENT {
-		t.Errorf("rw extra_path must be a recursive OPTIONAL bind at its real path: %+v", rw)
+	// An extra_path is mandatory, rw or not: an optional bind would be
+	// DROPPED when its source is missing, not deferred, and the app
+	// would serve permanently without a path it declared.
+	if b, ok := rw["/var/cache/blog"]; !ok || b.Source != "/var/cache/blog" || b.Flags != mountRecursive || b.IgnoreENOENT {
+		t.Errorf("rw extra_path must be a recursive MANDATORY bind at its real path: %+v", rw)
 	}
 	ro := binds("BindReadOnlyPaths")
 	// The base view: every entry present, and every one optional — no
@@ -315,8 +315,8 @@ func TestSandboxPropertiesFilesystemAndFull(t *testing.T) {
 	if _, whole := ro["/etc"]; whole {
 		t.Error("/etc is bound wholesale: every app would see every other app's env_file")
 	}
-	if b, ok := ro["/run/postgresql"]; !ok || b.Source != "/run/postgresql" || !b.IgnoreENOENT {
-		t.Errorf("ro extra_path missing, or mandatory when it should be optional: %+v", ro)
+	if b, ok := ro["/run/postgresql"]; !ok || b.Source != "/run/postgresql" || b.IgnoreENOENT {
+		t.Errorf("ro extra_path missing, or optional when it must be mandatory: %+v", ro)
 	}
 	if _, leaked := rw["/run/postgresql"]; leaked {
 		t.Error("a read-only extra_path must not be in BindPaths")
@@ -446,20 +446,19 @@ func TestSandboxSpecFor(t *testing.T) {
 	}
 }
 
-// An extra_path that does not exist at launch is tolerated — it is
-// bound with IgnoreENOENT so a boot-order race (the documented
-// /run/postgresql recipe: postgres creates the directory from its own
-// unit) starts the app instead of failing its unit. Tolerated is not
-// silent: resolveBindSources records it so the runner can warn, and a
-// recorded-but-never-reported absence would be exactly the quiet
-// degradation this design refuses.
-func TestAbsentExtraPathIsToleratedAndRecorded(t *testing.T) {
+// A declared extra_path that is not on the host refuses the launch,
+// and the refusal names the path. Tolerating it would not defer the
+// bind, it would drop it: the mount namespace is built once and / is a
+// private tmpfs, so a directory the host gains a moment later can
+// never appear inside a unit already running — the app would serve
+// permanently without a path it declared, and no retry of its own
+// could recover. The app's own dirs are refused for the same reason.
+func TestAbsentExtraPathRefusesTheLaunch(t *testing.T) {
 	root := t.TempDir()
 	appDir := filepath.Join(root, "blog")
 	release := filepath.Join(appDir, "releases", "v1")
 	shared := filepath.Join(appDir, "shared")
-	present := filepath.Join(root, "..", "present-extra")
-	present, err := filepath.Abs(present)
+	present, err := filepath.Abs(filepath.Join(root, "..", "present-extra"))
 	must(t, err)
 	for _, d := range []string{release, shared, present} {
 		must(t, os.MkdirAll(d, 0o750))
@@ -474,26 +473,17 @@ func TestAbsentExtraPathIsToleratedAndRecorded(t *testing.T) {
 			extra:    extras,
 		}
 	}
-
-	// Present only: nothing to report.
-	s := newSpec(extraPath{path: present})
+	// Resolution tolerates an absent source — there is nothing to
+	// resolve — and the mandatory bind is what refuses the launch, via
+	// the manager. So the guarantee lives in the rendered properties:
+	// nothing outside the base view may be optional, because an
+	// optional bind with a missing source is DROPPED, not deferred.
+	s := newSpec(extraPath{path: present}, extraPath{path: absent, rw: true})
 	must(t, s.resolveBindSources())
-	if len(s.absentExtra) != 0 {
-		t.Fatalf("an extra_path that exists must not be reported absent: %v", s.absentExtra)
+	base := map[string]bool{}
+	for _, p := range sandboxBaseView {
+		base[p] = true
 	}
-
-	// Absent: the launch still succeeds, and the path is named.
-	s = newSpec(extraPath{path: present}, extraPath{path: absent, rw: true})
-	if err := s.resolveBindSources(); err != nil {
-		t.Fatalf("an absent extra_path must not fail the launch: %v", err)
-	}
-	if !reflect.DeepEqual(s.absentExtra, []string{absent}) {
-		t.Fatalf("absentExtra = %v, want exactly [%s]", s.absentExtra, absent)
-	}
-
-	// And the rendered unit marks every extra optional, so systemd does
-	// not fail the unit on the missing mount the warning describes.
-	byDest := map[string]bindMount{}
 	for _, name := range []string{"BindPaths", "BindReadOnlyPaths"} {
 		for _, prop := range sandboxProperties(s) {
 			if prop.Name != name {
@@ -504,22 +494,11 @@ func TestAbsentExtraPathIsToleratedAndRecorded(t *testing.T) {
 				t.Fatalf("%s is not a []bindMount", name)
 			}
 			for _, m := range mounts {
-				byDest[m.Destination] = m
+				if m.IgnoreENOENT && !base[m.Destination] {
+					t.Errorf("%s is an optional bind but is not a base-view entry: a missing source would be dropped, not deferred", m.Destination)
+				}
 			}
 		}
-	}
-	for _, e := range []string{present, absent} {
-		b, ok := byDest[e]
-		if !ok {
-			t.Fatalf("extra_path %s is not in the rendered view: %v", e, byDest)
-		}
-		if !b.IgnoreENOENT {
-			t.Errorf("extra_path %s is a mandatory bind: a missing one would fail the whole unit", e)
-		}
-	}
-	// The app's own directories keep the opposite rule.
-	if b, ok := byDest[release]; !ok || b.IgnoreENOENT {
-		t.Errorf("the release bind must stay mandatory: %+v", b)
 	}
 }
 

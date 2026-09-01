@@ -187,7 +187,7 @@ resolved at config load.
 | `keep` | `5` | Release dirs retained (GC after success). The running version is always kept, so this can be `keep+1` after rolling back to an old release |
 | `max_artifact_size` | `100MB` | Download cap; decompressed cap is 10× |
 | `sandbox` | `auto` | Per-unit sandbox policy: `auto` (sandbox where the host delivers it, warning at every launch where it does not), `require` (sandbox or refuse to start — see the hazard under [Sandbox](#sandbox)), `off`. Global default, per-app override |
-| `extra_path <path> [rw]` | — | Host path the sandboxed app may see besides its own dirs; read-only unless `rw`. Repeatable. The recipe for a same-box database socket dir (`/run/postgresql`). Need not exist yet — see below |
+| `extra_path <path> [rw]` | — | Host path the sandboxed app may see besides its own dirs; read-only unless `rw`. Repeatable. The recipe for a same-box database socket dir (`/run/postgresql`). Must exist when the app starts — see below |
 
 ## Watchdog
 
@@ -382,16 +382,22 @@ app blog {
 }
 ```
 
-**An `extra_path` that does not exist yet is allowed, at load *and* at
-launch.** `/run/postgresql` is created by postgres' own unit, so on a
-reboot hotserve can recover an app before the directory is there.
-Failing the unit on that race would kill an app that only needed to
-retry its connection, so the bind is optional and the app starts
-without it — with a WARN naming the path, so a permanent typo does not
-pass as a temporary race. The app's **own** release and `shared` dirs
-are the opposite: mandatory, because a missing one is a broken deploy,
-not a race, and starting without it would hand the app an empty tmpfs
-where its code should be.
+**An `extra_path` must exist when the app starts.** Config load cannot
+require it — the config is read once, and `/run/postgresql` is created
+by postgres' own unit — so it is the unit start that fails, and the
+manager's error in the journal is what names the path. This is not
+pedantry: a unit's mount namespace is built once and
+its `/` is a private tmpfs, so a bind whose source is missing is
+**dropped, not deferred**. A directory the host gains a second later
+can never appear inside a unit that is already running, so an app
+started without it would serve permanently blind to it, with no retry
+of its own able to recover. Failing the launch is the recoverable
+option: a deploy falls back to the version still serving, and the
+journal names what was missing.
+
+If hotserve can genuinely start before the service that creates the
+directory, order it in systemd — add an `After=` drop-in to
+`hotserve.service` — rather than leaving it to the race.
 
 Two kinds of path are refused, each with an error saying which:
 inside the **liveswap root** (the app already sees its own release and
