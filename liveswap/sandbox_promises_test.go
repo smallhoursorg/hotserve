@@ -373,6 +373,46 @@ func TestExtraPathResolvesConfigLoadPlaceholders(t *testing.T) {
 	}
 }
 
+// Promise: an env_file that does not exist YET is still compared in
+// both spellings. env_file is allowed to be absent until the first
+// deploy, and EvalSymlinks fails on a missing leaf — so resolving the
+// whole path would hand back only the lexical spelling for exactly the
+// configurations that need checking. The link lives in the parent.
+func TestEnvFileIsolationResolvesASymlinkedParentOfAMissingFile(t *testing.T) {
+	base, err := os.MkdirTemp("/var", "envparent-")
+	if err != nil {
+		t.Skipf("no writable dir outside the refused prefixes: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	common := filepath.Join(base, "common")
+	must(t, os.MkdirAll(common, 0o750))
+	link := filepath.Join(base, "link")
+	must(t, os.Symlink(common, link))
+
+	blog := defaultedApp(t)
+	blog.ExtraPaths = []ExtraPathConfig{{Path: common}}
+	shop := defaultedApp(t)
+	// Through the link, and the file itself does not exist yet — the
+	// normal state before a first deploy writes it.
+	shop.EnvFile = filepath.Join(link, "shop.env")
+	if _, err := os.Stat(shop.EnvFile); !os.IsNotExist(err) {
+		t.Fatalf("the env file must not exist for this case to mean anything: %v", err)
+	}
+	a := &App{
+		Root:              "/var/lib/liveswap",
+		ArtifactAllowlist: []string{"github.com/smallhoursorg/"},
+		DeployTrust:       githubTrust(),
+		Apps:              map[string]*AppConfig{"blog": blog, "shop": shop},
+	}
+	err = a.Validate()
+	if err == nil {
+		t.Fatal("accepted an env_file whose parent links into a sibling's extra_path; blog would read it the moment it is created")
+	}
+	if !strings.Contains(err.Error(), "extra_path") {
+		t.Fatalf("refused for the wrong reason: %v", err)
+	}
+}
+
 // Promise: a sibling's own directories are compared in BOTH spellings.
 // The env file is canonicalised before the comparison, so matching it
 // against a lexical app directory alone misses the case where the

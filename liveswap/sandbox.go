@@ -924,10 +924,38 @@ func absAndCanonical(p string) []string {
 	}
 	p = filepath.Clean(p)
 	out := []string{p}
-	if c, err := filepath.EvalSymlinks(p); err == nil && c != p {
+	if c := canonicalDeepest(p); c != p {
 		out = append(out, c)
 	}
 	return out
+}
+
+// canonicalDeepest is EvalSymlinks for a path whose leaf may not exist
+// yet: it resolves the deepest ancestor that does and re-appends the
+// rest unchanged, falling back to p when nothing resolves.
+//
+// EvalSymlinks fails outright on a missing final component, and an
+// env_file is explicitly allowed to be absent until the first deploy —
+// so resolving the whole path would silently give back only the
+// lexical spelling for exactly the configurations that need checking.
+// With `/safe/link -> /srv/common` and `env_file /safe/link/shop.env`
+// not yet created, a sibling's `extra_path /srv/common` exposes that
+// file the moment it appears, while a lexical comparison sees two
+// unrelated strings. The link is in the PARENT, which is why the
+// deepest existing ancestor is the thing to resolve.
+func canonicalDeepest(p string) string {
+	rest := ""
+	for cur := p; ; {
+		if c, err := filepath.EvalSymlinks(cur); err == nil {
+			return filepath.Join(c, rest)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return p // reached the root without resolving anything
+		}
+		rest = filepath.Join(filepath.Base(cur), rest)
+		cur = parent
+	}
 }
 
 // validateEnvFileIsolation refuses a configuration in which one app's
