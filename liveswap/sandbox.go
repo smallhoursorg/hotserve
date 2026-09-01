@@ -68,9 +68,34 @@ func (t sandboxTier) String() string {
 	}
 }
 
+// validSandboxTierRecord accepts the values state.json may legitimately
+// hold for an instance's tier. "" is the important one: it is a record
+// written before sandboxing existed, and reading it as none is the
+// documented rollout contract — such an app relaunches bare and engages
+// on its next deploy.
+//
+// Anything else non-empty is corruption or tampering, and reading THAT
+// as none would relaunch the app with no sandbox at all, silently: a
+// one-character typo (`"ful"`) would cost an app its isolation while
+// the status endpoint honestly reported `none`. A syntactically corrupt
+// state.json is already a permanent recovery error ("never silently
+// reset", app.go); a semantically corrupt one is the same class of
+// problem and gets the same answer, rather than the opposite one.
+func validSandboxTierRecord(s string) error {
+	switch s {
+	case "", sandboxNone.String(), sandboxFilesystem.String(), sandboxFull.String():
+		return nil
+	}
+	return fmt.Errorf("recorded sandbox tier %q is not one of %q, %q or %q (or empty, for a record written before sandboxing): refusing to relaunch, because reading it as %q would silently drop this app's sandbox",
+		s, sandboxNone, sandboxFilesystem, sandboxFull, sandboxNone)
+}
+
 // parseSandboxTier is the inverse of String, for the persisted
-// disposition; anything unknown (including "") is none — the safe
-// reading of an older state.json, which relaunches bare.
+// disposition. Anything unknown (including "") reads as none; callers
+// that LAUNCH from a record must have validated it with
+// validSandboxTierRecord first, so that only ever means the legacy
+// empty value. Callers that merely describe a running unit (the status
+// endpoint, Reattach) can take the lenient reading.
 func parseSandboxTier(s string) sandboxTier {
 	switch s {
 	case "filesystem":
@@ -778,12 +803,6 @@ func warnEnvFileInView(logger *zap.Logger, specs map[string]*appSpec) {
 	if logger == nil {
 		return
 	}
-	// An env_file is absent from every view unless something names its
-	// directory — and an extra_path is something. This is a cross-app
-	// question, so it is answered here, at config load, over the whole
-	// set, and recomputed on every reload; it is a warning about a
-	// declaration, never state carried into a unit, so unlike the
-	// derived hidden set this replaced it cannot go stale.
 	abs := func(p string) string {
 		if p == "" {
 			return ""
@@ -796,25 +815,6 @@ func warnEnvFileInView(logger *zap.Logger, specs map[string]*appSpec) {
 			p = a
 		}
 		return filepath.Clean(p)
-	}
-	for name, spec := range specs {
-		if spec.sandboxMode == sandboxOff {
-			continue
-		}
-		for _, e := range spec.extraPaths {
-			for other, os := range specs {
-				if other == name || os.envFile == "" {
-					continue
-				}
-				f := abs(os.envFile)
-				if f != "" && pathWithin(f, abs(e.path)) {
-					logger.Warn("an extra_path puts another app's env_file inside this app's sandbox",
-						zap.String("app", name), zap.String("extra_path", e.path),
-						zap.String("other_app", other), zap.String("env_file", f),
-						zap.String("fix", "narrow the extra_path, or move that env_file outside it (the documented location is /etc/hotserve, which no extra_path may name)"))
-				}
-			}
-		}
 	}
 	for name, spec := range specs {
 		if spec.envFile == "" || spec.sandboxMode == sandboxOff {
@@ -835,4 +835,79 @@ func warnEnvFileInView(logger *zap.Logger, specs map[string]*appSpec) {
 				zap.String("fix", "move it outside the liveswap root (the documented location is /etc/hotserve), where no app can see it"))
 		}
 	}
+}
+
+// absAndCanonical returns a path made absolute and cleaned, plus its
+// resolved form when that differs and resolves at all. Containment
+// checks are lexical, so both spellings have to be compared or a
+// symlink walks straight past them.
+func absAndCanonical(p string) []string {
+	if p == "" {
+		return nil
+	}
+	if !filepath.IsAbs(p) {
+		a, err := filepath.Abs(p)
+		if err != nil {
+			return nil
+		}
+		p = a
+	}
+	p = filepath.Clean(p)
+	out := []string{p}
+	if c, err := filepath.EvalSymlinks(p); err == nil && c != p {
+		out = append(out, c)
+	}
+	return out
+}
+
+// validateEnvFileIsolation refuses a configuration in which one app's
+// env_file lands inside ANOTHER app's view. An app's own env file being
+// reachable is a stated non-goal to defend against — it receives those
+// variables anyway — but a sibling's is the secret this whole feature
+// exists to keep apart, and the documented guarantee says such a file
+// is absent from every other app's view.
+//
+// Two routes make that false, neither of which the deny-by-default view
+// closes on its own, because both are things the operator NAMED:
+//
+//   - the base view, which is bound read-only into every unit, so an
+//     env_file under /usr or a named /etc entry is readable by every
+//     app on the box;
+//   - another app's extra_path, which can cover the directory the env
+//     file sits in — and read-write, can rewrite it.
+//
+// A hard error rather than a warning: the alternative is documenting
+// that env files are only usually isolated. Validate runs before a
+// reload is committed, so a configuration rejected here leaves the
+// previous one serving.
+func validateEnvFileIsolation(a *App) error {
+	for name, cfg := range a.Apps {
+		if cfg == nil || cfg.EnvFile == "" {
+			continue
+		}
+		for _, f := range absAndCanonical(cfg.EnvFile) {
+			for _, b := range sandboxBaseView {
+				if pathWithin(f, b) {
+					return fmt.Errorf("app %s: env_file %q is inside %s, which is bound read-only into EVERY app's sandbox — every other app on this box could read it; keep env files outside the base view (the documented location is /etc/hotserve, which no app may name)", name, cfg.EnvFile, b)
+				}
+			}
+			for other, ocfg := range a.Apps {
+				if other == name || ocfg == nil || ocfg.Sandbox == sandboxOff {
+					continue
+				}
+				for _, e := range ocfg.ExtraPaths {
+					for _, ep := range absAndCanonical(e.Path) {
+						if pathWithin(f, ep) {
+							rw := "read"
+							if e.Writable {
+								rw = "read and rewrite"
+							}
+							return fmt.Errorf("app %s: env_file %q is inside app %s's extra_path %q, so %s could %s it; narrow that extra_path, or move the env file outside it (the documented location is /etc/hotserve)", name, cfg.EnvFile, other, e.Path, other, rw)
+						}
+					}
+				}
+			}
+		}
+	}
+	return nil
 }

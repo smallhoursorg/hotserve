@@ -340,6 +340,16 @@ thing that ages now, and it fails safe: a secret belonging to an app
 you add tomorrow is already absent from every unit running today,
 because nothing ever bound it.
 
+**Keep env files outside every app's view.** `/etc/hotserve` is the
+documented location and no app may name it. hotserve refuses a config
+in which one app's `env_file` sits inside another app's `extra_path`,
+or anywhere in the OS base view (`/usr`, the named `/etc` entries) —
+both would put one app's secrets in another app's sandbox, and the
+second would put them in *every* app's. An `env_file` inside its own
+app's `shared/` is a warning rather than an error: the app receives
+those variables anyway, but under `shared/` it can also rewrite the
+file and so choose its own next launch's environment.
+
 **Sandboxing an app is not containment for what it did while bare.**
 The sandbox restricts what an app can *reach*; it cannot un-copy. Its
 `shared/` dir survives every deploy and is bound writable into the new

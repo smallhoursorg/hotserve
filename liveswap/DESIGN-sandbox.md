@@ -149,6 +149,22 @@ requirement below stands as the contract the sandbox path must keep.
   app's data on another disk is a bind mount at the same path**: a
   mount resolves to itself, so it never reaches the check, and an app
   cannot forge one.
+- One app's `env_file` MUST NOT sit inside another app's view. The
+  deny-by-default view does not close this on its own, because both
+  routes are things the operator named: another app's `extra_path`
+  covering the directory, and the OS base view, which is bound into
+  every unit. Config load MUST refuse both, comparing canonical
+  spellings as well as configured ones. An `env_file` inside its OWN
+  app's dirs is a warning, not an error — the app receives those
+  variables regardless; the reason to warn is that under `shared/` it
+  can rewrite the file and choose its own next launch's environment.
+  Pinned by `TestEnvFileMayNotLandInAnotherAppsView`.
+- A recorded sandbox tier that is neither empty nor a tier name MUST
+  fail the relaunch rather than read as `none`. Empty is the legacy
+  pre-sandbox record and correctly relaunches bare; anything else is
+  corruption, and a syntactically corrupt `state.json` is already a
+  permanent recovery error. Pinned by
+  `TestCorruptRecordedTierFailsClosed`.
 - A command that resolves outside the view MUST be refused at launch
   with a message naming `extra_path`, not left to fail as a bare
   `203/EXEC`: `exec.LookPath` runs in the supervisor's view, so a

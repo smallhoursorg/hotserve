@@ -2,6 +2,7 @@ package liveswap
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -191,5 +192,101 @@ func TestPreStartRunsUnderTheSameSandboxAsItsApp(t *testing.T) {
 		if s.sandbox != nil {
 			t.Errorf("spec %d is sandboxed although the app is `sandbox off`: %+v", i, s.sandbox)
 		}
+	}
+}
+
+// Promise: "every operator `env_file` [is absent from every app's
+// view]" (liveswap/README.md) — for OTHER apps. Its own app receives
+// those variables anyway, so self-exposure is a warning; a sibling's
+// env file is the secret the feature exists to keep apart, and the
+// deny-by-default view does not close either route on its own, because
+// both are things the operator named.
+func TestEnvFileMayNotLandInAnotherAppsView(t *testing.T) {
+	// Through Validate(), not the validator directly: the wiring is
+	// half the promise, and a test that calls the function straight
+	// passes just as happily when nothing calls it.
+	app := func(envFile string, extras ...string) *AppConfig {
+		c := defaultedApp(t)
+		c.EnvFile = envFile
+		for _, e := range extras {
+			c.ExtraPaths = append(c.ExtraPaths, ExtraPathConfig{Path: e})
+		}
+		return c
+	}
+	for _, tc := range []struct {
+		name    string
+		apps    map[string]*AppConfig
+		wantErr string
+	}{
+		{"a sibling's extra_path covers it", map[string]*AppConfig{
+			"blog": app("", "/srv/common"),
+			"shop": app("/srv/common/shop.env"),
+		}, "extra_path"},
+		{"an ancestor extra_path counts", map[string]*AppConfig{
+			"blog": app("", "/srv"),
+			"shop": app("/srv/env/shop.env"),
+		}, "extra_path"},
+		{"the base view exposes it to everyone", map[string]*AppConfig{
+			"shop": app("/usr/local/etc/shop.env"),
+		}, "EVERY app's sandbox"},
+		{"its own extra_path is not cross-app", map[string]*AppConfig{
+			"shop": app("/srv/common/shop.env", "/srv/common"),
+		}, ""},
+		{"an unsandboxed viewer adds no exposure", map[string]*AppConfig{
+			"blog": func() *AppConfig { c := app("", "/srv"); c.Sandbox = sandboxOff; return c }(),
+			"shop": app("/srv/env/shop.env"),
+		}, ""},
+		{"the documented location is fine", map[string]*AppConfig{
+			"blog": app("/etc/hotserve/blog.env", "/run/postgresql"),
+			"shop": app("/etc/hotserve/shop.env"),
+		}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &App{
+				Root:              "/var/lib/liveswap",
+				ArtifactAllowlist: []string{"github.com/smallhoursorg/"},
+				DeployTrust:       githubTrust(),
+				Apps:              tc.apps,
+			}
+			err := a.Validate()
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("rejected a sound configuration: %v", err)
+			case tc.wantErr != "" && err == nil:
+				t.Fatalf("accepted a configuration exposing one app's env_file to another")
+			case tc.wantErr != "" && !strings.Contains(err.Error(), tc.wantErr):
+				t.Fatalf("refused for the wrong reason: %v", err)
+			}
+		})
+	}
+}
+
+// Promise: a relaunch reproduces the tier recorded for that instance —
+// and a record that does not mean anything must not read as "no
+// sandbox". A syntactically corrupt state.json is already a permanent
+// recovery error; a semantically corrupt one is the same class.
+func TestCorruptRecordedTierFailsClosed(t *testing.T) {
+	for _, ok := range []string{"", "none", "filesystem", "full"} {
+		if err := validSandboxTierRecord(ok); err != nil {
+			t.Errorf("%q is a legitimate record: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"ful", "Full", "FILESYSTEM", "yes", "true", "sandboxed", " full"} {
+		if err := validSandboxTierRecord(bad); err == nil {
+			t.Errorf("%q accepted: reading it as none would silently drop the app's sandbox", bad)
+		}
+	}
+	// And the recovery path refuses rather than relaunching bare.
+	rig := newTestRig(t)
+	must(t, rig.store.save(appState{CurrentVersion: "v1", Port: 1,
+		Handle: handleState{Unit: "hotserve-demo.v1.abc.service", Sandbox: "ful"}}))
+	must(t, mkdirRelease(rig.spec, "v1"))
+	err := rig.ma.ensureRunning()
+	if err == nil {
+		t.Fatal("recovery accepted a corrupt tier record and relaunched")
+	}
+	var perm *permanentRecoveryError
+	if !errors.As(err, &perm) {
+		t.Fatalf("a corrupt tier must be a permanent recovery error, not %T: %v", err, err)
 	}
 }

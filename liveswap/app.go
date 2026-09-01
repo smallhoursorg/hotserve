@@ -602,6 +602,14 @@ func (ma *managedApp) ensureRunning() error {
 	if err != nil {
 		return &permanentRecoveryError{err} // corrupt state: never silently reset
 	}
+	// Same rule for a record that parses but does not mean anything:
+	// this is the one value read from disk that decides how much
+	// isolation the relaunch gets, so a corrupt one must not read as
+	// "no sandbox". Validated here, at the boundary, so every launch
+	// downstream can parse it leniently.
+	if err := validSandboxTierRecord(st.Handle.Sandbox); err != nil {
+		return &permanentRecoveryError{err}
+	}
 	if !ok || st.CurrentVersion == "" {
 		// Nothing recorded — but a deploy whose state write failed may
 		// have left a unit behind; the manager's ledger decides, not

@@ -575,7 +575,10 @@ func (a *App) Validate() error {
 			return fmt.Errorf("app %s: max_artifact_size must be positive, got %d", name, cfg.MaxArtifactSize)
 		}
 	}
-	return nil
+	// Cross-app, so it needs every app's config and comes after the
+	// per-app loop: one app's env_file must not sit inside another
+	// app's view.
+	return validateEnvFileIsolation(a)
 }
 
 // Start recovers apps after a Caddy restart: each app that has a
