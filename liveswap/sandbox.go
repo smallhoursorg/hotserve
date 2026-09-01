@@ -155,11 +155,6 @@ func resolveSandboxTier(mode string, c sandboxCapability) (tier sandboxTier, war
 type extraPath struct {
 	path string
 	rw   bool
-	// source is what actually gets bound at path: the same thing,
-	// unless path is a symlink, in which case resolveBindSources fills
-	// in what it resolved to. The app still sees it at path — the name
-	// it was configured with and the name everything else refers to.
-	source string
 }
 
 // bindPath is one of the app's own directories bound back into its
@@ -404,21 +399,31 @@ func (s *sandboxSpec) resolveBindSources() error {
 			s.writable[i].source = resolved
 		}
 	}
-	for i, e := range s.extra {
+	for _, e := range s.extra {
 		resolved, err := filepath.EvalSymlinks(e.path)
-		if err != nil || resolved == e.path {
-			// Absent (checked as written at config load), or itself.
-			// An absent source is not tolerated — the bind is
-			// mandatory, so the manager refuses the unit rather than
-			// dropping it, which is what keeps an app from serving
-			// permanently blind to a path it declared. Nothing to
-			// resolve here either way.
+		if err != nil {
+			// Absent (checked as written at config load). Not tolerated
+			// — the bind is mandatory, so the manager refuses the unit
+			// rather than dropping it — but there is nothing to resolve
+			// here either way.
 			continue
 		}
-		if err := checkExtraPathContainment(resolved, s.root, rootC); err != nil {
-			return fmt.Errorf("refusing to launch sandboxed: extra_path %q resolves to %q: %w", e.path, resolved, err)
+		// An extra_path must BE the directory it names, the same rule
+		// the app's own binds follow above, and for a sharper reason:
+		// checking what a link resolves to and then binding it is a
+		// TOCTOU an app can win. Give blog `extra_path /mnt/blog rw`
+		// where /mnt/blog aliases /srv/blog, plus a second
+		// `extra_path /srv/blog/data`, and blog can replace data with a
+		// link to any directory on the box — a sibling's env_file
+		// included — between one launch and the next. Containment
+		// checks cannot close that: the planted target is a perfectly
+		// legitimate path that simply is not the one the operator
+		// named. Requiring equality does close it, because a mount
+		// resolves to itself and an app holds no capability to make
+		// one.
+		if resolved != e.path {
+			return fmt.Errorf("refusing to launch sandboxed: extra_path %q resolves to %q, which is not the directory it names; bind-mount it at %q instead of symlinking — a mount resolves to itself, and an app cannot forge one", e.path, resolved, e.path)
 		}
-		s.extra[i].source = resolved
 	}
 	return nil
 }
@@ -664,20 +669,34 @@ func validateExtraPath(p, root string) error {
 	if c, err := filepath.EvalSymlinks(root); err == nil {
 		rootC = c
 	}
-	// Follow symlinks before the containment checks: they are lexical,
-	// and BindPaths= binds what the path resolves to, so a link such as
-	// /srv/db-socket -> /run/user/<uid> would otherwise walk straight
-	// past them and hand back the very socket they exist to protect.
-	// A path that does not resolve (not created yet — /run/postgresql
-	// before postgres starts) is checked as written; and a link swapped
-	// between config load and unit start is not covered here, which
-	// needs write access outside every sandbox to arrange.
-	if resolved, err := filepath.EvalSymlinks(p); err == nil && resolved != p {
-		if err := checkExtraPathContainment(resolved, root, rootC); err != nil {
-			return fmt.Errorf("extra_path %q resolves to %q: %w", p, resolved, err)
-		}
+	// An extra_path must BE the directory it names. BindPaths= binds
+	// what a path resolves to, so following a link and then checking
+	// where it went is a race an app can win: one that holds a writable
+	// extra_path over the tree can repoint a second extra_path at any
+	// directory on the box between one launch and the next, and the
+	// planted target passes every containment check because it is a
+	// legitimate path — just not the one the operator named. Equality
+	// is what closes it, and it is the rule the app's own binds already
+	// follow (resolveBindSources). To put data on another disk,
+	// bind-mount it: a mount resolves to itself and an app holds no
+	// capability to make one.
+	//
+	// Refused here as well as at launch so an operator learns at config
+	// load rather than from a unit that never starts. A path that does
+	// not resolve is checked as written — /run/postgresql before
+	// postgres has started is the documented case — and the launch
+	// re-checks, which is what catches a link planted afterwards.
+	// The deny list first, so a path that is refused for what it names
+	// says so — `/proc/self` is a link, but "nothing may name /proc" is
+	// the reason an operator needs, not "it is not the directory it
+	// names".
+	if err := checkExtraPathContainment(p, root, rootC); err != nil {
+		return err
 	}
-	return checkExtraPathContainment(p, root, rootC)
+	if resolved, err := filepath.EvalSymlinks(p); err == nil && resolved != p {
+		return fmt.Errorf("extra_path %q resolves to %q, which is not the directory it names; bind-mount it at %q instead of symlinking — a mount resolves to itself, and an app cannot forge one", p, resolved, p)
+	}
+	return nil
 }
 
 // checkExtraPathContainment is the lexical half of validateExtraPath,
@@ -828,7 +847,7 @@ func (s *sandboxSpec) inView(p string) bool {
 		}
 	}
 	for _, e := range s.extra {
-		if both(e.path, e.source) {
+		if both(e.path, "") {
 			return true
 		}
 	}

@@ -878,7 +878,16 @@ func TestRelaunchBelowFullWarns(t *testing.T) {
 // lexical, but BindPaths= binds what a path resolves to, so a link
 // pointing at a name no app may be given must be refused by what it
 // resolves to, not by how it is spelled.
-func TestValidateExtraPathFollowsSymlinks(t *testing.T) {
+// An extra_path must BE the directory it names: a symlink is refused
+// whatever it points at, including somewhere perfectly legitimate.
+// Checking where a link goes and then binding it is a race an app can
+// win — one holding a writable extra_path over the tree can repoint a
+// second one between launches, and the planted target passes every
+// containment check because it IS a legitimate path, just not the one
+// the operator named. Equality is what closes that; a bind mount is
+// the supported way to put data elsewhere, since a mount resolves to
+// itself and an app holds no capability to make one.
+func TestExtraPathMustBeTheDirectoryItNames(t *testing.T) {
 	// The link itself must live outside every refused prefix, or the
 	// lexical check would refuse it before symlinks matter — /run
 	// qualifies (only /run/user and /run/hotserve are refused).
@@ -887,32 +896,70 @@ func TestValidateExtraPathFollowsSymlinks(t *testing.T) {
 		t.Skipf("no writable dir outside the refused prefixes: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	for _, target := range []string{"/dev", "/tmp"} {
+
+	allowed := filepath.Join(dir, "data")
+	must(t, os.MkdirAll(allowed, 0o750))
+	for _, target := range []string{"/dev", "/tmp", allowed} {
 		link := filepath.Join(dir, "link")
 		_ = os.Remove(link)
-		if err := os.Symlink(target, link); err != nil {
-			t.Fatal(err)
-		}
+		must(t, os.Symlink(target, link))
 		err := validateExtraPath(link, "/var/lib/liveswap")
 		if err == nil {
-			t.Errorf("a symlink to %s was accepted: BindPaths would follow it", target)
+			t.Errorf("a symlink to %s was accepted: BindPaths would follow it, and what it points at can change between launches", target)
 			continue
 		}
 		if !strings.Contains(err.Error(), "resolves to") {
 			t.Errorf("symlink to %s refused without naming the resolution: %v", target, err)
 		}
 	}
-	// A link to somewhere legitimate still passes.
-	allowed := filepath.Join(dir, "data")
-	if err := os.MkdirAll(allowed, 0o750); err != nil {
-		t.Fatal(err)
+	// The directory itself, named directly, is fine.
+	if err := validateExtraPath(allowed, "/var/lib/liveswap"); err != nil {
+		t.Errorf("a real directory named directly must be accepted: %v", err)
 	}
-	ok := filepath.Join(dir, "fine")
-	if err := os.Symlink(allowed, ok); err != nil {
-		t.Fatal(err)
+	// A path that does not exist yet is still accepted — the config is
+	// read once, and /run/postgresql is created by postgres' own unit.
+	// The launch is what re-checks.
+	if err := validateExtraPath(filepath.Join(dir, "not-created-yet"), "/var/lib/liveswap"); err != nil {
+		t.Errorf("an extra_path that does not exist yet must load: %v", err)
 	}
-	if err := validateExtraPath(ok, "/var/lib/liveswap"); err != nil {
-		t.Errorf("a symlink to an allowed path was refused: %v", err)
+}
+
+// The launch re-checks, which is what catches a link planted AFTER
+// config load — the TOCTOU an app with a writable extra_path over the
+// tree could otherwise win.
+func TestResolveBindSourcesRefusesAnExtraPathPlantedAsASymlink(t *testing.T) {
+	dir, err := os.MkdirTemp("/run", "extraplant-")
+	if err != nil {
+		t.Skipf("no writable dir outside the refused prefixes: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	root := t.TempDir()
+	appDir := filepath.Join(root, "blog")
+	release := filepath.Join(appDir, "releases", "v1")
+	shared := filepath.Join(appDir, "shared")
+	data := filepath.Join(dir, "data")
+	secrets := filepath.Join(dir, "secrets")
+	for _, d := range []string{release, shared, data, secrets} {
+		must(t, os.MkdirAll(d, 0o750))
+	}
+	spec := func() *sandboxSpec {
+		return &sandboxSpec{tier: sandboxFull, root: root, appDir: appDir, appName: "blog",
+			writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}},
+			extra:    []extraPath{{path: data}}}
+	}
+	// As configured and validated: a real directory.
+	must(t, spec().resolveBindSources())
+
+	// Now the app repoints it, the way it could through a writable
+	// extra_path covering this tree. The next launch must refuse.
+	must(t, os.RemoveAll(data))
+	must(t, os.Symlink(secrets, data))
+	err = spec().resolveBindSources()
+	if err == nil {
+		t.Fatal("a planted symlink was followed: the app would be handed a directory the operator never named")
+	}
+	if !strings.Contains(err.Error(), secrets) {
+		t.Fatalf("the refusal must name what it resolved to: %v", err)
 	}
 }
 

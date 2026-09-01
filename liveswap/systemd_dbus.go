@@ -289,10 +289,6 @@ func sandboxProperties(s *sandboxSpec) []sddbus.Property {
 		readOnly = append(readOnly, bindMount{Source: p, Destination: p, IgnoreENOENT: true, Flags: mountRecursive})
 	}
 	for _, e := range s.extra {
-		src := e.source
-		if src == "" {
-			src = e.path
-		}
 		// Destination is always the configured path: that is where the
 		// app expects to find it, whatever it resolves to on the host.
 		// Mandatory, unlike the base view. IgnoreENOENT would not
@@ -303,7 +299,7 @@ func sandboxProperties(s *sandboxSpec) []sddbus.Property {
 		// permanently missing a path it declared, and no retry of its
 		// own could recover. The manager refusing the unit is what
 		// makes that impossible.
-		m := bindMount{Source: src, Destination: e.path, Flags: mountRecursive}
+		m := bindMount{Source: e.path, Destination: e.path, Flags: mountRecursive}
 		if e.rw {
 			writable = append(writable, m)
 		} else {

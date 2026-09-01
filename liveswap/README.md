@@ -399,6 +399,17 @@ If hotserve can genuinely start before the service that creates the
 directory, order it in systemd — add an `After=` drop-in to
 `hotserve.service` — rather than leaving it to the race.
 
+**An `extra_path` must be the directory it names.** A symlink is
+refused — at config load, and again at every launch — whatever it
+points at, even somewhere otherwise legitimate. `BindPaths=` follows
+links, so checking where one goes and then binding it is a race an app
+can win: an app holding a writable `extra_path` over the same tree can
+repoint a second one between launches, and the planted target passes
+every containment check because it *is* a real path, just not the one
+you named. To put data on another disk, bind-mount it at the path you
+configured — a mount resolves to itself, and an app cannot forge one.
+This is the rule an app's own `releases/` and `shared/` already follow.
+
 Two kinds of path are refused, each with an error saying which:
 inside the **liveswap root** (the app already sees its own release and
 `shared/`; everything else there is another app), and any of the names
