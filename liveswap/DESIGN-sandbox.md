@@ -569,9 +569,12 @@ MUST here means adding its assertion in the same change.
 ## Amendment: `extra_path` deferred (2026-09-02)
 
 `extra_path` is **not in the shipped feature**. Every reference to it
-below describes a design that was written, reviewed and then lifted out
-before merge; the shipped view is exactly `sandboxBaseView` plus the
-app's own release and `shared/` dirs, and nothing widens it.
+**earlier in this document** — the behaviour specification, the config
+surface, the testing criteria — is superseded by this section and
+describes a design that was written, reviewed and then lifted out
+before merge. The shipped view is exactly `sandboxBaseView` plus the
+app's own release and `shared/` dirs, and nothing widens it. Read any
+normative `extra_path` clause above as history, not as a requirement.
 
 **Why it came out.** Six review rounds over the sandbox produced one
 class of real defect, and every instance of it was `extra_path`:

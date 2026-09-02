@@ -432,12 +432,11 @@ it at all. The sibling-secret row therefore held only for instances
 launched after the secret was declared.
 
 The view is now deny-by-default — `TemporaryFileSystem=/:ro` plus an
-explicit base view, the app's own two directories, and its declared
-its own directories — so nothing is derived and nothing ages. A secret
+explicit base view and the app's own two directories, and nothing
+widens it — so nothing is derived and nothing ages. A secret
 declared tomorrow is absent from a unit started yesterday for exactly
 the same reason every other path is: nothing ever bound it. What is
-still fixed at a unit's start is the tier and the set of paths an
-operator asked to be let IN, both of which fail safe and both of which
+still fixed at a unit's start is the tier, which fails safe and which
 a redeploy refreshes. Measured on all four cells of the support matrix
 (systemd 252/255/257/259): inside a unit, `/etc` holds only the named
 base-view entries this host actually has — a dozen or so — and
