@@ -511,13 +511,28 @@ func (r *systemdRunner) adopt(ctx context.Context, unit string, startedAt time.T
 // so the switch is awaited here rather than at the next watcher poll.
 // Bounded: if the manager never changes its mind the first value
 // stands and the watcher keeps following it.
+//
+// The wait cannot be ended early by asking the manager whether the
+// switch has happened, because nothing it exposes distinguishes the
+// intermediate from the settled pid — measured on systemd 257, where
+// ExecMainPID tracks MainPID exactly and changes with it. So the only
+// exit is observing the value change, and a unit that is already
+// settled when adopt first reads it runs the window out.
+//
+// That case is real but is the minority: StartTransientUnit returns
+// when the job is done, and measured over ten such starts the pid
+// still changed afterwards in nine. The step therefore backs off
+// rather than shrinking the window — the common case still catches
+// the switch within the first poll or two, while the already-settled
+// case costs six round trips instead of fifty, all of them under
+// deployMu.
 func (r *systemdRunner) settleMainPID(ctx context.Context, h *systemdHandle, first int) {
 	deadline := time.Now().Add(mainPIDSettle)
-	for time.Now().Before(deadline) {
+	for step := mainPIDSettleStep; time.Now().Before(deadline); step *= 2 {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(mainPIDSettleStep):
+		case <-time.After(step):
 		}
 		st, err := r.conn.UnitStatus(ctx, h.unit)
 		if err != nil || !st.running() {
@@ -531,7 +546,10 @@ func (r *systemdRunner) settleMainPID(ctx context.Context, h *systemdHandle, fir
 }
 
 const (
-	mainPIDSettle     = 500 * time.Millisecond
+	mainPIDSettle = 500 * time.Millisecond
+	// The first step: short enough that the common case (the switch
+	// lands within a few ms) is caught almost at once. It doubles from
+	// here, so the window costs ~6 reads rather than ~50.
 	mainPIDSettleStep = 10 * time.Millisecond
 )
 

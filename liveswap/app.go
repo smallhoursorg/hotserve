@@ -256,8 +256,10 @@ type appConfigState struct {
 	store     stateStore
 }
 
-// owner is the config installing this definition (see rollbackConfig).
-func (ma *managedApp) configure(owner any, spec *appSpec, logger *zap.Logger, clients *fetchClients) {
+// owner is the config installing this definition (see rollbackConfig);
+// manager is the user-manager connection its runner talks to, passed
+// in rather than reached for globally so a test can install its own.
+func (ma *managedApp) configure(owner any, spec *appSpec, logger *zap.Logger, clients *fetchClients, manager systemdConn) {
 	ma.specMu.Lock()
 	defer ma.specMu.Unlock()
 	changed := ma.spec != nil && !specEqual(ma.spec, spec)
@@ -271,7 +273,7 @@ func (ma *managedApp) configure(owner any, spec *appSpec, logger *zap.Logger, cl
 	ma.verifiers = resolveVerifiers(spec.trust, clients.jwks)
 	ma.logger = logger
 	if ma.runner == nil {
-		ma.runner = newSystemdRunner(userManager, logger)
+		ma.runner = newSystemdRunner(manager, logger)
 		ma.prober = &httpProber{client: clients.health, clock: realClock{}}
 		ma.fetch = &releaseFetcher{client: clients.download}
 		ma.clock = realClock{}

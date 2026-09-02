@@ -647,23 +647,21 @@ func TestValidateSandboxConfig(t *testing.T) {
 // refuses user namespaces: require refuses to start and names the
 // reason; auto starts unsandboxed and warns; off never probes.
 func TestStartResolvesSandboxPolicy(t *testing.T) {
-	origProbe, origManager := probeSandbox, probeUserManager
-	t.Cleanup(func() { probeSandbox, probeUserManager = origProbe, origManager })
-	probeUserManager = func() error { return nil }
 	probes := 0
-	probeSandbox = func(*zap.Logger) sandboxCapability {
-		probes++
-		return sandboxCapability{tier: sandboxNone, reason: "full tier: unit failed: Failed to set up user namespacing: Permission denied"}
-	}
 	newApp := func(mode string) *App {
 		spec := testSpec(t)
 		spec.sandboxMode = mode
 		return &App{
-			Root:    spec.dirs.root,
-			logger:  zap.NewNop(),
-			specs:   map[string]*appSpec{"demo": spec},
-			managed: map[string]*managedApp{},
-			clients: &fetchClients{},
+			Root:         spec.dirs.root,
+			logger:       zap.NewNop(),
+			specs:        map[string]*appSpec{"demo": spec},
+			managed:      map[string]*managedApp{},
+			clients:      &fetchClients{},
+			managerProbe: func() error { return nil },
+			sandboxProbe: func(*zap.Logger) sandboxCapability {
+				probes++
+				return sandboxCapability{tier: sandboxNone, reason: "full tier: unit failed: Failed to set up user namespacing: Permission denied"}
+			},
 		}
 	}
 	a := newApp(sandboxRequire)
@@ -1755,5 +1753,69 @@ func TestAppViewsAreDisjointExceptTheBaseView(t *testing.T) {
 		if _, present := blog[p]; present {
 			t.Errorf("blog's view contains %s", p)
 		}
+	}
+}
+
+// TestSandboxCapabilityCachedPerConnection pins the rule that keeps a
+// throwaway unit off Caddy's critical path: the host is measured at
+// most once per manager connection, and again after a redial — the
+// only event that can change the answer. Drives the caching directly,
+// so it needs no manager to dial.
+func TestSandboxCapabilityCachedPerConnection(t *testing.T) {
+	c := &userManagerClient{}
+	measured := 0
+	full := func() sandboxCapability {
+		measured++
+		return sandboxCapability{tier: sandboxFull}
+	}
+
+	c.generation.Add(1) // a first dial
+	for i := 0; i < 5; i++ {
+		if got := c.cachedSandboxCapability(c.generation.Load(), full); got.tier != sandboxFull {
+			t.Fatalf("call %d: tier = %v, want full", i, got.tier)
+		}
+	}
+	if measured != 1 {
+		t.Fatalf("measured %d times across 5 config loads, want 1: the probe starts a unit and belongs to the connection", measured)
+	}
+
+	// A redial invalidates it: the manager that restarted may not be
+	// the one that was measured.
+	c.generation.Add(1)
+	if got := c.cachedSandboxCapability(c.generation.Load(), full); got.tier != sandboxFull {
+		t.Fatalf("after redial: tier = %v", got.tier)
+	}
+	if measured != 2 {
+		t.Fatalf("measured %d times, want 2: a redial must re-measure", measured)
+	}
+
+	// A redial *during* a measurement means it described a manager that
+	// is no longer current: report it, cache nothing, measure again.
+	// Needs a generation the cache does not already hold, or the
+	// measurement below would never be reached.
+	c.generation.Add(1)
+	gen := c.generation.Load()
+	racing := func() sandboxCapability {
+		measured++
+		c.generation.Add(1)
+		return sandboxCapability{tier: sandboxNone, reason: "raced"}
+	}
+	if got := c.cachedSandboxCapability(gen, racing); got.reason != "raced" {
+		t.Fatalf("the caller that asked must still get the measurement it took: %+v", got)
+	}
+	if c.sandboxGen == gen {
+		t.Fatal("a measurement taken across a redial was cached against the stale generation")
+	}
+	if got := c.cachedSandboxCapability(c.generation.Load(), full); got.tier != sandboxFull || measured != 4 {
+		t.Fatalf("next call must re-measure: tier=%v measured=%d, want full/4", got.tier, measured)
+	}
+
+	// Generation 0 is "never dialed" and must never satisfy the cache.
+	fresh := &userManagerClient{}
+	measured = 0
+	fresh.cachedSandboxCapability(0, full)
+	fresh.cachedSandboxCapability(0, full)
+	if measured != 2 {
+		t.Fatalf("measured %d times at generation 0, want 2: no connection means nothing to cache against", measured)
 	}
 }

@@ -1084,8 +1084,8 @@ func TestRollbackConfigRestoresTheServingDefinition(t *testing.T) {
 	specA, specB := testSpec(t), testSpec(t)
 	specB.grace = 99 * time.Second
 	ownerA, ownerB := new(int), new(int)
-	rig.ma.configure(ownerA, specA, zap.NewNop(), clients)
-	rig.ma.configure(ownerB, specB, zap.NewNop(), clients)
+	rig.ma.configure(ownerA, specA, zap.NewNop(), clients, userManager)
+	rig.ma.configure(ownerB, specB, zap.NewNop(), clients, userManager)
 	// A successful reload: A is cleaned up after B configured — not
 	// the last writer, nothing happens.
 	if rig.ma.rollbackConfig(ownerA) || rig.ma.snapshot().spec != specB {
@@ -1106,8 +1106,8 @@ func TestRollbackConfigWakesTheWatchdog(t *testing.T) {
 	on, off := testSpec(t), testSpec(t)
 	off.watchdogOn = false
 	ownerA, ownerB := new(int), new(int)
-	rig.ma.configure(ownerA, on, zap.NewNop(), clients)
-	rig.ma.configure(ownerB, off, zap.NewNop(), clients)
+	rig.ma.configure(ownerA, on, zap.NewNop(), clients, userManager)
+	rig.ma.configure(ownerB, off, zap.NewNop(), clients, userManager)
 	// Drain the pokes configure sent, then roll back: the rollback
 	// itself must poke, or a parked loop never re-reads watchdog=on.
 	for len(rig.ma.wdNotify) > 0 {

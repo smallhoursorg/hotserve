@@ -26,7 +26,7 @@ import (
 
 func integrationRunner(t *testing.T) *systemdRunner {
 	t.Helper()
-	if err := probeUserManager(); err != nil {
+	if err := userManager.probe(); err != nil {
 		t.Fatalf("no systemd user manager (run via `make test-integration`): %v", err)
 	}
 	logger, _ := zap.NewDevelopment()
