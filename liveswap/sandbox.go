@@ -30,10 +30,10 @@ import (
 // lesser one — `sandbox require` refuses to start, `auto` launches with
 // a WARN naming the residual. (An earlier "filesystem" tier — the user
 // namespace without the PID namespace — was what Debian 12 and Ubuntu
-// 24.04 could manage. It is no longer probed for or offered, but it
-// survives as a value state.json may already hold: see
-// validSandboxTierRecord and sandboxResidual, which still describe it
-// so an instance recorded at that tier relaunches faithfully.)
+// 24.04 could manage. It was briefly kept as a value state.json might
+// already hold, until the release history was checked: v0.1.0 is the
+// only tag and predates sandboxing entirely, so no released hotserve
+// ever wrote it and there was no migration to protect.)
 //
 // The filesystem view is deny-by-default. An empty read-only tmpfs
 // replaces the whole root (TemporaryFileSystem=/) and the only things
@@ -56,15 +56,12 @@ import (
 type sandboxTier int
 
 const (
-	sandboxNone       sandboxTier = iota // floor only: non-dumpable supervisor, NoNewPrivileges
-	sandboxFilesystem                    // retired: user namespace + mount set, no PID namespace — legacy state.json records only
-	sandboxFull                          // sandboxFilesystem + PID namespace; the one tier a host is probed for
+	sandboxNone sandboxTier = iota // floor only: non-dumpable supervisor, NoNewPrivileges
+	sandboxFull                    // user namespace + mount set + PID namespace; the one tier a host is probed for
 )
 
 func (t sandboxTier) String() string {
 	switch t {
-	case sandboxFilesystem:
-		return "filesystem"
 	case sandboxFull:
 		return "full"
 	default:
@@ -87,11 +84,11 @@ func (t sandboxTier) String() string {
 // problem and gets the same answer, rather than the opposite one.
 func validSandboxTierRecord(s string) error {
 	switch s {
-	case "", sandboxNone.String(), sandboxFilesystem.String(), sandboxFull.String():
+	case "", sandboxNone.String(), sandboxFull.String():
 		return nil
 	}
-	return fmt.Errorf("recorded sandbox tier %q is not one of %q, %q or %q (or empty, for a record written before sandboxing): refusing to relaunch, because reading it as %q would silently drop this app's sandbox",
-		s, sandboxNone, sandboxFilesystem, sandboxFull, sandboxNone)
+	return fmt.Errorf("recorded sandbox tier %q is not %q or %q (or empty, for a record written before sandboxing): refusing to relaunch, because reading it as %q would silently drop this app's sandbox",
+		s, sandboxNone, sandboxFull, sandboxNone)
 }
 
 // parseSandboxTier is the inverse of String, for the persisted
@@ -102,8 +99,6 @@ func validSandboxTierRecord(s string) error {
 // endpoint, Reattach) can take the lenient reading.
 func parseSandboxTier(s string) sandboxTier {
 	switch s {
-	case "filesystem":
-		return sandboxFilesystem
 	case "full":
 		return sandboxFull
 	default:
@@ -482,18 +477,13 @@ func warnSandboxTier(c collaborators, spec *appSpec, tier sandboxTier) {
 	}
 	c.logger.Warn("launching without the full sandbox",
 		zap.String("tier", tier.String()),
-		zap.String("residual", sandboxResidual(tier)))
+		zap.String("residual", sandboxResidualNone))
 }
 
-// sandboxResidual states what a tier leaves open, for the WARN.
-func sandboxResidual(tier sandboxTier) string {
-	switch tier {
-	case sandboxFilesystem:
-		return "same-UID processes (hotserve, the user manager, sibling apps) remain visible and signalable, and their /proc entries that are not ptrace-gated — cmdline, status, cgroup — remain readable, so a sibling's or the supervisor's argv is disclosed; files, the ptrace-gated /proc entries (root, environ, cwd, mem, fd, maps) and the admin and manager sockets are closed"
-	default:
-		return "no per-unit sandbox: the app shares the hotserve UID's files, sockets and processes (non-dumpable supervisor and NoNewPrivileges only)"
-	}
-}
+// sandboxResidualNone states what the absence of a sandbox leaves
+// open, for the WARN. There is one tier below full and it is none, so
+// this is the only residual there is to name.
+const sandboxResidualNone = "no per-unit sandbox: the app shares the hotserve UID's files, sockets and processes (non-dumpable supervisor and NoNewPrivileges only)"
 
 // probeSandboxSpec is the spec the capability probe runs with: the
 // tier under test with the same deny-by-default view as a real app

@@ -113,7 +113,9 @@ func TestSandboxedEnvNamesNoPathOutsideTheView(t *testing.T) {
 // would notice — the app would simply become unreachable through the
 // proxy, at deploy time, on a real host.
 func TestNetworkNamespaceIsShared(t *testing.T) {
-	for _, tier := range []sandboxTier{sandboxFilesystem, sandboxFull} {
+	// One tier can reach a unit; the loop stays so a second one cannot
+	// be added without this promise being re-asserted for it.
+	for _, tier := range []sandboxTier{sandboxFull} {
 		spec := &sandboxSpec{tier: tier, root: "/var/lib/liveswap",
 			appDir: "/var/lib/liveswap/blog", appName: "blog",
 			writable: []bindPath{{dest: "/var/lib/liveswap/blog/shared"}}}
@@ -478,12 +480,12 @@ func TestEnvFileIsolationHonoursTheGlobalSandboxSetting(t *testing.T) {
 // sandbox". A syntactically corrupt state.json is already a permanent
 // recovery error; a semantically corrupt one is the same class.
 func TestCorruptRecordedTierFailsClosed(t *testing.T) {
-	for _, ok := range []string{"", "none", "filesystem", "full"} {
+	for _, ok := range []string{"", "none", "full"} {
 		if err := validSandboxTierRecord(ok); err != nil {
 			t.Errorf("%q is a legitimate record: %v", ok, err)
 		}
 	}
-	for _, bad := range []string{"ful", "Full", "FILESYSTEM", "yes", "true", "sandboxed", " full"} {
+	for _, bad := range []string{"ful", "Full", "filesystem", "FILESYSTEM", "yes", "true", "sandboxed", " full"} {
 		if err := validSandboxTierRecord(bad); err == nil {
 			t.Errorf("%q accepted: reading it as none would silently drop the app's sandbox", bad)
 		}

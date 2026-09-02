@@ -323,8 +323,7 @@ launch that runs below `full`, naming what stays open. The tier is
 probed once per start by running a throwaway unit and checking the
 namespaces from inside (`journalctl -t hotserve-sandbox-probe` shows
 what it saw). The tier an instance got is recorded in `state.json`
-and reported by the status endpoint (`"sandbox": "full" | "filesystem"
-| "none"`).
+and reported by the status endpoint (`"sandbox": "full" | "none"`).
 
 Sandboxing engages on each app's **next deploy** — the path with a
 fallback (a version that cannot live in its sandbox fails the health

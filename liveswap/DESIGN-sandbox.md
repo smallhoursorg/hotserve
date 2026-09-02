@@ -629,14 +629,27 @@ candidate, *full*. A host either delivers both namespaces or reports
 on a matrix of one, a second tier would be a path no supported host
 takes and no lane tests.
 
-**`filesystem` survives as a record, not a capability.** An instance
-started before this change may have `"sandbox":"filesystem"` in
-`state.json`. `validSandboxTierRecord` still accepts it and
-`sandboxProperties` still renders it, so such an instance relaunches
-at the tier it actually has. Reading it as `none` would silently drop
-a running app's isolation; reading it as `full` would silently claim
-one it never got. Both are the failure this document exists to
-prevent, so the value stays until every instance has redeployed.
+**`filesystem` is gone entirely** (removed 2026-09-02, issue #45). It
+was first kept as a value `state.json` might already hold, on the
+reasoning that reading such a record as `none` would silently drop a
+running app's isolation and reading it as `full` would silently claim
+one it never got. Checking the release history retired that reasoning:
+`v0.1.0` is the only tag and predates sandboxing — `handleState` had
+no `Sandbox` field and `sandbox.go` did not exist — so **no released
+hotserve ever wrote the value**, and the only machines that could hold
+such a record ran a build off the development branch. There was no
+migration to protect, and `validSandboxTierRecord` now fails closed on
+it like any other unknown string.
+
+The **recorded-tier mechanism** is untouched by that removal, and must
+not be confused with it. `handleState.Sandbox`, `parseSandboxTier` and
+a relaunch that reproduces the record rather than re-reading policy
+are not migration machinery: they are what stops an app that was set
+to `sandbox off` for debugging, and set back to `auto`, from having
+the sandbox engage on a crash relaunch or a boot recovery — where
+there is no old instance serving and no health gate to fail into. The
+empty record keeps its meaning too; absent reads as `none`, which is
+the safe default and the documented rollout contract.
 
 **The AppArmor profile is gone.** Debian's kernel does not restrict
 unprivileged user namespaces, so the profile granting `userns` to

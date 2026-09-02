@@ -785,11 +785,17 @@ The support matrix is Debian 13 alone. Two things follow, and neither
 changes the property set above:
 
 - **One tier.** `PrivatePIDs=` exists on every supported manager
-  (systemd 257), so *filesystem* is no longer probed for or offered.
-  It survives only as a value `state.json` may already hold, so an
-  instance recorded at that tier relaunches faithfully instead of
-  being silently upgraded or silently dropped
-  (`validSandboxTierRecord` in [liveswap/sandbox.go](liveswap/sandbox.go)).
+  (systemd 257), so *filesystem* is neither probed for nor offered,
+  and since 2026-09-02 (issue #45) it is not an accepted `state.json`
+  value either: no released hotserve ever wrote one (`v0.1.0` predates
+  sandboxing), so there was no migration to protect, and
+  `validSandboxTierRecord` fails closed on it. What remains is the
+  recorded-tier mechanism itself — a relaunch reproduces the tier the
+  instance actually got rather than re-reading policy
+  (`validSandboxTierRecord`, `parseSandboxTier` in
+  [liveswap/sandbox.go](liveswap/sandbox.go)) — which is what keeps a
+  sandbox from engaging on a crash relaunch, where no old instance is
+  serving and no health gate can catch it.
 - **No AppArmor profile.** Debian's kernel does not restrict
   unprivileged user namespaces, so the profile and the user-manager
   wrapper it attached to are removed along with the privilege they

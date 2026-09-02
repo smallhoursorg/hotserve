@@ -106,7 +106,7 @@ type handleState struct {
 	// what Reattach looks up after a hotserve restart.
 	Unit string `json:"unit,omitempty"`
 	// Sandbox is the sandbox tier the instance was started with
-	// ("full", "filesystem"; absent = none). A relaunch reproduces it
+	// ("full"; absent = none). A relaunch reproduces it
 	// rather than re-reading policy, so enabling sandboxing in config
 	// takes effect on the next deploy — the path with a fallback — and
 	// never on a recovery or watchdog relaunch.

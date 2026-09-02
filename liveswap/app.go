@@ -881,8 +881,8 @@ type statusSnapshot struct {
 	// Unit is the systemd unit running the instance — what to pass to
 	// journalctl for the app's own output.
 	Unit string `json:"unit,omitempty"`
-	// Sandbox is the sandbox tier the running instance has: "full",
-	// "filesystem" or "none" (see liveswap/README.md). Always present
+	// Sandbox is the sandbox tier the running instance has: "full" or
+	// "none" (see liveswap/README.md). Always present
 	// when an instance is, so operators and smoke tests can assert it.
 	Sandbox    string            `json:"sandbox,omitempty"`
 	Running    bool              `json:"running"`
