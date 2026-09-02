@@ -64,37 +64,54 @@ var userManager = &userManagerClient{}
 // measurement starts a real unit, so the first caller after a dial
 // pays for it and every later config load reads the cache.
 //
-// A manager that cannot be reached is not a measurement and is not
-// cached: it is reported as no capability, with the dial error as the
-// reason, so `require` refuses with it and `auto` warns with it.
+// probe() rather than get(): it proves the manager answers a real
+// request, and its error names the uid, the socket and the lingering
+// to enable. resolveSandboxTier puts that reason verbatim into the
+// `sandbox require` refusal and the `auto` WARN, so a manager that
+// went away between Start's probeManager and here must not be
+// reported as a sandbox problem with no remedy attached.
 func (c *userManagerClient) sandboxCapability(logger *zap.Logger) sandboxCapability {
-	// Dial first, so the generation read below is the one the probe
-	// will actually run on rather than 0.
-	if _, err := c.get(); err != nil {
-		return sandboxCapability{tier: sandboxNone, reason: fmt.Sprintf("user manager unreachable: %v", err)}
+	if err := c.probe(); err != nil {
+		return sandboxCapability{tier: sandboxNone, reason: err.Error()}
 	}
-	return c.cachedSandboxCapability(c.generation.Load(), func() sandboxCapability {
+	return c.cachedSandboxCapability(func() sandboxCapability {
 		r := newSystemdRunner(c, logger)
 		defer r.cancel()
 		return probeSandboxCapability(r)
 	})
 }
 
-// cachedSandboxCapability returns the measurement held for gen, taking
-// a fresh one via measure when the cache is empty or belongs to an
-// older connection. Separate from sandboxCapability so the caching
-// rule is testable without a manager to dial.
-func (c *userManagerClient) cachedSandboxCapability(gen uint64, measure func() sandboxCapability) sandboxCapability {
+// cachedSandboxCapability returns the measurement held for the current
+// connection, taking a fresh one via measure when the cache is empty
+// or belongs to an older one. Separate from sandboxCapability so the
+// caching rule is testable without a manager to dial.
+//
+// Only a capability the host actually delivered is cached. A `none`
+// verdict is not a measurement of the host so much as the absence of
+// one: probeSandboxCapability reports the same thing whether the
+// namespaces are genuinely unavailable or the probe unit merely timed
+// out under boot load, and caching that would pin every app
+// unsandboxed — or, under `require`, refuse the server — for the life
+// of a connection that nothing will drop. So a failed verdict is
+// reported and re-measured next time, which is what this code did
+// before the cache existed. The cost of re-measuring falls only on
+// hosts that cannot sandbox at all; the supported one pays it once.
+func (c *userManagerClient) cachedSandboxCapability(measure func() sandboxCapability) sandboxCapability {
 	c.sandboxMu.Lock()
 	defer c.sandboxMu.Unlock()
+	// Read under the lock: sampled outside it, a redial between the
+	// read and the lock would let a cache hit serve a measurement of a
+	// manager that no longer exists.
+	gen := c.generation.Load()
 	if gen != 0 && c.sandboxGen == gen {
 		return c.sandboxCap
 	}
 	got := measure()
-	// A redial while the probe ran means it measured a manager that is
-	// no longer the current one. Report it — the caller asked now — but
-	// cache nothing, so the next caller measures the live one.
-	if c.generation.Load() == gen {
+	// Cache only against a real connection, and only if that
+	// connection is still the current one: a redial while the probe
+	// ran means it described a manager that is no longer live. The
+	// caller that asked still gets what was measured.
+	if got.tier != sandboxNone && gen != 0 && c.generation.Load() == gen {
 		c.sandboxCap, c.sandboxGen = got, gen
 	}
 	return got

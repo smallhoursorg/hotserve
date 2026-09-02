@@ -71,6 +71,9 @@ type systemdRunner struct {
 	conn   systemdConn
 	logger atomic.Pointer[zap.Logger]
 	poll   time.Duration // watcher interval between unit-state reads
+	// settleStep paces settleMainPID's reads; a field, like poll, so a
+	// test of a full-tier start is not held for the real window.
+	settleStep time.Duration
 
 	// ctx bounds every D-Bus call and every watcher; cancel (close) is
 	// for tests — in production watchers live as long as the process.
@@ -201,7 +204,7 @@ const (
 
 func newSystemdRunner(conn systemdConn, logger *zap.Logger) *systemdRunner {
 	ctx, cancel := context.WithCancel(context.Background())
-	r := &systemdRunner{conn: conn, poll: unitPollInterval, ctx: ctx, cancel: cancel}
+	r := &systemdRunner{conn: conn, poll: unitPollInterval, settleStep: mainPIDSettleStep, ctx: ctx, cancel: cancel}
 	r.logger.Store(logger)
 	return r
 }
@@ -512,33 +515,52 @@ func (r *systemdRunner) adopt(ctx context.Context, unit string, startedAt time.T
 // Bounded: if the manager never changes its mind the first value
 // stands and the watcher keeps following it.
 //
-// The wait cannot be ended early by asking the manager whether the
-// switch has happened, because nothing it exposes distinguishes the
-// intermediate from the settled pid — measured on systemd 257, where
-// ExecMainPID tracks MainPID exactly and changes with it. So the only
-// exit is observing the value change, and a unit that is already
-// settled when adopt first reads it runs the window out.
+// Two measurements on systemd 257 say what this can and cannot be:
 //
-// That case is real but is the minority: StartTransientUnit returns
-// when the job is done, and measured over ten such starts the pid
-// still changed afterwards in nine. The step therefore backs off
-// rather than shrinking the window — the common case still catches
-// the switch within the first poll or two, while the already-settled
-// case costs six round trips instead of fifty, all of them under
-// deployMu.
+//   - Nothing the manager exposes distinguishes the intermediate from
+//     the settled pid — ExecMainPID tracks MainPID exactly and changes
+//     with it — so observing the value change is the only signal, and
+//     a unit already settled when adopt first reads it runs the whole
+//     window out.
+//   - That case is the minority: StartTransientUnit returns when the
+//     job is done, and over ten such starts the pid still changed
+//     afterwards in nine.
+//
+// So the wait earns its keep and must not be deleted. Its cost is the
+// window, not the reads: pacing cannot shrink 500ms of waiting, and
+// stepping the poll interval up only delays the nine-in-ten case that
+// exits early. It therefore polls at a flat interval, and the real
+// fix — ending the wait the instant the manager publishes the change,
+// via a PropertiesChanged subscription on the unit — is its own
+// change, because it needs a signal path this client does not have.
 func (r *systemdRunner) settleMainPID(ctx context.Context, h *systemdHandle, first int) {
 	deadline := time.Now().Add(mainPIDSettle)
-	for step := mainPIDSettleStep; time.Now().Before(deadline); step *= 2 {
+	// baseline is the pid the switch must move away from. When adopt
+	// read the unit before the manager had published any MainPID it is
+	// 0, and the first non-zero value is the intermediate rather than
+	// the app: adopting it as the baseline (and as the handle's pid,
+	// which beats leaving 0 there) keeps the wait honest instead of
+	// returning on a pid that is about to die.
+	baseline := first
+	for time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(step):
+		case <-time.After(r.settleStep):
 		}
 		st, err := r.conn.UnitStatus(ctx, h.unit)
 		if err != nil || !st.running() {
 			return
 		}
-		if st.MainPID != 0 && st.MainPID != first {
+		if st.MainPID == 0 {
+			continue
+		}
+		if baseline == 0 {
+			h.pid.Store(int64(st.MainPID))
+			baseline = st.MainPID
+			continue
+		}
+		if st.MainPID != baseline {
 			h.pid.Store(int64(st.MainPID))
 			return
 		}
@@ -547,9 +569,8 @@ func (r *systemdRunner) settleMainPID(ctx context.Context, h *systemdHandle, fir
 
 const (
 	mainPIDSettle = 500 * time.Millisecond
-	// The first step: short enough that the common case (the switch
-	// lands within a few ms) is caught almost at once. It doubles from
-	// here, so the window costs ~6 reads rather than ~50.
+	// mainPIDSettleStep is the default for systemdRunner.settleStep,
+	// which tests shorten the way they shorten poll.
 	mainPIDSettleStep = 10 * time.Millisecond
 )
 

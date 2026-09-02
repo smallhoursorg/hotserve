@@ -475,10 +475,14 @@ watchdog relaunch, with the status endpoint then honestly reporting
 emits; the fix is per-app UIDs.
 
 *The capability probe runs under the shared uid.* It starts a real
-transient unit for up to 30s per start, so any process holding that uid
-can interfere with it: under `auto` a failed probe degrades every app
-to `none` with a WARN, under `require` it fails the whole server start.
-The tier is therefore not solely a property of the host.
+transient unit, bounded at 30s, so any process holding that uid can
+interfere with it: under `auto` a failed probe degrades every app to
+`none` with a WARN, under `require` it fails the whole server start.
+The tier is therefore not solely a property of the host. The
+measurement is cached per manager connection, which narrows the window
+an attacker has to hit — but a failed verdict is deliberately NOT
+cached, so interference degrades the next start rather than pinning
+every app unsandboxed until the manager restarts.
 
 3. **Resource caps need a read-only cgroupfs inside the sandbox.** The
    cgroup subtree under `user@<uid>.service` is delegated to — owned

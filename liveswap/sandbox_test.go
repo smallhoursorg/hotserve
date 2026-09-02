@@ -647,19 +647,46 @@ func TestValidateSandboxConfig(t *testing.T) {
 // refuses user namespaces: require refuses to start and names the
 // reason; auto starts unsandboxed and warns; off never probes.
 func TestStartResolvesSandboxPolicy(t *testing.T) {
-	probes := 0
+	probes, managerProbes := 0, 0
 	newApp := func(mode string) *App {
 		spec := testSpec(t)
 		spec.sandboxMode = mode
+		// A managed app, not an empty map: Start gates the
+		// reachability probe on there being one, so an empty pool
+		// leaves that seam dead and the ordering it guarantees —
+		// manager reachable BEFORE the host is measured — unasserted.
+		rig := newTestRig(t)
+		rig.spec = spec
+		rig.ma.spec = spec
+		// Start installs its own watchdog context over the rig's, so
+		// the rig's t.Cleanup no longer reaches it; stop it explicitly
+		// or goleak fails the package on the leaked goroutine.
+		t.Cleanup(rig.ma.stopWatchdog)
+		// Per-App, not shared: the ordering being pinned is "this
+		// config proved its manager reachable before it measured the
+		// host", and a counter shared across the three apps below
+		// would be satisfied by the previous app's probe.
+		measuredHere := false
 		return &App{
-			Root:         spec.dirs.root,
-			logger:       zap.NewNop(),
-			specs:        map[string]*appSpec{"demo": spec},
-			managed:      map[string]*managedApp{},
-			clients:      &fetchClients{},
-			managerProbe: func() error { return nil },
+			Root:    spec.dirs.root,
+			logger:  zap.NewNop(),
+			specs:   map[string]*appSpec{"demo": spec},
+			managed: map[string]*managedApp{"demo": rig.ma},
+			clients: &fetchClients{},
+			// A fake connection, so the unknown-app sweep Start spawns
+			// cannot reach a real manager and stop units belonging to
+			// whoever is running one on this machine.
+			manager: newFakeSystemdConn(),
+			managerProbe: func() error {
+				managerProbes++
+				measuredHere = true
+				return nil
+			},
 			sandboxProbe: func(*zap.Logger) sandboxCapability {
 				probes++
+				if !measuredHere {
+					t.Error("this App measured the host before proving its manager reachable")
+				}
 				return sandboxCapability{tier: sandboxNone, reason: "full tier: unit failed: Failed to set up user namespacing: Permission denied"}
 			},
 		}
@@ -688,6 +715,14 @@ func TestStartResolvesSandboxPolicy(t *testing.T) {
 		t.Fatalf("off tier = %v", a.specs["demo"].sandboxTier)
 	}
 	_ = a.Cleanup()
+
+	// Every one of those starts had a managed app, so every one had to
+	// prove the manager reachable first — the seam that replaced the
+	// probeUserManager package var, and the precondition the cached
+	// measurement's own early return depends on.
+	if managerProbes != 3 {
+		t.Fatalf("manager reachability probed %d times across 3 starts, want 3", managerProbes)
+	}
 }
 
 // TestSandboxRootUnderTmpIsAllowed: only hotserve's own state is a
@@ -1757,10 +1792,9 @@ func TestAppViewsAreDisjointExceptTheBaseView(t *testing.T) {
 }
 
 // TestSandboxCapabilityCachedPerConnection pins the rule that keeps a
-// throwaway unit off Caddy's critical path: the host is measured at
-// most once per manager connection, and again after a redial — the
-// only event that can change the answer. Drives the caching directly,
-// so it needs no manager to dial.
+// throwaway unit off Caddy's critical path: a delivered capability is
+// measured at most once per manager connection, and again after a
+// redial. Drives the caching directly, so it needs no manager to dial.
 func TestSandboxCapabilityCachedPerConnection(t *testing.T) {
 	c := &userManagerClient{}
 	measured := 0
@@ -1771,7 +1805,7 @@ func TestSandboxCapabilityCachedPerConnection(t *testing.T) {
 
 	c.generation.Add(1) // a first dial
 	for i := 0; i < 5; i++ {
-		if got := c.cachedSandboxCapability(c.generation.Load(), full); got.tier != sandboxFull {
+		if got := c.cachedSandboxCapability(full); got.tier != sandboxFull {
 			t.Fatalf("call %d: tier = %v, want full", i, got.tier)
 		}
 	}
@@ -1782,7 +1816,7 @@ func TestSandboxCapabilityCachedPerConnection(t *testing.T) {
 	// A redial invalidates it: the manager that restarted may not be
 	// the one that was measured.
 	c.generation.Add(1)
-	if got := c.cachedSandboxCapability(c.generation.Load(), full); got.tier != sandboxFull {
+	if got := c.cachedSandboxCapability(full); got.tier != sandboxFull {
 		t.Fatalf("after redial: tier = %v", got.tier)
 	}
 	if measured != 2 {
@@ -1791,31 +1825,66 @@ func TestSandboxCapabilityCachedPerConnection(t *testing.T) {
 
 	// A redial *during* a measurement means it described a manager that
 	// is no longer current: report it, cache nothing, measure again.
-	// Needs a generation the cache does not already hold, or the
-	// measurement below would never be reached.
 	c.generation.Add(1)
 	gen := c.generation.Load()
 	racing := func() sandboxCapability {
 		measured++
 		c.generation.Add(1)
-		return sandboxCapability{tier: sandboxNone, reason: "raced"}
+		return sandboxCapability{tier: sandboxFull, reason: "raced"}
 	}
-	if got := c.cachedSandboxCapability(gen, racing); got.reason != "raced" {
+	if got := c.cachedSandboxCapability(racing); got.reason != "raced" {
 		t.Fatalf("the caller that asked must still get the measurement it took: %+v", got)
 	}
 	if c.sandboxGen == gen {
 		t.Fatal("a measurement taken across a redial was cached against the stale generation")
 	}
-	if got := c.cachedSandboxCapability(c.generation.Load(), full); got.tier != sandboxFull || measured != 4 {
-		t.Fatalf("next call must re-measure: tier=%v measured=%d, want full/4", got.tier, measured)
-	}
 
-	// Generation 0 is "never dialed" and must never satisfy the cache.
+	// Generation 0 is "never dialed": nothing to cache against, in
+	// either direction. The write guard is asserted as well as the
+	// read one, so the two halves cannot disagree about the sentinel.
 	fresh := &userManagerClient{}
 	measured = 0
-	fresh.cachedSandboxCapability(0, full)
-	fresh.cachedSandboxCapability(0, full)
+	fresh.cachedSandboxCapability(full)
+	fresh.cachedSandboxCapability(full)
 	if measured != 2 {
 		t.Fatalf("measured %d times at generation 0, want 2: no connection means nothing to cache against", measured)
+	}
+	if fresh.sandboxGen != 0 {
+		t.Fatalf("sandboxGen = %d after measuring with no connection; 0 is reserved for \"never measured\"", fresh.sandboxGen)
+	}
+}
+
+// TestSandboxFailedMeasurementIsNotCached pins the half of the caching
+// rule that decides whether a bad minute costs a host its sandbox for
+// the life of a connection. probeSandboxCapability reports the same
+// {none, reason} whether the namespaces are genuinely unavailable or
+// the probe unit merely timed out under boot load, and a timeout
+// leaves the connection Connected() — so nothing would ever drop it
+// and re-measure.
+func TestSandboxFailedMeasurementIsNotCached(t *testing.T) {
+	c := &userManagerClient{}
+	c.generation.Add(1)
+	measured := 0
+	failing := func() sandboxCapability {
+		measured++
+		return sandboxCapability{tier: sandboxNone, reason: "full tier: unit failed: probe timed out"}
+	}
+	for i := 0; i < 3; i++ {
+		if got := c.cachedSandboxCapability(failing); got.tier != sandboxNone {
+			t.Fatalf("call %d: tier = %v, want none", i, got.tier)
+		}
+	}
+	if measured != 3 {
+		t.Fatalf("measured %d times, want 3: a failed verdict must not pin every app unsandboxed until a redial", measured)
+	}
+	if c.sandboxGen != 0 {
+		t.Fatal("a failed verdict was cached")
+	}
+	// And once the host answers, that verdict is cached as usual.
+	if got := c.cachedSandboxCapability(func() sandboxCapability { return sandboxCapability{tier: sandboxFull} }); got.tier != sandboxFull {
+		t.Fatalf("tier = %v, want full", got.tier)
+	}
+	if c.cachedSandboxCapability(failing); measured != 3 {
+		t.Fatalf("measured %d: a cached success must still be served", measured)
 	}
 }

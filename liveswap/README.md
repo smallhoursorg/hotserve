@@ -320,9 +320,12 @@ bare `203/EXEC`.
 **Policy and rollout.** `sandbox auto` (the default) applies the best
 tier the host delivers, and logs a warning at start and at every
 launch that runs below `full`, naming what stays open. The tier is
-probed once per start by running a throwaway unit and checking the
-namespaces from inside (`journalctl -t hotserve-sandbox-probe` shows
-what it saw). The tier an instance got is recorded in `state.json`
+probed by running a throwaway unit and checking the namespaces from
+inside (`journalctl -t hotserve-sandbox-probe` shows what it saw).
+That measurement is cached per connection to the user manager, so a
+reload does not repeat it — but a host whose answer was `none` is
+measured again on the next reload, so fixing the host and reloading
+does take effect. Restarting the user manager re-measures either way. The tier an instance got is recorded in `state.json`
 and reported by the status endpoint (`"sandbox": "full" | "none"`).
 
 Sandboxing engages on each app's **next deploy** — the path with a

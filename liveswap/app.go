@@ -256,9 +256,12 @@ type appConfigState struct {
 	store     stateStore
 }
 
-// owner is the config installing this definition (see rollbackConfig);
-// manager is the user-manager connection its runner talks to, passed
-// in rather than reached for globally so a test can install its own.
+// owner is the config installing this definition (see rollbackConfig).
+// manager is the connection a runner built here talks to, passed in
+// rather than reached for globally so a test can install its own; it
+// is read only when this managedApp has no runner yet, because a
+// pooled app keeps the runner — and so the connection — it was first
+// started with across every later reload.
 func (ma *managedApp) configure(owner any, spec *appSpec, logger *zap.Logger, clients *fetchClients, manager systemdConn) {
 	ma.specMu.Lock()
 	defer ma.specMu.Unlock()

@@ -134,12 +134,17 @@ type App struct {
 	// releasing anything.
 	recoverCancel context.CancelFunc
 	recoverWG     *sync.WaitGroup // pointer: App values are copied by Caddy
-	// manager is the user-manager client this config talks to, and the
-	// managerProbe/sandboxProbe seams over it. Fields rather than the
-	// package vars they replace: a test scripting a host now installs
-	// it on its own App instead of mutating global state and restoring
-	// it in a t.Cleanup, so two such tests can run at once.
-	manager         *userManagerClient
+	// manager is the manager connection everything this config starts
+	// talks to — its apps' runners and its unknown-app sweep. Typed as
+	// the interface, so a test installs a fake here and Start touches
+	// no real socket; nil means the process-wide client.
+	//
+	// managerProbe and sandboxProbe are the two seams that need the
+	// concrete client (reachability, and the cached measurement).
+	// Fields rather than the package vars they replace: a test scripts
+	// a host on its own App instead of mutating global state and
+	// restoring it in a t.Cleanup.
+	manager         systemdConn
 	managerProbe    func() error
 	sandboxProbe    func(*zap.Logger) sandboxCapability
 	allowlist       []artifactAllowEntry
@@ -577,7 +582,7 @@ func (a *App) Start() error {
 			return err
 		}
 	}
-	// Sandbox policy is settled here, once per start, against what this
+	// Sandbox policy is settled here, on every start, against what this
 	// host delivers: the probe runs a throwaway unit with the sandbox
 	// applied and checks the namespaces from inside. `require` on a
 	// host that falls short fails the start — by design, and documented
@@ -600,7 +605,7 @@ func (a *App) Start() error {
 		}
 	}
 	for name, ma := range a.managed {
-		ma.configure(a, a.specs[name], a.logger.Named(name), a.clients, a.userManagerClient())
+		ma.configure(a, a.specs[name], a.logger.Named(name), a.clients, a.systemdConn())
 		ma.startWatchdog()
 	}
 	a.started = true
@@ -611,10 +616,11 @@ func (a *App) Start() error {
 	// the sweep judges each app against the pool right before acting,
 	// so neither a reload racing it nor a candidate config that later
 	// fails to activate can lose an app someone still holds.
+	conn := a.systemdConn()
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), unknownAppSweepTimeout)
 		defer cancel()
-		if err := sweepUnknownApps(ctx, userManager, a.logger); err != nil {
+		if err := sweepUnknownApps(ctx, conn, a.logger); err != nil {
 			a.logger.Error("sweeping units of apps no longer configured", zap.Error(err))
 		}
 	}()
@@ -647,9 +653,10 @@ func (a *App) sandboxWanted() bool {
 	return false
 }
 
-// userManager returns the client this config uses. Apps built by
-// Provision share the process-wide one; a test may install its own.
-func (a *App) userManagerClient() *userManagerClient {
+// systemdConn returns the manager connection this config uses. Apps
+// built by Provision share the process-wide client; a test may install
+// its own so nothing it starts reaches a real manager.
+func (a *App) systemdConn() systemdConn {
 	if a.manager != nil {
 		return a.manager
 	}
@@ -664,7 +671,7 @@ func (a *App) probeManager() error {
 	if a.managerProbe != nil {
 		return a.managerProbe()
 	}
-	return a.userManagerClient().probe()
+	return userManager.probe()
 }
 
 // measureSandbox reports what this host delivers (sandbox.go), from
@@ -673,7 +680,7 @@ func (a *App) measureSandbox() sandboxCapability {
 	if a.sandboxProbe != nil {
 		return a.sandboxProbe(a.logger)
 	}
-	return a.userManagerClient().sandboxCapability(a.logger)
+	return userManager.sandboxCapability(a.logger)
 }
 
 // Stop intentionally does NOT stop app processes: on a config reload
