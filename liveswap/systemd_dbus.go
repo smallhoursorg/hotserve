@@ -81,10 +81,26 @@ func (c *userManagerClient) sandboxCapability(logger *zap.Logger) sandboxCapabil
 	})
 }
 
+// forgetSandboxCapability drops the cached measurement so the next
+// caller takes a fresh one. The connection generation covers a manager
+// restart; this covers everything else that can change the answer
+// under a live connection — see systemdRunner.sandboxedStartFailed,
+// which is the evidence that triggers it.
+func (c *userManagerClient) forgetSandboxCapability() {
+	c.sandboxMu.Lock()
+	defer c.sandboxMu.Unlock()
+	c.sandboxCap, c.sandboxGen = sandboxCapability{}, 0
+}
+
 // cachedSandboxCapability returns the measurement held for the current
 // connection, taking a fresh one via measure when the cache is empty
 // or belongs to an older one. Separate from sandboxCapability so the
 // caching rule is testable without a manager to dial.
+//
+// A cached capability is dropped by forgetSandboxCapability when a
+// sandboxed unit fails to start, because what is measured here is the
+// kernel and the LSM, not the manager: the generation cannot see a
+// sysctl or a policy reload.
 //
 // Only a capability the host actually delivered is cached. A `none`
 // verdict is not a measurement of the host so much as the absence of

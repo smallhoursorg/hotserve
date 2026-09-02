@@ -481,9 +481,42 @@ func (r *systemdRunner) Start(spec startSpec) (handle, error) {
 	}
 	if res != "done" {
 		st := r.reapFailed(ctx, u.Name)
+		r.sandboxedStartFailed(u)
 		return nil, fmt.Errorf("unit %s: start job %s (%s)", u.Name, res, st.exitString())
 	}
 	return r.adopt(ctx, u.Name, time.Now(), u.StopTimeout, sandboxTierOf(spec)), nil
+}
+
+// sandboxCapabilityForgetter is the manager client's cache, as much of
+// it as the runner needs. An optional interface: a fake connection in
+// a test need not carry one.
+type sandboxCapabilityForgetter interface{ forgetSandboxCapability() }
+
+// sandboxedStartFailed reports a unit that failed to start with a
+// sandbox applied, which is evidence the cached capability no longer
+// describes the host.
+//
+// The measurement is cached against the manager connection, but what
+// it measures is the kernel and the LSM: user.max_user_namespaces, an
+// AppArmor policy reload or a container limit can all take the
+// namespaces away while the connection stays up, and the generation
+// cannot see it. Without this the cached `full` would stand, and
+// `sandbox auto` would keep choosing a tier whose units no longer
+// start — failing deploys where auto's whole contract is to degrade
+// with a WARN and keep serving.
+//
+// A launch fails for many reasons that have nothing to do with the
+// sandbox, and those cost one extra measurement on the next start.
+// That is the right way round: re-measuring is one throwaway unit,
+// while not re-measuring is every deploy failing until the manager
+// restarts.
+func (r *systemdRunner) sandboxedStartFailed(u unitSpec) {
+	if u.Sandbox == nil || u.Sandbox.tier == sandboxNone {
+		return
+	}
+	if f, ok := r.conn.(sandboxCapabilityForgetter); ok {
+		f.forgetSandboxCapability()
+	}
 }
 
 // adopt builds a watched handle for a unit known to be running.

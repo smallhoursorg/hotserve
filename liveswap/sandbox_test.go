@@ -1888,3 +1888,96 @@ func TestSandboxFailedMeasurementIsNotCached(t *testing.T) {
 		t.Fatalf("measured %d: a cached success must still be served", measured)
 	}
 }
+
+// TestSandboxedStartFailureForgetsCapability pins the invalidation the
+// connection generation cannot provide. The capability is cached
+// against the manager connection, but what it measures is the kernel
+// and the LSM: user.max_user_namespaces, an AppArmor policy reload or
+// a container limit can take the namespaces away while the connection
+// stays up. Without this the cached `full` would stand and `sandbox
+// auto` would keep choosing a tier whose units no longer start —
+// failing every deploy, where auto's contract is to degrade with a
+// WARN and keep serving.
+func TestSandboxedStartFailureForgetsCapability(t *testing.T) {
+	c := &userManagerClient{}
+	c.generation.Add(1)
+	measured := 0
+	full := func() sandboxCapability {
+		measured++
+		return sandboxCapability{tier: sandboxFull}
+	}
+	if got := c.cachedSandboxCapability(full); got.tier != sandboxFull || measured != 1 {
+		t.Fatalf("tier=%v measured=%d", got.tier, measured)
+	}
+
+	// A unit that failed to start WITHOUT a sandbox says nothing about
+	// the host's namespaces, and must not cost a measurement.
+	r := &systemdRunner{conn: c}
+	r.sandboxedStartFailed(unitSpec{Name: "bare.service"})
+	r.sandboxedStartFailed(unitSpec{Name: "off.service", Sandbox: &sandboxSpec{tier: sandboxNone}})
+	if c.cachedSandboxCapability(full); measured != 1 {
+		t.Fatalf("measured %d: an unsandboxed start failure is not evidence about the sandbox", measured)
+	}
+
+	// One that failed WITH a sandbox applied is. Driven through Start,
+	// not by calling the helper: the wiring is the thing that can be
+	// deleted, and asserting the helper alone leaves Start free to
+	// stop calling it with every test still green.
+	r.sandboxedStartFailed(unitSpec{Name: "app.service", Sandbox: &sandboxSpec{tier: sandboxFull}})
+	if c.sandboxGen != 0 {
+		t.Fatal("a sandboxed start failure left the stale capability cached")
+	}
+	degraded := func() sandboxCapability {
+		measured++
+		return sandboxCapability{tier: sandboxNone, reason: "full tier: unit failed: Permission denied"}
+	}
+	got := c.cachedSandboxCapability(degraded)
+	if got.tier != sandboxNone || measured != 2 {
+		t.Fatalf("tier=%v measured=%d: the next start must re-measure the host", got.tier, measured)
+	}
+	// And auto now degrades with a warning instead of selecting a tier
+	// whose units cannot start.
+	tier, warn, err := resolveSandboxTier(sandboxAuto, got)
+	if err != nil || tier != sandboxNone || warn == "" {
+		t.Fatalf("auto must degrade with a WARN: tier=%v warn=%q err=%v", tier, warn, err)
+	}
+}
+
+// forgetCountingConn is a fake connection that also carries the
+// optional capability cache, so a test can see Start reach for it.
+type forgetCountingConn struct {
+	*fakeSystemdConn
+	forgotten int
+}
+
+func (f *forgetCountingConn) forgetSandboxCapability() { f.forgotten++ }
+
+// TestStartForgetsCapabilityOnSandboxedFailure pins the WIRING, not the
+// helper: that Start's failure path is what reports a sandboxed unit
+// the manager refused. Without this, deleting the one call from Start
+// leaves every other sandbox test green while the stale capability
+// survives and auto keeps choosing a tier whose units cannot start.
+func TestStartForgetsCapabilityOnSandboxedFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		sandbox *sandboxSpec
+		want    int
+	}{
+		{"sandboxed unit the manager refused", &sandboxSpec{tier: sandboxFull, root: "/var/lib/liveswap"}, 1},
+		{"bare unit that failed for its own reasons", nil, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := &forgetCountingConn{fakeSystemdConn: newFakeSystemdConn()}
+			conn.startResult = "failed"
+			conn.failStatus = &unitStatus{LoadState: "loaded", ActiveState: "failed", Result: "exit-code", ExecMainCode: 1, ExecMainStatus: 226}
+			r := newSystemdRunner(conn, zap.NewNop())
+			t.Cleanup(r.cancel)
+			if _, err := r.Start(startSpec{app: "demo", version: "v1", command: []string{"/bin/true"}, sandbox: tc.sandbox}); err == nil {
+				t.Fatal("a start job that did not return done must be an error")
+			}
+			if conn.forgotten != tc.want {
+				t.Fatalf("capability forgotten %d times, want %d", conn.forgotten, tc.want)
+			}
+		})
+	}
+}
