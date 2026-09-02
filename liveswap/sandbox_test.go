@@ -17,7 +17,7 @@ import (
 )
 
 func TestSandboxTierRoundTrip(t *testing.T) {
-	for _, tier := range []sandboxTier{sandboxNone, sandboxFilesystem, sandboxFull} {
+	for _, tier := range []sandboxTier{sandboxNone, sandboxFull} {
 		if got := parseSandboxTier(tier.String()); got != tier {
 			t.Errorf("parse(%q) = %v, want %v", tier.String(), got, tier)
 		}
@@ -27,6 +27,24 @@ func TestSandboxTierRoundTrip(t *testing.T) {
 	for _, s := range []string{"", "bogus", "FULL"} {
 		if got := parseSandboxTier(s); got != sandboxNone {
 			t.Errorf("parse(%q) = %v, want none", s, got)
+		}
+	}
+	// The other direction, and the one a `default: return "none"` would
+	// silently break: a tier this build does not define must not render
+	// as a record validSandboxTierRecord accepts. state() persists
+	// whatever String() returns, so a rendering that round-trips as a
+	// legitimate value would let an out-of-range in-memory tier become a
+	// valid bare record — a sandboxed unit persisted, and relaunched,
+	// unsandboxed. 2 is included because it is the value sandboxFull
+	// itself held until removing the filesystem tier renumbered the
+	// iota — the most plausible stale tier there is.
+	for _, undefined := range []sandboxTier{2, 99, -1} {
+		rendered := undefined.String()
+		if err := validSandboxTierRecord(rendered); err == nil {
+			t.Errorf("tier %d rendered as %q, which is an accepted record", int(undefined), rendered)
+		}
+		if got := parseSandboxTier(rendered); got != sandboxNone {
+			t.Errorf("parse(%q) = %v; an unrepresentable tier must not parse back to a real one", rendered, got)
 		}
 	}
 	st := (&systemdHandle{unit: "u.service"}).state()
@@ -41,10 +59,10 @@ func TestSandboxTierRoundTrip(t *testing.T) {
 
 func TestResolveSandboxTier(t *testing.T) {
 	full := sandboxCapability{tier: sandboxFull}
-	// The two capabilities the probe can actually report. `filesystem`
-	// survives only as a value state.json may already hold (see
-	// validSandboxTierRecord); it is never a probe result, so driving
-	// the policy with it would test a path no host can reach.
+	// The two capabilities the probe can actually report. There is no
+	// third: `filesystem` is neither probed for nor an accepted record
+	// (see validSandboxTierRecord), so driving the policy with it would
+	// test a path no host and no state.json can reach.
 	none := sandboxCapability{tier: sandboxNone, reason: "full tier: unit failed: Failed to set up user namespacing: Permission denied"}
 	cases := []struct {
 		name     string
@@ -85,7 +103,7 @@ func TestResolveSandboxTier(t *testing.T) {
 // sandboxPropertyNames is the set sandboxProperties emits; the test
 // pins it so a property can neither disappear nor appear unnoticed.
 var sandboxPropertyNames = []string{
-	"PrivateUsers", "PrivateTmp", "PrivateDevices",
+	"PrivateUsers", "PrivatePIDs", "PrivateTmp", "PrivateDevices",
 	"ProtectControlGroups", "ProtectKernelTunables", "ProtectKernelModules", "ProtectKernelLogs",
 	"RestrictNamespaces", "RestrictRealtime", "RestrictSUIDSGID", "LockPersonality",
 	"RestrictAddressFamilies", "SystemCallFilter", "SystemCallErrorNumber", "CapabilityBoundingSet",
@@ -112,7 +130,7 @@ func TestSandboxPropertiesNoneWhenUnsandboxed(t *testing.T) {
 		{ExecStart: []string{"/bin/true"}, Sandbox: &sandboxSpec{tier: sandboxNone, root: "/var/lib/liveswap"}},
 	} {
 		got := propMap(u)
-		for _, name := range append(sandboxPropertyNames, "PrivatePIDs") {
+		for _, name := range sandboxPropertyNames {
 			if _, present := got[name]; present {
 				t.Errorf("%s set on an unsandboxed unit", name)
 			}
@@ -123,9 +141,9 @@ func TestSandboxPropertiesNoneWhenUnsandboxed(t *testing.T) {
 	}
 }
 
-func TestSandboxPropertiesFilesystemAndFull(t *testing.T) {
+func TestSandboxPropertiesFullTier(t *testing.T) {
 	spec := &sandboxSpec{
-		tier:    sandboxFilesystem,
+		tier:    sandboxFull,
 		root:    "/var/lib/liveswap",
 		appDir:  "/var/lib/liveswap/blog",
 		appName: "blog",
@@ -143,10 +161,10 @@ func TestSandboxPropertiesFilesystemAndFull(t *testing.T) {
 			t.Errorf("%s is set: the deny-by-default view masks nothing, it names what exists", name)
 		}
 	}
-	if _, present := got["PrivatePIDs"]; present {
-		t.Error("PrivatePIDs must not be set on the filesystem tier (unknown property below systemd 256)")
-	}
+	// There is one tier above none, so PrivatePIDs= is emitted for
+	// every sandboxed unit rather than conditionally.
 	for name, want := range map[string]any{
+		"PrivatePIDs":           "yes",
 		"PrivateUsers":          true,
 		"PrivateTmp":            true,
 		"PrivateDevices":        true,
@@ -225,15 +243,6 @@ func TestSandboxPropertiesFilesystemAndFull(t *testing.T) {
 	}
 	if unset, _ := got["UnsetEnvironment"].([]string); !reflect.DeepEqual(unset, []string{"XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"}) {
 		t.Errorf("UnsetEnvironment = %v", unset)
-	}
-
-	spec.tier = sandboxFull
-	got = propMap(unitSpec{ExecStart: []string{"/bin/true"}, Sandbox: spec})
-	if got["PrivatePIDs"] != "yes" {
-		t.Errorf("full tier must set PrivatePIDs=yes, got %v", got["PrivatePIDs"])
-	}
-	if got["PrivateUsers"] != true {
-		t.Error("full tier keeps the explicit user namespace")
 	}
 }
 
@@ -346,20 +355,16 @@ func TestSandboxSpecFor(t *testing.T) {
 }
 
 func TestSandboxProbeCommand(t *testing.T) {
-	fs := sandboxProbeCommand(sandboxFilesystem)
 	full := sandboxProbeCommand(sandboxFull)
-	if fs[0] != "/bin/sh" || fs[1] != "-c" || len(fs) != 3 {
-		t.Fatalf("probe must be a single sh -c script, got %v", fs)
-	}
-	if !strings.Contains(fs[2], "uid_map") || strings.Contains(fs[2], `= 1`) {
-		t.Fatalf("filesystem probe checks the user namespace only: %q", fs[2])
+	if full[0] != "/bin/sh" || full[1] != "-c" || len(full) != 3 {
+		t.Fatalf("probe must be a single sh -c script, got %v", full)
 	}
 	// systemd turns "$$" into "$" in ExecStart arguments, so the shell
 	// pid must be spelled "$$$$" and a bare "$$" must never appear.
 	if !strings.Contains(full[2], "uid_map") || !strings.Contains(full[2], `"$$$$" = 1`) {
 		t.Fatalf("full probe checks both namespaces: %q", full[2])
 	}
-	for _, s := range []string{fs[2], full[2]} {
+	for _, s := range []string{full[2]} {
 		if strings.Contains(strings.ReplaceAll(s, "$$$$", ""), "$$") {
 			t.Fatalf("a bare $$ would reach the shell as $: %q", s)
 		}
@@ -407,7 +412,7 @@ func TestProbeSandboxCapability(t *testing.T) {
 				t.Fatalf("tier = %v (%s), want %v", got.tier, got.reason, tc.wantTier)
 			}
 			// One supported tier means exactly one candidate: a probe
-			// that tried the retired filesystem tier would be reporting
+			// that tried the removed filesystem tier would be reporting
 			// a capability nothing can be launched with.
 			if !reflect.DeepEqual(r.tried, []sandboxTier{sandboxFull}) {
 				t.Fatalf("tried %v, want exactly [full]", r.tried)
@@ -523,16 +528,45 @@ func TestDeployUsesPolicyRelaunchUsesRecord(t *testing.T) {
 	if st := rig2.ma.status(); st.Sandbox != "none" {
 		t.Fatalf("status sandbox = %q, want none", st.Sandbox)
 	}
-	// And a recorded filesystem-tier instance relaunches at that tier.
+	// And the converse: a recorded full-tier instance relaunches at
+	// that tier although policy now says off. The record decides a
+	// relaunch in both directions — that is the whole mechanism, and
+	// with one tier these two rigs are the only ways to state it.
 	rig3 := newTestRig(t)
-	rig3.spec.sandboxTier = sandboxFull
-	must(t, rig3.store.save(appState{CurrentVersion: "v2", Port: 1, Handle: handleState{Unit: "hotserve-demo.v2.abc.service", Sandbox: "filesystem"}}))
+	rig3.spec.sandboxMode = sandboxOff
+	rig3.spec.sandboxTier = sandboxNone
+	must(t, rig3.store.save(appState{CurrentVersion: "v2", Port: 1, Handle: handleState{Unit: "hotserve-demo.v2.abc.service", Sandbox: "full"}}))
 	must(t, mkdirRelease(rig3.spec, "v2"))
 	if err := rig3.ma.ensureRunning(); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
-	if got := rig3.runner.started[0].sandbox; got == nil || got.tier != sandboxFilesystem {
+	if got := rig3.runner.started[0].sandbox; got == nil || got.tier != sandboxFull {
 		t.Fatalf("recorded tier not reproduced: %+v", got)
+	}
+	if st := rig3.ma.status(); st.Sandbox != "full" {
+		t.Fatalf("status sandbox = %q, want full", st.Sandbox)
+	}
+
+	// The third path a record reaches, and the one nothing pinned: a
+	// reattach, where the unit is still running and is adopted rather
+	// than relaunched. systemdRunner.Reattach reproduces the tier from
+	// the record; without this, deleting that line left the whole
+	// suite green while status under-reported a sandboxed app as
+	// "none" and the next watchdog restart relaunched it bare.
+	rig4 := newTestRig(t)
+	rig4.spec.sandboxMode = sandboxAuto
+	rig4.spec.sandboxTier = sandboxFull
+	rig4.runner.reattachOK = true
+	must(t, rig4.store.save(appState{CurrentVersion: "v1", Port: 1, Handle: handleState{Unit: "hotserve-demo.v1.abc.service", Sandbox: "full"}}))
+	must(t, mkdirRelease(rig4.spec, "v1"))
+	if err := rig4.ma.ensureRunning(); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if n := len(rig4.runner.started); n != 0 {
+		t.Fatalf("a reattachable unit must be adopted, not relaunched: started = %d", n)
+	}
+	if st := rig4.ma.status(); st.Sandbox != "full" {
+		t.Fatalf("reattach dropped the recorded tier: status sandbox = %q, want full", st.Sandbox)
 	}
 }
 
@@ -674,9 +708,9 @@ func TestSandboxRootUnderTmpIsAllowed(t *testing.T) {
 }
 
 // TestRelaunchBelowFullWarns pins the "prominent WARN at every spawn":
-// a relaunch that reproduces a bare (or filesystem-tier) instance
-// while policy is auto logs it, naming the residual; a full-tier
-// launch and sandbox off do not.
+// a relaunch that reproduces a bare instance while policy wants a
+// sandbox logs it, naming the residual; a full-tier launch and
+// sandbox off do not.
 func TestRelaunchBelowFullWarns(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -685,7 +719,10 @@ func TestRelaunchBelowFullWarns(t *testing.T) {
 		want     int
 	}{
 		{"auto, bare record", sandboxAuto, "", 1},
-		{"auto, filesystem record", sandboxAuto, "filesystem", 1},
+		// require, not a second spelling of the bare record above:
+		// warnSandboxTier short-circuits on sandboxOff alone, and
+		// nothing else in the suite pins that require still warns.
+		{"require, bare record", sandboxRequire, "", 1},
 		{"auto, full record", sandboxAuto, "full", 0},
 		{"off, bare record", sandboxOff, "", 0},
 	} {
@@ -1220,7 +1257,7 @@ func TestSandboxPropertiesNeverEmitsAnEmptyBindList(t *testing.T) {
 		want []string // properties that must be present
 		gone []string // properties that must not be emitted at all
 	}{
-		{"the capability probe: nothing of its own", probeSandboxSpec(sandboxFilesystem),
+		{"the capability probe: nothing of its own", probeSandboxSpec(sandboxFull),
 			[]string{"BindReadOnlyPaths", "TemporaryFileSystem"}, []string{"BindPaths"}},
 		{"an app with no read-only binds of its own", &sandboxSpec{tier: sandboxFull, root: "/var/lib/liveswap",
 			writable: []bindPath{{dest: "/var/lib/liveswap/blog/shared"}}},

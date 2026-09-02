@@ -488,7 +488,10 @@ func (r *systemdRunner) adopt(ctx context.Context, unit string, startedAt time.T
 	h := &systemdHandle{unit: unit, startedAt: startedAt, stopTimeout: stopTimeout, sandbox: tier, done: make(chan struct{})}
 	if st, err := r.conn.UnitStatus(ctx, unit); err == nil {
 		h.pid.Store(int64(st.MainPID))
-		if tier == sandboxFull {
+		// Spelled as sandboxProperties spells it (systemd_dbus.go):
+		// every sandboxed unit gets PrivatePIDs=, so every sandboxed
+		// unit has the intermediate PID to settle past.
+		if tier != sandboxNone {
 			r.settleMainPID(ctx, h, st.MainPID)
 		}
 	} else {

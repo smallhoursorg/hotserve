@@ -253,7 +253,7 @@ requirement below stands as the contract the sandbox path must keep.
   bound it. What ages now is only what an operator asked to be let
   IN, which fails safe.
 - The status endpoint MUST report the tier the running instance has
-  (`"sandbox": "full" | "filesystem" | "none"`) — observability for
+  (`"sandbox": "full" | "none"`) — observability for
   operators and the assertion hook for smoke tests.
 - When a deploy fails its health gate and the app is sandboxed, the
   webhook error body SHOULD hint at `extra_path` (the "file/socket
@@ -426,8 +426,9 @@ The supported operator rollout, which the product docs MUST describe:
 3. Let the sandbox engage on that app's **next deploy**, where a broken
    profile fails safe and surfaces the `extra_path` hint. Roll
    app-by-app, watching `"sandbox"` in each app's status (the shipped
-   field is a tier string — `"full"`, `"filesystem"` or `"none"` — not
-   a boolean; a boolean cannot express the two tiers).
+   field is a tier string — `"full"` or `"none"` — not a boolean, so
+   that a tier added later needs no wire-format change; the e2e and
+   install-test lanes parse it as a string).
 4. Only after every app is proven, optionally tighten to `require`.
 
 Nothing here is destructive: the release being started and `shared/`
@@ -629,14 +630,42 @@ candidate, *full*. A host either delivers both namespaces or reports
 on a matrix of one, a second tier would be a path no supported host
 takes and no lane tests.
 
-**`filesystem` survives as a record, not a capability.** An instance
-started before this change may have `"sandbox":"filesystem"` in
-`state.json`. `validSandboxTierRecord` still accepts it and
-`sandboxProperties` still renders it, so such an instance relaunches
-at the tier it actually has. Reading it as `none` would silently drop
-a running app's isolation; reading it as `full` would silently claim
-one it never got. Both are the failure this document exists to
-prevent, so the value stays until every instance has redeployed.
+**`filesystem` is gone entirely** (removed 2026-09-02, issue #45). It
+was first kept as a value `state.json` might already hold, on the
+reasoning that reading such a record as `none` would silently drop a
+running app's isolation and reading it as `full` would silently claim
+one it never got. Checking the release history retired that reasoning:
+`v0.1.0` is the only tag and predates sandboxing — `handleState` had
+no `Sandbox` field and `sandbox.go` did not exist — so **no released
+hotserve ever wrote the value**, and the only machines that could hold
+such a record ran a build off the development branch. There was no
+migration to protect, and `validSandboxTierRecord` now fails closed on
+it like any other unknown string.
+
+**The record cuts both ways, and only one of them is a safety
+property.** An instance recorded bare stays bare, which is the point.
+An instance recorded *full* also keeps its tier after the operator
+sets `sandbox off` and reloads — `launchVersion` applies the record
+and never re-reads policy — so the escape hatch this document offers
+for an app that cannot live in its sandbox does not take effect on a
+crash relaunch or a boot recovery, only on the next deploy or
+rollback. Worse, `warnSandboxTier` short-circuits on `sandbox off`, so
+nothing in the journal names the disagreement. That is a residual, not
+a design intent: an app crash-looping under its sandbox stays down
+after the documented remedy, silently. It is pre-existing and is left
+alone here because a cosmetic PR is the wrong place to change
+relaunch behaviour; the fix is to warn (at least) whenever a launch
+disagrees with current policy in either direction.
+
+The **recorded-tier mechanism** is untouched by that removal, and must
+not be confused with it. `handleState.Sandbox`, `parseSandboxTier` and
+a relaunch that reproduces the record rather than re-reading policy
+are not migration machinery: they are what stops an app that was set
+to `sandbox off` for debugging, and set back to `auto`, from having
+the sandbox engage on a crash relaunch or a boot recovery — where
+there is no old instance serving and no health gate to fail into. The
+empty record keeps its meaning too; absent reads as `none`, which is
+the safe default and the documented rollout contract.
 
 **The AppArmor profile is gone.** Debian's kernel does not restrict
 unprivileged user namespaces, so the profile granting `userns` to
@@ -655,10 +684,13 @@ measurement rather than an inference from `/etc/os-release`.
 **Accepted costs**, both stated so they are not rediscovered as bugs:
 
 - A Debian 12 host that upgrades hotserve drops from *filesystem* to
-  `none` — not to a lesser sandbox, to no sandbox. It is loud (WARN at
-  every launch, `"sandbox":"none"` in status, `require` refusing to
-  start) but it is a real reduction, and it is what dropping support
-  means.
+  `none` — not to a lesser sandbox, to no sandbox. For an app deployed
+  after the upgrade it is loud (WARN at every launch,
+  `"sandbox":"none"` in status, `require` refusing to start) but it is
+  a real reduction, and it is what dropping support means. An instance
+  still *recorded* at the removed tier does not degrade at all: since
+  #45 the record is rejected and recovery refuses permanently rather
+  than relaunching it bare. Only a development build ever wrote one.
 - CI no longer exercises a userns-restricted kernel. GitHub's runners
   boot an Ubuntu kernel, and the profile was what let the Debian cells
   prove the sandbox under a real restriction; CI now sets

@@ -255,9 +255,8 @@ const (
 
 // sandboxProperties renders a sandboxSpec (nil: nothing). The set is
 // the one measured in issue #35; see sandbox.go for what it closes.
-// PrivatePIDs= is emitted only for the full tier, so a unit relaunched
-// from a legacy "filesystem" record is never handed a property its
-// recorded tier does not include.
+// There is one tier above none, so a spec that reaches past the guard
+// below is a full one and gets every property unconditionally.
 //
 // The view is deny-by-default: TemporaryFileSystem=/ replaces the
 // whole filesystem with an empty read-only tmpfs, and the binds below
@@ -266,8 +265,8 @@ const (
 // left for either to act on — an unnamed path is absent, not merely
 // unreadable, which is a stronger statement than either option makes
 // and one that cannot go stale. MountAPIVFS= is not set: /proc, /sys
-// and /dev are mounted inside the tmpfs by PrivateDevices= (and, at
-// the full tier, PrivatePIDs=), measured on 252/255/257/259.
+// and /dev are mounted inside the tmpfs by PrivateDevices= and
+// PrivatePIDs=, measured on 252/255/257/259.
 func sandboxProperties(s *sandboxSpec) []sddbus.Property {
 	if s == nil || s.tier == sandboxNone {
 		return nil
@@ -331,9 +330,7 @@ func sandboxProperties(s *sandboxSpec) []sddbus.Property {
 	// has no directories of its own) used to do. Omit what is empty.
 	props = appendIfAny(props, "BindReadOnlyPaths", readOnly)
 	props = appendIfAny(props, "BindPaths", writable)
-	if s.tier == sandboxFull {
-		props = append(props, sddbus.Property{Name: "PrivatePIDs", Value: godbus.MakeVariant("yes")})
-	}
+	props = append(props, sddbus.Property{Name: "PrivatePIDs", Value: godbus.MakeVariant("yes")})
 	return props
 }
 

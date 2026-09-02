@@ -200,7 +200,10 @@ func (r *fakeRunner) Reattach(st handleState) (handle, bool, error) {
 	if !r.reattachOK {
 		return nil, false, nil
 	}
-	h := &fakeHandle{id: "reattached", alive: true}
+	// The real runner reproduces the recorded tier here
+	// (systemdRunner.Reattach); a fake that dropped it let that line be
+	// deleted with the whole suite still green.
+	h := &fakeHandle{id: "reattached", alive: true, sandbox: parseSandboxTier(st.Sandbox)}
 	r.handles = append(r.handles, h)
 	return h, true, nil
 }
