@@ -493,8 +493,10 @@ app example {
 
 **The runtime must be under `/usr`.** The sandbox base view
 binds `/usr`, so a normal `/usr/local/bin/deno` (or an apt-installed
-one) is already inside every unit. Only a runtime somewhere else —
-`/opt/node/bin/node`, an nvm or asdf shim — needs one.
+one) is already inside every unit. A runtime somewhere else —
+`/opt/node/bin/node`, an nvm or asdf shim — is absent from the
+sandbox and cannot be reached: ship it inside the release, or run that
+app with `sandbox off`.
 
 **What it does not buy you.** These flags are enforced *in-process* by
 the runtime, so they hold exactly as long as the runtime does: `-A` /

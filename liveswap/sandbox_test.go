@@ -1720,4 +1720,3 @@ func TestAppViewsAreDisjointExceptTheBaseView(t *testing.T) {
 		}
 	}
 }
-

@@ -143,10 +143,12 @@ an on-disk release. Full details, CI snippets, and every option:
   reconfigure the server.
   Apps run as one shared user, but each in its own systemd sandbox
   with a deny-by-default filesystem view: a user namespace, and a
-  filesystem that holds nothing but that app's own release and data,
-  the parts of the OS it needs to run, and whatever it was explicitly
-  given. hotserve's keys, sockets and env files, the other apps, and
-  the rest of the host are not made unreadable — they are *absent*.
+  filesystem that holds nothing but that app's own release and data
+  and the parts of the OS it needs to run. That view is fixed — there
+  is no directive that widens it — so hotserve's keys, sockets and env
+  files, the other apps, and the rest of the host are not made
+  unreadable, they are *absent*. An app that needs more runs with
+  `sandbox off`, which costs the other apps nothing.
   The app also gets its own PID namespace, so siblings are invisible
   rather than merely unreadable. What is *not* claimed: both
   namespaces are required, and a host that cannot deliver them gets no
@@ -175,7 +177,7 @@ an on-disk release. Full details, CI snippets, and every option:
   deny-by-default filesystem view — the whole host filesystem replaced
   by an empty read-only tmpfs (`TemporaryFileSystem=/:ro`), with only
   the OS the app needs to run — named entry by entry, never whole
-  trees — its own release and `shared/`, and its
+  trees — plus its own release and `shared/`
   bound back, so hotserve's directories and
   sockets and every other app are *absent* rather than merely
   unreadable — `PrivateTmp=`, `PrivateDevices=`, a read-only cgroupfs,
