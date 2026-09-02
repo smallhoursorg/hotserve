@@ -45,8 +45,14 @@ type userManagerClient struct {
 	// config load, and measuring it costs a whole throwaway unit — far
 	// too much to repeat on Caddy's critical path, which is what
 	// App.Start used to do on every reload. It is measured at most once
-	// per connection: a manager restart forces a redial, and that is
-	// the only event that can change the answer.
+	// per connection: a manager restart forces a redial, which is the
+	// event the generation exists to catch.
+	//
+	// It is not the only thing that can change the answer, because
+	// what the probe measures is the kernel and the LSM rather than
+	// the manager — a sysctl or a policy reload moves it with the
+	// connection still up. forgetSandboxCapability is the other half:
+	// a sandboxed unit the manager refuses drops the cache.
 	//
 	// Its own mutex, not mu: a measurement takes a unit start plus its
 	// exit, and holding the mutex every D-Bus call needs for that long

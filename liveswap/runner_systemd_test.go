@@ -31,14 +31,19 @@ type fakeSystemdConn struct {
 	// did not return "done" (the failed unit the manager keeps loaded).
 	failStatus *unitStatus
 	blockStart bool // StartTransientUnit waits for ctx (oneshot cancellation)
-	stopResult string
-	stopErr    error
-	stopLeaves bool // StopUnit does not mark the unit gone
-	listErr    error
-	resetErr   error
-	listCalls  int
-	listHook   func()        // runs inside ListUnits, before it returns (interleaving tests)
-	stopDelay  time.Duration // StopUnit sleeps this long (concurrency tests)
+	// startStatus is the status a newly started (non-oneshot) unit gets;
+	// nil means the default active/4242. A test that needs MainPID to
+	// be unpublished at adopt time sets one with MainPID 0 — it cannot
+	// preset f.status, because the unit name carries a random nonce.
+	startStatus *unitStatus
+	stopResult  string
+	stopErr     error
+	stopLeaves  bool // StopUnit does not mark the unit gone
+	listErr     error
+	resetErr    error
+	listCalls   int
+	listHook    func()        // runs inside ListUnits, before it returns (interleaving tests)
+	stopDelay   time.Duration // StopUnit sleeps this long (concurrency tests)
 }
 
 func newFakeSystemdConn() *fakeSystemdConn {
@@ -58,7 +63,11 @@ func (f *fakeSystemdConn) StartTransientUnit(ctx context.Context, u unitSpec) (s
 	case startErr != nil:
 	case !u.Oneshot:
 		if _, preset := f.status[u.Name]; !preset {
-			f.status[u.Name] = unitStatus{LoadState: "loaded", ActiveState: "active", SubState: "running", MainPID: 4242}
+			st := unitStatus{LoadState: "loaded", ActiveState: "active", SubState: "running", MainPID: 4242}
+			if f.startStatus != nil {
+				st = *f.startStatus
+			}
+			f.status[u.Name] = st
 		}
 	}
 	f.mu.Unlock()
@@ -1029,5 +1038,85 @@ func TestProbeUnitsAreNotAppUnits(t *testing.T) {
 	}
 	if strings.HasPrefix(appUnit, unitPrefix+"sandboxprobe_") {
 		t.Fatal("a configured app collides with the probe namespace")
+	}
+}
+
+// TestSystemdRunnerSettlesFromUnpublishedMainPID covers the case the
+// settle loop used to get wrong: StartTransientUnit can return before
+// the manager has published any MainPID, so adopt reads 0. The first
+// non-zero value is then the namespace-setup intermediate, not the
+// app, and a predicate of "different from what adopt saw" accepted it
+// — storing a pid that dies milliseconds later. The existing settle
+// test starts at 4242 and never exercises this.
+func TestSystemdRunnerSettlesFromUnpublishedMainPID(t *testing.T) {
+	r, conn := newTestSystemdRunner(t)
+	spec := testApp(t)
+	spec.sandbox = &sandboxSpec{tier: sandboxFull, root: "/var/lib/liveswap",
+		writable: []bindPath{{dest: spec.dir, source: spec.dir}}}
+	// 0 (nothing published yet) -> 4242 (the intermediate) -> 4243 (the app).
+	conn.startStatus = &unitStatus{LoadState: "loaded", ActiveState: "active", SubState: "running", MainPID: 0}
+	go func() {
+		for {
+			time.Sleep(2 * time.Millisecond)
+			conn.mu.Lock()
+			n := len(conn.started)
+			conn.mu.Unlock()
+			if n > 0 {
+				break
+			}
+		}
+		name := conn.unit(0).Name
+		time.Sleep(20 * time.Millisecond)
+		conn.setStatus(name, unitStatus{LoadState: "loaded", ActiveState: "active", SubState: "running", MainPID: 4242})
+		time.Sleep(20 * time.Millisecond)
+		conn.setStatus(name, unitStatus{LoadState: "loaded", ActiveState: "active", SubState: "running", MainPID: 4243})
+	}()
+	h, err := r.Start(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := h.state().PID; got != 4243 {
+		t.Fatalf("settled on pid %d, want the app's 4243 — 4242 is the intermediate the manager reports while it sets the namespace up, and 0 is nothing published yet", got)
+	}
+}
+
+// forgetIntoClientConn reports a failed sandboxed launch into a real
+// userManagerClient's cache, which is the arrangement production has:
+// the runner's connection IS that client.
+type forgetIntoClientConn struct {
+	*fakeSystemdConn
+	c *userManagerClient
+}
+
+func (f *forgetIntoClientConn) forgetSandboxCapability() { f.c.forgetSandboxCapability() }
+
+// TestProbeFailureDoesNotDeadlockOnSandboxMu pins the exemption that
+// makes the invalidation safe at all. The measurement runs under
+// sandboxMu, and it runs the probe through the same RunOnce that now
+// reports failures back into that cache — so without the Probe
+// exemption a host that CANNOT sandbox, the one case the probe exists
+// to detect, deadlocks the config load instead of degrading.
+func TestProbeFailureDoesNotDeadlockOnSandboxMu(t *testing.T) {
+	c := &userManagerClient{}
+	c.generation.Add(1)
+	conn := &forgetIntoClientConn{fakeSystemdConn: newFakeSystemdConn(), c: c}
+	conn.startResult = "failed"
+	conn.failStatus = &unitStatus{LoadState: "loaded", ActiveState: "failed", Result: "exit-code", ExecMainCode: 1, ExecMainStatus: 226}
+	r := newSystemdRunner(conn, zap.NewNop())
+	t.Cleanup(r.cancel)
+
+	done := make(chan sandboxCapability, 1)
+	go func() {
+		done <- c.cachedSandboxCapability(func() sandboxCapability {
+			return probeSandboxCapability(r)
+		})
+	}()
+	select {
+	case got := <-done:
+		if got.tier != sandboxNone {
+			t.Fatalf("a refused probe unit must measure as none, got %v", got.tier)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("measuring an unsandboxable host deadlocked: the probe's own failure re-entered sandboxMu")
 	}
 }

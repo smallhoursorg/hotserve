@@ -1981,3 +1981,41 @@ func TestStartForgetsCapabilityOnSandboxedFailure(t *testing.T) {
 		})
 	}
 }
+
+// TestRunOnceForgetsCapabilityOnSandboxedFailure covers the launch path
+// Start does not: a sandboxed pre_start goes through RunOnce, and if a
+// live namespace or LSM change first surfaces there, the stale
+// capability would survive and later reloads keep choosing a tier
+// whose units cannot start.
+func TestRunOnceForgetsCapabilityOnSandboxedFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		spec    startSpec
+		want    int
+		startEr bool
+	}{
+		{name: "sandboxed pre_start the manager refused",
+			spec: startSpec{app: "demo", version: "v1", command: []string{"/bin/true"}, sandbox: &sandboxSpec{tier: sandboxFull, root: "/var/lib/liveswap"}},
+			want: 1},
+		{name: "the capability probe's own unit is exempt",
+			spec: startSpec{app: "sandbox-probe", version: "full", command: []string{"/bin/true"}, probe: true, sandbox: probeSandboxSpec(sandboxFull)},
+			want: 0},
+		{name: "bare pre_start",
+			spec: startSpec{app: "demo", version: "v1", command: []string{"/bin/true"}},
+			want: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := &forgetCountingConn{fakeSystemdConn: newFakeSystemdConn()}
+			conn.startResult = "failed"
+			conn.failStatus = &unitStatus{LoadState: "loaded", ActiveState: "failed", Result: "exit-code", ExecMainCode: 1, ExecMainStatus: 226}
+			r := newSystemdRunner(conn, zap.NewNop())
+			t.Cleanup(r.cancel)
+			if err := r.RunOnce(context.Background(), tc.spec); err == nil {
+				t.Fatal("a oneshot whose job did not return done must be an error")
+			}
+			if conn.forgotten != tc.want {
+				t.Fatalf("capability forgotten %d times, want %d", conn.forgotten, tc.want)
+			}
+		})
+	}
+}
