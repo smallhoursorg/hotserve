@@ -14,7 +14,7 @@ PKGS = ./... ./liveswap/... ./penaltybox/...
 VERSION ?= $(shell (git describe --tags --exact-match 2>/dev/null || echo v0.0.0-dev) | sed 's/^v//')
 
 # Distro image for the package install smoke test (install-test).
-DISTRO ?= debian:12
+DISTRO ?= debian:13
 
 .PHONY: test test-integration vet tidy lint fuzz fuzz-list vulncheck secretscan build package install-test e2e soak e2e-logs clean
 
@@ -51,8 +51,13 @@ test-integration:
 	$(COMPOSE) rm -sf dev-systemd >/dev/null; \
 	exit $$status
 
+# Both tag sets: the integration-tagged files are not compiled by
+# `make test` or a bare vet, so a signature change that breaks them
+# stays invisible until the integration lane boots a whole systemd
+# container to find out.
 vet:
 	$(COMPOSE) run --rm dev go vet $(PKGS)
+	$(COMPOSE) run --rm dev go vet -tags integration $(PKGS)
 
 tidy:
 	for m in $(MODULES); do $(COMPOSE) run --rm -w /src/$$m dev go mod tidy || exit 1; done

@@ -325,11 +325,7 @@ func TestIntegrationDeployLifecycle(t *testing.T) {
 	})
 
 	t.Run("config reload keeps the app process running", func(t *testing.T) {
-		_, before := getBody(t, "http://localhost:9080/")
-		pidBefore := pidRe.FindStringSubmatch(before)
-		if pidBefore == nil {
-			t.Fatalf("no pid in response: %q", before)
-		}
+		pidBefore := currentPID(t)
 
 		// Reload the SAME config through the admin API. The UsagePool
 		// must carry the running child across the reload untouched.
@@ -339,9 +335,11 @@ func TestIntegrationDeployLifecycle(t *testing.T) {
 		if code != http.StatusOK {
 			t.Fatalf("post-reload proxy = %d", code)
 		}
-		pidAfter := pidRe.FindStringSubmatch(after)
-		if pidAfter == nil || pidAfter[1] != pidBefore[1] {
-			t.Fatalf("app process restarted across reload: before=%v after=%v", pidBefore, pidAfter)
+		if !strings.Contains(after, "hello ") {
+			t.Fatalf("post-reload body: %q", after)
+		}
+		if pidAfter := currentPID(t); pidAfter != pidBefore {
+			t.Fatalf("app process restarted across reload: before=%d after=%d", pidBefore, pidAfter)
 		}
 	})
 
@@ -498,16 +496,38 @@ func tryBody() (int, string) {
 	return resp.StatusCode, string(data)
 }
 
-func currentPID(t *testing.T) int {
+// statusPIDRe reads the host pid from the status endpoint. The pid an
+// app prints about itself is 1 inside its PID namespace, so only the
+// status (the unit's MainPID) can tell instances apart or be signalled.
+var statusPIDRe = regexp.MustCompile(`"pid":(\d+)`)
+
+// statusPID is the running instance's host pid, or (0, false) when the
+// status carries none (nothing running yet).
+func statusPID(t *testing.T, app string) (int, bool) {
 	t.Helper()
-	code, page := getBody(t, "http://localhost:9080/")
-	m := pidRe.FindStringSubmatch(page)
+	code, status := getStatusApp(t, app)
+	m := statusPIDRe.FindStringSubmatch(status)
 	if code != http.StatusOK || m == nil {
-		t.Fatalf("no pid in proxied response: %d %q", code, page)
+		return 0, false
 	}
 	pid, err := strconv.Atoi(m[1])
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || pid == 0 {
+		return 0, false
+	}
+	return pid, true
+}
+
+func currentPID(t *testing.T) int { return currentPIDApp(t, "demo") }
+
+func currentPIDApp(t *testing.T, app string) int {
+	t.Helper()
+	code, page := getBody(t, "http://localhost:9080/")
+	if code != http.StatusOK || !pidRe.MatchString(page) {
+		t.Fatalf("app not serving: %d %q", code, page)
+	}
+	pid, ok := statusPID(t, app)
+	if !ok {
+		t.Fatalf("status carries no pid for %s", app)
 	}
 	return pid
 }
@@ -536,17 +556,16 @@ func TestIntegrationWatchdogRestarts(t *testing.T) {
 	}
 
 	t.Run("SIGKILLed app comes back with a new pid", func(t *testing.T) {
-		pid := currentPID(t)
+		pid := currentPIDApp(t, app)
 		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
 			t.Fatal(err)
 		}
 		pollUntil(t, 15*time.Second, "restart with a new pid", func() bool {
-			code, page := tryBody()
-			if code != http.StatusOK {
+			if code, _ := tryBody(); code != http.StatusOK {
 				return false
 			}
-			m := pidRe.FindStringSubmatch(page)
-			return m != nil && m[1] != strconv.Itoa(pid)
+			p, ok := statusPID(t, app)
+			return ok && p != pid
 		})
 		// The new instance is published a beat before the restart is
 		// recorded, so poll for the record rather than read it once.
@@ -558,18 +577,17 @@ func TestIntegrationWatchdogRestarts(t *testing.T) {
 	})
 
 	t.Run("sustained health failure triggers a restart", func(t *testing.T) {
-		pid := currentPID(t)
+		pid := currentPIDApp(t, app)
 		brokenPath := filepath.Join(root, app, "releases", "v1", "broken")
 		if err := os.WriteFile(brokenPath, []byte("1"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		pollUntil(t, 20*time.Second, "health-triggered restart", func() bool {
-			code, page := tryBody()
-			if code != http.StatusOK {
+			if code, _ := tryBody(); code != http.StatusOK {
 				return false
 			}
-			m := pidRe.FindStringSubmatch(page)
-			return m != nil && m[1] != strconv.Itoa(pid)
+			p, ok := statusPID(t, app)
+			return ok && p != pid
 		})
 		// Heal the release so the replacement stays up.
 		if err := os.Remove(brokenPath); err != nil {
@@ -603,19 +621,18 @@ func TestIntegrationWatchdogThrottleAutoRecovers(t *testing.T) {
 
 	// Budget is 1 per 10s window: the first kill restarts immediately,
 	// the second throttles until the window frees.
-	pid := currentPID(t)
+	pid := currentPIDApp(t, app)
 	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
 		t.Fatal(err)
 	}
 	pollUntil(t, 15*time.Second, "the single budgeted restart", func() bool {
-		code, page := tryBody()
-		if code != http.StatusOK {
+		if code, _ := tryBody(); code != http.StatusOK {
 			return false
 		}
-		m := pidRe.FindStringSubmatch(page)
-		return m != nil && m[1] != strconv.Itoa(pid)
+		p, ok := statusPID(t, app)
+		return ok && p != pid
 	})
-	secondPID := currentPID(t)
+	secondPID := currentPIDApp(t, app)
 	if err := syscall.Kill(secondPID, syscall.SIGKILL); err != nil {
 		t.Fatal(err)
 	}
@@ -636,8 +653,8 @@ func TestIntegrationWatchdogThrottleAutoRecovers(t *testing.T) {
 		if code != http.StatusOK || !strings.Contains(page, "hello v1") {
 			return false
 		}
-		m := pidRe.FindStringSubmatch(page)
-		return m != nil && m[1] != strconv.Itoa(secondPID)
+		p, ok := statusPID(t, app)
+		return ok && p != secondPID
 	})
 	if _, status := getStatusApp(t, app); strings.Contains(status, `"state":"throttled"`) {
 		t.Fatalf("throttle must clear after the auto-recovery: %s", status)

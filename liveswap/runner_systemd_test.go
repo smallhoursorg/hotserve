@@ -933,3 +933,93 @@ func TestUnitStatusRunning(t *testing.T) {
 		}
 	}
 }
+
+// TestSystemdRunnerWatcherFollowsMainPID: a sandboxed unit's MainPID
+// changes shortly after start (PrivatePIDs= makes the manager fork an
+// intermediate that sets the namespace up, then report its child), so
+// the handle must track the manager's current MainPID, not the first
+// value it read.
+func TestSystemdRunnerWatcherFollowsMainPID(t *testing.T) {
+	r, conn := newTestSystemdRunner(t)
+	h, err := r.Start(testApp(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.state().PID != 4242 { // the fake's MainPID for a started unit
+		t.Fatalf("sanity: pid read at start, got %d", h.state().PID)
+	}
+	conn.setStatus(h.state().Unit, unitStatus{LoadState: "loaded", ActiveState: "active", MainPID: 4243})
+	deadline := time.Now().Add(2 * time.Second)
+	for h.state().PID != 4243 {
+		if time.Now().After(deadline) {
+			t.Fatalf("watcher did not follow the MainPID change, still %d", h.state().PID)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if r.Alive(h) != true {
+		t.Fatal("a MainPID change must not read as an exit")
+	}
+}
+
+// TestSystemdRunnerStartSettlesMainPIDForFullTier: a full-tier start
+// returns with the app's pid, not the intermediate the manager reports
+// for its first few milliseconds; other tiers take the first read.
+func TestSystemdRunnerStartSettlesMainPIDForFullTier(t *testing.T) {
+	r, conn := newTestSystemdRunner(t)
+	spec := testApp(t)
+	// A realistic spec: the release dir is always a writable bind, which
+	// is also what puts the command inside the unit's view.
+	spec.sandbox = &sandboxSpec{tier: sandboxFull, root: "/var/lib/liveswap",
+		writable: []bindPath{{dest: spec.dir, source: spec.dir}}}
+	// The fake presets MainPID 4242 at start; flip it to 4243 shortly
+	// after, like the manager does once the namespace is set up.
+	go func() {
+		for {
+			time.Sleep(5 * time.Millisecond)
+			conn.mu.Lock()
+			n := len(conn.started)
+			conn.mu.Unlock()
+			if n > 0 {
+				break
+			}
+		}
+		time.Sleep(30 * time.Millisecond)
+		conn.setStatus(conn.unit(0).Name, unitStatus{LoadState: "loaded", ActiveState: "active", MainPID: 4243})
+	}()
+	h, err := r.Start(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.state().PID != 4243 {
+		t.Fatalf("full-tier start returned the intermediate pid %d, want the settled 4243", h.state().PID)
+	}
+}
+
+// TestProbeUnitsAreNotAppUnits: the capability probe's unit must sit
+// outside the app-name grammar, or a concurrent sweepUnknownApps would
+// stop it mid-probe — or an app legitimately called "sandbox-probe"
+// would collide with it — downgrading the tier, or failing `sandbox
+// require`, for no reason at all.
+func TestProbeUnitsAreNotAppUnits(t *testing.T) {
+	name, err := unitName(startSpec{app: "sandbox-probe", version: "full", probe: true}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(name, unitPrefix) || !strings.HasSuffix(name, ".service") {
+		t.Fatalf("probe unit name %q is not a hotserve unit", name)
+	}
+	if app, ok := unitApp(name); ok {
+		t.Fatalf("probe unit %q parses as app %q; a sweep would stop it", name, app)
+	}
+	// And an app really named sandbox-probe gets its own, distinct units.
+	appUnit, err := unitName(startSpec{app: "sandbox-probe", version: "v1"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := unitApp(appUnit); !ok || got != "sandbox-probe" {
+		t.Fatalf("a configured app must still parse: %q -> %q %v", appUnit, got, ok)
+	}
+	if strings.HasPrefix(appUnit, unitPrefix+"sandboxprobe_") {
+		t.Fatal("a configured app collides with the probe namespace")
+	}
+}

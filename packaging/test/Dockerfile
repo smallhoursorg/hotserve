@@ -1,10 +1,8 @@
 # Systemd-in-docker image for the package install smoke test
-# (`make install-test`). One Dockerfile serves every matrix cell:
-# BASE_IMAGE picks the distro: debian:12, debian:13, ubuntu:24.04 or
-# ubuntu:26.04 — the support matrix; all share the same apt invocation.
-# systemd is 252 / 257 / 255 / 257 respectively: debian:13 and
-# ubuntu:26.04 are the >= 256 cells that the planned per-app isolation
-# will need, the other two the older-systemd compatibility path.
+# (`make install-test`). BASE_IMAGE is debian:13 — the support matrix is
+# one release (systemd 257), so the smoke test asserts the full sandbox
+# tier unconditionally. BASE_IMAGE stays a build arg so a candidate
+# release can be tried against a newer Debian without editing this file.
 #
 # networkd/resolved are deliberately NOT installed: with no wait-online
 # unit enabled, network-online.target (which hotserve.service Requires=)
@@ -12,7 +10,7 @@
 # logind (loginctl enable-linger in postinstall) needs the system bus;
 # libpam-systemd is NOT — it is a package Depends, and the smoke test
 # proves apt resolves it.
-ARG BASE_IMAGE=debian:12
+ARG BASE_IMAGE=debian:13
 FROM ${BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive

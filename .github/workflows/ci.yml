@@ -94,6 +94,17 @@ jobs:
     name: e2e (${{ matrix.runner }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Debian 13 does not restrict unprivileged user namespaces, but
+      # GitHub's runners boot an *Ubuntu* kernel, which refuses them to
+      # unconfined processes host-wide — and the sysctl is not
+      # namespaced, so it reaches into the container. The package used
+      # to ship an AppArmor profile to lift it; with the matrix down to
+      # Debian 13 that profile is gone, so the runner is brought in line
+      # with a real Debian host instead. Consequence to keep in view: CI
+      # no longer exercises a userns-restricted kernel, and the runtime
+      # probe (liveswap/sandbox.go) is the only thing standing between
+      # such a host and a silent `sandbox: none`.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       # make e2e dumps hotserve/upstream/artifact logs itself when
       # scenarios fail.
       - run: make e2e COMPOSE="$COMPOSE"
@@ -121,9 +132,9 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-  # Installs the .deb under real systemd, full distro x arch product,
-  # and runs the staged smoke test (install → unit boot → liveswap
-  # deploy under the sandbox → reinstall/conffile → remove). The single
+  # Installs the .deb under real systemd on each arch and runs the
+  # staged smoke test (install → unit boot → liveswap deploy under the
+  # sandbox → reinstall/conffile → remove). The single
   # dist artifact carries both arches; smoke.sh picks by
   # `dpkg --print-architecture`, which is what makes the arm cells work
   # unchanged.
@@ -132,7 +143,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        distro: ["debian:12", "debian:13", "ubuntu:24.04", "ubuntu:26.04"]
+        distro: ["debian:13"]
         runner: [ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
     name: install-test (${{ matrix.distro }}, ${{ matrix.runner }})
@@ -142,6 +153,17 @@ jobs:
         with:
           name: dist
           path: dist
+      # Debian 13 does not restrict unprivileged user namespaces, but
+      # GitHub's runners boot an *Ubuntu* kernel, which refuses them to
+      # unconfined processes host-wide — and the sysctl is not
+      # namespaced, so it reaches into the container. The package used
+      # to ship an AppArmor profile to lift it; with the matrix down to
+      # Debian 13 that profile is gone, so the runner is brought in line
+      # with a real Debian host instead. Consequence to keep in view: CI
+      # no longer exercises a userns-restricted kernel, and the runtime
+      # probe (liveswap/sandbox.go) is the only thing standing between
+      # such a host and a silent `sandbox: none`.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: make install-test DISTRO=${{ matrix.distro }}
 
   # Full-history secret scan: catches keys/tokens in the changes being

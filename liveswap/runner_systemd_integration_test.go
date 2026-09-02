@@ -406,3 +406,246 @@ func TestIntegrationSystemdManagerStallIsNotACrash(t *testing.T) {
 	}
 	waitPIDsGone(t, pids, 2*time.Second)
 }
+
+// sandboxRoot makes a liveswap-style root outside /tmp (PrivateTmp=
+// would hide a t.TempDir) with one app's release and shared dirs, a
+// sibling app, and a state.json — the layout the sandbox must slice.
+func sandboxRoot(t *testing.T) (root, release, shared string) {
+	t.Helper()
+	root, err := os.MkdirTemp("/var/tmp", "liveswap-itest-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	release = filepath.Join(root, "itest", "releases", "v1")
+	shared = filepath.Join(root, "itest", "shared")
+	for _, d := range []string{release, shared, filepath.Join(root, "itest", "tmp"), filepath.Join(root, "other", "shared")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range []string{filepath.Join(root, "itest", "state.json"), filepath.Join(root, "other", "shared", "secret")} {
+		if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root, release, shared
+}
+
+// TestIntegrationSystemdSandboxProbe: the capability probe against the
+// real manager. The dev-systemd image is trixie (systemd 257) — the
+// support matrix — so the answer is full, unconditionally. A `none`
+// here is a real failure and not a host to accommodate: either the
+// kernel under the test container refuses user namespaces, or the
+// sandbox regressed.
+func TestIntegrationSystemdSandboxProbe(t *testing.T) {
+	r := integrationRunner(t)
+	got := probeSandboxCapability(r)
+	t.Logf("tier=%s reason=%q", got.tier, got.reason)
+	if got.tier != sandboxFull {
+		t.Fatalf("the supported host must deliver the full tier, got %s (%s)", got.tier, got.reason)
+	}
+}
+
+// sandboxProbeScript writes one line per check into $1 (the shared
+// dir, the only writable persistent path in the view). MGR and HS are
+// the user manager's and a bystander's PIDs.
+const sandboxProbeScript = `out="$1/probe.txt"; MGR=$2; ROOT=$3
+: > "$out"
+echo "pid=$$" >> "$out"
+read _ _ n < /proc/self/uid_map; echo "uidmap=$n" >> "$out"
+echo "nprocs=$(ls /proc | grep -c '^[0-9]')" >> "$out"
+ls /proc/$MGR/root/ >/dev/null 2>&1 && echo "mgr_root=open" >> "$out" || echo "mgr_root=closed" >> "$out"
+cat /proc/$MGR/environ >/dev/null 2>&1 && echo "mgr_environ=open" >> "$out" || echo "mgr_environ=closed" >> "$out"
+[ -e "$ROOT/other" ] && echo "sibling=open" >> "$out" || echo "sibling=closed" >> "$out"
+[ -e "$ROOT/itest/state.json" ] && echo "state=open" >> "$out" || echo "state=closed" >> "$out"
+[ -e "$ROOT/itest/tmp" ] && echo "apptmp=open" >> "$out" || echo "apptmp=closed" >> "$out"
+touch "$ROOT/itest/releases/v1/w" 2>/dev/null && echo "release=writable" >> "$out" || echo "release=readonly" >> "$out"
+touch "$ROOT/newfile" 2>/dev/null && echo "root=writable" >> "$out" || echo "root=readonly" >> "$out"
+# Absence, not unreadability: under a deny-by-default view an unnamed
+# path does not exist inside the unit, which is a stronger statement
+# than the InaccessiblePaths= node this used to test for readability.
+[ -e /var/lib/hotserve ] && echo "hotserve_lib=open" >> "$out" || echo "hotserve_lib=closed" >> "$out"
+[ -e /run/user/$(id -u)/systemd/private ] && echo "mgr_socket=open" >> "$out" || echo "mgr_socket=closed" >> "$out"
+for d in /var/lib /etc/hotserve /etc/liveswap /run/hotserve /opt /srv /home /root /mnt; do
+  k=$(echo "$d" | tr -d /); [ -e "$d" ] && echo "abs_$k=present" >> "$out" || echo "abs_$k=absent" >> "$out"
+done
+echo "etc_listing=$(ls /etc | tr '\n' ' ')" >> "$out"
+# And the base view must actually carry a runnable OS, or "absent"
+# would only mean the unit has nothing at all.
+[ -x /bin/sh ] && echo "binsh=ok" >> "$out" || echo "binsh=MISSING" >> "$out"
+[ -x /usr/bin/env ] && echo "usrbinenv=ok" >> "$out" || echo "usrbinenv=MISSING" >> "$out"
+[ -e /etc/ssl ] && echo "etcssl=ok" >> "$out" || echo "etcssl=MISSING" >> "$out"
+[ -r /etc/resolv.conf ] && echo "resolvconf=ok" >> "$out" || echo "resolvconf=MISSING" >> "$out"
+cg=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup); (echo max > "$cg/memory.max") 2>/dev/null && echo "cgroup=writable" >> "$out" || echo "cgroup=readonly" >> "$out"
+touch /tmp/w 2>/dev/null && echo "tmp=writable" >> "$out" || echo "tmp=readonly" >> "$out"
+echo "home=$HOME" >> "$out"
+[ -n "$XDG_RUNTIME_DIR" ] && echo "xdg_runtime=set" >> "$out" || echo "xdg_runtime=unset" >> "$out"
+echo "done=1" >> "$out"
+sleep 300
+`
+
+func readProbe(t *testing.T, shared string) map[string]string {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		b, err := os.ReadFile(filepath.Join(shared, "probe.txt"))
+		if err == nil && strings.Contains(string(b), "done=1") {
+			m := map[string]string{}
+			for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+				k, v, _ := strings.Cut(line, "=")
+				m[k] = v
+			}
+			return m
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("probe.txt not written: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestIntegrationSystemdSandboxedUnit starts a unit with the full
+// sandbox and reads the view from inside: the namespaces are in
+// effect, the root shows only the app's own dirs, everything nothing
+// named is absent (not merely unreadable), the manager's /proc is
+// closed, cgroupfs is read-only, /tmp is private and writable, HOME is
+// the shared dir. Then the unit is stopped through the runner like any
+// other.
+func TestIntegrationSystemdSandboxedUnit(t *testing.T) {
+	r := integrationRunner(t)
+	root, release, shared := sandboxRoot(t)
+	if err := os.WriteFile(filepath.Join(release, "server"), []byte("#!/bin/sh\n"+sandboxProbeScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mgrPID := strings.TrimSpace(run(t, "systemctl", "show", "-p", "MainPID", "--value", "user@"+strconv.Itoa(os.Getuid())+".service"))
+	if mgrPID == "" || mgrPID == "0" {
+		mgrPID = strconv.Itoa(os.Getppid())
+	}
+	spec := startSpec{
+		app:     "itest",
+		version: "sandboxed",
+		command: []string{"./server", shared, mgrPID, root},
+		dir:     release,
+		env:     []string{"PATH=" + os.Getenv("PATH"), "HOME=" + shared},
+		grace:   2 * time.Second,
+		sandbox: &sandboxSpec{tier: sandboxFull, root: root, appDir: filepath.Join(root, "itest"), appName: "itest",
+			writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}}},
+	}
+	h, err := r.Start(spec)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = r.Stop(h, 2*time.Second) })
+	got := readProbe(t, shared)
+	t.Logf("probe: %v", got)
+	for k, want := range map[string]string{
+		"pid": "1", "mgr_root": "closed", "mgr_environ": "closed",
+		"sibling": "closed", "state": "closed", "apptmp": "closed",
+		"release": "writable", "hotserve_lib": "closed", "mgr_socket": "closed",
+		"cgroup": "readonly", "tmp": "writable", "home": shared, "xdg_runtime": "unset",
+		// The base view: an OS the app can actually run on. Without
+		// these, "absent" below would only mean the unit is empty.
+		"binsh": "ok", "usrbinenv": "ok", "etcssl": "ok", "resolvconf": "ok",
+	} {
+		if got[k] != want {
+			t.Errorf("%s = %q, want %q", k, got[k], want)
+		}
+	}
+	// Deny-by-default: not one of these is bound, so not one of them
+	// exists — no InaccessiblePaths= entry, and no list to keep current.
+	for _, k := range []string{
+		"abs_varlib", "abs_etchotserve", "abs_etcliveswap", "abs_runhotserve",
+		"abs_opt", "abs_srv", "abs_home", "abs_root", "abs_mnt",
+	} {
+		if got[k] != "absent" {
+			t.Errorf("%s = %q, want absent", k, got[k])
+		}
+	}
+	// /etc is named entry by entry, never bound whole: an app that could
+	// list all of /etc would see every other app's env_file.
+	for _, unwanted := range []string{"hotserve", "liveswap", "shadow", "sudoers"} {
+		if strings.Contains(" "+got["etc_listing"], " "+unwanted+" ") {
+			t.Errorf("/etc inside the unit contains %s: %q", unwanted, got["etc_listing"])
+		}
+	}
+	if got["uidmap"] == "4294967295" {
+		t.Error("no user namespace: uid_map covers the whole id space")
+	}
+	if n, _ := strconv.Atoi(got["nprocs"]); n == 0 || n > 8 {
+		t.Errorf("nprocs = %q, want a handful (own PID namespace)", got["nprocs"])
+	}
+	unit := h.state().Unit
+	props := run(t, "systemctl", "--user", "show", unit, "-p", "PrivatePIDs,PrivateUsers,ProtectSystem,ProtectControlGroups,TemporaryFileSystem,BindPaths,BindReadOnlyPaths,InaccessiblePaths")
+	for _, want := range []string{"PrivatePIDs=yes", "PrivateUsers=yes", "ProtectControlGroups=yes", "TemporaryFileSystem=/:ro"} {
+		if !strings.Contains(props, want) {
+			t.Errorf("unit lacks %s:\n%s", want, props)
+		}
+	}
+	// The retired half of the old model, read back off the live unit.
+	for _, gone := range []string{"ProtectSystem=strict", "InaccessiblePaths=/"} {
+		if strings.Contains(props, gone) {
+			t.Errorf("unit still carries %s: the view names what exists, it does not mask a list\n%s", gone, props)
+		}
+	}
+	if h.state().Sandbox != "full" {
+		t.Errorf("handle state sandbox = %q", h.state().Sandbox)
+	}
+	if err := r.Stop(h, 2*time.Second); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+}
+
+// run executes a command and returns its stdout, failing the test on
+// error.
+func run(t *testing.T, name string, args ...string) string {
+	t.Helper()
+	out, err := exec.Command(name, args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s %v: %v\n%s", name, args, err, out)
+	}
+	return string(out)
+}
+
+// TestIntegrationSystemdSIGTERMReachesNamespaceInit pins a property the
+// full tier could plausibly have broken: with PrivatePIDs= the app is
+// PID 1 of its own namespace, and the kernel discards signals sent to a
+// namespace init from an ancestor namespace when the handler is SIG_DFL
+// (the classic "docker stop takes ten seconds" behaviour). If that
+// applied here, every cutover, drain and watchdog stop would silently
+// wait out `grace` and end in SIGKILL,
+// losing in-flight requests — the e2e cannot see it because its app is
+// a Go binary, whose runtime installs handlers for every signal.
+func TestIntegrationSystemdSIGTERMReachesNamespaceInit(t *testing.T) {
+	r := integrationRunner(t)
+	root, release, shared := sandboxRoot(t)
+	// A shell that handles SIGTERM and takes its time about it, the way
+	// a draining server does.
+	body := "trap 'echo drained > " + shared + "/drained.txt; sleep 2; exit 0' TERM\nwhile :; do sleep 0.2; done\n"
+	if err := os.WriteFile(filepath.Join(release, "server"), []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	spec := startSpec{
+		app: "itest", version: "sigterm", command: []string{"./server"}, dir: release,
+		env: []string{"PATH=" + os.Getenv("PATH")}, grace: 10 * time.Second,
+		sandbox: &sandboxSpec{tier: sandboxFull, root: root, appDir: filepath.Join(root, "itest"), appName: "itest",
+			writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}}},
+	}
+	h, err := r.Start(spec)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	started := time.Now()
+	if err := r.Stop(h, spec.grace); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	took := time.Since(started)
+	if _, err := os.Stat(filepath.Join(shared, "drained.txt")); err != nil {
+		t.Fatalf("the app's SIGTERM handler never ran inside its PID namespace: %v", err)
+	}
+	if took >= spec.grace {
+		t.Fatalf("stop took %s, the whole grace — SIGTERM was discarded and SIGKILL did the work", took)
+	}
+	t.Logf("SIGTERM honoured inside the PID namespace: handler ran, stop took %s of a %s grace", took, spec.grace)
+}

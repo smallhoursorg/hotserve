@@ -213,7 +213,7 @@ func unitProperties(u unitSpec) []sddbus.Property {
 	if stopUSec == 0 {
 		stopUSec = 1
 	}
-	return []sddbus.Property{
+	props := []sddbus.Property{
 		sddbus.PropDescription(u.Description),
 		sddbus.PropType(typ),
 		sddbus.PropExecStart(u.ExecStart, false),
@@ -227,6 +227,123 @@ func unitProperties(u unitSpec) []sddbus.Property {
 		{Name: "StandardOutput", Value: godbus.MakeVariant("journal")},
 		{Name: "StandardError", Value: godbus.MakeVariant("journal")},
 	}
+	return append(props, sandboxProperties(u.Sandbox)...)
+}
+
+// D-Bus shapes of the sandbox properties, as systemd's own
+// bus-unit-util renders the unit-file syntax: list-valued path
+// options are "(ssbt)" bind tuples or "a(ss)" (path, options) pairs,
+// the allow-list options are "(bas)", and the flag/capability sets
+// are uint64 masks.
+type (
+	bindMount struct {
+		Source, Destination string
+		IgnoreENOENT        bool
+		Flags               uint64 // mount flags: mountRecursive for rbind
+	}
+	tmpfsMount struct{ Path, Options string }
+	allowList  struct {
+		AllowList bool
+		Names     []string
+	}
+)
+
+const (
+	mountRecursive uint64 = 0x4000 // MS_REC: BindPaths=' default "rbind"
+	errnoEPERM     int32  = 1      // SystemCallErrorNumber=EPERM, every Linux arch
+)
+
+// sandboxProperties renders a sandboxSpec (nil: nothing). The set is
+// the one measured in issue #35; see sandbox.go for what it closes.
+// PrivatePIDs= is emitted only for the full tier, so a unit relaunched
+// from a legacy "filesystem" record is never handed a property its
+// recorded tier does not include.
+//
+// The view is deny-by-default: TemporaryFileSystem=/ replaces the
+// whole filesystem with an empty read-only tmpfs, and the binds below
+// are the only things that exist inside the unit. There is no
+// InaccessiblePaths= and no ProtectSystem= because there is nothing
+// left for either to act on — an unnamed path is absent, not merely
+// unreadable, which is a stronger statement than either option makes
+// and one that cannot go stale. MountAPIVFS= is not set: /proc, /sys
+// and /dev are mounted inside the tmpfs by PrivateDevices= (and, at
+// the full tier, PrivatePIDs=), measured on 252/255/257/259.
+func sandboxProperties(s *sandboxSpec) []sddbus.Property {
+	if s == nil || s.tier == sandboxNone {
+		return nil
+	}
+	writable := make([]bindMount, 0, len(s.writable))
+	for _, b := range s.writable {
+		src := b.source
+		if src == "" {
+			src = b.dest
+		}
+		writable = append(writable, bindMount{Source: src, Destination: b.dest, Flags: mountRecursive})
+	}
+	// The base view first: every entry optional. Debian 13 is merged-/usr
+	// and has no /etc/pki, so several names are aliases or simply absent
+	// — and /run/systemd/resolve exists only where resolved runs. A
+	// missing entry must not fail the unit (see sandboxBaseView).
+	readOnly := make([]bindMount, 0, len(sandboxBaseView))
+	for _, p := range sandboxBaseView {
+		readOnly = append(readOnly, bindMount{Source: p, Destination: p, IgnoreENOENT: true, Flags: mountRecursive})
+	}
+	props := []sddbus.Property{
+		// Explicit on purpose: the mount options below do not imply it
+		// (without it the unit fails to exec), and it is the piece that
+		// closes /proc reads of processes outside the namespace.
+		{Name: "PrivateUsers", Value: godbus.MakeVariant(true)},
+		{Name: "PrivateTmp", Value: godbus.MakeVariant(true)},
+		{Name: "PrivateDevices", Value: godbus.MakeVariant(true)},
+		// Read-only cgroupfs: the delegated subtree is owned by the
+		// app's own uid, so resource caps are otherwise rewritable.
+		{Name: "ProtectControlGroups", Value: godbus.MakeVariant(true)},
+		{Name: "ProtectKernelTunables", Value: godbus.MakeVariant(true)},
+		{Name: "ProtectKernelModules", Value: godbus.MakeVariant(true)},
+		{Name: "ProtectKernelLogs", Value: godbus.MakeVariant(true)},
+		// RestrictNamespaces=yes: the allowed set is empty.
+		{Name: "RestrictNamespaces", Value: godbus.MakeVariant(uint64(0))},
+		{Name: "RestrictRealtime", Value: godbus.MakeVariant(true)},
+		{Name: "RestrictSUIDSGID", Value: godbus.MakeVariant(true)},
+		{Name: "LockPersonality", Value: godbus.MakeVariant(true)},
+		// AF_NETLINK stays: getifaddrs() — Node's os.networkInterfaces(),
+		// Go's net.Interfaces(), which frameworks call at startup — needs
+		// a read-only netlink socket, and with an empty capability set
+		// netlink cannot change anything.
+		{Name: "RestrictAddressFamilies", Value: godbus.MakeVariant(allowList{true, []string{"AF_INET", "AF_INET6", "AF_UNIX", "AF_NETLINK"}})},
+		{Name: "SystemCallFilter", Value: godbus.MakeVariant(allowList{true, []string{"@system-service"}})},
+		{Name: "SystemCallErrorNumber", Value: godbus.MakeVariant(errnoEPERM)},
+		{Name: "CapabilityBoundingSet", Value: godbus.MakeVariant(uint64(0))},
+		// Start from nothing. The two bind properties appended below
+		// put back the OS the app needs to run and the app's own
+		// directories, and between them they are the whole view.
+		{Name: "TemporaryFileSystem", Value: godbus.MakeVariant([]tmpfsMount{{"/", "ro"}})},
+		// The manager hands every unit its own XDG_RUNTIME_DIR and bus
+		// address; both point into a /run/user that is not in the view.
+		{Name: "UnsetEnvironment", Value: godbus.MakeVariant([]string{"XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"})},
+	}
+	// BindPaths= and BindReadOnlyPaths= are two views of ONE list in the
+	// manager, and setting either to an empty array does not mean "add
+	// nothing" — it resets the whole list, read-only entries included.
+	// Emitting an empty BindPaths= after the base view would therefore
+	// take /usr and /bin away again and every unit would fail
+	// 203/EXEC — measured, and exactly what the capability probe (which
+	// has no directories of its own) used to do. Omit what is empty.
+	props = appendIfAny(props, "BindReadOnlyPaths", readOnly)
+	props = appendIfAny(props, "BindPaths", writable)
+	if s.tier == sandboxFull {
+		props = append(props, sddbus.Property{Name: "PrivatePIDs", Value: godbus.MakeVariant("yes")})
+	}
+	return props
+}
+
+// appendIfAny adds a list-valued property only when it has entries;
+// see the reset semantics noted in sandboxProperties.
+func appendIfAny(props []sddbus.Property, name string, binds []bindMount) []sddbus.Property {
+	if len(binds) == 0 {
+		return props
+	}
+	return append(props, sddbus.Property{Name: name, Value: godbus.MakeVariant(binds)})
 }
 
 func (c *userManagerClient) StartTransientUnit(ctx context.Context, u unitSpec) (string, error) {

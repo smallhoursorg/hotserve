@@ -26,23 +26,35 @@ license: Apache-2.0
 # gives that manager its runtime directory; without libpam-systemd it
 # cannot start at all. dbus: loginctl (lingering) needs the system bus.
 depends:
-  # No systemd version floor: the runner works on 252+ (Debian 12,
-  # Ubuntu 24.04). The planned per-app isolation needs 256+ and will be
-  # probe-gated at runtime, not at install (DESIGN-threat-model.md,
-  # "The shared-UID rule").
+  # No systemd version floor is declared even though the sandbox needs
+  # 256+ (Debian 13 ships 257): the per-app sandbox is probe-gated at
+  # runtime rather than at install, so a host that cannot deliver it
+  # still installs and still serves — it just reports `sandbox: none`
+  # (DESIGN-threat-model.md, "The shared-UID rule").
   - libpam-systemd
   - dbus
 
+# Every entry pins its mode. Without file_info nfpm copies the mode of
+# the file on the build host, so the package would carry whatever the
+# builder's umask happened to be — `make package` under umask 0002
+# shipped /usr/bin/hotserve group-writable (0775). A permission that
+# arrives by accident is one nobody reviewed.
 contents:
   # `make package` stages the right arch's binary at this fixed path
   # before each nfpm run (nfpm does not env-expand contents paths).
   - src: build/hotserve
     dst: /usr/bin/hotserve
+    file_info:
+      mode: 0755
   - src: packaging/hotserve.service
     dst: /lib/systemd/system/hotserve.service
+    file_info:
+      mode: 0644
   - src: packaging/Caddyfile
     dst: /etc/hotserve/Caddyfile
     type: config|noreplace
+    file_info:
+      mode: 0644
   - dst: /var/lib/hotserve
     type: dir
     file_info:

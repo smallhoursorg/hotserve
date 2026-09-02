@@ -141,7 +141,12 @@ Caddy's environment (`PATH`, `HOME`, `LANG`, `TZ`, `LC_*` — nothing
 else, so supervisor credentials like ACME DNS tokens never reach
 apps) → `env_file` → inline `env` → injected `PORT` and
 `HOST=127.0.0.1`, all layered on the systemd user manager's own
-defaults (`XDG_RUNTIME_DIR`, `INVOCATION_ID`, …). Keys must be valid
+defaults (`XDG_RUNTIME_DIR`, `INVOCATION_ID`, …). Two of those
+defaults are **reserved** in a sandboxed unit and cannot be set by
+`env` or `env_file`: `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`
+are unset after everything else, because they name the user manager's
+own runtime directory and bus — the sockets a sandboxed app must not
+hold. Setting either has no effect rather than an error. Keys must be valid
 variable names (`[A-Za-z_][A-Za-z0-9_]*`) — systemd rejects anything
 else, so config load does too. Anything more an app needs must be
 passed explicitly via `env` or `env_file`. Apps get the user manager's
@@ -186,6 +191,7 @@ resolved at config load.
 | `watchdog_window` | `10m` | Sliding window for the restart budget |
 | `keep` | `5` | Release dirs retained (GC after success). The running version is always kept, so this can be `keep+1` after rolling back to an old release |
 | `max_artifact_size` | `100MB` | Download cap; decompressed cap is 10× |
+| `sandbox` | `auto` | Per-unit sandbox policy: `auto` (sandbox where the host delivers it, warning at every launch where it does not), `require` (sandbox or refuse to start — see the hazard under [Sandbox](#sandbox)), `off`. Global default, per-app override |
 
 ## Watchdog
 
@@ -236,6 +242,278 @@ Health probes also no longer follow redirects (a 3xx now reads as
 unhealthy, for the deploy gate too): if your health endpoint
 redirects — a `/health` → `/health/` trailing slash is the classic —
 point `health_path` at the final path.
+
+## Sandbox
+
+Every instance runs inside systemd's own per-unit sandbox. There is
+one tier, `full`, and a host either delivers it or gets nothing:
+
+| `full` — what every sandboxed unit gets |
+|---|
+| User namespace (`PrivateUsers=`) |
+| PID namespace (`PrivatePIDs=`) — supervisor, user manager and siblings **invisible and unsignalable** |
+| Deny-by-default filesystem: the whole host filesystem replaced by an empty read-only tmpfs, only named paths bound back |
+| hotserve's keys and sockets, other apps, and every path nothing named — **absent**, not merely unreadable |
+| Private `/tmp`, minimal `/dev`, read-only cgroupfs, no capabilities, `@system-service` syscall filter, `AF_INET`/`AF_INET6`/`AF_UNIX`/`AF_NETLINK` only, no nested namespaces |
+
+`PrivatePIDs=` needs systemd 256; Debian 13 — the supported host —
+ships 257. Where the namespaces cannot be had at all (a container, an
+LXC VPS, a kernel built without user namespaces, an LSM that refuses
+them) the status endpoint reports `"sandbox": "none"` and every launch
+warns. It is deliberately not a ladder: a weaker sandbox wearing the
+same name is the "looks configured, quietly weaker" failure this
+design refuses. Use `sandbox require` to turn that into a refusal to
+start.
+
+**An app sees its release dir, its `shared/`, a private `/tmp`, the OS
+runtime. Nothing else on the host
+exists in its view.**
+
+That is the whole guarantee. The view is built deny-by-default
+(`TemporaryFileSystem=/:ro` plus explicit binds), so it is a policy
+rather than a list of things to hide: `state.json`, `tmp/` (the upload
+staging dir), other releases, other apps, `/var/lib/hotserve` (TLS
+keys), `/run/hotserve` (admin socket), `/run/user/<uid>` (the manager
+socket), `/etc/hotserve`, `/home`, `/opt`, `/srv` and every operator
+`env_file` are absent — not present-but-unreadable — and no list has
+to be kept current for that to stay true.
+
+"The OS runtime" is a named set, not the host: `/usr` and its usrmerge
+aliases (`/bin`, `/sbin`, `/lib*`), the certificate directories of the
+TLS trust store, and the individual `/etc` entries needed for name and
+user resolution, timezone and the dynamic linker. `sandboxBaseView` in
+`sandbox.go` is the list, and it names entries rather than the trees
+containing them: `/etc` is not bound whole (that would hand every app
+every other app's `env_file`), and neither is `/etc/ssl`, which also
+holds `/etc/ssl/private`. Every entry is optional, since no distro has
+all of them, so inside a unit `ls /etc` shows however many this host
+actually has — a dozen or so — and `ls /var/lib` shows exactly one,
+the liveswap root.
+
+The working directory is the release dir and `HOME` defaults to
+`shared/`; both are writable. `HOME` is applied before `env_file` and
+inline `env`, so you can point it elsewhere — inside the release dir,
+say. Point it somewhere the sandbox does not bind and
+the app gets a `HOME` that does not exist inside its unit; liveswap
+warns at every launch rather than refusing, since you asked for it. The network namespace is shared by design — the app
+binds `127.0.0.1:$PORT` as before, and sibling ports remain reachable.
+
+This closes the routes the threat model ranks first: reading the
+supervisor's environment or walking the host through
+`/proc/<pid>/root` (the **user** namespace is what closes them — the
+kernel refuses `ptrace`-class access across user namespaces even for
+the same uid), the admin socket, the TLS keys, sibling files. The
+**PID** namespace adds the rest: process visibility and signals. Worth
+keeping straight, because it is why a host that delivers neither gets
+`none` rather than something in between.
+
+**What this costs you.** An app that reads something under `/opt`,
+`/srv` or `/var/lib`, or whose runtime lives outside `/usr` (a
+vendored Node, an `nvm`/`asdf` shim), cannot be reached at all —
+those paths do not exist inside the unit. The sandbox engages on an
+app's **next deploy**, so this surfaces where it has a fallback: the
+health gate fails the new version while the old one keeps serving. A
+command that is not in the view is refused before the unit is even
+created, with a message naming `sandbox off`, rather than failing as a
+bare `203/EXEC`.
+
+**Policy and rollout.** `sandbox auto` (the default) applies the best
+tier the host delivers, and logs a warning at start and at every
+launch that runs below `full`, naming what stays open. The tier is
+probed once per start by running a throwaway unit and checking the
+namespaces from inside (`journalctl -t hotserve-sandbox-probe` shows
+what it saw). The tier an instance got is recorded in `state.json`
+and reported by the status endpoint (`"sandbox": "full" | "filesystem"
+| "none"`).
+
+Sandboxing engages on each app's **next deploy** — the path with a
+fallback (a version that cannot live in its sandbox fails the health
+gate while the old one keeps serving) — never on a supervisor
+restart, a boot recovery or a watchdog restart: those reproduce the
+tier the instance was recorded with, so upgrading hotserve does not
+turn into a fleet-wide, no-fallback restart into sandboxes. The
+supported rollout: upgrade; confirm apps healthy; declare each app's
+data layout; deploy each app and watch `"sandbox"` in its
+status; only then, optionally, `sandbox require`.
+`journalctl -t hotserve-sandbox-probe` shows the probe's verdict on
+this host.
+
+**What a running instance's sandbox is fixed to.** A unit's view is
+built when it starts and is never rebuilt under it — reloads
+deliberately leave running apps alone — so a config change reaches an
+app on its next deploy, not before. That is the only
+thing that ages now, and it fails safe: a secret belonging to an app
+you add tomorrow is already absent from every unit running today,
+because nothing ever bound it.
+
+**Keep env files outside every app's view.** `/etc/hotserve` is the
+documented location and no app may name it. hotserve refuses a config
+in which one app's `env_file` sits inside another app's own dirs,
+or anywhere in the OS base view (`/usr`, the named `/etc` entries) —
+both would put one app's secrets in another app's sandbox, and the
+second would put them in *every* app's. An `env_file` inside its own
+app's `shared/` is a warning rather than an error: the app receives
+those variables anyway, but under `shared/` it can also rewrite the
+file and so choose its own next launch's environment.
+
+**Sandboxing an app is not containment for what it did while bare.**
+The sandbox restricts what an app can *reach*; it cannot un-copy. Its
+`shared/` dir survives every deploy and is bound writable into the new
+sandbox, so anything the bare instance put there is inside the
+sandboxed view afterwards — and because every app runs as the same
+user, a bare app could read hotserve's keys, a sibling's files or any
+`env_file` and copy them there. A hardlink is worse than a copy: it
+stays a live view of the file, so rotating a secret by editing it in
+place republishes it. If an app may have been compromised while
+running bare, clear its `shared/` and rotate anything it could read —
+deploying it sandboxed does not undo the access it already had.
+
+**`require` is the one setting that can keep the whole server from
+starting**: it fails the start (admin socket and proxy included) when
+the host cannot deliver the `full` tier — a manager below 256, or a
+kernel/LSM that refuses the namespaces. Use it only once `auto` has
+been proven on that host.
+
+**When an app breaks under the sandbox** the symptom is usually an
+`ENOENT` for something that exists on the host: a database's unix
+socket, a data directory outside the app's own, a runtime under
+`/opt`. **There is no way to widen a view.** An app sees the OS base
+view, its own release dir and its own `shared/`. That is the whole
+list, and it is fixed.
+
+That is a deliberate limit, not an oversight. The one mechanism that
+would widen a view is also the one that has to be correct against
+symlinks, TOCTOU, cross-app containment and the base view all at once,
+and getting it wrong hands one app another's secrets. Until it can be
+designed and reviewed on its own, the answer for an app that needs
+more is `sandbox off` for that app — the same isolation it had before
+per-app sandboxing existed, and the rest of the fleet keeps its own.
+
+Practical consequences worth planning around:
+
+- **Put persistent data in `shared/`.** It survives deploys, it is
+  writable, and it is `$HOME` inside the unit. A SQLite file belongs
+  there, not in `/var/lib/myapp`.
+- **A same-box database over a unix socket needs `sandbox off`** for
+  that app, or a TCP loopback connection, which the shared network
+  namespace still allows.
+- **Install runtimes under `/usr`.** The base view binds it, so
+  `/usr/local/bin/deno` or an apt-installed `node` is already inside
+  every unit. A vendored runtime under `/opt`, or an `nvm`/`asdf` shim
+  under a home directory, is not — ship it inside the release instead,
+  or run that app with `sandbox off`.
+
+An app's own `releases/<version>` and `shared/` must **be** the
+directories they name. hotserve resolves them immediately before the
+unit is created and refuses to launch if either points somewhere else,
+because the app dir is writable by the app: a symlink placed there
+cannot be told from one you meant. To put an app's data on another
+disk, bind-mount it at the same path (`mount --bind /mnt/blog-data
+/var/lib/liveswap/blog/shared`, or the equivalent fstab entry) — a
+mount resolves to itself, so it is invisible to that check, and an app
+cannot forge one.
+
+`sandbox off` per app is the escape hatch: for an app that needs a
+path outside its own dirs, and for the workloads the sandbox cannot
+host at all — anything that creates its own namespaces (Chromium's
+sandbox under Puppeteer, nested containers) or needs devices beyond
+`/dev/null`-class ones. It is per app, so one app opting out costs the
+others nothing.
+
+**Hosts.** The sandbox is built on unprivileged user namespaces.
+Debian 13's kernel permits them, which is why it is the supported
+host and why the package ships no LSM policy of its own. Some kernels
+refuse them — Ubuntu 24.04+ restricts them to processes under an
+AppArmor profile granting `userns`
+(`kernel.apparmor_restrict_unprivileged_userns=1`), and container and
+LXC hosts often have them off entirely. hotserve does not work around
+that: it probes, and a host that cannot deliver the namespaces runs
+apps with `"sandbox": "none"` and a warning at every launch (the
+non-dumpable supervisor and `NoNewPrivileges` remain).
+`journalctl -t hotserve-sandbox-probe` says why. If you are on such a
+host and want the sandbox, the fix is the host's: permit unprivileged
+user namespaces for hotserve's user manager, or move to Debian 13.
+
+## Runtime permissions (Deno, Node)
+
+The sandbox above is the **ceiling**: it is enforced by the kernel, it
+is decided by your Caddyfile, and it survives a compromised artifact.
+A runtime with its own permission model lets the app **narrow itself
+further inside that ceiling** — and it can express things a mount
+namespace cannot, most importantly *which network addresses the
+process may reach*.
+
+liveswap does not parse, synthesize or verify these flags. They are
+just part of `command`, which is the point: `command` lives in your
+Caddyfile on the box, so a deployed tarball cannot widen its own
+permissions the way it could if they lived in the artifact.
+
+A Deno app, with the placeholders from [Placeholders](#placeholders):
+
+```
+app example {
+    command deno serve --port {port} --host 127.0.0.1 \
+        --cached-only \
+        --allow-net=127.0.0.1:{port} \
+        --allow-read={release_dir},{shared_dir} \
+        --allow-write={shared_dir} \
+        --allow-env=DATABASE_URL \
+        main.ts
+    env DENO_DIR {release_dir}/.deno
+    env DATABASE_URL {shared_dir}/app.db
+    health_path /health
+}
+```
+
+**What that buys you** (measured against Deno 2.8.3; re-check with
+`deno serve --help=full` when you upgrade):
+
+- `--allow-net=127.0.0.1:{port}` is enough for `deno serve` to bind and
+  serve. Every *other* address is refused with `NotCapable` — so a
+  dependency that wakes up and tries to POST your secrets somewhere
+  fails at the runtime boundary. Note it is an **address allowlist,
+  not a direction**: it does not distinguish listening from
+  connecting. Scoping it to the app's own port works because the only
+  address left to reach is itself — which also closes the sibling
+  `127.0.0.1` ports the sandbox leaves open (all apps share a network
+  namespace).
+- Without `--allow-read` the app cannot read `/etc/hosts`, and without
+  `--allow-env` it cannot read its own environment — including the
+  variables liveswap injected. Name only what the app actually needs.
+- Remote imports are governed by `--allow-import`, **not**
+  `--allow-net`. Leave it off and add `--cached-only` so the serving
+  process can never fetch a module. Vendor dependencies at build time
+  and ship the populated cache **inside the tarball**, with `DENO_DIR`
+  pointing into the release dir as above — the tarball is extracted
+  there, so a cache shipped in it is the one Deno reads. Pointing
+  `DENO_DIR` at `{shared_dir}` instead means the shipped cache is never
+  consulted and a first `--cached-only` start fails; if you want the
+  cache to survive deploys, warm it into `{shared_dir}` from
+  `pre_start` and point `DENO_DIR` there.
+
+**The runtime must be under `/usr`.** The sandbox base view
+binds `/usr`, so a normal `/usr/local/bin/deno` (or an apt-installed
+one) is already inside every unit. A runtime somewhere else —
+`/opt/node/bin/node`, an nvm or asdf shim — is absent from the
+sandbox and cannot be reached: ship it inside the release, or run that
+app with `sandbox off`.
+
+**What it does not buy you.** These flags are enforced *in-process* by
+the runtime, so they hold exactly as long as the runtime does: `-A` /
+`--allow-all`, `--allow-run` or `--allow-ffi` hand it all back, and a
+bug in the runtime itself is outside their reach. That is why they are
+the inner layer and not the only one — the user and PID namespaces and
+the deny-by-default view are what still stand if the runtime is the
+thing that breaks. Use both; do not trade one for the other.
+
+**Health.** `deno serve` hands every path to your default export's
+`fetch`, so `health_path` only works if your handler answers 2xx on
+it. If it does not, set `health_path off` and the deploy gate falls
+back to "the process is still alive after `soak`".
+
+Node's `--permission` model layers the same way. The principle is
+identical whatever the runtime: the ceiling is liveswap's, the
+narrowing is the app's, and neither substitutes for the other.
 
 ## Deploy authentication (`deploy_trust`)
 
@@ -501,10 +779,13 @@ failure the previous version never stopped serving.
   releases/v1.4.2/        one dir per deployed version
   releases/v1.4.1/
   current -> releases/v1.4.2   (convenience symlink; state.json is truth)
-  shared/                 persistent data, survives deploys
-  state.json              current version + process handle
+  shared/                 persistent data, survives deploys (the app's HOME)
+  state.json              current version + process handle + sandbox tier
   tmp/                    download staging
 ```
+
+Inside its sandbox an instance sees only `releases/<its version>/`
+and `shared/` of this tree (see [Sandbox](#sandbox)).
 
 ## Semantics and trade-offs (read this)
 
@@ -530,7 +811,8 @@ failure the previous version never stopped serving.
   watchdog is the only restarter — and stopping a version kills its
   whole cgroup, so worker trees never outlive it.
 - **Changed app definitions apply on the next deploy**, never by
-  restarting a running app mid-reload.
+  restarting a running app mid-reload — the sandbox tier included: a
+  relaunch reproduces the tier the instance was recorded with.
 - **No post-promote *auto*-revert.** Once traffic cuts over, the deploy
   is done; if the new version misbehaves later, roll back explicitly
   with `?rollback=<version>` (its release dir is still on disk — that's

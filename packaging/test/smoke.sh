@@ -55,7 +55,26 @@ apt-get update -qq
 apt-get install -y "$deb"
 
 id hotserve >/dev/null || die "postinstall did not create the hotserve user"
+# The package ships no user-manager wrapper and no AppArmor profile:
+# the support matrix is Debian 13, whose kernel does not restrict
+# unprivileged user namespaces, so user@<uid>.service runs stock. A
+# leftover from an older package would mean postinstall's cleanup did
+# not run.
+[ ! -e /usr/libexec/hotserve/user-manager ] \
+	|| die "the retired user-manager wrapper is installed; the package should ship no such path"
+[ ! -e /etc/apparmor.d/hotserve-user-manager ] \
+	|| die "the retired AppArmor profile is installed; postinstall should have removed it"
+# Every packaged file's mode is pinned in nfpm.yaml rather than
+# inherited from the build host's umask; check the one that matters.
+bmode=$(stat -c '%U:%G %a' /usr/bin/hotserve)
+[ "$bmode" = "root:root 755" ] \
+	|| die "/usr/bin/hotserve is '$bmode', want 'root:root 755' — an unpinned mode follows the builder's umask"
 getent group hotserve >/dev/null || die "postinstall did not create the hotserve group"
+# The package's directories are group-hotserve, so postinstall must
+# ESTABLISH the account's membership rather than assume it — an account
+# an admin or another package created keeps whatever groups it had.
+id -nG hotserve | tr ' ' '\n' | grep -qx hotserve \
+	|| die "the hotserve user is not in the hotserve group; postinstall must add it, not assume it"
 for d in /var/lib/hotserve /var/lib/liveswap; do
 	got=$(stat -c '%U:%G %a' "$d")
 	[ "$got" = "hotserve:hotserve 750" ] || die "$d is '$got', want 'hotserve:hotserve 750'"
@@ -114,6 +133,12 @@ stage "stage 2: liveswap deploy under the systemd sandbox"
 # root here, standing in for the operator's token-minting machine.
 hotserve deploy-keygen --out /etc/hotserve/deploy.key
 
+# The user manager's PID, handed to the app so it can try the routes
+# the sandbox is supposed to close. Captured before the config is
+# written; the manager has been running since stage 1.
+mgr_pid=$(systemctl show -p MainPID --value "user@$uid.service")
+[ -n "$mgr_pid" ] && [ "$mgr_pid" != "0" ] || die "no MainPID for user@$uid.service"
+
 # Overwriting the packaged conffile doubles as the modification marker
 # for the stage-3 config|noreplace assertion.
 cat > /etc/hotserve/Caddyfile <<'EOF'
@@ -132,6 +157,8 @@ cat > /etc/hotserve/Caddyfile <<'EOF'
 
 		app demo {
 			command ./server
+			env MGR_PID __MGR_PID__
+			env HOTSERVE_UID __HOTSERVE_UID__
 			health_interval 250ms
 			health_timeout 1s
 			soak 1s
@@ -150,6 +177,14 @@ cat > /etc/hotserve/Caddyfile <<'EOF'
 	liveswap_webhook
 }
 EOF
+
+# The heredoc above is quoted — it has to be, it carries Caddy's own
+# {...} placeholders — so the two runtime values are substituted here.
+# Without this the app receives the literal strings and every /proc
+# probe below tests a path that cannot exist, passing vacuously.
+sed -i "s|__MGR_PID__|$mgr_pid|; s|__HOTSERVE_UID__|$uid|" /etc/hotserve/Caddyfile
+grep -q '__MGR_PID__\|__HOTSERVE_UID__' /etc/hotserve/Caddyfile \
+	&& die "placeholder substitution failed; the sandbox probes would test nothing"
 
 systemctl daemon-reload
 timeout 120 systemctl restart hotserve || die "restart with liveswap config failed"
@@ -170,9 +205,37 @@ done
 # `hotserve respond`, honoring liveswap's PORT contract and answering
 # 200 on every path (which satisfies the health gate).
 workdir=$(mktemp -d)
+# Besides the NOFILE contract the wrapper reports what its sandbox
+# looks like from inside: the uid_map range (1 in a user namespace,
+# 2^32-1 in none), its own pid (1 in a PID namespace), how many pids
+# /proc shows, and whether hotserve's own state dir exists in its view.
 cat > "$workdir/server" <<'EOF'
 #!/bin/sh
-echo "smoke app starting on $PORT nofile_soft=$(ulimit -Sn) nofile_hard=$(ulimit -Hn)"
+read _ _ uidmap < /proc/self/uid_map
+# Filesystem routes are tested for EXISTENCE: the view is
+# deny-by-default (TemporaryFileSystem=/ plus explicit binds), so a
+# path nothing named is absent rather than present-but-unreadable.
+[ -e /var/lib/hotserve ] && hslib=open || hslib=closed
+# The routes the sandbox exists to close. Their closure rests on the
+# user namespace alone — the kernel refusing ptrace-class access across
+# user namespaces — with the PID namespace closing them a second time
+# over. Probing them here keeps the user-namespace claim tested in its
+# own right rather than only through the namespace stacked on top.
+ls "/proc/$MGR_PID/root/" >/dev/null 2>&1 && mgrroot=open || mgrroot=closed
+cat "/proc/$MGR_PID/environ" >/dev/null 2>&1 && mgrenv=open || mgrenv=closed
+[ -e "/run/user/$HOTSERVE_UID/systemd/private" ] && mgrsock=open || mgrsock=closed
+[ -e /run/hotserve/admin.sock ] && adminsock=open || adminsock=closed
+[ -e /var/lib/liveswap/demo/state.json ] && state=open || state=closed
+[ -e /etc/hotserve ] && etchs=open || etchs=closed
+# The base view: an OS the app can run on. Without it every "closed"
+# above would be satisfied by a unit that has nothing in it at all.
+[ -x /bin/sh ] && binsh=ok || binsh=MISSING
+[ -x /usr/bin/hotserve ] && hsbin=ok || hsbin=MISSING
+[ -e /etc/ssl/certs ] && etcssl=ok || etcssl=MISSING
+[ -e /etc/ssl/private ] && sslpriv=present || sslpriv=absent
+etclist=$(ls /etc 2>/dev/null | tr '\n' ',')
+varliblist=$(ls /var/lib 2>/dev/null | tr '\n' ',')
+echo "smoke app starting on $PORT nofile_soft=$(ulimit -Sn) nofile_hard=$(ulimit -Hn) uidmap=$uidmap pid=$$ nprocs=$(ls /proc | grep -c '^[0-9]') hotserve_lib=$hslib mgr_root=$mgrroot mgr_environ=$mgrenv mgr_socket=$mgrsock admin_socket=$adminsock state_json=$state etc_hotserve=$etchs binsh=$binsh hsbin=$hsbin etcssl=$etcssl sslprivate=$sslpriv etclist=$etclist varliblist=$varliblist saw_mgr_pid=$MGR_PID saw_uid=$HOTSERVE_UID"
 exec /usr/bin/hotserve respond --listen 127.0.0.1:"$PORT" "hello smoke"
 EOF
 chmod +x "$workdir/server"
@@ -197,7 +260,7 @@ code=$(curl -s -o /tmp/deploy-body -w '%{http_code}' --max-time 90 \
 	-d '{"url":"http://127.0.0.1:8200/demo.tar.gz","version":"s1"}' "$HOOK")
 [ "$code" = "200" ] || {
 	echo "deploy response: $(cat /tmp/deploy-body)"
-	die "deploy under systemd sandbox failed with HTTP $code — if the journal shows a permission error, suspect the unit's sandboxing (ProtectSystem/XDG dirs) vs the packaged /var/lib dirs"
+	die "deploy under systemd sandbox failed with HTTP $code — a deny-by-default view fails with ENOENT (or 203/EXEC for the command itself), not a permission error, so if the journal shows a missing path suspect the unit's base view or a missing extra_path rather than file modes"
 }
 curl -fsS --max-time 5 "$PROXY/" | grep -q "hello smoke" \
 	|| die "proxy does not serve the deployed app"
@@ -231,20 +294,106 @@ journalctl --no-pager -t hotserve-demo | grep -q "smoke app starting" \
 # had (#37).
 mgr_nofile=$(user_systemctl show -p DefaultLimitNOFILE --value)
 app_line=$(journalctl --no-pager -t hotserve-demo | grep 'smoke app starting' | tail -1)
+# The evidence behind every in-unit assertion below, printed whether or
+# not one fails: a cell that dies on one field is much easier to read
+# next to the whole view the app actually saw.
+echo "in-unit view: ${app_line#*smoke app starting }"
 app_soft=$(printf '%s' "$app_line" | grep -o 'nofile_soft=[0-9]*' | cut -d= -f2)
 app_hard=$(printf '%s' "$app_line" | grep -o 'nofile_hard=[0-9]*' | cut -d= -f2)
 [ -n "$mgr_nofile" ] && [ "$app_soft" = "$mgr_nofile" ] && [ "$app_hard" = "$mgr_nofile" ] \
 	|| die "app NOFILE soft=$app_soft hard=$app_hard is not the user manager's DefaultLimitNOFILE ($mgr_nofile) on both"
 app_nofile=$app_soft
 sd_version=$(systemctl --version | awk 'NR==1 {print $2}')
-if [ "${sd_version%%[!0-9]*}" -ge 256 ]; then
-	[ "$mgr_nofile" = "1048576" ] \
-		|| die "systemd $sd_version: user@$uid DefaultLimitNOFILE is $mgr_nofile, not the drop-in's 1048576"
-	echo "app NOFILE $app_nofile = user@$uid DefaultLimitNOFILE = the drop-in's 1048576 (systemd $sd_version)"
-else
-	echo "app NOFILE $app_nofile = user@$uid DefaultLimitNOFILE (systemd $sd_version < 256: drop-in not applied, #37)"
-fi
+# The user@<uid> drop-in only reaches the manager from systemd 256 (#37);
+# the support matrix is Debian 13 (257), so this is unconditional.
+[ "${sd_version%%[!0-9]*}" -ge 256 ] \
+	|| die "systemd $sd_version is below the supported floor of 256 (Debian 13 ships 257)"
+[ "$mgr_nofile" = "1048576" ] \
+	|| die "systemd $sd_version: user@$uid DefaultLimitNOFILE is $mgr_nofile, not the drop-in's 1048576"
+echo "app NOFILE $app_nofile = user@$uid DefaultLimitNOFILE = the drop-in's 1048576 (systemd $sd_version)"
 echo "deployed as unit $unit under user@$uid; app output in the journal"
+
+# The sandbox tier: full — a PID namespace on top of the user namespace
+# and the mount set. Debian 13 is systemd 257, so there is one tier and
+# the status endpoint must report it; the app's own view must agree.
+# The host kernel's stance on unprivileged user namespaces is printed
+# for the record: it lives in the host kernel, not the container image,
+# so a CI runner that restricts them fails this cell even though Debian
+# itself does not restrict them.
+echo "host: $(uname -r); apparmor_restrict_unprivileged_userns=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo absent); virt=$(systemd-detect-virt 2>/dev/null || echo unknown)"
+sandbox=$(printf '%s' "$status" | sed -n 's/.*"sandbox":"\([a-z]*\)".*/\1/p')
+app_uidmap=$(printf '%s' "$app_line" | grep -o 'uidmap=[0-9]*' | cut -d= -f2)
+app_pid=$(printf '%s' "$app_line" | grep -o ' pid=[0-9]*' | cut -d= -f2)
+app_nprocs=$(printf '%s' "$app_line" | grep -o 'nprocs=[0-9]*' | cut -d= -f2)
+app_hslib=$(printf '%s' "$app_line" | grep -o 'hotserve_lib=[a-z]*' | cut -d= -f2)
+[ "$sandbox" = "full" ] || die "status sandbox is '$sandbox', want full"
+[ "$app_pid" = "1" ] || die "full tier but the app is pid $app_pid inside its unit, not 1 (no PID namespace)"
+[ -n "$app_nprocs" ] && [ "$app_nprocs" -le 8 ] || die "full tier but /proc shows $app_nprocs pids inside the unit"
+[ "$app_uidmap" != "4294967295" ] && [ -n "$app_uidmap" ] || die "no user namespace inside the unit (uid_map range $app_uidmap)"
+[ "$app_hslib" = "closed" ] || die "/var/lib/hotserve is visible inside the sandboxed unit"
+# These are the acceptance paths from DESIGN-sandbox.md. They are
+# closed by the user namespace alone — the PID namespace on top is what
+# additionally hides and protects sibling processes — so they are the
+# assertions that must hold even if a host ever delivers less.
+# The probes are only worth anything if the app was handed the real
+# values: a literal "$mgr_pid" would make every /proc check below pass
+# by testing a path that cannot exist.
+saw_pid=$(printf '%s' "$app_line" | grep -o 'saw_mgr_pid=[^ ]*' | cut -d= -f2)
+saw_uid=$(printf '%s' "$app_line" | grep -o 'saw_uid=[^ ]*' | cut -d= -f2)
+[ "$saw_pid" = "$mgr_pid" ] \
+	|| die "the app was given MGR_PID='$saw_pid', not the manager's real pid $mgr_pid — the /proc probes would be vacuous"
+[ "$saw_uid" = "$uid" ] \
+	|| die "the app was given HOTSERVE_UID='$saw_uid', not $uid — the manager-socket probe would be vacuous"
+# And prove the routes are reachable at all from outside the sandbox,
+# so "closed" means the sandbox closed it rather than the path being
+# absent on this host.
+[ -r "/proc/$mgr_pid/environ" ] || die "/proc/$mgr_pid/environ is unreadable even to root; the in-unit probe would prove nothing"
+[ -e "/run/user/$uid/systemd/private" ] || die "the manager socket does not exist; the in-unit probe would prove nothing"
+sslpriv_seen=$(printf '%s' "$app_line" | grep -o 'sslprivate=[a-z]*' | cut -d= -f2)
+[ "$sslpriv_seen" = "absent" ] \
+	|| die "/etc/ssl/private is inside the unit: the base view binds the trust store, not the whole /etc/ssl tree"
+for route in mgr_root mgr_environ mgr_socket admin_socket state_json etc_hotserve; do
+	got=$(printf '%s' "$app_line" | grep -o "$route=[a-z_]*" | cut -d= -f2)
+	[ "$got" = "closed" ] \
+		|| die "$route is '$got' inside the $sandbox-tier unit: a route the design says is closed is open"
+done
+echo "in-unit routes closed: manager /proc root+environ, manager socket, admin socket, state.json, /etc/hotserve"
+# The other half of the deny-by-default claim, and the one that keeps
+# "closed" from being satisfied by an empty unit: the base view carries
+# an OS the app can execute in, /etc is only the named entries (never
+# the whole tree, which would hand every app every other app's
+# env_file), and /var/lib holds nothing but the path to this app's own
+# directories — hotserve's TLS keys sit next door on the host.
+for present in binsh hsbin etcssl; do
+	got=$(printf '%s' "$app_line" | grep -o "$present=[A-Za-z]*" | cut -d= -f2)
+	[ "$got" = "ok" ] \
+		|| die "$present is '$got' inside the unit: the base view does not carry a runnable OS, so the closed routes above prove nothing"
+done
+etclist=$(printf '%s' "$app_line" | grep -o 'etclist=[^ ]*' | cut -d= -f2)
+case ",$etclist" in
+*,hotserve,* | *,liveswap,* | *,shadow,*)
+	die "/etc inside the unit carries more than the named entries ($etclist): every app would see every other app's env_file" ;;
+esac
+varliblist=$(printf '%s' "$app_line" | grep -o 'varliblist=[^ ]*' | cut -d= -f2)
+[ "$varliblist" = "liveswap," ] \
+	|| die "/var/lib inside the unit is '$varliblist', want only 'liveswap': anything else is a path nothing named"
+echo "in-unit base view: /bin/sh, /usr/bin/hotserve, /etc/ssl; /etc=$etclist /var/lib=$varliblist"
+[ "$(user_systemctl show -p PrivateUsers --value "$unit")" = "yes" ] || die "unit lacks PrivateUsers=yes"
+[ "$(user_systemctl show -p TemporaryFileSystem --value "$unit")" = "/:ro" ] || die "unit lacks TemporaryFileSystem=/:ro — the view is not deny-by-default"
+# The retired half of the old model, read back off the live unit. Both
+# properties still exist on every service, so test the value rather
+# than its presence: what must be gone is the setting, not the row.
+[ "$(user_systemctl show -p ProtectSystem --value "$unit")" != "strict" ] || die "unit still sets ProtectSystem=strict; the view names what exists rather than making the rest read-only"
+case "$(user_systemctl show -p InaccessiblePaths --value "$unit")" in
+*/*) die "unit still masks a list with InaccessiblePaths=" ;;
+esac
+journalctl --no-pager -u hotserve | grep -q "launching without the full sandbox" && degraded=yes || degraded=no
+if [ "$sandbox" = "full" ]; then
+	[ "$degraded" = "no" ] || die "full tier must not log the degraded WARN"
+else
+	[ "$degraded" = "yes" ] || die "$sandbox tier must be warned about at launch"
+fi
+echo "sandbox tier $sandbox (systemd $sd_version): uid_map range $app_uidmap, pid $app_pid, $app_nprocs pids visible, /var/lib/hotserve $app_hslib"
 
 # `hotserve validate` provisions and cleans up without starting: run
 # as root (no user manager for uid 0) and as the hotserve user (the
@@ -270,7 +419,22 @@ echo "journal is free of the deploy token"
 stage "stage 3: reinstall — upgrade path, conffile preservation, app survival"
 pid_before=$(printf '%s' "$status" | sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p')
 [ -n "$pid_before" ] || die "status missing pid: $status"
+# The account already exists by definition on a reinstall, which is the
+# path that used to set the group only when it CREATED the user. Strip
+# the membership first, the way a hotserve account made by an admin (or
+# another package) would arrive: postinstall must establish it rather
+# than assume it.
+# postinstall's useradd makes hotserve the account's PRIMARY group, so
+# it cannot simply be removed; move the account to another primary
+# group instead, which is exactly the shape a pre-existing account has.
+groupadd --system smoketest-other 2>/dev/null || true
+usermod -g smoketest-other hotserve \
+	|| die "could not move the hotserve account off its primary group; the reinstall assertion below would be vacuous"
+id -nG hotserve | tr ' ' '\n' | grep -qx hotserve \
+	&& die "the hotserve account is still in the hotserve group; the reinstall assertion below would be vacuous"
 dpkg -i "$deb"
+id -nG hotserve | tr ' ' '\n' | grep -qx hotserve \
+	|| die "reinstall did not restore the hotserve user's group membership: the package's group-owned directories would be unreachable"
 grep -q liveswap_webhook /etc/hotserve/Caddyfile \
 	|| die "reinstall clobbered the modified /etc/hotserve/Caddyfile (config|noreplace broken)"
 systemctl is-active --quiet hotserve \

@@ -45,6 +45,17 @@
 # 			env_file /etc/hotserve/myapp.env
 # 			# pre_start node migrate.js
 #
+# 			# Each app runs in its own systemd sandbox, and the
+# 			# filesystem it sees is deny-by-default: its release dir,
+# 			# its shared/ dir, a private /tmp, the OS runtime (/usr and
+# 			# a named handful of /etc) — and nothing else on this host
+# 			# exists inside it. There is no way to widen that view, so
+# 			# put persistent data in shared/ and install runtimes under
+# 			# /usr. A path outside is ENOENT, not a permission error;
+# 			# a runtime outside /usr (a vendored Node, an nvm/asdf
+# 			# shim) is refused up front rather than failing later.
+# 			# `sandbox off` for that app is the escape hatch.
+#
 # 			# Crash/health watchdog (on by default). Defaults shown:
 # 			# watchdog          on     # off = never auto-restart
 # 			# watchdog_failures 3      # consecutive failed health probes

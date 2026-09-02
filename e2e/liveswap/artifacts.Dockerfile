@@ -1,11 +1,13 @@
-# Builds the demo app once, packs four release tarballs (v1, v2, a v3
-# whose health check always fails, and a "workers" release whose
-# ./server is a shell leader that forks a worker before exec'ing the
-# app — the process-tree shape the systemd suite kills), and serves
-# them over HTTP — the stand-in for a GitHub/GitLab release asset URL.
+# Builds the demo app once, packs five release tarballs (v1, v2, a v3
+# whose health check always fails, a "workers" release whose ./server
+# is a shell leader that forks a worker before exec'ing the app — the
+# process-tree shape the systemd suite kills — and a "probe" release
+# whose ./server records its sandbox view before exec'ing the app),
+# and serves them over HTTP — the stand-in for a GitHub/GitLab release
+# asset URL.
 FROM golang:1.27-trixie AS build
 WORKDIR /build
-COPY testapp/main.go workers.sh ./
+COPY testapp/main.go workers.sh probe.sh ./
 RUN CGO_ENABLED=0 go build -o server main.go
 RUN mkdir /out \
 	&& for v in v1 v2; do \
@@ -24,7 +26,13 @@ RUN mkdir /out \
 	&& cp /build/workers.sh /tmp/stage-workers/server \
 	&& chmod +x /tmp/stage-workers/server \
 	&& echo workers > /tmp/stage-workers/version.txt \
-	&& tar -czf /out/demo-workers.tar.gz -C /tmp/stage-workers .
+	&& tar -czf /out/demo-workers.tar.gz -C /tmp/stage-workers . \
+	&& mkdir /tmp/stage-probe \
+	&& cp /build/server /tmp/stage-probe/server-bin \
+	&& cp /build/probe.sh /tmp/stage-probe/server \
+	&& chmod +x /tmp/stage-probe/server \
+	&& echo probe > /tmp/stage-probe/version.txt \
+	&& tar -czf /out/demo-probe.tar.gz -C /tmp/stage-probe .
 
 FROM caddy:2.11.4
 COPY --from=build /out /srv/artifacts
