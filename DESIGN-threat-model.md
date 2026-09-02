@@ -363,9 +363,13 @@ consequences, and they decide the mechanism:
    on, and because they are the evidence for readmitting Ubuntu should
    that ever be wanted. Consequence accepted: a Debian 12 host that
    upgrades hotserve drops from *filesystem* to `none` rather than
-   degrading gracefully. That is what dropping support means, and it
-   is loud (WARN at every launch, `"sandbox":"none"` in status) rather
-   than silent.
+   degrading gracefully. That is what dropping support means, and for
+   an app deployed after the upgrade it is loud (WARN at every launch,
+   `"sandbox":"none"` in status) rather than silent. An instance still
+   *recorded* at the removed tier is louder still: since #45 that
+   record is rejected and recovery refuses rather than relaunching
+   (`validSandboxTierRecord`). No released hotserve ever wrote one, so
+   this is reachable only from a development build.
 2. **A non-dumpable supervisor is the floor on every host.**
    `prctl(PR_SET_DUMPABLE, 0)` makes hotserve's `/proc` entries require
    `CAP_SYS_PTRACE`, which apps under `NoNewPrivileges` never hold —
@@ -782,7 +786,17 @@ rows (T3, T4) that no isolation approach touches.
 ### Amendment (2026-09-01): one host, one tier
 
 The support matrix is Debian 13 alone. Two things follow, and neither
-changes the property set above:
+changes the property set above.
+
+**Read the body above through this amendment.** Where it says "two
+tiers", "the best tier" or *filesystem* — the shipped-status note at
+§"Supervisor⇄app and app⇄app boundaries", the residual-risk table's
+footnote 12, and the rollout and install-test descriptions — there is
+one tier and its name is *full*. A host that cannot deliver it gets
+`none`, so those rows describe a mitigation no supported host can be
+at, and footnote 12's `◐` is unreachable rather than partial. The
+prose is kept as the record of what was measured when, not rewritten
+in place.
 
 - **One tier.** `PrivatePIDs=` exists on every supported manager
   (systemd 257), so *filesystem* is neither probed for nor offered,
@@ -793,9 +807,14 @@ changes the property set above:
   recorded-tier mechanism itself — a relaunch reproduces the tier the
   instance actually got rather than re-reading policy
   (`validSandboxTierRecord`, `parseSandboxTier` in
-  [liveswap/sandbox.go](liveswap/sandbox.go)) — which is what keeps a
-  sandbox from engaging on a crash relaunch, where no old instance is
-  serving and no health gate can catch it.
+  [liveswap/sandbox.go](liveswap/sandbox.go)). It cuts both ways, and
+  only the first direction is a safety property: an instance recorded
+  bare stays bare, so a sandbox never engages on a crash relaunch,
+  where no old instance is serving and no health gate can catch it. An
+  instance recorded *full* likewise stays sandboxed even after the
+  operator sets `sandbox off`, which is the same rule and is **not** a
+  safety property — see the residual in
+  [liveswap/DESIGN-sandbox.md](liveswap/DESIGN-sandbox.md).
 - **No AppArmor profile.** Debian's kernel does not restrict
   unprivileged user namespaces, so the profile and the user-manager
   wrapper it attached to are removed along with the privilege they

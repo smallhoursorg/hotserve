@@ -265,8 +265,8 @@ const (
 // left for either to act on — an unnamed path is absent, not merely
 // unreadable, which is a stronger statement than either option makes
 // and one that cannot go stale. MountAPIVFS= is not set: /proc, /sys
-// and /dev are mounted inside the tmpfs by PrivateDevices= (and, at
-// the full tier, PrivatePIDs=), measured on 252/255/257/259.
+// and /dev are mounted inside the tmpfs by PrivateDevices= and
+// PrivatePIDs=, measured on 252/255/257/259.
 func sandboxProperties(s *sandboxSpec) []sddbus.Property {
 	if s == nil || s.tier == sandboxNone {
 		return nil

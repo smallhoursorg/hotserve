@@ -24,16 +24,16 @@ import (
 //	deny-by-default view                 TestSandboxViewIsExactlyWhatIsNamed
 //	                                     TestIntegrationSystemdSandboxedUnit
 //	app-to-app boundary                  TestAppViewsAreDisjointExceptTheBaseView
-//	/etc never bound whole               TestSandboxPropertiesFilesystemAndFull
+//	/etc never bound whole               TestSandboxPropertiesFullTier
 //	                                     TestBaseViewNamesTheTrustStoreNotTheTree
 //	                                     TestBindSourceInsideTheBaseViewRefused
 //	binds are the dirs they name         TestMandatoryBindMustBeTheDirectoryItNames
 //	                                     TestBindOntoASiblingsExternalDataRefused
 //	command must be in the view          TestUnitForRefusesCommandOutsideTheView
 //	no empty list property               TestSandboxPropertiesNeverEmitsAnEmptyBindList
-//	/sys/fs/cgroup read-only             TestSandboxPropertiesFilesystemAndFull
-//	/run/systemd/resolve reachable       TestSandboxPropertiesFilesystemAndFull
-//	user + PID namespace per tier        TestSandboxPropertiesFilesystemAndFull
+//	/sys/fs/cgroup read-only             TestSandboxPropertiesFullTier
+//	/run/systemd/resolve reachable       TestSandboxPropertiesFullTier
+//	user + PID namespace, every unit     TestSandboxPropertiesFullTier
 //	                                     TestIntegrationSystemdSandboxProbe
 //	WARN below the full tier             TestRelaunchBelowFullWarns
 //	engage on next deploy, not relaunch  TestDeployUsesPolicyRelaunchUsesRecord

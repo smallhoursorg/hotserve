@@ -62,10 +62,18 @@ const (
 
 func (t sandboxTier) String() string {
 	switch t {
+	case sandboxNone:
+		return "none"
 	case sandboxFull:
 		return "full"
 	default:
-		return "none"
+		// A tier this build does not define. state() persists whatever
+		// this returns, so rendering it as "none" would let an
+		// out-of-range value be written as a legitimate record and
+		// relaunch a sandboxed app bare — fail-open, in the one enum
+		// whose corruption is meant to fail closed. This spelling is
+		// not a record validSandboxTierRecord accepts, so it does.
+		return fmt.Sprintf("sandboxTier(%d)", int(t))
 	}
 }
 
@@ -133,14 +141,14 @@ func resolveSandboxTier(mode string, c sandboxCapability) (tier sandboxTier, war
 		return sandboxNone, "", nil
 	case sandboxRequire:
 		if c.tier != sandboxFull {
-			return sandboxNone, "", fmt.Errorf("sandbox require: this host cannot deliver the full sandbox (%s); use `sandbox auto` to run with the %s tier, or upgrade the host", c.reason, c.tier)
+			return sandboxNone, "", fmt.Errorf("sandbox require: this host cannot deliver the full sandbox (%s); use `sandbox auto` to run with no sandbox at all, or fix the host", c.reason)
 		}
 		return sandboxFull, "", nil
 	default: // auto
 		if c.tier == sandboxFull {
 			return sandboxFull, "", nil
 		}
-		return c.tier, fmt.Sprintf("sandbox auto: running with the %s tier, not full (%s)", c.tier, c.reason), nil
+		return c.tier, fmt.Sprintf("sandbox auto: running with no sandbox at all, not the full one (%s)", c.reason), nil
 	}
 }
 

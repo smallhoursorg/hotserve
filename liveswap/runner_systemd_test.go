@@ -511,12 +511,20 @@ func TestSystemdRunnerReattach(t *testing.T) {
 	}
 
 	conn.setStatus("live.service", unitStatus{LoadState: "loaded", ActiveState: "active", SubState: "running", MainPID: 77})
-	h, ok, err := r.Reattach(handleState{Unit: "live.service", StartedAt: started})
+	h, ok, err := r.Reattach(handleState{Unit: "live.service", StartedAt: started, Sandbox: "full"})
 	if !ok || err != nil {
 		t.Fatalf("running unit must be adopted: ok=%v err=%v", ok, err)
 	}
 	if st := h.state(); st.PID != 77 || st.Unit != "live.service" || !st.StartedAt.Equal(started) {
 		t.Fatalf("adopted state %+v", st)
+	}
+	// The recorded tier survives the round trip. A reattach that
+	// dropped it would have status under-report a sandboxed app as
+	// "none" and the next watchdog relaunch start it bare — the
+	// "silently drop this app's sandbox" outcome validSandboxTierRecord
+	// exists to prevent, and nothing else in any lane pins it.
+	if st := h.state(); st.Sandbox != "full" {
+		t.Fatalf("reattach dropped the recorded tier: %q, want full", st.Sandbox)
 	}
 	if !r.Alive(h) || r.Wait(h) == nil {
 		t.Fatal("adopted handle must be watched like a spawned one")
