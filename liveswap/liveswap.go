@@ -240,23 +240,6 @@ type AppConfig struct {
 	// Sandbox overrides the global sandbox policy for this app:
 	// "auto", "require" or "off". Default: the global setting.
 	Sandbox string `json:"sandbox,omitempty"`
-
-	// ExtraPaths are host paths the sandboxed app may see in addition
-	// to its own release and shared directories and the OS runtime
-	// (/usr plus a named handful of /etc) — read-only unless Writable.
-	// The view is deny-by-default, so nothing else on the host exists
-	// inside the unit and this is the only way to let something in.
-	// The canonical use is a same-box database's unix socket directory
-	// (/run/postgresql). Paths inside the liveswap root, and the names
-	// that would give back what the sandbox took, are refused. Ignored
-	// when the app runs without a sandbox.
-	ExtraPaths []ExtraPathConfig `json:"extra_paths,omitempty"`
-}
-
-// ExtraPathConfig is one `extra_path <path> [rw]` entry.
-type ExtraPathConfig struct {
-	Path     string `json:"path"`
-	Writable bool   `json:"writable,omitempty"`
 }
 
 // CaddyModule returns the Caddy module information.
@@ -391,13 +374,6 @@ func (cfg *AppConfig) applyDefaults(repl *caddy.Replacer) {
 	for k, v := range cfg.Env {
 		cfg.Env[k] = repl.ReplaceKnown(v, "")
 	}
-	// extra_path too, or the documented "{env.*} resolves at config
-	// load" rule holds for every path option except the newest one —
-	// and `extra_path {env.DB_SOCKET_DIR}` reaches Validate as a
-	// literal and is refused for not being absolute.
-	for i, e := range cfg.ExtraPaths {
-		cfg.ExtraPaths[i].Path = repl.ReplaceKnown(e.Path, "")
-	}
 	if cfg.HealthPath == "" {
 		cfg.HealthPath = "/health"
 	}
@@ -462,10 +438,6 @@ func (a *App) buildSpec(name string, cfg *AppConfig) (*appSpec, error) {
 	if sandboxMode == "" {
 		sandboxMode = a.Sandbox
 	}
-	var extra []extraPath
-	for _, e := range cfg.ExtraPaths {
-		extra = append(extra, extraPath{path: e.Path, rw: e.Writable})
-	}
 	return &appSpec{
 		name:            name,
 		command:         cfg.Command,
@@ -491,7 +463,6 @@ func (a *App) buildSpec(name string, cfg *AppConfig) (*appSpec, error) {
 		allowlist:       allowlist,
 		dirs:            newAppDirs(a.Root, name),
 		sandboxMode:     sandboxMode,
-		extraPaths:      extra,
 	}, nil
 }
 
@@ -503,8 +474,8 @@ func (a *App) Validate() error {
 	}
 	// Clean, not merely absolute: the containment checks below and in
 	// sandbox.go compare paths lexically, so an uncleaned root like
-	// /srv/liveswap/../liveswap would let an extra_path name a
-	// sibling's directory through the spelling the check never sees.
+	// /srv/liveswap/../liveswap would be measured against a spelling
+	// the checks never see.
 	if filepath.Clean(a.Root) != a.Root {
 		return fmt.Errorf("root must be a clean path (no . , .. or doubled separators): %q resolves to %q", a.Root, filepath.Clean(a.Root))
 	}
@@ -517,11 +488,6 @@ func (a *App) Validate() error {
 	for name, cfg := range a.Apps {
 		if cfg.Sandbox != "" && !validSandboxMode(cfg.Sandbox) {
 			return fmt.Errorf("app %s: sandbox must be \"auto\", \"require\" or \"off\", got %q", name, cfg.Sandbox)
-		}
-		for _, e := range cfg.ExtraPaths {
-			if err := validateExtraPath(e.Path, a.Root); err != nil {
-				return fmt.Errorf("app %s: %w", name, err)
-			}
 		}
 		if !appNameRe.MatchString(name) {
 			return fmt.Errorf("app name %q must match %s", name, appNameRe)

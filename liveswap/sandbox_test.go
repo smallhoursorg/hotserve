@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -81,100 +82,6 @@ func TestResolveSandboxTier(t *testing.T) {
 	}
 }
 
-func TestValidateExtraPathAndRoot(t *testing.T) {
-	root := "/var/lib/liveswap"
-	for _, ok := range []string{"/run/postgresql", "/opt/geoip", "/var/cache/blog", "/srv/media"} {
-		if err := validateExtraPath(ok, root); err != nil {
-			t.Errorf("%s rejected: %v", ok, err)
-		}
-	}
-	for _, bad := range []string{
-		"relative/path", "/opt/../etc", "/opt/", "/",
-		"/var/lib/liveswap", "/var/lib/liveswap/other/shared", // the root: siblings live there
-		"/var/lib/hotserve", "/var/lib/hotserve/caddy", // TLS keys
-		"/run/hotserve", "/etc/hotserve", "/etc/liveswap/blog.env",
-	} {
-		if err := validateExtraPath(bad, root); err == nil {
-			t.Errorf("%s accepted", bad)
-		}
-	}
-	// The sharp cases: anything the unit gets its own copy of, or that
-	// would hand back a route out, must not be bindable — /run/user is
-	// the manager's private socket (a sandbox escape), /sys/fs/cgroup
-	// undoes the read-only cgroupfs the resource caps will rely on.
-	// Read-only is no defence: connecting to a unix socket is not a
-	// filesystem write.
-	for _, closed := range []string{
-		"/run/user", "/run/user/997", "/run/user/997/systemd/private",
-		"/home", "/home/deploy/data", "/root",
-		"/tmp", "/var/tmp/build", "/dev", "/dev/shm",
-		"/sys", "/sys/fs/cgroup", "/proc", "/proc/self",
-	} {
-		err := validateExtraPath(closed, root)
-		if err == nil {
-			t.Errorf("%s accepted: it would hand back what the sandbox closes", closed)
-			continue
-		}
-		if !strings.Contains(err.Error(), "no app may be given") {
-			t.Errorf("%s refused for the wrong reason: %v", closed, err)
-		}
-	}
-	// A prefix that merely shares characters with a refused path is fine.
-	for _, ok := range []string{"/var/lib/hotserve-data", "/tmpfiles", "/devices", "/run/userdata"} {
-		if err := validateExtraPath(ok, root); err != nil {
-			t.Errorf("%s rejected: %v", ok, err)
-		}
-	}
-	if err := validateSandboxRoot("/var/lib/liveswap"); err != nil {
-		t.Errorf("default root rejected: %v", err)
-	}
-	// A root inside hotserve's own state is a config error worth
-	// failing on; a root under /tmp or /var/tmp is deliberately fine —
-	// binds nest into the unit's private tmp, and the integration lane
-	// runs that way.
-	for _, bad := range []string{"/var/lib/hotserve/apps", "/etc/hotserve/apps", "/etc/liveswap/apps"} {
-		if err := validateSandboxRoot(bad); err == nil {
-			t.Errorf("root %s accepted: it is inside hotserve's own state", bad)
-		}
-	}
-}
-
-// TestValidateExtraPathComparesTheResolvedRoot: with a symlinked root,
-// an extra_path spelled the *canonical* way already resolves to itself,
-// so following symlinks does not help — only comparing against the
-// resolved root does. Without it `extra_path /mnt/liveswap/shop/shared`
-// passes validation and then binds a sibling's data back in.
-func TestValidateExtraPathComparesTheResolvedRoot(t *testing.T) {
-	// Outside /tmp: it is a never-bound prefix, so every path under a
-	// t.TempDir would be refused for that reason instead of this one.
-	base, err := os.MkdirTemp("/var", "resolvedroot-")
-	if err != nil {
-		t.Skipf("no writable dir outside the refused prefixes: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(base) })
-	real := filepath.Join(base, "mnt-liveswap")
-	if err := os.MkdirAll(filepath.Join(real, "shop", "shared"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	root := filepath.Join(base, "srv-liveswap")
-	if err := os.Symlink(real, root); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
-	}
-	for _, spelling := range []string{
-		filepath.Join(real, "shop", "shared"), // the canonical sibling
-		filepath.Join(root, "shop", "shared"), // the configured spelling
-		real,                                  // the root itself, canonically
-	} {
-		if err := validateExtraPath(spelling, root); err == nil {
-			t.Errorf("extra_path %q accepted: it reaches under the liveswap root %s", spelling, root)
-		}
-	}
-	// A neighbour of the canonical root is still fine.
-	if err := validateExtraPath(filepath.Join(base, "mnt-liveswap-cache"), root); err != nil {
-		t.Errorf("path beside the canonical root rejected: %v", err)
-	}
-}
-
 // sandboxPropertyNames is the set sandboxProperties emits; the test
 // pins it so a property can neither disappear nor appear unnoticed.
 var sandboxPropertyNames = []string{
@@ -224,7 +131,6 @@ func TestSandboxPropertiesFilesystemAndFull(t *testing.T) {
 		appName: "blog",
 		writable: []bindPath{{dest: "/var/lib/liveswap/blog/releases/v3", source: "/var/lib/liveswap/blog/releases/v3"},
 			{dest: "/var/lib/liveswap/blog/shared", source: "/var/lib/liveswap/blog/shared"}},
-		extra: []extraPath{{path: "/run/postgresql"}, {path: "/var/cache/blog", rw: true}},
 	}
 	got := propMap(unitSpec{ExecStart: []string{"/bin/true"}, Sandbox: spec})
 	for _, name := range sandboxPropertyNames {
@@ -284,12 +190,6 @@ func TestSandboxPropertiesFilesystemAndFull(t *testing.T) {
 			t.Errorf("BindPaths lacks a recursive, mandatory bind of %s at its real path: %+v", p, rw)
 		}
 	}
-	// An extra_path is mandatory, rw or not: an optional bind would be
-	// DROPPED when its source is missing, not deferred, and the app
-	// would serve permanently without a path it declared.
-	if b, ok := rw["/var/cache/blog"]; !ok || b.Source != "/var/cache/blog" || b.Flags != mountRecursive || b.IgnoreENOENT {
-		t.Errorf("rw extra_path must be a recursive MANDATORY bind at its real path: %+v", rw)
-	}
 	ro := binds("BindReadOnlyPaths")
 	// The base view: every entry present, and every one optional — no
 	// host has all of it (see sandboxBaseView).
@@ -315,11 +215,13 @@ func TestSandboxPropertiesFilesystemAndFull(t *testing.T) {
 	if _, whole := ro["/etc"]; whole {
 		t.Error("/etc is bound wholesale: every app would see every other app's env_file")
 	}
-	if b, ok := ro["/run/postgresql"]; !ok || b.Source != "/run/postgresql" || b.IgnoreENOENT {
-		t.Errorf("ro extra_path missing, or optional when it must be mandatory: %+v", ro)
-	}
-	if _, leaked := rw["/run/postgresql"]; leaked {
-		t.Error("a read-only extra_path must not be in BindPaths")
+	// Nothing but the base view and the app's own dirs is bound at all:
+	// nothing widens a view, so
+	// the rendered set IS the guarantee.
+	for dest := range ro {
+		if !slices.Contains(sandboxBaseView, dest) {
+			t.Errorf("BindReadOnlyPaths carries %s, which is neither a base-view entry nor one of the app's own dirs", dest)
+		}
 	}
 	if unset, _ := got["UnsetEnvironment"].([]string); !reflect.DeepEqual(unset, []string{"XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"}) {
 		t.Errorf("UnsetEnvironment = %v", unset)
@@ -348,7 +250,6 @@ func TestSandboxViewIsExactlyWhatIsNamed(t *testing.T) {
 		appName: "blog",
 		writable: []bindPath{{dest: "/var/lib/liveswap/blog/releases/v3"},
 			{dest: "/var/lib/liveswap/blog/shared"}},
-		extra: []extraPath{{path: "/run/postgresql"}, {path: "/var/cache/blog", rw: true}},
 	}
 	got := propMap(unitSpec{ExecStart: []string{"/bin/true"}, Sandbox: spec})
 	if tmp, _ := got["TemporaryFileSystem"].([]tmpfsMount); !reflect.DeepEqual(tmp, []tmpfsMount{{"/", "ro"}}) {
@@ -366,8 +267,6 @@ func TestSandboxViewIsExactlyWhatIsNamed(t *testing.T) {
 	want := map[string]bool{
 		"/var/lib/liveswap/blog/releases/v3": true,
 		"/var/lib/liveswap/blog/shared":      true,
-		"/run/postgresql":                    true,
-		"/var/cache/blog":                    true,
 	}
 	for _, p := range sandboxBaseView {
 		want[p] = true
@@ -392,6 +291,10 @@ func TestSandboxViewIsExactlyWhatIsNamed(t *testing.T) {
 		"/var/lib/liveswap/blog/tmp", "/var/lib/liveswap/shop",
 		"/var/lib/hotserve", "/run/hotserve", "/etc/hotserve", "/etc/liveswap",
 		"/etc/blog/blog.env", "/run/user", "/home", "/opt", "/srv", "/var/lib",
+		// Nothing widens a view any more, so a same-box database
+		// socket dir and an out-of-tree cache are absent like
+		// everything else nobody named.
+		"/run/postgresql", "/var/cache/blog",
 	} {
 		if view[absent] {
 			t.Errorf("%s is in the view", absent)
@@ -402,7 +305,7 @@ func TestSandboxViewIsExactlyWhatIsNamed(t *testing.T) {
 	}
 	for _, present := range []string{
 		"/var/lib/liveswap/blog/releases/v3/server", "/var/lib/liveswap/blog/shared/db.sqlite",
-		"/usr/bin/node", "/bin/sh", "/run/postgresql/.s.PGSQL.5432", "/etc/ssl/certs",
+		"/usr/bin/node", "/bin/sh", "/etc/ssl/certs",
 	} {
 		if !spec.inView(present) {
 			t.Errorf("inView says %s is absent, but it is under a bind", present)
@@ -412,7 +315,6 @@ func TestSandboxViewIsExactlyWhatIsNamed(t *testing.T) {
 
 func TestSandboxSpecFor(t *testing.T) {
 	spec := testSpec(t)
-	spec.extraPaths = []extraPath{{path: "/run/postgresql"}}
 	if spec.sandboxSpecFor("/x", sandboxNone) != nil {
 		t.Fatal("none must render no spec")
 	}
@@ -433,9 +335,6 @@ func TestSandboxSpecFor(t *testing.T) {
 			}
 		}
 	}
-	if !reflect.DeepEqual(got.extra, spec.extraPaths) {
-		t.Fatalf("extra = %v", got.extra)
-	}
 	// appName, not the resolved app dir, is what the launch-time check
 	// derives its expected base from — see resolveBindSources.
 	if got.appName != spec.name || got.appDir != spec.dirs.app {
@@ -443,62 +342,6 @@ func TestSandboxSpecFor(t *testing.T) {
 	}
 	if !filepath.IsAbs(got.root) {
 		t.Fatalf("root must be absolute: %q", got.root)
-	}
-}
-
-// A declared extra_path that is not on the host refuses the launch,
-// and the refusal names the path. Tolerating it would not defer the
-// bind, it would drop it: the mount namespace is built once and / is a
-// private tmpfs, so a directory the host gains a moment later can
-// never appear inside a unit already running — the app would serve
-// permanently without a path it declared, and no retry of its own
-// could recover. The app's own dirs are refused for the same reason.
-func TestAbsentExtraPathRefusesTheLaunch(t *testing.T) {
-	root := t.TempDir()
-	appDir := filepath.Join(root, "blog")
-	release := filepath.Join(appDir, "releases", "v1")
-	shared := filepath.Join(appDir, "shared")
-	present, err := filepath.Abs(filepath.Join(root, "..", "present-extra"))
-	must(t, err)
-	for _, d := range []string{release, shared, present} {
-		must(t, os.MkdirAll(d, 0o750))
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(present) })
-	absent := filepath.Join(present, "never-created")
-
-	newSpec := func(extras ...extraPath) *sandboxSpec {
-		return &sandboxSpec{
-			tier: sandboxFull, root: root, appDir: appDir, appName: "blog",
-			writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}},
-			extra:    extras,
-		}
-	}
-	// Resolution tolerates an absent source — there is nothing to
-	// resolve — and the mandatory bind is what refuses the launch, via
-	// the manager. So the guarantee lives in the rendered properties:
-	// nothing outside the base view may be optional, because an
-	// optional bind with a missing source is DROPPED, not deferred.
-	s := newSpec(extraPath{path: present}, extraPath{path: absent, rw: true})
-	must(t, s.resolveBindSources())
-	base := map[string]bool{}
-	for _, p := range sandboxBaseView {
-		base[p] = true
-	}
-	for _, name := range []string{"BindPaths", "BindReadOnlyPaths"} {
-		for _, prop := range sandboxProperties(s) {
-			if prop.Name != name {
-				continue
-			}
-			mounts, ok := prop.Value.Value().([]bindMount)
-			if !ok {
-				t.Fatalf("%s is not a []bindMount", name)
-			}
-			for _, m := range mounts {
-				if m.IgnoreENOENT && !base[m.Destination] {
-					t.Errorf("%s is an optional bind but is not a base-view entry: a missing source would be dropped, not deferred", m.Destination)
-				}
-			}
-		}
 	}
 }
 
@@ -581,7 +424,7 @@ func TestProbeSandboxCapability(t *testing.T) {
 				// The probe carries the tier and nothing else: with a
 				// deny-by-default view there is no per-host state for it
 				// to reproduce, and it exposes not one path of its own.
-				if s.sandbox == nil || len(s.sandbox.writable) != 0 || len(s.sandbox.extra) != 0 || s.sandbox.root != "" {
+				if s.sandbox == nil || len(s.sandbox.writable) != 0 || s.sandbox.root != "" {
 					t.Errorf("probe unit must carry the tier's sandbox and expose nothing: %+v", s.sandbox)
 				}
 				if !reflect.DeepEqual(s.command, sandboxProbeCommand(s.sandbox.tier)) {
@@ -699,8 +542,6 @@ func TestCaddyfileSandboxDirectives(t *testing.T) {
 		app blog {
 			command node server.js
 			sandbox auto
-			extra_path /run/postgresql
-			extra_path /var/cache/blog rw
 		}
 		app api {
 			command ./server
@@ -713,13 +554,9 @@ func TestCaddyfileSandboxDirectives(t *testing.T) {
 	if a.Sandbox != "require" || a.Apps["blog"].Sandbox != "auto" || a.Apps["api"].Sandbox != "" {
 		t.Fatalf("sandbox modes wrong: %q %q %q", a.Sandbox, a.Apps["blog"].Sandbox, a.Apps["api"].Sandbox)
 	}
-	want := []ExtraPathConfig{{Path: "/run/postgresql"}, {Path: "/var/cache/blog", Writable: true}}
-	if !reflect.DeepEqual(a.Apps["blog"].ExtraPaths, want) {
-		t.Fatalf("extra_paths = %+v", a.Apps["blog"].ExtraPaths)
-	}
 	for _, bad := range []string{
-		"liveswap {\n app x {\n command a\n extra_path /p ro\n }\n}",
-		"liveswap {\n app x {\n command a\n extra_path\n }\n}",
+		// extra_path was removed; the directive must not be silently accepted.
+		"liveswap {\n app x {\n command a\n extra_path /p\n }\n}",
 		"liveswap {\n sandbox\n}",
 		"liveswap {\n app x {\n command a\n sandbox auto extra\n }\n}",
 	} {
@@ -759,9 +596,6 @@ func TestValidateSandboxConfig(t *testing.T) {
 	for name, mutate := range map[string]func(*App){
 		"bad global mode": func(a *App) { a.Sandbox = "yes" },
 		"bad app mode":    func(a *App) { a.Apps["blog"].Sandbox = "on" },
-		"relative extra":  func(a *App) { a.Apps["blog"].ExtraPaths = []ExtraPathConfig{{Path: "data"}} },
-		"extra in root":   func(a *App) { a.Apps["blog"].ExtraPaths = []ExtraPathConfig{{Path: "/var/lib/liveswap/api/shared"}} },
-		"extra refused":   func(a *App) { a.Apps["blog"].ExtraPaths = []ExtraPathConfig{{Path: "/run/hotserve"}} },
 		"root in state":   func(a *App) { a.Root = "/var/lib/hotserve/apps" },
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -874,95 +708,6 @@ func TestRelaunchBelowFullWarns(t *testing.T) {
 	}
 }
 
-// TestValidateExtraPathFollowsSymlinks: the containment checks are
-// lexical, but BindPaths= binds what a path resolves to, so a link
-// pointing at a name no app may be given must be refused by what it
-// resolves to, not by how it is spelled.
-// An extra_path must BE the directory it names: a symlink is refused
-// whatever it points at, including somewhere perfectly legitimate.
-// Checking where a link goes and then binding it is a race an app can
-// win — one holding a writable extra_path over the tree can repoint a
-// second one between launches, and the planted target passes every
-// containment check because it IS a legitimate path, just not the one
-// the operator named. Equality is what closes that; a bind mount is
-// the supported way to put data elsewhere, since a mount resolves to
-// itself and an app holds no capability to make one.
-func TestExtraPathMustBeTheDirectoryItNames(t *testing.T) {
-	// The link itself must live outside every refused prefix, or the
-	// lexical check would refuse it before symlinks matter — /run
-	// qualifies (only /run/user and /run/hotserve are refused).
-	dir, err := os.MkdirTemp("/run", "extrapath-")
-	if err != nil {
-		t.Skipf("no writable dir outside the refused prefixes: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-
-	allowed := filepath.Join(dir, "data")
-	must(t, os.MkdirAll(allowed, 0o750))
-	for _, target := range []string{"/dev", "/tmp", allowed} {
-		link := filepath.Join(dir, "link")
-		_ = os.Remove(link)
-		must(t, os.Symlink(target, link))
-		err := validateExtraPath(link, "/var/lib/liveswap")
-		if err == nil {
-			t.Errorf("a symlink to %s was accepted: BindPaths would follow it, and what it points at can change between launches", target)
-			continue
-		}
-		if !strings.Contains(err.Error(), "resolves to") {
-			t.Errorf("symlink to %s refused without naming the resolution: %v", target, err)
-		}
-	}
-	// The directory itself, named directly, is fine.
-	if err := validateExtraPath(allowed, "/var/lib/liveswap"); err != nil {
-		t.Errorf("a real directory named directly must be accepted: %v", err)
-	}
-	// A path that does not exist yet is still accepted — the config is
-	// read once, and /run/postgresql is created by postgres' own unit.
-	// The launch is what re-checks.
-	if err := validateExtraPath(filepath.Join(dir, "not-created-yet"), "/var/lib/liveswap"); err != nil {
-		t.Errorf("an extra_path that does not exist yet must load: %v", err)
-	}
-}
-
-// The launch re-checks, which is what catches a link planted AFTER
-// config load — the TOCTOU an app with a writable extra_path over the
-// tree could otherwise win.
-func TestResolveBindSourcesRefusesAnExtraPathPlantedAsASymlink(t *testing.T) {
-	dir, err := os.MkdirTemp("/run", "extraplant-")
-	if err != nil {
-		t.Skipf("no writable dir outside the refused prefixes: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	root := t.TempDir()
-	appDir := filepath.Join(root, "blog")
-	release := filepath.Join(appDir, "releases", "v1")
-	shared := filepath.Join(appDir, "shared")
-	data := filepath.Join(dir, "data")
-	secrets := filepath.Join(dir, "secrets")
-	for _, d := range []string{release, shared, data, secrets} {
-		must(t, os.MkdirAll(d, 0o750))
-	}
-	spec := func() *sandboxSpec {
-		return &sandboxSpec{tier: sandboxFull, root: root, appDir: appDir, appName: "blog",
-			writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}},
-			extra:    []extraPath{{path: data}}}
-	}
-	// As configured and validated: a real directory.
-	must(t, spec().resolveBindSources())
-
-	// Now the app repoints it, the way it could through a writable
-	// extra_path covering this tree. The next launch must refuse.
-	must(t, os.RemoveAll(data))
-	must(t, os.Symlink(secrets, data))
-	err = spec().resolveBindSources()
-	if err == nil {
-		t.Fatal("a planted symlink was followed: the app would be handed a directory the operator never named")
-	}
-	if !strings.Contains(err.Error(), secrets) {
-		t.Fatalf("the refusal must name what it resolved to: %v", err)
-	}
-}
-
 // TestEnvFilesAreAbsentWithoutBeingListed is what replaced the derived
 // hidden set: no app's env_file is named anywhere in a sibling's spec,
 // and none of them is reachable inside its view — not because they
@@ -1062,7 +807,7 @@ func TestWarnEnvFileInView(t *testing.T) {
 }
 
 // TestValidateRejectsUncleanRoot: every containment check is lexical,
-// so a root spelled with .. would let an extra_path name a sibling
+// so a root spelled with .. would let a bind reach a sibling
 // through a spelling the check never sees.
 func TestValidateRejectsUncleanRoot(t *testing.T) {
 	base := func(root string) *App {
@@ -1257,8 +1002,7 @@ func TestBindDestinationsAreTheConfiguredPaths(t *testing.T) {
 	aliasRelease := filepath.Join(root, "blog", "releases", "v1")
 	aliasShared := filepath.Join(root, "blog", "shared")
 	sb := &sandboxSpec{tier: sandboxFull, root: root, appDir: filepath.Join(root, "blog"), appName: "blog",
-		writable: []bindPath{{dest: aliasRelease, source: aliasRelease}, {dest: aliasShared, source: aliasShared}},
-		extra:    []extraPath{{path: "/run/postgresql"}}}
+		writable: []bindPath{{dest: aliasRelease, source: aliasRelease}, {dest: aliasShared, source: aliasShared}}}
 	if err := sb.resolveBindSources(); err != nil {
 		t.Fatalf("a symlinked root was refused: %v", err)
 	}
@@ -1289,26 +1033,8 @@ func TestBindDestinationsAreTheConfiguredPaths(t *testing.T) {
 // exposes it exactly as surely as one inside it, because the binds are
 // recursive — `shared -> /run` carries /run/user (the manager's
 // socket) and /run/hotserve (the admin socket) in with it, and
-// `extra_path /etc` carries every configured env file.
+// a root under one of them would carry every app's data in.
 func TestOverlapIsSymmetric(t *testing.T) {
-	for _, ancestor := range []string{"/run", "/var/lib", "/etc", "/var"} {
-		if err := validateExtraPath(ancestor, "/var/lib/liveswap"); err == nil {
-			t.Errorf("extra_path %s accepted: it contains something no app may be given", ancestor)
-		}
-	}
-	// The liveswap root's own ancestors go too: binding them back would
-	// carry every app's data in.
-	if err := validateExtraPath("/var/lib", "/var/lib/liveswap"); err == nil {
-		t.Error("an ancestor of the liveswap root was accepted")
-	}
-	// Siblings that merely share a prefix are still fine. (Not
-	// /etc/ssl/certs — that IS a base-view entry now, so naming it is
-	// refused for granting nothing; see TestExtraPathMayNotOverlapTheBaseView.)
-	for _, ok := range []string{"/run/postgresql", "/var/cache/blog", "/etc/myapp", "/srv/data"} {
-		if err := validateExtraPath(ok, "/var/lib/liveswap"); err != nil {
-			t.Errorf("%s rejected: %v", ok, err)
-		}
-	}
 	if err := refusedAsBindSource("/run"); err == nil {
 		t.Error("a bind source containing /run/user was accepted at launch time")
 	}
@@ -1459,15 +1185,11 @@ func TestUnitForRefusesCommandOutsideTheView(t *testing.T) {
 	spec := base
 	spec.command, spec.sandbox = []string{runtime}, sb()
 	_, err = r.unitFor(spec, false)
-	if err == nil || !strings.Contains(err.Error(), "extra_path") {
+	if err == nil || !strings.Contains(err.Error(), "sandbox off") {
 		t.Fatalf("unitFor must refuse a command outside the view and name the fix, got %v", err)
 	}
-	// Declaring it is the documented answer, and it must then be accepted.
-	spec.sandbox = sb()
-	spec.sandbox.extra = []extraPath{{path: outside}}
-	if _, err := r.unitFor(spec, false); err != nil {
-		t.Fatalf("an extra_path covering the runtime must make it reachable: %v", err)
-	}
+	// There is no way to widen the view, so `sandbox off` is the whole
+	// of the answer for a runtime that lives outside /usr.
 	// The ordinary cases still pass: a binary in the release dir, and
 	// one in the base view.
 	for _, cmd := range []string{"./server", "/bin/sh"} {
@@ -1500,7 +1222,7 @@ func TestSandboxPropertiesNeverEmitsAnEmptyBindList(t *testing.T) {
 	}{
 		{"the capability probe: nothing of its own", probeSandboxSpec(sandboxFilesystem),
 			[]string{"BindReadOnlyPaths", "TemporaryFileSystem"}, []string{"BindPaths"}},
-		{"an app with no ro extra_path", &sandboxSpec{tier: sandboxFull, root: "/var/lib/liveswap",
+		{"an app with no read-only binds of its own", &sandboxSpec{tier: sandboxFull, root: "/var/lib/liveswap",
 			writable: []bindPath{{dest: "/var/lib/liveswap/blog/shared"}}},
 			[]string{"BindPaths", "BindReadOnlyPaths"}, nil},
 	} {
@@ -1636,7 +1358,7 @@ func TestUnitForResolvesTheCommandBeforeTestingTheView(t *testing.T) {
 	if err == nil {
 		t.Fatal("a shim inside the view pointing at a target outside it was accepted")
 	}
-	if !strings.Contains(err.Error(), realBin) || !strings.Contains(err.Error(), "extra_path") {
+	if !strings.Contains(err.Error(), realBin) || !strings.Contains(err.Error(), "sandbox off") {
 		t.Fatalf("the refusal must name the resolved target and the fix: %v", err)
 	}
 }
@@ -1842,10 +1564,6 @@ func TestPlantedBindOntoTheSupervisorsRealStateRefused(t *testing.T) {
 	if err := refusedAsBindSource(dataDir); err == nil {
 		t.Errorf("a bind onto %s was accepted: that is where this hotserve keeps its TLS keys", dataDir)
 	}
-	// And through extra_path, which asks the same question.
-	if err := validateExtraPath(dataDir, "/var/lib/liveswap"); err == nil {
-		t.Errorf("extra_path %s accepted: the supervisor's own data dir", dataDir)
-	}
 
 	// (c) The admin socket directory as systemd actually made it.
 	runtimeDir := filepath.Join(base, "run-hotserve")
@@ -1937,8 +1655,8 @@ func TestBindOntoASiblingsExternalDataRefused(t *testing.T) {
 // over sandboxSpec, so it also covers how the binds are emitted.
 func TestAppViewsAreDisjointExceptTheBaseView(t *testing.T) {
 	root := t.TempDir()
-	view := func(name string, extras []extraPath) map[string]bindMount {
-		spec := &appSpec{name: name, dirs: newAppDirs(root, name), extraPaths: extras}
+	view := func(name string) map[string]bindMount {
+		spec := &appSpec{name: name, dirs: newAppDirs(root, name)}
 		sb := spec.sandboxSpecFor(spec.dirs.release("v1"), sandboxFull)
 		got := propMap(unitSpec{ExecStart: []string{"/bin/true"}, Sandbox: sb})
 		m := map[string]bindMount{}
@@ -1956,8 +1674,8 @@ func TestAppViewsAreDisjointExceptTheBaseView(t *testing.T) {
 		base[p] = true
 	}
 
-	blog := view("blog", nil)
-	shop := view("shop", nil)
+	blog := view("blog")
+	shop := view("shop")
 	for dest, b := range blog {
 		if base[dest] {
 			if !b.IgnoreENOENT {
@@ -2003,46 +1721,3 @@ func TestAppViewsAreDisjointExceptTheBaseView(t *testing.T) {
 	}
 }
 
-// TestExtraPathMayNotOverlapTheBaseView: the base view is bound
-// read-only into every unit, so a writable bind inside it is a
-// cross-app WRITE channel — the write goes through to the host inode
-// that every sibling's own /usr bind exposes. I first allowed this,
-// reasoning that the base view already makes such a path readable and
-// so refusing changed nothing. That accounted for the read direction
-// only. The sharp end is `extra_path /usr/local/bin rw`: that
-// directory is on the PATH the supervisor searches with exec.LookPath,
-// so one app could choose the binary another app runs.
-func TestExtraPathMayNotOverlapTheBaseView(t *testing.T) {
-	for _, p := range []string{
-		"/usr/local/bin", "/usr/local/share/assets", "/usr",
-		"/etc/alternatives", "/etc/ld.so.conf.d", "/etc/ssl/certs",
-	} {
-		err := validateExtraPath(p, "/var/lib/liveswap")
-		if err == nil {
-			t.Errorf("extra_path %s accepted: it is inside the view every app shares", p)
-			continue
-		}
-		if !strings.Contains(err.Error(), "EVERY app's sandbox") {
-			t.Errorf("%s refused for the wrong reason: %v", p, err)
-		}
-	}
-	// The documented recipes are unaffected — none of them overlaps a
-	// base-view entry, including the /run one, which sits beside
-	// /run/systemd/resolve rather than under it.
-	for _, p := range []string{"/run/postgresql", "/var/cache/blog", "/srv/media", "/opt/geoip"} {
-		if err := validateExtraPath(p, "/var/lib/liveswap"); err != nil {
-			t.Errorf("documented extra_path %s refused: %v", p, err)
-		}
-	}
-	// And nothing hotserve derives may land there either.
-	root := t.TempDir()
-	spec := &appSpec{name: "blog", dirs: newAppDirs(root, "blog")}
-	sb := spec.sandboxSpecFor(spec.dirs.release("v1"), sandboxFull)
-	for _, b := range sb.writable {
-		for _, base := range sandboxBaseView {
-			if overlaps(b.dest, base) {
-				t.Errorf("a derived writable bind %s lands in the base view %s", b.dest, base)
-			}
-		}
-	}
-}

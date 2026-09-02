@@ -94,7 +94,6 @@ type appSpec struct {
 	allowlist       []artifactAllowEntry
 	dirs            appDirs
 	sandboxMode     string      // auto | require | off (policy, from config)
-	extraPaths      []extraPath // host paths exposed inside the sandbox
 	// sandboxTier is the tier new instances of this app get: policy
 	// resolved against the host at App.Start. Relaunches ignore it and
 	// reproduce the recorded tier of the instance they replace.

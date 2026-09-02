@@ -176,7 +176,7 @@ an on-disk release. Full details, CI snippets, and every option:
   by an empty read-only tmpfs (`TemporaryFileSystem=/:ro`), with only
   the OS the app needs to run — named entry by entry, never whole
   trees — its own release and `shared/`, and its
-  declared `extra_path`s bound back, so hotserve's directories and
+  bound back, so hotserve's directories and
   sockets and every other app are *absent* rather than merely
   unreadable — `PrivateTmp=`, `PrivateDevices=`, a read-only cgroupfs,
   no capabilities, and systemd's curated

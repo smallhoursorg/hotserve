@@ -272,7 +272,7 @@ func sandboxProperties(s *sandboxSpec) []sddbus.Property {
 	if s == nil || s.tier == sandboxNone {
 		return nil
 	}
-	writable := make([]bindMount, 0, len(s.writable)+len(s.extra))
+	writable := make([]bindMount, 0, len(s.writable))
 	for _, b := range s.writable {
 		src := b.source
 		if src == "" {
@@ -284,27 +284,9 @@ func sandboxProperties(s *sandboxSpec) []sddbus.Property {
 	// and has no /etc/pki, so several names are aliases or simply absent
 	// — and /run/systemd/resolve exists only where resolved runs. A
 	// missing entry must not fail the unit (see sandboxBaseView).
-	readOnly := make([]bindMount, 0, len(sandboxBaseView)+len(s.extra))
+	readOnly := make([]bindMount, 0, len(sandboxBaseView))
 	for _, p := range sandboxBaseView {
 		readOnly = append(readOnly, bindMount{Source: p, Destination: p, IgnoreENOENT: true, Flags: mountRecursive})
-	}
-	for _, e := range s.extra {
-		// Destination is always the configured path: that is where the
-		// app expects to find it, whatever it resolves to on the host.
-		// Mandatory, unlike the base view. IgnoreENOENT would not
-		// DEFER a missing extra_path, it would DROP it: the mount
-		// namespace is built once and / is a private tmpfs, so a
-		// directory the host gains a moment later can never appear
-		// inside a unit already running. The app would come up
-		// permanently missing a path it declared, and no retry of its
-		// own could recover. The manager refusing the unit is what
-		// makes that impossible.
-		m := bindMount{Source: e.path, Destination: e.path, Flags: mountRecursive}
-		if e.rw {
-			writable = append(writable, m)
-		} else {
-			readOnly = append(readOnly, m)
-		}
 	}
 	props := []sddbus.Property{
 		// Explicit on purpose: the mount options below do not imply it

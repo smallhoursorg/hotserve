@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/caddyserver/caddy/v2"
 )
 
 // Each test in this file pins ONE normative promise from
@@ -28,7 +27,6 @@ import (
 //	app-to-app boundary                  TestAppViewsAreDisjointExceptTheBaseView
 //	/etc never bound whole               TestSandboxPropertiesFilesystemAndFull
 //	                                     TestBaseViewNamesTheTrustStoreNotTheTree
-//	base view is not a write channel     TestExtraPathMayNotOverlapTheBaseView
 //	                                     TestBindSourceInsideTheBaseViewRefused
 //	binds are the dirs they name         TestMandatoryBindMustBeTheDirectoryItNames
 //	                                     TestBindOntoASiblingsExternalDataRefused
@@ -155,13 +153,12 @@ func TestNetworkNamespaceIsShared(t *testing.T) {
 // Asserted on the specs the runner actually receives, so it covers the
 // wiring rather than the intent: a deploy with a pre_start issues
 // RunOnce then Start, and their sandbox specs must be equal — same
-// tier, same binds, same extras.
+// tier, same binds.
 func TestPreStartRunsUnderTheSameSandboxAsItsApp(t *testing.T) {
 	rig := newTestRig(t)
 	rig.spec.preStart = []string{"./migrate"}
 	rig.spec.sandboxMode = sandboxAuto
 	rig.spec.sandboxTier = sandboxFull
-	rig.spec.extraPaths = []extraPath{{path: "/run/postgresql"}}
 	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/1", version: "v1"}))
 
 	rig.runner.mu.Lock()
@@ -209,12 +206,9 @@ func TestEnvFileMayNotLandInAnotherAppsView(t *testing.T) {
 	// Through Validate(), not the validator directly: the wiring is
 	// half the promise, and a test that calls the function straight
 	// passes just as happily when nothing calls it.
-	app := func(envFile string, extras ...string) *AppConfig {
+	app := func(envFile string) *AppConfig {
 		c := defaultedApp(t)
 		c.EnvFile = envFile
-		for _, e := range extras {
-			c.ExtraPaths = append(c.ExtraPaths, ExtraPathConfig{Path: e})
-		}
 		return c
 	}
 	for _, tc := range []struct {
@@ -222,32 +216,21 @@ func TestEnvFileMayNotLandInAnotherAppsView(t *testing.T) {
 		apps    map[string]*AppConfig
 		wantErr string
 	}{
-		{"a sibling's extra_path covers it", map[string]*AppConfig{
-			"blog": app("", "/srv/common"),
-			"shop": app("/srv/common/shop.env"),
-		}, "extra_path"},
-		{"an ancestor extra_path counts", map[string]*AppConfig{
-			"blog": app("", "/srv"),
-			"shop": app("/srv/env/shop.env"),
-		}, "extra_path"},
 		{"the base view exposes it to everyone", map[string]*AppConfig{
 			"shop": app("/usr/local/etc/shop.env"),
 		}, "EVERY app's sandbox"},
-		{"its own extra_path is not cross-app", map[string]*AppConfig{
-			"shop": app("/srv/common/shop.env", "/srv/common"),
-		}, ""},
 		{"an unsandboxed viewer adds no exposure", map[string]*AppConfig{
-			"blog": func() *AppConfig { c := app("", "/srv"); c.Sandbox = sandboxOff; return c }(),
-			"shop": app("/srv/env/shop.env"),
+			"blog": func() *AppConfig { c := app(""); c.Sandbox = sandboxOff; return c }(),
+			"shop": app("/var/lib/liveswap/blog/shared/shop.env"),
 		}, ""},
 		{"the documented location is fine", map[string]*AppConfig{
-			"blog": app("/etc/hotserve/blog.env", "/run/postgresql"),
+			"blog": app("/etc/hotserve/blog.env"),
 			"shop": app("/etc/hotserve/shop.env"),
 		}, ""},
-		// A neighbour's own dirs are bound into its unit without any
-		// extra_path naming them: shared/ read-WRITE, releases/
-		// read-only. Both are the same cross-app exposure by a shorter
-		// route, and neither loop above looks at them.
+		// A neighbour's own dirs are bound into its unit: shared/
+		// read-WRITE, releases/ read-only. With nothing else able to
+		// widen a view, these and the base view are the whole of what
+		// can expose one app's env file to another.
 		{"a sibling's shared dir is bound read-write into its unit", map[string]*AppConfig{
 			"blog": app(""),
 			"shop": app("/var/lib/liveswap/blog/shared/shop.env"),
@@ -296,17 +279,12 @@ func TestHomeOutsideTheViewIsReported(t *testing.T) {
 	appDir := filepath.Join(root, "blog")
 	release := filepath.Join(appDir, "releases", "v1")
 	shared := filepath.Join(appDir, "shared")
-	extra := filepath.Join(root, "..", "cache-blog")
-	extra, err := filepath.Abs(extra)
-	must(t, err)
-	for _, d := range []string{release, shared, extra} {
+	for _, d := range []string{release, shared} {
 		must(t, os.MkdirAll(d, 0o750))
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(extra) })
 	sb := &sandboxSpec{
 		tier: sandboxFull, root: root, appDir: appDir, appName: "blog",
 		writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}},
-		extra:    []extraPath{{path: extra, rw: true}},
 	}
 	env := func(home string) []string {
 		return []string{"PATH=/usr/bin", "HOME=" + home, "PORT=8080"}
@@ -318,7 +296,6 @@ func TestHomeOutsideTheViewIsReported(t *testing.T) {
 	}{
 		{"the default shared dir is in view", shared, false},
 		{"a release dir is in view", release, false},
-		{"an rw extra_path is a legitimate override", extra, false},
 		{"the base view is in view", "/usr/share", false},
 		{"a path nothing binds is not", "/opt/app", true},
 		{"the app dir root is not bound", appDir, true},
@@ -345,34 +322,6 @@ func TestHomeOutsideTheViewIsReported(t *testing.T) {
 	}
 }
 
-// Promise: `{env.*}` resolves at config load for extra_path as it does
-// for every other path option (liveswap/README.md). A literal reaching
-// Validate is refused for not being absolute, so the failure is a
-// config that will not load rather than a path quietly unexpanded.
-func TestExtraPathResolvesConfigLoadPlaceholders(t *testing.T) {
-	t.Setenv("DB_SOCKET_DIR", "/run/postgresql")
-	cfg := defaultedApp(t)
-	cfg.ExtraPaths = []ExtraPathConfig{{Path: "{env.DB_SOCKET_DIR}"}, {Path: "/var/cache/blog", Writable: true}}
-	cfg.applyDefaults(caddy.NewReplacer())
-	if got := cfg.ExtraPaths[0].Path; got != "/run/postgresql" {
-		t.Fatalf("extra_path[0] = %q, want the expanded /run/postgresql", got)
-	}
-	if got := cfg.ExtraPaths[1].Path; got != "/var/cache/blog" {
-		t.Fatalf("a literal extra_path must survive expansion unchanged, got %q", got)
-	}
-	// And it must reach Validate expanded: unexpanded it is not
-	// absolute, so the whole config would be refused.
-	a := &App{
-		Root:              "/var/lib/liveswap",
-		ArtifactAllowlist: []string{"github.com/smallhoursorg/"},
-		DeployTrust:       githubTrust(),
-		Apps:              map[string]*AppConfig{"blog": cfg},
-	}
-	if err := a.Validate(); err != nil {
-		t.Fatalf("a config whose extra_path came from {env.*} must load: %v", err)
-	}
-}
-
 // Promise: an env_file that does not exist YET is still compared in
 // both spellings. env_file is allowed to be absent until the first
 // deploy, and EvalSymlinks fails on a missing leaf — so resolving the
@@ -384,31 +333,31 @@ func TestEnvFileIsolationResolvesASymlinkedParentOfAMissingFile(t *testing.T) {
 		t.Skipf("no writable dir outside the refused prefixes: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(base) })
-	common := filepath.Join(base, "common")
-	must(t, os.MkdirAll(common, 0o750))
+	root := filepath.Join(base, "liveswap")
+	blogShared := filepath.Join(root, "blog", "shared")
+	must(t, os.MkdirAll(blogShared, 0o750))
+	// A link whose TARGET is a sibling's shared dir, with the env file
+	// itself not created yet — the normal state before a first deploy.
 	link := filepath.Join(base, "link")
-	must(t, os.Symlink(common, link))
+	must(t, os.Symlink(blogShared, link))
 
 	blog := defaultedApp(t)
-	blog.ExtraPaths = []ExtraPathConfig{{Path: common}}
 	shop := defaultedApp(t)
-	// Through the link, and the file itself does not exist yet — the
-	// normal state before a first deploy writes it.
 	shop.EnvFile = filepath.Join(link, "shop.env")
 	if _, err := os.Stat(shop.EnvFile); !os.IsNotExist(err) {
 		t.Fatalf("the env file must not exist for this case to mean anything: %v", err)
 	}
 	a := &App{
-		Root:              "/var/lib/liveswap",
+		Root:              root,
 		ArtifactAllowlist: []string{"github.com/smallhoursorg/"},
 		DeployTrust:       githubTrust(),
 		Apps:              map[string]*AppConfig{"blog": blog, "shop": shop},
 	}
 	err = a.Validate()
 	if err == nil {
-		t.Fatal("accepted an env_file whose parent links into a sibling's extra_path; blog would read it the moment it is created")
+		t.Fatal("accepted an env_file whose parent links into a sibling's shared dir; blog would read and rewrite it the moment it is created")
 	}
-	if !strings.Contains(err.Error(), "extra_path") {
+	if !strings.Contains(err.Error(), "shared dir") {
 		t.Fatalf("refused for the wrong reason: %v", err)
 	}
 }
@@ -418,9 +367,7 @@ func TestEnvFileIsolationResolvesASymlinkedParentOfAMissingFile(t *testing.T) {
 // against a lexical app directory alone misses the case where the
 // liveswap root is a symlink — the app dir the operator configured and
 // the one the bind actually exposes are then different strings, and
-// only one of them is ever tested. The extra_path branch has always
-// canonicalised both sides; this is the same rule for the route added
-// alongside it.
+// only one of them is ever tested.
 func TestEnvFileIsolationComparesBothSpellingsOfASiblingsDirs(t *testing.T) {
 	// A real symlinked root: <tmp>/link -> <tmp>/real, with blog's
 	// shared dir existing so EvalSymlinks has something to resolve.
@@ -460,9 +407,8 @@ func TestEnvFileIsolationComparesBothSpellingsOfASiblingsDirs(t *testing.T) {
 func TestEnvFileIsolationHonoursTheGlobalSandboxSetting(t *testing.T) {
 	apps := func() map[string]*AppConfig {
 		blog := defaultedApp(t)
-		blog.ExtraPaths = []ExtraPathConfig{{Path: "/srv/common"}}
 		shop := defaultedApp(t)
-		shop.EnvFile = "/srv/common/shop.env"
+		shop.EnvFile = "/var/lib/liveswap/blog/shared/shop.env"
 		return map[string]*AppConfig{"blog": blog, "shop": shop}
 	}
 	newApp := func(global string) *App {
@@ -477,7 +423,7 @@ func TestEnvFileIsolationHonoursTheGlobalSandboxSetting(t *testing.T) {
 	// The control: the same config with sandboxing on must still be
 	// refused, or the case below proves nothing.
 	if err := newApp(sandboxAuto).Validate(); err == nil {
-		t.Fatal("sandbox auto: a sibling's extra_path covering an env_file must be refused")
+		t.Fatal("sandbox auto: an env_file inside a sibling's shared dir must be refused")
 	}
 	if err := newApp(sandboxOff).Validate(); err != nil {
 		t.Fatalf("sandbox off globally: no unit gets a view, so nothing is exposed by one; refused anyway: %v", err)

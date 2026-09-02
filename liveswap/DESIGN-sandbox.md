@@ -566,6 +566,51 @@ MUST here means adding its assertion in the same change.
 - Landlock as a same-config fallback backend where userns is
   unavailable: keep the config surface compatible, defer the backend.
 
+## Amendment: `extra_path` deferred (2026-09-02)
+
+`extra_path` is **not in the shipped feature**. Every reference to it
+below describes a design that was written, reviewed and then lifted out
+before merge; the shipped view is exactly `sandboxBaseView` plus the
+app's own release and `shared/` dirs, and nothing widens it.
+
+**Why it came out.** Six review rounds over the sandbox produced one
+class of real defect, and every instance of it was `extra_path`:
+
+- an optional bind (`IgnoreENOENT`) was believed to defer a missing
+  source; it drops it, so the app served permanently blind to a path it
+  declared;
+- a writable `extra_path` aliasing over a second one let a compromised
+  app repoint the second at any directory on the box between launches —
+  a sibling's `env_file` included — and every containment check still
+  passed, because the planted target was a real path that simply was
+  not the one the operator named;
+- the `{env.*}` expansion every other path option gets was missing;
+- and the cross-app `env_file` checks exist *because* an `extra_path`
+  can cover another app's secrets, which is where the remaining
+  findings clustered.
+
+That is not a coincidence. `extra_path` is the only mechanism that
+*adds* to a deny-by-default view, it is operator-controlled, and it has
+to hold simultaneously against symlinks, TOCTOU, cross-app containment
+and the base view. It is the one part of this design that inverts the
+model, and it deserves to be designed and reviewed on its own rather
+than as a clause of a feature this size.
+
+**What replaces it, for now:** `sandbox off` for the app that needs
+more — per app, so the rest of the fleet keeps its isolation, and no
+worse than that app had before per-app sandboxing existed. Persistent
+data goes in `shared/`; runtimes go under `/usr`, which the base view
+binds.
+
+**What to keep when it returns.** The rules below were paid for and
+should not be rediscovered: a bind must BE the directory it names
+(equality, not resolve-then-check — a mount resolves to itself and an
+app cannot forge one); overlap is symmetric; the base view may not be
+named at all, read-only or writable; a missing source must fail the
+unit rather than be skipped; and the cross-app `env_file` check must
+compare canonical *and* configured spellings, resolving the deepest
+existing ancestor for a path whose leaf does not exist yet.
+
 ## Amendment: one host, one tier (2026-09-01)
 
 The support matrix narrowed to **Debian 13** (systemd 257). Where this

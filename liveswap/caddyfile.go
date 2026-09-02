@@ -55,7 +55,6 @@ func parseWebhookDirective(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler,
 //	        deploy_trust <preset> { ... }  # overrides the global default
 //	        artifact_allowlist <host[:port][/path/][?param&param...]...>
 //	        sandbox           <auto|require|off>   # overrides the global default
-//	        extra_path        <path> [rw]          # repeatable; ro unless rw
 //	        health_path       <path|off>
 //	        health_interval   <duration>
 //	        health_timeout    <duration>
@@ -189,18 +188,6 @@ func (cfg *AppConfig) unmarshalBlock(d *caddyfile.Dispenser) error {
 				return d.ArgErr()
 			}
 			cfg.Sandbox = d.Val()
-		case "extra_path":
-			if !d.NextArg() {
-				return d.ArgErr()
-			}
-			e := ExtraPathConfig{Path: d.Val()}
-			if d.NextArg() {
-				if d.Val() != "rw" {
-					return d.Errf("extra_path: expected \"rw\" after the path, got %q", d.Val())
-				}
-				e.Writable = true
-			}
-			cfg.ExtraPaths = append(cfg.ExtraPaths, e)
 		case "health_path":
 			if !d.NextArg() {
 				return d.ArgErr()

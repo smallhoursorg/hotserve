@@ -400,7 +400,7 @@ func (r *systemdRunner) unitFor(spec startSpec, oneshot bool) (unitSpec, error) 
 				zap.String("app", spec.app),
 				zap.String("home", home),
 				zap.String("effect", "any runtime that touches $HOME (npm, corepack, pip) will fail with ENOENT naming no cause"),
-				zap.String("fix", "leave HOME unset to get the app's shared dir, or declare the path as an rw extra_path"))
+				zap.String("fix", "leave HOME unset to get the app's shared dir, the one writable persistent path in the view"))
 		}
 		// LookPath above ran in *this* process's view of the filesystem,
 		// which under a deny-by-default sandbox is not the unit's: a
@@ -423,7 +423,7 @@ func (r *systemdRunner) unitFor(spec startSpec, oneshot bool) (unitSpec, error) 
 			if target != argv0 {
 				via = fmt.Sprintf(" (via %s, which is)", argv0)
 			}
-			return unitSpec{}, fmt.Errorf("%s is not inside the sandbox view of app %s%s: an app sees its release dir, its shared dir, the OS runtime (/usr and a named handful of /etc) and its extra_paths, and nothing else on this host — declare the directory holding it with `extra_path`, or use `sandbox off` for this app", target, spec.app, via)
+			return unitSpec{}, fmt.Errorf("%s is not inside the sandbox view of app %s%s: an app sees its release dir, its shared dir and the OS runtime (/usr and a named handful of /etc), and nothing else on this host — ship the runtime inside the release, install it under /usr, or use `sandbox off` for this app", target, spec.app, via)
 		}
 	}
 	desc := "hotserve app " + spec.app + " " + spec.version

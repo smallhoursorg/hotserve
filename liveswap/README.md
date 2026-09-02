@@ -192,7 +192,6 @@ resolved at config load.
 | `keep` | `5` | Release dirs retained (GC after success). The running version is always kept, so this can be `keep+1` after rolling back to an old release |
 | `max_artifact_size` | `100MB` | Download cap; decompressed cap is 10× |
 | `sandbox` | `auto` | Per-unit sandbox policy: `auto` (sandbox where the host delivers it, warning at every launch where it does not), `require` (sandbox or refuse to start — see the hazard under [Sandbox](#sandbox)), `off`. Global default, per-app override |
-| `extra_path <path> [rw]` | — | Host path the sandboxed app may see besides its own dirs; read-only unless `rw`. Repeatable. The recipe for a same-box database socket dir (`/run/postgresql`). Must exist when the app starts — see below |
 
 ## Watchdog
 
@@ -267,7 +266,7 @@ design refuses. Use `sandbox require` to turn that into a refusal to
 start.
 
 **An app sees its release dir, its `shared/`, a private `/tmp`, the OS
-runtime, and whatever `extra_path` names. Nothing else on the host
+runtime. Nothing else on the host
 exists in its view.**
 
 That is the whole guarantee. The view is built deny-by-default
@@ -293,8 +292,8 @@ the liveswap root.
 
 The working directory is the release dir and `HOME` defaults to
 `shared/`; both are writable. `HOME` is applied before `env_file` and
-inline `env`, so you can point it elsewhere — at an `extra_path` you
-declared `rw`, say. Point it somewhere the sandbox does not bind and
+inline `env`, so you can point it elsewhere — inside the release dir,
+say. Point it somewhere the sandbox does not bind and
 the app gets a `HOME` that does not exist inside its unit; liveswap
 warns at every launch rather than refusing, since you asked for it. The network namespace is shared by design — the app
 binds `127.0.0.1:$PORT` as before, and sibling ports remain reachable.
@@ -310,12 +309,12 @@ keeping straight, because it is why a host that delivers neither gets
 
 **What this costs you.** An app that reads something under `/opt`,
 `/srv` or `/var/lib`, or whose runtime lives outside `/usr` (a
-vendored Node, an `nvm`/`asdf` shim), needs an `extra_path` for it —
+vendored Node, an `nvm`/`asdf` shim), cannot be reached at all —
 those paths do not exist inside the unit. The sandbox engages on an
 app's **next deploy**, so this surfaces where it has a fallback: the
 health gate fails the new version while the old one keeps serving. A
 command that is not in the view is refused before the unit is even
-created, with a message naming `extra_path`, rather than failing as a
+created, with a message naming `sandbox off`, rather than failing as a
 bare `203/EXEC`.
 
 **Policy and rollout.** `sandbox auto` (the default) applies the best
@@ -334,22 +333,22 @@ restart, a boot recovery or a watchdog restart: those reproduce the
 tier the instance was recorded with, so upgrading hotserve does not
 turn into a fleet-wide, no-fallback restart into sandboxes. The
 supported rollout: upgrade; confirm apps healthy; declare each app's
-`extra_path` needs; deploy each app and watch `"sandbox"` in its
+data layout; deploy each app and watch `"sandbox"` in its
 status; only then, optionally, `sandbox require`.
 `journalctl -t hotserve-sandbox-probe` shows the probe's verdict on
 this host.
 
 **What a running instance's sandbox is fixed to.** A unit's view is
 built when it starts and is never rebuilt under it — reloads
-deliberately leave running apps alone — so an `extra_path` added by a
-reload reaches an app on its next deploy, not before. That is the only
+deliberately leave running apps alone — so a config change reaches an
+app on its next deploy, not before. That is the only
 thing that ages now, and it fails safe: a secret belonging to an app
 you add tomorrow is already absent from every unit running today,
 because nothing ever bound it.
 
 **Keep env files outside every app's view.** `/etc/hotserve` is the
 documented location and no app may name it. hotserve refuses a config
-in which one app's `env_file` sits inside another app's `extra_path`,
+in which one app's `env_file` sits inside another app's own dirs,
 or anywhere in the OS base view (`/usr`, the named `/etc` entries) —
 both would put one app's secrets in another app's sandbox, and the
 second would put them in *every* app's. An `env_file` inside its own
@@ -377,59 +376,32 @@ been proven on that host.
 
 **When an app breaks under the sandbox** the symptom is usually an
 `ENOENT` for something that exists on the host: a database's unix
-socket, a data directory outside the app's own. Declare it:
+socket, a data directory outside the app's own, a runtime under
+`/opt`. **There is no way to widen a view.** An app sees the OS base
+view, its own release dir and its own `shared/`. That is the whole
+list, and it is fixed.
 
-```caddyfile
-app blog {
-	command node server.js
-	extra_path /run/postgresql        # same-box Postgres over its socket (ro suffices)
-	extra_path /var/cache/blog rw
-}
-```
+That is a deliberate limit, not an oversight. The one mechanism that
+would widen a view is also the one that has to be correct against
+symlinks, TOCTOU, cross-app containment and the base view all at once,
+and getting it wrong hands one app another's secrets. Until it can be
+designed and reviewed on its own, the answer for an app that needs
+more is `sandbox off` for that app — the same isolation it had before
+per-app sandboxing existed, and the rest of the fleet keeps its own.
 
-**An `extra_path` must exist when the app starts.** Config load cannot
-require it — the config is read once, and `/run/postgresql` is created
-by postgres' own unit — so it is the unit start that fails, and the
-manager's error in the journal is what names the path. This is not
-pedantry: a unit's mount namespace is built once and
-its `/` is a private tmpfs, so a bind whose source is missing is
-**dropped, not deferred**. A directory the host gains a second later
-can never appear inside a unit that is already running, so an app
-started without it would serve permanently blind to it, with no retry
-of its own able to recover. Failing the launch is the recoverable
-option: a deploy falls back to the version still serving, and the
-journal names what was missing.
+Practical consequences worth planning around:
 
-If hotserve can genuinely start before the service that creates the
-directory, order it in systemd — add an `After=` drop-in to
-`hotserve.service` — rather than leaving it to the race.
-
-**An `extra_path` must be the directory it names.** A symlink is
-refused — at config load, and again at every launch — whatever it
-points at, even somewhere otherwise legitimate. `BindPaths=` follows
-links, so checking where one goes and then binding it is a race an app
-can win: an app holding a writable `extra_path` over the same tree can
-repoint a second one between launches, and the planted target passes
-every containment check because it *is* a real path, just not the one
-you named. To put data on another disk, bind-mount it at the path you
-configured — a mount resolves to itself, and an app cannot forge one.
-This is the rule an app's own `releases/` and `shared/` already follow.
-
-Two kinds of path are refused, each with an error saying which:
-inside the **liveswap root** (the app already sees its own release and
-`shared/`; everything else there is another app), and any of the names
-that would give back what the sandbox just took — hotserve's own
-`/var/lib/hotserve`, `/run/hotserve`, `/etc/hotserve`, `/etc/liveswap`,
-and `/home`, `/root`, `/run/user`, `/tmp`, `/var/tmp`, `/dev`, `/sys`,
-`/proc`. Overlap counts in both directions, since the binds are
-recursive: `extra_path /etc` would carry every env file in with it.
-
-`extra_path` may not name anything in the OS base view either. Those
-paths are bound into *every* app's sandbox, so read-only the
-declaration grants nothing, and writable it would let one app write
-where every other app reads — including directories on the executable
-search path, which would let it choose the binary another app runs.
-Put shared data somewhere outside the base view.
+- **Put persistent data in `shared/`.** It survives deploys, it is
+  writable, and it is `$HOME` inside the unit. A SQLite file belongs
+  there, not in `/var/lib/myapp`.
+- **A same-box database over a unix socket needs `sandbox off`** for
+  that app, or a TCP loopback connection, which the shared network
+  namespace still allows.
+- **Install runtimes under `/usr`.** The base view binds it, so
+  `/usr/local/bin/deno` or an apt-installed `node` is already inside
+  every unit. A vendored runtime under `/opt`, or an `nvm`/`asdf` shim
+  under a home directory, is not — ship it inside the release instead,
+  or run that app with `sandbox off`.
 
 An app's own `releases/<version>` and `shared/` must **be** the
 directories they name. hotserve resolves them immediately before the
@@ -441,24 +413,12 @@ disk, bind-mount it at the same path (`mount --bind /mnt/blog-data
 mount resolves to itself, so it is invisible to that check, and an app
 cannot forge one.
 
-The second list is not what makes the sandbox hold — the view is
-deny-by-default, so a path missing from it is still absent until
-something names it. But naming is the point: `extra_path
-/run/user/<uid>` returns the user manager's private socket and lets the
-app start an unsandboxed unit of its own, read-only included, since
-connecting to a unix socket is not a filesystem write. The same check
-guards the app's own release and `shared/` binds, which a bare app can
-aim elsewhere with a symlink — so it is applied to what those paths
-*resolve to*, and it covers the directories this hotserve is actually
-using (Caddy's data and config dirs wherever `XDG_DATA_HOME` puts them,
-and the runtime directory systemd gave it), not just the packaged
-locations.
-
-`sandbox off` per app is the escape hatch while you find a missing
-path — and the answer for the few workloads the sandbox cannot host at
-all: anything that creates its own namespaces (Chromium's sandbox
-under Puppeteer, nested containers) or needs devices beyond
-`/dev/null`-class ones.
+`sandbox off` per app is the escape hatch: for an app that needs a
+path outside its own dirs, and for the workloads the sandbox cannot
+host at all — anything that creates its own namespaces (Chromium's
+sandbox under Puppeteer, nested containers) or needs devices beyond
+`/dev/null`-class ones. It is per app, so one app opting out costs the
+others nothing.
 
 **Hosts.** The sandbox is built on unprivileged user namespaces.
 Debian 13's kernel permits them, which is why it is the supported
@@ -531,7 +491,7 @@ app example {
   cache to survive deploys, warm it into `{shared_dir}` from
   `pre_start` and point `DENO_DIR` there.
 
-**No `extra_path` is needed for the runtime.** The sandbox base view
+**The runtime must be under `/usr`.** The sandbox base view
 binds `/usr`, so a normal `/usr/local/bin/deno` (or an apt-installed
 one) is already inside every unit. Only a runtime somewhere else —
 `/opt/node/bin/node`, an nvm or asdf shim — needs one.

@@ -433,7 +433,7 @@ launched after the secret was declared.
 
 The view is now deny-by-default — `TemporaryFileSystem=/:ro` plus an
 explicit base view, the app's own two directories, and its declared
-`extra_path`s — so nothing is derived and nothing ages. A secret
+its own directories — so nothing is derived and nothing ages. A secret
 declared tomorrow is absent from a unit started yesterday for exactly
 the same reason every other path is: nothing ever bound it. What is
 still fixed at a unit's start is the tier and the set of paths an
@@ -724,8 +724,7 @@ Cost / lock-in rows:
   recorded sandbox tier lives there too). Normative and shipped: the
   whole filesystem is replaced by an empty read-only tmpfs in the
   unit's view (`TemporaryFileSystem=/:ro`) and only the release being
-  started, `shared/`, the OS base view and the declared `extra_path`s
-  are bound back — the app dir root, `state.json`, `tmp/` (the upload
+  started, `shared/` and the OS base view are bound back — the app dir root, `state.json`, `tmp/` (the upload
   staging dir: a running instance must not be able to rewrite the next
   version's tarball) and the other releases do not exist inside, along
   with everything else on the host. `sandboxSpecFor` in

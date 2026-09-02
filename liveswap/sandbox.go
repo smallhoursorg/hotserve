@@ -2,7 +2,6 @@ package liveswap
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -39,8 +38,8 @@ import (
 // The filesystem view is deny-by-default. An empty read-only tmpfs
 // replaces the whole root (TemporaryFileSystem=/) and the only things
 // that exist inside a unit are the ones this file names:
-// sandboxBaseView, the app's own release and shared dirs, and its
-// extra_paths. The guarantee is one sentence — anything not named is
+// sandboxBaseView and the app's own release and shared dirs. Nothing
+// widens it. The guarantee is one sentence — anything not named is
 // absent — and it holds by construction rather than by a list of
 // things to hide being complete. Nothing has to be derived from the
 // running configuration, and nothing ages: a secret that appears on
@@ -150,13 +149,6 @@ func resolveSandboxTier(mode string, c sandboxCapability) (tier sandboxTier, war
 	}
 }
 
-// extraPath is a host path the app may see in addition to its own
-// directories (`extra_path <path> [rw]`).
-type extraPath struct {
-	path string
-	rw   bool
-}
-
 // bindPath is one of the app's own directories bound back into its
 // view: dest is where the app sees it (and what WorkingDirectory,
 // HOME and the {release_dir}/{shared_dir} placeholders name), source
@@ -173,7 +165,7 @@ type bindPath struct {
 // sandboxBaseView is everything an app sees of the host besides its
 // own directories: the parts of the OS a program needs in order to
 // execute at all. Under TemporaryFileSystem=/ this list, plus the
-// app's own dirs and its extra_paths, *is* the view — anything not
+// app's own dirs, *is* the view — anything not
 // named here is absent, not merely unreadable.
 //
 // /etc is named entry by entry rather than bound whole. Binding /etc
@@ -218,38 +210,6 @@ var sandboxBaseView = []string{
 	"/run/systemd/resolve",
 }
 
-// sandboxNeverBound are the names an extra_path may never take.
-//
-// With a deny-by-default view this list is not what makes the sandbox
-// hold — nothing is in a unit's view unless something names it, so a
-// path missing here is still absent. What the list does is refuse the
-// names that, once named, would give back what the sandbox just took.
-//
-// "Once named" is the whole of it, and it is why these literals are
-// not the last word: a mandatory bind that RESOLVES onto a protected
-// path names it just as surely as an operator typing it. See
-// protectedFromBinds, which is what the checks actually use — this
-// list is its static floor, canonicalised and extended there with the
-// directories this hotserve is really pointed at.
-//
-// The sharpest case is /run/user: an extra_path there returns the user
-// manager's private socket, and since PrivateUsers= maps the app's uid
-// one-to-one, the app could then ask the manager to start a unit of
-// its own with no sandbox at all. Read-only does not help — connecting
-// to a unix socket is not a filesystem write. `sandbox off` is the
-// escape hatch for a workload that genuinely needs one of these.
-var sandboxNeverBound = append(append(append([]string{},
-	sandboxHotservePaths...), sandboxPrivateCopies...), sandboxNeverReachable...)
-
-// sandboxPrivateCopies are the trees a unit gets its own copy of, or
-// simply does without: an extra_path may not name them, because a bind
-// would hand back the host's nested inside the unit's own. They are
-// NOT refused as a mandatory bind source, though — validateSandboxRoot
-// deliberately permits a liveswap root under /tmp, /var/tmp or /home,
-// and the app's own dirs then nest there exactly as they do under
-// /var/lib. The integration lane runs from /var/tmp.
-var sandboxPrivateCopies = []string{"/home", "/root", "/tmp", "/var/tmp"}
-
 // sandboxNeverReachable is what nothing an app runs may hold, by any
 // route: the user manager's private socket and session bus (with
 // PrivateUsers= mapping the app's uid one-to-one, reaching it lets the
@@ -260,9 +220,8 @@ var sandboxNeverReachable = []string{"/run/user", "/dev", "/sys", "/proc"}
 
 // sandboxHotservePaths is the supervisor's own state on a packaged
 // install: TLS keys and certificates, the admin socket's directory,
-// the documented env-file directories. It is the subset of
-// sandboxNeverBound that is a mistake to put the liveswap *root*
-// inside of, not merely to name in an extra_path.
+// the documented env-file directories: a mistake to put the liveswap
+// *root* inside of, and never reachable as a bind source.
 var sandboxHotservePaths = []string{
 	"/var/lib/hotserve", "/run/hotserve", "/etc/hotserve", "/etc/liveswap",
 }
@@ -284,7 +243,6 @@ type sandboxSpec struct {
 	// version's tarball) and its other releases are simply not named,
 	// so they do not exist inside the unit.
 	writable []bindPath
-	extra    []extraPath
 	// appDir is this app's own directory under the root, and appName
 	// the name it was configured with: a writable bind that resolves
 	// inside the root must stay inside *this* app's directory, or one
@@ -298,7 +256,7 @@ type sandboxSpec struct {
 // moment before systemd follows these paths, and the only check that
 // sees what they point at *now*.
 //
-// The mandatory binds need this as much as extra_path does, and are
+// The mandatory binds need this, and are
 // the easier target: `shared` and the release dirs live under the
 // shared hotserve UID, and appDirs.ensure's MkdirAll succeeds on a
 // symlink. An app running bare — `sandbox off`, a host stuck at the
@@ -325,9 +283,8 @@ type sandboxSpec struct {
 // resolves to itself, so it never reaches this check at all — and an
 // app cannot forge one.
 //
-// Paths that do not resolve — an extra_path for a socket directory
-// that appears later — are left as written, having already passed the
-// same checks lexically at config load.
+// Paths that do not resolve are left as written, having already passed
+// the same checks lexically at config load.
 //
 // Residual, stated rather than papered over: this is a check on a
 // pathname, and between it and the manager following that pathname a
@@ -399,32 +356,6 @@ func (s *sandboxSpec) resolveBindSources() error {
 			s.writable[i].source = resolved
 		}
 	}
-	for _, e := range s.extra {
-		resolved, err := filepath.EvalSymlinks(e.path)
-		if err != nil {
-			// Absent (checked as written at config load). Not tolerated
-			// — the bind is mandatory, so the manager refuses the unit
-			// rather than dropping it — but there is nothing to resolve
-			// here either way.
-			continue
-		}
-		// An extra_path must BE the directory it names, the same rule
-		// the app's own binds follow above, and for a sharper reason:
-		// checking what a link resolves to and then binding it is a
-		// TOCTOU an app can win. Give blog `extra_path /mnt/blog rw`
-		// where /mnt/blog aliases /srv/blog, plus a second
-		// `extra_path /srv/blog/data`, and blog can replace data with a
-		// link to any directory on the box — a sibling's env_file
-		// included — between one launch and the next. Containment
-		// checks cannot close that: the planted target is a perfectly
-		// legitimate path that simply is not the one the operator
-		// named. Requiring equality does close it, because a mount
-		// resolves to itself and an app holds no capability to make
-		// one.
-		if resolved != e.path {
-			return fmt.Errorf("refusing to launch sandboxed: extra_path %q resolves to %q, which is not the directory it names; bind-mount it at %q instead of symlinking — a mount resolves to itself, and an app cannot forge one", e.path, resolved, e.path)
-		}
-	}
 	return nil
 }
 
@@ -433,9 +364,10 @@ func (s *sandboxSpec) resolveBindSources() error {
 // *inside* a protected path is the obvious case, *containing* one just
 // as bad, since these binds are recursive.
 //
-// Deliberately narrower than the extra_path list: sandboxPrivateCopies
-// is absent, because a liveswap root may legitimately live under /tmp,
-// /var/tmp or /home and every bind under it would then "overlap" one.
+// /tmp, /var/tmp and /home are deliberately NOT here: a liveswap root
+// may legitimately live under one of them and every bind beneath it
+// would then "overlap" it. A unit gets its own /tmp and /home anyway,
+// so nothing of the host's leaks through them.
 func refusedAsBindSource(p string) error {
 	for _, c := range supervisorPaths() {
 		if overlaps(p, c) {
@@ -523,7 +455,7 @@ func overlaps(a, b string) bool { return pathWithin(a, b) || pathWithin(b, a) }
 
 // sandboxSpecFor is the sandbox of one instance of this app at the
 // given tier: its release being started and its shared dir writable,
-// its extra paths, and the base view. Everything else on the host —
+// plus the base view. Everything else on the host —
 // every other app, every other release, hotserve's own state — is
 // absent because nothing names it. nil for none.
 func (s *appSpec) sandboxSpecFor(releaseDir string, tier sandboxTier) *sandboxSpec {
@@ -538,7 +470,6 @@ func (s *appSpec) sandboxSpecFor(releaseDir string, tier sandboxTier) *sandboxSp
 		writable: []bindPath{{dest: releaseDir, source: releaseDir}, {dest: s.dirs.shared, source: s.dirs.shared}},
 		// Copied: resolveBindSources rewrites entries to what they
 		// resolve to, and the spec must not mutate the app's config.
-		extra: append([]extraPath{}, s.extraPaths...),
 	}
 }
 
@@ -645,100 +576,13 @@ func probeSandboxCapability(r runner) sandboxCapability {
 	return sandboxCapability{tier: sandboxNone, reason: strings.Join(reasons, "; ")}
 }
 
-// validateExtraPath enforces what an extra_path may name: an absolute,
-// clean path that is neither inside the liveswap root (whose other
-// contents are exactly what the sandbox exists to keep out; the app's
-// own directories are already in its view) nor one of the names that
-// would give back what the sandbox took. The refusal names the reason
-// so an operator can tell a typo from a boundary.
-func validateExtraPath(p, root string) error {
-	if !filepath.IsAbs(p) || filepath.Clean(p) != p {
-		return fmt.Errorf("extra_path %q must be an absolute, clean path", p)
-	}
-	if p == "/" {
-		return errors.New("extra_path / would expose the whole host")
-	}
-	// The root's own canonical spelling, for the containment checks: a
-	// resolved extra_path is canonical, so comparing it only against a
-	// lexical root would miss a sibling reached the other way round
-	// (with /srv/liveswap -> /mnt/liveswap, `extra_path
-	// /mnt/liveswap/shop/shared` already resolves to itself and would
-	// pass, then bind the sibling back). This is the same
-	// canonicalisation resolveBindSources does for mandatory binds.
-	rootC := root
-	if c, err := filepath.EvalSymlinks(root); err == nil {
-		rootC = c
-	}
-	// An extra_path must BE the directory it names. BindPaths= binds
-	// what a path resolves to, so following a link and then checking
-	// where it went is a race an app can win: one that holds a writable
-	// extra_path over the tree can repoint a second extra_path at any
-	// directory on the box between one launch and the next, and the
-	// planted target passes every containment check because it is a
-	// legitimate path — just not the one the operator named. Equality
-	// is what closes it, and it is the rule the app's own binds already
-	// follow (resolveBindSources). To put data on another disk,
-	// bind-mount it: a mount resolves to itself and an app holds no
-	// capability to make one.
-	//
-	// Refused here as well as at launch so an operator learns at config
-	// load rather than from a unit that never starts. A path that does
-	// not resolve is checked as written — /run/postgresql before
-	// postgres has started is the documented case — and the launch
-	// re-checks, which is what catches a link planted afterwards.
-	// The deny list first, so a path that is refused for what it names
-	// says so — `/proc/self` is a link, but "nothing may name /proc" is
-	// the reason an operator needs, not "it is not the directory it
-	// names".
-	if err := checkExtraPathContainment(p, root, rootC); err != nil {
-		return err
-	}
-	if resolved, err := filepath.EvalSymlinks(p); err == nil && resolved != p {
-		return fmt.Errorf("extra_path %q resolves to %q, which is not the directory it names; bind-mount it at %q instead of symlinking — a mount resolves to itself, and an app cannot forge one", p, resolved, p)
-	}
-	return nil
-}
-
-// checkExtraPathContainment is the lexical half of validateExtraPath,
-// applied to the path as written and to what it resolves to. root and
-// rootC are the liveswap root's configured and canonical spellings;
-// either one reaching the path is a refusal.
-func checkExtraPathContainment(p, root, rootC string) error {
-	// Overlap in either direction: an extra_path *inside* the root
-	// exposes another app's data, and one *containing* the root carries
-	// the whole tree in, since the binds are recursive.
-	if overlaps(p, root) || overlaps(p, rootC) {
-		return fmt.Errorf("extra_path %q overlaps the liveswap root %s, which no app sees beyond its own release and shared dirs", p, root)
-	}
-	// The base view is bound read-only into EVERY unit, so a writable
-	// bind inside it is a cross-app write channel, not the harmless
-	// redundancy a read-only one would be: whatever this app writes
-	// goes through the bind to the host inode, where every sibling's
-	// own /usr (or /etc/...) bind exposes it. `extra_path /usr/local/bin
-	// rw` is the sharp end — that directory is on the PATH the
-	// supervisor searches with exec.LookPath, so one app could choose
-	// the binary another app runs. Read-only overlap is refused too,
-	// because it grants nothing: the path is already in every view.
-	for _, b := range sandboxBaseView {
-		if overlaps(p, b) {
-			return fmt.Errorf("extra_path %q overlaps %s, which is bound read-only into EVERY app's sandbox — read-only it grants nothing (the path is already in every view), and writable it lets this app write where every other app reads, including directories on the executable search path; put shared data somewhere outside the base view", p, b)
-		}
-	}
-	for _, c := range append(supervisorPaths(), sandboxNeverBound...) {
-		if overlaps(p, c) {
-			return fmt.Errorf("extra_path %q overlaps %s, which no app may be given — binding it back would undo the sandbox for this app; use `sandbox off` if the app genuinely needs it", p, c)
-		}
-	}
-	return nil
-}
-
 // validateSandboxRoot rejects a liveswap root inside hotserve's own
 // state: the root holds the apps' own data, and putting it inside the
 // supervisor's TLS keys or env files is a configuration mistake worth
 // failing on, sandbox or no sandbox.
 //
-// A root inside one of the *other* sandboxNeverBound entries is
-// deliberately NOT refused: systemd creates the mount points for
+// A root under /tmp, /var/tmp or /home is deliberately NOT refused:
+// systemd creates the mount points for
 // TemporaryFileSystem= and BindPaths= inside the namespace, so a root
 // under /tmp, /var/tmp or /home is masked with everything else and the
 // app's own dirs bind back into it exactly as they do under /var/lib.
@@ -787,7 +631,7 @@ func validateSandboxRoot(root string) error {
 // homeOutsideView reports an operator-set HOME that the unit's view
 // does not contain. buildEnv applies the sandbox HOME (the shared dir)
 // BEFORE env_file and inline env so an operator can point it elsewhere
-// — at an rw extra_path, say — which is deliberate. What is not
+// — inside the release dir, say — which is deliberate. What is not
 // deliberate is doing it by accident: a HOME that is absent inside the
 // unit surfaces as an ENOENT from whichever runtime touches $HOME
 // first, naming no cause. The last assignment wins, as it does for
@@ -824,15 +668,15 @@ func pathWithin(p, dir string) bool {
 }
 
 // inView reports whether p exists inside a unit built from this spec:
-// under one of the app's own directories, in the base view, or named
-// by an extra_path. Everything else on the host is absent, so this is
-// the whole of the view — the same three sources sandboxProperties
+// under one of the app's own directories, or in the base view.
+// Everything else on the host is absent, so this is
+// the whole of the view — the same two sources sandboxProperties
 // renders, and the reason it can be answered without asking systemd.
 func (s *sandboxSpec) inView(p string) bool {
 	// Destination AND source. The caller resolves symlinks before
 	// asking, and a resolved path is canonical, so a bind whose source
-	// differs from its destination — a symlinked liveswap root, or an
-	// extra_path that resolves elsewhere — is only recognisable by its
+	// differs from its destination — a symlinked liveswap root — is
+	// only recognisable by its
 	// source. Testing destinations alone would refuse `./server` under
 	// a root like /srv/liveswap -> /mnt/liveswap on every launch.
 	both := func(dest, source string) bool {
@@ -843,11 +687,6 @@ func (s *sandboxSpec) inView(p string) bool {
 	}
 	for _, b := range s.writable {
 		if both(b.dest, b.source) {
-			return true
-		}
-	}
-	for _, e := range s.extra {
-		if both(e.path, "") {
 			return true
 		}
 	}
@@ -938,10 +777,10 @@ func absAndCanonical(p string) []string {
 // env_file is explicitly allowed to be absent until the first deploy —
 // so resolving the whole path would silently give back only the
 // lexical spelling for exactly the configurations that need checking.
-// With `/safe/link -> /srv/common` and `env_file /safe/link/shop.env`
-// not yet created, a sibling's `extra_path /srv/common` exposes that
-// file the moment it appears, while a lexical comparison sees two
-// unrelated strings. The link is in the PARENT, which is why the
+// With `/safe/link -> /var/lib/liveswap/blog/shared` and
+// `env_file /safe/link/shop.env` not yet created, blog's own bind
+// exposes that file the moment it appears, while a lexical comparison
+// sees two unrelated strings. The link is in the PARENT, which is why the
 // deepest existing ancestor is the thing to resolve.
 func canonicalDeepest(p string) string {
 	rest := ""
@@ -971,9 +810,7 @@ func canonicalDeepest(p string) string {
 //   - the base view, which is bound read-only into every unit, so an
 //     env_file under /usr or a named /etc entry is readable by every
 //     app on the box;
-//   - another app's extra_path, which can cover the directory the env
-//     file sits in — and read-write, can rewrite it;
-//   - another app's OWN directories, which sandboxSpecFor binds into
+//   - another app's own directories, which sandboxSpecFor binds into
 //     its unit — `shared/` read-WRITE. An env file parked in a
 //     neighbour's shared dir is readable and rewritable by that
 //     neighbour, which is the same exposure by a shorter route.
@@ -1030,17 +867,6 @@ func validateEnvFileIsolation(a *App) error {
 				if other == name || ocfg == nil || effective(ocfg) == sandboxOff {
 					continue
 				}
-				for _, e := range ocfg.ExtraPaths {
-					for _, ep := range absAndCanonical(e.Path) {
-						if pathWithin(f, ep) {
-							rw := "read"
-							if e.Writable {
-								rw = "read and rewrite"
-							}
-							return fmt.Errorf("app %s: env_file %q is inside app %s's extra_path %q, so %s could %s it; narrow that extra_path, or move the env file outside it (the documented location is /etc/hotserve)", name, cfg.EnvFile, other, e.Path, other, rw)
-						}
-					}
-				}
 				// The neighbour's own bound directories. Its release
 				// dirs are read-only in its unit and its shared dir is
 				// read-write, so this is the one route on which the
@@ -1050,8 +876,8 @@ func validateEnvFileIsolation(a *App) error {
 					{od.shared, "shared dir", "read and rewrite"},
 					{od.releases, "release dirs", "read"},
 				} {
-					// Both spellings, as the extra_path branch above:
-					// the env file is compared canonically, so a lexical
+					// Both spellings: the env file is compared
+					// canonically, so a lexical
 					// app dir alone would miss it whenever the root is a
 					// symlink (/srv/liveswap -> /mnt/liveswap, an env
 					// file configured as /mnt/liveswap/blog/shared/...).
