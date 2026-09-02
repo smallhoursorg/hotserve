@@ -479,7 +479,7 @@ func (a *App) Validate() error {
 	if filepath.Clean(a.Root) != a.Root {
 		return fmt.Errorf("root must be a clean path (no . , .. or doubled separators): %q resolves to %q", a.Root, filepath.Clean(a.Root))
 	}
-	if err := validateSandboxRoot(a.Root); err != nil {
+	if err := validateSandboxRoot(a.Root, a.anySandboxed()); err != nil {
 		return err
 	}
 	if a.Sandbox != "" && !validSandboxMode(a.Sandbox) { // "" = the default Provision applies (auto)

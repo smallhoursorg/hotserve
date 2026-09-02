@@ -576,6 +576,33 @@ func probeSandboxCapability(r runner) sandboxCapability {
 	return sandboxCapability{tier: sandboxNone, reason: strings.Join(reasons, "; ")}
 }
 
+// effectiveSandbox is an app's policy after the global default and
+// Provision's own default are applied — the same resolution buildSpec
+// does. Reading the raw per-app field instead treats `sandbox off` set
+// globally, which leaves every app's own field empty, as if every app
+// were sandboxed.
+func (a *App) effectiveSandbox(cfg *AppConfig) string {
+	if cfg != nil && cfg.Sandbox != "" {
+		return cfg.Sandbox
+	}
+	if a.Sandbox != "" {
+		return a.Sandbox
+	}
+	return sandboxAuto
+}
+
+// anySandboxed reports whether any app will actually get a view. The
+// checks that exist only because a view is built — the base-view
+// overlap rule below — must not fire when none is.
+func (a *App) anySandboxed() bool {
+	for _, cfg := range a.Apps {
+		if cfg != nil && a.effectiveSandbox(cfg) != sandboxOff {
+			return true
+		}
+	}
+	return false
+}
+
 // validateSandboxRoot rejects a liveswap root inside hotserve's own
 // state: the root holds the apps' own data, and putting it inside the
 // supervisor's TLS keys or env files is a configuration mistake worth
@@ -589,7 +616,7 @@ func probeSandboxCapability(r runner) sandboxCapability {
 // The real-systemd integration lane runs with a /var/tmp root and
 // asserts the full tier. Refusing those would turn an odd-but-working
 // setup into a server that will not start.
-func validateSandboxRoot(root string) error {
+func validateSandboxRoot(root string, sandboxed bool) error {
 	// Both spellings: the check is lexical, so `/srv/liveswap ->
 	// /var/lib/hotserve/apps` would otherwise walk straight past it.
 	// An unresolvable root (not created yet, which is the normal case
@@ -604,6 +631,17 @@ func validateSandboxRoot(root string) error {
 			if pathWithin(r, h) {
 				return fmt.Errorf("root %q is inside %s, which holds hotserve's own keys, sockets and env files; use a root outside it (the default is /var/lib/liveswap)", root, h)
 			}
+		}
+		// The base-view rules below exist only because a view is built.
+		// With every app effectively `sandbox off` nothing binds /usr,
+		// so refusing a root under it would reject a configuration that
+		// was valid before per-app sandboxing existed — and `sandbox
+		// off`, the documented way out, could not rescue it, because
+		// config load fails first. The supervisor-state rule above is
+		// unconditional: a root inside hotserve's keys is a mistake
+		// with or without a sandbox.
+		if !sandboxed {
+			continue
 		}
 		// A root inside the base view would put EVERY app's state and
 		// every app's data under a tree bound read-only into every
@@ -827,15 +865,7 @@ func canonicalDeepest(p string) string {
 func validateEnvFileIsolation(a *App) error {
 	// The same resolution buildSpec does: the app's own setting, else
 	// the global default, else auto (what Provision fills in).
-	effective := func(cfg *AppConfig) string {
-		if cfg.Sandbox != "" {
-			return cfg.Sandbox
-		}
-		if a.Sandbox != "" {
-			return a.Sandbox
-		}
-		return sandboxAuto
-	}
+	effective := func(cfg *AppConfig) string { return a.effectiveSandbox(cfg) }
 	sandboxed := false
 	for _, cfg := range a.Apps {
 		if cfg != nil && effective(cfg) != sandboxOff {

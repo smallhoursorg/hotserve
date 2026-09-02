@@ -42,19 +42,28 @@ through it.
   outside the configured trust claims, is in scope — as is any deploy
   reaching outside `artifact_allowlist` (see
   [liveswap/README.md](liveswap/README.md)).
-- Apps deployed by liveswap share one UID, but each runs in its own
-  user and PID namespace behind a deny-by-default filesystem view
-  ([liveswap/DESIGN-sandbox.md](liveswap/DESIGN-sandbox.md)): a way for
-  one app to read another's files, environment, sockets or `/proc`, or
-  to escape to the *supervisor or system*, is in scope. Two things are
-  known limits rather than vulnerabilities: an app reaches its **own**
-  secrets and database by definition, and sibling apps share a network
-  namespace, so one can connect to another's localhost port. The full
+- Apps deployed by liveswap share one UID. **What is in scope depends
+  on the tier the instance reports** (`"sandbox"` in its status), which
+  is the only claim hotserve makes:
+  - `full` — each app runs in its own user and PID namespace behind a
+    deny-by-default filesystem view
+    ([liveswap/DESIGN-sandbox.md](liveswap/DESIGN-sandbox.md)). A way
+    for one app to read another's files, environment, sockets or
+    `/proc`, or to escape to the *supervisor or system*, is in scope.
+  - `none` — either `sandbox off` for that app, or a host the probe
+    found cannot deliver the namespaces (a container, an LXC VPS, a
+    kernel built without them). Cross-app access is then **expected**,
+    not a vulnerability: that is the pre-sandbox behaviour the setting
+    and the probe both announce, loudly, at every launch. Escapes to
+    root or outside the machine remain in scope.
+  Known limits at every tier: an app reaches its **own** secrets and
+  database by definition, and sibling apps share a network namespace,
+  so one can connect to another's localhost port. The full
   attacker/asset/attack-path analysis is in
   [DESIGN-threat-model.md](DESIGN-threat-model.md).
 - Reports against a host outside the supported matrix (Debian 13) are
   welcome but are triaged as bugs, not advisories: the sandbox is
-  probe-gated, so such a host reports `sandbox: none` rather than
-  claiming an isolation it does not have.
+  probe-gated, so such a host reports `none` rather than claiming an
+  isolation it does not have.
 - Vulnerabilities in Caddy itself belong upstream:
   [caddyserver/caddy security policy](https://github.com/caddyserver/caddy/security/policy).

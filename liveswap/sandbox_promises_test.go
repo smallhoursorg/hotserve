@@ -396,6 +396,44 @@ func TestEnvFileIsolationComparesBothSpellingsOfASiblingsDirs(t *testing.T) {
 	}
 }
 
+// Promise: the checks that exist only because a view is built do not
+// fire when none is. `sandbox off` is the documented way out for a
+// configuration the sandbox cannot host — it is worth nothing if
+// config load refuses that configuration before the escape hatch is
+// consulted. The supervisor-state rule is the exception: a root inside
+// hotserve's own keys is a mistake with or without a sandbox.
+func TestRootUnderTheBaseViewIsOnlyRefusedWhenSomethingIsSandboxed(t *testing.T) {
+	const underBaseView = "/usr/local/liveswap"
+	if err := validateSandboxRoot(underBaseView, true); err == nil {
+		t.Fatal("with an app sandboxed, a root under the base view must be refused: every app would read every other's data")
+	}
+	if err := validateSandboxRoot(underBaseView, false); err != nil {
+		t.Fatalf("with nothing sandboxed, nothing binds /usr and the root is harmless; refused anyway: %v", err)
+	}
+	// Unconditional, either way.
+	for _, sandboxed := range []bool{true, false} {
+		if err := validateSandboxRoot("/var/lib/hotserve/apps", sandboxed); err == nil {
+			t.Errorf("sandboxed=%v: a root inside hotserve's own state must always be refused", sandboxed)
+		}
+	}
+	// And end to end, through Validate: the whole config loads.
+	cfg := defaultedApp(t)
+	a := &App{
+		Root:              underBaseView,
+		Sandbox:           sandboxOff,
+		ArtifactAllowlist: []string{"github.com/smallhoursorg/"},
+		DeployTrust:       githubTrust(),
+		Apps:              map[string]*AppConfig{"blog": cfg},
+	}
+	if err := a.Validate(); err != nil {
+		t.Fatalf("sandbox off globally with a root under the base view must load: %v", err)
+	}
+	a.Sandbox = sandboxAuto
+	if err := a.Validate(); err == nil {
+		t.Fatal("sandbox auto with a root under the base view must be refused")
+	}
+}
+
 // Promise: with sandboxing turned off GLOBALLY, the env-file isolation
 // rules do not reject the configuration. `sandbox off` in the liveswap
 // block leaves every app's own Sandbox field empty, so a check that

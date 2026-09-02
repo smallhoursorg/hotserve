@@ -667,7 +667,7 @@ func TestStartResolvesSandboxPolicy(t *testing.T) {
 // into a server that will not start.
 func TestSandboxRootUnderTmpIsAllowed(t *testing.T) {
 	for _, root := range []string{"/tmp/liveswap-test", "/var/tmp/x", "/home/deploy/apps", "/srv/apps"} {
-		if err := validateSandboxRoot(root); err != nil {
+		if err := validateSandboxRoot(root, true); err != nil {
 			t.Errorf("root %s must not fail config load: %v", root, err)
 		}
 	}
@@ -1416,7 +1416,7 @@ func TestBindSourceInsideTheBaseViewRefused(t *testing.T) {
 		}
 	}
 	for _, bad := range []string{"/usr/local/liveswap", "/usr/share/liveswap", "/etc/ssl/certs/apps"} {
-		if err := validateSandboxRoot(bad); err == nil {
+		if err := validateSandboxRoot(bad, true); err == nil {
 			t.Errorf("root %s accepted: every app's data would be readable by every other app", bad)
 		}
 	}
@@ -1427,12 +1427,12 @@ func TestBindSourceInsideTheBaseViewRefused(t *testing.T) {
 	// releases and shared dir on /etc/ssl/certs — bound read-only and
 	// recursively into every sandbox on the box.
 	for _, bad := range []string{"/etc/ssl", "/etc", "/"} {
-		if err := validateSandboxRoot(bad); err == nil {
+		if err := validateSandboxRoot(bad, true); err == nil {
 			t.Errorf("root %s accepted: it contains a base-view entry, so an app named for that entry would be readable by every other app", bad)
 		}
 	}
 	for _, ok := range []string{"/var/lib/liveswap", "/srv/apps", "/mnt/apps", "/tmp/liveswap-test"} {
-		if err := validateSandboxRoot(ok); err != nil {
+		if err := validateSandboxRoot(ok, true); err != nil {
 			t.Errorf("root %s refused: %v", ok, err)
 		}
 	}
@@ -1459,7 +1459,7 @@ func TestValidateSandboxRootFollowsSymlinks(t *testing.T) {
 		if err := os.Symlink(target, link); err != nil {
 			t.Skipf("symlinks unavailable: %v", err)
 		}
-		if err := validateSandboxRoot(link); err == nil {
+		if err := validateSandboxRoot(link, true); err == nil {
 			t.Errorf("a root symlinked to %s was accepted: the lexical spelling hides it", target)
 		}
 	}
