@@ -29,6 +29,24 @@ func TestSandboxTierRoundTrip(t *testing.T) {
 			t.Errorf("parse(%q) = %v, want none", s, got)
 		}
 	}
+	// The other direction, and the one a `default: return "none"` would
+	// silently break: a tier this build does not define must not render
+	// as a record validSandboxTierRecord accepts. state() persists
+	// whatever String() returns, so a rendering that round-trips as a
+	// legitimate value would let an out-of-range in-memory tier become a
+	// valid bare record — a sandboxed unit persisted, and relaunched,
+	// unsandboxed. 2 is included because it is the value sandboxFull
+	// itself held until removing the filesystem tier renumbered the
+	// iota — the most plausible stale tier there is.
+	for _, undefined := range []sandboxTier{2, 99, -1} {
+		rendered := undefined.String()
+		if err := validSandboxTierRecord(rendered); err == nil {
+			t.Errorf("tier %d rendered as %q, which is an accepted record", int(undefined), rendered)
+		}
+		if got := parseSandboxTier(rendered); got != sandboxNone {
+			t.Errorf("parse(%q) = %v; an unrepresentable tier must not parse back to a real one", rendered, got)
+		}
+	}
 	st := (&systemdHandle{unit: "u.service"}).state()
 	if st.Sandbox != "" {
 		t.Fatalf("a bare handle must not persist a tier, got %q", st.Sandbox)
