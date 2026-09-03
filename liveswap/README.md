@@ -694,7 +694,7 @@ watchdog's state (restart counts, last restart cause), and
 newest-first.
 
 The tarball's contents must sit at the archive root (`tar -czf
-app.tar.gz -C dist .`), with versions matching `[A-Za-z0-9._-]{1,64}`.
+app.tar.gz -C dist .`), with versions matching `[A-Za-z0-9._-]{1,64}` and not starting with a dot.
 
 ## Secrets and logs
 

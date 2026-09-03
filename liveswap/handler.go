@@ -146,7 +146,7 @@ func (h *Handler) deployURL(w http.ResponseWriter, r *http.Request, ma *managedA
 		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "url is required"})
 	}
 	if !validVersion(p.Version) {
-		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("version must match %s and not be . or ..", versionRe)})
+		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("version must match %s", versionRe)})
 	}
 	// Go's transport would refuse a control character in the header
 	// value anyway, but as an opaque 500 at fetch time; catching it
@@ -163,7 +163,7 @@ func (h *Handler) deployURL(w http.ResponseWriter, r *http.Request, ma *managedA
 func (h *Handler) deployPush(w http.ResponseWriter, r *http.Request, ma *managedApp, by string) error {
 	version := r.URL.Query().Get("version")
 	if !validVersion(version) {
-		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("version query param must match %s and not be . or ..", versionRe)})
+		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("version query param must match %s", versionRe)})
 	}
 	// Acquire the per-app deploy lock BEFORE staging the upload: a
 	// concurrent push then gets an immediate 409 instead of streaming a
@@ -204,7 +204,7 @@ func (h *Handler) deployPush(w http.ResponseWriter, r *http.Request, ma *managed
 func (h *Handler) deployRollback(w http.ResponseWriter, r *http.Request, ma *managedApp, by string) error {
 	version := r.URL.Query().Get("rollback")
 	if !validVersion(version) {
-		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("rollback version must match %s and not be . or ..", versionRe)})
+		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("rollback version must match %s", versionRe)})
 	}
 	return h.runDeploy(w, r, ma, deployRequest{version: version, rollback: true}, by)
 }

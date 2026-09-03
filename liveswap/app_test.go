@@ -709,13 +709,17 @@ func TestHostOfStripsUserinfoCredentials(t *testing.T) {
 	}
 }
 
-func TestValidVersionRejectsDotSegments(t *testing.T) {
-	for _, v := range []string{"v1", "1.2.3", "release_2024-01-01", "..foo", "..."} {
+func TestValidVersionRejectsDotPrefix(t *testing.T) {
+	for _, v := range []string{"v1", "1.2.3", "release_2024-01-01", "v1..2", "a.", "_", "-"} {
 		if !validVersion(v) {
 			t.Errorf("validVersion(%q) = false, want true", v)
 		}
 	}
-	for _, v := range []string{".", "..", "", "has/slash", "with space", "..\x00"} {
+	// A leading dot is refused as a whole class: "." and ".." resolve
+	// onto the releases dir or the app root, ".extract-1" is deleted by
+	// release GC as a staging orphan, and any other dot-name is
+	// invisible to it. See versionRe.
+	for _, v := range []string{".", "..", "..foo", "...", ".extract-1", ".v1", "", "has/slash", "with space", "..\x00"} {
 		if validVersion(v) {
 			t.Errorf("validVersion(%q) = true, want false (path-unsafe)", v)
 		}
