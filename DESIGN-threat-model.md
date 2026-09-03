@@ -355,8 +355,9 @@ consequences, and they decide the mechanism:
    **Superseded 2026-09-01 (matrix narrowed to Debian 13):** the
    second tier and the AppArmor profile are gone. There is one tier,
    *full*, and one candidate in the probe; a host that cannot deliver
-   both namespaces gets `none` with a WARN, and `sandbox require`
-   refuses to start. The paragraph above is kept because the
+   both namespaces is refused: since 2026-09-03 the policy is `on` or
+   `off`, and `on` — the default — fails the start rather than
+   running the app bare. The paragraph above is kept because the
    measurements behind it — that a user namespace alone closes the
    `/proc` routes, that AppArmor path-attachment is the only way to
    grant `userns` to one manager — are what the current design rests
@@ -476,13 +477,16 @@ emits; the fix is per-app UIDs.
 
 *The capability probe runs under the shared uid.* It starts a real
 transient unit, bounded at 30s, so any process holding that uid can
-interfere with it: under `auto` a failed probe degrades every app to
-`none` with a WARN, under `require` it fails the whole server start.
-The tier is therefore not solely a property of the host. The
-measurement is cached per manager connection, which narrows the window
-an attacker has to hit — but a failed verdict is deliberately NOT
-cached, so interference degrades the next start rather than pinning
-every app unsandboxed until the manager restarts.
+interfere with it. Since the policy became two-valued (2026-09-03) a
+failed probe fails the whole server start, which is the default
+posture — so this is an availability attack on the supervisor, not a
+way to weaken an app: interference cannot produce a running hotserve
+with the sandbox off. The tier is therefore not solely a property of
+the host. The measurement is cached per manager connection, which
+narrows the window an attacker has to hit, and a failed verdict is
+deliberately NOT cached, so interference costs the next start rather
+than pinning a verdict until the manager restarts. An operator who
+must come up on a contested box sets `sandbox off` deliberately.
 
 3. **Resource caps need a read-only cgroupfs inside the sandbox.** The
    cgroup subtree under `user@<uid>.service` is delegated to — owned
@@ -770,7 +774,8 @@ be the template or a minimal privileged helper, never
 supervisor-shaped transient units on the system manager.
 DESIGN-sandbox.md's behaviour spec, config surface and rollout
 semantics (engage on next deploy, record the tier in `state.json`,
-`auto`/`require`/`off`) are what shipped; its bwrap mechanics did not.
+`on`/`off` — `auto`/`require` until 2026-09-03) are what shipped; its
+bwrap mechanics did not.
 Resource caps are #35 phase 2.
 
 *Superseded (kept for the record):* the earlier recommendation was B

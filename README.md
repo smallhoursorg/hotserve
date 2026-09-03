@@ -34,10 +34,10 @@ That gives you `/usr/bin/hotserve`, a systemd service running as the
 **Supported: Debian 13.** One release, one sandbox: every app unit
 gets a PID *and* a user namespace on top of the deny-by-default
 filesystem view — see [liveswap/README.md](liveswap/README.md#sandbox).
-hotserve still installs and serves on other systemd distributions, but
-nothing else is tested, and a host that cannot deliver the sandbox
-reports `sandbox: none` rather than something weaker (`sandbox
-require` refuses to start there).
+hotserve still installs on other systemd distributions, but nothing
+else is tested, and a host that cannot deliver the sandbox refuses to
+start rather than serving something weaker — set `sandbox off` there
+to run without one deliberately.
 The package depends on `libpam-systemd` and `dbus` (present on any
 stock Debian server): liveswap runs your apps as systemd units
 under the `hotserve` user's own service manager, which needs
@@ -151,10 +151,13 @@ an on-disk release. Full details, CI snippets, and every option:
   `sandbox off`, which costs the other apps nothing.
   The app also gets its own PID namespace, so siblings are invisible
   rather than merely unreadable. What is *not* claimed: both
-  namespaces are required, and a host that cannot deliver them gets no
-  per-unit sandbox at all — `"sandbox": "none"`, warned at every
-  launch, with sibling files, sockets and process contents exposed as
-  they were before this existed. There is no middle tier. What stays
+  namespaces are required, and there is no middle tier — a host that
+  cannot deliver them refuses to start under `sandbox on` (the
+  default). An app running with `sandbox off` — or relaunched from an
+  instance recorded bare — has no per-unit sandbox at all:
+  `"sandbox": "none"`, warned at every launch, with sibling files,
+  sockets and process contents exposed as they were before this
+  existed. What stays
   shared by design even when the sandbox is on is the network
   namespace: sibling `127.0.0.1` ports are reachable (a runtime's own
   permission flags can close that — see liveswap's "Runtime
@@ -187,15 +190,16 @@ an on-disk release. Full details, CI snippets, and every option:
   Debian 13 ships 257), so the supervisor, the user manager and
   sibling apps are invisible and unsignalable. A host that cannot
   deliver either namespace — a container, an LXC VPS, a kernel built
-  without them — gets no sandbox and says so at every launch, rather
-  than something weaker wearing the same name.
+  without them — is refused rather than given something weaker wearing
+  the same name: hotserve will not start, and says what the host
+  lacks.
   Why the user namespace matters: under a shared UID the kernel would
   otherwise let any app walk the host through
   `/proc/<user-manager>/root`; see
   [DESIGN-threat-model.md](DESIGN-threat-model.md) "The shared-UID
   rule". hotserve itself additionally runs non-dumpable from its
-  first milliseconds. Policy is `sandbox auto` (default) / `require` /
-  `off`, engaging on each app's **next deploy** (never on an upgrade
+  first milliseconds. Policy is `sandbox on` (default) / `off`,
+  engaging on each app's **next deploy** (never on an upgrade
   relaunch) — [liveswap/README.md](liveswap/README.md#sandbox).
   **Next:** resource caps (`MemoryMax=`, `TasksMax=`, `CPUQuota=`) with
   a config surface — real now that cgroupfs is read-only inside the

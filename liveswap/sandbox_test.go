@@ -9,7 +9,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -70,32 +69,36 @@ func TestResolveSandboxTier(t *testing.T) {
 		mode     string
 		cap      sandboxCapability
 		wantTier sandboxTier
-		wantWarn bool
 		wantErr  bool
 	}{
-		{"auto full", sandboxAuto, full, sandboxFull, false, false},
-		{"auto none warns", sandboxAuto, none, sandboxNone, true, false},
-		{"require full", sandboxRequire, full, sandboxFull, false, false},
-		{"require refuses none", sandboxRequire, none, sandboxNone, false, true},
-		{"off ignores capability", sandboxOff, full, sandboxNone, false, false},
+		{"on full", sandboxOn, full, sandboxFull, false},
+		// The whole policy in one row: there is no lesser tier to fall
+		// back to, so a host that cannot deliver is refused rather than
+		// quietly run bare.
+		{"on refuses none", sandboxOn, none, sandboxNone, true},
+		{"off ignores capability", sandboxOff, full, sandboxNone, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tier, warn, err := resolveSandboxTier(tc.mode, tc.cap)
+			tier, err := resolveSandboxTier(tc.mode, tc.cap)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
 			}
 			if tier != tc.wantTier {
 				t.Fatalf("tier = %v, want %v", tier, tc.wantTier)
 			}
-			if (warn != "") != tc.wantWarn {
-				t.Fatalf("warn = %q, wantWarn %v", warn, tc.wantWarn)
+			if !tc.wantErr {
+				return
 			}
-			if tc.wantErr && !strings.Contains(err.Error(), tc.cap.reason) {
-				t.Fatalf("require error must name the reason %q: %v", tc.cap.reason, err)
+			// The refusal is what an operator reads when the server
+			// will not come up: it must carry both the probe's
+			// diagnosis and the one setting that runs without a
+			// sandbox.
+			if !strings.Contains(err.Error(), tc.cap.reason) {
+				t.Fatalf("the refusal must name the reason %q: %v", tc.cap.reason, err)
 			}
-			if tc.wantWarn && tc.cap.reason != "" && !strings.Contains(warn, tc.cap.reason) {
-				t.Fatalf("warn must name the reason %q: %q", tc.cap.reason, warn)
+			if !strings.Contains(err.Error(), sandboxOff) {
+				t.Fatalf("the refusal must name `sandbox %s` as the remedy: %v", sandboxOff, err)
 			}
 		})
 	}
@@ -373,9 +376,13 @@ func TestSandboxProbeCommand(t *testing.T) {
 }
 
 // probeRunner scripts RunOnce per tier for probeSandboxCapability.
+// queue, when non-empty, scripts successive calls instead (first
+// entry first), for the retry cases where the two attempts must
+// answer differently.
 type probeRunner struct {
 	*fakeRunner
 	fail  map[sandboxTier]error
+	queue []error
 	tried []sandboxTier
 	specs []startSpec
 }
@@ -384,7 +391,73 @@ func (p *probeRunner) RunOnce(_ context.Context, spec startSpec) error {
 	tier := sandboxTierOf(spec)
 	p.tried = append(p.tried, tier)
 	p.specs = append(p.specs, spec)
+	if len(p.queue) > 0 {
+		err := p.queue[0]
+		p.queue = p.queue[1:]
+		return err
+	}
 	return p.fail[tier]
+}
+
+// TestManagerSeamNeedsNoFuncSeams pins the promise on App.manager: an
+// App with only a fake connection installed touches no real socket.
+// Before this, probeManager and measureSandbox fell through to the
+// process-wide client whenever the func seams were nil — a test that
+// set manager alone would dial the real $XDG_RUNTIME_DIR socket and
+// start a real probe unit on the machine running the tests.
+func TestManagerSeamNeedsNoFuncSeams(t *testing.T) {
+	conn := newFakeSystemdConn()
+	a := &App{logger: zap.NewNop(), manager: conn}
+	if err := a.probeManager(); err != nil {
+		t.Fatalf("an installed connection is reachable by construction: %v", err)
+	}
+	got := a.measureSandbox()
+	if got.tier != sandboxFull {
+		t.Fatalf("tier = %v (%s), want full — the fake answers done, so the measurement through it must too", got.tier, got.reason)
+	}
+	// The measurement went through the installed connection, not the
+	// process-wide client: the fake saw the probe's own unit.
+	probed := false
+	for _, u := range conn.started {
+		if strings.Contains(u.Name, "sandboxprobe_") {
+			probed = true
+		}
+	}
+	if !probed {
+		t.Fatalf("no probe unit reached the installed connection; started: %v", len(conn.started))
+	}
+}
+
+// TestProbeSandboxCapabilityRetriesTimeout pins the one retry, and
+// its shape. With `sandbox on` the default, the probe's verdict
+// decides whether hotserve starts at all, and hotserve.service has no
+// Restart= — so a transient timeout under boot load must get a second
+// attempt before it becomes a refusal to start. Only a timeout: a
+// probe that FAILED measured the host, and retrying a measurement
+// would just slow every refusal down.
+func TestProbeSandboxCapabilityRetriesTimeout(t *testing.T) {
+	t.Run("a timeout is retried and the host recovers", func(t *testing.T) {
+		r := &probeRunner{fakeRunner: &fakeRunner{}, queue: []error{context.DeadlineExceeded, nil}}
+		got := probeSandboxCapability(r)
+		if got.tier != sandboxFull {
+			t.Fatalf("tier = %v (%s), want full: one slow attempt must not decide the start", got.tier, got.reason)
+		}
+		if len(r.tried) != 2 {
+			t.Fatalf("tried %d times, want 2", len(r.tried))
+		}
+	})
+	t.Run("a second timeout is the verdict", func(t *testing.T) {
+		r := &probeRunner{fakeRunner: &fakeRunner{}, queue: []error{context.DeadlineExceeded, context.DeadlineExceeded}}
+		got := probeSandboxCapability(r)
+		if got.tier != sandboxNone || !strings.Contains(got.reason, "deadline") {
+			t.Fatalf("tier = %v (%s), want none with the timeout in the reason", got.tier, got.reason)
+		}
+		if len(r.tried) != 2 {
+			t.Fatalf("tried %d times, want 2 — the retry is bounded", len(r.tried))
+		}
+	})
+	// A fast failure is not retried; TestProbeSandboxCapability pins
+	// that with its exact tried == [full] assertions.
 }
 
 func TestProbeSandboxCapability(t *testing.T) {
@@ -490,7 +563,7 @@ func TestBuildEnvSandboxedHome(t *testing.T) {
 // the relaunch that has no fallback.
 func TestDeployUsesPolicyRelaunchUsesRecord(t *testing.T) {
 	rig := newTestRig(t)
-	rig.spec.sandboxMode = sandboxAuto
+	rig.spec.sandboxMode = sandboxOn
 	rig.spec.sandboxTier = sandboxFull
 	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/a.tgz", version: "v1"}))
 	if got := rig.runner.started[0].sandbox; got == nil || got.tier != sandboxFull {
@@ -515,7 +588,7 @@ func TestDeployUsesPolicyRelaunchUsesRecord(t *testing.T) {
 	// A recorded bare instance relaunches bare although policy now
 	// says full.
 	rig2 := newTestRig(t)
-	rig2.spec.sandboxMode = sandboxAuto
+	rig2.spec.sandboxMode = sandboxOn
 	rig2.spec.sandboxTier = sandboxFull
 	must(t, rig2.store.save(appState{CurrentVersion: "v1", Port: 1, Handle: handleState{Unit: "hotserve-demo.v1.abc.service"}}))
 	must(t, mkdirRelease(rig2.spec, "v1"))
@@ -555,7 +628,7 @@ func TestDeployUsesPolicyRelaunchUsesRecord(t *testing.T) {
 	// suite green while status under-reported a sandboxed app as
 	// "none" and the next watchdog restart relaunched it bare.
 	rig4 := newTestRig(t)
-	rig4.spec.sandboxMode = sandboxAuto
+	rig4.spec.sandboxMode = sandboxOn
 	rig4.spec.sandboxTier = sandboxFull
 	rig4.runner.reattachOK = true
 	must(t, rig4.store.save(appState{CurrentVersion: "v1", Port: 1, Handle: handleState{Unit: "hotserve-demo.v1.abc.service", Sandbox: "full"}}))
@@ -573,10 +646,10 @@ func TestDeployUsesPolicyRelaunchUsesRecord(t *testing.T) {
 
 func TestCaddyfileSandboxDirectives(t *testing.T) {
 	d := caddyfile.NewTestDispenser(`liveswap {
-		sandbox require
+		sandbox on
 		app blog {
 			command node server.js
-			sandbox auto
+			sandbox off
 		}
 		app api {
 			command ./server
@@ -586,14 +659,14 @@ func TestCaddyfileSandboxDirectives(t *testing.T) {
 	if err := a.UnmarshalCaddyfile(d); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if a.Sandbox != "require" || a.Apps["blog"].Sandbox != "auto" || a.Apps["api"].Sandbox != "" {
+	if a.Sandbox != "on" || a.Apps["blog"].Sandbox != "off" || a.Apps["api"].Sandbox != "" {
 		t.Fatalf("sandbox modes wrong: %q %q %q", a.Sandbox, a.Apps["blog"].Sandbox, a.Apps["api"].Sandbox)
 	}
 	for _, bad := range []string{
 		// extra_path was removed; the directive must not be silently accepted.
 		"liveswap {\n app x {\n command a\n extra_path /p\n }\n}",
 		"liveswap {\n sandbox\n}",
-		"liveswap {\n app x {\n command a\n sandbox auto extra\n }\n}",
+		"liveswap {\n app x {\n command a\n sandbox on extra\n }\n}",
 	} {
 		var a App
 		if err := a.UnmarshalCaddyfile(caddyfile.NewTestDispenser(bad)); err == nil {
@@ -616,10 +689,10 @@ func TestValidateSandboxConfig(t *testing.T) {
 	}
 	// Precedence: the app's mode beats the global one; "" defers.
 	a := base()
-	a.Sandbox = "require"
+	a.Sandbox = "on"
 	spec, err := a.buildSpec("blog", a.Apps["blog"])
 	must(t, err)
-	if spec.sandboxMode != "require" {
+	if spec.sandboxMode != "on" {
 		t.Fatalf("global mode not inherited: %q", spec.sandboxMode)
 	}
 	a.Apps["blog"].Sandbox = "off"
@@ -628,16 +701,31 @@ func TestValidateSandboxConfig(t *testing.T) {
 	if spec.sandboxMode != "off" {
 		t.Fatalf("app mode must override: %q", spec.sandboxMode)
 	}
-	for name, mutate := range map[string]func(*App){
-		"bad global mode": func(a *App) { a.Sandbox = "yes" },
-		"bad app mode":    func(a *App) { a.Apps["blog"].Sandbox = "on" },
-		"root in state":   func(a *App) { a.Root = "/var/lib/hotserve/apps" },
+	for name, tc := range map[string]struct {
+		mutate func(*App)
+		want   []string // substrings the refusal must carry
+	}{
+		"bad global mode": {func(a *App) { a.Sandbox = "yes" }, []string{`must be "on" or "off"`}},
+		"bad app mode":    {func(a *App) { a.Apps["blog"].Sandbox = "maybe" }, []string{"app blog", `must be "on" or "off"`}},
+		// The two spellings of the policy this replaced get their own
+		// messages naming the replacement — asserted on content, so
+		// collapsing them into the generic rejection fails here rather
+		// than leaving the promise unpinned.
+		"retired auto":    {func(a *App) { a.Sandbox = "auto" }, []string{`"auto" has been removed`, `"on"`, `"off"`}},
+		"retired require": {func(a *App) { a.Apps["blog"].Sandbox = "require" }, []string{`"require" is now spelled "on"`}},
+		"root in state":   {func(a *App) { a.Root = "/var/lib/hotserve/apps" }, nil},
 	} {
 		t.Run(name, func(t *testing.T) {
 			a := base()
-			mutate(a)
-			if err := a.Validate(); err == nil {
+			tc.mutate(a)
+			err := a.Validate()
+			if err == nil {
 				t.Fatal("accepted")
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("refusal %q lacks %q", err, w)
+				}
 			}
 		})
 	}
@@ -645,8 +733,9 @@ func TestValidateSandboxConfig(t *testing.T) {
 
 // TestStartResolvesSandboxPolicy drives App.Start with a scripted host
 // that cannot deliver the sandbox — a container, or a kernel that
-// refuses user namespaces: require refuses to start and names the
-// reason; auto starts unsandboxed and warns; off never probes.
+// refuses user namespaces: `on` refuses to start and names the reason;
+// `off` never probes. There is no third case, which is the point —
+// with `auto` gone there is no mode that starts anyway.
 func TestStartResolvesSandboxPolicy(t *testing.T) {
 	probes, managerProbes := 0, 0
 	newApp := func(mode string) *App {
@@ -692,16 +781,9 @@ func TestStartResolvesSandboxPolicy(t *testing.T) {
 			},
 		}
 	}
-	a := newApp(sandboxRequire)
+	a := newApp(sandboxOn)
 	if err := a.Start(); err == nil || !strings.Contains(err.Error(), "Permission denied") {
-		t.Fatalf("require on a host without the sandbox must refuse with the reason, got %v", err)
-	}
-	a = newApp(sandboxAuto)
-	if err := a.Start(); err != nil {
-		t.Fatalf("auto must start: %v", err)
-	}
-	if a.specs["demo"].sandboxTier != sandboxNone {
-		t.Fatalf("auto tier = %v", a.specs["demo"].sandboxTier)
+		t.Fatalf("`on` against a host without the sandbox must refuse with the reason, got %v", err)
 	}
 	_ = a.Cleanup()
 	before := probes
@@ -721,8 +803,8 @@ func TestStartResolvesSandboxPolicy(t *testing.T) {
 	// prove the manager reachable first — the seam that replaced the
 	// probeUserManager package var, and the precondition the cached
 	// measurement's own early return depends on.
-	if managerProbes != 3 {
-		t.Fatalf("manager reachability probed %d times across 3 starts, want 3", managerProbes)
+	if managerProbes != 2 {
+		t.Fatalf("manager reachability probed %d times across 2 starts, want 2", managerProbes)
 	}
 }
 
@@ -752,12 +834,10 @@ func TestRelaunchBelowFullWarns(t *testing.T) {
 		recorded string
 		want     int
 	}{
-		{"auto, bare record", sandboxAuto, "", 1},
-		// require, not a second spelling of the bare record above:
-		// warnSandboxTier short-circuits on sandboxOff alone, and
-		// nothing else in the suite pins that require still warns.
-		{"require, bare record", sandboxRequire, "", 1},
-		{"auto, full record", sandboxAuto, "full", 0},
+		{"on, bare record", sandboxOn, "", 1},
+		{"on, full record", sandboxOn, "full", 0},
+		// warnSandboxTier short-circuits on sandboxOff alone, so this
+		// row is what pins that the short-circuit is the only one.
 		{"off, bare record", sandboxOff, "", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -831,11 +911,11 @@ func TestWarnEnvFileInView(t *testing.T) {
 		mode    string
 		want    int
 	}{
-		{"outside every view", "/etc/hotserve/demo.env", sandboxAuto, 0},
-		{"in shared", filepath.Join(spec.dirs.shared, "demo.env"), sandboxAuto, 1},
-		{"in releases", filepath.Join(spec.dirs.releases, "v1", "demo.env"), sandboxAuto, 1},
+		{"outside every view", "/etc/hotserve/demo.env", sandboxOn, 0},
+		{"in shared", filepath.Join(spec.dirs.shared, "demo.env"), sandboxOn, 1},
+		{"in releases", filepath.Join(spec.dirs.releases, "v1", "demo.env"), sandboxOn, 1},
 		{"in shared but unsandboxed", filepath.Join(spec.dirs.shared, "demo.env"), sandboxOff, 0},
-		{"no env_file", "", sandboxAuto, 0},
+		{"no env_file", "", sandboxOn, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			core, logs := observer.New(zap.WarnLevel)
@@ -869,7 +949,7 @@ func TestWarnEnvFileInView(t *testing.T) {
 
 		core, logs := observer.New(zap.WarnLevel)
 		s := *spec
-		s.envFile, s.sandboxMode = link, sandboxAuto
+		s.envFile, s.sandboxMode = link, sandboxOn
 		warnEnvFileInView(zap.New(core), map[string]*appSpec{"demo": &s})
 		if logs.Len() != 1 {
 			t.Fatalf("an env_file linked into shared/ must warn: %v", logs.All())
@@ -1887,166 +1967,5 @@ func TestSandboxFailedMeasurementIsNotCached(t *testing.T) {
 	}
 	if c.cachedSandboxCapability(failing); measured != 3 {
 		t.Fatalf("measured %d: a cached success must still be served", measured)
-	}
-}
-
-// TestSandboxedStartFailureForgetsCapability pins the invalidation the
-// connection generation cannot provide. The capability is cached
-// against the manager connection, but what it measures is the kernel
-// and the LSM: user.max_user_namespaces, an AppArmor policy reload or
-// a container limit can take the namespaces away while the connection
-// stays up. Without this the cached `full` would stand and `sandbox
-// auto` would keep choosing a tier whose units no longer start —
-// failing every deploy, where auto's contract is to degrade with a
-// WARN and keep serving.
-func TestSandboxedStartFailureForgetsCapability(t *testing.T) {
-	c := &userManagerClient{}
-	c.generation.Add(1)
-	measured := 0
-	full := func() sandboxCapability {
-		measured++
-		return sandboxCapability{tier: sandboxFull}
-	}
-	if got := c.cachedSandboxCapability(full); got.tier != sandboxFull || measured != 1 {
-		t.Fatalf("tier=%v measured=%d", got.tier, measured)
-	}
-
-	// A unit that failed to start WITHOUT a sandbox says nothing about
-	// the host's namespaces, and must not cost a measurement.
-	r := &systemdRunner{conn: c}
-	r.sandboxedStartFailed(unitSpec{Name: "bare.service"})
-	r.sandboxedStartFailed(unitSpec{Name: "off.service", Sandbox: &sandboxSpec{tier: sandboxNone}})
-	if c.cachedSandboxCapability(full); measured != 1 {
-		t.Fatalf("measured %d: an unsandboxed start failure is not evidence about the sandbox", measured)
-	}
-
-	// One that failed WITH a sandbox applied is. Driven through Start,
-	// not by calling the helper: the wiring is the thing that can be
-	// deleted, and asserting the helper alone leaves Start free to
-	// stop calling it with every test still green.
-	r.sandboxedStartFailed(unitSpec{Name: "app.service", Sandbox: &sandboxSpec{tier: sandboxFull}})
-	if c.sandboxGen != 0 {
-		t.Fatal("a sandboxed start failure left the stale capability cached")
-	}
-	degraded := func() sandboxCapability {
-		measured++
-		return sandboxCapability{tier: sandboxNone, reason: "full tier: unit failed: Permission denied"}
-	}
-	got := c.cachedSandboxCapability(degraded)
-	if got.tier != sandboxNone || measured != 2 {
-		t.Fatalf("tier=%v measured=%d: the next start must re-measure the host", got.tier, measured)
-	}
-	// And auto now degrades with a warning instead of selecting a tier
-	// whose units cannot start.
-	tier, warn, err := resolveSandboxTier(sandboxAuto, got)
-	if err != nil || tier != sandboxNone || warn == "" {
-		t.Fatalf("auto must degrade with a WARN: tier=%v warn=%q err=%v", tier, warn, err)
-	}
-}
-
-// forgetCountingConn is a fake connection that also carries the
-// optional capability cache, so a test can see Start reach for it.
-type forgetCountingConn struct {
-	*fakeSystemdConn
-	forgotten int
-}
-
-func (f *forgetCountingConn) forgetSandboxCapability() { f.forgotten++ }
-
-// TestStartForgetsCapabilityOnSandboxedFailure pins the WIRING, not the
-// helper: that Start's failure path is what reports a sandboxed unit
-// the manager refused. Without this, deleting the one call from Start
-// leaves every other sandbox test green while the stale capability
-// survives and auto keeps choosing a tier whose units cannot start.
-func TestStartForgetsCapabilityOnSandboxedFailure(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		sandbox *sandboxSpec
-		want    int
-	}{
-		{"sandboxed unit the manager refused", &sandboxSpec{tier: sandboxFull, root: "/var/lib/liveswap"}, 1},
-		{"bare unit that failed for its own reasons", nil, 0},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			conn := &forgetCountingConn{fakeSystemdConn: newFakeSystemdConn()}
-			conn.startResult = "failed"
-			conn.failStatus = &unitStatus{LoadState: "loaded", ActiveState: "failed", Result: "exit-code", ExecMainCode: 1, ExecMainStatus: 226}
-			r := newSystemdRunner(conn, zap.NewNop())
-			t.Cleanup(r.cancel)
-			if _, err := r.Start(startSpec{app: "demo", version: "v1", command: []string{"/bin/true"}, sandbox: tc.sandbox}); err == nil {
-				t.Fatal("a start job that did not return done must be an error")
-			}
-			if conn.forgotten != tc.want {
-				t.Fatalf("capability forgotten %d times, want %d", conn.forgotten, tc.want)
-			}
-		})
-	}
-}
-
-// TestRunOnceForgetsCapabilityOnSandboxedFailure covers the launch path
-// Start does not: a sandboxed pre_start goes through RunOnce, and if a
-// live namespace or LSM change first surfaces there, the stale
-// capability would survive and later reloads keep choosing a tier
-// whose units cannot start.
-func TestRunOnceForgetsCapabilityOnSandboxedFailure(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		spec    startSpec
-		want    int
-		startEr bool
-	}{
-		{name: "sandboxed pre_start the manager refused",
-			spec: startSpec{app: "demo", version: "v1", command: []string{"/bin/true"}, sandbox: &sandboxSpec{tier: sandboxFull, root: "/var/lib/liveswap"}},
-			want: 1},
-		{name: "the capability probe's own unit is exempt",
-			spec: startSpec{app: "sandbox-probe", version: "full", command: []string{"/bin/true"}, probe: true, sandbox: probeSandboxSpec(sandboxFull)},
-			want: 0},
-		{name: "bare pre_start",
-			spec: startSpec{app: "demo", version: "v1", command: []string{"/bin/true"}},
-			want: 0},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			conn := &forgetCountingConn{fakeSystemdConn: newFakeSystemdConn()}
-			conn.startResult = "failed"
-			conn.failStatus = &unitStatus{LoadState: "loaded", ActiveState: "failed", Result: "exit-code", ExecMainCode: 1, ExecMainStatus: 226}
-			r := newSystemdRunner(conn, zap.NewNop())
-			t.Cleanup(r.cancel)
-			if err := r.RunOnce(context.Background(), tc.spec); err == nil {
-				t.Fatal("a oneshot whose job did not return done must be an error")
-			}
-			if conn.forgotten != tc.want {
-				t.Fatalf("capability forgotten %d times, want %d", conn.forgotten, tc.want)
-			}
-		})
-	}
-}
-
-// TestForgetSandboxCapabilityDoesNotBlock pins that invalidation never
-// waits on a measurement. It is called from launch paths — one under
-// deployMu, one holding a stop deadline already counting down — while
-// a concurrent measurement can hold sandboxMu for the probe's whole
-// budget. Blocking there would spend a deploy's time, or the budget
-// for stopping a pre_start that may still be executing, on bookkeeping.
-func TestForgetSandboxCapabilityDoesNotBlock(t *testing.T) {
-	c := &userManagerClient{}
-	c.generation.Add(1)
-	c.cachedSandboxCapability(func() sandboxCapability { return sandboxCapability{tier: sandboxFull} })
-
-	c.sandboxMu.Lock() // a measurement in flight
-	done := make(chan struct{})
-	go func() { c.forgetSandboxCapability(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		c.sandboxMu.Unlock()
-		t.Fatal("invalidation blocked behind an in-flight measurement")
-	}
-	c.sandboxMu.Unlock()
-
-	// Skipped, not lost: the measurement holding the mutex publishes a
-	// fresh reading, and an uncontended call still clears.
-	c.forgetSandboxCapability()
-	if c.sandboxGen != 0 {
-		t.Fatal("an uncontended invalidation must clear the cache")
 	}
 }

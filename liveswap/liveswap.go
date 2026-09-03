@@ -110,12 +110,10 @@ type App struct {
 	// AllowInsecureHTTP. Apps may override.
 	ArtifactAllowlist []string `json:"artifact_allowlist,omitempty"`
 
-	// Sandbox is the default per-app sandbox policy: "auto" (the best
-	// tier this host delivers, with a WARN when that is not the full
-	// one), "require" (the full tier or refuse to start — this can keep
-	// the whole server from starting on a host that cannot deliver it;
-	// tighten to it only after auto has been proven per app), or
-	// "off". Default "auto". Apps may override. See liveswap/README.md.
+	// Sandbox is the default per-app sandbox policy: "on" (the full
+	// sandbox, or refuse to start — this keeps the whole server from
+	// starting on a host that cannot deliver it) or "off". Default
+	// "on". Apps may override. See liveswap/README.md.
 	Sandbox string `json:"sandbox,omitempty"`
 
 	// Apps defines the managed applications, keyed by name
@@ -135,12 +133,16 @@ type App struct {
 	recoverCancel context.CancelFunc
 	recoverWG     *sync.WaitGroup // pointer: App values are copied by Caddy
 	// manager is the manager connection everything this config starts
-	// talks to — its apps' runners and its unknown-app sweep. Typed as
+	// talks to — its apps' runners, its unknown-app sweep, and (when
+	// the seams below are nil) its capability measurement. Typed as
 	// the interface, so a test installs a fake here and Start touches
-	// no real socket; nil means the process-wide client.
+	// no real socket; nil means the process-wide client. probeManager
+	// and measureSandbox honour it, so that promise holds whether or
+	// not the seams are set.
 	//
-	// managerProbe and sandboxProbe are the two seams that need the
-	// concrete client (reachability, and the cached measurement).
+	// managerProbe and sandboxProbe script the two OUTCOMES directly —
+	// reachability, and the measured capability — for a test that
+	// wants an answer rather than a connection to measure through.
 	// Fields rather than the package vars they replace: a test scripts
 	// a host on its own App instead of mutating global state and
 	// restoring it in a t.Cleanup.
@@ -250,8 +252,8 @@ type AppConfig struct {
 	// is additionally capped at 10x this. Default 100MB.
 	MaxArtifactSize int64 `json:"max_artifact_size,omitempty"`
 
-	// Sandbox overrides the global sandbox policy for this app:
-	// "auto", "require" or "off". Default: the global setting.
+	// Sandbox overrides the global sandbox policy for this app: "on"
+	// or "off". Default: the global setting.
 	Sandbox string `json:"sandbox,omitempty"`
 }
 
@@ -278,7 +280,7 @@ func (a *App) Provision(ctx caddy.Context) error {
 	}
 	resolveTrustPlaceholders(repl, a.DeployTrust)
 	if a.Sandbox == "" {
-		a.Sandbox = sandboxAuto
+		a.Sandbox = sandboxOn
 	}
 	if a.Root == "" {
 		a.Root = "/var/lib/liveswap"
@@ -495,12 +497,12 @@ func (a *App) Validate() error {
 	if err := validateSandboxRoot(a.Root, a.anySandboxed()); err != nil {
 		return err
 	}
-	if a.Sandbox != "" && !validSandboxMode(a.Sandbox) { // "" = the default Provision applies (auto)
-		return fmt.Errorf("sandbox must be \"auto\", \"require\" or \"off\", got %q", a.Sandbox)
+	if err := sandboxModeError(a.Sandbox); err != nil {
+		return err
 	}
 	for name, cfg := range a.Apps {
-		if cfg.Sandbox != "" && !validSandboxMode(cfg.Sandbox) {
-			return fmt.Errorf("app %s: sandbox must be \"auto\", \"require\" or \"off\", got %q", name, cfg.Sandbox)
+		if err := sandboxModeError(cfg.Sandbox); err != nil {
+			return fmt.Errorf("app %s: %w", name, err)
 		}
 		if !appNameRe.MatchString(name) {
 			return fmt.Errorf("app name %q must match %s", name, appNameRe)
@@ -584,9 +586,9 @@ func (a *App) Start() error {
 	}
 	// Sandbox policy is settled here, on every start, against what this
 	// host delivers: the probe runs a throwaway unit with the sandbox
-	// applied and checks the namespaces from inside. `require` on a
-	// host that falls short fails the start — by design, and documented
-	// as such — so it is checked before any app is configured.
+	// applied and checks the namespaces from inside. A host that falls
+	// short fails the start — by design, and documented as such — so it
+	// is checked before any app is configured.
 	//
 	// The measurement itself is cached on the manager connection, so a
 	// reload that changes nothing about the manager does not pay for a
@@ -594,14 +596,11 @@ func (a *App) Start() error {
 	if a.sandboxWanted() {
 		capability := a.measureSandbox()
 		for name, spec := range a.specs {
-			tier, warn, err := resolveSandboxTier(spec.sandboxMode, capability)
+			tier, err := resolveSandboxTier(spec.sandboxMode, capability)
 			if err != nil {
 				return fmt.Errorf("app %s: %w", name, err)
 			}
 			spec.sandboxTier = tier
-			if warn != "" {
-				a.logger.Warn(warn, zap.String("app", name), zap.String("tier", tier.String()))
-			}
 		}
 	}
 	for name, ma := range a.managed {
@@ -671,6 +670,12 @@ func (a *App) probeManager() error {
 	if a.managerProbe != nil {
 		return a.managerProbe()
 	}
+	if a.manager != nil {
+		// An installed connection is reachable by construction. The
+		// field exists so this App touches no real socket, and the
+		// process-wide client below is exactly that socket.
+		return nil
+	}
 	return userManager.probe()
 }
 
@@ -679,6 +684,15 @@ func (a *App) probeManager() error {
 func (a *App) measureSandbox() sandboxCapability {
 	if a.sandboxProbe != nil {
 		return a.sandboxProbe(a.logger)
+	}
+	if a.manager != nil {
+		// Measure through the installed connection, uncached: the
+		// cache belongs to the real client (it keeps a throwaway unit
+		// off Caddy's reload path), and a scripted connection answers
+		// at scripted speed.
+		r := newSystemdRunner(a.manager, a.logger)
+		defer r.cancel()
+		return probeSandboxCapability(r)
 	}
 	return userManager.sandboxCapability(a.logger)
 }

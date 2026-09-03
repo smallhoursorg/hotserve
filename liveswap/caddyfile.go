@@ -46,7 +46,7 @@ func parseWebhookDirective(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler,
 //	    deploy_trust <preset>  { ... }   # who may deploy (repeatable)
 //	    allow_insecure_http
 //	    artifact_allowlist     <host[:port][/path/][?param&param...]...>
-//	    sandbox                <auto|require|off>   # default for every app
+//	    sandbox                <on|off>   # default for every app
 //	    app <name> {
 //	        command           <cmd> [args...]
 //	        pre_start         <cmd> [args...]
@@ -54,7 +54,7 @@ func parseWebhookDirective(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler,
 //	        env_file          <path>
 //	        deploy_trust <preset> { ... }  # overrides the global default
 //	        artifact_allowlist <host[:port][/path/][?param&param...]...>
-//	        sandbox           <auto|require|off>   # overrides the global default
+//	        sandbox           <on|off>   # overrides the global default
 //	        health_path       <path|off>
 //	        health_interval   <duration>
 //	        health_timeout    <duration>

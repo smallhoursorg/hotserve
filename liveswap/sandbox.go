@@ -2,6 +2,7 @@ package liveswap
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -26,9 +27,10 @@ import (
 //
 // One tier, because the support matrix is one release: Debian 13 ships
 // systemd 257 and does not restrict unprivileged user namespaces. A
-// host that cannot deliver it gets no sandbox at all rather than a
-// lesser one — `sandbox require` refuses to start, `auto` launches with
-// a WARN naming the residual. (An earlier "filesystem" tier — the user
+// host that cannot deliver it is refused rather than given a lesser
+// one: `sandbox on` fails the start, naming what the host lacks and
+// `sandbox off` as the way to run without it. (An earlier "filesystem"
+// tier — the user
 // namespace without the PID namespace — was what Debian 12 and Ubuntu
 // 24.04 could manage. It was briefly kept as a value state.json might
 // already hold, until the release history was checked: v0.1.0 is the
@@ -46,13 +48,22 @@ import (
 // the host after a unit started is absent from it for exactly the same
 // reason every other path is.
 //
-// The policy (auto/require/off) is resolved per app at Start against a
-// host capability measured once per manager connection (not per
-// config load: the measurement costs a whole unit — see
+// The policy (on/off) is resolved per app at Start against a host
+// capability measured once per manager connection (not per config
+// load: the measurement costs a whole unit — see
 // userManagerClient.sandboxCapability); the tier an instance actually
 // got is recorded with its handle in state.json so a relaunch
 // reproduces it (engage on the next deploy, never on the upgrade
 // relaunch — see liveswap/DESIGN-sandbox.md, rollout semantics).
+//
+// Because there is one tier and no lesser one to fall back to, the
+// measurement decides whether hotserve starts at all rather than which
+// tier it picks: a host that cannot deliver it fails Start with the
+// probe's reason attached. That makes the sandbox an availability
+// dependency, which is the deliberate trade — a supervisor that
+// quietly ran every app with no isolation because the kernel changed
+// its mind is the worse outcome. `sandbox off` is the escape, and
+// every refusal names it.
 
 // sandboxTier is what a unit actually gets.
 type sandboxTier int
@@ -116,15 +127,40 @@ func parseSandboxTier(s string) sandboxTier {
 	}
 }
 
-// Sandbox policy values, as configured.
+// Sandbox policy values, as configured. Two, not three: an `auto` that
+// silently ran an app with no isolation on a host that could not
+// deliver the full sandbox was the "looks configured, quietly weaker"
+// failure this design refuses everywhere else. There is one supported
+// tier, so the policy is whether to insist on it.
 const (
-	sandboxAuto    = "auto"    // best available tier; WARN when it is not full
-	sandboxRequire = "require" // full or refuse to start
-	sandboxOff     = "off"
+	sandboxOn  = "on" // the full sandbox, or refuse to start
+	sandboxOff = "off"
 )
 
 func validSandboxMode(s string) bool {
-	return s == sandboxAuto || s == sandboxRequire || s == sandboxOff
+	return s == sandboxOn || s == sandboxOff
+}
+
+// sandboxModeError validates a configured mode, naming the two
+// spellings this policy replaced rather than lumping them into the
+// generic message. Not a migration path — there is nothing to
+// migrate: v0.1.0 is the only tag, it predates sandboxing entirely,
+// and nothing is deployed. It is for the configs that do exist,
+// written against the development branch, and for a reader coming
+// from the design docs, whose superseded passages still say `auto`
+// and `require`. "" is the default Provision fills in.
+func sandboxModeError(mode string) error {
+	if mode == "" || validSandboxMode(mode) {
+		return nil
+	}
+	switch mode {
+	case "auto":
+		return fmt.Errorf("sandbox %q has been removed: on a host that could not deliver the sandbox it ran apps with none at all, which is the %q failure it was named against. Use %q (the default), which refuses to start instead, or %q to run without one deliberately",
+			"auto", "looks configured, quietly weaker", sandboxOn, sandboxOff)
+	case "require":
+		return fmt.Errorf("sandbox %q is now spelled %q, and is the default", "require", sandboxOn)
+	}
+	return fmt.Errorf("sandbox must be %q or %q, got %q", sandboxOn, sandboxOff, mode)
 }
 
 // sandboxCapability is what the host can deliver. Measured by starting
@@ -136,24 +172,18 @@ type sandboxCapability struct {
 }
 
 // resolveSandboxTier applies the configured policy to the host's
-// capability. require accepts only the full tier: accepting a weaker
-// one silently is the "looks configured, quietly weaker" failure the
-// design forbids. warn is non-empty when auto settled below full.
-func resolveSandboxTier(mode string, c sandboxCapability) (tier sandboxTier, warn string, err error) {
-	switch mode {
-	case sandboxOff:
-		return sandboxNone, "", nil
-	case sandboxRequire:
-		if c.tier != sandboxFull {
-			return sandboxNone, "", fmt.Errorf("sandbox require: this host cannot deliver the full sandbox (%s); use `sandbox auto` to run with no sandbox at all, or fix the host", c.reason)
-		}
-		return sandboxFull, "", nil
-	default: // auto
-		if c.tier == sandboxFull {
-			return sandboxFull, "", nil
-		}
-		return c.tier, fmt.Sprintf("sandbox auto: running with no sandbox at all, not the full one (%s)", c.reason), nil
+// capability: the full tier, or a refusal naming what the host lacks
+// and the one setting that runs without it. The error reaches the
+// operator through App.Start, so it must carry the remedy — this is
+// the message someone reads when the server will not come up.
+func resolveSandboxTier(mode string, c sandboxCapability) (sandboxTier, error) {
+	if mode == sandboxOff {
+		return sandboxNone, nil
 	}
+	if c.tier != sandboxFull {
+		return sandboxNone, fmt.Errorf("sandbox on: this host cannot deliver the full sandbox (%s); fix the host, or set `sandbox off` to run this app with no sandbox at all", c.reason)
+	}
+	return sandboxFull, nil
 }
 
 // bindPath is one of the app's own directories bound back into its
@@ -482,7 +512,14 @@ func (s *appSpec) sandboxSpecFor(releaseDir string, tier sandboxTier) *sandboxSp
 
 // warnSandboxTier logs, at every launch, when an app that wants a
 // sandbox is getting less than the full one — the design's "prominent
-// WARN at every spawn", so a degraded host is never a quiet fact.
+// WARN at every spawn".
+//
+// With `sandbox on` refusing the start outright, the one way here is a
+// relaunch reproducing an instance recorded bare (the rollout
+// contract: sandboxing engages on the next deploy, never on the
+// upgrade relaunch). That app is running unsandboxed while its config
+// asks for a sandbox, which is exactly the state worth saying out loud
+// every time.
 func warnSandboxTier(c collaborators, spec *appSpec, tier sandboxTier) {
 	if spec.sandboxMode == sandboxOff || tier == sandboxFull {
 		return
@@ -544,8 +581,8 @@ const sandboxProbeTimeout = 30 * time.Second
 // user namespaces, or an LSM that refuses them all fail the unit on a
 // manager whose version says it should have worked. A unit the manager
 // refuses, or a probe that exits non-zero (a property silently
-// ignored), fails with the reason kept for the WARN and the require
-// error.
+// ignored), fails with the reason kept for the refusal `sandbox on`
+// raises.
 //
 // The probe also proves the base view: /bin/sh has to exist inside the
 // unit for the script to run at all, so a host whose runtime the base
@@ -553,18 +590,38 @@ const sandboxProbeTimeout = 30 * time.Second
 func probeSandboxCapability(r runner) sandboxCapability {
 	var reasons []string
 	try := func(tier sandboxTier) bool {
-		ctx, cancel := context.WithTimeout(context.Background(), sandboxProbeTimeout)
-		defer cancel()
-		err := r.RunOnce(ctx, startSpec{
-			app:     "sandbox-probe",
-			version: tier.String(),
-			command: sandboxProbeCommand(tier),
-			dir:     "/",
-			env:     []string{"PATH=/usr/bin:/bin"},
-			grace:   5 * time.Second,
-			sandbox: probeSandboxSpec(tier),
-			probe:   true,
-		})
+		attempt := func() error {
+			ctx, cancel := context.WithTimeout(context.Background(), sandboxProbeTimeout)
+			defer cancel()
+			return r.RunOnce(ctx, startSpec{
+				app:     "sandbox-probe",
+				version: tier.String(),
+				command: sandboxProbeCommand(tier),
+				dir:     "/",
+				env:     []string{"PATH=/usr/bin:/bin"},
+				grace:   5 * time.Second,
+				sandbox: probeSandboxSpec(tier),
+				probe:   true,
+			})
+		}
+		err := attempt()
+		if errors.Is(err, context.DeadlineExceeded) {
+			// One retry, for a timeout only. A probe that fails is a
+			// measurement; one that times out is the absence of one —
+			// the shape a capable host under boot load produces — and
+			// with `sandbox on` the default, this verdict decides
+			// whether hotserve starts at all. hotserve.service carries
+			// no Restart= (the liveswap watchdog is this system's only
+			// restarter), so at boot there is no next reload to
+			// re-measure on: without the retry, one slow attempt keeps
+			// a fully capable box down until someone restarts it by
+			// hand. A genuinely incapable host is not slowed by this —
+			// the manager refuses, or the unit fails, fast and with a
+			// reason on the first attempt. The cost is a worst case of
+			// two probe budgets on a host that times out twice, paid
+			// on a Start that was about to be refused anyway.
+			err = attempt()
+		}
 		if err != nil {
 			reasons = append(reasons, fmt.Sprintf("%s tier: %v", tier, err))
 			return false
@@ -590,7 +647,7 @@ func (a *App) effectiveSandbox(cfg *AppConfig) string {
 	if a.Sandbox != "" {
 		return a.Sandbox
 	}
-	return sandboxAuto
+	return sandboxOn
 }
 
 // anySandboxed reports whether any app will actually get a view. The
@@ -866,7 +923,7 @@ func canonicalDeepest(p string) string {
 // config over views that are not being built.
 func validateEnvFileIsolation(a *App) error {
 	// The same resolution buildSpec does: the app's own setting, else
-	// the global default, else auto (what Provision fills in).
+	// the global default, else on (what Provision fills in).
 	effective := func(cfg *AppConfig) string { return a.effectiveSandbox(cfg) }
 	sandboxed := false
 	for _, cfg := range a.Apps {
