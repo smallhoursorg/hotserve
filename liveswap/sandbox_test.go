@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -2017,5 +2018,35 @@ func TestRunOnceForgetsCapabilityOnSandboxedFailure(t *testing.T) {
 				t.Fatalf("capability forgotten %d times, want %d", conn.forgotten, tc.want)
 			}
 		})
+	}
+}
+
+// TestForgetSandboxCapabilityDoesNotBlock pins that invalidation never
+// waits on a measurement. It is called from launch paths — one under
+// deployMu, one holding a stop deadline already counting down — while
+// a concurrent measurement can hold sandboxMu for the probe's whole
+// budget. Blocking there would spend a deploy's time, or the budget
+// for stopping a pre_start that may still be executing, on bookkeeping.
+func TestForgetSandboxCapabilityDoesNotBlock(t *testing.T) {
+	c := &userManagerClient{}
+	c.generation.Add(1)
+	c.cachedSandboxCapability(func() sandboxCapability { return sandboxCapability{tier: sandboxFull} })
+
+	c.sandboxMu.Lock() // a measurement in flight
+	done := make(chan struct{})
+	go func() { c.forgetSandboxCapability(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		c.sandboxMu.Unlock()
+		t.Fatal("invalidation blocked behind an in-flight measurement")
+	}
+	c.sandboxMu.Unlock()
+
+	// Skipped, not lost: the measurement holding the mutex publishes a
+	// fresh reading, and an uncontended call still clears.
+	c.forgetSandboxCapability()
+	if c.sandboxGen != 0 {
+		t.Fatal("an uncontended invalidation must clear the cache")
 	}
 }

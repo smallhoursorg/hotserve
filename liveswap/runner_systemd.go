@@ -678,8 +678,12 @@ func (r *systemdRunner) RunOnce(ctx context.Context, spec startSpec) error {
 		// on the runner's own context — the caller's is already done.
 		stopCtx, cancel := context.WithTimeout(r.ctx, u.StopTimeout+stopSlack)
 		defer cancel()
+		// Stop first: stopCtx's deadline is already running, and a
+		// pre_start that may still be executing is worth more than the
+		// ordering of a cache invalidation.
+		err := r.stopUnobserved(stopCtx, u.Name, cause)
 		r.sandboxedStartFailed(u)
-		return r.stopUnobserved(stopCtx, u.Name, cause)
+		return err
 	}
 	if res == "done" {
 		return nil

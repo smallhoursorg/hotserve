@@ -92,8 +92,20 @@ func (c *userManagerClient) sandboxCapability(logger *zap.Logger) sandboxCapabil
 // restart; this covers everything else that can change the answer
 // under a live connection — see systemdRunner.sandboxedStartFailed,
 // which is the evidence that triggers it.
+// TryLock, not Lock: this is called from launch paths — one under
+// deployMu, one holding a stop deadline that is already ticking — and
+// a concurrent measurement holds sandboxMu for the probe's whole
+// budget. Waiting there would spend a deploy's time, or a pre_start's
+// stop budget, on bookkeeping.
+//
+// Skipping when contended is correct rather than merely expedient: the
+// measurement holding the mutex is about to publish a fresh reading of
+// this same host, which is what invalidating asks for. If it somehow
+// does not, the next failed launch tries again.
 func (c *userManagerClient) forgetSandboxCapability() {
-	c.sandboxMu.Lock()
+	if !c.sandboxMu.TryLock() {
+		return
+	}
 	defer c.sandboxMu.Unlock()
 	c.sandboxCap, c.sandboxGen = sandboxCapability{}, 0
 }
