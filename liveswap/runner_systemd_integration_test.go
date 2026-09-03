@@ -607,6 +607,70 @@ func run(t *testing.T, name string, args ...string) string {
 	return string(out)
 }
 
+// TestIntegrationSystemdSandboxedUnitFailsAfterItsStartJobSucceeds pins
+// the systemd semantics that decide WHERE a sandboxed unit's failure
+// can be observed, and so what a synchronous caller is entitled to
+// conclude from a start that returned cleanly.
+//
+// App units are Type=simple (unitProperties sets oneshot only for
+// pre_start). A Type=simple start job completes as soon as the manager
+// has forked — before the child sets its namespaces up and before it
+// execs — so everything that can go wrong in the child arrives
+// afterwards, through watch → finish, with the start job already
+// reported "done".
+//
+// That is why the capability invalidation removed in this branch could
+// not work: it hung off Start's and RunOnce's synchronous failure
+// paths, and the failure it existed to catch (226/NAMESPACE, when a
+// kernel or LSM change withdraws the namespaces under a live manager
+// connection) never reaches them. A future round tempted to reinstate
+// it should fail here first.
+//
+// A missing interpreter rather than broken namespaces: 203/EXEC and
+// 226/NAMESPACE both come from the same forked child after the same
+// "done", and this one needs no host surgery to provoke. unitFor's own
+// in-view check passes — the script is executable and inside the
+// sandbox view — so the failure genuinely happens in the child.
+func TestIntegrationSystemdSandboxedUnitFailsAfterItsStartJobSucceeds(t *testing.T) {
+	r := integrationRunner(t)
+	root, release, shared := sandboxRoot(t)
+	if err := os.WriteFile(filepath.Join(release, "server"), []byte("#!/nonexistent/interpreter\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	spec := startSpec{
+		app:     "itest",
+		version: "asyncfail",
+		command: []string{"./server"},
+		dir:     release,
+		env:     []string{"PATH=" + os.Getenv("PATH"), "HOME=" + shared},
+		grace:   2 * time.Second,
+		sandbox: &sandboxSpec{tier: sandboxFull, root: root, appDir: filepath.Join(root, "itest"), appName: "itest",
+			writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}}},
+	}
+	h, err := r.Start(spec)
+	if err != nil {
+		t.Fatalf("the start job reported this unit's failure synchronously: %v\n"+
+			"If systemd now completes a Type=simple job only after exec, the asynchrony this pins is gone "+
+			"and the sandbox capability cache could be invalidated from a launch path again.", err)
+	}
+	t.Cleanup(func() { _ = r.Stop(h, 2*time.Second) })
+
+	// The unit is already doomed, and nothing synchronous saw it.
+	select {
+	case <-r.Wait(h):
+	case <-time.After(30 * time.Second):
+		t.Fatal("unit never reached a terminal state")
+	}
+	exit := h.(*systemdHandle).exit.Load()
+	if exit == nil {
+		t.Fatal("no exit recorded for a unit observed dead")
+	}
+	if exit.ExecMainStatus != 203 {
+		t.Fatalf("ExecMainStatus = %d (%s), want 203/EXEC — the child died in exec, after the start job said done",
+			exit.ExecMainStatus, exit.exitString())
+	}
+}
+
 // TestIntegrationSystemdSIGTERMReachesNamespaceInit pins a property the
 // full tier could plausibly have broken: with PrivatePIDs= the app is
 // PID 1 of its own namespace, and the kernel discards signals sent to a
