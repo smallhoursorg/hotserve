@@ -64,7 +64,7 @@ verified JWT in `Authorization: Bearer` (see "Reducing the asset"):
 against public material, then a claim allowlist. Auth happens **before**
 existence is revealed: an unknown app name is verified against the
 *global* trust sources so callers cannot enumerate app names
-([handler.go:81-103](liveswap/handler.go)). Config load refuses an app
+([handler.go:76-110](liveswap/handler.go)). Config load refuses an app
 that resolves to zero trust sources ([liveswap.go](liveswap/liveswap.go)).
 The `X-Liveswap-Secret` custom header is retired — Bearer only, which
 Caddy redacts from access logs.
@@ -72,31 +72,32 @@ Caddy redacts from access logs.
 Properties that matter to the model:
 
 - **GET and POST both sit behind the secret.** GET returns full status,
-  POST deploys, all else 405 ([handler.go:105-113](liveswap/handler.go)).
+  POST deploys, all else 405 ([handler.go:101-109](liveswap/handler.go)).
   The status endpoint is authenticated — not public.
 - **No rate limiting anywhere on the auth path.** No throttle, lockout,
   or backoff. Token *forgery* is infeasible (no private key), so this is
   not a guessing oracle — but each failure logs at Warn with `app`+`remote`
-  ([handler.go:95-96](liveswap/handler.go)), an unauthenticated
+  ([handler.go:90-95](liveswap/handler.go)), an unauthenticated
   log-amplification / disk-fill primitive, and every attempt costs a
   JWT/JWKS verification. Body is
-  capped at 64 KiB → 413 ([handler.go:42,121-128](liveswap/handler.go));
+  capped at 64 KiB → 413 ([handler.go:37,133-140](liveswap/handler.go));
   `deployMu.TryLock()` → 409 serializes deploys
   ([app.go:258-260](liveswap/app.go)) but does nothing for auth attempts.
 - **Path routing is `path.Base(path.Clean(...))`**
-  ([handler.go:82](liveswap/handler.go)): `/anything/deep/myapp` targets
+  ([handler.go:77](liveswap/handler.go)): `/anything/deep/myapp` targets
   `myapp`. A naive `path /deploy/*` site matcher does not constrain the
   app name; the operator's matcher is the only constraint.
 - **Payload:** three fields only — `url`, `version`, `auth_header`
-  ([app.go:94-98](liveswap/app.go)); unknown JSON silently ignored (no
-  `DisallowUnknownFields`). `version` is `^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$` (no leading dot),
-  not `.`/`..`, double-sanitized before touching the filesystem
-  ([liveswap.go:50,63-65,72-74](liveswap/liveswap.go)). `auth_header`
-  is only control-char-checked ([handler.go:141-143](liveswap/handler.go));
+  ([app.go:112-116](liveswap/app.go)); unknown JSON silently ignored (no
+  `DisallowUnknownFields`). `version` is `^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$` (no leading
+  dot, so never `.`/`..` or a release-GC bookkeeping name),
+  double-sanitized before touching the filesystem
+  ([liveswap.go:65,77-79,85-87](liveswap/liveswap.go)). `auth_header`
+  is only control-char-checked ([handler.go:164-169](liveswap/handler.go));
   its contents are attacker-chosen and forwarded to the allowlisted host.
 - **Response leaks (all post-auth):** the 500 path returns raw
   `err.Error()` plus the full status snapshot
-  ([handler.go:159-162](liveswap/handler.go)) — filesystem paths, tar
+  ([handler.go:254-258](liveswap/handler.go)) — filesystem paths, tar
   entry names, the operator's allowlist echoed verbatim
   ([allowlist.go:279-281,363,379](liveswap/allowlist.go)). The status
   snapshot exposes the app's **port and PID** and watchdog cause/failure

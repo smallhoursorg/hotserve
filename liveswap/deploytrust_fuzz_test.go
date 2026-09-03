@@ -6,9 +6,9 @@
 // was exactly a claim shape (a round-numbered repository_id) that the
 // matcher mishandled. The property asserted is fail-closed matching:
 // a pin is satisfied exactly when the claim is present, scalar and
-// byte-equal to it, and the decision is rebuilt from the raw JSON
-// independently so a future "helpful" coercion in claimScalar cannot
-// pass unnoticed. decodeClaims never yielding a float64 is pinned too:
+// byte-equal to it — decided from the raw JSON alone, so that neither
+// a "helpful" coercion in claimScalar nor a refusal of a valid scalar
+// can pass unnoticed. decodeClaims never yielding a float64 is pinned too:
 // that is what makes claimScalar's float64 refusal unreachable from
 // production.
 package liveswap
@@ -71,18 +71,15 @@ func FuzzMatchClaims(f *testing.F) {
 
 		merr := matchClaims(map[string]string{pinName: pinValue}, got)
 
-		// The oracle: a pin matches exactly when its claim is present,
-		// scalar, and renders byte-equal. Neither direction may drift —
-		// a match beyond this is a coercion, a refusal within it is
-		// fail-closed turned fail-always.
-		v, present := got[pinName]
-		s, scalar := claimScalar(v)
-		if ok := present && scalar && s == pinValue; (merr == nil) != ok {
-			t.Fatalf("matchClaims(%q=%q, %s) = %v; present=%t scalar=%t rendering=%q value=%#v",
-				pinName, pinValue, raw, merr, present, scalar, s, v)
-		}
-		if merr == nil {
-			assertRawClaimEquals(t, raw, pinName, pinValue)
+		// The oracle is derived from the raw JSON alone — not from
+		// claimScalar, which is under test — so neither direction can
+		// drift unseen: a match the raw bytes do not justify is a
+		// coercion, a refusal they do justify is fail-closed turned
+		// fail-always.
+		want := rawClaimMatches(t, raw, pinName, pinValue)
+		if (merr == nil) != want {
+			t.Fatalf("matchClaims(%q=%q, %s) = %v, raw JSON says match=%t (decoded value %#v)",
+				pinName, pinValue, raw, merr, want, got[pinName])
 		}
 
 		// No pins: nothing to fail. Any absent pin: always a failure,
@@ -103,11 +100,12 @@ func FuzzMatchClaims(f *testing.F) {
 	})
 }
 
-// assertRawClaimEquals rebuilds the match decision from the raw JSON
-// without claimScalar: the claim's own bytes must be a JSON string
-// whose decoded value is the pin, or a bare number/bool literal whose
-// source text is the pin. Anything else that matched is a coercion.
-func assertRawClaimEquals(t *testing.T, raw []byte, name, pin string) {
+// rawClaimMatches decides, from the claim's own bytes and without
+// claimScalar, whether a pin should match: the claim must be present
+// and be either a JSON string whose decoded value is the pin, or a
+// bare number/bool literal whose source text is the pin. Composite and
+// null claims never match; nothing else is coerced.
+func rawClaimMatches(t *testing.T, raw []byte, name, pin string) bool {
 	t.Helper()
 	// Same decoder shape as decodeClaims (a Decoder, so trailing bytes
 	// after the object are tolerated identically; last duplicate wins
@@ -116,9 +114,13 @@ func assertRawClaimEquals(t *testing.T, raw []byte, name, pin string) {
 	if err := json.NewDecoder(bytes.NewReader(raw)).Decode(&top); err != nil {
 		t.Fatalf("raw re-decode of %s failed after decodeClaims succeeded: %v", raw, err)
 	}
-	rv := bytes.TrimSpace(top[name])
+	rv, ok := top[name]
+	if !ok {
+		return false
+	}
+	rv = bytes.TrimSpace(rv)
 	if len(rv) == 0 {
-		t.Fatalf("claim %q matched but has no raw value in %s", name, raw)
+		t.Fatalf("claim %q present in %s with no raw value", name, raw)
 	}
 	switch rv[0] {
 	case '"':
@@ -126,16 +128,13 @@ func assertRawClaimEquals(t *testing.T, raw []byte, name, pin string) {
 		if err := json.Unmarshal(rv, &s); err != nil {
 			t.Fatalf("raw string claim %s: %v", rv, err)
 		}
-		if s != pin {
-			t.Fatalf("pin %q matched string claim %s", pin, rv)
-		}
+		return s == pin
 	case '[', '{', 'n':
-		t.Fatalf("pin %q matched composite/null claim %s", pin, rv)
+		return false
 	default:
-		// number, true, false: the source text is the canonical form.
-		if string(rv) != pin {
-			t.Fatalf("pin %q matched literal claim %s (only its exact source text may match)", pin, rv)
-		}
+		// number, true, false: the source text is the canonical form
+		// (json.Number carries the literal verbatim).
+		return string(rv) == pin
 	}
 }
 
