@@ -154,7 +154,7 @@ func sandboxModeError(mode string) error {
 	}
 	switch mode {
 	case "auto":
-		return fmt.Errorf("sandbox %q has been removed: on a host that could not deliver the sandbox it ran apps with none at all, which is the %q it was named against. Use %q (the default), which refuses to start instead, or %q to run without one deliberately",
+		return fmt.Errorf("sandbox %q has been removed: on a host that could not deliver the sandbox it ran apps with none at all, which is the %q failure it was named against. Use %q (the default), which refuses to start instead, or %q to run without one deliberately",
 			"auto", "looks configured, quietly weaker", sandboxOn, sandboxOff)
 	case "require":
 		return fmt.Errorf("sandbox %q is now spelled %q, and is the default", "require", sandboxOn)
