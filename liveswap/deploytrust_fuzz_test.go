@@ -5,10 +5,12 @@
 // OIDC provider's claim set, or a local token minted by hand — and #31
 // was exactly a claim shape (a round-numbered repository_id) that the
 // matcher mishandled. The property asserted is fail-closed matching:
-// a pin is satisfied only by a scalar claim whose canonical rendering
-// is byte-equal to the pin, and the decision is rebuilt from the raw
-// JSON independently so a future "helpful" coercion in claimScalar
-// cannot pass unnoticed.
+// a pin is satisfied exactly when the claim is present, scalar and
+// byte-equal to it, and the decision is rebuilt from the raw JSON
+// independently so a future "helpful" coercion in claimScalar cannot
+// pass unnoticed. decodeClaims never yielding a float64 is pinned too:
+// that is what makes claimScalar's float64 refusal unreachable from
+// production.
 package liveswap
 
 import (
@@ -67,41 +69,20 @@ func FuzzMatchClaims(f *testing.F) {
 		// can creep back in.
 		assertNoFloat(t, "", got)
 
-		want := map[string]string{pinName: pinValue}
-		merr := matchClaims(want, got)
+		merr := matchClaims(map[string]string{pinName: pinValue}, got)
 
+		// The oracle: a pin matches exactly when its claim is present,
+		// scalar, and renders byte-equal. Neither direction may drift —
+		// a match beyond this is a coercion, a refusal within it is
+		// fail-closed turned fail-always.
 		v, present := got[pinName]
 		s, scalar := claimScalar(v)
+		if ok := present && scalar && s == pinValue; (merr == nil) != ok {
+			t.Fatalf("matchClaims(%q=%q, %s) = %v; present=%t scalar=%t rendering=%q value=%#v",
+				pinName, pinValue, raw, merr, present, scalar, s, v)
+		}
 		if merr == nil {
-			// A match is the suspicious outcome; it must be fully
-			// accounted for.
-			if !present {
-				t.Fatalf("matchClaims(%q=%q, %s) matched an absent claim", pinName, pinValue, raw)
-			}
-			if !scalar {
-				t.Fatalf("matchClaims(%q=%q, %s) matched a non-scalar claim %#v", pinName, pinValue, raw, v)
-			}
-			if s != pinValue {
-				t.Fatalf("matchClaims(%q=%q, %s) matched claim rendering %q", pinName, pinValue, raw, s)
-			}
-			if isDigits(pinValue) {
-				switch n := v.(type) {
-				case json.Number:
-					if n.String() != pinValue {
-						t.Fatalf("numeric pin %q matched number %q", pinValue, n.String())
-					}
-				case string:
-					if n != pinValue {
-						t.Fatalf("numeric pin %q matched string %q", pinValue, n)
-					}
-				default:
-					t.Fatalf("numeric pin %q matched a %T", pinValue, v)
-				}
-			}
 			assertRawClaimEquals(t, raw, pinName, pinValue)
-		} else if present && scalar && s == pinValue {
-			// Fail-closed must not quietly become fail-always.
-			t.Fatalf("matchClaims(%q=%q, %s) rejected a byte-equal scalar claim: %v", pinName, pinValue, raw, merr)
 		}
 
 		// No pins: nothing to fail. Any absent pin: always a failure,
@@ -172,16 +153,4 @@ func assertNoFloat(t *testing.T, path string, v any) {
 			assertNoFloat(t, path+"/"+strconv.Itoa(i), e)
 		}
 	}
-}
-
-func isDigits(s string) bool {
-	if s == "" {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		if s[i] < '0' || s[i] > '9' {
-			return false
-		}
-	}
-	return true
 }

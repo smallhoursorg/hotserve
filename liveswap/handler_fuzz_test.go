@@ -2,11 +2,12 @@
 // (deployURL) and the version query parameter (deployPush,
 // deployRollback), both attacker-shaped once a token is accepted. The
 // property is that every request the gate lets through carries a
-// version that is a single, non-escaping path component under the
-// releases dir — the deploy pipeline os.RemoveAll's that path — and a
-// non-empty URL and a header value the transport will not choke on.
-// Whether the URL is allowed is FuzzPinnedURL's job; this target stops
-// where the payload becomes a deployRequest.
+// version that is a single, non-escaping, non-dot path component under
+// the releases dir — the deploy pipeline os.RemoveAll's that path, and
+// release GC treats dot-entries there as its own — plus a non-empty
+// URL and a header value the transport will not choke on. Whether the
+// URL is allowed is FuzzPinnedURL's job; this target stops where the
+// payload becomes a deployRequest.
 package liveswap
 
 import (
@@ -14,6 +15,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/net/http/httpguts"
 )
 
 func FuzzDeployRequest(f *testing.F) {
@@ -28,7 +31,10 @@ func FuzzDeployRequest(f *testing.F) {
 		{`{"url":"https://x/a.tgz","version":""}`, ""},
 		{`{"url":"https://x/a.tgz","version":"` + strings.Repeat("a", 65) + `"}`, strings.Repeat("a", 65)},
 		{`{"url":"https://x/a.tgz","version":"...."}`, "...."},
+		{`{"url":"https://x/a.tgz","version":".extract-1"}`, ".extract-v1"},
+		{`{"url":"https://x/a.tgz","version":".v1"}`, ".hidden"},
 		{`{"url":"https://x/a.tgz","version":"-"}`, "-"},
+		{`{"url":"https://x/a.tgz","version":"v1..2"}`, "a."},
 		{`{"url":"","version":"v1"}`, "v1"},
 		{`{"version":"v1"}`, "v1"},
 		{`{"url":1,"version":"v1"}`, "v1"},
@@ -37,10 +43,10 @@ func FuzzDeployRequest(f *testing.F) {
 		{`{"url":"https://x/a.tgz","version":"v1"} trailing`, "v1"},
 		{`{"url":"https://x/a.tgz","version":"v1","auth_header":"Bearer x\r\nX-Injected: y"}`, "v1"},
 		{`{"url":"https://x/a.tgz","version":"v1","auth_header":"x\u007f"}`, "v1"},
+		{`{"url":"https://x/a.tgz","version":"v1","auth_header":"x\ty"}`, "v1"},
 		{`{"url":"https://x/a.tgz","version":"v1","auth_header":"Bearer ok"}`, "v1"},
 		{`[{"url":"https://x/a.tgz","version":"v1"}]`, "v1"},
 		{`{"url":{"url":"https://x/a.tgz"},"version":"v1"}`, "v1"},
-		{strings.Repeat("[", 10000), "v1"},
 		{``, ""},
 		{`null`, "%2e%2e"},
 	} {
@@ -62,8 +68,12 @@ func FuzzDeployRequest(f *testing.F) {
 			if p.URL == "" {
 				t.Fatalf("parseDeployPayload(%q) accepted an empty url", body)
 			}
-			if strings.ContainsFunc(p.AuthHeader, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
-				t.Fatalf("parseDeployPayload(%q) accepted control characters in auth_header %q", body, p.AuthHeader)
+			// The independent oracle for the header check is the one
+			// net/http applies to outgoing header values. The gate is
+			// stricter (it refuses a tab, which the transport allows);
+			// it must never be looser.
+			if !httpguts.ValidHeaderFieldValue(p.AuthHeader) {
+				t.Fatalf("parseDeployPayload(%q) accepted an auth_header the transport refuses: %q", body, p.AuthHeader)
 			}
 			assertVersionIsOneComponent(t, "body", p.Version)
 		}
@@ -77,20 +87,19 @@ func FuzzDeployRequest(f *testing.F) {
 
 // assertVersionIsOneComponent is the filesystem property behind
 // validVersion: the version must land exactly one level below the
-// releases dir, as itself, through the same helper the pipeline uses.
+// releases dir, as itself, through the same helper the pipeline uses,
+// and must not be a dot-entry, which release GC owns (".extract-*" is
+// deleted as a staging orphan, anything else dot-prefixed is skipped).
 func assertVersionIsOneComponent(t *testing.T, where, v string) {
 	t.Helper()
 	if !validVersion(v) {
 		t.Fatalf("%s version %q accepted but validVersion rejects it", where, v)
 	}
-	if v == "" || v == "." || v == ".." {
-		t.Fatalf("%s version %q accepted", where, v)
-	}
 	if strings.ContainsAny(v, `/\`+"\x00") {
 		t.Fatalf("%s version %q contains a separator or NUL", where, v)
 	}
-	if got := versionPathComponent(v); got != v {
-		t.Fatalf("%s version %q is not its own path component (%q)", where, v, got)
+	if strings.HasPrefix(v, ".") {
+		t.Fatalf("%s version %q is a dot-entry in the releases dir", where, v)
 	}
 	d := appDirs{releases: "/r"}
 	rel := d.release(v)

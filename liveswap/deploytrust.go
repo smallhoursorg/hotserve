@@ -453,9 +453,14 @@ func claimScalar(v any) (string, bool) {
 	case bool:
 		return strconv.FormatBool(t), true
 	case float64:
-		// Defensive: a claim set reached here without UseNumber. Format
-		// as a plain decimal, never scientific notation.
-		return strconv.FormatFloat(t, 'f', -1, 64), true
+		// A claim set that reached here without UseNumber has already
+		// lost the identity it is meant to prove (2^53+1 is ...992 by
+		// now; 1e8 may or may not be 100000000). Refuse rather than
+		// format: unreachable from either verifier — both go through
+		// decodeClaims, and FuzzMatchClaims pins that it never yields a
+		// float64 — so this exists to fail loud if a third path ever
+		// appears.
+		return "", false
 	default:
 		return "", false
 	}
