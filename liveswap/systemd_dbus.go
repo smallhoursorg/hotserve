@@ -100,12 +100,14 @@ func (c *userManagerClient) sandboxCapability(logger *zap.Logger) sandboxCapabil
 // verdict is not a measurement of the host so much as the absence of
 // one: probeSandboxCapability reports the same thing whether the
 // namespaces are genuinely unavailable or the probe unit merely timed
-// out under boot load, and caching that would pin every app
-// unsandboxed — or, under `require`, refuse the server — for the life
-// of a connection that nothing will drop. So a failed verdict is
-// reported and re-measured next time, which is what this code did
-// before the cache existed. The cost of re-measuring falls only on
-// hosts that cannot sandbox at all; the supported one pays it once.
+// out under boot load, and caching that would refuse the server for
+// the life of a connection that nothing will drop. That matters more
+// now than when the rule was written: with the policy two-valued, a
+// cached `none` is not a degraded app but a hotserve that will not
+// come up until the manager restarts. So a failed verdict is reported
+// and re-measured next time, which is what this code did before the
+// cache existed. The cost of re-measuring falls only on hosts that
+// cannot sandbox at all; the supported one pays it once.
 func (c *userManagerClient) cachedSandboxCapability(measure func() sandboxCapability) sandboxCapability {
 	c.sandboxMu.Lock()
 	defer c.sandboxMu.Unlock()

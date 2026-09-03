@@ -580,8 +580,8 @@ const sandboxProbeTimeout = 30 * time.Second
 // user namespaces, or an LSM that refuses them all fail the unit on a
 // manager whose version says it should have worked. A unit the manager
 // refuses, or a probe that exits non-zero (a property silently
-// ignored), fails with the reason kept for the WARN and the require
-// error.
+// ignored), fails with the reason kept for the refusal `sandbox on`
+// raises.
 //
 // The probe also proves the base view: /bin/sh has to exist inside the
 // unit for the script to run at all, so a host whose runtime the base
@@ -902,7 +902,7 @@ func canonicalDeepest(p string) string {
 // config over views that are not being built.
 func validateEnvFileIsolation(a *App) error {
 	// The same resolution buildSpec does: the app's own setting, else
-	// the global default, else auto (what Provision fills in).
+	// the global default, else on (what Provision fills in).
 	effective := func(cfg *AppConfig) string { return a.effectiveSandbox(cfg) }
 	sandboxed := false
 	for _, cfg := range a.Apps {

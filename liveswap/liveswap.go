@@ -248,8 +248,8 @@ type AppConfig struct {
 	// is additionally capped at 10x this. Default 100MB.
 	MaxArtifactSize int64 `json:"max_artifact_size,omitempty"`
 
-	// Sandbox overrides the global sandbox policy for this app:
-	// "auto", "require" or "off". Default: the global setting.
+	// Sandbox overrides the global sandbox policy for this app: "on"
+	// or "off". Default: the global setting.
 	Sandbox string `json:"sandbox,omitempty"`
 }
 
