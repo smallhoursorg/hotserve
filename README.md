@@ -151,10 +151,13 @@ an on-disk release. Full details, CI snippets, and every option:
   `sandbox off`, which costs the other apps nothing.
   The app also gets its own PID namespace, so siblings are invisible
   rather than merely unreadable. What is *not* claimed: both
-  namespaces are required, and a host that cannot deliver them gets no
-  per-unit sandbox at all — `"sandbox": "none"`, warned at every
-  launch, with sibling files, sockets and process contents exposed as
-  they were before this existed. There is no middle tier. What stays
+  namespaces are required, and there is no middle tier — a host that
+  cannot deliver them refuses to start under `sandbox on` (the
+  default). An app running with `sandbox off` — or relaunched from an
+  instance recorded bare — has no per-unit sandbox at all:
+  `"sandbox": "none"`, warned at every launch, with sibling files,
+  sockets and process contents exposed as they were before this
+  existed. What stays
   shared by design even when the sandbox is on is the network
   namespace: sibling `127.0.0.1` ports are reachable (a runtime's own
   permission flags can close that — see liveswap's "Runtime

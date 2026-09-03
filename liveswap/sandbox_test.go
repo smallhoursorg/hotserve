@@ -689,10 +689,10 @@ func TestValidateSandboxConfig(t *testing.T) {
 	}
 	// Precedence: the app's mode beats the global one; "" defers.
 	a := base()
-	a.Sandbox = "require"
+	a.Sandbox = "on"
 	spec, err := a.buildSpec("blog", a.Apps["blog"])
 	must(t, err)
-	if spec.sandboxMode != "require" {
+	if spec.sandboxMode != "on" {
 		t.Fatalf("global mode not inherited: %q", spec.sandboxMode)
 	}
 	a.Apps["blog"].Sandbox = "off"
@@ -701,21 +701,31 @@ func TestValidateSandboxConfig(t *testing.T) {
 	if spec.sandboxMode != "off" {
 		t.Fatalf("app mode must override: %q", spec.sandboxMode)
 	}
-	for name, mutate := range map[string]func(*App){
-		"bad global mode": func(a *App) { a.Sandbox = "yes" },
-		"bad app mode":    func(a *App) { a.Apps["blog"].Sandbox = "maybe" },
-		// The two spellings of the policy this replaced. Both are
-		// refused, with a message naming the replacement rather than
-		// the generic "must be on or off".
-		"retired auto":    func(a *App) { a.Sandbox = "auto" },
-		"retired require": func(a *App) { a.Apps["blog"].Sandbox = "require" },
-		"root in state":   func(a *App) { a.Root = "/var/lib/hotserve/apps" },
+	for name, tc := range map[string]struct {
+		mutate func(*App)
+		want   []string // substrings the refusal must carry
+	}{
+		"bad global mode": {func(a *App) { a.Sandbox = "yes" }, []string{`must be "on" or "off"`}},
+		"bad app mode":    {func(a *App) { a.Apps["blog"].Sandbox = "maybe" }, []string{"app blog", `must be "on" or "off"`}},
+		// The two spellings of the policy this replaced get their own
+		// messages naming the replacement — asserted on content, so
+		// collapsing them into the generic rejection fails here rather
+		// than leaving the promise unpinned.
+		"retired auto":    {func(a *App) { a.Sandbox = "auto" }, []string{`"auto" has been removed`, `"on"`, `"off"`}},
+		"retired require": {func(a *App) { a.Apps["blog"].Sandbox = "require" }, []string{`"require" is now spelled "on"`}},
+		"root in state":   {func(a *App) { a.Root = "/var/lib/hotserve/apps" }, nil},
 	} {
 		t.Run(name, func(t *testing.T) {
 			a := base()
-			mutate(a)
-			if err := a.Validate(); err == nil {
+			tc.mutate(a)
+			err := a.Validate()
+			if err == nil {
 				t.Fatal("accepted")
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("refusal %q lacks %q", err, w)
+				}
 			}
 		})
 	}

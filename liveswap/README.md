@@ -448,14 +448,14 @@ refuse them — Ubuntu 24.04+ restricts them to processes under an
 AppArmor profile granting `userns`
 (`kernel.apparmor_restrict_unprivileged_userns=1`), and container and
 LXC hosts often have them off entirely. hotserve does not work around
-that: it probes, and a host that cannot deliver the namespaces runs
-apps with `"sandbox": "none"` and a warning at every launch (the
-non-dumpable supervisor and `NoNewPrivileges` remain).
-`journalctl -t hotserve-sandbox-probe` says why. If you are on such a
-host and want the sandbox, the fix is the host's: permit unprivileged
-user namespaces for hotserve's user manager, or move to Debian 13. If
-you want to run there without one, that is `sandbox off` — an explicit
-choice, not a silent degrade.
+that: it probes, and under `sandbox on` — the default — a host that
+cannot deliver the namespaces refuses to start rather than running
+apps bare. `journalctl -t hotserve-sandbox-probe` says why it
+refused. If you are on such a host and want the sandbox, the fix is
+the host's: permit unprivileged user namespaces for hotserve's user
+manager, or move to Debian 13. If you want to run there without one,
+that is `sandbox off` — an explicit choice (the non-dumpable
+supervisor and `NoNewPrivileges` remain), not a silent degrade.
 
 ## Runtime permissions (Deno, Node)
 
