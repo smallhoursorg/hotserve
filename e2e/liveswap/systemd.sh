@@ -199,7 +199,7 @@ until [ "$(json_str "$(status)" phase 2>/dev/null)" = "running" ] && [ "$(json_n
 	i=$((i + 1)); [ "$i" -ge 40 ] && break; sleep 0.5
 done
 [ "$(json_str "$(status)" sandbox)" = "none" ] \
-	&& pass "bare-recorded instance relaunched bare (sandbox=none) although config says auto" \
+	&& pass "bare-recorded instance relaunched bare (sandbox=none) although config says on" \
 	|| fail "relaunch changed the recorded tier: sandbox=$(json_str "$(status)" sandbox)"
 journalctl --no-pager -u hotserve | grep -q "launching without the full sandbox" \
 	&& pass "the bare relaunch was warned about in the journal" \

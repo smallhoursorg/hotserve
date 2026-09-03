@@ -56,6 +56,17 @@
 # 			# shim) is refused up front rather than failing later.
 # 			# `sandbox off` for that app is the escape hatch.
 #
+# 			# The policy is `sandbox on` (the default) or `off`; there
+# 			# is no mode that runs unsandboxed by itself. On a host
+# 			# that cannot deliver the sandbox — a container, an LXC
+# 			# VPS, a kernel without user namespaces — hotserve does
+# 			# NOT start, and says what is missing. That is deliberate:
+# 			# the alternative is every app silently running with no
+# 			# isolation. If that is your host, set `sandbox off`
+# 			# deliberately. Prove a new box with a reload before you
+# 			# restart into it — a reload that cannot activate leaves
+# 			# the running config serving.
+#
 # 			# Crash/health watchdog (on by default). Defaults shown:
 # 			# watchdog          on     # off = never auto-restart
 # 			# watchdog_failures 3      # consecutive failed health probes

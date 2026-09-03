@@ -191,7 +191,7 @@ resolved at config load.
 | `watchdog_window` | `10m` | Sliding window for the restart budget |
 | `keep` | `5` | Release dirs retained (GC after success). The running version is always kept, so this can be `keep+1` after rolling back to an old release |
 | `max_artifact_size` | `100MB` | Download cap; decompressed cap is 10× |
-| `sandbox` | `auto` | Per-unit sandbox policy: `auto` (sandbox where the host delivers it, warning at every launch where it does not), `require` (sandbox or refuse to start — see the hazard under [Sandbox](#sandbox)), `off`. Global default, per-app override |
+| `sandbox` | `on` | Per-unit sandbox policy: `on` (the full sandbox, or refuse to start — see the hazard under [Sandbox](#sandbox)), `off`. Global default, per-app override |
 
 ## Watchdog
 
@@ -259,11 +259,12 @@ one tier, `full`, and a host either delivers it or gets nothing:
 `PrivatePIDs=` needs systemd 256; Debian 13 — the supported host —
 ships 257. Where the namespaces cannot be had at all (a container, an
 LXC VPS, a kernel built without user namespaces, an LSM that refuses
-them) the status endpoint reports `"sandbox": "none"` and every launch
-warns. It is deliberately not a ladder: a weaker sandbox wearing the
-same name is the "looks configured, quietly weaker" failure this
-design refuses. Use `sandbox require` to turn that into a refusal to
-start.
+them) hotserve refuses to start, naming what the host lacks. It is
+deliberately not a ladder, and there is deliberately no mode that runs
+anyway: a weaker sandbox wearing the same name — or none at all under
+a config that asks for one — is the "looks configured, quietly weaker"
+failure this design refuses. Use `sandbox off` to run without one
+deliberately.
 
 **An app sees its release dir, its `shared/`, a private `/tmp`, the OS
 runtime. Nothing else on the host
@@ -317,16 +318,29 @@ command that is not in the view is refused before the unit is even
 created, with a message naming `sandbox off`, rather than failing as a
 bare `203/EXEC`.
 
-**Policy and rollout.** `sandbox auto` (the default) applies the best
-tier the host delivers, and logs a warning at start and at every
-launch that runs below `full`, naming what stays open. The tier is
-probed by running a throwaway unit and checking the namespaces from
-inside (`journalctl -t hotserve-sandbox-probe` shows what it saw).
-That measurement is cached per connection to the user manager, so a
-reload does not repeat it — but a host whose answer was `none` is
-measured again on the next reload, so fixing the host and reloading
-does take effect. Restarting the user manager re-measures either way. The tier an instance got is recorded in `state.json`
-and reported by the status endpoint (`"sandbox": "full" | "none"`).
+**Policy and rollout.** `sandbox on` (the default) gives every app the
+full tier, or hotserve does not start — the refusal names what the
+host lacks and `sandbox off` as the way to run without one. `sandbox
+off` runs with the floor only (non-dumpable supervisor,
+`NoNewPrivileges`). A launch that runs below `full` anyway — the
+relaunch of an instance recorded bare, see below — logs a warning
+naming what stays open.
+
+Capability is probed by running a throwaway unit and checking the
+namespaces from inside (`journalctl -t hotserve-sandbox-probe` shows
+what it saw). That measurement is cached per connection to the user
+manager, so a reload does not repeat it — but a host that answered
+`none` is measured again on the next reload, so fixing the host and
+reloading does take effect. Restarting the user manager re-measures
+either way. The tier an instance got is recorded in `state.json` and
+reported by the status endpoint (`"sandbox": "full" | "none"`).
+
+Because the default is `on`, **the sandbox is an availability
+dependency**: a host that stops being able to deliver it will not
+start hotserve until the host is fixed or `sandbox off` is set. Before
+upgrading a box you have not proven, set `sandbox off` first, then
+turn it on with a reload — a reload that cannot activate leaves the
+running config serving, where a restart does not.
 
 Sandboxing engages on each app's **next deploy** — the path with a
 fallback (a version that cannot live in its sandbox fails the health
@@ -334,9 +348,10 @@ gate while the old one keeps serving) — never on a supervisor
 restart, a boot recovery or a watchdog restart: those reproduce the
 tier the instance was recorded with, so upgrading hotserve does not
 turn into a fleet-wide, no-fallback restart into sandboxes. The
-supported rollout: upgrade; confirm apps healthy; declare each app's
-data layout; deploy each app and watch `"sandbox"` in its
-status; only then, optionally, `sandbox require`.
+supported rollout: confirm the host can sandbox (or set `sandbox off`
+first); upgrade; confirm apps healthy; declare each app's data layout;
+set `sandbox on` and reload; deploy each app and watch `"sandbox"` in
+its status.
 `journalctl -t hotserve-sandbox-probe` shows the probe's verdict on
 this host.
 
@@ -370,11 +385,15 @@ place republishes it. If an app may have been compromised while
 running bare, clear its `shared/` and rotate anything it could read —
 deploying it sandboxed does not undo the access it already had.
 
-**`require` is the one setting that can keep the whole server from
-starting**: it fails the start (admin socket and proxy included) when
+**`sandbox on` can keep the whole server from starting**, and it is
+the default: it fails the start (admin socket and proxy included) when
 the host cannot deliver the `full` tier — a manager below 256, or a
-kernel/LSM that refuses the namespaces. Use it only once `auto` has
-been proven on that host.
+kernel/LSM that refuses the namespaces. That is deliberate — the
+alternative is a supervisor that silently runs every app with no
+isolation because the kernel changed its mind — but it makes the
+sandbox an availability dependency. On a host you have not proven, set
+`sandbox off` before upgrading, then turn it on with a reload: a
+reload that cannot activate leaves the running config serving.
 
 **When an app breaks under the sandbox** the symptom is usually an
 `ENOENT` for something that exists on the host: a database's unix
@@ -434,7 +453,9 @@ apps with `"sandbox": "none"` and a warning at every launch (the
 non-dumpable supervisor and `NoNewPrivileges` remain).
 `journalctl -t hotserve-sandbox-probe` says why. If you are on such a
 host and want the sandbox, the fix is the host's: permit unprivileged
-user namespaces for hotserve's user manager, or move to Debian 13.
+user namespaces for hotserve's user manager, or move to Debian 13. If
+you want to run there without one, that is `sandbox off` — an explicit
+choice, not a silent degrade.
 
 ## Runtime permissions (Deno, Node)
 

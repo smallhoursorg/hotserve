@@ -5,7 +5,10 @@ sandboxing on the user-manager runner. **Narrowed 2026-09-01** to a
 single probe-gated tier, *full* (user namespace + PID namespace + the
 mount/device/cgroup/seccomp/caps set), when the support matrix became
 Debian 13 alone — see "Amendment: one host, one tier" below, which
-supersedes every two-tier statement in this document. Resource caps
+supersedes every two-tier statement in this document. **Narrowed again
+2026-09-03** to a two-valued policy, `on` or `off` — see "Amendment:
+sandbox on or off", which supersedes every `auto`/`require` statement
+in this document. Resource caps
 are phase 2. This document was the implementation brief
 for bubblewrap; what remains normative is the threat model, the
 behaviour specification (amended below where the measured mechanism
@@ -58,15 +61,16 @@ requirement below stands as the contract the sandbox path must keep.
 
 ## Behavior specification (normative)
 
-- Sandboxing MUST default to on (`sandbox auto`), probed by running a
+- Sandboxing MUST default to on (`sandbox on`), probed by running a
   throwaway unit and checking the namespaces from inside
   (the manager silently ignores `PrivatePIDs=` on a kernel without PID
   namespaces, so accepting the property proves nothing). It MUST be
-  configurable globally and per app: `auto` (sandbox where the host
-  delivers it, with a prominent WARN at start and at every spawn that
-  runs below *full*), `require` (start fails unless the *full* tier is
-  available — a weaker tier accepted silently is the "looks
-  configured, quietly weaker" trap), `off`.
+  configurable globally and per app: `on` (start fails unless the
+  *full* tier is available — a weaker tier accepted silently is the
+  "looks configured, quietly weaker" trap, and so is no tier at all)
+  or `off`. A launch that runs below *full* anyway — the relaunch of
+  an instance recorded bare — MUST carry a prominent WARN naming the
+  residual.
 - The sandboxed filesystem view MUST be **deny-by-default**: an empty
   read-only tmpfs replaces the whole filesystem
   (`TemporaryFileSystem=/:ro`) and the only things that exist inside a
@@ -266,7 +270,7 @@ requirement below stands as the contract the sandbox path must keep.
 ```caddyfile
 app blog {
 	command node server.js
-	sandbox auto              # auto (default) | require | off
+	sandbox on                # on (default) | off
 	extra_path /opt/geoip     # ro by default; repeatable
 	extra_path /var/cache/blog rw
 	extra_path /run/postgresql  # the canonical recipe: same-box DB
@@ -396,40 +400,44 @@ restart is exactly when an app is already in trouble. Therefore:
   existing app MUST ride its **next deploy** (the path that has the
   fallback). Concretely: an app whose recorded running instance is
   bare relaunches **bare** after a supervisor restart even when config
-  now says `sandbox auto`; the new isolation takes effect on the next
+  now says `sandbox on`; the new isolation takes effect on the next
   cutover, where the health gate protects it. Record the sandbox
   disposition of the running instance in `state.json` so a relaunch
   reproduces what was actually running, not what config now wants.
-- `auto`'s graceful degrade covers **host incapability only** (a user
-  manager below systemd 256, or a kernel that forbids the namespaces
-  → floor-only + WARN). It does NOT cover a per-app
-  misconfiguration on a capable host — a missing `extra_path` still
-  fails the app. The doc must not imply `auto` is a safety net for
-  profile mistakes; the deploy-path fallback is that net.
-- A global `sandbox require` is the one setting that can take down the
-  **whole server** rather than one app: `require` fails *provision*, so
-  on a host that cannot sandbox (systemd < 256, an LXC VPS or
-  locked-down kernel without the namespaces) hotserve does not come up
-  at all — admin socket and proxy included.
-  `require` MUST therefore be reachable only after `auto` has been
-  proven per-app on that host, and this hazard MUST be documented at
-  the config surface, not just here.
+- There is no graceful degrade for **host incapability**. A host that
+  cannot deliver the namespaces (an LXC VPS, a locked-down kernel, a
+  container) fails the start with the probe's reason attached. Nor is
+  there one for a per-app misconfiguration on a capable host; the
+  deploy-path fallback is that net, and the doc must not imply the
+  policy is a safety net for profile mistakes.
+- `sandbox on` is therefore the one setting that can take down the
+  **whole server** rather than one app: it fails *start*, so on a host
+  that cannot sandbox hotserve does not come up at all — admin socket
+  and proxy included. Because it is also the **default**, this hazard
+  MUST be documented at the config surface, in the release notes for
+  any upgrade that introduces it, and in the refusal message itself,
+  which MUST name `sandbox off` as the way to run without one.
 
 The supported operator rollout, which the product docs MUST describe:
-1. Upgrade the binary with sandboxing not yet engaged; absorb the one
+1. **Before upgrading**, establish that the host can deliver the
+   sandbox — this is the step the removal of `auto` adds, and skipping
+   it is what turns an upgrade into an outage. A host that cannot must
+   have `sandbox off` set in config *first*, or the new binary will
+   not start.
+2. Upgrade the binary with sandboxing set `off`; absorb the one
    unavoidable supervisor-restart blip (a binary swap is not
    zero-downtime — only deploys are) and confirm apps run healthy
    *bare* on the new binary. One variable at a time.
-2. Pre-declare each app's `extra_path` needs and set it to `sandbox
-   auto`, applied via **reload** (a no-op for a live app — it does not
-   restart), so nothing changes yet.
-3. Let the sandbox engage on that app's **next deploy**, where a broken
-   profile fails safe and surfaces the `extra_path` hint. Roll
-   app-by-app, watching `"sandbox"` in each app's status (the shipped
-   field is a tier string — `"full"` or `"none"` — not a boolean, so
-   that a tier added later needs no wire-format change; the e2e and
-   install-test lanes parse it as a string).
-4. Only after every app is proven, optionally tighten to `require`.
+3. Set `sandbox on` per app, applied via **reload** (a no-op for a
+   live app — it does not restart), so nothing changes yet. A reload
+   is the safe place to discover an incapable host: the new config
+   fails to activate and the running one keeps serving.
+4. Let the sandbox engage on that app's **next deploy**, where a broken
+   profile fails safe. Roll app-by-app, watching `"sandbox"` in each
+   app's status (the shipped field is a tier string — `"full"` or
+   `"none"` — not a boolean, so that a tier added later needs no
+   wire-format change; the e2e and install-test lanes parse it as a
+   string).
 
 Nothing here is destructive: the release being started and `shared/`
 are bind-mounted at their real paths and everything else is simply
@@ -490,7 +498,7 @@ MUST here means adding its assertion in the same change.
   the (expected ~zero) overhead as a measured claim.
 - Upgrade contract: a test proves that an app whose recorded running
   instance is bare relaunches **bare** after a supervisor restart even
-  when config now says `sandbox auto`, and only becomes sandboxed on
+  when config now says `sandbox on`, and only becomes sandboxed on
   its next deploy (the "engage on next deploy, not on the upgrade
   relaunch" rule). This asserts the `state.json` sandbox-disposition
   field is honored on relaunch — the invariant that keeps an upgrade
@@ -551,7 +559,7 @@ MUST here means adding its assertion in the same change.
   rather than bound whole, because binding it would reintroduce the
   per-config hidden set for everything under it. See `sandboxBaseView`
   and the behaviour spec above.
-- Global `sandbox require` default in the `liveswap` block (fleet
+- Global `sandbox on` default in the `liveswap` block (fleet
   policy vs per-app)? Lean: yes, per-app overrides a global default;
   cheap to add at config level.
 - ~~Operator env_files outside `/etc/hotserve`: masked dir covers the
@@ -614,6 +622,70 @@ named at all, read-only or writable; a missing source must fail the
 unit rather than be skipped; and the cross-app `env_file` check must
 compare canonical *and* configured spellings, resolving the deepest
 existing ancestor for a path whose leaf does not exist yet.
+
+## Amendment: sandbox on or off (2026-09-03)
+
+The policy is two-valued. Where this document says `auto` or
+`require`, read `on`; where it describes a graceful degrade to `none`,
+read a refusal to start. The tier set, the property set, the
+deny-by-default view and the recorded-tier relaunch semantics are
+unchanged.
+
+**`auto` was the trap this design names elsewhere.** On a host that
+could not deliver the sandbox, `auto` ran every app with no isolation
+at all and a WARN. That is "looks configured, quietly weaker" at the
+host level — the exact failure `require` refused a lesser tier to
+avoid, and the reason the *filesystem* rung was retired rather than
+kept. With one supported tier there is no ladder to descend, so the
+only real question is whether to insist on the tier, and a policy with
+one real question does not need three values.
+
+**What removed it was a bug in what replaced its safety net.** #48
+cached the capability measurement against the manager connection, and
+three review rounds then added machinery to keep that cache from going
+stale: never cache a failure, invalidate when the manager refuses a
+sandboxed unit, exempt the probe's own unit so the invalidator cannot
+deadlock on the measurement holding its mutex. The invalidation could
+not work. App units are `Type=simple`, whose start job completes once
+the manager has forked — before namespace setup and before exec — so
+the failure it existed to catch (`226/NAMESPACE`, when a kernel or LSM
+change withdraws the namespaces under a live connection) arrives
+asynchronously through `watch` → `finish`, while every hook sat on a
+synchronous path.
+
+**And the contract it was defending did not exist.**
+`resolveSandboxTier` runs once in `Start` and freezes its answer into
+`spec.sandboxTier`; every deploy reads that frozen field. Dropping the
+cache cannot re-tier a running config — the earliest it can matter is
+the next `Start`. `auto`'s "degrade and keep serving" was always a
+*start-time* contract, already honoured by measuring at `Start`, and
+the machinery was defending a runtime reading of it that nothing
+implements. Three rounds of patching that did not converge were the
+symptom; the wrong policy was the cause.
+`TestIntegrationSystemdSandboxedUnitFailsAfterItsStartJobSucceeds`
+pins the systemd semantics so the invalidation is not reinvented.
+
+**Accepted cost: the sandbox is now an availability dependency.** A
+host that could sandbox at install and later cannot — a kernel
+upgrade, a `user.max_user_namespaces` sysctl, migration into a
+container — refuses to start on the next hotserve restart, where
+`auto` logged a WARN and kept serving. Two consequences follow and are
+deliberate:
+
+- The **upgrade path gains a precondition**, written into the rollout
+  ladder above: confirm the host can sandbox, or set `sandbox off`,
+  *before* upgrading. A reload is the safe place to find out; a
+  restart is not.
+- Probe interference under the shared uid (DESIGN-threat-model.md,
+  "The capability probe runs under the shared uid") now fails the
+  server start in the default posture rather than degrading one
+  config load. A failed verdict is never cached, so it retries on the
+  next reload rather than pinning — but the start still fails.
+
+Both are worse than a WARN for an operator on an incapable host, and
+better than a supervisor that silently runs every app with no
+isolation because the kernel changed its mind. `sandbox off` remains
+the deliberate escape, and every refusal names it.
 
 ## Amendment: one host, one tier (2026-09-01)
 

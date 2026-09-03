@@ -187,15 +187,16 @@ an on-disk release. Full details, CI snippets, and every option:
   Debian 13 ships 257), so the supervisor, the user manager and
   sibling apps are invisible and unsignalable. A host that cannot
   deliver either namespace — a container, an LXC VPS, a kernel built
-  without them — gets no sandbox and says so at every launch, rather
-  than something weaker wearing the same name.
+  without them — is refused rather than given something weaker wearing
+  the same name: hotserve will not start, and says what the host
+  lacks.
   Why the user namespace matters: under a shared UID the kernel would
   otherwise let any app walk the host through
   `/proc/<user-manager>/root`; see
   [DESIGN-threat-model.md](DESIGN-threat-model.md) "The shared-UID
   rule". hotserve itself additionally runs non-dumpable from its
-  first milliseconds. Policy is `sandbox auto` (default) / `require` /
-  `off`, engaging on each app's **next deploy** (never on an upgrade
+  first milliseconds. Policy is `sandbox on` (default) / `off`,
+  engaging on each app's **next deploy** (never on an upgrade
   relaunch) — [liveswap/README.md](liveswap/README.md#sandbox).
   **Next:** resource caps (`MemoryMax=`, `TasksMax=`, `CPUQuota=`) with
   a config surface — real now that cgroupfs is read-only inside the
