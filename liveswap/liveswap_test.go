@@ -164,7 +164,7 @@ func TestHealthPathOffIsValid(t *testing.T) {
 // neutralize traversal for anything hostile (defense-in-depth beneath
 // the validVersion gate).
 func TestVersionPathComponent(t *testing.T) {
-	for _, v := range []string{"v1.2.3", "2026-08-16", "a_b-c.d", "...", "v1..2", "A"} {
+	for _, v := range []string{"v1.2.3", "2026-08-16", "a_b-c.d", "v1..2", "a...", "A"} {
 		if !validVersion(v) {
 			t.Fatalf("test premise broken: %q should be a valid version", v)
 		}

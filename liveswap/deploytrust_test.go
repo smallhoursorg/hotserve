@@ -245,9 +245,10 @@ func TestMatchClaimsNumeric(t *testing.T) {
 	if err := matchClaims(want, map[string]any{"repository_id": json.Number("100000000")}); err != nil {
 		t.Errorf("json.Number claim rejected: %v", err)
 	}
-	// Defensive float64 path must format as a plain decimal, not "1e+08".
-	if err := matchClaims(want, map[string]any{"repository_id": float64(100000000)}); err != nil {
-		t.Errorf("float64 claim rejected: %v", err)
+	// A float64 claim means the set was decoded without UseNumber and
+	// its digits are no longer trustworthy: refused, never formatted.
+	if err := matchClaims(want, map[string]any{"repository_id": float64(100000000)}); err == nil {
+		t.Error("float64 claim must be refused, not formatted and matched")
 	}
 	if err := matchClaims(want, map[string]any{"repository_id": json.Number("99")}); err == nil {
 		t.Error("mismatched numeric claim must be rejected")
