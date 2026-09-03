@@ -48,11 +48,15 @@ type userManagerClient struct {
 	// per connection: a manager restart forces a redial, which is the
 	// event the generation exists to catch.
 	//
-	// It is not the only thing that can change the answer, because
-	// what the probe measures is the kernel and the LSM rather than
-	// the manager — a sysctl or a policy reload moves it with the
-	// connection still up. forgetSandboxCapability is the other half:
-	// a sandboxed unit the manager refuses drops the cache.
+	// What the probe measures is the kernel and the LSM rather than
+	// the manager, so a sysctl or an LSM policy reload can move the
+	// answer with the connection still up. That is deliberately not
+	// chased: the verdict is a start-time input (App.Start freezes a
+	// tier into each app's spec and every later deploy reads that
+	// field), so a measurement taken at the start that resolved it is
+	// the honest one to hold. A host whose namespace policy changes
+	// underneath a running hotserve is re-measured on the next dial —
+	// a manager restart, or hotserve's own.
 	//
 	// Its own mutex, not mu: a measurement takes a unit start plus its
 	// exit, and holding the mutex every D-Bus call needs for that long
@@ -87,38 +91,10 @@ func (c *userManagerClient) sandboxCapability(logger *zap.Logger) sandboxCapabil
 	})
 }
 
-// forgetSandboxCapability drops the cached measurement so the next
-// caller takes a fresh one. The connection generation covers a manager
-// restart; this covers everything else that can change the answer
-// under a live connection — see systemdRunner.sandboxedStartFailed,
-// which is the evidence that triggers it.
-// TryLock, not Lock: this is called from launch paths — one under
-// deployMu, one holding a stop deadline that is already ticking — and
-// a concurrent measurement holds sandboxMu for the probe's whole
-// budget. Waiting there would spend a deploy's time, or a pre_start's
-// stop budget, on bookkeeping.
-//
-// Skipping when contended is correct rather than merely expedient: the
-// measurement holding the mutex is about to publish a fresh reading of
-// this same host, which is what invalidating asks for. If it somehow
-// does not, the next failed launch tries again.
-func (c *userManagerClient) forgetSandboxCapability() {
-	if !c.sandboxMu.TryLock() {
-		return
-	}
-	defer c.sandboxMu.Unlock()
-	c.sandboxCap, c.sandboxGen = sandboxCapability{}, 0
-}
-
 // cachedSandboxCapability returns the measurement held for the current
 // connection, taking a fresh one via measure when the cache is empty
 // or belongs to an older one. Separate from sandboxCapability so the
 // caching rule is testable without a manager to dial.
-//
-// A cached capability is dropped by forgetSandboxCapability when a
-// sandboxed unit fails to start, because what is measured here is the
-// kernel and the LSM, not the manager: the generation cannot see a
-// sysctl or a policy reload.
 //
 // Only a capability the host actually delivered is cached. A `none`
 // verdict is not a measurement of the host so much as the absence of

@@ -115,12 +115,8 @@ type unitSpec struct {
 	ExecStart        []string // ExecStart[0] is an absolute path
 	Environment      []string
 	Oneshot          bool // Type=oneshot (pre_start) instead of simple
-	// Probe marks the capability probe's own unit. Its failure is the
-	// measurement, not evidence against one, and reporting it would
-	// re-enter sandboxMu while the measurement holds it.
-	Probe       bool
-	StopTimeout time.Duration
-	Sandbox     *sandboxSpec
+	StopTimeout      time.Duration
+	Sandbox          *sandboxSpec
 }
 
 // unitStatus is a snapshot of one unit as the manager reports it.
@@ -453,7 +449,6 @@ func (r *systemdRunner) unitFor(spec startSpec, oneshot bool) (unitSpec, error) 
 		ExecStart:        append([]string{argv0}, spec.command[1:]...),
 		Environment:      env,
 		Oneshot:          oneshot,
-		Probe:            spec.probe,
 		StopTimeout:      grace,
 		Sandbox:          spec.sandbox,
 	}, nil
@@ -481,58 +476,14 @@ func (r *systemdRunner) Start(spec startSpec) (handle, error) {
 	res, err := r.conn.StartTransientUnit(ctx, u)
 	if err != nil {
 		// The request may or may not have reached the manager
-		// (invariant 5): reconcile by name rather than guess. Only a
-		// reconciliation that ends in failure is evidence about the
-		// sandbox — one that adopts the unit found it running.
-		h, rerr := r.reconcileStart(u, fmt.Errorf("starting unit %s: %w", u.Name, err))
-		if rerr != nil {
-			r.sandboxedStartFailed(u)
-		}
-		return h, rerr
+		// (invariant 5): reconcile by name rather than guess.
+		return r.reconcileStart(u, fmt.Errorf("starting unit %s: %w", u.Name, err))
 	}
 	if res != "done" {
 		st := r.reapFailed(ctx, u.Name)
-		r.sandboxedStartFailed(u)
 		return nil, fmt.Errorf("unit %s: start job %s (%s)", u.Name, res, st.exitString())
 	}
 	return r.adopt(ctx, u.Name, time.Now(), u.StopTimeout, sandboxTierOf(spec)), nil
-}
-
-// sandboxCapabilityForgetter is the manager client's cache, as much of
-// it as the runner needs. An optional interface: a fake connection in
-// a test need not carry one.
-type sandboxCapabilityForgetter interface{ forgetSandboxCapability() }
-
-// sandboxedStartFailed reports a unit that failed to start with a
-// sandbox applied, which is evidence the cached capability no longer
-// describes the host.
-//
-// The measurement is cached against the manager connection, but what
-// it measures is the kernel and the LSM: user.max_user_namespaces, an
-// AppArmor policy reload or a container limit can all take the
-// namespaces away while the connection stays up, and the generation
-// cannot see it. Without this the cached `full` would stand, and
-// `sandbox auto` would keep choosing a tier whose units no longer
-// start — failing deploys where auto's whole contract is to degrade
-// with a WARN and keep serving.
-//
-// A launch fails for many reasons that have nothing to do with the
-// sandbox, and those cost one extra measurement on the next start.
-// That is the right way round: re-measuring is one throwaway unit,
-// while not re-measuring is every deploy failing until the manager
-// restarts.
-// The probe's own unit is exempt for two reasons. Its failure IS the
-// measurement — reporting it would be circular — and the measurement
-// runs while cachedSandboxCapability holds sandboxMu, so forgetting
-// from underneath it would deadlock on a host that cannot sandbox,
-// which is exactly the host where the probe fails.
-func (r *systemdRunner) sandboxedStartFailed(u unitSpec) {
-	if u.Probe || u.Sandbox == nil || u.Sandbox.tier == sandboxNone {
-		return
-	}
-	if f, ok := r.conn.(sandboxCapabilityForgetter); ok {
-		f.forgetSandboxCapability()
-	}
 }
 
 // adopt builds a watched handle for a unit known to be running.
@@ -678,12 +629,7 @@ func (r *systemdRunner) RunOnce(ctx context.Context, spec startSpec) error {
 		// on the runner's own context — the caller's is already done.
 		stopCtx, cancel := context.WithTimeout(r.ctx, u.StopTimeout+stopSlack)
 		defer cancel()
-		// Stop first: stopCtx's deadline is already running, and a
-		// pre_start that may still be executing is worth more than the
-		// ordering of a cache invalidation.
-		err := r.stopUnobserved(stopCtx, u.Name, cause)
-		r.sandboxedStartFailed(u)
-		return err
+		return r.stopUnobserved(stopCtx, u.Name, cause)
 	}
 	if res == "done" {
 		return nil
@@ -691,7 +637,6 @@ func (r *systemdRunner) RunOnce(ctx context.Context, spec startSpec) error {
 	reapCtx, cancel := context.WithTimeout(r.ctx, stopSlack)
 	defer cancel()
 	st := r.reapFailed(reapCtx, u.Name)
-	r.sandboxedStartFailed(u)
 	return fmt.Errorf("%s (unit %s: job %s)", st.exitString(), u.Name, res)
 }
 
