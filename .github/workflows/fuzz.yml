@@ -1,5 +1,6 @@
 # Weekly fuzzing of the untrusted-input surfaces (artifact tarball
-# extraction, path containment, URL redaction, hint-header parsing).
+# extraction, path containment, URL redaction, hint-header parsing,
+# deploy-token claim matching, webhook request parsing).
 # Seed corpora already run in every PR via `make test`, and `make
 # fuzz-list` there guarantees every target is discovered; this lane
 # does real coverage-guided fuzzing. Like soak, deliberately NOT part
@@ -24,7 +25,10 @@ permissions:
 jobs:
   fuzz:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Targets run serially at FUZZTIME each (12 targets x 5m = 60m of
+    # fuzzing alone), plus a per-target instrumented build; the cap
+    # must clear that or the tail targets never get their budget.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
