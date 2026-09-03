@@ -142,12 +142,12 @@ func validSandboxMode(s string) bool {
 
 // sandboxModeError validates a configured mode, naming the two
 // spellings this policy replaced rather than lumping them into the
-// generic message: `auto` and `require` are all over the design docs
-// and may well sit in an operator's working config. Nothing released
-// ever accepted either — v0.1.0 is the only tag and predates
-// sandboxing entirely — so this is a clear message on a config that
-// was never valid, not a migration. "" is the default Provision fills
-// in.
+// generic message. Not a migration path — there is nothing to
+// migrate: v0.1.0 is the only tag, it predates sandboxing entirely,
+// and nothing is deployed. It is for the configs that do exist,
+// written against the development branch, and for a reader coming
+// from the design docs, whose superseded passages still say `auto`
+// and `require`. "" is the default Provision fills in.
 func sandboxModeError(mode string) error {
 	if mode == "" || validSandboxMode(mode) {
 		return nil

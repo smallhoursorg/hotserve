@@ -665,6 +665,14 @@ symptom; the wrong policy was the cause.
 `TestIntegrationSystemdSandboxedUnitFailsAfterItsStartJobSucceeds`
 pins the systemd semantics so the invalidation is not reinvented.
 
+**This was free to do, and will not be again.** There is no installed
+base: `v0.1.0` is the only tag, it predates sandboxing, and nothing is
+deployed. So a policy value could be deleted outright rather than
+deprecated through a release — the same reasoning that retired the
+*filesystem* tier, and the last time it will apply to the sandbox
+config surface. Once anyone is running this, changing the default from
+"degrade" to "refuse" would be a migration, not an amendment.
+
 **Accepted cost: the sandbox is now an availability dependency.** A
 host that could sandbox at install and later cannot — a kernel
 upgrade, a `user.max_user_namespaces` sysctl, migration into a
@@ -672,10 +680,10 @@ container — refuses to start on the next hotserve restart, where
 `auto` logged a WARN and kept serving. Two consequences follow and are
 deliberate:
 
-- The **upgrade path gains a precondition**, written into the rollout
-  ladder above: confirm the host can sandbox, or set `sandbox off`,
-  *before* upgrading. A reload is the safe place to find out; a
-  restart is not.
+- The **upgrade path carries a precondition** for whoever runs this
+  first, written into the rollout ladder above: confirm the host can
+  sandbox, or set `sandbox off`, *before* upgrading. A reload is the
+  safe place to find out; a restart is not.
 - Probe interference under the shared uid (DESIGN-threat-model.md,
   "The capability probe runs under the shared uid") now fails the
   server start in the default posture rather than degrading one
