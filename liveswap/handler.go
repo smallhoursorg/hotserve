@@ -147,10 +147,11 @@ func (h *Handler) deployURL(w http.ResponseWriter, r *http.Request, ma *managedA
 
 // parseDeployPayload is the body half of deployURL: the size-capped
 // bytes in, either a payload the pipeline may act on or the 4xx that
-// refuses it. It is kept free of the ResponseWriter so FuzzDeployRequest
-// can drive the exact production gate — every field check a version or
-// URL passes on its way to the filesystem lives here, not in the
-// handler around it. status is 0 on success.
+// refuses it. Every check the JSON body gets before it becomes a
+// deployRequest lives here (the URL allowlist is downstream, in the
+// download), and it is kept free of the ResponseWriter so
+// FuzzDeployRequest drives the production gate itself. status is 0 on
+// success.
 func parseDeployPayload(body []byte) (p deployPayload, status int, msg string) {
 	if err := json.Unmarshal(body, &p); err != nil {
 		return deployPayload{}, http.StatusBadRequest, "invalid JSON payload: " + err.Error()
@@ -159,7 +160,7 @@ func parseDeployPayload(body []byte) (p deployPayload, status int, msg string) {
 		return deployPayload{}, http.StatusUnprocessableEntity, "url is required"
 	}
 	if !validVersion(p.Version) {
-		return deployPayload{}, http.StatusUnprocessableEntity, fmt.Sprintf("version must match %s and not be . or ..", versionRe)
+		return deployPayload{}, http.StatusUnprocessableEntity, fmt.Sprintf("version must match %s", versionRe)
 	}
 	// Go's transport would refuse a control character in the header
 	// value anyway, but as an opaque 500 at fetch time; catching it
@@ -176,7 +177,7 @@ func parseDeployPayload(body []byte) (p deployPayload, status int, msg string) {
 func (h *Handler) deployPush(w http.ResponseWriter, r *http.Request, ma *managedApp, by string) error {
 	version := r.URL.Query().Get("version")
 	if !validVersion(version) {
-		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("version query param must match %s and not be . or ..", versionRe)})
+		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("version query param must match %s", versionRe)})
 	}
 	// Acquire the per-app deploy lock BEFORE staging the upload: a
 	// concurrent push then gets an immediate 409 instead of streaming a
@@ -217,7 +218,7 @@ func (h *Handler) deployPush(w http.ResponseWriter, r *http.Request, ma *managed
 func (h *Handler) deployRollback(w http.ResponseWriter, r *http.Request, ma *managedApp, by string) error {
 	version := r.URL.Query().Get("rollback")
 	if !validVersion(version) {
-		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("rollback version must match %s and not be . or ..", versionRe)})
+		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("rollback version must match %s", versionRe)})
 	}
 	return h.runDeploy(w, r, ma, deployRequest{version: version, rollback: true}, by)
 }

@@ -89,7 +89,7 @@ Properties that matter to the model:
   app name; the operator's matcher is the only constraint.
 - **Payload:** three fields only — `url`, `version`, `auth_header`
   ([app.go:94-98](liveswap/app.go)); unknown JSON silently ignored (no
-  `DisallowUnknownFields`). `version` is `^[A-Za-z0-9._-]{1,64}$`,
+  `DisallowUnknownFields`). `version` is `^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$` (no leading dot),
   not `.`/`..`, double-sanitized before touching the filesystem
   ([liveswap.go:50,63-65,72-74](liveswap/liveswap.go)). `auth_header`
   is only control-char-checked ([handler.go:141-143](liveswap/handler.go));

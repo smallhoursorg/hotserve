@@ -51,11 +51,18 @@ func poolKey(name string) string { return "liveswap:app:" + name }
 
 var appNameRe = regexp.MustCompile(`^[a-z0-9-]{1,63}$`)
 
-// versionRe matches the same tag alphabet the Nomad-era webhook
-// allowed. The alphabet has no path separator, but "." and ".." still
-// match it, so validVersion — not the regex alone — is the check to
-// use before a version reaches a filesystem path.
-var versionRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+// versionRe is the tag alphabet: the Nomad-era webhook's set, minus a
+// leading dot. The alphabet has no path separator, so no tag can
+// escape releases/; the leading dot is refused because the releases
+// dir uses it for its own bookkeeping — ".extract-<version>" is the
+// staging dir a deploy renames into place, and release GC removes any
+// ".extract-*" it finds as a crash orphan and skips every other
+// dot-entry as a stray. A version named ".extract-1" would therefore
+// be deleted by the GC of the deploy that installed it, and ".v1"
+// would never be listed or pruned. "." and ".." fall out of the same
+// rule (both would resolve releases/<version> onto the releases dir
+// itself or the app root — where shared/ lives).
+var versionRe = regexp.MustCompile(`^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$`)
 
 // versionPathComponent renders a version tag safe to use as a single
 // path component, mechanically: rooting the string at "/" and cleaning
@@ -71,14 +78,12 @@ func versionPathComponent(v string) string {
 	return strings.TrimPrefix(filepath.Clean("/"+v), "/")
 }
 
-// validVersion reports whether v is an acceptable version tag. It must
-// match the tag alphabet and must not be "." or ".." — both match the
-// alphabet but resolve releases/<version> to the releases dir itself
-// or its parent (the app root), turning a deploy's release-replace
-// (os.RemoveAll of releaseDir in download.go) into deletion of every
-// release or of the app's persistent shared/ data.
+// validVersion reports whether v is an acceptable version tag: the
+// gate every version passes before it reaches a filesystem path (see
+// versionRe for what the alphabet refuses and why). FuzzDeployRequest
+// pins the filesystem property behind it.
 func validVersion(v string) bool {
-	return versionRe.MatchString(v) && v != "." && v != ".."
+	return versionRe.MatchString(v)
 }
 
 // App is the `liveswap` Caddy app module: the deploy orchestrator.
