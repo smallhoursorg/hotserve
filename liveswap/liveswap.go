@@ -132,8 +132,21 @@ type App struct {
 	// recoverCancel/recoverWG own the boot-recovery goroutines this
 	// config started, so Cleanup can end them before rolling back or
 	// releasing anything.
-	recoverCancel   context.CancelFunc
-	recoverWG       *sync.WaitGroup // pointer: App values are copied by Caddy
+	recoverCancel context.CancelFunc
+	recoverWG     *sync.WaitGroup // pointer: App values are copied by Caddy
+	// manager is the manager connection everything this config starts
+	// talks to — its apps' runners and its unknown-app sweep. Typed as
+	// the interface, so a test installs a fake here and Start touches
+	// no real socket; nil means the process-wide client.
+	//
+	// managerProbe and sandboxProbe are the two seams that need the
+	// concrete client (reachability, and the cached measurement).
+	// Fields rather than the package vars they replace: a test scripts
+	// a host on its own App instead of mutating global state and
+	// restoring it in a t.Cleanup.
+	manager         systemdConn
+	managerProbe    func() error
+	sandboxProbe    func(*zap.Logger) sandboxCapability
 	allowlist       []artifactAllowEntry
 	globalTrust     []trustSource // resolved global DeployTrust, for the unknown-app path
 	globalVerifiers []verifier
@@ -565,17 +578,21 @@ func (a *App) Start() error {
 	// here rather than in Provision so `hotserve validate` — which
 	// provisions and cleans up without starting — works as any user.
 	if len(a.managed) > 0 {
-		if err := probeUserManager(); err != nil {
+		if err := a.probeManager(); err != nil {
 			return err
 		}
 	}
-	// Sandbox policy is settled here, once per start, against what this
+	// Sandbox policy is settled here, on every start, against what this
 	// host delivers: the probe runs a throwaway unit with the sandbox
 	// applied and checks the namespaces from inside. `require` on a
 	// host that falls short fails the start — by design, and documented
 	// as such — so it is checked before any app is configured.
+	//
+	// The measurement itself is cached on the manager connection, so a
+	// reload that changes nothing about the manager does not pay for a
+	// unit here; see userManagerClient.sandboxCapability.
 	if a.sandboxWanted() {
-		capability := probeSandbox(a.logger)
+		capability := a.measureSandbox()
 		for name, spec := range a.specs {
 			tier, warn, err := resolveSandboxTier(spec.sandboxMode, capability)
 			if err != nil {
@@ -588,7 +605,7 @@ func (a *App) Start() error {
 		}
 	}
 	for name, ma := range a.managed {
-		ma.configure(a, a.specs[name], a.logger.Named(name), a.clients)
+		ma.configure(a, a.specs[name], a.logger.Named(name), a.clients, a.systemdConn())
 		ma.startWatchdog()
 	}
 	a.started = true
@@ -599,10 +616,11 @@ func (a *App) Start() error {
 	// the sweep judges each app against the pool right before acting,
 	// so neither a reload racing it nor a candidate config that later
 	// fails to activate can lose an app someone still holds.
+	conn := a.systemdConn()
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), unknownAppSweepTimeout)
 		defer cancel()
-		if err := sweepUnknownApps(ctx, userManager, a.logger); err != nil {
+		if err := sweepUnknownApps(ctx, conn, a.logger); err != nil {
 			a.logger.Error("sweeping units of apps no longer configured", zap.Error(err))
 		}
 	}()
@@ -635,12 +653,34 @@ func (a *App) sandboxWanted() bool {
 	return false
 }
 
-// probeSandbox measures what the user manager can deliver (sandbox.go);
-// a variable so unit tests can script the host.
-var probeSandbox = func(logger *zap.Logger) sandboxCapability {
-	r := newSystemdRunner(userManager, logger)
-	defer r.cancel()
-	return probeSandboxCapability(r)
+// systemdConn returns the manager connection this config uses. Apps
+// built by Provision share the process-wide client; a test may install
+// its own so nothing it starts reaches a real manager.
+func (a *App) systemdConn() systemdConn {
+	if a.manager != nil {
+		return a.manager
+	}
+	return userManager
+}
+
+// probeManager fails loudly when the manager is unreachable, so Start
+// reports what to fix rather than every deploy failing later. Called
+// from Start rather than Provision so `hotserve validate` — which
+// provisions and cleans up without starting — works as any user.
+func (a *App) probeManager() error {
+	if a.managerProbe != nil {
+		return a.managerProbe()
+	}
+	return userManager.probe()
+}
+
+// measureSandbox reports what this host delivers (sandbox.go), from
+// the per-connection cache.
+func (a *App) measureSandbox() sandboxCapability {
+	if a.sandboxProbe != nil {
+		return a.sandboxProbe(a.logger)
+	}
+	return userManager.sandboxCapability(a.logger)
 }
 
 // Stop intentionally does NOT stop app processes: on a config reload

@@ -47,7 +47,9 @@ import (
 // reason every other path is.
 //
 // The policy (auto/require/off) is resolved per app at Start against a
-// host capability probed once per Start; the tier an instance actually
+// host capability measured once per manager connection (not per
+// config load: the measurement costs a whole unit — see
+// userManagerClient.sandboxCapability); the tier an instance actually
 // got is recorded with its handle in state.json so a relaunch
 // reproduces it (engage on the next deploy, never on the upgrade
 // relaunch — see liveswap/DESIGN-sandbox.md, rollout semantics).
@@ -125,7 +127,9 @@ func validSandboxMode(s string) bool {
 	return s == sandboxAuto || s == sandboxRequire || s == sandboxOff
 }
 
-// sandboxCapability is what the host can deliver, as probed at Start.
+// sandboxCapability is what the host can deliver. Measured by starting
+// a real unit, so it is cached against the manager connection rather
+// than taken again on every config load.
 type sandboxCapability struct {
 	tier   sandboxTier
 	reason string // why tier is below full ("" when full)

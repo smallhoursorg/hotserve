@@ -15,6 +15,7 @@ import (
 
 	sddbus "github.com/coreos/go-systemd/v22/dbus"
 	godbus "github.com/godbus/dbus/v5"
+	"go.uber.org/zap"
 )
 
 // userManagerClient talks to the systemd service manager of the user
@@ -32,17 +33,123 @@ import (
 type userManagerClient struct {
 	mu   sync.Mutex
 	conn *sddbus.Conn
+	// generation counts successful dials, so a measurement can name the
+	// connection it was taken on. Starts at 1: 0 means "never dialed",
+	// which no cached measurement can match.
+	generation atomic.Uint64
 	// nofile is the manager's DefaultLimitNOFILE (its hard ceiling for
 	// units), read once per connection; 0 = unknown, leave units alone.
 	nofile atomic.Uint64
+
+	// The sandbox capability is a property of the manager, not of a
+	// config load, and measuring it costs a whole throwaway unit — far
+	// too much to repeat on Caddy's critical path, which is what
+	// App.Start used to do on every reload. It is measured at most once
+	// per connection: a manager restart forces a redial, which is the
+	// event the generation exists to catch.
+	//
+	// It is not the only thing that can change the answer, because
+	// what the probe measures is the kernel and the LSM rather than
+	// the manager — a sysctl or a policy reload moves it with the
+	// connection still up. forgetSandboxCapability is the other half:
+	// a sandboxed unit the manager refuses drops the cache.
+	//
+	// Its own mutex, not mu: a measurement takes a unit start plus its
+	// exit, and holding the mutex every D-Bus call needs for that long
+	// would stall the runner.
+	sandboxMu  sync.Mutex
+	sandboxCap sandboxCapability
+	sandboxGen uint64 // generation sandboxCap holds for; 0 = never measured
 }
 
 // userManager is the process-wide client every systemdRunner shares.
 var userManager = &userManagerClient{}
 
-// probeUserManager is what Provision calls to fail loudly when the
-// manager is unreachable; a variable so unit tests can stub it.
-var probeUserManager = func() error { return userManager.probe() }
+// sandboxCapability reports what this manager can deliver, measuring
+// at most once per connection (see the cache fields above). The
+// measurement starts a real unit, so the first caller after a dial
+// pays for it and every later config load reads the cache.
+//
+// probe() rather than get(): it proves the manager answers a real
+// request, and its error names the uid, the socket and the lingering
+// to enable. resolveSandboxTier puts that reason verbatim into the
+// `sandbox require` refusal and the `auto` WARN, so a manager that
+// went away between Start's probeManager and here must not be
+// reported as a sandbox problem with no remedy attached.
+func (c *userManagerClient) sandboxCapability(logger *zap.Logger) sandboxCapability {
+	if err := c.probe(); err != nil {
+		return sandboxCapability{tier: sandboxNone, reason: err.Error()}
+	}
+	return c.cachedSandboxCapability(func() sandboxCapability {
+		r := newSystemdRunner(c, logger)
+		defer r.cancel()
+		return probeSandboxCapability(r)
+	})
+}
+
+// forgetSandboxCapability drops the cached measurement so the next
+// caller takes a fresh one. The connection generation covers a manager
+// restart; this covers everything else that can change the answer
+// under a live connection — see systemdRunner.sandboxedStartFailed,
+// which is the evidence that triggers it.
+// TryLock, not Lock: this is called from launch paths — one under
+// deployMu, one holding a stop deadline that is already ticking — and
+// a concurrent measurement holds sandboxMu for the probe's whole
+// budget. Waiting there would spend a deploy's time, or a pre_start's
+// stop budget, on bookkeeping.
+//
+// Skipping when contended is correct rather than merely expedient: the
+// measurement holding the mutex is about to publish a fresh reading of
+// this same host, which is what invalidating asks for. If it somehow
+// does not, the next failed launch tries again.
+func (c *userManagerClient) forgetSandboxCapability() {
+	if !c.sandboxMu.TryLock() {
+		return
+	}
+	defer c.sandboxMu.Unlock()
+	c.sandboxCap, c.sandboxGen = sandboxCapability{}, 0
+}
+
+// cachedSandboxCapability returns the measurement held for the current
+// connection, taking a fresh one via measure when the cache is empty
+// or belongs to an older one. Separate from sandboxCapability so the
+// caching rule is testable without a manager to dial.
+//
+// A cached capability is dropped by forgetSandboxCapability when a
+// sandboxed unit fails to start, because what is measured here is the
+// kernel and the LSM, not the manager: the generation cannot see a
+// sysctl or a policy reload.
+//
+// Only a capability the host actually delivered is cached. A `none`
+// verdict is not a measurement of the host so much as the absence of
+// one: probeSandboxCapability reports the same thing whether the
+// namespaces are genuinely unavailable or the probe unit merely timed
+// out under boot load, and caching that would pin every app
+// unsandboxed — or, under `require`, refuse the server — for the life
+// of a connection that nothing will drop. So a failed verdict is
+// reported and re-measured next time, which is what this code did
+// before the cache existed. The cost of re-measuring falls only on
+// hosts that cannot sandbox at all; the supported one pays it once.
+func (c *userManagerClient) cachedSandboxCapability(measure func() sandboxCapability) sandboxCapability {
+	c.sandboxMu.Lock()
+	defer c.sandboxMu.Unlock()
+	// Read under the lock: sampled outside it, a redial between the
+	// read and the lock would let a cache hit serve a measurement of a
+	// manager that no longer exists.
+	gen := c.generation.Load()
+	if gen != 0 && c.sandboxGen == gen {
+		return c.sandboxCap
+	}
+	got := measure()
+	// Cache only against a real connection, and only if that
+	// connection is still the current one: a redial while the probe
+	// ran means it described a manager that is no longer live. The
+	// caller that asked still gets what was measured.
+	if got.tier != sandboxNone && gen != 0 && c.generation.Load() == gen {
+		c.sandboxCap, c.sandboxGen = got, gen
+	}
+	return got
+}
 
 // userManagerSocket is the private socket of this uid's manager.
 func userManagerSocket() string {
@@ -132,6 +239,7 @@ func (c *userManagerClient) get() (*sddbus.Conn, error) {
 	}
 	c.conn = conn
 	c.nofile.Store(nofile) // published with the connection it was read from
+	c.generation.Add(1)    // ... as is the generation the sandbox cache keys on
 	return conn, nil
 }
 

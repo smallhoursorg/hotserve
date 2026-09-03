@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -647,23 +648,48 @@ func TestValidateSandboxConfig(t *testing.T) {
 // refuses user namespaces: require refuses to start and names the
 // reason; auto starts unsandboxed and warns; off never probes.
 func TestStartResolvesSandboxPolicy(t *testing.T) {
-	origProbe, origManager := probeSandbox, probeUserManager
-	t.Cleanup(func() { probeSandbox, probeUserManager = origProbe, origManager })
-	probeUserManager = func() error { return nil }
-	probes := 0
-	probeSandbox = func(*zap.Logger) sandboxCapability {
-		probes++
-		return sandboxCapability{tier: sandboxNone, reason: "full tier: unit failed: Failed to set up user namespacing: Permission denied"}
-	}
+	probes, managerProbes := 0, 0
 	newApp := func(mode string) *App {
 		spec := testSpec(t)
 		spec.sandboxMode = mode
+		// A managed app, not an empty map: Start gates the
+		// reachability probe on there being one, so an empty pool
+		// leaves that seam dead and the ordering it guarantees —
+		// manager reachable BEFORE the host is measured — unasserted.
+		rig := newTestRig(t)
+		rig.spec = spec
+		rig.ma.spec = spec
+		// Start installs its own watchdog context over the rig's, so
+		// the rig's t.Cleanup no longer reaches it; stop it explicitly
+		// or goleak fails the package on the leaked goroutine.
+		t.Cleanup(rig.ma.stopWatchdog)
+		// Per-App, not shared: the ordering being pinned is "this
+		// config proved its manager reachable before it measured the
+		// host", and a counter shared across the three apps below
+		// would be satisfied by the previous app's probe.
+		measuredHere := false
 		return &App{
 			Root:    spec.dirs.root,
 			logger:  zap.NewNop(),
 			specs:   map[string]*appSpec{"demo": spec},
-			managed: map[string]*managedApp{},
+			managed: map[string]*managedApp{"demo": rig.ma},
 			clients: &fetchClients{},
+			// A fake connection, so the unknown-app sweep Start spawns
+			// cannot reach a real manager and stop units belonging to
+			// whoever is running one on this machine.
+			manager: newFakeSystemdConn(),
+			managerProbe: func() error {
+				managerProbes++
+				measuredHere = true
+				return nil
+			},
+			sandboxProbe: func(*zap.Logger) sandboxCapability {
+				probes++
+				if !measuredHere {
+					t.Error("this App measured the host before proving its manager reachable")
+				}
+				return sandboxCapability{tier: sandboxNone, reason: "full tier: unit failed: Failed to set up user namespacing: Permission denied"}
+			},
 		}
 	}
 	a := newApp(sandboxRequire)
@@ -690,6 +716,14 @@ func TestStartResolvesSandboxPolicy(t *testing.T) {
 		t.Fatalf("off tier = %v", a.specs["demo"].sandboxTier)
 	}
 	_ = a.Cleanup()
+
+	// Every one of those starts had a managed app, so every one had to
+	// prove the manager reachable first — the seam that replaced the
+	// probeUserManager package var, and the precondition the cached
+	// measurement's own early return depends on.
+	if managerProbes != 3 {
+		t.Fatalf("manager reachability probed %d times across 3 starts, want 3", managerProbes)
+	}
 }
 
 // TestSandboxRootUnderTmpIsAllowed: only hotserve's own state is a
@@ -1755,5 +1789,264 @@ func TestAppViewsAreDisjointExceptTheBaseView(t *testing.T) {
 		if _, present := blog[p]; present {
 			t.Errorf("blog's view contains %s", p)
 		}
+	}
+}
+
+// TestSandboxCapabilityCachedPerConnection pins the rule that keeps a
+// throwaway unit off Caddy's critical path: a delivered capability is
+// measured at most once per manager connection, and again after a
+// redial. Drives the caching directly, so it needs no manager to dial.
+func TestSandboxCapabilityCachedPerConnection(t *testing.T) {
+	c := &userManagerClient{}
+	measured := 0
+	full := func() sandboxCapability {
+		measured++
+		return sandboxCapability{tier: sandboxFull}
+	}
+
+	c.generation.Add(1) // a first dial
+	for i := 0; i < 5; i++ {
+		if got := c.cachedSandboxCapability(full); got.tier != sandboxFull {
+			t.Fatalf("call %d: tier = %v, want full", i, got.tier)
+		}
+	}
+	if measured != 1 {
+		t.Fatalf("measured %d times across 5 config loads, want 1: the probe starts a unit and belongs to the connection", measured)
+	}
+
+	// A redial invalidates it: the manager that restarted may not be
+	// the one that was measured.
+	c.generation.Add(1)
+	if got := c.cachedSandboxCapability(full); got.tier != sandboxFull {
+		t.Fatalf("after redial: tier = %v", got.tier)
+	}
+	if measured != 2 {
+		t.Fatalf("measured %d times, want 2: a redial must re-measure", measured)
+	}
+
+	// A redial *during* a measurement means it described a manager that
+	// is no longer current: report it, cache nothing, measure again.
+	c.generation.Add(1)
+	gen := c.generation.Load()
+	racing := func() sandboxCapability {
+		measured++
+		c.generation.Add(1)
+		return sandboxCapability{tier: sandboxFull, reason: "raced"}
+	}
+	if got := c.cachedSandboxCapability(racing); got.reason != "raced" {
+		t.Fatalf("the caller that asked must still get the measurement it took: %+v", got)
+	}
+	if c.sandboxGen == gen {
+		t.Fatal("a measurement taken across a redial was cached against the stale generation")
+	}
+
+	// Generation 0 is "never dialed": nothing to cache against, in
+	// either direction. The write guard is asserted as well as the
+	// read one, so the two halves cannot disagree about the sentinel.
+	fresh := &userManagerClient{}
+	measured = 0
+	fresh.cachedSandboxCapability(full)
+	fresh.cachedSandboxCapability(full)
+	if measured != 2 {
+		t.Fatalf("measured %d times at generation 0, want 2: no connection means nothing to cache against", measured)
+	}
+	if fresh.sandboxGen != 0 {
+		t.Fatalf("sandboxGen = %d after measuring with no connection; 0 is reserved for \"never measured\"", fresh.sandboxGen)
+	}
+}
+
+// TestSandboxFailedMeasurementIsNotCached pins the half of the caching
+// rule that decides whether a bad minute costs a host its sandbox for
+// the life of a connection. probeSandboxCapability reports the same
+// {none, reason} whether the namespaces are genuinely unavailable or
+// the probe unit merely timed out under boot load, and a timeout
+// leaves the connection Connected() — so nothing would ever drop it
+// and re-measure.
+func TestSandboxFailedMeasurementIsNotCached(t *testing.T) {
+	c := &userManagerClient{}
+	c.generation.Add(1)
+	measured := 0
+	failing := func() sandboxCapability {
+		measured++
+		return sandboxCapability{tier: sandboxNone, reason: "full tier: unit failed: probe timed out"}
+	}
+	for i := 0; i < 3; i++ {
+		if got := c.cachedSandboxCapability(failing); got.tier != sandboxNone {
+			t.Fatalf("call %d: tier = %v, want none", i, got.tier)
+		}
+	}
+	if measured != 3 {
+		t.Fatalf("measured %d times, want 3: a failed verdict must not pin every app unsandboxed until a redial", measured)
+	}
+	if c.sandboxGen != 0 {
+		t.Fatal("a failed verdict was cached")
+	}
+	// And once the host answers, that verdict is cached as usual.
+	if got := c.cachedSandboxCapability(func() sandboxCapability { return sandboxCapability{tier: sandboxFull} }); got.tier != sandboxFull {
+		t.Fatalf("tier = %v, want full", got.tier)
+	}
+	if c.cachedSandboxCapability(failing); measured != 3 {
+		t.Fatalf("measured %d: a cached success must still be served", measured)
+	}
+}
+
+// TestSandboxedStartFailureForgetsCapability pins the invalidation the
+// connection generation cannot provide. The capability is cached
+// against the manager connection, but what it measures is the kernel
+// and the LSM: user.max_user_namespaces, an AppArmor policy reload or
+// a container limit can take the namespaces away while the connection
+// stays up. Without this the cached `full` would stand and `sandbox
+// auto` would keep choosing a tier whose units no longer start —
+// failing every deploy, where auto's contract is to degrade with a
+// WARN and keep serving.
+func TestSandboxedStartFailureForgetsCapability(t *testing.T) {
+	c := &userManagerClient{}
+	c.generation.Add(1)
+	measured := 0
+	full := func() sandboxCapability {
+		measured++
+		return sandboxCapability{tier: sandboxFull}
+	}
+	if got := c.cachedSandboxCapability(full); got.tier != sandboxFull || measured != 1 {
+		t.Fatalf("tier=%v measured=%d", got.tier, measured)
+	}
+
+	// A unit that failed to start WITHOUT a sandbox says nothing about
+	// the host's namespaces, and must not cost a measurement.
+	r := &systemdRunner{conn: c}
+	r.sandboxedStartFailed(unitSpec{Name: "bare.service"})
+	r.sandboxedStartFailed(unitSpec{Name: "off.service", Sandbox: &sandboxSpec{tier: sandboxNone}})
+	if c.cachedSandboxCapability(full); measured != 1 {
+		t.Fatalf("measured %d: an unsandboxed start failure is not evidence about the sandbox", measured)
+	}
+
+	// One that failed WITH a sandbox applied is. Driven through Start,
+	// not by calling the helper: the wiring is the thing that can be
+	// deleted, and asserting the helper alone leaves Start free to
+	// stop calling it with every test still green.
+	r.sandboxedStartFailed(unitSpec{Name: "app.service", Sandbox: &sandboxSpec{tier: sandboxFull}})
+	if c.sandboxGen != 0 {
+		t.Fatal("a sandboxed start failure left the stale capability cached")
+	}
+	degraded := func() sandboxCapability {
+		measured++
+		return sandboxCapability{tier: sandboxNone, reason: "full tier: unit failed: Permission denied"}
+	}
+	got := c.cachedSandboxCapability(degraded)
+	if got.tier != sandboxNone || measured != 2 {
+		t.Fatalf("tier=%v measured=%d: the next start must re-measure the host", got.tier, measured)
+	}
+	// And auto now degrades with a warning instead of selecting a tier
+	// whose units cannot start.
+	tier, warn, err := resolveSandboxTier(sandboxAuto, got)
+	if err != nil || tier != sandboxNone || warn == "" {
+		t.Fatalf("auto must degrade with a WARN: tier=%v warn=%q err=%v", tier, warn, err)
+	}
+}
+
+// forgetCountingConn is a fake connection that also carries the
+// optional capability cache, so a test can see Start reach for it.
+type forgetCountingConn struct {
+	*fakeSystemdConn
+	forgotten int
+}
+
+func (f *forgetCountingConn) forgetSandboxCapability() { f.forgotten++ }
+
+// TestStartForgetsCapabilityOnSandboxedFailure pins the WIRING, not the
+// helper: that Start's failure path is what reports a sandboxed unit
+// the manager refused. Without this, deleting the one call from Start
+// leaves every other sandbox test green while the stale capability
+// survives and auto keeps choosing a tier whose units cannot start.
+func TestStartForgetsCapabilityOnSandboxedFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		sandbox *sandboxSpec
+		want    int
+	}{
+		{"sandboxed unit the manager refused", &sandboxSpec{tier: sandboxFull, root: "/var/lib/liveswap"}, 1},
+		{"bare unit that failed for its own reasons", nil, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := &forgetCountingConn{fakeSystemdConn: newFakeSystemdConn()}
+			conn.startResult = "failed"
+			conn.failStatus = &unitStatus{LoadState: "loaded", ActiveState: "failed", Result: "exit-code", ExecMainCode: 1, ExecMainStatus: 226}
+			r := newSystemdRunner(conn, zap.NewNop())
+			t.Cleanup(r.cancel)
+			if _, err := r.Start(startSpec{app: "demo", version: "v1", command: []string{"/bin/true"}, sandbox: tc.sandbox}); err == nil {
+				t.Fatal("a start job that did not return done must be an error")
+			}
+			if conn.forgotten != tc.want {
+				t.Fatalf("capability forgotten %d times, want %d", conn.forgotten, tc.want)
+			}
+		})
+	}
+}
+
+// TestRunOnceForgetsCapabilityOnSandboxedFailure covers the launch path
+// Start does not: a sandboxed pre_start goes through RunOnce, and if a
+// live namespace or LSM change first surfaces there, the stale
+// capability would survive and later reloads keep choosing a tier
+// whose units cannot start.
+func TestRunOnceForgetsCapabilityOnSandboxedFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		spec    startSpec
+		want    int
+		startEr bool
+	}{
+		{name: "sandboxed pre_start the manager refused",
+			spec: startSpec{app: "demo", version: "v1", command: []string{"/bin/true"}, sandbox: &sandboxSpec{tier: sandboxFull, root: "/var/lib/liveswap"}},
+			want: 1},
+		{name: "the capability probe's own unit is exempt",
+			spec: startSpec{app: "sandbox-probe", version: "full", command: []string{"/bin/true"}, probe: true, sandbox: probeSandboxSpec(sandboxFull)},
+			want: 0},
+		{name: "bare pre_start",
+			spec: startSpec{app: "demo", version: "v1", command: []string{"/bin/true"}},
+			want: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := &forgetCountingConn{fakeSystemdConn: newFakeSystemdConn()}
+			conn.startResult = "failed"
+			conn.failStatus = &unitStatus{LoadState: "loaded", ActiveState: "failed", Result: "exit-code", ExecMainCode: 1, ExecMainStatus: 226}
+			r := newSystemdRunner(conn, zap.NewNop())
+			t.Cleanup(r.cancel)
+			if err := r.RunOnce(context.Background(), tc.spec); err == nil {
+				t.Fatal("a oneshot whose job did not return done must be an error")
+			}
+			if conn.forgotten != tc.want {
+				t.Fatalf("capability forgotten %d times, want %d", conn.forgotten, tc.want)
+			}
+		})
+	}
+}
+
+// TestForgetSandboxCapabilityDoesNotBlock pins that invalidation never
+// waits on a measurement. It is called from launch paths — one under
+// deployMu, one holding a stop deadline already counting down — while
+// a concurrent measurement can hold sandboxMu for the probe's whole
+// budget. Blocking there would spend a deploy's time, or the budget
+// for stopping a pre_start that may still be executing, on bookkeeping.
+func TestForgetSandboxCapabilityDoesNotBlock(t *testing.T) {
+	c := &userManagerClient{}
+	c.generation.Add(1)
+	c.cachedSandboxCapability(func() sandboxCapability { return sandboxCapability{tier: sandboxFull} })
+
+	c.sandboxMu.Lock() // a measurement in flight
+	done := make(chan struct{})
+	go func() { c.forgetSandboxCapability(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		c.sandboxMu.Unlock()
+		t.Fatal("invalidation blocked behind an in-flight measurement")
+	}
+	c.sandboxMu.Unlock()
+
+	// Skipped, not lost: the measurement holding the mutex publishes a
+	// fresh reading, and an uncontended call still clears.
+	c.forgetSandboxCapability()
+	if c.sandboxGen != 0 {
+		t.Fatal("an uncontended invalidation must clear the cache")
 	}
 }

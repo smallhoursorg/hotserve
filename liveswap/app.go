@@ -257,7 +257,12 @@ type appConfigState struct {
 }
 
 // owner is the config installing this definition (see rollbackConfig).
-func (ma *managedApp) configure(owner any, spec *appSpec, logger *zap.Logger, clients *fetchClients) {
+// manager is the connection a runner built here talks to, passed in
+// rather than reached for globally so a test can install its own; it
+// is read only when this managedApp has no runner yet, because a
+// pooled app keeps the runner — and so the connection — it was first
+// started with across every later reload.
+func (ma *managedApp) configure(owner any, spec *appSpec, logger *zap.Logger, clients *fetchClients, manager systemdConn) {
 	ma.specMu.Lock()
 	defer ma.specMu.Unlock()
 	changed := ma.spec != nil && !specEqual(ma.spec, spec)
@@ -271,7 +276,7 @@ func (ma *managedApp) configure(owner any, spec *appSpec, logger *zap.Logger, cl
 	ma.verifiers = resolveVerifiers(spec.trust, clients.jwks)
 	ma.logger = logger
 	if ma.runner == nil {
-		ma.runner = newSystemdRunner(userManager, logger)
+		ma.runner = newSystemdRunner(manager, logger)
 		ma.prober = &httpProber{client: clients.health, clock: realClock{}}
 		ma.fetch = &releaseFetcher{client: clients.download}
 		ma.clock = realClock{}

@@ -58,8 +58,8 @@ requirement below stands as the contract the sandbox path must keep.
 
 ## Behavior specification (normative)
 
-- Sandboxing MUST default to on (`sandbox auto`), probed at start by
-  running a throwaway unit and checking the namespaces from inside
+- Sandboxing MUST default to on (`sandbox auto`), probed by running a
+  throwaway unit and checking the namespaces from inside
   (the manager silently ignores `PrivatePIDs=` on a kernel without PID
   namespaces, so accepting the property proves nothing). It MUST be
   configurable globally and per app: `auto` (sandbox where the host
