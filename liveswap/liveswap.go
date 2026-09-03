@@ -110,12 +110,10 @@ type App struct {
 	// AllowInsecureHTTP. Apps may override.
 	ArtifactAllowlist []string `json:"artifact_allowlist,omitempty"`
 
-	// Sandbox is the default per-app sandbox policy: "auto" (the best
-	// tier this host delivers, with a WARN when that is not the full
-	// one), "require" (the full tier or refuse to start — this can keep
-	// the whole server from starting on a host that cannot deliver it;
-	// tighten to it only after auto has been proven per app), or
-	// "off". Default "auto". Apps may override. See liveswap/README.md.
+	// Sandbox is the default per-app sandbox policy: "on" (the full
+	// sandbox, or refuse to start — this keeps the whole server from
+	// starting on a host that cannot deliver it) or "off". Default
+	// "on". Apps may override. See liveswap/README.md.
 	Sandbox string `json:"sandbox,omitempty"`
 
 	// Apps defines the managed applications, keyed by name
@@ -278,7 +276,7 @@ func (a *App) Provision(ctx caddy.Context) error {
 	}
 	resolveTrustPlaceholders(repl, a.DeployTrust)
 	if a.Sandbox == "" {
-		a.Sandbox = sandboxAuto
+		a.Sandbox = sandboxOn
 	}
 	if a.Root == "" {
 		a.Root = "/var/lib/liveswap"
@@ -495,12 +493,12 @@ func (a *App) Validate() error {
 	if err := validateSandboxRoot(a.Root, a.anySandboxed()); err != nil {
 		return err
 	}
-	if a.Sandbox != "" && !validSandboxMode(a.Sandbox) { // "" = the default Provision applies (auto)
-		return fmt.Errorf("sandbox must be \"auto\", \"require\" or \"off\", got %q", a.Sandbox)
+	if err := sandboxModeError(a.Sandbox); err != nil {
+		return err
 	}
 	for name, cfg := range a.Apps {
-		if cfg.Sandbox != "" && !validSandboxMode(cfg.Sandbox) {
-			return fmt.Errorf("app %s: sandbox must be \"auto\", \"require\" or \"off\", got %q", name, cfg.Sandbox)
+		if err := sandboxModeError(cfg.Sandbox); err != nil {
+			return fmt.Errorf("app %s: %w", name, err)
 		}
 		if !appNameRe.MatchString(name) {
 			return fmt.Errorf("app name %q must match %s", name, appNameRe)
@@ -584,9 +582,9 @@ func (a *App) Start() error {
 	}
 	// Sandbox policy is settled here, on every start, against what this
 	// host delivers: the probe runs a throwaway unit with the sandbox
-	// applied and checks the namespaces from inside. `require` on a
-	// host that falls short fails the start — by design, and documented
-	// as such — so it is checked before any app is configured.
+	// applied and checks the namespaces from inside. A host that falls
+	// short fails the start — by design, and documented as such — so it
+	// is checked before any app is configured.
 	//
 	// The measurement itself is cached on the manager connection, so a
 	// reload that changes nothing about the manager does not pay for a
@@ -594,14 +592,11 @@ func (a *App) Start() error {
 	if a.sandboxWanted() {
 		capability := a.measureSandbox()
 		for name, spec := range a.specs {
-			tier, warn, err := resolveSandboxTier(spec.sandboxMode, capability)
+			tier, err := resolveSandboxTier(spec.sandboxMode, capability)
 			if err != nil {
 				return fmt.Errorf("app %s: %w", name, err)
 			}
 			spec.sandboxTier = tier
-			if warn != "" {
-				a.logger.Warn(warn, zap.String("app", name), zap.String("tier", tier.String()))
-			}
 		}
 	}
 	for name, ma := range a.managed {

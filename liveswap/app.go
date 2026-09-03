@@ -93,7 +93,7 @@ type appSpec struct {
 	allowInsecure   bool
 	allowlist       []artifactAllowEntry
 	dirs            appDirs
-	sandboxMode     string // auto | require | off (policy, from config)
+	sandboxMode     string // on | off (policy, from config)
 	// sandboxTier is the tier new instances of this app get: policy
 	// resolved against the host at App.Start. Relaunches ignore it and
 	// reproduce the recorded tier of the instance they replace.

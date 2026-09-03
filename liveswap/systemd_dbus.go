@@ -77,9 +77,9 @@ var userManager = &userManagerClient{}
 // probe() rather than get(): it proves the manager answers a real
 // request, and its error names the uid, the socket and the lingering
 // to enable. resolveSandboxTier puts that reason verbatim into the
-// `sandbox require` refusal and the `auto` WARN, so a manager that
-// went away between Start's probeManager and here must not be
-// reported as a sandbox problem with no remedy attached.
+// `sandbox on` refusal, so a manager that went away between Start's
+// probeManager and here must not be reported as a sandbox problem
+// with no remedy attached.
 func (c *userManagerClient) sandboxCapability(logger *zap.Logger) sandboxCapability {
 	if err := c.probe(); err != nil {
 		return sandboxCapability{tier: sandboxNone, reason: err.Error()}

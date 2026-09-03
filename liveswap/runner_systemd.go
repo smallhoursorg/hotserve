@@ -274,7 +274,7 @@ func unitName(spec startSpec, oneshot bool) (string, error) {
 		// sweep skips it (a probe named like an app would be stopped
 		// by a concurrent sweepUnknownApps, or collide with an app
 		// actually called "sandbox-probe", downgrading the tier or
-		// failing `sandbox require` for no reason).
+		// failing `sandbox on` for no reason).
 		return unitPrefix + "sandboxprobe_" + hex.EncodeToString(nonce[:]) + ".service", nil
 	}
 	name := unitPrefix + spec.app + "." + spec.version + "." + hex.EncodeToString(nonce[:])

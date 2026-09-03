@@ -158,7 +158,7 @@ func TestNetworkNamespaceIsShared(t *testing.T) {
 func TestPreStartRunsUnderTheSameSandboxAsItsApp(t *testing.T) {
 	rig := newTestRig(t)
 	rig.spec.preStart = []string{"./migrate"}
-	rig.spec.sandboxMode = sandboxAuto
+	rig.spec.sandboxMode = sandboxOn
 	rig.spec.sandboxTier = sandboxFull
 	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/1", version: "v1"}))
 
@@ -430,9 +430,9 @@ func TestRootUnderTheBaseViewIsOnlyRefusedWhenSomethingIsSandboxed(t *testing.T)
 	if err := a.Validate(); err != nil {
 		t.Fatalf("sandbox off globally with a root under the base view must load: %v", err)
 	}
-	a.Sandbox = sandboxAuto
+	a.Sandbox = sandboxOn
 	if err := a.Validate(); err == nil {
-		t.Fatal("sandbox auto with a root under the base view must be refused")
+		t.Fatal("sandbox on with a root under the base view must be refused")
 	}
 }
 
@@ -461,8 +461,8 @@ func TestEnvFileIsolationHonoursTheGlobalSandboxSetting(t *testing.T) {
 	}
 	// The control: the same config with sandboxing on must still be
 	// refused, or the case below proves nothing.
-	if err := newApp(sandboxAuto).Validate(); err == nil {
-		t.Fatal("sandbox auto: an env_file inside a sibling's shared dir must be refused")
+	if err := newApp(sandboxOn).Validate(); err == nil {
+		t.Fatal("sandbox on: an env_file inside a sibling's shared dir must be refused")
 	}
 	if err := newApp(sandboxOff).Validate(); err != nil {
 		t.Fatalf("sandbox off globally: no unit gets a view, so nothing is exposed by one; refused anyway: %v", err)
