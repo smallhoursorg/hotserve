@@ -223,6 +223,7 @@ make lint vet tidy
 make vulncheck         # govulncheck, all modules (tool dep in go.mod — Dependabot-bumped)
 make secretscan        # gitleaks full-history secret scan (same image as the CI gate)
 make fuzz              # fuzz the untrusted-input surfaces (FUZZTIME=2m per target)
+make fuzz-list         # what fuzz will run: targets are discovered, never listed by hand (CI runs this on every PR)
 make soak              # ~20min leak hunt: deploy/reload churn, goroutine/fd assertions
 make build             # cross-compile linux amd64/arm64
 make package           # .deb via nfpm

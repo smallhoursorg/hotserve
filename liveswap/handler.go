@@ -127,7 +127,6 @@ func (h *Handler) deploy(w http.ResponseWriter, r *http.Request, ma *managedApp,
 // deployURL is the default path: a JSON body naming an artifact URL to
 // pull, size-capped like any control payload.
 func (h *Handler) deployURL(w http.ResponseWriter, r *http.Request, ma *managedApp, by string) error {
-	var p deployPayload
 	// Read one byte past the cap: exceeding it proves the payload is
 	// oversized, which deserves an honest 413 — truncating at the cap
 	// would surface as a misleading "invalid JSON" 400.
@@ -139,22 +138,36 @@ func (h *Handler) deployURL(w http.ResponseWriter, r *http.Request, ma *managedA
 		return respondJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
 			"error": fmt.Sprintf("payload exceeds %d bytes", maxPayloadBytes)})
 	}
+	p, status, msg := parseDeployPayload(body)
+	if status != 0 {
+		return respondJSON(w, status, map[string]string{"error": msg})
+	}
+	return h.runDeploy(w, r, ma, p.request(), by)
+}
+
+// parseDeployPayload is the body half of deployURL: the size-capped
+// bytes in, either a payload the pipeline may act on or the 4xx that
+// refuses it. It is kept free of the ResponseWriter so FuzzDeployRequest
+// can drive the exact production gate — every field check a version or
+// URL passes on its way to the filesystem lives here, not in the
+// handler around it. status is 0 on success.
+func parseDeployPayload(body []byte) (p deployPayload, status int, msg string) {
 	if err := json.Unmarshal(body, &p); err != nil {
-		return respondJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON payload: " + err.Error()})
+		return deployPayload{}, http.StatusBadRequest, "invalid JSON payload: " + err.Error()
 	}
 	if p.URL == "" {
-		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "url is required"})
+		return deployPayload{}, http.StatusUnprocessableEntity, "url is required"
 	}
 	if !validVersion(p.Version) {
-		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("version must match %s and not be . or ..", versionRe)})
+		return deployPayload{}, http.StatusUnprocessableEntity, fmt.Sprintf("version must match %s and not be . or ..", versionRe)
 	}
 	// Go's transport would refuse a control character in the header
 	// value anyway, but as an opaque 500 at fetch time; catching it
 	// here names the field while it is still cheap to fix.
 	if strings.ContainsFunc(p.AuthHeader, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
-		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "auth_header contains control characters"})
+		return deployPayload{}, http.StatusUnprocessableEntity, "auth_header contains control characters"
 	}
-	return h.runDeploy(w, r, ma, p.request(), by)
+	return p, 0, ""
 }
 
 // deployPush streams an uploaded gzip tarball to a staging file and
