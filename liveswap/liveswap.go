@@ -133,12 +133,16 @@ type App struct {
 	recoverCancel context.CancelFunc
 	recoverWG     *sync.WaitGroup // pointer: App values are copied by Caddy
 	// manager is the manager connection everything this config starts
-	// talks to — its apps' runners and its unknown-app sweep. Typed as
+	// talks to — its apps' runners, its unknown-app sweep, and (when
+	// the seams below are nil) its capability measurement. Typed as
 	// the interface, so a test installs a fake here and Start touches
-	// no real socket; nil means the process-wide client.
+	// no real socket; nil means the process-wide client. probeManager
+	// and measureSandbox honour it, so that promise holds whether or
+	// not the seams are set.
 	//
-	// managerProbe and sandboxProbe are the two seams that need the
-	// concrete client (reachability, and the cached measurement).
+	// managerProbe and sandboxProbe script the two OUTCOMES directly —
+	// reachability, and the measured capability — for a test that
+	// wants an answer rather than a connection to measure through.
 	// Fields rather than the package vars they replace: a test scripts
 	// a host on its own App instead of mutating global state and
 	// restoring it in a t.Cleanup.
@@ -666,6 +670,12 @@ func (a *App) probeManager() error {
 	if a.managerProbe != nil {
 		return a.managerProbe()
 	}
+	if a.manager != nil {
+		// An installed connection is reachable by construction. The
+		// field exists so this App touches no real socket, and the
+		// process-wide client below is exactly that socket.
+		return nil
+	}
 	return userManager.probe()
 }
 
@@ -674,6 +684,15 @@ func (a *App) probeManager() error {
 func (a *App) measureSandbox() sandboxCapability {
 	if a.sandboxProbe != nil {
 		return a.sandboxProbe(a.logger)
+	}
+	if a.manager != nil {
+		// Measure through the installed connection, uncached: the
+		// cache belongs to the real client (it keeps a throwaway unit
+		// off Caddy's reload path), and a scripted connection answers
+		// at scripted speed.
+		r := newSystemdRunner(a.manager, a.logger)
+		defer r.cancel()
+		return probeSandboxCapability(r)
 	}
 	return userManager.sandboxCapability(a.logger)
 }

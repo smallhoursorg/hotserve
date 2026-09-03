@@ -2,6 +2,7 @@ package liveswap
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -589,18 +590,38 @@ const sandboxProbeTimeout = 30 * time.Second
 func probeSandboxCapability(r runner) sandboxCapability {
 	var reasons []string
 	try := func(tier sandboxTier) bool {
-		ctx, cancel := context.WithTimeout(context.Background(), sandboxProbeTimeout)
-		defer cancel()
-		err := r.RunOnce(ctx, startSpec{
-			app:     "sandbox-probe",
-			version: tier.String(),
-			command: sandboxProbeCommand(tier),
-			dir:     "/",
-			env:     []string{"PATH=/usr/bin:/bin"},
-			grace:   5 * time.Second,
-			sandbox: probeSandboxSpec(tier),
-			probe:   true,
-		})
+		attempt := func() error {
+			ctx, cancel := context.WithTimeout(context.Background(), sandboxProbeTimeout)
+			defer cancel()
+			return r.RunOnce(ctx, startSpec{
+				app:     "sandbox-probe",
+				version: tier.String(),
+				command: sandboxProbeCommand(tier),
+				dir:     "/",
+				env:     []string{"PATH=/usr/bin:/bin"},
+				grace:   5 * time.Second,
+				sandbox: probeSandboxSpec(tier),
+				probe:   true,
+			})
+		}
+		err := attempt()
+		if errors.Is(err, context.DeadlineExceeded) {
+			// One retry, for a timeout only. A probe that fails is a
+			// measurement; one that times out is the absence of one —
+			// the shape a capable host under boot load produces — and
+			// with `sandbox on` the default, this verdict decides
+			// whether hotserve starts at all. hotserve.service carries
+			// no Restart= (the liveswap watchdog is this system's only
+			// restarter), so at boot there is no next reload to
+			// re-measure on: without the retry, one slow attempt keeps
+			// a fully capable box down until someone restarts it by
+			// hand. A genuinely incapable host is not slowed by this —
+			// the manager refuses, or the unit fails, fast and with a
+			// reason on the first attempt. The cost is a worst case of
+			// two probe budgets on a host that times out twice, paid
+			// on a Start that was about to be refused anyway.
+			err = attempt()
+		}
 		if err != nil {
 			reasons = append(reasons, fmt.Sprintf("%s tier: %v", tier, err))
 			return false

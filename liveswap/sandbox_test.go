@@ -376,9 +376,13 @@ func TestSandboxProbeCommand(t *testing.T) {
 }
 
 // probeRunner scripts RunOnce per tier for probeSandboxCapability.
+// queue, when non-empty, scripts successive calls instead (first
+// entry first), for the retry cases where the two attempts must
+// answer differently.
 type probeRunner struct {
 	*fakeRunner
 	fail  map[sandboxTier]error
+	queue []error
 	tried []sandboxTier
 	specs []startSpec
 }
@@ -387,7 +391,73 @@ func (p *probeRunner) RunOnce(_ context.Context, spec startSpec) error {
 	tier := sandboxTierOf(spec)
 	p.tried = append(p.tried, tier)
 	p.specs = append(p.specs, spec)
+	if len(p.queue) > 0 {
+		err := p.queue[0]
+		p.queue = p.queue[1:]
+		return err
+	}
 	return p.fail[tier]
+}
+
+// TestManagerSeamNeedsNoFuncSeams pins the promise on App.manager: an
+// App with only a fake connection installed touches no real socket.
+// Before this, probeManager and measureSandbox fell through to the
+// process-wide client whenever the func seams were nil — a test that
+// set manager alone would dial the real $XDG_RUNTIME_DIR socket and
+// start a real probe unit on the machine running the tests.
+func TestManagerSeamNeedsNoFuncSeams(t *testing.T) {
+	conn := newFakeSystemdConn()
+	a := &App{logger: zap.NewNop(), manager: conn}
+	if err := a.probeManager(); err != nil {
+		t.Fatalf("an installed connection is reachable by construction: %v", err)
+	}
+	got := a.measureSandbox()
+	if got.tier != sandboxFull {
+		t.Fatalf("tier = %v (%s), want full — the fake answers done, so the measurement through it must too", got.tier, got.reason)
+	}
+	// The measurement went through the installed connection, not the
+	// process-wide client: the fake saw the probe's own unit.
+	probed := false
+	for _, u := range conn.started {
+		if strings.Contains(u.Name, "sandboxprobe_") {
+			probed = true
+		}
+	}
+	if !probed {
+		t.Fatalf("no probe unit reached the installed connection; started: %v", len(conn.started))
+	}
+}
+
+// TestProbeSandboxCapabilityRetriesTimeout pins the one retry, and
+// its shape. With `sandbox on` the default, the probe's verdict
+// decides whether hotserve starts at all, and hotserve.service has no
+// Restart= — so a transient timeout under boot load must get a second
+// attempt before it becomes a refusal to start. Only a timeout: a
+// probe that FAILED measured the host, and retrying a measurement
+// would just slow every refusal down.
+func TestProbeSandboxCapabilityRetriesTimeout(t *testing.T) {
+	t.Run("a timeout is retried and the host recovers", func(t *testing.T) {
+		r := &probeRunner{fakeRunner: &fakeRunner{}, queue: []error{context.DeadlineExceeded, nil}}
+		got := probeSandboxCapability(r)
+		if got.tier != sandboxFull {
+			t.Fatalf("tier = %v (%s), want full: one slow attempt must not decide the start", got.tier, got.reason)
+		}
+		if len(r.tried) != 2 {
+			t.Fatalf("tried %d times, want 2", len(r.tried))
+		}
+	})
+	t.Run("a second timeout is the verdict", func(t *testing.T) {
+		r := &probeRunner{fakeRunner: &fakeRunner{}, queue: []error{context.DeadlineExceeded, context.DeadlineExceeded}}
+		got := probeSandboxCapability(r)
+		if got.tier != sandboxNone || !strings.Contains(got.reason, "deadline") {
+			t.Fatalf("tier = %v (%s), want none with the timeout in the reason", got.tier, got.reason)
+		}
+		if len(r.tried) != 2 {
+			t.Fatalf("tried %d times, want 2 — the retry is bounded", len(r.tried))
+		}
+	})
+	// A fast failure is not retried; TestProbeSandboxCapability pins
+	// that with its exact tried == [full] assertions.
 }
 
 func TestProbeSandboxCapability(t *testing.T) {

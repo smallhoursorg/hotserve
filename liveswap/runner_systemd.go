@@ -71,9 +71,6 @@ type systemdRunner struct {
 	conn   systemdConn
 	logger atomic.Pointer[zap.Logger]
 	poll   time.Duration // watcher interval between unit-state reads
-	// settleStep paces settleMainPID's reads; a field, like poll, so a
-	// test of a full-tier start is not held for the real window.
-	settleStep time.Duration
 
 	// ctx bounds every D-Bus call and every watcher; cancel (close) is
 	// for tests — in production watchers live as long as the process.
@@ -204,7 +201,7 @@ const (
 
 func newSystemdRunner(conn systemdConn, logger *zap.Logger) *systemdRunner {
 	ctx, cancel := context.WithCancel(context.Background())
-	r := &systemdRunner{conn: conn, poll: unitPollInterval, settleStep: mainPIDSettleStep, ctx: ctx, cancel: cancel}
+	r := &systemdRunner{conn: conn, poll: unitPollInterval, ctx: ctx, cancel: cancel}
 	r.logger.Store(logger)
 	return r
 }
@@ -546,7 +543,7 @@ func (r *systemdRunner) settleMainPID(ctx context.Context, h *systemdHandle, fir
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(r.settleStep):
+		case <-time.After(mainPIDSettleStep):
 		}
 		st, err := r.conn.UnitStatus(ctx, h.unit)
 		if err != nil || !st.running() {
@@ -568,9 +565,7 @@ func (r *systemdRunner) settleMainPID(ctx context.Context, h *systemdHandle, fir
 }
 
 const (
-	mainPIDSettle = 500 * time.Millisecond
-	// mainPIDSettleStep is the default for systemdRunner.settleStep,
-	// which tests shorten the way they shorten poll.
+	mainPIDSettle     = 500 * time.Millisecond
 	mainPIDSettleStep = 10 * time.Millisecond
 )
 
