@@ -34,10 +34,10 @@ That gives you `/usr/bin/hotserve`, a systemd service running as the
 **Supported: Debian 13.** One release, one sandbox: every app unit
 gets a PID *and* a user namespace on top of the deny-by-default
 filesystem view — see [liveswap/README.md](liveswap/README.md#sandbox).
-hotserve still installs and serves on other systemd distributions, but
-nothing else is tested, and a host that cannot deliver the sandbox
-reports `sandbox: none` rather than something weaker (`sandbox
-require` refuses to start there).
+hotserve still installs on other systemd distributions, but nothing
+else is tested, and a host that cannot deliver the sandbox refuses to
+start rather than serving something weaker — set `sandbox off` there
+to run without one deliberately.
 The package depends on `libpam-systemd` and `dbus` (present on any
 stock Debian server): liveswap runs your apps as systemd units
 under the `hotserve` user's own service manager, which needs
