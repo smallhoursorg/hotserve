@@ -270,9 +270,13 @@ scope for the runtime model, in scope for release signing (roadmap).
   this; the design question is only how much *worse* it can get (does it
   reach root?) — which is where the polkit trap below lives.
 
-## Enumerated attack paths (today, no isolation)
+## Enumerated attack paths (the pre-#35 baseline — history)
 
-For **T1**, the reachable-today set — the boundary matrix:
+For **T1**, the set reachable before per-app sandboxing — the boundary
+matrix as it stood. Since 2026-09-03 every app unit is sandboxed with
+no opt-out, so every ✔ below describes a bare app that no longer
+exists on a running box (see the amendment at the end); the rows are
+kept as what the sandbox was built to close:
 
 | Path | Reachable today | Mechanism |
 |---|---|---|
@@ -349,29 +353,32 @@ consequences, and they decide the mechanism:
    newer AppArmor converts it into a stack with `unconfined`, which
    stays restricted — seen on Ubuntu 26.04). Residual: that
    permission is inherited by the manager's children, so an app run
-   with `sandbox off` on such a host may create user namespaces where
-   the distro default would refuse — sandboxed apps cannot
-   (`RestrictNamespaces=`).
+   with `sandbox off` (gone since 2026-09-03) on such a host may
+   create user namespaces where the distro default would refuse —
+   sandboxed apps cannot (`RestrictNamespaces=`).
 
    **Superseded 2026-09-01 (matrix narrowed to Debian 13):** the
    second tier and the AppArmor profile are gone. There is one tier,
    *full*, and one candidate in the probe; a host that cannot deliver
-   both namespaces is refused: since 2026-09-03 the policy is `on` or
-   `off`, and `on` — the default — fails the start rather than
-   running the app bare. The paragraph above is kept because the
+   both namespaces is refused: since 2026-09-03 there is no policy at
+   all — every unit is sandboxed and an incapable host fails the
+   start rather than running any app bare. The paragraph above is kept because the
    measurements behind it — that a user namespace alone closes the
    `/proc` routes, that AppArmor path-attachment is the only way to
    grant `userns` to one manager — are what the current design rests
    on, and because they are the evidence for readmitting Ubuntu should
    that ever be wanted. Consequence accepted: a Debian 12 host that
-   upgrades hotserve drops from *filesystem* to `none` rather than
-   degrading gracefully. That is what dropping support means, and for
-   an app deployed after the upgrade it is loud (WARN at every launch,
-   `"sandbox":"none"` in status) rather than silent. An instance still
-   *recorded* at the removed tier is louder still: since #45 that
-   record is rejected and recovery refuses rather than relaunching
-   (`validSandboxTierRecord`). No released hotserve ever wrote one, so
-   this is reachable only from a development build.
+   upgrades hotserve is refused outright rather than degraded (at
+   the time of the narrowing it dropped to `none` with a WARN and a
+   status field; since 2026-09-03 there is no `none` — the start
+   fails). That is what dropping support means. A unit still running
+   from a development build that predates this is refused at
+   reattach and relaunched sandboxed (the runner checks the live
+   unit's namespaces — an honest-stale-unit check, not a defence
+   against a same-uid process starting units on purpose, which is
+   inside the trust domain already). `v0.1.0`, the only tag,
+   predates sandboxing entirely and has no users; no release since
+   has had a way to run an app without the sandbox.
 2. **A non-dumpable supervisor is the floor on every host.**
    `prctl(PR_SET_DUMPABLE, 0)` makes hotserve's `/proc` entries require
    `CAP_SYS_PTRACE`, which apps under `NoNewPrivileges` never hold —
@@ -385,7 +392,7 @@ consequences, and they decide the mechanism:
    binary that runs it) — so any binary
    importing liveswap (hotserve or an xcaddy build) is non-dumpable
    before `main`; a failure is fatal. Pinned by a unit test and by the
-   real-systemd e2e suite (scenario 12). It closes the
+   real-systemd e2e suite (scenario 11). It closes the
    `/proc/<supervisor>/environ` and `/proc/<supervisor>/root` routes
    only; TLS keys on disk, the admin socket and sibling files still
    need the mount namespace.
@@ -407,11 +414,11 @@ consequences, and they decide the mechanism:
    flag), and one in its own PID namespace cannot see the
    supervisor's PID — a namespace on `hotserve.service` would not
    help, because a parent PID namespace sees its children's processes.
-   With #35 phase 1 the window is closed for every sandboxed app on
-   every cell of the matrix (the *filesystem* tier suffices); it
-   stands only for apps running with `sandbox off` or on a host where
-   the probe found no usable user namespace — accepted and stated
-   here rather than in the README's one-line claim.
+   With #35 phase 1 the window is closed for every sandboxed app, and
+   since 2026-09-03 every app is sandboxed — `sandbox off` is gone and
+   a host without a usable user namespace does not start — so it
+   stands for nothing on a running box. Stated here rather than in
+   the README's one-line claim.
 *Residual the sandbox cannot close by itself:* every path a unit binds
 is checked by name, and between that check and the manager following
 it, any process sharing the hotserve UID can swap what it points at.
@@ -424,7 +431,11 @@ leaves only this race; no pathname check can close the race itself
 while the supervisor and its apps are the same principal. A sandboxed
 app cannot reach the mount points at all, so the exposure is bounded
 to apps already running unsandboxed on a box this model treats as one
-trust domain. Per-app UIDs are what closes it.
+trust domain. Per-app UIDs are what closes it. **Closed 2026-09-03:**
+no app runs unsandboxed — `sandbox off` is gone — and inside a view
+the app directory is a tmpfs of mount points an app cannot unlink, so
+the only process sharing the hotserve uid outside a sandbox is
+hotserve itself.
 
 *A unit's view is a policy, not a snapshot.* **Closed 2026-08-31
 (#35).** This row used to record the opposite. systemd builds a unit's
@@ -441,9 +452,8 @@ The view is now deny-by-default — `TemporaryFileSystem=/:ro` plus an
 explicit base view and the app's own two directories, and nothing
 widens it — so nothing is derived and nothing ages. A secret
 declared tomorrow is absent from a unit started yesterday for exactly
-the same reason every other path is: nothing ever bound it. What is
-still fixed at a unit's start is the tier, which fails safe and which
-a redeploy refreshes. Measured on all four cells of the support matrix
+the same reason every other path is: nothing ever bound it. Measured
+on all four cells of the then support matrix
 (systemd 252/255/257/259): inside a unit, `/etc` holds only the named
 base-view entries this host actually has — a dozen or so — and
 `/var/lib` holds the liveswap root alone.
@@ -464,7 +474,10 @@ rotates a secret **in place** publishes the new value into the sandbox
 too — only replace-by-rename breaks the link. The operational
 consequence, stated in liveswap/README.md's rollout section: sandboxing
 an app that may have been compromised while bare is not containment;
-clear its `shared/` and rotate anything it could read first.
+clear its `shared/` and rotate anything it could read first. **Closed
+2026-09-03** for every current box: nothing runs bare (`sandbox off`
+and the `none` tier are gone), so the only bare instance that can
+have left anything behind ran a hotserve older than sandboxing.
 
 *The recorded tier is app-writable.* A relaunch reproduces the tier
 from `state.json`, which lives under the shared uid and outside every
@@ -474,7 +487,9 @@ watchdog relaunch, with the status endpoint then honestly reporting
 `none`. It cannot redirect `CurrentVersion` out of the app
 (`versionPathComponent`, the `os.Stat` on the release dir, and
 `unitBelongsTo` each refuse). The signal is the WARN every such launch
-emits; the fix is per-app UIDs.
+emits; the fix is per-app UIDs. **Closed 2026-09-03:** there is no
+bare app to write the record and no recorded tier to write — every
+relaunch is sandboxed like a deploy.
 
 *The capability probe runs under the shared uid.* It starts a real
 transient unit, bounded at 30s, so any process holding that uid can
@@ -482,12 +497,15 @@ interfere with it. Since the policy became two-valued (2026-09-03) a
 failed probe fails the whole server start, which is the default
 posture — so this is an availability attack on the supervisor, not a
 way to weaken an app: interference cannot produce a running hotserve
-with the sandbox off. The tier is therefore not solely a property of
-the host. The measurement is cached per manager connection, which
+with the sandbox off. The verdict is therefore not solely a property
+of the host. The measurement is cached per manager connection, which
 narrows the window an attacker has to hit, and a failed verdict is
 deliberately NOT cached, so interference costs the next start rather
-than pinning a verdict until the manager restarts. An operator who
-must come up on a contested box sets `sandbox off` deliberately.
+than pinning a verdict until the manager restarts. There is no way to
+come up on a contested box without the probe passing (since
+2026-09-03 there is no `sandbox off`); the remedy is to remove the
+interfering process, which runs as the hotserve uid and is therefore
+either hotserve's own app or something already in the trust domain.
 
 3. **Resource caps need a read-only cgroupfs inside the sandbox.** The
    cgroup subtree under `user@<uid>.service` is delegated to — owned
@@ -732,8 +750,9 @@ Cost / lock-in rows:
   which also enables a per-app netns later. Decide it explicitly rather
   than inheriting the gap.
 - **`state.json` must stay outside any writable sandbox view**
-  ([liveswap/state.go](liveswap/state.go) is trusted on relaunch; the
-  recorded sandbox tier lives there too). Normative and shipped: the
+  ([liveswap/state.go](liveswap/state.go) is trusted on relaunch for
+  the version and the unit; since 2026-09-03 it records no sandbox
+  disposition and nothing outside a sandbox writes it but hotserve). Normative and shipped: the
   whole filesystem is replaced by an empty read-only tmpfs in the
   unit's view (`TemporaryFileSystem=/:ro`) and only the release being
   started, `shared/` and the OS base view are bound back — the app dir root, `state.json`, `tmp/` (the upload
@@ -773,10 +792,10 @@ as a second mechanism; per-app UIDs, egress filtering and the
 root-owned template stay later milestones, and if they land they MUST
 be the template or a minimal privileged helper, never
 supervisor-shaped transient units on the system manager.
-DESIGN-sandbox.md's behaviour spec, config surface and rollout
-semantics (engage on next deploy, record the tier in `state.json`,
-`on`/`off` — `auto`/`require` until 2026-09-03) are what shipped; its
-bwrap mechanics did not.
+DESIGN-sandbox.md's behaviour spec and config surface are what
+shipped, as amended: since 2026-09-03 (later) there is no policy, no
+recorded tier and no rollout ladder — every unit is sandboxed and an
+incapable host is refused. Its bwrap mechanics did not ship.
 Resource caps are #35 phase 2.
 
 *Superseded (kept for the record):* the earlier recommendation was B
@@ -792,6 +811,46 @@ Independently of which approach lands, do the three non-isolation
 hardening items above — they are cheaper than any of A/B/C and address
 rows (T3, T4) that no isolation approach touches.
 
+
+### Amendment (2026-09-03, later): the sandbox is unconditional
+
+`sandbox off` is removed; there is no sandbox policy, global or
+per-app, and no recorded tier. Every app unit gets the one sandbox —
+deploy, `pre_start`, crash relaunch, boot recovery, reattach — and a
+host that cannot deliver it fails the start. The reasoning is in
+[liveswap/DESIGN-sandbox.md](liveswap/DESIGN-sandbox.md), "Amendment:
+the sandbox is unconditional"; what changes in *this* document:
+
+- **The shared-UID rule gets its corollary.** `sandbox off` was
+  documented as per-app; on a shared uid it was not — a bare app read
+  every sibling's data and hotserve's keys. So the rule that made the
+  user namespace load-bearing is also the rule that makes an opt-out
+  impossible: any app outside a namespace is every app's problem.
+- **Three residuals close by construction** and are marked in place
+  above: *the recorded tier is app-writable* (no bare writer, no
+  record), *what a bare app leaves behind* (nothing runs bare on a
+  current box), and the bind-source TOCTOU race (no process shares
+  the hotserve uid outside a sandbox except hotserve itself; inside a
+  view the app directory is a tmpfs of mount points an app cannot
+  unlink). The `execve`-window residual likewise stands for nothing on
+  a running box. The one unit hotserve did not start — a stale one
+  from a development build, or another same-uid process's — is
+  refused at reattach when it lacks the namespaces and replaced by a
+  sandboxed relaunch, so "every unit" holds for adopted units too.
+  That check is for an honest stale unit; a same-uid process that
+  starts units on purpose can give one any property set, and is the
+  trust domain, not a boundary the check could hold.
+- **The enumerated attack-path table is history.** Every ✔ row
+  described a bare app; none exists. The "today, no isolation" heading
+  is renamed to say so.
+- **The probe is now the whole availability story.** Interference with
+  it fails the start, and there is no setting that comes up without
+  it; the remedy is removing the interferer, not weakening the box.
+
+What does not change: T5 (a supervisor RCE gains nothing — hotserve
+still holds no grant), the network namespace being shared by design,
+per-app UIDs remaining the answer to app-vs-app residuals for
+anything the namespaces do not close, and resource caps as phase 2.
 
 ### Amendment (2026-09-01): one host, one tier
 
@@ -824,7 +883,8 @@ in place.
   instance recorded *full* likewise stays sandboxed even after the
   operator sets `sandbox off`, which is the same rule and is **not** a
   safety property — see the residual in
-  [liveswap/DESIGN-sandbox.md](liveswap/DESIGN-sandbox.md).
+  [liveswap/DESIGN-sandbox.md](liveswap/DESIGN-sandbox.md). (Both
+  directions are gone since 2026-09-03: no `off`, no record.)
 - **No AppArmor profile.** Debian's kernel does not restrict
   unprivileged user namespaces, so the profile and the user-manager
   wrapper it attached to are removed along with the privilege they

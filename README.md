@@ -36,8 +36,7 @@ gets a PID *and* a user namespace on top of the deny-by-default
 filesystem view — see [liveswap/README.md](liveswap/README.md#sandbox).
 hotserve still installs on other systemd distributions, but nothing
 else is tested, and a host that cannot deliver the sandbox refuses to
-start rather than serving something weaker — set `sandbox off` there
-to run without one deliberately.
+start rather than serving something weaker.
 The package depends on `libpam-systemd` and `dbus` (present on any
 stock Debian server): liveswap runs your apps as systemd units
 under the `hotserve` user's own service manager, which needs
@@ -147,23 +146,16 @@ an on-disk release. Full details, CI snippets, and every option:
   and the parts of the OS it needs to run. That view is fixed — there
   is no directive that widens it — so hotserve's keys, sockets and env
   files, the other apps, and the rest of the host are not made
-  unreadable, they are *absent*. An app that needs more runs with
-  `sandbox off`, which costs the other apps nothing.
-  The app also gets its own PID namespace, so siblings are invisible
-  rather than merely unreadable. What is *not* claimed: both
-  namespaces are required, and there is no middle tier — a host that
-  cannot deliver them refuses to start under `sandbox on` (the
-  default). An app running with `sandbox off` — or relaunched from an
-  instance recorded bare — has no per-unit sandbox at all:
-  `"sandbox": "none"`, warned at every launch, with sibling files,
-  sockets and process contents exposed as they were before this
-  existed. What stays
-  shared by design even when the sandbox is on is the network
-  namespace: sibling `127.0.0.1` ports are reachable (a runtime's own
-  permission flags can close that — see liveswap's "Runtime
-  permissions"). Details and the rollout rules:
-  [liveswap/README.md](liveswap/README.md#sandbox); the reasoning:
-  [DESIGN-threat-model.md](DESIGN-threat-model.md).
+  unreadable, they are *absent*. The app also gets its own PID
+  namespace, so siblings are invisible rather than merely unreadable.
+  There is no opt-out: an app without a sandbox would run as the same
+  user as everything else and reach all of it, so both namespaces are
+  required on every unit and a host that cannot deliver them refuses
+  to start. What stays shared by design is the network namespace:
+  sibling `127.0.0.1` ports are reachable (a runtime's own permission
+  flags can close that — see liveswap's "Runtime permissions").
+  Details: [liveswap/README.md](liveswap/README.md#sandbox); the
+  reasoning: [DESIGN-threat-model.md](DESIGN-threat-model.md).
 - **Deploys are authenticated without a shared secret.** A deploy
   carries a short-lived token — an OIDC token from CI, verified against
   the provider's public keys, or one signed by a local key whose public
@@ -198,9 +190,9 @@ an on-disk release. Full details, CI snippets, and every option:
   `/proc/<user-manager>/root`; see
   [DESIGN-threat-model.md](DESIGN-threat-model.md) "The shared-UID
   rule". hotserve itself additionally runs non-dumpable from its
-  first milliseconds. Policy is `sandbox on` (default) / `off`,
-  engaging on each app's **next deploy** (never on an upgrade
-  relaunch) — [liveswap/README.md](liveswap/README.md#sandbox).
+  first milliseconds. There is no sandbox setting: every launch —
+  deploy, relaunch, recovery — gets the same one, or hotserve does
+  not start — [liveswap/README.md](liveswap/README.md#sandbox).
   **Next:** resource caps (`MemoryMax=`, `TasksMax=`, `CPUQuota=`) with
   a config surface — real now that cgroupfs is read-only inside the
   unit. Per-app UIDs would need a small privileged helper and stay a

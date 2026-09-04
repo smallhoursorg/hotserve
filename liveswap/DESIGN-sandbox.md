@@ -450,7 +450,16 @@ The supported operator rollout, which the product docs MUST describe:
    host can deliver the sandbox. A reload is the safe place to find
    out — a config that cannot activate leaves the running one serving,
    where a restart does not. `hotserve validate` does not measure the
-   host (it never starts an app).
+   host (it never starts an app). One caveat the operator docs MUST
+   state: the verdict is cached per user-manager connection
+   (`userManagerClient.sandboxCapability`), so a reload measures the
+   host only the first time after hotserve dialled the manager — on a
+   fresh box, the first reload; on a box where the namespace policy
+   was changed underneath a running hotserve (a sysctl, an LSM policy
+   load), not until the next restart. There is deliberately no
+   uncached preflight: the cache is what keeps a throwaway unit off
+   Caddy's reload path, and a policy change under a live connection is
+   not chased (the client's own comment says why).
 2. Upgrade; absorb the one unavoidable supervisor-restart blip (a
    binary swap is not zero-downtime — only deploys are); running apps
    are reattached, not relaunched.

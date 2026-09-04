@@ -336,9 +336,17 @@ able to deliver it will not start hotserve until the host is fixed;
 there is no setting that runs apps without one. That is deliberate —
 the alternative is a supervisor that silently runs every app with no
 isolation because the kernel changed its mind — so prove a box before
-you restart into it: `hotserve validate` does not measure the host
-(it never starts an app), but a reload does, and a reload that cannot
-activate leaves the running config serving where a restart does not.
+you restart into it. `hotserve validate` does not measure the host (it
+never starts an app); a reload does, once: the verdict is held for the
+life of hotserve's connection to the user manager, so the first start
+or reload after hotserve dials the manager is the measurement and a
+later reload reuses it. On a fresh box that first reload is the proof
+you want, and a reload that cannot activate leaves the running config
+serving where a restart does not. A host changed underneath a running
+hotserve — a sysctl, an LSM policy load — is not re-measured until the
+next restart, which is where it can refuse; there is deliberately no
+uncached preflight, because the cache is what keeps a throwaway unit
+off every reload.
 Every launch is sandboxed the same way — a deploy, a crash relaunch,
 boot recovery, a reattach after `systemctl restart hotserve` — so
 there is nothing per instance to roll out and nothing to watch in
