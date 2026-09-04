@@ -115,12 +115,6 @@ type App struct {
 	// AllowInsecureHTTP. Apps may override.
 	ArtifactAllowlist []string `json:"artifact_allowlist,omitempty"`
 
-	// Sandbox is the default per-app sandbox policy: "on" (the full
-	// sandbox, or refuse to start — this keeps the whole server from
-	// starting on a host that cannot deliver it) or "off". Default
-	// "on". Apps may override. See liveswap/README.md.
-	Sandbox string `json:"sandbox,omitempty"`
-
 	// Apps defines the managed applications, keyed by name
 	// ([a-z0-9-]). The name is the webhook path segment and the
 	// argument to `dynamic liveswap <name>`.
@@ -153,7 +147,7 @@ type App struct {
 	// restoring it in a t.Cleanup.
 	manager         systemdConn
 	managerProbe    func() error
-	sandboxProbe    func(*zap.Logger) sandboxCapability
+	sandboxProbe    func(*zap.Logger) error
 	allowlist       []artifactAllowEntry
 	globalTrust     []trustSource // resolved global DeployTrust, for the unknown-app path
 	globalVerifiers []verifier
@@ -256,10 +250,6 @@ type AppConfig struct {
 	// Caddyfile accepts human forms like 100MB). Decompressed content
 	// is additionally capped at 10x this. Default 100MB.
 	MaxArtifactSize int64 `json:"max_artifact_size,omitempty"`
-
-	// Sandbox overrides the global sandbox policy for this app: "on"
-	// or "off". Default: the global setting.
-	Sandbox string `json:"sandbox,omitempty"`
 }
 
 // CaddyModule returns the Caddy module information.
@@ -284,9 +274,6 @@ func (a *App) Provision(ctx caddy.Context) error {
 		a.ArtifactAllowlist[i] = repl.ReplaceKnown(e, "")
 	}
 	resolveTrustPlaceholders(repl, a.DeployTrust)
-	if a.Sandbox == "" {
-		a.Sandbox = sandboxOn
-	}
 	if a.Root == "" {
 		a.Root = "/var/lib/liveswap"
 	}
@@ -454,10 +441,6 @@ func (a *App) buildSpec(name string, cfg *AppConfig) (*appSpec, error) {
 	if err != nil {
 		return nil, fmt.Errorf("app %s: %w", name, err)
 	}
-	sandboxMode := cfg.Sandbox
-	if sandboxMode == "" {
-		sandboxMode = a.Sandbox
-	}
 	return &appSpec{
 		name:            name,
 		command:         cfg.Command,
@@ -482,7 +465,6 @@ func (a *App) buildSpec(name string, cfg *AppConfig) (*appSpec, error) {
 		allowInsecure:   a.AllowInsecureHTTP,
 		allowlist:       allowlist,
 		dirs:            newAppDirs(a.Root, name),
-		sandboxMode:     sandboxMode,
 	}, nil
 }
 
@@ -499,16 +481,10 @@ func (a *App) Validate() error {
 	if filepath.Clean(a.Root) != a.Root {
 		return fmt.Errorf("root must be a clean path (no . , .. or doubled separators): %q resolves to %q", a.Root, filepath.Clean(a.Root))
 	}
-	if err := validateSandboxRoot(a.Root, a.anySandboxed()); err != nil {
-		return err
-	}
-	if err := sandboxModeError(a.Sandbox); err != nil {
+	if err := validateSandboxRoot(a.Root); err != nil {
 		return err
 	}
 	for name, cfg := range a.Apps {
-		if err := sandboxModeError(cfg.Sandbox); err != nil {
-			return fmt.Errorf("app %s: %w", name, err)
-		}
 		if !appNameRe.MatchString(name) {
 			return fmt.Errorf("app name %q must match %s", name, appNameRe)
 		}
@@ -588,24 +564,19 @@ func (a *App) Start() error {
 		if err := a.probeManager(); err != nil {
 			return err
 		}
-	}
-	// Sandbox policy is settled here, on every start, against what this
-	// host delivers: the probe runs a throwaway unit with the sandbox
-	// applied and checks the namespaces from inside. A host that falls
-	// short fails the start — by design, and documented as such — so it
-	// is checked before any app is configured.
-	//
-	// The measurement itself is cached on the manager connection, so a
-	// reload that changes nothing about the manager does not pay for a
-	// unit here; see userManagerClient.sandboxCapability.
-	if a.sandboxWanted() {
-		capability := a.measureSandbox()
-		for name, spec := range a.specs {
-			tier, err := resolveSandboxTier(spec.sandboxMode, capability)
-			if err != nil {
-				return fmt.Errorf("app %s: %w", name, err)
-			}
-			spec.sandboxTier = tier
+		// Every app runs in the sandbox, so what this host can deliver
+		// is settled here, on every start: the probe runs a throwaway
+		// unit with the sandbox applied and checks the namespaces from
+		// inside. A host that falls short fails the start — by design,
+		// and documented as such — before any app is configured. The
+		// error reaches the operator as the reason the server will not
+		// come up, so it names the remedy: there is none in config.
+		//
+		// The measurement itself is cached on the manager connection,
+		// so a reload that changes nothing about the manager does not
+		// pay for a unit here; see userManagerClient.sandboxCapability.
+		if err := a.measureSandbox(); err != nil {
+			return fmt.Errorf("every app runs in the per-app sandbox and this host cannot deliver it: %w. Fix the host: there is no setting that runs an app without one", err)
 		}
 	}
 	for name, ma := range a.managed {
@@ -646,17 +617,6 @@ func (a *App) Start() error {
 	return nil
 }
 
-// sandboxWanted reports whether any app's policy is not "off" — the
-// only case the capability probe is worth running.
-func (a *App) sandboxWanted() bool {
-	for _, spec := range a.specs {
-		if spec.sandboxMode != sandboxOff {
-			return true
-		}
-	}
-	return false
-}
-
 // systemdConn returns the manager connection this config uses. Apps
 // built by Provision share the process-wide client; a test may install
 // its own so nothing it starts reaches a real manager.
@@ -684,9 +644,10 @@ func (a *App) probeManager() error {
 	return userManager.probe()
 }
 
-// measureSandbox reports what this host delivers (sandbox.go), from
-// the per-connection cache.
-func (a *App) measureSandbox() sandboxCapability {
+// measureSandbox reports whether this host delivers the sandbox
+// (sandbox.go), from the per-connection cache: nil, or the probe's
+// reason it does not.
+func (a *App) measureSandbox() error {
 	if a.sandboxProbe != nil {
 		return a.sandboxProbe(a.logger)
 	}

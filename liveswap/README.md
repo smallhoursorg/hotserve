@@ -137,9 +137,10 @@ deploy.example.com {
 
 Apps must listen on `127.0.0.1` at the injected `PORT`. Their
 environment is, lowest precedence first: an allowlisted slice of
-Caddy's environment (`PATH`, `HOME`, `LANG`, `TZ`, `LC_*` — nothing
-else, so supervisor credentials like ACME DNS tokens never reach
-apps) → `env_file` → inline `env` → injected `PORT` and
+Caddy's environment (`PATH`, `LANG`, `TZ`, `LC_*` — nothing else, so
+supervisor credentials like ACME DNS tokens never reach apps) →
+`HOME` set to the app's `shared/` → `env_file` → inline `env` →
+injected `PORT` and
 `HOST=127.0.0.1`, all layered on the systemd user manager's own
 defaults (`XDG_RUNTIME_DIR`, `INVOCATION_ID`, …). Two of those
 defaults are **reserved** in a sandboxed unit and cannot be set by
@@ -191,7 +192,6 @@ resolved at config load.
 | `watchdog_window` | `10m` | Sliding window for the restart budget |
 | `keep` | `5` | Release dirs retained (GC after success). The running version is always kept, so this can be `keep+1` after rolling back to an old release |
 | `max_artifact_size` | `100MB` | Download cap; decompressed cap is 10× |
-| `sandbox` | `on` | Per-unit sandbox policy: `on` (the full sandbox, or refuse to start — see the hazard under [Sandbox](#sandbox)), `off`. Global default, per-app override |
 
 ## Watchdog
 
@@ -246,9 +246,10 @@ point `health_path` at the final path.
 ## Sandbox
 
 Every instance runs inside systemd's own per-unit sandbox. There is
-one tier, `full`, and a host either delivers it or gets nothing:
+one sandbox, no setting that turns it off or widens it, and a host
+either delivers it or hotserve does not start:
 
-| `full` — what every sandboxed unit gets |
+| What every unit gets |
 |---|
 | User namespace (`PrivateUsers=`) |
 | PID namespace (`PrivatePIDs=`) — supervisor, user manager and siblings **invisible and unsignalable** |
@@ -261,10 +262,12 @@ ships 257. Where the namespaces cannot be had at all (a container, an
 LXC VPS, a kernel built without user namespaces, an LSM that refuses
 them) hotserve refuses to start, naming what the host lacks. It is
 deliberately not a ladder, and there is deliberately no mode that runs
-anyway: a weaker sandbox wearing the same name — or none at all under
-a config that asks for one — is the "looks configured, quietly weaker"
-failure this design refuses. Use `sandbox off` to run without one
-deliberately.
+anyway: a weaker sandbox wearing the same name — or none at all — is
+the "looks configured, quietly weaker" failure this design refuses.
+An app with no sandbox would not be alone in paying for it: every app
+runs as the hotserve user, so one bare app could read every sibling's
+data and hotserve's own keys. That is why there is no per-app opt-out
+either.
 
 **An app sees its release dir, its `shared/`, a private `/tmp`, the OS
 runtime. Nothing else on the host
@@ -305,55 +308,49 @@ supervisor's environment or walking the host through
 kernel refuses `ptrace`-class access across user namespaces even for
 the same uid), the admin socket, the TLS keys, sibling files. The
 **PID** namespace adds the rest: process visibility and signals. Worth
-keeping straight, because it is why a host that delivers neither gets
-`none` rather than something in between.
+keeping straight, because it is why a host that delivers neither is
+refused rather than given something in between.
 
 **What this costs you.** An app that reads something under `/opt`,
 `/srv` or `/var/lib`, or whose runtime lives outside `/usr` (a
 vendored Node, an `nvm`/`asdf` shim), cannot be reached at all —
-those paths do not exist inside the unit. The sandbox engages on an
-app's **next deploy**, so this surfaces where it has a fallback: the
-health gate fails the new version while the old one keeps serving. A
-command that is not in the view is refused before the unit is even
-created, with a message naming `sandbox off`, rather than failing as a
-bare `203/EXEC`.
+those paths do not exist inside the unit. A deploy is where this
+surfaces, and it has a fallback there: the health gate fails the new
+version while the old one keeps serving. A command that is not in the
+view is refused before the unit is even created, with a message that
+says where the runtime has to live, rather than failing as a bare
+`203/EXEC`.
 
-**Policy and rollout.** `sandbox on` (the default) gives every app the
-full tier, or hotserve does not start — the refusal names what the
-host lacks and `sandbox off` as the way to run without one. `sandbox
-off` runs with the floor only (non-dumpable supervisor,
-`NoNewPrivileges`). A launch that runs below `full` anyway — the
-relaunch of an instance recorded bare, see below — logs a warning
-naming what stays open.
+**The host is measured at start.** Capability is probed by running a
+throwaway unit and checking the namespaces from inside
+(`journalctl -t hotserve-sandbox-probe` shows what it saw). A host
+that cannot deliver the sandbox fails the start — admin socket and
+proxy included — with the probe's reason. That measurement is cached
+per connection to the user manager, so a reload does not repeat it;
+a refused host is measured again on the next start or reload, so
+fixing the host does take effect. Restarting the user manager
+re-measures either way.
 
-Capability is probed by running a throwaway unit and checking the
-namespaces from inside (`journalctl -t hotserve-sandbox-probe` shows
-what it saw). That measurement is cached per connection to the user
-manager, so a reload does not repeat it — but a host that answered
-`none` is measured again on the next reload, so fixing the host and
-reloading does take effect. Restarting the user manager re-measures
-either way. The tier an instance got is recorded in `state.json` and
-reported by the status endpoint (`"sandbox": "full" | "none"`).
-
-Because the default is `on`, **the sandbox is an availability
-dependency**: a host that stops being able to deliver it will not
-start hotserve until the host is fixed or `sandbox off` is set. Before
-upgrading a box you have not proven, set `sandbox off` first, then
-turn it on with a reload — a reload that cannot activate leaves the
-running config serving, where a restart does not.
-
-Sandboxing engages on each app's **next deploy** — the path with a
-fallback (a version that cannot live in its sandbox fails the health
-gate while the old one keeps serving) — never on a supervisor
-restart, a boot recovery or a watchdog restart: those reproduce the
-tier the instance was recorded with, so upgrading hotserve does not
-turn into a fleet-wide, no-fallback restart into sandboxes. The
-supported rollout: confirm the host can sandbox (or set `sandbox off`
-first); upgrade; confirm apps healthy; declare each app's data layout;
-set `sandbox on` and reload; deploy each app and watch `"sandbox"` in
-its status.
-`journalctl -t hotserve-sandbox-probe` shows the probe's verdict on
-this host.
+**The sandbox is an availability dependency.** A host that stops being
+able to deliver it will not start hotserve until the host is fixed;
+there is no setting that runs apps without one. That is deliberate —
+the alternative is a supervisor that silently runs every app with no
+isolation because the kernel changed its mind — so prove a box before
+you restart into it. `hotserve validate` does not measure the host (it
+never starts an app); a reload does, once: the verdict is held for the
+life of hotserve's connection to the user manager, so the first start
+or reload after hotserve dials the manager is the measurement and a
+later reload reuses it. On a fresh box that first reload is the proof
+you want, and a reload that cannot activate leaves the running config
+serving where a restart does not. A host changed underneath a running
+hotserve — a sysctl, an LSM policy load — is not re-measured until the
+next restart, which is where it can refuse; there is deliberately no
+uncached preflight, because the cache is what keeps a throwaway unit
+off every reload.
+Every launch is sandboxed the same way — a deploy, a crash relaunch,
+boot recovery, a reattach after `systemctl restart hotserve` — so
+there is nothing per instance to roll out and nothing to watch in
+status: an app is running, or hotserve did not start.
 
 **What a running instance's sandbox is fixed to.** A unit's view is
 built when it starts and is never rebuilt under it — reloads
@@ -373,27 +370,17 @@ app's `shared/` is a warning rather than an error: the app receives
 those variables anyway, but under `shared/` it can also rewrite the
 file and so choose its own next launch's environment.
 
-**Sandboxing an app is not containment for what it did while bare.**
-The sandbox restricts what an app can *reach*; it cannot un-copy. Its
-`shared/` dir survives every deploy and is bound writable into the new
-sandbox, so anything the bare instance put there is inside the
-sandboxed view afterwards — and because every app runs as the same
-user, a bare app could read hotserve's keys, a sibling's files or any
-`env_file` and copy them there. A hardlink is worse than a copy: it
-stays a live view of the file, so rotating a secret by editing it in
-place republishes it. If an app may have been compromised while
-running bare, clear its `shared/` and rotate anything it could read —
-deploying it sandboxed does not undo the access it already had.
-
-**`sandbox on` can keep the whole server from starting**, and it is
-the default: it fails the start (admin socket and proxy included) when
-the host cannot deliver the `full` tier — a manager below 256, or a
-kernel/LSM that refuses the namespaces. That is deliberate — the
-alternative is a supervisor that silently runs every app with no
-isolation because the kernel changed its mind — but it makes the
-sandbox an availability dependency. On a host you have not proven, set
-`sandbox off` before upgrading, then turn it on with a reload: a
-reload that cannot activate leaves the running config serving.
+**The sandbox is not containment for what an app did before it had
+one.** It restricts what an app can *reach*; it cannot un-copy. An
+app's `shared/` survives every deploy and is bound writable into every
+sandbox, so anything an instance put there before sandboxing existed
+(a hotserve older than this, where every app ran as the shared user
+with the whole host in reach) is inside the view afterwards. A
+hardlink is worse than a copy: it stays a live view of the file, so
+rotating a secret by editing it in place republishes it. If an app may
+have been compromised on such a hotserve, clear its `shared/` and
+rotate anything it could read — the sandbox does not undo access it
+already had.
 
 **When an app breaks under the sandbox** the symptom is usually an
 `ENOENT` for something that exists on the host: a database's unix
@@ -405,24 +392,24 @@ list, and it is fixed.
 That is a deliberate limit, not an oversight. The one mechanism that
 would widen a view is also the one that has to be correct against
 symlinks, TOCTOU, cross-app containment and the base view all at once,
-and getting it wrong hands one app another's secrets. Until it can be
-designed and reviewed on its own, the answer for an app that needs
-more is `sandbox off` for that app — the same isolation it had before
-per-app sandboxing existed, and the rest of the fleet keeps its own.
+and getting it wrong hands one app another's secrets. It comes back
+when a running app needs it and can be designed and reviewed on its
+own; until then the answers below are the answers. There is no
+per-app opt-out either: an app with no sandbox runs as the same user
+as everything else and reaches all of it.
 
 Practical consequences worth planning around:
 
 - **Put persistent data in `shared/`.** It survives deploys, it is
   writable, and it is `$HOME` inside the unit. A SQLite file belongs
   there, not in `/var/lib/myapp`.
-- **A same-box database over a unix socket needs `sandbox off`** for
-  that app, or a TCP loopback connection, which the shared network
-  namespace still allows.
+- **A same-box database is reached over TCP loopback**, which the
+  shared network namespace allows; its unix socket is outside the
+  view.
 - **Install runtimes under `/usr`.** The base view binds it, so
   `/usr/local/bin/deno` or an apt-installed `node` is already inside
   every unit. A vendored runtime under `/opt`, or an `nvm`/`asdf` shim
-  under a home directory, is not — ship it inside the release instead,
-  or run that app with `sandbox off`.
+  under a home directory, is not — ship it inside the release instead.
 
 An app's own `releases/<version>` and `shared/` must **be** the
 directories they name. hotserve resolves them immediately before the
@@ -434,12 +421,12 @@ disk, bind-mount it at the same path (`mount --bind /mnt/blog-data
 mount resolves to itself, so it is invisible to that check, and an app
 cannot forge one.
 
-`sandbox off` per app is the escape hatch: for an app that needs a
-path outside its own dirs, and for the workloads the sandbox cannot
-host at all — anything that creates its own namespaces (Chromium's
-sandbox under Puppeteer, nested containers) or needs devices beyond
-`/dev/null`-class ones. It is per app, so one app opting out costs the
-others nothing.
+**Workloads the sandbox cannot host are not supported.** Anything
+that creates its own namespaces (Chromium's sandbox under Puppeteer,
+nested containers) or needs devices beyond the `/dev/null` class has
+no place to run: there is no opt-out to put it in. That is a decision
+to revisit when such an app exists, on its own terms, not a reason to
+reopen the box for everyone.
 
 **Hosts.** The sandbox is built on unprivileged user namespaces.
 Debian 13's kernel permits them, which is why it is the supported
@@ -448,14 +435,11 @@ refuse them — Ubuntu 24.04+ restricts them to processes under an
 AppArmor profile granting `userns`
 (`kernel.apparmor_restrict_unprivileged_userns=1`), and container and
 LXC hosts often have them off entirely. hotserve does not work around
-that: it probes, and under `sandbox on` — the default — a host that
-cannot deliver the namespaces refuses to start rather than running
-apps bare. `journalctl -t hotserve-sandbox-probe` says why it
-refused. If you are on such a host and want the sandbox, the fix is
-the host's: permit unprivileged user namespaces for hotserve's user
-manager, or move to Debian 13. If you want to run there without one,
-that is `sandbox off` — an explicit choice (the non-dumpable
-supervisor and `NoNewPrivileges` remain), not a silent degrade.
+that: it probes, and a host that cannot deliver the namespaces refuses
+to start rather than running apps bare. `journalctl -t
+hotserve-sandbox-probe` says why it refused. The fix is the host's:
+permit unprivileged user namespaces for hotserve's user manager, or
+move to Debian 13. There is no way to run there without the sandbox.
 
 ## Runtime permissions (Deno, Node)
 
@@ -518,8 +502,7 @@ app example {
 binds `/usr`, so a normal `/usr/local/bin/deno` (or an apt-installed
 one) is already inside every unit. A runtime somewhere else —
 `/opt/node/bin/node`, an nvm or asdf shim — is absent from the
-sandbox and cannot be reached: ship it inside the release, or run that
-app with `sandbox off`.
+sandbox and cannot be reached: ship it inside the release.
 
 **What it does not buy you.** These flags are enforced *in-process* by
 the runtime, so they hold exactly as long as the runtime does: `-A` /
@@ -803,7 +786,7 @@ failure the previous version never stopped serving.
   releases/v1.4.1/
   current -> releases/v1.4.2   (convenience symlink; state.json is truth)
   shared/                 persistent data, survives deploys (the app's HOME)
-  state.json              current version + process handle + sandbox tier
+  state.json              current version + process handle
   tmp/                    download staging
 ```
 
@@ -834,8 +817,7 @@ and `shared/` of this tree (see [Sandbox](#sandbox)).
   watchdog is the only restarter — and stopping a version kills its
   whole cgroup, so worker trees never outlive it.
 - **Changed app definitions apply on the next deploy**, never by
-  restarting a running app mid-reload — the sandbox tier included: a
-  relaunch reproduces the tier the instance was recorded with.
+  restarting a running app mid-reload.
 - **No post-promote *auto*-revert.** Once traffic cuts over, the deploy
   is done; if the new version misbehaves later, roll back explicitly
   with `?rollback=<version>` (its release dir is still on disk — that's

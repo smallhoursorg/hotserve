@@ -2,7 +2,6 @@ package liveswap
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -24,19 +23,20 @@ import (
 //	deny-by-default view                 TestSandboxViewIsExactlyWhatIsNamed
 //	                                     TestIntegrationSystemdSandboxedUnit
 //	app-to-app boundary                  TestAppViewsAreDisjointExceptTheBaseView
-//	/etc never bound whole               TestSandboxPropertiesFullTier
+//	/etc never bound whole               TestSandboxPropertiesEveryUnit
 //	                                     TestBaseViewNamesTheTrustStoreNotTheTree
 //	                                     TestBindSourceInsideTheBaseViewRefused
 //	binds are the dirs they name         TestMandatoryBindMustBeTheDirectoryItNames
 //	                                     TestBindOntoASiblingsExternalDataRefused
 //	command must be in the view          TestUnitForRefusesCommandOutsideTheView
 //	no empty list property               TestSandboxPropertiesNeverEmitsAnEmptyBindList
-//	/sys/fs/cgroup read-only             TestSandboxPropertiesFullTier
-//	/run/systemd/resolve reachable       TestSandboxPropertiesFullTier
-//	user + PID namespace, every unit     TestSandboxPropertiesFullTier
+//	/sys/fs/cgroup read-only             TestSandboxPropertiesEveryUnit
+//	/run/systemd/resolve reachable       TestSandboxPropertiesEveryUnit
+//	user + PID namespace, every unit     TestSandboxPropertiesEveryUnit
 //	                                     TestIntegrationSystemdSandboxProbe
-//	WARN below the full tier             TestRelaunchBelowFullWarns
-//	engage on next deploy, not relaunch  TestDeployUsesPolicyRelaunchUsesRecord
+//	every launch is sandboxed            TestEveryLaunchIsSandboxed
+//	no unit without a sandbox            TestUnitRefusesToRunWithoutASandbox
+//	reattach refuses a bare unit         TestSystemdRunnerReattach
 //	stop semantics unchanged             TestIntegrationSystemdStopKillsWholeTree
 //	                                     TestIntegrationSystemdSIGTERMReachesNamespaceInit
 
@@ -61,13 +61,13 @@ func TestSandboxedEnvCarriesNoSupervisorSecrets(t *testing.T) {
 		t.Setenv(k, v)
 	}
 	spec := testSpec(t)
-	for _, sandboxed := range []bool{false, true} {
-		env, err := buildEnv(spec, "v1", 8123, spec.dirs.release("v1"), sandboxed)
+	{
+		env, err := buildEnv(spec, "v1", 8123, spec.dirs.release("v1"))
 		must(t, err)
 		for k := range secrets {
 			for _, kv := range env {
 				if strings.HasPrefix(kv, k+"=") {
-					t.Errorf("sandboxed=%v: the supervisor's %s reached the app: %q", sandboxed, k, kv)
+					t.Errorf("the supervisor's %s reached the app: %q", k, kv)
 				}
 			}
 		}
@@ -89,9 +89,9 @@ func TestSandboxedEnvNamesNoPathOutsideTheView(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", "/var/lib/hotserve/caddy")
 	t.Setenv("XDG_CONFIG_HOME", "/var/lib/hotserve/config")
 	spec := testSpec(t)
-	env, err := buildEnv(spec, "v1", 8123, spec.dirs.release("v1"), true)
+	env, err := buildEnv(spec, "v1", 8123, spec.dirs.release("v1"))
 	must(t, err)
-	sb := spec.sandboxSpecFor(spec.dirs.release("v1"), sandboxFull)
+	sb := spec.sandboxSpecFor(spec.dirs.release("v1"))
 	for _, kv := range env {
 		k, v, _ := strings.Cut(kv, "=")
 		switch k {
@@ -113,36 +113,32 @@ func TestSandboxedEnvNamesNoPathOutsideTheView(t *testing.T) {
 // would notice — the app would simply become unreachable through the
 // proxy, at deploy time, on a real host.
 func TestNetworkNamespaceIsShared(t *testing.T) {
-	// One tier can reach a unit; the loop stays so a second one cannot
-	// be added without this promise being re-asserted for it.
-	for _, tier := range []sandboxTier{sandboxFull} {
-		spec := &sandboxSpec{tier: tier, root: "/var/lib/liveswap",
-			appDir: "/var/lib/liveswap/blog", appName: "blog",
-			writable: []bindPath{{dest: "/var/lib/liveswap/blog/shared"}}}
-		got := propMap(unitSpec{ExecStart: []string{"/bin/true"}, Sandbox: spec})
-		for _, name := range []string{
-			"PrivateNetwork", "NetworkNamespacePath", "PrivateIPC", "IPCNamespacePath",
-		} {
-			if v, present := got[name]; present {
-				t.Errorf("%s tier sets %s=%v: the app must share the network namespace so hotserve can proxy to 127.0.0.1:$PORT", tier, name, v)
+	spec := &sandboxSpec{root: "/var/lib/liveswap",
+		appDir: "/var/lib/liveswap/blog", appName: "blog",
+		writable: []bindPath{{dest: "/var/lib/liveswap/blog/shared"}}}
+	got := propMap(unitSpec{ExecStart: []string{"/bin/true"}, Sandbox: spec})
+	for _, name := range []string{
+		"PrivateNetwork", "NetworkNamespacePath", "PrivateIPC", "IPCNamespacePath",
+	} {
+		if v, present := got[name]; present {
+			t.Errorf("%s=%v is set: the app must share the network namespace so hotserve can proxy to 127.0.0.1:$PORT", name, v)
+		}
+	}
+	// The address families the app needs to bind and be proxied to
+	// are the other half of the same promise.
+	fam, _ := got["RestrictAddressFamilies"].(allowList)
+	if !fam.AllowList {
+		t.Errorf("RestrictAddressFamilies must be an allow list, got %+v", fam)
+	}
+	for _, want := range []string{"AF_INET", "AF_INET6"} {
+		found := false
+		for _, n := range fam.Names {
+			if n == want {
+				found = true
 			}
 		}
-		// The address families the app needs to bind and be proxied to
-		// are the other half of the same promise.
-		fam, _ := got["RestrictAddressFamilies"].(allowList)
-		if !fam.AllowList {
-			t.Errorf("%s tier: RestrictAddressFamilies must be an allow list, got %+v", tier, fam)
-		}
-		for _, want := range []string{"AF_INET", "AF_INET6"} {
-			found := false
-			for _, n := range fam.Names {
-				if n == want {
-					found = true
-				}
-			}
-			if !found {
-				t.Errorf("%s tier: %s missing, the app cannot bind its port: %v", tier, want, fam.Names)
-			}
+		if !found {
+			t.Errorf("%s missing, the app cannot bind its port: %v", want, fam.Names)
 		}
 	}
 }
@@ -158,8 +154,6 @@ func TestNetworkNamespaceIsShared(t *testing.T) {
 func TestPreStartRunsUnderTheSameSandboxAsItsApp(t *testing.T) {
 	rig := newTestRig(t)
 	rig.spec.preStart = []string{"./migrate"}
-	rig.spec.sandboxMode = sandboxOn
-	rig.spec.sandboxTier = sandboxFull
 	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/1", version: "v1"}))
 
 	rig.runner.mu.Lock()
@@ -180,20 +174,6 @@ func TestPreStartRunsUnderTheSameSandboxAsItsApp(t *testing.T) {
 	}
 	if pre.dir != app.dir {
 		t.Errorf("pre_start working dir %q != app's %q", pre.dir, app.dir)
-	}
-	// And an unsandboxed app's pre_start is unsandboxed too, rather
-	// than accidentally stricter than the thing it precedes.
-	rig2 := newTestRig(t)
-	rig2.spec.preStart = []string{"./migrate"}
-	rig2.spec.sandboxMode = sandboxOff
-	must(t, rig2.ma.Deploy(context.Background(), deployRequest{url: "https://x/1", version: "v1"}))
-	rig2.runner.mu.Lock()
-	specs2 := append([]startSpec{}, rig2.runner.started...)
-	rig2.runner.mu.Unlock()
-	for i, s := range specs2 {
-		if s.sandbox != nil {
-			t.Errorf("spec %d is sandboxed although the app is `sandbox off`: %+v", i, s.sandbox)
-		}
 	}
 }
 
@@ -220,10 +200,6 @@ func TestEnvFileMayNotLandInAnotherAppsView(t *testing.T) {
 		{"the base view exposes it to everyone", map[string]*AppConfig{
 			"shop": app("/usr/local/etc/shop.env"),
 		}, "EVERY app's sandbox"},
-		{"an unsandboxed viewer adds no exposure", map[string]*AppConfig{
-			"blog": func() *AppConfig { c := app(""); c.Sandbox = sandboxOff; return c }(),
-			"shop": app("/var/lib/liveswap/blog/shared/shop.env"),
-		}, ""},
 		{"the documented location is fine", map[string]*AppConfig{
 			"blog": app("/etc/hotserve/blog.env"),
 			"shop": app("/etc/hotserve/shop.env"),
@@ -243,10 +219,6 @@ func TestEnvFileMayNotLandInAnotherAppsView(t *testing.T) {
 		{"an app's own shared dir is not cross-app", map[string]*AppConfig{
 			"blog": app(""),
 			"shop": app("/var/lib/liveswap/shop/shared/shop.env"),
-		}, ""},
-		{"an unsandboxed sibling's dirs add no exposure", map[string]*AppConfig{
-			"blog": func() *AppConfig { c := app(""); c.Sandbox = sandboxOff; return c }(),
-			"shop": app("/var/lib/liveswap/blog/shared/shop.env"),
 		}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -284,7 +256,7 @@ func TestHomeOutsideTheViewIsReported(t *testing.T) {
 		must(t, os.MkdirAll(d, 0o750))
 	}
 	sb := &sandboxSpec{
-		tier: sandboxFull, root: root, appDir: appDir, appName: "blog",
+		root: root, appDir: appDir, appName: "blog",
 		writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}},
 	}
 	env := func(home string) []string {
@@ -316,10 +288,6 @@ func TestHomeOutsideTheViewIsReported(t *testing.T) {
 	// inline env, so checking the first one would clear an override.
 	if _, outside := homeOutsideView([]string{"HOME=" + shared, "HOME=/opt/app"}, sb); !outside {
 		t.Fatal("an override appended after the default must be the one checked")
-	}
-	// An unsandboxed launch has no view to be outside of.
-	if _, outside := homeOutsideView(env("/opt/app"), nil); outside {
-		t.Fatal("a bare launch has no view; nothing can be outside it")
 	}
 }
 
@@ -398,109 +366,52 @@ func TestEnvFileIsolationComparesBothSpellingsOfASiblingsDirs(t *testing.T) {
 	}
 }
 
-// Promise: the checks that exist only because a view is built do not
-// fire when none is. `sandbox off` is the documented way out for a
-// configuration the sandbox cannot host — it is worth nothing if
-// config load refuses that configuration before the escape hatch is
-// consulted. The supervisor-state rule is the exception: a root inside
-// hotserve's own keys is a mistake with or without a sandbox.
-func TestRootUnderTheBaseViewIsOnlyRefusedWhenSomethingIsSandboxed(t *testing.T) {
+// Promise: a liveswap root inside the base view is refused at config
+// load, unconditionally — every app's data would be bound read-only
+// into every other app's sandbox. There is no sandbox setting that
+// could make such a root harmless, so there is no case in which it
+// loads. The supervisor-state rule is refused for its own reason: a
+// root inside hotserve's own keys is a mistake with or without a view.
+func TestRootUnderTheBaseViewIsRefused(t *testing.T) {
 	const underBaseView = "/usr/local/liveswap"
-	if err := validateSandboxRoot(underBaseView, true); err == nil {
-		t.Fatal("with an app sandboxed, a root under the base view must be refused: every app would read every other's data")
+	if err := validateSandboxRoot(underBaseView); err == nil {
+		t.Fatal("a root under the base view must be refused: every app would read every other's data")
 	}
-	if err := validateSandboxRoot(underBaseView, false); err != nil {
-		t.Fatalf("with nothing sandboxed, nothing binds /usr and the root is harmless; refused anyway: %v", err)
+	if err := validateSandboxRoot("/var/lib/hotserve/apps"); err == nil {
+		t.Error("a root inside hotserve's own state must always be refused")
 	}
-	// Unconditional, either way.
-	for _, sandboxed := range []bool{true, false} {
-		if err := validateSandboxRoot("/var/lib/hotserve/apps", sandboxed); err == nil {
-			t.Errorf("sandboxed=%v: a root inside hotserve's own state must always be refused", sandboxed)
-		}
-	}
-	// And end to end, through Validate: the whole config loads.
-	cfg := defaultedApp(t)
+	// And end to end, through Validate.
 	a := &App{
 		Root:              underBaseView,
-		Sandbox:           sandboxOff,
 		ArtifactAllowlist: []string{"github.com/smallhoursorg/"},
 		DeployTrust:       githubTrust(),
-		Apps:              map[string]*AppConfig{"blog": cfg},
+		Apps:              map[string]*AppConfig{"blog": defaultedApp(t)},
 	}
-	if err := a.Validate(); err != nil {
-		t.Fatalf("sandbox off globally with a root under the base view must load: %v", err)
-	}
-	a.Sandbox = sandboxOn
 	if err := a.Validate(); err == nil {
-		t.Fatal("sandbox on with a root under the base view must be refused")
+		t.Fatal("a root under the base view must be refused at config load")
 	}
 }
 
-// Promise: with sandboxing turned off GLOBALLY, the env-file isolation
-// rules do not reject the configuration. `sandbox off` in the liveswap
-// block leaves every app's own Sandbox field empty, so a check that
-// reads the raw per-app value sees "" — not "off" — and refuses to load
-// a config over views it is not building. The effective policy is the
-// only one that means anything here, and buildSpec resolves it the
-// same way (liveswap.go).
-func TestEnvFileIsolationHonoursTheGlobalSandboxSetting(t *testing.T) {
-	apps := func() map[string]*AppConfig {
-		blog := defaultedApp(t)
-		shop := defaultedApp(t)
-		shop.EnvFile = "/var/lib/liveswap/blog/shared/shop.env"
-		return map[string]*AppConfig{"blog": blog, "shop": shop}
+// Promise: every unit is sandboxed. The runner is the last thing
+// between a start spec and a running process, so it is where "no
+// sandbox" is refused rather than rendered with the floor only: a
+// caller that forgot the spec gets an error and no unit, never a bare
+// app. Nothing in production can reach this — every launch path goes
+// through sandboxSpecFor — which is exactly why it is pinned here.
+func TestUnitRefusesToRunWithoutASandbox(t *testing.T) {
+	r, conn := newTestSystemdRunner(t)
+	spec := testApp(t)
+	spec.sandbox = nil
+	if _, err := r.Start(spec); err == nil || !strings.Contains(err.Error(), "no sandbox spec") {
+		t.Fatalf("Start without a sandbox spec must be refused, got %v", err)
 	}
-	newApp := func(global string) *App {
-		return &App{
-			Root:              "/var/lib/liveswap",
-			Sandbox:           global,
-			ArtifactAllowlist: []string{"github.com/smallhoursorg/"},
-			DeployTrust:       githubTrust(),
-			Apps:              apps(),
-		}
+	if err := r.RunOnce(context.Background(), spec); err == nil || !strings.Contains(err.Error(), "no sandbox spec") {
+		t.Fatalf("RunOnce without a sandbox spec must be refused, got %v", err)
 	}
-	// The control: the same config with sandboxing on must still be
-	// refused, or the case below proves nothing.
-	if err := newApp(sandboxOn).Validate(); err == nil {
-		t.Fatal("sandbox on: an env_file inside a sibling's shared dir must be refused")
-	}
-	if err := newApp(sandboxOff).Validate(); err != nil {
-		t.Fatalf("sandbox off globally: no unit gets a view, so nothing is exposed by one; refused anyway: %v", err)
-	}
-	// And the base-view branch, which consults no per-app field at all.
-	a := newApp(sandboxOff)
-	a.Apps["shop"].EnvFile = "/usr/local/etc/shop.env"
-	if err := a.Validate(); err != nil {
-		t.Fatalf("sandbox off globally: the base view is bound into no unit; refused anyway: %v", err)
-	}
-}
-
-// Promise: a relaunch reproduces the tier recorded for that instance —
-// and a record that does not mean anything must not read as "no
-// sandbox". A syntactically corrupt state.json is already a permanent
-// recovery error; a semantically corrupt one is the same class.
-func TestCorruptRecordedTierFailsClosed(t *testing.T) {
-	for _, ok := range []string{"", "none", "full"} {
-		if err := validSandboxTierRecord(ok); err != nil {
-			t.Errorf("%q is a legitimate record: %v", ok, err)
-		}
-	}
-	for _, bad := range []string{"ful", "Full", "filesystem", "FILESYSTEM", "yes", "true", "sandboxed", " full"} {
-		if err := validSandboxTierRecord(bad); err == nil {
-			t.Errorf("%q accepted: reading it as none would silently drop the app's sandbox", bad)
-		}
-	}
-	// And the recovery path refuses rather than relaunching bare.
-	rig := newTestRig(t)
-	must(t, rig.store.save(appState{CurrentVersion: "v1", Port: 1,
-		Handle: handleState{Unit: "hotserve-demo.v1.abc.service", Sandbox: "ful"}}))
-	must(t, mkdirRelease(rig.spec, "v1"))
-	err := rig.ma.ensureRunning()
-	if err == nil {
-		t.Fatal("recovery accepted a corrupt tier record and relaunched")
-	}
-	var perm *permanentRecoveryError
-	if !errors.As(err, &perm) {
-		t.Fatalf("a corrupt tier must be a permanent recovery error, not %T: %v", err, err)
+	conn.mu.Lock()
+	n := len(conn.started)
+	conn.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("%d unit(s) reached the manager without a sandbox", n)
 	}
 }

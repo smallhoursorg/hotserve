@@ -197,9 +197,10 @@ properties, so it would let a compromised hotserve start a root unit;
 Ubuntu 22.04's polkit 0.105 cannot even filter by unit name. Per-app
 UIDs — the one thing the system manager would buy — are a later
 milestone behind a small privileged helper. Isolation between apps
-and hotserve comes from per-unit sandboxing (probe-gated, needs
-unprivileged user namespaces) or bubblewrap, see `DESIGN-sandbox.md`
-and `DESIGN-threat-model.md`.
+and hotserve comes from systemd's per-unit sandboxing on every unit
+(probe-gated at start: a host without unprivileged user namespaces is
+refused, there is no setting that runs without), see
+`DESIGN-sandbox.md` and `DESIGN-threat-model.md`.
 
 Packaging consequences: `libpam-systemd` (pam_systemd hands the user
 manager its `XDG_RUNTIME_DIR`) and `dbus` are hard dependencies;

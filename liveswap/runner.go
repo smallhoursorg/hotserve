@@ -79,10 +79,9 @@ type startSpec struct {
 	dir     string        // working directory (the release dir)
 	env     []string      // complete environment, KEY=VALUE form
 	grace   time.Duration // SIGTERM→SIGKILL budget applied when the instance is stopped
-	// sandbox is the per-unit sandbox to apply; nil runs the command
-	// with the floor only. The caller decides (policy × host
-	// capability, or the disposition recorded for a relaunch); the
-	// runner only renders it.
+	// sandbox is the per-unit sandbox to apply. Every unit has one;
+	// the runner refuses a spec without it rather than running the
+	// command with the floor only (unitFor).
 	sandbox *sandboxSpec
 	// probe marks the throwaway unit the sandbox capability probe runs.
 	// It is named outside the app grammar (see unitName) so no sweep
@@ -105,10 +104,4 @@ type handleState struct {
 	// Unit is the transient systemd unit running the instance; it is
 	// what Reattach looks up after a hotserve restart.
 	Unit string `json:"unit,omitempty"`
-	// Sandbox is the sandbox tier the instance was started with
-	// ("full"; absent = none). A relaunch reproduces it
-	// rather than re-reading policy, so enabling sandboxing in config
-	// takes effect on the next deploy — the path with a fallback — and
-	// never on a recovery or watchdog relaunch.
-	Sandbox string `json:"sandbox,omitempty"`
 }

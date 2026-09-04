@@ -51,40 +51,39 @@ type userManagerClient struct {
 	// What the probe measures is the kernel and the LSM rather than
 	// the manager, so a sysctl or an LSM policy reload can move the
 	// answer with the connection still up. That is deliberately not
-	// chased: the verdict is a start-time input (App.Start freezes a
-	// tier into each app's spec and every later deploy reads that
-	// field), so a measurement taken at the start that resolved it is
-	// the honest one to hold. A host whose namespace policy changes
-	// underneath a running hotserve is re-measured on the next dial —
-	// a manager restart, or hotserve's own.
+	// chased: the verdict is a start-time input (App.Start either
+	// comes up or refuses on it), so a measurement taken at the start
+	// that resolved it is the honest one to hold. A host whose
+	// namespace policy changes underneath a running hotserve is
+	// re-measured on the next dial — a manager restart, or hotserve's
+	// own.
 	//
 	// Its own mutex, not mu: a measurement takes a unit start plus its
 	// exit, and holding the mutex every D-Bus call needs for that long
 	// would stall the runner.
 	sandboxMu  sync.Mutex
-	sandboxCap sandboxCapability
-	sandboxGen uint64 // generation sandboxCap holds for; 0 = never measured
+	sandboxGen uint64 // generation the host was measured capable for; 0 = never
 }
 
 // userManager is the process-wide client every systemdRunner shares.
 var userManager = &userManagerClient{}
 
-// sandboxCapability reports what this manager can deliver, measuring
-// at most once per connection (see the cache fields above). The
-// measurement starts a real unit, so the first caller after a dial
-// pays for it and every later config load reads the cache.
+// sandboxCapability reports whether this manager can deliver the
+// sandbox (nil) or why not, measuring at most once per connection
+// (see the cache fields above). The measurement starts a real unit,
+// so the first caller after a dial pays for it and every later config
+// load reads the cache.
 //
 // probe() rather than get(): it proves the manager answers a real
 // request, and its error names the uid, the socket and the lingering
-// to enable. resolveSandboxTier puts that reason verbatim into the
-// `sandbox on` refusal, so a manager that went away between Start's
-// probeManager and here must not be reported as a sandbox problem
-// with no remedy attached.
-func (c *userManagerClient) sandboxCapability(logger *zap.Logger) sandboxCapability {
+// to enable. App.Start puts that reason verbatim into its refusal, so
+// a manager that went away between Start's probeManager and here must
+// not be reported as a sandbox problem with no remedy attached.
+func (c *userManagerClient) sandboxCapability(logger *zap.Logger) error {
 	if err := c.probe(); err != nil {
-		return sandboxCapability{tier: sandboxNone, reason: err.Error()}
+		return err
 	}
-	return c.cachedSandboxCapability(func() sandboxCapability {
+	return c.cachedSandboxCapability(func() error {
 		r := newSystemdRunner(c, logger)
 		defer r.cancel()
 		return probeSandboxCapability(r)
@@ -96,19 +95,17 @@ func (c *userManagerClient) sandboxCapability(logger *zap.Logger) sandboxCapabil
 // or belongs to an older one. Separate from sandboxCapability so the
 // caching rule is testable without a manager to dial.
 //
-// Only a capability the host actually delivered is cached. A `none`
-// verdict is not a measurement of the host so much as the absence of
-// one: probeSandboxCapability reports the same thing whether the
-// namespaces are genuinely unavailable or the probe unit merely timed
-// out under boot load, and caching that would refuse the server for
-// the life of a connection that nothing will drop. That matters more
-// now than when the rule was written: with the policy two-valued, a
-// cached `none` is not a degraded app but a hotserve that will not
-// come up until the manager restarts. So a failed verdict is reported
-// and re-measured next time, which is what this code did before the
-// cache existed. The cost of re-measuring falls only on hosts that
-// cannot sandbox at all; the supported one pays it once.
-func (c *userManagerClient) cachedSandboxCapability(measure func() sandboxCapability) sandboxCapability {
+// Only a capable verdict is cached. A failed one is not a measurement
+// of the host so much as the absence of one: probeSandboxCapability
+// reports the same thing whether the namespaces are genuinely
+// unavailable or the probe unit merely timed out under boot load, and
+// caching that would refuse the server for the life of a connection
+// that nothing will drop — a hotserve that will not come up until the
+// manager restarts. So a failed verdict is reported and re-measured
+// next time, which is what this code did before the cache existed.
+// The cost of re-measuring falls only on hosts that cannot sandbox at
+// all; the supported one pays it once.
+func (c *userManagerClient) cachedSandboxCapability(measure func() error) error {
 	c.sandboxMu.Lock()
 	defer c.sandboxMu.Unlock()
 	// Read under the lock: sampled outside it, a redial between the
@@ -116,17 +113,17 @@ func (c *userManagerClient) cachedSandboxCapability(measure func() sandboxCapabi
 	// manager that no longer exists.
 	gen := c.generation.Load()
 	if gen != 0 && c.sandboxGen == gen {
-		return c.sandboxCap
+		return nil
 	}
-	got := measure()
+	err := measure()
 	// Cache only against a real connection, and only if that
 	// connection is still the current one: a redial while the probe
 	// ran means it described a manager that is no longer live. The
 	// caller that asked still gets what was measured.
-	if got.tier != sandboxNone && gen != 0 && c.generation.Load() == gen {
-		c.sandboxCap, c.sandboxGen = got, gen
+	if err == nil && gen != 0 && c.generation.Load() == gen {
+		c.sandboxGen = gen
 	}
-	return got
+	return err
 }
 
 // userManagerSocket is the private socket of this uid's manager.
@@ -339,10 +336,10 @@ const (
 	errnoEPERM     int32  = 1      // SystemCallErrorNumber=EPERM, every Linux arch
 )
 
-// sandboxProperties renders a sandboxSpec (nil: nothing). The set is
-// the one measured in issue #35; see sandbox.go for what it closes.
-// There is one tier above none, so a spec that reaches past the guard
-// below is a full one and gets every property unconditionally.
+// sandboxProperties renders a sandboxSpec. The set is the one measured
+// in issue #35; see sandbox.go for what it closes. Every unit gets
+// every property: there is one sandbox and no lesser one (unitFor
+// refuses a spec without one, so s is never nil here).
 //
 // The view is deny-by-default: TemporaryFileSystem=/ replaces the
 // whole filesystem with an empty read-only tmpfs, and the binds below
@@ -354,9 +351,6 @@ const (
 // and /dev are mounted inside the tmpfs by PrivateDevices= and
 // PrivatePIDs=, measured on 252/255/257/259.
 func sandboxProperties(s *sandboxSpec) []sddbus.Property {
-	if s == nil || s.tier == sandboxNone {
-		return nil
-	}
 	writable := make([]bindMount, 0, len(s.writable))
 	for _, b := range s.writable {
 		src := b.source
@@ -534,6 +528,7 @@ func statusFromProps(props map[string]any) unitStatus {
 		SubState:       propString(props, "SubState"),
 		Result:         propString(props, "Result"),
 		MainPID:        propInt(props, "MainPID"),
+		Sandboxed:      propYes(props, "PrivateUsers") && propYes(props, "PrivatePIDs"),
 		ExecMainCode:   propInt(props, "ExecMainCode"),
 		ExecMainStatus: propInt(props, "ExecMainStatus"),
 		StopTimeout:    usecDuration(propInt(props, "TimeoutStopUSec")),
@@ -572,6 +567,19 @@ func (c *userManagerClient) ListUnits(ctx context.Context, pattern string) ([]un
 func propString(props map[string]any, key string) string {
 	s, _ := props[key].(string)
 	return s
+}
+
+// propYes reads a namespace property as "in effect". PrivateUsers= is
+// a bool on the bus; PrivatePIDs= is a string ("yes"/"no" — later
+// versions add modes, none of which is "no").
+func propYes(props map[string]any, key string) bool {
+	switch v := props[key].(type) {
+	case bool:
+		return v
+	case string:
+		return v != "" && v != "no" && v != "false"
+	}
+	return false
 }
 
 func propInt(props map[string]any, key string) int {

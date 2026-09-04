@@ -75,17 +75,19 @@ fi
 case "$s" in *'"running":true'*) pass "status reports the reattached app running" ;; *) fail "reattached app not running: $s" ;; esac
 
 echo "=== systemd 4: the app runs in its sandbox — the view from inside ==="
-# Host-side facts first (never assertions): they explain a `none` tier
-# on a kernel that refuses unprivileged user namespaces. Debian 13 does
-# not restrict them, but the e2e container runs on whatever kernel the
-# CI runner has, so record what that kernel allows.
+# Host-side facts first (never assertions): they explain a refused
+# start on a kernel that restricts unprivileged user namespaces.
+# Debian 13 does not restrict them, but the e2e container runs on
+# whatever kernel the CI runner has, so record what that kernel allows.
 echo "host: $(uname -r); apparmor_restrict_unprivileged_userns=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo absent)"
 echo "userns: max_user_namespaces=$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo absent)"
 # The probe release's ./server records its view into its shared dir
 # (e2e/liveswap/probe.sh), then becomes the app. The image is trixie
-# (systemd 257) — the only release in the support matrix — so the tier
-# is full: a PID namespace on top of the user namespace and the mount
-# set.
+# (systemd 257) — the only release in the support matrix — so the
+# sandbox is the whole set: a PID namespace on top of the user
+# namespace and the mount set. The view from inside is the assertion;
+# there is no status field to consult, because there is nothing to
+# report — every unit gets this.
 code=$(deploy demo-probe.tar.gz sb1)
 [ "$code" = "200" ] || fail "deploy of the probe release returned $code: $(body)"
 probe=/var/lib/liveswap/demo/shared/probe.txt
@@ -99,9 +101,6 @@ expect_probe() { # <key> <want>
 	got=$(probe_val "$1")
 	[ "$got" = "$2" ] && pass "inside the sandbox: $1=$2" || fail "inside the sandbox: $1=$got, want $2"
 }
-[ "$(json_str "$(status)" sandbox)" = "full" ] \
-	&& pass "status reports sandbox=full" \
-	|| fail "status sandbox is $(json_str "$(status)" sandbox), want full: $(status)"
 expect_probe pid 1
 [ "$(probe_val uidmap)" != "4294967295" ] \
 	&& pass "inside the sandbox: own user namespace (uid_map $(probe_val uidmap))" \
@@ -174,43 +173,7 @@ for gone in "ProtectSystem=strict" "InaccessiblePaths=/"; do
 	esac
 done
 
-echo "=== systemd 5: a bare-recorded instance relaunches bare; the sandbox engages on the next deploy ==="
-# The upgrade contract: enabling sandboxing must never force a running
-# app into a sandbox on a relaunch that has no fallback (boot
-# recovery, watchdog). Simulate a pre-sandbox state.json: stop
-# hotserve, drop the recorded tier, kill the unit so recovery has to
-# relaunch rather than reattach, start hotserve.
-state=/var/lib/liveswap/demo/state.json
-systemctl stop hotserve
-sunit=$(sed -n 's/.*"unit": *"\([^"]*\)".*/\1/p' "$state")
-[ -n "$sunit" ] || fail "could not read the recorded unit from state.json"
-sed -i -e ':a' -e 'N' -e '$!ba' -e 's/,[[:space:]]*"sandbox":[[:space:]]*"[a-z]*"//' "$state"
-grep -q '"sandbox"' "$state" && fail "could not strip the recorded tier from state.json"
-user_systemctl stop "$sunit" >/dev/null 2>&1 || fail "could not stop $sunit"
-# The unit must not be running afterwards (a transient unit whose app
-# exits non-zero on SIGTERM stays loaded as "failed" until something
-# resets it; recovery resets and relaunches, never adopts, either way).
-user_systemctl is-active --quiet "$sunit" \
-	&& fail "unit $sunit still active; the relaunch below would be a reattach"
-systemctl start hotserve
-wait_hook || fail "hotserve did not come back"
-i=0
-until [ "$(json_str "$(status)" phase 2>/dev/null)" = "running" ] && [ "$(json_num "$(status)" pid 2>/dev/null)" != "" ]; do
-	i=$((i + 1)); [ "$i" -ge 40 ] && break; sleep 0.5
-done
-[ "$(json_str "$(status)" sandbox)" = "none" ] \
-	&& pass "bare-recorded instance relaunched bare (sandbox=none) although config says on" \
-	|| fail "relaunch changed the recorded tier: sandbox=$(json_str "$(status)" sandbox)"
-journalctl --no-pager -u hotserve | grep -q "launching without the full sandbox" \
-	&& pass "the bare relaunch was warned about in the journal" \
-	|| fail "no WARN for the bare relaunch in the journal"
-code=$(deploy demo-v2.tar.gz sb2)
-[ "$code" = "200" ] || fail "deploy after the bare relaunch returned $code: $(body)"
-[ "$(json_str "$(status)" sandbox)" = "full" ] \
-	&& pass "the next deploy engaged the sandbox (sandbox=full)" \
-	|| fail "the next deploy did not engage the sandbox: $(json_str "$(status)" sandbox)"
-
-echo "=== systemd 6: stopping a version takes its whole process tree ==="
+echo "=== systemd 5: stopping a version takes its whole process tree ==="
 c=$(deploy demo-workers.tar.gz w1)
 [ "$c" = "200" ] || fail "deploy workers: expected 200, got $c ($(cat /tmp/deploy-body))"
 case "$(body)" in "hello workers"*) pass "worker-tree release serves" ;; *) fail "worker-tree release not serving" ;; esac
@@ -230,7 +193,7 @@ for p in $tree; do kill -0 "$p" 2>/dev/null && survivors="$survivors $p"; done
 [ "$(user_systemctl show -p LoadState --value "$wunit")" = "not-found" ] \
 	&& pass "old unit unloaded" || fail "old unit $wunit still loaded"
 
-echo "=== systemd 7: a crash leaves no failed unit behind ==="
+echo "=== systemd 6: a crash leaves no failed unit behind ==="
 s=$(status)
 cunit=$(json_str "$s" unit)
 cpid=$(json_num "$s" pid)
@@ -249,7 +212,7 @@ sleep 1
 n=$(user_systemctl list-units --all --no-legend --plain "'hotserve-*'" | wc -l)
 [ "$n" = "1" ] && pass "exactly one hotserve unit loaded" || fail "expected 1 loaded hotserve unit, found $n"
 
-echo "=== systemd 8: a unit gone behind hotserve's back is relaunched on start ==="
+echo "=== systemd 7: a unit gone behind hotserve's back is relaunched on start ==="
 # The cold path recovery takes when the recorded unit no longer exists
 # (a reboot, a manual stop — and a v0.1.0 state.json with no unit at
 # all): not reattach, but launch. Stop the unit as the operator might,
@@ -329,7 +292,7 @@ wait_new_pid() { # <old pid> -> sets NEWPID or fails after 30s
 	return 1
 }
 
-echo "=== systemd 9: removing the app via reload stops its units; adding it back relaunches ==="
+echo "=== systemd 8: removing the app via reload stops its units; adding it back relaunches ==="
 s=$(status)
 runit=$(json_str "$s" unit)
 rpid=$(json_num "$s" pid)
@@ -343,7 +306,7 @@ wait_new_pid "$rpid" && pass "re-added app relaunched from state.json (pid $rpid
 	|| fail "re-added app did not come back: $(status)"
 case "$(status)" in *'"current_version":"sd-final"'*) pass "relaunched the recorded version" ;; *) fail "unexpected version after re-add: $(status)" ;; esac
 
-echo "=== systemd 10: an app removed while hotserve was down is swept on the next start ==="
+echo "=== systemd 9: an app removed while hotserve was down is swept on the next start ==="
 s=$(status)
 dunit=$(json_str "$s" unit)
 dpid=$(json_num "$s" pid)
@@ -360,12 +323,12 @@ wait_hook || fail "webhook not back after restoring the app"
 wait_new_pid "$dpid" && pass "restored app relaunched from state.json (pid $dpid -> $NEWPID)" \
 	|| fail "restored app did not come back: $(status)"
 
-echo "=== systemd 11: app output reaches the journal ==="
+echo "=== systemd 10: app output reaches the journal ==="
 journalctl --no-pager -t hotserve-demo | grep -q "workers up" \
 	&& pass "app stdout is in the journal under identifier hotserve-demo" \
 	|| fail "no app output in the journal for -t hotserve-demo"
 
-echo "=== systemd 12: hotserve is non-dumpable — its /proc is closed to its own UID ==="
+echo "=== systemd 11: hotserve is non-dumpable — its /proc is closed to its own UID ==="
 # Apps run as the hotserve user. The kernel opens /proc/<pid>/environ
 # and /proc/<pid>/root to any same-UID reader of a dumpable process —
 # whatever sandbox that reader sits in — so without this floor every
