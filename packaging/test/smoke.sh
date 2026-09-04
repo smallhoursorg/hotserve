@@ -315,20 +315,19 @@ echo "deployed as unit $unit under user@$uid; app output in the journal"
 
 # The sandbox tier: full — a PID namespace on top of the user namespace
 # and the mount set. Debian 13 is systemd 257, so there is one tier and
-# the status endpoint must report it; the app's own view must agree.
+# the app's own view is the assertion (there is no status field: every
+# unit gets the sandbox, so there is nothing to report).
 # The host kernel's stance on unprivileged user namespaces is printed
 # for the record: it lives in the host kernel, not the container image,
 # so a CI runner that restricts them fails this cell even though Debian
 # itself does not restrict them.
 echo "host: $(uname -r); apparmor_restrict_unprivileged_userns=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo absent); virt=$(systemd-detect-virt 2>/dev/null || echo unknown)"
-sandbox=$(printf '%s' "$status" | sed -n 's/.*"sandbox":"\([a-z]*\)".*/\1/p')
 app_uidmap=$(printf '%s' "$app_line" | grep -o 'uidmap=[0-9]*' | cut -d= -f2)
 app_pid=$(printf '%s' "$app_line" | grep -o ' pid=[0-9]*' | cut -d= -f2)
 app_nprocs=$(printf '%s' "$app_line" | grep -o 'nprocs=[0-9]*' | cut -d= -f2)
 app_hslib=$(printf '%s' "$app_line" | grep -o 'hotserve_lib=[a-z]*' | cut -d= -f2)
-[ "$sandbox" = "full" ] || die "status sandbox is '$sandbox', want full"
-[ "$app_pid" = "1" ] || die "full tier but the app is pid $app_pid inside its unit, not 1 (no PID namespace)"
-[ -n "$app_nprocs" ] && [ "$app_nprocs" -le 8 ] || die "full tier but /proc shows $app_nprocs pids inside the unit"
+[ "$app_pid" = "1" ] || die "the app is pid $app_pid inside its unit, not 1 (no PID namespace)"
+[ -n "$app_nprocs" ] && [ "$app_nprocs" -le 8 ] || die "/proc shows $app_nprocs pids inside the unit"
 [ "$app_uidmap" != "4294967295" ] && [ -n "$app_uidmap" ] || die "no user namespace inside the unit (uid_map range $app_uidmap)"
 [ "$app_hslib" = "closed" ] || die "/var/lib/hotserve is visible inside the sandboxed unit"
 # These are the acceptance paths from DESIGN-sandbox.md. They are
@@ -355,7 +354,7 @@ sslpriv_seen=$(printf '%s' "$app_line" | grep -o 'sslprivate=[a-z]*' | cut -d= -
 for route in mgr_root mgr_environ mgr_socket admin_socket state_json etc_hotserve; do
 	got=$(printf '%s' "$app_line" | grep -o "$route=[a-z_]*" | cut -d= -f2)
 	[ "$got" = "closed" ] \
-		|| die "$route is '$got' inside the $sandbox-tier unit: a route the design says is closed is open"
+		|| die "$route is '$got' inside the unit: a route the design says is closed is open"
 done
 echo "in-unit routes closed: manager /proc root+environ, manager socket, admin socket, state.json, /etc/hotserve"
 # The other half of the deny-by-default claim, and the one that keeps
@@ -387,13 +386,7 @@ echo "in-unit base view: /bin/sh, /usr/bin/hotserve, /etc/ssl; /etc=$etclist /va
 case "$(user_systemctl show -p InaccessiblePaths --value "$unit")" in
 */*) die "unit still masks a list with InaccessiblePaths=" ;;
 esac
-journalctl --no-pager -u hotserve | grep -q "launching without the full sandbox" && degraded=yes || degraded=no
-if [ "$sandbox" = "full" ]; then
-	[ "$degraded" = "no" ] || die "full tier must not log the degraded WARN"
-else
-	[ "$degraded" = "yes" ] || die "$sandbox tier must be warned about at launch"
-fi
-echo "sandbox tier $sandbox (systemd $sd_version): uid_map range $app_uidmap, pid $app_pid, $app_nprocs pids visible, /var/lib/hotserve $app_hslib"
+echo "sandbox (systemd $sd_version): uid_map range $app_uidmap, pid $app_pid, $app_nprocs pids visible, /var/lib/hotserve $app_hslib"
 
 # `hotserve validate` provisions and cleans up without starting: run
 # as root (no user manager for uid 0) and as the hotserve user (the

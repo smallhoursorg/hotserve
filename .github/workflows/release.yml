@@ -55,7 +55,8 @@ jobs:
           instead — it installs everything below for you and is what the
           test matrix certifies. Other systemd distributions can use
           this archive, but nothing else is tested, and a host that
-          cannot deliver the per-app sandbox reports `sandbox: none`.
+          cannot deliver the per-app sandbox refuses to start — every
+          app runs in one, and there is no setting that runs without.
 
           What the package would have set up, and you now own:
             - a dedicated system user/group (hotserve) to run as

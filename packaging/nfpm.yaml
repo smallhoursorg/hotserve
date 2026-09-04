@@ -29,13 +29,12 @@ depends:
   # No systemd version floor is declared even though the sandbox needs
   # 256+ (Debian 13 ships 257): the per-app sandbox is probe-gated at
   # runtime rather than at install, so a host that cannot deliver it
-  # still installs. It will not serve until the operator says so: the
-  # policy is `on` (default) or `off`, and `on` fails the start on a
-  # host that cannot deliver the full tier, naming `sandbox off` as
-  # the way to run without one. A version floor here would refuse the
-  # install instead, which is the worse of the two — the probe, not
-  # the package manager, is what knows whether this kernel permits
-  # the namespaces (DESIGN-threat-model.md, "The shared-UID rule").
+  # still installs — and then refuses to start, naming what the host
+  # lacks; there is no setting that runs apps without the sandbox. A
+  # version floor here would refuse the install instead, which is the
+  # worse of the two — the probe, not the package manager, is what
+  # knows whether this kernel permits the namespaces
+  # (DESIGN-threat-model.md, "The shared-UID rule").
   - libpam-systemd
   - dbus
 
