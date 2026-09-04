@@ -558,7 +558,7 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 			return true
 		}
 	}
-	newInst, err := ma.launchVersion(c, inst.version, parseSandboxTier(inst.handle.state().Sandbox))
+	newInst, err := ma.launchVersion(c, inst.version)
 	if err != nil {
 		// The budget slot stays consumed, so a launch that fails
 		// instantly is bounded exactly like any other restart storm;

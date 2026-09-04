@@ -50,7 +50,50 @@ func scriptApp(t *testing.T, body string) startSpec {
 		dir:     dir,
 		env:     []string{"PORT=4321", "HOST=127.0.0.1", "PATH=" + os.Getenv("PATH")},
 		grace:   2 * time.Second,
+		sandbox: itestSandbox(dir),
 	}
+}
+
+// itestSandbox is the sandbox every integration unit runs in: the
+// script's own directory bound writable, under a root nothing else
+// uses. Every unit is sandboxed, so the lane's are too — which puts
+// each in its own PID namespace, where the pids a script writes are
+// namespace-local. unitPIDs reads the host pids from the cgroup.
+func itestSandbox(dir string) *sandboxSpec {
+	return &sandboxSpec{root: "/var/tmp/liveswap-itest", writable: []bindPath{{dest: dir, source: dir}}}
+}
+
+// unitPIDs is the unit's process set as the manager's own ledger has
+// it — host pids from the unit's cgroup — the same way the e2e lane
+// reads them.
+func unitPIDs(t *testing.T, unit string) []int {
+	t.Helper()
+	cg := strings.TrimSpace(run(t, "systemctl", "--user", "show", "-p", "ControlGroup", "--value", unit))
+	if cg == "" {
+		t.Fatalf("unit %s has no control group", unit)
+	}
+	b, err := os.ReadFile("/sys/fs/cgroup" + cg + "/cgroup.procs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pids []int
+	for _, f := range strings.Fields(string(b)) {
+		n, err := strconv.Atoi(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pids = append(pids, n)
+	}
+	return pids
+}
+
+func hasPID(pids []int, pid int) bool {
+	for _, p := range pids {
+		if p == pid {
+			return true
+		}
+	}
+	return false
 }
 
 // workerTree is a leader that forks two workers and records all three
@@ -128,9 +171,10 @@ func TestIntegrationSystemdStopKillsWholeTree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pids := readPIDs(t, spec.dir)
-	if h.state().PID != pids[0] {
-		t.Fatalf("handle PID %d, leader wrote %d", h.state().PID, pids[0])
+	readPIDs(t, spec.dir) // readiness: the workers are forked
+	pids := unitPIDs(t, h.state().Unit)
+	if len(pids) < 3 || !hasPID(pids, h.state().PID) {
+		t.Fatalf("cgroup holds %v; want the leader (handle pid %d) and two workers", pids, h.state().PID)
 	}
 	if !r.Alive(h) {
 		t.Fatal("instance should be alive")
@@ -154,14 +198,18 @@ func TestIntegrationSystemdLeaderCrashKillsWorkers(t *testing.T) {
 	spec := scriptApp(t, `sleep 300 & w1=$!
 sleep 300 & w2=$!
 echo "$$ $w1 $w2" > pids.txt
-sleep 0.3
+sleep 1
 exit 3
 `)
 	h, err := r.Start(spec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pids := readPIDs(t, spec.dir)
+	readPIDs(t, spec.dir) // readiness: the workers are forked
+	pids := unitPIDs(t, h.state().Unit)
+	if len(pids) < 3 {
+		t.Fatalf("cgroup holds %v; want the leader and two workers", pids)
+	}
 	select {
 	case <-r.Wait(h):
 	case <-time.After(10 * time.Second):
@@ -232,19 +280,27 @@ func TestIntegrationSystemdRunOnce(t *testing.T) {
 		t.Fatalf("non-zero exit: %v", err)
 	}
 
-	slow := scriptApp(t, "echo \"$$\" > pids.txt\nsleep 300\n")
+	slow := scriptApp(t, "sleep 300\n")
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	err = r.RunOnce(ctx, slow)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("cancelled RunOnce: %v", err)
 	}
-	b, readErr := os.ReadFile(filepath.Join(slow.dir, "pids.txt"))
-	if readErr != nil {
-		t.Fatal(readErr)
+	// A cancelled RunOnce stops its unit; the manager must not still
+	// hold one (its pids are inside the unit's own namespace, so the
+	// unit list is the host-side fact to check).
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		units := strings.TrimSpace(run(t, "systemctl", "--user", "list-units", "--all", "--plain", "--no-legend", "hotserve-itest.runonce.*"))
+		if units == "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("cancelled RunOnce left a unit behind:\n%s", units)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
-	waitPIDsGone(t, []int{pid}, 5*time.Second)
 }
 
 func TestIntegrationSystemdReattachAdoptsLiveUnit(t *testing.T) {
@@ -254,8 +310,9 @@ func TestIntegrationSystemdReattachAdoptsLiveUnit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pids := readPIDs(t, spec.dir)
+	readPIDs(t, spec.dir) // readiness: the workers are forked
 	st := h1.state()
+	pids := unitPIDs(t, st.Unit)
 	if st.Unit == "" {
 		t.Fatal("state must name the unit")
 	}
@@ -267,8 +324,8 @@ func TestIntegrationSystemdReattachAdoptsLiveUnit(t *testing.T) {
 	if !ok || err != nil {
 		t.Fatalf("live unit must be adopted: ok=%v err=%v", ok, err)
 	}
-	if h2.state().PID != pids[0] || h2.state().Unit != st.Unit {
-		t.Fatalf("adopted %+v, want pid %d unit %s", h2.state(), pids[0], st.Unit)
+	if h2.state().PID != st.PID || !hasPID(pids, h2.state().PID) || h2.state().Unit != st.Unit {
+		t.Fatalf("adopted %+v, want pid %d (in cgroup %v) unit %s", h2.state(), st.PID, pids, st.Unit)
 	}
 	if err := r2.Stop(h2, spec.grace); err != nil {
 		t.Fatalf("Stop via adopter: %v", err)
@@ -327,6 +384,7 @@ func TestIntegrationSystemdSweepStopsStrays(t *testing.T) {
 	strayDir := t.TempDir()
 	straySpec := spec
 	straySpec.dir = strayDir
+	straySpec.sandbox = itestSandbox(strayDir)
 	if err := os.WriteFile(filepath.Join(strayDir, "server"), []byte("#!/bin/sh\n"+workerTree), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -334,8 +392,10 @@ func TestIntegrationSystemdSweepStopsStrays(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	strayPIDs := readPIDs(t, strayDir)
-	keepPIDs := readPIDs(t, spec.dir)
+	readPIDs(t, strayDir)
+	readPIDs(t, spec.dir)
+	strayPIDs := unitPIDs(t, stray.state().Unit)
+	keepPIDs := unitPIDs(t, keep.state().Unit)
 	if err := r.Sweep(spec.app, keep); err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
@@ -379,7 +439,8 @@ func TestIntegrationSystemdManagerStallIsNotACrash(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pids := readPIDs(t, spec.dir)
+	readPIDs(t, spec.dir) // readiness: the workers are forked
+	pids := unitPIDs(t, h.state().Unit)
 	mgr := managerPID(t)
 	if err := syscall.Kill(mgr, syscall.SIGSTOP); err != nil {
 		t.Fatal(err)
@@ -434,16 +495,14 @@ func sandboxRoot(t *testing.T) (root, release, shared string) {
 
 // TestIntegrationSystemdSandboxProbe: the capability probe against the
 // real manager. The dev-systemd image is trixie (systemd 257) — the
-// support matrix — so the answer is full, unconditionally. A `none`
-// here is a real failure and not a host to accommodate: either the
-// kernel under the test container refuses user namespaces, or the
-// sandbox regressed.
+// support matrix — so the answer is capable, unconditionally. A
+// refusal here is a real failure and not a host to accommodate:
+// either the kernel under the test container refuses user namespaces,
+// or the sandbox regressed.
 func TestIntegrationSystemdSandboxProbe(t *testing.T) {
 	r := integrationRunner(t)
-	got := probeSandboxCapability(r)
-	t.Logf("tier=%s reason=%q", got.tier, got.reason)
-	if got.tier != sandboxFull {
-		t.Fatalf("the supported host must deliver the full tier, got %s (%s)", got.tier, got.reason)
+	if err := probeSandboxCapability(r); err != nil {
+		t.Fatalf("the supported host must deliver the sandbox: %v", err)
 	}
 }
 
@@ -529,7 +588,7 @@ func TestIntegrationSystemdSandboxedUnit(t *testing.T) {
 		dir:     release,
 		env:     []string{"PATH=" + os.Getenv("PATH"), "HOME=" + shared},
 		grace:   2 * time.Second,
-		sandbox: &sandboxSpec{tier: sandboxFull, root: root, appDir: filepath.Join(root, "itest"), appName: "itest",
+		sandbox: &sandboxSpec{root: root, appDir: filepath.Join(root, "itest"), appName: "itest",
 			writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}}},
 	}
 	h, err := r.Start(spec)
@@ -588,9 +647,6 @@ func TestIntegrationSystemdSandboxedUnit(t *testing.T) {
 			t.Errorf("unit still carries %s: the view names what exists, it does not mask a list\n%s", gone, props)
 		}
 	}
-	if h.state().Sandbox != "full" {
-		t.Errorf("handle state sandbox = %q", h.state().Sandbox)
-	}
 	if err := r.Stop(h, 2*time.Second); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
@@ -644,7 +700,7 @@ func TestIntegrationSystemdSandboxedUnitFailsAfterItsStartJobSucceeds(t *testing
 		dir:     release,
 		env:     []string{"PATH=" + os.Getenv("PATH"), "HOME=" + shared},
 		grace:   2 * time.Second,
-		sandbox: &sandboxSpec{tier: sandboxFull, root: root, appDir: filepath.Join(root, "itest"), appName: "itest",
+		sandbox: &sandboxSpec{root: root, appDir: filepath.Join(root, "itest"), appName: "itest",
 			writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}}},
 	}
 	h, err := r.Start(spec)
@@ -692,7 +748,7 @@ func TestIntegrationSystemdSIGTERMReachesNamespaceInit(t *testing.T) {
 	spec := startSpec{
 		app: "itest", version: "sigterm", command: []string{"./server"}, dir: release,
 		env: []string{"PATH=" + os.Getenv("PATH")}, grace: 10 * time.Second,
-		sandbox: &sandboxSpec{tier: sandboxFull, root: root, appDir: filepath.Join(root, "itest"), appName: "itest",
+		sandbox: &sandboxSpec{root: root, appDir: filepath.Join(root, "itest"), appName: "itest",
 			writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}}},
 	}
 	h, err := r.Start(spec)

@@ -46,7 +46,6 @@ func parseWebhookDirective(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler,
 //	    deploy_trust <preset>  { ... }   # who may deploy (repeatable)
 //	    allow_insecure_http
 //	    artifact_allowlist     <host[:port][/path/][?param&param...]...>
-//	    sandbox                <on|off>   # default for every app
 //	    app <name> {
 //	        command           <cmd> [args...]
 //	        pre_start         <cmd> [args...]
@@ -54,7 +53,6 @@ func parseWebhookDirective(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler,
 //	        env_file          <path>
 //	        deploy_trust <preset> { ... }  # overrides the global default
 //	        artifact_allowlist <host[:port][/path/][?param&param...]...>
-//	        sandbox           <on|off>   # overrides the global default
 //	        health_path       <path|off>
 //	        health_interval   <duration>
 //	        health_timeout    <duration>
@@ -98,11 +96,6 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				return d.ArgErr()
 			}
 			a.ArtifactAllowlist = append(a.ArtifactAllowlist, entries...)
-		case "sandbox":
-			if !d.NextArg() {
-				return d.ArgErr()
-			}
-			a.Sandbox = d.Val()
 		case "allowed_artifact_hosts":
 			return d.Errf("allowed_artifact_hosts was replaced by artifact_allowlist; entries may now pin a path prefix (github.com/your-org/), which is the recommended form on multi-tenant hosts")
 		case "app":
@@ -183,11 +176,6 @@ func (cfg *AppConfig) unmarshalBlock(d *caddyfile.Dispenser) error {
 			}
 			cfg.ArtifactAllowlist = append(cfg.ArtifactAllowlist, entries...)
 			continue
-		case "sandbox":
-			if !d.NextArg() {
-				return d.ArgErr()
-			}
-			cfg.Sandbox = d.Val()
 		case "health_path":
 			if !d.NextArg() {
 				return d.ArgErr()

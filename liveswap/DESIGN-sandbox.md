@@ -6,16 +6,18 @@ single probe-gated tier, *full* (user namespace + PID namespace + the
 mount/device/cgroup/seccomp/caps set), when the support matrix became
 Debian 13 alone — see "Amendment: one host, one tier" below, which
 supersedes every two-tier statement in this document. **Narrowed again
-2026-09-03** to a two-valued policy, `on` or `off` — see "Amendment:
-sandbox on or off", which supersedes every `auto`/`require` statement
-in this document. Resource caps
+2026-09-03** to a two-valued policy, `on` or `off`, and **later the
+same day to no policy at all** — see "Amendment: the sandbox is
+unconditional", which supersedes every `on`/`off` statement, the
+recorded-tier relaunch semantics and the rollout ladder in this
+document (and "Amendment: sandbox on or off" before it). Resource caps
 are phase 2. This document was the implementation brief
 for bubblewrap; what remains normative is the threat model, the
 behaviour specification (amended below where the measured mechanism
 differs), the config surface, the rollout/upgrade semantics and the
 testing criteria. The bubblewrap mechanics ("Spawn path", "Signal
 trap", "Probe and fallback ladder", "Packaging") are historical. The
-implementation is `liveswap/sandbox.go` (tiers, policy, spec, probe)
+implementation is `liveswap/sandbox.go` (spec, probe)
 and `sandboxProperties` in `liveswap/systemd_dbus.go`; the measured
 basis is the 2026-08-30 spike comment on #35 and
 [DESIGN-threat-model.md](../DESIGN-threat-model.md), "The shared-UID
@@ -53,24 +55,29 @@ originally seeded every app's environment with hotserve's own
 tokens (and, before deploy auth went keyless, the deploy secret too).
 The attacker we just described dumps `process.env` first; a stolen ACME
 token lets them issue or alter certificates. That leak is FIXED ahead
-of M8: `buildEnv` now inherits only an allowlist (PATH, HOME, LANG, TZ,
-LC_*), pinned by `TestBuildEnvDoesNotLeakSupervisorSecrets`. (Deploy
+of M8: `buildEnv` now inherits only an allowlist (PATH, LANG, TZ,
+LC_*; HOME is the app's shared dir, never inherited), pinned by
+`TestBuildEnvDoesNotLeakSupervisorSecrets`. (Deploy
 auth is now asymmetric — no shared secret lives on the box at all; see
 [DESIGN-threat-model.md](../DESIGN-threat-model.md).) The normative
 requirement below stands as the contract the sandbox path must keep.
 
 ## Behavior specification (normative)
 
-- Sandboxing MUST default to on (`sandbox on`), probed by running a
-  throwaway unit and checking the namespaces from inside
-  (the manager silently ignores `PrivatePIDs=` on a kernel without PID
-  namespaces, so accepting the property proves nothing). It MUST be
-  configurable globally and per app: `on` (start fails unless the
-  *full* tier is available — a weaker tier accepted silently is the
-  "looks configured, quietly weaker" trap, and so is no tier at all)
-  or `off`. A launch that runs below *full* anyway — the relaunch of
-  an instance recorded bare — MUST carry a prominent WARN naming the
-  residual.
+- Sandboxing MUST be unconditional: every unit — deploy, `pre_start`,
+  crash relaunch, boot recovery, reattach — gets the one sandbox, and
+  there is no configuration surface that turns it off or widens it.
+  The host MUST be probed at start by running a throwaway unit and
+  checking the namespaces from inside (the manager silently ignores
+  `PrivatePIDs=` on a kernel without PID namespaces, so accepting the
+  property proves nothing), and a host that cannot deliver the sandbox
+  MUST fail the start with the probe's reason — a weaker sandbox
+  accepted silently is the "looks configured, quietly weaker" trap,
+  and no sandbox at all, on a shared uid, hands one app every sibling's
+  data and hotserve's own keys. The runner MUST refuse a start spec
+  with no sandbox (`TestUnitRefusesToRunWithoutASandbox`). (Until
+  2026-09-03: `sandbox on|off`, with a WARN below *full*; see the
+  amendments.)
 - The sandboxed filesystem view MUST be **deny-by-default**: an empty
   read-only tmpfs replaces the whole filesystem
   (`TemporaryFileSystem=/:ro`) and the only things that exist inside a
@@ -164,14 +171,16 @@ requirement below stands as the contract the sandbox path must keep.
   variables regardless; the reason to warn is that under `shared/` it
   can rewrite the file and choose its own next launch's environment.
   Pinned by `TestEnvFileMayNotLandInAnotherAppsView`.
-- A recorded sandbox tier that is neither empty nor a tier name MUST
-  fail the relaunch rather than read as `none`. Empty is the legacy
-  pre-sandbox record and correctly relaunches bare; anything else is
-  corruption, and a syntactically corrupt `state.json` is already a
-  permanent recovery error. Pinned by
-  `TestCorruptRecordedTierFailsClosed`.
+- Nothing in `state.json` decides how much isolation a relaunch gets:
+  there is no recorded sandbox disposition, and a record written
+  before sandboxing existed relaunches sandboxed like everything else.
+  Pinned by `TestEveryLaunchIsSandboxed`. (Until 2026-09-03 the tier
+  was recorded and a corrupt record failed closed; see the
+  amendments.)
 - A command that resolves outside the view MUST be refused at launch
-  with a message naming `extra_path`, not left to fail as a bare
+  with a message that says where a runtime has to live (ship it in
+  the release, or install it under `/usr`; `extra_path` is deferred —
+  until 2026-09-02 the message named it), not left to fail as a bare
   `203/EXEC`: `exec.LookPath` runs in the supervisor's view, so a
   runtime installed outside `/usr` (`/opt/node/bin/node`, an nvm or
   asdf shim under a home directory) resolves for the supervisor and
@@ -183,11 +192,13 @@ requirement below stands as the contract the sandbox path must keep.
   otherwise dangle — all DNS inside the sandbox failing, silently, on
   the most common distro. Local
   unix sockets (`/run/postgresql`, `/run/mysqld`, …) are deliberately
-  not reachable unless declared; `extra_path` is the documented recipe
-  (see config surface).
+  not reachable: a same-box database is reached over TCP loopback.
+  (`extra_path` was the recipe and would be again; deferred since
+  2026-09-02.)
 - The app environment MUST be scrubbed (already implemented, for bare
   and sandboxed spawns alike): an allowlist of inherited variables
-  (`PATH`, `HOME`, `LANG`, `TZ`, `LC_*`), then env_file, then inline
+  (`PATH`, `LANG`, `TZ`, `LC_*`; `HOME` is set to the app's shared dir,
+  never inherited), then env_file, then inline
   `env`, then the `PORT`/`HOST` contract — never a blanket
   `os.Environ()` inheritance, which would leak ACME tokens (and any
   other supervisor secrets) into every app. The sandbox path MUST NOT
@@ -217,13 +228,14 @@ requirement below stands as the contract the sandbox path must keep.
   DESIGN-threat-model.md, "The shared-UID rule": under a shared UID,
   every mount restriction above is void without a namespace the
   kernel's ptrace check honours, and the user namespace is the one it
-  does, on every cell of the matrix. On systemd ≥ 256 the app MUST
-  additionally run inside a new PID namespace (`PrivatePIDs=yes`, the
-  *full* tier): the supervisor, the user manager and every sibling
-  become invisible and unsignalable, and systemd's in-namespace stub
-  init reaps orphaned grandchildren. Below 256 signals and process
-  visibility remain open (DoS class) and MUST be warned about at
-  every launch.
+  does. The app MUST additionally run inside a new PID namespace
+  (`PrivatePIDs=yes`): the supervisor, the user manager and every
+  sibling become invisible and unsignalable, and systemd's
+  in-namespace stub init reaps orphaned grandchildren. A manager that
+  cannot deliver it (below 256) is refused at start — the support
+  matrix is Debian 13, systemd 257. (Until 2026-09-01 the user
+  namespace alone was a lesser tier, with a WARN at every launch for
+  the signals it left open; see the amendments.)
 - The unit's cgroup is the lifetime boundary (`KillMode=control-group`,
   already in force for every unit): nothing outlives the unit, which
   is what `--die-with-parent` provided under bubblewrap. A unit has no
@@ -246,31 +258,40 @@ requirement below stands as the contract the sandbox path must keep.
   the backstop (killing the in-namespace init kills everything in the
   namespace; no survivor is possible). The existing escalation tests
   define the contract.
-- The view a unit gets is fixed at its start: an `extra_path` added by
-  a later reload does not appear inside instances already running, and
-  the operator MUST be told to redeploy them. This is the same "engage
-  on the next deploy" rule the tier follows. *Amended 2026-08-31:* it
+- The view a unit gets is fixed at its start: a change to the view (a
+  future `extra_path` added by a later reload — today nothing changes
+  it) does not appear inside instances already running, and the
+  operator MUST be told to redeploy them. (This was also the rule the
+  recorded tier followed, until 2026-09-03.) *Amended 2026-08-31:* it
   is no longer a **security** asymmetry. Under the previous
   hidden-set model a secret declared after a unit started stayed
   readable inside it; under the deny-by-default view that secret is
   absent from every view, old units included, because nothing ever
   bound it. What ages now is only what an operator asked to be let
   IN, which fails safe.
-- The status endpoint MUST report the tier the running instance has
-  (`"sandbox": "full" | "none"`) — observability for
-  operators and the assertion hook for smoke tests.
-- When a deploy fails its health gate and the app is sandboxed, the
-  webhook error body SHOULD hint at `extra_path` (the "file/socket
-  exists on the host but not in the sandbox" ENOENT is the one support
-  question this feature will generate — and the socket variant, a
-  same-box database at `/run/postgresql`, is the likelier of the two).
+- The status endpoint reports no sandbox field: there is one sandbox
+  and every unit has it, so there is nothing to report. The lanes
+  assert the sandbox from inside the unit (the probe release's view),
+  which is the only honest assertion hook. (Until 2026-09-03:
+  `"sandbox": "full" | "none"`.)
+- When a deploy fails its health gate, the webhook error body SHOULD
+  say that a path may be outside the view and name the answers (TCP
+  loopback for a same-box database socket; ship or install the
+  runtime) — the "file/socket exists on the host but not in the
+  sandbox" ENOENT is the one support question this feature will
+  generate, and the socket variant is the likelier of the two.
+  (`extra_path` was the hint until it was deferred.)
 
 ## Config surface (semantic, backend-agnostic)
+
+**There is no sandbox config surface** (2026-09-03): `sandbox on|off`
+is gone and `extra_path` is deferred (amendment below). What follows
+is the shape `extra_path` takes when an app needs it, kept as the
+design record.
 
 ```caddyfile
 app blog {
 	command node server.js
-	sandbox on                # on (default) | off
 	extra_path /opt/geoip     # ro by default; repeatable
 	extra_path /var/cache/blog rw
 	extra_path /run/postgresql  # the canonical recipe: same-box DB
@@ -316,7 +337,8 @@ hand-rolled flag soup.
 > environment is the user manager's defaults plus the allowlisted
 > slice.
 
-`startSpec` gains a `sandbox *sandboxSpec` (nil = bare). The exec
+`startSpec` gains a `sandbox *sandboxSpec` (nil = bare — until
+2026-09-03; the runner now refuses a nil one). The exec
 runner, when the spec is non-nil, prepends the bwrap argv produced by
 a pure function:
 
@@ -352,7 +374,9 @@ teardown makes orphan survival structurally impossible.
 
 ### Probe and fallback ladder
 
-At provision, once per config load: locate `bwrap` in PATH and run a
+*(Historical, bubblewrap era. There is no ladder: the systemd probe
+runs once per manager connection and an incapable host fails the
+start.)* At provision, once per config load: locate `bwrap` in PATH and run a
 self-test (`bwrap --ro-bind / / true` class) to prove userns actually
 works on this kernel/host (LXC-based VPSes and locked-down kernels
 fail here, not at first deploy). Cache the verdict; `auto` degrades
@@ -393,51 +417,46 @@ Under the systemd runner a hotserve restart or upgrade no longer
 relaunches apps at all — units survive and are reattached — so the
 second path is reached by a reboot, a unit stopped behind hotserve's
 back, and every watchdog restart. Those are not rare, and a watchdog
-restart is exactly when an app is already in trouble. Therefore:
+restart is exactly when an app is already in trouble.
 
-- Enabling sandboxing MUST NOT force an already-running app into a
-  sandbox on the upgrade's restart relaunch. Sandbox engagement for an
-  existing app MUST ride its **next deploy** (the path that has the
-  fallback). Concretely: an app whose recorded running instance is
-  bare relaunches **bare** after a supervisor restart even when config
-  now says `sandbox on`; the new isolation takes effect on the next
-  cutover, where the health gate protects it. Record the sandbox
-  disposition of the running instance in `state.json` so a relaunch
-  reproduces what was actually running, not what config now wants.
+**Since 2026-09-03 there is nothing to roll out.** Every launch is
+sandboxed the same way, there is no policy to enable and no recorded
+disposition for a relaunch to reproduce, so the asymmetry above no
+longer decides anything: a profile mistake is a view mistake — the
+same fixed view every launch of that app gets — and it surfaces on
+the app's next deploy or relaunch alike. What the asymmetry still
+governs is the *view itself* changing under a running app, which
+never happens (a unit's view is built when it starts and reloads leave
+running apps alone). Therefore:
+
 - There is no graceful degrade for **host incapability**. A host that
   cannot deliver the namespaces (an LXC VPS, a locked-down kernel, a
-  container) fails the start with the probe's reason attached. Nor is
-  there one for a per-app misconfiguration on a capable host; the
-  deploy-path fallback is that net, and the doc must not imply the
-  policy is a safety net for profile mistakes.
-- `sandbox on` is therefore the one setting that can take down the
-  **whole server** rather than one app: it fails *start*, so on a host
-  that cannot sandbox hotserve does not come up at all — admin socket
-  and proxy included. Because it is also the **default**, this hazard
-  MUST be documented at the config surface, in the release notes for
-  any upgrade that introduces it, and in the refusal message itself,
-  which MUST name `sandbox off` as the way to run without one.
+  container) fails the start with the probe's reason attached, and
+  there is no setting that runs apps without one — that setting, when
+  it existed, handed a bare app every sibling's data and hotserve's
+  keys on the shared uid. Nor is there a degrade for a per-app
+  misconfiguration on a capable host; the deploy-path fallback is that
+  net.
+- The sandbox is therefore an **availability dependency** of the whole
+  server: on a host that cannot sandbox, hotserve does not come up at
+  all — admin socket and proxy included. This hazard MUST be
+  documented at the install surface, in the release notes, and in the
+  refusal message itself, which MUST name where the probe's output is
+  (`journalctl -t hotserve-sandbox-probe`) and say that no setting
+  runs without one.
 
 The supported operator rollout, which the product docs MUST describe:
-1. **Before upgrading**, establish that the host can deliver the
-   sandbox — this is the step the removal of `auto` adds, and skipping
-   it is what turns an upgrade into an outage. A host that cannot must
-   have `sandbox off` set in config *first*, or the new binary will
-   not start.
-2. Upgrade the binary with sandboxing set `off`; absorb the one
-   unavoidable supervisor-restart blip (a binary swap is not
-   zero-downtime — only deploys are) and confirm apps run healthy
-   *bare* on the new binary. One variable at a time.
-3. Set `sandbox on` per app, applied via **reload** (a no-op for a
-   live app — it does not restart), so nothing changes yet. A reload
-   is the safe place to discover an incapable host: the new config
-   fails to activate and the running one keeps serving.
-4. Let the sandbox engage on that app's **next deploy**, where a broken
-   profile fails safe. Roll app-by-app, watching `"sandbox"` in each
-   app's status (the shipped field is a tier string — `"full"` or
-   `"none"` — not a boolean, so that a tier added later needs no
-   wire-format change; the e2e and install-test lanes parse it as a
-   string).
+1. **Before restarting into a new box or binary**, establish that the
+   host can deliver the sandbox. A reload is the safe place to find
+   out — a config that cannot activate leaves the running one serving,
+   where a restart does not. `hotserve validate` does not measure the
+   host (it never starts an app).
+2. Upgrade; absorb the one unavoidable supervisor-restart blip (a
+   binary swap is not zero-downtime — only deploys are); running apps
+   are reattached, not relaunched.
+
+(Until 2026-09-03 this was a four-step ladder around `sandbox off`
+and engage-on-next-deploy; it is in git.)
 
 Nothing here is destructive: the release being started and `shared/`
 are bind-mounted at their real paths and everything else is simply
@@ -463,9 +482,9 @@ MUST here means adding its assertion in the same change.
 - Unit: the unit-property builder's table tests (the base view,
   extra_path ro/rw, real-path invariants, and above all that the set
   of bind destinations IS the view — nothing named that should not be)
-  against the fake D-Bus connection; fallback ladder with a fake
-  manager version
-  (auto-degrade warns, require fails provision).
+  against the fake D-Bus connection; the host-refusal pins (an
+  incapable host fails Start with the probe's reason; a start spec
+  with no sandbox is refused by the runner).
 - Integration: real systemd ≥ 256 in the dev-systemd container — the
   property set is read back from the transient unit, SIGTERM reaches
   the app inside its PID namespace, escalation, no orphans after
@@ -485,24 +504,21 @@ MUST here means adding its assertion in the same change.
   trap would otherwise ship silently), `$HOME` is writable, and the
   scrubbed env does NOT contain a seeded supervisor secret (e.g. a
   test ACME token).
-- install-test: smoke stage 2 asserts `"sandbox": "full"` in the
-  status response on the systemd ≥ 256 cells (Debian 13, Ubuntu
-  26.04) — this is where Ubuntu's AppArmor user-namespace policy is
-  proven for `systemd --user` per-release, per-arch, under the real
-  unit — and `"sandbox": "filesystem"` with the WARN in the journal on
-  the older cells (Debian 12, Ubuntu 24.04). Both cells additionally
-  assert the view from inside the unit: hotserve's state, sockets and
-  a sibling's files absent, `/etc` only the base-view entries, and a
-  runnable OS present so "absent" cannot mean "empty unit".
+- install-test: the smoke asserts the sandbox from inside the unit on
+  the one cell (Debian 13): pid 1 and a single-id `uid_map` (both
+  namespaces), hotserve's state, sockets and a sibling's files absent,
+  `/etc` only the base-view entries, and a runnable OS present so
+  "absent" cannot mean "empty unit". (Until 2026-09-03 it also parsed
+  a `"sandbox"` status field; there is none.)
 - soak: full churn with sandbox on; RSS/goroutine/fd deltas quantify
   the (expected ~zero) overhead as a measured claim.
-- Upgrade contract: a test proves that an app whose recorded running
-  instance is bare relaunches **bare** after a supervisor restart even
-  when config now says `sandbox on`, and only becomes sandboxed on
-  its next deploy (the "engage on next deploy, not on the upgrade
-  relaunch" rule). This asserts the `state.json` sandbox-disposition
-  field is honored on relaunch — the invariant that keeps an upgrade
-  from being a fleet-wide no-fallback restart into sandboxes.
+- Every launch is sandboxed: `TestEveryLaunchIsSandboxed` asserts the
+  specs the runner receives for a deploy, its `pre_start`, and a
+  relaunch from a record (including one with no sandbox field) all
+  carry the app's sandbox, and `TestUnitRefusesToRunWithoutASandbox`
+  that the runner refuses a spec without one. (Until 2026-09-03 the
+  contract under test was the opposite — a bare record relaunched
+  bare — and e2e systemd scenario 5 pinned it; both are gone.)
 - Negative test once during development: widen the view (add a bind
   for /etc/hotserve) and confirm the e2e isolation scenario fails.
   Under a deny-by-default view the mutation to make is *adding* a
@@ -545,8 +561,8 @@ MUST here means adding its assertion in the same change.
   why it appears in the specification above.
 - Protecting an app from itself — its own env and its own database
   are legitimately reachable by definition.
-- macOS/Windows sandboxing — `auto` is a documented no-op off-Linux
-  (dev machines); servers are Linux.
+- macOS/Windows sandboxing — servers are Linux; elsewhere the probe
+  refuses to start, which is the documented behaviour, not a no-op.
 
 ## Open questions (with leans)
 
@@ -559,9 +575,10 @@ MUST here means adding its assertion in the same change.
   rather than bound whole, because binding it would reintroduce the
   per-config hidden set for everything under it. See `sandboxBaseView`
   and the behaviour spec above.
-- Global `sandbox on` default in the `liveswap` block (fleet
+- ~~Global `sandbox on` default in the `liveswap` block (fleet
   policy vs per-app)? Lean: yes, per-app overrides a global default;
-  cheap to add at config level.
+  cheap to add at config level.~~ **DISSOLVED 2026-09-03:** there is no
+  policy, global or per-app.
 - ~~Operator env_files outside `/etc/hotserve`: masked dir covers the
   documented location only…~~ **DISSOLVED 2026-08-31 (#35).** With a
   deny-by-default view an `env_file` is absent from every unit
@@ -608,11 +625,13 @@ and the base view. It is the one part of this design that inverts the
 model, and it deserves to be designed and reviewed on its own rather
 than as a clause of a feature this size.
 
-**What replaces it, for now:** `sandbox off` for the app that needs
-more — per app, so the rest of the fleet keeps its isolation, and no
-worse than that app had before per-app sandboxing existed. Persistent
-data goes in `shared/`; runtimes go under `/usr`, which the base view
-binds.
+**What replaces it, for now:** nothing. `sandbox off` was the
+stand-in until 2026-09-03 and is gone (it was never per-app in effect
+— see the amendment below). Persistent data goes in `shared/`;
+runtimes go under `/usr`, which the base view binds, or ship in the
+release; a same-box database is reached over TCP loopback. The first
+running app that needs a path outside its own dirs is what brings
+`extra_path` back, designed on its own.
 
 **What to keep when it returns.** The rules below were paid for and
 should not be rediscovered: a bind must BE the directory it names
@@ -623,7 +642,91 @@ unit rather than be skipped; and the cross-app `env_file` check must
 compare canonical *and* configured spellings, resolving the deepest
 existing ancestor for a path whose leaf does not exist yet.
 
+## Amendment: the sandbox is unconditional (2026-09-03, later)
+
+**Supersedes "Amendment: sandbox on or off" below**, the recorded-tier
+relaunch semantics, the rollout ladder, and every `sandbox on|off`
+statement in this document.
+
+`sandbox off` is removed. There is one sandbox, every unit gets it —
+deploy, `pre_start`, crash relaunch, boot recovery, reattach — and no
+configuration surface turns it off or widens it. A host that cannot
+deliver it fails the start, naming the probe's reason and where its
+output went; there is no setting that runs an app without one.
+
+**Why.** `sandbox off` was documented as per-app and costing the other
+apps nothing. It was per-app in syntax only. Every app runs as the
+hotserve uid, so a bare app could read every sibling's `shared/`,
+hotserve's TLS keys and ACME tokens, write any app's `state.json` —
+pinning a sibling bare across every restart — and stop siblings
+through the manager socket. One app opting out cost every other app
+its isolation. Every documented use of `off` has a sandbox-preserving
+answer or is speculative: a same-box database over a unix socket →
+TCP loopback (or `extra_path` when it returns); a runtime under `/opt`
+→ ship it in the release; workloads that create their own namespaces
+or need devices → unsupported until an app needs them, decided then on
+their own terms; hosts without user namespaces → outside the support
+matrix already, `off` was the last lifeline. No installed base, so no
+migration.
+
+**What goes with it, and why each was only there for `off`:**
+
+- The `sandbox` directive (global and per-app), the policy vocabulary
+  and its validation. A config naming `sandbox` fails to load.
+- The recorded tier in `state.json` and the "engage on next deploy,
+  never on a relaunch" rule. Its only stated reason (below, "one host,
+  one tier") was an app set to `off` for debugging not having the
+  sandbox engage on a crash relaunch; with no `off` there is nothing
+  for a relaunch to reproduce, and every launch is sandboxed like a
+  deploy. A record written before sandboxing existed relaunches
+  sandboxed too.
+- The `"sandbox"` status field and the "launching without the full
+  sandbox" WARN: nothing to report and nothing to warn about.
+- The `sandboxed` skips in the root and env-file validation: every
+  view is built, so every rule applies.
+
+**What replaces the policy: an invariant.** The runner refuses a start
+spec with no sandbox — the one way an app could ever have run bare —
+pinned by `TestUnitRefusesToRunWithoutASandbox`; `TestEveryLaunchIsSandboxed`
+asserts every launch path carries the app's sandbox. And a reattach
+verifies rather than trusts: a recorded unit that is running without
+`PrivateUsers=`/`PrivatePIDs=` was not started by this hotserve (a
+development build that still had `sandbox off`, or another same-uid
+process) and is refused, logged at ERROR, and replaced by a sandboxed
+relaunch through the ordinary sweep (`TestSystemdRunnerReattach`).
+That is the one place "every unit" could otherwise have been "every
+unit hotserve started". It catches an honest stale unit, not a
+same-uid process starting units on purpose — that process can give a
+unit any property set and is inside the trust domain already
+(DESIGN-threat-model.md, the shared-UID rule). The config-side
+refusal holds for both config forms: the Caddyfile arms are gone, and
+Caddy decodes module JSON strictly (`StrictUnmarshalJSON`, unknown
+fields refused, nested app objects included) —
+`TestRetiredSandboxConfigIsRejected` pins both. The probe's
+verdict is an error (nil = capable), cached per manager connection as
+before and never cached when failed.
+
+**Residuals this closes** (DESIGN-threat-model.md, amended there): "the
+recorded tier is app-writable" and "what a bare app leaves behind"
+close outright — nothing runs bare to write or leave anything; the
+bind-source TOCTOU race closes because no process shares the hotserve
+uid outside a sandbox except hotserve itself, and inside a view the
+app directory is a tmpfs of mount points an app cannot unlink. The
+`resolveBindSources` guard stays as what keeps that true for whatever
+was on disk before.
+
+**Accepted cost.** The sandbox is an availability dependency with no
+override: a host without unprivileged user namespaces — including
+unprivileged LXC containers from budget providers — cannot run
+hotserve at all, and a workload the sandbox cannot host has nowhere to
+run. Both are the support-matrix decision (Debian 13) made explicit
+rather than new. The "accepted cost" reasoning in the amendment below
+still holds; only its last sentence does not.
+
 ## Amendment: sandbox on or off (2026-09-03)
+
+*Superseded later the same day by the amendment above: there is no
+policy at all. Kept as the record of the step in between.*
 
 The policy is two-valued. Where this document says `auto` or
 `require`, read `on`; where it describes a graceful degrade to `none`,
@@ -692,8 +795,9 @@ deliberate:
 
 Both are worse than a WARN for an operator on an incapable host, and
 better than a supervisor that silently runs every app with no
-isolation because the kernel changed its mind. `sandbox off` remains
-the deliberate escape, and every refusal names it.
+isolation because the kernel changed its mind. ~~`sandbox off` remains
+the deliberate escape, and every refusal names it.~~ (Removed later
+the same day; see above.)
 
 ## Amendment: one host, one tier (2026-09-01)
 
@@ -704,9 +808,10 @@ property set, the deny-by-default view, the config surface or the
 rollout semantics changes.
 
 **One tier is probed for.** `probeSandboxCapability` has a single
-candidate, *full*. A host either delivers both namespaces or reports
-`none`: `auto` launches bare with a WARN naming the residual,
-`require` refuses to start. There is deliberately no fallback rung —
+candidate, *full*. A host either delivers both namespaces or is
+refused (at the time: `auto` launched bare with a WARN and `require`
+refused; then `on` refused and `off` ran bare; now there is no policy
+and the start fails). There is deliberately no fallback rung —
 on a matrix of one, a second tier would be a path no supported host
 takes and no lane tests.
 
@@ -735,7 +840,9 @@ a design intent: an app crash-looping under its sandbox stays down
 after the documented remedy, silently. It is pre-existing and is left
 alone here because a cosmetic PR is the wrong place to change
 relaunch behaviour; the fix is to warn (at least) whenever a launch
-disagrees with current policy in either direction.
+disagrees with current policy in either direction. **Closed
+2026-09-03:** the record and `sandbox off` are both gone, so a launch
+cannot disagree with anything.
 
 The **recorded-tier mechanism** is untouched by that removal, and must
 not be confused with it. `handleState.Sandbox`, `parseSandboxTier` and
@@ -745,7 +852,9 @@ to `sandbox off` for debugging, and set back to `auto`, from having
 the sandbox engage on a crash relaunch or a boot recovery — where
 there is no old instance serving and no health gate to fail into. The
 empty record keeps its meaning too; absent reads as `none`, which is
-the safe default and the documented rollout contract.
+the safe default and the documented rollout contract. **Gone
+2026-09-03:** that reason went with `sandbox off`; there is nothing
+for a relaunch to reproduce, and the record field is removed.
 
 **The AppArmor profile is gone.** Debian's kernel does not restrict
 unprivileged user namespaces, so the profile granting `userns` to

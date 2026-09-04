@@ -71,6 +71,7 @@ type systemdRunner struct {
 	conn   systemdConn
 	logger atomic.Pointer[zap.Logger]
 	poll   time.Duration // watcher interval between unit-state reads
+	settle time.Duration // settleMainPID's window (mainPIDSettle; tests shrink it)
 
 	// ctx bounds every D-Bus call and every watcher; cancel (close) is
 	// for tests — in production watchers live as long as the process.
@@ -103,7 +104,8 @@ type systemdConn interface {
 // D-Bus client turns it into properties; the fixed hardening set
 // (Restart=no, KillMode=control-group, NoNewPrivileges) is applied by
 // the client to every unit and is not configurable here on purpose.
-// Sandbox adds the per-unit isolation set (sandbox.go); nil = none.
+// Sandbox is the per-unit isolation set (sandbox.go); never nil —
+// unitFor refuses a spec without one.
 type unitSpec struct {
 	Name             string
 	Description      string
@@ -132,6 +134,12 @@ type unitStatus struct {
 	// StopTimeout is the unit's own TimeoutStopSec — the SIGTERM→SIGKILL
 	// budget it was created with, which is what bounds a stop of it.
 	StopTimeout time.Duration
+	// Sandboxed reports the unit carrying the namespaces every app unit
+	// gets (PrivateUsers= and PrivatePIDs=). Reattach refuses to adopt a
+	// running unit without them: nothing hotserve starts lacks them, so
+	// such a unit was started by something else, and adopting it would
+	// serve an app with no sandbox and no signal.
+	Sandboxed bool
 }
 
 // stopBudget is how long a stop of this unit can take before the
@@ -201,7 +209,7 @@ const (
 
 func newSystemdRunner(conn systemdConn, logger *zap.Logger) *systemdRunner {
 	ctx, cancel := context.WithCancel(context.Background())
-	r := &systemdRunner{conn: conn, poll: unitPollInterval, ctx: ctx, cancel: cancel}
+	r := &systemdRunner{conn: conn, poll: unitPollInterval, settle: mainPIDSettle, ctx: ctx, cancel: cancel}
 	r.logger.Store(logger)
 	return r
 }
@@ -222,19 +230,12 @@ type systemdHandle struct {
 	// when the handle was made (the start spec's grace, or the value
 	// read at reattach) — the fallback when a fresh read fails.
 	stopTimeout time.Duration
-	// sandbox is the tier the unit was started with (or recorded with,
-	// at reattach) — persisted so a relaunch reproduces it.
-	sandbox sandboxTier
-	done    chan struct{}
-	exit    atomic.Pointer[unitStatus] // final status, set before done closes
+	done        chan struct{}
+	exit        atomic.Pointer[unitStatus] // final status, set before done closes
 }
 
 func (h *systemdHandle) state() handleState {
-	st := handleState{PID: int(h.pid.Load()), StartedAt: h.startedAt, Unit: h.unit}
-	if h.sandbox != sandboxNone {
-		st.Sandbox = h.sandbox.String()
-	}
-	return st
+	return handleState{PID: int(h.pid.Load()), StartedAt: h.startedAt, Unit: h.unit}
 }
 
 // Unit naming: hotserve-<app>.<version>.<nonce>[.prestart].service.
@@ -270,8 +271,8 @@ func unitName(spec startSpec, oneshot bool) (string, error) {
 		// matches it: unitApp reports "not an app unit" and every
 		// sweep skips it (a probe named like an app would be stopped
 		// by a concurrent sweepUnknownApps, or collide with an app
-		// actually called "sandbox-probe", downgrading the tier or
-		// failing `sandbox on` for no reason).
+		// actually called "sandbox-probe", failing the start for no
+		// reason at all).
 		return unitPrefix + "sandboxprobe_" + hex.EncodeToString(nonce[:]) + ".service", nil
 	}
 	name := unitPrefix + spec.app + "." + spec.version + "." + hex.EncodeToString(nonce[:])
@@ -378,6 +379,12 @@ func (r *systemdRunner) unitFor(spec startSpec, oneshot bool) (unitSpec, error) 
 	if err != nil {
 		return unitSpec{}, err
 	}
+	// Every unit is sandboxed. A spec without one is a caller bug, and
+	// the one way an app could ever run bare, so it is refused here —
+	// before a unit exists — rather than rendered with the floor only.
+	if spec.sandbox == nil {
+		return unitSpec{}, fmt.Errorf("unit for app %s %s has no sandbox spec: every app unit is sandboxed, so this is a caller bug", spec.app, spec.version)
+	}
 	argv0, err := resolveCommand(spec.command[0], spec.dir)
 	if err != nil {
 		return unitSpec{}, err
@@ -386,45 +393,43 @@ func (r *systemdRunner) unitFor(spec startSpec, oneshot bool) (unitSpec, error) 
 	// what a bind source points at is only knowable now (see
 	// resolveBindSources). A refusal fails the launch — a deploy falls
 	// back to the version still serving.
-	if spec.sandbox != nil {
-		if err := spec.sandbox.resolveBindSources(); err != nil {
-			return unitSpec{}, err
+	if err := spec.sandbox.resolveBindSources(); err != nil {
+		return unitSpec{}, err
+	}
+	// HOME is a default buildEnv applies before env_file and inline
+	// env, so an operator may point it elsewhere on purpose. One
+	// pointed outside the view is allowed and reported: it is the
+	// difference between "npm failed" and "npm's HOME was never in
+	// my view".
+	if home, outside := homeOutsideView(spec.env, spec.sandbox); outside {
+		r.log().Warn("HOME is set to a path the sandbox does not bind; it does not exist inside the unit",
+			zap.String("app", spec.app),
+			zap.String("home", home),
+			zap.String("effect", "any runtime that touches $HOME (npm, corepack, pip) will fail with ENOENT naming no cause"),
+			zap.String("fix", "leave HOME unset to get the app's shared dir, the one writable persistent path in the view"))
+	}
+	// LookPath above ran in *this* process's view of the filesystem,
+	// which under a deny-by-default sandbox is not the unit's: a
+	// runtime installed outside /usr — /opt/node/bin/node, an asdf
+	// or nvm shim under a home directory — resolves here and then
+	// does not exist in there. systemd would report that as a bare
+	// status=203/EXEC after the unit has already been created, so
+	// say it now, in the language the operator can act on.
+	// Resolved, because LookPath does not follow symlinks: a shim at
+	// /usr/local/bin/node -> /opt/node/bin/node is under the /usr
+	// base entry and would pass unresolved, then die as the very
+	// 203/EXEC this check exists to replace — the symlink is inside
+	// the view, its target is not.
+	target := argv0
+	if t, err := filepath.EvalSymlinks(argv0); err == nil {
+		target = t
+	}
+	if !spec.sandbox.inView(target) {
+		via := ""
+		if target != argv0 {
+			via = fmt.Sprintf(" (via %s, which is)", argv0)
 		}
-		// HOME is a default buildEnv applies before env_file and inline
-		// env, so an operator may point it elsewhere on purpose. One
-		// pointed outside the view is allowed and reported: it is the
-		// difference between "npm failed" and "npm's HOME was never in
-		// my view".
-		if home, outside := homeOutsideView(spec.env, spec.sandbox); outside {
-			r.log().Warn("HOME is set to a path the sandbox does not bind; it does not exist inside the unit",
-				zap.String("app", spec.app),
-				zap.String("home", home),
-				zap.String("effect", "any runtime that touches $HOME (npm, corepack, pip) will fail with ENOENT naming no cause"),
-				zap.String("fix", "leave HOME unset to get the app's shared dir, the one writable persistent path in the view"))
-		}
-		// LookPath above ran in *this* process's view of the filesystem,
-		// which under a deny-by-default sandbox is not the unit's: a
-		// runtime installed outside /usr — /opt/node/bin/node, an asdf
-		// or nvm shim under a home directory — resolves here and then
-		// does not exist in there. systemd would report that as a bare
-		// status=203/EXEC after the unit has already been created, so
-		// say it now, in the language the operator can act on.
-		// Resolved, because LookPath does not follow symlinks: a shim at
-		// /usr/local/bin/node -> /opt/node/bin/node is under the /usr
-		// base entry and would pass unresolved, then die as the very
-		// 203/EXEC this check exists to replace — the symlink is inside
-		// the view, its target is not.
-		target := argv0
-		if t, err := filepath.EvalSymlinks(argv0); err == nil {
-			target = t
-		}
-		if !spec.sandbox.inView(target) {
-			via := ""
-			if target != argv0 {
-				via = fmt.Sprintf(" (via %s, which is)", argv0)
-			}
-			return unitSpec{}, fmt.Errorf("%s is not inside the sandbox view of app %s%s: an app sees its release dir, its shared dir and the OS runtime (/usr and a named handful of /etc), and nothing else on this host — ship the runtime inside the release, install it under /usr, or use `sandbox off` for this app", target, spec.app, via)
-		}
+		return unitSpec{}, fmt.Errorf("%s is not inside the sandbox view of app %s%s: an app sees its release dir, its shared dir and the OS runtime (/usr and a named handful of /etc), and nothing else on this host — ship the runtime inside the release, or install it under /usr", target, spec.app, via)
 	}
 	desc := "hotserve app " + spec.app + " " + spec.version
 	if oneshot {
@@ -451,14 +456,6 @@ func (r *systemdRunner) unitFor(spec startSpec, oneshot bool) (unitSpec, error) 
 	}, nil
 }
 
-// sandboxTierOf is the tier a start spec asks for (none when nil).
-func sandboxTierOf(spec startSpec) sandboxTier {
-	if spec.sandbox == nil {
-		return sandboxNone
-	}
-	return spec.sandbox.tier
-}
-
 // Start creates the unit; the start job of a simple service completes
 // once the manager has forked it, so this returns promptly. A unit
 // that then dies at exec time is caught by the watcher and surfaces as
@@ -480,20 +477,18 @@ func (r *systemdRunner) Start(spec startSpec) (handle, error) {
 		st := r.reapFailed(ctx, u.Name)
 		return nil, fmt.Errorf("unit %s: start job %s (%s)", u.Name, res, st.exitString())
 	}
-	return r.adopt(ctx, u.Name, time.Now(), u.StopTimeout, sandboxTierOf(spec)), nil
+	return r.adopt(ctx, u.Name, time.Now(), u.StopTimeout), nil
 }
 
 // adopt builds a watched handle for a unit known to be running.
-func (r *systemdRunner) adopt(ctx context.Context, unit string, startedAt time.Time, stopTimeout time.Duration, tier sandboxTier) *systemdHandle {
-	h := &systemdHandle{unit: unit, startedAt: startedAt, stopTimeout: stopTimeout, sandbox: tier, done: make(chan struct{})}
+func (r *systemdRunner) adopt(ctx context.Context, unit string, startedAt time.Time, stopTimeout time.Duration) *systemdHandle {
+	h := &systemdHandle{unit: unit, startedAt: startedAt, stopTimeout: stopTimeout, done: make(chan struct{})}
 	if st, err := r.conn.UnitStatus(ctx, unit); err == nil {
 		h.pid.Store(int64(st.MainPID))
 		// Spelled as sandboxProperties spells it (systemd_dbus.go):
-		// every sandboxed unit gets PrivatePIDs=, so every sandboxed
-		// unit has the intermediate PID to settle past.
-		if tier != sandboxNone {
-			r.settleMainPID(ctx, h, st.MainPID)
-		}
+		// every unit gets PrivatePIDs=, so every unit has the
+		// intermediate PID to settle past.
+		r.settleMainPID(ctx, h, st.MainPID)
 	} else {
 		r.log().Warn("unit started but its main PID could not be read yet", zap.String("unit", unit), zap.Error(err))
 	}
@@ -531,7 +526,7 @@ func (r *systemdRunner) adopt(ctx context.Context, unit string, startedAt time.T
 // via a PropertiesChanged subscription on the unit — is its own
 // change, because it needs a signal path this client does not have.
 func (r *systemdRunner) settleMainPID(ctx context.Context, h *systemdHandle, first int) {
-	deadline := time.Now().Add(mainPIDSettle)
+	deadline := time.Now().Add(r.settle)
 	// baseline is the pid the switch must move away from. When adopt
 	// read the unit before the manager had published any MainPID it is
 	// 0, and the first non-zero value is the intermediate rather than
@@ -583,11 +578,7 @@ func (r *systemdRunner) reconcileStart(u unitSpec, cause error) (handle, error) 
 		r.log().Warn("start reported an error but the unit is running; adopting it", zap.String("unit", unit), zap.Error(cause))
 		ctx, cancel := context.WithTimeout(r.ctx, pollTimeout)
 		defer cancel()
-		tier := sandboxNone
-		if u.Sandbox != nil {
-			tier = u.Sandbox.tier
-		}
-		return r.adopt(ctx, unit, time.Now(), u.StopTimeout, tier), nil
+		return r.adopt(ctx, unit, time.Now(), u.StopTimeout), nil
 	case err == nil:
 		if st.loaded() {
 			ctx, cancel := context.WithTimeout(r.ctx, pollTimeout)
@@ -723,8 +714,10 @@ func (r *systemdRunner) Stop(h handle, grace time.Duration) error {
 }
 
 // Reattach adopts the unit recorded in state.json if the manager still
-// runs it. Whatever happened to it while hotserve was away is logged;
-// a failed unit is reset so it cannot linger, and the caller relaunches.
+// runs it — and runs it sandboxed: a running unit without the
+// namespaces is refused, since nothing this hotserve starts lacks them.
+// Whatever happened to it while hotserve was away is logged; a failed
+// unit is reset so it cannot linger, and the caller relaunches.
 // A unit whose state cannot be read is an error: the caller must not
 // launch beside a unit that may be running (invariant 3).
 func (r *systemdRunner) Reattach(st handleState) (handle, bool, error) {
@@ -738,7 +731,41 @@ func (r *systemdRunner) Reattach(st handleState) (handle, bool, error) {
 		return nil, false, fmt.Errorf("reading recorded unit %s: %w", st.Unit, err)
 	}
 	if us.running() {
-		h := &systemdHandle{unit: st.Unit, startedAt: st.StartedAt, stopTimeout: us.StopTimeout, sandbox: parseSandboxTier(st.Sandbox), done: make(chan struct{})}
+		if !us.Sandboxed {
+			// Every unit hotserve starts is sandboxed, so this one was
+			// not started by this hotserve: a development build that
+			// still had `sandbox off`, say. It is running an app with
+			// no sandbox, which nothing else would ever report. Not
+			// adopted: the caller's relaunch sweeps this app's units
+			// first, so it is stopped and the version relaunches
+			// sandboxed. This catches an honest stale unit; it is not a
+			// defence against a same-uid process that starts units on
+			// purpose — such a process can start one with any property
+			// set, including hotserve's own, and is already inside the
+			// trust domain (DESIGN-threat-model.md, the shared-UID
+			// rule), so no comparison here would keep it out.
+			//
+			// Stopped here, not left for the relaunch's sweep: the
+			// relaunch prepares (port, env) before it sweeps, and a
+			// preparation that keeps failing — a missing env_file —
+			// would keep this unit serving bare across every retry.
+			// An unconfirmed stop is an error, so the caller does not
+			// launch beside a unit that may still be running.
+			r.log().Error("recorded unit is running WITHOUT the sandbox; stopping it — the version relaunches sandboxed",
+				zap.String("unit", st.Unit), zap.Int("pid", us.MainPID))
+			grace := us.StopTimeout
+			if grace <= 0 {
+				grace = defaultStopTimeout
+			}
+			stopCtx, stopCancel := context.WithTimeout(r.ctx, grace+stopSlack)
+			defer stopCancel()
+			bare := fmt.Errorf("recorded unit %s was running without the sandbox", st.Unit)
+			if err := r.stopUnobserved(stopCtx, st.Unit, bare); !errors.Is(err, bare) || errors.As(err, new(*unitUnconfirmedError)) {
+				return nil, false, fmt.Errorf("stopping it: %w", err)
+			}
+			return nil, false, nil
+		}
+		h := &systemdHandle{unit: st.Unit, startedAt: st.StartedAt, stopTimeout: us.StopTimeout, done: make(chan struct{})}
 		h.pid.Store(int64(us.MainPID))
 		go r.watch(h)
 		return h, true, nil

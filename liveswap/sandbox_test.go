@@ -16,94 +16,6 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 )
 
-func TestSandboxTierRoundTrip(t *testing.T) {
-	for _, tier := range []sandboxTier{sandboxNone, sandboxFull} {
-		if got := parseSandboxTier(tier.String()); got != tier {
-			t.Errorf("parse(%q) = %v, want %v", tier.String(), got, tier)
-		}
-	}
-	// An older state.json (no field) and garbage both read as none:
-	// the relaunch of an instance whose tier is unknown is bare.
-	for _, s := range []string{"", "bogus", "FULL"} {
-		if got := parseSandboxTier(s); got != sandboxNone {
-			t.Errorf("parse(%q) = %v, want none", s, got)
-		}
-	}
-	// The other direction, and the one a `default: return "none"` would
-	// silently break: a tier this build does not define must not render
-	// as a record validSandboxTierRecord accepts. state() persists
-	// whatever String() returns, so a rendering that round-trips as a
-	// legitimate value would let an out-of-range in-memory tier become a
-	// valid bare record — a sandboxed unit persisted, and relaunched,
-	// unsandboxed. 2 is included because it is the value sandboxFull
-	// itself held until removing the filesystem tier renumbered the
-	// iota — the most plausible stale tier there is.
-	for _, undefined := range []sandboxTier{2, 99, -1} {
-		rendered := undefined.String()
-		if err := validSandboxTierRecord(rendered); err == nil {
-			t.Errorf("tier %d rendered as %q, which is an accepted record", int(undefined), rendered)
-		}
-		if got := parseSandboxTier(rendered); got != sandboxNone {
-			t.Errorf("parse(%q) = %v; an unrepresentable tier must not parse back to a real one", rendered, got)
-		}
-	}
-	st := (&systemdHandle{unit: "u.service"}).state()
-	if st.Sandbox != "" {
-		t.Fatalf("a bare handle must not persist a tier, got %q", st.Sandbox)
-	}
-	st = (&systemdHandle{unit: "u.service", sandbox: sandboxFull}).state()
-	if st.Sandbox != "full" {
-		t.Fatalf("persisted tier = %q, want full", st.Sandbox)
-	}
-}
-
-func TestResolveSandboxTier(t *testing.T) {
-	full := sandboxCapability{tier: sandboxFull}
-	// The two capabilities the probe can actually report. There is no
-	// third: `filesystem` is neither probed for nor an accepted record
-	// (see validSandboxTierRecord), so driving the policy with it would
-	// test a path no host and no state.json can reach.
-	none := sandboxCapability{tier: sandboxNone, reason: "full tier: unit failed: Failed to set up user namespacing: Permission denied"}
-	cases := []struct {
-		name     string
-		mode     string
-		cap      sandboxCapability
-		wantTier sandboxTier
-		wantErr  bool
-	}{
-		{"on full", sandboxOn, full, sandboxFull, false},
-		// The whole policy in one row: there is no lesser tier to fall
-		// back to, so a host that cannot deliver is refused rather than
-		// quietly run bare.
-		{"on refuses none", sandboxOn, none, sandboxNone, true},
-		{"off ignores capability", sandboxOff, full, sandboxNone, false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			tier, err := resolveSandboxTier(tc.mode, tc.cap)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
-			}
-			if tier != tc.wantTier {
-				t.Fatalf("tier = %v, want %v", tier, tc.wantTier)
-			}
-			if !tc.wantErr {
-				return
-			}
-			// The refusal is what an operator reads when the server
-			// will not come up: it must carry both the probe's
-			// diagnosis and the one setting that runs without a
-			// sandbox.
-			if !strings.Contains(err.Error(), tc.cap.reason) {
-				t.Fatalf("the refusal must name the reason %q: %v", tc.cap.reason, err)
-			}
-			if !strings.Contains(err.Error(), sandboxOff) {
-				t.Fatalf("the refusal must name `sandbox %s` as the remedy: %v", sandboxOff, err)
-			}
-		})
-	}
-}
-
 // sandboxPropertyNames is the set sandboxProperties emits; the test
 // pins it so a property can neither disappear nor appear unnoticed.
 var sandboxPropertyNames = []string{
@@ -128,26 +40,8 @@ func propMap(u unitSpec) map[string]any {
 	return got
 }
 
-func TestSandboxPropertiesNoneWhenUnsandboxed(t *testing.T) {
-	for _, u := range []unitSpec{
-		{ExecStart: []string{"/bin/true"}},
-		{ExecStart: []string{"/bin/true"}, Sandbox: &sandboxSpec{tier: sandboxNone, root: "/var/lib/liveswap"}},
-	} {
-		got := propMap(u)
-		for _, name := range sandboxPropertyNames {
-			if _, present := got[name]; present {
-				t.Errorf("%s set on an unsandboxed unit", name)
-			}
-		}
-		if got["NoNewPrivileges"] != true {
-			t.Error("the floor (NoNewPrivileges) must stay on every unit")
-		}
-	}
-}
-
-func TestSandboxPropertiesFullTier(t *testing.T) {
+func TestSandboxPropertiesEveryUnit(t *testing.T) {
 	spec := &sandboxSpec{
-		tier:    sandboxFull,
 		root:    "/var/lib/liveswap",
 		appDir:  "/var/lib/liveswap/blog",
 		appName: "blog",
@@ -165,8 +59,8 @@ func TestSandboxPropertiesFullTier(t *testing.T) {
 			t.Errorf("%s is set: the deny-by-default view masks nothing, it names what exists", name)
 		}
 	}
-	// There is one tier above none, so PrivatePIDs= is emitted for
-	// every sandboxed unit rather than conditionally.
+	// One sandbox, every unit: both namespaces are emitted
+	// unconditionally, never as a tier a lesser host could miss.
 	for name, want := range map[string]any{
 		"PrivatePIDs":           "yes",
 		"PrivateUsers":          true,
@@ -257,7 +151,6 @@ func TestSandboxPropertiesFullTier(t *testing.T) {
 // inside the unit.
 func TestSandboxViewIsExactlyWhatIsNamed(t *testing.T) {
 	spec := &sandboxSpec{
-		tier:    sandboxFull,
 		root:    "/var/lib/liveswap",
 		appDir:  "/var/lib/liveswap/blog",
 		appName: "blog",
@@ -328,13 +221,10 @@ func TestSandboxViewIsExactlyWhatIsNamed(t *testing.T) {
 
 func TestSandboxSpecFor(t *testing.T) {
 	spec := testSpec(t)
-	if spec.sandboxSpecFor("/x", sandboxNone) != nil {
-		t.Fatal("none must render no spec")
-	}
 	rel := spec.dirs.release("v1")
-	got := spec.sandboxSpecFor(rel, sandboxFull)
-	if got.tier != sandboxFull || got.root != spec.dirs.root {
-		t.Fatalf("tier/root wrong: %+v", got)
+	got := spec.sandboxSpecFor(rel)
+	if got == nil || got.root != spec.dirs.root {
+		t.Fatalf("root wrong: %+v", got)
 	}
 	if !reflect.DeepEqual(got.writable, []bindPath{{dest: rel, source: rel}, {dest: spec.dirs.shared, source: spec.dirs.shared}}) {
 		t.Fatalf("writable = %v", got.writable)
@@ -359,7 +249,7 @@ func TestSandboxSpecFor(t *testing.T) {
 }
 
 func TestSandboxProbeCommand(t *testing.T) {
-	full := sandboxProbeCommand(sandboxFull)
+	full := sandboxProbeCommand()
 	if full[0] != "/bin/sh" || full[1] != "-c" || len(full) != 3 {
 		t.Fatalf("probe must be a single sh -c script, got %v", full)
 	}
@@ -375,28 +265,25 @@ func TestSandboxProbeCommand(t *testing.T) {
 	}
 }
 
-// probeRunner scripts RunOnce per tier for probeSandboxCapability.
-// queue, when non-empty, scripts successive calls instead (first
-// entry first), for the retry cases where the two attempts must
-// answer differently.
+// probeRunner scripts RunOnce for probeSandboxCapability: fail is the
+// answer to every attempt; queue, when non-empty, scripts successive
+// calls instead (first entry first), for the retry cases where the two
+// attempts must answer differently.
 type probeRunner struct {
 	*fakeRunner
-	fail  map[sandboxTier]error
+	fail  error
 	queue []error
-	tried []sandboxTier
 	specs []startSpec
 }
 
 func (p *probeRunner) RunOnce(_ context.Context, spec startSpec) error {
-	tier := sandboxTierOf(spec)
-	p.tried = append(p.tried, tier)
 	p.specs = append(p.specs, spec)
 	if len(p.queue) > 0 {
 		err := p.queue[0]
 		p.queue = p.queue[1:]
 		return err
 	}
-	return p.fail[tier]
+	return p.fail
 }
 
 // TestManagerSeamNeedsNoFuncSeams pins the promise on App.manager: an
@@ -411,9 +298,8 @@ func TestManagerSeamNeedsNoFuncSeams(t *testing.T) {
 	if err := a.probeManager(); err != nil {
 		t.Fatalf("an installed connection is reachable by construction: %v", err)
 	}
-	got := a.measureSandbox()
-	if got.tier != sandboxFull {
-		t.Fatalf("tier = %v (%s), want full — the fake answers done, so the measurement through it must too", got.tier, got.reason)
+	if err := a.measureSandbox(); err != nil {
+		t.Fatalf("the fake answers done, so the measurement through it must be capable: %v", err)
 	}
 	// The measurement went through the installed connection, not the
 	// process-wide client: the fake saw the probe's own unit.
@@ -429,85 +315,82 @@ func TestManagerSeamNeedsNoFuncSeams(t *testing.T) {
 }
 
 // TestProbeSandboxCapabilityRetriesTimeout pins the one retry, and
-// its shape. With `sandbox on` the default, the probe's verdict
-// decides whether hotserve starts at all, and hotserve.service has no
-// Restart= — so a transient timeout under boot load must get a second
-// attempt before it becomes a refusal to start. Only a timeout: a
-// probe that FAILED measured the host, and retrying a measurement
-// would just slow every refusal down.
+// its shape. The probe's verdict decides whether hotserve starts at
+// all, and hotserve.service has no Restart= — so a transient timeout
+// under boot load must get a second attempt before it becomes a
+// refusal to start. Only a timeout: a probe that FAILED measured the
+// host, and retrying a measurement would just slow every refusal down.
 func TestProbeSandboxCapabilityRetriesTimeout(t *testing.T) {
 	t.Run("a timeout is retried and the host recovers", func(t *testing.T) {
 		r := &probeRunner{fakeRunner: &fakeRunner{}, queue: []error{context.DeadlineExceeded, nil}}
-		got := probeSandboxCapability(r)
-		if got.tier != sandboxFull {
-			t.Fatalf("tier = %v (%s), want full: one slow attempt must not decide the start", got.tier, got.reason)
+		if err := probeSandboxCapability(r); err != nil {
+			t.Fatalf("one slow attempt must not decide the start: %v", err)
 		}
-		if len(r.tried) != 2 {
-			t.Fatalf("tried %d times, want 2", len(r.tried))
+		if len(r.specs) != 2 {
+			t.Fatalf("tried %d times, want 2", len(r.specs))
 		}
 	})
 	t.Run("a second timeout is the verdict", func(t *testing.T) {
 		r := &probeRunner{fakeRunner: &fakeRunner{}, queue: []error{context.DeadlineExceeded, context.DeadlineExceeded}}
-		got := probeSandboxCapability(r)
-		if got.tier != sandboxNone || !strings.Contains(got.reason, "deadline") {
-			t.Fatalf("tier = %v (%s), want none with the timeout in the reason", got.tier, got.reason)
+		err := probeSandboxCapability(r)
+		if err == nil || !strings.Contains(err.Error(), "deadline") {
+			t.Fatalf("want a refusal with the timeout in the reason, got %v", err)
 		}
-		if len(r.tried) != 2 {
-			t.Fatalf("tried %d times, want 2 — the retry is bounded", len(r.tried))
+		if len(r.specs) != 2 {
+			t.Fatalf("tried %d times, want 2 — the retry is bounded", len(r.specs))
 		}
 	})
 	// A fast failure is not retried; TestProbeSandboxCapability pins
-	// that with its exact tried == [full] assertions.
+	// that with its exact one-attempt assertions.
 }
 
 func TestProbeSandboxCapability(t *testing.T) {
 	denied := errors.New("unit failed: Failed to set up user namespacing: Permission denied")
 	cases := []struct {
 		name      string
-		fail      map[sandboxTier]error
-		wantTier  sandboxTier
-		wantWords []string
+		fail      error
+		wantWords []string // nil: the host is capable
 	}{
-		{"host delivers it", nil, sandboxFull, nil},
+		{"host delivers it", nil, nil},
 		// A manager that accepts the properties but a kernel that
 		// silently ignores PrivatePIDs=: the probe exits non-zero
 		// because the process is not pid 1. There is no lower tier to
-		// fall to, so this is `none` — the operator must see the reason.
-		{"kernel ignores the PID namespace", map[sandboxTier]error{sandboxFull: errors.New("exit status 1")}, sandboxNone, []string{"full tier", "exit status 1", "Debian 13"}},
+		// fall to, so this is a refusal — the operator must see why.
+		{"kernel ignores the PID namespace", errors.New("exit status 1"), []string{"sandbox probe unit", "exit status 1", "journalctl -t hotserve-sandbox-probe", "Debian 13"}},
 		// A container, an LXC VPS, or a kernel built without user
 		// namespaces: the manager refuses the unit outright.
-		{"userns denied", map[sandboxTier]error{sandboxFull: denied}, sandboxNone, []string{"Permission denied", "Debian 13"}},
+		{"userns denied", denied, []string{"Permission denied", "Debian 13"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &probeRunner{fakeRunner: &fakeRunner{}, fail: tc.fail}
-			got := probeSandboxCapability(r)
-			if got.tier != tc.wantTier {
-				t.Fatalf("tier = %v (%s), want %v", got.tier, got.reason, tc.wantTier)
+			err := probeSandboxCapability(r)
+			if (err != nil) != (tc.wantWords != nil) {
+				t.Fatalf("verdict = %v, want capable=%v", err, tc.wantWords == nil)
 			}
-			// One supported tier means exactly one candidate: a probe
-			// that tried the removed filesystem tier would be reporting
-			// a capability nothing can be launched with.
-			if !reflect.DeepEqual(r.tried, []sandboxTier{sandboxFull}) {
-				t.Fatalf("tried %v, want exactly [full]", r.tried)
+			// One sandbox means exactly one attempt: a probe that tried
+			// a lesser property set would be measuring a capability
+			// nothing can be launched with.
+			if len(r.specs) != 1 {
+				t.Fatalf("tried %d times, want exactly 1", len(r.specs))
 			}
 			for _, w := range tc.wantWords {
-				if !strings.Contains(got.reason, w) {
-					t.Errorf("reason %q lacks %q", got.reason, w)
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("reason %q lacks %q", err, w)
 				}
 			}
-			if got.tier == sandboxFull && got.reason != "" {
-				t.Errorf("full needs no reason, got %q", got.reason)
-			}
 			for _, s := range r.specs {
-				// The probe carries the tier and nothing else: with a
+				// The probe carries the sandbox and nothing else: with a
 				// deny-by-default view there is no per-host state for it
 				// to reproduce, and it exposes not one path of its own.
 				if s.sandbox == nil || len(s.sandbox.writable) != 0 || s.sandbox.root != "" {
-					t.Errorf("probe unit must carry the tier's sandbox and expose nothing: %+v", s.sandbox)
+					t.Errorf("probe unit must carry the sandbox and expose nothing: %+v", s.sandbox)
 				}
-				if !reflect.DeepEqual(s.command, sandboxProbeCommand(s.sandbox.tier)) {
-					t.Errorf("probe command mismatch for %v", s.sandbox.tier)
+				if !reflect.DeepEqual(s.command, sandboxProbeCommand()) {
+					t.Errorf("probe command mismatch: %v", s.command)
+				}
+				if !s.probe {
+					t.Error("the probe unit must be marked as one, or a sweep can mistake it for an app's")
 				}
 			}
 		})
@@ -517,9 +400,7 @@ func TestProbeSandboxCapability(t *testing.T) {
 func TestBuildEnvSandboxedHome(t *testing.T) {
 	spec := testSpec(t)
 	t.Setenv("HOME", "/var/lib/hotserve")
-	bare, err := buildEnv(spec, "v1", 8123, spec.dirs.release("v1"), false)
-	must(t, err)
-	sandboxed, err := buildEnv(spec, "v1", 8123, spec.dirs.release("v1"), true)
+	sandboxed, err := buildEnv(spec, "v1", 8123, spec.dirs.release("v1"))
 	must(t, err)
 	find := func(env []string, key string) (string, int) {
 		var val string
@@ -532,15 +413,14 @@ func TestBuildEnvSandboxedHome(t *testing.T) {
 		}
 		return val, n
 	}
-	if v, _ := find(bare, "HOME"); v != "/var/lib/hotserve" {
-		t.Fatalf("bare HOME = %q, want the inherited one", v)
-	}
+	// The inherited HOME (hotserve's state dir, absent from the view)
+	// never reaches the unit: replaced, not merely shadowed.
 	if v, n := find(sandboxed, "HOME"); v != spec.dirs.shared || n != 1 {
 		t.Fatalf("sandboxed HOME = %q (×%d), want %s once", v, n, spec.dirs.shared)
 	}
 	// env_file / inline env still win: they come later.
 	spec.env = map[string]string{"HOME": "/elsewhere"}
-	sandboxed, err = buildEnv(spec, "v1", 8123, spec.dirs.release("v1"), true)
+	sandboxed, err = buildEnv(spec, "v1", 8123, spec.dirs.release("v1"))
 	must(t, err)
 	if v, _ := find(sandboxed, "HOME"); !strings.HasSuffix(strings.Join(sandboxed, "\n"), "HOST=127.0.0.1") || v == "" {
 		t.Fatalf("env ordering broken: %v", sandboxed)
@@ -556,21 +436,18 @@ func TestBuildEnvSandboxedHome(t *testing.T) {
 	}
 }
 
-// TestDeployUsesPolicyRelaunchUsesRecord is the upgrade contract: a
-// deploy applies the tier policy resolved at Start, while recovery and
-// watchdog relaunches reproduce the tier recorded for the instance —
-// so enabling the sandbox never forces a running bare app into one on
-// the relaunch that has no fallback.
-func TestDeployUsesPolicyRelaunchUsesRecord(t *testing.T) {
+// TestEveryLaunchIsSandboxed: there is one sandbox and every path that
+// starts a unit applies it — a deploy, its pre_start, and a relaunch
+// from the record (recovery, and the watchdog through the same
+// launchVersion) — with nothing read from state.json deciding how much
+// isolation an instance gets. A record written before sandboxing
+// existed relaunches sandboxed like everything else.
+func TestEveryLaunchIsSandboxed(t *testing.T) {
 	rig := newTestRig(t)
-	rig.spec.sandboxMode = sandboxOn
-	rig.spec.sandboxTier = sandboxFull
 	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/a.tgz", version: "v1"}))
-	if got := rig.runner.started[0].sandbox; got == nil || got.tier != sandboxFull {
-		t.Fatalf("deploy must apply the policy tier: %+v", got)
-	}
-	if st := rig.ma.status(); st.Sandbox != "full" {
-		t.Fatalf("status sandbox = %q, want full", st.Sandbox)
+	want := rig.spec.sandboxSpecFor(rig.spec.dirs.release("v1"))
+	if got := rig.runner.started[0].sandbox; !reflect.DeepEqual(got, want) {
+		t.Fatalf("deploy sandbox = %+v, want %+v", got, want)
 	}
 	// pre_start runs under the same sandbox.
 	rig.spec.preStart = []string{"./migrate"}
@@ -579,168 +456,75 @@ func TestDeployUsesPolicyRelaunchUsesRecord(t *testing.T) {
 	if n := len(rig.runner.started); n != 3 {
 		t.Fatalf("started = %d, want deploy, pre_start, deploy", n)
 	}
+	want2 := rig.spec.sandboxSpecFor(rig.spec.dirs.release("v2"))
 	for i := 1; i <= 2; i++ {
-		if got := rig.runner.started[i].sandbox; got == nil || got.tier != sandboxFull {
-			t.Fatalf("started[%d] must carry the same sandbox as the app: %+v", i, got)
+		if got := rig.runner.started[i].sandbox; !reflect.DeepEqual(got, want2) {
+			t.Fatalf("started[%d] sandbox = %+v, want %+v", i, got, want2)
 		}
 	}
 
-	// A recorded bare instance relaunches bare although policy now
-	// says full.
+	// A relaunch from a record — including one with no sandbox field,
+	// written before sandboxing existed — is sandboxed like a deploy.
 	rig2 := newTestRig(t)
-	rig2.spec.sandboxMode = sandboxOn
-	rig2.spec.sandboxTier = sandboxFull
 	must(t, rig2.store.save(appState{CurrentVersion: "v1", Port: 1, Handle: handleState{Unit: "hotserve-demo.v1.abc.service"}}))
 	must(t, mkdirRelease(rig2.spec, "v1"))
 	rig2.runner.reattachOK = false
 	if err := rig2.ma.ensureRunning(); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
-	if got := rig2.runner.started[0].sandbox; got != nil {
-		t.Fatalf("a bare-recorded instance must relaunch bare, got %+v", got)
-	}
-	if st := rig2.ma.status(); st.Sandbox != "none" {
-		t.Fatalf("status sandbox = %q, want none", st.Sandbox)
-	}
-	// And the converse: a recorded full-tier instance relaunches at
-	// that tier although policy now says off. The record decides a
-	// relaunch in both directions — that is the whole mechanism, and
-	// with one tier these two rigs are the only ways to state it.
-	rig3 := newTestRig(t)
-	rig3.spec.sandboxMode = sandboxOff
-	rig3.spec.sandboxTier = sandboxNone
-	must(t, rig3.store.save(appState{CurrentVersion: "v2", Port: 1, Handle: handleState{Unit: "hotserve-demo.v2.abc.service", Sandbox: "full"}}))
-	must(t, mkdirRelease(rig3.spec, "v2"))
-	if err := rig3.ma.ensureRunning(); err != nil {
-		t.Fatalf("recover: %v", err)
-	}
-	if got := rig3.runner.started[0].sandbox; got == nil || got.tier != sandboxFull {
-		t.Fatalf("recorded tier not reproduced: %+v", got)
-	}
-	if st := rig3.ma.status(); st.Sandbox != "full" {
-		t.Fatalf("status sandbox = %q, want full", st.Sandbox)
-	}
-
-	// The third path a record reaches, and the one nothing pinned: a
-	// reattach, where the unit is still running and is adopted rather
-	// than relaunched. systemdRunner.Reattach reproduces the tier from
-	// the record; without this, deleting that line left the whole
-	// suite green while status under-reported a sandboxed app as
-	// "none" and the next watchdog restart relaunched it bare.
-	rig4 := newTestRig(t)
-	rig4.spec.sandboxMode = sandboxOn
-	rig4.spec.sandboxTier = sandboxFull
-	rig4.runner.reattachOK = true
-	must(t, rig4.store.save(appState{CurrentVersion: "v1", Port: 1, Handle: handleState{Unit: "hotserve-demo.v1.abc.service", Sandbox: "full"}}))
-	must(t, mkdirRelease(rig4.spec, "v1"))
-	if err := rig4.ma.ensureRunning(); err != nil {
-		t.Fatalf("recover: %v", err)
-	}
-	if n := len(rig4.runner.started); n != 0 {
-		t.Fatalf("a reattachable unit must be adopted, not relaunched: started = %d", n)
-	}
-	if st := rig4.ma.status(); st.Sandbox != "full" {
-		t.Fatalf("reattach dropped the recorded tier: status sandbox = %q, want full", st.Sandbox)
+	want = rig2.spec.sandboxSpecFor(rig2.spec.dirs.release("v1"))
+	if got := rig2.runner.started[0].sandbox; !reflect.DeepEqual(got, want) {
+		t.Fatalf("relaunch sandbox = %+v, want %+v", got, want)
 	}
 }
 
-func TestCaddyfileSandboxDirectives(t *testing.T) {
-	d := caddyfile.NewTestDispenser(`liveswap {
-		sandbox on
-		app blog {
-			command node server.js
-			sandbox off
-		}
-		app api {
-			command ./server
-		}
-	}`)
-	var a App
-	if err := a.UnmarshalCaddyfile(d); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if a.Sandbox != "on" || a.Apps["blog"].Sandbox != "off" || a.Apps["api"].Sandbox != "" {
-		t.Fatalf("sandbox modes wrong: %q %q %q", a.Sandbox, a.Apps["blog"].Sandbox, a.Apps["api"].Sandbox)
-	}
+// TestRetiredSandboxConfigIsRejected: there is no sandbox config
+// surface. `sandbox on|off` and `extra_path` were both removed, and
+// neither may be silently accepted in either config form — a config
+// that names them is asking for a policy this build does not have,
+// and an operator who wrote `sandbox off` must not get a sandboxed app
+// believing they got none. The Caddyfile arms are gone, and Caddy
+// loads module JSON with StrictUnmarshalJSON (DisallowUnknownFields),
+// which reaches the nested app objects too. (No "was replaced" alias,
+// as allowed_artifact_hosts got: there is no installed base with
+// these in a config.)
+func TestRetiredSandboxConfigIsRejected(t *testing.T) {
 	for _, bad := range []string{
-		// extra_path was removed; the directive must not be silently accepted.
+		"liveswap {\n sandbox on\n app x {\n command a\n }\n}",
+		"liveswap {\n sandbox off\n app x {\n command a\n }\n}",
+		"liveswap {\n app x {\n command a\n sandbox off\n }\n}",
 		"liveswap {\n app x {\n command a\n extra_path /p\n }\n}",
-		"liveswap {\n sandbox\n}",
-		"liveswap {\n app x {\n command a\n sandbox on extra\n }\n}",
 	} {
 		var a App
 		if err := a.UnmarshalCaddyfile(caddyfile.NewTestDispenser(bad)); err == nil {
 			t.Errorf("accepted: %s", bad)
 		}
 	}
-}
-
-func TestValidateSandboxConfig(t *testing.T) {
-	base := func() *App {
-		return &App{
-			Root:              "/var/lib/liveswap",
-			ArtifactAllowlist: []string{"github.com/smallhoursorg/"},
-			DeployTrust:       githubTrust(),
-			Apps:              map[string]*AppConfig{"blog": defaultedApp(t)},
+	for _, bad := range []string{
+		`{"sandbox":"off","apps":{"x":{"command":["a"]}}}`,
+		`{"apps":{"x":{"command":["a"],"sandbox":"off"}}}`,
+		`{"apps":{"x":{"command":["a"],"extra_path":["/p"]}}}`,
+	} {
+		var a App
+		if err := caddy.StrictUnmarshalJSON([]byte(bad), &a); err == nil {
+			t.Errorf("JSON accepted: %s", bad)
 		}
 	}
-	if err := base().Validate(); err != nil {
-		t.Fatalf("base config rejected: %v", err)
-	}
-	// Precedence: the app's mode beats the global one; "" defers.
-	a := base()
-	a.Sandbox = "on"
-	spec, err := a.buildSpec("blog", a.Apps["blog"])
-	must(t, err)
-	if spec.sandboxMode != "on" {
-		t.Fatalf("global mode not inherited: %q", spec.sandboxMode)
-	}
-	a.Apps["blog"].Sandbox = "off"
-	spec, err = a.buildSpec("blog", a.Apps["blog"])
-	must(t, err)
-	if spec.sandboxMode != "off" {
-		t.Fatalf("app mode must override: %q", spec.sandboxMode)
-	}
-	for name, tc := range map[string]struct {
-		mutate func(*App)
-		want   []string // substrings the refusal must carry
-	}{
-		"bad global mode": {func(a *App) { a.Sandbox = "yes" }, []string{`must be "on" or "off"`}},
-		"bad app mode":    {func(a *App) { a.Apps["blog"].Sandbox = "maybe" }, []string{"app blog", `must be "on" or "off"`}},
-		// The two spellings of the policy this replaced get their own
-		// messages naming the replacement — asserted on content, so
-		// collapsing them into the generic rejection fails here rather
-		// than leaving the promise unpinned.
-		"retired auto":    {func(a *App) { a.Sandbox = "auto" }, []string{`"auto" has been removed`, `"on"`, `"off"`}},
-		"retired require": {func(a *App) { a.Apps["blog"].Sandbox = "require" }, []string{`"require" is now spelled "on"`}},
-		"root in state":   {func(a *App) { a.Root = "/var/lib/hotserve/apps" }, nil},
-	} {
-		t.Run(name, func(t *testing.T) {
-			a := base()
-			tc.mutate(a)
-			err := a.Validate()
-			if err == nil {
-				t.Fatal("accepted")
-			}
-			for _, w := range tc.want {
-				if !strings.Contains(err.Error(), w) {
-					t.Errorf("refusal %q lacks %q", err, w)
-				}
-			}
-		})
+	// And the control: the same JSON without the retired key loads.
+	var a App
+	if err := caddy.StrictUnmarshalJSON([]byte(`{"apps":{"x":{"command":["a"]}}}`), &a); err != nil {
+		t.Fatalf("a sound JSON config was refused: %v", err)
 	}
 }
 
-// TestStartResolvesSandboxPolicy drives App.Start with a scripted host
+// TestStartRefusesAnIncapableHost drives App.Start with a scripted host
 // that cannot deliver the sandbox — a container, or a kernel that
-// refuses user namespaces: `on` refuses to start and names the reason;
-// `off` never probes. There is no third case, which is the point —
-// with `auto` gone there is no mode that starts anyway.
-func TestStartResolvesSandboxPolicy(t *testing.T) {
-	probes, managerProbes := 0, 0
-	newApp := func(mode string) *App {
+// refuses user namespaces — and with one that can. The refusal names
+// the probe's reason and where its output went; there is no setting
+// that starts anyway, so nothing else to test.
+func TestStartRefusesAnIncapableHost(t *testing.T) {
+	newApp := func(verdict error) (*App, *int) {
 		spec := testSpec(t)
-		spec.sandboxMode = mode
 		// A managed app, not an empty map: Start gates the
 		// reachability probe on there being one, so an empty pool
 		// leaves that seam dead and the ordering it guarantees —
@@ -752,10 +536,7 @@ func TestStartResolvesSandboxPolicy(t *testing.T) {
 		// the rig's t.Cleanup no longer reaches it; stop it explicitly
 		// or goleak fails the package on the leaked goroutine.
 		t.Cleanup(rig.ma.stopWatchdog)
-		// Per-App, not shared: the ordering being pinned is "this
-		// config proved its manager reachable before it measured the
-		// host", and a counter shared across the three apps below
-		// would be satisfied by the previous app's probe.
+		managerProbes := 0
 		measuredHere := false
 		return &App{
 			Root:    spec.dirs.root,
@@ -772,39 +553,36 @@ func TestStartResolvesSandboxPolicy(t *testing.T) {
 				measuredHere = true
 				return nil
 			},
-			sandboxProbe: func(*zap.Logger) sandboxCapability {
-				probes++
+			sandboxProbe: func(*zap.Logger) error {
 				if !measuredHere {
 					t.Error("this App measured the host before proving its manager reachable")
 				}
-				return sandboxCapability{tier: sandboxNone, reason: "full tier: unit failed: Failed to set up user namespacing: Permission denied"}
+				return verdict
 			},
+		}, &managerProbes
+	}
+	a, probes := newApp(errors.New("sandbox probe unit: unit failed: Failed to set up user namespacing: Permission denied"))
+	err := a.Start()
+	if err == nil {
+		t.Fatal("a host without the sandbox must refuse to start")
+	}
+	for _, w := range []string{"Permission denied", "no setting"} {
+		if !strings.Contains(err.Error(), w) {
+			t.Errorf("the refusal must carry %q: %v", w, err)
 		}
 	}
-	a := newApp(sandboxOn)
-	if err := a.Start(); err == nil || !strings.Contains(err.Error(), "Permission denied") {
-		t.Fatalf("`on` against a host without the sandbox must refuse with the reason, got %v", err)
-	}
 	_ = a.Cleanup()
-	before := probes
-	a = newApp(sandboxOff)
-	if err := a.Start(); err != nil {
-		t.Fatalf("off must start: %v", err)
+	if *probes != 1 {
+		t.Fatalf("manager reachability probed %d times, want 1", *probes)
 	}
-	if probes != before {
-		t.Fatal("off must not probe the host")
-	}
-	if a.specs["demo"].sandboxTier != sandboxNone {
-		t.Fatalf("off tier = %v", a.specs["demo"].sandboxTier)
-	}
-	_ = a.Cleanup()
 
-	// Every one of those starts had a managed app, so every one had to
-	// prove the manager reachable first — the seam that replaced the
-	// probeUserManager package var, and the precondition the cached
-	// measurement's own early return depends on.
-	if managerProbes != 2 {
-		t.Fatalf("manager reachability probed %d times across 2 starts, want 2", managerProbes)
+	a, probes = newApp(nil)
+	if err := a.Start(); err != nil {
+		t.Fatalf("a capable host must start: %v", err)
+	}
+	_ = a.Cleanup()
+	if *probes != 1 {
+		t.Fatalf("manager reachability probed %d times, want 1", *probes)
 	}
 }
 
@@ -817,45 +595,9 @@ func TestStartResolvesSandboxPolicy(t *testing.T) {
 // into a server that will not start.
 func TestSandboxRootUnderTmpIsAllowed(t *testing.T) {
 	for _, root := range []string{"/tmp/liveswap-test", "/var/tmp/x", "/home/deploy/apps", "/srv/apps"} {
-		if err := validateSandboxRoot(root, true); err != nil {
+		if err := validateSandboxRoot(root); err != nil {
 			t.Errorf("root %s must not fail config load: %v", root, err)
 		}
-	}
-}
-
-// TestRelaunchBelowFullWarns pins the "prominent WARN at every spawn":
-// a relaunch that reproduces a bare instance while policy wants a
-// sandbox logs it, naming the residual; a full-tier launch and
-// sandbox off do not.
-func TestRelaunchBelowFullWarns(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		mode     string
-		recorded string
-		want     int
-	}{
-		{"on, bare record", sandboxOn, "", 1},
-		{"on, full record", sandboxOn, "full", 0},
-		// warnSandboxTier short-circuits on sandboxOff alone, so this
-		// row is what pins that the short-circuit is the only one.
-		{"off, bare record", sandboxOff, "", 0},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			rig := newTestRig(t)
-			core, logs := observer.New(zap.WarnLevel)
-			rig.ma.logger = zap.New(core)
-			rig.spec.sandboxMode = tc.mode
-			rig.spec.sandboxTier = sandboxFull
-			must(t, rig.store.save(appState{CurrentVersion: "v1", Port: 1, Handle: handleState{Unit: "hotserve-demo.v1.abc.service", Sandbox: tc.recorded}}))
-			must(t, mkdirRelease(rig.spec, "v1"))
-			if err := rig.ma.ensureRunning(); err != nil {
-				t.Fatalf("recover: %v", err)
-			}
-			got := logs.FilterMessage("launching without the full sandbox").Len()
-			if got != tc.want {
-				t.Fatalf("warned %d times, want %d: %v", got, tc.want, logs.All())
-			}
-		})
 	}
 }
 
@@ -883,7 +625,7 @@ func TestEnvFilesAreAbsentWithoutBeingListed(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		sb := spec.sandboxSpecFor(spec.dirs.release("v1"), sandboxFull)
+		sb := spec.sandboxSpecFor(spec.dirs.release("v1"))
 		for _, secret := range []string{"/etc/secrets/blog.env", "/etc/secrets/shop.env", "/etc/secrets"} {
 			if sb.inView(secret) {
 				t.Errorf("%s's view reaches %s", name, secret)
@@ -908,19 +650,17 @@ func TestWarnEnvFileInView(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		envFile string
-		mode    string
 		want    int
 	}{
-		{"outside every view", "/etc/hotserve/demo.env", sandboxOn, 0},
-		{"in shared", filepath.Join(spec.dirs.shared, "demo.env"), sandboxOn, 1},
-		{"in releases", filepath.Join(spec.dirs.releases, "v1", "demo.env"), sandboxOn, 1},
-		{"in shared but unsandboxed", filepath.Join(spec.dirs.shared, "demo.env"), sandboxOff, 0},
-		{"no env_file", "", sandboxOn, 0},
+		{"outside every view", "/etc/hotserve/demo.env", 0},
+		{"in shared", filepath.Join(spec.dirs.shared, "demo.env"), 1},
+		{"in releases", filepath.Join(spec.dirs.releases, "v1", "demo.env"), 1},
+		{"no env_file", "", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			core, logs := observer.New(zap.WarnLevel)
 			s := *spec
-			s.envFile, s.sandboxMode = tc.envFile, tc.mode
+			s.envFile = tc.envFile
 			warnEnvFileInView(zap.New(core), map[string]*appSpec{"demo": &s})
 			if got := logs.Len(); got != tc.want {
 				t.Fatalf("warned %d times, want %d: %v", got, tc.want, logs.All())
@@ -949,7 +689,7 @@ func TestWarnEnvFileInView(t *testing.T) {
 
 		core, logs := observer.New(zap.WarnLevel)
 		s := *spec
-		s.envFile, s.sandboxMode = link, sandboxOn
+		s.envFile = link
 		warnEnvFileInView(zap.New(core), map[string]*appSpec{"demo": &s})
 		if logs.Len() != 1 {
 			t.Fatalf("an env_file linked into shared/ must warn: %v", logs.All())
@@ -976,14 +716,14 @@ func TestValidateRejectsUncleanRoot(t *testing.T) {
 	}
 }
 
-// TestResolveBindSourcesRefusesPlantedSymlink is the escape a bare app
-// could arrange for its own sandboxed future: `shared` and the release
-// dirs live under the shared hotserve UID and appDirs.ensure's MkdirAll
-// succeeds on a symlink, so an app running with `sandbox off` (or on a
-// host stuck at the none tier, or simply before its first sandboxed
-// deploy — the documented rollout) can point its own shared dir at the
-// user manager's socket directory and have BindPaths= mount it inside
-// the sandbox on the next launch.
+// TestResolveBindSourcesRefusesPlantedSymlink: `shared` and the
+// release dirs live under the shared hotserve UID and
+// appDirs.ensure's MkdirAll succeeds on a symlink, so a link planted
+// at an app's shared dir — pointing at the user manager's socket
+// directory — would have BindPaths= mount that inside the sandbox on
+// the next launch. Nothing sandboxed can plant one (the mount points
+// are not unlinkable from inside a view), so this is the guard that
+// keeps that true for whatever was on disk before.
 func TestResolveBindSourcesRefusesPlantedSymlink(t *testing.T) {
 	root := t.TempDir()
 	appDir := filepath.Join(root, "blog")
@@ -1019,7 +759,7 @@ func TestResolveBindSourcesRefusesPlantedSymlink(t *testing.T) {
 		t.Cleanup(func() { _ = os.RemoveAll(p) })
 	}
 	spec := func(sharedPath string) *sandboxSpec {
-		return &sandboxSpec{tier: sandboxFull, root: root, appDir: appDir, appName: "blog",
+		return &sandboxSpec{root: root, appDir: appDir, appName: "blog",
 			writable: []bindPath{{dest: release, source: release}, {dest: sharedPath, source: sharedPath}}}
 	}
 	// Baseline: real directories resolve to themselves and are kept.
@@ -1108,7 +848,7 @@ func TestUnitForResolvesBindSources(t *testing.T) {
 	}
 	spec := startSpec{
 		app: "blog", version: "v1", command: []string{"./server"}, dir: release,
-		sandbox: &sandboxSpec{tier: sandboxFull, root: root, appDir: appDir, appName: "blog",
+		sandbox: &sandboxSpec{root: root, appDir: appDir, appName: "blog",
 			writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}}},
 	}
 	if _, err := r.unitFor(spec, false); err == nil || !strings.Contains(err.Error(), "not the directory it names") {
@@ -1152,7 +892,7 @@ func TestBindDestinationsAreTheConfiguredPaths(t *testing.T) {
 	}
 	aliasRelease := filepath.Join(root, "blog", "releases", "v1")
 	aliasShared := filepath.Join(root, "blog", "shared")
-	sb := &sandboxSpec{tier: sandboxFull, root: root, appDir: filepath.Join(root, "blog"), appName: "blog",
+	sb := &sandboxSpec{root: root, appDir: filepath.Join(root, "blog"), appName: "blog",
 		writable: []bindPath{{dest: aliasRelease, source: aliasRelease}, {dest: aliasShared, source: aliasShared}}}
 	if err := sb.resolveBindSources(); err != nil {
 		t.Fatalf("a symlinked root was refused: %v", err)
@@ -1216,7 +956,7 @@ func TestMandatoryBindMustBeTheDirectoryItNames(t *testing.T) {
 	}
 	link := filepath.Join(appDir, "shared-link")
 	spec := func(sharedPath string) *sandboxSpec {
-		return &sandboxSpec{tier: sandboxFull, root: root, appDir: appDir, appName: "blog",
+		return &sandboxSpec{root: root, appDir: appDir, appName: "blog",
 			writable: []bindPath{{dest: release, source: release}, {dest: sharedPath, source: sharedPath}}}
 	}
 	for _, target := range []string{appDir, filepath.Join(appDir, "releases"), filepath.Join(appDir, "tmp"), root} {
@@ -1252,7 +992,7 @@ func TestMandatoryBindMustBeTheDirectoryItNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	aliasShared := filepath.Join(aliasRoot, "blog", "shared")
-	viaAlias := &sandboxSpec{tier: sandboxFull, root: aliasRoot, appDir: filepath.Join(aliasRoot, "blog"), appName: "blog",
+	viaAlias := &sandboxSpec{root: aliasRoot, appDir: filepath.Join(aliasRoot, "blog"), appName: "blog",
 		writable: []bindPath{{dest: aliasShared, source: aliasShared}}}
 	if err := viaAlias.resolveBindSources(); err != nil {
 		t.Fatalf("a symlinked root must still work: %v", err)
@@ -1265,8 +1005,8 @@ func TestMandatoryBindMustBeTheDirectoryItNames(t *testing.T) {
 // TestAppDirAliasToSiblingRefused: the expected base for a mandatory
 // bind is derived from the canonical root plus the configured app
 // name, never from what the app's own directory resolves to. Resolving
-// appDir would let the alias vouch for itself — a bare app that
-// replaces <root>/blog with a link to <root>/shop makes shop's
+// appDir would let the alias vouch for itself — a link replacing
+// <root>/blog with <root>/shop makes shop's
 // directory the expected base, and both of blog's binds then match it
 // exactly, handing the sibling's release and shared data to the new
 // sandbox.
@@ -1284,7 +1024,7 @@ func TestAppDirAliasToSiblingRefused(t *testing.T) {
 	}
 	release := filepath.Join(appDir, "releases", "v1")
 	shared := filepath.Join(appDir, "shared")
-	s := &sandboxSpec{tier: sandboxFull, root: root, appDir: appDir, appName: "blog",
+	s := &sandboxSpec{root: root, appDir: appDir, appName: "blog",
 		writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}}}
 	err := s.resolveBindSources()
 	if err == nil {
@@ -1328,7 +1068,7 @@ func TestUnitForRefusesCommandOutsideTheView(t *testing.T) {
 		t.Fatal(err)
 	}
 	sb := func() *sandboxSpec {
-		return &sandboxSpec{tier: sandboxFull, root: root, appDir: appDir, appName: "blog",
+		return &sandboxSpec{root: root, appDir: appDir, appName: "blog",
 			writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}}}
 	}
 	base := startSpec{app: "blog", version: "v1", dir: release}
@@ -1336,11 +1076,12 @@ func TestUnitForRefusesCommandOutsideTheView(t *testing.T) {
 	spec := base
 	spec.command, spec.sandbox = []string{runtime}, sb()
 	_, err = r.unitFor(spec, false)
-	if err == nil || !strings.Contains(err.Error(), "sandbox off") {
+	if err == nil || !strings.Contains(err.Error(), "install it under /usr") {
 		t.Fatalf("unitFor must refuse a command outside the view and name the fix, got %v", err)
 	}
-	// There is no way to widen the view, so `sandbox off` is the whole
-	// of the answer for a runtime that lives outside /usr.
+	// There is no way to widen the view and no way to run without one,
+	// so the answer for a runtime outside /usr is to ship it in the
+	// release or install it under /usr — which is what the message says.
 	// The ordinary cases still pass: a binary in the release dir, and
 	// one in the base view.
 	for _, cmd := range []string{"./server", "/bin/sh"} {
@@ -1349,12 +1090,6 @@ func TestUnitForRefusesCommandOutsideTheView(t *testing.T) {
 		if _, err := r.unitFor(spec, false); err != nil {
 			t.Errorf("%s refused: %v", cmd, err)
 		}
-	}
-	// Unsandboxed, the check does not apply at all.
-	spec = base
-	spec.command = []string{runtime}
-	if _, err := r.unitFor(spec, false); err != nil {
-		t.Errorf("an unsandboxed unit must not be subject to the view check: %v", err)
 	}
 }
 
@@ -1371,9 +1106,9 @@ func TestSandboxPropertiesNeverEmitsAnEmptyBindList(t *testing.T) {
 		want []string // properties that must be present
 		gone []string // properties that must not be emitted at all
 	}{
-		{"the capability probe: nothing of its own", probeSandboxSpec(sandboxFull),
+		{"the capability probe: nothing of its own", probeSandboxSpec(),
 			[]string{"BindReadOnlyPaths", "TemporaryFileSystem"}, []string{"BindPaths"}},
-		{"an app with no read-only binds of its own", &sandboxSpec{tier: sandboxFull, root: "/var/lib/liveswap",
+		{"an app with no read-only binds of its own", &sandboxSpec{root: "/var/lib/liveswap",
 			writable: []bindPath{{dest: "/var/lib/liveswap/blog/shared"}}},
 			[]string{"BindPaths", "BindReadOnlyPaths"}, nil},
 	} {
@@ -1443,7 +1178,7 @@ func TestSymlinkedRootUnderPrivateTmpLaunches(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			s := &sandboxSpec{tier: sandboxFull, root: root, appDir: filepath.Join(root, "blog"), appName: "blog",
+			s := &sandboxSpec{root: root, appDir: filepath.Join(root, "blog"), appName: "blog",
 				writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}}}
 			if err := s.resolveBindSources(); err != nil {
 				t.Fatalf("a symlinked root under %s must launch, exactly as an unaliased one does: %v", under, err)
@@ -1465,7 +1200,7 @@ func TestSymlinkedRootUnderPrivateTmpLaunches(t *testing.T) {
 			if err := os.Symlink("/dev", planted); err != nil {
 				t.Fatal(err)
 			}
-			bad := &sandboxSpec{tier: sandboxFull, root: root, appDir: filepath.Join(root, "blog"), appName: "blog",
+			bad := &sandboxSpec{root: root, appDir: filepath.Join(root, "blog"), appName: "blog",
 				writable: []bindPath{{dest: release, source: release}, {dest: planted, source: planted}}}
 			if err := bad.resolveBindSources(); err == nil {
 				t.Error("a planted shared -> /dev was accepted under a symlinked root")
@@ -1503,13 +1238,13 @@ func TestUnitForResolvesTheCommandBeforeTestingTheView(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 	spec := startSpec{app: "blog", version: "v1", dir: release, command: []string{shim},
-		sandbox: &sandboxSpec{tier: sandboxFull, root: root, appDir: appDir, appName: "blog",
+		sandbox: &sandboxSpec{root: root, appDir: appDir, appName: "blog",
 			writable: []bindPath{{dest: release, source: release}}}}
 	_, err = r.unitFor(spec, false)
 	if err == nil {
 		t.Fatal("a shim inside the view pointing at a target outside it was accepted")
 	}
-	if !strings.Contains(err.Error(), realBin) || !strings.Contains(err.Error(), "sandbox off") {
+	if !strings.Contains(err.Error(), realBin) || !strings.Contains(err.Error(), "install it under /usr") {
 		t.Fatalf("the refusal must name the resolved target and the fix: %v", err)
 	}
 }
@@ -1540,7 +1275,7 @@ func TestBaseViewNamesTheTrustStoreNotTheTree(t *testing.T) {
 	}
 	// And the private-key directory must not be reachable through any
 	// base-view entry, by prefix or otherwise.
-	spec := &sandboxSpec{tier: sandboxFull, root: "/var/lib/liveswap", appDir: "/var/lib/liveswap/blog", appName: "blog"}
+	spec := &sandboxSpec{root: "/var/lib/liveswap", appDir: "/var/lib/liveswap/blog", appName: "blog"}
 	if spec.inView("/etc/ssl/private") || spec.inView("/etc/ssl/private/host.key") {
 		t.Error("/etc/ssl/private is inside the view")
 	}
@@ -1567,7 +1302,7 @@ func TestBindSourceInsideTheBaseViewRefused(t *testing.T) {
 		}
 	}
 	for _, bad := range []string{"/usr/local/liveswap", "/usr/share/liveswap", "/etc/ssl/certs/apps"} {
-		if err := validateSandboxRoot(bad, true); err == nil {
+		if err := validateSandboxRoot(bad); err == nil {
 			t.Errorf("root %s accepted: every app's data would be readable by every other app", bad)
 		}
 	}
@@ -1578,12 +1313,12 @@ func TestBindSourceInsideTheBaseViewRefused(t *testing.T) {
 	// releases and shared dir on /etc/ssl/certs — bound read-only and
 	// recursively into every sandbox on the box.
 	for _, bad := range []string{"/etc/ssl", "/etc", "/"} {
-		if err := validateSandboxRoot(bad, true); err == nil {
+		if err := validateSandboxRoot(bad); err == nil {
 			t.Errorf("root %s accepted: it contains a base-view entry, so an app named for that entry would be readable by every other app", bad)
 		}
 	}
 	for _, ok := range []string{"/var/lib/liveswap", "/srv/apps", "/mnt/apps", "/tmp/liveswap-test"} {
-		if err := validateSandboxRoot(ok, true); err != nil {
+		if err := validateSandboxRoot(ok); err != nil {
 			t.Errorf("root %s refused: %v", ok, err)
 		}
 	}
@@ -1610,7 +1345,7 @@ func TestValidateSandboxRootFollowsSymlinks(t *testing.T) {
 		if err := os.Symlink(target, link); err != nil {
 			t.Skipf("symlinks unavailable: %v", err)
 		}
-		if err := validateSandboxRoot(link, true); err == nil {
+		if err := validateSandboxRoot(link); err == nil {
 			t.Errorf("a root symlinked to %s was accepted: the lexical spelling hides it", target)
 		}
 	}
@@ -1645,7 +1380,7 @@ func TestUnitForAcceptsACommandUnderASymlinkedRoot(t *testing.T) {
 	}
 	aliasRelease := filepath.Join(root, "blog", "releases", "v1")
 	spec := startSpec{app: "blog", version: "v1", dir: aliasRelease, command: []string{"./server"},
-		sandbox: &sandboxSpec{tier: sandboxFull, root: root, appDir: filepath.Join(root, "blog"), appName: "blog",
+		sandbox: &sandboxSpec{root: root, appDir: filepath.Join(root, "blog"), appName: "blog",
 			writable: []bindPath{{dest: aliasRelease, source: aliasRelease},
 				{dest: filepath.Join(root, "blog", "shared"), source: filepath.Join(root, "blog", "shared")}}}}
 	if _, err := r.unitFor(spec, false); err != nil {
@@ -1763,7 +1498,7 @@ func TestBindOntoASiblingsExternalDataRefused(t *testing.T) {
 	if err := os.Symlink(shopData, blogShared); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	spec := &sandboxSpec{tier: sandboxFull, root: root, appDir: filepath.Join(root, "blog"), appName: "blog",
+	spec := &sandboxSpec{root: root, appDir: filepath.Join(root, "blog"), appName: "blog",
 		writable: []bindPath{{dest: blogRelease, source: blogRelease}, {dest: blogShared, source: blogShared}}}
 	err = spec.resolveBindSources()
 	if err == nil {
@@ -1808,7 +1543,7 @@ func TestAppViewsAreDisjointExceptTheBaseView(t *testing.T) {
 	root := t.TempDir()
 	view := func(name string) map[string]bindMount {
 		spec := &appSpec{name: name, dirs: newAppDirs(root, name)}
-		sb := spec.sandboxSpecFor(spec.dirs.release("v1"), sandboxFull)
+		sb := spec.sandboxSpecFor(spec.dirs.release("v1"))
 		got := propMap(unitSpec{ExecStart: []string{"/bin/true"}, Sandbox: sb})
 		m := map[string]bindMount{}
 		for _, prop := range []string{"BindPaths", "BindReadOnlyPaths"} {
@@ -1849,7 +1584,7 @@ func TestAppViewsAreDisjointExceptTheBaseView(t *testing.T) {
 	for name, other := range map[string]string{"blog": "shop", "shop": "blog"} {
 		got := propMap(unitSpec{ExecStart: []string{"/bin/true"},
 			Sandbox: (&appSpec{name: name, dirs: newAppDirs(root, name)}).sandboxSpecFor(
-				newAppDirs(root, name).release("v1"), sandboxFull)})
+				newAppDirs(root, name).release("v1"))})
 		for _, b := range got["BindPaths"].([]bindMount) {
 			if !strings.HasPrefix(b.Destination, filepath.Join(root, name)+"/") {
 				t.Errorf("%s has a writable bind at %s, outside its own app directory", name, b.Destination)
@@ -1879,15 +1614,15 @@ func TestAppViewsAreDisjointExceptTheBaseView(t *testing.T) {
 func TestSandboxCapabilityCachedPerConnection(t *testing.T) {
 	c := &userManagerClient{}
 	measured := 0
-	full := func() sandboxCapability {
+	capable := func() error {
 		measured++
-		return sandboxCapability{tier: sandboxFull}
+		return nil
 	}
 
 	c.generation.Add(1) // a first dial
 	for i := 0; i < 5; i++ {
-		if got := c.cachedSandboxCapability(full); got.tier != sandboxFull {
-			t.Fatalf("call %d: tier = %v, want full", i, got.tier)
+		if err := c.cachedSandboxCapability(capable); err != nil {
+			t.Fatalf("call %d: %v, want capable", i, err)
 		}
 	}
 	if measured != 1 {
@@ -1897,8 +1632,8 @@ func TestSandboxCapabilityCachedPerConnection(t *testing.T) {
 	// A redial invalidates it: the manager that restarted may not be
 	// the one that was measured.
 	c.generation.Add(1)
-	if got := c.cachedSandboxCapability(full); got.tier != sandboxFull {
-		t.Fatalf("after redial: tier = %v", got.tier)
+	if err := c.cachedSandboxCapability(capable); err != nil {
+		t.Fatalf("after redial: %v", err)
 	}
 	if measured != 2 {
 		t.Fatalf("measured %d times, want 2: a redial must re-measure", measured)
@@ -1908,13 +1643,14 @@ func TestSandboxCapabilityCachedPerConnection(t *testing.T) {
 	// is no longer current: report it, cache nothing, measure again.
 	c.generation.Add(1)
 	gen := c.generation.Load()
-	racing := func() sandboxCapability {
+	before := measured
+	racing := func() error {
 		measured++
 		c.generation.Add(1)
-		return sandboxCapability{tier: sandboxFull, reason: "raced"}
+		return nil
 	}
-	if got := c.cachedSandboxCapability(racing); got.reason != "raced" {
-		t.Fatalf("the caller that asked must still get the measurement it took: %+v", got)
+	if err := c.cachedSandboxCapability(racing); err != nil || measured != before+1 {
+		t.Fatalf("the caller that asked must still get the measurement it took: %v (measured %d)", err, measured-before)
 	}
 	if c.sandboxGen == gen {
 		t.Fatal("a measurement taken across a redial was cached against the stale generation")
@@ -1925,8 +1661,8 @@ func TestSandboxCapabilityCachedPerConnection(t *testing.T) {
 	// read one, so the two halves cannot disagree about the sentinel.
 	fresh := &userManagerClient{}
 	measured = 0
-	fresh.cachedSandboxCapability(full)
-	fresh.cachedSandboxCapability(full)
+	_ = fresh.cachedSandboxCapability(capable)
+	_ = fresh.cachedSandboxCapability(capable)
 	if measured != 2 {
 		t.Fatalf("measured %d times at generation 0, want 2: no connection means nothing to cache against", measured)
 	}
@@ -1936,36 +1672,36 @@ func TestSandboxCapabilityCachedPerConnection(t *testing.T) {
 }
 
 // TestSandboxFailedMeasurementIsNotCached pins the half of the caching
-// rule that decides whether a bad minute costs a host its sandbox for
-// the life of a connection. probeSandboxCapability reports the same
-// {none, reason} whether the namespaces are genuinely unavailable or
-// the probe unit merely timed out under boot load, and a timeout
-// leaves the connection Connected() — so nothing would ever drop it
-// and re-measure.
+// rule that decides whether a bad minute keeps a host down for the
+// life of a connection. probeSandboxCapability reports a failure the
+// same way whether the namespaces are genuinely unavailable or the
+// probe unit merely timed out under boot load, and a timeout leaves
+// the connection Connected() — so nothing would ever drop it and
+// re-measure.
 func TestSandboxFailedMeasurementIsNotCached(t *testing.T) {
 	c := &userManagerClient{}
 	c.generation.Add(1)
 	measured := 0
-	failing := func() sandboxCapability {
+	failing := func() error {
 		measured++
-		return sandboxCapability{tier: sandboxNone, reason: "full tier: unit failed: probe timed out"}
+		return errors.New("sandbox probe unit: unit failed: probe timed out")
 	}
 	for i := 0; i < 3; i++ {
-		if got := c.cachedSandboxCapability(failing); got.tier != sandboxNone {
-			t.Fatalf("call %d: tier = %v, want none", i, got.tier)
+		if err := c.cachedSandboxCapability(failing); err == nil {
+			t.Fatalf("call %d: capable, want the failure reported", i)
 		}
 	}
 	if measured != 3 {
-		t.Fatalf("measured %d times, want 3: a failed verdict must not pin every app unsandboxed until a redial", measured)
+		t.Fatalf("measured %d times, want 3: a failed verdict must not keep hotserve down until a redial", measured)
 	}
 	if c.sandboxGen != 0 {
 		t.Fatal("a failed verdict was cached")
 	}
 	// And once the host answers, that verdict is cached as usual.
-	if got := c.cachedSandboxCapability(func() sandboxCapability { return sandboxCapability{tier: sandboxFull} }); got.tier != sandboxFull {
-		t.Fatalf("tier = %v, want full", got.tier)
+	if err := c.cachedSandboxCapability(func() error { return nil }); err != nil {
+		t.Fatalf("capable verdict reported as %v", err)
 	}
-	if c.cachedSandboxCapability(failing); measured != 3 {
-		t.Fatalf("measured %d: a cached success must still be served", measured)
+	if err := c.cachedSandboxCapability(failing); err != nil || measured != 3 {
+		t.Fatalf("a cached success must still be served: %v (measured %d)", err, measured)
 	}
 }

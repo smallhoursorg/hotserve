@@ -63,7 +63,7 @@ func (f *fakeSystemdConn) StartTransientUnit(ctx context.Context, u unitSpec) (s
 	case startErr != nil:
 	case !u.Oneshot:
 		if _, preset := f.status[u.Name]; !preset {
-			st := unitStatus{LoadState: "loaded", ActiveState: "active", SubState: "running", MainPID: 4242}
+			st := unitStatus{LoadState: "loaded", ActiveState: "active", SubState: "running", MainPID: 4242, Sandboxed: true}
 			if f.startStatus != nil {
 				st = *f.startStatus
 			}
@@ -184,6 +184,10 @@ func newTestSystemdRunner(t *testing.T) (*systemdRunner, *fakeSystemdConn) {
 	conn := newFakeSystemdConn()
 	r := newSystemdRunner(conn, zap.NewNop())
 	r.poll = time.Millisecond
+	// The fake never moves MainPID, so the settle wait every start now
+	// pays would run its whole window out; the two settle tests set it
+	// back to the real one.
+	r.settle = 5 * time.Millisecond
 	t.Cleanup(r.close)
 	return r, conn
 }
@@ -203,6 +207,9 @@ func testApp(t *testing.T) startSpec {
 		dir:     dir,
 		env:     []string{"PORT=8123", "HOST=127.0.0.1"},
 		grace:   3 * time.Second,
+		// Every unit is sandboxed: the release dir is a writable bind,
+		// which is also what puts ./server inside the unit's view.
+		sandbox: &sandboxSpec{root: "/var/lib/liveswap", writable: []bindPath{{dest: dir, source: dir}}},
 	}
 }
 
@@ -290,7 +297,7 @@ func TestSystemdRunnerZeroGraceGetsDefaultStopTimeout(t *testing.T) {
 }
 
 func TestUnitPropertiesApplyHardening(t *testing.T) {
-	props := unitProperties(unitSpec{Name: "x.service", ExecStart: []string{"/bin/true"}, StopTimeout: 3 * time.Second, Oneshot: true})
+	props := unitProperties(unitSpec{Name: "x.service", ExecStart: []string{"/bin/true"}, StopTimeout: 3 * time.Second, Oneshot: true, Sandbox: probeSandboxSpec()})
 	got := map[string]any{}
 	for _, p := range props {
 		got[p.Name] = p.Value.Value()
@@ -315,7 +322,7 @@ func TestUnitPropertiesApplyHardening(t *testing.T) {
 	if _, ok := got["ExecStart"]; !ok {
 		t.Error("ExecStart missing")
 	}
-	for _, p := range unitProperties(unitSpec{ExecStart: []string{"/bin/true"}, StopTimeout: 500 * time.Nanosecond}) {
+	for _, p := range unitProperties(unitSpec{ExecStart: []string{"/bin/true"}, StopTimeout: 500 * time.Nanosecond, Sandbox: probeSandboxSpec()}) {
 		if p.Name == "TimeoutStopUSec" && p.Value.Value() != uint64(1) {
 			t.Errorf("a sub-microsecond grace must clamp to 1µs, not 0 (= never SIGKILL); got %v", p.Value.Value())
 		}
@@ -519,22 +526,35 @@ func TestSystemdRunnerReattach(t *testing.T) {
 		t.Fatal("unknown unit ⇒ observed not running")
 	}
 
-	conn.setStatus("live.service", unitStatus{LoadState: "loaded", ActiveState: "active", SubState: "running", MainPID: 77})
-	h, ok, err := r.Reattach(handleState{Unit: "live.service", StartedAt: started, Sandbox: "full"})
+	conn.setStatus("live.service", unitStatus{LoadState: "loaded", ActiveState: "active", SubState: "running", MainPID: 77, Sandboxed: true})
+	h, ok, err := r.Reattach(handleState{Unit: "live.service", StartedAt: started})
 	if !ok || err != nil {
 		t.Fatalf("running unit must be adopted: ok=%v err=%v", ok, err)
 	}
 	if st := h.state(); st.PID != 77 || st.Unit != "live.service" || !st.StartedAt.Equal(started) {
 		t.Fatalf("adopted state %+v", st)
 	}
-	// The recorded tier survives the round trip. A reattach that
-	// dropped it would have status under-report a sandboxed app as
-	// "none" and the next watchdog relaunch start it bare — the
-	// "silently drop this app's sandbox" outcome validSandboxTierRecord
-	// exists to prevent, and nothing else in any lane pins it.
-	if st := h.state(); st.Sandbox != "full" {
-		t.Fatalf("reattach dropped the recorded tier: %q, want full", st.Sandbox)
+	// A running unit WITHOUT the sandbox is never adopted: nothing
+	// this hotserve starts lacks it, so it is something else's unit —
+	// a development build that still had `sandbox off`, say — and
+	// adopting it would serve an app bare with no signal. It is
+	// stopped here and now, not left for the relaunch's sweep (which
+	// a failing relaunch preparation would never reach).
+	conn.setStatus("bare.service", unitStatus{LoadState: "loaded", ActiveState: "active", SubState: "running", MainPID: 78})
+	if _, ok, err := r.Reattach(handleState{Unit: "bare.service"}); ok || err != nil {
+		t.Fatalf("a running unit without the sandbox must be stopped, not adopted: ok=%v err=%v", ok, err)
 	}
+	if stops := conn.stops(); len(stops) == 0 || stops[len(stops)-1] != "bare.service" {
+		t.Fatalf("the bare unit was not stopped: stops=%v", stops)
+	}
+	// And a stop that cannot be confirmed is an error, so the caller
+	// does not launch beside a unit that may still be running.
+	conn.setStatus("bare2.service", unitStatus{LoadState: "loaded", ActiveState: "active", SubState: "running", MainPID: 79})
+	conn.stopErr = errors.New("manager went away")
+	if _, ok, err := r.Reattach(handleState{Unit: "bare2.service"}); ok || err == nil {
+		t.Fatalf("an unconfirmed stop of a bare unit must be an error: ok=%v err=%v", ok, err)
+	}
+	conn.stopErr = nil
 	if !r.Alive(h) || r.Wait(h) == nil {
 		t.Fatal("adopted handle must be watched like a spawned one")
 	}
@@ -558,7 +578,7 @@ func TestSystemdRunnerReattach(t *testing.T) {
 func TestSystemdRunnerStartReconcilesAmbiguousFailure(t *testing.T) {
 	// The D-Bus call errors but the unit is running: adopt it.
 	r, conn := newTestSystemdRunner(t)
-	running := unitStatus{LoadState: "loaded", ActiveState: "active", MainPID: 99}
+	running := unitStatus{LoadState: "loaded", ActiveState: "active", MainPID: 99, Sandboxed: true}
 	conn.mu.Lock()
 	conn.startErr = errors.New("dbus: reply lost")
 	conn.failStatus = &running
@@ -679,8 +699,8 @@ func TestSystemdRunnerSweep(t *testing.T) {
 		t.Fatal(err)
 	}
 	conn.setStatus("hotserve-demo.v0.9.11111111.service", failedStatus) // leftover failed unit of ours
-	conn.setStatus("hotserve-demo-api.v1.22222222.service", unitStatus{LoadState: "loaded", ActiveState: "active"})
-	conn.setStatus("hotserve-demo.v1.notanonce.service", unitStatus{LoadState: "loaded", ActiveState: "active"})
+	conn.setStatus("hotserve-demo-api.v1.22222222.service", unitStatus{LoadState: "loaded", ActiveState: "active", Sandboxed: true})
+	conn.setStatus("hotserve-demo.v1.notanonce.service", unitStatus{LoadState: "loaded", ActiveState: "active", Sandboxed: true})
 
 	if err := r.Sweep("demo", keep); err != nil {
 		t.Fatalf("Sweep: %v", err)
@@ -698,7 +718,7 @@ func TestSystemdRunnerSweep(t *testing.T) {
 	}
 
 	// A stop that cannot be confirmed is an error: nothing may be GC'd.
-	conn.setStatus("hotserve-demo.v2.33333333.service", unitStatus{LoadState: "loaded", ActiveState: "active"})
+	conn.setStatus("hotserve-demo.v2.33333333.service", unitStatus{LoadState: "loaded", ActiveState: "active", Sandboxed: true})
 	conn.mu.Lock()
 	conn.stopErr = errors.New("dbus down")
 	conn.mu.Unlock()
@@ -729,7 +749,7 @@ func TestSystemdRunnerWatcherBackfillsPID(t *testing.T) {
 	// Start succeeds but the immediate MainPID read fails: the unit is
 	// fine, hotserve just could not ask. The watcher repairs the PID
 	// once the manager answers again.
-	running := unitStatus{LoadState: "loaded", ActiveState: "active", MainPID: 4242}
+	running := unitStatus{LoadState: "loaded", ActiveState: "active", MainPID: 4242, Sandboxed: true}
 	conn.mu.Lock()
 	conn.failStatus = &running
 	conn.mu.Unlock()
@@ -761,7 +781,7 @@ func TestSystemdRunnerWatcherBackfillsPID(t *testing.T) {
 
 func TestSweepUnknownApps(t *testing.T) {
 	conn := newFakeSystemdConn()
-	running := unitStatus{LoadState: "loaded", ActiveState: "active"}
+	running := unitStatus{LoadState: "loaded", ActiveState: "active", Sandboxed: true}
 	conn.setStatus("hotserve-demo.v1.0a1b2c3d.service", running)     // configured: keep
 	conn.setStatus("hotserve-old.v3.0a1b2c3d.service", running)      // removed app: stop
 	conn.setStatus("hotserve-old.v2.0a1b2c3e.service", failedStatus) // removed app: reset
@@ -797,7 +817,7 @@ func TestSweepUnknownApps(t *testing.T) {
 
 func TestSweepUnknownAppsDoesNothingWhileExiting(t *testing.T) {
 	conn := newFakeSystemdConn()
-	conn.setStatus("hotserve-old.v3.0a1b2c3d.service", unitStatus{LoadState: "loaded", ActiveState: "active"})
+	conn.setStatus("hotserve-old.v3.0a1b2c3d.service", unitStatus{LoadState: "loaded", ActiveState: "active", Sandboxed: true})
 	orig := caddyExiting
 	caddyExiting = func() bool { return true }
 	t.Cleanup(func() { caddyExiting = orig })
@@ -814,7 +834,7 @@ func TestSweepUnknownAppsJudgesAgainstLiveConfig(t *testing.T) {
 	// sweep must judge against the ledger as it is right before acting
 	// — never a capture from before.
 	conn := newFakeSystemdConn()
-	running := unitStatus{LoadState: "loaded", ActiveState: "active"}
+	running := unitStatus{LoadState: "loaded", ActiveState: "active", Sandboxed: true}
 	conn.setStatus("hotserve-late.v1.0a1b2c3d.service", running)
 	var mu sync.Mutex
 	configured := map[string]bool{} // "late" is not configured when the sweep starts
@@ -848,7 +868,7 @@ func TestUnitApp(t *testing.T) {
 
 func TestSystemdRunnerSweepStopsStraysConcurrentlyAndHonoursTheGuard(t *testing.T) {
 	r, conn := newTestSystemdRunner(t)
-	running := unitStatus{LoadState: "loaded", ActiveState: "active"}
+	running := unitStatus{LoadState: "loaded", ActiveState: "active", Sandboxed: true}
 	conn.setStatus("hotserve-demo.v1.11111111.service", running)
 	conn.setStatus("hotserve-demo.v2.22222222.service", running)
 	// A guard that turns false after the listing: nothing may be stopped.
@@ -886,7 +906,7 @@ func TestSystemdRunnerHandleRecordsStopBudget(t *testing.T) {
 	if h.(*systemdHandle).stopTimeout != 42*time.Second {
 		t.Fatalf("Start must record the unit's stop budget, got %s", h.(*systemdHandle).stopTimeout)
 	}
-	conn.setStatus("old.service", unitStatus{LoadState: "loaded", ActiveState: "active", StopTimeout: 7 * time.Minute})
+	conn.setStatus("old.service", unitStatus{LoadState: "loaded", ActiveState: "active", StopTimeout: 7 * time.Minute, Sandboxed: true})
 	h2, ok, err := r.Reattach(handleState{Unit: "old.service"})
 	if !ok || err != nil {
 		t.Fatal("adopt")
@@ -927,7 +947,7 @@ func TestUnitStatusRunning(t *testing.T) {
 		st   unitStatus
 		want bool
 	}{
-		{unitStatus{LoadState: "loaded", ActiveState: "active"}, true},
+		{unitStatus{LoadState: "loaded", ActiveState: "active", Sandboxed: true}, true},
 		{unitStatus{LoadState: "loaded", ActiveState: "activating"}, true},
 		{unitStatus{LoadState: "loaded", ActiveState: "deactivating"}, true},
 		{unitStatus{LoadState: "loaded", ActiveState: "inactive"}, false},
@@ -965,7 +985,7 @@ func TestSystemdRunnerWatcherFollowsMainPID(t *testing.T) {
 	if h.state().PID != 4242 { // the fake's MainPID for a started unit
 		t.Fatalf("sanity: pid read at start, got %d", h.state().PID)
 	}
-	conn.setStatus(h.state().Unit, unitStatus{LoadState: "loaded", ActiveState: "active", MainPID: 4243})
+	conn.setStatus(h.state().Unit, unitStatus{LoadState: "loaded", ActiveState: "active", MainPID: 4243, Sandboxed: true})
 	deadline := time.Now().Add(2 * time.Second)
 	for h.state().PID != 4243 {
 		if time.Now().After(deadline) {
@@ -978,16 +998,14 @@ func TestSystemdRunnerWatcherFollowsMainPID(t *testing.T) {
 	}
 }
 
-// TestSystemdRunnerStartSettlesMainPIDForFullTier: a full-tier start
-// returns with the app's pid, not the intermediate the manager reports
-// for its first few milliseconds; other tiers take the first read.
-func TestSystemdRunnerStartSettlesMainPIDForFullTier(t *testing.T) {
+// TestSystemdRunnerStartSettlesMainPID: a start returns with the app's
+// pid, not the intermediate the manager reports for its first few
+// milliseconds while it sets the PID namespace up — every unit has
+// one, so every start settles.
+func TestSystemdRunnerStartSettlesMainPID(t *testing.T) {
 	r, conn := newTestSystemdRunner(t)
+	r.settle = mainPIDSettle
 	spec := testApp(t)
-	// A realistic spec: the release dir is always a writable bind, which
-	// is also what puts the command inside the unit's view.
-	spec.sandbox = &sandboxSpec{tier: sandboxFull, root: "/var/lib/liveswap",
-		writable: []bindPath{{dest: spec.dir, source: spec.dir}}}
 	// The fake presets MainPID 4242 at start; flip it to 4243 shortly
 	// after, like the manager does once the namespace is set up.
 	go func() {
@@ -1001,24 +1019,23 @@ func TestSystemdRunnerStartSettlesMainPIDForFullTier(t *testing.T) {
 			}
 		}
 		time.Sleep(30 * time.Millisecond)
-		conn.setStatus(conn.unit(0).Name, unitStatus{LoadState: "loaded", ActiveState: "active", MainPID: 4243})
+		conn.setStatus(conn.unit(0).Name, unitStatus{LoadState: "loaded", ActiveState: "active", MainPID: 4243, Sandboxed: true})
 	}()
 	h, err := r.Start(spec)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if h.state().PID != 4243 {
-		t.Fatalf("full-tier start returned the intermediate pid %d, want the settled 4243", h.state().PID)
+		t.Fatalf("start returned the intermediate pid %d, want the settled 4243", h.state().PID)
 	}
 }
 
 // TestProbeUnitsAreNotAppUnits: the capability probe's unit must sit
 // outside the app-name grammar, or a concurrent sweepUnknownApps would
 // stop it mid-probe — or an app legitimately called "sandbox-probe"
-// would collide with it — downgrading the tier, or failing `sandbox
-// require`, for no reason at all.
+// would collide with it — failing the start for no reason at all.
 func TestProbeUnitsAreNotAppUnits(t *testing.T) {
-	name, err := unitName(startSpec{app: "sandbox-probe", version: "full", probe: true}, true)
+	name, err := unitName(startSpec{app: "sandbox-probe", version: "probe", probe: true}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1050,11 +1067,10 @@ func TestProbeUnitsAreNotAppUnits(t *testing.T) {
 // test starts at 4242 and never exercises this.
 func TestSystemdRunnerSettlesFromUnpublishedMainPID(t *testing.T) {
 	r, conn := newTestSystemdRunner(t)
+	r.settle = mainPIDSettle
 	spec := testApp(t)
-	spec.sandbox = &sandboxSpec{tier: sandboxFull, root: "/var/lib/liveswap",
-		writable: []bindPath{{dest: spec.dir, source: spec.dir}}}
 	// 0 (nothing published yet) -> 4242 (the intermediate) -> 4243 (the app).
-	conn.startStatus = &unitStatus{LoadState: "loaded", ActiveState: "active", SubState: "running", MainPID: 0}
+	conn.startStatus = &unitStatus{LoadState: "loaded", ActiveState: "active", SubState: "running", MainPID: 0, Sandboxed: true}
 	go func() {
 		for {
 			time.Sleep(2 * time.Millisecond)
@@ -1067,9 +1083,9 @@ func TestSystemdRunnerSettlesFromUnpublishedMainPID(t *testing.T) {
 		}
 		name := conn.unit(0).Name
 		time.Sleep(20 * time.Millisecond)
-		conn.setStatus(name, unitStatus{LoadState: "loaded", ActiveState: "active", SubState: "running", MainPID: 4242})
+		conn.setStatus(name, unitStatus{LoadState: "loaded", ActiveState: "active", SubState: "running", MainPID: 4242, Sandboxed: true})
 		time.Sleep(20 * time.Millisecond)
-		conn.setStatus(name, unitStatus{LoadState: "loaded", ActiveState: "active", SubState: "running", MainPID: 4243})
+		conn.setStatus(name, unitStatus{LoadState: "loaded", ActiveState: "active", SubState: "running", MainPID: 4243, Sandboxed: true})
 	}()
 	h, err := r.Start(spec)
 	if err != nil {
