@@ -1,56 +1,48 @@
-# DESIGN — threat model and process-isolation evaluation
+# DESIGN — threat model
 
-Status: analysis. This document states what hotserve is defending, who
-the attacker is, the concrete paths from an entry point to an asset,
-and how three candidate isolation/hardening stacks score against those
-paths. It is the decision record behind the "per-app sandboxing"
-roadmap item; [DESIGN-sandbox.md](liveswap/DESIGN-sandbox.md) remains
-authoritative for the sandbox's behaviour spec, config surface and
-rollout semantics (its bubblewrap mechanics are superseded — see "The
-shared-UID rule"), and this document places that work in the wider
-attack surface rather than restating it.
+This document describes the present: what is built, why, and what it
+promises. History lives in git (`git log -- DESIGN-threat-model.md`);
+the "History" section at the end holds only dated one-liners.
+Amendments are for decisions still fresh or contested and get folded
+into the body once they settle.
 
-Scope: a single Debian 13 box (the support matrix; narrowed from
-Debian 12/13 + Ubuntu 24.04/26.04 on 2026-09-01 — see "Amendment" at
-the end of the Recommendation) running `hotserve` (a Caddy
-distribution) as the `hotserve` system user, supervising deployed apps
-as transient systemd units under the hotserve user's own service
-manager via liveswap's `systemdRunner`
+This document states what hotserve is defending, who the attacker is,
+the concrete paths from an entry point to an asset, and how the shipped
+isolation closes or bounds each one.
+[liveswap/DESIGN-sandbox.md](liveswap/DESIGN-sandbox.md) is authoritative
+for the sandbox's behaviour specification; this document places that
+work in the wider attack surface rather than restating it.
+
+Scope: a single Debian 13 box running `hotserve` (a Caddy distribution)
+as the `hotserve` system user, supervising deployed apps as transient
+systemd units under the hotserve user's own service manager via
+liveswap's `systemdRunner`
 ([liveswap/runner_systemd.go](liveswap/runner_systemd.go)). Multi-node,
 Windows, and macOS-as-a-server are out of scope by product design.
 
-> **Update — the deploy secret has been removed from the box.** Deploy
-> auth is now asymmetric (`deploy_trust`, see "Reducing the asset"
-> below): the supervisor holds only public material, so the former
-> top asset — a symmetric `LIVESWAP_SECRET` readable via
-> `/proc/<supervisor>/environ` — no longer exists. ACME DNS tokens and
-> TLS keys remain, so the isolation work below still stands; the
-> ranking is left intact as the pre-change record, with the deploy
-> secret struck through.
-
 ## Assets (what an attacker is after), ranked
 
-1. ~~**`LIVESWAP_SECRET`** — the deploy secret.~~ **Removed.** Deploys
-   are now authenticated by a verified JWT (CI OIDC or a local public
-   key); there is no shared deploy secret on the box. A stolen token is
-   short-lived and audience/claim-scoped, and the verifier holds only
-   public keys.
-2. **ACME DNS tokens** — in the supervisor env; issue/alter certs.
-   The highest-value item on the box. Was reachable via
-   `/proc/<supervisor>/environ`; closed by the non-dumpable supervisor
-   ("The shared-UID rule"). Still on disk wherever Caddy persists
-   config (`/var/lib/hotserve/caddy/autosave.json`) — a filesystem route.
-3. **TLS private keys** — `/var/lib/hotserve/caddy/**`, mode `0750`
+1. **ACME DNS tokens** — in the supervisor env; issue/alter certs. The
+   highest-value item on the box. The `/proc/<supervisor>/environ`
+   route is closed by the non-dumpable supervisor and by the app-side
+   namespaces ("The shared-UID rule"). Still on disk wherever Caddy
+   persists config (`/var/lib/hotserve/caddy/autosave.json`) — a
+   filesystem route, closed by the sandbox view.
+2. **TLS private keys** — `/var/lib/hotserve/caddy/**`, mode `0750`
    owned by `hotserve`.
-4. **Admin API socket** — `/run/hotserve/admin.sock`
+3. **Admin API socket** — `/run/hotserve/admin.sock`
    ([packaging/Caddyfile:18](packaging/Caddyfile)); reconfigures the
    whole server. Gated on being the `hotserve` user, not on the network.
-5. **Per-app secrets** — an app's own env vars / `env_file`
+4. **Per-app secrets** — an app's own env vars / `env_file`
    (`/etc/hotserve/*.env`). Legitimately reachable by that app; the
    goal is to keep them from *siblings*.
-6. **Sibling app data** — `/var/lib/liveswap/<app>/{releases,shared,state.json}`.
-7. **System integrity** — root, persistence, other system services.
-8. **Availability** — serving traffic and the deploy pipeline.
+5. **Sibling app data** — `/var/lib/liveswap/<app>/{releases,shared,state.json}`.
+6. **System integrity** — root, persistence, other system services.
+7. **Availability** — serving traffic and the deploy pipeline.
+
+There is no deploy secret on the box. Deploys are authenticated by a
+verified JWT (CI OIDC or a local public key); the verifier holds only
+public material — see "Reducing the asset".
 
 ## Trust boundaries and entry points
 
@@ -66,12 +58,11 @@ existence is revealed: an unknown app name is verified against the
 *global* trust sources so callers cannot enumerate app names
 ([handler.go:76-110](liveswap/handler.go)). Config load refuses an app
 that resolves to zero trust sources ([liveswap.go](liveswap/liveswap.go)).
-The `X-Liveswap-Secret` custom header is retired — Bearer only, which
-Caddy redacts from access logs.
+Bearer is the only transport, which Caddy redacts from access logs.
 
 Properties that matter to the model:
 
-- **GET and POST both sit behind the secret.** GET returns full status,
+- **GET and POST both sit behind the token.** GET returns full status,
   POST deploys, all else 405 ([handler.go:101-109](liveswap/handler.go)).
   The status endpoint is authenticated — not public.
 - **No rate limiting anywhere on the auth path.** No throttle, lockout,
@@ -79,19 +70,31 @@ Properties that matter to the model:
   not a guessing oracle — but each failure logs at Warn with `app`+`remote`
   ([handler.go:90-95](liveswap/handler.go)), an unauthenticated
   log-amplification / disk-fill primitive, and every attempt costs a
-  JWT/JWKS verification. Body is
-  capped at 64 KiB → 413 ([handler.go:37,133-140](liveswap/handler.go));
-  `deployMu.TryLock()` → 409 serializes deploys
-  ([app.go:258-260](liveswap/app.go)) but does nothing for auth attempts.
+  JWT/JWKS verification. Body is capped at 64 KiB → 413
+  ([handler.go:37,133-140](liveswap/handler.go)); `deployMu.TryLock()`
+  → 409 serializes deploys ([app.go:343](liveswap/app.go)) but does
+  nothing for auth attempts.
 - **Path routing is `path.Base(path.Clean(...))`**
   ([handler.go:77](liveswap/handler.go)): `/anything/deep/myapp` targets
   `myapp`. A naive `path /deploy/*` site matcher does not constrain the
   app name; the operator's matcher is the only constraint.
-- **Payload:** three fields only — `url`, `version`, `auth_header`
-  ([app.go:112-116](liveswap/app.go)); unknown JSON silently ignored (no
-  `DisallowUnknownFields`). `version` is `^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$` (no leading
-  dot, so never `.`/`..` or a release-GC bookkeeping name),
-  double-sanitized before touching the filesystem
+- **Three request shapes** ([handler.go:112-124](liveswap/handler.go)),
+  all behind the same token: a JSON body pulls from a URL (below); a
+  gzip body **pushes** the artifact itself (`POST /<app>?version=`,
+  [handler.go:174-215](liveswap/handler.go)) — the bytes come straight
+  from the authenticated caller, capped at `max_artifact_size`, staged
+  under the app's `tmp/` and extracted like a download, and **no
+  `artifact_allowlist` is consulted** because there is no URL to pin;
+  `?rollback=` relaunches an on-disk release. The push path has no
+  SSRF surface, but it means a token-holder can deploy arbitrary
+  bytes with no artifact host in the loop: the allowlist confines
+  *pulls*, and only the claim scope confines *who*.
+- **Pull payload:** three fields only — `url`, `version`, `auth_header`
+  ([app.go:108-110](liveswap/app.go)); unknown JSON silently ignored (no
+  `DisallowUnknownFields`). `version` is
+  `^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$` (no leading dot, so never
+  `.`/`..` or a release-GC bookkeeping name), double-sanitized before
+  touching the filesystem
   ([liveswap.go:65,77-79,85-87](liveswap/liveswap.go)). `auth_header`
   is only control-char-checked ([handler.go:164-169](liveswap/handler.go));
   its contents are attacker-chosen and forwarded to the allowlisted host.
@@ -101,28 +104,23 @@ Properties that matter to the model:
   entry names, the operator's allowlist echoed verbatim
   ([allowlist.go:279-281,363,379](liveswap/allowlist.go)). The status
   snapshot exposes the app's **port and PID** and watchdog cause/failure
-  state ([app.go:519-543](liveswap/app.go),
-  [watchdog.go:234-254](liveswap/watchdog.go)). Artifact URLs *are*
+  state ([app.go:873](liveswap/app.go) `status()`,
+  [watchdog.go:255-275](liveswap/watchdog.go)). Artifact URLs *are*
   redacted before logs/errors ([download.go:158-163](liveswap/download.go)),
-  so query signatures do not leak — handled well.
-- **Replay / downgrade — now bounded.** The bearer JWT is short-lived
-  (`exp`), so a captured request is replayable only within that window,
-  not indefinitely. And versions are immutable: re-deploying an existing
-  version (running or not) is refused 422, so replaying an *older*
-  deploy's payload no longer downgrades the app. A token-holder can
-  still downgrade deliberately via `?rollback=<version>` — but that is an
-  explicit, audited operation (`deployed_by` + a `source:rollback` log),
-  not a silent replay side-effect.
-- **Header-in-logs footgun — fixed.** The custom `X-Liveswap-Secret`
-  header (logged in plaintext, unlike the redacted `Authorization`) has
-  been removed; Bearer is the only transport. (Deploy tokens are also
-  short-lived, so an access-log leak is far less valuable than a leaked
-  long-lived secret would have been.)
+  so query signatures do not leak.
+- **Replay / downgrade is bounded.** The bearer JWT is short-lived
+  (`exp`), so a captured request is replayable only within that window.
+  Versions are immutable: re-deploying an existing version (running or
+  not) is refused 422, so replaying an *older* deploy's payload does not
+  downgrade the app. A token-holder can still downgrade deliberately
+  via `?rollback=<version>` — an explicit, audited operation
+  (`deployed_by` + a `source:rollback` log), not a silent replay
+  side-effect.
 
 ### Artifact fetching — `liveswap/download.go` + `allowlist.go`
 
 The allowlist is **mandatory** — config load fails without one
-([liveswap.go:397](liveswap/liveswap.go)); no any-origin mode. Pinning
+([liveswap.go:507](liveswap/liveswap.go)); no any-origin mode. Pinning
 ([allowlist.go:382-449](liveswap/allowlist.go)) rebuilds the outgoing
 URL so scheme is constant, host/port/path-prefix come from *config
 bytes*, and only the path suffix + query come from the payload — the
@@ -132,7 +130,7 @@ request can never contribute host bytes, with two fail-closed re-checks
 ([allowlist.go:433](liveswap/allowlist.go)). Canonicalization
 ([allowlist.go:180-227](liveswap/allowlist.go)) and query gating
 ([allowlist.go:238-284](liveswap/allowlist.go)) are thorough and
-closed-by-default. This is a genuinely strong design.
+closed-by-default.
 
 `https` only unless `allow_insecure_http`
 ([download.go:41-49](liveswap/download.go)), re-enforced on **every
@@ -142,7 +140,7 @@ on cross-host redirects but **not** same-host
 ([download.go:77-82](liveswap/download.go)). Size: Content-Length
 pre-check plus streaming `LimitReader`, default 100 MB
 ([download.go:94-114](liveswap/download.go),
-[liveswap.go:332-333](liveswap/liveswap.go)).
+[liveswap.go:423-424](liveswap/liveswap.go)).
 
 **The documented, real gap:** the host allowlist governs the **first
 hop only** — `CheckRedirect` deliberately does not re-check the host
@@ -179,8 +177,8 @@ Residual items for the model:
   passes `IsLocal`, but nothing resolves the on-disk path *through*
   an earlier-written symlink. Blast radius is bounded (targets must stay
   symbolically under root; extraction is into a hidden staging dir
-  `os.Rename`d on success, [download.go:196-215](liveswap/download.go)).
-  Flagged for the sandbox review, not asserted as exploitable.
+  `os.Rename`d on success, [download.go:232](liveswap/download.go)).
+  Not asserted as exploitable.
 - **No entry-count or path-length cap** independent of the byte budget:
   a billion 1-byte entries fits in 1 GB → CPU/inode exhaustion. The
   archive is read **twice**, so the byte cap permits 2× the work.
@@ -191,16 +189,17 @@ Residual items for the model:
 
 The starter config exposes only `:80` returning a static string; the
 entire liveswap/webhook block ships commented out
-([packaging/Caddyfile:23-65](packaging/Caddyfile)) — a fresh install
+([packaging/Caddyfile:26-92](packaging/Caddyfile)) — a fresh install
 has no deploy endpoint. Admin is off TCP, on
 `unix//run/hotserve/admin.sock` ([packaging/Caddyfile:18](packaging/Caddyfile)),
 `RuntimeDirectoryMode=0750` owned by the service user
-([packaging/hotserve.service:26-29](packaging/hotserve.service)) — so
-admin access is gated on *being the `hotserve` user*, which every
-deployed app already is (stated honestly at
-[packaging/Caddyfile:13-15](packaging/Caddyfile)). The recommended
-webhook deployment ([Caddyfile:63-65](packaging/Caddyfile)) is a public
-TLS vhost with only the shared secret and no rate limiting in front.
+([packaging/hotserve.service:33-34](packaging/hotserve.service)) — so
+admin access is gated on *being the `hotserve` user*. Every deployed
+app is that user, but a sandboxed app cannot reach `/run/hotserve` at
+all (the path is not in its view), so the gate holds against apps and
+only hotserve itself can connect. The example webhook deployment
+([Caddyfile:90-92](packaging/Caddyfile)) is a public TLS vhost with
+`liveswap_webhook` behind `deploy_trust` and no rate limiting in front.
 
 **penaltybox** is a response-phase rate-limit-hint enforcer; it touches
 untrusted input only narrowly (the client key defaults to
@@ -211,35 +210,27 @@ bounded by `max_keys` (default 100 000, idle-eviction). The origin's
 hint header is strict-parsed and fails open. It is a minor surface:
 denial-of-protection under bad config, not injection or exhaustion.
 
-### Supervisor⇄app and app⇄app boundaries — **built (2026-08-31, #35)**
+### Supervisor⇄app and app⇄app boundaries
 
-> **Status:** this section described the state before per-app
-> sandboxing shipped, when a transient unit gave a cgroup and nothing
-> else. It is kept for the reasoning that follows; what it says is
-> *missing* is now in place. Every app unit runs in its own user
-> namespace (and, on systemd ≥ 256, its own PID namespace) with a
-> deny-by-default filesystem view — see "The shared-UID rule" below
-> and the Recommendation at the end. The network namespace is still
-> shared, by design.
-
-Every app runs as `hotserve`. Before #35 that meant the host's mount,
-PID and network namespaces ([runner_systemd.go](liveswap/runner_systemd.go)
-— a transient unit under the user manager gives a cgroup, not a
-namespace, and unlike the exec runner's children the apps no longer
-sit inside hotserve.service's `PrivateTmp`/`ProtectSystem`). The unit
-environment is the user manager's defaults (`XDG_RUNTIME_DIR`,
-`INVOCATION_ID`, …) plus an allowlisted slice of hotserve's (`PATH,
-HOME, LANG, TZ, LC_*`, [app.go](liveswap/app.go) `inheritedEnv`) —
-closing *direct* inheritance of
-ACME tokens (and any other supervisor secrets); the `/proc` route is
-closed by the non-dumpable supervisor ("The shared-UID rule" below);
-the filesystem routes were what remained. This is the boundary the
-whole evaluation existed to build, and #35 phase 1 builds it.
+Every app runs as `hotserve`, in its own user namespace and its own PID
+namespace, with a deny-by-default filesystem view — see "The shared-UID
+rule" and "The shipped mechanism". The network namespace is shared, by
+design. The unit environment is the user manager's defaults
+(`INVOCATION_ID`, …; `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`
+are unset because `/run/user` is not in the view) plus an allowlisted
+slice of hotserve's (`PATH`, `LANG`, `TZ`, `LC_*` —
+[app.go](liveswap/app.go) `envAllowlist`; `HOME` is never inherited,
+`buildEnv` sets it to the app's shared dir) — closing *direct*
+inheritance of ACME tokens and any other supervisor secret
+(`TestBuildEnvDoesNotLeakSupervisorSecrets`). The `/proc` route is
+closed twice over (non-dumpable supervisor; cross-namespace refusal);
+the filesystem routes are closed by absence.
 
 ### Install-time — `packaging/postinstall.sh`
 
 Runs as root at install; creates the `hotserve` user, chowns
-`/var/lib/{hotserve,liveswap}`. Supply-chain attacks on hotserve's own
+`/var/lib/{hotserve,liveswap}`, enables linger so the hotserve user
+manager runs without a session. Supply-chain attacks on hotserve's own
 build land here, but they run in CI, not from a deployed app — out of
 scope for the runtime model, in scope for release signing (roadmap).
 
@@ -249,13 +240,15 @@ scope for the runtime model, in scope for release signing (roadmap).
   primary threat, per the npm 2025 wave: a transitive dependency's
   runtime payload sweeps the filesystem for `.env`/tokens and
   exfiltrates. Already has code execution as `hotserve`. This is the
-  attacker per-app isolation must stop.
-- **T2 — Stolen deploy token / compromised CI identity.** With the
-  symmetric secret retired, this is now a short-lived, claim-scoped
-  token (or control of the CI identity that mints one). Can still
-  deploy arbitrary code and downgrade versions within
-  `artifact_allowlist` for the token's lifetime; containment is the
-  allowlist and the claim scope, not the runtime.
+  attacker per-app isolation exists to stop.
+- **T2 — Stolen deploy token / compromised CI identity.** A short-lived,
+  claim-scoped token (or control of the CI identity that mints one). Can
+  deploy arbitrary code to every app that accepts that trust source for
+  the token's lifetime — by pushing a tarball directly, which passes no
+  allowlist, or by pulling from a URL within `artifact_allowlist` — and
+  roll back versions. Containment is the claim scope (and, for pulls,
+  the allowlist), not the runtime; the sandbox bounds what the deployed
+  code then reaches.
 - **T3 — Malicious/compromised artifact host** within the allowlist
   pin. Controls tarball bytes, status, redirect targets (any https
   host), timing. Faces `extract.go` and the first-hop SSRF gap.
@@ -268,37 +261,18 @@ scope for the runtime model, in scope for release signing (roadmap).
   probability, catastrophic: it *is* the `hotserve` user, so it already
   holds every asset short of root. No app-isolation design prevents
   this; the design question is only how much *worse* it can get (does it
-  reach root?) — which is where the polkit trap below lives.
+  reach root?) — which is why the supervisor holds no grant (see "The
+  shipped mechanism").
 
-## Enumerated attack paths (the pre-#35 baseline — history)
-
-For **T1**, the set reachable before per-app sandboxing — the boundary
-matrix as it stood. Since 2026-09-03 every app unit is sandboxed with
-no opt-out, so every ✔ below describes a bare app that no longer
-exists on a running box (see the amendment at the end); the rows are
-kept as what the sandbox was built to close:
-
-| Path | Reachable today | Mechanism |
-|---|---|---|
-| `/proc/<supervisor>/environ` → ACME tokens | ✘ closed | same UID, but hotserve is non-dumpable (see "The shared-UID rule") |
-| connect admin socket → reconfigure server | ✔ | dir `0750`, same UID |
-| read TLS private keys | ✔ | same UID, `/var/lib/hotserve` |
-| read/write sibling releases, `shared`, `state.json` | ✔ | same UID |
-| read sibling `env_file` (`/etc/hotserve/*.env`) | ✔ | operator-set mode, same UID |
-| talk to sibling `127.0.0.1:$PORT` directly | ✔ | shared netns |
-| signal / `/proc`-inspect sibling processes | ✔ | shared PID ns |
-| exec setuid binary (`sudo`/`pkexec` class) | ✔ | no `no_new_privs` |
-| fork-bomb / memory exhaust the box | ✔ | no cgroup/rlimit |
-| network exfiltration | ✔ | shared netns, no egress policy |
-
-For **T2**: deploy-arbitrary-code (contained only by the allowlist);
-version-downgrade. For **T3**: archive-borne CPU/inode exhaustion; the
+For **T2**: deploy-arbitrary-code (a push is contained by nothing but
+the claim scope; a pull additionally by the allowlist); deliberate
+rollback. For **T3**: archive-borne CPU/inode exhaustion; the
 link-TOCTOU shape (unproven); first-hop→any-https SSRF. For **T4**:
-log-amplification disk-fill (online *token forgery* is infeasible —
-see below). For **T5**: total, by definition — the containment
-question is root-vs-not-root.
+log-amplification disk-fill (online *token forgery* is infeasible).
+For **T5**: total, by definition — the containment question is
+root-vs-not-root.
 
-## The shared-UID rule (normative for every approach)
+## The shared-UID rule
 
 Everything liveswap touches runs as one UID: hotserve, the hotserve
 user's `systemd --user` manager, and every app. The kernel gates
@@ -310,220 +284,184 @@ the uid and dumpable checks the LSM hook runs, and commoncap's
 `cap_ptrace_access_check` refuses a caller whose `user_ns` differs
 from the target's unless the caller holds `CAP_SYS_PTRACE` *in the
 target's namespace*, which an app in a child namespace never does.
-(An earlier version of this section said "regardless of user
-namespace"; the 2026-08-30 spike on #35 measured otherwise — bare:
-`/proc/<manager>/root` open; `PrivateUsers=yes` alone: denied.) Three
-consequences, and they decide the mechanism:
+(Measured on the 2026-08-30 spike — bare: `/proc/<manager>/root` open;
+`PrivateUsers=yes` alone: denied.) Three consequences, and they decide
+the mechanism:
 
 1. **No mount sandbox without a namespace the ptrace check honours.**
    A sandboxed app that can `ptrace`-read any same-UID PID outside its
    sandbox opens `/proc/<that-pid>/root/…` and walks the host
    filesystem. The user manager (host root, same UID, always running)
    is a permanent such target; every sibling app is another.
-   `ProtectSystem=strict`, `InaccessiblePaths=`, a bubblewrap
-   `--ro-bind` view are all void without one. `ProtectProc=invisible`
-   does not substitute: `hidepid` hides other *users'* processes, and
-   there are no other users here. Two namespaces do, and they close
-   different things:
+   `ProtectSystem=strict`, `InaccessiblePaths=`, any bind-mounted view
+   are all void without one. `ProtectProc=invisible` does not
+   substitute: `hidepid` hides other *users'* processes, and there are
+   no other users here. Two namespaces do, and they close different
+   things:
    - a **user namespace** (`PrivateUsers=yes`) closes the `/proc`
      reads — `root`, `environ`, `cwd`, `mem`, `fd` — of every process
      outside it, so the mount restrictions hold. Signals still
-     deliver: `kill` checks uids, not namespaces. Available on every
-     user manager in the support matrix (explicit on 252; implied by
-     the mount options from 253).
-   - a **PID namespace** (`PrivatePIDs=yes`, systemd ≥ 256) makes
-     those processes invisible and unsignalable, and gives the unit
-     an in-namespace init. Debian 13 and Ubuntu 26.04.
+     deliver: `kill` checks uids, not namespaces.
+   - a **PID namespace** (`PrivatePIDs=yes`) makes those processes
+     invisible and unsignalable, and gives the unit an in-namespace
+     init.
 
-   **Shipped (#35 phase 1, 2026-08-30):** two tiers, probe-gated at
-   Start. *filesystem* — user namespace plus the mount, device,
-   cgroup, seccomp and capability set — on every cell; *full* —
-   filesystem plus the PID namespace — where the manager is ≥ 256.
-   Below 256 the residual is DoS-class (a compromised app can
-   enumerate and `kill` same-UID processes; hotserve.service and the
-   watchdog restart what it kills), not data access, and is warned
-   about at every launch; `sandbox require` accepts only *full*.
-   Bubblewrap is not carried as a second mechanism. Ubuntu 22.04 is
-   dropped from the matrix. Ubuntu 24.04+ restricts unprivileged user
-   namespaces to unconfined processes (measured on CI's Ubuntu-kernel
-   runner: probe exit 226, tier none); the package ships an AppArmor
-   profile granting `userns` to hotserve's user manager alone,
-   attached by path to the wrapper `user@<uid>.service` is started
-   through (`AppArmorProfile=` cannot be used: for an unprivileged unit
-   newer AppArmor converts it into a stack with `unconfined`, which
-   stays restricted — seen on Ubuntu 26.04). Residual: that
-   permission is inherited by the manager's children, so an app run
-   with `sandbox off` (gone since 2026-09-03) on such a host may
-   create user namespaces where the distro default would refuse —
-   sandboxed apps cannot (`RestrictNamespaces=`).
+   Every app unit gets both. There is no lesser configuration and no
+   opt-out: a host that cannot deliver both namespaces fails the start
+   rather than running any app bare (`unitFor` refuses a spec without
+   a sandbox). A unit hotserve did not start with them — a stale one
+   from a development build, or another same-uid process's — is
+   refused at reattach and replaced by a sandboxed relaunch, so "every
+   unit" holds for adopted units too. That check is for an honest
+   stale unit; a same-uid process that starts units on purpose can
+   give one any property set, and is the trust domain, not a boundary
+   the check could hold.
 
-   **Superseded 2026-09-01 (matrix narrowed to Debian 13):** the
-   second tier and the AppArmor profile are gone. There is one tier,
-   *full*, and one candidate in the probe; a host that cannot deliver
-   both namespaces is refused: since 2026-09-03 there is no policy at
-   all — every unit is sandboxed and an incapable host fails the
-   start rather than running any app bare. The paragraph above is kept because the
-   measurements behind it — that a user namespace alone closes the
-   `/proc` routes, that AppArmor path-attachment is the only way to
-   grant `userns` to one manager — are what the current design rests
-   on, and because they are the evidence for readmitting Ubuntu should
-   that ever be wanted. Consequence accepted: a Debian 12 host that
-   upgrades hotserve is refused outright rather than degraded (at
-   the time of the narrowing it dropped to `none` with a WARN and a
-   status field; since 2026-09-03 there is no `none` — the start
-   fails). That is what dropping support means. A unit still running
-   from a development build that predates this is refused at
-   reattach and relaunched sandboxed (the runner checks the live
-   unit's namespaces — an honest-stale-unit check, not a defence
-   against a same-uid process starting units on purpose, which is
-   inside the trust domain already). `v0.1.0`, the only tag,
-   predates sandboxing entirely and has no users; no release since
-   has had a way to run an app without the sandbox.
-2. **A non-dumpable supervisor is the floor on every host.**
+   **Corollary: an opt-out is impossible on a shared uid.** A per-app
+   "sandbox off" reads as per-app; it is not — a bare app reads every
+   sibling's data and hotserve's keys. The rule that makes the user
+   namespace load-bearing is the rule that makes any app outside a
+   namespace every app's problem.
+
+2. **A non-dumpable supervisor is the floor.**
    `prctl(PR_SET_DUMPABLE, 0)` makes hotserve's `/proc` entries require
-   `CAP_SYS_PTRACE`, which apps under `NoNewPrivileges` never hold —
-   with or without user namespaces. **Shipped:** `liveswap/harden`, a
-   leaf package whose `init` runs right after `syscall`'s — before
-   `os`, `fmt`, Caddy and every package depending on them; only
+   `CAP_SYS_PTRACE`, which apps never hold — the unit's
+   `CapabilityBoundingSet=` is empty and `NoNewPrivileges=` stops an
+   `execve` from acquiring any — with or without user namespaces.
+   `liveswap/harden` is a leaf package
+   whose `init` runs right after `syscall`'s — before `os`, `fmt`,
+   Caddy and every package depending on them; only
    `syscall`-closure-only leaves that sort earlier can precede it, and
    those cannot touch `/proc` (measured with `GODEBUG=inittrace=1`:
    the 17th of 460 initializers on hotserve, two such leaves ahead of
    it; `TestInitRunsBeforeOS` pins `syscall < harden < os` in any
-   binary that runs it) — so any binary
-   importing liveswap (hotserve or an xcaddy build) is non-dumpable
-   before `main`; a failure is fatal. Pinned by a unit test and by the
-   real-systemd e2e suite (scenario 11). It closes the
-   `/proc/<supervisor>/environ` and `/proc/<supervisor>/root` routes
-   only; TLS keys on disk, the admin socket and sibling files still
-   need the mount namespace.
-   *Residual:* app units outlive supervisor restarts, so a same-UID
-   app already running can race the interval between `execve` and
-   that `init` — the Go runtime's start-up plus `syscall`'s own
-   dependencies, well under a millisecond — and read the new
-   supervisor's environment. On the support matrix that is a *read*
-   race: Yama's default `kernel.yama.ptrace_scope=1` forbids a
-   non-descendant from `PTRACE_ATTACH`/`PTRACE_SEIZE` at any time
-   (Yama gates `PTRACE_MODE_ATTACH`, which the dumpable flag does not
-   govern), so an app cannot seize the supervisor in the window; on a
-   host set to `ptrace_scope=0` an attach made in the window would
-   survive `PR_SET_DUMPABLE=0` and amount to persistent supervisor
-   compromise — such hosts are outside this model. Only the kernel
-   closes the window, and only from the app's side: an app unit in
-   its own user namespace cannot read the supervisor's `/proc` at all
-   (the cross-namespace refusal above is not gated on the dumpable
-   flag), and one in its own PID namespace cannot see the
-   supervisor's PID — a namespace on `hotserve.service` would not
-   help, because a parent PID namespace sees its children's processes.
-   With #35 phase 1 the window is closed for every sandboxed app, and
-   since 2026-09-03 every app is sandboxed — `sandbox off` is gone and
-   a host without a usable user namespace does not start — so it
-   stands for nothing on a running box. Stated here rather than in
-   the README's one-line claim.
-*Residual the sandbox cannot close by itself:* every path a unit binds
-is checked by name, and between that check and the manager following
-it, any process sharing the hotserve UID can swap what it points at.
-During the documented bare-to-sandbox rollout the old bare instance is
-still running — a deploy stops it only once the new one is healthy —
-so that process can be the very app being sandboxed. hotserve resolves
-and re-checks each bind source at unit creation, the last moment
-before the manager acts, which closes the planted-symlink case and
-leaves only this race; no pathname check can close the race itself
-while the supervisor and its apps are the same principal. A sandboxed
-app cannot reach the mount points at all, so the exposure is bounded
-to apps already running unsandboxed on a box this model treats as one
-trust domain. Per-app UIDs are what closes it. **Closed 2026-09-03:**
-no app runs unsandboxed — `sandbox off` is gone — and inside a view
-the app directory is a tmpfs of mount points an app cannot unlink, so
-the only process sharing the hotserve uid outside a sandbox is
-hotserve itself.
+   binary that runs it) — so any binary importing liveswap (hotserve or
+   an xcaddy build) is non-dumpable before `main`; a failure is fatal.
+   Pinned by a unit test and by the real-systemd e2e suite (scenario
+   11). It closes the `/proc/<supervisor>/environ` and
+   `/proc/<supervisor>/root` routes only; TLS keys on disk, the admin
+   socket and sibling files need the mount namespace.
 
-*A unit's view is a policy, not a snapshot.* **Closed 2026-08-31
-(#35).** This row used to record the opposite. systemd builds a unit's
-mount namespace at start and hotserve never rebuilds it under a
-running app (reloads leave instances alone by design), so while the
-view was *the host, minus a set of paths derived from the running
-configuration*, that set aged: an `env_file` belonging to an app added
-later was merely read-only inside older siblings' sandboxes rather
-than absent, and a path created after a unit started was not masked in
-it at all. The sibling-secret row therefore held only for instances
-launched after the secret was declared.
+   *Residual, recorded because `liveswap/harden` cites it:* app units
+   outlive supervisor restarts, so a same-UID app could in principle
+   race the interval between `execve` and that `init` — well under a
+   millisecond — and read the new supervisor's environment. On Debian
+   13 that is a *read* race: Yama's default
+   `kernel.yama.ptrace_scope=1` forbids a non-descendant from
+   `PTRACE_ATTACH`/`PTRACE_SEIZE` at any time (Yama gates
+   `PTRACE_MODE_ATTACH`, which the dumpable flag does not govern), so
+   an app cannot seize the supervisor in the window; a host set to
+   `ptrace_scope=0` is outside this model. The window is closed from
+   the app's side by the namespaces above — an app in its own user
+   namespace cannot read the supervisor's `/proc` at all, and one in
+   its own PID namespace cannot see the supervisor's PID — and since
+   every app is sandboxed it stands for nothing on a running box.
 
-The view is now deny-by-default — `TemporaryFileSystem=/:ro` plus an
-explicit base view and the app's own two directories, and nothing
-widens it — so nothing is derived and nothing ages. A secret
-declared tomorrow is absent from a unit started yesterday for exactly
-the same reason every other path is: nothing ever bound it. Measured
-on all four cells of the then support matrix
-(systemd 252/255/257/259): inside a unit, `/etc` holds only the named
-base-view entries this host actually has — a dozen or so — and
-`/var/lib` holds the liveswap root alone.
-
-*What a bare app leaves behind, the sandbox keeps.* The sandbox
-restricts **reachability**; it cannot un-copy. `shared/` is the one
-directory that survives every deploy and is bound read-write into the
-new sandbox, so anything a bare instance put there — `sandbox off`, a
-host at the `none` tier, or simply any app before its first sandboxed
-deploy, which is the documented rollout — is inside the sandboxed
-app's view afterwards, legitimately, with every check passing because
-the bind resolves to exactly the directory it names. As the shared uid
-a bare app can `cp` the supervisor's TLS keys, a sibling's release or
-`shared` contents, or any readable `env_file` into its own `shared/`.
-Worse, it can `link(2)` them: the shared uid owns those files, so the
-hardlink is a live view of the inode, and an operator who later
-rotates a secret **in place** publishes the new value into the sandbox
-too — only replace-by-rename breaks the link. The operational
-consequence, stated in liveswap/README.md's rollout section: sandboxing
-an app that may have been compromised while bare is not containment;
-clear its `shared/` and rotate anything it could read first. **Closed
-2026-09-03** for every current box: nothing runs bare (`sandbox off`
-and the `none` tier are gone), so the only bare instance that can
-have left anything behind ran a hotserve older than sandboxing.
-
-*The recorded tier is app-writable.* A relaunch reproduces the tier
-from `state.json`, which lives under the shared uid and outside every
-sandboxed view — but a *bare* app can write any app's `state.json` and
-pin it to `none` across every supervisor restart, boot recovery and
-watchdog relaunch, with the status endpoint then honestly reporting
-`none`. It cannot redirect `CurrentVersion` out of the app
-(`versionPathComponent`, the `os.Stat` on the release dir, and
-`unitBelongsTo` each refuse). The signal is the WARN every such launch
-emits; the fix is per-app UIDs. **Closed 2026-09-03:** there is no
-bare app to write the record and no recorded tier to write — every
-relaunch is sandboxed like a deploy.
-
-*The capability probe runs under the shared uid.* It starts a real
-transient unit, bounded at 30s, so any process holding that uid can
-interfere with it. Since the policy became two-valued (2026-09-03) a
-failed probe fails the whole server start, which is the default
-posture — so this is an availability attack on the supervisor, not a
-way to weaken an app: interference cannot produce a running hotserve
-with the sandbox off. The verdict is therefore not solely a property
-of the host. The measurement is cached per manager connection, which
-narrows the window an attacker has to hit, and a failed verdict is
-deliberately NOT cached, so interference costs the next start rather
-than pinning a verdict until the manager restarts. There is no way to
-come up on a contested box without the probe passing (since
-2026-09-03 there is no `sandbox off`); the remedy is to remove the
-interfering process, which runs as the hotserve uid and is therefore
-either hotserve's own app or something already in the trust domain.
+   *The capability probe runs under the shared uid.* It starts a real
+   transient unit, bounded at 30 s, so any process holding that uid can
+   interfere with it. A failed probe fails the whole server start, so
+   this is an availability attack on the supervisor, not a way to
+   weaken an app: interference cannot produce a running hotserve with
+   a lesser sandbox. The verdict is cached per manager connection
+   (`userManagerClient.cachedSandboxCapability`,
+   [systemd_dbus.go:108](liveswap/systemd_dbus.go)), which narrows the
+   window,
+   and a failed verdict is deliberately NOT cached, so interference
+   costs the next start rather than pinning a verdict until the manager
+   restarts. The remedy is to remove the interfering process, which
+   runs as the hotserve uid and is therefore either hotserve's own app
+   or something already in the trust domain.
 
 3. **Resource caps need a read-only cgroupfs inside the sandbox.** The
    cgroup subtree under `user@<uid>.service` is delegated to — owned
    by — the hotserve UID, so `MemoryMax=`/`TasksMax=` on a user-manager
    unit is a limit the app can rewrite in `/sys/fs/cgroup` (or escape
    by migrating its PIDs) unless that tree is read-only in its view.
-   Runtimes only ever *read* it.
+   Runtimes only ever *read* it. `ProtectControlGroups=` is set on
+   every unit, so caps are real the moment they are set; none is set
+   today — the trigger is an app that needs bounding (#52).
 
-## Reducing the asset (deploy auth) — shipped
+## The shipped mechanism
 
-The two mitigation axes are orthogonal: *isolate the runtime* (the
-three approaches below) and *shrink the prize*. This axis is done.
+systemd's own per-unit sandboxing on the user-manager runner, issued as
+transient-unit properties by a supervisor that holds no grant.
 
-The former `LIVESWAP_SECRET` was bad on two counts: it was **symmetric**
-(the verifier stored the same value it checked, so the prize physically
-sat in the supervisor's env, reachable via `/proc`), and it was a
-**long-lived bearer** (theft was permanent, replay unbounded). The fix
-is asymmetric verification — the box holds only public material:
+**Why the user manager and not the system one.** polkit is blind to
+unit *properties*, so a `StartTransientUnit` grant on the *system*
+manager that the supervisor can shape is root-equivalent (a unit can
+name `User=root`, any `ExecStart=`) — a naive systemd runner would
+make T5 *worse*. hotserve instead talks to the hotserve user's own
+manager over its private socket (`/run/user/<uid>/systemd/private`):
+no session bus, no polkit, no grant of any kind. It can create units
+only as itself, under `NoNewPrivileges`, so a supervisor RCE gains
+nothing it did not already have (T5 unchanged). What only the system
+manager can buy — per-app `User=`, `IPAddressDeny=` egress filtering —
+stays future work and, if wanted, must arrive as a root-owned template
+or a minimal privileged helper, never as a system-manager transient
+grant.
+
+**The property set**, on every unit — `unitProperties` renders the
+lifecycle properties and appends `sandboxProperties` for the rest
+([liveswap/systemd_dbus.go:284,353](liveswap/systemd_dbus.go)):
+
+- Namespaces: `PrivateUsers=yes`, `PrivatePIDs=yes`, `PrivateTmp=yes`,
+  `PrivateDevices=yes`; `RestrictNamespaces=` (empty set — an app
+  cannot create further namespaces).
+- View: `TemporaryFileSystem=/:ro` replaces the whole filesystem with
+  an empty read-only tmpfs; `BindReadOnlyPaths=` puts back a named OS
+  base view and `BindPaths=` the app's release and `shared/` dirs.
+  Nothing else exists inside. There is no `InaccessiblePaths=` and no
+  `ProtectSystem=` because there is nothing left for either to act on
+  — an unnamed path is absent, not merely unreadable. The view is
+  deny-by-default, so nothing is derived from the running
+  configuration and nothing ages: a secret declared tomorrow is absent
+  from a unit started yesterday for the same reason every other path
+  is.
+- Kernel and privilege surface: `ProtectControlGroups=`,
+  `ProtectKernelTunables=`, `ProtectKernelModules=`,
+  `ProtectKernelLogs=`, `RestrictRealtime=`, `RestrictSUIDSGID=`,
+  `LockPersonality=`, `NoNewPrivileges=`, `CapabilityBoundingSet=`
+  (empty), `SystemCallFilter=@system-service` with
+  `SystemCallErrorNumber=EPERM`, `RestrictAddressFamilies=AF_INET
+  AF_INET6 AF_UNIX AF_NETLINK` (netlink stays read-only for
+  `getifaddrs()`, which Node and Go frameworks call at startup).
+- Lifecycle: `Restart=no` (the liveswap watchdog is the sole
+  restarter), `KillMode=control-group`,
+  `UnsetEnvironment=XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS`.
+
+**The probe stays.** At `App.Start` — every config activation —
+hotserve starts a real transient unit with this property set and reads
+back from inside it that both namespaces engaged. The verdict is
+cached against the manager connection's generation
+(`userManagerClient.cachedSandboxCapability`): later activations on
+the same connection read the cache, and a redial (a manager restart,
+or hotserve's own) starts a new generation that the next `Start`
+measures afresh. A unit launched between a redial and that next
+`Start` — a watchdog relaunch after the manager came back — is not
+preceded by a probe; if the host can no longer deliver the namespaces
+it fails `226/NAMESPACE` and the watchdog reports it, never a bare
+app. The probe is not a
+proxy for the systemd version — it is what catches a container, an LXC
+VPS or a kernel built without user namespaces, all of which can present
+a supported manager version and still refuse the unit. CI sets
+`kernel.apparmor_restrict_unprivileged_userns=0` on GitHub's Ubuntu
+kernel to make the runner behave like a Debian host, so no lane
+exercises a restricted kernel; the probe is the only thing standing
+between such a host and a silent loss of isolation. Deleting it would
+turn a measurement into a claim.
+
+**What it does not do**, by design: the network namespace is shared
+(sibling `127.0.0.1:$PORT` reachable; egress open); there are no
+per-app UIDs; resource caps are unset. Each is in "Residual risks".
+
+## Reducing the asset (deploy auth)
+
+The two mitigation axes are orthogonal: *isolate the runtime* (above)
+and *shrink the prize*. A symmetric, long-lived deploy secret would be
+bad on two counts: the verifier would store the same value it checks
+(so the prize physically sits in the supervisor's env), and theft would
+be permanent. hotserve uses asymmetric verification — the box holds
+only public material:
 
 - **OIDC (CI, primary):** the box verifies a per-run token against the
   provider's public JWKS and a claim allowlist (`deploy_trust github |
@@ -537,371 +475,95 @@ is asymmetric verification — the box holds only public material:
 Implementation: `liveswap/deploytrust.go` (verification via the vetted
 `go-oidc`/`go-jose`, never hand-rolled). Effects on the model:
 
-- **Asset #1 is gone from the box.** `/proc/<supervisor>/environ` no
-  longer yields a deploy credential; the top asset is now ACME tokens.
-- **T2 shrinks:** a stolen token is short-lived and claim-scoped, not a
-  permanent deploy-anything key. The compromise surface moves from
-  "a secret on the box" to "the CI identity that mints tokens."
-- **T4's online guessing disappears:** forging a token needs the
-  issuer's or operator's private key; there is nothing to brute-force.
-  (Rate limiting is still owed for the log-amplification vector.)
-- **Replay/downgrade is bounded** by the token's `exp` (minutes),
-  where the old bearer secret was replayable indefinitely.
+- **No deploy credential on the box.** `/proc/<supervisor>/environ`
+  would yield ACME tokens, not a deploy key; the top asset is ACME
+  tokens.
+- **T2 is bounded:** a stolen token is short-lived and claim-scoped, not
+  a permanent deploy-anything key. The compromise surface is "the CI
+  identity that mints tokens", not "a secret on the box".
+- **T4 has no online guessing:** forging a token needs the issuer's or
+  operator's private key; there is nothing to brute-force. (Rate
+  limiting is still owed for the log-amplification vector.)
+- **Replay is bounded** by the token's `exp` (minutes).
 
-What it does **not** do: ACME tokens and TLS keys still live on the box
-(the `/proc` and filesystem routes remain), so the isolation approaches
-below are still required. Auth redesign shrinks the prize; it does not
-isolate the runtime.
+What it does **not** do: ACME tokens and TLS keys still live on the box,
+so the sandbox is still required. Auth design shrinks the prize; it
+does not isolate the runtime.
 
-## The three candidate approaches
-
-All three sit behind the existing `runner` interface
-([liveswap/runner.go:12](liveswap/runner.go)), whose comment already
-anticipates a systemd-backed implementation slotting in without touching
-the state machine. The isolation dimension is added to `startSpec` as a
-**backend-agnostic** field (paths, uid, namespace flags), not as a bag
-of one backend's flags — so the approaches are swappable, not welded in.
-
-### A — "UID + hardening" (no user namespaces required)
-
-- `no_new_privs` on every spawned child (via a `setpriv` wrapper, or
-  free with the ambient-cap plumbing below) — kills the entire
-  setuid-binary escalation row.
-- Static per-app UIDs (`hotserve-app-<name>`), created at provision.
-  **Trap (test-pinned invariant):** the supervisor needs
-  `CAP_SETUID`/`CAP_SETGID`, and ambient capabilities survive
-  `setuid()`+`execve()` — so the ambient set MUST be cleared before
-  exec, or every app inherits `CAP_SETUID` and can `setuid(0)`. This is
-  security-critical hand-authored code and must carry a test in the
-  spirit of `TestBuildEnvDoesNotLeakSupervisorSecrets`.
-- Group-based release access: extraction stays `hotserve`, apps read via
-  a shared group with `0750` release dirs (no `CAP_CHOWN` needed;
-  `extract.go` already strips setuid/setgid so the tree is safe to share
-  read-only).
-- `RLIMIT_NPROC` (per-UID) → fork-bomb bound even before cgroups.
-- A **shipped static AppArmor profile** (Debian/Ubuntu ship AppArmor
-  enabled) applied via `aa_change_onexec`, denying `@{PROC}/*/environ`,
-  `/etc/hotserve/**`, `/run/hotserve/**`, `/var/lib/hotserve/**`.
-  Works **without** user namespaces — including on LXC VPSes.
-
-Closes the supervisor-secret, admin-socket, TLS-key, and setuid rows
-**unconditionally** (the only approach that does so on userns-denied
-hosts). Does **not** isolate sibling files by path (UID + group + one
-static profile is supervisor-vs-app, not per-app), sibling ports, or
-sibling PIDs beyond what per-UID `ProtectProc`-style hiding gives.
-
-### B — "Canonical exec-runner stack" (A + namespaces + cgroups)
-
-A, plus:
-
-- **bubblewrap** per [DESIGN-sandbox.md](liveswap/DESIGN-sandbox.md):
-  mount + PID namespaces, allowlist filesystem view at real host paths,
-  `--die-with-parent`, `--new-session`, the `Setpgid`-vs-`setsid` EPERM
-  conflict resolved as that doc specifies. Hides `/proc/<supervisor>`,
-  the admin socket, sibling files and PIDs by **absence**.
-- **`Delegate=yes` cgroup subtree** on `hotserve.service`: the
-  supervisor writes `memory.max`/`pids.max`/`cpu.max` into per-app
-  sub-cgroups itself — unprivileged within its delegated subtree, on
-  every matrix cell (cgroup v2 everywhere ≥ 22.04). It must move itself
-  into a leaf sub-cgroup first (no-processes-in-inner-nodes rule).
-- AppArmor (from A) doubles as the **no-userns fallback rung**: where
-  the userns probe fails, `auto` degrades to bare+AppArmor+UID with a
-  WARN, exactly the ladder DESIGN-sandbox.md specifies.
-
-Closes every T1 filesystem/proc/PID row and adds resource limits.
-Remaining open: **sibling `127.0.0.1:$PORT`** (netns is shared by
-design) and **network egress** — both explicit non-goals, the port gap
-addressable later by a unix-socket upstream contract.
-
-### C — "systemd template-unit runner"
-
-> **Status (2026-08-29): what shipped is neither B nor C.** liveswap
-> now runs every app as a transient unit on the **hotserve user's own
-> manager** (`user@<uid>.service`, private socket, no polkit, no
-> grant of any kind). The escalation trap this section warns about is
-> real and was the reason for that choice: it exists only when the
-> supervisor holds a `manage-units` grant on the *system* manager,
-> and hotserve holds none — it can create units only as itself, under
-> `NoNewPrivileges`, so a supervisor RCE gains nothing it did not
-> already have (T5 unchanged: `◐`). What C alone can buy — per-app
-> `User=`, `IPAddressDeny=` egress filtering — remains future work
-> and, if wanted, must arrive as a root-owned template or a minimal
-> privileged helper, never as a system-manager transient grant.
-> Restart-survival (`Reattach`) shipped with the runner. The
-> "unprivileged compose" testability row below is stale: `make e2e`
-> now runs hotserve under real systemd in a privileged container.
-> Isolation is the next milestone, and "The shared-UID rule" above
-> settles its mechanism: systemd's own per-unit sandboxing on the
-> user manager, which holds only with `PrivatePIDs=` (systemd ≥ 256)
-> — so it is probe-gated: full on Debian 13 / Ubuntu 26.04, floor-only
-> with a WARN on Debian 12 / Ubuntu 24.04. The property set is C's,
-> minus `User=` and the polkit/template machinery:
-> `PrivatePIDs=`, `ProtectSystem=strict` + `ReadWritePaths=`,
-> `PrivateTmp=`, `InaccessiblePaths=`, `ProtectControlGroups=` (so
-> caps are real), `SystemCallFilter=@system-service`, resource caps.
-> No bubblewrap. Still to prove on both cells, inside the *user*
-> manager: that the set applies to a transient unit, and that
-> Ubuntu's AppArmor user-namespace restriction does not block
-> `systemd --user` (bwrap had a dedicated profile; systemd does not).
-
-A packaged `hotserve-app@.service` template with **root-owned**
-properties: per-app `User=`, `ProtectSystem=strict`,
-`ProtectProc=invisible`, `PrivateTmp`, `SystemCallFilter=@system-service`
-(a curated, adopt-wholesale seccomp filter — the bar DESIGN-sandbox.md
-sets), `IPAddressDeny=`/`SocketBindDeny=` (**egress filtering — C-only**),
-and `PrivatePIDs=yes` which **engages on systemd ≥ 256 and is silently
-ignored below** (unit-file unknown-directive degradation; matrix:
-22.04=249, D12=252, 24.04=255, D13=257, 26.04≥257). The supervisor is
-restricted to `start`/`stop` of that template — polkit **can** match
-unit *names*, and because nothing is transient the properties are not
-attacker-suppliable.
-
-Why the *template*, not `systemd-run` transient units: polkit is blind
-to unit *properties*, so a `StartTransientUnit` grant that the
-supervisor can shape is effectively root-equivalent (a unit can name
-`User=root`, any `ExecStart=`) — the escalation trap that makes a naive
-systemd runner *worse* than today for T5. The template moves that policy
-into root-owned files. Per-deploy variation (port/env) flows via
-drop-ins or `EnvironmentFile`, not via attacker-influenced properties.
-
-Restart-survival (`Reattach` across a supervisor restart,
-`handleState.Unit` already reserved in
-[liveswap/runner.go:56-59](liveswap/runner.go)) is **explicitly a
-separate later milestone** — it is the riskiest state-machine work and
-is not required for the isolation win.
-
-Note: C breaks the fast dev/test loop — `make e2e` is unprivileged
-compose with no systemd — so it needs the install-test lane (already
-real systemd, [Makefile:112-127](Makefile)) as its proving ground. This
-supersedes DESIGN-liveswap.md's stale "needs a Linux-VM test lane
-outside compose" note.
-
-## Scoring against the threat model
-
-`●` closed · `◐` partial · `○` open · `—` n/a. "userns-denied host" =
-LXC VPS / locked-down kernel.
-
-"Shipped" is #35 phase 1 (2026-08-30): the systemd-native tiers on
-the user-manager runner; *full* on systemd ≥ 256, *filesystem* below.
-
-| Attack path (attacker) | Before #35 | Shipped | A | B | C |
-|---|---|---|---|---|---|
-| `/proc/<sup>/environ` (ACME tokens) (T1) | ●¹¹ | ● | ● | ● | ● |
-| admin socket connect (T1) | ○ | ● | ● | ● | ● |
-| TLS private key read (T1) | ○ | ● | ● | ● | ● |
-| sibling file read/write (T1) | ○ | ● | ◐¹ | ● | ● |
-| sibling `127.0.0.1:$PORT` (T1) | ○ | ○² | ○ | ○² | ◐³ |
-| sibling PID signal/inspect (T1) | ○ | ●/◐¹² | ◐⁴ | ● | ●⁵ |
-| setuid-binary escalation (T1) | ○ | ● | ● | ● | ● |
-| fork-bomb / mem exhaust (T1) | ○ | ○¹³ | ◐⁶ | ● | ● |
-| network exfiltration (T1) | ○ | ○ | ○ | ○ | ●⁷ |
-| deploy arbitrary code (T2) | ○⁸ | ○⁸ | ○⁸ | ○⁸ | ○⁸ |
-| version downgrade (T2) | ○ | ○ | ○ | ○ | ○ |
-| archive CPU/inode exhaust (T3) | ○ | ○ | ○ | ◐⁹ | ◐⁹ |
-| first-hop→any-https SSRF (T3) | ◐ | ◐ | ◐ | ◐ | ●⁷ |
-| webhook log-amplification (T4) | ○ | ○ | ○ | ○ | ○ |
-| **supervisor RCE → root? (T5)** | ◐ | ◐ | ◐ | ◐ | ◐¹⁰ |
-
-1. Supervisor-vs-app via one static profile + group perms; not per-app
-   path isolation. 2. Netns shared by design; future unix-socket
-   upstream contract closes it. 3. `SocketBindDeny=`/`RestrictAddress`
-   can fence localhost binds, partially. 4. Per-UID `ProtectProc`-style
-   hiding only. 5. Real per-unit PID isolation only on systemd ≥ 256
-   (`PrivatePIDs=`); below that, `ProtectProc=invisible` + per-UID.
-   6. `RLIMIT_NPROC` only, no memory cap. 7. Egress/IP filtering is
-   C-only. 8. Contained by `artifact_allowlist`, not the runtime —
-   orthogonal to isolation. 9. `Delegate` cgroup `pids.max` bounds inode
-   pressure indirectly; the missing entry-count cap in `extract.go` is
-   the real fix and is isolation-independent. 10. C is the only approach
-   that can make T5 *worse* (polkit root-escalation) if built as
-   transient units — the template design avoids it, hence `◐` not `○`,
-   but it is the row that demands the most care. 11. Closed by the
-   non-dumpable supervisor (shared-UID rule, item 2) independently of
-   any approach; the "Before #35" column otherwise predates isolation.
-   12. `●` on the *full* tier (systemd ≥ 256, PID namespace); `◐` on
-   the *filesystem* tier — `/proc` inspection is closed by the user
-   namespace, signals are not (DoS class, warned at every launch).
-   13. Deferred to #35 phase 2: `ProtectControlGroups=` already makes
-   the cgroup tree read-only inside the unit, so `MemoryMax=`/
-   `TasksMax=`/`CPUQuota=` will be real when they land.
-
-Cost / lock-in rows:
-
-| | A | B | C |
-|---|---|---|---|
-| Works on userns-denied host | ● | ◐ (degrades to A) | ● |
-| New privileged code authored | ambient-cap clearing | + bwrap argv | polkit + template policy |
-| New runtime dependency | none | `bubblewrap` | none |
-| Testable in `make e2e` (unprivileged compose) | ● | ● | ○ (install-test only) |
-| Reversible (swap behind `runner`) | ● | ● | ◐ (egress/restart features are one-way) |
-
-## Residual risks common to all three
+## Residual risks
 
 - **An app's own secrets and its own database are reachable by
   definition** — not a bug, stated so operators do not expect otherwise.
 - **Install-time supply chain** (hotserve's own build) is a CI concern;
   release signing is the roadmap answer, not a runtime control.
 - **T5 is contained, not prevented** — a supervisor RCE holds every
-  asset short of root under all three; only C changes the root question,
-  and only if built as a locked template (never transient units).
-- **Sibling localhost ports** stay reachable under A and B (shared
-  netns). The clean fix is making the app→hotserve contract a unix
-  socket in the app's own dir (Caddy `reverse_proxy` speaks `unix/`),
-  which also enables a per-app netns later. Decide it explicitly rather
-  than inheriting the gap.
+  asset short of root. It does not reach root because the supervisor
+  holds no grant; keep it that way.
+- **Sibling localhost ports** stay reachable (shared netns). The clean
+  fix is making the app→hotserve contract a unix socket in the app's
+  own dir (Caddy `reverse_proxy` speaks `unix/`), which also enables a
+  per-app netns later. It changes the app contract from `$PORT` to a
+  socket path, so it is its own milestone.
+- **Network egress** is open for every app. A runtime whose permission
+  model gates the network (Deno's `--allow-net`) can close it from
+  inside — see liveswap/README.md "Runtime permissions"; Node's
+  `--permission` model does not cover network I/O. The runtime-agnostic
+  answer is the unix-socket contract above plus `PrivateNetwork=`.
+- **Resource exhaustion** — a runaway app can starve its siblings and
+  Caddy (fork bomb, memory leak). `ProtectControlGroups=` makes
+  `MemoryMax=`/`TasksMax=`/`CPUQuota=` real the moment they are set;
+  nothing sets them until an app needs bounding (#52).
 - **`state.json` must stay outside any writable sandbox view**
   ([liveswap/state.go](liveswap/state.go) is trusted on relaunch for
-  the version and the unit; since 2026-09-03 it records no sandbox
-  disposition and nothing outside a sandbox writes it but hotserve). Normative and shipped: the
-  whole filesystem is replaced by an empty read-only tmpfs in the
-  unit's view (`TemporaryFileSystem=/:ro`) and only the release being
-  started, `shared/` and the OS base view are bound back — the app dir root, `state.json`, `tmp/` (the upload
-  staging dir: a running instance must not be able to rewrite the next
-  version's tarball) and the other releases do not exist inside, along
-  with everything else on the host. `sandboxSpecFor` in
-  liveswap/sandbox.go is the single place that list is built;
-  `TestSandboxSpecFor` and `TestSandboxViewIsExactlyWhatIsNamed` pin
-  it — the latter asserts the rendered set of bind destinations IS the
-  view, so an accidental widening fails there.
-- **Non-isolation hardening is still owed regardless of approach:**
-  webhook rate limiting (T4 log-amplification) and the `extract.go`
-  entry-count cap (T3). (The Bearer-only / no-shared-secret and
-  short-lived-token items are now done — see "Reducing the asset".)
+  the version and the unit). Normative and shipped: only the release
+  being started, `shared/` and the OS base view are bound into the
+  unit — the app dir root, `state.json`, `tmp/` (the upload staging
+  dir: a running instance must not be able to rewrite the next
+  version's tarball) and the other releases do not exist inside.
+  `sandboxSpecFor` in liveswap/sandbox.go is the single place that
+  list is built; `TestSandboxSpecFor` and
+  `TestSandboxViewIsExactlyWhatIsNamed` pin it — the latter asserts the
+  rendered set of bind destinations IS the view, so an accidental
+  widening fails there.
+- **Non-isolation hardening still owed:** webhook rate limiting (T4
+  log-amplification) and the `extract.go` entry-count cap (T3).
 
-## Recommendation
+## History
 
-**Decided (2026-08-29) and shipped (2026-08-30, #35 phase 1):
-systemd's own per-unit sandboxing on the user-manager runner, in two
-probe-gated tiers** — narrowed to one tier on 2026-09-01, see the
-Amendment below. That is C's property set without C's privilege —
-`PrivateUsers=` for the user namespace that closes cross-process
-`/proc` reads (the shared-UID rule as corrected), `PrivatePIDs=` for
-the PID namespace that closes visibility and signals where the manager
-is ≥ 256, a deny-by-default filesystem view (`TemporaryFileSystem=/:ro`
-plus `BindReadOnlyPaths=` for a named OS base view and `BindPaths=`
-for the app's own two directories — amended 2026-08-31 from
-`ProtectSystem=strict` plus a derived `InaccessiblePaths=` set, which
-could be incomplete and went stale between deploys), `PrivateTmp=`,
-`ProtectControlGroups=` so resource caps will be real, and the curated
-`SystemCallFilter=@system-service` — issued as transient-unit
-properties by a supervisor that holds no grant, so a supervisor RCE
-still gains nothing (T5 unchanged). *full* on Debian 13 / Ubuntu
-26.04; *filesystem* on Debian 12 / Ubuntu 24.04 with a WARN at every
-launch naming the residual. Bubblewrap is dropped rather than carried
-as a second mechanism; per-app UIDs, egress filtering and the
-root-owned template stay later milestones, and if they land they MUST
-be the template or a minimal privileged helper, never
-supervisor-shaped transient units on the system manager.
-DESIGN-sandbox.md's behaviour spec and config surface are what
-shipped, as amended: since 2026-09-03 (later) there is no policy, no
-recorded tier and no rollout ladder — every unit is sandboxed and an
-incapable host is refused. Its bwrap mechanics did not ship.
-Resource caps are #35 phase 2.
+Dated one-liners; the full text of each is in git.
 
-*Superseded (kept for the record):* the earlier recommendation was B
-— A's items first (`no_new_privs`, per-app UIDs, group-based release
-access, `RLIMIT_NPROC`, an AppArmor profile), then bubblewrap +
-`Delegate` cgroups with AppArmor as the no-userns rung, deferring C
-until egress filtering or restart-survival earned it. Restart-survival
-arrived without C (the user-manager runner, #34), the non-dumpable
-floor is shipped, and the shared-UID rule made bubblewrap's PID
-namespace the load-bearing piece — which systemd now provides itself.
-
-Independently of which approach lands, do the three non-isolation
-hardening items above — they are cheaper than any of A/B/C and address
-rows (T3, T4) that no isolation approach touches.
-
-
-### Amendment (2026-09-03, later): the sandbox is unconditional
-
-`sandbox off` is removed; there is no sandbox policy, global or
-per-app, and no recorded tier. Every app unit gets the one sandbox —
-deploy, `pre_start`, crash relaunch, boot recovery, reattach — and a
-host that cannot deliver it fails the start. The reasoning is in
-[liveswap/DESIGN-sandbox.md](liveswap/DESIGN-sandbox.md), "Amendment:
-the sandbox is unconditional"; what changes in *this* document:
-
-- **The shared-UID rule gets its corollary.** `sandbox off` was
-  documented as per-app; on a shared uid it was not — a bare app read
-  every sibling's data and hotserve's keys. So the rule that made the
-  user namespace load-bearing is also the rule that makes an opt-out
-  impossible: any app outside a namespace is every app's problem.
-- **Three residuals close by construction** and are marked in place
-  above: *the recorded tier is app-writable* (no bare writer, no
-  record), *what a bare app leaves behind* (nothing runs bare on a
-  current box), and the bind-source TOCTOU race (no process shares
-  the hotserve uid outside a sandbox except hotserve itself; inside a
-  view the app directory is a tmpfs of mount points an app cannot
-  unlink). The `execve`-window residual likewise stands for nothing on
-  a running box. The one unit hotserve did not start — a stale one
-  from a development build, or another same-uid process's — is
-  refused at reattach when it lacks the namespaces and replaced by a
-  sandboxed relaunch, so "every unit" holds for adopted units too.
-  That check is for an honest stale unit; a same-uid process that
-  starts units on purpose can give one any property set, and is the
-  trust domain, not a boundary the check could hold.
-- **The enumerated attack-path table is history.** Every ✔ row
-  described a bare app; none exists. The "today, no isolation" heading
-  is renamed to say so.
-- **The probe is now the whole availability story.** Interference with
-  it fails the start, and there is no setting that comes up without
-  it; the remedy is removing the interferer, not weakening the box.
-
-What does not change: T5 (a supervisor RCE gains nothing — hotserve
-still holds no grant), the network namespace being shared by design,
-per-app UIDs remaining the answer to app-vs-app residuals for
-anything the namespaces do not close, and resource caps as phase 2.
-
-### Amendment (2026-09-01): one host, one tier
-
-The support matrix is Debian 13 alone. Two things follow, and neither
-changes the property set above.
-
-**Read the body above through this amendment.** Where it says "two
-tiers", "the best tier" or *filesystem* — the shipped-status note at
-§"Supervisor⇄app and app⇄app boundaries", the residual-risk table's
-footnote 12, and the rollout and install-test descriptions — there is
-one tier and its name is *full*. A host that cannot deliver it gets
-`none`, so those rows describe a mitigation no supported host can be
-at, and footnote 12's `◐` is unreachable rather than partial. The
-prose is kept as the record of what was measured when, not rewritten
-in place.
-
-- **One tier.** `PrivatePIDs=` exists on every supported manager
-  (systemd 257), so *filesystem* is neither probed for nor offered,
-  and since 2026-09-02 (issue #45) it is not an accepted `state.json`
-  value either: no released hotserve ever wrote one (`v0.1.0` predates
-  sandboxing), so there was no migration to protect, and
-  `validSandboxTierRecord` fails closed on it. What remains is the
-  recorded-tier mechanism itself — a relaunch reproduces the tier the
-  instance actually got rather than re-reading policy
-  (`validSandboxTierRecord`, `parseSandboxTier` in
-  [liveswap/sandbox.go](liveswap/sandbox.go)). It cuts both ways, and
-  only the first direction is a safety property: an instance recorded
-  bare stays bare, so a sandbox never engages on a crash relaunch,
-  where no old instance is serving and no health gate can catch it. An
-  instance recorded *full* likewise stays sandboxed even after the
-  operator sets `sandbox off`, which is the same rule and is **not** a
-  safety property — see the residual in
-  [liveswap/DESIGN-sandbox.md](liveswap/DESIGN-sandbox.md). (Both
-  directions are gone since 2026-09-03: no `off`, no record.)
-- **No AppArmor profile.** Debian's kernel does not restrict
-  unprivileged user namespaces, so the profile and the user-manager
-  wrapper it attached to are removed along with the privilege they
-  carried — the residual noted above (an app under `sandbox off`
-  inheriting `userns` from the manager) is gone with them.
-
-What deliberately does **not** change: the probe. It was never a proxy
-for the systemd version — it is what catches a container, an LXC VPS
-or a kernel built without user namespaces, all of which can present a
-supported manager version and still refuse the unit. Deleting it would
-turn a measurement into a claim.
-
-The cost is CI fidelity: GitHub's runners boot an Ubuntu kernel, and
-the profile was what let the Debian cells prove the sandbox under a
-real userns restriction. With it gone, CI sets
-`kernel.apparmor_restrict_unprivileged_userns=0` on the runner to make
-it behave like a Debian host, and no lane exercises a restricted
-kernel any more. The probe is the only thing standing between such a
-host and a silent loss of isolation, which is the second reason it
-stays.
+- 2026-08 — Threat model written as a decision record comparing three
+  isolation stacks (A: UID + hardening + AppArmor; B: bubblewrap +
+  delegated cgroups; C: root-owned systemd template). B was recommended.
+- 2026-08-28 (#29, `465e846`) — Shared deploy secret (`LIVESWAP_SECRET`,
+  `X-Liveswap-Secret` header) replaced by `deploy_trust` (OIDC + local
+  key). The former top asset left the box.
+- 2026-08-29 (#34, `17f1a04`) — Apps run as transient units on the
+  hotserve user's own manager: neither B nor C. Restart-survival
+  (`Reattach`) shipped with it.
+- 2026-08-30 (#38, `6a080d0`) — Non-dumpable supervisor; the shared-UID
+  rule recorded, corrected by the spike measurement that a user
+  namespace *does* close cross-process `/proc` reads. That measurement
+  made systemd's own namespaces the mechanism.
+- 2026-08-30 (#40 branch; merged 2026-09-02 as `6e8dfa2`) — Sandbox
+  built: two probe-gated tiers (*filesystem* on systemd < 256, *full*
+  ≥ 256), deny-by-default view (replacing `ProtectSystem=strict` + a
+  derived `InaccessiblePaths=` set that could go stale — the "view is a
+  policy" residual). Ubuntu needed an AppArmor profile attached by path
+  to a user-manager wrapper.
+- 2026-09-01 (`3446a53` on the #40 branch; tier code removed in #47
+  `ce97f37`) — Debian 13 only; one tier; AppArmor profile and wrapper
+  deleted; CI sets `apparmor_restrict_unprivileged_userns=0`.
+- 2026-09-03 (#48 `5e36764`) — Probe measured once per manager
+  connection; failure never cached.
+- 2026-09-03 (#49 `20e61c1`) — `sandbox auto`/`require` collapsed to
+  `on|off`.
+- 2026-09-04 (#51 `24ff8e9`) — `sandbox off`, the recorded tier and the
+  status field removed; the runner refuses a spec without a sandbox;
+  reattach verifies the live unit's namespaces. Closed by construction:
+  the bind-source TOCTOU race (no attacker-controlled app runs outside
+  a sandbox; hotserve and the user manager still share the uid, and
+  are the trust domain), the app-writable recorded tier (no record), and
+  "what a bare app leaves behind in `shared/`" (nothing runs bare). The
+  pre-#40 "reachable today" attack-path table described bare apps and
+  is history with them.
