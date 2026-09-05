@@ -78,7 +78,18 @@ Properties that matter to the model:
   ([handler.go:77](liveswap/handler.go)): `/anything/deep/myapp` targets
   `myapp`. A naive `path /deploy/*` site matcher does not constrain the
   app name; the operator's matcher is the only constraint.
-- **Payload:** three fields only — `url`, `version`, `auth_header`
+- **Three request shapes** ([handler.go:112-124](liveswap/handler.go)),
+  all behind the same token: a JSON body pulls from a URL (below); a
+  gzip body **pushes** the artifact itself (`POST /<app>?version=`,
+  [handler.go:174-215](liveswap/handler.go)) — the bytes come straight
+  from the authenticated caller, capped at `max_artifact_size`, staged
+  under the app's `tmp/` and extracted like a download, and **no
+  `artifact_allowlist` is consulted** because there is no URL to pin;
+  `?rollback=` relaunches an on-disk release. The push path has no
+  SSRF surface, but it means a token-holder can deploy arbitrary
+  bytes with no artifact host in the loop: the allowlist confines
+  *pulls*, and only the claim scope confines *who*.
+- **Pull payload:** three fields only — `url`, `version`, `auth_header`
   ([app.go:108-110](liveswap/app.go)); unknown JSON silently ignored (no
   `DisallowUnknownFields`). `version` is
   `^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$` (no leading dot, so never
@@ -232,9 +243,12 @@ scope for the runtime model, in scope for release signing (roadmap).
   attacker per-app isolation exists to stop.
 - **T2 — Stolen deploy token / compromised CI identity.** A short-lived,
   claim-scoped token (or control of the CI identity that mints one). Can
-  deploy arbitrary code and roll back versions within
-  `artifact_allowlist` for the token's lifetime; containment is the
-  allowlist and the claim scope, not the runtime.
+  deploy arbitrary code to every app that accepts that trust source for
+  the token's lifetime — by pushing a tarball directly, which passes no
+  allowlist, or by pulling from a URL within `artifact_allowlist` — and
+  roll back versions. Containment is the claim scope (and, for pulls,
+  the allowlist), not the runtime; the sandbox bounds what the deployed
+  code then reaches.
 - **T3 — Malicious/compromised artifact host** within the allowlist
   pin. Controls tarball bytes, status, redirect targets (any https
   host), timing. Faces `extract.go` and the first-hop SSRF gap.
@@ -250,8 +264,9 @@ scope for the runtime model, in scope for release signing (roadmap).
   reach root?) — which is why the supervisor holds no grant (see "The
   shipped mechanism").
 
-For **T2**: deploy-arbitrary-code (contained only by the allowlist);
-deliberate rollback. For **T3**: archive-borne CPU/inode exhaustion; the
+For **T2**: deploy-arbitrary-code (a push is contained by nothing but
+the claim scope; a pull additionally by the allowlist); deliberate
+rollback. For **T3**: archive-borne CPU/inode exhaustion; the
 link-TOCTOU shape (unproven); first-hop→any-https SSRF. For **T4**:
 log-amplification disk-fill (online *token forgery* is infeasible).
 For **T5**: total, by definition — the containment question is
@@ -348,8 +363,9 @@ the mechanism:
    this is an availability attack on the supervisor, not a way to
    weaken an app: interference cannot produce a running hotserve with
    a lesser sandbox. The verdict is cached per manager connection
-   (`userManagerClient.sandboxCapability`,
-   [liveswap.go:577](liveswap/liveswap.go)), which narrows the window,
+   (`userManagerClient.cachedSandboxCapability`,
+   [systemd_dbus.go:108](liveswap/systemd_dbus.go)), which narrows the
+   window,
    and a failed verdict is deliberately NOT cached, so interference
    costs the next start rather than pinning a verdict until the manager
    restarts. The remedy is to remove the interfering process, which
@@ -384,8 +400,9 @@ stays future work and, if wanted, must arrive as a root-owned template
 or a minimal privileged helper, never as a system-manager transient
 grant.
 
-**The property set** (`sandboxProperties`,
-[liveswap/systemd_dbus.go](liveswap/systemd_dbus.go)), on every unit:
+**The property set**, on every unit — `unitProperties` renders the
+lifecycle properties and appends `sandboxProperties` for the rest
+([liveswap/systemd_dbus.go:284,353](liveswap/systemd_dbus.go)):
 
 - Namespaces: `PrivateUsers=yes`, `PrivatePIDs=yes`, `PrivateTmp=yes`,
   `PrivateDevices=yes`; `RestrictNamespaces=` (empty set — an app

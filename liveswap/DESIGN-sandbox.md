@@ -257,8 +257,11 @@ designed and deferred.
 `resolveBindSources` resolves and re-checks every bind source at the
 last moment before the manager acts (closing the planted-symlink
 case), `homeOutsideView` reports an operator `HOME` the view cannot
-satisfy, and `sandboxProperties` (liveswap/systemd_dbus.go) renders
-the property set above. `unitFor` refuses a spec without a sandbox.
+satisfy, and `unitProperties` (liveswap/systemd_dbus.go) renders the
+lifecycle properties — `Restart=no`, `KillMode=control-group`,
+`NoNewPrivileges=` — then appends `sandboxProperties` for the
+namespaces, the view and the privilege surface. `unitFor` refuses a
+spec without a sandbox.
 
 **The probe.** At `App.Start` — every config activation —
 `probeSandboxCapability` starts a throwaway unit with the same property
