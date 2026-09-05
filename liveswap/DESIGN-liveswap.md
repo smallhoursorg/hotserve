@@ -1,13 +1,18 @@
 # DESIGN — liveswap
 
-Status: v1 implemented. This document is the handover brief: why the
-module exists, its normative behavior, the architecture decisions and
-their traps, and what was deliberately left out.
+This document describes the present: what is built, why, and what it
+promises. History lives in git (`git log -- liveswap/DESIGN-liveswap.md`);
+the "History" section at the end holds only dated one-liners.
+Amendments are for decisions still fresh or contested and get folded
+into the body once they settle.
+
+This is the handover brief: why the module exists, its normative
+behavior, the architecture decisions and their traps, and what was
+deliberately left out.
 
 ## Why this module exists
 
-The predecessor stack (see `reference/infra-nomad` in the development
-repo) ran a single VPS with Nomad as orchestrator, a ~490-line Deno
+The predecessor stack ran a single VPS with Nomad as orchestrator, a ~490-line Deno
 webhook to download GitHub release tarballs and drive `nomad job run`,
 and Caddy configured through a Nomad template that re-rendered
 upstreams from the service catalog. It worked, but three systems and a
@@ -152,10 +157,9 @@ client in `systemd_dbus.go`): every instance is a transient service
 unit under the **hotserve user's own systemd manager**
 (`user@<uid>.service`), reached over that manager's private socket
 (`/run/user/<uid>/systemd/private` — no session bus, no polkit, no
-root). v1 shipped an exec runner (apps as child processes in their own
-process group); it was replaced, not fixed, once it needed a page of
-init-system emulation for what cgroups do natively, and it took the
-"apps restart with the binary" trade-off with it.
+root). There is no other runner: an exec runner would need a page of
+init-system emulation for what cgroups do natively, and would tie app
+lifetime to the binary's.
 
 What the unit gives us: `KillMode=control-group` makes stop and crash
 cleanup mean the whole process tree (npm → node → workers), the
@@ -193,13 +197,12 @@ remembering.
 
 Why the user manager and not the system one: a polkit rule granting
 `org.freedesktop.systemd1.manage-units` cannot inspect unit
-properties, so it would let a compromised hotserve start a root unit;
-Ubuntu 22.04's polkit 0.105 cannot even filter by unit name. Per-app
-UIDs — the one thing the system manager would buy — are a later
+properties, so it would let a compromised hotserve start a root unit.
+Per-app UIDs — the one thing the system manager would buy — are a later
 milestone behind a small privileged helper. Isolation between apps
 and hotserve comes from systemd's per-unit sandboxing on every unit
 (probe-gated at start: a host without unprivileged user namespaces is
-refused, there is no setting that runs without), see
+refused, and there is no setting that runs an app without one), see
 `DESIGN-sandbox.md` and `DESIGN-threat-model.md`.
 
 Packaging consequences: `libpam-systemd` (pam_systemd hands the user
@@ -233,12 +236,15 @@ cancelled/joined by that config's Cleanup.
 | `handler.go` | webhook auth, payload validation, status endpoint |
 | `upstreams.go` | dynamic upstream source (the cutover read side) |
 | `runner.go` / `runner_systemd.go` / `systemd_dbus.go` / `port.go` | runner interface + the systemd transient-unit implementation + its D-Bus client + port helpers |
+| `sandbox.go` | the per-unit sandbox: view spec, base view, bind-source checks, capability probe (see DESIGN-sandbox.md) |
+| `harden/` | leaf package: the supervisor goes non-dumpable at init, before `os` |
+| `allowlist.go` | `artifact_allowlist` parsing, canonicalisation and URL pinning |
 | `download.go` | capped, redacted artifact download; `releaseFetcher` (download+extract orchestration) |
 | `extract.go` | validate-then-extract hardened tar handling |
 | `health.go` | prober with soak/deadline arithmetic on an injected clock |
 | `watchdog.go` | continuous crash/health supervision: per-app loop, restart budget, backoff |
 | `state.go` | `state.json` atomic persistence, keep-N GC |
-| `deploytrust.go` | deploy-auth: OIDC + local-key JWT verification |
+| `deploytrust.go` / `deploytoken_cmd.go` | deploy-auth: OIDC + local-key JWT verification; the `hotserve deploy-keygen` / `deploy-token` subcommands |
 | `clock.go` | `Now()`/`Sleep()` clock seam |
 
 ## Security posture
@@ -324,11 +330,9 @@ author's beliefs about systemd, and only the real thing corrects them.
    the running app alone, the app keeping its PID across the upgrade
    restart, and removal taking the apps, drop-ins and linger flag.
 
-## Watchdog (added after v1)
+## Watchdog
 
-The continuous watchdog — originally the first v1 non-goal below —
-shipped as a follow-up. Design summary (full operator docs in
-README.md "Watchdog"):
+Design summary (full operator docs in README.md "Watchdog"):
 
 - One goroutine per pooled `managedApp` (`watchdog.go`), started at
   first Provision, torn down in `Destruct` **before** the child is
@@ -362,33 +366,44 @@ README.md "Watchdog"):
   runner creates every unit with `Restart=no`, or systemd and
   liveswap would fight over the same failure.
 
-## Non-goals (v1)
+## Non-goals
 
 - Post-promote *auto*-revert. Rollback is an explicit operation —
-  `POST /<app>?rollback=<version>` relaunches an on-disk release. (The
-  continuous health watchdog, originally part of this
-  non-goal, has since shipped — see "Watchdog" above. It restarts the
-  same version; it still never auto-reverts.)
+  `POST /<app>?rollback=<version>` relaunches an on-disk release. The
+  watchdog restarts the same version; it never auto-reverts.
 - Multi-node or any cluster awareness.
-- Resource limits — now one unit property away (`MemoryMax=`,
-  `TasksMax=`, `CPUQuota=`; the user manager delegates those
-  controllers); not yet exposed in config.
-- Prometheus metrics (deploys_total, duration) — v1.1 candidate.
+- Resource limits — one unit property away (`MemoryMax=`, `TasksMax=`,
+  `CPUQuota=`; the sandbox makes cgroupfs read-only so they hold);
+  unset by design until an app needs them (#52).
+- Prometheus metrics (deploys_total, duration).
 - Deploy queueing; 409 + CI retry is the queue.
 - Windows.
 - Streaming (NDJSON) deploy progress; the response is buffered JSON so
   `curl --fail` semantics stay honest.
 
-## Open questions for v2 (with leans)
+## Open questions (with leans)
 
-1. ~~**systemd runner**~~ — shipped, and as the only runner rather than
-   an opt-in: see "Runner abstraction". The test lane it needed is a
-   privileged systemd container, which Docker Desktop runs fine.
-2. **Deploy events** — emit Caddy events (deploy_succeeded/_failed) so
+1. **Deploy events** — emit Caddy events (deploy_succeeded/_failed) so
    users can wire notifications. Lean: yes, cheap and composable.
-3. **Admin endpoints** (`caddy liveswap status/rollback`) alongside the
+2. **Admin endpoints** (`caddy liveswap status/rollback`) alongside the
    webhook. Lean: later; the webhook + status JSON covers CI and cron.
-4. **Metrics.** Lean: add with events.
-5. **Config-change restarts** — an explicit "apply now" admin action
+3. **Metrics.** Lean: add with events.
+4. **Config-change restarts** — an explicit "apply now" admin action
    instead of waiting for the next deploy. Lean: keep next-deploy
    semantics; add an admin endpoint if users ask.
+
+## History
+
+Dated one-liners; the full text of each is in git.
+
+- 2026-08-17 (v0.1.0) — v1 shipped with an exec runner: apps as child
+  processes in their own process group, restarting with the binary.
+  The continuous watchdog was a stated non-goal.
+- 2026-08-18 (#28) — Watchdog shipped as a follow-up, on by default.
+- 2026-08-28 (#29) — Shared deploy secret replaced by `deploy_trust`
+  (OIDC + local key).
+- 2026-08-29 (#34, `17f1a04`) — Exec runner replaced, not fixed, by the
+  systemd transient-unit runner on the hotserve user's manager; units
+  survive a hotserve restart (`Reattach`). The test lane it needed is
+  a privileged systemd container.
+- 2026-09-02 (#40) — Every unit sandboxed; see DESIGN-sandbox.md.
