@@ -475,11 +475,11 @@ does not isolate the runtime.
   own dir (Caddy `reverse_proxy` speaks `unix/`), which also enables a
   per-app netns later. It changes the app contract from `$PORT` to a
   socket path, so it is its own milestone.
-- **Network egress** is open for every app. Runtimes with a permission
-  model (Deno, Node's `--experimental-permission`) can close it from
-  inside — see liveswap/README.md "Runtime permissions"; the
-  runtime-agnostic answer is the unix-socket contract above plus
-  `PrivateNetwork=`.
+- **Network egress** is open for every app. A runtime whose permission
+  model gates the network (Deno's `--allow-net`) can close it from
+  inside — see liveswap/README.md "Runtime permissions"; Node's
+  `--permission` model does not cover network I/O. The runtime-agnostic
+  answer is the unix-socket contract above plus `PrivateNetwork=`.
 - **Resource exhaustion** — a runaway app can starve its siblings and
   Caddy (fork bomb, memory leak). `ProtectControlGroups=` makes
   `MemoryMax=`/`TasksMax=`/`CPUQuota=` real the moment they are set;
