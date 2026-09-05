@@ -105,7 +105,7 @@ Properties that matter to the model:
   ([allowlist.go:279-281,363,379](liveswap/allowlist.go)). The status
   snapshot exposes the app's **port and PID** and watchdog cause/failure
   state ([app.go:873](liveswap/app.go) `status()`,
-  [watchdog.go:234-254](liveswap/watchdog.go)). Artifact URLs *are*
+  [watchdog.go:255-275](liveswap/watchdog.go)). Artifact URLs *are*
   redacted before logs/errors ([download.go:158-163](liveswap/download.go)),
   so query signatures do not leak.
 - **Replay / downgrade is bounded.** The bearer JWT is short-lived
@@ -561,8 +561,9 @@ Dated one-liners; the full text of each is in git.
 - 2026-09-04 (#51 `24ff8e9`) — `sandbox off`, the recorded tier and the
   status field removed; the runner refuses a spec without a sandbox;
   reattach verifies the live unit's namespaces. Closed by construction:
-  the bind-source TOCTOU race (no process outside a sandbox shares the
-  uid but hotserve), the app-writable recorded tier (no record), and
+  the bind-source TOCTOU race (no attacker-controlled app runs outside
+  a sandbox; hotserve and the user manager still share the uid, and
+  are the trust domain), the app-writable recorded tier (no record), and
   "what a bare app leaves behind in `shared/`" (nothing runs bare). The
   pre-#40 "reachable today" attack-path table described bare apps and
   is history with them.
