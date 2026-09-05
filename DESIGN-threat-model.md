@@ -178,7 +178,7 @@ Residual items for the model:
 
 The starter config exposes only `:80` returning a static string; the
 entire liveswap/webhook block ships commented out
-([packaging/Caddyfile:26-79](packaging/Caddyfile)) — a fresh install
+([packaging/Caddyfile:26-92](packaging/Caddyfile)) — a fresh install
 has no deploy endpoint. Admin is off TCP, on
 `unix//run/hotserve/admin.sock` ([packaging/Caddyfile:18](packaging/Caddyfile)),
 `RuntimeDirectoryMode=0750` owned by the service user
@@ -187,8 +187,8 @@ admin access is gated on *being the `hotserve` user*. Every deployed
 app is that user, but a sandboxed app cannot reach `/run/hotserve` at
 all (the path is not in its view), so the gate holds against apps and
 only hotserve itself can connect. The example webhook deployment
-([Caddyfile:26-40](packaging/Caddyfile)) is a public TLS vhost with
-`deploy_trust` and no rate limiting in front.
+([Caddyfile:90-92](packaging/Caddyfile)) is a public TLS vhost with
+`liveswap_webhook` behind `deploy_trust` and no rate limiting in front.
 
 **penaltybox** is a response-phase rate-limit-hint enforcer; it touches
 untrusted input only narrowly (the client key defaults to
@@ -207,8 +207,9 @@ rule" and "The shipped mechanism". The network namespace is shared, by
 design. The unit environment is the user manager's defaults
 (`INVOCATION_ID`, …; `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`
 are unset because `/run/user` is not in the view) plus an allowlisted
-slice of hotserve's (`PATH, HOME, LANG, TZ, LC_*`,
-[app.go](liveswap/app.go) `inheritedEnv`) — closing *direct*
+slice of hotserve's (`PATH`, `LANG`, `TZ`, `LC_*` —
+[app.go](liveswap/app.go) `envAllowlist`; `HOME` is never inherited,
+`buildEnv` sets it to the app's shared dir) — closing *direct*
 inheritance of ACME tokens and any other supervisor secret
 (`TestBuildEnvDoesNotLeakSupervisorSecrets`). The `/proc` route is
 closed twice over (non-dumpable supervisor; cross-namespace refusal);
@@ -309,8 +310,10 @@ the mechanism:
 
 2. **A non-dumpable supervisor is the floor.**
    `prctl(PR_SET_DUMPABLE, 0)` makes hotserve's `/proc` entries require
-   `CAP_SYS_PTRACE`, which apps under `NoNewPrivileges` never hold —
-   with or without user namespaces. `liveswap/harden` is a leaf package
+   `CAP_SYS_PTRACE`, which apps never hold — the unit's
+   `CapabilityBoundingSet=` is empty and `NoNewPrivileges=` stops an
+   `execve` from acquiring any — with or without user namespaces.
+   `liveswap/harden` is a leaf package
    whose `init` runs right after `syscall`'s — before `os`, `fmt`,
    Caddy and every package depending on them; only
    `syscall`-closure-only leaves that sort earlier can precede it, and
