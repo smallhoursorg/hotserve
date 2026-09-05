@@ -154,11 +154,10 @@ passed explicitly via `env` or `env_file`. Apps get the user manager's
 resource limits; each unit sets its open-files limit (soft and hard)
 to the manager's ceiling, which the package raises to match
 `hotserve.service` (1048576) via a `user@<uid>.service.d` drop-in —
-effective on systemd ≥ 256 and from the manager's next start: an
-upgrade installs the drop-in but deliberately does not restart a
-running manager (that would stop every app), so the ceiling changes
-at the next boot or manual restart. Below 256 the manager inherits
-its ceiling from PID 1 instead (#37).
+effective from the manager's next start: an upgrade installs the
+drop-in but deliberately does not restart a running manager (that
+would stop every app), so the ceiling changes at the next boot or
+manual restart.
 
 ### Placeholders
 
@@ -231,17 +230,11 @@ The status JSON's `watchdog` object reports `state`
 `consecutive_failures`, `restarts_in_window`, `last_restart_at`,
 `last_restart_cause` (`crash|health`) and `last_failure`.
 
-**Upgrading from v0.1.0:** the watchdog is new and **on by default**,
-which changes one promise: previously a promoted process was never
-touched until the next deploy; now a process that exits, or whose
-`health_path` fails `watchdog_failures` consecutive probes, is
-restarted. If your health endpoint can be slow under load, raise
-`health_timeout` (probe timeouts count as failures) — or set
-`watchdog off` on apps that must keep the old hands-off behavior.
-Health probes also no longer follow redirects (a 3xx now reads as
-unhealthy, for the deploy gate too): if your health endpoint
-redirects — a `/health` → `/health/` trailing slash is the classic —
-point `health_path` at the final path.
+If your health endpoint can be slow under load, raise `health_timeout`
+(probe timeouts count as failures). If it redirects — a `/health` →
+`/health/` trailing slash is the classic — point `health_path` at the
+final path, since a 3xx reads as unhealthy for the watchdog and the
+deploy gate alike.
 
 ## Sandbox
 
@@ -431,10 +424,8 @@ reopen the box for everyone.
 **Hosts.** The sandbox is built on unprivileged user namespaces.
 Debian 13's kernel permits them, which is why it is the supported
 host and why the package ships no LSM policy of its own. Some kernels
-refuse them — Ubuntu 24.04+ restricts them to processes under an
-AppArmor profile granting `userns`
-(`kernel.apparmor_restrict_unprivileged_userns=1`), and container and
-LXC hosts often have them off entirely. hotserve does not work around
+refuse them — an LSM restriction on unprivileged user namespaces, or a
+container or LXC host with them off entirely. hotserve does not work around
 that: it probes, and a host that cannot deliver the namespaces refuses
 to start rather than running apps bare. `journalctl -t
 hotserve-sandbox-probe` says why it refused. The fix is the host's:

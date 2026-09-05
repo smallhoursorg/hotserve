@@ -164,7 +164,7 @@ an on-disk release. Full details, CI snippets, and every option:
 
 ## Roadmap
 
-- **Per-app sandboxing — shipped; resource caps next.**
+- **Per-app sandboxing — shipped.**
   Every app runs as a transient unit under the hotserve user's own
   systemd manager (chosen over the system manager: a polkit grant to
   manage units is root-equivalent), and each unit carries systemd's
@@ -193,10 +193,10 @@ an on-disk release. Full details, CI snippets, and every option:
   first milliseconds. There is no sandbox setting: every launch —
   deploy, relaunch, recovery — gets the same one, or hotserve does
   not start — [liveswap/README.md](liveswap/README.md#sandbox).
-  **Next:** resource caps (`MemoryMax=`, `TasksMax=`, `CPUQuota=`) with
-  a config surface — real now that cgroupfs is read-only inside the
-  unit. Per-app UIDs would need a small privileged helper and stay a
-  later milestone.
+  Resource caps (`MemoryMax=`, `TasksMax=`, `CPUQuota=`) hold inside
+  the unit already and are unset by design until an app needs
+  bounding (#52). Per-app UIDs would need a small privileged helper
+  and stay a later milestone.
 - Hosted APT/APK repositories with package signing and auto-updates
 - A metrics/alerts module to sit alongside liveswap and penaltybox —
   first customer: alerting when the watchdog is stuck in a restart
@@ -219,7 +219,7 @@ make fuzz-list         # what fuzz will run (discovered per module, not listed b
 make soak              # ~20min leak hunt: deploy/reload churn, goroutine/fd assertions
 make build             # cross-compile linux amd64/arm64
 make package           # .deb via nfpm
-make install-test      # install the .deb under real systemd (DISTRO=debian:12 etc.)
+make install-test      # install the .deb under real systemd (Debian 13)
 ```
 
 `test-integration`, `e2e` and `install-test` boot systemd inside a
