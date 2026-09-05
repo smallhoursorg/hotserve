@@ -260,7 +260,7 @@ case), `homeOutsideView` reports an operator `HOME` the view cannot
 satisfy, and `sandboxProperties` (liveswap/systemd_dbus.go) renders
 the property set above. `unitFor` refuses a spec without a sandbox.
 
-**The probe.** Before the first unit on a manager connection,
+**The probe.** At `App.Start` — every config activation —
 `probeSandboxCapability` starts a throwaway unit with the same property
 set whose script reads `/proc/self/uid_map` and its own pid, and passes
 only if the uid range is not the host's and the pid is 1 — both
@@ -270,9 +270,16 @@ capable host under boot load produces; hotserve.service carries no
 until someone restarts it by hand), 30 s each. The probe also proves
 the base view: `/bin/sh` has to exist inside the unit for the script
 to run at all. Its output lands in `journalctl -t hotserve-sandbox-probe`,
-which the refusal message names. The verdict is cached per manager
-connection (`userManagerClient.sandboxCapability`); a failed verdict
-is never cached.
+which the refusal message names. The verdict is cached against the
+manager connection's generation
+(`userManagerClient.cachedSandboxCapability`): later activations on
+the same connection read the cache; a redial — a manager restart, or
+hotserve's own — starts a new generation that the next `Start`
+measures afresh. A failed verdict is never cached. A unit launched
+between a redial and that next `Start` (a watchdog relaunch after the
+manager came back) is not preceded by a probe: if the host can no
+longer deliver the namespaces the unit fails `226/NAMESPACE` and the
+watchdog reports it — never a bare app.
 
 The probe stays a measurement rather than a version check because the
 host still gets a vote: a container, an LXC VPS, a kernel built
@@ -283,7 +290,8 @@ kernel so the runner behaves like a Debian host; no lane exercises a
 restricted kernel, and the probe is what stands between such a host
 and a silent loss of isolation.
 
-There is no cache invalidation, and this is deliberate: app units are
+Within a live connection nothing invalidates the verdict — not a
+sysctl, not an LSM policy load — and this is deliberate: app units are
 `Type=simple`, whose start job completes once the manager has forked —
 before namespace setup and before exec — so a namespace failure
 (`226/NAMESPACE`, when a kernel or LSM change withdraws the namespaces
@@ -357,9 +365,11 @@ assertion in the same change.
 - Integration: real systemd in the dev-systemd container — the
   property set is read back from the transient unit, SIGTERM reaches
   the app inside its PID namespace, escalation, no orphans after
-  SIGKILL. Once during development, the same run with `PrivatePIDs=`
-  removed made the `/proc/<manager-pid>/root` assertion below fail,
-  proving the PID namespace is the load-bearing piece.
+  SIGKILL. The 2026-08-30 spike measured the split the shared-UID rule
+  rests on: bare, `/proc/<manager-pid>/root` opens; with
+  `PrivateUsers=` alone it is denied — the user namespace is the
+  load-bearing piece for the read assertions below, `PrivatePIDs=`
+  for visibility and signals.
 - e2e: ALL scenarios pass sandboxed (the zero-downtime suite doubles as
   sandbox-compat proof); one scenario deploys a probe app that
   attempts to read a sibling's release dir, a sibling's env file path,

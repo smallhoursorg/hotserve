@@ -72,14 +72,14 @@ Properties that matter to the model:
   log-amplification / disk-fill primitive, and every attempt costs a
   JWT/JWKS verification. Body is capped at 64 KiB → 413
   ([handler.go:37,133-140](liveswap/handler.go)); `deployMu.TryLock()`
-  → 409 serializes deploys ([app.go:258-260](liveswap/app.go)) but does
+  → 409 serializes deploys ([app.go:343](liveswap/app.go)) but does
   nothing for auth attempts.
 - **Path routing is `path.Base(path.Clean(...))`**
   ([handler.go:77](liveswap/handler.go)): `/anything/deep/myapp` targets
   `myapp`. A naive `path /deploy/*` site matcher does not constrain the
   app name; the operator's matcher is the only constraint.
 - **Payload:** three fields only — `url`, `version`, `auth_header`
-  ([app.go:112-116](liveswap/app.go)); unknown JSON silently ignored (no
+  ([app.go:108-110](liveswap/app.go)); unknown JSON silently ignored (no
   `DisallowUnknownFields`). `version` is
   `^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$` (no leading dot, so never
   `.`/`..` or a release-GC bookkeeping name), double-sanitized before
@@ -93,7 +93,7 @@ Properties that matter to the model:
   entry names, the operator's allowlist echoed verbatim
   ([allowlist.go:279-281,363,379](liveswap/allowlist.go)). The status
   snapshot exposes the app's **port and PID** and watchdog cause/failure
-  state ([app.go:519-543](liveswap/app.go),
+  state ([app.go:873](liveswap/app.go) `status()`,
   [watchdog.go:234-254](liveswap/watchdog.go)). Artifact URLs *are*
   redacted before logs/errors ([download.go:158-163](liveswap/download.go)),
   so query signatures do not leak.
@@ -109,7 +109,7 @@ Properties that matter to the model:
 ### Artifact fetching — `liveswap/download.go` + `allowlist.go`
 
 The allowlist is **mandatory** — config load fails without one
-([liveswap.go:397](liveswap/liveswap.go)); no any-origin mode. Pinning
+([liveswap.go:507](liveswap/liveswap.go)); no any-origin mode. Pinning
 ([allowlist.go:382-449](liveswap/allowlist.go)) rebuilds the outgoing
 URL so scheme is constant, host/port/path-prefix come from *config
 bytes*, and only the path suffix + query come from the payload — the
@@ -129,7 +129,7 @@ on cross-host redirects but **not** same-host
 ([download.go:77-82](liveswap/download.go)). Size: Content-Length
 pre-check plus streaming `LimitReader`, default 100 MB
 ([download.go:94-114](liveswap/download.go),
-[liveswap.go:332-333](liveswap/liveswap.go)).
+[liveswap.go:423-424](liveswap/liveswap.go)).
 
 **The documented, real gap:** the host allowlist governs the **first
 hop only** — `CheckRedirect` deliberately does not re-check the host
@@ -166,7 +166,7 @@ Residual items for the model:
   passes `IsLocal`, but nothing resolves the on-disk path *through*
   an earlier-written symlink. Blast radius is bounded (targets must stay
   symbolically under root; extraction is into a hidden staging dir
-  `os.Rename`d on success, [download.go:196-215](liveswap/download.go)).
+  `os.Rename`d on success, [download.go:232](liveswap/download.go)).
   Not asserted as exploitable.
 - **No entry-count or path-length cap** independent of the byte budget:
   a billion 1-byte entries fits in 1 GB → CPU/inode exhaustion. The
@@ -182,7 +182,7 @@ entire liveswap/webhook block ships commented out
 has no deploy endpoint. Admin is off TCP, on
 `unix//run/hotserve/admin.sock` ([packaging/Caddyfile:18](packaging/Caddyfile)),
 `RuntimeDirectoryMode=0750` owned by the service user
-([packaging/hotserve.service:26-29](packaging/hotserve.service)) — so
+([packaging/hotserve.service:33-34](packaging/hotserve.service)) — so
 admin access is gated on *being the `hotserve` user*. Every deployed
 app is that user, but a sandboxed app cannot reach `/run/hotserve` at
 all (the path is not in its view), so the gate holds against apps and
@@ -412,9 +412,18 @@ grant.
   restarter), `KillMode=control-group`,
   `UnsetEnvironment=XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS`.
 
-**The probe stays.** Before the first unit on a manager connection,
+**The probe stays.** At `App.Start` — every config activation —
 hotserve starts a real transient unit with this property set and reads
-back from inside it that both namespaces engaged. The probe is not a
+back from inside it that both namespaces engaged. The verdict is
+cached against the manager connection's generation
+(`userManagerClient.cachedSandboxCapability`): later activations on
+the same connection read the cache, and a redial (a manager restart,
+or hotserve's own) starts a new generation that the next `Start`
+measures afresh. A unit launched between a redial and that next
+`Start` — a watchdog relaunch after the manager came back — is not
+preceded by a probe; if the host can no longer deliver the namespaces
+it fails `226/NAMESPACE` and the watchdog reports it, never a bare
+app. The probe is not a
 proxy for the systemd version — it is what catches a container, an LXC
 VPS or a kernel built without user namespaces, all of which can present
 a supported manager version and still refuse the unit. CI sets
