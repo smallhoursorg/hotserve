@@ -127,7 +127,7 @@ services:
   # merged Caddyfile is mounted so the reload scenario can POST it to
   # the admin API mid-traffic.
   e2e-runner:
-    image: curlimages/curl:8.21.0
+    image: curlimages/curl:8.22.0
     depends_on:
       - e2e-hotserve
     volumes:
