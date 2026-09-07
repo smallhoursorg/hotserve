@@ -28,12 +28,12 @@ func FuzzUnitName(f *testing.F) {
 		{"blog", "v1.4.2"}, {"blog-api", "v1"}, {"blog", "1"}, {"a", "."}, {"a", ".."},
 		{"Blog", "v1"}, {"blog", "v1/../x"}, {"", "v1"}, {"blog", ""}, {"blog@x", "v1"},
 		{strings.Repeat("a", 63), strings.Repeat("9", 64)}, {strings.Repeat("a", 64), "v1"},
-		{"b-", "-"}, {"-", "v-1"}, {"blog", "v1.prestart"}, {"blog", "1.aaaaaaaa"},
+		{"b-", "-"}, {"-", "v-1"}, {"blog", "v1.prestart"}, {"blog", "1.aaaaaaaaaaaaaaaa"},
 	} {
 		f.Add(c[0], c[1])
 	}
 	f.Fuzz(func(t *testing.T, app, version string) {
-		spec := startSpec{app: app, version: version}
+		spec := startSpec{app: app, version: version, nonce: "0a1b2c3d0a1b2c3d"}
 		valid := appNameRe.MatchString(app) && validVersion(version)
 		for _, oneshot := range []bool{false, true} {
 			name, err := unitName(spec, oneshot)

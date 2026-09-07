@@ -12,13 +12,16 @@ import (
 	"go.uber.org/zap"
 )
 
-// appState is what survives a Caddy restart: enough to relaunch (or,
-// with a future systemd runner, reattach to) the current version.
+// appState is what survives a Caddy restart: enough to reattach to, or
+// relaunch, the current version.
 type appState struct {
-	CurrentVersion string      `json:"current_version"`
-	Port           int         `json:"port"`
-	Handle         handleState `json:"handle"`
-	UpdatedAt      time.Time   `json:"updated_at"`
+	CurrentVersion string `json:"current_version"`
+	// Nonce identifies the instance: it names the unit (Handle.Unit
+	// carries it too) and the socket, appDirs.socket(Nonce), which is
+	// derived at load rather than recorded so the two cannot disagree.
+	Nonce     string      `json:"nonce"`
+	Handle    handleState `json:"handle"`
+	UpdatedAt time.Time   `json:"updated_at"`
 }
 
 // stateStore persists appState; an interface so pipeline unit tests

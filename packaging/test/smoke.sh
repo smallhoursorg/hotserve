@@ -202,7 +202,7 @@ until [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOK
 done
 
 # Build a deployable artifact on the fly: the "app" is a wrapper around
-# `hotserve respond`, honoring liveswap's PORT contract and answering
+# `hotserve respond`, honoring liveswap's SOCKET contract and answering
 # 200 on every path (which satisfies the health gate).
 workdir=$(mktemp -d)
 # Besides the NOFILE contract the wrapper reports what its sandbox
@@ -235,8 +235,9 @@ cat "/proc/$MGR_PID/environ" >/dev/null 2>&1 && mgrenv=open || mgrenv=closed
 [ -e /etc/ssl/private ] && sslpriv=present || sslpriv=absent
 etclist=$(ls /etc 2>/dev/null | tr '\n' ',')
 varliblist=$(ls /var/lib 2>/dev/null | tr '\n' ',')
-echo "smoke app starting on $PORT nofile_soft=$(ulimit -Sn) nofile_hard=$(ulimit -Hn) uidmap=$uidmap pid=$$ nprocs=$(ls /proc | grep -c '^[0-9]') hotserve_lib=$hslib mgr_root=$mgrroot mgr_environ=$mgrenv mgr_socket=$mgrsock admin_socket=$adminsock state_json=$state etc_hotserve=$etchs binsh=$binsh hsbin=$hsbin etcssl=$etcssl sslprivate=$sslpriv etclist=$etclist varliblist=$varliblist saw_mgr_pid=$MGR_PID saw_uid=$HOTSERVE_UID"
-exec /usr/bin/hotserve respond --listen 127.0.0.1:"$PORT" "hello smoke"
+echo "smoke app starting on $SOCKET nofile_soft=$(ulimit -Sn) nofile_hard=$(ulimit -Hn) uidmap=$uidmap pid=$$ nprocs=$(ls /proc | grep -c '^[0-9]') hotserve_lib=$hslib mgr_root=$mgrroot mgr_environ=$mgrenv mgr_socket=$mgrsock admin_socket=$adminsock state_json=$state etc_hotserve=$etchs binsh=$binsh hsbin=$hsbin etcssl=$etcssl sslprivate=$sslpriv etclist=$etclist varliblist=$varliblist saw_mgr_pid=$MGR_PID saw_uid=$HOTSERVE_UID"
+# Caddy's unix//abs/path spelling: "unix/" + the absolute socket path.
+exec /usr/bin/hotserve respond --listen "unix/$SOCKET" "hello smoke"
 EOF
 chmod +x "$workdir/server"
 mkdir -p /srv/art
@@ -260,7 +261,9 @@ code=$(curl -s -o /tmp/deploy-body -w '%{http_code}' --max-time 90 \
 	-d '{"url":"http://127.0.0.1:8200/demo.tar.gz","version":"s1"}' "$HOOK")
 [ "$code" = "200" ] || {
 	echo "deploy response: $(cat /tmp/deploy-body)"
-	die "deploy under systemd sandbox failed with HTTP $code — a deny-by-default view fails with ENOENT (or 203/EXEC for the command itself), not a permission error, so if the journal shows a missing path suspect the unit's base view or a missing extra_path rather than file modes"
+	echo "--- app journal (hotserve-demo):"
+	journalctl --no-pager -t hotserve-demo 2>/dev/null | tail -40
+	die "deploy under systemd sandbox failed with HTTP $code — a deny-by-default view fails with ENOENT (or 203/EXEC for the command itself), not a permission error, so if the journal shows a missing path suspect the unit's base view rather than file modes"
 }
 curl -fsS --max-time 5 "$PROXY/" | grep -q "hello smoke" \
 	|| die "proxy does not serve the deployed app"

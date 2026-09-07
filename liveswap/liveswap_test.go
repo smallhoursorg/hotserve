@@ -151,6 +151,36 @@ func TestValidate(t *testing.T) {
 	}
 }
 
+// A socket path must fit sun_path (108 bytes). The longest one an app
+// can produce is refused at config load, with the limit named, rather
+// than failing the bind inside the unit at deploy time.
+func TestValidateRefusesSocketPathOverLimit(t *testing.T) {
+	app := strings.Repeat("a", 63)
+	mk := func(root string) *App {
+		return &App{
+			Root:              root,
+			ArtifactAllowlist: []string{"github.com/smallhoursorg/"},
+			DeployTrust:       githubTrust(),
+			Apps:              map[string]*AppConfig{app: defaultedApp(t)},
+		}
+	}
+	// The longer of the two paths is the app's own: "/" + root + "/" +
+	// app + "/run/" + 16 + "/app.sock". The boundary root leaves it at
+	// exactly 107 bytes, with the pinned proxy/ path two shorter.
+	zero := strings.Repeat("0", 16)
+	boundary := "/" + strings.Repeat("r", unixSocketPathMax-1-len(newAppDirs("/", app).socket(zero)))
+	if got := len(newAppDirs(boundary, app).socket(zero)); got != unixSocketPathMax {
+		t.Fatalf("test arithmetic: boundary path is %d bytes", got)
+	}
+	if err := mk(boundary).Validate(); err != nil {
+		t.Fatalf("a %d-byte socket path must validate: %v", unixSocketPathMax, err)
+	}
+	err := mk(boundary + "r").Validate()
+	if err == nil || !strings.Contains(err.Error(), "107") || !strings.Contains(err.Error(), "/run/") {
+		t.Fatalf("a 108-byte socket path must be refused naming the limit and the path, got %v", err)
+	}
+}
+
 func TestHealthPathOffIsValid(t *testing.T) {
 	a := &App{Root: "/x", ArtifactAllowlist: []string{"h"}, DeployTrust: githubTrust(), Apps: map[string]*AppConfig{"w": defaultedApp(t)}}
 	a.Apps["w"].HealthPath = "off"

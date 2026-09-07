@@ -359,15 +359,22 @@ func supervisorPaths() []string {
 func overlaps(a, b string) bool { return pathWithin(a, b) || pathWithin(b, a) }
 
 // sandboxSpecFor is the sandbox of one instance of this app: its
-// release being started and its shared dir writable, plus the base
-// view. Everything else on the host — every other app, every other
-// release, hotserve's own state — is absent because nothing names it.
-func (s *appSpec) sandboxSpecFor(releaseDir string) *sandboxSpec {
+// release being started, its shared dir and its own run/<nonce> dir
+// (where it binds its socket) writable, plus the base view. Everything
+// else on the host — every other app, every other release, every other
+// instance's run dir, hotserve's own state, the proxy/ dir holding the
+// pinned socket names — is absent because nothing names it.
+func (s *appSpec) sandboxSpecFor(releaseDir, nonce string) *sandboxSpec {
+	run := s.dirs.runDir(nonce)
 	return &sandboxSpec{
-		root:     s.dirs.root,
-		appDir:   s.dirs.app,
-		appName:  s.name,
-		writable: []bindPath{{dest: releaseDir, source: releaseDir}, {dest: s.dirs.shared, source: s.dirs.shared}},
+		root:    s.dirs.root,
+		appDir:  s.dirs.app,
+		appName: s.name,
+		writable: []bindPath{
+			{dest: releaseDir, source: releaseDir},
+			{dest: s.dirs.shared, source: s.dirs.shared},
+			{dest: run, source: run},
+		},
 		// Copied: resolveBindSources rewrites entries to what they
 		// resolve to, and the spec must not mutate the app's config.
 	}
@@ -427,11 +434,16 @@ const sandboxProbeTimeout = 30 * time.Second
 // is the text an operator reads when the server will not come up.
 func probeSandboxCapability(r runner) error {
 	attempt := func() error {
+		nonce, err := newNonce()
+		if err != nil {
+			return err
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), sandboxProbeTimeout)
 		defer cancel()
 		return r.RunOnce(ctx, startSpec{
 			app:     "sandbox-probe",
 			version: "probe",
+			nonce:   nonce,
 			command: sandboxProbeCommand(),
 			dir:     "/",
 			env:     []string{"PATH=/usr/bin:/bin"},

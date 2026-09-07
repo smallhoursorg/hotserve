@@ -310,7 +310,26 @@ func unitProperties(u unitSpec) []sddbus.Property {
 		{Name: "StandardOutput", Value: godbus.MakeVariant("journal")},
 		{Name: "StandardError", Value: godbus.MakeVariant("journal")},
 	}
+	if u.Socket != "" {
+		// The unit owns its socket file for exactly as long as it runs:
+		// the manager removes it after the service stops, however it
+		// stopped — under the unit's own sandbox, where run/ is bound
+		// writable and /usr/bin/rm is in the base view. Failure is
+		// ignored (the "-" prefix): a socket the app never bound, or
+		// already unlinked, must not mark the unit failed.
+		props = append(props, sddbus.Property{Name: "ExecStopPost", Value: godbus.MakeVariant([]execCommand{
+			{Path: "/usr/bin/rm", Args: []string{"rm", "-f", u.Socket}, IgnoreFailure: true},
+		})})
+	}
 	return append(props, sandboxProperties(u.Sandbox)...)
+}
+
+// execCommand is the D-Bus shape of one Exec*= entry, "(sasb)": the
+// binary, its argv, and whether a non-zero exit is ignored.
+type execCommand struct {
+	Path          string
+	Args          []string
+	IgnoreFailure bool
 }
 
 // D-Bus shapes of the sandbox properties, as systemd's own

@@ -18,7 +18,7 @@ func TestFileStateStoreRoundTrip(t *testing.T) {
 
 	want := appState{
 		CurrentVersion: "v3",
-		Port:           8123,
+		Nonce:          "0a1b2c3d0a1b2c3d",
 		Handle:         handleState{PID: 999, StartedAt: time.Unix(1_700_000_000, 0).UTC()},
 		UpdatedAt:      time.Unix(1_700_000_100, 0).UTC(),
 	}
@@ -27,7 +27,7 @@ func TestFileStateStoreRoundTrip(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("load: ok=%v err=%v", ok, err)
 	}
-	if got.CurrentVersion != want.CurrentVersion || got.Port != want.Port || got.Handle.PID != want.Handle.PID {
+	if got.CurrentVersion != want.CurrentVersion || got.Nonce != want.Nonce || got.Handle.PID != want.Handle.PID {
 		t.Fatalf("round trip mismatch: %+v != %+v", got, want)
 	}
 	// No stray temp file left behind.

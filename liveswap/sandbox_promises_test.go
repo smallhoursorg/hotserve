@@ -62,7 +62,7 @@ func TestSandboxedEnvCarriesNoSupervisorSecrets(t *testing.T) {
 	}
 	spec := testSpec(t)
 	{
-		env, err := buildEnv(spec, "v1", 8123, spec.dirs.release("v1"))
+		env, err := buildEnv(spec, "v1", spec.dirs.socket("0a1b2c3d0a1b2c3d"), spec.dirs.release("v1"))
 		must(t, err)
 		for k := range secrets {
 			for _, kv := range env {
@@ -89,9 +89,9 @@ func TestSandboxedEnvNamesNoPathOutsideTheView(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", "/var/lib/hotserve/caddy")
 	t.Setenv("XDG_CONFIG_HOME", "/var/lib/hotserve/config")
 	spec := testSpec(t)
-	env, err := buildEnv(spec, "v1", 8123, spec.dirs.release("v1"))
+	env, err := buildEnv(spec, "v1", spec.dirs.socket("0a1b2c3d0a1b2c3d"), spec.dirs.release("v1"))
 	must(t, err)
-	sb := spec.sandboxSpecFor(spec.dirs.release("v1"))
+	sb := spec.sandboxSpecFor(spec.dirs.release("v1"), recordedNonce)
 	for _, kv := range env {
 		k, v, _ := strings.Cut(kv, "=")
 		switch k {
@@ -105,13 +105,14 @@ func TestSandboxedEnvNamesNoPathOutsideTheView(t *testing.T) {
 	}
 }
 
-// Promise: "The network namespace MUST be shared: the app binds
-// 127.0.0.1:$PORT and hotserve proxies to it, unchanged."
+// Promise: "The network namespace MUST be shared: apps make outbound
+// calls, and hotserve reaches the app's socket at its real host path."
 //
 // Nothing asserts the absence of the properties that would break it,
 // and unsharing the netns is a one-line change that no filesystem test
-// would notice — the app would simply become unreachable through the
-// proxy, at deploy time, on a real host.
+// would notice — an app's outbound calls would simply fail, at deploy
+// time, on a real host. AF_UNIX is the other half: without it the app
+// cannot bind the socket the proxy dials.
 func TestNetworkNamespaceIsShared(t *testing.T) {
 	spec := &sandboxSpec{root: "/var/lib/liveswap",
 		appDir: "/var/lib/liveswap/blog", appName: "blog",
@@ -121,16 +122,14 @@ func TestNetworkNamespaceIsShared(t *testing.T) {
 		"PrivateNetwork", "NetworkNamespacePath", "PrivateIPC", "IPCNamespacePath",
 	} {
 		if v, present := got[name]; present {
-			t.Errorf("%s=%v is set: the app must share the network namespace so hotserve can proxy to 127.0.0.1:$PORT", name, v)
+			t.Errorf("%s=%v is set: the app must share the network namespace for its outbound calls", name, v)
 		}
 	}
-	// The address families the app needs to bind and be proxied to
-	// are the other half of the same promise.
 	fam, _ := got["RestrictAddressFamilies"].(allowList)
 	if !fam.AllowList {
 		t.Errorf("RestrictAddressFamilies must be an allow list, got %+v", fam)
 	}
-	for _, want := range []string{"AF_INET", "AF_INET6"} {
+	for _, want := range []string{"AF_INET", "AF_INET6", "AF_UNIX"} {
 		found := false
 		for _, n := range fam.Names {
 			if n == want {
@@ -138,7 +137,64 @@ func TestNetworkNamespaceIsShared(t *testing.T) {
 			}
 		}
 		if !found {
-			t.Errorf("%s missing, the app cannot bind its port: %v", want, fam.Names)
+			t.Errorf("%s missing, the app cannot bind its socket or call out: %v", want, fam.Names)
+		}
+	}
+}
+
+// Promise: the socket an instance is handed is inside its own view,
+// under a directory bound writable, and no two instances share one —
+// the old and the new instance of a deploy run side by side, and the
+// proxy dials exactly one of them.
+func TestSocketIsInsideTheViewAndUniquePerInstance(t *testing.T) {
+	rig := newTestRig(t)
+	ctx := context.Background()
+	must(t, rig.ma.Deploy(ctx, deployRequest{url: "https://x/1", version: "v1"}))
+	must(t, rig.ma.Deploy(ctx, deployRequest{url: "https://x/2", version: "v2"}))
+	rig.runner.mu.Lock()
+	specs := append([]startSpec{}, rig.runner.started...)
+	rig.runner.mu.Unlock()
+	if len(specs) != 2 {
+		t.Fatalf("want two Starts, got %d", len(specs))
+	}
+	sockets := map[string]bool{}
+	for _, spec := range specs {
+		env := spec.env[len(spec.env)-1]
+		socket, ok := strings.CutPrefix(env, "SOCKET=")
+		if !ok {
+			t.Fatalf("SOCKET is not the last (highest-precedence) env entry: %q", env)
+		}
+		if !spec.sandbox.inView(socket) {
+			t.Errorf("socket %s is outside the unit's view", socket)
+		}
+		own := rig.spec.dirs.runDir(spec.nonce)
+		writable := false
+		for _, b := range spec.sandbox.writable {
+			if b.dest == own {
+				writable = true
+			}
+			if b.dest == rig.spec.dirs.run {
+				t.Errorf("the run/ parent is bound: every other instance's socket name would be in the view")
+			}
+		}
+		if !writable || !pathWithin(socket, own) {
+			t.Errorf("socket %s is not under the instance's own writable run dir %s", socket, own)
+		}
+		if socket != rig.spec.dirs.socket(spec.nonce) || spec.socket != socket {
+			t.Errorf("socket %s is not the spec's own (nonce %q, spec.socket %q)", socket, spec.nonce, spec.socket)
+		}
+		sockets[socket] = true
+	}
+	if len(sockets) != 2 {
+		t.Fatalf("two instances share a socket: %v", sockets)
+	}
+	// And neither instance's view contains the other's run dir: the
+	// old instance a deploy replaces, running alongside, cannot reach
+	// the new socket's name before hotserve pins it.
+	for i, spec := range specs {
+		other := specs[1-i]
+		if spec.sandbox.inView(other.socket) {
+			t.Errorf("instance %s can see instance %s's socket %s", spec.nonce, other.nonce, other.socket)
 		}
 	}
 }
@@ -260,7 +316,7 @@ func TestHomeOutsideTheViewIsReported(t *testing.T) {
 		writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}},
 	}
 	env := func(home string) []string {
-		return []string{"PATH=/usr/bin", "HOME=" + home, "PORT=8080"}
+		return []string{"PATH=/usr/bin", "HOME=" + home, "SOCKET=" + filepath.Join(appDir, "run", "0a1b2c3d0a1b2c3d.sock")}
 	}
 	for _, tc := range []struct {
 		name string
@@ -340,7 +396,8 @@ func TestEnvFileIsolationResolvesASymlinkedParentOfAMissingFile(t *testing.T) {
 func TestEnvFileIsolationComparesBothSpellingsOfASiblingsDirs(t *testing.T) {
 	// A real symlinked root: <tmp>/link -> <tmp>/real, with blog's
 	// shared dir existing so EvalSymlinks has something to resolve.
-	tmp := t.TempDir()
+	// A short tmp: Validate also measures the socket paths under it.
+	tmp := shortTempDir(t)
 	real := filepath.Join(tmp, "real")
 	link := filepath.Join(tmp, "link")
 	must(t, os.MkdirAll(filepath.Join(real, "blog", "shared"), 0o750))

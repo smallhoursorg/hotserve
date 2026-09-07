@@ -115,7 +115,7 @@ func TestWebhookDeployHappyPath(t *testing.T) {
 	if status.CurrentVersion != "v1" || !status.Running {
 		t.Fatalf("response status wrong: %+v", status)
 	}
-	if rig.ma.activePort.Load() == 0 {
+	if rig.ma.activeSocket.Load() == nil {
 		t.Fatal("deploy did not publish a port")
 	}
 	// The status records which trust source authorized the deploy.

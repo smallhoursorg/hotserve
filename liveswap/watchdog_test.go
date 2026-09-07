@@ -77,7 +77,7 @@ func deployV1(t *testing.T, rig *testRig) {
 func TestWatchdogRestartsOnCrash(t *testing.T) {
 	rig := newTestRig(t)
 	deployV1(t, rig)
-	portV1 := rig.ma.activePort.Load()
+	sockV1 := rig.ma.activeSocket.Load()
 	rig.startWatchdogT(t)
 	waitUntil(t, "watchdog to arm", func() bool {
 		s := rig.ma.wd.currentState()
@@ -90,8 +90,8 @@ func TestWatchdogRestartsOnCrash(t *testing.T) {
 		return rig.runner.startCount() == 2
 	})
 	waitUntil(t, "new instance published", func() bool {
-		p := rig.ma.activePort.Load()
-		return p != 0 && p != portV1
+		p := rig.ma.activeSocket.Load()
+		return p != nil && p != sockV1
 	})
 	st, ok, _ := rig.store.load()
 	if !ok || st.CurrentVersion != "v1" {
@@ -100,6 +100,34 @@ func TestWatchdogRestartsOnCrash(t *testing.T) {
 	status := rig.ma.status()
 	if status.Watchdog == nil || status.Watchdog.RestartsInWindow != 1 || status.Watchdog.LastRestartCause != "crash" {
 		t.Fatalf("watchdog status not recorded: %+v", status.Watchdog)
+	}
+}
+
+// Promise: a watchdog restart leaves the dead instance's socket
+// behind for nobody — the relaunch's sweep removes it.
+func TestRestartRemovesTheDeadSocket(t *testing.T) {
+	rig := newTestRig(t)
+	rig.prober.bind = true
+	deployV1(t, rig)
+	dead := rig.ma.currentInstance()
+	if _, err := os.Stat(dead.socket); err != nil {
+		t.Fatalf("the bound socket should exist: %v", err)
+	}
+	rig.startWatchdogT(t)
+	waitUntil(t, "watchdog to arm", func() bool {
+		s := rig.ma.wd.currentState()
+		return s == wdStateGrace || s == wdStateWatching
+	})
+	rig.runner.handleAt(0).kill()
+	advanceUntil(t, rig, time.Second, "restart after crash", func() bool {
+		return rig.runner.startCount() == 2
+	})
+	waitUntil(t, "dead socket removed", func() bool {
+		_, err := os.Stat(dead.socket)
+		return os.IsNotExist(err)
+	})
+	if cur := rig.ma.currentInstance(); cur.socket == dead.socket {
+		t.Fatal("the replacement must get its own socket")
 	}
 }
 
@@ -138,7 +166,7 @@ func TestWatchdogUnconfirmedStopAbortsRestart(t *testing.T) {
 	rig.spec.wdGrace = time.Hour
 	deployV1(t, rig)
 	rig.ma.wd.skipNextGrace(rig.runner.handleAt(0)) // the first pass probes immediately; only the retry proves the skip
-	port := rig.ma.activePort.Load()
+	sock := rig.ma.activeSocket.Load()
 	rig.prober.setProbeErr(errors.New("health check returned 500"))
 	rig.runner.stopErr = errTest
 	rig.runner.stopLeavesAlive = true
@@ -154,7 +182,7 @@ func TestWatchdogUnconfirmedStopAbortsRestart(t *testing.T) {
 	if rig.runner.startCount() != 1 {
 		t.Fatalf("no replacement may be launched beside an unconfirmed instance, got %d starts", rig.runner.startCount())
 	}
-	if rig.ma.activePort.Load() != port {
+	if rig.ma.activeSocket.Load() != sock {
 		t.Fatal("the still-alive instance stays routed")
 	}
 	if rig.runner.stopCount() < 2 {
@@ -314,7 +342,7 @@ func TestWatchdogThrottlesThenResumesAfterWindow(t *testing.T) {
 	if got := rig.runner.startCount(); got != 3 {
 		t.Fatalf("window of 2 must pace to exactly 2 restarts before throttling (3 starts total), got %d", got)
 	}
-	if rig.ma.activePort.Load() != 0 {
+	if rig.ma.activeSocket.Load() != nil {
 		t.Fatal("a dead instance must not stay routed during the throttle wait")
 	}
 	if s := rig.ma.status(); s.Watchdog.State != wdStateThrottled {
@@ -327,7 +355,7 @@ func TestWatchdogThrottlesThenResumesAfterWindow(t *testing.T) {
 		return rig.runner.startCount() == 4
 	})
 	waitUntil(t, "resumed instance routed again", func() bool {
-		return rig.ma.activePort.Load() != 0
+		return rig.ma.activeSocket.Load() != nil
 	})
 }
 
@@ -547,13 +575,13 @@ func TestWatchdogUnroutesDeadInstanceDuringBackoff(t *testing.T) {
 	// port must already be unrouted (clean 5xx, and the freed port
 	// cannot leak another app's traffic here if reused).
 	waitUntil(t, "dead instance unrouted before the restart", func() bool {
-		return rig.ma.activePort.Load() == 0
+		return rig.ma.activeSocket.Load() == nil
 	})
 	if got := rig.runner.startCount(); got != 1 {
 		t.Fatalf("unroute must happen before any restart, got %d starts", got)
 	}
 	advanceUntil(t, rig, time.Second, "restart republishes the port", func() bool {
-		return rig.ma.activePort.Load() != 0 && rig.runner.startCount() == 2
+		return rig.ma.activeSocket.Load() != nil && rig.runner.startCount() == 2
 	})
 }
 
@@ -574,14 +602,14 @@ func TestWatchdogUnroutesWhenRelaunchKeepsFailing(t *testing.T) {
 	advanceUntil(t, rig, time.Second, "launch failures drain into throttle", func() bool {
 		return rig.ma.wd.currentState() == wdStateThrottled
 	})
-	if rig.ma.activePort.Load() != 0 {
+	if rig.ma.activeSocket.Load() != nil {
 		t.Fatal("port must stay unrouted while relaunches fail")
 	}
 	// Heal the launcher: the next budgeted attempt must recover and
 	// route the app again.
 	rig.runner.setStartErr(nil)
 	advanceUntil(t, rig, 5*time.Second, "recovery once launches succeed again", func() bool {
-		return rig.ma.activePort.Load() != 0 && rig.ma.status().Running
+		return rig.ma.activeSocket.Load() != nil && rig.ma.status().Running
 	})
 }
 
@@ -833,11 +861,13 @@ func TestWatchdogFallsBackToPollingWithoutWaitChannel(t *testing.T) {
 	// A reattached-style handle has no done channel: Wait returns nil
 	// and crash detection must ride the health tick's Alive poll.
 	h := &fakeHandle{id: "reattached", alive: true}
+	sock := rig.spec.dirs.socket("0a1b2c3d0a1b2c3d")
 	rig.ma.mu.Lock()
-	rig.ma.current = &instance{version: "v1", port: 1234, handle: h}
+	inst := &instance{version: "v1", nonce: "0a1b2c3d0a1b2c3d", socket: sock, sock: rig.spec.dirs.socketRef("0a1b2c3d0a1b2c3d"), handle: h}
+	rig.ma.current = inst
 	rig.ma.mu.Unlock()
-	rig.ma.activePort.Store(1234)
-	must(t, rig.store.save(appState{CurrentVersion: "v1", Port: 1234, Handle: handleState{PID: 1}}))
+	rig.ma.activeSocket.Store(inst.sock)
+	must(t, rig.store.save(appState{CurrentVersion: "v1", Nonce: "0a1b2c3d0a1b2c3d", Handle: handleState{PID: 1}}))
 	must(t, mkdirRelease(rig.spec, "v1"))
 	rig.startWatchdogT(t)
 	waitUntil(t, "watchdog to arm", func() bool {

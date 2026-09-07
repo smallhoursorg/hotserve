@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -80,10 +83,11 @@ func (c *fakeClock) After(d time.Duration) <-chan time.Time {
 // Handles built as bare literals (no done channel) exercise the
 // Wait-returns-nil polling fallback.
 type fakeHandle struct {
-	id    string
-	alive bool
-	done  chan struct{}
-	mu    sync.Mutex
+	id     string
+	alive  bool
+	done   chan struct{}
+	socket string // removed when the "unit" stops, as ExecStopPost= does
+	mu     sync.Mutex
 }
 
 func (h *fakeHandle) state() handleState { return handleState{PID: 4242} }
@@ -107,6 +111,9 @@ func (h *fakeHandle) kill() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.alive = false
+	if h.socket != "" {
+		_ = os.Remove(h.socket)
+	}
 	if h.done != nil {
 		select {
 		case <-h.done:
@@ -142,7 +149,7 @@ func (r *fakeRunner) Start(spec startSpec) (handle, error) {
 	if r.startErr != nil {
 		return nil, r.startErr
 	}
-	h := &fakeHandle{id: fmt.Sprintf("h%d", len(r.handles)), alive: true, done: make(chan struct{})}
+	h := &fakeHandle{id: fmt.Sprintf("h%d", len(r.handles)), alive: true, done: make(chan struct{}), socket: spec.socket}
 	r.started = append(r.started, spec)
 	r.handles = append(r.handles, h)
 	return h, nil
@@ -190,7 +197,9 @@ func (r *fakeRunner) Reattach(st handleState) (handle, bool, error) {
 		r.reattachErrs = r.reattachErrs[1:]
 		return nil, false, err
 	}
-	if !r.reattachOK {
+	// Nothing recorded is nothing to reattach to, as with the real
+	// runner; a record the caller refused arrives here as zero.
+	if !r.reattachOK || st == (handleState{}) {
 		return nil, false, nil
 	}
 	h := &fakeHandle{id: "reattached", alive: true}
@@ -256,22 +265,45 @@ func (r *fakeRunner) handleAt(i int) *fakeHandle {
 // (the watchdog path) consumes the result queue first, then repeats
 // probeErr; both are settable while the watchdog goroutine runs.
 type fakeProber struct {
-	err error
+	err  error
+	bind bool // bind a real socket during the health gate, as the app would, and pin it as the real prober does
 
 	mu           sync.Mutex
 	probeErr     error
 	probeResults []error
 	probeCalls   int
+	listeners    []net.Listener
 }
 
-func (p *fakeProber) waitHealthy(_ context.Context, _ string, alive func() bool, _ healthConfig) error {
+func (p *fakeProber) waitHealthy(_ context.Context, sock *socketRef, alive func() bool, _ healthConfig) error {
+	if p.bind {
+		ln, err := listenSocket(sock.path)
+		if err != nil {
+			return err
+		}
+		p.mu.Lock()
+		p.listeners = append(p.listeners, ln)
+		p.mu.Unlock()
+		if _, err := sock.dial(); err != nil {
+			return err
+		}
+	}
 	if !alive() {
 		return errors.New("process exited before becoming healthy")
 	}
 	return p.err
 }
 
-func (p *fakeProber) probeOnce(_ context.Context, _ string, _ time.Duration) error {
+func (p *fakeProber) closeListeners() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, ln := range p.listeners {
+		_ = ln.Close()
+	}
+	p.listeners = nil
+}
+
+func (p *fakeProber) probeOnce(_ context.Context, _ *socketRef, _ string, _ time.Duration) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.probeCalls++
@@ -340,7 +372,6 @@ func (s *fakeStore) save(st appState) error {
 // testSpec builds a fully-populated spec rooted in a temp dir.
 func testSpec(t *testing.T) *appSpec {
 	t.Helper()
-	root := t.TempDir()
 	return &appSpec{
 		name:            "demo",
 		command:         []string{"./server", "--version", "{version}"},
@@ -360,7 +391,7 @@ func testSpec(t *testing.T) *appSpec {
 		wdWindow:        10 * time.Minute,
 		keep:            2,
 		maxArtifactSize: 1 << 20,
-		dirs:            newAppDirs(root, "demo"),
+		dirs:            newAppDirs(shortTempDir(t), "demo"),
 	}
 }
 
@@ -372,6 +403,84 @@ type testRig struct {
 	clock  *fakeClock
 	store  *fakeStore
 	spec   *appSpec
+}
+
+// recordedNonce is the instance nonce the state.json fixtures record.
+const recordedNonce = "0a1b2c3d0a1b2c3d"
+
+// activeSocketIs reports whether the proxy is routed to the recorded
+// instance's socket.
+func activeSocketIs(rig *testRig) bool {
+	s := rig.ma.activeSocket.Load()
+	return s != nil && s.path == rig.spec.dirs.socket(recordedNonce)
+}
+
+// socketFiles lists the instance sockets present under the app's run
+// dir, by nonce.
+func socketFiles(t *testing.T, rig *testRig) []string {
+	t.Helper()
+	entries, err := os.ReadDir(rig.spec.dirs.run)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() && nonceRe.MatchString(e.Name()) {
+			out = append(out, e.Name())
+		}
+	}
+	return out
+}
+
+// pinnedFiles lists the pinned names under the app's proxy dir, by nonce.
+func pinnedFiles(t *testing.T, rig *testRig) []string {
+	t.Helper()
+	return socketNames(t, rig.spec.dirs.proxy)
+}
+
+func socketNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, e := range entries {
+		if n, ok := strings.CutSuffix(e.Name(), ".sock"); ok {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// listenSocket binds a real unix socket at path, as a running app
+// does; closing the listener leaves the file, as an app's exit does
+// (the unit's ExecStopPost removes it — the fake handle mimics that).
+func listenSocket(path string) (net.Listener, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return nil, err
+	}
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, err
+	}
+	ln.(*net.UnixListener).SetUnlinkOnClose(false)
+	return ln, nil
+}
+
+// bindSocket is listenSocket for a test's own fixture.
+func bindSocket(t *testing.T, path string) {
+	t.Helper()
+	ln, err := listenSocket(path)
+	must(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+}
+
+// touchSocket plants a stale socket file the way a dead app leaves one.
+func touchSocket(t *testing.T, path string) {
+	t.Helper()
+	must(t, os.MkdirAll(filepath.Dir(path), 0o750))
+	must(t, os.WriteFile(path, nil, 0o600))
 }
 
 func newTestRig(t *testing.T) *testRig {
@@ -395,6 +504,7 @@ func newTestRig(t *testing.T) *testRig {
 	ma.logger = zap.NewNop()
 	ma.wdCtx, ma.wdCancel = context.WithCancel(context.Background())
 	t.Cleanup(ma.wdCancel)
+	t.Cleanup(rig.prober.closeListeners)
 	rig.ma = ma
 	return rig
 }
@@ -404,8 +514,8 @@ func TestDeployFirstVersion(t *testing.T) {
 	if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/a.tgz", version: "v1"}); err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
-	if got := rig.ma.activePort.Load(); got == 0 {
-		t.Fatal("activePort not published after deploy")
+	if rig.ma.activeSocket.Load() == nil {
+		t.Fatal("activeSocket not published after deploy")
 	}
 	st, ok, _ := rig.store.load()
 	if !ok || st.CurrentVersion != "v1" {
@@ -427,12 +537,12 @@ func TestDeploySecondVersionStopsOldAfterDrain(t *testing.T) {
 	rig := newTestRig(t)
 	ctx := context.Background()
 	must(t, rig.ma.Deploy(ctx, deployRequest{url: "https://x/1", version: "v1"}))
-	portV1 := rig.ma.activePort.Load()
+	sockV1 := rig.ma.activeSocket.Load()
 	before := rig.clock.Now()
 
 	must(t, rig.ma.Deploy(ctx, deployRequest{url: "https://x/2", version: "v2"}))
-	if rig.ma.activePort.Load() == portV1 {
-		t.Fatal("cutover did not change the active port")
+	if rig.ma.activeSocket.Load() == sockV1 {
+		t.Fatal("cutover did not change the active socket")
 	}
 	if rig.runner.stopCount() != 1 {
 		t.Fatalf("old instance not stopped exactly once: %d", rig.runner.stopCount())
@@ -450,13 +560,13 @@ func TestDeployPreStartFailureKeepsOldServing(t *testing.T) {
 	rig := newTestRig(t)
 	ctx := context.Background()
 	must(t, rig.ma.Deploy(ctx, deployRequest{url: "https://x/1", version: "v1"}))
-	portV1 := rig.ma.activePort.Load()
+	sockV1 := rig.ma.activeSocket.Load()
 
 	rig.spec.preStart = []string{"./migrate"}
 	rig.runner.runOnceErr = errors.New("migration exploded")
 	err := rig.ma.Deploy(ctx, deployRequest{url: "https://x/2", version: "v2"})
-	if err == nil || rig.ma.activePort.Load() != portV1 {
-		t.Fatalf("pre_start failure must abort and keep old port; err=%v", err)
+	if err == nil || rig.ma.activeSocket.Load() != sockV1 {
+		t.Fatalf("pre_start failure must abort and keep the old socket routed; err=%v", err)
 	}
 	if got := rig.ma.status(); got.CurrentVersion != "v1" || !got.Running {
 		t.Fatalf("old version must keep serving: %+v", got)
@@ -470,14 +580,14 @@ func TestDeployHealthFailureStopsNewKeepsOld(t *testing.T) {
 	rig := newTestRig(t)
 	ctx := context.Background()
 	must(t, rig.ma.Deploy(ctx, deployRequest{url: "https://x/1", version: "v1"}))
-	portV1 := rig.ma.activePort.Load()
+	sockV1 := rig.ma.activeSocket.Load()
 
 	rig.prober.err = errors.New("never became healthy")
 	err := rig.ma.Deploy(ctx, deployRequest{url: "https://x/2", version: "v2"})
 	if err == nil {
 		t.Fatal("expected health-gate failure")
 	}
-	if rig.ma.activePort.Load() != portV1 {
+	if rig.ma.activeSocket.Load() != sockV1 {
 		t.Fatal("failed deploy must not move traffic")
 	}
 	// v1 still alive, v2 stopped: exactly one stop, and current still v1.
@@ -542,7 +652,7 @@ func TestDeployGCKeepsNewestReleases(t *testing.T) {
 
 func TestEnsureRunningRelaunchesFromState(t *testing.T) {
 	rig := newTestRig(t)
-	rig.store.state = appState{CurrentVersion: "v7", Port: 12345, Handle: handleState{PID: 1}}
+	rig.store.state = appState{CurrentVersion: "v7", Nonce: recordedNonce, Handle: handleState{PID: 1}}
 	rig.store.ok = true
 	if err := os.MkdirAll(rig.spec.dirs.release("v7"), 0o755); err != nil {
 		t.Fatal(err)
@@ -550,7 +660,7 @@ func TestEnsureRunningRelaunchesFromState(t *testing.T) {
 	if err := rig.ma.ensureRunning(); err != nil {
 		t.Fatalf("ensureRunning: %v", err)
 	}
-	if rig.ma.activePort.Load() == 0 {
+	if rig.ma.activeSocket.Load() == nil {
 		t.Fatal("recovered instance not published")
 	}
 	if got := rig.ma.status().CurrentVersion; got != "v7" {
@@ -559,19 +669,27 @@ func TestEnsureRunningRelaunchesFromState(t *testing.T) {
 	if len(rig.runner.started) != 1 {
 		t.Fatalf("expected exactly one Start, got %d", len(rig.runner.started))
 	}
+	// A relaunch creates the dirs it binds, run/ included: the runner
+	// resolves every bind source and a missing one refuses the launch.
+	for _, d := range []string{rig.spec.dirs.run, rig.spec.dirs.shared} {
+		if st, err := os.Stat(d); err != nil || !st.IsDir() {
+			t.Fatalf("relaunch must create %s: %v", d, err)
+		}
+	}
 }
 
 func TestEnsureRunningReattachesWhenRunnerCan(t *testing.T) {
 	rig := newTestRig(t)
 	rig.runner.reattachOK = true
-	rig.store.state = appState{CurrentVersion: "v7", Port: 12345, Handle: handleState{PID: 1}}
+	bindSocket(t, rig.spec.dirs.socket(recordedNonce))
+	rig.store.state = appState{CurrentVersion: "v7", Nonce: recordedNonce, Handle: handleState{Unit: "hotserve-demo.v7.0a1b2c3d0a1b2c3d.service"}}
 	rig.store.ok = true
 	if err := os.MkdirAll(rig.spec.dirs.release("v7"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	must(t, rig.ma.ensureRunning())
-	if got := rig.ma.activePort.Load(); got != 12345 {
-		t.Fatalf("reattach must keep the recorded port, got %d", got)
+	if !activeSocketIs(rig) {
+		t.Fatalf("reattach must keep the recorded socket, got %v", rig.ma.activeSocket.Load())
 	}
 	if len(rig.runner.started) != 0 {
 		t.Fatal("reattach must not start a new process")
@@ -581,7 +699,7 @@ func TestEnsureRunningReattachesWhenRunnerCan(t *testing.T) {
 func TestEnsureRunningNoStateIsNoop(t *testing.T) {
 	rig := newTestRig(t)
 	must(t, rig.ma.ensureRunning())
-	if rig.ma.activePort.Load() != 0 || len(rig.runner.started) != 0 {
+	if rig.ma.activeSocket.Load() != nil || len(rig.runner.started) != 0 {
 		t.Fatal("nothing should happen without persisted state")
 	}
 }
@@ -611,9 +729,10 @@ func TestBuildEnvPrecedenceAndPlaceholders(t *testing.T) {
 	envFile := filepath.Join(t.TempDir(), "app.env")
 	must(t, os.WriteFile(envFile, []byte("# comment\nexport FROM_FILE=yes\nOVERRIDE=\"file\"\n\n"), 0o600))
 	spec.envFile = envFile
-	spec.env = map[string]string{"OVERRIDE": "inline", "DB": "sqlite:{shared_dir}/app.db", "V": "{version}:{port}"}
+	spec.env = map[string]string{"OVERRIDE": "inline", "DB": "sqlite:{shared_dir}/app.db", "V": "{version}:{socket}"}
 
-	env, err := buildEnv(spec, "v9", 8123, spec.dirs.release("v9"))
+	sock := spec.dirs.socket("0a1b2c3d0a1b2c3d")
+	env, err := buildEnv(spec, "v9", sock, spec.dirs.release("v9"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -626,12 +745,16 @@ func TestBuildEnvPrecedenceAndPlaceholders(t *testing.T) {
 		"FROM_FILE": "yes",
 		"OVERRIDE":  "inline",
 		"DB":        "sqlite:" + spec.dirs.shared + "/app.db",
-		"V":         "v9:8123",
-		"PORT":      "8123",
-		"HOST":      "127.0.0.1",
+		"V":         "v9:" + sock,
+		"SOCKET":    sock,
 	} {
 		if byKey[k] != want {
 			t.Errorf("%s = %q, want %q", k, byKey[k], want)
+		}
+	}
+	for _, gone := range []string{"PORT", "HOST"} {
+		if v, ok := byKey[gone]; ok {
+			t.Errorf("%s=%q is set: the contract is the socket, nothing listens on a port", gone, v)
 		}
 	}
 }
@@ -642,7 +765,7 @@ func TestBuildEnvDoesNotLeakSupervisorSecrets(t *testing.T) {
 	t.Setenv("PATH", "/usr/bin:/bin")
 	t.Setenv("LC_ALL", "C.UTF-8")
 
-	env, err := buildEnv(testSpec(t), "v1", 8123, t.TempDir())
+	env, err := buildEnv(testSpec(t), "v1", "/var/lib/liveswap/demo/run/0a1b2c3d0a1b2c3d.sock", t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -718,10 +841,21 @@ func TestValidVersionRejectsDotPrefix(t *testing.T) {
 
 func TestExpandArgs(t *testing.T) {
 	spec := testSpec(t)
-	got := expandArgs([]string{"run", "--rel={release_dir}", "{version}"}, spec, "v2", 9000, "/rel/v2")
-	if got[1] != "--rel=/rel/v2" || got[2] != "v2" {
+	got := expandArgs([]string{"run", "--rel={release_dir}", "{version}", "--listen={socket}"}, spec, "v2", "/run/x.sock", "/rel/v2")
+	if got[1] != "--rel=/rel/v2" || got[2] != "v2" || got[3] != "--listen=/run/x.sock" {
 		t.Fatalf("placeholders not expanded: %v", got)
 	}
+}
+
+// shortTempDir is t.TempDir without the test name in the path: a
+// liveswap root the tests bind sockets under, where a long test name
+// would push <root>/demo/proxy/<nonce>.sock past sun_path.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "ls")
+	must(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
 }
 
 func must(t *testing.T, err error) {
@@ -909,6 +1043,183 @@ func TestDeployStopOldErrorDefersToSweep(t *testing.T) {
 	}
 }
 
+// Promise: the nonce in the start spec is the one that names the
+// socket, so the unit (named from the spec) and the socket (in the
+// env) can be checked against each other on reattach.
+func TestStartSpecNonceNamesTheSocket(t *testing.T) {
+	rig := newTestRig(t)
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/1", version: "v1"}))
+	spec := rig.runner.started[0]
+	if !nonceRe.MatchString(spec.nonce) {
+		t.Fatalf("start spec nonce %q", spec.nonce)
+	}
+	want := "SOCKET=" + rig.spec.dirs.socket(spec.nonce)
+	if spec.env[len(spec.env)-1] != want {
+		t.Fatalf("env ends with %q, want %q", spec.env[len(spec.env)-1], want)
+	}
+	inst := rig.ma.currentInstance()
+	if inst.nonce != spec.nonce || inst.socket != rig.spec.dirs.socket(spec.nonce) {
+		t.Fatalf("instance %+v does not carry the spec's nonce", inst)
+	}
+	if st, _, _ := rig.store.load(); st.Nonce != inst.nonce {
+		t.Fatalf("state.json records nonce %q, want %q", st.Nonce, inst.nonce)
+	}
+	if s := rig.ma.status(); s.Socket != inst.socket {
+		t.Fatalf("status reports %q, want %q", s.Socket, inst.socket)
+	}
+}
+
+// Promise: a confirmed sweep is the manager's word that nothing but
+// the kept instance runs, so every other socket under run/ is a
+// leftover and is removed. Files that are not instance sockets are
+// not ours to touch.
+func TestSweepPrunesSocketsNotHeldByTheManager(t *testing.T) {
+	rig := newTestRig(t)
+	rig.prober.bind = true
+	must(t, rig.spec.dirs.ensure())
+	touchSocket(t, rig.spec.dirs.socket("aaaaaaaaaaaaaaaa"))
+	must(t, os.WriteFile(filepath.Join(rig.spec.dirs.run, "junk.txt"), nil, 0o600))
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/1", version: "v1"}))
+	cur := rig.ma.currentInstance()
+	if got := socketFiles(t, rig); len(got) != 1 || got[0] != cur.nonce {
+		t.Fatalf("sockets after deploy = %v, want only the current instance's %s", got, cur.nonce)
+	}
+	if _, err := os.Stat(filepath.Join(rig.spec.dirs.run, "junk.txt")); err != nil {
+		t.Fatal("a file that is not an instance socket must be left alone")
+	}
+	// An unconfirmed sweep vouches for nothing: nothing is pruned, and
+	// the aborted launch takes its own dir with it.
+	touchSocket(t, rig.spec.dirs.socket("bbbbbbbbbbbbbbbb"))
+	rig.runner.sweepErr = errTest
+	_ = rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/2", version: "v2"})
+	got := socketFiles(t, rig)
+	slices.Sort(got)
+	if want := []string{"bbbbbbbbbbbbbbbb", cur.nonce}; !slices.Equal(got, slices.Sorted(slices.Values(want))) {
+		t.Fatalf("sockets after an unconfirmed sweep = %v, want %v", got, want)
+	}
+}
+
+// Promise: an instance's socket is gone once the instance is stopped —
+// the unit removes it (ExecStopPost=, which the fake handle mimics),
+// and the deploy's sweep would prune it anyway: the old one after a
+// cutover, the new one after a failed health gate.
+func TestStopRemovesTheInstanceSocket(t *testing.T) {
+	rig := newTestRig(t)
+	rig.prober.bind = true
+	ctx := context.Background()
+	must(t, rig.ma.Deploy(ctx, deployRequest{url: "https://x/1", version: "v1"}))
+	v1 := rig.ma.currentInstance()
+	if _, err := os.Stat(v1.socket); err != nil {
+		t.Fatalf("the bound socket should exist: %v", err)
+	}
+
+	rig.prober.err = errors.New("never became healthy")
+	if err := rig.ma.Deploy(ctx, deployRequest{url: "https://x/2", version: "v2"}); err == nil {
+		t.Fatal("expected the health gate to fail")
+	}
+	if got := socketFiles(t, rig); len(got) != 1 || got[0] != v1.nonce {
+		t.Fatalf("after a failed gate only v1's socket remains, got %v", got)
+	}
+
+	rig.prober.err = nil
+	must(t, rig.ma.Deploy(ctx, deployRequest{url: "https://x/3", version: "v3"}))
+	v3 := rig.ma.currentInstance()
+	if got := socketFiles(t, rig); len(got) != 1 || got[0] != v3.nonce {
+		t.Fatalf("after a cutover only v3's socket remains, got %v", got)
+	}
+	if _, err := os.Stat(v1.socket); !os.IsNotExist(err) {
+		t.Fatalf("v1's socket must be removed after it is stopped: %v", err)
+	}
+}
+
+// Promise: the recorded nonce names the socket the proxy will dial, so
+// a record is adopted only when the nonce is the recorded unit's own
+// and the socket it names is there. Anything else relaunches rather
+// than routing to a socket that answers nobody.
+func TestEnsureRunningRefusesARecordWhoseSocketItCannotDial(t *testing.T) {
+	for name, tc := range map[string]struct {
+		nonce   string
+		bind    bool
+		symlink bool
+	}{
+		"nonce is not the unit's":  {nonce: "ffffffffffffffff", bind: true},
+		"socket file is gone":      {nonce: recordedNonce},
+		"the name is a symlink":    {nonce: recordedNonce, symlink: true},
+		"the name is a plain file": {nonce: recordedNonce, bind: false, symlink: false},
+		// A nonce that is not one is never a path component: the
+		// decoy it would escape to is planted, and must survive.
+		"the nonce is a traversal": {nonce: "../../target"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rig := newTestRig(t)
+			rig.runner.reattachOK = true
+			socket := rig.spec.dirs.socket(tc.nonce)
+			decoy := filepath.Join(rig.spec.dirs.root, "target.sock")
+			switch {
+			case tc.bind:
+				bindSocket(t, socket)
+			case tc.symlink:
+				victim := filepath.Join(t.TempDir(), "admin.sock")
+				bindSocket(t, victim)
+				must(t, os.MkdirAll(filepath.Dir(socket), 0o750))
+				must(t, os.Symlink(victim, socket))
+			case name == "the name is a plain file":
+				touchSocket(t, socket)
+			case name == "the nonce is a traversal":
+				touchSocket(t, decoy)
+			}
+			rig.store.state = appState{CurrentVersion: "v7", Nonce: tc.nonce, Handle: handleState{Unit: "hotserve-demo.v7.0a1b2c3d0a1b2c3d.service"}}
+			rig.store.ok = true
+			must(t, os.MkdirAll(rig.spec.dirs.release("v7"), 0o755))
+			must(t, rig.ma.ensureRunning())
+			if _, err := os.Stat(decoy); name == "the nonce is a traversal" && err != nil {
+				t.Fatalf("a traversal in the recorded nonce reached outside the app's dirs: %v", err)
+			}
+			if len(rig.runner.reattachSeen) != 1 || rig.runner.reattachSeen[0].Unit != "" {
+				t.Fatalf("the record must not reach the manager: %+v", rig.runner.reattachSeen)
+			}
+			if rig.runner.startCount() != 1 {
+				t.Fatal("the recorded version is relaunched instead")
+			}
+			if s := rig.ma.activeSocket.Load(); s == nil || s.path == rig.spec.dirs.socket(tc.nonce) {
+				t.Fatalf("the recorded socket must never be routed: %v", s)
+			}
+		})
+	}
+	// And a record whose nonce is the unit's, with the socket bound, is
+	// adopted as-is.
+	rig := newTestRig(t)
+	rig.runner.reattachOK = true
+	bindSocket(t, rig.spec.dirs.socket(recordedNonce))
+	rig.store.state = appState{CurrentVersion: "v7", Nonce: recordedNonce, Handle: handleState{Unit: "hotserve-demo.v7.0a1b2c3d0a1b2c3d.service"}}
+	rig.store.ok = true
+	must(t, os.MkdirAll(rig.spec.dirs.release("v7"), 0o755))
+	must(t, rig.ma.ensureRunning())
+	if rig.runner.startCount() != 0 || !activeSocketIs(rig) {
+		t.Fatalf("a record whose socket is the unit's own is adopted, starts=%d", rig.runner.startCount())
+	}
+	if got := rig.ma.currentInstance(); got.nonce != recordedNonce {
+		t.Fatalf("the adopted instance carries the recorded nonce, got %+v", got)
+	}
+}
+
+// Promise: an app removed from the config leaves no socket behind.
+func TestDestructRemovedAppLeavesNoSocket(t *testing.T) {
+	rig := newTestRig(t)
+	rig.prober.bind = true
+	markLive(t)
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/1", version: "v1"}))
+	touchSocket(t, rig.spec.dirs.socket("aaaaaaaaaaaaaaaa"))
+	touchSocket(t, filepath.Join(rig.spec.dirs.proxy, "bbbbbbbbbbbbbbbb.sock"))
+	must(t, rig.ma.Destruct())
+	if got := socketFiles(t, rig); len(got) != 0 {
+		t.Fatalf("sockets after removal = %v, want none", got)
+	}
+	if got := pinnedFiles(t, rig); len(got) != 0 {
+		t.Fatalf("pinned names after removal = %v, want none", got)
+	}
+}
+
 func TestDestructOnRemovalSweepsWholeApp(t *testing.T) {
 	rig := newTestRig(t)
 	markLive(t)
@@ -956,7 +1267,8 @@ func TestStartSpecCarriesUnitIdentity(t *testing.T) {
 
 func TestEnsureRunningUnreadableReattachIsTransientAndLaunchesNothing(t *testing.T) {
 	rig := newTestRig(t)
-	rig.store.state = appState{CurrentVersion: "v7", Port: 12345, Handle: handleState{Unit: "u.service"}}
+	bindSocket(t, rig.spec.dirs.socket(recordedNonce))
+	rig.store.state = appState{CurrentVersion: "v7", Nonce: recordedNonce, Handle: handleState{Unit: "hotserve-demo.v7.0a1b2c3d0a1b2c3d.service"}}
 	rig.store.ok = true
 	must(t, os.MkdirAll(rig.spec.dirs.release("v7"), 0o755))
 	rig.runner.reattachErrs = []error{errTest}
@@ -964,14 +1276,78 @@ func TestEnsureRunningUnreadableReattachIsTransientAndLaunchesNothing(t *testing
 	if !transientRecovery(err) || !strings.Contains(err.Error(), "not relaunching") {
 		t.Fatalf("expected a transient refusal, got %v", err)
 	}
-	if rig.runner.startCount() != 0 || rig.ma.activePort.Load() != 0 {
+	if rig.runner.startCount() != 0 || rig.ma.activeSocket.Load() != nil {
 		t.Fatal("must not launch or publish while the recorded unit's state is unknown")
+	}
+	// The pin made before asking the manager survives a transient
+	// answer: the unit may be serving, and the app may since have
+	// replaced its own name, so the retry must adopt through the pin.
+	if got := pinnedFiles(t, rig); len(got) != 1 || got[0] != recordedNonce {
+		t.Fatalf("a transient reattach must keep the pin, got %v", got)
+	}
+	must(t, os.Remove(rig.spec.dirs.socket(recordedNonce)))
+	rig.runner.reattachOK = true
+	must(t, rig.ma.ensureRunning())
+	if rig.runner.startCount() != 0 || !activeSocketIs(rig) {
+		t.Fatalf("the retry must adopt through the surviving pin, starts=%d", rig.runner.startCount())
+	}
+}
+
+// Recovery holds the app's ownerLock for its whole run, so a
+// start-time prune of this app's dirs (a reload adding it back races
+// the sweep of apps no longer configured) can never interleave with
+// adopting them. Pinned from the other side: recovery waits for the
+// lock — its own app's, another app's held lock is nothing to it.
+func TestEnsureRunningWaitsForTheOwnershipLock(t *testing.T) {
+	rig := newTestRig(t)
+	rig.runner.reattachOK = true
+	bindSocket(t, rig.spec.dirs.socket(recordedNonce))
+	rig.store.state = appState{CurrentVersion: "v7", Nonce: recordedNonce, Handle: handleState{Unit: "hotserve-demo.v7.0a1b2c3d0a1b2c3d.service"}}
+	rig.store.ok = true
+	must(t, os.MkdirAll(rig.spec.dirs.release("v7"), 0o755))
+
+	otherApp := ownerLock("somebody-else")
+	otherApp.Lock()
+	defer otherApp.Unlock()
+	mu := ownerLock("demo")
+	mu.Lock()
+	done := make(chan error, 1)
+	go func() { done <- rig.ma.ensureRunning() }()
+	time.Sleep(50 * time.Millisecond)
+	if rig.ma.activeSocket.Load() != nil {
+		mu.Unlock()
+		t.Fatal("recovery adopted while the app's ownership lock was held")
+	}
+	mu.Unlock()
+	must(t, <-done)
+	if !activeSocketIs(rig) {
+		t.Fatal("recovery adopts once the lock is free")
+	}
+}
+
+// A definitive "not running" from the manager, by contrast, retires
+// the pin made for the record: the relaunch gets its own.
+func TestEnsureRunningNotAttachedRetiresThePin(t *testing.T) {
+	rig := newTestRig(t)
+	bindSocket(t, rig.spec.dirs.socket(recordedNonce))
+	rig.store.state = appState{CurrentVersion: "v7", Nonce: recordedNonce, Handle: handleState{Unit: "hotserve-demo.v7.0a1b2c3d0a1b2c3d.service"}}
+	rig.store.ok = true
+	must(t, os.MkdirAll(rig.spec.dirs.release("v7"), 0o755))
+	must(t, rig.ma.ensureRunning()) // reattachOK is false: definitively not running
+	if rig.runner.startCount() != 1 {
+		t.Fatalf("the recorded version is relaunched, starts=%d", rig.runner.startCount())
+	}
+	for _, n := range pinnedFiles(t, rig) {
+		if n == recordedNonce {
+			t.Fatal("the pin made for a unit the manager does not hold must be retired")
+		}
 	}
 }
 
 func TestRecoverRetriesTransientErrorsUntilReattached(t *testing.T) {
 	rig := newTestRig(t)
-	rig.store.state = appState{CurrentVersion: "v7", Port: 12345, Handle: handleState{Unit: "u.service"}}
+	bindSocket(t, rig.spec.dirs.socket(recordedNonce))
+	rig.store.state = appState{CurrentVersion: "v7", Nonce: recordedNonce, Handle: handleState{Unit: "hotserve-demo.v7.0a1b2c3d0a1b2c3d.service"}}
 	rig.store.ok = true
 	must(t, os.MkdirAll(rig.spec.dirs.release("v7"), 0o755))
 	rig.runner.reattachErrs = []error{errTest, errTest}
@@ -979,11 +1355,11 @@ func TestRecoverRetriesTransientErrorsUntilReattached(t *testing.T) {
 	done := make(chan struct{})
 	go func() { rig.ma.recover(context.Background(), zap.NewNop()); close(done) }()
 	advanceUntil(t, rig, recoveryBackoffFloor, "reattach after two transient failures", func() bool {
-		return rig.ma.activePort.Load() == 12345
+		return activeSocketIs(rig)
 	})
 	<-done
-	if rig.runner.startCount() != 0 || rig.ma.activePort.Load() != 12345 {
-		t.Fatalf("expected a reattach on the third try, starts=%d port=%d", rig.runner.startCount(), rig.ma.activePort.Load())
+	if rig.runner.startCount() != 0 || !activeSocketIs(rig) {
+		t.Fatalf("expected a reattach on the third try, starts=%d socket=%v", rig.runner.startCount(), rig.ma.activeSocket.Load())
 	}
 	if rig.runner.reattachCalls != 3 {
 		t.Fatalf("expected 3 reattach attempts, got %d", rig.runner.reattachCalls)
@@ -995,7 +1371,7 @@ func TestRecoverRetriesTransientErrorsUntilReattached(t *testing.T) {
 
 func TestRecoverGivesUpOnPermanentErrors(t *testing.T) {
 	rig := newTestRig(t)
-	rig.store.state = appState{CurrentVersion: "v7", Port: 12345, Handle: handleState{PID: 1}}
+	rig.store.state = appState{CurrentVersion: "v7", Nonce: recordedNonce, Handle: handleState{PID: 1}}
 	rig.store.ok = true // release dir deliberately missing: not something a retry fixes
 	done := make(chan struct{})
 	go func() { rig.ma.recover(context.Background(), zap.NewNop()); close(done) }()
@@ -1008,7 +1384,8 @@ func TestRecoverGivesUpOnPermanentErrors(t *testing.T) {
 
 func TestEnsureRunningReattachSweepFailureIsTransient(t *testing.T) {
 	rig := newTestRig(t)
-	rig.store.state = appState{CurrentVersion: "v7", Port: 12345, Handle: handleState{Unit: "u.service"}}
+	bindSocket(t, rig.spec.dirs.socket(recordedNonce))
+	rig.store.state = appState{CurrentVersion: "v7", Nonce: recordedNonce, Handle: handleState{Unit: "hotserve-demo.v7.0a1b2c3d0a1b2c3d.service"}}
 	rig.store.ok = true
 	must(t, os.MkdirAll(rig.spec.dirs.release("v7"), 0o755))
 	rig.runner.reattachOK = true
@@ -1017,7 +1394,7 @@ func TestEnsureRunningReattachSweepFailureIsTransient(t *testing.T) {
 	if !transientRecovery(err) {
 		t.Fatalf("an unsettled ledger after reattach must be reported as transient, got %v", err)
 	}
-	if rig.ma.activePort.Load() != 12345 {
+	if !activeSocketIs(rig) {
 		t.Fatal("the reattached instance still serves meanwhile")
 	}
 	// The retry path (instance alive) sweeps again and succeeds.
@@ -1030,7 +1407,7 @@ func TestEnsureRunningReattachSweepFailureIsTransient(t *testing.T) {
 
 func TestCleanupJoinsRecoveryBeforeReleasing(t *testing.T) {
 	rig := newTestRig(t)
-	rig.store.state = appState{CurrentVersion: "v7", Port: 12345, Handle: handleState{Unit: "u.service"}}
+	rig.store.state = appState{CurrentVersion: "v7", Nonce: recordedNonce, Handle: handleState{Unit: "hotserve-demo.v7.0a1b2c3d0a1b2c3d.service"}}
 	rig.store.ok = true
 	must(t, os.MkdirAll(rig.spec.dirs.release("v7"), 0o755))
 	rig.runner.reattachErrs = []error{errTest, errTest, errTest, errTest, errTest, errTest}
@@ -1163,7 +1540,7 @@ func TestParseEnvFileRejectsInvalidKeys(t *testing.T) {
 
 func TestEnsureRunningRefusesAForeignUnitName(t *testing.T) {
 	rig := newTestRig(t)
-	rig.store.state = appState{CurrentVersion: "v7", Port: 12345, Handle: handleState{Unit: "hotserve-other.v1.0a1b2c3d.service"}}
+	rig.store.state = appState{CurrentVersion: "v7", Nonce: recordedNonce, Handle: handleState{Unit: "hotserve-other.v1.0a1b2c3d0a1b2c3d.service"}}
 	rig.store.ok = true
 	must(t, os.MkdirAll(rig.spec.dirs.release("v7"), 0o755))
 	must(t, rig.ma.ensureRunning())
@@ -1213,7 +1590,7 @@ func TestRecoveryErrorClassification(t *testing.T) {
 
 func TestEnsureRunningRelaunchSweepsStrays(t *testing.T) {
 	rig := newTestRig(t)
-	rig.store.state = appState{CurrentVersion: "v7", Port: 12345, Handle: handleState{PID: 1}}
+	rig.store.state = appState{CurrentVersion: "v7", Nonce: recordedNonce, Handle: handleState{PID: 1}}
 	rig.store.ok = true
 	must(t, os.MkdirAll(rig.spec.dirs.release("v7"), 0o755))
 	must(t, rig.ma.ensureRunning())
@@ -1227,15 +1604,169 @@ func TestEnsureRunningRelaunchSweepsStrays(t *testing.T) {
 
 func TestEnsureRunningDoesNotRelaunchWhenSweepUnconfirmed(t *testing.T) {
 	rig := newTestRig(t)
-	rig.store.state = appState{CurrentVersion: "v7", Port: 12345, Handle: handleState{PID: 1}}
+	rig.store.state = appState{CurrentVersion: "v7", Nonce: recordedNonce, Handle: handleState{PID: 1}}
 	rig.store.ok = true
 	must(t, os.MkdirAll(rig.spec.dirs.release("v7"), 0o755))
 	rig.runner.sweepErr = errTest
 	if err := rig.ma.ensureRunning(); err == nil || !strings.Contains(err.Error(), "not launching") {
 		t.Fatalf("expected a refusal to launch, got %v", err)
 	}
-	if rig.runner.startCount() != 0 || rig.ma.activePort.Load() != 0 {
+	if rig.runner.startCount() != 0 || rig.ma.activeSocket.Load() != nil {
 		t.Fatal("nothing may be launched or published beside a possibly-running unit")
+	}
+	// Recovery retries this every minute: the launch prepared and then
+	// abandoned must leave no run dir behind, or the retries leak one
+	// apiece until a sweep confirms.
+	if got := socketFiles(t, rig); len(got) != 0 {
+		t.Fatalf("an abandoned launch left run dirs behind: %v", got)
+	}
+}
+
+// A start the runner cannot confirm may have reached the manager: the
+// unit may be coming up, and its socket dir must stay for it to bind
+// in — the next confirmed sweep settles it. Same for a stop that
+// could not be confirmed. Only a launch known to be dead is retired.
+func TestAmbiguousStartKeepsTheLaunchSocketDir(t *testing.T) {
+	rig := newTestRig(t)
+	rig.runner.setStartErr(&unitUnconfirmedError{unit: "u", err: errTest})
+	if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/1", version: "v1"}); err == nil {
+		t.Fatal("expected the ambiguous start to fail the deploy")
+	}
+	if got := socketFiles(t, rig); len(got) != 1 {
+		t.Fatalf("an ambiguous start must keep the launch's run dir, got %v", got)
+	}
+	// A definitively failed start, by contrast, retires its launch —
+	// and this deploy's confirmed pre-Start sweep is the "next
+	// confirmed sweep" that prunes the ambiguous one's dir.
+	rig.runner.setStartErr(errTest)
+	_ = rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/2", version: "v2"})
+	if got := socketFiles(t, rig); len(got) != 0 {
+		t.Fatalf("a failed start retires its launch and the confirmed sweep prunes the ambiguous one, got %v", got)
+	}
+	// The relaunch path makes the same distinction.
+	rig2 := newTestRig(t)
+	rig2.store.state = appState{CurrentVersion: "v7", Nonce: recordedNonce, Handle: handleState{PID: 1}}
+	rig2.store.ok = true
+	must(t, os.MkdirAll(rig2.spec.dirs.release("v7"), 0o755))
+	rig2.runner.setStartErr(&unitUnconfirmedError{unit: "u", err: errTest})
+	if err := rig2.ma.ensureRunning(); err == nil {
+		t.Fatal("expected the ambiguous relaunch to be reported")
+	}
+	if got := socketFiles(t, rig2); len(got) != 1 {
+		t.Fatalf("an ambiguous relaunch must keep its run dir, got %v", got)
+	}
+}
+
+// The socket ledger after every way a deploy can end: what is on disk
+// under run/ and proxy/ is exactly the instances that are live — or
+// may be, when the runner could not say — and nothing else. Each row
+// injects one failure into a second deploy over a serving v1; the
+// expectation names which of the two launches' dirs may remain.
+func TestSocketLedgerAfterEveryDeployOutcome(t *testing.T) {
+	type outcome struct {
+		inject func(rig *testRig)
+		keepV1 bool // v1 still serves (its dirs stay)
+		keepV2 bool // v2's dirs stay: it serves, or it may be live and cannot be touched
+	}
+	for name, tc := range map[string]outcome{
+		"success":                 {inject: func(*testRig) {}, keepV1: false, keepV2: true},
+		"env_file missing":        {inject: func(r *testRig) { r.spec.envFile = filepath.Join(t.TempDir(), "none.env") }, keepV1: true},
+		"pre_start fails":         {inject: func(r *testRig) { r.spec.preStart = []string{"./migrate"}; r.runner.runOnceErr = errTest }, keepV1: true},
+		"sweep unconfirmed":       {inject: func(r *testRig) { r.runner.sweepErr = errTest }, keepV1: true},
+		"start fails":             {inject: func(r *testRig) { r.runner.setStartErr(errTest) }, keepV1: true},
+		"start ambiguous":         {inject: func(r *testRig) { r.runner.setStartErr(&unitUnconfirmedError{unit: "u", err: errTest}) }, keepV1: true, keepV2: true},
+		"health gate fails":       {inject: func(r *testRig) { r.prober.err = errTest }, keepV1: true},
+		"new instance stop hangs": {inject: func(r *testRig) { r.prober.err = errTest; r.runner.stopErr = errTest; r.runner.stopLeavesAlive = true }, keepV1: true, keepV2: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rig := newTestRig(t)
+			rig.prober.bind = true
+			ctx := context.Background()
+			must(t, rig.ma.Deploy(ctx, deployRequest{url: "https://x/1", version: "v1"}))
+			v1 := rig.ma.currentInstance().nonce
+			tc.inject(rig)
+			err := rig.ma.Deploy(ctx, deployRequest{url: "https://x/2", version: "v2"})
+			if (err == nil) != (name == "success") {
+				t.Fatalf("deploy v2: err = %v", err)
+			}
+			for _, dir := range []struct {
+				name string
+				got  []string
+			}{{"run", socketFiles(t, rig)}, {"proxy", pinnedFiles(t, rig)}} {
+				var want []string
+				if tc.keepV1 {
+					want = append(want, v1)
+				}
+				others := 0
+				for _, n := range dir.got {
+					if n != v1 {
+						others++
+					}
+				}
+				if dir.name == "proxy" && name == "start ambiguous" {
+					continue // never pinned: the start never returned a handle to probe
+				}
+				if (tc.keepV1 && !slices.Contains(dir.got, v1)) || (!tc.keepV1 && slices.Contains(dir.got, v1)) {
+					t.Errorf("%s: v1's entry present = %v, want %v (got %v)", dir.name, slices.Contains(dir.got, v1), tc.keepV1, dir.got)
+				}
+				if wantOthers := map[bool]int{true: 1, false: 0}[tc.keepV2]; others != wantOthers {
+					t.Errorf("%s: %d entries besides v1's, want %d (got %v, v1 %s, want-v1 %v)", dir.name, others, wantOthers, dir.got, v1, want)
+				}
+			}
+		})
+	}
+}
+
+// Promise: an address the proxy was ever handed never resolves to a
+// live socket again once its instance is retired — the property the
+// hard-linked, nonce-named pin exists for (a descriptor number would
+// be recycled). Across several cutovers, every retired address is
+// gone and only the current one remains.
+func TestRetiredAddressesNeverResolveAgain(t *testing.T) {
+	rig := newUpstreamsRig(t)
+	u := &Upstreams{App: "demo", ma: rig.ma}
+	var retired []string
+	for i := 1; i <= 6; i++ {
+		must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/a", version: fmt.Sprintf("v%d", i)}))
+		ups, err := u.GetUpstreams(httptest.NewRequest("GET", "/", nil))
+		must(t, err)
+		addr := strings.TrimPrefix(ups[0].Dial, "unix/")
+		if slices.Contains(retired, addr) {
+			t.Fatalf("deploy %d was handed a retired address %s", i, addr)
+		}
+		for _, old := range retired {
+			if _, err := os.Lstat(old); !os.IsNotExist(err) {
+				t.Fatalf("retired address %s still resolves after deploy %d: %v", old, i, err)
+			}
+		}
+		if st, err := os.Lstat(addr); err != nil || st.Mode()&os.ModeSocket == 0 {
+			t.Fatalf("current address %s is not a socket: %v", addr, err)
+		}
+		retired = append(retired, addr)
+	}
+}
+
+// Promise: a launch whose preparation fails — a missing env_file, the
+// case recovery retries forever — reserves nothing. The nonce dir is
+// created exclusively, so an existing one is never adopted either.
+func TestPrepareLaunchFailureReservesNothing(t *testing.T) {
+	rig := newTestRig(t)
+	rig.spec.envFile = filepath.Join(t.TempDir(), "missing.env")
+	if _, err := rig.spec.prepareLaunch("v1"); err == nil {
+		t.Fatal("a missing env_file must fail preparation")
+	}
+	if got := socketFiles(t, rig); len(got) != 0 {
+		t.Fatalf("a failed preparation left run dirs behind: %v", got)
+	}
+	// And a deploy that aborts after preparation (unconfirmed sweep)
+	// leaves none either.
+	rig.spec.envFile = ""
+	rig.runner.sweepErr = errTest
+	if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/1", version: "v1"}); err == nil {
+		t.Fatal("expected the deploy to abort on the unconfirmed sweep")
+	}
+	if got := socketFiles(t, rig); len(got) != 0 {
+		t.Fatalf("an aborted deploy left run dirs behind: %v", got)
 	}
 }
 
@@ -1301,7 +1832,7 @@ func TestDeploySweepsBeforeGCAndSkipsGCWhenSweepFails(t *testing.T) {
 func TestFailedDeployKeepsReleaseWhenStartUnconfirmed(t *testing.T) {
 	rig := newTestRig(t)
 	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/a.tgz", version: "v1"}))
-	rig.runner.setStartErr(&unitUnconfirmedError{unit: "hotserve-demo.v2.deadbeef.service", err: errTest})
+	rig.runner.setStartErr(&unitUnconfirmedError{unit: "hotserve-demo.v2.deadbeefdeadbeef.service", err: errTest})
 	err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/b.tgz", version: "v2"})
 	if err == nil || !strings.Contains(err.Error(), "left on disk") {
 		t.Fatalf("an unreconciled start must keep the release: %v", err)
@@ -1310,7 +1841,7 @@ func TestFailedDeployKeepsReleaseWhenStartUnconfirmed(t *testing.T) {
 		t.Fatalf("release must survive an unconfirmed start: %v", statErr)
 	}
 	rig.runner.setStartErr(nil)
-	rig.runner.runOnceErr = &unitUnconfirmedError{unit: "hotserve-demo.v3.deadbeef.prestart.service", err: errTest}
+	rig.runner.runOnceErr = &unitUnconfirmedError{unit: "hotserve-demo.v3.deadbeefdeadbeef.prestart.service", err: errTest}
 	rig.spec.preStart = []string{"migrate"}
 	err = rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/c.tgz", version: "v3"})
 	if err == nil || !strings.Contains(err.Error(), "left on disk") {

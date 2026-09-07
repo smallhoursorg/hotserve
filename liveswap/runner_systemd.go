@@ -2,10 +2,9 @@ package liveswap
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -116,6 +115,7 @@ type unitSpec struct {
 	Oneshot          bool // Type=oneshot (pre_start) instead of simple
 	StopTimeout      time.Duration
 	Sandbox          *sandboxSpec
+	Socket           string // the app's socket, removed by the unit when it stops
 }
 
 // unitStatus is a snapshot of one unit as the manager reports it.
@@ -243,7 +243,8 @@ func (h *systemdHandle) state() handleState {
 // in liveswap.go), all legal unit-name characters, so nothing is ever
 // escaped. The "." after the app is the one character an app name
 // cannot contain, which is what lets Sweep match "blog" without also
-// matching "blog-api"; the nonce makes every Start unique.
+// matching "blog-api"; the nonce makes every Start unique, and is the
+// same one that names the instance's socket (newNonce).
 const unitPrefix = "hotserve-"
 
 // unitNameRe is derived from the app-name and version alphabets in
@@ -252,7 +253,7 @@ var unitNameRe = regexp.MustCompile(
 	`^` + regexp.QuoteMeta(unitPrefix) +
 		`(` + strings.Trim(appNameRe.String(), "^$") + `)` +
 		`\.(` + strings.Trim(versionRe.String(), "^$") + `)` +
-		`\.[0-9a-f]{8}(\.prestart)?\.service$`)
+		`\.(` + strings.Trim(nonceRe.String(), "^$") + `)(\.prestart)?\.service$`)
 
 func unitName(spec startSpec, oneshot bool) (string, error) {
 	// The webhook validates both before a deploy gets this far; the
@@ -261,9 +262,8 @@ func unitName(spec startSpec, oneshot bool) (string, error) {
 	if !spec.probe && (!appNameRe.MatchString(spec.app) || !validVersion(spec.version)) {
 		return "", fmt.Errorf("cannot derive a unit name from app %q version %q", spec.app, spec.version)
 	}
-	var nonce [4]byte
-	if _, err := rand.Read(nonce[:]); err != nil {
-		return "", err
+	if !nonceRe.MatchString(spec.nonce) {
+		return "", fmt.Errorf("cannot derive a unit name for app %q version %q: instance nonce %q is not %s", spec.app, spec.version, spec.nonce, nonceRe)
 	}
 	if spec.probe {
 		// Underscores are outside the app-name alphabet, so this name
@@ -273,9 +273,9 @@ func unitName(spec startSpec, oneshot bool) (string, error) {
 		// by a concurrent sweepUnknownApps, or collide with an app
 		// actually called "sandbox-probe", failing the start for no
 		// reason at all).
-		return unitPrefix + "sandboxprobe_" + hex.EncodeToString(nonce[:]) + ".service", nil
+		return unitPrefix + "sandboxprobe_" + spec.nonce + ".service", nil
 	}
-	name := unitPrefix + spec.app + "." + spec.version + "." + hex.EncodeToString(nonce[:])
+	name := unitPrefix + spec.app + "." + spec.version + "." + spec.nonce
 	if oneshot {
 		name += ".prestart"
 	}
@@ -301,6 +301,15 @@ func unitApp(name string) (string, bool) {
 	return m[1], true
 }
 
+// unitNonce extracts the instance nonce from one of our unit names.
+func unitNonce(name string) (string, bool) {
+	m := unitNameRe.FindStringSubmatch(name)
+	if m == nil {
+		return "", false
+	}
+	return m[3], true
+}
+
 // appConfigured reports whether any loaded config — the live one, or
 // a candidate being provisioned — holds the app. The pool is the
 // authority: a candidate that later fails to activate still holds its
@@ -321,7 +330,7 @@ var unknownSweepMu sync.Mutex
 // config does not name (invariant 7): an app removed or renamed while
 // hotserve was down has no managedApp left to sweep it, so App.Start
 // does it here against the manager's own listing.
-func sweepUnknownApps(ctx context.Context, conn systemdConn, logger *zap.Logger) error {
+func sweepUnknownApps(ctx context.Context, conn systemdConn, root string, logger *zap.Logger) error {
 	unknownSweepMu.Lock()
 	defer unknownSweepMu.Unlock()
 	if caddyExiting() {
@@ -347,15 +356,63 @@ func sweepUnknownApps(ctx context.Context, conn systemdConn, logger *zap.Logger)
 			continue
 		}
 		logger.Warn("stopping units of an app no longer in the config", zap.String("app", app), zap.String("unit", u.Name))
-		// The caller's deadline bounds the whole sweep, so a slow
-		// manager cannot hold the start-time sweep open indefinitely;
-		// each stop re-checks the pool first, so a reload adopting the
-		// app between listing and stopping keeps its unit.
-		if serr := r.sweep(ctx, app, nil, func() bool { return !caddyExiting() && !appConfigured(app) }); serr != nil {
+		if serr := sweepUnowned(ctx, r, root, app, logger); serr != nil {
+			errs = append(errs, serr)
+		}
+	}
+	// An app whose units are all gone — exited cleanly while hotserve
+	// was down — never appears in the listing, yet its socket dirs may
+	// remain; if it is also no longer configured, nothing else will
+	// ever prune them.
+	entries, err := os.ReadDir(root)
+	if err != nil && !os.IsNotExist(err) {
+		errs = append(errs, fmt.Errorf("listing the liveswap root for apps no longer configured: %w", err))
+	}
+	for _, e := range entries {
+		app := e.Name()
+		if !e.IsDir() || seen[app] || !appNameRe.MatchString(app) || appConfigured(app) {
+			continue
+		}
+		if serr := sweepUnowned(ctx, r, root, app, logger); serr != nil {
 			errs = append(errs, serr)
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// sweepUnowned stops every unit of an app nobody owns and then prunes
+// its socket dirs — as one step under the app's ownerLock, so a reload
+// acquiring the app cannot slip in between and adopt what is about to
+// be removed. The caller's deadline bounds the whole sweep, so a slow
+// manager cannot hold the start-time sweep open indefinitely; each
+// stop re-checks the pool first, so a reload adopting the app between
+// listing and stopping keeps its unit. Ownership is not monotonic — a
+// candidate config can own the app for a moment and be cleaned up —
+// so a single veto during the sweep disables the prune: disk cleanup
+// follows only a sweep that accounted for every unit.
+func sweepUnowned(ctx context.Context, r *systemdRunner, root, app string, logger *zap.Logger) error {
+	mu := ownerLock(app)
+	mu.Lock()
+	defer mu.Unlock()
+	var vetoed atomic.Bool
+	still := func() bool {
+		ok := !caddyExiting() && !appConfigured(app)
+		if !ok {
+			vetoed.Store(true)
+		}
+		return ok
+	}
+	if !still() {
+		return nil
+	}
+	if err := r.sweep(ctx, app, nil, still); err != nil {
+		return err
+	}
+	if vetoed.Load() {
+		return nil
+	}
+	pruneSockets(newAppDirs(root, app), nil, logger)
+	return nil
 }
 
 // resolveCommand turns command[0] into the absolute path a transient
@@ -453,6 +510,7 @@ func (r *systemdRunner) unitFor(spec startSpec, oneshot bool) (unitSpec, error) 
 		Oneshot:          oneshot,
 		StopTimeout:      grace,
 		Sandbox:          spec.sandbox,
+		Socket:           spec.socket,
 	}, nil
 }
 
@@ -746,7 +804,7 @@ func (r *systemdRunner) Reattach(st handleState) (handle, bool, error) {
 			// rule), so no comparison here would keep it out.
 			//
 			// Stopped here, not left for the relaunch's sweep: the
-			// relaunch prepares (port, env) before it sweeps, and a
+			// relaunch prepares (dirs, socket, env) before it sweeps, and a
 			// preparation that keeps failing — a missing env_file —
 			// would keep this unit serving bare across every retry.
 			// An unconfirmed stop is an error, so the caller does not

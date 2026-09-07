@@ -40,6 +40,29 @@ func propMap(u unitSpec) map[string]any {
 	return got
 }
 
+// Promise: the unit owns its socket file for as long as it runs — the
+// manager removes it after the service stops, however it stopped, and
+// a socket the app never bound does not fail the unit. The probe unit
+// has no socket and gets no such hook.
+func TestUnitRemovesItsSocketWhenItStops(t *testing.T) {
+	spec := probeSandboxSpec()
+	got := propMap(unitSpec{ExecStart: []string{"/bin/true"}, Sandbox: spec, Socket: "/var/lib/liveswap/blog/run/0a1b2c3d0a1b2c3d.sock"})
+	cmds, ok := got["ExecStopPost"].([]execCommand)
+	if !ok || len(cmds) != 1 {
+		t.Fatalf("ExecStopPost = %#v, want one command", got["ExecStopPost"])
+	}
+	want := execCommand{Path: "/usr/bin/rm", Args: []string{"rm", "-f", "/var/lib/liveswap/blog/run/0a1b2c3d0a1b2c3d.sock"}, IgnoreFailure: true}
+	if !reflect.DeepEqual(cmds[0], want) {
+		t.Fatalf("ExecStopPost = %+v, want %+v", cmds[0], want)
+	}
+	if !spec.inView("/usr/bin/rm") {
+		t.Fatal("rm must be inside the unit's own view, or ExecStopPost cannot run under the sandbox")
+	}
+	if _, present := propMap(unitSpec{ExecStart: []string{"/bin/true"}, Sandbox: spec})["ExecStopPost"]; present {
+		t.Fatal("a unit with no socket (the probe) must not get an ExecStopPost")
+	}
+}
+
 func TestSandboxPropertiesEveryUnit(t *testing.T) {
 	spec := &sandboxSpec{
 		root:    "/var/lib/liveswap",
@@ -222,16 +245,22 @@ func TestSandboxViewIsExactlyWhatIsNamed(t *testing.T) {
 func TestSandboxSpecFor(t *testing.T) {
 	spec := testSpec(t)
 	rel := spec.dirs.release("v1")
-	got := spec.sandboxSpecFor(rel)
+	got := spec.sandboxSpecFor(rel, recordedNonce)
 	if got == nil || got.root != spec.dirs.root {
 		t.Fatalf("root wrong: %+v", got)
 	}
-	if !reflect.DeepEqual(got.writable, []bindPath{{dest: rel, source: rel}, {dest: spec.dirs.shared, source: spec.dirs.shared}}) {
-		t.Fatalf("writable = %v", got.writable)
+	want := []bindPath{
+		{dest: rel, source: rel},
+		{dest: spec.dirs.shared, source: spec.dirs.shared},
+		{dest: spec.dirs.runDir(recordedNonce), source: spec.dirs.runDir(recordedNonce)},
 	}
-	// The view never includes state.json, tmp/ (upload staging) or
-	// the other releases: nothing but the two dirs above is bound.
-	for _, p := range []string{spec.dirs.state, spec.dirs.tmp, spec.dirs.releases, spec.dirs.app} {
+	if !reflect.DeepEqual(got.writable, want) {
+		t.Fatalf("writable = %v, want %v", got.writable, want)
+	}
+	// The view never includes state.json, tmp/ (upload staging), the
+	// other releases, or the run/ parent holding every other
+	// instance's socket: nothing but the three dirs above is bound.
+	for _, p := range []string{spec.dirs.state, spec.dirs.tmp, spec.dirs.proxy, spec.dirs.run, spec.dirs.releases, spec.dirs.app} {
 		for _, w := range got.writable {
 			if w.dest == p || w.source == p {
 				t.Errorf("%s must not be in the writable view", p)
@@ -400,7 +429,7 @@ func TestProbeSandboxCapability(t *testing.T) {
 func TestBuildEnvSandboxedHome(t *testing.T) {
 	spec := testSpec(t)
 	t.Setenv("HOME", "/var/lib/hotserve")
-	sandboxed, err := buildEnv(spec, "v1", 8123, spec.dirs.release("v1"))
+	sandboxed, err := buildEnv(spec, "v1", spec.dirs.socket("0a1b2c3d0a1b2c3d"), spec.dirs.release("v1"))
 	must(t, err)
 	find := func(env []string, key string) (string, int) {
 		var val string
@@ -420,9 +449,9 @@ func TestBuildEnvSandboxedHome(t *testing.T) {
 	}
 	// env_file / inline env still win: they come later.
 	spec.env = map[string]string{"HOME": "/elsewhere"}
-	sandboxed, err = buildEnv(spec, "v1", 8123, spec.dirs.release("v1"))
+	sandboxed, err = buildEnv(spec, "v1", spec.dirs.socket("0a1b2c3d0a1b2c3d"), spec.dirs.release("v1"))
 	must(t, err)
-	if v, _ := find(sandboxed, "HOME"); !strings.HasSuffix(strings.Join(sandboxed, "\n"), "HOST=127.0.0.1") || v == "" {
+	if v, _ := find(sandboxed, "HOME"); !strings.HasSuffix(strings.Join(sandboxed, "\n"), "SOCKET="+spec.dirs.socket("0a1b2c3d0a1b2c3d")) || v == "" {
 		t.Fatalf("env ordering broken: %v", sandboxed)
 	}
 	last := ""
@@ -445,7 +474,7 @@ func TestBuildEnvSandboxedHome(t *testing.T) {
 func TestEveryLaunchIsSandboxed(t *testing.T) {
 	rig := newTestRig(t)
 	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/a.tgz", version: "v1"}))
-	want := rig.spec.sandboxSpecFor(rig.spec.dirs.release("v1"))
+	want := rig.spec.sandboxSpecFor(rig.spec.dirs.release("v1"), rig.runner.started[0].nonce)
 	if got := rig.runner.started[0].sandbox; !reflect.DeepEqual(got, want) {
 		t.Fatalf("deploy sandbox = %+v, want %+v", got, want)
 	}
@@ -456,8 +485,8 @@ func TestEveryLaunchIsSandboxed(t *testing.T) {
 	if n := len(rig.runner.started); n != 3 {
 		t.Fatalf("started = %d, want deploy, pre_start, deploy", n)
 	}
-	want2 := rig.spec.sandboxSpecFor(rig.spec.dirs.release("v2"))
 	for i := 1; i <= 2; i++ {
+		want2 := rig.spec.sandboxSpecFor(rig.spec.dirs.release("v2"), rig.runner.started[i].nonce)
 		if got := rig.runner.started[i].sandbox; !reflect.DeepEqual(got, want2) {
 			t.Fatalf("started[%d] sandbox = %+v, want %+v", i, got, want2)
 		}
@@ -466,13 +495,13 @@ func TestEveryLaunchIsSandboxed(t *testing.T) {
 	// A relaunch from a record — including one with no sandbox field,
 	// written before sandboxing existed — is sandboxed like a deploy.
 	rig2 := newTestRig(t)
-	must(t, rig2.store.save(appState{CurrentVersion: "v1", Port: 1, Handle: handleState{Unit: "hotserve-demo.v1.abc.service"}}))
+	must(t, rig2.store.save(appState{CurrentVersion: "v1", Nonce: "0a1b2c3d0a1b2c3d", Handle: handleState{Unit: "hotserve-demo.v1.0a1b2c3d0a1b2c3d.service"}}))
 	must(t, mkdirRelease(rig2.spec, "v1"))
 	rig2.runner.reattachOK = false
 	if err := rig2.ma.ensureRunning(); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
-	want = rig2.spec.sandboxSpecFor(rig2.spec.dirs.release("v1"))
+	want = rig2.spec.sandboxSpecFor(rig2.spec.dirs.release("v1"), rig2.runner.started[0].nonce)
 	if got := rig2.runner.started[0].sandbox; !reflect.DeepEqual(got, want) {
 		t.Fatalf("relaunch sandbox = %+v, want %+v", got, want)
 	}
@@ -625,7 +654,7 @@ func TestEnvFilesAreAbsentWithoutBeingListed(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		sb := spec.sandboxSpecFor(spec.dirs.release("v1"))
+		sb := spec.sandboxSpecFor(spec.dirs.release("v1"), recordedNonce)
 		for _, secret := range []string{"/etc/secrets/blog.env", "/etc/secrets/shop.env", "/etc/secrets"} {
 			if sb.inView(secret) {
 				t.Errorf("%s's view reaches %s", name, secret)
@@ -847,7 +876,7 @@ func TestUnitForResolvesBindSources(t *testing.T) {
 		t.Fatal(err)
 	}
 	spec := startSpec{
-		app: "blog", version: "v1", command: []string{"./server"}, dir: release,
+		app: "blog", version: "v1", nonce: "0a1b2c3d0a1b2c3d", command: []string{"./server"}, dir: release,
 		sandbox: &sandboxSpec{root: root, appDir: appDir, appName: "blog",
 			writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}}},
 	}
@@ -1071,7 +1100,7 @@ func TestUnitForRefusesCommandOutsideTheView(t *testing.T) {
 		return &sandboxSpec{root: root, appDir: appDir, appName: "blog",
 			writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}}}
 	}
-	base := startSpec{app: "blog", version: "v1", dir: release}
+	base := startSpec{app: "blog", version: "v1", nonce: "0a1b2c3d0a1b2c3d", dir: release}
 
 	spec := base
 	spec.command, spec.sandbox = []string{runtime}, sb()
@@ -1237,7 +1266,7 @@ func TestUnitForResolvesTheCommandBeforeTestingTheView(t *testing.T) {
 	if err := os.Symlink(realBin, shim); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	spec := startSpec{app: "blog", version: "v1", dir: release, command: []string{shim},
+	spec := startSpec{app: "blog", version: "v1", nonce: "0a1b2c3d0a1b2c3d", dir: release, command: []string{shim},
 		sandbox: &sandboxSpec{root: root, appDir: appDir, appName: "blog",
 			writable: []bindPath{{dest: release, source: release}}}}
 	_, err = r.unitFor(spec, false)
@@ -1379,7 +1408,7 @@ func TestUnitForAcceptsACommandUnderASymlinkedRoot(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 	aliasRelease := filepath.Join(root, "blog", "releases", "v1")
-	spec := startSpec{app: "blog", version: "v1", dir: aliasRelease, command: []string{"./server"},
+	spec := startSpec{app: "blog", version: "v1", nonce: "0a1b2c3d0a1b2c3d", dir: aliasRelease, command: []string{"./server"},
 		sandbox: &sandboxSpec{root: root, appDir: filepath.Join(root, "blog"), appName: "blog",
 			writable: []bindPath{{dest: aliasRelease, source: aliasRelease},
 				{dest: filepath.Join(root, "blog", "shared"), source: filepath.Join(root, "blog", "shared")}}}}
@@ -1543,7 +1572,7 @@ func TestAppViewsAreDisjointExceptTheBaseView(t *testing.T) {
 	root := t.TempDir()
 	view := func(name string) map[string]bindMount {
 		spec := &appSpec{name: name, dirs: newAppDirs(root, name)}
-		sb := spec.sandboxSpecFor(spec.dirs.release("v1"))
+		sb := spec.sandboxSpecFor(spec.dirs.release("v1"), recordedNonce)
 		got := propMap(unitSpec{ExecStart: []string{"/bin/true"}, Sandbox: sb})
 		m := map[string]bindMount{}
 		for _, prop := range []string{"BindPaths", "BindReadOnlyPaths"} {
@@ -1584,7 +1613,7 @@ func TestAppViewsAreDisjointExceptTheBaseView(t *testing.T) {
 	for name, other := range map[string]string{"blog": "shop", "shop": "blog"} {
 		got := propMap(unitSpec{ExecStart: []string{"/bin/true"},
 			Sandbox: (&appSpec{name: name, dirs: newAppDirs(root, name)}).sandboxSpecFor(
-				newAppDirs(root, name).release("v1"))})
+				newAppDirs(root, name).release("v1"), recordedNonce)})
 		for _, b := range got["BindPaths"].([]bindMount) {
 			if !strings.HasPrefix(b.Destination, filepath.Join(root, name)+"/") {
 				t.Errorf("%s has a writable bind at %s, outside its own app directory", name, b.Destination)
