@@ -236,7 +236,7 @@ else
 	fail "no relaunch after the unit was stopped behind hotserve's back: $s"
 fi
 case "$s" in *'"current_version":"sd-final"'*) pass "the relaunched instance is the recorded version" ;; *) fail "unexpected version after relaunch: $s" ;; esac
-# Recovery publishes the port as soon as the unit starts (no health
+# Recovery publishes the socket as soon as the unit starts (no health
 # gate on a relaunch); give the sandboxed app a moment to bind.
 i=0
 until case "$(body)" in "hello v1"*) true ;; *) false ;; esac; do

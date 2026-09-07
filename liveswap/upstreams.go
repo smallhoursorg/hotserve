@@ -18,9 +18,9 @@ func init() {
 //	    dynamic liveswap <app>
 //	}
 //
-// GetUpstreams reads the app's active port from an atomic — the deploy
-// pipeline's promote step swaps that value, which makes the cutover
-// instantaneous and config-reload-free while keeping every
+// GetUpstreams reads the app's active socket from an atomic — the
+// deploy pipeline's promote step swaps that value, which makes the
+// cutover instantaneous and config-reload-free while keeping every
 // reverse_proxy feature (websockets, h2, streaming, load-balancer
 // retries) intact.
 type Upstreams struct {
@@ -57,12 +57,18 @@ func (u *Upstreams) Provision(ctx caddy.Context) error {
 // GetUpstreams returns the active version's address, or an error (a
 // 502 with a clear log line) when nothing has been deployed yet.
 func (u *Upstreams) GetUpstreams(_ *http.Request) ([]*reverseproxy.Upstream, error) {
-	port := u.ma.activePort.Load()
-	if port == 0 {
+	sock := u.ma.activeSocket.Load()
+	if sock == nil {
 		return nil, fmt.Errorf("liveswap app %q has no running version yet (deploy one via the webhook)", u.App)
 	}
+	// The pinned name under proxy/, never the app-writable one (socketRef).
+	addr, err := sock.dial()
+	if err != nil {
+		return nil, fmt.Errorf("liveswap app %q: %w", u.App, err)
+	}
+	// "unix/" + an absolute path is Caddy's unix//abs/path spelling.
 	return []*reverseproxy.Upstream{
-		{Dial: "127.0.0.1:" + portString(int(port))},
+		{Dial: "unix/" + addr},
 	}, nil
 }
 

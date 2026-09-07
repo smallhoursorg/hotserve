@@ -451,8 +451,8 @@ between such a host and a silent loss of isolation. Deleting it would
 turn a measurement into a claim.
 
 **What it does not do**, by design: the network namespace is shared
-(sibling `127.0.0.1:$PORT` reachable; egress open); there are no
-per-app UIDs; resource caps are unset. Each is in "Residual risks".
+(egress open); there are no per-app UIDs; resource caps are unset.
+Each is in "Residual risks".
 
 ## Reducing the asset (deploy auth)
 
@@ -499,16 +499,52 @@ does not isolate the runtime.
 - **T5 is contained, not prevented** — a supervisor RCE holds every
   asset short of root. It does not reach root because the supervisor
   holds no grant; keep it that way.
-- **Sibling localhost ports** stay reachable (shared netns). The clean
-  fix is making the app→hotserve contract a unix socket in the app's
-  own dir (Caddy `reverse_proxy` speaks `unix/`), which also enables a
-  per-app netns later. It changes the app contract from `$PORT` to a
-  socket path, so it is its own milestone.
+- **Sibling localhost ports** — closed for the contract: nothing
+  hotserve runs listens on a port. Each instance binds a unix socket
+  in a directory of its own (`<root>/<app>/run/<nonce>/app.sock`, the
+  only `run/` entry in that instance's view), and a sibling's socket is
+  outside the view like the rest of the sibling.
+  What remains is an app that opens a loopback listener of its own
+  accord: that port is reachable by siblings, by the app's own choice.
+- **The socket name is app-writable, and `connect(2)` follows
+  symlinks.** The instance's `run/<nonce>/` is bound writable, so an
+  app can replace its socket with a symlink to a socket outside its
+  view — hotserve's admin socket, a sibling's — and a proxy that
+  dialled the *name*
+  would connect through it in hotserve's namespace: a confused deputy
+  handing the admin API to the world. hotserve therefore never dials
+  the name. The first successful connect opens the file
+  `O_PATH|O_NOFOLLOW` (a symlink comes back as the symlink and is
+  refused; only `S_IFSOCK` passes) and hard-links that inode, via the
+  descriptor's `/proc/self/fd` magic link so no second lookup of the
+  name happens, to `<app>/proxy/<nonce>.sock` — a directory no app's
+  view contains — and every dial from then on, proxy and prober, goes
+  to the pinned name (`socketRef`, liveswap/socket.go). What the app
+  does to its own name afterwards is irrelevant. The pinned name is
+  unique per instance and never reused — the nonce is 64 random bits,
+  so a repeat takes on the order of 2^32 launches of one app — and
+  retiring an instance simply unlinks it, so a request that obtained
+  the address before the cutover and dials after it reaches nobody —
+  never another app (a descriptor number would be recycled; a nonce
+  is not). A reattach
+  applies the same check before adopting a record and unlinks the
+  candidate it pinned if the manager says definitively that the unit
+  is not running. Each instance binds in a `run/<nonce>/` of its own,
+  so the instance a deploy replaces — running alongside, possibly the
+  compromised one the deploy exists to replace — cannot reach the new
+  socket's name before it is pinned. Pinned by
+  `TestGetUpstreamsRefusesASymlinkUnderTheSocketName`,
+  `TestSocketRefPinsTheSocketAndRefusesASymlink` and the reattach
+  cases in `TestEnsureRunningRefusesARecordWhoseSocketItCannotDial`.
 - **Network egress** is open for every app. A runtime whose permission
-  model gates the network (Deno's `--allow-net`) can close it from
-  inside — see liveswap/README.md "Runtime permissions"; Node's
-  `--permission` model does not cover network I/O. The runtime-agnostic
-  answer is the unix-socket contract above plus `PrivateNetwork=`.
+  model gates the network (Deno's `--allow-net`, which the socket
+  contract lets an app omit entirely) can close it from inside — see
+  liveswap/README.md "Runtime permissions"; Node's `--permission`
+  model does not cover network I/O. The runtime-agnostic answer is
+  `PrivateNetwork=` on the unit — a path socket crosses network
+  namespaces, so the contract already allows it — as a per-app opt-in
+  when an app that wants no network exists (it would also cut the app
+  off from any database).
 - **Resource exhaustion** — a runaway app can starve its siblings and
   Caddy (fork bomb, memory leak). `ProtectControlGroups=` makes
   `MemoryMax=`/`TasksMax=`/`CPUQuota=` real the moment they are set;
@@ -567,3 +603,6 @@ Dated one-liners; the full text of each is in git.
   "what a bare app leaves behind in `shared/`" (nothing runs bare). The
   pre-#40 "reachable today" attack-path table described bare apps and
   is history with them.
+- 2026-09-06 — App contract moved from `127.0.0.1:$PORT` to a
+  per-instance unix socket in `<app>/run/`; the sibling-port residual
+  closed for every runtime, compiled apps included.

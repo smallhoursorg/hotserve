@@ -75,6 +75,8 @@ func unitUnconfirmed(err error) bool {
 type startSpec struct {
 	app     string        // app name (unit naming, journal identifier)
 	version string        // version tag (unit naming, description)
+	nonce   string        // instance id (newNonce): names the unit, and the socket the app binds
+	socket  string        // the socket the app binds; the unit removes it when it stops (empty for the probe)
 	command []string      // argv; command[0] looked up in PATH unless it contains a slash
 	dir     string        // working directory (the release dir)
 	env     []string      // complete environment, KEY=VALUE form

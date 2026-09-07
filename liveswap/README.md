@@ -2,11 +2,11 @@
 
 **Your reverse proxy is your deploy pipeline.** liveswap turns a
 single Caddy server into a zero-downtime deploy orchestrator for the
-apps it fronts — Node.js, Go, anything that listens on a port. CI
-builds a tarball, POSTs a webhook with its URL, and Caddy does the
-rest: download, migrate, start the new version on a fresh localhost
-port, health-gate it, atomically cut traffic over, gracefully stop the
-old one. No Kubernetes, no Nomad, no SSH keys in CI, no extra daemons.
+apps it fronts — Node.js, Go, anything that can listen on a unix
+socket. CI builds a tarball, POSTs a webhook with its URL, and Caddy
+does the rest: download, migrate, start the new version on its own
+socket, health-gate it, atomically cut traffic over, gracefully stop
+the old one. No Kubernetes, no Nomad, no SSH keys in CI, no extra daemons.
 One binary. Part of [hotserve](https://github.com/smallhoursorg/hotserve), from [smallhours](https://github.com/smallhoursorg).
 
 ```
@@ -20,7 +20,7 @@ POST /blog {url, version}
   │ downloading   stream the artifact (size-capped, https, token-gated)
   │ extracting    hardened tar extraction into releases/<version>/
   │ preparing     pre_start command (migrations) — non-zero exit aborts
-  │ starting      spawn the app on a fresh 127.0.0.1 port, PORT injected
+  │ starting      spawn the app on a fresh unix socket, SOCKET injected
   │ soaking       GET /health until continuously healthy for `soak`
   │ promoting     atomic cutover — new requests hit the new version
   │ draining      wait `drain` for in-flight requests on the old one
@@ -135,13 +135,14 @@ deploy.example.com {
 }
 ```
 
-Apps must listen on `127.0.0.1` at the injected `PORT`. Their
+Apps must listen on the unix socket at the injected `SOCKET` path —
+one per instance, in a `run/<nonce>/` dir of its own; hotserve proxies to
+it and health-probes it, and nothing listens on a TCP port. Their
 environment is, lowest precedence first: an allowlisted slice of
 Caddy's environment (`PATH`, `LANG`, `TZ`, `LC_*` — nothing else, so
 supervisor credentials like ACME DNS tokens never reach apps) →
 `HOME` set to the app's `shared/` → `env_file` → inline `env` →
-injected `PORT` and
-`HOST=127.0.0.1`, all layered on the systemd user manager's own
+injected `SOCKET`, all layered on the systemd user manager's own
 defaults (`XDG_RUNTIME_DIR`, `INVOCATION_ID`, …). Two of those
 defaults are **reserved** in a sandboxed unit and cannot be set by
 `env` or `env_file`: `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`
@@ -159,10 +160,64 @@ drop-in but deliberately does not restart a running manager (that
 would stop every app), so the ceiling changes at the next boot or
 manual restart.
 
+### Listening on the socket
+
+The socket is a path, so every server that can listen on a unix
+socket works unchanged; locally you keep using a port. One branch
+covers both:
+
+```js
+// Node / Express: server.listen() takes a path as well as a port.
+server.listen(process.env.SOCKET ?? 3000);
+```
+
+```ts
+// Deno: the `deno serve` CLI is port-only; call Deno.serve yourself.
+const sock = Deno.env.get("SOCKET");
+Deno.serve(sock ? { path: sock } : { port: 8000 }, handler);
+```
+
+```go
+// Go
+ln, err := net.Listen("unix", os.Getenv("SOCKET"))
+if err != nil {
+	log.Fatal(err)
+}
+log.Fatal(http.Serve(ln, mux))
+```
+
+Bun: `Bun.serve({ unix: process.env.SOCKET, fetch })`. Hono on Node:
+`createAdaptorServer(app).listen(process.env.SOCKET)`. Python:
+`gunicorn --bind unix:$SOCKET`, `uvicorn --uds $SOCKET`. Ruby: `puma
+-b unix://$SOCKET`. Rust: axum/hyper on a `tokio::net::UnixListener`.
+
+Framework CLIs that only bind TCP (`next start`, Astro's node adapter)
+need a small custom server that calls the framework's request handler
+from an `http.Server` listening on the socket.
+
+hotserve's health probe arrives as `GET <health_path>` with
+`Host: localhost`; an app that allowlists hosts (Django's
+`ALLOWED_HOSTS`, Rails' `config.hosts`) must accept it. To poke a
+running app yourself, run as the hotserve user — `run/` is
+`0750 hotserve:hotserve` — and send the same request:
+`sudo -u hotserve curl --unix-socket "$SOCKET" http://localhost/health`
+(the path is `.socket` in the status JSON).
+
+Bind the socket **once** per instance. At the first successful
+connect hotserve hard-links the socket's inode into a directory of
+its own (`<app>/proxy/`, outside the sandbox) and dials that from
+then on — never the name under `run/<nonce>/`, which the app can write — so
+an app that unlinks and re-binds its path is, as far as hotserve is
+concerned, gone: its health probes fail and the watchdog restarts it.
+(With `health_path off` the watchdog only watches the process, so a
+re-bound app stays up and unroutable — another reason not to
+re-bind.) A stale socket file is never your problem either: the unit
+removes its socket when it stops, and every launch gets a fresh path.
+
 ### Placeholders
 
 `command`, `pre_start` and `env` values may use deploy-time
-placeholders: `{version}`, `{port}`, `{release_dir}`, `{shared_dir}`.
+placeholders: `{version}`, `{socket}`, `{release_dir}`, `{shared_dir}`.
 `{shared_dir}` (`<root>/<app>/shared/`) survives deploys — put SQLite
 files and uploads there. Standard Caddy `{env.*}` placeholders are
 resolved at config load.
@@ -292,8 +347,12 @@ The working directory is the release dir and `HOME` defaults to
 inline `env`, so you can point it elsewhere — inside the release dir,
 say. Point it somewhere the sandbox does not bind and
 the app gets a `HOME` that does not exist inside its unit; liveswap
-warns at every launch rather than refusing, since you asked for it. The network namespace is shared by design — the app
-binds `127.0.0.1:$PORT` as before, and sibling ports remain reachable.
+warns at every launch rather than refusing, since you asked for it.
+The network namespace is shared by design — apps make outbound calls
+and reach a same-box database over loopback — but nothing hotserve
+runs listens on a port: each instance binds its own unix socket under
+`run/<nonce>/`, which hotserve reaches at its real path, and a sibling's
+socket is outside the view like everything else of the sibling's.
 
 This closes the routes the threat model ranks first: reading the
 supervisor's environment or walking the host through
@@ -446,16 +505,17 @@ just part of `command`, which is the point: `command` lives in your
 Caddyfile on the box, so a deployed tarball cannot widen its own
 permissions the way it could if they lived in the artifact.
 
-A Deno app, with the placeholders from [Placeholders](#placeholders):
+A Deno app, with the placeholders from [Placeholders](#placeholders)
+and a `main.ts` that calls `Deno.serve({ path: Deno.env.get("SOCKET") })`
+(see [Listening on the socket](#listening-on-the-socket)):
 
 ```
 app example {
-    command deno serve --port {port} --host 127.0.0.1 \
+    command deno run \
         --cached-only \
-        --allow-net=127.0.0.1:{port} \
-        --allow-read={release_dir},{shared_dir} \
-        --allow-write={shared_dir} \
-        --allow-env=DATABASE_URL \
+        --allow-read={release_dir},{shared_dir},{socket} \
+        --allow-write={shared_dir},{socket} \
+        --allow-env=SOCKET,DATABASE_URL \
         main.ts
     env DENO_DIR {release_dir}/.deno
     env DATABASE_URL {shared_dir}/app.db
@@ -464,20 +524,20 @@ app example {
 ```
 
 **What that buys you** (measured against Deno 2.8.3; re-check with
-`deno serve --help=full` when you upgrade):
+`deno run --help=full` when you upgrade):
 
-- `--allow-net=127.0.0.1:{port}` is enough for `deno serve` to bind and
-  serve. Every *other* address is refused with `NotCapable` — so a
-  dependency that wakes up and tries to POST your secrets somewhere
-  fails at the runtime boundary. Note it is an **address allowlist,
-  not a direction**: it does not distinguish listening from
-  connecting. Scoping it to the app's own port works because the only
-  address left to reach is itself — which also closes the sibling
-  `127.0.0.1` ports the sandbox leaves open (all apps share a network
-  namespace).
+- **No `--allow-net` at all.** A unix socket is a file: serving needs
+  read and write on `{socket}` and nothing else, so every network
+  address is refused with `NotCapable` — a dependency that wakes up
+  and tries to POST your secrets somewhere fails at the runtime
+  boundary. Add `--allow-net=<host>` only for the hosts the app must
+  call. (`--allow-net` is an **address allowlist, not a direction**:
+  it does not distinguish listening from connecting.) The same holds
+  for a `deno compile`d binary: the flags are baked in, and a socket
+  path needs no per-deploy value baked with them.
 - Without `--allow-read` the app cannot read `/etc/hosts`, and without
   `--allow-env` it cannot read its own environment — including the
-  variables liveswap injected. Name only what the app actually needs.
+  `SOCKET` liveswap injected. Name only what the app actually needs.
 - Remote imports are governed by `--allow-import`, **not**
   `--allow-net`. Leave it off and add `--cached-only` so the serving
   process can never fetch a module. Vendor dependencies at build time
@@ -503,14 +563,16 @@ the inner layer and not the only one — the user and PID namespaces and
 the deny-by-default view are what still stand if the runtime is the
 thing that breaks. Use both; do not trade one for the other.
 
-**Health.** `deno serve` hands every path to your default export's
-`fetch`, so `health_path` only works if your handler answers 2xx on
-it. If it does not, set `health_path off` and the deploy gate falls
-back to "the process is still alive after `soak`".
+**Health.** `Deno.serve` hands every path to your handler, so
+`health_path` only works if it answers 2xx on it. If it does not, set
+`health_path off` and the deploy gate falls back to "the process is
+still alive after `soak`".
 
-Node's `--permission` model layers the same way. The principle is
-identical whatever the runtime: the ceiling is liveswap's, the
-narrowing is the app's, and neither substitutes for the other.
+Node's `--permission` model layers the same way for the filesystem,
+child processes and workers — it does not gate the network. The
+principle is identical whatever the runtime: the ceiling is
+liveswap's, the narrowing is the app's, and neither substitutes for
+the other.
 
 ## Deploy authentication (`deploy_trust`)
 

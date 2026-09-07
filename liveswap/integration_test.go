@@ -71,6 +71,7 @@ const testAppSource = `package main
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -93,7 +94,12 @@ func main() {
 	http.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprintf(w, "hello %s pid %d", version, os.Getpid())
 	})
-	if err := http.ListenAndServe("127.0.0.1:"+os.Getenv("PORT"), nil); err != nil {
+	ln, err := net.Listen("unix", os.Getenv("SOCKET"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := http.Serve(ln, nil); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -199,21 +205,17 @@ func getBody(t *testing.T, url string) (int, string) {
 
 var pidRe = regexp.MustCompile(`pid (\d+)`)
 
-var portRe = regexp.MustCompile(`"port":(\d+)`)
+var socketRe = regexp.MustCompile(`"socket":"([^"]+)"`)
 
-// portFromStatus extracts the active instance's port from the webhook
-// status JSON.
-func portFromStatus(t *testing.T, status string) int {
+// socketFromStatus extracts the active instance's socket path from the
+// webhook status JSON.
+func socketFromStatus(t *testing.T, status string) string {
 	t.Helper()
-	m := portRe.FindStringSubmatch(status)
+	m := socketRe.FindStringSubmatch(status)
 	if m == nil {
-		t.Fatalf("no port in status: %s", status)
+		t.Fatalf("no socket in status: %s", status)
 	}
-	n, err := strconv.Atoi(m[1])
-	if err != nil {
-		t.Fatalf("bad port %q in status: %v", m[1], err)
-	}
-	return n
+	return m[1]
 }
 
 func TestIntegrationDeployLifecycle(t *testing.T) {
@@ -273,7 +275,7 @@ func TestIntegrationDeployLifecycle(t *testing.T) {
 	t.Run("deploy v2 cuts over and stops v1", func(t *testing.T) {
 		_, prev := getBody(t, "http://localhost:9080/")
 		_, statusBefore := getStatus(t)
-		v1Port := portFromStatus(t, statusBefore)
+		v1Socket := socketFromStatus(t, statusBefore)
 
 		resp, body := postDeploy(t, artifactSrv.URL+"/demo-v2.tar.gz", "v2")
 		if resp.StatusCode != http.StatusOK {
@@ -291,22 +293,20 @@ func TestIntegrationDeployLifecycle(t *testing.T) {
 			t.Fatalf("status after v2: %s", status)
 		}
 
-		// The old port must be RELEASED, not merely unrouted. Port
-		// inequality is asserted here — and only here — because with
-		// real processes it is a true invariant: v1 was still listening
-		// when v2's port was allocated, so the kernel cannot have
-		// reused it. (On the unit tests' fake runner nothing binds, so
-		// the same assertion is flaky there — see
-		// TestGetUpstreamsSeesCutover's history.) The deploy response
-		// returns only after drain + stop-old, so by now a connect to
-		// v1's port must be refused.
-		v2Port := portFromStatus(t, status)
-		if v2Port == v1Port {
-			t.Fatalf("v2 was allocated v1's port %d while v1 was alive", v1Port)
+		// The old socket must be GONE, not merely unrouted: v2 got its
+		// own, and the deploy response returns only after drain +
+		// stop-old, so by now v1's socket file has been removed and a
+		// connect to it fails.
+		v2Socket := socketFromStatus(t, status)
+		if v2Socket == v1Socket {
+			t.Fatalf("v2 was handed v1's socket %s while v1 was alive", v1Socket)
 		}
-		if conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", v1Port), time.Second); err == nil {
+		if _, err := os.Stat(v1Socket); !os.IsNotExist(err) {
+			t.Fatalf("old v1 socket %s still present after stop: %v", v1Socket, err)
+		}
+		if conn, err := net.DialTimeout("unix", v1Socket, time.Second); err == nil {
 			_ = conn.Close()
-			t.Fatalf("old v1 port %d still accepting connections after stop", v1Port)
+			t.Fatalf("old v1 socket %s still accepting connections after stop", v1Socket)
 		}
 	})
 

@@ -5,6 +5,7 @@ package liveswap
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -46,9 +47,10 @@ func scriptApp(t *testing.T, body string) startSpec {
 	return startSpec{
 		app:     "itest",
 		version: strings.ToLower(strings.TrimPrefix(t.Name(), "TestIntegrationSystemd")),
+		nonce:   "0a1b2c3d0a1b2c3d",
 		command: []string{"./server"},
 		dir:     dir,
-		env:     []string{"PORT=4321", "HOST=127.0.0.1", "PATH=" + os.Getenv("PATH")},
+		env:     []string{"SOCKET=/var/lib/liveswap/itest/run/0a1b2c3d0a1b2c3d.sock", "PATH=" + os.Getenv("PATH")},
 		grace:   2 * time.Second,
 		sandbox: itestSandbox(dir),
 	}
@@ -228,6 +230,55 @@ exit 3
 	}
 }
 
+// The unit owns its socket file: ExecStopPost= removes it after the
+// service stops, however it stopped, with no supervisor-side cleanup
+// — which is what tidies up while hotserve is down. The socket is
+// bound from outside at the path the unit sees (its dir is a writable
+// bind at the same real path), and neither Stop nor a crash calls
+// socketRef.retire here.
+func TestIntegrationSystemdUnitRemovesItsSocketWhenItStops(t *testing.T) {
+	r := integrationRunner(t)
+	for _, tc := range []struct {
+		name   string
+		script string
+		stop   bool
+	}{
+		{"stopped", "while :; do sleep 1; done\n", true},
+		{"crashed", "sleep 1\nexit 3\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := scriptApp(t, tc.script)
+			spec.version = "socket-" + tc.name // scriptApp's t.Name()-derived version carries the subtest's "/"
+			spec.socket = filepath.Join(spec.dir, "app.sock")
+			ln, err := net.Listen("unix", spec.socket)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ln.(*net.UnixListener).SetUnlinkOnClose(false)
+			t.Cleanup(func() { _ = ln.Close() })
+			h, err := r.Start(spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.stop {
+				if err := r.Stop(h, spec.grace); err != nil {
+					t.Fatalf("Stop: %v", err)
+				}
+			} else {
+				select {
+				case <-r.Wait(h):
+				case <-time.After(10 * time.Second):
+					t.Fatal("crash never observed")
+				}
+			}
+			pollUntil(t, 3*time.Second, "the unit to remove its socket", func() bool {
+				_, err := os.Lstat(spec.socket)
+				return os.IsNotExist(err)
+			})
+		})
+	}
+}
+
 func TestIntegrationSystemdStopEscalatesToSIGKILL(t *testing.T) {
 	r := integrationRunner(t)
 	spec := scriptApp(t, "trap '' TERM\necho \"$$\" > pids.txt\nwhile :; do sleep 1; done\n")
@@ -261,7 +312,7 @@ func TestIntegrationSystemdStopEscalatesToSIGKILL(t *testing.T) {
 
 func TestIntegrationSystemdRunOnce(t *testing.T) {
 	r := integrationRunner(t)
-	ok := scriptApp(t, "echo \"$PORT $(pwd)\" > out.txt\nexit 0\n")
+	ok := scriptApp(t, "echo \"$SOCKET $(pwd)\" > out.txt\nexit 0\n")
 	if err := r.RunOnce(context.Background(), ok); err != nil {
 		t.Fatalf("RunOnce ok: %v", err)
 	}
@@ -271,8 +322,8 @@ func TestIntegrationSystemdRunOnce(t *testing.T) {
 	}
 	fields := strings.Fields(string(out))
 	realDir, _ := filepath.EvalSymlinks(ok.dir)
-	if len(fields) != 2 || fields[0] != "4321" || fields[1] != realDir {
-		t.Fatalf("env/cwd not propagated: %q (want 4321 %s)", out, realDir)
+	if len(fields) != 2 || fields[0] != "/var/lib/liveswap/itest/run/0a1b2c3d0a1b2c3d.sock" || fields[1] != realDir {
+		t.Fatalf("env/cwd not propagated: %q (want the SOCKET path and %s)", out, realDir)
 	}
 
 	bad := scriptApp(t, "exit 4\n")
@@ -383,6 +434,7 @@ func TestIntegrationSystemdSweepStopsStrays(t *testing.T) {
 	}
 	strayDir := t.TempDir()
 	straySpec := spec
+	straySpec.nonce = "deadbeefdeadbeef"
 	straySpec.dir = strayDir
 	straySpec.sandbox = itestSandbox(strayDir)
 	if err := os.WriteFile(filepath.Join(strayDir, "server"), []byte("#!/bin/sh\n"+workerTree), 0o755); err != nil {
@@ -584,6 +636,7 @@ func TestIntegrationSystemdSandboxedUnit(t *testing.T) {
 	spec := startSpec{
 		app:     "itest",
 		version: "sandboxed",
+		nonce:   "0a1b2c3d0a1b2c3d",
 		command: []string{"./server", shared, mgrPID, root},
 		dir:     release,
 		env:     []string{"PATH=" + os.Getenv("PATH"), "HOME=" + shared},
@@ -696,6 +749,7 @@ func TestIntegrationSystemdSandboxedUnitFailsAfterItsStartJobSucceeds(t *testing
 	spec := startSpec{
 		app:     "itest",
 		version: "asyncfail",
+		nonce:   "0a1b2c3d0a1b2c3d",
 		command: []string{"./server"},
 		dir:     release,
 		env:     []string{"PATH=" + os.Getenv("PATH"), "HOME=" + shared},
@@ -746,7 +800,7 @@ func TestIntegrationSystemdSIGTERMReachesNamespaceInit(t *testing.T) {
 		t.Fatal(err)
 	}
 	spec := startSpec{
-		app: "itest", version: "sigterm", command: []string{"./server"}, dir: release,
+		app: "itest", version: "sigterm", nonce: "0a1b2c3d0a1b2c3d", command: []string{"./server"}, dir: release,
 		env: []string{"PATH=" + os.Getenv("PATH")}, grace: 10 * time.Second,
 		sandbox: &sandboxSpec{root: root, appDir: filepath.Join(root, "itest"), appName: "itest",
 			writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}}},

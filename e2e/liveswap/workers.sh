@@ -5,5 +5,5 @@
 # app. Stopping or crashing this unit must take the worker with it.
 sleep 300 &
 echo "$$ $!" > pids.txt
-echo "workers up on $PORT"
+echo "workers up on $SOCKET"
 exec ./server-bin

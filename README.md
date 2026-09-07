@@ -14,7 +14,7 @@ Built in:
 
 | Module | What it does |
 |---|---|
-| **[liveswap](liveswap/)** | Zero-downtime app deploys: webhook from CI, artifact download, migrations, health-gated start, atomic traffic cutover, graceful stop, versioned releases with rollback. Your apps run as systemd units under the hotserve user's own service manager — Node.js, Go, anything that listens on a port — surviving hotserve restarts and upgrades, with a continuous watchdog that restarts them on crash or sustained health failure (bounded by a restart budget, with backoff). |
+| **[liveswap](liveswap/)** | Zero-downtime app deploys: webhook from CI, artifact download, migrations, health-gated start, atomic traffic cutover, graceful stop, versioned releases with rollback. Your apps run as systemd units under the hotserve user's own service manager — Node.js, Go, anything that can listen on a unix socket — surviving hotserve restarts and upgrades, with a continuous watchdog that restarts them on crash or sustained health failure (bounded by a restart budget, with backoff). |
 | **[penaltybox](penaltybox/)** | Rate limiting driven by your app's `X-Rate-Limit-Level` hint headers — weighted sliding-window budgets, tiers, and a penalty box for clients that cross them. |
 | **cache** | HTTP page caching via [Souin](https://github.com/darkweak/souin) with in-memory [Otter](https://github.com/darkweak/storages) storage. |
 | everything Caddy has | Automatic HTTPS, HTTP/2 + HTTP/3, the Caddyfile, the admin API — hotserve *is* Caddy underneath, with the modules above compiled in. |
@@ -72,7 +72,7 @@ automatic updates are on the roadmap.)
 		}
 
 		app myapp {
-			command node server.js          # runs in the release dir, PORT injected
+			command node server.js          # runs in the release dir, listens on $SOCKET
 			pre_start node migrate.js       # failure aborts the deploy
 			env_file /etc/hotserve/myapp.env
 		}
@@ -118,7 +118,7 @@ For non-CI deploys (a laptop, a cron box), use a local key instead:
 block at the `.pub`, and mint tokens with `hotserve deploy-token`.
 
 hotserve downloads the artifact, runs your migration, starts the new
-version on a private port, health-checks it until it has been solidly
+version on its own unix socket, health-checks it until it has been solidly
 up, atomically moves traffic over, and gracefully stops the old one.
 If anything fails, the old version never stops serving and CI goes
 red. Rollback is one call — `POST /<app>?rollback=<version>` relaunches
@@ -131,7 +131,7 @@ an on-disk release. Full details, CI snippets, and every option:
   Caddyfile, same admin API — `hotserve run`, `hotserve reload`,
   `hotserve validate` all behave exactly as Caddy's do.
 - **Made for one cheap server.** Apps run as systemd units under
-  hotserve's own user manager, on localhost ports; no container
+  hotserve's own user manager, reached over unix sockets; no container
   runtime anywhere. That's why there's deliberately no Docker image.
 - **Not a cluster.** Single-node by design. If you outgrow one server,
   you've outgrown hotserve — a good problem.
@@ -151,9 +151,10 @@ an on-disk release. Full details, CI snippets, and every option:
   There is no opt-out: an app without a sandbox would run as the same
   user as everything else and reach all of it, so both namespaces are
   required on every unit and a host that cannot deliver them refuses
-  to start. What stays shared by design is the network namespace:
-  sibling `127.0.0.1` ports are reachable (a runtime's own permission
-  flags can close that — see liveswap's "Runtime permissions").
+  to start. What stays shared by design is the network namespace, for
+  outbound calls; nothing hotserve runs listens on a port — each
+  instance binds a unix socket in its own directory, and a sibling's
+  socket is outside the view like the rest of the sibling.
   Details: [liveswap/README.md](liveswap/README.md#sandbox); the
   reasoning: [DESIGN-threat-model.md](DESIGN-threat-model.md).
 - **Deploys are authenticated without a shared secret.** A deploy

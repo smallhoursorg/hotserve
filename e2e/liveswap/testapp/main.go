@@ -8,6 +8,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -52,11 +53,13 @@ func main() {
 	http.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprintf(w, "hello %s pid %d", version, os.Getpid())
 	})
-	srv := &http.Server{
-		Addr:              "127.0.0.1:" + os.Getenv("PORT"),
-		ReadHeaderTimeout: 5 * time.Second,
+	ln, err := net.Listen("unix", os.Getenv("SOCKET"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
-	if err := srv.ListenAndServe(); err != nil {
+	srv := &http.Server{ReadHeaderTimeout: 5 * time.Second}
+	if err := srv.Serve(ln); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

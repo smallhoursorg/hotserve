@@ -74,8 +74,12 @@ below as a contract the sandbox path must keep.
 - What a unit's view MUST contain, at REAL host paths (no remapping —
   `current` symlinks, state paths and operator debugging all assume
   real paths):
-  - the app's release dir being started (rw) and its shared dir (rw),
-    and nothing else of the liveswap root. Its `state.json`, its
+  - the app's release dir being started (rw), its shared dir (rw) and
+    its own `run/<nonce>/` dir (rw — where it binds its socket; no
+    other instance's run dir is in the view, and hotserve pins the
+    socket by inode and never dials the app-writable name, see
+    DESIGN-threat-model.md "The socket name is app-writable"), and
+    nothing else of the liveswap root. Its `state.json`, its
     `tmp/` (the upload staging dir — a running instance must never be
     able to rewrite the next version's tarball), its `current` symlink
     and its other releases are simply never named, so they do not
@@ -176,7 +180,7 @@ below as a contract the sandbox path must keep.
 - The app environment MUST be scrubbed: an allowlist of inherited
   variables (`PATH`, `LANG`, `TZ`, `LC_*`; `HOME` is set to the app's
   shared dir, never inherited), then `env_file`, then inline `env`,
-  then the `PORT`/`HOST` contract — never a blanket `os.Environ()`
+  then the `SOCKET` contract — never a blanket `os.Environ()`
   inheritance, which would leak ACME tokens (and any other supervisor
   secrets) into every app. The sandbox path MUST NOT regress this.
   `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`, which the manager
@@ -221,8 +225,15 @@ below as a contract the sandbox path must keep.
   `SystemCallErrorNumber=EPERM` — systemd's curated allowlist, adopted
   wholesale, which is the bar the non-goals below set for any seccomp
   filter. Pinned by `TestSandboxPropertiesEveryUnit`.
-- The network namespace MUST be shared: the app binds 127.0.0.1:$PORT
-  and hotserve proxies to it, unchanged.
+- The network namespace MUST be shared: apps make outbound calls and
+  reach a same-box database over loopback. The app itself listens on
+  a per-instance unix socket in its own `run/<nonce>/` (`SOCKET`); nothing
+  hotserve runs listens on a port, and a sibling's socket is outside
+  the view. hotserve MUST NOT dial that app-writable name: it verifies
+  the inode and hard-links it to `<app>/proxy/<nonce>.sock`, a
+  directory no view contains, and dials that (DESIGN-threat-model.md,
+  "The socket name is app-writable"). `AF_UNIX` MUST stay in
+  `RestrictAddressFamilies=` (`TestNetworkNamespaceIsShared`).
 - `pre_start` MUST run under the same sandbox as the app it precedes
   (a migration that writes where the app cannot read is a bug caught
   at deploy time, not 3am).
@@ -495,3 +506,6 @@ Dated one-liners; the full text of each is in git.
   spec without a sandbox; reattach verifies the live unit's
   namespaces. `off` was per-app in syntax only: on a shared uid a bare
   app read every sibling's data and hotserve's keys.
+- 2026-09-06 — App contract moved from `127.0.0.1:$PORT` to a
+  per-instance unix socket under a third writable bind, `run/<nonce>/`; the
+  socket and the unit share a nonce.

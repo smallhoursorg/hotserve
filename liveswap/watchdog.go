@@ -3,6 +3,7 @@ package liveswap
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"math/rand/v2"
 	"net"
 	"sync"
@@ -374,7 +375,7 @@ func (ma *managedApp) superviseInstance(ctx context.Context, c collaborators, in
 				ma.wd.recordHealthy(c.clock.Now(), backoffResetAfter(spec))
 				continue
 			}
-			err := c.prober.probeOnce(ctx, "http://127.0.0.1:"+portString(inst.port)+spec.healthPath, spec.healthTimeout)
+			err := c.prober.probeOnce(ctx, inst.sock, spec.healthPath, spec.healthTimeout)
 			if ma.currentInstance() != inst {
 				// A deploy replaced the instance while the probe was in
 				// flight; its result belongs to the old era and must not
@@ -528,8 +529,7 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 	// has been serving fine for the last nine minutes of a ten-minute
 	// throttle helps nobody. One fresh probe settles it.
 	if kind == failureHealth && spec.healthPath != "" && c.runner.Alive(inst.handle) {
-		if err := c.prober.probeOnce(ctx,
-			"http://127.0.0.1:"+portString(inst.port)+spec.healthPath, spec.healthTimeout); err == nil {
+		if err := c.prober.probeOnce(ctx, inst.sock, spec.healthPath, spec.healthTimeout); err == nil {
 			ma.wd.refundBudget()
 			c.logger.Info("watchdog: instance recovered during the restart wait; restart canceled",
 				zap.String("version", inst.version))
@@ -564,7 +564,7 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 		// instantly is bounded exactly like any other restart storm;
 		// the next cycle sees the dead instance and tries again. The
 		// instance is gone either way (crashed, or stopped above), so
-		// stop routing to its port.
+		// stop routing to its socket.
 		ma.unrouteIf(inst)
 		c.logger.Error("watchdog: restart failed",
 			zap.String("version", inst.version), zap.Error(err))
@@ -573,11 +573,12 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 	if err := ma.publishInstance(c, newInst); err != nil {
 		c.logger.Warn("persisting restarted instance state", zap.Error(err))
 	}
+	inst.sock.retire()
 	ma.wd.recordRestart(c.clock.Now(), kind)
 	c.logger.Warn("watchdog: restarted app",
 		zap.String("cause", kind.String()),
 		zap.String("version", newInst.version),
-		zap.Int("port", newInst.port),
+		zap.String("socket", newInst.socket),
 		zap.Int("pid", newInst.handle.state().PID),
 		zap.Duration("backoff_was", d))
 	return true
@@ -600,17 +601,17 @@ func backoffResetAfter(spec *appSpec) time.Duration {
 }
 
 // classifyProbeErr labels a probe failure for logs. A refused
-// connection is strong evidence the process is gone or wedged; a
-// timeout is weak evidence (GC pause, load) — both count identically
-// toward the threshold, but operators reading logs deserve the
-// distinction.
+// connection, or a socket file that is not there at all, is strong
+// evidence the process is gone or wedged; a timeout is weak evidence
+// (GC pause, load) — both count identically toward the threshold, but
+// operators reading logs deserve the distinction.
 func classifyProbeErr(err error) string {
 	var nerr net.Error
 	switch {
 	case errors.Is(err, context.DeadlineExceeded),
 		errors.As(err, &nerr) && nerr.Timeout():
 		return "timeout"
-	case errors.Is(err, syscall.ECONNREFUSED):
+	case errors.Is(err, syscall.ECONNREFUSED), errors.Is(err, fs.ErrNotExist):
 		return "refused"
 	default:
 		return "unhealthy"

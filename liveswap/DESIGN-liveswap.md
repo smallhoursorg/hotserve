@@ -34,7 +34,7 @@ Concept map from the Nomad-era stack:
 | `min_healthy_time = "30s"` | `soak` (default 15s) |
 | `auto_revert = true` | failures before promote never move traffic |
 | webhook downloads GH release, `nomad job run` | webhook payload carries the artifact URL |
-| `nomadService` template + SIGUSR1 | `http.reverse_proxy.upstreams.liveswap` atomic port swap |
+| `nomadService` template + SIGUSR1 | `http.reverse_proxy.upstreams.liveswap` atomic socket swap |
 | versioned dirs + keep-6 GC | `releases/<version>/` + `keep` GC |
 | prestart migration task | `pre_start` |
 
@@ -104,7 +104,7 @@ Three cooperating modules, flat package `liveswap`:
    the last path segment so the directive works under any mount path.
 3. **`http.reverse_proxy.upstreams.liveswap`** (`upstreams.go`) —
    implements `reverseproxy.UpstreamSource`. `GetUpstreams` reads an
-   atomic port; returning `127.0.0.1:<port>`. This was chosen over (a)
+   atomic socket path, returning `unix/<path>`. This was chosen over (a)
    rewriting config via the admin API — a reload per deploy, config
    drift, races with operator edits — and (b) a bespoke proxy handler —
    reimplementing reverse_proxy badly.
@@ -114,7 +114,7 @@ Three cooperating modules, flat package `liveswap`:
 Caddy provisions the NEW config before cleaning up the OLD one on every
 reload, and module instances are always rebuilt. Anything owned by a
 module instance dies on reload. Therefore all live state — the running
-process handle, active port, deploy mutex, last-deploy record — lives
+process handle, active socket, deploy mutex, last-deploy record — lives
 in `managedApp` objects stored in a package-level `caddy.UsagePool`
 keyed by app name (`liveswap.go`). Provision takes a pool reference;
 Cleanup releases it; the refcount never reaches zero across a reload,
@@ -134,7 +134,16 @@ there would defeat the pool.
   a mid-deploy reload never tears the config.
 - `deployMu.TryLock` serializes deploys per app; 409 instead of queue.
 - `mu` guards current instance/phase/last-deploy.
-- `activePort` is the single atomic the proxy hot path reads.
+- `activeSocket` is the single atomic the proxy hot path reads: the
+  current instance's pinned socket, or nil while nothing serves.
+- `ownerLock(app)` (one mutex per app name) makes "stop what nobody
+  owns, then prune its socket dirs" one step with respect to recovery:
+  the start-time sweep of unconfigured apps holds it across the manager
+  sweep and the prune (and a single ownership veto during the sweep
+  disables the prune, since ownership is not monotonic), `ensureRunning`
+  across the whole of recovery, so a reload adding an app back cannot
+  adopt dirs the sweep is removing — and one app's slow recovery holds
+  up no other app's.
 - The runner's logger sits behind an atomic pointer because the
   per-unit watcher goroutines outlive the config that created them.
 
@@ -167,7 +176,9 @@ journal captures stdout/stderr under `SyslogIdentifier=hotserve-<app>`,
 `Restart=no` keeps the watchdog the sole restart authority, and
 `NoNewPrivileges` is on. `handleState.Unit` (persisted in
 `state.json`) is what `Reattach` looks up after a hotserve restart: a
-running unit is adopted with its port from state, a failed one is
+running unit is adopted with the socket its recorded nonce names —
+pinned afresh, so a name that no longer holds a socket refuses the
+adoption — and a failed one is
 logged, reset and relaunched. On process exit `Destruct` leaves units
 running for exactly that reason; only removing an app from the config
 stops it.
@@ -235,7 +246,8 @@ cancelled/joined by that config's Cleanup.
 | `caddyfile.go` | all Caddyfile parsing (global option, directive, upstreams); NO defaults here — Provision owns them |
 | `handler.go` | webhook auth, payload validation, status endpoint |
 | `upstreams.go` | dynamic upstream source (the cutover read side) |
-| `runner.go` / `runner_systemd.go` / `systemd_dbus.go` / `port.go` | runner interface + the systemd transient-unit implementation + its D-Bus client + port helpers |
+| `runner.go` / `runner_systemd.go` / `systemd_dbus.go` | runner interface + the systemd transient-unit implementation + its D-Bus client |
+| `socket.go` | the per-instance socket: nonce, path checks, stale-socket pruning, the unix dialer |
 | `sandbox.go` | the per-unit sandbox: view spec, base view, bind-source checks, capability probe (see DESIGN-sandbox.md) |
 | `harden/` | leaf package: the supervisor goes non-dumpable at init, before `os` |
 | `allowlist.go` | `artifact_allowlist` parsing, canonicalisation and URL pinning |
@@ -257,7 +269,20 @@ cancelled/joined by that config's Cleanup.
 - Tar hardening is a pure-Go port of the predecessor webhook's
   `validateArchive`, extended with a decompression-ratio cap and
   setuid stripping, and unit-tested against crafted malicious archives.
-- Apps bind 127.0.0.1 only; `PORT`/`HOST` are injected.
+- Apps listen on a per-instance unix socket in their own `run/<nonce>/`
+  dir; `SOCKET` is injected. Nothing hotserve runs listens on a port,
+  so there is no sibling port to reach. The socket and the unit share
+  a nonce, which is what `state.json` records; a record whose nonce is
+  not the unit's, or whose socket is not there to dial, is treated as
+  nothing recorded. hotserve never dials the socket by its
+  app-writable name: the first connect verifies the inode
+  (`O_NOFOLLOW`, `S_IFSOCK` only), hard-links it to
+  `<app>/proxy/<nonce>.sock` — outside every view — and proxy and
+  prober dial that from then on; retiring an instance unlinks it. So
+  bind once per instance. The unit removes its own
+  socket when it stops (`ExecStopPost=`); a confirmed sweep prunes any
+  left behind. The health probe is `GET <health_path>` with
+  `Host: localhost`.
 - `Authorization` is dropped by Go's HTTP client on cross-host
   redirects — exactly right for GitHub's asset→S3 redirect.
 - `artifact_allowlist` is required — there is no "deploy from

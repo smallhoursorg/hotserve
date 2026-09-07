@@ -203,9 +203,10 @@ func testApp(t *testing.T) startSpec {
 	return startSpec{
 		app:     "demo",
 		version: "v1.2",
+		nonce:   "0a1b2c3d0a1b2c3d",
 		command: []string{"./server", "--flag"},
 		dir:     dir,
-		env:     []string{"PORT=8123", "HOST=127.0.0.1"},
+		env:     []string{"SOCKET=/var/lib/liveswap/demo/run/0a1b2c3d0a1b2c3d.sock"},
 		grace:   3 * time.Second,
 		// Every unit is sandboxed: the release dir is a writable bind,
 		// which is also what puts ./server inside the unit's view.
@@ -222,7 +223,7 @@ func waitDone(t *testing.T, r *systemdRunner, h handle) {
 	}
 }
 
-var unitNamePattern = regexp.MustCompile(`^hotserve-demo\.v1\.2\.[0-9a-f]{8}\.service$`)
+var unitNamePattern = regexp.MustCompile(`^hotserve-demo\.v1\.2\.0a1b2c3d0a1b2c3d\.service$`)
 
 func TestSystemdRunnerStartBuildsUnit(t *testing.T) {
 	r, conn := newTestSystemdRunner(t)
@@ -246,7 +247,7 @@ func TestSystemdRunnerStartBuildsUnit(t *testing.T) {
 	if u.WorkingDirectory != spec.dir || u.SyslogIdentifier != "hotserve-demo" || u.StopTimeout != 3*time.Second {
 		t.Fatalf("unit spec: %+v", u)
 	}
-	if strings.Join(u.Environment, ",") != "PORT=8123,HOST=127.0.0.1" {
+	if strings.Join(u.Environment, ",") != "SOCKET=/var/lib/liveswap/demo/run/0a1b2c3d0a1b2c3d.sock" {
 		t.Fatalf("environment must be exactly the caller's env, got %v", u.Environment)
 	}
 	st := h.state()
@@ -258,13 +259,17 @@ func TestSystemdRunnerStartBuildsUnit(t *testing.T) {
 	}
 }
 
+// Every launch draws a fresh nonce (newNonce, in app.go), and the
+// nonce is what makes two starts of one version two units.
 func TestSystemdRunnerUnitNamesAreUnique(t *testing.T) {
 	r, conn := newTestSystemdRunner(t)
 	spec := testApp(t)
 	if _, err := r.Start(spec); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.Start(spec); err != nil {
+	again := spec
+	again.nonce = "deadbeefdeadbeef"
+	if _, err := r.Start(again); err != nil {
 		t.Fatal(err)
 	}
 	if conn.unit(0).Name == conn.unit(1).Name {
@@ -522,7 +527,7 @@ func TestSystemdRunnerReattach(t *testing.T) {
 	if _, ok, err := r.Reattach(handleState{PID: 1}); ok || err != nil {
 		t.Fatal("no unit recorded ⇒ cannot reattach, not an error")
 	}
-	if _, ok, err := r.Reattach(handleState{Unit: "hotserve-demo.v1.aaaaaaaa.service"}); ok || err != nil {
+	if _, ok, err := r.Reattach(handleState{Unit: "hotserve-demo.v1.aaaaaaaaaaaaaaaa.service"}); ok || err != nil {
 		t.Fatal("unknown unit ⇒ observed not running")
 	}
 
@@ -694,12 +699,14 @@ func TestSystemdRunnerSweep(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stray, err := r.Start(spec)
+	straySpec := spec
+	straySpec.nonce = "deadbeefdeadbeef"
+	stray, err := r.Start(straySpec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	conn.setStatus("hotserve-demo.v0.9.11111111.service", failedStatus) // leftover failed unit of ours
-	conn.setStatus("hotserve-demo-api.v1.22222222.service", unitStatus{LoadState: "loaded", ActiveState: "active", Sandboxed: true})
+	conn.setStatus("hotserve-demo.v0.9.1111111111111111.service", failedStatus) // leftover failed unit of ours
+	conn.setStatus("hotserve-demo-api.v1.2222222222222222.service", unitStatus{LoadState: "loaded", ActiveState: "active", Sandboxed: true})
 	conn.setStatus("hotserve-demo.v1.notanonce.service", unitStatus{LoadState: "loaded", ActiveState: "active", Sandboxed: true})
 
 	if err := r.Sweep("demo", keep); err != nil {
@@ -709,7 +716,7 @@ func TestSystemdRunnerSweep(t *testing.T) {
 	if len(stops) != 1 || stops[0] != stray.state().Unit {
 		t.Fatalf("exactly the stray unit of this app must be stopped, got %v", stops)
 	}
-	if rs := conn.resets(); len(rs) != 1 || rs[0] != "hotserve-demo.v0.9.11111111.service" {
+	if rs := conn.resets(); len(rs) != 1 || rs[0] != "hotserve-demo.v0.9.1111111111111111.service" {
 		t.Fatalf("the failed leftover must be reset, got %v", rs)
 	}
 	waitDone(t, r, stray)
@@ -718,7 +725,7 @@ func TestSystemdRunnerSweep(t *testing.T) {
 	}
 
 	// A stop that cannot be confirmed is an error: nothing may be GC'd.
-	conn.setStatus("hotserve-demo.v2.33333333.service", unitStatus{LoadState: "loaded", ActiveState: "active", Sandboxed: true})
+	conn.setStatus("hotserve-demo.v2.3333333333333333.service", unitStatus{LoadState: "loaded", ActiveState: "active", Sandboxed: true})
 	conn.mu.Lock()
 	conn.stopErr = errors.New("dbus down")
 	conn.mu.Unlock()
@@ -738,7 +745,7 @@ func TestSystemdRunnerSweep(t *testing.T) {
 	conn.listErr = nil
 	conn.resetErr = errors.New("dbus down")
 	conn.mu.Unlock()
-	conn.setStatus("hotserve-demo.v3.44444444.service", failedStatus)
+	conn.setStatus("hotserve-demo.v3.4444444444444444.service", failedStatus)
 	if err := r.Sweep("demo", keep); err == nil {
 		t.Fatal("a reset failure must be reported: the unit is still loaded")
 	}
@@ -781,21 +788,31 @@ func TestSystemdRunnerWatcherBackfillsPID(t *testing.T) {
 
 func TestSweepUnknownApps(t *testing.T) {
 	conn := newFakeSystemdConn()
+	root := t.TempDir()
+	// What the removed app left on disk while hotserve was down: no
+	// managedApp will ever sweep it, so this sweep must. The configured
+	// app's are left alone (its own sweeps own them).
+	for _, app := range []string{"old", "demo"} {
+		d := newAppDirs(root, app)
+		must(t, os.MkdirAll(d.runDir("0a1b2c3d0a1b2c3d"), 0o750))
+		must(t, os.MkdirAll(d.proxy, 0o750))
+		must(t, os.WriteFile(filepath.Join(d.proxy, "0a1b2c3d0a1b2c3d.sock"), nil, 0o600))
+	}
 	running := unitStatus{LoadState: "loaded", ActiveState: "active", Sandboxed: true}
-	conn.setStatus("hotserve-demo.v1.0a1b2c3d.service", running)     // configured: keep
-	conn.setStatus("hotserve-old.v3.0a1b2c3d.service", running)      // removed app: stop
-	conn.setStatus("hotserve-old.v2.0a1b2c3e.service", failedStatus) // removed app: reset
-	conn.setStatus("hotserve-demo-api.v1.0a1b2c3d.service", running) // another configured app: keep
-	conn.setStatus("hotserve-weird.service", running)                // not ours: ignore
+	conn.setStatus("hotserve-demo.v1.0a1b2c3d0a1b2c3d.service", running)     // configured: keep
+	conn.setStatus("hotserve-old.v3.0a1b2c3d0a1b2c3d.service", running)      // removed app: stop
+	conn.setStatus("hotserve-old.v2.0a1b2c3e0a1b2c3e.service", failedStatus) // removed app: reset
+	conn.setStatus("hotserve-demo-api.v1.0a1b2c3d0a1b2c3d.service", running) // another configured app: keep
+	conn.setStatus("hotserve-weird.service", running)                        // not ours: ignore
 	configured := map[string]bool{"demo": true, "demo-api": true}
 	orig := appConfigured
 	appConfigured = func(app string) bool { return configured[app] }
 	t.Cleanup(func() { appConfigured = orig })
-	err := sweepUnknownApps(context.Background(), conn, zap.NewNop())
+	err := sweepUnknownApps(context.Background(), conn, root, zap.NewNop())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stops := conn.stops(); len(stops) != 1 || stops[0] != "hotserve-old.v3.0a1b2c3d.service" {
+	if stops := conn.stops(); len(stops) != 1 || stops[0] != "hotserve-old.v3.0a1b2c3d0a1b2c3d.service" {
 		t.Fatalf("only the removed app's running unit must be stopped, got %v", stops)
 	}
 	conn.mu.Lock()
@@ -804,24 +821,33 @@ func TestSweepUnknownApps(t *testing.T) {
 	if lists != 2 { // one global listing + one per unknown app, not per unit
 		t.Fatalf("each unknown app must be swept once, got %d listings", lists)
 	}
-	if rs := conn.resets(); len(rs) != 1 || rs[0] != "hotserve-old.v2.0a1b2c3e.service" {
+	if rs := conn.resets(); len(rs) != 1 || rs[0] != "hotserve-old.v2.0a1b2c3e0a1b2c3e.service" {
 		t.Fatalf("the removed app's failed unit must be reset, got %v", rs)
+	}
+	for app, want := range map[string]bool{"old": false, "demo": true} {
+		d := newAppDirs(root, app)
+		_, runErr := os.Stat(d.runDir("0a1b2c3d0a1b2c3d"))
+		_, pinErr := os.Stat(filepath.Join(d.proxy, "0a1b2c3d0a1b2c3d.sock"))
+		if got := runErr == nil && pinErr == nil; got != want {
+			t.Fatalf("%s's socket dirs present = %v, want %v (run: %v, pin: %v)", app, got, want, runErr, pinErr)
+		}
 	}
 	conn.mu.Lock()
 	conn.listErr = errors.New("dbus down")
 	conn.mu.Unlock()
-	if err := sweepUnknownApps(context.Background(), conn, zap.NewNop()); err == nil {
+	if err := sweepUnknownApps(context.Background(), conn, root, zap.NewNop()); err == nil {
 		t.Fatal("a listing failure must be reported")
 	}
 }
 
 func TestSweepUnknownAppsDoesNothingWhileExiting(t *testing.T) {
 	conn := newFakeSystemdConn()
-	conn.setStatus("hotserve-old.v3.0a1b2c3d.service", unitStatus{LoadState: "loaded", ActiveState: "active", Sandboxed: true})
+	root := t.TempDir()
+	conn.setStatus("hotserve-old.v3.0a1b2c3d0a1b2c3d.service", unitStatus{LoadState: "loaded", ActiveState: "active", Sandboxed: true})
 	orig := caddyExiting
 	caddyExiting = func() bool { return true }
 	t.Cleanup(func() { caddyExiting = orig })
-	if err := sweepUnknownApps(context.Background(), conn, zap.NewNop()); err != nil {
+	if err := sweepUnknownApps(context.Background(), conn, root, zap.NewNop()); err != nil {
 		t.Fatal(err)
 	}
 	if len(conn.stops()) != 0 {
@@ -834,30 +860,133 @@ func TestSweepUnknownAppsJudgesAgainstLiveConfig(t *testing.T) {
 	// sweep must judge against the ledger as it is right before acting
 	// — never a capture from before.
 	conn := newFakeSystemdConn()
+	root := t.TempDir()
 	running := unitStatus{LoadState: "loaded", ActiveState: "active", Sandboxed: true}
-	conn.setStatus("hotserve-late.v1.0a1b2c3d.service", running)
+	conn.setStatus("hotserve-late.v1.0a1b2c3d0a1b2c3d.service", running)
+	late := newAppDirs(root, "late")
+	must(t, os.MkdirAll(late.runDir("0a1b2c3d0a1b2c3d"), 0o750))
+	must(t, os.MkdirAll(late.proxy, 0o750))
+	must(t, os.WriteFile(filepath.Join(late.proxy, "0a1b2c3d0a1b2c3d.sock"), nil, 0o600))
 	var mu sync.Mutex
 	configured := map[string]bool{} // "late" is not configured when the sweep starts
 	orig := appConfigured
-	appConfigured = func(app string) bool { mu.Lock(); defer mu.Unlock(); return configured[app] }
+	// Ownership is not monotonic: the candidate that adopts "late"
+	// mid-listing is itself cleaned up right after the sweep's veto,
+	// so every later check finds the app unowned again. The veto must
+	// still stand: a sweep that left a unit running prunes nothing.
+	appConfigured = func(app string) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		owned := configured[app]
+		configured[app] = false
+		return owned
+	}
 	t.Cleanup(func() { appConfigured = orig })
 	conn.mu.Lock()
 	conn.listHook = func() { mu.Lock(); configured["late"] = true; mu.Unlock() } // the reload lands mid-listing
 	conn.mu.Unlock()
-	if err := sweepUnknownApps(context.Background(), conn, zap.NewNop()); err != nil {
+	if err := sweepUnknownApps(context.Background(), conn, root, zap.NewNop()); err != nil {
 		t.Fatal(err)
 	}
 	if len(conn.stops()) != 0 {
 		t.Fatalf("an app the live config names must never be swept, got %v", conn.stops())
 	}
+	// Nor may its socket dirs be pruned: the unit the sweep left
+	// running is the instance the reload is adopting.
+	for _, p := range []string{late.runDir("0a1b2c3d0a1b2c3d"), filepath.Join(late.proxy, "0a1b2c3d0a1b2c3d.sock")} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("an adopted app's %s was pruned: %v", p, err)
+		}
+	}
+}
+
+// Deciding an app's socket dirs are nobody's, and pruning them, is one
+// step under the app's ownerLock — the lock recovery holds while it
+// adopts — so a reload adopting the app cannot slip between the check
+// and the prune. Pinned by holding the lock: the sweep must wait for
+// that app, and only that app.
+func TestSweepUnknownAppsPruneWaitsForRecovery(t *testing.T) {
+	conn := newFakeSystemdConn()
+	root := t.TempDir()
+	gone, other := newAppDirs(root, "gone"), newAppDirs(root, "other")
+	must(t, os.MkdirAll(gone.runDir("0a1b2c3d0a1b2c3d"), 0o750))
+	must(t, os.MkdirAll(other.runDir("0a1b2c3d0a1b2c3d"), 0o750))
+	orig := appConfigured
+	appConfigured = func(string) bool { return false }
+	t.Cleanup(func() { appConfigured = orig })
+
+	mu := ownerLock("gone")
+	mu.Lock()
+	done := make(chan error, 1)
+	go func() { done <- sweepUnknownApps(context.Background(), conn, root, zap.NewNop()) }()
+	time.Sleep(50 * time.Millisecond)
+	if _, err := os.Stat(gone.runDir("0a1b2c3d0a1b2c3d")); err != nil {
+		mu.Unlock()
+		t.Fatal("the sweep pruned while recovery held the app's ownership lock")
+	}
+	mu.Unlock()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []appDirs{gone, other} {
+		if _, err := os.Stat(d.runDir("0a1b2c3d0a1b2c3d")); !os.IsNotExist(err) {
+			t.Fatalf("once the lock is free the unowned dirs are pruned (%s): %v", d.app, err)
+		}
+	}
+}
+
+// A root that cannot be read is reported, not treated as swept.
+func TestSweepUnknownAppsReportsAnUnreadableRoot(t *testing.T) {
+	conn := newFakeSystemdConn()
+	root := filepath.Join(t.TempDir(), "root-is-a-file")
+	must(t, os.WriteFile(root, nil, 0o600))
+	if err := sweepUnknownApps(context.Background(), conn, root, zap.NewNop()); err == nil {
+		t.Fatal("an unreadable root must be reported")
+	}
+	if err := sweepUnknownApps(context.Background(), conn, filepath.Join(t.TempDir(), "absent"), zap.NewNop()); err != nil {
+		t.Fatalf("a missing root is nothing to prune, not an error: %v", err)
+	}
+}
+
+// An app whose units are all gone never appears in the manager's
+// listing; if it is no longer configured either, the start-time sweep
+// is the only thing that will ever prune what it left under the root.
+// A configured app's leftovers are its own managedApp's business.
+func TestSweepUnknownAppsPrunesAppsWithNoUnitsLeft(t *testing.T) {
+	conn := newFakeSystemdConn()
+	root := t.TempDir()
+	for _, app := range []string{"gone", "demo"} {
+		d := newAppDirs(root, app)
+		must(t, os.MkdirAll(d.runDir("0a1b2c3d0a1b2c3d"), 0o750))
+		must(t, os.MkdirAll(d.proxy, 0o750))
+		must(t, os.WriteFile(filepath.Join(d.proxy, "0a1b2c3d0a1b2c3d.sock"), nil, 0o600))
+	}
+	must(t, os.WriteFile(filepath.Join(root, "not-an-app-dir.txt"), nil, 0o600))
+	orig := appConfigured
+	appConfigured = func(app string) bool { return app == "demo" }
+	t.Cleanup(func() { appConfigured = orig })
+	if err := sweepUnknownApps(context.Background(), conn, root, zap.NewNop()); err != nil {
+		t.Fatal(err)
+	}
+	for app, want := range map[string]bool{"gone": false, "demo": true} {
+		d := newAppDirs(root, app)
+		_, runErr := os.Stat(d.runDir("0a1b2c3d0a1b2c3d"))
+		_, pinErr := os.Stat(filepath.Join(d.proxy, "0a1b2c3d0a1b2c3d.sock"))
+		if got := runErr == nil && pinErr == nil; got != want {
+			t.Fatalf("%s's socket dirs present = %v, want %v", app, got, want)
+		}
+	}
+	if _, err := os.Stat(newAppDirs(root, "gone").app); err != nil {
+		t.Fatal("only the socket dirs are pruned; the app's directory and releases stay")
+	}
 }
 
 func TestUnitApp(t *testing.T) {
 	for name, want := range map[string]string{
-		"hotserve-blog.v1.4.2.0a1b2c3d.service":          "blog",
-		"hotserve-blog-api.v1.0a1b2c3d.prestart.service": "blog-api",
-		"hotserve-blog.service":                          "",
-		"dbus.service":                                   "",
+		"hotserve-blog.v1.4.2.0a1b2c3d0a1b2c3d.service":          "blog",
+		"hotserve-blog-api.v1.0a1b2c3d0a1b2c3d.prestart.service": "blog-api",
+		"hotserve-blog.service":                                  "",
+		"dbus.service":                                           "",
 	} {
 		got, ok := unitApp(name)
 		if got != want || ok != (want != "") {
@@ -869,8 +998,8 @@ func TestUnitApp(t *testing.T) {
 func TestSystemdRunnerSweepStopsStraysConcurrentlyAndHonoursTheGuard(t *testing.T) {
 	r, conn := newTestSystemdRunner(t)
 	running := unitStatus{LoadState: "loaded", ActiveState: "active", Sandboxed: true}
-	conn.setStatus("hotserve-demo.v1.11111111.service", running)
-	conn.setStatus("hotserve-demo.v2.22222222.service", running)
+	conn.setStatus("hotserve-demo.v1.1111111111111111.service", running)
+	conn.setStatus("hotserve-demo.v2.2222222222222222.service", running)
 	// A guard that turns false after the listing: nothing may be stopped.
 	if err := r.sweep(context.Background(), "demo", nil, func() bool { return false }); err != nil {
 		t.Fatal(err)
@@ -929,12 +1058,12 @@ func TestUsecDuration(t *testing.T) {
 
 func TestUnitBelongsTo(t *testing.T) {
 	for name, want := range map[string]bool{
-		"hotserve-blog.v1.4.2.0a1b2c3d.service":          true,
-		"hotserve-blog.v1.4.2.0a1b2c3d.prestart.service": true,
-		"hotserve-blog-api.v1.0a1b2c3d.service":          false, // another app
-		"hotserve-blog.v1.service":                       false, // no nonce
-		"hotserve-blogx.v1.0a1b2c3d.service":             false,
-		"blog.v1.0a1b2c3d.service":                       false,
+		"hotserve-blog.v1.4.2.0a1b2c3d0a1b2c3d.service":          true,
+		"hotserve-blog.v1.4.2.0a1b2c3d0a1b2c3d.prestart.service": true,
+		"hotserve-blog-api.v1.0a1b2c3d0a1b2c3d.service":          false, // another app
+		"hotserve-blog.v1.service":                               false, // no nonce
+		"hotserve-blogx.v1.0a1b2c3d0a1b2c3d.service":             false,
+		"blog.v1.0a1b2c3d0a1b2c3d.service":                       false,
 	} {
 		if got := unitBelongsTo(name, "blog"); got != want {
 			t.Errorf("unitBelongsTo(%q, blog) = %v, want %v", name, got, want)
@@ -1030,12 +1159,43 @@ func TestSystemdRunnerStartSettlesMainPID(t *testing.T) {
 	}
 }
 
+// The instance nonce names the unit: the socket the app binds carries
+// the same one (appDirs.socket), which is what lets a reattach check
+// the recorded socket against the recorded unit.
+func TestUnitNameCarriesTheSpecNonce(t *testing.T) {
+	name, err := unitName(startSpec{app: "blog", version: "v1", nonce: "deadbeefdeadbeef"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "hotserve-blog.v1.deadbeefdeadbeef.service" {
+		t.Fatalf("unit name = %q", name)
+	}
+	if got, ok := unitNonce(name); !ok || got != "deadbeefdeadbeef" {
+		t.Fatalf("unitNonce(%q) = %q, %v", name, got, ok)
+	}
+	pre, err := unitName(startSpec{app: "blog", version: "v1", nonce: "deadbeefdeadbeef"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := unitNonce(pre); !ok || got != "deadbeefdeadbeef" {
+		t.Fatalf("the pre_start unit shares the nonce: unitNonce(%q) = %q, %v", pre, got, ok)
+	}
+	for _, bad := range []string{"", "DEADBEEFDEADBEEF", "deadbeef", "deadbeefdeadbee", "deadbeefdeadbeef0", "zzzzzzzzzzzzzzzz"} {
+		if _, err := unitName(startSpec{app: "blog", version: "v1", nonce: bad}, false); err == nil {
+			t.Errorf("nonce %q accepted", bad)
+		}
+	}
+	if _, ok := unitNonce("hotserve-blog.v1.service"); ok {
+		t.Error("a name without a nonce is not one of ours")
+	}
+}
+
 // TestProbeUnitsAreNotAppUnits: the capability probe's unit must sit
 // outside the app-name grammar, or a concurrent sweepUnknownApps would
 // stop it mid-probe — or an app legitimately called "sandbox-probe"
 // would collide with it — failing the start for no reason at all.
 func TestProbeUnitsAreNotAppUnits(t *testing.T) {
-	name, err := unitName(startSpec{app: "sandbox-probe", version: "probe", probe: true}, true)
+	name, err := unitName(startSpec{app: "sandbox-probe", version: "probe", nonce: "0a1b2c3d0a1b2c3d", probe: true}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1046,7 +1206,7 @@ func TestProbeUnitsAreNotAppUnits(t *testing.T) {
 		t.Fatalf("probe unit %q parses as app %q; a sweep would stop it", name, app)
 	}
 	// And an app really named sandbox-probe gets its own, distinct units.
-	appUnit, err := unitName(startSpec{app: "sandbox-probe", version: "v1"}, false)
+	appUnit, err := unitName(startSpec{app: "sandbox-probe", version: "v1", nonce: "0a1b2c3d0a1b2c3d"}, false)
 	if err != nil {
 		t.Fatal(err)
 	}

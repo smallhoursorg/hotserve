@@ -1,8 +1,8 @@
 // Package liveswap turns Caddy into a zero-downtime deploy orchestrator
 // for a single server. CI builds a tarball and POSTs a webhook with its
 // URL and version; Caddy downloads it, runs an optional pre-start
-// command (migrations), starts the new version as a systemd unit on a
-// fresh localhost port, health-gates it, atomically cuts traffic over,
+// command (migrations), starts the new version as a systemd unit on its
+// own unix socket, health-gates it, atomically cuts traffic over,
 // then gracefully stops the old version. Part of hotserve, from
 // smallhours.
 //
@@ -22,7 +22,6 @@ import (
 
 	"context"
 	"fmt"
-	"net/http"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -156,9 +155,9 @@ type App struct {
 // AppConfig defines one managed application.
 type AppConfig struct {
 	// Command starts the app, argv-style, with the release directory as
-	// working directory. The app must listen on 127.0.0.1 at the
-	// injected PORT. Placeholders: {version}, {port}, {release_dir},
-	// {shared_dir}. Required.
+	// working directory. The app must listen on the unix socket at the
+	// injected SOCKET path. Placeholders: {version}, {socket},
+	// {release_dir}, {shared_dir}. Required.
 	Command []string `json:"command,omitempty"`
 
 	// PreStart runs to completion in the release directory before the
@@ -268,7 +267,7 @@ func (a *App) Provision(ctx caddy.Context) error {
 	repl := caddy.NewReplacer()
 
 	// ReplaceKnown resolves {env.*} now but leaves the deploy-time
-	// placeholders ({version}, {port}, ...) untouched for app.go.
+	// placeholders ({version}, {socket}, ...) untouched for app.go.
 	a.Root = repl.ReplaceKnown(a.Root, "")
 	for i, e := range a.ArtifactAllowlist {
 		a.ArtifactAllowlist[i] = repl.ReplaceKnown(e, "")
@@ -292,15 +291,6 @@ func (a *App) Provision(ctx caddy.Context) error {
 
 	clients := &fetchClients{
 		download: newDownloadClient(a.AllowInsecureHTTP),
-		// The health client never follows redirects: the probe is a
-		// control signal from supervisor to app, and an app answering
-		// 3xx must read as "not 2xx", not steer the supervisor's
-		// request elsewhere.
-		health: &http.Client{
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
 		// The JWKS client fetches OIDC issuers' public keys over https
 		// only (unless allow_insecure_http), with a bounded timeout.
 		jwks: newJWKSClient(a.AllowInsecureHTTP),
@@ -488,6 +478,9 @@ func (a *App) Validate() error {
 		if !appNameRe.MatchString(name) {
 			return fmt.Errorf("app name %q must match %s", name, appNameRe)
 		}
+		if err := validateSocketPath(a.Root, name); err != nil {
+			return err
+		}
 		for k := range cfg.Env {
 			if !validEnvKey(k) {
 				return fmt.Errorf("app %s: env key %q is not a valid environment variable name (must match %s)", name, k, envKeyRe)
@@ -595,7 +588,7 @@ func (a *App) Start() error {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), unknownAppSweepTimeout)
 		defer cancel()
-		if err := sweepUnknownApps(ctx, conn, a.logger); err != nil {
+		if err := sweepUnknownApps(ctx, conn, a.Root, a.logger); err != nil {
 			a.logger.Error("sweeping units of apps no longer configured", zap.Error(err))
 		}
 	}()

@@ -24,6 +24,8 @@ import (
 //	<root>/<app>/releases/<version>/   one dir per deployed version
 //	<root>/<app>/shared/               persistent data, survives deploys
 //	<root>/<app>/tmp/                  download staging
+//	<root>/<app>/run/<nonce>/app.sock  one socket per instance, bound by the app; only run/<nonce>/ is in that instance's view
+//	<root>/<app>/proxy/<nonce>.sock    the same inode, hard-linked by hotserve; what it dials (not in any view)
 //	<root>/<app>/state.json            current version + process handle
 //	<root>/<app>/current -> releases/<version>   convenience symlink
 type appDirs struct {
@@ -32,6 +34,8 @@ type appDirs struct {
 	releases string
 	shared   string
 	tmp      string
+	run      string
+	proxy    string
 	state    string
 	current  string
 }
@@ -44,9 +48,29 @@ func newAppDirs(root, name string) appDirs {
 		releases: filepath.Join(app, "releases"),
 		shared:   filepath.Join(app, "shared"),
 		tmp:      filepath.Join(app, "tmp"),
+		run:      filepath.Join(app, "run"),
+		proxy:    filepath.Join(app, "proxy"),
 		state:    filepath.Join(app, "state.json"),
 		current:  filepath.Join(app, "current"),
 	}
+}
+
+// runDir is the one directory an instance may bind its socket in: its
+// own, so that no other instance of the app — the one it replaces, or
+// the one replacing it — can touch the name before hotserve pins it.
+func (d appDirs) runDir(nonce string) string {
+	return filepath.Join(d.run, nonce)
+}
+
+// socket is the path the instance identified by nonce listens on.
+func (d appDirs) socket(nonce string) string {
+	return filepath.Join(d.runDir(nonce), "app.sock")
+}
+
+// socketRef is how hotserve dials that instance: the socket, pinned
+// under proxy/.
+func (d appDirs) socketRef(nonce string) *socketRef {
+	return newSocketRef(d.socket(nonce), filepath.Join(d.proxy, nonce+".sock"), d.runDir(nonce))
 }
 
 func (d appDirs) release(version string) string {
@@ -57,7 +81,7 @@ func (d appDirs) release(version string) string {
 }
 
 func (d appDirs) ensure() error {
-	for _, dir := range []string{d.releases, d.shared, d.tmp} {
+	for _, dir := range []string{d.releases, d.shared, d.tmp, d.run, d.proxy} {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return err
 		}
@@ -163,7 +187,9 @@ type deployResult struct {
 // instance is one running version of an app.
 type instance struct {
 	version string
-	port    int
+	nonce   string     // names the unit and the socket (newNonce)
+	socket  string     // the unix socket the app listens on
+	sock    *socketRef // how hotserve dials it: pinned by inode under proxy/, never by the app's name
 	handle  handle
 }
 
@@ -179,7 +205,7 @@ type validationError struct{ msg string }
 func (e validationError) Error() string { return e.msg }
 
 // managedApp owns everything about one app that must survive config
-// reloads: the running instance, the active port the proxy reads, and
+// reloads: the running instance, the active socket the proxy reads, and
 // the single-deploy-at-a-time lock. It lives in the package-level
 // UsagePool (see liveswap.go), never inside a config's module instance.
 type managedApp struct {
@@ -208,9 +234,9 @@ type managedApp struct {
 	phase      string
 	lastDeploy *deployResult
 
-	// activePort is what GetUpstreams reads on every request; storing
-	// it is the cutover. 0 = nothing serving yet.
-	activePort atomic.Int64
+	// activeSocket is what GetUpstreams reads on every request; storing
+	// it is the cutover. nil = nothing serving yet.
+	activeSocket atomic.Pointer[socketRef]
 
 	// Watchdog plumbing. The goroutine is pool-scoped like everything
 	// else here: started once (first Provision), never touched by
@@ -272,7 +298,7 @@ func (ma *managedApp) configure(owner any, spec *appSpec, logger *zap.Logger, cl
 	ma.logger = logger
 	if ma.runner == nil {
 		ma.runner = newSystemdRunner(manager, logger)
-		ma.prober = &httpProber{client: clients.health, clock: realClock{}}
+		ma.prober = &httpProber{clock: realClock{}}
 		ma.fetch = &releaseFetcher{client: clients.download}
 		ma.clock = realClock{}
 	} else if sr, ok := ma.runner.(*systemdRunner); ok {
@@ -448,14 +474,24 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		}()
 	}
 
-	port, err := freePort()
+	l, err := spec.prepareLaunch(req.version)
 	if err != nil {
 		return err
 	}
-	env, err := buildEnv(spec, req.version, port, releaseDir)
-	if err != nil {
-		return err
-	}
+	// A launch that never becomes the instance leaves nothing behind:
+	// its run dir, and any pin the health gate made, go with it. Once
+	// promoted, l.sock is the instance's own and lives on. And like
+	// the release above, it is preserved while a unit may still be
+	// live — an ambiguous start or pre_start, a stop the runner could
+	// not confirm — since removing the dir from under a starting
+	// process would leave it running and unreachable; the next
+	// confirmed sweep stops that unit and prunes it.
+	defer func() {
+		if promoted || unitUnconfirmed(err) || (newHandle != nil && (stopUnconfirmed || c.runner.Alive(newHandle))) {
+			return
+		}
+		l.sock.retire()
+	}()
 
 	// pre_start is deploy-time preparation; its outputs (migrations,
 	// generated config, warmed caches) persist, so a rollback — which
@@ -467,22 +503,14 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		// A previous deploy's pre_start whose outcome could not be
 		// observed may still be running; settle the ledger before
 		// starting another migration beside it.
-		if !ma.sweep(c, oldHandle(old)) {
+		if !ma.sweep(c, old, l.nonce) {
 			return fmt.Errorf("%w; not running pre_start", errSweepUnconfirmed)
 		}
 		ma.setPhase(c, "preparing")
 		preCtx, cancel := context.WithTimeout(ctx, spec.deadline)
 		// Under the same sandbox as the app it precedes: a migration
 		// that writes where the app cannot read fails here, not at 3am.
-		err := c.runner.RunOnce(preCtx, startSpec{
-			app:     spec.name,
-			version: req.version,
-			command: expandArgs(spec.preStart, spec, req.version, port, releaseDir),
-			dir:     releaseDir,
-			env:     env,
-			grace:   spec.grace,
-			sandbox: spec.sandboxSpecFor(releaseDir),
-		})
+		err := c.runner.RunOnce(preCtx, l.startSpec(spec, spec.preStart))
 		cancel()
 		if err != nil {
 			return fmt.Errorf("pre_start failed: %w", err)
@@ -493,26 +521,17 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	// No Start without a confirmed sweep (keeping the version that is
 	// serving): the new instance must not come up beside a unit the
 	// manager still holds for this app.
-	if !ma.sweep(c, oldHandle(old)) {
+	if !ma.sweep(c, old, l.nonce) {
 		return fmt.Errorf("%w; not starting", errSweepUnconfirmed)
 	}
-	newHandle, err = c.runner.Start(startSpec{
-		app:     spec.name,
-		version: req.version,
-		sandbox: spec.sandboxSpecFor(releaseDir),
-		command: expandArgs(spec.command, spec, req.version, port, releaseDir),
-		dir:     releaseDir,
-		env:     env,
-		grace:   spec.grace,
-	})
+	newHandle, err = c.runner.Start(l.startSpec(spec, spec.command))
 	if err != nil {
 		return fmt.Errorf("start failed: %w", err)
 	}
 
 	ma.setPhase(c, "soaking")
-	baseURL := "http://127.0.0.1:" + portString(port)
 	alive := func() bool { return c.runner.Alive(newHandle) }
-	if err := c.prober.waitHealthy(ctx, baseURL, alive, healthConfig{
+	if err := c.prober.waitHealthy(ctx, l.sock, alive, healthConfig{
 		path:     spec.healthPath,
 		interval: spec.healthInterval,
 		timeout:  spec.healthTimeout,
@@ -533,7 +552,7 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	// The point of no return. From here on the request context is
 	// ignored: a CI client hanging up must not abort stop-old or GC.
 	ma.setPhase(c, "promoting")
-	newInst := &instance{version: req.version, port: port, handle: newHandle}
+	newInst := l.instance(newHandle)
 	if err := ma.publishInstance(c, newInst); err != nil { // ← the cutover
 		logger.Error("state persistence failed; deploys still work but a Caddy restart will not know about this version", zap.Error(err))
 	}
@@ -553,13 +572,16 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 			logger.Warn("stopping old version failed; the sweep below retries it", zap.String("version", old.version), zap.Error(err))
 		}
 	}
+	if old != nil {
+		old.sock.retire()
+	}
 
 	// Nothing is deleted while anything but the new instance may be
 	// running out of a release dir: the sweep settles that against
 	// the runner's own ledger (an unconfirmed stop above, a unit an
 	// earlier hotserve left behind), and any doubt skips GC — the next
 	// successful deploy catches up.
-	if !ma.sweep(c, newHandle) {
+	if !ma.sweep(c, newInst, "") {
 		logger.Warn("skipping release GC for this deploy")
 		return nil
 	}
@@ -581,13 +603,20 @@ func (ma *managedApp) ensureRunning() error {
 		return &transientRecoveryError{errors.New("a deploy is in progress")}
 	}
 	defer ma.deployMu.Unlock()
+	// Recovery pins and adopts, or relaunches into, this app's socket
+	// dirs; the start-time sweep of unconfigured apps prunes such dirs.
+	// Holding the app's ownerLock across recovery is what keeps the two
+	// from interleaving on an app a reload has just added back.
+	owner := ownerLock(ma.name)
+	owner.Lock()
+	defer owner.Unlock()
 
 	c := ma.snapshot()
 	spec := c.spec
 	if inst := ma.currentInstance(); inst != nil && c.runner.Alive(inst.handle) {
 		// Reload, or a retry after an earlier sweep could not confirm:
 		// the instance is fine; the ledger must still be settled.
-		if !ma.sweep(c, inst.handle) {
+		if !ma.sweep(c, inst, "") {
 			return &transientRecoveryError{fmt.Errorf("instance %s running; %w", inst.version, errSweepUnconfirmed)}
 		}
 		return nil
@@ -600,7 +629,7 @@ func (ma *managedApp) ensureRunning() error {
 		// Nothing recorded — but a deploy whose state write failed may
 		// have left a unit behind; the manager's ledger decides, not
 		// the absence of a file.
-		if !ma.sweep(c, nil) {
+		if !ma.sweep(c, nil, "") {
 			return &transientRecoveryError{errSweepUnconfirmed}
 		}
 		return nil
@@ -617,23 +646,69 @@ func (ma *managedApp) ensureRunning() error {
 		c.logger.Error("state.json names a unit that is not this app's; ignoring it", zap.String("unit", u))
 		st.Handle.Unit = ""
 	}
+	// The recorded nonce names the socket the proxy will dial, so the
+	// record is adopted only when it is the unit's own nonce and the
+	// socket it names can be pinned — present, and a socket rather
+	// than something planted under the name. Anything else — a unit
+	// that is not ours, a nonce that disagrees with it, a socket that
+	// is gone or forged — is "nothing recorded": the relaunch's sweep
+	// stops whatever the manager still holds, rather than routing to
+	// a socket that answers nobody, or to somebody else's.
+	// The nonce becomes a path component under run/ and proxy/, so a
+	// recorded value that is not a nonce is never used for anything —
+	// not to dial, not to remove — before it is even compared.
+	if st.Handle.Unit != "" && !nonceRe.MatchString(st.Nonce) {
+		c.logger.Error("state.json record ignored: its nonce is not one",
+			zap.String("unit", st.Handle.Unit), zap.String("nonce", st.Nonce))
+		st.Handle.Unit = ""
+	}
+	if err := spec.dirs.ensure(); err != nil {
+		return &transientRecoveryError{err}
+	}
+	var (
+		socket string
+		sock   *socketRef
+	)
+	if st.Handle.Unit != "" {
+		socket, sock = spec.dirs.socket(st.Nonce), spec.dirs.socketRef(st.Nonce)
+		reason := ""
+		if un, ok := unitNonce(st.Handle.Unit); !ok || un != st.Nonce {
+			reason = "its nonce is not the recorded unit's"
+		} else if _, err := sock.dial(); err != nil {
+			reason = "its socket cannot be dialled: " + err.Error()
+		}
+		if reason != "" {
+			c.logger.Error("state.json record ignored: "+reason,
+				zap.String("unit", st.Handle.Unit), zap.String("nonce", st.Nonce), zap.String("socket", socket))
+			st.Handle.Unit = ""
+		}
+	}
+	if st.Handle.Unit == "" {
+		st.Handle = handleState{} // nothing to reattach to
+	}
 	// An unreadable unit state is not "not running": launching beside
 	// a unit that may still be up would duplicate the app. Report it
 	// as transient; recover() retries with backoff until the manager
 	// answers, rather than guessing.
 	h, attached, err := c.runner.Reattach(st.Handle)
 	if err != nil {
+		// The pin stays for the retry: the unit may well be serving,
+		// and an app that has since replaced its own name (allowed)
+		// could not be pinned again from it.
 		return &transientRecoveryError{fmt.Errorf("cannot tell whether %s is still running; not relaunching: %w", st.CurrentVersion, err)}
 	}
+	if !attached && sock != nil {
+		sock.retire() // pinned above but definitively not adopted; the relaunch gets its own
+	}
 	if attached {
-		inst := &instance{version: st.CurrentVersion, port: st.Port, handle: h}
+		inst := &instance{version: st.CurrentVersion, nonce: st.Nonce, socket: socket, sock: sock, handle: h}
 		ma.mu.Lock()
 		ma.current = inst
 		ma.mu.Unlock()
-		ma.activePort.Store(int64(st.Port))
+		ma.activeSocket.Store(inst.sock)
 		c.logger.Info("reattached to running instance", zap.String("version", st.CurrentVersion))
 		ma.pokeWatchdog()
-		if !ma.sweep(c, h) {
+		if !ma.sweep(c, inst, "") {
 			// Serving, but the ledger is unsettled: recover() retries
 			// and the retry path above sweeps again.
 			return &transientRecoveryError{fmt.Errorf("reattached %s; %w", st.CurrentVersion, errSweepUnconfirmed)}
@@ -655,18 +730,9 @@ func (ma *managedApp) ensureRunning() error {
 		c.logger.Warn("persisting recovered state", zap.Error(err))
 	}
 	c.logger.Info("relaunched current version after restart",
-		zap.String("version", st.CurrentVersion), zap.Int("port", inst.port))
+		zap.String("version", st.CurrentVersion), zap.String("socket", inst.socket))
 	ma.pokeWatchdog()
 	return nil
-}
-
-// oldHandle is the handle of a possibly-nil instance, as a nil-safe
-// Sweep keep argument.
-func oldHandle(inst *instance) handle {
-	if inst == nil {
-		return nil
-	}
-	return inst.handle
 }
 
 // Recovery errors come in two kinds. transient: the manager could not
@@ -744,16 +810,27 @@ func (ma *managedApp) recover(ctx context.Context, logger *zap.Logger) {
 // earlier stop that could not be confirmed) does not outlive the next
 // start; deploys call it before GC. Returns false if something may
 // still be running, in which case callers must not delete anything.
-func (ma *managedApp) sweep(c collaborators, keep handle) bool {
-	if err := c.runner.Sweep(ma.name, keep); err != nil {
+// A confirmed sweep is also the manager's word that no instance but
+// keep is running, so every other instance's socket dirs are
+// leftovers — except the one being launched right after, named by
+// launching, whose run dir is already prepared.
+func (ma *managedApp) sweep(c collaborators, keep *instance, launching string) bool {
+	var keepHandle handle
+	keepNonces := []string{launching}
+	if keep != nil {
+		keepHandle = keep.handle
+		keepNonces = append(keepNonces, keep.nonce)
+	}
+	if err := c.runner.Sweep(ma.name, keepHandle); err != nil {
 		c.logger.Error("sweeping stray instances", zap.Error(err))
 		return false
 	}
+	pruneSockets(c.spec.dirs, keepNonces, c.logger)
 	return true
 }
 
-// launchVersion starts an already-on-disk version on a fresh port and
-// returns the new instance without publishing it. The version comes
+// launchVersion starts an already-on-disk version on a fresh socket
+// and returns the new instance without publishing it. The version comes
 // from the caller's record (state.json, or the live instance the
 // watchdog is replacing); the command and the environment are rendered
 // from the CURRENT spec, so an edited app definition does reach a
@@ -764,15 +841,10 @@ func (ma *managedApp) sweep(c collaborators, keep handle) bool {
 // answer — see #35.
 func (ma *managedApp) launchVersion(c collaborators, version string) (*instance, error) {
 	spec := c.spec
-	releaseDir := spec.dirs.release(version)
-	if _, err := os.Stat(releaseDir); err != nil {
+	if _, err := os.Stat(spec.dirs.release(version)); err != nil {
 		return nil, fmt.Errorf("release dir for version %s is missing: %w", version, err)
 	}
-	port, err := freePort()
-	if err != nil {
-		return nil, err
-	}
-	env, err := buildEnv(spec, version, port, releaseDir)
+	l, err := spec.prepareLaunch(version)
 	if err != nil {
 		return nil, err
 	}
@@ -780,55 +852,109 @@ func (ma *managedApp) launchVersion(c collaborators, version string) (*instance,
 	// runs for this app (a unit an earlier hotserve lost track of, a
 	// stop that could not be confirmed) is settled first, or nothing
 	// is launched beside it.
-	if !ma.sweep(c, nil) {
+	if !ma.sweep(c, nil, l.nonce) {
+		l.sock.retire()
 		return nil, fmt.Errorf("%w; not launching", errSweepUnconfirmed)
 	}
-	h, err := c.runner.Start(startSpec{
-		app:     spec.name,
-		version: version,
-		sandbox: spec.sandboxSpecFor(releaseDir),
-		command: expandArgs(spec.command, spec, version, port, releaseDir),
-		dir:     releaseDir,
-		env:     env,
-		grace:   spec.grace,
-	})
+	h, err := c.runner.Start(l.startSpec(spec, spec.command))
 	if err != nil {
+		if !unitUnconfirmed(err) { // an ambiguous start may be live: the next confirmed sweep prunes
+			l.sock.retire()
+		}
 		return nil, err
 	}
-	return &instance{version: version, port: port, handle: h}, nil
+	return l.instance(h), nil
+}
+
+// launch is one instance's disposition — its nonce, socket, release
+// dir and environment — prepared once and used for the pre_start unit
+// and the app unit alike, by deploys and relaunches alike, so the two
+// paths cannot drift.
+type launch struct {
+	version, nonce, socket, releaseDir string
+	sock                               *socketRef
+	env                                []string
+}
+
+// prepareLaunch draws the instance's nonce and renders its environment
+// from the current spec, creating the dirs the unit binds first: the
+// runner resolves every bind source, and run/ holds nothing between
+// instances.
+func (spec *appSpec) prepareLaunch(version string) (launch, error) {
+	if err := spec.dirs.ensure(); err != nil {
+		return launch{}, err
+	}
+	nonce, err := newNonce()
+	if err != nil {
+		return launch{}, err
+	}
+	// Exclusive: the dir is this launch's reservation of the nonce, and
+	// an existing one is some other instance's, never adopted as ours.
+	if err := os.Mkdir(spec.dirs.runDir(nonce), 0o750); err != nil {
+		return launch{}, err
+	}
+	l := launch{version: version, nonce: nonce, socket: spec.dirs.socket(nonce), releaseDir: spec.dirs.release(version)}
+	l.sock = spec.dirs.socketRef(nonce)
+	if l.env, err = buildEnv(spec, version, l.socket, l.releaseDir); err != nil {
+		l.sock.retire()
+		return launch{}, err
+	}
+	return l, nil
+}
+
+func (l launch) startSpec(spec *appSpec, command []string) startSpec {
+	return startSpec{
+		app:     spec.name,
+		version: l.version,
+		nonce:   l.nonce,
+		socket:  l.socket,
+		command: expandArgs(command, spec, l.version, l.socket, l.releaseDir),
+		dir:     l.releaseDir,
+		env:     l.env,
+		grace:   spec.grace,
+		sandbox: spec.sandboxSpecFor(l.releaseDir, l.nonce),
+	}
+}
+
+func (l launch) instance(h handle) *instance {
+	return &instance{version: l.version, nonce: l.nonce, socket: l.socket, sock: l.sock, handle: h}
 }
 
 // publishInstance installs inst as current, cuts traffic over to it
 // and persists it for the next restart. It is the ONLY place current
-// and activePort are installed — the watchdog's stale-instance guards
+// and activeSocket are installed — the watchdog's stale-instance guards
 // depend on the swap-before-route ordering here, so promote, recovery
-// and watchdog restarts must all go through it. A persist failure is
-// returned, not logged: each caller has its own severity and message.
+// and watchdog restarts must all go through it. The replaced
+// instance's pinned socket is the caller's to retire, once that
+// instance is stopped. A persist failure is returned, not logged: each
+// caller has its own severity and message.
 func (ma *managedApp) publishInstance(c collaborators, inst *instance) error {
 	ma.mu.Lock()
 	ma.current = inst
 	ma.mu.Unlock()
-	ma.activePort.Store(int64(inst.port))
+	ma.activeSocket.Store(inst.sock)
 	return ma.persistState(c, inst)
 }
 
-// unrouteIf clears activePort only while inst is still current, under
+// unrouteIf clears activeSocket only while inst is still current, under
 // the same lock that guards the current swap. Check-then-store without
 // the lock races promote: a deploy could install and route a healthy
 // instance between the check and the store, and the store would then
-// unroute it permanently.
+// unroute it permanently. The instance is dead, so its pinned socket
+// is retired with it.
 func (ma *managedApp) unrouteIf(inst *instance) {
 	ma.mu.Lock()
 	defer ma.mu.Unlock()
 	if ma.current == inst {
-		ma.activePort.Store(0)
+		ma.activeSocket.Store(nil)
+		inst.sock.retire()
 	}
 }
 
 func (ma *managedApp) persistState(c collaborators, inst *instance) error {
 	if err := c.store.save(appState{
 		CurrentVersion: inst.version,
-		Port:           inst.port,
+		Nonce:          inst.nonce,
 		Handle:         inst.handle.state(),
 		UpdatedAt:      c.clock.Now(),
 	}); err != nil {
@@ -855,8 +981,12 @@ type statusSnapshot struct {
 	App            string `json:"app"`
 	Phase          string `json:"phase"`
 	CurrentVersion string `json:"current_version,omitempty"`
-	Port           int    `json:"port,omitempty"`
-	PID            int    `json:"pid,omitempty"`
+	// Socket is the unix socket the instance listens on, under its
+	// run/ dir. It is what the app bound, not what hotserve dials:
+	// that is a hard link to the same inode under proxy/, outside
+	// the app's reach. Reachable by the hotserve user (run/ is 0750).
+	Socket string `json:"socket,omitempty"`
+	PID    int    `json:"pid,omitempty"`
 	// Unit is the systemd unit running the instance — what to pass to
 	// journalctl for the app's own output.
 	Unit       string            `json:"unit,omitempty"`
@@ -888,7 +1018,7 @@ func (ma *managedApp) status() statusSnapshot {
 	s := statusSnapshot{App: ma.name, Phase: ma.phase, LastDeploy: ma.lastDeploy, Watchdog: wd, AvailableVersions: available}
 	if ma.current != nil {
 		s.CurrentVersion = ma.current.version
-		s.Port = ma.current.port
+		s.Socket = ma.current.socket
 		hs := ma.current.handle.state()
 		s.PID = hs.PID
 		s.Unit = hs.Unit
@@ -972,8 +1102,13 @@ func (ma *managedApp) Destruct() error {
 	if inst != nil {
 		c.logger.Info("app removed from config; stopping it", zap.String("version", inst.version))
 		stopErr = c.runner.Stop(inst.handle, c.spec.grace)
+		inst.sock.retire()
 	}
-	return errors.Join(stopErr, c.runner.Sweep(ma.name, nil))
+	sweepErr := c.runner.Sweep(ma.name, nil)
+	if sweepErr == nil {
+		pruneSockets(c.spec.dirs, nil, c.logger)
+	}
+	return errors.Join(stopErr, sweepErr)
 }
 
 // startWatchdog launches the supervision goroutine once per pooled
@@ -1045,13 +1180,13 @@ func inheritedEnv() []string {
 // buildEnv assembles the child environment. Precedence, lowest to
 // highest: the allowlisted slice of Caddy's environment (PATH, LANG,
 // TZ, LC_*), the sandbox HOME, env_file, inline env, then the injected
-// PORT/HOST contract. HOME is never inherited: hotserve's own state
+// SOCKET contract. HOME is never inherited: hotserve's own state
 // dir does not exist inside the unit at all, so the app's HOME is its
 // shared dir — the one writable, persistent place in the view. Not a
 // nicety: every runtime that touches $HOME would ENOENT, which is the
 // shape a deny-by-default view fails in. Applied before env_file and
 // env, so an operator can still point it elsewhere.
-func buildEnv(spec *appSpec, version string, port int, releaseDir string) ([]string, error) {
+func buildEnv(spec *appSpec, version, socket, releaseDir string) ([]string, error) {
 	env := append(inheritedEnv(), "HOME="+spec.dirs.shared)
 	if spec.envFile != "" {
 		fileVars, err := parseEnvFile(spec.envFile)
@@ -1061,12 +1196,9 @@ func buildEnv(spec *appSpec, version string, port int, releaseDir string) ([]str
 		env = append(env, fileVars...)
 	}
 	for k, v := range spec.env {
-		env = append(env, k+"="+expandPlaceholders(v, spec, version, port, releaseDir))
+		env = append(env, k+"="+expandPlaceholders(v, spec, version, socket, releaseDir))
 	}
-	env = append(env,
-		"PORT="+portString(port),
-		"HOST=127.0.0.1",
-	)
+	env = append(env, "SOCKET="+socket)
 	return env, nil
 }
 
@@ -1116,19 +1248,19 @@ func parseEnvFile(path string) ([]string, error) {
 // only knowable mid-deploy. These intentionally use the same brace
 // style as Caddy placeholders but are resolved here, not by a
 // caddy.Replacer — Provision's ReplaceKnown leaves them alone.
-func expandPlaceholders(s string, spec *appSpec, version string, port int, releaseDir string) string {
+func expandPlaceholders(s string, spec *appSpec, version, socket, releaseDir string) string {
 	return strings.NewReplacer(
 		"{version}", version,
-		"{port}", portString(port),
+		"{socket}", socket,
 		"{release_dir}", releaseDir,
 		"{shared_dir}", spec.dirs.shared,
 	).Replace(s)
 }
 
-func expandArgs(args []string, spec *appSpec, version string, port int, releaseDir string) []string {
+func expandArgs(args []string, spec *appSpec, version, socket, releaseDir string) []string {
 	out := make([]string, len(args))
 	for i, a := range args {
-		out[i] = expandPlaceholders(a, spec, version, port, releaseDir)
+		out[i] = expandPlaceholders(a, spec, version, socket, releaseDir)
 	}
 	return out
 }
@@ -1150,6 +1282,5 @@ func hostOf(rawURL string) string {
 // managedApp at configure time.
 type fetchClients struct {
 	download *http.Client
-	health   *http.Client
 	jwks     *http.Client // fetches OIDC issuers' public keys for deploy auth
 }
