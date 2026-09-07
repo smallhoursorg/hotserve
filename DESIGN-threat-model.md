@@ -544,7 +544,7 @@ does not isolate the runtime.
   `PrivateNetwork=` on the unit — a path socket crosses network
   namespaces, so the contract already allows it — as a per-app opt-in
   when an app that wants no network exists (it would also cut the app
-  off from any database).
+  off from any database): #57.
 - **Resource exhaustion** — a runaway app can starve its siblings and
   Caddy (fork bomb, memory leak). `ProtectControlGroups=` makes
   `MemoryMax=`/`TasksMax=`/`CPUQuota=` real the moment they are set;
