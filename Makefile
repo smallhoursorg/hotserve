@@ -207,12 +207,20 @@ e2e:
 # metrics endpoint. ~15-20 min at defaults; tune with SOAK_DEPLOYS,
 # SOAK_RELOADS, SOAK_CLIENTS, SOAK_REQS. Runs weekly in CI (soak.yml),
 # never in the PR path.
+#
+# On failure: hotserve runs under systemd inside e2e-hotserve, so that
+# container's console carries nothing from it and the journal is the
+# evidence — same as the e2e target above, tail-bounded here because a
+# soak pushes 15-20 minutes of churn through the stub servers.
 soak:
 	$(COMPOSE) up --build -d e2e-hotserve e2e-upstream e2e-artifacts
 	status=0; \
 	$(COMPOSE) run --rm -e SOAK_DEPLOYS -e SOAK_RELOADS -e SOAK_CLIENTS -e SOAK_REQS \
 		--entrypoint "/bin/sh /soak.sh" e2e-runner || status=1; \
-	if [ $$status -ne 0 ]; then $(COMPOSE) logs --tail 200 e2e-hotserve; fi; \
+	if [ $$status -ne 0 ]; then \
+		$(COMPOSE) logs --tail 200 e2e-hotserve e2e-upstream e2e-artifacts; \
+		$(COMPOSE) exec -T e2e-hotserve journalctl --no-pager -n 300 || true; \
+	fi; \
 	$(COMPOSE) down --remove-orphans; \
 	exit $$status
 
