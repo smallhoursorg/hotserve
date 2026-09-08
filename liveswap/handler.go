@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 
 	"github.com/caddyserver/caddy/v2"
@@ -36,6 +38,16 @@ func bearerToken(r *http.Request) string {
 // maxPayloadBytes bounds the webhook JSON body.
 const maxPayloadBytes = 64 * 1024
 
+// loggedAppName bounds a request-supplied app name for the log: no
+// configured name is longer than appNameRe allows, so anything past
+// that is noise.
+func loggedAppName(name string) string {
+	if len(name) <= appNameMaxLen {
+		return name
+	}
+	return name[:appNameMaxLen] + "..."
+}
+
 // Handler implements the liveswap webhook endpoint. Mount it in its own
 // (HTTPS) site block; the final path segment names the app:
 //
@@ -46,8 +58,9 @@ const maxPayloadBytes = 64 * 1024
 // fully succeeded (200) or failed (5xx with the old version still
 // serving), so `curl --fail` makes CI red exactly when it should be.
 type Handler struct {
-	app    *App
-	logger *zap.Logger
+	app     *App
+	logger  *zap.Logger
+	limiter *authLimiter
 }
 
 // CaddyModule returns the Caddy module information.
@@ -69,6 +82,7 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	if len(h.app.Apps) == 0 {
 		return fmt.Errorf("liveswap_webhook is configured but no apps are defined in the liveswap global options")
 	}
+	h.limiter = webhookAuthLimiter
 	return nil
 }
 
@@ -87,13 +101,35 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 		verifiers = ma.currentVerifiers()
 	}
 	who, ok := authorize(r.Context(), verifiers, bearerToken(r))
+	key := clientKey(r)
 	if !ok {
-		h.logger.Warn("webhook auth failed",
-			zap.String("app", name), zap.String("remote", r.RemoteAddr))
+		// What a failure costs in the journal is the limiter's call
+		// (see authLimiter): the count of lines, and — the name being
+		// request input, logged truncated — the size of each.
+		v := h.limiter.fail(key)
+		if v.log {
+			h.logger.Warn("webhook auth failed",
+				zap.String("app", loggedAppName(name)), zap.String("remote", key))
+		}
+		if v.trippedKey {
+			h.logger.Warn("webhook auth failures from this address throttled: further ones are answered 429 and not logged",
+				zap.String("remote", key), zap.Int("failures", authFailBudget), zap.Duration("window", authFailWindow))
+		}
+		if v.trippedGlobal {
+			h.logger.Warn("webhook auth failures throttled process-wide: further ones are not logged",
+				zap.Int("failures", authFailGlobalBudget), zap.Duration("window", authFailWindow))
+		}
+		if v.throttled {
+			w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(v.retryAfter.Seconds()))))
+			return respondJSON(w, http.StatusTooManyRequests, map[string]string{
+				"error": "too many failed deploy authentications from this address; retry later",
+			})
+		}
 		return respondJSON(w, http.StatusUnauthorized, map[string]string{
 			"error": "invalid or missing deploy token (Authorization: Bearer <jwt>)",
 		})
 	}
+	h.limiter.clear(key)
 	if ma == nil {
 		return respondJSON(w, http.StatusNotFound, map[string]string{"error": fmt.Sprintf("unknown app %q", name)})
 	}

@@ -94,29 +94,61 @@ func (d appDirs) ensure() error {
 // it behind a lock and snapshots it at the start of each deploy, so a
 // mid-deploy reload never sees a torn config.
 type appSpec struct {
-	name            string
-	command         []string
-	preStart        []string
-	env             map[string]string
-	envFile         string
-	trust           []trustSource
-	healthPath      string // "" = no HTTP check (health_path off)
-	healthInterval  time.Duration
-	healthTimeout   time.Duration
-	soak            time.Duration
-	deadline        time.Duration
-	drain           time.Duration
-	grace           time.Duration
-	watchdogOn      bool
-	wdFailures      int
-	wdGrace         time.Duration
-	wdRestarts      int
-	wdWindow        time.Duration
-	keep            int
-	maxArtifactSize int64
-	allowInsecure   bool
-	allowlist       []artifactAllowEntry
-	dirs            appDirs
+	name               string
+	command            []string
+	preStart           []string
+	env                map[string]string
+	envFile            string
+	trust              []trustSource
+	healthPath         string // "" = no HTTP check (health_path off)
+	healthInterval     time.Duration
+	healthTimeout      time.Duration
+	soak               time.Duration
+	deadline           time.Duration
+	drain              time.Duration
+	grace              time.Duration
+	watchdogOn         bool
+	wdFailures         int
+	wdGrace            time.Duration
+	wdRestarts         int
+	wdWindow           time.Duration
+	keep               int
+	maxArtifactSize    int64
+	maxArtifactEntries int
+	allowInsecure      bool
+	allowlist          []artifactAllowEntry
+	dirs               appDirs
+}
+
+// archiveLimits is what one artifact of this app may cost to extract.
+func (s *appSpec) archiveLimits() archiveLimits {
+	return archiveLimits{
+		maxBytes:   s.maxArtifactSize * decompressionRatioCap,
+		maxEntries: s.maxArtifactEntries,
+	}
+}
+
+// capWarnFraction is how close to a cap an artifact may come before a
+// deploy warns: a cap an app grows into with no notice is an outage on
+// the deploy that crosses it, so the operator hears several deploys
+// early and raises the directive on their own schedule.
+const capWarnFraction = 0.75
+
+// warnNearCaps logs what the artifact cost and, past capWarnFraction
+// of either cap, a Warn naming the directive to raise.
+func (s *appSpec) warnNearCaps(logger *zap.Logger, st archiveStats) {
+	lim := s.archiveLimits()
+	logger.Info("artifact extracted",
+		zap.Int("entries", st.entries), zap.Int("max_entries", lim.maxEntries),
+		zap.Int64("bytes", st.bytes), zap.Int64("max_bytes", lim.maxBytes))
+	if float64(st.entries) >= capWarnFraction*float64(lim.maxEntries) {
+		logger.Warn("artifact approaching max_artifact_entries; raise it before a deploy fails on it",
+			zap.Int("entries", st.entries), zap.Int("max_entries", lim.maxEntries))
+	}
+	if float64(st.bytes) >= capWarnFraction*float64(lim.maxBytes) {
+		logger.Warn("artifact approaching the decompressed byte cap (max_artifact_size x 10); raise max_artifact_size before a deploy fails on it",
+			zap.Int64("bytes", st.bytes), zap.Int64("max_bytes", lim.maxBytes))
+	}
 }
 
 // deployPayload is the JSON body of a URL deploy — the only request
@@ -182,6 +214,14 @@ type deployResult struct {
 	By         string    `json:"deployed_by,omitempty"` // the trust source that authorized it
 	StartedAt  time.Time `json:"started_at"`
 	FinishedAt time.Time `json:"finished_at"`
+	// What the artifact cost against max_artifact_entries and the
+	// decompressed byte cap — the files, directories and links
+	// extraction created, and its bytes — so an app growing toward
+	// either is visible from the status endpoint before a deploy fails
+	// on it. Zero for a rollback (nothing is extracted) and for a
+	// deploy that failed before extraction.
+	ArtifactEntries int   `json:"artifact_entries"`
+	ArtifactBytes   int64 `json:"artifact_bytes"`
 }
 
 // instance is one running version of an app.
@@ -389,13 +429,16 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	logger := c.logger.With(zap.String("version", req.version))
 	logger.Info("deploy started", zap.String("artifact_host", hostOf(req.url)))
 
+	var stats archiveStats
 	defer func() {
 		result := deployResult{
-			Version:    req.version,
-			Status:     "succeeded",
-			By:         req.by,
-			StartedAt:  started,
-			FinishedAt: c.clock.Now(),
+			Version:         req.version,
+			Status:          "succeeded",
+			By:              req.by,
+			StartedAt:       started,
+			FinishedAt:      c.clock.Now(),
+			ArtifactEntries: stats.entries,
+			ArtifactBytes:   stats.bytes,
 		}
 		if err != nil {
 			result.Status = "failed"
@@ -437,9 +480,12 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		}
 	}
 
-	releaseDir, err := c.fetch.fetch(ctx, spec, req, func(phase string) { ma.setPhase(c, phase) })
+	releaseDir, stats, err := c.fetch.fetch(ctx, spec, req, func(phase string) { ma.setPhase(c, phase) })
 	if err != nil {
 		return err
+	}
+	if !req.rollback { // a rollback extracted nothing; there is nothing to measure
+		spec.warnNearCaps(logger, stats)
 	}
 	// If this freshly-extracted release never promotes (pre_start, start
 	// or health-gate failure), remove it: a failed attempt must not

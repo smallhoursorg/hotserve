@@ -43,6 +43,7 @@ func TestCaddyfileUnmarshalFullConfig(t *testing.T) {
 			watchdog_window 15m
 			keep 3
 			max_artifact_size 50MB
+			max_artifact_entries 20000
 		}
 
 		app api {
@@ -96,7 +97,7 @@ func TestCaddyfileUnmarshalFullConfig(t *testing.T) {
 		blog.Grace != caddy.Duration(20*time.Second) {
 		t.Fatalf("durations wrong: %+v", blog)
 	}
-	if blog.Keep != 3 || blog.MaxArtifactSize != 50_000_000 {
+	if blog.Keep != 3 || blog.MaxArtifactSize != 50_000_000 || blog.MaxArtifactEntries != 20_000 {
 		t.Fatalf("keep/max wrong: %+v", blog)
 	}
 	if blog.Watchdog != "off" ||
@@ -128,7 +129,7 @@ func TestCaddyfileUnmarshalEmptyAppBlockLeavesDefaultsToProvision(t *testing.T) 
 	blog := a.Apps["blog"]
 	if blog.HealthPath != "" || blog.HealthInterval != 0 || blog.Soak != 0 ||
 		blog.Deadline != 0 || blog.Drain != 0 || blog.Grace != 0 ||
-		blog.Keep != 0 || blog.MaxArtifactSize != 0 || len(blog.DeployTrust) != 0 {
+		blog.Keep != 0 || blog.MaxArtifactSize != 0 || blog.MaxArtifactEntries != 0 || len(blog.DeployTrust) != 0 {
 		t.Fatalf("parser applied defaults it must not: %+v", blog)
 	}
 	if blog.Watchdog != "" || blog.WatchdogFailures != 0 || blog.WatchdogGrace != 0 ||
@@ -153,6 +154,7 @@ func TestCaddyfileUnmarshalErrors(t *testing.T) {
 		{"bad duration", "liveswap {\n\tapp a {\n\t\tsoak banana\n\t}\n}", "invalid soak"},
 		{"bad keep", "liveswap {\n\tapp a {\n\t\tkeep many\n\t}\n}", "invalid keep"},
 		{"bad size", "liveswap {\n\tapp a {\n\t\tmax_artifact_size huge\n\t}\n}", "invalid max_artifact_size"},
+		{"bad entries", "liveswap {\n\tapp a {\n\t\tmax_artifact_entries lots\n\t}\n}", "invalid max_artifact_entries"},
 		{"command missing args", "liveswap {\n\tapp a {\n\t\tcommand\n\t}\n}", "wrong argument count"},
 		{"env missing value", "liveswap {\n\tapp a {\n\t\tenv K\n\t}\n}", "wrong argument count"},
 		{"root missing arg", "liveswap {\n\troot\n}", "wrong argument count"},

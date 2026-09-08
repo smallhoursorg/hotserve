@@ -109,6 +109,7 @@ COPY --from=builder /usr/bin/caddy /usr/bin/caddy
 			# watchdog_window   10m             # sliding window for the budget
 			# keep              5               # release dirs retained on disk
 			# max_artifact_size 100MB
+			# max_artifact_entries 100000
 		}
 
 		app api {                              # a Go app
@@ -246,6 +247,17 @@ resolved at config load.
 | `watchdog_window` | `10m` | Sliding window for the restart budget |
 | `keep` | `5` | Release dirs retained (GC after success). The running version is always kept, so this can be `keep+1` after rolling back to an old release |
 | `max_artifact_size` | `100MB` | Download cap; decompressed cap is 10× |
+| `max_artifact_entries` | `100000` | Cap on the files, directories and links one artifact creates (implied parent directories included). The byte cap does not bound what extraction *consumes* — every object costs an inode and most a disk block — so this is what keeps one hostile artifact from filling the disk for everything else on the box. A CI-built artifact is thousands; a Next.js standalone output is ~5–20k |
+
+Both caps are cliffs an app can grow into, so each successful deploy
+logs the artifact's entry count and decompressed size and, past **75%**
+of either cap, warns naming the directive to raise; `GET /<app>` shows
+the last deploy's figures as `artifact_entries` / `artifact_bytes`.
+Entry names and link targets are also bounded at PATH_MAX (4096
+bytes, under the release directory) and NAME_MAX (255 per component),
+and the content entries *declare* is capped like the stream (a sparse
+entry expands from no stream at all); not knobs — no real path or
+artifact is close.
 
 ## Watchdog
 
@@ -713,8 +725,9 @@ The response is synchronous:
 | 404 | Unknown app |
 | 409 | A deploy is already running for this app (retry) |
 | 413 | Pushed upload exceeded `max_artifact_size` |
+| 429 | This token failed, and the address has already failed 10 times this minute; `Retry-After` says when the oldest failure ages out. A *valid* token from the same address is never refused — see [Secrets and logs](#secrets-and-logs) |
 | 422 | Bad request — missing/invalid version, version already running, **version already exists** (versions are immutable — deploy a new version or roll back to relaunch it), a rollback target no longer on disk, or (URL path) an artifact url refused by `artifact_allowlist` (host, path, port, or an undeclared query parameter; the body names exactly what tripped and how the entry would declare it) |
-| 5xx | Deploy failed — **the old version is still serving**; body says why |
+| 5xx | Deploy failed — **the old version is still serving**; body says why. An artifact over `max_artifact_entries` or the decompressed byte cap fails here, before anything is written |
 
 Because the response is synchronous through the whole pipeline, the
 POST's wall time includes the health soak, the `drain` pause and the
@@ -724,8 +737,9 @@ in roughly soak + drain (~20s). Budget your CI step timeout for
 409 until the first one finishes.
 
 `GET /<app>` (same bearer token) returns status: phase, current
-version, port, pid, last deploy result (including `deployed_by`), the
-watchdog's state (restart counts, last restart cause), and
+version, port, pid, last deploy result (including `deployed_by` and
+the artifact's `artifact_entries` / `artifact_bytes` against the caps),
+the watchdog's state (restart counts, last restart cause), and
 `available_versions` — the on-disk releases you can roll back to,
 newest-first.
 
@@ -747,6 +761,22 @@ What liveswap does for you:
   (unlike Caddy's dist unit), so ACME DNS tokens and any other
   supervisor secrets never land in the journal — journals get pasted
   into bug reports. The package smoke test asserts this.
+- Failed webhook authentications are **throttled in the journal**.
+  Nobody can guess a token — forging one needs a private key — so the
+  throttle is not about guessing; it bounds what an unauthenticated
+  flood can write to your journal. Per client address, 10 failures a
+  minute; further bad tokens from that address get `429` until the
+  oldest failure ages out, and one line records that the address is
+  throttled. Process-wide, 100 failures a minute
+  are logged however many addresses a flood comes from, again with one
+  line saying the budget is spent; that process budget governs every
+  line, so once it is spent an address is throttled silently. The
+  address is Caddy's `client_ip`
+  (so `trusted_proxies` is honoured), IPv6 keyed by /64. The token is
+  still verified for a throttled address: a valid one is admitted and
+  clears the address, so sharing an address with a flood (a NAT, a CI
+  egress pool, a proxy without `trusted_proxies`) never costs a
+  deploy. Fixed, not configurable, and it survives config reloads.
 
 What's yours to handle:
 

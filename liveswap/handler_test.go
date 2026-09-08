@@ -6,11 +6,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // newTestHandler wires a Handler to an App backed by one fake-driven
@@ -24,7 +28,7 @@ func newTestHandler(t *testing.T) (*Handler, *testRig) {
 		managed:         map[string]*managedApp{"demo": rig.ma},
 		globalVerifiers: resolveVerifiers([]trustSource{localTrust(globalTestPub, "global")}, nil),
 	}
-	h := &Handler{app: app, logger: zap.NewNop()}
+	h := &Handler{app: app, logger: zap.NewNop(), limiter: newAuthLimiter(rig.clock)}
 	return h, rig
 }
 
@@ -204,6 +208,121 @@ func TestWebhookAppNameFromLastSegment(t *testing.T) {
 	w := do(t, h, http.MethodGet, "/deploy/demo", appToken(t), "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("prefixed path should resolve the app, got %d", w.Code)
+	}
+}
+
+// from sends a request as the given remote address.
+func from(t *testing.T, h *Handler, remote, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/demo", nil)
+	req.RemoteAddr = remote
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	return send(t, h, req)
+}
+
+// After the failure budget a client's bad tokens are answered 429
+// until the window slides — but a valid token from that address is
+// still admitted (and clears it): sharing an address with a flood
+// costs log lines, never a deploy.
+func TestWebhookThrottlesAuthFailures(t *testing.T) {
+	h, rig := newTestHandler(t)
+	const attacker = "203.0.113.9:1"
+	for i := range authFailBudget {
+		if w := from(t, h, attacker, "not-a-jwt"); w.Code != http.StatusUnauthorized {
+			t.Fatalf("failure %d: code = %d, want 401", i+1, w.Code)
+		}
+	}
+	w := from(t, h, attacker, "not-a-jwt")
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("past the budget: code = %d, want 429", w.Code)
+	}
+	if ra, err := strconv.Atoi(w.Header().Get("Retry-After")); err != nil || ra < 1 || ra > int(authFailWindow.Seconds()) {
+		t.Fatalf("Retry-After = %q, want seconds within the window", w.Header().Get("Retry-After"))
+	}
+	// Another address is unaffected.
+	if w := from(t, h, "198.51.100.1:1", appToken(t)); w.Code != http.StatusOK {
+		t.Fatalf("another address: code = %d, want 200", w.Code)
+	}
+	// The throttled address with a valid token deploys — and is
+	// cleared by it, so the full budget is back.
+	if w := from(t, h, attacker, appToken(t)); w.Code != http.StatusOK {
+		t.Fatalf("a valid token from a throttled address: code = %d, want 200", w.Code)
+	}
+	for i := range authFailBudget {
+		if w := from(t, h, attacker, "not-a-jwt"); w.Code != http.StatusUnauthorized {
+			t.Fatalf("after success, failure %d: code = %d, want 401", i+1, w.Code)
+		}
+	}
+	if w := from(t, h, attacker, "not-a-jwt"); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("budget did not refill on success: code = %d", w.Code)
+	}
+	// And the window slides on its own.
+	rig.clock.Advance(authFailWindow + time.Second)
+	if w := from(t, h, attacker, "not-a-jwt"); w.Code != http.StatusUnauthorized {
+		t.Fatalf("after the window: code = %d, want 401", w.Code)
+	}
+}
+
+// The throttle is what bounds the log: a flood of N failures from one
+// address writes budget+1 records (the failures, and one line saying
+// the address is now throttled), a request-supplied name is cut to
+// what a real app name could be — and the bound holds for a flood
+// that arrives all at once, not just one at a time.
+func TestWebhookThrottleBoundsTheLog(t *testing.T) {
+	for _, concurrent := range []bool{false, true} {
+		t.Run(map[bool]string{false: "serial", true: "concurrent"}[concurrent], func(t *testing.T) {
+			h, _ := newTestHandler(t)
+			core, logs := observer.New(zap.WarnLevel)
+			h.logger = zap.New(core)
+			const flood = authFailBudget + 50
+			hit := func() {
+				req := httptest.NewRequest(http.MethodGet, "/"+strings.Repeat("x", 10_000), nil)
+				req.RemoteAddr = "203.0.113.9:1"
+				req.Header.Set("Authorization", "Bearer not-a-jwt")
+				send(t, h, req)
+			}
+			if concurrent {
+				var wg sync.WaitGroup
+				for range flood {
+					wg.Go(hit)
+				}
+				wg.Wait()
+			} else {
+				for range flood {
+					hit()
+				}
+			}
+			if got := logs.Len(); got != authFailBudget+1 {
+				t.Fatalf("logged %d Warn records for %d failures, want %d", got, flood, authFailBudget+1)
+			}
+			for _, e := range logs.All() {
+				for _, f := range e.Context {
+					if f.Key == "app" && len(f.String) > appNameMaxLen+3 {
+						t.Fatalf("app field is %d bytes; the name must be truncated", len(f.String))
+					}
+				}
+			}
+		})
+	}
+}
+
+// A flood from many addresses runs into the process-wide budget: past
+// it, failures still 401 (and a throttled address still 429s) but the
+// journal gets one line saying so and nothing more.
+func TestWebhookThrottleIsBoundedAcrossAddresses(t *testing.T) {
+	h, _ := newTestHandler(t)
+	core, logs := observer.New(zap.WarnLevel)
+	h.logger = zap.New(core)
+	for i := range authFailGlobalBudget + 200 {
+		w := from(t, h, "10."+strconv.Itoa(i/256)+"."+strconv.Itoa(i%256)+".1:1", "not-a-jwt")
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("address %d: code = %d, want 401", i, w.Code)
+		}
+	}
+	if got := logs.Len(); got != authFailGlobalBudget+1 {
+		t.Fatalf("logged %d Warn records, want the global budget plus one", got)
 	}
 }
 

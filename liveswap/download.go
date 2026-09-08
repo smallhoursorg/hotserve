@@ -162,11 +162,13 @@ func redactURL(u *url.URL) string {
 	return u.Scheme + "://" + u.Host + u.EscapedPath()
 }
 
-// fetcher turns a webhook request into an extracted release directory.
-// It exists as an interface so the deploy pipeline's unit tests can
-// substitute a fake; the real implementation is releaseFetcher.
+// fetcher turns a webhook request into an extracted release directory,
+// reporting what the archive cost against the app's caps (zero for a
+// rollback, which extracts nothing). It exists as an interface so the
+// deploy pipeline's unit tests can substitute a fake; the real
+// implementation is releaseFetcher.
 type fetcher interface {
-	fetch(ctx context.Context, spec *appSpec, req deployRequest, progress func(phase string)) (string, error)
+	fetch(ctx context.Context, spec *appSpec, req deployRequest, progress func(phase string)) (string, archiveStats, error)
 }
 
 type releaseFetcher struct {
@@ -177,18 +179,18 @@ type releaseFetcher struct {
 // final release directory. Extraction happens into a hidden staging
 // dir that is renamed into place only on success, so releases/ never
 // contains a half-extracted version.
-func (rf *releaseFetcher) fetch(ctx context.Context, spec *appSpec, req deployRequest, progress func(string)) (string, error) {
+func (rf *releaseFetcher) fetch(ctx context.Context, spec *appSpec, req deployRequest, progress func(string)) (string, archiveStats, error) {
 	// Rollback: the release is already extracted on disk from a prior
 	// deploy — no fetch, no extract, just relaunch it.
 	if req.rollback {
 		releaseDir := spec.dirs.release(req.version)
 		if _, err := os.Stat(releaseDir); err != nil {
 			if os.IsNotExist(err) {
-				return "", validationError{fmt.Sprintf("no on-disk release %q to roll back to (it may have been pruned by keep)", req.version)}
+				return "", archiveStats{}, validationError{fmt.Sprintf("no on-disk release %q to roll back to (it may have been pruned by keep)", req.version)}
 			}
-			return "", err // a real I/O/permission error is a server failure, not a missing target
+			return "", archiveStats{}, err // a real I/O/permission error is a server failure, not a missing target
 		}
-		return releaseDir, nil
+		return releaseDir, archiveStats{}, nil
 	}
 
 	// Source the archive: a pushed upload already staged on disk, or a
@@ -207,7 +209,7 @@ func (rf *releaseFetcher) fetch(ctx context.Context, spec *appSpec, req deployRe
 			client:        rf.client,
 		})
 		if err != nil {
-			return "", err
+			return "", archiveStats{}, err
 		}
 	}
 	defer func() { _ = os.Remove(archive) }()
@@ -216,24 +218,28 @@ func (rf *releaseFetcher) fetch(ctx context.Context, spec *appSpec, req deployRe
 	releaseDir := spec.dirs.release(req.version)
 	staging := filepath.Join(spec.dirs.releases, ".extract-"+versionPathComponent(req.version))
 	if err := os.RemoveAll(staging); err != nil {
-		return "", err
+		return "", archiveStats{}, err
 	}
-	if err := extractArchive(archive, staging, spec.maxArtifactSize*decompressionRatioCap); err != nil {
+	stats, err := extractArchive(archive, staging, spec.archiveLimits())
+	if err != nil {
 		_ = os.RemoveAll(staging)
-		return "", err
+		return "", archiveStats{}, err
 	}
 	// Defensive: versions are immutable, so Deploy rejects an existing
 	// version before we get here — releaseDir normally does not exist.
 	// Kept so a stray leftover can't fail the rename.
+	// From here the archive has been extracted and measured: a failure
+	// still reports what it cost, so the status record stays honest
+	// about how far the deploy got.
 	if err := os.RemoveAll(releaseDir); err != nil {
 		_ = os.RemoveAll(staging)
-		return "", err
+		return "", stats, err
 	}
 	if err := os.Rename(staging, releaseDir); err != nil {
 		_ = os.RemoveAll(staging)
-		return "", err
+		return "", stats, err
 	}
-	return releaseDir, nil
+	return releaseDir, stats, nil
 }
 
 var _ fetcher = (*releaseFetcher)(nil)

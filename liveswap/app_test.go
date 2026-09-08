@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // fakeClock advances instantly on Sleep so pipeline tests never wait.
@@ -327,24 +328,29 @@ func (p *fakeProber) calls() int {
 	return p.probeCalls
 }
 
-// fakeFetcher materializes a release dir without any network.
+// fakeFetcher materializes a release dir without any network. stats is
+// what it reports the archive cost (zero unless a test sets it).
 type fakeFetcher struct {
 	err     error
+	stats   archiveStats
 	lastReq deployRequest
 }
 
-func (f *fakeFetcher) fetch(_ context.Context, spec *appSpec, req deployRequest, progress func(string)) (string, error) {
+func (f *fakeFetcher) fetch(_ context.Context, spec *appSpec, req deployRequest, progress func(string)) (string, archiveStats, error) {
 	f.lastReq = req
 	progress("downloading")
 	progress("extracting")
 	if f.err != nil {
-		return "", f.err
+		return "", archiveStats{}, f.err
 	}
 	dir := spec.dirs.release(req.version)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
+		return "", archiveStats{}, err
 	}
-	return dir, nil
+	if req.rollback {
+		return dir, archiveStats{}, nil // extracts nothing, like the real one
+	}
+	return dir, f.stats, nil
 }
 
 // fakeStore is an in-memory stateStore.
@@ -373,25 +379,26 @@ func (s *fakeStore) save(st appState) error {
 func testSpec(t *testing.T) *appSpec {
 	t.Helper()
 	return &appSpec{
-		name:            "demo",
-		command:         []string{"./server", "--version", "{version}"},
-		env:             map[string]string{"DATA": "{shared_dir}/db"},
-		trust:           []trustSource{localTrust(appTestPub, "demo")},
-		healthPath:      "/health",
-		healthInterval:  5 * time.Second,
-		healthTimeout:   2 * time.Second,
-		soak:            15 * time.Second,
-		deadline:        5 * time.Minute,
-		drain:           5 * time.Second,
-		grace:           10 * time.Second,
-		watchdogOn:      true,
-		wdFailures:      3,
-		wdGrace:         30 * time.Second,
-		wdRestarts:      5,
-		wdWindow:        10 * time.Minute,
-		keep:            2,
-		maxArtifactSize: 1 << 20,
-		dirs:            newAppDirs(shortTempDir(t), "demo"),
+		name:               "demo",
+		command:            []string{"./server", "--version", "{version}"},
+		env:                map[string]string{"DATA": "{shared_dir}/db"},
+		trust:              []trustSource{localTrust(appTestPub, "demo")},
+		healthPath:         "/health",
+		healthInterval:     5 * time.Second,
+		healthTimeout:      2 * time.Second,
+		soak:               15 * time.Second,
+		deadline:           5 * time.Minute,
+		drain:              5 * time.Second,
+		grace:              10 * time.Second,
+		watchdogOn:         true,
+		wdFailures:         3,
+		wdGrace:            30 * time.Second,
+		wdRestarts:         5,
+		wdWindow:           10 * time.Minute,
+		keep:               2,
+		maxArtifactSize:    1 << 20,
+		maxArtifactEntries: 1000,
+		dirs:               newAppDirs(shortTempDir(t), "demo"),
 	}
 }
 
@@ -507,6 +514,46 @@ func newTestRig(t *testing.T) *testRig {
 	t.Cleanup(rig.prober.closeListeners)
 	rig.ma = ma
 	return rig
+}
+
+// An artifact past 75% of either cap warns on the deploy that got
+// there, naming the directive, and the figures reach the status
+// record; below that, and on a rollback, nothing is said.
+func TestDeployWarnsNearArtifactCaps(t *testing.T) {
+	cases := []struct {
+		name  string
+		stats archiveStats
+		warns int
+	}{
+		{"well under", archiveStats{entries: 100, bytes: 1 << 16}, 0},
+		{"entries at 75%", archiveStats{entries: 750, bytes: 1 << 16}, 1},
+		{"bytes at 75%", archiveStats{entries: 100, bytes: 7_864_320}, 1}, // 0.75 × 1 MiB × 10
+		{"both", archiveStats{entries: 999, bytes: 10 << 20}, 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := newTestRig(t)
+			core, logs := observer.New(zap.WarnLevel)
+			rig.ma.logger = zap.New(core)
+			rig.fetch.stats = tc.stats
+			must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/a.tgz", version: "v1"}))
+			if got := logs.Len(); got != tc.warns {
+				t.Fatalf("warned %d times, want %d: %v", got, tc.warns, logs.All())
+			}
+			last := rig.ma.status().LastDeploy
+			if last.ArtifactEntries != tc.stats.entries || last.ArtifactBytes != tc.stats.bytes {
+				t.Fatalf("status did not record the artifact figures: %+v", last)
+			}
+			// A rollback extracts nothing: no figures, no warning, even
+			// though the fake would report the same stats.
+			must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/b.tgz", version: "v2"}))
+			logs.TakeAll()
+			must(t, rig.ma.Deploy(context.Background(), deployRequest{version: "v1", rollback: true}))
+			if logs.Len() != 0 {
+				t.Fatalf("rollback warned: %v", logs.All())
+			}
+		})
+	}
 }
 
 func TestDeployFirstVersion(t *testing.T) {

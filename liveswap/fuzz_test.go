@@ -57,7 +57,7 @@ func FuzzExtractArchive(f *testing.F) {
 		}
 		dest := filepath.Join(parent, "dest")
 
-		if err := extractArchive(arch, dest, 1<<20); err != nil {
+		if _, err := extractArchive(arch, dest, archiveLimits{maxBytes: 1 << 20, maxEntries: 100_000}); err != nil {
 			return // rejection is always a valid outcome
 		}
 

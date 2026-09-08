@@ -69,6 +69,11 @@
 # 			# watchdog_grace    30s    # post-start probe-failure amnesty
 # 			# watchdog_restarts 5      # budget per watchdog_window
 # 			# watchdog_window   10m
+#
+# 			# Artifact caps. A deploy warns at 75% of either, so raise
+# 			# them before an app grows into one. Defaults shown:
+# 			# max_artifact_size    100MB   # decompressed cap is 10x
+# 			# max_artifact_entries 100000  # files+dirs+links per artifact
 # 		}
 # 	}
 #
@@ -89,4 +94,7 @@
 #
 # deploy.example.com {
 # 	liveswap_webhook         # POST /myapp {url, version} from CI
+# 	                         # (failed auths are throttled in the journal,
+# 	                         # 10/min per address then 429 for bad tokens;
+# 	                         # a valid token always gets through — built in)
 # }

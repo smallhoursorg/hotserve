@@ -56,32 +56,53 @@ verified JWT in `Authorization: Bearer` (see "Reducing the asset"):
 against public material, then a claim allowlist. Auth happens **before**
 existence is revealed: an unknown app name is verified against the
 *global* trust sources so callers cannot enumerate app names
-([handler.go:76-110](liveswap/handler.go)). Config load refuses an app
+([handler.go:90-146](liveswap/handler.go)). Config load refuses an app
 that resolves to zero trust sources ([liveswap.go](liveswap/liveswap.go)).
 Bearer is the only transport, which Caddy redacts from access logs.
 
 Properties that matter to the model:
 
 - **GET and POST both sit behind the token.** GET returns full status,
-  POST deploys, all else 405 ([handler.go:101-109](liveswap/handler.go)).
+  POST deploys, all else 405 ([handler.go:137-145](liveswap/handler.go)).
   The status endpoint is authenticated — not public.
-- **No rate limiting anywhere on the auth path.** No throttle, lockout,
-  or backoff. Token *forgery* is infeasible (no private key), so this is
-  not a guessing oracle — but each failure logs at Warn with `app`+`remote`
-  ([handler.go:90-95](liveswap/handler.go)), an unauthenticated
-  log-amplification / disk-fill primitive, and every attempt costs a
-  JWT/JWKS verification. Body is capped at 64 KiB → 413
-  ([handler.go:37,133-140](liveswap/handler.go)); `deployMu.TryLock()`
-  → 409 serializes deploys ([app.go:343](liveswap/app.go)) but does
-  nothing for auth attempts.
+- **Auth failures are throttled in the journal**
+  ([liveswap/authlimit.go](liveswap/authlimit.go)). Token *forgery* is
+  infeasible (no private key), so this is not a guessing oracle; what
+  an unauthenticated caller can do with failures is make hotserve
+  write a Warn per request. Two sliding windows bound that, in one
+  lock scope so a burst of concurrent requests cannot each see room:
+  per address, 10 failures a minute, after which further bad tokens
+  get 429 until the oldest ages out; process-wide, 100 failures a
+  minute are logged however many addresses a flood comes from. The
+  address budget decides the 429; the process budget decides what is
+  logged, the once-per-window "budget spent" lines included — so
+  under a spent process budget an address is throttled silently. The
+  logged `app` field is cut to
+  what a real name could be. The address is Caddy's `client_ip`
+  (`trusted_proxies` honoured), IPv6 keyed by /64; the table is bounded
+  at 4096 addresses (drained ones swept at most once a window, then an
+  arbitrary one dropped), and the global budget is what holds above
+  that. The token is still verified for a throttled address and a
+  valid one is admitted (and clears the address): a NAT, a CI egress
+  pool, a proxy without `trusted_proxies` or a unix-socket listener all
+  collapse clients onto one key, and the throttle must never be a
+  deploy-denial primitive for whoever shares it. Verification cost is
+  therefore not bounded by the throttle — it is comparable to the TLS
+  handshake the request already paid, so the throttle is not what
+  bounds CPU. One limiter for the process, not per handler, so a
+  reload hands out no fresh budget and a second mount does not double
+  it. Body is capped at 64 KiB → 413
+  ([handler.go:39,169-176](liveswap/handler.go)); `deployMu.TryLock()`
+  → 409 serializes deploys ([app.go:408](liveswap/app.go); the push
+  path takes it before staging, [handler.go:222](liveswap/handler.go)).
 - **Path routing is `path.Base(path.Clean(...))`**
-  ([handler.go:77](liveswap/handler.go)): `/anything/deep/myapp` targets
+  ([handler.go:91](liveswap/handler.go)): `/anything/deep/myapp` targets
   `myapp`. A naive `path /deploy/*` site matcher does not constrain the
   app name; the operator's matcher is the only constraint.
-- **Three request shapes** ([handler.go:112-124](liveswap/handler.go)),
+- **Three request shapes** ([handler.go:148-161](liveswap/handler.go)),
   all behind the same token: a JSON body pulls from a URL (below); a
   gzip body **pushes** the artifact itself (`POST /<app>?version=`,
-  [handler.go:174-215](liveswap/handler.go)) — the bytes come straight
+  [handler.go:210-251](liveswap/handler.go)) — the bytes come straight
   from the authenticated caller, capped at `max_artifact_size`, staged
   under the app's `tmp/` and extracted like a download, and **no
   `artifact_allowlist` is consulted** because there is no URL to pin;
@@ -90,21 +111,21 @@ Properties that matter to the model:
   bytes with no artifact host in the loop: the allowlist confines
   *pulls*, and only the claim scope confines *who*.
 - **Pull payload:** three fields only — `url`, `version`, `auth_header`
-  ([app.go:108-110](liveswap/app.go)); unknown JSON silently ignored (no
+  ([app.go:164-166](liveswap/app.go)); unknown JSON silently ignored (no
   `DisallowUnknownFields`). `version` is
   `^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$` (no leading dot, so never
   `.`/`..` or a release-GC bookkeeping name), double-sanitized before
   touching the filesystem
-  ([liveswap.go:65,77-79,85-87](liveswap/liveswap.go)). `auth_header`
-  is only control-char-checked ([handler.go:164-169](liveswap/handler.go));
+  ([liveswap.go:70,82-84,90-92](liveswap/liveswap.go)). `auth_header`
+  is only control-char-checked ([handler.go:200-205](liveswap/handler.go));
   its contents are attacker-chosen and forwarded to the allowlisted host.
 - **Response leaks (all post-auth):** the 500 path returns raw
   `err.Error()` plus the full status snapshot
-  ([handler.go:254-258](liveswap/handler.go)) — filesystem paths, tar
+  ([handler.go:290-294](liveswap/handler.go)) — filesystem paths, tar
   entry names, the operator's allowlist echoed verbatim
   ([allowlist.go:279-281,363,379](liveswap/allowlist.go)). The status
   snapshot exposes the app's **port and PID** and watchdog cause/failure
-  state ([app.go:873](liveswap/app.go) `status()`,
+  state ([app.go:1048](liveswap/app.go) `status()`,
   [watchdog.go:255-275](liveswap/watchdog.go)). Artifact URLs *are*
   redacted before logs/errors ([download.go:158-163](liveswap/download.go)),
   so query signatures do not leak.
@@ -120,7 +141,7 @@ Properties that matter to the model:
 ### Artifact fetching — `liveswap/download.go` + `allowlist.go`
 
 The allowlist is **mandatory** — config load fails without one
-([liveswap.go:507](liveswap/liveswap.go)); no any-origin mode. Pinning
+([liveswap.go:518](liveswap/liveswap.go)); no any-origin mode. Pinning
 ([allowlist.go:382-449](liveswap/allowlist.go)) rebuilds the outgoing
 URL so scheme is constant, host/port/path-prefix come from *config
 bytes*, and only the path suffix + query come from the payload — the
@@ -179,9 +200,25 @@ Residual items for the model:
   symbolically under root; extraction is into a hidden staging dir
   `os.Rename`d on success, [download.go:232](liveswap/download.go)).
   Not asserted as exploitable.
-- **No entry-count or path-length cap** independent of the byte budget:
-  a billion 1-byte entries fits in 1 GB → CPU/inode exhaustion. The
-  archive is read **twice**, so the byte cap permits 2× the work.
+- **Entry and name caps, independent of the byte budget.** The byte
+  cap bounds the tar *stream*, not what extraction consumes: every
+  entry costs an inode and most a 4 KB block, so 1 GB of 1-byte files
+  is ~1M inodes and ~4 GB of blocks — a 20 GB ext4 root has ~1.3M
+  inodes — enough to take the box to ENOSPC for ACME storage,
+  `state.json`, the journal and every other app's next deploy, and it
+  persists under `keep`. `max_artifact_entries` (default 100000; a
+  CI-built artifact is thousands) counts the filesystem objects
+  extraction creates — the parent directories an entry implies
+  included, so one deep name cannot smuggle a thousand — and is
+  rejected in the validate pass, so nothing is written. Names and link
+  targets over PATH_MAX once joined under the release dir, or with a
+  component over NAME_MAX, are refused the same way. The content the
+  entries *declare* is capped like the stream: a GNU sparse entry's
+  holes are synthesized by the reader from no stream bytes, so the
+  stream cap alone would let one small entry write a disk of zeros.
+  A deploy reports the figures and warns past 75% of
+  either cap. The archive is still read **twice**, so the byte cap
+  permits 2× the CPU — bounded, and cheap next to the write pass.
 - `+x` survives extraction — intended (the artifact ships the app
   binary), but it is the point where artifact bytes become code.
 
@@ -199,7 +236,8 @@ app is that user, but a sandboxed app cannot reach `/run/hotserve` at
 all (the path is not in its view), so the gate holds against apps and
 only hotserve itself can connect. The example webhook deployment
 ([Caddyfile:90-92](packaging/Caddyfile)) is a public TLS vhost with
-`liveswap_webhook` behind `deploy_trust` and no rate limiting in front.
+`liveswap_webhook` behind `deploy_trust`; the handler's own
+per-address auth-failure throttle is the only rate limiting in front.
 
 **penaltybox** is a response-phase rate-limit-hint enforcer; it touches
 untrusted input only narrowly (the client key defaults to
@@ -266,9 +304,11 @@ scope for the runtime model, in scope for release signing (roadmap).
 
 For **T2**: deploy-arbitrary-code (a push is contained by nothing but
 the claim scope; a pull additionally by the allowlist); deliberate
-rollback. For **T3**: archive-borne CPU/inode exhaustion; the
+rollback. For **T3**: archive-borne CPU (bounded by the byte and
+entry caps; inode exhaustion is closed by the entry cap); the
 link-TOCTOU shape (unproven); first-hop→any-https SSRF. For **T4**:
-log-amplification disk-fill (online *token forgery* is infeasible).
+log-amplification, bounded by the auth-failure throttle (online
+*token forgery* is infeasible).
 For **T5**: total, by definition — the containment question is
 root-vs-not-root.
 
@@ -482,8 +522,8 @@ Implementation: `liveswap/deploytrust.go` (verification via the vetted
   a permanent deploy-anything key. The compromise surface is "the CI
   identity that mints tokens", not "a secret on the box".
 - **T4 has no online guessing:** forging a token needs the issuer's or
-  operator's private key; there is nothing to brute-force. (Rate
-  limiting is still owed for the log-amplification vector.)
+  operator's private key; there is nothing to brute-force. The
+  per-address failure throttle bounds the log-amplification vector.
 - **Replay is bounded** by the token's `exp` (minutes).
 
 What it does **not** do: ACME tokens and TLS keys still live on the box,
@@ -561,8 +601,11 @@ does not isolate the runtime.
   `TestSandboxViewIsExactlyWhatIsNamed` pin it — the latter asserts the
   rendered set of bind destinations IS the view, so an accidental
   widening fails there.
-- **Non-isolation hardening still owed:** webhook rate limiting (T4
-  log-amplification) and the `extract.go` entry-count cap (T3).
+- **Log amplification is bounded, not closed.** The auth-failure
+  throttle caps what the webhook writes to the journal (about 110
+  lines a minute from any number of sources); an operator-enabled
+  access log records every request regardless, and the verification
+  CPU per request is not throttled (see the webhook section for why).
 
 ## History
 
@@ -606,3 +649,9 @@ Dated one-liners; the full text of each is in git.
 - 2026-09-06 — App contract moved from `127.0.0.1:$PORT` to a
   per-instance unix socket in `<app>/run/`; the sibling-port residual
   closed for every runtime, compiled apps included.
+- 2026-09-07 — The two owed non-isolation items closed: webhook auth
+  failures throttled in the journal, per address and process-wide (T4
+  log amplification bounded; deploys never refused), and
+  `max_artifact_entries` plus PATH_MAX/NAME_MAX name caps in
+  extraction (T3 inode exhaustion closed), with a 75% warning so a
+  growing app sees either cap coming.
