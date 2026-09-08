@@ -370,6 +370,10 @@ func (a *App) Provision(ctx caddy.Context) error {
 // exit — where the units belong to whoever is or will be serving them.
 var liveStartedApps atomic.Int32
 
+// caddyExiting reports whether the whole process is shutting down (as
+// opposed to a config unloading an app); a variable so tests can flip it.
+var caddyExiting = caddy.Exiting
+
 func (cfg *AppConfig) applyDefaults(repl *caddy.Replacer) {
 	resolveTrustPlaceholders(repl, cfg.DeployTrust)
 	cfg.EnvFile = repl.ReplaceKnown(cfg.EnvFile, "")
@@ -594,7 +598,8 @@ func (a *App) Start() error {
 		//
 		// The measurement itself is cached on the manager connection,
 		// so a reload that changes nothing about the manager does not
-		// pay for a unit here; see userManagerClient.sandboxCapability.
+		// pay for a unit here; see measureSandbox and the cache it
+		// reads, userManagerClient.cachedSandboxCapability.
 		if err := a.measureSandbox(); err != nil {
 			return fmt.Errorf("every app runs in the per-app sandbox and this host cannot deliver it: %w. Fix the host: there is no setting that runs an app without one", err)
 		}
@@ -666,7 +671,9 @@ func (a *App) probeManager() error {
 
 // measureSandbox reports whether this host delivers the sandbox
 // (sandbox.go), from the per-connection cache: nil, or the probe's
-// reason it does not.
+// reason it does not. The measurement starts a real unit, so the first
+// caller after a dial pays for it and every later config load reads
+// the cache.
 func (a *App) measureSandbox() error {
 	if a.sandboxProbe != nil {
 		return a.sandboxProbe(a.logger)
@@ -676,11 +683,27 @@ func (a *App) measureSandbox() error {
 		// cache belongs to the real client (it keeps a throwaway unit
 		// off Caddy's reload path), and a scripted connection answers
 		// at scripted speed.
-		r := newSystemdRunner(a.manager, a.logger)
-		defer r.cancel()
-		return probeSandboxCapability(r)
+		return a.probeSandboxOver(a.manager)
 	}
-	return userManager.sandboxCapability(a.logger)
+	// probe() rather than get(): it proves the manager answers a real
+	// request, and its error names the uid, the socket and the lingering
+	// to enable. Start puts that reason verbatim into its refusal, so
+	// a manager that went away between Start's probeManager and here must
+	// not be reported as a sandbox problem with no remedy attached.
+	if err := userManager.probe(); err != nil {
+		return err
+	}
+	return userManager.cachedSandboxCapability(func() error {
+		return a.probeSandboxOver(userManager)
+	})
+}
+
+// probeSandboxOver runs the sandbox probe unit over conn, tearing the
+// runner down with it.
+func (a *App) probeSandboxOver(conn systemdConn) error {
+	r := newSystemdRunner(conn, a.logger)
+	defer r.close()
+	return probeSandboxCapability(r)
 }
 
 // Stop intentionally does NOT stop app processes: on a config reload
@@ -733,10 +756,6 @@ func (a *App) Cleanup() error {
 func (a *App) managedApp(name string) *managedApp {
 	return a.managed[name]
 }
-
-// unknownAppSweepTimeout bounds the start-time sweep of units whose
-// apps are no longer configured.
-const unknownAppSweepTimeout = 2 * time.Minute
 
 // Interface guards.
 var (

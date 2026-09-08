@@ -48,16 +48,15 @@ import (
 // in the configuration can turn it off or widen it. What is decided
 // at Start is whether this host can deliver it at all: a capability
 // measured once per manager connection (not per config load: the
-// measurement costs a whole unit — see
-// userManagerClient.sandboxCapability), and a host that falls short
-// fails Start with the probe's reason attached. That makes the
-// sandbox an availability dependency, which is the deliberate trade:
-// a supervisor that ran an app with no isolation — because the kernel
-// changed its mind, or because one app was let out — hands that app
-// every sibling's data and hotserve's own keys, since they all share
-// one uid. There is no lesser tier and no escape, so nothing has to be
-// recorded per instance either: a relaunch is sandboxed exactly like
-// a deploy.
+// measurement costs a whole unit — see App.measureSandbox), and a
+// host that falls short fails Start with the probe's reason attached.
+// That makes the sandbox an availability dependency, which is the
+// deliberate trade: a supervisor that ran an app with no isolation —
+// because the kernel changed its mind, or because one app was let out
+// — hands that app every sibling's data and hotserve's own keys,
+// since they all share one uid. There is no lesser tier and no
+// escape, so nothing has to be recorded per instance either: a
+// relaunch is sandboxed exactly like a deploy.
 
 // bindPath is one of the app's own directories bound back into its
 // view: dest is where the app sees it (and what WorkingDirectory,

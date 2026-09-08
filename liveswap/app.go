@@ -15,7 +15,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/caddyserver/caddy/v2"
 	"go.uber.org/zap"
 )
 
@@ -1103,10 +1102,6 @@ func (ma *managedApp) rollbackConfig(owner any) bool {
 // window (a restart with the candidate's settings). Closing it would
 // mean suspending supervision during every reload, which is worse
 // than the milliseconds-wide window it removes.
-
-// caddyExiting reports whether the whole process is shutting down (as
-// opposed to a config unloading an app); a variable so tests can flip it.
-var caddyExiting = caddy.Exiting
 
 // Destruct is called by the UsagePool when the last config referencing
 // this app is unloaded — i.e. real shutdown or the app being removed

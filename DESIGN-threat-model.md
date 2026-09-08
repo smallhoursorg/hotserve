@@ -93,7 +93,7 @@ Properties that matter to the model:
   reload hands out no fresh budget and a second mount does not double
   it. Body is capped at 64 KiB → 413
   ([handler.go:39,169-176](liveswap/handler.go)); `deployMu.TryLock()`
-  → 409 serializes deploys ([app.go:408](liveswap/app.go); the push
+  → 409 serializes deploys ([app.go:407](liveswap/app.go); the push
   path takes it before staging, [handler.go:222](liveswap/handler.go)).
 - **Path routing is `path.Base(path.Clean(...))`**
   ([handler.go:91](liveswap/handler.go)): `/anything/deep/myapp` targets
@@ -111,7 +111,7 @@ Properties that matter to the model:
   bytes with no artifact host in the loop: the allowlist confines
   *pulls*, and only the claim scope confines *who*.
 - **Pull payload:** three fields only — `url`, `version`, `auth_header`
-  ([app.go:164-166](liveswap/app.go)); unknown JSON silently ignored (no
+  ([app.go:163-165](liveswap/app.go)); unknown JSON silently ignored (no
   `DisallowUnknownFields`). `version` is
   `^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$` (no leading dot, so never
   `.`/`..` or a release-GC bookkeeping name), double-sanitized before
@@ -141,7 +141,7 @@ Properties that matter to the model:
 ### Artifact fetching — `liveswap/download.go` + `allowlist.go`
 
 The allowlist is **mandatory** — config load fails without one
-([liveswap.go:518](liveswap/liveswap.go)); no any-origin mode. Pinning
+([liveswap.go:522](liveswap/liveswap.go)); no any-origin mode. Pinning
 ([allowlist.go:382-449](liveswap/allowlist.go)) rebuilds the outgoing
 URL so scheme is constant, host/port/path-prefix come from *config
 bytes*, and only the path suffix + query come from the payload — the
@@ -161,7 +161,7 @@ on cross-host redirects but **not** same-host
 ([download.go:77-82](liveswap/download.go)). Size: Content-Length
 pre-check plus streaming `LimitReader`, default 100 MB
 ([download.go:94-114](liveswap/download.go),
-[liveswap.go:423-424](liveswap/liveswap.go)).
+[liveswap.go:431-432](liveswap/liveswap.go)).
 
 **The documented, real gap:** the host allowlist governs the **first
 hop only** — `CheckRedirect` deliberately does not re-check the host
@@ -404,7 +404,7 @@ the mechanism:
    weaken an app: interference cannot produce a running hotserve with
    a lesser sandbox. The verdict is cached per manager connection
    (`userManagerClient.cachedSandboxCapability`,
-   [systemd_dbus.go:108](liveswap/systemd_dbus.go)), which narrows the
+   [systemd_dbus.go:92](liveswap/systemd_dbus.go)), which narrows the
    window,
    and a failed verdict is deliberately NOT cached, so interference
    costs the next start rather than pinning a verdict until the manager
@@ -442,7 +442,7 @@ grant.
 
 **The property set**, on every unit — `unitProperties` renders the
 lifecycle properties and appends `sandboxProperties` for the rest
-([liveswap/systemd_dbus.go:284,353](liveswap/systemd_dbus.go)):
+([liveswap/systemd_dbus.go:268,356](liveswap/systemd_dbus.go)):
 
 - Namespaces: `PrivateUsers=yes`, `PrivatePIDs=yes`, `PrivateTmp=yes`,
   `PrivateDevices=yes`; `RestrictNamespaces=` (empty set — an app
