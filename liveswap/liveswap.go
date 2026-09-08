@@ -150,9 +150,21 @@ type App struct {
 	// Fields rather than the package vars they replace: a test scripts
 	// a host on its own App instead of mutating global state and
 	// restoring it in a t.Cleanup.
+	//
+	// processManager is the process-wide client itself — the one every
+	// path above falls through to when nothing is installed, which is
+	// what every real start does. nil means the real userManager; a
+	// test installs a fake to reach that fall-through without a manager
+	// to dial, which is the only way to assert the ordering inside it
+	// (sharedManager). It carries the same promise as manager: set it
+	// alone and nothing this App does touches a real socket, so
+	// systemdConn honours it too — otherwise Start would measure
+	// through the fake and then hand its apps and its sweep the real
+	// one.
 	manager         systemdConn
 	managerProbe    func() error
 	sandboxProbe    func(*zap.Logger) error
+	processManager  managerClient
 	allowlist       []artifactAllowEntry
 	globalTrust     []trustSource // resolved global DeployTrust, for the unknown-app path
 	globalVerifiers []verifier
@@ -649,6 +661,33 @@ func (a *App) systemdConn() systemdConn {
 	if a.manager != nil {
 		return a.manager
 	}
+	return a.sharedManager()
+}
+
+// managerClient is the process-wide manager client as probeManager and
+// measureSandbox use it: a connection to measure over, the reachability
+// proof that has to come first, and the cache the verdict is held in.
+// userManagerClient (systemd_dbus.go) is the real one. It is an
+// interface only so a test can reach the no-connection branch — the one
+// every real start takes — without dialling a manager; measuring
+// through the process-wide client for real would start a transient unit
+// on whatever machine runs the tests.
+type managerClient interface {
+	systemdConn
+	probe() error
+	cachedSandboxCapability(measure func() error) error
+}
+
+// sharedManager returns the process-wide client, or the fake a test
+// installed in its place. Distinct from systemdConn(): that one answers
+// "which manager do this config's apps talk to", and an App with a
+// scripted connection answers it with that connection. This one is the
+// process-wide client as such — the probe and the cache live on it, and
+// neither has a scripted equivalent.
+func (a *App) sharedManager() managerClient {
+	if a.processManager != nil {
+		return a.processManager
+	}
 	return userManager
 }
 
@@ -666,7 +705,7 @@ func (a *App) probeManager() error {
 		// process-wide client below is exactly that socket.
 		return nil
 	}
-	return userManager.probe()
+	return a.sharedManager().probe()
 }
 
 // measureSandbox reports whether this host delivers the sandbox
@@ -690,11 +729,12 @@ func (a *App) measureSandbox() error {
 	// to enable. Start puts that reason verbatim into its refusal, so
 	// a manager that went away between Start's probeManager and here must
 	// not be reported as a sandbox problem with no remedy attached.
-	if err := userManager.probe(); err != nil {
+	mgr := a.sharedManager()
+	if err := mgr.probe(); err != nil {
 		return err
 	}
-	return userManager.cachedSandboxCapability(func() error {
-		return a.probeSandboxOver(userManager)
+	return mgr.cachedSandboxCapability(func() error {
+		return a.probeSandboxOver(mgr)
 	})
 }
 

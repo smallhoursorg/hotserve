@@ -343,6 +343,109 @@ func TestManagerSeamNeedsNoFuncSeams(t *testing.T) {
 	}
 }
 
+// fakeManagerClient stands in for the process-wide userManager: a
+// scripted connection, plus the two things only the real client has —
+// the reachability probe and the capability cache. It counts both so a
+// test can assert which one ran, and in what order.
+type fakeManagerClient struct {
+	*fakeSystemdConn
+	probeErr error
+	probes   int
+	measured int
+}
+
+func (f *fakeManagerClient) probe() error {
+	f.probes++
+	return f.probeErr
+}
+
+func (f *fakeManagerClient) cachedSandboxCapability(measure func() error) error {
+	f.measured++
+	return measure()
+}
+
+// TestMeasureSandboxProvesTheManagerBeforeMeasuring covers the branch
+// every real start takes — no connection and no func seam installed, so
+// probeManager and measureSandbox fall through to the process-wide
+// client. It is the processManager counterpart of
+// TestManagerSeamNeedsNoFuncSeams: same promise (no real socket), but
+// reaching the fall-through itself rather than the branch above it.
+//
+// What it pins is an ordering whose failure is silent. Drop or reorder
+// measureSandbox's probe() and a manager that died between Start's
+// probeManager and here comes back as "this host cannot deliver the
+// sandbox" — a refusal whose own text says there is no fix in config —
+// instead of the error naming the uid, the socket and the lingering to
+// enable. hotserve refuses to come up either way; only the operator's
+// next hour differs.
+func TestMeasureSandboxProvesTheManagerBeforeMeasuring(t *testing.T) {
+	newApp := func(probeErr error) (*App, *fakeManagerClient) {
+		mgr := &fakeManagerClient{fakeSystemdConn: newFakeSystemdConn(), probeErr: probeErr}
+		// processManager alone: no manager, no func seams, so both
+		// methods take the fall-through this test exists for.
+		return &App{logger: zap.NewNop(), processManager: mgr}, mgr
+	}
+
+	t.Run("an unreachable manager is reported as itself", func(t *testing.T) {
+		gone := errors.New("liveswap needs the systemd user manager for uid 1000: loginctl enable-linger")
+		a, mgr := newApp(gone)
+		err := a.measureSandbox()
+		if !errors.Is(err, gone) {
+			t.Fatalf("the manager's own reason must come back verbatim, so Start's refusal names the remedy; got %v", err)
+		}
+		if mgr.measured != 0 {
+			t.Errorf("a manager that is gone was measured anyway (%d times): its absence would be reported as an incapable host", mgr.measured)
+		}
+		if len(mgr.started) != 0 {
+			t.Errorf("a dead manager must cost no probe unit; started %d", len(mgr.started))
+		}
+	})
+
+	t.Run("a reachable manager is measured over the client that was probed", func(t *testing.T) {
+		a, mgr := newApp(nil)
+		if err := a.measureSandbox(); err != nil {
+			t.Fatalf("the fake answers done, so the measurement must be capable: %v", err)
+		}
+		if mgr.probes != 1 || mgr.measured != 1 {
+			t.Fatalf("probed %d times and measured %d, want 1 and 1", mgr.probes, mgr.measured)
+		}
+		// Through the cache, and over the same client: the probe unit
+		// reached the connection whose probe() had just answered.
+		probed := false
+		for _, u := range mgr.started {
+			if strings.Contains(u.Name, "sandboxprobe_") {
+				probed = true
+			}
+		}
+		if !probed {
+			t.Fatalf("no probe unit reached the probed client; started: %d", len(mgr.started))
+		}
+	})
+
+	t.Run("probeManager reaches the same client", func(t *testing.T) {
+		gone := errors.New("no manager")
+		a, mgr := newApp(gone)
+		if err := a.probeManager(); !errors.Is(err, gone) {
+			t.Fatalf("probeManager must fall through to the installed client, got %v", err)
+		}
+		if mgr.probes != 1 {
+			t.Fatalf("probed %d times, want 1", mgr.probes)
+		}
+	})
+
+	t.Run("so does the connection this config's apps use", func(t *testing.T) {
+		// Same promise as manager: set processManager alone and nothing
+		// this App does touches a real socket. Measuring through the
+		// fake and then handing Start's runners and its unknown-app
+		// sweep the real $XDG_RUNTIME_DIR client would stop units
+		// belonging to whoever is running a manager on this machine.
+		a, mgr := newApp(nil)
+		if a.systemdConn() != systemdConn(mgr) {
+			t.Fatal("systemdConn fell through to the process-wide client past an installed fake")
+		}
+	})
+}
+
 // TestProbeSandboxCapabilityRetriesTimeout pins the one retry, and
 // its shape. The probe's verdict decides whether hotserve starts at
 // all, and hotserve.service has no Restart= — so a transient timeout
