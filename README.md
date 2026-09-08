@@ -217,7 +217,7 @@ make vulncheck         # govulncheck, all modules (tool dep in go.mod — Depend
 make secretscan        # gitleaks full-history secret scan (same image as the CI gate)
 make fuzz              # fuzz the untrusted-input surfaces (FUZZTIME=2m per target)
 make fuzz-list         # what fuzz will run (discovered per module, not listed by hand); CI runs it on every PR
-make soak              # ~20min leak hunt: deploy/reload churn, goroutine/fd assertions
+make soak              # ~20min leak hunt: deploy/reload churn, goroutine/fd assertions; CI runs it per merge to main and weekly
 make build             # cross-compile linux amd64/arm64
 make package           # .deb via nfpm
 make install-test      # install the .deb under real systemd (Debian 13)

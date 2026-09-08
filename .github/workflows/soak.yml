@@ -1,12 +1,31 @@
-# Weekly leak-hunting soak (~15-20 min): deploy/reload/traffic churn
-# against the product binary, then goroutine/fd return-to-baseline
-# assertions. Deliberately NOT part of ci-ok — soaks are the flakiest
-# test class, and a wolf-crying soak in the merge path would be worse
-# than none. A red run here means: read the log, grab a heap/goroutine
-# profile via the admin API, and treat it as a bug report.
+# Leak-hunting soak (~15-20 min): deploy/reload/traffic churn against
+# the product binary, then goroutine/fd return-to-baseline assertions.
+# Runs per merge to main, so a leak names the commit that introduced
+# it instead of a week of them, and weekly as the run that happens
+# even when nothing merges.
+#
+# Deliberately NOT part of ci-ok, and not on pull requests: 20 minutes
+# a PR, a paths filter would exclude almost nothing of liveswap/, and
+# a non-required red check still reads as blocked and trains people to
+# ignore it. Per-merge pinpoints the commit without touching the PR
+# checks or Dependabot auto-merge. A red run here means: read the log,
+# grab a heap/goroutine profile via the admin API, and treat it as a
+# bug report.
 name: soak
 
 on:
+  push:
+    branches: [main]
+    # Everything else can change what the soak measures, so this lists
+    # only what provably cannot: .dockerignore keeps *.md out of the
+    # build context, and a test file is not in the binary. A push is
+    # skipped only when EVERY changed file matches. Deliberately not an
+    # allowlist of leak-exposed paths — one would have skipped 2 of the
+    # last 25 merges while missing the root go.mod (where Caddy, Souin
+    # and the cache enter the binary) and the packaged unit's NOFILE.
+    paths-ignore:
+      - '**.md'
+      - '**_test.go'
   schedule:
     - cron: "43 5 * * 1"
   workflow_dispatch:
@@ -21,6 +40,14 @@ on:
 # Least-privilege token: this workflow only checks out and runs make.
 permissions:
   contents: read
+
+# A burst of merges should leave one soak running, not five queued.
+# The event is in the key on purpose: the weekly run and a push both
+# target main, so a branch-only key would let a merge cancel the
+# baseline run mid-flight.
+concurrency:
+  group: soak-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   soak:
