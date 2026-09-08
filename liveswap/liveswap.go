@@ -22,8 +22,10 @@ import (
 
 	"context"
 	"fmt"
+	"math"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -48,7 +50,11 @@ var appPool = caddy.NewUsagePool()
 
 func poolKey(name string) string { return "liveswap:app:" + name }
 
-var appNameRe = regexp.MustCompile(`^[a-z0-9-]{1,63}$`)
+// appNameMaxLen bounds an app name; it is also how much of a
+// request-supplied name the webhook is willing to log.
+const appNameMaxLen = 63
+
+var appNameRe = regexp.MustCompile(`^[a-z0-9-]{1,` + strconv.Itoa(appNameMaxLen) + `}$`)
 
 // versionRe is the tag alphabet: the Nomad-era webhook's set, minus a
 // leading dot. The alphabet has no path separator, so no tag can
@@ -249,6 +255,14 @@ type AppConfig struct {
 	// Caddyfile accepts human forms like 100MB). Decompressed content
 	// is additionally capped at 10x this. Default 100MB.
 	MaxArtifactSize int64 `json:"max_artifact_size,omitempty"`
+
+	// MaxArtifactEntries caps the number of entries (files, directories,
+	// links) an artifact may contain. The byte cap does not bound what
+	// extraction consumes — every entry costs an inode and most cost a
+	// disk block — so this is what keeps one hostile artifact from
+	// filling the disk for everything else on the box. A deploy warns
+	// at 75% of it. Default 100000; a CI-built artifact is thousands.
+	MaxArtifactEntries int `json:"max_artifact_entries,omitempty"`
 }
 
 // CaddyModule returns the Caddy module information.
@@ -413,6 +427,9 @@ func (cfg *AppConfig) applyDefaults(repl *caddy.Replacer) {
 	if cfg.MaxArtifactSize == 0 {
 		cfg.MaxArtifactSize = 100_000_000
 	}
+	if cfg.MaxArtifactEntries == 0 {
+		cfg.MaxArtifactEntries = 100_000
+	}
 }
 
 func (a *App) buildSpec(name string, cfg *AppConfig) (*appSpec, error) {
@@ -432,29 +449,30 @@ func (a *App) buildSpec(name string, cfg *AppConfig) (*appSpec, error) {
 		return nil, fmt.Errorf("app %s: %w", name, err)
 	}
 	return &appSpec{
-		name:            name,
-		command:         cfg.Command,
-		preStart:        cfg.PreStart,
-		env:             cfg.Env,
-		envFile:         cfg.EnvFile,
-		trust:           trust,
-		healthPath:      healthPath,
-		healthInterval:  time.Duration(cfg.HealthInterval),
-		healthTimeout:   time.Duration(cfg.HealthTimeout),
-		soak:            time.Duration(cfg.Soak),
-		deadline:        time.Duration(cfg.Deadline),
-		drain:           time.Duration(cfg.Drain),
-		grace:           time.Duration(cfg.Grace),
-		watchdogOn:      cfg.Watchdog != "off",
-		wdFailures:      cfg.WatchdogFailures,
-		wdGrace:         time.Duration(cfg.WatchdogGrace),
-		wdRestarts:      cfg.WatchdogRestarts,
-		wdWindow:        time.Duration(cfg.WatchdogWindow),
-		keep:            cfg.Keep,
-		maxArtifactSize: cfg.MaxArtifactSize,
-		allowInsecure:   a.AllowInsecureHTTP,
-		allowlist:       allowlist,
-		dirs:            newAppDirs(a.Root, name),
+		name:               name,
+		command:            cfg.Command,
+		preStart:           cfg.PreStart,
+		env:                cfg.Env,
+		envFile:            cfg.EnvFile,
+		trust:              trust,
+		healthPath:         healthPath,
+		healthInterval:     time.Duration(cfg.HealthInterval),
+		healthTimeout:      time.Duration(cfg.HealthTimeout),
+		soak:               time.Duration(cfg.Soak),
+		deadline:           time.Duration(cfg.Deadline),
+		drain:              time.Duration(cfg.Drain),
+		grace:              time.Duration(cfg.Grace),
+		watchdogOn:         cfg.Watchdog != "off",
+		wdFailures:         cfg.WatchdogFailures,
+		wdGrace:            time.Duration(cfg.WatchdogGrace),
+		wdRestarts:         cfg.WatchdogRestarts,
+		wdWindow:           time.Duration(cfg.WatchdogWindow),
+		keep:               cfg.Keep,
+		maxArtifactSize:    cfg.MaxArtifactSize,
+		maxArtifactEntries: cfg.MaxArtifactEntries,
+		allowInsecure:      a.AllowInsecureHTTP,
+		allowlist:          allowlist,
+		dirs:               newAppDirs(a.Root, name),
 	}, nil
 }
 
@@ -535,6 +553,15 @@ func (a *App) Validate() error {
 		}
 		if cfg.MaxArtifactSize < 1 {
 			return fmt.Errorf("app %s: max_artifact_size must be positive, got %d", name, cfg.MaxArtifactSize)
+		}
+		// The decompressed cap is decompressionRatioCap × this; past
+		// here it would overflow to a negative budget that reads every
+		// archive as empty.
+		if cfg.MaxArtifactSize > math.MaxInt64/decompressionRatioCap {
+			return fmt.Errorf("app %s: max_artifact_size must be at most %d, got %d", name, int64(math.MaxInt64/decompressionRatioCap), cfg.MaxArtifactSize)
+		}
+		if cfg.MaxArtifactEntries < 1 {
+			return fmt.Errorf("app %s: max_artifact_entries must be positive, got %d", name, cfg.MaxArtifactEntries)
 		}
 	}
 	// Cross-app, so it needs every app's config and comes after the

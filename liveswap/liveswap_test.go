@@ -1,6 +1,7 @@
 package liveswap
 
 import (
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -30,7 +31,7 @@ func TestApplyDefaults(t *testing.T) {
 		cfg.Grace != caddy.Duration(10*time.Second) {
 		t.Errorf("duration defaults wrong: %+v", cfg)
 	}
-	if cfg.Keep != 5 || cfg.MaxArtifactSize != 100_000_000 {
+	if cfg.Keep != 5 || cfg.MaxArtifactSize != 100_000_000 || cfg.MaxArtifactEntries != 100_000 {
 		t.Errorf("keep/size defaults wrong: %+v", cfg)
 	}
 	if cfg.Watchdog != "on" ||
@@ -131,6 +132,8 @@ func TestValidate(t *testing.T) {
 		{"negative soak", func(a *App) { a.Apps["blog"].Soak = caddy.Duration(-time.Second) }, "soak and drain"},
 		{"zero keep", func(a *App) { a.Apps["blog"].Keep = 0 }, "keep must be at least 1"},
 		{"zero size", func(a *App) { a.Apps["blog"].MaxArtifactSize = 0 }, "max_artifact_size must be positive"},
+		{"zero entries", func(a *App) { a.Apps["blog"].MaxArtifactEntries = 0 }, "max_artifact_entries must be positive"},
+		{"size overflows the decompressed cap", func(a *App) { a.Apps["blog"].MaxArtifactSize = math.MaxInt64/decompressionRatioCap + 1 }, "max_artifact_size must be at most"},
 		{"no allowlist anywhere", func(a *App) { a.ArtifactAllowlist = nil }, "artifact_allowlist is required"},
 		{"bad watchdog value", func(a *App) { a.Apps["blog"].Watchdog = "auto" }, "watchdog must be"},
 		{"zero watchdog failures", func(a *App) { a.Apps["blog"].WatchdogFailures = -1 }, "watchdog_failures must be at least 1"},

@@ -62,10 +62,25 @@ Concept map from the Nomad-era stack:
   and vetted query.
 - Extraction MUST reject: absolute paths, `..` traversal, symlink and
   hardlink targets resolving outside the archive root, special files
-  (devices/FIFOs), setuid/setgid bits, and decompressed content beyond
-  10× `max_artifact_size`. Validation is a full pre-pass; nothing is
-  written unless every entry is clean. Extraction goes to a staging dir
-  renamed into place on success.
+  (devices/FIFOs), setuid/setgid bits, decompressed content beyond
+  10× `max_artifact_size` — as decompressed stream and as the content
+  the entries declare, since a sparse entry expands from no stream —
+  more than `max_artifact_entries` filesystem objects (files,
+  directories and links, implied parents included: the byte cap bounds
+  the stream, not the inodes and blocks extraction consumes), and
+  names or link targets over PATH_MAX under the release directory or
+  with a component over NAME_MAX. Validation is a
+  full pre-pass; nothing is written unless every entry is clean. A
+  successful deploy reports the entry count and decompressed size and
+  warns past 75% of either cap, so the cliff is visible deploys ahead.
+  Extraction goes to a staging dir renamed into place on success.
+- Failed webhook authentications MUST be throttled in the journal:
+  per client address (10 failures per minute, then 429 for further
+  bad tokens) and process-wide (100 failures logged per minute, every
+  line included), so an
+  unauthenticated flood has a bounded journal cost from any number of
+  sources. A valid token MUST still be admitted from a throttled
+  address — the throttle bounds lines, never deploys.
 - `pre_start` (if configured) MUST run to completion in the release dir
   before the new instance starts; non-zero exit aborts the deploy.
 - The new instance MUST be continuously healthy for `soak` before any

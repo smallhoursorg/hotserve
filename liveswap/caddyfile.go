@@ -67,6 +67,7 @@ func parseWebhookDirective(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler,
 //	        watchdog_window   <duration>
 //	        keep              <n>
 //	        max_artifact_size <size>
+//	        max_artifact_entries <n>
 //	    }
 //	}
 func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
@@ -247,6 +248,10 @@ func (cfg *AppConfig) unmarshalBlock(d *caddyfile.Dispenser) error {
 				return d.Errf("max_artifact_size %q overflows", d.Val())
 			}
 			cfg.MaxArtifactSize = int64(size)
+		case "max_artifact_entries":
+			if err := parseCountArg(d, &cfg.MaxArtifactEntries); err != nil {
+				return err
+			}
 		default:
 			return d.Errf("unknown app subdirective %q", d.Val())
 		}
