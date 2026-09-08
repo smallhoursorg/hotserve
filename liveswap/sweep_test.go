@@ -1,0 +1,208 @@
+package liveswap
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+
+	"go.uber.org/zap"
+)
+
+func TestSweepUnknownApps(t *testing.T) {
+	conn := newFakeSystemdConn()
+	root := t.TempDir()
+	// What the removed app left on disk while hotserve was down: no
+	// managedApp will ever sweep it, so this sweep must. The configured
+	// app's are left alone (its own sweeps own them).
+	for _, app := range []string{"old", "demo"} {
+		d := newAppDirs(root, app)
+		must(t, os.MkdirAll(d.runDir("0a1b2c3d0a1b2c3d"), 0o750))
+		must(t, os.MkdirAll(d.proxy, 0o750))
+		must(t, os.WriteFile(filepath.Join(d.proxy, "0a1b2c3d0a1b2c3d.sock"), nil, 0o600))
+	}
+	running := unitStatus{LoadState: "loaded", ActiveState: "active", Sandboxed: true}
+	conn.setStatus("hotserve-demo.v1.0a1b2c3d0a1b2c3d.service", running)     // configured: keep
+	conn.setStatus("hotserve-old.v3.0a1b2c3d0a1b2c3d.service", running)      // removed app: stop
+	conn.setStatus("hotserve-old.v2.0a1b2c3e0a1b2c3e.service", failedStatus) // removed app: reset
+	conn.setStatus("hotserve-demo-api.v1.0a1b2c3d0a1b2c3d.service", running) // another configured app: keep
+	conn.setStatus("hotserve-weird.service", running)                        // not ours: ignore
+	configured := map[string]bool{"demo": true, "demo-api": true}
+	orig := appConfigured
+	appConfigured = func(app string) bool { return configured[app] }
+	t.Cleanup(func() { appConfigured = orig })
+	err := sweepUnknownApps(context.Background(), conn, root, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stops := conn.stops(); len(stops) != 1 || stops[0] != "hotserve-old.v3.0a1b2c3d0a1b2c3d.service" {
+		t.Fatalf("only the removed app's running unit must be stopped, got %v", stops)
+	}
+	conn.mu.Lock()
+	lists := conn.listCalls
+	conn.mu.Unlock()
+	if lists != 2 { // one global listing + one per unknown app, not per unit
+		t.Fatalf("each unknown app must be swept once, got %d listings", lists)
+	}
+	if rs := conn.resets(); len(rs) != 1 || rs[0] != "hotserve-old.v2.0a1b2c3e0a1b2c3e.service" {
+		t.Fatalf("the removed app's failed unit must be reset, got %v", rs)
+	}
+	for app, want := range map[string]bool{"old": false, "demo": true} {
+		d := newAppDirs(root, app)
+		_, runErr := os.Stat(d.runDir("0a1b2c3d0a1b2c3d"))
+		_, pinErr := os.Stat(filepath.Join(d.proxy, "0a1b2c3d0a1b2c3d.sock"))
+		if got := runErr == nil && pinErr == nil; got != want {
+			t.Fatalf("%s's socket dirs present = %v, want %v (run: %v, pin: %v)", app, got, want, runErr, pinErr)
+		}
+	}
+	conn.mu.Lock()
+	conn.listErr = errors.New("dbus down")
+	conn.mu.Unlock()
+	if err := sweepUnknownApps(context.Background(), conn, root, zap.NewNop()); err == nil {
+		t.Fatal("a listing failure must be reported")
+	}
+}
+
+func TestSweepUnknownAppsDoesNothingWhileExiting(t *testing.T) {
+	conn := newFakeSystemdConn()
+	root := t.TempDir()
+	conn.setStatus("hotserve-old.v3.0a1b2c3d0a1b2c3d.service", unitStatus{LoadState: "loaded", ActiveState: "active", Sandboxed: true})
+	orig := caddyExiting
+	caddyExiting = func() bool { return true }
+	t.Cleanup(func() { caddyExiting = orig })
+	if err := sweepUnknownApps(context.Background(), conn, root, zap.NewNop()); err != nil {
+		t.Fatal(err)
+	}
+	if len(conn.stops()) != 0 {
+		t.Fatalf("shutdown drops pool references; units must survive it, stops=%v", conn.stops())
+	}
+}
+
+func TestSweepUnknownAppsJudgesAgainstLiveConfig(t *testing.T) {
+	// A reload adds "late" back while the sweep is still listing: the
+	// sweep must judge against the ledger as it is right before acting
+	// — never a capture from before.
+	conn := newFakeSystemdConn()
+	root := t.TempDir()
+	running := unitStatus{LoadState: "loaded", ActiveState: "active", Sandboxed: true}
+	conn.setStatus("hotserve-late.v1.0a1b2c3d0a1b2c3d.service", running)
+	late := newAppDirs(root, "late")
+	must(t, os.MkdirAll(late.runDir("0a1b2c3d0a1b2c3d"), 0o750))
+	must(t, os.MkdirAll(late.proxy, 0o750))
+	must(t, os.WriteFile(filepath.Join(late.proxy, "0a1b2c3d0a1b2c3d.sock"), nil, 0o600))
+	var mu sync.Mutex
+	configured := map[string]bool{} // "late" is not configured when the sweep starts
+	orig := appConfigured
+	// Ownership is not monotonic: the candidate that adopts "late"
+	// mid-listing is itself cleaned up right after the sweep's veto,
+	// so every later check finds the app unowned again. The veto must
+	// still stand: a sweep that left a unit running prunes nothing.
+	appConfigured = func(app string) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		owned := configured[app]
+		configured[app] = false
+		return owned
+	}
+	t.Cleanup(func() { appConfigured = orig })
+	conn.mu.Lock()
+	conn.listHook = func() { mu.Lock(); configured["late"] = true; mu.Unlock() } // the reload lands mid-listing
+	conn.mu.Unlock()
+	if err := sweepUnknownApps(context.Background(), conn, root, zap.NewNop()); err != nil {
+		t.Fatal(err)
+	}
+	if len(conn.stops()) != 0 {
+		t.Fatalf("an app the live config names must never be swept, got %v", conn.stops())
+	}
+	// Nor may its socket dirs be pruned: the unit the sweep left
+	// running is the instance the reload is adopting.
+	for _, p := range []string{late.runDir("0a1b2c3d0a1b2c3d"), filepath.Join(late.proxy, "0a1b2c3d0a1b2c3d.sock")} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("an adopted app's %s was pruned: %v", p, err)
+		}
+	}
+}
+
+// Deciding an app's socket dirs are nobody's, and pruning them, is one
+// step under the app's ownerLock — the lock recovery holds while it
+// adopts — so a reload adopting the app cannot slip between the check
+// and the prune. Pinned by holding the lock: the sweep must wait for
+// that app, and only that app.
+func TestSweepUnknownAppsPruneWaitsForRecovery(t *testing.T) {
+	conn := newFakeSystemdConn()
+	root := t.TempDir()
+	gone, other := newAppDirs(root, "gone"), newAppDirs(root, "other")
+	must(t, os.MkdirAll(gone.runDir("0a1b2c3d0a1b2c3d"), 0o750))
+	must(t, os.MkdirAll(other.runDir("0a1b2c3d0a1b2c3d"), 0o750))
+	orig := appConfigured
+	appConfigured = func(string) bool { return false }
+	t.Cleanup(func() { appConfigured = orig })
+
+	mu := ownerLock("gone")
+	mu.Lock()
+	done := make(chan error, 1)
+	go func() { done <- sweepUnknownApps(context.Background(), conn, root, zap.NewNop()) }()
+	time.Sleep(50 * time.Millisecond)
+	if _, err := os.Stat(gone.runDir("0a1b2c3d0a1b2c3d")); err != nil {
+		mu.Unlock()
+		t.Fatal("the sweep pruned while recovery held the app's ownership lock")
+	}
+	mu.Unlock()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []appDirs{gone, other} {
+		if _, err := os.Stat(d.runDir("0a1b2c3d0a1b2c3d")); !os.IsNotExist(err) {
+			t.Fatalf("once the lock is free the unowned dirs are pruned (%s): %v", d.app, err)
+		}
+	}
+}
+
+// A root that cannot be read is reported, not treated as swept.
+func TestSweepUnknownAppsReportsAnUnreadableRoot(t *testing.T) {
+	conn := newFakeSystemdConn()
+	root := filepath.Join(t.TempDir(), "root-is-a-file")
+	must(t, os.WriteFile(root, nil, 0o600))
+	if err := sweepUnknownApps(context.Background(), conn, root, zap.NewNop()); err == nil {
+		t.Fatal("an unreadable root must be reported")
+	}
+	if err := sweepUnknownApps(context.Background(), conn, filepath.Join(t.TempDir(), "absent"), zap.NewNop()); err != nil {
+		t.Fatalf("a missing root is nothing to prune, not an error: %v", err)
+	}
+}
+
+// An app whose units are all gone never appears in the manager's
+// listing; if it is no longer configured either, the start-time sweep
+// is the only thing that will ever prune what it left under the root.
+// A configured app's leftovers are its own managedApp's business.
+func TestSweepUnknownAppsPrunesAppsWithNoUnitsLeft(t *testing.T) {
+	conn := newFakeSystemdConn()
+	root := t.TempDir()
+	for _, app := range []string{"gone", "demo"} {
+		d := newAppDirs(root, app)
+		must(t, os.MkdirAll(d.runDir("0a1b2c3d0a1b2c3d"), 0o750))
+		must(t, os.MkdirAll(d.proxy, 0o750))
+		must(t, os.WriteFile(filepath.Join(d.proxy, "0a1b2c3d0a1b2c3d.sock"), nil, 0o600))
+	}
+	must(t, os.WriteFile(filepath.Join(root, "not-an-app-dir.txt"), nil, 0o600))
+	orig := appConfigured
+	appConfigured = func(app string) bool { return app == "demo" }
+	t.Cleanup(func() { appConfigured = orig })
+	if err := sweepUnknownApps(context.Background(), conn, root, zap.NewNop()); err != nil {
+		t.Fatal(err)
+	}
+	for app, want := range map[string]bool{"gone": false, "demo": true} {
+		d := newAppDirs(root, app)
+		_, runErr := os.Stat(d.runDir("0a1b2c3d0a1b2c3d"))
+		_, pinErr := os.Stat(filepath.Join(d.proxy, "0a1b2c3d0a1b2c3d.sock"))
+		if got := runErr == nil && pinErr == nil; got != want {
+			t.Fatalf("%s's socket dirs present = %v, want %v", app, got, want)
+		}
+	}
+	if _, err := os.Stat(newAppDirs(root, "gone").app); err != nil {
+		t.Fatal("only the socket dirs are pruned; the app's directory and releases stay")
+	}
+}

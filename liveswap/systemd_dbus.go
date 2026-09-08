@@ -15,7 +15,6 @@ import (
 
 	sddbus "github.com/coreos/go-systemd/v22/dbus"
 	godbus "github.com/godbus/dbus/v5"
-	"go.uber.org/zap"
 )
 
 // userManagerClient talks to the systemd service manager of the user
@@ -68,32 +67,17 @@ type userManagerClient struct {
 // userManager is the process-wide client every systemdRunner shares.
 var userManager = &userManagerClient{}
 
-// sandboxCapability reports whether this manager can deliver the
-// sandbox (nil) or why not, measuring at most once per connection
-// (see the cache fields above). The measurement starts a real unit,
-// so the first caller after a dial pays for it and every later config
-// load reads the cache.
-//
-// probe() rather than get(): it proves the manager answers a real
-// request, and its error names the uid, the socket and the lingering
-// to enable. App.Start puts that reason verbatim into its refusal, so
-// a manager that went away between Start's probeManager and here must
-// not be reported as a sandbox problem with no remedy attached.
-func (c *userManagerClient) sandboxCapability(logger *zap.Logger) error {
-	if err := c.probe(); err != nil {
-		return err
-	}
-	return c.cachedSandboxCapability(func() error {
-		r := newSystemdRunner(c, logger)
-		defer r.cancel()
-		return probeSandboxCapability(r)
-	})
-}
-
 // cachedSandboxCapability returns the measurement held for the current
 // connection, taking a fresh one via measure when the cache is empty
-// or belongs to an older one. Separate from sandboxCapability so the
-// caching rule is testable without a manager to dial.
+// or belongs to an older one. The measurement itself is the caller's
+// (App.measureSandbox): this owns only the caching rule, which keeps
+// it testable without a manager to dial.
+//
+// Precondition every caller must hold: probe() the connection first.
+// A manager that is simply gone would otherwise surface through the
+// measurement as "this host cannot deliver the sandbox", losing the
+// error that names the uid, the socket and the lingering to enable —
+// and there is no remedy in config for the reason it would report.
 //
 // Only a capable verdict is cached. A failed one is not a measurement
 // of the host so much as the absence of one: probeSandboxCapability

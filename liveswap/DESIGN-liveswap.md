@@ -260,8 +260,10 @@ cancelled/joined by that config's Cleanup.
 | `app.go` | `managedApp` state machine, Deploy pipeline, recovery, env building |
 | `caddyfile.go` | all Caddyfile parsing (global option, directive, upstreams); NO defaults here — Provision owns them |
 | `handler.go` | webhook auth, payload validation, status endpoint |
+| `authlimit.go` | what a failed webhook auth costs the journal: per-address and process-wide budgets, on the injected clock |
 | `upstreams.go` | dynamic upstream source (the cutover read side) |
 | `runner.go` / `runner_systemd.go` / `systemd_dbus.go` | runner interface + the systemd transient-unit implementation + its D-Bus client |
+| `sweep.go` | `App.Start`'s reconciliation against the manager: stop the units, and prune the dirs, of apps no loaded config names. Module-layer (the pool is the ledger), driving the runner |
 | `socket.go` | the per-instance socket: nonce, path checks, stale-socket pruning, the unix dialer |
 | `sandbox.go` | the per-unit sandbox: view spec, base view, bind-source checks, capability probe (see DESIGN-sandbox.md) |
 | `harden/` | leaf package: the supervisor goes non-dumpable at init, before `os` |
