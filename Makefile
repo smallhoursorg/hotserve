@@ -205,8 +205,8 @@ e2e:
 # Leak-hunting soak against the product binary: deploy/reload/traffic
 # churn, then goroutine/fd return-to-baseline assertions over the admin
 # metrics endpoint. ~15-20 min at defaults; tune with SOAK_DEPLOYS,
-# SOAK_RELOADS, SOAK_CLIENTS, SOAK_REQS. Runs weekly in CI (soak.yml),
-# never in the PR path.
+# SOAK_RELOADS, SOAK_CLIENTS, SOAK_REQS. Runs per merge to main and
+# weekly in CI (soak.yml); never in the PR path.
 #
 # On failure: hotserve runs under systemd inside e2e-hotserve, so that
 # container's console carries nothing from it and the journal is the
