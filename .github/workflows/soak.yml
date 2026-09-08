@@ -28,6 +28,12 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # GitHub's Ubuntu kernel refuses unprivileged user namespaces to
+      # unconfined processes, and the sysctl is not namespaced, so it
+      # reaches into the privileged e2e container and the unconditional
+      # sandbox refuses to start. Brings the runner in line with a real
+      # Debian host; the full note is on the e2e job in ci.yml.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - env:
           SOAK_DEPLOYS: ${{ inputs.deploys || '300' }}
           SOAK_RELOADS: ${{ inputs.reloads || '300' }}
