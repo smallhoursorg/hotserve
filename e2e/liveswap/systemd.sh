@@ -45,6 +45,19 @@ systemctl is-active --quiet "user@$uid.service" && pass "user@$uid is active" ||
 user_systemctl is-active --quiet "$unit" && pass "unit is active under the user manager" || fail "unit $unit not active"
 [ "$(user_systemctl show -p MainPID --value "$unit")" = "$pid" ] \
 	&& pass "unit MainPID matches the status pid" || fail "MainPID differs from status pid $pid"
+# The command status reports is read back out of the manager's own
+# ExecStart, so it is what the unit is running — not what the config
+# says now, which a reload can change without restarting anything.
+cmd=$(json_arr "$s" command)
+cmd0=${cmd%% *}
+if [ -z "$cmd0" ]; then
+	fail "status reports no command: $s"
+else
+	case "$(user_systemctl show -p ExecStart --value "$unit")" in
+	*"$cmd0"*) pass "status command is the unit's ExecStart ($cmd)" ;;
+	*) fail "status command '$cmd' is not the unit's ExecStart" ;;
+	esac
+fi
 [ "$(user_systemctl show -p Restart --value "$unit")" = "no" ] \
 	&& pass "unit has Restart=no (the watchdog is the only restarter)" || fail "unit Restart is not 'no'"
 [ "$(user_systemctl show -p KillMode --value "$unit")" = "control-group" ] \
@@ -59,6 +72,12 @@ if [ "$(json_num "$s" pid)" = "$pid" ] && [ "$(json_str "$s" unit)" = "$unit" ];
 else
 	fail "instance changed across restart: $s"
 fi
+# A reattached unit has no launch in the new process to remember, so
+# the command can only be read back from the manager — the case where
+# a status that reported what hotserve started would go blank.
+[ "$(json_arr "$s" command)" = "$cmd" ] \
+	&& pass "the reattached instance still reports its command" \
+	|| fail "command lost across reattach: $s"
 case "$(body)" in "hello "*) pass "proxy serves after restart" ;; *) fail "proxy not serving after restart" ;; esac
 
 echo "=== systemd 3: SIGKILL of hotserve, then start: reattach ==="

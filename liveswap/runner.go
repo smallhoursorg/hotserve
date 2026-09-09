@@ -99,9 +99,18 @@ type handle interface {
 	state() handleState
 }
 
-// handleState is the persisted identity of a running instance.
+// handleState is what a runner reports about a running instance —
+// read live by status and the watchdog, and partly persisted. Only
+// Unit and StartedAt reach state.json: they are all Reattach needs,
+// and the manager is the ledger for the rest (DESIGN-liveswap.md).
+// Everything else here is json:"-" on purpose.
 type handleState struct {
-	PID       int       `json:"pid,omitempty"`
+	// PID is the unit's main process as last read. Not persisted: the
+	// watcher corrects it in the live handle, never in the file.
+	PID int `json:"-"`
+	// Command is the argv the manager reports. Not persisted: it shows
+	// what is running, and must never be what decides a relaunch.
+	Command   []string  `json:"-"`
 	StartedAt time.Time `json:"started_at,omitempty"`
 	// Unit is the transient systemd unit running the instance; it is
 	// what Reattach looks up after a hotserve restart.

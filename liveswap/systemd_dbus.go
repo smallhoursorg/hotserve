@@ -531,6 +531,7 @@ func statusFromProps(props map[string]any) unitStatus {
 		SubState:       propString(props, "SubState"),
 		Result:         propString(props, "Result"),
 		MainPID:        propInt(props, "MainPID"),
+		ExecStart:      propExecStart(props),
 		Sandboxed:      propYes(props, "PrivateUsers") && propYes(props, "PrivatePIDs"),
 		ExecMainCode:   propInt(props, "ExecMainCode"),
 		ExecMainStatus: propInt(props, "ExecMainStatus"),
@@ -583,6 +584,25 @@ func propYes(props map[string]any, key string) bool {
 		return v != "" && v != "no" && v != "false"
 	}
 	return false
+}
+
+// propExecStart reads the argv out of the ExecStart property:
+// a(sasbttttuii), an array of exec entries whose second member is the
+// argv. godbus decodes that as [][]any with the argv a []string — the
+// layout the integration lane pins against a real user manager, and
+// the only one read here, since an unrecognised shape already yields
+// nothing. Only the first entry is taken (every unit the runner builds
+// has exactly one ExecStart); the result is a copy.
+func propExecStart(props map[string]any) []string {
+	entries, ok := props["ExecStart"].([][]any)
+	if !ok || len(entries) == 0 || len(entries[0]) < 2 {
+		return nil
+	}
+	argv, ok := entries[0][1].([]string)
+	if !ok {
+		return nil
+	}
+	return append([]string(nil), argv...)
 }
 
 func propInt(props map[string]any, key string) int {

@@ -131,11 +131,16 @@ Properties that matter to the model:
   tar entry names, the operator's allowlist echoed verbatim
   (`artifactAllowEntry.String` and `describeAllowlist`,
   liveswap/allowlist.go). The status snapshot exposes the app's
-  **socket and PID** and watchdog cause/failure state
+  **socket, PID and the argv its unit is running** — the last read back
+  from the manager's `ExecStart` by `propExecStart`
+  (liveswap/systemd_dbus.go), so a credential the operator passed as a
+  command-line flag is echoed there — and watchdog cause/failure state
   (`managedApp.status`, liveswap/app.go; `watchdogState.statusSnapshot`,
-  liveswap/watchdog.go). Artifact URLs *are* redacted before
-  logs/errors (`redactURL`, liveswap/download.go), so query signatures
-  do not leak.
+  liveswap/watchdog.go). The environment is deliberately not in the
+  snapshot: it is the place secrets are meant to go, and unlike the argv
+  it answers no question about what is running. Artifact URLs *are*
+  redacted before logs/errors (`redactURL`, liveswap/download.go), so
+  query signatures do not leak.
 - **Replay / downgrade is bounded.** The bearer JWT is short-lived
   (`exp`), so a captured request is replayable only within that window.
   Versions are immutable: re-deploying an existing version (running or

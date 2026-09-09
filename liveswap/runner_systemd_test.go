@@ -7,6 +7,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -67,6 +68,10 @@ func (f *fakeSystemdConn) StartTransientUnit(ctx context.Context, u unitSpec) (s
 			if f.startStatus != nil {
 				st = *f.startStatus
 			}
+			// The manager reports back the ExecStart it was handed,
+			// whatever else the unit's status says — which is what
+			// makes reading the command back from it faithful.
+			st.ExecStart = u.ExecStart
 			f.status[u.Name] = st
 		}
 	}
@@ -253,6 +258,11 @@ func TestSystemdRunnerStartBuildsUnit(t *testing.T) {
 	st := h.state()
 	if st.Unit != u.Name || st.PID != 4242 || st.StartedAt.IsZero() {
 		t.Fatalf("handle state %+v", st)
+	}
+	// The command is read back from the manager, not remembered from
+	// the spec, so it is the unit's own ExecStart.
+	if !slices.Equal(st.Command, u.ExecStart) {
+		t.Fatalf("handle must report the manager's ExecStart %v, got %v", u.ExecStart, st.Command)
 	}
 	if !r.Alive(h) {
 		t.Fatal("freshly started instance must be alive")
@@ -531,13 +541,20 @@ func TestSystemdRunnerReattach(t *testing.T) {
 		t.Fatal("unknown unit ⇒ observed not running")
 	}
 
-	conn.setStatus("live.service", unitStatus{LoadState: "loaded", ActiveState: "active", SubState: "running", MainPID: 77, Sandboxed: true})
+	adopted := []string{"/opt/app/server", "--port=0"}
+	conn.setStatus("live.service", unitStatus{LoadState: "loaded", ActiveState: "active", SubState: "running", MainPID: 77, Sandboxed: true, ExecStart: adopted})
 	h, ok, err := r.Reattach(handleState{Unit: "live.service", StartedAt: started})
 	if !ok || err != nil {
 		t.Fatalf("running unit must be adopted: ok=%v err=%v", ok, err)
 	}
 	if st := h.state(); st.PID != 77 || st.Unit != "live.service" || !st.StartedAt.Equal(started) {
 		t.Fatalf("adopted state %+v", st)
+	}
+	// Reattach is the path with no launch in this process to remember,
+	// so the command can only come from the manager — and must, or
+	// status would report nothing for every app across a restart.
+	if st := h.state(); !slices.Equal(st.Command, adopted) {
+		t.Fatalf("a reattached handle must report the unit's command %v, got %v", adopted, st.Command)
 	}
 	// A running unit WITHOUT the sandbox is never adopted: nothing
 	// this hotserve starts lacks it, so it is something else's unit —
@@ -664,9 +681,15 @@ func TestStatusFromPropsAndStopBudget(t *testing.T) {
 		"LoadState": "loaded", "ActiveState": "active", "SubState": "running",
 		"MainPID": uint32(77), "ExecMainCode": int32(1), "ExecMainStatus": int32(3),
 		"TimeoutStopUSec": uint64(60_000_000),
+		// As godbus decodes a(sasbttttuii): an array of structs, each
+		// []any, whose second member is the argv.
+		"ExecStart": [][]any{{"/opt/app/server", []string{"/opt/app/server", "--flag"}, false}},
 	})
 	if st.MainPID != 77 || st.ExecMainStatus != 3 || st.StopTimeout != time.Minute {
 		t.Fatalf("parsed %+v", st)
+	}
+	if !slices.Equal(st.ExecStart, []string{"/opt/app/server", "--flag"}) {
+		t.Fatalf("ExecStart parsed as %v", st.ExecStart)
 	}
 	// The unit's own budget wins over a smaller caller grace; a larger
 	// caller grace wins; nothing known ⇒ default, never zero.
@@ -675,6 +698,50 @@ func TestStatusFromPropsAndStopBudget(t *testing.T) {
 	}
 	if (unitStatus{}).stopBudget(0) != defaultStopTimeout {
 		t.Fatal("unknown budget and zero grace must fall back to the default")
+	}
+}
+
+// propExecStart reads a nested D-Bus shape out of a map hotserve does
+// not build, so every way it can be malformed must read as "no command"
+// rather than as a panic or as a half-parsed argv. A missing command is
+// reported as missing; it is never guessed at.
+func TestPropExecStartRefusesEveryShapeButItsOwn(t *testing.T) {
+	argv := []string{"/opt/app/server", "--flag"}
+	for _, tc := range []struct {
+		name string
+		val  any
+		want []string
+	}{
+		{"godbus struct array", [][]any{{"/opt/app/server", argv, false}}, argv},
+		{"first entry wins", [][]any{{"/x", argv, false}, {"/y", []string{"other"}, false}}, argv},
+		{"no ExecStart at all", nil, nil},
+		{"empty array", [][]any{}, nil},
+		{"entry too short", [][]any{{"/opt/app/server"}}, nil},
+		{"argv is not a list", [][]any{{"/x", "server --flag", false}}, nil},
+		{"property is a scalar", uint64(3), nil},
+		// Shapes godbus does not produce for this property are refused
+		// rather than accommodated — reporting a command inferred from
+		// an unrecognised layout would be worse than reporting none.
+		{"outer decoded as []any", []any{[]any{"/x", argv, false}}, nil},
+		{"argv decoded as []any", [][]any{{"/x", []any{"/opt/app/server"}, false}}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			props := map[string]any{}
+			if tc.val != nil {
+				props["ExecStart"] = tc.val
+			}
+			if got := propExecStart(props); !slices.Equal(got, tc.want) {
+				t.Fatalf("propExecStart = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	// The result never aliases the property map: a caller holding the
+	// argv cannot be edited from under it by a later read.
+	props := map[string]any{"ExecStart": [][]any{{"/x", argv, false}}}
+	got := propExecStart(props)
+	got[0] = "mutated"
+	if argv[0] != "/opt/app/server" {
+		t.Fatal("propExecStart must copy the argv, not alias the property map")
 	}
 }
 
@@ -751,7 +818,7 @@ func TestSystemdRunnerSweep(t *testing.T) {
 	}
 }
 
-func TestSystemdRunnerWatcherBackfillsPID(t *testing.T) {
+func TestSystemdRunnerWatcherBackfillsPIDAndCommand(t *testing.T) {
 	r, conn := newTestSystemdRunner(t)
 	// Start succeeds but the immediate MainPID read fails: the unit is
 	// fine, hotserve just could not ask. The watcher repairs the PID
@@ -773,16 +840,62 @@ func TestSystemdRunnerWatcherBackfillsPID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the start job succeeded; a failed PID read must not fail Start: %v", err)
 	}
-	if h2.state().PID != 0 {
-		t.Fatalf("PID should be unknown after a failed read, got %d", h2.state().PID)
+	if h2.state().PID != 0 || h2.state().Command != nil {
+		t.Fatalf("pid and command should be unknown after a failed read, got %+v", h2.state())
 	}
+	// The command is repaired for the same reason as the pid, and it
+	// matters more: an instance that came up during a D-Bus outage
+	// would otherwise report no command for its whole life — blank in
+	// exactly the incident the field exists to explain.
 	conn.setStatusErr(nil)
 	deadline := time.Now().Add(2 * time.Second)
-	for h2.state().PID != 4242 {
+	for h2.state().PID != 4242 || len(h2.state().Command) == 0 {
 		if time.Now().After(deadline) {
-			t.Fatalf("watcher never backfilled the PID, still %d", h2.state().PID)
+			t.Fatalf("watcher never backfilled the handle, still %+v", h2.state())
 		}
 		time.Sleep(time.Millisecond)
+	}
+	// One unit, one command: a later read cannot change it.
+	first := h2.state().Command
+	conn.setStatus(h2.state().Unit, unitStatus{LoadState: "loaded", ActiveState: "active", MainPID: 4242, Sandboxed: true, ExecStart: []string{"/somewhere/else"}})
+	time.Sleep(20 * time.Millisecond)
+	if !slices.Equal(h2.state().Command, first) {
+		t.Fatalf("the command must be read once and kept, got %v after %v", h2.state().Command, first)
+	}
+}
+
+// An app that dies before the watcher's first good poll must still
+// report what it was running. The adopt-time read failed, so the only
+// status the handle ever sees is the terminal one — and that is
+// precisely the crash an operator is trying to explain, so the command
+// is taken off every successful read rather than only off a running
+// one.
+func TestSystemdRunnerCommandSurvivesACrashBeforeTheFirstGoodPoll(t *testing.T) {
+	r, conn := newTestSystemdRunner(t)
+	conn.setStatusErr(errors.New("dbus hiccup"))
+	h, err := r.Start(testApp(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.state().Command != nil {
+		t.Fatalf("sanity: the adopt read failed, so no command yet, got %v", h.state().Command)
+	}
+	// The manager answers again, and what it reports is a unit that has
+	// already failed — never a running one.
+	unit := h.state().Unit
+	started := conn.unit(0)
+	conn.setStatus(unit, unitStatus{
+		LoadState: "loaded", ActiveState: "failed", Result: "exit-code",
+		ExecMainCode: 1, ExecMainStatus: 2, Sandboxed: true, ExecStart: started.ExecStart,
+	})
+	conn.setStatusErr(nil)
+	select {
+	case <-r.Wait(h):
+	case <-time.After(2 * time.Second):
+		t.Fatal("the watcher never observed the unit go")
+	}
+	if !slices.Equal(h.state().Command, started.ExecStart) {
+		t.Fatalf("a dead instance must still report what it was running: got %v, want %v", h.state().Command, started.ExecStart)
 	}
 }
 
@@ -892,13 +1005,17 @@ func TestUnitStatusRunning(t *testing.T) {
 			t.Errorf("%+v running=%v want %v", tc.st, got, tc.want)
 		}
 	}
-	for st, want := range map[unitStatus]string{
-		{ExecMainCode: 1, ExecMainStatus: 3}:                           "exit status 3",
-		{ExecMainCode: 1, ExecMainStatus: 0}:                           "exit status 0",
-		{ExecMainCode: 2, ExecMainStatus: 9}:                           "killed by signal 9 (killed)",
-		{ExecMainCode: 0, ExecMainStatus: 0}:                           "no process exit recorded",
-		{ExecMainCode: 0, ExecMainStatus: 0, Result: "exec-condition"}: "no process exit recorded (result exec-condition)",
+	for _, tc := range []struct {
+		st   unitStatus
+		want string
+	}{
+		{unitStatus{ExecMainCode: 1, ExecMainStatus: 3}, "exit status 3"},
+		{unitStatus{ExecMainCode: 1, ExecMainStatus: 0}, "exit status 0"},
+		{unitStatus{ExecMainCode: 2, ExecMainStatus: 9}, "killed by signal 9 (killed)"},
+		{unitStatus{ExecMainCode: 0, ExecMainStatus: 0}, "no process exit recorded"},
+		{unitStatus{ExecMainCode: 0, ExecMainStatus: 0, Result: "exec-condition"}, "no process exit recorded (result exec-condition)"},
 	} {
+		st, want := tc.st, tc.want
 		if got := st.exitString(); got != want {
 			t.Errorf("%+v exitString = %q want %q", st, got, want)
 		}

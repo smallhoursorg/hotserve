@@ -125,6 +125,9 @@ type unitStatus struct {
 	SubState    string
 	Result      string // service Result= once it has stopped
 	MainPID     int
+	// ExecStart is the argv the manager runs, read back rather than
+	// remembered — which is also what makes it right after a Reattach.
+	ExecStart []string
 	// ExecMainCode/Status describe how the main process ended, with
 	// waitid semantics: code 1 = exited (status is the exit code),
 	// 2 = killed and 3 = dumped (status is the signal number).
@@ -229,12 +232,30 @@ type systemdHandle struct {
 	// when the handle was made (the start spec's grace, or the value
 	// read at reattach) — the fallback when a fresh read fails.
 	stopTimeout time.Duration
-	done        chan struct{}
-	exit        atomic.Pointer[unitStatus] // final status, set before done closes
+	// argv is the unit's command, read back at adopt and at reattach.
+	// Written once, but the read can fail (the D-Bus outage that also
+	// leaves pid unread) and the watcher repairs both — so it is
+	// atomic like pid, not plain like unit and startedAt.
+	argv atomic.Pointer[[]string]
+	done chan struct{}
+	exit atomic.Pointer[unitStatus] // final status, set before done closes
 }
 
 func (h *systemdHandle) state() handleState {
-	return handleState{PID: int(h.pid.Load()), StartedAt: h.startedAt, Unit: h.unit}
+	st := handleState{PID: int(h.pid.Load()), StartedAt: h.startedAt, Unit: h.unit}
+	if argv := h.argv.Load(); argv != nil {
+		st.Command = *argv
+	}
+	return st
+}
+
+// setArgv records the command the manager reports, if it is not
+// already known. Only the first non-empty read counts: a unit's
+// ExecStart does not change, so a later one can only repeat it.
+func (h *systemdHandle) setArgv(argv []string) {
+	if len(argv) > 0 {
+		h.argv.CompareAndSwap(nil, &argv)
+	}
 }
 
 // Unit naming: hotserve-<app>.<version>.<nonce>[.prestart].service.
@@ -437,6 +458,7 @@ func (r *systemdRunner) adopt(ctx context.Context, unit string, startedAt time.T
 	h := &systemdHandle{unit: unit, startedAt: startedAt, stopTimeout: stopTimeout, done: make(chan struct{})}
 	if st, err := r.conn.UnitStatus(ctx, unit); err == nil {
 		h.pid.Store(int64(st.MainPID))
+		h.setArgv(st.ExecStart)
 		// Spelled as sandboxProperties spells it (systemd_dbus.go):
 		// every unit gets PrivatePIDs=, so every unit has the
 		// intermediate PID to settle past.
@@ -719,6 +741,7 @@ func (r *systemdRunner) Reattach(st handleState) (handle, bool, error) {
 		}
 		h := &systemdHandle{unit: st.Unit, startedAt: st.StartedAt, stopTimeout: us.StopTimeout, done: make(chan struct{})}
 		h.pid.Store(int64(us.MainPID))
+		h.setArgv(us.ExecStart)
 		go r.watch(h)
 		return h, true, nil
 	}
@@ -834,6 +857,10 @@ func (r *systemdRunner) watch(h *systemdHandle) {
 			outage = false
 			r.log().Info("unit state readable again", zap.String("unit", h.unit))
 		}
+		// Off every successful read, before the terminal branch: an app
+		// that crashes before the first good poll would otherwise take
+		// its command to the grave. A terminal snapshot still has it.
+		h.setArgv(st.ExecStart)
 		if st.running() {
 			// The handle follows the unit's MainPID: a read that failed
 			// right after start is repaired here, and so is the pid of a

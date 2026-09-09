@@ -89,10 +89,13 @@ type fakeHandle struct {
 	alive  bool
 	done   chan struct{}
 	socket string // removed when the "unit" stops, as ExecStopPost= does
-	mu     sync.Mutex
+	// argv is what this handle was started with, reported back the way
+	// the real runner reports the manager's ExecStart.
+	argv []string
+	mu   sync.Mutex
 }
 
-func (h *fakeHandle) state() handleState { return handleState{PID: 4242} }
+func (h *fakeHandle) state() handleState { return handleState{PID: 4242, Command: h.argv} }
 
 func (h *fakeHandle) isAlive() bool {
 	h.mu.Lock()
@@ -151,7 +154,7 @@ func (r *fakeRunner) Start(spec startSpec) (handle, error) {
 	if r.startErr != nil {
 		return nil, r.startErr
 	}
-	h := &fakeHandle{id: fmt.Sprintf("h%d", len(r.handles)), alive: true, done: make(chan struct{}), socket: spec.socket}
+	h := &fakeHandle{id: fmt.Sprintf("h%d", len(r.handles)), alive: true, done: make(chan struct{}), socket: spec.socket, argv: spec.command}
 	r.started = append(r.started, spec)
 	r.handles = append(r.handles, h)
 	return h, nil
@@ -200,8 +203,9 @@ func (r *fakeRunner) Reattach(st handleState) (handle, bool, error) {
 		return nil, false, err
 	}
 	// Nothing recorded is nothing to reattach to, as with the real
-	// runner; a record the caller refused arrives here as zero.
-	if !r.reattachOK || st == (handleState{}) {
+	// runner, which branches on the unit name alone; a record the
+	// caller refused arrives here as zero.
+	if !r.reattachOK || st.Unit == "" {
 		return nil, false, nil
 	}
 	h := &fakeHandle{id: "reattached", alive: true}

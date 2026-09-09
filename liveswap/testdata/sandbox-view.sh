@@ -22,7 +22,7 @@
 # lanes silently returned a cached pass when only this file changed.
 # Keeping one copy is the point: three copies drifted on fifteen keys,
 # and one of them had stopped testing that /etc/ssl/private stays out
-# of the view (#52).
+# of the view (#72).
 #
 # Each lane wraps it in its own ./server, which SOURCES this file and
 # then becomes whatever that lane needs (a sleep, the demo app,
