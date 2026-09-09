@@ -542,6 +542,12 @@ func sandboxRoot(t *testing.T) (root, release, shared string) {
 			t.Fatal(err)
 		}
 	}
+	// The convenience symlink an app really has next to its dirs.
+	// Without it the probe's current=closed would be a check on a path
+	// that never existed on the host either.
+	if err := os.Symlink(filepath.Join("releases", "v1"), filepath.Join(root, "itest", "current")); err != nil {
+		t.Fatal(err)
+	}
 	return root, release, shared
 }
 
@@ -558,49 +564,56 @@ func TestIntegrationSystemdSandboxProbe(t *testing.T) {
 	}
 }
 
-// sandboxProbeScript writes one line per check into $1 (the shared
-// dir, the only writable persistent path in the view). MGR and HS are
-// the user manager's and a bystander's PIDs.
-const sandboxProbeScript = `out="$1/probe.txt"; MGR=$2; ROOT=$3
-: > "$out"
-echo "pid=$$" >> "$out"
-read _ _ n < /proc/self/uid_map; echo "uidmap=$n" >> "$out"
-echo "nprocs=$(ls /proc | grep -c '^[0-9]')" >> "$out"
-ls /proc/$MGR/root/ >/dev/null 2>&1 && echo "mgr_root=open" >> "$out" || echo "mgr_root=closed" >> "$out"
-cat /proc/$MGR/environ >/dev/null 2>&1 && echo "mgr_environ=open" >> "$out" || echo "mgr_environ=closed" >> "$out"
-[ -e "$ROOT/other" ] && echo "sibling=open" >> "$out" || echo "sibling=closed" >> "$out"
-[ -e "$ROOT/itest/state.json" ] && echo "state=open" >> "$out" || echo "state=closed" >> "$out"
-[ -e "$ROOT/itest/tmp" ] && echo "apptmp=open" >> "$out" || echo "apptmp=closed" >> "$out"
-touch "$ROOT/itest/releases/v1/w" 2>/dev/null && echo "release=writable" >> "$out" || echo "release=readonly" >> "$out"
-touch "$ROOT/newfile" 2>/dev/null && echo "root=writable" >> "$out" || echo "root=readonly" >> "$out"
-# Absence, not unreadability: under a deny-by-default view an unnamed
-# path does not exist inside the unit, which is a stronger statement
-# than the InaccessiblePaths= node this used to test for readability.
-[ -e /var/lib/hotserve ] && echo "hotserve_lib=open" >> "$out" || echo "hotserve_lib=closed" >> "$out"
-[ -e /run/user/$(id -u)/systemd/private ] && echo "mgr_socket=open" >> "$out" || echo "mgr_socket=closed" >> "$out"
-for d in /var/lib /etc/hotserve /etc/liveswap /run/hotserve /opt /srv /home /root /mnt; do
-  k=$(echo "$d" | tr -d /); [ -e "$d" ] && echo "abs_$k=present" >> "$out" || echo "abs_$k=absent" >> "$out"
-done
-echo "etc_listing=$(ls /etc | tr '\n' ' ')" >> "$out"
-# And the base view must actually carry a runnable OS, or "absent"
-# would only mean the unit has nothing at all.
-[ -x /bin/sh ] && echo "binsh=ok" >> "$out" || echo "binsh=MISSING" >> "$out"
-[ -x /usr/bin/env ] && echo "usrbinenv=ok" >> "$out" || echo "usrbinenv=MISSING" >> "$out"
-[ -e /etc/ssl ] && echo "etcssl=ok" >> "$out" || echo "etcssl=MISSING" >> "$out"
-[ -r /etc/resolv.conf ] && echo "resolvconf=ok" >> "$out" || echo "resolvconf=MISSING" >> "$out"
-cg=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup); (echo max > "$cg/memory.max") 2>/dev/null && echo "cgroup=writable" >> "$out" || echo "cgroup=readonly" >> "$out"
-touch /tmp/w 2>/dev/null && echo "tmp=writable" >> "$out" || echo "tmp=readonly" >> "$out"
-echo "home=$HOME" >> "$out"
-[ -n "$XDG_RUNTIME_DIR" ] && echo "xdg_runtime=set" >> "$out" || echo "xdg_runtime=unset" >> "$out"
-echo "done=1" >> "$out"
-sleep 300
-`
+// writeSandboxView installs the shared view probe (sandboxViewScript,
+// the same file e2e/liveswap/systemd.sh and packaging/test/smoke.sh
+// use) into the release dir, alongside a ./server that sources it and
+// then idles. Sourced, not run as a child, so the probe reports $$ as
+// the unit's main pid.
+func writeSandboxView(t *testing.T, release string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(release, sandboxViewName), []byte(sandboxViewScript), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// sleep, not exec sleep: as namespace PID 1 an exec'd sleep would
+	// have no default SIGTERM disposition and Stop would always have to
+	// escalate to SIGKILL.
+	server := "#!/bin/sh\n. ./sandbox-view.sh\nsleep 300\n"
+	if err := os.WriteFile(filepath.Join(release, "server"), []byte(server), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// seedRuntimeDirFixture creates the runtime dir and admin socket that a
+// real hotserve has, because this container runs none. Without it
+// run_hotserve=closed and admin_socket=closed pass on paths that never
+// existed on the host, proving nothing about the view — the same
+// vacuity the manager-socket and /proc checks guard against by pinning
+// the uid and the pid. The packaged unit creates /run/hotserve through
+// RuntimeDirectory=; the socket is a real one, so [ -e ] sees what it
+// would see in production.
+func seedRuntimeDirFixture(t *testing.T) {
+	t.Helper()
+	if err := os.MkdirAll("/run/hotserve", 0o750); err != nil {
+		t.Fatalf("seeding /run/hotserve: %v", err)
+	}
+	sock := "/run/hotserve/admin.sock"
+	_ = os.Remove(sock)
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("seeding %s: %v", sock, err)
+	}
+	t.Cleanup(func() { _ = l.Close(); _ = os.Remove(sock) })
+	// The probe's "closed" is only evidence if the path is here to hide.
+	if _, err := os.Stat(sock); err != nil {
+		t.Fatalf("%s was not created; the in-unit probe would prove nothing: %v", sock, err)
+	}
+}
 
 func readProbe(t *testing.T, shared string) map[string]string {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		b, err := os.ReadFile(filepath.Join(shared, "probe.txt"))
+		b, err := os.ReadFile(filepath.Join(shared, "view.txt"))
 		if err == nil && strings.Contains(string(b), "done=1") {
 			m := map[string]string{}
 			for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
@@ -610,7 +623,7 @@ func readProbe(t *testing.T, shared string) map[string]string {
 			return m
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("probe.txt not written: %v", err)
+			t.Fatalf("view.txt not written: %v", err)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -626,9 +639,8 @@ func readProbe(t *testing.T, shared string) map[string]string {
 func TestIntegrationSystemdSandboxedUnit(t *testing.T) {
 	r := integrationRunner(t)
 	root, release, shared := sandboxRoot(t)
-	if err := os.WriteFile(filepath.Join(release, "server"), []byte("#!/bin/sh\n"+sandboxProbeScript), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	writeSandboxView(t, release)
+	seedRuntimeDirFixture(t)
 	mgrPID := strings.TrimSpace(run(t, "systemctl", "show", "-p", "MainPID", "--value", "user@"+strconv.Itoa(os.Getuid())+".service"))
 	if mgrPID == "" || mgrPID == "0" {
 		mgrPID = strconv.Itoa(os.Getppid())
@@ -637,10 +649,11 @@ func TestIntegrationSystemdSandboxedUnit(t *testing.T) {
 		app:     "itest",
 		version: "sandboxed",
 		nonce:   "0a1b2c3d0a1b2c3d",
-		command: []string{"./server", shared, mgrPID, root},
+		command: []string{"./server"},
 		dir:     release,
-		env:     []string{"PATH=" + os.Getenv("PATH"), "HOME=" + shared},
-		grace:   2 * time.Second,
+		env: []string{"PATH=" + os.Getenv("PATH"), "HOME=" + shared,
+			"MGR_PID=" + mgrPID, "HOTSERVE_UID=" + strconv.Itoa(os.Getuid())},
+		grace: 2 * time.Second,
 		sandbox: &sandboxSpec{root: root, appDir: filepath.Join(root, "itest"), appName: "itest",
 			writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}}},
 	}
@@ -653,12 +666,40 @@ func TestIntegrationSystemdSandboxedUnit(t *testing.T) {
 	t.Logf("probe: %v", got)
 	for k, want := range map[string]string{
 		"pid": "1", "mgr_root": "closed", "mgr_environ": "closed",
-		"sibling": "closed", "state": "closed", "apptmp": "closed",
-		"release": "writable", "hotserve_lib": "closed", "mgr_socket": "closed",
+		// The root shows this app and nothing else: sandboxRoot puts a
+		// second app's shared/secret next door, and it must not be
+		// nameable from in here.
+		"root_listing": "itest ",
+		"state":        "closed", "apptmp": "closed", "current": "closed",
+		"release": "writable",
+		// Deliberately no "root" expectation here. This lane's fixture
+		// root is a /var/tmp temp dir, and PrivateTmp= gives the unit
+		// its own writable /var/tmp with the binds created inside it
+		// (sandbox.go, validateSandboxRoot) — so the root dir itself is
+		// writable, while still naming nothing but this app. Under the
+		// real /var/lib layout it is read-only, which e2e and the
+		// packaging smoke both assert.
+		"hotserve_lib": "closed", "run_hotserve": "closed", "etc_hotserve": "closed",
+		"admin_socket": "closed", "mgr_socket": "closed",
 		"cgroup": "readonly", "tmp": "writable", "home": shared, "xdg_runtime": "unset",
 		// The base view: an OS the app can actually run on. Without
 		// these, "absent" below would only mean the unit is empty.
 		"binsh": "ok", "usrbinenv": "ok", "etcssl": "ok", "resolvconf": "ok",
+		// The trust store is named, not the tree holding it: /etc/ssl
+		// also holds /etc/ssl/private. This lane used to check only
+		// that /etc/ssl existed, which a bind of the whole tree — every
+		// app handed hotserve's TLS keys — would have satisfied.
+		"sslprivate": "absent",
+		// No name to resolve was supplied, and the probe says so rather
+		// than omitting the key: e2e is where DNS from inside is proved.
+		"dns": "skipped",
+		// The probe echoes back what it was handed. A blank or literal
+		// value here would make every /proc assertion above vacuous.
+		"saw_mgr_pid": mgrPID, "saw_uid": strconv.Itoa(os.Getuid()),
+		// And the uid it actually used for the manager-socket path:
+		// /run/user/<wrong uid> is absent too, so mgr_socket=closed
+		// only means something once this is pinned.
+		"uid": strconv.Itoa(os.Getuid()),
 	} {
 		if got[k] != want {
 			t.Errorf("%s = %q, want %q", k, got[k], want)
@@ -667,8 +708,8 @@ func TestIntegrationSystemdSandboxedUnit(t *testing.T) {
 	// Deny-by-default: not one of these is bound, so not one of them
 	// exists — no InaccessiblePaths= entry, and no list to keep current.
 	for _, k := range []string{
-		"abs_varlib", "abs_etchotserve", "abs_etcliveswap", "abs_runhotserve",
-		"abs_opt", "abs_srv", "abs_home", "abs_root", "abs_mnt",
+		"abs_varlib", "abs_etcliveswap", "abs_opt", "abs_srv",
+		"abs_home", "abs_root", "abs_mnt", "abs_media",
 	} {
 		if got[k] != "absent" {
 			t.Errorf("%s = %q, want absent", k, got[k])

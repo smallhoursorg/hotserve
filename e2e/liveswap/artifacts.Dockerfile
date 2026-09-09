@@ -5,9 +5,14 @@
 # whose ./server records its sandbox view before exec'ing the app),
 # and serves them over HTTP — the stand-in for a GitHub/GitLab release
 # asset URL.
+#
+# The build context is the repo root, not this directory (see
+# docker-compose.yml), which is why every COPY path is repo-relative:
+# the probe release carries liveswap/testdata/sandbox-view.sh, one view probe shared
+# with liveswap's integration test and packaging/test/smoke.sh (#52).
 FROM golang:1.27-trixie AS build
 WORKDIR /build
-COPY testapp/main.go workers.sh probe.sh ./
+COPY e2e/liveswap/testapp/main.go e2e/liveswap/workers.sh e2e/liveswap/probe-server.sh liveswap/testdata/sandbox-view.sh ./
 RUN CGO_ENABLED=0 go build -o server main.go
 RUN mkdir /out \
 	&& for v in v1 v2; do \
@@ -29,11 +34,12 @@ RUN mkdir /out \
 	&& tar -czf /out/demo-workers.tar.gz -C /tmp/stage-workers . \
 	&& mkdir /tmp/stage-probe \
 	&& cp /build/server /tmp/stage-probe/server-bin \
-	&& cp /build/probe.sh /tmp/stage-probe/server \
+	&& cp /build/probe-server.sh /tmp/stage-probe/server \
+	&& cp /build/sandbox-view.sh /tmp/stage-probe/ \
 	&& chmod +x /tmp/stage-probe/server \
 	&& echo probe > /tmp/stage-probe/version.txt \
 	&& tar -czf /out/demo-probe.tar.gz -C /tmp/stage-probe .
 
 FROM caddy:2.11.4
 COPY --from=build /out /srv/artifacts
-COPY artifacts.Caddyfile /etc/caddy/Caddyfile
+COPY e2e/liveswap/artifacts.Caddyfile /etc/caddy/Caddyfile

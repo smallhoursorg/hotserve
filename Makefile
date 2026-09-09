@@ -172,6 +172,7 @@ install-test:
 		-v /sys/fs/cgroup:/sys/fs/cgroup:rw \
 		-v $(CURDIR)/dist:/dist:ro \
 		-v $(CURDIR)/packaging/test/smoke.sh:/smoke.sh:ro \
+		-v $(CURDIR)/liveswap/testdata/sandbox-view.sh:/sandbox-view.sh:ro \
 		hotserve-install-test-$(subst :,-,$(DISTRO))
 	docker exec hotserve-smoke /bin/bash /smoke.sh; status=$$?; \
 	if [ $$status -ne 0 ]; then \

@@ -81,21 +81,32 @@ echo "=== systemd 4: the app runs in its sandbox — the view from inside ==="
 # whatever kernel the CI runner has, so record what that kernel allows.
 echo "host: $(uname -r); apparmor_restrict_unprivileged_userns=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo absent)"
 echo "userns: max_user_namespaces=$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo absent)"
-# The probe release's ./server records its view into its shared dir
-# (e2e/liveswap/probe.sh), then becomes the app. The image is trixie
+# The probe release's ./server sources the shared view probe
+# (liveswap/testdata/sandbox-view.sh, one asset with liveswap's integration test and
+# packaging/test/smoke.sh) to record its view into its shared dir, then
+# becomes the app. The image is trixie
 # (systemd 257) — the only release in the support matrix — so the
 # sandbox is the whole set: a PID namespace on top of the user
 # namespace and the mount set. The view from inside is the assertion;
 # there is no status field to consult, because there is nothing to
 # report — every unit gets this.
+# A second app on disk, so root_listing below is a real sibling check.
+# With only demo there, binding the WHOLE liveswap root into the unit
+# would still list exactly "demo" and pass. This one is deliberately
+# not in the config: it exists to be invisible, and its secret is what
+# a leaking view would expose.
+mkdir -p /var/lib/liveswap/other/shared
+: > /var/lib/liveswap/other/shared/secret
+chown -R hotserve:hotserve /var/lib/liveswap/other
+
 code=$(deploy demo-probe.tar.gz sb1)
 [ "$code" = "200" ] || fail "deploy of the probe release returned $code: $(body)"
-probe=/var/lib/liveswap/demo/shared/probe.txt
+probe=/var/lib/liveswap/demo/shared/view.txt
 i=0
 until grep -q '^done=1' "$probe" 2>/dev/null; do
 	i=$((i + 1)); [ "$i" -ge 20 ] && break; sleep 0.5
 done
-grep -q '^done=1' "$probe" || fail "probe.txt not written by the sandboxed app"
+grep -q '^done=1' "$probe" || fail "view.txt not written by the sandboxed app"
 probe_val() { sed -n "s/^$1=//p" "$probe" | head -1; }
 expect_probe() { # <key> <want>
 	got=$(probe_val "$1")
@@ -109,6 +120,8 @@ n=$(probe_val nprocs)
 [ -n "$n" ] && [ "$n" -le 8 ] \
 	&& pass "inside the sandbox: /proc lists $n pids (own PID namespace)" \
 	|| fail "inside the sandbox: /proc lists $n pids — the host's, not a PID namespace"
+[ -d /var/lib/liveswap/other ] \
+	|| fail "the sibling app fixture is missing; root_listing would prove nothing"
 [ "$(probe_val root_listing)" = "demo " ] \
 	&& pass "inside the sandbox: the liveswap root shows only this app" \
 	|| fail "inside the sandbox: root listing is '$(probe_val root_listing)', want only 'demo'"
@@ -118,9 +131,35 @@ expect_probe current closed
 expect_probe release writable
 expect_probe root readonly
 expect_probe hotserve_lib closed
+# Real here, unlike the admin socket below: the packaged unit creates
+# /run/hotserve through RuntimeDirectory=. Guarded so "closed" cannot
+# come from the directory simply not existing.
+[ -d /run/hotserve ] \
+	|| fail "/run/hotserve does not exist on the host; the in-unit probe would prove nothing"
 expect_probe run_hotserve closed
+# The manager socket is only meaningfully "closed" if the probe looked
+# at the real path: under a deny-by-default view /run/user/<any uid> is
+# absent, so a wrong uid would pass this. Pin the uid the probe used,
+# and prove the socket is there to be hidden.
+expect_probe uid "$uid"
+[ -e "/run/user/$uid/systemd/private" ] \
+	|| fail "the manager socket does not exist on the host; the in-unit probe would prove nothing"
 expect_probe mgr_socket closed
 expect_probe etc_hotserve closed
+# admin_socket is deliberately NOT asserted here. This config puts the
+# admin API on TCP (e2e/Caddyfile: test-only, so the runner can drive
+# /load over the network), so /run/hotserve/admin.sock is never
+# created and "closed" would pass on a path that never existed.
+# run_hotserve above already proves the whole directory is out of the
+# view, and install-test asserts the socket itself against a real one.
+# The manager's /proc is not checked from in here: this lane has no way
+# to hand the probe a runtime pid (its Caddyfile is baked at image
+# build), so the probe reports "skipped" rather than a vacuous "closed".
+# Those two routes are covered from outside the unit further down
+# (denied_to_hotserve), and from inside by the integration and smoke
+# lanes, which can pass MGR_PID.
+expect_probe mgr_root skipped
+expect_probe mgr_environ skipped
 expect_probe cgroup readonly
 expect_probe tmp writable
 expect_probe home /var/lib/liveswap/demo/shared
@@ -133,14 +172,21 @@ expect_probe binsh ok
 expect_probe usrbinenv ok
 expect_probe etcssl ok
 expect_probe sslprivate absent
+expect_probe resolvconf ok
 # Deny-by-default: nothing bound these, so they do not exist inside the
 # unit — not "present but inaccessible", which is what the hidden-set
 # model left behind and what could go stale between deploys.
-for d in opt srv home root mnt media varlibhotserve etcliveswap; do
+for d in opt srv home root mnt media etcliveswap; do
 	expect_probe "abs_$d" absent
 done
+# /var/lib is the exception: the liveswap root lives under it, so it is
+# present and varlib_listing below is the real check. hotserve's own
+# state dir next door is hotserve_lib above.
+expect_probe abs_varlib present
 # /etc is named entry by entry, never bound whole: an app that could
 # list all of /etc would see every other app's env_file.
+[ -n "$(probe_val etc_listing)" ] \
+	|| fail "inside the sandbox: /etc lists nothing at all — the base view is empty, not narrow"
 case " $(probe_val etc_listing)" in
 *" hotserve "* | *" liveswap "* | *" shadow "*)
 	fail "inside the sandbox: /etc carries more than the named entries: $(probe_val etc_listing)" ;;
