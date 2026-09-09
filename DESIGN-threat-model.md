@@ -46,9 +46,10 @@ public material — see "Reducing the asset".
 ## Trust boundaries and entry points
 
 Source is cited by symbol, not line: `Type.Method` or a package-level
-name, with the file it lives in. Where a claim rests on one statement
-inside a long function, the prose names it so it can be found by
-search.
+name, with the file it lives in named on a passage's first citation —
+later symbols are in that file unless another is named. Where a claim
+rests on one statement inside a long function, the prose names it so it
+can be found by search.
 
 ### Webhook endpoint — `liveswap/handler.go`
 
@@ -99,7 +100,7 @@ Properties that matter to the model:
   (`maxPayloadBytes`, enforced in `Handler.deployURL`,
   liveswap/handler.go); `deployMu.TryLock()` → 409 serializes deploys
   (`managedApp.Deploy`, liveswap/app.go; the push path takes it before
-  staging, in `Handler.deployPush`).
+  staging, in `Handler.deployPush`, liveswap/handler.go).
 - **Path routing is `path.Base(path.Clean(...))`**, the first statement
   of `Handler.ServeHTTP` (liveswap/handler.go): `/anything/deep/myapp`
   targets `myapp`. A naive `path /deploy/*` site matcher does not
