@@ -416,7 +416,7 @@ Design summary (full operator docs in README.md "Watchdog"):
 - Multi-node or any cluster awareness.
 - Resource limits — one unit property away (`MemoryMax=`, `TasksMax=`,
   `CPUQuota=`; the sandbox makes cgroupfs read-only so they hold);
-  unset by design until an app needs them (#52).
+  unset by design until an app needs them (#71).
 - Prometheus metrics (deploys_total, duration).
 - Deploy queueing; 409 + CI retry is the queue.
 - Windows.

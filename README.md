@@ -196,7 +196,7 @@ an on-disk release. Full details, CI snippets, and every option:
   not start — [liveswap/README.md](liveswap/README.md#sandbox).
   Resource caps (`MemoryMax=`, `TasksMax=`, `CPUQuota=`) hold inside
   the unit already and are unset by design until an app needs
-  bounding (#52). Per-app UIDs would need a small privileged helper
+  bounding (#71). Per-app UIDs would need a small privileged helper
   and stay a later milestone.
 - Hosted APT/APK repositories with package signing and auto-updates
 - A metrics/alerts module to sit alongside liveswap and penaltybox —
