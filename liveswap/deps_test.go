@@ -23,9 +23,9 @@ import (
 // concern, not a file, and a concern is sometimes split (appdirs.go
 // and socket.go are one path vocabulary; runner.go and sandbox.go pass
 // each other value types). Upward edges are not forbidden outright —
-// there are a few deliberate ones — but each must be named in
-// allowedUpward with the reason it is right, so a new one has to be
-// argued for in review instead of arriving unnoticed.
+// there are a few deliberate ones — but allowedUpward lists them by the
+// names allowed to cross, with the reason, so a new backwards edge has
+// to be argued for in review instead of arriving unnoticed.
 
 // fileLayer places every non-test file in the package. Low is leaf.
 var fileLayer = map[string]int{
@@ -67,31 +67,60 @@ var fileLayer = map[string]int{
 	"deploytoken_cmd.go": 5,
 }
 
+// upward is one deliberate backwards edge: the names that may cross,
+// and why that is right. Naming them matters — a pair-level exemption
+// would let the *next* upward name from the same file cross unnoticed,
+// which is the whole failure this test exists to stop.
+type upward struct {
+	names  []string
+	reason string
+}
+
 // allowedUpward lists every edge that runs against the layering on
-// purpose. An entry that stops being an upward edge is a failure too:
-// a stale exception is how a list like this rots into a rubber stamp.
-var allowedUpward = map[[2]string]string{
-	{"app.go", "liveswap.go"}: "process-lifecycle facts (caddyExiting, " +
-		"liveStartedApps) live with the module that owns the pool; Destruct " +
-		"reads them to tell a shutdown from an app being removed (#65)",
+// purpose. It is checked in both directions: an unlisted name fails,
+// and so does a listed name — or a whole entry — that is no longer an
+// upward edge. A stale exception is how a list like this rots into a
+// rubber stamp.
+var allowedUpward = map[[2]string]upward{
+	{"app.go", "liveswap.go"}: {
+		names: []string{"caddyExiting", "liveStartedApps"},
+		reason: "process-lifecycle facts live with the module that owns the " +
+			"pool; Destruct reads them to tell a shutdown from an app being " +
+			"removed (#65)",
+	},
 
-	{"sweep.go", "liveswap.go"}: "same: the pool is the ledger the sweep asks " +
-		"what is still configured (appPool, poolKey, caddyExiting)",
+	{"sweep.go", "liveswap.go"}: {
+		names: []string{"appPool", "caddyExiting", "poolKey"},
+		reason: "same: the pool is the ledger the sweep asks what is still " +
+			"configured",
+	},
 
-	{"download.go", "app.go"}: "app.go holds the fetcher interface and " +
-		"download.go implements it, so the call points down; only the value " +
-		"types it is handed (appSpec, deployRequest, validationError) point back",
+	{"download.go", "app.go"}: {
+		names: []string{"appSpec", "deployRequest", "validationError"},
+		reason: "app.go holds the fetcher interface and download.go implements " +
+			"it, so the call points down; only the value types it is handed " +
+			"point back",
+	},
 
-	{"sandbox.go", "app.go"}: "sandboxSpecFor is a method on *appSpec — " +
-		"methods live with the concern, not with the receiver (#65)",
+	{"sandbox.go", "app.go"}: {
+		names: []string{"appSpec"},
+		reason: "sandboxSpecFor is a method on *appSpec — methods live with the " +
+			"concern, not with the receiver (#65)",
+	},
 
-	{"sandbox.go", "liveswap.go"}: "validateEnvFileIsolation is a whole-config " +
-		"Validate rule: checking one app's env_file against every other app's " +
-		"dirs needs the whole config (#65)",
+	{"sandbox.go", "liveswap.go"}: {
+		names: []string{"App"},
+		reason: "validateEnvFileIsolation is a whole-config Validate rule: " +
+			"checking one app's env_file against every other app's dirs needs " +
+			"the whole config (#65)",
+	},
 
-	{"systemd_dbus.go", "liveswap.go"}: "managerClient is declared where it is " +
-		"consumed and asserted where it is implemented (`var _ managerClient`) " +
-		"— Go's normal direction for an interface",
+	{"systemd_dbus.go", "liveswap.go"}: {
+		names: []string{"managerClient"},
+		reason: "the interface is declared where it is consumed and asserted " +
+			"where it is implemented (`var _ managerClient`) — Go's normal " +
+			"direction for an interface",
+	},
 }
 
 func TestFileLayering(t *testing.T) {
@@ -101,6 +130,8 @@ func TestFileLayering(t *testing.T) {
 	// name -> the files declaring it. A build-tagged pair (linkSocket in
 	// socket_linux.go and socket_other.go) declares one name twice; both
 	// sit in the same layer, so an edge to either reads the same.
+	structTypes := structTypeNames(files)
+
 	declaredIn := map[string][]string{}
 	for name, f := range files {
 		for _, d := range packageScopeDecls(f) {
@@ -124,7 +155,7 @@ func TestFileLayering(t *testing.T) {
 
 	edges := map[[2]string][]string{}
 	for name, f := range files {
-		for _, use := range freeIdents(f) {
+		for _, use := range freeIdents(f, structTypes) {
 			for _, decl := range declaredIn[use] {
 				if decl == name {
 					continue
@@ -135,32 +166,60 @@ func TestFileLayering(t *testing.T) {
 		}
 	}
 
-	used := map[[2]string]bool{}
+	seen := map[[2]string]map[string]bool{}
 	for e, names := range edges {
 		from, to := fileLayer[e[0]], fileLayer[e[1]]
 		if from >= to {
 			continue
 		}
-		if _, ok := allowedUpward[e]; ok {
-			used[e] = true
+		names = dedupe(names)
+		sort.Strings(names)
+		ex, ok := allowedUpward[e]
+		if !ok {
+			t.Errorf("%s (layer %d) uses %s (layer %d): %s\n"+
+				"\tthis edge points up. Move the names down into a lower file, or — if the edge\n"+
+				"\tis right — add it to allowedUpward in deps_test.go with the reason.",
+				e[0], from, e[1], to, strings.Join(names, ", "))
 			continue
 		}
-		sort.Strings(names)
-		t.Errorf("%s (layer %d) uses %s (layer %d): %s\n"+
-			"\tthis edge points up. Move the names down into a lower file, or — if the edge\n"+
-			"\tis right — add it to allowedUpward in deps_test.go with the reason.",
-			e[0], from, e[1], to, strings.Join(dedupe(names), ", "))
+		seen[e] = map[string]bool{}
+		allowed := map[string]bool{}
+		for _, n := range ex.names {
+			allowed[n] = true
+		}
+		for _, n := range names {
+			seen[e][n] = true
+			if !allowed[n] {
+				t.Errorf("%s (layer %d) uses %s (layer %d): %s\n"+
+					"\tthis name is not one of the deliberate upward edges between these two\n"+
+					"\tfiles (%s). Move it down, or add it to that allowedUpward entry.",
+					e[0], from, e[1], to, n, strings.Join(ex.names, ", "))
+			}
+		}
 	}
-	for e, reason := range allowedUpward {
-		if strings.TrimSpace(reason) == "" {
+
+	for e, ex := range allowedUpward {
+		if strings.TrimSpace(ex.reason) == "" {
 			t.Errorf("allowedUpward excuses %s -> %s with no reason: say why the edge is right",
 				e[0], e[1])
 		}
-		if !used[e] {
+		if len(ex.names) == 0 {
+			t.Errorf("allowedUpward excuses %s -> %s without naming any name", e[0], e[1])
+		}
+		crossed, ok := seen[e]
+		if !ok {
 			t.Errorf("allowedUpward excuses %s -> %s, which is no longer an upward edge: remove it",
 				e[0], e[1])
+			continue
+		}
+		for _, n := range ex.names {
+			if !crossed[n] {
+				t.Errorf("allowedUpward excuses %q crossing %s -> %s, which it no longer does: remove it",
+					n, e[0], e[1])
+			}
 		}
 	}
+
 }
 
 // parsePackageFiles reads every non-test .go file in the package,
@@ -181,6 +240,13 @@ func parsePackageFiles(t *testing.T, fset *token.FileSet) map[string]*ast.File {
 		f, err := parser.ParseFile(fset, filepath.Join(".", name), nil, parser.SkipObjectResolution)
 		if err != nil {
 			t.Fatalf("parse %s: %v", name, err)
+		}
+		// Only files the compiler would compile into this package: a
+		// `//go:build ignore` helper in `package main` (the usual shape
+		// for a codegen or tool file) declares names that are not this
+		// package's, and merging them would invent edges.
+		if f.Name.Name != "liveswap" {
+			continue
 		}
 		files[name] = f
 	}
@@ -229,6 +295,51 @@ func packageScopeDecls(f *ast.File) []string {
 	return out
 }
 
+// structTypeNames returns the package's type names whose underlying
+// type is a struct, so a composite literal of one can be recognised
+// without type information.
+func structTypeNames(files map[string]*ast.File) map[string]bool {
+	out := map[string]bool{}
+	for _, f := range files {
+		for _, d := range f.Decls {
+			g, ok := d.(*ast.GenDecl)
+			if !ok || g.Tok != token.TYPE {
+				continue
+			}
+			for _, sp := range g.Specs {
+				ts, ok := sp.(*ast.TypeSpec)
+				if !ok {
+					continue
+				}
+				if _, ok := ts.Type.(*ast.StructType); ok {
+					out[ts.Name.Name] = true
+				}
+			}
+		}
+	}
+	return out
+}
+
+// structLit reports whether a composite literal of this type has field
+// names for keys. A nil type is an elided literal nested inside
+// another (`[]bindMount{{Source: ...}}`); assuming struct there can
+// hide an edge written as a key of a nested *map* literal, which is
+// the safe direction — it never invents one.
+func structLit(t ast.Expr, structTypes map[string]bool) bool {
+	switch t := t.(type) {
+	case nil, *ast.StructType:
+		return true
+	case *ast.Ident:
+		return structTypes[t.Name]
+	case *ast.SelectorExpr:
+		return true // a struct from another package
+	case *ast.StarExpr:
+		return structLit(t.X, structTypes)
+	default:
+		return false // map, array, slice: keys are expressions
+	}
+}
+
 // freeIdents returns identifiers a file uses that it does not itself
 // bind: not selector right-hand sides (x.Sel), struct field names,
 // composite-literal keys, labels, or import names.
@@ -238,7 +349,7 @@ func packageScopeDecls(f *ast.File) []string {
 // can hide a real edge (a false negative) but can never invent one, so
 // the check does not cry wolf. It reports nothing on this package
 // today; see TestFileLayeringShadowing.
-func freeIdents(f *ast.File) []string {
+func freeIdents(f *ast.File, structTypes map[string]bool) []string {
 	bound := boundNames(f)
 	skip := map[*ast.Ident]bool{}
 	ast.Inspect(f, func(n ast.Node) bool {
@@ -250,6 +361,12 @@ func freeIdents(f *ast.File) []string {
 				skip[id] = true
 			}
 		case *ast.CompositeLit:
+			// Only a struct literal's keys are field names. A map or
+			// array literal's keys are ordinary expressions, and
+			// skipping those would hide any edge written as a map key.
+			if !structLit(n.Type, structTypes) {
+				return true
+			}
 			for _, el := range n.Elts {
 				if kv, ok := el.(*ast.KeyValueExpr); ok {
 					if id, ok := kv.Key.(*ast.Ident); ok {

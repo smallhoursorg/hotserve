@@ -264,7 +264,7 @@ running upward.
 | Layer | Files |
 |---|---|
 | 0 | `clock.go`, `names.go` |
-| 1 | `appdirs.go`, `socket.go`, `extract.go`, `allowlist.go`, `authlimit.go`, `deploytrust.go`, `health.go` |
+| 1 | `appdirs.go`, `socket.go` (+`_linux`/`_other`), `extract.go`, `allowlist.go`, `authlimit.go`, `deploytrust.go`, `health.go` |
 | 2 | `runner.go`, `sandbox.go`, `download.go`, `state.go` |
 | 3 | `runner_systemd.go`, `systemd_dbus.go` |
 | 4 | `app.go`, `watchdog.go`, `sweep.go` |
@@ -279,11 +279,15 @@ Upward edges are not banned, because a few are right: an interface
 declared where it is consumed and asserted where it is implemented, a
 `Validate` rule that needs the whole config, a method that lives with
 its concern rather than its receiver. Each is listed in the test's
-`allowedUpward` with the reason it is right, and an entry that stops
-being an upward edge fails too — a stale exception is how a list like
-that rots into a rubber stamp. The effect is that a new backwards edge
-has to be argued for in review instead of arriving unnoticed, which is
-what #60 found eight of.
+`allowedUpward` — by the *names* allowed to cross, not just the pair of
+files, so the next upward name between two already-excused files still
+has to be argued for — together with the reason it is right. The list
+is checked in both directions: an unlisted name fails, and so does a
+listed name, or a whole entry, that no longer crosses. A stale
+exception is how a list like that rots into a rubber stamp.
+
+The effect is that a new backwards edge has to be argued for in review
+instead of arriving unnoticed, which is what #60 found eight of.
 
 ### File-by-file
 
