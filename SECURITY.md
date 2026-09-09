@@ -1,8 +1,10 @@
 # Security policy
 
-hotserve runs as a privileged system service and supervises your
-application processes, so security reports are taken seriously and
-handled with priority.
+hotserve terminates TLS for your sites, holds the keys, and supervises
+your application processes. It runs unprivileged — `User=hotserve`,
+with `CAP_NET_BIND_SERVICE` and nothing else — but a compromise still
+reaches everything it serves, so security reports are taken seriously
+and handled with priority.
 
 ## Reporting a vulnerability
 

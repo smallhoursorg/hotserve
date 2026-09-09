@@ -1,11 +1,12 @@
 # nfpm packaging definition — currently .deb only, run once
 # per arch × format by `make package`. Env: NFPM_ARCH, NFPM_VERSION.
 #
-# No .apk: Alpine runs OpenRC, so the shipped systemd unit would be
-# inert there — a package that installs but starts nothing. The .apk
-# returns with an OpenRC script and an Alpine install-test lane in the
-# hosted APT/APK repository phase; Alpine users take the raw-binary
-# tarball path meanwhile (documented in the README).
+# No .apk, and no plan for one. Alpine runs OpenRC, and liveswap runs
+# apps as transient systemd units with no fallback runner (see
+# App.Start), so an Alpine hotserve would serve — Caddy, cache,
+# penaltybox — but refuse any Caddyfile defining an app. An OpenRC
+# package would install a hotserve missing the feature it exists for.
+# The raw-binary tarball is for other systemd hosts, not for Alpine.
 name: hotserve
 arch: "${NFPM_ARCH}"
 platform: linux

@@ -61,7 +61,7 @@ services:
     volumes:
       - .:/src
 
-  # Packager for the release .deb/.apk artifacts (`make package`).
+  # Packager for the release .deb artifacts (`make package`).
   nfpm:
     image: goreleaser/nfpm:v2.47.0
     working_dir: /src

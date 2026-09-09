@@ -138,12 +138,13 @@ build:
 		wait $$p1 || exit 1; wait $$p2 || exit 1; \
 		chmod -R a+rwX build'
 
-# Builds .deb for both arches into dist/. (.apk dropped until it can
-# ship a working OpenRC service and an Alpine install-test lane — a
-# package that installs but starts nothing is worse than the raw
-# tarball; returns with the hosted-repo phase.) The packages carry
-# the systemd unit, the starter /etc/hotserve/Caddyfile and the data
-# dirs; postinstall creates the hotserve system user.
+# Builds .deb for both arches into dist/. .deb only, and no .apk
+# planned: liveswap runs apps as transient systemd units with no
+# fallback runner, so an Alpine/OpenRC package would install a hotserve
+# that serves but refuses any Caddyfile defining an app — see
+# packaging/nfpm.yaml. The packages carry the systemd unit, the starter
+# /etc/hotserve/Caddyfile and the data dirs; postinstall creates the
+# hotserve system user.
 package: build
 	mkdir -p dist
 	for a in amd64 arm64; do \
