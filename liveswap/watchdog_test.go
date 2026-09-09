@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"slices"
 	"testing"
 	"time"
 )
@@ -100,6 +101,60 @@ func TestWatchdogRestartsOnCrash(t *testing.T) {
 	status := rig.ma.status()
 	if status.Watchdog == nil || status.Watchdog.RestartsInWindow != 1 || status.Watchdog.LastRestartCause != "crash" {
 		t.Fatalf("watchdog status not recorded: %+v", status.Watchdog)
+	}
+}
+
+// TestRelaunchRendersTheCurrentCommandAndStatusShowsIt: a relaunch
+// pins the version and nothing else — command, env and sandbox render
+// from the spec as it is NOW (launchVersion), so an app definition
+// edited since the deploy reaches the next crash restart. A reload
+// does not restart a running app, so that edit can sit unapplied for
+// hours and then take effect at a restart nobody connects to it.
+//
+// That is the behaviour, deliberately: the same rule watchdogDisabled
+// follows for the same event. What makes it survivable is that status
+// reports the argv the instance is actually running, so the change is
+// visible instead of being inferred from an app that started behaving
+// differently. This test is that promise.
+func TestRelaunchRendersTheCurrentCommandAndStatusShowsIt(t *testing.T) {
+	rig := newTestRig(t)
+	deployV1(t, rig)
+	deployed := rig.ma.status().Command
+	if len(deployed) == 0 {
+		t.Fatal("status must report the argv the instance was launched with")
+	}
+
+	// The operator edits the command and reloads. Swapped before the
+	// watchdog starts: a live spec is read by the watchdog goroutine,
+	// and this test is about the relaunch, not about racing it.
+	edited := *rig.spec
+	edited.command = []string{"./server", "--edited", "{version}"}
+	rig.ma.specMu.Lock()
+	rig.ma.spec = &edited
+	rig.ma.specMu.Unlock()
+
+	// Nothing has restarted, so the running instance — and status —
+	// still report the command it was actually started with.
+	if got := rig.ma.status().Command; !slices.Equal(got, deployed) {
+		t.Fatalf("a reload must not change what the running instance reports: %v became %v", deployed, got)
+	}
+
+	rig.startWatchdogT(t)
+	waitUntil(t, "watchdog to arm", func() bool {
+		s := rig.ma.wd.currentState()
+		return s == wdStateGrace || s == wdStateWatching
+	})
+	rig.runner.handleAt(0).kill()
+	advanceUntil(t, rig, time.Second, "restart after crash", func() bool {
+		return rig.runner.startCount() == 2
+	})
+
+	want := []string{"./server", "--edited", "v1"}
+	waitUntil(t, "status to report the relaunched command", func() bool {
+		return slices.Equal(rig.ma.status().Command, want)
+	})
+	if st, _, _ := rig.store.load(); st.CurrentVersion != "v1" {
+		t.Fatalf("the relaunch pins the version; only the command re-renders: %+v", st)
 	}
 }
 

@@ -737,7 +737,18 @@ in roughly soak + drain (~20s). Budget your CI step timeout for
 409 until the first one finishes.
 
 `GET /<app>` (same bearer token) returns status: phase, current
-version, port, pid, last deploy result (including `deployed_by` and
+version, socket, pid, `command` — the argv the running instance was
+actually launched with, read back from systemd, which is not
+necessarily what the config says now (a reload does not restart a
+running app, so an edited `command` applies at the next deploy or
+crash relaunch). It is the *rendered* argv, not the configured text:
+`command ./server {version}` reports as
+`["/var/lib/liveswap/blog/releases/v1.4.2/server", "v1.4.2"]`, since
+the unit runs an absolute resolved path with the placeholders already
+substituted. Compare it against the release it should be running, not
+against the directive. Anything you put in `command` is readable by
+anyone who can read status, so keep secrets in `env`, which status
+does not report. Then: last deploy result (including `deployed_by` and
 the artifact's `artifact_entries` / `artifact_bytes` against the caps),
 the watchdog's state (restart counts, last restart cause), and
 `available_versions` — the on-disk releases you can roll back to,
@@ -869,7 +880,7 @@ failure the previous version never stopped serving.
   releases/v1.4.1/
   current -> releases/v1.4.2   (convenience symlink; state.json is truth)
   shared/                 persistent data, survives deploys (the app's HOME)
-  state.json              current version + process handle
+  state.json              current version, nonce and unit name
   tmp/                    download staging
 ```
 
@@ -886,7 +897,11 @@ and `shared/` of this tree (see [Sandbox](#sandbox)).
   without that manager). Config reloads never touch them (deploy state
   lives outside the config, reference-counted across reloads — proven
   by an e2e scenario that reloads mid-traffic and asserts the app's
-  PID is unchanged), and neither do **hotserve restarts and upgrades**:
+  PID is unchanged) — so an edited `command` or `env` does not apply
+  to the running instance; it applies at the next deploy, and at a
+  crash relaunch, which is why status reports the `command` the
+  instance is actually running — and neither do **hotserve restarts
+  and upgrades**:
   on start, liveswap reattaches to the unit recorded in `state.json`
   and serves it immediately; only if that unit is gone (reboot, or it
   died meanwhile) is the current version relaunched. Stopping hotserve

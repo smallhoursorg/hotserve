@@ -3,6 +3,7 @@ package liveswap
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,16 +20,41 @@ func TestFileStateStoreRoundTrip(t *testing.T) {
 	want := appState{
 		CurrentVersion: "v3",
 		Nonce:          "0a1b2c3d0a1b2c3d",
-		Handle:         handleState{PID: 999, StartedAt: time.Unix(1_700_000_000, 0).UTC()},
-		UpdatedAt:      time.Unix(1_700_000_100, 0).UTC(),
+		Handle: handleState{
+			PID:       999,
+			Command:   []string{"/usr/bin/node", "server.js"},
+			StartedAt: time.Unix(1_700_000_000, 0).UTC(),
+			Unit:      "hotserve-blog.v3.0a1b2c3d0a1b2c3d.service",
+		},
+		UpdatedAt: time.Unix(1_700_000_100, 0).UTC(),
 	}
 	must(t, store.save(want))
 	got, ok, err := store.load()
 	if err != nil || !ok {
 		t.Fatalf("load: ok=%v err=%v", ok, err)
 	}
-	if got.CurrentVersion != want.CurrentVersion || got.Nonce != want.Nonce || got.Handle.PID != want.Handle.PID {
+	if got.CurrentVersion != want.CurrentVersion || got.Nonce != want.Nonce || got.Handle.Unit != want.Handle.Unit {
 		t.Fatalf("round trip mismatch: %+v != %+v", got, want)
+	}
+	if !got.Handle.StartedAt.Equal(want.Handle.StartedAt) {
+		t.Fatalf("started_at must survive the round trip: %s != %s", got.Handle.StartedAt, want.Handle.StartedAt)
+	}
+	// Only what Reattach needs is recorded. PID and Command are read
+	// live from the manager and would be stale the moment they were
+	// written, so they must not reach the file at all — asserted on
+	// the bytes, because a json:"-" that is dropped still round-trips
+	// as a zero value and would look identical from load() alone.
+	raw, err := os.ReadFile(store.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"pid", "command", "node", "999"} {
+		if strings.Contains(string(raw), key) {
+			t.Fatalf("state.json must not record %q; it holds:\n%s", key, raw)
+		}
+	}
+	if got.Handle.PID != 0 || got.Handle.Command != nil {
+		t.Fatalf("a loaded record must carry no pid or command, got pid=%d command=%v", got.Handle.PID, got.Handle.Command)
 	}
 	// No stray temp file left behind.
 	if _, err := os.Stat(store.path + ".tmp"); !os.IsNotExist(err) {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -367,6 +368,14 @@ func TestIntegrationSystemdReattachAdoptsLiveUnit(t *testing.T) {
 	if st.Unit == "" {
 		t.Fatal("state must name the unit")
 	}
+	// The command is decoded out of the manager's own ExecStart
+	// property — a nested D-Bus shape no fake can prove the layout of,
+	// which is why the assertion belongs in this lane. A parser that
+	// reads it as nothing would leave status quietly silent about what
+	// every app is running.
+	if len(st.Command) == 0 || !filepath.IsAbs(st.Command[0]) || filepath.Base(st.Command[0]) != "server" {
+		t.Fatalf("the manager's ExecStart must decode to the resolved argv, got %v", st.Command)
+	}
 	// A "new hotserve": its own runner, same manager.
 	r2 := newSystemdRunner(userManager, zap.NewNop())
 	r2.poll = 50 * time.Millisecond
@@ -377,6 +386,12 @@ func TestIntegrationSystemdReattachAdoptsLiveUnit(t *testing.T) {
 	}
 	if h2.state().PID != st.PID || !hasPID(pids, h2.state().PID) || h2.state().Unit != st.Unit {
 		t.Fatalf("adopted %+v, want pid %d (in cgroup %v) unit %s", h2.state(), st.PID, pids, st.Unit)
+	}
+	// Reattach has no launch of its own to remember, so an adopted
+	// handle can only report the command by reading it back — and must,
+	// or status would go blank for every app across a hotserve restart.
+	if !slices.Equal(h2.state().Command, st.Command) {
+		t.Fatalf("adopted handle reports command %v, want the running unit's %v", h2.state().Command, st.Command)
 	}
 	if err := r2.Stop(h2, spec.grace); err != nil {
 		t.Fatalf("Stop via adopter: %v", err)

@@ -439,9 +439,21 @@ Design summary (full operator docs in README.md "Watchdog"):
 - Restarts take `deployMu` (TryLock, yielding to deploys) and re-check
   instance identity — promote swaps `current` before stopping the old
   handle, so a deploy-stopped handle never reads as a crash. The
-  relaunch path is `launchVersion`, shared with boot recovery: it
-  reproduces the recorded instance, never re-reads config-level launch
-  policy.
+  relaunch path is `launchVersion`, shared with boot recovery: the
+  record pins the **version**, and command, env and sandbox render
+  from the spec as it is now, so an app definition edited since the
+  deploy reaches the next crash restart — the same rule
+  `watchdogDisabled` follows for the same event, and the same exposure
+  a reload has always had. The record deliberately holds no launch
+  disposition: reproducing a stale instance faithfully would close the
+  one way an operator has to fix a crash-looping app without a
+  deploy, make "every unit is sandboxed" a property of a file rather
+  than of the code, and write env secrets to disk. What makes the
+  drift survivable is visibility, not fidelity — status reports the
+  argv the manager holds for the running unit (`ExecStart`, read back
+  at adopt and at reattach, never persisted), so a definition that has
+  drifted from what is running is visible rather than inferred from an
+  app that changed behaviour at a restart.
 - Pacing is fixed: 1s exponential backoff, 60s cap, ±20% jitter,
   reset only after sustained health. The budget
   (`watchdog_restarts`/`watchdog_window`, shared by crash and health
@@ -498,3 +510,7 @@ Dated one-liners; the full text of each is in git.
   survive a hotserve restart (`Reattach`). The test lane it needed is
   a privileged systemd container.
 - 2026-09-02 (#40) — Every unit sandboxed; see DESIGN-sandbox.md.
+- 2026-09-09 (#52) — A relaunch renders from the current spec: written
+  down as the rule rather than the record growing a launch
+  disposition, and status now reports the unit's own `ExecStart` so
+  the drift is visible. `pid` left `state.json` with it.

@@ -38,3 +38,6 @@ status() { curl -s --max-time 5 -H "Authorization: Bearer $TOKEN" "$HOOK"; }
 # enough for the status endpoint's flat fields (no jq in the images).
 json_str() { printf '%s' "$1" | sed -n "s/.*\"$2\":\"\([^\"]*\)\".*/\1/p"; }
 json_num() { printf '%s' "$1" | sed -n "s/.*\"$2\":\([0-9][0-9]*\).*/\1/p"; }
+# json_arr <json> <key>: a top-level array of strings as one space-
+# separated line, which is all `command` needs to be compared.
+json_arr() { printf '%s' "$1" | sed -n "s/.*\"$2\":\[\([^]]*\)\].*/\1/p" | tr -d '"' | tr ',' ' '; }

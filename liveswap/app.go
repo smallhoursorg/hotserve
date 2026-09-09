@@ -961,6 +961,11 @@ type statusSnapshot struct {
 	// the app's reach. Reachable by the hotserve user (run/ is 0750).
 	Socket string `json:"socket,omitempty"`
 	PID    int    `json:"pid,omitempty"`
+	// Command is the argv the manager reports for the running unit —
+	// rendered, so an absolute path with placeholders substituted, and
+	// not what the config says now (a reload does not restart an app).
+	// Env is not reported: see DESIGN-threat-model.md.
+	Command []string `json:"command,omitempty"`
 	// Unit is the systemd unit running the instance — what to pass to
 	// journalctl for the app's own output.
 	Unit       string            `json:"unit,omitempty"`
@@ -995,6 +1000,7 @@ func (ma *managedApp) status() statusSnapshot {
 		s.Socket = ma.current.socket
 		hs := ma.current.handle.state()
 		s.PID = hs.PID
+		s.Command = hs.Command
 		s.Unit = hs.Unit
 		s.Running = c.runner.Alive(ma.current.handle)
 	}
