@@ -47,13 +47,16 @@ to start and `loginctl` to stay alive without a login.
 ### Without the package
 
 The `hotserve_<version>_linux_<arch>.tar.gz` archives on the same page
-hold the **raw binary** (plus LICENSE and a README), for systems where
-you manage the service yourself — your own systemd unit, NixOS-style
-distros, containers. Prefer the packages where you can: go this way
-and you own what the package would have done, namely a dedicated
-`hotserve` user, a `Type=notify` unit, `loginctl enable-linger
-hotserve` (with `libpam-systemd` installed) so the user's manager
-exists for the apps, and the config at `/etc/hotserve/Caddyfile`.
+hold the **raw binary** (plus LICENSE and a README), for hosts you
+wire up yourself — a NixOS-style distro, or Alpine, which gets no
+`.deb`. Prefer the packages where you can: going this way you take on
+what the package does for you, namely a dedicated `hotserve` user, a
+`Type=notify` unit, `loginctl enable-linger hotserve` (with
+`libpam-systemd` installed) so the user manager exists for your apps,
+and the config at `/etc/hotserve/Caddyfile`. The sandbox still
+applies, so the host has to be able to deliver both namespaces —
+many container and LXC hosts cannot, and hotserve will refuse to
+start there rather than run your apps unprotected.
 
 (A hosted APT repository with automatic updates is on the roadmap.
 There is no `.apk`: Alpine runs OpenRC, so the shipped systemd unit
