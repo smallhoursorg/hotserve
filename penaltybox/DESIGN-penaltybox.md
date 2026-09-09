@@ -231,7 +231,8 @@ code — the same seam reserved for the distributed store below.
 ## References
 
 - Wire contract + Fastly/HAProxy equivalents:
-  [README.md](README.md#the-wire-contract)
+  [The wire contract](README.md#the-wire-contract),
+  [Concept map](README.md#concept-map)
 - Fastly (verified 2026-07-25):
   [check_rate](https://www.fastly.com/documentation/reference/vcl/functions/rate-limiting/ratelimit-check-rate/),
   [penaltybox_has](https://www.fastly.com/documentation/reference/vcl/functions/rate-limiting/ratelimit-penaltybox-has/),
