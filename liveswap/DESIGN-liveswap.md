@@ -257,7 +257,9 @@ cancelled/joined by that config's Cleanup.
 | File | Concern |
 |---|---|
 | `liveswap.go` | App module, config structs + defaults, Validate, pool wiring |
+| `names.go` | the app-name and version alphabets, and the two helpers over them; shared by every layer |
 | `app.go` | `managedApp` state machine, Deploy pipeline, recovery, env building |
+| `appdirs.go` | `appDirs`: the on-disk layout for one app. Pure path arithmetic — no state, no lock |
 | `caddyfile.go` | all Caddyfile parsing (global option, directive, upstreams); NO defaults here — Provision owns them |
 | `handler.go` | webhook auth, payload validation, status endpoint |
 | `authlimit.go` | what a failed webhook auth costs the journal: per-address and process-wide budgets, on the injected clock |
