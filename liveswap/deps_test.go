@@ -127,11 +127,11 @@ func TestFileLayering(t *testing.T) {
 	fset := token.NewFileSet()
 	files := parsePackageFiles(t, fset)
 
+	structTypes := structTypeNames(files)
+
 	// name -> the files declaring it. A build-tagged pair (linkSocket in
 	// socket_linux.go and socket_other.go) declares one name twice; both
 	// sit in the same layer, so an edge to either reads the same.
-	structTypes := structTypeNames(files)
-
 	declaredIn := map[string][]string{}
 	for name, f := range files {
 		for _, d := range packageScopeDecls(f) {
@@ -219,7 +219,6 @@ func TestFileLayering(t *testing.T) {
 			}
 		}
 	}
-
 }
 
 // parsePackageFiles reads every non-test .go file in the package,
@@ -337,7 +336,10 @@ func structLit(t ast.Expr, structTypes map[string]bool) bool {
 	case *ast.Ident:
 		return structTypes[t.Name]
 	case *ast.SelectorExpr:
-		return true // a struct from another package
+		// An imported named type. Guessed, not known: an imported
+		// keyed collection (url.Values) has this exact shape, so the
+		// keys skipped here are audited by TestFileLayeringBlindSpots.
+		return true
 	case *ast.StarExpr:
 		return structLit(t.X, structTypes)
 	default:
@@ -347,13 +349,26 @@ func structLit(t ast.Expr, structTypes map[string]bool) bool {
 
 // freeIdents returns identifiers a file uses that it does not itself
 // bind: not selector right-hand sides (x.Sel), struct field names,
-// composite-literal keys, labels, or import names.
+// composite-literal keys, or labels.
+//
+// The left-hand side of a selector *is* emitted, including the package
+// half of a qualified name like `zap.String`. That is safe rather than
+// sloppy: Go forbids an identifier being declared in both the file and
+// the package block, so a package-scope declaration sharing a name
+// with an import is a compile error in every file importing it —
+//
+//	caddyfile.go:406:5: os already declared through import of package os ("os")
+//		app.go:9:2: other declaration of os
+//
+// which means a selector's package half can never also name another
+// file's declaration, and declaredIn has no entry for it. (Raised in
+// review on #75; recorded here so it is not re-derived.)
 //
 // Local shadowing is handled by over-approximation — a name bound
 // anywhere in the file as a local is ignored everywhere in it. That
 // can hide a real edge (a false negative) but can never invent one, so
-// the check does not cry wolf. It reports nothing on this package
-// today; see TestFileLayeringShadowing.
+// the check does not cry wolf; TestFileLayeringBlindSpots is what
+// holds that trade honest.
 func freeIdents(f *ast.File, structTypes map[string]bool) []string {
 	bound := boundNames(f)
 	skip := map[*ast.Ident]bool{}
