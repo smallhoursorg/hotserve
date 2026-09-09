@@ -232,7 +232,7 @@ make e2e               # both module suites against the hotserve binary (incl. S
 make lint vet tidy
 ```
 
-CI runs the identical targets.
+CI runs all of these on every PR except `tidy`, which is local-only.
 
 ## References
 
