@@ -55,8 +55,9 @@ and you own what the package would have done, namely a dedicated
 hotserve` (with `libpam-systemd` installed) so the user's manager
 exists for the apps, and the config at `/etc/hotserve/Caddyfile`.
 
-(Hosted APT/APK repositories with automatic updates are on the
-roadmap.)
+(A hosted APT repository with automatic updates is on the roadmap.
+There is no `.apk`: Alpine runs OpenRC, so the shipped systemd unit
+would be inert there.)
 
 ## Quickstart: deploy an app with zero downtime
 
@@ -183,11 +184,13 @@ each one is there. What is still ahead:
 - **Per-app UIDs.** Apps share the unprivileged `hotserve` user; giving
   each its own would need a small privileged helper, so it stays a
   later milestone.
-- Hosted APT/APK repositories with package signing and auto-updates
-- A metrics/alerts module to sit alongside liveswap and penaltybox —
-  first customer: alerting when the watchdog is stuck in a restart
-  loop (it retries forever by design, so the loop itself is the signal
-  that a release is broken)
+- **A hosted APT repository**, with package signing and auto-updates.
+
+Not committed to, but worth naming: a metrics/alerts module alongside
+liveswap and penaltybox. The first thing it would earn its keep on is
+alerting when the watchdog is stuck in a restart loop — the watchdog
+retries forever by design, so the loop itself is the signal that a
+release is broken.
 
 ## Development
 
