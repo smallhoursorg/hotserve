@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -912,6 +913,16 @@ func must(t *testing.T, err error) {
 	}
 }
 
+// swapSeam installs f for the duration of the test and restores the
+// previous value after. Atomically both ways: App.Start's unknown-app
+// sweep reads these seams from a goroutine nothing joins, so a restore
+// can land while a sweep started by an earlier test is still reading.
+func swapSeam[T any](t *testing.T, seam *atomic.Pointer[T], f T) {
+	t.Helper()
+	prev := seam.Swap(&f)
+	t.Cleanup(func() { seam.Store(prev) })
+}
+
 func TestRollbackSkipsPreStart(t *testing.T) {
 	rig := newTestRig(t)
 	rig.spec.preStart = []string{"./migrate"}
@@ -1285,9 +1296,7 @@ func TestDestructLeavesInstanceRunningOnProcessExit(t *testing.T) {
 	rig := newTestRig(t)
 	markLive(t)
 	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/1", version: "v1"}))
-	orig := caddyExiting
-	caddyExiting = func() bool { return true }
-	t.Cleanup(func() { caddyExiting = orig })
+	swapSeam(t, &caddyExitingSeam, func() bool { return true })
 	must(t, rig.ma.Destruct())
 	if rig.runner.stopCount() != 0 {
 		t.Fatal("on process exit the unit must be left running for reattach")

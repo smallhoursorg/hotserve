@@ -31,9 +31,7 @@ func TestSweepUnknownApps(t *testing.T) {
 	conn.setStatus("hotserve-demo-api.v1.0a1b2c3d0a1b2c3d.service", running) // another configured app: keep
 	conn.setStatus("hotserve-weird.service", running)                        // not ours: ignore
 	configured := map[string]bool{"demo": true, "demo-api": true}
-	orig := appConfigured
-	appConfigured = func(app string) bool { return configured[app] }
-	t.Cleanup(func() { appConfigured = orig })
+	swapSeam(t, &appConfiguredSeam, func(app string) bool { return configured[app] })
 	err := sweepUnknownApps(context.Background(), conn, root, zap.NewNop())
 	if err != nil {
 		t.Fatal(err)
@@ -70,9 +68,7 @@ func TestSweepUnknownAppsDoesNothingWhileExiting(t *testing.T) {
 	conn := newFakeSystemdConn()
 	root := t.TempDir()
 	conn.setStatus("hotserve-old.v3.0a1b2c3d0a1b2c3d.service", unitStatus{LoadState: "loaded", ActiveState: "active", Sandboxed: true})
-	orig := caddyExiting
-	caddyExiting = func() bool { return true }
-	t.Cleanup(func() { caddyExiting = orig })
+	swapSeam(t, &caddyExitingSeam, func() bool { return true })
 	if err := sweepUnknownApps(context.Background(), conn, root, zap.NewNop()); err != nil {
 		t.Fatal(err)
 	}
@@ -95,19 +91,17 @@ func TestSweepUnknownAppsJudgesAgainstLiveConfig(t *testing.T) {
 	must(t, os.WriteFile(filepath.Join(late.proxy, "0a1b2c3d0a1b2c3d.sock"), nil, 0o600))
 	var mu sync.Mutex
 	configured := map[string]bool{} // "late" is not configured when the sweep starts
-	orig := appConfigured
 	// Ownership is not monotonic: the candidate that adopts "late"
 	// mid-listing is itself cleaned up right after the sweep's veto,
 	// so every later check finds the app unowned again. The veto must
 	// still stand: a sweep that left a unit running prunes nothing.
-	appConfigured = func(app string) bool {
+	swapSeam(t, &appConfiguredSeam, func(app string) bool {
 		mu.Lock()
 		defer mu.Unlock()
 		owned := configured[app]
 		configured[app] = false
 		return owned
-	}
-	t.Cleanup(func() { appConfigured = orig })
+	})
 	conn.mu.Lock()
 	conn.listHook = func() { mu.Lock(); configured["late"] = true; mu.Unlock() } // the reload lands mid-listing
 	conn.mu.Unlock()
@@ -137,9 +131,7 @@ func TestSweepUnknownAppsPruneWaitsForRecovery(t *testing.T) {
 	gone, other := newAppDirs(root, "gone"), newAppDirs(root, "other")
 	must(t, os.MkdirAll(gone.runDir("0a1b2c3d0a1b2c3d"), 0o750))
 	must(t, os.MkdirAll(other.runDir("0a1b2c3d0a1b2c3d"), 0o750))
-	orig := appConfigured
-	appConfigured = func(string) bool { return false }
-	t.Cleanup(func() { appConfigured = orig })
+	swapSeam(t, &appConfiguredSeam, func(string) bool { return false })
 
 	mu := ownerLock("gone")
 	mu.Lock()
@@ -188,9 +180,7 @@ func TestSweepUnknownAppsPrunesAppsWithNoUnitsLeft(t *testing.T) {
 		must(t, os.WriteFile(filepath.Join(d.proxy, "0a1b2c3d0a1b2c3d.sock"), nil, 0o600))
 	}
 	must(t, os.WriteFile(filepath.Join(root, "not-an-app-dir.txt"), nil, 0o600))
-	orig := appConfigured
-	appConfigured = func(app string) bool { return app == "demo" }
-	t.Cleanup(func() { appConfigured = orig })
+	swapSeam(t, &appConfiguredSeam, func(app string) bool { return app == "demo" })
 	if err := sweepUnknownApps(context.Background(), conn, root, zap.NewNop()); err != nil {
 		t.Fatal(err)
 	}
@@ -205,4 +195,37 @@ func TestSweepUnknownAppsPrunesAppsWithNoUnitsLeft(t *testing.T) {
 	if _, err := os.Stat(newAppDirs(root, "gone").app); err != nil {
 		t.Fatal("only the socket dirs are pruned; the app's directory and releases stay")
 	}
+}
+
+// The two seams the sweep reads are swapped by tests while a sweep may
+// still be running: App.Start launches it on a goroutine nothing joins
+// (bounded only by unknownAppSweepTimeout), so one test's restore can
+// land while a sweep started by an earlier test is still reading. Both
+// must therefore tolerate a concurrent read and swap, and the two loops
+// below deliberately share no happens-before edge — that pairing is
+// exactly what -race reports if either seam is not an atomic.
+//
+// Both verdicts installed here are the ones that make a sweep do
+// nothing (exiting, and every app still owned): the seams are global,
+// so a sweep leaked by an earlier test and running through this one
+// must find the safe answer, never a licence to stop and prune.
+func TestSweepSeamsTolerateAConcurrentSwap(t *testing.T) {
+	const rounds = 1000
+	swapSeam(t, &caddyExitingSeam, func() bool { return true })
+	swapSeam(t, &appConfiguredSeam, func(string) bool { return true })
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < rounds; i++ {
+			_ = caddyExiting()
+			_ = appConfigured("demo")
+		}
+	}()
+	for i := 0; i < rounds; i++ {
+		exiting := func() bool { return true }
+		caddyExitingSeam.Store(&exiting)
+		configured := func(string) bool { return true }
+		appConfiguredSeam.Store(&configured)
+	}
+	<-done
 }

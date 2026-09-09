@@ -340,8 +340,21 @@ func (a *App) Provision(ctx caddy.Context) error {
 var liveStartedApps atomic.Int32
 
 // caddyExiting reports whether the whole process is shutting down (as
-// opposed to a config unloading an app); a variable so tests can flip it.
-var caddyExiting = caddy.Exiting
+// opposed to a config unloading an app).
+//
+// Tests flip it through the seam below, which is an atomic rather than
+// a plain var because App.Start's unknown-app sweep reads it from a
+// goroutine nothing joins: a test restoring the seam can overlap a
+// sweep still running from an earlier test, and a plain var leaves
+// that undefined. nil = caddy.Exiting.
+var caddyExitingSeam atomic.Pointer[func() bool]
+
+func caddyExiting() bool {
+	if f := caddyExitingSeam.Load(); f != nil {
+		return (*f)()
+	}
+	return caddy.Exiting()
+}
 
 func (cfg *AppConfig) applyDefaults(repl *caddy.Replacer) {
 	resolveTrustPlaceholders(repl, cfg.DeployTrust)
@@ -584,7 +597,10 @@ func (a *App) Start() error {
 	// against the manager's own listing. Background, like recovery;
 	// the sweep judges each app against the pool right before acting,
 	// so neither a reload racing it nor a candidate config that later
-	// fails to activate can lose an app someone still holds.
+	// fails to activate can lose an app someone still holds. Nothing
+	// joins this goroutine — its own timeout bounds it — which is why
+	// the two seams it reads (caddyExiting, appConfigured) are atomics
+	// and not the plain vars they read like.
 	conn := a.systemdConn()
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), unknownAppSweepTimeout)
