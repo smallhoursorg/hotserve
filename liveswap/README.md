@@ -53,21 +53,24 @@ If you know Nomad, the concept map is:
 
 ## Install
 
-Build Caddy with the module (nothing else to install on the server):
+Build Caddy with the module:
 
 ```sh
 xcaddy build --with github.com/smallhoursorg/hotserve/liveswap
 ```
 
-Or in a Dockerfile:
+Or take the prebuilt binary from
+[hotserve](https://github.com/smallhoursorg/hotserve/releases), which
+ships liveswap compiled in — on Debian 13 the `.deb` sets up everything
+below for you.
 
-```dockerfile
-FROM caddy:2.11.4-builder AS builder
-RUN xcaddy build v2.11.4 --with github.com/smallhoursorg/hotserve/liveswap
-
-FROM caddy:2.11.4
-COPY --from=builder /usr/bin/caddy /usr/bin/caddy
-```
+**The server needs systemd.** liveswap runs your apps as transient
+units on the service user's own systemd manager, so the box also needs
+`libpam-systemd`, `dbus`, and `loginctl enable-linger <user>`; without that
+manager, a config defining any app refuses to start. A container image
+is not a deployment target for the same reason — there is no user
+manager in one, and the per-app [sandbox](#sandbox) needs namespaces
+most container hosts will not give you.
 
 ## Caddyfile
 
@@ -78,22 +81,27 @@ COPY --from=builder /usr/bin/caddy /usr/bin/caddy
 		artifact_allowlist github.com/your-org/ # required: where artifacts may come from
 		# allow_insecure_http                  # permit http:// artifact URLs (off by default)
 
-		# Who may deploy — required (globally or per app). A deploy
-		# carries an `Authorization: Bearer <JWT>`; it is authorized if
-		# any deploy_trust source verifies it. No shared secret is ever
-		# stored on the box.
-		deploy_trust github {                  # preset: GitHub Actions OIDC
-			audience hotserve
-			claim repository your-org/blog     # pin who may deploy
-			claim ref        refs/heads/main
-		}
+		# A deploy_trust block may also sit here, as the default for
+		# apps that declare none of their own. Claims that name one
+		# repo belong with the app they authorize, as below — a
+		# per-app block REPLACES the global one, it does not add to it.
 
 		app blog {                             # a Node.js app
 			command node server.js             # runs with CWD = the release dir
 			pre_start node migrate.js          # optional; non-zero exit aborts the deploy
-			env_file /etc/liveswap/blog.env     # optional KEY=VALUE file
+			env_file /etc/hotserve/blog.env    # optional KEY=VALUE file
 			env NODE_ENV production            # inline env, repeatable
-			# deploy_trust local { public_key /etc/hotserve/blog.pub }  # per-app override
+
+			# Who may deploy this app — required (here or globally). A
+			# deploy carries an `Authorization: Bearer <JWT>`; it is
+			# authorized if any deploy_trust source verifies it. No
+			# shared secret is ever stored on the box.
+			deploy_trust github {                 # preset: GitHub Actions OIDC
+				audience hotserve
+				claim repository your-org/blog     # pin who may deploy
+				claim ref        refs/heads/main
+			}
+
 			# Everything below is a default, shown for reference:
 			# health_path       /health        # GET must return 2xx ("off" = liveness only)
 			# health_interval   5s
@@ -115,6 +123,10 @@ COPY --from=builder /usr/bin/caddy /usr/bin/caddy
 		app api {                              # a Go app
 			command ./server --config config.yaml
 			env DATABASE_URL sqlite:{shared_dir}/api.db
+			deploy_trust github {                 # its own repo, its own block
+				audience hotserve
+				claim repository your-org/api
+			}
 		}
 	}
 }
@@ -279,7 +291,8 @@ The watchdog **never gives up**. The restart budget is a rate
 limiter, not a give-up point: after `watchdog_restarts` restarts
 inside `watchdog_window` it *throttles* — logs an error, reports
 `"state":"throttled"` in the status JSON, unroutes a dead instance so
-the proxy fails cleanly instead of dialing a dead port, waits for the
+the proxy fails cleanly instead of dialing a socket nothing is
+listening on, waits for the
 oldest restart to slide out of the window, and tries again. An app
 taken down by a transient incident (a traffic flood, a dependency
 outage) therefore comes back on its own once the incident ends, with
