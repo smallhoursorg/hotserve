@@ -76,19 +76,19 @@ without the feature it exists for.
 	liveswap {
 		artifact_allowlist github.com/your-org/   # required: pin artifact origins
 
-		# Who may deploy. A deploy carries an OIDC token from CI; the box
-		# verifies it against the provider's public keys — no shared
-		# secret ever lives on the server. (required, globally or per app)
-		deploy_trust github {
-			audience hotserve
-			claim repository your-org/myapp
-			claim ref        refs/heads/main
-		}
-
 		app myapp {
 			command node server.js          # runs in the release dir, listens on $SOCKET
 			pre_start node migrate.js       # failure aborts the deploy
 			env_file /etc/hotserve/myapp.env
+
+			# Who may deploy this app: a token minted by CI, verified
+			# against the provider's public keys — no shared secret ever
+			# lives on the server. (required, per app or globally)
+			deploy_trust github {
+				audience hotserve
+				claim repository your-org/myapp
+				claim ref        refs/heads/main
+			}
 		}
 	}
 
