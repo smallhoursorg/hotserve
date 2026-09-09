@@ -109,7 +109,7 @@ jobs:
       # scenarios fail.
       - run: make e2e COMPOSE="$COMPOSE"
 
-  # Builds the same .deb/.apk artifacts a release would, on every
+  # Builds the same .deb artifacts a release would, on every
   # commit, and hands them to the install-test matrix below.
   package:
     runs-on: ubuntu-latest
