@@ -601,4 +601,7 @@ func propInt(props map[string]any, key string) int {
 	return 0
 }
 
-var _ systemdConn = (*userManagerClient)(nil)
+// managerClient embeds systemdConn, so this asserts both: the client is
+// the runner's connection, and it is the probe and cache App.measureSandbox
+// reaches when no connection is installed.
+var _ managerClient = (*userManagerClient)(nil)

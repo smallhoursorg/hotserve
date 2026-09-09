@@ -141,7 +141,7 @@ Properties that matter to the model:
 ### Artifact fetching — `liveswap/download.go` + `allowlist.go`
 
 The allowlist is **mandatory** — config load fails without one
-([liveswap.go:522](liveswap/liveswap.go)); no any-origin mode. Pinning
+([liveswap.go:534](liveswap/liveswap.go)); no any-origin mode. Pinning
 ([allowlist.go:382-449](liveswap/allowlist.go)) rebuilds the outgoing
 URL so scheme is constant, host/port/path-prefix come from *config
 bytes*, and only the path suffix + query come from the payload — the
@@ -161,7 +161,7 @@ on cross-host redirects but **not** same-host
 ([download.go:77-82](liveswap/download.go)). Size: Content-Length
 pre-check plus streaming `LimitReader`, default 100 MB
 ([download.go:94-114](liveswap/download.go),
-[liveswap.go:431-432](liveswap/liveswap.go)).
+[liveswap.go:443-444](liveswap/liveswap.go)).
 
 **The documented, real gap:** the host allowlist governs the **first
 hop only** — `CheckRedirect` deliberately does not re-check the host
