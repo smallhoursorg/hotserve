@@ -30,3 +30,10 @@ linters:
     nolintlint:
       require-explanation: true
       require-specific: true
+
+# Formatting was the one structural check CI left to a human to
+# remember: neither `make lint` nor `make vet` ran gofmt, so drift was
+# caught only before a push, or not at all.
+formatters:
+  enable:
+    - gofmt
