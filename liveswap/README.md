@@ -66,7 +66,7 @@ below for you.
 
 **The server needs systemd.** liveswap runs your apps as transient
 units on the service user's own systemd manager, so the box also needs
-`libpam-systemd` and `loginctl enable-linger <user>`; without that
+`libpam-systemd`, `dbus`, and `loginctl enable-linger <user>`; without that
 manager, a config defining any app refuses to start. A container image
 is not a deployment target for the same reason — there is no user
 manager in one, and the per-app [sandbox](#sandbox) needs namespaces
