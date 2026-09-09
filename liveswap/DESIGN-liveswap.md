@@ -252,6 +252,49 @@ serving them. Boot recovery is owned by the config that started it,
 retried with backoff for anything not explicitly permanent, and
 cancelled/joined by that config's Cleanup.
 
+### Layering
+
+The package is flat, so the compiler cannot report a dependency
+pointing the wrong way: an import cycle is unreachable and every file
+sees every other. Nothing enforces the order below — it is written
+down because #60 found eight edges running backwards, and the only
+reason they were found at all was somebody building this map by hand.
+
+| Layer | Files |
+|---|---|
+| 0 | `clock.go`, `names.go` |
+| 1 | `appdirs.go`, `socket.go` (+`_linux`/`_other`), `extract.go`, `allowlist.go`, `authlimit.go`, `deploytrust.go`, `health.go` |
+| 2 | `runner.go`, `sandbox.go`, `download.go`, `state.go` |
+| 3 | `runner_systemd.go`, `systemd_dbus.go` |
+| 4 | `app.go`, `watchdog.go`, `sweep.go` |
+| 5 | `liveswap.go`, `handler.go`, `upstreams.go`, `caddyfile.go`, `deploytoken_cmd.go` |
+
+A file may use a lower layer or its own. Sideways is fine: a layer is a
+concern, and a concern is sometimes split across files — `appdirs.go`
+and `socket.go` are one path vocabulary; `runner.go` and `sandbox.go`
+hand each other value types.
+
+Six edges run upward on purpose. They are listed here so a seventh has
+to justify itself rather than blend in:
+
+| Edge | Why it is right |
+|---|---|
+| `app.go` → `liveswap.go` (`caddyExiting`, `liveStartedApps`) | process-lifecycle facts live with the module that owns the pool; `Destruct` reads them to tell a shutdown from an app being removed |
+| `sweep.go` → `liveswap.go` (`appPool`, `poolKey`, `caddyExiting`) | the pool is the ledger the sweep asks what is still configured |
+| `download.go` → `app.go` (`appSpec`, `deployRequest`, `validationError`) | `app.go` holds the `fetcher` interface and `download.go` implements it, so the call points down; only the value types it is handed point back |
+| `sandbox.go` → `app.go` (`appSpec`) | `sandboxSpecFor` is a method on `*appSpec` — methods live with the concern, not the receiver |
+| `sandbox.go` → `liveswap.go` (`App`) | `validateEnvFileIsolation` is a whole-config `Validate` rule: checking one app's `env_file` against every other app's dirs needs the whole config |
+| `systemd_dbus.go` → `liveswap.go` (`managerClient`) | the interface is declared where it is consumed and asserted where it is implemented — Go's normal direction |
+
+A machine-checked version of this table was built and rejected (#75):
+resolving "which file declares this name" from the syntax tree alone
+takes a guess at every construct that shares a shape with another —
+map keys against struct fields, generic instantiations against
+collections — and six review rounds each found another. Doing it
+properly needs the type checker, which is a real dependency for a
+property no operator ever sees. The trigger for revisiting is
+backwards edges reappearing *despite* this table.
+
 ### File-by-file
 
 | File | Concern |
