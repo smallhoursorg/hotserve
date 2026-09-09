@@ -321,10 +321,15 @@ func structTypeNames(files map[string]*ast.File) map[string]bool {
 }
 
 // structLit reports whether a composite literal of this type has field
-// names for keys. A nil type is an elided literal nested inside
-// another (`[]bindMount{{Source: ...}}`); assuming struct there can
-// hide an edge written as a key of a nested *map* literal, which is
-// the safe direction — it never invents one.
+// names for keys. Two cases cannot be settled without type
+// information and are guessed as "struct": a nil type (an elided
+// literal nested inside another, `[]bindMount{{Source: ...}}`) and an
+// imported named type, which an imported *keyed collection* shares the
+// shape of (`url.Values{k: v}` looks exactly like a struct literal).
+// Guessing struct never invents an edge, but it can hide one written
+// as such a key — so the guess is not trusted: every key it skips is
+// checked against the package by TestFileLayeringBlindSpots, which
+// fails naming it rather than letting the check go quietly blind.
 func structLit(t ast.Expr, structTypes map[string]bool) bool {
 	switch t := t.(type) {
 	case nil, *ast.StructType:
@@ -417,6 +422,45 @@ func freeIdents(f *ast.File, structTypes map[string]bool) []string {
 	return out
 }
 
+// guessedType reports whether structLit had to guess for this literal
+// type rather than resolve it. A type named in this package resolves
+// exactly; an elided type and an imported one do not.
+func guessedType(t ast.Expr) bool {
+	switch t := t.(type) {
+	case nil, *ast.SelectorExpr:
+		return true
+	case *ast.StarExpr:
+		return guessedType(t.X)
+	default:
+		return false
+	}
+}
+
+// literalKeys returns the identifiers freeIdents skipped as struct
+// field names *on a guess* — the elided and imported types. Keys of a
+// literal whose type resolved to a struct declared in this package are
+// certain, not guesses, and are not audited: fields named after their
+// own type (`collaborators{runner: …, clock: …}`) are idiomatic and
+// say nothing about the layering.
+func literalKeys(f *ast.File, structTypes map[string]bool) []string {
+	var out []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		lit, ok := n.(*ast.CompositeLit)
+		if !ok || !guessedType(lit.Type) || !structLit(lit.Type, structTypes) {
+			return true
+		}
+		for _, el := range lit.Elts {
+			if kv, ok := el.(*ast.KeyValueExpr); ok {
+				if id, ok := kv.Key.(*ast.Ident); ok {
+					out = append(out, id.Name)
+				}
+			}
+		}
+		return true
+	})
+	return out
+}
+
 // boundNames collects every name a file binds locally: receivers,
 // parameters, results, :=, function-scope var/const/type, range and
 // type-switch variables.
@@ -496,14 +540,23 @@ func dedupe(in []string) []string {
 	return out
 }
 
-// TestFileLayeringShadowing pins the approximation in freeIdents: no
-// file binds a local with the same name as a package-scope declaration
-// from another file, so ignoring shadowed names hides no edge today.
-// If this fails, the name it reports is one the layering check has
-// gone blind to — rename the local, or teach freeIdents real scopes.
-func TestFileLayeringShadowing(t *testing.T) {
+// TestFileLayeringBlindSpots pins the two places TestFileLayering
+// trades exactness for simplicity, so neither can go quietly blind.
+//
+//  1. freeIdents ignores a name bound as a local anywhere in a file,
+//     rather than tracking real scopes.
+//  2. structLit guesses "struct" for an elided or imported composite
+//     literal type, so its keys are treated as field names.
+//
+// Both hide edges rather than invent them, and both are inert only
+// while no name collides. This test is that condition. A failure here
+// is not a bug in the file it names — it is the layering check telling
+// you it can no longer see past it: rename the local, spell the
+// literal's type out, or teach freeIdents real scopes.
+func TestFileLayeringBlindSpots(t *testing.T) {
 	fset := token.NewFileSet()
 	files := parsePackageFiles(t, fset)
+	structTypes := structTypeNames(files)
 
 	declaredIn := map[string][]string{}
 	for name, f := range files {
@@ -512,13 +565,30 @@ func TestFileLayeringShadowing(t *testing.T) {
 		}
 	}
 
+	elsewhere := func(name, self string) []string {
+		var out []string
+		for _, d := range declaredIn[name] {
+			if d != self {
+				out = append(out, d)
+			}
+		}
+		return out
+	}
+
 	var blind []string
 	for name, f := range files {
 		for local := range boundNames(f) {
-			for _, decl := range declaredIn[local] {
-				if decl != name {
-					blind = append(blind, fmt.Sprintf("%s binds %q, declared at package scope in %s", name, local, decl))
-				}
+			for _, d := range elsewhere(local, name) {
+				blind = append(blind, fmt.Sprintf(
+					"%s binds %q as a local; it is declared at package scope in %s, so any use of the latter in %s is invisible to TestFileLayering",
+					name, local, d, name))
+			}
+		}
+		for _, key := range dedupe(literalKeys(f, structTypes)) {
+			for _, d := range elsewhere(key, name) {
+				blind = append(blind, fmt.Sprintf(
+					"%s uses %q as a composite-literal key taken to be a struct field; it is declared at package scope in %s, so if that literal is really a map or array the edge to %s is invisible to TestFileLayering",
+					name, key, d, d))
 			}
 		}
 	}
