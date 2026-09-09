@@ -5,3 +5,7 @@ reference
 Makefile
 docker-compose*.yml
 *.md
+# Build outputs: ~140 MB of binaries and packages that no image build
+# copies, sent to the daemon by every context: . build.
+build
+dist

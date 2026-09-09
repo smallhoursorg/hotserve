@@ -73,8 +73,12 @@ services:
   # GitHub or GitLab release asset URL.
   e2e-artifacts:
     build:
-      context: e2e/liveswap
-      dockerfile: artifacts.Dockerfile
+      # The repo root, like e2e-hotserve and e2e-upstream below: the
+      # probe release carries liveswap/testdata/sandbox-view.sh, the
+      # one view probe, which is embedded by liveswap's own test and so
+      # has to live inside that module.
+      context: .
+      dockerfile: e2e/liveswap/artifacts.Dockerfile
 
   # The hotserve product binary under test (built from cmd/hotserve).
   # This container plays the production VPS: systemd as PID 1 running

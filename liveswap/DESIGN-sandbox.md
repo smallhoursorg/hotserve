@@ -370,6 +370,20 @@ statement was prose, and its header maps every other normative bullet
 to the test that pins it. Adding a MUST here means adding its
 assertion in the same change.
 
+Three of these lanes read the view from *inside* a unit, and they do
+it with one asset: `liveswap/testdata/sandbox-view.sh`, the **view probe**. It
+derives every path from its working directory, writes one `k=v` line
+per check into the app's shared dir and ends with `done=1`; each lane
+sources it from its own `./server` and asserts the subset it can. Not
+to be confused with the **capability probe** (`probeSandboxCapability`),
+which is production code that runs a throwaway unit at `App.Start` to
+decide whether the host can deliver a sandbox at all. A check whose
+input a lane cannot supply is emitted as `skipped`, never omitted, so a
+lane that silently loses an input fails rather than passes vacuously;
+`TestSandboxViewProbeEmitsEveryKey` pins the key set in `make test`.
+It was three diverged copies until #52: one of them had stopped
+testing that `/etc/ssl/private` stays out of the view.
+
 - Unit: the unit-property builder's table tests (the base view,
   real-path invariants, and above all that the set of bind
   destinations IS the view — nothing named that should not be) against
@@ -379,26 +393,41 @@ assertion in the same change.
 - Integration: real systemd in the dev-systemd container — the
   property set is read back from the transient unit, SIGTERM reaches
   the app inside its PID namespace, escalation, no orphans after
-  SIGKILL. The 2026-08-30 spike measured the split the shared-UID rule
-  rests on: bare, `/proc/<manager-pid>/root` opens; with
-  `PrivateUsers=` alone it is denied — the user namespace is the
-  load-bearing piece for the read assertions below, `PrivatePIDs=`
-  for visibility and signals.
+  SIGKILL, and the view probe runs with `MGR_PID` supplied so the
+  manager's `/proc` is asserted closed from inside. The 2026-08-30
+  spike measured the split the shared-UID rule rests on: bare,
+  `/proc/<manager-pid>/root` opens; with `PrivateUsers=` alone it is
+  denied — the user namespace is the load-bearing piece for the read
+  assertions below, `PrivatePIDs=` for visibility and signals. This
+  lane's fixture root is a `/var/tmp` temp dir, so the root dir is
+  writable here (`PrivateTmp=`) and only e2e and install-test assert
+  it read-only.
 - e2e: ALL scenarios pass sandboxed (the zero-downtime suite doubles as
-  sandbox-compat proof); one scenario deploys a probe app that
-  attempts to read a sibling's release dir, a sibling's env file path,
-  the admin socket, the user manager's private socket,
-  `/proc/<hotserve-pid>/environ` and `/proc/<user-manager-pid>/root`,
-  and asserts every attempt fails and that `/proc` lists only
-  in-namespace PIDs. The probe app also asserts the positive contract:
-  a DNS lookup and an outbound HTTP fetch succeed (the resolv.conf trap
-  would otherwise ship silently), `$HOME` is writable, and the scrubbed
-  env does NOT contain a seeded supervisor secret (a test ACME token).
+  sandbox-compat proof); one scenario deploys a probe app whose view
+  must name only its own release, shared and run dirs — the liveswap
+  root lists this app and no sibling — with hotserve's state dir, its
+  runtime dir and the user manager's private socket all absent, and
+  `/proc` listing only in-namespace PIDs. It does not assert the admin
+  socket: this config puts the admin API on TCP so the runner can drive
+  `/load`, so nothing creates one and "absent" would prove nothing;
+  install-test asserts it against a real socket. The probe app also asserts
+  the positive contract: a DNS lookup and an outbound HTTP fetch
+  succeed (the resolv.conf trap would otherwise ship silently), `$HOME`
+  is writable, and the scrubbed env does NOT contain a seeded
+  supervisor secret (a test ACME token). This lane supplies no
+  `MGR_PID` — its Caddyfile is baked at image build and the manager's
+  pid is a runtime value — so the two `/proc/<manager-pid>` checks
+  report `skipped` here and are asserted as such; they are covered from
+  *outside* the unit by `denied_to_hotserve`, and from inside by the
+  integration and install-test lanes.
 - install-test: the smoke asserts the sandbox from inside the unit on
-  Debian 13: pid 1 and a single-id `uid_map` (both namespaces),
-  hotserve's state, sockets and a sibling's files absent, `/etc` only
-  the base-view entries, and a runnable OS present so "absent" cannot
-  mean "empty unit".
+  Debian 13, against the packaged .deb's real layout: pid 1 and a
+  single-id `uid_map` (both namespaces), hotserve's state, sockets and
+  a sibling's files absent, `/etc` only the base-view entries, and a
+  runnable OS present so "absent" cannot mean "empty unit". It is the
+  lane that proves the manager's `/proc` and the admin socket are
+  closed while both are reachable from outside the unit — the vacuity
+  guards that make "closed" mean the sandbox closed it.
 - soak: full churn; RSS/goroutine/fd deltas quantify the (expected
   ~zero) overhead as a measured claim.
 - Every launch is sandboxed: `TestEveryLaunchIsSandboxed` asserts the
@@ -407,9 +436,11 @@ assertion in the same change.
   carry the app's sandbox, and `TestUnitRefusesToRunWithoutASandbox`
   that the runner refuses a spec without one.
 - Negative test once during development: widen the view (add a bind
-  for `/etc/hotserve`) and confirm the e2e isolation scenario fails.
-  Under a deny-by-default view the mutation to make is *adding* a
-  name, not removing a mask.
+  for `/etc/hotserve`, or for all of `/etc/ssl` rather than
+  `/etc/ssl/certs`) and confirm the isolation assertions fail — in all
+  three of the lanes that read the view from inside, which is the point
+  of their sharing one probe. Under a deny-by-default view the mutation
+  to make is *adding* a name, not removing a mask.
 - Mind the failure *signature*: under a deny-by-default view a
   runtime that probes a path nobody named gets **ENOENT** ("no such
   file or directory"), not EACCES or EROFS. It is why a missing

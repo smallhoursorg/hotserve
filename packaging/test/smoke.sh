@@ -205,43 +205,25 @@ done
 # `hotserve respond`, honoring liveswap's SOCKET contract and answering
 # 200 on every path (which satisfies the health gate).
 workdir=$(mktemp -d)
-# Besides the NOFILE contract the wrapper reports what its sandbox
-# looks like from inside: the uid_map range (1 in a user namespace,
-# 2^32-1 in none), its own pid (1 in a PID namespace), how many pids
-# /proc shows, and whether hotserve's own state dir exists in its view.
+# Besides the NOFILE contract the wrapper records what its sandbox
+# looks like from inside, by sourcing the shared view probe
+# (liveswap/testdata/sandbox-view.sh — one asset with liveswap's integration test
+# and e2e/liveswap/systemd.sh, mounted into this container by
+# `make install-test`). Sourced, not run as a child, so the probe
+# reports $$ as the unit's main pid; the NOFILE values below are
+# inherited either way.
+cp /sandbox-view.sh "$workdir/sandbox-view.sh" \
+	|| die "the view probe is not mounted at /sandbox-view.sh; run this through 'make install-test'"
 cat > "$workdir/server" <<'EOF'
 #!/bin/sh
-read _ _ uidmap < /proc/self/uid_map
-# Filesystem routes are tested for EXISTENCE: the view is
-# deny-by-default (TemporaryFileSystem=/ plus explicit binds), so a
-# path nothing named is absent rather than present-but-unreadable.
-[ -e /var/lib/hotserve ] && hslib=open || hslib=closed
-# The routes the sandbox exists to close. Their closure rests on the
-# user namespace alone — the kernel refusing ptrace-class access across
-# user namespaces — with the PID namespace closing them a second time
-# over. Probing them here keeps the user-namespace claim tested in its
-# own right rather than only through the namespace stacked on top.
-ls "/proc/$MGR_PID/root/" >/dev/null 2>&1 && mgrroot=open || mgrroot=closed
-cat "/proc/$MGR_PID/environ" >/dev/null 2>&1 && mgrenv=open || mgrenv=closed
-[ -e "/run/user/$HOTSERVE_UID/systemd/private" ] && mgrsock=open || mgrsock=closed
-[ -e /run/hotserve/admin.sock ] && adminsock=open || adminsock=closed
-[ -e /var/lib/liveswap/demo/state.json ] && state=open || state=closed
-[ -e /etc/hotserve ] && etchs=open || etchs=closed
-# The base view: an OS the app can run on. Without it every "closed"
-# above would be satisfied by a unit that has nothing in it at all.
-[ -x /bin/sh ] && binsh=ok || binsh=MISSING
-[ -x /usr/bin/hotserve ] && hsbin=ok || hsbin=MISSING
-[ -e /etc/ssl/certs ] && etcssl=ok || etcssl=MISSING
-[ -e /etc/ssl/private ] && sslpriv=present || sslpriv=absent
-etclist=$(ls /etc 2>/dev/null | tr '\n' ',')
-varliblist=$(ls /var/lib 2>/dev/null | tr '\n' ',')
-echo "smoke app starting on $SOCKET nofile_soft=$(ulimit -Sn) nofile_hard=$(ulimit -Hn) uidmap=$uidmap pid=$$ nprocs=$(ls /proc | grep -c '^[0-9]') hotserve_lib=$hslib mgr_root=$mgrroot mgr_environ=$mgrenv mgr_socket=$mgrsock admin_socket=$adminsock state_json=$state etc_hotserve=$etchs binsh=$binsh hsbin=$hsbin etcssl=$etcssl sslprivate=$sslpriv etclist=$etclist varliblist=$varliblist saw_mgr_pid=$MGR_PID saw_uid=$HOTSERVE_UID"
+. ./sandbox-view.sh
+echo "smoke app starting on $SOCKET"
 # Caddy's unix//abs/path spelling: "unix/" + the absolute socket path.
 exec /usr/bin/hotserve respond --listen "unix/$SOCKET" "hello smoke"
 EOF
 chmod +x "$workdir/server"
 mkdir -p /srv/art
-tar -czf /srv/art/demo.tar.gz -C "$workdir" server
+tar -czf /srv/art/demo.tar.gz -C "$workdir" server sandbox-view.sh
 
 /usr/bin/hotserve file-server --listen 127.0.0.1:8200 --root /srv/art \
 	>/tmp/artserver.log 2>&1 &
@@ -253,6 +235,15 @@ until curl -fs -o /dev/null http://127.0.0.1:8200/demo.tar.gz; do
 	[ "$i" -ge 15 ] && die "artifact file-server not up within 15s"
 	sleep 1
 done
+
+# A second app on disk, so root_listing below is a real sibling check.
+# With only demo there, binding the WHOLE liveswap root into the unit
+# would still list exactly "demo" and pass. This one is deliberately
+# not in the config: it exists to be invisible, and its secret is what
+# a leaking view would expose.
+mkdir -p /var/lib/liveswap/other/shared
+: > /var/lib/liveswap/other/shared/secret
+chown -R hotserve:hotserve /var/lib/liveswap/other
 
 # Deploy via Authorization: Bearer — Caddy access logs redact it
 # automatically — exercised here under the real unit.
@@ -296,13 +287,31 @@ journalctl --no-pager -t hotserve-demo | grep -q "smoke app starting" \
 # drop-in does not reach the manager and the value is whatever PID 1
 # had (#37).
 mgr_nofile=$(user_systemctl show -p DefaultLimitNOFILE --value)
-app_line=$(journalctl --no-pager -t hotserve-demo | grep 'smoke app starting' | tail -1)
+# The view the app recorded from inside its unit. The shared probe
+# writes it into the app's shared dir — the one writable, persistent
+# path in the view — and smoke runs as root, so it is readable here.
+# A file, not a journal line: the keys are the ones e2e and the
+# integration lane assert too, and reading them back by name beats
+# fifteen greps over one flat line.
+view=/var/lib/liveswap/demo/shared/view.txt
+i=0
+until grep -q '^done=1' "$view" 2>/dev/null; do
+	i=$((i + 1))
+	[ "$i" -ge 20 ] && die "view.txt not written by the sandboxed app"
+	sleep 0.5
+done
+probe_val() { sed -n "s/^$1=//p" "$view" | head -1; }
+expect_probe() { # <key> <want>
+	got=$(probe_val "$1")
+	[ "$got" = "$2" ] || die "inside the unit: $1=$got, want $2"
+}
 # The evidence behind every in-unit assertion below, printed whether or
 # not one fails: a cell that dies on one field is much easier to read
 # next to the whole view the app actually saw.
-echo "in-unit view: ${app_line#*smoke app starting }"
-app_soft=$(printf '%s' "$app_line" | grep -o 'nofile_soft=[0-9]*' | cut -d= -f2)
-app_hard=$(printf '%s' "$app_line" | grep -o 'nofile_hard=[0-9]*' | cut -d= -f2)
+echo "in-unit view:"
+sed 's/^/  /' "$view"
+app_soft=$(probe_val nofile_soft)
+app_hard=$(probe_val nofile_hard)
 [ -n "$mgr_nofile" ] && [ "$app_soft" = "$mgr_nofile" ] && [ "$app_hard" = "$mgr_nofile" ] \
 	|| die "app NOFILE soft=$app_soft hard=$app_hard is not the user manager's DefaultLimitNOFILE ($mgr_nofile) on both"
 app_nofile=$app_soft
@@ -325,23 +334,22 @@ echo "deployed as unit $unit under user@$uid; app output in the journal"
 # so a CI runner that restricts them fails this cell even though Debian
 # itself does not restrict them.
 echo "host: $(uname -r); apparmor_restrict_unprivileged_userns=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo absent); virt=$(systemd-detect-virt 2>/dev/null || echo unknown)"
-app_uidmap=$(printf '%s' "$app_line" | grep -o 'uidmap=[0-9]*' | cut -d= -f2)
-app_pid=$(printf '%s' "$app_line" | grep -o ' pid=[0-9]*' | cut -d= -f2)
-app_nprocs=$(printf '%s' "$app_line" | grep -o 'nprocs=[0-9]*' | cut -d= -f2)
-app_hslib=$(printf '%s' "$app_line" | grep -o 'hotserve_lib=[a-z]*' | cut -d= -f2)
-[ "$app_pid" = "1" ] || die "the app is pid $app_pid inside its unit, not 1 (no PID namespace)"
+app_uidmap=$(probe_val uidmap)
+app_nprocs=$(probe_val nprocs)
+expect_probe pid 1
 [ -n "$app_nprocs" ] && [ "$app_nprocs" -le 8 ] || die "/proc shows $app_nprocs pids inside the unit"
 [ "$app_uidmap" != "4294967295" ] && [ -n "$app_uidmap" ] || die "no user namespace inside the unit (uid_map range $app_uidmap)"
-[ "$app_hslib" = "closed" ] || die "/var/lib/hotserve is visible inside the sandboxed unit"
+expect_probe hotserve_lib closed
 # These are the acceptance paths from DESIGN-sandbox.md. They are
 # closed by the user namespace alone — the PID namespace on top is what
 # additionally hides and protects sibling processes — so they are the
 # assertions that must hold even if a host ever delivers less.
 # The probes are only worth anything if the app was handed the real
 # values: a literal "$mgr_pid" would make every /proc check below pass
-# by testing a path that cannot exist.
-saw_pid=$(printf '%s' "$app_line" | grep -o 'saw_mgr_pid=[^ ]*' | cut -d= -f2)
-saw_uid=$(printf '%s' "$app_line" | grep -o 'saw_uid=[^ ]*' | cut -d= -f2)
+# by testing a path that cannot exist. The probe echoes back what it
+# was handed for exactly this comparison.
+saw_pid=$(probe_val saw_mgr_pid)
+saw_uid=$(probe_val saw_uid)
 [ "$saw_pid" = "$mgr_pid" ] \
 	|| die "the app was given MGR_PID='$saw_pid', not the manager's real pid $mgr_pid — the /proc probes would be vacuous"
 [ "$saw_uid" = "$uid" ] \
@@ -351,35 +359,62 @@ saw_uid=$(printf '%s' "$app_line" | grep -o 'saw_uid=[^ ]*' | cut -d= -f2)
 # absent on this host.
 [ -r "/proc/$mgr_pid/environ" ] || die "/proc/$mgr_pid/environ is unreadable even to root; the in-unit probe would prove nothing"
 [ -e "/run/user/$uid/systemd/private" ] || die "the manager socket does not exist; the in-unit probe would prove nothing"
-sslpriv_seen=$(printf '%s' "$app_line" | grep -o 'sslprivate=[a-z]*' | cut -d= -f2)
-[ "$sslpriv_seen" = "absent" ] \
-	|| die "/etc/ssl/private is inside the unit: the base view binds the trust store, not the whole /etc/ssl tree"
-for route in mgr_root mgr_environ mgr_socket admin_socket state_json etc_hotserve; do
-	got=$(printf '%s' "$app_line" | grep -o "$route=[a-z_]*" | cut -d= -f2)
+[ -e /run/hotserve/admin.sock ] || die "the admin socket does not exist; the in-unit probe would prove nothing"
+expect_probe sslprivate absent
+for route in mgr_root mgr_environ mgr_socket admin_socket state etc_hotserve run_hotserve apptmp current; do
+	got=$(probe_val "$route")
 	[ "$got" = "closed" ] \
 		|| die "$route is '$got' inside the unit: a route the design says is closed is open"
 done
-echo "in-unit routes closed: manager /proc root+environ, manager socket, admin socket, state.json, /etc/hotserve"
+echo "in-unit routes closed: manager /proc root+environ, manager socket, admin socket, state.json, /etc/hotserve, /run/hotserve, the app's tmp and current"
+# The app's own dirs are the other side of that: exactly its release
+# (writable), its shared dir as $HOME, and a liveswap root that names
+# no other app.
+# Guarded: "demo " only means the sandbox hid the sibling if the
+# sibling is actually on the host.
+[ -d /var/lib/liveswap/other ] \
+	|| die "the sibling app fixture is missing; root_listing would prove nothing"
+expect_probe root_listing "demo "
+expect_probe release writable
+expect_probe root readonly
+expect_probe home /var/lib/liveswap/demo/shared
+expect_probe xdg_runtime unset
+expect_probe cgroup readonly
+expect_probe tmp writable
+# Deny-by-default: nothing bound these, so they do not exist inside the
+# unit — absent, not present-but-unreadable.
+for d in opt srv home root mnt media etcliveswap; do
+	expect_probe "abs_$d" absent
+done
+# /var/lib is the exception: the liveswap root lives under it, so it is
+# present, and varlib_listing below is the real check.
+expect_probe abs_varlib present
 # The other half of the deny-by-default claim, and the one that keeps
 # "closed" from being satisfied by an empty unit: the base view carries
 # an OS the app can execute in, /etc is only the named entries (never
 # the whole tree, which would hand every app every other app's
 # env_file), and /var/lib holds nothing but the path to this app's own
 # directories — hotserve's TLS keys sit next door on the host.
-for present in binsh hsbin etcssl; do
-	got=$(printf '%s' "$app_line" | grep -o "$present=[A-Za-z]*" | cut -d= -f2)
+for present in binsh usrbinenv hsbin etcssl resolvconf; do
+	got=$(probe_val "$present")
 	[ "$got" = "ok" ] \
 		|| die "$present is '$got' inside the unit: the base view does not carry a runnable OS, so the closed routes above prove nothing"
 done
-etclist=$(printf '%s' "$app_line" | grep -o 'etclist=[^ ]*' | cut -d= -f2)
-case ",$etclist" in
-*,hotserve,* | *,liveswap,* | *,shadow,*)
+etclist=$(probe_val etc_listing)
+# A non-empty guard in its own right: the case below has only failure
+# branches, so an empty listing — /etc gone entirely rather than merely
+# narrow — would match nothing and report success on the opposite
+# regression to the one it is here to catch.
+[ -n "$etclist" ] \
+	|| die "/etc inside the unit lists nothing at all: the base view is empty, not narrow"
+case " $etclist" in
+*" hotserve "* | *" liveswap "* | *" shadow "*)
 	die "/etc inside the unit carries more than the named entries ($etclist): every app would see every other app's env_file" ;;
 esac
-varliblist=$(printf '%s' "$app_line" | grep -o 'varliblist=[^ ]*' | cut -d= -f2)
-[ "$varliblist" = "liveswap," ] \
+varliblist=$(probe_val varlib_listing)
+[ "$varliblist" = "liveswap " ] \
 	|| die "/var/lib inside the unit is '$varliblist', want only 'liveswap': anything else is a path nothing named"
-echo "in-unit base view: /bin/sh, /usr/bin/hotserve, /etc/ssl; /etc=$etclist /var/lib=$varliblist"
+echo "in-unit base view: /bin/sh, /usr/bin/env, /usr/bin/hotserve, /etc/ssl/certs, /etc/resolv.conf; /etc=$etclist /var/lib=$varliblist"
 [ "$(user_systemctl show -p PrivateUsers --value "$unit")" = "yes" ] || die "unit lacks PrivateUsers=yes"
 [ "$(user_systemctl show -p TemporaryFileSystem --value "$unit")" = "/:ro" ] || die "unit lacks TemporaryFileSystem=/:ro — the view is not deny-by-default"
 # The retired half of the old model, read back off the live unit. Both
@@ -389,7 +424,7 @@ echo "in-unit base view: /bin/sh, /usr/bin/hotserve, /etc/ssl; /etc=$etclist /va
 case "$(user_systemctl show -p InaccessiblePaths --value "$unit")" in
 */*) die "unit still masks a list with InaccessiblePaths=" ;;
 esac
-echo "sandbox (systemd $sd_version): uid_map range $app_uidmap, pid $app_pid, $app_nprocs pids visible, /var/lib/hotserve $app_hslib"
+echo "sandbox (systemd $sd_version): uid_map range $app_uidmap, pid $(probe_val pid), $app_nprocs pids visible, /var/lib/hotserve $(probe_val hotserve_lib)"
 
 # `hotserve validate` provisions and cleans up without starting: run
 # as root (no user manager for uid 0) and as the hotserve user (the
