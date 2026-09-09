@@ -252,6 +252,39 @@ serving them. Boot recovery is owned by the config that started it,
 retried with backoff for anything not explicitly permanent, and
 cancelled/joined by that config's Cleanup.
 
+### Layering
+
+The package is flat, so the compiler cannot report a dependency
+pointing the wrong way: an import cycle is unreachable and every file
+sees every other. The layering below is therefore asserted by a test,
+`deps_test.go`, which parses the package, resolves each file's use of
+package-scope names to the file declaring it, and fails on any edge
+running upward.
+
+| Layer | Files |
+|---|---|
+| 0 | `clock.go`, `names.go` |
+| 1 | `appdirs.go`, `socket.go`, `extract.go`, `allowlist.go`, `authlimit.go`, `deploytrust.go`, `health.go` |
+| 2 | `runner.go`, `sandbox.go`, `download.go`, `state.go` |
+| 3 | `runner_systemd.go`, `systemd_dbus.go` |
+| 4 | `app.go`, `watchdog.go`, `sweep.go` |
+| 5 | `liveswap.go`, `handler.go`, `upstreams.go`, `caddyfile.go`, `deploytoken_cmd.go` |
+
+A file may use a lower layer or its own. Sideways is allowed because a
+layer is a concern and a concern is sometimes split across files —
+`appdirs.go` and `socket.go` are one path vocabulary; `runner.go` and
+`sandbox.go` hand each other value types.
+
+Upward edges are not banned, because a few are right: an interface
+declared where it is consumed and asserted where it is implemented, a
+`Validate` rule that needs the whole config, a method that lives with
+its concern rather than its receiver. Each is listed in the test's
+`allowedUpward` with the reason it is right, and an entry that stops
+being an upward edge fails too — a stale exception is how a list like
+that rots into a rubber stamp. The effect is that a new backwards edge
+has to be argued for in review instead of arriving unnoticed, which is
+what #60 found eight of.
+
 ### File-by-file
 
 | File | Concern |
