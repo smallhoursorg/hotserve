@@ -93,7 +93,7 @@ Properties that matter to the model:
   reload hands out no fresh budget and a second mount does not double
   it. Body is capped at 64 KiB → 413
   ([handler.go:39,169-176](liveswap/handler.go)); `deployMu.TryLock()`
-  → 409 serializes deploys ([app.go:407](liveswap/app.go); the push
+  → 409 serializes deploys ([app.go:336](liveswap/app.go); the push
   path takes it before staging, [handler.go:222](liveswap/handler.go)).
 - **Path routing is `path.Base(path.Clean(...))`**
   ([handler.go:91](liveswap/handler.go)): `/anything/deep/myapp` targets
@@ -111,12 +111,12 @@ Properties that matter to the model:
   bytes with no artifact host in the loop: the allowlist confines
   *pulls*, and only the claim scope confines *who*.
 - **Pull payload:** three fields only — `url`, `version`, `auth_header`
-  ([app.go:163-165](liveswap/app.go)); unknown JSON silently ignored (no
+  ([app.go:92-94](liveswap/app.go)); unknown JSON silently ignored (no
   `DisallowUnknownFields`). `version` is
   `^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$` (no leading dot, so never
   `.`/`..` or a release-GC bookkeeping name), double-sanitized before
   touching the filesystem
-  ([liveswap.go:70,82-84,90-92](liveswap/liveswap.go)). `auth_header`
+  ([names.go:33,45-47,53-55](liveswap/names.go)). `auth_header`
   is only control-char-checked ([handler.go:200-205](liveswap/handler.go));
   its contents are attacker-chosen and forwarded to the allowlisted host.
 - **Response leaks (all post-auth):** the 500 path returns raw
@@ -125,7 +125,7 @@ Properties that matter to the model:
   entry names, the operator's allowlist echoed verbatim
   ([allowlist.go:279-281,363,379](liveswap/allowlist.go)). The status
   snapshot exposes the app's **port and PID** and watchdog cause/failure
-  state ([app.go:1048](liveswap/app.go) `status()`,
+  state ([app.go:977](liveswap/app.go) `status()`,
   [watchdog.go:255-275](liveswap/watchdog.go)). Artifact URLs *are*
   redacted before logs/errors ([download.go:158-163](liveswap/download.go)),
   so query signatures do not leak.
@@ -141,7 +141,7 @@ Properties that matter to the model:
 ### Artifact fetching — `liveswap/download.go` + `allowlist.go`
 
 The allowlist is **mandatory** — config load fails without one
-([liveswap.go:534](liveswap/liveswap.go)); no any-origin mode. Pinning
+([liveswap.go:491](liveswap/liveswap.go)); no any-origin mode. Pinning
 ([allowlist.go:382-449](liveswap/allowlist.go)) rebuilds the outgoing
 URL so scheme is constant, host/port/path-prefix come from *config
 bytes*, and only the path suffix + query come from the payload — the
@@ -161,7 +161,7 @@ on cross-host redirects but **not** same-host
 ([download.go:77-82](liveswap/download.go)). Size: Content-Length
 pre-check plus streaming `LimitReader`, default 100 MB
 ([download.go:94-114](liveswap/download.go),
-[liveswap.go:443-444](liveswap/liveswap.go)).
+[liveswap.go:400-401](liveswap/liveswap.go)).
 
 **The documented, real gap:** the host allowlist governs the **first
 hop only** — `CheckRedirect` deliberately does not re-check the host
