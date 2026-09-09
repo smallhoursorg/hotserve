@@ -26,9 +26,18 @@ const unknownAppSweepTimeout = 2 * time.Minute
 // authority: a candidate that later fails to activate still holds its
 // pool references until its Cleanup, and the config it would have
 // replaced holds its own throughout, so nothing a sweep judges
-// "unknown" can belong to a config that is or may yet be serving. A
-// variable so tests can substitute their own ledger.
-var appConfigured = func(app string) bool {
+// "unknown" can belong to a config that is or may yet be serving.
+//
+// Tests substitute their own ledger through the seam below. It is an
+// atomic rather than a plain var because the sweep runs on a goroutine
+// nothing joins: a test restoring the seam can overlap a sweep still
+// reading it. nil = the pool.
+var appConfiguredSeam atomic.Pointer[func(string) bool]
+
+func appConfigured(app string) bool {
+	if f := appConfiguredSeam.Load(); f != nil {
+		return (*f)(app)
+	}
 	refs, ok := appPool.References(poolKey(app))
 	return ok && refs > 0
 }

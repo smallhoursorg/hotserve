@@ -161,6 +161,10 @@ there would defeat the pool.
   up no other app's.
 - The runner's logger sits behind an atomic pointer because the
   per-unit watcher goroutines outlive the config that created them.
+- The two seams the start-time sweep reads — `caddyExiting` and
+  `appConfigured` — sit behind atomic pointers for the same reason:
+  that sweep is deliberately detached, joined by nothing, so a test
+  restoring a seam can overlap a sweep still reading it.
 
 ### Runner abstraction (`runner.go`)
 
