@@ -14,7 +14,7 @@ Built in:
 
 | Module | What it does |
 |---|---|
-| **[liveswap](liveswap/)** | Zero-downtime app deploys: webhook from CI, artifact download, migrations, health-gated start, atomic traffic cutover, graceful stop, versioned releases with rollback. Your apps run as systemd units under the hotserve user's own service manager — Node.js, Go, anything that can listen on a unix socket — surviving hotserve restarts and upgrades, with a continuous watchdog that restarts them on crash or sustained health failure (bounded by a restart budget, with backoff). |
+| **[liveswap](liveswap/)** | Zero-downtime app deploys: webhook from CI, artifact download, migrations, health-gated start, atomic traffic cutover, graceful stop, versioned releases with rollback. Your apps run as systemd units under the hotserve user's own service manager — Node.js, Go, anything that can listen on a unix socket — surviving hotserve restarts and upgrades, with a continuous watchdog that restarts them on crash or sustained health failure (a restart budget and backoff bound the rate; it throttles rather than giving up). |
 | **[penaltybox](penaltybox/)** | Rate limiting driven by your app's `X-Rate-Limit-Level` hint headers — weighted sliding-window budgets, tiers, and a penalty box for clients that cross them. |
 | **cache** | HTTP page caching via [Souin](https://github.com/darkweak/souin) with in-memory [Otter](https://github.com/darkweak/storages) storage. |
 | everything Caddy has | Automatic HTTPS, HTTP/2 + HTTP/3, the Caddyfile, the admin API — hotserve *is* Caddy underneath, with the modules above compiled in. |
@@ -30,28 +30,33 @@ sudo systemctl enable --now hotserve
 ```
 
 That gives you `/usr/bin/hotserve`, a systemd service running as the
-`hotserve` user, and a starter config at `/etc/hotserve/Caddyfile`.
-**Supported: Debian 13.** One release, one sandbox: every app unit
-gets a PID *and* a user namespace on top of the deny-by-default
-filesystem view — see [liveswap/README.md](liveswap/README.md#sandbox).
-hotserve still installs on other systemd distributions, but nothing
-else is tested, and a host that cannot deliver the sandbox refuses to
-start rather than serving something weaker.
-The package depends on `libpam-systemd` and `dbus` (present on any
-stock Debian server): liveswap runs your apps as systemd units
-under the `hotserve` user's own service manager, which needs
-`pam_systemd` to start and `loginctl` to be kept alive without a
-login — the package enables that lingering for you.
-Prefer the packages — they set up everything above for you. The
-`hotserve_<version>_linux_<arch>.tar.gz` archives on the same page
-contain the **raw binary** (plus LICENSE and a README) for systems
-where you manage the service yourself — your own systemd unit,
-NixOS-style distros, containers. Going that route, you own what the
-package would have done: a dedicated `hotserve` user, a `Type=notify`
-unit, `loginctl enable-linger hotserve` (with `libpam-systemd`
-installed) so the user's manager exists for the apps, and the config
-at `/etc/hotserve/Caddyfile`. (Hosted APT/APK repositories with
-automatic updates are on the roadmap.)
+`hotserve` user, a starter config at `/etc/hotserve/Caddyfile`, and
+the lingering user manager your apps' units run under.
+
+**Supported: Debian 13.** hotserve installs on other systemd
+distributions, but nothing else is tested, and a host that cannot
+deliver the per-app sandbox refuses to start rather than serving
+something weaker — [liveswap/README.md](liveswap/README.md#sandbox)
+has what a host has to provide.
+
+The package depends on `libpam-systemd` and `dbus`, both present on a
+stock Debian server: liveswap runs your apps as systemd units under
+the `hotserve` user's own service manager, which needs `pam_systemd`
+to start and `loginctl` to stay alive without a login.
+
+### Without the package
+
+The `hotserve_<version>_linux_<arch>.tar.gz` archives on the same page
+hold the **raw binary** (plus LICENSE and a README), for systems where
+you manage the service yourself — your own systemd unit, NixOS-style
+distros, containers. Prefer the packages where you can: go this way
+and you own what the package would have done, namely a dedicated
+`hotserve` user, a `Type=notify` unit, `loginctl enable-linger
+hotserve` (with `libpam-systemd` installed) so the user's manager
+exists for the apps, and the config at `/etc/hotserve/Caddyfile`.
+
+(Hosted APT/APK repositories with automatic updates are on the
+roadmap.)
 
 ## Quickstart: deploy an app with zero downtime
 
@@ -109,6 +114,7 @@ steps:
       "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=hotserve" | jq -r .value)" >> "$GITHUB_OUTPUT"
   - run: |
       curl --fail -X POST -H "Authorization: Bearer ${{ steps.tok.outputs.jwt }}" \
+        -H 'Content-Type: application/json' \
         -d '{"url":"https://…/myapp.tar.gz","version":"v1.4.2"}' \
         https://deploy.example.com/myapp
 ```
@@ -165,39 +171,18 @@ an on-disk release. Full details, CI snippets, and every option:
 
 ## Roadmap
 
-- **Per-app sandboxing — shipped.**
-  Every app runs as a transient unit under the hotserve user's own
-  systemd manager (chosen over the system manager: a polkit grant to
-  manage units is root-equivalent), and each unit carries systemd's
-  own sandboxing: a user namespace (`PrivateUsers=`), a
-  deny-by-default filesystem view — the whole host filesystem replaced
-  by an empty read-only tmpfs (`TemporaryFileSystem=/:ro`), with only
-  the OS the app needs to run — named entry by entry, never whole
-  trees — plus its own release and `shared/`
-  bound back, so hotserve's directories and
-  sockets and every other app are *absent* rather than merely
-  unreadable — `PrivateTmp=`, `PrivateDevices=`, a read-only cgroupfs,
-  no capabilities, and systemd's curated
-  `SystemCallFilter=@system-service` — no containers, no bubblewrap.
-  The unit also gets a PID namespace (`PrivatePIDs=`, systemd 256+;
-  Debian 13 ships 257), so the supervisor, the user manager and
-  sibling apps are invisible and unsignalable. A host that cannot
-  deliver either namespace — a container, an LXC VPS, a kernel built
-  without them — is refused rather than given something weaker wearing
-  the same name: hotserve will not start, and says what the host
-  lacks.
-  Why the user namespace matters: under a shared UID the kernel would
-  otherwise let any app walk the host through
-  `/proc/<user-manager>/root`; see
-  [DESIGN-threat-model.md](DESIGN-threat-model.md) "The shared-UID
-  rule". hotserve itself additionally runs non-dumpable from its
-  first milliseconds. There is no sandbox setting: every launch —
-  deploy, relaunch, recovery — gets the same one, or hotserve does
-  not start — [liveswap/README.md](liveswap/README.md#sandbox).
-  Resource caps (`MemoryMax=`, `TasksMax=`, `CPUQuota=`) hold inside
-  the unit already and are unset by design until an app needs
-  bounding (#71). Per-app UIDs would need a small privileged helper
-  and stay a later milestone.
+Per-app sandboxing is shipped and unconditional — see **One box, one
+trust domain** above for what an app can reach,
+[liveswap/README.md](liveswap/README.md#sandbox) for the unit's own
+settings, and [DESIGN-threat-model.md](DESIGN-threat-model.md) for why
+each one is there. What is still ahead:
+
+- **Resource caps.** `MemoryMax=`, `TasksMax=` and `CPUQuota=` hold
+  inside the unit already, and are left unset by design until an app
+  needs bounding (#71).
+- **Per-app UIDs.** Apps share the unprivileged `hotserve` user; giving
+  each its own would need a small privileged helper, so it stays a
+  later milestone.
 - Hosted APT/APK repositories with package signing and auto-updates
 - A metrics/alerts module to sit alongside liveswap and penaltybox —
   first customer: alerting when the watchdog is stuck in a restart
@@ -212,15 +197,16 @@ No local Go toolchain needed — everything runs in Docker:
 make test              # unit tests, all modules (race + coverage)
 make test-integration  # real deploys through caddytest, under a real systemd user manager
 make e2e               # full stack: both module suites against the shipped binary under systemd, then restart survival + crash recovery
-make lint vet tidy
+make lint vet tidy     # golangci-lint (gofmt-gated), go vet, go mod tidy
 make vulncheck         # govulncheck, all modules (tool dep in go.mod — Dependabot-bumped)
 make secretscan        # gitleaks full-history secret scan (same image as the CI gate)
 make fuzz              # fuzz the untrusted-input surfaces (FUZZTIME=2m per target)
 make fuzz-list         # what fuzz will run (discovered per module, not listed by hand); CI runs it on every PR
 make soak              # ~20min leak hunt: deploy/reload churn, goroutine/fd assertions; CI runs it per merge to main and weekly
 make build             # cross-compile linux amd64/arm64
-make package           # .deb via nfpm
-make install-test      # install the .deb under real systemd (Debian 13)
+make package           # .deb via nfpm, into dist/
+make install-test      # install dist/'s .deb under real systemd (Debian 13);
+                       #   run `make package` first — dist/ is not rebuilt
 ```
 
 `test-integration`, `e2e` and `install-test` boot systemd inside a
@@ -260,7 +246,7 @@ weekly `pin-watch` workflow:
 
 ## Dependencies
 
-You're being asked to run this as root on a production server, so
+You're being asked to install this on a production server, so
 here's exactly what's in the binary and what it drags in. Module counts
 are measured from `go mod graph` (deduplicated by module path); the
 "pulls in" column shows what each dependency adds *beyond* what's
@@ -280,22 +266,23 @@ the scanner.)
 | [go-systemd](https://github.com/coreos/go-systemd) (`dbus`) + [godbus](https://github.com/godbus/dbus) | +1 | ✓ | ✓ | — | liveswap's runner: apps are transient units created over systemd's D-Bus API on the hotserve user's own manager (no polkit, no root). go-systemd was already in the workspace graph; godbus is its one dependency, pure Go. |
 | [go-oidc](https://github.com/coreos/go-oidc) + [go-jose](https://github.com/go-jose/go-jose) | 0 (already in Caddy's tree) | ✓ | ✓ | — | Deploy authentication (`deploy_trust`): OIDC discovery/JWKS verification and JWT signing/verification. Both were already transitive dependencies of Caddy; liveswap now requires them directly. Vetted and widely used — the deliberate alternative to hand-rolling JWT crypto. |
 
-The liveswap and penaltybox columns are what a standalone
-`xcaddy build --with ...` of that module pulls in; the hotserve binary
-contains everything.
+A ✓ in the liveswap and penaltybox columns means that module's own
+code requires the dependency. A "—" there is not "absent from that
+module's graph" — the rows marked "already in Caddy's tree" arrive via
+Caddy either way. The hotserve column is ✓ throughout: the product
+binary contains every row.
 
 Build and CI tooling never ships to users and is pinned by image tag
 in `docker-compose.yml`: `golang` (toolchain), `golangci-lint`,
-`nfpm` (deb packaging), `curl` (e2e runner). GitHub Actions are
-pinned to commit SHAs.
+`gitleaks` (secret scan), `nfpm` (deb packaging) and `curl` (the e2e
+runner). GitHub Actions are pinned to commit SHAs.
 
 What keeps this honest: `govulncheck` gates every PR and runs weekly
 against the fresh vulnerability database (reachable-code analysis, all
 modules), every release is blocked until the full test matrix passes —
-including installing the actual `.deb` under systemd on Debian 13,
-on both architectures — and any dependency bump has to survive all of
-the above
-before it merges.
+including installing the actual `.deb` under systemd on Debian 13, on
+both architectures — and any dependency bump has to survive all of the
+above before it merges.
 
 ## License
 
