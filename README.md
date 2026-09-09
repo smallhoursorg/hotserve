@@ -47,20 +47,25 @@ to start and `loginctl` to stay alive without a login.
 ### Without the package
 
 The `hotserve_<version>_linux_<arch>.tar.gz` archives on the same page
-hold the **raw binary** (plus LICENSE and a README), for hosts you
-wire up yourself — a NixOS-style distro, or Alpine, which gets no
-`.deb`. Prefer the packages where you can: going this way you take on
-what the package does for you, namely a dedicated `hotserve` user, a
-`Type=notify` unit, `loginctl enable-linger hotserve` (with
-`libpam-systemd` installed) so the user manager exists for your apps,
-and the config at `/etc/hotserve/Caddyfile`. The sandbox still
-applies, so the host has to be able to deliver both namespaces —
-many container and LXC hosts cannot, and hotserve will refuse to
-start there rather than run your apps unprotected.
+hold the **raw binary** (plus LICENSE and a README), for other systemd
+hosts you wire up yourself — a NixOS-style distro, say. Prefer the
+packages where you can: going this way you take on what the package
+does for you, namely a dedicated `hotserve` user, a `Type=notify`
+unit, `loginctl enable-linger hotserve` (with `libpam-systemd`
+installed) so the user manager exists for your apps, and the config at
+`/etc/hotserve/Caddyfile`. The sandbox applies here too, so the host
+has to deliver both namespaces — many container and LXC hosts cannot,
+and hotserve refuses to start rather than run your apps unprotected.
 
-(A hosted APT repository with automatic updates is on the roadmap.
-There is no `.apk`: Alpine runs OpenRC, so the shipped systemd unit
-would be inert there.)
+**systemd is not optional.** liveswap runs your apps as transient
+units on your user's systemd manager and there is no fallback runner,
+so this is not a path onto a non-systemd host. hotserve would still
+serve there — Caddy, the cache, penaltybox — but a Caddyfile defining
+any `app` refuses to start. That is also why there is no `.apk`:
+Alpine runs OpenRC, and an Alpine package would install a hotserve
+without the feature it exists for.
+
+(A hosted APT repository with automatic updates is on the roadmap.)
 
 ## Quickstart: deploy an app with zero downtime
 
