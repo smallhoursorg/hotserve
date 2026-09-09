@@ -38,7 +38,7 @@ files/env/releases, TLS keys, admin socket, sibling `/proc`, signals).
 What this does NOT stop, stated honestly: theft of the compromised
 app's own secrets (its env is its env), network exfiltration (netns is
 shared by design), resource exhaustion (caps are unset until an app
-needs them — #52), and install-time supply-chain attacks (those run in
+needs them — #71), and install-time supply-chain attacks (those run in
 CI, not on the box).
 
 The mount namespace alone does not close the threat model: the
@@ -381,7 +381,7 @@ decide whether the host can deliver a sandbox at all. A check whose
 input a lane cannot supply is emitted as `skipped`, never omitted, so a
 lane that silently loses an input fails rather than passes vacuously;
 `TestSandboxViewProbeEmitsEveryKey` pins the key set in `make test`.
-It was three diverged copies until #52: one of them had stopped
+It was three diverged copies until #72: one of them had stopped
 testing that `/etc/ssl/private` stays out of the view.
 
 - Unit: the unit-property builder's table tests (the base view,
@@ -454,7 +454,7 @@ testing that `/etc/ssl/private` stays out of the view.
 
 - Resource limits (`MemoryMax=`, `TasksMax=`, `CPUQuota=`) — real the
   moment they are set, because `/sys/fs/cgroup` is read-only in the
-  unit; unset by design until an app needs bounding (#52).
+  unit; unset by design until an app needs bounding (#71).
 - Network egress control — kernel sandboxes cannot scope by hostname.
   The sandbox is the kernel-enforced ceiling; a runtime's own
   `--allow-*` flags are the app narrowing itself inside it, enforced

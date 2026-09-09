@@ -419,7 +419,7 @@ the mechanism:
    by migrating its PIDs) unless that tree is read-only in its view.
    Runtimes only ever *read* it. `ProtectControlGroups=` is set on
    every unit, so caps are real the moment they are set; none is set
-   today — the trigger is an app that needs bounding (#52).
+   today — the trigger is an app that needs bounding (#71).
 
 ## The shipped mechanism
 
@@ -588,7 +588,7 @@ does not isolate the runtime.
 - **Resource exhaustion** — a runaway app can starve its siblings and
   Caddy (fork bomb, memory leak). `ProtectControlGroups=` makes
   `MemoryMax=`/`TasksMax=`/`CPUQuota=` real the moment they are set;
-  nothing sets them until an app needs bounding (#52).
+  nothing sets them until an app needs bounding (#71).
 - **`state.json` must stay outside any writable sandbox view**
   ([liveswap/state.go](liveswap/state.go) is trusted on relaunch for
   the version and the unit). Normative and shipped: only the release
