@@ -142,38 +142,37 @@ an on-disk release. Full details, CI snippets, and every option:
   runtime anywhere. That's why there's deliberately no Docker image.
 - **Not a cluster.** Single-node by design. If you outgrow one server,
   you've outgrown hotserve — a good problem.
-- **One box, one trust domain.** Apps run without privileges
-  (`NoNewPrivileges`, an unprivileged user) and the admin API lives on
-  a unix socket rather than TCP — otherwise "localhost-only" would
-  include every app you run, and one SSRF bug in an app could
-  reconfigure the server.
-  Apps run as one shared user, but each in its own systemd sandbox
-  with a deny-by-default filesystem view: a user namespace, and a
-  filesystem that holds nothing but that app's own release and data
-  and the parts of the OS it needs to run. That view is fixed — there
-  is no directive that widens it — so hotserve's keys, sockets and env
-  files, the other apps, and the rest of the host are not made
-  unreadable, they are *absent*. The app also gets its own PID
-  namespace, so siblings are invisible rather than merely unreadable.
-  There is no opt-out: an app without a sandbox would run as the same
-  user as everything else and reach all of it, so both namespaces are
-  required on every unit and a host that cannot deliver them refuses
-  to start. What stays shared by design is the network namespace, for
-  outbound calls; nothing hotserve runs listens on a port — each
-  instance binds a unix socket in its own directory, and a sibling's
-  socket is outside the view like the rest of the sibling.
-  Details: [liveswap/README.md](liveswap/README.md#sandbox); the
-  reasoning: [DESIGN-threat-model.md](DESIGN-threat-model.md).
+
+## Security
+
+The threat model is [DESIGN-threat-model.md](DESIGN-threat-model.md);
+to report something, [SECURITY.md](SECURITY.md). Three properties it
+rests on:
+
+- **The admin API is not on localhost.** It listens on a unix socket
+  rather than TCP: "localhost-only" would include every app you run,
+  and one SSRF bug in an app could otherwise reconfigure the server.
+  Apps themselves run unprivileged, with `NoNewPrivileges`.
+- **Every app is sandboxed, with no opt-out.** Apps share the
+  `hotserve` user, so each runs in its own systemd sandbox: it sees
+  its own release, its `shared/` data, a private `/tmp`, and the parts
+  of the OS it needs. Nothing else on the host exists in its view —
+  hotserve's keys and every sibling app are *absent* from its
+  filesystem and invisible in its process table, not merely
+  unreadable. A host that cannot deliver that refuses to start rather
+  than run something weaker. What is shared by design is the network,
+  for outbound calls; nothing hotserve runs listens on a port.
+  Details: [liveswap/README.md](liveswap/README.md#sandbox).
 - **Deploys are authenticated without a shared secret.** A deploy
-  carries a short-lived token — an OIDC token from CI, verified against
-  the provider's public keys, or one signed by a local key whose public
-  half the box holds. Nothing an attacker can steal off the box lets
-  them deploy; see [DESIGN-threat-model.md](DESIGN-threat-model.md).
+  carries a short-lived token — an OIDC token from CI, verified
+  against the provider's public keys, or one signed by a local key
+  whose public half the box holds. Nothing an attacker can steal off
+  the box lets them deploy.
 
 ## Roadmap
 
-Per-app sandboxing is shipped and unconditional — see **One box, one
-trust domain** above for what an app can reach,
+Per-app sandboxing is shipped and unconditional — see **Security**
+above for what an app can reach,
 [liveswap/README.md](liveswap/README.md#sandbox) for the unit's own
 settings, and [DESIGN-threat-model.md](DESIGN-threat-model.md) for why
 each one is there. What is still ahead:
