@@ -44,7 +44,8 @@ stock Debian server: liveswap runs your apps as systemd units under
 the `hotserve` user's own service manager, which needs `pam_systemd`
 to start and `loginctl` to stay alive without a login.
 
-### Without the package
+<details>
+<summary><b>Without the package</b> — the raw binary, for other systemd hosts</summary>
 
 The `hotserve_<version>_linux_<arch>.tar.gz` archives on the same page
 hold the **raw binary** (plus LICENSE and a README), for other systemd
@@ -64,6 +65,8 @@ serve there — Caddy, the cache, penaltybox — but a Caddyfile defining
 any `app` refuses to start. That is also why there is no `.apk`:
 Alpine runs OpenRC, and an Alpine package would install a hotserve
 without the feature it exists for.
+
+</details>
 
 (A hosted APT repository with automatic updates is on the roadmap.)
 
