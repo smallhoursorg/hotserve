@@ -48,8 +48,13 @@ jobs:
           ==================================
 
           This archive contains the bare hotserve executable. It is for
-          systems where you manage the service yourself (your own
-          systemd unit, NixOS-style distros, containers).
+          systemd hosts where you manage the service yourself — a
+          NixOS-style distro, say.
+
+          systemd is not optional: liveswap runs your apps as transient
+          units on the service user's own systemd manager, and there is
+          no fallback runner. Without one, hotserve still serves, but a
+          Caddyfile defining any app refuses to start.
 
           If you are on Debian 13, use the .deb from the same release
           instead — it installs everything below for you and is what the
@@ -57,6 +62,7 @@ jobs:
           this archive, but nothing else is tested, and a host that
           cannot deliver the per-app sandbox refuses to start — every
           app runs in one, and there is no setting that runs without.
+          Many container and LXC hosts cannot deliver it.
 
           What the package would have set up, and you now own:
             - a dedicated system user/group (hotserve) to run as
@@ -64,6 +70,11 @@ jobs:
                 hotserve run --config /etc/hotserve/Caddyfile
               with XDG_DATA_HOME/XDG_CONFIG_HOME pointed somewhere the
               service user can write (TLS certificates live there)
+            - libpam-systemd installed, and:
+                loginctl enable-linger hotserve
+              so that user's systemd manager exists without a login —
+              your apps run as units under it, so without this they
+              cannot start at all
             - a starter config at /etc/hotserve/Caddyfile
 
           Docs: https://github.com/smallhoursorg/hotserve
