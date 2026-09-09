@@ -16,8 +16,7 @@ work in the wider attack surface rather than restating it.
 Scope: a single Debian 13 box running `hotserve` (a Caddy distribution)
 as the `hotserve` system user, supervising deployed apps as transient
 systemd units under the hotserve user's own service manager via
-liveswap's `systemdRunner`
-([liveswap/runner_systemd.go](liveswap/runner_systemd.go)). Multi-node,
+liveswap's `systemdRunner` (liveswap/runner_systemd.go). Multi-node,
 Windows, and macOS-as-a-server are out of scope by product design.
 
 ## Assets (what an attacker is after), ranked
@@ -30,9 +29,9 @@ Windows, and macOS-as-a-server are out of scope by product design.
    filesystem route, closed by the sandbox view.
 2. **TLS private keys** — `/var/lib/hotserve/caddy/**`, mode `0750`
    owned by `hotserve`.
-3. **Admin API socket** — `/run/hotserve/admin.sock`
-   ([packaging/Caddyfile:18](packaging/Caddyfile)); reconfigures the
-   whole server. Gated on being the `hotserve` user, not on the network.
+3. **Admin API socket** — `/run/hotserve/admin.sock` (the `admin`
+   directive, packaging/Caddyfile); reconfigures the whole server.
+   Gated on being the `hotserve` user, not on the network.
 4. **Per-app secrets** — an app's own env vars / `env_file`
    (`/etc/hotserve/*.env`). Legitimately reachable by that app; the
    goal is to keep them from *siblings*.
@@ -46,7 +45,11 @@ public material — see "Reducing the asset".
 
 ## Trust boundaries and entry points
 
-All line references are against the working tree at time of writing.
+Source is cited by symbol, not line: `Type.Method` or a package-level
+name, with the file it lives in named on a passage's first citation —
+later symbols are in that file unless another is named. Where a claim
+rests on one statement inside a long function, the prose names it so it
+can be found by search.
 
 ### Webhook endpoint — `liveswap/handler.go`
 
@@ -56,18 +59,20 @@ verified JWT in `Authorization: Bearer` (see "Reducing the asset"):
 against public material, then a claim allowlist. Auth happens **before**
 existence is revealed: an unknown app name is verified against the
 *global* trust sources so callers cannot enumerate app names
-([handler.go:90-146](liveswap/handler.go)). Config load refuses an app
-that resolves to zero trust sources ([liveswap.go](liveswap/liveswap.go)).
-Bearer is the only transport, which Caddy redacts from access logs.
+(`Handler.ServeHTTP`, liveswap/handler.go). Config load refuses an app
+that resolves to zero trust sources (`App.Validate`,
+liveswap/liveswap.go). Bearer is the only transport, which Caddy
+redacts from access logs.
 
 Properties that matter to the model:
 
 - **GET and POST both sit behind the token.** GET returns full status,
-  POST deploys, all else 405 ([handler.go:137-145](liveswap/handler.go)).
-  The status endpoint is authenticated — not public.
+  POST deploys, all else 405 — the method switch in
+  `Handler.ServeHTTP` (liveswap/handler.go). The status endpoint is
+  authenticated — not public.
 - **Auth failures are throttled in the journal**
-  ([liveswap/authlimit.go](liveswap/authlimit.go)). Token *forgery* is
-  infeasible (no private key), so this is not a guessing oracle; what
+  (liveswap/authlimit.go). Token *forgery* is infeasible (no private
+  key), so this is not a guessing oracle; what
   an unauthenticated caller can do with failures is make hotserve
   write a Warn per request. Two sliding windows bound that, in one
   lock scope so a burst of concurrent requests cannot each see room:
@@ -92,17 +97,18 @@ Properties that matter to the model:
   bounds CPU. One limiter for the process, not per handler, so a
   reload hands out no fresh budget and a second mount does not double
   it. Body is capped at 64 KiB → 413
-  ([handler.go:39,169-176](liveswap/handler.go)); `deployMu.TryLock()`
-  → 409 serializes deploys ([app.go:336](liveswap/app.go); the push
-  path takes it before staging, [handler.go:222](liveswap/handler.go)).
-- **Path routing is `path.Base(path.Clean(...))`**
-  ([handler.go:91](liveswap/handler.go)): `/anything/deep/myapp` targets
-  `myapp`. A naive `path /deploy/*` site matcher does not constrain the
-  app name; the operator's matcher is the only constraint.
-- **Three request shapes** ([handler.go:148-161](liveswap/handler.go)),
-  all behind the same token: a JSON body pulls from a URL (below); a
-  gzip body **pushes** the artifact itself (`POST /<app>?version=`,
-  [handler.go:210-251](liveswap/handler.go)) — the bytes come straight
+  (`maxPayloadBytes`, enforced in `Handler.deployURL`,
+  liveswap/handler.go); `deployMu.TryLock()` → 409 serializes deploys
+  (`managedApp.Deploy`, liveswap/app.go; the push path takes it before
+  staging, in `Handler.deployPush`, liveswap/handler.go).
+- **Path routing is `path.Base(path.Clean(...))`**, the first statement
+  of `Handler.ServeHTTP` (liveswap/handler.go): `/anything/deep/myapp`
+  targets `myapp`. A naive `path /deploy/*` site matcher does not
+  constrain the app name; the operator's matcher is the only constraint.
+- **Three request shapes** (`Handler.deploy` dispatches on them,
+  liveswap/handler.go), all behind the same token: a JSON body pulls
+  from a URL (below); a gzip body **pushes** the artifact itself
+  (`POST /<app>?version=`, `Handler.deployPush`) — the bytes come straight
   from the authenticated caller, capped at `max_artifact_size`, staged
   under the app's `tmp/` and extracted like a download, and **no
   `artifact_allowlist` is consulted** because there is no URL to pin;
@@ -111,24 +117,25 @@ Properties that matter to the model:
   bytes with no artifact host in the loop: the allowlist confines
   *pulls*, and only the claim scope confines *who*.
 - **Pull payload:** three fields only — `url`, `version`, `auth_header`
-  ([app.go:92-94](liveswap/app.go)); unknown JSON silently ignored (no
+  (`deployPayload`, liveswap/app.go); unknown JSON silently ignored (no
   `DisallowUnknownFields`). `version` is
   `^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$` (no leading dot, so never
   `.`/`..` or a release-GC bookkeeping name), double-sanitized before
-  touching the filesystem
-  ([names.go:33,45-47,53-55](liveswap/names.go)). `auth_header`
-  is only control-char-checked ([handler.go:200-205](liveswap/handler.go));
-  its contents are attacker-chosen and forwarded to the allowlisted host.
+  touching the filesystem (`versionRe`, `versionPathComponent` and
+  `validVersion`, liveswap/names.go). `auth_header` is only
+  control-char-checked (`parseDeployPayload`, liveswap/handler.go); its
+  contents are attacker-chosen and forwarded to the allowlisted host.
 - **Response leaks (all post-auth):** the 500 path returns raw
   `err.Error()` plus the full status snapshot
-  ([handler.go:290-294](liveswap/handler.go)) — filesystem paths, tar
-  entry names, the operator's allowlist echoed verbatim
-  ([allowlist.go:279-281,363,379](liveswap/allowlist.go)). The status
-  snapshot exposes the app's **port and PID** and watchdog cause/failure
-  state ([app.go:977](liveswap/app.go) `status()`,
-  [watchdog.go:255-275](liveswap/watchdog.go)). Artifact URLs *are*
-  redacted before logs/errors ([download.go:158-163](liveswap/download.go)),
-  so query signatures do not leak.
+  (`Handler.mapDeployResult`, liveswap/handler.go) — filesystem paths,
+  tar entry names, the operator's allowlist echoed verbatim
+  (`artifactAllowEntry.String` and `describeAllowlist`,
+  liveswap/allowlist.go). The status snapshot exposes the app's
+  **socket and PID** and watchdog cause/failure state
+  (`managedApp.status`, liveswap/app.go; `watchdogState.statusSnapshot`,
+  liveswap/watchdog.go). Artifact URLs *are* redacted before
+  logs/errors (`redactURL`, liveswap/download.go), so query signatures
+  do not leak.
 - **Replay / downgrade is bounded.** The bearer JWT is short-lived
   (`exp`), so a captured request is replayable only within that window.
   Versions are immutable: re-deploying an existing version (running or
@@ -141,65 +148,62 @@ Properties that matter to the model:
 ### Artifact fetching — `liveswap/download.go` + `allowlist.go`
 
 The allowlist is **mandatory** — config load fails without one
-([liveswap.go:491](liveswap/liveswap.go)); no any-origin mode. Pinning
-([allowlist.go:382-449](liveswap/allowlist.go)) rebuilds the outgoing
-URL so scheme is constant, host/port/path-prefix come from *config
-bytes*, and only the path suffix + query come from the payload — the
-request can never contribute host bytes, with two fail-closed re-checks
-(port [allowlist.go:407](liveswap/allowlist.go), query
-[allowlist.go:418](liveswap/allowlist.go)) and a prefix-boundary guard
-([allowlist.go:433](liveswap/allowlist.go)). Canonicalization
-([allowlist.go:180-227](liveswap/allowlist.go)) and query gating
-([allowlist.go:238-284](liveswap/allowlist.go)) are thorough and
+(`App.Validate`, liveswap/liveswap.go); no any-origin mode. Pinning
+(`artifactAllowEntry.pinnedURLString`, liveswap/allowlist.go) rebuilds
+the outgoing URL so scheme is constant, host/port/path-prefix come from
+*config bytes*, and only the path suffix + query come from the payload
+— the request can never contribute host bytes, with two fail-closed
+re-checks (port, then query) and a prefix-boundary guard, all three in
+`pinnedURLString`. Canonicalization (`canonicalEscapedPath`) and query
+gating (`artifactAllowEntry.vetQuery`) are thorough and
 closed-by-default.
 
-`https` only unless `allow_insecure_http`
-([download.go:41-49](liveswap/download.go)), re-enforced on **every
-redirect hop** ([download.go:142-152](liveswap/download.go)) — closing
-Go's default https→http downgrade. `auth_header` is stripped by stdlib
-on cross-host redirects but **not** same-host
-([download.go:77-82](liveswap/download.go)). Size: Content-Length
-pre-check plus streaming `LimitReader`, default 100 MB
-([download.go:94-114](liveswap/download.go),
-[liveswap.go:400-401](liveswap/liveswap.go)).
+`https` only unless `allow_insecure_http` (`downloadArtifact`,
+liveswap/download.go), re-enforced on **every redirect hop** by the
+`CheckRedirect` closure in `newDownloadClient` — closing Go's default
+https→http downgrade. `auth_header` is stripped by stdlib on cross-host
+redirects but **not** same-host (also `downloadArtifact`). Size:
+Content-Length pre-check plus streaming `LimitReader`, default 100 MB
+(`downloadArtifact`; the default is set in `AppConfig.applyDefaults`,
+liveswap/liveswap.go).
 
 **The documented, real gap:** the host allowlist governs the **first
 hop only** — `CheckRedirect` deliberately does not re-check the host
-per hop, because the GitHub→S3 redirect is load-bearing
-([download.go:128-135](liveswap/download.go)). So an allowlisted first
+per hop, because the GitHub→S3 redirect is load-bearing (the rationale
+is on `newDownloadClient`, liveswap/download.go). So an allowlisted first
 host can redirect the fetch to *any* https host — LAN, internal, an
 https metadata endpoint. "https-only" is a partial SSRF barrier (it
 stops plain-http metadata endpoints, not an attacker's https target).
 Reaching it requires a valid deploy token **and** an allowlisted first hop.
 Secondary: a malicious host can trickle bytes under the cap (only a
-30 s `ResponseHeaderTimeout`, [download.go:136-141](liveswap/download.go))
-to hold the per-app deploy lock open — DoS-of-deploys, not of serving.
+30 s `ResponseHeaderTimeout`, set in `newDownloadClient`) to hold the
+per-app deploy lock open — DoS-of-deploys, not of serving.
 
 ### Tar extraction — `liveswap/extract.go`
 
 Two-pass (validate-all, then write — no partial residue,
-[extract.go:26-36](liveswap/extract.go)). Traversal via stdlib
-`filepath.IsLocal` in both passes
-([extract.go:82,108,165-177](liveswap/extract.go)). Symlink/hardlink
-targets must resolve inside the archive root
-([extract.go:88-96,183-196](liveswap/extract.go)). Modes: `Perm()|0600`
-strips setuid/setgid/sticky structurally
-([extract.go:123](liveswap/extract.go)); dirs forced `0750`. Devices/
-FIFOs rejected. Decompression bomb capped at `max_artifact_size × 10`
-over the *decompressed* stream ([extract.go:17,52](liveswap/extract.go)).
+`extractArchive`, liveswap/extract.go). Traversal via stdlib
+`filepath.IsLocal`, which both passes reach through `safeRelPath`.
+Symlink/hardlink targets must resolve inside the archive root
+(`linkTargetStaysInside`). Modes: `Perm()|0600` strips
+setuid/setgid/sticky structurally (`writeEntry`); dirs forced `0750`.
+Devices/FIFOs rejected. Decompression bomb capped at
+`max_artifact_size × 10` over the *decompressed* stream
+(`decompressionRatioCap`, enforced by the `io.LimitedReader` in
+`walkArchive`).
 
 Residual items for the model:
 
 - **Link TOCTOU shape (unproven, worth review):** validation is
-  *symbolic* (string resolution); writing
-  ([extract.go:133-146](liveswap/extract.go)) does `os.Symlink` then
-  later `os.Link`/`os.OpenFile` under `destDir` with no `openat`-style
+  *symbolic* (string resolution); writing (`writeEntry`,
+  liveswap/extract.go) does `os.Symlink` then later
+  `os.Link`/`os.OpenFile` under `destDir` with no `openat`-style
   re-check after intermediate symlinks exist on disk. Each entry name
   passes `IsLocal`, but nothing resolves the on-disk path *through*
   an earlier-written symlink. Blast radius is bounded (targets must stay
   symbolically under root; extraction is into a hidden staging dir
-  `os.Rename`d on success, [download.go:232](liveswap/download.go)).
-  Not asserted as exploitable.
+  `os.Rename`d on success, in `releaseFetcher.fetch`,
+  liveswap/download.go). Not asserted as exploitable.
 - **Entry and name caps, independent of the byte budget.** The byte
   cap bounds the tar *stream*, not what extraction consumes: every
   entry costs an inode and most a 4 KB block, so 1 GB of 1-byte files
@@ -226,27 +230,26 @@ Residual items for the model:
 
 The starter config exposes only `:80` returning a static string; the
 entire liveswap/webhook block ships commented out
-([packaging/Caddyfile:26-92](packaging/Caddyfile)) — a fresh install
-has no deploy endpoint. Admin is off TCP, on
-`unix//run/hotserve/admin.sock` ([packaging/Caddyfile:18](packaging/Caddyfile)),
-`RuntimeDirectoryMode=0750` owned by the service user
-([packaging/hotserve.service:33-34](packaging/hotserve.service)) — so
-admin access is gated on *being the `hotserve` user*. Every deployed
-app is that user, but a sandboxed app cannot reach `/run/hotserve` at
-all (the path is not in its view), so the gate holds against apps and
-only hotserve itself can connect. The example webhook deployment
-([Caddyfile:90-92](packaging/Caddyfile)) is a public TLS vhost with
-`liveswap_webhook` behind `deploy_trust`; the handler's own
-per-address auth-failure throttle is the only rate limiting in front.
+(packaging/Caddyfile) — a fresh install has no deploy endpoint. Admin
+is off TCP, on `unix//run/hotserve/admin.sock` (the `admin` directive,
+same file), `RuntimeDirectoryMode=0750` owned by the service user
+(packaging/hotserve.service) — so admin access is gated on *being the
+`hotserve` user*. Every deployed app is that user, but a sandboxed app
+cannot reach `/run/hotserve` at all (the path is not in its view), so
+the gate holds against apps and only hotserve itself can connect. The
+commented-out `deploy.example.com` example is a public TLS vhost with
+`liveswap_webhook` behind `deploy_trust`; the handler's own per-address
+auth-failure throttle is the only rate limiting in front.
 
 **penaltybox** is a response-phase rate-limit-hint enforcer; it touches
 untrusted input only narrowly (the client key defaults to
-`{http.vars.client_ip}`, deferring XFF trust to `trusted_proxies`;
-[penaltybox/penaltybox.go:34-37,109-114](penaltybox/penaltybox.go)). A
-misconfigured `trusted_proxies` turns client bytes into store keys,
-bounded by `max_keys` (default 100 000, idle-eviction). The origin's
-hint header is strict-parsed and fails open. It is a minor surface:
-denial-of-protection under bad config, not injection or exhaustion.
+`{http.vars.client_ip}`, deferring XFF trust to `trusted_proxies` — the
+`Key` field of `Handler`, defaulted in `Handler.Provision`,
+penaltybox/penaltybox.go). A misconfigured `trusted_proxies` turns
+client bytes into store keys, bounded by `max_keys` (default 100 000,
+idle-eviction). The origin's hint header is strict-parsed and fails
+open. It is a minor surface: denial-of-protection under bad config, not
+injection or exhaustion.
 
 ### Supervisor⇄app and app⇄app boundaries
 
@@ -256,9 +259,9 @@ rule" and "The shipped mechanism". The network namespace is shared, by
 design. The unit environment is the user manager's defaults
 (`INVOCATION_ID`, …; `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`
 are unset because `/run/user` is not in the view) plus an allowlisted
-slice of hotserve's (`PATH`, `LANG`, `TZ`, `LC_*` —
-[app.go](liveswap/app.go) `envAllowlist`; `HOME` is never inherited,
-`buildEnv` sets it to the app's shared dir) — closing *direct*
+slice of hotserve's (`PATH`, `LANG`, `TZ`, `LC_*` — `envAllowlist`,
+liveswap/app.go; `HOME` is never inherited, `buildEnv` sets it to the
+app's shared dir) — closing *direct*
 inheritance of ACME tokens and any other supervisor secret
 (`TestBuildEnvDoesNotLeakSupervisorSecrets`). The `/proc` route is
 closed twice over (non-dumpable supervisor; cross-namespace refusal);
@@ -404,10 +407,9 @@ the mechanism:
    weaken an app: interference cannot produce a running hotserve with
    a lesser sandbox. The verdict is cached per manager connection
    (`userManagerClient.cachedSandboxCapability`,
-   [systemd_dbus.go:92](liveswap/systemd_dbus.go)), which narrows the
-   window,
-   and a failed verdict is deliberately NOT cached, so interference
-   costs the next start rather than pinning a verdict until the manager
+   liveswap/systemd_dbus.go), which narrows the window, and a failed
+   verdict is deliberately NOT cached, so interference costs the next
+   start rather than pinning a verdict until the manager
    restarts. The remedy is to remove the interfering process, which
    runs as the hotserve uid and is therefore either hotserve's own app
    or something already in the trust domain.
@@ -442,7 +444,7 @@ grant.
 
 **The property set**, on every unit — `unitProperties` renders the
 lifecycle properties and appends `sandboxProperties` for the rest
-([liveswap/systemd_dbus.go:268,356](liveswap/systemd_dbus.go)):
+(liveswap/systemd_dbus.go):
 
 - Namespaces: `PrivateUsers=yes`, `PrivatePIDs=yes`, `PrivateTmp=yes`,
   `PrivateDevices=yes`; `RestrictNamespaces=` (empty set — an app
@@ -590,7 +592,7 @@ does not isolate the runtime.
   `MemoryMax=`/`TasksMax=`/`CPUQuota=` real the moment they are set;
   nothing sets them until an app needs bounding (#71).
 - **`state.json` must stay outside any writable sandbox view**
-  ([liveswap/state.go](liveswap/state.go) is trusted on relaunch for
+  (liveswap/state.go is trusted on relaunch for
   the version and the unit). Normative and shipped: only the release
   being started, `shared/` and the OS base view are bound into the
   unit — the app dir root, `state.json`, `tmp/` (the upload staging

@@ -2,9 +2,9 @@
 
 Status: **handover — not started.** This document briefs the developer who
 will implement the module. It is the Caddy counterpart to the HAProxy and
-Fastly consumption recipes for the CMS's rate-limit hint header — read
-[DESIGN-rate-limit-hints.md](./DESIGN-rate-limit-hints.md) first; this doc
-assumes its wire contract. External vendor facts below were verified
+Fastly consumption recipes for the rate-limit hint header — read
+[README.md → The wire contract](README.md#the-wire-contract) first; this
+doc assumes it. External vendor facts below were verified
 2026-07-25 (Fastly) or follow HAProxy's stable stick-table config surface.
 
 ## Why this module exists
@@ -57,10 +57,9 @@ threat, not first-hit).
 | Penalty TTL        | 1m–1h, minute granularity                  | table `expire`                                | configurable; default 5m            |
 | Clustered state    | platform-global                            | stick-table peers protocol                    | **out of scope v1** (see Non-goals) |
 
-Reference implementations of the other two columns (keep these in the
-module README so users can cross-check): the Fastly VCL and HAProxy
-snippets in
-[DESIGN-rate-limit-hints.md → Consumption recipes](./DESIGN-rate-limit-hints.md#consumption-recipes-documentation-not-code-we-ship).
+Reference implementations of the other two columns: the Fastly and
+HAProxy equivalents are in [README.md → Concept map](README.md#concept-map),
+so users can cross-check without leaving the repo.
 
 ## Behavior specification (normative)
 
@@ -231,8 +230,9 @@ code — the same seam reserved for the distributed store below.
 
 ## References
 
-- Wire contract + sibling recipes:
-  [DESIGN-rate-limit-hints.md](./DESIGN-rate-limit-hints.md)
+- Wire contract + Fastly/HAProxy equivalents:
+  [The wire contract](README.md#the-wire-contract),
+  [Concept map](README.md#concept-map)
 - Fastly (verified 2026-07-25):
   [check_rate](https://www.fastly.com/documentation/reference/vcl/functions/rate-limiting/ratelimit-check-rate/),
   [penaltybox_has](https://www.fastly.com/documentation/reference/vcl/functions/rate-limiting/ratelimit-penaltybox-has/),
