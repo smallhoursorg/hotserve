@@ -75,10 +75,19 @@ c=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$H
 [ "$c" = "200" ] && pass "valid token accepted" || fail "valid token: expected 200, got $c"
 
 echo "=== scenario 2: nothing deployed yet -> proxy 5xx, not a hang ==="
-c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$PROXY/")
+# The proxy holds a request only until the app's first recovery attempt
+# returns (at most 2s), and the readiness gate above does not wait for
+# that, so the first try may still land in it. After it, the answer is
+# immediate: an app whose recovery never releases it times out on all
+# five one-second tries.
+c=000
+for try in 1 2 3 4 5; do
+	c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 1 "$PROXY/")
+	case "$c" in 5*) break ;; esac
+done
 case "$c" in
-5*) pass "undeployed app answers $c immediately" ;;
-*) fail "expected 5xx before first deploy, got $c" ;;
+5*) pass "undeployed app answers $c within 1s (try $try)" ;;
+*) fail "expected 5xx before first deploy within 1s, got $c on five tries" ;;
 esac
 
 echo "=== scenario 3: deploy v1 through the webhook ==="

@@ -206,6 +206,14 @@ type managedApp struct {
 	// it is the cutover. nil = nothing serving yet.
 	activeSocket atomic.Pointer[socketRef]
 
+	// recovered is closed once this process's first recovery attempt
+	// for the app has returned (recover), however it ended. Until then a
+	// nil activeSocket means "not reattached yet" rather than "nothing
+	// to serve", and GetUpstreams holds the request instead of failing
+	// it. Pool-scoped like the rest, so a reload finds it closed.
+	recovered     chan struct{}
+	recoveredOnce sync.Once
+
 	// Watchdog plumbing. The goroutine is pool-scoped like everything
 	// else here: started once (first Provision), never touched by
 	// reloads, torn down in Destruct BEFORE the child is stopped so a
@@ -227,7 +235,13 @@ type managedApp struct {
 }
 
 func newManagedApp(name string) *managedApp {
-	return &managedApp{name: name, phase: "idle", wdNotify: make(chan struct{}, 1)}
+	return &managedApp{name: name, phase: "idle", wdNotify: make(chan struct{}, 1), recovered: make(chan struct{})}
+}
+
+// markRecovered releases every request GetUpstreams is holding for
+// recovery, and every later one it would have held.
+func (ma *managedApp) markRecovered() {
+	ma.recoveredOnce.Do(func() { close(ma.recovered) })
 }
 
 // configure installs the latest spec and (re)wires collaborators. On
@@ -746,13 +760,20 @@ const (
 // where the user manager is briefly unresponsive must not leave a
 // healthy app unrouted until an operator reloads. ctx belongs to the
 // config that started it and ends at that config's Cleanup.
+//
+// Requests held for recovery (GetUpstreams) are released when the first
+// attempt returns, whatever it decided: they get what the app has by
+// then, and never wait out a backoff. A recovery cancelled before its
+// first attempt releases them too.
 func (ma *managedApp) recover(ctx context.Context, logger *zap.Logger) {
+	defer ma.markRecovered()
 	delay := recoveryBackoffFloor
 	for attempt := 1; ; attempt++ {
 		if ctx.Err() != nil {
 			return // destructed before this attempt
 		}
 		err := ma.ensureRunning()
+		ma.markRecovered()
 		if err == nil {
 			return
 		}

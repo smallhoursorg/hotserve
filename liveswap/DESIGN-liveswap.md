@@ -102,6 +102,12 @@ Concept map from the Nomad-era stack:
 - On Caddy start, each app with recorded state MUST be relaunched (or
   reattached, if the runner supports it) and published as soon as the
   process is up — the health gate is a deploy gate, not a boot gate.
+- A request that reaches an app before its first recovery attempt has
+  returned MUST be held until it has (bounded by the request and by
+  `recoveryWaitCap`, 2s), not failed: Caddy can serve before the
+  liveswap app has even started, and recovery runs after that. Once
+  the attempt has returned, nothing is held — a crash the watchdog is
+  relaunching fails as fast as it did before.
 - Deploy secrets, `auth_header` values, and artifact URL query strings
   MUST NOT be logged.
 
@@ -373,7 +379,10 @@ author's beliefs about systemd, and only the real thing corrects them.
    same-version rejection; GC gated on a confirmed sweep); recovery
    (reattach, relaunch, no-state sweep, transient vs permanent
    classification, retry loop on the fake clock, refusal of a foreign
-   unit name in state.json, Cleanup joining recovery); Destruct's
+   unit name in state.json, Cleanup joining recovery); the proxy's
+   hold for recovery (released by a reattach, a failed first attempt,
+   a cancelled recovery, the client and the cap; never for a crash);
+   Destruct's
    live-config gate and rollback of a rejected candidate's definition;
    the runner over a scripted manager (unit properties and naming,
    watcher terminal states and transport-error immunity, PID backfill,
