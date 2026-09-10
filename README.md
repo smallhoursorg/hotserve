@@ -205,14 +205,15 @@ To check for a quiet moment, add `metrics` to the Caddyfile's global
 options, reload, and read how many requests are in flight:
 
 ```sh
-sudo curl -s --unix-socket /run/hotserve/admin.sock http://localhost/metrics \
+sudo curl -fsS --unix-socket /run/hotserve/admin.sock http://localhost/metrics \
   | grep '^caddy_http_requests_in_flight'
 ```
 
-Every line at 0 means nothing is mid-request (there are no lines at
-all until the first request after the reload). It is only a snapshot,
-so a request can still start the moment after, but it catches the slow
-downloads that would stretch the window.
+Every line at 0 means nothing is mid-request. No lines means the check
+is not working yet, not that the server is idle: `metrics` is not on,
+or nothing has been served since the reload (load a page, then look
+again). It is only a snapshot, so a request can still start the moment
+after, but it catches the slow downloads that would stretch the window.
 
 </details>
 
