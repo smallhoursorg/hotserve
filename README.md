@@ -150,8 +150,10 @@ upgrade:
 
 ```sh
 # from the release page: the .deb for your architecture, and checksums.txt
+v=0.2.0                             # the version in the .deb's file name
+arch=$(dpkg --print-architecture)   # amd64 or arm64
 sha256sum -c --ignore-missing checksums.txt
-sudo apt install ./hotserve_*_amd64.deb
+sudo apt install ./hotserve_${v}_${arch}.deb
 ```
 
 The package keeps your `/etc/hotserve/Caddyfile` and restarts hotserve
@@ -161,8 +163,9 @@ finds each one in `state.json` and picks it up as it is — same process,
 no relaunch, no redeploy.
 
 **The restart itself is not zero-downtime.** New visitors get errors
-for about a tenth of a second — longer while a slow request finishes,
-at most a little over 5 seconds — so upgrade at a quiet moment. A
+for about a tenth of a second, or longer while a slow request finishes:
+the old process gets up to 5 seconds to stop before the new one starts.
+So upgrade at a quiet moment. A
 config change does not need a restart: `sudo systemctl reload hotserve`
 swaps the config inside the running process, drops no requests, and
 never restarts a running app (an edited app definition applies at its
@@ -183,10 +186,14 @@ process picks the apps back up. How long the window lasts:
   (measured on Debian 13 in the package test container, plain HTTP).
 - **With a slow one in flight** — a large download, a long poll — as
   long as that request takes, because the old process waits for it.
-- **At most a little over 5 seconds** (`TimeoutStopSec=5s` in the unit).
-  systemd then kills the old process, which cuts off whatever was still
+- **The old process gets at most 5 seconds to stop** (`TimeoutStopSec=5s`
+  in the unit). systemd then kills it, which cuts off whatever was still
   running, and logs `Failed with result 'timeout'`; the restart still
-  goes ahead, and the apps are untouched.
+  goes ahead, and the apps are untouched. The new process starts after
+  that, so the window is those 5 seconds plus its startup (5.3 seconds
+  in all, in the test container) — and a new process that cannot start
+  leaves the site down until it can, which is what the config check
+  below is for.
 
 This is how Caddy itself upgrades: its official Debian package restarts
 the service the same way, with the same 5-second stop timeout, and the
@@ -217,7 +224,7 @@ Before you upgrade:
   rejects would stop the upgraded hotserve from starting, and the site
   would stay down until you fixed the config or went back.
 - **Keep the `.deb` you are upgrading from.**
-  `sudo apt install --allow-downgrades ./hotserve_<old>_amd64.deb`
+  `sudo apt install --allow-downgrades ./hotserve_<old>_$(dpkg --print-architecture).deb`
   puts it back — the same restart, in reverse. On a VPS, a snapshot
   taken first is the fuller way back.
 - **Upgrade hotserve and the host separately.** hotserve measures what
