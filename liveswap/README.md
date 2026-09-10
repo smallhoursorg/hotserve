@@ -916,8 +916,10 @@ and `shared/` of this tree (see [Sandbox](#sandbox)).
   instance is actually running — and neither do **hotserve restarts
   and upgrades**:
   on start, liveswap reattaches to the unit recorded in `state.json`
-  and serves it immediately; only if that unit is gone (reboot, or it
-  died meanwhile) is the current version relaunched. Stopping hotserve
+  and serves it without relaunching it (what visitors see while
+  hotserve itself restarts: [Upgrading](../README.md#upgrading));
+  only if that unit is gone (reboot, or it died meanwhile) is the
+  current version relaunched. Stopping hotserve
   therefore leaves apps running until the next start; removing the
   package stops them. Removing an app (or the whole `liveswap` block)
   via a **reload** stops its units; if you instead edit the file and
