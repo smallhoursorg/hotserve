@@ -88,7 +88,7 @@ Concept map from the Nomad-era stack:
   healthy within `deadline`. A flapping health check resets the soak.
 - Any failure before the promote step MUST leave the old version
   serving, untouched. The webhook response MUST be synchronous and MUST
-  be a 5xx on failure (CI turns red; `curl --fail`).
+  be a 5xx on failure (CI turns red; `curl --fail-with-body`).
 - The cutover MUST NOT trigger a config reload; it is an atomic value
   swap read per-request by the upstream source.
 - After cutover the pipeline MUST wait `drain`, then SIGTERM the old
@@ -96,9 +96,17 @@ Concept map from the Nomad-era stack:
   `grace`.
 - Release GC MUST run only after successful deploys, keep the newest
   `keep` dirs by mtime, and never delete the currently-serving version.
-  Failed versions' dirs are kept (until GC'd by age) for debugging.
+  A failed URL or push deploy's freshly extracted release dir is
+  removed (a rollback relaunches an existing release and never deletes
+  it), so its version stays retriable — unless the failed instance
+  may still be running (the
+  dir is kept rather than pulled from under a live process; the next
+  launch's sweep stops the stray unit) or the removal itself fails;
+  either way release GC (after a later successful deploy) removes it
+  once it falls outside the newest `keep`.
 - Config reloads MUST NOT restart running apps. Changed app definitions
-  apply on the next deploy.
+  apply at the app's next launch: a deploy, a rollback, or a relaunch
+  after a crash, a sustained health failure, or a reboot.
 - On Caddy start, each app with recorded state MUST be relaunched (or
   reattached, if the runner supports it) and published as soon as the
   process is up — the health gate is a deploy gate, not a boot gate.
@@ -482,7 +490,7 @@ Design summary (full operator docs in README.md "Watchdog"):
 - Deploy queueing; 409 + CI retry is the queue.
 - Windows.
 - Streaming (NDJSON) deploy progress; the response is buffered JSON so
-  `curl --fail` semantics stay honest.
+  `curl --fail-with-body` semantics stay honest.
 
 ## Open questions (with leans)
 
@@ -492,7 +500,7 @@ Design summary (full operator docs in README.md "Watchdog"):
    webhook. Lean: later; the webhook + status JSON covers CI and cron.
 3. **Metrics.** Lean: add with events.
 4. **Config-change restarts** — an explicit "apply now" admin action
-   instead of waiting for the next deploy. Lean: keep next-deploy
+   instead of waiting for the next launch. Lean: keep next-launch
    semantics; add an admin endpoint if users ask.
 
 ## History
