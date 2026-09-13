@@ -38,7 +38,7 @@ for it. Use the version in `.deno-version`, which is what the workflow
 builds with:
 
 ```sh
-v=v2.9.6                              # the contents of .deno-version
+v=v$(cat .deno-version)               # from a checkout; on the box, type what the file says
 f=deno-$(uname -m)-unknown-linux-gnu.zip
 curl -fsSLO "https://github.com/denoland/deno/releases/download/$v/$f"
 curl -fsSLO "https://github.com/denoland/deno/releases/download/$v/$f.sha256sum"
@@ -86,8 +86,8 @@ The copy on the box is the one that counts: hotserve never reads
 `hotserve.caddy` from a deploy. (Without a box repo, as root: edit
 `/etc/hotserve/Caddyfile`, `hotserve validate --config` it, then
 `systemctl reload hotserve`. hotserve's e2e suite instead saves the
-file on its box and writes `import /etc/hotserve/example.caddy` in
-the block.)
+file on its box as `/etc/hotserve/<app>.caddy` and writes `import`
+of that path in the block.)
 
 **3. Point the workflow at the box.** In your copy of this directory,
 set `HOTSERVE_URL` in `.github/workflows/deploy.yml` to
@@ -133,9 +133,9 @@ the older code with the flags on the box today.
 
 Given a local tarball instead of a URL, `scripts/deploy.sh` pushes it
 in the request body, so a laptop build needs no release. The token
-comes from `hotserve deploy-token`, and hotserve is built for Linux
-only, so this is a path for a Linux machine that is not the box (the
-signing key must stay off the box). With a `deploy_trust local` block
+comes from `hotserve deploy-token`, and hotserve's release binaries
+are Linux only, so this is a path for a Linux machine that is not the
+box (the signing key must stay off the box). With a `deploy_trust local` block
 on the box (see
 [Deploy authentication](../../liveswap/README.md#deploy-authentication-deploy_trust)):
 

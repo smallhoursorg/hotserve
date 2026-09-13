@@ -113,7 +113,9 @@ like this:
 - `https://deploy.example.com/example` answers 401 with
   `{"error":"invalid or missing deploy token …"}`, in a browser or
   with `curl -i`. That is the webhook working: a deploy carries a
-  token, and nothing without one gets further than this.
+  token, and nothing without one gets further than this. Check once:
+  the eleventh tokenless request in a minute from one address gets 429
+  instead, and a warning in the journal — the limiter, not a fault.
 - `journalctl -u hotserve | grep 'liveswap started'` gains a line with
   `"apps":1,"app_names":["example"]`.
 

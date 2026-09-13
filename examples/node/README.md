@@ -83,8 +83,8 @@ The copy on the box is the one that counts: hotserve never reads
 `hotserve.caddy` from a deploy. (Without a box repo, as root: edit
 `/etc/hotserve/Caddyfile`, `hotserve validate --config` it, then
 `systemctl reload hotserve`. hotserve's e2e suite instead saves the
-file on its box and writes `import /etc/hotserve/example.caddy` in
-the block.)
+file on its box as `/etc/hotserve/<app>.caddy` and writes `import`
+of that path in the block.)
 
 **3. Point the workflow at the box.** In your copy of this directory,
 set `HOTSERVE_URL` in `.github/workflows/deploy.yml` to
@@ -134,8 +134,9 @@ Given a local tarball instead of a URL, `scripts/deploy.sh` pushes it
 in the request body, so a laptop build needs no release — as long as
 the laptop is the box's architecture and OS (a Linux arm64 build, for
 an arm64 box). The token comes from `hotserve deploy-token`, and
-hotserve is built for Linux only, so this is a path for a Linux
-machine that is not the box (the signing key must stay off the box).
+hotserve's release binaries are Linux only, so this is a path for a
+Linux machine that is not the box (the signing key must stay off the
+box).
 With a `deploy_trust local` block on the box (see
 [Deploy authentication](../../liveswap/README.md#deploy-authentication-deploy_trust)):
 
