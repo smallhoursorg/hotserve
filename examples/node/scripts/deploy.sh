@@ -12,8 +12,10 @@
 #   HOTSERVE_TOKEN        a deploy token. Not needed in GitHub Actions: with
 #                         `permissions: id-token: write` one is minted per run.
 #   HOTSERVE_AUDIENCE     the audience the box's deploy_trust expects (default: hotserve)
-#   ARTIFACT_AUTH_HEADER  sent by the box when it fetches the URL, for a private
-#                         release asset (e.g. "token <github token>")
+#   ARTIFACT_AUTH_HEADER  sent by the box as Authorization when it fetches the
+#                         URL: "token <github token>" reads a release asset by
+#                         its API URL, private repo or not (the workflow sends
+#                         the job's own token)
 #
 # The request returns once the deploy has finished: 200 with the app's
 # status when the new version is live, or an error body saying why it

@@ -57,7 +57,7 @@ that is:
 	admin unix//run/hotserve/admin.sock
 
 	liveswap {
-		artifact_allowlist github.com/your-org/
+		artifact_allowlist api.github.com/repos/your-org/
 
 		app example {
 			# the lines from hotserve.caddy go here
@@ -93,13 +93,13 @@ of that path in the block.)
 set `HOTSERVE_URL` in `.github/workflows/deploy.yml` to
 `https://deploy.example.com/example`, then push to `main`. The
 workflow publishes the tarball as a GitHub release and the box fetches
-it — so every deployed version stays on GitHub, and the box's
-`artifact_allowlist github.com/your-org/` is what admits it. The
-deploy step prints the app's status when the new version is live, or
-why it was refused; a refused deploy leaves the old version serving.
-(A private repo's assets are only readable through GitHub's API: see
-"Deploying from CI" in hotserve's
-[liveswap/README.md](../../liveswap/README.md#deploying-from-ci).)
+it — so every deployed version stays on GitHub. The box fetches the
+asset by its API URL with the job's own token, so a private repo
+deploys the same way as a public one, and the box's
+`artifact_allowlist api.github.com/repos/your-org/` is what admits
+it. The deploy step prints the app's status when the new version is
+live, or why it was refused; a refused deploy leaves the old version
+serving.
 
 What a first deploy that worked looks like, from the laptop:
 
