@@ -1,0 +1,65 @@
+# The box's whole config. hotserve reads /etc/hotserve/Caddyfile, and
+# `make push` puts this file there (see README.md). No secrets in it:
+# those go in env files on the box, which this repo never holds.
+{
+	# Keep: the admin API off TCP (every app can reach localhost), and
+	# `systemctl reload` finds the socket here.
+	admin unix//run/hotserve/admin.sock
+
+	liveswap {
+		# Required: where a deploy that sends a URL may fetch from. The
+		# examples' workflows send their GitHub release's URL, which
+		# this admits; only a tarball pushed in the request body skips it.
+		artifact_allowlist github.com/your-org/
+
+		app example {
+			# From examples/deno/hotserve.caddy. The Deno flags are the
+			# app's permissions: widen them here, and push, before you
+			# deploy code that needs more; narrow them after.
+			command deno run --cached-only \
+				--allow-net=unix:{socket} \
+				--allow-read={shared_dir},{socket} \
+				--allow-write={socket} \
+				--allow-env=SOCKET,APP_VERSION,DATA_DIR \
+				main.ts
+			pre_start deno run --cached-only \
+				--allow-read={shared_dir} \
+				--allow-write={shared_dir} \
+				--allow-env=DATA_DIR \
+				migrate.ts
+			env DENO_DIR {release_dir}/.deno
+			env DENO_NO_UPDATE_CHECK 1
+			env APP_VERSION {version}
+			env DATA_DIR {shared_dir}
+
+			# Secrets, when the app has some: KEY=VALUE lines in a file
+			# on the box that only root and hotserve can read (README.md).
+			# env_file /etc/hotserve/example.env
+
+			# Who may deploy it: this repo's main branch, by the OIDC
+			# token its workflow mints. Nothing secret is stored here.
+			deploy_trust github {
+				audience hotserve
+				claim repository your-org/example
+				claim ref refs/heads/main
+			}
+		}
+	}
+}
+
+example.com {
+	reverse_proxy {
+		dynamic liveswap example
+	}
+	# Before the first deploy, and while the app is down, the proxy has
+	# no upstream and answers 503. Keep that status — monitors and CI
+	# should see it — but give a person a sentence instead of a blank
+	# page. `journalctl -u hotserve` says which of the two it is.
+	handle_errors 502 503 {
+		respond "example is not running: nothing has been deployed yet, or it is down and being restarted." {http.error.status_code}
+	}
+}
+
+deploy.example.com {
+	liveswap_webhook
+}

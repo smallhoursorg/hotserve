@@ -1,0 +1,29 @@
+# /etc/sudoers.d/hotserve-admin — what administering hotserve needs.
+#
+# Members of the hotserve-admin group can run exactly these commands as
+# root, and nothing else: they are the privileged steps of bin/push,
+# argument for argument, plus editing the apps' env files. Everything
+# else an administrator does needs no privilege at all: `hotserve
+# validate`, reading the config, and — with membership of the adm
+# group — the journal, hotserve's and every app's.
+#
+# What this grants is the hotserve user's reach, not root's: whoever
+# can write the Caddyfile can make hotserve serve any file it can read
+# (its TLS keys, every app's data) and add their own deploy_trust.
+#
+# Install:  sudo install -m 0440 sudoers /etc/sudoers.d/hotserve-admin
+#           sudo groupadd hotserve-admin
+#           sudo usermod -aG adm,hotserve-admin <user>
+Cmnd_Alias HOTSERVE_CONFIG = \
+	/usr/bin/tee /etc/hotserve/Caddyfile.new, \
+	/usr/bin/chmod 0644 /etc/hotserve/Caddyfile.new, \
+	/usr/bin/rm -f /etc/hotserve/Caddyfile.new, \
+	/usr/bin/rm -f /etc/hotserve/Caddyfile.prev, \
+	/usr/bin/cp -p /etc/hotserve/Caddyfile /etc/hotserve/Caddyfile.prev, \
+	/usr/bin/mv -f /etc/hotserve/Caddyfile.new /etc/hotserve/Caddyfile, \
+	/usr/bin/mv -f /etc/hotserve/Caddyfile.prev /etc/hotserve/Caddyfile, \
+	/usr/bin/systemctl reload hotserve
+# Anchored regex, not a glob: in sudoers a * would also match "/", and
+# so admit /etc/hotserve/../elsewhere/x.env.
+Cmnd_Alias HOTSERVE_SECRETS = sudoedit ^/etc/hotserve/[A-Za-z0-9_-]+\.env$
+%hotserve-admin ALL=(root) NOPASSWD: HOTSERVE_CONFIG, HOTSERVE_SECRETS

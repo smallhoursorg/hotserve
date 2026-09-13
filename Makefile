@@ -187,7 +187,9 @@ install-test:
 # journalctl and the process tree): restart survival, SIGKILL of
 # hotserve + reattach, cgroup teardown of a worker tree, crash
 # cleanup, journal output. The recovery suite is the runner's view
-# after all that: still serving, deploys still work.
+# after all that: still serving, deploys still work. Last, the box
+# suite drives examples/box's bin/push from the host against the
+# container, and puts the e2e config back.
 e2e:
 	$(cgroup2_preflight)
 	$(COMPOSE) up --build -d e2e-hotserve e2e-upstream e2e-artifacts
@@ -197,6 +199,8 @@ e2e:
 	$(COMPOSE) exec -T e2e-hotserve /bin/sh /suite-systemd.sh || status=1; \
 	echo "════ recovery suite: the runner's view after hotserve's unclean death ════"; \
 	$(COMPOSE) run --rm --entrypoint "/bin/sh /suite-recovery.sh" e2e-runner || status=1; \
+	echo "════ box suite: examples/box's bin/push against the e2e box ════"; \
+	COMPOSE="$(COMPOSE)" sh e2e/box-push.sh || status=1; \
 	if [ $$status -ne 0 ]; then \
 		$(COMPOSE) logs e2e-upstream e2e-artifacts; \
 		$(COMPOSE) exec -T e2e-hotserve journalctl --no-pager -n 300 || true; \
