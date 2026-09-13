@@ -1,0 +1,24 @@
+# What this app needs from the box: the lines that go inside its
+# `app <name> { … }` block in your box repo's Caddyfile. (hotserve's
+# e2e suite imports this file, so these exact lines are tested.)
+#
+# The Deno permission flags are why these live on the box and not in
+# the tarball: hotserve never reads this file from a deploy, so a
+# compromised build cannot grant itself --allow-net, --allow-run or
+# -A. Widening one is a change to the box: widen before you deploy
+# code that needs it, narrow once the code that needed it is gone.
+command deno run --cached-only \
+	--allow-net=unix:{socket} \
+	--allow-read={shared_dir},{socket} \
+	--allow-write={socket} \
+	--allow-env=SOCKET,APP_VERSION,DATA_DIR \
+	main.ts
+pre_start deno run --cached-only \
+	--allow-read={shared_dir} \
+	--allow-write={shared_dir} \
+	--allow-env=DATA_DIR \
+	migrate.ts
+env DENO_DIR {release_dir}/.deno   # the module cache shipped in the tarball
+env DENO_NO_UPDATE_CHECK 1         # no background call home to dl.deno.land
+env APP_VERSION {version}
+env DATA_DIR {shared_dir}          # persistent data: survives deploys

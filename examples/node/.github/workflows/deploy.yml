@@ -1,0 +1,41 @@
+# On every push to main: build the executables, publish them as a
+# GitHub release, and tell the box to fetch it. No secrets: the job
+# mints a short-lived OIDC token that the box's `deploy_trust github
+# { … }` block verifies against GitHub's keys.
+name: deploy
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write # create the release
+  id-token: write # mint the deploy token
+
+concurrency: deploy # one at a time: a second deploy would get a 409
+
+jobs:
+  deploy:
+    # MUST be the box's architecture: the executable is the runner's
+    # Node binary. ubuntu-24.04-arm for an arm64 box, ubuntu-24.04 for
+    # amd64.
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 26
+      - run: npm run bundle
+      - id: version
+        run: echo "version=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          files: app.tar.gz
+      # A public repo: the box fetches the release asset by its download
+      # URL, which `artifact_allowlist github.com/your-org/` admits. For
+      # a private repo the asset is only readable through the API — see
+      # "Deploying from CI" in hotserve's liveswap/README.md.
+      - run: scripts/deploy.sh "https://github.com/$GITHUB_REPOSITORY/releases/download/$VERSION/app.tar.gz"
+        env:
+          HOTSERVE_URL: https://deploy.example.com/example
+          VERSION: ${{ steps.version.outputs.version }}

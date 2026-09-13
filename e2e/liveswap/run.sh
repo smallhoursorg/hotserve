@@ -265,6 +265,87 @@ esac
 c=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" "$HOOK?rollback=nope")
 [ "$c" = "422" ] && pass "rollback to a missing release gets 422" || fail "missing rollback: expected 422, got $c"
 
+echo "=== scenario 13: the Deno example deploys as its README says ==="
+# examples/deno is the app newcomers copy. Its tarball comes from its
+# own scripts/bundle.sh (artifacts image, standing in for the release
+# its workflow publishes), its permission flags from its own
+# hotserve.caddy (imported by e2e/Caddyfile), and it is deployed here
+# by its own scripts/deploy.sh — so a change to the app contract, or
+# a Deno release that changes what the flags mean, fails here rather
+# than in someone's first deploy.
+DENO_HOOK="http://e2e-hotserve:8081/deno-example"
+DENO_PROXY="http://e2e-hotserve:8082"
+deno_deploy() { # <version> <artifact URL or file>
+	HOTSERVE_URL=$DENO_HOOK HOTSERVE_TOKEN=$TOKEN VERSION=$1 \
+		sh /deploy-example.sh "$2" >/tmp/deno-deploy.out 2>&1
+}
+if deno_deploy dx1 "$ART/deno-example.tar.gz"; then
+	pass "deploy.sh had the box fetch the Deno example by URL"
+else
+	fail "deploy.sh dx1 failed: $(cat /tmp/deno-deploy.out)"
+fi
+b=$(curl -s --max-time 5 "$DENO_PROXY/")
+[ "$b" = "hello from dx1 (schema v1)" ] \
+	&& pass "the example serves on its socket with the documented flags, after its pre_start: '$b'" \
+	|| fail "Deno example: expected 'hello from dx1 (schema v1)', got '$b'"
+
+# Its SIGTERM handler finishes in-flight requests: a redeploy under
+# traffic drops none. This one is the laptop path: deploy.sh given a
+# local file pushes it in the request body.
+curl -fsS -o /tmp/deno-example.tgz "$ART/deno-example.tar.gz" || fail "could not fetch the Deno example tarball"
+saved_proxy=$PROXY
+PROXY=$DENO_PROXY
+traffic_start /tmp/codes-deno
+deno_deploy dx2 /tmp/deno-example.tgz || fail "deploy.sh dx2 failed: $(cat /tmp/deno-deploy.out)"
+traffic_stop
+PROXY=$saved_proxy
+assert_all_200 /tmp/codes-deno "Deno example cutover"
+b=$(curl -s --max-time 5 "$DENO_PROXY/")
+[ "$b" = "hello from dx2 (schema v1)" ] && pass "the example serves dx2" || fail "expected dx2, got '$b'"
+
+# A refused deploy: deploy.sh exits non-zero and prints the reason.
+if deno_deploy dx3 "$ART/deno-example-missing.tar.gz"; then
+	fail "deploy.sh reported success for an artifact that does not exist"
+else
+	case "$(cat /tmp/deno-deploy.out)" in
+	*'"error"'*404*) pass "a failed deploy exits non-zero and deploy.sh prints why" ;;
+	*) fail "deploy.sh failure output lacks the reason: $(cat /tmp/deno-deploy.out)" ;;
+	esac
+fi
+b=$(curl -s --max-time 5 "$DENO_PROXY/")
+[ "$b" = "hello from dx2 (schema v1)" ] && pass "dx2 kept serving through the failed deploy" || fail "after the failed deploy: '$b'"
+
+echo "=== scenario 14: the Node example deploys as its README says ==="
+# examples/node: the same contract as one executable per command,
+# built by Node's single-executable build with nothing installed on
+# the box. Deployed by URL with its own deploy.sh, then redeployed
+# from a local file under traffic.
+NODE_HOOK="http://e2e-hotserve:8081/node-example"
+NODE_PROXY="http://e2e-hotserve:8083"
+node_deploy() { # <version> <artifact URL or file>
+	HOTSERVE_URL=$NODE_HOOK HOTSERVE_TOKEN=$TOKEN VERSION=$1 \
+		sh /deploy-node-example.sh "$2" >/tmp/node-deploy.out 2>&1
+}
+if node_deploy nx1 "$ART/node-example.tar.gz"; then
+	pass "deploy.sh had the box fetch the Node example by URL"
+else
+	fail "deploy.sh nx1 failed: $(cat /tmp/node-deploy.out)"
+fi
+b=$(curl -s --max-time 5 "$NODE_PROXY/")
+[ "$b" = "hello from nx1 (schema v1)" ] \
+	&& pass "the executable serves on its socket, after its pre_start executable: '$b'" \
+	|| fail "Node example: expected 'hello from nx1 (schema v1)', got '$b'"
+curl -fsS -o /tmp/node-example.tgz "$ART/node-example.tar.gz" || fail "could not fetch the Node example tarball"
+saved_proxy=$PROXY
+PROXY=$NODE_PROXY
+traffic_start /tmp/codes-node
+node_deploy nx2 /tmp/node-example.tgz || fail "deploy.sh nx2 failed: $(cat /tmp/node-deploy.out)"
+traffic_stop
+PROXY=$saved_proxy
+assert_all_200 /tmp/codes-node "Node example cutover"
+b=$(curl -s --max-time 5 "$NODE_PROXY/")
+[ "$b" = "hello from nx2 (schema v1)" ] && pass "the Node example serves nx2" || fail "expected nx2, got '$b'"
+
 echo ""
 if [ "$FAILURES" -eq 0 ]; then
 	echo "ALL E2E SCENARIOS PASSED"

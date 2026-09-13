@@ -5,6 +5,13 @@
 # with deployed apps as transient units under that user's own systemd
 # manager — exactly the layout the .deb's postinstall produces.
 # (e2e-upstream reuses the image as a plain `hotserve run` container.)
+
+# The Deno runtime for the examples/deno lane, installed under
+# /usr/local, inside every app's sandbox view. A FROM, so Dependabot
+# watches it; keep it the same version as the build image in
+# e2e/liveswap/artifacts.Dockerfile and the example's workflow.
+FROM denoland/deno:bin-2.9.6 AS deno
+
 FROM golang:1.27-trixie AS builder
 WORKDIR /src
 COPY . .
@@ -13,10 +20,12 @@ RUN CGO_ENABLED=0 GOFLAGS=-buildvcs=false go build -trimpath -o /hotserve ./cmd/
 FROM debian:trixie-slim
 ENV DEBIAN_FRONTEND=noninteractive
 # libpam-systemd: pam_systemd gives user@<uid>.service its runtime dir;
-# dbus: logind; procps + curl: the in-container systemd suite.
+# dbus: logind; procps + curl: the in-container systemd suite;
+# libatomic1: what a Node single executable needs on arm64 (the one
+# package examples/node asks the box for).
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends \
-		systemd systemd-sysv dbus libpam-systemd procps curl ca-certificates \
+		systemd systemd-sysv dbus libpam-systemd procps curl ca-certificates libatomic1 \
 	&& rm -rf /var/lib/apt/lists/*
 RUN systemctl mask \
 	systemd-udevd.service \
@@ -28,6 +37,7 @@ RUN systemctl mask \
 	|| true
 
 COPY --from=builder /hotserve /usr/bin/hotserve
+COPY --from=deno /deno /usr/local/bin/deno
 # Fail the build outright if any module didn't link in. (Otter is
 # additionally proven at startup: the `otter` cache option makes config
 # load fail if the storage module is absent.)
@@ -52,6 +62,10 @@ COPY e2e/systemd/e2e.conf /etc/systemd/system/hotserve.service.d/e2e.conf
 COPY e2e/systemd/e2e-token.service /etc/systemd/system/e2e-token.service
 RUN systemctl enable hotserve.service e2e-token.service
 COPY e2e/Caddyfile /etc/hotserve/Caddyfile
+# The Deno example's app-block lines, imported by e2e/Caddyfile: the
+# lines its README says to copy onto the box are the lines tested.
+COPY examples/deno/hotserve.caddy /etc/hotserve/deno-example.caddy
+COPY examples/node/hotserve.caddy /etc/hotserve/node-example.caddy
 COPY e2e/mint-token.sh /usr/local/bin/mint-token.sh
 RUN chmod +x /usr/local/bin/mint-token.sh
 

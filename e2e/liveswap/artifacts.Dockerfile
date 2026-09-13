@@ -40,6 +40,22 @@ RUN mkdir /out \
 	&& echo probe > /tmp/stage-probe/version.txt \
 	&& tar -czf /out/demo-probe.tar.gz -C /tmp/stage-probe .
 
+# The Deno example, built by its own scripts/bundle.sh with the same
+# Deno version e2e/Dockerfile installs on the box.
+FROM denoland/deno:2.9.6 AS deno-build
+WORKDIR /example
+COPY examples/deno/ ./
+RUN sh scripts/bundle.sh
+
+# The Node example, built by its own scripts/bundle.sh: Node's
+# single-executable build, so the e2e box needs no Node installed.
+FROM node:26-trixie-slim AS node-build
+WORKDIR /example
+COPY examples/node/ ./
+RUN sh scripts/bundle.sh
+
 FROM caddy:2.11.4
 COPY --from=build /out /srv/artifacts
+COPY --from=deno-build /example/app.tar.gz /srv/artifacts/deno-example.tar.gz
+COPY --from=node-build /example/app.tar.gz /srv/artifacts/node-example.tar.gz
 COPY e2e/liveswap/artifacts.Caddyfile /etc/caddy/Caddyfile

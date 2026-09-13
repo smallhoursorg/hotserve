@@ -1,0 +1,10 @@
+{
+  "name": "hotserve-node-example",
+  "private": true,
+  "engines": { "node": ">=26" },
+  "scripts": {
+    "dev": "DATA_DIR=./data node migrate.js && DATA_DIR=./data node --watch server.js",
+    "bundle": "sh scripts/bundle.sh",
+    "deploy": "sh scripts/deploy.sh app.tar.gz"
+  }
+}

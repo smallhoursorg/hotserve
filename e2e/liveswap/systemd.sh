@@ -274,8 +274,8 @@ s=$(status)
 sleep 1
 [ "$(user_systemctl show -p LoadState --value "$cunit")" = "not-found" ] \
 	&& pass "crashed unit was reset and unloaded" || fail "crashed unit $cunit still loaded"
-n=$(user_systemctl list-units --all --no-legend --plain "'hotserve-*'" | wc -l)
-[ "$n" = "1" ] && pass "exactly one hotserve unit loaded" || fail "expected 1 loaded hotserve unit, found $n"
+n=$(user_systemctl list-units --all --no-legend --plain "'hotserve-demo.*'" | wc -l)
+[ "$n" = "1" ] && pass "exactly one hotserve-demo unit loaded" || fail "expected 1 loaded hotserve-demo unit, found $n"
 
 echo "=== systemd 7: a unit gone behind hotserve's back is relaunched on start ==="
 # The cold path recovery takes when the recorded unit no longer exists

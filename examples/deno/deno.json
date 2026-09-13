@@ -1,0 +1,10 @@
+{
+  "imports": {
+    "@std/path": "jsr:@std/path@^1"
+  },
+  "tasks": {
+    "dev": "DATA_DIR=./data deno run --allow-env=DATA_DIR --allow-read=./data --allow-write=./data migrate.ts && DATA_DIR=./data deno run --watch --allow-env=SOCKET,APP_VERSION,DATA_DIR --allow-read=./data --allow-net=127.0.0.1:8000 main.ts",
+    "bundle": "sh scripts/bundle.sh",
+    "deploy": "sh scripts/deploy.sh app.tar.gz"
+  }
+}
