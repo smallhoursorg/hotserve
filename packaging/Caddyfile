@@ -98,7 +98,7 @@
 # }
 #
 # deploy.example.com {
-# 	liveswap_webhook         # POST /myapp from CI: a tarball, or {url, version}
+# 	liveswap_webhook         # POST /myapp from CI: {url, version}, or a tarball with ?version=
 # 	                         # (failed auths are throttled in the journal,
 # 	                         # 10/min per address then 429 for bad tokens;
 # 	                         # a valid token always gets through — built in)

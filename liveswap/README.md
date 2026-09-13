@@ -767,8 +767,9 @@ in roughly soak + drain (~20s). Budget your CI step timeout for
 version, socket, pid, `command` — the argv the running instance was
 actually launched with, read back from systemd, which is not
 necessarily what the config says now (a reload does not restart a
-running app, so an edited `command` applies at the next deploy or
-crash relaunch). It is the *rendered* argv, not the configured text:
+running app, so an edited `command` applies at the next launch: a
+deploy, a rollback, or a relaunch after a crash or reboot). It is the
+*rendered* argv, not the configured text:
 `command ./server {version}` reports as
 `["/var/lib/liveswap/blog/releases/v1.4.2/server", "v1.4.2"]`, since
 the unit runs an absolute resolved path with the placeholders already
@@ -840,8 +841,6 @@ permissions:
   contents: write               # (for the release upload below)
 
 steps:
-- uses: actions/checkout@v7
-
 - name: Build artifact
   run: |
     npm ci && npm run build
@@ -898,9 +897,11 @@ A version the box already has gets a `422` — versions are immutable —
 so a re-run of a job that deployed fails at this step rather than
 deploying twice. A deploy that fails is cleaned up, so its version can
 be deployed again — unless the 5xx body says `release <version> left
-on disk`: the failed instance could not be confirmed stopped, so the
-dir stays until release GC ages it past `keep`; remove
-`releases/<version>` by hand, or use a new version.
+on disk` (the failed instance could not be confirmed stopped, so the
+dir is kept rather than pulled from under a process that may still
+run) or `cleanup of failed release` (removing it failed). Either way
+that version stays a 422 until release GC ages the dir past `keep`;
+use a new version.
 
 ### GitLab CI
 
@@ -930,9 +931,10 @@ deploy:
 On gitlab.com that URL needs `artifact_allowlist
 gitlab.com/api/v4/projects/<project id>/` on the box.
 `DEPLOY_READ_TOKEN` is the artifact-download credential: a project
-access token with `read_api`, stored as a masked CI/CD variable
-(`CI_JOB_TOKEN` cannot be used — it dies with the job, before the box
-fetches).
+access token with `read_api`, stored as a masked CI/CD variable. The
+job token is not a substitute: `auth_header` is sent as the
+`Authorization` header, and GitLab takes `CI_JOB_TOKEN` in a
+`JOB-TOKEN` header, as the upload line above shows.
 
 `--fail-with-body` makes the CI job red exactly when the deploy fails
 and prints the JSON `error` that says why (plain `--fail` hides it) —
@@ -966,10 +968,10 @@ and `shared/` of this tree (see [Sandbox](#sandbox)).
   lives outside the config, reference-counted across reloads — proven
   by an e2e scenario that reloads mid-traffic and asserts the app's
   PID is unchanged) — so an edited `command` or `env` does not apply
-  to the running instance; it applies at the next deploy, and at a
-  crash relaunch, which is why status reports the `command` the
-  instance is actually running — and neither do **hotserve restarts
-  and upgrades**:
+  to the running instance; it applies at the next launch (a deploy, a
+  rollback, a relaunch after a crash or reboot), which is why status
+  reports the `command` the instance is actually running — and
+  neither do **hotserve restarts and upgrades**:
   on start, liveswap reattaches to the unit recorded in `state.json`
   and serves it without relaunching it (what visitors see while
   hotserve itself restarts: [Upgrading](../README.md#upgrading));
