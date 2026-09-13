@@ -27,14 +27,17 @@ jobs:
       - id: version
         run: echo "version=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        id: release
         with:
           tag_name: ${{ steps.version.outputs.version }}
           files: app.tar.gz
-      # A public repo: the box fetches the release asset by its download
-      # URL, which `artifact_allowlist github.com/your-org/` admits. For
-      # a private repo the asset is only readable through the API — see
-      # "Deploying from CI" in hotserve's liveswap/README.md.
-      - run: scripts/deploy.sh "https://github.com/$GITHUB_REPOSITORY/releases/download/$VERSION/app.tar.gz"
+      # The asset's API URL, not its public download URL, so a private
+      # repo deploys the same way: the box fetches it with this job's own
+      # token (which expires with the job), and the box's
+      # `artifact_allowlist api.github.com/repos/your-org/` admits it.
+      - run: scripts/deploy.sh "$ASSET_URL"
         env:
           HOTSERVE_URL: https://deploy.example.com/example
           VERSION: ${{ steps.version.outputs.version }}
+          ASSET_URL: ${{ fromJSON(steps.release.outputs.assets)[0].url }}
+          ARTIFACT_AUTH_HEADER: token ${{ github.token }}

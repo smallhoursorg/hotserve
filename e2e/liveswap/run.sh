@@ -279,8 +279,12 @@ c=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TO
 # running version is untouched.
 example_scenario() { # <app> <port> <deploy.sh path> <version prefix>
 	app=$1 hook="http://e2e-hotserve:8081/$1" proxy="http://e2e-hotserve:$2" script=$3 pre=$4
+	# The auth header is what the workflow sends for a release asset;
+	# the artifacts server ignores it, and a file upload has no URL to
+	# send it with. Set here so deploy.sh's JSON-escaping of it is run.
 	ex_deploy() { # <version> <artifact URL or file>
-		HOTSERVE_URL=$hook HOTSERVE_TOKEN=$TOKEN VERSION=$1 sh "$script" "$2" >/tmp/ex-deploy.out 2>&1
+		HOTSERVE_URL=$hook HOTSERVE_TOKEN=$TOKEN VERSION=$1 ARTIFACT_AUTH_HEADER="token e2e" \
+			sh "$script" "$2" >/tmp/ex-deploy.out 2>&1
 	}
 	ex_body() { curl -s --max-time 5 "$proxy/"; }
 	if ex_deploy "${pre}1" "$ART/$app.tar.gz"; then
