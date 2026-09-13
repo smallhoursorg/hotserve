@@ -54,6 +54,7 @@ printf '\n:8083 {\n\trespond "pushed"\n}\n' >>"$tmp/v1"
 if push "$tmp/v1"; then pass "push applied a valid config"; else fail "push of a valid config failed: $(cat "$tmp/out")"; fi
 [ "$(served 8083)" = "pushed" ] && pass "the pushed config is running" || fail "the pushed site does not answer: '$(served 8083)'"
 box cmp -s /etc/hotserve/Caddyfile - <"$tmp/v1" && pass "the live file is the pushed one" || fail "the live file differs from the pushed one"
+box test ! -e /etc/hotserve/Caddyfile.prev && pass "a successful push leaves no .prev" || fail "Caddyfile.prev left after a successful push"
 if push "$tmp/v1" && grep -q "already runs" "$tmp/out"; then pass "pushing the same file again is a no-op"; else fail "a repeat push: $(cat "$tmp/out")"; fi
 
 echo "=== box 3: a config the box rejects never touches the live file ==="
@@ -76,7 +77,33 @@ fi
 box cmp -s /etc/hotserve/Caddyfile - <"$tmp/v1" && pass "the live file is the running config again" || fail "the live file is not the running config after a failed reload"
 [ "$(served 8083)" = "pushed" ] && pass "the running config kept serving" || fail "after the failed reload: '$(served 8083)'"
 
-echo "=== box 5: put the e2e config back ==="
+echo "=== box 5: a 'no' at the prompt applies nothing, even with stdin a pipe ==="
+# No YES=1: bin/push asks, and the answer arrives on a pipe — which the
+# remote commands must not have drained first.
+cp "$tmp/v1" "$tmp/v2"
+printf '\n:8086 {\n\trespond "never"\n}\n' >>"$tmp/v2"
+if printf 'n\n' | CONFIG="$tmp/v2" HOTSERVE_REMOTE="$COMPOSE exec -T -u admin e2e-hotserve" sh examples/box/bin/push >"$tmp/out" 2>&1; then
+	fail "push exited 0 after a 'no'"
+else
+	grep -q "not applied" "$tmp/out" && pass "a piped 'n' reaches the prompt and is honoured" || fail "unexpected push output: $(cat "$tmp/out")"
+fi
+box cmp -s /etc/hotserve/Caddyfile - <"$tmp/v1" && pass "the live file is unchanged after 'no'" || fail "the live file changed after a 'no'"
+box test ! -e /etc/hotserve/Caddyfile.new && pass "no staged file left after 'no'" || fail "Caddyfile.new left after 'no'"
+
+echo "=== box 6: with hotserve down, a valid push lands the file for the next start ==="
+box systemctl stop hotserve
+if push "$tmp/v2"; then
+	fail "push exited 0 with hotserve stopped"
+else
+	grep -q "not running" "$tmp/out" && pass "push says hotserve is not running, not that the config failed" || fail "unexpected push output: $(cat "$tmp/out")"
+fi
+box cmp -s /etc/hotserve/Caddyfile - <"$tmp/v2" && pass "the validated file is in place for the next start" || fail "the live file is not the pushed one"
+box test ! -e /etc/hotserve/Caddyfile.prev && pass "no .prev left behind" || fail "Caddyfile.prev left on the box"
+box systemctl start hotserve
+for i in $(seq 40); do [ "$(served 8086)" = "never" ] && break; sleep 0.5; done
+[ "$(served 8086)" = "never" ] && pass "hotserve started with the pushed config" || fail "after start: '$(served 8086)'"
+
+echo "=== box 7: put the e2e config back ==="
 push "$tmp/original" && pass "restored the original config" || fail "could not restore the original config: $(cat "$tmp/out")"
 
 echo ""

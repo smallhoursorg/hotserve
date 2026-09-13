@@ -16,7 +16,7 @@ and the change is a diff someone reads before `make push`.
 |---|---|
 | `Caddyfile` | The box's whole config; becomes `/etc/hotserve/Caddyfile` |
 | `bin/push` | Validates on the box, shows the diff, swaps the file in, reloads |
-| `sudoers` | The six commands `bin/push` runs as root, and nothing else |
+| `sudoers` | The eight commands `bin/push` runs as root, and nothing else |
 | `Makefile` | `make check` and `make push` |
 | `.github/workflows/check.yml` | `make check` on every push and pull request |
 
@@ -69,7 +69,9 @@ works before you close the root session: that is the whole of what
    [Secrets](#secrets) — so give it to the people who may change what
    the box serves.
 3. Set `HOTSERVE_VERSION` in `.github/workflows/check.yml` to the
-   release the box runs (`dpkg -s hotserve` on the box shows it).
+   release the box runs: the tag without its `v`. `dpkg -s hotserve`
+   shows it, except that dpkg writes a prerelease as `0.2.0~rc1`
+   where the tag is `0.2.0-rc1`.
 
 ## Change the config
 

@@ -16,7 +16,9 @@
 #           sudo usermod -aG adm,hotserve-admin <user>
 Cmnd_Alias HOTSERVE_CONFIG = \
 	/usr/bin/tee /etc/hotserve/Caddyfile.new, \
+	/usr/bin/chmod 0644 /etc/hotserve/Caddyfile.new, \
 	/usr/bin/rm -f /etc/hotserve/Caddyfile.new, \
+	/usr/bin/rm -f /etc/hotserve/Caddyfile.prev, \
 	/usr/bin/cp -p /etc/hotserve/Caddyfile /etc/hotserve/Caddyfile.prev, \
 	/usr/bin/mv -f /etc/hotserve/Caddyfile.new /etc/hotserve/Caddyfile, \
 	/usr/bin/mv -f /etc/hotserve/Caddyfile.prev /etc/hotserve/Caddyfile, \

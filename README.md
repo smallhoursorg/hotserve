@@ -26,7 +26,7 @@ On the box, fetch the `.deb` for its architecture from
 it, and install it:
 
 ```sh
-v=0.2.0                             # the release you are installing
+v=0.2.0                             # the release you are installing (a prerelease's .deb is named 0.2.0.rc1)
 arch=$(dpkg --print-architecture)   # amd64 or arm64
 base=https://github.com/smallhoursorg/hotserve/releases/download/v$v
 cd /tmp && curl -fsSLO "$base/hotserve_${v}_${arch}.deb" && curl -fsSLO "$base/checksums.txt"
@@ -43,8 +43,7 @@ prints a harmless "download is performed unsandboxed as root" notice.)
 ```sh
 systemctl status hotserve          # active (running)
 curl -s localhost                  # "hotserve is running. Edit /etc/hotserve/Caddyfile …"
-journalctl -u hotserve -n 20       # Caddy's start-up lines, and liveswap's:
-                                   #   liveswap started  apps=0
+journalctl -u hotserve | grep 'liveswap started'   # one JSON line: "msg":"liveswap started","apps":0
 ```
 
 That gives you `/usr/bin/hotserve`, a systemd service running as the
@@ -92,7 +91,7 @@ without the feature it exists for.
 **Installing needs root; administering does not.** Checking a config
 (`hotserve validate`) needs no privilege, reading the journal —
 hotserve's and every app's — needs the `adm` group, and changing the
-config and reloading are six fixed commands, listed in
+config and reloading are eight fixed commands, listed in
 [examples/box/sudoers](examples/box/sudoers). That is the `hotserve`
 user's reach (its TLS keys, every app's data), not root's: hotserve
 itself runs unprivileged. The e2e suite administers its box that way.

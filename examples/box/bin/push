@@ -26,13 +26,21 @@ config=${CONFIG:-$(dirname "$0")/../Caddyfile}
 remote=${HOTSERVE_REMOTE:-ssh ${BOX:?set BOX to the box to push to, e.g. BOX=box.example.com}}
 live=/etc/hotserve/Caddyfile
 
-on_box() { $remote "$@"; } # $remote splits into words on purpose
+# $remote splits into words on purpose. Every remote command gets an
+# empty stdin: ssh (and docker exec) would otherwise hand it this
+# script's, and eat the answer to the prompt below when stdin is a pipe
+# (`echo y | bin/push`). The one command that reads input, tee, is
+# given it explicitly.
+on_box() { $remote "$@" </dev/null; }
 # Each of these is an exact line in ../sudoers; -n fails at once if
 # the user is not set up rather than waiting for a password.
 as_root() { on_box sudo -n "$@"; }
 
 [ -f "$config" ] || { echo "push: no $config here" >&2; exit 1; }
-as_root tee "$live.new" >/dev/null <"$config"
+$remote sudo -n tee "$live.new" >/dev/null <"$config"
+# tee creates the file under root's umask; make it what the package
+# ships (0644) so the unprivileged validate below can read it.
+as_root chmod 0644 "$live.new"
 
 if ! on_box hotserve validate --config "$live.new"; then
 	as_root rm -f "$live.new"
@@ -59,7 +67,15 @@ fi
 as_root cp -p "$live" "$live.prev"
 as_root mv -f "$live.new" "$live"
 if as_root systemctl reload hotserve; then
+	as_root rm -f "$live.prev"
 	echo "push: applied; hotserve reloaded (running apps are not restarted)"
+elif ! on_box systemctl is-active --quiet hotserve; then
+	# Nothing to roll back to: the old config is not running either.
+	# The new file validated, so it is the right one for the next start.
+	as_root rm -f "$live.prev"
+	echo "push: applied, but hotserve is not running, so nothing was reloaded; it will start with this config" >&2
+	echo "push: sudo systemctl start hotserve on the box, then journalctl -u hotserve -n 50 for why it was down" >&2
+	exit 1
 else
 	as_root mv -f "$live.prev" "$live"
 	echo "push: the reload failed, so the previous Caddyfile is back in place and still running" >&2
