@@ -98,7 +98,9 @@ hotserve's and every app's — needs the `adm` group, and changing the
 config and reloading are eight fixed commands, listed in
 [examples/box/sudoers](examples/box/sudoers). That is the `hotserve`
 user's reach (its TLS keys, every app's data), not root's: hotserve
-itself runs unprivileged. The e2e suite administers its box that way.
+itself runs unprivileged. One thing reaches wider: `adm` reads the
+whole system journal, not only hotserve's lines, so it is a trust
+grant in its own right. The e2e suite administers its box that way.
 
 ## Getting started
 

@@ -10,6 +10,11 @@
 # not break anything now, but it would stop the next restart or
 # upgrade from starting.
 #
+# One push at a time: the staged name is fixed, so two administrators
+# pushing at once would trip over each other's Caddyfile.new — the
+# validate would refuse, or the wrong file would go live. Coordinate
+# through the repo (merge, then push), as the README says.
+#
 # Runs as an ordinary user on the box: validating and diffing need no
 # privilege, and every privileged step is one fixed command, listed
 # in ../sudoers. Nothing here needs root or a root key.

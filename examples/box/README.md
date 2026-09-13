@@ -66,8 +66,9 @@ works before you close the root session: that is the whole of what
    membership of `adm` and `hotserve-admin`. `bin/push` needs nothing
    more, and `journalctl -u hotserve` needs no sudo at all. What that
    grants is the `hotserve` user's reach, not root's — see
-   [Secrets](#secrets) — so give it to the people who may change what
-   the box serves.
+   [Secrets](#secrets) — plus, through `adm`, the whole system
+   journal, not only hotserve's lines. Give it to the people who may
+   change what the box serves.
 3. Set `HOTSERVE_VERSION` in `.github/workflows/check.yml` to the
    release the box runs: the tag without its `v`. `dpkg -s hotserve`
    shows it, except that dpkg writes a prerelease as `0.2.0~rc1`
