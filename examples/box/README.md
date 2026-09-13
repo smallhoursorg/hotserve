@@ -16,7 +16,7 @@ and the change is a diff someone reads before `make push`.
 |---|---|
 | `Caddyfile` | The box's whole config; becomes `/etc/hotserve/Caddyfile` |
 | `bin/push` | Validates on the box, shows the diff, swaps the file in, reloads |
-| `sudoers` | The eight commands `bin/push` runs as root, and nothing else |
+| `sudoers` | The eight commands `bin/push` runs as root, `sudoedit` of the apps' env files, and nothing else |
 | `Makefile` | `make check` and `make push` |
 | `.github/workflows/check.yml` | `make check` on every push and pull request |
 
@@ -29,8 +29,9 @@ administered as root. This repo is what
 that, and this is its short form. Anything that needs root and that the
 administrator below cannot do — `apt install libatomic1` for a Node
 executable on arm64, a Deno under `/usr/local`, an app's env file (see
-[Secrets](#secrets)) — happens while you still have root; the
-first-deploy page has each.
+[Secrets](#secrets)) — happens while you still have root: the installs
+are on the first-deploy page, the env file on the after-first-deploy
+page.
 
 1. Copy this directory into a new private repo, from a checkout of
    hotserve at the release the box runs
@@ -64,9 +65,10 @@ first-deploy page has each.
    runs its privileged steps through `sudo -n`, which root passes
    without a password; the next step gives it a user that is not root.
 5. Create the user you will administer it as. The `sudoers` file in
-   this directory grants exactly the commands `bin/push` runs as root,
-   and nothing else; the `adm` group reads the logs. From the laptop,
-   from this repo:
+   this directory grants exactly the eight commands `bin/push` runs as
+   root, plus `sudoedit` of the apps' env files under `/etc/hotserve`
+   (see [Secrets](#secrets)), and nothing else; the `adm` group reads
+   the logs. From the laptop, from this repo:
 
    ```sh
    scp sudoers root@box.example.com:/etc/sudoers.d/hotserve-admin
