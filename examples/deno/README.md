@@ -132,7 +132,9 @@ the older code with the flags on the box today.
 ## Rolling back
 
 Actions → deploy → **Run workflow**, with a version from the releases
-page (the tag: a commit's first 12 characters). The box relaunches
+page (the tag: a commit's first 12 characters) and "Use workflow from"
+left on `main` — the box's `deploy_trust` pins that ref, so a run from
+a tag or another branch is refused with a 401. The box relaunches
 that release from its disk — the same start, health gate and cutover
 as a deploy, and no build — so it is live in about twenty seconds, or
 the run is red with the reason and nothing changed. A version the box

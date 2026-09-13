@@ -30,10 +30,19 @@ rollback=
 if [ "${1:-}" = --rollback ]; then
 	rollback=${2:?--rollback needs the version to roll back to}
 	shift 2
-	[ $# -eq 0 ] || { echo "deploy.sh: --rollback takes only a version" >&2; exit 1; }
+	# The box's version alphabet, so a stray character is refused here
+	# rather than mangling the query (a `#` would drop the rest of it).
+	case $rollback in
+	''|.*|*[!A-Za-z0-9._-]*) echo "deploy.sh: '$rollback' is not a version (letters, digits, . _ -; not starting with .)" >&2; exit 1 ;;
+	esac
 else
 	artifact=${1:?artifact URL or file, or --rollback <version>}
+	shift
 fi
+# `deno task deploy --rollback v` / `npm run deploy -- --rollback v`
+# would arrive here with app.tar.gz already in front of the flag and
+# push a stale tarball; refuse anything after the one operand.
+[ $# -eq 0 ] || { echo "deploy.sh: unexpected argument '$1' (--rollback goes first, without a tarball)" >&2; exit 1; }
 url=${HOTSERVE_URL:?set HOTSERVE_URL to the app webhook, e.g. https://deploy.example.com/example}
 if [ -z "$rollback" ]; then
 	version=${VERSION:-$(git rev-parse --short=12 HEAD 2>/dev/null || true)}

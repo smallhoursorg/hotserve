@@ -9,6 +9,8 @@ on:
   # Run workflow → a version from the releases page: the box relaunches
   # that release from its disk (the newest `keep` of them stay), through
   # the same health gate and cutover as a deploy. No build, no release.
+  # Leave "Use workflow from" on main: the box's deploy_trust pins
+  # `claim ref refs/heads/main`, and a run from a tag or branch is a 401.
   workflow_dispatch:
     inputs:
       rollback:
