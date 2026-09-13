@@ -104,32 +104,30 @@ grant in its own right. The e2e suite administers its box that way.
 
 ## Getting started
 
-Three directories are the paved road, and the e2e suite builds and
-deploys every one of them on every change, so what they say works.
-In order:
+[Your first deploy](docs/first-deploy.md) takes a fresh Debian 13
+server to an app that deploys on every push to `main`, in four steps.
+[After the first deploy](docs/after-first-deploy.md) then creates the
+administrator, closes root login, and puts the box's config in git.
+Both use the three directories below, which the e2e suite builds and
+deploys on every change, so what they say works:
 
-1. **[examples/box](examples/box)** — the box's config, kept in a
-   private repo of its own: the `Caddyfile` (which app, which repo may
-   deploy it, where the deploy webhook answers), a `make push` that
-   validates it on the box and never leaves an invalid file there, and
-   the sudoers file above. Do this first: it is where the deploy URL
-   and the app's permissions live.
-2. **An app to copy.** The box ships no runtime, so pick one of two
-   shapes:
-   - **[examples/node](examples/node)** — a single executable (Node's
-     own build), so nothing is installed on the box. Largest tarball;
-     simplest box.
-   - **[examples/deno](examples/deno)** — `deno run` with a Deno
-     installed under `/usr` on the box, and the runtime's permission
-     flags held in the box's Caddyfile, where a compromised build
-     cannot widen them.
+- **[examples/node](examples/node)** — a single executable (Node's own
+  build), so nothing is installed on the box. Largest tarball;
+  simplest box. The tutorial's default.
+- **[examples/deno](examples/deno)** — `deno run` with a Deno installed
+  under `/usr` on the box, and the runtime's permission flags held in
+  the box's Caddyfile, where a compromised build cannot widen them.
+- **[examples/box](examples/box)** — the box's config, kept in a
+  private repo of its own: the `Caddyfile` (which app, which repo may
+  deploy it, where the deploy webhook answers), a `make push` that
+  validates it on the box and never leaves an invalid file there, and
+  the sudoers file above.
 
-   Both serve on the socket hotserve hands them, answer `/health`,
-   migrate before each version starts, stop cleanly, and deploy from
-   GitHub Actions with no stored secret. Copy one, set its deploy URL,
-   push.
+Both apps serve on the socket hotserve hands them, answer `/health`,
+migrate before each version starts, stop cleanly, and deploy from
+GitHub Actions with no stored secret.
 
-The Quickstart below is the same thing by hand.
+The Quickstart below is the first deploy on one screen.
 
 ## Quickstart: deploy an app with zero downtime
 
