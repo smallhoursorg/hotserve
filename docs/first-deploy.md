@@ -22,8 +22,12 @@ Names used throughout — replace them with yours as you go:
 
 ## 1. A box, two names, two ports
 
-Any VPS with Debian 13 will do; the cheapest tier is enough for a few
-small apps. At the provider (Hetzner, say):
+Not every cheap server qualifies. Every app runs in its own systemd
+sandbox, and the host has to deliver user and PID namespaces for that:
+a KVM virtual machine does, and so does bare metal; many LXC-based and
+other container-style VPS offers do not, and hotserve refuses to start
+on them rather than run your apps unprotected. The cheapest KVM tier at
+a provider like Hetzner is enough for a few small apps. There:
 
 1. Create a server with **Debian 13** as the image and your SSH public
    key. Architecture is your choice; note it, since the release `.deb`
@@ -35,11 +39,10 @@ small apps. At the provider (Hetzner, say):
    `deploy.example.com`. hotserve gets certificates for both itself,
    once the names resolve and the ports are open.
 
-One thing to know before you pay for a year: every app runs in its own
-systemd sandbox, and the host has to deliver user and PID namespaces
-for that. Ordinary KVM servers do; many LXC-based servers, and all
-containers, do not. hotserve refuses to start on a host that
-cannot, and says what is missing, so step 2 tells you within a minute.
+If you are not sure what kind of server you have, step 2 tells you
+within a minute: a host that cannot deliver the sandbox is refused at
+start, with the missing piece named. Find that out before you pay for
+a year.
 
 ## 2. Install hotserve
 
