@@ -234,8 +234,9 @@ func newManagedApp(name string) *managedApp {
 // the first provision the runner/prober/etc. are created; on reloads
 // the spec, logger and state path are refreshed while the runner — and
 // with it any running unit — is left untouched: a changed
-// definition takes effect on the next deploy, never by restarting a
-// running app.
+// definition takes effect at the app's next launch (a deploy, a
+// rollback, or a relaunch after a crash, a sustained health failure
+// or a reboot), never by restarting a running app.
 // appConfigState is what a config installs on a pooled app and what
 // a rollback restores.
 type appConfigState struct {
@@ -274,7 +275,7 @@ func (ma *managedApp) configure(owner any, spec *appSpec, logger *zap.Logger, cl
 	}
 	ma.store = &fileStateStore{path: spec.dirs.state}
 	if changed {
-		logger.Info("app definition changed; it will apply on the next deploy")
+		logger.Info("app definition changed; it applies at the app's next launch (deploy, rollback, or relaunch after a crash or reboot)")
 	}
 	// Wake the watchdog so a reload's spec (watchdog off, new
 	// intervals) applies promptly even while the instance is healthy
