@@ -756,7 +756,7 @@ The response is synchronous:
 | 413 | Pushed upload exceeded `max_artifact_size`, or a JSON body exceeded 64 KiB |
 | 422 | Bad request — missing/invalid version, version already running, **version already exists** (versions are immutable — deploy a new version or roll back to relaunch it), a rollback target no longer on disk, or (URL path) an artifact url refused by `artifact_allowlist` (host, path, port, or an undeclared query parameter; the body names exactly what tripped and how the entry would declare it) |
 | 429 | This token failed, and the address has already failed 10 times this minute; `Retry-After` says when the oldest failure ages out. A *valid* token from the same address is never refused — see [Secrets and logs](#secrets-and-logs) |
-| 5xx | Deploy failed — **the old version is still serving**; body says why. An artifact over `max_artifact_entries` or the decompressed byte cap fails here, before anything is written |
+| 5xx | Deploy failed — **the old version, if there was one, is still serving**; body says why. An artifact over `max_artifact_entries` or the decompressed byte cap fails here, before anything is written |
 
 Because the response is synchronous through the whole pipeline, the
 POST's wall time includes the health soak, the `drain` pause and the
@@ -897,8 +897,10 @@ if a later step must have it, pass it through `env:` and keep the
 
 A version the box already has gets a `422` — versions are immutable —
 so a re-run of a job that deployed fails at this step rather than
-deploying twice. A deploy that fails is cleaned up, so its version can
-be deployed again — unless the 5xx body says `release <version> left
+deploying twice. A URL or push deploy that fails has its extracted
+release removed, so its version can be deployed again (a failed
+rollback leaves its on-disk release alone) — unless the 5xx body says
+`release <version> left
 on disk` (the failed instance could not be confirmed stopped, so the
 dir is kept rather than pulled from under a process that may still
 run) or `cleanup of failed release` (removing it failed). Either way

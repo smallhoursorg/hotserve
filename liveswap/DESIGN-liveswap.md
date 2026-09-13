@@ -96,8 +96,10 @@ Concept map from the Nomad-era stack:
   `grace`.
 - Release GC MUST run only after successful deploys, keep the newest
   `keep` dirs by mtime, and never delete the currently-serving version.
-  A failed deploy's release dir is removed, so its version stays
-  retriable — unless the failed instance may still be running (the
+  A failed URL or push deploy's freshly extracted release dir is
+  removed (a rollback relaunches an existing release and never deletes
+  it), so its version stays retriable — unless the failed instance
+  may still be running (the
   dir is kept rather than pulled from under a live process; the next
   launch's sweep stops the stray unit) or the removal itself fails;
   either way release GC (after a later successful deploy) removes it

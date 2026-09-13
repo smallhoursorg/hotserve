@@ -56,7 +56,8 @@ func loggedAppName(name string) string {
 //
 // Responses are synchronous — the POST returns when the deploy has
 // fully succeeded (200) or failed (5xx with the old version still
-// serving), so `curl --fail` makes CI red exactly when it should be.
+// serving), so `curl --fail-with-body` makes CI red exactly when it
+// should be, with the reason in the body.
 type Handler struct {
 	app     *App
 	logger  *zap.Logger
