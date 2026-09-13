@@ -133,7 +133,7 @@ deploy.example.com {
 
 Do not add an `env_file` line yet: hotserve reads that file each time
 the app launches, and a missing one fails the launch. Secrets come
-later, in [After the first deploy](after-first-deploy.md#2-secrets-if-the-app-has-any).
+later, in [After the first deploy](after-first-deploy.md#3-secrets-if-the-app-has-any).
 
 Then check the file and load it:
 
