@@ -20,6 +20,40 @@ and the change is a diff someone reads before `make push`.
 | `Makefile` | `make check` and `make push` |
 | `.github/workflows/check.yml` | `make check` on every push and pull request |
 
+## Provision the box
+
+Any VPS with Debian 13 will do; the cheapest tier is enough for a
+few small apps. At the provider (Hetzner, say):
+
+1. Create a server with **Debian 13** as the image, and your SSH
+   public key. Architecture is your choice; note it, since the release
+   `.deb` and a Node single executable are per-architecture.
+2. If the provider has a firewall, allow 80 and 443 from anywhere and
+   22 only from your own address (home, VPN).
+3. Point a DNS name at the address — and one for the deploy webhook
+   (`deploy.example.com` below), which hotserve serves on the same
+   box.
+
+Then, logged in as root once — install hotserve as
+[Install](../../README.md#install) says, and create the user you will
+administer it as. That user is not root: the `sudoers` file in this
+directory grants exactly the commands `bin/push` needs, and the `adm`
+group reads the logs.
+
+```sh
+adduser alice
+install -d -m 0700 -o alice -g alice /home/alice/.ssh && cp ~/.ssh/authorized_keys /home/alice/.ssh/
+curl -fsSL https://raw.githubusercontent.com/smallhoursorg/hotserve/main/examples/box/sudoers \
+  -o /etc/sudoers.d/hotserve-admin && chmod 0440 /etc/sudoers.d/hotserve-admin && visudo -c
+groupadd hotserve-admin && usermod -aG adm,hotserve-admin alice
+printf 'PermitRootLogin no\nPasswordAuthentication no\n' > /etc/ssh/sshd_config.d/10-hardening.conf
+systemctl reload ssh
+```
+
+Check `ssh alice@box.example.com sudo -n systemctl reload hotserve`
+works before you close the root session: that is the whole of what
+`make push` will need.
+
 ## Set it up
 
 1. Copy this directory into a new private repo, and replace
@@ -27,22 +61,13 @@ and the change is a diff someone reads before `make push`.
    `Caddyfile` with yours. The `app example` block is
    [examples/deno](../deno)'s; the app's own README walks through its
    side.
-2. Set up your user on the box. Administering hotserve needs no
-   root: `bin/push` runs as an ordinary user, whose privileged steps
-   are the exact commands in `sudoers`, and reads logs through the
-   `adm` group. Once, as root:
-
-   ```sh
-   sudo install -m 0440 sudoers /etc/sudoers.d/hotserve-admin
-   sudo groupadd hotserve-admin
-   sudo usermod -aG adm,hotserve-admin alice
-   ```
-
-   Then `ssh box.example.com sudo -n systemctl reload hotserve` works
-   for alice without a prompt, and `journalctl -u hotserve` needs no
-   sudo at all. What that grants is the `hotserve` user's reach, not
-   root's — see [Secrets](#secrets) — so give it to the people who
-   may change what the box serves.
+2. Make sure your user on the box is set up as in
+   [Provision the box](#provision-the-box): `sudoers` installed,
+   membership of `adm` and `hotserve-admin`. `bin/push` needs nothing
+   more, and `journalctl -u hotserve` needs no sudo at all. What that
+   grants is the `hotserve` user's reach, not root's — see
+   [Secrets](#secrets) — so give it to the people who may change what
+   the box serves.
 3. Set `HOTSERVE_VERSION` in `.github/workflows/check.yml` to the
    release the box runs (`dpkg -s hotserve` on the box shows it).
 
