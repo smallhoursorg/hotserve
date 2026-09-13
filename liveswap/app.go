@@ -275,7 +275,7 @@ func (ma *managedApp) configure(owner any, spec *appSpec, logger *zap.Logger, cl
 	}
 	ma.store = &fileStateStore{path: spec.dirs.state}
 	if changed {
-		logger.Info("app definition changed; it applies at the app's next launch (deploy, rollback, or relaunch after a crash or reboot)")
+		logger.Info("app definition changed; it applies at the app's next launch (deploy, rollback, or relaunch after a crash, health failure or reboot)")
 	}
 	// Wake the watchdog so a reload's spec (watchdog off, new
 	// intervals) applies promptly even while the instance is healthy
