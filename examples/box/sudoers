@@ -23,5 +23,7 @@ Cmnd_Alias HOTSERVE_CONFIG = \
 	/usr/bin/mv -f /etc/hotserve/Caddyfile.new /etc/hotserve/Caddyfile, \
 	/usr/bin/mv -f /etc/hotserve/Caddyfile.prev /etc/hotserve/Caddyfile, \
 	/usr/bin/systemctl reload hotserve
-Cmnd_Alias HOTSERVE_SECRETS = sudoedit /etc/hotserve/*.env
+# Anchored regex, not a glob: in sudoers a * would also match "/", and
+# so admit /etc/hotserve/../elsewhere/x.env.
+Cmnd_Alias HOTSERVE_SECRETS = sudoedit ^/etc/hotserve/[A-Za-z0-9_-]+\.env$
 %hotserve-admin ALL=(root) NOPASSWD: HOTSERVE_CONFIG, HOTSERVE_SECRETS

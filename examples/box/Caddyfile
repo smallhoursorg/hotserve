@@ -7,8 +7,9 @@
 	admin unix//run/hotserve/admin.sock
 
 	liveswap {
-		# Required: where a deploy that sends a URL may fetch from.
-		# Pushed tarballs, the examples' way, never consult it.
+		# Required: where a deploy that sends a URL may fetch from. The
+		# examples' workflows send their GitHub release's URL, which
+		# this admits; only a tarball pushed in the request body skips it.
 		artifact_allowlist github.com/your-org/
 
 		app example {

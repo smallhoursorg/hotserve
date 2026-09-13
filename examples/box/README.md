@@ -47,7 +47,7 @@ curl -fsSL https://raw.githubusercontent.com/smallhoursorg/hotserve/main/example
   -o /etc/sudoers.d/hotserve-admin && chmod 0440 /etc/sudoers.d/hotserve-admin && visudo -c
 groupadd hotserve-admin && usermod -aG adm,hotserve-admin alice
 printf 'PermitRootLogin no\nPasswordAuthentication no\n' > /etc/ssh/sshd_config.d/10-hardening.conf
-systemctl reload ssh
+sshd -t && systemctl reload ssh      # -t checks the config first: a bad one would lock you out
 ```
 
 Check `ssh alice@box.example.com sudo -n systemctl reload hotserve`

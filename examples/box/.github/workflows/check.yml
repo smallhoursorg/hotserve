@@ -13,7 +13,7 @@ jobs:
     env:
       HOTSERVE_VERSION: 0.2.0-rc1 # the version the box runs
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install hotserve (the release's bare binary)
         run: |
           base=https://github.com/smallhoursorg/hotserve/releases/download/v$HOTSERVE_VERSION

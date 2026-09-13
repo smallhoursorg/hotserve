@@ -26,7 +26,7 @@ On the box, fetch the `.deb` for its architecture from
 it, and install it:
 
 ```sh
-v=0.2.0                             # the release you are installing (a prerelease's .deb is named 0.2.0.rc1)
+v=0.2.0                             # the release you are installing
 arch=$(dpkg --print-architecture)   # amd64 or arm64
 base=https://github.com/smallhoursorg/hotserve/releases/download/v$v
 cd /tmp && curl -fsSLO "$base/hotserve_${v}_${arch}.deb" && curl -fsSLO "$base/checksums.txt"
@@ -37,13 +37,17 @@ sudo systemctl enable --now hotserve
 
 (`-L` follows GitHub's redirect to the file; `/tmp` is where `apt`
 can read a local package — installing one from your home directory
-prints a harmless "download is performed unsandboxed as root" notice.)
+prints a harmless "download is performed unsandboxed as root" notice.
+A prerelease's `.deb` is named differently from its tag —
+`hotserve_0.2.0.rc1_arm64.deb` under `v0.2.0-rc1` — so take that
+file name from the release page.)
 `enable --now` says only `Created symlink …`; that is success. Then:
 
 ```sh
 systemctl status hotserve          # active (running)
 curl -s localhost                  # "hotserve is running. Edit /etc/hotserve/Caddyfile …"
-journalctl -u hotserve | grep 'liveswap started'   # one JSON line: "msg":"liveswap started","apps":0
+sudo journalctl -u hotserve | grep 'liveswap started'   # one JSON line: "msg":"liveswap started","apps":0
+                                   # (no sudo once your user is in adm — next paragraph)
 ```
 
 That gives you `/usr/bin/hotserve`, a systemd service running as the
