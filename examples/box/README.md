@@ -67,7 +67,9 @@ works before you close the root session: that is the whole of what
 
 1. Copy this directory into a new private repo, and replace
    `example.com`, `deploy.example.com` and `your-org/example` in the
-   `Caddyfile` with yours. The `app example` block is
+   `Caddyfile` with yours — `your-org` twice: the `artifact_allowlist`
+   entry pins the organization alone, and `deploy_trust` the
+   repository. The `app example` block is
    [examples/deno](../deno)'s; for [examples/node](../node), replace
    its `command`, `pre_start` and `env` lines with the ones in
    `examples/node/hotserve.caddy`. Either app's README walks through
