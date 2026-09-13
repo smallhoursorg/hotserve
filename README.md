@@ -29,16 +29,19 @@ it, and install it:
 v=0.2.0                             # the release you are installing
 arch=$(dpkg --print-architecture)   # amd64 or arm64
 base=https://github.com/smallhoursorg/hotserve/releases/download/v$v
-cd /tmp && curl -fsSLO "$base/hotserve_${v}_${arch}.deb" && curl -fsSLO "$base/checksums.txt"
+sudo install -d -o "$USER" /var/local/hotserve && cd /var/local/hotserve
+curl -fsSLO "$base/hotserve_${v}_${arch}.deb" && curl -fsSLO "$base/checksums.txt"
 sha256sum -c --ignore-missing checksums.txt
 sudo apt install ./hotserve_${v}_${arch}.deb
 sudo systemctl enable --now hotserve
 ```
 
-(`-L` follows GitHub's redirect to the file; `/tmp` is where `apt`
-can read a local package — installing one from your home directory
-prints a harmless "download is performed unsandboxed as root" notice.
-A prerelease's `.deb` is named differently from its tag —
+(`-L` follows GitHub's redirect to the file. `/var/local/hotserve` is
+a directory `apt` can read a local package from — installing one from
+your home directory prints a harmless "download is performed
+unsandboxed as root" notice — and one that survives a reboot, unlike
+`/tmp`, so the file is still there when you want the way back from an
+upgrade. A prerelease's `.deb` is named differently from its tag —
 `hotserve_0.2.0.rc1_arm64.deb` under `v0.2.0-rc1` — so take that
 file name from the release page.)
 `enable --now` says only `Created symlink …`; that is success. Then:
@@ -229,6 +232,7 @@ upgrade:
 
 ```sh
 # from the release page: the .deb for your architecture, and checksums.txt
+cd /var/local/hotserve              # next to the release you are upgrading from
 v=0.2.0                             # the version in the .deb's file name
 arch=$(dpkg --print-architecture)   # amd64 or arm64
 sha256sum -c --ignore-missing checksums.txt
@@ -304,10 +308,10 @@ Before you upgrade:
   config check without touching anything that is running. A config it
   rejects would stop the upgraded hotserve from starting, and the site
   would stay down until you fixed the config or went back.
-- **Keep the `.deb` you are upgrading from.**
+- **The `.deb` you are upgrading from is still in `/var/local/hotserve`.**
   `sudo apt install --allow-downgrades ./hotserve_<old>_$(dpkg --print-architecture).deb`
-  puts it back — the same restart, in reverse. On a VPS, a snapshot
-  taken first is the fuller way back.
+  puts it back — the same restart, in reverse, and nothing to download
+  first. On a VPS, a snapshot taken first is the fuller way back.
 - **Upgrade hotserve and the host separately.** hotserve measures what
   the host can sandbox at every start and refuses to start on a host
   that cannot deliver it ([liveswap/README.md](liveswap/README.md#sandbox)),

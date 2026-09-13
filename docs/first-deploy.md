@@ -50,13 +50,16 @@ it, and install it:
 v=0.2.0                             # the release you are installing
 arch=$(dpkg --print-architecture)   # amd64 or arm64
 base=https://github.com/smallhoursorg/hotserve/releases/download/v$v
-cd /tmp && curl -fsSLO "$base/hotserve_${v}_${arch}.deb" && curl -fsSLO "$base/checksums.txt"
+mkdir -p /var/local/hotserve && cd /var/local/hotserve
+curl -fsSLO "$base/hotserve_${v}_${arch}.deb" && curl -fsSLO "$base/checksums.txt"
 sha256sum -c --ignore-missing checksums.txt
 apt install ./hotserve_${v}_${arch}.deb
 systemctl enable --now hotserve
 ```
 
-(A prerelease's `.deb` is named differently from its tag —
+(The directory is where the `.deb` stays, so the way back from a later
+upgrade is on the box already; `/tmp` would not survive a reboot. A
+prerelease's `.deb` is named differently from its tag —
 `hotserve_0.2.0.rc1_arm64.deb` under `v0.2.0-rc1` — so take that file
 name from the release page. `enable --now` prints only `Created
 symlink …`; that is success.)

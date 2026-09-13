@@ -134,14 +134,15 @@ At the provider's firewall, allow **22 only from your own address**
 (home, VPN). 80 and 443 stay open to the world; nothing else on the
 box listens on a port, since every app is reached over a unix socket.
 
-## 6. Keep what you installed
+## 6. Know the way back
 
-Keep the `.deb` you installed from, or note its version:
+The `.deb` you installed from is still in `/var/local/hotserve`, and
 `apt install --allow-downgrades` of it is the way back from an upgrade
-that does not suit you. The README's [Upgrading](../README.md#upgrading)
-section has the rest: checking a new version accepts your config before
-you install it, what visitors see during the restart, and how to pick a
-quiet moment for it.
+that does not suit you; download each later release into the same
+directory. The README's [Upgrading](../README.md#upgrading) section has
+the rest: checking a new version accepts your config before you install
+it, what visitors see during the restart, and how to pick a quiet
+moment for it.
 
 ## Day to day
 
