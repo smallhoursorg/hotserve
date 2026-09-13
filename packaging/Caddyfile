@@ -95,6 +95,11 @@
 # 	reverse_proxy {
 # 		dynamic liveswap myapp
 # 	}
+# 	# Before the first deploy, and while the app is down, there is no
+# 	# upstream and visitors get a bare 503. Keep the status; add words.
+# 	handle_errors 502 503 {
+# 		respond "myapp is not running: nothing deployed yet, or it is restarting." {http.error.status_code}
+# 	}
 # }
 #
 # deploy.example.com {

@@ -21,17 +21,36 @@ Built in:
 
 ## Install
 
-Grab the `.deb` for your architecture from
-[releases](https://github.com/smallhoursorg/hotserve/releases):
+On the box, fetch the `.deb` for its architecture from
+[releases](https://github.com/smallhoursorg/hotserve/releases), check
+it, and install it:
 
 ```sh
-sudo apt install ./hotserve_*_amd64.deb
+v=0.2.0                             # the release you are installing
+arch=$(dpkg --print-architecture)   # amd64 or arm64
+base=https://github.com/smallhoursorg/hotserve/releases/download/v$v
+cd /tmp && curl -fsSLO "$base/hotserve_${v}_${arch}.deb" && curl -fsSLO "$base/checksums.txt"
+sha256sum -c --ignore-missing checksums.txt
+sudo apt install ./hotserve_${v}_${arch}.deb
 sudo systemctl enable --now hotserve
 ```
 
+(`-L` follows GitHub's redirect to the file; `/tmp` is where `apt`
+can read a local package — installing one from your home directory
+prints a harmless "download is performed unsandboxed as root" notice.)
+`enable --now` says only `Created symlink …`; that is success. Then:
+
+```sh
+systemctl status hotserve          # active (running)
+curl -s localhost                  # "hotserve is running. Edit /etc/hotserve/Caddyfile …"
+journalctl -u hotserve -n 20       # Caddy's start-up lines, and liveswap's:
+                                   #   liveswap started  apps=0
+```
+
 That gives you `/usr/bin/hotserve`, a systemd service running as the
-`hotserve` user, a starter config at `/etc/hotserve/Caddyfile`, and
-the lingering user manager your apps' units run under.
+`hotserve` user, a starter config at `/etc/hotserve/Caddyfile`, and a
+systemd instance for the `hotserve` user that stays up without anyone
+logging in — the thing your apps will run under.
 
 **Supported: Debian 13.** hotserve installs on other systemd
 distributions, but nothing else is tested, and a host that cannot
@@ -70,9 +89,47 @@ without the feature it exists for.
 
 (A hosted APT repository with automatic updates is on the roadmap.)
 
+**Installing needs root; administering does not.** Checking a config
+(`hotserve validate`) needs no privilege, reading the journal —
+hotserve's and every app's — needs the `adm` group, and changing the
+config and reloading are six fixed commands, listed in
+[examples/box/sudoers](examples/box/sudoers). That is the `hotserve`
+user's reach (its TLS keys, every app's data), not root's: hotserve
+itself runs unprivileged. The e2e suite administers its box that way.
+
+## Getting started
+
+Three directories are the paved road, and the e2e suite builds and
+deploys every one of them on every change, so what they say works.
+In order:
+
+1. **[examples/box](examples/box)** — the box's config, kept in a
+   private repo of its own: the `Caddyfile` (which app, which repo may
+   deploy it, where the deploy webhook answers), a `make push` that
+   validates it on the box and never leaves an invalid file there, and
+   the sudoers file above. Do this first: it is where the deploy URL
+   and the app's permissions live.
+2. **An app to copy.** The box ships no runtime, so pick one of two
+   shapes:
+   - **[examples/node](examples/node)** — a single executable (Node's
+     own build), so nothing is installed on the box. Largest tarball;
+     simplest box.
+   - **[examples/deno](examples/deno)** — `deno run` with a Deno
+     installed under `/usr` on the box, and the runtime's permission
+     flags held in the box's Caddyfile, where a compromised build
+     cannot widen them.
+
+   Both serve on the socket hotserve hands them, answer `/health`,
+   migrate before each version starts, stop cleanly, and deploy from
+   GitHub Actions with no stored secret. Copy one, set its deploy URL,
+   push.
+
+The Quickstart below is the same thing by hand.
+
 ## Quickstart: deploy an app with zero downtime
 
-`/etc/hotserve/Caddyfile`:
+Edit `/etc/hotserve/Caddyfile` (the package's starter has all of this
+commented out, in place) to:
 
 ```caddyfile
 {
@@ -116,6 +173,17 @@ deploy.example.com {
 	liveswap_webhook
 }
 ```
+
+**What the app has to do.** hotserve does not hand it a port: it
+starts the app with `SOCKET` set to a unix socket path, and the app
+listens there (`server.listen(process.env.SOCKET)`,
+`Deno.serve({ path })`, `net.Listen("unix", …)` — every runtime can).
+hotserve proxies to that socket and health-checks it the same way, so
+`GET /health` just has to answer 2xx. On SIGTERM, finish in-flight
+requests and exit. Persistent data goes in the app's `shared/` dir
+(its `HOME`); the release dir is replaced on every deploy. The full
+contract, with snippets per runtime:
+[liveswap/README.md](liveswap/README.md#listening-on-the-socket).
 
 Then from CI. On GitHub Actions, request an OIDC token per run — no
 stored secret, on the box or in CI:

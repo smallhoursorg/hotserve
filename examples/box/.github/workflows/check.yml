@@ -1,0 +1,26 @@
+# Validate the Caddyfile on every push and pull request, with the
+# hotserve version the box runs. CI never pushes it: that stays a
+# person running `make push`, and no SSH key lives in CI.
+name: check
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    env:
+      HOTSERVE_VERSION: 0.2.0-rc1 # the version the box runs
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install hotserve (the release's bare binary)
+        run: |
+          base=https://github.com/smallhoursorg/hotserve/releases/download/v$HOTSERVE_VERSION
+          f=hotserve_${HOTSERVE_VERSION}_linux_amd64.tar.gz
+          curl -fsSLO "$base/$f"
+          curl -fsSLO "$base/checksums.txt"
+          sha256sum -c --ignore-missing checksums.txt
+          tar -xzf "$f" hotserve
+          sudo install -m 0755 hotserve /usr/local/bin/hotserve
+      - run: make check

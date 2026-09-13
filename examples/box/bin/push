@@ -1,0 +1,68 @@
+#!/bin/sh
+# Pushes the Caddyfile to the box without ever leaving a bad one there.
+#
+#   BOX=box.example.com bin/push        (or: make push BOX=box.example.com)
+#
+# In order: stage the file next to the live one; validate it on the
+# box; show the diff and ask; swap it in with a rename; reload. If the
+# reload fails, the previous file goes back, so the file on disk always
+# matches the config that is running — a bad file left behind would
+# not break anything now, but it would stop the next restart or
+# upgrade from starting.
+#
+# Runs as an ordinary user on the box: validating and diffing need no
+# privilege, and every privileged step is one fixed command, listed
+# in ../sudoers. Nothing here needs root or a root key.
+#
+#   BOX              the box to ssh to, as a user set up per README.md
+#   HOTSERVE_REMOTE  the command prefix that runs a command on the box as
+#                    that user (default: ssh $BOX; hotserve's e2e suite
+#                    uses docker compose exec)
+#   CONFIG           the file to push (default: the Caddyfile beside bin/)
+#   YES=1            apply without asking
+set -eu
+
+config=${CONFIG:-$(dirname "$0")/../Caddyfile}
+remote=${HOTSERVE_REMOTE:-ssh ${BOX:?set BOX to the box to push to, e.g. BOX=box.example.com}}
+live=/etc/hotserve/Caddyfile
+
+on_box() { $remote "$@"; } # $remote splits into words on purpose
+# Each of these is an exact line in ../sudoers; -n fails at once if
+# the user is not set up rather than waiting for a password.
+as_root() { on_box sudo -n "$@"; }
+
+[ -f "$config" ] || { echo "push: no $config here" >&2; exit 1; }
+as_root tee "$live.new" >/dev/null <"$config"
+
+if ! on_box hotserve validate --config "$live.new"; then
+	as_root rm -f "$live.new"
+	echo "push: the box rejected $config; nothing changed" >&2
+	exit 1
+fi
+
+if on_box cmp -s "$live" "$live.new"; then
+	as_root rm -f "$live.new"
+	echo "push: the box already runs this $config"
+	exit 0
+fi
+on_box diff -u "$live" "$live.new" || true
+if [ "${YES:-}" != 1 ]; then
+	printf 'push: apply this diff? [y/N] '
+	read -r answer
+	if [ "$answer" != y ]; then
+		as_root rm -f "$live.new"
+		echo "push: not applied"
+		exit 1
+	fi
+fi
+
+as_root cp -p "$live" "$live.prev"
+as_root mv -f "$live.new" "$live"
+if as_root systemctl reload hotserve; then
+	echo "push: applied; hotserve reloaded (running apps are not restarted)"
+else
+	as_root mv -f "$live.prev" "$live"
+	echo "push: the reload failed, so the previous Caddyfile is back in place and still running" >&2
+	echo "push: why: journalctl -u hotserve -n 50 on the box" >&2
+	exit 1
+fi
