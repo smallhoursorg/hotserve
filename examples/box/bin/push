@@ -1,7 +1,7 @@
 #!/bin/sh
 # Pushes the Caddyfile to the box without ever leaving a bad one there.
 #
-#   BOX=box.example.com bin/push        (or: make push BOX=box.example.com)
+#   BOX=alice@box.example.com bin/push  (or: make push BOX=alice@box.example.com)
 #
 # In order: stage the file next to the live one; validate it on the
 # box; show the diff and ask; swap it in with a rename; reload. If the
@@ -19,7 +19,7 @@
 # privilege, and every privileged step is one fixed command, listed
 # in ../sudoers. Nothing here needs root or a root key.
 #
-#   BOX              the box to ssh to, as a user set up per README.md
+#   BOX              user@host to ssh to: the administrator set up per README.md
 #   HOTSERVE_REMOTE  the command prefix that runs a command on the box as
 #                    that user (default: ssh $BOX; hotserve's e2e suite
 #                    uses docker compose exec)
@@ -28,7 +28,7 @@
 set -eu
 
 config=${CONFIG:-$(dirname "$0")/../Caddyfile}
-remote=${HOTSERVE_REMOTE:-ssh ${BOX:?set BOX to the box to push to, e.g. BOX=box.example.com}}
+remote=${HOTSERVE_REMOTE:-ssh ${BOX:?set BOX to the administrator and box to push to, e.g. BOX=alice@box.example.com}}
 live=/etc/hotserve/Caddyfile
 
 # $remote splits into words on purpose. Every remote command gets an

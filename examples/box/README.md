@@ -34,11 +34,20 @@ few small apps. At the provider (Hetzner, say):
    (`deploy.example.com` below), which hotserve serves on the same
    box.
 
-Then, logged in as root once — install hotserve as
-[Install](../../README.md#install) says, and create the user you will
-administer it as. That user is not root: the `sudoers` file in this
-directory grants exactly the commands `bin/push` needs, and the `adm`
-group reads the logs.
+Then, logged in as root once, in this order — the user created last
+cannot do the steps before it:
+
+1. Install hotserve as [Install](../../README.md#install) says.
+2. Install what your app's shape needs. The administrator below cannot
+   `apt install`, so this is the moment:
+   - a Node single executable on an arm64 box: `apt install libatomic1`
+     ([examples/node](../node#put-it-on-a-box) says why);
+   - a Deno app: Deno under `/usr/local/bin`, with the lines in
+     [examples/deno](../deno#put-it-on-a-box);
+   - an app with secrets: its env file, as [Secrets](#secrets) shows.
+3. Create the user you will administer it as. That user is not root:
+   the `sudoers` file in this directory grants exactly the commands
+   `bin/push` needs, and the `adm` group reads the logs.
 
 ```sh
 adduser alice
@@ -59,8 +68,10 @@ works before you close the root session: that is the whole of what
 1. Copy this directory into a new private repo, and replace
    `example.com`, `deploy.example.com` and `your-org/example` in the
    `Caddyfile` with yours. The `app example` block is
-   [examples/deno](../deno)'s; the app's own README walks through its
-   side.
+   [examples/deno](../deno)'s; for [examples/node](../node), replace
+   its `command`, `pre_start` and `env` lines with the ones in
+   `examples/node/hotserve.caddy`. Either app's README walks through
+   its side.
 2. Make sure your user on the box is set up as in
    [Provision the box](#provision-the-box): `sudoers` installed,
    membership of `adm` and `hotserve-admin`. `bin/push` needs nothing
@@ -80,7 +91,7 @@ Edit the `Caddyfile`, open a pull request (CI validates it), merge,
 then from a checkout of `main`:
 
 ```sh
-make push BOX=box.example.com
+make push BOX=alice@box.example.com     # the user from Provision the box
 ```
 
 `bin/push` copies the file to the box next to the live one, validates
@@ -92,6 +103,19 @@ reload fails, it puts the previous file back, so the file on disk is
 always the config that is running. (A bad file left in place would
 not break anything at once, since the running config stays, but it
 would stop the next restart or upgrade from starting.)
+
+After the first push, with nothing deployed yet, a correct box looks
+like this:
+
+- `https://example.com` answers 503 with the sentence from the
+  Caddyfile's `handle_errors` block — once the certificate is issued,
+  which takes a few seconds after the reload with 80 and 443 open.
+- `https://deploy.example.com/example` answers 401 with
+  `{"error":"invalid or missing deploy token …"}`, in a browser or
+  with `curl -i`. That is the webhook working: a deploy carries a
+  token, and nothing without one gets further than this.
+- `journalctl -u hotserve | grep 'liveswap started'` gains a line with
+  `"apps":1,"app_names":["example"]`.
 
 A reload never restarts a running app. A changed `app` block applies
 at the app's next launch: its next deploy, or a relaunch after a crash

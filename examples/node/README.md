@@ -28,21 +28,26 @@ npm run dev            # http://127.0.0.1:8000
 
 ## Put it on a box
 
-You need a Debian 13 server with hotserve installed (see
-[Install](../../README.md#install)) and a DNS name pointing at it.
+You need a Debian 13 server with hotserve installed and a box repo
+for its config, both from [examples/box](../box#provision-the-box),
+and a DNS name pointing at it.
 
-**1. On an arm64 box, install `libatomic1`.** The tarball carries its
-own Node, and Node's arm64 build links one library a stock Debian 13
-does not ship; without it the app fails to start with exit status 127
-(`error while loading shared libraries: libatomic.so.1`). amd64
-needs nothing.
+**1. On an arm64 box, install `libatomic1`** — as root, while
+provisioning the box: the administrator the box README creates cannot
+install packages. The tarball carries its own Node, and Node's arm64
+build links one library a stock Debian 13 does not ship; without it
+the app fails to start with exit status 127 (`error while loading
+shared libraries: libatomic.so.1`). amd64 needs nothing.
 
 ```sh
-sudo apt install libatomic1
+apt install libatomic1
 ```
 
-**2. Add the app to the box's Caddyfile** (`/etc/hotserve/Caddyfile`),
-with the lines from `hotserve.caddy` inside its `app` block:
+**2. Add the app to the box repo's Caddyfile**, with the lines from
+`hotserve.caddy` inside its `app` block, and `make push` it (the box
+README's [Change the config](../box#change-the-config)). The box
+example ships the Deno app's block; this app's `command`, `pre_start`
+and `env` lines replace those. In the box repo's Caddyfile, that is:
 
 ```caddyfile
 {
@@ -74,15 +79,12 @@ deploy.example.com {
 }
 ```
 
-Instead of pasting them, you can save `hotserve.caddy` on the box (as
-`/etc/hotserve/example.caddy`, say) and write
-`import /etc/hotserve/example.caddy` in the block: that is how the e2e
-suite uses it. Check the config, then load it:
-
-```sh
-hotserve validate --config /etc/hotserve/Caddyfile
-sudo systemctl reload hotserve
-```
+The copy on the box is the one that counts: hotserve never reads
+`hotserve.caddy` from a deploy. (Without a box repo, as root: edit
+`/etc/hotserve/Caddyfile`, `hotserve validate --config` it, then
+`systemctl reload hotserve`. hotserve's e2e suite instead saves the
+file on its box and writes `import /etc/hotserve/example.caddy` in
+the block.)
 
 **3. Point the workflow at the box.** In your copy of this directory,
 set `HOTSERVE_URL` in `.github/workflows/deploy.yml` to
@@ -97,6 +99,20 @@ why it was refused; a refused deploy leaves the old version serving.
 (A private repo's assets are only readable through GitHub's API: see
 "Deploying from CI" in hotserve's
 [liveswap/README.md](../../liveswap/README.md#deploying-from-ci).)
+
+What a first deploy that worked looks like, from the laptop:
+
+- The deploy step's output ends with the app's status JSON, holding
+  `"current_version":"<the commit's first 12 characters>"`.
+- `curl https://example.com/` answers `hello from <that version>
+  (schema v1)`; the 503 from before the deploy is gone.
+- `ssh alice@box.example.com journalctl -t hotserve-example` shows the
+  app's own output — the migration's line, then whatever `server.js`
+  prints. The `adm` group the box README grants is what reads it.
+
+A re-run of the same workflow run is refused with a 422: versions are
+immutable on the box, and that commit's version is already there. Push
+a new commit to deploy again.
 
 ## What the executable is, and isn't
 
@@ -117,7 +133,10 @@ the box's Caddyfile hold the runtime's flags.
 Given a local tarball instead of a URL, `scripts/deploy.sh` pushes it
 in the request body, so a laptop build needs no release — as long as
 the laptop is the box's architecture and OS (a Linux arm64 build, for
-an arm64 box). With a `deploy_trust local` block on the box (see
+an arm64 box). The token comes from `hotserve deploy-token`, and
+hotserve is built for Linux only, so this is a path for a Linux
+machine that is not the box (the signing key must stay off the box).
+With a `deploy_trust local` block on the box (see
 [Deploy authentication](../../liveswap/README.md#deploy-authentication-deploy_trust)):
 
 ```sh
