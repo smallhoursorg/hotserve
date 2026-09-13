@@ -147,8 +147,10 @@ moment for it.
 ## Day to day
 
 - **Deploy** by pushing to `main`; **roll back** from Actions → deploy →
-  **Run workflow** with a version from the releases page
-  ([examples/node](../examples/node/README.md#rolling-back)).
+  **Run workflow**, with "Use workflow from" left on `main` and the
+  version to go back to: a commit's first 12 characters, as the
+  releases page lists them, and one of the newest five, which is what
+  the box still holds ([examples/node](../examples/node/README.md#rolling-back)).
 - **Logs:** `journalctl -t hotserve-example` for the app's own output,
   `journalctl -u hotserve` for hotserve's, both without sudo as `alice`.
 - **A second app:** another `app` block and site in the Caddyfile,

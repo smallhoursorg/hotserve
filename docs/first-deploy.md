@@ -266,8 +266,12 @@ a new commit to deploy again.
 
 An app at `example.com` that deploys on every push to `main`, with no
 SSH key or password anywhere in CI. Rollback is a button:
-Actions → deploy → **Run workflow**, with a version from the releases
-page; the example's README says [how](../examples/node/README.md#rolling-back).
+Actions → deploy → **Run workflow**, with the version to go back to. A
+version is the first 12 characters of a commit on `main`, as the
+releases page lists them; the box keeps the newest five, so those are
+the ones it can relaunch. Leave "Use workflow from" on `main`: the
+workflow runs from there whichever version it relaunches. The
+example's README says [more](../examples/node/README.md#rolling-back).
 The next app is the same four steps minus the first two: another
 `app` block and site in the Caddyfile, another copy of the example.
 
