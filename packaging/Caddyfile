@@ -4,18 +4,81 @@
 # the built-in modules: liveswap (zero-downtime deploys), penaltybox
 # (rate-limit hint enforcement) and cache (Souin + Otter).
 #
-# Reload after editing:  sudo systemctl reload hotserve
+# Check before reloading: a file that fails to load leaves the old config
+# running, but it also stops the next restart or upgrade from starting.
+#   hotserve validate --config /etc/hotserve/Caddyfile
+#   sudo systemctl reload hotserve
 
 {
 	# Admin API on a unix socket instead of the default localhost:2019.
 	# "localhost" includes every app hotserve runs: an SSRF bug in any
 	# deployed app could otherwise be steered at the TCP admin API and
 	# reconfigure the whole server. HTTP clients can't be steered at a
-	# unix socket. (Apps currently share the hotserve user, so this
-	# stops network-borne access, not a fully compromised app — see the
-	# trust model in the README.) `systemctl reload hotserve` finds the
-	# socket via this config; keep the line if you edit this block.
+	# unix socket, and /run/hotserve is absent from every app's sandbox.
+	# `systemctl reload hotserve` finds the socket via this config; keep
+	# the line if you edit this block.
 	admin unix//run/hotserve/admin.sock
+
+	# ── Example: a Node.js app with zero-downtime deploys ──
+	#
+	# Uncomment what you need HERE, inside this block: global options
+	# all live in the one block at the top of the file, and a second
+	# { } block is a parse error. The matching site blocks are below.
+	#
+	# liveswap {
+	# 	artifact_allowlist github.com/your-org/   # required: pin artifact origins
+	#
+	# 	# Who may deploy (required). CI sends an OIDC token; the box
+	# 	# verifies it against the provider's public keys — no shared
+	# 	# secret on the server. For non-CI deploys use a local key:
+	# 	# `hotserve deploy-keygen`, then `deploy_trust local { public_key … }`.
+	# 	deploy_trust github {
+	# 		audience hotserve
+	# 		claim repository your-org/myapp
+	# 		claim ref        refs/heads/main
+	# 	}
+	#
+	# 	app myapp {
+	# 		command node server.js
+	# 		env_file /etc/hotserve/myapp.env
+	# 		# pre_start node migrate.js
+	#
+	# 		# Each app runs in its own systemd sandbox, and the
+	# 		# filesystem it sees is deny-by-default: its release dir,
+	# 		# its shared/ dir, a private /tmp, the OS runtime (/usr and
+	# 		# a named handful of /etc) — and nothing else on this host
+	# 		# exists inside it. There is no way to widen that view, so
+	# 		# put persistent data in shared/ and install runtimes under
+	# 		# /usr. A path outside is ENOENT, not a permission error;
+	# 		# a runtime outside /usr (a vendored Node, an nvm/asdf
+	# 		# shim) is refused up front rather than failing later.
+	#
+	# 		# There is no setting that turns the sandbox off or widens
+	# 		# it. On a host that cannot deliver it — a container, an
+	# 		# LXC VPS, a kernel without user namespaces — hotserve does
+	# 		# NOT start, and says what is missing. That is deliberate:
+	# 		# the alternative is an app running with no isolation, which
+	# 		# on a shared uid means every other app's data and
+	# 		# hotserve's own keys. The supported host is Debian 13.
+	#
+	# 		# Crash/health watchdog (on by default). Defaults shown:
+	# 		# watchdog          on     # off = never auto-restart
+	# 		# watchdog_failures 3      # consecutive failed health probes
+	# 		# watchdog_grace    30s    # post-start probe-failure amnesty
+	# 		# watchdog_restarts 5      # budget per watchdog_window
+	# 		# watchdog_window   10m
+	#
+	# 		# Artifact caps. A deploy warns at 75% of either, so raise
+	# 		# them before an app grows into one. Defaults shown:
+	# 		# max_artifact_size    100MB   # decompressed cap is 10x
+	# 		# max_artifact_entries 100000  # files+dirs+links per artifact
+	# 	}
+	# }
+	#
+	# cache {       # page cache: Souin, in-memory Otter storage
+	# 	ttl 60s
+	# 	otter
+	# }
 }
 
 # ── Replace with your domain once DNS points here — hotserve then
@@ -24,65 +87,7 @@
 	respond "hotserve is running. Edit /etc/hotserve/Caddyfile to serve your apps."
 }
 
-# ── Example: a Node.js app with zero-downtime deploys ──
-#
-# {
-# 	liveswap {
-# 		artifact_allowlist github.com/your-org/   # required: pin artifact origins
-#
-# 		# Who may deploy (required). CI sends an OIDC token; the box
-# 		# verifies it against the provider's public keys — no shared
-# 		# secret on the server. For non-CI deploys use a local key:
-# 		# `hotserve deploy-keygen`, then `deploy_trust local { public_key … }`.
-# 		deploy_trust github {
-# 			audience hotserve
-# 			claim repository your-org/myapp
-# 			claim ref        refs/heads/main
-# 		}
-#
-# 		app myapp {
-# 			command node server.js
-# 			env_file /etc/hotserve/myapp.env
-# 			# pre_start node migrate.js
-#
-# 			# Each app runs in its own systemd sandbox, and the
-# 			# filesystem it sees is deny-by-default: its release dir,
-# 			# its shared/ dir, a private /tmp, the OS runtime (/usr and
-# 			# a named handful of /etc) — and nothing else on this host
-# 			# exists inside it. There is no way to widen that view, so
-# 			# put persistent data in shared/ and install runtimes under
-# 			# /usr. A path outside is ENOENT, not a permission error;
-# 			# a runtime outside /usr (a vendored Node, an nvm/asdf
-# 			# shim) is refused up front rather than failing later.
-#
-# 			# There is no setting that turns the sandbox off or widens
-# 			# it. On a host that cannot deliver it — a container, an
-# 			# LXC VPS, a kernel without user namespaces — hotserve does
-# 			# NOT start, and says what is missing. That is deliberate:
-# 			# the alternative is an app running with no isolation, which
-# 			# on a shared uid means every other app's data and
-# 			# hotserve's own keys. The supported host is Debian 13.
-#
-# 			# Crash/health watchdog (on by default). Defaults shown:
-# 			# watchdog          on     # off = never auto-restart
-# 			# watchdog_failures 3      # consecutive failed health probes
-# 			# watchdog_grace    30s    # post-start probe-failure amnesty
-# 			# watchdog_restarts 5      # budget per watchdog_window
-# 			# watchdog_window   10m
-#
-# 			# Artifact caps. A deploy warns at 75% of either, so raise
-# 			# them before an app grows into one. Defaults shown:
-# 			# max_artifact_size    100MB   # decompressed cap is 10x
-# 			# max_artifact_entries 100000  # files+dirs+links per artifact
-# 		}
-# 	}
-#
-# 	# Page cache (Souin + in-memory Otter storage):
-# 	# cache {
-# 	# 	ttl 60s
-# 	# 	otter
-# 	# }
-# }
+# ── Example: the sites for the app above ──
 #
 # myapp.example.com {
 # 	# hint_penaltybox        # rate limiting driven by app hint headers
@@ -93,7 +98,7 @@
 # }
 #
 # deploy.example.com {
-# 	liveswap_webhook         # POST /myapp {url, version} from CI
+# 	liveswap_webhook         # POST /myapp from CI: a tarball, or {url, version}
 # 	                         # (failed auths are throttled in the journal,
 # 	                         # 10/min per address then 429 for bad tokens;
 # 	                         # a valid token always gets through — built in)

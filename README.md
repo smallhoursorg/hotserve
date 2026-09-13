@@ -76,6 +76,9 @@ without the feature it exists for.
 
 ```caddyfile
 {
+	# Keep: the admin API off TCP (see Security); `systemctl reload` finds it here.
+	admin unix//run/hotserve/admin.sock
+
 	liveswap {
 		artifact_allowlist github.com/your-org/   # required: pin artifact origins
 
@@ -121,15 +124,20 @@ stored secret, on the box or in CI:
 permissions:
   id-token: write               # let the job mint an OIDC token
 steps:
-  - id: tok
-    run: echo "jwt=$(curl -sH "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-      "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=hotserve" | jq -r .value)" >> "$GITHUB_OUTPUT"
   - run: |
-      curl --fail -X POST -H "Authorization: Bearer ${{ steps.tok.outputs.jwt }}" \
+      JWT=$(curl -fsS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+        "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=hotserve" | jq -er .value)
+      echo "::add-mask::$JWT"
+      curl --fail-with-body -X POST -H "Authorization: Bearer $JWT" \
         -H 'Content-Type: application/json' \
-        -d '{"url":"https://…/myapp.tar.gz","version":"v1.4.2"}' \
+        -d '{"url":"https://github.com/your-org/myapp/releases/download/v1.4.2/myapp.tar.gz","version":"v1.4.2"}' \
         https://deploy.example.com/myapp
 ```
+
+Mint and use the token in the one step — interpolated into a later
+step's script it lands in the job log — and `--fail-with-body` so a
+failed deploy prints why. More, including GitLab and private release
+assets: [Deploying from CI](liveswap/README.md#deploying-from-ci).
 
 For non-CI deploys (a laptop, a cron box), use a local key instead:
 `hotserve deploy-keygen`, point a `deploy_trust local { public_key … }`

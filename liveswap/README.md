@@ -76,6 +76,10 @@ most container hosts will not give you.
 
 ```caddyfile
 {
+	# Keep the admin API off TCP: every app can reach localhost. (This
+	# is the hotserve package's path; `systemctl reload` finds it here.)
+	admin unix//run/hotserve/admin.sock
+
 	liveswap {
 		# root /var/lib/liveswap                # where releases/state live (default)
 		artifact_allowlist github.com/your-org/ # required: where artifacts may come from
@@ -432,7 +436,8 @@ status: an app is running, or hotserve did not start.
 **What a running instance's sandbox is fixed to.** A unit's view is
 built when it starts and is never rebuilt under it — reloads
 deliberately leave running apps alone — so a config change reaches an
-app on its next deploy, not before. That is the only
+app at its next launch (a deploy, or a relaunch after a crash or
+reboot), not before. That is the only
 thing that ages now, and it fails safe: a secret belonging to an app
 you add tomorrow is already absent from every unit running today,
 because nothing ever bound it.
@@ -446,6 +451,13 @@ second would put them in *every* app's. An `env_file` inside its own
 app's `shared/` is a warning rather than an error: the app receives
 those variables anyway, but under `shared/` it can also rewrite the
 file and so choose its own next launch's environment.
+
+hotserve reads the file itself, as the `hotserve` user, each time the
+app launches (a deploy, a rollback, a relaunch after a crash or a
+reboot); loading the config does not open it. So create it readable by
+that user and nobody else —
+`sudo install -m 0640 -o root -g hotserve blog.env /etc/hotserve/` —
+and keep it in place: a missing or unreadable file fails that launch.
 
 **The sandbox is not containment for what an app did before it had
 one.** It restricts what an app can *reach*; it cannot un-copy. An
@@ -682,7 +694,7 @@ release, all through the same endpoint and the same auth:
 
 ```json
 {
-  "url": "https://github.com/you/blog/releases/download/v1.4.2/blog.tar.gz",
+  "url": "https://github.com/your-org/blog/releases/download/v1.4.2/blog.tar.gz",
   "version": "v1.4.2",
   "auth_header": "Bearer <token-for-private-assets>"
 }
@@ -697,7 +709,7 @@ so GitHub's S3 redirect works). The URL must pass `artifact_allowlist`.
 a query parameter:
 
 ```sh
-curl --fail -X POST -H "Authorization: Bearer $JWT" \
+curl --fail-with-body -X POST -H "Authorization: Bearer $JWT" \
   -H "Content-Type: application/gzip" --data-binary @blog.tgz \
   "https://deploy.example.com/blog?version=v1.4.2"
 ```
@@ -712,7 +724,7 @@ air-gapped or egress-locked box) without hosting the artifact anywhere.
 disk (retained by `keep`), with no fetch or upload:
 
 ```sh
-curl --fail -X POST -H "Authorization: Bearer $JWT" \
+curl --fail-with-body -X POST -H "Authorization: Bearer $JWT" \
   "https://deploy.example.com/blog?rollback=v1.4.1"
 ```
 
@@ -734,12 +746,14 @@ The response is synchronous:
 | Code | Meaning |
 |---|---|
 | 200 | Deployed; body is the app's status JSON |
+| 400 | The body could not be read, or is not valid JSON |
 | 401 | Bad or missing token |
 | 404 | Unknown app |
+| 405 | A method other than `GET` or `POST` |
 | 409 | A deploy is already running for this app (retry) |
-| 413 | Pushed upload exceeded `max_artifact_size` |
-| 429 | This token failed, and the address has already failed 10 times this minute; `Retry-After` says when the oldest failure ages out. A *valid* token from the same address is never refused — see [Secrets and logs](#secrets-and-logs) |
+| 413 | Pushed upload exceeded `max_artifact_size`, or a JSON body exceeded 64 KiB |
 | 422 | Bad request — missing/invalid version, version already running, **version already exists** (versions are immutable — deploy a new version or roll back to relaunch it), a rollback target no longer on disk, or (URL path) an artifact url refused by `artifact_allowlist` (host, path, port, or an undeclared query parameter; the body names exactly what tripped and how the entry would declare it) |
+| 429 | This token failed, and the address has already failed 10 times this minute; `Retry-After` says when the oldest failure ages out. A *valid* token from the same address is never refused — see [Secrets and logs](#secrets-and-logs) |
 | 5xx | Deploy failed — **the old version is still serving**; body says why. An artifact over `max_artifact_entries` or the decompressed byte cap fails here, before anything is written |
 
 Because the response is synchronous through the whole pipeline, the
@@ -826,36 +840,67 @@ permissions:
   contents: write               # (for the release upload below)
 
 steps:
+- uses: actions/checkout@v7
+
 - name: Build artifact
   run: |
     npm ci && npm run build
     tar -czf blog.tar.gz -C dist .
 
 - name: Upload release
+  id: release
   uses: softprops/action-gh-release@v2
   with:
     tag_name: build-${{ github.run_number }}
     files: blog.tar.gz
 
 - name: Deploy
+  env:
+    ASSET_URL: ${{ fromJSON(steps.release.outputs.assets)[0].url }}
+    GH_TOKEN: ${{ github.token }}
   run: |
-    JWT=$(curl -sH "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-      "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=hotserve" | jq -r .value)
-    curl --fail --max-time 600 -X POST \
+    JWT=$(curl -fsS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+      "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=hotserve" | jq -er .value)
+    echo "::add-mask::$JWT"
+    curl --fail-with-body --max-time 600 -X POST \
       -H "Authorization: Bearer $JWT" \
       -d '{
-        "url": "https://api.github.com/repos/${{ github.repository }}/releases/assets/'"$ASSET_ID"'",
+        "url": "'"$ASSET_URL"'",
         "version": "build-${{ github.run_number }}",
-        "auth_header": "token ${{ secrets.GITHUB_TOKEN }}"
+        "auth_header": "token '"$GH_TOKEN"'"
       }' \
       https://deploy.example.com/blog
 ```
 
-(`auth_header` is a separate, artifact-download credential — the token
-that reads a private release asset — not the deploy token.)
+`ASSET_URL` is the uploaded asset's API URL
+(`https://api.github.com/repos/your-org/blog/releases/assets/<id>`),
+so the box needs `artifact_allowlist api.github.com/repos/your-org/`:
+hosts match exactly, and `github.com/your-org/` does not admit it.
+(`jq -er` fails the step if the mint returned nothing, instead of
+sending an empty bearer and blaming `deploy_trust`.)
 
-(For public repos, the plain `browser_download_url` works and needs no
+(`auth_header` is a separate, artifact-download credential — the token
+that reads a private release asset — not the deploy token. It is the
+job's own token, which expires when the job ends.)
+
+(For public repos, the plain `browser_download_url`
+(`https://github.com/your-org/blog/releases/download/<tag>/blog.tar.gz`)
+works with `artifact_allowlist github.com/your-org/` and needs no
 `auth_header`.)
+
+Mint and use the deploy token in the one step. Interpolating it into
+a later step's `run:` script (`${{ steps.….outputs… }}`) prints it in
+the job log, and until it expires anyone who reads the log can deploy;
+if a later step must have it, pass it through `env:` and keep the
+`::add-mask::`.
+
+A version the box already has gets a `422` — versions are immutable —
+so a re-run of a job that deployed fails at this step rather than
+deploying twice. A deploy that fails is cleaned up, so its version can
+be deployed again — unless the 5xx body says `release <version> left
+on disk`: the failed instance could not be confirmed stopped, so the
+dir stays until release GC ages it past `keep`; remove
+`releases/<version>` by hand, or use a new version.
 
 ### GitLab CI
 
@@ -868,11 +913,11 @@ deploy:
   script:
     - tar -czf blog.tar.gz -C dist .
     - |
-      curl --fail --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+      curl --fail-with-body --header "JOB-TOKEN: $CI_JOB_TOKEN" \
         --upload-file blog.tar.gz \
         "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/blog/$CI_COMMIT_SHORT_SHA/blog.tar.gz"
     - |
-      curl --fail --max-time 600 -X POST \
+      curl --fail-with-body --max-time 600 -X POST \
         -H "Authorization: Bearer $HOTSERVE_JWT" \
         -d "{
           \"url\": \"$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/blog/$CI_COMMIT_SHORT_SHA/blog.tar.gz\",
@@ -882,8 +927,18 @@ deploy:
         https://deploy.example.com/blog
 ```
 
-`--fail` makes the CI job red exactly when the deploy fails — and on
-failure the previous version never stopped serving.
+On gitlab.com that URL needs `artifact_allowlist
+gitlab.com/api/v4/projects/<project id>/` on the box.
+`DEPLOY_READ_TOKEN` is the artifact-download credential: a project
+access token with `read_api`, stored as a masked CI/CD variable
+(`CI_JOB_TOKEN` cannot be used — it dies with the job, before the box
+fetches).
+
+`--fail-with-body` makes the CI job red exactly when the deploy fails
+and prints the JSON `error` that says why (plain `--fail` hides it) —
+and on failure the previous version never stopped serving. The app's
+own output (a crashing start, a failing `pre_start`) is not in that
+body: it is in the journal on the box, `journalctl -t hotserve-blog`.
 
 ## Server layout
 
@@ -929,7 +984,8 @@ and `shared/` of this tree (see [Sandbox](#sandbox)).
   hotserve) systemctl --user stop 'hotserve-*'`. Units are created with `Restart=no` — the
   watchdog is the only restarter — and stopping a version kills its
   whole cgroup, so worker trees never outlive it.
-- **Changed app definitions apply on the next deploy**, never by
+- **Changed app definitions apply at the app's next launch** — a
+  deploy, a rollback, or a relaunch after a crash or reboot — never by
   restarting a running app mid-reload.
 - **No post-promote *auto*-revert.** Once traffic cuts over, the deploy
   is done; if the new version misbehaves later, roll back explicitly

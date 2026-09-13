@@ -96,9 +96,13 @@ Concept map from the Nomad-era stack:
   `grace`.
 - Release GC MUST run only after successful deploys, keep the newest
   `keep` dirs by mtime, and never delete the currently-serving version.
-  Failed versions' dirs are kept (until GC'd by age) for debugging.
+  A failed deploy's release dir is removed, so its version stays
+  retriable — unless the failed instance may still be running, in
+  which case it is left on disk (the next launch's sweep stops the
+  stray unit; release GC removes the dir once it ages past `keep`).
 - Config reloads MUST NOT restart running apps. Changed app definitions
-  apply on the next deploy.
+  apply at the app's next launch: a deploy, a rollback, or a relaunch
+  after a crash or reboot.
 - On Caddy start, each app with recorded state MUST be relaunched (or
   reattached, if the runner supports it) and published as soon as the
   process is up — the health gate is a deploy gate, not a boot gate.
