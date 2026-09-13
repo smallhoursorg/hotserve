@@ -38,6 +38,13 @@ RUN systemctl mask \
 
 COPY --from=builder /hotserve /usr/bin/hotserve
 COPY --from=deno /deno /usr/local/bin/deno
+# The example pins the Deno its workflow builds with in .deno-version;
+# the FROM above is Dependabot's to bump. Refuse to build when the two
+# differ, so a bump cannot leave the example testing one version and
+# deploying another.
+COPY examples/deno/.deno-version /tmp/.deno-version
+RUN [ "$(deno --version | sed -n 's/^deno \([0-9.]*\).*/\1/p')" = "$(cat /tmp/.deno-version)" ] \
+	|| { echo "e2e/Dockerfile pins Deno $(deno --version | head -1) but examples/deno/.deno-version says $(cat /tmp/.deno-version)" >&2; exit 1; }
 # Fail the build outright if any module didn't link in. (Otter is
 # additionally proven at startup: the `otter` cache option makes config
 # load fail if the storage module is absent.)

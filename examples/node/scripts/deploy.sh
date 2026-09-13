@@ -5,7 +5,10 @@
 #   scripts/deploy.sh <app.tar.gz>       a local file: pushed in the request body
 #
 #   HOTSERVE_URL          the app's webhook, e.g. https://deploy.example.com/example  (required)
-#   VERSION               the release's version; defaults to the commit (12 hex chars)
+#   VERSION               the release's version; defaults to the commit (12 hex
+#                         chars). Versions are immutable on the box, so the
+#                         default deploys once per commit: set VERSION for an
+#                         uncommitted build (VERSION=wip-3, say)
 #   HOTSERVE_TOKEN        a deploy token. Not needed in GitHub Actions: with
 #                         `permissions: id-token: write` one is minted per run.
 #   HOTSERVE_AUDIENCE     the audience the box's deploy_trust expects (default: hotserve)
@@ -20,7 +23,8 @@ set -eu
 
 artifact=${1:?artifact URL or file}
 url=${HOTSERVE_URL:?set HOTSERVE_URL to the app webhook, e.g. https://deploy.example.com/example}
-version=${VERSION:-$(git rev-parse --short=12 HEAD)}
+version=${VERSION:-$(git rev-parse --short=12 HEAD 2>/dev/null || true)}
+[ -n "$version" ] || { echo "deploy.sh: not in a git checkout; set VERSION" >&2; exit 1; }
 
 if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
 	# GitHub Actions OIDC. The token stays in this process: handing it

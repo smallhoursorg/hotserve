@@ -45,6 +45,9 @@ RUN mkdir /out \
 FROM denoland/deno:2.9.6 AS deno-build
 WORKDIR /example
 COPY examples/deno/ ./
+# Same pin as the example's .deno-version (and e2e/Dockerfile), or fail.
+RUN [ "$(deno --version | sed -n 's/^deno \([0-9.]*\).*/\1/p')" = "$(cat .deno-version)" ] \
+	|| { echo "artifacts.Dockerfile builds with Deno $(deno --version | head -1) but .deno-version says $(cat .deno-version)" >&2; exit 1; }
 RUN sh scripts/bundle.sh
 
 # The Node example, built by its own scripts/bundle.sh: Node's

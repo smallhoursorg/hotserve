@@ -31,11 +31,11 @@ You need a Debian 13 server with hotserve installed (see
 
 **1. Install Deno on the box, under `/usr/local`.** The app's sandbox
 contains `/usr` and nothing else of the host's software, so a Deno in
-your home directory would not exist for it. Use the version the
-workflow builds with:
+your home directory would not exist for it. Use the version in
+`.deno-version`, which is what the workflow builds with:
 
 ```sh
-v=v2.9.6
+v=v$(cat .deno-version)
 f=deno-$(uname -m)-unknown-linux-gnu.zip
 curl -fsSLO "https://github.com/denoland/deno/releases/download/$v/$f"
 curl -fsSLO "https://github.com/denoland/deno/releases/download/$v/$f.sha256sum"
@@ -127,3 +127,7 @@ HOTSERVE_URL=https://deploy.example.com/example \
 HOTSERVE_TOKEN=$(hotserve deploy-token --key deploy.key --audience hotserve) \
 deno task deploy
 ```
+
+The version defaults to the commit, and versions are immutable on the
+box, so that deploys once per commit; for an uncommitted build set one
+(`VERSION=wip-3 deno task deploy`).

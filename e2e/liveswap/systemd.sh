@@ -274,8 +274,15 @@ s=$(status)
 sleep 1
 [ "$(user_systemctl show -p LoadState --value "$cunit")" = "not-found" ] \
 	&& pass "crashed unit was reset and unloaded" || fail "crashed unit $cunit still loaded"
-n=$(user_systemctl list-units --all --no-legend --plain "'hotserve-demo.*'" | wc -l)
-[ "$n" = "1" ] && pass "exactly one hotserve-demo unit loaded" || fail "expected 1 loaded hotserve-demo unit, found $n"
+# One unit per app, and nothing else under the prefix: the examples'
+# pre_start oneshots and the sandbox probe's RunOnce unit must all
+# have unloaded, so a leak of any of them shows up in the total.
+for app in demo deno-example node-example; do
+	n=$(user_systemctl list-units --all --no-legend --plain "'hotserve-$app.*'" | wc -l)
+	[ "$n" = "1" ] && pass "exactly one hotserve-$app unit loaded" || fail "expected 1 loaded hotserve-$app unit, found $n"
+done
+n=$(user_systemctl list-units --all --no-legend --plain "'hotserve-*'" | wc -l)
+[ "$n" = "3" ] && pass "no other hotserve-* unit is loaded (pre_start and probe units unloaded)" || fail "expected 3 loaded hotserve-* units, found $n"
 
 echo "=== systemd 7: a unit gone behind hotserve's back is relaunched on start ==="
 # The cold path recovery takes when the recorded unit no longer exists
@@ -309,20 +316,20 @@ until case "$(body)" in "hello v1"*) true ;; *) false ;; esac; do
 done
 case "$(body)" in "hello v1"*) pass "proxy serves the relaunched instance" ;; *) fail "proxy not serving after relaunch" ;; esac
 
-# removal_config writes a Caddyfile without the demo app — and without
-# the :8080 site that proxies to it and the :8081 webhook site, since
-# liveswap_webhook refuses a config that defines no apps. The liveswap
-# global block itself stays, so the module is still loaded (that is
-# the shape of "an operator removed their last app").
+# removal_config writes a Caddyfile without any app — and without the
+# sites that proxy to them (:8080, :8082, :8083) and the :8081 webhook
+# site, since liveswap_webhook refuses a config that defines no apps.
+# The liveswap global block itself stays, so the module is still
+# loaded (that is the shape of "an operator removed their last app").
 removal_config() { # <out>
 	awk '
-		/^\t\tapp demo \{/ { skip = 1 }
-		/^:808[01] \{/    { skip = 2 }
+		/^\t\tapp [a-z-]+ \{/ { skip = 1 }
+		/^:808[0-3] \{/    { skip = 2 }
 		skip == 0 { print }
 		skip == 1 && /^\t\t}$/ { skip = 0 }
 		skip == 2 && /^}$/     { skip = 0 }
 	' /etc/hotserve/Caddyfile > "$1"
-	grep -q 'app demo' "$1" && die "removal config still names the app"
+	grep -q '^\t\tapp ' "$1" && die "removal config still names an app"
 	grep -q 'liveswap {' "$1" || die "removal config lost the liveswap block"
 }
 # load_config POSTs a Caddyfile to the admin API. Caddy flushes adapter

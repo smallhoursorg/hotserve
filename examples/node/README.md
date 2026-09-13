@@ -126,3 +126,7 @@ HOTSERVE_URL=https://deploy.example.com/example \
 HOTSERVE_TOKEN=$(hotserve deploy-token --key deploy.key --audience hotserve) \
 npm run deploy
 ```
+
+The version defaults to the commit, and versions are immutable on the
+box, so that deploys once per commit; for an uncommitted build set one
+(`VERSION=wip-3 npm run deploy`).

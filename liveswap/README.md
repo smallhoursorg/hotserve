@@ -556,7 +556,8 @@ app example {
         --allow-read={release_dir},{shared_dir},{socket} \
         --allow-write={shared_dir},{socket} \
         --allow-env=SOCKET,DATABASE_URL \
-        main.ts
+        main.ts                          # {release_dir} read: for its own static files;
+                                         # loading modules needs no read grant
     env DENO_DIR {release_dir}/.deno
     env DENO_NO_UPDATE_CHECK 1
     env DATABASE_URL {shared_dir}/app.db

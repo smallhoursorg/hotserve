@@ -22,7 +22,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: denoland/setup-deno@v2
         with:
-          deno-version: v2.9.6 # the version the box runs
+          deno-version-file: .deno-version # the version the box runs
       - run: deno task bundle
       - id: version
         run: echo "version=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
