@@ -26,12 +26,13 @@ deno task dev          # http://127.0.0.1:8000
 
 ## Put it on a box
 
-You need a Debian 13 server with hotserve installed and a box repo
-for its config, both from [examples/box](../box#provision-the-box),
-and a DNS name pointing at it.
+You need a Debian 13 server with hotserve installed and a DNS name
+pointing at it. [Your first deploy](../../docs/first-deploy.md) is the
+whole path from a fresh server, with this app as its one fork; the
+three steps below are its second half.
 
 **1. Install Deno on the box, under `/usr/local`** — as root, while
-provisioning the box: the administrator the box README creates cannot
+you still have it: the administrator the box repo creates later cannot
 install packages. The app's sandbox contains `/usr` and nothing else
 of the host's software, so a Deno in a home directory would not exist
 for it. Use the version in `.deno-version`, which is what the workflow
@@ -46,11 +47,13 @@ sha256sum -c "$f.sha256sum"
 apt install -y unzip && unzip -o "$f" deno -d /usr/local/bin
 ```
 
-**2. Add the app to the box repo's Caddyfile**, with the lines from
-`hotserve.caddy` inside its `app` block, and `make push` it (the box
-README's [Change the config](../box#change-the-config)). The box
-example ships this app's block already. In the box repo's Caddyfile,
-that is:
+**2. Add the app to the box's Caddyfile**, with the lines from
+`hotserve.caddy` inside its `app` block. As root that is
+`/etc/hotserve/Caddyfile`: edit, `hotserve validate --config` it,
+`systemctl reload hotserve`. Once the box has a
+[box repo](../box#change-the-config), it is that repo's `Caddyfile`
+and `make push`. The box example ships this app's block already.
+Either way, the file is:
 
 ```caddyfile
 {
@@ -83,10 +86,8 @@ deploy.example.com {
 ```
 
 The copy on the box is the one that counts: hotserve never reads
-`hotserve.caddy` from a deploy. (Without a box repo, as root: edit
-`/etc/hotserve/Caddyfile`, `hotserve validate --config` it, then
-`systemctl reload hotserve`. hotserve's e2e suite instead saves the
-file on its box as `/etc/hotserve/<app>.caddy` and writes `import`
+`hotserve.caddy` from a deploy. (hotserve's e2e suite instead saves
+the file on its box as `/etc/hotserve/<app>.caddy` and writes `import`
 of that path in the block.)
 
 **3. Point the workflow at the box.** In your copy of this directory,

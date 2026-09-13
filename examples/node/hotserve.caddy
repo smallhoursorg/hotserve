@@ -1,6 +1,7 @@
 # What this app needs from the box: the lines that go inside its
-# `app <name> { … }` block in your box repo's Caddyfile. (hotserve's
-# e2e suite imports this file, so these exact lines are tested.)
+# `app <name> { … }` block in the box's Caddyfile — /etc/hotserve/Caddyfile,
+# or your box repo's copy of it. (hotserve's e2e suite imports this
+# file, so these exact lines are tested.)
 #
 # Both commands are executables inside the tarball, so nothing has to
 # be installed on the box. A path with a `/` in it resolves against

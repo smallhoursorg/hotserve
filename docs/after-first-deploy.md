@@ -58,7 +58,8 @@ full description.
 ## 2. Create the administrator
 
 This user is not root. The `sudoers` file in the repo you just made
-grants exactly the eight commands `make push` runs as root, and
+grants exactly the eight commands `make push` runs as root, plus
+`sudoedit` of the apps' env files under `/etc/hotserve` (step 3), and
 nothing else; the `adm` group reads the logs. Everything else an
 administrator does — checking a config, reading it, `journalctl` —
 needs no privilege at all. Read the file: it is short, and it says
