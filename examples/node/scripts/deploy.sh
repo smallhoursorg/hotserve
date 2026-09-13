@@ -49,11 +49,14 @@ if [ -f "$artifact" ]; then
 		-H "Content-Type: application/gzip" --data-binary @"$artifact" \
 		"$url?version=$version"
 else
-	auth=${ARTIFACT_AUTH_HEADER:+,\"auth_header\":\"$ARTIFACT_AUTH_HEADER\"}
+	# JSON-escape what goes into the body (a quote or backslash in a
+	# header value would otherwise make it malformed).
+	json() { printf '%s' "$1" | sed 's/[\\"]/\\&/g'; }
+	auth=${ARTIFACT_AUTH_HEADER:+,\"auth_header\":\"$(json "$ARTIFACT_AUTH_HEADER")\"}
 	curl --fail-with-body --silent --show-error --max-time 600 -X POST \
 		-H "Authorization: Bearer $token" \
 		-H "Content-Type: application/json" \
-		-d "{\"url\":\"$artifact\",\"version\":\"$version\"$auth}" \
+		-d "{\"url\":\"$(json "$artifact")\",\"version\":\"$(json "$version")\"$auth}" \
 		"$url"
 fi
 echo
