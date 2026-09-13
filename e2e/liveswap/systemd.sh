@@ -349,6 +349,36 @@ unit_gone() { # <unit> -> 0 once the manager no longer loads it (waits up to 20s
 		sleep 0.5
 	done
 }
+# The examples are in the config too, so a removal must stop all three
+# apps and a restore must bring all three back — not just demo, which
+# status() and the proxy checks watch.
+EXAMPLES="deno-example node-example"
+ex_status() { curl -s --max-time 5 -H "Authorization: Bearer $TOKEN" "${HOOK%/demo}/$1"; }
+snapshot_examples() { # records unit and pid per example into EX_<app-with-dashes-removed>_UNIT/_PID
+	for app in $EXAMPLES; do
+		es=$(ex_status "$app")
+		eval "EX_$(echo "$app" | tr -d -)_UNIT='$(json_str "$es" unit)'; EX_$(echo "$app" | tr -d -)_PID='$(json_num "$es" pid)'"
+	done
+}
+assert_examples_gone() { # <label>
+	for app in $EXAMPLES; do
+		eval "u=\$EX_$(echo "$app" | tr -d -)_UNIT; p=\$EX_$(echo "$app" | tr -d -)_PID"
+		unit_gone "$u" && pass "$1: $app's unit stopped and unloaded" || fail "$1: unit $u of $app survived"
+		kill -0 "$p" 2>/dev/null && fail "$1: $app's process $p still alive" || pass "$1: $app's process is gone"
+	done
+}
+assert_examples_back() { # <label>
+	for app in $EXAMPLES; do
+		eval "old=\$EX_$(echo "$app" | tr -d -)_PID"
+		i=0; np=""
+		while [ "$i" -lt 60 ]; do
+			np=$(json_num "$(ex_status "$app")" pid)
+			[ -n "$np" ] && [ "$np" != "$old" ] && break
+			i=$((i + 1)); sleep 0.5
+		done
+		[ -n "$np" ] && [ "$np" != "$old" ] && pass "$1: $app relaunched (pid $old -> $np)" || fail "$1: $app did not come back: $(ex_status "$app")"
+	done
+}
 wait_new_pid() { # <old pid> -> sets NEWPID or fails after 30s
 	i=0
 	NEWPID=""
@@ -368,32 +398,38 @@ echo "=== systemd 8: removing the app via reload stops its units; adding it back
 s=$(status)
 runit=$(json_str "$s" unit)
 rpid=$(json_num "$s" pid)
+snapshot_examples
 removal_config /tmp/without-demo.Caddyfile
-load_config /tmp/without-demo.Caddyfile && pass "reload without the app accepted" \
-	|| fail "reload without the app rejected: $(cat /tmp/load-code) $(cat /tmp/load-body)"
+load_config /tmp/without-demo.Caddyfile && pass "reload without the apps accepted" \
+	|| fail "reload without the apps rejected: $(cat /tmp/load-code) $(cat /tmp/load-body)"
 unit_gone "$runit" && pass "removed app's unit stopped and unloaded" || fail "unit $runit survived the app's removal"
 kill -0 "$rpid" 2>/dev/null && fail "removed app's process $rpid still alive" || pass "removed app's process is gone"
-load_config /etc/hotserve/Caddyfile || fail "reload restoring the app rejected: $(cat /tmp/load-body)"
+assert_examples_gone "reload"
+load_config /etc/hotserve/Caddyfile || fail "reload restoring the apps rejected: $(cat /tmp/load-body)"
 wait_new_pid "$rpid" && pass "re-added app relaunched from state.json (pid $rpid -> $NEWPID)" \
 	|| fail "re-added app did not come back: $(status)"
+assert_examples_back "re-add"
 case "$(status)" in *'"current_version":"sd-final"'*) pass "relaunched the recorded version" ;; *) fail "unexpected version after re-add: $(status)" ;; esac
 
 echo "=== systemd 9: an app removed while hotserve was down is swept on the next start ==="
 s=$(status)
 dunit=$(json_str "$s" unit)
 dpid=$(json_num "$s" pid)
+snapshot_examples
 cp /etc/hotserve/Caddyfile /tmp/with-demo.Caddyfile
 systemctl stop hotserve
 kill -0 "$dpid" 2>/dev/null && pass "app survives hotserve stop (pid $dpid)" || fail "app died with hotserve stop"
 cp /tmp/without-demo.Caddyfile /etc/hotserve/Caddyfile
-systemctl start hotserve || fail "start without the app failed"
+systemctl start hotserve || fail "start without the apps failed"
 unit_gone "$dunit" && pass "start-time sweep stopped the unit of an app no config names" \
 	|| fail "unit $dunit of a removed app survived the restart"
+assert_examples_gone "start-time sweep"
 cp /tmp/with-demo.Caddyfile /etc/hotserve/Caddyfile
 systemctl restart hotserve || fail "restart with the app failed"
 wait_hook || fail "webhook not back after restoring the app"
 wait_new_pid "$dpid" && pass "restored app relaunched from state.json (pid $dpid -> $NEWPID)" \
 	|| fail "restored app did not come back: $(status)"
+assert_examples_back "restore"
 
 echo "=== systemd 10: app output reaches the journal ==="
 journalctl --no-pager -t hotserve-demo | grep -q "workers up" \

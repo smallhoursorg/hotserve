@@ -39,7 +39,10 @@ else
 	token=${HOTSERVE_TOKEN:?set HOTSERVE_TOKEN (mint one with: hotserve deploy-token) or run in GitHub Actions with id-token: write}
 fi
 
-echo "deploying $artifact as $version to $url"
+# Never print a URL's query string: that is where presigned-URL
+# credentials live (the box redacts it from its logs for the same
+# reason), and Actions output is readable by anyone who can see the job.
+echo "deploying ${artifact%%\?*} as $version to $url"
 if [ -f "$artifact" ]; then
 	curl --fail-with-body --silent --show-error --max-time 600 -X POST \
 		-H "Authorization: Bearer $token" \
