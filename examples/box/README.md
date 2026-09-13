@@ -20,72 +20,77 @@ and the change is a diff someone reads before `make push`.
 | `Makefile` | `make check` and `make push` |
 | `.github/workflows/check.yml` | `make check` on every push and pull request |
 
-## Provision the box
-
-Any VPS with Debian 13 will do; the cheapest tier is enough for a
-few small apps. At the provider (Hetzner, say):
-
-1. Create a server with **Debian 13** as the image, and your SSH
-   public key. Architecture is your choice; note it, since the release
-   `.deb` and a Node single executable are per-architecture.
-2. If the provider has a firewall, allow 80 and 443 from anywhere and
-   22 only from your own address (home, VPN).
-3. Point a DNS name at the address — and one for the deploy webhook
-   (`deploy.example.com` below), which hotserve serves on the same
-   box.
-
-Then, logged in as root once, in this order — the user created last
-cannot do the steps before it:
-
-1. Install hotserve as [Your first deploy](../../docs/first-deploy.md#2-install-hotserve) says.
-2. Install what your app's shape needs. The administrator below cannot
-   `apt install`, so this is the moment:
-   - a Node single executable on an arm64 box: `apt install libatomic1`
-     ([examples/node](../node#put-it-on-a-box) says why);
-   - a Deno app: Deno under `/usr/local/bin`, with the lines in
-     [examples/deno](../deno#put-it-on-a-box);
-   - an app with secrets: its env file, as [Secrets](#secrets) shows.
-3. Create the user you will administer it as. That user is not root:
-   the `sudoers` file in this directory grants exactly the commands
-   `bin/push` needs, and the `adm` group reads the logs.
-
-```sh
-adduser alice
-install -d -m 0700 -o alice -g alice /home/alice/.ssh && cp ~/.ssh/authorized_keys /home/alice/.ssh/
-curl -fsSL https://raw.githubusercontent.com/smallhoursorg/hotserve/main/examples/box/sudoers \
-  -o /etc/sudoers.d/hotserve-admin && chmod 0440 /etc/sudoers.d/hotserve-admin && visudo -c
-groupadd hotserve-admin && usermod -aG adm,hotserve-admin alice
-printf 'PermitRootLogin no\nPasswordAuthentication no\n' > /etc/ssh/sshd_config.d/10-hardening.conf
-sshd -t && systemctl reload ssh      # -t checks the config first: a bad one would lock you out
-```
-
-Check `ssh alice@box.example.com sudo -n systemctl reload hotserve`
-works before you close the root session: that is the whole of what
-`make push` will need.
-
 ## Set it up
 
-1. Copy this directory into a new private repo, and replace
-   `example.com`, `deploy.example.com` and `your-org/example` in the
-   `Caddyfile` with yours — `your-org` twice: the `artifact_allowlist`
-   entry pins the organization alone, and `deploy_trust` the
-   repository. The `app example` block is
-   [examples/deno](../deno)'s; for [examples/node](../node), replace
-   its `command`, `pre_start` and `env` lines with the ones in
-   `examples/node/hotserve.caddy`. Either app's README walks through
-   its side.
-2. Make sure your user on the box is set up as in
-   [Provision the box](#provision-the-box): `sudoers` installed,
-   membership of `adm` and `hotserve-admin`. `bin/push` needs nothing
-   more, and `journalctl -u hotserve` needs no sudo at all. What that
-   grants is the `hotserve` user's reach, not root's — see
-   [Secrets](#secrets) — plus, through `adm`, the whole system
-   journal, not only hotserve's lines. Give it to the people who may
-   change what the box serves.
+The box comes from [Your first deploy](../../docs/first-deploy.md):
+installed, serving one app from a Caddyfile written by hand, still
+administered as root. This repo is what
+[After the first deploy](../../docs/after-first-deploy.md) makes of
+that, and this is its short form. Anything that needs root and that the
+administrator below cannot do — `apt install libatomic1` for a Node
+executable on arm64, a Deno under `/usr/local`, an app's env file (see
+[Secrets](#secrets)) — happens while you still have root; the
+first-deploy page has each.
+
+1. Copy this directory into a new private repo, from a checkout of
+   hotserve at the release the box runs
+   (`git clone --depth 1 --branch v0.2.0 https://github.com/smallhoursorg/hotserve`).
+2. Replace the example `Caddyfile` with the one the box is running:
+
+   ```sh
+   scp root@box.example.com:/etc/hotserve/Caddyfile Caddyfile
+   ```
+
+   Starting from the live file means the first push changes nothing
+   and nothing edited on the box is lost. (Setting up a box from this
+   repo instead, with no first deploy behind it: edit the example.
+   Replace `example.com`, `deploy.example.com` and `your-org/example` —
+   `your-org` twice: the `artifact_allowlist` entry pins the
+   organization alone, and `deploy_trust` the repository. The
+   `app example` block is [examples/deno](../deno)'s; for
+   [examples/node](../node), replace its `command`, `pre_start` and
+   `env` lines with the ones in `examples/node/hotserve.caddy`.)
 3. Set `HOTSERVE_VERSION` in `.github/workflows/check.yml` to the
    release the box runs: the tag without its `v`. `dpkg -s hotserve`
    shows it, except that dpkg writes a prerelease as `0.2.0~rc1`
    where the tag is `0.2.0-rc1`.
+4. Commit, and push once, as root, to prove the loop:
+
+   ```sh
+   make push BOX=root@box.example.com
+   ```
+
+   It answers that the box already runs this Caddyfile. `bin/push`
+   runs its privileged steps through `sudo -n`, which root passes
+   without a password; the next step gives it a user that is not root.
+5. Create the user you will administer it as. The `sudoers` file in
+   this directory grants exactly the commands `bin/push` runs as root,
+   and nothing else; the `adm` group reads the logs. From the laptop,
+   from this repo:
+
+   ```sh
+   scp sudoers root@box.example.com:/etc/sudoers.d/hotserve-admin
+   ```
+
+   Then as root on the box:
+
+   ```sh
+   chmod 0440 /etc/sudoers.d/hotserve-admin && visudo -c
+   adduser alice
+   install -d -m 0700 -o alice -g alice /home/alice/.ssh && cp ~/.ssh/authorized_keys /home/alice/.ssh/
+   groupadd hotserve-admin && usermod -aG adm,hotserve-admin alice
+   ```
+
+   Check `ssh alice@box.example.com sudo -n systemctl reload hotserve`
+   works before you close the root session: that is the whole of what
+   `make push BOX=alice@box.example.com` needs from now on, and
+   `journalctl -u hotserve` needs no sudo at all. What that grants is
+   the `hotserve` user's reach, not root's — see [Secrets](#secrets) —
+   plus, through `adm`, the whole system journal, not only hotserve's
+   lines. Give it to the people who may change what the box serves.
+
+Closing root login and the rest of the hardening is on
+[After the first deploy](../../docs/after-first-deploy.md).
 
 ## Change the config
 
@@ -93,7 +98,7 @@ Edit the `Caddyfile`, open a pull request (CI validates it), merge,
 then from a checkout of `main`:
 
 ```sh
-make push BOX=alice@box.example.com     # the user from Provision the box
+make push BOX=alice@box.example.com     # the administrator from Set it up
 ```
 
 `bin/push` copies the file to the box next to the live one, validates

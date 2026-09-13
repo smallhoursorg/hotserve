@@ -28,12 +28,13 @@ npm run dev            # http://127.0.0.1:8000
 
 ## Put it on a box
 
-You need a Debian 13 server with hotserve installed and a box repo
-for its config, both from [examples/box](../box#provision-the-box),
-and a DNS name pointing at it.
+You need a Debian 13 server with hotserve installed and a DNS name
+pointing at it. [Your first deploy](../../docs/first-deploy.md) is the
+whole path from a fresh server, with this app as its example; the
+three steps below are its second half.
 
-**1. On an arm64 box, install `libatomic1`** — as root, while
-provisioning the box: the administrator the box README creates cannot
+**1. On an arm64 box, install `libatomic1`** — as root, while you
+still have it: the administrator the box repo creates later cannot
 install packages. The tarball carries its own Node, and Node's arm64
 build links one library a stock Debian 13 does not ship; without it
 the app fails to start with exit status 127 (`error while loading
@@ -43,11 +44,14 @@ shared libraries: libatomic.so.1`). amd64 needs nothing.
 apt install libatomic1
 ```
 
-**2. Add the app to the box repo's Caddyfile**, with the lines from
-`hotserve.caddy` inside its `app` block, and `make push` it (the box
-README's [Change the config](../box#change-the-config)). The box
-example ships the Deno app's block; this app's `command`, `pre_start`
-and `env` lines replace those. In the box repo's Caddyfile, that is:
+**2. Add the app to the box's Caddyfile**, with the lines from
+`hotserve.caddy` inside its `app` block. As root that is
+`/etc/hotserve/Caddyfile`: edit, `hotserve validate --config` it,
+`systemctl reload hotserve`. Once the box has a
+[box repo](../box#change-the-config), it is that repo's `Caddyfile`
+and `make push`. The box example ships the Deno app's block; this
+app's `command`, `pre_start` and `env` lines replace those. Either
+way, the file is:
 
 ```caddyfile
 {
@@ -80,10 +84,8 @@ deploy.example.com {
 ```
 
 The copy on the box is the one that counts: hotserve never reads
-`hotserve.caddy` from a deploy. (Without a box repo, as root: edit
-`/etc/hotserve/Caddyfile`, `hotserve validate --config` it, then
-`systemctl reload hotserve`. hotserve's e2e suite instead saves the
-file on its box as `/etc/hotserve/<app>.caddy` and writes `import`
+`hotserve.caddy` from a deploy. (hotserve's e2e suite instead saves
+the file on its box as `/etc/hotserve/<app>.caddy` and writes `import`
 of that path in the block.)
 
 **3. Point the workflow at the box.** In your copy of this directory,
