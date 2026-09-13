@@ -8,9 +8,12 @@
 
 	liveswap {
 		# Required: where a deploy that sends a URL may fetch from. The
-		# examples' workflows send their GitHub release's URL, which
-		# this admits; only a tarball pushed in the request body skips it.
-		artifact_allowlist github.com/your-org/
+		# examples' workflows send their release asset's API URL, which
+		# works for a private repo too (the box fetches it with the
+		# job's own token); this entry admits it. Hosts match exactly,
+		# so `github.com/your-org/` would not. Only a tarball pushed in
+		# the request body skips the allowlist.
+		artifact_allowlist api.github.com/repos/your-org/
 
 		app example {
 			# From examples/deno/hotserve.caddy. The Deno flags are the
