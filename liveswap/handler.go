@@ -55,8 +55,8 @@ func loggedAppName(name string) string {
 //	GET  /<app>  returns status JSON (phase, current version, last deploy)
 //
 // Responses are synchronous — the POST returns when the deploy has
-// fully succeeded (200) or failed (5xx with the old version still
-// serving), so `curl --fail-with-body` makes CI red exactly when it
+// fully succeeded (200) or failed (5xx with the old version, if there
+// was one, still serving), so `curl --fail-with-body` makes CI red exactly when it
 // should be, with the reason in the body.
 type Handler struct {
 	app     *App

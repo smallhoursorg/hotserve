@@ -439,7 +439,7 @@ status: an app is running, or hotserve did not start.
 built when it starts and is never rebuilt under it — reloads
 deliberately leave running apps alone — so a config change reaches an
 app at its next launch (a deploy, a rollback, or a relaunch after a
-crash or reboot), not before. That is the only
+crash, a sustained health failure, or a reboot), not before. That is the only
 thing that ages now, and it fails safe: a secret belonging to an app
 you add tomorrow is already absent from every unit running today,
 because nothing ever bound it.
@@ -770,7 +770,7 @@ version, socket, pid, `command` — the argv the running instance was
 actually launched with, read back from systemd, which is not
 necessarily what the config says now (a reload does not restart a
 running app, so an edited `command` applies at the next launch: a
-deploy, a rollback, or a relaunch after a crash or reboot). It is the
+deploy, a rollback, or a relaunch after a crash, a sustained health failure, or a reboot). It is the
 *rendered* argv, not the configured text:
 `command ./server {version}` reports as
 `["/var/lib/liveswap/blog/releases/v1.4.2/server", "v1.4.2"]`, since
@@ -943,7 +943,7 @@ job token is not a substitute: `auth_header` is sent as the
 
 `--fail-with-body` makes the CI job red exactly when the deploy fails
 and prints the JSON `error` that says why (plain `--fail` hides it) —
-and on failure the previous version never stopped serving. The app's
+and on failure the previous version, if there was one, never stopped serving. The app's
 own output (a crashing start, a failing `pre_start`) is not in that
 body: it is in the journal on the box, `journalctl -t hotserve-blog`.
 
@@ -974,7 +974,7 @@ and `shared/` of this tree (see [Sandbox](#sandbox)).
   by an e2e scenario that reloads mid-traffic and asserts the app's
   PID is unchanged) — so an edited `command` or `env` does not apply
   to the running instance; it applies at the next launch (a deploy, a
-  rollback, a relaunch after a crash or reboot), which is why status
+  rollback, a relaunch after a crash, a sustained health failure, or a reboot), which is why status
   reports the `command` the instance is actually running — and
   neither do **hotserve restarts and upgrades**:
   on start, liveswap reattaches to the unit recorded in `state.json`
@@ -992,7 +992,7 @@ and `shared/` of this tree (see [Sandbox](#sandbox)).
   watchdog is the only restarter — and stopping a version kills its
   whole cgroup, so worker trees never outlive it.
 - **Changed app definitions apply at the app's next launch** — a
-  deploy, a rollback, or a relaunch after a crash or reboot — never by
+  deploy, a rollback, or a relaunch after a crash, a sustained health failure, or a reboot — never by
   restarting a running app mid-reload.
 - **No post-promote *auto*-revert.** Once traffic cuts over, the deploy
   is done; if the new version misbehaves later, roll back explicitly
