@@ -718,6 +718,27 @@ func TestStartRefusesAnIncapableHost(t *testing.T) {
 	}
 }
 
+// TestStartLogsWhatItStarted: a fresh install's journal carries one
+// line saying liveswap is up and how many apps it holds — the
+// confirmation a first user looks for before deploying anything. With
+// no apps configured Start skips the manager and sandbox probes, so
+// the line is the only evidence the module loaded at all.
+func TestStartLogsWhatItStarted(t *testing.T) {
+	core, logs := observer.New(zap.InfoLevel)
+	a := &App{Root: t.TempDir(), logger: zap.New(core), manager: newFakeSystemdConn()}
+	if err := a.Start(); err != nil {
+		t.Fatalf("Start with no apps: %v", err)
+	}
+	_ = a.Cleanup()
+	got := logs.FilterMessage("liveswap started").All()
+	if len(got) != 1 {
+		t.Fatalf("want one 'liveswap started' line, got %d", len(got))
+	}
+	if n := got[0].ContextMap()["apps"]; n != int64(0) {
+		t.Fatalf("apps = %v, want 0", n)
+	}
+}
+
 // TestSandboxRootUnderTmpIsAllowed: only hotserve's own state is a
 // root worth failing config load over. A root under a path the sandbox
 // replaces (/tmp, /var/tmp — every t.TempDir, and the real-systemd

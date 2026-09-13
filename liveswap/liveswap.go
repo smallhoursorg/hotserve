@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -592,6 +593,15 @@ func (a *App) Start() error {
 	}
 	a.started = true
 	liveStartedApps.Add(1)
+	// The one line a fresh install can look for in the journal: the
+	// module is up, and with how many apps — zero is a valid, and on
+	// a starter config the expected, answer.
+	names := make([]string, 0, len(a.managed))
+	for name := range a.managed {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	a.logger.Info("liveswap started", zap.Int("apps", len(names)), zap.Strings("app_names", names))
 	// Units of apps no loaded config names have no managedApp to sweep
 	// them (removed or renamed while hotserve was down): settle them
 	// against the manager's own listing. Background, like recovery;
