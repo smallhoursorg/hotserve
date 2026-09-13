@@ -106,7 +106,7 @@ Concept map from the Nomad-era stack:
   once it falls outside the newest `keep`.
 - Config reloads MUST NOT restart running apps. Changed app definitions
   apply at the app's next launch: a deploy, a rollback, or a relaunch
-  after a crash or reboot.
+  after a crash, a sustained health failure, or a reboot.
 - On Caddy start, each app with recorded state MUST be relaunched (or
   reattached, if the runner supports it) and published as soon as the
   process is up — the health gate is a deploy gate, not a boot gate.

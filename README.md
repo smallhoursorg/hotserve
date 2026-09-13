@@ -178,7 +178,7 @@ config change does not need a restart: `sudo systemctl reload hotserve`
 swaps the config inside the running process, drops no requests, and
 never restarts a running app (an edited app definition applies the
 next time the app starts: its next deploy or rollback, or a relaunch
-after a crash or a reboot).
+after a crash, a sustained health failure, or a reboot).
 
 <details>
 <summary><b>What visitors see during the restart</b> — and how to pick a quiet moment</summary>
