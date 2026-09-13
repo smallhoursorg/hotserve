@@ -100,7 +100,8 @@ Concept map from the Nomad-era stack:
   retriable — unless the failed instance may still be running (the
   dir is kept rather than pulled from under a live process; the next
   launch's sweep stops the stray unit) or the removal itself fails;
-  either way release GC removes the dir once it ages past `keep`.
+  either way release GC (after a later successful deploy) removes it
+  once it falls outside the newest `keep`.
 - Config reloads MUST NOT restart running apps. Changed app definitions
   apply at the app's next launch: a deploy, a rollback, or a relaunch
   after a crash or reboot.

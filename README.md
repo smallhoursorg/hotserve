@@ -76,7 +76,7 @@ without the feature it exists for.
 
 ```caddyfile
 {
-	# Keep: the admin API off TCP (see Security); `systemctl reload` finds it here.
+	# Keep: the admin API off TCP (see Security); the package's `systemctl reload` finds it here.
 	admin unix//run/hotserve/admin.sock
 
 	liveswap {

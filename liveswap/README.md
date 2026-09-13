@@ -76,8 +76,10 @@ most container hosts will not give you.
 
 ```caddyfile
 {
-	# Keep the admin API off TCP: every app can reach localhost. (This
-	# is the hotserve package's path; `systemctl reload` finds it here.)
+	# Keep the admin API off TCP: every app can reach localhost. This
+	# is the hotserve package's path (its unit creates /run/hotserve and
+	# `systemctl reload` finds the socket here); a self-managed unit
+	# needs RuntimeDirectory=hotserve, or another dir its user owns.
 	admin unix//run/hotserve/admin.sock
 
 	liveswap {
@@ -436,8 +438,8 @@ status: an app is running, or hotserve did not start.
 **What a running instance's sandbox is fixed to.** A unit's view is
 built when it starts and is never rebuilt under it — reloads
 deliberately leave running apps alone — so a config change reaches an
-app at its next launch (a deploy, or a relaunch after a crash or
-reboot), not before. That is the only
+app at its next launch (a deploy, a rollback, or a relaunch after a
+crash or reboot), not before. That is the only
 thing that ages now, and it fails safe: a secret belonging to an app
 you add tomorrow is already absent from every unit running today,
 because nothing ever bound it.
@@ -900,8 +902,9 @@ be deployed again — unless the 5xx body says `release <version> left
 on disk` (the failed instance could not be confirmed stopped, so the
 dir is kept rather than pulled from under a process that may still
 run) or `cleanup of failed release` (removing it failed). Either way
-that version stays a 422 until release GC ages the dir past `keep`;
-use a new version.
+that version stays a 422 until release GC — which runs after a
+*successful* deploy and keeps the newest `keep` dirs — drops it; use
+a new version.
 
 ### GitLab CI
 
@@ -909,7 +912,7 @@ use a new version.
 deploy:
   stage: deploy
   id_tokens:
-    HOTSERVE_JWT:               # verified by `deploy_trust gitlab { audience hotserve }`
+    HOTSERVE_JWT:               # verified by `deploy_trust gitlab { audience hotserve; claim project_path your-org/blog }`
       aud: hotserve
   script:
     - tar -czf blog.tar.gz -C dist .
