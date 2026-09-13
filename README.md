@@ -21,47 +21,21 @@ Built in:
 
 ## Install
 
-On the box, fetch the `.deb` for its architecture from
-[releases](https://github.com/smallhoursorg/hotserve/releases), check
-it, and install it:
+A `.deb` for amd64 and arm64 on the
+[releases](https://github.com/smallhoursorg/hotserve/releases) page.
+[Your first deploy](docs/first-deploy.md) installs it and deploys an
+app, in four steps; [Upgrading](docs/upgrading.md) is every release
+after that. The package gives you `/usr/bin/hotserve`, a systemd
+service running as the `hotserve` user, a starter config at
+`/etc/hotserve/Caddyfile`, and a systemd instance for the `hotserve`
+user that stays up without anyone logging in — the thing your apps
+will run under.
 
-```sh
-v=0.2.0                             # the release you are installing
-arch=$(dpkg --print-architecture)   # amd64 or arm64
-base=https://github.com/smallhoursorg/hotserve/releases/download/v$v
-sudo install -d -o "$USER" /var/local/hotserve && cd /var/local/hotserve
-curl -fsSLO "$base/hotserve_${v}_${arch}.deb" && curl -fsSLO "$base/checksums.txt"
-sha256sum -c --ignore-missing checksums.txt
-sudo apt install ./hotserve_${v}_${arch}.deb
-sudo systemctl enable --now hotserve
-```
-
-(`-L` follows GitHub's redirect to the file. `/var/local/hotserve` is
-a directory `apt` can read a local package from — installing one from
-your home directory prints a harmless "download is performed
-unsandboxed as root" notice — and one that survives a reboot, unlike
-`/tmp`, so the file is still there when you want the way back from an
-upgrade. A prerelease's `.deb` is named differently from its tag —
-`hotserve_0.2.0.rc1_arm64.deb` under `v0.2.0-rc1` — so take that
-file name from the release page.)
-`enable --now` says only `Created symlink …`; that is success. Then:
-
-```sh
-systemctl status hotserve          # active (running)
-curl -s localhost                  # "hotserve is running. Edit /etc/hotserve/Caddyfile …"
-sudo journalctl -u hotserve | grep 'liveswap started'   # one JSON line: "msg":"liveswap started","apps":0
-                                   # (no sudo once your user is in adm — next paragraph)
-```
-
-That gives you `/usr/bin/hotserve`, a systemd service running as the
-`hotserve` user, a starter config at `/etc/hotserve/Caddyfile`, and a
-systemd instance for the `hotserve` user that stays up without anyone
-logging in — the thing your apps will run under.
-
-**Supported: Debian 13.** hotserve installs on other systemd
-distributions, but nothing else is tested, and a host that cannot
-deliver the per-app sandbox refuses to start rather than serving
-something weaker — [liveswap/README.md](liveswap/README.md#sandbox)
+**Supported: Debian 13, on a real virtual machine.** hotserve installs
+on other systemd distributions, but nothing else is tested, and a host
+that cannot deliver the per-app sandbox — many LXC-based and other
+container-style servers — refuses to start rather than serving
+something weaker; [liveswap/README.md](liveswap/README.md#sandbox)
 has what a host has to provide.
 
 The package depends on `libpam-systemd` and `dbus`, both present on a
@@ -130,197 +104,6 @@ Both apps serve on the socket hotserve hands them, answer `/health`,
 migrate before each version starts, stop cleanly, and deploy from
 GitHub Actions with no stored secret.
 
-The Quickstart below is the first deploy on one screen.
-
-## Quickstart: deploy an app with zero downtime
-
-Edit `/etc/hotserve/Caddyfile` (the package's starter has all of this
-commented out, in place) to:
-
-```caddyfile
-{
-	# Keep: the admin API off TCP (see Security); the package's `systemctl reload` finds it here.
-	admin unix//run/hotserve/admin.sock
-
-	liveswap {
-		artifact_allowlist github.com/your-org/   # required: pin artifact origins
-
-		app myapp {
-			command node server.js          # runs in the release dir, listens on $SOCKET
-			pre_start node migrate.js       # failure aborts the deploy
-			env_file /etc/hotserve/myapp.env
-
-			# Who may deploy this app: a token minted by CI, verified
-			# against the provider's public keys — no shared secret ever
-			# lives on the server. (required, per app or globally)
-			deploy_trust github {
-				audience hotserve
-				claim repository your-org/myapp
-				claim ref        refs/heads/main
-			}
-		}
-	}
-
-	cache {
-		ttl 60s
-		otter
-	}
-}
-
-myapp.example.com {
-	hint_penaltybox                     # rate limiting from app hint headers
-	cache                               # page cache
-	reverse_proxy {
-		dynamic liveswap myapp          # traffic follows the live version
-	}
-}
-
-deploy.example.com {
-	liveswap_webhook
-}
-```
-
-**What the app has to do.** hotserve does not hand it a port: it
-starts the app with `SOCKET` set to a unix socket path, and the app
-listens there (`server.listen(process.env.SOCKET)`,
-`Deno.serve({ path })`, `net.Listen("unix", …)` — every runtime can).
-hotserve proxies to that socket and health-checks it the same way, so
-`GET /health` just has to answer 2xx. On SIGTERM, finish in-flight
-requests and exit. Persistent data goes in the app's `shared/` dir
-(its `HOME`); the release dir is replaced on every deploy. The full
-contract, with snippets per runtime:
-[liveswap/README.md](liveswap/README.md#listening-on-the-socket).
-
-Then from CI. On GitHub Actions, request an OIDC token per run — no
-stored secret, on the box or in CI:
-
-```yaml
-permissions:
-  id-token: write               # let the job mint an OIDC token
-steps:
-  - run: |
-      JWT=$(curl -fsS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-        "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=hotserve" | jq -er .value)
-      echo "::add-mask::$JWT"
-      curl --fail-with-body -X POST -H "Authorization: Bearer $JWT" \
-        -H 'Content-Type: application/json' \
-        -d '{"url":"https://github.com/your-org/myapp/releases/download/v1.4.2/myapp.tar.gz","version":"v1.4.2"}' \
-        https://deploy.example.com/myapp
-```
-
-Mint and use the token in the one step — interpolated into a later
-step's script it lands in the job log — and `--fail-with-body` so a
-failed deploy prints why. More, including GitLab and private release
-assets: [Deploying from CI](liveswap/README.md#deploying-from-ci).
-
-For non-CI deploys (a laptop, a cron box), use a local key instead:
-`hotserve deploy-keygen`, point a `deploy_trust local { public_key … }`
-block at the `.pub`, and mint tokens with `hotserve deploy-token`.
-
-hotserve downloads the artifact, runs your migration, starts the new
-version on its own unix socket, health-checks it until it has been solidly
-up, atomically moves traffic over, and gracefully stops the old one.
-If anything fails, the old version never stops serving and CI goes
-red. Rollback is one call — `POST /<app>?rollback=<version>` relaunches
-an on-disk release. Full details, CI snippets, and every option:
-[liveswap/README.md](liveswap/README.md).
-
-## Upgrading
-
-A release is a new `.deb`; installing it over the old one is the
-upgrade:
-
-```sh
-# from the release page: the .deb for your architecture, and checksums.txt
-cd /var/local/hotserve              # next to the release you are upgrading from
-v=0.2.0                             # the version in the .deb's file name
-arch=$(dpkg --print-architecture)   # amd64 or arm64
-sha256sum -c --ignore-missing checksums.txt
-sudo apt install ./hotserve_${v}_${arch}.deb
-```
-
-The package keeps your `/etc/hotserve/Caddyfile` and restarts hotserve
-into the new binary. Your apps are not restarted: they run under
-hotserve's user manager rather than inside hotserve, so the new process
-finds each one in `state.json` and picks it up as it is — same process,
-no relaunch, no redeploy.
-
-**The restart itself is not zero-downtime.** New visitors get errors
-for about a tenth of a second, or longer while a slow request finishes:
-the old process gets up to 5 seconds to stop before the new one starts.
-So upgrade at a quiet moment. A
-config change does not need a restart: `sudo systemctl reload hotserve`
-swaps the config inside the running process, drops no requests, and
-never restarts a running app (an edited app definition applies the
-next time the app starts: its next deploy or rollback, or a relaunch
-after a crash, a sustained health failure, or a reboot).
-
-<details>
-<summary><b>What visitors see during the restart</b> — and how to pick a quiet moment</summary>
-
-Deploys are zero-downtime; upgrading hotserve is not, because the
-process listening on 80 and 443 is the one being replaced. On stop it
-closes its listeners at once and lets the requests already in flight
-finish, and the new process cannot listen until the old one has
-exited. New visitors get connection refused for that whole window,
-sometimes followed by a few dozen milliseconds of 503s while the new
-process picks the apps back up. How long the window lasts:
-
-- **With only short requests in flight:** about a tenth of a second
-  (measured on Debian 13 in the package test container, plain HTTP).
-- **With a slow one in flight** — a large download, a long poll — as
-  long as that request takes, because the old process waits for it.
-- **The old process gets at most 5 seconds to stop** (`TimeoutStopSec=5s`
-  in the unit). systemd then kills it, which cuts off whatever was still
-  running, and logs `Failed with result 'timeout'`; the restart still
-  goes ahead, and the apps are untouched. The new process starts after
-  that, so the window is those 5 seconds plus its startup (5.3 seconds
-  in all, in the test container) — and a new process that cannot start
-  leaves the site down until it can, which is what the config check
-  below is for.
-
-This is how Caddy itself upgrades: its official Debian package restarts
-the service the same way, with the same 5-second stop timeout, and the
-shutdown is Caddy's own. The 503s are the one part that is hotserve's —
-the moment before liveswap has picked your apps back up.
-
-To check for a quiet moment, add `metrics` to the Caddyfile's global
-options, reload, and read how many requests are in flight:
-
-```sh
-sudo curl -fsS --unix-socket /run/hotserve/admin.sock http://localhost/metrics \
-  | grep '^caddy_http_requests_in_flight'
-```
-
-Every line at 0 means nothing is mid-request. No lines means the check
-is not working yet, not that the server is idle: `metrics` is not on,
-or nothing has been served since the reload (load a page, then look
-again). It is only a snapshot, so a request can still start the moment
-after, but it catches the slow downloads that would stretch the window.
-
-</details>
-
-Before you upgrade:
-
-- **Check the new version accepts your config.** The `.tar.gz` on the
-  release page holds the bare binary, and
-  `sudo ./hotserve validate --config /etc/hotserve/Caddyfile` runs its
-  config check without touching anything that is running. A config it
-  rejects would stop the upgraded hotserve from starting, and the site
-  would stay down until you fixed the config or went back.
-- **The `.deb` you are upgrading from is still in `/var/local/hotserve`.**
-  `sudo apt install --allow-downgrades ./hotserve_<old>_$(dpkg --print-architecture).deb`
-  puts it back — the same restart, in reverse, and nothing to download
-  first. On a VPS, a snapshot taken first is the fuller way back.
-- **Upgrade hotserve and the host separately.** hotserve measures what
-  the host can sandbox at every start and refuses to start on a host
-  that cannot deliver it ([liveswap/README.md](liveswap/README.md#sandbox)),
-  so a kernel update or reboot bundled with an upgrade leaves you
-  guessing which change did it.
-
-There is no APT repository yet, so nothing upgrades hotserve behind
-your back; the hosted repository on the [roadmap](#roadmap) is what
-will change that.
 
 ## What hotserve is (and isn't)
 

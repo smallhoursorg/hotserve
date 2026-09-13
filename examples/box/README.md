@@ -37,7 +37,7 @@ few small apps. At the provider (Hetzner, say):
 Then, logged in as root once, in this order — the user created last
 cannot do the steps before it:
 
-1. Install hotserve as [Install](../../README.md#install) says.
+1. Install hotserve as [Your first deploy](../../docs/first-deploy.md#2-install-hotserve) says.
 2. Install what your app's shape needs. The administrator below cannot
    `apt install`, so this is the moment:
    - a Node single executable on an arm64 box: `apt install libatomic1`
