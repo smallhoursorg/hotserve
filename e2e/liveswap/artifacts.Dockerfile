@@ -40,6 +40,25 @@ RUN mkdir /out \
 	&& echo probe > /tmp/stage-probe/version.txt \
 	&& tar -czf /out/demo-probe.tar.gz -C /tmp/stage-probe .
 
+# The Deno example, built by its own scripts/bundle.sh with the same
+# Deno version e2e/Dockerfile installs on the box.
+FROM denoland/deno:2.9.6 AS deno-build
+WORKDIR /example
+COPY examples/deno/ ./
+# Same pin as the example's .deno-version (and e2e/Dockerfile), or fail.
+RUN [ "$(deno --version | sed -n 's/^deno \([0-9.]*\).*/\1/p')" = "$(cat .deno-version)" ] \
+	|| { echo "artifacts.Dockerfile builds with Deno $(deno --version | head -1) but .deno-version says $(cat .deno-version)" >&2; exit 1; }
+RUN sh scripts/bundle.sh
+
+# The Node example, built by its own scripts/bundle.sh: Node's
+# single-executable build, so the e2e box needs no Node installed.
+FROM node:26-trixie-slim AS node-build
+WORKDIR /example
+COPY examples/node/ ./
+RUN sh scripts/bundle.sh
+
 FROM caddy:2.11.4
 COPY --from=build /out /srv/artifacts
+COPY --from=deno-build /example/app.tar.gz /srv/artifacts/deno-example.tar.gz
+COPY --from=node-build /example/app.tar.gz /srv/artifacts/node-example.tar.gz
 COPY e2e/liveswap/artifacts.Caddyfile /etc/caddy/Caddyfile

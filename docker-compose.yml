@@ -138,6 +138,8 @@ services:
       - ./e2e/run.sh:/run.sh:ro
       - ./e2e/lib.sh:/lib.sh:ro
       - ./e2e/liveswap/run.sh:/suite-liveswap.sh:ro
+      - ./examples/deno/scripts/deploy.sh:/deploy-example.sh:ro
+      - ./examples/node/scripts/deploy.sh:/deploy-node-example.sh:ro
       - ./e2e/liveswap/recovery.sh:/suite-recovery.sh:ro
       - ./e2e/soak.sh:/soak.sh:ro
       - ./e2e/penaltybox/run.sh:/suite-penaltybox.sh:ro

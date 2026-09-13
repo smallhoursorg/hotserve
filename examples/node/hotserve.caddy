@@ -1,0 +1,11 @@
+# What this app needs from the box: the lines that go inside its
+# `app <name> { … }` block in your box repo's Caddyfile. (hotserve's
+# e2e suite imports this file, so these exact lines are tested.)
+#
+# Both commands are executables inside the tarball, so nothing has to
+# be installed on the box. A path with a `/` in it resolves against
+# the release dir.
+command ./server
+pre_start ./migrate
+env APP_VERSION {version}
+env DATA_DIR {shared_dir}          # persistent data: survives deploys

@@ -1,0 +1,40 @@
+# On every push to main: build the tarball, publish it as a GitHub
+# release, and tell the box to fetch it. No secrets: the job mints a
+# short-lived OIDC token that the box's `deploy_trust github { … }`
+# block verifies against GitHub's keys.
+name: deploy
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write # create the release
+  id-token: write # mint the deploy token
+
+concurrency: deploy # one at a time: a second deploy would get a 409
+
+jobs:
+  deploy:
+    # Build on the box's architecture if you add npm packages with
+    # native code (ubuntu-24.04-arm for an arm64 box).
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version-file: .deno-version # the version the box runs
+      - run: deno task bundle
+      - id: version
+        run: echo "version=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          files: app.tar.gz
+      # A public repo: the box fetches the release asset by its download
+      # URL, which `artifact_allowlist github.com/your-org/` admits. For
+      # a private repo the asset is only readable through the API — see
+      # "Deploying from CI" in hotserve's liveswap/README.md.
+      - run: scripts/deploy.sh "https://github.com/$GITHUB_REPOSITORY/releases/download/$VERSION/app.tar.gz"
+        env:
+          HOTSERVE_URL: https://deploy.example.com/example
+          VERSION: ${{ steps.version.outputs.version }}

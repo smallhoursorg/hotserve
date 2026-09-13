@@ -37,7 +37,9 @@ updates:
         versions: [">= 0.29.0"]
 
   - package-ecosystem: github-actions
-    directory: "/"
+    # The examples' deploy workflows are SHA-pinned like ours and are
+    # copied into other people's repos, so their pins are kept fresh.
+    directories: ["/", "/examples/deno", "/examples/node"]
     schedule:
       interval: weekly
     cooldown:

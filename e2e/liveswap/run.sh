@@ -20,10 +20,11 @@ echo "=== waiting for the deploy token ==="
 wait_for_token
 
 # traffic_start <file>: continuous requests, one status code per line
-traffic_start() {
+traffic_start() { # <file> [proxy]
 	: > "$1"
+	proxy=${2:-$PROXY}
 	(while [ ! -f /tmp/stop-traffic ]; do
-		curl -s -o /dev/null -w '%{http_code}\n' --max-time 2 "$PROXY/" >> "$1" 2>/dev/null
+		curl -s -o /dev/null -w '%{http_code}\n' --max-time 2 "$proxy/" >> "$1" 2>/dev/null
 		sleep 0.05
 	done) &
 	TRAFFIC_PID=$!
@@ -264,6 +265,57 @@ esac
 # Rollback to a version that was never deployed is a 422.
 c=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" "$HOOK?rollback=nope")
 [ "$c" = "422" ] && pass "rollback to a missing release gets 422" || fail "missing rollback: expected 422, got $c"
+
+# The examples are the apps newcomers copy. Each tarball comes from its
+# own scripts/bundle.sh (artifacts image, standing in for the release
+# its workflow publishes), its app-block lines from its own
+# hotserve.caddy (imported by e2e/Caddyfile), and it is deployed here
+# by its own scripts/deploy.sh — so a change to the app contract, or a
+# runtime release that changes what the flags mean, fails here rather
+# than in someone's first deploy. First by URL (the CI path), then a
+# redeploy from a local file under traffic (the laptop path; its
+# SIGTERM handler must finish in-flight requests), then a refused
+# deploy: deploy.sh exits non-zero and prints the reason, and the
+# running version is untouched.
+example_scenario() { # <app> <port> <deploy.sh path> <version prefix>
+	app=$1 hook="http://e2e-hotserve:8081/$1" proxy="http://e2e-hotserve:$2" script=$3 pre=$4
+	ex_deploy() { # <version> <artifact URL or file>
+		HOTSERVE_URL=$hook HOTSERVE_TOKEN=$TOKEN VERSION=$1 sh "$script" "$2" >/tmp/ex-deploy.out 2>&1
+	}
+	ex_body() { curl -s --max-time 5 "$proxy/"; }
+	if ex_deploy "${pre}1" "$ART/$app.tar.gz"; then
+		pass "$app: deploy.sh had the box fetch the tarball by URL"
+	else
+		fail "$app: deploy.sh ${pre}1 failed: $(cat /tmp/ex-deploy.out)"
+	fi
+	b=$(ex_body)
+	[ "$b" = "hello from ${pre}1 (schema v1)" ] \
+		&& pass "$app: serves on its socket with its own flags, after its pre_start: '$b'" \
+		|| fail "$app: expected 'hello from ${pre}1 (schema v1)', got '$b'"
+	curl -fsS -o "/tmp/$app.tgz" "$ART/$app.tar.gz" || fail "$app: could not fetch the tarball"
+	traffic_start "/tmp/codes-$app" "$proxy"
+	ex_deploy "${pre}2" "/tmp/$app.tgz" || fail "$app: deploy.sh ${pre}2 failed: $(cat /tmp/ex-deploy.out)"
+	traffic_stop
+	assert_all_200 "/tmp/codes-$app" "$app cutover"
+	b=$(ex_body)
+	[ "$b" = "hello from ${pre}2 (schema v1)" ] && pass "$app: serves ${pre}2" || fail "$app: expected ${pre}2, got '$b'"
+	if ex_deploy "${pre}3" "$ART/$app-missing.tar.gz"; then
+		fail "$app: deploy.sh reported success for an artifact that does not exist"
+	else
+		case "$(cat /tmp/ex-deploy.out)" in
+		*'"error"'*404*) pass "$app: a failed deploy exits non-zero and deploy.sh prints why" ;;
+		*) fail "$app: deploy.sh failure output lacks the reason: $(cat /tmp/ex-deploy.out)" ;;
+		esac
+	fi
+	b=$(ex_body)
+	[ "$b" = "hello from ${pre}2 (schema v1)" ] && pass "$app: ${pre}2 kept serving through the failed deploy" || fail "$app: after the failed deploy: '$b'"
+}
+
+echo "=== scenario 13: the Deno example deploys as its README says ==="
+example_scenario deno-example 8082 /deploy-example.sh dx
+
+echo "=== scenario 14: the Node example deploys as its README says ==="
+example_scenario node-example 8083 /deploy-node-example.sh nx
 
 echo ""
 if [ "$FAILURES" -eq 0 ]; then

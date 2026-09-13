@@ -585,7 +585,8 @@ does not isolate the runtime.
   cases in `TestEnsureRunningRefusesARecordWhoseSocketItCannotDial`.
 - **Network egress** is open for every app. A runtime whose permission
   model gates the network (Deno's `--allow-net`, which the socket
-  contract lets an app omit entirely) can close it from inside — see
+  contract lets an app narrow to `unix:{socket}` alone) can close it
+  from inside — see
   liveswap/README.md "Runtime permissions"; Node's `--permission`
   model does not cover network I/O. The runtime-agnostic answer is
   `PrivateNetwork=` on the unit — a path socket crosses network

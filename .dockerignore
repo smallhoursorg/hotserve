@@ -9,3 +9,10 @@ docker-compose*.yml
 # copies, sent to the daemon by every context: . build.
 build
 dist
+# The examples' local build output and dev data: bundle.sh recreates
+# dist/ inside the build, and a stale copy from a laptop build would
+# be baked into the artifacts image's COPY layer.
+examples/*/dist
+examples/*/app.tar.gz
+examples/*/node_modules
+examples/*/data

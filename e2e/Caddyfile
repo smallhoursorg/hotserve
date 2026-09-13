@@ -3,7 +3,7 @@
 # network. The admin API is exposed so the reload-survival scenario can
 # POST this same file to /load mid-traffic.
 #
-# Listeners: 8080/8081 = liveswap (proxy + webhook),
+# Listeners: 8080/8081 = liveswap (proxy + webhook), 8082/8083 = the Deno/Node examples,
 #            9080/9090/9091 = penaltybox (plain / cached / tiered).
 {
 	# TCP admin is TEST-ONLY (the runner container drives /load and
@@ -47,6 +47,30 @@
 			watchdog_grace 5s
 			keep 2
 		}
+
+		# The Deno example (examples/deno), with the flags from its own
+		# hotserve.caddy; only the e2e timings are added here.
+		app deno-example {
+			import /etc/hotserve/deno-example.caddy
+			health_interval 250ms
+			health_timeout 1s
+			soak 1s
+			deadline 20s
+			drain 500ms
+			grace 3s
+		}
+
+		# The Node example (examples/node): one executable, no runtime
+		# on the box. Same e2e timings.
+		app node-example {
+			import /etc/hotserve/node-example.caddy
+			health_interval 250ms
+			health_timeout 1s
+			soak 1s
+			deadline 20s
+			drain 500ms
+			grace 3s
+		}
 	}
 }
 
@@ -55,6 +79,18 @@
 :8080 {
 	reverse_proxy {
 		dynamic liveswap demo
+	}
+}
+
+:8082 {
+	reverse_proxy {
+		dynamic liveswap deno-example
+	}
+}
+
+:8083 {
+	reverse_proxy {
+		dynamic liveswap node-example
 	}
 }
 

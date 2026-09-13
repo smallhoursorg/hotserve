@@ -552,28 +552,43 @@ and a `main.ts` that calls `Deno.serve({ path: Deno.env.get("SOCKET") })`
 app example {
     command deno run \
         --cached-only \
+        --allow-net=unix:{socket} \
         --allow-read={release_dir},{shared_dir},{socket} \
         --allow-write={shared_dir},{socket} \
         --allow-env=SOCKET,DATABASE_URL \
-        main.ts
+        main.ts                          # {release_dir} read: for its own static files;
+                                         # loading modules needs no read grant
     env DENO_DIR {release_dir}/.deno
+    env DENO_NO_UPDATE_CHECK 1
     env DATABASE_URL {shared_dir}/app.db
     health_path /health
 }
 ```
 
-**What that buys you** (measured against Deno 2.8.3; re-check with
-`deno run --help=full` when you upgrade):
+[examples/deno](../examples/deno) is a complete app built this way.
+hotserve's e2e suite deploys it with its own flags, on the Deno
+version pinned in `e2e/Dockerfile`, so a Deno release that changes
+what serving needs fails CI rather than your deploy. The refusals
+below were measured on Deno 2.9.6; re-check with
+`deno run --help=full` if the box runs a different Deno.
 
-- **No `--allow-net` at all.** A unix socket is a file: serving needs
-  read and write on `{socket}` and nothing else, so every network
-  address is refused with `NotCapable` — a dependency that wakes up
-  and tries to POST your secrets somewhere fails at the runtime
-  boundary. Add `--allow-net=<host>` only for the hosts the app must
-  call. (`--allow-net` is an **address allowlist, not a direction**:
-  it does not distinguish listening from connecting.) The same holds
-  for a `deno compile`d binary: the flags are baked in, and a socket
-  path needs no per-deploy value baked with them.
+**What that buys you:**
+
+- **`--allow-net` names only the socket.** From Deno 2.9, a unix
+  socket is a network address as well as a file: serving needs
+  `--allow-net=unix:{socket}` plus read and write on it. That grants
+  exactly that path, so every other address — any TCP host, loopback,
+  any other socket — is refused with `NotCapable`, and a dependency
+  that wakes up and tries to POST your secrets somewhere fails at the
+  runtime boundary. Add `--allow-net=<host>` only for the hosts the
+  app must call. (`--allow-net` is an **address allowlist, not a
+  direction**: it does not distinguish listening from connecting.)
+  Deno 2.8 needed only the read and write, and rejects the `unix:`
+  form.
+- **A `deno compile`d binary carries its own flags.** They are baked
+  in at build time, so they come from the repo, not your Caddyfile: a
+  compromised build can widen them. Keep `deno run` with the flags in
+  `command` if you want the box to hold them.
 - Without `--allow-read` the app cannot read `/etc/hosts`, and without
   `--allow-env` it cannot read its own environment — including the
   `SOCKET` liveswap injected. Name only what the app actually needs.
