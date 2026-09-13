@@ -3,12 +3,14 @@
 #
 #   scripts/deploy.sh <artifact URL>     the box fetches it (CI: a release asset)
 #   scripts/deploy.sh <app.tar.gz>       a local file: pushed in the request body
+#   scripts/deploy.sh --rollback <ver>   relaunches a version still on the box's disk
 #
 #   HOTSERVE_URL          the app's webhook, e.g. https://deploy.example.com/example  (required)
 #   VERSION               the release's version; defaults to the commit (12 hex
 #                         chars). Versions are immutable on the box, so the
 #                         default deploys once per commit: set VERSION for an
-#                         uncommitted build (VERSION=wip-3, say)
+#                         uncommitted build (VERSION=wip-3, say). Not used by
+#                         --rollback: that names its version itself
 #   HOTSERVE_TOKEN        a deploy token. Not needed in GitHub Actions: with
 #                         `permissions: id-token: write` one is minted per run.
 #   HOTSERVE_AUDIENCE     the audience the box's deploy_trust expects (default: hotserve)
@@ -17,16 +19,35 @@
 #                         its API URL, private repo or not (the workflow sends
 #                         the job's own token)
 #
-# The request returns once the deploy has finished: 200 with the app's
-# status when the new version is live, or an error body saying why it
-# was refused (the old version keeps serving). Either way the body is
-# printed, and a failed deploy exits non-zero.
+# The request returns once the deploy (or rollback: the same start,
+# health gate and cutover, from a release already on disk) has
+# finished: 200 with the app's status when the new version is live, or
+# an error body saying why it was refused (the old version keeps
+# serving). Either way the body is printed, and a failure exits non-zero.
 set -eu
 
-artifact=${1:?artifact URL or file}
+rollback=
+if [ "${1:-}" = --rollback ]; then
+	rollback=${2:?--rollback needs the version to roll back to}
+	shift 2
+	# The box's version alphabet, so a stray character is refused here
+	# rather than mangling the query (a `#` would drop the rest of it).
+	case $rollback in
+	''|.*|*[!A-Za-z0-9._-]*) echo "deploy.sh: '$rollback' is not a version (letters, digits, . _ -; not starting with .)" >&2; exit 1 ;;
+	esac
+else
+	artifact=${1:?artifact URL or file, or --rollback <version>}
+	shift
+fi
+# `deno task deploy --rollback v` / `npm run deploy -- --rollback v`
+# would arrive here with app.tar.gz already in front of the flag and
+# push a stale tarball; refuse anything after the one operand.
+[ $# -eq 0 ] || { echo "deploy.sh: unexpected argument '$1' (--rollback goes first, without a tarball)" >&2; exit 1; }
 url=${HOTSERVE_URL:?set HOTSERVE_URL to the app webhook, e.g. https://deploy.example.com/example}
-version=${VERSION:-$(git rev-parse --short=12 HEAD 2>/dev/null || true)}
-[ -n "$version" ] || { echo "deploy.sh: not in a git checkout; set VERSION" >&2; exit 1; }
+if [ -z "$rollback" ]; then
+	version=${VERSION:-$(git rev-parse --short=12 HEAD 2>/dev/null || true)}
+	[ -n "$version" ] || { echo "deploy.sh: not in a git checkout; set VERSION" >&2; exit 1; }
+fi
 
 if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
 	# GitHub Actions OIDC. The token stays in this process: handing it
@@ -39,6 +60,15 @@ if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
 	echo "::add-mask::$token"
 else
 	token=${HOTSERVE_TOKEN:?set HOTSERVE_TOKEN (mint one with: hotserve deploy-token) or run in GitHub Actions with id-token: write}
+fi
+
+if [ -n "$rollback" ]; then
+	echo "rolling $url back to $rollback"
+	curl --fail-with-body --silent --show-error --max-time 600 -X POST \
+		-H "Authorization: Bearer $token" \
+		"$url?rollback=$rollback"
+	echo
+	exit 0
 fi
 
 # Never print a URL's query string: that is where presigned-URL

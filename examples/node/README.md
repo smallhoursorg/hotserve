@@ -15,8 +15,8 @@ what is here works.
 | `migrate.js` | The `pre_start` hook: runs before each new version starts |
 | `package.json` | The `dev`, `bundle` and `deploy` scripts (no dependencies) |
 | `scripts/bundle.sh` | Builds `app.tar.gz`: `server` and `migrate` as executables |
-| `scripts/deploy.sh` | Tells the box to deploy a release URL (or pushes a local tarball) |
-| `.github/workflows/deploy.yml` | Build, publish a release, deploy — on every push to `main` |
+| `scripts/deploy.sh` | Tells the box to deploy a release URL (or pushes a local tarball), or to roll back |
+| `.github/workflows/deploy.yml` | Build, publish a release, deploy — on every push to `main`; `Run workflow` rolls back |
 | `hotserve.caddy` | What the app needs from the box: the lines for its `app` block |
 | `AGENTS.md` | The rules the box enforces, for you and your coding agent |
 
@@ -127,6 +127,18 @@ the build. To run a Node that is installed on the box instead, see
 the [Deno example](../deno) for the shape — `command node server.js`
 with the runtime under `/usr` — which is smaller per deploy and lets
 the box's Caddyfile hold the runtime's flags.
+
+## Rolling back
+
+Actions → deploy → **Run workflow**, with a version from the releases
+page (the tag: a commit's first 12 characters) and "Use workflow from"
+left on `main` — the box's `deploy_trust` pins that ref, so a run from
+a tag or another branch is refused with a 401. The box relaunches
+that release from its disk — the same start, health gate and cutover
+as a deploy, and no build — so it is live in about twenty seconds, or
+the run is red with the reason and nothing changed. A version the box
+no longer holds is a 422: it keeps the newest five releases, plus the
+running one. Roll forward the same way you deploy: push a commit.
 
 ## Deploying without CI
 

@@ -6,6 +6,16 @@ name: deploy
 on:
   push:
     branches: [main]
+  # Run workflow → a version from the releases page: the box relaunches
+  # that release from its disk (the newest `keep` of them stay), through
+  # the same health gate and cutover as a deploy. No build, no release.
+  # Leave "Use workflow from" on main: the box's deploy_trust pins
+  # `claim ref refs/heads/main`, and a run from a tag or branch is a 401.
+  workflow_dispatch:
+    inputs:
+      rollback:
+        description: "Roll back to this version (a tag on the releases page)"
+        required: true
 
 permissions:
   contents: write # create the release
@@ -21,12 +31,16 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        if: ${{ !inputs.rollback }}
         with:
           deno-version-file: .deno-version # the version the box runs
       - run: deno task bundle
+        if: ${{ !inputs.rollback }}
       - id: version
+        if: ${{ !inputs.rollback }}
         run: echo "version=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        if: ${{ !inputs.rollback }}
         id: release
         with:
           tag_name: ${{ steps.version.outputs.version }}
@@ -36,8 +50,14 @@ jobs:
       # token (which expires with the job), and the box's
       # `artifact_allowlist api.github.com/repos/your-org/` admits it.
       - run: scripts/deploy.sh "$ASSET_URL"
+        if: ${{ !inputs.rollback }}
         env:
           HOTSERVE_URL: https://deploy.example.com/example
           VERSION: ${{ steps.version.outputs.version }}
           ASSET_URL: ${{ fromJSON(steps.release.outputs.assets)[0].url }}
           ARTIFACT_AUTH_HEADER: token ${{ github.token }}
+      - if: ${{ inputs.rollback }}
+        run: scripts/deploy.sh --rollback "$ROLLBACK"
+        env:
+          HOTSERVE_URL: https://deploy.example.com/example
+          ROLLBACK: ${{ inputs.rollback }}
