@@ -139,7 +139,7 @@ box listens on a port, since every app is reached over a unix socket.
 The `.deb` you installed from is still in `/var/local/hotserve`, and
 `apt install --allow-downgrades` of it is the way back from an upgrade
 that does not suit you; download each later release into the same
-directory. The README's [Upgrading](../README.md#upgrading) section has
+directory. [Upgrading](upgrading.md) has
 the rest: checking a new version accepts your config before you install
 it, what visitors see during the restart, and how to pick a quiet
 moment for it.
