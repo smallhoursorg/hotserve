@@ -27,10 +27,12 @@ trap 'rm -rf "$tmp"' EXIT
 box cat /etc/hotserve/Caddyfile >"$tmp/original"
 
 echo "=== box 0: the admin user has what the README says, and no more ==="
-admin journalctl -u hotserve -n 1 --no-pager >"$tmp/out" 2>&1 \
-	&& pass "adm reads hotserve's journal without privilege" || fail "admin cannot read the journal: $(cat "$tmp/out")"
-admin journalctl -t hotserve-demo -n 1 --no-pager >"$tmp/out" 2>&1 \
-	&& pass "adm reads an app's journal" || fail "admin cannot read the app journal: $(cat "$tmp/out")"
+# journalctl exits 0 on an empty (or invisible) journal too, so look
+# for known lines, not just a clean exit.
+admin journalctl -u hotserve --no-pager >"$tmp/out" 2>&1 && grep -q '"liveswap started"' "$tmp/out" \
+	&& pass "adm reads hotserve's journal without privilege" || fail "admin cannot read the journal: $(tail -3 "$tmp/out")"
+admin journalctl -t hotserve-demo --no-pager >"$tmp/out" 2>&1 && grep -q 'hotserve-demo' "$tmp/out" \
+	&& pass "adm reads an app's journal" || fail "admin cannot read the app journal: $(tail -3 "$tmp/out")"
 if admin sudo -n systemctl restart hotserve >"$tmp/out" 2>&1; then
 	fail "the sudoers file let admin restart hotserve"
 else
