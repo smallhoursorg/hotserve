@@ -718,6 +718,56 @@ func TestStartRefusesAnIncapableHost(t *testing.T) {
 	}
 }
 
+// TestStartLogsWhatItStarted: a fresh install's journal carries one
+// line saying liveswap is up and how many apps it holds — the
+// confirmation a first user looks for before deploying anything. With
+// no apps configured Start skips the manager and sandbox probes, so
+// the line is the only evidence the module loaded at all.
+func TestStartLogsWhatItStarted(t *testing.T) {
+	core, logs := observer.New(zap.InfoLevel)
+	a := &App{Root: t.TempDir(), logger: zap.New(core), manager: newFakeSystemdConn()}
+	if err := a.Start(); err != nil {
+		t.Fatalf("Start with no apps: %v", err)
+	}
+	_ = a.Cleanup()
+	got := logs.FilterMessage("liveswap started").All()
+	if len(got) != 1 {
+		t.Fatalf("want one 'liveswap started' line, got %d", len(got))
+	}
+	if n := got[0].ContextMap()["apps"]; n != int64(0) {
+		t.Fatalf("apps = %v, want 0", n)
+	}
+
+	// With apps, the names are listed sorted — a map walk would print
+	// them in a different order on every start, and the line is meant
+	// to be compared across boots.
+	core, logs = observer.New(zap.InfoLevel)
+	managed := map[string]*managedApp{}
+	specs := map[string]*appSpec{}
+	for _, name := range []string{"zeta", "alpha"} {
+		rig := newTestRig(t)
+		t.Cleanup(rig.ma.stopWatchdog)
+		managed[name], specs[name] = rig.ma, rig.spec
+	}
+	a = &App{
+		Root: t.TempDir(), logger: zap.New(core), specs: specs, managed: managed,
+		clients: &fetchClients{}, manager: newFakeSystemdConn(),
+		managerProbe: func() error { return nil },
+		sandboxProbe: func(*zap.Logger) error { return nil },
+	}
+	if err := a.Start(); err != nil {
+		t.Fatalf("Start with two apps: %v", err)
+	}
+	_ = a.Cleanup()
+	got = logs.FilterMessage("liveswap started").All()
+	if len(got) != 1 {
+		t.Fatalf("want one 'liveswap started' line, got %d", len(got))
+	}
+	if names := got[0].ContextMap()["app_names"]; !reflect.DeepEqual(names, []any{"alpha", "zeta"}) {
+		t.Fatalf("app_names = %#v, want [alpha zeta]", names)
+	}
+}
+
 // TestSandboxRootUnderTmpIsAllowed: only hotserve's own state is a
 // root worth failing config load over. A root under a path the sandbox
 // replaces (/tmp, /var/tmp — every t.TempDir, and the real-systemd
