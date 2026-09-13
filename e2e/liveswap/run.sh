@@ -274,7 +274,8 @@ c=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TO
 # runtime release that changes what the flags mean, fails here rather
 # than in someone's first deploy. First by URL (the CI path), then a
 # redeploy from a local file under traffic (the laptop path; its
-# SIGTERM handler must finish in-flight requests), then a refused
+# SIGTERM handler must finish in-flight requests), then a rollback to
+# the first (the Run-workflow path), then a refused
 # deploy: deploy.sh exits non-zero and prints the reason, and the
 # running version is untouched.
 example_scenario() { # <app> <port> <deploy.sh path> <version prefix>
@@ -303,6 +304,15 @@ example_scenario() { # <app> <port> <deploy.sh path> <version prefix>
 	assert_all_200 "/tmp/codes-$app" "$app cutover"
 	b=$(ex_body)
 	[ "$b" = "hello from ${pre}2 (schema v1)" ] && pass "$app: serves ${pre}2" || fail "$app: expected ${pre}2, got '$b'"
+	# The workflow's Run-workflow path: deploy.sh --rollback, the release
+	# still on the box's disk, no artifact.
+	if HOTSERVE_URL=$hook HOTSERVE_TOKEN=$TOKEN sh "$script" --rollback "${pre}1" >/tmp/ex-deploy.out 2>&1; then
+		pass "$app: deploy.sh --rollback relaunched ${pre}1"
+	else
+		fail "$app: deploy.sh --rollback ${pre}1 failed: $(cat /tmp/ex-deploy.out)"
+	fi
+	b=$(ex_body)
+	[ "$b" = "hello from ${pre}1 (schema v1)" ] && pass "$app: serves ${pre}1 again" || fail "$app: after the rollback: '$b'"
 	if ex_deploy "${pre}3" "$ART/$app-missing.tar.gz"; then
 		fail "$app: deploy.sh reported success for an artifact that does not exist"
 	else
@@ -312,7 +322,7 @@ example_scenario() { # <app> <port> <deploy.sh path> <version prefix>
 		esac
 	fi
 	b=$(ex_body)
-	[ "$b" = "hello from ${pre}2 (schema v1)" ] && pass "$app: ${pre}2 kept serving through the failed deploy" || fail "$app: after the failed deploy: '$b'"
+	[ "$b" = "hello from ${pre}1 (schema v1)" ] && pass "$app: ${pre}1 kept serving through the failed deploy" || fail "$app: after the failed deploy: '$b'"
 }
 
 echo "=== scenario 13: the Deno example deploys as its README says ==="

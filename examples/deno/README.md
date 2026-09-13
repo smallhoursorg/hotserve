@@ -13,8 +13,8 @@ to hotserve, so what is here works.
 | `migrate.ts` | The `pre_start` hook: runs before each new version starts |
 | `deno.json` | Dependencies and the `dev`, `bundle` and `deploy` tasks |
 | `scripts/bundle.sh` | Builds `app.tar.gz`, with the module cache inside it |
-| `scripts/deploy.sh` | Tells the box to deploy a release URL (or pushes a local tarball) |
-| `.github/workflows/deploy.yml` | Build, publish a release, deploy — on every push to `main` |
+| `scripts/deploy.sh` | Tells the box to deploy a release URL (or pushes a local tarball), or to roll back |
+| `.github/workflows/deploy.yml` | Build, publish a release, deploy — on every push to `main`; `Run workflow` rolls back |
 | `hotserve.caddy` | What the app needs from the box: the lines for its `app` block |
 | `AGENTS.md` | The rules the box enforces, for you and your coding agent |
 
@@ -128,6 +128,17 @@ says what the code expects.
 A reload never restarts the running app; the new flags apply at its
 next launch (a deploy, or a restart after a crash). A rollback runs
 the older code with the flags on the box today.
+
+## Rolling back
+
+Actions → deploy → **Run workflow**, with a version from the releases
+page (the tag: a commit's first 12 characters). The box relaunches
+that release from its disk — the same start, health gate and cutover
+as a deploy, and no build — so it is live in about twenty seconds, or
+the run is red with the reason and nothing changed. A version the box
+no longer holds is a 422: it keeps the newest five releases, plus the
+running one. It runs the older code with the Deno flags on the box
+today (see above). Roll forward the same way you deploy: push a commit.
 
 ## Deploying without CI
 
