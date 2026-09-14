@@ -342,8 +342,23 @@ func (ma *managedApp) redactorFor(s statusSnapshot) *redactor {
 	kvs := append([]string(nil), ma.secrets...)
 	ma.secretsMu.Unlock()
 	safe := append([]string{ma.name, s.CurrentVersion}, s.AvailableVersions...)
+	// A recorded version, pruned or not, is a name and must not be
+	// masked as a secret — unless it IS a known value: a record file
+	// is not something the deployer's POST vouched for (a legacy app
+	// could plant one under a secret's value as its name), and a safe
+	// string equal to a known value would exempt that value from the
+	// filter (newRedactor). The same goes for a version a request asks
+	// a record of.
+	known := make(map[string]bool, len(kvs))
+	for _, kv := range kvs {
+		if _, v, ok := strings.Cut(kv, "="); ok {
+			known[v] = true
+		}
+	}
 	for _, d := range s.Deploys {
-		safe = append(safe, d.Version) // a recorded version, pruned or not, is a name
+		if !known[d.Version] {
+			safe = append(safe, d.Version)
+		}
 	}
 	if s.LastDeploy != nil {
 		safe = append(safe, s.LastDeploy.Version)
@@ -1297,7 +1312,7 @@ func (ma *managedApp) status() statusSnapshot {
 		if rels := listReleases(c.spec.dirs.releases); rels != nil {
 			available = rels
 		}
-		deploys = listDeploySummaries(c.spec.dirs.deploys)
+		deploys = listDeploySummaries(c.spec.dirs)
 	}
 	ma.mu.Lock()
 	defer ma.mu.Unlock()

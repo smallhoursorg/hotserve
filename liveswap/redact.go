@@ -75,6 +75,9 @@ type redactor struct {
 	// env_file could not be read, so its values are unknown to the
 	// filter. Fail closed rather than filter with the heuristics alone.
 	withhold string
+	// reported is what a body already reported as redacted before this
+	// pass (a stored record's redacted_env): kept, and added to.
+	reported []string
 }
 
 // secretForm is one text to replace, the keys whose values it belongs
@@ -292,6 +295,18 @@ func (r *redactor) replaceKnown(s string, seen map[string]bool) string {
 	return s
 }
 
+// union is both lists' names, each once, sorted.
+func union(a, b []string) []string {
+	set := make(map[string]bool, len(a)+len(b))
+	for _, n := range a {
+		set[n] = true
+	}
+	for _, n := range b {
+		set[n] = true
+	}
+	return reportedKeys(set)
+}
+
 func reportedKeys(seen map[string]bool) []string {
 	keys := make([]string, 0, len(seen))
 	for k := range seen {
@@ -435,12 +450,16 @@ func (r *redactor) redactJSON(raw []byte) string {
 		}
 	}
 	body = r.replaceKnown(body, seen)
-	if len(seen) > 0 {
+	var reported []string
+	if r != nil {
+		reported = r.reported
+	}
+	if len(seen) > 0 || len(reported) > 0 {
 		names := reportedKeys(seen)
 		for i, n := range names {
 			names[i] = r.replaceKnown(n, seen)
 		}
-		body = withField(body, "redacted_env", names)
+		body = withField(body, "redacted_env", union(names, reported))
 	}
 	if !json.Valid([]byte(body)) {
 		return `{"error":"[#0]"}`
@@ -450,6 +469,22 @@ func (r *redactor) redactJSON(raw []byte) string {
 
 // withField sets a string-array field on a JSON object body; anything
 // else (an array, a scalar) is returned as it is.
+// keepingReported returns a filter that, when it reports the keys it
+// redacted, also keeps the keys a body already reported: a stored
+// record was filtered once when written and names those keys; the
+// read-time pass must add to that list, never replace it.
+func (r *redactor) keepingReported(body json.RawMessage) *redactor {
+	var obj struct {
+		Reported []string `json:"redacted_env"`
+	}
+	if json.Unmarshal(body, &obj) != nil || len(obj.Reported) == 0 {
+		return r
+	}
+	c := *r
+	c.reported = obj.Reported
+	return &c
+}
+
 func withField(body, name string, values []string) string {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(body), &obj); err != nil || obj == nil {

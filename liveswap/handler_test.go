@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -772,5 +773,18 @@ func TestWebhookDeployRecordWithoutASpecIs503(t *testing.T) {
 	}
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("record route without a spec: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// A record read back through the live filter keeps the keys it was
+// recorded with, and gains any the live filter redacts now.
+func TestWebhookDeployRecordKeepsItsRecordedKeys(t *testing.T) {
+	h, rig := newTestHandler(t)
+	rig.spec.envFile = filepath.Join(t.TempDir(), "app.env")
+	must(t, os.WriteFile(rig.spec.envFile, []byte("NEW=newvaluenewvalue1234\n"), 0o600))
+	must(t, writeDeployRecord(rig.spec.dirs, "v1", []byte(`{"version":"v1","status":"failed","error":"[redacted:OLD] then newvaluenewvalue1234","redacted_env":["OLD"]}`)))
+	w := do(t, h, http.MethodGet, "/demo?deploy=v1", appToken(t), "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"redacted_env":["NEW","OLD"]`) || strings.Contains(w.Body.String(), "newvaluenewvalue1234") {
+		t.Fatalf("record: %d %s", w.Code, w.Body.String())
 	}
 }

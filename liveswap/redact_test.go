@@ -358,3 +358,20 @@ func mustJSON(t *testing.T, s string) []byte {
 	}
 	return b[1 : len(b)-1]
 }
+
+// A body that already reports redacted keys — a stored record — keeps
+// them through a later pass, whether or not that pass redacts more.
+func TestKeepingReportedAddsToTheRecordsKeys(t *testing.T) {
+	r := newRedactor([]string{"NEW=newvaluenewvalue1234"}, nil)
+	body := json.RawMessage(`{"error":"got newvaluenewvalue1234","redacted_env":["OLD"]}`)
+	if got := r.keepingReported(body).redactJSON(body); !strings.Contains(got, `"redacted_env":["NEW","OLD"]`) || strings.Contains(got, "newvaluenewvalue1234") {
+		t.Fatalf("got %s", got)
+	}
+	quiet := json.RawMessage(`{"error":"nothing here","redacted_env":["OLD"]}`)
+	if got := r.keepingReported(quiet).redactJSON(quiet); !strings.Contains(got, `"redacted_env":["OLD"]`) {
+		t.Fatalf("a pass that redacts nothing must keep the keys: %s", got)
+	}
+	if got := r.redactJSON(quiet); !strings.Contains(got, `"redacted_env":["OLD"]`) {
+		t.Fatalf("without keepingReported the field is body text and passes as it was: %s", got)
+	}
+}

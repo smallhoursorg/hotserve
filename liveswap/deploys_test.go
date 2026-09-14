@@ -28,7 +28,7 @@ func TestDeployRecordsAreWrittenAndListed(t *testing.T) {
 	if err := deployOnceV1(t, rig); err == nil {
 		t.Fatal("v1 should have failed in pre_start")
 	}
-	rec, err := readDeployRecord(rig.spec.dirs.deploys, "v1")
+	rec, err := readDeployRecord(rig.spec.dirs, "v1")
 	if err != nil {
 		t.Fatalf("no record for the failed v1: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestDeployRecordsAreWrittenAndListed(t *testing.T) {
 	if len(st.Deploys) != 2 || st.Deploys[0].Version != "v2" || st.Deploys[0].Status != "succeeded" || st.Deploys[1].Version != "v1" || st.Deploys[1].Status != "failed" || st.Deploys[1].Phase != "preparing" {
 		t.Fatalf("status.deploys = %+v", st.Deploys)
 	}
-	if _, err := readDeployRecord(rig.spec.dirs.deploys, "v9"); !errors.Is(err, errNoDeployRecord) {
+	if _, err := readDeployRecord(rig.spec.dirs, "v9"); !errors.Is(err, errNoDeployRecord) {
 		t.Fatalf("a version never deployed: %v", err)
 	}
 }
@@ -93,10 +93,11 @@ func TestDeployRecordsArePrunedWithReleases(t *testing.T) {
 }
 
 func TestPruneDeployRecordsKeepsOnDiskAndNewest(t *testing.T) {
-	dir := t.TempDir()
+	d := newAppDirs(t.TempDir(), "demo")
+	dir := d.deploys
 	base := time.Now().Add(-time.Hour)
 	for i, v := range []string{"a", "b", "c", "d"} {
-		must(t, writeDeployRecord(dir, v, []byte(`{"version":"`+v+`"}`)))
+		must(t, writeDeployRecord(d, v, []byte(`{"version":"`+v+`"}`)))
 		must(t, os.Chtimes(deployRecordPath(dir, v), base.Add(time.Duration(i)*time.Minute), base.Add(time.Duration(i)*time.Minute)))
 	}
 	must(t, os.WriteFile(filepath.Join(dir, ".record-123.tmp"), []byte("{"), 0o600)) // a write that never got its rename
@@ -123,9 +124,9 @@ func TestDeployRecordsAreOutsideTheSandboxView(t *testing.T) {
 // A filter that replaced a timestamp-shaped value leaves the record in
 // the list: the times are carried raw, and the order is the write time.
 func TestDeploySummariesSurviveARedactedTimestamp(t *testing.T) {
-	dir := t.TempDir()
-	must(t, writeDeployRecord(dir, "v1", []byte(`{"version":"v1","status":"succeeded","started_at":"[redacted:STAMP]","finished_at":"[redacted:STAMP]"}`)))
-	got := listDeploySummaries(dir)
+	d := newAppDirs(t.TempDir(), "demo")
+	must(t, writeDeployRecord(d, "v1", []byte(`{"version":"v1","status":"succeeded","started_at":"[redacted:STAMP]","finished_at":"[redacted:STAMP]"}`)))
+	got := listDeploySummaries(d)
 	if len(got) != 1 || got[0].Version != "v1" || string(got[0].FinishedAt) != `"[redacted:STAMP]"` {
 		t.Fatalf("summaries = %+v", got)
 	}
@@ -137,12 +138,12 @@ func TestDeployRecordsAreNotPrunedWhenReleasesAreUnreadable(t *testing.T) {
 	rig := newTestRig(t)
 	rig.spec.keep = 1
 	for _, v := range []string{"a", "b", "c"} {
-		must(t, writeDeployRecord(rig.spec.dirs.deploys, v, []byte(`{"version":"`+v+`","status":"failed"}`)))
+		must(t, writeDeployRecord(rig.spec.dirs, v, []byte(`{"version":"`+v+`","status":"failed"}`)))
 	}
 	must(t, os.RemoveAll(rig.spec.dirs.releases))
 	must(t, os.WriteFile(rig.spec.dirs.releases, []byte("not a dir"), 0o600)) // ReadDir fails
 	rig.ma.recordDeploy(rig.ma.snapshot(), deployResult{Version: "d", Status: "failed"})
-	if got := len(listDeploySummaries(rig.spec.dirs.deploys)); got != 4 {
+	if got := len(listDeploySummaries(rig.spec.dirs)); got != 4 {
 		t.Fatalf("records after an unreadable releases dir = %d, want all 4 kept", got)
 	}
 }
@@ -155,14 +156,14 @@ func TestDeployRecordSurvivesARefusedRepost(t *testing.T) {
 	if err := deployOnceV1(t, rig); err != nil {
 		t.Fatal(err)
 	}
-	before, err := readDeployRecord(rig.spec.dirs.deploys, "v1")
+	before, err := readDeployRecord(rig.spec.dirs, "v1")
 	must(t, err)
 	err = deployOnceV1(t, rig)
 	var ve validationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("re-posting the running version should be refused: %v", err)
 	}
-	after, err := readDeployRecord(rig.spec.dirs.deploys, "v1")
+	after, err := readDeployRecord(rig.spec.dirs, "v1")
 	must(t, err)
 	if string(after) != string(before) || !strings.Contains(string(after), `"status":"succeeded"`) {
 		t.Fatalf("the refusal replaced v1's record:\n%s\n%s", before, after)
@@ -185,7 +186,7 @@ func TestDeployRecordKeepsAPrePhaseFailure(t *testing.T) {
 	if err == nil || errors.As(err, &ve) {
 		t.Fatalf("want an operational failure, got %v", err)
 	}
-	rec, rerr := readDeployRecord(rig.spec.dirs.deploys, "v1")
+	rec, rerr := readDeployRecord(rig.spec.dirs, "v1")
 	if rerr != nil || !strings.Contains(string(rec), `"status":"failed"`) {
 		t.Fatalf("a pre-phase operational failure must be recorded: %v %s", rerr, rec)
 	}
@@ -203,10 +204,10 @@ func TestDeployRecordsRefuseAPlantedDirectoryLink(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(rig.spec.dirs.app, "state.json")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("a record was written through the planted link: %v", err)
 	}
-	if _, err := readDeployRecord(rig.spec.dirs.deploys, "state"); err == nil || errors.Is(err, errNoDeployRecord) {
+	if _, err := readDeployRecord(rig.spec.dirs, "state"); err == nil || errors.Is(err, errNoDeployRecord) {
 		t.Fatalf("a read through the planted link must be refused outright, got %v", err)
 	}
-	if got := listDeploySummaries(rig.spec.dirs.deploys); got != nil {
+	if got := listDeploySummaries(rig.spec.dirs); got != nil {
 		t.Fatalf("listed through the planted link: %+v", got)
 	}
 }
@@ -214,14 +215,19 @@ func TestDeployRecordsRefuseAPlantedDirectoryLink(t *testing.T) {
 // A record name that is a link is neither served nor summarised, and a
 // record whose version is not the name it sits under is not listed.
 func TestDeployRecordsDoNotFollowARecordLinkOrTrustAForgedVersion(t *testing.T) {
-	dir := t.TempDir()
+	d := newAppDirs(t.TempDir(), "demo")
+	dir, err := deploysDir(d)
+	must(t, err)
 	must(t, os.WriteFile(filepath.Join(dir, "other.txt"), []byte(`{"version":"v1","status":"succeeded"}`), 0o600))
 	must(t, os.Symlink("other.txt", deployRecordPath(dir, "v1")))
-	if _, err := readDeployRecord(dir, "v1"); err == nil || errors.Is(err, errNoDeployRecord) {
+	if _, err := readDeployRecord(d, "v1"); err == nil || errors.Is(err, errNoDeployRecord) {
 		t.Fatalf("a linked record must be refused outright, got %v", err)
 	}
-	must(t, writeDeployRecord(dir, "v2", []byte(`{"version":"AKIAFORGEDSECRETVALUE","status":"succeeded"}`)))
-	if got := listDeploySummaries(dir); len(got) != 0 {
+	must(t, writeDeployRecord(d, "v2", []byte(`{"version":"AKIAFORGEDSECRETVALUE","status":"succeeded"}`)))
+	// A version that is not a version, whose path component happens
+	// to equal the name it sits under, is not one of ours either.
+	must(t, os.WriteFile(filepath.Join(dir, "TOKEN.json"), []byte(`{"version":"../TOKEN","status":"succeeded"}`), 0o600))
+	if got := listDeploySummaries(d); len(got) != 0 {
 		t.Fatalf("a linked record or a forged version reached the list: %+v", got)
 	}
 }
@@ -229,11 +235,13 @@ func TestDeployRecordsDoNotFollowARecordLinkOrTrustAForgedVersion(t *testing.T) 
 // A planted temp name is never written through: the temp file is
 // created fresh under a random name, and the leftover link is pruned.
 func TestDeployRecordWriteNeverUsesAPlantedTempName(t *testing.T) {
-	dir := t.TempDir()
+	d := newAppDirs(t.TempDir(), "demo")
+	dir, err := deploysDir(d)
+	must(t, err)
 	target := filepath.Join(dir, "victim.json")
 	must(t, os.WriteFile(target, []byte("precious"), 0o600))
 	must(t, os.Symlink("victim.json", filepath.Join(dir, "v1.json.tmp")))
-	must(t, writeDeployRecord(dir, "v1", []byte(`{"version":"v1","status":"failed"}`)))
+	must(t, writeDeployRecord(d, "v1", []byte(`{"version":"v1","status":"failed"}`)))
 	if b, _ := os.ReadFile(target); string(b) != "precious" {
 		t.Fatalf("the planted temp link's target was rewritten: %q", b)
 	}
@@ -246,16 +254,16 @@ func TestDeployRecordWriteNeverUsesAPlantedTempName(t *testing.T) {
 // A record under a version's name that is not that version's — stale,
 // planted, corrupted, or not an object at all — is not served as it.
 func TestDeployRecordMustNameItsVersion(t *testing.T) {
-	dir := t.TempDir()
-	must(t, writeDeployRecord(dir, "v1", []byte(`{"version":"v2","status":"succeeded"}`)))
-	must(t, writeDeployRecord(dir, "v3", []byte(`["not","an","object"]`)))
+	d := newAppDirs(t.TempDir(), "demo")
+	must(t, writeDeployRecord(d, "v1", []byte(`{"version":"v2","status":"succeeded"}`)))
+	must(t, writeDeployRecord(d, "v3", []byte(`["not","an","object"]`)))
 	for _, v := range []string{"v1", "v3"} {
-		if _, err := readDeployRecord(dir, v); err == nil || errors.Is(err, errNoDeployRecord) {
+		if _, err := readDeployRecord(d, v); err == nil || errors.Is(err, errNoDeployRecord) {
 			t.Fatalf("%s: a record that is not the version's must be refused outright, got %v", v, err)
 		}
 	}
-	must(t, writeDeployRecord(dir, "v4", []byte(`{"version":"v4","status":"failed"}`)))
-	if _, err := readDeployRecord(dir, "v4"); err != nil {
+	must(t, writeDeployRecord(d, "v4", []byte(`{"version":"v4","status":"failed"}`)))
+	if _, err := readDeployRecord(d, "v4"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -276,7 +284,7 @@ func TestDeployRecordIsNotWithheldByALaterUnreadableEnvFile(t *testing.T) {
 	live.envFile = filepath.Join(t.TempDir(), "missing.env")
 	rig.ma.spec = &live
 	rig.ma.recordDeploy(c, deployResult{Version: "v1", Status: "failed", Error: "pre_start failed: SECRET=hunter2hunter2hunter2 refused"})
-	rec, err := readDeployRecord(c.spec.dirs.deploys, "v1")
+	rec, err := readDeployRecord(c.spec.dirs, "v1")
 	if err != nil {
 		t.Fatalf("the record was withheld or not written: %v", err)
 	}
@@ -285,5 +293,61 @@ func TestDeployRecordIsNotWithheldByALaterUnreadableEnvFile(t *testing.T) {
 	}
 	if w := rig.ma.redactorFor(rig.ma.status()); w.withhold == "" {
 		t.Fatal("the test's premise: the live filter withholds while the env_file is unreadable")
+	}
+}
+
+// An ancestor that is a link — `<root>/blog -> <root>/shop`, planted
+// by a pre-sandbox app — is not followed either: blog's records are
+// not written, read or listed from shop's directory.
+func TestDeployRecordsRefuseAPlantedAncestorLink(t *testing.T) {
+	root := t.TempDir()
+	shop := newAppDirs(root, "shop")
+	must(t, writeDeployRecord(shop, "v1", []byte(`{"version":"v1","status":"succeeded"}`)))
+	must(t, os.Symlink("shop", filepath.Join(root, "blog")))
+	blog := newAppDirs(root, "blog")
+	if _, err := deploysDir(blog); err == nil {
+		t.Fatal("blog's deploys dir resolves into shop's and must be refused")
+	}
+	if err := writeDeployRecord(blog, "v9", []byte(`{"version":"v9","status":"failed"}`)); err == nil {
+		t.Fatal("a write through the ancestor link must be refused")
+	}
+	if _, err := os.Lstat(deployRecordPath(shop.deploys, "v9")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("blog's record landed in shop's directory")
+	}
+	if _, err := readDeployRecord(blog, "v1"); err == nil || errors.Is(err, errNoDeployRecord) {
+		t.Fatalf("a read through the ancestor link must be refused outright, got %v", err)
+	}
+	if got := listDeploySummaries(blog); got != nil {
+		t.Fatalf("shop's records listed as blog's: %+v", got)
+	}
+	// An alias on the root itself is the one difference allowed.
+	alias := filepath.Join(t.TempDir(), "alias")
+	must(t, os.Symlink(root, alias))
+	if _, err := deploysDir(newAppDirs(alias, "shop")); err != nil {
+		t.Fatalf("a symlinked root is a legitimate layout: %v", err)
+	}
+}
+
+// A record planted under a name equal to a known env value must not
+// let that value through the response filter: the status keeps the
+// value redacted even though the same string is a "version".
+func TestARecordedVersionEqualToAKnownValueIsStillRedacted(t *testing.T) {
+	rig := newTestRig(t)
+	secret := "q7Wm2xK9pL4vB8nR3tY6zH5c" // gitleaks:allow — a made-up value for this test
+	rig.spec.envFile = filepath.Join(t.TempDir(), "app.env")
+	must(t, os.WriteFile(rig.spec.envFile, []byte("TOKEN="+secret+"\n"), 0o600))
+	must(t, writeDeployRecord(rig.spec.dirs, secret, []byte(`{"version":"`+secret+`","status":"succeeded"}`)))
+	if err := deployOnceV1(t, rig); err != nil {
+		t.Fatal(err)
+	}
+	s := rig.ma.status()
+	if len(s.Deploys) == 0 {
+		t.Fatal("the planted record is listed (its version matches its name); the filter is what must catch it")
+	}
+	raw, err := json.Marshal(s)
+	must(t, err)
+	body := rig.ma.redactorFor(s).redactJSON(raw)
+	if strings.Contains(body, secret) || !strings.Contains(body, "[redacted:TOKEN]") {
+		t.Fatalf("the known value leaked through a recorded version: %s", body)
 	}
 }
