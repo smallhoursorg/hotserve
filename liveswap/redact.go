@@ -475,7 +475,14 @@ func withField(body, name string, values []string) string {
 	}
 	var had []string
 	if raw, ok := obj[name]; ok {
-		_ = json.Unmarshal(raw, &had) // not an array: nothing to keep
+		var items []any
+		if json.Unmarshal(raw, &items) == nil {
+			for _, it := range items {
+				if str, ok := it.(string); ok {
+					had = append(had, str) // the strings, and only those: the field is key names
+				}
+			}
+		}
 	}
 	v, err := json.Marshal(union(values, had))
 	if err != nil {

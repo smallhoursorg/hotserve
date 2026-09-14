@@ -342,18 +342,20 @@ func (ma *managedApp) redactorFor(s statusSnapshot) *redactor {
 	kvs := append([]string(nil), ma.secrets...)
 	ma.secretsMu.Unlock()
 	// Safe strings are names, not secrets, and come in two kinds. The
-	// versions a deployer's request named (the running one, the last
-	// deploy's) are safe as given. Names read off the filesystem —
-	// release directories, record files, a version a request asks a
-	// record of — are safe only when they are not a known value: a
-	// safe string equal to one would exempt it from the filter
-	// (newRedactor), and a name on disk is not something a request
-	// vouched for (deploys.go, the record store's rules).
-	safe := []string{ma.name, s.CurrentVersion}
+	// version the last deploy's request named is safe as given. Names
+	// read off the filesystem — the running version (state.json after
+	// a restart), release directories, record files, a version a
+	// request asks a record of — are safe only when they are not a
+	// known value: a safe string equal to one would exempt it from the
+	// filter (newRedactor), and a name on disk is not something a
+	// request vouched for (deploys.go, the record store's rules).
+	safe := []string{ma.name}
 	if s.LastDeploy != nil {
 		safe = append(safe, s.LastDeploy.Version)
 	}
-	fromDisk := append([]string(nil), s.AvailableVersions...)
+	// The running version is from state.json after a restart, a file
+	// like the others: under the same rule.
+	fromDisk := append([]string{s.CurrentVersion}, s.AvailableVersions...)
 	for _, d := range s.Deploys {
 		fromDisk = append(fromDisk, d.Version)
 	}
@@ -641,6 +643,7 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	ma.mu.Unlock()
 
 	var stats archiveStats
+	accepted := false        // the request passed its checks: from here on, what happens is the version's history
 	var detail *deployDetail // filled by the failure-detail defer below, which runs first
 	launched := false        // a pre_start or Start was attempted: there are units to ask about
 	appExit := ""            // the app's exit, read before hotserve stops a failed instance
@@ -671,13 +674,16 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		ma.lastDeploy = &result
 		ma.phase = "idle"
 		ma.mu.Unlock()
-		// A refusal before any phase — the version already running or
-		// already on disk — is about the request, not the version:
+		// What happened before the request was accepted — the version
+		// already running or on disk, the app's directories not there
+		// to make — is about the request or the box, not the version:
 		// it must not replace the record of the deploy that put the
-		// version there. Anything else that failed, even before the
-		// first phase, is the version's own history and is recorded.
+		// version there. Past acceptance, a refusal of the request's
+		// own content (an artifact URL the allowlist refuses) is still
+		// the request's; anything else that failed is the version's
+		// history and is recorded.
 		var ve validationError
-		if len(result.Phases) > 0 || !errors.As(err, &ve) {
+		if err == nil || (accepted && !errors.As(err, &ve)) {
 			ma.recordDeploy(c, result)
 		}
 	}()
@@ -705,6 +711,8 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 			return fmt.Errorf("checking release %s: %w", req.version, statErr)
 		}
 	}
+
+	accepted = true
 
 	releaseDir, stats, err := c.fetch.fetch(ctx, spec, req, func(phase string) { ma.setPhase(c, phase) })
 	if err != nil {
@@ -1300,8 +1308,14 @@ type statusSnapshot struct {
 	Command []string `json:"command,omitempty"`
 	// Unit is the systemd unit running the instance — what to pass to
 	// journalctl for the app's own output.
-	Unit       string            `json:"unit,omitempty"`
-	Running    bool              `json:"running"`
+	Unit    string `json:"unit,omitempty"`
+	Running bool   `json:"running"`
+	// Deploys is the outcome of the latest deploy of each version a
+	// record is kept for (deploys.go), newest first; the whole record
+	// is GET /<app>?deploy=<version>. Serialized before last_deploy:
+	// the examples' deploy.sh reads the failing phase as the last
+	// "phase" in the body, which must stay last_deploy's.
+	Deploys    []deploySummary   `json:"deploys,omitempty"`
 	LastDeploy *deployResult     `json:"last_deploy,omitempty"`
 	Watchdog   *watchdogSnapshot `json:"watchdog,omitempty"`
 	// AvailableVersions lists the on-disk releases, newest-first — the
@@ -1309,10 +1323,6 @@ type statusSnapshot struct {
 	// healthy app with no releases reports []), so an empty set is
 	// distinguishable from a server that doesn't report the field.
 	AvailableVersions []string `json:"available_versions"`
-	// Deploys is the outcome of the latest deploy of each version a
-	// record is kept for (deploys.go), newest first; the whole record
-	// is GET /<app>?deploy=<version>.
-	Deploys []deploySummary `json:"deploys,omitempty"`
 }
 
 func (ma *managedApp) status() statusSnapshot {

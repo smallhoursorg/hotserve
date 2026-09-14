@@ -788,3 +788,18 @@ func TestWebhookDeployRecordKeepsItsRecordedKeys(t *testing.T) {
 		t.Fatalf("record: %d %s", w.Code, w.Body.String())
 	}
 }
+
+// The examples' deploy.sh reads the failing phase as the last "phase"
+// in a failure body; with older records listed in the status that must
+// still be last_deploy's, so deploys is serialized before it.
+func TestFailureBodyEndsWithLastDeploysPhase(t *testing.T) {
+	h, rig := newTestHandler(t)
+	must(t, writeDeployRecord(rig.spec.dirs, "v0", []byte(`{"version":"v0","status":"failed","phase":"soaking"}`)))
+	rig.runner.startErr = errors.New("boom")
+	w := do(t, h, http.MethodPost, "/demo", appToken(t), `{"url":"https://x/a.tgz","version":"v1"}`)
+	body := w.Body.String()
+	i := strings.LastIndex(body, `"phase":"`)
+	if w.Code != 500 || i < 0 || !strings.HasPrefix(body[i:], `"phase":"starting"`) {
+		t.Fatalf("status %d, last phase in body is not last_deploy's: %s", w.Code, body)
+	}
+}

@@ -891,7 +891,12 @@ newest `keep` others (failed deploys, whose release is removed at
 once, and versions release GC has pruned), so the set is bounded by
 about twice `keep`. They are written as the response filter left them
 — a secret rotated later is not in an old record — and pass it again
-when read, like every body.
+when read, like every body. One consequence: a version name equal to
+an `env_file` value is treated as that value wherever it is read off
+the box (a release directory, a record) and shows as `[redacted:KEY]`
+in `available_versions`, `deploys` and a record — so do not name
+versions after `env_file` values; a release identifier an app needs
+belongs in inline `env`.
 
 ## Secrets and logs
 

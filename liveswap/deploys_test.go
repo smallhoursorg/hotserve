@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -178,22 +179,39 @@ func TestDeployRecordSurvivesARefusedRepost(t *testing.T) {
 	}
 }
 
-// A failure before the first phase that is not a refusal — the box's
-// own, here a releases path that is not a directory — is the version's
-// history and is recorded like any other.
-func TestDeployRecordKeepsAPrePhaseFailure(t *testing.T) {
+// What fails before the request is accepted — here the app's
+// directories cannot be made — is about the box, not the version, and
+// writes no record; a refusal of the request's own content after
+// acceptance (an artifact URL the allowlist refuses, a 422 raised
+// inside the downloading phase) does not replace a version's record
+// either.
+func TestDeployRecordIsNotTouchedBeforeAcceptanceOrByARefusal(t *testing.T) {
 	rig := newTestRig(t)
 	must(t, os.MkdirAll(rig.spec.dirs.app, 0o750))
 	must(t, os.RemoveAll(rig.spec.dirs.releases))
 	must(t, os.WriteFile(rig.spec.dirs.releases, []byte("not a dir"), 0o600))
-	err := deployOnceV1(t, rig)
-	var ve validationError
-	if err == nil || errors.As(err, &ve) {
-		t.Fatalf("want an operational failure, got %v", err)
+	if err := deployOnceV1(t, rig); err == nil {
+		t.Fatal("want the box's failure")
 	}
-	rec, rerr := readDeployRecord(rig.spec.dirs, "v1")
-	if rerr != nil || !strings.Contains(string(rec), `"status":"failed"`) {
-		t.Fatalf("a pre-phase operational failure must be recorded: %v %s", rerr, rec)
+	if _, err := readDeployRecord(rig.spec.dirs, "v1"); !errors.Is(err, errNoDeployRecord) {
+		t.Fatalf("a failure before acceptance must write no record: %v", err)
+	}
+
+	rig = newTestRig(t)
+	if err := deployOnceV1(t, rig); err != nil {
+		t.Fatal(err)
+	}
+	must(t, os.RemoveAll(rig.spec.dirs.release("v1"))) // pruned by release GC, say; the record survives
+	before, err := readDeployRecord(rig.spec.dirs, "v1")
+	must(t, err)
+	rig.fetch.err = validationError{"artifact url https://elsewhere.test/a.tgz refused: host not in artifact_allowlist"}
+	if err := deployOnceV1(t, rig); err == nil {
+		t.Fatal("want the allowlist's refusal")
+	}
+	after, err := readDeployRecord(rig.spec.dirs, "v1")
+	must(t, err)
+	if string(after) != string(before) {
+		t.Fatalf("a refusal of the request replaced v1's record:\n%s\n%s", before, after)
 	}
 }
 
@@ -221,7 +239,7 @@ func TestDeployRecordsRefuseAPlantedDirectoryLink(t *testing.T) {
 // record whose version is not the name it sits under is not listed.
 func TestDeployRecordsDoNotFollowARecordLinkOrTrustAForgedVersion(t *testing.T) {
 	d := newAppDirs(t.TempDir(), "demo")
-	dir, err := deploysDir(d)
+	dir, err := recordsDir(d, true)
 	must(t, err)
 	must(t, os.WriteFile(filepath.Join(dir, "other.txt"), []byte(`{"version":"v1","status":"succeeded"}`), 0o600))
 	must(t, os.Symlink("other.txt", deployRecordPath(dir, "v1")))
@@ -237,22 +255,32 @@ func TestDeployRecordsDoNotFollowARecordLinkOrTrustAForgedVersion(t *testing.T) 
 	}
 }
 
-// A planted temp name is never written through: the temp file is
-// created fresh under a random name, and the leftover link is pruned.
-func TestDeployRecordWriteNeverUsesAPlantedTempName(t *testing.T) {
+// The temp file is created fresh under a random name (O_EXCL), so a
+// write leaves no temp file behind and touches nothing planted; a
+// planted temp-suffixed link is pruned, its target untouched.
+func TestDeployRecordWriteLeavesNoTempFileAndPruneRemovesAPlantedOne(t *testing.T) {
 	d := newAppDirs(t.TempDir(), "demo")
-	dir, err := deploysDir(d)
+	dir, err := recordsDir(d, true)
 	must(t, err)
-	target := filepath.Join(dir, "victim.json")
+	target := filepath.Join(d.app, "victim.txt") // outside the records dir: prune must not reach it through the link
 	must(t, os.WriteFile(target, []byte("precious"), 0o600))
-	must(t, os.Symlink("victim.json", filepath.Join(dir, "v1.json.tmp")))
+	must(t, os.Symlink("../victim.txt", filepath.Join(dir, ".record-planted.tmp")))
 	must(t, writeDeployRecord(d, "v1", []byte(`{"version":"v1","status":"failed"}`)))
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") && e.Name() != ".record-planted.tmp" {
+			t.Fatalf("a temp file was left behind: %s", e.Name())
+		}
+	}
 	if b, _ := os.ReadFile(target); string(b) != "precious" {
-		t.Fatalf("the planted temp link's target was rewritten: %q", b)
+		t.Fatalf("the planted link's target was rewritten: %q", b)
 	}
 	pruneDeployRecords(dir, 5, nil, zap.NewNop())
-	if _, err := os.Lstat(filepath.Join(dir, "v1.json.tmp")); !errors.Is(err, fs.ErrNotExist) {
+	if _, err := os.Lstat(filepath.Join(dir, ".record-planted.tmp")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("the planted temp link was not pruned: %v", err)
+	}
+	if b, _ := os.ReadFile(target); string(b) != "precious" {
+		t.Fatalf("pruning the link touched its target: %q", b)
 	}
 }
 
@@ -310,7 +338,7 @@ func TestDeployRecordsRefuseAPlantedAncestorLink(t *testing.T) {
 	must(t, os.MkdirAll(shop.app, 0o750))
 	must(t, os.Symlink("shop", filepath.Join(root, "blog")))
 	blog := newAppDirs(root, "blog")
-	if _, err := deploysDir(blog); err == nil {
+	if _, err := recordsDir(blog, true); err == nil {
 		t.Fatal("blog's deploys dir resolves into shop's and must be refused")
 	}
 	// Refused before anything was created through the link: shop has
@@ -334,8 +362,16 @@ func TestDeployRecordsRefuseAPlantedAncestorLink(t *testing.T) {
 	// An alias on the root itself is the one difference allowed.
 	alias := filepath.Join(t.TempDir(), "alias")
 	must(t, os.Symlink(root, alias))
-	if _, err := deploysDir(newAppDirs(alias, "shop")); err != nil {
+	if _, err := recordsDir(newAppDirs(alias, "shop"), true); err != nil {
 		t.Fatalf("a symlinked root is a legitimate layout: %v", err)
+	}
+	// And a root that is not on disk yet, under a linked ancestor,
+	// resolves as far as it can and is made where it should be.
+	linked := filepath.Join(t.TempDir(), "var")
+	must(t, os.Symlink(root, linked))
+	fresh := newAppDirs(filepath.Join(linked, "not-yet", "liveswap"), "news")
+	if _, err := recordsDir(fresh, true); err != nil {
+		t.Fatalf("a not-yet-existing root under a linked ancestor: %v", err)
 	}
 }
 
@@ -437,5 +473,47 @@ func TestAnOnDiskVersionEqualToAKnownValueIsStillRedacted(t *testing.T) {
 	must(t, err)
 	if body := rig.ma.redactorFor(s).redactJSON(raw); strings.Contains(body, secret) || !strings.Contains(body, "[redacted:TOKEN]") {
 		t.Fatalf("a planted release name exempted the value: %s", body)
+	}
+}
+
+// A FIFO where a record should be must not hold the open — and with
+// it the status, and the deploy lock: it is not a regular file, and
+// the open does not block on it.
+func TestDeployRecordsDoNotBlockOnAPlantedFIFO(t *testing.T) {
+	d := newAppDirs(t.TempDir(), "demo")
+	dir, err := recordsDir(d, true)
+	must(t, err)
+	must(t, syscall.Mkfifo(filepath.Join(dir, "v1.json"), 0o600))
+	must(t, writeDeployRecord(d, "v2", []byte(`{"version":"v2","status":"succeeded"}`)))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if got := listDeploySummaries(d); len(got) != 1 || got[0].Version != "v2" {
+			t.Errorf("list with a FIFO beside a record: %+v", got)
+		}
+		if _, err := readDeployRecord(d, "v1"); err == nil || errors.Is(err, errNoDeployRecord) {
+			t.Errorf("a FIFO under a record's name must be refused outright, got %v", err)
+		}
+		pruneDeployRecords(dir, 5, nil, zap.NewNop())
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a planted FIFO blocked the record store")
+	}
+}
+
+// A status poll makes nothing: an app never deployed has no deploys
+// directory after GET /<app>, and no record is a 404, not a directory.
+func TestStatusDoesNotCreateTheRecordsDir(t *testing.T) {
+	rig := newTestRig(t)
+	if d := rig.ma.status().Deploys; d != nil {
+		t.Fatalf("deploys before any deploy: %+v", d)
+	}
+	if _, err := readDeployRecord(rig.spec.dirs, "v1"); !errors.Is(err, errNoDeployRecord) {
+		t.Fatalf("no store yet: want errNoDeployRecord, got %v", err)
+	}
+	if _, err := os.Lstat(rig.spec.dirs.deploys); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a read created the records dir: %v", err)
 	}
 }

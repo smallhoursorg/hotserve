@@ -378,4 +378,7 @@ func TestReportedKeysMergeWithTheBodys(t *testing.T) {
 	if got := r.redactJSON([]byte(`{"error":"got newvaluenewvalue1234","redacted_env":"not-an-array"}`)); !strings.Contains(got, `"redacted_env":["NEW"]`) {
 		t.Fatalf("a field that is not an array is replaced: %s", got)
 	}
+	if got := r.redactJSON([]byte(`{"error":"got newvaluenewvalue1234","redacted_env":["OLD",5,null]}`)); !strings.Contains(got, `"redacted_env":["NEW","OLD"]`) {
+		t.Fatalf("only the strings of a mixed array are kept: %s", got)
+	}
 }

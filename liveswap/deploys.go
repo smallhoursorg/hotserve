@@ -76,7 +76,7 @@ type deploySummary struct {
 // version, then prunes. Failures are logged, not fatal: the deploy's
 // outcome is already known and the response must say it.
 func (ma *managedApp) recordDeploy(c collaborators, result deployResult) {
-	dir, err := deploysDir(c.spec.dirs)
+	dir, err := recordsDir(c.spec.dirs, true)
 	if err != nil {
 		c.logger.Warn("deploy record: not written", zap.Error(err))
 		return
@@ -173,50 +173,63 @@ func (ma *managedApp) recordRedactor(c collaborators, result deployResult) *reda
 	return newRedactor(kvs, safe)
 }
 
-// deploysDir makes sure the records directory is the directory it
-// names (rule 4) — created if absent, refused if a link or anything
-// else stands in its place, or if any ancestor is a link that lands
-// it elsewhere: `<root>/blog -> <root>/shop` would have blog's
-// deploys list, serve and prune shop's records. The check is the bind
-// sources': canonical against canonical, with an alias on the
-// liveswap root itself the one difference allowed.
-func deploysDir(d appDirs) (string, error) {
-	rootC := d.root
-	if c, err := filepath.EvalSymlinks(d.root); err == nil {
-		rootC = c
-	}
+// recordsDir is the records directory as the directory it names
+// (rule 4): with create, made if absent; refused if a link or anything
+// else stands in its place, or if any ancestor is a link that lands it
+// elsewhere — `<root>/blog -> <root>/shop` would have blog's deploys
+// list, serve and prune shop's records. The check is the bind
+// sources': canonical against canonical (canonicalDeepest, so a root
+// not yet on disk under a linked ancestor resolves as far as it can),
+// with an alias on the liveswap root itself the one difference
+// allowed. Without create — every read — a missing directory is
+// fs.ErrNotExist and nothing is made: a status poll must not create
+// an app's tree.
+func recordsDir(d appDirs, create bool) (string, error) {
+	rootC := canonicalDeepest(d.root)
+	want := filepath.Join(rootC, filepath.Base(d.app), "deploys")
 	// The app dir first, before anything is created through it: an
 	// ancestor link would otherwise have MkdirAll make the directory
 	// where the link points before the check below refused it.
-	if got, err := filepath.EvalSymlinks(d.app); err == nil && got != filepath.Join(rootC, filepath.Base(d.app)) {
+	if got := canonicalDeepest(d.app); got != filepath.Dir(want) {
 		return "", fmt.Errorf("%s resolves to %s (a planted link is not followed)", d.app, got)
 	}
-	if err := os.MkdirAll(d.deploys, 0o750); err != nil {
-		return "", err
+	if create {
+		if err := os.MkdirAll(d.deploys, 0o750); err != nil {
+			return "", err
+		}
 	}
 	fi, err := os.Lstat(d.deploys)
 	if err != nil {
-		return "", err
+		return "", err // fs.ErrNotExist when absent and not creating
 	}
 	if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
 		return "", fmt.Errorf("%s is not a directory (a planted link is not followed)", d.deploys)
 	}
-	got, err := filepath.EvalSymlinks(d.deploys)
-	if err != nil {
-		return "", err
-	}
-	if want := filepath.Join(rootC, filepath.Base(d.app), "deploys"); got != want {
+	if got := canonicalDeepest(d.deploys); got != want {
 		return "", fmt.Errorf("%s resolves to %s, not %s (a planted link is not followed)", d.deploys, got, want)
 	}
 	return d.deploys, nil
 }
 
+// recordHead is what proves a file a record (rule 1): a valid version
+// equal to the name it was read under. The rest of the object is body
+// text for the filter.
+func recordHead(b []byte, name string) (deploySummary, bool) {
+	var s deploySummary
+	if json.Unmarshal(b, &s) != nil || !validVersion(s.Version) || s.Version+".json" != name {
+		return deploySummary{}, false
+	}
+	return s, true
+}
+
 // writeDeployRecord writes the record atomically: a fresh temp file
-// under a random name (never a path something could have planted),
-// then a rename over the record's name. Readable by the hotserve user
-// and its group, like state.json.
+// under a random name (O_EXCL, never a path something could have
+// planted), then a rename over the record's name. Mode 0600 like
+// state.json: a record carries the app's own lines, filtered but
+// still the app's, and nothing but hotserve reads records — the
+// webhook is the interface.
 func writeDeployRecord(d appDirs, version string, filtered []byte) (err error) {
-	dir, err := deploysDir(d)
+	dir, err := recordsDir(d, true)
 	if err != nil {
 		return err
 	}
@@ -231,10 +244,6 @@ func writeDeployRecord(d appDirs, version string, filtered []byte) (err error) {
 		}
 	}()
 	if _, err = f.Write(append(filtered, '\n')); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if err = f.Chmod(0o640); err != nil {
 		_ = f.Close()
 		return err
 	}
@@ -254,7 +263,10 @@ const deployRecordMaxBytes = 1 << 20
 // as the bytes, so a record replaced between two lookups cannot pair
 // one outcome with another's time.
 func openRecord(path string) ([]byte, time.Time, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0) //nolint:gosec // a path under the app's own deploys dir, built here
+	// O_NONBLOCK as elf.go opens the command: a FIFO where a record
+	// should be would otherwise hold the open — and the status, and
+	// the deploy lock — for good.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0) //nolint:gosec // a path under the app's own deploys dir, built here
 	if err != nil {
 		return nil, time.Time{}, err
 	}
@@ -286,23 +298,22 @@ var errNoDeployRecord = errors.New("no deploy recorded for this version")
 // readDeployRecord returns the record's bytes — one JSON object, as
 // written — or errNoDeployRecord.
 func readDeployRecord(d appDirs, version string) (json.RawMessage, error) {
-	dir, err := deploysDir(d)
-	if err != nil {
-		return nil, err
-	}
-	b, _, err := openRecord(deployRecordPath(dir, version))
+	dir, err := recordsDir(d, false)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, errNoDeployRecord
 	}
 	if err != nil {
 		return nil, err
 	}
-	// Rule 1: an object naming the version it was asked for, or a
-	// stale, planted or corrupted file under the name — not a record.
-	var head struct {
-		Version string `json:"version"`
+	name := versionPathComponent(version) + ".json"
+	b, _, err := openRecord(filepath.Join(dir, name))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, errNoDeployRecord
 	}
-	if err := json.Unmarshal(b, &head); err != nil || head.Version != version {
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := recordHead(b, name); !ok {
 		return nil, fmt.Errorf("deploy record for %s is not that version's record", version)
 	}
 	return json.RawMessage(b), nil
@@ -311,7 +322,7 @@ func readDeployRecord(d appDirs, version string) (json.RawMessage, error) {
 // listDeploySummaries reads every record's outcome, newest first by
 // the record's write time. nil when there is no directory yet.
 func listDeploySummaries(d appDirs) []deploySummary {
-	dir, err := deploysDir(d)
+	dir, err := recordsDir(d, false)
 	if err != nil {
 		return nil
 	}
@@ -332,16 +343,22 @@ func listDeploySummaries(d appDirs) []deploySummary {
 		if err != nil {
 			continue // a link, or not a record
 		}
-		var s deploySummary
-		// Rule 1: a valid version equal to the name it was read from,
-		// or it is not a record of ours. What its version then does in
-		// a response is rule 2's, in redactorFor.
-		if json.Unmarshal(b, &s) != nil || !validVersion(s.Version) || s.Version+".json" != e.Name() {
+		// What its version then does in a response is rule 2's, in
+		// redactorFor.
+		s, ok := recordHead(b, e.Name())
+		if !ok {
 			continue
 		}
 		recs = append(recs, dated{s, written})
 	}
-	sort.Slice(recs, func(i, j int) bool { return recs[i].written.After(recs[j].written) })
+	// Newest first; two written within one timestamp tick by name, so
+	// the order is the same on every read.
+	sort.Slice(recs, func(i, j int) bool {
+		if !recs[i].written.Equal(recs[j].written) {
+			return recs[i].written.After(recs[j].written)
+		}
+		return recs[i].summary.Version > recs[j].summary.Version
+	})
 	out := make([]deploySummary, len(recs))
 	for i, r := range recs {
 		out[i] = r.summary
@@ -385,10 +402,7 @@ func pruneDeployRecords(dir string, keep int, onDisk []string, logger *zap.Logge
 		// its name would otherwise crowd out the records the slots are
 		// for. Such an entry is not ours to keep either; it goes.
 		b, written, err := openRecord(filepath.Join(dir, e.Name()))
-		var head struct {
-			Version string `json:"version"`
-		}
-		if err != nil || json.Unmarshal(b, &head) != nil || !validVersion(head.Version) || head.Version+".json" != e.Name() {
+		if _, ok := recordHead(b, e.Name()); err != nil || !ok {
 			if rmErr := os.Remove(filepath.Join(dir, e.Name())); rmErr == nil {
 				logger.Info("deploy record: removed an entry that is not a record", zap.String("file", e.Name()))
 			}
@@ -396,7 +410,12 @@ func pruneDeployRecords(dir string, keep int, onDisk []string, logger *zap.Logge
 		}
 		others = append(others, rec{e.Name(), written})
 	}
-	sort.Slice(others, func(i, j int) bool { return others[i].modTime.After(others[j].modTime) })
+	sort.Slice(others, func(i, j int) bool {
+		if !others[i].modTime.Equal(others[j].modTime) {
+			return others[i].modTime.After(others[j].modTime)
+		}
+		return others[i].name > others[j].name
+	})
 	for i, r := range others {
 		if i < keep {
 			continue
