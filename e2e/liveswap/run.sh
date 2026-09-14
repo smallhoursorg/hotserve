@@ -337,7 +337,7 @@ example_scenario() { # <app> <port> <deploy.sh path> <version prefix>
 		fail "$app: in Actions, deploy.sh exited 0 on a failed deploy"
 	else
 		case "$(cat /tmp/ex-deploy.out)" in
-		*'::group::deploying '*'"error"'*404*'::endgroup::'*'::error title=hotserve%3A '*' failed::in '*': '*404*)
+		*'::group::deploying '*'"error"'*404*'::endgroup::'*'::error title=hotserve%3A '*' failed::in downloading: '*404*)
 			pass "$app: in Actions, a failure is grouped and annotated with its phase and cause" ;;
 		*) fail "$app: Actions-mode failure output: $(cat /tmp/ex-deploy.out)" ;;
 		esac
