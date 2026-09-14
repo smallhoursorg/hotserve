@@ -554,8 +554,8 @@ func (a *App) Validate() error {
 		if cfg.Keep < 1 {
 			return fmt.Errorf("app %s: keep must be at least 1, got %d", name, cfg.Keep)
 		}
-		if n := *cfg.DeployLogLines; n < 0 || n > 1000 {
-			return fmt.Errorf("app %s: deploy_log_lines must be between 0 (off) and 1000, got %d", name, n)
+		if n := cfg.DeployLogLines; n != nil && (*n < 0 || *n > 1000) {
+			return fmt.Errorf("app %s: deploy_log_lines must be between 0 (off) and 1000, got %d", name, *n)
 		}
 		if cfg.MaxArtifactSize < 1 {
 			return fmt.Errorf("app %s: max_artifact_size must be positive, got %d", name, cfg.MaxArtifactSize)
