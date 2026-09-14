@@ -93,30 +93,30 @@ began=$(date +%s)
 body=$(mktemp)
 # The stream: curl prints each line as it arrives and tee keeps a
 # copy (curl's own errors go to stderr, printed but kept out of the
-# copy), and curl's exit status is kept too — a pipeline's is tee's.
+# copy), and the response headers are kept in a file of their own.
 # The outcome is the last line's http_status — a stream is 200 from
-# its first byte, so the status line says nothing. A body with no such
-# line did not stream: a box without stream support answered the
-# single response, and curl's status is the outcome (--fail-with-body
-# makes a refusal non-zero); or the stream was cut short, which the
-# missing terminal line makes a failure.
-rcfile=$(mktemp)
-trap 'rm -f "$body" "$rcfile"' EXIT
+# its first byte, so the status line says nothing. A body with no
+# such line and no phase line did not stream: a box without stream
+# support answered the single response, and its status line is the
+# outcome (a 3xx from an intermediary is not a deploy). A phase line
+# with no terminal line is a stream cut short: a failure.
+hdrs=$(mktemp)
+trap 'rm -f "$body" "$hdrs"' EXIT
 stream() { # <curl args...>: runs the request, prints it, keeps it
-	{
-		curl --fail-with-body --silent --show-error --no-buffer --max-time 600 \
-			-H "Authorization: Bearer $token" -H "Accept: application/x-ndjson" \
-			"$@"
-		echo $? >"$rcfile"
-	} | tee "$body"
+	# curl's own status is not needed — the headers say what happened
+	# — and under set -e a failing curl must not end the pipeline
+	# before tee has the body, hence the || true.
+	curl --fail-with-body --silent --show-error --no-buffer --max-time 600 \
+		-H "Authorization: Bearer $token" -H "Accept: application/x-ndjson" \
+		-D "$hdrs" "$@" | tee "$body" || true
 }
-outcome() { # the http_status of a complete last line; else 200 for a single response curl accepted, else 0
+outcome() { # the http_status of a complete last line; else a single response's status; else 0
 	# The whole terminal suffix, brace included: a connection cut after
 	# the digits must not read as an outcome.
 	code=$(tail -n 1 "$body" | sed -n 's/.*,"event":"done","http_status":\([0-9][0-9]*\)}$/\1/p')
 	if [ -n "$code" ]; then echo "$code"
-	elif [ "$(cat "$rcfile" 2>/dev/null)" = 0 ] && ! grep -q '"event":"phase"' "$body"; then echo 200
-	else echo 0
+	elif grep -q '"event":"phase"' "$body"; then echo 0
+	else sed -n 's/^HTTP\/[0-9.]* \([0-9][0-9][0-9]\).*/\1/p' "$hdrs" | tail -n 1 | grep . || echo 0
 	fi
 }
 finish() { # <what>: dresses the outcome, exits on failure
