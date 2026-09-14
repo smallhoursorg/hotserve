@@ -237,7 +237,7 @@ var (
 // status outside the vocabulary, is left as it is for the caller's
 // own checks to refuse.
 func restoreVocabulary(filtered, status, phase string) string {
-	if !recordStatuses[status] || (phase != "" && !recordPhases[phase]) {
+	if !recordStatuses[status] || (phase != "" && (status != "failed" || !recordPhases[phase])) {
 		return filtered
 	}
 	var obj map[string]json.RawMessage
@@ -267,10 +267,11 @@ func recordHead(b []byte, name string) (deploySummary, bool) {
 	if json.Unmarshal(b, &s) != nil || !validVersion(s.Version) || s.Version+".json" != name {
 		return deploySummary{}, false
 	}
-	// And an outcome in the vocabulary: a status that is one, a phase
-	// that is one or absent — the writer guarantees both (rule 3), so
-	// a file without them is not a record of ours.
-	if !recordStatuses[s.Status] || (s.Phase != "" && !recordPhases[s.Phase]) {
+	// And an outcome in the vocabulary: a status that is one, and a
+	// phase — the one a failure reached — only on a failure, and one
+	// of the vocabulary. The writer guarantees all of it (rule 3), so
+	// a file without is not a record of ours.
+	if !recordStatuses[s.Status] || (s.Phase != "" && (s.Status != "failed" || !recordPhases[s.Phase])) {
 		return deploySummary{}, false
 	}
 	return s, true

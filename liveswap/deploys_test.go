@@ -579,7 +579,8 @@ func TestDeployRecordMustHaveAVocabularyOutcome(t *testing.T) {
 	must(t, writeDeployRecord(d, "v1", []byte(`{"version":"v1"}`)))
 	must(t, writeDeployRecord(d, "v2", []byte(`{"version":"v2","status":"failed","phase":"idle"}`)))
 	must(t, writeDeployRecord(d, "v3", []byte(`{"version":"v3","status":"failed"}`)))
-	for _, v := range []string{"v1", "v2"} {
+	must(t, writeDeployRecord(d, "v4", []byte(`{"version":"v4","status":"succeeded","phase":"starting"}`))) // a success reached no failing phase
+	for _, v := range []string{"v1", "v2", "v4"} {
 		if _, err := readDeployRecord(d, v); err == nil || errors.Is(err, errNoDeployRecord) {
 			t.Fatalf("%s: not vocabulary, must be refused outright, got %v", v, err)
 		}
