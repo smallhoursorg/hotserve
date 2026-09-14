@@ -145,3 +145,28 @@ func TestDeployRecordsAreNotPrunedWhenReleasesAreUnreadable(t *testing.T) {
 		t.Fatalf("records after an unreadable releases dir = %d, want all 4 kept", got)
 	}
 }
+
+// A refusal before any phase — re-posting the running version, or a
+// version already on disk — writes no record: the record of the deploy
+// that put the version there stays as it was.
+func TestDeployRecordSurvivesARefusedRepost(t *testing.T) {
+	rig := newTestRig(t)
+	if err := deployOnceV1(t, rig); err != nil {
+		t.Fatal(err)
+	}
+	before, err := readDeployRecord(rig.spec.dirs.deploys, "v1")
+	must(t, err)
+	err = deployOnceV1(t, rig)
+	var ve validationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("re-posting the running version should be refused: %v", err)
+	}
+	after, err := readDeployRecord(rig.spec.dirs.deploys, "v1")
+	must(t, err)
+	if string(after) != string(before) || !strings.Contains(string(after), `"status":"succeeded"`) {
+		t.Fatalf("the refusal replaced v1's record:\n%s\n%s", before, after)
+	}
+	if d := rig.ma.status().Deploys; len(d) != 1 || d[0].Status != "succeeded" {
+		t.Fatalf("deploys = %+v", d)
+	}
+}

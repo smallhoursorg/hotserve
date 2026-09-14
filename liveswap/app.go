@@ -640,7 +640,13 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		ma.lastDeploy = &result
 		ma.phase = "idle"
 		ma.mu.Unlock()
-		ma.recordDeploy(c, result)
+		// A refusal before any phase — the version already running or
+		// already on disk — is about the request, not the version:
+		// it must not replace the record of the deploy that put the
+		// version there.
+		if len(result.Phases) > 0 {
+			ma.recordDeploy(c, result)
+		}
 	}()
 
 	old := ma.currentInstance()

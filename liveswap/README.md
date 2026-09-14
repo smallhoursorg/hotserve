@@ -881,7 +881,9 @@ curl --fail-with-body -H "Authorization: Bearer $JWT" \
 ```
 
 The record is the latest deploy of that version (a rollback to it
-replaces it); a version never deployed is a `404`. `GET /<app>` lists
+replaces it; a request refused before any phase — the version already
+running, or already on disk — writes none); a version never deployed
+is a `404`. `GET /<app>` lists
 every recorded version's outcome in `deploys`, newest first:
 `version`, `status`, the failing `phase`, `deployed_by`, and the
 times. Records are kept for every version still on disk plus the

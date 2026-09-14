@@ -276,6 +276,11 @@ func (h *Handler) deployRecord(w http.ResponseWriter, ma *managedApp, version st
 		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("deploy query param must match %s", versionRe)}, ma.redactorFor(statusSnapshot{}))
 	}
 	c := ma.snapshot()
+	if c.spec == nil {
+		// An app the pool still holds but no loaded config describes
+		// (status() makes the same allowance): nowhere to read from.
+		return respondJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "app has no configuration loaded"}, ma.redactorFor(statusSnapshot{}))
+	}
 	rec, err := readDeployRecord(c.spec.dirs.deploys, version)
 	// The requested version is a name the filter must let through,
 	// whether or not the status still lists it by the time it is

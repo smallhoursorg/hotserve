@@ -759,3 +759,14 @@ func TestDeployRecordVersionsAreNamesNotSecrets(t *testing.T) {
 		}
 	}
 }
+
+// An app the pool holds without a loaded spec answers the record route
+// with a 503, as its status answers without one — never a panic.
+func TestWebhookDeployRecordWithoutASpecIs503(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.app.managed["bare"] = &managedApp{name: "bare"}
+	w := do(t, h, http.MethodGet, "/bare?deploy=v1", globalToken(t), "")
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("record route without a spec: %d %s", w.Code, w.Body.String())
+	}
+}
