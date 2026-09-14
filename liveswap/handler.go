@@ -335,11 +335,20 @@ func deployOutcome(ma *managedApp, err error) (int, any, *redactor) {
 // being the body the single response carries, plus its status code.
 const ndjson = "application/x-ndjson"
 
-// wantsStream reports whether the request asked for the stream. The
-// header is read loosely — a list, a parameter — because clients
-// compose it loosely; nothing but the media type's presence matters.
+// wantsStream reports whether the request asked for the stream: the
+// media type, exactly, among the items of every Accept header sent
+// (a list, with or without parameters), and nothing that merely
+// resembles it.
 func wantsStream(r *http.Request) bool {
-	return strings.Contains(strings.ToLower(r.Header.Get("Accept")), ndjson)
+	for _, v := range r.Header.Values("Accept") {
+		for _, item := range strings.Split(v, ",") {
+			mt, _, _ := strings.Cut(item, ";")
+			if strings.EqualFold(strings.TrimSpace(mt), ndjson) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // deployStream writes a deploy as JSON lines. The stream begins with
@@ -360,21 +369,17 @@ func newDeployStream(w http.ResponseWriter, ma *managedApp) *deployStream {
 	return &deployStream{w: w, ma: ma}
 }
 
-// line writes one object and flushes it to the client. A write that
-// fails is a client gone; the deploy carries on (its context says
-// when to stop) and the last line's write reports it.
-func (s *deployStream) line(v any, rd *redactor) error {
+// write sends one filtered JSON object as a line and flushes it. A
+// write that fails is a client gone; the deploy carries on (its
+// context says when to stop) and the last line's write reports it.
+func (s *deployStream) write(filtered string) error {
 	if !s.begun {
 		s.begun = true
 		s.w.Header().Set("Content-Type", ndjson)
 		s.w.Header().Set("Cache-Control", "no-store")
 		s.w.WriteHeader(http.StatusOK)
 	}
-	raw, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	if _, err := s.w.Write(append([]byte(rd.redactJSON(raw)), '\n')); err != nil {
+	if _, err := s.w.Write(append([]byte(filtered), '\n')); err != nil {
 		return err
 	}
 	_ = http.NewResponseController(s.w).Flush()
@@ -383,7 +388,11 @@ func (s *deployStream) line(v any, rd *redactor) error {
 
 // phase is the pipeline's listener: one line per phase entered.
 func (s *deployStream) phase(phase string) {
-	_ = s.line(map[string]any{"event": "phase", "phase": phase, "at": time.Now().UTC()}, s.ma.redactorFor(statusSnapshot{}))
+	raw, err := json.Marshal(map[string]any{"event": "phase", "phase": phase, "at": time.Now().UTC()})
+	if err != nil {
+		return
+	}
+	_ = s.write(s.ma.redactorFor(statusSnapshot{}).redactJSON(raw))
 }
 
 // finish writes the outcome as the last line: the single response's
@@ -397,16 +406,19 @@ func (s *deployStream) finish(ma *managedApp, err error) error {
 	if !s.begun {
 		return respondJSON(s.w, code, body, rd)
 	}
-	// The single response's bytes with two fields appended, not a
-	// re-marshalled map: the fields keep the order the single response
-	// has, which a client reading "the last phase" by position relies
-	// on (the examples' deploy.sh does).
+	// The single response's bytes, filtered, with two fields appended
+	// after the filter: not a re-marshalled map, so the fields keep the
+	// order the single response has (a client reading "the last phase"
+	// by position relies on it — the examples' deploy.sh does); and
+	// after, so the outcome's markers survive a filter that withholds
+	// the whole body (an unreadable env_file). redactJSON always
+	// returns one JSON object, so the closing brace is where it ends.
 	raw, mErr := json.Marshal(body)
 	if mErr != nil {
 		return mErr
 	}
-	tail := fmt.Sprintf(`,"event":"done","http_status":%d}`, code)
-	return s.line(json.RawMessage(append(raw[:len(raw)-1], tail...)), rd)
+	filtered := rd.redactJSON(raw)
+	return s.write(fmt.Sprintf(`%s,"event":"done","http_status":%d}`, filtered[:len(filtered)-1], code))
 }
 
 // isGzipUpload reports whether the request body is a pushed artifact.

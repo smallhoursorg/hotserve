@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -648,5 +649,47 @@ func TestWebhookStreamRefusedBeforeAnyPhaseKeepsItsCode(t *testing.T) {
 	w, lines := streamLines(t, h)
 	if w.Code != 422 || w.Header().Get("Content-Type") != "application/json" || len(lines) != 1 || lines[0]["event"] != nil || !strings.Contains(lines[0]["error"].(string), "already running") {
 		t.Fatalf("status %d, content-type %q, lines %v", w.Code, w.Header().Get("Content-Type"), lines)
+	}
+}
+
+// The stream is asked for by the media type exactly, in any Accept
+// header sent: a list, a parameter, a second header; not a lookalike.
+func TestWantsStreamReadsAcceptExactly(t *testing.T) {
+	cases := []struct {
+		accept []string
+		want   bool
+	}{
+		{[]string{"application/x-ndjson"}, true},
+		{[]string{"Application/X-NDJSON; q=0.9"}, true},
+		{[]string{"application/json, application/x-ndjson"}, true},
+		{[]string{"application/json", "application/x-ndjson"}, true},
+		{[]string{"application/x-ndjson-backup"}, false},
+		{[]string{"application/json"}, false},
+		{nil, false},
+	}
+	for _, tc := range cases {
+		r := httptest.NewRequest(http.MethodPost, "/demo", nil)
+		for _, a := range tc.accept {
+			r.Header.Add("Accept", a)
+		}
+		if got := wantsStream(r); got != tc.want {
+			t.Errorf("Accept %q: wantsStream = %v, want %v", tc.accept, got, tc.want)
+		}
+	}
+}
+
+// A filter that withholds the whole body — the app's env_file cannot
+// be read, so its values are unknown — still leaves the last line's
+// markers in place: the outcome is appended after the filter.
+func TestWebhookStreamLastLineSurvivesWithholding(t *testing.T) {
+	h, rig := newTestHandler(t)
+	rig.spec.envFile = filepath.Join(t.TempDir(), "missing.env")
+	w, lines := streamLines(t, h)
+	last := lines[len(lines)-1]
+	if w.Code != 200 || last["event"] != "done" || last["http_status"] != float64(500) {
+		t.Fatalf("status %d, last line = %v", w.Code, last)
+	}
+	if _, withheld := last["status"]; withheld {
+		t.Fatalf("the body should have been withheld while the env_file is unreadable: %v", last)
 	}
 }
