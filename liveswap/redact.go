@@ -257,7 +257,7 @@ var shapeRules = []struct {
 	// layer 1 left there, and not a path or placeholder (an argv flag
 	// such as --api-key=/etc/hotserve/app.key names a file, not a
 	// secret).
-	{regexp.MustCompile(`(?i)\b([a-z0-9_-]*(?:password|passwd|secret|api[_-]?key|access[_-]?token|private[_-]?key)[a-z0-9_-]*)("?\s*[=:]\s*"?)[^\s"',;\[/{][^\s"',;]{7,}`), "$1$2[redacted:credential]"},
+	{regexp.MustCompile(`(?i)\b([a-z0-9_-]*(?:password|passwd|secret|api[_-]?key|access[_-]?token|private[_-]?key)[a-z0-9_-]*)(["']?\s*[=:]\s*["']?)[^\s"',;\[/{][^\s"',;]{7,}`), "$1$2[redacted:credential]"},
 }
 
 // basicCredentialRe finds "Basic <base64>"; the decode check is in
@@ -417,12 +417,17 @@ func (r *redactor) redactJSON(raw []byte) string {
 	seen := map[string]bool{}
 	var body string
 	if r != nil && r.withhold != "" {
-		// Marshalled, not concatenated: the reason carries a path.
+		// Marshalled, not concatenated: the reason carries a path. And
+		// filtered like any body: the path, or the parse error quoting
+		// a line of the file, can carry a token-shaped string.
 		b, err := json.Marshal(map[string]string{"error": "response withheld: " + r.withhold})
 		if err != nil {
 			return `{"error":"[#0]"}`
 		}
-		body = string(b)
+		body = r.filter(string(b), seen)
+		if !json.Valid([]byte(body)) {
+			body = `{"error":"response withheld: the app's env_file could not be read"}`
+		}
 	} else {
 		body = r.filter(string(raw), seen)
 		if !json.Valid([]byte(body)) {

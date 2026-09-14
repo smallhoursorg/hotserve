@@ -189,6 +189,13 @@ func TestRedactJSONWithholdsWhenTheEnvFileIsUnread(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &obj); err != nil || !strings.Contains(obj["error"], `we"ird\path.env`) {
 		t.Errorf("reason lost: %s", out)
 	}
+	// And the diagnostic is filtered like any body: a token-shaped
+	// segment in the path, or a line the parse error quotes, is masked.
+	r.withhold = `/etc/hotserve/app.env:3: "TOKEN ghp_` + strings.Repeat("a1B2", 9) + `" is not KEY=VALUE`
+	out = r.redactJSON([]byte(`{}`))
+	if !json.Valid([]byte(out)) || strings.Contains(out, "ghp_") || !strings.Contains(out, "[redacted:") {
+		t.Errorf("withhold diagnostic not filtered: %s", out)
+	}
 }
 
 func TestRedactorShortSafeValuesDoNotSplitCredentials(t *testing.T) {
@@ -220,6 +227,7 @@ func TestRedactorShapes(t *testing.T) {
 		{"prefixed key", "DB_PASSWORD=correct-horse-battery", "DB_PASSWORD=[redacted:credential]"},
 		{"aws secret key", "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "AWS_SECRET_ACCESS_KEY=[redacted:credential]"}, // gitleaks:allow
 		{"json quoted", `{"password":"correct-horse-battery","x":1}`, `{"password":"[redacted:credential]","x":1}`},
+		{"single quoted", `password='correct-horse-battery' next`, `password='[redacted:credential]' next`},
 		{"a path is not a credential", "--api-key=/etc/hotserve/app.key", "--api-key=/etc/hotserve/app.key"},
 		{"a placeholder is not a credential", "api_key={shared_dir}/key", "api_key={shared_dir}/key"},
 		{"a marker is not re-redacted", "API_KEY=[redacted:API_KEY] next", "API_KEY=[redacted:API_KEY] next"},
