@@ -28,9 +28,12 @@ Cmnd_Alias HOTSERVE_CONFIG = \
 # an env file: empty, 0640 root:hotserve, under /etc/hotserve — every
 # argument but the name is literal, and the regex spans the whole
 # argument string, so a second path, another mode or another owner
-# does not match. It adds no reach: an administrator can already set
-# any app's environment with an `env` line in the Caddyfile.
+# does not match. -T makes the last argument the file itself: without
+# it, install would treat an existing directory of that name as the
+# place to put a file called "null". It adds no reach: an administrator
+# can already set any app's environment with an `env` line in the
+# Caddyfile.
 Cmnd_Alias HOTSERVE_SECRETS = \
 	sudoedit ^/etc/hotserve/[A-Za-z0-9_-]+\.env$, \
-	/usr/bin/install ^-m 0640 -o root -g hotserve /dev/null /etc/hotserve/[A-Za-z0-9_-]+\.env$
+	/usr/bin/install ^-m 0640 -o root -g hotserve -T /dev/null /etc/hotserve/[A-Za-z0-9_-]+\.env$
 %hotserve-admin ALL=(root) NOPASSWD: HOTSERVE_CONFIG, HOTSERVE_SECRETS

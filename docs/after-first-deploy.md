@@ -105,7 +105,7 @@ one: the sudoers file admits exactly one way to create the file and
 one way to edit it.
 
 ```sh
-sudo install -m 0640 -o root -g hotserve /dev/null /etc/hotserve/example.env   # once: empty, root:hotserve
+sudo install -m 0640 -o root -g hotserve -T /dev/null /etc/hotserve/example.env   # once: empty, root:hotserve
 sudoedit /etc/hotserve/example.env      # one KEY=VALUE per line
 ```
 

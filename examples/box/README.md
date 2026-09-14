@@ -145,7 +145,7 @@ the file and edit it; both are its exact lines, so nothing about the
 mode, the owner or the directory is theirs to choose:
 
 ```sh
-sudo install -m 0640 -o root -g hotserve /dev/null /etc/hotserve/example.env   # once: empty, root:hotserve
+sudo install -m 0640 -o root -g hotserve -T /dev/null /etc/hotserve/example.env   # once: empty, root:hotserve
 sudoedit /etc/hotserve/example.env      # DATABASE_URL=postgres://…
 ```
 
