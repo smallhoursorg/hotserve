@@ -137,8 +137,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 
 	switch r.Method {
 	case http.MethodGet:
-		if v := r.URL.Query().Get("deploy"); v != "" {
-			return h.deployRecord(w, ma, v)
+		if r.URL.Query().Has("deploy") {
+			return h.deployRecord(w, ma, r.URL.Query().Get("deploy"))
 		}
 		s := ma.status()
 		return respondJSON(w, http.StatusOK, s, ma.redactorFor(s))
@@ -272,7 +272,11 @@ func (h *Handler) deployRecord(w http.ResponseWriter, ma *managedApp, version st
 	}
 	c := ma.snapshot()
 	rec, err := readDeployRecord(c.spec.dirs.deploys, version)
+	// The requested version is a name the filter must let through,
+	// whether or not the status still lists it by the time it is
+	// built (a prune, a reload between the read and the response).
 	s := ma.status()
+	s.Deploys = append(s.Deploys, deploySummary{Version: version})
 	switch {
 	case errors.Is(err, errNoDeployRecord):
 		return respondJSON(w, http.StatusNotFound, map[string]string{"error": fmt.Sprintf("no deploy recorded for version %s", version)}, ma.redactorFor(s))

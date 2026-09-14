@@ -337,6 +337,9 @@ func (ma *managedApp) redactorFor(s statusSnapshot) *redactor {
 	kvs := append([]string(nil), ma.secrets...)
 	ma.secretsMu.Unlock()
 	safe := append([]string{ma.name, s.CurrentVersion}, s.AvailableVersions...)
+	for _, d := range s.Deploys {
+		safe = append(safe, d.Version) // a recorded version, pruned or not, is a name
+	}
 	if s.LastDeploy != nil {
 		safe = append(safe, s.LastDeploy.Version)
 	}

@@ -562,7 +562,33 @@ func TestWebhookDeployRecordRoute(t *testing.T) {
 	if w := do(t, h, http.MethodGet, "/demo?deploy=../state", appToken(t), ""); w.Code != 422 {
 		t.Fatalf("malformed: %d %s", w.Code, w.Body.String())
 	}
+	if w := do(t, h, http.MethodGet, "/demo?deploy=", appToken(t), ""); w.Code != 422 {
+		t.Fatalf("an empty deploy query is malformed, not the status: %d %s", w.Code, w.Body.String())
+	}
 	if w := do(t, h, http.MethodGet, "/demo", appToken(t), ""); !strings.Contains(w.Body.String(), `"deploys":[{"version":"v1","status":"failed"`) {
 		t.Fatalf("status lacks deploys: %s", w.Body.String())
+	}
+}
+
+// A recorded version's name survives the filter's entropy layer in the
+// status list and in its own record, as the running and on-disk
+// versions' names do — a commit SHA is a name, not a secret.
+func TestDeployRecordVersionsAreNamesNotSecrets(t *testing.T) {
+	h, rig := newTestHandler(t)
+	sha := "9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e"
+	rig.runner.startErr = errors.New("boom")
+	if w := do(t, h, http.MethodPost, "/demo", appToken(t), `{"url":"https://x/a.tgz","version":"`+sha+`"}`); w.Code != 500 {
+		t.Fatalf("setup deploy: %d %s", w.Code, w.Body.String())
+	}
+	rig.runner.startErr = nil
+	if w := do(t, h, http.MethodPost, "/demo", appToken(t), `{"url":"https://x/b.tgz","version":"v2"}`); w.Code != 200 {
+		t.Fatalf("second deploy: %d %s", w.Code, w.Body.String())
+	}
+	// The failed SHA's release is gone; it is in no field but deploys.
+	for _, path := range []string{"/demo", "/demo?deploy=" + sha} {
+		w := do(t, h, http.MethodGet, path, appToken(t), "")
+		if w.Code != 200 || !strings.Contains(w.Body.String(), sha) || strings.Contains(w.Body.String(), "[masked") {
+			t.Fatalf("%s: %d %s", path, w.Code, w.Body.String())
+		}
 	}
 }
