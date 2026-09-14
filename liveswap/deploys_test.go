@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,7 +99,7 @@ func TestPruneDeployRecordsKeepsOnDiskAndNewest(t *testing.T) {
 		must(t, writeDeployRecord(dir, v, []byte(`{"version":"`+v+`"}`)))
 		must(t, os.Chtimes(deployRecordPath(dir, v), base.Add(time.Duration(i)*time.Minute), base.Add(time.Duration(i)*time.Minute)))
 	}
-	must(t, os.WriteFile(filepath.Join(dir, "x.json.tmp"), []byte("{"), 0o600)) // a write that never got its rename
+	must(t, os.WriteFile(filepath.Join(dir, ".record-123.tmp"), []byte("{"), 0o600)) // a write that never got its rename
 	pruneDeployRecords(dir, 1, []string{"a"}, zap.NewNop())
 	entries, _ := os.ReadDir(dir)
 	var left []string
@@ -187,5 +188,57 @@ func TestDeployRecordKeepsAPrePhaseFailure(t *testing.T) {
 	rec, rerr := readDeployRecord(rig.spec.dirs.deploys, "v1")
 	if rerr != nil || !strings.Contains(string(rec), `"status":"failed"`) {
 		t.Fatalf("a pre-phase operational failure must be recorded: %v %s", rerr, rec)
+	}
+}
+
+// A link planted where the records directory should be — by an app
+// that could write its app dir before sandboxing existed — is not
+// followed: nothing is written through it, read through it, or listed
+// from it.
+func TestDeployRecordsRefuseAPlantedDirectoryLink(t *testing.T) {
+	rig := newTestRig(t)
+	must(t, os.MkdirAll(rig.spec.dirs.app, 0o750))
+	must(t, os.Symlink("..", rig.spec.dirs.deploys)) // deploys -> the app dir: version "state" would be state.json
+	rig.ma.recordDeploy(rig.ma.snapshot(), deployResult{Version: "state", Status: "failed"})
+	if _, err := os.Lstat(filepath.Join(rig.spec.dirs.app, "state.json")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a record was written through the planted link: %v", err)
+	}
+	if _, err := readDeployRecord(rig.spec.dirs.deploys, "state"); err == nil || errors.Is(err, errNoDeployRecord) {
+		t.Fatalf("a read through the planted link must be refused outright, got %v", err)
+	}
+	if got := listDeploySummaries(rig.spec.dirs.deploys); got != nil {
+		t.Fatalf("listed through the planted link: %+v", got)
+	}
+}
+
+// A record name that is a link is neither served nor summarised, and a
+// record whose version is not the name it sits under is not listed.
+func TestDeployRecordsDoNotFollowARecordLinkOrTrustAForgedVersion(t *testing.T) {
+	dir := t.TempDir()
+	must(t, os.WriteFile(filepath.Join(dir, "other.txt"), []byte(`{"version":"v1","status":"succeeded"}`), 0o600))
+	must(t, os.Symlink("other.txt", deployRecordPath(dir, "v1")))
+	if _, err := readDeployRecord(dir, "v1"); err == nil || errors.Is(err, errNoDeployRecord) {
+		t.Fatalf("a linked record must be refused outright, got %v", err)
+	}
+	must(t, writeDeployRecord(dir, "v2", []byte(`{"version":"AKIAFORGEDSECRETVALUE","status":"succeeded"}`)))
+	if got := listDeploySummaries(dir); len(got) != 0 {
+		t.Fatalf("a linked record or a forged version reached the list: %+v", got)
+	}
+}
+
+// A planted temp name is never written through: the temp file is
+// created fresh under a random name, and the leftover link is pruned.
+func TestDeployRecordWriteNeverUsesAPlantedTempName(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "victim.json")
+	must(t, os.WriteFile(target, []byte("precious"), 0o600))
+	must(t, os.Symlink("victim.json", filepath.Join(dir, "v1.json.tmp")))
+	must(t, writeDeployRecord(dir, "v1", []byte(`{"version":"v1","status":"failed"}`)))
+	if b, _ := os.ReadFile(target); string(b) != "precious" {
+		t.Fatalf("the planted temp link's target was rewritten: %q", b)
+	}
+	pruneDeployRecords(dir, 5, nil, zap.NewNop())
+	if _, err := os.Lstat(filepath.Join(dir, "v1.json.tmp")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the planted temp link was not pruned: %v", err)
 	}
 }

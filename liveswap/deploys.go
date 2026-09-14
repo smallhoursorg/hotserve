@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"go.uber.org/zap"
@@ -32,6 +34,16 @@ import (
 // still on disk, plus the newest `keep` others — failed deploys, whose
 // release is removed at once, and versions release GC has pruned — so
 // the directory is bounded by 2×keep whatever the deploy rate.
+//
+// Nothing here follows a symlink. The app dir was writable by the app
+// before sandboxing existed, and a link planted then — `deploys ->
+// ..` so that a version named "state" rewrites state.json, a record
+// name pointing at another file to be served or to forge a summary —
+// is exactly what the first use after an upgrade must not follow, as
+// resolveBindSources (sandbox.go) says of the bind sources. The
+// directory must be a directory, a record must be a regular file, a
+// temp file is created fresh under a random name, and a summary's
+// version must be the name it was read from.
 
 // deploySummary is a record's outcome as the status lists it. The
 // times are carried as the record has them, not parsed: a record is
@@ -52,6 +64,10 @@ type deploySummary struct {
 // outcome is already known and the response must say it.
 func (ma *managedApp) recordDeploy(c collaborators, result deployResult) {
 	dir := c.spec.dirs.deploys
+	if err := deploysDir(dir); err != nil {
+		c.logger.Warn("deploy record: not written", zap.Error(err))
+		return
+	}
 	raw, err := json.Marshal(result)
 	if err != nil {
 		c.logger.Warn("deploy record: cannot encode", zap.Error(err))
@@ -90,18 +106,83 @@ func releaseNames(releasesDir string) ([]string, error) {
 	return names, nil
 }
 
-// writeDeployRecord writes the record atomically (temp file + rename),
-// readable by the hotserve user and its group, like state.json.
-func writeDeployRecord(dir, version string, filtered []byte) error {
+// deploysDir makes sure the records directory is a directory of its
+// own — created if absent, refused if a link or anything else stands
+// in its place.
+func deploysDir(dir string) error {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
 	}
-	path := deployRecordPath(dir, version)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append(filtered, '\n'), 0o640); err != nil { //nolint:gosec // group-readable on purpose: the administrator's group reads records as it reads state.json
+	fi, err := os.Lstat(dir)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+		return fmt.Errorf("%s is not a directory (a planted link is not followed)", dir)
+	}
+	return nil
+}
+
+// writeDeployRecord writes the record atomically: a fresh temp file
+// under a random name (never a path something could have planted),
+// then a rename over the record's name. Readable by the hotserve user
+// and its group, like state.json.
+func writeDeployRecord(dir, version string, filtered []byte) (err error) {
+	if err := deploysDir(dir); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(dir, ".record-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmp)
+		}
+	}()
+	if _, err = f.Write(append(filtered, '\n')); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err = f.Chmod(0o640); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, deployRecordPath(dir, version))
+}
+
+// deployRecordMaxBytes bounds a record read: one holds a bounded
+// result (an 8 KiB tail at most); anything larger is not one.
+const deployRecordMaxBytes = 1 << 20
+
+// openRecord opens a record without following a link and reads it
+// whole, refusing anything that is not a regular file of a record's
+// size.
+func openRecord(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0) //nolint:gosec // a path under the app's own deploys dir, built here
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close() //nolint:errcheck // read-only
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	b, err := io.ReadAll(io.LimitReader(f, deployRecordMaxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > deployRecordMaxBytes {
+		return nil, fmt.Errorf("%s is larger than a record can be", path)
+	}
+	return b, nil
 }
 
 func deployRecordPath(dir, version string) string {
@@ -114,7 +195,10 @@ var errNoDeployRecord = errors.New("no deploy recorded for this version")
 // readDeployRecord returns the record's bytes — one JSON object, as
 // written — or errNoDeployRecord.
 func readDeployRecord(dir, version string) (json.RawMessage, error) {
-	b, err := os.ReadFile(deployRecordPath(dir, version))
+	if err := deploysDir(dir); err != nil {
+		return nil, err
+	}
+	b, err := openRecord(deployRecordPath(dir, version))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, errNoDeployRecord
 	}
@@ -130,6 +214,9 @@ func readDeployRecord(dir, version string) (json.RawMessage, error) {
 // listDeploySummaries reads every record's outcome, newest first by
 // the record's write time. nil when there is no directory yet.
 func listDeploySummaries(dir string) []deploySummary {
+	if fi, err := os.Lstat(dir); err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+		return nil
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
@@ -147,12 +234,15 @@ func listDeploySummaries(dir string) []deploySummary {
 		if err != nil {
 			continue
 		}
-		b, err := os.ReadFile(filepath.Join(dir, e.Name())) //nolint:gosec // the app's own deploys dir, entries listed from it
+		b, err := openRecord(filepath.Join(dir, e.Name()))
 		if err != nil {
-			continue
+			continue // a link, or not a record
 		}
 		var s deploySummary
-		if json.Unmarshal(b, &s) != nil || s.Version == "" {
+		// The version is the name the record was read from, or the
+		// record is not one of ours: a forged version must not reach
+		// the response, nor the filter's safe list.
+		if json.Unmarshal(b, &s) != nil || s.Version == "" || versionPathComponent(s.Version)+".json" != e.Name() {
 			continue // a record the filter withheld whole, or a stray
 		}
 		recs = append(recs, dated{s, info.ModTime()})
@@ -183,7 +273,7 @@ func pruneDeployRecords(dir string, keep int, onDisk []string, logger *zap.Logge
 	}
 	var others []rec
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json.tmp") {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".tmp") {
 			// A write interrupted between the temp file and the rename:
 			// deploys are serialized per app, so no write is in flight
 			// now, and the leftover would otherwise sit outside the
