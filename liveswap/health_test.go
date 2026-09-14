@@ -251,3 +251,22 @@ func TestProberProcessDeathKeepsLastProbe(t *testing.T) {
 		t.Fatalf("the last answered probe should ride along: %v", err)
 	}
 }
+
+// A failing probe's body is kept only up to probeBodyExcerpt bytes:
+// the excerpt is a diagnosis, not a page.
+func TestProbeOnceKeepsABoundedBodyExcerpt(t *testing.T) {
+	big := strings.Repeat("x", probeBodyExcerpt*3)
+	sock := unixServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(big))
+	}))
+	p := &httpProber{clock: newFakeClock()}
+	err := p.probeOnce(context.Background(), testSocketRef(t, sock), "/health", time.Second)
+	var pe *probeError
+	if !errors.As(err, &pe) || pe.status != http.StatusInternalServerError {
+		t.Fatalf("want a probe error with the status, got %v", err)
+	}
+	if len(pe.body) != probeBodyExcerpt || pe.body != big[:probeBodyExcerpt] {
+		t.Fatalf("body excerpt is %d bytes, want the first %d", len(pe.body), probeBodyExcerpt)
+	}
+}

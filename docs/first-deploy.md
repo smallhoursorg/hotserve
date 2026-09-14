@@ -253,10 +253,13 @@ What a first deploy that worked looks like:
 
 If the deploy step is red, its output says which stage refused it and
 why — a token the box would not accept, a URL outside the allowlist, a
-health check that never passed. The app's own output is not in that
-message: for a migration that failed or an app that exited on start,
-`journalctl -t hotserve-example` on the box is where the reason is.
-Nothing was serving before, so nothing changed.
+health check that never passed. For a migration that failed or an app
+that exited on start, the same output carries the app's side under
+`detail`: the exit status, what the health endpoint answered, and the
+last lines the app wrote (40 by default; `deploy_log_lines` in the
+app block changes that, `0` keeps them on the box). The full journal
+is `journalctl -t hotserve-example` on the box. Nothing was serving
+before, so nothing changed.
 
 A re-run of the same workflow run is refused with a 422: versions are
 immutable on the box, and that commit's version is already there. Push

@@ -1177,3 +1177,22 @@ func TestSystemdRunnerSettlesFromUnpublishedMainPID(t *testing.T) {
 		t.Fatalf("settled on pid %d, want the app's 4243 — 4242 is the intermediate the manager reports while it sets the namespace up, and 0 is nothing published yet", got)
 	}
 }
+
+// After the watcher saw a unit end, a status with no ExecMainCode is
+// a clean exit whose unit was unloaded before the status was read —
+// not "no process exit recorded", which is for a start job that never
+// got as far as a process.
+func TestExitAfterEndNamesTheUnloadedCleanExit(t *testing.T) {
+	gone := unitStatus{LoadState: "not-found"}
+	if got := gone.exitAfterEnd(); !strings.Contains(got, "without failure") {
+		t.Fatalf("unloaded clean exit = %q", got)
+	}
+	failed := unitStatus{LoadState: "loaded", ActiveState: "failed", Result: "exit-code", ExecMainCode: 1, ExecMainStatus: 3}
+	if got := failed.exitAfterEnd(); got != "exit status 3" {
+		t.Fatalf("a recorded exit is itself: %q", got)
+	}
+	skipped := unitStatus{LoadState: "loaded", ActiveState: "failed", Result: "dependency"}
+	if got := skipped.exitAfterEnd(); !strings.Contains(got, "no process exit recorded") {
+		t.Fatalf("a job that never ran a process: %q", got)
+	}
+}

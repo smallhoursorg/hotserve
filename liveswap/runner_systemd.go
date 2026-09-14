@@ -448,7 +448,7 @@ func (r *systemdRunner) Start(spec startSpec) (handle, error) {
 	}
 	if res != "done" {
 		st := r.reapFailed(ctx, u.Name)
-		return nil, fmt.Errorf("unit %s: start job %s (%s)", u.Name, res, st.exitString())
+		return nil, &exitError{exit: st.exitString(), unit: u.Name, job: "start job " + res}
 	}
 	return r.adopt(ctx, u.Name, time.Now(), u.StopTimeout), nil
 }
@@ -597,7 +597,7 @@ func (r *systemdRunner) RunOnce(ctx context.Context, spec startSpec) error {
 	reapCtx, cancel := context.WithTimeout(r.ctx, stopSlack)
 	defer cancel()
 	st := r.reapFailed(reapCtx, u.Name)
-	return &exitError{exit: st.exitString(), unit: u.Name, job: res}
+	return &exitError{exit: st.exitString(), unit: u.Name, job: "job " + res}
 }
 
 // Exit is the recorded end of the instance's main process, once the
@@ -611,7 +611,18 @@ func (r *systemdRunner) Exit(h handle) string {
 	if st == nil {
 		return ""
 	}
-	return st.exitString()
+	return st.exitAfterEnd()
+}
+
+// exitAfterEnd is exitString for a unit the watcher saw end. A clean
+// exit unloads a transient unit before the watcher looks again, and
+// the manager then has no ExecMainCode to give: that is a success
+// result whose status was not read, not "no exit recorded".
+func (s unitStatus) exitAfterEnd() string {
+	if s.ExecMainCode == 0 && !s.loaded() && (s.Result == "" || s.Result == "success") {
+		return "exited without failure (the unit was unloaded before its exit status could be read)"
+	}
+	return s.exitString()
 }
 
 // stopUnobserved stops a unit and returns cause if the unit is

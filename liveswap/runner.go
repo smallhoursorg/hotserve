@@ -12,14 +12,15 @@ import (
 // implementation is systemdRunner (runner_systemd.go): every instance
 // is a transient systemd service unit under the hotserve user's own
 // service manager, which is what lets apps outlive hotserve restarts.
-// exitError is RunOnce's report of a command that ran and failed: how
-// it ended, in which unit, with what job result. The deploy's failure
-// detail reads the exit; the text is what the error always said.
+// exitError is the runner's report of a unit that ran and failed: how
+// its process ended, in which unit, with what job ("start job failed"
+// for Start, "job failed" for RunOnce). The deploy's failure detail
+// reads the exit; the text is what the errors always said.
 type exitError struct {
 	exit, unit, job string
 }
 
-func (e *exitError) Error() string { return fmt.Sprintf("%s (unit %s: job %s)", e.exit, e.unit, e.job) }
+func (e *exitError) Error() string { return fmt.Sprintf("unit %s: %s (%s)", e.unit, e.job, e.exit) }
 
 type runner interface {
 	// Start launches a long-running instance and returns immediately.

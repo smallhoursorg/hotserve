@@ -2,12 +2,12 @@ package liveswap
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // The app's own output goes to the journal (StandardOutput=journal on
@@ -23,7 +23,9 @@ import (
 //
 // Everything read here passes the response filter (redact.go) like
 // any other body, and deploy_log_lines 0 keeps app output on the box
-// entirely.
+// entirely: no journal tail, and no health probe body either
+// (failureDetail, app.go) — the exit status and the probe's status
+// code are hotserve's observations, not the app's bytes, and stay.
 
 // journalReader is the seam: the real reader runs journalctl, tests
 // script one.
@@ -55,19 +57,45 @@ func (journalctlReader) tail(ctx context.Context, units []string, since time.Tim
 	for _, u := range units {
 		args = append(args, "_SYSTEMD_USER_UNIT="+u)
 	}
-	out, err := exec.CommandContext(ctx, "journalctl", args...).Output() //nolint:gosec // a fixed program; the arguments are validated unit names, a count and a timestamp built here, never request input
-	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
-			return nil, fmt.Errorf("journalctl: %s", strings.TrimSpace(string(ee.Stderr)))
+	// The line count bounds the entries, not their size: a single entry
+	// can be as long as journald lets a line be. The output streams
+	// through a writer that keeps only the last bytes, more than the
+	// response cap so that capTail still sees "there was more" (a
+	// dropped prefix leaves a partial first line for it to cut), and
+	// memory is fixed whatever the app wrote.
+	out := &tailWriter{max: 2 * deployLogMaxBytes}
+	stderr := &tailWriter{max: 1024}
+	cmd := exec.CommandContext(ctx, "journalctl", args...) //nolint:gosec // a fixed program; the arguments are validated unit names, a count and a timestamp built here, never request input
+	cmd.Stdout, cmd.Stderr = out, stderr
+	if err := cmd.Run(); err != nil {
+		if msg := strings.TrimSpace(string(stderr.buf)); msg != "" {
+			return nil, fmt.Errorf("journalctl: %s", msg)
 		}
 		return nil, fmt.Errorf("journalctl: %w", err)
 	}
-	text := strings.TrimRight(string(out), "\n")
+	text := strings.TrimRight(string(out.buf), "\n")
 	if text == "" {
 		return nil, nil
 	}
 	return strings.Split(text, "\n"), nil
+}
+
+// tailWriter keeps the last max bytes written to it.
+type tailWriter struct {
+	max int
+	buf []byte
+}
+
+func (w *tailWriter) Write(p []byte) (int, error) {
+	if len(p) >= w.max {
+		w.buf = append(w.buf[:0], p[len(p)-w.max:]...)
+		return len(p), nil
+	}
+	if over := len(w.buf) + len(p) - w.max; over > 0 {
+		w.buf = append(w.buf[:0], w.buf[over:]...)
+	}
+	w.buf = append(w.buf, p...)
+	return len(p), nil
 }
 
 // deployLogMaxBytes bounds the tail in bytes whatever deploy_log_lines
@@ -98,7 +126,13 @@ func capTail(lines []string, maxLines, maxBytes int) ([]string, bool) {
 				if keep < 0 {
 					keep = 0
 				}
-				lines = []string{marker + lines[i][len(lines[i])-keep:]}
+				// Cut on a rune boundary: a UTF-8 sequence split at
+				// its start would reach the response as U+FFFD.
+				start := len(lines[i]) - keep
+				for start < len(lines[i]) && !utf8.RuneStart(lines[i][start]) {
+					start++
+				}
+				lines = []string{marker + lines[i][start:]}
 			} else {
 				lines = lines[i+1:]
 			}

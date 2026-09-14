@@ -177,6 +177,8 @@ type deployDetail struct {
 	// Probe is the last health probe that completed with a non-2xx
 	// answer: the status, a redirect's target, the first bytes of the
 	// body — where "Invalid HTTP_HOST header" or "no such table" is.
+	// The body is the app's output and deploy_log_lines 0 leaves it
+	// out, as it does the tail; the status and location stay.
 	Probe *probeDetail `json:"probe,omitempty"`
 	// LogTail is the last lines the app's units wrote to the journal
 	// since the deploy began — pre_start and app alike — bounded by
@@ -504,7 +506,12 @@ func (ma *managedApp) failureDetail(c collaborators, spec *appSpec, err error, a
 		d.Exit = appExit
 	}
 	if errors.As(err, &pe) {
-		d.Probe = &probeDetail{Status: pe.status, Location: pe.location, Body: pe.body}
+		d.Probe = &probeDetail{Status: pe.status, Location: pe.location}
+		// The body is the app's output as much as the journal is:
+		// deploy_log_lines 0 keeps both on the box.
+		if spec.deployLogLines > 0 {
+			d.Probe.Body = pe.body
+		}
 	}
 	if spec.deployLogLines > 0 && c.journal != nil {
 		var units []string

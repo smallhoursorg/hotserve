@@ -80,11 +80,13 @@ Properties that matter to the model:
   (liveswap/journal.go, `deployDetail` in liveswap/app.go): the last
   lines its units wrote, read back with `journalctl` — the one
   external program hotserve runs, with a fixed argument list —
-  bounded by `deploy_log_lines` (default 40, `0` keeps app output on
-  the box) and 8 KiB; the first 512 bytes of a failing health probe's
-  body; and the exit status the runner recorded. Reading the journal
-  is a grant: journald keeps a system user's output in the system
-  journal, so the packaged unit puts hotserve's process in
+  bounded by `deploy_log_lines` (default 40) and 8 KiB; the first 512
+  bytes of a failing health probe's body; and the exit status the
+  runner recorded. `deploy_log_lines 0` keeps the app's bytes — the
+  tail and the probe body both — on the box; the exit status and the
+  probe's status code are hotserve's observations and stay. Reading
+  the journal is a grant: journald keeps a system user's output in the
+  system journal, so the packaged unit puts hotserve's process in
   `systemd-journal` (`SupplementaryGroups=`, the process and not the
   account, so the apps under the user manager keep the account's
   groups and see no journal in their sandbox anyway). What that

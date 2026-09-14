@@ -264,7 +264,7 @@ resolved at config load.
 | `watchdog_restarts` | `5` | Restart budget within `watchdog_window`; crash and health restarts share it |
 | `watchdog_window` | `10m` | Sliding window for the restart budget |
 | `keep` | `5` | Release dirs retained (GC after success). The running version is always kept, so this can be `keep+1` after rolling back to an old release |
-| `deploy_log_lines` | `40` | How many of the app's last journal lines a failed deploy's response carries (see [Webhook API](#webhook-api)); `0` keeps the app's output on the box. At most 1000, and 8 KiB whatever the count |
+| `deploy_log_lines` | `40` | How many of the app's last journal lines a failed deploy's response carries (see [Webhook API](#webhook-api)); `0` keeps the app's output on the box (no tail, and no health probe body). At most 1000, and 8 KiB whatever the count |
 | `max_artifact_size` | `100MB` | Download cap; decompressed cap is 10× |
 | `max_artifact_entries` | `100000` | Cap on the files, directories and links one artifact creates (implied parent directories included). The byte cap does not bound what extraction *consumes* — every object costs an inode and most a disk block — so this is what keeps one hostile artifact from filling the disk for everything else on the box. A CI-built artifact is thousands; a Next.js standalone output is ~5–20k |
 
@@ -788,7 +788,8 @@ launch happened, `detail`:
 
 - `exit` — how the process ended, from systemd: `exit status 3`,
   `killed by signal 9 (killed)`. The `pre_start`'s when that failed;
-  the app's when it died before becoming healthy.
+  the app's when its start job failed or it died before becoming
+  healthy.
 - `probe` — the last health probe that completed with a non-2xx
   answer: its `status`, a redirect's `location`, and the first 512
   bytes of its `body`, which is where a framework says "Invalid
@@ -806,7 +807,9 @@ launch happened, `detail`:
 Every string in it passes the response filter first — `[redacted:KEY]`
 where an `env_file` value was, and `redacted_env` naming the keys —
 because the response lands in a CI log, and `deploy_log_lines 0`
-keeps the app's output on the box entirely. See
+keeps the app's output on the box entirely: no `log_tail`, and no
+`probe.body` either (the probe's `status` and `location`, and `exit`,
+are hotserve's own observations and stay). See
 [Secrets and logs](#secrets-and-logs). A success carries `phases` and
 no `detail`.
 
@@ -1024,9 +1027,11 @@ job token is not a substitute: `auth_header` is sent as the
 
 `--fail-with-body` makes the CI job red exactly when the deploy fails
 and prints the JSON `error` that says why (plain `--fail` hides it) —
-and on failure the previous version, if there was one, never stopped serving. The app's
-own output (a crashing start, a failing `pre_start`) is not in that
-body: it is in the journal on the box, `journalctl -t hotserve-blog`.
+and on failure the previous version, if there was one, never stopped serving. The body's
+`status.last_deploy.detail` says why from the app's side — the exit
+status, the last health probe's answer, the last lines the app and
+its `pre_start` wrote (see [Webhook API](#webhook-api)); the whole
+journal stays on the box, `journalctl -t hotserve-blog`.
 
 ## Server layout
 

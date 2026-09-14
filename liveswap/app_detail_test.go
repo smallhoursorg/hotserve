@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // fakeJournal scripts what the app's units wrote.
@@ -37,7 +38,7 @@ func TestFailureDetailPreStartExit(t *testing.T) {
 	rig := newTestRig(t)
 	rig.spec.preStart = []string{"./migrate"}
 	rig.spec.deployLogLines = 40
-	rig.runner.runOnceErr = &exitError{exit: "exit status 3", unit: "hotserve-demo.v1.x.prestart.service", job: "failed"}
+	rig.runner.runOnceErr = &exitError{exit: "exit status 3", unit: "hotserve-demo.v1.x.prestart.service", job: "job failed"}
 	j := &fakeJournal{lines: []string{"migrate: schema v1 -> v2", "migrate: cannot open app.db"}}
 	rig.ma.journal = j
 
@@ -117,7 +118,7 @@ func TestFailureDetailCaps(t *testing.T) {
 	rig := newTestRig(t)
 	rig.spec.deployLogLines = 2
 	rig.spec.preStart = []string{"./migrate"}
-	rig.runner.runOnceErr = &exitError{exit: "exit status 1", unit: "u", job: "failed"}
+	rig.runner.runOnceErr = &exitError{exit: "exit status 1", unit: "u", job: "job failed"}
 	rig.ma.journal = &fakeJournal{lines: []string{"one", "two", "three"}} // journalctl asked for 3, returned 3
 	if err := deployOnceV1(t, rig); err == nil {
 		t.Fatal("deploy should have failed")
@@ -159,7 +160,7 @@ func TestFailureDetailSwitches(t *testing.T) {
 	rig := newTestRig(t)
 	rig.spec.deployLogLines = 0
 	rig.spec.preStart = []string{"./migrate"}
-	rig.runner.runOnceErr = &exitError{exit: "exit status 1", unit: "u", job: "failed"}
+	rig.runner.runOnceErr = &exitError{exit: "exit status 1", unit: "u", job: "job failed"}
 	j := &fakeJournal{lines: []string{"never read"}}
 	rig.ma.journal = j
 	if err := deployOnceV1(t, rig); err == nil {
@@ -172,7 +173,7 @@ func TestFailureDetailSwitches(t *testing.T) {
 	rig = newTestRig(t)
 	rig.spec.deployLogLines = 40
 	rig.spec.preStart = []string{"./migrate"}
-	rig.runner.runOnceErr = &exitError{exit: "exit status 1", unit: "u", job: "failed"}
+	rig.runner.runOnceErr = &exitError{exit: "exit status 1", unit: "u", job: "job failed"}
 	rig.ma.journal = &fakeJournal{err: errors.New("journalctl: not found")}
 	if err := deployOnceV1(t, rig); err == nil {
 		t.Fatal("deploy should have failed")
@@ -215,5 +216,50 @@ func TestCapTail(t *testing.T) {
 	}
 	if got, tr := capTail([]string{"short", strings.Repeat("y", 100)}, 10, 50); len(got) != 1 || !strings.HasPrefix(got[0], "…") || !tr {
 		t.Errorf("an oversized last line after others: %v %v", got, tr)
+	}
+}
+
+// deploy_log_lines 0 keeps the app's output on the box: the probe's
+// status and redirect target are reported, its body is not.
+func TestFailureDetailZeroKeepsProbeBodyOnTheBox(t *testing.T) {
+	rig := newTestRig(t)
+	rig.spec.deployLogLines = 0
+	rig.prober.err = fmt.Errorf("not healthy within deadline 5m: %w", &probeError{status: 500, body: "Traceback (most recent call last): secret things"})
+	rig.ma.journal = &fakeJournal{lines: []string{"never read"}}
+	if err := deployOnceV1(t, rig); err == nil {
+		t.Fatal("deploy should have failed the health gate")
+	}
+	d := rig.ma.status().LastDeploy.Detail
+	if d == nil || d.Probe == nil || d.Probe.Status != 500 || d.Probe.Body != "" {
+		t.Fatalf("with deploy_log_lines 0 the probe body stays on the box: %+v", d)
+	}
+}
+
+// tailWriter keeps the last max bytes whatever is written, in one
+// write or many, and never more.
+func TestTailWriter(t *testing.T) {
+	w := &tailWriter{max: 8}
+	for _, s := range []string{"abc", "def", "ghi"} {
+		if n, err := w.Write([]byte(s)); n != 3 || err != nil {
+			t.Fatalf("write %q: %d %v", s, n, err)
+		}
+	}
+	if string(w.buf) != "bcdefghi" {
+		t.Fatalf("after three writes: %q", w.buf)
+	}
+	if _, err := w.Write([]byte("0123456789ab")); err != nil || string(w.buf) != "456789ab" {
+		t.Fatalf("one write over max: %q %v", w.buf, err)
+	}
+	if _, err := w.Write([]byte("xyz")); err != nil || string(w.buf) != "789abxyz" {
+		t.Fatalf("a write after that: %q %v", w.buf, err)
+	}
+}
+
+// The clipped oversized line is cut on a rune boundary.
+func TestCapTailClipsOnRuneBoundary(t *testing.T) {
+	line := strings.Repeat("é", 100) // 200 bytes, every one inside a 2-byte rune
+	got, tr := capTail([]string{line}, 10, 50)
+	if !tr || len(got) != 1 || !utf8.ValidString(got[0]) || len(got[0]) > 50 {
+		t.Fatalf("clipped line must be valid UTF-8 within the cap: %q %v", got, tr)
 	}
 }

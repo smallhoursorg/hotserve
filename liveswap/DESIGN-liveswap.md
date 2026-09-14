@@ -182,11 +182,22 @@ type runner interface {
 	RunOnce(ctx context.Context, spec startSpec) error
 	Alive(h handle) bool
 	Wait(h handle) <-chan struct{}
+	Exit(h handle) string
 	Stop(h handle, grace time.Duration) error
 	Reattach(st handleState) (handle, bool, error)
 	Sweep(app string, keep handle) error
 }
 ```
+
+`Exit` is how the instance's main process ended ("exit status 3",
+"killed by signal 9 (killed)"), "" while it runs, and non-empty
+whenever `Alive` is false: a runner records the exit before it
+declares the handle dead. A failed deploy's response reads it
+(`failureDetail`, app.go), so a runner that cannot observe the exit
+must still say so in words rather than return "". `Start` and
+`RunOnce` report a unit that ran and failed as a typed `exitError`,
+which the same detail reads for the `pre_start`'s and a failed start
+job's exit.
 
 The one implementation is `systemdRunner` (`runner_systemd.go`, D-Bus
 client in `systemd_dbus.go`): every instance is a transient service

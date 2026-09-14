@@ -23,6 +23,9 @@ func TestApplyDefaults(t *testing.T) {
 	if cfg.HealthPath != "/health" {
 		t.Errorf("health_path default = %q", cfg.HealthPath)
 	}
+	if cfg.DeployLogLines == nil || *cfg.DeployLogLines != 40 {
+		t.Errorf("deploy_log_lines default = %v, want 40", cfg.DeployLogLines)
+	}
 	if cfg.HealthInterval != caddy.Duration(5*time.Second) ||
 		cfg.HealthTimeout != caddy.Duration(2*time.Second) ||
 		cfg.Soak != caddy.Duration(15*time.Second) ||
@@ -141,6 +144,8 @@ func TestValidate(t *testing.T) {
 		{"negative watchdog grace", func(a *App) { a.Apps["blog"].WatchdogGrace = caddy.Duration(-time.Second) }, "watchdog_grace must not be negative"},
 		{"negative watchdog window", func(a *App) { a.Apps["blog"].WatchdogWindow = caddy.Duration(-time.Second) }, "watchdog_window must be positive"},
 		{"bad env key", func(a *App) { a.Apps["blog"].Env = map[string]string{"my-var": "1"} }, `env key "my-var"`},
+		{"negative deploy_log_lines", func(a *App) { n := -1; a.Apps["blog"].DeployLogLines = &n }, "deploy_log_lines must be between"},
+		{"deploy_log_lines over 1000", func(a *App) { n := 1001; a.Apps["blog"].DeployLogLines = &n }, "deploy_log_lines must be between"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
