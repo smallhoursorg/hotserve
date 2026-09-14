@@ -43,6 +43,56 @@ if admin ls /var/lib/hotserve >/dev/null 2>&1; then
 else
 	pass "admin cannot read hotserve's data dir: it is not the hotserve user"
 fi
+# The env-file grant: the one install line the sudoers file admits
+# creates an empty 0640 root:hotserve file under /etc/hotserve, and
+# nothing that differs from it by a path, a mode, an owner, a group, a
+# source or an extra argument. A refusal must be sudo's own, not
+# install failing after sudo let it through: a two-destination form,
+# say, would fail in install either way. With -n, a command no
+# NOPASSWD line matches is "a password is required"; a user with no
+# line at all gets "is not allowed to execute". Either is sudo
+# stopping before anything ran; install's own errors say "install:".
+box rm -f /etc/hotserve/e2e-secrets.env
+if admin sudo -n /usr/bin/install -m 0640 -o root -g hotserve -T /dev/null /etc/hotserve/e2e-secrets.env >"$tmp/out" 2>&1; then
+	pass "admin can create an app's env file"
+	[ "$(box stat -c '%a %U %G %s' /etc/hotserve/e2e-secrets.env)" = "640 root hotserve 0" ] \
+		&& pass "the env file is empty, 0640 root:hotserve" || fail "env file is $(box stat -c '%a %U %G %s' /etc/hotserve/e2e-secrets.env)"
+else
+	fail "admin cannot create an env file: $(tail -3 "$tmp/out")"
+fi
+box rm -f /etc/hotserve/e2e-secrets.env
+for args in \
+	"-m 0640 -o root -g hotserve -T /dev/null /tmp/e2e-secrets.env" \
+	"-m 0640 -o root -g hotserve -T /dev/null /etc/hotserve/../e2e-secrets.env" \
+	"-m 0644 -o root -g hotserve -T /dev/null /etc/hotserve/e2e-secrets.env" \
+	"-m 0640 -o admin -g hotserve -T /dev/null /etc/hotserve/e2e-secrets.env" \
+	"-m 0640 -o root -g root -T /dev/null /etc/hotserve/e2e-secrets.env" \
+	"-m 0640 -o root -g admin -T /dev/null /etc/hotserve/e2e-secrets.env" \
+	"-m 0640 -o root -g hotserve -T /etc/shadow /etc/hotserve/e2e-secrets.env" \
+	"-m 0640 -o root -g hotserve -T /dev/null /etc/hotserve/e2e-secrets.env -v" \
+	"-m 0640 -o root -g hotserve /dev/null /etc/hotserve/e2e-secrets.env" \
+	"-m 0640 -o root -g hotserve -T /dev/null /etc/hotserve/e2e-secrets.env /etc/hotserve/other.env"; do
+	# shellcheck disable=SC2086 # the args are meant to split
+	if admin sudo -n /usr/bin/install $args >"$tmp/out" 2>&1; then
+		fail "the sudoers file let admin run: install $args"
+	elif grep -q -E "a password is required|is not allowed to execute" "$tmp/out"; then
+		pass "sudo refused: install $args"
+	else
+		fail "install $args failed, but not because sudo refused it: $(tail -1 "$tmp/out")"
+	fi
+done
+box rm -f /etc/hotserve/e2e-secrets.env /etc/hotserve/other.env /tmp/e2e-secrets.env /etc/e2e-secrets.env
+# -T is why a directory of that name (only root could make one) is an
+# install error, not a root-owned file called "null" inside it.
+box mkdir -p /etc/hotserve/e2e-dir.env
+if admin sudo -n /usr/bin/install -m 0640 -o root -g hotserve -T /dev/null /etc/hotserve/e2e-dir.env >"$tmp/out" 2>&1; then
+	fail "install replaced a directory named like an env file"
+else
+	box test ! -e /etc/hotserve/e2e-dir.env/null && grep -q '^install:' "$tmp/out" \
+		&& pass "a directory named like an env file is an install error, and gains no file" \
+		|| fail "against a directory: $(tail -1 "$tmp/out"); null exists: $(box test -e /etc/hotserve/e2e-dir.env/null && echo yes || echo no)"
+fi
+box rm -rf /etc/hotserve/e2e-dir.env
 
 echo "=== box 1: examples/box/Caddyfile validates with this build ==="
 if admin hotserve validate --adapter caddyfile --config /dev/stdin <examples/box/Caddyfile >"$tmp/out" 2>&1; then
