@@ -2,9 +2,11 @@ package liveswap
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -518,7 +520,7 @@ func TestDeployPayloadIsTheOnlyWireType(t *testing.T) {
 		`"URL":"https://x/a.tgz","Version":"v1","AuthHeader":"Bearer t",` +
 		`"localArchive":"/etc/passwd","rollback":true,"by":"forged"}`
 	must(t, json.Unmarshal([]byte(body), &req)) //nolint:staticcheck // SA9005 is the property under test: nothing on the wire can land in deployRequest
-	if req != (deployRequest{}) {
+	if !reflect.DeepEqual(req, deployRequest{}) {
 		t.Fatalf("a body reached deployRequest fields: %+v", req)
 	}
 }
@@ -540,5 +542,171 @@ func TestWebhookURLDeployForwardsWireFields(t *testing.T) {
 	}
 	if got.localArchive != "" || got.rollback {
 		t.Fatalf("server-side fields reachable from the body: %+v", got)
+	}
+}
+
+// streamLines runs a v1 URL deploy with Accept: application/x-ndjson
+// and returns the response and its lines, each parsed.
+func streamLines(t *testing.T, h *Handler) (*httptest.ResponseRecorder, []map[string]any) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/demo", strings.NewReader(`{"url":"https://example.test/v1.tgz","version":"v1"}`))
+	req.Header.Set("Authorization", "Bearer "+appToken(t))
+	req.Header.Set("Accept", "application/x-ndjson")
+	w := httptest.NewRecorder()
+	var next caddyhttp.Handler = caddyhttp.HandlerFunc(func(http.ResponseWriter, *http.Request) error { return nil })
+	if err := h.ServeHTTP(w, req, next); err != nil {
+		t.Fatalf("ServeHTTP returned error: %v", err)
+	}
+	var lines []map[string]any
+	for _, raw := range strings.Split(strings.TrimRight(w.Body.String(), "\n"), "\n") {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(raw), &m); err != nil {
+			t.Fatalf("line %q is not JSON: %v", raw, err)
+		}
+		lines = append(lines, m)
+	}
+	return w, lines
+}
+
+// With Accept: application/x-ndjson the deploy is one JSON line per
+// phase as it happens, then the single response's body with
+// "event":"done" and the status code it would have had.
+func TestWebhookDeployStreamsPhases(t *testing.T) {
+	h, _ := newTestHandler(t)
+	w, lines := streamLines(t, h)
+	if w.Code != 200 || w.Header().Get("Content-Type") != "application/x-ndjson" {
+		t.Fatalf("status %d, content-type %q", w.Code, w.Header().Get("Content-Type"))
+	}
+	var phases []string
+	for _, l := range lines[:len(lines)-1] {
+		if l["event"] != "phase" {
+			t.Fatalf("not a phase line: %v", l)
+		}
+		phases = append(phases, l["phase"].(string))
+	}
+	if got := strings.Join(phases, ","); !strings.HasPrefix(got, "downloading,extracting,") || !strings.Contains(got, "promoting") {
+		t.Fatalf("phases streamed = %s", got)
+	}
+	last := lines[len(lines)-1]
+	if last["event"] != "done" || last["http_status"] != float64(200) || last["current_version"] != "v1" {
+		t.Fatalf("last line = %v", last)
+	}
+}
+
+// A failure streams as it would have responded: the last line is the
+// 500 body — error and the old status — with http_status 500, on a
+// 200 stream.
+func TestWebhookDeployStreamCarriesTheFailure(t *testing.T) {
+	h, rig := newTestHandler(t)
+	rig.runner.startErr = errors.New("boom")
+	w, lines := streamLines(t, h)
+	last := lines[len(lines)-1]
+	if w.Code != 200 || last["event"] != "done" || last["http_status"] != float64(500) || !strings.Contains(last["error"].(string), "boom") || last["status"] == nil {
+		t.Fatalf("status %d, last line = %v", w.Code, last)
+	}
+	if lines[0]["event"] != "phase" || lines[0]["phase"] != "downloading" {
+		t.Fatalf("first line = %v", lines[0])
+	}
+}
+
+// Without the Accept header nothing changes: one body, the real code.
+func TestWebhookDeployWithoutAcceptIsUnchanged(t *testing.T) {
+	h, rig := newTestHandler(t)
+	rig.runner.startErr = errors.New("boom")
+	w := do(t, h, http.MethodPost, "/demo", appToken(t), `{"url":"https://example.test/v1.tgz","version":"v1"}`)
+	if w.Code != 500 || w.Header().Get("Content-Type") != "application/json" || strings.Contains(w.Body.String(), `"event"`) {
+		t.Fatalf("status %d, content-type %q, body %s", w.Code, w.Header().Get("Content-Type"), w.Body.String())
+	}
+}
+
+// A push streams too: the lock is taken and the upload staged before
+// any phase, then the pipeline's phases and outcome are lines.
+func TestWebhookPushStreams(t *testing.T) {
+	h, _ := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodPost, "/demo?version=v1", strings.NewReader("not-really-gzip"))
+	req.Header.Set("Authorization", "Bearer "+appToken(t))
+	req.Header.Set("Content-Type", "application/gzip")
+	req.Header.Set("Accept", "application/x-ndjson")
+	w := httptest.NewRecorder()
+	var next caddyhttp.Handler = caddyhttp.HandlerFunc(func(http.ResponseWriter, *http.Request) error { return nil })
+	if err := h.ServeHTTP(w, req, next); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(w.Body.String(), "\n"), "\n")
+	if w.Code != 200 || w.Header().Get("Content-Type") != "application/x-ndjson" || !strings.Contains(lines[0], `"phase":"downloading"`) || !strings.Contains(lines[len(lines)-1], `"http_status":200`) {
+		t.Fatalf("status %d, content-type %q, body %s", w.Code, w.Header().Get("Content-Type"), w.Body.String())
+	}
+}
+
+// An outcome reached before the first phase — here a version the box
+// already has — has nothing streamed yet, and is the single response
+// with its real code, so a client's --fail-with-body catches it.
+func TestWebhookStreamRefusedBeforeAnyPhaseKeepsItsCode(t *testing.T) {
+	h, _ := newTestHandler(t)
+	if w, _ := streamLines(t, h); w.Code != 200 {
+		t.Fatalf("first deploy: %d %s", w.Code, w.Body.String())
+	}
+	w, lines := streamLines(t, h)
+	if w.Code != 422 || w.Header().Get("Content-Type") != "application/json" || len(lines) != 1 || lines[0]["event"] != nil || !strings.Contains(lines[0]["error"].(string), "already running") {
+		t.Fatalf("status %d, content-type %q, lines %v", w.Code, w.Header().Get("Content-Type"), lines)
+	}
+}
+
+// The stream is asked for by the media type exactly, in any Accept
+// header sent: a list, a parameter, a second header; not a lookalike.
+func TestWantsStreamReadsAcceptExactly(t *testing.T) {
+	cases := []struct {
+		accept []string
+		want   bool
+	}{
+		{[]string{"application/x-ndjson"}, true},
+		{[]string{"Application/X-NDJSON; q=0.9"}, true},
+		{[]string{"application/json, application/x-ndjson"}, true},
+		{[]string{"application/json", "application/x-ndjson"}, true},
+		{[]string{"application/x-ndjson-backup"}, false},
+		{[]string{"application/x-ndjson;q=0"}, false},
+		{[]string{"application/x-ndjson;q=0.0, application/json"}, false},
+		{[]string{"application/x-ndjson;q=abc"}, false},
+		{[]string{"application/x-ndjson;q=NaN"}, false},
+		{[]string{"application/x-ndjson;q=+Inf"}, false},
+		{[]string{"application/x-ndjson;q=2"}, false},
+		{[]string{"application/x-ndjson;q=1"}, true},
+		{[]string{"application/json"}, false},
+		{nil, false},
+	}
+	for _, tc := range cases {
+		r := httptest.NewRequest(http.MethodPost, "/demo", nil)
+		for _, a := range tc.accept {
+			r.Header.Add("Accept", a)
+		}
+		if got := wantsStream(r); got != tc.want {
+			t.Errorf("Accept %q: wantsStream = %v, want %v", tc.accept, got, tc.want)
+		}
+	}
+}
+
+// A filter that withholds the whole body — the app's env_file cannot
+// be read, so its values are unknown — still leaves the last line's
+// markers in place: the outcome is appended after the filter.
+func TestWebhookStreamLastLineSurvivesWithholding(t *testing.T) {
+	h, rig := newTestHandler(t)
+	rig.spec.envFile = filepath.Join(t.TempDir(), "missing.env")
+	w, lines := streamLines(t, h)
+	last := lines[len(lines)-1]
+	if w.Code != 200 || last["event"] != "done" || last["http_status"] != float64(500) {
+		t.Fatalf("status %d, last line = %v", w.Code, last)
+	}
+	if _, withheld := last["status"]; withheld {
+		t.Fatalf("the body should have been withheld while the env_file is unreadable: %v", last)
+	}
+	// The phase lines keep their event and phase beside the filter's
+	// diagnostic, for the same reason.
+	for _, l := range lines[:len(lines)-1] {
+		if l["event"] != "phase" || l["phase"] == nil {
+			t.Fatalf("a withheld phase line lost its markers: %v", l)
+		}
+	}
+	if lines[0]["phase"] != "downloading" {
+		t.Fatalf("first phase = %v", lines[0])
 	}
 }

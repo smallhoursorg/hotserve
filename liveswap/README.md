@@ -768,7 +768,7 @@ The response is synchronous:
 
 | Code | Meaning |
 |---|---|
-| 200 | Deployed; body is the app's status JSON |
+| 200 | Deployed; body is the app's status JSON. Also every streamed deploy (below), whatever its outcome |
 | 400 | The body could not be read, or is not valid JSON |
 | 401 | Bad or missing token |
 | 404 | Unknown app |
@@ -839,6 +839,33 @@ newest-first.
 
 The tarball's contents must sit at the archive root (`tar -czf
 app.tar.gz -C dist .`), with versions matching `[A-Za-z0-9._-]{1,64}` and not starting with a dot.
+
+### Streaming the deploy
+
+Send `Accept: application/x-ndjson` on any deploy or rollback POST and
+the response is one JSON line per phase as the pipeline enters it,
+then the body the single response would have carried, with two fields
+added — `"event":"done"` and `http_status`, the code that response
+would have had:
+
+```
+{"at":"2026-09-14T15:02:11Z","event":"phase","phase":"downloading"}
+{"at":"2026-09-14T15:02:12Z","event":"phase","phase":"extracting"}
+…
+{"app":"blog","current_version":"v1.4.2",…,"event":"done","http_status":200}
+```
+
+The stream begins with the first phase, and from then on the status
+line is `200` whatever happens — it went out before the outcome
+existed — so a streaming client reads `http_status` from the last line
+and nothing else: a failed deploy is `"http_status":500` with the
+`error` and the old version's `status`, exactly as the single response
+would have said. A request refused before any phase (401, 404, a 409
+because a deploy is running, a 422 on the request or the version) has
+nothing streamed yet and is the usual single response with its real
+code. Every line passes the response filter. The examples'
+`scripts/deploy.sh` streams, prints each line as it arrives, and exits
+on the last line's code — or on the real one when nothing streamed.
 
 ## Secrets and logs
 
