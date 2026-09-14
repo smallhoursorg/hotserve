@@ -666,7 +666,11 @@ does not isolate the runtime.
   being started, `shared/` and the OS base view are bound into the
   unit — the app dir root, `state.json`, `tmp/` (the upload staging
   dir: a running instance must not be able to rewrite the next
-  version's tarball) and the other releases do not exist inside.
+  version's tarball), `deploys/` (each version's recorded deploy
+  outcome, liveswap/deploys.go: written as the response filter left
+  it, so no known secret is on disk in it, and served through the
+  filter again; `TestDeployRecordsAreOutsideTheSandboxView`) and the
+  other releases do not exist inside.
   `sandboxSpecFor` in liveswap/sandbox.go is the single place that
   list is built; `TestSandboxSpecFor` and
   `TestSandboxViewIsExactlyWhatIsNamed` pin it — the latter asserts the

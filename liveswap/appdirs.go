@@ -17,6 +17,7 @@ import (
 //	<root>/<app>/tmp/                  download staging
 //	<root>/<app>/run/<nonce>/app.sock  one socket per instance, bound by the app; only run/<nonce>/ is in that instance's view
 //	<root>/<app>/proxy/<nonce>.sock    the same inode, hard-linked by hotserve; what it dials (not in any view)
+//	<root>/<app>/deploys/<version>.json  the latest deploy's outcome for that version, filtered (not in any view)
 //	<root>/<app>/state.json            current version + process handle
 //	<root>/<app>/current -> releases/<version>   convenience symlink
 type appDirs struct {
@@ -27,6 +28,7 @@ type appDirs struct {
 	tmp      string
 	run      string
 	proxy    string
+	deploys  string
 	state    string
 	current  string
 }
@@ -41,6 +43,7 @@ func newAppDirs(root, name string) appDirs {
 		tmp:      filepath.Join(app, "tmp"),
 		run:      filepath.Join(app, "run"),
 		proxy:    filepath.Join(app, "proxy"),
+		deploys:  filepath.Join(app, "deploys"),
 		state:    filepath.Join(app, "state.json"),
 		current:  filepath.Join(app, "current"),
 	}
@@ -72,7 +75,7 @@ func (d appDirs) release(version string) string {
 }
 
 func (d appDirs) ensure() error {
-	for _, dir := range []string{d.releases, d.shared, d.tmp, d.run, d.proxy} {
+	for _, dir := range []string{d.releases, d.shared, d.tmp, d.run, d.proxy, d.deploys} {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return err
 		}

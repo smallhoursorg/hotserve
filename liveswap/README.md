@@ -756,7 +756,9 @@ over), so it is zero-downtime too. A `422` is returned if that version
 is no longer on disk. To see what you can roll back to, `GET /<app>`
 returns `available_versions` — the on-disk releases, newest-first
 (`keep` of them, plus the running version when it is older than those —
-see the `keep` note above, so the list can briefly hold `keep+1`).
+see the `keep` note above, so the list can briefly hold `keep+1`) —
+and `deploys`, what each recorded version's latest deploy came to
+(see [Deploy records](#deploy-records)).
 
 **Versions are immutable.** A deploy (URL or push) never overwrites an
 existing on-disk release, so a version you can roll back to can't be
@@ -839,6 +841,28 @@ newest-first.
 
 The tarball's contents must sit at the archive root (`tar -czf
 app.tar.gz -C dist .`), with versions matching `[A-Za-z0-9._-]{1,64}` and not starting with a dot.
+
+### Deploy records
+
+Every deploy writes its outcome — the same `last_deploy` object, with
+its `phases` and, for a failure, its `detail` — to a record for that
+version, and `GET /<app>?deploy=<version>` reads it back:
+
+```sh
+curl --fail-with-body -H "Authorization: Bearer $JWT" \
+  "https://deploy.example.com/blog?deploy=v1.4.1"
+```
+
+The record is the latest deploy of that version (a rollback to it
+replaces it); a version never deployed is a `404`. `GET /<app>` lists
+every recorded version's outcome in `deploys`, newest first:
+`version`, `status`, the failing `phase`, `deployed_by`, and the
+times. Records are kept for every version still on disk plus the
+newest `keep` others (failed deploys, whose release is removed at
+once, and versions release GC has pruned), so the set is bounded by
+about twice `keep`. They are written as the response filter left them
+— a secret rotated later is not in an old record — and pass it again
+when read, like every body.
 
 ## Secrets and logs
 
@@ -1047,6 +1071,7 @@ journal stays on the box, `journalctl -t hotserve-blog`.
   current -> releases/v1.4.2   (convenience symlink; state.json is truth)
   shared/                 persistent data, survives deploys (the app's HOME)
   state.json              current version, nonce and unit name
+  deploys/v1.4.2.json     each version's latest deploy outcome (see Deploy records)
   tmp/                    download staging
 ```
 

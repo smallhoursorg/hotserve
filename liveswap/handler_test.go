@@ -2,6 +2,7 @@ package liveswap
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -540,5 +541,28 @@ func TestWebhookURLDeployForwardsWireFields(t *testing.T) {
 	}
 	if got.localArchive != "" || got.rollback {
 		t.Fatalf("server-side fields reachable from the body: %+v", got)
+	}
+}
+
+// GET /<app>?deploy=<version> is that version's recorded outcome;
+// a version never deployed is a 404, a malformed one a 422.
+func TestWebhookDeployRecordRoute(t *testing.T) {
+	h, rig := newTestHandler(t)
+	rig.runner.startErr = errors.New("boom")
+	if w := do(t, h, http.MethodPost, "/demo", appToken(t), `{"url":"https://x/a.tgz","version":"v1"}`); w.Code != 500 {
+		t.Fatalf("setup deploy: %d %s", w.Code, w.Body.String())
+	}
+	w := do(t, h, http.MethodGet, "/demo?deploy=v1", appToken(t), "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"version":"v1"`) || !strings.Contains(w.Body.String(), `"status":"failed"`) || !strings.Contains(w.Body.String(), "boom") {
+		t.Fatalf("record: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(t, h, http.MethodGet, "/demo?deploy=v2", appToken(t), ""); w.Code != 404 {
+		t.Fatalf("never deployed: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(t, h, http.MethodGet, "/demo?deploy=../state", appToken(t), ""); w.Code != 422 {
+		t.Fatalf("malformed: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(t, h, http.MethodGet, "/demo", appToken(t), ""); !strings.Contains(w.Body.String(), `"deploys":[{"version":"v1","status":"failed"`) {
+		t.Fatalf("status lacks deploys: %s", w.Body.String())
 	}
 }

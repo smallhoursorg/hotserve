@@ -161,6 +161,13 @@ case "$b" in
 *) fail "expected v2 to keep serving, got '$b'" ;;
 esac
 
+# Its record: the same failure, filtered, readable by version.
+c=$(curl -s -o /tmp/record -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$HOOK?deploy=v3crash")
+[ "$c" = "200" ] && grep -q '"status":"failed"' /tmp/record && grep -q '"exit":"exit status 3"' /tmp/record && grep -q '"redacted_env":\["SECRET"\]' /tmp/record \
+	&& pass "the crash release's record says why it failed, filtered" \
+	|| fail "record v3crash: $c $(cat /tmp/record)"
+grep -q 'e2e-secret-value-1234' /tmp/record && fail "the record leaked the env_file value" || pass "the record carries no env_file value"
+
 echo "=== scenario 5c: a release built for the other machine is refused before anything runs ==="
 c=$(deploy demo-wrongarch.tar.gz v3wrongarch)
 [ "$c" = "422" ] && pass "wrong-architecture release gets 422" || fail "wrong-architecture release: expected 422, got $c ($(cat /tmp/deploy-body))"
@@ -321,6 +328,20 @@ case "$b" in
 "hello v1"*) pass "rollback relaunches the on-disk release: '$b'" ;;
 *) fail "expected 'hello v1 ...' after rollback, got '$b'" ;;
 esac
+# Every deploy's outcome is on record, the rolled-back-to one included:
+# px1's record is readable after the rollback, and the status lists
+# the outcomes (the crash release's record, many deploys ago, has been
+# pruned by now — the rule keeps `keep` records of versions no longer
+# on disk; scenario 5b read it while it was fresh).
+c=$(curl -s -o /tmp/record -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$HOOK?deploy=px1")
+[ "$c" = "200" ] && pass "px1's deploy record is readable after the rollback" || fail "record px1: expected 200, got $c ($(cat /tmp/record))"
+grep -q '"version":"px1","status":"succeeded"' /tmp/record && pass "the record is px1's outcome" || fail "record: $(cat /tmp/record)"
+case "$(status)" in
+*'"deploys":[{"version":"px1","status":"succeeded"'*) pass "status lists the deploys newest first" ;;
+*) fail "status.deploys: $(status)" ;;
+esac
+c=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$HOOK?deploy=never")
+[ "$c" = "404" ] && pass "a version never deployed has no record (404)" || fail "record never: expected 404, got $c"
 # Rollback to a version that was never deployed is a 422.
 c=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" "$HOOK?rollback=nope")
 [ "$c" = "422" ] && pass "rollback to a missing release gets 422" || fail "missing rollback: expected 422, got $c"

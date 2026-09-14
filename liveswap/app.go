@@ -624,6 +624,7 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		ma.lastDeploy = &result
 		ma.phase = "idle"
 		ma.mu.Unlock()
+		ma.recordDeploy(c, result)
 	}()
 
 	old := ma.currentInstance()
@@ -1253,11 +1254,16 @@ type statusSnapshot struct {
 	// healthy app with no releases reports []), so an empty set is
 	// distinguishable from a server that doesn't report the field.
 	AvailableVersions []string `json:"available_versions"`
+	// Deploys is the outcome of the latest deploy of each version a
+	// record is kept for (deploys.go), newest first; the whole record
+	// is GET /<app>?deploy=<version>.
+	Deploys []deploySummary `json:"deploys,omitempty"`
 }
 
 func (ma *managedApp) status() statusSnapshot {
 	c := ma.snapshot()
 	var wd *watchdogSnapshot
+	var deploys []deploySummary
 	available := []string{} // always an array in the JSON, never null
 	if c.spec != nil {
 		if c.clock != nil {
@@ -1267,10 +1273,11 @@ func (ma *managedApp) status() statusSnapshot {
 		if rels := listReleases(c.spec.dirs.releases); rels != nil {
 			available = rels
 		}
+		deploys = listDeploySummaries(c.spec.dirs.deploys)
 	}
 	ma.mu.Lock()
 	defer ma.mu.Unlock()
-	s := statusSnapshot{App: ma.name, Phase: ma.phase, LastDeploy: ma.lastDeploy, Watchdog: wd, AvailableVersions: available}
+	s := statusSnapshot{App: ma.name, Phase: ma.phase, LastDeploy: ma.lastDeploy, Watchdog: wd, AvailableVersions: available, Deploys: deploys}
 	if ma.current != nil {
 		s.CurrentVersion = ma.current.version
 		s.Socket = ma.current.socket

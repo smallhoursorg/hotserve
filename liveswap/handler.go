@@ -137,6 +137,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 
 	switch r.Method {
 	case http.MethodGet:
+		if v := r.URL.Query().Get("deploy"); v != "" {
+			return h.deployRecord(w, ma, v)
+		}
 		s := ma.status()
 		return respondJSON(w, http.StatusOK, s, ma.redactorFor(s))
 	case http.MethodPost:
@@ -259,6 +262,24 @@ func (h *Handler) deployRollback(w http.ResponseWriter, r *http.Request, ma *man
 		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("rollback version must match %s", versionRe)}, ma.redactorFor(statusSnapshot{}))
 	}
 	return h.runDeploy(w, r, ma, deployRequest{version: version, rollback: true}, by)
+}
+
+// deployRecord answers GET /<app>?deploy=<version> with the recorded
+// outcome of that version's latest deploy (deploys.go).
+func (h *Handler) deployRecord(w http.ResponseWriter, ma *managedApp, version string) error {
+	if !validVersion(version) {
+		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("deploy query param must match %s", versionRe)}, ma.redactorFor(statusSnapshot{}))
+	}
+	c := ma.snapshot()
+	rec, err := readDeployRecord(c.spec.dirs.deploys, version)
+	s := ma.status()
+	switch {
+	case errors.Is(err, errNoDeployRecord):
+		return respondJSON(w, http.StatusNotFound, map[string]string{"error": fmt.Sprintf("no deploy recorded for version %s", version)}, ma.redactorFor(s))
+	case err != nil:
+		return respondJSON(w, http.StatusInternalServerError, map[string]string{"error": "reading deploy record: " + err.Error()}, ma.redactorFor(s))
+	}
+	return respondJSON(w, http.StatusOK, rec, ma.redactorFor(s))
 }
 
 // runDeploy records the authorizing source, runs the pipeline, and maps
