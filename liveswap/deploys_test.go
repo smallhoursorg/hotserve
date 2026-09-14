@@ -242,3 +242,48 @@ func TestDeployRecordWriteNeverUsesAPlantedTempName(t *testing.T) {
 		t.Fatalf("the planted temp link was not pruned: %v", err)
 	}
 }
+
+// A record under a version's name that is not that version's — stale,
+// planted, corrupted, or not an object at all — is not served as it.
+func TestDeployRecordMustNameItsVersion(t *testing.T) {
+	dir := t.TempDir()
+	must(t, writeDeployRecord(dir, "v1", []byte(`{"version":"v2","status":"succeeded"}`)))
+	must(t, writeDeployRecord(dir, "v3", []byte(`["not","an","object"]`)))
+	for _, v := range []string{"v1", "v3"} {
+		if _, err := readDeployRecord(dir, v); err == nil || errors.Is(err, errNoDeployRecord) {
+			t.Fatalf("%s: a record that is not the version's must be refused outright, got %v", v, err)
+		}
+	}
+	must(t, writeDeployRecord(dir, "v4", []byte(`{"version":"v4","status":"failed"}`)))
+	if _, err := readDeployRecord(dir, "v4"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The record is filtered with the deploy's own spec and the values
+// known at the time, never withheld: a reload to an unreadable
+// env_file while the deploy ran must not turn its outcome into a
+// placeholder nothing can recover.
+func TestDeployRecordIsNotWithheldByALaterUnreadableEnvFile(t *testing.T) {
+	rig := newTestRig(t)
+	rig.spec.envFile = filepath.Join(t.TempDir(), "app.env")
+	must(t, os.WriteFile(rig.spec.envFile, []byte("SECRET=hunter2hunter2hunter2\n"), 0o600))
+	rig.ma.rememberSecrets(rig.spec.envFile, []string{"SECRET=hunter2hunter2hunter2"})
+	c := rig.ma.snapshot() // the deploy's snapshot, env_file readable
+	// The reload: the live spec now names an env_file that does not
+	// exist, so the response filter would withhold every body.
+	live := *rig.spec
+	live.envFile = filepath.Join(t.TempDir(), "missing.env")
+	rig.ma.spec = &live
+	rig.ma.recordDeploy(c, deployResult{Version: "v1", Status: "failed", Error: "pre_start failed: SECRET=hunter2hunter2hunter2 refused"})
+	rec, err := readDeployRecord(c.spec.dirs.deploys, "v1")
+	if err != nil {
+		t.Fatalf("the record was withheld or not written: %v", err)
+	}
+	if s := string(rec); !strings.Contains(s, `"status":"failed"`) || strings.Contains(s, "hunter2") || !strings.Contains(s, "[redacted:SECRET]") {
+		t.Fatalf("record = %s", s)
+	}
+	if w := rig.ma.redactorFor(rig.ma.status()); w.withhold == "" {
+		t.Fatal("the test's premise: the live filter withholds while the env_file is unreadable")
+	}
+}

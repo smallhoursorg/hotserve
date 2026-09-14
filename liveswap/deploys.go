@@ -73,7 +73,7 @@ func (ma *managedApp) recordDeploy(c collaborators, result deployResult) {
 		c.logger.Warn("deploy record: cannot encode", zap.Error(err))
 		return
 	}
-	filtered := ma.redactorFor(ma.status()).redactJSON(raw)
+	filtered := ma.recordRedactor(c, result).redactJSON(raw)
 	if err := writeDeployRecord(dir, result.Version, []byte(filtered)); err != nil {
 		c.logger.Warn("deploy record: cannot write", zap.String("version", result.Version), zap.Error(err))
 		return
@@ -104,6 +104,27 @@ func releaseNames(releasesDir string) ([]string, error) {
 		}
 	}
 	return names, nil
+}
+
+// recordRedactor is the filter a record is written through: the
+// deploy's own spec and the values the filter knows — every env_file
+// value seen at any launch, this deploy's included (rememberSecrets
+// ran before it launched) — with no withholding. The response filter
+// withholds while the *live* env_file cannot be read, because the
+// running app's values would be unknown; a record is about a deploy
+// that is over, and a reload to an unreadable env_file while it ran
+// must not turn its outcome into a placeholder that nothing can
+// recover once the file is fixed.
+func (ma *managedApp) recordRedactor(c collaborators, result deployResult) *redactor {
+	ma.secretsMu.Lock()
+	kvs := append([]string(nil), ma.secrets...)
+	ma.secretsMu.Unlock()
+	safe := []string{ma.name, result.Version}
+	if c.spec != nil {
+		safe = append(safe, c.spec.dirs.root, c.spec.dirs.app, c.spec.dirs.releases, c.spec.dirs.shared, c.spec.dirs.run)
+		safe = append(safe, listReleases(c.spec.dirs.releases)...)
+	}
+	return newRedactor(kvs, safe)
 }
 
 // deploysDir makes sure the records directory is a directory of its
@@ -205,8 +226,14 @@ func readDeployRecord(dir, version string) (json.RawMessage, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !json.Valid(b) {
-		return nil, fmt.Errorf("deploy record for %s is not JSON", version)
+	// The record must be an object naming the version it was asked
+	// for: a stale, planted or corrupted file under the name is not
+	// the version's record.
+	var head struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(b, &head); err != nil || head.Version != version {
+		return nil, fmt.Errorf("deploy record for %s is not that version's record", version)
 	}
 	return json.RawMessage(b), nil
 }
