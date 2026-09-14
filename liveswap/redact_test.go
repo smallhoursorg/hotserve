@@ -374,4 +374,11 @@ func TestKeepingReportedAddsToTheRecordsKeys(t *testing.T) {
 	if got := r.redactJSON(quiet); !strings.Contains(got, `"redacted_env":["OLD"]`) {
 		t.Fatalf("without keepingReported the field is body text and passes as it was: %s", got)
 	}
+	// A planted entry equal to a known value is filtered like any
+	// text before it is carried forward, and the key it belongs to
+	// joins the keys reported.
+	planted := json.RawMessage(`{"version":"v1","redacted_env":["newvaluenewvalue1234"]}`)
+	if got := r.keepingReported(planted).redactJSON(planted); strings.Contains(got, "newvaluenewvalue1234") || !strings.Contains(got, `"redacted_env":["NEW","[redacted:NEW]"]`) {
+		t.Fatalf("a planted reported entry leaked or was not accounted for: %s", got)
+	}
 }

@@ -450,9 +450,16 @@ func (r *redactor) redactJSON(raw []byte) string {
 		}
 	}
 	body = r.replaceKnown(body, seen)
+	// The keys a stored record reported are body text from a file, not
+	// this pass's own findings: each goes through the filter like any
+	// other text before it is carried forward — a planted entry equal
+	// to a known value comes out as its marker, and what that finds
+	// joins the keys reported now.
 	var reported []string
 	if r != nil {
-		reported = r.reported
+		for _, n := range r.reported {
+			reported = append(reported, r.replaceKnown(r.filter(n, seen), seen))
+		}
 	}
 	if len(seen) > 0 || len(reported) > 0 {
 		names := reportedKeys(seen)
