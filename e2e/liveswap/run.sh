@@ -305,14 +305,19 @@ example_scenario() { # <app> <port> <deploy.sh path> <version prefix>
 	b=$(ex_body)
 	[ "$b" = "hello from ${pre}2 (schema v1)" ] && pass "$app: serves ${pre}2" || fail "$app: expected ${pre}2, got '$b'"
 	# The workflow's Run-workflow path: deploy.sh --rollback, the release
-	# still on the box's disk, no artifact.
-	if HOTSERVE_URL=$hook HOTSERVE_TOKEN=$TOKEN sh "$script" --rollback "${pre}1" >/tmp/ex-deploy.out 2>&1; then
+	# still on the box's disk, no artifact — run as the workflow runs it,
+	# with GITHUB_ACTIONS set, so the job-summary line is exercised.
+	: >/tmp/ex-summary.md
+	if HOTSERVE_URL=$hook HOTSERVE_TOKEN=$TOKEN GITHUB_ACTIONS=1 GITHUB_STEP_SUMMARY=/tmp/ex-summary.md \
+		sh "$script" --rollback "${pre}1" >/tmp/ex-deploy.out 2>&1; then
 		pass "$app: deploy.sh --rollback relaunched ${pre}1"
 	else
 		fail "$app: deploy.sh --rollback ${pre}1 failed: $(cat /tmp/ex-deploy.out)"
 	fi
 	b=$(ex_body)
 	[ "$b" = "hello from ${pre}1 (schema v1)" ] && pass "$app: serves ${pre}1 again" || fail "$app: after the rollback: '$b'"
+	grep -q "rollback to ${pre}1 live" /tmp/ex-summary.md && pass "$app: in Actions, a success lands one job-summary line" \
+		|| fail "$app: summary after the rollback: $(cat /tmp/ex-summary.md)"
 	if ex_deploy "${pre}3" "$ART/$app-missing.tar.gz"; then
 		fail "$app: deploy.sh reported success for an artifact that does not exist"
 	else
@@ -323,6 +328,32 @@ example_scenario() { # <app> <port> <deploy.sh path> <version prefix>
 	fi
 	b=$(ex_body)
 	[ "$b" = "hello from ${pre}1 (schema v1)" ] && pass "$app: ${pre}1 kept serving through the failed deploy" || fail "$app: after the failed deploy: '$b'"
+	# The same failure as the workflow sees it: the output in a group, an
+	# error annotation naming the failing phase and the cause, a summary
+	# line — and the raw body still printed. A failed deploy leaves no
+	# release, so the version is free to try again.
+	: >/tmp/ex-summary.md
+	if GITHUB_ACTIONS=1 GITHUB_STEP_SUMMARY=/tmp/ex-summary.md ex_deploy "${pre}3" "$ART/$app-missing.tar.gz"; then
+		fail "$app: in Actions, deploy.sh exited 0 on a failed deploy"
+	else
+		case "$(cat /tmp/ex-deploy.out)" in
+		*'::group::deploying '*'"error"'*404*'::endgroup::'*'::error title=hotserve%3A '*' failed::in '*': '*404*)
+			pass "$app: in Actions, a failure is grouped and annotated with its phase and cause" ;;
+		*) fail "$app: Actions-mode failure output: $(cat /tmp/ex-deploy.out)" ;;
+		esac
+		grep -q 'failed in `' /tmp/ex-summary.md && pass "$app: the job summary names the failed phase" \
+			|| fail "$app: summary after the failed deploy: $(cat /tmp/ex-summary.md)"
+	fi
+	# A failure with no JSON body — nothing listening — still gets an
+	# annotation, pointing at the output instead of a cause.
+	if HOTSERVE_URL="http://e2e-hotserve:1/$app" HOTSERVE_TOKEN=$TOKEN VERSION="${pre}3" \
+		GITHUB_ACTIONS=1 GITHUB_STEP_SUMMARY=/tmp/ex-summary.md sh "$script" "/tmp/$app.tgz" >/tmp/ex-deploy.out 2>&1; then
+		fail "$app: deploy.sh exited 0 with nothing listening"
+	else
+		grep -q '::error title=hotserve%3A .* failed::see the response above' /tmp/ex-deploy.out \
+			&& pass "$app: a failure without a JSON body is annotated too" \
+			|| fail "$app: non-JSON failure output: $(cat /tmp/ex-deploy.out)"
+	fi
 }
 
 echo "=== scenario 13: the Deno example deploys as its README says ==="

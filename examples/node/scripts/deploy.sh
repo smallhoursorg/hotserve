@@ -70,11 +70,17 @@ else
 fi
 
 # The Actions dressing. `field` reads one string field out of the
-# response with the same sed the e2e suite uses (no jq here: this also
-# runs from laptops). It takes the last occurrence, which for "phase"
-# is the failing phase inside last_deploy, and for "error" its cause.
+# response (no jq here: this also runs from laptops): the last
+# occurrence, which for "phase" is the failing phase inside last_deploy
+# and for "error" its cause, with JSON's \" and \\ unescaped so a quote
+# in the cause does not cut it short. `prop` and `msg` escape what a
+# workflow command's property and message may not contain.
 actions=${GITHUB_ACTIONS:-}
-field() { printf '%s' "$1" | sed -n "s/.*\"$2\":\"\([^\"]*\)\".*/\1/p"; }
+field() {
+	printf '%s' "$1" | sed -n 's/.*"'"$2"'":"\(\([^\\"]*\\.\)*[^\\"]*\)".*/\1/p' | sed 's/\\\(["\\]\)/\1/g'
+}
+msg() { printf '%s' "$1" | sed 's/%/%25/g' | tr '\r\n' '  '; }
+prop() { msg "$1" | sed 's/:/%3A/g; s/,/%2C/g'; }
 began=$(date +%s)
 body=$(mktemp)
 trap 'rm -f "$body"' EXIT
@@ -90,7 +96,7 @@ finish() { # <curl exit status> <what>: prints the body, dresses it, exits on fa
 	fi
 	phase=$(field "$(cat "$body")" phase)
 	why=$(field "$(cat "$body")" error)
-	[ -n "$actions" ] && echo "::error title=hotserve: $what failed::${phase:+in $phase: }${why:-see the response above}"
+	[ -n "$actions" ] && echo "::error title=$(prop "hotserve: $what failed")::$(msg "${phase:+in $phase: }${why:-see the response above}")"
 	[ -n "${GITHUB_STEP_SUMMARY:-}" ] && printf '**hotserve:** %s failed%s, %s\n\n%s\n\n' "$what" "${phase:+ in \`$phase\`}" "$took" "${why:-see the log}" >>"$GITHUB_STEP_SUMMARY"
 	exit "$rc"
 }
