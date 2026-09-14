@@ -398,3 +398,25 @@ func TestDeployRecordFiltersACurrentValueBeforeAnyLaunch(t *testing.T) {
 		t.Fatalf("a current value reached the record of a pre-launch failure: %s", s)
 	}
 }
+
+// A known value that is a fragment of the record's own JSON makes the
+// filter withhold the whole body; the record is then an envelope that
+// still names the version and status, readable and listed.
+func TestDeployRecordSurvivesTheFiltersWholeBodyFallback(t *testing.T) {
+	rig := newTestRig(t)
+	rig.ma.rememberSecrets("/etc/app.env", []string{`WEIRD="status":"failed","error"`})
+	rig.runner.startErr = errors.New("boom")
+	if err := deployOnceV1(t, rig); err == nil {
+		t.Fatal("v1 should have failed")
+	}
+	rec, err := readDeployRecord(rig.spec.dirs, "v1")
+	if err != nil {
+		t.Fatalf("the record must be readable as v1's: %v", err)
+	}
+	if s := string(rec); !strings.Contains(s, `"version":"v1"`) || !strings.Contains(s, `"status":"failed"`) || !strings.Contains(s, "record withheld") || strings.Contains(s, "boom") {
+		t.Fatalf("envelope = %s", s)
+	}
+	if d := rig.ma.status().Deploys; len(d) != 1 || d[0].Version != "v1" || d[0].Status != "failed" {
+		t.Fatalf("deploys = %+v", d)
+	}
+}

@@ -74,6 +74,27 @@ func (ma *managedApp) recordDeploy(c collaborators, result deployResult) {
 		return
 	}
 	filtered := ma.recordRedactor(c, result).redactJSON(raw)
+	// The filter's whole-body fallback — a known value that is a
+	// fragment of the record's own JSON — leaves an object with no
+	// version, which nothing could read back as this version's. The
+	// record is then an envelope that says so: the identity (the
+	// version the deployer named, the status vocabulary, the times)
+	// and why the rest is missing.
+	var head struct {
+		Version string `json:"version"`
+	}
+	if json.Unmarshal([]byte(filtered), &head) != nil || head.Version != result.Version {
+		env, err := json.Marshal(map[string]any{
+			"version": result.Version, "status": result.Status, "phase": result.Phase,
+			"deployed_by": result.By, "started_at": result.StartedAt, "finished_at": result.FinishedAt,
+			"error": "record withheld: a redacted value overlapped the record's own structure",
+		})
+		if err != nil {
+			c.logger.Warn("deploy record: cannot encode the envelope", zap.Error(err))
+			return
+		}
+		filtered = string(env)
+	}
 	if err := writeDeployRecord(c.spec.dirs, result.Version, []byte(filtered)); err != nil {
 		c.logger.Warn("deploy record: cannot write", zap.String("version", result.Version), zap.Error(err))
 		return
