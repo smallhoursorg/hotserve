@@ -145,9 +145,11 @@ type fakeRunner struct {
 	reattachErrs    []error // consumed one per Reattach call before reattachOK applies
 	reattachCalls   int
 	reattachSeen    []handleState
-	stopErr         error   // Stop returns this
-	stopLeavesAlive bool    // Stop does not actually kill the handle
-	startDies       string  // when set, Start's handle is already dead with this exit
+	stopErr         error  // Stop returns this
+	stopLeavesAlive bool   // Stop does not actually kill the handle
+	startDies       string // when set, Start's handle is already dead with this exit
+	preflightErr    error  // Preflight returns this
+	preflights      []startSpec
 	sweepErr        error   // Sweep returns this
 	sweepErrs       []error // consumed one per Sweep call before sweepErr applies
 	sweeps          []handle
@@ -167,6 +169,13 @@ func (r *fakeRunner) Start(spec startSpec) (handle, error) {
 	r.started = append(r.started, spec)
 	r.handles = append(r.handles, h)
 	return h, nil
+}
+
+func (r *fakeRunner) Preflight(spec startSpec) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.preflights = append(r.preflights, spec)
+	return r.preflightErr
 }
 
 func (r *fakeRunner) Exit(h handle) string {

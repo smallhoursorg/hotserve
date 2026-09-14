@@ -232,7 +232,8 @@ In `.github/workflows/deploy.yml`, set two things:
   `https://deploy.example.com/example`.
 - `runs-on` to the box's architecture: `ubuntu-24.04-arm` for an arm64
   box, `ubuntu-24.04` for amd64. The executable is the runner's own
-  Node binary, so this has to match.
+  Node binary, so this has to match; a mismatch is refused at deploy
+  time with a message naming the right value.
 
 Push to `main`. The workflow builds the executables, publishes them as
 a GitHub release tagged with the commit's first 12 characters, mints an

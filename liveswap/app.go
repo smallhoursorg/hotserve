@@ -711,14 +711,25 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	// recovery — must NOT re-run it. Re-running an old forward migration
 	// would be wrong, and a flaky preflight check must never block an
 	// emergency rollback.
+	// Pre-flight, before any unit exists and before a migration runs:
+	// the command and the pre_start resolve to files inside the
+	// sandbox view, built for this machine. A tarball from the wrong
+	// runner is refused here as the deployer's error (422) with the
+	// fix named, rather than surfacing as a 203/EXEC a phase later.
+	ma.setPhase(c, "preparing")
+	if err := c.runner.Preflight(l.startSpec(spec, spec.command)); err != nil {
+		return validationError{fmt.Sprintf("pre-flight: %v", err)}
+	}
 	if len(spec.preStart) > 0 && !req.rollback {
+		if err := c.runner.Preflight(l.startSpec(spec, spec.preStart)); err != nil {
+			return validationError{fmt.Sprintf("pre-flight of pre_start: %v", err)}
+		}
 		// A previous deploy's pre_start whose outcome could not be
 		// observed may still be running; settle the ledger before
 		// starting another migration beside it.
 		if !ma.sweep(c, old, l.nonce) {
 			return fmt.Errorf("%w; not running pre_start", errSweepUnconfirmed)
 		}
-		ma.setPhase(c, "preparing")
 		preCtx, cancel := context.WithTimeout(ctx, spec.deadline)
 		// Under the same sandbox as the app it precedes: a migration
 		// that writes where the app cannot read fails here, not at 3am.

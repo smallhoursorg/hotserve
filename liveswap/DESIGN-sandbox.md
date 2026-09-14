@@ -169,7 +169,10 @@ below as a contract the sandbox path must keep.
   runtime installed outside `/usr` (`/opt/node/bin/node`, an nvm or
   asdf shim under a home directory) resolves for the supervisor and
   then does not exist inside the unit
-  (`TestUnitForRefusesCommandOutsideTheView`).
+  (`TestUnitForRefusesCommandOutsideTheView`). The deploy asks the
+  same question first, at its pre-flight, and reports the refusal as
+  a 422 (`TestSystemdRunnerPreflight`); the launch's own check stays
+  as the last word.
 - `/run/systemd/resolve` MUST stay reachable (read-only) when it
   exists: on systemd-resolved hosts `/etc/resolv.conf` is a symlink
   into that directory, and since nothing else under `/run` is in the
