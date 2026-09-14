@@ -90,7 +90,10 @@ field() {
 msg() { printf '%s' "$1" | sed 's/%/%25/g' | tr '\r\n' '  '; }
 prop() { msg "$1" | sed 's/:/%3A/g; s/,/%2C/g'; }
 began=$(date +%s)
-body=$(mktemp)
+# One temp directory, trapped before anything is put in it.
+tmpd=$(mktemp -d)
+trap 'rm -rf "$tmpd"' EXIT
+body=$tmpd/body
 # The stream: curl prints each line as it arrives and tee keeps a
 # copy (curl's own errors go to stderr, printed but kept out of the
 # copy); the response headers and curl's own exit status are kept in
@@ -102,9 +105,8 @@ body=$(mktemp)
 # is the outcome (a 3xx from an intermediary is not a deploy). A
 # phase line with no terminal line is a stream cut short, and a
 # single response curl could not finish is no outcome: failures both.
-hdrs=$(mktemp)
-rcfile=$(mktemp)
-trap 'rm -f "$body" "$hdrs" "$rcfile"' EXIT
+hdrs=$tmpd/headers
+rcfile=$tmpd/curl-status
 stream() { # <curl args...>: runs the request, prints it, keeps it
 	# `|| rc=$?` keeps a failing curl from ending the group under
 	# set -e before its status is written.
