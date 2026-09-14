@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"mime"
 	"net/http"
 	"os"
 	"path"
@@ -336,16 +337,22 @@ func deployOutcome(ma *managedApp, err error) (int, any, *redactor) {
 const ndjson = "application/x-ndjson"
 
 // wantsStream reports whether the request asked for the stream: the
-// media type, exactly, among the items of every Accept header sent
-// (a list, with or without parameters), and nothing that merely
-// resembles it.
+// media type, exactly, among the items of every Accept header sent (a
+// list, with or without parameters), not refused by a q of zero, and
+// nothing that merely resembles it.
 func wantsStream(r *http.Request) bool {
 	for _, v := range r.Header.Values("Accept") {
 		for _, item := range strings.Split(v, ",") {
-			mt, _, _ := strings.Cut(item, ";")
-			if strings.EqualFold(strings.TrimSpace(mt), ndjson) {
-				return true
+			mt, params, err := mime.ParseMediaType(strings.TrimSpace(item))
+			if err != nil || mt != ndjson {
+				continue
 			}
+			if q, ok := params["q"]; ok {
+				if f, err := strconv.ParseFloat(q, 64); err != nil || f <= 0 {
+					continue
+				}
+			}
+			return true
 		}
 	}
 	return false

@@ -94,8 +94,13 @@ Properties that matter to the model:
   which the shipped units keep free of secrets (no `--environ`, the
   smoke test asserts it). Every body passes
   four layers before it is written. A streamed deploy (`Accept:
-  application/x-ndjson`) is the same bytes cut into lines, each
-  through the same filter before it is written. First, exact: every `env_file`
+  application/x-ndjson`) writes two kinds of line, each through the
+  same filter before it is written: phase lines, generated objects
+  holding a phase name and a timestamp and nothing of the app's; and
+  the last line, the single response's body filtered exactly as it
+  would have been, with two fixed fields — `"event":"done"` and
+  `http_status` — appended after the filter so that a body the filter
+  withholds still ends the stream with them. First, exact: every `env_file`
   value of 8+ characters this process has rendered for a launch (or,
   after a restart, read from the file for the filter), in each form
   the filter recognises (as written, JSON-escaped, base64 standard and

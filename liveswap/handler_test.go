@@ -664,6 +664,9 @@ func TestWantsStreamReadsAcceptExactly(t *testing.T) {
 		{[]string{"application/json, application/x-ndjson"}, true},
 		{[]string{"application/json", "application/x-ndjson"}, true},
 		{[]string{"application/x-ndjson-backup"}, false},
+		{[]string{"application/x-ndjson;q=0"}, false},
+		{[]string{"application/x-ndjson;q=0.0, application/json"}, false},
+		{[]string{"application/x-ndjson;q=abc"}, false},
 		{[]string{"application/json"}, false},
 		{nil, false},
 	}

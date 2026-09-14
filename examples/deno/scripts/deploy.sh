@@ -104,8 +104,10 @@ stream() { # <curl args...>: runs the request, prints it, keeps it
 		-H "Authorization: Bearer $token" -H "Accept: application/x-ndjson" \
 		"$@" | tee "$body"
 }
-outcome() { # the http_status of the last line, or 0 when there is none
-	tail -n 1 "$body" | sed -n 's/.*"http_status":\([0-9][0-9]*\).*/\1/p' | grep . || echo 0
+outcome() { # the http_status of a complete last line, or 0 when there is none
+	# The whole terminal suffix, brace included: a connection cut after
+	# the digits must not read as an outcome.
+	tail -n 1 "$body" | sed -n 's/.*,"event":"done","http_status":\([0-9][0-9]*\)}$/\1/p' | grep . || echo 0
 }
 finish() { # <what>: dresses the outcome, exits on failure
 	what=$1
