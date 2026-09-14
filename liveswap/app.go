@@ -525,7 +525,8 @@ func (ma *managedApp) failureDetail(c collaborators, spec *appSpec, err error, a
 		// and miss the last line — the one that says why.
 		var lines []string
 		ctx, cancel := context.WithTimeout(context.Background(), journalTailTimeout)
-		for attempt := 0; attempt < 5; attempt++ {
+		defer cancel()
+		for attempt := 0; attempt < 5 && ctx.Err() == nil; attempt++ {
 			got, err := c.journal.tail(ctx, units, since, spec.deployLogLines)
 			if err != nil {
 				d.LogTailError = err.Error()
@@ -538,7 +539,6 @@ func (ma *managedApp) failureDetail(c collaborators, spec *appSpec, err error, a
 			}
 			c.clock.Sleep(200 * time.Millisecond)
 		}
-		cancel()
 		if d.LogTailError == "" {
 			d.LogTail, d.LogTailTruncated = capTail(lines, spec.deployLogLines, deployLogMaxBytes)
 		}

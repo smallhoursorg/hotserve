@@ -35,6 +35,10 @@ type journalReader interface {
 	tail(ctx context.Context, units []string, since time.Time, n int) ([]string, error)
 }
 
+// journalctlPath is where Debian's systemd package puts journalctl —
+// an absolute path, so what runs never depends on PATH.
+const journalctlPath = "/usr/bin/journalctl"
+
 // journalctlReader reads the hotserve user's own journal, where the
 // units on its user manager write.
 type journalctlReader struct{}
@@ -65,7 +69,7 @@ func (journalctlReader) tail(ctx context.Context, units []string, since time.Tim
 	// memory is fixed whatever the app wrote.
 	out := &tailWriter{max: 2 * deployLogMaxBytes}
 	stderr := &tailWriter{max: 1024}
-	cmd := exec.CommandContext(ctx, "journalctl", args...) //nolint:gosec // a fixed program; the arguments are validated unit names, a count and a timestamp built here, never request input
+	cmd := exec.CommandContext(ctx, journalctlPath, args...) //nolint:gosec // a fixed program by absolute path; the arguments are validated unit names, a count and a timestamp built here, never request input
 	cmd.Stdout, cmd.Stderr = out, stderr
 	if err := cmd.Run(); err != nil {
 		if msg := strings.TrimSpace(string(stderr.buf)); msg != "" {
