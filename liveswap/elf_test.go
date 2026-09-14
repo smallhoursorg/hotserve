@@ -59,6 +59,18 @@ func TestElfMachine(t *testing.T) {
 	if _, _, err := elfMachine(filepath.Join(t.TempDir(), "missing")); err == nil {
 		t.Fatal("a missing file is an error, not a pass")
 	}
+	// Executable but unreadable: the kernel can run it, this check
+	// cannot read it, and it passes unclassified.
+	if os.Geteuid() == 0 {
+		t.Skip("root reads everything; the execute-only case needs an unprivileged user")
+	}
+	p := writeFile(t, "xonly", elfHeader(2, false, 62))
+	if err := os.Chmod(p, 0o111); err != nil {
+		t.Fatal(err)
+	}
+	if got, _, err := elfMachine(p); err != nil || got != "" {
+		t.Fatalf("execute-only file: %q %v; want unclassified, no error", got, err)
+	}
 }
 
 // checkMachine passes the box's own machine, anything that is not a

@@ -14,7 +14,7 @@ import (
 func TestPreflightRefusalIs422BeforeAnyUnit(t *testing.T) {
 	rig := newTestRig(t)
 	rig.spec.preStart = []string{"./migrate"}
-	rig.runner.preflightErr = errors.New("this box is arm64 and ./server is an x86-64 executable: build on a runner of the box's architecture (runs-on: ubuntu-24.04-arm)")
+	rig.runner.preflightErr = &preflightError{"this box is arm64 and ./server is an x86-64 executable: build on a runner of the box's architecture (runs-on: ubuntu-24.04-arm)"}
 	err := deployOnceV1(t, rig)
 	var ve validationError
 	if !errors.As(err, &ve) || !strings.Contains(err.Error(), "pre-flight: this box is arm64") {
@@ -55,5 +55,18 @@ func TestPreflightChecksCommandThenPreStart(t *testing.T) {
 	}
 	if p := rig.runner.preflights; len(p) != 1 || p[0].command[0] != rig.spec.command[0] {
 		t.Fatalf("a rollback pre-flights the command only: %+v", p)
+	}
+}
+
+// A pre-flight that could not be made — a bind source that would not
+// resolve, a file that would not read — is hotserve's failure, not the
+// deployer's: no 422.
+func TestPreflightFailureIsNotTheDeployers(t *testing.T) {
+	rig := newTestRig(t)
+	rig.runner.preflightErr = errors.New("resolving bind source /var/lib/liveswap/demo/shared: permission denied")
+	err := deployOnceV1(t, rig)
+	var ve validationError
+	if err == nil || errors.As(err, &ve) || !strings.Contains(err.Error(), "pre-flight: resolving bind source") {
+		t.Fatalf("want a plain (5xx) error naming the pre-flight, got %v", err)
 	}
 }

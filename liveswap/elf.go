@@ -2,8 +2,10 @@ package liveswap
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"runtime"
 )
@@ -20,6 +22,15 @@ import (
 // second-guess what the kernel will run (a 32-bit executable under a
 // compat kernel, say).
 
+// preflightError is a refusal the deployer can act on — the release
+// or the box's runtime layout as given — which the deploy reports as
+// a 422. Any other error from a pre-flight is hotserve's own (a bind
+// source that cannot be resolved, a file that cannot be read) and is
+// reported as such.
+type preflightError struct{ msg string }
+
+func (e *preflightError) Error() string { return e.msg }
+
 // elfMachines maps e_machine to the Go architecture name a box reports
 // as runtime.GOARCH, and the machine's own name for the message.
 var elfMachines = map[uint16]struct{ goarch, name string }{
@@ -33,6 +44,12 @@ var elfMachines = map[uint16]struct{ goarch, name string }{
 // ELF or is for a machine this check does not know.
 func elfMachine(path string) (goarch, name string, err error) {
 	f, err := os.Open(path) //nolint:gosec // the resolved command of a release the deploy is about to run
+	if errors.Is(err, fs.ErrPermission) {
+		// Executable but not readable (mode 0111): the kernel can run
+		// it and this check cannot read it, so it passes unclassified,
+		// like a machine the check does not know.
+		return "", "", nil
+	}
 	if err != nil {
 		return "", "", err
 	}
@@ -71,7 +88,7 @@ func checkMachine(path string) error {
 	if _, known := elfMachines[machineFor(runtime.GOARCH)]; !known {
 		return nil // a box whose machine this check does not know cannot compare
 	}
-	return fmt.Errorf("this box is %s and %s is an %s executable: build on a runner of the box's architecture%s", runtime.GOARCH, path, name, runsOnHint(runtime.GOARCH))
+	return &preflightError{fmt.Sprintf("this box is %s and %s is an %s executable: build on a runner of the box's architecture%s", runtime.GOARCH, path, name, runsOnHint(runtime.GOARCH))}
 }
 
 // machineFor is elfMachines' inverse for the box's own architecture.

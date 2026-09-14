@@ -357,7 +357,9 @@ func resolveInView(spec startSpec) (argv0, target string, err error) {
 	}
 	argv0, err = resolveCommand(spec.command[0], spec.dir)
 	if err != nil {
-		return "", "", err
+		// A command that is not there, or not executable: the release
+		// as shipped, or the command as configured — the deployer's.
+		return "", "", &preflightError{err.Error()}
 	}
 	// As late as possible, and before the manager follows any of them:
 	// what a bind source points at is only knowable now (see
@@ -387,7 +389,7 @@ func resolveInView(spec startSpec) (argv0, target string, err error) {
 		if target != argv0 {
 			via = fmt.Sprintf(" (via %s, which is)", argv0)
 		}
-		return "", "", fmt.Errorf("%s is not inside the sandbox view of app %s%s: an app sees its release dir, its shared dir and the OS runtime (/usr and a named handful of /etc), and nothing else on this host — ship the runtime inside the release, or install it under /usr", target, spec.app, via)
+		return "", "", &preflightError{fmt.Sprintf("%s is not inside the sandbox view of app %s%s: an app sees its release dir, its shared dir and the OS runtime (/usr and a named handful of /etc), and nothing else on this host — ship the runtime inside the release, or install it under /usr", target, spec.app, via)}
 	}
 	return argv0, target, nil
 }

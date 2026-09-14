@@ -490,6 +490,19 @@ func (ma *managedApp) takePhases(finished time.Time) []phaseTiming {
 	return phases
 }
 
+// preflightResult classifies a pre-flight's outcome: a refusal is the
+// deployer's (422); anything else is hotserve's own failure to check.
+func preflightResult(what string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var pe *preflightError
+	if errors.As(err, &pe) {
+		return validationError{fmt.Sprintf("%s: %v", what, err)}
+	}
+	return fmt.Errorf("%s: %w", what, err)
+}
+
 // failureDetail is the app's side of a failed deploy, gathered after
 // the fact: the exit the runner recorded (the pre_start's from its
 // error; the app's as read before hotserve stopped it, and only when
@@ -709,20 +722,22 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	// generated config, warmed caches) persist, so a rollback — which
 	// relaunches an already-prepared on-disk release, like crash
 	// recovery — must NOT re-run it. Re-running an old forward migration
-	// would be wrong, and a flaky preflight check must never block an
-	// emergency rollback.
+	// would be wrong, and a flaky migration check must never block an
+	// emergency rollback. The command's pre-flight above does run on a
+	// rollback: it is a path resolution and a header read, nothing
+	// that can flake, and what it refuses the launch would refuse too.
 	// Pre-flight, before any unit exists and before a migration runs:
 	// the command and the pre_start resolve to files inside the
 	// sandbox view, built for this machine. A tarball from the wrong
 	// runner is refused here as the deployer's error (422) with the
 	// fix named, rather than surfacing as a 203/EXEC a phase later.
 	ma.setPhase(c, "preparing")
-	if err := c.runner.Preflight(l.startSpec(spec, spec.command)); err != nil {
-		return validationError{fmt.Sprintf("pre-flight: %v", err)}
+	if err := preflightResult("pre-flight", c.runner.Preflight(l.startSpec(spec, spec.command))); err != nil {
+		return err
 	}
 	if len(spec.preStart) > 0 && !req.rollback {
-		if err := c.runner.Preflight(l.startSpec(spec, spec.preStart)); err != nil {
-			return validationError{fmt.Sprintf("pre-flight of pre_start: %v", err)}
+		if err := preflightResult("pre-flight of pre_start", c.runner.Preflight(l.startSpec(spec, spec.preStart))); err != nil {
+			return err
 		}
 		// A previous deploy's pre_start whose outcome could not be
 		// observed may still be running; settle the ledger before
