@@ -19,11 +19,13 @@
 #                         its API URL, private repo or not (the workflow sends
 #                         the job's own token)
 #
-# The request returns once the deploy (or rollback: the same start,
-# health gate and cutover, from a release already on disk) has
-# finished: 200 with the app's status when the new version is live, or
-# an error body saying why it was refused (the old version keeps
-# serving). Either way the body is printed, and a failure exits non-zero.
+# The deploy (or rollback: the same start, health gate and cutover,
+# from a release already on disk) is streamed as it happens: one JSON
+# line per phase, then the outcome — the app's status when the new
+# version is live, or an error saying why it was refused (the old
+# version keeps serving) — with the status code the request would
+# have had in `http_status`. Every line is printed as it arrives, and
+# a failure exits non-zero.
 #
 # In GitHub Actions the same output is also dressed for the job page:
 # the request's output in a collapsible group, a failure as an error
@@ -90,31 +92,45 @@ prop() { msg "$1" | sed 's/:/%3A/g; s/,/%2C/g'; }
 began=$(date +%s)
 body=$(mktemp)
 trap 'rm -f "$body"' EXIT
-finish() { # <curl exit status> <what>: prints the body, dresses it, exits on failure
-	rc=$1 what=$2
-	cat "$body"
+# The stream: curl prints each line as it arrives and tee keeps a
+# copy (curl's own errors go to stderr, printed but kept out of the
+# copy). The outcome is the last line's http_status — a stream is 200
+# from its first byte, so the status line says nothing — and a body
+# with no such line is a request that never streamed: refused before
+# it began (curl's --fail-with-body puts that error in the body) or
+# cut short.
+stream() { # <curl args...>: runs the request, prints it, keeps it
+	curl --fail-with-body --silent --show-error --no-buffer --max-time 600 \
+		-H "Authorization: Bearer $token" -H "Accept: application/x-ndjson" \
+		"$@" | tee "$body"
+}
+outcome() { # the http_status of the last line, or 0 when there is none
+	tail -n 1 "$body" | sed -n 's/.*"http_status":\([0-9][0-9]*\).*/\1/p' | grep . || echo 0
+}
+finish() { # <what>: dresses the outcome, exits on failure
+	what=$1
 	echo
 	[ -n "$actions" ] && printf '::endgroup::\n'
 	took="$(( $(date +%s) - began ))s"
-	if [ "$rc" -eq 0 ]; then
+	code=$(outcome)
+	case $code in
+	2??)
 		[ -n "${GITHUB_STEP_SUMMARY:-}" ] && printf '**hotserve:** %s live, %s\n\n' "$what" "$took" >>"$GITHUB_STEP_SUMMARY"
-		return 0
-	fi
-	phase=$(field "$(cat "$body")" phase)
-	why=$(field "$(cat "$body")" error)
+		return 0 ;;
+	esac
+	last=$(tail -n 1 "$body")
+	phase=$(field "$last" phase)
+	why=$(field "$last" error)
 	[ -n "$actions" ] && printf '::error title=%s::%s\n' "$(prop "hotserve: $what failed")" "$(msg "${phase:+in $phase: }${why:-see the response above}")"
 	[ -n "${GITHUB_STEP_SUMMARY:-}" ] && printf '**hotserve:** %s failed%s, %s\n\n%s\n\n' "$what" "${phase:+ in \`$phase\`}" "$took" "${why:-see the log}" >>"$GITHUB_STEP_SUMMARY"
-	exit "$rc"
+	exit 1
 }
 
 if [ -n "$rollback" ]; then
 	what="$app rollback to $rollback"
 	printf '%srolling %s back to %s\n' "${actions:+::group::}" "$url" "$rollback"
-	rc=0
-	curl --fail-with-body --silent --show-error --max-time 600 -X POST \
-		-H "Authorization: Bearer $token" \
-		-o "$body" "$url?rollback=$rollback" || rc=$?
-	finish "$rc" "$what"
+	stream -X POST "$url?rollback=$rollback"
+	finish "$what"
 	exit 0
 fi
 
@@ -123,21 +139,14 @@ fi
 # reason), and Actions output is readable by anyone who can see the job.
 what="$app $version"
 printf '%sdeploying %s as %s to %s\n' "${actions:+::group::}" "${artifact%%\?*}" "$version" "$url"
-rc=0
 if [ -f "$artifact" ]; then
-	curl --fail-with-body --silent --show-error --max-time 600 -X POST \
-		-H "Authorization: Bearer $token" \
-		-H "Content-Type: application/gzip" --data-binary @"$artifact" \
-		-o "$body" "$url?version=$version" || rc=$?
+	stream -X POST -H "Content-Type: application/gzip" --data-binary @"$artifact" "$url?version=$version"
 else
 	# JSON-escape what goes into the body (a quote or backslash in a
 	# header value would otherwise make it malformed).
 	json() { printf '%s' "$1" | sed 's/[\\"]/\\&/g'; }
 	auth=${ARTIFACT_AUTH_HEADER:+,\"auth_header\":\"$(json "$ARTIFACT_AUTH_HEADER")\"}
-	curl --fail-with-body --silent --show-error --max-time 600 -X POST \
-		-H "Authorization: Bearer $token" \
-		-H "Content-Type: application/json" \
-		-d "{\"url\":\"$(json "$artifact")\",\"version\":\"$(json "$version")\"$auth}" \
-		-o "$body" "$url" || rc=$?
+	stream -X POST -H "Content-Type: application/json" \
+		-d "{\"url\":\"$(json "$artifact")\",\"version\":\"$(json "$version")\"$auth}" "$url"
 fi
-finish "$rc" "$what"
+finish "$what"

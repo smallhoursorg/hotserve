@@ -161,6 +161,45 @@ case "$b" in
 *) fail "expected v2 to keep serving, got '$b'" ;;
 esac
 
+echo "=== scenario 5d: Accept: application/x-ndjson streams the deploy, and its outcome ==="
+# A success: phase lines as they happen, then the status with
+# "event":"done" and http_status 200.
+c=$(curl -s -o /tmp/stream-body -w '%{http_code}' --max-time 120 -X POST \
+	-H "Authorization: Bearer $TOKEN" -H "Accept: application/x-ndjson" \
+	-H "Content-Type: application/json" \
+	-d "{\"url\":\"$ART/demo-v2.tar.gz\",\"version\":\"v2stream\"}" "$HOOK")
+[ "$c" = "200" ] && pass "stream answers 200" || fail "stream: expected 200, got $c ($(cat /tmp/stream-body))"
+head -n 1 /tmp/stream-body | grep -q '^{"at":"[^"]*","event":"phase","phase":"downloading"}$' \
+	&& pass "first line is the downloading phase" \
+	|| fail "first line: $(head -n 1 /tmp/stream-body)"
+grep -c '"event":"phase"' /tmp/stream-body | grep -q '^[5-9]$' \
+	&& pass "one line per phase" \
+	|| fail "phase lines: $(grep -c '"event":"phase"' /tmp/stream-body) in $(cat /tmp/stream-body)"
+case "$(tail -n 1 /tmp/stream-body)" in
+*'"current_version":"v2stream"'*'"event":"done"'*'"http_status":200'*) pass "last line is the status with http_status 200" ;;
+*) fail "last line: $(tail -n 1 /tmp/stream-body)" ;;
+esac
+# A failure: the same stream, 200 on the wire, the 500 body last with
+# http_status 500 and the exit status the crash had.
+c=$(curl -s -o /tmp/stream-body -w '%{http_code}' --max-time 120 -X POST \
+	-H "Authorization: Bearer $TOKEN" -H "Accept: application/x-ndjson" \
+	-H "Content-Type: application/json" \
+	-d "{\"url\":\"$ART/demo-crash.tar.gz\",\"version\":\"v3crashstream\"}" "$HOOK")
+[ "$c" = "200" ] && pass "a failing stream is still 200 on the wire" || fail "failing stream: expected 200, got $c"
+last=$(tail -n 1 /tmp/stream-body)
+for want in '"event":"done"' '"http_status":500' '"exit":"exit status 3"' '"redacted_env":["SECRET"]'; do
+	case "$last" in
+	*"$want"*) pass "the failing stream's last line has $want" ;;
+	*) fail "the failing stream's last line lacks $want: $last" ;;
+	esac
+done
+grep -q 'e2e-secret-value-1234' /tmp/stream-body && fail "the stream leaked the env_file value" || pass "the stream carries no env_file value"
+b=$(body)
+case "$b" in
+"hello v2"*) pass "v2stream serving after the failed stream: '$b'" ;;
+*) fail "expected v2 to keep serving, got '$b'" ;;
+esac
+
 echo "=== scenario 6: concurrent deploy gets 409 ==="
 deploy demo-v1.tar.gz v4 > /tmp/first-deploy-code &
 FIRST=$!

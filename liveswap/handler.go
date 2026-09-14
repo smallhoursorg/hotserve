@@ -12,6 +12,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
@@ -249,7 +250,10 @@ func (h *Handler) deployPush(w http.ResponseWriter, r *http.Request, ma *managed
 	defer func() { _ = os.Remove(archive) }()
 	req := deployRequest{version: version, localArchive: archive, by: by}
 	h.logDeployAuthorized(r, ma, req)
-	return h.mapDeployResult(w, ma, ma.deployLocked(r.Context(), req, c))
+	return h.finishDeploy(w, r, ma, func(onPhase func(string)) error {
+		req.onPhase, c.onPhase = onPhase, onPhase
+		return ma.deployLocked(r.Context(), req, c)
+	})
 }
 
 // deployRollback relaunches an already-extracted on-disk release.
@@ -262,11 +266,28 @@ func (h *Handler) deployRollback(w http.ResponseWriter, r *http.Request, ma *man
 }
 
 // runDeploy records the authorizing source, runs the pipeline, and maps
-// the outcome to a status code.
+// the outcome to a status code — or, when the client asked for it,
+// streams the phases as they happen and ends with the same outcome.
 func (h *Handler) runDeploy(w http.ResponseWriter, r *http.Request, ma *managedApp, req deployRequest, by string) error {
 	req.by = by
 	h.logDeployAuthorized(r, ma, req)
-	return h.mapDeployResult(w, ma, ma.Deploy(r.Context(), req))
+	if !wantsStream(r) {
+		return h.mapDeployResult(w, ma, ma.Deploy(r.Context(), req))
+	}
+	st := newDeployStream(w, ma)
+	req.onPhase = st.phase
+	return st.finish(ma, ma.Deploy(r.Context(), req))
+}
+
+// finishDeploy is the push path's runDeploy: the pipeline already ran
+// under the lock the handler took, and its outcome is written the way
+// the request asked for.
+func (h *Handler) finishDeploy(w http.ResponseWriter, r *http.Request, ma *managedApp, run func(onPhase func(string)) error) error {
+	if !wantsStream(r) {
+		return h.mapDeployResult(w, ma, run(nil))
+	}
+	st := newDeployStream(w, ma)
+	return st.finish(ma, run(st.phase))
 }
 
 func (h *Handler) logDeployAuthorized(r *http.Request, ma *managedApp, req deployRequest) {
@@ -277,25 +298,115 @@ func (h *Handler) logDeployAuthorized(r *http.Request, ma *managedApp, req deplo
 
 // mapDeployResult turns a pipeline outcome into the webhook response.
 func (h *Handler) mapDeployResult(w http.ResponseWriter, ma *managedApp, err error) error {
+	code, body, rd := deployOutcome(ma, err)
+	if body == nil {
+		// The client hung up mid-deploy; nobody is reading this.
+		return nil
+	}
+	return respondJSON(w, code, body, rd)
+}
+
+// deployOutcome is the status code and body a pipeline outcome maps
+// to, with the app's filter for it; a nil body is a client that hung
+// up, which nothing is written for.
+func deployOutcome(ma *managedApp, err error) (int, any, *redactor) {
 	status := ma.status()
 	rd := ma.redactorFor(status)
 	var vErr validationError
 	switch {
 	case err == nil:
-		return respondJSON(w, http.StatusOK, status, rd)
+		return http.StatusOK, status, rd
 	case errors.Is(err, errDeployInProgress):
-		return respondJSON(w, http.StatusConflict, map[string]string{"error": err.Error()}, rd)
+		return http.StatusConflict, map[string]string{"error": err.Error()}, rd
 	case errors.As(err, &vErr):
-		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()}, rd)
+		return http.StatusUnprocessableEntity, map[string]string{"error": err.Error()}, rd
 	case errors.Is(err, context.Canceled):
-		// The client hung up mid-deploy; nobody is reading this.
-		return nil
+		return 0, nil, rd
 	default:
-		return respondJSON(w, http.StatusInternalServerError, map[string]any{
+		return http.StatusInternalServerError, map[string]any{
 			"error":  err.Error(),
 			"status": status, // shows the old version still serving
-		}, rd)
+		}, rd
 	}
+}
+
+// ndjson is the media type a client sends in Accept to have the deploy
+// streamed: one JSON object per line as the pipeline moves, the last
+// being the body the single response carries, plus its status code.
+const ndjson = "application/x-ndjson"
+
+// wantsStream reports whether the request asked for the stream. The
+// header is read loosely — a list, a parameter — because clients
+// compose it loosely; nothing but the media type's presence matters.
+func wantsStream(r *http.Request) bool {
+	return strings.Contains(strings.ToLower(r.Header.Get("Accept")), ndjson)
+}
+
+// deployStream writes a deploy as JSON lines. The stream begins with
+// the first phase: from then on the status line is 200 whatever the
+// outcome — it went out before the outcome existed — and the last line
+// carries "http_status", the code the single response would have had,
+// which a client that streams reads instead. An outcome reached before
+// any phase (a version refused, a deploy already running) has nothing
+// streamed yet and is the single response with its real code. Every
+// line passes the app's filter.
+type deployStream struct {
+	w     http.ResponseWriter
+	ma    *managedApp
+	begun bool
+}
+
+func newDeployStream(w http.ResponseWriter, ma *managedApp) *deployStream {
+	return &deployStream{w: w, ma: ma}
+}
+
+// line writes one object and flushes it to the client. A write that
+// fails is a client gone; the deploy carries on (its context says
+// when to stop) and the last line's write reports it.
+func (s *deployStream) line(v any, rd *redactor) error {
+	if !s.begun {
+		s.begun = true
+		s.w.Header().Set("Content-Type", ndjson)
+		s.w.Header().Set("Cache-Control", "no-store")
+		s.w.WriteHeader(http.StatusOK)
+	}
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	if _, err := s.w.Write(append([]byte(rd.redactJSON(raw)), '\n')); err != nil {
+		return err
+	}
+	_ = http.NewResponseController(s.w).Flush()
+	return nil
+}
+
+// phase is the pipeline's listener: one line per phase entered.
+func (s *deployStream) phase(phase string) {
+	_ = s.line(map[string]any{"event": "phase", "phase": phase, "at": time.Now().UTC()}, s.ma.redactorFor(statusSnapshot{}))
+}
+
+// finish writes the outcome as the last line: the single response's
+// body with "event":"done" and "http_status" added — or, when no
+// phase was ever streamed, as the single response itself.
+func (s *deployStream) finish(ma *managedApp, err error) error {
+	code, body, rd := deployOutcome(ma, err)
+	if body == nil {
+		return nil
+	}
+	if !s.begun {
+		return respondJSON(s.w, code, body, rd)
+	}
+	// The single response's bytes with two fields appended, not a
+	// re-marshalled map: the fields keep the order the single response
+	// has, which a client reading "the last phase" by position relies
+	// on (the examples' deploy.sh does).
+	raw, mErr := json.Marshal(body)
+	if mErr != nil {
+		return mErr
+	}
+	tail := fmt.Sprintf(`,"event":"done","http_status":%d}`, code)
+	return s.line(json.RawMessage(append(raw[:len(raw)-1], tail...)), rd)
 }
 
 // isGzipUpload reports whether the request body is a pushed artifact.

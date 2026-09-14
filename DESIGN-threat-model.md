@@ -93,7 +93,9 @@ Properties that matter to the model:
   widens is what a compromised hotserve reads — every unit's lines —
   which the shipped units keep free of secrets (no `--environ`, the
   smoke test asserts it). Every body passes
-  four layers before it is written. First, exact: every `env_file`
+  four layers before it is written. A streamed deploy (`Accept:
+  application/x-ndjson`) is the same bytes cut into lines, each
+  through the same filter before it is written. First, exact: every `env_file`
   value of 8+ characters this process has rendered for a launch (or,
   after a restart, read from the file for the filter), in each form
   the filter recognises (as written, JSON-escaped, base64 standard and

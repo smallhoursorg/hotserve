@@ -119,6 +119,11 @@ type deployRequest struct {
 	rollback bool
 	// by is the label of the trust source that authorized this deploy.
 	by string
+	// onPhase, when set, is told each phase the pipeline enters, on the
+	// deploy's own goroutine before the phase's work begins — a
+	// streaming response's line writer (handler.go). Server-side, never
+	// from the wire.
+	onPhase func(phase string)
 }
 
 // source names the deploy's artifact source, for the audit log.
@@ -447,6 +452,9 @@ type collaborators struct {
 	store   stateStore
 	journal journalReader
 	logger  *zap.Logger
+	// onPhase is the request's phase listener, carried with the
+	// snapshot so setPhase needs no lock to find it.
+	onPhase func(phase string)
 }
 
 func (ma *managedApp) snapshot() collaborators {
@@ -470,6 +478,9 @@ func (ma *managedApp) setPhase(c collaborators, phase string) {
 	ma.phases = append(ma.phases, phaseTiming{Name: phase, StartedAt: c.clock.Now()})
 	ma.mu.Unlock()
 	c.logger.Info("deploy phase", zap.String("phase", phase))
+	if c.onPhase != nil {
+		c.onPhase(phase)
+	}
 }
 
 // takePhases returns the running deploy's phases with their durations
@@ -558,7 +569,9 @@ func (ma *managedApp) Deploy(ctx context.Context, req deployRequest) error {
 		return errDeployInProgress
 	}
 	defer ma.deployMu.Unlock()
-	return ma.deployLocked(ctx, req, ma.snapshot())
+	c := ma.snapshot()
+	c.onPhase = req.onPhase
+	return ma.deployLocked(ctx, req, c)
 }
 
 // deployLocked runs the blue/green pipeline. The caller MUST already
