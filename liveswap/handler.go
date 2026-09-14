@@ -348,7 +348,9 @@ func wantsStream(r *http.Request) bool {
 				continue
 			}
 			if q, ok := params["q"]; ok {
-				if f, err := strconv.ParseFloat(q, 64); err != nil || f <= 0 {
+				// A qvalue is 0 to 1; anything else — NaN, Inf, 2 —
+				// is not one, and does not switch the protocol.
+				if f, err := strconv.ParseFloat(q, 64); err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f <= 0 || f > 1 {
 					continue
 				}
 			}
@@ -393,13 +395,17 @@ func (s *deployStream) write(filtered string) error {
 	return nil
 }
 
-// phase is the pipeline's listener: one line per phase entered.
+// phase is the pipeline's listener: one line per phase entered. Like
+// the last line, its fixed fields go on after the filter: a filter
+// that withholds the whole body (an unreadable env_file) then leaves
+// its diagnostic in the line and the event and phase beside it.
 func (s *deployStream) phase(phase string) {
-	raw, err := json.Marshal(map[string]any{"event": "phase", "phase": phase, "at": time.Now().UTC()})
+	raw, err := json.Marshal(map[string]any{"at": time.Now().UTC()})
 	if err != nil {
 		return
 	}
-	_ = s.write(s.ma.redactorFor(statusSnapshot{}).redactJSON(raw))
+	filtered := s.ma.redactorFor(statusSnapshot{}).redactJSON(raw)
+	_ = s.write(fmt.Sprintf(`%s,"event":"phase","phase":%q}`, filtered[:len(filtered)-1], phase))
 }
 
 // finish writes the outcome as the last line: the single response's

@@ -667,6 +667,10 @@ func TestWantsStreamReadsAcceptExactly(t *testing.T) {
 		{[]string{"application/x-ndjson;q=0"}, false},
 		{[]string{"application/x-ndjson;q=0.0, application/json"}, false},
 		{[]string{"application/x-ndjson;q=abc"}, false},
+		{[]string{"application/x-ndjson;q=NaN"}, false},
+		{[]string{"application/x-ndjson;q=+Inf"}, false},
+		{[]string{"application/x-ndjson;q=2"}, false},
+		{[]string{"application/x-ndjson;q=1"}, true},
 		{[]string{"application/json"}, false},
 		{nil, false},
 	}
@@ -694,5 +698,15 @@ func TestWebhookStreamLastLineSurvivesWithholding(t *testing.T) {
 	}
 	if _, withheld := last["status"]; withheld {
 		t.Fatalf("the body should have been withheld while the env_file is unreadable: %v", last)
+	}
+	// The phase lines keep their event and phase beside the filter's
+	// diagnostic, for the same reason.
+	for _, l := range lines[:len(lines)-1] {
+		if l["event"] != "phase" || l["phase"] == nil {
+			t.Fatalf("a withheld phase line lost its markers: %v", l)
+		}
+	}
+	if lines[0]["phase"] != "downloading" {
+		t.Fatalf("first phase = %v", lines[0])
 	}
 }
