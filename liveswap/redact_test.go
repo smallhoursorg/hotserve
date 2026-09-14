@@ -178,10 +178,27 @@ func TestRedactorSafeSpansSurviveShapes(t *testing.T) {
 
 func TestRedactJSONWithholdsWhenTheEnvFileIsUnread(t *testing.T) {
 	r := newRedactor(nil, nil)
-	r.withhold = "the app's env_file could not be read"
+	r.withhold = `the app's env_file could not be read (open /etc/hotserve/we"ird\path.env: no such file)`
 	out := r.redactJSON([]byte(`{"app":"x","error":"anything at all"}`))
 	if !json.Valid([]byte(out)) || strings.Contains(out, "anything at all") || !strings.Contains(out, "withheld") {
 		t.Errorf("body not withheld: %s", out)
+	}
+	// The reason carries a path; a quote or backslash in it must not
+	// turn the diagnostic into the opaque fallback.
+	var obj map[string]string
+	if err := json.Unmarshal([]byte(out), &obj); err != nil || !strings.Contains(obj["error"], `we"ird\path.env`) {
+		t.Errorf("reason lost: %s", out)
+	}
+}
+
+func TestRedactorShortSafeValuesDoNotSplitCredentials(t *testing.T) {
+	// A one-character app name or version is safe, but protecting it as
+	// a substring everywhere would carve a credential into pieces too
+	// short for the entropy layer to see.
+	cred := "k3J9xQ2mZ8pL0vT7wR4nY6bH1cD5fG"
+	r := newRedactor(nil, []string{"1", "a", "k3J9"})
+	if out, _ := r.redact("token " + cred + " end"); strings.Contains(out, cred) {
+		t.Errorf("a short safe value shielded a credential: %q", out)
 	}
 }
 

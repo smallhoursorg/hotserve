@@ -270,8 +270,13 @@ func (ma *managedApp) rememberSecrets(path string, kvs []string) {
 // is not an error here — the next launch reports that — and the read
 // is retried on the next response until it succeeds.
 func (ma *managedApp) redactorFor(s statusSnapshot) *redactor {
-	spec := ma.snapshot().spec
+	// The spec is read under secretsMu so the "which env_file is
+	// loaded" check and the spec it is checked against are one
+	// snapshot: a reload landing between the two could otherwise pair
+	// the new spec with the old latch. secretsMu → specMu is the only
+	// nesting: configure holds specMu and never takes secretsMu.
 	ma.secretsMu.Lock()
+	spec := ma.snapshot().spec
 	var unread error
 	if spec != nil && (!ma.secretsLoaded || ma.secretsFrom != spec.envFile) {
 		if spec.envFile == "" {

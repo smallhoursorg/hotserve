@@ -322,17 +322,26 @@ func (r *redactor) filter(s string, seen map[string]bool) string {
 	return restore(s)
 }
 
-// protectSafe swaps every safe string for a placeholder no rule can
-// match (control characters are in no rule's alphabet) and returns
-// the function that swaps them back. Longest first, so a safe string
-// containing another is protected whole.
+// safeSpanMinLen is the shortest safe string protectSafe holds out of
+// the heuristics. Below it nothing a rule matches fits inside the
+// string, and a short one — a one-character app name or version —
+// would otherwise be swapped out of the middle of a credential and
+// split it into pieces too short for the entropy layer to see.
+const safeSpanMinLen = 12
+
+// protectSafe swaps every safe string of safeSpanMinLen or more for a
+// placeholder no rule can match (control characters are in no rule's
+// alphabet) and returns the function that swaps them back. Longest
+// first, so a safe string containing another is protected whole.
 func (r *redactor) protectSafe(s string) (string, func(string) string) {
 	if r == nil || len(r.safeExact) == 0 {
 		return s, func(s string) string { return s }
 	}
 	safe := make([]string, 0, len(r.safeExact))
 	for v := range r.safeExact {
-		safe = append(safe, v)
+		if len(v) >= safeSpanMinLen {
+			safe = append(safe, v)
+		}
 	}
 	sort.Slice(safe, func(i, j int) bool {
 		return len(safe[i]) > len(safe[j]) || (len(safe[i]) == len(safe[j]) && safe[i] < safe[j])
@@ -408,7 +417,12 @@ func (r *redactor) redactJSON(raw []byte) string {
 	seen := map[string]bool{}
 	var body string
 	if r != nil && r.withhold != "" {
-		body = `{"error":"response withheld: ` + r.withhold + `"}`
+		// Marshalled, not concatenated: the reason carries a path.
+		b, err := json.Marshal(map[string]string{"error": "response withheld: " + r.withhold})
+		if err != nil {
+			return `{"error":"[#0]"}`
+		}
+		body = string(b)
 	} else {
 		body = r.filter(string(raw), seen)
 		if !json.Valid([]byte(body)) {
