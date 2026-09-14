@@ -448,7 +448,7 @@ func (r *systemdRunner) Start(spec startSpec) (handle, error) {
 	}
 	if res != "done" {
 		st := r.reapFailed(ctx, u.Name)
-		return nil, &exitError{exit: st.exitString(), unit: u.Name, job: "start job " + res}
+		return nil, startExit(st.exitString(), u.Name, res)
 	}
 	return r.adopt(ctx, u.Name, time.Now(), u.StopTimeout), nil
 }
@@ -597,7 +597,7 @@ func (r *systemdRunner) RunOnce(ctx context.Context, spec startSpec) error {
 	reapCtx, cancel := context.WithTimeout(r.ctx, stopSlack)
 	defer cancel()
 	st := r.reapFailed(reapCtx, u.Name)
-	return &exitError{exit: st.exitString(), unit: u.Name, job: "job " + res}
+	return runOnceExit(st.exitString(), u.Name, res)
 }
 
 // Exit is the recorded end of the instance's main process, once the

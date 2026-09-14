@@ -68,6 +68,7 @@ func parseWebhookDirective(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler,
 //	        keep              <n>
 //	        max_artifact_size <size>
 //	        max_artifact_entries <n>
+//	        deploy_log_lines  <n>
 //	    }
 //	}
 func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {

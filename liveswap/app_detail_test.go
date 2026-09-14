@@ -38,7 +38,7 @@ func TestFailureDetailPreStartExit(t *testing.T) {
 	rig := newTestRig(t)
 	rig.spec.preStart = []string{"./migrate"}
 	rig.spec.deployLogLines = 40
-	rig.runner.runOnceErr = &exitError{exit: "exit status 3", unit: "hotserve-demo.v1.x.prestart.service", job: "job failed"}
+	rig.runner.runOnceErr = runOnceExit("exit status 3", "hotserve-demo.v1.x.prestart.service", "failed")
 	j := &fakeJournal{lines: []string{"migrate: schema v1 -> v2", "migrate: cannot open app.db"}}
 	rig.ma.journal = j
 
@@ -118,7 +118,7 @@ func TestFailureDetailCaps(t *testing.T) {
 	rig := newTestRig(t)
 	rig.spec.deployLogLines = 2
 	rig.spec.preStart = []string{"./migrate"}
-	rig.runner.runOnceErr = &exitError{exit: "exit status 1", unit: "u", job: "job failed"}
+	rig.runner.runOnceErr = runOnceExit("exit status 1", "u", "failed")
 	rig.ma.journal = &fakeJournal{lines: []string{"one", "two", "three"}} // journalctl asked for 3, returned 3
 	if err := deployOnceV1(t, rig); err == nil {
 		t.Fatal("deploy should have failed")
@@ -160,7 +160,7 @@ func TestFailureDetailSwitches(t *testing.T) {
 	rig := newTestRig(t)
 	rig.spec.deployLogLines = 0
 	rig.spec.preStart = []string{"./migrate"}
-	rig.runner.runOnceErr = &exitError{exit: "exit status 1", unit: "u", job: "job failed"}
+	rig.runner.runOnceErr = runOnceExit("exit status 1", "u", "failed")
 	j := &fakeJournal{lines: []string{"never read"}}
 	rig.ma.journal = j
 	if err := deployOnceV1(t, rig); err == nil {
@@ -173,7 +173,7 @@ func TestFailureDetailSwitches(t *testing.T) {
 	rig = newTestRig(t)
 	rig.spec.deployLogLines = 40
 	rig.spec.preStart = []string{"./migrate"}
-	rig.runner.runOnceErr = &exitError{exit: "exit status 1", unit: "u", job: "job failed"}
+	rig.runner.runOnceErr = runOnceExit("exit status 1", "u", "failed")
 	rig.ma.journal = &fakeJournal{err: errors.New("journalctl: not found")}
 	if err := deployOnceV1(t, rig); err == nil {
 		t.Fatal("deploy should have failed")

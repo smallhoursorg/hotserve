@@ -475,8 +475,8 @@ func TestSystemdRunnerStartJobFailureResetsUnit(t *testing.T) {
 	conn.mu.Unlock()
 	spec := testApp(t)
 	_, err := r.Start(spec)
-	if err == nil || !strings.Contains(err.Error(), "start job failed") || !strings.Contains(err.Error(), "exit status 3") {
-		t.Fatalf("got %v", err)
+	if err == nil || !strings.HasPrefix(err.Error(), "unit ") || !strings.HasSuffix(err.Error(), ": start job failed (exit status 3)") {
+		t.Fatalf("the start job's failure must read as it always did, got %v", err)
 	}
 	if len(conn.resets()) != 1 {
 		t.Fatalf("a unit whose start job failed must be reset, got %v", conn.resets())
@@ -506,8 +506,8 @@ func TestSystemdRunnerRunOnceReportsExitStatus(t *testing.T) {
 	conn.failStatus = &fs
 	conn.mu.Unlock()
 	err := r.RunOnce(context.Background(), testApp(t))
-	if err == nil || !strings.Contains(err.Error(), "exit status 3") || !strings.Contains(err.Error(), "job failed") {
-		t.Fatalf("error must carry the exit status and job result, got %v", err)
+	if err == nil || !strings.HasPrefix(err.Error(), "exit status 3 (unit ") || !strings.HasSuffix(err.Error(), ": job failed)") {
+		t.Fatalf("error must carry the exit status and job result in the format it always had, got %v", err)
 	}
 	if rs := conn.resets(); len(rs) != 1 || rs[0] != conn.unit(0).Name {
 		t.Fatalf("failed oneshot must be reset, got %v", rs)
