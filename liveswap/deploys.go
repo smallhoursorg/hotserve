@@ -90,7 +90,8 @@ func (ma *managedApp) recordDeploy(c collaborators, result deployResult) {
 		c.logger.Warn("deploy record: cannot encode", zap.Error(err))
 		return
 	}
-	filtered := restoreVocabulary(ma.recordRedactor(c, result).redactJSON(raw), result.Status, result.Phase)
+	rd, unknown := ma.recordRedactor(c, result)
+	filtered := restoreVocabulary(rd.redactJSON(raw), result.Status, result.Phase)
 	// Rule 3's envelope. The filter's whole-body fallback — a known
 	// value that is a fragment of the record's own JSON — leaves an
 	// object with no version, which nothing could read back as this
@@ -104,6 +105,8 @@ func (ma *managedApp) recordDeploy(c collaborators, result deployResult) {
 	}
 	why := ""
 	switch {
+	case unknown != "":
+		why = unknown
 	case json.Unmarshal([]byte(filtered), &head) != nil || head.Version != result.Version:
 		why = "a redacted value overlapped the record's own structure"
 	case len(filtered)+1 > deployRecordMaxBytes: // +1: the newline the file ends with
@@ -155,15 +158,19 @@ func releaseNames(releasesDir string) ([]string, error) {
 
 // recordRedactor is the filter a record is written through: the
 // deploy's own spec and every value the filter knows — remembered at
-// any launch, and read from the deploy's own env_file now — with no
-// withholding. The response filter withholds while the *live*
-// env_file cannot be read, because the running app's values would be
-// unknown; a record is about a deploy that is over, and a reload to
-// an unreadable env_file while it ran must not turn its outcome into
-// a placeholder that nothing can recover once the file is fixed. Its
-// safe strings follow rule 2: the version the deployer named as
-// given, names off the filesystem only when not a known value.
-func (ma *managedApp) recordRedactor(c collaborators, result deployResult) *redactor {
+// any launch, and read from the deploy's own env_file now. It does
+// not withhold on the *live* env_file as the response filter does (a
+// record is about a deploy that is over, and a reload to an
+// unreadable file while it ran must not turn its outcome into a
+// placeholder nothing can recover once the file is fixed); but when
+// the deploy's own env_file is there and cannot be parsed whole, the
+// values before the bad line are unknown to the filter and could be
+// in the very error that says so — the second result names that, and
+// the record is the envelope (rule 3). A file that is absent holds no
+// values to know. Its safe strings follow rule 2: the version the
+// deployer named as given, names off the filesystem only when not a
+// known value.
+func (ma *managedApp) recordRedactor(c collaborators, result deployResult) (*redactor, string) {
 	ma.secretsMu.Lock()
 	kvs := append([]string(nil), ma.secrets...)
 	ma.secretsMu.Unlock()
@@ -172,9 +179,13 @@ func (ma *managedApp) recordRedactor(c collaborators, result deployResult) *reda
 	// complete — remembered nothing: read the deploy's own env_file
 	// too, so what it holds now is known to the filter that writes
 	// the record. Unreadable, the remembered values are all there is.
+	unknown := ""
 	if c.spec != nil && c.spec.envFile != "" {
-		if now, err := parseEnvFile(c.spec.envFile); err == nil {
+		switch now, err := parseEnvFile(c.spec.envFile); {
+		case err == nil:
 			kvs = mergeSecrets(kvs, now)
+		case !errors.Is(err, fs.ErrNotExist):
+			unknown = "the deploy's env_file could not be read whole, so its values are unknown to the filter"
 		}
 	}
 	safe := []string{ma.name, result.Version}
@@ -182,7 +193,7 @@ func (ma *managedApp) recordRedactor(c collaborators, result deployResult) *reda
 		safe = append(safe, c.spec.dirs.root, c.spec.dirs.app, c.spec.dirs.releases, c.spec.dirs.shared, c.spec.dirs.run)
 		safe = append(safe, namesNotValues(kvs, listReleases(c.spec.dirs.releases))...)
 	}
-	return newRedactor(kvs, safe)
+	return newRedactor(kvs, safe), unknown
 }
 
 // recordsDir is the records directory as the directory it names

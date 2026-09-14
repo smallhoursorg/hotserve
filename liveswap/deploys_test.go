@@ -407,7 +407,8 @@ func TestRecordFilterDoesNotTrustAReleaseNameEqualToAKnownValue(t *testing.T) {
 	secret := "q7Wm2xK9pL4vB8nR3tY6zH5c" // gitleaks:allow — a made-up value for this test
 	rig.ma.rememberSecrets("/etc/app.env", []string{"TOKEN=" + secret})
 	must(t, os.MkdirAll(rig.spec.dirs.release(secret), 0o755))
-	rec := rig.ma.recordRedactor(rig.ma.snapshot(), deployResult{Version: "v1"}).redactJSON([]byte(`{"version":"v1","error":"got ` + secret + `"}`))
+	rd, _ := rig.ma.recordRedactor(rig.ma.snapshot(), deployResult{Version: "v1"})
+	rec := rd.redactJSON([]byte(`{"version":"v1","error":"got ` + secret + `"}`))
 	if strings.Contains(rec, secret) || !strings.Contains(rec, "[redacted:TOKEN]") {
 		t.Fatalf("a planted release name exempted the value: %s", rec)
 	}
@@ -633,5 +634,24 @@ func TestDeployRecordSizeBoundCountsTheNewline(t *testing.T) {
 	}
 	if _, err := readDeployRecord(rig.spec.dirs, "v1"); err != nil {
 		t.Fatalf("a record at the bound must be readable (as itself or as the envelope): %v", err)
+	}
+}
+
+// An env_file that cannot be parsed whole leaves the values before the
+// bad line unknown to the filter — and the error that says so can
+// carry one; the record is then the envelope, never the error.
+func TestDeployRecordIsAnEnvelopeWhenTheEnvFileWillNotParseWhole(t *testing.T) {
+	rig := newTestRig(t)
+	secret := "q7Wm2xK9pL4vB8nR3tY6zH5c" // gitleaks:allow — a made-up value for this test
+	rig.spec.envFile = filepath.Join(t.TempDir(), "app.env")
+	must(t, os.WriteFile(rig.spec.envFile, []byte("TOKEN="+secret+"\n"+secret+"-=x\n"), 0o600))
+	err := deployOnceV1(t, rig)
+	if err == nil || !strings.Contains(err.Error(), secret) {
+		t.Fatalf("the premise: the deploy fails on the bad line and the error names it: %v", err)
+	}
+	rec, rerr := readDeployRecord(rig.spec.dirs, "v1")
+	must(t, rerr)
+	if s := string(rec); strings.Contains(s, secret) || !strings.Contains(s, "record withheld") || !strings.Contains(s, `"status":"failed"`) {
+		t.Fatalf("record = %s", s)
 	}
 }
