@@ -117,3 +117,14 @@ func TestDeployRecordsAreOutsideTheSandboxView(t *testing.T) {
 		t.Fatal("the deploys dir must not be inside the sandbox view")
 	}
 }
+
+// A filter that replaced a timestamp-shaped value leaves the record in
+// the list: the times are carried raw, and the order is the write time.
+func TestDeploySummariesSurviveARedactedTimestamp(t *testing.T) {
+	dir := t.TempDir()
+	must(t, writeDeployRecord(dir, "v1", []byte(`{"version":"v1","status":"succeeded","started_at":"[redacted:STAMP]","finished_at":"[redacted:STAMP]"}`)))
+	got := listDeploySummaries(dir)
+	if len(got) != 1 || got[0].Version != "v1" || string(got[0].FinishedAt) != `"[redacted:STAMP]"` {
+		t.Fatalf("summaries = %+v", got)
+	}
+}

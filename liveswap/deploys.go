@@ -33,14 +33,18 @@ import (
 // release is removed at once, and versions release GC has pruned — so
 // the directory is bounded by 2×keep whatever the deploy rate.
 
-// deploySummary is a record's outcome as the status lists it.
+// deploySummary is a record's outcome as the status lists it. The
+// times are carried as the record has them, not parsed: a record is
+// the filter's output, and a filter that replaced a value the shape
+// of a timestamp must not make the record vanish from the list. The
+// list is ordered by the record's write time instead.
 type deploySummary struct {
-	Version    string    `json:"version"`
-	Status     string    `json:"status"`
-	Phase      string    `json:"phase,omitempty"` // where it failed
-	By         string    `json:"deployed_by,omitempty"`
-	StartedAt  time.Time `json:"started_at"`
-	FinishedAt time.Time `json:"finished_at"`
+	Version    string          `json:"version"`
+	Status     string          `json:"status"`
+	Phase      string          `json:"phase,omitempty"` // where it failed
+	By         string          `json:"deployed_by,omitempty"`
+	StartedAt  json.RawMessage `json:"started_at,omitempty"`
+	FinishedAt json.RawMessage `json:"finished_at,omitempty"`
 }
 
 // recordDeploy writes result's filtered form as the record of its
@@ -99,15 +103,23 @@ func readDeployRecord(dir, version string) (json.RawMessage, error) {
 }
 
 // listDeploySummaries reads every record's outcome, newest first by
-// finish time. nil when there is no directory yet.
+// the record's write time. nil when there is no directory yet.
 func listDeploySummaries(dir string) []deploySummary {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
 	}
-	var out []deploySummary
+	type dated struct {
+		summary deploySummary
+		written time.Time
+	}
+	var recs []dated
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
 			continue
 		}
 		b, err := os.ReadFile(filepath.Join(dir, e.Name())) //nolint:gosec // the app's own deploys dir, entries listed from it
@@ -118,9 +130,13 @@ func listDeploySummaries(dir string) []deploySummary {
 		if json.Unmarshal(b, &s) != nil || s.Version == "" {
 			continue // a record the filter withheld whole, or a stray
 		}
-		out = append(out, s)
+		recs = append(recs, dated{s, info.ModTime()})
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].FinishedAt.After(out[j].FinishedAt) })
+	sort.Slice(recs, func(i, j int) bool { return recs[i].written.After(recs[j].written) })
+	out := make([]deploySummary, len(recs))
+	for i, r := range recs {
+		out[i] = r.summary
+	}
 	return out
 }
 
