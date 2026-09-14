@@ -21,7 +21,8 @@ import (
 // terminal line; "fail" is a single 500; "cut" streams one phase and
 // closes; "redirect" is a 3xx, what an intermediary answers;
 // "truncated" promises a single 200 body and drops the connection
-// before delivering it.
+// before delivering it; "accepted" is a bodiless 202, what a queue in
+// front of the box answers: a 2xx that is not a completed deploy.
 func box(t *testing.T, mode string) *httptest.Server {
 	t.Helper()
 	status := map[string]any{"app": "demo", "current_version": "v1", "running": true, "last_deploy": map[string]any{"version": "v1", "status": "succeeded"}}
@@ -37,6 +38,8 @@ func box(t *testing.T, mode string) *httptest.Server {
 			single(w, 200, status)
 		case "fail":
 			single(w, 500, map[string]any{"error": "health gate: boom", "status": status})
+		case "accepted":
+			w.WriteHeader(http.StatusAccepted)
 		case "redirect":
 			http.Redirect(w, r, "https://elsewhere.test/demo", http.StatusMovedPermanently)
 		case "truncated":
@@ -92,6 +95,7 @@ func TestDeployShReadsEveryShapeOfAnswer(t *testing.T) {
 		{"cut", 1, `"phase":"downloading"`},
 		{"redirect", 1, ""},
 		{"truncated", 1, ""},
+		{"accepted", 1, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.mode, func(t *testing.T) {
