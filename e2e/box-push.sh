@@ -43,6 +43,33 @@ if admin ls /var/lib/hotserve >/dev/null 2>&1; then
 else
 	pass "admin cannot read hotserve's data dir: it is not the hotserve user"
 fi
+# The env-file grant: the one install line the sudoers file admits
+# creates an empty 0640 root:hotserve file under /etc/hotserve, and
+# nothing that differs from it by a path, a mode or an owner.
+box rm -f /etc/hotserve/e2e-secrets.env
+if admin sudo -n /usr/bin/install -m 0640 -o root -g hotserve /dev/null /etc/hotserve/e2e-secrets.env >"$tmp/out" 2>&1; then
+	pass "admin can create an app's env file"
+	[ "$(box stat -c '%a %U %G %s' /etc/hotserve/e2e-secrets.env)" = "640 root hotserve 0" ] \
+		&& pass "the env file is empty, 0640 root:hotserve" || fail "env file is $(box stat -c '%a %U %G %s' /etc/hotserve/e2e-secrets.env)"
+else
+	fail "admin cannot create an env file: $(tail -3 "$tmp/out")"
+fi
+box rm -f /etc/hotserve/e2e-secrets.env
+for args in \
+	"-m 0640 -o root -g hotserve /dev/null /tmp/e2e-secrets.env" \
+	"-m 0640 -o root -g hotserve /dev/null /etc/hotserve/../e2e-secrets.env" \
+	"-m 0644 -o root -g hotserve /dev/null /etc/hotserve/e2e-secrets.env" \
+	"-m 0640 -o admin -g hotserve /dev/null /etc/hotserve/e2e-secrets.env" \
+	"-m 0640 -o root -g hotserve /etc/shadow /etc/hotserve/e2e-secrets.env" \
+	"-m 0640 -o root -g hotserve /dev/null /etc/hotserve/e2e-secrets.env /etc/hotserve/other.env"; do
+	# shellcheck disable=SC2086 # the args are meant to split
+	if admin sudo -n /usr/bin/install $args >/dev/null 2>&1; then
+		fail "the sudoers file let admin run: install $args"
+	else
+		pass "refused: install $args"
+	fi
+done
+box rm -f /etc/hotserve/e2e-secrets.env /etc/hotserve/other.env /tmp/e2e-secrets.env /etc/e2e-secrets.env
 
 echo "=== box 1: examples/box/Caddyfile validates with this build ==="
 if admin hotserve validate --adapter caddyfile --config /dev/stdin <examples/box/Caddyfile >"$tmp/out" 2>&1; then

@@ -2,8 +2,8 @@
 #
 # Members of the hotserve-admin group can run exactly these commands as
 # root, and nothing else: they are the privileged steps of bin/push,
-# argument for argument, plus editing the apps' env files. Everything
-# else an administrator does needs no privilege at all: `hotserve
+# argument for argument, plus creating and editing the apps' env files.
+# Everything else an administrator does needs no privilege at all: `hotserve
 # validate`, reading the config, and — with membership of the adm
 # group — the journal, hotserve's and every app's.
 #
@@ -24,6 +24,13 @@ Cmnd_Alias HOTSERVE_CONFIG = \
 	/usr/bin/mv -f /etc/hotserve/Caddyfile.prev /etc/hotserve/Caddyfile, \
 	/usr/bin/systemctl reload hotserve
 # Anchored regex, not a glob: in sudoers a * would also match "/", and
-# so admit /etc/hotserve/../elsewhere/x.env.
-Cmnd_Alias HOTSERVE_SECRETS = sudoedit ^/etc/hotserve/[A-Za-z0-9_-]+\.env$
+# so admit /etc/hotserve/../elsewhere/x.env. The install line creates
+# an env file: empty, 0640 root:hotserve, under /etc/hotserve — every
+# argument but the name is literal, and the regex spans the whole
+# argument string, so a second path, another mode or another owner
+# does not match. It adds no reach: an administrator can already set
+# any app's environment with an `env` line in the Caddyfile.
+Cmnd_Alias HOTSERVE_SECRETS = \
+	sudoedit ^/etc/hotserve/[A-Za-z0-9_-]+\.env$, \
+	/usr/bin/install ^-m 0640 -o root -g hotserve /dev/null /etc/hotserve/[A-Za-z0-9_-]+\.env$
 %hotserve-admin ALL=(root) NOPASSWD: HOTSERVE_CONFIG, HOTSERVE_SECRETS

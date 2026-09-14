@@ -59,8 +59,8 @@ full description.
 
 This user is not root. The `sudoers` file in the repo you just made
 grants exactly the eight commands `make push` runs as root, plus
-`sudoedit` of the apps' env files under `/etc/hotserve` (step 3), and
-nothing else; the `adm` group reads the logs. Everything else an
+creating and editing the apps' env files under `/etc/hotserve`
+(step 3), and nothing else; the `adm` group reads the logs. Everything else an
 administrator does — checking a config, reading it, `journalctl` —
 needs no privilege at all. Read the file: it is short, and it says
 what it grants.
@@ -100,21 +100,20 @@ account to the people who may change what the box serves.
 Skip this if it does not; the examples do not. When it does, the
 values go in a file on the box that only root and the `hotserve` user
 can read, never in a repo, and the app's block names it with
-`env_file`. Creating the file is root's one-time job, and root login
-closes in the next step, so make one now for each app that will need
-it:
+`env_file`. This is `alice`'s job, now or whenever an app first needs
+one: the sudoers file admits exactly one way to create the file and
+one way to edit it.
 
 ```sh
-install -m 0640 -o root -g hotserve /dev/null /etc/hotserve/example.env
+sudo install -m 0640 -o root -g hotserve /dev/null /etc/hotserve/example.env   # once: empty, root:hotserve
+sudoedit /etc/hotserve/example.env      # one KEY=VALUE per line
 ```
 
-From then on `alice` edits it with `sudoedit /etc/hotserve/example.env`
-(one `KEY=VALUE` per line), which the sudoers file allows, and adds
-`env_file /etc/hotserve/example.env` to the app's block. hotserve reads
-the file at each launch, so a change applies at the app's next deploy.
-A Deno app also needs `--allow-env=` to name each variable it reads.
-The box README's [Secrets](../examples/box/README.md#secrets) section
-has more.
+Then add `env_file /etc/hotserve/example.env` to the app's block.
+hotserve reads the file at each launch, so a change applies at the
+app's next deploy. A Deno app also needs `--allow-env=` to name each
+variable it reads. The box README's
+[Secrets](../examples/box/README.md#secrets) section has more.
 
 ## 4. Close root login
 
@@ -126,8 +125,7 @@ sshd -t && systemctl reload ssh      # -t checks the config first: a bad one wou
 ```
 
 Log out. From here everything is `alice`, and anything that does need
-root again — a package install, a new env file — is the provider's
-console.
+root again — a package install, say — is the provider's console.
 
 ## 5. Shut the port you are not using
 

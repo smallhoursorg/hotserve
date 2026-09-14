@@ -16,7 +16,7 @@ and the change is a diff someone reads before `make push`.
 |---|---|
 | `Caddyfile` | The box's whole config; becomes `/etc/hotserve/Caddyfile` |
 | `bin/push` | Validates on the box, shows the diff, swaps the file in, reloads |
-| `sudoers` | The eight commands `bin/push` runs as root, `sudoedit` of the apps' env files, and nothing else |
+| `sudoers` | The eight commands `bin/push` runs as root, creating and `sudoedit`ing the apps' env files, and nothing else |
 | `Makefile` | `make check` and `make push` |
 | `.github/workflows/check.yml` | `make check` on every push and pull request |
 
@@ -28,10 +28,8 @@ administered as root. This repo is what
 [After the first deploy](../../docs/after-first-deploy.md) makes of
 that, and this is its short form. Anything that needs root and that the
 administrator below cannot do — `apt install libatomic1` for a Node
-executable on arm64, a Deno under `/usr/local`, an app's env file (see
-[Secrets](#secrets)) — happens while you still have root: the installs
-are on the first-deploy page, the env file on the after-first-deploy
-page.
+executable on arm64, a Deno under `/usr/local` — happens while you
+still have root; the first-deploy page has each.
 
 1. Copy this directory into a new private repo, from a checkout of
    hotserve at the release the box runs
@@ -66,9 +64,9 @@ page.
    without a password; the next step gives it a user that is not root.
 5. Create the user you will administer it as. The `sudoers` file in
    this directory grants exactly the eight commands `bin/push` runs as
-   root, plus `sudoedit` of the apps' env files under `/etc/hotserve`
-   (see [Secrets](#secrets)), and nothing else; the `adm` group reads
-   the logs. From the laptop, from this repo:
+   root, plus creating and `sudoedit`ing the apps' env files under
+   `/etc/hotserve` (see [Secrets](#secrets)), and nothing else; the
+   `adm` group reads the logs. From the laptop, from this repo:
 
    ```sh
    scp sudoers root@box.example.com:/etc/sudoers.d/hotserve-admin
@@ -142,11 +140,12 @@ the flags pushed today.
 
 They never go in this repo. Put each app's in a file on the box that
 only root and the `hotserve` user can read, and name it with
-`env_file` in the app's block. Creating the file is root's one-time
-job; `sudoers` lets an administrator edit it afterwards:
+`env_file` in the app's block. `sudoers` lets an administrator create
+the file and edit it; both are its exact lines, so nothing about the
+mode, the owner or the directory is theirs to choose:
 
 ```sh
-sudo install -m 0640 -o root -g hotserve /dev/null /etc/hotserve/example.env   # as root, once
+sudo install -m 0640 -o root -g hotserve /dev/null /etc/hotserve/example.env   # once: empty, root:hotserve
 sudoedit /etc/hotserve/example.env      # DATABASE_URL=postgres://…
 ```
 
