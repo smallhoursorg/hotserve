@@ -76,10 +76,23 @@ Properties that matter to the model:
   it into a GitHub Actions log, readable by everyone with read access
   to the repository, retained, and public for a public repository.
   The caller is trusted to run code on the box; the log's readers are
-  not. Today a body carries hotserve's own fields and error text, and
-  the app's own bytes reach it only through a probe error that quotes
-  a malformed response line; the filter is in place before the change
-  that puts app output into responses on purpose. Every body passes
+  not. A failed deploy's body carries the app's own bytes on purpose
+  (liveswap/journal.go, `deployDetail` in liveswap/app.go): the last
+  lines its units wrote, read back with `journalctl` — the one
+  external program hotserve runs, with a fixed argument list —
+  bounded by `deploy_log_lines` (default 40) and 8 KiB; the first 512
+  bytes of a failing health probe's body; and the exit status the
+  runner recorded. `deploy_log_lines 0` keeps the app's bytes — the
+  tail and the probe body both — on the box; the exit status and the
+  probe's status code are hotserve's observations and stay. Reading
+  the journal is a grant: journald keeps a system user's output in the
+  system journal, so the packaged unit puts hotserve's process in
+  `systemd-journal` (`SupplementaryGroups=`, the process and not the
+  account, so the apps under the user manager keep the account's
+  groups and see no journal in their sandbox anyway). What that
+  widens is what a compromised hotserve reads — every unit's lines —
+  which the shipped units keep free of secrets (no `--environ`, the
+  smoke test asserts it). Every body passes
   four layers before it is written. First, exact: every `env_file`
   value of 8+ characters this process has rendered for a launch (or,
   after a restart, read from the file for the filter), in each form

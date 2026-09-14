@@ -68,6 +68,7 @@ func parseWebhookDirective(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler,
 //	        keep              <n>
 //	        max_artifact_size <size>
 //	        max_artifact_entries <n>
+//	        deploy_log_lines  <n>
 //	    }
 //	}
 func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
@@ -227,6 +228,12 @@ func (cfg *AppConfig) unmarshalBlock(d *caddyfile.Dispenser) error {
 			if err := parseDurationArg(d, &cfg.WatchdogWindow); err != nil {
 				return err
 			}
+		case "deploy_log_lines":
+			var n int
+			if err := parseCountArg(d, &n); err != nil {
+				return err
+			}
+			cfg.DeployLogLines = &n
 		case "keep":
 			if !d.NextArg() {
 				return d.ArgErr()

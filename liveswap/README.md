@@ -264,6 +264,7 @@ resolved at config load.
 | `watchdog_restarts` | `5` | Restart budget within `watchdog_window`; crash and health restarts share it |
 | `watchdog_window` | `10m` | Sliding window for the restart budget |
 | `keep` | `5` | Release dirs retained (GC after success). The running version is always kept, so this can be `keep+1` after rolling back to an old release |
+| `deploy_log_lines` | `40` | How many of the app's last journal lines a failed deploy's response carries (see [Webhook API](#webhook-api)); `0` keeps the app's output on the box (no tail, and no health probe body). At most 1000, and 8 KiB whatever the count |
 | `max_artifact_size` | `100MB` | Download cap; decompressed cap is 10× |
 | `max_artifact_entries` | `100000` | Cap on the files, directories and links one artifact creates (implied parent directories included). The byte cap does not bound what extraction *consumes* — every object costs an inode and most a disk block — so this is what keeps one hostile artifact from filling the disk for everything else on the box. A CI-built artifact is thousands; a Next.js standalone output is ~5–20k |
 
@@ -780,6 +781,38 @@ in roughly soak + drain (~20s). Budget your CI step timeout for
 `deadline` plus drain and grace, and expect a concurrent deploy to
 409 until the first one finishes.
 
+**A failed deploy says why, from the app's side.** The 5xx body's
+`status.last_deploy` carries the phase it stopped in, `phases` — each
+phase the deploy passed through with how long it took — and, once a
+launch happened, `detail`:
+
+- `exit` — how the process ended, from systemd: `exit status 3`,
+  `killed by signal 9 (killed)`. The `pre_start`'s when that failed;
+  the app's when its start job failed or it died before becoming
+  healthy.
+- `probe` — the last health probe that completed with a non-2xx
+  answer: its `status`, a redirect's `location`, and the first 512
+  bytes of its `body`, which is where a framework says "Invalid
+  HTTP_HOST header" or a migration says "no such table".
+- `log_tail` — the last lines the `pre_start` and the app wrote to the
+  journal since the deploy began, up to `deploy_log_lines` of them and
+  8 KiB; `log_tail_truncated` when a cap dropped some, `log_tail_error`
+  when the journal could not be read. `journalctl` reads it; journald
+  keeps a system user's output in the system journal, so the packaged
+  unit gives hotserve's own process the `systemd-journal` group
+  (`SupplementaryGroups=` in `hotserve.service` — the process, not
+  the account, so the apps do not get it). A raw-binary install
+  without that grant gets `log_tail_error` instead of a tail.
+
+Every string in it passes the response filter first — `[redacted:KEY]`
+where an `env_file` value was, and `redacted_env` naming the keys —
+because the response lands in a CI log, and `deploy_log_lines 0`
+keeps the app's output on the box entirely: no `log_tail`, and no
+`probe.body` either (the probe's `status` and `location`, and `exit`,
+are hotserve's own observations and stay). See
+[Secrets and logs](#secrets-and-logs). A success carries `phases` and
+no `detail`.
+
 `GET /<app>` (same bearer token) returns status: phase, current
 version, socket, pid, `command` — the argv the running instance was
 actually launched with, read back from systemd, which is not
@@ -869,6 +902,16 @@ What's yours to handle:
   `hotserve-<app>` (`journalctl -t hotserve-blog`, or by unit name —
   the status endpoint reports it). If your app prints its own secrets
   at startup, they end up in the journal — that one's on the app.
+- **A failed deploy's response carries the app's last lines** (up to
+  `deploy_log_lines`, 40 by default), the process's exit status and
+  the last health probe's answer, after the response filter. The
+  filter knows every `env_file` value and replaces it; what it does
+  not know — a secret the app fetched at runtime and printed in a
+  low-entropy form — is caught only by the heuristics. Two things
+  follow. Keep secrets in `env_file`, where the filter can see them.
+  And with a **public repository**, the Actions log is public: if
+  your app's output is not something you would post, set
+  `deploy_log_lines 0` and read the journal on the box instead.
 
 ## Deploying from CI
 
@@ -984,9 +1027,11 @@ job token is not a substitute: `auth_header` is sent as the
 
 `--fail-with-body` makes the CI job red exactly when the deploy fails
 and prints the JSON `error` that says why (plain `--fail` hides it) —
-and on failure the previous version, if there was one, never stopped serving. The app's
-own output (a crashing start, a failing `pre_start`) is not in that
-body: it is in the journal on the box, `journalctl -t hotserve-blog`.
+and on failure the previous version, if there was one, never stopped serving. The body's
+`status.last_deploy.detail` says why from the app's side — the exit
+status, the last health probe's answer, the last lines the app and
+its `pre_start` wrote (see [Webhook API](#webhook-api)); the whole
+journal stays on the box, `journalctl -t hotserve-blog`.
 
 ## Server layout
 

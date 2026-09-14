@@ -215,6 +215,16 @@ type AppConfig struct {
 	// counted over. Default 10m.
 	WatchdogWindow caddy.Duration `json:"watchdog_window,omitempty"`
 
+	// DeployLogLines is how many of the app's last journal lines a
+	// failed deploy's response carries (the pre_start's and the app's,
+	// since the deploy began), on top of the exit status and the last
+	// health probe's answer. The response goes to whoever deployed —
+	// a CI log, and with a public repository a public one — so it
+	// passes the response filter first, and 0 keeps the app's output
+	// on the box entirely. Bounded at 8 KiB whatever the count.
+	// Default 40, at most 1000.
+	DeployLogLines *int `json:"deploy_log_lines,omitempty"`
+
 	// Keep is how many release directories to retain on disk,
 	// including the current one. Default 5. The running version is
 	// always retained even if it is older than the newest `keep` (e.g.
@@ -412,6 +422,10 @@ func (cfg *AppConfig) applyDefaults(repl *caddy.Replacer) {
 	if cfg.Keep == 0 {
 		cfg.Keep = 5
 	}
+	if cfg.DeployLogLines == nil {
+		n := 40
+		cfg.DeployLogLines = &n
+	}
 	if cfg.MaxArtifactSize == 0 {
 		cfg.MaxArtifactSize = 100_000_000
 	}
@@ -456,6 +470,7 @@ func (a *App) buildSpec(name string, cfg *AppConfig) (*appSpec, error) {
 		wdRestarts:         cfg.WatchdogRestarts,
 		wdWindow:           time.Duration(cfg.WatchdogWindow),
 		keep:               cfg.Keep,
+		deployLogLines:     *cfg.DeployLogLines,
 		maxArtifactSize:    cfg.MaxArtifactSize,
 		maxArtifactEntries: cfg.MaxArtifactEntries,
 		allowInsecure:      a.AllowInsecureHTTP,
@@ -538,6 +553,9 @@ func (a *App) Validate() error {
 		}
 		if cfg.Keep < 1 {
 			return fmt.Errorf("app %s: keep must be at least 1, got %d", name, cfg.Keep)
+		}
+		if n := cfg.DeployLogLines; n != nil && (*n < 0 || *n > 1000) {
+			return fmt.Errorf("app %s: deploy_log_lines must be between 0 (off) and 1000, got %d", name, *n)
 		}
 		if cfg.MaxArtifactSize < 1 {
 			return fmt.Errorf("app %s: max_artifact_size must be positive, got %d", name, cfg.MaxArtifactSize)

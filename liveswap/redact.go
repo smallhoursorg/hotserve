@@ -19,10 +19,10 @@ import (
 // from env_file, so it knows the secrets by value, and it knows which
 // high-entropy strings of its own (versions, paths) are not secrets.
 //
-// Today a response carries hotserve's own fields and error text; the
-// app's own bytes reach one only through a probe error that quotes a
-// malformed response line. The filter is here first because the next
-// change puts the app's output into responses on purpose.
+// A failed deploy's response carries the app's own bytes on purpose
+// (deployDetail in app.go: the journal tail, a probe's body, the exit
+// status), so this is what stands between an app that prints its
+// database URL and a public Actions log.
 //
 // Four layers, in order:
 //

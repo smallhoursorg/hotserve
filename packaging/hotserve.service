@@ -20,6 +20,16 @@ Requires=network-online.target
 Type=notify
 User=hotserve
 Group=hotserve
+# A failed deploy's response carries the app's last journal lines
+# (liveswap/journal.go reads them with journalctl). journald keeps a
+# system user's output in the system journal, readable by the
+# systemd-journal group, so hotserve's own process joins it — this
+# process only, not the account: the apps run under the user manager
+# with the account's groups, which stay as they are, and their sandbox
+# has no journal in its view either way. What this widens is what a
+# compromised hotserve can read: every unit's lines, which the units
+# here keep free of secrets (no --environ, see below).
+SupplementaryGroups=systemd-journal
 # Caddy resolves its dirs to $XDG_.../caddy, so both land inside
 # /var/lib/hotserve (which the package owns and chowns): TLS material
 # and storage in /var/lib/hotserve/caddy, config autosave alongside it.

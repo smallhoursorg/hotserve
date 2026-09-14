@@ -3,6 +3,7 @@ package liveswap
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -11,6 +12,29 @@ import (
 // implementation is systemdRunner (runner_systemd.go): every instance
 // is a transient systemd service unit under the hotserve user's own
 // service manager, which is what lets apps outlive hotserve restarts.
+// exitError is the runner's report of a unit that ran and failed: how
+// its process ended, in which unit, with what job. The deploy's
+// failure detail reads the exit; the text is what each error always
+// said — RunOnce's "exit status 3 (unit X: job failed)", Start's
+// "unit X: start job failed (exit status 3)" — so nothing parsing the
+// response's top-level error sees a change.
+type exitError struct {
+	exit, unit, job string
+	msg             string
+}
+
+func (e *exitError) Error() string { return e.msg }
+
+// runOnceExit is RunOnce's exitError, in RunOnce's words.
+func runOnceExit(exit, unit, res string) *exitError {
+	return &exitError{exit: exit, unit: unit, job: "job " + res, msg: fmt.Sprintf("%s (unit %s: job %s)", exit, unit, res)}
+}
+
+// startExit is Start's exitError for a failed start job, in Start's words.
+func startExit(exit, unit, res string) *exitError {
+	return &exitError{exit: exit, unit: unit, job: "start job " + res, msg: fmt.Sprintf("unit %s: start job %s (%s)", unit, res, exit)}
+}
+
 type runner interface {
 	// Start launches a long-running instance and returns immediately.
 	Start(spec startSpec) (handle, error)
@@ -21,6 +45,12 @@ type runner interface {
 
 	// Alive reports whether the instance is still running.
 	Alive(h handle) bool
+
+	// Exit is how the instance's main process ended ("exit status 3",
+	// "killed by signal 9 (killed)"), or "" while it runs. Non-empty
+	// whenever Alive is false: the runner records the exit before it
+	// declares the handle dead (finish, runner_systemd.go).
+	Exit(h handle) string
 
 	// Wait returns a channel that is closed once the instance exits.
 	// It may return nil when the runner cannot wait on this handle;

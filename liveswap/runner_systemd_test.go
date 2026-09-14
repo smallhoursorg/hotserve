@@ -475,8 +475,8 @@ func TestSystemdRunnerStartJobFailureResetsUnit(t *testing.T) {
 	conn.mu.Unlock()
 	spec := testApp(t)
 	_, err := r.Start(spec)
-	if err == nil || !strings.Contains(err.Error(), "start job failed") || !strings.Contains(err.Error(), "exit status 3") {
-		t.Fatalf("got %v", err)
+	if err == nil || !strings.HasPrefix(err.Error(), "unit ") || !strings.HasSuffix(err.Error(), ": start job failed (exit status 3)") {
+		t.Fatalf("the start job's failure must read as it always did, got %v", err)
 	}
 	if len(conn.resets()) != 1 {
 		t.Fatalf("a unit whose start job failed must be reset, got %v", conn.resets())
@@ -506,8 +506,8 @@ func TestSystemdRunnerRunOnceReportsExitStatus(t *testing.T) {
 	conn.failStatus = &fs
 	conn.mu.Unlock()
 	err := r.RunOnce(context.Background(), testApp(t))
-	if err == nil || !strings.Contains(err.Error(), "exit status 3") || !strings.Contains(err.Error(), "job failed") {
-		t.Fatalf("error must carry the exit status and job result, got %v", err)
+	if err == nil || !strings.HasPrefix(err.Error(), "exit status 3 (unit ") || !strings.HasSuffix(err.Error(), ": job failed)") {
+		t.Fatalf("error must carry the exit status and job result in the format it always had, got %v", err)
 	}
 	if rs := conn.resets(); len(rs) != 1 || rs[0] != conn.unit(0).Name {
 		t.Fatalf("failed oneshot must be reset, got %v", rs)
@@ -1175,5 +1175,24 @@ func TestSystemdRunnerSettlesFromUnpublishedMainPID(t *testing.T) {
 	}
 	if got := h.state().PID; got != 4243 {
 		t.Fatalf("settled on pid %d, want the app's 4243 — 4242 is the intermediate the manager reports while it sets the namespace up, and 0 is nothing published yet", got)
+	}
+}
+
+// After the watcher saw a unit end, a status with no ExecMainCode is
+// a clean exit whose unit was unloaded before the status was read —
+// not "no process exit recorded", which is for a start job that never
+// got as far as a process.
+func TestExitAfterEndNamesTheUnloadedCleanExit(t *testing.T) {
+	gone := unitStatus{LoadState: "not-found"}
+	if got := gone.exitAfterEnd(); !strings.Contains(got, "without failure") {
+		t.Fatalf("unloaded clean exit = %q", got)
+	}
+	failed := unitStatus{LoadState: "loaded", ActiveState: "failed", Result: "exit-code", ExecMainCode: 1, ExecMainStatus: 3}
+	if got := failed.exitAfterEnd(); got != "exit status 3" {
+		t.Fatalf("a recorded exit is itself: %q", got)
+	}
+	skipped := unitStatus{LoadState: "loaded", ActiveState: "failed", Result: "dependency"}
+	if got := skipped.exitAfterEnd(); !strings.Contains(got, "no process exit recorded") {
+		t.Fatalf("a job that never ran a process: %q", got)
 	}
 }

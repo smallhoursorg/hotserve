@@ -36,6 +36,9 @@
 
 		app demo {
 			command ./server
+			# A secret the crash scenario's release prints: the failed
+			# deploy's response must carry the line with it redacted.
+			env_file /etc/hotserve/demo.env
 			health_interval 250ms
 			health_timeout 1s
 			soak 1s
