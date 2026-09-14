@@ -45,7 +45,13 @@ else
 fi
 # The env-file grant: the one install line the sudoers file admits
 # creates an empty 0640 root:hotserve file under /etc/hotserve, and
-# nothing that differs from it by a path, a mode or an owner.
+# nothing that differs from it by a path, a mode, an owner, a group, a
+# source or an extra argument. A refusal must be sudo's own, not
+# install failing after sudo let it through: a two-destination form,
+# say, would fail in install either way. With -n, a command no
+# NOPASSWD line matches is "a password is required"; a user with no
+# line at all gets "is not allowed to execute". Either is sudo
+# stopping before anything ran; install's own errors say "install:".
 box rm -f /etc/hotserve/e2e-secrets.env
 if admin sudo -n /usr/bin/install -m 0640 -o root -g hotserve /dev/null /etc/hotserve/e2e-secrets.env >"$tmp/out" 2>&1; then
 	pass "admin can create an app's env file"
@@ -60,13 +66,18 @@ for args in \
 	"-m 0640 -o root -g hotserve /dev/null /etc/hotserve/../e2e-secrets.env" \
 	"-m 0644 -o root -g hotserve /dev/null /etc/hotserve/e2e-secrets.env" \
 	"-m 0640 -o admin -g hotserve /dev/null /etc/hotserve/e2e-secrets.env" \
+	"-m 0640 -o root -g root /dev/null /etc/hotserve/e2e-secrets.env" \
+	"-m 0640 -o root -g admin /dev/null /etc/hotserve/e2e-secrets.env" \
 	"-m 0640 -o root -g hotserve /etc/shadow /etc/hotserve/e2e-secrets.env" \
+	"-m 0640 -o root -g hotserve /dev/null /etc/hotserve/e2e-secrets.env -v" \
 	"-m 0640 -o root -g hotserve /dev/null /etc/hotserve/e2e-secrets.env /etc/hotserve/other.env"; do
 	# shellcheck disable=SC2086 # the args are meant to split
-	if admin sudo -n /usr/bin/install $args >/dev/null 2>&1; then
+	if admin sudo -n /usr/bin/install $args >"$tmp/out" 2>&1; then
 		fail "the sudoers file let admin run: install $args"
+	elif grep -q -E "a password is required|is not allowed to execute" "$tmp/out"; then
+		pass "sudo refused: install $args"
 	else
-		pass "refused: install $args"
+		fail "install $args failed, but not because sudo refused it: $(tail -1 "$tmp/out")"
 	fi
 done
 box rm -f /etc/hotserve/e2e-secrets.env /etc/hotserve/other.env /tmp/e2e-secrets.env /etc/e2e-secrets.env
