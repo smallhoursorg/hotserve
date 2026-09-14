@@ -358,3 +358,27 @@ func mustJSON(t *testing.T, s string) []byte {
 	}
 	return b[1 : len(b)-1]
 }
+
+// A body that already reports redacted keys — a stored record read
+// back — keeps them through a later pass, whether or not that pass
+// redacts more: withField merges with what the filtered body holds.
+// An entry equal to a known value is body text like any other, and
+// comes out as its marker with the key it belongs to reported.
+func TestReportedKeysMergeWithTheBodys(t *testing.T) {
+	r := newRedactor([]string{"NEW=newvaluenewvalue1234"}, nil)
+	if got := r.redactJSON([]byte(`{"error":"got newvaluenewvalue1234","redacted_env":["OLD"]}`)); !strings.Contains(got, `"redacted_env":["NEW","OLD"]`) || strings.Contains(got, "newvaluenewvalue1234") {
+		t.Fatalf("got %s", got)
+	}
+	if got := r.redactJSON([]byte(`{"error":"nothing here","redacted_env":["OLD"]}`)); !strings.Contains(got, `"redacted_env":["OLD"]`) {
+		t.Fatalf("a pass that redacts nothing must keep the keys: %s", got)
+	}
+	if got := r.redactJSON([]byte(`{"version":"v1","redacted_env":["newvaluenewvalue1234"]}`)); strings.Contains(got, "newvaluenewvalue1234") || !strings.Contains(got, `"redacted_env":["NEW","[redacted:NEW]"]`) {
+		t.Fatalf("a planted reported entry leaked or was not accounted for: %s", got)
+	}
+	if got := r.redactJSON([]byte(`{"error":"got newvaluenewvalue1234","redacted_env":"not-an-array"}`)); !strings.Contains(got, `"redacted_env":["NEW"]`) {
+		t.Fatalf("a field that is not an array is replaced: %s", got)
+	}
+	if got := r.redactJSON([]byte(`{"error":"got newvaluenewvalue1234","redacted_env":["OLD",5,null]}`)); !strings.Contains(got, `"redacted_env":["NEW","OLD"]`) {
+		t.Fatalf("only the strings of a mixed array are kept: %s", got)
+	}
+}

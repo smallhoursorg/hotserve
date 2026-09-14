@@ -756,7 +756,9 @@ over), so it is zero-downtime too. A `422` is returned if that version
 is no longer on disk. To see what you can roll back to, `GET /<app>`
 returns `available_versions` — the on-disk releases, newest-first
 (`keep` of them, plus the running version when it is older than those —
-see the `keep` note above, so the list can briefly hold `keep+1`).
+see the `keep` note above, so the list can briefly hold `keep+1`) —
+and `deploys`, what each recorded version's latest deploy came to
+(see [Deploy records](#deploy-records)).
 
 **Versions are immutable.** A deploy (URL or push) never overwrites an
 existing on-disk release, so a version you can roll back to can't be
@@ -866,6 +868,35 @@ nothing streamed yet and is the usual single response with its real
 code. Every line passes the response filter. The examples'
 `scripts/deploy.sh` streams, prints each line as it arrives, and exits
 on the last line's code — or on the real one when nothing streamed.
+
+### Deploy records
+
+Every deploy writes its outcome — the same `last_deploy` object, with
+its `phases` and, for a failure, its `detail` — to a record for that
+version, and `GET /<app>?deploy=<version>` reads it back:
+
+```sh
+curl --fail-with-body -H "Authorization: Bearer $JWT" \
+  "https://deploy.example.com/blog?deploy=v1.4.1"
+```
+
+The record is the latest deploy of that version (a rollback to it
+replaces it; a request refused before any phase — the version already
+running, or already on disk — writes none); a version never deployed
+is a `404`. `GET /<app>` lists
+every recorded version's outcome in `deploys`, newest first:
+`version`, `status`, the failing `phase`, `deployed_by`, and the
+times. Records are kept for every version still on disk plus the
+newest `keep` others (failed deploys, whose release is removed at
+once, and versions release GC has pruned), so the set is bounded by
+about twice `keep`. They are written as the response filter left them
+— a secret rotated later is not in an old record — and pass it again
+when read, like every body. One consequence: a version name equal to
+an `env_file` value is treated as that value wherever it is read off
+the box (a release directory, a record) and shows as `[redacted:KEY]`
+in `available_versions`, `deploys` and a record — so do not name
+versions after `env_file` values; a release identifier an app needs
+belongs in inline `env`.
 
 ## Secrets and logs
 
@@ -1074,6 +1105,7 @@ journal stays on the box, `journalctl -t hotserve-blog`.
   current -> releases/v1.4.2   (convenience symlink; state.json is truth)
   shared/                 persistent data, survives deploys (the app's HOME)
   state.json              current version, nonce and unit name
+  deploys/v1.4.2.json     each version's latest deploy outcome (see Deploy records)
   tmp/                    download staging
 ```
 

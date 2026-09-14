@@ -292,6 +292,18 @@ func (r *redactor) replaceKnown(s string, seen map[string]bool) string {
 	return s
 }
 
+// union is both lists' names, each once, sorted.
+func union(a, b []string) []string {
+	set := make(map[string]bool, len(a)+len(b))
+	for _, n := range a {
+		set[n] = true
+	}
+	for _, n := range b {
+		set[n] = true
+	}
+	return reportedKeys(set)
+}
+
 func reportedKeys(seen map[string]bool) []string {
 	keys := make([]string, 0, len(seen))
 	for k := range seen {
@@ -450,12 +462,29 @@ func (r *redactor) redactJSON(raw []byte) string {
 
 // withField sets a string-array field on a JSON object body; anything
 // else (an array, a scalar) is returned as it is.
+// withField sets a string-array field on a JSON object body, merged
+// with any array the body already holds under that name. The body is
+// the filter's output: an existing array there — a stored record's
+// own redacted_env, read back — has been through every layer as body
+// text, so its entries are kept, never replaced, and nothing that
+// did not pass the filter is added. The final pass runs before this.
 func withField(body, name string, values []string) string {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(body), &obj); err != nil || obj == nil {
 		return body
 	}
-	v, err := json.Marshal(values)
+	var had []string
+	if raw, ok := obj[name]; ok {
+		var items []any
+		if json.Unmarshal(raw, &items) == nil {
+			for _, it := range items {
+				if str, ok := it.(string); ok {
+					had = append(had, str) // the strings, and only those: the field is key names
+				}
+			}
+		}
+	}
+	v, err := json.Marshal(union(values, had))
 	if err != nil {
 		return body
 	}

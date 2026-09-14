@@ -673,7 +673,25 @@ does not isolate the runtime.
   being started, `shared/` and the OS base view are bound into the
   unit — the app dir root, `state.json`, `tmp/` (the upload staging
   dir: a running instance must not be able to rewrite the next
-  version's tarball) and the other releases do not exist inside.
+  version's tarball), `deploys/` (each version's recorded deploy
+  outcome; `TestDeployRecordsAreOutsideTheSandboxView`) and the
+  other releases do not exist inside.
+- **The deploy record store is a trust boundary in both directions**
+  (liveswap/deploys.go states its four rules; every function there
+  and both filters hold them). A record is written once, through the
+  filter, into a directory verified as the app's own — so no known
+  secret is on disk in it, and a secret rotated later is not in an
+  old record for the new filter to miss. Anything read back is text
+  from disk: served only through the filter, trusted for nothing
+  else unless it proves itself a record (a regular file, a valid
+  version name, an object naming that version). Nothing from disk
+  reaches a response or a filter's safe list except through the
+  filter as body text or as a name that is not a known value —
+  release directories and record files alike, since the app dir was
+  writable by the app before sandboxing existed — and nothing is
+  appended to a body after the filter's final pass. Nothing there
+  follows a link, ancestors included, and the store never blocks a
+  deploy or a status.
   `sandboxSpecFor` in liveswap/sandbox.go is the single place that
   list is built; `TestSandboxSpecFor` and
   `TestSandboxViewIsExactlyWhatIsNamed` pin it — the latter asserts the

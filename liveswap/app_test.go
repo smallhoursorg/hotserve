@@ -375,8 +375,10 @@ type fakeFetcher struct {
 
 func (f *fakeFetcher) fetch(_ context.Context, spec *appSpec, req deployRequest, progress func(string)) (string, archiveStats, error) {
 	f.lastReq = req
-	progress("downloading")
-	progress("extracting")
+	if !req.rollback { // as the real fetcher: a rollback fetches and extracts nothing
+		progress("downloading")
+		progress("extracting")
+	}
 	if f.err != nil {
 		return "", archiveStats{}, f.err
 	}

@@ -9,6 +9,7 @@ import (
 	"math"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"strconv"
@@ -139,6 +140,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 
 	switch r.Method {
 	case http.MethodGet:
+		// Parsed strictly: URL.Query drops a pair it cannot decode, and
+		// a malformed `?deploy=%ZZ` would fall through to the status.
+		q, err := url.ParseQuery(r.URL.RawQuery)
+		if err != nil {
+			return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "malformed query: " + err.Error()}, ma.redactorFor(statusSnapshot{}))
+		}
+		if q.Has("deploy") {
+			return h.deployRecord(w, ma, q.Get("deploy"))
+		}
 		s := ma.status()
 		return respondJSON(w, http.StatusOK, s, ma.redactorFor(s))
 	case http.MethodPost:
@@ -264,6 +274,41 @@ func (h *Handler) deployRollback(w http.ResponseWriter, r *http.Request, ma *man
 		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("rollback version must match %s", versionRe)}, ma.redactorFor(statusSnapshot{}))
 	}
 	return h.runDeploy(w, r, ma, deployRequest{version: version, rollback: true}, by)
+}
+
+// deployRecord answers GET /<app>?deploy=<version> with the recorded
+// outcome of that version's latest deploy (deploys.go).
+func (h *Handler) deployRecord(w http.ResponseWriter, ma *managedApp, version string) error {
+	if !validVersion(version) {
+		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("deploy query param must match %s", versionRe)}, ma.redactorFor(statusSnapshot{}))
+	}
+	c := ma.snapshot()
+	if c.spec == nil {
+		// An app the pool still holds but no loaded config describes
+		// (status() makes the same allowance): nowhere to read from.
+		return respondJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "app has no configuration loaded"}, ma.redactorFor(statusSnapshot{}))
+	}
+	rec, err := readDeployRecord(c.spec.dirs, version)
+	// The requested version is a name the filter should let through,
+	// whether or not the status still lists it by the time it is
+	// built (a prune, a reload between the read and the response) —
+	// as a name from outside, under the same rule as a recorded one:
+	// never when it equals a known value (redactorFor).
+	s := ma.status()
+	s.Deploys = append(s.Deploys, deploySummary{Version: version})
+	switch {
+	case errors.Is(err, errNoDeployRecord):
+		return respondJSON(w, http.StatusNotFound, map[string]string{"error": fmt.Sprintf("no deploy recorded for version %s", version)}, ma.redactorFor(s))
+	case err != nil:
+		return respondJSON(w, http.StatusInternalServerError, map[string]string{"error": "reading deploy record: " + err.Error()}, ma.redactorFor(s))
+	}
+	// Through the live filter like every body, then the outcome words
+	// put back (deploys.go, rule 3): the record's own status and
+	// phase, which recordHead has already required to be vocabulary,
+	// or nothing — a word equal to a known value must not read as
+	// redacted.
+	head, _ := recordHead(rec, versionPathComponent(version)+".json")
+	return respondFiltered(w, http.StatusOK, restoreVocabulary(ma.redactorFor(s).redactJSON(rec), head.Status, head.Phase))
 }
 
 // runDeploy records the authorizing source, runs the pipeline, and maps
@@ -523,9 +568,14 @@ func respondJSON(w http.ResponseWriter, code int, v any, r *redactor) error {
 	if err != nil {
 		return err
 	}
+	return respondFiltered(w, code, r.redactJSON(raw))
+}
+
+// respondFiltered writes a body that has already passed the filter.
+func respondFiltered(w http.ResponseWriter, code int, filtered string) error {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	_, err = w.Write(append([]byte(r.redactJSON(raw)), '\n'))
+	_, err := w.Write(append([]byte(filtered), '\n'))
 	return err
 }
 

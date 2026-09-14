@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -708,5 +709,115 @@ func TestWebhookStreamLastLineSurvivesWithholding(t *testing.T) {
 	}
 	if lines[0]["phase"] != "downloading" {
 		t.Fatalf("first phase = %v", lines[0])
+	}
+}
+
+// GET /<app>?deploy=<version> is that version's recorded outcome;
+// a version never deployed is a 404, a malformed one a 422.
+func TestWebhookDeployRecordRoute(t *testing.T) {
+	h, rig := newTestHandler(t)
+	rig.runner.startErr = errors.New("boom")
+	if w := do(t, h, http.MethodPost, "/demo", appToken(t), `{"url":"https://x/a.tgz","version":"v1"}`); w.Code != 500 {
+		t.Fatalf("setup deploy: %d %s", w.Code, w.Body.String())
+	}
+	w := do(t, h, http.MethodGet, "/demo?deploy=v1", appToken(t), "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"version":"v1"`) || !strings.Contains(w.Body.String(), `"status":"failed"`) || !strings.Contains(w.Body.String(), "boom") {
+		t.Fatalf("record: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(t, h, http.MethodGet, "/demo?deploy=v2", appToken(t), ""); w.Code != 404 {
+		t.Fatalf("never deployed: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(t, h, http.MethodGet, "/demo?deploy=../state", appToken(t), ""); w.Code != 422 {
+		t.Fatalf("malformed: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(t, h, http.MethodGet, "/demo?deploy=", appToken(t), ""); w.Code != 422 {
+		t.Fatalf("an empty deploy query is malformed, not the status: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(t, h, http.MethodGet, "/demo?deploy=%ZZ", appToken(t), ""); w.Code != 422 {
+		t.Fatalf("a query that does not decode is malformed, not the status: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(t, h, http.MethodGet, "/demo", appToken(t), ""); !strings.Contains(w.Body.String(), `"deploys":[{"version":"v1","status":"failed"`) {
+		t.Fatalf("status lacks deploys: %s", w.Body.String())
+	}
+}
+
+// A recorded version's name survives the filter's entropy layer in the
+// status list and in its own record, as the running and on-disk
+// versions' names do — a commit SHA is a name, not a secret.
+func TestDeployRecordVersionsAreNamesNotSecrets(t *testing.T) {
+	h, rig := newTestHandler(t)
+	sha := "9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e"
+	rig.runner.startErr = errors.New("boom")
+	if w := do(t, h, http.MethodPost, "/demo", appToken(t), `{"url":"https://x/a.tgz","version":"`+sha+`"}`); w.Code != 500 {
+		t.Fatalf("setup deploy: %d %s", w.Code, w.Body.String())
+	}
+	rig.runner.startErr = nil
+	if w := do(t, h, http.MethodPost, "/demo", appToken(t), `{"url":"https://x/b.tgz","version":"v2"}`); w.Code != 200 {
+		t.Fatalf("second deploy: %d %s", w.Code, w.Body.String())
+	}
+	// The failed SHA's release is gone; it is in no field but deploys.
+	for _, path := range []string{"/demo", "/demo?deploy=" + sha} {
+		w := do(t, h, http.MethodGet, path, appToken(t), "")
+		if w.Code != 200 || !strings.Contains(w.Body.String(), sha) || strings.Contains(w.Body.String(), "[masked") {
+			t.Fatalf("%s: %d %s", path, w.Code, w.Body.String())
+		}
+	}
+}
+
+// An app the pool holds without a loaded spec answers the record route
+// with a 503, as its status answers without one — never a panic. (Over
+// HTTP such an app has no trust to verify against and is a 401 first;
+// the route is exercised directly.)
+func TestWebhookDeployRecordWithoutASpecIs503(t *testing.T) {
+	h, _ := newTestHandler(t)
+	w := httptest.NewRecorder()
+	if err := h.deployRecord(w, &managedApp{name: "bare"}, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("record route without a spec: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// A record read back through the live filter keeps the keys it was
+// recorded with, and gains any the live filter redacts now.
+func TestWebhookDeployRecordKeepsItsRecordedKeys(t *testing.T) {
+	h, rig := newTestHandler(t)
+	rig.spec.envFile = filepath.Join(t.TempDir(), "app.env")
+	must(t, os.WriteFile(rig.spec.envFile, []byte("NEW=newvaluenewvalue1234\n"), 0o600))
+	must(t, writeDeployRecord(rig.spec.dirs, "v1", []byte(`{"version":"v1","status":"failed","error":"[redacted:OLD] then newvaluenewvalue1234","redacted_env":["OLD"]}`)))
+	w := do(t, h, http.MethodGet, "/demo?deploy=v1", appToken(t), "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"redacted_env":["NEW","OLD"]`) || strings.Contains(w.Body.String(), "newvaluenewvalue1234") {
+		t.Fatalf("record: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// The examples' deploy.sh reads the failing phase as the last "phase"
+// in a failure body; with older records listed in the status that must
+// still be last_deploy's, so deploys is serialized before it.
+func TestFailureBodyEndsWithLastDeploysPhase(t *testing.T) {
+	h, rig := newTestHandler(t)
+	must(t, writeDeployRecord(rig.spec.dirs, "v0", []byte(`{"version":"v0","status":"failed","phase":"soaking"}`)))
+	rig.runner.startErr = errors.New("boom")
+	w := do(t, h, http.MethodPost, "/demo", appToken(t), `{"url":"https://x/a.tgz","version":"v1"}`)
+	body := w.Body.String()
+	i := strings.LastIndex(body, `"phase":"`)
+	if w.Code != 500 || i < 0 || !strings.HasPrefix(body[i:], `"phase":"starting"`) {
+		t.Fatalf("status %d, last phase in body is not last_deploy's: %s", w.Code, body)
+	}
+}
+
+// GET ?deploy= puts the record's outcome words back after the live
+// filter, so a known value spelled like one does not read as redacted.
+func TestWebhookDeployRecordOutcomeSurvivesAVocabularySecret(t *testing.T) {
+	h, rig := newTestHandler(t)
+	rig.spec.envFile = filepath.Join(t.TempDir(), "app.env")
+	must(t, os.WriteFile(rig.spec.envFile, []byte("WORD=succeeded\n"), 0o600))
+	if w := do(t, h, http.MethodPost, "/demo", appToken(t), `{"url":"https://x/a.tgz","version":"v1"}`); w.Code != 200 {
+		t.Fatalf("deploy: %d %s", w.Code, w.Body.String())
+	}
+	w := do(t, h, http.MethodGet, "/demo?deploy=v1", appToken(t), "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"status":"succeeded"`) {
+		t.Fatalf("record: %d %s", w.Code, w.Body.String())
 	}
 }

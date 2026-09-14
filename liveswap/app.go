@@ -341,10 +341,25 @@ func (ma *managedApp) redactorFor(s statusSnapshot) *redactor {
 	}
 	kvs := append([]string(nil), ma.secrets...)
 	ma.secretsMu.Unlock()
-	safe := append([]string{ma.name, s.CurrentVersion}, s.AvailableVersions...)
+	// Safe strings are names, not secrets, and come in two kinds. The
+	// version the last deploy's request named is safe as given. Names
+	// read off the filesystem — the running version (state.json after
+	// a restart), release directories, record files, a version a
+	// request asks a record of — are safe only when they are not a
+	// known value: a safe string equal to one would exempt it from the
+	// filter (newRedactor), and a name on disk is not something a
+	// request vouched for (deploys.go, the record store's rules).
+	safe := []string{ma.name}
 	if s.LastDeploy != nil {
 		safe = append(safe, s.LastDeploy.Version)
 	}
+	// The running version is from state.json after a restart, a file
+	// like the others: under the same rule.
+	fromDisk := append([]string{s.CurrentVersion}, s.AvailableVersions...)
+	for _, d := range s.Deploys {
+		fromDisk = append(fromDisk, d.Version)
+	}
+	safe = append(safe, namesNotValues(kvs, fromDisk)...)
 	if spec != nil {
 		safe = append(safe, spec.dirs.root, spec.dirs.app, spec.dirs.releases, spec.dirs.shared, spec.dirs.run)
 	}
@@ -356,6 +371,27 @@ func (ma *managedApp) redactorFor(s statusSnapshot) *redactor {
 		r.withhold = "the app's env_file could not be read, so its values are unknown to the filter (" + unread.Error() + ")"
 	}
 	return r
+}
+
+// namesNotValues is names with any that equals a known env value left
+// out: a name read off the filesystem — a record's, a release
+// directory's — is not something the deployer's POST vouched for, and
+// a safe string equal to a known value would exempt that value from
+// the filter (newRedactor).
+func namesNotValues(kvs, names []string) []string {
+	known := make(map[string]bool, len(kvs))
+	for _, kv := range kvs {
+		if _, v, ok := strings.Cut(kv, "="); ok {
+			known[v] = true
+		}
+	}
+	var out []string
+	for _, n := range names {
+		if !known[n] {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // mergeSecrets appends the pairs not already present.
@@ -607,6 +643,7 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	ma.mu.Unlock()
 
 	var stats archiveStats
+	accepted := false        // the request passed its checks: from here on, what happens is the version's history
 	var detail *deployDetail // filled by the failure-detail defer below, which runs first
 	launched := false        // a pre_start or Start was attempted: there are units to ask about
 	appExit := ""            // the app's exit, read before hotserve stops a failed instance
@@ -626,9 +663,14 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 			result.Status = "failed"
 			result.Error = err.Error()
 			result.Detail = detail
-			ma.mu.Lock()
-			result.Phase = ma.phase
-			ma.mu.Unlock()
+			// The phase reached when it failed — none when it failed
+			// before the first (a rollback whose env_file would not
+			// read): "idle" is the app's state, not a deploy's phase.
+			if len(result.Phases) > 0 {
+				ma.mu.Lock()
+				result.Phase = ma.phase
+				ma.mu.Unlock()
+			}
 			logger.Error("deploy failed", zap.Error(err))
 		} else {
 			logger.Info("deploy succeeded")
@@ -637,6 +679,18 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		ma.lastDeploy = &result
 		ma.phase = "idle"
 		ma.mu.Unlock()
+		// What happened before the request was accepted — the version
+		// already running or on disk, the app's directories not there
+		// to make — is about the request or the box, not the version:
+		// it must not replace the record of the deploy that put the
+		// version there. Past acceptance, a refusal of the request's
+		// own content (an artifact URL the allowlist refuses) is still
+		// the request's; anything else that failed is the version's
+		// history and is recorded.
+		var ve validationError
+		if err == nil || (accepted && !errors.As(err, &ve)) {
+			ma.recordDeploy(c, result)
+		}
 	}()
 
 	old := ma.currentInstance()
@@ -662,6 +716,8 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 			return fmt.Errorf("checking release %s: %w", req.version, statErr)
 		}
 	}
+
+	accepted = true
 
 	releaseDir, stats, err := c.fetch.fetch(ctx, spec, req, func(phase string) { ma.setPhase(c, phase) })
 	if err != nil {
@@ -1257,8 +1313,14 @@ type statusSnapshot struct {
 	Command []string `json:"command,omitempty"`
 	// Unit is the systemd unit running the instance — what to pass to
 	// journalctl for the app's own output.
-	Unit       string            `json:"unit,omitempty"`
-	Running    bool              `json:"running"`
+	Unit    string `json:"unit,omitempty"`
+	Running bool   `json:"running"`
+	// Deploys is the outcome of the latest deploy of each version a
+	// record is kept for (deploys.go), newest first; the whole record
+	// is GET /<app>?deploy=<version>. Serialized before last_deploy:
+	// the examples' deploy.sh reads the failing phase as the last
+	// "phase" in the body, which must stay last_deploy's.
+	Deploys    []deploySummary   `json:"deploys,omitempty"`
 	LastDeploy *deployResult     `json:"last_deploy,omitempty"`
 	Watchdog   *watchdogSnapshot `json:"watchdog,omitempty"`
 	// AvailableVersions lists the on-disk releases, newest-first — the
@@ -1271,6 +1333,7 @@ type statusSnapshot struct {
 func (ma *managedApp) status() statusSnapshot {
 	c := ma.snapshot()
 	var wd *watchdogSnapshot
+	var deploys []deploySummary
 	available := []string{} // always an array in the JSON, never null
 	if c.spec != nil {
 		if c.clock != nil {
@@ -1280,10 +1343,11 @@ func (ma *managedApp) status() statusSnapshot {
 		if rels := listReleases(c.spec.dirs.releases); rels != nil {
 			available = rels
 		}
+		deploys = listDeploySummaries(c.spec.dirs)
 	}
 	ma.mu.Lock()
 	defer ma.mu.Unlock()
-	s := statusSnapshot{App: ma.name, Phase: ma.phase, LastDeploy: ma.lastDeploy, Watchdog: wd, AvailableVersions: available}
+	s := statusSnapshot{App: ma.name, Phase: ma.phase, LastDeploy: ma.lastDeploy, Watchdog: wd, AvailableVersions: available, Deploys: deploys}
 	if ma.current != nil {
 		s.CurrentVersion = ma.current.version
 		s.Socket = ma.current.socket
