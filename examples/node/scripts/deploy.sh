@@ -90,24 +90,46 @@ field() {
 msg() { printf '%s' "$1" | sed 's/%/%25/g' | tr '\r\n' '  '; }
 prop() { msg "$1" | sed 's/:/%3A/g; s/,/%2C/g'; }
 began=$(date +%s)
-body=$(mktemp)
-trap 'rm -f "$body"' EXIT
+# One temp directory, trapped before anything is put in it.
+tmpd=$(mktemp -d)
+trap 'rm -rf "$tmpd"' EXIT
+body=$tmpd/body
 # The stream: curl prints each line as it arrives and tee keeps a
 # copy (curl's own errors go to stderr, printed but kept out of the
-# copy). The outcome is the last line's http_status — a stream is 200
-# from its first byte, so the status line says nothing — and a body
-# with no such line is a request that never streamed: refused before
-# it began (curl's --fail-with-body puts that error in the body) or
-# cut short.
+# copy); the response headers and curl's own exit status are kept in
+# files of their own — a pipeline's status is tee's. The outcome is
+# the last line's http_status — a stream is 200 from its first byte,
+# so the status line says nothing. A body with no such line and no
+# phase line did not stream: a box without stream support answered
+# the single response, and when curl brought it whole and its status
+# line is the 200 a completed deploy answers, that is the outcome: a
+# 3xx from an intermediary is not a deploy, and neither is any other
+# 2xx (a 202 from a queue in front of the box, say). A phase line
+# with no terminal line is a stream cut short, and a single response
+# curl could not finish is no outcome: failures both.
+hdrs=$tmpd/headers
+rcfile=$tmpd/curl-status
 stream() { # <curl args...>: runs the request, prints it, keeps it
-	curl --fail-with-body --silent --show-error --no-buffer --max-time 600 \
-		-H "Authorization: Bearer $token" -H "Accept: application/x-ndjson" \
-		"$@" | tee "$body"
+	# `|| rc=$?` keeps a failing curl from ending the group under
+	# set -e before its status is written.
+	{
+		rc=0
+		curl --fail-with-body --silent --show-error --no-buffer --max-time 600 \
+			-H "Authorization: Bearer $token" -H "Accept: application/x-ndjson" \
+			-D "$hdrs" "$@" || rc=$?
+		echo "$rc" >"$rcfile"
+	} | tee "$body"
 }
-outcome() { # the http_status of a complete last line, or 0 when there is none
+outcome() { # the http_status of a complete last line; else 200 for a whole single 200; else 0
 	# The whole terminal suffix, brace included: a connection cut after
 	# the digits must not read as an outcome.
-	tail -n 1 "$body" | sed -n 's/.*,"event":"done","http_status":\([0-9][0-9]*\)}$/\1/p' | grep . || echo 0
+	code=$(tail -n 1 "$body" | sed -n 's/.*,"event":"done","http_status":\([0-9][0-9]*\)}$/\1/p')
+	if [ -n "$code" ]; then echo "$code"
+	elif grep -q '"event":"phase"' "$body"; then echo 0
+	elif [ "$(cat "$rcfile" 2>/dev/null)" != 0 ]; then echo 0
+	elif [ "$(sed -n 's/^HTTP\/[0-9.]* \([0-9][0-9][0-9]\).*/\1/p' "$hdrs" | tail -n 1)" = 200 ]; then echo 200
+	else echo 0
+	fi
 }
 finish() { # <what>: dresses the outcome, exits on failure
 	what=$1
