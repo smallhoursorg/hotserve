@@ -70,6 +70,45 @@ Properties that matter to the model:
   POST deploys, all else 405 — the method switch in
   `Handler.ServeHTTP` (liveswap/handler.go). The status endpoint is
   authenticated — not public.
+- **What the webhook says back is filtered** (liveswap/redact.go,
+  applied in `respondJSON`, the one writer of every body). The
+  response's audience is wider than its caller: the paved road prints
+  it into a GitHub Actions log, readable by everyone with read access
+  to the repository, retained, and public for a public repository.
+  The caller is trusted to run code on the box; the log's readers are
+  not. Today a body carries hotserve's own fields and error text, and
+  the app's own bytes reach it only through a probe error that quotes
+  a malformed response line; the filter is in place before the change
+  that puts app output into responses on purpose. Every body passes
+  four layers before it is written. First, exact: every `env_file`
+  value of 8+ characters this process has rendered for a launch (or,
+  after a restart, read from the file for the filter), in each form
+  the filter recognises (as written, JSON-escaped, base64 standard and
+  URL alphabets padded and not, hex, URL-escaped, and a URL value's
+  password on its own), becomes `[redacted:KEY]`, and the body gains
+  `redacted_env` naming the keys. hotserve is the party that knows
+  these values, which is why the filter lives here and not in CI,
+  where `::add-mask::` can only hide what the job itself knows.
+  Second, an allowlist: the versions the status names and the app's
+  own paths are exempt from the heuristics below and are never
+  secrets, whatever file names them. Third, shape rules for
+  credentials with a recognisable form. Fourth, entropy: a run of 20+
+  characters from the base64 or hex alphabet, mixed and with Shannon
+  entropy above the class's bar, is replaced by `[masked, N chars]`,
+  never by a fingerprint. A body the first layer would leave
+  unparsable (a value made of JSON's own punctuation matching the
+  structure rather than a string) is withheld, with the keys still
+  reported. What the filter does **not** promise: an encoding not in
+  the list, a value under 8 characters, a secret split across lines,
+  a secret the app fetched at runtime and printed in a low-entropy
+  form, an inline `env` value (not a secret by policy: the Caddyfile
+  is in a repo), or a value the still-running instance was launched
+  with before a hotserve restart if the file has changed since.
+  Tested from both sides — a fuzz property that no known value or
+  form survives and the JSON stays valid (`FuzzRedactor`), and a
+  corpus that the diagnostics a reader needs do (`TestRedactorCorpus`)
+  — because a filter with only the first test drifts toward blanking
+  everything.
 - **Auth failures are throttled in the journal**
   (liveswap/authlimit.go). Token *forgery* is infeasible (no private
   key), so this is not a guessing oracle; what

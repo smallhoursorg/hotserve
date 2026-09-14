@@ -124,25 +124,26 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 			w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(v.retryAfter.Seconds()))))
 			return respondJSON(w, http.StatusTooManyRequests, map[string]string{
 				"error": "too many failed deploy authentications from this address; retry later",
-			})
+			}, nil)
 		}
 		return respondJSON(w, http.StatusUnauthorized, map[string]string{
 			"error": "invalid or missing deploy token (Authorization: Bearer <jwt>)",
-		})
+		}, nil)
 	}
 	h.limiter.clear(key)
 	if ma == nil {
-		return respondJSON(w, http.StatusNotFound, map[string]string{"error": fmt.Sprintf("unknown app %q", name)})
+		return respondJSON(w, http.StatusNotFound, map[string]string{"error": fmt.Sprintf("unknown app %q", name)}, nil)
 	}
 
 	switch r.Method {
 	case http.MethodGet:
-		return respondJSON(w, http.StatusOK, ma.status())
+		s := ma.status()
+		return respondJSON(w, http.StatusOK, s, ma.redactorFor(s))
 	case http.MethodPost:
 		return h.deploy(w, r, ma, who)
 	default:
 		w.Header().Set("Allow", "GET, POST")
-		return respondJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return respondJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"}, nil)
 	}
 }
 
@@ -169,15 +170,15 @@ func (h *Handler) deployURL(w http.ResponseWriter, r *http.Request, ma *managedA
 	// would surface as a misleading "invalid JSON" 400.
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxPayloadBytes+1))
 	if err != nil {
-		return respondJSON(w, http.StatusBadRequest, map[string]string{"error": "reading body: " + err.Error()})
+		return respondJSON(w, http.StatusBadRequest, map[string]string{"error": "reading body: " + err.Error()}, ma.redactorFor(statusSnapshot{}))
 	}
 	if len(body) > maxPayloadBytes {
 		return respondJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
-			"error": fmt.Sprintf("payload exceeds %d bytes", maxPayloadBytes)})
+			"error": fmt.Sprintf("payload exceeds %d bytes", maxPayloadBytes)}, ma.redactorFor(statusSnapshot{}))
 	}
 	p, status, msg := parseDeployPayload(body)
 	if status != 0 {
-		return respondJSON(w, status, map[string]string{"error": msg})
+		return respondJSON(w, status, map[string]string{"error": msg}, ma.redactorFor(statusSnapshot{}))
 	}
 	return h.runDeploy(w, r, ma, p.request(), by)
 }
@@ -214,7 +215,7 @@ func parseDeployPayload(body []byte) (p deployPayload, status int, msg string) {
 func (h *Handler) deployPush(w http.ResponseWriter, r *http.Request, ma *managedApp, by string) error {
 	version := r.URL.Query().Get("version")
 	if !validVersion(version) {
-		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("version query param must match %s", versionRe)})
+		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("version query param must match %s", versionRe)}, ma.redactorFor(statusSnapshot{}))
 	}
 	// Acquire the per-app deploy lock BEFORE staging the upload: a
 	// concurrent push then gets an immediate 409 instead of streaming a
@@ -234,14 +235,14 @@ func (h *Handler) deployPush(w http.ResponseWriter, r *http.Request, ma *managed
 	switch {
 	case errors.Is(err, errArtifactTooLarge):
 		return respondJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
-			"error": fmt.Sprintf("uploaded artifact exceeds max_artifact_size (%d bytes)", spec.maxArtifactSize)})
+			"error": fmt.Sprintf("uploaded artifact exceeds max_artifact_size (%d bytes)", spec.maxArtifactSize)}, ma.redactorFor(statusSnapshot{}))
 	case errors.As(err, &stgErr):
 		// A local filesystem failure (mkdir/create/write/close, e.g. a
 		// full disk) is a server error, like a failed URL download.
-		return respondJSON(w, http.StatusInternalServerError, map[string]string{"error": "staging upload: " + err.Error()})
+		return respondJSON(w, http.StatusInternalServerError, map[string]string{"error": "staging upload: " + err.Error()}, ma.redactorFor(statusSnapshot{}))
 	case err != nil:
 		// Otherwise the body read itself failed — a bad request.
-		return respondJSON(w, http.StatusBadRequest, map[string]string{"error": "reading upload: " + err.Error()})
+		return respondJSON(w, http.StatusBadRequest, map[string]string{"error": "reading upload: " + err.Error()}, ma.redactorFor(statusSnapshot{}))
 	}
 	// Backstop cleanup: fetch removes the archive once it extracts it,
 	// but if the pipeline returns before fetch it would leak.
@@ -255,7 +256,7 @@ func (h *Handler) deployPush(w http.ResponseWriter, r *http.Request, ma *managed
 func (h *Handler) deployRollback(w http.ResponseWriter, r *http.Request, ma *managedApp, by string) error {
 	version := r.URL.Query().Get("rollback")
 	if !validVersion(version) {
-		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("rollback version must match %s", versionRe)})
+		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("rollback version must match %s", versionRe)}, ma.redactorFor(statusSnapshot{}))
 	}
 	return h.runDeploy(w, r, ma, deployRequest{version: version, rollback: true}, by)
 }
@@ -277,14 +278,15 @@ func (h *Handler) logDeployAuthorized(r *http.Request, ma *managedApp, req deplo
 // mapDeployResult turns a pipeline outcome into the webhook response.
 func (h *Handler) mapDeployResult(w http.ResponseWriter, ma *managedApp, err error) error {
 	status := ma.status()
+	rd := ma.redactorFor(status)
 	var vErr validationError
 	switch {
 	case err == nil:
-		return respondJSON(w, http.StatusOK, status)
+		return respondJSON(w, http.StatusOK, status, rd)
 	case errors.Is(err, errDeployInProgress):
-		return respondJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		return respondJSON(w, http.StatusConflict, map[string]string{"error": err.Error()}, rd)
 	case errors.As(err, &vErr):
-		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()}, rd)
 	case errors.Is(err, context.Canceled):
 		// The client hung up mid-deploy; nobody is reading this.
 		return nil
@@ -292,7 +294,7 @@ func (h *Handler) mapDeployResult(w http.ResponseWriter, ma *managedApp, err err
 		return respondJSON(w, http.StatusInternalServerError, map[string]any{
 			"error":  err.Error(),
 			"status": status, // shows the old version still serving
-		})
+		}, rd)
 	}
 }
 
@@ -374,10 +376,21 @@ func stageUpload(body io.Reader, tmpDir string, maxBytes int64) (string, error) 
 	return path, nil
 }
 
-func respondJSON(w http.ResponseWriter, code int, v any) error {
+// respondJSON writes every body the webhook sends, through the
+// response filter (redact.go). r is the app's filter — every site
+// with the app in scope passes ma.redactorFor — and nil only for the
+// bodies written before an app is known (401, 429, 404), where the
+// shape and entropy layers still apply. When a known secret was found
+// the object gains a `redacted_env` field naming the keys.
+func respondJSON(w http.ResponseWriter, code int, v any, r *redactor) error {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	return json.NewEncoder(w).Encode(v)
+	_, err = w.Write(append([]byte(r.redactJSON(raw)), '\n'))
+	return err
 }
 
 // Interface guards.

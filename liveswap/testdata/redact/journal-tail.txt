@@ -1,0 +1,11 @@
+migrate: schema v1 -> v2 in /var/lib/liveswap/example/shared/app.db
+listening on /var/lib/liveswap/example/run/0a1b2c3d0a1b2c3d/app.sock
+config: DATABASE_URL=postgres://app:s3cr3t-pw-value@db/app
+config: API_KEY=zK9dQ2mX8pL0vT7wR4nY6bH1 (base64 eks5ZFEybVg4cEwwdlQ3d1I0blk2Ykgx)
+warn: token eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJyZXBvOnNtYWxsaG91cnNvcmcvZXhhbXBsZSJ9.c2lnbmF0dXJlX2hlcmVfMTIzNDU2Nzg5MA rejected by upstream
+error: Invalid HTTP_HOST header: 'localhost'. You may need to add 'localhost' to ALLOWED_HOSTS.
+  at handleRequest (file:///var/lib/liveswap/example/releases/dx2/main.ts:42:11)
+  at ext:deno_http/00_serve.ts:511:19
+fetch https://api.github.com/repos/smallhoursorg/example/releases/assets/12345 -> 404
+session id 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08 expired
+2026-09-14T07:15:33Z exited with status 3

@@ -1,0 +1,12 @@
+# what a reader needs from a failed-deploy body
+health gate: not healthy within deadline 5m: health check returned 503
+"current_version":"dx1"
+"version":"dx2"
+"phase":"soaking"
+/var/lib/liveswap/example/run/0a1b2c3d0a1b2c3d/app.sock
+hotserve-example.dx1.0a1b2c3d0a1b2c3d.service
+--allow-env=SOCKET,APP_VERSION,DATA_DIR
+"deployed_by":"repo:smallhoursorg/example:ref:refs/heads/main"
+"started_at":"2026-09-14T07:15:33.123456789Z"
+"available_versions":["dx2","dx1"]
+"artifact_bytes":45112233
