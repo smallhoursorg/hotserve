@@ -172,6 +172,17 @@ type phaseTiming struct {
 	Seconds   float64   `json:"seconds"`
 }
 
+// The outcome vocabulary: what a deploy's status and phase may say.
+// A record's status is one of these and its phase one of these or
+// absent (recordHead, deploys.go); the response filter holds the
+// words out of every layer where they stand as an outcome (redact.go,
+// rule 3), so they carry nothing of the app's and nothing rewrites
+// them.
+var (
+	outcomeStatuses = map[string]bool{"succeeded": true, "failed": true}
+	outcomePhases   = map[string]bool{"downloading": true, "extracting": true, "preparing": true, "starting": true, "soaking": true, "promoting": true, "draining": true, "stopping_old": true}
+)
+
 // deployDetail is the app's side of a failed deploy. Every string in
 // it passes the response filter before it is written (redact.go).
 type deployDetail struct {
@@ -341,25 +352,18 @@ func (ma *managedApp) redactorFor(s statusSnapshot) *redactor {
 	}
 	kvs := append([]string(nil), ma.secrets...)
 	ma.secretsMu.Unlock()
-	// Safe strings are names, not secrets, and come in two kinds. The
-	// version the last deploy's request named is safe as given. Names
-	// read off the filesystem — the running version (state.json after
-	// a restart), release directories, record files, a version a
-	// request asks a record of — are safe only when they are not a
-	// known value: a safe string equal to one would exempt it from the
-	// filter (newRedactor), and a name on disk is not something a
-	// request vouched for (deploys.go, the record store's rules).
-	safe := []string{ma.name}
+	// Safe strings are names: the app's, every version the status
+	// names — the running one, the last deploy's, the releases on
+	// disk, the recorded ones — and the app's dirs. Whoever named one,
+	// it exempts nothing: a safe string equal to a known value is
+	// dropped by newRedactor (redact.go, rule 1).
+	safe := append([]string{ma.name, s.CurrentVersion}, s.AvailableVersions...)
 	if s.LastDeploy != nil {
 		safe = append(safe, s.LastDeploy.Version)
 	}
-	// The running version is from state.json after a restart, a file
-	// like the others: under the same rule.
-	fromDisk := append([]string{s.CurrentVersion}, s.AvailableVersions...)
 	for _, d := range s.Deploys {
-		fromDisk = append(fromDisk, d.Version)
+		safe = append(safe, d.Version)
 	}
-	safe = append(safe, namesNotValues(kvs, fromDisk)...)
 	if spec != nil {
 		safe = append(safe, spec.dirs.root, spec.dirs.app, spec.dirs.releases, spec.dirs.shared, spec.dirs.run)
 	}
@@ -371,27 +375,6 @@ func (ma *managedApp) redactorFor(s statusSnapshot) *redactor {
 		r.withhold = "the app's env_file could not be read, so its values are unknown to the filter (" + unread.Error() + ")"
 	}
 	return r
-}
-
-// namesNotValues is names with any that equals a known env value left
-// out: a name read off the filesystem — a record's, a release
-// directory's — is not something the deployer's POST vouched for, and
-// a safe string equal to a known value would exempt that value from
-// the filter (newRedactor).
-func namesNotValues(kvs, names []string) []string {
-	known := make(map[string]bool, len(kvs))
-	for _, kv := range kvs {
-		if _, v, ok := strings.Cut(kv, "="); ok {
-			known[v] = true
-		}
-	}
-	var out []string
-	for _, n := range names {
-		if !known[n] {
-			out = append(out, n)
-		}
-	}
-	return out
 }
 
 // mergeSecrets appends the pairs not already present.
@@ -948,6 +931,14 @@ func (ma *managedApp) ensureRunning() error {
 			return &transientRecoveryError{errSweepUnconfirmed}
 		}
 		return nil
+	}
+	// state.json is ours, but it is a file: the version it names
+	// becomes a path component, an argument, an environment value,
+	// so one that is not a version is used for nothing — not even to
+	// look for its release. Corrupt state, like the rest: never
+	// silently reset (redact.go, rule 4).
+	if !validVersion(st.CurrentVersion) {
+		return &permanentRecoveryError{fmt.Errorf("state names version %q, which is not a version", st.CurrentVersion)}
 	}
 	releaseDir := spec.dirs.release(st.CurrentVersion)
 	if _, err := os.Stat(releaseDir); err != nil {

@@ -73,8 +73,8 @@ var _ stateStore = (*fileStateStore)(nil)
 // listReleases returns the on-disk release versions, newest-first, so
 // the status endpoint can tell an operator what is available to roll
 // back to. Best-effort: a read error yields nil and status still
-// renders. Same enumeration rules as gcReleases (skip dotfiles and
-// staging dirs).
+// renders. A release is a directory named as a version, nothing else
+// (gcReleases enumerates more loosely: it also removes orphans).
 func listReleases(releasesDir string) []string {
 	entries, err := os.ReadDir(releasesDir)
 	if err != nil {
@@ -86,7 +86,11 @@ func listReleases(releasesDir string) []string {
 	}
 	var rels []rel
 	for _, e := range entries {
-		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+		// A directory whose name is not a version is not a release:
+		// nothing could deploy it, roll back to it, or record it
+		// (redact.go, rule 4). Dotfiles and staging dirs are among
+		// what the alphabet refuses.
+		if !e.IsDir() || !validVersion(e.Name()) {
 			continue
 		}
 		info, err := e.Info()

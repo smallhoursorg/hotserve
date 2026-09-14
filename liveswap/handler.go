@@ -291,9 +291,9 @@ func (h *Handler) deployRecord(w http.ResponseWriter, ma *managedApp, version st
 	rec, err := readDeployRecord(c.spec.dirs, version)
 	// The requested version is a name the filter should let through,
 	// whether or not the status still lists it by the time it is
-	// built (a prune, a reload between the read and the response) —
-	// as a name from outside, under the same rule as a recorded one:
-	// never when it equals a known value (redactorFor).
+	// built (a prune, a reload between the read and the response): a
+	// safe string like the versions the status names, under the same
+	// rule (redactorFor).
 	s := ma.status()
 	s.Deploys = append(s.Deploys, deploySummary{Version: version})
 	switch {
@@ -302,13 +302,9 @@ func (h *Handler) deployRecord(w http.ResponseWriter, ma *managedApp, version st
 	case err != nil:
 		return respondJSON(w, http.StatusInternalServerError, map[string]string{"error": "reading deploy record: " + err.Error()}, ma.redactorFor(s))
 	}
-	// Through the live filter like every body, then the outcome words
-	// put back (deploys.go, rule 3): the record's own status and
-	// phase, which recordHead has already required to be vocabulary,
-	// or nothing — a word equal to a known value must not read as
-	// redacted.
-	head, _ := recordHead(rec, versionPathComponent(version)+".json")
-	return respondFiltered(w, http.StatusOK, restoreVocabulary(ma.redactorFor(s).redactJSON(rec), head.Status, head.Phase))
+	// Through the live filter like every body; its outcome words
+	// stand outside the filter there (redact.go, rule 3).
+	return respondFiltered(w, http.StatusOK, ma.redactorFor(s).redactJSON(rec))
 }
 
 // runDeploy records the authorizing source, runs the pipeline, and maps

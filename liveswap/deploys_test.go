@@ -548,11 +548,70 @@ func TestDeployRecordOutcomeSurvivesAVocabularySecret(t *testing.T) {
 	if len(d) != 2 || d[0].Status != "failed" || d[0].Phase != "preparing" || d[1].Status != "succeeded" {
 		t.Fatalf("summaries = %+v", d)
 	}
-	// Read back through the live filter: the words are put back there
-	// too, and other text is still filtered.
-	served := restoreVocabulary(rig.ma.redactorFor(rig.ma.status()).redactJSON(rec), "failed", "preparing")
-	if !strings.Contains(served, `"status":"failed"`) || !strings.Contains(served, `"phase":"preparing"`) {
+	// Read back through the live filter: the words stand outside it
+	// there too, and the same word as text does not.
+	served := rig.ma.redactorFor(rig.ma.status()).redactJSON(rec)
+	if !strings.Contains(served, `"status":"failed"`) || !strings.Contains(served, `"phase":"preparing"`) || !strings.Contains(served, `"name":"preparing"`) {
 		t.Fatalf("outcome rewritten when served: %s", served)
+	}
+	rec = []byte(`{"version":"v2","status":"failed","phase":"preparing","error":"preparing: migrate failed"}`)
+	if served := rig.ma.redactorFor(rig.ma.status()).redactJSON(rec); !strings.Contains(served, `"error":"[redacted:STEP]: migrate failed"`) {
+		t.Fatalf("a vocabulary word as text was not filtered: %s", served)
+	}
+}
+
+// A version named exactly as an env_file value is redacted like the
+// value (redact.go, rule 1), so its record could not name itself: it
+// is written as the envelope, which says why, and is listed and served
+// like any record — with the version redacted where the filter sees it.
+func TestDeployRecordOfAVersionEqualToAValueIsAnEnvelope(t *testing.T) {
+	rig := newTestRig(t)
+	rig.ma.rememberSecrets("/etc/app.env", []string{"RELEASE=2026.09.14"})
+	rig.runner.startErr = errors.New("boom")
+	if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://example.test/r.tgz", version: "2026.09.14", by: "test"}); err == nil {
+		t.Fatal("the deploy should have failed")
+	}
+	rec, err := readDeployRecord(rig.spec.dirs, "2026.09.14")
+	must(t, err)
+	if s := string(rec); !strings.Contains(s, `"version":"2026.09.14"`) || !strings.Contains(s, "record withheld: the version equals an env_file value") || strings.Contains(s, "boom") {
+		t.Fatalf("record = %s", s)
+	}
+	if d := rig.ma.status().Deploys; len(d) != 1 || d[0].Version != "2026.09.14" || d[0].Status != "failed" {
+		t.Fatalf("deploys = %+v", d)
+	}
+	if served := rig.ma.redactorFor(rig.ma.status()).redactJSON(rec); strings.Contains(served, "2026.09.14") || !strings.Contains(served, `"version":"[redacted:RELEASE]"`) {
+		t.Fatalf("served = %s", served)
+	}
+}
+
+// A version equal to a value too short to be a secret is redacted
+// nowhere, and its record is a record, not the envelope.
+func TestDeployRecordOfAVersionEqualToAShortValueIsWhole(t *testing.T) {
+	rig := newTestRig(t)
+	rig.ma.rememberSecrets("/etc/app.env", []string{"VERSION=v7"})
+	rig.runner.startErr = errors.New("boom")
+	if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://example.test/v7.tgz", version: "v7", by: "test"}); err == nil {
+		t.Fatal("the deploy should have failed")
+	}
+	rec, err := readDeployRecord(rig.spec.dirs, "v7")
+	must(t, err)
+	if s := string(rec); !strings.Contains(s, `"version":"v7"`) || !strings.Contains(s, "boom") || strings.Contains(s, "record withheld") {
+		t.Fatalf("record = %s", s)
+	}
+}
+
+// A record's times are carried into the status body as the record has
+// them, so they must be strings: a planted record whose time is an
+// object is not a record (rule 1), or it could put structure of its
+// own choosing into every status response.
+func TestDeployRecordTimesMustBeStrings(t *testing.T) {
+	d := newAppDirs(t.TempDir(), "demo")
+	must(t, writeDeployRecord(d, "v1", []byte(`{"version":"v1","status":"succeeded","started_at":{"name":"succeeded"},"finished_at":"2026-09-14T00:00:00Z"}`)))
+	must(t, writeDeployRecord(d, "v2", []byte(`{"version":"v2","status":"succeeded","finished_at":["x"]}`)))
+	must(t, writeDeployRecord(d, "v3", []byte(`{"version":"v3","status":"succeeded","finished_at":"[redacted:STAMP]"}`)))
+	must(t, writeDeployRecord(d, "v4", []byte(`{"version":"v4","status":"succeeded","started_at":null}`)))
+	if got := listDeploySummaries(d); len(got) != 1 || got[0].Version != "v3" {
+		t.Fatalf("summaries = %+v", got)
 	}
 }
 

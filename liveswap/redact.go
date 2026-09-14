@@ -33,13 +33,13 @@ import (
 //     its own in the same forms. Replaced with [redacted:KEY]. Inline
 //     `env` values are not secrets by policy (the Caddyfile is in a
 //     repo) and are not redacted; SOCKET, HOME and the inherited PATH
-//     are paths a diagnostic needs. A value equal to something on the
-//     safe list (a version, one of the app's own paths) is not a
-//     secret either, whatever file it came from.
+//     are paths a diagnostic needs.
 //  2. A safe list — the versions the status names, the app's dirs —
 //     exempt from the heuristics below, so a 40-character git SHA used
 //     as a version survives. Each entry is also split the way layer 4
 //     tokenises, so a dotted version's generated segment is safe too.
+//     Never from layer 1: a safe string equal to a known value is not
+//     safe (rule 1 below).
 //  3. Shape rules: credentials with a recognisable form (JWTs, bearer
 //     tokens, URL userinfo and query strings, provider key prefixes,
 //     PEM private keys, password=… assignments).
@@ -52,6 +52,39 @@ import (
 // Best effort past layer 1, and documented as such in
 // DESIGN-threat-model.md: an encoding not in the list, a value under
 // secretMinLen, a secret split across lines, all pass.
+//
+// Four rules hold across the layers and every writer of a body, and
+// the code is judged against them, not the other way round:
+//
+//  1. No safe string ever equals a known value. A safe string exempts
+//     nothing from layer 1: one equal to an env_file value is dropped
+//     in newRedactor, whatever named it — a request, the config, a
+//     name read off disk — so provenance is never tracked, and every
+//     caller passes a plain list (redactorFor, recordRedactor).
+//  2. The final known-value pass is the last write to a body. What
+//     redactJSON adds after it cannot carry the app's bytes: the
+//     redacted_env field (a fixed name, key names filtered, and the
+//     strings the filtered body already held). The stream's spliced
+//     event, phase and http_status fields (handler.go) are constants
+//     and a phase word. Nothing else appends to a body after that
+//     pass.
+//  3. The outcome vocabulary is structural, never textual. A pair
+//     "status":"<word>", "phase":"<word>" or "name":"<word>", the
+//     word one of the deploy vocabulary (app.go), is the one place
+//     layer 1 leaves a known form standing: a form that is a bare
+//     word of the vocabulary (a value, or a URL value's password,
+//     spelled as one) is replaced everywhere but in such a pair
+//     (secretForm.outside) — and a word carries nothing of the
+//     app's. Every other form is replaced wherever it is, and a body
+//     with fewer pairs at the end than it had (a value that is part
+//     of a word was replaced inside it) is withheld (filterBody).
+//     The same word in error or detail is text like any other, and
+//     filtered.
+//  4. A version read off disk passes validVersion before it is used
+//     as one — launched, listed, offered, recorded: state.json's
+//     current_version (ensureRunning), a release directory's name
+//     (listReleases), a record's (recordHead). Release GC enumerates
+//     directory entries by name; that is not a use of a version.
 const (
 	secretMinLen  = 8
 	entropyMinLen = 20
@@ -65,11 +98,10 @@ type redactor struct {
 	// secrets holds every form of every known value, longest first so
 	// a value that contains another is replaced whole.
 	secrets []*secretForm
-	// safeExact is the safe strings as given: an env_file value equal
-	// to one is not a secret. safeTokens is those strings and every
-	// layer-4 token inside them: exempt from the entropy heuristic.
-	// Kept apart, or a dotted version would make its SHA segment a
-	// non-secret for an env_file value equal to that segment.
+	// safeExact is the safe strings as given, none equal to a known
+	// value (rule 1): held out of the heuristics as spans. safeTokens
+	// is those strings and every layer-4 token inside them: exempt
+	// from the entropy heuristic.
 	safeExact, safeTokens map[string]bool
 	// withhold, when set, is why no body may be sent: the app's
 	// env_file could not be read, so its values are unknown to the
@@ -82,18 +114,30 @@ type redactor struct {
 // it — chosen so that no form of those keys' values is a substring of
 // it, or the replacement would put the value back.
 type secretForm struct {
-	text   string
-	keys   []string
-	marker string
+	text string
+	// outside, for a text that is a bare word of the outcome
+	// vocabulary, matches the text everywhere but where it stands as
+	// an outcome (rule 3): the word where it is a pair's, or on its
+	// own. Nil for every other form.
+	outside *regexp.Regexp
+	keys    []string
+	marker  string
 }
 
 // newRedactor takes env_file KEY=VALUE pairs and the strings that must
-// survive the heuristics. A nil *redactor is usable: layers 3 and 4
-// only.
+// survive the heuristics. A safe string equal to a value is dropped
+// (rule 1): whoever named it, it exempts nothing. A nil *redactor is
+// usable: layers 3 and 4 only.
 func newRedactor(envFile []string, safe []string) *redactor {
+	known := make(map[string]bool, len(envFile))
+	for _, kv := range envFile {
+		if _, value, ok := strings.Cut(kv, "="); ok {
+			known[value] = true
+		}
+	}
 	r := &redactor{safeExact: make(map[string]bool, len(safe)), safeTokens: make(map[string]bool, len(safe))}
 	for _, s := range safe {
-		if s == "" {
+		if s == "" || known[s] {
 			continue
 		}
 		r.safeExact[s] = true
@@ -105,7 +149,7 @@ func newRedactor(envFile []string, safe []string) *redactor {
 	byText := map[string]*secretForm{}
 	for _, kv := range envFile {
 		key, value, ok := strings.Cut(kv, "=")
-		if !ok || len(value) < secretMinLen || r.safeExact[value] {
+		if !ok || len(value) < secretMinLen {
 			continue
 		}
 		forms := secretForms(value)
@@ -120,7 +164,7 @@ func newRedactor(envFile []string, safe []string) *redactor {
 			}
 			sf := byText[form]
 			if sf == nil {
-				sf = &secretForm{text: form}
+				sf = &secretForm{text: form, outside: outcomeOutside[form]}
 				byText[form] = sf
 				r.secrets = append(r.secrets, sf)
 			}
@@ -274,8 +318,10 @@ var basicCredentialRe = regexp.MustCompile(`(?i)\bbasic[ \t]+[A-Za-z0-9+/]{4,}={
 var entropyTokenRe = regexp.MustCompile(`[A-Za-z0-9+=_-]{20,}`)
 
 // replaceKnown is layer 1 on its own: every known form replaced by its
-// marker, and the keys found added to seen. Markers contain no form,
-// so a second pass over its own output changes nothing.
+// marker, and the keys found added to seen. A form that is a bare
+// word of the outcome vocabulary is replaced everywhere but where it
+// stands as an outcome (rule 3). Markers contain no form, so a second
+// pass over its own output changes nothing.
 func (r *redactor) replaceKnown(s string, seen map[string]bool) string {
 	if r == nil {
 		return s
@@ -284,7 +330,22 @@ func (r *redactor) replaceKnown(s string, seen map[string]bool) string {
 		if !strings.Contains(s, sec.text) {
 			continue
 		}
-		s = strings.ReplaceAll(s, sec.text, sec.marker)
+		found := true
+		if sec.outside == nil {
+			s = strings.ReplaceAll(s, sec.text, sec.marker)
+		} else {
+			found = false
+			s = sec.outside.ReplaceAllStringFunc(s, func(m string) string {
+				if m[0] == '"' { // the pair, left as it is
+					return m
+				}
+				found = true
+				return sec.marker
+			})
+		}
+		if !found {
+			continue
+		}
 		for _, k := range sec.keys {
 			seen[k] = true
 		}
@@ -316,7 +377,10 @@ func reportedKeys(seen map[string]bool) []string {
 // redact filters s and reports which env keys' values it found. Layer
 // 1 runs first and again last: the heuristic layers' own marker text
 // ("[redacted:private-key]") can contain a known value, and only a
-// pass over the finished text guarantees none remains.
+// pass over the finished text guarantees none remains. Rule 3 holds
+// here as in a body: a value that is a word of the outcome vocabulary
+// stands where the text spells it as an outcome pair. Every body goes
+// through redactJSON; this is the text form, for tests.
 func (r *redactor) redact(s string) (string, []string) {
 	seen := map[string]bool{}
 	s = r.filter(s, seen)
@@ -440,13 +504,10 @@ func (r *redactor) redactJSON(raw []byte) string {
 		if !json.Valid([]byte(body)) {
 			body = `{"error":"response withheld: the app's env_file could not be read"}`
 		}
+		body = r.replaceKnown(body, seen)
 	} else {
-		body = r.filter(string(raw), seen)
-		if !json.Valid([]byte(body)) {
-			body = `{"error":"response withheld: a redacted value overlapped the response's own structure"}`
-		}
+		body = r.filterBody(string(raw), seen)
 	}
-	body = r.replaceKnown(body, seen)
 	if len(seen) > 0 {
 		names := reportedKeys(seen)
 		for i, n := range names {
@@ -460,14 +521,65 @@ func (r *redactor) redactJSON(raw []byte) string {
 	return body
 }
 
-// withField sets a string-array field on a JSON object body; anything
-// else (an array, a scalar) is returned as it is.
+// filterBody is the layers over a body as marshalled, then the final
+// pass; what it returns is the bytes written, or a withheld body when
+// a known value overlapped the body's structure or one of its
+// outcomes.
+func (r *redactor) filterBody(raw string, seen map[string]bool) string {
+	outcomes := len(outcomePairRe.FindAllStringIndex(raw, -1))
+	body := r.filter(raw, seen)
+	if !json.Valid([]byte(body)) {
+		return r.replaceKnown(`{"error":"response withheld: a redacted value overlapped the response's own structure"}`, seen)
+	}
+	body = r.replaceKnown(body, seen)
+	// Every outcome the body had is still a word (rule 3), or the body
+	// is withheld: a value that is part of a word ("ucceeded") was
+	// replaced inside it, and a body whose status is not a word of the
+	// vocabulary is not served. No layer writes a quote it did not
+	// find, and none moves one next to an outcome key, so nothing can
+	// make a pair; the count can only fall.
+	if len(outcomePairRe.FindAllStringIndex(body, -1)) < outcomes {
+		return r.replaceKnown(`{"error":"response withheld: a redacted value overlapped the response's own outcome"}`, seen)
+	}
+	return body
+}
+
+// outcomePairRe is a status, phase or phase name standing as one: a
+// quoted key, a colon, a quoted word of the vocabulary.
+var outcomePairRe = regexp.MustCompile(`"(?:status|phase|name)":"(?:` + outcomeAlternation() + `)"`)
+
+// outcomeOutside is, per word of the vocabulary, the pattern that
+// matches it everywhere but where it stands as an outcome
+// (secretForm.outside): compiled once here, from the vocabulary's own
+// constants, never from a value.
+var outcomeOutside = func() map[string]*regexp.Regexp {
+	m := make(map[string]*regexp.Regexp, len(outcomeStatuses)+len(outcomePhases))
+	for _, w := range strings.Split(outcomeAlternation(), "|") {
+		m[w] = regexp.MustCompile(`"(?:status|phase|name)":"` + w + `"|` + w)
+	}
+	return m
+}()
+
+// outcomeAlternation is the vocabulary as a pattern.
+func outcomeAlternation() string {
+	words := make([]string, 0, len(outcomeStatuses)+len(outcomePhases))
+	for w := range outcomeStatuses {
+		words = append(words, regexp.QuoteMeta(w))
+	}
+	for w := range outcomePhases {
+		words = append(words, regexp.QuoteMeta(w))
+	}
+	sort.Strings(words)
+	return strings.Join(words, "|")
+}
+
 // withField sets a string-array field on a JSON object body, merged
 // with any array the body already holds under that name. The body is
 // the filter's output: an existing array there — a stored record's
 // own redacted_env, read back — has been through every layer as body
 // text, so its entries are kept, never replaced, and nothing that
-// did not pass the filter is added. The final pass runs before this.
+// did not pass the filter is added. The final pass runs before this
+// (rule 2). Anything but an object is returned as it is.
 func withField(body, name string, values []string) string {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(body), &obj); err != nil || obj == nil {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1460,6 +1461,29 @@ func TestRecoverRetriesTransientErrorsUntilReattached(t *testing.T) {
 	}
 	if rig.runner.sweepCount() != 1 || rig.runner.sweeps[0] != rig.runner.handleAt(0) {
 		t.Fatal("recovery must sweep stray units, keeping the adopted one")
+	}
+}
+
+// Rule 4 (redact.go): the version state.json names becomes a path
+// component, an argument and an environment value, so one that is not
+// a version is refused before anything is looked up or launched — a
+// permanent error, like corrupt state, never a silent reset — even
+// with a release directory of that name planted for it to find.
+func TestEnsureRunningRefusesAPlantedVersion(t *testing.T) {
+	for _, bad := range []string{"../../etc", "a/b", "v1\n", strings.Repeat("v", 65), ".hidden", "v 1"} {
+		t.Run(strconv.Quote(bad), func(t *testing.T) {
+			rig := newTestRig(t)
+			rig.store.state = appState{CurrentVersion: bad, Nonce: recordedNonce, Handle: handleState{Unit: "hotserve-demo.v7.0a1b2c3d0a1b2c3d.service"}}
+			rig.store.ok = true
+			must(t, os.MkdirAll(rig.spec.dirs.release(bad), 0o755))
+			err := rig.ma.ensureRunning()
+			if err == nil || transientRecovery(err) {
+				t.Fatalf("a planted version must be a permanent recovery error, got %v", err)
+			}
+			if rig.runner.startCount() != 0 || len(rig.runner.reattachSeen) != 0 {
+				t.Fatalf("a planted version reached the runner: starts=%d reattach=%+v", rig.runner.startCount(), rig.runner.reattachSeen)
+			}
+		})
 	}
 }
 
