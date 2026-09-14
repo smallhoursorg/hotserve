@@ -282,9 +282,11 @@ func (h *Handler) deployRecord(w http.ResponseWriter, ma *managedApp, version st
 		return respondJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "app has no configuration loaded"}, ma.redactorFor(statusSnapshot{}))
 	}
 	rec, err := readDeployRecord(c.spec.dirs, version)
-	// The requested version is a name the filter must let through,
+	// The requested version is a name the filter should let through,
 	// whether or not the status still lists it by the time it is
-	// built (a prune, a reload between the read and the response).
+	// built (a prune, a reload between the read and the response) —
+	// as a name from outside, under the same rule as a recorded one:
+	// never when it equals a known value (redactorFor).
 	s := ma.status()
 	s.Deploys = append(s.Deploys, deploySummary{Version: version})
 	switch {
@@ -293,7 +295,7 @@ func (h *Handler) deployRecord(w http.ResponseWriter, ma *managedApp, version st
 	case err != nil:
 		return respondJSON(w, http.StatusInternalServerError, map[string]string{"error": "reading deploy record: " + err.Error()}, ma.redactorFor(s))
 	}
-	return respondJSON(w, http.StatusOK, rec, ma.redactorFor(s).keepingReported(rec))
+	return respondJSON(w, http.StatusOK, rec, ma.redactorFor(s))
 }
 
 // runDeploy records the authorizing source, runs the pipeline, and maps

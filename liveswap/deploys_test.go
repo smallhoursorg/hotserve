@@ -401,22 +401,41 @@ func TestDeployRecordFiltersACurrentValueBeforeAnyLaunch(t *testing.T) {
 
 // A known value that is a fragment of the record's own JSON makes the
 // filter withhold the whole body; the record is then an envelope that
-// still names the version and status, readable and listed.
+// still names the version and status, readable and listed — and made
+// only of values that cannot carry source data, so a second known
+// value that the result held (here the deployer label) is not in it.
 func TestDeployRecordSurvivesTheFiltersWholeBodyFallback(t *testing.T) {
 	rig := newTestRig(t)
-	rig.ma.rememberSecrets("/etc/app.env", []string{`WEIRD="status":"failed","error"`})
+	label := "local:/shared/deploy-2f7e9c1a4b.pub"
+	rig.ma.rememberSecrets("/etc/app.env", []string{`WEIRD="status":"failed","error"`, "LABEL=" + label})
 	rig.runner.startErr = errors.New("boom")
-	if err := deployOnceV1(t, rig); err == nil {
+	if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://example.test/v1.tgz", version: "v1", by: label}); err == nil {
 		t.Fatal("v1 should have failed")
 	}
 	rec, err := readDeployRecord(rig.spec.dirs, "v1")
 	if err != nil {
 		t.Fatalf("the record must be readable as v1's: %v", err)
 	}
-	if s := string(rec); !strings.Contains(s, `"version":"v1"`) || !strings.Contains(s, `"status":"failed"`) || !strings.Contains(s, "record withheld") || strings.Contains(s, "boom") {
+	if s := string(rec); !strings.Contains(s, `"version":"v1"`) || !strings.Contains(s, `"status":"failed"`) || !strings.Contains(s, "record withheld") || strings.Contains(s, "boom") || strings.Contains(s, label) {
 		t.Fatalf("envelope = %s", s)
 	}
 	if d := rig.ma.status().Deploys; len(d) != 1 || d[0].Version != "v1" || d[0].Status != "failed" {
 		t.Fatalf("deploys = %+v", d)
+	}
+}
+
+// A release directory named after a known value — off the filesystem,
+// like a record's name — does not exempt that value from the response
+// filter either.
+func TestAnOnDiskVersionEqualToAKnownValueIsStillRedacted(t *testing.T) {
+	rig := newTestRig(t)
+	secret := "q7Wm2xK9pL4vB8nR3tY6zH5c" // gitleaks:allow — a made-up value for this test
+	rig.ma.rememberSecrets("/etc/app.env", []string{"TOKEN=" + secret})
+	must(t, os.MkdirAll(rig.spec.dirs.release(secret), 0o755))
+	s := rig.ma.status()
+	raw, err := json.Marshal(s)
+	must(t, err)
+	if body := rig.ma.redactorFor(s).redactJSON(raw); strings.Contains(body, secret) || !strings.Contains(body, "[redacted:TOKEN]") {
+		t.Fatalf("a planted release name exempted the value: %s", body)
 	}
 }

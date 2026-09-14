@@ -21,29 +21,42 @@ import (
 // replaced it. The record of why v1.4.1 failed last Tuesday was gone
 // by Wednesday. Now every deploy writes its result to
 // <app>/deploys/<version>.json — the latest outcome of that version,
-// a rollback included — outside every app's sandbox view (beside
-// proxy/, never inside a release dir, which the app can write), and
-// GET /<app>?deploy=<version> reads it back.
+// a rollback included — and GET /<app>?deploy=<version> reads it
+// back; the status lists each recorded version's outcome.
 //
-// The file holds the result as the response filter left it (redact.go),
-// with the env_file values known at the time already replaced: a
-// secret rotated later is not in an old record for the new filter to
-// miss. Reading passes the filter again, as every body does.
+// The store is a trust boundary in both directions, and these are its
+// rules; every function here holds them, and the two filters
+// (redactorFor in app.go, recordRedactor below) hold the second.
 //
-// Records are pruned with the releases: one is kept for every version
-// still on disk, plus the newest `keep` others — failed deploys, whose
-// release is removed at once, and versions release GC has pruned — so
-// the directory is bounded by 2×keep whatever the deploy rate.
+//  1. A record is bytes hotserve wrote once, through the filter, into
+//     a directory it verified as its own. Anything read back is text
+//     from disk: it may be served only through the filter, and it is
+//     trusted for nothing else — not as a name, not as a retention
+//     slot — unless it proves itself a record: a regular file, under
+//     a valid version name, whose object names that version.
+//  2. Nothing from disk reaches a response or a filter's safe list
+//     except through the filter as body text, or as a name that is
+//     not a known env value (namesNotValues). Nothing is appended to
+//     a body after the filter's final pass (withField merges what
+//     the filtered body already reports; it adds nothing else).
+//  3. Whatever the filter does to a body, the record on disk names
+//     its version and status, from values that cannot carry source
+//     data: the version the deployer named, vocabulary, timestamps.
+//  4. The store never blocks a deploy or a status — a failure here is
+//     a warning, a missing store is an empty list — and never follows
+//     a link: the app dir was writable by the app before sandboxing
+//     existed, and a link planted then (`deploys -> ..`, a record name
+//     pointing elsewhere, an ancestor pointing at another app) is what
+//     the first use after an upgrade must not follow, as the bind
+//     sources' check says (resolveBindSources, sandbox.go).
 //
-// Nothing here follows a symlink. The app dir was writable by the app
-// before sandboxing existed, and a link planted then — `deploys ->
-// ..` so that a version named "state" rewrites state.json, a record
-// name pointing at another file to be served or to forge a summary —
-// is exactly what the first use after an upgrade must not follow, as
-// resolveBindSources (sandbox.go) says of the bind sources. The
-// directory must be a directory, a record must be a regular file, a
-// temp file is created fresh under a random name, and a summary's
-// version must be the name it was read from.
+// The file holds the result as the record filter left it, with the
+// env_file values known at the time already replaced: a secret rotated
+// later is not in an old record for the new filter to miss. Records
+// are pruned with the releases: one is kept for every version still on
+// disk, plus the newest `keep` others — failed deploys, whose release
+// is removed at once, and versions release GC has pruned — so the
+// directory is bounded by 2×keep whatever the deploy rate.
 
 // deploySummary is a record's outcome as the status lists it. The
 // times are carried as the record has them, not parsed: a record is
@@ -77,16 +90,17 @@ func (ma *managedApp) recordDeploy(c collaborators, result deployResult) {
 	// The filter's whole-body fallback — a known value that is a
 	// fragment of the record's own JSON — leaves an object with no
 	// version, which nothing could read back as this version's. The
-	// record is then an envelope that says so: the identity (the
-	// version the deployer named, the status vocabulary, the times)
-	// and why the rest is missing.
+	// record is then an envelope (rule 3): the version the deployer
+	// named, the status and phase vocabulary, the times, and why the
+	// rest is missing — nothing that could carry source data, so
+	// nothing the filter would have had to see.
 	var head struct {
 		Version string `json:"version"`
 	}
 	if json.Unmarshal([]byte(filtered), &head) != nil || head.Version != result.Version {
 		env, err := json.Marshal(map[string]any{
 			"version": result.Version, "status": result.Status, "phase": result.Phase,
-			"deployed_by": result.By, "started_at": result.StartedAt, "finished_at": result.FinishedAt,
+			"started_at": result.StartedAt, "finished_at": result.FinishedAt,
 			"error": "record withheld: a redacted value overlapped the record's own structure",
 		})
 		if err != nil {
@@ -128,14 +142,15 @@ func releaseNames(releasesDir string) ([]string, error) {
 }
 
 // recordRedactor is the filter a record is written through: the
-// deploy's own spec and the values the filter knows — every env_file
-// value seen at any launch, this deploy's included (rememberSecrets
-// ran before it launched) — with no withholding. The response filter
-// withholds while the *live* env_file cannot be read, because the
-// running app's values would be unknown; a record is about a deploy
-// that is over, and a reload to an unreadable env_file while it ran
-// must not turn its outcome into a placeholder that nothing can
-// recover once the file is fixed.
+// deploy's own spec and every value the filter knows — remembered at
+// any launch, and read from the deploy's own env_file now — with no
+// withholding. The response filter withholds while the *live*
+// env_file cannot be read, because the running app's values would be
+// unknown; a record is about a deploy that is over, and a reload to
+// an unreadable env_file while it ran must not turn its outcome into
+// a placeholder that nothing can recover once the file is fixed. Its
+// safe strings follow rule 2: the version the deployer named as
+// given, names off the filesystem only when not a known value.
 func (ma *managedApp) recordRedactor(c collaborators, result deployResult) *redactor {
 	ma.secretsMu.Lock()
 	kvs := append([]string(nil), ma.secrets...)
@@ -153,20 +168,18 @@ func (ma *managedApp) recordRedactor(c collaborators, result deployResult) *reda
 	safe := []string{ma.name, result.Version}
 	if c.spec != nil {
 		safe = append(safe, c.spec.dirs.root, c.spec.dirs.app, c.spec.dirs.releases, c.spec.dirs.shared, c.spec.dirs.run)
-		// Release names are read off the filesystem: one equal to a
-		// known value must not exempt it (namesNotValues).
 		safe = append(safe, namesNotValues(kvs, listReleases(c.spec.dirs.releases))...)
 	}
 	return newRedactor(kvs, safe)
 }
 
 // deploysDir makes sure the records directory is the directory it
-// names — created if absent, refused if a link or anything else
-// stands in its place, or if any ancestor is a link that lands it
-// elsewhere: `<root>/blog -> <root>/shop` would have blog's deploys
-// list, serve and prune shop's records. The check is the bind
-// sources' (resolveBindSources): canonical against canonical, with
-// an alias on the liveswap root itself the one difference allowed.
+// names (rule 4) — created if absent, refused if a link or anything
+// else stands in its place, or if any ancestor is a link that lands
+// it elsewhere: `<root>/blog -> <root>/shop` would have blog's
+// deploys list, serve and prune shop's records. The check is the bind
+// sources': canonical against canonical, with an alias on the
+// liveswap root itself the one difference allowed.
 func deploysDir(d appDirs) (string, error) {
 	rootC := d.root
 	if c, err := filepath.EvalSymlinks(d.root); err == nil {
@@ -235,11 +248,11 @@ func writeDeployRecord(d appDirs, version string, filtered []byte) (err error) {
 // result (an 8 KiB tail at most); anything larger is not one.
 const deployRecordMaxBytes = 1 << 20
 
-// openRecord opens a record without following a link and reads it
-// whole, refusing anything that is not a regular file of a record's
-// size; the modification time comes from the same open file as the
-// bytes, so a record replaced between two lookups cannot pair one
-// outcome with another's time.
+// openRecord opens a record without following a link (rule 4) and
+// reads it whole, refusing anything that is not a regular file of a
+// record's size; the modification time comes from the same open file
+// as the bytes, so a record replaced between two lookups cannot pair
+// one outcome with another's time.
 func openRecord(path string) ([]byte, time.Time, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0) //nolint:gosec // a path under the app's own deploys dir, built here
 	if err != nil {
@@ -284,9 +297,8 @@ func readDeployRecord(d appDirs, version string) (json.RawMessage, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The record must be an object naming the version it was asked
-	// for: a stale, planted or corrupted file under the name is not
-	// the version's record.
+	// Rule 1: an object naming the version it was asked for, or a
+	// stale, planted or corrupted file under the name — not a record.
 	var head struct {
 		Version string `json:"version"`
 	}
@@ -321,13 +333,11 @@ func listDeploySummaries(d appDirs) []deploySummary {
 			continue // a link, or not a record
 		}
 		var s deploySummary
-		// The version is the name the record was read from, or the
-		// record is not one of ours. (A file planted under a name equal
-		// to a secret's value would pass this; it is the response
-		// filter that never lets a recorded version equal to a known
-		// value into its safe list — redactorFor.)
+		// Rule 1: a valid version equal to the name it was read from,
+		// or it is not a record of ours. What its version then does in
+		// a response is rule 2's, in redactorFor.
 		if json.Unmarshal(b, &s) != nil || !validVersion(s.Version) || s.Version+".json" != e.Name() {
-			continue // a record the filter withheld whole, or a stray
+			continue
 		}
 		recs = append(recs, dated{s, written})
 	}
@@ -370,10 +380,10 @@ func pruneDeployRecords(dir string, keep int, onDisk []string, logger *zap.Logge
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") || disk[e.Name()] {
 			continue
 		}
-		// Only a record of ours holds a retention slot: a link, a file
-		// that is not JSON, or a version that is not its name would
-		// otherwise crowd out the records the slots are for. Such an
-		// entry is not ours to keep either; it goes.
+		// Rule 1 again: only a record of ours holds a retention slot —
+		// a link, a file that is not JSON, or a version that is not
+		// its name would otherwise crowd out the records the slots are
+		// for. Such an entry is not ours to keep either; it goes.
 		b, written, err := openRecord(filepath.Join(dir, e.Name()))
 		var head struct {
 			Version string `json:"version"`

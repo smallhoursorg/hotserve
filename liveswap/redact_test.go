@@ -359,26 +359,23 @@ func mustJSON(t *testing.T, s string) []byte {
 	return b[1 : len(b)-1]
 }
 
-// A body that already reports redacted keys — a stored record — keeps
-// them through a later pass, whether or not that pass redacts more.
-func TestKeepingReportedAddsToTheRecordsKeys(t *testing.T) {
+// A body that already reports redacted keys — a stored record read
+// back — keeps them through a later pass, whether or not that pass
+// redacts more: withField merges with what the filtered body holds.
+// An entry equal to a known value is body text like any other, and
+// comes out as its marker with the key it belongs to reported.
+func TestReportedKeysMergeWithTheBodys(t *testing.T) {
 	r := newRedactor([]string{"NEW=newvaluenewvalue1234"}, nil)
-	body := json.RawMessage(`{"error":"got newvaluenewvalue1234","redacted_env":["OLD"]}`)
-	if got := r.keepingReported(body).redactJSON(body); !strings.Contains(got, `"redacted_env":["NEW","OLD"]`) || strings.Contains(got, "newvaluenewvalue1234") {
+	if got := r.redactJSON([]byte(`{"error":"got newvaluenewvalue1234","redacted_env":["OLD"]}`)); !strings.Contains(got, `"redacted_env":["NEW","OLD"]`) || strings.Contains(got, "newvaluenewvalue1234") {
 		t.Fatalf("got %s", got)
 	}
-	quiet := json.RawMessage(`{"error":"nothing here","redacted_env":["OLD"]}`)
-	if got := r.keepingReported(quiet).redactJSON(quiet); !strings.Contains(got, `"redacted_env":["OLD"]`) {
+	if got := r.redactJSON([]byte(`{"error":"nothing here","redacted_env":["OLD"]}`)); !strings.Contains(got, `"redacted_env":["OLD"]`) {
 		t.Fatalf("a pass that redacts nothing must keep the keys: %s", got)
 	}
-	if got := r.redactJSON(quiet); !strings.Contains(got, `"redacted_env":["OLD"]`) {
-		t.Fatalf("without keepingReported the field is body text and passes as it was: %s", got)
-	}
-	// A planted entry equal to a known value is filtered like any
-	// text before it is carried forward, and the key it belongs to
-	// joins the keys reported.
-	planted := json.RawMessage(`{"version":"v1","redacted_env":["newvaluenewvalue1234"]}`)
-	if got := r.keepingReported(planted).redactJSON(planted); strings.Contains(got, "newvaluenewvalue1234") || !strings.Contains(got, `"redacted_env":["NEW","[redacted:NEW]"]`) {
+	if got := r.redactJSON([]byte(`{"version":"v1","redacted_env":["newvaluenewvalue1234"]}`)); strings.Contains(got, "newvaluenewvalue1234") || !strings.Contains(got, `"redacted_env":["NEW","[redacted:NEW]"]`) {
 		t.Fatalf("a planted reported entry leaked or was not accounted for: %s", got)
+	}
+	if got := r.redactJSON([]byte(`{"error":"got newvaluenewvalue1234","redacted_env":"not-an-array"}`)); !strings.Contains(got, `"redacted_env":["NEW"]`) {
+		t.Fatalf("a field that is not an array is replaced: %s", got)
 	}
 }

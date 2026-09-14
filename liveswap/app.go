@@ -341,22 +341,23 @@ func (ma *managedApp) redactorFor(s statusSnapshot) *redactor {
 	}
 	kvs := append([]string(nil), ma.secrets...)
 	ma.secretsMu.Unlock()
-	safe := append([]string{ma.name, s.CurrentVersion}, s.AvailableVersions...)
-	// A recorded version, pruned or not, is a name and must not be
-	// masked as a secret — unless it IS a known value: a record file
-	// is not something the deployer's POST vouched for (a legacy app
-	// could plant one under a secret's value as its name), and a safe
-	// string equal to a known value would exempt that value from the
-	// filter (newRedactor). The same goes for a version a request asks
-	// a record of.
-	var recorded []string
-	for _, d := range s.Deploys {
-		recorded = append(recorded, d.Version)
-	}
-	safe = append(safe, namesNotValues(kvs, recorded)...)
+	// Safe strings are names, not secrets, and come in two kinds. The
+	// versions a deployer's request named (the running one, the last
+	// deploy's) are safe as given. Names read off the filesystem —
+	// release directories, record files, a version a request asks a
+	// record of — are safe only when they are not a known value: a
+	// safe string equal to one would exempt it from the filter
+	// (newRedactor), and a name on disk is not something a request
+	// vouched for (deploys.go, the record store's rules).
+	safe := []string{ma.name, s.CurrentVersion}
 	if s.LastDeploy != nil {
 		safe = append(safe, s.LastDeploy.Version)
 	}
+	fromDisk := append([]string(nil), s.AvailableVersions...)
+	for _, d := range s.Deploys {
+		fromDisk = append(fromDisk, d.Version)
+	}
+	safe = append(safe, namesNotValues(kvs, fromDisk)...)
 	if spec != nil {
 		safe = append(safe, spec.dirs.root, spec.dirs.app, spec.dirs.releases, spec.dirs.shared, spec.dirs.run)
 	}

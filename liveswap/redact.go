@@ -75,9 +75,6 @@ type redactor struct {
 	// env_file could not be read, so its values are unknown to the
 	// filter. Fail closed rather than filter with the heuristics alone.
 	withhold string
-	// reported is what a body already reported as redacted before this
-	// pass (a stored record's redacted_env): kept, and added to.
-	reported []string
 }
 
 // secretForm is one text to replace, the keys whose values it belongs
@@ -450,23 +447,12 @@ func (r *redactor) redactJSON(raw []byte) string {
 		}
 	}
 	body = r.replaceKnown(body, seen)
-	// The keys a stored record reported are body text from a file, not
-	// this pass's own findings: each goes through the filter like any
-	// other text before it is carried forward — a planted entry equal
-	// to a known value comes out as its marker, and what that finds
-	// joins the keys reported now.
-	var reported []string
-	if r != nil {
-		for _, n := range r.reported {
-			reported = append(reported, r.replaceKnown(r.filter(n, seen), seen))
-		}
-	}
-	if len(seen) > 0 || len(reported) > 0 {
+	if len(seen) > 0 {
 		names := reportedKeys(seen)
 		for i, n := range names {
 			names[i] = r.replaceKnown(n, seen)
 		}
-		body = withField(body, "redacted_env", union(names, reported))
+		body = withField(body, "redacted_env", names)
 	}
 	if !json.Valid([]byte(body)) {
 		return `{"error":"[#0]"}`
@@ -476,28 +462,22 @@ func (r *redactor) redactJSON(raw []byte) string {
 
 // withField sets a string-array field on a JSON object body; anything
 // else (an array, a scalar) is returned as it is.
-// keepingReported returns a filter that, when it reports the keys it
-// redacted, also keeps the keys a body already reported: a stored
-// record was filtered once when written and names those keys; the
-// read-time pass must add to that list, never replace it.
-func (r *redactor) keepingReported(body json.RawMessage) *redactor {
-	var obj struct {
-		Reported []string `json:"redacted_env"`
-	}
-	if json.Unmarshal(body, &obj) != nil || len(obj.Reported) == 0 {
-		return r
-	}
-	c := *r
-	c.reported = obj.Reported
-	return &c
-}
-
+// withField sets a string-array field on a JSON object body, merged
+// with any array the body already holds under that name. The body is
+// the filter's output: an existing array there — a stored record's
+// own redacted_env, read back — has been through every layer as body
+// text, so its entries are kept, never replaced, and nothing that
+// did not pass the filter is added. The final pass runs before this.
 func withField(body, name string, values []string) string {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(body), &obj); err != nil || obj == nil {
 		return body
 	}
-	v, err := json.Marshal(values)
+	var had []string
+	if raw, ok := obj[name]; ok {
+		_ = json.Unmarshal(raw, &had) // not an array: nothing to keep
+	}
+	v, err := json.Marshal(union(values, had))
 	if err != nil {
 		return body
 	}
