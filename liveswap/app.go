@@ -43,6 +43,7 @@ type appSpec struct {
 	keep               int
 	maxArtifactSize    int64
 	maxArtifactEntries int
+	deployLogLines     int // lines of the app's journal in a failed deploy's response; 0 = none
 	allowInsecure      bool
 	allowlist          []artifactAllowEntry
 	dirs               appDirs
@@ -150,6 +151,47 @@ type deployResult struct {
 	// deploy that failed before extraction.
 	ArtifactEntries int   `json:"artifact_entries"`
 	ArtifactBytes   int64 `json:"artifact_bytes"`
+	// Phases is each phase the deploy passed through, in order, with
+	// how long it took: where the time went, and where it stopped.
+	Phases []phaseTiming `json:"phases,omitempty"`
+	// Detail is why a failed deploy failed, from the app's side: how
+	// its process ended, what its health endpoint answered, the last
+	// lines it wrote. Nil for a success, and for a failure before a
+	// launch (nothing of the app's ran).
+	Detail *deployDetail `json:"detail,omitempty"`
+}
+
+type phaseTiming struct {
+	Name      string    `json:"name"`
+	StartedAt time.Time `json:"started_at"`
+	Seconds   float64   `json:"seconds"`
+}
+
+// deployDetail is the app's side of a failed deploy. Every string in
+// it passes the response filter before it is written (redact.go).
+type deployDetail struct {
+	// Exit is how the process ended, from the runner: "exit status 3",
+	// "killed by signal 9 (killed)". The pre_start's when that failed,
+	// otherwise the app's, when it died before becoming healthy.
+	Exit string `json:"exit,omitempty"`
+	// Probe is the last health probe that completed with a non-2xx
+	// answer: the status, a redirect's target, the first bytes of the
+	// body — where "Invalid HTTP_HOST header" or "no such table" is.
+	Probe *probeDetail `json:"probe,omitempty"`
+	// LogTail is the last lines the app's units wrote to the journal
+	// since the deploy began — pre_start and app alike — bounded by
+	// deploy_log_lines and 8 KiB; LogTailTruncated says when a cap
+	// dropped lines. LogTailError says why there is no tail when there
+	// should have been one (journalctl missing, the journal unreadable).
+	LogTail          []string `json:"log_tail,omitempty"`
+	LogTailTruncated bool     `json:"log_tail_truncated,omitempty"`
+	LogTailError     string   `json:"log_tail_error,omitempty"`
+}
+
+type probeDetail struct {
+	Status   int    `json:"status"`
+	Location string `json:"location,omitempty"`
+	Body     string `json:"body,omitempty"`
 }
 
 // instance is one running version of an app.
@@ -190,16 +232,18 @@ type managedApp struct {
 	fetch     fetcher
 	clock     clock
 	store     stateStore
+	journal   journalReader
 	logger    *zap.Logger
 
 	// deployMu serializes deploys per app. TryLock (not a queue): a
 	// concurrent webhook gets an immediate 409 and CI can retry.
 	deployMu sync.Mutex
 
-	// mu guards current, phase and lastDeploy.
+	// mu guards current, phase, phases and lastDeploy.
 	mu         sync.Mutex
 	current    *instance
 	phase      string
+	phases     []phaseTiming // the running deploy's phases, in order
 	lastDeploy *deployResult
 
 	// activeSocket is what GetUpstreams reads on every request; storing
@@ -362,6 +406,7 @@ func (ma *managedApp) configure(owner any, spec *appSpec, logger *zap.Logger, cl
 		ma.prober = &httpProber{clock: realClock{}}
 		ma.fetch = &releaseFetcher{client: clients.download}
 		ma.clock = realClock{}
+		ma.journal = journalctlReader{}
 	} else if sr, ok := ma.runner.(*systemdRunner); ok {
 		sr.setLogger(logger)
 	}
@@ -392,34 +437,109 @@ func (ma *managedApp) currentVerifiers() []verifier {
 // snapshot returns a consistent view of the spec and collaborators for
 // one deploy/recovery run.
 type collaborators struct {
-	spec   *appSpec
-	runner runner
-	prober prober
-	fetch  fetcher
-	clock  clock
-	store  stateStore
-	logger *zap.Logger
+	spec    *appSpec
+	runner  runner
+	prober  prober
+	fetch   fetcher
+	clock   clock
+	store   stateStore
+	journal journalReader
+	logger  *zap.Logger
 }
 
 func (ma *managedApp) snapshot() collaborators {
 	ma.specMu.RLock()
 	defer ma.specMu.RUnlock()
 	return collaborators{
-		spec:   ma.spec,
-		runner: ma.runner,
-		prober: ma.prober,
-		fetch:  ma.fetch,
-		clock:  ma.clock,
-		store:  ma.store,
-		logger: ma.logger,
+		spec:    ma.spec,
+		runner:  ma.runner,
+		prober:  ma.prober,
+		fetch:   ma.fetch,
+		clock:   ma.clock,
+		store:   ma.store,
+		journal: ma.journal,
+		logger:  ma.logger,
 	}
 }
 
 func (ma *managedApp) setPhase(c collaborators, phase string) {
 	ma.mu.Lock()
 	ma.phase = phase
+	ma.phases = append(ma.phases, phaseTiming{Name: phase, StartedAt: c.clock.Now()})
 	ma.mu.Unlock()
 	c.logger.Info("deploy phase", zap.String("phase", phase))
+}
+
+// takePhases returns the running deploy's phases with their durations
+// filled in (each ends where the next begins; the last at finished)
+// and clears the record for the next deploy.
+func (ma *managedApp) takePhases(finished time.Time) []phaseTiming {
+	ma.mu.Lock()
+	phases := ma.phases
+	ma.phases = nil
+	ma.mu.Unlock()
+	for i := range phases {
+		end := finished
+		if i+1 < len(phases) {
+			end = phases[i+1].StartedAt
+		}
+		phases[i].Seconds = end.Sub(phases[i].StartedAt).Seconds()
+	}
+	return phases
+}
+
+// failureDetail is the app's side of a failed deploy, gathered after
+// the fact: the exit the runner recorded (the pre_start's from its
+// error; the app's as read before hotserve stopped it, and only when
+// it died on its own), the last probe's answer, and the last lines the
+// launch's units wrote. Nil when a launch left nothing to say.
+func (ma *managedApp) failureDetail(c collaborators, spec *appSpec, err error, appExit string, l launch, since time.Time) *deployDetail {
+	d := &deployDetail{}
+	var ee *exitError
+	var pe *probeError
+	switch {
+	case errors.As(err, &ee):
+		d.Exit = ee.exit
+	case appExit != "":
+		d.Exit = appExit
+	}
+	if errors.As(err, &pe) {
+		d.Probe = &probeDetail{Status: pe.status, Location: pe.location, Body: pe.body}
+	}
+	if spec.deployLogLines > 0 && c.journal != nil {
+		var units []string
+		for _, oneshot := range []bool{true, false} {
+			if u, err := unitName(l.startSpec(spec, spec.command), oneshot); err == nil {
+				units = append(units, u)
+			}
+		}
+		// The journal trails the process by a moment; ask again while
+		// the count still grows, within a bound, rather than read once
+		// and miss the last line — the one that says why.
+		var lines []string
+		ctx, cancel := context.WithTimeout(context.Background(), journalTailTimeout)
+		for attempt := 0; attempt < 5; attempt++ {
+			got, err := c.journal.tail(ctx, units, since, spec.deployLogLines)
+			if err != nil {
+				d.LogTailError = err.Error()
+				break
+			}
+			grew := len(got) > len(lines)
+			lines = got
+			if len(lines) > spec.deployLogLines || (attempt > 0 && !grew) {
+				break
+			}
+			c.clock.Sleep(200 * time.Millisecond)
+		}
+		cancel()
+		if d.LogTailError == "" {
+			d.LogTail, d.LogTailTruncated = capTail(lines, spec.deployLogLines, deployLogMaxBytes)
+		}
+	}
+	if d.Exit == "" && d.Probe == nil && d.LogTail == nil && !d.LogTailTruncated && d.LogTailError == "" {
+		return nil
+	}
+	return d
 }
 
 // Deploy runs the full blue/green pipeline. Any failure before the
@@ -449,21 +569,30 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	started := c.clock.Now()
 	logger := c.logger.With(zap.String("version", req.version))
 	logger.Info("deploy started", zap.String("artifact_host", hostOf(req.url)))
+	ma.mu.Lock()
+	ma.phases = nil
+	ma.mu.Unlock()
 
 	var stats archiveStats
+	var detail *deployDetail // filled by the failure-detail defer below, which runs first
+	launched := false        // a pre_start or Start was attempted: there are units to ask about
+	appExit := ""            // the app's exit, read before hotserve stops a failed instance
 	defer func() {
+		finished := c.clock.Now()
 		result := deployResult{
 			Version:         req.version,
 			Status:          "succeeded",
 			By:              req.by,
 			StartedAt:       started,
-			FinishedAt:      c.clock.Now(),
+			FinishedAt:      finished,
 			ArtifactEntries: stats.entries,
 			ArtifactBytes:   stats.bytes,
+			Phases:          ma.takePhases(finished),
 		}
 		if err != nil {
 			result.Status = "failed"
 			result.Error = err.Error()
+			result.Detail = detail
 			ma.mu.Lock()
 			result.Phase = ma.phase
 			ma.mu.Unlock()
@@ -546,6 +675,14 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		return err
 	}
 	ma.rememberSecrets(spec.envFile, l.secrets)
+	// Declared after the cleanup defers above, so it runs before them:
+	// the detail is read off the pipeline's own error, before cleanup
+	// joins its own lines onto it.
+	defer func() {
+		if err != nil && launched {
+			detail = ma.failureDetail(c, spec, err, appExit, l, started)
+		}
+	}()
 	// A launch that never becomes the instance leaves nothing behind:
 	// its run dir, and any pin the health gate made, go with it. Once
 	// promoted, l.sock is the instance's own and lives on. And like
@@ -578,6 +715,7 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		preCtx, cancel := context.WithTimeout(ctx, spec.deadline)
 		// Under the same sandbox as the app it precedes: a migration
 		// that writes where the app cannot read fails here, not at 3am.
+		launched = true
 		err := c.runner.RunOnce(preCtx, l.startSpec(spec, spec.preStart))
 		cancel()
 		if err != nil {
@@ -592,6 +730,7 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	if !ma.sweep(c, old, l.nonce) {
 		return fmt.Errorf("%w; not starting", errSweepUnconfirmed)
 	}
+	launched = true
 	newHandle, err = c.runner.Start(l.startSpec(spec, spec.command))
 	if err != nil {
 		return fmt.Errorf("start failed: %w", err)
@@ -607,6 +746,12 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		deadline: spec.deadline,
 	}); err != nil {
 		deployErr := fmt.Errorf("health gate: %w", err)
+		// The exit is the app's own only when it died on its own; read
+		// it now, before the Stop below would make every failure look
+		// like a SIGTERM.
+		if errors.Is(err, errProcessExited) {
+			appExit = c.runner.Exit(newHandle)
+		}
 		// If Stop can't confirm the instance is gone, surface that — and
 		// the cleanup defer then leaves the release in place rather than
 		// delete it beneath a possibly live process.

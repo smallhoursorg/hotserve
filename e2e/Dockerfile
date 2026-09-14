@@ -69,6 +69,11 @@ COPY e2e/systemd/e2e.conf /etc/systemd/system/hotserve.service.d/e2e.conf
 COPY e2e/systemd/e2e-token.service /etc/systemd/system/e2e-token.service
 RUN systemctl enable hotserve.service e2e-token.service
 COPY e2e/Caddyfile /etc/hotserve/Caddyfile
+# The demo app's env file, as the box README says to make one: root
+# and the hotserve user can read it, nothing else. The crash scenario
+# deploys a release that prints SECRET and exits.
+RUN printf 'SECRET=e2e-secret-value-1234\n' > /etc/hotserve/demo.env \
+	&& chown root:hotserve /etc/hotserve/demo.env && chmod 0640 /etc/hotserve/demo.env
 # The Deno example's app-block lines, imported by e2e/Caddyfile: the
 # lines its README says to copy onto the box are the lines tested.
 COPY examples/deno/hotserve.caddy /etc/hotserve/deno-example.caddy

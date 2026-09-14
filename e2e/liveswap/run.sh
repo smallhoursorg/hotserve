@@ -114,10 +114,50 @@ esac
 grep -q "health gate" /tmp/deploy-body \
 	&& pass "failure body names the health gate" \
 	|| fail "failure body missing cause: $(cat /tmp/deploy-body)"
+# The app's side of it: the last probe's answer, and the phases up to
+# the one that failed.
+grep -q '"probe":{"status":500' /tmp/deploy-body \
+	&& pass "failure detail carries the last probe's status" \
+	|| fail "no probe detail: $(cat /tmp/deploy-body)"
+grep -q '"phases":\[{"name":"downloading"' /tmp/deploy-body \
+	&& pass "failure body carries the phase timings" \
+	|| fail "no phases: $(cat /tmp/deploy-body)"
 assert_all_200 /tmp/codes-broken "broken-deploy containment"
 b=$(body)
 case "$b" in
 "hello v2"*) pass "v2 still serving after failed v3: '$b'" ;;
+*) fail "expected v2 to keep serving, got '$b'" ;;
+esac
+
+echo "=== scenario 5b: a release that prints its secret and exits — the response says how, with the secret redacted ==="
+c=$(deploy demo-crash.tar.gz v3crash)
+case "$c" in
+5*) pass "crashing deploy reported failure ($c)" ;;
+*) fail "crashing deploy: expected 5xx, got $c" ;;
+esac
+grep -q '"exit":"exit status 3"' /tmp/deploy-body \
+	&& pass "failure detail carries the exit status" \
+	|| fail "no exit status: $(cat /tmp/deploy-body)"
+grep -q '"log_tail":\[' /tmp/deploy-body \
+	&& pass "failure detail carries the app's last lines" \
+	|| fail "no log tail: $(cat /tmp/deploy-body)"
+grep -q 'fatal: cannot start' /tmp/deploy-body \
+	&& pass "the tail has the app's stderr" \
+	|| fail "stderr line missing from the tail: $(cat /tmp/deploy-body)"
+if grep -q 'e2e-secret-value-1234' /tmp/deploy-body; then
+	fail "the env_file value reached the response: $(cat /tmp/deploy-body)"
+else
+	pass "the env_file value is not in the response"
+fi
+grep -q 'SECRET=\[redacted:SECRET\]' /tmp/deploy-body \
+	&& pass "the printed secret is the marker" \
+	|| fail "no marker where the secret was: $(cat /tmp/deploy-body)"
+grep -q '"redacted_env":\["SECRET"\]' /tmp/deploy-body \
+	&& pass "the response names the key it redacted" \
+	|| fail "no redacted_env: $(cat /tmp/deploy-body)"
+b=$(body)
+case "$b" in
+"hello v2"*) pass "v2 still serving after the crash: '$b'" ;;
 *) fail "expected v2 to keep serving, got '$b'" ;;
 esac
 

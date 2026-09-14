@@ -1,9 +1,10 @@
-# Builds the demo app once, packs five release tarballs (v1, v2, a v3
+# Builds the demo app once, packs six release tarballs (v1, v2, a v3
 # whose health check always fails, a "workers" release whose ./server
 # is a shell leader that forks a worker before exec'ing the app — the
-# process-tree shape the systemd suite kills — and a "probe" release
-# whose ./server records its sandbox view before exec'ing the app),
-# and serves them over HTTP — the stand-in for a GitHub/GitLab release
+# process-tree shape the systemd suite kills — a "probe" release whose
+# ./server records its sandbox view before exec'ing the app, and a
+# "crash" release whose ./server prints its secret and exits 3), and
+# serves them over HTTP — the stand-in for a GitHub/GitLab release
 # asset URL.
 #
 # The build context is the repo root, not this directory (see
@@ -12,7 +13,7 @@
 # with liveswap's integration test and packaging/test/smoke.sh (#52).
 FROM golang:1.27-trixie AS build
 WORKDIR /build
-COPY e2e/liveswap/testapp/main.go e2e/liveswap/workers.sh e2e/liveswap/probe-server.sh liveswap/testdata/sandbox-view.sh ./
+COPY e2e/liveswap/testapp/main.go e2e/liveswap/workers.sh e2e/liveswap/probe-server.sh e2e/liveswap/crash.sh liveswap/testdata/sandbox-view.sh ./
 RUN CGO_ENABLED=0 go build -o server main.go
 RUN mkdir /out \
 	&& for v in v1 v2; do \
@@ -38,7 +39,12 @@ RUN mkdir /out \
 	&& cp /build/sandbox-view.sh /tmp/stage-probe/ \
 	&& chmod +x /tmp/stage-probe/server \
 	&& echo probe > /tmp/stage-probe/version.txt \
-	&& tar -czf /out/demo-probe.tar.gz -C /tmp/stage-probe .
+	&& tar -czf /out/demo-probe.tar.gz -C /tmp/stage-probe . \
+	&& mkdir /tmp/stage-crash \
+	&& cp /build/crash.sh /tmp/stage-crash/server \
+	&& chmod +x /tmp/stage-crash/server \
+	&& echo crash > /tmp/stage-crash/version.txt \
+	&& tar -czf /out/demo-crash.tar.gz -C /tmp/stage-crash .
 
 # The Deno example, built by its own scripts/bundle.sh with the same
 # Deno version e2e/Dockerfile installs on the box.

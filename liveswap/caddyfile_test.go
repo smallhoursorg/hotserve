@@ -42,6 +42,7 @@ func TestCaddyfileUnmarshalFullConfig(t *testing.T) {
 			watchdog_restarts 7
 			watchdog_window 15m
 			keep 3
+			deploy_log_lines 12
 			max_artifact_size 50MB
 			max_artifact_entries 20000
 		}
@@ -100,6 +101,9 @@ func TestCaddyfileUnmarshalFullConfig(t *testing.T) {
 	if blog.Keep != 3 || blog.MaxArtifactSize != 50_000_000 || blog.MaxArtifactEntries != 20_000 {
 		t.Fatalf("keep/max wrong: %+v", blog)
 	}
+	if blog.DeployLogLines == nil || *blog.DeployLogLines != 12 {
+		t.Fatalf("deploy_log_lines wrong: %+v", blog.DeployLogLines)
+	}
 	if blog.Watchdog != "off" ||
 		blog.WatchdogFailures != 4 ||
 		blog.WatchdogGrace != caddy.Duration(45*time.Second) ||
@@ -129,7 +133,8 @@ func TestCaddyfileUnmarshalEmptyAppBlockLeavesDefaultsToProvision(t *testing.T) 
 	blog := a.Apps["blog"]
 	if blog.HealthPath != "" || blog.HealthInterval != 0 || blog.Soak != 0 ||
 		blog.Deadline != 0 || blog.Drain != 0 || blog.Grace != 0 ||
-		blog.Keep != 0 || blog.MaxArtifactSize != 0 || blog.MaxArtifactEntries != 0 || len(blog.DeployTrust) != 0 {
+		blog.Keep != 0 || blog.MaxArtifactSize != 0 || blog.MaxArtifactEntries != 0 || len(blog.DeployTrust) != 0 ||
+		blog.DeployLogLines != nil {
 		t.Fatalf("parser applied defaults it must not: %+v", blog)
 	}
 	if blog.Watchdog != "" || blog.WatchdogFailures != 0 || blog.WatchdogGrace != 0 ||

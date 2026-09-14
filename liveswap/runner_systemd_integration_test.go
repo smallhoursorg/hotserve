@@ -355,6 +355,47 @@ func TestIntegrationSystemdRunOnce(t *testing.T) {
 	}
 }
 
+// A failed pre_start reports its exit through exitError, and the
+// journal tail reads back what the unit wrote, stdout and stderr, in
+// order, under the real user manager.
+func TestIntegrationSystemdJournalTail(t *testing.T) {
+	r := integrationRunner(t)
+	spec := scriptApp(t, "echo first line\necho second line >&2\nexit 2\n")
+	since := time.Now()
+	err := r.RunOnce(context.Background(), spec)
+	var ee *exitError
+	if err == nil || !errors.As(err, &ee) || ee.exit != "exit status 2" {
+		t.Fatalf("RunOnce: %v (want an exitError with exit status 2)", err)
+	}
+	unit, err := unitName(spec, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The journal lags the process by a moment; ask until both lines
+	// are there or the deadline passes.
+	var lines []string
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), journalTailTimeout)
+		lines, err = journalctlReader{}.tail(ctx, []string{unit}, since, 40)
+		cancel()
+		if err == nil && len(lines) >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("journal tail of %s: %v, %v", unit, lines, err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if got := strings.Join(lines, "|"); got != "first line|second line" {
+		t.Fatalf("tail = %q", got)
+	}
+	// Nothing since a moment after the exit: the window is honoured.
+	if lines, err := (journalctlReader{}).tail(context.Background(), []string{unit}, time.Now().Add(5*time.Second), 40); err != nil || len(lines) != 0 {
+		t.Fatalf("tail since the future: %v, %v", lines, err)
+	}
+}
+
 func TestIntegrationSystemdReattachAdoptsLiveUnit(t *testing.T) {
 	r1 := integrationRunner(t)
 	spec := scriptApp(t, workerTree)

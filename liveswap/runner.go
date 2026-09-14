@@ -3,6 +3,7 @@ package liveswap
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -11,6 +12,15 @@ import (
 // implementation is systemdRunner (runner_systemd.go): every instance
 // is a transient systemd service unit under the hotserve user's own
 // service manager, which is what lets apps outlive hotserve restarts.
+// exitError is RunOnce's report of a command that ran and failed: how
+// it ended, in which unit, with what job result. The deploy's failure
+// detail reads the exit; the text is what the error always said.
+type exitError struct {
+	exit, unit, job string
+}
+
+func (e *exitError) Error() string { return fmt.Sprintf("%s (unit %s: job %s)", e.exit, e.unit, e.job) }
+
 type runner interface {
 	// Start launches a long-running instance and returns immediately.
 	Start(spec startSpec) (handle, error)
@@ -21,6 +31,12 @@ type runner interface {
 
 	// Alive reports whether the instance is still running.
 	Alive(h handle) bool
+
+	// Exit is how the instance's main process ended ("exit status 3",
+	// "killed by signal 9 (killed)"), or "" while it runs. Non-empty
+	// whenever Alive is false: the runner records the exit before it
+	// declares the handle dead (finish, runner_systemd.go).
+	Exit(h handle) string
 
 	// Wait returns a channel that is closed once the instance exits.
 	// It may return nil when the runner cannot wait on this handle;

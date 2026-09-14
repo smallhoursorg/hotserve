@@ -87,6 +87,7 @@ func (c *fakeClock) After(d time.Duration) <-chan time.Time {
 type fakeHandle struct {
 	id     string
 	alive  bool
+	exit   string // what Exit reports once dead
 	done   chan struct{}
 	socket string // removed when the "unit" stops, as ExecStopPost= does
 	// argv is what this handle was started with, reported back the way
@@ -116,6 +117,9 @@ func (h *fakeHandle) kill() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.alive = false
+	if h.exit == "" {
+		h.exit = "killed by signal 15 (terminated)" // what a Stop looks like from the runner
+	}
 	if h.socket != "" {
 		_ = os.Remove(h.socket)
 	}
@@ -143,6 +147,7 @@ type fakeRunner struct {
 	reattachSeen    []handleState
 	stopErr         error   // Stop returns this
 	stopLeavesAlive bool    // Stop does not actually kill the handle
+	startDies       string  // when set, Start's handle is already dead with this exit
 	sweepErr        error   // Sweep returns this
 	sweepErrs       []error // consumed one per Sweep call before sweepErr applies
 	sweeps          []handle
@@ -155,9 +160,23 @@ func (r *fakeRunner) Start(spec startSpec) (handle, error) {
 		return nil, r.startErr
 	}
 	h := &fakeHandle{id: fmt.Sprintf("h%d", len(r.handles)), alive: true, done: make(chan struct{}), socket: spec.socket, argv: spec.command}
+	if r.startDies != "" {
+		h.exit = r.startDies
+		h.kill()
+	}
 	r.started = append(r.started, spec)
 	r.handles = append(r.handles, h)
 	return h, nil
+}
+
+func (r *fakeRunner) Exit(h handle) string {
+	fh, ok := h.(*fakeHandle)
+	if !ok || fh.isAlive() {
+		return ""
+	}
+	fh.mu.Lock()
+	defer fh.mu.Unlock()
+	return fh.exit
 }
 
 func (r *fakeRunner) RunOnce(_ context.Context, spec startSpec) error {
@@ -295,7 +314,11 @@ func (p *fakeProber) waitHealthy(_ context.Context, sock *socketRef, alive func(
 		}
 	}
 	if !alive() {
-		return errors.New("process exited before becoming healthy")
+		// What the real gate returns: the sentinel, with the scripted
+		// probe alongside when the script is one.
+		var pe *probeError
+		errors.As(p.err, &pe)
+		return &healthGateError{err: errProcessExited, probe: pe}
 	}
 	return p.err
 }

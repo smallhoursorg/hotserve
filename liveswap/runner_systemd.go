@@ -597,7 +597,21 @@ func (r *systemdRunner) RunOnce(ctx context.Context, spec startSpec) error {
 	reapCtx, cancel := context.WithTimeout(r.ctx, stopSlack)
 	defer cancel()
 	st := r.reapFailed(reapCtx, u.Name)
-	return fmt.Errorf("%s (unit %s: job %s)", st.exitString(), u.Name, res)
+	return &exitError{exit: st.exitString(), unit: u.Name, job: res}
+}
+
+// Exit is the recorded end of the instance's main process, once the
+// watcher has seen it (finish); "" before that.
+func (r *systemdRunner) Exit(h handle) string {
+	sh, ok := h.(*systemdHandle)
+	if !ok {
+		return ""
+	}
+	st := sh.exit.Load()
+	if st == nil {
+		return ""
+	}
+	return st.exitString()
 }
 
 // stopUnobserved stops a unit and returns cause if the unit is

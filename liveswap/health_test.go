@@ -2,6 +2,7 @@ package liveswap
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -224,7 +225,29 @@ func TestProbeOnceUsesThePathAndRefusesRedirects(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "302") {
 		t.Fatalf("a redirect must read as unhealthy, got %v", err)
 	}
+	var pe *probeError
+	if !errors.As(err, &pe) || pe.status != 302 || pe.location != "/ok" {
+		t.Fatalf("the probe error must carry the status and the redirect target: %+v", pe)
+	}
 	if got := gotPath.Load(); got != "/health" {
 		t.Fatalf("probed %v, want /health (the redirect target must never be fetched)", got)
+	}
+}
+
+// The process dies after answering a probe: the verdict is the exit,
+// and the answer it gave is kept alongside for the deploy's detail.
+func TestProberProcessDeathKeepsLastProbe(t *testing.T) {
+	sock := unixServer(t, statusHandler(http.StatusInternalServerError))
+	clk := newFakeClock()
+	p := &httpProber{clock: clk}
+	var calls atomic.Int64
+	dieAfterTwo := func() bool { return calls.Add(1) <= 2 }
+	err := p.waitHealthy(context.Background(), testSocketRef(t, sock), dieAfterTwo, testHealthConfig())
+	if !errors.Is(err, errProcessExited) {
+		t.Fatalf("want the process-exit sentinel, got %v", err)
+	}
+	var pe *probeError
+	if !errors.As(err, &pe) || pe.status != http.StatusInternalServerError {
+		t.Fatalf("the last answered probe should ride along: %v", err)
 	}
 }

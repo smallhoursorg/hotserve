@@ -43,17 +43,21 @@ func (p *httpProber) waitHealthy(ctx context.Context, sock *socketRef, alive fun
 	deadline := start.Add(hc.deadline)
 	var healthySince time.Time
 	lastErr := errors.New("no probe completed")
+	// The last probe the app answered, kept apart from lastErr: the
+	// final tick before a deadline is often a timeout or a refused
+	// dial, and the answer before it is the diagnosis.
+	var lastProbe *probeError
 
 	for {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("deploy canceled while waiting for health: %w", err)
 		}
 		if !alive() {
-			return fmt.Errorf("process exited before becoming healthy")
+			return &healthGateError{err: errProcessExited, probe: lastProbe}
 		}
 		now := p.clock.Now()
 		if now.After(deadline) {
-			return fmt.Errorf("not healthy within deadline %v: %w", hc.deadline, lastErr)
+			return &healthGateError{err: fmt.Errorf("not healthy within deadline %v: %w", hc.deadline, lastErr), probe: lastProbe}
 		}
 
 		if hc.path == "" {
@@ -65,6 +69,10 @@ func (p *httpProber) waitHealthy(ctx context.Context, sock *socketRef, alive fun
 		} else if err := p.probeOnce(ctx, sock, hc.path, hc.timeout); err != nil {
 			healthySince = time.Time{} // health must be continuous
 			lastErr = err
+			var pe *probeError
+			if errors.As(err, &pe) {
+				lastProbe = pe
+			}
 		} else if healthySince.IsZero() {
 			healthySince = now
 			lastErr = nil
@@ -113,9 +121,49 @@ func (p *httpProber) probeOnce(ctx context.Context, sock *socketRef, path string
 		_ = resp.Body.Close()
 	}()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("health check returned %d", resp.StatusCode)
+		// The first bytes of the body are the diagnosis more often than
+		// the status is ("Invalid HTTP_HOST header", "no such table"),
+		// and a redirect's target says where the app wanted to go.
+		excerpt, _ := io.ReadAll(io.LimitReader(resp.Body, probeBodyExcerpt))
+		return &probeError{status: resp.StatusCode, location: resp.Header.Get("Location"), body: string(excerpt)}
 	}
 	return nil
 }
+
+// probeBodyExcerpt is how much of a failing probe's body is kept.
+const probeBodyExcerpt = 512
+
+// errProcessExited is the health gate's verdict when the process died
+// before it was healthy; the deploy reads the runner's exit for it.
+var errProcessExited = errors.New("process exited before becoming healthy")
+
+// healthGateError is why the gate failed, with the last answered probe
+// alongside whatever the final tick was — a crash, a timeout, a
+// refused dial — so the answer is not lost behind it. Its text is the
+// verdict's alone; errors.Is and errors.As see both.
+type healthGateError struct {
+	err   error
+	probe *probeError
+}
+
+func (e *healthGateError) Error() string { return e.err.Error() }
+
+func (e *healthGateError) Unwrap() []error {
+	if e.probe == nil {
+		return []error{e.err}
+	}
+	return []error{e.err, e.probe}
+}
+
+// probeError is a completed probe that was not 2xx: what the app
+// answered, kept for the deploy's failure detail. Its text is the same
+// line it always was, so nothing that read the error changes.
+type probeError struct {
+	status   int
+	location string
+	body     string
+}
+
+func (e *probeError) Error() string { return fmt.Sprintf("health check returned %d", e.status) }
 
 var _ prober = (*httpProber)(nil)
