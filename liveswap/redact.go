@@ -65,7 +65,16 @@ type redactor struct {
 	// secrets holds every form of every known value, longest first so
 	// a value that contains another is replaced whole.
 	secrets []*secretForm
-	safe    map[string]bool
+	// safeExact is the safe strings as given: an env_file value equal
+	// to one is not a secret. safeTokens is those strings and every
+	// layer-4 token inside them: exempt from the entropy heuristic.
+	// Kept apart, or a dotted version would make its SHA segment a
+	// non-secret for an env_file value equal to that segment.
+	safeExact, safeTokens map[string]bool
+	// withhold, when set, is why no body may be sent: the app's
+	// env_file could not be read, so its values are unknown to the
+	// filter. Fail closed rather than filter with the heuristics alone.
+	withhold string
 }
 
 // secretForm is one text to replace, the keys whose values it belongs
@@ -82,20 +91,21 @@ type secretForm struct {
 // survive the heuristics. A nil *redactor is usable: layers 3 and 4
 // only.
 func newRedactor(envFile []string, safe []string) *redactor {
-	r := &redactor{safe: make(map[string]bool, len(safe))}
+	r := &redactor{safeExact: make(map[string]bool, len(safe)), safeTokens: make(map[string]bool, len(safe))}
 	for _, s := range safe {
 		if s == "" {
 			continue
 		}
-		r.safe[s] = true
+		r.safeExact[s] = true
+		r.safeTokens[s] = true
 		for _, tok := range entropyTokenRe.FindAllString(s, -1) {
-			r.safe[tok] = true
+			r.safeTokens[tok] = true
 		}
 	}
 	byText := map[string]*secretForm{}
 	for _, kv := range envFile {
 		key, value, ok := strings.Cut(kv, "=")
-		if !ok || len(value) < secretMinLen || r.safe[value] {
+		if !ok || len(value) < secretMinLen || r.safeExact[value] {
 			continue
 		}
 		forms := secretForms(value)
@@ -144,16 +154,25 @@ func contains(list []string, s string) bool {
 // candidate that contains no known form of any value — not only this
 // key's, since another key's value ("redacted", say) can be a
 // substring of a marker and would then be put back by a later
-// replacement. Forms are 8+ characters and the candidates share no
-// 8-character run, so one always fits.
+// replacement. The named candidates come first; when every one of
+// them contains a form (a key named for its own value), the marker is
+// a number in brackets, which at under 8 characters can contain no
+// form at all.
 func chooseMarker(keys []string, all []string) string {
 	label := strings.Join(keys, ",")
-	for _, c := range []string{
+	candidates := []string{
 		"[redacted:" + label + "]",
 		"[REDACTED:" + label + "]",
 		"[withheld:" + label + "]",
 		"<" + label + " removed>",
-	} {
+	}
+	for n := 1; ; n++ {
+		var c string
+		if n <= len(candidates) {
+			c = candidates[n-1]
+		} else {
+			c = "[#" + strconv.Itoa(n-len(candidates)) + "]"
+		}
 		clean := true
 		for _, f := range all {
 			if strings.Contains(c, f) {
@@ -165,7 +184,6 @@ func chooseMarker(keys []string, all []string) string {
 			return c
 		}
 	}
-	return "[withheld]"
 }
 
 // urlPassword is the password in a value of the form
@@ -243,8 +261,9 @@ var shapeRules = []struct {
 }
 
 // basicCredentialRe finds "Basic <base64>"; the decode check is in
-// redact, since a regexp cannot tell a credential from a word.
-var basicCredentialRe = regexp.MustCompile(`(?i)\bbasic[ \t]+[A-Za-z0-9+/]{8,}={0,2}`)
+// redact, since a regexp cannot tell a credential from a word. Four
+// characters is the shortest base64 of a user:pass ("a:b").
+var basicCredentialRe = regexp.MustCompile(`(?i)\bbasic[ \t]+[A-Za-z0-9+/]{4,}={0,2}`)
 
 // entropyTokenRe finds candidates for layer 4. `/` is not in the
 // alphabet on purpose: a URL path is a long base64-alphabet run with
@@ -254,25 +273,48 @@ var basicCredentialRe = regexp.MustCompile(`(?i)\bbasic[ \t]+[A-Za-z0-9+/]{8,}={
 // which is why the safe list is split the same way.
 var entropyTokenRe = regexp.MustCompile(`[A-Za-z0-9+=_-]{20,}`)
 
-// redact filters s and reports which env keys' values it found.
-func (r *redactor) redact(s string) (string, []string) {
-	var keys []string
-	if r != nil {
-		seen := map[string]bool{}
-		for _, sec := range r.secrets {
-			if !strings.Contains(s, sec.text) {
-				continue
-			}
-			s = strings.ReplaceAll(s, sec.text, sec.marker)
-			for _, k := range sec.keys {
-				if !seen[k] {
-					seen[k] = true
-					keys = append(keys, k)
-				}
-			}
-		}
-		sort.Strings(keys)
+// replaceKnown is layer 1 on its own: every known form replaced by its
+// marker, and the keys found added to seen. Markers contain no form,
+// so a second pass over its own output changes nothing.
+func (r *redactor) replaceKnown(s string, seen map[string]bool) string {
+	if r == nil {
+		return s
 	}
+	for _, sec := range r.secrets {
+		if !strings.Contains(s, sec.text) {
+			continue
+		}
+		s = strings.ReplaceAll(s, sec.text, sec.marker)
+		for _, k := range sec.keys {
+			seen[k] = true
+		}
+	}
+	return s
+}
+
+func reportedKeys(seen map[string]bool) []string {
+	keys := make([]string, 0, len(seen))
+	for k := range seen {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// redact filters s and reports which env keys' values it found. Layer
+// 1 runs first and again last: the heuristic layers' own marker text
+// ("[redacted:private-key]") can contain a known value, and only a
+// pass over the finished text guarantees none remains.
+func (r *redactor) redact(s string) (string, []string) {
+	seen := map[string]bool{}
+	s = r.replaceKnown(s, seen)
+	s = r.heuristics(s)
+	s = r.replaceKnown(s, seen)
+	return s, reportedKeys(seen)
+}
+
+// heuristics is layers 3 and 4.
+func (r *redactor) heuristics(s string) string {
 	for _, rule := range shapeRules {
 		s = rule.re.ReplaceAllString(s, rule.repl)
 	}
@@ -291,8 +333,8 @@ func (r *redactor) redact(s string) (string, []string) {
 		}
 		return m
 	})
-	s = entropyTokenRe.ReplaceAllStringFunc(s, func(tok string) string {
-		if r != nil && r.safe[tok] {
+	return entropyTokenRe.ReplaceAllStringFunc(s, func(tok string) string {
+		if r != nil && r.safeTokens[tok] {
 			return tok
 		}
 		if looksGenerated(tok) {
@@ -300,32 +342,67 @@ func (r *redactor) redact(s string) (string, []string) {
 		}
 		return tok
 	})
-	return s, keys
 }
 
 // redactJSON filters a marshalled JSON body and, when a known value
-// was found, adds a `redacted_env` field naming the keys. Layer 1 is a
-// plain substring replacement, so a value made of JSON's own
-// punctuation could in principle match across a string's delimiters
-// and leave the body unparsable; that body is withheld rather than
-// sent, with the keys still reported.
+// was found, adds a `redacted_env` field naming the keys. Whatever is
+// finally sent — the filtered body, the field, or a fallback — gets a
+// last layer-1 pass, so no known form is in the bytes written, and is
+// valid JSON.
+//
+// Layer 1 is a plain substring replacement, so a value made of JSON's
+// own punctuation could match across a string's delimiters and leave
+// the body unparsable; that body is withheld rather than sent, with
+// the keys still reported. A filter whose env_file could not be read
+// withholds every body: the heuristics alone are not the promise.
 func (r *redactor) redactJSON(raw []byte) string {
-	body, keys := r.redact(string(raw))
+	seen := map[string]bool{}
+	if r != nil && r.withhold != "" {
+		return r.finish(`{"error":"response withheld: `+r.withhold+`"}`, seen)
+	}
+	body := r.replaceKnown(string(raw), seen)
+	body = r.heuristics(body)
 	if !json.Valid([]byte(body)) {
 		body = `{"error":"response withheld: a redacted value overlapped the response's own structure"}`
 	}
-	if len(keys) == 0 {
-		return body
+	if len(seen) > 0 {
+		body = withField(body, "redacted_env", reportedKeys(seen))
 	}
+	return r.finish(body, seen)
+}
+
+// finish is the last pass: layer 1 over the bytes about to be written
+// (the field's key names and a fallback's fixed text included), then
+// the validity check again. A body that is still not JSON — a value
+// equal to the response's own punctuation, twice over — becomes the
+// one body that can contain nothing: a marker under 8 characters.
+func (r *redactor) finish(body string, seen map[string]bool) string {
+	before := len(seen)
+	body = r.replaceKnown(body, seen)
+	if len(seen) > before && strings.HasPrefix(body, "{") {
+		// The last pass found a value in the field's own text or a
+		// fallback; the report has to say so as well.
+		body = withField(body, "redacted_env", reportedKeys(seen))
+		body = r.replaceKnown(body, seen)
+	}
+	if !json.Valid([]byte(body)) {
+		return `{"error":"[#0]"}`
+	}
+	return body
+}
+
+// withField sets a string-array field on a JSON object body; anything
+// else (an array, a scalar) is returned as it is.
+func withField(body, name string, values []string) string {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(body), &obj); err != nil || obj == nil {
-		return body // an array or scalar body: nowhere to put the field
+		return body
 	}
-	k, err := json.Marshal(keys)
+	v, err := json.Marshal(values)
 	if err != nil {
 		return body
 	}
-	obj["redacted_env"] = k
+	obj[name] = v
 	out, err := json.Marshal(obj)
 	if err != nil {
 		return body

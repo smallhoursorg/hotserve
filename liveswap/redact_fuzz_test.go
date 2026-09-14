@@ -70,14 +70,16 @@ func FuzzRedactor(f *testing.F) {
 			if !json.Valid([]byte(js)) {
 				t.Fatalf("form %q: redactJSON produced invalid JSON: %s", form, js)
 			}
-			// The one fixed text in a body is the field name redacted_env;
-			// a value of "redacted" appears inside it, as the name, not as
-			// a leak. It is taken out before the absence check.
-			if !strings.Contains(js, `"redacted_env":["SECRET"]`) {
-				t.Fatalf("form %q: keys not reported in %s", form, js)
-			}
-			if rest := strings.ReplaceAll(js, `"redacted_env":["SECRET"]`, ""); strings.Contains(rest, string(mustQuote(t, form))) {
+			// Strictly: the form is absent from the bytes written, the
+			// field name included (a value of "redacted" turns the field
+			// name itself into a marker; the report is still there), and
+			// the key is reported unless the body had to fall back to the
+			// one marker that can carry nothing.
+			if strings.Contains(js, string(mustQuote(t, form))) {
 				t.Fatalf("form %q: survived in JSON body %s", form, js)
+			}
+			if !strings.Contains(js, `["SECRET"]`) && js != `{"error":"[#0]"}` {
+				t.Fatalf("form %q: keys not reported in %s", form, js)
 			}
 		}
 	})

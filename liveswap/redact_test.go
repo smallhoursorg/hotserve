@@ -92,12 +92,33 @@ func TestRedactorSharedValuesAndMarkers(t *testing.T) {
 			t.Errorf("a marker reintroduced a value: %q -> %q", in, out)
 		}
 	}
+	// A key named for its own value defeats every named candidate; the
+	// marker is then a number in brackets.
+	r = newRedactor([]string{"withheld=withheld"}, nil)
+	if out, _ := r.redact("it was withheld"); strings.Contains(out, "withheld") || !strings.Contains(out, "[#1]") {
+		t.Errorf("key named for its value: %q", out)
+	}
+	// A heuristic layer's own marker text can contain a known value;
+	// the final pass removes it.
+	r = newRedactor([]string{"SECRET=private-key"}, nil)
+	if out, _ := r.redact("-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----"); strings.Contains(out, "private-key") {
+		t.Errorf("a shape marker reintroduced a value: %q", out)
+	}
+	// The safe list exempts a value only when it equals a safe string
+	// whole: a dotted version's segment is safe from the entropy
+	// heuristic, not a non-secret when an env_file value equals it.
+	sha := "3f9a1c2b4d5e6f708192a3b4c5d6e7f8091a2b3c"
+	r = newRedactor([]string{"TOKEN=" + sha}, []string{"2026.09.14." + sha})
+	if out, keys := r.redact("saw " + sha); strings.Contains(out, sha) || len(keys) != 1 {
+		t.Errorf("an env_file value equal to a safe token survived: %q %v", out, keys)
+	}
 }
 
 func TestRedactorBasicCredential(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
 		{"Authorization: Basic dToxMjM0NTY3OA==", "Authorization: Basic [redacted:basic-credential]"},
 		{"Authorization: Basic dToxMjM0NTY3OA", "Authorization: Basic [redacted:basic-credential]"},
+		{"Authorization: Basic YTpi", "Authorization: Basic [redacted:basic-credential]"}, // a:b, the shortest
 		{"Basic authentication is required", "Basic authentication is required"},
 		{"basic YWJjZGVmZ2hpams=", "basic YWJjZGVmZ2hpams="}, // decodes, but to no user:pass
 	} {
@@ -123,6 +144,23 @@ func TestRedactJSONWithholdsAnUnparsableBody(t *testing.T) {
 	if out := r.redactJSON([]byte(`["x"]`)); out != `["x"]` {
 		t.Errorf("array body = %s", out)
 	}
+	// The fallback's own text and the redacted_env field's key names go
+	// through the last pass too: a second value equal to a word in the
+	// fallback, or a key named for its value, cannot come back.
+	r = newRedactor([]string{`ALLOWED=["a","b"]`, "SECRET=redacted", "withheld=withheld"}, nil)
+	out = r.redactJSON([]byte(`{"app":"x","available_versions":["a","b"],"e":"withheld"}`))
+	if !json.Valid([]byte(out)) || strings.Contains(out, "redacted") || strings.Contains(out, "withheld") {
+		t.Errorf("fallback or field leaked a value: %s", out)
+	}
+}
+
+func TestRedactJSONWithholdsWhenTheEnvFileIsUnread(t *testing.T) {
+	r := newRedactor(nil, nil)
+	r.withhold = "the app's env_file could not be read"
+	out := r.redactJSON([]byte(`{"app":"x","error":"anything at all"}`))
+	if !json.Valid([]byte(out)) || strings.Contains(out, "anything at all") || !strings.Contains(out, "withheld") {
+		t.Errorf("body not withheld: %s", out)
+	}
 }
 
 func TestRedactorShapes(t *testing.T) {
@@ -141,7 +179,7 @@ func TestRedactorShapes(t *testing.T) {
 		{"assignment", "PASSWORD=correct-horse-battery next", "PASSWORD=[redacted:credential] next"},
 		{"assignment colon", "api_key: 0123456789abcdef", "api_key: [redacted:credential]"}, // gitleaks:allow
 		{"prefixed key", "DB_PASSWORD=correct-horse-battery", "DB_PASSWORD=[redacted:credential]"},
-		{"aws secret key", "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "AWS_SECRET_ACCESS_KEY=[redacted:credential]"},
+		{"aws secret key", "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "AWS_SECRET_ACCESS_KEY=[redacted:credential]"}, // gitleaks:allow
 		{"json quoted", `{"password":"correct-horse-battery","x":1}`, `{"password":"[redacted:credential]","x":1}`},
 		{"a path is not a credential", "--api-key=/etc/hotserve/app.key", "--api-key=/etc/hotserve/app.key"},
 		{"a placeholder is not a credential", "api_key={shared_dir}/key", "api_key={shared_dir}/key"},

@@ -826,8 +826,12 @@ What liveswap does for you:
   8+ characters is scrubbed from responses, so a non-secret there (a
   path, a hostname) gets scrubbed too and belongs in inline `env`
   instead; and inline `env` values are never treated as secrets,
-  because the Caddyfile lives in a repo. Past the first layer it is
-  best effort, and the limits are in DESIGN-threat-model.md.
+  because the Caddyfile lives in a repo. While an app's `env_file`
+  cannot be read (a rewrite mid-flight, a mode not yet fixed), every
+  response about that app is withheld, since its values are unknown
+  to the filter; the body says so, and the next response after the
+  file reads is normal. Past the first layer it is best effort, and
+  the limits are in DESIGN-threat-model.md.
 - Deploy logs record the artifact **host only**; download errors go
   through a redactor that drops credentials and query strings (where
   presigned-URL and token secrets live).

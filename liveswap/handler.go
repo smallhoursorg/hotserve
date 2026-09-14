@@ -143,7 +143,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 		return h.deploy(w, r, ma, who)
 	default:
 		w.Header().Set("Allow", "GET, POST")
-		return respondJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"}, nil)
+		return respondJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"}, ma.redactorFor(statusSnapshot{}))
 	}
 }
 
@@ -378,9 +378,9 @@ func stageUpload(body io.Reader, tmpDir string, maxBytes int64) (string, error) 
 
 // respondJSON writes every body the webhook sends, through the
 // response filter (redact.go). r is the app's filter — every site
-// with the app in scope passes ma.redactorFor — and nil only for the
-// bodies written before an app is known (401, 429, 404), where the
-// shape and entropy layers still apply. When a known secret was found
+// with the app in scope passes ma.redactorFor, the 405 included —
+// and nil only for the bodies written before an app is known (401,
+// 429, 404), where the shape and entropy layers still apply. When a known secret was found
 // the object gains a `redacted_env` field naming the keys.
 func respondJSON(w http.ResponseWriter, code int, v any, r *redactor) error {
 	raw, err := json.Marshal(v)

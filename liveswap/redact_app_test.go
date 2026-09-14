@@ -56,11 +56,19 @@ func TestRedactorForLoadsEnvFileWithoutALaunch(t *testing.T) {
 	if out, keys := ma2.redactorFor(statusSnapshot{}).redact("plain"); out != "plain" || len(keys) != 0 {
 		t.Fatalf("missing env_file: %q %v", out, keys)
 	}
+	// …but a body is withheld until it reads: the running app's values
+	// are unknown, and the heuristics alone are not the promise.
+	if out := ma2.redactorFor(statusSnapshot{}).redactJSON([]byte(`{"error":"a low-entropy secret"}`)); strings.Contains(out, "low-entropy") || !strings.Contains(out, "env_file could not be read") {
+		t.Fatalf("body sent with the env_file unread: %s", out)
+	}
 	if err := os.WriteFile(spec2.envFile, []byte("TOKEN=late-but-known-value\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if out, _ := ma2.redactorFor(statusSnapshot{}).redact("saw late-but-known-value"); strings.Contains(out, "late-but-known-value") {
 		t.Fatalf("env_file written after the first response was never read: %q", out)
+	}
+	if out := ma2.redactorFor(statusSnapshot{}).redactJSON([]byte(`{"error":"fine now"}`)); !strings.Contains(out, "fine now") {
+		t.Fatalf("body still withheld after the env_file read: %s", out)
 	}
 
 	// A value equal to one of the app's own paths, or its name, is not

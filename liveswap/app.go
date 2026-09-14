@@ -272,12 +272,15 @@ func (ma *managedApp) rememberSecrets(path string, kvs []string) {
 func (ma *managedApp) redactorFor(s statusSnapshot) *redactor {
 	spec := ma.snapshot().spec
 	ma.secretsMu.Lock()
+	var unread error
 	if spec != nil && (!ma.secretsLoaded || ma.secretsFrom != spec.envFile) {
 		if spec.envFile == "" {
 			ma.secretsFrom, ma.secretsLoaded = "", true
 		} else if kvs, err := parseEnvFile(spec.envFile); err == nil {
 			ma.secrets = mergeSecrets(ma.secrets, kvs)
 			ma.secretsFrom, ma.secretsLoaded = spec.envFile, true
+		} else {
+			unread = err
 		}
 	}
 	kvs := append([]string(nil), ma.secrets...)
@@ -289,7 +292,14 @@ func (ma *managedApp) redactorFor(s statusSnapshot) *redactor {
 	if spec != nil {
 		safe = append(safe, spec.dirs.root, spec.dirs.app, spec.dirs.releases, spec.dirs.shared, spec.dirs.run)
 	}
-	return newRedactor(kvs, safe)
+	r := newRedactor(kvs, safe)
+	if unread != nil {
+		// The values the running app holds are unknown to the filter,
+		// and the heuristics alone are not the promise: no body until
+		// the file reads. The reason names the file, not its contents.
+		r.withhold = "the app's env_file could not be read, so its values are unknown to the filter (" + unread.Error() + ")"
+	}
+	return r
 }
 
 // mergeSecrets appends the pairs not already present.

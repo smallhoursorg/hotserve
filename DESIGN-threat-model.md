@@ -95,10 +95,17 @@ Properties that matter to the model:
   credentials with a recognisable form. Fourth, entropy: a run of 20+
   characters from the base64 or hex alphabet, mixed and with Shannon
   entropy above the class's bar, is replaced by `[masked, N chars]`,
-  never by a fingerprint. A body the first layer would leave
-  unparsable (a value made of JSON's own punctuation matching the
-  structure rather than a string) is withheld, with the keys still
-  reported. What the filter does **not** promise: an encoding not in
+  never by a fingerprint. Markers are chosen so that none contains a
+  known value (a key named for its own value gets a number in
+  brackets), and the first layer runs once more over the finished
+  bytes — the report field and any fallback included — so the promise
+  holds for the bytes written, not only for the body as filtered. A
+  body the first layer would leave unparsable (a value made of JSON's
+  own punctuation matching the structure rather than a string) is
+  withheld, with the keys still reported; and while an app's
+  `env_file` cannot be read, its values are unknown to the filter and
+  every body about that app is withheld rather than sent through the
+  heuristics alone. What the filter does **not** promise: an encoding not in
   the list, a value under 8 characters, a secret split across lines,
   a secret the app fetched at runtime and printed in a low-entropy
   form, an inline `env` value (not a secret by policy: the Caddyfile
