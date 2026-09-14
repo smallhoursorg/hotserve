@@ -643,8 +643,10 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		// A refusal before any phase — the version already running or
 		// already on disk — is about the request, not the version:
 		// it must not replace the record of the deploy that put the
-		// version there.
-		if len(result.Phases) > 0 {
+		// version there. Anything else that failed, even before the
+		// first phase, is the version's own history and is recorded.
+		var ve validationError
+		if len(result.Phases) > 0 || !errors.As(err, &ve) {
 			ma.recordDeploy(c, result)
 		}
 	}()

@@ -170,3 +170,22 @@ func TestDeployRecordSurvivesARefusedRepost(t *testing.T) {
 		t.Fatalf("deploys = %+v", d)
 	}
 }
+
+// A failure before the first phase that is not a refusal — the box's
+// own, here a releases path that is not a directory — is the version's
+// history and is recorded like any other.
+func TestDeployRecordKeepsAPrePhaseFailure(t *testing.T) {
+	rig := newTestRig(t)
+	must(t, os.MkdirAll(rig.spec.dirs.app, 0o750))
+	must(t, os.RemoveAll(rig.spec.dirs.releases))
+	must(t, os.WriteFile(rig.spec.dirs.releases, []byte("not a dir"), 0o600))
+	err := deployOnceV1(t, rig)
+	var ve validationError
+	if err == nil || errors.As(err, &ve) {
+		t.Fatalf("want an operational failure, got %v", err)
+	}
+	rec, rerr := readDeployRecord(rig.spec.dirs.deploys, "v1")
+	if rerr != nil || !strings.Contains(string(rec), `"status":"failed"`) {
+		t.Fatalf("a pre-phase operational failure must be recorded: %v %s", rerr, rec)
+	}
+}
