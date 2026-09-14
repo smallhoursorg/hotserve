@@ -3,8 +3,10 @@
 # is a shell leader that forks a worker before exec'ing the app — the
 # process-tree shape the systemd suite kills — a "probe" release whose
 # ./server records its sandbox view before exec'ing the app, and a
-# "crash" release whose ./server prints its secret and exits 3), and
-# serves them over HTTP — the stand-in for a GitHub/GitLab release
+# "crash" release whose ./server prints its secret and exits 3, and a
+# "wrongarch" release whose ./server was built for the other machine —
+# the tarball a workflow on the wrong runs-on produces), and serves
+# them over HTTP — the stand-in for a GitHub/GitLab release
 # asset URL.
 #
 # The build context is the repo root, not this directory (see
@@ -12,9 +14,13 @@
 # the probe release carries liveswap/testdata/sandbox-view.sh, one view probe shared
 # with liveswap's integration test and packaging/test/smoke.sh (#52).
 FROM golang:1.27-trixie AS build
+# The box's architecture, from BuildKit; the wrongarch release is
+# built for the other one.
+ARG TARGETARCH
 WORKDIR /build
 COPY e2e/liveswap/testapp/main.go e2e/liveswap/workers.sh e2e/liveswap/probe-server.sh e2e/liveswap/crash.sh liveswap/testdata/sandbox-view.sh ./
 RUN CGO_ENABLED=0 go build -o server main.go
+RUN other=amd64; [ "$TARGETARCH" = amd64 ] && other=arm64; CGO_ENABLED=0 GOARCH=$other go build -o server-other main.go
 RUN mkdir /out \
 	&& for v in v1 v2; do \
 		mkdir /tmp/stage-$v \
@@ -44,7 +50,11 @@ RUN mkdir /out \
 	&& cp /build/crash.sh /tmp/stage-crash/server \
 	&& chmod +x /tmp/stage-crash/server \
 	&& echo crash > /tmp/stage-crash/version.txt \
-	&& tar -czf /out/demo-crash.tar.gz -C /tmp/stage-crash .
+	&& tar -czf /out/demo-crash.tar.gz -C /tmp/stage-crash . \
+	&& mkdir /tmp/stage-wrongarch \
+	&& cp /build/server-other /tmp/stage-wrongarch/server \
+	&& echo wrongarch > /tmp/stage-wrongarch/version.txt \
+	&& tar -czf /out/demo-wrongarch.tar.gz -C /tmp/stage-wrongarch .
 
 # The Deno example, built by its own scripts/bundle.sh with the same
 # Deno version e2e/Dockerfile installs on the box.

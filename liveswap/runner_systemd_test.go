@@ -7,6 +7,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -1194,5 +1195,48 @@ func TestExitAfterEndNamesTheUnloadedCleanExit(t *testing.T) {
 	skipped := unitStatus{LoadState: "loaded", ActiveState: "failed", Result: "dependency"}
 	if got := skipped.exitAfterEnd(); !strings.Contains(got, "no process exit recorded") {
 		t.Fatalf("a job that never ran a process: %q", got)
+	}
+}
+
+// Preflight is the launch's resolution run early: the release's own
+// script passes; an executable for another machine is refused with the
+// runner to build on; a command outside the sandbox view is refused
+// with where the runtime has to live — all before a unit exists.
+func TestSystemdRunnerPreflight(t *testing.T) {
+	r, conn := newTestSystemdRunner(t)
+	spec := testApp(t)
+	if err := r.Preflight(spec); err != nil {
+		t.Fatalf("the release's script must pass: %v", err)
+	}
+	other := uint16(62)
+	if runtime.GOARCH == "amd64" {
+		other = 183
+	}
+	if machineFor(runtime.GOARCH) != 0 {
+		if err := os.WriteFile(filepath.Join(spec.dir, "server"), elfHeader(2, false, other), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		err := r.Preflight(spec)
+		if err == nil || !strings.Contains(err.Error(), "build on a runner of the box's architecture") {
+			t.Fatalf("an executable for another machine must be refused: %v", err)
+		}
+	}
+	// Outside the view: a runtime under a home directory, the nvm case
+	// (/bin/sh would not do — /bin is /usr/bin on a merged /usr, and
+	// /usr is in every view).
+	elsewhere := filepath.Join(t.TempDir(), "node")
+	if err := os.WriteFile(elsewhere, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := spec
+	outside.command = []string{elsewhere}
+	if err := r.Preflight(outside); err == nil || !strings.Contains(err.Error(), "not inside the sandbox view") {
+		t.Fatalf("a command outside the view must be refused: %v", err)
+	}
+	conn.mu.Lock()
+	n := len(conn.started)
+	conn.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("Preflight created %d units; it must create none", n)
 	}
 }

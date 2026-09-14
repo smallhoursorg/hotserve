@@ -19,21 +19,24 @@ git push → CI builds app.tar.gz → uploads it → curl webhook → Caddy hot-
 POST /blog {url, version}
   │ downloading   stream the artifact (size-capped, https, token-gated)
   │ extracting    hardened tar extraction into releases/<version>/
-  │ preparing     pre_start command (migrations) — non-zero exit aborts
+  │ preparing     pre-flight (command and pre_start resolve inside the sandbox
+  │               view, built for this machine — else 422), then pre_start
+  │               (migrations) — non-zero exit aborts
   │ starting      spawn the app on a fresh unix socket, SOCKET injected
   │ soaking       GET /health until continuously healthy for `soak`
   │ promoting     atomic cutover — new requests hit the new version
   │ draining      wait `drain` for in-flight requests on the old one
   │ stopping_old  stop the old unit: SIGTERM its whole cgroup, SIGKILL after `grace`
   └ 200 OK        (any failure before "promoting" → old version never
-                   stopped serving, webhook returns 5xx, CI goes red)
+                   stopped serving; the webhook returns 422 for a refusal
+                   and 5xx for a failure, and CI goes red either way)
 ```
 
 The diagram shows a **URL pull**; the same pipeline serves two more
 sources (see [Webhook API](#webhook-api)): a **push** streams the
 tarball in the request body (skips `downloading`), and a **rollback**
-relaunches an on-disk release (skips `downloading`/`extracting`/
-`preparing`). Versions are immutable — a re-deploy of an existing
+relaunches an on-disk release (skips `downloading`/`extracting`, and
+`preparing` runs no `pre_start`). Versions are immutable — a re-deploy of an existing
 version is rejected; rollback is how you relaunch one.
 
 The cutover is an atomic pointer swap inside a `reverse_proxy` dynamic
@@ -401,9 +404,11 @@ vendored Node, an `nvm`/`asdf` shim), cannot be reached at all —
 those paths do not exist inside the unit. A deploy is where this
 surfaces, and it has a fallback there: the health gate fails the new
 version while the old one keeps serving. A command that is not in the
-view is refused before the unit is even created, with a message that
-says where the runtime has to live, rather than failing as a bare
-`203/EXEC`.
+view is refused before the unit is even created — at the deploy's
+pre-flight, as a 422 — with a message that says where the runtime has
+to live, rather than failing as a bare `203/EXEC`. The same pre-flight
+refuses an executable built for another machine (an x86-64 tarball
+pushed to an arm64 box) naming the `runs-on` to build on.
 
 **The host is measured at start.** Capability is probed by running a
 throwaway unit and checking the namespaces from inside
@@ -770,7 +775,7 @@ The response is synchronous:
 | 405 | A method other than `GET` or `POST` |
 | 409 | A deploy is already running for this app (retry) |
 | 413 | Pushed upload exceeded `max_artifact_size`, or a JSON body exceeded 64 KiB |
-| 422 | Bad request — missing/invalid version, version already running, **version already exists** (versions are immutable — deploy a new version or roll back to relaunch it), a rollback target no longer on disk, or (URL path) an artifact url refused by `artifact_allowlist` (host, path, port, or an undeclared query parameter; the body names exactly what tripped and how the entry would declare it) |
+| 422 | Bad request — missing/invalid version, version already running, **version already exists** (versions are immutable — deploy a new version or roll back to relaunch it), a rollback target no longer on disk, a pre-flight refusal (the command or `pre_start` does not resolve inside the sandbox view, or is an executable built for another machine — the body names the box's architecture and the `runs-on` to build on), or (URL path) an artifact url refused by `artifact_allowlist` (host, path, port, or an undeclared query parameter; the body names exactly what tripped and how the entry would declare it) |
 | 429 | This token failed, and the address has already failed 10 times this minute; `Retry-After` says when the oldest failure ages out. A *valid* token from the same address is never refused — see [Secrets and logs](#secrets-and-logs) |
 | 5xx | Deploy failed — **the old version, if there was one, is still serving**; body says why. An artifact over `max_artifact_entries` or the decompressed byte cap fails here, before anything is written |
 

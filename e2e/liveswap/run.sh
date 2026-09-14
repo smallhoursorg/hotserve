@@ -161,6 +161,25 @@ case "$b" in
 *) fail "expected v2 to keep serving, got '$b'" ;;
 esac
 
+echo "=== scenario 5c: a release built for the other machine is refused before anything runs ==="
+c=$(deploy demo-wrongarch.tar.gz v3wrongarch)
+[ "$c" = "422" ] && pass "wrong-architecture release gets 422" || fail "wrong-architecture release: expected 422, got $c ($(cat /tmp/deploy-body))"
+grep -q 'build on a runner of the box'"'"'s architecture (runs-on: ' /tmp/deploy-body \
+	&& pass "the refusal names the runner to build on" \
+	|| fail "no fix named: $(cat /tmp/deploy-body)"
+# A 422 body is the error alone; the status endpoint's last_deploy
+# records where it was refused.
+s=$(status)
+case "$s" in
+*'"version":"v3wrongarch","status":"failed","error":"pre-flight: '*'"phase":"preparing"'*) pass "refused in phase preparing, before any unit" ;;
+*) fail "last_deploy does not record the pre-flight refusal in preparing: $s" ;;
+esac
+b=$(body)
+case "$b" in
+"hello v2"*) pass "v2 still serving after the refusal: '$b'" ;;
+*) fail "expected v2 to keep serving, got '$b'" ;;
+esac
+
 echo "=== scenario 6: concurrent deploy gets 409 ==="
 deploy demo-v1.tar.gz v4 > /tmp/first-deploy-code &
 FIRST=$!
