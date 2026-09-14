@@ -374,7 +374,7 @@ esac
 # on disk; scenario 5b read it while it was fresh).
 c=$(curl -s -o /tmp/record -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$HOOK?deploy=px1")
 [ "$c" = "200" ] && pass "px1's deploy record is readable after the rollback" || fail "record px1: expected 200, got $c ($(cat /tmp/record))"
-grep -q '"version":"px1","status":"succeeded"' /tmp/record && pass "the record is px1's outcome" || fail "record: $(cat /tmp/record)"
+grep -q '"version":"px1"' /tmp/record && grep -q '"status":"succeeded"' /tmp/record && pass "the record is px1's outcome" || fail "record: $(cat /tmp/record)"
 case "$(status)" in
 *'"deploys":[{"version":"px1","status":"succeeded"'*) pass "status lists the deploys newest first" ;;
 *) fail "status.deploys: $(status)" ;;

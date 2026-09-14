@@ -733,6 +733,9 @@ func TestWebhookDeployRecordRoute(t *testing.T) {
 	if w := do(t, h, http.MethodGet, "/demo?deploy=", appToken(t), ""); w.Code != 422 {
 		t.Fatalf("an empty deploy query is malformed, not the status: %d %s", w.Code, w.Body.String())
 	}
+	if w := do(t, h, http.MethodGet, "/demo?deploy=%ZZ", appToken(t), ""); w.Code != 422 {
+		t.Fatalf("a query that does not decode is malformed, not the status: %d %s", w.Code, w.Body.String())
+	}
 	if w := do(t, h, http.MethodGet, "/demo", appToken(t), ""); !strings.Contains(w.Body.String(), `"deploys":[{"version":"v1","status":"failed"`) {
 		t.Fatalf("status lacks deploys: %s", w.Body.String())
 	}

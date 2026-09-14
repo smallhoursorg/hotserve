@@ -106,7 +106,7 @@ func (ma *managedApp) recordDeploy(c collaborators, result deployResult) {
 	switch {
 	case json.Unmarshal([]byte(filtered), &head) != nil || head.Version != result.Version:
 		why = "a redacted value overlapped the record's own structure"
-	case len(filtered) > deployRecordMaxBytes:
+	case len(filtered)+1 > deployRecordMaxBytes: // +1: the newline the file ends with
 		why = "larger than a record can be"
 	}
 	if why != "" {
@@ -265,6 +265,12 @@ func restoreVocabulary(filtered, status, phase string) string {
 func recordHead(b []byte, name string) (deploySummary, bool) {
 	var s deploySummary
 	if json.Unmarshal(b, &s) != nil || !validVersion(s.Version) || s.Version+".json" != name {
+		return deploySummary{}, false
+	}
+	// And an outcome in the vocabulary: a status that is one, a phase
+	// that is one or absent — the writer guarantees both (rule 3), so
+	// a file without them is not a record of ours.
+	if !recordStatuses[s.Status] || (s.Phase != "" && !recordPhases[s.Phase]) {
 		return deploySummary{}, false
 	}
 	return s, true

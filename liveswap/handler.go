@@ -9,6 +9,7 @@ import (
 	"math"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"strconv"
@@ -139,8 +140,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 
 	switch r.Method {
 	case http.MethodGet:
-		if r.URL.Query().Has("deploy") {
-			return h.deployRecord(w, ma, r.URL.Query().Get("deploy"))
+		// Parsed strictly: URL.Query drops a pair it cannot decode, and
+		// a malformed `?deploy=%ZZ` would fall through to the status.
+		q, err := url.ParseQuery(r.URL.RawQuery)
+		if err != nil {
+			return respondJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "malformed query: " + err.Error()}, ma.redactorFor(statusSnapshot{}))
+		}
+		if q.Has("deploy") {
+			return h.deployRecord(w, ma, q.Get("deploy"))
 		}
 		s := ma.status()
 		return respondJSON(w, http.StatusOK, s, ma.redactorFor(s))

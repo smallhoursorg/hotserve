@@ -663,9 +663,14 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 			result.Status = "failed"
 			result.Error = err.Error()
 			result.Detail = detail
-			ma.mu.Lock()
-			result.Phase = ma.phase
-			ma.mu.Unlock()
+			// The phase reached when it failed — none when it failed
+			// before the first (a rollback whose env_file would not
+			// read): "idle" is the app's state, not a deploy's phase.
+			if len(result.Phases) > 0 {
+				ma.mu.Lock()
+				result.Phase = ma.phase
+				ma.mu.Unlock()
+			}
 			logger.Error("deploy failed", zap.Error(err))
 		} else {
 			logger.Info("deploy succeeded")

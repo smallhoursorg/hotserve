@@ -98,14 +98,14 @@ func TestPruneDeployRecordsKeepsOnDiskAndNewest(t *testing.T) {
 	dir := d.deploys
 	base := time.Now().Add(-time.Hour)
 	for i, v := range []string{"a", "b", "c", "d"} {
-		must(t, writeDeployRecord(d, v, []byte(`{"version":"`+v+`"}`)))
+		must(t, writeDeployRecord(d, v, []byte(`{"version":"`+v+`","status":"failed"}`)))
 		must(t, os.Chtimes(deployRecordPath(dir, v), base.Add(time.Duration(i)*time.Minute), base.Add(time.Duration(i)*time.Minute)))
 	}
 	must(t, os.WriteFile(filepath.Join(dir, ".record-123.tmp"), []byte("{"), 0o600)) // a write that never got its rename
 	// Strays hold no retention slot and are removed: a file that is
 	// not JSON, a record whose version is not its name, a link.
 	must(t, os.WriteFile(filepath.Join(dir, "junk.json"), []byte("{"), 0o600))
-	must(t, os.WriteFile(filepath.Join(dir, "wrong.json"), []byte(`{"version":"other"}`), 0o600))
+	must(t, os.WriteFile(filepath.Join(dir, "wrong.json"), []byte(`{"version":"other","status":"failed"}`), 0o600))
 	must(t, os.Symlink("a.json", filepath.Join(dir, "link.json")))
 	pruneDeployRecords(dir, 1, []string{"a"}, zap.NewNop())
 	entries, _ := os.ReadDir(dir)
@@ -569,5 +569,68 @@ func TestDeployRecordTooLargeIsAnEnvelope(t *testing.T) {
 	}
 	if s := string(rec); !strings.Contains(s, `"version":"v1"`) || !strings.Contains(s, `"status":"failed"`) || !strings.Contains(s, "larger than a record can be") || len(s) > 1024 {
 		t.Fatalf("envelope = %.200s… (%d bytes)", s, len(s))
+	}
+}
+
+// A file under a version's name whose outcome is not vocabulary — no
+// status, an invented phase — is not a record: not served, not listed.
+func TestDeployRecordMustHaveAVocabularyOutcome(t *testing.T) {
+	d := newAppDirs(t.TempDir(), "demo")
+	must(t, writeDeployRecord(d, "v1", []byte(`{"version":"v1"}`)))
+	must(t, writeDeployRecord(d, "v2", []byte(`{"version":"v2","status":"failed","phase":"idle"}`)))
+	must(t, writeDeployRecord(d, "v3", []byte(`{"version":"v3","status":"failed"}`)))
+	for _, v := range []string{"v1", "v2"} {
+		if _, err := readDeployRecord(d, v); err == nil || errors.Is(err, errNoDeployRecord) {
+			t.Fatalf("%s: not vocabulary, must be refused outright, got %v", v, err)
+		}
+	}
+	if got := listDeploySummaries(d); len(got) != 1 || got[0].Version != "v3" {
+		t.Fatalf("listed = %+v", got)
+	}
+}
+
+// A rollback that fails before its first phase records no phase: the
+// app's "idle" is not a deploy's phase, and a record must be
+// vocabulary to be read back.
+func TestDeployRecordOfAPrePhaseFailureHasNoPhase(t *testing.T) {
+	rig := newTestRig(t)
+	if err := deployOnceV1(t, rig); err != nil {
+		t.Fatal(err)
+	}
+	if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://example.test/v2.tgz", version: "v2", by: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	rig.spec.envFile = filepath.Join(t.TempDir(), "missing.env") // prepareLaunch fails before any phase
+	err := rig.ma.Deploy(context.Background(), deployRequest{version: "v1", rollback: true, by: "test"})
+	if err == nil {
+		t.Fatal("the rollback should have failed reading its env_file")
+	}
+	rec, rerr := readDeployRecord(rig.spec.dirs, "v1")
+	if rerr != nil {
+		t.Fatalf("the failed rollback's record must be readable: %v", rerr)
+	}
+	if s := string(rec); !strings.Contains(s, `"status":"failed"`) || strings.Contains(s, `"phase":`) {
+		t.Fatalf("record = %s", s)
+	}
+	if ld := rig.ma.status().LastDeploy; ld.Phase != "" {
+		t.Fatalf("last_deploy.phase = %q for a failure before any phase", ld.Phase)
+	}
+}
+
+// The size bound counts the newline the file ends with: a filtered
+// record of exactly the bound is an envelope, not a file one byte too
+// long for every reader.
+func TestDeployRecordSizeBoundCountsTheNewline(t *testing.T) {
+	rig := newTestRig(t)
+	// Pad the error so the filtered JSON lands on the bound exactly.
+	probe := deployResult{Version: "v1", Status: "failed", By: "test", Error: ""}
+	base, err := json.Marshal(probe)
+	must(t, err)
+	rig.runner.startErr = errors.New(strings.Repeat("x", deployRecordMaxBytes-len(base)-len("start failed: ")))
+	if err := deployOnceV1(t, rig); err == nil {
+		t.Fatal("v1 should have failed")
+	}
+	if _, err := readDeployRecord(rig.spec.dirs, "v1"); err != nil {
+		t.Fatalf("a record at the bound must be readable (as itself or as the envelope): %v", err)
 	}
 }
