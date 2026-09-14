@@ -101,6 +101,11 @@ func TestPruneDeployRecordsKeepsOnDiskAndNewest(t *testing.T) {
 		must(t, os.Chtimes(deployRecordPath(dir, v), base.Add(time.Duration(i)*time.Minute), base.Add(time.Duration(i)*time.Minute)))
 	}
 	must(t, os.WriteFile(filepath.Join(dir, ".record-123.tmp"), []byte("{"), 0o600)) // a write that never got its rename
+	// Strays hold no retention slot and are removed: a file that is
+	// not JSON, a record whose version is not its name, a link.
+	must(t, os.WriteFile(filepath.Join(dir, "junk.json"), []byte("{"), 0o600))
+	must(t, os.WriteFile(filepath.Join(dir, "wrong.json"), []byte(`{"version":"other"}`), 0o600))
+	must(t, os.Symlink("a.json", filepath.Join(dir, "link.json")))
 	pruneDeployRecords(dir, 1, []string{"a"}, zap.NewNop())
 	entries, _ := os.ReadDir(dir)
 	var left []string
@@ -349,5 +354,19 @@ func TestARecordedVersionEqualToAKnownValueIsStillRedacted(t *testing.T) {
 	body := rig.ma.redactorFor(s).redactJSON(raw)
 	if strings.Contains(body, secret) || !strings.Contains(body, "[redacted:TOKEN]") {
 		t.Fatalf("the known value leaked through a recorded version: %s", body)
+	}
+}
+
+// A release directory named after a known env value — plantable while
+// the app dir was writable — does not exempt that value from the
+// record's filter.
+func TestRecordFilterDoesNotTrustAReleaseNameEqualToAKnownValue(t *testing.T) {
+	rig := newTestRig(t)
+	secret := "q7Wm2xK9pL4vB8nR3tY6zH5c" // gitleaks:allow — a made-up value for this test
+	rig.ma.rememberSecrets("/etc/app.env", []string{"TOKEN=" + secret})
+	must(t, os.MkdirAll(rig.spec.dirs.release(secret), 0o755))
+	rec := rig.ma.recordRedactor(rig.ma.snapshot(), deployResult{Version: "v1"}).redactJSON([]byte(`{"version":"v1","error":"got ` + secret + `"}`))
+	if strings.Contains(rec, secret) || !strings.Contains(rec, "[redacted:TOKEN]") {
+		t.Fatalf("a planted release name exempted the value: %s", rec)
 	}
 }

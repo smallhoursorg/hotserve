@@ -122,7 +122,9 @@ func (ma *managedApp) recordRedactor(c collaborators, result deployResult) *reda
 	safe := []string{ma.name, result.Version}
 	if c.spec != nil {
 		safe = append(safe, c.spec.dirs.root, c.spec.dirs.app, c.spec.dirs.releases, c.spec.dirs.shared, c.spec.dirs.run)
-		safe = append(safe, listReleases(c.spec.dirs.releases)...)
+		// Release names are read off the filesystem: one equal to a
+		// known value must not exempt it (namesNotValues).
+		safe = append(safe, namesNotValues(kvs, listReleases(c.spec.dirs.releases))...)
 	}
 	return newRedactor(kvs, safe)
 }
@@ -331,11 +333,21 @@ func pruneDeployRecords(dir string, keep int, onDisk []string, logger *zap.Logge
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") || disk[e.Name()] {
 			continue
 		}
-		info, err := e.Info()
-		if err != nil {
+		// Only a record of ours holds a retention slot: a link, a file
+		// that is not JSON, or a version that is not its name would
+		// otherwise crowd out the records the slots are for. Such an
+		// entry is not ours to keep either; it goes.
+		b, written, err := openRecord(filepath.Join(dir, e.Name()))
+		var head struct {
+			Version string `json:"version"`
+		}
+		if err != nil || json.Unmarshal(b, &head) != nil || !validVersion(head.Version) || head.Version+".json" != e.Name() {
+			if rmErr := os.Remove(filepath.Join(dir, e.Name())); rmErr == nil {
+				logger.Info("deploy record: removed an entry that is not a record", zap.String("file", e.Name()))
+			}
 			continue
 		}
-		others = append(others, rec{e.Name(), info.ModTime()})
+		others = append(others, rec{e.Name(), written})
 	}
 	sort.Slice(others, func(i, j int) bool { return others[i].modTime.After(others[j].modTime) })
 	for i, r := range others {

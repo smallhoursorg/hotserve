@@ -349,17 +349,11 @@ func (ma *managedApp) redactorFor(s statusSnapshot) *redactor {
 	// string equal to a known value would exempt that value from the
 	// filter (newRedactor). The same goes for a version a request asks
 	// a record of.
-	known := make(map[string]bool, len(kvs))
-	for _, kv := range kvs {
-		if _, v, ok := strings.Cut(kv, "="); ok {
-			known[v] = true
-		}
-	}
+	var recorded []string
 	for _, d := range s.Deploys {
-		if !known[d.Version] {
-			safe = append(safe, d.Version)
-		}
+		recorded = append(recorded, d.Version)
 	}
+	safe = append(safe, namesNotValues(kvs, recorded)...)
 	if s.LastDeploy != nil {
 		safe = append(safe, s.LastDeploy.Version)
 	}
@@ -374,6 +368,27 @@ func (ma *managedApp) redactorFor(s statusSnapshot) *redactor {
 		r.withhold = "the app's env_file could not be read, so its values are unknown to the filter (" + unread.Error() + ")"
 	}
 	return r
+}
+
+// namesNotValues is names with any that equals a known env value left
+// out: a name read off the filesystem — a record's, a release
+// directory's — is not something the deployer's POST vouched for, and
+// a safe string equal to a known value would exempt that value from
+// the filter (newRedactor).
+func namesNotValues(kvs, names []string) []string {
+	known := make(map[string]bool, len(kvs))
+	for _, kv := range kvs {
+		if _, v, ok := strings.Cut(kv, "="); ok {
+			known[v] = true
+		}
+	}
+	var out []string
+	for _, n := range names {
+		if !known[n] {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // mergeSecrets appends the pairs not already present.
