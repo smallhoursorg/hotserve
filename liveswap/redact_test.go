@@ -149,8 +149,30 @@ func TestRedactJSONWithholdsAnUnparsableBody(t *testing.T) {
 	// fallback, or a key named for its value, cannot come back.
 	r = newRedactor([]string{`ALLOWED=["a","b"]`, "SECRET=redacted", "withheld=withheld"}, nil)
 	out = r.redactJSON([]byte(`{"app":"x","available_versions":["a","b"],"e":"withheld"}`))
-	if !json.Valid([]byte(out)) || strings.Contains(out, "redacted") || strings.Contains(out, "withheld") {
-		t.Errorf("fallback or field leaked a value: %s", out)
+	rest := strings.Replace(out, `"redacted_env":`, "", 1)
+	if !json.Valid([]byte(out)) || strings.Contains(rest, "redacted") || strings.Contains(rest, "withheld") || !strings.Contains(out, `"redacted_env":[`) {
+		t.Errorf("fallback or field leaked a value, or the report is missing: %s", out)
+	}
+	// A value equal to the report field's own name: the field keeps its
+	// name (fixed public text) and still names the key.
+	r = newRedactor([]string{"WEIRD=redacted_env"}, nil)
+	out = r.redactJSON([]byte(`{"error":"saw redacted_env here"}`))
+	if !json.Valid([]byte(out)) || !strings.Contains(out, `"redacted_env":["WEIRD"]`) || strings.Contains(out, "saw redacted_env") {
+		t.Errorf("value equal to the field name: %s", out)
+	}
+}
+
+func TestRedactorSafeSpansSurviveShapes(t *testing.T) {
+	// A version shaped like a provider token is on the safe list and
+	// comes through the shape rules untouched, everywhere it appears.
+	v := "ghp_" + strings.Repeat("a1B2", 9)
+	r := newRedactor(nil, []string{v})
+	in := `{"current_version":"` + v + `","unit":"hotserve-x.` + v + `.0a1b2c3d0a1b2c3d.service"}`
+	if out, _ := r.redact(in); out != in {
+		t.Errorf("a safe version was rewritten by a shape rule:\n got %s\nwant %s", out, in)
+	}
+	if out, _ := (*redactor)(nil).redact(in); !strings.Contains(out, "[redacted:github-token]") {
+		t.Errorf("without the safe list the same shape must be caught: %s", out)
 	}
 }
 

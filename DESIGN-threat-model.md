@@ -98,8 +98,12 @@ Properties that matter to the model:
   never by a fingerprint. Markers are chosen so that none contains a
   known value (a key named for its own value gets a number in
   brackets), and the first layer runs once more over the finished
-  bytes — the report field and any fallback included — so the promise
-  holds for the bytes written, not only for the body as filtered. A
+  bytes — any fallback included — so the promise holds for the bytes
+  written, not only for the body as filtered; the safe strings are
+  held out of the heuristic layers as spans, so a version shaped like
+  a token survives them. The one text outside the promise is the
+  report field's own name, `redacted_env`: it is fixed, in every such
+  response, and so reveals nothing; its key names are filtered. A
   body the first layer would leave unparsable (a value made of JSON's
   own punctuation matching the structure rather than a string) is
   withheld, with the keys still reported; and while an app's

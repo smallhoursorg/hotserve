@@ -307,10 +307,49 @@ func reportedKeys(seen map[string]bool) []string {
 // pass over the finished text guarantees none remains.
 func (r *redactor) redact(s string) (string, []string) {
 	seen := map[string]bool{}
-	s = r.replaceKnown(s, seen)
-	s = r.heuristics(s)
+	s = r.filter(s, seen)
 	s = r.replaceKnown(s, seen)
 	return s, reportedKeys(seen)
+}
+
+// filter is layers 1 to 4 in order, with the safe strings held out of
+// the heuristic layers: a version shaped like a provider token, or a
+// path with a generated-looking segment, comes back as it went in.
+func (r *redactor) filter(s string, seen map[string]bool) string {
+	s = r.replaceKnown(s, seen)
+	s, restore := r.protectSafe(s)
+	s = r.heuristics(s)
+	return restore(s)
+}
+
+// protectSafe swaps every safe string for a placeholder no rule can
+// match (control characters are in no rule's alphabet) and returns
+// the function that swaps them back. Longest first, so a safe string
+// containing another is protected whole.
+func (r *redactor) protectSafe(s string) (string, func(string) string) {
+	if r == nil || len(r.safeExact) == 0 {
+		return s, func(s string) string { return s }
+	}
+	safe := make([]string, 0, len(r.safeExact))
+	for v := range r.safeExact {
+		safe = append(safe, v)
+	}
+	sort.Slice(safe, func(i, j int) bool {
+		return len(safe[i]) > len(safe[j]) || (len(safe[i]) == len(safe[j]) && safe[i] < safe[j])
+	})
+	var used []string
+	for _, v := range safe {
+		if strings.Contains(s, v) {
+			s = strings.ReplaceAll(s, v, "\x00"+strconv.Itoa(len(used))+"\x00")
+			used = append(used, v)
+		}
+	}
+	return s, func(s string) string {
+		for i := len(used) - 1; i >= 0; i-- {
+			s = strings.ReplaceAll(s, "\x00"+strconv.Itoa(i)+"\x00", used[i])
+		}
+		return s
+	}
 }
 
 // heuristics is layers 3 and 4.
@@ -346,44 +385,43 @@ func (r *redactor) heuristics(s string) string {
 
 // redactJSON filters a marshalled JSON body and, when a known value
 // was found, adds a `redacted_env` field naming the keys. Whatever is
-// finally sent — the filtered body, the field, or a fallback — gets a
-// last layer-1 pass, so no known form is in the bytes written, and is
-// valid JSON.
+// finally sent — the filtered body or a fallback — gets a last
+// layer-1 pass, so no known form is in the bytes written, and the
+// result is valid JSON.
+//
+// The report field is added after that pass, its name verbatim and
+// each key name filtered on its own: the name is fixed public text in
+// every such response, and a value equal to it is not learned from
+// the response, whereas a field renamed by the filter would break the
+// one thing the field is for. That fixed name is the single text the
+// strict property (FuzzRedactor) does not cover.
 //
 // Layer 1 is a plain substring replacement, so a value made of JSON's
 // own punctuation could match across a string's delimiters and leave
 // the body unparsable; that body is withheld rather than sent, with
 // the keys still reported. A filter whose env_file could not be read
-// withholds every body: the heuristics alone are not the promise.
+// withholds every body: the heuristics alone are not the promise. A
+// body that is still not JSON at the end — a value equal to the
+// response's own punctuation, twice over — becomes the one body that
+// can contain nothing: a marker under 8 characters.
 func (r *redactor) redactJSON(raw []byte) string {
 	seen := map[string]bool{}
+	var body string
 	if r != nil && r.withhold != "" {
-		return r.finish(`{"error":"response withheld: `+r.withhold+`"}`, seen)
+		body = `{"error":"response withheld: ` + r.withhold + `"}`
+	} else {
+		body = r.filter(string(raw), seen)
+		if !json.Valid([]byte(body)) {
+			body = `{"error":"response withheld: a redacted value overlapped the response's own structure"}`
+		}
 	}
-	body := r.replaceKnown(string(raw), seen)
-	body = r.heuristics(body)
-	if !json.Valid([]byte(body)) {
-		body = `{"error":"response withheld: a redacted value overlapped the response's own structure"}`
-	}
-	if len(seen) > 0 {
-		body = withField(body, "redacted_env", reportedKeys(seen))
-	}
-	return r.finish(body, seen)
-}
-
-// finish is the last pass: layer 1 over the bytes about to be written
-// (the field's key names and a fallback's fixed text included), then
-// the validity check again. A body that is still not JSON — a value
-// equal to the response's own punctuation, twice over — becomes the
-// one body that can contain nothing: a marker under 8 characters.
-func (r *redactor) finish(body string, seen map[string]bool) string {
-	before := len(seen)
 	body = r.replaceKnown(body, seen)
-	if len(seen) > before && strings.HasPrefix(body, "{") {
-		// The last pass found a value in the field's own text or a
-		// fallback; the report has to say so as well.
-		body = withField(body, "redacted_env", reportedKeys(seen))
-		body = r.replaceKnown(body, seen)
+	if len(seen) > 0 {
+		names := reportedKeys(seen)
+		for i, n := range names {
+			names[i] = r.replaceKnown(n, seen)
+		}
+		body = withField(body, "redacted_env", names)
 	}
 	if !json.Valid([]byte(body)) {
 		return `{"error":"[#0]"}`
