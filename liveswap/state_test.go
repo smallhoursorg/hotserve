@@ -3,12 +3,30 @@ package liveswap
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"go.uber.org/zap"
 )
+
+// Rule 4 (redact.go): a directory under releases/ is a release only
+// under a version's name. Anything else — a staging dir, a dotfile, a
+// name nothing could deploy or roll back to — is not listed, so it
+// is neither offered to an operator nor put on the filter's safe list.
+func TestListReleasesSkipsNamesThatAreNotVersions(t *testing.T) {
+	dir := t.TempDir()
+	for _, n := range []string{"v1", "2026.09.14", ".extract-abc", "a b", "..x", strings.Repeat("v", 65)} {
+		must(t, os.MkdirAll(filepath.Join(dir, n), 0o755))
+	}
+	must(t, os.WriteFile(filepath.Join(dir, "v9"), nil, 0o600)) // a file, not a release
+	got := listReleases(dir)
+	sort.Strings(got)
+	if strings.Join(got, ",") != "2026.09.14,v1" {
+		t.Fatalf("listReleases = %v", got)
+	}
+}
 
 func TestFileStateStoreRoundTrip(t *testing.T) {
 	store := &fileStateStore{path: filepath.Join(t.TempDir(), "app", "state.json")}

@@ -67,10 +67,99 @@ func TestRedactorSafeList(t *testing.T) {
 	if out, _ := r.redact(`"current_version":"` + dotted + `","unit":"hotserve-x.` + dotted + `.0a1b2c3d0a1b2c3d.service"`); strings.Contains(out, "[masked") {
 		t.Errorf("a dotted safe version was masked: %q", out)
 	}
-	// An env_file value equal to a safe string is not a secret.
+	// A safe string equal to an env_file value exempts nothing (rule
+	// 1): the value is still redacted, whatever named the string.
 	r = newRedactor([]string{"RELEASE=" + sha, "ROOT=/var/lib/liveswap/example"}, []string{sha, "/var/lib/liveswap/example"})
-	if out, keys := r.redact(sha + " at /var/lib/liveswap/example/run"); strings.Contains(out, "[redacted") || len(keys) != 0 {
-		t.Errorf("safe-listed env_file values were redacted: %q %v", out, keys)
+	if out, keys := r.redact(sha + " at /var/lib/liveswap/example/run"); strings.Contains(out, sha) || strings.Contains(out, "/var/lib/liveswap/example") || strings.Join(keys, ",") != "RELEASE,ROOT" {
+		t.Errorf("a safe string exempted an env_file value: %q %v", out, keys)
+	}
+}
+
+// Rule 1 from the filter's callers' side: every kind of safe string —
+// the app's name, a version a request named, one read off disk, an
+// app dir — is dropped when it equals a known value, and the rest of
+// the safe list still holds out of the heuristics.
+func TestNoSafeStringEqualsAKnownValue(t *testing.T) {
+	sha := "3f9a1c2b4d5e6f708192a3b4c5d6e7f8091a2b3c"
+	env := []string{"NAME=blog-production", "VERSION=" + sha, "DIR=/var/lib/liveswap/blog/shared"}
+	r := newRedactor(env, []string{"blog-production", sha, "/var/lib/liveswap/blog/shared", "/var/lib/liveswap/blog", "e7f8091a2b3c4d5e6f708192a3b4c5d63f9a1c2b"})
+	out, keys := r.redact("blog-production " + sha + " /var/lib/liveswap/blog/shared /var/lib/liveswap/blog e7f8091a2b3c4d5e6f708192a3b4c5d63f9a1c2b")
+	for _, v := range []string{"blog-production", sha, "/var/lib/liveswap/blog/shared"} {
+		if strings.Contains(out, v) {
+			t.Errorf("safe string equal to a known value survived: %q in %q", v, out)
+		}
+	}
+	if strings.Join(keys, ",") != "DIR,NAME,VERSION" {
+		t.Errorf("keys = %v", keys)
+	}
+	if !strings.Contains(out, "/var/lib/liveswap/blog ") || !strings.Contains(out, "e7f8091a2b3c4d5e6f708192a3b4c5d63f9a1c2b") {
+		t.Errorf("a safe string that is no known value was not held out of the heuristics: %q", out)
+	}
+}
+
+// Rule 3: the outcome vocabulary stands outside the filter wherever
+// it is a status, a phase or a phase's name — the status GET's
+// last_deploy and deploys, a record, a phase timing — and nowhere
+// else: the same word in error text is a known value like any other.
+func TestOutcomeWordsSurviveEverywhere(t *testing.T) {
+	r := newRedactor([]string{"WORD=succeeded", "STEP=preparing", "END=stopping_old"}, nil)
+	body := `{"deploys":[{"version":"v2","status":"failed","phase":"preparing"},{"version":"v1","status":"succeeded"}],` +
+		`"last_deploy":{"version":"v2","status":"failed","error":"migrate: preparing succeeded then stopping_old","phase":"preparing",` +
+		`"phases":[{"name":"preparing","seconds":1.5},{"name":"stopping_old","seconds":0.1}],"detail":{"log_tail":["status: succeeded"]}}}`
+	out := r.redactJSON([]byte(body))
+	for _, want := range []string{`"status":"failed"`, `"status":"succeeded"`, `"phase":"preparing"`, `"name":"preparing"`, `"name":"stopping_old"`,
+		`"error":"migrate: [redacted:STEP] [redacted:WORD] then [redacted:END]"`, `"log_tail":["status: [redacted:WORD]"]`, `"redacted_env":["END","STEP","WORD"]`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %s in %s", want, out)
+		}
+	}
+	// In place: the body's order is as marshalled, so the last "phase"
+	// in a failure body is still last_deploy's.
+	if i := strings.LastIndex(out, `"phase":"`); !strings.HasPrefix(out[i:], `"phase":"preparing","phases"`) {
+		t.Errorf("field order changed: %s", out)
+	}
+	// A value that overlaps a pair — its quotes, its key, more than the
+	// word — is not a word: layer 1 sees it before the pair is held,
+	// and the body it breaks is withheld, the key reported.
+	for _, v := range []string{`"status":"failed","error"`, `succeeded"`, `:"preparing"`, `"name":"stopping_old"`} {
+		out := newRedactor([]string{"WEIRD=" + v}, nil).redactJSON([]byte(body))
+		if !strings.HasPrefix(out, `{"error":"response withheld: a redacted value overlapped the response's own structure"`) || !strings.Contains(out, `"redacted_env":["WEIRD"]`) || strings.Contains(out, v) {
+			t.Errorf("value %q overlapping a pair: %s", v, out)
+		}
+	}
+	// A value that is part of a word is replaced inside it, which
+	// leaves an outcome that is not a word: withheld too, rather than
+	// served with a status nothing can read.
+	for _, v := range []string{"ucceeded", "stopping", "reparing"} {
+		out := newRedactor([]string{"WEIRD=" + v}, nil).redactJSON([]byte(body))
+		if !strings.HasPrefix(out, `{"error":"response withheld: a redacted value overlapped the response's own outcome"`) || !strings.Contains(out, `"redacted_env":["WEIRD"]`) || strings.Contains(out, v) {
+			t.Errorf("value %q inside a word: %s", v, out)
+		}
+	}
+	// A pair a record planted where hotserve writes none is a pair in
+	// the count before and after alike, so it cannot mask a damaged
+	// one; and with no value to redact in it, it is left as it is.
+	planted := `{"version":"v1","status":"succeeded","x":{"name":"succeeded"}}`
+	if out := newRedactor([]string{"WEIRD=ucceeded"}, nil).redactJSON([]byte(planted)); !strings.HasPrefix(out, `{"error":"response withheld: a redacted value overlapped the response's own outcome"`) {
+		t.Errorf("a planted pair masked a damaged outcome: %s", out)
+	}
+	if out := newRedactor([]string{"WORD=succeeded"}, nil).redactJSON([]byte(planted)); out != planted {
+		t.Errorf("a planted pair is a pair: %s", out)
+	}
+	// A URL value's password spelled as a word is a bare word form,
+	// and rides through at an outcome key like the value would.
+	if out := newRedactor([]string{"DATABASE_URL=postgres://u:succeeded@h/db"}, nil).redactJSON([]byte(body)); !strings.Contains(out, `"status":"succeeded"`) || strings.Contains(out, "preparing succeeded then") {
+		t.Errorf("a password spelled as a word: %s", out)
+	}
+	// A withheld body carries no outcome, and the words are
+	// not smuggled onto it.
+	r.withhold = "the app's env_file could not be read"
+	if out := r.redactJSON([]byte(body)); strings.Contains(out, "succeeded") || strings.Contains(out, "preparing") {
+		t.Errorf("outcome words on a withheld body: %s", out)
+	}
+	// Without a vocabulary secret the body is untouched.
+	if out := newRedactor(nil, nil).redactJSON([]byte(body)); out != body {
+		t.Errorf("the filter changed a body with nothing to redact:\n%s\n%s", body, out)
 	}
 }
 

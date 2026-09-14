@@ -71,7 +71,10 @@ Properties that matter to the model:
   `Handler.ServeHTTP` (liveswap/handler.go). The status endpoint is
   authenticated — not public.
 - **What the webhook says back is filtered** (liveswap/redact.go,
-  applied in `respondJSON`, the one writer of every body). The
+  which states the filter's four rules; every body passes it —
+  through `respondJSON` in liveswap/handler.go, the record route's
+  `respondFiltered`, the stream's lines, the record store's write).
+  The
   response's audience is wider than its caller: the paved road prints
   it into a GitHub Actions log, readable by everyone with read access
   to the repository, retained, and public for a public repository.
@@ -110,8 +113,11 @@ Properties that matter to the model:
   these values, which is why the filter lives here and not in CI,
   where `::add-mask::` can only hide what the job itself knows.
   Second, an allowlist: the versions the status names and the app's
-  own paths are exempt from the heuristics below and are never
-  secrets, whatever file names them. Third, shape rules for
+  own paths are exempt from the heuristics below — never from the
+  first layer: a safe string equal to a known value is dropped,
+  whoever named it (a request, the config, a name read off disk), so
+  a version, an app name or a path spelled as an `env_file` value is
+  redacted like the value. Third, shape rules for
   credentials with a recognisable form. Fourth, entropy: a run of 20+
   characters from the base64 or hex alphabet, mixed and with Shannon
   entropy above the class's bar, is replaced by `[masked, N chars]`,
@@ -123,7 +129,16 @@ Properties that matter to the model:
   held out of the heuristic layers as spans, so a version shaped like
   a token survives them. The one text outside the promise is the
   report field's own name, `redacted_env`: it is fixed, in every such
-  response, and so reveals nothing; its key names are filtered. A
+  response, and so reveals nothing; its key names are filtered. The
+  other is the outcome vocabulary — `succeeded`, `failed`, the phase
+  names — where it stands as a `status`, `phase` or phase `name`: a
+  known form that is a bare word (a value, or a URL value's password,
+  spelled as one) is replaced everywhere but in such a pair, in every
+  body, so a value spelled as one of the words rewrites no outcome.
+  Every other form is replaced wherever it is; a body with fewer
+  such pairs at the end than it had — a value that is part of a word
+  was replaced inside it — is withheld; and the same word in `error`
+  or `detail` is text, and filtered. A
   body the first layer would leave unparsable (a value made of JSON's
   own punctuation matching the structure rather than a string) is
   withheld, with the keys still reported; and while an app's
@@ -668,8 +683,10 @@ does not isolate the runtime.
   `MemoryMax=`/`TasksMax=`/`CPUQuota=` real the moment they are set;
   nothing sets them until an app needs bounding (#71).
 - **`state.json` must stay outside any writable sandbox view**
-  (liveswap/state.go is trusted on relaunch for
-  the version and the unit). Normative and shipped: only the release
+  (liveswap/state.go is read on relaunch for the version and the
+  unit, and checked before either is used: a version that is not one,
+  a unit that is not this app's, a nonce that is not one — refused,
+  never a path). Normative and shipped: only the release
   being started, `shared/` and the OS base view are bound into the
   unit — the app dir root, `state.json`, `tmp/` (the upload staging
   dir: a running instance must not be able to rewrite the next
@@ -680,16 +697,20 @@ does not isolate the runtime.
   (liveswap/deploys.go states its four rules; every function there
   and both filters hold them). A record is written once, through the
   filter, into a directory verified as the app's own — so no known
-  secret is on disk in it, and a secret rotated later is not in an
-  old record for the new filter to miss. Anything read back is text
+  secret is on disk in it (a version equal to one is the exception,
+  and is already the record's file name and the release directory's),
+  and a secret rotated later is not in an old record for the new
+  filter to miss. Anything read back is text
   from disk: served only through the filter, trusted for nothing
   else unless it proves itself a record (a regular file, a valid
   version name, an object naming that version). Nothing from disk
-  reaches a response or a filter's safe list except through the
-  filter as body text or as a name that is not a known value —
-  release directories and record files alike, since the app dir was
-  writable by the app before sandboxing existed — and nothing is
-  appended to a body after the filter's final pass. Nothing there
+  reaches a response except through the filter as body text; a name
+  read off disk — a release directory's, a record's, `state.json`'s —
+  is a safe string like any other and, like any other, never one
+  equal to a known value (the app dir was writable by the app before
+  sandboxing existed); and nothing is appended to a body after the
+  filter's final pass but what the filter's own second rule names.
+  Nothing there
   follows a link, ancestors included, and the store never blocks a
   deploy or a status.
   `sandboxSpecFor` in liveswap/sandbox.go is the single place that

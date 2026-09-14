@@ -807,8 +807,35 @@ func TestFailureBodyEndsWithLastDeploysPhase(t *testing.T) {
 	}
 }
 
-// GET ?deploy= puts the record's outcome words back after the live
-// filter, so a known value spelled like one does not read as redacted.
+// Rule 3 over HTTP, on the bodies that are not a record: the status
+// GET's last_deploy and deploys, and a failed POST's body, keep their
+// outcome words while the same words in the error are redacted.
+func TestWebhookOutcomeWordsSurviveInEveryBody(t *testing.T) {
+	h, rig := newTestHandler(t)
+	rig.spec.envFile = filepath.Join(t.TempDir(), "app.env")
+	must(t, os.WriteFile(rig.spec.envFile, []byte("WORD=succeeded\nPHASE=starting\n"), 0o600))
+	if w := do(t, h, http.MethodPost, "/demo", appToken(t), `{"url":"https://x/a.tgz","version":"v1"}`); w.Code != 200 || !strings.Contains(w.Body.String(), `"status":"succeeded"`) {
+		t.Fatalf("deploy: %d %s", w.Code, w.Body.String())
+	}
+	rig.runner.startErr = errors.New("starting succeeded? no")
+	post := do(t, h, http.MethodPost, "/demo", appToken(t), `{"url":"https://x/b.tgz","version":"v2"}`)
+	get := do(t, h, http.MethodGet, "/demo", appToken(t), "")
+	for name, w := range map[string]*httptest.ResponseRecorder{"POST 500": post, "GET": get} {
+		body := w.Body.String()
+		for _, want := range []string{`"status":"failed"`, `"phase":"starting"`, `"status":"succeeded"`, `"name":"starting"`, `[redacted:PHASE] [redacted:WORD]? no`} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s: missing %s in %d %s", name, want, w.Code, body)
+			}
+		}
+	}
+	if post.Code != 500 || get.Code != 200 {
+		t.Fatalf("codes: %d %d", post.Code, get.Code)
+	}
+}
+
+// GET ?deploy= is a body like any other: the record's outcome words
+// stand outside the live filter, so a known value spelled like one
+// does not read as redacted.
 func TestWebhookDeployRecordOutcomeSurvivesAVocabularySecret(t *testing.T) {
 	h, rig := newTestHandler(t)
 	rig.spec.envFile = filepath.Join(t.TempDir(), "app.env")

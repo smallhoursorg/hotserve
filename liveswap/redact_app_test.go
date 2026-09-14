@@ -71,8 +71,9 @@ func TestRedactorForLoadsEnvFileWithoutALaunch(t *testing.T) {
 		t.Fatalf("body still withheld after the env_file read: %s", out)
 	}
 
-	// A value equal to one of the app's own paths, or its name, is not
-	// a secret whatever file it came from.
+	// A value equal to one of the app's own paths, or its name, is a
+	// secret like any other value, and the path is no longer a safe
+	// string (rule 1): the response filter's safe list exempts nothing.
 	spec3 := testSpec(t)
 	spec3.envFile = filepath.Join(t.TempDir(), "paths.env")
 	if err := os.WriteFile(spec3.envFile, []byte("APP_ROOT="+spec3.dirs.app+"\nNAME="+spec3.name+"-is-short\n"), 0o600); err != nil {
@@ -80,7 +81,7 @@ func TestRedactorForLoadsEnvFileWithoutALaunch(t *testing.T) {
 	}
 	ma3 := newManagedApp(spec3.name)
 	ma3.spec = spec3
-	if out, keys := ma3.redactorFor(statusSnapshot{}).redact("socket " + spec3.dirs.app + "/run/x/app.sock"); strings.Contains(out, "[redacted") || len(keys) != 0 {
-		t.Fatalf("the app's own path was redacted: %q %v", out, keys)
+	if out, keys := ma3.redactorFor(statusSnapshot{}).redact("socket " + spec3.dirs.app + "/run/x/app.sock"); strings.Contains(out, spec3.dirs.app) || strings.Join(keys, ",") != "APP_ROOT" {
+		t.Fatalf("a safe string exempted the env_file value equal to it: %q %v", out, keys)
 	}
 }

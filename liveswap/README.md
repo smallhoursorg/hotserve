@@ -892,11 +892,14 @@ once, and versions release GC has pruned), so the set is bounded by
 about twice `keep`. They are written as the response filter left them
 — a secret rotated later is not in an old record — and pass it again
 when read, like every body. One consequence: a version name equal to
-an `env_file` value is treated as that value wherever it is read off
-the box (a release directory, a record) and shows as `[redacted:KEY]`
-in `available_versions`, `deploys` and a record — so do not name
-versions after `env_file` values; a release identifier an app needs
-belongs in inline `env`.
+an `env_file` value is that value wherever it appears —
+`current_version`, `available_versions`, `last_deploy`, `deploys`, a
+record — and shows as `[redacted:KEY]`, and such a version's record
+is only the envelope (version, outcome, times, and why); so do not
+name versions (or apps) after `env_file` values; a release identifier
+an app needs belongs in inline `env`. The outcome words — `succeeded`, `failed`,
+the phase names — are never redacted where they stand as an outcome,
+whatever `env_file` holds.
 
 ## Secrets and logs
 
@@ -917,7 +920,9 @@ What liveswap does for you:
   any 20+-character run that looks generated — base64 or hex alphabet,
   mixed, high entropy — becomes `[masked, N chars]`. The versions the
   status names and the app's own paths are exempt from the heuristics,
-  so a git SHA used as a version survives. Two consequences for what
+  so a git SHA used as a version survives — from the heuristics only:
+  one equal to an `env_file` value is redacted like the value. Two
+  consequences for what
   you put where: `env_file` is for secrets, and every value in it of
   8+ characters is scrubbed from responses, so a non-secret there (a
   path, a hostname) gets scrubbed too and belongs in inline `env`

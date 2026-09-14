@@ -46,9 +46,14 @@ func FuzzRedactor(f *testing.F) {
 			base64.RawURLEncoding.EncodeToString([]byte(value)), hex.EncodeToString([]byte(value)),
 			url.QueryEscape(value), url.PathEscape(value)}
 		for _, form := range forms {
-			// No exemption for a value that is a substring of the usual
-			// marker ("redacted", say): the marker is chosen per key so
-			// that it never contains a form of the value.
+			// The one exemption is rule 3's: a value that is a word of
+			// the outcome vocabulary stands where the text makes it an
+			// outcome pair. No exemption for a value that is a substring
+			// of the usual marker ("redacted", say): the marker is chosen
+			// per key so that it never contains a form of the value.
+			if (outcomeStatuses[value] || outcomePhases[value]) && outcomePairRe.MatchString(prefix+form+suffix) {
+				continue
+			}
 			out, keys := r.redact(prefix + form + suffix)
 			if strings.Contains(out, form) {
 				t.Fatalf("form %q of %q survived in %q", form, value, out)
@@ -65,19 +70,27 @@ func FuzzRedactor(f *testing.F) {
 			if string(mustQuote(t, form)) != form && form != value {
 				continue
 			}
-			body, _ := json.Marshal(map[string]any{"error": prefix + form + suffix, "versions": []string{"x", "y"}})
+			body, _ := json.Marshal(map[string]any{"error": prefix + form + suffix, "versions": []string{"x", "y"}, "status": "succeeded", "phase": "starting"})
 			js := r.redactJSON(body)
 			if !json.Valid([]byte(js)) {
 				t.Fatalf("form %q: redactJSON produced invalid JSON: %s", form, js)
 			}
-			// Strictly: the form is absent from the bytes written, with
-			// one exception — the report field's own fixed name, which is
-			// in every such response and so reveals nothing — and the key
-			// is reported unless the body had to fall back to the one
-			// marker that can carry nothing.
+			// Strictly: the form is absent from the bytes written, in
+			// any encoding, with two exceptions — the report field's own
+			// fixed name, which is in every such response and so reveals
+			// nothing, and (rule 3) a value that is a bare word of the
+			// outcome vocabulary, where it stands as the body's own
+			// outcome — and the key is reported unless the body had to
+			// fall back to the one marker that can carry nothing.
 			rest := strings.Replace(js, `"redacted_env":`, "", 1)
-			if strings.Contains(rest, string(mustQuote(t, form))) {
+			if outcomeStatuses[value] || outcomePhases[value] {
+				rest = strings.NewReplacer(`"status":"succeeded"`, "", `"phase":"starting"`, "").Replace(rest)
+			}
+			if strings.Contains(rest, string(mustQuote(t, form))) || strings.Contains(rest, form) {
 				t.Fatalf("form %q: survived in JSON body %s", form, js)
+			}
+			if !strings.HasPrefix(js, `{"error":"response withheld`) && js != `{"error":"[#0]"}` && (!strings.Contains(js, `"status":"succeeded"`) || !strings.Contains(js, `"phase":"starting"`)) {
+				t.Fatalf("form %q: the outcome was rewritten in %s", form, js)
 			}
 			if !strings.Contains(js, `"redacted_env":[`) && js != `{"error":"[#0]"}` {
 				t.Fatalf("form %q: keys not reported in %s", form, js)

@@ -25,8 +25,8 @@ import (
 // back; the status lists each recorded version's outcome.
 //
 // The store is a trust boundary in both directions, and these are its
-// rules; every function here holds them, and the two filters
-// (redactorFor in app.go, recordRedactor below) hold the second.
+// rules; every function here holds them, and the filter's own rules
+// (redact.go) hold the second and third.
 //
 //  1. A record is bytes hotserve wrote once, through the filter, into
 //     a directory it verified as its own. Anything read back is text
@@ -34,18 +34,20 @@ import (
 //     trusted for nothing else — not as a name, not as a retention
 //     slot — unless it proves itself a record: a regular file, under
 //     a valid version name, whose object names that version.
-//  2. Nothing from disk reaches a response or a filter's safe list
-//     except through the filter as body text, or as a name that is
-//     not a known env value (namesNotValues). Nothing is appended to
-//     a body after the filter's final pass (withField merges what
-//     the filtered body already reports; it adds nothing else).
+//  2. Nothing from disk reaches a response except through the filter
+//     as body text. A recorded version is a safe string like any
+//     other name, and no safe string equals a known value (redact.go,
+//     rule 1). Nothing is appended to a body after the filter's final
+//     pass (withField merges what the filtered body already reports;
+//     it adds nothing else).
 //  3. Whatever the filter does to a body, the record on disk names
 //     its version and outcome, from values that cannot carry source
 //     data: the version the deployer named, vocabulary, timestamps.
-//     The vocabulary fields (status, phase) are put back after the
-//     filter, at write and at read, since a value equal to a word of
-//     the vocabulary would otherwise rewrite them; a record too large
-//     to read back is an envelope, never an unreadable file.
+//     The vocabulary (status, phase) stands outside the filter in
+//     every body (redact.go, rule 3), so a value equal to a word of
+//     it rewrites nothing; a record the filter leaves unreadable as
+//     one, or too large to read back, is an envelope, never an
+//     unreadable file.
 //  4. The store never blocks a deploy or a status — a failure here is
 //     a warning, a missing store is an empty list — and never follows
 //     a link: the app dir was writable by the app before sandboxing
@@ -91,33 +93,41 @@ func (ma *managedApp) recordDeploy(c collaborators, result deployResult) {
 		return
 	}
 	rd, unknown := ma.recordRedactor(c, result)
-	filtered := restoreVocabulary(rd.redactJSON(raw), result.Status, result.Phase)
+	filtered := rd.redactJSON(raw)
 	// Rule 3's envelope. The filter's whole-body fallback — a known
 	// value that is a fragment of the record's own JSON — leaves an
-	// object with no version, which nothing could read back as this
-	// version's; and a record larger than a reader accepts would be
-	// written only to be refused. Either way the record is the
-	// version the deployer named, the outcome vocabulary, the times,
-	// and why the rest is missing — nothing that could carry source
-	// data, so nothing the filter would have had to see.
-	var head struct {
-		Version string `json:"version"`
-	}
+	// object that is not a record of this version (recordHead: no
+	// version, or an outcome the filter reached); and a record larger
+	// than a reader accepts would be written only to be refused.
+	// Either way the record is the version the deployer named, the
+	// outcome vocabulary, the times, and why the rest is missing —
+	// nothing that could carry source data, so nothing the filter
+	// would have had to see.
 	why := ""
-	switch {
+	switch _, isRecord := recordHead([]byte(filtered), result.Version+".json"); {
 	case unknown != "":
 		why = unknown
-	case json.Unmarshal([]byte(filtered), &head) != nil || head.Version != result.Version:
-		why = "a redacted value overlapped the record's own structure"
+	case !isRecord && !rd.safeExact[result.Version]:
+		// Redacted like the value it equals (redact.go, rule 1), so
+		// the record could not name itself; the envelope does. (A
+		// value too short to be a secret drops the version from the
+		// safe list too, but redacts nothing: the record stands.)
+		why = "the version equals an env_file value"
+	case !isRecord:
+		why = "a redacted value overlapped the record's own structure or outcome"
 	case len(filtered)+1 > deployRecordMaxBytes: // +1: the newline the file ends with
 		why = "larger than a record can be"
 	}
 	if why != "" {
-		env, err := json.Marshal(map[string]any{
-			"version": result.Version, "status": result.Status, "phase": result.Phase,
+		envelope := map[string]any{
+			"version": result.Version, "status": result.Status,
 			"started_at": result.StartedAt, "finished_at": result.FinishedAt,
 			"error": "record withheld: " + why,
-		})
+		}
+		if result.Phase != "" { // absent, as a marshalled result has it, not ""
+			envelope["phase"] = result.Phase
+		}
+		env, err := json.Marshal(envelope)
 		if err != nil {
 			c.logger.Warn("deploy record: cannot encode the envelope", zap.Error(err))
 			return
@@ -167,9 +177,9 @@ func releaseNames(releasesDir string) ([]string, error) {
 // values before the bad line are unknown to the filter and could be
 // in the very error that says so — the second result names that, and
 // the record is the envelope (rule 3). A file that is absent holds no
-// values to know. Its safe strings follow rule 2: the version the
-// deployer named as given, names off the filesystem only when not a
-// known value.
+// values to know. Its safe strings are the names the response filter
+// exempts: the version, the app's dirs, the releases on disk — and
+// none equal to a known value (redact.go, rule 1).
 func (ma *managedApp) recordRedactor(c collaborators, result deployResult) (*redactor, string) {
 	ma.secretsMu.Lock()
 	kvs := append([]string(nil), ma.secrets...)
@@ -191,7 +201,7 @@ func (ma *managedApp) recordRedactor(c collaborators, result deployResult) (*red
 	safe := []string{ma.name, result.Version}
 	if c.spec != nil {
 		safe = append(safe, c.spec.dirs.root, c.spec.dirs.app, c.spec.dirs.releases, c.spec.dirs.shared, c.spec.dirs.run)
-		safe = append(safe, namesNotValues(kvs, listReleases(c.spec.dirs.releases))...)
+		safe = append(safe, listReleases(c.spec.dirs.releases)...)
 	}
 	return newRedactor(kvs, safe), unknown
 }
@@ -234,42 +244,6 @@ func recordsDir(d appDirs, create bool) (string, error) {
 	return d.deploys, nil
 }
 
-// The outcome vocabulary: what status and phase may say. A record's
-// status must be one of these; its phase one of these or absent.
-var (
-	recordStatuses = map[string]bool{"succeeded": true, "failed": true}
-	recordPhases   = map[string]bool{"downloading": true, "extracting": true, "preparing": true, "starting": true, "soaking": true, "promoting": true, "draining": true, "stopping_old": true}
-)
-
-// restoreVocabulary puts the outcome fields back on a filtered record
-// (rule 3): a known value equal to a word of the vocabulary — a secret
-// spelled "succeeded" — would otherwise have rewritten them, and the
-// words carry nothing of the app's. Anything but an object, or a
-// status outside the vocabulary, is left as it is for the caller's
-// own checks to refuse.
-func restoreVocabulary(filtered, status, phase string) string {
-	if !recordStatuses[status] || (phase != "" && (status != "failed" || !recordPhases[phase])) {
-		return filtered
-	}
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(filtered), &obj); err != nil || obj == nil {
-		return filtered
-	}
-	st, _ := json.Marshal(status)
-	obj["status"] = st
-	if phase == "" {
-		delete(obj, "phase")
-	} else {
-		ph, _ := json.Marshal(phase)
-		obj["phase"] = ph
-	}
-	out, err := json.Marshal(obj)
-	if err != nil {
-		return filtered
-	}
-	return string(out)
-}
-
 // recordHead is what proves a file a record (rule 1): a valid version
 // equal to the name it was read under. The rest of the object is body
 // text for the filter.
@@ -282,8 +256,17 @@ func recordHead(b []byte, name string) (deploySummary, bool) {
 	// phase — the one a failure reached — only on a failure, and one
 	// of the vocabulary. The writer guarantees all of it (rule 3), so
 	// a file without is not a record of ours.
-	if !recordStatuses[s.Status] || (s.Phase != "" && (s.Status != "failed" || !recordPhases[s.Phase])) {
+	if !outcomeStatuses[s.Status] || (s.Phase != "" && (s.Status != "failed" || !outcomePhases[s.Phase])) {
 		return deploySummary{}, false
+	}
+	// And its times strings, as the writer marshals them: the summary
+	// carries them as they are into the status body, and a string is
+	// the one value that re-encodes as text rather than structure.
+	for _, raw := range []json.RawMessage{s.StartedAt, s.FinishedAt} {
+		var str string
+		if len(raw) != 0 && (string(raw) == "null" || json.Unmarshal(raw, &str) != nil) {
+			return deploySummary{}, false
+		}
 	}
 	return s, true
 }
