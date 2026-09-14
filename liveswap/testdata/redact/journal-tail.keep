@@ -1,0 +1,12 @@
+# diagnostics a reader needs from an app's last lines
+migrate: schema v1 -> v2 in /var/lib/liveswap/example/shared/app.db
+listening on /var/lib/liveswap/example/run/0a1b2c3d0a1b2c3d/app.sock
+config: DATABASE_URL=[redacted:DATABASE_URL]
+config: API_KEY=[redacted:API_KEY] (base64 [redacted:API_KEY])
+warn: token [redacted:jwt] rejected by upstream
+error: Invalid HTTP_HOST header: 'localhost'. You may need to add 'localhost' to ALLOWED_HOSTS.
+at handleRequest (file:///var/lib/liveswap/example/releases/dx2/main.ts:42:11)
+at ext:deno_http/00_serve.ts:511:19
+fetch https://api.github.com/repos/smallhoursorg/example/releases/assets/12345 -> 404
+session id [masked, 64 chars] expired
+2026-09-14T07:15:33Z exited with status 3

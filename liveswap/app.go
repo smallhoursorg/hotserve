@@ -224,10 +224,102 @@ type managedApp struct {
 	wdWG         sync.WaitGroup
 	wdNotify     chan struct{} // buffered(1); poked whenever current changes
 	wd           watchdogState
+
+	// secrets is every env_file KEY=VALUE pair this process has
+	// rendered for a launch, or read for the filter after a restart,
+	// kept for the life of the process so a value rotated since stays
+	// redacted from responses. What a still-running instance was
+	// launched with before a restart is not known: only the file as it
+	// is now. Under secretsMu; read by the handler's response path,
+	// written by deploys, relaunches and configure.
+	secretsMu sync.Mutex
+	secrets   []string
+	// secretsFrom is the env_file path whose contents are in secrets
+	// (rendered by a launch, or read for the filter); a spec naming a
+	// different path — a reload, or a rollback of one — is unread
+	// until the next response's filter reads it. "" with
+	// secretsLoaded set means the spec has no env_file.
+	secretsFrom   string
+	secretsLoaded bool
 }
 
 func newManagedApp(name string) *managedApp {
 	return &managedApp{name: name, phase: "idle", wdNotify: make(chan struct{}, 1)}
+}
+
+// rememberSecrets records a launch's env_file pairs for the response
+// filter (redact.go): path is the env_file the launch's spec named
+// and kvs what it held. Values are added, never dropped: a secret
+// that was ever handed to an app is one a response could still carry.
+func (ma *managedApp) rememberSecrets(path string, kvs []string) {
+	ma.secretsMu.Lock()
+	defer ma.secretsMu.Unlock()
+	ma.secretsFrom, ma.secretsLoaded = path, true
+	ma.secrets = mergeSecrets(ma.secrets, kvs)
+}
+
+// redactorFor is the filter for a response about this app: the
+// remembered secrets, with the versions the status names exempt from
+// the heuristics (a git SHA as a version is high-entropy by design).
+//
+// After a hotserve restart the app is reattached without a launch, so
+// nothing has rendered its env_file yet; and a reload can name a
+// different env_file than the last launch rendered. Either way the
+// current spec's file is unread, and the filter reads it here. A file
+// that cannot be read now (a rewrite mid-flight, a mode not yet fixed)
+// is not an error here — the next launch reports that — and the read
+// is retried on the next response until it succeeds.
+func (ma *managedApp) redactorFor(s statusSnapshot) *redactor {
+	// The spec is read under secretsMu so the "which env_file is
+	// loaded" check and the spec it is checked against are one
+	// snapshot: a reload landing between the two could otherwise pair
+	// the new spec with the old latch. secretsMu → specMu is the only
+	// nesting: configure holds specMu and never takes secretsMu.
+	ma.secretsMu.Lock()
+	spec := ma.snapshot().spec
+	var unread error
+	if spec != nil && (!ma.secretsLoaded || ma.secretsFrom != spec.envFile) {
+		if spec.envFile == "" {
+			ma.secretsFrom, ma.secretsLoaded = "", true
+		} else if kvs, err := parseEnvFile(spec.envFile); err == nil {
+			ma.secrets = mergeSecrets(ma.secrets, kvs)
+			ma.secretsFrom, ma.secretsLoaded = spec.envFile, true
+		} else {
+			unread = err
+		}
+	}
+	kvs := append([]string(nil), ma.secrets...)
+	ma.secretsMu.Unlock()
+	safe := append([]string{ma.name, s.CurrentVersion}, s.AvailableVersions...)
+	if s.LastDeploy != nil {
+		safe = append(safe, s.LastDeploy.Version)
+	}
+	if spec != nil {
+		safe = append(safe, spec.dirs.root, spec.dirs.app, spec.dirs.releases, spec.dirs.shared, spec.dirs.run)
+	}
+	r := newRedactor(kvs, safe)
+	if unread != nil {
+		// The values the running app holds are unknown to the filter,
+		// and the heuristics alone are not the promise: no body until
+		// the file reads. The reason names the file, not its contents.
+		r.withhold = "the app's env_file could not be read, so its values are unknown to the filter (" + unread.Error() + ")"
+	}
+	return r
+}
+
+// mergeSecrets appends the pairs not already present.
+func mergeSecrets(have, add []string) []string {
+	known := make(map[string]bool, len(have))
+	for _, kv := range have {
+		known[kv] = true
+	}
+	for _, kv := range add {
+		if !known[kv] {
+			known[kv] = true
+			have = append(have, kv)
+		}
+	}
+	return have
 }
 
 // configure installs the latest spec and (re)wires collaborators. On
@@ -453,6 +545,7 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	if err != nil {
 		return err
 	}
+	ma.rememberSecrets(spec.envFile, l.secrets)
 	// A launch that never becomes the instance leaves nothing behind:
 	// its run dir, and any pin the health gate made, go with it. Once
 	// promoted, l.sock is the instance's own and lives on. And like
@@ -823,6 +916,7 @@ func (ma *managedApp) launchVersion(c collaborators, version string) (*instance,
 	if err != nil {
 		return nil, err
 	}
+	ma.rememberSecrets(spec.envFile, l.secrets)
 	// No Start without a confirmed sweep: whatever the manager still
 	// runs for this app (a unit an earlier hotserve lost track of, a
 	// stop that could not be confirmed) is settled first, or nothing
@@ -849,6 +943,9 @@ type launch struct {
 	version, nonce, socket, releaseDir string
 	sock                               *socketRef
 	env                                []string
+	// secrets is the env_file subset of env: what the response filter
+	// must never let out (redact.go).
+	secrets []string
 }
 
 // prepareLaunch draws the instance's nonce and renders its environment
@@ -870,7 +967,7 @@ func (spec *appSpec) prepareLaunch(version string) (launch, error) {
 	}
 	l := launch{version: version, nonce: nonce, socket: spec.dirs.socket(nonce), releaseDir: spec.dirs.release(version)}
 	l.sock = spec.dirs.socketRef(nonce)
-	if l.env, err = buildEnv(spec, version, l.socket, l.releaseDir); err != nil {
+	if l.env, l.secrets, err = buildEnvFull(spec, version, l.socket, l.releaseDir); err != nil {
 		l.sock.retire()
 		return launch{}, err
 	}
@@ -1164,19 +1261,30 @@ func inheritedEnv() []string {
 // shape a deny-by-default view fails in. Applied before env_file and
 // env, so an operator can still point it elsewhere.
 func buildEnv(spec *appSpec, version, socket, releaseDir string) ([]string, error) {
-	env := append(inheritedEnv(), "HOME="+spec.dirs.shared)
+	env, _, err := buildEnvFull(spec, version, socket, releaseDir)
+	return env, err
+}
+
+// buildEnvFull is buildEnv plus the env_file pairs on their own: the
+// values the response filter treats as secrets. Inline `env` is not
+// among them — it lives in the Caddyfile, in a repo, and is not secret
+// by policy — and neither are HOME, SOCKET or the inherited PATH,
+// which a diagnostic has to be able to name.
+func buildEnvFull(spec *appSpec, version, socket, releaseDir string) (env, secrets []string, err error) {
+	env = append(inheritedEnv(), "HOME="+spec.dirs.shared)
 	if spec.envFile != "" {
 		fileVars, err := parseEnvFile(spec.envFile)
 		if err != nil {
-			return nil, fmt.Errorf("env_file: %w", err)
+			return nil, nil, fmt.Errorf("env_file: %w", err)
 		}
 		env = append(env, fileVars...)
+		secrets = fileVars
 	}
 	for k, v := range spec.env {
 		env = append(env, k+"="+expandPlaceholders(v, spec, version, socket, releaseDir))
 	}
 	env = append(env, "SOCKET="+socket)
-	return env, nil
+	return env, secrets, nil
 }
 
 // envKeyRe is what systemd accepts in Environment=; the exec runner

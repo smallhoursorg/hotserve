@@ -1,0 +1,13 @@
+# gitleaks configuration: the default rules, plus one allowlist.
+#
+# liveswap/testdata/redact/ holds fixtures for the response filter
+# (liveswap/redact.go): sample deploy output carrying credential-shaped
+# strings on purpose, so the tests can assert they are redacted. None
+# is a real secret. The Go tests for the same filter carry a few more
+# inline, each marked gitleaks:allow on its line.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "response-filter fixtures: credential-shaped by design"
+paths = ['''^liveswap/testdata/redact/''']

@@ -806,6 +806,32 @@ app.tar.gz -C dist .`), with versions matching `[A-Za-z0-9._-]{1,64}` and not st
 
 What liveswap does for you:
 
+- **Every webhook response is filtered before it leaves the box.** A
+  response lands in a CI log — readable by everyone with read access
+  to the repository, retained, public for a public repo — so nothing
+  reaches it unfiltered. hotserve knows the app's secrets by value (it
+  built the environment from `env_file`), so the first layer is exact:
+  every `env_file` value of 8+ characters, as written, JSON-escaped,
+  base64, hex or URL-escaped (and a URL value's password on its own),
+  becomes `[redacted:KEY]`, and the response gains
+  `"redacted_env": ["KEY", …]` naming what it contained. Then
+  credentials with a recognisable shape (JWTs, bearer tokens, URL
+  userinfo and query strings, provider key prefixes, PEM blocks,
+  `…PASSWORD=`-style assignments) are replaced by name, and finally
+  any 20+-character run that looks generated — base64 or hex alphabet,
+  mixed, high entropy — becomes `[masked, N chars]`. The versions the
+  status names and the app's own paths are exempt from the heuristics,
+  so a git SHA used as a version survives. Two consequences for what
+  you put where: `env_file` is for secrets, and every value in it of
+  8+ characters is scrubbed from responses, so a non-secret there (a
+  path, a hostname) gets scrubbed too and belongs in inline `env`
+  instead; and inline `env` values are never treated as secrets,
+  because the Caddyfile lives in a repo. While an app's `env_file`
+  cannot be read (a rewrite mid-flight, a mode not yet fixed), every
+  response about that app is withheld, since its values are unknown
+  to the filter; the body says so, and the next response after the
+  file reads is normal. Past the first layer it is best effort, and
+  the limits are in DESIGN-threat-model.md.
 - Deploy logs record the artifact **host only**; download errors go
   through a redactor that drops credentials and query strings (where
   presigned-URL and token secrets live).
