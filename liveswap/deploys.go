@@ -119,6 +119,16 @@ func (ma *managedApp) recordRedactor(c collaborators, result deployResult) *reda
 	ma.secretsMu.Lock()
 	kvs := append([]string(nil), ma.secrets...)
 	ma.secretsMu.Unlock()
+	// The values remembered so far are those of every launch, and a
+	// deploy that failed before its launch — a download that did not
+	// complete — remembered nothing: read the deploy's own env_file
+	// too, so what it holds now is known to the filter that writes
+	// the record. Unreadable, the remembered values are all there is.
+	if c.spec != nil && c.spec.envFile != "" {
+		if now, err := parseEnvFile(c.spec.envFile); err == nil {
+			kvs = mergeSecrets(kvs, now)
+		}
+	}
 	safe := []string{ma.name, result.Version}
 	if c.spec != nil {
 		safe = append(safe, c.spec.dirs.root, c.spec.dirs.app, c.spec.dirs.releases, c.spec.dirs.shared, c.spec.dirs.run)
@@ -137,6 +147,16 @@ func (ma *managedApp) recordRedactor(c collaborators, result deployResult) *reda
 // sources' (resolveBindSources): canonical against canonical, with
 // an alias on the liveswap root itself the one difference allowed.
 func deploysDir(d appDirs) (string, error) {
+	rootC := d.root
+	if c, err := filepath.EvalSymlinks(d.root); err == nil {
+		rootC = c
+	}
+	// The app dir first, before anything is created through it: an
+	// ancestor link would otherwise have MkdirAll make the directory
+	// where the link points before the check below refused it.
+	if got, err := filepath.EvalSymlinks(d.app); err == nil && got != filepath.Join(rootC, filepath.Base(d.app)) {
+		return "", fmt.Errorf("%s resolves to %s (a planted link is not followed)", d.app, got)
+	}
 	if err := os.MkdirAll(d.deploys, 0o750); err != nil {
 		return "", err
 	}
@@ -146,10 +166,6 @@ func deploysDir(d appDirs) (string, error) {
 	}
 	if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
 		return "", fmt.Errorf("%s is not a directory (a planted link is not followed)", d.deploys)
-	}
-	rootC := d.root
-	if c, err := filepath.EvalSymlinks(d.root); err == nil {
-		rootC = c
 	}
 	got, err := filepath.EvalSymlinks(d.deploys)
 	if err != nil {

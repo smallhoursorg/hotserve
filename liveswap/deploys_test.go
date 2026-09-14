@@ -307,12 +307,18 @@ func TestDeployRecordIsNotWithheldByALaterUnreadableEnvFile(t *testing.T) {
 func TestDeployRecordsRefuseAPlantedAncestorLink(t *testing.T) {
 	root := t.TempDir()
 	shop := newAppDirs(root, "shop")
-	must(t, writeDeployRecord(shop, "v1", []byte(`{"version":"v1","status":"succeeded"}`)))
+	must(t, os.MkdirAll(shop.app, 0o750))
 	must(t, os.Symlink("shop", filepath.Join(root, "blog")))
 	blog := newAppDirs(root, "blog")
 	if _, err := deploysDir(blog); err == nil {
 		t.Fatal("blog's deploys dir resolves into shop's and must be refused")
 	}
+	// Refused before anything was created through the link: shop has
+	// no deploys dir that blog's request made for it.
+	if _, err := os.Lstat(shop.deploys); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("blog's refused request created shop's deploys dir: %v", err)
+	}
+	must(t, writeDeployRecord(shop, "v1", []byte(`{"version":"v1","status":"succeeded"}`)))
 	if err := writeDeployRecord(blog, "v9", []byte(`{"version":"v9","status":"failed"}`)); err == nil {
 		t.Fatal("a write through the ancestor link must be refused")
 	}
@@ -368,5 +374,27 @@ func TestRecordFilterDoesNotTrustAReleaseNameEqualToAKnownValue(t *testing.T) {
 	rec := rig.ma.recordRedactor(rig.ma.snapshot(), deployResult{Version: "v1"}).redactJSON([]byte(`{"version":"v1","error":"got ` + secret + `"}`))
 	if strings.Contains(rec, secret) || !strings.Contains(rec, "[redacted:TOKEN]") {
 		t.Fatalf("a planted release name exempted the value: %s", rec)
+	}
+}
+
+// A deploy that failed before its launch remembered no env_file
+// values, and its error can still carry one: the record's filter
+// reads the deploy's own env_file, so the value is not written.
+func TestDeployRecordFiltersACurrentValueBeforeAnyLaunch(t *testing.T) {
+	rig := newTestRig(t)
+	secret := "q7Wm2xK9pL4vB8nR3tY6zH5c" // gitleaks:allow — a made-up value for this test
+	rig.spec.envFile = filepath.Join(t.TempDir(), "app.env")
+	must(t, os.WriteFile(rig.spec.envFile, []byte("TOKEN="+secret+"\n"), 0o600))
+	rig.fetch.err = errors.New("download https://x/a.tgz?sig=" + secret + ": HTTP 403")
+	if err := deployOnceV1(t, rig); err == nil {
+		t.Fatal("the download should have failed")
+	}
+	rec, err := readDeployRecord(rig.spec.dirs, "v1")
+	must(t, err)
+	// The value is gone and the key reported; which layer took it (the
+	// query-string rule reaches a URL's query before the marker does)
+	// is not the point.
+	if s := string(rec); strings.Contains(s, secret) || !strings.Contains(s, `"redacted_env":["TOKEN"]`) {
+		t.Fatalf("a current value reached the record of a pre-launch failure: %s", s)
 	}
 }
