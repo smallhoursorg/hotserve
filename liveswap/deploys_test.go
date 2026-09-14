@@ -128,3 +128,19 @@ func TestDeploySummariesSurviveARedactedTimestamp(t *testing.T) {
 		t.Fatalf("summaries = %+v", got)
 	}
 }
+
+// A releases directory that cannot be listed is no reason to prune:
+// every record stays, rather than an on-disk release losing its.
+func TestDeployRecordsAreNotPrunedWhenReleasesAreUnreadable(t *testing.T) {
+	rig := newTestRig(t)
+	rig.spec.keep = 1
+	for _, v := range []string{"a", "b", "c"} {
+		must(t, writeDeployRecord(rig.spec.dirs.deploys, v, []byte(`{"version":"`+v+`","status":"failed"}`)))
+	}
+	must(t, os.RemoveAll(rig.spec.dirs.releases))
+	must(t, os.WriteFile(rig.spec.dirs.releases, []byte("not a dir"), 0o600)) // ReadDir fails
+	rig.ma.recordDeploy(rig.ma.snapshot(), deployResult{Version: "d", Status: "failed"})
+	if got := len(listDeploySummaries(rig.spec.dirs.deploys)); got != 4 {
+		t.Fatalf("records after an unreadable releases dir = %d, want all 4 kept", got)
+	}
+}

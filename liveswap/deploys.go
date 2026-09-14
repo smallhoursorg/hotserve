@@ -62,7 +62,32 @@ func (ma *managedApp) recordDeploy(c collaborators, result deployResult) {
 		c.logger.Warn("deploy record: cannot write", zap.String("version", result.Version), zap.Error(err))
 		return
 	}
-	pruneDeployRecords(dir, c.spec.keep, listReleases(c.spec.dirs.releases), c.logger)
+	// The protection set is read strictly: a releases dir that cannot
+	// be listed is no reason to prune, since an on-disk release would
+	// then look like an "other" and lose its record.
+	onDisk, err := releaseNames(c.spec.dirs.releases)
+	if err != nil {
+		c.logger.Warn("deploy record: releases unreadable, not pruning", zap.Error(err))
+		return
+	}
+	pruneDeployRecords(dir, c.spec.keep, onDisk, c.logger)
+}
+
+// releaseNames is every release directory's name, or an error when the
+// directory cannot be listed — unlike listReleases, which is
+// best-effort and ordered, this is the set pruning must not miss.
+func releaseNames(releasesDir string) ([]string, error) {
+	entries, err := os.ReadDir(releasesDir)
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
+			names = append(names, e.Name())
+		}
+	}
+	return names, nil
 }
 
 // writeDeployRecord writes the record atomically (temp file + rename),
