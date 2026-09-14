@@ -6,6 +6,7 @@ package examples
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -87,7 +88,8 @@ func TestDeployShReadsEveryShapeOfAnswer(t *testing.T) {
 			cmd.Env = append(os.Environ(), "HOTSERVE_URL="+srv.URL+"/demo", "HOTSERVE_TOKEN=x", "VERSION=v1", "GITHUB_ACTIONS=", "ACTIONS_ID_TOKEN_REQUEST_URL=")
 			out, err := cmd.CombinedOutput()
 			code := 0
-			if ee, ok := err.(*exec.ExitError); ok {
+			var ee *exec.ExitError
+			if errors.As(err, &ee) {
 				code = ee.ExitCode()
 			} else if err != nil {
 				t.Fatalf("running deploy.sh: %v\n%s", err, out)
