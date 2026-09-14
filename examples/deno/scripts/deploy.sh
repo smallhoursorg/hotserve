@@ -50,7 +50,11 @@ fi
 # push a stale tarball; refuse anything after the one operand.
 [ $# -eq 0 ] || { echo "deploy.sh: unexpected argument '$1' (--rollback goes first, without a tarball)" >&2; exit 1; }
 url=${HOTSERVE_URL:?set HOTSERVE_URL to the app webhook, e.g. https://deploy.example.com/example}
-app=${url##*/}
+# The app is the URL's last path segment; the box accepts a trailing
+# slash there, so drop any before taking it.
+app=$url
+while [ "${app%/}" != "$app" ]; do app=${app%/}; done
+app=${app##*/}
 if [ -z "$rollback" ]; then
 	version=${VERSION:-$(git rev-parse --short=12 HEAD 2>/dev/null || true)}
 	[ -n "$version" ] || { echo "deploy.sh: not in a git checkout; set VERSION" >&2; exit 1; }

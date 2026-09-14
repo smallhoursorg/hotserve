@@ -306,9 +306,11 @@ example_scenario() { # <app> <port> <deploy.sh path> <version prefix>
 	[ "$b" = "hello from ${pre}2 (schema v1)" ] && pass "$app: serves ${pre}2" || fail "$app: expected ${pre}2, got '$b'"
 	# The workflow's Run-workflow path: deploy.sh --rollback, the release
 	# still on the box's disk, no artifact — run as the workflow runs it,
-	# with GITHUB_ACTIONS set, so the job-summary line is exercised.
+	# with GITHUB_ACTIONS set, so the job-summary line is exercised. The
+	# URL carries a trailing slash, which the box accepts, and the
+	# summary must still name the app.
 	: >/tmp/ex-summary.md
-	if HOTSERVE_URL=$hook HOTSERVE_TOKEN=$TOKEN GITHUB_ACTIONS=1 GITHUB_STEP_SUMMARY=/tmp/ex-summary.md \
+	if HOTSERVE_URL="$hook/" HOTSERVE_TOKEN=$TOKEN GITHUB_ACTIONS=1 GITHUB_STEP_SUMMARY=/tmp/ex-summary.md \
 		sh "$script" --rollback "${pre}1" >/tmp/ex-deploy.out 2>&1; then
 		pass "$app: deploy.sh --rollback relaunched ${pre}1"
 	else
@@ -316,7 +318,7 @@ example_scenario() { # <app> <port> <deploy.sh path> <version prefix>
 	fi
 	b=$(ex_body)
 	[ "$b" = "hello from ${pre}1 (schema v1)" ] && pass "$app: serves ${pre}1 again" || fail "$app: after the rollback: '$b'"
-	grep -q "rollback to ${pre}1 live" /tmp/ex-summary.md && pass "$app: in Actions, a success lands one job-summary line" \
+	grep -q "$app rollback to ${pre}1 live" /tmp/ex-summary.md && pass "$app: in Actions, a success lands one job-summary line naming the app" \
 		|| fail "$app: summary after the rollback: $(cat /tmp/ex-summary.md)"
 	if ex_deploy "${pre}3" "$ART/$app-missing.tar.gz"; then
 		fail "$app: deploy.sh reported success for an artifact that does not exist"
