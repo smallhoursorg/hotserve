@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"runtime"
+	"syscall"
 )
 
 // A tarball built on the wrong runner — an x86-64 Node single
@@ -43,7 +44,12 @@ var elfMachines = map[uint16]struct{ goarch, name string }{
 // name of the machine it was built for. Both "" when the file is not
 // ELF or is for a machine this check does not know.
 func elfMachine(path string) (goarch, name string, err error) {
-	f, err := os.Open(path) //nolint:gosec // the resolved command of a release the deploy is about to run
+	// Non-blocking, then checked: a FIFO where the command should be —
+	// a release dir is the app's to write, and a rollback relaunches
+	// one the app has had — would otherwise hold the open, and the
+	// app's deploy lock with it, for good. Only a regular file is
+	// classified; the launch is where anything else fails.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) //nolint:gosec // the resolved command of a release the deploy is about to run
 	if errors.Is(err, fs.ErrPermission) {
 		// Executable but not readable (mode 0111): the kernel can run
 		// it and this check cannot read it, so it passes unclassified,
@@ -54,6 +60,11 @@ func elfMachine(path string) (goarch, name string, err error) {
 		return "", "", err
 	}
 	defer f.Close() //nolint:errcheck // read-only
+	if fi, err := f.Stat(); err != nil {
+		return "", "", err
+	} else if !fi.Mode().IsRegular() {
+		return "", "", nil
+	}
 	var hdr [20]byte
 	if _, err := io.ReadFull(f, hdr[:]); err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {

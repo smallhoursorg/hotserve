@@ -28,7 +28,8 @@ POST /blog {url, version}
   │ draining      wait `drain` for in-flight requests on the old one
   │ stopping_old  stop the old unit: SIGTERM its whole cgroup, SIGKILL after `grace`
   └ 200 OK        (any failure before "promoting" → old version never
-                   stopped serving, webhook returns 5xx, CI goes red)
+                   stopped serving; the webhook returns 422 for a refusal
+                   and 5xx for a failure, and CI goes red either way)
 ```
 
 The diagram shows a **URL pull**; the same pipeline serves two more

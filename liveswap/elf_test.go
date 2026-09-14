@@ -5,7 +5,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // elfHeader builds the first twenty bytes of an ELF file for a machine.
@@ -59,6 +61,24 @@ func TestElfMachine(t *testing.T) {
 	}
 	if _, _, err := elfMachine(filepath.Join(t.TempDir(), "missing")); err == nil {
 		t.Fatal("a missing file is an error, not a pass")
+	}
+	// A FIFO where the command should be must not hold the open (and
+	// the app's deploy lock) for good: not a regular file, unclassified.
+	fifo := filepath.Join(t.TempDir(), "fifo")
+	if err := syscall.Mkfifo(fifo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if got, _, err := elfMachine(fifo); err != nil || got != "" {
+			t.Errorf("a FIFO: %q %v; want unclassified, no error", got, err)
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("elfMachine blocked on a FIFO")
 	}
 	// Executable but unreadable: the kernel can run it, this check
 	// cannot read it, and it passes unclassified.
