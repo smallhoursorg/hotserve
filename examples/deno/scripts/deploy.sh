@@ -24,6 +24,12 @@
 # finished: 200 with the app's status when the new version is live, or
 # an error body saying why it was refused (the old version keeps
 # serving). Either way the body is printed, and a failure exits non-zero.
+#
+# In GitHub Actions the same output is also dressed for the job page:
+# the request's output in a collapsible group, a failure as an error
+# annotation naming the phase and the cause, and one line in the job
+# summary. Nothing else is sent or printed; a run from a laptop sees
+# none of it.
 set -eu
 
 rollback=
@@ -44,6 +50,11 @@ fi
 # push a stale tarball; refuse anything after the one operand.
 [ $# -eq 0 ] || { echo "deploy.sh: unexpected argument '$1' (--rollback goes first, without a tarball)" >&2; exit 1; }
 url=${HOTSERVE_URL:?set HOTSERVE_URL to the app webhook, e.g. https://deploy.example.com/example}
+# The app is the URL's last path segment; the box accepts a trailing
+# slash there, so drop any before taking it.
+app=$url
+while [ "${app%/}" != "$app" ]; do app=${app%/}; done
+app=${app##*/}
 if [ -z "$rollback" ]; then
 	version=${VERSION:-$(git rev-parse --short=12 HEAD 2>/dev/null || true)}
 	[ -n "$version" ] || { echo "deploy.sh: not in a git checkout; set VERSION" >&2; exit 1; }
@@ -57,29 +68,67 @@ if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
 		"$ACTIONS_ID_TOKEN_REQUEST_URL&audience=${HOTSERVE_AUDIENCE:-hotserve}" |
 		sed -n 's/.*"value" *: *"\([^"]*\)".*/\1/p')
 	[ -n "$token" ] || { echo "deploy.sh: could not mint an OIDC token" >&2; exit 1; }
-	echo "::add-mask::$token"
+	printf '::add-mask::%s\n' "$token"
 else
 	token=${HOTSERVE_TOKEN:?set HOTSERVE_TOKEN (mint one with: hotserve deploy-token) or run in GitHub Actions with id-token: write}
 fi
 
+# The Actions dressing. `field` reads one string field out of the
+# response (no jq here: this also runs from laptops): the last
+# occurrence, which for "phase" is the failing phase inside last_deploy
+# and for "error" its cause, with JSON's \" and \\ unescaped so a quote
+# in the cause does not cut it short. `prop` and `msg` escape what a
+# workflow command's property and message may not contain. The
+# commands are written with printf, never echo: dash's echo turns a
+# JSON-escaped \n in a cause into a real newline and splits the line.
+actions=${GITHUB_ACTIONS:-}
+field() {
+	printf '%s' "$1" | sed -n 's/.*"'"$2"'":"\(\([^\\"]*\\.\)*[^\\"]*\)".*/\1/p' | sed 's/\\\(["\\]\)/\1/g'
+}
+msg() { printf '%s' "$1" | sed 's/%/%25/g' | tr '\r\n' '  '; }
+prop() { msg "$1" | sed 's/:/%3A/g; s/,/%2C/g'; }
+began=$(date +%s)
+body=$(mktemp)
+trap 'rm -f "$body"' EXIT
+finish() { # <curl exit status> <what>: prints the body, dresses it, exits on failure
+	rc=$1 what=$2
+	cat "$body"
+	echo
+	[ -n "$actions" ] && printf '::endgroup::\n'
+	took="$(( $(date +%s) - began ))s"
+	if [ "$rc" -eq 0 ]; then
+		[ -n "${GITHUB_STEP_SUMMARY:-}" ] && printf '**hotserve:** %s live, %s\n\n' "$what" "$took" >>"$GITHUB_STEP_SUMMARY"
+		return 0
+	fi
+	phase=$(field "$(cat "$body")" phase)
+	why=$(field "$(cat "$body")" error)
+	[ -n "$actions" ] && printf '::error title=%s::%s\n' "$(prop "hotserve: $what failed")" "$(msg "${phase:+in $phase: }${why:-see the response above}")"
+	[ -n "${GITHUB_STEP_SUMMARY:-}" ] && printf '**hotserve:** %s failed%s, %s\n\n%s\n\n' "$what" "${phase:+ in \`$phase\`}" "$took" "${why:-see the log}" >>"$GITHUB_STEP_SUMMARY"
+	exit "$rc"
+}
+
 if [ -n "$rollback" ]; then
-	echo "rolling $url back to $rollback"
+	what="$app rollback to $rollback"
+	printf '%srolling %s back to %s\n' "${actions:+::group::}" "$url" "$rollback"
+	rc=0
 	curl --fail-with-body --silent --show-error --max-time 600 -X POST \
 		-H "Authorization: Bearer $token" \
-		"$url?rollback=$rollback"
-	echo
+		-o "$body" "$url?rollback=$rollback" || rc=$?
+	finish "$rc" "$what"
 	exit 0
 fi
 
 # Never print a URL's query string: that is where presigned-URL
 # credentials live (the box redacts it from its logs for the same
 # reason), and Actions output is readable by anyone who can see the job.
-echo "deploying ${artifact%%\?*} as $version to $url"
+what="$app $version"
+printf '%sdeploying %s as %s to %s\n' "${actions:+::group::}" "${artifact%%\?*}" "$version" "$url"
+rc=0
 if [ -f "$artifact" ]; then
 	curl --fail-with-body --silent --show-error --max-time 600 -X POST \
 		-H "Authorization: Bearer $token" \
 		-H "Content-Type: application/gzip" --data-binary @"$artifact" \
-		"$url?version=$version"
+		-o "$body" "$url?version=$version" || rc=$?
 else
 	# JSON-escape what goes into the body (a quote or backslash in a
 	# header value would otherwise make it malformed).
@@ -89,6 +138,6 @@ else
 		-H "Authorization: Bearer $token" \
 		-H "Content-Type: application/json" \
 		-d "{\"url\":\"$(json "$artifact")\",\"version\":\"$(json "$version")\"$auth}" \
-		"$url"
+		-o "$body" "$url" || rc=$?
 fi
-echo
+finish "$rc" "$what"
