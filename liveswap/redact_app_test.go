@@ -27,10 +27,24 @@ func TestRedactorForLoadsEnvFileWithoutALaunch(t *testing.T) {
 	}
 
 	// A launch with a rotated value: both are known afterwards.
-	ma.rememberSecrets([]string{"DATABASE_URL=postgres://app:new-pw-value-2@db/app"})
+	ma.rememberSecrets(envFile, []string{"DATABASE_URL=postgres://app:new-pw-value-2@db/app"})
 	out, _ = ma.redactorFor(statusSnapshot{}).redact("old s3cr3t-pw-value new new-pw-value-2")
 	if strings.Contains(out, "s3cr3t-pw-value") || strings.Contains(out, "new-pw-value-2") {
 		t.Fatalf("a rotated value must stay redacted: %q", out)
+	}
+
+	// A reload that names a different env_file: the next filter reads
+	// it, and what the old one held stays known.
+	other := filepath.Join(t.TempDir(), "other.env")
+	if err := os.WriteFile(other, []byte("TOKEN=from-the-other-file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reloaded := testSpec(t)
+	reloaded.envFile = other
+	ma.spec = reloaded
+	out, _ = ma.redactorFor(statusSnapshot{}).redact("from-the-other-file and s3cr3t-pw-value")
+	if strings.Contains(out, "from-the-other-file") || strings.Contains(out, "s3cr3t-pw-value") {
+		t.Fatalf("after a reload naming another env_file: %q", out)
 	}
 
 	// A file that cannot be read yet is not an error here, and the

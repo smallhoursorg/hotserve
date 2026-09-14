@@ -64,11 +64,19 @@ const (
 type redactor struct {
 	// secrets holds every form of every known value, longest first so
 	// a value that contains another is replaced whole.
-	secrets []secretForm
+	secrets []*secretForm
 	safe    map[string]bool
 }
 
-type secretForm struct{ key, text string }
+// secretForm is one text to replace, the keys whose values it belongs
+// to (two keys can hold the same value), and the marker that replaces
+// it — chosen so that no form of those keys' values is a substring of
+// it, or the replacement would put the value back.
+type secretForm struct {
+	text   string
+	keys   []string
+	marker string
+}
 
 // newRedactor takes env_file KEY=VALUE pairs and the strings that must
 // survive the heuristics. A nil *redactor is usable: layers 3 and 4
@@ -84,7 +92,7 @@ func newRedactor(envFile []string, safe []string) *redactor {
 			r.safe[tok] = true
 		}
 	}
-	seen := map[string]bool{}
+	byText := map[string]*secretForm{}
 	for _, kv := range envFile {
 		key, value, ok := strings.Cut(kv, "=")
 		if !ok || len(value) < secretMinLen || r.safe[value] {
@@ -97,15 +105,67 @@ func newRedactor(envFile []string, safe []string) *redactor {
 			forms = append(forms, secretForms(pw)...)
 		}
 		for _, form := range forms {
-			if len(form) < secretMinLen || seen[form] {
+			if len(form) < secretMinLen {
 				continue
 			}
-			seen[form] = true
-			r.secrets = append(r.secrets, secretForm{key: key, text: form})
+			sf := byText[form]
+			if sf == nil {
+				sf = &secretForm{text: form}
+				byText[form] = sf
+				r.secrets = append(r.secrets, sf)
+			}
+			if !contains(sf.keys, key) {
+				sf.keys = append(sf.keys, key)
+			}
 		}
+	}
+	all := make([]string, 0, len(r.secrets))
+	for _, sf := range r.secrets {
+		all = append(all, sf.text)
+	}
+	for _, sf := range r.secrets {
+		sort.Strings(sf.keys)
+		sf.marker = chooseMarker(sf.keys, all)
 	}
 	sort.SliceStable(r.secrets, func(i, j int) bool { return len(r.secrets[i].text) > len(r.secrets[j].text) })
 	return r
+}
+
+func contains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+// chooseMarker is the replacement for the values of keys: the first
+// candidate that contains no known form of any value — not only this
+// key's, since another key's value ("redacted", say) can be a
+// substring of a marker and would then be put back by a later
+// replacement. Forms are 8+ characters and the candidates share no
+// 8-character run, so one always fits.
+func chooseMarker(keys []string, all []string) string {
+	label := strings.Join(keys, ",")
+	for _, c := range []string{
+		"[redacted:" + label + "]",
+		"[REDACTED:" + label + "]",
+		"[withheld:" + label + "]",
+		"<" + label + " removed>",
+	} {
+		clean := true
+		for _, f := range all {
+			if strings.Contains(c, f) {
+				clean = false
+				break
+			}
+		}
+		if clean {
+			return c
+		}
+	}
+	return "[withheld]"
 }
 
 // urlPassword is the password in a value of the form
@@ -182,6 +242,10 @@ var shapeRules = []struct {
 	{regexp.MustCompile(`(?i)\b([a-z0-9_-]*(?:password|passwd|secret|api[_-]?key|access[_-]?token|private[_-]?key)[a-z0-9_-]*)("?\s*[=:]\s*"?)[^\s"',;\[/{][^\s"',;]{7,}`), "$1$2[redacted:credential]"},
 }
 
+// basicCredentialRe finds "Basic <base64>"; the decode check is in
+// redact, since a regexp cannot tell a credential from a word.
+var basicCredentialRe = regexp.MustCompile(`(?i)\bbasic[ \t]+[A-Za-z0-9+/]{8,}={0,2}`)
+
 // entropyTokenRe finds candidates for layer 4. `/` is not in the
 // alphabet on purpose: a URL path is a long base64-alphabet run with
 // slashes, and splitting there keeps paths readable while a base64
@@ -199,10 +263,12 @@ func (r *redactor) redact(s string) (string, []string) {
 			if !strings.Contains(s, sec.text) {
 				continue
 			}
-			s = strings.ReplaceAll(s, sec.text, "[redacted:"+sec.key+"]")
-			if !seen[sec.key] {
-				seen[sec.key] = true
-				keys = append(keys, sec.key)
+			s = strings.ReplaceAll(s, sec.text, sec.marker)
+			for _, k := range sec.keys {
+				if !seen[k] {
+					seen[k] = true
+					keys = append(keys, k)
+				}
 			}
 		}
 		sort.Strings(keys)
@@ -210,6 +276,21 @@ func (r *redactor) redact(s string) (string, []string) {
 	for _, rule := range shapeRules {
 		s = rule.re.ReplaceAllString(s, rule.repl)
 	}
+	s = basicCredentialRe.ReplaceAllStringFunc(s, func(m string) string {
+		// Basic's credential is base64 of user:password, and is one at
+		// any length — the bearer rule's 20-character floor would let
+		// `Basic dToxMjM0NTY3OA==` (u:12345678) through. Prose after the
+		// word ("Basic authentication") does not decode to a user:pass.
+		i := strings.LastIndexAny(m, " \t")
+		if i < 0 {
+			return m
+		}
+		dec, err := base64.RawStdEncoding.DecodeString(strings.TrimRight(m[i+1:], "="))
+		if err == nil && strings.Contains(string(dec), ":") {
+			return m[:i+1] + "[redacted:basic-credential]"
+		}
+		return m
+	})
 	s = entropyTokenRe.ReplaceAllStringFunc(s, func(tok string) string {
 		if r != nil && r.safe[tok] {
 			return tok

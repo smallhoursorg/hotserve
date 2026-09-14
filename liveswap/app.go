@@ -234,8 +234,12 @@ type managedApp struct {
 	// written by deploys, relaunches and configure.
 	secretsMu sync.Mutex
 	secrets   []string
-	// secretsLoaded: the current spec's env_file has been read, or
-	// there is none. Cleared by configure when the path changes.
+	// secretsFrom is the env_file path whose contents are in secrets
+	// (rendered by a launch, or read for the filter); a spec naming a
+	// different path — a reload, or a rollback of one — is unread
+	// until the next response's filter reads it. "" with
+	// secretsLoaded set means the spec has no env_file.
+	secretsFrom   string
 	secretsLoaded bool
 }
 
@@ -244,15 +248,13 @@ func newManagedApp(name string) *managedApp {
 }
 
 // rememberSecrets records a launch's env_file pairs for the response
-// filter (redact.go). Values are added, never dropped: a secret that
-// was ever handed to an app is one a response could still carry.
-func (ma *managedApp) rememberSecrets(kvs []string) {
-	if len(kvs) == 0 {
-		return
-	}
+// filter (redact.go): path is the env_file the launch's spec named
+// and kvs what it held. Values are added, never dropped: a secret
+// that was ever handed to an app is one a response could still carry.
+func (ma *managedApp) rememberSecrets(path string, kvs []string) {
 	ma.secretsMu.Lock()
 	defer ma.secretsMu.Unlock()
-	ma.secretsLoaded = true // a launch rendered the file; no need to read it again
+	ma.secretsFrom, ma.secretsLoaded = path, true
 	ma.secrets = mergeSecrets(ma.secrets, kvs)
 }
 
@@ -261,24 +263,21 @@ func (ma *managedApp) rememberSecrets(kvs []string) {
 // the heuristics (a git SHA as a version is high-entropy by design).
 //
 // After a hotserve restart the app is reattached without a launch, so
-// nothing has rendered its env_file yet; the first filter built reads
-// it from the current spec. A file that cannot be read now (a rewrite
-// mid-flight, a mode not yet fixed) is not an error here — the next
-// launch reports that — and the read is retried on the next response
-// until it succeeds.
+// nothing has rendered its env_file yet; and a reload can name a
+// different env_file than the last launch rendered. Either way the
+// current spec's file is unread, and the filter reads it here. A file
+// that cannot be read now (a rewrite mid-flight, a mode not yet fixed)
+// is not an error here — the next launch reports that — and the read
+// is retried on the next response until it succeeds.
 func (ma *managedApp) redactorFor(s statusSnapshot) *redactor {
 	spec := ma.snapshot().spec
 	ma.secretsMu.Lock()
-	if !ma.secretsLoaded {
-		switch {
-		case spec == nil:
-		case spec.envFile == "":
-			ma.secretsLoaded = true
-		default:
-			if kvs, err := parseEnvFile(spec.envFile); err == nil {
-				ma.secrets = mergeSecrets(ma.secrets, kvs)
-				ma.secretsLoaded = true
-			}
+	if spec != nil && (!ma.secretsLoaded || ma.secretsFrom != spec.envFile) {
+		if spec.envFile == "" {
+			ma.secretsFrom, ma.secretsLoaded = "", true
+		} else if kvs, err := parseEnvFile(spec.envFile); err == nil {
+			ma.secrets = mergeSecrets(ma.secrets, kvs)
+			ma.secretsFrom, ma.secretsLoaded = spec.envFile, true
 		}
 	}
 	kvs := append([]string(nil), ma.secrets...)
@@ -338,13 +337,6 @@ func (ma *managedApp) configure(owner any, spec *appSpec, logger *zap.Logger, cl
 		ma.prev = &appConfigState{spec: ma.spec, verifiers: ma.verifiers, logger: ma.logger, store: ma.store}
 	}
 	ma.configuredBy = owner
-	if ma.spec == nil || ma.spec.envFile != spec.envFile {
-		// A new env_file path is unread: the next response's filter
-		// reads it (redactorFor). What the old one held stays known.
-		ma.secretsMu.Lock()
-		ma.secretsLoaded = false
-		ma.secretsMu.Unlock()
-	}
 	ma.spec = spec
 	// Deploy auth is not tied to the running process, so — unlike the
 	// runner — it is rewired on every reload and takes effect at once.
@@ -538,7 +530,7 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	if err != nil {
 		return err
 	}
-	ma.rememberSecrets(l.secrets)
+	ma.rememberSecrets(spec.envFile, l.secrets)
 	// A launch that never becomes the instance leaves nothing behind:
 	// its run dir, and any pin the health gate made, go with it. Once
 	// promoted, l.sock is the instance's own and lives on. And like
@@ -909,7 +901,7 @@ func (ma *managedApp) launchVersion(c collaborators, version string) (*instance,
 	if err != nil {
 		return nil, err
 	}
-	ma.rememberSecrets(l.secrets)
+	ma.rememberSecrets(spec.envFile, l.secrets)
 	// No Start without a confirmed sweep: whatever the manager still
 	// runs for this app (a unit an earlier hotserve lost track of, a
 	// stop that could not be confirmed) is settled first, or nothing

@@ -74,6 +74,39 @@ func TestRedactorSafeList(t *testing.T) {
 	}
 }
 
+func TestRedactorSharedValuesAndMarkers(t *testing.T) {
+	// Two keys with one value: both are reported, and the marker names
+	// both.
+	r := newRedactor([]string{"A=abcdefghij", "B=abcdefghij"}, nil)
+	out, keys := r.redact("x abcdefghij y")
+	if out != "x [redacted:A,B] y" || strings.Join(keys, ",") != "A,B" {
+		t.Errorf("shared value: %q %v", out, keys)
+	}
+	// A value that is a substring of the usual marker — any key's
+	// value, not only the one being replaced — moves every marker to
+	// one that does not contain it.
+	r = newRedactor([]string{"A=abcdefghij", "SECRET=redacted", "OTHER=REDACTED:OTHER"}, nil)
+	for _, in := range []string{"value redacted here", "REDACTED:OTHER", "x abcdefghij y", "abcdefghij redacted REDACTED:OTHER"} {
+		out, _ := r.redact(in)
+		if strings.Contains(out, "redacted") || strings.Contains(out, "REDACTED:OTHER") || strings.Contains(out, "abcdefghij") {
+			t.Errorf("a marker reintroduced a value: %q -> %q", in, out)
+		}
+	}
+}
+
+func TestRedactorBasicCredential(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"Authorization: Basic dToxMjM0NTY3OA==", "Authorization: Basic [redacted:basic-credential]"},
+		{"Authorization: Basic dToxMjM0NTY3OA", "Authorization: Basic [redacted:basic-credential]"},
+		{"Basic authentication is required", "Basic authentication is required"},
+		{"basic YWJjZGVmZ2hpams=", "basic YWJjZGVmZ2hpams="}, // decodes, but to no user:pass
+	} {
+		if got, _ := (*redactor)(nil).redact(tc.in); got != tc.want {
+			t.Errorf("%q:\n got %q\nwant %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestRedactJSONWithholdsAnUnparsableBody(t *testing.T) {
 	// A value made of JSON's own punctuation can match the body's
 	// structure rather than a string inside it. The body is withheld,

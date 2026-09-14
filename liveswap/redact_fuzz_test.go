@@ -45,13 +45,10 @@ func FuzzRedactor(f *testing.F) {
 			base64.RawStdEncoding.EncodeToString([]byte(value)), base64.URLEncoding.EncodeToString([]byte(value)),
 			base64.RawURLEncoding.EncodeToString([]byte(value)), hex.EncodeToString([]byte(value)),
 			url.QueryEscape(value), url.PathEscape(value)}
-		const marker = "[redacted:SECRET]"
 		for _, form := range forms {
-			// A form that is itself a substring of the marker cannot be
-			// asserted absent: the replacement would contain it.
-			if strings.Contains(marker, form) {
-				continue
-			}
+			// No exemption for a value that is a substring of the usual
+			// marker ("redacted", say): the marker is chosen per key so
+			// that it never contains a form of the value.
 			out, keys := r.redact(prefix + form + suffix)
 			if strings.Contains(out, form) {
 				t.Fatalf("form %q of %q survived in %q", form, value, out)
@@ -73,8 +70,14 @@ func FuzzRedactor(f *testing.F) {
 			if !json.Valid([]byte(js)) {
 				t.Fatalf("form %q: redactJSON produced invalid JSON: %s", form, js)
 			}
-			if strings.Contains(js, string(mustQuote(t, form))) || !strings.Contains(js, `"redacted_env":["SECRET"]`) {
-				t.Fatalf("form %q: JSON body %s", form, js)
+			// The one fixed text in a body is the field name redacted_env;
+			// a value of "redacted" appears inside it, as the name, not as
+			// a leak. It is taken out before the absence check.
+			if !strings.Contains(js, `"redacted_env":["SECRET"]`) {
+				t.Fatalf("form %q: keys not reported in %s", form, js)
+			}
+			if rest := strings.ReplaceAll(js, `"redacted_env":["SECRET"]`, ""); strings.Contains(rest, string(mustQuote(t, form))) {
+				t.Fatalf("form %q: survived in JSON body %s", form, js)
 			}
 		}
 	})
