@@ -183,6 +183,16 @@ func pruneDeployRecords(dir string, keep int, onDisk []string, logger *zap.Logge
 	}
 	var others []rec
 	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json.tmp") {
+			// A write interrupted between the temp file and the rename:
+			// deploys are serialized per app, so no write is in flight
+			// now, and the leftover would otherwise sit outside the
+			// bound — like release GC's crashed staging dirs.
+			if err := os.Remove(filepath.Join(dir, e.Name())); err == nil {
+				logger.Info("deploy record: removed orphaned temp file", zap.String("file", e.Name()))
+			}
+			continue
+		}
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") || disk[e.Name()] {
 			continue
 		}

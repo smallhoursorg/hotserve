@@ -98,6 +98,7 @@ func TestPruneDeployRecordsKeepsOnDiskAndNewest(t *testing.T) {
 		must(t, writeDeployRecord(dir, v, []byte(`{"version":"`+v+`"}`)))
 		must(t, os.Chtimes(deployRecordPath(dir, v), base.Add(time.Duration(i)*time.Minute), base.Add(time.Duration(i)*time.Minute)))
 	}
+	must(t, os.WriteFile(filepath.Join(dir, "x.json.tmp"), []byte("{"), 0o600)) // a write that never got its rename
 	pruneDeployRecords(dir, 1, []string{"a"}, zap.NewNop())
 	entries, _ := os.ReadDir(dir)
 	var left []string
