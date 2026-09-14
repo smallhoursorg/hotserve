@@ -56,14 +56,22 @@ func elfMachine(path string) (goarch, name string, err error) {
 	defer f.Close() //nolint:errcheck // read-only
 	var hdr [20]byte
 	if _, err := io.ReadFull(f, hdr[:]); err != nil {
-		return "", "", nil // shorter than a header: not ELF
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return "", "", nil // shorter than a header: not ELF
+		}
+		return "", "", err // could not be read: not a pass
 	}
 	if string(hdr[:4]) != "\x7fELF" {
 		return "", "", nil
 	}
-	var order binary.ByteOrder = binary.LittleEndian
-	if hdr[5] == 2 { // EI_DATA: ELFDATA2MSB
+	var order binary.ByteOrder
+	switch hdr[5] { // EI_DATA
+	case 1:
+		order = binary.LittleEndian
+	case 2:
 		order = binary.BigEndian
+	default:
+		return "", "", nil // not an encoding ELF defines: unclassified
 	}
 	if hdr[4] != 2 { // EI_CLASS: not ELFCLASS64 — a 32-bit file is the kernel's call
 		return "", "", nil

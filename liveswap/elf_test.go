@@ -44,6 +44,7 @@ func TestElfMachine(t *testing.T) {
 		{"riscv64", elfHeader(2, false, 243), "riscv64"},
 		{"32-bit x86 is the kernel's call", elfHeader(1, false, 3), ""},
 		{"an unknown 64-bit machine", elfHeader(2, false, 22), ""},
+		{"an encoding ELF does not define", func() []byte { h := elfHeader(2, false, 62); h[5] = 0; return h }(), ""},
 		{"a shell script", []byte("#!/bin/sh\nexec ./server-bin \"$@\"\n"), ""},
 		{"shorter than a header", []byte("\x7fELF"), ""},
 		{"empty", nil, ""},
