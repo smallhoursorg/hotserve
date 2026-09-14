@@ -19,7 +19,9 @@ import (
 // A stand-in box. "single" answers the single response a box without
 // stream support (before #103) gives; "stream" streams phases and the
 // terminal line; "fail" is a single 500; "cut" streams one phase and
-// closes; "redirect" is a 3xx, what an intermediary answers.
+// closes; "redirect" is a 3xx, what an intermediary answers;
+// "truncated" promises a single 200 body and drops the connection
+// before delivering it.
 func box(t *testing.T, mode string) *httptest.Server {
 	t.Helper()
 	status := map[string]any{"app": "demo", "current_version": "v1", "running": true, "last_deploy": map[string]any{"version": "v1", "status": "succeeded"}}
@@ -37,6 +39,16 @@ func box(t *testing.T, mode string) *httptest.Server {
 			single(w, 500, map[string]any{"error": "health gate: boom", "status": status})
 		case "redirect":
 			http.Redirect(w, r, "https://elsewhere.test/demo", http.StatusMovedPermanently)
+		case "truncated":
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Content-Length", "4096")
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"app":"demo","current_vers`))
+			w.(http.Flusher).Flush()
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
 		default:
 			w.Header().Set("Content-Type", "application/x-ndjson")
 			w.WriteHeader(200)
@@ -79,6 +91,7 @@ func TestDeployShReadsEveryShapeOfAnswer(t *testing.T) {
 		{"fail", 1, "health gate: boom"},
 		{"cut", 1, `"phase":"downloading"`},
 		{"redirect", 1, ""},
+		{"truncated", 1, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.mode, func(t *testing.T) {
