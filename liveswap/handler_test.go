@@ -803,3 +803,18 @@ func TestFailureBodyEndsWithLastDeploysPhase(t *testing.T) {
 		t.Fatalf("status %d, last phase in body is not last_deploy's: %s", w.Code, body)
 	}
 }
+
+// GET ?deploy= puts the record's outcome words back after the live
+// filter, so a known value spelled like one does not read as redacted.
+func TestWebhookDeployRecordOutcomeSurvivesAVocabularySecret(t *testing.T) {
+	h, rig := newTestHandler(t)
+	rig.spec.envFile = filepath.Join(t.TempDir(), "app.env")
+	must(t, os.WriteFile(rig.spec.envFile, []byte("WORD=succeeded\n"), 0o600))
+	if w := do(t, h, http.MethodPost, "/demo", appToken(t), `{"url":"https://x/a.tgz","version":"v1"}`); w.Code != 200 {
+		t.Fatalf("deploy: %d %s", w.Code, w.Body.String())
+	}
+	w := do(t, h, http.MethodGet, "/demo?deploy=v1", appToken(t), "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"status":"succeeded"`) {
+		t.Fatalf("record: %d %s", w.Code, w.Body.String())
+	}
+}

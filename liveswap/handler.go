@@ -295,7 +295,13 @@ func (h *Handler) deployRecord(w http.ResponseWriter, ma *managedApp, version st
 	case err != nil:
 		return respondJSON(w, http.StatusInternalServerError, map[string]string{"error": "reading deploy record: " + err.Error()}, ma.redactorFor(s))
 	}
-	return respondJSON(w, http.StatusOK, rec, ma.redactorFor(s))
+	// Through the live filter like every body, then the outcome words
+	// put back (deploys.go, rule 3): the record's own status and
+	// phase, which recordHead has already required to be vocabulary,
+	// or nothing — a word equal to a known value must not read as
+	// redacted.
+	head, _ := recordHead(rec, versionPathComponent(version)+".json")
+	return respondFiltered(w, http.StatusOK, restoreVocabulary(ma.redactorFor(s).redactJSON(rec), head.Status, head.Phase))
 }
 
 // runDeploy records the authorizing source, runs the pipeline, and maps
@@ -555,9 +561,14 @@ func respondJSON(w http.ResponseWriter, code int, v any, r *redactor) error {
 	if err != nil {
 		return err
 	}
+	return respondFiltered(w, code, r.redactJSON(raw))
+}
+
+// respondFiltered writes a body that has already passed the filter.
+func respondFiltered(w http.ResponseWriter, code int, filtered string) error {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	_, err = w.Write(append([]byte(r.redactJSON(raw)), '\n'))
+	_, err := w.Write(append([]byte(filtered), '\n'))
 	return err
 }
 

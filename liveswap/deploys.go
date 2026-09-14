@@ -40,8 +40,12 @@ import (
 //     a body after the filter's final pass (withField merges what
 //     the filtered body already reports; it adds nothing else).
 //  3. Whatever the filter does to a body, the record on disk names
-//     its version and status, from values that cannot carry source
+//     its version and outcome, from values that cannot carry source
 //     data: the version the deployer named, vocabulary, timestamps.
+//     The vocabulary fields (status, phase) are put back after the
+//     filter, at write and at read, since a value equal to a word of
+//     the vocabulary would otherwise rewrite them; a record too large
+//     to read back is an envelope, never an unreadable file.
 //  4. The store never blocks a deploy or a status — a failure here is
 //     a warning, a missing store is an empty list — and never follows
 //     a link: the app dir was writable by the app before sandboxing
@@ -86,22 +90,30 @@ func (ma *managedApp) recordDeploy(c collaborators, result deployResult) {
 		c.logger.Warn("deploy record: cannot encode", zap.Error(err))
 		return
 	}
-	filtered := ma.recordRedactor(c, result).redactJSON(raw)
-	// The filter's whole-body fallback — a known value that is a
-	// fragment of the record's own JSON — leaves an object with no
-	// version, which nothing could read back as this version's. The
-	// record is then an envelope (rule 3): the version the deployer
-	// named, the status and phase vocabulary, the times, and why the
-	// rest is missing — nothing that could carry source data, so
-	// nothing the filter would have had to see.
+	filtered := restoreVocabulary(ma.recordRedactor(c, result).redactJSON(raw), result.Status, result.Phase)
+	// Rule 3's envelope. The filter's whole-body fallback — a known
+	// value that is a fragment of the record's own JSON — leaves an
+	// object with no version, which nothing could read back as this
+	// version's; and a record larger than a reader accepts would be
+	// written only to be refused. Either way the record is the
+	// version the deployer named, the outcome vocabulary, the times,
+	// and why the rest is missing — nothing that could carry source
+	// data, so nothing the filter would have had to see.
 	var head struct {
 		Version string `json:"version"`
 	}
-	if json.Unmarshal([]byte(filtered), &head) != nil || head.Version != result.Version {
+	why := ""
+	switch {
+	case json.Unmarshal([]byte(filtered), &head) != nil || head.Version != result.Version:
+		why = "a redacted value overlapped the record's own structure"
+	case len(filtered) > deployRecordMaxBytes:
+		why = "larger than a record can be"
+	}
+	if why != "" {
 		env, err := json.Marshal(map[string]any{
 			"version": result.Version, "status": result.Status, "phase": result.Phase,
 			"started_at": result.StartedAt, "finished_at": result.FinishedAt,
-			"error": "record withheld: a redacted value overlapped the record's own structure",
+			"error": "record withheld: " + why,
 		})
 		if err != nil {
 			c.logger.Warn("deploy record: cannot encode the envelope", zap.Error(err))
@@ -209,6 +221,42 @@ func recordsDir(d appDirs, create bool) (string, error) {
 		return "", fmt.Errorf("%s resolves to %s, not %s (a planted link is not followed)", d.deploys, got, want)
 	}
 	return d.deploys, nil
+}
+
+// The outcome vocabulary: what status and phase may say. A record's
+// status must be one of these; its phase one of these or absent.
+var (
+	recordStatuses = map[string]bool{"succeeded": true, "failed": true}
+	recordPhases   = map[string]bool{"downloading": true, "extracting": true, "preparing": true, "starting": true, "soaking": true, "promoting": true, "draining": true, "stopping_old": true}
+)
+
+// restoreVocabulary puts the outcome fields back on a filtered record
+// (rule 3): a known value equal to a word of the vocabulary — a secret
+// spelled "succeeded" — would otherwise have rewritten them, and the
+// words carry nothing of the app's. Anything but an object, or a
+// status outside the vocabulary, is left as it is for the caller's
+// own checks to refuse.
+func restoreVocabulary(filtered, status, phase string) string {
+	if !recordStatuses[status] || (phase != "" && !recordPhases[phase]) {
+		return filtered
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(filtered), &obj); err != nil || obj == nil {
+		return filtered
+	}
+	st, _ := json.Marshal(status)
+	obj["status"] = st
+	if phase == "" {
+		delete(obj, "phase")
+	} else {
+		ph, _ := json.Marshal(phase)
+		obj["phase"] = ph
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return filtered
+	}
+	return string(out)
 }
 
 // recordHead is what proves a file a record (rule 1): a valid version

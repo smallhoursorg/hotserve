@@ -76,7 +76,7 @@ func (d appDirs) release(version string) string {
 
 func (d appDirs) ensure() error {
 	// deploys/ is not here: the record store is optional, made on
-	// first use by deploysDir, and a failure there is a warning, not a
+	// first use by recordsDir, and a failure there is a warning, not a
 	// deploy that cannot start.
 	for _, dir := range []string{d.releases, d.shared, d.tmp, d.run, d.proxy} {
 		if err := os.MkdirAll(dir, 0o750); err != nil {

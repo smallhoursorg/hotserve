@@ -517,3 +517,57 @@ func TestStatusDoesNotCreateTheRecordsDir(t *testing.T) {
 		t.Fatalf("a read created the records dir: %v", err)
 	}
 }
+
+// A known value equal to a word of the outcome vocabulary — a secret
+// spelled "succeeded", a phase's name — does not rewrite a record's
+// status or phase, on disk or when read back; the record's other text
+// is still filtered.
+func TestDeployRecordOutcomeSurvivesAVocabularySecret(t *testing.T) {
+	rig := newTestRig(t)
+	rig.ma.rememberSecrets("/etc/app.env", []string{"WORD=succeeded", "STEP=preparing"})
+	if err := deployOnceV1(t, rig); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := readDeployRecord(rig.spec.dirs, "v1")
+	must(t, err)
+	if !strings.Contains(string(rec), `"status":"succeeded"`) {
+		t.Fatalf("status rewritten on disk: %s", rec)
+	}
+	rig.spec.preStart = []string{"./migrate"}
+	rig.runner.runOnceErr = runOnceExit("exit status 1", "u", "failed")
+	if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://example.test/v2.tgz", version: "v2", by: "test"}); err == nil {
+		t.Fatal("v2 should have failed")
+	}
+	rec, err = readDeployRecord(rig.spec.dirs, "v2")
+	must(t, err)
+	if s := string(rec); !strings.Contains(s, `"status":"failed"`) || !strings.Contains(s, `"phase":"preparing"`) {
+		t.Fatalf("outcome rewritten on disk: %s", s)
+	}
+	d := rig.ma.status().Deploys
+	if len(d) != 2 || d[0].Status != "failed" || d[0].Phase != "preparing" || d[1].Status != "succeeded" {
+		t.Fatalf("summaries = %+v", d)
+	}
+	// Read back through the live filter: the words are put back there
+	// too, and other text is still filtered.
+	served := restoreVocabulary(rig.ma.redactorFor(rig.ma.status()).redactJSON(rec), "failed", "preparing")
+	if !strings.Contains(served, `"status":"failed"`) || !strings.Contains(served, `"phase":"preparing"`) {
+		t.Fatalf("outcome rewritten when served: %s", served)
+	}
+}
+
+// A record the filter leaves larger than a reader accepts is written
+// as an envelope, readable, rather than as a file every reader refuses.
+func TestDeployRecordTooLargeIsAnEnvelope(t *testing.T) {
+	rig := newTestRig(t)
+	rig.runner.startErr = errors.New("boom: " + strings.Repeat("x", 2*deployRecordMaxBytes))
+	if err := deployOnceV1(t, rig); err == nil {
+		t.Fatal("v1 should have failed")
+	}
+	rec, err := readDeployRecord(rig.spec.dirs, "v1")
+	if err != nil {
+		t.Fatalf("an oversized outcome must still leave a readable record: %v", err)
+	}
+	if s := string(rec); !strings.Contains(s, `"version":"v1"`) || !strings.Contains(s, `"status":"failed"`) || !strings.Contains(s, "larger than a record can be") || len(s) > 1024 {
+		t.Fatalf("envelope = %.200s… (%d bytes)", s, len(s))
+	}
+}
