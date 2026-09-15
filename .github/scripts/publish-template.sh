@@ -16,7 +16,8 @@
 # overwritten by the next one (changes go to examples/ here). Running
 # it again is harmless: the same tree makes no commit, and a tag the
 # mirror already has on that commit pushes nothing. A tag the mirror
-# has on another commit is refused, never moved.
+# has on another commit is refused, never moved. A prerelease, or a
+# release older than one the mirror already has, leaves it alone.
 set -eu
 
 rt=${1:?runtime: node or deno}
@@ -24,21 +25,15 @@ tag=${2:?the release tag, e.g. v0.2.0}
 repo=${3:-smallhoursorg/hotserve-example-$rt}
 src=examples/$rt
 
+case $tag in
+*-*) echo "publish-template: $tag is a prerelease; $repo left as it is"; exit 0 ;;
+esac
 sha=$(git rev-parse -q --verify "refs/tags/$tag^{commit}") ||
 	{ echo "publish-template: no tag $tag here" >&2; exit 1; }
-
-# The templates follow the newest release: a fix to an older line
-# (v0.1.1 after v0.2.0) must not roll them back. Prereleases (a
-# hyphen) never count, and the modules' liveswap/v* tags do not match.
-newest=$(git tag -l 'v*' | grep -v -- - | sort -V | tail -n 1)
-if [ "$tag" != "$newest" ]; then
-	echo "publish-template: $tag is not the newest release ($newest); $repo left as it is"
-	exit 0
-fi
 git cat-file -e "$tag:$src" 2>/dev/null ||
 	{ echo "publish-template: $tag has no $src" >&2; exit 1; }
 
-# gh answers git's credential requests with GH_TOKEN, for these two
+# gh answers git's credential requests with GH_TOKEN, for these
 # commands only: nothing is written to any git config.
 auth() { git -c credential.helper= -c 'credential.helper=!gh auth git-credential' "$@"; }
 
@@ -46,6 +41,23 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 m=$work/mirror
 auth clone --quiet --depth 1 "https://github.com/$repo.git" "$m"
+
+# The templates follow the newest release, and the mirror's own tags
+# are the record of what has been published: a tag lands there only
+# with its release, and its ruleset keeps it from moving or going. So
+# a fix to an older line (v0.2.1 after v0.3.0) is skipped, while a
+# newer tag here whose release never went out (a v0.3.0 whose CI
+# failed) holds nothing back. A newer release that lands between this
+# read and the push below moves main, and the push, fast-forward only,
+# is refused. ls-remote runs on its own line so that its failure stops
+# the script instead of reading as "no tags".
+published=$(auth -C "$m" ls-remote --tags --refs origin 'v*')
+newest=$(printf '%s\n%s\n' "$published" "$tag" | sed 's|.*refs/tags/||' | grep -v -e - -e '^$' | sort -V | tail -n 1)
+if [ "$newest" != "$tag" ]; then
+	echo "publish-template: $repo already has $newest, newer than $tag; left as it is"
+	exit 0
+fi
+
 # An empty repository (the first release) has no branch yet.
 git -C "$m" checkout -q -B main
 
