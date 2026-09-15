@@ -214,8 +214,8 @@ the above:
    ```
 
 Then in step 4, copy [examples/deno](../examples/deno) instead, and
-leave its `runs-on` alone: the tarball has no native code, so any
-runner builds it.
+leave `HOTSERVE_RUNS_ON` unset: the tarball has no native code, so
+any runner builds it.
 
 </details>
 
@@ -226,14 +226,21 @@ Copy [examples/node](../examples/node) into a new GitHub repository,
 by its API URL with the workflow's own token, and the
 `artifact_allowlist` above admits it.
 
-In `.github/workflows/deploy.yml`, set two things:
+No file in it names the box: the workflow reads repository variables.
+In the repository's Settings → Secrets and variables → Actions →
+Variables, add:
 
-- `HOTSERVE_URL` (it appears twice) to
-  `https://deploy.example.com/example`.
-- `runs-on` to the box's architecture: `ubuntu-24.04-arm` for an arm64
-  box, `ubuntu-24.04` for amd64. The executable is the runner's own
-  Node binary, so this has to match; a mismatch is refused at deploy
-  time with a message naming the right value.
+- `HOTSERVE_URL`, set to `https://deploy.example.com/example`. A
+  run without it stops at its first step, saying so, and publishes
+  nothing.
+- On an amd64 box, `HOTSERVE_RUNS_ON`, set to `ubuntu-24.04`. The
+  workflow builds on an arm64 runner otherwise, and the executable is
+  the runner's own Node binary, so this has to match the box; a
+  mismatch is refused at deploy time with a message naming the right
+  value.
+
+Or from a laptop with the GitHub CLI:
+`gh variable set HOTSERVE_URL -R your-org/example --body https://deploy.example.com/example`.
 
 Push to `main`. The workflow builds the executables, publishes them as
 a GitHub release tagged with the commit's first 12 characters, mints an
@@ -277,7 +284,8 @@ the ones it can relaunch. Leave "Use workflow from" on `main`: the
 workflow runs from there whichever version it relaunches. The
 example's README says [more](../examples/node/README.md#rolling-back).
 The next app is the same four steps minus the first two: another
-`app` block and site in the Caddyfile, another copy of the example.
+`app` block and site in the Caddyfile, another copy of the example
+with its own `HOTSERVE_URL`.
 
 Now do [After the first deploy](after-first-deploy.md): it turns this
 box from something root set up into something a person administers,

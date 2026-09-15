@@ -1,5 +1,6 @@
 # Product releases: push a tag like v0.1.0 and this builds the binaries
-# and OS packages and attaches them to the GitHub release.
+# and OS packages and attaches them to the GitHub release, then brings
+# the example apps' template repositories up to it.
 # (Submodule tags like liveswap/v0.1.0 do not match the v* filter.)
 name: release
 
@@ -102,3 +103,52 @@ jobs:
           args=()
           case "$GITHUB_REF_NAME" in *-*) args+=(--prerelease) ;; esac
           gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --verify-tag "${args[@]}"
+
+  # Each example app is also a template repository of its own
+  # (smallhoursorg/hotserve-example-node, -deno), for "Use this
+  # template". This repo stays the source: once the release is out,
+  # each mirror's main becomes exactly what examples/<runtime> holds at
+  # this tag, the tree the ci job's e2e deployed, and gains the tag.
+  # Prereleases leave the mirrors alone, and so does a tag that is not
+  # the newest release (a fix to an older line): the script has the
+  # details. A failure here leaves the mirrors one release behind and
+  # the release published; "Re-run failed jobs" redoes only this.
+  #
+  # Set up once, by hand:
+  #   - Both repositories, public and created empty; then for each:
+  #       gh repo edit <repo> --template --enable-issues=false \
+  #         --enable-wiki=false --enable-projects=false \
+  #         --description "Template: generated from smallhoursorg/hotserve examples/<runtime> on each release; changes go there"
+  #       gh api -X PUT repos/<repo>/actions/permissions -F enabled=false
+  #     Actions off, or each sync runs the example's own deploy
+  #     workflow in the mirror (with no HOTSERVE_URL there it only
+  #     fails at its first step, but off is quieter). A repository
+  #     made from the template has Actions on: settings are not copied.
+  #   - TEMPLATES_TOKEN: a fine-grained PAT, resource owner
+  #     smallhoursorg, on the two mirror repositories only, with
+  #     Contents and Workflows read-write: every sync pushes
+  #     .github/workflows/deploy.yml, which a token without Workflows
+  #     cannot (and GITHUB_TOKEN never can). Deploy keys are off for
+  #     the organization. It expires; renew it before then, or the next
+  #     release is red here.
+  templates:
+    needs: [release]
+    if: ${{ !contains(github.ref_name, '-') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [node, deno]
+    runs-on: ubuntu-latest
+    name: templates (${{ matrix.runtime }})
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Every tag: the script publishes only the newest release.
+          fetch-depth: 0
+          persist-credentials: false
+      - env:
+          GH_TOKEN: ${{ secrets.TEMPLATES_TOKEN }}
+          RUNTIME: ${{ matrix.runtime }}
+        run: sh .github/scripts/publish-template.sh "$RUNTIME" "$GITHUB_REF_NAME"
