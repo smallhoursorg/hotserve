@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,7 +29,7 @@ func TestLocalVerifier(t *testing.T) {
 	ctx := context.Background()
 
 	// The happy path: right key, audience and claims.
-	if err := base().verify(ctx, mintTestToken(t, priv, "aud1", want)); err != nil {
+	if _, err := base().verify(ctx, mintTestToken(t, priv, "aud1", want)); err != nil {
 		t.Fatalf("valid token rejected: %v", err)
 	}
 
@@ -60,7 +61,7 @@ func TestLocalVerifier(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			v, tok := tc.build()
-			if err := v.verify(ctx, tok); err == nil {
+			if _, err := v.verify(ctx, tok); err == nil {
 				t.Fatalf("%s must be rejected", tc.name)
 			}
 		})
@@ -98,7 +99,7 @@ func TestLocalTokenRequiresExp(t *testing.T) {
 		"aud": "a", "iat": jwt.NewNumericDate(time.Now()),
 	})
 	v := &localVerifier{audience: "a", pub: pub}
-	if err := v.verify(context.Background(), noExp); err == nil {
+	if _, err := v.verify(context.Background(), noExp); err == nil {
 		t.Fatal("local token without exp must be rejected")
 	}
 }
@@ -148,7 +149,7 @@ func TestLocalKeyFileRoundtrip(t *testing.T) {
 	}
 	v := &localVerifier{audience: "hotserve", pub: loadedPub, claims: map[string]string{"repository": "org/app"}}
 	tok := mintTestToken(t, loadedPriv, "hotserve", map[string]string{"repository": "org/app"})
-	if err := v.verify(context.Background(), tok); err != nil {
+	if _, err := v.verify(context.Background(), tok); err != nil {
 		t.Fatalf("round-trip token rejected: %v", err)
 	}
 }
@@ -161,7 +162,7 @@ func TestOIDCVerifier(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	if err := base().verify(ctx, iss.mint(t, iss.priv, "hotserve", want, time.Now().Add(5*time.Minute))); err != nil {
+	if _, err := base().verify(ctx, iss.mint(t, iss.priv, "hotserve", want, time.Now().Add(5*time.Minute))); err != nil {
 		t.Fatalf("valid token rejected: %v", err)
 	}
 
@@ -188,7 +189,7 @@ func TestOIDCVerifier(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := base().verify(ctx, tc.tok()); err == nil {
+			if _, err := base().verify(ctx, tc.tok()); err == nil {
 				t.Fatalf("%s must be rejected", tc.name)
 			}
 		})
@@ -210,13 +211,13 @@ func TestOIDCVerifierNumericClaim(t *testing.T) {
 	}
 	tok := iss.mintClaims(t, "hotserve", time.Now().Add(5*time.Minute),
 		map[string]any{"repository_id": 100000000})
-	if err := v.verify(context.Background(), tok); err != nil {
+	if _, err := v.verify(context.Background(), tok); err != nil {
 		t.Fatalf("token with numeric repository_id rejected: %v", err)
 	}
 	// A different numeric id must still be rejected.
 	bad := iss.mintClaims(t, "hotserve", time.Now().Add(5*time.Minute),
 		map[string]any{"repository_id": 999})
-	if err := v.verify(context.Background(), bad); err == nil {
+	if _, err := v.verify(context.Background(), bad); err == nil {
 		t.Fatal("wrong repository_id must be rejected")
 	}
 
@@ -232,8 +233,103 @@ func TestOIDCVerifierNumericClaim(t *testing.T) {
 	}
 	bigTok := iss.mintClaims(t, "hotserve", time.Now().Add(5*time.Minute),
 		map[string]any{"repository_id": big})
-	if err := bigV.verify(context.Background(), bigTok); err != nil {
+	if _, err := bigV.verify(context.Background(), bigTok); err != nil {
 		t.Fatalf("token with a >2^53 repository_id rejected: %v", err)
+	}
+}
+
+// TestAttribute pins the form a deploy is recorded under: the label,
+// then each named claim in the order named, a value that could be read
+// as more than one field quoted.
+func TestAttribute(t *testing.T) {
+	names := []string{"repository", "ref", "actor"}
+	for _, tc := range []struct {
+		name   string
+		claims map[string]any
+		want   string
+	}{
+		{"all present, in list order", map[string]any{"actor": "alice", "ref": "refs/heads/main", "repository": "org/blog"},
+			"L repository=org/blog ref=refs/heads/main actor=alice"},
+		{"absent claims left out", map[string]any{"ref": "refs/heads/main"}, "L ref=refs/heads/main"},
+		{"none present", map[string]any{"sub": "x"}, "L"},
+		{"non-scalar and null left out", map[string]any{"repository": []any{"a"}, "ref": map[string]any{}, "actor": nil}, "L"},
+		{"number by its digits", map[string]any{"actor": json.Number("9007199254740993")}, "L actor=9007199254740993"},
+		{"space quoted", map[string]any{"actor": "alice actor=bob"}, `L actor="alice actor=bob"`},
+		{"quote and backslash quoted", map[string]any{"actor": `a"b\c`}, `L actor="a\"b\\c"`},
+		{"control rune quoted", map[string]any{"actor": "a\nb"}, `L actor="a\nb"`},
+		{"non-ASCII space quoted", map[string]any{"actor": "a" + string(rune(0xa0)) + "b"}, `L actor="a\` + "u00a0b\""},
+		{"empty quoted", map[string]any{"actor": ""}, `L actor=""`},
+		{"printable unicode as is", map[string]any{"actor": "zoë"}, "L actor=zoë"},
+		{"= inside a value as is", map[string]any{"ref": "refs/heads/a=b"}, "L ref=refs/heads/a=b"},
+	} {
+		if got := attribute("L", names, tc.claims); got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestPresetAttribution pins which claims each preset records, carried
+// past the fold of github/gitlab into kind "oidc".
+func TestPresetAttribution(t *testing.T) {
+	dir := t.TempDir()
+	_, pub := mustGenTestKey()
+	pubDER, _ := x509.MarshalPKIXPublicKey(pub)
+	pubPath := dir + "/k.pub"
+	if err := os.WriteFile(pubPath, pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		tc   TrustConfig
+		want string
+	}{
+		{TrustConfig{Kind: "github", Audience: "a", Claims: map[string]string{"repository": "o/r"}}, "repository ref actor"},
+		{TrustConfig{Kind: "gitlab", Audience: "a", Claims: map[string]string{"project_path": "o/r"}}, "project_path ref user_login"},
+		{TrustConfig{Kind: "oidc", Issuer: "https://idp.example", Audience: "a", Subject: "ci"}, "sub"},
+		{TrustConfig{Kind: "local", PublicKey: pubPath}, "sub"},
+	} {
+		srcs, err := buildTrust([]TrustConfig{tc.tc}, nil)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.tc.Kind, err)
+		}
+		if got := strings.Join(srcs[0].attribution, " "); got != tc.want {
+			t.Errorf("%s records %q, want %q", tc.tc.Kind, got, tc.want)
+		}
+	}
+}
+
+// TestAuthorizeAttributes pins that authorize hands back the accepting
+// verifier's label with the token's claims, for either kind — the
+// string deployed_by and the `deploy authorized` line carry.
+func TestAuthorizeAttributes(t *testing.T) {
+	ctx := context.Background()
+	priv, pub := mustGenTestKey()
+	local := resolveVerifiers([]trustSource{localTrust(pub, "aud1")}, nil)
+	for _, tc := range []struct {
+		name   string
+		claims map[string]string
+		want   string
+	}{
+		{"with a subject", map[string]string{"sub": "alice"}, "local:test-key sub=alice"},
+		{"without one", nil, "local:test-key"},
+	} {
+		by, ok := authorize(ctx, local, mintTestToken(t, priv, "aud1", tc.claims))
+		if !ok || by != tc.want {
+			t.Errorf("local %s: authorize = %q, %v; want %q", tc.name, by, ok, tc.want)
+		}
+	}
+
+	iss := newMockIssuer(t)
+	gh := resolveVerifiers([]trustSource{{
+		kind: "oidc", issuer: iss.url, audience: "hotserve",
+		claims: map[string]string{"repository": "org/blog"}, attribution: attributionClaims["github"],
+	}}, iss.client)
+	tok := iss.mint(t, iss.priv, "hotserve", map[string]string{
+		"repository": "org/blog", "ref": "refs/heads/main", "actor": "alice",
+		"sub": "repo:org/blog:ref:refs/heads/main",
+	}, time.Now().Add(5*time.Minute))
+	want := "oidc:" + iss.url + " repository=org/blog ref=refs/heads/main actor=alice"
+	if by, ok := authorize(ctx, gh, tok); !ok || by != want {
+		t.Errorf("github: authorize = %q, %v; want %q", by, ok, want)
 	}
 }
 

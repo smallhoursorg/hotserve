@@ -85,7 +85,7 @@ func globalToken(t *testing.T) string { return mintTestToken(t, globalTestPriv, 
 
 // localTrust builds a local trust source for a test public key.
 func localTrust(pub ed25519.PublicKey, audience string) trustSource {
-	return trustSource{kind: "local", audience: audience, pubKey: pub, keyPath: "test-key"}
+	return trustSource{kind: "local", audience: audience, pubKey: pub, keyPath: "test-key", attribution: attributionClaims["local"]}
 }
 
 // githubTrust is an I/O-free config-level trust source for config tests
