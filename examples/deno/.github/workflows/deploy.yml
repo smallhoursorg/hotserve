@@ -2,6 +2,11 @@
 # release, and tell the box to fetch it. No secrets: the job mints a
 # short-lived OIDC token that the box's `deploy_trust github { … }`
 # block verifies against GitHub's keys.
+#
+# No file here names the box. Its address is the repository variable
+# HOTSERVE_URL (Settings → Secrets and variables → Actions →
+# Variables), and the runner is the variable HOTSERVE_RUNS_ON when the
+# default below is not the one the box needs.
 name: deploy
 on:
   push:
@@ -25,10 +30,25 @@ concurrency: deploy # one at a time: a second deploy would get a 409
 
 jobs:
   deploy:
-    # Build on the box's architecture if you add npm packages with
-    # native code (ubuntu-24.04-arm for an arm64 box).
-    runs-on: ubuntu-24.04
+    # Any runner builds the tarball: it has no native code. If you add
+    # npm packages with native code, build on the box's architecture:
+    # set the variable HOTSERVE_RUNS_ON (ubuntu-24.04-arm for an arm64
+    # box).
+    runs-on: ${{ vars.HOTSERVE_RUNS_ON || 'ubuntu-24.04' }}
+    env:
+      # The app's webhook on the box, e.g.
+      # https://deploy.example.com/example. A repository variable, not
+      # an organization one: it names this one app.
+      HOTSERVE_URL: ${{ vars.HOTSERVE_URL }}
     steps:
+      # A repository made from a template runs this workflow as it is
+      # created, before the variable can exist: that run stops here,
+      # with the one setting it needs, and publishes nothing.
+      - name: Check HOTSERVE_URL is set
+        if: ${{ !vars.HOTSERVE_URL }}
+        run: |
+          echo "::error title=HOTSERVE_URL is not set::Add the repository variable HOTSERVE_URL, the app's webhook on the box (https://deploy.example.com/example, say): Settings → Secrets and variables → Actions → Variables, or gh variable set HOTSERVE_URL -R $GITHUB_REPOSITORY --body <url>. Then push to main."
+          exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         if: ${{ !inputs.rollback }}
@@ -52,12 +72,10 @@ jobs:
       - run: scripts/deploy.sh "$ASSET_URL"
         if: ${{ !inputs.rollback }}
         env:
-          HOTSERVE_URL: https://deploy.example.com/example
           VERSION: ${{ steps.version.outputs.version }}
           ASSET_URL: ${{ fromJSON(steps.release.outputs.assets)[0].url }}
           ARTIFACT_AUTH_HEADER: token ${{ github.token }}
       - if: ${{ inputs.rollback }}
         run: scripts/deploy.sh --rollback "$ROLLBACK"
         env:
-          HOTSERVE_URL: https://deploy.example.com/example
           ROLLBACK: ${{ inputs.rollback }}

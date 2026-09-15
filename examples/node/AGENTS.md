@@ -23,8 +23,8 @@ which runs it under rules that do not show up when you run it locally.
   of a package from `node_modules` does not work inside the
   executable.
 - **Build on the box's architecture.** The executable is the Node
-  binary it was built with; the workflow's `runs-on` must match the
-  box.
+  binary it was built with; the workflow's runner (the variable
+  `HOTSERVE_RUNS_ON`, arm64 when unset) must match the box.
 - **Only its own dirs exist in production.** The app's sandbox holds
   its release dir, `$DATA_DIR`, a private `/tmp` and the OS runtime
   under `/usr`. `/opt`, `/srv`, `/home` and host unix sockets (a local

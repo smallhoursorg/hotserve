@@ -1,7 +1,9 @@
 // Package examples holds the tests of what the examples ship that is
 // not an example's own code: scripts/deploy.sh, which every example
 // copies and which has to read a box's answer in every shape a box
-// can give it.
+// can give it; and, for the template repositories each release
+// publishes them as, the links in their docs and the script that does
+// the publishing.
 package examples
 
 import (

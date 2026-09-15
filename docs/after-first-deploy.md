@@ -153,8 +153,9 @@ moment for it.
 - **Logs:** `journalctl -t hotserve-example` for the app's own output,
   `journalctl -u hotserve` for hotserve's, both without sudo as `alice`.
 - **A second app:** another `app` block and site in the Caddyfile,
-  pushed from the box repo; another copy of the example. The Caddyfile
-  is the only thing on the box that changes.
+  pushed from the box repo; another copy of the example, with its own
+  `HOTSERVE_URL`. The Caddyfile is the only thing on the box that
+  changes.
 - **A changed `app` block** applies at the app's next launch — its next
   deploy or rollback, or a relaunch after a crash — never to the one
   running. Widen a Deno app's permissions before deploying code that

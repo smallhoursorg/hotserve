@@ -3,9 +3,10 @@
 A small app to copy as the start of your own. It serves on the unix
 socket hotserve hands it, answers a health check, runs a migration
 before each new version starts, finishes its requests on shutdown, and
-deploys from GitHub Actions with no stored secret. hotserve's e2e suite
-builds and deploys this directory, with these files, on every change
-to hotserve, so what is here works.
+deploys from GitHub Actions with no stored secret.
+[hotserve](https://github.com/smallhoursorg/hotserve)'s e2e suite
+builds and deploys these files, from its `examples/deno`, on every
+change to hotserve, so what is here works.
 
 | File | What it is |
 |---|---|
@@ -14,7 +15,7 @@ to hotserve, so what is here works.
 | `deno.json` | Dependencies and the `dev`, `bundle` and `deploy` tasks |
 | `scripts/bundle.sh` | Builds `app.tar.gz`, with the module cache inside it |
 | `scripts/deploy.sh` | Tells the box to deploy a release URL (or pushes a local tarball), or to roll back |
-| `.github/workflows/deploy.yml` | Build, publish a release, deploy — on every push to `main`; `Run workflow` rolls back |
+| `.github/workflows/deploy.yml` | Build, publish a release, deploy — on every push to `main`; `Run workflow` rolls back. The box's address is the repository variable `HOTSERVE_URL` |
 | `hotserve.caddy` | What the app needs from the box: the lines for its `app` block |
 | `AGENTS.md` | The rules the box enforces, for you and your coding agent |
 
@@ -27,7 +28,7 @@ deno task dev          # http://127.0.0.1:8000
 ## Put it on a box
 
 You need a Debian 13 server with hotserve installed and a DNS name
-pointing at it. [Your first deploy](../../docs/first-deploy.md) is the
+pointing at it. [Your first deploy](https://github.com/smallhoursorg/hotserve/blob/main/docs/first-deploy.md) is the
 whole path from a fresh server, with this app as its one fork; the
 three steps below are its second half.
 
@@ -51,7 +52,7 @@ apt install -y unzip && unzip -o "$f" deno -d /usr/local/bin
 `hotserve.caddy` inside its `app` block. As root that is
 `/etc/hotserve/Caddyfile`: edit, `hotserve validate --config` it,
 `systemctl reload hotserve`. Once the box has a
-[box repo](../box#change-the-config), it is that repo's `Caddyfile`
+[box repo](https://github.com/smallhoursorg/hotserve/tree/main/examples/box#change-the-config), it is that repo's `Caddyfile`
 and `make push`. The box example ships this app's block already.
 Either way, the file is:
 
@@ -90,16 +91,20 @@ The copy on the box is the one that counts: hotserve never reads
 the file on its box as `/etc/hotserve/<app>.caddy` and writes `import`
 of that path in the block.)
 
-**3. Point the workflow at the box.** In your copy of this directory,
-set `HOTSERVE_URL` in `.github/workflows/deploy.yml` to
-`https://deploy.example.com/example`, then push to `main`. The
-workflow publishes the tarball as a GitHub release and the box fetches
-it — so every deployed version stays on GitHub. The box fetches the
-asset by its API URL with the job's own token, so a private repo
-deploys the same way as a public one, and the box's
-`artifact_allowlist api.github.com/repos/your-org/` is what admits
-it. The deploy step prints the app's status when the new version is
-live, or why it was refused; a refused deploy leaves the old version
+**3. Point the workflow at the box.** No file needs editing: in your
+copy's GitHub repository, add the repository variable `HOTSERVE_URL`,
+set to `https://deploy.example.com/example` (Settings → Secrets and
+variables → Actions → Variables, or
+`gh variable set HOTSERVE_URL -R your-org/example --body https://deploy.example.com/example`).
+Then push to `main`. A run without `HOTSERVE_URL` stops at its first
+step, saying so, and publishes nothing. The workflow publishes the
+tarball as a GitHub release and the box fetches it — so every deployed
+version stays on GitHub. The box fetches the asset by its API URL with
+the job's own token, so a private repo deploys the same way as a
+public one, and the box's
+`artifact_allowlist api.github.com/repos/your-org/` is what admits it.
+The deploy step prints the app's status when the new version is live,
+or why it was refused; a refused deploy leaves the old version
 serving.
 
 What a first deploy that worked looks like, from the laptop:
@@ -151,7 +156,7 @@ comes from `hotserve deploy-token`, and hotserve's release binaries
 are Linux only, so this is a path for a Linux machine that is not the
 box (the signing key must stay off the box). With a `deploy_trust local` block
 on the box (see
-[Deploy authentication](../../liveswap/README.md#deploy-authentication-deploy_trust)):
+[Deploy authentication](https://github.com/smallhoursorg/hotserve/blob/main/liveswap/README.md#deploy-authentication-deploy_trust)):
 
 ```sh
 deno task bundle
