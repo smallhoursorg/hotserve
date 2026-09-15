@@ -47,7 +47,7 @@ jobs:
       - name: Check HOTSERVE_URL is set
         if: ${{ !vars.HOTSERVE_URL }}
         run: |
-          echo "::error title=HOTSERVE_URL is not set::Add the repository variable HOTSERVE_URL, the app's webhook on the box (https://deploy.example.com/example, say): Settings → Secrets and variables → Actions → Variables, or gh variable set HOTSERVE_URL -R $GITHUB_REPOSITORY --body <url>. Then push to main."
+          echo "::error title=HOTSERVE_URL is not set::Add the repository variable HOTSERVE_URL, the app's webhook on the box (https://deploy.example.com/example, say): Settings → Secrets and variables → Actions → Variables, or gh variable set HOTSERVE_URL -R $GITHUB_REPOSITORY --body <url>. Then re-run this job, or push."
           exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -73,7 +73,10 @@ jobs:
         if: ${{ !inputs.rollback }}
         env:
           VERSION: ${{ steps.version.outputs.version }}
-          ASSET_URL: ${{ fromJSON(steps.release.outputs.assets)[0].url }}
+          # On a rollback the release step is skipped and its output is
+          # empty; GitHub evaluates this anyway, and fromJSON('') would
+          # fail the whole run before the rollback step.
+          ASSET_URL: ${{ fromJSON(steps.release.outputs.assets || '[{}]')[0].url }}
           ARTIFACT_AUTH_HEADER: token ${{ github.token }}
       - if: ${{ inputs.rollback }}
         run: scripts/deploy.sh --rollback "$ROLLBACK"

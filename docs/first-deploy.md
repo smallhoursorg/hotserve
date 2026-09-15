@@ -69,8 +69,11 @@ Check it:
 ```sh
 systemctl status hotserve          # active (running)
 curl -s localhost                  # "hotserve is running. Edit /etc/hotserve/Caddyfile …"
-journalctl -u hotserve | grep 'liveswap started'   # one JSON line: "msg":"liveswap started","apps":0
 ```
+
+(The deploy side, liveswap, is not running yet: the starter config
+leaves it commented out. It starts, and says so in the journal, in
+step 3.)
 
 If it is not running, `journalctl -u hotserve -n 50` says why. A host
 that cannot deliver the sandbox is refused here, with the missing piece

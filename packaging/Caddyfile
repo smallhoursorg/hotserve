@@ -19,14 +19,19 @@
 	# the line if you edit this block.
 	admin unix//run/hotserve/admin.sock
 
-	# ── Example: a Node.js app with zero-downtime deploys ──
+	# ── Example: the Node.js app in hotserve's examples/node, with
+	#    zero-downtime deploys. It ships as one executable with Node
+	#    inside; its README says what the box needs for it. ──
 	#
 	# Uncomment what you need HERE, inside this block: global options
 	# all live in the one block at the top of the file, and a second
 	# { } block is a parse error. The matching site blocks are below.
 	#
 	# liveswap {
-	# 	artifact_allowlist github.com/your-org/   # required: pin artifact origins
+	# 	# Required: where a deploy may fetch from. The example's
+	# 	# workflow sends its release asset's API URL, so it is
+	# 	# api.github.com here, not github.com.
+	# 	artifact_allowlist api.github.com/repos/your-org/
 	#
 	# 	# Who may deploy (required). CI sends an OIDC token; the box
 	# 	# verifies it against the provider's public keys — no shared
@@ -39,9 +44,15 @@
 	# 	}
 	#
 	# 	app myapp {
-	# 		command node server.js
-	# 		env_file /etc/hotserve/myapp.env
-	# 		# pre_start node migrate.js
+	# 		# From examples/node/hotserve.caddy: both commands are
+	# 		# executables inside the tarball.
+	# 		command ./server
+	# 		pre_start ./migrate
+	# 		env APP_VERSION {version}
+	# 		env DATA_DIR {shared_dir}
+	# 		# Secrets, read at each launch. The file must exist once
+	# 		# this line is in: a missing one fails the launch.
+	# 		# env_file /etc/hotserve/myapp.env
 	#
 	# 		# Each app runs in its own systemd sandbox, and the
 	# 		# filesystem it sees is deny-by-default: its release dir,
