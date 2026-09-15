@@ -579,7 +579,9 @@ func outcomeAlternation() string {
 // own redacted_env, read back — has been through every layer as body
 // text, so its entries are kept, never replaced, and nothing that
 // did not pass the filter is added. The final pass runs before this
-// (rule 2). Anything but an object is returned as it is.
+// (rule 2). The object is re-marshalled, so its top-level keys come
+// out sorted; its values are carried as raw JSON, so a nested object
+// keeps its keys' order. Anything but an object is returned as it is.
 func withField(body, name string, values []string) string {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(body), &obj); err != nil || obj == nil {

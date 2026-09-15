@@ -460,13 +460,18 @@ func (s *deployStream) finish(ma *managedApp, err error) error {
 	if !s.begun {
 		return respondJSON(s.w, code, body, rd)
 	}
-	// The single response's bytes, filtered, with two fields appended
-	// after the filter: not a re-marshalled map, so the fields keep the
-	// order the single response has (a client reading "the last phase"
-	// by position relies on it — the examples' deploy.sh does); and
-	// after, so the outcome's markers survive a filter that withholds
-	// the whole body (an unreadable env_file). redactJSON always
-	// returns one JSON object, so the closing brace is where it ends.
+	// The single response's bytes, filtered as respondJSON filters
+	// them, with two fields appended after the filter: appended, not
+	// re-marshalled, so the line has the single response's order, which
+	// is whatever the filter left (a redaction re-marshals the top
+	// level, sorting its keys; a nested object keeps its order — see
+	// withField). A client reading "the last phase" by position relies
+	// on it: the examples' deploy.sh reads a failure's, and every phase
+	// in a failure body is inside "status", in statusSnapshot's order.
+	// And after, so the outcome's markers survive a filter that
+	// withholds the whole body (an unreadable env_file). redactJSON
+	// always returns one JSON object, so the closing brace is where it
+	// ends.
 	raw, mErr := json.Marshal(body)
 	if mErr != nil {
 		return mErr

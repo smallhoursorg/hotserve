@@ -1310,7 +1310,9 @@ type statusSnapshot struct {
 	// record is kept for (deploys.go), newest first; the whole record
 	// is GET /<app>?deploy=<version>. Serialized before last_deploy:
 	// the examples' deploy.sh reads the failing phase as the last
-	// "phase" in the body, which must stay last_deploy's.
+	// "phase" in a failure body, which must stay last_deploy's. That
+	// body carries the snapshot under "status", whose keys' order the
+	// filter keeps (withField sorts only the top level).
 	Deploys    []deploySummary   `json:"deploys,omitempty"`
 	LastDeploy *deployResult     `json:"last_deploy,omitempty"`
 	Watchdog   *watchdogSnapshot `json:"watchdog,omitempty"`

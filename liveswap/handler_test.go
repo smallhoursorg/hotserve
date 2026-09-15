@@ -793,17 +793,51 @@ func TestWebhookDeployRecordKeepsItsRecordedKeys(t *testing.T) {
 }
 
 // The examples' deploy.sh reads the failing phase as the last "phase"
-// in a failure body; with older records listed in the status that must
-// still be last_deploy's, so deploys is serialized before it.
+// in a failure body, the stream's last line; with older records listed
+// in the status that must still be last_deploy's, so deploys is
+// serialized before it. A redaction does not move it: the
+// redacted_env it adds re-marshals only the body's top level, which
+// holds no phase.
 func TestFailureBodyEndsWithLastDeploysPhase(t *testing.T) {
-	h, rig := newTestHandler(t)
-	must(t, writeDeployRecord(rig.spec.dirs, "v0", []byte(`{"version":"v0","status":"failed","phase":"soaking"}`)))
-	rig.runner.startErr = errors.New("boom")
-	w := do(t, h, http.MethodPost, "/demo", appToken(t), `{"url":"https://x/a.tgz","version":"v1"}`)
-	body := w.Body.String()
-	i := strings.LastIndex(body, `"phase":"`)
-	if w.Code != 500 || i < 0 || !strings.HasPrefix(body[i:], `"phase":"starting"`) {
-		t.Fatalf("status %d, last phase in body is not last_deploy's: %s", w.Code, body)
+	for _, tc := range []struct {
+		name           string
+		secret, stream bool
+	}{
+		{"single", false, false},
+		{"stream", false, true},
+		{"single redacted", true, false},
+		{"stream redacted", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, rig := newTestHandler(t)
+			must(t, writeDeployRecord(rig.spec.dirs, "v0", []byte(`{"version":"v0","status":"failed","phase":"soaking"}`)))
+			rig.runner.startErr = errors.New("boom")
+			if tc.secret {
+				rig.spec.envFile = filepath.Join(t.TempDir(), "app.env")
+				must(t, os.WriteFile(rig.spec.envFile, []byte("SECRET=hunter2hunter2\n"), 0o600))
+				rig.runner.startErr = errors.New("boom hunter2hunter2")
+			}
+			var code int
+			var body string
+			if tc.stream {
+				w, lines := streamLines(t, h)
+				raw := strings.Split(strings.TrimRight(w.Body.String(), "\n"), "\n")
+				status, _ := lines[len(lines)-1]["http_status"].(float64)
+				code, body = int(status), raw[len(raw)-1]
+			} else {
+				w := do(t, h, http.MethodPost, "/demo", appToken(t), `{"url":"https://x/a.tgz","version":"v1"}`)
+				code, body = w.Code, w.Body.String()
+			}
+			i := strings.LastIndex(body, `"phase":"`)
+			if code != 500 || i < 0 || !strings.HasPrefix(body[i:], `"phase":"starting"`) {
+				t.Fatalf("status %d, last phase in body is not last_deploy's: %s", code, body)
+			}
+			// Each case takes the path it names: withField ran exactly
+			// when a known value was in the body.
+			if strings.Contains(body, `"redacted_env":["SECRET"]`) != tc.secret || strings.Contains(body, "hunter2hunter2") {
+				t.Fatalf("redaction: %s", body)
+			}
+		})
 	}
 }
 
