@@ -127,6 +127,11 @@ jobs:
   #     Pull requests off too, in the web UI (Settings → General →
   #     Features; the API has no switch for it): the next release
   #     overwrites whatever one merges.
+  #   - Two rulesets per repository, no bypass: main refuses a
+  #     non-fast-forward push and deletion; refs/tags/v* refuses update
+  #     and deletion. The script only fast-forwards main and creates
+  #     tags, so it never meets them; they keep anyone else (or a
+  #     leaked token) from rewriting what a release's template was.
   #   - TEMPLATES_TOKEN: a fine-grained PAT, resource owner
   #     smallhoursorg, on the two mirror repositories only, with
   #     Contents and Workflows read-write: every sync pushes
