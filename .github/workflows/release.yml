@@ -124,6 +124,9 @@ jobs:
   #     workflow in the mirror (with no HOTSERVE_URL there it only
   #     fails at its first step, but off is quieter). A repository
   #     made from the template has Actions on: settings are not copied.
+  #     Pull requests off too, in the web UI (Settings → General →
+  #     Features; the API has no switch for it): the next release
+  #     overwrites whatever one merges.
   #   - TEMPLATES_TOKEN: a fine-grained PAT, resource owner
   #     smallhoursorg, on the two mirror repositories only, with
   #     Contents and Workflows read-write: every sync pushes
