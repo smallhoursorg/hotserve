@@ -20,8 +20,9 @@
 	admin unix//run/hotserve/admin.sock
 
 	# ── Example: the Node.js app in hotserve's examples/node, with
-	#    zero-downtime deploys. It ships as one executable with Node
-	#    inside; its README says what the box needs for it. ──
+	#    zero-downtime deploys. Its tarball holds two executables,
+	#    server and migrate, each with Node inside; its README says
+	#    what the box needs for them. ──
 	#
 	# Uncomment what you need HERE, inside this block: global options
 	# all live in the one block at the top of the file, and a second
