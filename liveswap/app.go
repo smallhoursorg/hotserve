@@ -117,7 +117,9 @@ type deployRequest struct {
 	// rollback relaunches an existing on-disk release/<Version> without
 	// fetching or extracting anything.
 	rollback bool
-	// by is the label of the trust source that authorized this deploy.
+	// by is who this deploy is recorded under: the label of the trust
+	// source that authorized it and the token's attribution claims
+	// (attribute, deploytrust.go).
 	by string
 	// onPhase, when set, is told each phase the pipeline enters, on the
 	// deploy's own goroutine before the phase's work begins — a
@@ -145,7 +147,7 @@ type deployResult struct {
 	Status     string    `json:"status"` // "succeeded" | "failed"
 	Error      string    `json:"error,omitempty"`
 	Phase      string    `json:"phase,omitempty"`       // phase reached when it failed
-	By         string    `json:"deployed_by,omitempty"` // the trust source that authorized it
+	By         string    `json:"deployed_by,omitempty"` // the trust source that authorized it, and the token's attribution claims
 	StartedAt  time.Time `json:"started_at"`
 	FinishedAt time.Time `json:"finished_at"`
 	// What the artifact cost against max_artifact_entries and the

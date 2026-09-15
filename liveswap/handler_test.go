@@ -113,7 +113,8 @@ func TestWebhookUnknownAppIs404OnlyWhenAuthenticated(t *testing.T) {
 
 func TestWebhookDeployHappyPath(t *testing.T) {
 	h, rig := newTestHandler(t)
-	w := do(t, h, http.MethodPost, "/demo", appToken(t), `{"url":"https://x/a.tgz","version":"v1"}`)
+	tok := mintTestToken(t, appTestPriv, "demo", map[string]string{"sub": "alice"})
+	w := do(t, h, http.MethodPost, "/demo", tok, `{"url":"https://x/a.tgz","version":"v1"}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("code = %d body=%s", w.Code, w.Body.String())
 	}
@@ -125,9 +126,15 @@ func TestWebhookDeployHappyPath(t *testing.T) {
 	if rig.ma.activeSocket.Load() == nil {
 		t.Fatal("deploy did not publish a port")
 	}
-	// The status records which trust source authorized the deploy.
-	if status.LastDeploy == nil || status.LastDeploy.By != "local:test-key" {
-		t.Fatalf("deployed_by not recorded: %+v", status.LastDeploy)
+	// The status records who authorized the deploy: the trust source,
+	// and the subject its token names.
+	const want = "local:test-key sub=alice"
+	if status.LastDeploy == nil || status.LastDeploy.By != want {
+		t.Fatalf("deployed_by = %+v, want %q", status.LastDeploy, want)
+	}
+	// So does the version's record.
+	if len(status.Deploys) == 0 || status.Deploys[0].By != want {
+		t.Fatalf("recorded deployed_by = %+v, want %q", status.Deploys, want)
 	}
 }
 

@@ -307,7 +307,7 @@ func (h *Handler) deployRecord(w http.ResponseWriter, ma *managedApp, version st
 	return respondFiltered(w, http.StatusOK, ma.redactorFor(s).redactJSON(rec))
 }
 
-// runDeploy records the authorizing source, runs the pipeline, and maps
+// runDeploy records who authorized it, runs the pipeline, and maps
 // the outcome to a status code — or, when the client asked for it,
 // streams the phases as they happen and ends with the same outcome.
 func (h *Handler) runDeploy(w http.ResponseWriter, r *http.Request, ma *managedApp, req deployRequest, by string) error {

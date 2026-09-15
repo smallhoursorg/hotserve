@@ -700,12 +700,24 @@ Each dev runs `hotserve deploy-keygen` once and hands you the `.pub`
 never a `local` key in CI (that would store a long-lived private key in
 CI secrets — the thing OIDC exists to avoid).
 
-Every successful deploy records **which source authorized it**: a
-`deploy authorized` log line (`via` = the source label, e.g.
-`local:/etc/hotserve/alice.pub` or `oidc:https://token.actions…`) and a
-`deployed_by` field in the status JSON. That is your audit trail for
-hand deploys — pin `subject <name>` on each dev's block so the label
-names the person.
+Every authorized deploy records **who authorized it**: the label of the
+source that accepted the token, then what the token says about where
+the deploy came from — `repository`, `ref` and `actor` for `github`;
+`project_path`, `ref` and `user_login` for `gitlab`; `sub` for `oidc`
+and `local`. A claim the token lacks is left out, and a value with a
+space or a quote in it is quoted. The same string is `via` on the
+`deploy authorized` log line and `deployed_by` in the status JSON and
+in [deploy records](#deploy-records):
+
+```
+oidc:https://token.actions.githubusercontent.com repository=your-org/blog ref=refs/heads/main actor=alice
+local:/etc/hotserve/alice.pub sub=alice
+```
+
+That is your audit trail. For a `local` block the key path says whose
+key it was; `sub` is whatever the key's holder minted the token with
+(`hotserve deploy-token --subject`), unless the block pins `subject
+<name>`, which makes it a name the box checked.
 
 ## Webhook API
 

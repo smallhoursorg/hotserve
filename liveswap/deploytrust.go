@@ -59,12 +59,13 @@ type TrustConfig struct {
 // mapped to issuers, local public keys loaded, claims folded. It holds
 // no network state — verifiers are built from it in resolveVerifiers.
 type trustSource struct {
-	kind     string // "oidc" | "local"
-	issuer   string // oidc
-	audience string
-	pubKey   ed25519.PublicKey // local
-	keyPath  string            // local (for error messages)
-	claims   map[string]string
+	kind        string // "oidc" | "local"
+	issuer      string // oidc
+	audience    string
+	pubKey      ed25519.PublicKey // local
+	keyPath     string            // local (for error messages)
+	claims      map[string]string
+	attribution []string // the preset's attributionClaims, kept past the fold to "oidc"
 }
 
 // resolveTrustPlaceholders expands {env.*} (and other known Caddy
@@ -139,7 +140,7 @@ func resolveTrustConfig(tc TrustConfig) (trustSource, error) {
 		if err := requireIdentityClaim(tc.Kind, claims); err != nil {
 			return trustSource{}, err
 		}
-		return trustSource{kind: "oidc", issuer: issuer, audience: tc.Audience, claims: claims}, nil
+		return trustSource{kind: "oidc", issuer: issuer, audience: tc.Audience, claims: claims, attribution: attributionClaims[tc.Kind]}, nil
 
 	case "local":
 		if tc.PublicKey == "" {
@@ -152,7 +153,7 @@ func resolveTrustConfig(tc TrustConfig) (trustSource, error) {
 		if err != nil {
 			return trustSource{}, fmt.Errorf("local public_key: %w", err)
 		}
-		return trustSource{kind: "local", audience: tc.Audience, pubKey: key, keyPath: tc.PublicKey, claims: claims}, nil
+		return trustSource{kind: "local", audience: tc.Audience, pubKey: key, keyPath: tc.PublicKey, claims: claims, attribution: attributionClaims["local"]}, nil
 
 	case "":
 		return trustSource{}, fmt.Errorf("missing preset (use `deploy_trust github|gitlab|oidc|local { ... }`)")
@@ -168,6 +169,18 @@ func resolveTrustConfig(tc TrustConfig) (trustSource, error) {
 var identityClaims = map[string][]string{
 	"github": {"repository", "repository_id", "repository_owner", "repository_owner_id", "sub"},
 	"gitlab": {"project_path", "project_id", "namespace_path", "namespace_id", "sub"},
+}
+
+// attributionClaims lists, per preset, the token claims a deploy is
+// recorded under after the source's label (attribute): where it came
+// from and who started it. Not the identity constraints — those are
+// the operator's config, already known — but what this token says.
+// No e-mail claim: the result lands in CI logs.
+var attributionClaims = map[string][]string{
+	"github": {"repository", "ref", "actor"},
+	"gitlab": {"project_path", "ref", "user_login"},
+	"oidc":   {"sub"},
+	"local":  {"sub"},
 }
 
 // requireIdentityClaim fails closed when an OIDC source pins no identity.
@@ -234,12 +247,10 @@ func loadEd25519PublicKey(path string) (ed25519.PublicKey, error) {
 
 // verifier authenticates a raw bearer JWT for one trust source.
 type verifier interface {
-	// verify returns nil iff the token's signature and standard claims
-	// are valid and every configured claim constraint matches.
-	verify(ctx context.Context, rawToken string) error
-	// label identifies the source in logs (never includes secrets —
-	// there are none).
-	label() string
+	// verify returns a nil error iff the token's signature and standard
+	// claims are valid and every configured claim constraint matches,
+	// and with it who the deploy is recorded under (attribute).
+	verify(ctx context.Context, rawToken string) (by string, err error)
 }
 
 // resolveVerifiers turns validated trust sources into live verifiers.
@@ -252,12 +263,12 @@ func resolveVerifiers(sources []trustSource, jwksClient *http.Client) []verifier
 		case "oidc":
 			out = append(out, &oidcVerifier{
 				issuer: ts.issuer, audience: ts.audience,
-				claims: ts.claims, client: jwksClient,
+				claims: ts.claims, attribution: ts.attribution, client: jwksClient,
 			})
 		case "local":
 			out = append(out, &localVerifier{
 				audience: ts.audience, pub: ts.pubKey,
-				keyPath: ts.keyPath, claims: ts.claims,
+				keyPath: ts.keyPath, claims: ts.claims, attribution: ts.attribution,
 			})
 		}
 	}
@@ -283,18 +294,44 @@ func warmVerifiers(verifierSets ...[]verifier) {
 	}
 }
 
-// authorize returns the label of the first verifier that accepts the
-// token (for the deploy audit log), and whether any did.
+// authorize returns who the first verifier that accepts the token
+// records the deploy under — its label and the token's attribution
+// claims (attribute), for the deploy record and audit log — and
+// whether any did.
 func authorize(ctx context.Context, verifiers []verifier, rawToken string) (string, bool) {
 	if rawToken == "" {
 		return "", false
 	}
 	for _, v := range verifiers {
-		if err := v.verify(ctx, rawToken); err == nil {
-			return v.label(), true
+		if by, err := v.verify(ctx, rawToken); err == nil {
+			return by, true
 		}
 	}
 	return "", false
+}
+
+// attribute is who a deploy is recorded under: the source's label,
+// then ` name=value` for each named claim the token carries, in the
+// order named. A claim that is absent or not a scalar is left out. A
+// value that is empty or holds a space, a quote, a backslash or an
+// unprintable rune is Go-quoted, so a subject the token's signer chose
+// ("alice actor=bob") reads as one value, never as a second field.
+func attribute(label string, names []string, claims map[string]any) string {
+	var b strings.Builder
+	b.WriteString(label)
+	for _, name := range names {
+		s, ok := claimScalar(claims[name])
+		if !ok {
+			continue
+		}
+		if s == "" || strings.ContainsFunc(s, func(r rune) bool {
+			return r == ' ' || r == '"' || r == '\\' || !strconv.IsPrint(r)
+		}) {
+			s = strconv.Quote(s)
+		}
+		b.WriteString(" " + name + "=" + s)
+	}
+	return b.String()
 }
 
 // oidcVerifier validates a provider-issued OIDC token against the
@@ -303,10 +340,11 @@ func authorize(ctx context.Context, verifiers []verifier, rawToken string) (stri
 // safe (the old version keeps serving) — rather than failing config
 // load for the whole server.
 type oidcVerifier struct {
-	issuer   string
-	audience string
-	claims   map[string]string
-	client   *http.Client
+	issuer      string
+	audience    string
+	claims      map[string]string
+	attribution []string
+	client      *http.Client
 
 	mu  sync.Mutex
 	idv *oidc.IDTokenVerifier
@@ -328,27 +366,30 @@ func (v *oidcVerifier) ensure(ctx context.Context) (*oidc.IDTokenVerifier, error
 	return v.idv, nil
 }
 
-func (v *oidcVerifier) verify(ctx context.Context, rawToken string) error {
+func (v *oidcVerifier) verify(ctx context.Context, rawToken string) (string, error) {
 	idv, err := v.ensure(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
 	tok, err := idv.Verify(oidc.ClientContext(ctx, v.client), rawToken)
 	if err != nil {
-		return err
+		return "", err
 	}
 	// go-oidc unmarshals into json.RawMessage by copying the verified
 	// claim bytes; decodeClaims then re-parses them with numbers kept as
 	// json.Number (see decodeClaims for why %v on a float64 is unsafe).
 	var raw json.RawMessage
 	if err := tok.Claims(&raw); err != nil {
-		return err
+		return "", err
 	}
 	claims, err := decodeClaims(raw)
 	if err != nil {
-		return err
+		return "", err
 	}
-	return matchClaims(v.claims, claims)
+	if err := matchClaims(v.claims, claims); err != nil {
+		return "", err
+	}
+	return attribute(v.label(), v.attribution, claims), nil
 }
 
 // decodeClaims unmarshals a JWT claim set with numbers preserved as
@@ -373,46 +414,50 @@ func decodeClaims(raw []byte) (map[string]any, error) {
 // nbf, aud) are enforced here because there is no OIDC provider to do
 // them.
 type localVerifier struct {
-	audience string
-	pub      ed25519.PublicKey
-	keyPath  string
-	claims   map[string]string
+	audience    string
+	pub         ed25519.PublicKey
+	keyPath     string
+	claims      map[string]string
+	attribution []string
 }
 
 func (v *localVerifier) label() string { return "local:" + v.keyPath }
 
-func (v *localVerifier) verify(_ context.Context, rawToken string) error {
+func (v *localVerifier) verify(_ context.Context, rawToken string) (string, error) {
 	tok, err := jwt.ParseSigned(rawToken, []jose.SignatureAlgorithm{jose.EdDSA})
 	if err != nil {
-		return err
+		return "", err
 	}
 	var std jwt.Claims
 	var raw json.RawMessage
 	// Claims verifies the signature against v.pub, then unmarshals the
 	// payload into both the standard-claims struct and the raw bytes.
 	if err := tok.Claims(v.pub, &std, &raw); err != nil {
-		return err
+		return "", err
 	}
 	// Decode with numbers kept as json.Number, so a numeric claim in a
 	// hand-minted local token compares the same way as an OIDC one.
 	all, err := decodeClaims(raw)
 	if err != nil {
-		return err
+		return "", err
 	}
 	// ValidateWithLeeway only checks exp when present, so a local token
 	// with no expiry would be accepted forever. Require it — the
 	// short-lived-token guarantee depends on it.
 	if std.Expiry == nil {
-		return fmt.Errorf("local token has no exp claim")
+		return "", fmt.Errorf("local token has no exp claim")
 	}
 	expected := jwt.Expected{Time: time.Now()}
 	if v.audience != "" {
 		expected.AnyAudience = jwt.Audience{v.audience}
 	}
 	if err := std.ValidateWithLeeway(expected, oidcLeeway); err != nil {
-		return err
+		return "", err
 	}
-	return matchClaims(v.claims, all)
+	if err := matchClaims(v.claims, all); err != nil {
+		return "", err
+	}
+	return attribute(v.label(), v.attribution, all), nil
 }
 
 // matchClaims requires every constraint to equal the token's claim
