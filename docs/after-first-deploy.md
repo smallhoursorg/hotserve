@@ -152,6 +152,15 @@ moment for it.
   the box still holds ([examples/node](../examples/node/README.md#rolling-back)).
 - **Logs:** `journalctl -t hotserve-example` for the app's own output,
   `journalctl -u hotserve` for hotserve's, both without sudo as `alice`.
+- **If hotserve crashes** — a SIGKILL, out of memory, a bug — systemd
+  starts it again a second later and it picks the running apps back up.
+  A plain `kill` (SIGTERM) is a clean stop, like `systemctl stop`, and
+  stays stopped; so does a start it *refuses*: `journalctl -u hotserve -n 50`
+  says why; fix it, then `sudo systemctl start hotserve` (after "start
+  request repeated too quickly", `sudo systemctl reset-failed hotserve`
+  first). A restart loads whatever is in `/etc/hotserve/Caddyfile`, so
+  an edit you have not reloaded goes live then — or, if it does not
+  validate, keeps hotserve down.
 - **A second app:** another `app` block and site in the Caddyfile,
   pushed from the box repo; another copy of the example, with its own
   `HOTSERVE_URL`. The Caddyfile is the only thing on the box that

@@ -441,8 +441,10 @@ author's beliefs about systemd, and only the real thing corrects them.
    **admin-API reload under traffic with unchanged app PID**; status;
    watchdog after crash and after health failure; push and rollback.
    Then, inside the container: the app is a unit under `user@<uid>`
-   with `Restart=no`; `systemctl restart hotserve` and SIGKILL+start
-   keep the same PID (reattach); stopping a version takes its whole
+   with `Restart=no`; `systemctl restart hotserve` keeps the same app
+   PID (reattach), and so do hotserve's own deaths — SIGKILL, exit 2,
+   an OOM kill — which the unit undoes on its own, while a start
+   hotserve refuses stays down; stopping a version takes its whole
    process tree; a crash leaves no failed unit; a unit gone behind
    hotserve's back is relaunched on start; removing the app via reload
    stops its units and re-adding it relaunches; an app removed while

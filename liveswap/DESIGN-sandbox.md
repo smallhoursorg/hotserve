@@ -282,9 +282,16 @@ spec without a sandbox.
 set whose script reads `/proc/self/uid_map` and its own pid, and passes
 only if the uid range is not the host's and the pid is 1 — both
 namespaces engaged. One attempt, one retry on timeout only (the shape a
-capable host under boot load produces; hotserve.service carries no
-`Restart=`, so without it one slow attempt keeps a capable box down
-until someone restarts it by hand), 30 s each. The probe also proves
+capable host under boot load produces; a refused start exits 1, which
+hotserve.service deliberately never retries, so without it one slow
+attempt keeps a capable box down until someone starts it by hand),
+30 s each, and a hung attempt is then stopped with its grace and the
+runner's stop slack: 190 s bounded with the manager connection's two
+dials (connect, then authenticate, 10 s each, for each of the two
+sockets `NewConnection` opens) and the two manager probes `Start`
+makes first, which the unit's `TimeoutStartSec=240s` is sized above — the
+retry must reach its own verdict, not be cut off by a start timeout
+whose restart would begin the sequence again. The probe also proves
 the base view: `/bin/sh` has to exist inside the unit for the script
 to run at all. Its output lands in `journalctl -t hotserve-sandbox-probe`,
 which the refusal message names. The verdict is cached against the

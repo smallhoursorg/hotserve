@@ -4,9 +4,11 @@
 # systemctl, journalctl and the process tree, which the runner
 # container on the compose network cannot see. Proves the systemd
 # runner's contract end to end: the app is a transient unit under the
-# hotserve user's manager, it survives hotserve restarts and an
-# unclean hotserve death, stopping a version takes its whole process
-# tree, a crash leaves nothing behind, and app output is in the journal.
+# hotserve user's manager, it survives hotserve restarts and hotserve's
+# own deaths — which the packaged unit undoes on its own, while a start
+# hotserve refuses stays down — stopping a version takes its whole
+# process tree, a crash leaves nothing behind, and app output is in
+# the journal.
 set -u
 
 PROXY="http://127.0.0.1:8080"
@@ -28,6 +30,64 @@ wait_hook() { # -> 0 once the webhook answers 200, 1 after 30s
 		[ "$i" -ge 30 ] && return 1
 		sleep 1
 	done
+}
+
+# hotserve.service itself, as systemd sees it. The crash rows below
+# read the unit's own record — Result, ExecMainCode/Status, NRestarts —
+# never a systemctl command's exit status: Caddy sends READY=1 before
+# it knows whether the config loaded, so `systemctl start` can return
+# 0 for a start that then exits 1.
+hs_prop() { systemctl show -p "$1" --value hotserve; }
+hs_shape() { systemctl show -p ActiveState,SubState,Result,NRestarts hotserve | tr '\n' ' '; }
+wait_hs_substate() { # <glob> -> 0 once SubState matches (10s)
+	i=0
+	until case "$(hs_prop SubState)" in $1) true ;; *) false ;; esac; do
+		i=$((i + 1)); [ "$i" -ge 100 ] && return 1; sleep 0.1
+	done
+}
+wait_hs_up() { # <old ExecMainPID> -> 0 once active/running on another main pid (60s)
+	i=0
+	until [ "$(hs_prop ActiveState)" = "active" ] && [ "$(hs_prop SubState)" = "running" ] \
+		&& [ "$(hs_prop ExecMainPID)" != "$1" ] && [ "$(hs_prop ExecMainPID)" != "0" ]; do
+		i=$((i + 1)); [ "$i" -ge 120 ] && return 1; sleep 0.5
+	done
+}
+# crash_prelude gives the row its own start budget (the default start
+# limit counts every start, and reset-failed also zeroes NRestarts) and
+# the baseline every assertion is measured against — relative, never
+# absolute.
+crash_prelude() {
+	systemctl reset-failed hotserve
+	N0=$(hs_prop NRestarts); HP0=$(hs_prop ExecMainPID); T0=$(date +%s)
+}
+# failure_shape reads the death's record inside the RestartSec window,
+# in one show call so the three values are one snapshot. <Result> may
+# be two alternatives separated by |. ExecMainCode is the SIGCHLD code
+# as `show` prints it: 1 = exited (status is the exit code), 2 = killed
+# (status is the signal).
+failure_shape() { # <label> <Result> <ExecMainCode> <ExecMainStatus>
+	wait_hs_substate 'auto-restart*' \
+		|| { fail "$1: not in auto-restart within 10s: $(hs_shape)"; return 1; }
+	Result= ExecMainCode= ExecMainStatus=
+	eval "$(systemctl show -p Result,ExecMainCode,ExecMainStatus hotserve)"
+	case "|$2|" in *"|$Result|"*) rok=1 ;; *) rok=0 ;; esac
+	[ "$rok" = 1 ] && [ "$ExecMainCode" = "$3" ] && [ "$ExecMainStatus" = "$4" ] \
+		&& pass "$1: Result=$Result ExecMainCode=$ExecMainCode ExecMainStatus=$ExecMainStatus" \
+		|| fail "$1: Result=$Result ExecMainCode=$ExecMainCode ExecMainStatus=$ExecMainStatus, want $2/$3/$4"
+}
+# came_back: systemd brought hotserve back exactly once, and it
+# reattached to the instance section 1 recorded in $pid/$unit.
+came_back() { # <label>
+	wait_hs_up "$HP0" && pass "$1: hotserve back on its own (main pid $HP0 -> $(hs_prop ExecMainPID))" \
+		|| fail "$1: hotserve not back within 60s: $(hs_shape)"
+	n1=$(hs_prop NRestarts)
+	[ "$n1" = "$((N0 + 1))" ] && pass "$1: NRestarts $N0 -> $n1 (one automatic restart, no loop)" \
+		|| fail "$1: NRestarts $N0 -> $n1, want $((N0 + 1))"
+	wait_hook || fail "$1: webhook not back within 30s"
+	s=$(status)
+	[ "$(json_num "$s" pid)" = "$pid" ] && [ "$(json_str "$s" unit)" = "$unit" ] \
+		&& pass "$1: same app pid and unit (reattached, not relaunched)" || fail "$1: instance changed: $s"
+	case "$s" in *'"running":true'*) pass "$1: reattached app running" ;; *) fail "$1: app not running: $s" ;; esac
 }
 
 echo "=== systemd 1: the app is a transient unit under user@$uid ==="
@@ -59,9 +119,15 @@ else
 	esac
 fi
 [ "$(user_systemctl show -p Restart --value "$unit")" = "no" ] \
-	&& pass "unit has Restart=no (the watchdog is the only restarter)" || fail "unit Restart is not 'no'"
+	&& pass "unit has Restart=no (apps are restarted by the watchdog, not systemd)" || fail "unit Restart is not 'no'"
 [ "$(user_systemctl show -p KillMode --value "$unit")" = "control-group" ] \
 	&& pass "unit has KillMode=control-group" || fail "unit KillMode is not control-group"
+# hotserve's own unit is the other half of that rule: systemd restarts
+# it after a crash, and never after an exit 1 (a start it refused).
+[ "$(hs_prop Restart)" = "on-failure" ] \
+	&& pass "hotserve.service has Restart=on-failure" || fail "hotserve.service Restart is '$(hs_prop Restart)'"
+[ "$(hs_prop RestartPreventExitStatus)" = "1" ] \
+	&& pass "hotserve.service never retries an exit 1" || fail "hotserve.service RestartPreventExitStatus is '$(hs_prop RestartPreventExitStatus)'"
 
 echo "=== systemd 2: systemctl restart hotserve keeps the app running ==="
 systemctl restart hotserve || fail "systemctl restart hotserve failed"
@@ -80,18 +146,56 @@ fi
 	|| fail "command lost across reattach: $s"
 case "$(body)" in "hello "*) pass "proxy serves after restart" ;; *) fail "proxy not serving after restart" ;; esac
 
-echo "=== systemd 3: SIGKILL of hotserve, then start: reattach ==="
-systemctl kill -s SIGKILL hotserve
-sleep 1
-systemctl start hotserve || fail "systemctl start after SIGKILL failed"
-wait_hook || fail "webhook not back within 30s of the unclean death"
-s=$(status)
-if [ "$(json_num "$s" pid)" = "$pid" ] && [ "$(json_str "$s" unit)" = "$unit" ]; then
-	pass "same pid and unit after SIGKILL + start"
+echo "=== systemd 3: SIGKILL of hotserve: systemd brings it back, and it reattaches ==="
+# No `systemctl start` here: one inside the RestartSec window would
+# pre-empt the automatic restart and the row would prove nothing.
+crash_prelude
+systemctl kill --kill-whom=main -s SIGKILL hotserve
+failure_shape "SIGKILL" signal 2 9
+came_back "SIGKILL"
+journalctl -u hotserve --no-pager --since "@$T0" | grep -q "code=killed, status=9/KILL" \
+	&& pass "SIGKILL: the journal records the unclean death" || fail "SIGKILL: no killed/9 line in the journal since $T0"
+
+echo "=== systemd 3b: hotserve exits 2 (SIGQUIT is Caddy's force-quit, a panic's code): systemd brings it back ==="
+# The row that pins "a panic is restarted": Restart=on-abnormal would
+# leave an unclean exit code down.
+crash_prelude
+systemctl kill --kill-whom=main -s SIGQUIT hotserve
+failure_shape "exit 2" exit-code 1 2
+came_back "exit 2"
+
+echo "=== systemd 3c: hotserve OOM-killed: systemd brings it back ==="
+# The limit is written into the unit's live cgroup, not set as a
+# runtime property: a property would survive the restart and kill the
+# next process too. systemd prunes the empty cgroup on death and makes
+# a fresh one for the restart, so the trigger should clear itself; it
+# is also lifted by hand once the death is on record, so a kernel or
+# systemd that kept the cgroup cannot turn this row into a restart
+# loop — which is why the last check asserts only that the restarted
+# unit runs unlimited, not who lifted the limit. Swap is closed first:
+# a runner with a swapfile would thrash instead of dying.
+crash_prelude
+hcg=$(hs_prop ControlGroup)
+if [ -w "/sys/fs/cgroup$hcg/memory.max" ]; then
+	echo 0 > "/sys/fs/cgroup$hcg/memory.swap.max" 2>/dev/null || true
+	echo 8M > "/sys/fs/cgroup$hcg/memory.max"
+	# Whether systemd files it as oom-kill (it saw the cgroup's
+	# memory.events first) or as the SIGKILL the kernel delivered is a
+	# race it is entitled to; the journal line below is the OOM proof.
+	failure_shape "OOM" "oom-kill|signal" 2 9
+	if [ -e "/sys/fs/cgroup$hcg/memory.max" ]; then
+		echo max > "/sys/fs/cgroup$hcg/memory.max" 2>/dev/null
+		echo max > "/sys/fs/cgroup$hcg/memory.swap.max" 2>/dev/null
+	fi
+	came_back "OOM"
+	journalctl -u hotserve --no-pager --since "@$T0" | grep -qi "oom" \
+		&& pass "OOM: the journal records the OOM kill" || fail "OOM: no oom line in the journal since $T0"
+	[ "$(cat "/sys/fs/cgroup$(hs_prop ControlGroup)/memory.max")" = "max" ] \
+		&& pass "OOM: the restarted unit runs unlimited" \
+		|| fail "OOM: memory.max is still $(cat "/sys/fs/cgroup$(hs_prop ControlGroup)/memory.max") after the restart"
 else
-	fail "instance changed across the unclean death: $s"
+	fail "OOM: no writable memory controller at /sys/fs/cgroup$hcg — the row would prove nothing"
 fi
-case "$s" in *'"running":true'*) pass "status reports the reattached app running" ;; *) fail "reattached app not running: $s" ;; esac
 
 echo "=== systemd 4: the app runs in its sandbox — the view from inside ==="
 # Host-side facts first (never assertions): they explain a refused
@@ -430,6 +534,44 @@ wait_hook || fail "webhook not back after restoring the app"
 wait_new_pid "$dpid" && pass "restored app relaunched from state.json (pid $dpid -> $NEWPID)" \
 	|| fail "restored app did not come back: $(status)"
 assert_examples_back "restore"
+
+echo "=== systemd 9b: a start hotserve refuses stays down: systemd does not retry an exit 1 ==="
+# hotserve's own refusal, not a syntax error: liveswap_webhook with no
+# apps is refused while the config loads, after Caddy has already sent
+# READY=1 — the shape where `systemctl restart` can return 0 and a test
+# that trusted it would pass vacuously.
+s=$(status)
+fpid=$(json_num "$s" pid)
+funit=$(json_str "$s" unit)
+cp /etc/hotserve/Caddyfile /tmp/good.Caddyfile
+removal_config /tmp/refused.Caddyfile
+printf ':8081 {\n\tliveswap_webhook\n}\n' >> /tmp/refused.Caddyfile
+cp /tmp/refused.Caddyfile /etc/hotserve/Caddyfile
+systemctl reset-failed hotserve
+N0=$(hs_prop NRestarts) # the baseline, taken before the start that will be refused
+T0=$(date +%s)
+systemctl restart hotserve >/dev/null 2>&1 # status ignored on purpose, see above
+i=0
+until [ "$(hs_prop ActiveState)" = "failed" ]; do i=$((i + 1)); [ "$i" -ge 100 ] && break; sleep 0.1; done
+[ "$(hs_prop ActiveState)" = "failed" ] && pass "refused config: the unit failed" || fail "unit did not fail on the refused config: $(hs_shape)"
+Result= ExecMainCode= ExecMainStatus=
+eval "$(systemctl show -p Result,ExecMainCode,ExecMainStatus hotserve)"
+[ "$Result" = "exit-code" ] && [ "$ExecMainCode" = "1" ] && [ "$ExecMainStatus" = "1" ] \
+	&& pass "the refusal is exit-code 1 (Caddy's failed startup)" \
+	|| fail "refusal shape Result=$Result ExecMainCode=$ExecMainCode ExecMainStatus=$ExecMainStatus"
+sleep 3 # > RestartSec: had systemd retried, the unit would be activating or active by now
+[ "$(hs_prop ActiveState)" = "failed" ] && [ "$(hs_prop SubState)" = "failed" ] && [ "$(hs_prop NRestarts)" = "$N0" ] \
+	&& pass "still failed 3s later, NRestarts unchanged ($N0): RestartPreventExitStatus=1 held" \
+	|| fail "systemd retried the refused start: $(hs_shape)"
+journalctl -u hotserve --no-pager --since "@$T0" | grep -q "no apps are defined" \
+	&& pass "the journal carries the refusal's reason" || fail "refusal reason not in the journal since $T0"
+kill -0 "$fpid" 2>/dev/null && pass "the app kept running through the refused start (pid $fpid)" || fail "app $fpid died with the refused start"
+cp /tmp/good.Caddyfile /etc/hotserve/Caddyfile
+systemctl start hotserve || fail "start after restoring the config failed"
+wait_hook || fail "webhook not back after restoring the config"
+s=$(status)
+[ "$(json_num "$s" pid)" = "$fpid" ] && [ "$(json_str "$s" unit)" = "$funit" ] \
+	&& pass "reattached after the refused start" || fail "instance changed across the refused start: $s"
 
 echo "=== systemd 10: app output reaches the journal ==="
 journalctl --no-pager -t hotserve-demo | grep -q "workers up" \
