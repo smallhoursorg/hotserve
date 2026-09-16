@@ -160,20 +160,8 @@ moment for it.
   deploy or rollback, or a relaunch after a crash — never to the one
   running. Widen a Deno app's permissions before deploying code that
   needs them; narrow after the code that needed them is gone.
-- **Patching the box** (`apt upgrade`) reaches an app at its next launch
-  too, because apps run on the box's own `/usr`: a running app keeps
-  the runtime and libraries it has already loaded. What apt patches
-  depends on where the runtime came from. An app run as
-  `command node server.js` with Node from apt gets the new Node and the
-  new system libraries; the Deno under `/usr/local/bin`, and the Node
-  example's executable, which carries its own Node, get only the
-  libraries — a newer Deno is a new file there, a newer Node a new
-  build, and either still waits for the next launch. Restarting or
-  upgrading hotserve does not relaunch apps; it reattaches to them. So
-  after patching, push a commit to each app's repository — an empty
-  one, `git commit --allow-empty -m "Relaunch after patching"`, is
-  enough: the running version cannot be deployed again, and a new
-  commit is a new version — or reboot, which relaunches every app but
-  takes the sites down while it does.
+- **Patching the box** (`apt upgrade`) reaches an app only at its next
+  launch too; after patching, push a commit to each app or reboot
+  ([Upgrading](upgrading.md#patching-the-host)).
 - **Everything else:** [liveswap/README.md](../liveswap/README.md) is the
   reference for every option, status code and edge.

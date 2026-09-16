@@ -94,3 +94,33 @@ Before you upgrade:
 There is no APT repository yet, so nothing upgrades hotserve behind
 your back; the hosted repository on the [roadmap](../README.md#roadmap) is what
 will change that.
+
+## Patching the host
+
+Apps run on the box's own `/usr`, so `apt upgrade` reaches an app at
+its next launch — its next deploy or rollback, or a relaunch after a
+crash, a sustained health failure, or a reboot — never the one
+running, which keeps the runtime and libraries it has already loaded.
+Upgrading hotserve does not relaunch apps either: it picks them up as
+they are.
+
+What a patch reaches depends on where the app's runtime came from:
+
+- **`command node server.js` with Node from apt:** the new Node and the
+  new system libraries.
+- **The Deno under `/usr/local/bin`**, or **the Node example's
+  executable**, which carries its own Node: the new system libraries
+  only. A newer Deno is a new file there, and a newer Node a new build;
+  either still waits for the next launch.
+
+So after patching, relaunch each app by pushing a commit to its
+repository. An empty one is enough:
+
+```sh
+git commit --allow-empty -m "Relaunch after patching" && git push
+```
+
+The version running cannot be deployed or rolled back to again, and a
+new commit is a new version, so it goes through the same health gate
+and cutover as any deploy. Or reboot, which relaunches every app at
+once but takes the sites down while it does.
