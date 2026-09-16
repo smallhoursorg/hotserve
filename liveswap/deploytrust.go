@@ -303,10 +303,9 @@ func warmVerifiers(verifierSets ...[]verifier) {
 	}
 }
 
-// unavailable is a refusal that is the box's, not the token's: a
+// unavailable is a refusal that is the box's, not the token's: the
 // source could not be consulted — its discovery or its key fetch
-// failed — so the token was never judged. labels name the sources
-// that could not be, for the journal.
+// failed — so the token was never judged. label names the source.
 //
 // The handler charges it like any refusal. Whether a failure spends
 // the budget is measurable from outside (ten tokens, then one more:
@@ -315,13 +314,15 @@ func warmVerifiers(verifierSets ...[]verifier) {
 // deployer nothing real: the first valid token after the outage is
 // admitted from a throttled address. What an unavailable changes is
 // the journal: one line per source per window naming it, written
-// however spent the budgets are (authLimiter.outage), so a CI loop
-// retrying through an issuer outage never leaves the journal quiet
-// about the cause. Not an unavailable: the caller going away
-// (ctx.Err) and an issuer answering as someone else (config).
+// however spent the budgets are (authLimiter.outage) and whether or
+// not another source then accepted the token, so a CI loop retrying
+// through an issuer outage never leaves the journal quiet about the
+// cause, and neither does a fallback source that keeps deploys going.
+// Not an unavailable: the caller going away (ctx.Err) and an issuer
+// answering as someone else (config).
 type unavailable struct {
-	labels []string
-	err    error
+	label string
+	err   error
 }
 
 func (u unavailable) Error() string { return u.err.Error() }
@@ -332,38 +333,32 @@ func (u unavailable) Unwrap() error { return u.err }
 // claims (attribute), for the deploy record and audit log. When none
 // does, the error says why each source refused, one entry per source
 // in config order (or the one reason no source was tried), for the
-// operator's journal. If any source was unavailable, the whole is
-// unavailable too, naming every such source: the token might have
-// been one of theirs, and the journal must say the box could not
-// check it. The response stays a flat 401 whatever the reason (see
-// Handler.ServeHTTP), so nothing here reaches a caller.
-func authorize(ctx context.Context, verifiers []verifier, rawToken string) (string, error) {
+// operator's journal. down is every source that could not be
+// consulted before that point, accepted or not: the journal must say
+// so either way. The response stays a flat 401 whatever the reason
+// (see Handler.ServeHTTP), so nothing here reaches a caller.
+func authorize(ctx context.Context, verifiers []verifier, rawToken string) (by string, down []unavailable, err error) {
 	if rawToken == "" {
-		return "", errors.New("no bearer token in Authorization header")
+		return "", nil, errors.New("no bearer token in Authorization header")
 	}
 	if len(verifiers) == 0 {
-		return "", errors.New("no deploy_trust source resolves for this app")
+		return "", nil, errors.New("no deploy_trust source resolves for this app")
 	}
 	refused := make([]string, 0, len(verifiers))
-	var down []string // the sources that could not be consulted
 	for _, v := range verifiers {
 		by, err := v.verify(ctx, rawToken)
 		if err == nil {
-			return by, nil
+			return by, down, nil
 		}
 		var u unavailable
 		if errors.As(err, &u) {
-			down = append(down, u.labels...)
+			down = append(down, u)
 		}
 		// The bound is on the reason alone — the label is the operator's
 		// config, and it must survive however long the reason is.
 		refused = append(refused, v.label()+": "+boundRefusal(err.Error()))
 	}
-	err := errors.New(strings.Join(refused, "; "))
-	if len(down) > 0 {
-		return "", unavailable{labels: down, err: err}
-	}
-	return "", err
+	return "", down, errors.New(strings.Join(refused, "; "))
 }
 
 // maxRefusalLen bounds one source's reason in the journal. A reason
@@ -468,7 +463,7 @@ func (v *oidcVerifier) ensure(ctx context.Context) (*oidc.IDTokenVerifier, error
 		if ctx.Err() != nil || errors.As(err, &mismatch) {
 			return nil, err
 		}
-		return nil, unavailable{[]string{v.label()}, err}
+		return nil, unavailable{v.label(), err}
 	}
 	v.idv = provider.Verifier(&oidc.Config{ClientID: v.audience})
 	return v.idv, nil
@@ -498,7 +493,7 @@ func (v *oidcVerifier) verify(ctx context.Context, rawToken string) (string, err
 		// A caller that went away mid-fetch gets the same text (the
 		// fetch waits on its ctx) and is not an outage.
 		if ctx.Err() == nil && strings.HasPrefix(err.Error(), keyFetchFailed) {
-			return "", unavailable{[]string{v.label()}, err}
+			return "", unavailable{v.label(), err}
 		}
 		return "", err
 	}

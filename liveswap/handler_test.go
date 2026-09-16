@@ -964,7 +964,7 @@ func TestWebhookIssuerOutageIsNamedPastTheBudget(t *testing.T) {
 	const ci, other = "203.0.113.9:1", "203.0.113.10:1"
 	outageLines := func(all []observer.LoggedEntry) (n int) {
 		for _, e := range all {
-			if strings.Contains(e.Message, "could not be consulted") {
+			if strings.Contains(e.Message, "could not consult") {
 				if src := e.ContextMap()["source"]; src != "oidc:"+iss.url {
 					t.Fatalf("source = %v, want the down issuer", src)
 				}
@@ -1040,6 +1040,34 @@ func TestWebhookIssuerOutageIsNamedPastTheBudget(t *testing.T) {
 	}
 }
 
+// A source that could not be consulted is named even when a source
+// after it accepts the token: the deploy goes through, nothing is
+// charged, and the journal still says the first source is down. Two
+// issuers, since a token reaches the first one's key fetch only if it
+// is shaped for it — a local-key token is refused for its algorithm
+// before any fetch.
+func TestWebhookOutageIsNamedWhenAnotherSourceAccepts(t *testing.T) {
+	h, rig := newTestHandler(t)
+	core, logs := observer.New(zap.WarnLevel)
+	h.logger = zap.New(core)
+	down, up := newMockIssuer(t), newMockIssuer(t)
+	down.jwksDown.Store(true)
+	rig.ma.verifiers = append(
+		resolveVerifiers([]trustSource{{kind: "oidc", issuer: down.url, audience: "hotserve", claims: map[string]string{"sub": "ci"}}}, down.client),
+		resolveVerifiers([]trustSource{{kind: "oidc", issuer: up.url, audience: "hotserve", claims: map[string]string{"sub": "ci"}}}, up.client)...)
+	tok := up.mint(t, up.priv, "hotserve", map[string]string{"sub": "ci"}, time.Now().Add(5*time.Minute))
+	if w := do(t, h, http.MethodGet, "/demo", tok, ""); w.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	all := logs.All()
+	if len(all) != 1 || !strings.Contains(all[0].Message, "could not consult") || all[0].ContextMap()["source"] != "oidc:"+down.url {
+		t.Fatalf("logged %+v, want the one line naming the down issuer", all)
+	}
+	if h.limiter.size() != 0 {
+		t.Fatalf("an accepted token charged %d addresses, want none", h.limiter.size())
+	}
+}
+
 // Every source that could not be consulted gets its own line: with
 // two issuers down, an alert keyed on the source field sees both.
 func TestWebhookOutageNamesEverySourceDown(t *testing.T) {
@@ -1058,7 +1086,7 @@ func TestWebhookOutageNamesEverySourceDown(t *testing.T) {
 	}
 	var sources []string
 	for _, e := range logs.All() {
-		if strings.Contains(e.Message, "could not be consulted") {
+		if strings.Contains(e.Message, "could not consult") {
 			sources = append(sources, e.ContextMap()["source"].(string))
 		}
 	}

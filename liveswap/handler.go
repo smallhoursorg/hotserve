@@ -112,8 +112,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 	if ma != nil {
 		verifiers = ma.currentVerifiers()
 	}
-	who, refused := authorize(r.Context(), verifiers, bearerToken(r))
+	who, down, refused := authorize(r.Context(), verifiers, bearerToken(r))
 	key := clientKey(r)
+	// A source the box could not consult is named here once per window
+	// per source, whatever the budgets and whether or not another
+	// source then accepted the token; a refusal is still charged below
+	// like any other — see unavailable for why both.
+	for _, u := range down {
+		if h.limiter.outage(u.label) {
+			h.logger.Warn("webhook auth could not consult a trust source",
+				zap.String("source", u.label), zap.String("app", loggedAppName(name)),
+				zap.String("remote", key), zap.String("reason", boundRefusal(u.Error())))
+		}
+	}
 	if refused != nil {
 		// What a failure costs in the journal is the limiter's call
 		// (see authLimiter): the count of lines, and — the name and
@@ -122,19 +133,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 		// response below stays the same flat 401 for every reason, so
 		// a caller learns neither which apps exist nor what a source
 		// pins.
-		// A source the box could not consult is charged below like any
-		// refusal and named here once per window per source, whatever
-		// the budgets — see unavailable for why both.
-		var down unavailable
-		if errors.As(refused, &down) {
-			for _, label := range down.labels {
-				if h.limiter.outage(label) {
-					h.logger.Warn("webhook auth could not check the token: a trust source could not be consulted",
-						zap.String("source", label), zap.String("app", loggedAppName(name)),
-						zap.String("remote", key), zap.String("refused", refused.Error()))
-				}
-			}
-		}
 		v := h.limiter.fail(key)
 		if v.log {
 			h.logger.Warn("webhook auth failed",
