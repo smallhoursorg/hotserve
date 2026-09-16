@@ -227,7 +227,7 @@ native code, so any runner builds it.
 
 The Node app is published as a template repository,
 [hotserve-example-node](https://github.com/smallhoursorg/hotserve-example-node) — the `examples/node` directory of
-this repo, as of the release you installed. Open it, press **Use this
+this repo, as of its latest stable release. Open it, press **Use this
 template** → **Create a new repository**, and name it
 `your-org/example`. Private is fine: the box fetches the release asset
 by its API URL with the workflow's own token, and the

@@ -8,8 +8,8 @@ starts, finishes its requests on shutdown, and deploys from GitHub
 Actions with no stored secret.
 [hotserve](https://github.com/smallhoursorg/hotserve)'s e2e suite
 builds and deploys these files, from its `examples/node`, on every
-change to hotserve, so what is here works. Each release publishes them
-as the template repository
+change to hotserve, so what is here works. Each stable release
+publishes them as the template repository
 [hotserve-example-node](https://github.com/smallhoursorg/hotserve-example-node): **Use this template** there makes a
 repository of your own, which deploys with no file edited.
 
