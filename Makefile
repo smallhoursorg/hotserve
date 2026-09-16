@@ -184,8 +184,9 @@ install-test:
 
 # The main suites run via the e2e-runner entrypoint. Then the systemd
 # suite runs INSIDE the hotserve container (it needs systemctl,
-# journalctl and the process tree): restart survival, SIGKILL of
-# hotserve + reattach, cgroup teardown of a worker tree, crash
+# journalctl and the process tree): restart survival, hotserve's own
+# crashes (SIGKILL, exit 2, OOM) undone by the unit + reattach, a
+# refused start staying down, cgroup teardown of a worker tree, crash
 # cleanup, journal output. The recovery suite is the runner's view
 # after all that: still serving, deploys still work. Last, the box
 # suite drives examples/box's bin/push from the host against the

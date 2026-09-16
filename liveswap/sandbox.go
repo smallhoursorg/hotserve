@@ -408,7 +408,15 @@ func sandboxProbeCommand() []string {
 }
 
 // sandboxProbeTimeout bounds one probe unit: a shell that exits at
-// once, plus the manager's namespace setup.
+// once, plus the manager's namespace setup. Two attempts of it (each
+// followed, on a timeout, by the stop of the unit that hung: its grace
+// plus stopSlack), after the manager connection's two dials (dialTimeout
+// each to connect and again to authenticate: NewConnection opens two
+// sockets) and the two manager probes App.Start makes (probeTimeout
+// each), are what a start spends before Caddy reports ready — 40 + 20
+// + 130 = 190 s bounded, which hotserve.service's TimeoutStartSec
+// (packaging/hotserve.service, 240 s) is sized above with room for
+// Caddy's own start. Change one, re-derive the other.
 const sandboxProbeTimeout = 30 * time.Second
 
 // probeSandboxCapability reports whether the host delivers the
@@ -456,16 +464,18 @@ func probeSandboxCapability(r runner) error {
 		// One retry, for a timeout only. A probe that fails is a
 		// measurement; one that times out is the absence of one — the
 		// shape a capable host under boot load produces — and this
-		// verdict decides whether hotserve starts at all.
-		// hotserve.service carries no Restart= (the liveswap watchdog
-		// is this system's only restarter), so at boot there is no
-		// next reload to re-measure on: without the retry, one slow
-		// attempt keeps a fully capable box down until someone
-		// restarts it by hand. A genuinely incapable host is not
-		// slowed by this — the manager refuses, or the unit fails,
-		// fast and with a reason on the first attempt. The cost is a
-		// worst case of two probe budgets on a host that times out
-		// twice, paid on a Start that was about to be refused anyway.
+		// verdict decides whether hotserve starts at all. A refused
+		// start exits 1, which hotserve.service deliberately never
+		// retries (RestartPreventExitStatus=1: a refusal is final
+		// until an operator acts), so at boot there is no next start
+		// to re-measure on: without the retry, one slow attempt keeps
+		// a fully capable box down until someone starts it by hand.
+		// This retry is the one re-measurement such a host gets. A
+		// genuinely incapable host is not slowed by this — the manager
+		// refuses, or the unit fails, fast and with a reason on the
+		// first attempt. The cost is a worst case of two probe budgets
+		// on a host that times out twice, paid on a Start that was
+		// about to be refused anyway.
 		err = attempt()
 	}
 	if err != nil {

@@ -37,7 +37,11 @@ closes its listeners at once and lets the requests already in flight
 finish, and the new process cannot listen until the old one has
 exited. New visitors get connection refused for that whole window,
 sometimes followed by a few dozen milliseconds of 503s while the new
-process picks the apps back up. How long the window lasts:
+process picks the apps back up. A crash has a window of its own:
+whatever was in flight is cut off, systemd waits a second
+(`RestartSec=1s`) and starts hotserve again, and the apps are picked
+back up the same way — a little over a second, plus the start itself.
+How long a planned restart's window lasts:
 
 - **With only short requests in flight:** about a tenth of a second
   (measured on Debian 13 in the package test container, plain HTTP).
@@ -49,8 +53,9 @@ process picks the apps back up. How long the window lasts:
   goes ahead, and the apps are untouched. The new process starts after
   that, so the window is those 5 seconds plus its startup (5.3 seconds
   in all, in the test container) — and a new process that cannot start
-  leaves the site down until it can, which is what the config check
-  below is for.
+  is not retried by systemd (it retries a crash, never a refused
+  start): the site stays down until you fix the config or go back,
+  which is what the config check below is for.
 
 This is how Caddy itself upgrades: its official Debian package restarts
 the service the same way, with the same 5-second stop timeout, and the
@@ -80,7 +85,8 @@ Before you upgrade:
   `sudo ./hotserve validate --config /etc/hotserve/Caddyfile` runs its
   config check without touching anything that is running. A config it
   rejects would stop the upgraded hotserve from starting, and the site
-  would stay down until you fixed the config or went back.
+  would stay down until you fixed the config or went back (systemd
+  retries a crash, not a refusal).
 - **The `.deb` you are upgrading from is still in `/var/local/hotserve`.**
   `sudo apt install --allow-downgrades ./hotserve_<old>_$(dpkg --print-architecture).deb`
   puts it back — the same restart, in reverse, and nothing to download

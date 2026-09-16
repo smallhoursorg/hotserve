@@ -89,8 +89,10 @@ for m in liveswap http.handlers.liveswap_webhook \
 done
 echo "all product modules linked"
 
-# Type=notify: enable --now returning 0 IS the readiness assertion.
-timeout 120 systemctl enable --now hotserve || die "systemctl enable --now hotserve failed"
+# Type=notify, but Caddy sends READY=1 before it knows whether the
+# config loaded, so enable --now returning 0 is not the readiness
+# assertion — the curl below is.
+timeout 300 systemctl enable --now hotserve || die "systemctl enable --now hotserve failed"
 curl -fsS --max-time 5 http://127.0.0.1:80/ | grep -q "hotserve is running" \
 	|| die "starter Caddyfile not serving on :80"
 echo "unit started and starter config answers on :80"
@@ -116,7 +118,17 @@ curl -s --max-time 2 -o /dev/null http://127.0.0.1:2019/config/ \
 curl -fsS --max-time 5 http://127.0.0.1:80/ | grep -q "hotserve is running" \
 	|| die "not serving after reload"
 [ "$(systemctl show -p NRestarts --value hotserve)" = "0" ] \
-	|| die "service restarted behind our back (NRestarts != 0)"
+	|| die "hotserve restarted itself during install/reload (NRestarts != 0): it came up, died and systemd brought it back — see the journal"
+# The unit's restart policy, read off the loaded unit: a crashed
+# hotserve comes back, a start it refused (exit 1) is never retried.
+[ "$(systemctl show -p Restart --value hotserve)" = "on-failure" ] \
+	|| die "unit Restart is '$(systemctl show -p Restart --value hotserve)', want on-failure: a crashed hotserve would stay down"
+[ "$(systemctl show -p RestartPreventExitStatus --value hotserve)" = "1" ] \
+	|| die "unit RestartPreventExitStatus is '$(systemctl show -p RestartPreventExitStatus --value hotserve)', want 1: a refused start would loop"
+[ "$(systemctl show -p RestartUSec --value hotserve)" = "1s" ] \
+	|| die "unit RestartSec is '$(systemctl show -p RestartUSec --value hotserve)', want 1s"
+[ "$(systemctl show -p TimeoutStartUSec --value hotserve)" = "4min" ] \
+	|| die "unit TimeoutStartSec is '$(systemctl show -p TimeoutStartUSec --value hotserve)', want 4min: the start's bounded probe path (190s) must finish inside it, with margin"
 # 'permission denied' / 'read-only file system' would mean the unit's
 # XDG dirs point somewhere the sandboxed hotserve user cannot write —
 # that breaks ACME cert persistence in production even though the
@@ -187,7 +199,7 @@ grep -q '__MGR_PID__\|__HOTSERVE_UID__' /etc/hotserve/Caddyfile \
 	&& die "placeholder substitution failed; the sandbox probes would test nothing"
 
 systemctl daemon-reload
-timeout 120 systemctl restart hotserve || die "restart with liveswap config failed"
+timeout 300 systemctl restart hotserve || die "restart with liveswap config failed"
 
 # Mint the deploy bearer with the private key (audience must match the
 # deploy_trust block).
@@ -258,7 +270,7 @@ code=$(curl -s -o /tmp/deploy-body -w '%{http_code}' --max-time 90 \
 }
 curl -fsS --max-time 5 "$PROXY/" | grep -q "hello smoke" \
 	|| die "proxy does not serve the deployed app"
-status=$(curl -s -H "Authorization: Bearer $TOKEN" "$HOOK")
+status=$(curl -s --max-time 5 -H "Authorization: Bearer $TOKEN" "$HOOK")
 case "$status" in
 *'"current_version":"s1"'*) : ;;
 *) die "status missing current_version s1: $status" ;;
@@ -275,7 +287,7 @@ user_systemctl() { su -s /bin/sh hotserve -c "XDG_RUNTIME_DIR=/run/user/$uid sys
 user_systemctl is-active --quiet "$unit" \
 	|| die "app unit $unit is not active under hotserve's user manager"
 [ "$(user_systemctl show -p Restart --value "$unit")" = "no" ] \
-	|| die "app unit must have Restart=no (the liveswap watchdog is the only restarter)"
+	|| die "app unit must have Restart=no (apps are restarted by the liveswap watchdog, not systemd)"
 journalctl --no-pager -t hotserve-demo | grep -q "smoke app starting" \
 	|| die "app stdout did not reach the journal under identifier hotserve-demo"
 # The runner's contract: every unit's NOFILE (soft and hard) is the
@@ -447,6 +459,33 @@ journalctl -u hotserve --no-pager | grep -q "$TOKEN" \
 	&& die "deploy token leaked into the journal" || true
 echo "journal is free of the deploy token"
 
+stage "stage 2b: a SIGKILLed hotserve is back within seconds, reattached"
+# Stage 3's upgrade restart is a clean stop and start, which never
+# exercises Restart=; this is the one lane that runs the installed
+# .deb's unit, so the crash path is proven here too. The unit's own
+# record is the assertion, never a systemctl exit status.
+hp0=$(systemctl show -p ExecMainPID --value hotserve)
+systemctl kill --kill-whom=main -s SIGKILL hotserve
+i=0
+until [ "$(systemctl show -p ActiveState --value hotserve)" = "active" ] \
+	&& [ "$(systemctl show -p ExecMainPID --value hotserve)" != "$hp0" ]; do
+	i=$((i + 1))
+	[ "$i" -ge 60 ] && die "hotserve not back within 30s of SIGKILL: $(systemctl show -p ActiveState,SubState,Result,NRestarts hotserve | tr '\n' ' ')"
+	sleep 0.5
+done
+[ "$(systemctl show -p NRestarts --value hotserve)" = "1" ] \
+	|| die "NRestarts is $(systemctl show -p NRestarts --value hotserve), want 1: more than one automatic restart after a single kill"
+deadline=$(($(date +%s) + 30))
+until [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 -H "Authorization: Bearer $TOKEN" "$HOOK")" = "200" ]; do
+	[ "$(date +%s)" -ge "$deadline" ] && die "webhook not back within 30s of the automatic restart"
+	sleep 1
+done
+status=$(curl -s --max-time 5 -H "Authorization: Bearer $TOKEN" "$HOOK")
+[ "$(printf '%s' "$status" | sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p')" = "$pid_live" ] \
+	|| die "app pid changed across hotserve's SIGKILL restart: reattach failed: $status"
+curl -fsS --max-time 5 "$PROXY/" | grep -q "hello smoke" || die "app not served after hotserve's automatic restart"
+echo "SIGKILL: systemd restarted hotserve (NRestarts=1); app pid $pid_live reattached"
+
 stage "stage 3: reinstall — upgrade path, conffile preservation, app survival"
 pid_before=$(printf '%s' "$status" | sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p')
 [ -n "$pid_before" ] || die "status missing pid: $status"
@@ -481,7 +520,7 @@ until [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOK
 	[ "$i" -ge 30 ] && die "webhook not back within 30s of the upgrade restart"
 	sleep 1
 done
-status=$(curl -s -H "Authorization: Bearer $TOKEN" "$HOOK")
+status=$(curl -s --max-time 5 -H "Authorization: Bearer $TOKEN" "$HOOK")
 pid_after=$(printf '%s' "$status" | sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p')
 [ "$pid_after" = "$pid_before" ] \
 	|| die "app pid changed across the upgrade restart ($pid_before -> $pid_after): reattach failed, the app was relaunched (or is gone): $status"

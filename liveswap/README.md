@@ -421,8 +421,10 @@ fixing the host does take effect. Restarting the user manager
 re-measures either way.
 
 **The sandbox is an availability dependency.** A host that stops being
-able to deliver it will not start hotserve until the host is fixed;
-there is no setting that runs apps without one. That is deliberate —
+able to deliver it will not start hotserve until the host is fixed,
+and systemd does not retry a start hotserve refused — fix the host,
+then `systemctl start hotserve`; there is no setting that runs apps
+without one. That is deliberate —
 the alternative is a supervisor that silently runs every app with no
 isolation because the kernel changed its mind — so prove a box before
 you restart into it. `hotserve validate` does not measure the host (it
@@ -1203,14 +1205,16 @@ and `shared/` of this tree (see [Sandbox](#sandbox)).
   hotserve itself restarts: [Upgrading](../docs/upgrading.md));
   only if that unit is gone (reboot, or it died meanwhile) is the
   current version relaunched. Stopping hotserve
-  therefore leaves apps running until the next start; removing the
-  package stops them. Removing an app (or the whole `liveswap` block)
+  therefore leaves apps running until the next start, and a hotserve
+  that crashes is started again by systemd a second later and
+  reattaches the same way (a start it refuses is not retried); removing
+  the package stops them. Removing an app (or the whole `liveswap` block)
   via a **reload** stops its units; if you instead edit the file and
   *restart* hotserve with the whole block gone, nothing is left to
   judge the old units and they keep running — decommission them
   explicitly: `sudo -u hotserve XDG_RUNTIME_DIR=/run/user/$(id -u
   hotserve) systemctl --user stop 'hotserve-*'`. Units are created with `Restart=no` — the
-  watchdog is the only restarter — and stopping a version kills its
+  watchdog is the only restarter of apps — and stopping a version kills its
   whole cgroup, so worker trees never outlive it.
 - **Changed app definitions apply at the app's next launch** — a
   deploy, a rollback, or a relaunch after a crash, a sustained health failure, or a reboot — never by

@@ -448,10 +448,11 @@ func TestMeasureSandboxProvesTheManagerBeforeMeasuring(t *testing.T) {
 
 // TestProbeSandboxCapabilityRetriesTimeout pins the one retry, and
 // its shape. The probe's verdict decides whether hotserve starts at
-// all, and hotserve.service has no Restart= — so a transient timeout
-// under boot load must get a second attempt before it becomes a
-// refusal to start. Only a timeout: a probe that FAILED measured the
-// host, and retrying a measurement would just slow every refusal down.
+// all, and a refused start (exit 1) is the one exit hotserve.service
+// never retries — so a transient timeout under boot load must get a
+// second attempt in-process before it becomes a refusal to start.
+// Only a timeout: a probe that FAILED measured the host, and retrying
+// a measurement would just slow every refusal down.
 func TestProbeSandboxCapabilityRetriesTimeout(t *testing.T) {
 	t.Run("a timeout is retried and the host recovers", func(t *testing.T) {
 		r := &probeRunner{fakeRunner: &fakeRunner{}, queue: []error{context.DeadlineExceeded, nil}}

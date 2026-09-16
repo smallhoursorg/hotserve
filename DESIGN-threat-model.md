@@ -512,7 +512,12 @@ the mechanism:
    interfere with it. A failed probe fails the whole server start, so
    this is an availability attack on the supervisor, not a way to
    weaken an app: interference cannot produce a running hotserve with
-   a lesser sandbox. The verdict is cached per manager connection
+   a lesser sandbox. A probe made to fail, or to time out twice, keeps
+   hotserve down until an operator starts it — a refused start exits 1,
+   which the unit never retries; a start stretched past the unit's
+   `TimeoutStartSec` is restarted by systemd, which repeats the
+   exposure rather than ending it. Either way the bound is the same
+   trust domain. The verdict is cached per manager connection
    (`userManagerClient.cachedSandboxCapability`,
    liveswap/systemd_dbus.go), which narrows the window, and a failed
    verdict is deliberately NOT cached, so interference costs the next
@@ -575,7 +580,8 @@ lifecycle properties and appends `sandboxProperties` for the rest
   AF_INET6 AF_UNIX AF_NETLINK` (netlink stays read-only for
   `getifaddrs()`, which Node and Go frameworks call at startup).
 - Lifecycle: `Restart=no` (the liveswap watchdog is the sole
-  restarter), `KillMode=control-group`,
+  restarter of apps; hotserve.service itself is restarted by systemd
+  after a crash, never after a refused start), `KillMode=control-group`,
   `UnsetEnvironment=XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS`.
 
 **The probe stays.** At `App.Start` — every config activation —
