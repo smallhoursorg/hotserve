@@ -201,15 +201,18 @@ Properties that matter to the model:
   SSRF surface, but it means a token-holder can deploy arbitrary
   bytes with no artifact host in the loop: the allowlist confines
   *pulls*, and only the claim scope confines *who*.
-- **Pull payload:** three fields only — `url`, `version`, `auth_header`
-  (`deployPayload`, liveswap/app.go); unknown JSON silently ignored (no
-  `DisallowUnknownFields`). `version` is
+- **Pull payload:** four fields only — `url`, `version`, `auth_header`,
+  `sha256` (`deployPayload`, liveswap/app.go); unknown JSON silently
+  ignored (no `DisallowUnknownFields`). `version` is
   `^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$` (no leading dot, so never
   `.`/`..` or a release-GC bookkeeping name), double-sanitized before
   touching the filesystem (`versionRe`, `versionPathComponent` and
   `validVersion`, liveswap/names.go). `auth_header` is only
   control-char-checked (`parseDeployPayload`, liveswap/handler.go); its
   contents are attacker-chosen and forwarded to the allowlisted host.
+  `sha256` is optional; when present it is exactly 64 hex characters,
+  lowercased (`parseDeployPayload`), and the download must hash to it
+  (below).
 - **Response leaks (all post-auth):** the 500 path returns raw
   `err.Error()` plus the full status snapshot
   (`Handler.mapDeployResult`, liveswap/handler.go) — filesystem paths,
@@ -256,6 +259,18 @@ redirects but **not** same-host (also `downloadArtifact`). Size:
 Content-Length pre-check plus streaming `LimitReader`, default 100 MB
 (`downloadArtifact`; the default is set in `AppConfig.applyDefaults`,
 liveswap/liveswap.go).
+
+**Content binding is the deployer's choice.** A pull that carries
+`sha256` is hashed as it streams (`downloadArtifact`), and a body that
+hashes to anything else is refused as a `validationError` — a 422
+naming the pinned and the served digests — with the staged file
+removed; the cap is judged first, so a cut-short body reports the
+cap, never a mismatch. The pin is the deployer's own hash of the
+tarball it built, so with it a host can only withhold the artifact,
+not substitute one. Without it the fetched bytes are trusted on the
+allowlist and the token alone. The example workflows and the README's
+CI recipes send it; a push (bytes from the authenticated caller) and a
+rollback (no fetch) have nothing to pin.
 
 **The documented, real gap:** the host allowlist governs the **first
 hop only** — `CheckRedirect` deliberately does not re-check the host
@@ -381,8 +396,10 @@ scope for the runtime model, in scope for release signing (roadmap).
   the allowlist), not the runtime; the sandbox bounds what the deployed
   code then reaches.
 - **T3 — Malicious/compromised artifact host** within the allowlist
-  pin. Controls tarball bytes, status, redirect targets (any https
-  host), timing. Faces `extract.go` and the first-hop SSRF gap.
+  pin. Controls status, redirect targets (any https host), timing —
+  and the tarball bytes, unless the pull carries `sha256`, which the
+  example workflows do: then other bytes are a 422, and what remains
+  is withholding. Faces `extract.go` and the first-hop SSRF gap.
 - **T4 — Unauthenticated network attacker** on the public webhook/proxy.
   Faces the token gate — forgery needs a private key, so there is no
   guessing oracle; the realer wins are log-amplification, the CPU cost of
@@ -772,3 +789,7 @@ Dated one-liners; the full text of each is in git.
   `max_artifact_entries` plus PATH_MAX/NAME_MAX name caps in
   extraction (T3 inode exhaustion closed), with a 75% warning so a
   growing app sees either cap coming.
+- 2026-09-16 (#106) — Optional `sha256` on a pull deploy, checked on
+  the download stream; T3 no longer chooses the bytes of a pinned
+  pull. Actor and attribution claims in `deployed_by` (#111) landed
+  the day before.

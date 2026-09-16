@@ -93,12 +93,15 @@ type deployPayload struct {
 	URL        string `json:"url"`
 	Version    string `json:"version"`
 	AuthHeader string `json:"auth_header"`
+	// SHA256 is the artifact's digest as sha256sum prints it, 64 hex
+	// characters; optional. When set, the download must hash to it.
+	SHA256 string `json:"sha256"`
 }
 
 // request is the one place a payload becomes a request: exactly the
-// three wire fields cross over, everything else stays zero.
+// four wire fields cross over, everything else stays zero.
 func (p deployPayload) request() deployRequest {
-	return deployRequest{url: p.URL, version: p.Version, authHeader: p.AuthHeader}
+	return deployRequest{url: p.URL, version: p.Version, authHeader: p.AuthHeader, sha256: p.SHA256}
 }
 
 // deployRequest is the validated deploy request handed to the
@@ -110,6 +113,11 @@ type deployRequest struct {
 	url        string
 	version    string
 	authHeader string
+	// sha256 pins the bytes a URL pull must download: lowercase hex, or
+	// empty for no pin (parseDeployPayload normalises it). A push's
+	// bytes are the request itself and a rollback fetches nothing, so
+	// neither carries one.
+	sha256 string
 	// localArchive is the path of an already-staged pushed tarball (an
 	// os.CreateTemp name under the app's own tmp dir, chosen by the
 	// handler — never request input); empty for a URL pull.
@@ -333,7 +341,7 @@ func (ma *managedApp) rememberSecrets(path string, kvs []string) {
 // that cannot be read now (a rewrite mid-flight, a mode not yet fixed)
 // is not an error here — the next launch reports that — and the read
 // is retried on the next response until it succeeds.
-func (ma *managedApp) redactorFor(s statusSnapshot) *redactor {
+func (ma *managedApp) redactorFor(s statusSnapshot, names ...string) *redactor {
 	// The spec is read under secretsMu so the "which env_file is
 	// loaded" check and the spec it is checked against are one
 	// snapshot: a reload landing between the two could otherwise pair
@@ -356,10 +364,13 @@ func (ma *managedApp) redactorFor(s statusSnapshot) *redactor {
 	ma.secretsMu.Unlock()
 	// Safe strings are names: the app's, every version the status
 	// names — the running one, the last deploy's, the releases on
-	// disk, the recorded ones — and the app's dirs. Whoever named one,
-	// it exempts nothing: a safe string equal to a known value is
-	// dropped by newRedactor (redact.go, rule 1).
+	// disk, the recorded ones — the app's dirs, and any the caller's
+	// body names that the status does not (the digests a refused pin
+	// reports, deployOutcome). Whoever named one, it exempts nothing:
+	// a safe string equal to a known value is dropped by newRedactor
+	// (redact.go, rule 1).
 	safe := append([]string{ma.name, s.CurrentVersion}, s.AvailableVersions...)
+	safe = append(safe, names...)
 	if s.LastDeploy != nil {
 		safe = append(safe, s.LastDeploy.Version)
 	}

@@ -18,6 +18,12 @@
 #                         URL: "token <github token>" reads a release asset by
 #                         its API URL, private repo or not (the workflow sends
 #                         the job's own token)
+#   ARTIFACT_SHA256       the artifact's digest as `sha256sum app.tar.gz` prints
+#                         it: the box refuses a download that hashes to anything
+#                         else, so a host serving other bytes than this build
+#                         cannot deploy them (the workflow sends it). A pushed
+#                         file is the request itself and a rollback fetches
+#                         nothing: neither takes a pin, and one set is refused
 #
 # The deploy (or rollback: the same start, health gate and cutover,
 # from a release already on disk) is streamed as it happens: one JSON
@@ -54,6 +60,18 @@ fi
 # would arrive here with app.tar.gz already in front of the flag and
 # push a stale tarball; refuse anything after the one operand.
 [ $# -eq 0 ] || { echo "deploy.sh: unexpected argument '$1' (--rollback goes first, without a tarball)" >&2; exit 1; }
+# A pin only a URL deploy can carry. With a pushed file (the request
+# itself) or a rollback (no fetch) it would be dropped, and a dropped
+# pin is one the operator believes is checked; set but empty, the step
+# that computes it produced nothing. Refused here, before any output
+# or the token mint, like every other refusal of the invocation.
+if [ -n "${ARTIFACT_SHA256+set}" ]; then
+	[ -n "$ARTIFACT_SHA256" ] || { echo "deploy.sh: ARTIFACT_SHA256 is set but empty (the step that computes the digest produced nothing); unset it to deploy unpinned" >&2; exit 1; }
+	if [ -n "$rollback" ] || [ -f "$artifact" ]; then
+		echo "deploy.sh: ARTIFACT_SHA256 pins a URL deploy; a pushed file is the request itself and a rollback fetches nothing, so unset it" >&2
+		exit 1
+	fi
+fi
 url=${HOTSERVE_URL:?set HOTSERVE_URL to the app webhook, e.g. https://deploy.example.com/example}
 # The app is the URL's last path segment; the box accepts a trailing
 # slash there, so drop any before taking it.
@@ -211,7 +229,8 @@ else
 	# header value would otherwise make it malformed).
 	json() { printf '%s' "$1" | sed 's/[\\"]/\\&/g'; }
 	auth=${ARTIFACT_AUTH_HEADER:+,\"auth_header\":\"$(json "$ARTIFACT_AUTH_HEADER")\"}
+	sha=${ARTIFACT_SHA256:+,\"sha256\":\"$(json "$ARTIFACT_SHA256")\"}
 	stream -X POST -H "Content-Type: application/json" \
-		-d "{\"url\":\"$(json "$artifact")\",\"version\":\"$(json "$version")\"$auth}" "$url"
+		-d "{\"url\":\"$(json "$artifact")\",\"version\":\"$(json "$version")\"$auth$sha}" "$url"
 fi
 finish "$what"

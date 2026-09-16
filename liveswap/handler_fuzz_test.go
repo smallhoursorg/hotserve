@@ -5,7 +5,8 @@
 // version that is a single, non-escaping, non-dot path component under
 // the releases dir — the deploy pipeline os.RemoveAll's that path, and
 // release GC treats dot-entries there as its own — plus a non-empty
-// URL and a header value the transport will not choke on. Whether the
+// URL, a header value the transport will not choke on, and a sha256
+// pin that is absent or exactly a lowercase hex digest. Whether the
 // URL is allowed is FuzzPinnedURL's job; this target stops where the
 // payload becomes a deployRequest.
 package liveswap
@@ -13,11 +14,14 @@ package liveswap
 import (
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
 	"golang.org/x/net/http/httpguts"
 )
+
+var lowercaseDigest = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func FuzzDeployRequest(f *testing.F) {
 	for _, s := range [][2]string{
@@ -45,6 +49,14 @@ func FuzzDeployRequest(f *testing.F) {
 		{`{"url":"https://x/a.tgz","version":"v1","auth_header":"x\u007f"}`, "v1"},
 		{`{"url":"https://x/a.tgz","version":"v1","auth_header":"x\ty"}`, "v1"},
 		{`{"url":"https://x/a.tgz","version":"v1","auth_header":"Bearer ok"}`, "v1"},
+		{`{"url":"https://x/a.tgz","version":"v1","sha256":"` + strings.Repeat("a", 64) + `"}`, "v1"},
+		{`{"url":"https://x/a.tgz","version":"v1","sha256":"` + strings.Repeat("A", 64) + `"}`, "v1"},
+		{`{"url":"https://x/a.tgz","version":"v1","sha256":"` + strings.Repeat("a", 63) + `"}`, "v1"},
+		{`{"url":"https://x/a.tgz","version":"v1","sha256":"` + strings.Repeat("a", 65) + `"}`, "v1"},
+		{`{"url":"https://x/a.tgz","version":"v1","sha256":"` + strings.Repeat("g", 64) + `"}`, "v1"},
+		{`{"url":"https://x/a.tgz","version":"v1","sha256":"sha256:` + strings.Repeat("a", 57) + `"}`, "v1"},
+		{`{"url":"https://x/a.tgz","version":"v1","sha256":""}`, "v1"},
+		{`{"url":"https://x/a.tgz","version":"v1","sha256":1}`, "v1"},
 		{`[{"url":"https://x/a.tgz","version":"v1"}]`, "v1"},
 		{`{"url":{"url":"https://x/a.tgz"},"version":"v1"}`, "v1"},
 		{``, ""},
@@ -76,6 +88,12 @@ func FuzzDeployRequest(f *testing.F) {
 				t.Fatalf("parseDeployPayload(%q) accepted an auth_header the transport refuses: %q", body, p.AuthHeader)
 			}
 			assertVersionIsOneComponent(t, "body", p.Version)
+			// A pin the gate lets through is exactly the form the journal
+			// and the mismatch message carry: 64 lowercase hex, or none.
+			// An oracle of its own, not the gate's regexp.
+			if p.SHA256 != "" && !lowercaseDigest.MatchString(p.SHA256) {
+				t.Fatalf("parseDeployPayload(%q) accepted sha256 %q", body, p.SHA256)
+			}
 		}
 		// deployPush and deployRollback read the version from the query
 		// and gate on the same validVersion.

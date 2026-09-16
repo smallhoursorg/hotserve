@@ -763,13 +763,22 @@ release, all through the same endpoint and the same auth:
 {
   "url": "https://github.com/your-org/blog/releases/download/v1.4.2/blog.tar.gz",
   "version": "v1.4.2",
-  "auth_header": "Bearer <token-for-private-assets>"
+  "auth_header": "Bearer <token-for-private-assets>",
+  "sha256": "<the tarball's digest, as sha256sum prints it>"
 }
 ```
 
 `auth_header` is optional and is sent verbatim as `Authorization` on
 the artifact download (dropped automatically on cross-host redirects,
 so GitHub's S3 redirect works). The URL must pass `artifact_allowlist`.
+
+`sha256` is optional too: the tarball's digest, 64 hex characters
+(`sha256sum blog.tar.gz`). The box hashes the download as it streams
+and refuses a mismatch with a `422` naming both digests, so a host
+that serves other bytes than CI built cannot deploy them. Without it,
+the download is trusted on the strength of the allowlist and the
+token alone. The example workflows send it; a push carries no pin,
+because its bytes are the request itself.
 
 **2. Push an uploaded tarball** — no artifact host needed. Stream the
 `.tar.gz` as the request body with a gzip content type; the version is
@@ -1062,12 +1071,14 @@ steps:
     JWT=$(curl -fsS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
       "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=hotserve" | jq -er .value)
     echo "::add-mask::$JWT"
+    SHA256=$(sha256sum blog.tar.gz | cut -d' ' -f1)
     curl --fail-with-body --max-time 600 -X POST \
       -H "Authorization: Bearer $JWT" \
       -d '{
         "url": "'"$ASSET_URL"'",
         "version": "build-${{ github.run_number }}",
-        "auth_header": "token '"$GH_TOKEN"'"
+        "auth_header": "token '"$GH_TOKEN"'",
+        "sha256": "'"$SHA256"'"
       }' \
       https://deploy.example.com/blog
 ```
@@ -1078,6 +1089,10 @@ so the box needs `artifact_allowlist api.github.com/repos/your-org/`:
 hosts match exactly, and `github.com/your-org/` does not admit it.
 (`jq -er` fails the step if the mint returned nothing, instead of
 sending an empty bearer and blaming `deploy_trust`.)
+
+`SHA256` is the digest of the tarball this job built, taken from the
+runner's own copy: the box refuses the asset unless it hashes to the
+same, so nothing between the upload and the deploy can swap it.
 
 (`auth_header` is a separate, artifact-download credential — the token
 that reads a private release asset — not the deploy token. It is the
@@ -1122,18 +1137,22 @@ deploy:
         --upload-file blog.tar.gz \
         "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/blog/$CI_COMMIT_SHORT_SHA/blog.tar.gz"
     - |
+      SHA256=$(sha256sum blog.tar.gz | cut -d' ' -f1)
       curl --fail-with-body --max-time 600 -X POST \
         -H "Authorization: Bearer $HOTSERVE_JWT" \
         -d "{
           \"url\": \"$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/blog/$CI_COMMIT_SHORT_SHA/blog.tar.gz\",
           \"version\": \"$CI_COMMIT_SHORT_SHA\",
-          \"auth_header\": \"Bearer $DEPLOY_READ_TOKEN\"
+          \"auth_header\": \"Bearer $DEPLOY_READ_TOKEN\",
+          \"sha256\": \"$SHA256\"
         }" \
         https://deploy.example.com/blog
 ```
 
 On gitlab.com that URL needs `artifact_allowlist
-gitlab.com/api/v4/projects/<project id>/` on the box.
+gitlab.com/api/v4/projects/<project id>/` on the box. `SHA256` is the
+tarball's digest from the job's own copy, which the box holds the
+download to (see the pull payload above).
 `DEPLOY_READ_TOKEN` is the artifact-download credential: a project
 access token with `read_api`, stored as a masked CI/CD variable. The
 job token is not a substitute: `auth_header` is sent as the

@@ -106,7 +106,9 @@ release and the box fetches it — so every deployed version stays on
 GitHub. The box fetches the asset by its API URL with the job's own
 token, so a private repo deploys the same way as a public one, and the
 box's `artifact_allowlist api.github.com/repos/your-org/` is what
-admits it. The deploy step prints the app's status when the new
+admits it. The job also sends the tarball's digest, taken before the
+upload, and the box refuses the asset unless it hashes to the same.
+The deploy step prints the app's status when the new
 version is live, or why it was refused; a refused deploy leaves the
 old version serving. A 401 means the box's `deploy_trust` for this
 app does not accept the run — most often `claim repository` or `claim

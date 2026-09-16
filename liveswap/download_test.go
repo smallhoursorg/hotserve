@@ -2,13 +2,16 @@ package liveswap
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -112,6 +115,103 @@ func TestDownloadPayloadRefusalsAreValidationErrors(t *testing.T) {
 		if err == nil || !errors.As(err, &vErr) {
 			t.Errorf("%s: want validationError, got %T: %v", name, err, err)
 		}
+	}
+}
+
+// A pinned sha256 binds the download to the bytes the deployer hashed:
+// the same bytes come through, other bytes are a validationError (a
+// 422 upstream) naming both digests, and nothing is left on disk.
+func TestDownloadArtifactPinnedDigest(t *testing.T) {
+	body := []byte("artifact-bytes")
+	sum := sha256.Sum256(body)
+	pin := hex.EncodeToString(sum[:])
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	opts := testDownloadOpts(t, srv.URL+"/demo.tar.gz")
+	opts.sha256 = pin
+	path, err := downloadArtifact(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("pinned download of the pinned bytes: %v", err)
+	}
+	if data, _ := os.ReadFile(path); string(data) != string(body) {
+		t.Fatalf("content = %q", data)
+	}
+
+	opts = testDownloadOpts(t, srv.URL+"/demo.tar.gz")
+	opts.sha256 = strings.Repeat("0", 64)
+	_, err = downloadArtifact(context.Background(), opts)
+	var vErr validationError
+	if !errors.As(err, &vErr) {
+		t.Fatalf("mismatch: want validationError, got %T: %v", err, err)
+	}
+	if !strings.Contains(err.Error(), "request pinned "+opts.sha256) || !strings.Contains(err.Error(), "downloaded "+pin) {
+		t.Fatalf("mismatch names neither digest: %v", err)
+	}
+	if entries, _ := os.ReadDir(opts.destDir); len(entries) != 0 {
+		t.Fatalf("mismatched download left behind: %v", entries)
+	}
+}
+
+// The pin crosses from the request into the download through the real
+// fetcher: a mismatch is refused (what the refusal says and leaves is
+// TestDownloadArtifactPinnedDigest's), and the same request with the
+// right pin extracts the release.
+func TestReleaseFetcherHoldsTheDownloadToThePin(t *testing.T) {
+	archive := buildTarGz(t, []tarEntry{{name: "server", body: "#!/bin/sh\n", mode: 0o755}})
+	bytes, err := os.ReadFile(archive)
+	must(t, err)
+	sum := sha256.Sum256(bytes)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(bytes)
+	}))
+	defer srv.Close()
+	spec := testSpec(t)
+	spec.allowlist = mustAllowlist(t, entryFor(srv.URL))
+	spec.allowInsecure = true
+	rf := &releaseFetcher{client: &http.Client{}}
+	req := deployRequest{url: srv.URL + "/a.tgz", version: "v1", sha256: strings.Repeat("0", 64)}
+
+	_, _, err = rf.fetch(context.Background(), spec, req, func(string) {})
+	var vErr validationError
+	if !errors.As(err, &vErr) {
+		t.Fatalf("mismatched pin: want the validationError, got %T: %v", err, err)
+	}
+
+	req.sha256 = hex.EncodeToString(sum[:])
+	dir, _, err := rf.fetch(context.Background(), spec, req, func(string) {})
+	if err != nil {
+		t.Fatalf("pinned pull of the pinned bytes: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "server")); err != nil {
+		t.Fatalf("release not extracted: %v", err)
+	}
+}
+
+// An over-cap body is cut short, so its digest says nothing: the
+// streaming cap is the error, not a mismatch the deployer would chase.
+// Chunked and flushed, so no Content-Length refuses it before a byte
+// is hashed (TestDownloadArtifactContentLengthCap covers that path).
+func TestDownloadArtifactCapBeatsThePin(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		for i := 0; i < 64; i++ {
+			_, _ = w.Write(make([]byte, 64))
+			w.(http.Flusher).Flush()
+		}
+	}))
+	defer srv.Close()
+	opts := testDownloadOpts(t, srv.URL)
+	opts.maxBytes = 512
+	opts.sha256 = strings.Repeat("0", 64)
+	_, err := downloadArtifact(context.Background(), opts)
+	if err == nil || !strings.Contains(err.Error(), "exceeded max size") {
+		t.Fatalf("want the streaming cap error, got %v", err)
+	}
+	if strings.Contains(err.Error(), "mismatch") {
+		t.Fatalf("the pin was judged on a cut-short body: %v", err)
 	}
 }
 

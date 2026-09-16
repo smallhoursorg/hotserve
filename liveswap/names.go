@@ -32,6 +32,11 @@ var appNameRe = regexp.MustCompile(`^[a-z0-9-]{1,` + strconv.Itoa(appNameMaxLen)
 // itself or the app root — where shared/ lives).
 var versionRe = regexp.MustCompile(`^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$`)
 
+// sha256Re is a pull's artifact pin as sha256sum prints it, in either
+// case (parseDeployPayload lowercases what it accepts). Nothing else:
+// no `sha256:` prefix, no other algorithm.
+var sha256Re = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
+
 // versionPathComponent renders a version tag safe to use as a single
 // path component, mechanically: rooting the string at "/" and cleaning
 // resolves any "..", and the leading separator is then stripped. For

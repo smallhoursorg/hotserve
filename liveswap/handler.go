@@ -240,6 +240,14 @@ func parseDeployPayload(body []byte) (p deployPayload, status int, msg string) {
 	if strings.ContainsFunc(p.AuthHeader, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
 		return deployPayload{}, http.StatusUnprocessableEntity, "auth_header contains control characters"
 	}
+	// A pin is the digest as sha256sum prints it, in either case,
+	// carried on in the lowercase form the journal and a mismatch name.
+	if p.SHA256 != "" {
+		if !sha256Re.MatchString(p.SHA256) {
+			return deployPayload{}, http.StatusUnprocessableEntity, fmt.Sprintf("sha256 must match %s (the artifact's digest as sha256sum prints it)", sha256Re)
+		}
+		p.SHA256 = strings.ToLower(p.SHA256)
+	}
 	return p, 0, ""
 }
 
@@ -355,9 +363,16 @@ func (h *Handler) finishDeploy(w http.ResponseWriter, r *http.Request, ma *manag
 }
 
 func (h *Handler) logDeployAuthorized(r *http.Request, ma *managedApp, req deployRequest) {
-	h.logger.Info("deploy authorized",
+	fields := []zap.Field{
 		zap.String("app", ma.name), zap.String("via", req.by),
-		zap.String("source", req.source()), zap.String("remote", r.RemoteAddr))
+		zap.String("source", req.source()), zap.String("remote", r.RemoteAddr),
+	}
+	if req.sha256 != "" {
+		// What the pull is bound to, for the operator reading back what
+		// a deploy fetched: a digest, never a secret.
+		fields = append(fields, zap.String("sha256", req.sha256))
+	}
+	h.logger.Info("deploy authorized", fields...)
 }
 
 // mapDeployResult turns a pipeline outcome into the webhook response.
@@ -375,7 +390,14 @@ func (h *Handler) mapDeployResult(w http.ResponseWriter, ma *managedApp, err err
 // up, which nothing is written for.
 func deployOutcome(ma *managedApp, err error) (int, any, *redactor) {
 	status := ma.status()
-	rd := ma.redactorFor(status)
+	// A refused pin names two digests, and a digest is the shape of a
+	// token the filter masks: told they are names — the deployer's own
+	// pin, and what the host served — the 422 can say which is which.
+	// Not a mismatch: no names (the zero value's are empty, and
+	// newRedactor skips those).
+	var dm digestMismatch
+	_ = errors.As(err, &dm)
+	rd := ma.redactorFor(status, dm.names()...)
 	var vErr validationError
 	switch {
 	case err == nil:

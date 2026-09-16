@@ -2,12 +2,15 @@ package liveswap
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -20,6 +23,7 @@ type downloadOpts struct {
 	allowInsecure bool                 // permit plain http URLs
 	allowlist     []artifactAllowEntry // required; no any-origin mode
 	client        *http.Client
+	sha256        string // hex digest the body must hash to, either case; empty for no pin
 }
 
 // downloadArtifact streams the artifact to a file in destDir and
@@ -27,6 +31,13 @@ type downloadOpts struct {
 // hardened webhook this module replaces: once against Content-Length
 // before reading the body, and again on the running byte count while
 // streaming (Content-Length can lie or be absent).
+//
+// A pinned sha256 is checked on the same pass: the body is hashed as
+// it is written, and a digest that differs is a validationError naming
+// both — the deployer's pin and what the host served — so a host that
+// serves other bytes than CI built cannot deploy them (T3,
+// DESIGN-threat-model.md). The cap is checked first: an over-cap body
+// was cut short, so its digest says nothing.
 //
 // Secrets never reach the logs from here: errors carry the URL's host
 // and path only, never its query string or the auth header.
@@ -104,7 +115,8 @@ func downloadArtifact(ctx context.Context, opts downloadOpts) (string, error) {
 	}
 	// LimitReader with one extra byte: reading maxBytes+1 proves the
 	// body exceeded the cap without ever buffering more than that.
-	n, err := io.Copy(f, io.LimitReader(resp.Body, opts.maxBytes+1))
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(resp.Body, opts.maxBytes+1))
 	closeErr := f.Close()
 	if err == nil {
 		err = closeErr
@@ -112,12 +124,34 @@ func downloadArtifact(ctx context.Context, opts downloadOpts) (string, error) {
 	if err == nil && n > opts.maxBytes {
 		err = fmt.Errorf("artifact exceeded max size during download (max %d bytes)", opts.maxBytes)
 	}
+	if got := hex.EncodeToString(h.Sum(nil)); err == nil && opts.sha256 != "" && !strings.EqualFold(got, opts.sha256) {
+		err = digestMismatch{pinned: strings.ToLower(opts.sha256), got: got}
+	}
 	if err != nil {
 		_ = os.Remove(f.Name())
 		return "", err
 	}
 	return f.Name(), nil
 }
+
+// digestMismatch refuses a pinned pull whose body hashed to something
+// else. It is a validationError — the webhook answers 422 with the
+// message — that also carries the two digests as values: the response
+// filter masks a token of a digest's shape unless it is told the
+// token is a name (redactorFor), and the message is no use to the
+// deployer with both digests masked. deployOutcome passes names() on.
+type digestMismatch struct{ pinned, got string }
+
+func (d digestMismatch) Error() string {
+	return fmt.Sprintf("artifact sha256 mismatch: request pinned %s, downloaded %s", d.pinned, d.got)
+}
+
+// Unwrap makes errors.As find the validationError the webhook maps to 422.
+func (d digestMismatch) Unwrap() error { return validationError{d.Error()} }
+
+// names is what the filter must let through: both digests, or nothing
+// for the zero value.
+func (d digestMismatch) names() []string { return []string{d.pinned, d.got} }
 
 // newDownloadClient builds the shared artifact HTTP client. No overall
 // timeout — large artifacts on slow links are legitimate — but a
@@ -207,6 +241,7 @@ func (rf *releaseFetcher) fetch(ctx context.Context, spec *appSpec, req deployRe
 			allowInsecure: spec.allowInsecure,
 			allowlist:     spec.allowlist,
 			client:        rf.client,
+			sha256:        req.sha256,
 		})
 		if err != nil {
 			return "", archiveStats{}, err
