@@ -90,10 +90,12 @@ deploys on every change, so what they say works:
 
 - **[examples/node](examples/node)** — a single executable (Node's own
   build), so nothing is installed on the box. Largest tarball;
-  simplest box. The tutorial's default.
+  simplest box. The tutorial's default. Start your own from the
+  template it is published as, [hotserve-example-node](https://github.com/smallhoursorg/hotserve-example-node).
 - **[examples/deno](examples/deno)** — `deno run` with a Deno installed
   under `/usr` on the box, and the runtime's permission flags held in
   the box's Caddyfile, where a compromised build cannot widen them.
+  Its template is [hotserve-example-deno](https://github.com/smallhoursorg/hotserve-example-deno).
 - **[examples/box](examples/box)** — the box's config, kept in a
   private repo of its own: the `Caddyfile` (which app, which repo may
   deploy it, where the deploy webhook answers), a `make push` that

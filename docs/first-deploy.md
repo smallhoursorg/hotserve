@@ -216,21 +216,34 @@ the above:
    env DATA_DIR {shared_dir}
    ```
 
-Then in step 4, copy [examples/deno](../examples/deno) instead, and
-leave `HOTSERVE_RUNS_ON` unset: the tarball has no native code, so
-any runner builds it.
+Then in step 4, start from
+[hotserve-example-deno](https://github.com/smallhoursorg/hotserve-example-deno) instead — the same **Use this
+template** — and leave `HOTSERVE_RUNS_ON` unset: the tarball has no
+native code, so any runner builds it.
 
 </details>
 
 ## 4. The app
 
-Copy [examples/node](../examples/node) into a new GitHub repository,
+The Node app is published as a template repository,
+[hotserve-example-node](https://github.com/smallhoursorg/hotserve-example-node) — the `examples/node` directory of
+this repo, as of its latest stable release. Open it, press **Use this
+template** → **Create a new repository**, and name it
 `your-org/example`. Private is fine: the box fetches the release asset
 by its API URL with the workflow's own token, and the
-`artifact_allowlist` above admits it.
+`artifact_allowlist` above admits it. From a laptop with the GitHub
+CLI that is:
 
-No file in it names the box: the workflow reads repository variables.
-In the repository's Settings → Secrets and variables → Actions →
+```sh
+gh repo create your-org/example --template smallhoursorg/hotserve-example-node --private
+```
+
+The new repository runs the deploy workflow as soon as it is created,
+and that run stops red at its first step: it does not know your box
+yet. Nothing was published, and telling it the box is the rest of this
+step — no file is edited, ever.
+
+In the new repository's Settings → Secrets and variables → Actions →
 Variables, add:
 
 - `HOTSERVE_URL`, set to `https://deploy.example.com/example`. A
@@ -242,16 +255,18 @@ Variables, add:
   mismatch is refused at deploy time with a message naming the right
   value.
 
-Or from a laptop with the GitHub CLI:
+Or from a laptop:
 `gh variable set HOTSERVE_URL -R your-org/example --body https://deploy.example.com/example`.
 
-Push to `main`. The workflow builds the executables, publishes them as
-a GitHub release tagged with the commit's first 12 characters, mints an
-OIDC token, and asks the box to deploy. The box fetches the release,
-runs the migration, starts the new version on its own socket, health
-checks it for fifteen seconds, and moves traffic over. The request
-returns when that is done, so the deploy step takes about half a
-minute.
+Then re-run the red run — Actions → the failed run → **Re-run jobs** —
+which picks up the variable you just set. (A push does the same, and
+is how every later deploy starts.) The workflow builds the
+executables, publishes them as a GitHub release tagged with the
+commit's first 12 characters, mints an OIDC token, and asks the box to
+deploy. The box fetches the release, runs the migration, starts the
+new version on its own socket, health checks it for fifteen seconds,
+and moves traffic over. The request returns when that is done, so the
+deploy step takes about half a minute.
 
 What a first deploy that worked looks like:
 
@@ -287,8 +302,8 @@ the ones it can relaunch. Leave "Use workflow from" on `main`: the
 workflow runs from there whichever version it relaunches. The
 example's README says [more](../examples/node/README.md#rolling-back).
 The next app is the same four steps minus the first two: another
-`app` block and site in the Caddyfile, another copy of the example
-with its own `HOTSERVE_URL`.
+`app` block and site in the Caddyfile, another repository from the
+template with its own `HOTSERVE_URL`.
 
 Now do [After the first deploy](after-first-deploy.md): it turns this
 box from something root set up into something a person administers,
