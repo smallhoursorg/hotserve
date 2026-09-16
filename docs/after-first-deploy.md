@@ -160,5 +160,8 @@ moment for it.
   deploy or rollback, or a relaunch after a crash — never to the one
   running. Widen a Deno app's permissions before deploying code that
   needs them; narrow after the code that needed them is gone.
+- **Patching the box** (`apt upgrade`) reaches an app only at its next
+  launch too; after patching, push a commit to each app or reboot
+  ([Upgrading](upgrading.md#patching-the-host)).
 - **Everything else:** [liveswap/README.md](../liveswap/README.md) is the
   reference for every option, status code and edge.
