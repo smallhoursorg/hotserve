@@ -9,12 +9,14 @@ package examples
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -132,11 +134,26 @@ func TestDeployShReadsEveryShapeOfAnswer(t *testing.T) {
 // the process's, and returns its combined output and exit status.
 func deploySh(t *testing.T, srv *httptest.Server, env ...string) (string, int) {
 	t.Helper()
-	cmd := exec.Command("sh", filepath.Join("node", "scripts", "deploy.sh"), "https://example.test/a.tgz")
+	return deployShArgs(t, srv, []string{"https://example.test/a.tgz"}, env...)
+}
+
+// deployShArgs is deploySh with the operands chosen: a URL the box
+// would fetch, a local file the script pushes, or --rollback and a
+// version.
+func deployShArgs(t *testing.T, srv *httptest.Server, args []string, env ...string) (string, int) {
+	t.Helper()
+	cmd := exec.Command("sh", append([]string{filepath.Join("node", "scripts", "deploy.sh")}, args...)...)
 	// Later entries win, so a developer's own HOTSERVE_AUDIENCE, or the
 	// job summary of an Actions run this test runs in, never reaches
-	// the script unless a case sets it.
-	cmd.Env = append(append(os.Environ(), "HOTSERVE_URL="+srv.URL+"/demo", "VERSION=v1", "HOTSERVE_AUDIENCE=", "GITHUB_STEP_SUMMARY="), env...)
+	// the script unless a case sets it. ARTIFACT_SHA256 is dropped
+	// rather than blanked: the script tells set-but-empty from unset.
+	var base []string
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "ARTIFACT_SHA256=") {
+			base = append(base, kv)
+		}
+	}
+	cmd.Env = append(append(base, "HOTSERVE_URL="+srv.URL+"/demo", "VERSION=v1", "HOTSERVE_AUDIENCE=", "GITHUB_STEP_SUMMARY="), env...)
 	out, err := cmd.CombinedOutput()
 	var ee *exec.ExitError
 	if errors.As(err, &ee) {
@@ -146,6 +163,64 @@ func deploySh(t *testing.T, srv *httptest.Server, env ...string) (string, int) {
 		t.Fatalf("running deploy.sh: %v\n%s", err, out)
 	}
 	return string(out), 0
+}
+
+// ARTIFACT_SHA256 pins a URL deploy: it goes in the body as sha256 and
+// its absence sends no pin. Set but empty (a digest step that produced
+// nothing), or set with a local file or a rollback — neither of which
+// the box pins — the script refuses before any output or request,
+// rather than drop the pin.
+func TestDeployShPinsTheArtifactDigest(t *testing.T) {
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Fatal("deploy.sh needs curl; install it to run this test")
+	}
+	// The body the stand-in last received, under a lock: the handler
+	// runs on the server's goroutine, and the script's exit is no
+	// happens-before edge the race detector can see.
+	var mu sync.Mutex
+	var lastBody string
+	body := func() string { mu.Lock(); defer mu.Unlock(); return lastBody }
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		lastBody = string(b)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"app":"demo","current_version":"v1","running":true}` + "\n"))
+	}))
+	defer srv.Close()
+	pin := strings.Repeat("ab", 32)
+	env := []string{"HOTSERVE_TOKEN=x", "GITHUB_ACTIONS=", "ACTIONS_ID_TOKEN_REQUEST_URL="}
+
+	if out, code := deploySh(t, srv, append(env, "ARTIFACT_SHA256="+pin)...); code != 0 || body() != `{"url":"https://example.test/a.tgz","version":"v1","sha256":"`+pin+`"}` {
+		t.Fatalf("pinned: exit %d, body %s\n%s", code, body(), out)
+	}
+	if out, code := deploySh(t, srv, env...); code != 0 || strings.Contains(body(), "sha256") {
+		t.Fatalf("unpinned: exit %d, body %s\n%s", code, body(), out)
+	}
+	tarball := filepath.Join(t.TempDir(), "app.tar.gz")
+	if err := os.WriteFile(tarball, []byte("not really gzip"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+		env  []string
+		want string
+	}{
+		{"set but empty", []string{"https://example.test/a.tgz"}, []string{"ARTIFACT_SHA256="}, "ARTIFACT_SHA256 is set but empty"},
+		{"push", []string{tarball}, []string{"ARTIFACT_SHA256=" + pin}, "ARTIFACT_SHA256 pins a URL deploy"},
+		{"rollback", []string{"--rollback", "v1"}, []string{"ARTIFACT_SHA256=" + pin}, "ARTIFACT_SHA256 pins a URL deploy"},
+	} {
+		mu.Lock()
+		lastBody = ""
+		mu.Unlock()
+		// Under Actions, so a refusal after the group line would show.
+		out, code := deployShArgs(t, srv, tc.args, append(append(env, "GITHUB_ACTIONS=true"), tc.env...)...)
+		if code != 1 || !strings.Contains(out, tc.want) || strings.Contains(out, "::group::") || body() != "" {
+			t.Fatalf("%s with a pin: exit %d (want 1 before any output or request), body %q\n%s", tc.name, code, body(), out)
+		}
+	}
 }
 
 // In Actions a refused OIDC token is followed by the claims the run

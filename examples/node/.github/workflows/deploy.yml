@@ -59,6 +59,16 @@ jobs:
       - id: version
         if: ${{ !inputs.rollback }}
         run: echo "version=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+      # The tarball's digest, taken here before it leaves the runner: the
+      # box hashes what it downloads and refuses anything else, so the
+      # release asset cannot be swapped between this job and the deploy.
+      - id: artifact
+        if: ${{ !inputs.rollback }}
+        # An assignment, so a sha256sum that fails fails the step (a
+        # substitution inside echo would not): an empty digest is no pin.
+        run: |
+          sha=$(sha256sum app.tar.gz)
+          echo "sha256=${sha%% *}" >> "$GITHUB_OUTPUT"
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         if: ${{ !inputs.rollback }}
         id: release
@@ -78,6 +88,7 @@ jobs:
           # fail the whole run before the rollback step.
           ASSET_URL: ${{ fromJSON(steps.release.outputs.assets || '[{}]')[0].url }}
           ARTIFACT_AUTH_HEADER: token ${{ github.token }}
+          ARTIFACT_SHA256: ${{ steps.artifact.outputs.sha256 }}
       - if: ${{ inputs.rollback }}
         run: scripts/deploy.sh --rollback "$ROLLBACK"
         env:

@@ -1,6 +1,8 @@
 package liveswap
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -151,16 +153,27 @@ func TestWebhookUsesPerAppTrust(t *testing.T) {
 
 func TestWebhookValidatesPayload(t *testing.T) {
 	h, _ := newTestHandler(t)
+	const pinShape = "sha256 must match " // the 422 quotes the pattern, as version's does
 	cases := []struct {
-		name string
-		body string
-		want int
+		name     string
+		body     string
+		want     int
+		wantBody string // in the response, when set
 	}{
-		{"bad json", "{nope", http.StatusBadRequest},
-		{"missing url", `{"version":"v1"}`, http.StatusUnprocessableEntity},
-		{"missing version", `{"url":"https://x/a.tgz"}`, http.StatusUnprocessableEntity},
-		{"evil version", `{"url":"https://x/a.tgz","version":"../../etc"}`, http.StatusUnprocessableEntity},
-		{"auth_header with CRLF", `{"url":"https://x/a.tgz","version":"v1","auth_header":"Bearer a\r\nX-Evil: 1"}`, http.StatusUnprocessableEntity},
+		{"bad json", "{nope", http.StatusBadRequest, ""},
+		{"missing url", `{"version":"v1"}`, http.StatusUnprocessableEntity, ""},
+		{"missing version", `{"url":"https://x/a.tgz"}`, http.StatusUnprocessableEntity, ""},
+		{"evil version", `{"url":"https://x/a.tgz","version":"../../etc"}`, http.StatusUnprocessableEntity, ""},
+		{"auth_header with CRLF", `{"url":"https://x/a.tgz","version":"v1","auth_header":"Bearer a\r\nX-Evil: 1"}`, http.StatusUnprocessableEntity, ""},
+		// A pin is the digest as sha256sum prints it: 64 hex characters,
+		// nothing else, and a refusal names the field. (The accepted
+		// forms reach the fetcher in TestWebhookURLDeployForwardsWireFields.)
+		{"sha256 too short", `{"url":"https://x/a.tgz","version":"v1","sha256":"` + strings.Repeat("a", 63) + `"}`, http.StatusUnprocessableEntity, pinShape},
+		{"sha256 too long", `{"url":"https://x/a.tgz","version":"v1","sha256":"` + strings.Repeat("a", 65) + `"}`, http.StatusUnprocessableEntity, pinShape},
+		{"sha256 not hex", `{"url":"https://x/a.tgz","version":"v1","sha256":"` + strings.Repeat("g", 64) + `"}`, http.StatusUnprocessableEntity, pinShape},
+		{"sha256 prefixed", `{"url":"https://x/a.tgz","version":"v1","sha256":"sha256:` + strings.Repeat("a", 57) + `"}`, http.StatusUnprocessableEntity, pinShape},
+		{"sha256 not a string", `{"url":"https://x/a.tgz","version":"v1","sha256":1}`, http.StatusBadRequest, ""},
+		{"sha256 empty is no pin", `{"url":"https://x/a.tgz","version":"v1","sha256":""}`, http.StatusOK, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -168,7 +181,57 @@ func TestWebhookValidatesPayload(t *testing.T) {
 			if w.Code != tc.want {
 				t.Fatalf("code = %d, want %d (body %s)", w.Code, tc.want, w.Body.String())
 			}
+			if tc.wantBody != "" && !strings.Contains(w.Body.String(), tc.wantBody) {
+				t.Fatalf("body = %s, want it to carry %q", w.Body.String(), tc.wantBody)
+			}
 		})
+	}
+}
+
+// A refused pin's 422 names both digests as they are: real ones, which
+// the filter's entropy layer would otherwise mask as tokens. Both are
+// names (the deployer's own pin, and the hash of what a host served),
+// never secrets. (No record to check: a refusal of the request's own
+// content is not the version's history — see the deploy pipeline.)
+func TestWebhookRefusedPinNamesBothDigests(t *testing.T) {
+	h, rig := newTestHandler(t)
+	digest := func(s string) string { sum := sha256.Sum256([]byte(s)); return hex.EncodeToString(sum[:]) }
+	pinned, got := digest("what CI built"), digest("what the host served")
+	rig.fetch.err = digestMismatch{pinned: pinned, got: got}
+	w := do(t, h, http.MethodPost, "/demo", appToken(t), `{"url":"https://x/a.tgz","version":"v1","sha256":"`+pinned+`"}`)
+	if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "request pinned "+pinned+", downloaded "+got) {
+		t.Fatalf("response = %d %s; want a 422 naming both digests", w.Code, w.Body.String())
+	}
+}
+
+// A pinned pull names its digest in the deploy authorized line; an
+// unpinned one has no field to name.
+func TestWebhookDeployAuthorizedNamesThePin(t *testing.T) {
+	h, _ := newTestHandler(t)
+	core, logs := observer.New(zap.InfoLevel)
+	h.logger = zap.New(core)
+	pin := strings.Repeat("ab", 32)
+	for _, tc := range []struct{ body, want string }{
+		{`{"url":"https://x/a.tgz","version":"v1","sha256":"` + strings.ToUpper(pin) + `"}`, pin},
+		{`{"url":"https://x/a.tgz","version":"v2"}`, ""},
+	} {
+		logs.TakeAll()
+		if w := do(t, h, http.MethodPost, "/demo", appToken(t), tc.body); w.Code != http.StatusOK {
+			t.Fatalf("code = %d body=%s", w.Code, w.Body.String())
+		}
+		var authorized []observer.LoggedEntry
+		for _, e := range logs.All() {
+			if e.Message == "deploy authorized" {
+				authorized = append(authorized, e)
+			}
+		}
+		if len(authorized) != 1 {
+			t.Fatalf("logged %d deploy authorized lines, want one: %+v", len(authorized), logs.All())
+		}
+		got, has := authorized[0].ContextMap()["sha256"]
+		if has != (tc.want != "") || (has && got != tc.want) {
+			t.Fatalf("sha256 field = %v (present %v), want %q", got, has, tc.want)
+		}
 	}
 }
 
@@ -547,7 +610,7 @@ func TestWebhookPushContentTypeCaseInsensitive(t *testing.T) {
 
 // TestDeployPayloadIsTheOnlyWireType pins the deployPayload /
 // deployRequest split structurally (see deployPayload): the wire type
-// carries exactly the three body fields, and the request type has no
+// carries exactly the four body fields, and the request type has no
 // exported field at all — encoding/json cannot set an unexported
 // field, so decoding a body into a deployRequest is a no-op by
 // language rule, not by convention. Reverting to one decoded struct,
@@ -561,7 +624,7 @@ func TestDeployPayloadIsTheOnlyWireType(t *testing.T) {
 		f := pt.Field(i)
 		wire[f.Name] = f.Tag.Get("json")
 	}
-	want := map[string]string{"URL": "url", "Version": "version", "AuthHeader": "auth_header"}
+	want := map[string]string{"URL": "url", "Version": "version", "AuthHeader": "auth_header", "SHA256": "sha256"}
 	if !reflect.DeepEqual(wire, want) {
 		t.Fatalf("deployPayload wire fields = %v, want %v", wire, want)
 	}
@@ -574,8 +637,8 @@ func TestDeployPayloadIsTheOnlyWireType(t *testing.T) {
 	// And the property itself, end to end: a body naming every field
 	// by its wire name (and its Go name) leaves a deployRequest zero.
 	var req deployRequest
-	body := `{"url":"https://x/a.tgz","version":"v1","auth_header":"Bearer t",` +
-		`"URL":"https://x/a.tgz","Version":"v1","AuthHeader":"Bearer t",` +
+	body := `{"url":"https://x/a.tgz","version":"v1","auth_header":"Bearer t","sha256":"` + strings.Repeat("a", 64) + `",` +
+		`"URL":"https://x/a.tgz","Version":"v1","AuthHeader":"Bearer t","SHA256":"` + strings.Repeat("a", 64) + `",` +
 		`"localArchive":"/etc/passwd","rollback":true,"by":"forged"}`
 	must(t, json.Unmarshal([]byte(body), &req)) //nolint:staticcheck // SA9005 is the property under test: nothing on the wire can land in deployRequest
 	if !reflect.DeepEqual(req, deployRequest{}) {
@@ -588,14 +651,16 @@ func TestDeployPayloadIsTheOnlyWireType(t *testing.T) {
 // server-side ones stay zero however the body spells them.
 func TestWebhookURLDeployForwardsWireFields(t *testing.T) {
 	h, rig := newTestHandler(t)
-	body := `{"url":"https://x/private.tgz","version":"v7","auth_header":"Bearer artifact-token",` +
+	body := `{"url":"https://x/private.tgz","version":"v7","auth_header":"Bearer artifact-token","sha256":"` + strings.Repeat("Ab", 32) + `",` +
 		`"localArchive":"/etc/passwd","local_archive":"/etc/passwd","rollback":true}`
 	w := do(t, h, http.MethodPost, "/demo", appToken(t), body)
 	if w.Code != http.StatusOK {
 		t.Fatalf("code = %d body=%s", w.Code, w.Body.String())
 	}
 	got := rig.fetch.lastReq
-	if got.url != "https://x/private.tgz" || got.version != "v7" || got.authHeader != "Bearer artifact-token" {
+	// The pin reaches the fetcher in the form the download compares
+	// against: lowercase.
+	if got.url != "https://x/private.tgz" || got.version != "v7" || got.authHeader != "Bearer artifact-token" || got.sha256 != strings.Repeat("ab", 32) {
 		t.Fatalf("wire fields did not reach the fetcher: %+v", got)
 	}
 	if got.localArchive != "" || got.rollback {
