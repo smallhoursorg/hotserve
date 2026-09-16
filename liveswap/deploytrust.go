@@ -253,7 +253,9 @@ type verifier interface {
 	// claims are valid and every configured claim constraint matches,
 	// and with it who the deploy is recorded under (attribute). The
 	// error says what failed — signature, exp, audience, a claim — and
-	// is for the operator's journal, never a response.
+	// is for the operator's journal, never a response. An error that
+	// is an unavailable (errors.As) says the source could not be
+	// consulted at all, which is the box's failure, not the token's.
 	verify(ctx context.Context, rawToken string) (by string, err error)
 	// label names the source the way deployed_by and the journal do:
 	// oidc:<issuer> or local:<public key path>.
@@ -301,31 +303,62 @@ func warmVerifiers(verifierSets ...[]verifier) {
 	}
 }
 
+// unavailable is a refusal that is the box's, not the token's: the
+// source could not be consulted — its discovery or its key fetch
+// failed — so the token was never judged. label names the source.
+//
+// The handler charges it like any refusal. Whether a failure spends
+// the budget is measurable from outside (ten tokens, then one more:
+// 401 or 429), so it must not depend on which sources an app names —
+// the same app-existence leak the flat 401 closes. Charging costs a
+// deployer nothing real: the first valid token after the outage is
+// admitted from a throttled address. What an unavailable changes is
+// the journal: one line per source per window naming it, written
+// however spent the budgets are (authLimiter.outage) and whether or
+// not another source then accepted the token, so a CI loop retrying
+// through an issuer outage never leaves the journal quiet about the
+// cause, and neither does a fallback source that keeps deploys going.
+// Not an unavailable: the caller going away (ctx.Err) and an issuer
+// answering as someone else (config).
+type unavailable struct {
+	label string
+	err   error
+}
+
+func (u unavailable) Error() string { return u.err.Error() }
+func (u unavailable) Unwrap() error { return u.err }
+
 // authorize returns who the first verifier that accepts the token
 // records the deploy under — its label and the token's attribution
 // claims (attribute), for the deploy record and audit log. When none
 // does, the error says why each source refused, one entry per source
 // in config order (or the one reason no source was tried), for the
-// operator's journal. The response stays a flat 401 whatever the
-// reason (see Handler.ServeHTTP), so nothing here reaches a caller.
-func authorize(ctx context.Context, verifiers []verifier, rawToken string) (string, error) {
+// operator's journal. down is every source that could not be
+// consulted before that point, accepted or not: the journal must say
+// so either way. The response stays a flat 401 whatever the reason
+// (see Handler.ServeHTTP), so nothing here reaches a caller.
+func authorize(ctx context.Context, verifiers []verifier, rawToken string) (by string, down []unavailable, err error) {
 	if rawToken == "" {
-		return "", errors.New("no bearer token in Authorization header")
+		return "", nil, errors.New("no bearer token in Authorization header")
 	}
 	if len(verifiers) == 0 {
-		return "", errors.New("no deploy_trust source resolves for this app")
+		return "", nil, errors.New("no deploy_trust source resolves for this app")
 	}
 	refused := make([]string, 0, len(verifiers))
 	for _, v := range verifiers {
 		by, err := v.verify(ctx, rawToken)
 		if err == nil {
-			return by, nil
+			return by, down, nil
+		}
+		var u unavailable
+		if errors.As(err, &u) {
+			down = append(down, u)
 		}
 		// The bound is on the reason alone — the label is the operator's
 		// config, and it must survive however long the reason is.
 		refused = append(refused, v.label()+": "+boundRefusal(err.Error()))
 	}
-	return "", errors.New(strings.Join(refused, "; "))
+	return "", down, errors.New(strings.Join(refused, "; "))
 }
 
 // maxRefusalLen bounds one source's reason in the journal. A reason
@@ -422,11 +455,29 @@ func (v *oidcVerifier) ensure(ctx context.Context) (*oidc.IDTokenVerifier, error
 	}
 	provider, err := oidc.NewProvider(oidc.ClientContext(ctx, v.client), v.issuer)
 	if err != nil {
-		return nil, fmt.Errorf("oidc discovery for %s: %w", v.issuer, err)
+		err = fmt.Errorf("oidc discovery for %s: %w", v.issuer, err)
+		// Neither the caller going away nor an issuer that answers as
+		// someone else (a misnamed issuer in the config) is the issuer
+		// being out of reach.
+		var mismatch *oidc.IssuerMismatchError
+		if ctx.Err() != nil || errors.As(err, &mismatch) {
+			return nil, err
+		}
+		return nil, unavailable{v.label(), err}
 	}
 	v.idv = provider.Verifier(&oidc.Config{ClientID: v.audience})
 	return v.idv, nil
 }
+
+// keyFetchFailed prefixes go-oidc's error when the issuer's JWKS could
+// not be fetched — the issuer down, or answering anything but 200. The
+// key set wraps its fetch error, but the verifier flattens it (%v) into
+// the signature failure, so the text is the only handle; a non-200 is
+// not a typed error at any layer either. TestOIDCVerifierIssuerDown
+// holds it against the pinned library, so a bump that changes it fails
+// there rather than silently turning an outage back into a plain
+// refusal, which would lose the journal line naming the source.
+const keyFetchFailed = "failed to verify signature: fetching keys"
 
 func (v *oidcVerifier) verify(ctx context.Context, rawToken string) (string, error) {
 	idv, err := v.ensure(ctx)
@@ -435,6 +486,15 @@ func (v *oidcVerifier) verify(ctx context.Context, rawToken string) (string, err
 	}
 	tok, err := idv.Verify(oidc.ClientContext(ctx, v.client), rawToken)
 	if err != nil {
+		// The signature is checked before any claim, and a token whose
+		// key is not cached (or does not verify against the cached one)
+		// fetches; so during an outage every well-formed token lands
+		// here, and only a malformed one is still a refusal of its own.
+		// A caller that went away mid-fetch gets the same text (the
+		// fetch waits on its ctx) and is not an outage.
+		if ctx.Err() == nil && strings.HasPrefix(err.Error(), keyFetchFailed) {
+			return "", unavailable{v.label(), err}
+		}
 		return "", err
 	}
 	// go-oidc unmarshals into json.RawMessage by copying the verified

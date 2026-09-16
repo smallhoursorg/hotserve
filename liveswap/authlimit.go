@@ -30,6 +30,12 @@ import (
 // handshake the request already paid and is not what the throttle is
 // for. Fixed, not configurable: a legitimate deployer fails a handful
 // of times while setting up, never ten times in a minute.
+//
+// A failure that is the box's — a trust source it could not consult
+// (unavailable, which says why) — is charged like any other and gets
+// a line of its own once per window per source (outage), outside
+// both budgets: sources are operator config, so that line's bound is
+// not the caller's to grow.
 const (
 	authFailBudget       = 10
 	authFailGlobalBudget = 100
@@ -63,6 +69,10 @@ type authLimiter struct {
 	keys      map[string]*failWindow
 	global    failWindow
 	lastSweep time.Time
+	// outages is when each source that could not be consulted was
+	// last logged, by label: config, so it cannot grow with traffic;
+	// labels a reload retired are dropped as their window drains.
+	outages map[string]time.Time
 }
 
 // failWindow is the failures logged inside the window, oldest first,
@@ -77,6 +87,7 @@ func newAuthLimiter(c clock) *authLimiter {
 	return &authLimiter{
 		budget: authFailBudget, globalBudget: authFailGlobalBudget, maxKeys: authKeysMax,
 		window: authFailWindow, clock: c, keys: map[string]*failWindow{},
+		outages: map[string]time.Time{},
 	}
 }
 
@@ -138,6 +149,27 @@ func (l *authLimiter) fail(key string) failVerdict {
 		v.trippedGlobal = true
 	}
 	return v
+}
+
+// outage records that the source label could not be consulted and
+// says whether to log it: once per window per source, outside both
+// budgets. It touches no address; the request is charged by fail as
+// usual. The table is swept of drained labels on each write, which is
+// O(labels) — configured ones, not the caller's to grow.
+func (l *authLimiter) outage(label string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.clock.Now()
+	if last, ok := l.outages[label]; ok && now.Sub(last) < l.window {
+		return false
+	}
+	for k, last := range l.outages {
+		if now.Sub(last) >= l.window {
+			delete(l.outages, k)
+		}
+	}
+	l.outages[label] = now
+	return true
 }
 
 // clear forgets key: an authentication that succeeded.

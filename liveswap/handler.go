@@ -25,6 +25,14 @@ func init() {
 	caddy.RegisterModule(Handler{})
 }
 
+// unauthorized is the flat 401: the same sentence whatever the reason,
+// so a caller learns neither which apps exist nor what a source pins.
+func unauthorized(w http.ResponseWriter) error {
+	return respondJSON(w, http.StatusUnauthorized, map[string]string{
+		"error": "invalid or missing deploy token (Authorization: Bearer <jwt>)",
+	}, nil)
+}
+
 // bearerToken extracts the deploy JWT from `Authorization: Bearer
 // <jwt>`. Bearer is the only accepted transport: Caddy redacts the
 // Authorization header from access logs automatically (the retired
@@ -104,8 +112,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 	if ma != nil {
 		verifiers = ma.currentVerifiers()
 	}
-	who, refused := authorize(r.Context(), verifiers, bearerToken(r))
+	who, down, refused := authorize(r.Context(), verifiers, bearerToken(r))
 	key := clientKey(r)
+	// A source the box could not consult is named here once per window
+	// per source, whatever the budgets and whether or not another
+	// source then accepted the token; a refusal is still charged below
+	// like any other — see unavailable for why both.
+	for _, u := range down {
+		if h.limiter.outage(u.label) {
+			h.logger.Warn("webhook auth could not consult a trust source",
+				zap.String("source", u.label), zap.String("app", loggedAppName(name)),
+				zap.String("remote", key), zap.String("reason", boundRefusal(u.Error())))
+		}
+	}
 	if refused != nil {
 		// What a failure costs in the journal is the limiter's call
 		// (see authLimiter): the count of lines, and — the name and
@@ -134,9 +153,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 				"error": "too many failed deploy authentications from this address; retry later",
 			}, nil)
 		}
-		return respondJSON(w, http.StatusUnauthorized, map[string]string{
-			"error": "invalid or missing deploy token (Authorization: Bearer <jwt>)",
-		}, nil)
+		return unauthorized(w)
 	}
 	h.limiter.clear(key)
 	if ma == nil {

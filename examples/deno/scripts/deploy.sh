@@ -154,6 +154,8 @@ refused() {
 		echo "  the audience, subject or claim it pins, against what hotserve deploy-token was given"
 	fi
 	echo "Or the URL's app name is not one the box knows: an unknown app answers the same 401."
+	echo "Or the box could not consult the token's issuer (an outage there): its journal says so, and a re-run"
+	echo "once the issuer is back goes through."
 	echo "Check the app's deploy_trust block in the box's Caddyfile. The box's journal"
 	echo "(journalctl -u hotserve, 'webhook auth failed') names the app asked for and the"
 	echo "check that refused it, unless the box's budget for logging failed authentications is spent."

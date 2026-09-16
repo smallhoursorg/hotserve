@@ -154,3 +154,41 @@ func TestClientKey(t *testing.T) {
 		t.Errorf("client_ip var not honoured: %q", got)
 	}
 }
+
+// An unreachable source is logged once per window per source, and
+// touches no address: the outage is the box's, and its bound is the
+// number of configured sources.
+func TestAuthLimiterOutageOncePerWindowPerSource(t *testing.T) {
+	clk := newFakeClock()
+	l := newAuthLimiter(clk)
+	l.window = time.Minute
+	if !l.outage("oidc:a") {
+		t.Fatal("first outage of a source must be logged")
+	}
+	if l.outage("oidc:a") {
+		t.Fatal("second outage of a source within the window must not be logged")
+	}
+	if !l.outage("oidc:b") {
+		t.Fatal("another source has its own line")
+	}
+	clk.Advance(30 * time.Second)
+	if l.outage("oidc:a") {
+		t.Fatal("still within the window")
+	}
+	clk.Advance(30 * time.Second)
+	if !l.outage("oidc:a") {
+		t.Fatal("the window passed: logged again")
+	}
+	// A label whose window drained (b, a minute ago) is swept on that
+	// write: a reload's retired sources do not accumulate.
+	if _, kept := l.outages["oidc:b"]; kept || len(l.outages) != 1 {
+		t.Fatalf("outages = %v, want the one live label", l.outages)
+	}
+	if l.size() != 0 {
+		t.Fatalf("outages tracked %d addresses, want none", l.size())
+	}
+	// And the address budget is untouched by them.
+	if v := l.fail("203.0.113.9"); !v.log || v.throttled || len(l.keys["203.0.113.9"].times) != 1 {
+		t.Fatalf("first failure after outages: %+v", v)
+	}
+}

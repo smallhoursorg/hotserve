@@ -3,6 +3,7 @@ package liveswap
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -328,6 +329,10 @@ func TestWebhookThrottleBoundsTheLog(t *testing.T) {
 	}
 }
 
+// flat401 is the body every refusal answers with, JSON-encoded as
+// respondJSON writes it.
+const flat401 = `{"error":"invalid or missing deploy token (Authorization: Bearer \u003cjwt\u003e)"}`
+
 // A refused token leaves its reason in the journal — which source, and
 // what failed — on the line the limiter already governs, and nowhere
 // else: the 401 body is the same flat sentence whatever the reason, so
@@ -337,7 +342,6 @@ func TestWebhookAuthFailureSaysWhyInTheJournalOnly(t *testing.T) {
 	h, _ := newTestHandler(t)
 	core, logs := observer.New(zap.WarnLevel)
 	h.logger = zap.New(core)
-	const flat = `{"error":"invalid or missing deploy token (Authorization: Bearer \u003cjwt\u003e)"}`
 	for _, tc := range []struct {
 		name, path, token, want string
 	}{
@@ -349,7 +353,7 @@ func TestWebhookAuthFailureSaysWhyInTheJournalOnly(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			logs.TakeAll()
 			w := do(t, h, http.MethodGet, tc.path, tc.token, "")
-			if w.Code != http.StatusUnauthorized || strings.TrimSpace(w.Body.String()) != flat {
+			if w.Code != http.StatusUnauthorized || strings.TrimSpace(w.Body.String()) != flat401 {
 				t.Fatalf("response = %d %s; want the flat 401", w.Code, w.Body.String())
 			}
 			all := logs.All()
@@ -933,5 +937,160 @@ func TestWebhookDeployRecordOutcomeSurvivesAVocabularySecret(t *testing.T) {
 	w := do(t, h, http.MethodGet, "/demo?deploy=v1", appToken(t), "")
 	if w.Code != 200 || !strings.Contains(w.Body.String(), `"status":"succeeded"`) {
 		t.Fatalf("record: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// A trust source the box cannot reach is the box's failure, not the
+// caller's — but it is charged like any other, since whether a
+// failure spends the budget is measurable from outside and must not
+// depend on which sources an app names. What the outage changes is
+// the journal: one line per source per window naming it, written
+// however spent the budgets are, so a CI loop retrying through an
+// issuer outage cannot leave the journal quiet about the cause. And
+// the first valid token after the outage is admitted from the
+// throttled address, so charging costs the deployer nothing.
+func TestWebhookIssuerOutageIsNamedPastTheBudget(t *testing.T) {
+	h, rig := newTestHandler(t)
+	core, logs := observer.New(zap.WarnLevel)
+	h.logger = zap.New(core)
+	iss := newMockIssuer(t)
+	iss.jwksDown.Store(true)
+	rig.ma.verifiers = resolveVerifiers([]trustSource{{
+		kind: "oidc", issuer: iss.url, audience: "hotserve", claims: map[string]string{"sub": "ci"},
+	}}, iss.client)
+	token := func() string {
+		return iss.mint(t, iss.priv, "hotserve", map[string]string{"sub": "ci"}, time.Now().Add(5*time.Minute))
+	}
+	const ci, other = "203.0.113.9:1", "203.0.113.10:1"
+	outageLines := func(all []observer.LoggedEntry) (n int) {
+		for _, e := range all {
+			if strings.Contains(e.Message, "could not consult") {
+				if src := e.ContextMap()["source"]; src != "oidc:"+iss.url {
+					t.Fatalf("source = %v, want the down issuer", src)
+				}
+				n++
+			}
+		}
+		return n
+	}
+
+	// Within the budget: charged and logged as any refusal, plus the
+	// one outage line for the window.
+	for i := range authFailBudget {
+		w := from(t, h, ci, token())
+		if w.Code != http.StatusUnauthorized || strings.TrimSpace(w.Body.String()) != flat401 {
+			t.Fatalf("request %d during the outage: %d %s; want the flat 401", i+1, w.Code, w.Body.String())
+		}
+	}
+	all := logs.TakeAll()
+	if got := outageLines(all); got != 1 {
+		t.Fatalf("logged %d outage lines within the budget, want one: %+v", got, all)
+	}
+	if len(all) != authFailBudget+2 { // the per-request lines, the address tripped, the outage
+		t.Fatalf("logged %d records, want the budget plus the tripped line plus the outage line: %+v", len(all), all)
+	}
+	// Past it: 429 as for any failure, and silent — the outage line
+	// for this window is already written.
+	for i := range 5 {
+		if w := from(t, h, ci, token()); w.Code != http.StatusTooManyRequests {
+			t.Fatalf("request %d past the budget: code = %d, want 429", i+1, w.Code)
+		}
+	}
+	if got := logs.TakeAll(); len(got) != 0 {
+		t.Fatalf("past the budget logged %+v, want nothing within the window", got)
+	}
+
+	// A window on: another address writes this window's outage line;
+	// a second later the CI address spends its fresh budget again.
+	rig.clock.Advance(authFailWindow)
+	if w := from(t, h, other, token()); w.Code != http.StatusUnauthorized {
+		t.Fatalf("another address, next window: code = %d, want 401", w.Code)
+	}
+	if got := logs.TakeAll(); len(got) != 2 || outageLines(got) != 1 {
+		t.Fatalf("another address logged %+v, want its refusal and the window's outage line", got)
+	}
+	rig.clock.Advance(time.Second)
+	for range authFailBudget {
+		from(t, h, ci, token())
+	}
+	logs.TakeAll()
+	// Another window on from that line: the CI address is still
+	// throttled (its failures are a second younger than the line), and
+	// its throttled request — silent as any other — still writes the
+	// outage line for the new window.
+	rig.clock.Advance(authFailWindow - time.Second)
+	if w := from(t, h, ci, token()); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("throttled during the outage: code = %d, want 429", w.Code)
+	}
+	if got := logs.TakeAll(); len(got) != 1 || outageLines(got) != 1 {
+		t.Fatalf("throttled request logged %+v, want the outage line alone", got)
+	}
+
+	// The issuer is back: the throttled address's first valid token
+	// deploys and clears it.
+	iss.jwksDown.Store(false)
+	eventually(t, "issuer back", func() error {
+		if w := from(t, h, ci, token()); w.Code != http.StatusOK {
+			return fmt.Errorf("code = %d, want 200; body: %s", w.Code, w.Body.String())
+		}
+		return nil
+	})
+	if h.limiter.size() != 1 { // the other address's one failure remains
+		t.Fatalf("after the deploy %d addresses are charged, want the other one alone", h.limiter.size())
+	}
+}
+
+// A source that could not be consulted is named even when a source
+// after it accepts the token: the deploy goes through, nothing is
+// charged, and the journal still says the first source is down. Two
+// issuers, since a token reaches the first one's key fetch only if it
+// is shaped for it — a local-key token is refused for its algorithm
+// before any fetch.
+func TestWebhookOutageIsNamedWhenAnotherSourceAccepts(t *testing.T) {
+	h, rig := newTestHandler(t)
+	core, logs := observer.New(zap.WarnLevel)
+	h.logger = zap.New(core)
+	down, up := newMockIssuer(t), newMockIssuer(t)
+	down.jwksDown.Store(true)
+	rig.ma.verifiers = append(
+		resolveVerifiers([]trustSource{{kind: "oidc", issuer: down.url, audience: "hotserve", claims: map[string]string{"sub": "ci"}}}, down.client),
+		resolveVerifiers([]trustSource{{kind: "oidc", issuer: up.url, audience: "hotserve", claims: map[string]string{"sub": "ci"}}}, up.client)...)
+	tok := up.mint(t, up.priv, "hotserve", map[string]string{"sub": "ci"}, time.Now().Add(5*time.Minute))
+	if w := do(t, h, http.MethodGet, "/demo", tok, ""); w.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	all := logs.All()
+	if len(all) != 1 || !strings.Contains(all[0].Message, "could not consult") || all[0].ContextMap()["source"] != "oidc:"+down.url {
+		t.Fatalf("logged %+v, want the one line naming the down issuer", all)
+	}
+	if h.limiter.size() != 0 {
+		t.Fatalf("an accepted token charged %d addresses, want none", h.limiter.size())
+	}
+}
+
+// Every source that could not be consulted gets its own line: with
+// two issuers down, an alert keyed on the source field sees both.
+func TestWebhookOutageNamesEverySourceDown(t *testing.T) {
+	h, rig := newTestHandler(t)
+	core, logs := observer.New(zap.WarnLevel)
+	h.logger = zap.New(core)
+	a, b := newMockIssuer(t), newMockIssuer(t)
+	a.jwksDown.Store(true)
+	b.jwksDown.Store(true)
+	rig.ma.verifiers = append(
+		resolveVerifiers([]trustSource{{kind: "oidc", issuer: a.url, audience: "hotserve", claims: map[string]string{"sub": "ci"}}}, a.client),
+		resolveVerifiers([]trustSource{{kind: "oidc", issuer: b.url, audience: "hotserve", claims: map[string]string{"sub": "ci"}}}, b.client)...)
+	tok := a.mint(t, a.priv, "hotserve", map[string]string{"sub": "ci"}, time.Now().Add(5*time.Minute))
+	if w := do(t, h, http.MethodGet, "/demo", tok, ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("code = %d, want 401", w.Code)
+	}
+	var sources []string
+	for _, e := range logs.All() {
+		if strings.Contains(e.Message, "could not consult") {
+			sources = append(sources, e.ContextMap()["source"].(string))
+		}
+	}
+	if strings.Join(sources, " ") != "oidc:"+a.url+" oidc:"+b.url {
+		t.Fatalf("sources named = %q, want both issuers in config order", sources)
 	}
 }
