@@ -719,6 +719,28 @@ key it was; `sub` is whatever the key's holder minted the token with
 (`hotserve deploy-token --subject`), unless the block pins `subject
 <name>`, which makes it a name the box checked.
 
+A refused token is recorded too — in the journal only. The response
+is the same flat 401 whatever the reason: anyone with a GitHub
+repository can mint a token for audience `hotserve`, so an answer that
+named the failed check would tell them which apps exist and what each
+block pins. The `webhook auth failed` line carries `refused`: one
+entry per source, in config order, each the source's label and what
+it refused — the signature, `exp`, the audience, or a `claim` that did
+not match, with the identity the token presented:
+
+```
+"refused":"oidc:https://token.actions.githubusercontent.com: presented repository=your-org/other ref=refs/heads/main actor=alice: claim \"repository\" mismatch; local:/etc/hotserve/alice.pub: go-jose/go-jose: error in cryptographic primitive"
+```
+
+A request with no bearer token says so instead, as does an app with
+no source at all. The box failing to reach the issuer (OIDC discovery
+on first use) lands here as well: still a 401 to the caller, with the
+network error in the journal. Each entry is one line of at most 300
+bytes — an issuer's error quotes what the token carried, and a
+presented identity can be anything the issuer signed — and the line
+count is bounded by the throttle below: past it, a refusal is a 429
+and writes nothing.
+
 ## Webhook API
 
 `POST https://deploy.example.com/<app>`, with `Authorization: Bearer
@@ -784,7 +806,7 @@ The response is synchronous:
 |---|---|
 | 200 | Deployed; body is the app's status JSON. Also every streamed deploy (below), whatever its outcome |
 | 400 | The body could not be read, or is not valid JSON |
-| 401 | Bad or missing token |
+| 401 | Bad or missing token. The same flat answer whatever the reason; the journal's `webhook auth failed` line says why (below) |
 | 404 | Unknown app |
 | 405 | A method other than `GET` or `POST` |
 | 409 | A deploy is already running for this app (retry) |

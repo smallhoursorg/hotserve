@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -249,8 +251,13 @@ func loadEd25519PublicKey(path string) (ed25519.PublicKey, error) {
 type verifier interface {
 	// verify returns a nil error iff the token's signature and standard
 	// claims are valid and every configured claim constraint matches,
-	// and with it who the deploy is recorded under (attribute).
+	// and with it who the deploy is recorded under (attribute). The
+	// error says what failed — signature, exp, audience, a claim — and
+	// is for the operator's journal, never a response.
 	verify(ctx context.Context, rawToken string) (by string, err error)
+	// label names the source the way deployed_by and the journal do:
+	// oidc:<issuer> or local:<public key path>.
+	label() string
 }
 
 // resolveVerifiers turns validated trust sources into live verifiers.
@@ -296,18 +303,62 @@ func warmVerifiers(verifierSets ...[]verifier) {
 
 // authorize returns who the first verifier that accepts the token
 // records the deploy under — its label and the token's attribution
-// claims (attribute), for the deploy record and audit log — and
-// whether any did.
-func authorize(ctx context.Context, verifiers []verifier, rawToken string) (string, bool) {
+// claims (attribute), for the deploy record and audit log. When none
+// does, the error says why each source refused, one entry per source
+// in config order (or the one reason no source was tried), for the
+// operator's journal. The response stays a flat 401 whatever the
+// reason (see Handler.ServeHTTP), so nothing here reaches a caller.
+func authorize(ctx context.Context, verifiers []verifier, rawToken string) (string, error) {
 	if rawToken == "" {
-		return "", false
+		return "", errors.New("no bearer token in Authorization header")
 	}
+	if len(verifiers) == 0 {
+		return "", errors.New("no deploy_trust source resolves for this app")
+	}
+	refused := make([]string, 0, len(verifiers))
 	for _, v := range verifiers {
-		if by, err := v.verify(ctx, rawToken); err == nil {
-			return by, true
+		by, err := v.verify(ctx, rawToken)
+		if err == nil {
+			return by, nil
 		}
+		// Cut before the copy: a library's error can quote a header
+		// the caller made as large as the request allows.
+		msg := err.Error()
+		if len(msg) > maxRefusalLen {
+			msg = msg[:maxRefusalLen]
+		}
+		refused = append(refused, boundRefusal(v.label()+": "+msg))
 	}
-	return "", false
+	return "", errors.New(strings.Join(refused, "; "))
+}
+
+// maxRefusalLen bounds one source's refusal in the journal. A refusal
+// can carry token-supplied text — an issuer library quotes the token's
+// audience or issuer in its error, and a claim mismatch names the
+// identity the token presented — so, like loggedAppName for the app
+// name, the size of a line an unauthenticated caller can write is
+// fixed; authLimiter bounds how many.
+const maxRefusalLen = 300
+
+// boundRefusal makes a refusal one journal line of at most
+// maxRefusalLen bytes plus an ellipsis. One line first: a refusal
+// holding a control rune (a newline in a library's error would split
+// the line) or bytes that are not UTF-8 is Go-quoted to ASCII — the
+// rule attribute applies to claim values — and only then cut, at a
+// rune boundary, so the cut can neither leave a partial rune nor
+// grow the string it bounds.
+func boundRefusal(s string) string {
+	if !utf8.ValidString(s) || strings.ContainsFunc(s, func(r rune) bool { return !strconv.IsPrint(r) && r != ' ' }) {
+		s = strconv.QuoteToASCII(s)
+	}
+	if len(s) > maxRefusalLen {
+		n := maxRefusalLen
+		for n > 0 && !utf8.RuneStart(s[n]) {
+			n--
+		}
+		s = s[:n] + "..."
+	}
+	return s
 }
 
 // attribute is who a deploy is recorded under: the source's label,
@@ -317,8 +368,14 @@ func authorize(ctx context.Context, verifiers []verifier, rawToken string) (stri
 // unprintable rune is Go-quoted, so a subject the token's signer chose
 // ("alice actor=bob") reads as one value, never as a second field.
 func attribute(label string, names []string, claims map[string]any) string {
+	return label + presented(names, claims)
+}
+
+// presented is the ` name=value` tail of attribute: the identity a
+// verified token carries, rendered the same way whether the deploy is
+// recorded under it or refused because of it.
+func presented(names []string, claims map[string]any) string {
 	var b strings.Builder
-	b.WriteString(label)
 	for _, name := range names {
 		s, ok := claimScalar(claims[name])
 		if !ok {
@@ -387,7 +444,7 @@ func (v *oidcVerifier) verify(ctx context.Context, rawToken string) (string, err
 		return "", err
 	}
 	if err := matchClaims(v.claims, claims); err != nil {
-		return "", err
+		return "", presentedErr(v.attribution, claims, err)
 	}
 	return attribute(v.label(), v.attribution, claims), nil
 }
@@ -455,9 +512,24 @@ func (v *localVerifier) verify(_ context.Context, rawToken string) (string, erro
 		return "", err
 	}
 	if err := matchClaims(v.claims, all); err != nil {
-		return "", err
+		return "", presentedErr(v.attribution, all, err)
 	}
 	return attribute(v.label(), v.attribution, all), nil
+}
+
+// presentedErr is a claim refusal with the identity the token
+// presented in front of it — the signature verified, so the values are
+// the issuer's word, and they are what the operator lacks when the
+// pinned claim is the wrong one: `presented repository=o/other
+// ref=refs/heads/main actor=alice: claim "repository" mismatch`. A
+// token carrying none of the attribution claims reads as `presented
+// nothing`.
+func presentedErr(names []string, claims map[string]any, err error) error {
+	p := presented(names, claims)
+	if p == "" {
+		p = " nothing"
+	}
+	return fmt.Errorf("presented%s: %w", p, err)
 }
 
 // matchClaims requires every constraint to equal the token's claim

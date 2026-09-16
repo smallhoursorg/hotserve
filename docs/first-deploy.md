@@ -279,7 +279,15 @@ What a first deploy that worked looks like:
 
 If the deploy step is red, its output says which stage refused it and
 why — a token the box would not accept, a URL outside the allowlist, a
-health check that never passed. For a migration that failed or an app
+health check that never passed. A 401 means the box's `deploy_trust`
+for this app does not accept the run: most often the `claim
+repository` or `claim ref` names another repository or branch, or the
+audience differs. The step prints the values the run minted its token
+with, so you can hold them against the app block; the box's answer
+deliberately says no more, and `journalctl -u hotserve` on the box
+names the check that refused it — for the first ten failures a minute
+from one address; past that the box answers 429 and writes nothing
+until the minute passes. For a migration that failed or an app
 that exited on start, the same output carries the app's side under
 `detail`: the exit status, what the health endpoint answered, and the
 last lines the app wrote (40 by default; `deploy_log_lines` in the

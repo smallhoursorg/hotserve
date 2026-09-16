@@ -108,7 +108,13 @@ token, so a private repo deploys the same way as a public one, and the
 box's `artifact_allowlist api.github.com/repos/your-org/` is what
 admits it. The deploy step prints the app's status when the new
 version is live, or why it was refused; a refused deploy leaves the
-old version serving.
+old version serving. A 401 means the box's `deploy_trust` for this
+app does not accept the run — most often `claim repository` or `claim
+ref` names another repository or branch — and the step prints the
+values this run minted its token with; the box's journal
+(`journalctl -u hotserve`) names the check that refused it, for the
+first ten failures a minute from one address (past that: 429, and
+nothing written until the minute passes).
 
 What a first deploy that worked looks like, from the laptop:
 

@@ -312,7 +312,49 @@ func TestWebhookThrottleBoundsTheLog(t *testing.T) {
 					if f.Key == "app" && len(f.String) > appNameMaxLen+3 {
 						t.Fatalf("app field is %d bytes; the name must be truncated", len(f.String))
 					}
+					// One bounded refusal per source, joined by "; ": the
+					// unknown-app path is refused by the global sources.
+					n := len(h.app.globalVerifiers)
+					if f.Key == "refused" && len(f.String) > n*(maxRefusalLen+3)+(n-1)*2 {
+						t.Fatalf("refused field is %d bytes for %d sources; each source's refusal must be bounded", len(f.String), n)
+					}
 				}
+			}
+		})
+	}
+}
+
+// A refused token leaves its reason in the journal — which source, and
+// what failed — on the line the limiter already governs, and nowhere
+// else: the 401 body is the same flat sentence whatever the reason, so
+// an unauthenticated caller learns nothing about which apps exist or
+// what a source pins.
+func TestWebhookAuthFailureSaysWhyInTheJournalOnly(t *testing.T) {
+	h, _ := newTestHandler(t)
+	core, logs := observer.New(zap.WarnLevel)
+	h.logger = zap.New(core)
+	const flat = `{"error":"invalid or missing deploy token (Authorization: Bearer \u003cjwt\u003e)"}`
+	for _, tc := range []struct {
+		name, path, token, want string
+	}{
+		{"no header", "/demo", "", "no bearer token"},
+		{"garbage", "/demo", "not-a-jwt", "local:"},
+		{"wrong audience", "/demo", mintTestToken(t, appTestPriv, "other", nil), "aud"},
+		{"unknown app", "/nope", "not-a-jwt", "local:"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs.TakeAll()
+			w := do(t, h, http.MethodGet, tc.path, tc.token, "")
+			if w.Code != http.StatusUnauthorized || strings.TrimSpace(w.Body.String()) != flat {
+				t.Fatalf("response = %d %s; want the flat 401", w.Code, w.Body.String())
+			}
+			all := logs.All()
+			if len(all) != 1 || all[0].Message != "webhook auth failed" {
+				t.Fatalf("logged %d records, want the one auth-failed line: %+v", len(all), all)
+			}
+			refused, ok := all[0].ContextMap()["refused"].(string)
+			if !ok || !strings.Contains(refused, tc.want) {
+				t.Fatalf("refused = %q, want it to carry %q", refused, tc.want)
 			}
 		})
 	}
