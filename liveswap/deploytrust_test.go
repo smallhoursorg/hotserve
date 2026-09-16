@@ -11,9 +11,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -312,9 +314,9 @@ func TestAuthorizeAttributes(t *testing.T) {
 		{"with a subject", map[string]string{"sub": "alice"}, "local:test-key sub=alice"},
 		{"without one", nil, "local:test-key"},
 	} {
-		by, ok := authorize(ctx, local, mintTestToken(t, priv, "aud1", tc.claims))
-		if !ok || by != tc.want {
-			t.Errorf("local %s: authorize = %q, %v; want %q", tc.name, by, ok, tc.want)
+		by, err := authorize(ctx, local, mintTestToken(t, priv, "aud1", tc.claims))
+		if err != nil || by != tc.want {
+			t.Errorf("local %s: authorize = %q, %v; want %q", tc.name, by, err, tc.want)
 		}
 	}
 
@@ -328,8 +330,122 @@ func TestAuthorizeAttributes(t *testing.T) {
 		"sub": "repo:org/blog:ref:refs/heads/main",
 	}, time.Now().Add(5*time.Minute))
 	want := "oidc:" + iss.url + " repository=org/blog ref=refs/heads/main actor=alice"
-	if by, ok := authorize(ctx, gh, tok); !ok || by != want {
-		t.Errorf("github: authorize = %q, %v; want %q", by, ok, want)
+	if by, err := authorize(ctx, gh, tok); err != nil || by != want {
+		t.Errorf("github: authorize = %q, %v; want %q", by, err, want)
+	}
+}
+
+// TestAuthorizeSaysWhy pins what a refused token leaves for the
+// operator's journal: which source refused it and why, in config
+// order, with the identity a verified token presented — and that the
+// two cases where no source is asked say so. What a caller sees is
+// pinned in handler_test (the flat 401, whatever the reason).
+func TestAuthorizeSaysWhy(t *testing.T) {
+	ctx := context.Background()
+	priv, pub := mustGenTestKey()
+	local := resolveVerifiers([]trustSource{localTrust(pub, "aud1")}, nil)
+	iss := newMockIssuer(t)
+	gh := resolveVerifiers([]trustSource{{
+		kind: "oidc", issuer: iss.url, audience: "hotserve",
+		claims: map[string]string{"repository": "org/blog"}, attribution: attributionClaims["github"],
+	}}, iss.client)
+	both := append(append([]verifier{}, gh...), local...)
+	otherRSA, _ := rsa.GenerateKey(rand.Reader, 2048)
+	mint := func(aud string, claims map[string]string) string {
+		return iss.mint(t, iss.priv, aud, claims, time.Now().Add(5*time.Minute))
+	}
+	for _, tc := range []struct {
+		name string
+		vs   []verifier
+		tok  string
+		want []string // each in the refusal, in this order
+	}{
+		{"no token", local, "", []string{"no bearer token"}},
+		{"no source", nil, mintTestToken(t, priv, "aud1", nil), []string{"no deploy_trust source"}},
+		{"garbage", local, "not-a-jwt", []string{"local:test-key: "}},
+		{"wrong audience", local, mintTestToken(t, priv, "other", nil), []string{"local:test-key: ", "aud"}},
+		{"expired", local, mintExpiredToken(t, priv, "aud1", nil), []string{"local:test-key: ", "exp"}},
+		{"unknown signer", gh, iss.mint(t, otherRSA, "hotserve", nil, time.Now().Add(time.Minute)), []string{"oidc:" + iss.url + ": "}},
+		{"claim mismatch names who tried", gh,
+			mint("hotserve", map[string]string{"repository": "org/other", "ref": "refs/heads/main", "actor": "alice"}),
+			[]string{"oidc:" + iss.url + ": claim \"repository\" mismatch, presented repository=org/other ref=refs/heads/main actor=alice"}},
+		{"claim absent, nothing presented", gh, mint("hotserve", nil), []string{"claim \"repository\" absent from token, presented nothing"}},
+		{"every source, config order", both, "not-a-jwt", []string{"oidc:" + iss.url + ": ", "; local:test-key: "}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			by, err := authorize(ctx, tc.vs, tc.tok)
+			if err == nil {
+				t.Fatalf("authorized as %q", by)
+			}
+			got := err.Error()
+			at := 0
+			for _, w := range tc.want {
+				i := strings.Index(got[at:], w)
+				if i < 0 {
+					t.Fatalf("refusal %q lacks %q (after offset %d)", got, w, at)
+				}
+				at += i + len(w)
+			}
+		})
+	}
+
+	// A refusal is bounded however long the token's own text is — the
+	// audience go-oidc quotes back, or the identity a verified token
+	// presents, in ASCII or not — it stays valid UTF-8 on one line, and
+	// the cut takes the identity, never the reason in front of it.
+	for name, tok := range map[string]string{
+		"long audience":       mint(strings.Repeat("a", 10_000), nil),
+		"long ascii identity": mint("hotserve", map[string]string{"repository": "org/" + strings.Repeat("r", 400)}),
+		"long emoji identity": mint("hotserve", map[string]string{"repository": "org/" + strings.Repeat("😀", 200), "ref": "refs/heads/é"}),
+		"control in identity": mint("hotserve", map[string]string{"repository": "org/" + strings.Repeat("a\n", 200)}),
+	} {
+		by, err := authorize(ctx, gh, tok)
+		if err == nil {
+			t.Fatalf("%s: authorized as %q", name, by)
+		}
+		got := err.Error()
+		if len(got) > len(gh[0].label())+2+maxRefusalLen+len("...") {
+			t.Errorf("%s: refusal is %d bytes; the reason must be cut at %d", name, len(got), maxRefusalLen)
+		}
+		if !utf8.ValidString(got) || strings.ContainsRune(got, '\n') {
+			t.Errorf("%s: refusal is not one line of UTF-8: %q", name, got)
+		}
+		if strings.Contains(name, "identity") && !strings.Contains(got, `claim "repository" mismatch`) {
+			t.Errorf("%s: the cut took the reason: %q", name, got)
+		}
+	}
+}
+
+// TestBoundRefusal pins what a journal line needs of a refusal that
+// may carry request text: one line, valid UTF-8, and at most
+// maxRefusalLen bytes plus the ellipsis — whatever the bytes.
+func TestBoundRefusal(t *testing.T) {
+	if got := boundRefusal("plain: claim \"repository\" mismatch"); got != "plain: claim \"repository\" mismatch" {
+		t.Errorf("a plain refusal must pass through, got %q", got)
+	}
+	if got := boundRefusal("a\nb"); got != `"a\nb"` {
+		t.Errorf("a control rune must leave the refusal Go-quoted, got %q", got)
+	}
+	if got := boundRefusal("a\xffb"); got != `"a\xffb"` {
+		t.Errorf("a byte that is not UTF-8 must leave the refusal Go-quoted, got %q", got)
+	}
+	long := strings.Repeat("x", maxRefusalLen+50)
+	if got := boundRefusal(long); got != long[:maxRefusalLen]+"..." {
+		t.Errorf("an overlong refusal must be cut, got %d bytes", len(got))
+	}
+	for name, in := range map[string]string{
+		"emoji":        strings.Repeat("😀", maxRefusalLen),
+		"emoji at cut": strings.Repeat("x", maxRefusalLen-1) + "😀😀",
+		"newlines":     strings.Repeat("\n", maxRefusalLen),
+		"bad bytes":    strings.Repeat("\xff", maxRefusalLen),
+	} {
+		got := boundRefusal(in)
+		if len(got) > maxRefusalLen+len("...") {
+			t.Errorf("%s: %d bytes, must be at most %d", name, len(got), maxRefusalLen+3)
+		}
+		if !utf8.ValidString(got) || strings.ContainsFunc(got, func(r rune) bool { return !strconv.IsPrint(r) && r != ' ' }) {
+			t.Errorf("%s: not one printable line of UTF-8: %q", name, got)
+		}
 	}
 }
 

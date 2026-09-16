@@ -104,16 +104,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 	if ma != nil {
 		verifiers = ma.currentVerifiers()
 	}
-	who, ok := authorize(r.Context(), verifiers, bearerToken(r))
+	who, refused := authorize(r.Context(), verifiers, bearerToken(r))
 	key := clientKey(r)
-	if !ok {
+	if refused != nil {
 		// What a failure costs in the journal is the limiter's call
-		// (see authLimiter): the count of lines, and — the name being
-		// request input, logged truncated — the size of each.
+		// (see authLimiter): the count of lines, and — the name and
+		// the refusal being request input, both logged bounded — the
+		// size of each. The refusal is for this journal only: the
+		// response below stays the same flat 401 for every reason, so
+		// a caller learns neither which apps exist nor what a source
+		// pins.
 		v := h.limiter.fail(key)
 		if v.log {
 			h.logger.Warn("webhook auth failed",
-				zap.String("app", loggedAppName(name)), zap.String("remote", key))
+				zap.String("app", loggedAppName(name)), zap.String("remote", key),
+				zap.String("refused", refused.Error()))
 		}
 		if v.trippedKey {
 			h.logger.Warn("webhook auth failures from this address throttled: further ones are answered 429 and not logged",

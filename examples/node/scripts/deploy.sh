@@ -25,7 +25,10 @@
 # version is live, or an error saying why it was refused (the old
 # version keeps serving) — with the status code the request would
 # have had in `http_status`. Every line is printed as it arrives, and
-# a failure exits non-zero.
+# a failure exits non-zero. A 401 — the box would not accept the
+# token — is followed by what the box must trust for this run, since
+# the box's own answer deliberately does not say (the reason is in its
+# journal, for its operator).
 #
 # In GitHub Actions the same output is also dressed for the job page:
 # the request's output in a collapsible group, a failure as an error
@@ -71,8 +74,10 @@ if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
 		sed -n 's/.*"value" *: *"\([^"]*\)".*/\1/p')
 	[ -n "$token" ] || { echo "deploy.sh: could not mint an OIDC token" >&2; exit 1; }
 	printf '::add-mask::%s\n' "$token"
+	minted=1
 else
 	token=${HOTSERVE_TOKEN:?set HOTSERVE_TOKEN (mint one with: hotserve deploy-token) or run in GitHub Actions with id-token: write}
+	minted=
 fi
 
 # The Actions dressing. `field` reads one string field out of the
@@ -120,6 +125,7 @@ stream() { # <curl args...>: runs the request, prints it, keeps it
 		echo "$rc" >"$rcfile"
 	} | tee "$body"
 }
+httpstatus() { sed -n 's/^HTTP\/[0-9.]* \([0-9][0-9][0-9]\).*/\1/p' "$hdrs" 2>/dev/null | tail -n 1; }
 outcome() { # the http_status of a complete last line; else 200 for a whole single 200; else 0
 	# The whole terminal suffix, brace included: a connection cut after
 	# the digits must not read as an outcome.
@@ -127,9 +133,30 @@ outcome() { # the http_status of a complete last line; else 200 for a whole sing
 	if [ -n "$code" ]; then echo "$code"
 	elif grep -q '"event":"phase"' "$body"; then echo 0
 	elif [ "$(cat "$rcfile" 2>/dev/null)" != 0 ]; then echo 0
-	elif [ "$(sed -n 's/^HTTP\/[0-9.]* \([0-9][0-9][0-9]\).*/\1/p' "$hdrs" | tail -n 1)" = 200 ]; then echo 200
+	elif [ "$(httpstatus)" = 200 ]; then echo 200
 	else echo 0
 	fi
+}
+# refused says what the box must trust for a token it turned away.
+# The box's 401 is the same flat sentence whatever the reason — an
+# answer naming the check that failed would tell anyone who can mint a
+# token (every GitHub repository can) which apps exist and what each
+# pins — so this side is built from what the run already has, and the
+# reason itself is in the box's journal. Most often, not always: the
+# journal also holds the case where the box could not reach the
+# issuer to check the token at all.
+refused() {
+	echo "the box refused this token. Most often its deploy_trust for this app does not accept:"
+	if [ -n "$minted" ]; then
+		printf '  %-18s%s\n' 'audience' "${HOTSERVE_AUDIENCE:-hotserve}" 'claim repository' "${GITHUB_REPOSITORY:-?}" 'claim ref' "${GITHUB_REF:-?}"
+	else
+		echo "  the key this token was minted with (deploy_trust local { public_key ... })"
+		echo "  the audience, subject or claim it pins, against what hotserve deploy-token was given"
+	fi
+	echo "Or the URL's app name is not one the box knows: an unknown app answers the same 401."
+	echo "Check the app's deploy_trust block in the box's Caddyfile. The box's journal"
+	echo "(journalctl -u hotserve, 'webhook auth failed') names the app asked for and the"
+	echo "check that refused it, unless the box's budget for logging failed authentications is spent."
 }
 finish() { # <what>: dresses the outcome, exits on failure
 	what=$1
@@ -145,8 +172,20 @@ finish() { # <what>: dresses the outcome, exits on failure
 	last=$(tail -n 1 "$body")
 	phase=$(field "$last" phase)
 	why=$(field "$last" error)
-	[ -n "$actions" ] && printf '::error title=%s::%s\n' "$(prop "hotserve: $what failed")" "$(msg "${phase:+in $phase: }${why:-see the response above}")"
-	[ -n "${GITHUB_STEP_SUMMARY:-}" ] && printf '**hotserve:** %s failed%s, %s\n\n%s\n\n' "$what" "${phase:+ in \`$phase\`}" "$took" "${why:-see the log}" >>"$GITHUB_STEP_SUMMARY"
+	# Only the box's own 401, by its sentence: a 401 from something in
+	# front of it (a wrong HOTSERVE_URL, say) is not about deploy_trust.
+	hint=
+	if [ "$(httpstatus)" = 401 ]; then
+		case $why in 'invalid or missing deploy token'*) hint=$(refused) ;; esac
+	fi
+	[ -z "$hint" ] || printf '%s\n' "$hint"
+	[ -n "$actions" ] && printf '::error title=%s::%s\n' "$(prop "hotserve: $what failed")" "$(msg "${phase:+in $phase: }${why:-see the response above}${hint:+; the log says what the box must trust}")"
+	if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+		printf '**hotserve:** %s failed%s, %s\n\n%s\n\n' "$what" "${phase:+ in \`$phase\`}" "$took" "${why:-see the log}" >>"$GITHUB_STEP_SUMMARY"
+		# Tildes: a git ref or repository name cannot hold one, so the
+		# run's own values cannot end the fence early.
+		[ -z "$hint" ] || printf '~~~\n%s\n~~~\n\n' "$hint" >>"$GITHUB_STEP_SUMMARY"
+	fi
 	exit 1
 }
 

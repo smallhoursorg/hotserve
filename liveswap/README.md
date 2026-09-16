@@ -719,6 +719,31 @@ key it was; `sub` is whatever the key's holder minted the token with
 (`hotserve deploy-token --subject`), unless the block pins `subject
 <name>`, which makes it a name the box checked.
 
+A refused token is recorded too — in the journal only. The response
+is the same flat 401 whatever the reason: anyone with a GitHub
+repository can mint a token for audience `hotserve`, so an answer that
+named the failed check would tell them which apps exist and what each
+block pins. The `webhook auth failed` line carries `refused`: one
+entry per source, in config order, each the source's label and what
+it refused — the signature, `exp`, the audience, or a `claim` that did
+not match, with the identity the token presented:
+
+```
+"refused":"oidc:https://token.actions.githubusercontent.com: claim \"repository\" mismatch, presented repository=your-org/other ref=refs/heads/main actor=alice; local:/etc/hotserve/alice.pub: go-jose/go-jose: error in cryptographic primitive"
+```
+
+A request with no bearer token says so instead, as does an app with
+no source at all. The box failing to reach the issuer (OIDC discovery
+on first use) lands here as well: still a 401 to the caller, with the
+network error in the journal. Each entry's reason is one line, cut
+at 300 bytes plus an ellipsis — an issuer's error quotes what the
+token carried, and a presented identity can be anything the issuer
+signed; the reason comes before the identity, so the cut never takes
+it — after the source's label, which is your config and is not cut.
+The line count is bounded by the throttle below: past an address's
+ten failures a minute the answer is 429 and nothing is written; past
+the process's hundred, a 401 with nothing written.
+
 ## Webhook API
 
 `POST https://deploy.example.com/<app>`, with `Authorization: Bearer
@@ -784,8 +809,8 @@ The response is synchronous:
 |---|---|
 | 200 | Deployed; body is the app's status JSON. Also every streamed deploy (below), whatever its outcome |
 | 400 | The body could not be read, or is not valid JSON |
-| 401 | Bad or missing token |
-| 404 | Unknown app |
+| 401 | Bad or missing token — or an unknown app, until the token authenticates against the global sources. The same flat answer whatever the reason; the journal's `webhook auth failed` line says why (above) |
+| 404 | Unknown app, once authenticated against the global sources (unauthenticated, an unknown app is the 401 above) |
 | 405 | A method other than `GET` or `POST` |
 | 409 | A deploy is already running for this app (retry) |
 | 413 | Pushed upload exceeded `max_artifact_size`, or a JSON body exceeded 64 KiB |
