@@ -809,8 +809,8 @@ The response is synchronous:
 |---|---|
 | 200 | Deployed; body is the app's status JSON. Also every streamed deploy (below), whatever its outcome |
 | 400 | The body could not be read, or is not valid JSON |
-| 401 | Bad or missing token. The same flat answer whatever the reason; the journal's `webhook auth failed` line says why (below) |
-| 404 | Unknown app |
+| 401 | Bad or missing token — or an unknown app, until the token authenticates against the global sources. The same flat answer whatever the reason; the journal's `webhook auth failed` line says why (above) |
+| 404 | Unknown app, once authenticated against the global sources (unauthenticated, an unknown app is the 401 above) |
 | 405 | A method other than `GET` or `POST` |
 | 409 | A deploy is already running for this app (retry) |
 | 413 | Pushed upload exceeded `max_artifact_size`, or a JSON body exceeded 64 KiB |

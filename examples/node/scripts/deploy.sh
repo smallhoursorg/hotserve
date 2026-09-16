@@ -153,9 +153,10 @@ refused() {
 		echo "  the key this token was minted with (deploy_trust local { public_key ... })"
 		echo "  the audience, subject or claim it pins, against what hotserve deploy-token was given"
 	fi
+	echo "Or the URL's app name is not one the box knows: an unknown app answers the same 401."
 	echo "Check the app's deploy_trust block in the box's Caddyfile. The box's journal"
-	echo "(journalctl -u hotserve, 'webhook auth failed') names the check that refused it,"
-	echo "unless the box's budget for logging failed authentications is spent."
+	echo "(journalctl -u hotserve, 'webhook auth failed') names the app asked for and the"
+	echo "check that refused it, unless the box's budget for logging failed authentications is spent."
 }
 finish() { # <what>: dresses the outcome, exits on failure
 	what=$1

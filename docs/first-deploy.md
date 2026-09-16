@@ -282,10 +282,13 @@ why — a token the box would not accept, a URL outside the allowlist, a
 health check that never passed. A 401 means the box's `deploy_trust`
 for this app does not accept the run: most often the `claim
 repository` or `claim ref` names another repository or branch, or the
-audience differs. The step prints the values the run minted its token
-with, so you can hold them against the app block; the box's answer
-deliberately says no more, and `journalctl -u hotserve` on the box
-names the check that refused it — within the box's budget for failed
+audience differs. It also means an app the box does not know — a
+typo in `HOTSERVE_URL` — since an unknown app answers the same 401
+unless a global `deploy_trust` accepts the token. The step prints the
+values the run minted its token with, so you can hold them against
+the app block; the box's answer deliberately says no more, and
+`journalctl -u hotserve` on the box names the app that was asked for
+and the check that refused it — within the box's budget for failed
 authentications: ten a minute from one address (past that, 429) and a
 hundred a minute in all (past that, 401), neither written to the
 journal until the minute passes. For a migration that failed or an app
