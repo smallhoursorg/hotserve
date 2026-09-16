@@ -312,11 +312,15 @@ func TestWebhookThrottleBoundsTheLog(t *testing.T) {
 					if f.Key == "app" && len(f.String) > appNameMaxLen+3 {
 						t.Fatalf("app field is %d bytes; the name must be truncated", len(f.String))
 					}
-					// One bounded refusal per source, joined by "; ": the
-					// unknown-app path is refused by the global sources.
-					n := len(h.app.globalVerifiers)
-					if f.Key == "refused" && len(f.String) > n*(maxRefusalLen+3)+(n-1)*2 {
-						t.Fatalf("refused field is %d bytes for %d sources; each source's refusal must be bounded", len(f.String), n)
+					// One entry per source, joined by "; ", each its label (the
+					// operator's config) and a bounded reason: the unknown-app
+					// path is refused by the global sources.
+					bound := 0
+					for _, v := range h.app.globalVerifiers {
+						bound += len(v.label()) + 2 + maxRefusalLen + 3 + 2
+					}
+					if f.Key == "refused" && len(f.String) > bound {
+						t.Fatalf("refused field is %d bytes; each source's reason must be bounded", len(f.String))
 					}
 				}
 			}

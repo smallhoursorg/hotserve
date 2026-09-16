@@ -321,19 +321,20 @@ func authorize(ctx context.Context, verifiers []verifier, rawToken string) (stri
 		if err == nil {
 			return by, nil
 		}
-		// Cut before the copy: a library's error can quote a header
-		// the caller made as large as the request allows.
-		refused = append(refused, boundRefusal(v.label()+": "+cutRunes(err.Error(), maxRefusalLen)))
+		// The bound is on the reason alone — the label is the operator's
+		// config, and it must survive however long the reason is.
+		refused = append(refused, v.label()+": "+boundRefusal(err.Error()))
 	}
 	return "", errors.New(strings.Join(refused, "; "))
 }
 
-// maxRefusalLen bounds one source's refusal in the journal. A refusal
+// maxRefusalLen bounds one source's reason in the journal. A reason
 // can carry token-supplied text — an issuer library quotes the token's
 // audience or issuer in its error, and a claim mismatch names the
 // identity the token presented — so, like loggedAppName for the app
 // name, the size of a line an unauthenticated caller can write is
-// fixed; authLimiter bounds how many.
+// fixed; authLimiter bounds how many. The source's label in front of
+// it is the operator's own config and is not cut.
 const maxRefusalLen = 300
 
 // boundRefusal makes a refusal one journal line of at most

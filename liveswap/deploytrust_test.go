@@ -404,8 +404,8 @@ func TestAuthorizeSaysWhy(t *testing.T) {
 			t.Fatalf("%s: authorized as %q", name, by)
 		}
 		got := err.Error()
-		if len(got) > maxRefusalLen+len("...") {
-			t.Errorf("%s: refusal is %d bytes; must be cut at %d", name, len(got), maxRefusalLen)
+		if len(got) > len(gh[0].label())+2+maxRefusalLen+len("...") {
+			t.Errorf("%s: refusal is %d bytes; the reason must be cut at %d", name, len(got), maxRefusalLen)
 		}
 		if !utf8.ValidString(got) || strings.ContainsRune(got, '\n') {
 			t.Errorf("%s: refusal is not one line of UTF-8: %q", name, got)
