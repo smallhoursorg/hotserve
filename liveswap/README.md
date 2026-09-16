@@ -733,16 +733,23 @@ not match, with the identity the token presented:
 ```
 
 A request with no bearer token says so instead, as does an app with
-no source at all. The box failing to reach the issuer (OIDC discovery
-on first use) lands here as well: still a 401 to the caller, with the
-network error in the journal. Each entry's reason is one line, cut
-at 300 bytes plus an ellipsis — an issuer's error quotes what the
-token carried, and a presented identity can be anything the issuer
-signed; the reason comes before the identity, so the cut never takes
-it — after the source's label, which is your config and is not cut.
-The line count is bounded by the throttle below: past an address's
-ten failures a minute the answer is 429 and nothing is written; past
-the process's hundred, a 401 with nothing written.
+no source at all. The box failing to consult the issuer — OIDC
+discovery on first use, or fetching its signing keys — lands here as
+well: still a 401 to the caller, with the network error in the
+journal. Each entry's reason is one line, cut at 300 bytes plus an
+ellipsis — an issuer's error quotes what the token carried, and a
+presented identity can be anything the issuer signed; the reason
+comes before the identity, so the cut never takes it — after the
+source's label, which is your config and is not cut. The line count
+is bounded by the throttle below: past an address's ten failures a
+minute the answer is 429 and this line is not written; past the
+process's hundred, a 401 with this line not written. A source the box
+could not consult has a line of its own outside those budgets:
+`webhook auth could not consult a trust source`, once a minute per
+source while it lasts, whether the token was then refused or another
+source accepted it — so an issuer outage, or a fallback source
+quietly carrying every deploy through one, never leaves the journal
+silent about it.
 
 ## Webhook API
 
@@ -990,7 +997,10 @@ What liveswap does for you:
   throttled. Process-wide, 100 failures a minute
   are logged however many addresses a flood comes from, again with one
   line saying the budget is spent; that process budget governs every
-  line, so once it is spent an address is throttled silently. The
+  line about a refusal, so once it is spent an address is throttled
+  silently. The one line outside both budgets names a trust source
+  the box could not consult, once a minute per source: that is the
+  box's failure, bounded by your config, not by callers. The
   address is Caddy's `client_ip`
   (so `trusted_proxies` is honoured), IPv6 keyed by /64. The token is
   still verified for a throttled address: a valid one is admitted and
