@@ -8,11 +8,13 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -237,6 +239,151 @@ func TestOIDCVerifierNumericClaim(t *testing.T) {
 		map[string]any{"repository_id": big})
 	if _, err := bigV.verify(context.Background(), bigTok); err != nil {
 		t.Fatalf("token with a >2^53 repository_id rejected: %v", err)
+	}
+}
+
+// eventually retries check for a short while. go-oidc's key set
+// signals a finished fetch to its waiters before it records the
+// result under its lock, so the verify right after an issuer's state
+// changed can still see the previous fetch; a bounded retry keeps the
+// property under test (recovery without a restart) honest.
+func eventually(t *testing.T, what string, check func() error) {
+	t.Helper()
+	var err error
+	for range 40 {
+		if err = check(); err == nil {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("%s: %v", what, err)
+}
+
+// TestOIDCVerifierIssuerDown pins what an issuer the box cannot get
+// what it needs from looks like to the caller of verify: an
+// unavailable, not a refusal — the token was never judged — for both
+// discovery and the key fetch. The key-fetch case holds keyFetchFailed
+// against the pinned go-oidc (the text is the only handle on it). It
+// also pins what is NOT an outage: a token the cached keys verify
+// still deploys, a malformed token is its own refusal, a caller that
+// went away is its own failure, and an issuer answering as someone
+// else is the config's.
+func TestOIDCVerifierIssuerDown(t *testing.T) {
+	iss := newMockIssuer(t)
+	want := map[string]string{"repository": "org/app"}
+	fresh := func() *oidcVerifier {
+		return &oidcVerifier{issuer: iss.url, audience: "hotserve", claims: want, client: iss.client}
+	}
+	valid := func() string { return iss.mint(t, iss.priv, "hotserve", want, time.Now().Add(5*time.Minute)) }
+	ctx := context.Background()
+	wantDown := func(t *testing.T, err error, what string) unavailable {
+		t.Helper()
+		var u unavailable
+		if !errors.As(err, &u) {
+			t.Fatalf("%s: err = %v, want an unavailable", what, err)
+		}
+		if len(u.labels) != 1 || u.labels[0] != "oidc:"+iss.url {
+			t.Fatalf("%s: labels = %q, want the source's", what, u.labels)
+		}
+		return u
+	}
+	wantPlain := func(t *testing.T, err error, what string) {
+		t.Helper()
+		if err == nil || errors.As(err, &unavailable{}) {
+			t.Fatalf("%s: err = %v, want a plain refusal", what, err)
+		}
+	}
+	gone, cancel := context.WithCancel(ctx)
+	cancel()
+
+	iss.discoveryDown.Store(true)
+	_, err := fresh().verify(ctx, valid())
+	u := wantDown(t, err, "discovery 503")
+	if !strings.Contains(u.Error(), "oidc discovery for") {
+		t.Fatalf("discovery 503: reason = %q, want it to say discovery", u.Error())
+	}
+	_, err = fresh().verify(gone, valid())
+	wantPlain(t, err, "discovery with the caller gone")
+	iss.discoveryDown.Store(false)
+
+	iss.discoveredAs.Store("https://someone-else.example")
+	_, err = fresh().verify(ctx, valid())
+	wantPlain(t, err, "discovery naming another issuer")
+	if !strings.Contains(err.Error(), "someone-else.example") {
+		t.Fatalf("issuer mismatch: reason = %q, want it to name the issuer found", err.Error())
+	}
+	iss.discoveredAs.Store("")
+
+	iss.jwksDown.Store(true)
+	v := fresh()
+	_, err = v.verify(ctx, valid())
+	u = wantDown(t, err, "JWKS 503 on first use")
+	if !strings.HasPrefix(u.Error(), keyFetchFailed) {
+		t.Fatalf("JWKS 503: reason = %q, want the keyFetchFailed prefix %q", u.Error(), keyFetchFailed)
+	}
+	_, err = v.verify(gone, valid())
+	wantPlain(t, err, "key fetch with the caller gone")
+
+	// Recovery needs no restart: the provider is cached, the key set
+	// fetches again.
+	iss.jwksDown.Store(false)
+	eventually(t, "issuer back: valid token rejected", func() error {
+		_, err := v.verify(ctx, valid())
+		return err
+	})
+
+	// Down again, keys cached: a token those keys verify still deploys
+	// — an outage only reaches tokens the box has no key for.
+	iss.jwksDown.Store(true)
+	if _, err := v.verify(ctx, valid()); err != nil {
+		t.Fatalf("issuer down with keys cached: valid token rejected: %v", err)
+	}
+	// A malformed token never reaches the fetch: a refusal of its own.
+	_, err = v.verify(ctx, "not-a-jwt")
+	wantPlain(t, err, "malformed token during an outage")
+	// A bad signature under a known kid refetches (go-oidc's rotation
+	// strategy), so during an outage it cannot be told from a rotated
+	// key: unavailable, deliberately.
+	other, _ := rsa.GenerateKey(rand.Reader, 2048)
+	_, err = v.verify(ctx, iss.mint(t, other, "hotserve", want, time.Now().Add(5*time.Minute)))
+	_ = wantDown(t, err, "bad signature during an outage")
+}
+
+// TestAuthorizeUnavailableOutranksARefusal: with one source down and
+// another refusing, the token might have been the down source's, so
+// the whole is unavailable — naming every source that is down — and
+// the journal text still carries every source's reason, in config
+// order.
+func TestAuthorizeUnavailableOutranksARefusal(t *testing.T) {
+	iss := newMockIssuer(t)
+	iss.discoveryDown.Store(true)
+	priv, pub := mustGenTestKey()
+	local := &localVerifier{audience: "hotserve", pub: pub, keyPath: "/k.pem"}
+	down := &oidcVerifier{issuer: iss.url, audience: "hotserve", client: iss.client}
+	tok := mintTestToken(t, priv, "other", nil) // the local source refuses it: wrong audience
+	for _, order := range [][]verifier{{local, down}, {down, local}} {
+		_, err := authorize(context.Background(), order, tok)
+		var u unavailable
+		if !errors.As(err, &u) || len(u.labels) != 1 || u.labels[0] != down.label() {
+			t.Fatalf("order %v: err = %v, want unavailable for %s", order, err, down.label())
+		}
+		if !strings.Contains(err.Error(), "local:/k.pem: ") || !strings.Contains(err.Error(), "oidc:"+iss.url+": ") {
+			t.Fatalf("order %v: reasons = %q, want both sources named", order, err.Error())
+		}
+	}
+	// Two sources down: both named, in config order.
+	iss2 := newMockIssuer(t)
+	iss2.discoveryDown.Store(true)
+	down2 := &oidcVerifier{issuer: iss2.url, audience: "hotserve", client: iss2.client}
+	_, err := authorize(context.Background(), []verifier{down, local, down2}, tok)
+	var u unavailable
+	if !errors.As(err, &u) || strings.Join(u.labels, " ") != down.label()+" "+down2.label() {
+		t.Fatalf("two sources down: err = %v, labels = %q, want both", err, u.labels)
+	}
+	// Both up: the same token is a plain refusal.
+	iss.discoveryDown.Store(false)
+	if _, err := authorize(context.Background(), []verifier{local, down}, tok); err == nil || errors.As(err, &unavailable{}) {
+		t.Fatalf("both sources up: err = %v, want a plain refusal", err)
 	}
 }
 
@@ -485,6 +632,12 @@ type mockIssuer struct {
 	client *http.Client
 	priv   *rsa.PrivateKey
 	kid    string
+	// discoveryDown / jwksDown make that endpoint answer 503: the
+	// issuer is up but the box cannot get what it needs from it.
+	discoveryDown, jwksDown atomic.Bool
+	// discoveredAs, when set, is the issuer the discovery document
+	// claims — someone other than the URL it was fetched from.
+	discoveredAs atomic.Value
 }
 
 func newMockIssuer(t *testing.T) *mockIssuer {
@@ -499,12 +652,24 @@ func newMockIssuer(t *testing.T) *mockIssuer {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+		if iss.discoveryDown.Load() {
+			http.Error(w, "upstream unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		issuer := iss.url
+		if as, ok := iss.discoveredAs.Load().(string); ok && as != "" {
+			issuer = as
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"issuer":   iss.url,
+			"issuer":   issuer,
 			"jwks_uri": iss.url + "/jwks",
 		})
 	})
 	mux.HandleFunc("/jwks", func(w http.ResponseWriter, _ *http.Request) {
+		if iss.jwksDown.Load() {
+			http.Error(w, "upstream unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		_ = json.NewEncoder(w).Encode(jwks)
 	})
 	srv := httptest.NewServer(mux)

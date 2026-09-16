@@ -80,7 +80,12 @@ Concept map from the Nomad-era stack:
   line included), so an
   unauthenticated flood has a bounded journal cost from any number of
   sources. A valid token MUST still be admitted from a throttled
-  address — the throttle bounds lines, never deploys.
+  address — the throttle bounds lines, never deploys. A source the box
+  cannot consult (discovery, key fetch) is charged like any failure
+  (whether a failure spends the budget is measurable from outside and
+  MUST NOT depend on which sources an app names) but MUST be named in
+  the journal once per window per source however spent the budgets
+  are, so an issuer outage never leaves the journal quiet.
 - `pre_start` (if configured) MUST run to completion in the release dir
   before the new instance starts; non-zero exit aborts the deploy.
 - The new instance MUST be continuously healthy for `soak` before any

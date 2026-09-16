@@ -25,6 +25,14 @@ func init() {
 	caddy.RegisterModule(Handler{})
 }
 
+// unauthorized is the flat 401: the same sentence whatever the reason,
+// so a caller learns neither which apps exist nor what a source pins.
+func unauthorized(w http.ResponseWriter) error {
+	return respondJSON(w, http.StatusUnauthorized, map[string]string{
+		"error": "invalid or missing deploy token (Authorization: Bearer <jwt>)",
+	}, nil)
+}
+
 // bearerToken extracts the deploy JWT from `Authorization: Bearer
 // <jwt>`. Bearer is the only accepted transport: Caddy redacts the
 // Authorization header from access logs automatically (the retired
@@ -114,6 +122,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 		// response below stays the same flat 401 for every reason, so
 		// a caller learns neither which apps exist nor what a source
 		// pins.
+		// A source the box could not consult is charged below like any
+		// refusal and named here once per window per source, whatever
+		// the budgets — see unavailable for why both.
+		var down unavailable
+		if errors.As(refused, &down) {
+			for _, label := range down.labels {
+				if h.limiter.outage(label) {
+					h.logger.Warn("webhook auth could not check the token: a trust source could not be consulted",
+						zap.String("source", label), zap.String("app", loggedAppName(name)),
+						zap.String("remote", key), zap.String("refused", refused.Error()))
+				}
+			}
+		}
 		v := h.limiter.fail(key)
 		if v.log {
 			h.logger.Warn("webhook auth failed",
@@ -134,9 +155,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 				"error": "too many failed deploy authentications from this address; retry later",
 			}, nil)
 		}
-		return respondJSON(w, http.StatusUnauthorized, map[string]string{
-			"error": "invalid or missing deploy token (Authorization: Bearer <jwt>)",
-		}, nil)
+		return unauthorized(w)
 	}
 	h.limiter.clear(key)
 	if ma == nil {
