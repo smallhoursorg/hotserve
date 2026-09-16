@@ -112,9 +112,10 @@ serving. A 401 means the box's `deploy_trust` for this app does not
 accept the run — most often `claim repository` or `claim ref` names
 another repository or branch — and the step prints the values this
 run minted its token with; the box's journal (`journalctl -u
-hotserve`) names the check that refused it, for the first ten
-failures a minute from one address (past that: 429, and nothing
-written until the minute passes).
+hotserve`) names the check that refused it, within the box's budget
+for failed authentications: ten a minute from one address (past
+that, 429) and a hundred a minute in all (past that, 401), neither
+written until the minute passes.
 
 What a first deploy that worked looks like, from the laptop:
 

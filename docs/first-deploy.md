@@ -285,9 +285,10 @@ repository` or `claim ref` names another repository or branch, or the
 audience differs. The step prints the values the run minted its token
 with, so you can hold them against the app block; the box's answer
 deliberately says no more, and `journalctl -u hotserve` on the box
-names the check that refused it — for the first ten failures a minute
-from one address; past that the box answers 429 and writes nothing
-until the minute passes. For a migration that failed or an app
+names the check that refused it — within the box's budget for failed
+authentications: ten a minute from one address (past that, 429) and a
+hundred a minute in all (past that, 401), neither written to the
+journal until the minute passes. For a migration that failed or an app
 that exited on start, the same output carries the app's side under
 `detail`: the exit status, what the health endpoint answered, and the
 last lines the app wrote (40 by default; `deploy_log_lines` in the

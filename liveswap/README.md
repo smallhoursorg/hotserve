@@ -729,17 +729,19 @@ it refused — the signature, `exp`, the audience, or a `claim` that did
 not match, with the identity the token presented:
 
 ```
-"refused":"oidc:https://token.actions.githubusercontent.com: presented repository=your-org/other ref=refs/heads/main actor=alice: claim \"repository\" mismatch; local:/etc/hotserve/alice.pub: go-jose/go-jose: error in cryptographic primitive"
+"refused":"oidc:https://token.actions.githubusercontent.com: claim \"repository\" mismatch, presented repository=your-org/other ref=refs/heads/main actor=alice; local:/etc/hotserve/alice.pub: go-jose/go-jose: error in cryptographic primitive"
 ```
 
 A request with no bearer token says so instead, as does an app with
 no source at all. The box failing to reach the issuer (OIDC discovery
 on first use) lands here as well: still a 401 to the caller, with the
-network error in the journal. Each entry is one line of at most 300
-bytes — an issuer's error quotes what the token carried, and a
-presented identity can be anything the issuer signed — and the line
-count is bounded by the throttle below: past it, a refusal is a 429
-and writes nothing.
+network error in the journal. Each entry is one line, cut at 300
+bytes plus an ellipsis — an issuer's error quotes what the token
+carried, and a presented identity can be anything the issuer signed;
+the reason comes before the identity, so the cut never takes it —
+and the line count is bounded by the throttle below: past an
+address's ten failures a minute the answer is 429 and nothing is
+written; past the process's hundred, a 401 with nothing written.
 
 ## Webhook API
 

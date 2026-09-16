@@ -323,11 +323,7 @@ func authorize(ctx context.Context, verifiers []verifier, rawToken string) (stri
 		}
 		// Cut before the copy: a library's error can quote a header
 		// the caller made as large as the request allows.
-		msg := err.Error()
-		if len(msg) > maxRefusalLen {
-			msg = msg[:maxRefusalLen]
-		}
-		refused = append(refused, boundRefusal(v.label()+": "+msg))
+		refused = append(refused, boundRefusal(v.label()+": "+cutRunes(err.Error(), maxRefusalLen)))
 	}
 	return "", errors.New(strings.Join(refused, "; "))
 }
@@ -352,13 +348,21 @@ func boundRefusal(s string) string {
 		s = strconv.QuoteToASCII(s)
 	}
 	if len(s) > maxRefusalLen {
-		n := maxRefusalLen
-		for n > 0 && !utf8.RuneStart(s[n]) {
-			n--
-		}
-		s = s[:n] + "..."
+		s = cutRunes(s, maxRefusalLen) + "..."
 	}
 	return s
+}
+
+// cutRunes is s cut to at most n bytes at a rune boundary, so a cut
+// never turns valid UTF-8 into bytes that would have to be quoted.
+func cutRunes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 // attribute is who a deploy is recorded under: the source's label,
@@ -517,19 +521,20 @@ func (v *localVerifier) verify(_ context.Context, rawToken string) (string, erro
 	return attribute(v.label(), v.attribution, all), nil
 }
 
-// presentedErr is a claim refusal with the identity the token
-// presented in front of it — the signature verified, so the values are
-// the issuer's word, and they are what the operator lacks when the
-// pinned claim is the wrong one: `presented repository=o/other
-// ref=refs/heads/main actor=alice: claim "repository" mismatch`. A
-// token carrying none of the attribution claims reads as `presented
-// nothing`.
+// presentedErr is a claim refusal followed by the identity the token
+// presented — the signature verified, so the values are the issuer's
+// word, and they are what the operator lacks when the pinned claim is
+// the wrong one: `claim "repository" mismatch, presented
+// repository=o/other ref=refs/heads/main actor=alice`. The reason
+// comes first so that boundRefusal's cut, when an identity is long,
+// takes the identity and never the reason. A token carrying none of
+// the attribution claims reads as `presented nothing`.
 func presentedErr(names []string, claims map[string]any, err error) error {
 	p := presented(names, claims)
 	if p == "" {
 		p = " nothing"
 	}
-	return fmt.Errorf("presented%s: %w", p, err)
+	return fmt.Errorf("%w, presented%s", err, p)
 }
 
 // matchClaims requires every constraint to equal the token's claim

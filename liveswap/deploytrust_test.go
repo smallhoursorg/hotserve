@@ -368,8 +368,8 @@ func TestAuthorizeSaysWhy(t *testing.T) {
 		{"unknown signer", gh, iss.mint(t, otherRSA, "hotserve", nil, time.Now().Add(time.Minute)), []string{"oidc:" + iss.url + ": "}},
 		{"claim mismatch names who tried", gh,
 			mint("hotserve", map[string]string{"repository": "org/other", "ref": "refs/heads/main", "actor": "alice"}),
-			[]string{"oidc:" + iss.url + ": presented repository=org/other ref=refs/heads/main actor=alice: claim \"repository\" mismatch"}},
-		{"claim absent, nothing presented", gh, mint("hotserve", nil), []string{"presented nothing: claim \"repository\" absent"}},
+			[]string{"oidc:" + iss.url + ": claim \"repository\" mismatch, presented repository=org/other ref=refs/heads/main actor=alice"}},
+		{"claim absent, nothing presented", gh, mint("hotserve", nil), []string{"claim \"repository\" absent from token, presented nothing"}},
 		{"every source, config order", both, "not-a-jwt", []string{"oidc:" + iss.url + ": ", "; local:test-key: "}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -391,7 +391,8 @@ func TestAuthorizeSaysWhy(t *testing.T) {
 
 	// A refusal is bounded however long the token's own text is — the
 	// audience go-oidc quotes back, or the identity a verified token
-	// presents, in ASCII or not — and it stays valid UTF-8 on one line.
+	// presents, in ASCII or not — it stays valid UTF-8 on one line, and
+	// the cut takes the identity, never the reason in front of it.
 	for name, tok := range map[string]string{
 		"long audience":       mint(strings.Repeat("a", 10_000), nil),
 		"long ascii identity": mint("hotserve", map[string]string{"repository": "org/" + strings.Repeat("r", 400)}),
@@ -408,6 +409,9 @@ func TestAuthorizeSaysWhy(t *testing.T) {
 		}
 		if !utf8.ValidString(got) || strings.ContainsRune(got, '\n') {
 			t.Errorf("%s: refusal is not one line of UTF-8: %q", name, got)
+		}
+		if strings.Contains(name, "identity") && !strings.Contains(got, `claim "repository" mismatch`) {
+			t.Errorf("%s: the cut took the reason: %q", name, got)
 		}
 	}
 }
