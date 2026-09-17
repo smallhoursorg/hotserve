@@ -279,7 +279,12 @@ Entry names and link targets are also bounded at PATH_MAX (4096
 bytes, under the release directory) and NAME_MAX (255 per component),
 and the content entries *declare* is capped like the stream (a sparse
 entry expands from no stream at all); not knobs — no real path or
-artifact is close.
+artifact is close. The byte cap is for the whole artifact, not for
+each file in it, so a single large executable is fine — the Node
+example unpacks to about 300 MB in two binaries, and it is the
+compressed tarball that has to fit `max_artifact_size`. A million tiny
+files fit the byte budget comfortably; refusing those is the entry
+cap's job.
 
 ## Watchdog
 

@@ -36,6 +36,15 @@ const (
 // inode and a 4 KB block per entry, so a budget of 1 GB is ~1M inodes
 // and ~4 GB of blocks, enough to take a small disk to ENOSPC for
 // everything else on the box. The entry cap is what bounds that.
+//
+// Both are the whole archive's budget, deliberately: one entry may
+// spend all of maxBytes. That is the shape of a single-executable
+// artifact — examples/node ships two `node --build-sea` binaries,
+// ~300 MB unpacked, under a 1 GB default budget — so a per-entry
+// ceiling would have to sit above the largest binary an app may ship,
+// and there it bounds nothing maxBytes does not. The shape that costs
+// more than its bytes is many small entries, which is maxEntries'
+// job.
 type archiveLimits struct {
 	maxBytes   int64
 	maxEntries int

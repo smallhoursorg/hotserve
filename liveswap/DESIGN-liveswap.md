@@ -62,18 +62,20 @@ Concept map from the Nomad-era stack:
   and vetted query.
 - Extraction MUST reject: absolute paths, `..` traversal, symlink and
   hardlink targets resolving outside the archive root, special files
-  (devices/FIFOs), setuid/setgid bits, decompressed content beyond
-  10× `max_artifact_size` — as decompressed stream and as the content
-  the entries declare, since a sparse entry expands from no stream —
-  more than `max_artifact_entries` filesystem objects (files,
-  directories and links, implied parents included: the byte cap bounds
-  the stream, not the inodes and blocks extraction consumes), and
-  names or link targets over PATH_MAX under the release directory or
-  with a component over NAME_MAX. Validation is a
-  full pre-pass; nothing is written unless every entry is clean. A
-  successful deploy reports the entry count and decompressed size and
-  warns past 75% of either cap, so the cliff is visible deploys ahead.
-  Extraction goes to a staging dir renamed into place on success.
+  (devices/FIFOs), setuid/setgid bits, decompressed content beyond 10×
+  `max_artifact_size` — as decompressed stream and as the content the
+  entries declare, since a sparse entry expands from no stream, and in
+  both readings the budget is the archive's, so one entry may
+  legitimately be all of it — more than `max_artifact_entries`
+  filesystem objects (files, directories and links, implied parents
+  included: the byte cap bounds the stream, not the inodes and blocks
+  extraction consumes), and names or link targets over PATH_MAX under
+  the release directory or with a component over NAME_MAX. Validation
+  is a full pre-pass; nothing is written unless every entry is clean.
+  A successful deploy reports the entry count and decompressed size
+  and warns past 75% of either cap, so the cliff is visible deploys
+  ahead. Extraction goes to a staging dir renamed into place on
+  success.
 - Failed webhook authentications MUST be throttled in the journal:
   per client address (10 failures per minute, then 429 for further
   bad tokens) and process-wide (100 failures logged per minute, every
