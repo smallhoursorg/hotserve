@@ -149,6 +149,44 @@ func TestExtractDecompressionCap(t *testing.T) {
 	}
 }
 
+// The byte budget is the archive's, not each entry's: one file may be
+// nearly all of it. That is the shape of a single-executable artifact
+// (a `node --build-sea` or `deno compile` binary is one entry of
+// hundreds of megabytes), so there is deliberately no per-entry
+// ceiling.
+func TestExtractLetsOneEntrySpendTheWholeByteBudget(t *testing.T) {
+	lim := archiveLimits{maxBytes: 64 * 1024, maxEntries: 1000}
+	// Four 512-byte blocks of headroom for the entry's header and the
+	// two zero blocks that end a tar stream; the rest is one file.
+	body := strings.Repeat("A", int(lim.maxBytes)-4*512)
+	archive := buildTarGz(t, []tarEntry{{name: "server", body: body, mode: 0o755}})
+
+	dest := filepath.Join(t.TempDir(), "out")
+	stats, err := extractArchive(archive, dest, lim)
+	must(t, err)
+	if stats.entries != 1 {
+		t.Fatalf("entries = %d, want 1", stats.entries)
+	}
+	data, err := os.ReadFile(filepath.Join(dest, "server"))
+	if err != nil || len(data) != len(body) {
+		t.Fatalf("extracted %d bytes, want %d: %v", len(data), len(body), err)
+	}
+	if stats.bytes < int64(len(body)) {
+		t.Fatalf("bytes = %d, want at least the entry's %d", stats.bytes, len(body))
+	}
+
+	// And the archive budget is what bounds it: halve the budget and
+	// the same single entry is refused, in the validate pass.
+	dest = filepath.Join(t.TempDir(), "out")
+	_, err = extractArchive(archive, dest, archiveLimits{maxBytes: lim.maxBytes / 2, maxEntries: lim.maxEntries})
+	if err == nil || !strings.Contains(err.Error(), "content declared beyond") {
+		t.Fatalf("want a byte-cap error, got %v", err)
+	}
+	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
+		t.Fatal("cap rejection must not leave extracted files")
+	}
+}
+
 // The entry cap is a validate-pass rejection: one entry past it and
 // nothing is written, however small the entries are (the byte cap
 // would let a stream of empty files through).

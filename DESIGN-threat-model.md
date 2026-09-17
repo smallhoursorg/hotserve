@@ -325,6 +325,14 @@ Residual items for the model:
   entries *declare* is capped like the stream: a GNU sparse entry's
   holes are synthesized by the reader from no stream bytes, so the
   stream cap alone would let one small entry write a disk of zeros.
+  The byte budget is the *archive's*, not each entry's: a file may be
+  nearly all of it, which is the shape of a single-executable artifact
+  — `examples/node` ships two `node --build-sea` binaries, ~300 MB
+  unpacked, under the 1 GB default. A per-entry ceiling would have to
+  sit above the largest binary an app may ship, and there it bounds
+  nothing the archive budget does not; the shape that costs more than
+  its bytes is many small entries, and that is what
+  `max_artifact_entries` refuses.
   A deploy reports the figures and warns past 75% of
   either cap. The archive is still read **twice**, so the byte cap
   permits 2× the CPU — bounded, and cheap next to the write pass.
