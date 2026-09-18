@@ -142,9 +142,15 @@ writing to it does not restore. One command per box, then two lines per
 app:
 
 ```
+sudo install -m 0600 /dev/null /root/b2-key
+printf 'AWS_ACCESS_KEY_ID=…\nAWS_SECRET_ACCESS_KEY=…\n' | sudo tee /root/b2-key >/dev/null
 sudo hotserve backup init s3:s3.us-west-004.backblazeb2.com/my-bucket \
-	AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=…
+	--credentials-file /root/b2-key
+sudo rm /root/b2-key
 ```
+
+(The storage key goes in a file because a command line is visible to
+every user on the box while it runs, and stays in your shell history.)
 
 ```
 app example {

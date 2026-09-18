@@ -42,7 +42,26 @@ func TestStatusMatchesSnapshotsToApps(t *testing.T) {
 		snap("ccc", "shop", 20*time.Minute),
 	), nil)
 
-	got, err := Status(context.Background(), apps, capture, t.TempDir())
+	// blog's last run finished cleanly, which is what makes its
+	// snapshot evidence of a working backup rather than of restic
+	// having written one on the way to failing.
+	staging := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(staging, "blog"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	marker := SuccessMarker(filepath.Join(staging, "blog"))
+	if err := os.WriteFile(marker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Dated with the fixture's clock, not the machine's: the report is
+	// read against statusNow, so a marker written "now" would make this
+	// test pass or fail on what the runner thinks the date is.
+	cleanRun := statusNow.Add(-12 * time.Minute)
+	if err := os.Chtimes(marker, cleanRun, cleanRun); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Status(context.Background(), apps, capture, staging)
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
@@ -79,7 +98,13 @@ func TestStaleAfterTwoMissedRuns(t *testing.T) {
 		{StaleAfter + time.Minute, true},
 		{72 * time.Hour, true},
 	} {
-		s := AppStatus{Latest: &Snapshot{Time: statusNow.Add(-tc.age)}}
+		// With a clean run recorded at the same moment as the snapshot:
+		// freshness is measured from the run, and a snapshot with no
+		// clean run behind it is stale whatever its age (below).
+		s := AppStatus{
+			Latest:      &Snapshot{Time: statusNow.Add(-tc.age)},
+			LastSuccess: statusNow.Add(-tc.age),
+		}
 		if got := s.Stale(statusNow); got != tc.stale {
 			t.Errorf("age %v: stale = %v, want %v", tc.age, got, tc.stale)
 		}
@@ -105,6 +130,25 @@ func TestStaleMeasuresFromTheLastCleanRun(t *testing.T) {
 	}
 	if healthy.Stale(statusNow) {
 		t.Error("a clean run ten minutes ago is current")
+	}
+}
+
+// The failure the marker exists to catch: restic writes a snapshot and
+// still exits non-zero, so a box whose every run fails part-way gets a
+// fresh snapshot every hour. Falling back to the newest snapshot when
+// no clean run has ever been recorded would call that healthy for ever.
+func TestStaleWithSnapshotsButNoCleanRunEverRecorded(t *testing.T) {
+	failing := AppStatus{Latest: &Snapshot{Time: statusNow.Add(-5 * time.Minute)}}
+	if !failing.Stale(statusNow) {
+		t.Error("snapshots from runs that never finished cleanly are not a backup")
+	}
+	var out strings.Builder
+	FormatStatus(&out, []AppStatus{{
+		App:    testApp("blog", StateEntry{Kind: KindFiles, Path: "uploads"}),
+		Latest: &Snapshot{Time: statusNow.Add(-5 * time.Minute), ShortID: "aaa"},
+	}}, statusNow)
+	if !strings.Contains(out.String(), "no clean run on this box") {
+		t.Errorf("the report has to say why a recent snapshot is not current:\n%s", out.String())
 	}
 }
 

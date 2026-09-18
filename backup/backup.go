@@ -314,10 +314,44 @@ func lookupEnv(key string) string { return os.Getenv(key) }
 // repository without them exporting anything. Deliberately not a
 // shell: KEY=VALUE, # comments and blank lines, nothing else.
 func LoadEnvFile(path string) ([]string, error) {
+	return loadEnvFile(path, settingsFile)
+}
+
+// CredentialsFile reads the same format for --credentials-file: the
+// provider's keys, in a file the operator wrote, so that they are not
+// in shell history or in /proc/*/cmdline while init runs. Same parser,
+// different advice when it goes wrong — telling someone to run `init`
+// to create the file they are passing *to* init is a loop.
+func CredentialsFile(path string) ([]string, error) {
+	return loadEnvFile(path, credentialsFile)
+}
+
+type envFileRole int
+
+const (
+	settingsFile envFileRole = iota
+	credentialsFile
+)
+
+func (r envFileRole) missing(path string) error {
+	if r == credentialsFile {
+		return fmt.Errorf("--credentials-file %s does not exist: it is a file you write, holding the provider's keys as KEY=VALUE lines, one per line", path)
+	}
+	return fmt.Errorf("backups are not configured on this box: %s does not exist — `hotserve backup init <repository>` writes it", path)
+}
+
+func (r envFileRole) empty(path string) error {
+	if r == credentialsFile {
+		return fmt.Errorf("--credentials-file %s is empty: it should hold the provider's keys, like AWS_ACCESS_KEY_ID=… and AWS_SECRET_ACCESS_KEY=… (the repository and its password are not set here — they are the argument to init and --password-file)", path)
+	}
+	return fmt.Errorf("%s is empty: it should set RESTIC_REPOSITORY and RESTIC_PASSWORD", path)
+}
+
+func loadEnvFile(path string, role envFileRole) ([]string, error) {
 	body, err := os.ReadFile(path) //nolint:gosec // the operator's own root-only settings file, named on the command line or by the packaged unit
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("backups are not configured on this box: %s does not exist — `hotserve backup init <repository>` writes it", path)
+			return nil, role.missing(path)
 		}
 		return nil, fmt.Errorf("reading %s: %w", path, err)
 	}
@@ -340,7 +374,7 @@ func LoadEnvFile(path string) ([]string, error) {
 		env = append(env, key+"="+unquote(value))
 	}
 	if len(env) == 0 {
-		return nil, fmt.Errorf("%s is empty: it should set RESTIC_REPOSITORY and RESTIC_PASSWORD", path)
+		return nil, role.empty(path)
 	}
 	return env, nil
 }

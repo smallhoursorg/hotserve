@@ -35,6 +35,15 @@ type InitOptions struct {
 	Force bool
 }
 
+// sealedEnvHint explains the one thing that surprises an operator
+// whose credentials work in their own shell: these checks deliberately
+// do not use their shell. The hourly job gets the settings file and
+// nothing else, so anything the repository needs — a storage key, a
+// proxy, a CA bundle path — has to be part of those settings, and a
+// check that borrowed the terminal's environment would pass here and
+// fail every hour afterwards.
+const sealedEnvHint = "These checks run with only the settings that will be written, the way the hourly job does. A variable that lives in your shell (AWS_PROFILE, a proxy, a credentials file under your home) is not used — pass what the repository needs to init as KEY=VALUE, or in --credentials-file."
+
 // DeleteProbeTag marks the snapshot init makes to find out whether
 // these credentials can delete. It is left behind when they cannot —
 // which is the good case — so the tag says what it is.
@@ -123,7 +132,7 @@ func Init(ctx context.Context, o InitOptions, run Runner, capture Capturer, log 
 	if _, err := capture(ctx, "restic", "cat", "config"); err != nil {
 		say(log, "repository not found; creating it")
 		if err := run(ctx, "restic", "init"); err != nil {
-			return fmt.Errorf("cannot open %s with this password, and cannot create it either: if the repository already exists, the password is wrong — pass --password-file with the one you saved; if it does not, check the URL and the storage credentials (%w)", o.Repository, err)
+			return fmt.Errorf("cannot open %s with this password, and cannot create it either: if the repository already exists, the password is wrong — pass --password-file with the one you saved; if it does not, check the URL and the storage credentials (%w)\n\n%s", o.Repository, err, sealedEnvHint)
 		}
 	} else if generated {
 		// It opened with a password this command invented, which
@@ -157,12 +166,12 @@ func Init(ctx context.Context, o InitOptions, run Runner, capture Capturer, log 
 		// scheduled" — and this is the moment they are least able to go
 		// and check.
 		if replacing {
-			return fmt.Errorf("%w\n\n%s is unchanged: the box still backs up to the repository it was already using", err, o.EnvFile)
+			return fmt.Errorf("%w\n\n%s is unchanged: the box still backs up to the repository it was already using.\n\n%s", err, o.EnvFile, sealedEnvHint)
 		}
 		if generated {
-			return fmt.Errorf("%w\n\n%s was not written, so nothing is scheduled. Keep the password printed above and pass --password-file when you run init again", err, o.EnvFile)
+			return fmt.Errorf("%w\n\n%s was not written, so nothing is scheduled. Keep the password printed above and pass --password-file when you run init again.\n\n%s", err, o.EnvFile, sealedEnvHint)
 		}
-		return fmt.Errorf("%w\n\n%s was not written, so nothing is scheduled", err, o.EnvFile)
+		return fmt.Errorf("%w\n\n%s was not written, so nothing is scheduled.\n\n%s", err, o.EnvFile, sealedEnvHint)
 	}
 	// A repository on this box was just created by root; the jobs run
 	// as someone else and would find it unreadable ("open …/keys:

@@ -44,6 +44,12 @@ fi
 mkdir -p /var/lib/hotserve /var/lib/liveswap /var/lib/hotserve-backup
 chmod 750 /var/lib/hotserve /var/lib/liveswap /var/lib/hotserve-backup
 chown hotserve:hotserve /var/lib/hotserve /var/lib/liveswap /var/lib/hotserve-backup
+# The package ships the Caddyfile here, so dpkg makes this directory —
+# but this script also runs without the payload, and the backup
+# settings and the timer marker below both live here. Root's, because
+# the credentials do.
+mkdir -p /etc/hotserve
+chmod 755 /etc/hotserve
 # Packages before the Debian-13-only matrix copied an AppArmor profile
 # into /etc/apparmor.d (which the package itself does not own, so dpkg
 # will not remove it on upgrade). Unload and delete it: apparmor.service
@@ -97,14 +103,27 @@ EOF
 	# Enabling it here (rather than asking for it in the docs) is what
 	# makes `hotserve backup init` the only step.
 	#
-	# First install only. dpkg passes the previously configured
-	# version as $2 on an upgrade, and an operator who disabled the
-	# timer — because backups run from somewhere else, or because a
-	# job was hurting the box — must not find it running again after
-	# `apt upgrade`.
-	if [ -z "${2:-}" ]; then
+	# Enabled once, then never touched again. "First install" is the
+	# wrong test: dpkg passes the previously configured version as $2,
+	# so a box upgrading from a hotserve that predates the timer would
+	# skip this for ever — `hotserve backup init` would report the
+	# repository ready and nothing would ever run. A marker records
+	# that this package has enabled the timer once, so an operator who
+	# then disables it — backups run from somewhere else, or a job was
+	# hurting the box — keeps that choice across upgrades.
+	#
+	# It lives beside the backup credentials because that directory is
+	# root's: the staging root is owned by the hotserve user, and a
+	# compromised app must not be able to decide whether the next
+	# upgrade turns backups on.
+	timer_marker=/etc/hotserve/.backup-timer-configured
+	if [ ! -e "$timer_marker" ]; then
 		systemctl enable hotserve-backup.timer 2>/dev/null || true
 		systemctl start hotserve-backup.timer 2>/dev/null || true
+		# touch, not `: > file`: a redirection that fails on a special
+		# builtin ends a `set -e` shell whatever follows it, and this
+		# script must not take the install down over a marker.
+		touch "$timer_marker" 2>/dev/null || true
 	fi
 	echo "hotserve installed. Start it with:"
 	echo "  sudo systemctl enable --now hotserve"

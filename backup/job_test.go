@@ -189,6 +189,46 @@ func TestExecuteDropsStagedCopiesOfUndeclaredDatabases(t *testing.T) {
 	}
 }
 
+// The obvious way to move an app's uploads to a data disk is a
+// symlink — and restic stores a symlink AS a symlink (it has no option
+// to follow one), so the snapshot would hold the link and none of the
+// files, hourly, with every run reporting success. Measured against
+// restic 0.18 on Debian 13: exit 0, snapshot size 0 B. A backup that
+// silently holds nothing is the one outcome worth failing for.
+func TestExecuteRefusesADeclaredPathThatIsASymlink(t *testing.T) {
+	for _, tc := range []struct{ name, target string }{
+		{"to a directory on another disk", "dir"},
+		{"dangling", "not-created-yet"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &recorder{}
+			job := newJob(t, rec, nil, nil)
+			target := filepath.Join(job.Shared, tc.target)
+			if tc.target == "dir" {
+				if err := os.MkdirAll(target, 0o750); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Symlink(target, filepath.Join(job.Shared, "uploads")); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			job.Files = []string{"uploads"}
+			err := job.Execute(context.Background())
+			if err == nil {
+				t.Fatalf("a symlinked path must not be backed up as if it were the data: %+v", rec.calls)
+			}
+			for _, want := range []string{"symlink", "back up nothing"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("the refusal must say what would happen (%q): %v", want, err)
+				}
+			}
+			if len(rec.calls) != 0 {
+				t.Errorf("nothing should have run: %+v", rec.calls)
+			}
+		})
+	}
+}
+
 func TestExecuteRefusesPathsOutsideShared(t *testing.T) {
 	for _, tc := range []struct{ name, path string }{
 		{"parent", "../../../etc/shadow"},

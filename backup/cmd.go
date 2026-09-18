@@ -32,10 +32,11 @@ reads as root; nothing about backups is configured in the Caddyfile.
       Writes the environment file, creates the repository if it is
       new, and checks whether these credentials can delete from it —
       they should not be able to, so that someone who takes the box
-      cannot erase its backups. Provider credentials are passed as
-      KEY=VALUE, or in a root-only file with --credentials-file, which
-      keeps the storage key out of shell history and out of
-      /proc/*/cmdline while init runs. A password is
+      cannot erase its backups. Provider credentials belong in a
+      root-only file passed with --credentials-file, as KEY=VALUE
+      lines: on the command line they are in your shell history and in
+      /proc/*/cmdline, which every user on the box can read while init
+      runs. Trailing KEY=VALUE arguments work too. A password is
       generated and printed once; keep it somewhere else too, because
       nothing can recover it. Rebuilding a box means pointing init at
       the repository that already exists, with the password it was
@@ -181,7 +182,7 @@ func cmdInit(fl caddycmd.Flags, args []string) (int, error) {
 	}
 	extra := args[1:] // provider credentials as KEY=VALUE
 	if path := fl.String("credentials-file"); path != "" {
-		fromFile, err := LoadEnvFile(path)
+		fromFile, err := CredentialsFile(path)
 		if err != nil {
 			return caddy1, err
 		}
@@ -196,11 +197,20 @@ func cmdInit(fl caddycmd.Flags, args []string) (int, error) {
 		User:         fl.String("user"),
 		Force:        fl.Bool("force"),
 	}
+	// Everything init runs, runs the way the hourly job will: no
+	// inherited credentials, no inherited HOME. What passes here is
+	// then what passes at 03:00 with nobody logged in.
+	home, err := os.MkdirTemp("", "hotserve-init")
+	if err != nil {
+		return caddy1, fmt.Errorf("making a scratch home for the repository checks: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(home) }()
 	// The existence and probe checks are questions, not failures, so
 	// their output is captured rather than shown: restic's "repository
 	// does not exist" while init is about to create one reads as an
 	// error when it is the expected answer.
-	if err := Init(context.Background(), o, execRunner(os.Stderr), captureQuiet(), os.Stdout); err != nil {
+	run, capture := sealed(home, execRunner(os.Stderr), captureQuiet())
+	if err := Init(context.Background(), o, run, capture, os.Stdout); err != nil {
 		return caddy1, err
 	}
 	return 0, nil
@@ -284,7 +294,7 @@ func cmdApp(fl caddycmd.Flags, entryArgs []string) (int, error) {
 func execRunner(stderr *os.File) Runner {
 	return func(ctx context.Context, name string, args ...string) error {
 		cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // restic, sqlite3 and systemd-run with an argv built here from the running config, never from a request
-		cmd.Env = append(os.Environ(), runnerEnv(ctx)...)
+		cmd.Env = commandEnv(ctx)
 		cmd.Stdout = stderr
 		cmd.Stderr = stderr
 		if err := cmd.Run(); err != nil {
@@ -303,7 +313,7 @@ func execRunner(stderr *os.File) Runner {
 func captureRunner() Capturer {
 	return func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // restic, sqlite3 and systemd-run with an argv built here from the running config, never from a request
-		cmd.Env = append(os.Environ(), runnerEnv(ctx)...)
+		cmd.Env = commandEnv(ctx)
 		cmd.Stderr = os.Stderr
 		out, err := cmd.Output()
 		if err != nil {
@@ -324,7 +334,7 @@ func captureRunner() Capturer {
 func captureQuiet() Capturer {
 	return func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // restic, sqlite3 and systemd-run with an argv built here from the running config, never from a request
-		cmd.Env = append(os.Environ(), runnerEnv(ctx)...)
+		cmd.Env = commandEnv(ctx)
 		var errOut bytes.Buffer
 		cmd.Stderr = &errOut
 		out, err := cmd.Output()
@@ -341,6 +351,89 @@ func captureQuiet() Capturer {
 // anything it later starts would inherit it.
 type envKey struct{}
 
+// sealKey marks a command that must run with the environment the
+// hourly job will have, and nothing else.
+type sealKey struct{}
+
+// commandEnv is what a command this package starts runs with.
+//
+// Normally that is this process's environment plus the settings — an
+// operator running `status` or a restore by hand keeps their proxy,
+// their locale, their ssh-agent. init is different: its whole job is
+// to answer "will the scheduled backups work?", and the scheduled
+// backups get the settings file and nothing else. Inheriting root's
+// shell there means an AWS_PROFILE, a ~/.aws/credentials reachable
+// through HOME, or a proxy variable can make the check pass and every
+// hourly run fail afterwards — the one failure this command exists to
+// rule out.
+func commandEnv(ctx context.Context) []string {
+	settings, _ := ctx.Value(envKey{}).([]string)
+	if home, sealed := ctx.Value(sealKey{}).(string); sealed {
+		return append([]string{
+			// systemd's own default for a system unit, which is what
+			// the jobs get. sealed() resolves the program against this
+			// same list, because exec does not.
+			"PATH=" + jobPath,
+			// A home of its own, so nothing is read out of root's.
+			"HOME=" + home,
+			"XDG_CACHE_HOME=" + filepath.Join(home, "cache"),
+		}, settings...)
+	}
+	return append(os.Environ(), settings...)
+}
+
+// jobPath is the PATH a system unit gets from systemd, and therefore
+// the one the hourly jobs find restic and sqlite3 on.
+const jobPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+// sealed makes a Runner and a Capturer use commandEnv's sealed form,
+// and run the same *binary* the jobs will.
+//
+// The program is resolved here rather than left to exec: exec looks a
+// name up on THIS process's PATH, and cmd.Env only changes what the
+// child sees afterwards. Without this, a hand-built restic earlier on
+// root's PATH would create and check the repository at init, while
+// every hourly run used the packaged one — the same "init says ready,
+// backups never work" split the sealed environment is here to close.
+func sealed(home string, run Runner, capture Capturer) (Runner, Capturer) {
+	seal := func(ctx context.Context) context.Context {
+		return context.WithValue(ctx, sealKey{}, home)
+	}
+	as := func(name string) string {
+		if strings.Contains(name, "/") {
+			return name
+		}
+		if p, err := lookPathIn(jobPath, name); err == nil {
+			return p
+		}
+		// Left as it was, so the runner's own "not installed" message
+		// is what the operator reads.
+		return name
+	}
+	return func(ctx context.Context, name string, args ...string) error {
+			return run(seal(ctx), as(name), args...)
+		}, func(ctx context.Context, name string, args ...string) ([]byte, error) {
+			return capture(seal(ctx), as(name), args...)
+		}
+}
+
+// lookPathIn is exec.LookPath against a PATH of our choosing, which
+// the standard library does not offer.
+func lookPathIn(path, name string) (string, error) {
+	for dir := range strings.SplitSeq(path, ":") {
+		if dir == "" {
+			continue
+		}
+		candidate := filepath.Join(dir, name)
+		info, err := os.Stat(candidate)
+		if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+			continue
+		}
+		return candidate, nil
+	}
+	return "", fmt.Errorf("%s is not on the path the backup jobs use (%s)", name, path)
+}
+
 func withEnv(run Runner, env []string) Runner {
 	return func(ctx context.Context, name string, args ...string) error {
 		return run(context.WithValue(ctx, envKey{}, env), name, args...)
@@ -351,9 +444,4 @@ func withCaptureEnv(capture Capturer, env []string) Capturer {
 	return func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		return capture(context.WithValue(ctx, envKey{}, env), name, args...)
 	}
-}
-
-func runnerEnv(ctx context.Context) []string {
-	env, _ := ctx.Value(envKey{}).([]string)
-	return env
 }

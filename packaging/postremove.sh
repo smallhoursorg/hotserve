@@ -16,6 +16,10 @@
 case "${1:-}" in
 purge)
 	rm -f /etc/hotserve/backup.env
+	# The marker that says the backup timer has been enabled once. A
+	# purge is the operator starting over, and an install after one
+	# should enable the timer again.
+	rm -f /etc/hotserve/.backup-timer-configured
 	rm -rf /var/lib/hotserve-backup
 	;;
 esac

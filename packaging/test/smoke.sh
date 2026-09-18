@@ -516,7 +516,7 @@ id -nG hotserve | tr ' ' '\n' | grep -qx hotserve \
 grep -q liveswap_webhook /etc/hotserve/Caddyfile \
 	|| die "reinstall clobbered the modified /etc/hotserve/Caddyfile (config|noreplace broken)"
 systemctl is-enabled hotserve-backup.timer >/dev/null 2>&1 \
-	&& die "the upgrade re-enabled hotserve-backup.timer: a timer an operator turned off must stay off (postinstall must guard on first install)"
+	&& die "the upgrade re-enabled hotserve-backup.timer: a timer an operator turned off must stay off"
 systemctl is-active --quiet hotserve \
 	|| die "service not active after reinstall — an upgrade must not leave the server down (preremove stop / missing postinstall restart)"
 id hotserve >/dev/null || die "hotserve user gone after reinstall (postinstall not idempotent)"
@@ -537,6 +537,28 @@ pid_after=$(printf '%s' "$status" | sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p')
 case "$status" in *'"running":true'*) : ;; *) die "reattached app not running: $status" ;; esac
 curl -fsS --max-time 5 "$PROXY/" | grep -q "hello smoke" || die "reattached app not served"
 echo "reinstall preserved config and user; hotserve restarted and reattached to the running app (pid $pid_after)"
+
+# The other half of that rule: a box upgrading from a hotserve that
+# predates the backup timer has never been asked the question, and must
+# end up with it on — otherwise `hotserve backup init` reports the
+# repository ready and nothing ever runs. That box looks exactly like
+# this one with the marker removed.
+[ -e /etc/hotserve/.backup-timer-configured ] \
+	|| die "postinstall did not record that it configured the backup timer; the assertion below would be vacuous"
+rm -f /etc/hotserve/.backup-timer-configured
+dpkg -i "$deb"
+systemctl is-enabled hotserve-backup.timer >/dev/null 2>&1 \
+	|| die "upgrading from a release without the timer left it disabled: the documented setup would complete and no backup would ever run"
+# postinstall try-restarts hotserve, and the stages after this one
+# assert about the service and the app. Wait for it, as the first
+# reinstall does, so nothing below races that restart.
+i=0
+until [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$HOOK")" = "200" ]; do
+	i=$((i + 1))
+	[ "$i" -ge 30 ] && die "webhook not back within 30s of the second upgrade restart"
+	sleep 1
+done
+echo "an upgrade from a release predating the timer enables it; one that already had it leaves the operator's choice alone"
 
 stage "stage 4: removal"
 # Stand in for a configured box: the credentials `hotserve backup init`
@@ -570,7 +592,9 @@ apt-get purge -y hotserve
 [ ! -e /var/lib/hotserve-backup ] \
 	|| die "purge left the staged database copies (plaintext app data) on the box"
 [ ! -e /etc/hotserve/Caddyfile ] || die "purge left the conffile behind"
-echo "purge removed the credentials, the staged copies and the conffile"
+[ ! -e /etc/hotserve/.backup-timer-configured ] \
+	|| die "purge left the timer marker: a later install would not enable the backup timer"
+echo "purge removed the credentials, the staged copies, the timer marker and the conffile"
 
 echo ""
 echo "ALL PACKAGE SMOKE STAGES PASSED ($deb on $(. /etc/os-release && echo "$PRETTY_NAME"))"

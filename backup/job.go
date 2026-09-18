@@ -83,9 +83,25 @@ func (j Job) Execute(ctx context.Context) error {
 		// uploads/) is not a failure: restic would exit non-zero on a
 		// missing target, and an app is allowed to declare where its
 		// data will go before it puts anything there.
-		if _, err := os.Stat(p); errors.Is(err, fs.ErrNotExist) {
+		//
+		// Lstat, not Stat, so the two cases below can be told apart at
+		// all: Stat answers about a symlink's target, and a link whose
+		// target is missing would be reported as "not created yet".
+		info, err := os.Lstat(p)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
 			j.logf("%s: %s does not exist yet, skipping", j.App, rel)
 			continue
+		case err != nil:
+			return fmt.Errorf("app %s: %s: %w", j.App, rel, err)
+		case info.Mode()&fs.ModeSymlink != 0:
+			// restic stores a symlink as a symlink — it has no option to
+			// follow one (0.18) — so a declared path that is a link to a
+			// data disk would put the link in the snapshot and none of
+			// the data, hourly, while every run reported success. That
+			// is the one outcome a backup must never produce quietly.
+			return fmt.Errorf("app %s: state files %s is a symlink to %s: restic would store the link and none of the data, so this would report success and back up nothing — declare a path the app's data really lives at, or mount the disk at %s",
+				j.App, rel, linkTarget(p), p)
 		}
 		targets = append(targets, p)
 	}
@@ -170,6 +186,17 @@ func (j Job) stageDatabases(ctx context.Context) error {
 func ResticBackupArgs(app string, targets []string) []string {
 	args := []string{"backup", "--quiet", "--tag", "hotserve", "--tag", "app:" + app}
 	return append(args, targets...)
+}
+
+// linkTarget names what a symlink points at, for the error that
+// refuses one. Unreadable is not worth its own message: the refusal is
+// about the link, and the target is there to save a `ls -l`.
+func linkTarget(path string) string {
+	target, err := os.Readlink(path)
+	if err != nil {
+		return "somewhere else"
+	}
+	return target
 }
 
 func (j Job) logf(format string, a ...any) {

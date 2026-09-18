@@ -293,6 +293,24 @@ else
 	fail "--check failed with a current backup: $status_out"
 fi
 
+# restic writes a snapshot even when it exits non-zero, so snapshots
+# alone are not evidence that backups work. Take away the record of the
+# clean run and the report must stop calling this app current, however
+# fresh the snapshot in the repository is — this is the difference
+# between a monitor and a green light.
+mv /var/lib/hotserve-backup/backup-example/.last-success /tmp/last-success
+if hotserve backup status --check --admin 127.0.0.1:2019 >/dev/null 2>&1; then
+	fail "--check passed on snapshots alone: a box whose every run fails part-way would stay green for ever"
+else
+	pass "--check fails when no run has finished cleanly, however fresh the snapshot"
+fi
+if hotserve backup status --admin 127.0.0.1:2019 2>&1 | grep -q "no clean run on this box"; then
+	pass "the report says why a fresh snapshot is not a backup"
+else
+	fail "the report gave no reason: $(hotserve backup status --admin 127.0.0.1:2019 2>&1)"
+fi
+mv /tmp/last-success /var/lib/hotserve-backup/backup-example/.last-success
+
 echo "=== summary ==="
 pkill -f 'INSERT INTO rows' 2>/dev/null
 if [ "$failures" -eq 0 ]; then

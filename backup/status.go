@@ -60,10 +60,17 @@ func (s AppStatus) Stale(now time.Time) bool {
 	if s.Latest == nil {
 		return true
 	}
-	if !s.LastSuccess.IsZero() {
-		return now.Sub(s.LastSuccess) > StaleAfter
+	// And no clean run on this box is the same answer. Falling back to
+	// the newest snapshot here would restore the very failure the
+	// marker exists to catch: restic writes a snapshot and still exits
+	// non-zero, so a box whose every run fails part-way would show a
+	// fresh snapshot every hour and stay green for ever. A box that has
+	// never finished a run has no evidence that its backups work — that
+	// includes a rebuilt one, until its first run.
+	if s.LastSuccess.IsZero() {
+		return true
 	}
-	return now.Sub(s.Latest.Time) > StaleAfter
+	return now.Sub(s.LastSuccess) > StaleAfter
 }
 
 // Status reads every hotserve snapshot in one call and matches them to
@@ -123,7 +130,10 @@ func FormatStatus(w io.Writer, statuses []AppStatus, now time.Time) {
 		// A snapshot newer than the last clean run means the runs
 		// since then have been failing: show that rather than the
 		// snapshot's age, which would read as a healthy backup.
-		if s.Latest != nil && !s.LastSuccess.IsZero() && s.Latest.Time.After(s.LastSuccess.Add(time.Minute)) {
+		switch {
+		case s.Latest != nil && s.LastSuccess.IsZero():
+			last += "  (no clean run on this box)"
+		case s.Latest != nil && !s.LastSuccess.IsZero() && s.Latest.Time.After(s.LastSuccess.Add(time.Minute)):
 			last += "  (last clean run " + humanAge(now.Sub(s.LastSuccess)) + ")"
 		}
 		if s.Stale(now) {

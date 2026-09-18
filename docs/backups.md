@@ -8,9 +8,20 @@ under each app's `shared/` dir.
 Setting it up is two steps: one command per box, and two lines per app.
 
 ```
+sudo install -m 0600 /dev/null /root/b2-key
+sudo tee /root/b2-key >/dev/null <<'EOF'
+AWS_ACCESS_KEY_ID=0045f8…
+AWS_SECRET_ACCESS_KEY=…
+EOF
 sudo hotserve backup init s3:s3.us-west-004.backblazeb2.com/my-bucket \
-	AWS_ACCESS_KEY_ID=0045f8… AWS_SECRET_ACCESS_KEY=…
+	--credentials-file /root/b2-key
+sudo rm /root/b2-key
 ```
+
+The key goes in a file rather than on the command line: `/proc/*/cmdline`
+is readable by every user on the box while init runs, and a command line
+is kept in your shell history afterwards. `init` copies what it reads
+into `/etc/hotserve/backup.env` (root-only), which is where it stays.
 
 ```
 app blog {
@@ -36,6 +47,13 @@ the same two lines — nothing to enable, no second config file.
 
 Backups are per app: what one app declares is copied by a job that can
 see that app's `shared/` dir and nothing else.
+
+**Declare the data, not a link to it.** restic stores a symlink as a
+symlink, so `state files uploads` where `uploads` is a link to a data
+disk would back up the link and none of the files. A job refuses that
+rather than reporting success over nothing; mount the disk at
+`shared/uploads` instead. A symlink *inside* a declared directory is
+stored the same way — its target is not followed.
 
 A restore needs the same repository and the same password, so keep the
 password somewhere other than the box — a password manager, not a note
@@ -182,9 +200,11 @@ sudo apt install ./hotserve_*.deb
 # up — in a file, because sudo does not carry environment variables
 printf '%s' 'correct-horse-battery-staple-42' | sudo tee /root/restic-password >/dev/null
 sudo chmod 0600 /root/restic-password
-sudo hotserve backup init s3:… AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=… \
+sudo install -m 0600 /dev/null /root/b2-key
+printf 'AWS_ACCESS_KEY_ID=…\nAWS_SECRET_ACCESS_KEY=…\n' | sudo tee /root/b2-key >/dev/null
+sudo hotserve backup init s3:… --credentials-file /root/b2-key \
 	--password-file /root/restic-password
-sudo rm /root/restic-password
+sudo rm /root/restic-password /root/b2-key
 
 # files go back where they were; the database copy lands under /var/lib/hotserve-backup
 sudo hotserve backup restic -- restore latest --tag app:blog --target /
@@ -235,10 +255,38 @@ migrated the database in a way you need to undo, roll the code back
 ## Check it is working
 
 ```
+sudo hotserve backup status       # one line per app that declares state
 sudo hotserve backup run          # run it now, don't wait for the timer
 systemctl list-timers hotserve-backup.timer
 sudo hotserve backup restic -- snapshots --tag hotserve
 ```
+
+`status` answers the two questions worth asking — is everything covered,
+and is it current:
+
+```
+APP   DECLARES               SNAPSHOTS  LAST BACKUP
+blog  1 database, 1 path     37         12 min ago  a1b2c3d4
+shop  1 path                 0          never  ⚠
+```
+
+For a monitor, `sudo hotserve backup status --check` prints the same
+report and exits non-zero when any app has no current backup, so a cron
+line or a Nagios-style check needs nothing else.
+
+Two things it will say that are worth knowing before you see them at
+three in the morning:
+
+- **`(no clean run on this box)`** — the repository holds snapshots for
+  this app, but no backup run on *this* machine has finished cleanly.
+  restic writes a snapshot even when it exits part-way through, so a
+  fresh snapshot on its own is not evidence that anything works. This is
+  also what a rebuilt box shows until its first hourly run.
+- **`(last clean run 3 days ago)`** beside a recent snapshot — runs since
+  then have been failing. `journalctl -u hotserve-backup-<app>` says why.
+
+Freshness is measured from the last clean run, not from the newest
+snapshot, so an app whose every run fails part-way cannot look healthy.
 
 Then do the thing almost nobody does: **restore once, on purpose,
 before you need to.** Restore an app's newest snapshot into a scratch
