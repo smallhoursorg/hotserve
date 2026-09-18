@@ -1,12 +1,10 @@
 package backup
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -70,18 +68,17 @@ reads as root; nothing about backups is configured in the Caddyfile.
       Puts the app's declared state back from the newest snapshot a
       clean run recorded in the repository, or the one given. It says
       which snapshot and what will happen, and asks for the app's name
-      before changing anything. Databases are
-      replaced through SQLite's own backup API, in one transaction, so
-      the app can keep running; files in the snapshot are put back, and
-      files added since are kept unless --delete. The snapshot is
-      checked first — each declared path looked up, each database copy
-      through its integrity check — and if any of that fails nothing
-      is touched. A path the snapshot does not hold is left as it is.
-      A directory can be left part-restored by a failure part-way;
-      running the command again finishes it. It runs in the app's
-      backup unit, so it never overlaps that app's backup. On a rebuilt
-      box, restore before the first deploy: the app then starts on its
-      data.
+      before changing anything. Databases are replaced through SQLite's
+      own backup API, in one transaction, so the app can keep running;
+      files in the snapshot are put back, and files added since are
+      kept unless --delete. The snapshot is checked first — each
+      declared path looked up, each database copy through its integrity
+      check — and if any of that fails nothing is touched. A path the
+      snapshot does not hold is left as it is. A directory can be left
+      part-restored by a failure part-way; running the command again
+      finishes it. It runs in the app's backup unit, so it never
+      overlaps that app's backup. On a rebuilt box, restore before the
+      first deploy: the app then starts on its data.
 
   hotserve backup restic -- <restic arguments...>
       Runs restic against this box's repository, as the user the
@@ -96,11 +93,13 @@ reads as root; nothing about backups is configured in the Caddyfile.
       the way the Caddyfile declares it, as sqlite:app.db or
       files:uploads, with paths relative to the app's shared dir:
       every sqlite entry is copied with VACUUM INTO into --staging,
-      then restic gets the copies plus every files entry. This is what
-      'run' launches inside the sandbox; running it by hand is
-      supported and does exactly the same thing, unsandboxed.
-      ('restore-app' is the same for 'restore', and is not run by
-      hand.)
+      then restic gets the copies plus every files entry. Running it by
+      hand is supported, and does both steps here, unsandboxed. 'run'
+      launches them as two sandboxed units (--phase): the copy with the
+      app's data writable — SQLite needs that to read a database — and
+      no network or repository settings, then the upload with the app's
+      data read-only. ('restore-app' is the same for 'restore', and is
+      not run by hand.)
 
 Every restic and sqlite3 command is printed as it runs, so any step
 can be reproduced by hand. Retention is deliberately not applied here:
@@ -114,6 +113,7 @@ belongs with the privileged key, off the box.`,
 			fs.String("user", "hotserve", "user the per-app jobs run as (run)")
 			fs.String("name", "", "app name (app)")
 			fs.String("shared", "", "the app's shared dir, absolute (app)")
+			fs.String("phase", "", "one step of an app's backup: stage (copy its databases) or upload; both when unset (app; set by run)")
 			fs.String("password-file", "", "the password of a repository that already exists, for a rebuilt box (init)")
 			fs.String("credentials-file", "", "provider credentials as KEY=VALUE lines, instead of on the command line (init)")
 			fs.Bool("force", false, "replace an existing environment file (init)")
@@ -198,7 +198,7 @@ func cmdStatus(fl caddycmd.Flags) (int, error) {
 	if err != nil {
 		return caddy1, fmt.Errorf("finding this box's hostname (restic records it on every snapshot): %w", err)
 	}
-	statuses, err := Status(ctx, apps, withCaptureEnv(captureRunner(), env), fl.String("staging"), host)
+	statuses, err := Status(ctx, apps, Exec(osExec).withEnv(env), host)
 	if err != nil {
 		return caddy1, err
 	}
@@ -294,8 +294,7 @@ func cmdInit(fl caddycmd.Flags, args []string) (int, error) {
 	// their output is captured rather than shown: restic's "repository
 	// does not exist" while init is about to create one reads as an
 	// error when it is the expected answer.
-	run, capture := asJob(view, checkRoot, execRunner(os.Stderr), captureQuiet())
-	if err := Init(ctx, o, run, capture, os.Stdout); err != nil {
+	if err := Init(ctx, o, asJob(view, checkRoot, osExec), os.Stdout); err != nil {
 		return caddy1, err
 	}
 	return 0, nil
@@ -383,7 +382,7 @@ func cmdRun(fl caddycmd.Flags) (int, error) {
 	if err := checkStagingRoot(o.StagingRoot); err != nil {
 		return caddy1, err
 	}
-	if err := RunAll(ctx, apps, o, execRunner(os.Stderr), os.Stdout); err != nil {
+	if err := RunAll(ctx, apps, o, osExec, os.Stdout); err != nil {
 		return caddy1, err
 	}
 	return 0, nil
@@ -417,128 +416,27 @@ func cmdApp(fl caddycmd.Flags, entryArgs []string) (int, error) {
 		Staging:   staging,
 		Databases: app.Databases(),
 		Files:     app.Files(),
-		Run:       execRunner(os.Stderr),
-		Capture:   captureRunner(),
+		Exec:      osExec,
 		Log:       os.Stdout,
+	}
+	switch phase := fl.String("phase"); phase {
+	case phaseStage:
+		if err := job.Stage(context.Background()); err != nil {
+			return caddy1, err
+		}
+		fmt.Printf("%s: databases copied\n", name)
+		return 0, nil
+	case phaseUpload:
+		job.Staged = true
+	case "":
+	default:
+		return caddy1, fmt.Errorf("unknown --phase %q: want %s or %s", phase, phaseStage, phaseUpload)
 	}
 	if err := job.Execute(context.Background()); err != nil {
 		return caddy1, err
 	}
 	fmt.Printf("%s: backed up\n", name)
 	return 0, nil
-}
-
-// execRunner runs a real command, letting its output through: restic
-// and sqlite3 explain their own failures better than a wrapper can.
-func execRunner(stderr *os.File) Runner {
-	return func(ctx context.Context, name string, args ...string) error {
-		cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // restic, sqlite3 and systemd-run with an argv built here from the running config, never from a request
-		cmd.Env = commandEnv(ctx)
-		cmd.Stdout = stderr
-		cmd.Stderr = stderr
-		if err := cmd.Run(); err != nil {
-			if _, lookErr := exec.LookPath(name); lookErr != nil {
-				return fmt.Errorf("%s is not installed: %w", name, lookErr)
-			}
-			return err
-		}
-		return nil
-	}
-}
-
-// captureRunner reads a command's stdout instead of passing it
-// through, for the reporting path. Its stderr still goes to the
-// terminal, so restic's own explanation of a failure is not swallowed.
-func captureRunner() Capturer {
-	return func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // restic, sqlite3 and systemd-run with an argv built here from the running config, never from a request
-		cmd.Env = commandEnv(ctx)
-		cmd.Stderr = os.Stderr
-		out, err := cmd.Output()
-		if err != nil {
-			if _, lookErr := exec.LookPath(name); lookErr != nil {
-				return nil, fmt.Errorf("%s is not installed: %w", name, lookErr)
-			}
-			// What it printed before failing goes back with the error:
-			// sqlite3's integrity check says what is wrong on stdout.
-			return out, err
-		}
-		return out, nil
-	}
-}
-
-// captureQuiet keeps a command's output to itself — its failure is an
-// answer, not a fault — but keeps stderr rather than dropping it:
-// restic explains a refusal there, and that wording is the evidence
-// the delete check classifies. Without it, every append-only
-// repository would report as "unknown".
-func captureQuiet() Capturer {
-	return func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // restic, sqlite3 and systemd-run with an argv built here from the running config, never from a request
-		cmd.Env = commandEnv(ctx)
-		var errOut bytes.Buffer
-		cmd.Stderr = &errOut
-		if sink := stderrSink(ctx); sink != nil {
-			cmd.Stderr = io.MultiWriter(&errOut, sink)
-		}
-		out, err := cmd.Output()
-		if err != nil {
-			return append(out, errOut.Bytes()...), err
-		}
-		return out, nil
-	}
-}
-
-// stderrKey carries a buffer that a Capturer copies the command's
-// stderr into, whatever its exit status.
-//
-// A Capturer's return value is the command's stdout — which callers
-// parse, as JSON for `restic snapshots --json` — plus stderr only when
-// it fails. That is not enough for the one place stderr IS the answer:
-// restic exits 0 when the storage refuses a delete, and the refusal is
-// on stderr alone (measured: stdout empty, the 403 on stderr). Merging
-// stderr into every capture would break the JSON; asking for it here,
-// where it is evidence, does not.
-type stderrKey struct{}
-
-func withStderr(ctx context.Context, w *bytes.Buffer) context.Context {
-	return context.WithValue(ctx, stderrKey{}, w)
-}
-
-func stderrSink(ctx context.Context) io.Writer {
-	if w, ok := ctx.Value(stderrKey{}).(*bytes.Buffer); ok && w != nil {
-		return w
-	}
-	return nil
-}
-
-// envKey carries extra environment for a Runner through the context,
-// so a command that has just learned a password (init) can hand it to
-// restic without putting it in this process's own environment, where
-// anything it later starts would inherit it.
-type envKey struct{}
-
-// commandEnv is what a command this package starts runs with: this
-// process's environment plus the settings. An operator running
-// `status` or a restore by hand keeps their proxy, their locale, their
-// ssh-agent. (init's checks do not come through here with the
-// settings: they run as units with the job's own environment — see
-// asJob.)
-func commandEnv(ctx context.Context) []string {
-	settings, _ := ctx.Value(envKey{}).([]string)
-	return append(os.Environ(), settings...)
-}
-
-func withEnv(run Runner, env []string) Runner {
-	return func(ctx context.Context, name string, args ...string) error {
-		return run(context.WithValue(ctx, envKey{}, env), name, args...)
-	}
-}
-
-func withCaptureEnv(capture Capturer, env []string) Capturer {
-	return func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		return capture(context.WithValue(ctx, envKey{}, env), name, args...)
-	}
 }
 
 // cmdRestore puts one app's declared state back from a snapshot: it
@@ -591,13 +489,13 @@ func cmdRestore(fl caddycmd.Flags, args []string) (int, error) {
 	staging := filepath.Join(o.StagingRoot, name)
 	// A rebuilt box restores before the first deploy, when liveswap has
 	// not made the app's directories yet.
-	if err := ensureShared(ctx, app.Shared, o.User, execRunner(os.Stderr)); err != nil {
+	if err := ensureShared(ctx, app.Shared, o.User, osExec); err != nil {
 		return caddy1, err
 	}
 	view := jobView{User: o.User, EnvFile: envFile, Home: StagingRestore(staging)}
 	// This app's backups, and every clean-run record (an OR of the two
 	// --tag flags).
-	out, err := captureRunner()(ctx, "systemd-run", resticInUnit(view, []string{"snapshots", "--json", "--tag", "hotserve,app:" + name, "--tag", CleanTag})...)
+	out, err := Exec(osExec).output(ctx, Cmd{Name: "systemd-run", Args: resticInUnit(view, []string{"snapshots", "--json", "--tag", "hotserve,app:" + name, "--tag", CleanTag})})
 	if err != nil {
 		return caddy1, fmt.Errorf("listing the snapshots of %s: %w", name, err)
 	}
@@ -626,7 +524,7 @@ func cmdRestore(fl caddycmd.Flags, args []string) (int, error) {
 	// PID 1 owns and would otherwise go on writing the app's data with
 	// nobody watching — so the unit is stopped here, at once, and the
 	// message says what that leaves.
-	err = execRunner(os.Stderr)(ctx, "systemd-run", launch...)
+	err = osExec(ctx, Cmd{Name: "systemd-run", Args: launch})
 	if ctx.Err() != nil {
 		_ = exec.Command("systemctl", "stop", unit+".service").Run() //nolint:gosec // a fixed program; the unit name is built here from an app name the config validated
 		return caddy1, fmt.Errorf("interrupted: the restore of %s was stopped, so it may be partly done — run it again to finish it", name)
@@ -657,13 +555,13 @@ func findApp(apps []App, name string) (App, error) {
 // would be root's, and the app could not write its own data. Made as
 // that user, a link someone left in the path is followed with only
 // that user's rights.
-func ensureShared(ctx context.Context, shared, username string, run Runner) error {
+func ensureShared(ctx context.Context, shared, username string, x Exec) error {
 	if _, err := os.Stat(shared); err == nil {
 		return nil
 	}
-	return run(ctx, "systemd-run", "--wait", "--collect", "--quiet",
-		"--property=User="+username, "--property=Group="+username, "--property=UMask=0027",
-		"/bin/mkdir", "-p", shared)
+	return x(ctx, Cmd{Name: "systemd-run", Args: []string{"--wait", "--collect", "--quiet",
+		"--property=User=" + username, "--property=Group=" + username, "--property=UMask=0027",
+		"/bin/mkdir", "-p", shared}})
 }
 
 // cmdRestoreApp is the restore itself, inside the unit cmdRestore
@@ -682,62 +580,18 @@ func cmdRestoreApp(fl caddycmd.Flags, entryArgs []string) (int, error) {
 	}
 	app := App{Name: name, Shared: shared, State: entries}
 	job := RestoreJob{
-		App:         name,
-		Shared:      shared,
-		Staging:     staging,
-		Snapshot:    snapshot,
-		Databases:   app.Databases(),
-		Files:       app.Files(),
-		Delete:      fl.Bool("delete"),
-		Run:         execRunner(os.Stderr),
-		Capture:     captureRunner(),
-		Dump:        resticDump,
-		RestoreTree: resticRestoreTree,
-		Log:         os.Stdout,
+		App:       name,
+		Shared:    shared,
+		Staging:   staging,
+		Snapshot:  snapshot,
+		Databases: app.Databases(),
+		Files:     app.Files(),
+		Delete:    fl.Bool("delete"),
+		Exec:      osExec,
+		Log:       os.Stdout,
 	}
 	if err := job.Execute(context.Background()); err != nil {
 		return caddy1, err
 	}
 	return 0, nil
-}
-
-// resticRestoreTree runs one `restic restore --json`, reading its
-// errors off stderr as they are written. Its stdout is the summary,
-// and is dropped: restic counts a file it could not write as restored,
-// so the summary is evidence of nothing.
-func resticRestoreTree(ctx context.Context, args ...string) (restoreErrors, error) {
-	cmd := exec.CommandContext(ctx, "restic", args...) //nolint:gosec // a fixed program; the snapshot and paths come from the listing just read
-	cmd.Env = commandEnv(ctx)
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return restoreErrors{Counted: -1}, err
-	}
-	if err := cmd.Start(); err != nil {
-		if _, lookErr := exec.LookPath("restic"); lookErr != nil {
-			return restoreErrors{Counted: -1}, fmt.Errorf("restic is not installed: %w", lookErr)
-		}
-		return restoreErrors{Counted: -1}, err
-	}
-	// Read to the end before Wait, which closes the pipe.
-	errs := readRestoreErrors(stderr, os.Stderr)
-	return errs, cmd.Wait()
-}
-
-// resticDump writes one file out of a snapshot. O_EXCL: dst is a name
-// the caller has just cleared, and a link that appeared there since is
-// not followed.
-func resticDump(ctx context.Context, snapshot, path, dst string) error {
-	f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o640) //nolint:gosec // a path built here, inside the unit's own view
-	if err != nil {
-		return err
-	}
-	cmd := exec.CommandContext(ctx, "restic", "dump", snapshot, path) //nolint:gosec // a fixed program; the snapshot and path come from the listing just read
-	cmd.Env = commandEnv(ctx)
-	cmd.Stdout = f
-	cmd.Stderr = os.Stderr
-	err = cmd.Run()
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	return err
 }

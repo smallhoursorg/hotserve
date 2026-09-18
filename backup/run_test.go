@@ -5,8 +5,8 @@ import (
 	"errors"
 	"io"
 	"os"
-	"os/user"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -35,20 +35,6 @@ func launchOpts(stagingRoot string) LaunchOptions {
 	}
 }
 
-// RunAll chowns each staging dir to the user the jobs run as, so a
-// test that actually runs it needs a user this machine has — the
-// hotserve user exists on a box, not in a test container.
-func launchOptsHere(t *testing.T, stagingRoot string) LaunchOptions {
-	t.Helper()
-	me, err := user.Current()
-	if err != nil {
-		t.Fatal(err)
-	}
-	o := launchOpts(stagingRoot)
-	o.User = me.Username
-	return o
-}
-
 // The sandbox is the whole point of launching the job in its own
 // unit, so the properties that constitute it are pinned here: the
 // view holds this app's shared dir read-only and this app's staging
@@ -65,7 +51,9 @@ func TestLaunchArgsSandboxesEachAppToItsOwnData(t *testing.T) {
 		"--unit=hotserve-backup-blog",
 		"--property=User=hotserve",
 		"--property=TemporaryFileSystem=/:ro",
-		"--property=BindPaths=/var/lib/liveswap/blog/shared",
+		// The unit that reaches the network reads the app's data and
+		// cannot write it, database or not.
+		"--property=BindReadOnlyPaths=/var/lib/liveswap/blog/shared",
 		// systemd makes the job's own dir, owned by the job's user and
 		// in its view; the launcher, which is root, never touches it.
 		"--property=StateDirectory=hotserve-backup/blog",
@@ -98,7 +86,7 @@ func TestLaunchArgsSandboxesEachAppToItsOwnData(t *testing.T) {
 
 	// The command the unit runs, after the properties — and what the
 	// launcher logs, rather than the whole property list.
-	want := []string{"/usr/bin/hotserve", "backup", "app", "--name=blog",
+	want := []string{"/usr/bin/hotserve", "backup", "app", "--phase=upload", "--name=blog",
 		"--shared=/var/lib/liveswap/blog/shared", "--staging=/var/lib/hotserve-backup/blog",
 		"sqlite:app.db", "files:uploads"}
 	if got := jobCommand(args); strings.Join(got, " ") != strings.Join(want, " ") {
@@ -124,25 +112,118 @@ func TestLaunchArgsDoNotCapHowLongOrHowLargeABackupMayBe(t *testing.T) {
 	}
 }
 
-// An app whose state is only files never has its dir opened for
-// writing, so it goes in read-only — least privilege per app. A
-// database forces the writable bind, because SQLite creates the -shm
-// file beside it to read a WAL database at all (proven on the box:
-// a read-only mount fails with "unable to open database file").
-func TestLaunchArgsBindsTheAppsDataReadOnlyUnlessADatabaseNeedsOpening(t *testing.T) {
-	filesOnly := testApp("wiki", StateEntry{Kind: KindFiles, Path: "pages"})
-	args := strings.Join(LaunchArgs(filesOnly, launchOpts("/var/lib/hotserve-backup")), "\n")
-	if !strings.Contains(args, "--property=BindReadOnlyPaths=/var/lib/liveswap/wiki/shared") {
-		t.Errorf("files-only app should get a read-only bind:\n%s", args)
+// SQLite creates the -shm file beside a WAL database to read it at all
+// (measured: a read-only mount fails with "unable to open database
+// file"), so whatever copies a database has the app's data writable.
+// That is a unit of its own, with nothing else: no network, and no
+// settings file, so no repository credentials. The unit that has both —
+// restic's — has the data read-only. Everything else about the two
+// sandboxes is the same.
+func TestTheUnitThatCanWriteAnAppsDataCanReachNothing(t *testing.T) {
+	app := testApp("blog", StateEntry{Kind: KindSQLite, Path: "app.db"}, StateEntry{Kind: KindFiles, Path: "uploads"})
+	o := launchOpts("/var/lib/hotserve-backup")
+	stage, upload := StageArgs(app, o), LaunchArgs(app, o)
+	props := func(args []string) []string {
+		var out []string
+		for _, a := range args {
+			if strings.HasPrefix(a, "--property=") || strings.HasPrefix(a, "--unit=") {
+				out = append(out, a)
+			}
+		}
+		return out
 	}
-	if strings.Contains(args, "--property=BindPaths=/var/lib/liveswap/wiki/shared") {
-		t.Error("files-only app must not get a writable bind")
+	const (
+		writable = "--property=BindPaths=/var/lib/liveswap/blog/shared"
+		readOnly = "--property=BindReadOnlyPaths=/var/lib/liveswap/blog/shared"
+		noNet    = "--property=PrivateNetwork=yes"
+		settings = "--property=EnvironmentFile=/etc/hotserve/backup.env"
+	)
+	s, u := props(stage), props(upload)
+	for _, want := range []string{writable, noNet} {
+		if !slices.Contains(s, want) {
+			t.Errorf("the staging unit lacks %s", want)
+		}
 	}
+	for _, a := range s {
+		if strings.Contains(a, "EnvironmentFile") {
+			t.Errorf("the staging unit must hold no repository settings: %s", a)
+		}
+	}
+	for _, want := range []string{readOnly, settings} {
+		if !slices.Contains(u, want) {
+			t.Errorf("the upload unit lacks %s", want)
+		}
+	}
+	for _, never := range []string{writable, noNet} {
+		if slices.Contains(u, never) {
+			t.Errorf("the upload unit must not have %s", never)
+		}
+	}
+	drop := func(all []string, these ...string) []string {
+		return slices.DeleteFunc(slices.Clone(all), func(a string) bool { return slices.Contains(these, a) })
+	}
+	if rest, want := drop(s, writable, noNet), drop(u, readOnly, settings); !slices.Equal(rest, want) {
+		t.Errorf("the two units differ by more than the data's bind, the network and the settings:\nstage  %v\nupload %v", rest, want)
+	}
+	if !slices.Contains(s, "--unit=hotserve-backup-blog") {
+		t.Errorf("one unit name per app keeps a copy, an upload and a restore from ever overlapping: %v", s)
+	}
+	if got := jobCommand(stage); !slices.Equal(got[:4], []string{"/usr/bin/hotserve", "backup", "app", "--phase=stage"}) {
+		t.Errorf("the staging unit runs %v", got)
+	}
+}
 
-	withDB := testApp("blog", StateEntry{Kind: KindSQLite, Path: "app.db"})
-	args = strings.Join(LaunchArgs(withDB, launchOpts("/var/lib/hotserve-backup")), "\n")
-	if !strings.Contains(args, "--property=BindPaths=/var/lib/liveswap/blog/shared") {
-		t.Errorf("an app with a database needs its dir writable:\n%s", args)
+// An app with no database has nothing to copy, so it has no staging
+// step: one unit, its data read-only.
+func TestAnAppWithoutADatabaseHasNoStagingStep(t *testing.T) {
+	var launched []string
+	x := func(_ context.Context, c Cmd) error {
+		for _, a := range c.Args {
+			if phase, ok := strings.CutPrefix(a, "--phase="); ok {
+				launched = append(launched, phase)
+			}
+		}
+		return nil
+	}
+	apps := []App{
+		deployedApp(t, "blog", StateEntry{Kind: KindSQLite, Path: "app.db"}, StateEntry{Kind: KindFiles, Path: "uploads"}),
+		deployedApp(t, "wiki", StateEntry{Kind: KindFiles, Path: "pages"}),
+	}
+	var log strings.Builder
+	if err := RunAll(context.Background(), apps, launchOpts(t.TempDir()), x, &log); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(launched, ",") != "stage,upload,upload" {
+		t.Errorf("want blog copied then uploaded, and wiki uploaded: %v", launched)
+	}
+	if !strings.Contains(log.String(), "blog: copying its databases") || !strings.Contains(log.String(), "with no network and no repository settings") || strings.Contains(log.String(), "wiki: copying") {
+		t.Errorf("the log must say which step has what:\n%s", log.String())
+	}
+}
+
+// A copy that fails is that app's failure: nothing is uploaded for it —
+// the staged copies are last hour's, or none — and the next app still
+// gets its backup.
+func TestAFailedCopyUploadsNothingForThatApp(t *testing.T) {
+	var launched []string
+	x := func(_ context.Context, c Cmd) error {
+		joined := strings.Join(c.Args, " ")
+		launched = append(launched, joined[strings.Index(joined, "--phase="):strings.Index(joined, " --shared=")])
+		if strings.Contains(joined, "--phase=stage --name=blog") {
+			return errors.New("exit status 1")
+		}
+		return nil
+	}
+	apps := []App{
+		deployedApp(t, "blog", StateEntry{Kind: KindSQLite, Path: "app.db"}),
+		deployedApp(t, "shop", StateEntry{Kind: KindSQLite, Path: "app.db"}),
+	}
+	err := RunAll(context.Background(), apps, launchOpts(t.TempDir()), x, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "blog") || strings.Contains(err.Error(), "shop") {
+		t.Fatalf("want an error naming blog alone, got %v", err)
+	}
+	if got := strings.Join(launched, " | "); got != "--phase=stage --name=blog | --phase=stage --name=shop | --phase=upload --name=shop" {
+		t.Errorf("launched: %s", got)
 	}
 }
 
@@ -242,7 +323,7 @@ func TestRunAllContinuesAfterOneFailureAndReportsIt(t *testing.T) {
 		}
 		return nil
 	}
-	err := RunAll(context.Background(), apps, launchOptsHere(t, root), run, io.Discard)
+	err := RunAll(context.Background(), apps, launchOpts(root), fake(run, nil), io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "shop") {
 		t.Fatalf("want an error naming the failed app, got %v", err)
 	}
@@ -293,7 +374,7 @@ func TestRunAllSkipsAnAppThatHasNeverBeenDeployed(t *testing.T) {
 		return nil
 	}
 	var log strings.Builder
-	if err := RunAll(context.Background(), apps, launchOptsHere(t, t.TempDir()), run, &log); err != nil {
+	if err := RunAll(context.Background(), apps, launchOpts(t.TempDir()), fake(run, nil), &log); err != nil {
 		t.Fatalf("an undeployed app is not a failure: %v", err)
 	}
 	if strings.Join(launched, ",") != "blog" {
@@ -310,7 +391,7 @@ func TestRunAllWithNothingDeclaredIsNotAnError(t *testing.T) {
 		t.Error("nothing should be launched")
 		return nil
 	}
-	if err := RunAll(context.Background(), nil, launchOptsHere(t, t.TempDir()), run, &log); err != nil {
+	if err := RunAll(context.Background(), nil, launchOpts(t.TempDir()), fake(run, nil), &log); err != nil {
 		t.Fatalf("want success, got %v", err)
 	}
 	if !strings.Contains(log.String(), "nothing to back up") {

@@ -74,6 +74,16 @@ const CleanTag = "hotserve-clean"
 func cleanAppTag(app string) string { return "clean-app:" + app }
 func cleanOfTag(id string) string   { return "clean-of:" + id }
 
+// cleanOf is the id of the snapshot a clean-run record vouches for.
+func cleanOf(record Snapshot) string {
+	for _, t := range record.Tags {
+		if id, ok := strings.CutPrefix(t, "clean-of:"); ok {
+			return id
+		}
+	}
+	return ""
+}
+
 // cleanRecordArgs writes the record for snapshot id of app. Its content
 // comes from a command restic runs itself, so no file is written for it.
 func cleanRecordArgs(app, id string) []string {

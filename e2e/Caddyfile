@@ -66,9 +66,12 @@
 		# only files never opens a database, so its data must be bound
 		# read-only — the backup of an app like this can never write
 		# to it at all.
+		# `drafts` is declared and never created: a path the app has
+		# not made yet is skipped, and named by `status`.
 		app files-example {
 			command ./server
 			state files pages
+			state files drafts
 		}
 
 		# The Deno example (examples/deno), with the flags from its own

@@ -59,30 +59,63 @@ func unitName(app string) string { return "hotserve-backup-" + app }
 // which turns a hung connection into a retry or a failure; and runs
 // never overlap, because systemd does not start the timer's unit while
 // it is still active.
+//
+// This is the unit that talks to the network — restic, with the
+// repository's credentials — and the app's data is in its view
+// read-only, whatever the app declares. What has to open a database is
+// another unit, before it (StageArgs).
 func LaunchArgs(app App, o LaunchOptions) []string {
-	staging := o.StagingRoot + "/" + app.Name
-	// An app whose state is only files is read as it lies, so its dir
-	// goes in read-only. A database cannot be: SQLite creates the
-	// -shm file beside it to read a WAL database at all, so reading
-	// one from a read-only mount fails outright ("unable to open
-	// database file"). The app's dir is therefore writable exactly
-	// when a database must be opened — and the job still only reads,
-	// as the same user that already owns the data.
+	return unitArgs(app, o, phaseUpload, jobView{
+		User:    o.User,
+		EnvFile: o.EnvFile,
+		Home:    o.StagingRoot + "/" + app.Name,
+		Shared:  app.Shared,
+	})
+}
+
+// StageArgs is the systemd-run invocation that copies an app's
+// databases, for an app that declares one (needsStaging).
+//
+// SQLite creates the -shm file beside a WAL database to read it at all,
+// so reading one from a read-only mount fails outright ("unable to open
+// database file"): whatever copies a database has the app's data
+// writable. So that is all this unit is given. It has no network — the
+// copy is from one directory on this box to another — and no settings
+// file, so it holds no repository credentials either: the process that
+// can write an app's data can reach nothing, and the one that reaches
+// the network (LaunchArgs) cannot write it.
+//
+// Same unit name as the upload that follows it, and as a restore: one
+// name per app is what keeps the three from ever running at once.
+func StageArgs(app App, o LaunchOptions) []string {
+	return unitArgs(app, o, phaseStage, jobView{
+		User:           o.User,
+		Home:           o.StagingRoot + "/" + app.Name,
+		Shared:         app.Shared,
+		SharedWritable: true,
+		NoNetwork:      true,
+	})
+}
+
+// The two steps of one app's backup, as `hotserve backup app --phase`
+// names them. With no phase the command does both, in the current
+// process: that is what running it by hand does.
+const (
+	phaseStage  = "stage"
+	phaseUpload = "upload"
+)
+
+func unitArgs(app App, o LaunchOptions, phase string, v jobView) []string {
 	args := append([]string{
 		"--wait", "--collect", "--quiet",
 		"--unit=" + unitName(app.Name),
-	}, sandboxProperties(jobView{
-		User:           o.User,
-		EnvFile:        o.EnvFile,
-		Home:           staging,
-		Shared:         app.Shared,
-		SharedWritable: sharedWritable(app),
-	})...)
+	}, sandboxProperties(v)...)
 	args = append(args,
 		o.Self, "backup", "app",
+		"--phase="+phase,
 		"--name="+app.Name,
 		"--shared="+app.Shared,
-		"--staging="+staging,
+		"--staging="+v.Home,
 	)
 	// The declarations go across as they were written, so the argv in
 	// the journal reads like the app block it came from.
@@ -92,11 +125,9 @@ func LaunchArgs(app App, o LaunchOptions) []string {
 	return args
 }
 
-// sharedWritable is whether an app's job gets its data dir writable:
-// only when a database must be opened, because SQLite creates the -shm
-// file beside a WAL database to read it at all. One place decides it,
-// for the sandbox and for what the log says about the sandbox.
-func sharedWritable(app App) bool { return len(app.Databases()) > 0 }
+// needsStaging is whether an app's backup has a staging step: only when
+// it declares a database.
+func needsStaging(app App) bool { return len(app.Databases()) > 0 }
 
 // jobCommand is the command a unit runs: LaunchArgs without the
 // systemd-run flags and sandbox properties in front of it — what an
@@ -124,6 +155,9 @@ type jobView struct {
 	// Shared is the app's data, or "" for a unit that reads none.
 	Shared         string
 	SharedWritable bool
+	// NoNetwork gives the unit a network namespace of its own, holding
+	// a loopback and nothing else.
+	NoNetwork bool
 }
 
 // sandboxProperties is the one definition of a backup unit's sandbox,
@@ -135,7 +169,6 @@ func sandboxProperties(v jobView) []string {
 		"--property=Type=oneshot",
 		"--property=User=" + v.User,
 		"--property=Group=" + v.User,
-		"--property=EnvironmentFile=" + v.EnvFile,
 		"--property=Environment=GOGC=20",
 		"--property=Environment=GOMAXPROCS=1",
 		// restic's cache lives with this unit's own directory, not in
@@ -176,6 +209,13 @@ func sandboxProperties(v jobView) []string {
 		"--property=SystemCallFilter=@system-service",
 	}
 	props = append(props, homeProperties(v.Home)...)
+	// The repository settings, for a unit that reaches the repository.
+	if v.EnvFile != "" {
+		props = append(props, "--property=EnvironmentFile="+v.EnvFile)
+	}
+	if v.NoNetwork {
+		props = append(props, "--property=PrivateNetwork=yes")
+	}
 	if v.Shared != "" {
 		if v.SharedWritable {
 			props = append(props, "--property=BindPaths="+v.Shared)
@@ -251,53 +291,50 @@ func resticInUnit(v jobView, args []string) []string {
 // same function that writes /etc/hotserve/backup.env, so systemd
 // parses exactly the bytes the jobs will get. Each call writes them
 // to a fresh root-only file beside that one and removes it after.
-func asJob(v jobView, envDir string, run Runner, capture Capturer) (Runner, Capturer) {
-	launch := func(ctx context.Context, name string, args []string) (context.Context, []string, func(), error) {
-		if name != "restic" {
-			return ctx, nil, nil, fmt.Errorf("init runs restic as the job, and nothing else (asked for %s)", name)
+func asJob(v jobView, envDir string, next Exec) Exec {
+	return func(ctx context.Context, c Cmd) error {
+		if c.Name != "restic" {
+			return fmt.Errorf("init runs restic as the job, and nothing else (asked for %s)", c.Name)
 		}
-		settings, _ := ctx.Value(envKey{}).([]string)
 		f, err := os.CreateTemp(envDir, ".backup.env-check-*")
 		if err != nil {
-			return ctx, nil, nil, fmt.Errorf("writing the settings to check: %w", err)
+			return fmt.Errorf("writing the settings to check: %w", err)
 		}
-		cleanup := func() { _ = os.Remove(f.Name()) }
+		defer func() { _ = os.Remove(f.Name()) }()
 		// One err through all three steps: a chmod or a write that
 		// failed must not leave the check running against a partial
 		// settings file.
 		err = f.Chmod(0o600)
 		if err == nil {
-			_, err = io.WriteString(f, renderEnvFile(settings))
+			_, err = io.WriteString(f, renderEnvFile(c.Env))
 		}
 		if cerr := f.Close(); err == nil {
 			err = cerr
 		}
 		if err != nil {
-			cleanup()
-			return ctx, nil, nil, fmt.Errorf("writing the settings to check: %w", err)
+			return fmt.Errorf("writing the settings to check: %w", err)
 		}
 		view := v
 		view.EnvFile = f.Name()
-		// The secrets are in the file now; systemd-run itself has no
-		// use for them in its own environment.
-		return context.WithValue(ctx, envKey{}, nil), resticInUnit(view, args), cleanup, nil
-	}
-	return func(ctx context.Context, name string, args ...string) error {
-			ctx, argv, cleanup, err := launch(ctx, name, args)
-			if err != nil {
-				return err
-			}
-			defer cleanup()
-			return run(ctx, "systemd-run", argv...)
-		}, func(ctx context.Context, name string, args ...string) ([]byte, error) {
-			ctx, argv, cleanup, err := launch(ctx, name, args)
-			if err != nil {
-				return nil, err
-			}
-			defer cleanup()
-			return capture(ctx, "systemd-run", argv...)
+		// The settings are in the file now: systemd-run itself gets
+		// none of them in its own environment.
+		argv := append([]string{"--unit=" + checkUnit}, resticInUnit(view, c.Args)...)
+		err = next(ctx, Cmd{Name: "systemd-run", Args: argv, Stdout: c.Stdout, Stderr: c.Stderr})
+		// A context that ended — Ctrl-C, or a check that ran out of
+		// time — ends systemd-run, the client. The unit is PID 1's, and
+		// restic in it would go on retrying for minutes, holding the
+		// name: it is stopped here.
+		if ctx.Err() != nil {
+			_ = next(context.WithoutCancel(ctx), Cmd{Name: "systemctl", Args: []string{"stop", checkUnit + ".service"}, Stdout: io.Discard, Stderr: io.Discard})
 		}
+		return err
+	}
 }
+
+// checkUnit is the unit each of init's checks runs as, one after
+// another: named, so that one whose context ends can be stopped, and so
+// that two inits cannot run their checks at once.
+const checkUnit = "hotserve-backup-check"
 
 // RunAll backs up each app in turn — never concurrently: peak memory
 // is then one job's, not the sum, which is what keeps a box with
@@ -306,7 +343,7 @@ func asJob(v jobView, envDir string, run Runner, capture Capturer) (Runner, Capt
 // One app's failure does not stop the others: a broken database must
 // not cost every other app its backup. The failures are collected and
 // reported together.
-func RunAll(ctx context.Context, apps []App, o LaunchOptions, run Runner, log io.Writer) error {
+func RunAll(ctx context.Context, apps []App, o LaunchOptions, x Exec, log io.Writer) error {
 	if len(apps) == 0 {
 		say(log, "no app declares state; nothing to back up")
 		return nil
@@ -323,16 +360,21 @@ func RunAll(ctx context.Context, apps []App, o LaunchOptions, run Runner, log io
 			say(log, "%s: no data yet (never deployed), skipping", app.Name)
 			continue
 		}
-		args := LaunchArgs(app, o)
-		// The command the unit runs, not the forty sandbox properties
+		// The command each unit runs, not the forty sandbox properties
 		// around it: those are the same every time, and
 		// `systemctl show hotserve-backup-<app>` has them while it runs.
-		access := "read-only"
-		if sharedWritable(app) {
-			access = "writable, for SQLite"
+		if needsStaging(app) {
+			stage := StageArgs(app, o)
+			say(log, "%s: copying its databases in %s, its data writable (SQLite needs that to read one), with no network and no repository settings: %s", app.Name, unitName(app.Name), quoteArgs(jobCommand(stage)))
+			if err := x(ctx, Cmd{Name: "systemd-run", Args: stage}); err != nil {
+				say(log, "%s: FAILED (%v) — journalctl -u %s", app.Name, err, unitName(app.Name))
+				failed = append(failed, app.Name)
+				continue
+			}
 		}
-		say(log, "%s: backing up in %s, its data %s: %s", app.Name, unitName(app.Name), access, quoteArgs(jobCommand(args)))
-		if err := run(ctx, "systemd-run", args...); err != nil {
+		args := LaunchArgs(app, o)
+		say(log, "%s: backing up in %s, its data read-only: %s", app.Name, unitName(app.Name), quoteArgs(jobCommand(args)))
+		if err := x(ctx, Cmd{Name: "systemd-run", Args: args}); err != nil {
 			say(log, "%s: FAILED (%v) — journalctl -u %s", app.Name, err, unitName(app.Name))
 			failed = append(failed, app.Name)
 			continue

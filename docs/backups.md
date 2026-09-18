@@ -85,8 +85,7 @@ declare state, then runs one short-lived job per app, in turn. Each job:
    staging dir — a live database file cannot be copied safely any other
    way, and this is the step that makes the backup restorable;
 2. hands restic the copies and the declared file paths, as one snapshot
-   tagged with the app's name — and with a `run:` tag of its own, which
-   is how the job finds that snapshot again to read it back;
+   tagged with the app's name;
 3. exits. Nothing stays running between backups.
 
 Each job runs as the `hotserve` user inside a systemd sandbox whose
@@ -103,16 +102,20 @@ snapshots there. Per-app isolation of the backups themselves would mean
 a repository and a key for each app; that is a reasonable thing to want
 and it is not what this does.
 
-How that app's dir is bound depends on what the app declares:
+Those two steps are two sandboxes, because they need opposite things:
 
-- **Only `state files`** — bound **read-only**. That app's backup
-  cannot write to its data at all.
-- **Any `state sqlite`** — bound **writable**, because SQLite creates
-  the `-shm` file next to a database to read a WAL database at all; on
+- **The copy** has the app's `shared/` **writable**: SQLite creates the
+  `-shm` file next to a database to read a WAL database at all, and on
   a read-only mount the copy fails with "unable to open database file".
-  The job still only reads, as the same user that already owns the
-  data, and the e2e suite checks the database is byte-identical after a
-  backup.
+  So that is all it has — **no network, and no repository settings**.
+  It still only reads, as the same user that already owns the data, and
+  the e2e suite checks the database is byte-identical after a backup.
+- **The upload** — restic, which talks to the network and holds the
+  repository's credentials — has the app's `shared/` **read-only**. It
+  cannot write to the app's data at all.
+
+An app that declares only `state files` has no copy step: one unit, its
+data read-only.
 
 A run counts only once its snapshot has been **read back** out of the
 repository holding every declared path as data: each database as a

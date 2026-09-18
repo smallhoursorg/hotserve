@@ -59,18 +59,21 @@ Windows, and macOS-as-a-server are out of scope by product design.
    owners without following one. The staging root itself is root's,
    `0750`: nothing running as `hotserve` — hotserve.service included —
    needs to enter it, so none can.
-   The hourly job of an app that declares a database has that app's
-   `shared/` bound **writable**: SQLite creates `-shm` beside a WAL
-   database to read it at all. restic — the one process in the job
-   that talks to the network — could therefore alter that app's data
-   if compromised: that app's only, as the user that already owns it.
-   A files-only app's job gets its data read-only.
+   SQLite creates `-shm` beside a WAL database to read it at all, so
+   whatever copies a database has that app's `shared/` **writable**.
+   That is a unit of its own, given nothing else: no network
+   (`PrivateNetwork=`) and no settings file, so no repository
+   credentials. restic — the process that talks to the network, and
+   parses what the storage sends back — runs in the unit after it,
+   with the app's data read-only. The one unit with both the network
+   and an app's data writable is a restore, which an operator starts
+   and confirms.
    A restore (`hotserve backup restore`) takes its
    copies out of the repository into `<app>/restore` beside them and
    removes them when it ends. It runs in that app's backup unit with
    the app's data writable, and with nothing else writable but its own
-   `<app>/restore` dir: the backup's copies and its record of which
-   paths it has seen are not in its view. A link the app left in its
+   `<app>/restore` dir: the backup's copies and its cache are not in
+   its view. A link the app left in its
    own data can therefore steer the restore's writes only into the
    app's own data or that scratch dir.
    The repository itself is never on the box: it is a backend URL

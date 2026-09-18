@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -25,16 +24,17 @@ type restoreFixture struct {
 	// integrityErr its exit status.
 	integrity    string
 	integrityErr error
-	dumped       map[string]string // dst → the snapshot path written there
-	// tree is what `restic restore` of a directory reports; treeErr is
-	// its exit status.
-	tree    restoreErrors
-	treeErr error
+	// treeStderr is what `restic restore` of a directory writes to
+	// stderr; treeErr is its exit status.
+	treeStderr string
+	treeErr    error
+	// fail is the exit status of a command that only runs, by name.
+	fail map[string]error
 }
 
 func newRestore(t *testing.T, dbs, files []string) *restoreFixture {
 	t.Helper()
-	f := &restoreFixture{integrity: "ok", dumped: map[string]string{}}
+	f := &restoreFixture{integrity: "ok"}
 	f.job = RestoreJob{
 		App:       "blog",
 		Shared:    t.TempDir(),
@@ -53,42 +53,32 @@ func newRestore(t *testing.T, dbs, files []string) *restoreFixture {
 		p := filepath.Join(f.job.Shared, rel)
 		f.held[p] = fmt.Sprintf(`{"struct_type":"node","path":%q,"type":"dir","mode":2147484141}`, p)
 	}
-	f.job.Run = func(_ context.Context, name string, args ...string) error {
-		f.calls = append(f.calls, call{name, args})
-		return nil
-	}
-	f.job.Capture = func(_ context.Context, name string, args ...string) ([]byte, error) {
-		f.calls = append(f.calls, call{name, args})
+	// One Exec, answering each command the restore runs the way the
+	// real one does: a listing and an integrity check on stdout, a dumped
+	// file's bytes on stdout, a directory restore's errors on stderr.
+	f.job.Exec = func(_ context.Context, c Cmd) error {
+		f.calls = append(f.calls, call{c.Name, c.Args})
 		switch {
-		case name == "sqlite3":
-			return []byte(f.integrity + "\n"), f.integrityErr
-		case name == "restic" && args[0] == "ls":
-			var b strings.Builder
-			for _, dir := range args[slices.Index(args, "s1full")+1:] {
+		case c.Name == "sqlite3" && c.Stdout != nil:
+			_, _ = c.Stdout.Write([]byte(f.integrity + "\n"))
+			return f.integrityErr
+		case c.Name == "restic" && c.Args[0] == "ls":
+			for _, dir := range c.Args[slices.Index(c.Args, "s1full")+1:] {
 				for p, node := range f.held {
 					if filepath.Dir(p) == dir && node != "" {
-						b.WriteString(node + "\n")
+						_, _ = c.Stdout.Write([]byte(node + "\n"))
 					}
 				}
 			}
-			return []byte(b.String()), nil
-		}
-		return nil, fmt.Errorf("unexpected %s %v", name, args)
-	}
-	f.job.Dump = func(_ context.Context, snapshot, path, dst string) error {
-		f.calls = append(f.calls, call{"dump", []string{snapshot, path, dst}})
-		f.dumped[dst] = path
-		file, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-		if err != nil {
+			return nil
+		case c.Name == "restic" && c.Args[0] == "dump":
+			_, err := c.Stdout.Write([]byte("from the snapshot"))
 			return err
+		case c.Name == "restic" && c.Args[0] == "restore":
+			_, _ = c.Stderr.Write([]byte(f.treeStderr))
+			return f.treeErr
 		}
-		_, _ = file.WriteString("from the snapshot")
-		return file.Close()
-	}
-	f.tree = restoreErrors{Counted: -1}
-	f.job.RestoreTree = func(_ context.Context, args ...string) (restoreErrors, error) {
-		f.calls = append(f.calls, call{"restic", args})
-		return f.tree, f.treeErr
+		return f.fail[c.Name]
 	}
 	return f
 }
@@ -124,8 +114,10 @@ func TestRestorePutsTheDatabaseBackThroughSQLiteAndTheFilesThroughRestic(t *test
 	if got := w[1].args; !slices.Equal(got, []string{"restore", "--json", "--quiet", "s1full:" + uploads, "--target", uploads}) {
 		t.Errorf("files go back as the snapshot's copy of that one directory, without --delete unless asked, got %v", got)
 	}
-	if f.dumped[copyPath] != filepath.Join(StagingData(f.job.Staging), "app.db") {
-		t.Errorf("the database comes out of the snapshot from the copy the backup took, got %v", f.dumped)
+	if !slices.ContainsFunc(f.calls, func(c call) bool {
+		return c.name == "restic" && slices.Equal(c.args, []string{"dump", "s1full", filepath.Join(StagingData(f.job.Staging), "app.db")})
+	}) {
+		t.Errorf("the database comes out of the snapshot from the copy the backup took, got %v", f.calls)
 	}
 	if _, err := os.Stat(filepath.Dir(copyPath)); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("the plaintext copies must be gone after a restore: %v", err)
@@ -153,7 +145,7 @@ func TestRestoreChecksEverythingBeforeItChangesAnything(t *testing.T) {
 		// stdout, "malformed" on stderr, and exits 1 (3.46, measured).
 		"sqlite3 exits 1 over a malformed copy": func(f *restoreFixture) {
 			f.integrity = "*** in database main ***\nTree 2 page 2: btreeInitPage() returns error code 11"
-			f.integrityErr = &exec.ExitError{}
+			f.integrityErr = exited(1)
 		},
 		"the snapshot has no copy of a database": func(f *restoreFixture) {
 			f.held[filepath.Join(StagingData(f.job.Staging), "app.db")] = ""
@@ -206,7 +198,7 @@ func TestRestoreSaysWhatAFailurePartWayLeaves(t *testing.T) {
 		t.Errorf("a directory that failed part-way must be called partly restored, got %v", err)
 	}
 	f = newRestore(t, []string{"app.db"}, nil)
-	f.job.Run = func(context.Context, string, ...string) error { return errors.New("exit status 1") }
+	f.fail = map[string]error{"sqlite3": errors.New("exit status 1")}
 	if err := f.job.Execute(context.Background()); err == nil || !strings.Contains(err.Error(), "it is as it was") {
 		t.Errorf("a failed .restore leaves the database as it was, and must say so, got %v", err)
 	}
@@ -281,7 +273,7 @@ func TestRestoreCarriesOnPastOwnerRefusals(t *testing.T) {
 	f := newRestore(t, nil, []string{"uploads", "avatars"})
 	var log strings.Builder
 	f.job.Log = &log
-	f.tree = readRestoreErrors(strings.NewReader(resticOwnerRefusals), io.Discard)
+	f.treeStderr = resticOwnerRefusals
 	f.treeErr = errors.New("exit status 1")
 	if err := f.job.Execute(context.Background()); err != nil {
 		t.Fatalf("owner refusals alone must not fail a restore: %v", err)
@@ -298,7 +290,7 @@ func TestRestoreCarriesOnPastOwnerRefusals(t *testing.T) {
 // and says what restic said.
 func TestRestoreFailsWhenMoreThanOwnersWentWrong(t *testing.T) {
 	f := newRestore(t, nil, []string{"uploads", "avatars"})
-	f.tree = readRestoreErrors(strings.NewReader(resticOwnerRefusalsAndALostFile), io.Discard)
+	f.treeStderr = resticOwnerRefusalsAndALostFile
 	f.treeErr = errors.New("exit status 1")
 	err := f.job.Execute(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "may be partly restored") || !strings.Contains(err.Error(), "no such file or directory") {

@@ -1,7 +1,6 @@
 package backup
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,7 +8,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -18,25 +16,14 @@ import (
 // stagingRestore is the restore's own working dir, inside the app's
 // staging dir and the only part of it the restore unit can see: its
 // database copies and restic's cache live here. The rest — the backup's
-// copies, its cache, the record of which paths it has seen — is not in
-// the restore's view, because the restore writes into the app's data,
-// and a link the app left there must not be able to steer those writes
-// into the backup's own bookkeeping.
+// copies and its cache — is not in the restore's view, because the
+// restore writes into the app's data, and a link the app left there
+// must not be able to steer those writes into what the backup keeps.
 const stagingRestore = "restore"
 
 // StagingRestore is the restore unit's HOME and only writable dir
 // besides the app's data.
 func StagingRestore(appStaging string) string { return filepath.Join(appStaging, stagingRestore) }
-
-// Dumper writes one file out of a snapshot to dst — `restic dump`,
-// whose output is the file's bytes, so it cannot go through a Runner.
-// dst must not exist: it is created, never opened through a link that
-// the app put where it will be.
-type Dumper func(ctx context.Context, snapshot, path, dst string) error
-
-// TreeRestorer runs one `restic restore --json` of a directory and
-// returns the errors restic reported; err is its exit status.
-type TreeRestorer func(ctx context.Context, args ...string) (restoreErrors, error)
 
 // restoreErrors is what one `restic restore --json` said went wrong.
 //
@@ -83,66 +70,52 @@ func (e restoreErrors) describe() string {
 	return fmt.Sprintf(" (restic reported %d errors, the first: %s)", e.Other, strings.Join(e.OtherFirst, "; "))
 }
 
-// readRestoreErrors reads the stderr of `restic restore --json`, one
-// JSON message per line, as it is written — a line per file is a lot
-// of lines for an uploads dir, so they are counted, not kept. Every
-// error that is not an owner refusal is copied to show as it arrives.
+// read takes one line of the stderr of `restic restore --json`, as it
+// is written — a line per file is a lot of lines for an uploads dir, so
+// they are counted, not kept. Every error that is not an owner refusal
+// goes to show, in restic's words, as it arrives.
 //
 // An owner refusal is recognised by both ends of its message: the same
 // lchown fails with "no such file or directory" when restic could not
 // write the file at all, and that is a real failure. restic's summary
 // on stdout is no help in telling them apart — it counts such a file
 // as restored.
-func readRestoreErrors(r io.Reader, show io.Writer) restoreErrors {
-	errs := restoreErrors{Counted: -1}
+func (e *restoreErrors) read(line string, show io.Writer) {
 	other := func(msg string) {
-		errs.Other++
-		if len(errs.OtherFirst) < 3 {
-			errs.OtherFirst = append(errs.OtherFirst, msg)
+		e.Other++
+		if len(e.OtherFirst) < 3 {
+			e.OtherFirst = append(e.OtherFirst, msg)
 		}
 		say(show, "restic: %s", msg)
 	}
-	lines := bufio.NewScanner(r)
-	lines.Buffer(make([]byte, 0, 64<<10), 1<<20)
-	for lines.Scan() {
-		line := strings.TrimSpace(lines.Text())
-		if line == "" {
-			continue
+	m, ok := parseResticLine(line)
+	switch {
+	case !ok:
+		other(line)
+	case m.Type == "error" && m.During == "restore" && strings.HasPrefix(m.Error.Message, "lchown ") && strings.HasSuffix(m.Error.Message, ": invalid argument"):
+		e.Owner++
+	case m.Type == "error":
+		other(m.Error.Message)
+	case m.Type == "exit_error":
+		var n int
+		if _, err := fmt.Sscanf(strings.TrimSpace(m.Message), "Fatal: There were %d errors", &n); err == nil {
+			e.Counted = n
+			return
 		}
-		var m struct {
-			Type  string `json:"message_type"`
-			Error struct {
-				Message string `json:"message"`
-			} `json:"error"`
-			During  string `json:"during"`
-			Message string `json:"message"`
-		}
-		if err := json.Unmarshal([]byte(line), &m); err != nil {
-			other(line)
-			continue
-		}
-		switch m.Type {
-		case "error":
-			msg := m.Error.Message
-			if m.During == "restore" && strings.HasPrefix(msg, "lchown ") && strings.HasSuffix(msg, ": invalid argument") {
-				errs.Owner++
-				continue
-			}
-			other(msg)
-		case "exit_error":
-			var n int
-			if _, err := fmt.Sscanf(strings.TrimSpace(m.Message), "Fatal: There were %d errors", &n); err == nil {
-				errs.Counted = n
-				continue
-			}
-			other(strings.TrimSpace(m.Message))
-		default:
-			other(line)
-		}
+		other(strings.TrimSpace(m.Message))
+	default:
+		other(line)
 	}
-	if err := lines.Err(); err != nil {
-		other("reading restic's errors: " + err.Error())
+}
+
+// readRestoreErrors reads a whole stderr.
+func readRestoreErrors(r io.Reader, show io.Writer) restoreErrors {
+	errs := restoreErrors{Counted: -1}
+	w := &lineWriter{each: func(line string) { errs.read(line, show) }}
+	if _, err := io.Copy(w, r); err != nil {
+		errs.read("reading restic's errors: "+err.Error(), show)
 	}
+	w.flush()
 	return errs
 }
 
@@ -171,11 +144,9 @@ type RestoreJob struct {
 	// deletes what nobody asked it to is the one that loses data.
 	Delete bool
 
-	Run         Runner
-	Capture     Capturer
-	Dump        Dumper
-	RestoreTree TreeRestorer
-	Log         io.Writer
+	// Exec runs restic and sqlite3.
+	Exec Exec
+	Log  io.Writer
 }
 
 // Execute restores the snapshot.
@@ -236,18 +207,17 @@ func (j RestoreJob) Execute(ctx context.Context) error {
 			return fmt.Errorf("app %s: the staging dir %s has a space, quote or backslash in it, which sqlite3's .restore cannot be given — use a plain --staging path", j.App, j.Staging)
 		}
 		j.logf("+ restic dump %s %s > %s", j.Snapshot, want[i].path, copies[i])
-		if err := j.Dump(ctx, j.Snapshot, want[i].path, copies[i]); err != nil {
+		if err := j.dump(ctx, want[i].path, copies[i]); err != nil {
 			return fmt.Errorf("app %s: taking %s out of snapshot %s: %w", j.App, rel, j.Snapshot, err)
 		}
 		args := []string{copies[i], "PRAGMA integrity_check"}
 		j.logf("+ sqlite3 %s", quoteArgs(args))
-		out, err := j.Capture(ctx, "sqlite3", args...)
+		out, err := j.Exec.output(ctx, Cmd{Name: "sqlite3", Args: args})
 		// sqlite3 rejects a damaged copy in one of two ways: it prints
 		// what is wrong and exits 0, or — a page it cannot read at all —
 		// it says "malformed" on stderr and exits 1. Both are the check
 		// failing; only sqlite3 not running at all is something else.
-		var rejected *exec.ExitError
-		if err != nil && !errors.As(err, &rejected) {
+		if err != nil && exitStatus(err) < 0 {
 			return fmt.Errorf("app %s: checking the copy of %s: %w", j.App, rel, err)
 		}
 		if got := strings.TrimSpace(string(out)); err != nil || got != "ok" {
@@ -301,7 +271,7 @@ func (j RestoreJob) Execute(ctx context.Context) error {
 		// the way the backup's copy does.
 		args := []string{"-cmd", ".timeout " + sqliteBusyTimeoutMS, live, ".restore " + copies[i]}
 		j.logf("+ sqlite3 %s", quoteArgs(args))
-		if err := j.Run(ctx, "sqlite3", args...); err != nil {
+		if err := j.Exec(ctx, Cmd{Name: "sqlite3", Args: args}); err != nil {
 			// .restore is one transaction: a failure leaves the database
 			// as it was.
 			return fmt.Errorf("app %s: restoring %s failed, and it is as it was: %w", j.App, rel, err)
@@ -321,7 +291,7 @@ func (j RestoreJob) Execute(ctx context.Context) error {
 				args = append(args, "--delete")
 			}
 			j.logf("+ restic %s", quoteArgs(args))
-			errs, err := j.RestoreTree(ctx, args...)
+			errs, err := j.restoreTree(ctx, args)
 			switch {
 			case err == nil:
 			case errs.ownerOnly():
@@ -348,7 +318,7 @@ func (j RestoreJob) Execute(ctx context.Context) error {
 			if err := os.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				return fmt.Errorf("app %s: restoring %s: %w", j.App, f.rel, err)
 			}
-			err := j.Dump(ctx, j.Snapshot, f.path, tmp)
+			err := j.dump(ctx, f.path, tmp)
 			if err == nil && f.mode != nil {
 				// dump gives the bytes and not the mode; the listing
 				// has it, and a script that was executable stays so —
@@ -369,6 +339,42 @@ func (j RestoreJob) Execute(ctx context.Context) error {
 	return nil
 }
 
+// dump writes one file out of the snapshot to dst — `restic dump`, whose
+// output is the file's bytes. O_EXCL: dst is a name the caller has just
+// cleared, so it is created, never opened through a link that appeared
+// there since.
+func (j RestoreJob) dump(ctx context.Context, path, dst string) error {
+	f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o640) //nolint:gosec // a path built here, inside the unit's own view
+	if err != nil {
+		return err
+	}
+	c := restic("dump", j.Snapshot, path)
+	c.Stdout = f
+	err = j.Exec(ctx, c)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
+// restoreTree runs one `restic restore --json` of a directory, reading
+// its errors off stderr as they are written; err is its exit status.
+// Its stdout is the summary, and is dropped: restic counts a file it
+// could not write as restored, so the summary is evidence of nothing.
+func (j RestoreJob) restoreTree(ctx context.Context, args []string) (restoreErrors, error) {
+	errs := restoreErrors{Counted: -1}
+	show := j.Log
+	if show == nil {
+		show = io.Discard
+	}
+	stderr := &lineWriter{each: func(line string) { errs.read(line, show) }}
+	c := restic(args...)
+	c.Stdout, c.Stderr = io.Discard, stderr
+	err := j.Exec(ctx, c)
+	stderr.flush()
+	return errs, err
+}
+
 // list looks every declared path up in the snapshot, with one `ls` of
 // their parents — the same bounded listing verifySnapshot uses.
 func (j RestoreJob) list(ctx context.Context, want []expectedNode) (map[string]lsNode, error) {
@@ -381,7 +387,7 @@ func (j RestoreJob) list(ctx context.Context, want []expectedNode) (map[string]l
 		}
 	}
 	j.logf("+ restic %s", quoteArgs(args))
-	out, err := j.Capture(ctx, "restic", args...)
+	out, err := j.Exec.output(ctx, restic(args...))
 	if err != nil {
 		return nil, fmt.Errorf("app %s: listing snapshot %s: %w", j.App, j.Snapshot, err)
 	}

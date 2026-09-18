@@ -3,9 +3,11 @@ package backup
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -36,13 +38,46 @@ type fakeRestic struct {
 	// the bucket, a typo'd one).
 	wrongPassword bool
 	initFails     string
+	// stderr and env are those of the command being answered.
+	stderr io.Writer
+	env    []string
+	// bounded records whether `cat config` was asked against a clock.
+	bounded bool
+}
+
+// exited is a command's exit status, as os/exec reports one.
+type exited int
+
+func (e exited) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
+func (e exited) ExitCode() int { return int(e) }
+
+// opens reports whether the password a command was given opens this
+// repository. One that init made up never does: it is 32 random bytes,
+// and the repository was set up with something else.
+func (f *fakeRestic) opens() bool {
+	for _, kv := range f.env {
+		if pw, ok := strings.CutPrefix(kv, "RESTIC_PASSWORD="); ok {
+			made, _ := regexp.MatchString(`^[A-Za-z0-9_-]{43}$`, pw)
+			return !f.wrongPassword && !made
+		}
+	}
+	return false
+}
+
+// exec is this repository as an Exec: capture answers every command
+// whose stdout is read, and do gets the rest.
+func (f *fakeRestic) exec(do does) Exec {
+	return func(ctx context.Context, c Cmd) error {
+		f.stderr, f.env = c.Stderr, c.Env
+		return fake(do, f.capture)(ctx, c)
+	}
 }
 
 // restic 0.18.0's own words, captured from real runs (see
 // alreadyInitialized).
 const (
-	resticInitExistsS3  = "Fatal: create key in repository at s3:http://e2e-s3:8333/made/other failed: repository master key and config already initialized\n"
-	resticWrongPassword = "Fatal: wrong password or no key found\n"
+	resticInitExistsS3      = "Fatal: create key in repository at s3:http://e2e-s3:8333/made/other failed: repository master key and config already initialized\n"
+	resticWrongPasswordSays = "Fatal: wrong password or no key found\n"
 )
 
 func (f *fakeRestic) capture(ctx context.Context, name string, args ...string) ([]byte, error) {
@@ -51,18 +86,19 @@ func (f *fakeRestic) capture(ctx context.Context, name string, args ...string) (
 	case len(args) > 0 && args[0] == "init":
 		switch {
 		case f.initFails != "":
-			return []byte(f.initFails), errors.New("exit status 1")
+			return []byte(f.initFails), exited(1)
 		case f.repoMissing:
 			f.repoMissing = false
 			return []byte("created restic repository 1a67cc52d5\n"), nil
 		}
-		return []byte(resticInitExistsS3), errors.New("exit status 1")
+		return []byte(resticInitExistsS3), exited(1)
 	case len(args) > 1 && args[0] == "cat" && args[1] == "config":
+		_, f.bounded = ctx.Deadline()
 		switch {
-		case f.repoMissing:
-			return nil, errors.New("Fatal: repository does not exist")
-		case f.wrongPassword:
-			return []byte(resticWrongPassword), errors.New("exit status 12")
+		case f.repoMissing || f.initFails != "":
+			return []byte("Fatal: repository does not exist: unable to open config file\n"), exited(resticNoRepository)
+		case !f.opens():
+			return []byte(resticWrongPasswordSays), exited(resticWrongPassword)
 		}
 		return []byte("{}"), nil
 	case len(args) > 0 && args[0] == "snapshots":
@@ -76,17 +112,12 @@ func (f *fakeRestic) capture(ctx context.Context, name string, args ...string) (
 	case len(args) > 0 && args[0] == "forget":
 		f.forgotten = true
 		// Streams as restic really uses them (measured): what forget
-		// says goes to stderr, stdout stays empty. A Capturer returns
-		// stdout, plus stderr only on a failure — so on exit 0 the
-		// words reach the caller only through the stderr sink it asked
-		// for, exactly as captureQuiet delivers them.
-		if sink := stderrSink(ctx); sink != nil {
-			_, _ = io.WriteString(sink, f.forgetOut)
+		// says goes to stderr, stdout stays empty — whatever its exit
+		// status.
+		if f.stderr != nil {
+			_, _ = io.WriteString(f.stderr, f.forgetOut)
 		}
-		if f.forgetErr != nil {
-			return []byte(f.forgetOut), f.forgetErr
-		}
-		return nil, nil
+		return nil, f.forgetErr
 	}
 	return nil, nil
 }
@@ -101,9 +132,9 @@ func (f *fakeRestic) forgot(id string) bool {
 	return false
 }
 
-func probeSnapshots() Capturer { return (&fakeRestic{}).capture }
+func probeSnapshots() *fakeRestic { return &fakeRestic{} }
 
-func missingRepo() Capturer { return (&fakeRestic{repoMissing: true}).capture }
+func missingRepo() *fakeRestic { return &fakeRestic{repoMissing: true} }
 
 func initOpts(t *testing.T) InitOptions {
 	t.Helper()
@@ -125,7 +156,7 @@ func TestInitWritesARootOnlyEnvFile(t *testing.T) {
 	o.Extra = []string{"AWS_SECRET_ACCESS_KEY=s3cret", "AWS_ACCESS_KEY_ID=keyid"}
 	rec := &recorder{}
 	var out strings.Builder
-	if err := Init(context.Background(), o, rec.run, probeSnapshots(), &out); err != nil {
+	if err := Init(context.Background(), o, probeSnapshots().exec(rec.run), &out); err != nil {
 		t.Fatalf("init: %v", err)
 	}
 	info, err := os.Stat(o.EnvFile)
@@ -162,7 +193,7 @@ func TestInitShowsAGeneratedPasswordOnce(t *testing.T) {
 	o := initOpts(t)
 	o.Password = "" // a new repository
 	var out strings.Builder
-	if err := Init(context.Background(), o, (&recorder{}).run, missingRepo(), &out); err != nil {
+	if err := Init(context.Background(), o, missingRepo().exec((&recorder{}).run), &out); err != nil {
 		t.Fatalf("init: %v", err)
 	}
 	if !strings.Contains(out.String(), "save this somewhere safe") {
@@ -195,7 +226,7 @@ func TestInitWritesNothingWhenTheCredentialsCannotBackUp(t *testing.T) {
 		}
 		return nil
 	}}
-	err := Init(context.Background(), o, rec.run, probeSnapshots(), io.Discard)
+	err := Init(context.Background(), o, probeSnapshots().exec(rec.run), io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "was not written") {
 		t.Fatalf("want a failure saying nothing was installed, got %v", err)
 	}
@@ -220,7 +251,7 @@ func TestInitSaysTheOldSettingsStandWhenForcedInitFails(t *testing.T) {
 		}
 		return nil
 	}}
-	err := Init(context.Background(), o, rec.run, probeSnapshots(), io.Discard)
+	err := Init(context.Background(), o, probeSnapshots().exec(rec.run), io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "unchanged") {
 		t.Fatalf("want a failure saying the old settings stand, got %v", err)
 	}
@@ -239,7 +270,7 @@ func TestInitSaysTheOldSettingsStandWhenForcedInitFails(t *testing.T) {
 func TestInitKeepsTheOrderOfProviderSettings(t *testing.T) {
 	o := initOpts(t)
 	o.Extra = []string{"AWS_ACCESS_KEY_ID=superseded", "AWS_ACCESS_KEY_ID=current"}
-	if err := Init(context.Background(), o, (&recorder{}).run, probeSnapshots(), io.Discard); err != nil {
+	if err := Init(context.Background(), o, probeSnapshots().exec((&recorder{}).run), io.Discard); err != nil {
 		t.Fatalf("init: %v", err)
 	}
 	body, err := os.ReadFile(o.EnvFile)
@@ -261,7 +292,7 @@ func TestInitRefusesToOverwriteWithoutForce(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec := &recorder{}
-	err := Init(context.Background(), o, rec.run, probeSnapshots(), io.Discard)
+	err := Init(context.Background(), o, probeSnapshots().exec(rec.run), io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "--force") {
 		t.Fatalf("want a refusal naming --force, got %v", err)
 	}
@@ -279,7 +310,7 @@ func TestInitRefusesToOverwriteWithoutForce(t *testing.T) {
 // two it did.
 func TestInitCreatesOrOpensTheRepository(t *testing.T) {
 	var out strings.Builder
-	if err := Init(context.Background(), initOpts(t), (&recorder{}).run, probeSnapshots(), &out); err != nil {
+	if err := Init(context.Background(), initOpts(t), probeSnapshots().exec((&recorder{}).run), &out); err != nil {
 		t.Fatalf("init on an existing repository: %v", err)
 	}
 	if !strings.Contains(out.String(), "repository ready") || strings.Contains(out.String(), "created a new repository") {
@@ -289,7 +320,7 @@ func TestInitCreatesOrOpensTheRepository(t *testing.T) {
 	fresh := initOpts(t)
 	fresh.Password = "" // a new repository: init makes the password
 	out.Reset()
-	if err := Init(context.Background(), fresh, (&recorder{}).run, missingRepo(), &out); err != nil {
+	if err := Init(context.Background(), fresh, missingRepo().exec((&recorder{}).run), &out); err != nil {
 		t.Fatalf("init on a missing repository: %v", err)
 	}
 	if !strings.Contains(out.String(), "created a new repository") {
@@ -297,23 +328,50 @@ func TestInitCreatesOrOpensTheRepository(t *testing.T) {
 	}
 }
 
-// Asked to open a repository in a bucket that does not exist, restic
-// retries "The specified bucket does not exist" for many minutes —
-// (measured against a real S3 server: still retrying when stopped at
-// eight). So when `restic init` fails for any reason but "a repository
-// is already here", init reports that failure and does NOT go on to
-// `cat config`: that is the call that hangs, and a typo in a bucket
-// name must not look like a stuck box.
-func TestInitNeverOpensWhereItCouldNotCreate(t *testing.T) {
+// `restic init` exits 1 whether a repository is already there or one
+// could not be made. Which it was is read from `cat config`'s exit
+// status — and that call is made against a clock, because asked of a
+// bucket that does not exist it retries for many minutes (measured
+// against a real S3 server: still retrying when stopped at eight), and a
+// typo in a bucket name must not look like a stuck box.
+func TestInitReportsItsOwnFailureWhereNoRepositoryIs(t *testing.T) {
 	fake := &fakeRestic{initFails: "Fatal: create repository at s3:https://s3.example.com/typo failed: Access Denied.\n"}
-	err := Init(context.Background(), initOpts(t), (&recorder{}).run, fake.capture, io.Discard)
-	if err == nil || !strings.Contains(err.Error(), "Access Denied") {
+	o := initOpts(t)
+	err := Init(context.Background(), o, fake.exec((&recorder{}).run), io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "cannot create a repository") || !strings.Contains(err.Error(), "Access Denied") {
 		t.Fatalf("want init's own failure, quoted, got %v", err)
 	}
-	for _, c := range fake.calls {
-		if len(c.args) > 0 && c.args[0] == "cat" {
-			t.Fatalf("init asked cat config after init failed — the call that retries for many minutes on a missing bucket: %v", fake.calls)
-		}
+	if !fake.bounded {
+		t.Error("cat config was asked with no deadline: on a missing bucket it retries for many minutes")
+	}
+	if _, statErr := os.Stat(o.EnvFile); !os.IsNotExist(statErr) {
+		t.Error("no settings may be written for a repository that was never made")
+	}
+}
+
+// What decides is restic's exit status, which it documents, and never
+// its wording, which differs with the backend and the version: here
+// every answer says the same unhelpful thing.
+func TestRepositoryStateReadsTheExitStatusNotTheWords(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err  error
+		want repoState
+	}{
+		"opens":                      {nil, repositoryOpen},
+		"12: wrong password":         {exited(resticWrongPassword), repositoryLocked},
+		"10: no repository there":    {exited(resticNoRepository), repositoryAbsent},
+		"1: anything else":           {exited(1), repositoryAbsent},
+		"stopped before it answered": {context.DeadlineExceeded, repositoryAbsent},
+		"could not be started":       {errors.New("restic is not installed"), repositoryAbsent},
+	} {
+		t.Run(name, func(t *testing.T) {
+			x := fake(nil, func(context.Context, string, ...string) ([]byte, error) {
+				return []byte("Fatal: something went wrong\n"), tc.err
+			})
+			if got, _ := repositoryState(context.Background(), x); got != tc.want {
+				t.Errorf("state = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -327,7 +385,7 @@ func TestInitAsksForTheExistingRepositorysPassword(t *testing.T) {
 	asked := 0
 	o.AskPassword = func() (string, error) { asked++; return "the-one-saved-at-setup", nil }
 	var out strings.Builder
-	if err := Init(context.Background(), o, (&recorder{}).run, probeSnapshots(), &out); err != nil {
+	if err := Init(context.Background(), o, probeSnapshots().exec((&recorder{}).run), &out); err != nil {
 		t.Fatalf("init: %v", err)
 	}
 	if asked != 1 {
@@ -349,7 +407,7 @@ func TestInitAsksForTheExistingRepositorysPassword(t *testing.T) {
 		t.Error("asked for a password of a repository that did not exist")
 		return "", nil
 	}
-	if err := Init(context.Background(), fresh, (&recorder{}).run, missingRepo(), io.Discard); err != nil {
+	if err := Init(context.Background(), fresh, missingRepo().exec((&recorder{}).run), io.Discard); err != nil {
 		t.Fatalf("init on a new repository: %v", err)
 	}
 }
@@ -360,7 +418,7 @@ func TestInitRefusesAWrongAskedForPassword(t *testing.T) {
 	o := initOpts(t)
 	o.Password = ""
 	o.AskPassword = func() (string, error) { return "not-it", nil }
-	err := Init(context.Background(), o, (&recorder{}).run, (&fakeRestic{wrongPassword: true}).capture, io.Discard)
+	err := Init(context.Background(), o, (&fakeRestic{wrongPassword: true}).exec((&recorder{}).run), io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "cannot open it") {
 		t.Fatalf("want a wrong-password failure, got %v", err)
 	}
@@ -372,30 +430,9 @@ func TestInitRefusesAWrongAskedForPassword(t *testing.T) {
 // Existing repository, wrong password: said plainly, and quickly.
 func TestInitSaysWhenThePasswordCannotOpenTheRepository(t *testing.T) {
 	fake := &fakeRestic{wrongPassword: true}
-	err := Init(context.Background(), initOpts(t), (&recorder{}).run, fake.capture, io.Discard)
+	err := Init(context.Background(), initOpts(t), fake.exec((&recorder{}).run), io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "cannot open it") || !strings.Contains(err.Error(), "wrong password") {
 		t.Fatalf("want a wrong-password failure quoting restic, got %v", err)
-	}
-}
-
-// restic's own words for "already exists", captured from restic 0.18.0,
-// are recognised; anything else is a real failure to create and must
-// not be mistaken for one.
-func TestAlreadyInitializedKnowsResticsWords(t *testing.T) {
-	for _, out := range []string{resticInitExistsS3} {
-		if !alreadyInitialized(out) {
-			t.Errorf("restic's own words for an existing repository were not recognised: %q", out)
-		}
-	}
-	for _, out := range []string{
-		"Stat: The specified bucket does not exist",
-		"Fatal: create repository at s3:…/typo failed: Access Denied.",
-		resticWrongPassword,
-		"",
-	} {
-		if alreadyInitialized(out) {
-			t.Errorf("%q is not a repository that exists", out)
-		}
 	}
 }
 
@@ -405,7 +442,7 @@ func TestInitWarnsWhenTheKeyCanDelete(t *testing.T) {
 	rec := &recorder{}
 	fake := &fakeRestic{} // forget succeeds: the key can delete
 	var out strings.Builder
-	if err := Init(context.Background(), initOpts(t), rec.run, fake.capture, &out); err != nil {
+	if err := Init(context.Background(), initOpts(t), fake.exec(rec.run), &out); err != nil {
 		t.Fatalf("init: %v", err)
 	}
 	if !strings.Contains(out.String(), "WARNING: these credentials can delete backups") {
@@ -464,7 +501,7 @@ func TestInitJudgesTheDeleteByTheRepositoryNotTheExitStatus(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var out strings.Builder
-			if err := Init(context.Background(), initOpts(t), (&recorder{}).run, tc.fake.capture, &out); err != nil {
+			if err := Init(context.Background(), initOpts(t), tc.fake.exec((&recorder{}).run), &out); err != nil {
 				t.Fatalf("init: %v", err)
 			}
 			if !strings.Contains(out.String(), tc.want) {
@@ -482,7 +519,7 @@ func TestInitJudgesTheDeleteByTheRepositoryNotTheExitStatus(t *testing.T) {
 // reach first.
 func TestTheDeleteProbeWritesNoFile(t *testing.T) {
 	rec := &recorder{}
-	if err := Init(context.Background(), initOpts(t), rec.run, probeSnapshots(), io.Discard); err != nil {
+	if err := Init(context.Background(), initOpts(t), probeSnapshots().exec(rec.run), io.Discard); err != nil {
 		t.Fatalf("init: %v", err)
 	}
 	for _, c := range rec.calls {
@@ -504,7 +541,7 @@ func TestInitReportsAnAppendOnlyKey(t *testing.T) {
 		forgetErr: errors.New("exit status 1"),
 	}
 	var out strings.Builder
-	if err := Init(context.Background(), initOpts(t), (&recorder{}).run, fake.capture, &out); err != nil {
+	if err := Init(context.Background(), initOpts(t), fake.exec((&recorder{}).run), &out); err != nil {
 		t.Fatalf("a key that refuses deletes is the good case, not an error: %v", err)
 	}
 	if !strings.Contains(out.String(), "delete refused by the storage") {
@@ -533,7 +570,7 @@ func TestInitDoesNotMistakeAFailureForProtection(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeRestic{refuses: true, forgetOut: tc.out, forgetErr: errors.New("exit status 1")}
 			var out strings.Builder
-			if err := Init(context.Background(), initOpts(t), (&recorder{}).run, fake.capture, &out); err != nil {
+			if err := Init(context.Background(), initOpts(t), fake.exec((&recorder{}).run), &out); err != nil {
 				t.Fatalf("init: %v", err)
 			}
 			if strings.Contains(out.String(), "delete refused by the storage") {
@@ -553,11 +590,23 @@ func TestDeniedByRecognisesRealRefusals(t *testing.T) {
 		"s3.removeObject: 403 Forbidden",
 		"Access Denied.",
 		"b2_delete_file_version: 401: unauthorized",
-		"remove /srv/backups/snapshots/abc: permission denied",
-		"remove /srv/backups/snapshots/abc: read-only file system",
+		"This request is not authorized to perform this operation.",
 	} {
 		if !deniedBy(text) {
 			t.Errorf("%q is a storage refusing, and must count as one", text)
+		}
+	}
+	// Every repository is an object store reached over the network, so a
+	// filesystem's words are never the storage's: they are this box's —
+	// restic's cache, a temp dir — and a probe snapshot that is still
+	// there beside one of them is not evidence of anything.
+	for _, text := range []string{
+		"unable to open cache: mkdir /var/lib/hotserve-backup/x/cache: permission denied",
+		"open /tmp/restic-temp-pack-1: read-only file system",
+		"operation not permitted",
+	} {
+		if deniedBy(text) {
+			t.Errorf("%q is this box talking, not the storage refusing a delete", text)
 		}
 	}
 }
@@ -572,7 +621,7 @@ func TestInitFailsWhenTheProbeSnapshotCannotBeWritten(t *testing.T) {
 		}
 		return nil
 	}
-	err := Init(context.Background(), initOpts(t), rec.run, probeSnapshots(), io.Discard)
+	err := Init(context.Background(), initOpts(t), probeSnapshots().exec(rec.run), io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "not writable") {
 		t.Fatalf("want a not-writable error, got %v", err)
 	}
@@ -593,7 +642,7 @@ func TestInitRefusesToLetCredentialsRedefineItsOwnSettings(t *testing.T) {
 	} {
 		o := initOpts(t)
 		o.Extra = []string{"AWS_ACCESS_KEY_ID=keyid", kv}
-		err := Init(context.Background(), o, (&recorder{}).run, probeSnapshots(), io.Discard)
+		err := Init(context.Background(), o, probeSnapshots().exec((&recorder{}).run), io.Discard)
 		if err == nil {
 			t.Errorf("%s should be refused", kv)
 			continue
@@ -607,7 +656,7 @@ func TestInitRefusesToLetCredentialsRedefineItsOwnSettings(t *testing.T) {
 func TestInitRejectsMalformedCredentials(t *testing.T) {
 	o := initOpts(t)
 	o.Extra = []string{"AWS_ACCESS_KEY_ID"}
-	err := Init(context.Background(), o, (&recorder{}).run, probeSnapshots(), io.Discard)
+	err := Init(context.Background(), o, probeSnapshots().exec((&recorder{}).run), io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "KEY=VALUE") {
 		t.Fatalf("want a KEY=VALUE error, got %v", err)
 	}
@@ -624,7 +673,7 @@ func TestInitRefusesAPath(t *testing.T) {
 			calls = append(calls, name)
 			return nil, nil
 		}
-		err := Init(context.Background(), o, run, capture, io.Discard)
+		err := Init(context.Background(), o, fake(run, capture), io.Discard)
 		if err == nil || !strings.Contains(err.Error(), "not a backend URL") {
 			t.Errorf("%q: want a refusal naming backend URLs, got %v", repo, err)
 		}

@@ -6,11 +6,13 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // InitOptions is one `hotserve backup init`.
@@ -60,7 +62,7 @@ const DeleteProbeTag = "hotserve-delete-probe"
 // A key that can delete gets a warning naming what it means, because
 // the box's credentials being able to erase the backups is the
 // difference between a backup and a hostage.
-func Init(ctx context.Context, o InitOptions, run Runner, capture Capturer, log io.Writer) (err error) {
+func Init(ctx context.Context, o InitOptions, x Exec, log io.Writer) (err error) {
 	if o.Repository == "" {
 		return fmt.Errorf("a repository is required, e.g. `hotserve backup init s3:s3.us-west-004.backblazeb2.com/my-bucket`")
 	}
@@ -119,10 +121,8 @@ func Init(ctx context.Context, o InitOptions, run Runner, capture Capturer, log 
 	// first would survive a failed run — a typo'd bucket, a wrong
 	// key — and the retry would then refuse to overwrite it, warning
 	// about losing backups that were never made.
-	baseRun, baseCapture := run, capture
-	env := EnvFor(o.Repository, password, o.Extra)
-	run = withEnv(baseRun, env)
-	capture = withCaptureEnv(baseCapture, env)
+	base := x
+	x = base.withEnv(EnvFor(o.Repository, password, o.Extra))
 
 	// Create first, then open — never the other way round. Asked to open
 	// a repository in a bucket that does not exist, restic 0.18 treats
@@ -130,26 +130,22 @@ func Init(ctx context.Context, o InitOptions, run Runner, capture Capturer, log 
 	// for many minutes (measured: still retrying when stopped at eight),
 	// so a typo in a bucket name would look like init hanging. `restic
 	// init` answers at once either way: it creates the repository (and
-	// the bucket, where the key may), or it refuses because one is
-	// already there. Only then is `cat config` asked to prove the
-	// password — against a bucket now known to exist.
-	out, initErr := capture(ctx, "restic", "init")
-	switch {
-	case initErr == nil:
+	// the bucket, where the key may), or it fails.
+	//
+	// It fails the same way — exit 1 — whether a repository is already
+	// there or one could not be made, and says which only in words. `cat
+	// config` says it in its exit status (repositoryState), so that is
+	// what decides; init's words are for the operator to read.
+	out, initErr := x.asked(ctx, restic("init"))
+	if initErr == nil {
 		say(log, "created a new repository")
-	case !alreadyInitialized(string(out)):
-		return fmt.Errorf("cannot create a repository at %s: %s\n\nCheck the URL, that the bucket exists, and that the storage key may write to it.\n\n%s", o.Repository, firstLine(out, initErr), asJobHint)
-	case generated && o.AskPassword == nil:
-		// A password this command invented cannot open a repository
-		// that already exists; writing it down would leave the box
-		// backing up into something it cannot read.
-		return fmt.Errorf("%s already exists, and a new password was generated for it — run init at a terminal to be asked for the password you saved when you first set it up, or pass it with --password-file", o.Repository)
-	default:
-		if generated {
+	} else {
+		state, why := repositoryState(ctx, x)
+		if state == repositoryLocked && generated && o.AskPassword != nil {
 			// A rebuilt box, at a terminal: the repository is there, so
 			// the invented password is dropped and the real one asked
 			// for. Nothing was written with the invented one — `restic
-			// init` refused before creating anything.
+			// init` failed before creating anything.
 			asked, err := o.AskPassword()
 			if err != nil {
 				return err
@@ -158,12 +154,20 @@ func Init(ctx context.Context, o InitOptions, run Runner, capture Capturer, log 
 				return err
 			}
 			password, generated = asked, false
-			env = EnvFor(o.Repository, password, o.Extra)
-			run = withEnv(baseRun, env)
-			capture = withCaptureEnv(baseCapture, env)
+			x = base.withEnv(EnvFor(o.Repository, password, o.Extra))
+			state, why = repositoryState(ctx, x)
 		}
-		if out, err := capture(ctx, "restic", "cat", "config"); err != nil {
-			return fmt.Errorf("%s already exists, and this password cannot open it (%s) — pass --password-file with the password you saved when you first set it up", o.Repository, firstLine(out, err))
+		switch {
+		case state == repositoryOpen:
+		case state == repositoryLocked && generated:
+			// A password this command invented cannot open a repository
+			// that already exists; writing it down would leave the box
+			// backing up into something it cannot read.
+			return fmt.Errorf("%s already exists, and a new password was generated for it — run init at a terminal to be asked for the password you saved when you first set it up, or pass it with --password-file", o.Repository)
+		case state == repositoryLocked:
+			return fmt.Errorf("%s already exists, and this password cannot open it (%s) — pass --password-file with the password you saved when you first set it up", o.Repository, why)
+		default:
+			return fmt.Errorf("cannot create a repository at %s: %s\n\nCheck the URL, that the bucket exists, and that the storage key may write to it.\n\n%s", o.Repository, firstLine(out, initErr), asJobHint)
 		}
 	}
 	say(log, "repository ready")
@@ -182,7 +186,7 @@ func Init(ctx context.Context, o InitOptions, run Runner, capture Capturer, log 
 	// would otherwise leave the file behind, arming an hourly job that
 	// fails every time, and the retry would refuse to overwrite it
 	// without --force.
-	deletion, err := probeDelete(ctx, run, capture)
+	deletion, err := probeDelete(ctx, x)
 	if err != nil {
 		// What the operator has to know is what the box is doing NOW.
 		// With --force over a working setup that is "still backing up
@@ -220,17 +224,58 @@ func Init(ctx context.Context, o InitOptions, run Runner, capture Capturer, log 
 	return nil
 }
 
-// alreadyInitialized recognises restic refusing to init over a
-// repository that exists. The wording is restic 0.18.0's own, captured
-// from a real run:
-//
-//	s3: …failed: repository master key and config already initialized
-//
-// Anything else is a real failure to create, and is reported as one —
-// without asking `cat config` afterwards, which is the call that hangs
-// on a bucket that does not exist.
-func alreadyInitialized(out string) bool {
-	return strings.Contains(out, "master key and config already initialized")
+// What `restic cat config` finds where init could not create.
+type repoState int
+
+const (
+	// repositoryAbsent: none there, or nothing that could be reached in
+	// time — init's failure to create one stands.
+	repositoryAbsent repoState = iota
+	// repositoryOpen: one is there, and this password opens it.
+	repositoryOpen
+	// repositoryLocked: one is there, and this password does not.
+	repositoryLocked
+)
+
+// restic's exit statuses, which it documents and keeps (0.17 and later;
+// measured on 0.18.0 against an S3 server, and they pass through
+// `systemd-run --wait`): 10 for no repository at that location, 12 for
+// a password that opens none of its keys.
+const (
+	resticNoRepository  = 10
+	resticWrongPassword = 12
+)
+
+// openTimeout bounds `cat config`. It answers in a second or two when
+// there is anything to answer about; asked of a bucket that does not
+// exist it retries for many minutes, and the unit is stopped instead
+// (asJob stops a check whose context ends).
+const openTimeout = 30 * time.Second
+
+// repositoryState asks whether a repository is there, by exit status —
+// never by what restic prints, which is wording, and which differs with
+// the backend and the version. why is restic's first line, to quote.
+func repositoryState(ctx context.Context, x Exec) (state repoState, why string) {
+	ctx, cancel := context.WithTimeout(ctx, openTimeout)
+	defer cancel()
+	out, err := x.asked(ctx, restic("cat", "config"))
+	switch {
+	case err == nil:
+		return repositoryOpen, ""
+	case exitStatus(err) == resticWrongPassword:
+		return repositoryLocked, firstLine(out, err)
+	}
+	return repositoryAbsent, firstLine(out, err)
+}
+
+// exitStatus is the status a command exited with, or -1 when it did not
+// get as far as exiting (it could not be started, or was stopped).
+func exitStatus(err error) int {
+	var exited interface{ ExitCode() int }
+	if errors.As(err, &exited) {
+		return exited.ExitCode()
+	}
+	return -1
 }
 
 // firstLine is the part of restic's output worth quoting in an error:
@@ -294,21 +339,24 @@ func resolvePassword(o InitOptions) (string, bool, error) {
 // no file is written for it: this process runs as root, and anything
 // it wrote where the checks can see is somewhere the backup user can
 // reach first.
-func probeDelete(ctx context.Context, run Runner, capture Capturer) (probeResult, error) {
-	if err := run(ctx, "restic", "backup", "--quiet", "--tag", DeleteProbeTag,
+func probeDelete(ctx context.Context, x Exec) (probeResult, error) {
+	if err := x(ctx, restic("backup", "--quiet", "--tag", DeleteProbeTag,
 		"--stdin-from-command", "--stdin-filename", DeleteProbeTag,
-		"--", "echo", "hotserve delete probe"); err != nil {
+		"--", "echo", "hotserve delete probe")); err != nil {
 		return probeUnknown, fmt.Errorf("writing a probe snapshot: %w (the repository is not writable with these credentials)", err)
 	}
-	id, err := newestSnapshotID(ctx, capture, DeleteProbeTag)
+	id, err := newestSnapshotID(ctx, x, DeleteProbeTag)
 	if err != nil {
 		return probeUnknown, err
 	}
 	// The refusal, when there is one, is on stderr with exit status 0,
-	// so stderr is asked for explicitly: it is the evidence.
-	var stderr bytes.Buffer
-	out, forgetErr := capture(withStderr(ctx, &stderr), "restic", "forget", "--quiet", id)
-	still, err := snapshotListed(ctx, capture, DeleteProbeTag, id)
+	// so both streams are kept whatever the status: stderr is the
+	// evidence.
+	var stdout, stderr bytes.Buffer
+	forget := restic("forget", "--quiet", id)
+	forget.Stdout, forget.Stderr = &stdout, &stderr
+	forgetErr := x(ctx, forget)
+	still, err := snapshotListed(ctx, x, DeleteProbeTag, id)
 	switch {
 	case err != nil:
 		// Cannot tell what happened: that is the answer, not a guess.
@@ -321,7 +369,7 @@ func probeDelete(ctx context.Context, run Runner, capture Capturer) (probeResult
 	// repository would otherwise be reported as "your backups cannot be
 	// deleted", which is the one thing a security check must never say
 	// on no evidence.
-	evidence := string(out) + " " + stderr.String()
+	evidence := stdout.String() + " " + stderr.String()
 	if forgetErr != nil {
 		evidence += " " + forgetErr.Error()
 	}
@@ -333,8 +381,8 @@ func probeDelete(ctx context.Context, run Runner, capture Capturer) (probeResult
 
 // snapshotListed reports whether the snapshot with this short id is
 // still in the repository.
-func snapshotListed(ctx context.Context, capture Capturer, tag, id string) (bool, error) {
-	out, err := capture(ctx, "restic", "snapshots", "--json", "--tag", tag)
+func snapshotListed(ctx context.Context, x Exec, tag, id string) (bool, error) {
+	out, err := x.asked(ctx, restic("snapshots", "--json", "--tag", tag))
 	if err != nil {
 		return false, err
 	}
@@ -361,7 +409,16 @@ const (
 
 // deniedBy recognises a storage saying no. The wording comes from the
 // backends: S3-compatible stores answer AccessDenied or 403 Forbidden,
-// B2 says unauthorized.
+// B2 says unauthorized, Azure "not authorized". They are object stores'
+// words only: every repository is reached over the network, so a
+// filesystem's — "permission denied", "read-only file system" — are
+// this box's (restic's cache, a temp dir), never the storage refusing.
+//
+// This is the one decision here made on wording, because restic gives a
+// refused delete no exit status of its own (it exits 0). It is a second
+// condition, never the first: the probe snapshot has to be still in the
+// repository before its words are read at all, and words that are not
+// recognised read as "unknown", not as "refused".
 //
 // Words only, never a bare status number. A match here becomes "your
 // backups cannot be deleted", so a false one is the worst answer this
@@ -373,8 +430,7 @@ func deniedBy(text string) bool {
 	t := strings.ToLower(text)
 	for _, s := range []string{
 		"accessdenied", "access denied", "forbidden",
-		"unauthorized", "not authorized", "permission denied",
-		"operation not permitted", "read-only",
+		"unauthorized", "not authorized",
 	} {
 		if strings.Contains(t, s) {
 			return true
@@ -385,8 +441,8 @@ func deniedBy(text string) bool {
 
 // newestSnapshotID finds the snapshot just written, so it can be
 // deleted by id.
-func newestSnapshotID(ctx context.Context, capture Capturer, tag string) (string, error) {
-	out, err := capture(ctx, "restic", "snapshots", "--json", "--tag", tag)
+func newestSnapshotID(ctx context.Context, x Exec, tag string) (string, error) {
+	out, err := x.asked(ctx, restic("snapshots", "--json", "--tag", tag))
 	if err != nil {
 		return "", fmt.Errorf("listing the probe snapshot: %w", err)
 	}

@@ -5,19 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
 )
-
-// Capturer runs a command and returns its stdout. Separate from
-// Runner because only the reporting path needs the output; the
-// backup path deliberately lets restic's own output through to the
-// journal instead.
-type Capturer func(ctx context.Context, name string, args ...string) ([]byte, error)
 
 // Snapshot is the part of `restic snapshots --json` this reads.
 type Snapshot struct {
@@ -88,11 +82,11 @@ func (s AppStatus) Stale(now time.Time) bool {
 //
 // host is this box's hostname: freshness is this box's runs, not those
 // of another box writing to the same repository.
-func Status(ctx context.Context, apps []App, capture Capturer, stagingRoot, host string) ([]AppStatus, error) {
+func Status(ctx context.Context, apps []App, x Exec, host string) ([]AppStatus, error) {
 	// --no-lock: listing snapshots needs no lock, so status writes
 	// nothing into the repository. Two --tag flags are an OR: the
 	// backups, and the clean-run records.
-	out, err := capture(ctx, "restic", "snapshots", "--no-lock", "--json", "--tag", "hotserve", "--tag", CleanTag)
+	out, err := x.output(ctx, restic("snapshots", "--no-lock", "--json", "--tag", "hotserve", "--tag", CleanTag))
 	if err != nil {
 		return nil, fmt.Errorf("reading snapshots: %w", err)
 	}
@@ -112,18 +106,21 @@ func Status(ctx context.Context, apps []App, capture Capturer, stagingRoot, host
 	statuses := make([]AppStatus, 0, len(apps))
 	for _, app := range apps {
 		st := AppStatus{App: app, Snapshots: len(byApp[app.Name])}
+		var lastClean string // the snapshot this box's newest clean run vouches for
 		for _, r := range records[app.Name] {
 			if r.Hostname == host && r.Time.After(st.LastSuccess) {
-				st.LastSuccess = r.Time
+				st.LastSuccess, lastClean = r.Time, cleanOf(r)
 			}
 		}
-		// The seen list is written by a clean run on this box; until
-		// there has been one it says nothing yet. Lstat: a link where
-		// the list should be is not a list (see readSeen).
-		if info, err := os.Lstat(SeenPaths(filepath.Join(stagingRoot, app.Name))); err == nil && info.Mode().IsRegular() {
-			seen := readSeen(SeenPaths(filepath.Join(stagingRoot, app.Name)))
+		// What that snapshot was given is what this box's last clean run
+		// found; a declared path not among it has not been there yet.
+		// Until there has been a clean run, this says nothing.
+		for _, s := range byApp[app.Name] {
+			if lastClean == "" || s.ID != lastClean {
+				continue
+			}
 			for _, rel := range app.Files() {
-				if !seen[filepath.Clean(rel)] {
+				if p, err := sharedPath(app.Shared, rel); err == nil && !slices.Contains(s.Paths, p) {
 					st.NeverThere = append(st.NeverThere, filepath.Clean(rel))
 				}
 			}

@@ -240,6 +240,18 @@ if journalctl --no-pager -u hotserve-backup-backup-example.service | grep -q 're
 else
 	fail "the job did not log its restic command"
 fi
+# restic is run with --json, for the id of the snapshot it wrote; what
+# reaches the journal is still words.
+if journalctl --no-pager -u hotserve-backup-backup-example.service | grep -Eq 'snapshot [0-9a-f]{8}: [0-9]+ new and [0-9]+ changed files, .* added to the repository'; then
+	pass "the job says which snapshot it wrote and what it added"
+else
+	fail "no summary of the backup in the journal: $(journalctl --no-pager -u hotserve-backup-backup-example.service | tail -5)"
+fi
+if journalctl --no-pager -u hotserve-backup-backup-example.service -u hotserve-backup-files-example.service | grep -q 'message_type'; then
+	fail "restic's JSON reached the journal: $(journalctl --no-pager -u hotserve-backup-backup-example.service | grep message_type | head -2)"
+else
+	pass "none of restic's JSON reaches the journal"
+fi
 # A run only counts once the snapshot has been read back out of the
 # repository holding what was declared — checked here against restic's
 # real JSON. backup-example declares one database and one files path.
@@ -283,17 +295,23 @@ if [ "$db_before" = "$(sha256sum "$SHARED/app.db" | cut -d' ' -f1)" ]; then
 else
 	fail "the backup modified the app's database"
 fi
-# An app that declares only files never opens a database, so it gets no
-# write access to its data: least privilege per app.
-if grep -q "files-example: backing up in hotserve-backup-files-example, its data read-only:" /tmp/run1.log; then
-	pass "a files-only app's data is bound read-only"
+# The unit that reaches the network — restic's — has an app's data
+# read-only, database or not. What has to open a database (SQLite creates
+# -shm beside one to read it at all) is a step of its own before it, with
+# the data writable and nothing else: no network, no repository settings.
+# (Its real properties are checked further down, while one is running.)
+if grep -q "files-example: backing up in hotserve-backup-files-example, its data read-only:" /tmp/run1.log \
+	&& grep -q "backup-example: backing up in hotserve-backup-backup-example, its data read-only:" /tmp/run1.log; then
+	pass "every app's data is read-only to the unit that uploads it"
 else
-	fail "a files-only app should be bound read-only: $(grep 'files-example: backing up' /tmp/run1.log)"
+	fail "the upload units: $(grep 'backing up in' /tmp/run1.log)"
 fi
-if grep -q "backup-example: backing up in hotserve-backup-backup-example, its data writable, for SQLite:" /tmp/run1.log; then
-	pass "the database app's data is bound writable (SQLite needs to create -shm)"
+if grep -q "backup-example: copying its databases in hotserve-backup-backup-example, its data writable" /tmp/run1.log \
+	&& ! grep -q "files-example: copying" /tmp/run1.log \
+	&& [ "$(grep -n 'backup-example: copying' /tmp/run1.log | cut -d: -f1)" -lt "$(grep -n 'backup-example: backing up' /tmp/run1.log | cut -d: -f1)" ]; then
+	pass "an app with a database has its copy taken first, in a step of its own; an app without one has no such step"
 else
-	fail "the database app needs a writable bind: $(grep 'backup-example: backing up' /tmp/run1.log)"
+	fail "the staging step: $(grep -E 'copying|backing up in' /tmp/run1.log)"
 fi
 
 echo "=== the snapshot taken under write load restores ==="
@@ -555,6 +573,8 @@ chown root:root "$SHARED/uploads/unreadable"
 chmod 000 "$SHARED/uploads/unreadable"
 clean_before=$(count_of hotserve-clean,clean-app:backup-example)
 snaps_before=$(count_of hotserve,app:backup-example)
+t_fail=$(date +%s)
+sleep 1
 if hotserve backup run --admin 127.0.0.1:2019 >/tmp/run-fail.log 2>&1; then
 	fail "a run in which one app's backup failed exited 0: $(tail -5 /tmp/run-fail.log)"
 else
@@ -564,6 +584,11 @@ if grep -q 'backup-example: FAILED' /tmp/run-fail.log && grep -q 'files-example:
 	pass "the failing app is named, and the other app still got its backup"
 else
 	fail "after a failing job: $(grep -E ': (ok|FAILED)' /tmp/run-fail.log | tr '\n' ' ')"
+fi
+if journalctl --no-pager -u hotserve-backup-backup-example.service --since "@$t_fail" | grep -q 'restic: .*uploads/unreadable: permission denied'; then
+	pass "the journal says, in restic's words, which file it could not read"
+else
+	fail "restic's error is not in the journal: $(journalctl --no-pager -u hotserve-backup-backup-example.service --since "@$t_fail" | tail -6)"
 fi
 if [ "$(count_of hotserve,app:backup-example)" -eq $((snaps_before + 1)) ] && [ "$(count_of hotserve-clean,clean-app:backup-example)" -eq "$clean_before" ]; then
 	pass "restic left a snapshot of the failed run, and no clean-run record vouches for it"
@@ -581,6 +606,37 @@ if hotserve backup run --admin 127.0.0.1:2019 >/tmp/run-mend.log 2>&1 && [ "$(co
 	pass "with the file gone the next run is clean, and is recorded as one"
 else
 	fail "the run after the fix: $(tail -5 /tmp/run-mend.log)"
+fi
+
+echo "=== a declared path that is not there: not yet, or not any more ==="
+# What this box has backed up before is read from the repository — its
+# newest clean run's snapshot — and only when a declared path is missing.
+# files-example declares `drafts`, which nothing has ever created.
+status_paths=$(hotserve backup status --check --admin 127.0.0.1:2019 2>&1)
+paths_rc=$?
+if [ "$paths_rc" -eq 0 ] && echo "$status_paths" | grep -q "drafts has not existed at any backup yet"; then
+	pass "a declared path the app has not made yet is skipped and named by status, and --check still passes"
+else
+	fail "a never-created path (exit $paths_rc): $status_paths"
+fi
+# `pages` has been backed up. Gone, it must fail that app's run rather
+# than drop out of every backup from now on.
+mv "$FILES_SHARED/pages" "$FILES_SHARED/pages.aside"
+t_gone=$(date +%s)
+sleep 1
+if hotserve backup run --admin 127.0.0.1:2019 >/tmp/run-gone.log 2>&1; then
+	fail "a run in which a backed-up path had vanished exited 0: $(tail -5 /tmp/run-gone.log)"
+elif grep -q 'files-example: FAILED' /tmp/run-gone.log && grep -q 'backup-example: ok' /tmp/run-gone.log \
+	&& journalctl --no-pager -u hotserve-backup-files-example.service --since "@$t_gone" | grep -q "pages was backed up before and is not there now"; then
+	pass "a declared path that was backed up and is gone fails that app's run, and says which path"
+else
+	fail "a vanished path: $(grep -E ': (ok|FAILED)' /tmp/run-gone.log | tr '\n' ' ') / $(journalctl --no-pager -u hotserve-backup-files-example.service --since "@$t_gone" | tail -3)"
+fi
+mv "$FILES_SHARED/pages.aside" "$FILES_SHARED/pages"
+if hotserve backup run --admin 127.0.0.1:2019 >/tmp/run-back.log 2>&1 && grep -q 'files-example: ok' /tmp/run-back.log; then
+	pass "with the path back the next run is clean"
+else
+	fail "the run after the path came back: $(tail -5 /tmp/run-back.log)"
 fi
 
 echo "=== the launcher is root, and makes nothing under the staging root ==="
@@ -702,6 +758,17 @@ hold
 hotserve backup run --admin 127.0.0.1:2019 >/tmp/run-held.log 2>&1 &
 run_pid=$!
 if wait_for unit_running; then
+	# The unit held here is the copy: the one step with the app's data
+	# writable. What systemd gave it, not what a log line says.
+	# (Asked for one at a time: several at once, `show` leaves out the
+	# ones that are empty, and an empty EnvironmentFiles is the point.)
+	held=$(systemctl show "$unit" -p PrivateNetwork -p BindPaths -p ExecStart | tr '\n' ' ')
+	if [ "$(systemctl show "$unit" -p PrivateNetwork --value)" = yes ] && systemctl show "$unit" -p BindPaths --value | grep -q "$SHARED" \
+		&& [ -z "$(systemctl show "$unit" -p EnvironmentFiles --value)" ] && systemctl show "$unit" -p ExecStart --value | grep -q -- '--phase=stage'; then
+		pass "the unit with an app's data writable has no network and no repository settings"
+	else
+		fail "the staging unit's sandbox: $held EnvironmentFiles=[$(systemctl show "$unit" -p EnvironmentFiles --value)]"
+	fi
 	if hotserve backup status --admin 127.0.0.1:2019 2>&1 | grep -q "backing up now"; then
 		pass "status says a backup is running while one is"
 	else

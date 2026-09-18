@@ -2,15 +2,15 @@ package backup
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
-	"syscall"
 	"testing"
-	"time"
 )
 
 type call struct {
@@ -20,7 +20,16 @@ type call struct {
 
 type recorder struct {
 	calls []call
-	fail  map[string]error
+	// all is every call since the fixture was made: tests clear calls
+	// between runs, and the fake repository (remembered) needs the runs
+	// before.
+	all  []call
+	fail map[string]error
+	// say answers the commands whose stdout is read. summary is what
+	// `restic backup --json` prints when it exits cleanly; unset, it
+	// names snapshot s1full.
+	say     says
+	summary string
 	// failIf decides per invocation, for the commands whose outcome
 	// is the answer rather than a failure (restic forget in init).
 	failIf func(name string, args []string) error
@@ -29,8 +38,82 @@ type recorder struct {
 	touch bool
 }
 
+// lastClean is what the repository would hold of this fixture's newest
+// clean run: the id its clean-run record vouches for, and the paths the
+// backup before that record was given.
+func (r *recorder) lastClean() (id string, paths []string) {
+	var targets []string
+	for _, c := range r.all {
+		if c.name != "restic" || len(c.args) == 0 || c.args[0] != "backup" {
+			continue
+		}
+		if !slices.Contains(c.args, CleanTag) {
+			targets = nil
+			for _, a := range c.args {
+				if strings.HasPrefix(a, "/") {
+					targets = append(targets, a)
+				}
+			}
+			continue
+		}
+		for _, a := range c.args {
+			if of, ok := strings.CutPrefix(a, "clean-of:"); ok {
+				id, paths = of, targets
+			}
+		}
+	}
+	return id, paths
+}
+
+// remembered answers, in front of next, the two questions a job asks the
+// repository about its own past: this host's newest clean-run record,
+// and the snapshot that record vouches for.
+func remembered(rec *recorder, next says) says {
+	return func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if name == "restic" && len(args) > 0 && args[0] == "snapshots" {
+			last := args[len(args)-1]
+			id, paths := rec.lastClean()
+			switch {
+			case strings.HasPrefix(last, CleanTag+",") && id == "":
+				return []byte(`[]`), nil
+			case strings.HasPrefix(last, CleanTag+","):
+				return json.Marshal([]Snapshot{{ID: "rec1", ShortID: "rec1", Tags: []string{CleanTag, cleanAppTag("blog"), cleanOfTag(id)}}})
+			case id != "" && last == id:
+				return json.Marshal([]Snapshot{{ID: id, ShortID: id, Paths: paths}})
+			}
+		}
+		return next(ctx, name, args...)
+	}
+}
+
+// summaryOf is restic's own summary line for a backup (0.18.0, measured),
+// naming the snapshot it wrote.
+func summaryOf(id string) string {
+	return `{"message_type":"summary","files_new":2,"files_changed":0,"data_added_packed":1686,"total_duration":0.7,"snapshot_id":"` + id + `"}` + "\n"
+}
+
+// exec is the fixture's Exec. A backup is recorded like any command that
+// only runs, and then prints its summary; every other command whose
+// stdout is read is answered by say.
+func (r *recorder) exec(ctx context.Context, c Cmd) error {
+	backup := c.Name == "restic" && len(c.Args) > 0 && c.Args[0] == "backup" && slices.Contains(c.Args, "--json")
+	if c.Stdout == nil || backup {
+		err := r.run(ctx, c.Name, c.Args...)
+		if err == nil && backup {
+			summary := r.summary
+			if summary == "" {
+				summary = summaryOf("s1full")
+			}
+			_, _ = c.Stdout.Write([]byte(summary))
+		}
+		return err
+	}
+	return fake(nil, r.say)(ctx, c)
+}
+
 func (r *recorder) run(_ context.Context, name string, args ...string) error {
 	r.calls = append(r.calls, call{name, args})
+	r.all = append(r.all, call{name, args})
 	if r.touch && name == "sqlite3" && len(args) > 0 {
 		// The SQL is the last argument, after -cmd and the URI.
 		if dst := stagedPathFromSQL(args[len(args)-1]); dst != "" {
@@ -86,12 +169,11 @@ func newJob(t *testing.T, rec *recorder, dbs, files []string) Job {
 		Staging:   t.TempDir(),
 		Databases: dbs,
 		Files:     files,
-		RunID:     "r1",
-		Run:       rec.run,
+		Exec:      rec.exec,
 		Log:       io.Discard,
 		Env:       testEnv,
 	}
-	job.Capture = snapshotHolding(heldBy(job))
+	rec.say = remembered(rec, snapshotHolding(heldBy(job)))
 	return job
 }
 
@@ -118,7 +200,7 @@ func heldBy(j Job) map[string]string {
 // a snapshot holding `held`: one snapshot, and `ls` of a directory
 // lists that directory's entries in the snapshot — which are only the
 // ones that were backed up, never the rest of what was on disk.
-func snapshotHolding(held map[string]string) Capturer {
+func snapshotHolding(held map[string]string) says {
 	return func(_ context.Context, _ string, args ...string) ([]byte, error) {
 		switch args[0] {
 		case "snapshots":
@@ -175,10 +257,64 @@ func TestExecuteStagesDatabasesThenBacksUp(t *testing.T) {
 	if restic.name != "restic" {
 		t.Fatalf("last command = %q, want restic", restic.name)
 	}
-	want := []string{"backup", "--quiet", "--tag", "hotserve", "--tag", "app:blog", "--tag", "run:r1",
+	want := []string{"backup", "--json", "--quiet", "--tag", "hotserve", "--tag", "app:blog",
 		StagingData(job.Staging), filepath.Join(job.Shared, "uploads")}
 	if strings.Join(restic.args, " ") != strings.Join(want, " ") {
 		t.Errorf("restic argv:\n got %v\nwant %v", restic.args, want)
+	}
+}
+
+// As `run` launches them: the copy in one unit, the upload in another.
+// The upload opens no database — it has the app's data read-only — and
+// refuses to go on without the copies the step before it left.
+func TestTheUploadStepUsesTheCopiesTheStagingStepLeft(t *testing.T) {
+	rec := &recorder{touch: true}
+	job := newJob(t, rec, []string{"app.db", "data/sessions.db"}, []string{"uploads"})
+	if err := job.Stage(context.Background()); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	if len(rec.calls) != 2 || rec.calls[0].name != "sqlite3" || rec.calls[1].name != "sqlite3" {
+		t.Fatalf("the staging step copies the databases and runs nothing else: %+v", rec.calls)
+	}
+	rec.calls = nil
+	job.Staged = true
+	// The staging step needs neither the repository nor its settings;
+	// only the upload does.
+	if err := job.Execute(context.Background()); err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	for _, c := range rec.calls {
+		if c.name == "sqlite3" {
+			t.Errorf("the upload step must open no database: %v", c.args)
+		}
+	}
+	if cleanRecord(rec) == nil {
+		t.Errorf("the upload step backs up, reads back and records: %+v", rec.calls)
+	}
+
+	// No copies: the staging step did not run, or failed.
+	rec = &recorder{}
+	job = newJob(t, rec, []string{"app.db"}, nil)
+	job.Staged = true
+	err := job.Execute(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "no staged copy of app.db") {
+		t.Fatalf("want a failure naming the missing copy, got %v", err)
+	}
+	if len(rec.calls) != 0 {
+		t.Errorf("nothing may be uploaded without the copies: %+v", rec.calls)
+	}
+}
+
+// The staging step runs with no repository settings at all.
+func TestTheStagingStepNeedsNoRepositorySettings(t *testing.T) {
+	rec := &recorder{touch: true}
+	job := newJob(t, rec, []string{"app.db"}, nil)
+	job.Env = func(string) string { return "" }
+	if err := job.Stage(context.Background()); err != nil {
+		t.Fatalf("stage without RESTIC_*: %v", err)
+	}
+	if err := job.Execute(context.Background()); err == nil || !strings.Contains(err.Error(), "RESTIC_REPOSITORY") {
+		t.Fatalf("the upload still requires them, got %v", err)
 	}
 }
 
@@ -323,7 +459,7 @@ func TestExecuteFailsWhenTheSnapshotDoesNotHoldWhatWasDeclared(t *testing.T) {
 			job := newJob(t, rec, []string{"app.db"}, []string{"uploads"})
 			held := heldBy(job)
 			tc.edit(job, held)
-			job.Capture = snapshotHolding(held)
+			rec.say = snapshotHolding(held)
 			err := job.Execute(context.Background())
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("want a failure saying %q, got %v", tc.want, err)
@@ -339,27 +475,29 @@ func TestExecuteFailsWhenTheSnapshotDoesNotHoldWhatWasDeclared(t *testing.T) {
 // itself: restic lists a named directory's direct children, so naming
 // an uploads dir would return a line per upload (measured: 501 lines
 // for 500 files, against 2 for its parent). In the snapshot a parent
-// holds only what was backed up from it. And it asks for the snapshot
-// this run tagged, so neither another box writing to the same
+// holds only what was backed up from it. And it lists the snapshot
+// restic named in its summary — asking the repository which snapshot is
+// "this run's" is a guess — so neither another box writing to the same
 // repository nor an earlier run of this one is ever the one checked.
 func TestExecuteReadsBackThroughTheParentsOfWhatWasDeclared(t *testing.T) {
-	var lsArgs, snapshotArgs []string
+	var lsArgs []string
+	var looked int
 	rec := &recorder{}
 	job := newJob(t, rec, []string{"app.db", "data/sessions.db"}, []string{"uploads"})
-	holding := job.Capture
-	job.Capture = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	holding := rec.say
+	rec.say = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		switch args[0] {
 		case "ls":
 			lsArgs = args
 		case "snapshots":
-			snapshotArgs = args
+			looked++
 		}
 		return holding(ctx, name, args...)
 	}
 	if err := job.Execute(context.Background()); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
-	want := []string{"ls", "--json", "s1",
+	want := []string{"ls", "--json", "s1full",
 		StagingData(job.Staging),
 		filepath.Join(StagingData(job.Staging), "data"),
 		job.Shared,
@@ -372,8 +510,8 @@ func TestExecuteReadsBackThroughTheParentsOfWhatWasDeclared(t *testing.T) {
 			t.Errorf("the read-back must not list the declared directory's own contents: %v", lsArgs)
 		}
 	}
-	if got, want := strings.Join(snapshotArgs, " "), "snapshots --json --tag hotserve,app:blog,run:r1"; got != want {
-		t.Errorf("the snapshot checked must be the one this run tagged:\n got %s\nwant %s", got, want)
+	if looked != 0 {
+		t.Errorf("the snapshot to check is the one restic named, not one looked up: %d lookups", looked)
 	}
 	// A snapshot holding everything declared is a success, recorded in
 	// the repository against that snapshot's full id, and never tagged
@@ -384,27 +522,41 @@ func TestExecuteReadsBackThroughTheParentsOfWhatWasDeclared(t *testing.T) {
 	}
 }
 
-// The clean-run record vouches for one snapshot by id, so the read-back
-// has to know which snapshot this run wrote. Anything but exactly one
-// snapshot under the run's tag is not knowing, and nothing is recorded.
-func TestExecuteRecordsNothingUnlessOneSnapshotCarriesTheRunTag(t *testing.T) {
-	for name, listing := range map[string]string{
-		"none": `[]`,
-		"two":  `[{"id":"s1full","short_id":"s1"},{"id":"s2full","short_id":"s2"}]`,
+// The clean-run record vouches for one snapshot by id, and the id is the
+// one restic gave for this run's backup. A run restic does not name a
+// snapshot for has nothing to read back, and records nothing.
+func TestTheSnapshotIsTheOneResticNamed(t *testing.T) {
+	rec := &recorder{summary: summaryOf("9f3a77c2e1d04b5a")}
+	job := newJob(t, rec, []string{"app.db"}, nil)
+	var listed string
+	holding := rec.say
+	rec.say = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if args[0] == "ls" {
+			listed = args[2]
+		}
+		return holding(ctx, name, args...)
+	}
+	if err := job.Execute(context.Background()); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if listed != "9f3a77c2e1d04b5a" {
+		t.Errorf("read back snapshot %q, want the one restic named", listed)
+	}
+	if r := cleanRecord(rec); r == nil || !slices.Contains(r, "clean-of:9f3a77c2e1d04b5a") {
+		t.Errorf("the clean-run record must vouch for the snapshot restic named: %v", r)
+	}
+
+	for name, summary := range map[string]string{
+		"nothing on stdout":            " ",
+		"a summary with no id":         `{"message_type":"summary","files_new":2}` + "\n",
+		"a line that is not a message": "backup done\n",
 	} {
 		t.Run(name, func(t *testing.T) {
-			rec := &recorder{}
+			rec := &recorder{summary: summary}
 			job := newJob(t, rec, []string{"app.db"}, nil)
-			holding := job.Capture
-			job.Capture = func(ctx context.Context, cmd string, args ...string) ([]byte, error) {
-				if args[0] == "snapshots" {
-					return []byte(listing), nil
-				}
-				return holding(ctx, cmd, args...)
-			}
 			err := job.Execute(context.Background())
-			if err == nil || !strings.Contains(err.Error(), "run:r1") {
-				t.Fatalf("want a failure naming the run's tag, got %v", err)
+			if err == nil || !strings.Contains(err.Error(), "without naming the snapshot") {
+				t.Fatalf("want a failure saying no snapshot was named, got %v", err)
 			}
 			if r := cleanRecord(rec); r != nil {
 				t.Errorf("no snapshot was identified, so none may be vouched for: %v", r)
@@ -413,41 +565,36 @@ func TestExecuteRecordsNothingUnlessOneSnapshotCarriesTheRunTag(t *testing.T) {
 	}
 }
 
-// Left unset, the run id is random: two runs never share a tag, and the
-// read-back asks for the tag its own backup was given.
-func TestEachRunTagsItsOwnSnapshot(t *testing.T) {
-	var tags []string
-	for range 2 {
-		rec := &recorder{}
-		job := newJob(t, rec, []string{"app.db"}, nil)
-		job.RunID = ""
-		var lookedUp string
-		holding := job.Capture
-		job.Capture = func(ctx context.Context, cmd string, args ...string) ([]byte, error) {
-			if args[0] == "snapshots" {
-				lookedUp = args[len(args)-1]
-			}
-			return holding(ctx, cmd, args...)
+// restic's errors arrive as JSON with --json, and the journal is read by
+// people: each is put back into its own words, with the file it is about.
+func TestResticsErrorsReachTheLogInWords(t *testing.T) {
+	rec := &recorder{}
+	job := newJob(t, rec, nil, []string{"uploads"})
+	var log strings.Builder
+	job.Log = &log
+	job.Exec = func(ctx context.Context, c Cmd) error {
+		if c.Name == "restic" && c.Args[0] == "backup" && c.Stderr != nil {
+			_, _ = c.Stderr.Write([]byte(`{"message_type":"error","error":{"message":"open /data/uploads/locked: permission denied"},"during":"archival","item":"/data/uploads/locked"}` + "\n" +
+				`{"message_type":"exit_error","code":3,"message":"Warning: at least one source file could not be read"}` + "\n"))
+			_, _ = c.Stdout.Write([]byte(summaryOf("partial1")))
+			return errors.New("exit status 3")
 		}
-		if err := job.Execute(context.Background()); err != nil {
-			t.Fatalf("execute: %v", err)
-		}
-		var tag string
-		for _, a := range rec.calls[1].args {
-			if strings.HasPrefix(a, "run:") {
-				tag = a
-			}
-		}
-		if len(tag) != len("run:")+16 {
-			t.Fatalf("want a run tag of 16 hex digits on the backup, got %q in %v", tag, rec.calls[1].args)
-		}
-		if want := "hotserve,app:blog," + tag; lookedUp != want {
-			t.Errorf("the read-back looked up %q, want the backup's own tag %q", lookedUp, want)
-		}
-		tags = append(tags, tag)
+		return rec.exec(ctx, c)
 	}
-	if tags[0] == tags[1] {
-		t.Errorf("two runs shared the tag %s", tags[0])
+	err := job.Execute(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "exit status 3") {
+		t.Fatalf("want the run to fail on restic's exit status, got %v", err)
+	}
+	for _, want := range []string{"restic: open /data/uploads/locked: permission denied (/data/uploads/locked)", "restic: Warning: at least one source file could not be read"} {
+		if !strings.Contains(log.String(), want) {
+			t.Errorf("missing %q in the log:\n%s", want, log.String())
+		}
+	}
+	if strings.Contains(log.String(), "message_type") {
+		t.Errorf("JSON reached the journal:\n%s", log.String())
+	}
+	if r := cleanRecord(rec); r != nil {
+		t.Errorf("a snapshot restic wrote on its way to exit 3 must not be vouched for: %v", r)
 	}
 }
 
@@ -489,7 +636,8 @@ func TestExecuteSkipsADeclaredPathThatNeverExisted(t *testing.T) {
 // Removing a `state files` line removes the path from what is expected:
 // deleting that directory afterwards is not a failure.
 func TestExecuteForgetsAPathThatIsNoLongerDeclared(t *testing.T) {
-	job := newJob(t, &recorder{}, nil, []string{"uploads", "avatars"})
+	rec := &recorder{}
+	job := newJob(t, rec, nil, []string{"uploads", "avatars"})
 	if err := job.Execute(context.Background()); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
@@ -497,52 +645,78 @@ func TestExecuteForgetsAPathThatIsNoLongerDeclared(t *testing.T) {
 	if err := os.RemoveAll(filepath.Join(job.Shared, "avatars")); err != nil {
 		t.Fatal(err)
 	}
-	job.Capture = snapshotHolding(heldBy(job))
+	rec.say = remembered(rec, snapshotHolding(heldBy(job)))
 	if err := job.Execute(context.Background()); err != nil {
 		t.Fatalf("an undeclared path's absence is not a failure: %v", err)
 	}
-	if seen := readSeen(SeenPaths(job.Staging)); seen["avatars"] || !seen["uploads"] {
-		t.Errorf("the list should now hold exactly what was declared and present: %v", seen)
+	if _, paths := rec.lastClean(); !slices.Equal(paths, []string{filepath.Join(job.Shared, "uploads")}) {
+		t.Errorf("the newest clean run should hold exactly what is declared and present: %v", paths)
 	}
 }
 
-// `status` reads the list as root, and a job wrote it. A link there is
-// not followed — its target's lines would become "paths" — and a FIFO
-// is not waited on: either reads as no list, at once.
-func TestTheSeenListIsReadOnlyAsARegularFile(t *testing.T) {
-	dir := t.TempDir()
-	secret := filepath.Join(dir, "root-only")
-	if err := os.WriteFile(secret, []byte("uploads\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	link := filepath.Join(dir, "link")
-	if err := os.Symlink(secret, link); err != nil {
-		t.Fatal(err)
-	}
-	fifo := filepath.Join(dir, "fifo")
-	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	for name, path := range map[string]string{"a link": link, "a fifo": fifo} {
-		done := make(chan map[string]bool, 1)
-		go func() { done <- readSeen(path) }()
-		select {
-		case seen := <-done:
-			if len(seen) != 0 {
-				t.Errorf("%s was read as a list: %v", name, seen)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatalf("%s: reading the list blocked", name)
+// What a box has backed up before is in the repository, so a run whose
+// declared paths are all there asks it nothing: two calls to read its
+// snapshot back, and no more. One that finds a path missing asks once,
+// for this host's newest clean run.
+func TestTheRepositoryIsAskedAboutThePastOnlyWhenAPathIsMissing(t *testing.T) {
+	rec := &recorder{}
+	job := newJob(t, rec, nil, []string{"uploads", "avatars", "exports"})
+	var asked [][]string
+	inner := rec.say
+	rec.say = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if args[0] == "snapshots" && strings.HasPrefix(args[len(args)-1], CleanTag+",") {
+			asked = append(asked, args)
 		}
+		return inner(ctx, name, args...)
 	}
-	if seen := readSeen(secret); !seen["uploads"] {
-		t.Errorf("a regular file is the list: %v", seen)
+	if err := job.Execute(context.Background()); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	if len(asked) != 0 {
+		t.Fatalf("every declared path was there, and the repository was still asked: %v", asked)
+	}
+	// Two paths the app never made: both are skipped on one question.
+	job.Files = append(job.Files, "later", "later-still")
+	if err := job.Execute(context.Background()); err != nil {
+		t.Fatalf("paths that were never there are not a failure: %v", err)
+	}
+	if len(asked) != 1 {
+		t.Fatalf("want one question for the whole run, got %d: %v", len(asked), asked)
+	}
+	host, _ := os.Hostname()
+	if got := strings.Join(asked[0], " "); !strings.Contains(got, "--latest 1 --host "+host) || !strings.HasSuffix(got, CleanTag+",clean-app:blog") {
+		t.Errorf("the question must be this host's newest clean run of this app: %s", got)
+	}
+}
+
+// Not knowing is not "not created yet". A run that finds a declared
+// path missing and cannot ask the repository fails, rather than dropping
+// the path from every backup from then on.
+func TestAMissingPathFailsTheRunWhenThePastCannotBeRead(t *testing.T) {
+	rec := &recorder{}
+	job := newJob(t, rec, []string{"app.db"}, nil)
+	job.Files = []string{"uploads"} // declared, not there
+	inner := rec.say
+	rec.say = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if args[0] == "snapshots" && strings.HasPrefix(args[len(args)-1], CleanTag+",") {
+			return nil, errors.New("exit status 1")
+		}
+		return inner(ctx, name, args...)
+	}
+	err := job.Execute(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "uploads is not there") || !strings.Contains(err.Error(), "could not be read from the repository") {
+		t.Fatalf("want a failure saying what could not be known, got %v", err)
+	}
+	for _, c := range rec.calls {
+		if c.name == "restic" {
+			t.Errorf("nothing may be backed up by a run that does not know what it is dropping: %v", c.args)
+		}
 	}
 }
 
 // `state files uploads/` and `state files uploads` name one directory;
 // changing the spelling must not make a vanished path look new.
-func TestTheSeenListIgnoresHowAPathIsSpelled(t *testing.T) {
+func TestABackedUpPathIsKnownHoweverItIsSpelled(t *testing.T) {
 	job := newJob(t, &recorder{}, nil, []string{"uploads/"})
 	if err := job.Execute(context.Background()); err != nil {
 		t.Fatalf("first run: %v", err)

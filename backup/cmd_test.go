@@ -1,7 +1,6 @@
 package backup
 
 import (
-	"bytes"
 	"context"
 	"os"
 	"slices"
@@ -99,12 +98,12 @@ func TestAsJobRunsResticAsTheJobDoes(t *testing.T) {
 	var gotArgs []string
 	var envDuring string
 	var settingsLeaked bool
-	record := func(ctx context.Context, name string, args ...string) error {
-		gotName, gotArgs = name, args
-		if s, _ := ctx.Value(envKey{}).([]string); len(s) > 0 {
+	record := func(_ context.Context, c Cmd) error {
+		gotName, gotArgs = c.Name, c.Args
+		if len(c.Env) > 0 {
 			settingsLeaked = true
 		}
-		for _, a := range args {
+		for _, a := range c.Args {
 			if f, ok := strings.CutPrefix(a, "--property=EnvironmentFile="); ok {
 				info, err := os.Stat(f)
 				if err != nil {
@@ -119,9 +118,9 @@ func TestAsJobRunsResticAsTheJobDoes(t *testing.T) {
 		}
 		return nil
 	}
-	run, _ := asJob(view, envDir, record, nil)
-	ctx := context.WithValue(context.Background(), envKey{}, settings)
-	if err := run(ctx, "restic", "cat", "config"); err != nil {
+	check := restic("cat", "config")
+	check.Env = settings
+	if err := asJob(view, envDir, record)(context.Background(), check); err != nil {
 		t.Fatal(err)
 	}
 
@@ -152,10 +151,37 @@ func TestAsJobRunsResticAsTheJobDoes(t *testing.T) {
 	}
 }
 
+// Ctrl-C, or a check that ran out of time, ends systemd-run — the client.
+// The unit is PID 1's, and restic in it would go on retrying for minutes
+// under a name the next check needs: it is stopped.
+func TestAsJobStopsTheUnitOfACheckWhoseContextEnded(t *testing.T) {
+	var calls []string
+	next := func(ctx context.Context, c Cmd) error {
+		calls = append(calls, c.Name+" "+strings.Join(c.Args, " "))
+		if c.Name == "systemctl" && ctx.Err() != nil {
+			t.Error("the stop must not be cancelled by the context that just ended")
+		}
+		return ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	x := asJob(jobView{User: "hotserve", Home: checkHome}, t.TempDir(), next)
+	if err := x(ctx, restic("cat", "config")); err == nil {
+		t.Fatal("a check whose context ended has not passed")
+	}
+	if len(calls) != 2 || !strings.HasPrefix(calls[0], "systemd-run --unit="+checkUnit+" ") || calls[1] != "systemctl stop "+checkUnit+".service" {
+		t.Errorf("want the check, in a named unit, then its stop: %q", calls)
+	}
+
+	calls = nil
+	if err := x(context.Background(), restic("cat", "config")); err != nil || len(calls) != 1 {
+		t.Errorf("a check that ran to its end is not stopped: %q, %v", calls, err)
+	}
+}
+
 func TestAsJobRunsNothingButRestic(t *testing.T) {
-	run, _ := asJob(jobView{User: "hotserve", Home: t.TempDir()}, t.TempDir(),
-		func(context.Context, string, ...string) error { return nil }, nil)
-	if err := run(context.Background(), "sh", "-c", "id"); err == nil {
+	x := asJob(jobView{User: "hotserve", Home: t.TempDir()}, t.TempDir(), fake(nil, nil))
+	if err := x(context.Background(), Cmd{Name: "sh", Args: []string{"-c", "id"}}); err == nil {
 		t.Fatal("init's checks run restic and nothing else")
 	}
 }
@@ -175,9 +201,9 @@ func TestTheJobAndInitsChecksShareOneSandbox(t *testing.T) {
 	job := LaunchArgs(app, opts)
 
 	var check []string
-	run, _ := asJob(jobView{User: "hotserve", Home: scratch}, t.TempDir(),
-		func(_ context.Context, _ string, args ...string) error { check = args; return nil }, nil)
-	if err := run(context.Background(), "restic", "version"); err != nil {
+	x := asJob(jobView{User: "hotserve", Home: scratch}, t.TempDir(),
+		func(_ context.Context, c Cmd) error { check = c.Args; return nil })
+	if err := x(context.Background(), restic("version")); err != nil {
 		t.Fatal(err)
 	}
 	// Every property, binds included, with only the paths that name
@@ -230,42 +256,6 @@ func TestTheJobAndInitsChecksShareOneSandbox(t *testing.T) {
 	}
 	if len(j) < 25 {
 		t.Fatalf("only %d properties compared; the comparison would be vacuous", len(j))
-	}
-}
-
-// captureQuiet against a real process, not a fake: stdout is what the
-// caller parses (JSON, for `restic snapshots --json`), so stderr must
-// never be mixed into it on success — but a caller that asks for stderr
-// must get it whatever the exit status, because restic exits 0 over a
-// refused delete and says so on stderr alone.
-func TestCaptureQuietKeepsTheStreamsApart(t *testing.T) {
-	capture := captureQuiet()
-	script := func(exit string) []string {
-		return []string{"-c", `printf '[{"ok":true}]'; printf 'Remove(<snapshot/x>) failed: 403 Forbidden' >&2; exit ` + exit}
-	}
-
-	var stderr bytes.Buffer
-	out, err := capture(withStderr(context.Background(), &stderr), "sh", script("0")...)
-	if err != nil {
-		t.Fatalf("exit 0: %v", err)
-	}
-	if string(out) != `[{"ok":true}]` {
-		t.Errorf("stdout must stay clean for parsing on success, got %q", out)
-	}
-	if !strings.Contains(stderr.String(), "403 Forbidden") {
-		t.Errorf("the caller asked for stderr and did not get it on exit 0: %q", stderr.String())
-	}
-
-	// Nobody asked: stderr is not in the result on success.
-	out, _ = capture(context.Background(), "sh", script("0")...)
-	if strings.Contains(string(out), "Forbidden") {
-		t.Errorf("stderr leaked into stdout: %q", out)
-	}
-
-	// On failure the result carries both.
-	out, err = capture(context.Background(), "sh", script("1")...)
-	if err == nil || !strings.Contains(string(out), "403 Forbidden") {
-		t.Errorf("a failure should return stderr with stdout: %q, %v", out, err)
 	}
 }
 
