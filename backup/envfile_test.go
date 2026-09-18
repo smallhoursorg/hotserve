@@ -26,11 +26,11 @@ func TestLoadEnvFile(t *testing.T) {
 
 // systemd strips surrounding quotes from an EnvironmentFile= value
 // before the jobs see it. Reading the same file any other way has to
-// match, or the launcher looks for a repository named `"/srv/x"`,
-// finds no leading slash, and never binds it into the job's view.
+// match, or status and restore read a different repository from the
+// one the jobs use.
 func TestLoadEnvFileStripsQuotesLikeSystemd(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "backup.env")
-	body := "RESTIC_REPOSITORY=\"/srv/backups\"\nRESTIC_PASSWORD='p a s s'\nAWS_ACCESS_KEY_ID=plain\n"
+	body := "RESTIC_REPOSITORY=\"s3:host/bucket\"\nRESTIC_PASSWORD='p a s s'\nAWS_ACCESS_KEY_ID=plain\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -38,13 +38,12 @@ func TestLoadEnvFileStripsQuotesLikeSystemd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	want := []string{"RESTIC_REPOSITORY=/srv/backups", "RESTIC_PASSWORD=p a s s", "AWS_ACCESS_KEY_ID=plain"}
+	want := []string{"RESTIC_REPOSITORY=s3:host/bucket", "RESTIC_PASSWORD=p a s s", "AWS_ACCESS_KEY_ID=plain"}
 	if strings.Join(env, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("got %q, want %q", env, want)
 	}
-	repo, err := LocalRepositoryPath(env)
-	if err != nil || repo != "/srv/backups" {
-		t.Fatalf("a quoted repository must still be recognised as local: %q, %v", repo, err)
+	if err := checkSettingsRepository(env); err != nil {
+		t.Fatalf("a quoted backend URL must still be recognised as one: %v", err)
 	}
 }
 

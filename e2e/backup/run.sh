@@ -1,8 +1,8 @@
 #!/bin/sh
 # Runs INSIDE the e2e-hotserve container (systemd as PID 1): the whole
 # backup path against a real box — a real hotserve serving a real
-# config, real transient units, a real restic repository and a real
-# SQLite database being written while it is copied.
+# config, real transient units, a real S3 repository and a real SQLite
+# database being written while it is copied.
 #
 # What this proves that unit tests cannot: the per-app job's sandbox is
 # one systemd accepts and can start; a database copied under write
@@ -10,27 +10,27 @@
 # data it reads; and an app whose block declares no state is left
 # alone.
 #
-# Two repositories: a path on this box for most of the suite, then a
-# real S3 endpoint (e2e-s3, rclone serve s3, on an internal network of
-# its own) for restic's s3 backend and the storage credentials, end to
-# end through the job's sandbox. What only a real provider can show —
-# TLS to it, and a key its policy makes append-only — is checked on a
-# real box before release, not here; the delete check's reading of a
-# refusal is pinned in the unit tests by restic's real output.
+# Every repository here is on e2e-s3 (rclone serve s3, on an internal
+# network of its own): restic's s3 backend and the storage credentials,
+# end to end through the job's sandbox. What only a real provider can
+# show — TLS to it, and a key its policy makes append-only — is checked
+# on a real box before release; the delete check's reading of a refusal
+# is pinned in the unit tests by restic's real output.
 set -u
 
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; failures=$((failures + 1)); }
 failures=0
 
-REPO=/srv/e2e-restic
+S3=http://e2e-s3:8333
+S3_KEY_ID=hotserve-e2e
+S3_SECRET=not-a-secret
+REPO="s3:$S3/hotserve-e2e"
 SHARED=/var/lib/liveswap/backup-example/shared
 FILES_SHARED=/var/lib/liveswap/files-example/shared
-# Deliberately no RESTIC_* in this script's environment: the settings
-# live in a root-only file, and every restic command here goes through
-# `hotserve backup restic --`, exactly as docs/backups.md tells an
-# operator to. An ambient repository and password would hide the very
-# failure that page had — commands that cannot find the repository.
+# No RESTIC_* in this script's environment: the settings live in a
+# root-only file, and every restic command here goes through `hotserve
+# backup restic --`, as docs/backups.md tells an operator to.
 as_hotserve() { su -s /bin/sh hotserve -c "$*"; }
 # The writer holds the database between commits, so every read here
 # waits rather than failing with "database is locked".
@@ -40,30 +40,52 @@ rows_now() { sq "file:$SHARED/app.db?mode=ro" 'select count(*) from rows'; }
 # first to open creates -wal and -shm owned by root, and the app — the
 # writer here — can then no longer open its own database.
 sq_app() { su -s /bin/sh hotserve -c "sqlite3 -cmd '.timeout 5000' '$SHARED/app.db' \"$1\""; }
+# The storage key, in a root-only file made 0600 before anything is
+# written into it, as docs/backups.md shows for a script.
+key_file() {
+	install -m 0600 /dev/null /root/s3-key
+	printf 'AWS_ACCESS_KEY_ID=%s\nAWS_SECRET_ACCESS_KEY=%s\n' "$S3_KEY_ID" "$S3_SECRET" >/root/s3-key
+}
+# init without a terminal, against a repository on e2e-s3.
+s3_init() {
+	key_file
+	RESTIC_PASSWORD="${PW:-e2e}" hotserve backup init "$@" --credentials-file /root/s3-key 2>&1
+	rm -f /root/s3-key
+}
 
 echo "=== preparing two apps: one with a database, one with only files ==="
-install -d -o hotserve -g hotserve -m 0750 "$SHARED" "$SHARED/uploads" "$FILES_SHARED" "$FILES_SHARED/pages" /srv
+install -d -o hotserve -g hotserve -m 0750 "$SHARED" "$SHARED/uploads" "$FILES_SHARED" "$FILES_SHARED/pages"
 as_hotserve "sqlite3 '$SHARED/app.db' \"PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS rows(n INTEGER PRIMARY KEY, t TEXT);\"" >/dev/null
 as_hotserve "echo photo > '$SHARED/uploads/cat.jpg'"
 as_hotserve "echo page > '$FILES_SHARED/pages/index.md'"
 
 # A writer, standing in for the app: the copy has to hold up while the
-# app is writing, which is the entire reason VACUUM INTO is used — and
-# so does a restore. Stopped for the idle-database checks, started
-# again for the restore.
+# app is writing, which is the reason VACUUM INTO is used — and so does
+# a restore. Stopped for the idle-database checks, started again for
+# the restore.
 start_writer() { as_hotserve "sh -c 'i=0; while [ \$i -lt 20000 ]; do sqlite3 \"$SHARED/app.db\" \"INSERT INTO rows(t) VALUES (datetime(\\\"now\\\"));\" >/dev/null 2>&1; i=\$((i+1)); sleep 0.05; done' &" >/dev/null 2>&1; }
 start_writer
 
+echo "=== the S3 endpoint ==="
+# A wrong key is refused. Checked with curl: restic treats a rejected
+# request as transient and retries it for minutes.
+code=$(curl -s -o /dev/null -w '%{http_code}' --aws-sigv4 "aws:amz:us-east-1:s3" --user "$S3_KEY_ID:wrong" "$S3/")
+if [ "$code" = 403 ]; then
+	pass "the S3 endpoint refuses a wrong key"
+else
+	fail "the S3 endpoint answered a wrong key with HTTP $code"
+fi
+
 echo "=== hotserve backup init ==="
-rm -rf "$REPO" /etc/hotserve/backup.env
+rm -f /etc/hotserve/backup.env
 # init's checks run as the hourly job does — a unit with its sandbox,
 # its user and its PATH — so nothing in root's own shell can make them
-# pass. Prove it the hard way: a restic first on root's PATH that
-# always fails. If init used it, init would fail; the job never would.
+# pass. A restic first on root's PATH that always fails proves it: if
+# init used it, init would fail; the job never would.
 mkdir -p /tmp/roots-own-bin
 printf '#!/bin/sh\necho "the restic on root'"'"'s PATH was used" >&2\nexit 97\n' > /tmp/roots-own-bin/restic
 chmod +x /tmp/roots-own-bin/restic
-init_out=$(PATH="/tmp/roots-own-bin:$PATH" RESTIC_PASSWORD=e2e hotserve backup init "$REPO" 2>&1)
+init_out=$(PATH="/tmp/roots-own-bin:$PATH" s3_init "$REPO")
 if echo "$init_out" | grep -q "repository ready"; then
 	pass "init created the repository"
 else
@@ -73,13 +95,6 @@ if echo "$init_out" | grep -q "PATH was used"; then
 	fail "init ran the restic on root's PATH, which the hourly job never would"
 else
 	pass "init's checks ignored the restic on root's PATH: they run as the job runs"
-fi
-# restic wrote the repository as the jobs' user, from inside the unit —
-# so nothing in it ever needed handing over by a root chown.
-if [ "$(stat -c %U "$REPO/config")" = hotserve ] && [ "$(stat -c %U "$REPO")" = hotserve ]; then
-	pass "the repository was created by the jobs' own user"
-else
-	fail "repository owned by $(stat -c %U "$REPO")/$(stat -c %U "$REPO/config" 2>/dev/null), want hotserve"
 fi
 # Everything init's checks put on disk — the password among it — lives
 # in one root-only directory on tmpfs, and goes when init finishes.
@@ -93,71 +108,72 @@ if ls -A /run/hotserve-backup | grep -q .; then
 else
 	pass "init left neither its check directory nor a copy of the settings behind"
 fi
-
-# A directory with anything else in it is never taken over: init gives
-# the whole repository to the backup user and every job mounts it
-# writable. /var/backups on Debian holds shadow.bak.
-mkdir -p /srv/not-a-repo
-echo 'root:$y$j9T$secret' > /srv/not-a-repo/shadow.bak
-chmod 0600 /srv/not-a-repo/shadow.bak
-refused=$(RESTIC_PASSWORD=e2e hotserve backup init /srv/not-a-repo --force 2>&1 || true)
-if echo "$refused" | grep -q "not a restic repository"; then
-	pass "init refuses a populated directory that is not a repository"
-else
-	fail "init took over a populated directory: $refused"
-fi
-if [ "$(stat -c %U /srv/not-a-repo/shadow.bak)" = root ] && [ "$(stat -c %a /srv/not-a-repo/shadow.bak)" = 600 ]; then
-	pass "the refused directory's contents were not touched"
-else
-	fail "shadow.bak is now $(stat -c '%U %a' /srv/not-a-repo/shadow.bak)"
-fi
-if grep -q "^RESTIC_REPOSITORY=$REPO\$" /etc/hotserve/backup.env; then
-	pass "refusing the populated directory left the working settings alone"
-else
-	fail "backup.env was changed by a refused init"
-fi
-rm -rf /srv/not-a-repo
-# A local path is a key that CAN delete, so the warning must appear —
-# this is the check that tells an operator their backups are erasable.
+# e2e-s3 is not asked to enforce an append-only policy — that is the
+# storage provider's job — so its one key can delete, and init must say
+# so: this is the check that tells an operator their backups are
+# erasable.
 if echo "$init_out" | grep -q "WARNING: these credentials can delete backups"; then
-	pass "init reported that these credentials can delete"
+	pass "init found that this key can delete, against a real S3 server"
 else
-	fail "init did not run the delete check: $init_out"
+	fail "init did not report the key as able to delete: $init_out"
 fi
 if [ "$(stat -c %a /etc/hotserve/backup.env)" = 600 ]; then
 	pass "the environment file is root-only"
 else
 	fail "backup.env mode is $(stat -c %a /etc/hotserve/backup.env), want 600"
 fi
-
-# A repository path is checked as it resolves on disk, not as it
-# reads: init hands the whole tree to the backup user and every job
-# mounts it writable, so a link into a system directory would give
-# both away. Checked on a real filesystem because the bug is a real
-# symlink, not a string.
-ln -sfn /etc /srv/looks-harmless
-linked=$(hotserve backup init /srv/looks-harmless --force 2>&1 || true)
-if echo "$linked" | grep -q "resolves to"; then
-	pass "a repository path that resolves into a system directory is refused"
+if grep -q "^AWS_SECRET_ACCESS_KEY=$S3_SECRET\$" /etc/hotserve/backup.env && grep -q "^RESTIC_REPOSITORY=$REPO\$" /etc/hotserve/backup.env; then
+	pass "the key and repository went into the settings the jobs get"
 else
-	fail "a symlinked repository was not refused: $linked"
+	fail "backup.env does not hold the S3 settings: $(grep -v PASSWORD /etc/hotserve/backup.env)"
+fi
+
+echo "=== a path on this box is never a repository ==="
+# init, run and restore each refuse one, with the same error, before
+# anything is created.
+refused=$(s3_init /srv/backups --force || true)
+if echo "$refused" | grep -q "not a backend URL" && [ ! -e /srv/backups ]; then
+	pass "init refuses a path, and creates nothing there"
+else
+	fail "init did not refuse a path: $refused"
+fi
+refused=$(s3_init local:/srv/backups --force || true)
+if echo "$refused" | grep -q "not a backend URL"; then
+	pass "init refuses a local: repository"
+else
+	fail "init did not refuse local:: $refused"
 fi
 if grep -q "^RESTIC_REPOSITORY=$REPO\$" /etc/hotserve/backup.env; then
-	pass "the refused init left the working settings alone"
+	pass "the refused inits left the working settings alone"
 else
 	fail "backup.env was changed by a refused init: $(grep '^RESTIC_REPOSITORY=' /etc/hotserve/backup.env)"
 fi
-rm -f /srv/looks-harmless
+cp /etc/hotserve/backup.env /tmp/backup.env.good
+sed -i 's|^RESTIC_REPOSITORY=.*|RESTIC_REPOSITORY=/srv/backups|' /etc/hotserve/backup.env
+refused=$(hotserve backup run --admin 127.0.0.1:2019 2>&1 || true)
+if echo "$refused" | grep -q "not a backend URL" && ! echo "$refused" | grep -q "backing up in"; then
+	pass "run refuses a path in the settings, before any job starts"
+else
+	fail "run did not refuse a path in the settings: $refused"
+fi
+refused=$(hotserve backup restore backup-example --admin 127.0.0.1:2019 --yes 2>&1 || true)
+if echo "$refused" | grep -q "not a backend URL"; then
+	pass "restore refuses a path in the settings"
+else
+	fail "restore did not refuse a path in the settings: $refused"
+fi
+cp /tmp/backup.env.good /etc/hotserve/backup.env
 
 echo "=== pointing a rebuilt box at the repository it already has ==="
-# What recovering a box means: the same repository, opened with the
-# password saved elsewhere. sudo does not carry RESTIC_PASSWORD, so it
-# arrives in a file — and init must reuse that password rather than
-# invent a new one that cannot read what is there.
+# Recovering a box means the same repository, opened with the password
+# saved elsewhere. sudo does not carry RESTIC_PASSWORD, so it arrives in
+# a file — and init reuses that password rather than inventing a new one
+# that cannot read what is there.
 printf 'e2e' > /tmp/restic-password
 chmod 0600 /tmp/restic-password
-cp /etc/hotserve/backup.env /tmp/backup.env.first
-rebuilt=$(hotserve backup init "$REPO" --password-file /tmp/restic-password --force 2>&1)
+key_file
+rebuilt=$(hotserve backup init "$REPO" --credentials-file /root/s3-key --password-file /tmp/restic-password --force 2>&1)
+rm -f /root/s3-key
 if echo "$rebuilt" | grep -q "repository ready"; then
 	pass "a rebuilt box reopens the existing repository with --password-file"
 else
@@ -168,16 +184,17 @@ if grep -q '^RESTIC_PASSWORD=e2e$' /etc/hotserve/backup.env; then
 else
 	fail "the password was replaced: $(grep '^RESTIC_PASSWORD=' /etc/hotserve/backup.env)"
 fi
-# The opposite mistake: no password for a repository that exists would
-# write a new one, and the box would back up into something it could
-# not read.
-wrong=$(hotserve backup init "$REPO" --force 2>&1 || true)
+# No password for a repository that exists would mean a generated one,
+# and the box backing up into something it cannot read.
+key_file
+wrong=$(hotserve backup init "$REPO" --credentials-file /root/s3-key --force 2>&1 || true)
+rm -f /root/s3-key
 if echo "$wrong" | grep -q "already exists"; then
 	pass "init refuses to invent a second password for an existing repository"
 else
 	fail "init should refuse a generated password on an existing repository: $wrong"
 fi
-cp /tmp/backup.env.first /etc/hotserve/backup.env
+cp /tmp/backup.env.good /etc/hotserve/backup.env
 
 echo "=== hotserve backup run ==="
 rows_before=$(rows_now)
@@ -187,21 +204,20 @@ else
 	fail "the run failed: $(tail -3 /tmp/run1.log)"
 fi
 # Only apps that declare state are touched: demo and the examples do
-# not, and must not have been launched.
+# not, and are never launched.
 if grep -q 'backup-example: ok' /tmp/run1.log && grep -q 'files-example: ok' /tmp/run1.log && ! grep -q 'demo: ok' /tmp/run1.log; then
 	pass "both apps declaring state were backed up, and only those"
 else
 	fail "wrong apps backed up: $(grep -E ': (ok|FAILED)' /tmp/run1.log | tr '\n' ' ')"
 fi
 
-# The snapshot from THIS run is the one taken while the writer was
-# inserting; it is what the restore checks below use, so it is chosen
-# now, before the writer stops.
-snap=$(hotserve backup restic -- snapshots --json --tag app:backup-example 2>/dev/null \
+# The snapshot from this run is the one taken while the writer was
+# inserting; the restore checks below use it, so it is chosen now,
+# before the writer stops.
+snap=$(hotserve backup restic -- snapshots --json --tag hotserve,app:backup-example 2>/dev/null \
 	| tr ',' '\n' | grep -o '"short_id":"[^"]*"' | tail -1 | cut -d'"' -f4)
-# Run as root, `backup restic --` drops to the backups' user; it must
-# take that user's HOME with it, or restic has no cache and says so on
-# every command the docs give.
+# Run as root, `backup restic --` drops to the backups' user and takes
+# that user's HOME with it, so restic has its cache.
 passthrough_err=$(hotserve backup restic -- snapshots --tag hotserve 2>&1 >/dev/null)
 if echo "$passthrough_err" | grep -q "unable to open cache"; then
 	fail "backup restic -- runs restic without a cache: $passthrough_err"
@@ -216,28 +232,24 @@ else
 	fail "the job did not log its restic command"
 fi
 # A run only counts once the snapshot has been read back out of the
-# repository holding what was declared. Checked here against restic's
-# real JSON, which the unit tests can only imitate: backup-example
-# declares one database and one files path, so two.
+# repository holding what was declared — checked here against restic's
+# real JSON. backup-example declares one database and one files path.
 if journalctl --no-pager -u hotserve-backup-backup-example.service | grep -q 'read back: 2 declared path(s) present'; then
 	pass "the job read its snapshot back and found every declared path in it"
 else
 	fail "the job did not verify its snapshot: $(journalctl --no-pager -u hotserve-backup-backup-example.service | tail -5)"
 fi
-# An app with a database needs its dir writable — SQLite creates the
-# -shm file beside the database to read a WAL database at all — so the
+# An app with a database gets its dir writable — SQLite creates the -shm
+# file beside the database to read a WAL database at all — so the
 # guarantee is what the job does with that access: it reads. Checked
-# with the writer stopped, since otherwise the app changes its own
-# database and the comparison means nothing.
+# with the writer stopped; otherwise the app changes its own database
+# and the comparison means nothing.
 pkill -f 'INSERT INTO rows' 2>/dev/null
 sleep 1
 # With the writer gone and the database closed cleanly, SQLite removes
-# -wal and -shm: this is the idle-app case, the one a box hits after a
-# reboot or while an app is crash-looping, and the copy must still be
-# taken.
-# The precondition has to hold, or the check below passes without
-# testing anything: wait for the sidecars to go, and fail if they do
-# not. A note printed into a passing suite is not a check.
+# -wal and -shm: the idle-app case, which a box hits after a reboot or
+# while an app is crash-looping. The check below means something only
+# once the sidecars are gone.
 idle=0
 for _ in 1 2 3 4 5 6 7 8 9 10; do
 	if ! ls "$SHARED" | grep -qE 'app[.]db-(wal|shm)'; then
@@ -262,8 +274,8 @@ if [ "$db_before" = "$(sha256sum "$SHARED/app.db" | cut -d' ' -f1)" ]; then
 else
 	fail "the backup modified the app's database"
 fi
-# An app that declares only files never opens a database, so it must
-# not be given write access to its data: least privilege per app.
+# An app that declares only files never opens a database, so it gets no
+# write access to its data: least privilege per app.
 if grep -q "files-example: backing up in hotserve-backup-files-example, its data read-only:" /tmp/run1.log; then
 	pass "a files-only app's data is bound read-only"
 else
@@ -301,23 +313,20 @@ else
 	fail "the uploads dir is missing from the snapshot"
 fi
 
-echo "=== a quoted repository: systemd and hotserve must read it the same ==="
+echo "=== a quoted repository: systemd and hotserve read it the same ==="
 # systemd's EnvironmentFile= strips surrounding quotes before the job
-# sees the value. If hotserve's own reader kept them, the launcher
-# would look for a repository named "\"/srv/…\"", find no leading
-# slash, and never bind it into the job's view — the job would then
-# fail every hour with "repository does not exist". Only a real unit
-# proves the two agree.
-cp /etc/hotserve/backup.env /tmp/backup.env.plain
+# sees the value, and hotserve's own reader does the same; if it did
+# not, run would read "\"s3:…\"" and refuse it as not a backend URL.
+# Only a real unit shows the two agree.
 sed -i "s|^RESTIC_REPOSITORY=.*|RESTIC_REPOSITORY=\"$REPO\"|" /etc/hotserve/backup.env
 if hotserve backup run --admin 127.0.0.1:2019 >/tmp/run-quoted.log 2>&1; then
-	pass "a quoted repository in the environment file still works"
+	pass "a quoted repository in the environment file works"
 else
 	fail "a quoted repository broke the run: $(tail -3 /tmp/run-quoted.log)"
 fi
-cp /tmp/backup.env.plain /etc/hotserve/backup.env
+cp /tmp/backup.env.good /etc/hotserve/backup.env
 
-echo "=== a second run (the staged copy from the first must be cleared) ==="
+echo "=== a second run (the staged copy from the first is cleared) ==="
 if hotserve backup run --admin 127.0.0.1:2019 >/tmp/run2.log 2>&1; then
 	pass "the second run succeeded"
 else
@@ -326,8 +335,8 @@ fi
 
 echo "=== hotserve backup restore, on a live box ==="
 # The restore docs/backups.md tells an operator to run, run the way it
-# says: with the app up and the writer still writing. Bad data first —
-# rows the snapshot holds deleted, an upload deleted, one added since.
+# says: with the app up and the writer writing. Bad data first — rows
+# the snapshot holds deleted, an upload deleted, one added since.
 start_writer
 sleep 1
 rows_pre=$(rows_now)
@@ -378,7 +387,7 @@ if [ "$(sq_app 'pragma journal_mode')" = wal ] && [ "$(stat -c %U "$SHARED/app.d
 else
 	fail "the restored database is $(sq_app 'pragma journal_mode'), owned by $(stat -c %U "$SHARED/app.db")"
 fi
-# The writer kept going through the restore, and keeps going after it.
+# The writer keeps going through the restore, and after it.
 rows_mid=$(rows_now)
 sleep 2
 if [ "$(rows_now)" -gt "$rows_mid" ] && [ "$(sq_app 'pragma integrity_check')" = ok ]; then
@@ -424,8 +433,8 @@ fi
 
 echo "=== hotserve backup status ==="
 status_out=$(hotserve backup status --admin 127.0.0.1:2019 2>&1)
-# The app's own row must not say "never": a `grep -qv never` over the
-# whole report always succeeds, because the header line matches.
+# The app's own row, not the whole report: the header line would match
+# a `grep -v never` of all of it.
 if echo "$status_out" | grep -qE '^backup-example .*(just now|(min|hours|days) ago)'; then
 	pass "status reports the app's row as backed up"
 else
@@ -440,11 +449,12 @@ else
 	fail "--check failed with a current backup: $status_out"
 fi
 
+echo "=== a snapshot no clean run vouches for ==="
 # restic writes a snapshot even when it exits non-zero, so snapshots
 # alone are not evidence that backups work: a clean run says so with a
-# record in the repository. Make a snapshot no clean run vouches for —
-# newer than every one that is — and a restore must name it, not take
-# it: it may be missing files, and with --delete those would go.
+# record in the repository. A snapshot newer than every vouched one is
+# named by restore, not taken: it may be missing files, and with
+# --delete those would go.
 if hotserve backup restic -- backup --quiet --tag hotserve --tag app:backup-example "$SHARED/uploads" >/dev/null 2>&1; then
 	pass "made a snapshot no clean-run record vouches for"
 else
@@ -464,49 +474,16 @@ else
 	fail "restore did not pass over the unvouched snapshot: $picked"
 fi
 
-echo "=== an S3 repository: restic's s3 backend, through the job's sandbox ==="
-# Everything above used a path on this box, which never touches what an
-# operator's real setup does: restic's S3 client, storage credentials
-# arriving through the settings file, and all of it from inside the
-# job's sandbox. e2e-s3 (rclone serve s3) stands in for B2 or S3. It is
-# not asked to enforce an append-only policy — that is the storage
-# provider's job — so its one key can delete, and init must say so.
-S3=http://e2e-s3:8333
-S3_KEY_ID=hotserve-e2e
-S3_WRONG_SECRET=wrong
-# A wrong key is refused. Checked with curl: restic treats a rejected
-# request as transient and retries it for minutes.
-code=$(curl -s -o /dev/null -w '%{http_code}' --aws-sigv4 "aws:amz:us-east-1:s3" --user "$S3_KEY_ID:$S3_WRONG_SECRET" "$S3/")
-if [ "$code" = 403 ]; then
-	pass "the S3 endpoint refuses a wrong key"
-else
-	fail "the S3 endpoint answered a wrong key with HTTP $code"
-fi
-# Set up exactly as docs/backups.md tells an operator to: the key in a
-# root-only file, created 0600 before anything is written into it.
-install -m 0600 /dev/null /root/s3-key
-printf 'AWS_ACCESS_KEY_ID=%s\nAWS_SECRET_ACCESS_KEY=%s\n' hotserve-e2e not-a-secret | tee /root/s3-key >/dev/null
-s3init=$(RESTIC_PASSWORD=e2e-s3 hotserve backup init "s3:$S3/hotserve-e2e" --credentials-file /root/s3-key --force 2>&1)
-rm -f /root/s3-key
-if echo "$s3init" | grep -q "repository ready"; then
-	pass "init set up an S3 repository through the job's sandbox"
-else
-	fail "init against S3 failed: $s3init"
-fi
-if echo "$s3init" | grep -q "WARNING: these credentials can delete backups"; then
-	pass "init found that this S3 key can delete, against a real S3 server"
-else
-	fail "init did not report the S3 key as able to delete: $s3init"
-fi
-if grep -q "^AWS_SECRET_ACCESS_KEY=not-a-secret\$" /etc/hotserve/backup.env && grep -q "^RESTIC_REPOSITORY=s3:$S3/hotserve-e2e\$" /etc/hotserve/backup.env; then
-	pass "the S3 key and repository went into the settings the jobs get"
-else
-	fail "backup.env does not hold the S3 settings: $(grep -v PASSWORD /etc/hotserve/backup.env)"
-fi
+echo "=== another repository ==="
 # A repository that already holds this app's snapshots, but no clean
-# run from this box: whatever this box did into the repository it used
-# before, the report must not vouch for this one. (A marker file on the
-# box could not tell the two repositories apart.)
+# run from this box: what this box did into the repository it used
+# before does not vouch for this one.
+PW=e2e-2 s3_init "s3:$S3/hotserve-e2e-2" --force >/tmp/init2.log
+if grep -q "repository ready" /tmp/init2.log; then
+	pass "init --force moved the box to a second repository"
+else
+	fail "init onto a second repository failed: $(cat /tmp/init2.log)"
+fi
 hotserve backup restic -- backup --quiet --tag hotserve --tag app:backup-example "$SHARED/uploads" >/dev/null 2>&1
 if hotserve backup status --check --admin 127.0.0.1:2019 >/dev/null 2>&1; then
 	fail "--check passed on a repository with no clean run recorded from this box"
@@ -521,57 +498,57 @@ fi
 t0=$(date +%s)
 sleep 1
 if hotserve backup run --admin 127.0.0.1:2019 >/tmp/run-s3.log 2>&1 && grep -q 'backup-example: ok' /tmp/run-s3.log && grep -q 'files-example: ok' /tmp/run-s3.log; then
-	pass "the hourly run backed both apps up to S3"
+	pass "the hourly run backed both apps up to the new repository"
 else
-	fail "the run against S3 failed: $(tail -5 /tmp/run-s3.log)"
+	fail "the run against the new repository failed: $(tail -5 /tmp/run-s3.log)"
 fi
 if journalctl --no-pager -u hotserve-backup-backup-example.service --since "@$t0" | grep -q 'read back: 2 declared path(s) present'; then
-	pass "the job read its S3 snapshot back and found every declared path in it"
+	pass "the job read its snapshot back from the new repository"
 else
-	fail "no read-back of the S3 snapshot: $(journalctl --no-pager -u hotserve-backup-backup-example.service --since "@$t0" | tail -5)"
+	fail "no read-back from the new repository: $(journalctl --no-pager -u hotserve-backup-backup-example.service --since "@$t0" | tail -5)"
 fi
 as_hotserve "rm '$FILES_SHARED/pages/index.md'"
 s3_restore=$(hotserve backup restore files-example --admin 127.0.0.1:2019 --yes 2>&1)
 if [ "$(cat "$FILES_SHARED/pages/index.md" 2>/dev/null)" = page ]; then
-	pass "a restore from S3 gives back the app's files"
+	pass "a restore from the new repository gives back the app's files"
 else
-	fail "restore from S3 failed: $s3_restore"
+	fail "restore from the new repository failed: $s3_restore"
 fi
 # The drill docs/backups.md suggests: into a scratch dir, by hand.
 rm -rf /tmp/s3-restore
-if hotserve backup restic -- restore latest --tag app:files-example --target /tmp/s3-restore >/dev/null 2>&1 \
+if hotserve backup restic -- restore latest --tag hotserve,app:files-example --target /tmp/s3-restore >/dev/null 2>&1 \
 	&& [ "$(cat "/tmp/s3-restore$FILES_SHARED/pages/index.md" 2>/dev/null)" = page ]; then
-	pass "the documented restore drill works against S3"
+	pass "the documented restore drill works"
 else
-	fail "restore drill from S3 failed: $(ls -R /tmp/s3-restore 2>&1 | head -5)"
+	fail "restore drill failed: $(ls -R /tmp/s3-restore 2>&1 | head -5)"
 fi
 if hotserve backup status --check --admin 127.0.0.1:2019 >/dev/null 2>&1; then
-	pass "--check passes with current backups in S3"
+	pass "--check passes once a clean run lands in the new repository"
 else
-	fail "--check failed against S3: $(hotserve backup status --admin 127.0.0.1:2019 2>&1)"
+	fail "--check failed after a clean run: $(hotserve backup status --admin 127.0.0.1:2019 2>&1)"
 fi
 
 echo "=== init at a terminal: one command, and it asks ==="
 # The documented setup is one command: at a terminal, init asks for the
 # storage key itself (the secret half without echo), so it is typed into
 # no command line and no shell history. script(1) gives it a real TTY;
-# the answers arrive on it the way a person would type them.
+# the answers arrive on it the way a person types them.
 tty_init() { script -qec "hotserve backup init s3:$S3/hotserve-e2e-tty --force" /dev/null; }
-# The secret is sent a moment after the key, as a person would type it
-# after its prompt appears: a pty echoes input when it ARRIVES, and init
-# turns echo off only when it asks for the secret. (The prompts come
-# before anything touches the network, so a few seconds is ample.)
-new_out=$({ printf '%s\n' "$S3_KEY_ID"; sleep 3; printf '%s\n' not-a-secret; } | tty_init 2>&1)
-if echo "$new_out" | grep -q "repository ready" && grep -q "^AWS_SECRET_ACCESS_KEY=not-a-secret\$" /etc/hotserve/backup.env; then
+# The secret is sent a moment after the key, as a person types it after
+# its prompt appears: a pty echoes input when it arrives, and init turns
+# echo off only when it asks for the secret. The prompts come before
+# anything touches the network, so a few seconds is ample.
+new_out=$({ printf '%s\n' "$S3_KEY_ID"; sleep 3; printf '%s\n' "$S3_SECRET"; } | tty_init 2>&1)
+if echo "$new_out" | grep -q "repository ready" && grep -q "^AWS_SECRET_ACCESS_KEY=$S3_SECRET\$" /etc/hotserve/backup.env; then
 	pass "init at a terminal asked for the key and set up a new repository"
 else
 	fail "init at a terminal did not set up the repository: $new_out"
 fi
-# The key ID, typed with echo on, must show: otherwise this capture
-# would not show typed input at all and the next check would be vacuous.
+# The key ID, typed with echo on, shows: without it this capture would
+# not show typed input at all, and the next check would be vacuous.
 if ! echo "$new_out" | grep -q "$S3_KEY_ID"; then
 	fail "the key ID did not show as it was typed, so the echo check below proves nothing: $new_out"
-elif echo "$new_out" | grep -q "not-a-secret"; then
+elif echo "$new_out" | grep -q "$S3_SECRET"; then
 	fail "the secret access key was shown on screen as it was typed"
 else
 	pass "the secret access key was not shown as it was typed"
@@ -579,7 +556,7 @@ fi
 # A rebuilt box: the repository exists, so init asks for its password
 # instead of inventing one that could not open it.
 saved_pw=$(sed -n 's/^RESTIC_PASSWORD=//p' /etc/hotserve/backup.env)
-old_out=$(printf '%s\n%s\n%s\n' "$S3_KEY_ID" not-a-secret "$saved_pw" | tty_init 2>&1)
+old_out=$(printf '%s\n%s\n%s\n' "$S3_KEY_ID" "$S3_SECRET" "$saved_pw" | tty_init 2>&1)
 if echo "$old_out" | grep -q "already exists. Its password" && echo "$old_out" | grep -q "repository ready"; then
 	pass "on an existing repository, init asked for its password and opened it"
 else
@@ -590,7 +567,7 @@ if grep -q "^RESTIC_PASSWORD=$saved_pw\$" /etc/hotserve/backup.env; then
 else
 	fail "the settings do not hold the repository's own password"
 fi
-wrong_out=$(printf '%s\n%s\n%s\n' "$S3_KEY_ID" not-a-secret "not-the-password" | tty_init 2>&1 || true)
+wrong_out=$(printf '%s\n%s\n%s\n' "$S3_KEY_ID" "$S3_SECRET" "not-the-password" | tty_init 2>&1 || true)
 if echo "$wrong_out" | grep -q "cannot open it"; then
 	pass "a wrong password is refused, and said so"
 else

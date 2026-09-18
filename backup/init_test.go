@@ -5,9 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
-	"os/user"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 )
@@ -43,9 +41,8 @@ type fakeRestic struct {
 // restic 0.18.0's own words, captured from real runs (see
 // alreadyInitialized).
 const (
-	resticInitExistsS3    = "Fatal: create key in repository at s3:http://e2e-s3:8333/made/other failed: repository master key and config already initialized\n"
-	resticInitExistsLocal = "Fatal: create repository at /root/localrepo failed: Fatal: unable to open repository at /root/localrepo: config file already exists\n"
-	resticWrongPassword   = "Fatal: wrong password or no key found\n"
+	resticInitExistsS3  = "Fatal: create key in repository at s3:http://e2e-s3:8333/made/other failed: repository master key and config already initialized\n"
+	resticWrongPassword = "Fatal: wrong password or no key found\n"
 )
 
 func (f *fakeRestic) capture(ctx context.Context, name string, args ...string) ([]byte, error) {
@@ -385,7 +382,7 @@ func TestInitSaysWhenThePasswordCannotOpenTheRepository(t *testing.T) {
 // wordings are its own, captured from restic 0.18.0; anything else is
 // a real failure to create and must not be mistaken for one.
 func TestAlreadyInitializedKnowsResticsWords(t *testing.T) {
-	for _, out := range []string{resticInitExistsS3, resticInitExistsLocal} {
+	for _, out := range []string{resticInitExistsS3} {
 		if !alreadyInitialized(out) {
 			t.Errorf("restic's own words for an existing repository were not recognised: %q", out)
 		}
@@ -618,254 +615,24 @@ func TestInitRejectsMalformedCredentials(t *testing.T) {
 	}
 }
 
-// A repository on this box is a directory init makes, or one restic
-// already made — never anything else. The rule is about what is IN the
-// directory, not what it is called: every attempt to say which names
-// are dangerous left one out (/etc/hotserve, /srv, and finally
-// /var/backups, which holds shadow.bak on every Debian box).
-func TestInitMakesOrReusesARepositoryAndAdoptsNothingElse(t *testing.T) {
-	me, err := user.Current()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct {
-		name    string
-		setup   func(t *testing.T, dir string) // dir does not exist yet
-		refused string                         // "" = accepted
-	}{
-		{"a new directory under an existing one", func(*testing.T, string) {}, ""},
-		{"an existing restic repository", func(t *testing.T, dir string) {
-			mustMkdir(t, filepath.Join(dir, "keys"))
-			mustMkdir(t, filepath.Join(dir, "data", "00"))
-			mustWrite(t, filepath.Join(dir, "config"), "restic")
-		}, ""},
-		{"a directory with other things in it (/var/backups)", func(t *testing.T, dir string) {
-			mustMkdir(t, dir)
-			mustWrite(t, filepath.Join(dir, "shadow.bak"), "root:$y$…")
-		}, "not a restic repository"},
-		{"a restic repository with something else beside it", func(t *testing.T, dir string) {
-			mustMkdir(t, filepath.Join(dir, "keys"))
-			mustWrite(t, filepath.Join(dir, "config"), "restic")
-			mustWrite(t, filepath.Join(dir, "id_ed25519"), "key")
-		}, "not a restic repository"},
-		{"an empty directory (someone's, and about to fill up)", func(t *testing.T, dir string) {
-			mustMkdir(t, dir)
-		}, "no config file"},
-		{"a symlink", func(t *testing.T, dir string) {
-			target := dir + "-target"
-			mustMkdir(t, target)
-			mustWrite(t, filepath.Join(target, "config"), "restic")
-			if err := os.Symlink(target, dir); err != nil {
-				t.Skipf("symlinks unavailable: %v", err)
-			}
-		}, "is a symlink"},
-		{"a path whose parent does not exist", func(*testing.T, string) {}, "does not exist, and neither does"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := filepath.Join(t.TempDir(), "repo")
-			if strings.Contains(tc.name, "parent does not exist") {
-				dir = filepath.Join(t.TempDir(), "missing", "repo")
-			}
-			tc.setup(t, dir)
-			var before []string
-			if entries, err := os.ReadDir(dir); err == nil {
-				for _, e := range entries {
-					before = append(before, e.Name())
-				}
-			}
-			o := initOpts(t)
-			o.Repository = dir
-			o.User = me.Username
-			var out strings.Builder
-			err := Init(context.Background(), o, (&recorder{}).run, probeSnapshots(), &out)
-			if tc.refused == "" {
-				if err != nil {
-					t.Fatalf("init: %v", err)
-				}
-				if info, statErr := os.Lstat(dir); statErr != nil || !info.IsDir() {
-					t.Fatalf("the repository directory should be there: %v", statErr)
-				}
-				return
-			}
-			if err == nil || !strings.Contains(err.Error(), tc.refused) {
-				t.Fatalf("want a refusal saying %q, got %v", tc.refused, err)
-			}
-			if _, statErr := os.Stat(o.EnvFile); !os.IsNotExist(statErr) {
-				t.Error("a refused repository must not be configured")
-			}
-			// Nothing was touched: the directory holds what it held.
-			var after []string
-			if entries, err := os.ReadDir(dir); err == nil {
-				for _, e := range entries {
-					after = append(after, e.Name())
-				}
-			}
-			if strings.Join(before, ",") != strings.Join(after, ",") {
-				t.Errorf("a refused directory was changed: %v → %v", before, after)
-			}
-		})
-	}
-}
-
-// The example everything teaches is /srv/backups, so the likeliest typo
-// is that path one component short — and /srv, /mnt, /home, /tmp exist
-// on every box. They are refused by the same rule as everything else:
-// an existing directory that is not a restic repository is never taken
-// over. Checked against the real directories, which are left as they
-// were: the refusal comes before anything is written.
-func TestInitRefusesTheTopLevelDirectoriesThemselves(t *testing.T) {
-	for _, dir := range []string{"/srv", "/mnt", "/media", "/opt", "/tmp", "/home", "/var"} {
-		if _, err := os.Stat(dir); err != nil {
-			continue // not on this machine
+// A repository is a backend URL; init refuses a path on this box before
+// it does anything else.
+func TestInitRefusesAPath(t *testing.T) {
+	for _, repo := range []string{"/srv/backups", "local:/srv/backups", "backups"} {
+		o := InitOptions{Repository: repo, EnvFile: filepath.Join(t.TempDir(), "backup.env"), Password: "p"}
+		var calls []string
+		run := func(_ context.Context, name string, args ...string) error { calls = append(calls, name); return nil }
+		capture := func(_ context.Context, name string, args ...string) ([]byte, error) {
+			calls = append(calls, name)
+			return nil, nil
 		}
-		if _, err := prepareLocalRepository(dir, ""); err == nil {
-			t.Errorf("%s was accepted as a repository", dir)
+		err := Init(context.Background(), o, run, capture, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "not a backend URL") {
+			t.Errorf("%q: want a refusal naming backend URLs, got %v", repo, err)
 		}
-	}
-}
-
-// A directory init created for a repository that then could not be set
-// up is removed again, so the retry is not refused by the leftovers of
-// the first attempt.
-func TestInitRemovesTheDirectoryItMadeWhenSetupFails(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "repo")
-	o := initOpts(t)
-	o.Password = "" // a new repository
-	o.Repository = dir
-	rec := &recorder{fail: map[string]error{"restic": errors.New("Fatal: create repository: permission denied")}}
-	if err := Init(context.Background(), o, rec.run, missingRepo(), io.Discard); err == nil {
-		t.Fatal("init should have failed")
-	}
-	if _, err := os.Lstat(dir); !os.IsNotExist(err) {
-		t.Errorf("the directory init made for the failed attempt is still there: %v", err)
-	}
-}
-
-// `run` binds the repository writable into every job, every hour; it
-// checks the same rule, so a hand-edited settings file or a disk that
-// did not mount (an empty mountpoint) cannot put some other directory
-// there.
-func TestIsResticRepository(t *testing.T) {
-	repo := t.TempDir()
-	mustWrite(t, filepath.Join(repo, "config"), "restic")
-	mustMkdir(t, filepath.Join(repo, "snapshots"))
-	if err := isResticRepository(repo); err != nil {
-		t.Errorf("a restic repository: %v", err)
-	}
-	if err := isResticRepository(t.TempDir()); err == nil {
-		t.Error("an empty mountpoint is not a repository")
-	}
-	home := t.TempDir()
-	mustWrite(t, filepath.Join(home, ".bashrc"), "")
-	if err := isResticRepository(home); err == nil {
-		t.Error("a home directory is not a repository")
-	}
-	// A repository at the root of a disk of its own always has ext4's
-	// lost+found beside it. Refusing that would refuse the most obvious
-	// way to give backups a disk — at init, and in every hourly run.
-	disk := t.TempDir()
-	mustWrite(t, filepath.Join(disk, "config"), "restic")
-	mustMkdir(t, filepath.Join(disk, "lost+found"))
-	if err := isResticRepository(disk); err != nil {
-		t.Errorf("a repository at a disk's root, with lost+found: %v", err)
-	}
-	// Only as a directory: a file by that name is not the filesystem's.
-	odd := t.TempDir()
-	mustWrite(t, filepath.Join(odd, "config"), "restic")
-	mustWrite(t, filepath.Join(odd, "lost+found"), "not a directory")
-	if err := isResticRepository(odd); err == nil {
-		t.Error("a file named lost+found is something else in the directory")
-	}
-}
-
-// The chown of an existing repository is scoped to it and leaves the
-// filesystem's own lost+found alone: it is root's, it is not restic's,
-// and nothing the jobs do needs it.
-func TestChownRepositoryLeavesLostAndFound(t *testing.T) {
-	me, err := user.Current()
-	if err != nil {
-		t.Fatal(err)
-	}
-	disk := t.TempDir()
-	mustWrite(t, filepath.Join(disk, "config"), "restic")
-	mustMkdir(t, filepath.Join(disk, "lost+found"))
-	mustWrite(t, filepath.Join(disk, "lost+found", "#12345"), "orphan")
-	mustMkdir(t, filepath.Join(disk, "data", "00"))
-	root, err := os.OpenRoot(disk)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = root.Close() }()
-	// What the chown hands over is exactly what walkRepository visits.
-	var visited []string
-	if err := walkRepository(root, func(p string) error { visited = append(visited, p); return nil }); err != nil {
-		t.Fatal(err)
-	}
-	got := strings.Join(visited, " ")
-	for _, want := range []string{".", "config", "data", "data/00"} {
-		if !slices.Contains(visited, want) {
-			t.Errorf("restic's %q was not handed over: %s", want, got)
+		if len(calls) != 0 {
+			t.Errorf("%q: nothing may run before the refusal, ran %v", repo, calls)
 		}
-	}
-	if strings.Contains(got, "lost+found") {
-		t.Errorf("the filesystem's lost+found was handed over too: %s", got)
-	}
-	// And the real chown runs over it without complaint.
-	if err := chownRepository(root, disk, me.Username); err != nil {
-		t.Fatalf("chown: %v", err)
-	}
-}
-
-// The chown of an existing repository is scoped to it: a symlink left
-// inside (by whoever owned the tree before) is changed itself, never
-// followed out of the repository.
-func TestChownRepositoryStaysInsideTheRepository(t *testing.T) {
-	me, err := user.Current()
-	if err != nil {
-		t.Fatal(err)
-	}
-	repo := t.TempDir()
-	mustWrite(t, filepath.Join(repo, "config"), "restic")
-	outside := t.TempDir()
-	if err := os.Symlink(outside, filepath.Join(repo, "data")); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
-	}
-	root, err := os.OpenRoot(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = root.Close() }()
-	var visited []string
-	if err := walkRepository(root, func(p string) error { visited = append(visited, p); return nil }); err != nil {
-		t.Fatal(err)
-	}
-	for _, p := range visited {
-		if strings.HasPrefix(p, "data/") {
-			t.Errorf("followed the symlink out of the repository: %s", p)
-		}
-	}
-	if err := chownRepository(root, repo, me.Username); err != nil {
-		t.Fatalf("chown: %v", err)
-	}
-	if err := chownRepository(root, repo, "no-such-user-here"); err == nil || !strings.Contains(err.Error(), "no-such-user-here") {
-		t.Errorf("want an error naming the user, got %v", err)
-	}
-}
-
-func mustMkdir(t *testing.T, dir string) {
-	t.Helper()
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func mustWrite(t *testing.T, path, body string) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
 	}
 }
 

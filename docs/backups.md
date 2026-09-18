@@ -142,28 +142,15 @@ proxy, a credentials file under your home, a `restic` earlier on your
 repository needs something more, pass it to `init` as `KEY=VALUE` or in
 `--credentials-file`, and it goes into the settings the job gets.
 
-### A repository on a disk of its own
+### Where the repository can be
 
-A repository can be a path on this box instead of a bucket — a second
-disk, say. `init` accepts exactly two things there:
-
-- **a path that does not exist yet**, under a directory that does:
-  `init` creates it, owned by the backup user, and restic fills it;
-- **an existing restic repository** — a rebuilt box pointed at the disk
-  its backups are on.
-
-It refuses anything else, **including an empty directory**. The
-repository is given to the backup user and mounted writable into every
-job, so a directory with anything else in it would be handed over with
-it — and on Debian, `/var/backups` holds `shadow.bak`. Point `init` at a
-new path inside a mount instead: `/mnt/disk/restic`, not `/mnt/disk`.
-The hourly run checks the same thing before mounting the repository
-into a job, so a disk that failed to mount fails the run with a message
-saying the repository is not there, instead of mounting whatever
-directory is left at that path into every job.
-
-A disk in the same box protects against a failed disk or a mistake, not
-against losing the box: keep a copy somewhere else too.
+A repository is a restic backend URL — `s3:`, `b2:`, `rest:`, `sftp:`,
+`azure:`, `gs:`, `swift:` or `rclone:` — and never a path on this box.
+`init`, the hourly run and `restore` all refuse a path, with the same
+error. A backup on the box it protects does not survive losing the box,
+and a repository the jobs could reach on disk would be mounted,
+writable, into every one of them. Every job reaches the repository over
+the network, and the sandbox binds nothing of it.
 
 ## Keep the box unable to delete
 

@@ -137,133 +137,35 @@ func unquote(v string) string {
 	return v
 }
 
-// RepositoryPath returns the directory a filesystem repository lives
-// in, or "" for a remote one (s3:, b2:, sftp:, rest: …). A local
-// repository has to be bound into each job's view; a remote one needs
-// nothing but the network the sandbox already allows.
-//
-// A relative path is refused rather than quietly treated as remote:
-// it would be bound nowhere, chowned nowhere, and resolved against
-// whatever directory each process happened to start in.
-func RepositoryPath(repo string) (string, error) {
-	v := strings.TrimPrefix(repo, "local:")
-	if strings.HasPrefix(v, "/") {
-		clean := filepath.Clean(v)
-		if err := safeRepositoryDir(clean); err != nil {
-			return "", err
-		}
-		// Lexical checks are not enough: /srv/backups can be a symlink
-		// to /var/lib/liveswap, and the bind would then put every
-		// app's data, writable, into every job. Whatever exists of
-		// this path is resolved and checked again.
-		resolved, err := resolveExisting(clean)
-		if err != nil {
-			return "", err
-		}
-		if resolved != clean {
-			if err := safeRepositoryDir(resolved); err != nil {
-				return "", fmt.Errorf("%s resolves to %s: %w", clean, resolved, err)
-			}
-		}
-		return clean, nil
+// Backends are the restic backends a repository may be. A repository
+// is always a URL for one of them, never a path on this box.
+var Backends = []string{"s3", "b2", "rest", "sftp", "azure", "gs", "swift", "rclone"}
+
+// CheckRepository refuses anything that is not a backend URL.
+func CheckRepository(repo string) error {
+	if scheme, rest, ok := strings.Cut(repo, ":"); ok && rest != "" && slices.Contains(Backends, scheme) {
+		return nil
 	}
-	// A backend prefix (scheme before any slash) is remote; anything
-	// else is a path, and paths have to be absolute.
-	if scheme, _, ok := strings.Cut(v, ":"); ok && !strings.Contains(scheme, "/") && scheme != "" && !strings.HasPrefix(repo, "local:") {
-		return "", nil
-	}
-	return "", fmt.Errorf("repository %q must be an absolute path (a directory on this box) or a backend URL like s3:…, b2:… or sftp:…", repo)
+	return fmt.Errorf("repository %q is not a backend URL: it must start with one of %s: — a path on this box is not supported", repo, strings.Join(Backends, ":, "))
 }
 
-// safeRepositoryDir refuses a local repository path by where it is,
-// before anything on disk is looked at: a system tree, a top-level
-// directory other things live in, or hotserve's own state. The repo
-// belongs to the jobs' user and every job binds it writable, so even
-// an empty directory in those places is no place for one.
-//
-// This is the coarse half. What decides whether a particular existing
-// directory may be used is what is in it — prepareLocalRepository in
-// init.go — because a list of dangerous names can never be finished:
-// every attempt left one out.
-func safeRepositoryDir(dir string) error {
-	if dir == "/" {
-		return fmt.Errorf("the repository cannot be / — it would be chowned to the backup user and mounted into every backup job")
-	}
-	// The system's own trees: not the directory itself, not an ancestor
-	// of one, and not anywhere inside one either. /etc/hotserve would
-	// otherwise be accepted, and init would hand the Caddyfile and the
-	// credentials it just wrote to the backup user.
-	for _, reserved := range []string{
-		"/bin", "/boot", "/dev", "/etc", "/lib", "/lib64",
-		"/proc", "/root", "/run", "/sbin", "/sys", "/usr",
-	} {
-		if dir == reserved || isAncestor(dir, reserved) || isAncestor(reserved, dir) {
-			return fmt.Errorf("the repository cannot be %s or anything under it: init gives the whole tree to the backup user and every job mounts it writable — put it somewhere of its own, like /srv/backups or a mounted disk", reserved)
-		}
-	}
-	// Not listed: /srv, /mnt, /var, /home and the like themselves. They
-	// always exist, so init's content rule already refuses them — it
-	// takes only a directory it creates or an existing restic repository
-	// (prepareLocalRepository) — and a list here would only repeat that,
-	// badly.
-	// hotserve's own trees, named explicitly: /var is refused above,
-	// but a bind mount could put them elsewhere.
-	for _, own := range []string{DefaultLiveswapRoot, DefaultStagingRoot, "/var/lib/hotserve"} {
-		if dir == own || isAncestor(dir, own) || isAncestor(own, dir) {
-			return fmt.Errorf("the repository cannot overlap %s: backups would be part of what is backed up, and the apps' data would be inside the jobs' repository mount", own)
-		}
-	}
-	return nil
-}
-
-// resolveExisting follows symlinks through as much of a path as
-// exists, and keeps the rest as given. A repository is usually named
-// before it is created, so the whole path cannot be resolved — but
-// every component that does exist can be, which is what catches
-// /srv/backups pointing at /var/lib/liveswap.
-func resolveExisting(path string) (string, error) {
-	cur, rest := path, ""
-	for {
-		resolved, err := filepath.EvalSymlinks(cur)
-		if err == nil {
-			return filepath.Join(resolved, rest), nil
-		}
-		if !os.IsNotExist(err) {
-			return "", fmt.Errorf("checking %s: %w", cur, err)
-		}
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			return filepath.Join(cur, rest), nil
-		}
-		rest = filepath.Join(filepath.Base(cur), rest)
-		cur = parent
-	}
-}
-
-// isAncestor reports whether dir contains other.
-func isAncestor(dir, other string) bool {
-	return strings.HasPrefix(other+string(filepath.Separator), dir+string(filepath.Separator))
-}
-
-// LocalRepositoryPath is RepositoryPath for the settings systemd
-// hands the jobs, plus the rule that this file is where a repository
-// is named: RESTIC_REPOSITORY_FILE would point at a file the jobs
-// cannot see inside their view, so it is refused rather than left to
-// fail hourly.
-func LocalRepositoryPath(env []string) (string, error) {
+// checkSettingsRepository checks the repository the settings file
+// names. RESTIC_REPOSITORY_FILE is refused: the jobs' sandbox cannot
+// see the file it points at.
+func checkSettingsRepository(env []string) error {
 	var repo string
 	for _, kv := range env {
 		if strings.HasPrefix(kv, "RESTIC_REPOSITORY_FILE=") {
-			return "", fmt.Errorf("RESTIC_REPOSITORY_FILE is not supported: the backup jobs run in a sandbox that cannot see it — put RESTIC_REPOSITORY in the environment file instead")
+			return fmt.Errorf("RESTIC_REPOSITORY_FILE is not supported: the backup jobs run in a sandbox that cannot see it — put RESTIC_REPOSITORY in the environment file instead")
 		}
 		if v, ok := strings.CutPrefix(kv, "RESTIC_REPOSITORY="); ok {
 			repo = v
 		}
 	}
 	if repo == "" {
-		return "", fmt.Errorf("no RESTIC_REPOSITORY in the environment file: `hotserve backup init <repository>` writes it")
+		return fmt.Errorf("no RESTIC_REPOSITORY in the environment file: `hotserve backup init <repository>` writes it")
 	}
-	return RepositoryPath(repo)
+	return CheckRepository(repo)
 }
 
 // DefaultLiveswapRoot repeats liveswap's own default because the

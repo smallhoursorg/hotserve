@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -93,8 +92,8 @@ func TestLaunchArgsRoundTripThroughParseEntries(t *testing.T) {
 // and a backup that failed every hour after.
 func TestAsJobRunsResticAsTheJobDoes(t *testing.T) {
 	envDir := t.TempDir()
-	view := jobView{User: "hotserve", Home: "/var/lib/hotserve-backup/.init-x", RepositoryPath: "/srv/backups"}
-	settings := []string{"RESTIC_REPOSITORY=/srv/backups", "RESTIC_PASSWORD=from-init"}
+	view := jobView{User: "hotserve", Home: "/var/lib/hotserve-backup/.init-x"}
+	settings := []string{"RESTIC_REPOSITORY=s3:s3.example.com/bucket", "RESTIC_PASSWORD=from-init"}
 
 	var gotName string
 	var gotArgs []string
@@ -130,7 +129,7 @@ func TestAsJobRunsResticAsTheJobDoes(t *testing.T) {
 		t.Fatalf("ran %q, want systemd-run: the check has to be a unit like the job", gotName)
 	}
 	joined := strings.Join(gotArgs, "\n")
-	for _, want := range []string{"--wait", "--pipe", "--expand-environment=no", "--property=User=hotserve", "--property=BindPaths=/srv/backups"} {
+	for _, want := range []string{"--wait", "--pipe", "--expand-environment=no", "--property=User=hotserve"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("missing %q from the check's unit:\n%s", want, joined)
 		}
@@ -170,15 +169,13 @@ func TestTheJobAndInitsChecksShareOneSandbox(t *testing.T) {
 		staging = "/var/lib/hotserve-backup/blog"
 		shared  = "/var/lib/liveswap/blog/shared"
 		scratch = "/run/hotserve-backup/init-x"
-		repo    = "/srv/backups"
 	)
 	app := testApp("blog", StateEntry{Kind: KindFiles, Path: "uploads"})
 	opts := launchOpts("/var/lib/hotserve-backup")
-	opts.RepositoryPath = repo
 	job := LaunchArgs(app, opts)
 
 	var check []string
-	run, _ := asJob(jobView{User: "hotserve", Home: scratch, RepositoryPath: repo}, t.TempDir(),
+	run, _ := asJob(jobView{User: "hotserve", Home: scratch}, t.TempDir(),
 		func(_ context.Context, _ string, args ...string) error { check = args; return nil }, nil)
 	if err := run(context.Background(), "restic", "version"); err != nil {
 		t.Fatal(err)
@@ -213,29 +210,6 @@ func TestTheJobAndInitsChecksShareOneSandbox(t *testing.T) {
 	}
 	if len(j) < 25 {
 		t.Fatalf("only %d properties compared; the comparison would be vacuous", len(j))
-	}
-}
-
-// `run` mounts the repository writable into every job, so it mounts
-// only a real one: not a directory a hand edit pointed the settings at,
-// and not the empty mountpoint a disk that failed to mount leaves.
-func TestRunBindsOnlyARealRepository(t *testing.T) {
-	repo := t.TempDir()
-	mustWrite(t, filepath.Join(repo, "config"), "restic")
-	got, err := repositoryToBind([]string{"RESTIC_REPOSITORY=" + repo})
-	if err != nil || got != repo {
-		t.Errorf("a restic repository should be bound: %q, %v", got, err)
-	}
-	if _, err := repositoryToBind([]string{"RESTIC_REPOSITORY=" + t.TempDir()}); err == nil {
-		t.Error("an empty mountpoint must not be bound into the jobs")
-	}
-	home := t.TempDir()
-	mustWrite(t, filepath.Join(home, ".ssh", "id_ed25519"), "key")
-	if _, err := repositoryToBind([]string{"RESTIC_REPOSITORY=" + home}); err == nil {
-		t.Error("a directory with other things in it must not be bound into the jobs")
-	}
-	if got, err := repositoryToBind([]string{"RESTIC_REPOSITORY=s3:s3.example.com/bucket"}); err != nil || got != "" {
-		t.Errorf("a remote repository needs no bind: %q, %v", got, err)
 	}
 }
 

@@ -6,10 +6,8 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,10 +64,9 @@ const DeleteProbeTag = "hotserve-delete-probe"
 // difference between a backup and a hostage.
 func Init(ctx context.Context, o InitOptions, run Runner, capture Capturer, log io.Writer) (err error) {
 	if o.Repository == "" {
-		return fmt.Errorf("a repository is required, e.g. `hotserve backup init s3:s3.us-west-004.backblazeb2.com/my-bucket` (or a path, for a disk you mount)")
+		return fmt.Errorf("a repository is required, e.g. `hotserve backup init s3:s3.us-west-004.backblazeb2.com/my-bucket`")
 	}
-	localPath, err := RepositoryPath(o.Repository)
-	if err != nil {
+	if err := CheckRepository(o.Repository); err != nil {
 		return err
 	}
 	// The extra settings are provider credentials, not a way to
@@ -117,36 +114,6 @@ func Init(ctx context.Context, o InitOptions, run Runner, capture Capturer, log 
 		key, value, _ := strings.Cut(kv, "=")
 		if err := envFileSafe(key, value); err != nil {
 			return err
-		}
-	}
-
-	// A repository on this box is a directory init makes, or one restic
-	// already made — never a directory that holds anything else. Every
-	// job gets it writable and it belongs to the backup user, so the
-	// question is not "is this path's name dangerous?" (a list that
-	// only ever grew: /etc, then /etc/hotserve, then /srv, then
-	// /var/backups) but "is there anything here to give away?".
-	// Settled before the checks, so they run against the directory
-	// the jobs will have, owned the way the jobs will need it.
-	if localPath != "" {
-		// Assigned, not declared: the cleanup below reads the named
-		// return, and a `:=` here would give it a shadow that is always
-		// nil by the time it runs.
-		var created bool
-		created, err = prepareLocalRepository(localPath, o.User)
-		if err != nil {
-			return err
-		}
-		if created {
-			say(log, "created %s for the repository, owned by %s (the user the jobs run as)", localPath, o.User)
-			defer func() {
-				// Only an empty directory goes: once restic has written
-				// a repository into it, it holds what the password
-				// printed below opens.
-				if err != nil {
-					_ = os.Remove(localPath)
-				}
-			}()
 		}
 	}
 
@@ -258,15 +225,13 @@ func Init(ctx context.Context, o InitOptions, run Runner, capture Capturer, log 
 // repository that exists. The wording depends on the backend; both are
 // restic 0.18.0's own, captured from real runs:
 //
-//	local: …failed: Fatal: unable to open repository at …: config file already exists
-//	s3:    …failed: repository master key and config already initialized
+//	s3: …failed: repository master key and config already initialized
 //
 // Anything else is a real failure to create, and is reported as one —
 // without asking `cat config` afterwards, which is the call that hangs
 // on a bucket that does not exist.
 func alreadyInitialized(out string) bool {
-	return strings.Contains(out, "config file already exists") ||
-		strings.Contains(out, "master key and config already initialized")
+	return strings.Contains(out, "master key and config already initialized")
 }
 
 // firstLine is the part of restic's output worth quoting in an error:
@@ -520,161 +485,6 @@ func envFileSafe(key, value string) error {
 // order the env file writes it.
 func EnvFor(repo, password string, extra []string) []string {
 	return append([]string{"RESTIC_REPOSITORY=" + repo, "RESTIC_PASSWORD=" + password}, extra...)
-}
-
-// resticEntries are the only names restic puts at the top of a
-// repository. A directory holding anything else was not made by
-// restic, and is not init's to give away.
-var resticEntries = map[string]bool{
-	"config": true, "data": true, "index": true,
-	"keys": true, "locks": true, "snapshots": true,
-}
-
-// prepareLocalRepository makes a repository directory usable by the
-// jobs, and refuses every directory it has no business taking over.
-//
-// Two shapes are accepted, and nothing else:
-//   - the path does not exist, and its parent does: init creates it,
-//     empty, owned by the jobs' user. restic then fills it — as that
-//     user, since init's checks run as the job — so nothing inside ever
-//     needs handing over.
-//   - the path is already a restic repository (a rebuilt box, a disk
-//     moved from another one): it holds only restic's own entries, and
-//     those are given to the jobs' user.
-//
-// Not even an empty directory is adopted. An empty /var/backups on a
-// fresh Debian box fills up with shadow.bak the first night; an empty
-// home directory is someone's. Creating the repository's own directory
-// is the only way to be sure what is being handed over.
-func prepareLocalRepository(dir, username string) (created bool, err error) {
-	info, err := os.Lstat(dir)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		parent := filepath.Dir(dir)
-		if pinfo, perr := os.Stat(parent); perr != nil || !pinfo.IsDir() {
-			return false, fmt.Errorf("%s does not exist, and neither does %s: init creates the repository's own directory and nothing above it — create or mount %s first", dir, parent, parent)
-		}
-		if err := os.Mkdir(dir, 0o700); err != nil {
-			return false, fmt.Errorf("creating the repository directory %s: %w", dir, err)
-		}
-		if username != "" {
-			uid, gid, err := userIDs(username)
-			if err == nil {
-				err = os.Lchown(dir, uid, gid)
-			}
-			if err != nil {
-				_ = os.Remove(dir)
-				return false, fmt.Errorf("giving %s to %s (the jobs write the repository): %w", dir, username, err)
-			}
-		}
-		return true, nil
-	case err != nil:
-		return false, fmt.Errorf("checking %s: %w", dir, err)
-	case info.Mode()&fs.ModeSymlink != 0:
-		return false, fmt.Errorf("%s is a symlink: give init the directory itself, or a new path for it to create — a link can be pointed somewhere else later, and every job mounts the repository writable", dir)
-	case !info.IsDir():
-		return false, fmt.Errorf("%s exists and is not a directory", dir)
-	}
-	// Everything from here goes through one opened handle, and that
-	// handle must be the directory just looked at. Checked by path and
-	// then chowned by path, a directory whose parent the backup user
-	// can write could be swapped for a link between the two — and root
-	// would hand over whatever the link points at.
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		return false, fmt.Errorf("opening %s: %w", dir, err)
-	}
-	defer func() { _ = root.Close() }()
-	opened, err := root.Stat(".")
-	if err != nil || !os.SameFile(info, opened) {
-		return false, fmt.Errorf("%s changed while it was being checked; run init again", dir)
-	}
-	if err := resticRepositoryIn(root, dir); err != nil {
-		return false, err
-	}
-	if username != "" {
-		if err := chownRepository(root, dir, username); err != nil {
-			return false, err
-		}
-	}
-	return false, nil
-}
-
-// isResticRepository reports whether dir holds a restic repository and
-// nothing else. It is also what `run` checks before binding a
-// repository into the jobs, so that editing the settings file by hand
-// — or a disk that did not mount — cannot put some other directory,
-// writable, into every job.
-func isResticRepository(dir string) error {
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		return fmt.Errorf("%s is not a restic repository: %w", dir, err)
-	}
-	defer func() { _ = root.Close() }()
-	return resticRepositoryIn(root, dir)
-}
-
-// lostAndFound is what ext4 puts at the root of every filesystem. A
-// repository at the root of a disk of its own — the obvious way to
-// give backups a disk — always has one beside restic's entries.
-const lostAndFound = "lost+found"
-
-func resticRepositoryIn(root *os.Root, dir string) error {
-	entries, err := fs.ReadDir(root.FS(), ".")
-	if err != nil {
-		return fmt.Errorf("reading %s: %w", dir, err)
-	}
-	newPath := filepath.Join(dir, "restic")
-	hasConfig := false
-	for _, e := range entries {
-		if e.Name() == lostAndFound && e.IsDir() {
-			continue
-		}
-		if !resticEntries[e.Name()] {
-			return fmt.Errorf("%s already exists and is not a restic repository (it holds %q): init only creates a new directory for a repository or reuses one restic made, because the whole directory is given to the backup user and mounted writable into every job — point init at a new path, like %s", dir, e.Name(), newPath)
-		}
-		if e.Name() == "config" && e.Type().IsRegular() {
-			hasConfig = true
-		}
-	}
-	if !hasConfig {
-		return fmt.Errorf("%s already exists and is not a restic repository (it has no config file): init only creates a new directory for a repository or reuses one restic made — point init at a new path, like %s", dir, newPath)
-	}
-	return nil
-}
-
-// chownRepository gives an existing restic repository to the jobs'
-// user — a rebuilt box's new hotserve user rarely has the old one's
-// uid. The walk is scoped with os.Root, so nothing in the tree can
-// lead it outside: not a symlink (Lchown changes the link itself), and
-// not a directory swapped for one mid-walk by whoever owned the tree
-// before, which a plain path walk would descend into as root.
-// lost+found is the filesystem's, not restic's, and is left alone.
-func chownRepository(root *os.Root, dir, username string) error {
-	uid, gid, err := userIDs(username)
-	if err != nil {
-		return err
-	}
-	return walkRepository(root, func(p string) error {
-		if err := root.Lchown(p, uid, gid); err != nil {
-			return fmt.Errorf("giving %s to %s: %w", filepath.Join(dir, p), username, err)
-		}
-		return nil
-	})
-}
-
-// walkRepository visits everything in the repository that is restic's
-// — the directory itself included — and nothing that is not.
-func walkRepository(root *os.Root, visit func(path string) error) error {
-	return fs.WalkDir(root.FS(), ".", func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if p == lostAndFound && d.IsDir() {
-			return fs.SkipDir
-		}
-		return visit(p)
-	})
 }
 
 // newPassword is what protects every backup, so it is long enough

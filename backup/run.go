@@ -27,10 +27,6 @@ type LaunchOptions struct {
 	// User owns liveswap's data; the job reads it as that user rather
 	// than as root.
 	User string
-	// RepositoryPath is set only for a filesystem repository, which
-	// has to be inside the job's view to be written to. Empty for a
-	// remote one.
-	RepositoryPath string
 }
 
 // unitName keeps one unit per app so `systemctl status` and the
@@ -82,7 +78,6 @@ func LaunchArgs(app App, o LaunchOptions) []string {
 		Home:           staging,
 		Shared:         app.Shared,
 		SharedWritable: sharedWritable(app),
-		RepositoryPath: o.RepositoryPath,
 	})...)
 	args = append(args,
 		o.Self, "backup", "app",
@@ -128,11 +123,6 @@ type jobView struct {
 	// Shared is the app's data, or "" for a unit that reads none.
 	Shared         string
 	SharedWritable bool
-	// RepositoryPath is set for a repository on this box.
-	RepositoryPath string
-	// RepositoryReadOnly binds it read-only, for a unit that only reads
-	// the repository and runs restic with --no-lock.
-	RepositoryReadOnly bool
 }
 
 // sandboxProperties is the one definition of a backup unit's sandbox,
@@ -192,17 +182,6 @@ func sandboxProperties(v jobView) []string {
 		} else {
 			props = append(props, "--property=BindReadOnlyPaths="+v.Shared)
 		}
-	}
-	switch {
-	case v.RepositoryPath != "" && v.RepositoryReadOnly:
-		// A restore writes the app's data, which the app itself can
-		// change under it — links included. The repository is not
-		// among what that can reach.
-		props = append(props, "--property=BindReadOnlyPaths="+v.RepositoryPath)
-	case v.RepositoryPath != "":
-		// A repository on this box is written to, so it goes in
-		// writable — and only for the jobs, never for an app.
-		props = append(props, "--property=BindPaths="+v.RepositoryPath)
 	}
 	return props
 }

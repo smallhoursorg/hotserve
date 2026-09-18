@@ -57,10 +57,12 @@ Windows, and macOS-as-a-server are out of scope by product design.
    removes them when it ends. It runs in that app's backup unit with
    the app's data writable, and with nothing else writable but its own
    `<app>/restore` dir: the backup's copies and its record of which
-   paths it has seen are not in its view, and a repository on this box
-   is read-only. A link the app left in its own data can therefore
-   steer the restore's writes only into the app's own data or that
-   scratch dir.
+   paths it has seen are not in its view. A link the app left in its
+   own data can therefore steer the restore's writes only into the
+   app's own data or that scratch dir.
+   The repository itself is never on the box: it is a backend URL
+   (`s3:`, `b2:`, `rest:`, `sftp:` …), and init, the hourly run and
+   restore refuse a path. No backup unit has any of it in its view.
 7. **Sibling app data** — `/var/lib/liveswap/<app>/{releases,shared,state.json}`.
 8. **System integrity** — root, persistence, other system services.
 9. **Availability** — serving traffic and the deploy pipeline.

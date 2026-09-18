@@ -200,23 +200,6 @@ func TestRestoreSaysWhatAFailurePartWayLeaves(t *testing.T) {
 	}
 }
 
-// A repository on this box is read-only to the restore, so restic runs
-// without a lock; a remote one is locked, so a prune elsewhere waits.
-func TestRestoreLocksARemoteRepository(t *testing.T) {
-	for _, noLock := range []bool{false, true} {
-		f := newRestore(t, nil, []string{"uploads"})
-		f.job.NoLock = noLock
-		if err := f.job.Execute(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-		for _, c := range f.calls {
-			if c.name == "restic" && slices.Contains(c.args, "--no-lock") != noLock {
-				t.Errorf("NoLock=%v but restic %v", noLock, c.args)
-			}
-		}
-	}
-}
-
 // The backup skips a declared path the app had not created yet, so a
 // snapshot without it is ordinary: the rest is restored and it is left.
 func TestRestoreLeavesAPathTheSnapshotNeverHad(t *testing.T) {
@@ -334,11 +317,11 @@ func TestConfirmRestoreWantsTheAppsName(t *testing.T) {
 
 // A restore runs as the app's backup job does — the same unit name,
 // so the two can never overlap, and the same sandbox — with two
-// differences, both deliberate: the app's data is writable, and a
-// repository on this box is read-only.
+// differences, both deliberate: the app's data is writable, and its
+// HOME is its own part of staging, not the backup's.
 func TestRestoreRunsInTheBackupJobsUnitAndSandbox(t *testing.T) {
 	app := App{Name: "blog", Shared: "/var/lib/liveswap/blog/shared", State: []StateEntry{{Kind: KindFiles, Path: "uploads"}}}
-	o := LaunchOptions{Self: "/usr/bin/hotserve", StagingRoot: "/var/lib/hotserve-backup", EnvFile: "/etc/hotserve/backup.env", User: "hotserve", RepositoryPath: "/srv/restic"}
+	o := LaunchOptions{Self: "/usr/bin/hotserve", StagingRoot: "/var/lib/hotserve-backup", EnvFile: "/etc/hotserve/backup.env", User: "hotserve"}
 	backup, restore := LaunchArgs(app, o), RestoreArgs(app, o, "s1full", false)
 	props := func(args []string) []string {
 		var out []string
@@ -352,7 +335,6 @@ func TestRestoreRunsInTheBackupJobsUnitAndSandbox(t *testing.T) {
 	staging := o.StagingRoot + "/blog"
 	swap := map[string]string{
 		"--property=BindReadOnlyPaths=" + app.Shared: "--property=BindPaths=" + app.Shared,
-		"--property=BindPaths=" + o.RepositoryPath:   "--property=BindReadOnlyPaths=" + o.RepositoryPath,
 		// Its own part of staging, not the backup's bookkeeping.
 		"--property=BindPaths=" + staging:                                "--property=BindPaths=" + StagingRestore(staging),
 		"--property=Environment=HOME=" + staging:                         "--property=Environment=HOME=" + StagingRestore(staging),
@@ -371,7 +353,7 @@ func TestRestoreRunsInTheBackupJobsUnitAndSandbox(t *testing.T) {
 	if !slices.Contains(restore, "--pipe") {
 		t.Error("the operator is at the terminal: the restore's output must reach it")
 	}
-	if cmd := jobCommand(restore); !slices.Equal(cmd[:3], []string{o.Self, "backup", "restore-app"}) || !slices.Contains(cmd, "--snapshot=s1full") || !slices.Contains(cmd, "--no-lock") {
+	if cmd := jobCommand(restore); !slices.Equal(cmd[:3], []string{o.Self, "backup", "restore-app"}) || !slices.Contains(cmd, "--snapshot=s1full") || slices.Contains(cmd, "--no-lock") {
 		t.Errorf("restore unit runs %v", cmd)
 	}
 }

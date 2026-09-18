@@ -56,11 +56,6 @@ type RestoreJob struct {
 	// inside each declared files path. Off by default: a restore that
 	// deletes what nobody asked it to is the one that loses data.
 	Delete bool
-	// NoLock runs restic without taking a lock, for a repository on
-	// this box, which the restore unit gets read-only. A remote one is
-	// locked as usual, so a prune run elsewhere waits for the restore
-	// rather than removing data from under it.
-	NoLock bool
 
 	Run     Runner
 	Capture Capturer
@@ -194,8 +189,7 @@ func (j RestoreJob) Execute(ctx context.Context) error {
 			// The snapshot's copy of this one directory, into the live
 			// one: restic puts back what differs and, only when asked,
 			// removes what the snapshot does not have.
-			args := append([]string{"restore"}, j.lock()...)
-			args = append(args, j.Snapshot+":"+f.path, "--target", f.path)
+			args := []string{"restore", j.Snapshot + ":" + f.path, "--target", f.path}
 			if j.Delete {
 				args = append(args, "--delete")
 			}
@@ -246,7 +240,7 @@ func (j RestoreJob) Execute(ctx context.Context) error {
 // list looks every declared path up in the snapshot, with one `ls` of
 // their parents — the same bounded listing verifySnapshot uses.
 func (j RestoreJob) list(ctx context.Context, want []expectedNode) (map[string]lsNode, error) {
-	args := append(append([]string{"ls"}, j.lock()...), "--json", j.Snapshot)
+	args := []string{"ls", "--json", j.Snapshot}
 	seen := map[string]bool{}
 	for _, w := range want {
 		if parent := filepath.Dir(w.path); !seen[parent] {
@@ -267,13 +261,6 @@ func (j RestoreJob) list(ctx context.Context, want []expectedNode) (map[string]l
 		}
 	}
 	return nodes, nil
-}
-
-func (j RestoreJob) lock() []string {
-	if j.NoLock {
-		return []string{"--no-lock"}
-	}
-	return nil
 }
 
 func (j RestoreJob) logf(format string, a ...any) {
@@ -298,11 +285,6 @@ func RestoreArgs(app App, o LaunchOptions, snapshot string, del bool) []string {
 		Home:           StagingRestore(staging),
 		Shared:         app.Shared,
 		SharedWritable: true,
-		RepositoryPath: o.RepositoryPath,
-		// Everything a restore asks of restic is a read, so a
-		// repository on this box goes in read-only, and restic runs
-		// against it with --no-lock.
-		RepositoryReadOnly: true,
 	})...)
 	args = append(args,
 		o.Self, "backup", "restore-app",
@@ -313,9 +295,6 @@ func RestoreArgs(app App, o LaunchOptions, snapshot string, del bool) []string {
 	)
 	if del {
 		args = append(args, "--delete")
-	}
-	if o.RepositoryPath != "" {
-		args = append(args, "--no-lock")
 	}
 	for _, e := range app.State {
 		args = append(args, e.Kind+":"+e.Path)

@@ -142,123 +142,55 @@ func TestLaunchArgsBindsTheAppsDataReadOnlyUnlessADatabaseNeedsOpening(t *testin
 	}
 }
 
-// A repository on this box is invisible to the job unless it is bound
-// in — the failure is "repository does not exist", which looks like a
-// configuration error rather than a missing mount. A remote
-// repository needs no bind at all.
-func TestLaunchArgsBindsALocalRepositoryOnly(t *testing.T) {
-	app := testApp("blog", StateEntry{Kind: KindSQLite, Path: "app.db"})
-
-	o := launchOpts("/var/lib/hotserve-backup")
-	o.RepositoryPath = "/srv/backups"
-	if !strings.Contains(strings.Join(LaunchArgs(app, o), "\n"), "--property=BindPaths=/srv/backups") {
-		t.Error("a filesystem repository must be in the job's view")
-	}
-
-	o.RepositoryPath = ""
-	for _, a := range LaunchArgs(app, o) {
-		if strings.Contains(a, "BindPaths=/srv") {
-			t.Errorf("a remote repository needs no bind: %s", a)
-		}
-	}
-}
-
-func TestRepositoryPath(t *testing.T) {
-	for _, tc := range []struct{ repo, want string }{
-		{"/srv/backups", "/srv/backups"},
-		{"local:/srv/backups/", "/srv/backups"},
-		{"s3:s3.example.com/bucket", ""},
-		{"b2:bucket:path", ""},
-		{"sftp:user@host:/srv/backups", ""},
-		{"rest:https://example.com/", ""},
-	} {
-		got, err := RepositoryPath(tc.repo)
-		if err != nil {
-			t.Errorf("%q: %v", tc.repo, err)
-		}
-		if got != tc.want {
-			t.Errorf("%q → %q, want %q", tc.repo, got, tc.want)
-		}
-	}
-	// A relative path would be bound nowhere and chowned nowhere, and
-	// would resolve against whatever directory each process started
-	// in — so it is refused rather than quietly treated as remote.
-	for _, repo := range []string{"backups", "./backups", "local:backups"} {
-		if _, err := RepositoryPath(repo); err == nil {
-			t.Errorf("%q should be refused as a relative path", repo)
-		}
-	}
-}
-
-// init chowns a filesystem repository to the jobs' user and every job
-// mounts it writable, so a path that is really a system directory
-// hands the box away. Descendants count: /etc/hotserve holds the
-// Caddyfile and the backup credentials.
-func TestRepositoryPathRefusesDirectoriesThatWouldGiveAwayTheBox(t *testing.T) {
-	// By name: system trees and hotserve's own. (/srv, /home and the like
-	// are refused too, but by what is in them — see
-	// TestInitRefusesTheTopLevelDirectoriesThemselves.)
+// A repository is a backend URL, never a path on this box.
+func TestCheckRepository(t *testing.T) {
 	for _, repo := range []string{
-		"/", "/etc", "/etc/hotserve", "/usr", "/usr/local/backups", "/root/backups",
-		"/var", "/var/lib", "/var/lib/liveswap", "/var/lib/liveswap/blog/shared",
-		"/var/lib/hotserve-backup", "/var/lib/hotserve",
+		"s3:s3.example.com/bucket", "b2:bucket:path", "sftp:user@host:/srv/backups",
+		"rest:https://example.com/", "azure:container:/", "gs:bucket:/", "swift:container:/", "rclone:remote:path",
 	} {
-		if _, err := RepositoryPath(repo); err == nil {
-			t.Errorf("%s should be refused as a repository", repo)
+		if err := CheckRepository(repo); err != nil {
+			t.Errorf("%q: %v", repo, err)
 		}
 	}
-	// A directory of its own is the documented shape, including one
-	// inside /var or a home directory.
-	for _, repo := range []string{"/srv/backups", "/mnt/disk/backups", "/var/backups", "/home/dev/backups"} {
-		if _, err := RepositoryPath(repo); err != nil {
-			t.Errorf("%s should be allowed: %v", repo, err)
+	for _, repo := range []string{
+		"/srv/backups", "local:/srv/backups", "backups", "./backups", "C:/backups", "s3:", "", "ftp:host/x",
+	} {
+		if err := CheckRepository(repo); err == nil || !strings.Contains(err.Error(), "not a backend URL") {
+			t.Errorf("%q must be refused as not a backend URL, got %v", repo, err)
 		}
 	}
 }
 
-// Cleaning a path is lexical, so /srv/backups can still be a symlink
-// into a tree the checks just refused — and the bind would then put
-// that tree, writable, into every backup job.
-func TestRepositoryPathFollowsSymlinksBeforeJudgingThem(t *testing.T) {
-	dir := t.TempDir()
-	link := filepath.Join(dir, "backups")
-	if err := os.Symlink("/usr", link); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
+// The settings file names the repository the jobs use: it is held to the
+// same rule, and RESTIC_REPOSITORY_FILE is refused because the jobs'
+// sandbox cannot see the file it points at.
+func TestCheckSettingsRepository(t *testing.T) {
+	if err := checkSettingsRepository([]string{"RESTIC_PASSWORD=x", "RESTIC_REPOSITORY=s3:host/bucket"}); err != nil {
+		t.Errorf("a backend URL is accepted: %v", err)
 	}
-	_, err := RepositoryPath(link)
-	if err == nil || !strings.Contains(err.Error(), "resolves to") {
-		t.Fatalf("a symlink into /usr must be refused, got %v", err)
+	if err := checkSettingsRepository([]string{"RESTIC_REPOSITORY=/srv/backups"}); err == nil || !strings.Contains(err.Error(), "not a backend URL") {
+		t.Errorf("a path must be refused, got %v", err)
 	}
-
-	// A link to somewhere harmless stays allowed, and the path the
-	// operator named is what gets bound.
-	safe := filepath.Join(dir, "elsewhere")
-	if err := os.MkdirAll(filepath.Join(dir, "target"), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(filepath.Join(dir, "target"), safe); err != nil {
-		t.Fatal(err)
-	}
-	got, err := RepositoryPath(safe)
-	if err != nil || got != safe {
-		t.Fatalf("got %q, %v; want %q", got, err, safe)
-	}
-}
-
-func TestLocalRepositoryPathFromTheEnvironmentFile(t *testing.T) {
-	got, err := LocalRepositoryPath([]string{"RESTIC_PASSWORD=x", "RESTIC_REPOSITORY=/srv/backups"})
-	if err != nil || got != "/srv/backups" {
-		t.Fatalf("got %q, %v", got, err)
-	}
-	// The jobs cannot see a file named here: their view holds the
-	// app's data, their staging and the repository, nothing else.
-	_, err = LocalRepositoryPath([]string{"RESTIC_REPOSITORY_FILE=/etc/hotserve/repo"})
-	if err == nil || !strings.Contains(err.Error(), "not supported") {
+	if err := checkSettingsRepository([]string{"RESTIC_REPOSITORY_FILE=/etc/hotserve/repo"}); err == nil || !strings.Contains(err.Error(), "not supported") {
 		t.Errorf("RESTIC_REPOSITORY_FILE should be refused, got %v", err)
 	}
-	_, err = LocalRepositoryPath([]string{"RESTIC_PASSWORD=x"})
-	if err == nil || !strings.Contains(err.Error(), "backup init") {
+	if err := checkSettingsRepository([]string{"RESTIC_PASSWORD=x"}); err == nil || !strings.Contains(err.Error(), "backup init") {
 		t.Errorf("a missing repository should say how to set one, got %v", err)
+	}
+}
+
+// Nothing but the app's data and the unit's own dir is bound into a
+// job: the repository is reached over the network.
+func TestLaunchArgsBindNothingButTheAppAndItsStaging(t *testing.T) {
+	app := testApp("blog", StateEntry{Kind: KindSQLite, Path: "app.db"})
+	o := launchOpts("/var/lib/hotserve-backup")
+	for _, a := range LaunchArgs(app, o) {
+		if !strings.Contains(a, "BindPaths=") || strings.Contains(a, "BindReadOnlyPaths=/usr ") {
+			continue
+		}
+		if a != "--property=BindPaths=/var/lib/hotserve-backup/blog" && a != "--property=BindPaths="+app.Shared {
+			t.Errorf("unexpected bind: %s", a)
+		}
 	}
 }
 

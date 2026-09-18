@@ -50,9 +50,9 @@ reads as root; nothing about backups is configured in the Caddyfile.
       on the command line, where your shell history and /proc/*/cmdline
       keep them.
 
-      A path on this box must be new (init creates it) or already a
-      restic repository; init never takes over a directory with
-      anything else in it.
+      The repository is a restic backend URL — s3:, b2:, rest:, sftp:,
+      azure:, gs:, swift: or rclone: — never a path on this box; init,
+      run and restore refuse one.
 
   hotserve backup run
       Asks the admin API which apps declare state and backs up each
@@ -119,7 +119,6 @@ belongs with the privileged key, off the box.`,
 			fs.String("snapshot", "", "the snapshot to restore, by id; the newest when unset (restore)")
 			fs.Bool("delete", false, "also delete files added since the snapshot, inside each declared files path (restore)")
 			fs.Bool("yes", false, "restore without asking first, for a script (restore)")
-			fs.Bool("no-lock", false, "run restic without a lock, for a repository bound read-only (restore-app; set by restore)")
 			return fs
 		}(),
 		Func: cmdBackup,
@@ -221,7 +220,7 @@ func cmdStatus(fl caddycmd.Flags) (int, error) {
 
 func cmdInit(fl caddycmd.Flags, args []string) (int, error) {
 	if len(args) == 0 {
-		return caddy1, fmt.Errorf("say where the backups go, e.g. `hotserve backup init s3:s3.us-west-004.backblazeb2.com/my-bucket` — or a path, for a disk you mount")
+		return caddy1, fmt.Errorf("say where the backups go, e.g. `hotserve backup init s3:s3.us-west-004.backblazeb2.com/my-bucket`")
 	}
 	extra := args[1:] // provider credentials as KEY=VALUE
 	if path := fl.String("credentials-file"); path != "" {
@@ -232,8 +231,7 @@ func cmdInit(fl caddycmd.Flags, args []string) (int, error) {
 		extra = append(fromFile, extra...)
 	}
 	username := fl.String("user")
-	repoPath, err := RepositoryPath(args[0])
-	if err != nil {
+	if err := CheckRepository(args[0]); err != nil {
 		return caddy1, err
 	}
 	// Everything the checks need on disk lives under one root-only
@@ -291,7 +289,7 @@ func cmdInit(fl caddycmd.Flags, args []string) (int, error) {
 			}
 		}
 	}
-	view := jobView{User: username, Home: home, RepositoryPath: repoPath}
+	view := jobView{User: username, Home: home}
 	// The existence and probe checks are questions, not failures, so
 	// their output is captured rather than shown: restic's "repository
 	// does not exist" while init is about to create one reads as an
@@ -308,22 +306,6 @@ func cmdInit(fl caddycmd.Flags, args []string) (int, error) {
 // asked, rather than failing over a detail.
 func unitActive(ctx context.Context, unit string) bool {
 	return exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", unit).Run() == nil //nolint:gosec // a fixed program; the unit name is built here from an app name the config validated
-}
-
-// repositoryToBind is the repository on this box that `run` mounts,
-// writable, into every job — "" for a remote one. Only a real restic
-// repository is ever mounted: the settings file is root's, but a hand
-// edit, or a disk that failed to mount and left an empty mountpoint,
-// must not put some other directory into every job every hour.
-func repositoryToBind(env []string) (string, error) {
-	path, err := LocalRepositoryPath(env)
-	if err != nil || path == "" {
-		return path, err
-	}
-	if err := isResticRepository(path); err != nil {
-		return "", fmt.Errorf("not binding %s into the backup jobs: %w", path, err)
-	}
-	return path, nil
 }
 
 // checkRoot holds init's checks while they run: the settings each one
@@ -363,23 +345,20 @@ func cmdRun(fl caddycmd.Flags) (int, error) {
 		return caddy1, err
 	}
 	envFile := fl.String("env-file")
-	// systemd hands the jobs this file; read it here too, for the one
-	// thing the launcher has to know: whether the repository is a
-	// path on this box, which then has to be inside each job's view.
+	// systemd hands the jobs this file; it is read here only to refuse
+	// a repository that is not a backend URL.
 	env, err := LoadEnvFile(envFile)
 	if err != nil {
 		return caddy1, err
 	}
-	repoPath, err := repositoryToBind(env)
-	if err != nil {
+	if err := checkSettingsRepository(env); err != nil {
 		return caddy1, err
 	}
 	o := LaunchOptions{
-		Self:           self,
-		StagingRoot:    fl.String("staging"),
-		EnvFile:        envFile,
-		User:           fl.String("user"),
-		RepositoryPath: repoPath,
+		Self:        self,
+		StagingRoot: fl.String("staging"),
+		EnvFile:     envFile,
+		User:        fl.String("user"),
 	}
 	if err := RunAll(ctx, apps, o, execRunner(os.Stderr), os.Stdout); err != nil {
 		return caddy1, err
@@ -565,16 +544,14 @@ func cmdRestore(fl caddycmd.Flags, args []string) (int, error) {
 	if err != nil {
 		return caddy1, err
 	}
-	repoPath, err := repositoryToBind(env)
-	if err != nil {
+	if err := checkSettingsRepository(env); err != nil {
 		return caddy1, err
 	}
 	o := LaunchOptions{
-		Self:           self,
-		StagingRoot:    fl.String("staging"),
-		EnvFile:        envFile,
-		User:           fl.String("user"),
-		RepositoryPath: repoPath,
+		Self:        self,
+		StagingRoot: fl.String("staging"),
+		EnvFile:     envFile,
+		User:        fl.String("user"),
 	}
 	unit := unitName(name)
 	// Checked here to say so plainly; systemd refuses a second unit of
@@ -596,10 +573,10 @@ func cmdRestore(fl caddycmd.Flags, args []string) (int, error) {
 	if err := ensureShared(ctx, app.Shared, o.User, execRunner(os.Stderr)); err != nil {
 		return caddy1, err
 	}
-	view := jobView{User: o.User, EnvFile: envFile, Home: StagingRestore(staging), RepositoryPath: repoPath, RepositoryReadOnly: true}
+	view := jobView{User: o.User, EnvFile: envFile, Home: StagingRestore(staging)}
 	// This app's backups, and every clean-run record (an OR of the two
 	// --tag flags).
-	out, err := captureRunner()(ctx, "systemd-run", resticInUnit(view, []string{"snapshots", "--no-lock", "--json", "--tag", "hotserve,app:" + name, "--tag", CleanTag})...)
+	out, err := captureRunner()(ctx, "systemd-run", resticInUnit(view, []string{"snapshots", "--json", "--tag", "hotserve,app:" + name, "--tag", CleanTag})...)
 	if err != nil {
 		return caddy1, fmt.Errorf("listing the snapshots of %s: %w", name, err)
 	}
@@ -691,10 +668,9 @@ func cmdRestoreApp(fl caddycmd.Flags, entryArgs []string) (int, error) {
 		Databases: app.Databases(),
 		Files:     app.Files(),
 		Delete:    fl.Bool("delete"),
-		NoLock:    fl.Bool("no-lock"),
 		Run:       execRunner(os.Stderr),
 		Capture:   captureRunner(),
-		Dump:      resticDumper(fl.Bool("no-lock")),
+		Dump:      resticDump,
 		Log:       os.Stdout,
 	}
 	if err := job.Execute(context.Background()); err != nil {
@@ -703,27 +679,21 @@ func cmdRestoreApp(fl caddycmd.Flags, entryArgs []string) (int, error) {
 	return 0, nil
 }
 
-// resticDumper writes one file out of a snapshot. O_EXCL: dst is a
-// name the caller has just cleared, and a link that appeared there
-// since is not followed.
-func resticDumper(noLock bool) Dumper {
-	return func(ctx context.Context, snapshot, path, dst string) error {
-		f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o640) //nolint:gosec // a path built here, inside the unit's own view
-		if err != nil {
-			return err
-		}
-		args := []string{"dump"}
-		if noLock {
-			args = append(args, "--no-lock")
-		}
-		cmd := exec.CommandContext(ctx, "restic", append(args, snapshot, path)...) //nolint:gosec // a fixed program; the snapshot and path come from the listing just read
-		cmd.Env = commandEnv(ctx)
-		cmd.Stdout = f
-		cmd.Stderr = os.Stderr
-		err = cmd.Run()
-		if cerr := f.Close(); err == nil {
-			err = cerr
-		}
+// resticDump writes one file out of a snapshot. O_EXCL: dst is a name
+// the caller has just cleared, and a link that appeared there since is
+// not followed.
+func resticDump(ctx context.Context, snapshot, path, dst string) error {
+	f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o640) //nolint:gosec // a path built here, inside the unit's own view
+	if err != nil {
 		return err
 	}
+	cmd := exec.CommandContext(ctx, "restic", "dump", snapshot, path) //nolint:gosec // a fixed program; the snapshot and path come from the listing just read
+	cmd.Env = commandEnv(ctx)
+	cmd.Stdout = f
+	cmd.Stderr = os.Stderr
+	err = cmd.Run()
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }

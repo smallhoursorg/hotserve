@@ -567,7 +567,7 @@ stage "stage 4: removal"
 # Stand in for a configured box: the credentials `hotserve backup init`
 # writes, and a staged database copy a job left behind. Remove must
 # keep them (the operator may be reinstalling); purge must not.
-printf 'RESTIC_REPOSITORY=/srv/backups\nRESTIC_PASSWORD=secret\n' > /etc/hotserve/backup.env
+printf 'RESTIC_REPOSITORY=s3:s3.example.com/backups\nRESTIC_PASSWORD=secret\n' > /etc/hotserve/backup.env
 chmod 0600 /etc/hotserve/backup.env
 # The copies an interrupted init can leave: the temporary it renames
 # into place, and the settings its checks ran with.
@@ -643,7 +643,7 @@ systemd-run --unit=hotserve-backup-smoke sleep 600 >/dev/null 2>&1 \
 	|| die "setup: could not start a stand-in backup job"
 systemctl is-active --quiet hotserve-backup-smoke.service \
 	|| die "setup: the stand-in job is not running; the assertion below would be vacuous"
-printf 'RESTIC_REPOSITORY=/srv/nowhere\nRESTIC_PASSWORD=x\n' > /etc/hotserve/backup.env
+printf 'RESTIC_REPOSITORY=s3:s3.example.com/nowhere\nRESTIC_PASSWORD=x\n' > /etc/hotserve/backup.env
 chmod 0600 /etc/hotserve/backup.env
 systemctl start hotserve-backup.service >/dev/null 2>&1 || true
 i=0
@@ -657,7 +657,7 @@ rm -f /etc/hotserve/backup.env
 # "Backups are off" only when they are.
 # (Output captured whole, then searched: `dpkg | grep -q` would let grep
 # exit on its first match and SIGPIPE dpkg mid-configure.)
-printf 'RESTIC_REPOSITORY=/srv/backups\nRESTIC_PASSWORD=secret\n' > /etc/hotserve/backup.env
+printf 'RESTIC_REPOSITORY=s3:s3.example.com/backups\nRESTIC_PASSWORD=secret\n' > /etc/hotserve/backup.env
 chmod 0600 /etc/hotserve/backup.env
 out=$(dpkg -i "$deb" 2>&1)
 case "$out" in *"Backups are off"*) die "an upgrade told a box whose backups are configured that they are off" ;; esac
