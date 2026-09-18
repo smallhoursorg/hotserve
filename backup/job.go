@@ -63,8 +63,8 @@ func (j Job) Execute(ctx context.Context) error {
 	}
 	targets := []string{}
 	if len(j.Databases) == 0 {
-		// No database declared any more: the staged copy of one that
-		// used to be is plaintext app data, and nothing would ever
+		// No database declared: a staged copy left by a removed
+		// declaration is plaintext app data, and nothing else would
 		// remove it. stageDatabases clears this itself when there is
 		// something to stage.
 		if err := os.RemoveAll(StagingData(j.Staging)); err != nil {
@@ -177,10 +177,9 @@ func SeenPaths(appStaging string) string {
 	return filepath.Join(appStaging, ".declared-present")
 }
 
-// readSeen treats a missing or unreadable list as empty: the first run,
-// or the first after an upgrade, cannot know what was there before, so
-// it gives every path the benefit of "not created yet" — as all runs
-// did before this list existed.
+// readSeen treats a missing or unreadable list as empty: the first run
+// cannot know what was there before, so it gives every path the
+// benefit of "not created yet".
 func readSeen(path string) map[string]bool {
 	seen := map[string]bool{}
 	body, err := os.ReadFile(path) //nolint:gosec // the job's own staging dir, a path built here
@@ -305,14 +304,12 @@ type lsNode struct {
 // repository and requires every declared path to be in it as data.
 //
 // Every check before this one is about the job's own view: the file
-// existed, the copy ran, restic exited 0. None of them is the backup.
-// This package has shipped, and then found, several ways for all of
-// those to be true while the snapshot held nothing worth restoring — a
-// symlink stored as a link, a database copy that came out empty. They
-// were each found by someone imagining them. Reading the snapshot back
-// catches the next one without anyone having to: a declared path that
-// is missing, is a link, or (for a database) is empty fails the run,
-// so it never earns the clean-run record.
+// existed, the copy ran, restic exited 0. None of them is the backup:
+// all of those can be true while the snapshot holds nothing worth
+// restoring — a symlink stored as a link, a database copy that came
+// out empty. Reading the snapshot back catches any such case: a
+// declared path that is missing, is a link, or (for a database) is
+// empty fails the run, so it never earns the clean-run record.
 //
 // Two cheap calls: the newest snapshot for this app from this box,
 // then `ls` of each declared path's PARENT. restic's ls lists a named

@@ -9,7 +9,7 @@ import (
 
 // init asks only for what it was not given, and only for the providers
 // the docs set up: typed secrets for an S3-compatible store or B2, and
-// nothing for a path, where there is no key to ask for.
+// nothing for anything else.
 func TestMissingCredentials(t *testing.T) {
 	keys := func(cs []credential) string {
 		var out []string

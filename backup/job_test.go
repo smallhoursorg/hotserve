@@ -55,9 +55,9 @@ func stagedPathFromSQL(sql string) string {
 func testEnv(string) string { return "set" }
 
 // newJob builds a job over a real shared dir holding the declared
-// data: a declared database that is missing is an error now (it is
-// almost always a typo), so the fixture has to look like an app that
-// has actually run.
+// data: a declared database that is missing is an error (it is almost
+// always a typo), so the fixture has to look like an app that has
+// actually run.
 func newJob(t *testing.T, rec *recorder, dbs, files []string) Job {
 	t.Helper()
 	shared := t.TempDir()
@@ -198,7 +198,7 @@ func TestExecuteFilesOnly(t *testing.T) {
 }
 
 // VACUUM INTO refuses to write a file that exists, so the job must
-// clear last run's copy — the failure the systemd-run spike hit.
+// clear last run's copy.
 func TestExecuteClearsStaleStagedCopy(t *testing.T) {
 	rec := &recorder{touch: true}
 	job := newJob(t, rec, []string{"app.db"}, nil)

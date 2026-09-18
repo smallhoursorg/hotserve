@@ -86,10 +86,10 @@ func TestLaunchArgsRoundTripThroughParseEntries(t *testing.T) {
 // init's checks are not an imitation of the hourly job: every restic
 // command is a unit with the job's own sandbox, run as the job's user,
 // with restic looked up on the unit's PATH and the settings arriving
-// through EnvironmentFile= exactly as the jobs get them. Each way init
-// used to differ — root's shell environment, root's PATH, root's HOME,
-// root owning what restic created — was a check that passed at init
-// and a backup that failed every hour after.
+// through EnvironmentFile= exactly as the jobs get them. Any
+// difference — root's shell environment, root's PATH, root's HOME,
+// root owning what restic creates — is a check that passes at init
+// and a backup that fails every hour after.
 func TestAsJobRunsResticAsTheJobDoes(t *testing.T) {
 	envDir := t.TempDir()
 	view := jobView{User: "hotserve", Home: "/var/lib/hotserve-backup/.init-x"}
@@ -242,7 +242,7 @@ func TestCaptureQuietKeepsTheStreamsApart(t *testing.T) {
 		t.Errorf("stderr leaked into stdout: %q", out)
 	}
 
-	// On failure the result carries both, as before.
+	// On failure the result carries both.
 	out, err = capture(context.Background(), "sh", script("1")...)
 	if err == nil || !strings.Contains(string(out), "403 Forbidden") {
 		t.Errorf("a failure should return stderr with stdout: %q, %v", out, err)

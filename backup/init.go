@@ -26,10 +26,8 @@ type InitOptions struct {
 	// the like). They go in the env file beside the password, because
 	// the same root-only file is the one thing systemd hands the jobs.
 	Extra []string
-	// User is who the per-app jobs run as. For a repository on this
-	// box it owns the directory init creates, or the existing
-	// repository init reuses; restic's own files are written by that
-	// user in the first place, because init's checks run as the job.
+	// User is who the per-app jobs run as. init's checks run as the
+	// job does, as this user.
 	User  string
 	Force bool
 	// AskPassword, when set, is asked for the password of a repository
@@ -130,10 +128,11 @@ func Init(ctx context.Context, o InitOptions, run Runner, capture Capturer, log 
 	// a repository in a bucket that does not exist, restic 0.18 treats
 	// "The specified bucket does not exist" as transient and retries it
 	// for many minutes (measured: still retrying when stopped at eight),
-	// so a typo in a bucket name looked like init hanging. `restic init` answers at once either way: it
-	// creates the repository (and the bucket, where the key may), or it
-	// refuses because one is already there. Only then is `cat config`
-	// asked to prove the password — against a bucket now known to exist.
+	// so a typo in a bucket name would look like init hanging. `restic
+	// init` answers at once either way: it creates the repository (and
+	// the bucket, where the key may), or it refuses because one is
+	// already there. Only then is `cat config` asked to prove the
+	// password — against a bucket now known to exist.
 	out, initErr := capture(ctx, "restic", "init")
 	switch {
 	case initErr == nil:
@@ -222,8 +221,8 @@ func Init(ctx context.Context, o InitOptions, run Runner, capture Capturer, log 
 }
 
 // alreadyInitialized recognises restic refusing to init over a
-// repository that exists. The wording depends on the backend; both are
-// restic 0.18.0's own, captured from real runs:
+// repository that exists. The wording is restic 0.18.0's own, captured
+// from a real run:
 //
 //	s3: …failed: repository master key and config already initialized
 //
@@ -362,7 +361,7 @@ const (
 
 // deniedBy recognises a storage saying no. The wording comes from the
 // backends: S3-compatible stores answer AccessDenied or 403 Forbidden,
-// B2 says unauthorized, a filesystem repository gives EACCES.
+// B2 says unauthorized, an sftp server says permission denied.
 //
 // Words only, never a bare status number. A match here becomes "your
 // backups cannot be deleted", so a false one is the worst answer this

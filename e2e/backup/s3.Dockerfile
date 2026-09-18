@@ -1,8 +1,7 @@
 # An S3 endpoint for the backup suite: rclone's `serve s3`, and nothing
 # else. It stands in for B2 or S3 so that the e2e exercises restic's own
 # s3: backend through the real job sandbox — credentials arriving in the
-# settings file, the upload, the read-back, a restore — which a local
-# repository path never touches.
+# settings file, the upload, the read-back, a restore.
 #
 # The binary comes from rclone's own published image, pinned by digest
 # (Dependabot keeps it current), and is the ONLY thing in the final

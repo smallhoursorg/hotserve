@@ -13,13 +13,12 @@ import (
 // Passthrough runs restic with the repository settings this box
 // already has, as the user that owns the backups.
 //
-// It exists because the alternative is worse in both directions: the
-// settings live in a root-only file, so `restic snapshots` as the
-// hotserve user finds no repository at all, and running restic as
-// root against a repository on this box leaves root-owned files and
-// locks in it that the hourly jobs then cannot remove. Every restore
-// in docs/backups.md goes through here, which is also what lets the
-// e2e suite run those commands exactly as written.
+// The settings live in a root-only file, so `restic snapshots` as the
+// hotserve user finds no repository at all; and run as that user,
+// restic's cache and anything else it writes belong to the user the
+// hourly jobs run as. Every restore in docs/backups.md goes through
+// here, which is also what lets the e2e suite run those commands
+// exactly as written.
 func Passthrough(ctx context.Context, envFile, username string, args []string, stdout, stderr *os.File) error {
 	if len(args) == 0 {
 		return fmt.Errorf("say what to run, e.g. `hotserve backup restic -- snapshots --tag hotserve`")
@@ -39,10 +38,10 @@ func Passthrough(ctx context.Context, envFile, username string, args []string, s
 			return err
 		}
 		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: cred}
-		// And that user's HOME, as `sudo -H` would: root's is where
-		// sudo leaves it, and restic keeps its cache under HOME — so
-		// every command printed "unable to open cache: mkdir
-		// /root/.cache: permission denied" and ran without one.
+		// And that user's HOME, as `sudo -H` would: restic keeps its
+		// cache under HOME, and with root's HOME, where sudo leaves
+		// it, every command prints "unable to open cache: mkdir
+		// /root/.cache: permission denied" and runs without one.
 		cmd.Env = append(cmd.Env, "HOME="+home)
 	}
 	say(stderr, "+ restic %s", quoteArgs(args))

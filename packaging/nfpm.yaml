@@ -96,7 +96,7 @@ contents:
 scripts:
   postinstall: packaging/postinstall.sh
   preremove: packaging/preremove.sh
-  # purge only: the backup credentials and the staged database copies.
+  # On purge: the backup credentials and the staged database copies.
   # A conffile is dpkg's job; these two are not conffiles (one is
   # written by `hotserve backup init`, the other by the jobs), so
   # without this they would outlive the package they came with.

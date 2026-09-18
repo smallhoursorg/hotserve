@@ -89,11 +89,9 @@ func (s AppStatus) Stale(now time.Time) bool {
 // host is this box's hostname: freshness is this box's runs, not those
 // of another box writing to the same repository.
 func Status(ctx context.Context, apps []App, capture Capturer, stagingRoot, host string) ([]AppStatus, error) {
-	// --no-lock: status runs as root, and a lock it wrote into a
-	// repository on this box would be root's — one the jobs could not
-	// clear if status were killed before removing it. Listing snapshots
-	// needs no lock. Two --tag flags are an OR: the backups, and the
-	// clean-run records.
+	// --no-lock: listing snapshots needs no lock, so status writes
+	// nothing into the repository. Two --tag flags are an OR: the
+	// backups, and the clean-run records.
 	out, err := capture(ctx, "restic", "snapshots", "--no-lock", "--json", "--tag", "hotserve", "--tag", CleanTag)
 	if err != nil {
 		return nil, fmt.Errorf("reading snapshots: %w", err)

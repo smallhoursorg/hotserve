@@ -302,8 +302,7 @@ func cmdInit(fl caddycmd.Flags, args []string) (int, error) {
 }
 
 // unitActive reports whether a systemd unit is running. An error reads
-// as "not running": the report then says what it said before this was
-// asked, rather than failing over a detail.
+// as "not running", rather than failing the report over a detail.
 func unitActive(ctx context.Context, unit string) bool {
 	return exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", unit).Run() == nil //nolint:gosec // a fixed program; the unit name is built here from an app name the config validated
 }
@@ -445,8 +444,8 @@ func captureRunner() Capturer {
 // captureQuiet keeps a command's output to itself — its failure is an
 // answer, not a fault — but keeps stderr rather than dropping it:
 // restic explains a refusal there, and that wording is the evidence
-// the delete check classifies. Discarding it made every append-only
-// repository report as "unknown".
+// the delete check classifies. Without it, every append-only
+// repository would report as "unknown".
 func captureQuiet() Capturer {
 	return func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // restic, sqlite3 and systemd-run with an argv built here from the running config, never from a request

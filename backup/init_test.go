@@ -299,11 +299,11 @@ func TestInitCreatesOrOpensTheRepository(t *testing.T) {
 
 // Asked to open a repository in a bucket that does not exist, restic
 // retries "The specified bucket does not exist" for many minutes —
-// against a real S3 server it was still retrying when stopped at eight.
-// So when `restic init`
-// fails for any reason but "a repository is already here", init reports
-// that failure and does NOT go on to `cat config`: that is the call that
-// hangs, and a typo in a bucket name must not look like a stuck box.
+// (measured against a real S3 server: still retrying when stopped at
+// eight). So when `restic init` fails for any reason but "a repository
+// is already here", init reports that failure and does NOT go on to
+// `cat config`: that is the call that hangs, and a typo in a bucket
+// name must not look like a stuck box.
 func TestInitNeverOpensWhereItCouldNotCreate(t *testing.T) {
 	fake := &fakeRestic{initFails: "Fatal: create repository at s3:https://s3.example.com/typo failed: Access Denied.\n"}
 	err := Init(context.Background(), initOpts(t), (&recorder{}).run, fake.capture, io.Discard)
@@ -320,7 +320,7 @@ func TestInitNeverOpensWhereItCouldNotCreate(t *testing.T) {
 // A rebuilt box, at a terminal: the repository already exists, so the
 // password init would have invented is dropped and the real one asked
 // for — and it is that one, checked against the repository, that goes
-// into the settings. Nothing was created with the invented one.
+// into the settings. Nothing is created with the invented one.
 func TestInitAsksForTheExistingRepositorysPassword(t *testing.T) {
 	o := initOpts(t)
 	o.Password = "" // nothing given: init would invent one
@@ -378,9 +378,9 @@ func TestInitSaysWhenThePasswordCannotOpenTheRepository(t *testing.T) {
 	}
 }
 
-// restic says "already exists" differently for each backend. Both
-// wordings are its own, captured from restic 0.18.0; anything else is
-// a real failure to create and must not be mistaken for one.
+// restic's own words for "already exists", captured from restic 0.18.0,
+// are recognised; anything else is a real failure to create and must
+// not be mistaken for one.
 func TestAlreadyInitializedKnowsResticsWords(t *testing.T) {
 	for _, out := range []string{resticInitExistsS3} {
 		if !alreadyInitialized(out) {
@@ -437,10 +437,8 @@ func TestInitWarnsWhenTheKeyCanDelete(t *testing.T) {
 // restic's own output against a real append-only server, captured
 // verbatim from restic 0.18.0 and restic-rest-server --append-only
 // (Debian 13) — ON STDERR, with stdout empty and exit status 0. The
-// delete check first trusted the exit status (and reported the key the
-// docs tell operators to create as able to delete), then read only
-// stdout (and reported it as "unknown"). The fake above delivers these
-// words on the stream restic really uses. Re-capture when upgrading.
+// fake above delivers these words on the stream restic really uses.
+// Re-capture when upgrading.
 const resticRefusedForget = "Remove(<snapshot/a4adfea30f>) failed: unexpected HTTP response (403): 403 Forbidden\n" +
 	"unable to remove snapshot/a4adfea30faac63d6109a2343dc75340f06d0db6f5dd31c9a1e50a42505d75fe from the repository\n"
 
@@ -548,8 +546,8 @@ func TestInitDoesNotMistakeAFailureForProtection(t *testing.T) {
 	}
 }
 
-// The other side of dropping the bare number: what real stores send
-// when they refuse must still read as a refusal.
+// The other side of matching words, never a bare number: what real
+// stores send when they refuse must still read as a refusal.
 func TestDeniedByRecognisesRealRefusals(t *testing.T) {
 	for _, text := range []string{
 		"s3.removeObject: 403 Forbidden",

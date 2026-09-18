@@ -191,8 +191,7 @@ func TestStaleWhenTheRepositoryHoldsNoSnapshotForTheApp(t *testing.T) {
 // from another box writing to the same repository does not count; and
 // after `init --force` onto another repository that already holds this
 // app's snapshots, the listing is that repository's, so the old
-// repository's runs cannot vouch for it — which a marker file on the
-// box did.
+// repository's runs cannot vouch for it.
 func TestStatusCountsOnlyThisBoxsRecordsInThisRepository(t *testing.T) {
 	apps := []App{testApp("blog", StateEntry{Kind: KindFiles, Path: "uploads"})}
 	capture, _ := capturing(snapshotsJSON(

@@ -81,7 +81,7 @@ func FetchApps(ctx context.Context, adminAddr string) ([]App, error) {
 // A name this process cannot see is an error, not an empty string:
 // hotserve is started by its own unit and may have variables this one
 // does not, and silently resolving to "" would send every backup at a
-// path that does not exist — which now reads as "never deployed" and
+// path that does not exist — which reads as "never deployed" and
 // skips the app entirely. Better to say which variable is missing.
 func resolveEnvPlaceholders(s string) (string, error) {
 	for {

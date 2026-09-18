@@ -1,7 +1,7 @@
 #!/bin/sh
-# hotserve package post-remove. Only `purge` does anything here: a
-# plain remove leaves everything on disk, because an operator removing
-# the package to install a different build must not lose their data.
+# hotserve package post-remove. A plain remove leaves everything on
+# disk, because an operator removing the package to install a different
+# build must not lose their data.
 #
 # What purge takes is what the package itself put there and what is
 # dangerous to leave lying about: the backup credentials (a repository

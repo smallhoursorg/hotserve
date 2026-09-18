@@ -59,12 +59,11 @@ func StagingCache(appStaging string) string { return filepath.Join(appStaging, s
 // exists" is not "the backup worked" — and a monitor, or a restore,
 // that cannot tell those apart is worse than none.
 //
-// The record lives in the repository, not on the box, for two reasons
-// a marker file got wrong: a rebuilt box has no marker, so it could
-// not tell which of the dead box's snapshots were whole; and a marker
-// is not tied to a repository, so after `init --force` onto another
-// one it kept vouching for runs that went somewhere else. Writing a
-// record is an append, which a key that cannot delete can still do.
+// The record lives in the repository, not on the box: a rebuilt box
+// can still tell which of the dead box's snapshots were whole, and a
+// record vouches only for runs in its own repository, including after
+// `init --force` onto another one. Writing a record is an append,
+// which a key that cannot delete can still do.
 //
 // It carries no `hotserve` tag, so nothing that lists backups — status,
 // restore, `snapshots --tag app:<name>` — mistakes it for one.
@@ -323,9 +322,7 @@ func loadEnvFile(path string, role envFileRole) ([]string, error) {
 		// systemd's EnvironmentFile= strips surrounding quotes before
 		// handing the value to the job. Reading the same file any
 		// other way would give this process a different repository
-		// path and a different password than the jobs get — the
-		// launcher would then look for a repository named `"/srv/x"`,
-		// find no leading slash, and never bind it into the view.
+		// and a different password than the jobs get.
 		env = append(env, key+"="+unquote(value))
 	}
 	if len(env) == 0 {

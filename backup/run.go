@@ -35,8 +35,8 @@ func unitName(app string) string { return "hotserve-backup-" + app }
 
 // LaunchArgs is the whole systemd-run invocation for one app's job.
 //
-// The property set is the one the spikes verified, and it is
-// load-bearing as a whole: dropping parts of it (the base view, the
+// The property set is load-bearing as a whole (measured on Debian 13):
+// dropping parts of it (the base view, the
 // private namespaces) makes systemd fail to set the user at all
 // (217/USER) rather than run with a weaker sandbox. The view holds
 // exactly three writable things — this app's staging dir — and one
@@ -47,15 +47,15 @@ func unitName(app string) string { return "hotserve-backup-" + app }
 // sqlite3), with the rest of the cgroup figure being reclaimable page
 // cache. GOGC/GOMAXPROCS trade a little CPU for a third less heap.
 //
-// No limit on how long a job runs or how much memory it may use. Both
-// were here, and both were wrong: the first backup of a large uploads
-// dir over a slow uplink runs for hours, and a job killed part-way
-// leaves the next one to upload everything again (measured: a first
-// backup killed at 240 MB of 763 MB — the next run re-sent all 763 MB),
-// so a time limit meant that backup never completed and the repository
-// grew with orphaned data every hour. A memory throttle cannot shrink
-// restic's working set — that grows with the repository's index — it
-// can only make it crawl. What does bound a job is restic's own
+// No limit on how long a job runs or how much memory it may use. The
+// first backup of a large uploads dir over a slow uplink runs for
+// hours, and a job killed part-way leaves the next run to upload
+// everything again (measured: a first backup killed at 240 MB of
+// 763 MB re-sent all 763 MB), so a time limit would stop a large first
+// backup from ever completing and grow the repository with orphaned
+// data every hour. A memory throttle cannot shrink restic's working
+// set — that grows with the repository's index — it can only make it
+// crawl. What does bound a job is restic's own
 // per-request timeout (--stuck-request-timeout, 5 minutes by default),
 // which turns a hung connection into a retry or a failure; and runs
 // never overlap, because systemd does not start the timer's unit while
@@ -128,8 +128,7 @@ type jobView struct {
 // sandboxProperties is the one definition of a backup unit's sandbox,
 // shared by the hourly job and by init's checks. Two lists would
 // drift, and every way they differed would be a check that passes at
-// init and a job that fails at 03:00 — which is what this package
-// kept finding while init imitated the job instead of being one.
+// init and a job that fails at 03:00.
 func sandboxProperties(v jobView) []string {
 	props := []string{
 		"--property=Type=oneshot",

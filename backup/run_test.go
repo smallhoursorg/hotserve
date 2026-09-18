@@ -103,12 +103,12 @@ func TestLaunchArgsSandboxesEachAppToItsOwnData(t *testing.T) {
 }
 
 // No limit on how long a job runs or how much memory it may use. A time
-// limit made the first backup of a large uploads dir impossible: a job
+// limit makes the first backup of a large uploads dir impossible: a job
 // killed part-way leaves the next one to upload everything again
-// (measured), so it restarted from nothing every hour, for ever, while
-// the repository filled with orphaned data. A memory throttle cannot
-// shrink restic's working set, only make it crawl. Hangs are bounded by
-// restic's own per-request timeout instead.
+// (measured), so it would restart from nothing every hour, for ever,
+// while the repository filled with orphaned data. A memory throttle
+// cannot shrink restic's working set, only make it crawl. Hangs are
+// bounded by restic's own per-request timeout instead.
 func TestLaunchArgsDoNotCapHowLongOrHowLargeABackupMayBe(t *testing.T) {
 	app := testApp("blog", StateEntry{Kind: KindFiles, Path: "uploads"})
 	for _, a := range LaunchArgs(app, launchOpts("/var/lib/hotserve-backup")) {
