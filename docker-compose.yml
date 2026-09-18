@@ -108,7 +108,7 @@ services:
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
       - ./e2e/lib.sh:/lib.sh:ro
       - ./e2e/liveswap/systemd.sh:/suite-systemd.sh:ro
-      - ./e2e/liveswap/backup.sh:/suite-backup.sh:ro
+      - ./e2e/backup/run.sh:/suite-backup.sh:ro
     depends_on:
       - e2e-artifacts
       - e2e-upstream
@@ -120,7 +120,7 @@ services:
       - e2e-s3
 
   # The backup suite's S3 endpoint (rclone serve s3, see
-  # e2e/liveswap/s3.Dockerfile). Everything the e2e-hotserve container
+  # e2e/backup/s3.Dockerfile). Everything the e2e-hotserve container
   # above needs — privilege, a writable root — this one does not, and
   # does not get: it runs as nobody, from an image holding one static
   # binary, with no capabilities, no way to gain any, a read-only root,
@@ -130,7 +130,7 @@ services:
   e2e-s3:
     build:
       context: .
-      dockerfile: e2e/liveswap/s3.Dockerfile
+      dockerfile: e2e/backup/s3.Dockerfile
     command: ["serve", "s3", "/data", "--addr", ":8333", "--auth-key", "hotserve-e2e,not-a-secret"]
     user: "65534:65534"
     read_only: true

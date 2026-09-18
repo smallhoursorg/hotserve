@@ -48,10 +48,11 @@ updates:
       actions:
         patterns: ["*"]
 
-  # Dockerfile base images (e2e builder/runtime, artifacts server,
-  # install-test systemd image, integration-test systemd image).
+  # Dockerfile base images (e2e builder/runtime, artifacts server, the
+  # backup suite's S3 endpoint, install-test systemd image,
+  # integration-test systemd image).
   - package-ecosystem: docker
-    directories: ["/e2e", "/e2e/liveswap", "/packaging/test", "/test/systemd"]
+    directories: ["/e2e", "/e2e/liveswap", "/e2e/backup", "/packaging/test", "/test/systemd"]
     schedule:
       interval: weekly
     cooldown:
