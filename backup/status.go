@@ -109,12 +109,12 @@ func Status(ctx context.Context, apps []App, capture Capturer, stagingRoot strin
 // operator has are "is everything covered?" and "is it current?".
 func FormatStatus(w io.Writer, statuses []AppStatus, now time.Time) {
 	if len(statuses) == 0 {
-		fmt.Fprintln(w, "No app declares state, so nothing is backed up.")
-		fmt.Fprintln(w, "Add `state sqlite <file>` or `state files <dir>` to an app block, then reload.")
+		say(w, "No app declares state, so nothing is backed up.")
+		say(w, "Add `state sqlite <file>` or `state files <dir>` to an app block, then reload.")
 		return
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "APP\tDECLARES\tSNAPSHOTS\tLAST BACKUP")
+	say(tw, "APP\tDECLARES\tSNAPSHOTS\tLAST BACKUP")
 	for _, s := range statuses {
 		last := "never"
 		if s.Latest != nil {
@@ -129,12 +129,12 @@ func FormatStatus(w io.Writer, statuses []AppStatus, now time.Time) {
 		if s.Stale(now) {
 			last += "  ⚠"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\n", s.App.Name, declares(s.App), s.Snapshots, last)
+		say(tw, "%s\t%s\t%d\t%s", s.App.Name, declares(s.App), s.Snapshots, last)
 	}
 	_ = tw.Flush()
 	for _, s := range statuses {
 		if s.Stale(now) {
-			fmt.Fprintf(w, "\n%s has no current backup. What the last run did:\n    journalctl -u hotserve-backup-%s -n 30\n", s.App.Name, s.App.Name)
+			say(w, "\n%s has no current backup. What the last run did:\n    journalctl -u hotserve-backup-%s -n 30", s.App.Name, s.App.Name)
 		}
 	}
 }

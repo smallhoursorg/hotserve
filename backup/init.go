@@ -77,7 +77,9 @@ func Init(ctx context.Context, o InitOptions, run Runner, capture Capturer, log 
 			return fmt.Errorf("%s cannot be set here: the password this command reports has to be the one the jobs use — pass --password-file to reuse an existing repository's password", key)
 		}
 	}
-	if _, err := os.Stat(o.EnvFile); err == nil && !o.Force {
+	_, statErr := os.Stat(o.EnvFile)
+	replacing := statErr == nil
+	if replacing && !o.Force {
 		return fmt.Errorf("%s already exists: it holds the password for the existing repository, and overwriting it loses access to those backups — pass --force to replace it anyway", o.EnvFile)
 	}
 	for _, kv := range o.Extra {
@@ -119,7 +121,7 @@ func Init(ctx context.Context, o InitOptions, run Runner, capture Capturer, log 
 	// operator with a box that backs up into a repository they cannot
 	// read).
 	if _, err := capture(ctx, "restic", "cat", "config"); err != nil {
-		fmt.Fprintln(log, "repository not found; creating it")
+		say(log, "repository not found; creating it")
 		if err := run(ctx, "restic", "init"); err != nil {
 			return fmt.Errorf("cannot open %s with this password, and cannot create it either: if the repository already exists, the password is wrong — pass --password-file with the one you saved; if it does not, check the URL and the storage credentials (%w)", o.Repository, err)
 		}
@@ -131,14 +133,14 @@ func Init(ctx context.Context, o InitOptions, run Runner, capture Capturer, log 
 		// box unable to read what it just backed up.
 		return fmt.Errorf("%s already exists, and a new password was generated for it — pass --password-file with the password you saved when you first set it up, so this box uses the same one", o.Repository)
 	}
-	fmt.Fprintln(log, "repository ready")
+	say(log, "repository ready")
 
 	// The password is reported before anything else can fail, because
 	// at this point the repository may already have been created with
 	// it: a later error that swallowed it would leave a repository
 	// nothing can open.
 	if generated {
-		fmt.Fprintf(log, "\nrepository password — save this somewhere safe now, nothing else has a copy:\n\n    %s\n\nWithout it the backups cannot be read, and no support can recover them.\n\n", password)
+		say(log, "\nrepository password — save this somewhere safe now, nothing else has a copy:\n\n    %s\n\nWithout it the backups cannot be read, and no support can recover them.\n", password)
 	}
 
 	// The probe writes a real snapshot, so it is also the proof that
@@ -149,6 +151,14 @@ func Init(ctx context.Context, o InitOptions, run Runner, capture Capturer, log 
 	// without --force.
 	deletion, err := probeDelete(ctx, run, capture)
 	if err != nil {
+		// What the operator has to know is what the box is doing NOW.
+		// With --force over a working setup that is "still backing up
+		// where it was", which is the opposite of "nothing is
+		// scheduled" — and this is the moment they are least able to go
+		// and check.
+		if replacing {
+			return fmt.Errorf("%w\n\n%s is unchanged: the box still backs up to the repository it was already using", err, o.EnvFile)
+		}
 		if generated {
 			return fmt.Errorf("%w\n\n%s was not written, so nothing is scheduled. Keep the password printed above and pass --password-file when you run init again", err, o.EnvFile)
 		}
@@ -166,28 +176,28 @@ func Init(ctx context.Context, o InitOptions, run Runner, capture Capturer, log 
 		if err := chownTree(path, o.User); err != nil {
 			return err
 		}
-		fmt.Fprintf(log, "repository is on this box, so it now belongs to %s (the user the jobs run as)\n", o.User)
+		say(log, "repository is on this box, so it now belongs to %s (the user the jobs run as)", o.User)
 	}
 	if err := writeEnvFile(o.EnvFile, o.Repository, password, o.Extra); err != nil {
 		return err
 	}
-	fmt.Fprintf(log, "wrote %s (root only)\n", o.EnvFile)
+	say(log, "wrote %s (root only)", o.EnvFile)
 	switch deletion {
 	case probeDeletable:
-		fmt.Fprintln(log, "\nWARNING: these credentials can delete backups.")
-		fmt.Fprintln(log, "Anyone who takes this box can erase every backup it made. Give the box a")
-		fmt.Fprintln(log, "key that can write but not delete, and keep a privileged key elsewhere for")
-		fmt.Fprintln(log, "pruning — docs/backups.md, \"Keep the box unable to delete\".")
+		say(log, "\nWARNING: these credentials can delete backups.")
+		say(log, "Anyone who takes this box can erase every backup it made. Give the box a")
+		say(log, "key that can write but not delete, and keep a privileged key elsewhere for")
+		say(log, "pruning — docs/backups.md, \"Keep the box unable to delete\".")
 	case probeRefused:
-		fmt.Fprintln(log, "delete refused by the storage: the box can add backups but not remove them")
+		say(log, "delete refused by the storage: the box can add backups but not remove them")
 	default:
-		fmt.Fprintln(log, "\nThe delete check could not finish: removing its probe snapshot failed for a")
-		fmt.Fprintln(log, "reason that was not a refusal by the storage (a network error, a stale lock).")
-		fmt.Fprintln(log, "Whether these credentials can erase your backups is unknown — run")
-		fmt.Fprintln(log, "`hotserve backup init` again when the repository is reachable.")
+		say(log, "\nThe delete check could not finish: removing its probe snapshot failed for a")
+		say(log, "reason that was not a refusal by the storage (a network error, a stale lock).")
+		say(log, "Whether these credentials can erase your backups is unknown — run")
+		say(log, "`hotserve backup init` again when the repository is reachable.")
 	}
-	fmt.Fprintln(log, "\nBackups run hourly (hotserve-backup.timer). Declare what to keep with")
-	fmt.Fprintln(log, "`state` lines in each app's block, then check with `hotserve backup status`.")
+	say(log, "\nBackups run hourly (hotserve-backup.timer). Declare what to keep with")
+	say(log, "`state` lines in each app's block, then check with `hotserve backup status`.")
 	return nil
 }
 
@@ -305,7 +315,7 @@ func newestSnapshotID(ctx context.Context, capture Capturer, tag string) (string
 }
 
 func writeEnvFile(path, repo, password string, extra []string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return err
 	}
 	var b strings.Builder
@@ -399,7 +409,7 @@ func chownTree(root, username string) error {
 		if err != nil {
 			return err
 		}
-		if err := os.Lchown(path, uid, gid); err != nil {
+		if err := os.Lchown(path, uid, gid); err != nil { //nolint:gosec // G122: Lchown is the symlink-safe half of this walk, which is the point made above
 			return fmt.Errorf("giving %s to %s: %w", path, username, err)
 		}
 		return nil

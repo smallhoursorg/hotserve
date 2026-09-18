@@ -208,7 +208,7 @@ func ensureStagingDir(dir, username string) error {
 // reported together.
 func RunAll(ctx context.Context, apps []App, o LaunchOptions, run Runner, log io.Writer) error {
 	if len(apps) == 0 {
-		fmt.Fprintln(log, "no app declares state; nothing to back up")
+		say(log, "no app declares state; nothing to back up")
 		return nil
 	}
 	var failed []string
@@ -220,7 +220,7 @@ func RunAll(ctx context.Context, apps []App, o LaunchOptions, run Runner, log io
 		// otherwise paint the timer red every hour until the first
 		// deploy, and a bind of a missing path fails the unit anyway.
 		if _, err := os.Stat(app.Shared); errors.Is(err, fs.ErrNotExist) {
-			fmt.Fprintf(log, "%s: no data yet (never deployed), skipping\n", app.Name)
+			say(log, "%s: no data yet (never deployed), skipping", app.Name)
 			continue
 		}
 		staging := o.StagingRoot + "/" + app.Name
@@ -228,18 +228,18 @@ func RunAll(ctx context.Context, apps []App, o LaunchOptions, run Runner, log io
 		// be, an owner changed by hand) is this app's failure, not
 		// the run's: the other apps still get their backup.
 		if err := ensureStagingDir(staging, o.User); err != nil {
-			fmt.Fprintf(log, "%s: FAILED (%v)\n", app.Name, err)
+			say(log, "%s: FAILED (%v)", app.Name, err)
 			failed = append(failed, app.Name)
 			continue
 		}
 		args := LaunchArgs(app, o)
-		fmt.Fprintf(log, "+ systemd-run %s\n", quoteArgs(args))
+		say(log, "+ systemd-run %s", quoteArgs(args))
 		if err := run(ctx, "systemd-run", args...); err != nil {
-			fmt.Fprintf(log, "%s: FAILED (%v) — journalctl -u %s\n", app.Name, err, unitName(app.Name))
+			say(log, "%s: FAILED (%v) — journalctl -u %s", app.Name, err, unitName(app.Name))
 			failed = append(failed, app.Name)
 			continue
 		}
-		fmt.Fprintf(log, "%s: ok\n", app.Name)
+		say(log, "%s: ok", app.Name)
 	}
 	if len(failed) > 0 {
 		return fmt.Errorf("%d of %d apps failed to back up: %s", len(failed), len(apps), strings.Join(failed, ", "))

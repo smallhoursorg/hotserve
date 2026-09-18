@@ -131,7 +131,7 @@ func adminGet(ctx context.Context, adminAddr, path string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("admin API at %s: %w (is hotserve running, and does this user have access to the socket?)", adminAddr, err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck // a response body this function has finished reading
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
 		return nil, fmt.Errorf("admin API at %s: reading response: %w", adminAddr, err)

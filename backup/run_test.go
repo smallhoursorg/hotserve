@@ -184,6 +184,9 @@ func TestRepositoryPathRefusesDirectoriesThatWouldGiveAwayTheBox(t *testing.T) {
 		"/", "/etc", "/etc/hotserve", "/usr", "/usr/local/backups", "/root/backups",
 		"/var", "/home", "/var/lib", "/var/lib/liveswap", "/var/lib/liveswap/blog/shared",
 		"/var/lib/hotserve-backup", "/var/lib/hotserve",
+		// The example everything here teaches is /srv/backups, so the
+		// likeliest typo is that path one component short.
+		"/srv", "/mnt", "/media", "/opt", "/tmp",
 	} {
 		if _, err := RepositoryPath(repo); err == nil {
 			t.Errorf("%s should be refused as a repository", repo)

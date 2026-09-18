@@ -153,6 +153,35 @@ func TestInitWritesNothingWhenTheCredentialsCannotBackUp(t *testing.T) {
 	}
 }
 
+// Pointing a working box at a new repository that turns out to be
+// unwritable must not tell the operator their backups are off: the old
+// settings are still there and the timer is still using them. Saying
+// "nothing is scheduled" here would be a lie at the worst moment.
+func TestInitSaysTheOldSettingsStandWhenForcedInitFails(t *testing.T) {
+	o := initOpts(t)
+	o.Force = true
+	if err := os.WriteFile(o.EnvFile, []byte("RESTIC_REPOSITORY=s3:s3.example.com/old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rec := &recorder{failIf: func(_ string, args []string) error {
+		if len(args) > 0 && args[0] == "backup" {
+			return errors.New("Fatal: unable to save snapshot: AccessDenied")
+		}
+		return nil
+	}}
+	err := Init(context.Background(), o, rec.run, probeSnapshots(), io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "unchanged") {
+		t.Fatalf("want a failure saying the old settings stand, got %v", err)
+	}
+	if strings.Contains(err.Error(), "nothing is scheduled") {
+		t.Error("the box is still backing up to the old repository; saying otherwise sends the operator looking in the wrong place")
+	}
+	body, readErr := os.ReadFile(o.EnvFile)
+	if readErr != nil || !strings.Contains(string(body), "s3.example.com/old") {
+		t.Errorf("the working settings must survive a failed --force: %q, %v", body, readErr)
+	}
+}
+
 // Provider settings keep the order they were given: systemd takes the
 // last assignment of a key, so re-ordering them here would hand the
 // jobs credentials that init never tested.

@@ -28,7 +28,7 @@ func Passthrough(ctx context.Context, envFile, username string, args []string, s
 	if err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, "restic", args...)
+	cmd := exec.CommandContext(ctx, "restic", args...) //nolint:gosec // a fixed program; the arguments are what the operator typed after `--` on their own command line
 	cmd.Env = append(os.Environ(), env...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = stdout
@@ -40,7 +40,7 @@ func Passthrough(ctx context.Context, envFile, username string, args []string, s
 		}
 		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: cred}
 	}
-	fmt.Fprintf(stderr, "+ restic %s\n", quoteArgs(args))
+	say(stderr, "+ restic %s", quoteArgs(args))
 	return cmd.Run()
 }
 
@@ -49,13 +49,16 @@ func credentialFor(username string) (*syscall.Credential, error) {
 	if err != nil {
 		return nil, fmt.Errorf("looking up the %s user (backups belong to it): %w", username, err)
 	}
-	uid, err := strconv.Atoi(u.Uid)
+	// Parsed at the width the kernel uses, rather than parsed as an int
+	// and narrowed: a uid that does not fit is a broken passwd entry,
+	// and narrowing it would silently run restic as somebody else.
+	uid, err := strconv.ParseUint(u.Uid, 10, 32)
 	if err != nil {
-		return nil, fmt.Errorf("user %s has a non-numeric uid %q", username, u.Uid)
+		return nil, fmt.Errorf("user %s has a uid %q that is not a number in range", username, u.Uid)
 	}
-	gid, err := strconv.Atoi(u.Gid)
+	gid, err := strconv.ParseUint(u.Gid, 10, 32)
 	if err != nil {
-		return nil, fmt.Errorf("user %s has a non-numeric gid %q", username, u.Gid)
+		return nil, fmt.Errorf("user %s has a gid %q that is not a number in range", username, u.Gid)
 	}
 	return &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}, nil
 }

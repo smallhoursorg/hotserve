@@ -18,6 +18,7 @@ package backup
 
 import (
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -57,6 +58,17 @@ func StagingCache(appStaging string) string { return filepath.Join(appStaging, s
 // cannot tell those apart is worse than none.
 func SuccessMarker(appStaging string) string {
 	return filepath.Join(appStaging, ".last-success")
+}
+
+// say prints one line of progress for the operator — to their terminal
+// when they ran the command, to the journal when the timer did.
+//
+// Nothing checks the write, and this is the only place that decides
+// so: a backup cannot do anything useful about a terminal that will
+// not take a line, and a command whose real work succeeded must not
+// report failure because its last println did not land.
+func say(w io.Writer, format string, a ...any) {
+	_, _ = fmt.Fprintf(w, format+"\n", a...)
 }
 
 // unquote mirrors what systemd does to an EnvironmentFile= value.
@@ -130,11 +142,13 @@ func safeRepositoryDir(dir string) error {
 			return fmt.Errorf("the repository cannot be %s or anything under it: init gives the whole tree to the backup user and every job mounts it writable — put it somewhere of its own, like /srv/backups or a mounted disk", reserved)
 		}
 	}
-	// /var and /home hold plenty that a repository must not swallow, but
-	// a directory of its own inside them (/var/backups, /home/me/backups)
-	// is a normal place to put one — so only the tree itself, and
-	// anything holding it, is refused.
-	for _, reserved := range []string{"/home", "/var"} {
+	// These hold plenty that a repository must not swallow, but a
+	// directory of its own inside them (/srv/backups, /mnt/disk/backups,
+	// /home/me/backups) is the normal place to put one — so only the
+	// tree itself, and anything holding it, is refused. /srv is in the
+	// list because it is the example everything here teaches, which
+	// makes it the likeliest thing to be typed one component short.
+	for _, reserved := range []string{"/home", "/media", "/mnt", "/opt", "/srv", "/tmp", "/var"} {
 		if dir == reserved || isAncestor(dir, reserved) {
 			return fmt.Errorf("the repository cannot be %s or hold %s: init gives the whole tree to the backup user and every job mounts it writable — use a directory of its own, like %s/backups", dir, reserved, reserved)
 		}
@@ -300,7 +314,7 @@ func lookupEnv(key string) string { return os.Getenv(key) }
 // repository without them exporting anything. Deliberately not a
 // shell: KEY=VALUE, # comments and blank lines, nothing else.
 func LoadEnvFile(path string) ([]string, error) {
-	body, err := os.ReadFile(path)
+	body, err := os.ReadFile(path) //nolint:gosec // the operator's own root-only settings file, named on the command line or by the packaged unit
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("backups are not configured on this box: %s does not exist — `hotserve backup init <repository>` writes it", path)

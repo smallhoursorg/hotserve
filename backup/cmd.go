@@ -283,7 +283,7 @@ func cmdApp(fl caddycmd.Flags, entryArgs []string) (int, error) {
 // and sqlite3 explain their own failures better than a wrapper can.
 func execRunner(stderr *os.File) Runner {
 	return func(ctx context.Context, name string, args ...string) error {
-		cmd := exec.CommandContext(ctx, name, args...)
+		cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // restic, sqlite3 and systemd-run with an argv built here from the running config, never from a request
 		cmd.Env = append(os.Environ(), runnerEnv(ctx)...)
 		cmd.Stdout = stderr
 		cmd.Stderr = stderr
@@ -302,7 +302,7 @@ func execRunner(stderr *os.File) Runner {
 // terminal, so restic's own explanation of a failure is not swallowed.
 func captureRunner() Capturer {
 	return func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		cmd := exec.CommandContext(ctx, name, args...)
+		cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // restic, sqlite3 and systemd-run with an argv built here from the running config, never from a request
 		cmd.Env = append(os.Environ(), runnerEnv(ctx)...)
 		cmd.Stderr = os.Stderr
 		out, err := cmd.Output()
@@ -323,7 +323,7 @@ func captureRunner() Capturer {
 // repository report as "unknown".
 func captureQuiet() Capturer {
 	return func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		cmd := exec.CommandContext(ctx, name, args...)
+		cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // restic, sqlite3 and systemd-run with an argv built here from the running config, never from a request
 		cmd.Env = append(os.Environ(), runnerEnv(ctx)...)
 		var errOut bytes.Buffer
 		cmd.Stderr = &errOut

@@ -110,7 +110,7 @@ func (j Job) Execute(ctx context.Context) error {
 	// this marker, written only after a clean exit, rather than from
 	// the newest snapshot — otherwise repeated partial backups would
 	// keep `status --check` green while every run was failing.
-	if err := os.WriteFile(SuccessMarker(j.Staging), []byte(""), 0o640); err != nil {
+	if err := os.WriteFile(SuccessMarker(j.Staging), []byte(""), 0o600); err != nil {
 		return fmt.Errorf("app %s: recording the backup as complete: %w", j.App, err)
 	}
 	return nil
@@ -176,7 +176,7 @@ func (j Job) logf(format string, a ...any) {
 	if j.Log == nil {
 		return
 	}
-	fmt.Fprintf(j.Log, format+"\n", a...)
+	say(j.Log, format, a...)
 }
 
 // quoteArgs renders an argv for the log the way a person would retype
