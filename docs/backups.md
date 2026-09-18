@@ -8,20 +8,24 @@ under each app's `shared/` dir.
 Setting it up is two steps: one command per box, and two lines per app.
 
 ```
+read -rp 'Key ID: ' key_id
+read -rsp 'Application key: ' app_key; echo
 sudo install -m 0600 /dev/null /root/b2-key
-sudo tee /root/b2-key >/dev/null <<'EOF'
-AWS_ACCESS_KEY_ID=0045f8…
-AWS_SECRET_ACCESS_KEY=…
-EOF
+printf 'AWS_ACCESS_KEY_ID=%s\nAWS_SECRET_ACCESS_KEY=%s\n' "$key_id" "$app_key" \
+	| sudo tee /root/b2-key >/dev/null
+unset app_key
 sudo hotserve backup init s3:s3.us-west-004.backblazeb2.com/my-bucket \
 	--credentials-file /root/b2-key
 sudo rm /root/b2-key
 ```
 
-The key goes in a file rather than on the command line: `/proc/*/cmdline`
-is readable by every user on the box while init runs, and a command line
-is kept in your shell history afterwards. `init` copies what it reads
-into `/etc/hotserve/backup.env` (root-only), which is where it stays.
+The key is typed at a prompt and handed over in a root-only file, so it
+is never part of a command: a command line is readable by every user on
+the box through `/proc/*/cmdline` while it runs, and your shell keeps it
+in its history afterwards — heredocs included. (`printf` is built into
+the shell, so the key never reaches another process's arguments.)
+`init` copies what it reads into `/etc/hotserve/backup.env`
+(root-only), which is where it stays.
 
 ```
 app blog {
@@ -96,6 +100,12 @@ How that app's dir is bound depends on what the app declares:
   data, and the e2e suite checks the database is byte-identical after a
   backup.
 
+A run counts only once its snapshot has been **read back** out of the
+repository holding every declared path as data: each database as a
+copy with something in it, each `files` path as the real thing, not a
+link. A run that exits cleanly but whose snapshot is missing any of
+that fails, and never counts as a backup in `status`.
+
 Every `restic` and `sqlite3` command is printed as it runs, so anything
 here can be reproduced by hand:
 
@@ -103,6 +113,39 @@ here can be reproduced by hand:
 journalctl -u hotserve-backup.service -n 50     # what the run decided
 journalctl -u hotserve-backup-blog.service      # one app's job
 ```
+
+### What `init` checks, and how
+
+`init` runs its checks the way the hourly job will run: as a unit with
+the job's own sandbox, as the `hotserve` user, with only the settings it
+is about to write. Nothing from your shell is used — an `AWS_PROFILE`, a
+proxy, a credentials file under your home, a `restic` earlier on your
+`PATH`. If the checks pass, the job has everything it needs; if the
+repository needs something more, pass it to `init` as `KEY=VALUE` or in
+`--credentials-file`, and it goes into the settings the job gets.
+
+### A repository on a disk of its own
+
+A repository can be a path on this box instead of a bucket — a second
+disk, say. `init` accepts exactly two things there:
+
+- **a path that does not exist yet**, under a directory that does:
+  `init` creates it, owned by the backup user, and restic fills it;
+- **an existing restic repository** — a rebuilt box pointed at the disk
+  its backups are on.
+
+It refuses anything else, **including an empty directory**. The
+repository is given to the backup user and mounted writable into every
+job, so a directory with anything else in it would be handed over with
+it — and on Debian, `/var/backups` holds `shadow.bak`. Point `init` at a
+new path inside a mount instead: `/mnt/disk/restic`, not `/mnt/disk`.
+The hourly run checks the same thing before mounting the repository
+into a job, so a disk that failed to mount fails the run with a message
+saying the repository is not there, instead of mounting whatever
+directory is left at that path into every job.
+
+A disk in the same box protects against a failed disk or a mistake, not
+against losing the box: keep a copy somewhere else too.
 
 ## Keep the box unable to delete
 
@@ -196,12 +239,19 @@ Install hotserve, point it at the same repository, restore, and deploy:
 ```
 sudo apt install ./hotserve_*.deb
 
-# the same repository, and the password you saved when you first set it
-# up — in a file, because sudo does not carry environment variables
-printf '%s' 'correct-horse-battery-staple-42' | sudo tee /root/restic-password >/dev/null
-sudo chmod 0600 /root/restic-password
+# the same repository, with the password you saved when you first set
+# it up and a storage key — typed at prompts so neither is ever part of
+# a command, and handed over in root-only files because sudo does not
+# carry environment variables
+read -rsp 'Repository password: ' restic_pw; echo
+read -rp 'Key ID: ' key_id
+read -rsp 'Application key: ' app_key; echo
+sudo install -m 0600 /dev/null /root/restic-password
 sudo install -m 0600 /dev/null /root/b2-key
-printf 'AWS_ACCESS_KEY_ID=…\nAWS_SECRET_ACCESS_KEY=…\n' | sudo tee /root/b2-key >/dev/null
+printf '%s' "$restic_pw" | sudo tee /root/restic-password >/dev/null
+printf 'AWS_ACCESS_KEY_ID=%s\nAWS_SECRET_ACCESS_KEY=%s\n' "$key_id" "$app_key" \
+	| sudo tee /root/b2-key >/dev/null
+unset restic_pw app_key
 sudo hotserve backup init s3:… --credentials-file /root/b2-key \
 	--password-file /root/restic-password
 sudo rm /root/restic-password /root/b2-key

@@ -197,7 +197,7 @@ install-test:
 # puts the e2e config back.
 e2e:
 	$(cgroup2_preflight)
-	$(COMPOSE) up --build -d e2e-hotserve e2e-upstream e2e-artifacts
+	$(COMPOSE) up --build -d e2e-hotserve e2e-upstream e2e-artifacts e2e-s3
 	status=0; \
 	$(COMPOSE) run --rm e2e-runner || status=1; \
 	echo "════ systemd suite: restart survival, reattach, cgroup teardown ════"; \
@@ -209,7 +209,7 @@ e2e:
 	echo "════ box suite: examples/box's bin/push against the e2e box ════"; \
 	COMPOSE="$(COMPOSE)" sh e2e/box-push.sh || status=1; \
 	if [ $$status -ne 0 ]; then \
-		$(COMPOSE) logs e2e-upstream e2e-artifacts; \
+		$(COMPOSE) logs e2e-upstream e2e-artifacts e2e-s3; \
 		$(COMPOSE) exec -T e2e-hotserve journalctl --no-pager -n 300 || true; \
 	fi; \
 	$(COMPOSE) down --remove-orphans; \
@@ -226,19 +226,19 @@ e2e:
 # evidence — same as the e2e target above, tail-bounded here because a
 # soak pushes 15-20 minutes of churn through the stub servers.
 soak:
-	$(COMPOSE) up --build -d e2e-hotserve e2e-upstream e2e-artifacts
+	$(COMPOSE) up --build -d e2e-hotserve e2e-upstream e2e-artifacts e2e-s3
 	status=0; \
 	$(COMPOSE) run --rm -e SOAK_DEPLOYS -e SOAK_RELOADS -e SOAK_CLIENTS -e SOAK_REQS \
 		--entrypoint "/bin/sh /soak.sh" e2e-runner || status=1; \
 	if [ $$status -ne 0 ]; then \
-		$(COMPOSE) logs --tail 200 e2e-hotserve e2e-upstream e2e-artifacts; \
+		$(COMPOSE) logs --tail 200 e2e-hotserve e2e-upstream e2e-artifacts e2e-s3; \
 		$(COMPOSE) exec -T e2e-hotserve journalctl --no-pager -n 300 || true; \
 	fi; \
 	$(COMPOSE) down --remove-orphans; \
 	exit $$status
 
 e2e-logs:
-	$(COMPOSE) logs e2e-upstream e2e-artifacts
+	$(COMPOSE) logs e2e-upstream e2e-artifacts e2e-s3
 	$(COMPOSE) exec -T e2e-hotserve journalctl --no-pager -n 300
 
 clean:

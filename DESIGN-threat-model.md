@@ -40,9 +40,14 @@ Windows, and macOS-as-a-server are out of scope by product design.
    reach a copy of every app's declared state, so they rank with the
    data itself. systemd reads the file as root and passes the values
    to each backup job; no app is ever in a view that contains it, and
-   hotserve itself never reads it. The box's storage key should not be
-   able to *delete* — `hotserve backup init` tries a delete and says
-   which kind you have (docs/backups.md).
+   hotserve itself never reads it. `hotserve backup init` checks new
+   settings by running them the same way, from a short-lived copy in
+   `/run/hotserve-backup` — a root-only directory on tmpfs, so the copy
+   is removed when each check ends, and an init that is killed outright
+   leaves it in memory until the next boot at most, never on disk.
+   Purge removes both.
+   The box's storage key should not be able to *delete* — `init` tries
+   a delete and says which kind you have (docs/backups.md).
 6. **Staged database copies** — `/var/lib/hotserve-backup/<app>/data`,
    mode `0750` owned by `hotserve`: a consistent copy of that app's
    declared databases, taken before each upload and replaced on the

@@ -2,6 +2,7 @@ package backup
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -76,7 +77,7 @@ func newJob(t *testing.T, rec *recorder, dbs, files []string) Job {
 			t.Fatal(err)
 		}
 	}
-	return Job{
+	job := Job{
 		App:       "blog",
 		Shared:    shared,
 		Staging:   t.TempDir(),
@@ -85,6 +86,53 @@ func newJob(t *testing.T, rec *recorder, dbs, files []string) Job {
 		Run:       rec.run,
 		Log:       io.Discard,
 		Env:       testEnv,
+	}
+	job.Capture = snapshotHolding(heldBy(job))
+	return job
+}
+
+// heldBy is what a snapshot of this job holds when everything went
+// right: each staged database as a file with data in it, each declared
+// files path as a directory. Keyed by path, valued by restic's JSON for
+// the node; tests edit it to build a snapshot that does NOT hold what
+// was declared ("" removes a node).
+func heldBy(j Job) map[string]string {
+	held := map[string]string{}
+	for _, rel := range j.Databases {
+		p := filepath.Join(StagingData(j.Staging), rel)
+		held[p] = fmt.Sprintf(`{"struct_type":"node","path":%q,"type":"file","size":4096}`, p)
+	}
+	for _, rel := range j.Files {
+		if p, err := sharedPath(j.Shared, rel); err == nil {
+			held[p] = fmt.Sprintf(`{"struct_type":"node","path":%q,"type":"dir"}`, p)
+		}
+	}
+	return held
+}
+
+// snapshotHolding answers the job's read-back the way restic does for
+// a snapshot holding `held`: one snapshot, and `ls` of a directory
+// lists that directory's entries in the snapshot — which are only the
+// ones that were backed up, never the rest of what was on disk.
+func snapshotHolding(held map[string]string) Capturer {
+	return func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "snapshots":
+			return []byte(`[{"short_id":"s1","time":"2026-09-18T12:00:00Z","tags":["hotserve","app:blog"]}]`), nil
+		case "ls":
+			var b strings.Builder
+			b.WriteString(`{"struct_type":"snapshot","short_id":"s1"}` + "\n")
+			for _, dir := range args[3:] {
+				fmt.Fprintf(&b, `{"struct_type":"node","path":%q,"type":"dir"}`+"\n", dir)
+				for p, node := range held {
+					if filepath.Dir(p) == dir && node != "" {
+						b.WriteString(node + "\n")
+					}
+				}
+			}
+			return []byte(b.String()), nil
+		}
+		return nil, fmt.Errorf("unexpected restic %v", args)
 	}
 }
 
@@ -226,6 +274,92 @@ func TestExecuteRefusesADeclaredPathThatIsASymlink(t *testing.T) {
 				t.Errorf("nothing should have run: %+v", rec.calls)
 			}
 		})
+	}
+}
+
+// Every check before the read-back is about the job's own view; none
+// of them is the backup. A snapshot that does not hold a declared
+// path, holds it as a link, or holds an empty database copy must fail
+// the run — so it never earns the marker that `status` reads as
+// "backed up".
+func TestExecuteFailsWhenTheSnapshotDoesNotHoldWhatWasDeclared(t *testing.T) {
+	uploads := func(j Job) string { return filepath.Join(j.Shared, "uploads") }
+	appDB := func(j Job) string { return filepath.Join(StagingData(j.Staging), "app.db") }
+	for _, tc := range []struct {
+		name, want string
+		edit       func(j Job, held map[string]string)
+	}{
+		{"a files path missing from the snapshot", "does not contain", func(j Job, held map[string]string) {
+			held[uploads(j)] = ""
+		}},
+		{"a files path stored as a link", "as a symlink", func(j Job, held map[string]string) {
+			held[uploads(j)] = fmt.Sprintf(`{"struct_type":"node","path":%q,"type":"symlink"}`, uploads(j))
+		}},
+		{"an empty database copy", "empty", func(j Job, held map[string]string) {
+			held[appDB(j)] = fmt.Sprintf(`{"struct_type":"node","path":%q,"type":"file","size":0}`, appDB(j))
+		}},
+		{"a database copy missing from the snapshot", "does not contain", func(j Job, held map[string]string) {
+			held[appDB(j)] = ""
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			job := newJob(t, &recorder{}, []string{"app.db"}, []string{"uploads"})
+			held := heldBy(job)
+			tc.edit(job, held)
+			job.Capture = snapshotHolding(held)
+			err := job.Execute(context.Background())
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want a failure saying %q, got %v", tc.want, err)
+			}
+			if _, statErr := os.Stat(SuccessMarker(job.Staging)); !os.IsNotExist(statErr) {
+				t.Error("a run whose snapshot does not hold what was declared must not be recorded as a success")
+			}
+		})
+	}
+}
+
+// The read-back lists each declared path's PARENT, never the path
+// itself: restic lists a named directory's direct children, so naming
+// an uploads dir would return a line per upload (measured: 501 lines
+// for 500 files, against 2 for its parent). In the snapshot a parent
+// holds only what was backed up from it. And it asks for this box's
+// snapshots only, so another box writing to the same repository is
+// never the one checked.
+func TestExecuteReadsBackThroughTheParentsOfWhatWasDeclared(t *testing.T) {
+	var lsArgs, snapshotArgs []string
+	job := newJob(t, &recorder{}, []string{"app.db", "data/sessions.db"}, []string{"uploads"})
+	holding := job.Capture
+	job.Capture = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "ls":
+			lsArgs = args
+		case "snapshots":
+			snapshotArgs = args
+		}
+		return holding(ctx, name, args...)
+	}
+	if err := job.Execute(context.Background()); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	want := []string{"ls", "--json", "s1",
+		StagingData(job.Staging),
+		filepath.Join(StagingData(job.Staging), "data"),
+		job.Shared,
+	}
+	if strings.Join(lsArgs, " ") != strings.Join(want, " ") {
+		t.Errorf("read-back:\n got %v\nwant %v", lsArgs, want)
+	}
+	for _, a := range lsArgs {
+		if a == "--recursive" || a == filepath.Join(job.Shared, "uploads") {
+			t.Errorf("the read-back must not list the declared directory's own contents: %v", lsArgs)
+		}
+	}
+	host, _ := os.Hostname()
+	if !strings.Contains(strings.Join(snapshotArgs, " "), "--host "+host) {
+		t.Errorf("the snapshot checked must be this box's: %v", snapshotArgs)
+	}
+	if _, err := os.Stat(SuccessMarker(job.Staging)); err != nil {
+		t.Errorf("a snapshot holding everything declared is a success: %v", err)
 	}
 }
 

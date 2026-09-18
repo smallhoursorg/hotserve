@@ -119,13 +119,16 @@ func RepositoryPath(repo string) (string, error) {
 	return "", fmt.Errorf("repository %q must be an absolute path (a directory on this box) or a backend URL like s3:…, b2:… or sftp:…", repo)
 }
 
-// safeRepositoryDir refuses a local repository path that would do
-// harm if it were a typo. `init` chowns the repository to the jobs'
-// user, recursively, and every job binds it writable — so `/etc`,
-// `/var` or a bare `/` would hand the host to the hotserve user and
-// put it inside each sandbox. An app's own data is refused for the
-// same reason in reverse: a repository there would be readable and
-// writable by whichever app's job happened to run.
+// safeRepositoryDir refuses a local repository path by where it is,
+// before anything on disk is looked at: a system tree, a top-level
+// directory other things live in, or hotserve's own state. The repo
+// belongs to the jobs' user and every job binds it writable, so even
+// an empty directory in those places is no place for one.
+//
+// This is the coarse half. What decides whether a particular existing
+// directory may be used is what is in it — prepareLocalRepository in
+// init.go — because a list of dangerous names can never be finished:
+// every attempt left one out.
 func safeRepositoryDir(dir string) error {
 	if dir == "/" {
 		return fmt.Errorf("the repository cannot be / — it would be chowned to the backup user and mounted into every backup job")

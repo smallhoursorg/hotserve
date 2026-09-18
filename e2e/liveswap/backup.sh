@@ -10,9 +10,13 @@
 # data it reads; and an app whose block declares no state is left
 # alone.
 #
-# The repository is a local path standing in for S3 — the compose
-# network is offline. What S3 adds (TLS, credentials, an append-only
-# key) is checked on a real box before release, not here.
+# Two repositories: a path on this box for most of the suite, then a
+# real S3 endpoint (e2e-s3, rclone serve s3, on an internal network of
+# its own) for restic's s3 backend and the storage credentials, end to
+# end through the job's sandbox. What only a real provider can show —
+# TLS to it, and a key its policy makes append-only — is checked on a
+# real box before release, not here; the delete check's reading of a
+# refusal is pinned in the unit tests by restic's real output.
 set -u
 
 pass() { echo "PASS: $1"; }
@@ -45,13 +49,67 @@ as_hotserve "sh -c 'i=0; while [ \$i -lt 20000 ]; do sqlite3 \"$SHARED/app.db\" 
 
 echo "=== hotserve backup init ==="
 rm -rf "$REPO" /etc/hotserve/backup.env
-install -d -o hotserve -g hotserve -m 0750 "$REPO"
-init_out=$(RESTIC_PASSWORD=e2e hotserve backup init "$REPO" 2>&1)
+# init's checks run as the hourly job does — a unit with its sandbox,
+# its user and its PATH — so nothing in root's own shell can make them
+# pass. Prove it the hard way: a restic first on root's PATH that
+# always fails. If init used it, init would fail; the job never would.
+mkdir -p /tmp/roots-own-bin
+printf '#!/bin/sh\necho "the restic on root'"'"'s PATH was used" >&2\nexit 97\n' > /tmp/roots-own-bin/restic
+chmod +x /tmp/roots-own-bin/restic
+init_out=$(PATH="/tmp/roots-own-bin:$PATH" RESTIC_PASSWORD=e2e hotserve backup init "$REPO" 2>&1)
 if echo "$init_out" | grep -q "repository ready"; then
 	pass "init created the repository"
 else
 	fail "init did not create the repository: $init_out"
 fi
+if echo "$init_out" | grep -q "PATH was used"; then
+	fail "init ran the restic on root's PATH, which the hourly job never would"
+else
+	pass "init's checks ignored the restic on root's PATH: they run as the job runs"
+fi
+# restic wrote the repository as the jobs' user, from inside the unit —
+# so nothing in it ever needed handing over by a root chown.
+if [ "$(stat -c %U "$REPO/config")" = hotserve ] && [ "$(stat -c %U "$REPO")" = hotserve ]; then
+	pass "the repository was created by the jobs' own user"
+else
+	fail "repository owned by $(stat -c %U "$REPO")/$(stat -c %U "$REPO/config" 2>/dev/null), want hotserve"
+fi
+# Everything init's checks put on disk — the password among it — lives
+# in one root-only directory on tmpfs, and goes when init finishes.
+if [ "$(stat -c '%U %a' /run/hotserve-backup)" = "root 700" ]; then
+	pass "init's checks run from a root-only directory on tmpfs"
+else
+	fail "/run/hotserve-backup is $(stat -c '%U %a' /run/hotserve-backup), want root 700"
+fi
+if ls -A /run/hotserve-backup | grep -q .; then
+	fail "init left something behind: $(ls -A /run/hotserve-backup)"
+else
+	pass "init left neither its check directory nor a copy of the settings behind"
+fi
+
+# A directory with anything else in it is never taken over: init gives
+# the whole repository to the backup user and every job mounts it
+# writable. /var/backups on Debian holds shadow.bak.
+mkdir -p /srv/not-a-repo
+echo 'root:$y$j9T$secret' > /srv/not-a-repo/shadow.bak
+chmod 0600 /srv/not-a-repo/shadow.bak
+refused=$(RESTIC_PASSWORD=e2e hotserve backup init /srv/not-a-repo --force 2>&1 || true)
+if echo "$refused" | grep -q "not a restic repository"; then
+	pass "init refuses a populated directory that is not a repository"
+else
+	fail "init took over a populated directory: $refused"
+fi
+if [ "$(stat -c %U /srv/not-a-repo/shadow.bak)" = root ] && [ "$(stat -c %a /srv/not-a-repo/shadow.bak)" = 600 ]; then
+	pass "the refused directory's contents were not touched"
+else
+	fail "shadow.bak is now $(stat -c '%U %a' /srv/not-a-repo/shadow.bak)"
+fi
+if grep -q "^RESTIC_REPOSITORY=$REPO\$" /etc/hotserve/backup.env; then
+	pass "refusing the populated directory left the working settings alone"
+else
+	fail "backup.env was changed by a refused init"
+fi
+rm -rf /srv/not-a-repo
 # A local path is a key that CAN delete, so the warning must appear —
 # this is the check that tells an operator their backups are erasable.
 if echo "$init_out" | grep -q "WARNING: these credentials can delete backups"; then
@@ -140,6 +198,15 @@ if journalctl --no-pager -u hotserve-backup-backup-example.service | grep -q 're
 	pass "the job logged the restic command it ran"
 else
 	fail "the job did not log its restic command"
+fi
+# A run only counts once the snapshot has been read back out of the
+# repository holding what was declared. Checked here against restic's
+# real JSON, which the unit tests can only imitate: backup-example
+# declares one database and one files path, so two.
+if journalctl --no-pager -u hotserve-backup-backup-example.service | grep -q 'read back: 2 declared path(s) present'; then
+	pass "the job read its snapshot back and found every declared path in it"
+else
+	fail "the job did not verify its snapshot: $(journalctl --no-pager -u hotserve-backup-backup-example.service | tail -5)"
 fi
 # An app with a database needs its dir writable — SQLite creates the
 # -shm file beside the database to read a WAL database at all — so the
@@ -310,6 +377,70 @@ else
 	fail "the report gave no reason: $(hotserve backup status --admin 127.0.0.1:2019 2>&1)"
 fi
 mv /tmp/last-success /var/lib/hotserve-backup/backup-example/.last-success
+
+echo "=== an S3 repository: restic's s3 backend, through the job's sandbox ==="
+# Everything above used a path on this box, which never touches what an
+# operator's real setup does: restic's S3 client, storage credentials
+# arriving through the settings file, and all of it from inside the
+# job's sandbox. e2e-s3 (rclone serve s3) stands in for B2 or S3. It is
+# not asked to enforce an append-only policy — that is the storage
+# provider's job — so its one key can delete, and init must say so.
+S3=http://e2e-s3:8333
+S3_KEY_ID=hotserve-e2e
+S3_WRONG_SECRET=wrong
+# A wrong key is refused. Checked with curl: restic treats a rejected
+# request as transient and retries it for minutes.
+code=$(curl -s -o /dev/null -w '%{http_code}' --aws-sigv4 "aws:amz:us-east-1:s3" --user "$S3_KEY_ID:$S3_WRONG_SECRET" "$S3/")
+if [ "$code" = 403 ]; then
+	pass "the S3 endpoint refuses a wrong key"
+else
+	fail "the S3 endpoint answered a wrong key with HTTP $code"
+fi
+# Set up exactly as docs/backups.md tells an operator to: the key in a
+# root-only file, created 0600 before anything is written into it.
+install -m 0600 /dev/null /root/s3-key
+printf 'AWS_ACCESS_KEY_ID=%s\nAWS_SECRET_ACCESS_KEY=%s\n' hotserve-e2e not-a-secret | tee /root/s3-key >/dev/null
+s3init=$(RESTIC_PASSWORD=e2e-s3 hotserve backup init "s3:$S3/hotserve-e2e" --credentials-file /root/s3-key --force 2>&1)
+rm -f /root/s3-key
+if echo "$s3init" | grep -q "repository ready"; then
+	pass "init set up an S3 repository through the job's sandbox"
+else
+	fail "init against S3 failed: $s3init"
+fi
+if echo "$s3init" | grep -q "WARNING: these credentials can delete backups"; then
+	pass "init found that this S3 key can delete, against a real S3 server"
+else
+	fail "init did not report the S3 key as able to delete: $s3init"
+fi
+if grep -q "^AWS_SECRET_ACCESS_KEY=not-a-secret\$" /etc/hotserve/backup.env && grep -q "^RESTIC_REPOSITORY=s3:$S3/hotserve-e2e\$" /etc/hotserve/backup.env; then
+	pass "the S3 key and repository went into the settings the jobs get"
+else
+	fail "backup.env does not hold the S3 settings: $(grep -v PASSWORD /etc/hotserve/backup.env)"
+fi
+t0=$(date +%s)
+sleep 1
+if hotserve backup run --admin 127.0.0.1:2019 >/tmp/run-s3.log 2>&1 && grep -q 'backup-example: ok' /tmp/run-s3.log && grep -q 'files-example: ok' /tmp/run-s3.log; then
+	pass "the hourly run backed both apps up to S3"
+else
+	fail "the run against S3 failed: $(tail -5 /tmp/run-s3.log)"
+fi
+if journalctl --no-pager -u hotserve-backup-backup-example.service --since "@$t0" | grep -q 'read back: 2 declared path(s) present'; then
+	pass "the job read its S3 snapshot back and found every declared path in it"
+else
+	fail "no read-back of the S3 snapshot: $(journalctl --no-pager -u hotserve-backup-backup-example.service --since "@$t0" | tail -5)"
+fi
+rm -rf /tmp/s3-restore
+if hotserve backup restic -- restore latest --tag app:files-example --target /tmp/s3-restore >/dev/null 2>&1 \
+	&& [ "$(cat "/tmp/s3-restore$FILES_SHARED/pages/index.md" 2>/dev/null)" = page ]; then
+	pass "a restore from S3 gives back the app's files"
+else
+	fail "restore from S3 failed: $(ls -R /tmp/s3-restore 2>&1 | head -5)"
+fi
+if hotserve backup status --check --admin 127.0.0.1:2019 >/dev/null 2>&1; then
+	pass "--check passes with current backups in S3"
+else
+	fail "--check failed against S3: $(hotserve backup status --admin 127.0.0.1:2019 2>&1)"
+fi
 
 echo "=== summary ==="
 pkill -f 'INSERT INTO rows' 2>/dev/null

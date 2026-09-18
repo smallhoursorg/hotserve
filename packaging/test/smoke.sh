@@ -566,6 +566,11 @@ stage "stage 4: removal"
 # keep them (the operator may be reinstalling); purge must not.
 printf 'RESTIC_REPOSITORY=/srv/backups\nRESTIC_PASSWORD=secret\n' > /etc/hotserve/backup.env
 chmod 0600 /etc/hotserve/backup.env
+# The copies an interrupted init can leave: the temporary it renames
+# into place, and the settings its checks ran with.
+printf 'RESTIC_PASSWORD=secret\n' > /etc/hotserve/.backup.env-1234
+install -d -m 0700 /run/hotserve-backup
+printf 'RESTIC_PASSWORD=secret\n' > /run/hotserve-backup/.backup.env-check-5678
 mkdir -p /var/lib/hotserve-backup/smoke/data
 echo staged > /var/lib/hotserve-backup/smoke/data/app.db
 apt-get remove -y hotserve
@@ -594,6 +599,10 @@ apt-get purge -y hotserve
 [ ! -e /etc/hotserve/Caddyfile ] || die "purge left the conffile behind"
 [ ! -e /etc/hotserve/.backup-timer-configured ] \
 	|| die "purge left the timer marker: a later install would not enable the backup timer"
+[ ! -e /etc/hotserve/.backup.env-1234 ] \
+	|| die "purge left a temporary copy of the backup credentials in /etc/hotserve"
+[ ! -e /run/hotserve-backup ] \
+	|| die "purge left the settings an interrupted init's checks ran with"
 echo "purge removed the credentials, the staged copies, the timer marker and the conffile"
 
 echo ""

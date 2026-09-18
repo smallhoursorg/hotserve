@@ -83,85 +83,157 @@ func TestLaunchArgsRoundTripThroughParseEntries(t *testing.T) {
 	}
 }
 
-// init exists to answer one question: will the hourly backups work?
-// The hourly job gets the settings file and nothing else, so a
-// credential that lives only in the operator's shell — AWS_PROFILE, a
-// key exported for a one-off, a credentials file under their HOME —
-// must not be able to make the check pass. Every command a person runs
-// themselves keeps their environment, because a proxy or a locale is
-// theirs to set.
-func TestCommandEnvSealsInitFromTheOperatorsShell(t *testing.T) {
-	t.Setenv("AWS_ACCESS_KEY_ID", "only-in-the-shell")
-	t.Setenv("HOME", "/root")
-	settings := []string{"RESTIC_REPOSITORY=s3:example/bucket", "RESTIC_PASSWORD=from-init"}
+// init's checks are not an imitation of the hourly job: every restic
+// command is a unit with the job's own sandbox, run as the job's user,
+// with restic looked up on the unit's PATH and the settings arriving
+// through EnvironmentFile= exactly as the jobs get them. Each way init
+// used to differ — root's shell environment, root's PATH, root's HOME,
+// root owning what restic created — was a check that passed at init
+// and a backup that failed every hour after.
+func TestAsJobRunsResticAsTheJobDoes(t *testing.T) {
+	envDir := t.TempDir()
+	view := jobView{User: "hotserve", Home: "/var/lib/hotserve-backup/.init-x", RepositoryPath: "/srv/backups"}
+	settings := []string{"RESTIC_REPOSITORY=/srv/backups", "RESTIC_PASSWORD=from-init"}
+
+	var gotName string
+	var gotArgs []string
+	var envDuring string
+	var settingsLeaked bool
+	record := func(ctx context.Context, name string, args ...string) error {
+		gotName, gotArgs = name, args
+		if s, _ := ctx.Value(envKey{}).([]string); len(s) > 0 {
+			settingsLeaked = true
+		}
+		for _, a := range args {
+			if f, ok := strings.CutPrefix(a, "--property=EnvironmentFile="); ok {
+				info, err := os.Stat(f)
+				if err != nil {
+					t.Fatalf("the settings file must exist while the unit runs: %v", err)
+				}
+				if info.Mode().Perm() != 0o600 {
+					t.Errorf("settings file mode = %o, want 600: it holds the repository password", info.Mode().Perm())
+				}
+				body, _ := os.ReadFile(f)
+				envDuring = string(body)
+			}
+		}
+		return nil
+	}
+	run, _ := asJob(view, envDir, record, nil)
 	ctx := context.WithValue(context.Background(), envKey{}, settings)
-
-	if !slices.Contains(commandEnv(ctx), "AWS_ACCESS_KEY_ID=only-in-the-shell") {
-		t.Error("a command the operator runs by hand should keep their own environment")
+	if err := run(ctx, "restic", "cat", "config"); err != nil {
+		t.Fatal(err)
 	}
 
-	env := commandEnv(context.WithValue(ctx, sealKey{}, "/tmp/scratch-home"))
-	for _, kv := range env {
-		if strings.HasPrefix(kv, "AWS_ACCESS_KEY_ID=") {
-			t.Errorf("init borrowed a credential from the shell: %q — the jobs will not have it", kv)
-		}
-		if kv == "HOME=/root" {
-			t.Error("init read root's home: a credentials file there would pass a check the jobs then fail")
+	if gotName != "systemd-run" {
+		t.Fatalf("ran %q, want systemd-run: the check has to be a unit like the job", gotName)
+	}
+	joined := strings.Join(gotArgs, "\n")
+	for _, want := range []string{"--wait", "--pipe", "--expand-environment=no", "--property=User=hotserve", "--property=BindPaths=/srv/backups"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing %q from the check's unit:\n%s", want, joined)
 		}
 	}
-	for _, want := range []string{
-		"HOME=/tmp/scratch-home",
-		"XDG_CACHE_HOME=/tmp/scratch-home/cache",
-		"RESTIC_REPOSITORY=s3:example/bucket",
-		"RESTIC_PASSWORD=from-init",
-	} {
-		if !slices.Contains(env, want) {
-			t.Errorf("sealed environment is missing %q: %v", want, env)
-		}
+	// restic is found inside the unit, on its PATH — not resolved here
+	// (exec would use root's PATH) or by systemd-run (which uses the
+	// caller's).
+	tail := gotArgs[len(gotArgs)-6:]
+	if want := []string{"/bin/sh", "-c", probeScript, "restic", "cat", "config"}; strings.Join(tail, " ") != strings.Join(want, " ") {
+		t.Errorf("command = %q, want %q", tail, want)
 	}
-	// restic has to be findable, or every check fails for the wrong
-	// reason — the jobs get systemd's default PATH, so this does too.
-	var path string
-	for _, kv := range env {
-		if v, ok := strings.CutPrefix(kv, "PATH="); ok {
-			path = v
-		}
+	if envDuring != renderEnvFile(settings) {
+		t.Errorf("the check read different settings from the ones the jobs will get:\n%s", envDuring)
 	}
-	if path != jobPath {
-		t.Errorf("PATH = %q, want the jobs' own %q", path, jobPath)
+	if settingsLeaked {
+		t.Error("the password was also handed to systemd-run's own environment; the file is the only place it belongs")
+	}
+	if left, _ := os.ReadDir(envDir); len(left) != 0 {
+		t.Errorf("a settings file was left behind: %v", left)
 	}
 }
 
-// Setting PATH in the child's environment does not decide which binary
-// runs: exec resolves the name against THIS process's PATH and only
-// then hands over the environment. A hand-built restic earlier on
-// root's PATH would otherwise create and check the repository at init
-// while every hourly run used the packaged one.
-func TestSealedRunsTheBinaryTheJobsWillRun(t *testing.T) {
-	// sh stands in for restic: it is on the jobs' PATH everywhere this
-	// runs, which restic is not (it is a Recommends, and the test image
-	// for this package has no need of it).
-	want, err := lookPathIn(jobPath, "sh")
-	if err != nil {
-		t.Skipf("nothing to resolve against here: %v", err)
+func TestAsJobRunsNothingButRestic(t *testing.T) {
+	run, _ := asJob(jobView{User: "hotserve", Home: t.TempDir()}, t.TempDir(),
+		func(context.Context, string, ...string) error { return nil }, nil)
+	if err := run(context.Background(), "sh", "-c", "id"); err == nil {
+		t.Fatal("init's checks run restic and nothing else")
 	}
-	// The operator's own PATH, with something of theirs first.
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "sh"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+}
 
-	var ran []string
-	record := func(_ context.Context, name string, _ ...string) error {
-		ran = append(ran, name)
-		return nil
-	}
-	run, _ := sealed(dir, record, nil)
-	if err := run(context.Background(), "sh", "-c", "true"); err != nil {
+// One sandbox, two users of it. If the hourly job's unit and init's
+// checks ever built their property lists separately, every property
+// one had and the other lacked would be a check that passed and a
+// backup that failed. This compares the hardening both actually get.
+func TestTheJobAndInitsChecksShareOneSandbox(t *testing.T) {
+	const (
+		staging = "/var/lib/hotserve-backup/blog"
+		shared  = "/var/lib/liveswap/blog/shared"
+		scratch = "/run/hotserve-backup/init-x"
+		repo    = "/srv/backups"
+	)
+	app := testApp("blog", StateEntry{Kind: KindFiles, Path: "uploads"})
+	opts := launchOpts("/var/lib/hotserve-backup")
+	opts.RepositoryPath = repo
+	job := LaunchArgs(app, opts)
+
+	var check []string
+	run, _ := asJob(jobView{User: "hotserve", Home: scratch, RepositoryPath: repo}, t.TempDir(),
+		func(_ context.Context, _ string, args ...string) error { check = args; return nil }, nil)
+	if err := run(context.Background(), "restic", "version"); err != nil {
 		t.Fatal(err)
 	}
-	if len(ran) != 1 || ran[0] != want {
-		t.Fatalf("init ran %q, want %q: the program has to be resolved on the jobs' PATH, or init checks the repository with one binary and the timer uses another", ran, want)
+	// Every property, binds included, with only the paths that name
+	// *this* unit's own directories replaced — so a bind that one side
+	// gained and the other did not (a writable /etc, say) is a
+	// difference this test sees, not one it filters out.
+	props := func(args []string, home string) []string {
+		var out []string
+		for _, a := range args {
+			if !strings.HasPrefix(a, "--property=") {
+				continue
+			}
+			if strings.HasPrefix(a, "--property=EnvironmentFile=") {
+				a = "--property=EnvironmentFile=<settings>"
+			}
+			out = append(out, strings.ReplaceAll(a, home, "<home>"))
+		}
+		return out
+	}
+	j, c := props(job, staging), props(check, scratch)
+	// The one difference by design: the job reads an app's data, and
+	// init's checks read none.
+	sharedBind := "--property=BindReadOnlyPaths=" + shared
+	if !slices.Contains(j, sharedBind) {
+		t.Fatalf("the job should bind the app's data read-only: %v", j)
+	}
+	j = slices.DeleteFunc(j, func(a string) bool { return a == sharedBind })
+	if strings.Join(j, "\n") != strings.Join(c, "\n") {
+		t.Fatalf("the job and init's checks run in different sandboxes:\njob:\n%s\n\ncheck:\n%s", strings.Join(j, "\n"), strings.Join(c, "\n"))
+	}
+	if len(j) < 25 {
+		t.Fatalf("only %d properties compared; the comparison would be vacuous", len(j))
+	}
+}
+
+// `run` mounts the repository writable into every job, so it mounts
+// only a real one: not a directory a hand edit pointed the settings at,
+// and not the empty mountpoint a disk that failed to mount leaves.
+func TestRunBindsOnlyARealRepository(t *testing.T) {
+	repo := t.TempDir()
+	mustWrite(t, filepath.Join(repo, "config"), "restic")
+	got, err := repositoryToBind([]string{"RESTIC_REPOSITORY=" + repo})
+	if err != nil || got != repo {
+		t.Errorf("a restic repository should be bound: %q, %v", got, err)
+	}
+	if _, err := repositoryToBind([]string{"RESTIC_REPOSITORY=" + t.TempDir()}); err == nil {
+		t.Error("an empty mountpoint must not be bound into the jobs")
+	}
+	home := t.TempDir()
+	mustWrite(t, filepath.Join(home, ".ssh", "id_ed25519"), "key")
+	if _, err := repositoryToBind([]string{"RESTIC_REPOSITORY=" + home}); err == nil {
+		t.Error("a directory with other things in it must not be bound into the jobs")
+	}
+	if got, err := repositoryToBind([]string{"RESTIC_REPOSITORY=s3:s3.example.com/bucket"}); err != nil || got != "" {
+		t.Errorf("a remote repository needs no bind: %q, %v", got, err)
 	}
 }

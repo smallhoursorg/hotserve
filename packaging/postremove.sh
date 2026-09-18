@@ -16,6 +16,11 @@
 case "${1:-}" in
 purge)
 	rm -f /etc/hotserve/backup.env
+	# And any copy of it: the temporary file `init` writes and renames
+	# into place (a crash between the two leaves one), and the settings
+	# init's checks run with, which live on tmpfs until the next boot.
+	rm -f /etc/hotserve/.backup.env-*
+	rm -rf /run/hotserve-backup
 	# The marker that says the backup timer has been enabled once. A
 	# purge is the operator starting over, and an install after one
 	# should enable the timer again.

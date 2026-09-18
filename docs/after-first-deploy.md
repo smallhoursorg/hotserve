@@ -142,14 +142,19 @@ writing to it does not restore. One command per box, then two lines per
 app:
 
 ```
+read -rp 'Key ID: ' key_id
+read -rsp 'Application key: ' app_key; echo
 sudo install -m 0600 /dev/null /root/b2-key
-printf 'AWS_ACCESS_KEY_ID=…\nAWS_SECRET_ACCESS_KEY=…\n' | sudo tee /root/b2-key >/dev/null
+printf 'AWS_ACCESS_KEY_ID=%s\nAWS_SECRET_ACCESS_KEY=%s\n' "$key_id" "$app_key" \
+	| sudo tee /root/b2-key >/dev/null
+unset app_key
 sudo hotserve backup init s3:s3.us-west-004.backblazeb2.com/my-bucket \
 	--credentials-file /root/b2-key
 sudo rm /root/b2-key
 ```
 
-(The storage key goes in a file because a command line is visible to
+(The storage key is typed at a prompt and handed over in a root-only
+file, so it is never part of a command: a command line is visible to
 every user on the box while it runs, and stays in your shell history.)
 
 ```

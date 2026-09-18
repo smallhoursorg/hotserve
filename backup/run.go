@@ -60,24 +60,65 @@ func LaunchArgs(app App, o LaunchOptions) []string {
 	// database file"). The app's dir is therefore writable exactly
 	// when a database must be opened — and the job still only reads,
 	// as the same user that already owns the data.
-	sharedBind := "--property=BindReadOnlyPaths=" + app.Shared
-	if len(app.Databases()) > 0 {
-		sharedBind = "--property=BindPaths=" + app.Shared
-	}
-	args := []string{
+	args := append([]string{
 		"--wait", "--collect", "--quiet",
 		"--unit=" + unitName(app.Name),
+	}, sandboxProperties(jobView{
+		User:           o.User,
+		EnvFile:        o.EnvFile,
+		Home:           staging,
+		Shared:         app.Shared,
+		SharedWritable: len(app.Databases()) > 0,
+		RepositoryPath: o.RepositoryPath,
+	})...)
+	args = append(args,
+		o.Self, "backup", "app",
+		"--name="+app.Name,
+		"--shared="+app.Shared,
+		"--staging="+staging,
+	)
+	// The declarations go across as they were written, so the argv in
+	// the journal reads like the app block it came from.
+	for _, e := range app.State {
+		args = append(args, e.Kind+":"+e.Path)
+	}
+	return args
+}
+
+// jobView is what one backup unit can see: whose it is, where its
+// settings come from, the one directory it may write, and the data it
+// is there to read.
+type jobView struct {
+	User    string
+	EnvFile string
+	// Home is the unit's only private writable directory: an app's
+	// staging dir for the hourly job, a scratch dir for init's checks.
+	Home string
+	// Shared is the app's data, or "" for a unit that reads none.
+	Shared         string
+	SharedWritable bool
+	// RepositoryPath is set for a repository on this box.
+	RepositoryPath string
+}
+
+// sandboxProperties is the one definition of a backup unit's sandbox,
+// shared by the hourly job and by init's checks. Two lists would
+// drift, and every way they differed would be a check that passes at
+// init and a job that fails at 03:00 — which is what this package
+// kept finding while init imitated the job instead of being one.
+func sandboxProperties(v jobView) []string {
+	props := []string{
 		"--property=Type=oneshot",
-		"--property=User=" + o.User,
-		"--property=Group=" + o.User,
-		"--property=EnvironmentFile=" + o.EnvFile,
+		"--property=User=" + v.User,
+		"--property=Group=" + v.User,
+		"--property=EnvironmentFile=" + v.EnvFile,
 		"--property=Environment=GOGC=20",
 		"--property=Environment=GOMAXPROCS=1",
-		// restic's cache lives with this app's staging, not in the
-		// user's home: the view has no home, and an uncached run
+		// restic's cache lives with this unit's own directory, not in
+		// the user's home: the view has no home, and an uncached run
 		// re-reads the whole repository index every hour.
-		"--property=Environment=XDG_CACHE_HOME=" + StagingCache(staging),
-		"--property=Environment=HOME=" + staging,
+		"--property=Environment=XDG_CACHE_HOME=" + StagingCache(v.Home),
+		"--property=Environment=HOME=" + v.Home,
 		"--property=MemoryAccounting=yes",
 		// MemoryHigh throttles: past it the kernel reclaims and the
 		// job slows down. There is deliberately no MemoryMax to go
@@ -105,8 +146,7 @@ func LaunchArgs(app App, o LaunchOptions) []string {
 		"--property=RuntimeMaxSec=45min",
 		"--property=TemporaryFileSystem=/:ro",
 		"--property=BindReadOnlyPaths=/usr /bin /lib -/lib64 /etc/ssl /etc/resolv.conf /etc/hosts /etc/passwd /etc/group /etc/localtime",
-		sharedBind,
-		"--property=BindPaths=" + staging,
+		"--property=BindPaths=" + v.Home,
 		"--property=PrivateUsers=yes",
 		// The same private PID namespace liveswap gives app units
 		// (systemd_dbus.go): every app and every job runs as the
@@ -129,23 +169,87 @@ func LaunchArgs(app App, o LaunchOptions) []string {
 		"--property=RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX",
 		"--property=SystemCallFilter=@system-service",
 	}
-	if o.RepositoryPath != "" {
+	if v.Shared != "" {
+		if v.SharedWritable {
+			props = append(props, "--property=BindPaths="+v.Shared)
+		} else {
+			props = append(props, "--property=BindReadOnlyPaths="+v.Shared)
+		}
+	}
+	if v.RepositoryPath != "" {
 		// A repository on this box is written to, so it goes in
 		// writable — and only for the jobs, never for an app.
-		args = append(args, "--property=BindPaths="+o.RepositoryPath)
+		props = append(props, "--property=BindPaths="+v.RepositoryPath)
 	}
-	args = append(args,
-		o.Self, "backup", "app",
-		"--name="+app.Name,
-		"--shared="+app.Shared,
-		"--staging="+staging,
-	)
-	// The declarations go across as they were written, so the argv in
-	// the journal reads like the app block it came from.
-	for _, e := range app.State {
-		args = append(args, e.Kind+":"+e.Path)
+	return props
+}
+
+// probeScript runs restic by name inside the unit. The name is looked
+// up there, on the unit's PATH — the same lookup the hourly job's
+// `exec` makes — and not by systemd-run, which resolves a relative
+// command on the *caller's* PATH before the unit exists. A restic in
+// root's ~/bin would otherwise be the one init checked the repository
+// with, and not the one the timer ever runs.
+const probeScript = `exec restic "$@"`
+
+// asJob runs every command init gives it the way the hourly job runs:
+// as a transient unit with the job's own sandbox, user, PATH, HOME and
+// settings file — not an imitation of them. What passes here is then
+// what passes at 03:00 with nobody logged in, by construction.
+//
+// The settings reach restic through EnvironmentFile=, rendered by the
+// same function that writes /etc/hotserve/backup.env, so systemd
+// parses exactly the bytes the jobs will get. Each call writes them
+// to a fresh root-only file beside that one and removes it after.
+func asJob(v jobView, envDir string, run Runner, capture Capturer) (Runner, Capturer) {
+	launch := func(ctx context.Context, name string, args []string) (context.Context, []string, func(), error) {
+		if name != "restic" {
+			return ctx, nil, nil, fmt.Errorf("init runs restic as the job, and nothing else (asked for %s)", name)
+		}
+		settings, _ := ctx.Value(envKey{}).([]string)
+		f, err := os.CreateTemp(envDir, ".backup.env-check-*")
+		if err != nil {
+			return ctx, nil, nil, fmt.Errorf("writing the settings to check: %w", err)
+		}
+		cleanup := func() { _ = os.Remove(f.Name()) }
+		// One err through all three steps: a chmod or a write that
+		// failed must not leave the check running against a partial
+		// settings file.
+		err = f.Chmod(0o600)
+		if err == nil {
+			_, err = io.WriteString(f, renderEnvFile(settings))
+		}
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			cleanup()
+			return ctx, nil, nil, fmt.Errorf("writing the settings to check: %w", err)
+		}
+		view := v
+		view.EnvFile = f.Name()
+		argv := append([]string{"--wait", "--collect", "--quiet", "--pipe", "--expand-environment=no"}, sandboxProperties(view)...)
+		argv = append(argv, "/bin/sh", "-c", probeScript, "restic")
+		argv = append(argv, args...)
+		// The secrets are in the file now; systemd-run itself has no
+		// use for them in its own environment.
+		return context.WithValue(ctx, envKey{}, nil), argv, cleanup, nil
 	}
-	return args
+	return func(ctx context.Context, name string, args ...string) error {
+			ctx, argv, cleanup, err := launch(ctx, name, args)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+			return run(ctx, "systemd-run", argv...)
+		}, func(ctx context.Context, name string, args ...string) ([]byte, error) {
+			ctx, argv, cleanup, err := launch(ctx, name, args)
+			if err != nil {
+				return nil, err
+			}
+			defer cleanup()
+			return capture(ctx, "systemd-run", argv...)
+		}
 }
 
 // ensureStagingDir creates the dir the job stages database copies in,
@@ -177,17 +281,9 @@ func ensureStagingDir(dir, username string) error {
 			return fmt.Errorf("staging path %s is not a directory (%s) — refusing to use it: the backup job writes here, so anything else is something it put there", d, info.Mode().Type())
 		}
 	}
-	u, err := user.Lookup(username)
+	uid, gid, err := userIDs(username)
 	if err != nil {
-		return fmt.Errorf("looking up the %s user (the jobs run as it): %w", username, err)
-	}
-	uid, err := strconv.Atoi(u.Uid)
-	if err != nil {
-		return fmt.Errorf("user %s has a non-numeric uid %q", username, u.Uid)
-	}
-	gid, err := strconv.Atoi(u.Gid)
-	if err != nil {
-		return fmt.Errorf("user %s has a non-numeric gid %q", username, u.Gid)
+		return err
 	}
 	for _, d := range []string{dir, StagingData(dir), StagingCache(dir)} {
 		// Lchown, not Chown: Chown follows a symlink, and following
@@ -197,6 +293,21 @@ func ensureStagingDir(dir, username string) error {
 		}
 	}
 	return nil
+}
+
+// userIDs is the numeric owner a directory the jobs write has to have.
+func userIDs(username string) (uid, gid int, err error) {
+	u, err := user.Lookup(username)
+	if err != nil {
+		return 0, 0, fmt.Errorf("looking up the %s user (the jobs run as it): %w", username, err)
+	}
+	if uid, err = strconv.Atoi(u.Uid); err != nil {
+		return 0, 0, fmt.Errorf("user %s has a non-numeric uid %q", username, u.Uid)
+	}
+	if gid, err = strconv.Atoi(u.Gid); err != nil {
+		return 0, 0, fmt.Errorf("user %s has a non-numeric gid %q", username, u.Gid)
+	}
+	return uid, gid, nil
 }
 
 // RunAll backs up each app in turn — never concurrently: peak memory

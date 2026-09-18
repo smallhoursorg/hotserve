@@ -112,6 +112,40 @@ services:
     depends_on:
       - e2e-artifacts
       - e2e-upstream
+      - e2e-s3
+    # The default network for everything it already talked to, and the
+    # S3 fixture's own, which nothing else joins.
+    networks:
+      - default
+      - e2e-s3
+
+  # The backup suite's S3 endpoint (rclone serve s3, see
+  # e2e/liveswap/s3.Dockerfile). Everything the e2e-hotserve container
+  # above needs — privilege, a writable root — this one does not, and
+  # does not get: it runs as nobody, from an image holding one static
+  # binary, with no capabilities, no way to gain any, a read-only root,
+  # its data on tmpfs, and bounded memory and processes. It sits on an
+  # internal network of its own: no route out, and the box under test is
+  # the only thing that can reach it.
+  e2e-s3:
+    build:
+      context: .
+      dockerfile: e2e/liveswap/s3.Dockerfile
+    command: ["serve", "s3", "/data", "--addr", ":8333", "--auth-key", "hotserve-e2e,not-a-secret"]
+    user: "65534:65534"
+    read_only: true
+    tmpfs:
+      - /data:uid=65534,gid=65534,mode=0700
+      - /tmp:uid=65534,gid=65534,mode=0700
+    environment:
+      # Where rclone looks for (and does not need) a config file.
+      HOME: /tmp
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    pids_limit: 128
+    networks:
+      - e2e-s3
 
   # Stub origin for the penaltybox scenarios: echoes the requested hint
   # level back as the response header. Reuses the product image with a
@@ -153,3 +187,8 @@ volumes:
   gobuildcache:
   golangcicache:
   e2e-deploy:
+
+networks:
+  # The S3 fixture's: internal, so it has no route anywhere but here.
+  e2e-s3:
+    internal: true
