@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -32,6 +33,118 @@ func StagingRestore(appStaging string) string { return filepath.Join(appStaging,
 // the app put where it will be.
 type Dumper func(ctx context.Context, snapshot, path, dst string) error
 
+// TreeRestorer runs one `restic restore --json` of a directory and
+// returns the errors restic reported; err is its exit status.
+type TreeRestorer func(ctx context.Context, args ...string) (restoreErrors, error)
+
+// restoreErrors is what one `restic restore --json` said went wrong.
+//
+// It exists for one case. restic 0.18 restores a file's owner by
+// number, and the restore unit's user namespace maps only root and the
+// hotserve user — so where the snapshot records any other number,
+// chown answers "invalid argument" rather than "not permitted", which
+// is the one refusal restic overlooks when it is not root. That is
+// every file on a rebuilt box whose hotserve user came out with a
+// different uid than the old box's. The file is restored — data, mode
+// and times — and belongs to this box's hotserve user, which is the
+// right owner; but restic counts an error per file and exits 1, and
+// taken at its word the restore would fail on every attempt, stopping
+// before the next declared path.
+//
+// restic 0.19 has --ownership-by-name, which makes all of this
+// unnecessary; Debian 13 has 0.18. With 0.19 on the supported platform,
+// pass that flag and delete this.
+type restoreErrors struct {
+	// Owner counts `lchown <path>: invalid argument`.
+	Owner int
+	// Other counts everything else, and OtherFirst keeps the first few
+	// as restic worded them.
+	Other      int
+	OtherFirst []string
+	// Counted is the N of restic's closing "There were N errors", or
+	// -1 when it gave none.
+	Counted int
+}
+
+// ownerOnly reports whether the owner refusals are all that went wrong,
+// by restic's own count as well as this one: an error restic counted
+// and this did not recognise is an error.
+func (e restoreErrors) ownerOnly() bool {
+	return e.Owner > 0 && e.Other == 0 && e.Counted == e.Owner
+}
+
+// describe is the part of a failure's message that says what restic
+// reported, for an error that has only its exit status otherwise.
+func (e restoreErrors) describe() string {
+	if e.Other == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (restic reported %d errors, the first: %s)", e.Other, strings.Join(e.OtherFirst, "; "))
+}
+
+// readRestoreErrors reads the stderr of `restic restore --json`, one
+// JSON message per line, as it is written — a line per file is a lot
+// of lines for an uploads dir, so they are counted, not kept. Every
+// error that is not an owner refusal is copied to show as it arrives.
+//
+// An owner refusal is recognised by both ends of its message: the same
+// lchown fails with "no such file or directory" when restic could not
+// write the file at all, and that is a real failure. restic's summary
+// on stdout is no help in telling them apart — it counts such a file
+// as restored.
+func readRestoreErrors(r io.Reader, show io.Writer) restoreErrors {
+	errs := restoreErrors{Counted: -1}
+	other := func(msg string) {
+		errs.Other++
+		if len(errs.OtherFirst) < 3 {
+			errs.OtherFirst = append(errs.OtherFirst, msg)
+		}
+		say(show, "restic: %s", msg)
+	}
+	lines := bufio.NewScanner(r)
+	lines.Buffer(make([]byte, 0, 64<<10), 1<<20)
+	for lines.Scan() {
+		line := strings.TrimSpace(lines.Text())
+		if line == "" {
+			continue
+		}
+		var m struct {
+			Type  string `json:"message_type"`
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+			During  string `json:"during"`
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			other(line)
+			continue
+		}
+		switch m.Type {
+		case "error":
+			msg := m.Error.Message
+			if m.During == "restore" && strings.HasPrefix(msg, "lchown ") && strings.HasSuffix(msg, ": invalid argument") {
+				errs.Owner++
+				continue
+			}
+			other(msg)
+		case "exit_error":
+			var n int
+			if _, err := fmt.Sscanf(strings.TrimSpace(m.Message), "Fatal: There were %d errors", &n); err == nil {
+				errs.Counted = n
+				continue
+			}
+			other(strings.TrimSpace(m.Message))
+		default:
+			other(line)
+		}
+	}
+	if err := lines.Err(); err != nil {
+		other("reading restic's errors: " + err.Error())
+	}
+	return errs
+}
+
 // RestoreJob puts one app's declared state back from a snapshot. It
 // runs where the backup job runs — the same sandbox, as the same user,
 // under the same unit name, so a restore and that app's hourly backup
@@ -57,10 +170,11 @@ type RestoreJob struct {
 	// deletes what nobody asked it to is the one that loses data.
 	Delete bool
 
-	Run     Runner
-	Capture Capturer
-	Dump    Dumper
-	Log     io.Writer
+	Run         Runner
+	Capture     Capturer
+	Dump        Dumper
+	RestoreTree TreeRestorer
+	Log         io.Writer
 }
 
 // Execute restores the snapshot.
@@ -189,17 +303,25 @@ func (j RestoreJob) Execute(ctx context.Context) error {
 			// The snapshot's copy of this one directory, into the live
 			// one: restic puts back what differs and, only when asked,
 			// removes what the snapshot does not have.
-			args := []string{"restore", j.Snapshot + ":" + f.path, "--target", f.path}
+			// --json for the errors, which are read rather than shown
+			// (see restoreErrors); --quiet because nothing else it
+			// would print is used.
+			args := []string{"restore", "--json", "--quiet", j.Snapshot + ":" + f.path, "--target", f.path}
 			if j.Delete {
 				args = append(args, "--delete")
 			}
 			j.logf("+ restic %s", quoteArgs(args))
-			if err := j.Run(ctx, "restic", args...); err != nil {
+			errs, err := j.RestoreTree(ctx, args...)
+			switch {
+			case err == nil:
+			case errs.ownerOnly():
+				j.logf("%s: %s: %d files and directories belong to this box's user, not the owner the snapshot records — it records an owner by number, and that number is no user here (a rebuilt box gives the same user another one). Their data, modes and times are restored.", j.App, f.rel, errs.Owner)
+			default:
 				// Not atomic: restic writes file by file, so a failure
 				// part-way leaves some of it restored (and, with
 				// --delete, some of it pruned). Running the restore
 				// again finishes it.
-				return fmt.Errorf("app %s: restoring %s failed part-way, so it may be partly restored — run the restore again to finish it: %w", j.App, f.rel, err)
+				return fmt.Errorf("app %s: restoring %s failed part-way, so it may be partly restored — run the restore again to finish it: %w%s", j.App, f.rel, err, errs.describe())
 			}
 		} else {
 			// restic restores directories; a declared single file comes

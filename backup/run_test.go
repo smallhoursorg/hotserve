@@ -145,12 +145,17 @@ func TestLaunchArgsBindsTheAppsDataReadOnlyUnlessADatabaseNeedsOpening(t *testin
 // A repository is a backend URL, never a path on this box.
 func TestCheckRepository(t *testing.T) {
 	for _, repo := range []string{
-		"s3:s3.example.com/bucket", "b2:bucket:path", "sftp:user@host:/srv/backups",
+		"s3:s3.example.com/bucket", "b2:bucket:path",
 		"rest:https://example.com/", "azure:container:/", "gs:bucket:/", "swift:container:/", "rclone:remote:path",
 	} {
 		if err := CheckRepository(repo); err != nil {
 			t.Errorf("%q: %v", repo, err)
 		}
+	}
+	// sftp is a restic backend, and refused with its own reason: its
+	// credentials are files, and a job's sandbox holds none.
+	if err := CheckRepository("sftp:user@host:/srv/backups"); err == nil || !strings.Contains(err.Error(), "sftp is not supported") {
+		t.Errorf("sftp must be refused, saying why, got %v", err)
 	}
 	for _, repo := range []string{
 		"/srv/backups", "local:/srv/backups", "backups", "./backups", "C:/backups", "s3:", "", "ftp:host/x",

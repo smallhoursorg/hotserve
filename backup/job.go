@@ -2,6 +2,8 @@ package backup
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // Runner executes an external command. The two the job needs are
@@ -36,6 +39,9 @@ type Job struct {
 	// Databases and Files are paths relative to Shared, as declared.
 	Databases []string
 	Files     []string
+	// RunID names this run's snapshot in the repository (see runTag).
+	// Empty means a random one.
+	RunID string
 
 	Run Runner
 	// Capture reads the snapshot back after it is written; see
@@ -43,6 +49,22 @@ type Job struct {
 	Capture Capturer
 	Log     io.Writer
 	Env     func(string) string
+}
+
+// runTag marks the one snapshot a run writes, so the read-back finds
+// that snapshot and no other. "The newest snapshot of this app" is not
+// it whenever the clock has stepped back since an earlier run: that
+// run's snapshot is then the newest, and a clean-run record would vouch
+// for it instead — for a snapshot restic wrote while exiting part-way,
+// if that is how the earlier run ended.
+func runTag(id string) string { return "run:" + id }
+
+func newRunID() (string, error) {
+	buf := make([]byte, 8)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("naming this run: %w", err)
+	}
+	return hex.EncodeToString(buf), nil
 }
 
 // Execute stages the databases and runs restic. It deliberately does
@@ -134,7 +156,14 @@ func (j Job) Execute(ctx context.Context) error {
 		return nil
 	}
 
-	args := ResticBackupArgs(j.App, targets)
+	run := j.RunID
+	if run == "" {
+		var err error
+		if run, err = newRunID(); err != nil {
+			return fmt.Errorf("app %s: %w", j.App, err)
+		}
+	}
+	args := ResticBackupArgs(j.App, run, targets)
 	j.logf("+ restic %s", quoteArgs(args))
 	if err := j.Run(ctx, "restic", args...); err != nil {
 		return fmt.Errorf("app %s: restic backup: %w", j.App, err)
@@ -150,7 +179,7 @@ func (j Job) Execute(ctx context.Context) error {
 			want = append(want, expectedNode{path: p})
 		}
 	}
-	snap, err := j.verifySnapshot(ctx, want)
+	snap, err := j.verifySnapshot(ctx, run, want)
 	if err != nil {
 		return fmt.Errorf("app %s: %w", j.App, err)
 	}
@@ -180,9 +209,23 @@ func SeenPaths(appStaging string) string {
 // readSeen treats a missing or unreadable list as empty: the first run
 // cannot know what was there before, so it gives every path the
 // benefit of "not created yet".
+//
+// `status` reads it too, as root, and a job wrote it: so only a regular
+// file is read, never through a link, and no more of it than a list of
+// declared paths could be. Anything else where the list should be — a
+// link to a root-only file, a FIFO that never answers, a device that
+// never ends — is read as no list.
 func readSeen(path string) map[string]bool {
 	seen := map[string]bool{}
-	body, err := os.ReadFile(path) //nolint:gosec // the job's own staging dir, a path built here
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0) //nolint:gosec // the job's own staging dir, a path built here
+	if err != nil {
+		return seen
+	}
+	defer func() { _ = f.Close() }()
+	if info, err := f.Stat(); err != nil || !info.Mode().IsRegular() {
+		return seen
+	}
+	body, err := io.ReadAll(io.LimitReader(f, 1<<20))
 	if err != nil {
 		return seen
 	}
@@ -276,10 +319,11 @@ func (j Job) stageDatabases(ctx context.Context) error {
 }
 
 // ResticBackupArgs is the whole restic invocation, as its own
-// function so the tests pin the argv (tags included: they are what
-// `hotserve backup status` and a per-app restore select on).
-func ResticBackupArgs(app string, targets []string) []string {
-	args := []string{"backup", "--quiet", "--tag", "hotserve", "--tag", "app:" + app}
+// function so the tests pin the argv (tags included: `hotserve` and
+// `app:` are what `hotserve backup status` and a per-app restore select
+// on, `run:` is what the read-back does).
+func ResticBackupArgs(app, run string, targets []string) []string {
+	args := []string{"backup", "--quiet", "--tag", "hotserve", "--tag", "app:" + app, "--tag", runTag(run)}
 	return append(args, targets...)
 }
 
@@ -311,25 +355,19 @@ type lsNode struct {
 // declared path that is missing, is a link, or (for a database) is
 // empty fails the run, so it never earns the clean-run record.
 //
-// Two cheap calls: the newest snapshot for this app from this box,
-// then `ls` of each declared path's PARENT. restic's ls lists a named
-// directory's direct children, so naming an uploads dir itself would
-// return one line per upload — a hundred thousand of them, held in
-// this job's memory. In the snapshot, a declared
-// path's parent holds only what was backed up from it, so its listing
-// grows with the number of declarations and nothing else.
-func (j Job) verifySnapshot(ctx context.Context, want []expectedNode) (Snapshot, error) {
+// Two cheap calls: the snapshot carrying this run's tag, then `ls` of
+// each declared path's PARENT. restic's ls lists a named directory's
+// direct children, so naming an uploads dir itself would return one
+// line per upload — a hundred thousand of them, held in this job's
+// memory. In the snapshot, a declared path's parent holds only what was
+// backed up from it, so its listing grows with the number of
+// declarations and nothing else.
+func (j Job) verifySnapshot(ctx context.Context, run string, want []expectedNode) (Snapshot, error) {
 	if j.Capture == nil {
 		return Snapshot{}, errors.New("cannot read the snapshot back: no way to capture restic's output was given")
 	}
-	// This box's snapshots only: restic records the hostname, and
-	// another box backing up to the same repository with its clock
-	// running ahead would otherwise be "newest" and be checked instead.
-	host, err := os.Hostname()
-	if err != nil {
-		return Snapshot{}, fmt.Errorf("finding this box's hostname (restic records it on every snapshot): %w", err)
-	}
-	out, err := j.Capture(ctx, "restic", "snapshots", "--json", "--latest", "1", "--host", host, "--tag", "hotserve,app:"+j.App)
+	// One --tag with commas is an AND: this app's backup from this run.
+	out, err := j.Capture(ctx, "restic", "snapshots", "--json", "--tag", "hotserve,app:"+j.App+","+runTag(run))
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("reading back the snapshot just written: %w", err)
 	}
@@ -337,16 +375,11 @@ func (j Job) verifySnapshot(ctx context.Context, want []expectedNode) (Snapshot,
 	if err := json.Unmarshal(out, &snaps); err != nil {
 		return Snapshot{}, fmt.Errorf("restic returned a snapshot list this version cannot read: %w", err)
 	}
-	if len(snaps) == 0 {
-		return Snapshot{}, errors.New("restic reported a backup, but no snapshot for this app is in the repository")
+	if len(snaps) != 1 {
+		return Snapshot{}, fmt.Errorf("restic reported a backup, but the repository holds %d snapshots tagged %s, not one", len(snaps), runTag(run))
 	}
-	newest := snaps[0]
-	for _, s := range snaps[1:] {
-		if s.Time.After(newest.Time) {
-			newest = s
-		}
-	}
-	args := []string{"ls", "--json", newest.ShortID}
+	snap := snaps[0]
+	args := []string{"ls", "--json", snap.ShortID}
 	seen := map[string]bool{}
 	for _, w := range want {
 		if parent := filepath.Dir(w.path); !seen[parent] {
@@ -356,7 +389,7 @@ func (j Job) verifySnapshot(ctx context.Context, want []expectedNode) (Snapshot,
 	}
 	out, err = j.Capture(ctx, "restic", args...)
 	if err != nil {
-		return Snapshot{}, fmt.Errorf("listing snapshot %s: %w", newest.ShortID, err)
+		return Snapshot{}, fmt.Errorf("listing snapshot %s: %w", snap.ShortID, err)
 	}
 	nodes := map[string]lsNode{}
 	for line := range strings.SplitSeq(string(out), "\n") {
@@ -369,15 +402,15 @@ func (j Job) verifySnapshot(ctx context.Context, want []expectedNode) (Snapshot,
 		n, ok := nodes[w.path]
 		switch {
 		case !ok:
-			return Snapshot{}, fmt.Errorf("snapshot %s does not contain %s, which was backed up — nothing of it could be restored", newest.ShortID, w.path)
+			return Snapshot{}, fmt.Errorf("snapshot %s does not contain %s, which was backed up — nothing of it could be restored", snap.ShortID, w.path)
 		case n.Type == "symlink":
-			return Snapshot{}, fmt.Errorf("snapshot %s holds %s as a symlink, not its data — nothing behind it could be restored", newest.ShortID, w.path)
+			return Snapshot{}, fmt.Errorf("snapshot %s holds %s as a symlink, not its data — nothing behind it could be restored", snap.ShortID, w.path)
 		case w.database && (n.Type != "file" || n.Size == 0):
-			return Snapshot{}, fmt.Errorf("snapshot %s holds the database copy %s as an empty %s — the copy did not take", newest.ShortID, w.path, n.Type)
+			return Snapshot{}, fmt.Errorf("snapshot %s holds the database copy %s as an empty %s — the copy did not take", snap.ShortID, w.path, n.Type)
 		}
 	}
-	j.logf("%s: snapshot %s read back: %d declared path(s) present", j.App, newest.ShortID, len(want))
-	return newest, nil
+	j.logf("%s: snapshot %s read back: %d declared path(s) present", j.App, snap.ShortID, len(want))
+	return snap, nil
 }
 
 // linkTarget names what a symlink points at, for the error that

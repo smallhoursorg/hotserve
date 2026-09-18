@@ -118,8 +118,9 @@ func Status(ctx context.Context, apps []App, capture Capturer, stagingRoot, host
 			}
 		}
 		// The seen list is written by a clean run on this box; until
-		// there has been one it says nothing yet.
-		if _, err := os.Stat(SeenPaths(filepath.Join(stagingRoot, app.Name))); err == nil {
+		// there has been one it says nothing yet. Lstat: a link where
+		// the list should be is not a list (see readSeen).
+		if info, err := os.Lstat(SeenPaths(filepath.Join(stagingRoot, app.Name))); err == nil && info.Mode().IsRegular() {
 			seen := readSeen(SeenPaths(filepath.Join(stagingRoot, app.Name)))
 			for _, rel := range app.Files() {
 				if !seen[filepath.Clean(rel)] {

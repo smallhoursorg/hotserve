@@ -50,9 +50,10 @@ reads as root; nothing about backups is configured in the Caddyfile.
       on the command line, where your shell history and /proc/*/cmdline
       keep them.
 
-      The repository is a restic backend URL — s3:, b2:, rest:, sftp:,
-      azure:, gs:, swift: or rclone: — never a path on this box; init,
-      run and restore refuse one.
+      The repository is a restic backend URL — s3:, b2:, rest:, azure:,
+      gs:, swift: or rclone: — never a path on this box; init, run and
+      restore refuse one. (Not sftp: its credentials are files, and the
+      jobs' sandbox holds only the settings init writes.)
 
   hotserve backup run
       Asks the admin API which apps declare state and backs up each
@@ -67,8 +68,9 @@ reads as root; nothing about backups is configured in the Caddyfile.
 
   hotserve backup restore <app> [--snapshot <id>] [--delete] [--yes]
       Puts the app's declared state back from the newest snapshot a
-      clean run recorded in the repository, or the one given. It says which snapshot and what will happen, and asks
-      for the app's name before changing anything. Databases are
+      clean run recorded in the repository, or the one given. It says
+      which snapshot and what will happen, and asks for the app's name
+      before changing anything. Databases are
       replaced through SQLite's own backup API, in one transaction, so
       the app can keep running; files in the snapshot are put back, and
       files added since are kept unless --delete. The snapshot is
@@ -259,7 +261,7 @@ func cmdInit(fl caddycmd.Flags, args []string) (int, error) {
 		return caddy1, fmt.Errorf("making a directory for the repository checks: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(home) }()
-	if err := ensureStagingDir(home, username); err != nil {
+	if err := ensureStagingDir(checkRoot, filepath.Base(home), username); err != nil {
 		return caddy1, err
 	}
 	o := InitOptions{
@@ -560,11 +562,11 @@ func cmdRestore(fl caddycmd.Flags, args []string) (int, error) {
 		return caddy1, fmt.Errorf("%s is backing up right now; restore once it has finished (journalctl -u %s -f)", name, unit)
 	}
 	staging := filepath.Join(o.StagingRoot, name)
-	if err := ensureStagingDir(staging, o.User); err != nil {
+	if err := ensureStagingDir(o.StagingRoot, name, o.User); err != nil {
 		return caddy1, err
 	}
 	// The restore unit's own dir, the only part of staging in its view.
-	if err := ensureStagingDir(StagingRestore(staging), o.User); err != nil {
+	if err := ensureStagingDir(o.StagingRoot, filepath.Join(name, stagingRestore), o.User); err != nil {
 		return caddy1, err
 	}
 	// A rebuilt box restores before the first deploy, when liveswap has
@@ -660,22 +662,45 @@ func cmdRestoreApp(fl caddycmd.Flags, entryArgs []string) (int, error) {
 	}
 	app := App{Name: name, Shared: shared, State: entries}
 	job := RestoreJob{
-		App:       name,
-		Shared:    shared,
-		Staging:   staging,
-		Snapshot:  snapshot,
-		Databases: app.Databases(),
-		Files:     app.Files(),
-		Delete:    fl.Bool("delete"),
-		Run:       execRunner(os.Stderr),
-		Capture:   captureRunner(),
-		Dump:      resticDump,
-		Log:       os.Stdout,
+		App:         name,
+		Shared:      shared,
+		Staging:     staging,
+		Snapshot:    snapshot,
+		Databases:   app.Databases(),
+		Files:       app.Files(),
+		Delete:      fl.Bool("delete"),
+		Run:         execRunner(os.Stderr),
+		Capture:     captureRunner(),
+		Dump:        resticDump,
+		RestoreTree: resticRestoreTree,
+		Log:         os.Stdout,
 	}
 	if err := job.Execute(context.Background()); err != nil {
 		return caddy1, err
 	}
 	return 0, nil
+}
+
+// resticRestoreTree runs one `restic restore --json`, reading its
+// errors off stderr as they are written. Its stdout is the summary,
+// and is dropped: restic counts a file it could not write as restored,
+// so the summary is evidence of nothing.
+func resticRestoreTree(ctx context.Context, args ...string) (restoreErrors, error) {
+	cmd := exec.CommandContext(ctx, "restic", args...) //nolint:gosec // a fixed program; the snapshot and paths come from the listing just read
+	cmd.Env = commandEnv(ctx)
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return restoreErrors{Counted: -1}, err
+	}
+	if err := cmd.Start(); err != nil {
+		if _, lookErr := exec.LookPath("restic"); lookErr != nil {
+			return restoreErrors{Counted: -1}, fmt.Errorf("restic is not installed: %w", lookErr)
+		}
+		return restoreErrors{Counted: -1}, err
+	}
+	// Read to the end before Wait, which closes the pipe.
+	errs := readRestoreErrors(stderr, os.Stderr)
+	return errs, cmd.Wait()
 }
 
 // resticDump writes one file out of a snapshot. O_EXCL: dst is a name

@@ -138,12 +138,21 @@ func unquote(v string) string {
 
 // Backends are the restic backends a repository may be. A repository
 // is always a URL for one of them, never a path on this box.
-var Backends = []string{"s3", "b2", "rest", "sftp", "azure", "gs", "swift", "rclone"}
+//
+// Each takes its credentials as settings, which is the only way a
+// credential reaches a job: the sandbox holds the environment file's
+// values and no file of the operator's. That is what leaves sftp out —
+// ssh reads its key and known_hosts from the user's home and /etc/ssh,
+// and neither is in a job's view.
+var Backends = []string{"s3", "b2", "rest", "azure", "gs", "swift", "rclone"}
 
 // CheckRepository refuses anything that is not a backend URL.
 func CheckRepository(repo string) error {
 	if scheme, rest, ok := strings.Cut(repo, ":"); ok && rest != "" && slices.Contains(Backends, scheme) {
 		return nil
+	}
+	if strings.HasPrefix(repo, "sftp:") {
+		return fmt.Errorf("repository %q: sftp is not supported — ssh takes its key and known_hosts from files, and the backup jobs run in a sandbox that holds only the settings init writes; use a backend whose credentials are settings (%s:)", repo, strings.Join(Backends, ":, "))
 	}
 	return fmt.Errorf("repository %q is not a backend URL: it must start with one of %s: — a path on this box is not supported", repo, strings.Join(Backends, ":, "))
 }

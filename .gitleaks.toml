@@ -13,10 +13,15 @@
 # scanned — and by text rather than by a `gitleaks:allow` comment,
 # because this scan reads every commit, including the one that
 # introduced it.
+#
+# The backup e2e suite (e2e/backup/run.sh) proves the S3 fixture refuses
+# a wrong key, with `curl --user "$S3_KEY_ID:wrong"`: a shell variable
+# and the word "wrong", which the curl-auth-user rule reads as a
+# credential. Allowlisted by that text, for the same reason.
 [extend]
 useDefault = true
 
 [allowlist]
 description = "fixtures that are credential-shaped by design"
 paths = ['''^liveswap/testdata/redact/''']
-regexes = ['''secret=with=equals''']
+regexes = ['''secret=with=equals''', '''\$S3_KEY_ID:wrong''']

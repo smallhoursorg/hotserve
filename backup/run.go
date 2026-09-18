@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"os/user"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -258,44 +259,52 @@ func asJob(v jobView, envDir string, run Runner, capture Capturer) (Runner, Capt
 		}
 }
 
-// ensureStagingDir creates the dir the job stages database copies in,
-// owned by the user the job runs as. This command runs as root (it has
-// to, to create the units), so a directory it makes is root's: without
-// the chown the job's very first VACUUM INTO fails with a permission
-// error, in every app, forever.
-func ensureStagingDir(dir, username string) error {
-	// Both halves up front: the job cannot create them itself, since
-	// only what is bound into its view exists, and a bind of a
-	// missing path fails the unit.
-	//
-	// Every step is symlink-safe, because the contents of these
-	// directories are written by the job — an unprivileged process
-	// that this one, running as root, then chowns. A job that swapped
-	// `data` for a symlink to /etc would otherwise have the next run
-	// hand /etc to the hotserve user: a link followed by root is a
-	// root escalation, so a path that is not a real directory is
-	// refused rather than repaired.
-	for _, d := range []string{dir, StagingData(dir), StagingCache(dir)} {
-		if err := os.MkdirAll(d, 0o750); err != nil {
-			return fmt.Errorf("staging dir %s: %w", d, err)
-		}
-		info, err := os.Lstat(d)
-		if err != nil {
-			return fmt.Errorf("staging dir %s: %w", d, err)
-		}
-		if !info.IsDir() {
-			return fmt.Errorf("staging path %s is not a directory (%s) — refusing to use it: the backup job writes here, so anything else is something it put there", d, info.Mode().Type())
-		}
-	}
+// ensureStagingDir creates rel under anchor — a job's dir, with its
+// data and cache dirs — owned by the user the job runs as. This command
+// runs as root (it has to, to create the units), so a directory it
+// makes is root's: without the chown the job's very first VACUUM INTO
+// fails with a permission error, in every app, forever. All three are
+// made up front: the job cannot create them itself, since only what is
+// bound into its view exists, and a bind of a missing path fails the
+// unit.
+//
+// anchor is a directory only root can change (the staging root, or
+// init's root-only dir); everything under it is written by jobs, which
+// are unprivileged. So every step goes through one handle on anchor
+// (os.Root), which resolves no path to anything outside it: a job that
+// swaps `data`, or a directory on the way to it, for a link to /etc
+// gets a refusal, not /etc. A link that stays inside reaches only what
+// the jobs' user owns already; and one where a directory should be is
+// refused rather than repaired, because a job put it there.
+func ensureStagingDir(anchor, rel, username string) error {
 	uid, gid, err := userIDs(username)
 	if err != nil {
 		return err
 	}
-	for _, d := range []string{dir, StagingData(dir), StagingCache(dir)} {
-		// Lchown, not Chown: Chown follows a symlink, and following
-		// one here is the escalation described above.
-		if err := os.Lchown(d, uid, gid); err != nil {
-			return fmt.Errorf("giving %s to %s (the job writes its database copies there): %w", d, username, err)
+	if err := os.MkdirAll(anchor, 0o750); err != nil {
+		return fmt.Errorf("staging root %s: %w", anchor, err)
+	}
+	root, err := os.OpenRoot(anchor)
+	if err != nil {
+		return fmt.Errorf("staging root %s: %w", anchor, err)
+	}
+	defer func() { _ = root.Close() }()
+	for _, d := range []string{rel, filepath.Join(rel, stagingData), filepath.Join(rel, stagingCache)} {
+		full := filepath.Join(anchor, d)
+		if err := root.MkdirAll(d, 0o750); err != nil {
+			return fmt.Errorf("staging dir %s: %w", full, err)
+		}
+		info, err := root.Lstat(d)
+		if err != nil {
+			return fmt.Errorf("staging dir %s: %w", full, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("staging path %s is not a directory (%s) — refusing to use it: the backup job writes here, so anything else is something it put there", full, info.Mode().Type())
+		}
+		// Lchown: should d become a link after the check, it is the
+		// link that changes hands.
+		if err := root.Lchown(d, uid, gid); err != nil {
+			return fmt.Errorf("giving %s to %s (the job writes its database copies there): %w", full, username, err)
 		}
 	}
 	return nil
@@ -340,11 +349,10 @@ func RunAll(ctx context.Context, apps []App, o LaunchOptions, run Runner, log io
 			say(log, "%s: no data yet (never deployed), skipping", app.Name)
 			continue
 		}
-		staging := o.StagingRoot + "/" + app.Name
 		// A per-app problem here (a stale file where the dir should
 		// be, an owner changed by hand) is this app's failure, not
 		// the run's: the other apps still get their backup.
-		if err := ensureStagingDir(staging, o.User); err != nil {
+		if err := ensureStagingDir(o.StagingRoot, app.Name, o.User); err != nil {
 			say(log, "%s: FAILED (%v)", app.Name, err)
 			failed = append(failed, app.Name)
 			continue

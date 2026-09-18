@@ -79,6 +79,11 @@ for d in /var/lib/hotserve /var/lib/liveswap; do
 	got=$(stat -c '%U:%G %a' "$d")
 	[ "$got" = "hotserve:hotserve 750" ] || die "$d is '$got', want 'hotserve:hotserve 750'"
 done
+# The backup staging root is root's: root makes and chowns the per-app
+# dirs in it, and hotserve.service, as the hotserve user with /var
+# writable, has no business rearranging what root is about to walk.
+got=$(stat -c '%U:%G %a' /var/lib/hotserve-backup)
+[ "$got" = "root:root 750" ] || die "/var/lib/hotserve-backup is '$got', want 'root:root 750'"
 echo "user/group and data dir ownership OK"
 
 /usr/bin/hotserve version

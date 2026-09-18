@@ -52,7 +52,19 @@ Windows, and macOS-as-a-server are out of scope by product design.
    mode `0750` owned by `hotserve`: a consistent copy of that app's
    declared databases, taken before each upload and replaced on the
    next run. Plaintext, like the database it came from, and outside
-   every app's view. A restore (`hotserve backup restore`) takes its
+   every app's view. The launcher, which is root, makes and chowns
+   those dirs, and what is in them is written by jobs — so it does both
+   through one handle on the staging root that resolves no path to
+   anything outside it, and refuses a link where a dir should be. The
+   staging root itself is root's, `0750`: nothing running as `hotserve`
+   — hotserve.service included — needs to enter it, so none can.
+   The hourly job of an app that declares a database has that app's
+   `shared/` bound **writable**: SQLite creates `-shm` beside a WAL
+   database to read it at all. restic — the one process in the job
+   that talks to the network — could therefore alter that app's data
+   if compromised: that app's only, as the user that already owns it.
+   A files-only app's job gets its data read-only.
+   A restore (`hotserve backup restore`) takes its
    copies out of the repository into `<app>/restore` beside them and
    removes them when it ends. It runs in that app's backup unit with
    the app's data writable, and with nothing else writable but its own
@@ -61,7 +73,7 @@ Windows, and macOS-as-a-server are out of scope by product design.
    own data can therefore steer the restore's writes only into the
    app's own data or that scratch dir.
    The repository itself is never on the box: it is a backend URL
-   (`s3:`, `b2:`, `rest:`, `sftp:` …), and init, the hourly run and
+   (`s3:`, `b2:`, `rest:` …), and init, the hourly run and
    restore refuse a path. No backup unit has any of it in its view.
 7. **Sibling app data** — `/var/lib/liveswap/<app>/{releases,shared,state.json}`.
 8. **System integrity** — root, persistence, other system services.

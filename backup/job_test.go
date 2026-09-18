@@ -8,7 +8,9 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 type call struct {
@@ -84,6 +86,7 @@ func newJob(t *testing.T, rec *recorder, dbs, files []string) Job {
 		Staging:   t.TempDir(),
 		Databases: dbs,
 		Files:     files,
+		RunID:     "r1",
 		Run:       rec.run,
 		Log:       io.Discard,
 		Env:       testEnv,
@@ -172,7 +175,7 @@ func TestExecuteStagesDatabasesThenBacksUp(t *testing.T) {
 	if restic.name != "restic" {
 		t.Fatalf("last command = %q, want restic", restic.name)
 	}
-	want := []string{"backup", "--quiet", "--tag", "hotserve", "--tag", "app:blog",
+	want := []string{"backup", "--quiet", "--tag", "hotserve", "--tag", "app:blog", "--tag", "run:r1",
 		StagingData(job.Staging), filepath.Join(job.Shared, "uploads")}
 	if strings.Join(restic.args, " ") != strings.Join(want, " ") {
 		t.Errorf("restic argv:\n got %v\nwant %v", restic.args, want)
@@ -336,9 +339,9 @@ func TestExecuteFailsWhenTheSnapshotDoesNotHoldWhatWasDeclared(t *testing.T) {
 // itself: restic lists a named directory's direct children, so naming
 // an uploads dir would return a line per upload (measured: 501 lines
 // for 500 files, against 2 for its parent). In the snapshot a parent
-// holds only what was backed up from it. And it asks for this box's
-// snapshots only, so another box writing to the same repository is
-// never the one checked.
+// holds only what was backed up from it. And it asks for the snapshot
+// this run tagged, so neither another box writing to the same
+// repository nor an earlier run of this one is ever the one checked.
 func TestExecuteReadsBackThroughTheParentsOfWhatWasDeclared(t *testing.T) {
 	var lsArgs, snapshotArgs []string
 	rec := &recorder{}
@@ -369,9 +372,8 @@ func TestExecuteReadsBackThroughTheParentsOfWhatWasDeclared(t *testing.T) {
 			t.Errorf("the read-back must not list the declared directory's own contents: %v", lsArgs)
 		}
 	}
-	host, _ := os.Hostname()
-	if !strings.Contains(strings.Join(snapshotArgs, " "), "--host "+host) {
-		t.Errorf("the snapshot checked must be this box's: %v", snapshotArgs)
+	if got, want := strings.Join(snapshotArgs, " "), "snapshots --json --tag hotserve,app:blog,run:r1"; got != want {
+		t.Errorf("the snapshot checked must be the one this run tagged:\n got %s\nwant %s", got, want)
 	}
 	// A snapshot holding everything declared is a success, recorded in
 	// the repository against that snapshot's full id, and never tagged
@@ -379,6 +381,73 @@ func TestExecuteReadsBackThroughTheParentsOfWhatWasDeclared(t *testing.T) {
 	r := cleanRecord(rec)
 	if r == nil || !slices.Contains(r, "clean-of:s1full") || !slices.Contains(r, "clean-app:blog") || slices.Contains(r, "hotserve") {
 		t.Errorf("want a clean-run record for s1full, tagged for blog and not as a backup, got %v", r)
+	}
+}
+
+// The clean-run record vouches for one snapshot by id, so the read-back
+// has to know which snapshot this run wrote. Anything but exactly one
+// snapshot under the run's tag is not knowing, and nothing is recorded.
+func TestExecuteRecordsNothingUnlessOneSnapshotCarriesTheRunTag(t *testing.T) {
+	for name, listing := range map[string]string{
+		"none": `[]`,
+		"two":  `[{"id":"s1full","short_id":"s1"},{"id":"s2full","short_id":"s2"}]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := &recorder{}
+			job := newJob(t, rec, []string{"app.db"}, nil)
+			holding := job.Capture
+			job.Capture = func(ctx context.Context, cmd string, args ...string) ([]byte, error) {
+				if args[0] == "snapshots" {
+					return []byte(listing), nil
+				}
+				return holding(ctx, cmd, args...)
+			}
+			err := job.Execute(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "run:r1") {
+				t.Fatalf("want a failure naming the run's tag, got %v", err)
+			}
+			if r := cleanRecord(rec); r != nil {
+				t.Errorf("no snapshot was identified, so none may be vouched for: %v", r)
+			}
+		})
+	}
+}
+
+// Left unset, the run id is random: two runs never share a tag, and the
+// read-back asks for the tag its own backup was given.
+func TestEachRunTagsItsOwnSnapshot(t *testing.T) {
+	var tags []string
+	for range 2 {
+		rec := &recorder{}
+		job := newJob(t, rec, []string{"app.db"}, nil)
+		job.RunID = ""
+		var lookedUp string
+		holding := job.Capture
+		job.Capture = func(ctx context.Context, cmd string, args ...string) ([]byte, error) {
+			if args[0] == "snapshots" {
+				lookedUp = args[len(args)-1]
+			}
+			return holding(ctx, cmd, args...)
+		}
+		if err := job.Execute(context.Background()); err != nil {
+			t.Fatalf("execute: %v", err)
+		}
+		var tag string
+		for _, a := range rec.calls[1].args {
+			if strings.HasPrefix(a, "run:") {
+				tag = a
+			}
+		}
+		if len(tag) != len("run:")+16 {
+			t.Fatalf("want a run tag of 16 hex digits on the backup, got %q in %v", tag, rec.calls[1].args)
+		}
+		if want := "hotserve,app:blog," + tag; lookedUp != want {
+			t.Errorf("the read-back looked up %q, want the backup's own tag %q", lookedUp, want)
+		}
+		tags = append(tags, tag)
+	}
+	if tags[0] == tags[1] {
+		t.Errorf("two runs shared the tag %s", tags[0])
 	}
 }
 
@@ -434,6 +503,40 @@ func TestExecuteForgetsAPathThatIsNoLongerDeclared(t *testing.T) {
 	}
 	if seen := readSeen(SeenPaths(job.Staging)); seen["avatars"] || !seen["uploads"] {
 		t.Errorf("the list should now hold exactly what was declared and present: %v", seen)
+	}
+}
+
+// `status` reads the list as root, and a job wrote it. A link there is
+// not followed — its target's lines would become "paths" — and a FIFO
+// is not waited on: either reads as no list, at once.
+func TestTheSeenListIsReadOnlyAsARegularFile(t *testing.T) {
+	dir := t.TempDir()
+	secret := filepath.Join(dir, "root-only")
+	if err := os.WriteFile(secret, []byte("uploads\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(secret, link); err != nil {
+		t.Fatal(err)
+	}
+	fifo := filepath.Join(dir, "fifo")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, path := range map[string]string{"a link": link, "a fifo": fifo} {
+		done := make(chan map[string]bool, 1)
+		go func() { done <- readSeen(path) }()
+		select {
+		case seen := <-done:
+			if len(seen) != 0 {
+				t.Errorf("%s was read as a list: %v", name, seen)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: reading the list blocked", name)
+		}
+	}
+	if seen := readSeen(secret); !seen["uploads"] {
+		t.Errorf("a regular file is the list: %v", seen)
 	}
 }
 

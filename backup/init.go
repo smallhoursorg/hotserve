@@ -361,7 +361,7 @@ const (
 
 // deniedBy recognises a storage saying no. The wording comes from the
 // backends: S3-compatible stores answer AccessDenied or 403 Forbidden,
-// B2 says unauthorized, an sftp server says permission denied.
+// B2 says unauthorized.
 //
 // Words only, never a bare status number. A match here becomes "your
 // backups cannot be deleted", so a false one is the worst answer this

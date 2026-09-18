@@ -58,6 +58,15 @@ install -d -o hotserve -g hotserve -m 0750 "$SHARED" "$SHARED/uploads" "$FILES_S
 as_hotserve "sqlite3 '$SHARED/app.db' \"PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS rows(n INTEGER PRIMARY KEY, t TEXT);\"" >/dev/null
 as_hotserve "echo photo > '$SHARED/uploads/cat.jpg'"
 as_hotserve "echo page > '$FILES_SHARED/pages/index.md'"
+# One page belongs to a uid this box has no user for — as every file
+# does, to a box rebuilt with another uid for the hotserve user. A job's
+# user namespace maps only root and hotserve, so restic 0.18 records an
+# owner that a restore is then refused ("lchown …: invalid argument"),
+# and exits 1 over a file it restored. The rebuilt-box restore below has
+# to get past that.
+echo about > "$FILES_SHARED/pages/about.md"
+chown 12345:12345 "$FILES_SHARED/pages/about.md"
+chmod 644 "$FILES_SHARED/pages/about.md"
 
 # A writer, standing in for the app: the copy has to hold up while the
 # app is writing, which is the reason VACUUM INTO is used — and so does
@@ -424,6 +433,15 @@ if [ "$(cat "$FILES_SHARED/pages/index.md" 2>/dev/null)" = page ]; then
 	pass "restore before the first deploy puts the app's files back"
 else
 	fail "restore on a rebuilt box: $rebuilt"
+fi
+# The page whose recorded owner this box cannot give it: restic exits 1
+# over it, and the restore still counts — the file is back, and it is
+# the hotserve user's.
+if [ "$(cat "$FILES_SHARED/pages/about.md" 2>/dev/null)" = about ] && [ "$(stat -c '%U %a' "$FILES_SHARED/pages/about.md")" = "hotserve 644" ] \
+	&& echo "$rebuilt" | grep -q "belong to this box's user" && echo "$rebuilt" | grep -q "restored from snapshot"; then
+	pass "a file whose recorded owner is no user here is restored as the hotserve user's, and the restore says so"
+else
+	fail "a recorded owner this box cannot give failed the restore: $rebuilt ($(stat -c '%U %a' "$FILES_SHARED/pages/about.md" 2>&1))"
 fi
 if [ "$(stat -c '%U %a' "$FILES_SHARED")" = "hotserve 750" ] && [ "$(stat -c '%U %a' /var/lib/liveswap/files-example)" = "hotserve 750" ]; then
 	pass "the app's dirs it made are the hotserve user's, mode 0750"

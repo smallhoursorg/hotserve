@@ -28,7 +28,7 @@ func TestMissingCredentials(t *testing.T) {
 		{"s3:s3.example.com/b", []string{"AWS_ACCESS_KEY_ID=k", "AWS_SECRET_ACCESS_KEY=s"}, ""},
 		{"b2:bucket:path", nil, "B2_ACCOUNT_ID B2_ACCOUNT_KEY"},
 		{"/srv/backups", nil, ""},
-		{"sftp:host:/srv", nil, ""},
+		{"rest:https://backups.example.com/box", nil, ""},
 	} {
 		if got := keys(missingCredentials(tc.repo, tc.given)); got != tc.want {
 			t.Errorf("%s with %v: asks for %q, want %q", tc.repo, tc.given, got, tc.want)

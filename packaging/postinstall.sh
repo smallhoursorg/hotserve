@@ -31,19 +31,21 @@ fi
 if ! in_group; then
 	echo "hotserve: the hotserve user is not a member of the hotserve group; add it with \`usermod -aG hotserve hotserve\` if its state directories become unreadable" >&2
 fi
-# /var/lib/hotserve-backup holds each app's staged database copies.
-# It belongs to the hotserve user for the same reason the others do —
-# the jobs write there — and because a restore onto a rebuilt box
-# lands the database copies here before any job has run: root-owned,
-# restic (as hotserve) could not create the directories and the
-# documented recovery would stop halfway.
-#
 # Created here as well as shipped in the package, so this script can
 # set a box up on its own: the e2e image runs it without installing
 # the .deb, and a script that assumes its own payload cannot do that.
 mkdir -p /var/lib/hotserve /var/lib/liveswap /var/lib/hotserve-backup
 chmod 750 /var/lib/hotserve /var/lib/liveswap /var/lib/hotserve-backup
-chown hotserve:hotserve /var/lib/hotserve /var/lib/liveswap /var/lib/hotserve-backup
+chown hotserve:hotserve /var/lib/hotserve /var/lib/liveswap
+# /var/lib/hotserve-backup holds one staging dir per app. The dirs in
+# it are the hotserve user's, because the jobs write there; the dir
+# itself is root's, because root walks it: `hotserve backup run` makes
+# and chowns <app>/ as root, and hotserve.service — the internet-facing
+# process, as the hotserve user, with /var writable — has no business
+# rearranging what root is about to walk. Nothing unprivileged needs to
+# enter: each job reaches its own dir through a bind mount that systemd
+# sets up.
+chown root:root /var/lib/hotserve-backup
 # The package ships the Caddyfile here, so dpkg makes this directory —
 # but this script also runs without the payload, and the backup
 # settings live here. Root's, because the credentials do.

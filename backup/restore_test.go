@@ -23,6 +23,10 @@ type restoreFixture struct {
 	// integrity is what `PRAGMA integrity_check` answers.
 	integrity string
 	dumped    map[string]string // dst → the snapshot path written there
+	// tree is what `restic restore` of a directory reports; treeErr is
+	// its exit status.
+	tree    restoreErrors
+	treeErr error
 }
 
 func newRestore(t *testing.T, dbs, files []string) *restoreFixture {
@@ -78,6 +82,11 @@ func newRestore(t *testing.T, dbs, files []string) *restoreFixture {
 		_, _ = file.WriteString("from the snapshot")
 		return file.Close()
 	}
+	f.tree = restoreErrors{Counted: -1}
+	f.job.RestoreTree = func(_ context.Context, args ...string) (restoreErrors, error) {
+		f.calls = append(f.calls, call{"restic", args})
+		return f.tree, f.treeErr
+	}
 	return f
 }
 
@@ -109,7 +118,7 @@ func TestRestorePutsTheDatabaseBackThroughSQLiteAndTheFilesThroughRestic(t *test
 		t.Errorf("the database must go back through sqlite3 .restore into the live file, got %v", got)
 	}
 	uploads := filepath.Join(f.job.Shared, "uploads")
-	if got := w[1].args; !slices.Equal(got, []string{"restore", "s1full:" + uploads, "--target", uploads}) {
+	if got := w[1].args; !slices.Equal(got, []string{"restore", "--json", "--quiet", "s1full:" + uploads, "--target", uploads}) {
 		t.Errorf("files go back as the snapshot's copy of that one directory, without --delete unless asked, got %v", got)
 	}
 	if f.dumped[copyPath] != filepath.Join(StagingData(f.job.Staging), "app.db") {
@@ -182,13 +191,7 @@ func TestRestoreChecksEverythingBeforeItChangesAnything(t *testing.T) {
 // "left as it was" — and a database's must, because .restore is.
 func TestRestoreSaysWhatAFailurePartWayLeaves(t *testing.T) {
 	f := newRestore(t, []string{"app.db"}, []string{"uploads"})
-	f.job.Run = func(_ context.Context, name string, args ...string) error {
-		f.calls = append(f.calls, call{name, args})
-		if name == "restic" {
-			return errors.New("exit status 1")
-		}
-		return nil
-	}
+	f.treeErr = errors.New("exit status 1")
 	err := f.job.Execute(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "may be partly restored") || !strings.Contains(err.Error(), "run the restore again") {
 		t.Errorf("a directory that failed part-way must be called partly restored, got %v", err)
@@ -197,6 +200,103 @@ func TestRestoreSaysWhatAFailurePartWayLeaves(t *testing.T) {
 	f.job.Run = func(context.Context, string, ...string) error { return errors.New("exit status 1") }
 	if err := f.job.Execute(context.Background()); err == nil || !strings.Contains(err.Error(), "it is as it was") {
 		t.Errorf("a failed .restore leaves the database as it was, and must say so, got %v", err)
+	}
+}
+
+// restic 0.18.0's own stderr, captured on Debian 13 from `restic restore
+// --json` run as a user whose namespace maps only itself, against a
+// snapshot whose files another uid owned.
+const (
+	// Every file restored; each one's recorded owner refused.
+	resticOwnerRefusals = `{"message_type":"error","error":{"message":"lchown /data/uploads/a.txt: invalid argument"},"during":"restore","item":"/a.txt"}
+{"message_type":"error","error":{"message":"lchown /data/uploads/sub/b.txt: invalid argument"},"during":"restore","item":"/sub/b.txt"}
+{"message_type":"error","error":{"message":"lchown /data/uploads/sub: invalid argument"},"during":"restore","item":"/sub"}
+{"message_type":"exit_error","code":1,"message":"Fatal: There were 3 errors\n"}
+`
+	// The same, with sub/ unwritable: b.txt was never written. restic
+	// reports that as a chmod and an lchown of a file that is not there
+	// — and its summary still counted the file as restored.
+	resticOwnerRefusalsAndALostFile = `{"message_type":"error","error":{"message":"chmod /data/uploads/sub/b.txt: no such file or directory"},"during":"restore","item":"/sub/b.txt"}
+{"message_type":"error","error":{"message":"lchown /data/uploads/a.txt: invalid argument"},"during":"restore","item":"/a.txt"}
+{"message_type":"error","error":{"message":"lchown /data/uploads/sub/b.txt: no such file or directory"},"during":"restore","item":"/sub/b.txt"}
+{"message_type":"error","error":{"message":"lchown /data/uploads/sub: invalid argument"},"during":"restore","item":"/sub"}
+{"message_type":"exit_error","code":1,"message":"Fatal: There were 4 errors\n"}
+`
+)
+
+// Owner refusals alone are a restore that worked. Anything beside them
+// — an lchown that failed another way included — is one that did not,
+// and so is a count restic gives that this reading does not reach.
+func TestReadRestoreErrorsToleratesOwnerRefusalsAndNothingElse(t *testing.T) {
+	for name, tc := range map[string]struct {
+		stderr    string
+		ownerOnly bool
+		shown     string
+	}{
+		"owner refusals only":    {resticOwnerRefusals, true, ""},
+		"a file was not written": {resticOwnerRefusalsAndALostFile, false, "lchown /data/uploads/sub/b.txt: no such file or directory"},
+		"restic counted more than were read": {
+			strings.Replace(resticOwnerRefusals, "There were 3 errors", "There were 4 errors", 1), false, ""},
+		"no closing count": {
+			strings.SplitAfterN(resticOwnerRefusals, "\n", 4)[0], false, ""},
+		"another fatal": {
+			resticOwnerRefusals + `{"message_type":"exit_error","code":1,"message":"Fatal: unable to load index"}` + "\n", false, "unable to load index"},
+		"an error outside the restore": {
+			strings.Replace(resticOwnerRefusals, `"during":"restore","item":"/a.txt"`, `"during":"verify","item":"/a.txt"`, 1), false, "lchown /data/uploads/a.txt"},
+		"not permitted is not this case": {
+			strings.ReplaceAll(resticOwnerRefusals, "invalid argument", "operation not permitted"), false, "operation not permitted"},
+		"a line that is not JSON": {
+			"unable to open cache\n" + resticOwnerRefusals, false, "unable to open cache"},
+		"nothing at all": {"", false, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var shown strings.Builder
+			errs := readRestoreErrors(strings.NewReader(tc.stderr), &shown)
+			if errs.ownerOnly() != tc.ownerOnly {
+				t.Errorf("ownerOnly = %v, want %v (%+v)", errs.ownerOnly(), tc.ownerOnly, errs)
+			}
+			if tc.shown != "" && !strings.Contains(shown.String(), tc.shown) {
+				t.Errorf("an error that is not an owner refusal must be shown as it arrives; want %q in %q", tc.shown, shown.String())
+			}
+			if tc.ownerOnly && shown.String() != "" {
+				t.Errorf("owner refusals are counted, never printed one per file: %q", shown.String())
+			}
+		})
+	}
+}
+
+// A rebuilt box: restic exits 1 over owners alone. That directory is
+// restored, the next declared one still gets its turn, and the log says
+// whose the files are.
+func TestRestoreCarriesOnPastOwnerRefusals(t *testing.T) {
+	f := newRestore(t, nil, []string{"uploads", "avatars"})
+	var log strings.Builder
+	f.job.Log = &log
+	f.tree = readRestoreErrors(strings.NewReader(resticOwnerRefusals), io.Discard)
+	f.treeErr = errors.New("exit status 1")
+	if err := f.job.Execute(context.Background()); err != nil {
+		t.Fatalf("owner refusals alone must not fail a restore: %v", err)
+	}
+	if w := f.writes(); len(w) != 2 {
+		t.Errorf("both declared paths must be restored, got %v", w)
+	}
+	if !strings.Contains(log.String(), "3 files and directories belong to this box's user") {
+		t.Errorf("the log must say whose the files are now:\n%s", log.String())
+	}
+}
+
+// The same exit status with a file that was never written is a failure,
+// and says what restic said.
+func TestRestoreFailsWhenMoreThanOwnersWentWrong(t *testing.T) {
+	f := newRestore(t, nil, []string{"uploads", "avatars"})
+	f.tree = readRestoreErrors(strings.NewReader(resticOwnerRefusalsAndALostFile), io.Discard)
+	f.treeErr = errors.New("exit status 1")
+	err := f.job.Execute(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "may be partly restored") || !strings.Contains(err.Error(), "no such file or directory") {
+		t.Fatalf("want a part-way failure quoting restic, got %v", err)
+	}
+	if w := f.writes(); len(w) != 1 {
+		t.Errorf("a failed directory stops the restore, got %v", w)
 	}
 }
 

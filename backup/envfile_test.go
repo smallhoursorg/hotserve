@@ -81,9 +81,15 @@ func TestEnsureStagingDirIsOwnedByTheJobsUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir := filepath.Join(t.TempDir(), "blog")
-	if err := ensureStagingDir(dir, me.Username); err != nil {
+	anchor := t.TempDir()
+	dir := filepath.Join(anchor, "blog")
+	if err := ensureStagingDir(anchor, "blog", me.Username); err != nil {
 		t.Fatalf("ensure: %v", err)
+	}
+	for _, d := range []string{StagingData(dir), StagingCache(dir)} {
+		if info, err := os.Stat(d); err != nil || !info.IsDir() {
+			t.Errorf("%s must be made up front — the job cannot, from inside its view: %v", d, err)
+		}
 	}
 	info, err := os.Stat(dir)
 	if err != nil {
@@ -94,8 +100,56 @@ func TestEnsureStagingDirIsOwnedByTheJobsUser(t *testing.T) {
 	}
 	// Chown to a user that does not exist must name the user, not
 	// fail with a bare errno.
-	err = ensureStagingDir(filepath.Join(t.TempDir(), "x"), "no-such-user-here")
+	err = ensureStagingDir(t.TempDir(), "x", "no-such-user-here")
 	if err == nil || !strings.Contains(err.Error(), "no-such-user-here") {
 		t.Fatalf("want an error naming the user, got %v", err)
+	}
+}
+
+// What is under the staging root is written by jobs, and this runs as
+// root: a link a job left there — where a directory should be, or on
+// the way to one — must never take the mkdir and the chown outside the
+// staging root.
+func TestEnsureStagingDirNeverLeavesItsAnchor(t *testing.T) {
+	me, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, plant := range map[string]func(anchor, outside string) error{
+		"data is a link out": func(anchor, outside string) error {
+			return os.Symlink(outside, filepath.Join(anchor, "blog", "data"))
+		},
+		"the restore dir is a link out": func(anchor, outside string) error {
+			return os.Symlink(outside, filepath.Join(anchor, "blog", "restore"))
+		},
+		"the restore dir is a link to a sibling app": func(anchor, _ string) error {
+			if err := os.Mkdir(filepath.Join(anchor, "shop"), 0o750); err != nil {
+				return err
+			}
+			return os.Symlink("../shop", filepath.Join(anchor, "blog", "restore"))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			anchor, outside := t.TempDir(), t.TempDir()
+			if err := os.Mkdir(filepath.Join(anchor, "blog"), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := plant(anchor, outside); err != nil {
+				t.Fatal(err)
+			}
+			err := ensureStagingDir(anchor, "blog", me.Username)
+			if err == nil {
+				err = ensureStagingDir(anchor, filepath.Join("blog", stagingRestore), me.Username)
+			}
+			if err == nil {
+				t.Fatal("a link where a staging dir should be must be refused")
+			}
+			if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+				t.Errorf("something was made outside the staging root: %v", entries)
+			}
+			if entries, _ := os.ReadDir(filepath.Join(anchor, "shop")); len(entries) != 0 {
+				t.Errorf("something was made in another app's dir: %v", entries)
+			}
+		})
 	}
 }

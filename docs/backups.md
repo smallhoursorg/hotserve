@@ -85,7 +85,8 @@ declare state, then runs one short-lived job per app, in turn. Each job:
    staging dir — a live database file cannot be copied safely any other
    way, and this is the step that makes the backup restorable;
 2. hands restic the copies and the declared file paths, as one snapshot
-   tagged with the app's name;
+   tagged with the app's name — and with a `run:` tag of its own, which
+   is how the job finds that snapshot again to read it back;
 3. exits. Nothing stays running between backups.
 
 Each job runs as the `hotserve` user inside a systemd sandbox whose
@@ -144,10 +145,12 @@ repository needs something more, pass it to `init` as `KEY=VALUE` or in
 
 ### Where the repository can be
 
-A repository is a restic backend URL — `s3:`, `b2:`, `rest:`, `sftp:`,
-`azure:`, `gs:`, `swift:` or `rclone:` — and never a path on this box.
-`init`, the hourly run and `restore` all refuse a path, with the same
-error. A backup on the box it protects does not survive losing the box,
+A repository is a restic backend URL — `s3:`, `b2:`, `rest:`, `azure:`,
+`gs:`, `swift:` or `rclone:` — and never a path on this box. `init`,
+the hourly run and `restore` all refuse a path, with the same error.
+`sftp:` is refused too: ssh takes its key and `known_hosts` from files,
+and a job's sandbox holds only the settings `init` writes — every
+backend here takes its credentials as settings. A backup on the box it protects does not survive losing the box,
 and a repository the jobs could reach on disk would be mounted,
 writable, into every one of them. Every job reaches the repository over
 the network, and the sandbox binds nothing of it.
@@ -299,6 +302,15 @@ sudo hotserve backup restore blog
 Restore before the first deploy: the app then starts on its data
 rather than on an empty directory. (The app's block has to be in the
 Caddyfile first — a restore puts back what the block declares.)
+
+A rebuilt box may give the `hotserve` user a different uid than the old
+one had, and a snapshot records each file's owner by number. Restored
+files belong to this box's `hotserve` user whatever number was recorded,
+and the restore says how many that applied to:
+
+```
+blog: uploads: 1204 files and directories belong to this box's user, not the owner the snapshot records — …
+```
 
 ### A rollback does not undo a migration
 
