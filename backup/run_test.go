@@ -75,6 +75,11 @@ func TestLaunchArgsSandboxesEachAppToItsOwnData(t *testing.T) {
 		"--property=SystemCallFilter=@system-service",
 		"--property=MemoryHigh=64M",
 		"--property=Environment=GOGC=20",
+		// The launcher's own Nice does not reach here: a transient unit
+		// is started by the system manager, not forked from it, so
+		// without this the hourly copy competes with the live apps.
+		"--property=Nice=10",
+		"--property=IOSchedulingClass=idle",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("missing property %q", want)
@@ -167,6 +172,58 @@ func TestRepositoryPath(t *testing.T) {
 		if _, err := RepositoryPath(repo); err == nil {
 			t.Errorf("%q should be refused as a relative path", repo)
 		}
+	}
+}
+
+// init chowns a filesystem repository to the jobs' user and every job
+// mounts it writable, so a path that is really a system directory
+// hands the box away. Descendants count: /etc/hotserve holds the
+// Caddyfile and the backup credentials.
+func TestRepositoryPathRefusesDirectoriesThatWouldGiveAwayTheBox(t *testing.T) {
+	for _, repo := range []string{
+		"/", "/etc", "/etc/hotserve", "/usr", "/usr/local/backups", "/root/backups",
+		"/var", "/home", "/var/lib", "/var/lib/liveswap", "/var/lib/liveswap/blog/shared",
+		"/var/lib/hotserve-backup", "/var/lib/hotserve",
+	} {
+		if _, err := RepositoryPath(repo); err == nil {
+			t.Errorf("%s should be refused as a repository", repo)
+		}
+	}
+	// A directory of its own is the documented shape, including one
+	// inside /var or a home directory.
+	for _, repo := range []string{"/srv/backups", "/mnt/disk/backups", "/var/backups", "/home/dev/backups"} {
+		if _, err := RepositoryPath(repo); err != nil {
+			t.Errorf("%s should be allowed: %v", repo, err)
+		}
+	}
+}
+
+// Cleaning a path is lexical, so /srv/backups can still be a symlink
+// into a tree the checks just refused — and the bind would then put
+// that tree, writable, into every backup job.
+func TestRepositoryPathFollowsSymlinksBeforeJudgingThem(t *testing.T) {
+	dir := t.TempDir()
+	link := filepath.Join(dir, "backups")
+	if err := os.Symlink("/usr", link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	_, err := RepositoryPath(link)
+	if err == nil || !strings.Contains(err.Error(), "resolves to") {
+		t.Fatalf("a symlink into /usr must be refused, got %v", err)
+	}
+
+	// A link to somewhere harmless stays allowed, and the path the
+	// operator named is what gets bound.
+	safe := filepath.Join(dir, "elsewhere")
+	if err := os.MkdirAll(filepath.Join(dir, "target"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "target"), safe); err != nil {
+		t.Fatal(err)
+	}
+	got, err := RepositoryPath(safe)
+	if err != nil || got != safe {
+		t.Fatalf("got %q, %v; want %q", got, err, safe)
 	}
 }
 

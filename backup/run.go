@@ -89,6 +89,12 @@ func LaunchArgs(app App, o LaunchOptions) []string {
 		// dies, and the 64 MB measured here is a floor to aim at, not
 		// a ceiling to enforce.
 		"--property=MemoryHigh=64M",
+		// Nice on hotserve-backup.service only lowers the launcher: a
+		// transient unit is started by the system manager, not forked
+		// from this process, so it would otherwise do the CPU-heavy
+		// part — sqlite3 and restic — at normal priority beside the
+		// apps it is backing up.
+		"--property=Nice=10",
 		"--property=IOSchedulingClass=idle",
 		// A job that hangs must not outlive the run that started it.
 		// systemd-run --wait only waits; a launcher that goes away

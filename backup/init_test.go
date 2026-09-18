@@ -132,6 +132,47 @@ func TestInitShowsAGeneratedPasswordOnce(t *testing.T) {
 	t.Error("no password in the environment file")
 }
 
+// A key that can read but not write gets through `restic cat config`
+// and fails on the first real backup. Installing the settings anyway
+// would arm the hourly timer to fail for ever, and the retry would
+// then refuse to overwrite the file it just left behind.
+func TestInitWritesNothingWhenTheCredentialsCannotBackUp(t *testing.T) {
+	o := initOpts(t)
+	rec := &recorder{failIf: func(_ string, args []string) error {
+		if len(args) > 0 && args[0] == "backup" {
+			return errors.New("Fatal: unable to save snapshot: AccessDenied")
+		}
+		return nil
+	}}
+	err := Init(context.Background(), o, rec.run, probeSnapshots(), io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "was not written") {
+		t.Fatalf("want a failure saying nothing was installed, got %v", err)
+	}
+	if _, statErr := os.Stat(o.EnvFile); !os.IsNotExist(statErr) {
+		t.Errorf("no environment file should exist after a failed probe: %v", statErr)
+	}
+}
+
+// Provider settings keep the order they were given: systemd takes the
+// last assignment of a key, so re-ordering them here would hand the
+// jobs credentials that init never tested.
+func TestInitKeepsTheOrderOfProviderSettings(t *testing.T) {
+	o := initOpts(t)
+	o.Extra = []string{"AWS_ACCESS_KEY_ID=superseded", "AWS_ACCESS_KEY_ID=current"}
+	if err := Init(context.Background(), o, (&recorder{}).run, probeSnapshots(), io.Discard); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	body, err := os.ReadFile(o.EnvFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := strings.Index(string(body), "AWS_ACCESS_KEY_ID=superseded")
+	last := strings.Index(string(body), "AWS_ACCESS_KEY_ID=current")
+	if first < 0 || last < 0 || last < first {
+		t.Errorf("the last setting given must be the last one written:\n%s", body)
+	}
+}
+
 // Overwriting the env file loses the password, and with it every
 // existing backup.
 func TestInitRefusesToOverwriteWithoutForce(t *testing.T) {

@@ -65,6 +65,25 @@ else
 	fail "backup.env mode is $(stat -c %a /etc/hotserve/backup.env), want 600"
 fi
 
+# A repository path is checked as it resolves on disk, not as it
+# reads: init hands the whole tree to the backup user and every job
+# mounts it writable, so a link into a system directory would give
+# both away. Checked on a real filesystem because the bug is a real
+# symlink, not a string.
+ln -sfn /etc /srv/looks-harmless
+linked=$(hotserve backup init /srv/looks-harmless --force 2>&1 || true)
+if echo "$linked" | grep -q "resolves to"; then
+	pass "a repository path that resolves into a system directory is refused"
+else
+	fail "a symlinked repository was not refused: $linked"
+fi
+if grep -q "^RESTIC_REPOSITORY=$REPO\$" /etc/hotserve/backup.env; then
+	pass "the refused init left the working settings alone"
+else
+	fail "backup.env was changed by a refused init: $(grep '^RESTIC_REPOSITORY=' /etc/hotserve/backup.env)"
+fi
+rm -f /srv/looks-harmless
+
 echo "=== pointing a rebuilt box at the repository it already has ==="
 # What recovering a box means: the same repository, opened with the
 # password saved elsewhere. sudo does not carry RESTIC_PASSWORD, so it

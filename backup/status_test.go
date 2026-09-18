@@ -108,6 +108,18 @@ func TestStaleMeasuresFromTheLastCleanRun(t *testing.T) {
 	}
 }
 
+// The marker lives on the box; the snapshots are the backup. After
+// `backup init --force` onto a fresh repository the old marker is
+// still there and still recent, and the report must not call a
+// repository that holds nothing for this app current — that is the
+// state where an operator believes they have backups and has none.
+func TestStaleWhenTheRepositoryHoldsNoSnapshotForTheApp(t *testing.T) {
+	switched := AppStatus{LastSuccess: statusNow.Add(-10 * time.Minute)}
+	if !switched.Stale(statusNow) {
+		t.Error("no snapshot in this repository is stale, whatever the local marker says")
+	}
+}
+
 // The marker is read from the app's staging dir, which is where the
 // job writes it.
 func TestStatusReadsTheSuccessMarker(t *testing.T) {

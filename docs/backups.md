@@ -126,6 +126,11 @@ restic to remove it. When the key cannot delete, the probe snapshot
 stays in the repository — a few hundred bytes, tagged
 `hotserve-delete-probe`.
 
+That probe is also the proof that the key can back up at all, so
+`init` installs `/etc/hotserve/backup.env` only after it succeeds. A
+key that can read but not write therefore leaves nothing behind and
+nothing scheduled: fix the key and run the same command again.
+
 **The trade:** old snapshots then accumulate until you remove them
 yourself, with a key that is allowed to. Do that from your laptop, not
 from the box:

@@ -52,10 +52,18 @@ const StaleAfter = 2*time.Hour + 30*time.Minute
 // exits non-zero (unreadable sources), so an app whose every run
 // fails part-way would otherwise look healthy for ever.
 func (s AppStatus) Stale(now time.Time) bool {
+	// The marker is local to the box; the snapshots are the backup. An
+	// app with no snapshot in *this* repository is stale whatever the
+	// marker says — that is what `backup init --force` onto a new
+	// repository looks like, and the report must not call a repository
+	// that holds nothing for this app current.
+	if s.Latest == nil {
+		return true
+	}
 	if !s.LastSuccess.IsZero() {
 		return now.Sub(s.LastSuccess) > StaleAfter
 	}
-	return s.Latest == nil || now.Sub(s.Latest.Time) > StaleAfter
+	return now.Sub(s.Latest.Time) > StaleAfter
 }
 
 // Status reads every hotserve snapshot in one call and matches them to

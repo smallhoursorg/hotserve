@@ -84,6 +84,19 @@ func RepositoryPath(repo string) (string, error) {
 		if err := safeRepositoryDir(clean); err != nil {
 			return "", err
 		}
+		// Lexical checks are not enough: /srv/backups can be a symlink
+		// to /var/lib/liveswap, and the bind would then put every
+		// app's data, writable, into every job. Whatever exists of
+		// this path is resolved and checked again.
+		resolved, err := resolveExisting(clean)
+		if err != nil {
+			return "", err
+		}
+		if resolved != clean {
+			if err := safeRepositoryDir(resolved); err != nil {
+				return "", fmt.Errorf("%s resolves to %s: %w", clean, resolved, err)
+			}
+		}
 		return clean, nil
 	}
 	// A backend prefix (scheme before any slash) is remote; anything
@@ -105,13 +118,25 @@ func safeRepositoryDir(dir string) error {
 	if dir == "/" {
 		return fmt.Errorf("the repository cannot be / — it would be chowned to the backup user and mounted into every backup job")
 	}
-	// A system directory, or an ancestor of one.
+	// The system's own trees: not the directory itself, not an ancestor
+	// of one, and not anywhere inside one either. /etc/hotserve would
+	// otherwise be accepted, and init would hand the Caddyfile and the
+	// credentials it just wrote to the backup user.
 	for _, reserved := range []string{
-		"/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64",
-		"/proc", "/root", "/run", "/sbin", "/sys", "/usr", "/var",
+		"/bin", "/boot", "/dev", "/etc", "/lib", "/lib64",
+		"/proc", "/root", "/run", "/sbin", "/sys", "/usr",
 	} {
+		if dir == reserved || isAncestor(dir, reserved) || isAncestor(reserved, dir) {
+			return fmt.Errorf("the repository cannot be %s or anything under it: init gives the whole tree to the backup user and every job mounts it writable — put it somewhere of its own, like /srv/backups or a mounted disk", reserved)
+		}
+	}
+	// /var and /home hold plenty that a repository must not swallow, but
+	// a directory of its own inside them (/var/backups, /home/me/backups)
+	// is a normal place to put one — so only the tree itself, and
+	// anything holding it, is refused.
+	for _, reserved := range []string{"/home", "/var"} {
 		if dir == reserved || isAncestor(dir, reserved) {
-			return fmt.Errorf("the repository cannot be %s or hold %s: init gives the whole tree to the backup user and every job mounts it writable — put it somewhere of its own, like /srv/backups or a mounted disk", dir, reserved)
+			return fmt.Errorf("the repository cannot be %s or hold %s: init gives the whole tree to the backup user and every job mounts it writable — use a directory of its own, like %s/backups", dir, reserved, reserved)
 		}
 	}
 	// hotserve's own trees, named explicitly: /var is refused above,
@@ -122,6 +147,30 @@ func safeRepositoryDir(dir string) error {
 		}
 	}
 	return nil
+}
+
+// resolveExisting follows symlinks through as much of a path as
+// exists, and keeps the rest as given. A repository is usually named
+// before it is created, so the whole path cannot be resolved — but
+// every component that does exist can be, which is what catches
+// /srv/backups pointing at /var/lib/liveswap.
+func resolveExisting(path string) (string, error) {
+	cur, rest := path, ""
+	for {
+		resolved, err := filepath.EvalSymlinks(cur)
+		if err == nil {
+			return filepath.Join(resolved, rest), nil
+		}
+		if !os.IsNotExist(err) {
+			return "", fmt.Errorf("checking %s: %w", cur, err)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return filepath.Join(cur, rest), nil
+		}
+		rest = filepath.Join(filepath.Base(cur), rest)
+		cur = parent
+	}
 }
 
 // isAncestor reports whether dir contains other.

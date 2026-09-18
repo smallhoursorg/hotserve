@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -134,17 +133,26 @@ func Init(ctx context.Context, o InitOptions, run Runner, capture Capturer, log 
 	}
 	fmt.Fprintln(log, "repository ready")
 
-	if err := writeEnvFile(o.EnvFile, o.Repository, password, o.Extra); err != nil {
-		return err
-	}
-	fmt.Fprintf(log, "wrote %s (root only)\n", o.EnvFile)
+	// The password is reported before anything else can fail, because
+	// at this point the repository may already have been created with
+	// it: a later error that swallowed it would leave a repository
+	// nothing can open.
 	if generated {
 		fmt.Fprintf(log, "\nrepository password — save this somewhere safe now, nothing else has a copy:\n\n    %s\n\nWithout it the backups cannot be read, and no support can recover them.\n\n", password)
 	}
 
+	// The probe writes a real snapshot, so it is also the proof that
+	// these credentials can back up at all. It runs before the
+	// environment file is installed: a read-only key that gets this far
+	// would otherwise leave the file behind, arming an hourly job that
+	// fails every time, and the retry would refuse to overwrite it
+	// without --force.
 	deletion, err := probeDelete(ctx, run, capture)
 	if err != nil {
-		return err
+		if generated {
+			return fmt.Errorf("%w\n\n%s was not written, so nothing is scheduled. Keep the password printed above and pass --password-file when you run init again", err, o.EnvFile)
+		}
+		return fmt.Errorf("%w\n\n%s was not written, so nothing is scheduled", err, o.EnvFile)
 	}
 	// A repository on this box was just created by root; the jobs run
 	// as someone else and would find it unreadable ("open …/keys:
@@ -160,6 +168,10 @@ func Init(ctx context.Context, o InitOptions, run Runner, capture Capturer, log 
 		}
 		fmt.Fprintf(log, "repository is on this box, so it now belongs to %s (the user the jobs run as)\n", o.User)
 	}
+	if err := writeEnvFile(o.EnvFile, o.Repository, password, o.Extra); err != nil {
+		return err
+	}
+	fmt.Fprintf(log, "wrote %s (root only)\n", o.EnvFile)
 	switch deletion {
 	case probeDeletable:
 		fmt.Fprintln(log, "\nWARNING: these credentials can delete backups.")
@@ -301,9 +313,12 @@ func writeEnvFile(path, repo, password string, extra []string) error {
 	b.WriteString("# `hotserve backup init` wrote this file; keep the password safe elsewhere too.\n")
 	b.WriteString("RESTIC_REPOSITORY=" + repo + "\n")
 	b.WriteString("RESTIC_PASSWORD=" + password + "\n")
-	sorted := append([]string(nil), extra...)
-	sort.Strings(sorted)
-	for _, kv := range sorted {
+	// Written in the order they were given, deliberately unsorted:
+	// systemd takes the last assignment of a key, and the same order is
+	// what `init` just probed the repository with. Sorting could put a
+	// different value last here than the one that was tested, so the
+	// hourly jobs would use credentials no one checked.
+	for _, kv := range extra {
 		b.WriteString(kv + "\n")
 	}
 	// Written to a new 0600 file and renamed over the old one. Opening
