@@ -497,6 +497,14 @@ pid_before=$(printf '%s' "$status" | sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p')
 # postinstall's useradd makes hotserve the account's PRIMARY group, so
 # it cannot simply be removed; move the account to another primary
 # group instead, which is exactly the shape a pre-existing account has.
+# An operator who turned the backup timer off — backups run from
+# somewhere else, or a job was hurting the box — must not find it
+# running again after an upgrade. Turn it off before the reinstall so
+# the assertion after it means something.
+systemctl is-enabled hotserve-backup.timer >/dev/null 2>&1 \
+	|| die "the package should enable hotserve-backup.timer on install (it stays inert until backup.env exists)"
+systemctl disable --now hotserve-backup.timer >/dev/null 2>&1 \
+	|| die "could not disable hotserve-backup.timer; the reinstall assertion below would be vacuous"
 groupadd --system smoketest-other 2>/dev/null || true
 usermod -g smoketest-other hotserve \
 	|| die "could not move the hotserve account off its primary group; the reinstall assertion below would be vacuous"
@@ -507,6 +515,8 @@ id -nG hotserve | tr ' ' '\n' | grep -qx hotserve \
 	|| die "reinstall did not restore the hotserve user's group membership: the package's group-owned directories would be unreachable"
 grep -q liveswap_webhook /etc/hotserve/Caddyfile \
 	|| die "reinstall clobbered the modified /etc/hotserve/Caddyfile (config|noreplace broken)"
+systemctl is-enabled hotserve-backup.timer >/dev/null 2>&1 \
+	&& die "the upgrade re-enabled hotserve-backup.timer: a timer an operator turned off must stay off (postinstall must guard on first install)"
 systemctl is-active --quiet hotserve \
 	|| die "service not active after reinstall — an upgrade must not leave the server down (preremove stop / missing postinstall restart)"
 id hotserve >/dev/null || die "hotserve user gone after reinstall (postinstall not idempotent)"
@@ -529,7 +539,16 @@ curl -fsS --max-time 5 "$PROXY/" | grep -q "hello smoke" || die "reattached app 
 echo "reinstall preserved config and user; hotserve restarted and reattached to the running app (pid $pid_after)"
 
 stage "stage 4: removal"
+# Stand in for a configured box: the credentials `hotserve backup init`
+# writes, and a staged database copy a job left behind. Remove must
+# keep them (the operator may be reinstalling); purge must not.
+printf 'RESTIC_REPOSITORY=/srv/backups\nRESTIC_PASSWORD=secret\n' > /etc/hotserve/backup.env
+chmod 0600 /etc/hotserve/backup.env
+mkdir -p /var/lib/hotserve-backup/smoke/data
+echo staged > /var/lib/hotserve-backup/smoke/data/app.db
 apt-get remove -y hotserve
+[ -f /etc/hotserve/backup.env ] \
+	|| die "remove deleted the backup credentials: an operator reinstalling would lose access to their repository"
 systemctl is-active --quiet hotserve && die "service still active after remove (preremove did not stop it)" || true
 [ ! -e /usr/bin/hotserve ] || die "/usr/bin/hotserve still present after remove"
 [ -f /etc/hotserve/Caddyfile ] || die "conffile deleted on remove (should survive until purge)"
@@ -539,6 +558,19 @@ systemctl is-active --quiet "user@$uid.service" && die "user manager still runni
 [ ! -e /var/lib/systemd/linger/hotserve ] || die "lingering left enabled"
 kill -0 "$pid_after" 2>/dev/null && die "deployed app (pid $pid_after) survived package removal" || true
 echo "removal stopped the service and the apps, kept the conffile"
+
+stage "stage 5: purge — the credentials and the staged copies go"
+# A repository password and a storage key that outlive the package are
+# exactly what DESIGN-threat-model.md ranks fifth; the staged copies
+# are plaintext app data. docs/upgrading.md tells operators purge
+# takes them, so it has to.
+apt-get purge -y hotserve
+[ ! -e /etc/hotserve/backup.env ] \
+	|| die "purge left the backup credentials (repository password and storage key) on the box"
+[ ! -e /var/lib/hotserve-backup ] \
+	|| die "purge left the staged database copies (plaintext app data) on the box"
+[ ! -e /etc/hotserve/Caddyfile ] || die "purge left the conffile behind"
+echo "purge removed the credentials, the staged copies and the conffile"
 
 echo ""
 echo "ALL PACKAGE SMOKE STAGES PASSED ($deb on $(. /etc/os-release && echo "$PRETTY_NAME"))"

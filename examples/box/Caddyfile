@@ -39,6 +39,13 @@
 			# on the box that only root and hotserve can read (README.md).
 			# env_file /etc/hotserve/example.env
 
+			# What in shared/ is worth keeping, once the box has run
+			# `hotserve backup init` (docs/backups.md). Everything else
+			# here is in this repo already; this is the part that
+			# isn't.
+			# state sqlite app.db
+			# state files uploads
+
 			# Who may deploy it: this repo's main branch, by the OIDC
 			# token its workflow mints. Nothing secret is stored here.
 			deploy_trust github {

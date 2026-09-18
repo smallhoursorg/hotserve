@@ -19,6 +19,10 @@ import (
 	_ "github.com/smallhoursorg/hotserve/liveswap"
 	_ "github.com/smallhoursorg/hotserve/penaltybox"
 
+	// `hotserve backup`: a CLI subcommand only — it registers no Caddy
+	// module and runs nothing inside the serving process.
+	_ "github.com/smallhoursorg/hotserve/backup"
+
 	// HTTP cache (Souin) with in-memory Otter storage.
 	_ "github.com/darkweak/souin/plugins/caddy"
 	_ "github.com/darkweak/storages/otter/caddy"

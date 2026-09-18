@@ -22,10 +22,13 @@ ENV DEBIAN_FRONTEND=noninteractive
 # libpam-systemd: pam_systemd gives user@<uid>.service its runtime dir;
 # dbus: logind; procps + curl: the in-container systemd suite;
 # libatomic1: what a Node single executable needs on arm64 (the one
-# package examples/node asks the box for).
+# package examples/node asks the box for); restic + sqlite3: what the
+# .deb recommends for `hotserve backup`, installed here so the backup
+# suite exercises the same binaries an operator gets from Debian.
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends \
 		systemd systemd-sysv dbus libpam-systemd procps curl ca-certificates libatomic1 sudo \
+		restic sqlite3 \
 	&& rm -rf /var/lib/apt/lists/*
 RUN systemctl mask \
 	systemd-udevd.service \

@@ -31,7 +31,19 @@ fi
 if ! in_group; then
 	echo "hotserve: the hotserve user is not a member of the hotserve group; add it with \`usermod -aG hotserve hotserve\` if its state directories become unreadable" >&2
 fi
-chown hotserve:hotserve /var/lib/hotserve /var/lib/liveswap
+# /var/lib/hotserve-backup holds each app's staged database copies.
+# It belongs to the hotserve user for the same reason the others do —
+# the jobs write there — and because a restore onto a rebuilt box
+# lands the database copies here before any job has run: root-owned,
+# restic (as hotserve) could not create the directories and the
+# documented recovery would stop halfway.
+#
+# Created here as well as shipped in the package, so this script can
+# set a box up on its own: the e2e image runs it without installing
+# the .deb, and a script that assumes its own payload cannot do that.
+mkdir -p /var/lib/hotserve /var/lib/liveswap /var/lib/hotserve-backup
+chmod 750 /var/lib/hotserve /var/lib/liveswap /var/lib/hotserve-backup
+chown hotserve:hotserve /var/lib/hotserve /var/lib/liveswap /var/lib/hotserve-backup
 # Packages before the Debian-13-only matrix copied an AppArmor profile
 # into /etc/apparmor.d (which the package itself does not own, so dpkg
 # will not remove it on upgrade). Unload and delete it: apparmor.service
@@ -79,6 +91,23 @@ EOF
 		mkdir -p /var/lib/systemd/linger && touch /var/lib/systemd/linger/hotserve
 	}
 	systemctl try-restart hotserve 2>/dev/null || true
+	# The backup timer is enabled but inert: its service refuses to
+	# start until /etc/hotserve/backup.env exists, so an install turns
+	# nothing on and configuring backups later needs no systemctl.
+	# Enabling it here (rather than asking for it in the docs) is what
+	# makes `hotserve backup init` the only step.
+	#
+	# First install only. dpkg passes the previously configured
+	# version as $2 on an upgrade, and an operator who disabled the
+	# timer — because backups run from somewhere else, or because a
+	# job was hurting the box — must not find it running again after
+	# `apt upgrade`.
+	if [ -z "${2:-}" ]; then
+		systemctl enable hotserve-backup.timer 2>/dev/null || true
+		systemctl start hotserve-backup.timer 2>/dev/null || true
+	fi
 	echo "hotserve installed. Start it with:"
 	echo "  sudo systemctl enable --now hotserve"
+	echo "Backups are off until you run:"
+	echo "  sudo hotserve backup init"
 fi

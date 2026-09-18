@@ -1,0 +1,24 @@
+# Hourly backups, spread across the hour.
+#
+# Hourly rather than continuous because the cost of a full copy is
+# small once restic deduplicates it — a measured ~1 MB per hour for a
+# 65 MB database — and because a job that starts and exits cannot leak
+# or hold memory between runs. An app that cannot afford to lose an
+# hour wants continuous replication instead (docs/backups.md).
+
+[Unit]
+Description=hotserve backups, hourly
+Documentation=https://github.com/smallhoursorg/hotserve/blob/main/docs/backups.md
+
+[Timer]
+OnCalendar=hourly
+# A box that was off (or a laptop that slept) runs the missed backup
+# at the next boot rather than waiting for the next whole hour.
+Persistent=true
+# Without this every box on the internet running this package would
+# back up at :00; with it, each box picks its own minute and keeps it.
+RandomizedDelaySec=15m
+FixedRandomDelay=true
+
+[Install]
+WantedBy=timers.target

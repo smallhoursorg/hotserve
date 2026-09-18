@@ -51,6 +51,26 @@
 			keep 2
 		}
 
+		# An app that declares state, for the backup suite. It is never
+		# deployed: what backups read is shared/, which the suite
+		# writes directly — the app block exists so the backup command
+		# discovers the declarations the way it will on a real box,
+		# from the running config over the admin API.
+		app backup-example {
+			command ./server
+			state sqlite app.db
+			state files uploads
+		}
+
+		# The other half of the backup suite: an app whose state is
+		# only files never opens a database, so its data must be bound
+		# read-only — the backup of an app like this can never write
+		# to it at all.
+		app files-example {
+			command ./server
+			state files pages
+		}
+
 		# The Deno example (examples/deno), with the flags from its own
 		# hotserve.caddy; only the e2e timings are added here.
 		app deno-example {

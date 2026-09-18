@@ -35,9 +35,22 @@ Windows, and macOS-as-a-server are out of scope by product design.
 4. **Per-app secrets** — an app's own env vars / `env_file`
    (`/etc/hotserve/*.env`). Legitimately reachable by that app; the
    goal is to keep them from *siblings*.
-5. **Sibling app data** — `/var/lib/liveswap/<app>/{releases,shared,state.json}`.
-6. **System integrity** — root, persistence, other system services.
-7. **Availability** — serving traffic and the deploy pipeline.
+5. **Backup credentials** — `/etc/hotserve/backup.env`, mode `0600`
+   owned by root: the repository password and the storage key. They
+   reach a copy of every app's declared state, so they rank with the
+   data itself. systemd reads the file as root and passes the values
+   to each backup job; no app is ever in a view that contains it, and
+   hotserve itself never reads it. The box's storage key should not be
+   able to *delete* — `hotserve backup init` tries a delete and says
+   which kind you have (docs/backups.md).
+6. **Staged database copies** — `/var/lib/hotserve-backup/<app>/data`,
+   mode `0750` owned by `hotserve`: a consistent copy of that app's
+   declared databases, taken before each upload and replaced on the
+   next run. Plaintext, like the database it came from, and outside
+   every app's view.
+7. **Sibling app data** — `/var/lib/liveswap/<app>/{releases,shared,state.json}`.
+8. **System integrity** — root, persistence, other system services.
+9. **Availability** — serving traffic and the deploy pipeline.
 
 There is no deploy secret on the box. Deploys are authenticated by a
 verified JWT (CI OIDC or a local public key); the verifier holds only

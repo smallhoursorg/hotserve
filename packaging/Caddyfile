@@ -55,6 +55,13 @@
 	# 		# this line is in: a missing one fails the launch.
 	# 		# env_file /etc/hotserve/myapp.env
 	#
+	# 		# What in shared/ is worth keeping. `hotserve backup init`
+	# 		# once per box, then these lines are all an app needs to be
+	# 		# backed up hourly: a database is copied consistently, the
+	# 		# rest is read as it lies. See docs/backups.md.
+	# 		# state sqlite app.db
+	# 		# state files uploads
+	#
 	# 		# Each app runs in its own systemd sandbox, and the
 	# 		# filesystem it sees is deny-by-default: its release dir,
 	# 		# its shared/ dir, a private /tmp, the OS runtime (/usr and

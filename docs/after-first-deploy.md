@@ -133,7 +133,33 @@ At the provider's firewall, allow **22 only from your own address**
 (home, VPN). 80 and 443 stay open to the world; nothing else on the
 box listens on a port, since every app is reached over a unix socket.
 
-## 6. Know the way back
+## 6. Back up the data
+
+Everything else on this page can be rebuilt from git. Your app's data
+cannot: the SQLite database and the files people upload live in the
+app's `shared/` dir, and a copy of the file taken while the app is
+writing to it does not restore. One command per box, then two lines per
+app:
+
+```
+sudo hotserve backup init s3:s3.us-west-004.backblazeb2.com/my-bucket \
+	AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=…
+```
+
+```
+app example {
+	…
+	state sqlite app.db
+	state files uploads
+}
+```
+
+Reload, and the app is backed up hourly from then on.
+[Backups](backups.md) has the rest: giving the box a key that cannot
+delete its own backups, restoring onto a new box, and restoring a
+moment on a live one.
+
+## 7. Know the way back
 
 The `.deb` you installed from is still in `/var/local/hotserve`, and
 `apt install --allow-downgrades` of it is the way back from an upgrade

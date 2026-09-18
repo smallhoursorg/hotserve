@@ -1,0 +1,34 @@
+# Backs up what each liveswap app declares as `state`.
+#
+# This unit does the deciding, not the copying: it asks hotserve's
+# admin API which apps declare state and then starts one transient,
+# sandboxed unit per app (hotserve-backup-<app>.service), each of
+# which can see only that app's shared dir — read-only — and its own
+# staging dir. Creating those units is why this runs as root; nothing
+# it starts does.
+#
+# It is inert until /etc/hotserve/backup.env names a repository, so
+# installing the package turns nothing on. `hotserve backup init`
+# writes that file.
+#
+# Deliberately not here: retention. `restic forget` deletes from the
+# repository, and the credentials on a box should not be able to —
+# see docs/backups.md, "Keep the box unable to delete".
+
+[Unit]
+Description=hotserve backups
+Documentation=https://github.com/smallhoursorg/hotserve/blob/main/docs/backups.md
+After=hotserve.service
+# Nothing to do when backups were never configured; the timer then
+# fires into a unit that skips, rather than one that fails every hour.
+ConditionPathExists=/etc/hotserve/backup.env
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/hotserve backup run
+# A run that cannot finish in an hour would overlap the next one; the
+# timer's Persistent= catches up the missed one instead.
+TimeoutStartSec=55m
+# Backups are background work: they yield to whatever is serving.
+Nice=10
+IOSchedulingClass=idle

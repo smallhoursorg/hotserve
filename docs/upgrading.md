@@ -97,6 +97,17 @@ Before you upgrade:
   so a kernel update or reboot bundled with an upgrade leaves you
   guessing which change did it.
 
+What an upgrade leaves alone:
+
+- **Your backups.** The repository, its password file
+  (`/etc/hotserve/backup.env`, a conffile) and the hourly timer come
+  through untouched, and a timer you turned off *stays* off — only a
+  first install enables it. An upgrade can land mid-backup: the job is
+  its own short-lived unit, so it finishes on the old binary and the
+  next hour's run uses the new one.
+- **Your `state` declarations**, which live in the Caddyfile like the
+  rest of an app's config.
+
 There is no APT repository yet, so nothing upgrades hotserve behind
 your back; the hosted repository on the [roadmap](../README.md#roadmap) is what
 will change that.

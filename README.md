@@ -84,7 +84,8 @@ grant in its own right. The e2e suite administers its box that way.
 [Your first deploy](docs/first-deploy.md) takes a fresh Debian 13
 server to an app that deploys on every push to `main`, in four steps.
 [After the first deploy](docs/after-first-deploy.md) then creates the
-administrator, closes root login, and puts the box's config in git.
+administrator, closes root login, puts the box's config in git and
+turns on [backups](docs/backups.md).
 Both use the three directories below, which the e2e suite builds and
 deploys on every change, so what they say works:
 
@@ -248,6 +249,15 @@ code requires the dependency. A "—" there is not "absent from that
 module's graph" — the rows marked "already in Caddy's tree" arrive via
 Caddy either way. The hotserve column is ✓ throughout: the product
 binary contains every row.
+
+**Two programs the package installs beside the binary, and never links
+into it:** `restic` and `sqlite3`, both from Debian, as
+`Recommends:` — so apt installs them by default and `apt remove` takes
+them with it. [Backups](docs/backups.md) shell out to them
+(`hotserve backup` prints each command as it runs); nothing else does,
+and a box that removes them serves exactly as before. They are
+deliberately not Go dependencies: a backup tool inside the serving
+binary would add its cloud SDKs to every install, backups or not.
 
 Build and CI tooling never ships to users and is pinned by image tag
 in `docker-compose.yml`: `golang` (toolchain), `golangci-lint`,

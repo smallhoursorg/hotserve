@@ -108,6 +108,7 @@ services:
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
       - ./e2e/lib.sh:/lib.sh:ro
       - ./e2e/liveswap/systemd.sh:/suite-systemd.sh:ro
+      - ./e2e/liveswap/backup.sh:/suite-backup.sh:ro
     depends_on:
       - e2e-artifacts
       - e2e-upstream

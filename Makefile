@@ -187,10 +187,14 @@ install-test:
 # journalctl and the process tree): restart survival, hotserve's own
 # crashes (SIGKILL, exit 2, OOM) undone by the unit + reattach, a
 # refused start staying down, cgroup teardown of a worker tree, crash
-# cleanup, journal output. The recovery suite is the runner's view
-# after all that: still serving, deploys still work. Last, the box
-# suite drives examples/box's bin/push from the host against the
-# container, and puts the e2e config back.
+# cleanup, journal output. Then the backup suite, also in-container:
+# an app's `state` declarations reach the backup command over the
+# admin API, its per-app job runs in a sandbox that cannot write to
+# the data it reads, and the database it copied under write load
+# restores intact. The recovery suite is the runner's view after all
+# that: still serving, deploys still work. Last, the box suite drives
+# examples/box's bin/push from the host against the container, and
+# puts the e2e config back.
 e2e:
 	$(cgroup2_preflight)
 	$(COMPOSE) up --build -d e2e-hotserve e2e-upstream e2e-artifacts
@@ -198,6 +202,8 @@ e2e:
 	$(COMPOSE) run --rm e2e-runner || status=1; \
 	echo "════ systemd suite: restart survival, reattach, cgroup teardown ════"; \
 	$(COMPOSE) exec -T e2e-hotserve /bin/sh /suite-systemd.sh || status=1; \
+	echo "════ backup suite: state declarations → sandboxed job → restore ════"; \
+	$(COMPOSE) exec -T e2e-hotserve /bin/sh /suite-backup.sh || status=1; \
 	echo "════ recovery suite: the runner's view after hotserve's unclean death ════"; \
 	$(COMPOSE) run --rm --entrypoint "/bin/sh /suite-recovery.sh" e2e-runner || status=1; \
 	echo "════ box suite: examples/box's bin/push against the e2e box ════"; \
