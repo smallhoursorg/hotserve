@@ -60,9 +60,22 @@ func Init(ctx context.Context, o InitOptions, run Runner, capture Capturer, log 
 	if _, err := RepositoryPath(o.Repository); err != nil {
 		return err
 	}
+	// The extra settings are provider credentials, not a way to
+	// redefine what init is for. systemd takes the LAST assignment in
+	// an environment file, so a second RESTIC_PASSWORD would leave
+	// the jobs using one password while the operator saves the one
+	// printed here — and a second RESTIC_REPOSITORY would send the
+	// hourly backups somewhere other than the repository just set up
+	// and checked.
 	for _, kv := range o.Extra {
-		if strings.HasPrefix(kv, "RESTIC_REPOSITORY_FILE=") {
+		key, _, _ := strings.Cut(kv, "=")
+		switch key {
+		case "RESTIC_REPOSITORY_FILE":
 			return fmt.Errorf("RESTIC_REPOSITORY_FILE is not supported: the backup jobs run in a sandbox that cannot see it — pass the repository itself instead")
+		case "RESTIC_REPOSITORY":
+			return fmt.Errorf("pass the repository as the argument, not as %s: two of them in the environment file would send the backups somewhere this command never checked", key)
+		case "RESTIC_PASSWORD", "RESTIC_PASSWORD_FILE", "RESTIC_PASSWORD_COMMAND":
+			return fmt.Errorf("%s cannot be set here: the password this command reports has to be the one the jobs use — pass --password-file to reuse an existing repository's password", key)
 		}
 	}
 	if _, err := os.Stat(o.EnvFile); err == nil && !o.Force {

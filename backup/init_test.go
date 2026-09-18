@@ -280,6 +280,32 @@ func TestInitFailsWhenTheProbeSnapshotCannotBeWritten(t *testing.T) {
 	}
 }
 
+// systemd takes the last assignment in an environment file, so a
+// second RESTIC_PASSWORD would leave the jobs using one password
+// while the operator saves the one this command printed — and a
+// second RESTIC_REPOSITORY would send the backups somewhere init
+// never checked.
+func TestInitRefusesToLetCredentialsRedefineItsOwnSettings(t *testing.T) {
+	for _, kv := range []string{
+		"RESTIC_PASSWORD=sneaky",
+		"RESTIC_PASSWORD_FILE=/tmp/other",
+		"RESTIC_PASSWORD_COMMAND=cat /tmp/other",
+		"RESTIC_REPOSITORY=s3:elsewhere/bucket",
+		"RESTIC_REPOSITORY_FILE=/tmp/repo",
+	} {
+		o := initOpts(t)
+		o.Extra = []string{"AWS_ACCESS_KEY_ID=keyid", kv}
+		err := Init(context.Background(), o, (&recorder{}).run, probeSnapshots(), io.Discard)
+		if err == nil {
+			t.Errorf("%s should be refused", kv)
+			continue
+		}
+		if _, statErr := os.Stat(o.EnvFile); statErr == nil {
+			t.Errorf("%s: nothing should have been written", kv)
+		}
+	}
+}
+
 func TestInitRejectsMalformedCredentials(t *testing.T) {
 	o := initOpts(t)
 	o.Extra = []string{"AWS_ACCESS_KEY_ID"}

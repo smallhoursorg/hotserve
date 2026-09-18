@@ -13,13 +13,19 @@ upgrade|failed-upgrade)
 	if command -v systemctl >/dev/null 2>&1; then
 		systemctl stop hotserve 2>/dev/null || true
 		systemctl disable hotserve 2>/dev/null || true
-		# The backup timer goes with it. What is already in the
-		# repository stays — removing the package must not destroy the
-		# backups — and so does /etc/hotserve/backup.env, until a
-		# purge, which postremove handles: without the password in it,
-		# those backups cannot be read again.
+		# The backup timer goes with it, and so does anything it has
+		# already started: stopping a timer does not stop the run it
+		# triggered, nor the per-app job that run created. A purge
+		# deletes the staging dir and the credentials, so a job still
+		# reading them would fail in confusing ways — or keep a
+		# database copy alive in a directory dpkg has removed.
 		systemctl stop hotserve-backup.timer 2>/dev/null || true
 		systemctl disable hotserve-backup.timer 2>/dev/null || true
+		systemctl stop hotserve-backup.service 2>/dev/null || true
+		# The per-app jobs are transient units named hotserve-backup-<app>.
+		for u in $(systemctl list-units --no-legend --plain 'hotserve-backup-*.service' 2>/dev/null | awk '{print $1}'); do
+			systemctl stop "$u" 2>/dev/null || true
+		done
 		# Removal is the one time the apps go too: stopping the user
 		# manager stops every unit under it (cgroup kill), and the
 		# linger + drop-in postinstall created come out with it.

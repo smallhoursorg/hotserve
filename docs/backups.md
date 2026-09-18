@@ -94,9 +94,20 @@ should be able to **add** backups and not to remove them.
 
 On Backblaze B2, create an application key restricted to the bucket
 (and, if several apps share it, the prefix) with `listFiles`,
-`readFiles` and `writeFiles` — and **not** `deleteFiles`. On S3, deny
-`s3:DeleteObject` in the bucket policy, except under `locks/`, which
-restic needs to write and clear its own lock files.
+`readFiles` and `writeFiles` — and **not** `deleteFiles`. That is the
+set restic needs; it never requires `deleteFiles`.
+
+**What that key can and cannot do, precisely.** On B2, removing a file
+by name only *hides* it — the previous version stays and needs
+`deleteFiles` to destroy. So this key can clear restic's own lock
+files (which it must), and someone who takes your box can make the
+repository look empty, but they cannot erase what is in it: the
+versions are still there to restore. Keep lifecycle rules that retain
+old versions, or that protection expires on a timer of your own
+making.
+
+On S3, deny `s3:DeleteObject` in the bucket policy, except under
+`locks/`, which restic needs to write and clear its own lock files.
 
 `hotserve backup init` checks this for you, and says which you have:
 

@@ -99,10 +99,13 @@ Before you upgrade:
 
 What an upgrade leaves alone:
 
-- **Your backups.** The repository, its password file
-  (`/etc/hotserve/backup.env`, a conffile) and the hourly timer come
-  through untouched, and a timer you turned off *stays* off — only a
-  first install enables it. An upgrade can land mid-backup: the job is
+- **Your backups.** The repository and its password file
+  (`/etc/hotserve/backup.env`, which `hotserve backup init` wrote — not
+  a file dpkg owns, and removed only by `apt purge`) come through
+  untouched. The timer unit itself is replaced like any other file in
+  the package; what survives is whether you had it *enabled*, and a
+  timer you turned off stays off, because only a first install enables
+  it. An upgrade can land mid-backup: the job is
   its own short-lived unit, so it finishes on the old binary and the
   next hour's run uses the new one.
 - **Your `state` declarations**, which live in the Caddyfile like the
