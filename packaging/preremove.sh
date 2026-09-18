@@ -19,6 +19,16 @@ upgrade|failed-upgrade)
 		# deletes the staging dir and the credentials, so a job still
 		# reading them would fail in confusing ways — or keep a
 		# database copy alive in a directory dpkg has removed.
+		# Disabling it here would outlive the package: the marker that
+		# postinstall keys on stays in /etc/hotserve until purge, so a
+		# box removed to install a different build would come back with
+		# its backups silently off. The marker records "an operator
+		# chose"; a timer that was running at removal was nobody's
+		# choice to stop, so the marker goes and the reinstall enables
+		# it again. One the operator had turned off stays off.
+		if systemctl is-enabled --quiet hotserve-backup.timer 2>/dev/null; then
+			rm -f /etc/hotserve/.backup-timer-configured
+		fi
 		systemctl stop hotserve-backup.timer 2>/dev/null || true
 		systemctl disable hotserve-backup.timer 2>/dev/null || true
 		systemctl stop hotserve-backup.service 2>/dev/null || true

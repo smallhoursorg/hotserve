@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -155,9 +156,9 @@ func Init(ctx context.Context, o InitOptions, run Runner, capture Capturer, log 
 
 	// Create first, then open — never the other way round. Asked to open
 	// a repository in a bucket that does not exist, restic 0.18 treats
-	// "The specified bucket does not exist" as transient and retries for
-	// about fifteen minutes (measured), so a typo in a bucket name looked
-	// like init hanging. `restic init` answers at once either way: it
+	// "The specified bucket does not exist" as transient and retries it
+	// for many minutes (measured: still retrying when stopped at eight),
+	// so a typo in a bucket name looked like init hanging. `restic init` answers at once either way: it
 	// creates the repository (and the bucket, where the key may), or it
 	// refuses because one is already there. Only then is `cat config`
 	// asked to prove the password — against a bucket now known to exist.
@@ -317,7 +318,10 @@ func probeDelete(ctx context.Context, run Runner, capture Capturer) (probeResult
 	if err != nil {
 		return probeUnknown, err
 	}
-	out, forgetErr := capture(ctx, "restic", "forget", "--quiet", id)
+	// The refusal, when there is one, is on stderr with exit status 0,
+	// so stderr is asked for explicitly: it is the evidence.
+	var stderr bytes.Buffer
+	out, forgetErr := capture(withStderr(ctx, &stderr), "restic", "forget", "--quiet", id)
 	still, err := snapshotListed(ctx, capture, DeleteProbeTag, id)
 	switch {
 	case err != nil:
@@ -331,7 +335,7 @@ func probeDelete(ctx context.Context, run Runner, capture Capturer) (probeResult
 	// repository would otherwise be reported as "your backups cannot be
 	// deleted", which is the one thing a security check must never say
 	// on no evidence.
-	evidence := string(out)
+	evidence := string(out) + " " + stderr.String()
 	if forgetErr != nil {
 		evidence += " " + forgetErr.Error()
 	}

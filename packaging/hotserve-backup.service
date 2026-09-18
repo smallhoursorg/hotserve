@@ -26,14 +26,18 @@ ConditionPathExists=/etc/hotserve/backup.env
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/hotserve backup run
-# No timeout on the sequence. Each app's job is bounded by its own
-# RuntimeMaxSec, so nothing here runs forever; a timeout on the
-# launcher would instead kill it mid-sequence and leave the transient
-# unit it was waiting on still running — the next hour would then find
-# that unit name taken, and the apps after it would never be reached.
-# systemd does not start a timer's unit while it is already active, so
-# a long run costs missed hours, not overlapping ones.
+# No timeout, here or on the jobs: the first backup of a large uploads
+# dir over a slow uplink takes hours, and a job cut off part-way makes
+# the next one upload everything again. A hung connection is restic's
+# to bound (its per-request timeout); systemd does not start a timer's
+# unit while it is still active, so a long run costs missed hours, not
+# overlapping ones.
 TimeoutStartSec=infinity
+# The per-app jobs are transient units of their own, outside this one's
+# cgroup, so stopping this unit — or it dying — would leave the job it
+# was waiting on running, and the next hour would find that unit name
+# taken. Whenever this unit stops, however it stops, they stop with it.
+ExecStopPost=/usr/bin/systemctl stop hotserve-backup-*.service
 # Backups are background work: they yield to whatever is serving.
 Nice=10
 IOSchedulingClass=idle

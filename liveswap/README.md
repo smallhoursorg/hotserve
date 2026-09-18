@@ -265,10 +265,11 @@ resolved against the disk — an app declares its state before it has
 ever been deployed, and the directories may not exist yet.
 
 A declared path must be the data itself, not a symlink to it: restic
-stores a symlink *as* a symlink, so a link to a mounted disk would put
-the link in the snapshot and none of the data. The backup job refuses
-one rather than reporting hourly success over nothing. To keep data on
-another disk, mount it at the declared path instead.
+stores a symlink *as* a symlink, so a link elsewhere would put the link
+in the snapshot and none of the data. The backup job refuses one rather
+than reporting hourly success over nothing. To keep an app's data on
+another disk, bind-mount it at the app's `shared/` directory, as
+[Sandbox](#sandbox) describes.
 
 liveswap does nothing with these entries: it never reads, writes or
 creates the paths, and an app with no `state` runs exactly as before.

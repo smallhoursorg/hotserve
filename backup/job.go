@@ -79,11 +79,18 @@ func (j Job) Execute(ctx context.Context) error {
 		// cache sits beside them and must not be backed up.
 		targets = append(targets, StagingData(j.Staging))
 	}
-	for _, rel := range j.Files {
-		p, err := sharedPath(j.Shared, rel)
+	// Which declared paths a clean run has backed up before: the only
+	// way to tell a path that is not there YET from one that is not
+	// there ANY MORE.
+	seen := readSeen(SeenPaths(j.Staging))
+	var present []string
+	for _, declared := range j.Files {
+		p, err := sharedPath(j.Shared, declared)
 		if err != nil {
 			return fmt.Errorf("app %s: %w", j.App, err)
 		}
+		// Keyed as cleaned, so `uploads/` and `uploads` are one path.
+		rel := filepath.Clean(declared)
 		// A declared path the app has not created yet (a new app's
 		// uploads/) is not a failure: restic would exit non-zero on a
 		// missing target, and an app is allowed to declare where its
@@ -94,6 +101,12 @@ func (j Job) Execute(ctx context.Context) error {
 		// target is missing would be reported as "not created yet".
 		info, err := os.Lstat(p)
 		switch {
+		case errors.Is(err, fs.ErrNotExist) && seen[rel]:
+			// It was backed up before, so "not created yet" is not what
+			// happened. Skipping it would let every other declared path
+			// keep the run green while this one is never backed up
+			// again — with only a journal line to say so.
+			return fmt.Errorf("app %s: state files %s was backed up before and is not there now — deleted or moved; put it back, or remove the `state files %s` line if the app no longer keeps it", j.App, rel, rel)
 		case errors.Is(err, fs.ErrNotExist):
 			j.logf("%s: %s does not exist yet, skipping", j.App, rel)
 			continue
@@ -105,10 +118,11 @@ func (j Job) Execute(ctx context.Context) error {
 			// data disk would put the link in the snapshot and none of
 			// the data, hourly, while every run reported success. That
 			// is the one outcome a backup must never produce quietly.
-			return fmt.Errorf("app %s: state files %s is a symlink to %s: restic would store the link and none of the data, so this would report success and back up nothing — declare a path the app's data really lives at, or mount the disk at %s",
-				j.App, rel, linkTarget(p), p)
+			return fmt.Errorf("app %s: state files %s is a symlink to %s: restic would store the link and none of the data, so this would report success and back up nothing — declare the path the app's data really lives at; to keep an app's data on another disk, bind-mount that disk at the app's shared dir (liveswap/README.md, \"Sandbox\")",
+				j.App, rel, linkTarget(p))
 		}
 		targets = append(targets, p)
+		present = append(present, rel)
 	}
 
 	// Everything declared is still to come: a files-only app whose
@@ -146,10 +160,70 @@ func (j Job) Execute(ctx context.Context) error {
 	// was read back holding what was declared — rather than from the
 	// newest snapshot, which repeated partial backups would keep fresh
 	// while every run was failing.
-	if err := os.WriteFile(SuccessMarker(j.Staging), []byte(""), 0o600); err != nil {
+	if err := writeSeen(SeenPaths(j.Staging), present); err != nil {
+		return fmt.Errorf("app %s: recording which declared paths were backed up: %w", j.App, err)
+	}
+	if err := replaceFile(SuccessMarker(j.Staging), ""); err != nil {
 		return fmt.Errorf("app %s: recording the backup as complete: %w", j.App, err)
 	}
 	return nil
+}
+
+// SeenPaths lists the declared files paths the last clean run backed
+// up, one per line, relative to the app's shared dir.
+func SeenPaths(appStaging string) string {
+	return filepath.Join(appStaging, ".declared-present")
+}
+
+// readSeen treats a missing or unreadable list as empty: the first run,
+// or the first after an upgrade, cannot know what was there before, so
+// it gives every path the benefit of "not created yet" — as all runs
+// did before this list existed.
+func readSeen(path string) map[string]bool {
+	seen := map[string]bool{}
+	body, err := os.ReadFile(path) //nolint:gosec // the job's own staging dir, a path built here
+	if err != nil {
+		return seen
+	}
+	for line := range strings.SplitSeq(string(body), "\n") {
+		if line != "" {
+			seen[line] = true
+		}
+	}
+	return seen
+}
+
+// writeSeen replaces the list with exactly what this run backed up. A
+// declaration that was removed drops out with it, and one that went
+// missing never gets here: the run fails first.
+func writeSeen(path string, present []string) error {
+	var b strings.Builder
+	for _, rel := range present {
+		b.WriteString(rel + "\n")
+	}
+	return replaceFile(path, b.String())
+}
+
+// replaceFile writes a new file beside path and renames it over path.
+// The job's staging dir is the job user's own, so a rename replaces
+// the old file whoever owns it — which a plain write does not: after
+// `hotserve backup app` has been run by hand as root, a write would
+// fail on the root-owned file every hour from then on, and the app
+// would never count as backed up again.
+func replaceFile(path, body string) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	if _, err := io.WriteString(tmp, body); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
 // stageDatabases copies each declared database into the staging dir,

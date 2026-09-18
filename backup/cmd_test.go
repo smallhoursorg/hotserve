@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -235,5 +236,41 @@ func TestRunBindsOnlyARealRepository(t *testing.T) {
 	}
 	if got, err := repositoryToBind([]string{"RESTIC_REPOSITORY=s3:s3.example.com/bucket"}); err != nil || got != "" {
 		t.Errorf("a remote repository needs no bind: %q, %v", got, err)
+	}
+}
+
+// captureQuiet against a real process, not a fake: stdout is what the
+// caller parses (JSON, for `restic snapshots --json`), so stderr must
+// never be mixed into it on success — but a caller that asks for stderr
+// must get it whatever the exit status, because restic exits 0 over a
+// refused delete and says so on stderr alone.
+func TestCaptureQuietKeepsTheStreamsApart(t *testing.T) {
+	capture := captureQuiet()
+	script := func(exit string) []string {
+		return []string{"-c", `printf '[{"ok":true}]'; printf 'Remove(<snapshot/x>) failed: 403 Forbidden' >&2; exit ` + exit}
+	}
+
+	var stderr bytes.Buffer
+	out, err := capture(withStderr(context.Background(), &stderr), "sh", script("0")...)
+	if err != nil {
+		t.Fatalf("exit 0: %v", err)
+	}
+	if string(out) != `[{"ok":true}]` {
+		t.Errorf("stdout must stay clean for parsing on success, got %q", out)
+	}
+	if !strings.Contains(stderr.String(), "403 Forbidden") {
+		t.Errorf("the caller asked for stderr and did not get it on exit 0: %q", stderr.String())
+	}
+
+	// Nobody asked: stderr is not in the result on success.
+	out, _ = capture(context.Background(), "sh", script("0")...)
+	if strings.Contains(string(out), "Forbidden") {
+		t.Errorf("stderr leaked into stdout: %q", out)
+	}
+
+	// On failure the result carries both, as before.
+	out, err = capture(context.Background(), "sh", script("1")...)
+	if err == nil || !strings.Contains(string(out), "403 Forbidden") {
+		t.Errorf("a failure should return stderr with stdout: %q, %v", out, err)
 	}
 }

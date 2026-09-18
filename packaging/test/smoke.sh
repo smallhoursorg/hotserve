@@ -573,7 +573,13 @@ install -d -m 0700 /run/hotserve-backup
 printf 'RESTIC_PASSWORD=secret\n' > /run/hotserve-backup/.backup.env-check-5678
 mkdir -p /var/lib/hotserve-backup/smoke/data
 echo staged > /var/lib/hotserve-backup/smoke/data/app.db
+# The operator has turned the backup timer off. A plain remove must keep
+# that choice (the marker stays with the credentials until purge), and it
+# gives stage 5's "purge removes the marker" something to remove.
+systemctl disable --now hotserve-backup.timer >/dev/null 2>&1
 apt-get remove -y hotserve
+[ -e /etc/hotserve/.backup-timer-configured ] \
+	|| die "remove dropped the record of an operator turning the backup timer off; a reinstall would turn it back on"
 [ -f /etc/hotserve/backup.env ] \
 	|| die "remove deleted the backup credentials: an operator reinstalling would lose access to their repository"
 systemctl is-active --quiet hotserve && die "service still active after remove (preremove did not stop it)" || true
@@ -604,6 +610,57 @@ apt-get purge -y hotserve
 [ ! -e /run/hotserve-backup ] \
 	|| die "purge left the settings an interrupted init's checks ran with"
 echo "purge removed the credentials, the staged copies, the timer marker and the conffile"
+
+stage "stage 6: the backup timer through remove, reinstall and a failed enable"
+# Last, on a fresh install: these rows remove and reinstall the package
+# several times, which would otherwise stop the server and the app that
+# stages 4 and 5 need running to assert anything about removal.
+dpkg -i "$deb" >/dev/null
+# The timer's lifecycle, one row at a time. The marker in /etc/hotserve
+# means "an operator has had their say"; everything below checks that it
+# never outlives, or is written without, what it stands for.
+marker=/etc/hotserve/.backup-timer-configured
+systemctl is-enabled --quiet hotserve-backup.timer \
+	|| die "setup: the backup timer should be enabled here; the rows below would be vacuous"
+
+# Removed to install a different build, then reinstalled: a timer that
+# was running must be running again. (Remove keeps /etc/hotserve, so a
+# marker left behind would stop the reinstall from enabling it.)
+dpkg -r hotserve >/dev/null
+dpkg -i "$deb" >/dev/null
+systemctl is-enabled --quiet hotserve-backup.timer \
+	|| die "remove + reinstall left the backup timer off: a box moved to another build stops backing up, silently"
+
+# The same round trip must not undo an operator's "off".
+systemctl disable --now hotserve-backup.timer >/dev/null 2>&1
+dpkg -r hotserve >/dev/null
+dpkg -i "$deb" >/dev/null
+systemctl is-enabled --quiet hotserve-backup.timer \
+	&& die "remove + reinstall turned back on a backup timer the operator had turned off"
+
+# An enable that fails must not be recorded as done, or no later upgrade
+# would try again. A masked unit makes `systemctl enable` fail for real.
+rm -f "$marker"
+systemctl mask hotserve-backup.timer >/dev/null 2>&1
+dpkg -i "$deb" >/dev/null
+[ ! -e "$marker" ] \
+	|| die "postinstall recorded the backup timer as configured although enabling it failed"
+systemctl unmask hotserve-backup.timer >/dev/null 2>&1
+dpkg -i "$deb" >/dev/null
+systemctl is-enabled --quiet hotserve-backup.timer && [ -e "$marker" ] \
+	|| die "the upgrade after a failed enable did not try again"
+
+# "Backups are off" only when they are.
+# (Output captured whole, then searched: `dpkg | grep -q` would let grep
+# exit on its first match and SIGPIPE dpkg mid-configure.)
+printf 'RESTIC_REPOSITORY=/srv/backups\nRESTIC_PASSWORD=secret\n' > /etc/hotserve/backup.env
+chmod 0600 /etc/hotserve/backup.env
+out=$(dpkg -i "$deb" 2>&1)
+case "$out" in *"Backups are off"*) die "an upgrade told a box whose backups are configured that they are off" ;; esac
+rm -f /etc/hotserve/backup.env
+out=$(dpkg -i "$deb" 2>&1)
+case "$out" in *"Backups are off"*) : ;; *) die "a box with no backups configured was not told how to turn them on" ;; esac
+echo "the backup timer survives remove + reinstall as it was, and a failed enable is retried"
 
 echo ""
 echo "ALL PACKAGE SMOKE STAGES PASSED ($deb on $(. /etc/os-release && echo "$PRETTY_NAME"))"

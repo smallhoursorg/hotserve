@@ -152,6 +152,36 @@ func TestStaleWithSnapshotsButNoCleanRunEverRecorded(t *testing.T) {
 	}
 }
 
+// A first backup of a large uploads dir takes hours. The report has to
+// say it is under way, or "never ⚠" reads as something broken — while
+// staying honest that there is no backup yet (--check still fails:
+// there is nothing to restore until it finishes).
+func TestFormatStatusSaysWhenABackupIsRunning(t *testing.T) {
+	var out strings.Builder
+	first := AppStatus{App: testApp("blog", StateEntry{Kind: KindFiles, Path: "uploads"}), Running: true}
+	FormatStatus(&out, []AppStatus{first}, statusNow)
+	for _, want := range []string{"first backup running now", "journalctl -u hotserve-backup-blog -f"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("want %q in the report:\n%s", want, out.String())
+		}
+	}
+	if !first.Stale(statusNow) {
+		t.Error("a first backup still running is not a backup yet")
+	}
+
+	out.Reset()
+	later := AppStatus{
+		App:         testApp("blog", StateEntry{Kind: KindFiles, Path: "uploads"}),
+		Latest:      &Snapshot{Time: statusNow.Add(-50 * time.Minute), ShortID: "aaa"},
+		LastSuccess: statusNow.Add(-50 * time.Minute),
+		Running:     true,
+	}
+	FormatStatus(&out, []AppStatus{later}, statusNow)
+	if !strings.Contains(out.String(), "(backing up now)") {
+		t.Errorf("an hourly run in progress should say so:\n%s", out.String())
+	}
+}
+
 // The marker lives on the box; the snapshots are the backup. After
 // `backup init --force` onto a fresh repository the old marker is
 // still there and still recent, and the report must not call a

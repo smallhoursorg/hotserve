@@ -363,6 +363,77 @@ func TestExecuteReadsBackThroughTheParentsOfWhatWasDeclared(t *testing.T) {
 	}
 }
 
+// A declared path that goes missing after it has been backed up must
+// fail the run. Skipping it — the right answer for a path the app has
+// not created yet — would let the other declarations keep the app green
+// while this one is never backed up again.
+func TestExecuteFailsWhenABackedUpPathGoesMissing(t *testing.T) {
+	job := newJob(t, &recorder{}, []string{"app.db"}, []string{"uploads", "avatars"})
+	if err := job.Execute(context.Background()); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(job.Shared, "uploads")); err != nil {
+		t.Fatal(err)
+	}
+	marker := SuccessMarker(job.Staging)
+	before, _ := os.Stat(marker)
+	err := job.Execute(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "backed up before") {
+		t.Fatalf("want a failure naming the vanished path, got %v", err)
+	}
+	if after, _ := os.Stat(marker); !after.ModTime().Equal(before.ModTime()) {
+		t.Error("a run that lost a declared path must not refresh the success marker")
+	}
+}
+
+// A path the app has never created is still a note, not a failure: a new
+// app declares where its uploads will go before anyone has uploaded.
+func TestExecuteSkipsADeclaredPathThatNeverExisted(t *testing.T) {
+	job := newJob(t, &recorder{}, []string{"app.db"}, nil)
+	job.Files = []string{"uploads"} // declared, never created
+	for i := range 2 {
+		if err := job.Execute(context.Background()); err != nil {
+			t.Fatalf("run %d: a path that was never there is not a failure: %v", i+1, err)
+		}
+	}
+}
+
+// Removing a `state files` line removes the path from what is expected:
+// deleting that directory afterwards is not a failure.
+func TestExecuteForgetsAPathThatIsNoLongerDeclared(t *testing.T) {
+	job := newJob(t, &recorder{}, nil, []string{"uploads", "avatars"})
+	if err := job.Execute(context.Background()); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	job.Files = []string{"uploads"}
+	if err := os.RemoveAll(filepath.Join(job.Shared, "avatars")); err != nil {
+		t.Fatal(err)
+	}
+	job.Capture = snapshotHolding(heldBy(job))
+	if err := job.Execute(context.Background()); err != nil {
+		t.Fatalf("an undeclared path's absence is not a failure: %v", err)
+	}
+	if seen := readSeen(SeenPaths(job.Staging)); seen["avatars"] || !seen["uploads"] {
+		t.Errorf("the list should now hold exactly what was declared and present: %v", seen)
+	}
+}
+
+// `state files uploads/` and `state files uploads` name one directory;
+// changing the spelling must not make a vanished path look new.
+func TestTheSeenListIgnoresHowAPathIsSpelled(t *testing.T) {
+	job := newJob(t, &recorder{}, nil, []string{"uploads/"})
+	if err := job.Execute(context.Background()); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	job.Files = []string{"./uploads"}
+	if err := os.RemoveAll(filepath.Join(job.Shared, "uploads")); err != nil {
+		t.Fatal(err)
+	}
+	if err := job.Execute(context.Background()); err == nil || !strings.Contains(err.Error(), "backed up before") {
+		t.Fatalf("a respelled declaration of a vanished path must still fail, got %v", err)
+	}
+}
+
 func TestExecuteRefusesPathsOutsideShared(t *testing.T) {
 	for _, tc := range []struct{ name, path string }{
 		{"parent", "../../../etc/shadow"},

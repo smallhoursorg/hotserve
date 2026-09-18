@@ -53,11 +53,26 @@ Backups are per app: what one app declares is copied by a job that can
 see that app's `shared/` dir and nothing else.
 
 **Declare the data, not a link to it.** restic stores a symlink as a
-symlink, so `state files uploads` where `uploads` is a link to a data
-disk would back up the link and none of the files. A job refuses that
-rather than reporting success over nothing; mount the disk at
-`shared/uploads` instead. A symlink *inside* a declared directory is
-stored the same way — its target is not followed.
+symlink, so `state files uploads` where `uploads` is a link somewhere else
+would back up the link and none of the files. A job refuses that rather
+than reporting success over nothing. (To keep an app's data on another
+disk, bind-mount that disk at the app's `shared/` directory, as
+[liveswap's Sandbox section](../liveswap/README.md#sandbox) describes.) A
+symlink *inside* a declared directory is stored the same way — its target
+is not followed.
+
+**A declared path that disappears fails the backup.** One the app has not
+created yet is skipped with a note — a new app declares where its uploads
+will go before anyone has uploaded anything. But a path that has been
+backed up before and is gone now fails the run, so the app stops counting
+as backed up instead of staying green while that path is never copied
+again. If the app no longer keeps a path, remove its `state files` line.
+
+What this cannot catch: a data disk bind-mounted at `shared/` that fails
+to mount. The app starts on the empty directory underneath and writes new
+data there within seconds, and that new data then backs up like any other.
+Your earlier snapshots are untouched, but nothing here will tell you the
+disk is missing — watch for that at boot the way you would for any mount.
 
 A restore needs the same repository and the same password, so keep the
 password somewhere other than the box — a password manager, not a note
@@ -154,9 +169,11 @@ gets the credentials in `/etc/hotserve/backup.env`, so those credentials
 should be able to **add** backups and not to remove them.
 
 On Backblaze B2, create an application key restricted to the bucket
-(and, if several apps share it, the prefix) with `listFiles`,
-`readFiles` and `writeFiles` — and **not** `deleteFiles`. That is the
-set restic needs; it never requires `deleteFiles`.
+(and, if several apps share it, the prefix) with `listBuckets`,
+`listFiles`, `readFiles` and `writeFiles` — and **not** `deleteFiles`.
+That is the set restic needs, and it never requires `deleteFiles`
+(restic's append-only support for B2 is built on exactly that:
+[restic#2398](https://github.com/restic/restic/pull/2398)).
 
 **What that key can and cannot do, precisely.** On B2, removing a file
 by name only *hides* it — the previous version stays and needs

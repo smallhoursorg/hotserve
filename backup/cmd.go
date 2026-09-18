@@ -5,6 +5,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -167,6 +168,9 @@ func cmdStatus(fl caddycmd.Flags) (int, error) {
 	if err != nil {
 		return caddy1, err
 	}
+	for i := range statuses {
+		statuses[i].Running = unitActive(ctx, unitName(statuses[i].App.Name)+".service")
+	}
 	now := time.Now()
 	FormatStatus(os.Stdout, statuses, now)
 	if !fl.Bool("check") {
@@ -246,6 +250,13 @@ func cmdInit(fl caddycmd.Flags, args []string) (int, error) {
 		return caddy1, err
 	}
 	return 0, nil
+}
+
+// unitActive reports whether a systemd unit is running. An error reads
+// as "not running": the report then says what it said before this was
+// asked, rather than failing over a detail.
+func unitActive(ctx context.Context, unit string) bool {
+	return exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", unit).Run() == nil //nolint:gosec // a fixed program; the unit name is built here from an app name the config validated
 }
 
 // repositoryToBind is the repository on this box that `run` mounts,
@@ -412,12 +423,38 @@ func captureQuiet() Capturer {
 		cmd.Env = commandEnv(ctx)
 		var errOut bytes.Buffer
 		cmd.Stderr = &errOut
+		if sink := stderrSink(ctx); sink != nil {
+			cmd.Stderr = io.MultiWriter(&errOut, sink)
+		}
 		out, err := cmd.Output()
 		if err != nil {
 			return append(out, errOut.Bytes()...), err
 		}
 		return out, nil
 	}
+}
+
+// stderrKey carries a buffer that a Capturer copies the command's
+// stderr into, whatever its exit status.
+//
+// A Capturer's return value is the command's stdout — which callers
+// parse, as JSON for `restic snapshots --json` — plus stderr only when
+// it fails. That is not enough for the one place stderr IS the answer:
+// restic exits 0 when the storage refuses a delete, and the refusal is
+// on stderr alone (measured: stdout empty, the 403 on stderr). Merging
+// stderr into every capture would break the JSON; asking for it here,
+// where it is evidence, does not.
+type stderrKey struct{}
+
+func withStderr(ctx context.Context, w *bytes.Buffer) context.Context {
+	return context.WithValue(ctx, stderrKey{}, w)
+}
+
+func stderrSink(ctx context.Context) io.Writer {
+	if w, ok := ctx.Value(stderrKey{}).(*bytes.Buffer); ok && w != nil {
+		return w
+	}
+	return nil
 }
 
 // envKey carries extra environment for a Runner through the context,

@@ -118,15 +118,25 @@ EOF
 	# upgrade turns backups on.
 	timer_marker=/etc/hotserve/.backup-timer-configured
 	if [ ! -e "$timer_marker" ]; then
-		systemctl enable hotserve-backup.timer 2>/dev/null || true
+		# The marker only once the enable has worked: written regardless,
+		# one failed enable would stop every later upgrade from trying
+		# again, and `hotserve backup init` would succeed on a box that
+		# never runs a backup.
+		if systemctl enable hotserve-backup.timer 2>/dev/null; then
+			# touch, not `: > file`: a redirection that fails on a
+			# special builtin ends a `set -e` shell whatever follows it,
+			# and this script must not take the install down over a
+			# marker.
+			touch "$timer_marker" 2>/dev/null || true
+		fi
 		systemctl start hotserve-backup.timer 2>/dev/null || true
-		# touch, not `: > file`: a redirection that fails on a special
-		# builtin ends a `set -e` shell whatever follows it, and this
-		# script must not take the install down over a marker.
-		touch "$timer_marker" 2>/dev/null || true
 	fi
 	echo "hotserve installed. Start it with:"
 	echo "  sudo systemctl enable --now hotserve"
-	echo "Backups are off until you run:"
-	echo "  sudo hotserve backup init"
+	# Only when it is true: an upgrade of a box whose backups work must
+	# not be told they are off.
+	if [ ! -e /etc/hotserve/backup.env ]; then
+		echo "Backups are off until you run:"
+		echo "  sudo hotserve backup init"
+	fi
 fi

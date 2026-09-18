@@ -145,17 +145,11 @@ func safeRepositoryDir(dir string) error {
 			return fmt.Errorf("the repository cannot be %s or anything under it: init gives the whole tree to the backup user and every job mounts it writable — put it somewhere of its own, like /srv/backups or a mounted disk", reserved)
 		}
 	}
-	// These hold plenty that a repository must not swallow, but a
-	// directory of its own inside them (/srv/backups, /mnt/disk/backups,
-	// /home/me/backups) is the normal place to put one — so only the
-	// tree itself, and anything holding it, is refused. /srv is in the
-	// list because it is the example everything here teaches, which
-	// makes it the likeliest thing to be typed one component short.
-	for _, reserved := range []string{"/home", "/media", "/mnt", "/opt", "/srv", "/tmp", "/var"} {
-		if dir == reserved || isAncestor(dir, reserved) {
-			return fmt.Errorf("the repository cannot be %s or hold %s: init gives the whole tree to the backup user and every job mounts it writable — use a directory of its own, like %s/backups", dir, reserved, reserved)
-		}
-	}
+	// Not listed: /srv, /mnt, /var, /home and the like themselves. They
+	// always exist, so init's content rule already refuses them — it
+	// takes only a directory it creates or an existing restic repository
+	// (prepareLocalRepository) — and a list here would only repeat that,
+	// badly.
 	// hotserve's own trees, named explicitly: /var is refused above,
 	// but a bind mount could put them elsewhere.
 	for _, own := range []string{DefaultLiveswapRoot, DefaultStagingRoot, "/var/lib/hotserve"} {

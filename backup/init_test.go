@@ -48,7 +48,7 @@ const (
 	resticWrongPassword   = "Fatal: wrong password or no key found\n"
 )
 
-func (f *fakeRestic) capture(_ context.Context, name string, args ...string) ([]byte, error) {
+func (f *fakeRestic) capture(ctx context.Context, name string, args ...string) ([]byte, error) {
 	f.calls = append(f.calls, call{name, args})
 	switch {
 	case len(args) > 0 && args[0] == "init":
@@ -78,7 +78,18 @@ func (f *fakeRestic) capture(_ context.Context, name string, args ...string) ([]
 		return []byte(`[{"short_id":"probe123","time":"2026-09-18T08:00:00Z","tags":["` + DeleteProbeTag + `"]}]`), nil
 	case len(args) > 0 && args[0] == "forget":
 		f.forgotten = true
-		return []byte(f.forgetOut), f.forgetErr
+		// Streams as restic really uses them (measured): what forget
+		// says goes to stderr, stdout stays empty. A Capturer returns
+		// stdout, plus stderr only on a failure — so on exit 0 the
+		// words reach the caller only through the stderr sink it asked
+		// for, exactly as captureQuiet delivers them.
+		if sink := stderrSink(ctx); sink != nil {
+			_, _ = io.WriteString(sink, f.forgetOut)
+		}
+		if f.forgetErr != nil {
+			return []byte(f.forgetOut), f.forgetErr
+		}
+		return nil, nil
 	}
 	return nil, nil
 }
@@ -290,8 +301,9 @@ func TestInitCreatesOrOpensTheRepository(t *testing.T) {
 }
 
 // Asked to open a repository in a bucket that does not exist, restic
-// retries "The specified bucket does not exist" for about fifteen
-// minutes — measured against a real S3 server. So when `restic init`
+// retries "The specified bucket does not exist" for many minutes —
+// against a real S3 server it was still retrying when stopped at eight.
+// So when `restic init`
 // fails for any reason but "a repository is already here", init reports
 // that failure and does NOT go on to `cat config`: that is the call that
 // hangs, and a typo in a bucket name must not look like a stuck box.
@@ -303,7 +315,7 @@ func TestInitNeverOpensWhereItCouldNotCreate(t *testing.T) {
 	}
 	for _, c := range fake.calls {
 		if len(c.args) > 0 && c.args[0] == "cat" {
-			t.Fatalf("init asked cat config after init failed — the call that retries for fifteen minutes on a missing bucket: %v", fake.calls)
+			t.Fatalf("init asked cat config after init failed — the call that retries for many minutes on a missing bucket: %v", fake.calls)
 		}
 	}
 }
@@ -375,10 +387,11 @@ func TestInitWarnsWhenTheKeyCanDelete(t *testing.T) {
 
 // restic's own output against a real append-only server, captured
 // verbatim from restic 0.18.0 and restic-rest-server --append-only
-// (Debian 13). Note what restic did with it: exit status 0. The delete
-// check used to trust that exit status, so it reported the very key the
-// docs tell operators to create as able to delete — and never gave the
-// "refused" answer at all. Re-capture this when upgrading restic.
+// (Debian 13) — ON STDERR, with stdout empty and exit status 0. The
+// delete check first trusted the exit status (and reported the key the
+// docs tell operators to create as able to delete), then read only
+// stdout (and reported it as "unknown"). The fake above delivers these
+// words on the stream restic really uses. Re-capture when upgrading.
 const resticRefusedForget = "Remove(<snapshot/a4adfea30f>) failed: unexpected HTTP response (403): 403 Forbidden\n" +
 	"unable to remove snapshot/a4adfea30faac63d6109a2343dc75340f06d0db6f5dd31c9a1e50a42505d75fe from the repository\n"
 
@@ -639,6 +652,23 @@ func TestInitMakesOrReusesARepositoryAndAdoptsNothingElse(t *testing.T) {
 				t.Errorf("a refused directory was changed: %v → %v", before, after)
 			}
 		})
+	}
+}
+
+// The example everything teaches is /srv/backups, so the likeliest typo
+// is that path one component short — and /srv, /mnt, /home, /tmp exist
+// on every box. They are refused by the same rule as everything else:
+// an existing directory that is not a restic repository is never taken
+// over. Checked against the real directories, which are left as they
+// were: the refusal comes before anything is written.
+func TestInitRefusesTheTopLevelDirectoriesThemselves(t *testing.T) {
+	for _, dir := range []string{"/srv", "/mnt", "/media", "/opt", "/tmp", "/home", "/var"} {
+		if _, err := os.Stat(dir); err != nil {
+			continue // not on this machine
+		}
+		if _, err := prepareLocalRepository(dir, ""); err == nil {
+			t.Errorf("%s was accepted as a repository", dir)
+		}
 	}
 }
 

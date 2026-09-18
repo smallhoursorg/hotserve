@@ -36,6 +36,10 @@ type AppStatus struct {
 	// it writes. Zero when none has: a repository can hold snapshots
 	// from runs that ended in failure.
 	LastSuccess time.Time
+	// Running is whether this app's job is running right now. A first
+	// backup of a large uploads dir can take hours, and without this the
+	// report would show only "never", which reads as something broken.
+	Running bool
 }
 
 // StaleAfter is when an hourly backup is late enough to be worth
@@ -136,6 +140,12 @@ func FormatStatus(w io.Writer, statuses []AppStatus, now time.Time) {
 		case s.Latest != nil && !s.LastSuccess.IsZero() && s.Latest.Time.After(s.LastSuccess.Add(time.Minute)):
 			last += "  (last clean run " + humanAge(now.Sub(s.LastSuccess)) + ")"
 		}
+		switch {
+		case s.Running && s.Latest == nil:
+			last += "  (first backup running now)"
+		case s.Running:
+			last += "  (backing up now)"
+		}
 		if s.Stale(now) {
 			last += "  ⚠"
 		}
@@ -143,7 +153,10 @@ func FormatStatus(w io.Writer, statuses []AppStatus, now time.Time) {
 	}
 	_ = tw.Flush()
 	for _, s := range statuses {
-		if s.Stale(now) {
+		switch {
+		case s.Stale(now) && s.Running:
+			say(w, "\n%s has no current backup yet; one is running now. Its progress:\n    journalctl -u hotserve-backup-%s -f", s.App.Name, s.App.Name)
+		case s.Stale(now):
 			say(w, "\n%s has no current backup. What the last run did:\n    journalctl -u hotserve-backup-%s -n 30", s.App.Name, s.App.Name)
 		}
 	}

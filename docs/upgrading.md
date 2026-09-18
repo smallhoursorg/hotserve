@@ -103,9 +103,11 @@ What an upgrade leaves alone:
   (`/etc/hotserve/backup.env`, which `hotserve backup init` wrote — not
   a file dpkg owns, and removed only by `apt purge`) come through
   untouched. The timer unit itself is replaced like any other file in
-  the package; what survives is whether you had it *enabled*, and a
-  timer you turned off stays off, because only a first install enables
-  it. An upgrade can land mid-backup: the job is
+  the package; what survives is whether you had it *enabled*: a timer
+  you turned off stays off, across upgrades and across removing and
+  reinstalling the package. (An upgrade from a hotserve that predates
+  the timer enables it, since nobody has turned it off yet.) An upgrade
+  can land mid-backup: the job is
   its own short-lived unit, so it finishes on the old binary and the
   next hour's run uses the new one.
 - **Your `state` declarations**, which live in the Caddyfile like the

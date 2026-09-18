@@ -49,8 +49,21 @@ func unitName(app string) string { return "hotserve-backup-" + app }
 //
 // Memory: measured peaks were ~78 MB of real memory (restic plus
 // sqlite3), with the rest of the cgroup figure being reclaimable page
-// cache. GOGC/GOMAXPROCS trade a little CPU for a third less heap, and
-// MemoryHigh throttles rather than kills.
+// cache. GOGC/GOMAXPROCS trade a little CPU for a third less heap.
+//
+// No limit on how long a job runs or how much memory it may use. Both
+// were here, and both were wrong: the first backup of a large uploads
+// dir over a slow uplink runs for hours, and a job killed part-way
+// leaves the next one to upload everything again (measured: a first
+// backup killed at 240 MB of 763 MB — the next run re-sent all 763 MB),
+// so a time limit meant that backup never completed and the repository
+// grew with orphaned data every hour. A memory throttle cannot shrink
+// restic's working set — that grows with the repository's index — it
+// can only make it crawl. What does bound a job is restic's own
+// per-request timeout (--stuck-request-timeout, 5 minutes by default),
+// which turns a hung connection into a retry or a failure; and runs
+// never overlap, because systemd does not start the timer's unit while
+// it is still active.
 func LaunchArgs(app App, o LaunchOptions) []string {
 	staging := o.StagingRoot + "/" + app.Name
 	// An app whose state is only files is read as it lies, so its dir
@@ -83,6 +96,18 @@ func LaunchArgs(app App, o LaunchOptions) []string {
 		args = append(args, e.Kind+":"+e.Path)
 	}
 	return args
+}
+
+// jobCommand is the command a unit runs: LaunchArgs without the
+// systemd-run flags and sandbox properties in front of it — what an
+// operator would type to run the same job by hand.
+func jobCommand(args []string) []string {
+	for i, a := range args {
+		if !strings.HasPrefix(a, "--") {
+			return args[i:]
+		}
+	}
+	return nil
 }
 
 // jobView is what one backup unit can see: whose it is, where its
@@ -120,16 +145,6 @@ func sandboxProperties(v jobView) []string {
 		"--property=Environment=XDG_CACHE_HOME=" + StagingCache(v.Home),
 		"--property=Environment=HOME=" + v.Home,
 		"--property=MemoryAccounting=yes",
-		// MemoryHigh throttles: past it the kernel reclaims and the
-		// job slows down. There is deliberately no MemoryMax to go
-		// with it — that one kills, and restic's working set grows
-		// with the size of the repository's index, so a cap that
-		// suited a new repository would start OOM-killing the hourly
-		// backup a year later, with no way to raise it short of a new
-		// release. A backup that runs slowly is better than one that
-		// dies, and the 64 MB measured here is a floor to aim at, not
-		// a ceiling to enforce.
-		"--property=MemoryHigh=64M",
 		// Nice on hotserve-backup.service only lowers the launcher: a
 		// transient unit is started by the system manager, not forked
 		// from this process, so it would otherwise do the CPU-heavy
@@ -137,13 +152,6 @@ func sandboxProperties(v jobView) []string {
 		// apps it is backing up.
 		"--property=Nice=10",
 		"--property=IOSchedulingClass=idle",
-		// A job that hangs must not outlive the run that started it.
-		// systemd-run --wait only waits; a launcher that goes away
-		// leaves the transient unit going, and the next hour's run
-		// would then fail on the unit name being taken — every hour,
-		// invisibly. This is what bounds a backup, which is why the
-		// launcher itself has no start timeout.
-		"--property=RuntimeMaxSec=45min",
 		"--property=TemporaryFileSystem=/:ro",
 		"--property=BindReadOnlyPaths=/usr /bin /lib -/lib64 /etc/ssl /etc/resolv.conf /etc/hosts /etc/passwd /etc/group /etc/localtime",
 		"--property=BindPaths=" + v.Home,
@@ -344,7 +352,10 @@ func RunAll(ctx context.Context, apps []App, o LaunchOptions, run Runner, log io
 			continue
 		}
 		args := LaunchArgs(app, o)
-		say(log, "+ systemd-run %s", quoteArgs(args))
+		// The command the unit runs, not the forty sandbox properties
+		// around it: those are the same every time, and
+		// `systemctl show hotserve-backup-<app>` has them while it runs.
+		say(log, "%s: backing up in %s: %s", app.Name, unitName(app.Name), quoteArgs(jobCommand(args)))
 		if err := run(ctx, "systemd-run", args...); err != nil {
 			say(log, "%s: FAILED (%v) — journalctl -u %s", app.Name, err, unitName(app.Name))
 			failed = append(failed, app.Name)

@@ -73,7 +73,6 @@ func TestLaunchArgsSandboxesEachAppToItsOwnData(t *testing.T) {
 		"--property=NoNewPrivileges=yes",
 		"--property=CapabilityBoundingSet=",
 		"--property=SystemCallFilter=@system-service",
-		"--property=MemoryHigh=64M",
 		"--property=Environment=GOGC=20",
 		// The launcher's own Nice does not reach here: a transient unit
 		// is started by the system manager, not forked from it, so
@@ -93,14 +92,30 @@ func TestLaunchArgsSandboxesEachAppToItsOwnData(t *testing.T) {
 		t.Errorf("liveswap paths named %d times, want 2 (the bind and the --shared flag): %v", n, args)
 	}
 
-	// The command the unit runs, after the properties.
-	rest := args[len(args)-8:]
+	// The command the unit runs, after the properties — and what the
+	// launcher logs, rather than the whole property list.
 	want := []string{"/usr/bin/hotserve", "backup", "app", "--name=blog",
 		"--shared=/var/lib/liveswap/blog/shared", "--staging=/var/lib/hotserve-backup/blog",
 		"sqlite:app.db", "files:uploads"}
-	for i := range want {
-		if rest[i] != want[i] {
-			t.Fatalf("command tail:\n got %v\nwant %v", rest, want)
+	if got := jobCommand(args); strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("command:\n got %v\nwant %v", got, want)
+	}
+}
+
+// No limit on how long a job runs or how much memory it may use. A time
+// limit made the first backup of a large uploads dir impossible: a job
+// killed part-way leaves the next one to upload everything again
+// (measured), so it restarted from nothing every hour, for ever, while
+// the repository filled with orphaned data. A memory throttle cannot
+// shrink restic's working set, only make it crawl. Hangs are bounded by
+// restic's own per-request timeout instead.
+func TestLaunchArgsDoNotCapHowLongOrHowLargeABackupMayBe(t *testing.T) {
+	app := testApp("blog", StateEntry{Kind: KindFiles, Path: "uploads"})
+	for _, a := range LaunchArgs(app, launchOpts("/var/lib/hotserve-backup")) {
+		for _, capped := range []string{"RuntimeMaxSec", "MemoryHigh", "MemoryMax", "TimeoutStartSec", "TimeoutSec", "CPUQuota"} {
+			if strings.Contains(a, "--property="+capped+"=") {
+				t.Errorf("%s would stop a large first backup from ever completing: %s", capped, a)
+			}
 		}
 	}
 }
@@ -180,13 +195,13 @@ func TestRepositoryPath(t *testing.T) {
 // hands the box away. Descendants count: /etc/hotserve holds the
 // Caddyfile and the backup credentials.
 func TestRepositoryPathRefusesDirectoriesThatWouldGiveAwayTheBox(t *testing.T) {
+	// By name: system trees and hotserve's own. (/srv, /home and the like
+	// are refused too, but by what is in them — see
+	// TestInitRefusesTheTopLevelDirectoriesThemselves.)
 	for _, repo := range []string{
 		"/", "/etc", "/etc/hotserve", "/usr", "/usr/local/backups", "/root/backups",
-		"/var", "/home", "/var/lib", "/var/lib/liveswap", "/var/lib/liveswap/blog/shared",
+		"/var", "/var/lib", "/var/lib/liveswap", "/var/lib/liveswap/blog/shared",
 		"/var/lib/hotserve-backup", "/var/lib/hotserve",
-		// The example everything here teaches is /srv/backups, so the
-		// likeliest typo is that path one component short.
-		"/srv", "/mnt", "/media", "/opt", "/tmp",
 	} {
 		if _, err := RepositoryPath(repo); err == nil {
 			t.Errorf("%s should be refused as a repository", repo)
