@@ -441,22 +441,28 @@ else
 fi
 
 # restic writes a snapshot even when it exits non-zero, so snapshots
-# alone are not evidence that backups work. Take away the record of the
-# clean run and the report must stop calling this app current, however
-# fresh the snapshot in the repository is — this is the difference
-# between a monitor and a green light.
-mv /var/lib/hotserve-backup/backup-example/.last-success /tmp/last-success
-if hotserve backup status --check --admin 127.0.0.1:2019 >/dev/null 2>&1; then
-	fail "--check passed on snapshots alone: a box whose every run fails part-way would stay green for ever"
+# alone are not evidence that backups work: a clean run says so with a
+# record in the repository. Make a snapshot no clean run vouches for —
+# newer than every one that is — and a restore must name it, not take
+# it: it may be missing files, and with --delete those would go.
+if hotserve backup restic -- backup --quiet --tag hotserve --tag app:backup-example "$SHARED/uploads" >/dev/null 2>&1; then
+	pass "made a snapshot no clean-run record vouches for"
 else
-	pass "--check fails when no run has finished cleanly, however fresh the snapshot"
+	fail "could not make an unvouched snapshot"
 fi
-if hotserve backup status --admin 127.0.0.1:2019 2>&1 | grep -q "no clean run on this box"; then
-	pass "the report says why a fresh snapshot is not a backup"
+if hotserve backup restic -- snapshots --tag hotserve-clean 2>/dev/null | grep -q hotserve-clean; then
+	pass "clean runs are recorded in the repository itself"
 else
-	fail "the report gave no reason: $(hotserve backup status --admin 127.0.0.1:2019 2>&1)"
+	fail "no clean-run record in the repository: $(hotserve backup restic -- snapshots 2>&1 | tail -5)"
 fi
-mv /tmp/last-success /var/lib/hotserve-backup/backup-example/.last-success
+# No terminal and no --yes: it describes its choice and then refuses,
+# so nothing is restored here.
+picked=$(hotserve backup restore backup-example --admin 127.0.0.1:2019 </dev/null 2>&1 || true)
+if echo "$picked" | grep -q "is newer, but the run that took it did not finish cleanly"; then
+	pass "restore passes over a snapshot no clean run vouches for, and says so"
+else
+	fail "restore did not pass over the unvouched snapshot: $picked"
+fi
 
 echo "=== an S3 repository: restic's s3 backend, through the job's sandbox ==="
 # Everything above used a path on this box, which never touches what an
@@ -496,6 +502,21 @@ if grep -q "^AWS_SECRET_ACCESS_KEY=not-a-secret\$" /etc/hotserve/backup.env && g
 	pass "the S3 key and repository went into the settings the jobs get"
 else
 	fail "backup.env does not hold the S3 settings: $(grep -v PASSWORD /etc/hotserve/backup.env)"
+fi
+# A repository that already holds this app's snapshots, but no clean
+# run from this box: whatever this box did into the repository it used
+# before, the report must not vouch for this one. (A marker file on the
+# box could not tell the two repositories apart.)
+hotserve backup restic -- backup --quiet --tag hotserve --tag app:backup-example "$SHARED/uploads" >/dev/null 2>&1
+if hotserve backup status --check --admin 127.0.0.1:2019 >/dev/null 2>&1; then
+	fail "--check passed on a repository with no clean run recorded from this box"
+else
+	pass "--check fails on a switched-to repository until a clean run lands in it, however fresh its snapshots"
+fi
+if hotserve backup status --admin 127.0.0.1:2019 2>&1 | grep -q "no clean run on this box"; then
+	pass "the report says why a fresh snapshot is not a backup"
+else
+	fail "the report gave no reason: $(hotserve backup status --admin 127.0.0.1:2019 2>&1)"
 fi
 t0=$(date +%s)
 sleep 1

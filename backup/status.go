@@ -34,9 +34,9 @@ type AppStatus struct {
 	App       App
 	Latest    *Snapshot
 	Snapshots int
-	// LastSuccess is when a job last finished cleanly, from the marker
-	// it writes. Zero when none has: a repository can hold snapshots
-	// from runs that ended in failure.
+	// LastSuccess is when a job on this box last finished cleanly, from
+	// its record in the repository (CleanTag). Zero when none has: a
+	// repository can hold snapshots from runs that ended in failure.
 	LastSuccess time.Time
 	// Running is whether this app's job is running right now. A first
 	// backup of a large uploads dir can take hours, and without this the
@@ -63,21 +63,18 @@ const StaleAfter = 2*time.Hour + 30*time.Minute
 // exits non-zero (unreadable sources), so an app whose every run
 // fails part-way would otherwise look healthy for ever.
 func (s AppStatus) Stale(now time.Time) bool {
-	// The marker is local to the box; the snapshots are the backup. An
-	// app with no snapshot in *this* repository is stale whatever the
-	// marker says — that is what `backup init --force` onto a new
-	// repository looks like, and the report must not call a repository
-	// that holds nothing for this app current.
+	// The snapshots are the backup: an app with none in this repository
+	// is stale, whatever else the listing holds.
 	if s.Latest == nil {
 		return true
 	}
-	// And no clean run on this box is the same answer. Falling back to
-	// the newest snapshot here would restore the very failure the
-	// marker exists to catch: restic writes a snapshot and still exits
-	// non-zero, so a box whose every run fails part-way would show a
-	// fresh snapshot every hour and stay green for ever. A box that has
-	// never finished a run has no evidence that its backups work — that
-	// includes a rebuilt one, until its first run.
+	// And no clean run from this box recorded in this repository is the
+	// same answer. Falling back to the newest snapshot here would restore
+	// the very failure the records exist to catch: restic writes a
+	// snapshot and still exits non-zero, so a box whose every run fails
+	// part-way would show a fresh snapshot every hour and stay green for
+	// ever. A box that has never finished a run has no evidence that its
+	// backups work — that includes a rebuilt one, until its first run.
 	if s.LastSuccess.IsZero() {
 		return true
 	}
@@ -88,19 +85,24 @@ func (s AppStatus) Stale(now time.Time) bool {
 // the apps that declare state. Apps come from the running config, so
 // an app whose `state` lines were removed drops off the report even
 // though its old snapshots remain in the repository.
-func Status(ctx context.Context, apps []App, capture Capturer, stagingRoot string) ([]AppStatus, error) {
+//
+// host is this box's hostname: freshness is this box's runs, not those
+// of another box writing to the same repository.
+func Status(ctx context.Context, apps []App, capture Capturer, stagingRoot, host string) ([]AppStatus, error) {
 	// --no-lock: status runs as root, and a lock it wrote into a
 	// repository on this box would be root's — one the jobs could not
 	// clear if status were killed before removing it. Listing snapshots
-	// needs no lock.
-	out, err := capture(ctx, "restic", "snapshots", "--no-lock", "--json", "--tag", "hotserve")
+	// needs no lock. Two --tag flags are an OR: the backups, and the
+	// clean-run records.
+	out, err := capture(ctx, "restic", "snapshots", "--no-lock", "--json", "--tag", "hotserve", "--tag", CleanTag)
 	if err != nil {
 		return nil, fmt.Errorf("reading snapshots: %w", err)
 	}
-	var snaps []Snapshot
-	if err := json.Unmarshal(out, &snaps); err != nil {
+	var listed []Snapshot
+	if err := json.Unmarshal(out, &listed); err != nil {
 		return nil, fmt.Errorf("restic returned a snapshot list this version cannot read: %w", err)
 	}
+	snaps, _, records := cleanRecords(listed)
 	byApp := map[string][]Snapshot{}
 	for _, s := range snaps {
 		for _, t := range s.Tags {
@@ -112,12 +114,15 @@ func Status(ctx context.Context, apps []App, capture Capturer, stagingRoot strin
 	statuses := make([]AppStatus, 0, len(apps))
 	for _, app := range apps {
 		st := AppStatus{App: app, Snapshots: len(byApp[app.Name])}
-		staging := filepath.Join(stagingRoot, app.Name)
-		if info, err := os.Stat(SuccessMarker(staging)); err == nil {
-			st.LastSuccess = info.ModTime()
-			// The seen list is written by the same clean run as the
-			// marker, so without the marker it says nothing yet.
-			seen := readSeen(SeenPaths(staging))
+		for _, r := range records[app.Name] {
+			if r.Hostname == host && r.Time.After(st.LastSuccess) {
+				st.LastSuccess = r.Time
+			}
+		}
+		// The seen list is written by a clean run on this box; until
+		// there has been one it says nothing yet.
+		if _, err := os.Stat(SeenPaths(filepath.Join(stagingRoot, app.Name))); err == nil {
+			seen := readSeen(SeenPaths(filepath.Join(stagingRoot, app.Name)))
 			for _, rel := range app.Files() {
 				if !seen[filepath.Clean(rel)] {
 					st.NeverThere = append(st.NeverThere, filepath.Clean(rel))

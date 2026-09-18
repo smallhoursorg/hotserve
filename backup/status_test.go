@@ -23,6 +23,12 @@ func snap(id, app string, age time.Duration) string {
 		id, statusNow.Add(-age).Format(time.RFC3339Nano), app, app)
 }
 
+// record is a clean-run record, as the job writes it, from host.
+func record(app, host string, age time.Duration, of string) string {
+	return fmt.Sprintf(`{"short_id":"rec-%s","time":%q,"hostname":%q,"tags":[%q,%q,%q]}`,
+		of, statusNow.Add(-age).Format(time.RFC3339Nano), host, CleanTag, cleanAppTag(app), cleanOfTag(of))
+}
+
 func capturing(out []byte, err error) (Capturer, *[]call) {
 	calls := &[]call{}
 	return func(_ context.Context, name string, args ...string) ([]byte, error) {
@@ -41,33 +47,22 @@ func TestStatusMatchesSnapshotsToApps(t *testing.T) {
 		snap("aaa", "blog", 3*time.Hour),
 		snap("bbb", "blog", 12*time.Minute),
 		snap("ccc", "shop", 20*time.Minute),
+		// blog's last run finished cleanly, which is what makes its
+		// snapshot evidence of a working backup rather than of restic
+		// having written one on the way to failing. The record is not a
+		// backup itself: blog has two snapshots, not three.
+		record("blog", "box-1", 11*time.Minute, "bbb"),
 	), nil)
 
-	// blog's last run finished cleanly, which is what makes its
-	// snapshot evidence of a working backup rather than of restic
-	// having written one on the way to failing.
-	staging := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(staging, "blog"), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	marker := SuccessMarker(filepath.Join(staging, "blog"))
-	if err := os.WriteFile(marker, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	// Dated with the fixture's clock, not the machine's: the report is
-	// read against statusNow, so a marker written "now" would make this
-	// test pass or fail on what the runner thinks the date is.
-	cleanRun := statusNow.Add(-12 * time.Minute)
-	if err := os.Chtimes(marker, cleanRun, cleanRun); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := Status(context.Background(), apps, capture, staging)
+	got, err := Status(context.Background(), apps, capture, t.TempDir(), "box-1")
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
 	if len(*calls) != 1 {
 		t.Errorf("want one restic call for every app, got %d", len(*calls))
+	}
+	if args := strings.Join((*calls)[0].args, " "); !strings.Contains(args, "--tag hotserve --tag "+CleanTag) {
+		t.Errorf("one call lists both the backups and the records: %v", args)
 	}
 	if got[0].App.Name != "blog" || got[1].App.Name != "shop" || got[2].App.Name != "wiki" {
 		t.Fatalf("apps out of order: %+v", got)
@@ -114,7 +109,7 @@ func TestStaleAfterTwoMissedRuns(t *testing.T) {
 
 // restic writes a snapshot even when it exits non-zero (unreadable
 // sources, exit 3), so "a snapshot exists" is not "the backup
-// worked". Freshness comes from the marker a clean run writes, or a
+// worked". Freshness comes from the record a clean run writes, or a
 // box whose every run fails part-way stays green for ever.
 func TestStaleMeasuresFromTheLastCleanRun(t *testing.T) {
 	// Snapshots every hour, but nothing has finished cleanly in a day.
@@ -134,7 +129,7 @@ func TestStaleMeasuresFromTheLastCleanRun(t *testing.T) {
 	}
 }
 
-// The failure the marker exists to catch: restic writes a snapshot and
+// The failure the records exist to catch: restic writes a snapshot and
 // still exits non-zero, so a box whose every run fails part-way gets a
 // fresh snapshot every hour. Falling back to the newest snapshot when
 // no clean run has ever been recorded would call that healthy for ever.
@@ -183,39 +178,51 @@ func TestFormatStatusSaysWhenABackupIsRunning(t *testing.T) {
 	}
 }
 
-// The marker lives on the box; the snapshots are the backup. After
-// `backup init --force` onto a fresh repository the old marker is
-// still there and still recent, and the report must not call a
-// repository that holds nothing for this app current — that is the
-// state where an operator believes they have backups and has none.
+// The snapshots are the backup: an app with none in this repository is
+// stale whatever else is known about it.
 func TestStaleWhenTheRepositoryHoldsNoSnapshotForTheApp(t *testing.T) {
 	switched := AppStatus{LastSuccess: statusNow.Add(-10 * time.Minute)}
 	if !switched.Stale(statusNow) {
-		t.Error("no snapshot in this repository is stale, whatever the local marker says")
+		t.Error("no snapshot in this repository is stale, whatever else is known")
 	}
 }
 
-// The marker is read from the app's staging dir, which is where the
-// job writes it.
-func TestStatusReadsTheSuccessMarker(t *testing.T) {
-	root := t.TempDir()
-	staging := filepath.Join(root, "blog")
-	if err := os.MkdirAll(staging, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(SuccessMarker(staging), nil, 0o640); err != nil {
-		t.Fatal(err)
-	}
-	capture, _ := capturing(snapshotsJSON(snap("aaa", "blog", time.Hour)), nil)
-	got, err := Status(context.Background(), []App{testApp("blog", StateEntry{Kind: KindFiles, Path: "uploads"})}, capture, root)
+// Freshness is this box's clean runs into THIS repository. A record
+// from another box writing to the same repository does not count; and
+// after `init --force` onto another repository that already holds this
+// app's snapshots, the listing is that repository's, so the old
+// repository's runs cannot vouch for it — which a marker file on the
+// box did.
+func TestStatusCountsOnlyThisBoxsRecordsInThisRepository(t *testing.T) {
+	apps := []App{testApp("blog", StateEntry{Kind: KindFiles, Path: "uploads"})}
+	capture, _ := capturing(snapshotsJSON(
+		snap("aaa", "blog", 10*time.Minute),
+		record("blog", "box-2", 9*time.Minute, "aaa"),
+	), nil)
+	got, err := Status(context.Background(), apps, capture, t.TempDir(), "box-1")
 	if err != nil {
-		t.Fatalf("status: %v", err)
+		t.Fatal(err)
 	}
-	if got[0].LastSuccess.IsZero() {
-		t.Fatal("the marker should have been read")
+	if !got[0].LastSuccess.IsZero() || !got[0].Stale(statusNow) {
+		t.Errorf("another box's clean run is not this box's: %+v", got[0])
 	}
-	if got[0].Stale(time.Now()) {
-		t.Error("a marker written just now is not stale")
+	// The switched-to repository: snapshots of blog, no record of a
+	// clean run from here. A staging dir full of this box's history
+	// changes nothing.
+	staging := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(staging, "blog"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSeen(SeenPaths(filepath.Join(staging, "blog")), []string{"uploads"}); err != nil {
+		t.Fatal(err)
+	}
+	capture, _ = capturing(snapshotsJSON(snap("old", "blog", 5*time.Minute)), nil)
+	got, err = Status(context.Background(), apps, capture, staging, "box-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got[0].Stale(statusNow) {
+		t.Error("a repository with no clean run recorded from this box must not read as current")
 	}
 }
 
@@ -228,35 +235,32 @@ func TestStatusNamesADeclaredPathThatHasNeverBeenThere(t *testing.T) {
 	if err := os.MkdirAll(staging, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(SuccessMarker(staging), nil, 0o640); err != nil {
-		t.Fatal(err)
-	}
 	if err := writeSeen(SeenPaths(staging), []string{"uploads"}); err != nil {
 		t.Fatal(err)
 	}
 	app := testApp("blog", StateEntry{Kind: KindFiles, Path: "uploads/"}, StateEntry{Kind: KindFiles, Path: "upload"})
-	capture, _ := capturing(snapshotsJSON(snap("aaa", "blog", time.Hour)), nil)
-	got, err := Status(context.Background(), []App{app}, capture, root)
+	capture, _ := capturing(snapshotsJSON(snap("aaa", "blog", time.Hour), record("blog", "box-1", 59*time.Minute, "aaa")), nil)
+	got, err := Status(context.Background(), []App{app}, capture, root, "box-1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Equal(got[0].NeverThere, []string{"upload"}) {
 		t.Fatalf("want only the path no run has found, got %v", got[0].NeverThere)
 	}
-	if got[0].Stale(time.Now()) {
+	if got[0].Stale(statusNow) {
 		t.Error("a path not created yet must not make the app stale: --check would page someone for an empty uploads dir")
 	}
 	var b strings.Builder
-	FormatStatus(&b, got, time.Now())
+	FormatStatus(&b, got, statusNow)
 	if !strings.Contains(b.String(), "upload has not existed at any backup yet") || !strings.Contains(b.String(), "`state files upload` has the path wrong") {
 		t.Errorf("the report must name the path and the typo it may be:\n%s", b.String())
 	}
-	// Before any clean run, the list is empty for every path, which is
-	// not news: say nothing.
-	if err := os.Remove(SuccessMarker(staging)); err != nil {
+	// Before any clean run on this box there is no list, which is not
+	// news: say nothing.
+	if err := os.Remove(SeenPaths(staging)); err != nil {
 		t.Fatal(err)
 	}
-	got, _ = Status(context.Background(), []App{app}, capture, root)
+	got, _ = Status(context.Background(), []App{app}, capture, root, "box-1")
 	if len(got[0].NeverThere) != 0 {
 		t.Errorf("without a clean run there is nothing to compare with, got %v", got[0].NeverThere)
 	}
@@ -315,7 +319,7 @@ func TestFormatStatusWithNothingDeclared(t *testing.T) {
 
 func TestStatusSurfacesResticFailures(t *testing.T) {
 	capture, _ := capturing(nil, errors.New("Fatal: unable to open repository"))
-	_, err := Status(context.Background(), []App{testApp("blog")}, capture, t.TempDir())
+	_, err := Status(context.Background(), []App{testApp("blog")}, capture, t.TempDir(), "box-1")
 	if err == nil || !strings.Contains(err.Error(), "reading snapshots") {
 		t.Fatalf("want the restic failure surfaced, got %v", err)
 	}

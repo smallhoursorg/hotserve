@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -118,7 +119,7 @@ func snapshotHolding(held map[string]string) Capturer {
 	return func(_ context.Context, _ string, args ...string) ([]byte, error) {
 		switch args[0] {
 		case "snapshots":
-			return []byte(`[{"short_id":"s1","time":"2026-09-18T12:00:00Z","tags":["hotserve","app:blog"]}]`), nil
+			return []byte(`[{"id":"s1full","short_id":"s1","time":"2026-09-18T12:00:00Z","tags":["hotserve","app:blog"]}]`), nil
 		case "ls":
 			var b strings.Builder
 			b.WriteString(`{"struct_type":"snapshot","short_id":"s1"}` + "\n")
@@ -144,8 +145,10 @@ func TestExecuteStagesDatabasesThenBacksUp(t *testing.T) {
 	if err := job.Execute(context.Background()); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
-	if len(rec.calls) != 3 {
-		t.Fatalf("want 3 commands, got %d: %+v", len(rec.calls), rec.calls)
+	// Two copies, the backup, then the clean-run record (after the
+	// read-back, which captures rather than runs).
+	if len(rec.calls) != 4 || cleanRecord(rec) == nil {
+		t.Fatalf("want 4 commands ending in the record, got %d: %+v", len(rec.calls), rec.calls)
 	}
 	if rec.calls[0].name != "sqlite3" || rec.calls[1].name != "sqlite3" {
 		t.Fatalf("databases must be staged first: %+v", rec.calls)
@@ -184,8 +187,8 @@ func TestExecuteFilesOnly(t *testing.T) {
 	if err := job.Execute(context.Background()); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
-	if len(rec.calls) != 1 || rec.calls[0].name != "restic" {
-		t.Fatalf("want one restic call, got %+v", rec.calls)
+	if len(rec.calls) != 2 || rec.calls[0].name != "restic" || cleanRecord(rec) == nil {
+		t.Fatalf("want the backup then its clean-run record, got %+v", rec.calls)
 	}
 	for _, a := range rec.calls[0].args {
 		if a == job.Staging || a == StagingData(job.Staging) {
@@ -277,11 +280,21 @@ func TestExecuteRefusesADeclaredPathThatIsASymlink(t *testing.T) {
 	}
 }
 
+// cleanRecord is the clean-run record a job wrote, if it wrote one.
+func cleanRecord(rec *recorder) []string {
+	for _, c := range rec.calls {
+		if c.name == "restic" && slices.Contains(c.args, CleanTag) {
+			return c.args
+		}
+	}
+	return nil
+}
+
 // Every check before the read-back is about the job's own view; none
 // of them is the backup. A snapshot that does not hold a declared
 // path, holds it as a link, or holds an empty database copy must fail
-// the run — so it never earns the marker that `status` reads as
-// "backed up".
+// the run — so it never earns the clean-run record that `status` reads
+// as "backed up" and restore chooses by.
 func TestExecuteFailsWhenTheSnapshotDoesNotHoldWhatWasDeclared(t *testing.T) {
 	uploads := func(j Job) string { return filepath.Join(j.Shared, "uploads") }
 	appDB := func(j Job) string { return filepath.Join(StagingData(j.Staging), "app.db") }
@@ -303,7 +316,8 @@ func TestExecuteFailsWhenTheSnapshotDoesNotHoldWhatWasDeclared(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			job := newJob(t, &recorder{}, []string{"app.db"}, []string{"uploads"})
+			rec := &recorder{}
+			job := newJob(t, rec, []string{"app.db"}, []string{"uploads"})
 			held := heldBy(job)
 			tc.edit(job, held)
 			job.Capture = snapshotHolding(held)
@@ -311,8 +325,8 @@ func TestExecuteFailsWhenTheSnapshotDoesNotHoldWhatWasDeclared(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("want a failure saying %q, got %v", tc.want, err)
 			}
-			if _, statErr := os.Stat(SuccessMarker(job.Staging)); !os.IsNotExist(statErr) {
-				t.Error("a run whose snapshot does not hold what was declared must not be recorded as a success")
+			if r := cleanRecord(rec); r != nil {
+				t.Errorf("a run whose snapshot does not hold what was declared must not be recorded as clean: %v", r)
 			}
 		})
 	}
@@ -327,7 +341,8 @@ func TestExecuteFailsWhenTheSnapshotDoesNotHoldWhatWasDeclared(t *testing.T) {
 // never the one checked.
 func TestExecuteReadsBackThroughTheParentsOfWhatWasDeclared(t *testing.T) {
 	var lsArgs, snapshotArgs []string
-	job := newJob(t, &recorder{}, []string{"app.db", "data/sessions.db"}, []string{"uploads"})
+	rec := &recorder{}
+	job := newJob(t, rec, []string{"app.db", "data/sessions.db"}, []string{"uploads"})
 	holding := job.Capture
 	job.Capture = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		switch args[0] {
@@ -358,8 +373,12 @@ func TestExecuteReadsBackThroughTheParentsOfWhatWasDeclared(t *testing.T) {
 	if !strings.Contains(strings.Join(snapshotArgs, " "), "--host "+host) {
 		t.Errorf("the snapshot checked must be this box's: %v", snapshotArgs)
 	}
-	if _, err := os.Stat(SuccessMarker(job.Staging)); err != nil {
-		t.Errorf("a snapshot holding everything declared is a success: %v", err)
+	// A snapshot holding everything declared is a success, recorded in
+	// the repository against that snapshot's full id, and never tagged
+	// as a backup itself.
+	r := cleanRecord(rec)
+	if r == nil || !slices.Contains(r, "clean-of:s1full") || !slices.Contains(r, "clean-app:blog") || slices.Contains(r, "hotserve") {
+		t.Errorf("want a clean-run record for s1full, tagged for blog and not as a backup, got %v", r)
 	}
 }
 
@@ -368,21 +387,21 @@ func TestExecuteReadsBackThroughTheParentsOfWhatWasDeclared(t *testing.T) {
 // not created yet — would let the other declarations keep the app green
 // while this one is never backed up again.
 func TestExecuteFailsWhenABackedUpPathGoesMissing(t *testing.T) {
-	job := newJob(t, &recorder{}, []string{"app.db"}, []string{"uploads", "avatars"})
+	rec := &recorder{}
+	job := newJob(t, rec, []string{"app.db"}, []string{"uploads", "avatars"})
 	if err := job.Execute(context.Background()); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
 	if err := os.RemoveAll(filepath.Join(job.Shared, "uploads")); err != nil {
 		t.Fatal(err)
 	}
-	marker := SuccessMarker(job.Staging)
-	before, _ := os.Stat(marker)
+	rec.calls = nil
 	err := job.Execute(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "backed up before") {
 		t.Fatalf("want a failure naming the vanished path, got %v", err)
 	}
-	if after, _ := os.Stat(marker); !after.ModTime().Equal(before.ModTime()) {
-		t.Error("a run that lost a declared path must not refresh the success marker")
+	if r := cleanRecord(rec); r != nil {
+		t.Errorf("a run that lost a declared path must not be recorded as clean: %v", r)
 	}
 }
 

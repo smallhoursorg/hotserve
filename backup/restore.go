@@ -142,7 +142,7 @@ func (j RestoreJob) Execute(ctx context.Context) error {
 	type fileStep struct {
 		rel, path string
 		dir       bool
-		mode      fs.FileMode
+		mode      *fs.FileMode
 	}
 	var files []fileStep
 	for i, rel := range j.Files {
@@ -158,7 +158,12 @@ func (j RestoreJob) Execute(ctx context.Context) error {
 		case n.Type == "dir":
 			files = append(files, fileStep{rel: filepath.Clean(rel), path: w.path, dir: true})
 		case n.Type == "file":
-			files = append(files, fileStep{rel: filepath.Clean(rel), path: w.path, mode: fs.FileMode(n.Mode).Perm()})
+			step := fileStep{rel: filepath.Clean(rel), path: w.path}
+			if n.Mode != nil {
+				m := fs.FileMode(*n.Mode).Perm()
+				step.mode = &m
+			}
+			files = append(files, step)
 		default:
 			return fmt.Errorf("snapshot %s holds %s as a %s, which this does not restore — nothing was restored", j.Snapshot, rel, n.Type)
 		}
@@ -218,10 +223,11 @@ func (j RestoreJob) Execute(ctx context.Context) error {
 				return fmt.Errorf("app %s: restoring %s: %w", j.App, f.rel, err)
 			}
 			err := j.Dump(ctx, j.Snapshot, f.path, tmp)
-			if err == nil && f.mode != 0 {
+			if err == nil && f.mode != nil {
 				// dump gives the bytes and not the mode; the listing
-				// has it, and a script that was executable stays so.
-				err = os.Chmod(tmp, f.mode)
+				// has it, and a script that was executable stays so —
+				// as does a file nobody may read (mode 0).
+				err = os.Chmod(tmp, *f.mode)
 			}
 			if err != nil {
 				_ = os.Remove(tmp)
@@ -322,36 +328,35 @@ func RestoreArgs(app App, o LaunchOptions, snapshot string, del bool) []string {
 // this app's snapshots are candidates, so an id copied from another
 // app's listing is refused rather than restored into this one.
 //
-// Unasked, it is the newest — from any box, since a rebuilt box has a
-// new hostname and the box whose snapshots it needs is the one that is
-// gone — but not one newer than this box's last clean run (lastClean,
-// zero when there has been none). restic writes a snapshot even when
-// the run fails part-way, so the newest can be missing files the app
-// still has; restored with --delete, it would delete them. Such a
-// snapshot is named in the note, for --snapshot, rather than chosen.
-func pickSnapshot(app string, snaps []Snapshot, want string, lastClean time.Time) (Snapshot, string, error) {
+// Unasked, it is the newest snapshot a clean-run record vouches for
+// (clean: the ids recorded for this app, see CleanTag) — from any box,
+// since a rebuilt box has a new hostname and the box whose snapshots it
+// needs is the one that is gone. restic writes a snapshot even when the
+// run fails part-way, so an unvouched one can be missing files: restored,
+// they would be silently absent, and with --delete, deleted. A newer
+// unvouched snapshot is named in the note, for --snapshot, rather than
+// chosen; with no vouched snapshot at all, one has to be chosen by hand.
+func pickSnapshot(app string, snaps []Snapshot, want string, clean map[string]bool) (Snapshot, string, error) {
 	if len(snaps) == 0 {
 		return Snapshot{}, "", fmt.Errorf("the repository has no snapshot of %s", app)
 	}
 	if want == "" || want == "latest" {
-		newest := func(ok func(Snapshot) bool) *Snapshot {
-			var n *Snapshot
-			for i, s := range snaps {
-				if ok(s) && (n == nil || s.Time.After(n.Time)) {
-					n = &snaps[i]
-				}
+		var latest, latestClean *Snapshot
+		for i, s := range snaps {
+			if latest == nil || s.Time.After(latest.Time) {
+				latest = &snaps[i]
 			}
-			return n
+			if clean[s.ID] && (latestClean == nil || s.Time.After(latestClean.Time)) {
+				latestClean = &snaps[i]
+			}
 		}
-		latest := newest(func(Snapshot) bool { return true })
-		if lastClean.IsZero() || !latest.Time.After(lastClean) {
-			return *latest, "", nil
+		switch {
+		case latestClean == nil:
+			return Snapshot{}, "", fmt.Errorf("no snapshot of %s is recorded as coming from a run that finished cleanly, so any of them may be missing files — choose one yourself with --snapshot <id> (`sudo hotserve backup restic -- snapshots --tag app:%s` lists them; the newest is %s)", app, app, latest.ShortID)
+		case latestClean.ID != latest.ID:
+			return *latestClean, fmt.Sprintf("Snapshot %s is newer, but the run that took it did not finish cleanly, so it may be missing files; this uses the newest clean one. --snapshot %s restores that one instead.", latest.ShortID, latest.ShortID), nil
 		}
-		clean := newest(func(s Snapshot) bool { return !s.Time.After(lastClean) })
-		if clean == nil {
-			return *latest, fmt.Sprintf("No backup of %s has finished cleanly since snapshot %s was taken; it may be missing files.", app, latest.ShortID), nil
-		}
-		return *clean, fmt.Sprintf("Snapshot %s is newer, but the run that took it did not finish cleanly, so it may be missing files; this uses the last clean one. --snapshot %s restores that one instead.", latest.ShortID, latest.ShortID), nil
+		return *latestClean, "", nil
 	}
 	var found []Snapshot
 	for _, s := range snaps {

@@ -66,9 +66,8 @@ reads as root; nothing about backups is configured in the Caddyfile.
       root: the repository settings are root-only.
 
   hotserve backup restore <app> [--snapshot <id>] [--delete] [--yes]
-      Puts the app's declared state back from its newest snapshot (on
-      this box, the newest from a run that finished cleanly), or the
-      one given. It says which snapshot and what will happen, and asks
+      Puts the app's declared state back from the newest snapshot a
+      clean run recorded in the repository, or the one given. It says which snapshot and what will happen, and asks
       for the app's name before changing anything. Databases are
       replaced through SQLite's own backup API, in one transaction, so
       the app can keep running; files in the snapshot are put back, and
@@ -194,7 +193,11 @@ func cmdStatus(fl caddycmd.Flags) (int, error) {
 	if err != nil {
 		return caddy1, err
 	}
-	statuses, err := Status(ctx, apps, withCaptureEnv(captureRunner(), env), fl.String("staging"))
+	host, err := os.Hostname()
+	if err != nil {
+		return caddy1, fmt.Errorf("finding this box's hostname (restic records it on every snapshot): %w", err)
+	}
+	statuses, err := Status(ctx, apps, withCaptureEnv(captureRunner(), env), fl.String("staging"), host)
 	if err != nil {
 		return caddy1, err
 	}
@@ -594,19 +597,18 @@ func cmdRestore(fl caddycmd.Flags, args []string) (int, error) {
 		return caddy1, err
 	}
 	view := jobView{User: o.User, EnvFile: envFile, Home: StagingRestore(staging), RepositoryPath: repoPath, RepositoryReadOnly: true}
-	out, err := captureRunner()(ctx, "systemd-run", resticInUnit(view, []string{"snapshots", "--no-lock", "--json", "--tag", "hotserve,app:" + name})...)
+	// This app's backups, and every clean-run record (an OR of the two
+	// --tag flags).
+	out, err := captureRunner()(ctx, "systemd-run", resticInUnit(view, []string{"snapshots", "--no-lock", "--json", "--tag", "hotserve,app:" + name, "--tag", CleanTag})...)
 	if err != nil {
 		return caddy1, fmt.Errorf("listing the snapshots of %s: %w", name, err)
 	}
-	var snaps []Snapshot
-	if err := json.Unmarshal(out, &snaps); err != nil {
+	var listed []Snapshot
+	if err := json.Unmarshal(out, &listed); err != nil {
 		return caddy1, fmt.Errorf("restic returned a snapshot list this version cannot read: %w", err)
 	}
-	var lastClean time.Time
-	if info, err := os.Stat(SuccessMarker(staging)); err == nil {
-		lastClean = info.ModTime()
-	}
-	snap, note, err := pickSnapshot(name, snaps, fl.String("snapshot"), lastClean)
+	snaps, cleanIDs, _ := cleanRecords(listed)
+	snap, note, err := pickSnapshot(name, snaps, fl.String("snapshot"), cleanIDs[name])
 	if err != nil {
 		return caddy1, err
 	}
@@ -622,10 +624,11 @@ func cmdRestore(fl caddycmd.Flags, args []string) (int, error) {
 	}
 	launch := RestoreArgs(app, o, snap.ID, del)
 	say(os.Stdout, "%s: restoring in %s: %s", name, unit, quoteArgs(jobCommand(launch)))
-	// Not ctx: cancelling it would kill systemd-run and leave the unit —
-	// which PID 1 owns — writing the app's data with nobody watching.
-	// An interrupt stops the unit instead, and says what that leaves.
-	err = execRunner(os.Stderr)(context.WithoutCancel(ctx), "systemd-run", launch...)
+	// An interrupt ends systemd-run — the client, not the unit, which
+	// PID 1 owns and would otherwise go on writing the app's data with
+	// nobody watching — so the unit is stopped here, at once, and the
+	// message says what that leaves.
+	err = execRunner(os.Stderr)(ctx, "systemd-run", launch...)
 	if ctx.Err() != nil {
 		_ = exec.Command("systemctl", "stop", unit+".service").Run() //nolint:gosec // a fixed program; the unit name is built here from an app name the config validated
 		return caddy1, fmt.Errorf("interrupted: the restore of %s was stopped, so it may be partly done — run it again to finish it", name)

@@ -117,7 +117,12 @@ A run counts only once its snapshot has been **read back** out of the
 repository holding every declared path as data: each database as a
 copy with something in it, each `files` path as the real thing, not a
 link. A run that exits cleanly but whose snapshot is missing any of
-that fails, and never counts as a backup in `status`.
+that fails. A run that passes writes a small record into the
+repository saying so — tagged `hotserve-clean`, a few hundred bytes,
+and a write, which a key that cannot delete can still make. `status`
+measures freshness from these records and `restore` chooses by them,
+so both work from the repository alone: on a rebuilt box, and after
+`init --force` onto another repository.
 
 Every `restic` and `sqlite3` command is printed as it runs, so anything
 here can be reproduced by hand:
@@ -267,8 +272,10 @@ Type the app's name to restore it: blog
   had not created it yet when it was taken — is left as it is.
 - **The newest clean snapshot, by default.** restic keeps a snapshot
   even from a run that failed part-way, and such a snapshot can be
-  missing files. When the newest one on this box came from a run that
-  did not finish cleanly, restore uses the one before it and says so.
+  missing files. restore takes the newest one a clean run recorded
+  (from any box — a rebuilt box has a new name), and when a newer one
+  exists without a record, it names it for `--snapshot` and says why it
+  passed it over.
 - **If it fails part-way** — a network error in the middle of a
   directory, say — that directory may be partly restored. Run the same
   command again to finish it. A database is either restored or left as
@@ -340,10 +347,13 @@ Two things it will say that are worth knowing before you see them at
 three in the morning:
 
 - **`(no clean run on this box)`** — the repository holds snapshots for
-  this app, but no backup run on *this* machine has finished cleanly.
-  restic writes a snapshot even when it exits part-way through, so a
-  fresh snapshot on its own is not evidence that anything works. This is
-  also what a rebuilt box shows until its first hourly run.
+  this app, but it has no record of a backup run from *this* machine
+  (by hostname) finishing cleanly. restic writes a snapshot even when it
+  exits part-way through, so a fresh snapshot on its own is not
+  evidence that anything works. This is also what a rebuilt box with a
+  new hostname shows until its first hourly run, and what a box shows
+  right after `init --force` onto a repository it has not backed up to
+  yet.
 - **`(last clean run 3 days ago)`** beside a recent snapshot — runs since
   then have been failing. `journalctl -u hotserve-backup-<app>` says why.
 - **`uploads has not existed at any backup yet`** — a declared path no
@@ -352,8 +362,9 @@ three in the morning:
   looks exactly the same, so the report names it until it appears. It
   does not make `--check` fail.
 
-Freshness is measured from the last clean run, not from the newest
-snapshot, so an app whose every run fails part-way cannot look healthy.
+Freshness is measured from the last clean run's record in this
+repository, not from the newest snapshot, so an app whose every run
+fails part-way cannot look healthy.
 
 Then do the thing almost nobody does: **restore once, on purpose,
 before you need to.** Restore an app's newest snapshot into a scratch

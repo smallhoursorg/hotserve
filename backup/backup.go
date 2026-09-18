@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -51,13 +52,68 @@ const (
 func StagingData(appStaging string) string  { return filepath.Join(appStaging, stagingData) }
 func StagingCache(appStaging string) string { return filepath.Join(appStaging, stagingCache) }
 
-// SuccessMarker is touched by a job that finished cleanly, and is
-// what `status` measures freshness from. restic writes a snapshot
-// even when it exits non-zero (unreadable sources, exit status 3), so
-// "a snapshot exists" is not "the backup worked" — and a monitor that
-// cannot tell those apart is worse than none.
-func SuccessMarker(appStaging string) string {
-	return filepath.Join(appStaging, ".last-success")
+// CleanTag marks a clean-run record: a tiny snapshot the job writes
+// into the repository once a backup has exited cleanly AND been read
+// back holding everything declared. restic writes a snapshot even when
+// it exits non-zero (unreadable sources, exit status 3), so "a snapshot
+// exists" is not "the backup worked" — and a monitor, or a restore,
+// that cannot tell those apart is worse than none.
+//
+// The record lives in the repository, not on the box, for two reasons
+// a marker file got wrong: a rebuilt box has no marker, so it could
+// not tell which of the dead box's snapshots were whole; and a marker
+// is not tied to a repository, so after `init --force` onto another
+// one it kept vouching for runs that went somewhere else. Writing a
+// record is an append, which a key that cannot delete can still do.
+//
+// It carries no `hotserve` tag, so nothing that lists backups — status,
+// restore, `snapshots --tag app:<name>` — mistakes it for one.
+const CleanTag = "hotserve-clean"
+
+// cleanAppTag and cleanOfTag say which app's run a record is for and
+// which snapshot it vouches for.
+func cleanAppTag(app string) string { return "clean-app:" + app }
+func cleanOfTag(id string) string   { return "clean-of:" + id }
+
+// cleanRecordArgs writes the record for snapshot id of app. Its content
+// comes from a command restic runs itself, so no file is written for it.
+func cleanRecordArgs(app, id string) []string {
+	return []string{"backup", "--quiet",
+		"--tag", CleanTag, "--tag", cleanAppTag(app), "--tag", cleanOfTag(id),
+		"--stdin-from-command", "--stdin-filename", CleanTag,
+		"--", "echo", id}
+}
+
+// cleanRecords splits a snapshot listing into backups and the clean-run
+// records among them, keyed by app: the ids each app's records vouch
+// for, and the records themselves (for their time and host).
+func cleanRecords(snaps []Snapshot) (backups []Snapshot, cleanIDs map[string]map[string]bool, records map[string][]Snapshot) {
+	cleanIDs = map[string]map[string]bool{}
+	records = map[string][]Snapshot{}
+	for _, s := range snaps {
+		if !slices.Contains(s.Tags, CleanTag) {
+			backups = append(backups, s)
+			continue
+		}
+		var app, of string
+		for _, t := range s.Tags {
+			if v, ok := strings.CutPrefix(t, "clean-app:"); ok {
+				app = v
+			}
+			if v, ok := strings.CutPrefix(t, "clean-of:"); ok {
+				of = v
+			}
+		}
+		if app == "" || of == "" {
+			continue
+		}
+		if cleanIDs[app] == nil {
+			cleanIDs[app] = map[string]bool{}
+		}
+		cleanIDs[app][of] = true
+		records[app] = append(records[app], s)
+	}
+	return backups, cleanIDs, records
 }
 
 // say prints one line of progress for the operator — to their terminal

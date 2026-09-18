@@ -150,21 +150,23 @@ func (j Job) Execute(ctx context.Context) error {
 			want = append(want, expectedNode{path: p})
 		}
 	}
-	if err := j.verifySnapshot(ctx, want); err != nil {
+	snap, err := j.verifySnapshot(ctx, want)
+	if err != nil {
 		return fmt.Errorf("app %s: %w", j.App, err)
 	}
 	// A snapshot existing is not the same as a backup succeeding:
 	// restic writes one and still exits non-zero when it could not
-	// read some of the sources. Freshness is therefore measured from
-	// this marker, written only after a clean exit AND a snapshot that
-	// was read back holding what was declared — rather than from the
-	// newest snapshot, which repeated partial backups would keep fresh
-	// while every run was failing.
+	// read some of the sources. So a clean run says so, in the
+	// repository (see CleanTag) — only after a clean exit AND a
+	// snapshot read back holding what was declared. status measures
+	// freshness from these records, and restore chooses by them.
+	record := cleanRecordArgs(j.App, snap.ID)
+	j.logf("+ restic %s", quoteArgs(record))
+	if err := j.Run(ctx, "restic", record...); err != nil {
+		return fmt.Errorf("app %s: snapshot %s is in the repository, but recording it as a clean run failed, so it will not count as one: %w", j.App, snap.ShortID, err)
+	}
 	if err := writeSeen(SeenPaths(j.Staging), present); err != nil {
 		return fmt.Errorf("app %s: recording which declared paths were backed up: %w", j.App, err)
-	}
-	if err := replaceFile(SuccessMarker(j.Staging), ""); err != nil {
-		return fmt.Errorf("app %s: recording the backup as complete: %w", j.App, err)
 	}
 	return nil
 }
@@ -294,7 +296,9 @@ type lsNode struct {
 	Path       string `json:"path"`
 	Type       string `json:"type"`
 	Size       uint64 `json:"size"`
-	Mode       uint32 `json:"mode"`
+	// Mode is nil when the listing has none, so a recorded mode of 0 —
+	// a file nobody may read — is told apart from a missing one.
+	Mode *uint32 `json:"mode"`
 }
 
 // verifySnapshot reads the snapshot just written back out of the
@@ -308,7 +312,7 @@ type lsNode struct {
 // were each found by someone imagining them. Reading the snapshot back
 // catches the next one without anyone having to: a declared path that
 // is missing, is a link, or (for a database) is empty fails the run,
-// so it never earns the success marker.
+// so it never earns the clean-run record.
 //
 // Two cheap calls: the newest snapshot for this app from this box,
 // then `ls` of each declared path's PARENT. restic's ls lists a named
@@ -317,27 +321,27 @@ type lsNode struct {
 // this job's memory. In the snapshot, a declared
 // path's parent holds only what was backed up from it, so its listing
 // grows with the number of declarations and nothing else.
-func (j Job) verifySnapshot(ctx context.Context, want []expectedNode) error {
+func (j Job) verifySnapshot(ctx context.Context, want []expectedNode) (Snapshot, error) {
 	if j.Capture == nil {
-		return errors.New("cannot read the snapshot back: no way to capture restic's output was given")
+		return Snapshot{}, errors.New("cannot read the snapshot back: no way to capture restic's output was given")
 	}
 	// This box's snapshots only: restic records the hostname, and
 	// another box backing up to the same repository with its clock
 	// running ahead would otherwise be "newest" and be checked instead.
 	host, err := os.Hostname()
 	if err != nil {
-		return fmt.Errorf("finding this box's hostname (restic records it on every snapshot): %w", err)
+		return Snapshot{}, fmt.Errorf("finding this box's hostname (restic records it on every snapshot): %w", err)
 	}
 	out, err := j.Capture(ctx, "restic", "snapshots", "--json", "--latest", "1", "--host", host, "--tag", "hotserve,app:"+j.App)
 	if err != nil {
-		return fmt.Errorf("reading back the snapshot just written: %w", err)
+		return Snapshot{}, fmt.Errorf("reading back the snapshot just written: %w", err)
 	}
 	var snaps []Snapshot
 	if err := json.Unmarshal(out, &snaps); err != nil {
-		return fmt.Errorf("restic returned a snapshot list this version cannot read: %w", err)
+		return Snapshot{}, fmt.Errorf("restic returned a snapshot list this version cannot read: %w", err)
 	}
 	if len(snaps) == 0 {
-		return errors.New("restic reported a backup, but no snapshot for this app is in the repository")
+		return Snapshot{}, errors.New("restic reported a backup, but no snapshot for this app is in the repository")
 	}
 	newest := snaps[0]
 	for _, s := range snaps[1:] {
@@ -355,7 +359,7 @@ func (j Job) verifySnapshot(ctx context.Context, want []expectedNode) error {
 	}
 	out, err = j.Capture(ctx, "restic", args...)
 	if err != nil {
-		return fmt.Errorf("listing snapshot %s: %w", newest.ShortID, err)
+		return Snapshot{}, fmt.Errorf("listing snapshot %s: %w", newest.ShortID, err)
 	}
 	nodes := map[string]lsNode{}
 	for line := range strings.SplitSeq(string(out), "\n") {
@@ -368,15 +372,15 @@ func (j Job) verifySnapshot(ctx context.Context, want []expectedNode) error {
 		n, ok := nodes[w.path]
 		switch {
 		case !ok:
-			return fmt.Errorf("snapshot %s does not contain %s, which was backed up — nothing of it could be restored", newest.ShortID, w.path)
+			return Snapshot{}, fmt.Errorf("snapshot %s does not contain %s, which was backed up — nothing of it could be restored", newest.ShortID, w.path)
 		case n.Type == "symlink":
-			return fmt.Errorf("snapshot %s holds %s as a symlink, not its data — nothing behind it could be restored", newest.ShortID, w.path)
+			return Snapshot{}, fmt.Errorf("snapshot %s holds %s as a symlink, not its data — nothing behind it could be restored", newest.ShortID, w.path)
 		case w.database && (n.Type != "file" || n.Size == 0):
-			return fmt.Errorf("snapshot %s holds the database copy %s as an empty %s — the copy did not take", newest.ShortID, w.path, n.Type)
+			return Snapshot{}, fmt.Errorf("snapshot %s holds the database copy %s as an empty %s — the copy did not take", newest.ShortID, w.path, n.Type)
 		}
 	}
 	j.logf("%s: snapshot %s read back: %d declared path(s) present", j.App, newest.ShortID, len(want))
-	return nil
+	return newest, nil
 }
 
 // linkTarget names what a symlink points at, for the error that

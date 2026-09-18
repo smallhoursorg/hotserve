@@ -257,6 +257,16 @@ func TestRestoreReplacesADeclaredFileWithoutFollowingALink(t *testing.T) {
 	if info, _ := os.Stat(live); info.Mode().Perm() != 0o755 {
 		t.Errorf("config.json has mode %v, want the snapshot's 0755", info.Mode().Perm())
 	}
+	// A recorded mode of 0 is a mode, not a missing one.
+	f = newRestore(t, nil, []string{"secret.key"})
+	locked := filepath.Join(f.job.Shared, "secret.key")
+	f.held[locked] = fmt.Sprintf(`{"struct_type":"node","path":%q,"type":"file","size":17,"mode":0}`, locked)
+	if err := f.job.Execute(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if info, _ := os.Stat(locked); info.Mode().Perm() != 0 {
+		t.Errorf("secret.key has mode %v, want the snapshot's 0000", info.Mode().Perm())
+	}
 	if got, _ := os.ReadFile(elsewhere); string(got) != "untouched" {
 		t.Errorf("the restore wrote through a link to %s", elsewhere)
 	}
@@ -269,37 +279,43 @@ func TestPickSnapshot(t *testing.T) {
 		{ID: "cccc2222dddd", ShortID: "cccc2222", Time: at(5)},
 		{ID: "aaaa1111eeee", ShortID: "aaaa1111", Time: at(1)},
 	}
-	var never time.Time
-	if s, _, err := pickSnapshot("blog", snaps, "", never); err != nil || s.ID != "cccc2222dddd" {
-		t.Errorf("unset picks the newest from any box, got %v %v", s.ID, err)
+	allClean := map[string]bool{"aaaa1111bbbb": true, "cccc2222dddd": true, "aaaa1111eeee": true}
+	if s, note, err := pickSnapshot("blog", snaps, "", allClean); err != nil || s.ID != "cccc2222dddd" || note != "" {
+		t.Errorf("unset picks the newest clean one, from any box, got %v %q %v", s.ID, note, err)
 	}
-	if s, _, err := pickSnapshot("blog", snaps, "cccc2222", never); err != nil || s.ID != "cccc2222dddd" {
+	if s, _, err := pickSnapshot("blog", snaps, "cccc2222", allClean); err != nil || s.ID != "cccc2222dddd" {
 		t.Errorf("a short id picks that snapshot, got %v %v", s.ID, err)
 	}
-	if s, _, err := pickSnapshot("blog", snaps, "aaaa1111eeee", never); err != nil || s.ID != "aaaa1111eeee" {
+	if s, _, err := pickSnapshot("blog", snaps, "aaaa1111eeee", allClean); err != nil || s.ID != "aaaa1111eeee" {
 		t.Errorf("a full id picks that snapshot, got %v %v", s.ID, err)
 	}
-	if _, _, err := pickSnapshot("blog", snaps, "aaaa1111", never); err == nil || !strings.Contains(err.Error(), "matches 2") {
+	if _, _, err := pickSnapshot("blog", snaps, "aaaa1111", allClean); err == nil || !strings.Contains(err.Error(), "matches 2") {
 		t.Errorf("an ambiguous id must be refused, got %v", err)
 	}
 	// Only this app's snapshots are listed, so another app's id is not
 	// among them: refused, rather than restored into this app.
-	if _, _, err := pickSnapshot("blog", snaps, "ffff9999", never); err == nil {
+	if _, _, err := pickSnapshot("blog", snaps, "ffff9999", allClean); err == nil {
 		t.Error("an id that is not one of this app's snapshots must be refused")
 	}
-	if _, _, err := pickSnapshot("blog", nil, "", never); err == nil {
+	if _, _, err := pickSnapshot("blog", nil, "", allClean); err == nil {
 		t.Error("an app with no snapshots must be refused")
 	}
-	// The run at 05:00 left a snapshot but did not finish cleanly (the
-	// last clean run ended at 04:00): it may be missing files, so it is
-	// named, not chosen — restored with --delete it would delete them.
-	s, note, err := pickSnapshot("blog", snaps, "", at(4))
+	// The run at 05:00 left a snapshot but no clean-run record: it may be
+	// missing files, so it is named, not chosen — restored with --delete
+	// it would delete them. This holds on a rebuilt box too: the record
+	// is in the repository, not on the box that died.
+	s, note, err := pickSnapshot("blog", snaps, "", map[string]bool{"aaaa1111bbbb": true})
 	if err != nil || s.ID != "aaaa1111bbbb" || !strings.Contains(note, "cccc2222") {
 		t.Errorf("want the 03:00 snapshot and a note naming cccc2222, got %v %q %v", s.ID, note, err)
 	}
 	// Asked for by id, it is what was asked for.
-	if s, _, err := pickSnapshot("blog", snaps, "cccc2222", at(4)); err != nil || s.ID != "cccc2222dddd" {
+	if s, _, err := pickSnapshot("blog", snaps, "cccc2222", nil); err != nil || s.ID != "cccc2222dddd" {
 		t.Errorf("--snapshot overrides, got %v %v", s.ID, err)
+	}
+	// No record at all: nothing vouches for any of them, so the choice
+	// is the operator's, and the error names the newest to start from.
+	if _, _, err := pickSnapshot("blog", snaps, "", nil); err == nil || !strings.Contains(err.Error(), "--snapshot") || !strings.Contains(err.Error(), "cccc2222") {
+		t.Errorf("with no clean record a default must be refused, naming --snapshot and the newest, got %v", err)
 	}
 }
 
