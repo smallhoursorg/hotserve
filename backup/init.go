@@ -34,6 +34,10 @@ type InitOptions struct {
 	// user in the first place, because init's checks run as the job.
 	User  string
 	Force bool
+	// AskPassword, when set, is asked for the password of a repository
+	// that turns out to exist already — a rebuilt box, at a terminal —
+	// instead of refusing. nil anywhere nobody can answer.
+	AskPassword func() (string, error)
 }
 
 // asJobHint explains the one thing that surprises an operator whose
@@ -150,9 +154,10 @@ func Init(ctx context.Context, o InitOptions, run Runner, capture Capturer, log 
 	// first would survive a failed run — a typo'd bucket, a wrong
 	// key — and the retry would then refuse to overwrite it, warning
 	// about losing backups that were never made.
+	baseRun, baseCapture := run, capture
 	env := EnvFor(o.Repository, password, o.Extra)
-	run = withEnv(run, env)
-	capture = withCaptureEnv(capture, env)
+	run = withEnv(baseRun, env)
+	capture = withCaptureEnv(baseCapture, env)
 
 	// Create first, then open — never the other way round. Asked to open
 	// a repository in a bucket that does not exist, restic 0.18 treats
@@ -168,12 +173,29 @@ func Init(ctx context.Context, o InitOptions, run Runner, capture Capturer, log 
 		say(log, "created a new repository")
 	case !alreadyInitialized(string(out)):
 		return fmt.Errorf("cannot create a repository at %s: %s\n\nCheck the URL, that the bucket exists, and that the storage key may write to it.\n\n%s", o.Repository, firstLine(out, initErr), asJobHint)
-	case generated:
+	case generated && o.AskPassword == nil:
 		// A password this command invented cannot open a repository
 		// that already exists; writing it down would leave the box
 		// backing up into something it cannot read.
-		return fmt.Errorf("%s already exists, and a new password was generated for it — pass --password-file with the password you saved when you first set it up, so this box uses the same one", o.Repository)
+		return fmt.Errorf("%s already exists, and a new password was generated for it — run init at a terminal to be asked for the password you saved when you first set it up, or pass it with --password-file", o.Repository)
 	default:
+		if generated {
+			// A rebuilt box, at a terminal: the repository is there, so
+			// the invented password is dropped and the real one asked
+			// for. Nothing was written with the invented one — `restic
+			// init` refused before creating anything.
+			asked, err := o.AskPassword()
+			if err != nil {
+				return err
+			}
+			if err := envFileSafe("the repository password", asked); err != nil {
+				return err
+			}
+			password, generated = asked, false
+			env = EnvFor(o.Repository, password, o.Extra)
+			run = withEnv(baseRun, env)
+			capture = withCaptureEnv(baseCapture, env)
+		}
 		if out, err := capture(ctx, "restic", "cat", "config"); err != nil {
 			return fmt.Errorf("%s already exists, and this password cannot open it (%s) — pass --password-file with the password you saved when you first set it up", o.Repository, firstLine(out, err))
 		}

@@ -320,6 +320,58 @@ func TestInitNeverOpensWhereItCouldNotCreate(t *testing.T) {
 	}
 }
 
+// A rebuilt box, at a terminal: the repository already exists, so the
+// password init would have invented is dropped and the real one asked
+// for — and it is that one, checked against the repository, that goes
+// into the settings. Nothing was created with the invented one.
+func TestInitAsksForTheExistingRepositorysPassword(t *testing.T) {
+	o := initOpts(t)
+	o.Password = "" // nothing given: init would invent one
+	asked := 0
+	o.AskPassword = func() (string, error) { asked++; return "the-one-saved-at-setup", nil }
+	var out strings.Builder
+	if err := Init(context.Background(), o, (&recorder{}).run, probeSnapshots(), &out); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if asked != 1 {
+		t.Fatalf("asked %d times, want once", asked)
+	}
+	body, err := os.ReadFile(o.EnvFile)
+	if err != nil || !strings.Contains(string(body), "RESTIC_PASSWORD=the-one-saved-at-setup\n") {
+		t.Errorf("the settings must hold the password that was asked for: %q, %v", body, err)
+	}
+	if strings.Contains(out.String(), "save this somewhere safe") {
+		t.Error("an existing repository's password is not news: no invented one may be printed")
+	}
+
+	// And a new repository is never asked about: its password is made
+	// here, strong, and shown once.
+	fresh := initOpts(t)
+	fresh.Password = ""
+	fresh.AskPassword = func() (string, error) {
+		t.Error("asked for a password of a repository that did not exist")
+		return "", nil
+	}
+	if err := Init(context.Background(), fresh, (&recorder{}).run, missingRepo(), io.Discard); err != nil {
+		t.Fatalf("init on a new repository: %v", err)
+	}
+}
+
+// The asked-for password is checked like any other: a wrong one is
+// said plainly, and nothing is written.
+func TestInitRefusesAWrongAskedForPassword(t *testing.T) {
+	o := initOpts(t)
+	o.Password = ""
+	o.AskPassword = func() (string, error) { return "not-it", nil }
+	err := Init(context.Background(), o, (&recorder{}).run, (&fakeRestic{wrongPassword: true}).capture, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "cannot open it") {
+		t.Fatalf("want a wrong-password failure, got %v", err)
+	}
+	if _, statErr := os.Stat(o.EnvFile); !os.IsNotExist(statErr) {
+		t.Error("no settings may be written with a password that does not open the repository")
+	}
+}
+
 // Existing repository, wrong password: said plainly, and quickly.
 func TestInitSaysWhenThePasswordCannotOpenTheRepository(t *testing.T) {
 	fake := &fakeRestic{wrongPassword: true}

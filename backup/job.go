@@ -294,6 +294,7 @@ type lsNode struct {
 	Path       string `json:"path"`
 	Type       string `json:"type"`
 	Size       uint64 `json:"size"`
+	Mode       uint32 `json:"mode"`
 }
 
 // verifySnapshot reads the snapshot just written back out of the
@@ -313,7 +314,7 @@ type lsNode struct {
 // then `ls` of each declared path's PARENT. restic's ls lists a named
 // directory's direct children, so naming an uploads dir itself would
 // return one line per upload — a hundred thousand of them, held in
-// memory inside a job throttled at 64 MB. In the snapshot, a declared
+// this job's memory. In the snapshot, a declared
 // path's parent holds only what was backed up from it, so its listing
 // grows with the number of declarations and nothing else.
 func (j Job) verifySnapshot(ctx context.Context, want []expectedNode) error {

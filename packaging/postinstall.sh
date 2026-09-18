@@ -128,7 +128,7 @@ EOF
 	# Only when it is true: an upgrade of a box whose backups work must
 	# not be told they are off.
 	if [ ! -e /etc/hotserve/backup.env ]; then
-		echo "Backups are off until you run:"
-		echo "  sudo hotserve backup init"
+		echo "Backups are off until you run, with where they go:"
+		echo "  sudo hotserve backup init s3:<endpoint>/<bucket>    (docs/backups.md)"
 	fi
 fi

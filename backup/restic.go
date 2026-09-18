@@ -34,31 +34,36 @@ func Passthrough(ctx context.Context, envFile, username string, args []string, s
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	if os.Geteuid() == 0 && username != "" {
-		cred, err := credentialFor(username)
+		cred, home, err := credentialFor(username)
 		if err != nil {
 			return err
 		}
 		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: cred}
+		// And that user's HOME, as `sudo -H` would: root's is where
+		// sudo leaves it, and restic keeps its cache under HOME — so
+		// every command printed "unable to open cache: mkdir
+		// /root/.cache: permission denied" and ran without one.
+		cmd.Env = append(cmd.Env, "HOME="+home)
 	}
 	say(stderr, "+ restic %s", quoteArgs(args))
 	return cmd.Run()
 }
 
-func credentialFor(username string) (*syscall.Credential, error) {
+func credentialFor(username string) (*syscall.Credential, string, error) {
 	u, err := user.Lookup(username)
 	if err != nil {
-		return nil, fmt.Errorf("looking up the %s user (backups belong to it): %w", username, err)
+		return nil, "", fmt.Errorf("looking up the %s user (backups belong to it): %w", username, err)
 	}
 	// Parsed at the width the kernel uses, rather than parsed as an int
 	// and narrowed: a uid that does not fit is a broken passwd entry,
 	// and narrowing it would silently run restic as somebody else.
 	uid, err := strconv.ParseUint(u.Uid, 10, 32)
 	if err != nil {
-		return nil, fmt.Errorf("user %s has a uid %q that is not a number in range", username, u.Uid)
+		return nil, "", fmt.Errorf("user %s has a uid %q that is not a number in range", username, u.Uid)
 	}
 	gid, err := strconv.ParseUint(u.Gid, 10, 32)
 	if err != nil {
-		return nil, fmt.Errorf("user %s has a gid %q that is not a number in range", username, u.Gid)
+		return nil, "", fmt.Errorf("user %s has a gid %q that is not a number in range", username, u.Gid)
 	}
-	return &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}, nil
+	return &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}, u.HomeDir, nil
 }

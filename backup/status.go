@@ -21,10 +21,12 @@ type Capturer func(ctx context.Context, name string, args ...string) ([]byte, er
 
 // Snapshot is the part of `restic snapshots --json` this reads.
 type Snapshot struct {
-	ShortID string    `json:"short_id"`
-	Time    time.Time `json:"time"`
-	Tags    []string  `json:"tags"`
-	Paths   []string  `json:"paths"`
+	ID       string    `json:"id"`
+	ShortID  string    `json:"short_id"`
+	Time     time.Time `json:"time"`
+	Hostname string    `json:"hostname"`
+	Tags     []string  `json:"tags"`
+	Paths    []string  `json:"paths"`
 }
 
 // AppStatus is one app's line in the report.
@@ -40,6 +42,11 @@ type AppStatus struct {
 	// backup of a large uploads dir can take hours, and without this the
 	// report would show only "never", which reads as something broken.
 	Running bool
+	// NeverThere lists the declared files paths that no clean run has
+	// found yet: an app's uploads dir before the first upload — or a
+	// typo, which looks exactly the same to the job. Only the report can
+	// tell them apart, by saying so to someone who knows which it is.
+	NeverThere []string
 }
 
 // StaleAfter is when an hourly backup is late enough to be worth
@@ -82,7 +89,11 @@ func (s AppStatus) Stale(now time.Time) bool {
 // an app whose `state` lines were removed drops off the report even
 // though its old snapshots remain in the repository.
 func Status(ctx context.Context, apps []App, capture Capturer, stagingRoot string) ([]AppStatus, error) {
-	out, err := capture(ctx, "restic", "snapshots", "--json", "--tag", "hotserve")
+	// --no-lock: status runs as root, and a lock it wrote into a
+	// repository on this box would be root's — one the jobs could not
+	// clear if status were killed before removing it. Listing snapshots
+	// needs no lock.
+	out, err := capture(ctx, "restic", "snapshots", "--no-lock", "--json", "--tag", "hotserve")
 	if err != nil {
 		return nil, fmt.Errorf("reading snapshots: %w", err)
 	}
@@ -101,8 +112,17 @@ func Status(ctx context.Context, apps []App, capture Capturer, stagingRoot strin
 	statuses := make([]AppStatus, 0, len(apps))
 	for _, app := range apps {
 		st := AppStatus{App: app, Snapshots: len(byApp[app.Name])}
-		if info, err := os.Stat(SuccessMarker(filepath.Join(stagingRoot, app.Name))); err == nil {
+		staging := filepath.Join(stagingRoot, app.Name)
+		if info, err := os.Stat(SuccessMarker(staging)); err == nil {
 			st.LastSuccess = info.ModTime()
+			// The seen list is written by the same clean run as the
+			// marker, so without the marker it says nothing yet.
+			seen := readSeen(SeenPaths(staging))
+			for _, rel := range app.Files() {
+				if !seen[filepath.Clean(rel)] {
+					st.NeverThere = append(st.NeverThere, filepath.Clean(rel))
+				}
+			}
 		}
 		for i, s := range byApp[app.Name] {
 			if st.Latest == nil || s.Time.After(st.Latest.Time) {
@@ -158,6 +178,12 @@ func FormatStatus(w io.Writer, statuses []AppStatus, now time.Time) {
 			say(w, "\n%s has no current backup yet; one is running now. Its progress:\n    journalctl -u hotserve-backup-%s -f", s.App.Name, s.App.Name)
 		case s.Stale(now):
 			say(w, "\n%s has no current backup. What the last run did:\n    journalctl -u hotserve-backup-%s -n 30", s.App.Name, s.App.Name)
+		}
+		// Not a failure, and not counted by --check: an app may declare
+		// where its data will go before it has any. But a typo in the
+		// path looks exactly like that for ever, so it is said here.
+		for _, rel := range s.NeverThere {
+			say(w, "\n%s: %s has not existed at any backup yet — the app has not created it, or `state files %s` has the path wrong (%s)", s.App.Name, rel, rel, filepath.Join(s.App.Shared, rel))
 		}
 	}
 }

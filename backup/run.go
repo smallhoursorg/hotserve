@@ -81,7 +81,7 @@ func LaunchArgs(app App, o LaunchOptions) []string {
 		EnvFile:        o.EnvFile,
 		Home:           staging,
 		Shared:         app.Shared,
-		SharedWritable: len(app.Databases()) > 0,
+		SharedWritable: sharedWritable(app),
 		RepositoryPath: o.RepositoryPath,
 	})...)
 	args = append(args,
@@ -97,6 +97,12 @@ func LaunchArgs(app App, o LaunchOptions) []string {
 	}
 	return args
 }
+
+// sharedWritable is whether an app's job gets its data dir writable:
+// only when a database must be opened, because SQLite creates the -shm
+// file beside a WAL database to read it at all. One place decides it,
+// for the sandbox and for what the log says about the sandbox.
+func sharedWritable(app App) bool { return len(app.Databases()) > 0 }
 
 // jobCommand is the command a unit runs: LaunchArgs without the
 // systemd-run flags and sandbox properties in front of it — what an
@@ -124,6 +130,9 @@ type jobView struct {
 	SharedWritable bool
 	// RepositoryPath is set for a repository on this box.
 	RepositoryPath string
+	// RepositoryReadOnly binds it read-only, for a unit that only reads
+	// the repository and runs restic with --no-lock.
+	RepositoryReadOnly bool
 }
 
 // sandboxProperties is the one definition of a backup unit's sandbox,
@@ -184,7 +193,13 @@ func sandboxProperties(v jobView) []string {
 			props = append(props, "--property=BindReadOnlyPaths="+v.Shared)
 		}
 	}
-	if v.RepositoryPath != "" {
+	switch {
+	case v.RepositoryPath != "" && v.RepositoryReadOnly:
+		// A restore writes the app's data, which the app itself can
+		// change under it — links included. The repository is not
+		// among what that can reach.
+		props = append(props, "--property=BindReadOnlyPaths="+v.RepositoryPath)
+	case v.RepositoryPath != "":
 		// A repository on this box is written to, so it goes in
 		// writable — and only for the jobs, never for an app.
 		props = append(props, "--property=BindPaths="+v.RepositoryPath)
@@ -199,6 +214,14 @@ func sandboxProperties(v jobView) []string {
 // root's ~/bin would otherwise be the one init checked the repository
 // with, and not the one the timer ever runs.
 const probeScript = `exec restic "$@"`
+
+// resticInUnit is the systemd-run argv that runs one restic command in
+// a unit with the job's sandbox, its output piped back to the caller.
+func resticInUnit(v jobView, args []string) []string {
+	argv := append([]string{"--wait", "--collect", "--quiet", "--pipe", "--expand-environment=no"}, sandboxProperties(v)...)
+	argv = append(argv, "/bin/sh", "-c", probeScript, "restic")
+	return append(argv, args...)
+}
 
 // asJob runs every command init gives it the way the hourly job runs:
 // as a transient unit with the job's own sandbox, user, PATH, HOME and
@@ -236,12 +259,9 @@ func asJob(v jobView, envDir string, run Runner, capture Capturer) (Runner, Capt
 		}
 		view := v
 		view.EnvFile = f.Name()
-		argv := append([]string{"--wait", "--collect", "--quiet", "--pipe", "--expand-environment=no"}, sandboxProperties(view)...)
-		argv = append(argv, "/bin/sh", "-c", probeScript, "restic")
-		argv = append(argv, args...)
 		// The secrets are in the file now; systemd-run itself has no
 		// use for them in its own environment.
-		return context.WithValue(ctx, envKey{}, nil), argv, cleanup, nil
+		return context.WithValue(ctx, envKey{}, nil), resticInUnit(view, args), cleanup, nil
 	}
 	return func(ctx context.Context, name string, args ...string) error {
 			ctx, argv, cleanup, err := launch(ctx, name, args)
@@ -355,7 +375,11 @@ func RunAll(ctx context.Context, apps []App, o LaunchOptions, run Runner, log io
 		// The command the unit runs, not the forty sandbox properties
 		// around it: those are the same every time, and
 		// `systemctl show hotserve-backup-<app>` has them while it runs.
-		say(log, "%s: backing up in %s: %s", app.Name, unitName(app.Name), quoteArgs(jobCommand(args)))
+		access := "read-only"
+		if sharedWritable(app) {
+			access = "writable, for SQLite"
+		}
+		say(log, "%s: backing up in %s, its data %s: %s", app.Name, unitName(app.Name), access, quoteArgs(jobCommand(args)))
 		if err := run(ctx, "systemd-run", args...); err != nil {
 			say(log, "%s: FAILED (%v) — journalctl -u %s", app.Name, err, unitName(app.Name))
 			failed = append(failed, app.Name)

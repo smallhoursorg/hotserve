@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -215,6 +216,49 @@ func TestStatusReadsTheSuccessMarker(t *testing.T) {
 	}
 	if got[0].Stale(time.Now()) {
 		t.Error("a marker written just now is not stale")
+	}
+}
+
+// A declared path no clean run has found is either not created yet or
+// a typo; the job cannot tell which, so the report names it — without
+// calling the app stale, which a new app's empty uploads dir is not.
+func TestStatusNamesADeclaredPathThatHasNeverBeenThere(t *testing.T) {
+	root := t.TempDir()
+	staging := filepath.Join(root, "blog")
+	if err := os.MkdirAll(staging, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(SuccessMarker(staging), nil, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSeen(SeenPaths(staging), []string{"uploads"}); err != nil {
+		t.Fatal(err)
+	}
+	app := testApp("blog", StateEntry{Kind: KindFiles, Path: "uploads/"}, StateEntry{Kind: KindFiles, Path: "upload"})
+	capture, _ := capturing(snapshotsJSON(snap("aaa", "blog", time.Hour)), nil)
+	got, err := Status(context.Background(), []App{app}, capture, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got[0].NeverThere, []string{"upload"}) {
+		t.Fatalf("want only the path no run has found, got %v", got[0].NeverThere)
+	}
+	if got[0].Stale(time.Now()) {
+		t.Error("a path not created yet must not make the app stale: --check would page someone for an empty uploads dir")
+	}
+	var b strings.Builder
+	FormatStatus(&b, got, time.Now())
+	if !strings.Contains(b.String(), "upload has not existed at any backup yet") || !strings.Contains(b.String(), "`state files upload` has the path wrong") {
+		t.Errorf("the report must name the path and the typo it may be:\n%s", b.String())
+	}
+	// Before any clean run, the list is empty for every path, which is
+	// not news: say nothing.
+	if err := os.Remove(SuccessMarker(staging)); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = Status(context.Background(), []App{app}, capture, root)
+	if len(got[0].NeverThere) != 0 {
+		t.Errorf("without a clean run there is nothing to compare with, got %v", got[0].NeverThere)
 	}
 }
 

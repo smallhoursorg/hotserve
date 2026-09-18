@@ -3,6 +3,7 @@ package backup
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -24,50 +25,69 @@ const caddy1 = 1
 func init() {
 	caddycmd.RegisterCommand(caddycmd.Command{
 		Name:  "backup",
-		Usage: "init <repository> | run | status | restic -- <args> | app <flags>",
+		Usage: "init <repository> | run | status | restore <app> | restic -- <args> | app <flags>",
 		Short: "Back up what liveswap apps declare as state",
 		Long: `Copies each app's declared state (see the 'state' directive) to a
 restic repository. The repository and its credentials come from an
 environment file, by default /etc/hotserve/backup.env, which systemd
 reads as root; nothing about backups is configured in the Caddyfile.
 
-  hotserve backup init <repository> [KEY=VALUE...]
+  hotserve backup init <repository>
       Writes the environment file, creates the repository if it is
       new, and checks whether these credentials can delete from it —
       they should not be able to, so that someone who takes the box
       cannot erase its backups. The checks run the way the hourly job
       will: as a unit with its sandbox and user, with only the settings
-      being written. A path on this box must be new (init creates it)
-      or already a restic repository; init never takes over a
-      directory with anything else in it. Provider credentials belong in a
-      root-only file passed with --credentials-file, as KEY=VALUE
-      lines: on the command line they are in your shell history and in
-      /proc/*/cmdline, which every user on the box can read while init
-      runs. Trailing KEY=VALUE arguments work too. A password is
-      generated and printed once; keep it somewhere else too, because
-      nothing can recover it. Rebuilding a box means pointing init at
-      the repository that already exists, with the password it was
-      made with: --password-file <path> (sudo does not carry
-      RESTIC_PASSWORD through).
+      being written.
+
+      At a terminal, init asks for what it needs: the storage key for
+      an s3: or b2: repository (the secret half without echo), and, for
+      a repository that already exists — a rebuilt box — its password.
+      A new repository gets a generated password, printed once; keep
+      it somewhere other than the box, because nothing can recover it.
+      For a script, give the same things in root-only files instead:
+      --credentials-file (KEY=VALUE lines) and --password-file. Never
+      on the command line, where your shell history and /proc/*/cmdline
+      keep them.
+
+      A path on this box must be new (init creates it) or already a
+      restic repository; init never takes over a directory with
+      anything else in it.
 
   hotserve backup run
       Asks the admin API which apps declare state and backs up each
       one in its own sandboxed, short-lived systemd unit. This is what
       the packaged timer runs; it needs root, to create those units.
 
+  hotserve backup status [--check]
+      One line per app that declares state: what it declares, how many
+      snapshots it has, and how old the newest one is. --check exits
+      non-zero when an app has no current backup, for a monitor. Needs
+      root: the repository settings are root-only.
+
+  hotserve backup restore <app> [--snapshot <id>] [--delete] [--yes]
+      Puts the app's declared state back from its newest snapshot (on
+      this box, the newest from a run that finished cleanly), or the
+      one given. It says which snapshot and what will happen, and asks
+      for the app's name before changing anything. Databases are
+      replaced through SQLite's own backup API, in one transaction, so
+      the app can keep running; files in the snapshot are put back, and
+      files added since are kept unless --delete. The snapshot is
+      checked first — each declared path looked up, each database copy
+      through its integrity check — and if any of that fails nothing
+      is touched. A path the snapshot does not hold is left as it is.
+      A directory can be left part-restored by a failure part-way;
+      running the command again finishes it. It runs in the app's
+      backup unit, so it never overlaps that app's backup. On a rebuilt
+      box, restore before the first deploy: the app then starts on its
+      data.
+
   hotserve backup restic -- <restic arguments...>
       Runs restic against this box's repository, as the user the
       backups belong to, with the settings from the environment file.
       Running restic on its own finds no repository, because that file
-      is root-only. This is how the restores in docs/backups.md reach
-      the repository:
+      is root-only:
           sudo hotserve backup restic -- snapshots --tag app:blog
-          sudo hotserve backup restic -- restore latest --tag app:blog --target /
-
-  hotserve backup status [--check]
-      One line per app that declares state: what it declares, how many
-      snapshots it has, and how old the newest one is. --check exits
-      non-zero when an app has no current backup, for a monitor.
 
   hotserve backup app --name <app> --shared <dir> [--staging <dir>]
                       <kind>:<path> [<kind>:<path>...]
@@ -78,6 +98,8 @@ reads as root; nothing about backups is configured in the Caddyfile.
       then restic gets the copies plus every files entry. This is what
       'run' launches inside the sandbox; running it by hand is
       supported and does exactly the same thing, unsandboxed.
+      ('restore-app' is the same for 'restore', and is not run by
+      hand.)
 
 Every restic and sqlite3 command is printed as it runs, so any step
 can be reproduced by hand. Retention is deliberately not applied here:
@@ -95,6 +117,10 @@ belongs with the privileged key, off the box.`,
 			fs.String("credentials-file", "", "provider credentials as KEY=VALUE lines, instead of on the command line (init)")
 			fs.Bool("force", false, "replace an existing environment file (init)")
 			fs.Bool("check", false, "exit non-zero when an app has no current backup (status)")
+			fs.String("snapshot", "", "the snapshot to restore, by id; the newest when unset (restore)")
+			fs.Bool("delete", false, "also delete files added since the snapshot, inside each declared files path (restore)")
+			fs.Bool("yes", false, "restore without asking first, for a script (restore)")
+			fs.Bool("no-lock", false, "run restic without a lock, for a repository bound read-only (restore-app; set by restore)")
 			return fs
 		}(),
 		Func: cmdBackup,
@@ -136,8 +162,12 @@ func cmdBackup(fl caddycmd.Flags) (int, error) {
 		return cmdStatus(fl)
 	case "restic":
 		return cmdRestic(fl, args[1:])
+	case "restore":
+		return cmdRestore(fl, args[1:])
+	case "restore-app":
+		return cmdRestoreApp(fl, args[1:])
 	default:
-		return caddy1, fmt.Errorf("unknown subcommand %q: want init, run, status, restic or app", args[0])
+		return caddy1, fmt.Errorf("unknown subcommand %q: want init, run, status, restore, restic or app", args[0])
 	}
 }
 
@@ -239,6 +269,24 @@ func cmdInit(fl caddycmd.Flags, args []string) (int, error) {
 		PasswordFile: fl.String("password-file"),
 		User:         username,
 		Force:        fl.Bool("force"),
+	}
+	// At a terminal, init asks for what it was not given — the storage
+	// key, and the password of a repository that already exists — so
+	// setting up a box is one command, and no secret is typed where the
+	// shell or /proc would keep it. Anywhere else it asks nothing.
+	if ask := terminalPrompter(ctx, os.Stdin, os.Stderr); ask != nil {
+		for _, c := range missingCredentials(o.Repository, o.Extra) {
+			v, err := ask(c.label, c.secret)
+			if err != nil {
+				return caddy1, err
+			}
+			o.Extra = append(o.Extra, c.key+"="+v)
+		}
+		if o.PasswordFile == "" && o.Password == "" {
+			o.AskPassword = func() (string, error) {
+				return ask("This repository already exists. Its password (not shown)", true)
+			}
+		}
 	}
 	view := jobView{User: username, Home: home, RepositoryPath: repoPath}
 	// The existence and probe checks are questions, not failures, so
@@ -483,5 +531,196 @@ func withEnv(run Runner, env []string) Runner {
 func withCaptureEnv(capture Capturer, env []string) Capturer {
 	return func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		return capture(context.WithValue(ctx, envKey{}, env), name, args...)
+	}
+}
+
+// cmdRestore puts one app's declared state back from a snapshot: it
+// finds the snapshot, says what will happen, asks, and then runs the
+// restore where the backup runs — in that app's unit, as its user,
+// in its sandbox.
+func cmdRestore(fl caddycmd.Flags, args []string) (int, error) {
+	if len(args) != 1 {
+		return caddy1, fmt.Errorf("say which app to restore: `hotserve backup restore <app>` (the newest snapshot) or `hotserve backup restore <app> --snapshot <id>`")
+	}
+	name := args[0]
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	self, err := os.Executable()
+	if err != nil {
+		return caddy1, fmt.Errorf("finding this binary (the restore re-execs it): %w", err)
+	}
+	apps, err := FetchApps(ctx, fl.String("admin"))
+	if err != nil {
+		return caddy1, err
+	}
+	app, err := findApp(apps, name)
+	if err != nil {
+		return caddy1, err
+	}
+	envFile := fl.String("env-file")
+	env, err := LoadEnvFile(envFile)
+	if err != nil {
+		return caddy1, err
+	}
+	repoPath, err := repositoryToBind(env)
+	if err != nil {
+		return caddy1, err
+	}
+	o := LaunchOptions{
+		Self:           self,
+		StagingRoot:    fl.String("staging"),
+		EnvFile:        envFile,
+		User:           fl.String("user"),
+		RepositoryPath: repoPath,
+	}
+	unit := unitName(name)
+	// Checked here to say so plainly; systemd refuses a second unit of
+	// the same name anyway, so a backup that starts after this check
+	// still cannot run beside the restore.
+	if unitActive(ctx, unit+".service") {
+		return caddy1, fmt.Errorf("%s is backing up right now; restore once it has finished (journalctl -u %s -f)", name, unit)
+	}
+	staging := filepath.Join(o.StagingRoot, name)
+	if err := ensureStagingDir(staging, o.User); err != nil {
+		return caddy1, err
+	}
+	// The restore unit's own dir, the only part of staging in its view.
+	if err := ensureStagingDir(StagingRestore(staging), o.User); err != nil {
+		return caddy1, err
+	}
+	// A rebuilt box restores before the first deploy, when liveswap has
+	// not made the app's directories yet.
+	if err := ensureShared(ctx, app.Shared, o.User, execRunner(os.Stderr)); err != nil {
+		return caddy1, err
+	}
+	view := jobView{User: o.User, EnvFile: envFile, Home: StagingRestore(staging), RepositoryPath: repoPath, RepositoryReadOnly: true}
+	out, err := captureRunner()(ctx, "systemd-run", resticInUnit(view, []string{"snapshots", "--no-lock", "--json", "--tag", "hotserve,app:" + name})...)
+	if err != nil {
+		return caddy1, fmt.Errorf("listing the snapshots of %s: %w", name, err)
+	}
+	var snaps []Snapshot
+	if err := json.Unmarshal(out, &snaps); err != nil {
+		return caddy1, fmt.Errorf("restic returned a snapshot list this version cannot read: %w", err)
+	}
+	var lastClean time.Time
+	if info, err := os.Stat(SuccessMarker(staging)); err == nil {
+		lastClean = info.ModTime()
+	}
+	snap, note, err := pickSnapshot(name, snaps, fl.String("snapshot"), lastClean)
+	if err != nil {
+		return caddy1, err
+	}
+	del := fl.Bool("delete")
+	DescribeRestore(os.Stdout, app, snap, del, time.Now())
+	if note != "" {
+		say(os.Stdout, "%s", note)
+	}
+	if !fl.Bool("yes") {
+		if err := confirmRestore(name, terminalPrompter(ctx, os.Stdin, os.Stderr)); err != nil {
+			return caddy1, err
+		}
+	}
+	launch := RestoreArgs(app, o, snap.ID, del)
+	say(os.Stdout, "%s: restoring in %s: %s", name, unit, quoteArgs(jobCommand(launch)))
+	// Not ctx: cancelling it would kill systemd-run and leave the unit —
+	// which PID 1 owns — writing the app's data with nobody watching.
+	// An interrupt stops the unit instead, and says what that leaves.
+	err = execRunner(os.Stderr)(context.WithoutCancel(ctx), "systemd-run", launch...)
+	if ctx.Err() != nil {
+		_ = exec.Command("systemctl", "stop", unit+".service").Run() //nolint:gosec // a fixed program; the unit name is built here from an app name the config validated
+		return caddy1, fmt.Errorf("interrupted: the restore of %s was stopped, so it may be partly done — run it again to finish it", name)
+	}
+	if err != nil {
+		return caddy1, fmt.Errorf("restoring %s failed (%w) — the lines above say which paths were restored and which step failed", name, err)
+	}
+	say(os.Stdout, "%s: restored from snapshot %s", name, snap.ShortID)
+	return 0, nil
+}
+
+func findApp(apps []App, name string) (App, error) {
+	var names []string
+	for _, a := range apps {
+		if a.Name == name {
+			return a, nil
+		}
+		names = append(names, a.Name)
+	}
+	if len(names) == 0 {
+		return App{}, fmt.Errorf("no app declares state, so there is nothing to restore %s into — add its block, with its `state` lines, to the Caddyfile and reload first", name)
+	}
+	return App{}, fmt.Errorf("no app %s declares state here (apps that do: %s) — a restore puts back what the app's block declares, so the block comes first", name, strings.Join(names, ", "))
+}
+
+// ensureShared makes an app's shared dir when it does not exist yet, as
+// the user that owns it and with liveswap's own mode: made by root, it
+// would be root's, and the app could not write its own data. Made as
+// that user, a link someone left in the path is followed with only
+// that user's rights.
+func ensureShared(ctx context.Context, shared, username string, run Runner) error {
+	if _, err := os.Stat(shared); err == nil {
+		return nil
+	}
+	return run(ctx, "systemd-run", "--wait", "--collect", "--quiet",
+		"--property=User="+username, "--property=Group="+username, "--property=UMask=0027",
+		"/bin/mkdir", "-p", shared)
+}
+
+// cmdRestoreApp is the restore itself, inside the unit cmdRestore
+// launches.
+func cmdRestoreApp(fl caddycmd.Flags, entryArgs []string) (int, error) {
+	name, shared, staging, snapshot := fl.String("name"), fl.String("shared"), fl.String("staging"), fl.String("snapshot")
+	if name == "" || shared == "" || snapshot == "" {
+		return caddy1, fmt.Errorf("--name, --shared and --snapshot are required (this subcommand is launched by `hotserve backup restore`)")
+	}
+	entries, err := parseEntries(entryArgs)
+	if err != nil {
+		return caddy1, err
+	}
+	if clean := filepath.Clean(staging); filepath.Base(clean) != name {
+		staging = filepath.Join(clean, name)
+	}
+	app := App{Name: name, Shared: shared, State: entries}
+	job := RestoreJob{
+		App:       name,
+		Shared:    shared,
+		Staging:   staging,
+		Snapshot:  snapshot,
+		Databases: app.Databases(),
+		Files:     app.Files(),
+		Delete:    fl.Bool("delete"),
+		NoLock:    fl.Bool("no-lock"),
+		Run:       execRunner(os.Stderr),
+		Capture:   captureRunner(),
+		Dump:      resticDumper(fl.Bool("no-lock")),
+		Log:       os.Stdout,
+	}
+	if err := job.Execute(context.Background()); err != nil {
+		return caddy1, err
+	}
+	return 0, nil
+}
+
+// resticDumper writes one file out of a snapshot. O_EXCL: dst is a
+// name the caller has just cleared, and a link that appeared there
+// since is not followed.
+func resticDumper(noLock bool) Dumper {
+	return func(ctx context.Context, snapshot, path, dst string) error {
+		f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o640) //nolint:gosec // a path built here, inside the unit's own view
+		if err != nil {
+			return err
+		}
+		args := []string{"dump"}
+		if noLock {
+			args = append(args, "--no-lock")
+		}
+		cmd := exec.CommandContext(ctx, "restic", append(args, snapshot, path)...) //nolint:gosec // a fixed program; the snapshot and path come from the listing just read
+		cmd.Env = commandEnv(ctx)
+		cmd.Stdout = f
+		cmd.Stderr = os.Stderr
+		err = cmd.Run()
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		return err
 	}
 }

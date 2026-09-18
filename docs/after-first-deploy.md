@@ -142,20 +142,13 @@ writing to it does not restore. One command per box, then two lines per
 app:
 
 ```
-read -rp 'Key ID: ' key_id
-read -rsp 'Application key: ' app_key; echo
-sudo install -m 0600 /dev/null /root/b2-key
-printf 'AWS_ACCESS_KEY_ID=%s\nAWS_SECRET_ACCESS_KEY=%s\n' "$key_id" "$app_key" \
-	| sudo tee /root/b2-key >/dev/null
-unset app_key
-sudo hotserve backup init s3:s3.us-west-004.backblazeb2.com/my-bucket \
-	--credentials-file /root/b2-key
-sudo rm /root/b2-key
+sudo hotserve backup init s3:s3.us-west-004.backblazeb2.com/my-bucket
 ```
 
-(The storage key is typed at a prompt and handed over in a root-only
-file, so it is never part of a command: a command line is visible to
-every user on the box while it runs, and stays in your shell history.)
+It asks for the storage key — the secret half without echo, so it ends
+up in no command line and no shell history — and prints the
+repository's password once. Keep that password somewhere other than the
+box: restoring onto a new one needs it.
 
 ```
 app example {
@@ -166,9 +159,10 @@ app example {
 ```
 
 Reload, and the app is backed up hourly from then on.
+`sudo hotserve backup restore example` puts it back.
 [Backups](backups.md) has the rest: giving the box a key that cannot
-delete its own backups, restoring onto a new box, and restoring a
-moment on a live one.
+delete its own backups, restoring onto a new box, and checking that
+backups are current.
 
 ## 7. Know the way back
 

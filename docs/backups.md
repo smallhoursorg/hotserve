@@ -8,24 +8,22 @@ under each app's `shared/` dir.
 Setting it up is two steps: one command per box, and two lines per app.
 
 ```
-read -rp 'Key ID: ' key_id
-read -rsp 'Application key: ' app_key; echo
-sudo install -m 0600 /dev/null /root/b2-key
-printf 'AWS_ACCESS_KEY_ID=%s\nAWS_SECRET_ACCESS_KEY=%s\n' "$key_id" "$app_key" \
-	| sudo tee /root/b2-key >/dev/null
-unset app_key
-sudo hotserve backup init s3:s3.us-west-004.backblazeb2.com/my-bucket \
-	--credentials-file /root/b2-key
-sudo rm /root/b2-key
+sudo hotserve backup init s3:s3.us-west-004.backblazeb2.com/my-bucket
 ```
 
-The key is typed at a prompt and handed over in a root-only file, so it
-is never part of a command: a command line is readable by every user on
-the box through `/proc/*/cmdline` while it runs, and your shell keeps it
-in its history afterwards — heredocs included. (`printf` is built into
-the shell, so the key never reaches another process's arguments.)
-`init` copies what it reads into `/etc/hotserve/backup.env`
-(root-only), which is where it stays.
+`init` asks for the storage key: the access key ID, then the secret,
+which is not shown as you type it. (On Backblaze B2 those are the
+application key's `keyID` and `applicationKey`.) Typed at a prompt, the
+key is in no command line — readable by every user on the box through
+`/proc/*/cmdline` while it runs — and in no shell history. `init` then
+creates the repository, checks the key, and keeps everything in
+`/etc/hotserve/backup.env` (root-only). It prints the repository's
+password once: save it somewhere other than this box, because a restore
+on a new one needs it and nothing can recover it.
+
+For a script, give `init` the same things in root-only files instead:
+`--credentials-file` with `KEY=VALUE` lines, and `--password-file` for
+a repository that already exists. Without a terminal it asks nothing.
 
 ```
 app blog {
@@ -184,10 +182,11 @@ versions are still there to restore. Keep lifecycle rules that retain
 old versions, or that protection expires on a timer of your own
 making.
 
-On S3, deny `s3:DeleteObject` in the bucket policy, except under
-`locks/`, which restic needs to write and clear its own lock files.
+Other providers express this differently — a bucket policy, a key
+scoped to write-only — and some cannot at all. Whatever you set up,
+you do not have to take it on trust:
 
-`hotserve backup init` checks this for you, and says which you have:
+`hotserve backup init` checks it, and says which you have:
 
 ```
 delete refused by the storage: the box can add backups but not remove them
@@ -211,7 +210,9 @@ nothing scheduled: fix the key and run the same command again.
 
 **The trade:** old snapshots then accumulate until you remove them
 yourself, with a key that is allowed to. Do that from your laptop, not
-from the box:
+from the box — with a retention policy of your choosing; for example,
+keeping a day of hourly snapshots, a month of dailies and a year of
+monthlies:
 
 ```
 restic forget --keep-hourly 24 --keep-daily 30 --keep-monthly 12 --prune
@@ -236,81 +237,74 @@ Kopia supports Object Lock directly.
 
 ## Restoring
 
-**Where things are in a snapshot.** Files are stored under the path
-they live at, so they restore straight back. A database is stored under
-the path of the *copy* the backup took, because copying is the only way
-to read a live database safely:
+```
+sudo hotserve backup restore blog
+```
 
-| In the app | In the snapshot |
-|---|---|
-| `/var/lib/liveswap/blog/shared/uploads/` | the same path |
-| `/var/lib/liveswap/blog/shared/app.db` | `/var/lib/hotserve-backup/blog/data/app.db` |
+puts back everything `blog` declares, from its newest snapshot. Before
+it changes anything it says what it is about to do, and asks you to
+type the app's name:
 
-So restoring files is one command, and a database is a restore followed
-by a copy into place. Both are below.
+```
+Restoring blog from snapshot a1b2c3d4, taken 2026-09-18 03:00 UTC (3 hours ago) on box-1:
+  app.db               replaced by the snapshot's copy; the app's writes wait while it goes in
+  uploads              files in the snapshot put back; files added since are kept
+(A path the snapshot does not hold — the app had not created it yet — is left as it is.)
+Type the app's name to restore it: blog
+```
+
+- **The app can keep running.** A database goes back through SQLite's
+  own backup API, as one transaction, so the app sees the restored data
+  as one ordinary commit and its `-wal` and `-shm` files stay consistent
+  with it. Its writes wait while the copy goes in; an app that gives up
+  on a busy database sooner than that will report errors for those
+  moments. (An app that keeps data in memory serves what it had until it
+  next reads the database.)
+- **Nothing is replaced until the snapshot checks out.** Every declared
+  path is looked up in the snapshot and every database copy has to pass
+  SQLite's integrity check first; if any of that fails, nothing is
+  touched. A declared path the snapshot does not hold at all — the app
+  had not created it yet when it was taken — is left as it is.
+- **The newest clean snapshot, by default.** restic keeps a snapshot
+  even from a run that failed part-way, and such a snapshot can be
+  missing files. When the newest one on this box came from a run that
+  did not finish cleanly, restore uses the one before it and says so.
+- **If it fails part-way** — a network error in the middle of a
+  directory, say — that directory may be partly restored. Run the same
+  command again to finish it. A database is either restored or left as
+  it was.
+- **Files added since the snapshot are kept.** `--delete` makes each
+  declared files path exactly as it was, removing what was added.
+- **An earlier moment:** `--snapshot <id>`, from
+  `sudo hotserve backup restic -- snapshots --tag app:blog`.
+- **In a script:** `--yes` skips the question. Without a terminal and
+  without `--yes`, it refuses.
+
+A restore runs where that app's backup runs — in its unit, as the
+`hotserve` user, in the same sandbox — so a restore and that app's
+hourly backup can never run at the same time.
 
 ### The box is gone
 
-Install hotserve, point it at the same repository, restore, and deploy:
+Install hotserve, put your Caddyfile back, point the box at the same
+repository, restore each app, then deploy:
 
 ```
 sudo apt install ./hotserve_*.deb
+sudo cp Caddyfile /etc/hotserve/Caddyfile && sudo systemctl reload hotserve
 
-# the same repository, with the password you saved when you first set
-# it up and a storage key — typed at prompts so neither is ever part of
-# a command, and handed over in root-only files because sudo does not
-# carry environment variables
-read -rsp 'Repository password: ' restic_pw; echo
-read -rp 'Key ID: ' key_id
-read -rsp 'Application key: ' app_key; echo
-sudo install -m 0600 /dev/null /root/restic-password
-sudo install -m 0600 /dev/null /root/b2-key
-printf '%s' "$restic_pw" | sudo tee /root/restic-password >/dev/null
-printf 'AWS_ACCESS_KEY_ID=%s\nAWS_SECRET_ACCESS_KEY=%s\n' "$key_id" "$app_key" \
-	| sudo tee /root/b2-key >/dev/null
-unset restic_pw app_key
-sudo hotserve backup init s3:… --credentials-file /root/b2-key \
-	--password-file /root/restic-password
-sudo rm /root/restic-password /root/b2-key
+sudo hotserve backup init s3:s3.us-west-004.backblazeb2.com/my-bucket
+# asks for the storage key, then — the repository already exists — for
+# the password you saved when you first set it up
 
-# files go back where they were; the database copy lands under /var/lib/hotserve-backup
-sudo hotserve backup restic -- restore latest --tag app:blog --target /
-
-# put the database where the app expects it
-sudo install -o hotserve -g hotserve -m 0640 \
-	/var/lib/hotserve-backup/blog/data/app.db \
-	/var/lib/liveswap/blog/shared/app.db
+sudo hotserve backup restore blog
 
 ./deploy.sh v4
 ```
 
-The data is in place before the app starts, so the first deploy comes up
-on it.
-
-### Bad data on a live box
-
-The app has to stop while its data is replaced, and stopping its process
-is not enough — the watchdog restarts it. Remove the app's block from
-the Caddyfile and reload; that stops its units and leaves its data
-alone:
-
-```
-sudo -e /etc/hotserve/Caddyfile        # comment out the app's block
-sudo systemctl reload hotserve         # its units stop
-
-sudo hotserve backup restic -- restore <snapshot> --target /
-sudo install -o hotserve -g hotserve -m 0640 \
-	/var/lib/hotserve-backup/blog/data/app.db \
-	/var/lib/liveswap/blog/shared/app.db
-sudo rm -f /var/lib/liveswap/blog/shared/app.db-wal /var/lib/liveswap/blog/shared/app.db-shm
-
-sudo -e /etc/hotserve/Caddyfile        # put the block back
-sudo systemctl reload hotserve         # the app relaunches on the restored data
-```
-
-Pick the snapshot with `sudo hotserve backup restic -- snapshots --tag app:blog`, and restore a
-particular moment with `--time`. The `-wal` and `-shm` files go because
-they belong to the database you are replacing, not to the copy.
+Restore before the first deploy: the app then starts on its data
+rather than on an empty directory. (The app's block has to be in the
+Caddyfile first — a restore puts back what the block declares.)
 
 ### A rollback does not undo a migration
 
@@ -338,8 +332,9 @@ shop  1 path                 0          never  ⚠
 ```
 
 For a monitor, `sudo hotserve backup status --check` prints the same
-report and exits non-zero when any app has no current backup, so a cron
-line or a Nagios-style check needs nothing else.
+report and exits non-zero when any app has no current backup. It needs
+root — the repository settings are root-only — so run it from root's
+crontab or a root systemd timer.
 
 Two things it will say that are worth knowing before you see them at
 three in the morning:
@@ -351,6 +346,11 @@ three in the morning:
   also what a rebuilt box shows until its first hourly run.
 - **`(last clean run 3 days ago)`** beside a recent snapshot — runs since
   then have been failing. `journalctl -u hotserve-backup-<app>` says why.
+- **`uploads has not existed at any backup yet`** — a declared path no
+  run has found. Backups skip a path the app has not created yet (a new
+  app's empty uploads dir is normal), but a typo in a `state files` line
+  looks exactly the same, so the report names it until it appears. It
+  does not make `--check` fail.
 
 Freshness is measured from the last clean run, not from the newest
 snapshot, so an app whose every run fails part-way cannot look healthy.
@@ -367,12 +367,8 @@ ls /tmp/drill/var/lib/liveswap/blog/shared/uploads
 
 A backup nobody has restored is a hypothesis.
 
-## If an app cannot lose an hour
+## Not covered: losing less than an hour
 
-Hourly is a deliberate default: a full copy of a database costs about a
-megabyte an hour once restic deduplicates it, and a job that exits
-cannot leak. If an app genuinely cannot lose an hour of writes, run
-continuous replication for that app (Litestream) alongside these
-backups — it must run as its own service, never wrapped around the app,
-because a deploy briefly runs two versions at once and two replicators
-writing one destination corrupt it.
+Backups are hourly, so a restore can lose up to an hour of writes.
+Continuous replication of a database (Litestream, for example) is not
+part of this, and nothing here sets it up.

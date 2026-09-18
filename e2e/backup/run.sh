@@ -36,6 +36,10 @@ as_hotserve() { su -s /bin/sh hotserve -c "$*"; }
 # waits rather than failing with "database is locked".
 sq() { sqlite3 -cmd '.timeout 5000' "$@"; }
 rows_now() { sq "file:$SHARED/app.db?mode=ro" 'select count(*) from rows'; }
+# As the app's own user: sqlite3 run as root on a WAL database it is the
+# first to open creates -wal and -shm owned by root, and the app — the
+# writer here — can then no longer open its own database.
+sq_app() { su -s /bin/sh hotserve -c "sqlite3 -cmd '.timeout 5000' '$SHARED/app.db' \"$1\""; }
 
 echo "=== preparing two apps: one with a database, one with only files ==="
 install -d -o hotserve -g hotserve -m 0750 "$SHARED" "$SHARED/uploads" "$FILES_SHARED" "$FILES_SHARED/pages" /srv
@@ -43,9 +47,12 @@ as_hotserve "sqlite3 '$SHARED/app.db' \"PRAGMA journal_mode=WAL; CREATE TABLE IF
 as_hotserve "echo photo > '$SHARED/uploads/cat.jpg'"
 as_hotserve "echo page > '$FILES_SHARED/pages/index.md'"
 
-# A writer for the whole run: the copy has to hold up while the app is
-# writing, which is the entire reason VACUUM INTO is used.
-as_hotserve "sh -c 'i=0; while [ \$i -lt 20000 ]; do sqlite3 \"$SHARED/app.db\" \"INSERT INTO rows(t) VALUES (datetime(\\\"now\\\"));\" >/dev/null 2>&1; i=\$((i+1)); sleep 0.05; done' &" >/dev/null 2>&1
+# A writer, standing in for the app: the copy has to hold up while the
+# app is writing, which is the entire reason VACUUM INTO is used — and
+# so does a restore. Stopped for the idle-database checks, started
+# again for the restore.
+start_writer() { as_hotserve "sh -c 'i=0; while [ \$i -lt 20000 ]; do sqlite3 \"$SHARED/app.db\" \"INSERT INTO rows(t) VALUES (datetime(\\\"now\\\"));\" >/dev/null 2>&1; i=\$((i+1)); sleep 0.05; done' &" >/dev/null 2>&1; }
+start_writer
 
 echo "=== hotserve backup init ==="
 rm -rf "$REPO" /etc/hotserve/backup.env
@@ -192,6 +199,15 @@ fi
 # now, before the writer stops.
 snap=$(hotserve backup restic -- snapshots --json --tag app:backup-example 2>/dev/null \
 	| tr ',' '\n' | grep -o '"short_id":"[^"]*"' | tail -1 | cut -d'"' -f4)
+# Run as root, `backup restic --` drops to the backups' user; it must
+# take that user's HOME with it, or restic has no cache and says so on
+# every command the docs give.
+passthrough_err=$(hotserve backup restic -- snapshots --tag hotserve 2>&1 >/dev/null)
+if echo "$passthrough_err" | grep -q "unable to open cache"; then
+	fail "backup restic -- runs restic without a cache: $passthrough_err"
+else
+	pass "backup restic -- runs restic with the backups' user's own cache"
+fi
 
 echo "=== the job ran in its own sandbox ==="
 if journalctl --no-pager -u hotserve-backup-backup-example.service | grep -q 'restic backup'; then
@@ -248,15 +264,15 @@ else
 fi
 # An app that declares only files never opens a database, so it must
 # not be given write access to its data: least privilege per app.
-if grep -q "BindReadOnlyPaths=$FILES_SHARED" /tmp/run1.log; then
+if grep -q "files-example: backing up in hotserve-backup-files-example, its data read-only:" /tmp/run1.log; then
 	pass "a files-only app's data is bound read-only"
 else
-	fail "a files-only app should be bound read-only: $(grep -o 'BindReadOnlyPaths=[^ ]*files-example[^ ]*' /tmp/run1.log | head -1)"
+	fail "a files-only app should be bound read-only: $(grep 'files-example: backing up' /tmp/run1.log)"
 fi
-if grep -q "BindPaths=$SHARED" /tmp/run1.log; then
+if grep -q "backup-example: backing up in hotserve-backup-backup-example, its data writable, for SQLite:" /tmp/run1.log; then
 	pass "the database app's data is bound writable (SQLite needs to create -shm)"
 else
-	fail "the database app needs a writable bind"
+	fail "the database app needs a writable bind: $(grep 'backup-example: backing up' /tmp/run1.log)"
 fi
 
 echo "=== the snapshot taken under write load restores ==="
@@ -308,38 +324,102 @@ else
 	fail "the second run failed: $(tail -3 /tmp/run2.log)"
 fi
 
-echo "=== the restore docs/backups.md tells an operator to run ==="
-# The commands below are the ones on that page, in order. They are run
-# here because a restore that only looks right is the failure nobody
-# finds until they need it: the database is stored under the path of
-# the COPY the backup took, so a bare `restic restore --target /`
-# leaves the app's own database untouched. That was a real defect in
-# this page, and this is what would have caught it.
-rows_expected=$(sq "$SHARED/app.db" 'select count(*) from rows')
-rm -f "$SHARED/app.db" "$SHARED/app.db-wal" "$SHARED/app.db-shm"
-rm -rf "$SHARED/uploads"
-
-hotserve backup restic -- restore latest --tag app:backup-example --target / >/dev/null 2>&1
-install -o hotserve -g hotserve -m 0640 \
-	/var/lib/hotserve-backup/backup-example/data/app.db \
-	"$SHARED/app.db" 2>/dev/null
-rm -f "$SHARED/app.db-wal" "$SHARED/app.db-shm"
-
-if [ -f "$SHARED/app.db" ] && [ "$(sq "$SHARED/app.db" 'pragma integrity_check')" = ok ]; then
-	pass "the documented restore puts a working database back in the app's own dir"
+echo "=== hotserve backup restore, on a live box ==="
+# The restore docs/backups.md tells an operator to run, run the way it
+# says: with the app up and the writer still writing. Bad data first —
+# rows the snapshot holds deleted, an upload deleted, one added since.
+start_writer
+sleep 1
+rows_pre=$(rows_now)
+sleep 2
+if [ "$(rows_now)" -gt "$rows_pre" ]; then
+	pass "the writer is writing as the restore begins"
 else
-	fail "the documented restore did not restore the database to $SHARED"
+	fail "the writer had stopped before the restore ($rows_pre rows), so the checks after it prove nothing about writes: $(ls -l "$SHARED")"
 fi
-rows_after=$(sq "$SHARED/app.db" 'select count(*) from rows' 2>/dev/null || echo 0)
-if [ "${rows_after:-0}" -ge "$((rows_expected - 5))" ]; then
-	pass "the restored database holds the app's rows ($rows_after of $rows_expected)"
+sq_app 'delete from rows where n <= 10'
+as_hotserve "rm '$SHARED/uploads/cat.jpg'; echo later > '$SHARED/uploads/added-later.txt'"
+first_row() { sq_app 'select count(*) from rows where n = 1' 2>/dev/null; }
+
+# Not at a terminal and no --yes: it asks nobody, so it restores nothing.
+unasked=$(hotserve backup restore backup-example --admin 127.0.0.1:2019 </dev/null 2>&1 || true)
+if echo "$unasked" | grep -q -- "--yes" && [ "$(first_row)" = 0 ]; then
+	pass "without a terminal or --yes, restore refuses and changes nothing"
 else
-	fail "rows missing after the documented restore: $rows_after of $rows_expected"
+	fail "restore went ahead unasked: $unasked"
 fi
-if [ -f "$SHARED/uploads/cat.jpg" ]; then
-	pass "the documented restore puts declared files back where the app reads them"
+# At a terminal, a wrong name is a no.
+wrong=$(printf 'y\n' | script -qec "hotserve backup restore backup-example --admin 127.0.0.1:2019" /dev/null 2>&1 || true)
+if echo "$wrong" | grep -q "nothing was restored" && [ "$(first_row)" = 0 ]; then
+	pass "restore asks for the app's name, and 'y' is not it"
 else
-	fail "uploads/ did not come back to $SHARED"
+	fail "a wrong answer did not stop the restore: $wrong"
+fi
+
+# The snapshot taken under write load, by id.
+restored=$(hotserve backup restore backup-example --admin 127.0.0.1:2019 --snapshot "$snap" --yes 2>&1)
+if echo "$restored" | grep -q "restored from snapshot $snap"; then
+	pass "restore --snapshot $snap succeeded"
+else
+	fail "restore failed: $restored"
+fi
+if echo "$restored" | grep -q "restoring in hotserve-backup-backup-example"; then
+	pass "the restore ran in the app's backup unit, so it cannot overlap a backup"
+else
+	fail "the restore did not say where it ran: $restored"
+fi
+if [ "$(first_row)" = 1 ] && [ "$(sq_app 'pragma integrity_check')" = ok ]; then
+	pass "the deleted rows are back, and the live database passes its integrity check"
+else
+	fail "the database was not restored: first row $(first_row), integrity $(sq_app 'pragma integrity_check' 2>&1)"
+fi
+if [ "$(sq_app 'pragma journal_mode')" = wal ] && [ "$(stat -c %U "$SHARED/app.db")" = hotserve ]; then
+	pass "the database is still the app's: WAL mode, owned by hotserve"
+else
+	fail "the restored database is $(sq_app 'pragma journal_mode'), owned by $(stat -c %U "$SHARED/app.db")"
+fi
+# The writer kept going through the restore, and keeps going after it.
+rows_mid=$(rows_now)
+sleep 2
+if [ "$(rows_now)" -gt "$rows_mid" ] && [ "$(sq_app 'pragma integrity_check')" = ok ]; then
+	pass "the app writes on after the restore ($rows_mid → $(rows_now) rows), and the database stays intact"
+else
+	fail "writes stopped or the database broke after the restore: $rows_mid → $(rows_now)"
+fi
+if [ "$(cat "$SHARED/uploads/cat.jpg" 2>/dev/null)" = photo ] && [ -f "$SHARED/uploads/added-later.txt" ]; then
+	pass "the deleted upload is back, and the one added since is kept"
+else
+	fail "uploads after restore: $(ls "$SHARED/uploads" | tr '\n' ' ')"
+fi
+# The restore's own dir stays (restic's cache is in it); the copies do not.
+if [ -e /var/lib/hotserve-backup/backup-example/restore/copies ]; then
+	fail "the restore left its plaintext database copies behind"
+else
+	pass "the restore removed its database copies"
+fi
+
+# --delete, confirmed at a terminal by typing the name.
+deleted=$(printf 'backup-example\n' | script -qec "hotserve backup restore backup-example --admin 127.0.0.1:2019 --delete" /dev/null 2>&1)
+if echo "$deleted" | grep -q "restored from snapshot" && [ ! -e "$SHARED/uploads/added-later.txt" ] && [ -f "$SHARED/uploads/cat.jpg" ]; then
+	pass "typing the name confirms; --delete removes what was added since"
+else
+	fail "restore --delete: $deleted / $(ls "$SHARED/uploads" | tr '\n' ' ')"
+fi
+
+echo "=== hotserve backup restore, on a rebuilt box ==="
+# Before the first deploy there is no shared dir at all: restore makes
+# it as liveswap would — the hotserve user's, 0750 — and fills it.
+rm -rf /var/lib/liveswap/files-example
+rebuilt=$(hotserve backup restore files-example --admin 127.0.0.1:2019 --yes 2>&1)
+if [ "$(cat "$FILES_SHARED/pages/index.md" 2>/dev/null)" = page ]; then
+	pass "restore before the first deploy puts the app's files back"
+else
+	fail "restore on a rebuilt box: $rebuilt"
+fi
+if [ "$(stat -c '%U %a' "$FILES_SHARED")" = "hotserve 750" ] && [ "$(stat -c '%U %a' /var/lib/liveswap/files-example)" = "hotserve 750" ]; then
+	pass "the app's dirs it made are the hotserve user's, mode 0750"
+else
+	fail "made $(stat -c '%U %a' /var/lib/liveswap/files-example) and $(stat -c '%U %a' "$FILES_SHARED")"
 fi
 
 echo "=== hotserve backup status ==="
@@ -429,17 +509,71 @@ if journalctl --no-pager -u hotserve-backup-backup-example.service --since "@$t0
 else
 	fail "no read-back of the S3 snapshot: $(journalctl --no-pager -u hotserve-backup-backup-example.service --since "@$t0" | tail -5)"
 fi
+as_hotserve "rm '$FILES_SHARED/pages/index.md'"
+s3_restore=$(hotserve backup restore files-example --admin 127.0.0.1:2019 --yes 2>&1)
+if [ "$(cat "$FILES_SHARED/pages/index.md" 2>/dev/null)" = page ]; then
+	pass "a restore from S3 gives back the app's files"
+else
+	fail "restore from S3 failed: $s3_restore"
+fi
+# The drill docs/backups.md suggests: into a scratch dir, by hand.
 rm -rf /tmp/s3-restore
 if hotserve backup restic -- restore latest --tag app:files-example --target /tmp/s3-restore >/dev/null 2>&1 \
 	&& [ "$(cat "/tmp/s3-restore$FILES_SHARED/pages/index.md" 2>/dev/null)" = page ]; then
-	pass "a restore from S3 gives back the app's files"
+	pass "the documented restore drill works against S3"
 else
-	fail "restore from S3 failed: $(ls -R /tmp/s3-restore 2>&1 | head -5)"
+	fail "restore drill from S3 failed: $(ls -R /tmp/s3-restore 2>&1 | head -5)"
 fi
 if hotserve backup status --check --admin 127.0.0.1:2019 >/dev/null 2>&1; then
 	pass "--check passes with current backups in S3"
 else
 	fail "--check failed against S3: $(hotserve backup status --admin 127.0.0.1:2019 2>&1)"
+fi
+
+echo "=== init at a terminal: one command, and it asks ==="
+# The documented setup is one command: at a terminal, init asks for the
+# storage key itself (the secret half without echo), so it is typed into
+# no command line and no shell history. script(1) gives it a real TTY;
+# the answers arrive on it the way a person would type them.
+tty_init() { script -qec "hotserve backup init s3:$S3/hotserve-e2e-tty --force" /dev/null; }
+# The secret is sent a moment after the key, as a person would type it
+# after its prompt appears: a pty echoes input when it ARRIVES, and init
+# turns echo off only when it asks for the secret. (The prompts come
+# before anything touches the network, so a few seconds is ample.)
+new_out=$({ printf '%s\n' "$S3_KEY_ID"; sleep 3; printf '%s\n' not-a-secret; } | tty_init 2>&1)
+if echo "$new_out" | grep -q "repository ready" && grep -q "^AWS_SECRET_ACCESS_KEY=not-a-secret\$" /etc/hotserve/backup.env; then
+	pass "init at a terminal asked for the key and set up a new repository"
+else
+	fail "init at a terminal did not set up the repository: $new_out"
+fi
+# The key ID, typed with echo on, must show: otherwise this capture
+# would not show typed input at all and the next check would be vacuous.
+if ! echo "$new_out" | grep -q "$S3_KEY_ID"; then
+	fail "the key ID did not show as it was typed, so the echo check below proves nothing: $new_out"
+elif echo "$new_out" | grep -q "not-a-secret"; then
+	fail "the secret access key was shown on screen as it was typed"
+else
+	pass "the secret access key was not shown as it was typed"
+fi
+# A rebuilt box: the repository exists, so init asks for its password
+# instead of inventing one that could not open it.
+saved_pw=$(sed -n 's/^RESTIC_PASSWORD=//p' /etc/hotserve/backup.env)
+old_out=$(printf '%s\n%s\n%s\n' "$S3_KEY_ID" not-a-secret "$saved_pw" | tty_init 2>&1)
+if echo "$old_out" | grep -q "already exists. Its password" && echo "$old_out" | grep -q "repository ready"; then
+	pass "on an existing repository, init asked for its password and opened it"
+else
+	fail "init did not ask for the existing repository's password: $old_out"
+fi
+if grep -q "^RESTIC_PASSWORD=$saved_pw\$" /etc/hotserve/backup.env; then
+	pass "the settings hold the password that was asked for"
+else
+	fail "the settings do not hold the repository's own password"
+fi
+wrong_out=$(printf '%s\n%s\n%s\n' "$S3_KEY_ID" not-a-secret "not-the-password" | tty_init 2>&1 || true)
+if echo "$wrong_out" | grep -q "cannot open it"; then
+	pass "a wrong password is refused, and said so"
+else
+	fail "a wrong password was not refused: $wrong_out"
 fi
 
 echo "=== summary ==="
