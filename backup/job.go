@@ -37,9 +37,9 @@ type Job struct {
 
 // Execute stages the databases and runs restic. It deliberately does
 // not apply a retention policy: `restic forget` deletes from the
-// repository, and the key on the box is append-only by design (see
-// docs/backups.md) — retention runs from `hotserve backup prune` with
-// the privileged key instead.
+// repository, and the key on the box should not be able to — so
+// retention is run off the box, with a privileged key, as
+// docs/backups.md describes. There is no command here that prunes.
 func (j Job) Execute(ctx context.Context) error {
 	env := j.Env
 	if env == nil {
@@ -74,6 +74,15 @@ func (j Job) Execute(ctx context.Context) error {
 			continue
 		}
 		targets = append(targets, p)
+	}
+
+	// Everything declared is still to come: a files-only app whose
+	// directories the app has not created yet leaves nothing to hand
+	// restic, and restic with no target exits with an argument error.
+	// Saying so and succeeding is the same answer the skip above gives.
+	if len(targets) == 0 {
+		j.logf("%s: nothing to back up yet — every declared path is still to be created", j.App)
+		return nil
 	}
 
 	args := ResticBackupArgs(j.App, targets)

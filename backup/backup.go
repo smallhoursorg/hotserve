@@ -18,6 +18,7 @@ package backup
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -176,11 +177,16 @@ func requireResticEnv(env func(string) string) error {
 }
 
 // sqliteURI is the read-only connection string for the live database.
-// Read-only matters twice: the job's view has shared/ mounted
-// read-only anyway, so a writable open would fail, and a reader can
-// never leave a hot journal behind in the app's directory.
+// Opening read-only says what the job is for: it reads the app's
+// data, and cannot leave a hot journal behind in the app's directory.
+//
+// The path is escaped rather than concatenated: `?`, `#` and `%` are
+// legal in a filename and meaningful in a URI, so `data/a?b.db` would
+// otherwise open `data/a` with a stray parameter — or fail — instead
+// of the database the operator declared.
 func sqliteURI(path string) string {
-	return "file:" + path + "?mode=ro"
+	u := url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro"}
+	return u.String()
 }
 
 // vacuumInto is the SQL that takes the consistent copy. The

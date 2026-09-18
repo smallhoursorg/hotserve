@@ -11,32 +11,48 @@ import (
 	"testing"
 )
 
-// The delete probe lists the snapshot it just wrote, so it can forget
-// it by id — `restic forget --tag x` alone refuses and would look like
-// a storage that denied the delete.
-// missingRepo answers "no repository here", which is what a first
-// init on a new bucket sees.
-func missingRepo() Capturer {
-	return func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		for _, a := range args {
-			if a == "config" {
-				return nil, errors.New("repository does not exist")
-			}
-		}
-		return probeSnapshots()(ctx, name, args...)
-	}
+// fakeRestic answers the questions init asks through the capturer:
+// does the repository exist, which snapshot did the probe write, and
+// what happens when it tries to remove it. The forget goes through
+// the capturer because its OUTPUT is the evidence — a refusal by the
+// storage reads differently from a network error, and only one of
+// those means the backups are safe from the box.
+type fakeRestic struct {
+	calls       []call
+	repoMissing bool
+	forgetOut   string
+	forgetErr   error
 }
 
-func probeSnapshots() Capturer {
-	return func(_ context.Context, _ string, args ...string) ([]byte, error) {
-		for _, a := range args {
-			if a == "config" {
-				return []byte("{}"), nil // the repository exists
-			}
+func (f *fakeRestic) capture(_ context.Context, name string, args ...string) ([]byte, error) {
+	f.calls = append(f.calls, call{name, args})
+	switch {
+	case len(args) > 1 && args[0] == "cat" && args[1] == "config":
+		if f.repoMissing {
+			return nil, errors.New("Fatal: repository does not exist")
 		}
+		return []byte("{}"), nil
+	case len(args) > 0 && args[0] == "snapshots":
 		return []byte(`[{"short_id":"probe123","time":"2026-09-18T08:00:00Z","tags":["` + DeleteProbeTag + `"]}]`), nil
+	case len(args) > 0 && args[0] == "forget":
+		return []byte(f.forgetOut), f.forgetErr
 	}
+	return nil, nil
 }
+
+func (f *fakeRestic) forgot(id string) bool {
+	for _, c := range f.calls {
+		joined := strings.Join(c.args, " ")
+		if strings.HasPrefix(joined, "forget") && strings.Contains(joined, id) {
+			return true
+		}
+	}
+	return false
+}
+
+func probeSnapshots() Capturer { return (&fakeRestic{}).capture }
+
+func missingRepo() Capturer { return (&fakeRestic{repoMissing: true}).capture }
 
 func initOpts(t *testing.T) InitOptions {
 	t.Helper()
@@ -175,43 +191,44 @@ func TestInitCreatesTheRepositoryOnlyWhenMissing(t *testing.T) {
 // so init proves it by trying: a key that CAN delete gets a warning.
 func TestInitWarnsWhenTheKeyCanDelete(t *testing.T) {
 	rec := &recorder{}
+	fake := &fakeRestic{} // forget succeeds: the key can delete
 	var out strings.Builder
-	if err := Init(context.Background(), initOpts(t), rec.run, probeSnapshots(), &out); err != nil {
+	if err := Init(context.Background(), initOpts(t), rec.run, fake.capture, &out); err != nil {
 		t.Fatalf("init: %v", err)
 	}
 	if !strings.Contains(out.String(), "WARNING: these credentials can delete backups") {
 		t.Fatalf("a deletable repository must warn:\n%s", out.String())
 	}
-	var probed, forgot bool
+	var probed bool
 	for _, c := range rec.calls {
 		joined := strings.Join(c.args, " ")
 		if strings.Contains(joined, "backup") && strings.Contains(joined, DeleteProbeTag) {
 			probed = true
 		}
-		// By id, never by tag: `restic forget --tag x` refuses without
-		// a policy, which would read as a storage that denied it.
-		if strings.HasPrefix(joined, "forget") && strings.Contains(joined, "probe123") {
-			forgot = true
-		}
+	}
+	if !probed {
+		t.Errorf("the check must write a probe snapshot: %+v", rec.calls)
+	}
+	// By id, never by tag: `restic forget --tag x` refuses without a
+	// policy, which would read as a storage that denied the delete.
+	if !fake.forgot("probe123") {
+		t.Errorf("the probe snapshot must be removed by id: %+v", fake.calls)
+	}
+	for _, c := range fake.calls {
+		joined := strings.Join(c.args, " ")
 		if strings.HasPrefix(joined, "forget") && strings.Contains(joined, "--tag") {
 			t.Errorf("forget by tag always fails without a policy, so it proves nothing: %v", c.args)
 		}
 	}
-	if !probed || !forgot {
-		t.Errorf("the check must write a probe snapshot and remove it by id: %+v", rec.calls)
-	}
 }
 
 func TestInitReportsAnAppendOnlyKey(t *testing.T) {
-	rec := &recorder{}
-	rec.failIf = func(_ string, args []string) error {
-		if len(args) > 0 && args[0] == "forget" {
-			return errors.New("AccessDenied")
-		}
-		return nil
+	fake := &fakeRestic{
+		forgetOut: "Fatal: AccessDenied: the key is not permitted to delete",
+		forgetErr: errors.New("exit status 1"),
 	}
 	var out strings.Builder
-	if err := Init(context.Background(), initOpts(t), rec.run, probeSnapshots(), &out); err != nil {
+	if err := Init(context.Background(), initOpts(t), (&recorder{}).run, fake.capture, &out); err != nil {
 		t.Fatalf("a key that refuses deletes is the good case, not an error: %v", err)
 	}
 	if !strings.Contains(out.String(), "delete refused by the storage") {
@@ -219,6 +236,31 @@ func TestInitReportsAnAppendOnlyKey(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "WARNING") {
 		t.Error("an append-only key must not warn")
+	}
+}
+
+// "Your backups cannot be deleted" is a security claim, so it must
+// rest on the storage refusing — not on any failure at all. A network
+// error or a stale lock is an unknown answer, and says so.
+func TestInitDoesNotMistakeAFailureForProtection(t *testing.T) {
+	for _, tc := range []struct{ name, out string }{
+		{"network", "Fatal: unable to open repository: dial tcp: i/o timeout"},
+		{"stale lock", "Fatal: repository is already locked by PID 123"},
+		{"corrupt", "Fatal: load index: invalid data returned"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeRestic{forgetOut: tc.out, forgetErr: errors.New("exit status 1")}
+			var out strings.Builder
+			if err := Init(context.Background(), initOpts(t), (&recorder{}).run, fake.capture, &out); err != nil {
+				t.Fatalf("init: %v", err)
+			}
+			if strings.Contains(out.String(), "delete refused by the storage") {
+				t.Errorf("a %s failure is not proof the backups are protected:\n%s", tc.name, out.String())
+			}
+			if !strings.Contains(out.String(), "could not finish") {
+				t.Errorf("an indeterminate probe must say so:\n%s", out.String())
+			}
+		})
 	}
 }
 

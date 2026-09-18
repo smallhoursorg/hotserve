@@ -114,7 +114,7 @@ func Init(ctx context.Context, o InitOptions, run Runner, capture Capturer, log 
 		fmt.Fprintf(log, "\nrepository password — save this somewhere safe now, nothing else has a copy:\n\n    %s\n\nWithout it the backups cannot be read, and no support can recover them.\n\n", password)
 	}
 
-	deletable, err := probeDelete(ctx, run, capture)
+	deletion, err := probeDelete(ctx, run, capture)
 	if err != nil {
 		return err
 	}
@@ -132,13 +132,19 @@ func Init(ctx context.Context, o InitOptions, run Runner, capture Capturer, log 
 		}
 		fmt.Fprintf(log, "repository is on this box, so it now belongs to %s (the user the jobs run as)\n", o.User)
 	}
-	if deletable {
+	switch deletion {
+	case probeDeletable:
 		fmt.Fprintln(log, "\nWARNING: these credentials can delete backups.")
 		fmt.Fprintln(log, "Anyone who takes this box can erase every backup it made. Give the box a")
 		fmt.Fprintln(log, "key that can write but not delete, and keep a privileged key elsewhere for")
 		fmt.Fprintln(log, "pruning — docs/backups.md, \"Keep the box unable to delete\".")
-	} else {
+	case probeRefused:
 		fmt.Fprintln(log, "delete refused by the storage: the box can add backups but not remove them")
+	default:
+		fmt.Fprintln(log, "\nThe delete check could not finish: removing its probe snapshot failed for a")
+		fmt.Fprintln(log, "reason that was not a refusal by the storage (a network error, a stale lock).")
+		fmt.Fprintln(log, "Whether these credentials can erase your backups is unknown — run")
+		fmt.Fprintln(log, "`hotserve backup init` again when the repository is reachable.")
 	}
 	fmt.Fprintln(log, "\nBackups run hourly (hotserve-backup.timer). Declare what to keep with")
 	fmt.Fprintln(log, "`state` lines in each app's block, then check with `hotserve backup status`.")
@@ -178,25 +184,61 @@ func resolvePassword(o InitOptions) (string, bool, error) {
 // specified, no snapshots will be removed", which would look exactly
 // like a storage that denied the delete — a check that always
 // reported "you are safe", whatever the credentials could do.
-func probeDelete(ctx context.Context, run Runner, capture Capturer) (bool, error) {
+func probeDelete(ctx context.Context, run Runner, capture Capturer) (probeResult, error) {
 	dir, err := os.MkdirTemp("", "hotserve-probe")
 	if err != nil {
-		return false, err
+		return probeUnknown, err
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
 	if err := os.WriteFile(filepath.Join(dir, "probe"), []byte("hotserve delete probe\n"), 0o600); err != nil {
-		return false, err
+		return probeUnknown, err
 	}
 	if err := run(ctx, "restic", "backup", "--quiet", "--tag", DeleteProbeTag, dir); err != nil {
-		return false, fmt.Errorf("writing a probe snapshot: %w (the repository is not writable with these credentials)", err)
+		return probeUnknown, fmt.Errorf("writing a probe snapshot: %w (the repository is not writable with these credentials)", err)
 	}
 	id, err := newestSnapshotID(ctx, capture, DeleteProbeTag)
 	if err != nil {
-		return false, err
+		return probeUnknown, err
 	}
-	// A forget that fails is the good outcome, so its error is the
-	// answer rather than a failure of this command.
-	return run(ctx, "restic", "forget", "--quiet", id) == nil, nil
+	// A forget that fails is the good outcome — but only when the
+	// storage is what refused it. A network blip, a stale lock or a
+	// corrupt repository would otherwise be reported as "your backups
+	// cannot be deleted", which is the one thing a security check must
+	// never say on no evidence.
+	out, err := capture(ctx, "restic", "forget", "--quiet", id)
+	if err == nil {
+		return probeDeletable, nil
+	}
+	if deniedBy(string(out) + " " + err.Error()) {
+		return probeRefused, nil
+	}
+	return probeUnknown, nil
+}
+
+// probeResult is what the delete check learned.
+type probeResult int
+
+const (
+	probeDeletable probeResult = iota
+	probeRefused
+	probeUnknown
+)
+
+// deniedBy recognises a storage saying no. The wording comes from the
+// backends: S3-compatible stores answer AccessDenied or 403, B2 says
+// unauthorized, a filesystem repository gives EACCES.
+func deniedBy(text string) bool {
+	t := strings.ToLower(text)
+	for _, s := range []string{
+		"accessdenied", "access denied", "403", "forbidden",
+		"unauthorized", "not authorized", "permission denied",
+		"operation not permitted", "read-only",
+	} {
+		if strings.Contains(t, s) {
+			return true
+		}
+	}
+	return false
 }
 
 // newestSnapshotID finds the snapshot just written, so it can be

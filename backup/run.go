@@ -91,6 +91,13 @@ func LaunchArgs(app App, o LaunchOptions) []string {
 		// a ceiling to enforce.
 		"--property=MemoryHigh=64M",
 		"--property=IOSchedulingClass=idle",
+		// A job that hangs must not outlive the run that started it.
+		// systemd-run --wait only waits; killing the launcher leaves
+		// the transient unit going, and the next hour's run would then
+		// fail on the unit name being taken — every hour, invisibly.
+		// 45 minutes is inside hotserve-backup.service's own 55, so
+		// the job dies first and the run reports it.
+		"--property=RuntimeMaxSec=45min",
 		"--property=TemporaryFileSystem=/:ro",
 		"--property=BindReadOnlyPaths=/usr /bin /lib -/lib64 /etc/ssl /etc/resolv.conf /etc/hosts /etc/passwd /etc/group /etc/localtime",
 		sharedBind,
@@ -139,9 +146,24 @@ func ensureStagingDir(dir, username string) error {
 	// Both halves up front: the job cannot create them itself, since
 	// only what is bound into its view exists, and a bind of a
 	// missing path fails the unit.
+	//
+	// Every step is symlink-safe, because the contents of these
+	// directories are written by the job — an unprivileged process
+	// that this one, running as root, then chowns. A job that swapped
+	// `data` for a symlink to /etc would otherwise have the next run
+	// hand /etc to the hotserve user: a link followed by root is a
+	// root escalation, so a path that is not a real directory is
+	// refused rather than repaired.
 	for _, d := range []string{dir, StagingData(dir), StagingCache(dir)} {
 		if err := os.MkdirAll(d, 0o750); err != nil {
 			return fmt.Errorf("staging dir %s: %w", d, err)
+		}
+		info, err := os.Lstat(d)
+		if err != nil {
+			return fmt.Errorf("staging dir %s: %w", d, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("staging path %s is not a directory (%s) — refusing to use it: the backup job writes here, so anything else is something it put there", d, info.Mode().Type())
 		}
 	}
 	u, err := user.Lookup(username)
@@ -157,7 +179,9 @@ func ensureStagingDir(dir, username string) error {
 		return fmt.Errorf("user %s has a non-numeric gid %q", username, u.Gid)
 	}
 	for _, d := range []string{dir, StagingData(dir), StagingCache(dir)} {
-		if err := os.Chown(d, uid, gid); err != nil {
+		// Lchown, not Chown: Chown follows a symlink, and following
+		// one here is the escalation described above.
+		if err := os.Lchown(d, uid, gid); err != nil {
 			return fmt.Errorf("giving %s to %s (the job writes its database copies there): %w", d, username, err)
 		}
 	}

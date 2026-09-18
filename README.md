@@ -252,8 +252,9 @@ binary contains every row.
 
 **Two programs the package installs beside the binary, and never links
 into it:** `restic` and `sqlite3`, both from Debian, as
-`Recommends:` — so apt installs them by default and `apt remove` takes
-them with it. [Backups](docs/backups.md) shell out to them
+`Recommends:` — apt installs them by default, and removing hotserve
+marks them as no longer required, so `apt autoremove` clears them (a
+plain `apt remove hotserve` leaves them in place). [Backups](docs/backups.md) shell out to them
 (`hotserve backup` prints each command as it runs); nothing else does,
 and a box that removes them serves exactly as before. They are
 deliberately not Go dependencies: a backup tool inside the serving

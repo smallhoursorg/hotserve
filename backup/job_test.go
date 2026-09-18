@@ -101,7 +101,7 @@ func TestExecuteStagesDatabasesThenBacksUp(t *testing.T) {
 	if rec.calls[0].name != "sqlite3" || rec.calls[1].name != "sqlite3" {
 		t.Fatalf("databases must be staged first: %+v", rec.calls)
 	}
-	if got, want := rec.calls[0].args[0], "file:"+filepath.Join(job.Shared, "app.db")+"?mode=ro"; got != want {
+	if got, want := rec.calls[0].args[0], "file://"+filepath.Join(job.Shared, "app.db")+"?mode=ro"; got != want {
 		t.Errorf("source = %q, want %q (opened read-only: the job reads the app's data, never writes it)", got, want)
 	}
 	wantDst := filepath.Join(StagingData(job.Staging), "data/sessions.db")
@@ -200,6 +200,23 @@ func TestExecuteRefusesPathsOutsideShared(t *testing.T) {
 				t.Errorf("nothing should run: %+v", rec.calls)
 			}
 		})
+	}
+}
+
+// `?`, `#` and `%` are legal in a filename and meaningful in a URI.
+// Concatenated, `a?b.db` opens `a` with a stray parameter — sqlite3
+// creates that file and reports "no such table", so the backup holds
+// an empty database and says nothing (measured on Debian 13).
+func TestSQLiteURIEscapesPathsThatLookLikeURIs(t *testing.T) {
+	for _, tc := range []struct{ path, want string }{
+		{"/s/a?b.db", "file:///s/a%3Fb.db?mode=ro"},
+		{"/s/c#d.db", "file:///s/c%23d.db?mode=ro"},
+		{"/s/e%2Ff.db", "file:///s/e%252Ff.db?mode=ro"},
+		{"/s/plain.db", "file:///s/plain.db?mode=ro"},
+	} {
+		if got := sqliteURI(tc.path); got != tc.want {
+			t.Errorf("sqliteURI(%q) = %q, want %q", tc.path, got, tc.want)
+		}
 	}
 }
 
