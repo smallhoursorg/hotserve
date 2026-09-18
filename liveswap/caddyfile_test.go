@@ -25,6 +25,8 @@ func TestCaddyfileUnmarshalFullConfig(t *testing.T) {
 			env NODE_ENV production
 			env DB sqlite:{shared_dir}/blog.db
 			env_file /etc/liveswap/blog.env
+			state sqlite blog.db
+			state files uploads
 			deploy_trust local {
 				public_key /etc/hotserve/blog.pub
 				subject ci@smallhours
@@ -83,6 +85,11 @@ func TestCaddyfileUnmarshalFullConfig(t *testing.T) {
 	}
 	if blog.EnvFile != "/etc/liveswap/blog.env" {
 		t.Fatalf("env_file wrong: %+v", blog)
+	}
+	if len(blog.State) != 2 ||
+		blog.State[0] != (StateEntry{Kind: StateKindSQLite, Path: "blog.db"}) ||
+		blog.State[1] != (StateEntry{Kind: StateKindFiles, Path: "uploads"}) {
+		t.Fatalf("state wrong: %+v", blog.State)
 	}
 	if len(blog.DeployTrust) != 1 || blog.DeployTrust[0].Kind != "local" ||
 		blog.DeployTrust[0].PublicKey != "/etc/hotserve/blog.pub" ||
@@ -160,6 +167,10 @@ func TestCaddyfileUnmarshalErrors(t *testing.T) {
 		{"bad keep", "liveswap {\n\tapp a {\n\t\tkeep many\n\t}\n}", "invalid keep"},
 		{"bad size", "liveswap {\n\tapp a {\n\t\tmax_artifact_size huge\n\t}\n}", "invalid max_artifact_size"},
 		{"bad entries", "liveswap {\n\tapp a {\n\t\tmax_artifact_entries lots\n\t}\n}", "invalid max_artifact_entries"},
+		{"unknown state kind", "liveswap {\n\tapp a {\n\t\tstate postgres db\n\t}\n}", "unknown state kind"},
+		{"state missing path", "liveswap {\n\tapp a {\n\t\tstate sqlite\n\t}\n}", "wrong argument count"},
+		{"state missing both args", "liveswap {\n\tapp a {\n\t\tstate\n\t}\n}", "wrong argument count"},
+		{"state extra arg", "liveswap {\n\tapp a {\n\t\tstate sqlite a.db b.db\n\t}\n}", "wrong argument count"},
 		{"command missing args", "liveswap {\n\tapp a {\n\t\tcommand\n\t}\n}", "wrong argument count"},
 		{"env missing value", "liveswap {\n\tapp a {\n\t\tenv K\n\t}\n}", "wrong argument count"},
 		{"root missing arg", "liveswap {\n\troot\n}", "wrong argument count"},

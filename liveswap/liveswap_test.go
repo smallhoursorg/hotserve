@@ -144,6 +144,48 @@ func TestValidate(t *testing.T) {
 		{"negative watchdog grace", func(a *App) { a.Apps["blog"].WatchdogGrace = caddy.Duration(-time.Second) }, "watchdog_grace must not be negative"},
 		{"negative watchdog window", func(a *App) { a.Apps["blog"].WatchdogWindow = caddy.Duration(-time.Second) }, "watchdog_window must be positive"},
 		{"bad env key", func(a *App) { a.Apps["blog"].Env = map[string]string{"my-var": "1"} }, `env key "my-var"`},
+		{"state escapes shared", func(a *App) {
+			a.Apps["blog"].State = []StateEntry{{Kind: StateKindSQLite, Path: "../../etc/shadow"}}
+		}, "stay inside it"},
+		{"state absolute", func(a *App) {
+			a.Apps["blog"].State = []StateEntry{{Kind: StateKindFiles, Path: "/var/lib/hotserve/caddy"}}
+		}, "stay inside it"},
+		{"state empty path", func(a *App) {
+			a.Apps["blog"].State = []StateEntry{{Kind: StateKindSQLite, Path: ""}}
+		}, "needs a path relative to"},
+		// filepath.IsLocal(".") is true, so the shared dir itself needs
+		// its own refusal: `state files .` would sweep the live
+		// database in as a file read as it lies.
+		{"state dot", func(a *App) {
+			a.Apps["blog"].State = []StateEntry{{Kind: StateKindFiles, Path: "."}}
+		}, "not the dir itself"},
+		{"state dot slash", func(a *App) {
+			a.Apps["blog"].State = []StateEntry{{Kind: StateKindFiles, Path: "./"}}
+		}, "not the dir itself"},
+		{"state unknown kind", func(a *App) {
+			a.Apps["blog"].State = []StateEntry{{Kind: "postgres", Path: "db"}}
+		}, "state kind must be"},
+		// A database inside a declared directory would be copied twice:
+		// once byte-for-byte as part of the directory (a torn copy)
+		// and once consistently. A restore could put the torn one back.
+		{"database inside a declared directory", func(a *App) {
+			a.Apps["blog"].State = []StateEntry{
+				{Kind: StateKindFiles, Path: "data"},
+				{Kind: StateKindSQLite, Path: "data/sessions.db"},
+			}
+		}, "overlap"},
+		{"directory inside a declared directory", func(a *App) {
+			a.Apps["blog"].State = []StateEntry{
+				{Kind: StateKindFiles, Path: "uploads/thumbs"},
+				{Kind: StateKindFiles, Path: "uploads"},
+			}
+		}, "overlap"},
+		{"state declared twice", func(a *App) {
+			a.Apps["blog"].State = []StateEntry{
+				{Kind: StateKindSQLite, Path: "app.db"},
+				{Kind: StateKindFiles, Path: "./app.db"},
+			}
+		}, "declared twice"},
 		{"negative deploy_log_lines", func(a *App) { n := -1; a.Apps["blog"].DeployLogLines = &n }, "deploy_log_lines must be between"},
 		{"deploy_log_lines over 1000", func(a *App) { n := 1001; a.Apps["blog"].DeployLogLines = &n }, "deploy_log_lines must be between"},
 	}
@@ -156,6 +198,28 @@ func TestValidate(t *testing.T) {
 				t.Fatalf("want error containing %q, got %v", tc.want, err)
 			}
 		})
+	}
+}
+
+// `state` names what is precious inside shared/, so the shapes a real
+// app uses — a database at the top, one in a subdirectory, several
+// upload dirs — must all load. The paths are not resolved against the
+// disk: an app declares its state before it has ever been deployed.
+func TestValidateAcceptsStateDeclarations(t *testing.T) {
+	a := &App{
+		Root:              "/var/lib/liveswap",
+		ArtifactAllowlist: []string{"github.com/smallhoursorg/"},
+		DeployTrust:       githubTrust(),
+		Apps:              map[string]*AppConfig{"blog": defaultedApp(t)},
+	}
+	a.Apps["blog"].State = []StateEntry{
+		{Kind: StateKindSQLite, Path: "app.db"},
+		{Kind: StateKindSQLite, Path: "data/sessions.db"},
+		{Kind: StateKindFiles, Path: "uploads"},
+		{Kind: StateKindFiles, Path: "uploads-original"},
+	}
+	if err := a.Validate(); err != nil {
+		t.Fatalf("valid state declarations rejected: %v", err)
 	}
 }
 

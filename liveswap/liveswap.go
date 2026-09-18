@@ -50,6 +50,12 @@ var appPool = caddy.NewUsagePool()
 
 func poolKey(name string) string { return "liveswap:app:" + name }
 
+// DefaultRoot is where app state lives when `root` is not set. It is
+// exported because the admin API serves the config as it was loaded,
+// not as it was provisioned: anything reading the config to find an
+// app's data has to apply this default itself.
+const DefaultRoot = "/var/lib/liveswap"
+
 // App is the `liveswap` Caddy app module: the deploy orchestrator.
 type App struct {
 	// Root is the directory holding all app state on disk:
@@ -150,6 +156,15 @@ type AppConfig struct {
 	// the app's environment. Optional; missing file fails the deploy.
 	EnvFile string `json:"env_file,omitempty"`
 
+	// State declares what inside the app's shared/ dir is precious:
+	// the data a rebuilt box needs back. liveswap does nothing with it
+	// — it neither reads, writes nor creates these paths, and an app
+	// without it runs identically. It is a declaration for whatever
+	// backs the box up, which reads it from the admin API: what to
+	// copy, and which entries are databases needing a consistent copy
+	// rather than a file read.
+	State []StateEntry `json:"state,omitempty"`
+
 	// DeployTrust overrides the global deploy-auth trust sources for
 	// this app (replaces, not appends).
 	DeployTrust []TrustConfig `json:"deploy_trust,omitempty"`
@@ -246,6 +261,28 @@ type AppConfig struct {
 	MaxArtifactEntries int `json:"max_artifact_entries,omitempty"`
 }
 
+// State kinds. A database cannot be copied byte-for-byte while it is
+// being written, so what reads these entries has to tell the two
+// apart: `sqlite` needs a consistent copy taken through SQLite,
+// `files` is read as it lies.
+const (
+	StateKindSQLite = "sqlite"
+	StateKindFiles  = "files"
+)
+
+// StateEntry is one `state <kind> <path>` declaration. Path is always
+// relative to the app's shared/ dir — the one directory that survives
+// deploys, rollbacks and the app's removal — and is validated as
+// lexically contained in it at config load. Nothing resolves it
+// against the filesystem here: the process that reads the data does
+// that inside its own view, where shared/ is all it can reach.
+type StateEntry struct {
+	// Kind is StateKindSQLite or StateKindFiles.
+	Kind string `json:"kind"`
+	// Path is relative to {shared_dir}, e.g. "app.db" or "uploads".
+	Path string `json:"path"`
+}
+
 // CaddyModule returns the Caddy module information.
 func (App) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
@@ -269,7 +306,7 @@ func (a *App) Provision(ctx caddy.Context) error {
 	}
 	resolveTrustPlaceholders(repl, a.DeployTrust)
 	if a.Root == "" {
-		a.Root = "/var/lib/liveswap"
+		a.Root = DefaultRoot
 	}
 
 	var err error
@@ -510,6 +547,9 @@ func (a *App) Validate() error {
 		if len(cfg.Command) == 0 {
 			return fmt.Errorf("app %s: command is required", name)
 		}
+		if err := validateState(name, cfg.State); err != nil {
+			return err
+		}
 		if len(a.DeployTrust) == 0 && len(cfg.DeployTrust) == 0 {
 			return fmt.Errorf("app %s: no deploy_trust configured — declare who may deploy, e.g. a `deploy_trust github { audience ...; claim repository your-org/%s }` block or a `deploy_trust local { public_key ... }` fallback (globally or per app)", name, name)
 		}
@@ -574,6 +614,57 @@ func (a *App) Validate() error {
 	// per-app loop: one app's env_file must not sit inside another
 	// app's view.
 	return validateEnvFileIsolation(a)
+}
+
+// validateState checks the `state` declarations of one app. The paths
+// are never resolved against the filesystem — the entries name what is
+// precious, not what exists, and an app that has not been deployed yet
+// has none of them — so the gate is lexical: relative, inside
+// shared/, and declared once. filepath.IsLocal is the same validator
+// extraction uses for archive paths (extract.go), so `..`, an absolute
+// path and a Windows-reserved name are all refused by the one rule
+// static analysis already recognizes as a containment barrier.
+func validateState(app string, entries []StateEntry) error {
+	seen := make(map[string]string, len(entries))
+	for _, e := range entries {
+		if e.Kind != StateKindSQLite && e.Kind != StateKindFiles {
+			return fmt.Errorf("app %s: state kind must be %s or %s, got %q", app, StateKindSQLite, StateKindFiles, e.Kind)
+		}
+		if e.Path == "" {
+			return fmt.Errorf("app %s: state %s needs a path relative to the app's shared dir, e.g. `state %s app.db` or `state %s uploads`", app, e.Kind, StateKindSQLite, StateKindFiles)
+		}
+		clean := filepath.Clean(e.Path)
+		if !filepath.IsLocal(clean) {
+			return fmt.Errorf("app %s: state %s %q must be relative to the app's shared dir and stay inside it (no leading / and no ..)", app, e.Kind, e.Path)
+		}
+		// filepath.IsLocal(".") is true, and "." is the shared dir
+		// itself: it would declare the live database and its WAL as
+		// files to read as they lie, which is the one thing the kinds
+		// exist to keep apart.
+		if clean == "." {
+			return fmt.Errorf("app %s: state %s must name something inside the app's shared dir, not the dir itself — declare each database and directory, e.g. `state %s app.db` and `state %s uploads`", app, e.Kind, StateKindSQLite, StateKindFiles)
+		}
+		if prev, dup := seen[clean]; dup {
+			return fmt.Errorf("app %s: state path %q is declared twice (as %s and %s)", app, clean, prev, e.Kind)
+		}
+		// One entry inside another is the one overlap the kinds exist
+		// to prevent: `state files data` with `state sqlite
+		// data/app.db` would copy the live database byte-for-byte as
+		// part of the directory — a torn copy — as well as the
+		// consistent one, and a restore could put the torn copy back.
+		for other, otherKind := range seen {
+			if inside(clean, other) || inside(other, clean) {
+				return fmt.Errorf("app %s: state %s %q and state %s %q overlap — one is inside the other, so the same data would be copied twice, once without the care its kind needs", app, e.Kind, clean, otherKind, other)
+			}
+		}
+		seen[clean] = e.Kind
+	}
+	return nil
+}
+
+// inside reports whether child is the same path as parent or below it.
+func inside(child, parent string) bool {
+	return child == parent || strings.HasPrefix(child, parent+string(filepath.Separator))
 }
 
 // Start recovers apps after a Caddy restart: each app that has a

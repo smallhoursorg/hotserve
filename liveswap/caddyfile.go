@@ -164,6 +164,18 @@ func (cfg *AppConfig) unmarshalBlock(d *caddyfile.Dispenser) error {
 				return d.ArgErr()
 			}
 			cfg.EnvFile = d.Val()
+		case "state":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			kind := d.Val()
+			if kind != StateKindSQLite && kind != StateKindFiles {
+				return d.Errf("unknown state kind %q: want %s (a database, copied through SQLite) or %s (read as it lies)", kind, StateKindSQLite, StateKindFiles)
+			}
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			cfg.State = append(cfg.State, StateEntry{Kind: kind, Path: d.Val()})
 		case "deploy_trust":
 			tc, err := parseDeployTrust(d)
 			if err != nil {

@@ -244,6 +244,42 @@ placeholders: `{version}`, `{socket}`, `{release_dir}`, `{shared_dir}`.
 files and uploads there. Standard Caddy `{env.*}` placeholders are
 resolved at config load.
 
+### Declaring state (`state`)
+
+`{shared_dir}` is where an app's data lives, but nothing says *which*
+of it matters. `state` does:
+
+```
+app blog {
+	command ./server
+	env DATA_DIR {shared_dir}
+	state sqlite app.db        # a database: needs a consistent copy
+	state files uploads        # files: read as they lie
+}
+```
+
+Paths are relative to `{shared_dir}` and are checked at config load to
+stay inside it; a path that is absolute or climbs out with `..` fails
+the config, as does declaring the same path twice. They are not
+resolved against the disk — an app declares its state before it has
+ever been deployed, and the directories may not exist yet.
+
+liveswap does nothing with these entries: it never reads, writes or
+creates the paths, and an app with no `state` runs exactly as before.
+They are a declaration for what backs the box up. `hotserve backup`
+reads them from the admin API (`/config/apps/liveswap`), so adding an
+app to your backups is these two lines and nothing else —
+see [docs/backups.md](../docs/backups.md). Anything else that reads
+the config can use them the same way.
+
+The two kinds are there because a database being written cannot be
+copied byte-for-byte: `sqlite` means "take a consistent copy" (a
+`VACUUM INTO` of a scratch file, which is then what gets backed up),
+`files` means "read it as it lies". They may not overlap — a database
+inside a declared directory would be copied both ways, and the torn
+copy could be the one a restore puts back — so a nested pair is a
+config error.
+
 ### Options
 
 | Option | Default | Meaning |
@@ -255,6 +291,7 @@ resolved at config load.
 | `command` | — (required) | argv to start the app, CWD = release dir |
 | `pre_start` | — | Run-to-completion hook; failure aborts deploy |
 | `env`, `env_file` | — | Extra environment |
+| `state <kind> <path>` | — | Declares data worth keeping, relative to `{shared_dir}`; `<kind>` is `sqlite` or `files`. Repeatable. Changes nothing about how the app runs (see [Declaring state](#declaring-state-state)) |
 | `health_path` | `/health` | 2xx = healthy; `off` = process-liveness only |
 | `health_interval` / `health_timeout` | `5s` / `2s` | Probe cadence |
 | `soak` | `15s` | Continuous health required before cutover |
