@@ -168,7 +168,7 @@ func TestTheJobAndInitsChecksShareOneSandbox(t *testing.T) {
 	const (
 		staging = "/var/lib/hotserve-backup/blog"
 		shared  = "/var/lib/liveswap/blog/shared"
-		scratch = "/run/hotserve-backup/init-x"
+		scratch = checkHome
 	)
 	app := testApp("blog", StateEntry{Kind: KindFiles, Path: "uploads"})
 	opts := launchOpts("/var/lib/hotserve-backup")
@@ -198,13 +198,33 @@ func TestTheJobAndInitsChecksShareOneSandbox(t *testing.T) {
 		return out
 	}
 	j, c := props(job, staging), props(check, scratch)
-	// The one difference by design: the job reads an app's data, and
-	// init's checks read none.
+	// Two differences by design. The job reads an app's data, and init's
+	// checks read none.
 	sharedBind := "--property=BindReadOnlyPaths=" + shared
 	if !slices.Contains(j, sharedBind) {
 		t.Fatalf("the job should bind the app's data read-only: %v", j)
 	}
 	j = slices.DeleteFunc(j, func(a string) bool { return a == sharedBind })
+	// And systemd makes each its one writable directory where that kind
+	// belongs: a job's under /var/lib, kept from run to run; a check's
+	// on tmpfs, kept only until init removes it. Neither is a path the
+	// launcher, which is root, makes or binds itself.
+	take := func(all []string, want ...string) []string {
+		for _, w := range want {
+			if !slices.Contains(all, w) {
+				t.Fatalf("missing %s in %v", w, all)
+			}
+			all = slices.DeleteFunc(all, func(a string) bool { return a == w })
+		}
+		return all
+	}
+	j = take(j, "--property=StateDirectory=hotserve-backup/blog", "--property=StateDirectoryMode=0750")
+	c = take(c, "--property=RuntimeDirectory=hotserve-backup-check", "--property=RuntimeDirectoryMode=0700", "--property=RuntimeDirectoryPreserve=yes")
+	for _, a := range append(slices.Clone(j), c...) {
+		if strings.Contains(a, "BindPaths=") {
+			t.Errorf("no unit's own directory is bound by path any more: %s", a)
+		}
+	}
 	if strings.Join(j, "\n") != strings.Join(c, "\n") {
 		t.Fatalf("the job and init's checks run in different sandboxes:\njob:\n%s\n\ncheck:\n%s", strings.Join(j, "\n"), strings.Join(c, "\n"))
 	}
@@ -246,5 +266,78 @@ func TestCaptureQuietKeepsTheStreamsApart(t *testing.T) {
 	out, err = capture(context.Background(), "sh", script("1")...)
 	if err == nil || !strings.Contains(string(out), "403 Forbidden") {
 		t.Errorf("a failure should return stderr with stdout: %q, %v", out, err)
+	}
+}
+
+// init keeps the repository password in this directory while its checks
+// run, so it is used only as a real directory that is root's and that
+// nobody else can enter — whatever an earlier run, or someone else,
+// left there.
+func TestRequireRootOnlyDir(t *testing.T) {
+	open := t.TempDir()
+	if err := os.Chmod(open, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := requireRootOnlyDir(open); err == nil || !strings.Contains(err.Error(), "only root can enter") {
+		t.Errorf("a directory others can enter must be refused, got %v", err)
+	}
+
+	closed := t.TempDir()
+	if err := os.Chmod(closed, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := closed + "-link"
+	if err := os.Symlink(closed, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(link) })
+	if err := requireRootOnlyDir(link); err == nil {
+		t.Error("a link to a directory is not that directory, and must be refused")
+	}
+
+	// 0700 is enough only when root owns it.
+	err := requireRootOnlyDir(closed)
+	if os.Geteuid() == 0 && err != nil {
+		t.Errorf("root's own 0700 directory must be accepted, got %v", err)
+	}
+	if os.Geteuid() != 0 && err == nil {
+		t.Error("a 0700 directory that is not root's must be refused")
+	}
+
+	if err := requireRootOnlyDir(closed + "-missing"); err == nil {
+		t.Error("a missing directory must be an error")
+	}
+}
+
+// systemd 257 says "activating", and `is-active` exits 3, for a
+// Type=oneshot unit whose command is still running (measured on Debian
+// 13). A job is such a unit, so that is what a running backup looks
+// like: read as "not running", a restore is never told to wait and
+// `status` never says a backup is under way.
+func TestARunningJobIsAnActivatingUnit(t *testing.T) {
+	for state, want := range map[string]bool{
+		"activating": true, "active": true, "deactivating": true, "reloading": true,
+		"inactive": false, "failed": false, "": false, "unknown": false,
+	} {
+		if got := unitStateIsRunning(state); got != want {
+			t.Errorf("unitStateIsRunning(%q) = %v, want %v", state, got, want)
+		}
+	}
+}
+
+// A restore puts back what an app's block declares, so an app that
+// declares nothing — or is not there — is told what comes first.
+func TestFindApp(t *testing.T) {
+	apps := []App{{Name: "blog"}, {Name: "shop"}}
+	if a, err := findApp(apps, "shop"); err != nil || a.Name != "shop" {
+		t.Errorf("findApp(shop) = %+v, %v", a, err)
+	}
+	_, err := findApp(apps, "wiki")
+	if err == nil || !strings.Contains(err.Error(), "blog, shop") || !strings.Contains(err.Error(), "the block comes first") {
+		t.Errorf("want the apps that do declare state, and what to do, got %v", err)
+	}
+	_, err = findApp(nil, "wiki")
+	if err == nil || !strings.Contains(err.Error(), "no app declares state") || !strings.Contains(err.Error(), "reload") {
+		t.Errorf("want an error saying nothing declares state, got %v", err)
 	}
 }

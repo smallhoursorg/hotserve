@@ -38,13 +38,13 @@ mkdir -p /var/lib/hotserve /var/lib/liveswap /var/lib/hotserve-backup
 chmod 750 /var/lib/hotserve /var/lib/liveswap /var/lib/hotserve-backup
 chown hotserve:hotserve /var/lib/hotserve /var/lib/liveswap
 # /var/lib/hotserve-backup holds one staging dir per app. The dirs in
-# it are the hotserve user's, because the jobs write there; the dir
-# itself is root's, because root walks it: `hotserve backup run` makes
-# and chowns <app>/ as root, and hotserve.service — the internet-facing
-# process, as the hotserve user, with /var writable — has no business
-# rearranging what root is about to walk. Nothing unprivileged needs to
-# enter: each job reaches its own dir through a bind mount that systemd
-# sets up.
+# it are the hotserve user's, because the jobs write there, and systemd
+# makes them (each job's StateDirectory=). The dir itself is root's:
+# hotserve.service — the internet-facing process, as the hotserve user,
+# with /var writable — has no business in it, and nothing unprivileged
+# needs to enter, since systemd puts each job's own dir in its view.
+# Made here so that it is 0750: left to StateDirectory=, a parent is
+# made 0755.
 chown root:root /var/lib/hotserve-backup
 # The package ships the Caddyfile here, so dpkg makes this directory —
 # but this script also runs without the payload, and the backup

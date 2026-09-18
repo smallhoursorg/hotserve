@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -20,9 +21,11 @@ type restoreFixture struct {
 	job   RestoreJob
 	held  map[string]string
 	calls []call
-	// integrity is what `PRAGMA integrity_check` answers.
-	integrity string
-	dumped    map[string]string // dst → the snapshot path written there
+	// integrity is what `PRAGMA integrity_check` answers, and
+	// integrityErr its exit status.
+	integrity    string
+	integrityErr error
+	dumped       map[string]string // dst → the snapshot path written there
 	// tree is what `restic restore` of a directory reports; treeErr is
 	// its exit status.
 	tree    restoreErrors
@@ -58,7 +61,7 @@ func newRestore(t *testing.T, dbs, files []string) *restoreFixture {
 		f.calls = append(f.calls, call{name, args})
 		switch {
 		case name == "sqlite3":
-			return []byte(f.integrity + "\n"), nil
+			return []byte(f.integrity + "\n"), f.integrityErr
 		case name == "restic" && args[0] == "ls":
 			var b strings.Builder
 			for _, dir := range args[slices.Index(args, "s1full")+1:] {
@@ -146,6 +149,12 @@ func TestRestoreDeletesOnlyWhenAsked(t *testing.T) {
 func TestRestoreChecksEverythingBeforeItChangesAnything(t *testing.T) {
 	cases := map[string]func(f *restoreFixture){
 		"a database copy fails its integrity check": func(f *restoreFixture) { f.integrity = "*** in database main ***\nPage 3 is never used" },
+		// A page sqlite3 cannot read at all: it says what it can on
+		// stdout, "malformed" on stderr, and exits 1 (3.46, measured).
+		"sqlite3 exits 1 over a malformed copy": func(f *restoreFixture) {
+			f.integrity = "*** in database main ***\nTree 2 page 2: btreeInitPage() returns error code 11"
+			f.integrityErr = &exec.ExitError{}
+		},
 		"the snapshot has no copy of a database": func(f *restoreFixture) {
 			f.held[filepath.Join(StagingData(f.job.Staging), "app.db")] = ""
 		},
@@ -435,8 +444,9 @@ func TestRestoreRunsInTheBackupJobsUnitAndSandbox(t *testing.T) {
 	staging := o.StagingRoot + "/blog"
 	swap := map[string]string{
 		"--property=BindReadOnlyPaths=" + app.Shared: "--property=BindPaths=" + app.Shared,
-		// Its own part of staging, not the backup's bookkeeping.
-		"--property=BindPaths=" + staging:                                "--property=BindPaths=" + StagingRestore(staging),
+		// Its own part of staging, not the backup's bookkeeping: systemd
+		// makes that dir and puts only it in the view.
+		"--property=StateDirectory=hotserve-backup/blog":                 "--property=StateDirectory=hotserve-backup/blog/restore",
 		"--property=Environment=HOME=" + staging:                         "--property=Environment=HOME=" + StagingRestore(staging),
 		"--property=Environment=XDG_CACHE_HOME=" + StagingCache(staging): "--property=Environment=XDG_CACHE_HOME=" + StagingCache(StagingRestore(staging)),
 	}
@@ -455,5 +465,34 @@ func TestRestoreRunsInTheBackupJobsUnitAndSandbox(t *testing.T) {
 	}
 	if cmd := jobCommand(restore); !slices.Equal(cmd[:3], []string{o.Self, "backup", "restore-app"}) || !slices.Contains(cmd, "--snapshot=s1full") || slices.Contains(cmd, "--no-lock") {
 		t.Errorf("restore unit runs %v", cmd)
+	}
+}
+
+// What the operator reads before typing the app's name: which snapshot,
+// from when and where, and what happens to each declared path — DELETED
+// only when it was asked for.
+func TestDescribeRestoreSaysWhatWillHappen(t *testing.T) {
+	app := App{Name: "blog", State: []StateEntry{
+		{Kind: KindSQLite, Path: "app.db"},
+		{Kind: KindFiles, Path: "uploads/"},
+	}}
+	now := time.Date(2026, 9, 18, 15, 0, 0, 0, time.UTC)
+	snap := Snapshot{ShortID: "a1b2c3d4", Hostname: "box-1", Time: now.Add(-3 * time.Hour)}
+
+	var kept strings.Builder
+	DescribeRestore(&kept, app, snap, false, now)
+	for _, want := range []string{"Restoring blog from snapshot a1b2c3d4", "3 hours ago", "on box-1", "app.db", "replaced by the snapshot's copy", "uploads ", "files added since are kept", "is left as it is"} {
+		if !strings.Contains(kept.String(), want) {
+			t.Errorf("missing %q in:\n%s", want, kept.String())
+		}
+	}
+	if strings.Contains(kept.String(), "DELETED") {
+		t.Errorf("nothing is deleted unless asked:\n%s", kept.String())
+	}
+
+	var deleted strings.Builder
+	DescribeRestore(&deleted, app, snap, true, now)
+	if !strings.Contains(deleted.String(), "files added since are DELETED") {
+		t.Errorf("--delete must be said in capitals before it is confirmed:\n%s", deleted.String())
 	}
 }

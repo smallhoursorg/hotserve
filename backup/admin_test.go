@@ -106,3 +106,45 @@ func TestFetchAppsUnreachableAdminSaysWhatToCheck(t *testing.T) {
 		t.Fatalf("want a hint about the socket, got %v", err)
 	}
 }
+
+// The admin API serves `root` as it was written, so an {env.NAME} in it
+// reaches this command unresolved. It is resolved from this command's
+// own environment, and a name it cannot see is an error that says so:
+// resolving it to "" would point every backup at a path that does not
+// exist, which reads as "never deployed" and skips the app.
+func TestFetchAppsResolvesAnEnvPlaceholderInRoot(t *testing.T) {
+	const cfg = `{"root": "{env.LIVESWAP_ROOT}/apps", "apps": {"blog": {"state": [{"kind": "files", "path": "uploads"}]}}}`
+	addr := serveAdmin(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(cfg)) })
+
+	t.Setenv("LIVESWAP_ROOT", "/data")
+	apps, err := FetchApps(context.Background(), addr)
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if len(apps) != 1 || apps[0].Shared != "/data/apps/blog/shared" {
+		t.Errorf("shared = %+v, want /data/apps/blog/shared", apps)
+	}
+
+	if err := os.Unsetenv("LIVESWAP_ROOT"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = FetchApps(context.Background(), addr)
+	if err == nil || !strings.Contains(err.Error(), "LIVESWAP_ROOT is not set") || !strings.Contains(err.Error(), "hotserve-backup.service") {
+		t.Errorf("want an error naming the variable and where to set it, got %v", err)
+	}
+}
+
+func TestFetchAppsRefusesARootItCannotUse(t *testing.T) {
+	for name, tc := range map[string]struct{ root, want string }{
+		"an unterminated placeholder": {"{env.LIVESWAP_ROOT", "unterminated placeholder"},
+		"a relative path":             {"var/lib/liveswap", "not an absolute path"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := `{"root": "` + tc.root + `", "apps": {"blog": {"state": [{"kind": "files", "path": "uploads"}]}}}`
+			addr := serveAdmin(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(cfg)) })
+			if _, err := FetchApps(context.Background(), addr); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("want an error saying %q, got %v", tc.want, err)
+			}
+		})
+	}
+}

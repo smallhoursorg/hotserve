@@ -112,10 +112,10 @@ if [ "$(stat -c '%U %a' /run/hotserve-backup)" = "root 700" ]; then
 else
 	fail "/run/hotserve-backup is $(stat -c '%U %a' /run/hotserve-backup), want root 700"
 fi
-if ls -A /run/hotserve-backup | grep -q .; then
-	fail "init left something behind: $(ls -A /run/hotserve-backup)"
+if ls -A /run/hotserve-backup | grep -q . || [ -e /run/hotserve-backup-check ]; then
+	fail "init left something behind: $(ls -A /run/hotserve-backup /run/hotserve-backup-check 2>&1)"
 else
-	pass "init left neither its check directory nor a copy of the settings behind"
+	pass "init left neither its checks' directory nor a copy of the settings behind"
 fi
 # e2e-s3 is not asked to enforce an append-only policy — that is the
 # storage provider's job — so its one key can delete, and init must say
@@ -545,6 +545,221 @@ if hotserve backup status --check --admin 127.0.0.1:2019 >/dev/null 2>&1; then
 else
 	fail "--check failed after a clean run: $(hotserve backup status --admin 127.0.0.1:2019 2>&1)"
 fi
+
+echo "=== a backup that fails says so, and costs nobody else theirs ==="
+# A file the job cannot read. restic backs up everything else, WRITES A
+# SNAPSHOT, and exits 3 — the case the clean-run records exist for.
+count_of() { hotserve backup restic -- snapshots --json --tag "$1" 2>/dev/null | grep -o '"short_id"' | wc -l; }
+echo secret > "$SHARED/uploads/unreadable"
+chown root:root "$SHARED/uploads/unreadable"
+chmod 000 "$SHARED/uploads/unreadable"
+clean_before=$(count_of hotserve-clean,clean-app:backup-example)
+snaps_before=$(count_of hotserve,app:backup-example)
+if hotserve backup run --admin 127.0.0.1:2019 >/tmp/run-fail.log 2>&1; then
+	fail "a run in which one app's backup failed exited 0: $(tail -5 /tmp/run-fail.log)"
+else
+	pass "a run in which one app's backup failed exits non-zero"
+fi
+if grep -q 'backup-example: FAILED' /tmp/run-fail.log && grep -q 'files-example: ok' /tmp/run-fail.log; then
+	pass "the failing app is named, and the other app still got its backup"
+else
+	fail "after a failing job: $(grep -E ': (ok|FAILED)' /tmp/run-fail.log | tr '\n' ' ')"
+fi
+if [ "$(count_of hotserve,app:backup-example)" -eq $((snaps_before + 1)) ] && [ "$(count_of hotserve-clean,clean-app:backup-example)" -eq "$clean_before" ]; then
+	pass "restic left a snapshot of the failed run, and no clean-run record vouches for it"
+else
+	fail "after a failed run: snapshots $snaps_before → $(count_of hotserve,app:backup-example), clean records $clean_before → $(count_of hotserve-clean,clean-app:backup-example)"
+fi
+picked=$(hotserve backup restore backup-example --admin 127.0.0.1:2019 </dev/null 2>&1 || true)
+if echo "$picked" | grep -q "is newer, but the run that took it did not finish cleanly"; then
+	pass "restore passes over the failed run's snapshot, and says so"
+else
+	fail "restore did not pass over the failed run's snapshot: $picked"
+fi
+rm -f "$SHARED/uploads/unreadable"
+if hotserve backup run --admin 127.0.0.1:2019 >/tmp/run-mend.log 2>&1 && [ "$(count_of hotserve-clean,clean-app:backup-example)" -eq $((clean_before + 1)) ]; then
+	pass "with the file gone the next run is clean, and is recorded as one"
+else
+	fail "the run after the fix: $(tail -5 /tmp/run-mend.log)"
+fi
+
+echo "=== the launcher is root, and makes nothing under the staging root ==="
+# systemd makes each job's dir (StateDirectory=): the job's user's, in a
+# staging root that stays root's. restic's cache is in it, made by the
+# job itself.
+if [ "$(stat -c '%U %a' /var/lib/hotserve-backup)" = "root 750" ] && [ "$(stat -c '%U %a' /var/lib/hotserve-backup/backup-example)" = "hotserve 750" ] \
+	&& [ "$(stat -c '%U' /var/lib/hotserve-backup/backup-example/restore)" = hotserve ]; then
+	pass "each job's dir is the hotserve user's, made by systemd, in a staging root that is root's"
+else
+	fail "staging: root $(stat -c '%U %a' /var/lib/hotserve-backup), app $(stat -c '%U %a' /var/lib/hotserve-backup/backup-example 2>&1), restore $(stat -c '%U' /var/lib/hotserve-backup/backup-example/restore 2>&1)"
+fi
+if journalctl --no-pager -u hotserve-backup-backup-example.service -u hotserve-backup-files-example.service | grep -q "unable to open cache"; then
+	fail "a job ran without restic's cache: $(journalctl --no-pager -u hotserve-backup-backup-example.service | grep 'unable to open cache' | tail -1)"
+else
+	pass "every job had restic's cache, in its own dir"
+fi
+# A link where a job's dir belongs is the one thing a job could leave
+# for a later run, as root, to follow. systemd does not start that unit,
+# and what the link points at is untouched; the other app is backed up.
+mkdir -p /srv/planted
+mv /var/lib/hotserve-backup/files-example /var/lib/hotserve-backup/files-example.real
+ln -s /srv/planted /var/lib/hotserve-backup/files-example
+if hotserve backup run --admin 127.0.0.1:2019 >/tmp/run-link.log 2>&1; then
+	fail "a run whose job dir is a link exited 0: $(tail -5 /tmp/run-link.log)"
+elif grep -q 'files-example: FAILED' /tmp/run-link.log && grep -q 'backup-example: ok' /tmp/run-link.log \
+	&& [ "$(stat -c '%U' /srv/planted)" = root ] && [ -z "$(ls -A /srv/planted)" ]; then
+	pass "a link where a job's dir belongs fails that app only, and nothing is made or chowned through it"
+else
+	fail "a planted link: $(grep -E ': (ok|FAILED)' /tmp/run-link.log | tr '\n' ' ') / /srv/planted is $(stat -c '%U' /srv/planted) holding '$(ls -A /srv/planted)'"
+fi
+rm -f /var/lib/hotserve-backup/files-example
+mv /var/lib/hotserve-backup/files-example.real /var/lib/hotserve-backup/files-example
+rmdir /srv/planted
+
+echo "=== a snapshot whose database copy is damaged restores nothing ==="
+# A real copy of the database with a page of noise in it, backed up by
+# hand where the job puts its copies, so sqlite3's own integrity check —
+# not a stand-in for it — is what refuses it. The staging root is
+# root's; it is opened to the backup user for as long as this takes.
+STAGE=/var/lib/hotserve-backup/backup-example
+chmod 751 /var/lib/hotserve-backup
+as_hotserve "rm -f '$STAGE/data/app.db'; sqlite3 -cmd '.timeout 5000' 'file:$SHARED/app.db?mode=ro' \"VACUUM INTO '$STAGE/data/app.db'\"; dd if=/dev/urandom of='$STAGE/data/app.db' bs=1 seek=4096 count=2048 conv=notrunc" >/dev/null 2>&1
+hotserve backup restic -- backup --quiet --tag hotserve --tag app:backup-example "$STAGE/data" "$SHARED/uploads" >/dev/null 2>&1
+chmod 750 /var/lib/hotserve-backup
+bad=$(hotserve backup restic -- snapshots --json --tag hotserve,app:backup-example 2>/dev/null \
+	| tr ',' '\n' | grep -o '"short_id":"[^"]*"' | tail -1 | cut -d'"' -f4)
+sq_app 'delete from rows where n <= 10'
+as_hotserve "rm -f '$SHARED/uploads/cat.jpg'"
+damaged=$(hotserve backup restore backup-example --admin 127.0.0.1:2019 --snapshot "$bad" --yes 2>&1)
+damaged_rc=$?
+if [ "$damaged_rc" -ne 0 ] && echo "$damaged" | grep -q "fails SQLite's integrity check" && echo "$damaged" | grep -q "nothing was restored" \
+	&& [ "$(first_row)" = 0 ] && [ ! -e "$SHARED/uploads/cat.jpg" ] && [ "$(sq_app 'pragma integrity_check')" = ok ]; then
+	pass "a damaged database copy fails the restore on SQLite's integrity check, before anything is touched: not the database, not the files"
+else
+	fail "restore from a damaged copy (exit $damaged_rc, first row $(first_row), $(ls "$SHARED/uploads" | tr '\n' ' ')): $damaged"
+fi
+# Put the data back, from the newest clean snapshot.
+mended=$(hotserve backup restore backup-example --admin 127.0.0.1:2019 --yes 2>&1)
+if [ "$(first_row)" = 1 ] && [ -f "$SHARED/uploads/cat.jpg" ]; then
+	pass "the newest clean snapshot then restores both"
+else
+	fail "the restore after the damaged one: $mended"
+fi
+
+echo "=== a rollback-journal database (SQLite's default mode) ==="
+# Everything above ran against a WAL database. Without WAL a reader and
+# a writer exclude each other, so the copy and the restore both have to
+# wait their turn with the app — and still come out whole.
+pkill -f 'INSERT INTO rows' 2>/dev/null
+sleep 1
+if [ "$(sq_app 'PRAGMA journal_mode=DELETE')" = delete ]; then
+	start_writer
+	sleep 1
+	if hotserve backup run --admin 127.0.0.1:2019 >/tmp/run-del.log 2>&1 && grep -q 'backup-example: ok' /tmp/run-del.log; then
+		pass "a rollback-journal database is copied while the app writes to it"
+	else
+		fail "backup of a rollback-journal database: $(tail -5 /tmp/run-del.log)"
+	fi
+	sq_app 'delete from rows where n <= 10'
+	del_restore=$(hotserve backup restore backup-example --admin 127.0.0.1:2019 --yes 2>&1)
+	if echo "$del_restore" | grep -q "restored from snapshot" && [ "$(first_row)" = 1 ] && [ "$(sq_app 'pragma integrity_check')" = ok ] && [ "$(sq_app 'pragma journal_mode')" = delete ]; then
+		pass "and restored while the app writes to it: rows back, intact, still a rollback-journal database"
+	else
+		fail "restore of a rollback-journal database (first row $(first_row), $(sq_app 'pragma journal_mode')): $del_restore"
+	fi
+	rows_mid=$(rows_now)
+	sleep 2
+	if [ "$(rows_now)" -gt "$rows_mid" ]; then
+		pass "the app writes on after it ($rows_mid → $(rows_now) rows)"
+	else
+		fail "writes stopped after the restore: $rows_mid → $(rows_now)"
+	fi
+else
+	fail "could not put the database into rollback-journal mode: $(sq_app 'pragma journal_mode')"
+fi
+
+# The next two need a backup, then a restore, that is still running when
+# something else happens. A connection holding the database exclusively
+# does that: in rollback-journal mode the copy and the restore both wait
+# for it, up to their ten-second busy timeout. The writer is stopped so
+# the lock is the only thing they wait for.
+pkill -f 'INSERT INTO rows' 2>/dev/null
+sleep 1
+rm -f /tmp/hold
+mkfifo /tmp/hold
+chmod 666 /tmp/hold
+hold() { as_hotserve "sqlite3 '$SHARED/app.db' < /tmp/hold" >/dev/null 2>&1 & exec 9>/tmp/hold; echo 'BEGIN EXCLUSIVE;' >&9; sleep 1; }
+release() { echo 'ROLLBACK;' >&9; exec 9>&-; sleep 1; }
+unit=hotserve-backup-backup-example.service
+wait_for() { i=0; while [ $i -lt 40 ]; do "$@" && return 0; i=$((i + 1)); sleep 0.5; done; return 1; }
+# A job is a oneshot unit, which systemd calls "activating" while its
+# command runs: `is-active --quiet` exits non-zero for it throughout.
+unit_running() { case "$(systemctl is-active "$unit")" in active | activating | deactivating) return 0 ;; esac; return 1; }
+unit_stopped() { ! unit_running; }
+
+echo "=== a restore waits for a backup that is running ==="
+hold
+hotserve backup run --admin 127.0.0.1:2019 >/tmp/run-held.log 2>&1 &
+run_pid=$!
+if wait_for unit_running; then
+	if hotserve backup status --admin 127.0.0.1:2019 2>&1 | grep -q "backing up now"; then
+		pass "status says a backup is running while one is"
+	else
+		fail "status does not show the running backup: $(hotserve backup status --admin 127.0.0.1:2019 2>&1)"
+	fi
+	busy=$(hotserve backup restore backup-example --admin 127.0.0.1:2019 --yes 2>&1)
+	busy_rc=$?
+	if [ "$busy_rc" -ne 0 ] && echo "$busy" | grep -q "is backing up right now"; then
+		pass "a restore is refused while that app's backup is running, and says to wait"
+	else
+		fail "a restore during a backup (exit $busy_rc): $busy"
+	fi
+else
+	fail "the held backup never started: $(tail -5 /tmp/run-held.log)"
+fi
+release
+if wait "$run_pid" && grep -q 'backup-example: ok' /tmp/run-held.log; then
+	pass "the backup it waited for then finished cleanly"
+else
+	fail "the held backup: $(tail -5 /tmp/run-held.log)"
+fi
+
+echo "=== Ctrl-C stops a restore, and the unit with it ==="
+sq_app 'delete from rows where n <= 10'
+hold
+hotserve backup restore backup-example --admin 127.0.0.1:2019 --yes >/tmp/restore-int.log 2>&1 &
+restore_pid=$!
+# Interrupted once it is at the step that writes: waiting, here, for
+# the lock on the live database.
+if wait_for grep -q '\.restore ' /tmp/restore-int.log; then
+	kill -INT "$restore_pid"
+	wait "$restore_pid"
+	int_rc=$?
+	if [ "$int_rc" -ne 0 ] && grep -q "interrupted: the restore of backup-example was stopped" /tmp/restore-int.log; then
+		pass "an interrupted restore exits non-zero and says what it leaves"
+	else
+		fail "interrupted restore (exit $int_rc): $(tail -5 /tmp/restore-int.log)"
+	fi
+	if wait_for unit_stopped; then
+		pass "the restore's unit is stopped with it, not left writing with nobody watching"
+	else
+		fail "the restore unit outlived the interrupt: $(systemctl is-active "$unit")"
+	fi
+else
+	kill "$restore_pid" 2>/dev/null
+	fail "the restore never reached the database step: $(tail -5 /tmp/restore-int.log)"
+fi
+release
+if [ "$(first_row)" = 0 ] && [ "$(sq_app 'pragma integrity_check')" = ok ]; then
+	pass "the database is as it was before the interrupted restore, and intact"
+else
+	fail "after an interrupted restore: first row $(first_row), $(sq_app 'pragma integrity_check' 2>&1)"
+fi
+rm -f /tmp/hold
+# Back to WAL with the rows in place, as the rest of the suite expects.
+hotserve backup restore backup-example --admin 127.0.0.1:2019 --yes >/dev/null 2>&1
+sq_app 'PRAGMA journal_mode=WAL' >/dev/null
+start_writer
 
 echo "=== init at a terminal: one command, and it asks ==="
 # The documented setup is one command: at a terminal, init asks for the

@@ -28,7 +28,7 @@ purge)
 	# into place (a crash between the two leaves one), and the settings
 	# init's checks run with, which live on tmpfs until the next boot.
 	rm -f /etc/hotserve/.backup.env-*
-	rm -rf /run/hotserve-backup
+	rm -rf /run/hotserve-backup /run/hotserve-backup-check
 	# A purge is the operator starting over: forget whether the timer was
 	# enabled, so an install after it enables it again.
 	if [ -x /usr/bin/deb-systemd-helper ]; then

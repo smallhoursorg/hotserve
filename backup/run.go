@@ -7,9 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"os/user"
 	"path/filepath"
-	"strconv"
 	"strings"
 )
 
@@ -120,6 +118,8 @@ type jobView struct {
 	EnvFile string
 	// Home is the unit's only private writable directory: an app's
 	// staging dir for the hourly job, a scratch dir for init's checks.
+	// systemd makes it (see homeProperties), so it is under /var/lib or
+	// under /run.
 	Home string
 	// Shared is the app's data, or "" for a unit that reads none.
 	Shared         string
@@ -153,7 +153,6 @@ func sandboxProperties(v jobView) []string {
 		"--property=IOSchedulingClass=idle",
 		"--property=TemporaryFileSystem=/:ro",
 		"--property=BindReadOnlyPaths=/usr /bin /lib -/lib64 /etc/ssl /etc/resolv.conf /etc/hosts /etc/passwd /etc/group /etc/localtime",
-		"--property=BindPaths=" + v.Home,
 		"--property=PrivateUsers=yes",
 		// The same private PID namespace liveswap gives app units
 		// (systemd_dbus.go): every app and every job runs as the
@@ -176,6 +175,7 @@ func sandboxProperties(v jobView) []string {
 		"--property=RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX",
 		"--property=SystemCallFilter=@system-service",
 	}
+	props = append(props, homeProperties(v.Home)...)
 	if v.Shared != "" {
 		if v.SharedWritable {
 			props = append(props, "--property=BindPaths="+v.Shared)
@@ -184,6 +184,46 @@ func sandboxProperties(v jobView) []string {
 		}
 	}
 	return props
+}
+
+// The two places systemd makes a unit's directory.
+const (
+	stateBase   = "/var/lib/"
+	runtimeBase = "/run/"
+)
+
+// homeProperties has systemd make the unit's directory, give it to the
+// unit's user and put it in the unit's view: StateDirectory= under
+// /var/lib, RuntimeDirectory= under /run. The launcher is root and what
+// is in these directories is written by jobs, so it touches none of it:
+// systemd refuses to start a unit whose directory is a link, and changes
+// owners without following one (both measured, systemd 257).
+//
+// A state directory stays — the staged copies are cleared by the next
+// run, restic's cache is kept for it. A runtime directory is init's, and
+// is kept between its checks (each is a unit of its own, and restic's
+// cache should outlive one) until init removes it.
+//
+// Anywhere else gets no directory at all, and a unit without its HOME
+// fails at its first write: checkStagingRoot refuses such a root first.
+func homeProperties(home string) []string {
+	if rel, ok := strings.CutPrefix(home, stateBase); ok {
+		return []string{"--property=StateDirectory=" + rel, "--property=StateDirectoryMode=0750"}
+	}
+	if rel, ok := strings.CutPrefix(home, runtimeBase); ok {
+		return []string{"--property=RuntimeDirectory=" + rel, "--property=RuntimeDirectoryMode=0700", "--property=RuntimeDirectoryPreserve=yes"}
+	}
+	return nil
+}
+
+// checkStagingRoot refuses a staging root systemd would not make the
+// jobs' directories in.
+func checkStagingRoot(root string) error {
+	clean := filepath.Clean(root)
+	if rel, ok := strings.CutPrefix(clean, stateBase); !ok || rel == "" || !filepath.IsLocal(rel) {
+		return fmt.Errorf("--staging %s must be a directory under %s: systemd makes each job's directory (StateDirectory=), and that is where it makes them", root, strings.TrimSuffix(stateBase, "/"))
+	}
+	return nil
 }
 
 // probeScript runs restic by name inside the unit. The name is looked
@@ -259,72 +299,6 @@ func asJob(v jobView, envDir string, run Runner, capture Capturer) (Runner, Capt
 		}
 }
 
-// ensureStagingDir creates rel under anchor — a job's dir, with its
-// data and cache dirs — owned by the user the job runs as. This command
-// runs as root (it has to, to create the units), so a directory it
-// makes is root's: without the chown the job's very first VACUUM INTO
-// fails with a permission error, in every app, forever. All three are
-// made up front: the job cannot create them itself, since only what is
-// bound into its view exists, and a bind of a missing path fails the
-// unit.
-//
-// anchor is a directory only root can change (the staging root, or
-// init's root-only dir); everything under it is written by jobs, which
-// are unprivileged. So every step goes through one handle on anchor
-// (os.Root), which resolves no path to anything outside it: a job that
-// swaps `data`, or a directory on the way to it, for a link to /etc
-// gets a refusal, not /etc. A link that stays inside reaches only what
-// the jobs' user owns already; and one where a directory should be is
-// refused rather than repaired, because a job put it there.
-func ensureStagingDir(anchor, rel, username string) error {
-	uid, gid, err := userIDs(username)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(anchor, 0o750); err != nil {
-		return fmt.Errorf("staging root %s: %w", anchor, err)
-	}
-	root, err := os.OpenRoot(anchor)
-	if err != nil {
-		return fmt.Errorf("staging root %s: %w", anchor, err)
-	}
-	defer func() { _ = root.Close() }()
-	for _, d := range []string{rel, filepath.Join(rel, stagingData), filepath.Join(rel, stagingCache)} {
-		full := filepath.Join(anchor, d)
-		if err := root.MkdirAll(d, 0o750); err != nil {
-			return fmt.Errorf("staging dir %s: %w", full, err)
-		}
-		info, err := root.Lstat(d)
-		if err != nil {
-			return fmt.Errorf("staging dir %s: %w", full, err)
-		}
-		if !info.IsDir() {
-			return fmt.Errorf("staging path %s is not a directory (%s) — refusing to use it: the backup job writes here, so anything else is something it put there", full, info.Mode().Type())
-		}
-		// Lchown: should d become a link after the check, it is the
-		// link that changes hands.
-		if err := root.Lchown(d, uid, gid); err != nil {
-			return fmt.Errorf("giving %s to %s (the job writes its database copies there): %w", full, username, err)
-		}
-	}
-	return nil
-}
-
-// userIDs is the numeric owner a directory the jobs write has to have.
-func userIDs(username string) (uid, gid int, err error) {
-	u, err := user.Lookup(username)
-	if err != nil {
-		return 0, 0, fmt.Errorf("looking up the %s user (the jobs run as it): %w", username, err)
-	}
-	if uid, err = strconv.Atoi(u.Uid); err != nil {
-		return 0, 0, fmt.Errorf("user %s has a non-numeric uid %q", username, u.Uid)
-	}
-	if gid, err = strconv.Atoi(u.Gid); err != nil {
-		return 0, 0, fmt.Errorf("user %s has a non-numeric gid %q", username, u.Gid)
-	}
-	return uid, gid, nil
-}
-
 // RunAll backs up each app in turn — never concurrently: peak memory
 // is then one job's, not the sum, which is what keeps a box with
 // several apps from paying for all of them at once.
@@ -347,14 +321,6 @@ func RunAll(ctx context.Context, apps []App, o LaunchOptions, run Runner, log io
 		// deploy, and a bind of a missing path fails the unit anyway.
 		if _, err := os.Stat(app.Shared); errors.Is(err, fs.ErrNotExist) {
 			say(log, "%s: no data yet (never deployed), skipping", app.Name)
-			continue
-		}
-		// A per-app problem here (a stale file where the dir should
-		// be, an owner changed by hand) is this app's failure, not
-		// the run's: the other apps still get their backup.
-		if err := ensureStagingDir(o.StagingRoot, app.Name, o.User); err != nil {
-			say(log, "%s: FAILED (%v)", app.Name, err)
-			failed = append(failed, app.Name)
 			continue
 		}
 		args := LaunchArgs(app, o)

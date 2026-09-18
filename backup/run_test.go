@@ -66,7 +66,11 @@ func TestLaunchArgsSandboxesEachAppToItsOwnData(t *testing.T) {
 		"--property=User=hotserve",
 		"--property=TemporaryFileSystem=/:ro",
 		"--property=BindPaths=/var/lib/liveswap/blog/shared",
-		"--property=BindPaths=/var/lib/hotserve-backup/blog",
+		// systemd makes the job's own dir, owned by the job's user and
+		// in its view; the launcher, which is root, never touches it.
+		"--property=StateDirectory=hotserve-backup/blog",
+		"--property=StateDirectoryMode=0750",
+		"--property=Environment=HOME=/var/lib/hotserve-backup/blog",
 		"--property=Environment=XDG_CACHE_HOME=/var/lib/hotserve-backup/blog/cache",
 		"--property=EnvironmentFile=/etc/hotserve/backup.env",
 		"--property=PrivateUsers=yes",
@@ -146,16 +150,19 @@ func TestLaunchArgsBindsTheAppsDataReadOnlyUnlessADatabaseNeedsOpening(t *testin
 func TestCheckRepository(t *testing.T) {
 	for _, repo := range []string{
 		"s3:s3.example.com/bucket", "b2:bucket:path",
-		"rest:https://example.com/", "azure:container:/", "gs:bucket:/", "swift:container:/", "rclone:remote:path",
+		"rest:https://example.com/", "azure:container:/", "gs:bucket:/", "swift:container:/",
 	} {
 		if err := CheckRepository(repo); err != nil {
 			t.Errorf("%q: %v", repo, err)
 		}
 	}
-	// sftp is a restic backend, and refused with its own reason: its
-	// credentials are files, and a job's sandbox holds none.
+	// sftp and rclone are restic backends, each refused with its own
+	// reason: what they need is in files, and a job's sandbox holds none.
 	if err := CheckRepository("sftp:user@host:/srv/backups"); err == nil || !strings.Contains(err.Error(), "sftp is not supported") {
 		t.Errorf("sftp must be refused, saying why, got %v", err)
+	}
+	if err := CheckRepository("rclone:remote:path"); err == nil || !strings.Contains(err.Error(), "rclone is not supported") {
+		t.Errorf("rclone must be refused, saying why, got %v", err)
 	}
 	for _, repo := range []string{
 		"/srv/backups", "local:/srv/backups", "backups", "./backups", "C:/backups", "s3:", "", "ftp:host/x",
@@ -242,44 +249,29 @@ func TestRunAllContinuesAfterOneFailureAndReportsIt(t *testing.T) {
 	if strings.Join(launched, ",") != "blog,shop,wiki" {
 		t.Errorf("every app must be attempted, in order: %v", launched)
 	}
-	for _, name := range []string{"blog", "shop", "wiki"} {
-		if _, err := os.Stat(filepath.Join(root, name)); err != nil {
-			t.Errorf("staging dir for %s: %v", name, err)
-		}
+	// The launcher is root, and what is under the staging root is
+	// written by jobs: it makes nothing there. systemd makes each job's
+	// dir (StateDirectory=).
+	if entries, _ := os.ReadDir(root); len(entries) != 0 {
+		t.Errorf("the launcher made something under the staging root: %v", entries)
 	}
 }
 
-// The same contract as a failed launch: a per-app staging problem is
-// that app's failure, not the run's.
-func TestRunAllContinuesWhenOneAppsStagingDirCannotBeMade(t *testing.T) {
-	root := t.TempDir()
-	// A regular file where blog's staging dir belongs.
-	if err := os.WriteFile(filepath.Join(root, "blog"), []byte("in the way"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	apps := []App{
-		deployedApp(t, "blog", StateEntry{Kind: KindFiles, Path: "uploads"}),
-		deployedApp(t, "shop", StateEntry{Kind: KindFiles, Path: "uploads"}),
-	}
-	var launched []string
-	run := func(_ context.Context, _ string, args ...string) error {
-		for _, a := range args {
-			if name, ok := strings.CutPrefix(a, "--name="); ok {
-				launched = append(launched, name)
-			}
+// systemd makes each job's directory, and makes them under /var/lib: a
+// staging root anywhere else would leave every job without one.
+func TestCheckStagingRoot(t *testing.T) {
+	for _, ok := range []string{"/var/lib/hotserve-backup", "/var/lib/hotserve-backup/", "/var/lib/x/y"} {
+		if err := checkStagingRoot(ok); err != nil {
+			t.Errorf("%s: %v", ok, err)
 		}
-		return nil
 	}
-	var log strings.Builder
-	err := RunAll(context.Background(), apps, launchOptsHere(t, root), run, &log)
-	if err == nil || !strings.Contains(err.Error(), "blog") {
-		t.Fatalf("want an error naming blog, got %v", err)
+	for _, bad := range []string{"/srv/staging", "/var/lib", "/var/lib/", "/var/lib/../../etc", "staging", ""} {
+		if err := checkStagingRoot(bad); err == nil || !strings.Contains(err.Error(), "under /var/lib") {
+			t.Errorf("%q must be refused, got %v", bad, err)
+		}
 	}
-	if strings.Join(launched, ",") != "shop" {
-		t.Errorf("shop should still have been backed up: %v", launched)
-	}
-	if !strings.Contains(log.String(), "blog: FAILED") {
-		t.Errorf("the run should name the failed app: %q", log.String())
+	if props := homeProperties("/srv/staging/blog"); len(props) != 0 {
+		t.Errorf("a home systemd cannot make gets no directory property: %v", props)
 	}
 }
 

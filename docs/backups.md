@@ -146,11 +146,12 @@ repository needs something more, pass it to `init` as `KEY=VALUE` or in
 ### Where the repository can be
 
 A repository is a restic backend URL — `s3:`, `b2:`, `rest:`, `azure:`,
-`gs:`, `swift:` or `rclone:` — and never a path on this box. `init`,
-the hourly run and `restore` all refuse a path, with the same error.
-`sftp:` is refused too: ssh takes its key and `known_hosts` from files,
-and a job's sandbox holds only the settings `init` writes — every
-backend here takes its credentials as settings. A backup on the box it protects does not survive losing the box,
+`gs:` or `swift:` — and never a path on this box. `init`, the hourly
+run and `restore` all refuse a path, with the same error. `sftp:` and
+`rclone:` are refused too: ssh takes its key and `known_hosts` from
+files, rclone its remotes from a config file, and a job's sandbox holds
+only the settings `init` writes — every backend here takes its
+credentials as settings. A backup on the box it protects does not survive losing the box,
 and a repository the jobs could reach on disk would be mounted,
 writable, into every one of them. Every job reaches the repository over
 the network, and the sandbox binds nothing of it.
@@ -236,7 +237,7 @@ Kopia supports Object Lock directly.
 sudo hotserve backup restore blog
 ```
 
-puts back everything `blog` declares, from its newest snapshot. Before
+puts back everything `blog` declares, from its newest clean snapshot. Before
 it changes anything it says what it is about to do, and asks you to
 type the app's name:
 

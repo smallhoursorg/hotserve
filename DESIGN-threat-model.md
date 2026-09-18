@@ -52,12 +52,13 @@ Windows, and macOS-as-a-server are out of scope by product design.
    mode `0750` owned by `hotserve`: a consistent copy of that app's
    declared databases, taken before each upload and replaced on the
    next run. Plaintext, like the database it came from, and outside
-   every app's view. The launcher, which is root, makes and chowns
-   those dirs, and what is in them is written by jobs — so it does both
-   through one handle on the staging root that resolves no path to
-   anything outside it, and refuses a link where a dir should be. The
-   staging root itself is root's, `0750`: nothing running as `hotserve`
-   — hotserve.service included — needs to enter it, so none can.
+   every app's view. What is in those dirs is written by jobs, so the
+   launcher, which is root, makes and chowns none of it: systemd makes
+   each unit's dir (`StateDirectory=`; `RuntimeDirectory=` for init's
+   checks), does not start a unit whose dir is a link, and changes
+   owners without following one. The staging root itself is root's,
+   `0750`: nothing running as `hotserve` — hotserve.service included —
+   needs to enter it, so none can.
    The hourly job of an app that declares a database has that app's
    `shared/` bound **writable**: SQLite creates `-shm` beside a WAL
    database to read it at all. restic — the one process in the job

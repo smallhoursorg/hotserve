@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -241,11 +242,20 @@ func (j RestoreJob) Execute(ctx context.Context) error {
 		args := []string{copies[i], "PRAGMA integrity_check"}
 		j.logf("+ sqlite3 %s", quoteArgs(args))
 		out, err := j.Capture(ctx, "sqlite3", args...)
-		if err != nil {
+		// sqlite3 rejects a damaged copy in one of two ways: it prints
+		// what is wrong and exits 0, or — a page it cannot read at all —
+		// it says "malformed" on stderr and exits 1. Both are the check
+		// failing; only sqlite3 not running at all is something else.
+		var rejected *exec.ExitError
+		if err != nil && !errors.As(err, &rejected) {
 			return fmt.Errorf("app %s: checking the copy of %s: %w", j.App, rel, err)
 		}
-		if got := strings.TrimSpace(string(out)); got != "ok" {
-			return fmt.Errorf("app %s: the copy of %s in snapshot %s fails SQLite's integrity check (%s) — nothing was restored; try an earlier snapshot", j.App, rel, j.Snapshot, strings.SplitN(got, "\n", 2)[0])
+		if got := strings.TrimSpace(string(out)); err != nil || got != "ok" {
+			reason := strings.SplitN(got, "\n", 2)[0]
+			if reason == "" {
+				reason = "sqlite3: " + err.Error()
+			}
+			return fmt.Errorf("app %s: the copy of %s in snapshot %s fails SQLite's integrity check (%s) — nothing was restored; try an earlier snapshot", j.App, rel, j.Snapshot, reason)
 		}
 	}
 	type fileStep struct {

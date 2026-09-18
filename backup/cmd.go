@@ -51,9 +51,9 @@ reads as root; nothing about backups is configured in the Caddyfile.
       keep them.
 
       The repository is a restic backend URL — s3:, b2:, rest:, azure:,
-      gs:, swift: or rclone: — never a path on this box; init, run and
-      restore refuse one. (Not sftp: its credentials are files, and the
-      jobs' sandbox holds only the settings init writes.)
+      gs: or swift: — never a path on this box; init, run and restore
+      refuse one. (Not sftp: or rclone: — what they need is in files,
+      and the jobs' sandbox holds only the settings init writes.)
 
   hotserve backup run
       Asks the admin API which apps declare state and backs up each
@@ -236,13 +236,14 @@ func cmdInit(fl caddycmd.Flags, args []string) (int, error) {
 	if err := CheckRepository(args[0]); err != nil {
 		return caddy1, err
 	}
-	// Everything the checks need on disk lives under one root-only
-	// directory on tmpfs: the settings they run with (the password and
-	// the storage key) and their one writable directory.
-	//   - Root-only, so nothing the backup user controls sits in any path
-	//     root writes through here: a directory the hotserve user can
-	//     rename things in is a directory where root's next write can
-	//     be redirected.
+	// What the checks need on disk is on tmpfs, in two places: the
+	// settings they run with (the password and the storage key) in a
+	// root-only directory, and their one writable directory, which
+	// systemd makes for them (checkHome).
+	//   - The settings' directory is root-only, so nothing the backup
+	//     user controls sits in any path root writes through here: a
+	//     directory the hotserve user can rename things in is a directory
+	//     where root's next write can be redirected.
 	//   - On tmpfs, so a crash — or a SIGKILL, which no cleanup survives —
 	//     leaves the secrets in memory until the next boot at most, never
 	//     on disk.
@@ -256,14 +257,11 @@ func cmdInit(fl caddycmd.Flags, args []string) (int, error) {
 	if err := requireRootOnlyDir(checkRoot); err != nil {
 		return caddy1, err
 	}
-	home, err := os.MkdirTemp(checkRoot, "init-")
-	if err != nil {
-		return caddy1, fmt.Errorf("making a directory for the repository checks: %w", err)
-	}
-	defer func() { _ = os.RemoveAll(home) }()
-	if err := ensureStagingDir(checkRoot, filepath.Base(home), username); err != nil {
-		return caddy1, err
-	}
+	// Whatever an init that was killed left there goes first, and what
+	// this one leaves goes last. /run is root's, so the name cannot be
+	// swapped under the removal, and RemoveAll follows no link inside.
+	_ = os.RemoveAll(checkHome)
+	defer func() { _ = os.RemoveAll(checkHome) }()
 	o := InitOptions{
 		Repository:   args[0],
 		Extra:        extra,
@@ -291,7 +289,7 @@ func cmdInit(fl caddycmd.Flags, args []string) (int, error) {
 			}
 		}
 	}
-	view := jobView{User: username, Home: home}
+	view := jobView{User: username, Home: checkHome}
 	// The existence and probe checks are questions, not failures, so
 	// their output is captured rather than shown: restic's "repository
 	// does not exist" while init is about to create one reads as an
@@ -306,12 +304,33 @@ func cmdInit(fl caddycmd.Flags, args []string) (int, error) {
 // unitActive reports whether a systemd unit is running. An error reads
 // as "not running", rather than failing the report over a detail.
 func unitActive(ctx context.Context, unit string) bool {
-	return exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", unit).Run() == nil //nolint:gosec // a fixed program; the unit name is built here from an app name the config validated
+	// The state is read, not the exit status: is-active exits 0 only
+	// for "active", and a job is never that (see unitStateIsRunning).
+	out, _ := exec.CommandContext(ctx, "systemctl", "is-active", unit).Output() //nolint:gosec // a fixed program; the unit name is built here from an app name the config validated
+	return unitStateIsRunning(strings.TrimSpace(string(out)))
 }
 
-// checkRoot holds init's checks while they run: the settings each one
-// is started with, and the directory it may write. /run is tmpfs.
+// unitStateIsRunning reports whether a unit in this state has a process
+// running. The jobs are Type=oneshot, and systemd calls a oneshot
+// "activating" for as long as its command runs — it becomes "active"
+// only with RemainAfterExit=, which a job does not have — so
+// "activating" is the state a backup or a restore spends its life in.
+func unitStateIsRunning(state string) bool {
+	switch state {
+	case "active", "activating", "reloading", "deactivating":
+		return true
+	}
+	return false
+}
+
+// checkRoot holds the settings each of init's checks is started with,
+// while they run. /run is tmpfs.
 const checkRoot = "/run/hotserve-backup"
+
+// checkHome is the directory init's checks may write: restic's cache,
+// kept from one check to the next. systemd makes it for them, as it
+// makes a job's (homeProperties).
+const checkHome = "/run/hotserve-backup-check"
 
 // requireRootOnlyDir refuses to use a directory for secrets unless it
 // is a real directory, owned by root, that nobody else can enter —
@@ -360,6 +379,9 @@ func cmdRun(fl caddycmd.Flags) (int, error) {
 		StagingRoot: fl.String("staging"),
 		EnvFile:     envFile,
 		User:        fl.String("user"),
+	}
+	if err := checkStagingRoot(o.StagingRoot); err != nil {
+		return caddy1, err
 	}
 	if err := RunAll(ctx, apps, o, execRunner(os.Stderr), os.Stdout); err != nil {
 		return caddy1, err
@@ -437,7 +459,9 @@ func captureRunner() Capturer {
 			if _, lookErr := exec.LookPath(name); lookErr != nil {
 				return nil, fmt.Errorf("%s is not installed: %w", name, lookErr)
 			}
-			return nil, err
+			// What it printed before failing goes back with the error:
+			// sqlite3's integrity check says what is wrong on stdout.
+			return out, err
 		}
 		return out, nil
 	}
@@ -554,6 +578,9 @@ func cmdRestore(fl caddycmd.Flags, args []string) (int, error) {
 		EnvFile:     envFile,
 		User:        fl.String("user"),
 	}
+	if err := checkStagingRoot(o.StagingRoot); err != nil {
+		return caddy1, err
+	}
 	unit := unitName(name)
 	// Checked here to say so plainly; systemd refuses a second unit of
 	// the same name anyway, so a backup that starts after this check
@@ -562,13 +589,6 @@ func cmdRestore(fl caddycmd.Flags, args []string) (int, error) {
 		return caddy1, fmt.Errorf("%s is backing up right now; restore once it has finished (journalctl -u %s -f)", name, unit)
 	}
 	staging := filepath.Join(o.StagingRoot, name)
-	if err := ensureStagingDir(o.StagingRoot, name, o.User); err != nil {
-		return caddy1, err
-	}
-	// The restore unit's own dir, the only part of staging in its view.
-	if err := ensureStagingDir(o.StagingRoot, filepath.Join(name, stagingRestore), o.User); err != nil {
-		return caddy1, err
-	}
 	// A rebuilt box restores before the first deploy, when liveswap has
 	// not made the app's directories yet.
 	if err := ensureShared(ctx, app.Shared, o.User, execRunner(os.Stderr)); err != nil {

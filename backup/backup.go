@@ -141,10 +141,12 @@ func unquote(v string) string {
 //
 // Each takes its credentials as settings, which is the only way a
 // credential reaches a job: the sandbox holds the environment file's
-// values and no file of the operator's. That is what leaves sftp out —
-// ssh reads its key and known_hosts from the user's home and /etc/ssh,
-// and neither is in a job's view.
-var Backends = []string{"s3", "b2", "rest", "azure", "gs", "swift", "rclone"}
+// values and no file of the operator's. That is what leaves out the two
+// restic backends that run another program: sftp, whose ssh reads its
+// key and known_hosts from the user's home and /etc/ssh, and rclone,
+// which reads a config file from the user's home. Neither place is in a
+// job's view.
+var Backends = []string{"s3", "b2", "rest", "azure", "gs", "swift"}
 
 // CheckRepository refuses anything that is not a backend URL.
 func CheckRepository(repo string) error {
@@ -153,6 +155,9 @@ func CheckRepository(repo string) error {
 	}
 	if strings.HasPrefix(repo, "sftp:") {
 		return fmt.Errorf("repository %q: sftp is not supported — ssh takes its key and known_hosts from files, and the backup jobs run in a sandbox that holds only the settings init writes; use a backend whose credentials are settings (%s:)", repo, strings.Join(Backends, ":, "))
+	}
+	if strings.HasPrefix(repo, "rclone:") {
+		return fmt.Errorf("repository %q: rclone is not supported — it reads its remotes from a config file in the user's home, and the backup jobs run in a sandbox that holds only the settings init writes; use a backend restic reaches itself (%s:)", repo, strings.Join(Backends, ":, "))
 	}
 	return fmt.Errorf("repository %q is not a backend URL: it must start with one of %s: — a path on this box is not supported", repo, strings.Join(Backends, ":, "))
 }
