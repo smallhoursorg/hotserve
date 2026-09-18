@@ -46,8 +46,7 @@ chmod 750 /var/lib/hotserve /var/lib/liveswap /var/lib/hotserve-backup
 chown hotserve:hotserve /var/lib/hotserve /var/lib/liveswap /var/lib/hotserve-backup
 # The package ships the Caddyfile here, so dpkg makes this directory —
 # but this script also runs without the payload, and the backup
-# settings and the timer marker below both live here. Root's, because
-# the credentials do.
+# settings live here. Root's, because the credentials do.
 mkdir -p /etc/hotserve
 chmod 755 /etc/hotserve
 # Packages before the Debian-13-only matrix copied an AppArmor profile
@@ -103,34 +102,27 @@ EOF
 	# Enabling it here (rather than asking for it in the docs) is what
 	# makes `hotserve backup init` the only step.
 	#
-	# Enabled once, then never touched again. "First install" is the
-	# wrong test: dpkg passes the previously configured version as $2,
-	# so a box upgrading from a hotserve that predates the timer would
-	# skip this for ever — `hotserve backup init` would report the
-	# repository ready and nothing would ever run. A marker records
-	# that this package has enabled the timer once, so an operator who
-	# then disables it — backups run from somewhere else, or a job was
-	# hurting the box — keeps that choice across upgrades.
-	#
-	# It lives beside the backup credentials because that directory is
-	# root's: the staging root is owned by the hotserve user, and a
-	# compromised app must not be able to decide whether the next
-	# upgrade turns backups on.
-	timer_marker=/etc/hotserve/.backup-timer-configured
-	if [ ! -e "$timer_marker" ]; then
-		# The marker only once the enable has worked: written regardless,
-		# one failed enable would stop every later upgrade from trying
-		# again, and `hotserve backup init` would succeed on a box that
-		# never runs a backup.
-		if systemctl enable hotserve-backup.timer 2>/dev/null; then
-			# touch, not `: > file`: a redirection that fails on a
-			# special builtin ends a `set -e` shell whatever follows it,
-			# and this script must not take the install down over a
-			# marker.
-			touch "$timer_marker" 2>/dev/null || true
+	# Its state across upgrades, removals and purges is kept by Debian's
+	# own deb-systemd-helper — these are the lines dh_installsystemd
+	# writes into every package that ships a unit (init-system-helpers is
+	# Essential, so it is always installed). It enables the timer on a
+	# first install and on an upgrade from a hotserve that did not have
+	# one; leaves it alone once an administrator has disabled it, across
+	# upgrades and across a remove and reinstall; and forgets it on purge.
+	case "${1:-}" in
+	configure|abort-upgrade|abort-deconfigure|abort-remove)
+		deb-systemd-helper unmask hotserve-backup.timer >/dev/null || true
+		if deb-systemd-helper --quiet was-enabled hotserve-backup.timer; then
+			deb-systemd-helper enable hotserve-backup.timer >/dev/null || true
+		else
+			deb-systemd-helper update-state hotserve-backup.timer >/dev/null || true
 		fi
-		systemctl start hotserve-backup.timer 2>/dev/null || true
-	fi
+		if [ -d /run/systemd/system ]; then
+			systemctl --system daemon-reload >/dev/null || true
+			deb-systemd-invoke start hotserve-backup.timer >/dev/null || true
+		fi
+		;;
+	esac
 	echo "hotserve installed. Start it with:"
 	echo "  sudo systemctl enable --now hotserve"
 	# Only when it is true: an upgrade of a box whose backups work must

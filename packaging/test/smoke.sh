@@ -542,10 +542,13 @@ echo "reinstall preserved config and user; hotserve restarted and reattached to 
 # predates the backup timer has never been asked the question, and must
 # end up with it on — otherwise `hotserve backup init` reports the
 # repository ready and nothing ever runs. That box looks exactly like
-# this one with the marker removed.
-[ -e /etc/hotserve/.backup-timer-configured ] \
-	|| die "postinstall did not record that it configured the backup timer; the assertion below would be vacuous"
-rm -f /etc/hotserve/.backup-timer-configured
+# this one with deb-systemd-helper's record of the timer forgotten.
+# (deb-systemd-helper runs only when dpkg calls it; DPKG_MAINTSCRIPT_PACKAGE
+# is how it tells, so it is set here the way dpkg sets it.)
+DPKG_MAINTSCRIPT_PACKAGE=hotserve deb-systemd-helper purge hotserve-backup.timer >/dev/null \
+	|| die "setup: could not make deb-systemd-helper forget the timer; the assertion below would be vacuous"
+systemctl is-enabled --quiet hotserve-backup.timer \
+	&& die "setup: the timer should be off and forgotten here; the assertion below would be vacuous"
 dpkg -i "$deb"
 systemctl is-enabled hotserve-backup.timer >/dev/null 2>&1 \
 	|| die "upgrading from a release without the timer left it disabled: the documented setup would complete and no backup would ever run"
@@ -573,13 +576,11 @@ install -d -m 0700 /run/hotserve-backup
 printf 'RESTIC_PASSWORD=secret\n' > /run/hotserve-backup/.backup.env-check-5678
 mkdir -p /var/lib/hotserve-backup/smoke/data
 echo staged > /var/lib/hotserve-backup/smoke/data/app.db
-# The operator has turned the backup timer off. A plain remove must keep
-# that choice (the marker stays with the credentials until purge), and it
-# gives stage 5's "purge removes the marker" something to remove.
+# The operator has turned the backup timer off. A plain remove keeps that
+# choice; the purge after it forgets it — which stage 6's fresh install
+# then shows, by finding the timer on again.
 systemctl disable --now hotserve-backup.timer >/dev/null 2>&1
 apt-get remove -y hotserve
-[ -e /etc/hotserve/.backup-timer-configured ] \
-	|| die "remove dropped the record of an operator turning the backup timer off; a reinstall would turn it back on"
 [ -f /etc/hotserve/backup.env ] \
 	|| die "remove deleted the backup credentials: an operator reinstalling would lose access to their repository"
 systemctl is-active --quiet hotserve && die "service still active after remove (preremove did not stop it)" || true
@@ -603,29 +604,24 @@ apt-get purge -y hotserve
 [ ! -e /var/lib/hotserve-backup ] \
 	|| die "purge left the staged database copies (plaintext app data) on the box"
 [ ! -e /etc/hotserve/Caddyfile ] || die "purge left the conffile behind"
-[ ! -e /etc/hotserve/.backup-timer-configured ] \
-	|| die "purge left the timer marker: a later install would not enable the backup timer"
 [ ! -e /etc/hotserve/.backup.env-1234 ] \
 	|| die "purge left a temporary copy of the backup credentials in /etc/hotserve"
 [ ! -e /run/hotserve-backup ] \
 	|| die "purge left the settings an interrupted init's checks ran with"
-echo "purge removed the credentials, the staged copies, the timer marker and the conffile"
+echo "purge removed the credentials, the staged copies and the conffile"
 
-stage "stage 6: the backup timer through remove, reinstall and a failed enable"
+stage "stage 6: the backup timer through purge, remove and reinstall"
 # Last, on a fresh install: these rows remove and reinstall the package
 # several times, which would otherwise stop the server and the app that
 # stages 4 and 5 need running to assert anything about removal.
 dpkg -i "$deb" >/dev/null
-# The timer's lifecycle, one row at a time. The marker in /etc/hotserve
-# means "an operator has had their say"; everything below checks that it
-# never outlives, or is written without, what it stands for.
-marker=/etc/hotserve/.backup-timer-configured
+# Stage 4 turned the timer off and stage 5 purged: a purge forgets the
+# operator's choice, so a fresh install turns it on again.
 systemctl is-enabled --quiet hotserve-backup.timer \
-	|| die "setup: the backup timer should be enabled here; the rows below would be vacuous"
+	|| die "a fresh install after a purge left the backup timer off"
 
 # Removed to install a different build, then reinstalled: a timer that
-# was running must be running again. (Remove keeps /etc/hotserve, so a
-# marker left behind would stop the reinstall from enabling it.)
+# was running must be running again.
 dpkg -r hotserve >/dev/null
 dpkg -i "$deb" >/dev/null
 systemctl is-enabled --quiet hotserve-backup.timer \
@@ -638,17 +634,25 @@ dpkg -i "$deb" >/dev/null
 systemctl is-enabled --quiet hotserve-backup.timer \
 	&& die "remove + reinstall turned back on a backup timer the operator had turned off"
 
-# An enable that fails must not be recorded as done, or no later upgrade
-# would try again. A masked unit makes `systemctl enable` fail for real.
-rm -f "$marker"
-systemctl mask hotserve-backup.timer >/dev/null 2>&1
-dpkg -i "$deb" >/dev/null
-[ ! -e "$marker" ] \
-	|| die "postinstall recorded the backup timer as configured although enabling it failed"
-systemctl unmask hotserve-backup.timer >/dev/null 2>&1
-dpkg -i "$deb" >/dev/null
-systemctl is-enabled --quiet hotserve-backup.timer && [ -e "$marker" ] \
-	|| die "the upgrade after a failed enable did not try again"
+# Stopping the launcher stops any per-app job it left running. Those are
+# transient units outside its cgroup, so without the unit's ExecStopPost
+# one would outlive it — and take the unit name the next hour's run
+# needs. Stand-in job; a launcher that fails at once (hotserve is not
+# running, so the admin API is not there) and therefore stops.
+systemd-run --unit=hotserve-backup-smoke sleep 600 >/dev/null 2>&1 \
+	|| die "setup: could not start a stand-in backup job"
+systemctl is-active --quiet hotserve-backup-smoke.service \
+	|| die "setup: the stand-in job is not running; the assertion below would be vacuous"
+printf 'RESTIC_REPOSITORY=/srv/nowhere\nRESTIC_PASSWORD=x\n' > /etc/hotserve/backup.env
+chmod 0600 /etc/hotserve/backup.env
+systemctl start hotserve-backup.service >/dev/null 2>&1 || true
+i=0
+while systemctl is-active --quiet hotserve-backup-smoke.service; do
+	i=$((i + 1))
+	[ "$i" -ge 10 ] && die "a per-app backup job outlived the launcher: the next hour's run would find its unit name taken"
+	sleep 1
+done
+rm -f /etc/hotserve/backup.env
 
 # "Backups are off" only when they are.
 # (Output captured whole, then searched: `dpkg | grep -q` would let grep
@@ -660,7 +664,7 @@ case "$out" in *"Backups are off"*) die "an upgrade told a box whose backups are
 rm -f /etc/hotserve/backup.env
 out=$(dpkg -i "$deb" 2>&1)
 case "$out" in *"Backups are off"*) : ;; *) die "a box with no backups configured was not told how to turn them on" ;; esac
-echo "the backup timer survives remove + reinstall as it was, and a failed enable is retried"
+echo "the backup timer survives remove + reinstall as it was, and a purge forgets it"
 
 echo ""
 echo "ALL PACKAGE SMOKE STAGES PASSED ($deb on $(. /etc/os-release && echo "$PRETTY_NAME"))"
