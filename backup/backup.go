@@ -50,6 +50,15 @@ const (
 func StagingData(appStaging string) string  { return filepath.Join(appStaging, stagingData) }
 func StagingCache(appStaging string) string { return filepath.Join(appStaging, stagingCache) }
 
+// SuccessMarker is touched by a job that finished cleanly, and is
+// what `status` measures freshness from. restic writes a snapshot
+// even when it exits non-zero (unreadable sources, exit status 3), so
+// "a snapshot exists" is not "the backup worked" — and a monitor that
+// cannot tell those apart is worse than none.
+func SuccessMarker(appStaging string) string {
+	return filepath.Join(appStaging, ".last-success")
+}
+
 // unquote mirrors what systemd does to an EnvironmentFile= value.
 func unquote(v string) string {
 	if len(v) >= 2 {
@@ -71,7 +80,11 @@ func unquote(v string) string {
 func RepositoryPath(repo string) (string, error) {
 	v := strings.TrimPrefix(repo, "local:")
 	if strings.HasPrefix(v, "/") {
-		return filepath.Clean(v), nil
+		clean := filepath.Clean(v)
+		if err := safeRepositoryDir(clean); err != nil {
+			return "", err
+		}
+		return clean, nil
 	}
 	// A backend prefix (scheme before any slash) is remote; anything
 	// else is a path, and paths have to be absolute.
@@ -79,6 +92,41 @@ func RepositoryPath(repo string) (string, error) {
 		return "", nil
 	}
 	return "", fmt.Errorf("repository %q must be an absolute path (a directory on this box) or a backend URL like s3:…, b2:… or sftp:…", repo)
+}
+
+// safeRepositoryDir refuses a local repository path that would do
+// harm if it were a typo. `init` chowns the repository to the jobs'
+// user, recursively, and every job binds it writable — so `/etc`,
+// `/var` or a bare `/` would hand the host to the hotserve user and
+// put it inside each sandbox. An app's own data is refused for the
+// same reason in reverse: a repository there would be readable and
+// writable by whichever app's job happened to run.
+func safeRepositoryDir(dir string) error {
+	if dir == "/" {
+		return fmt.Errorf("the repository cannot be / — it would be chowned to the backup user and mounted into every backup job")
+	}
+	// A system directory, or an ancestor of one.
+	for _, reserved := range []string{
+		"/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64",
+		"/proc", "/root", "/run", "/sbin", "/sys", "/usr", "/var",
+	} {
+		if dir == reserved || isAncestor(dir, reserved) {
+			return fmt.Errorf("the repository cannot be %s or hold %s: init gives the whole tree to the backup user and every job mounts it writable — put it somewhere of its own, like /srv/backups or a mounted disk", dir, reserved)
+		}
+	}
+	// hotserve's own trees, named explicitly: /var is refused above,
+	// but a bind mount could put them elsewhere.
+	for _, own := range []string{DefaultLiveswapRoot, DefaultStagingRoot, "/var/lib/hotserve"} {
+		if dir == own || isAncestor(dir, own) || isAncestor(own, dir) {
+			return fmt.Errorf("the repository cannot overlap %s: backups would be part of what is backed up, and the apps' data would be inside the jobs' repository mount", own)
+		}
+	}
+	return nil
+}
+
+// isAncestor reports whether dir contains other.
+func isAncestor(dir, other string) bool {
+	return strings.HasPrefix(other+string(filepath.Separator), dir+string(filepath.Separator))
 }
 
 // LocalRepositoryPath is RepositoryPath for the settings systemd

@@ -27,8 +27,9 @@ type recorder struct {
 
 func (r *recorder) run(_ context.Context, name string, args ...string) error {
 	r.calls = append(r.calls, call{name, args})
-	if r.touch && name == "sqlite3" && len(args) == 2 {
-		if dst := stagedPathFromSQL(args[1]); dst != "" {
+	if r.touch && name == "sqlite3" && len(args) > 0 {
+		// The SQL is the last argument, after -cmd and the URI.
+		if dst := stagedPathFromSQL(args[len(args)-1]); dst != "" {
 			_ = os.WriteFile(dst, []byte("db"), 0o600)
 		}
 	}
@@ -101,11 +102,16 @@ func TestExecuteStagesDatabasesThenBacksUp(t *testing.T) {
 	if rec.calls[0].name != "sqlite3" || rec.calls[1].name != "sqlite3" {
 		t.Fatalf("databases must be staged first: %+v", rec.calls)
 	}
-	if got, want := rec.calls[0].args[0], "file://"+filepath.Join(job.Shared, "app.db")+"?mode=ro"; got != want {
+	// -cmd .timeout <ms> comes first: sqlite3 fails immediately on a
+	// busy database otherwise, and an app mid-transaction is normal.
+	if got := strings.Join(rec.calls[0].args[:2], " "); got != "-cmd .timeout "+sqliteBusyTimeoutMS {
+		t.Errorf("no busy timeout before the copy: %q", got)
+	}
+	if got, want := rec.calls[0].args[2], "file://"+filepath.Join(job.Shared, "app.db")+"?mode=ro"; got != want {
 		t.Errorf("source = %q, want %q (opened read-only: the job reads the app's data, never writes it)", got, want)
 	}
 	wantDst := filepath.Join(StagingData(job.Staging), "data/sessions.db")
-	if got := stagedPathFromSQL(rec.calls[1].args[1]); got != wantDst {
+	if got := stagedPathFromSQL(rec.calls[1].args[len(rec.calls[1].args)-1]); got != wantDst {
 		t.Errorf("staged copy = %q, want %q (the layout under shared/ is kept)", got, wantDst)
 	}
 	if _, err := os.Stat(filepath.Dir(wantDst)); err != nil {

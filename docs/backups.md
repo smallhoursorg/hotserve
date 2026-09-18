@@ -134,7 +134,16 @@ from the box:
 restic forget --keep-hourly 24 --keep-daily 30 --keep-monthly 12 --prune
 ```
 
-A few times a year is enough; a bucket lifecycle rule can do it instead.
+A few times a year is enough.
+
+**Not with a lifecycle rule.** Expiring objects on the bucket's own
+schedule does not work here: restic deduplicates, so a pack a rule
+judges old can still hold the only copy of a chunk that this morning's
+snapshot needs, and removing it corrupts backups that are perfectly
+current. Lifecycle rules have one job in this setup — keeping old
+*versions* around, so that hiding cannot become destroying. Retention
+of snapshots is `restic forget --prune`, run by a key that is allowed
+to delete.
 
 **Going further:** storage-level immutability (S3 Object Lock, in
 governance or compliance mode) protects the backups even against

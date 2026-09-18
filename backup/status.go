@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -30,6 +32,10 @@ type AppStatus struct {
 	App       App
 	Latest    *Snapshot
 	Snapshots int
+	// LastSuccess is when a job last finished cleanly, from the marker
+	// it writes. Zero when none has: a repository can hold snapshots
+	// from runs that ended in failure.
+	LastSuccess time.Time
 }
 
 // StaleAfter is when an hourly backup is late enough to be worth
@@ -41,7 +47,14 @@ const StaleAfter = 2*time.Hour + 30*time.Minute
 // mention. An app that has never been backed up is stale by
 // definition — that is the state worth catching, since it is what a
 // typo in a `state` path or a never-configured repository looks like.
+// Freshness is measured from the last run that finished cleanly,
+// not from the newest snapshot: restic writes a snapshot even when it
+// exits non-zero (unreadable sources), so an app whose every run
+// fails part-way would otherwise look healthy for ever.
 func (s AppStatus) Stale(now time.Time) bool {
+	if !s.LastSuccess.IsZero() {
+		return now.Sub(s.LastSuccess) > StaleAfter
+	}
 	return s.Latest == nil || now.Sub(s.Latest.Time) > StaleAfter
 }
 
@@ -49,7 +62,7 @@ func (s AppStatus) Stale(now time.Time) bool {
 // the apps that declare state. Apps come from the running config, so
 // an app whose `state` lines were removed drops off the report even
 // though its old snapshots remain in the repository.
-func Status(ctx context.Context, apps []App, capture Capturer) ([]AppStatus, error) {
+func Status(ctx context.Context, apps []App, capture Capturer, stagingRoot string) ([]AppStatus, error) {
 	out, err := capture(ctx, "restic", "snapshots", "--json", "--tag", "hotserve")
 	if err != nil {
 		return nil, fmt.Errorf("reading snapshots: %w", err)
@@ -69,6 +82,9 @@ func Status(ctx context.Context, apps []App, capture Capturer) ([]AppStatus, err
 	statuses := make([]AppStatus, 0, len(apps))
 	for _, app := range apps {
 		st := AppStatus{App: app, Snapshots: len(byApp[app.Name])}
+		if info, err := os.Stat(SuccessMarker(filepath.Join(stagingRoot, app.Name))); err == nil {
+			st.LastSuccess = info.ModTime()
+		}
 		for i, s := range byApp[app.Name] {
 			if st.Latest == nil || s.Time.After(st.Latest.Time) {
 				st.Latest = &byApp[app.Name][i]
@@ -95,6 +111,12 @@ func FormatStatus(w io.Writer, statuses []AppStatus, now time.Time) {
 		last := "never"
 		if s.Latest != nil {
 			last = humanAge(now.Sub(s.Latest.Time)) + "  " + s.Latest.ShortID
+		}
+		// A snapshot newer than the last clean run means the runs
+		// since then have been failing: show that rather than the
+		// snapshot's age, which would read as a healthy backup.
+		if s.Latest != nil && !s.LastSuccess.IsZero() && s.Latest.Time.After(s.LastSuccess.Add(time.Minute)) {
+			last += "  (last clean run " + humanAge(now.Sub(s.LastSuccess)) + ")"
 		}
 		if s.Stale(now) {
 			last += "  ⚠"

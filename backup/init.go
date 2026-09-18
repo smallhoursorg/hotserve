@@ -90,6 +90,21 @@ func Init(ctx context.Context, o InitOptions, run Runner, capture Capturer, log 
 	if err != nil {
 		return err
 	}
+	// Everything that goes into the environment file has to survive
+	// systemd's reading of it unchanged, or this command checks one
+	// repository while the jobs use another.
+	if err := envFileSafe("the repository password", password); err != nil {
+		return err
+	}
+	if err := envFileSafe("the repository", o.Repository); err != nil {
+		return err
+	}
+	for _, kv := range o.Extra {
+		key, value, _ := strings.Cut(kv, "=")
+		if err := envFileSafe(key, value); err != nil {
+			return err
+		}
+	}
 
 	// Nothing is written until the repository answers. A file written
 	// first would survive a failed run — a typo'd bucket, a wrong
@@ -291,17 +306,55 @@ func writeEnvFile(path, repo, password string, extra []string) error {
 	for _, kv := range sorted {
 		b.WriteString(kv + "\n")
 	}
-	// 0600 before anything is written to it: the password must never
-	// exist on disk in a world-readable file, not even briefly.
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	// Written to a new 0600 file and renamed over the old one. Opening
+	// the existing file instead would keep whatever mode it had while
+	// the password went into it — and `--force` replaces a file that
+	// may have been made readable by someone else — so the secret
+	// never exists at a mode this command did not choose. The rename
+	// is also atomic: a reader sees the old settings or the new ones,
+	// never half a file.
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".backup.env-*")
 	if err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
-	defer f.Close()
-	if _, err := io.WriteString(f, b.String()); err != nil {
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name()) // no-op once the rename has happened
+	}()
+	if err := tmp.Chmod(0o600); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
-	return f.Chmod(0o600)
+	if _, err := io.WriteString(tmp, b.String()); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	return nil
+}
+
+// envFileSafe refuses a value systemd would read differently from the
+// way it was given. EnvironmentFile= strips surrounding quotes,
+// processes backslashes and ends a value at a newline, so a password
+// of 'secret' would be used literally here and as secret by the jobs,
+// and one holding a newline could append a second RESTIC_REPOSITORY
+// line of the attacker's choosing. Refusing is better than guessing:
+// the alternative is a box that initializes happily and backs up
+// somewhere else every hour.
+func envFileSafe(key, value string) error {
+	if strings.ContainsAny(value, "\n\r\x00") {
+		return fmt.Errorf("%s must not contain a newline: systemd ends the value there, and the rest would become another setting", key)
+	}
+	if strings.ContainsAny(value, `"'\`) {
+		return fmt.Errorf(`%s must not contain quotes or backslashes: systemd reads them as syntax, so the jobs would use a different value than this command just checked`, key)
+	}
+	if strings.TrimSpace(value) != value {
+		return fmt.Errorf("%s must not start or end with whitespace: systemd trims it, so the jobs would use a different value", key)
+	}
+	return nil
 }
 
 // EnvFor is the environment restic needs for this repository, in the

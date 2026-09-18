@@ -15,6 +15,11 @@ import (
 // tests can assert exactly what would be run without either binary.
 type Runner func(ctx context.Context, name string, args ...string) error
 
+// sqliteBusyTimeoutMS is how long the copy waits for an app that is
+// mid-write. Ten seconds is far longer than a web request's
+// transaction and far shorter than the hour until the next attempt.
+const sqliteBusyTimeoutMS = "10000"
+
 // Job is one app's backup: take a consistent copy of each declared
 // database into staging, then hand restic the staging dir and the
 // declared file paths in one snapshot.
@@ -52,6 +57,15 @@ func (j Job) Execute(ctx context.Context) error {
 		return fmt.Errorf("app %s declares no state to back up", j.App)
 	}
 	targets := []string{}
+	if len(j.Databases) == 0 {
+		// No database declared any more: the staged copy of one that
+		// used to be is plaintext app data, and nothing would ever
+		// remove it. stageDatabases clears this itself when there is
+		// something to stage.
+		if err := os.RemoveAll(StagingData(j.Staging)); err != nil {
+			return fmt.Errorf("app %s: clearing staged copies: %w", j.App, err)
+		}
+	}
 	if len(j.Databases) > 0 {
 		if err := j.stageDatabases(ctx); err != nil {
 			return err
@@ -89,6 +103,15 @@ func (j Job) Execute(ctx context.Context) error {
 	j.logf("+ restic %s", quoteArgs(args))
 	if err := j.Run(ctx, "restic", args...); err != nil {
 		return fmt.Errorf("app %s: restic backup: %w", j.App, err)
+	}
+	// A snapshot existing is not the same as a backup succeeding:
+	// restic writes one and still exits non-zero when it could not
+	// read some of the sources. Freshness is therefore measured from
+	// this marker, written only after a clean exit, rather than from
+	// the newest snapshot — otherwise repeated partial backups would
+	// keep `status --check` green while every run was failing.
+	if err := os.WriteFile(SuccessMarker(j.Staging), []byte(""), 0o640); err != nil {
+		return fmt.Errorf("app %s: recording the backup as complete: %w", j.App, err)
 	}
 	return nil
 }
@@ -128,8 +151,13 @@ func (j Job) stageDatabases(ctx context.Context) error {
 		// (The whole dir was cleared above, so VACUUM INTO — which
 		// refuses to overwrite an existing file — has somewhere to
 		// write.)
-		j.logf("+ sqlite3 %s %q", sqliteURI(src), vacuumInto(dst))
-		if err := j.Run(ctx, "sqlite3", sqliteURI(src), vacuumInto(dst)); err != nil {
+		// .timeout before the copy: sqlite3 defaults to failing the
+		// moment the database is busy, and an app mid-transaction —
+		// certain in rollback-journal mode, likely in WAL — would
+		// otherwise turn one unlucky second into a failed backup.
+		args := []string{"-cmd", ".timeout " + sqliteBusyTimeoutMS, sqliteURI(src), vacuumInto(dst)}
+		j.logf("+ sqlite3 %s", quoteArgs(args))
+		if err := j.Run(ctx, "sqlite3", args...); err != nil {
 			return fmt.Errorf("app %s: copying %s: %w", j.App, rel, err)
 		}
 	}

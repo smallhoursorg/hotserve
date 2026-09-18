@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -38,12 +39,20 @@ func FetchApps(ctx context.Context, adminAddr string) ([]App, error) {
 	if err := json.Unmarshal(body, &cfg); err != nil {
 		return nil, fmt.Errorf("admin API returned a config this version cannot read: %w", err)
 	}
+	// The admin API serves the config as loaded, not as provisioned,
+	// so both of liveswap's own steps have to be repeated here: its
+	// default when `root` is unset, and the {env.*} it resolves at
+	// load (liveswap.go, `a.Root = repl.ReplaceKnown(...)`).
 	root := cfg.Root
 	if root == "" {
-		// The admin API serves the config as loaded, not as
-		// provisioned: a Caddyfile that never wrote `root` leaves it
-		// empty here even though liveswap is using its default.
 		root = DefaultLiveswapRoot
+	}
+	root, err = resolveEnvPlaceholders(root)
+	if err != nil {
+		return nil, err
+	}
+	if !strings.HasPrefix(root, "/") {
+		return nil, fmt.Errorf("liveswap's root reads as %q, which is not an absolute path — backups cannot tell where any app's data is", root)
 	}
 	names := make([]string, 0, len(cfg.Apps))
 	for name := range cfg.Apps {
@@ -63,6 +72,35 @@ func FetchApps(ctx context.Context, adminAddr string) ([]App, error) {
 		})
 	}
 	return apps, nil
+}
+
+// resolveEnvPlaceholders expands the `{env.NAME}` form Caddy resolves
+// at config load, because the admin API hands back what was written
+// rather than what liveswap made of it.
+//
+// A name this process cannot see is an error, not an empty string:
+// hotserve is started by its own unit and may have variables this one
+// does not, and silently resolving to "" would send every backup at a
+// path that does not exist — which now reads as "never deployed" and
+// skips the app entirely. Better to say which variable is missing.
+func resolveEnvPlaceholders(s string) (string, error) {
+	for {
+		start := strings.Index(s, "{env.")
+		if start < 0 {
+			return s, nil
+		}
+		end := strings.Index(s[start:], "}")
+		if end < 0 {
+			return "", fmt.Errorf("liveswap's root has an unterminated placeholder: %q", s)
+		}
+		end += start
+		name := s[start+len("{env.") : end]
+		value, ok := os.LookupEnv(name)
+		if !ok {
+			return "", fmt.Errorf("liveswap's root is %q and %s is not set for this command: hotserve resolves it from its own environment, so set it for hotserve-backup.service too (a drop-in with Environment=%s=…), or write the path out in the Caddyfile", s, name, name)
+		}
+		s = s[:start] + value + s[end+1:]
+	}
 }
 
 // adminGet talks to the admin API over whatever address it is on —

@@ -49,9 +49,8 @@ func unitName(app string) string { return "hotserve-backup-" + app }
 //
 // Memory: measured peaks were ~78 MB of real memory (restic plus
 // sqlite3), with the rest of the cgroup figure being reclaimable page
-// cache. GOGC/GOMAXPROCS trade a little CPU for a third less heap,
-// MemoryHigh throttles rather than kills, and MemoryMax is a backstop
-// no healthy run should reach.
+// cache. GOGC/GOMAXPROCS trade a little CPU for a third less heap, and
+// MemoryHigh throttles rather than kills.
 func LaunchArgs(app App, o LaunchOptions) []string {
 	staging := o.StagingRoot + "/" + app.Name
 	// An app whose state is only files is read as it lies, so its dir
@@ -92,17 +91,23 @@ func LaunchArgs(app App, o LaunchOptions) []string {
 		"--property=MemoryHigh=64M",
 		"--property=IOSchedulingClass=idle",
 		// A job that hangs must not outlive the run that started it.
-		// systemd-run --wait only waits; killing the launcher leaves
-		// the transient unit going, and the next hour's run would then
-		// fail on the unit name being taken — every hour, invisibly.
-		// 45 minutes is inside hotserve-backup.service's own 55, so
-		// the job dies first and the run reports it.
+		// systemd-run --wait only waits; a launcher that goes away
+		// leaves the transient unit going, and the next hour's run
+		// would then fail on the unit name being taken — every hour,
+		// invisibly. This is what bounds a backup, which is why the
+		// launcher itself has no start timeout.
 		"--property=RuntimeMaxSec=45min",
 		"--property=TemporaryFileSystem=/:ro",
 		"--property=BindReadOnlyPaths=/usr /bin /lib -/lib64 /etc/ssl /etc/resolv.conf /etc/hosts /etc/passwd /etc/group /etc/localtime",
 		sharedBind,
 		"--property=BindPaths=" + staging,
 		"--property=PrivateUsers=yes",
+		// The same private PID namespace liveswap gives app units
+		// (systemd_dbus.go): every app and every job runs as the
+		// hotserve user, so without it a compromised restic could
+		// read a sibling app's /proc — its command line, its
+		// environment — despite the filesystem view being per app.
+		"--property=PrivatePIDs=yes",
 		"--property=PrivateTmp=yes",
 		"--property=PrivateDevices=yes",
 		"--property=NoNewPrivileges=yes",

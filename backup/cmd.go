@@ -1,10 +1,10 @@
 package backup
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -33,7 +33,9 @@ reads as root; nothing about backups is configured in the Caddyfile.
       new, and checks whether these credentials can delete from it —
       they should not be able to, so that someone who takes the box
       cannot erase its backups. Provider credentials are passed as
-      KEY=VALUE (AWS_ACCESS_KEY_ID=… and the like). A password is
+      KEY=VALUE, or in a root-only file with --credentials-file, which
+      keeps the storage key out of shell history and out of
+      /proc/*/cmdline while init runs. A password is
       generated and printed once; keep it somewhere else too, because
       nothing can recover it. Rebuilding a box means pointing init at
       the repository that already exists, with the password it was
@@ -82,6 +84,7 @@ belongs with the privileged key, off the box.`,
 			fs.String("name", "", "app name (app)")
 			fs.String("shared", "", "the app's shared dir, absolute (app)")
 			fs.String("password-file", "", "the password of a repository that already exists, for a rebuilt box (init)")
+			fs.String("credentials-file", "", "provider credentials as KEY=VALUE lines, instead of on the command line (init)")
 			fs.Bool("force", false, "replace an existing environment file (init)")
 			fs.Bool("check", false, "exit non-zero when an app has no current backup (status)")
 			return fs
@@ -153,7 +156,7 @@ func cmdStatus(fl caddycmd.Flags) (int, error) {
 	if err != nil {
 		return caddy1, err
 	}
-	statuses, err := Status(ctx, apps, withCaptureEnv(captureRunner(), env))
+	statuses, err := Status(ctx, apps, withCaptureEnv(captureRunner(), env), fl.String("staging"))
 	if err != nil {
 		return caddy1, err
 	}
@@ -176,9 +179,17 @@ func cmdInit(fl caddycmd.Flags, args []string) (int, error) {
 	if len(args) == 0 {
 		return caddy1, fmt.Errorf("say where the backups go, e.g. `hotserve backup init s3:s3.us-west-004.backblazeb2.com/my-bucket` — or a path, for a disk you mount")
 	}
+	extra := args[1:] // provider credentials as KEY=VALUE
+	if path := fl.String("credentials-file"); path != "" {
+		fromFile, err := LoadEnvFile(path)
+		if err != nil {
+			return caddy1, err
+		}
+		extra = append(fromFile, extra...)
+	}
 	o := InitOptions{
 		Repository:   args[0],
-		Extra:        args[1:], // provider credentials as KEY=VALUE
+		Extra:        extra,
 		EnvFile:      fl.String("env-file"),
 		Password:     os.Getenv("RESTIC_PASSWORD"),
 		PasswordFile: fl.String("password-file"),
@@ -305,14 +316,22 @@ func captureRunner() Capturer {
 	}
 }
 
-// captureQuiet is captureRunner with the command's stderr swallowed,
-// for the checks whose failure is an answer rather than a fault.
+// captureQuiet keeps a command's output to itself — its failure is an
+// answer, not a fault — but keeps stderr rather than dropping it:
+// restic explains a refusal there, and that wording is the evidence
+// the delete check classifies. Discarding it made every append-only
+// repository report as "unknown".
 func captureQuiet() Capturer {
 	return func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		cmd := exec.CommandContext(ctx, name, args...)
 		cmd.Env = append(os.Environ(), runnerEnv(ctx)...)
-		cmd.Stderr = io.Discard
-		return cmd.Output()
+		var errOut bytes.Buffer
+		cmd.Stderr = &errOut
+		out, err := cmd.Output()
+		if err != nil {
+			return append(out, errOut.Bytes()...), err
+		}
+		return out, nil
 	}
 }
 

@@ -133,10 +133,21 @@ sleep 1
 # -wal and -shm: this is the idle-app case, the one a box hits after a
 # reboot or while an app is crash-looping, and the copy must still be
 # taken.
-rm -f /tmp/idle-files
-ls "$SHARED" > /tmp/idle-files
-if grep -qE 'app[.]db-(wal|shm)' /tmp/idle-files; then
-	echo "   (note: -wal/-shm still present; the idle case is not being exercised)"
+# The precondition has to hold, or the check below passes without
+# testing anything: wait for the sidecars to go, and fail if they do
+# not. A note printed into a passing suite is not a check.
+idle=0
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+	if ! ls "$SHARED" | grep -qE 'app[.]db-(wal|shm)'; then
+		idle=1
+		break
+	fi
+	sleep 1
+done
+if [ "$idle" = 1 ]; then
+	pass "the database is idle: no -wal/-shm on disk"
+else
+	fail "-wal/-shm are still present, so the idle-database case below is not being exercised: $(ls "$SHARED" | tr '\n' ' ')"
 fi
 db_before=$(sha256sum "$SHARED/app.db" | cut -d' ' -f1)
 if hotserve backup run --admin 127.0.0.1:2019 >/tmp/run-quiet.log 2>&1; then

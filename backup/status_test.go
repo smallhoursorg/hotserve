@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -40,7 +42,7 @@ func TestStatusMatchesSnapshotsToApps(t *testing.T) {
 		snap("ccc", "shop", 20*time.Minute),
 	), nil)
 
-	got, err := Status(context.Background(), apps, capture)
+	got, err := Status(context.Background(), apps, capture, t.TempDir())
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
@@ -84,6 +86,70 @@ func TestStaleAfterTwoMissedRuns(t *testing.T) {
 	}
 }
 
+// restic writes a snapshot even when it exits non-zero (unreadable
+// sources, exit 3), so "a snapshot exists" is not "the backup
+// worked". Freshness comes from the marker a clean run writes, or a
+// box whose every run fails part-way stays green for ever.
+func TestStaleMeasuresFromTheLastCleanRun(t *testing.T) {
+	// Snapshots every hour, but nothing has finished cleanly in a day.
+	failing := AppStatus{
+		Latest:      &Snapshot{Time: statusNow.Add(-10 * time.Minute)},
+		LastSuccess: statusNow.Add(-24 * time.Hour),
+	}
+	if !failing.Stale(statusNow) {
+		t.Error("recent snapshots from failing runs must not read as current")
+	}
+	healthy := AppStatus{
+		Latest:      &Snapshot{Time: statusNow.Add(-10 * time.Minute)},
+		LastSuccess: statusNow.Add(-10 * time.Minute),
+	}
+	if healthy.Stale(statusNow) {
+		t.Error("a clean run ten minutes ago is current")
+	}
+}
+
+// The marker is read from the app's staging dir, which is where the
+// job writes it.
+func TestStatusReadsTheSuccessMarker(t *testing.T) {
+	root := t.TempDir()
+	staging := filepath.Join(root, "blog")
+	if err := os.MkdirAll(staging, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(SuccessMarker(staging), nil, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	capture, _ := capturing(snapshotsJSON(snap("aaa", "blog", time.Hour)), nil)
+	got, err := Status(context.Background(), []App{testApp("blog", StateEntry{Kind: KindFiles, Path: "uploads"})}, capture, root)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if got[0].LastSuccess.IsZero() {
+		t.Fatal("the marker should have been read")
+	}
+	if got[0].Stale(time.Now()) {
+		t.Error("a marker written just now is not stale")
+	}
+}
+
+// The report has to show the difference, or an operator reads the
+// snapshot's age and thinks all is well.
+func TestFormatStatusSaysWhenSnapshotsOutrunCleanRuns(t *testing.T) {
+	var out strings.Builder
+	FormatStatus(&out, []AppStatus{{
+		App:         testApp("blog", StateEntry{Kind: KindFiles, Path: "uploads"}),
+		Latest:      &Snapshot{ShortID: "bbb", Time: statusNow.Add(-10 * time.Minute)},
+		Snapshots:   40,
+		LastSuccess: statusNow.Add(-26 * time.Hour),
+	}}, statusNow)
+	if !strings.Contains(out.String(), "last clean run") {
+		t.Errorf("the report must show that the runs since have failed:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "⚠") {
+		t.Errorf("and mark the app as needing attention:\n%s", out.String())
+	}
+}
+
 func TestFormatStatusReport(t *testing.T) {
 	statuses := []AppStatus{
 		{
@@ -119,7 +185,7 @@ func TestFormatStatusWithNothingDeclared(t *testing.T) {
 
 func TestStatusSurfacesResticFailures(t *testing.T) {
 	capture, _ := capturing(nil, errors.New("Fatal: unable to open repository"))
-	_, err := Status(context.Background(), []App{testApp("blog")}, capture)
+	_, err := Status(context.Background(), []App{testApp("blog")}, capture, t.TempDir())
 	if err == nil || !strings.Contains(err.Error(), "reading snapshots") {
 		t.Fatalf("want the restic failure surfaced, got %v", err)
 	}
