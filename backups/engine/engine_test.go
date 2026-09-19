@@ -36,6 +36,9 @@ type box struct {
 	dump    func(paths []string) []dump.Result
 	summary string
 	ls      func(parent string) string
+	// before runs as a unit is about to start: the moment the manager
+	// would resolve its bind sources.
+	before func(unit.Spec)
 }
 
 var roleRe = regexp.MustCompile(`^hotserve_backup_([a-z]+)[0-9]*_`)
@@ -86,6 +89,9 @@ func (b *box) Stop(name string) error { b.stopped = append(b.stopped, name); ret
 
 func (b *box) Run(_ context.Context, s unit.Spec) (unit.Outcome, error) {
 	b.specs = append(b.specs, s)
+	if b.before != nil {
+		b.before(s)
+	}
 	m := roleRe.FindStringSubmatch(s.Name)
 	if m == nil {
 		b.t.Fatalf("unit name %q", s.Name)
@@ -461,5 +467,93 @@ func TestNotSetUp(t *testing.T) {
 	}
 	if len(b.specs) != 0 {
 		t.Fatalf("units were started: %s", b.roles())
+	}
+}
+
+// A declared path is the app's own to replace, and the upload unit
+// reads any file it is shown. A link is refused wherever it sits, and
+// what is bound is what was opened — not what the name leads to by the
+// time the manager resolves it.
+func TestALinkIsNeverFollowedAndABindCannotBeReAimed(t *testing.T) {
+	b := newBox(t)
+	sibling := filepath.Join(b.root, "shop", "shared")
+	must(t, os.MkdirAll(sibling, 0o755))
+	must(t, os.WriteFile(filepath.Join(sibling, "orders.txt"), []byte("the sibling's"), 0o600))
+	shared := filepath.Join(b.root, "blog", "shared")
+	must(t, os.Symlink(sibling, filepath.Join(shared, "linked")))
+	must(t, os.MkdirAll(filepath.Join(shared, "media"), 0o755))
+	must(t, os.Symlink(sibling, filepath.Join(shared, "media", "deep")))
+	b.plan = fmt.Sprintf(`{"root":%q,"apps":{"blog":{"files":["uploads","linked","media/deep/x"]}}}`, b.root)
+	b.ls = func(string) string { return `{"struct_type":"node","path":"/backup/blog/files/uploads","type":"dir"}` }
+
+	// The app swaps its one honest path for a link the moment the
+	// upload unit is about to start — after the engine looked.
+	swapped := ""
+	b.before = func(s unit.Spec) {
+		if roleRe.FindStringSubmatch(s.Name)[1] != "upload" {
+			return
+		}
+		must(t, os.Rename(filepath.Join(shared, "uploads"), filepath.Join(shared, "uploads.real")))
+		must(t, os.Symlink(sibling, filepath.Join(shared, "uploads")))
+		for _, bind := range s.Binds {
+			if bind.Dest == "/backup/blog/files/uploads" {
+				swapped, _ = os.Readlink(bind.Source)
+			}
+		}
+	}
+	st, err := Run(context.Background(), b.cfg, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(shared, "uploads.real"); swapped != want {
+		t.Fatalf("after the swap the bind source leads to %q, want the directory that was opened, %q", swapped, want)
+	}
+	up := b.spec("upload")
+	for _, bind := range up.Binds {
+		if strings.Contains(bind.Dest, "linked") || strings.Contains(bind.Dest, "deep") {
+			t.Errorf("a path through a link was bound: %+v", bind)
+		}
+		if strings.HasPrefix(bind.Dest, "/backup/blog/files") && !strings.HasPrefix(bind.Source, "/proc/") {
+			t.Errorf("a declared path is bound by name, which the app can re-aim: %+v", bind)
+		}
+	}
+	app := st.Apps["blog"]
+	if app.Class != record.Incomplete {
+		t.Fatalf("%+v", app)
+	}
+	for _, it := range app.Items[1:] {
+		if it.OK || !strings.Contains(it.Detail, "symbolic link") {
+			t.Errorf("%q: %+v", it.Path, it)
+		}
+	}
+}
+
+func TestASharedDirReachedThroughALinkIsRefused(t *testing.T) {
+	b := newBox(t)
+	shared := filepath.Join(b.root, "blog", "shared")
+	must(t, os.Rename(shared, shared+".real"))
+	must(t, os.Symlink(filepath.Join(b.root, "shop", "shared"), shared))
+	st, err := Run(context.Background(), b.cfg, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app := st.Apps["blog"]; app.Class != record.Failed || !strings.Contains(app.Detail, "symbolic link") {
+		t.Fatalf("%+v", app)
+	}
+	if b.roles() != "plan" {
+		t.Fatalf("units were started for it: %s", b.roles())
+	}
+}
+
+// The liveswap root itself may be an alias; liveswap allows that, and
+// it is the operator's to set.
+func TestASymlinkedRootIsFollowed(t *testing.T) {
+	b := newBox(t)
+	alias := filepath.Join(filepath.Dir(b.root), "alias")
+	must(t, os.Symlink(b.root, alias))
+	b.plan = strings.Replace(b.plan, fmt.Sprintf("%q", b.root), fmt.Sprintf("%q", alias), 1)
+	st, err := Run(context.Background(), b.cfg, b)
+	if err != nil || st.Apps["blog"].Class != record.OK {
+		t.Fatalf("%+v, %v", st.Apps["blog"], err)
 	}
 }

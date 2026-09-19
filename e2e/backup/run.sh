@@ -123,6 +123,19 @@ run && fail "a run with a missing declared path exited 0" || pass "the run exits
 expect_class blog incomplete "a missing files path"
 tr -d '\n' <"$STATUS" | sed 's/  */ /g' | grep -q '"path": "avatars", "ok": false, "detail": "missing' && pass "avatars is reported as missing, and uploads was still backed up" || fail "avatars: $(grep -A3 '"avatars"' "$STATUS" | tr -d '\n')"
 
+echo "=== backup 4b: an app cannot aim its backup at a sibling's data ==="
+# What a compromised blog can do: its declared path is its own to
+# replace. The unit that uploads can read any file it is shown, so what
+# it is shown must never be decided by a link the app made.
+cp /root/Caddyfile.base "$CADDYFILE"
+as_app sh -c 'cd /var/lib/liveswap/blog/shared && mv uploads uploads.real && ln -s ../../shop/shared uploads'
+run && fail "a run exited 0 with blog's declared path a link to shop's data" || pass "the run exits non-zero"
+expect_class blog incomplete "a declared path that is a link"
+tr -d '\n' <"$STATUS" | sed 's/  */ /g' | grep -q '"path": "uploads", "ok": false, "detail": "[^"]*symbolic link' && pass "and says the path is a symbolic link" || fail "uploads: $(grep -A3 '"uploads"' "$STATUS" | tr -d '\n')"
+rr ls --no-lock latest --tag app:blog 2>/dev/null | grep -q -e r.txt -e 'files/uploads/data' && fail "shop's files are in blog's snapshot: $(rr ls --no-lock latest --tag app:blog 2>/dev/null | grep files/)" || pass "nothing of shop's is in blog's snapshot"
+expect_class shop ok "a sibling aiming at its data"
+as_app sh -c 'cd /var/lib/liveswap/blog/shared && rm uploads && mv uploads.real uploads'
+
 echo "=== backup 5: a root the server and the backup would read differently ==="
 n=$(snapshots)
 sed 's#root /var/lib/liveswap#root {$LIVESWAP_ROOT:/var/lib/liveswap}#' /root/Caddyfile.base >"$CADDYFILE"

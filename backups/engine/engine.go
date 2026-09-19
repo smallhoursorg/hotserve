@@ -259,17 +259,33 @@ func (x *run) app(ctx context.Context, root, name string, decl *backupdecl.Confi
 	// filesystem, never from inside a unit, where a path that was not
 	// bound looks exactly like a path that does not exist. And only "no
 	// such file" means absent: anything else is an error.
-	st, err := os.Lstat(shared)
+	//
+	// It is decided by opening it (pin.go): what the units are shown is
+	// the directory that was found here, not whatever its name leads to
+	// by the time the manager binds it.
+	rootPin, err := pinRoot(root)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fail(record.Failed, "looking at the liveswap root: %v", err)
+	}
+	var sharedPin pin
+	if err == nil {
+		defer rootPin.close()
+		sharedPin, err = rootPin.beneath(name + "/shared")
+	}
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		if old := x.prev.Apps[name]; old != nil && old.LastOK != nil {
 			return fail(record.DataMissing, "%s does not exist, and this app was last backed up on %s (snapshot %s): its data is gone, or the disk it lives on is not mounted", shared, old.LastOK.Time.Format(time.RFC3339), short(old.LastOK.ID))
 		}
 		return fail(record.Pending, "%s does not exist yet: the app has not been deployed", shared)
+	case errors.Is(err, errLink):
+		return fail(record.Failed, "%s is reached through a symbolic link, which a backup does not follow; liveswap itself takes a bind mount there, not a link", shared)
 	case err != nil:
 		return fail(record.Failed, "looking at %s: %v", shared, err)
-	case !st.IsDir():
-		return fail(record.Failed, "%s is not a directory (%s)", shared, st.Mode().Type())
+	}
+	defer sharedPin.close()
+	if !sharedPin.isDir() {
+		return fail(record.Failed, "%s is not a directory", shared)
 	}
 
 	staging, err := x.staging(name)
@@ -293,8 +309,9 @@ func (x *run) app(ctx context.Context, root, name string, decl *backupdecl.Confi
 		return fail(record.Failed, "%v", err)
 	}
 
-	dumped := x.dump(ctx, name, shared, staging, declFile, decl, app)
-	binds, masked, present := x.view(name, shared, staging, declFile, decl, app)
+	dumped := x.dump(ctx, name, sharedPin, staging, declFile, decl, app)
+	binds, masked, present, unpin := x.view(name, sharedPin, staging, declFile, decl, app)
+	defer unpin()
 	if dumped+present == 0 {
 		return fail(record.Failed, "nothing that is declared could be read: %s", firstDetail(app.Items))
 	}
@@ -363,7 +380,7 @@ func (x *run) clean(ctx context.Context, app, staging string) error {
 // many copies are in staging. The unit parses what the app chose, so it
 // is the app's own kind of sandbox: the data user in its own
 // namespaces, no network, no credential, one app.
-func (x *run) dump(ctx context.Context, app, shared, staging, declFile string, decl *backupdecl.Config, rec *record.App) int {
+func (x *run) dump(ctx context.Context, app string, shared pin, staging, declFile string, decl *backupdecl.Config, rec *record.App) int {
 	if len(decl.SQLite) == 0 {
 		return 0
 	}
@@ -381,7 +398,7 @@ func (x *run) dump(ctx context.Context, app, shared, staging, declFile string, d
 		Binds: []unit.Bind{
 			// Writable: SQLite reads a WAL database only where it can
 			// create the -shm beside it.
-			{Source: shared, Dest: "/shared", Writable: true},
+			{Source: shared.source(), Dest: "/shared", Writable: true},
 			{Source: staging, Dest: "/staging", Writable: true},
 			{Source: declFile, Dest: "/plan.json"},
 		},
@@ -420,23 +437,38 @@ func (x *run) dump(ctx context.Context, app, shared, staging, declFile string, d
 // of. The paths inside are the same on every box, whatever its liveswap
 // root. A declared database inside a files path is masked there, with
 // its sidecars: the live file is never what gets uploaded.
-func (x *run) view(app, shared, staging, declFile string, decl *backupdecl.Config, rec *record.App) (binds []unit.Bind, masked []string, present int) {
+func (x *run) view(app string, shared pin, staging, declFile string, decl *backupdecl.Config, rec *record.App) (binds []unit.Bind, masked []string, present int, unpin func()) {
 	base := "/backup/" + app
 	binds = []unit.Bind{{Source: staging, Dest: base + "/sqlite"}, {Source: declFile, Dest: base + "/plan.json"}}
+	var pins []pin
+	unpin = func() {
+		for _, p := range pins {
+			p.close()
+		}
+	}
 	for _, p := range decl.Files {
 		it := record.Item{Kind: "files", Path: p}
-		if _, err := os.Lstat(filepath.Join(shared, p)); err != nil {
-			it.Detail = "missing: " + err.Error()
-			if !errors.Is(err, fs.ErrNotExist) {
+		// Pinned, not named: see pin.go. A link anywhere in a declared
+		// path is refused — the upload unit reads any file it is shown,
+		// so what it is shown is never for a link the app made to say.
+		item, err := shared.beneath(p)
+		if err != nil {
+			switch {
+			case errors.Is(err, fs.ErrNotExist):
+				it.Detail = "missing: no such file or directory under the shared dir"
+			case errors.Is(err, errLink):
+				it.Detail = "a symbolic link is in the way, and a backup does not follow one: declare the real path"
+			default:
 				it.Detail = err.Error()
 			}
 			rec.Items = append(rec.Items, it)
 			continue
 		}
+		pins = append(pins, item)
 		it.OK = true // until the snapshot says otherwise
 		rec.Items = append(rec.Items, it)
 		present++
-		binds = append(binds, unit.Bind{Source: filepath.Join(shared, p), Dest: path.Join(base, "files", p)})
+		binds = append(binds, unit.Bind{Source: item.source(), Dest: path.Join(base, "files", p)})
 		for _, db := range decl.SQLite {
 			if p == "." || db == p || strings.HasPrefix(db, p+"/") {
 				for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
@@ -445,7 +477,7 @@ func (x *run) view(app, shared, staging, declFile string, decl *backupdecl.Confi
 			}
 		}
 	}
-	return binds, masked, present
+	return binds, masked, present, unpin
 }
 
 // dataOwner is the data user's ids; a variable so a test can run where

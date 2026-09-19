@@ -10,12 +10,12 @@ require (
 	github.com/coreos/go-systemd/v22 v22.7.0
 	github.com/godbus/dbus/v5 v5.2.2
 	github.com/smallhoursorg/hotserve/liveswap v0.0.0-00010101000000-000000000000
+	golang.org/x/sys v0.48.0
 )
 
 require (
 	golang.org/x/mod v0.41.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/telemetry v0.0.0-20260811182544-a038080d80e5 // indirect
 	golang.org/x/tools v0.49.0 // indirect
 	golang.org/x/tools/go/packages/packagestest v0.1.1-deprecated // indirect
