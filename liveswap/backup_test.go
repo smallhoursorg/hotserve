@@ -225,3 +225,27 @@ func FuzzBackupDeclaration(f *testing.F) {
 }
 
 func joinedEqual(base, a, b string) bool { return filepath.Join(base, a) == filepath.Join(base, b) }
+
+// backupdecl repeats three of liveswap's values for readers that do
+// not link liveswap. This is what notices either side changing.
+func TestBackupdeclAgreesWithLiveswap(t *testing.T) {
+	a := new(App)
+	ctx, cancel := caddy.NewContext(caddy.Context{Context: context.Background()})
+	defer cancel()
+	if err := a.Provision(ctx); err != nil {
+		t.Fatalf("provisioning a config with no apps: %v", err)
+	}
+	if a.Root != backupdecl.DefaultRoot {
+		t.Errorf("liveswap's default root is %q, backupdecl.DefaultRoot is %q", a.Root, backupdecl.DefaultRoot)
+	}
+	for _, root := range []string{"/var/lib/liveswap", "/srv/live swap"} {
+		if got, want := backupdecl.SharedDir(root, "blog"), newAppDirs(root, "blog").shared; got != want {
+			t.Errorf("SharedDir(%q) = %q, liveswap's is %q", root, got, want)
+		}
+	}
+	for _, name := range []string{"blog", "a", "blog-api", "0", "", "Blog", "blog_api", "blog.api", "blog/api", strings.Repeat("a", 63), strings.Repeat("a", 64), "-", "é"} {
+		if got, want := backupdecl.ValidAppName(name), appNameRe.MatchString(name); got != want {
+			t.Errorf("ValidAppName(%q) = %v, liveswap says %v", name, got, want)
+		}
+	}
+}

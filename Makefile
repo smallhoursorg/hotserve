@@ -6,8 +6,8 @@ COMPOSE ?= docker compose
 # the root module — nested modules are excluded from a parent module's
 # pattern even in workspace mode — so test/vet name each module's tree
 # explicitly.
-MODULES ?= . liveswap penaltybox
-PKGS = ./... ./liveswap/... ./penaltybox/...
+MODULES ?= . backups liveswap penaltybox
+PKGS = ./... ./backups/... ./liveswap/... ./penaltybox/...
 
 # Release version: the tag when present (release.yml passes it in),
 # else a digit-leading dev placeholder that deb version rules accept.
@@ -16,7 +16,7 @@ VERSION ?= $(shell (git describe --tags --exact-match 2>/dev/null || echo v0.0.0
 # Distro image for the package install smoke test (install-test).
 DISTRO ?= debian:13
 
-.PHONY: test test-integration vet tidy lint fuzz fuzz-list vulncheck secretscan build package install-test e2e soak e2e-logs clean
+.PHONY: test test-integration vet tidy lint fuzz fuzz-list vulncheck secretscan build package install-test e2e e2e-backup soak e2e-logs clean
 
 test:
 	$(COMPOSE) run --rm dev go test -race -cover $(PKGS)
@@ -45,7 +45,7 @@ test-integration:
 	$(COMPOSE) exec -T dev-systemd /bin/sh /src/test/systemd/ready.sh || status=1; \
 	if [ $$status -eq 0 ]; then \
 		$(COMPOSE) exec -T -e XDG_RUNTIME_DIR=/run/user/0 dev-systemd \
-			go test -race -tags integration -v -run Integration -p 1 ./liveswap/... ./penaltybox/... || status=1; \
+			go test -race -tags integration -v -run Integration -p 1 ./backups/... ./liveswap/... ./penaltybox/... || status=1; \
 	fi; \
 	if [ $$status -ne 0 ]; then $(COMPOSE) exec -T dev-systemd journalctl --no-pager -n 100 || true; fi; \
 	$(COMPOSE) rm -sf dev-systemd >/dev/null; \
@@ -207,6 +207,23 @@ e2e:
 		$(COMPOSE) exec -T e2e-hotserve journalctl --no-pager -n 300 || true; \
 	fi; \
 	$(COMPOSE) down --remove-orphans; \
+	exit $$status
+
+# The backup suite: a box with systemd, Debian's restic and sqlite3, and
+# an S3 server for the repository. Its own target and its own CI job —
+# it shares nothing with the e2e stack, so run beside it, it costs its
+# own length and not the e2e job's. It takes down only its own two
+# services, so it can run beside `make e2e` on one host.
+e2e-backup:
+	$(cgroup2_preflight)
+	$(COMPOSE) up --build -d e2e-s3 e2e-backup-box
+	status=0; \
+	$(COMPOSE) exec -T e2e-backup-box /bin/sh /suite-backup.sh || status=1; \
+	if [ $$status -ne 0 ]; then \
+		$(COMPOSE) logs --tail 50 e2e-s3; \
+		$(COMPOSE) exec -T e2e-backup-box journalctl --no-pager -n 200 || true; \
+	fi; \
+	$(COMPOSE) rm -sf e2e-backup-box e2e-s3 >/dev/null; \
 	exit $$status
 
 # Leak-hunting soak against the product binary: deploy/reload/traffic
