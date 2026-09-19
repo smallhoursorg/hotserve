@@ -48,7 +48,7 @@ func TestInspect(t *testing.T) {
 		"sub/escape/outside.db": Failed, // a way out of the shared dir is refused, not followed
 	} {
 		done := make(chan Result, 1)
-		go func() { _, r := inspect(shared, rel); done <- r }()
+		go func() { done <- inspect(shared, rel) }()
 		select {
 		case res := <-done:
 			if res.Class != want {
@@ -60,12 +60,14 @@ func TestInspect(t *testing.T) {
 	}
 }
 
-func TestBoundGrowsWithTheDatabase(t *testing.T) {
-	if got := boundFor(0); got != time.Minute {
-		t.Errorf("an empty database: %s", got)
-	}
-	// 50 GiB at the measured ~200 MB/s is about four minutes.
-	if got := boundFor(50 << 30); got < 10*time.Hour {
-		t.Errorf("50 GiB is given %s", got)
+func TestURI(t *testing.T) {
+	for abs, want := range map[string]string{
+		"/var/lib/liveswap/blog/shared/app.db": "file:/var/lib/liveswap/blog/shared/app.db?mode=rw",
+		"/srv/my dir%20#?/a'b.db":              "file:/srv/my%20dir%2520%23%3F/a%27b.db?mode=rw",
+		"/srv/é.db":                            "file:/srv/%C3%A9.db?mode=rw",
+	} {
+		if got := uri(abs); got != want {
+			t.Errorf("uri(%q) = %q, want %q", abs, got, want)
+		}
 	}
 }

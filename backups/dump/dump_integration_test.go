@@ -26,6 +26,7 @@ func dirs(t *testing.T) (shared, staging string) {
 
 func sql(t *testing.T, db, stmt string) string {
 	t.Helper()
+	must(t, os.MkdirAll(filepath.Dir(db), 0o755))
 	out, err := exec.Command(sqlite3, db, stmt).CombinedOutput()
 	if err != nil {
 		t.Fatalf("sqlite3 %s: %v: %s", stmt, err, out)
@@ -116,43 +117,58 @@ func TestIntegrationWhatIsNotADatabaseIsNeverGivenToSqlite3(t *testing.T) {
 	}
 }
 
-// The app swaps its database for a FIFO after the checks. sqlite3
-// blocks opening it — a real sqlite3, really blocked — and the bound
-// is what ends it; the next database is still dumped.
-func TestIntegrationAFifoSwappedInIsKilledAndTheNextDatabaseIsDumped(t *testing.T) {
-	shared, staging := dirs(t)
-	victim := filepath.Join(shared, "swapped.db")
-	sql(t, victim, "create table t(x);")
-	sql(t, filepath.Join(shared, "next.db"), "create table t(x); insert into t values (1);")
+// The app swaps its database for something else after the checks — a
+// FIFO, which blocks a sqlite3 given the path directly for ever; a
+// socket; nothing at all. Each is an error at once, nothing is created
+// in the app's directory, and the next database is still dumped.
+func TestIntegrationWhatIsSwappedInAfterTheChecksFailsAtOnce(t *testing.T) {
+	for what, swap := range map[string]func(string) error{
+		"a fifo":  func(p string) error { return syscall.Mkfifo(p, 0o644) },
+		"a dir":   func(p string) error { return os.Mkdir(p, 0o755) },
+		"nothing": func(string) error { return nil },
+		"text":    func(p string) error { return os.WriteFile(p, []byte("not a database at all, any more"), 0o644) },
+	} {
+		t.Run(what, func(t *testing.T) {
+			shared, staging := dirs(t)
+			victim := filepath.Join(shared, "swapped.db")
+			sql(t, victim, "create table t(x);")
+			sql(t, filepath.Join(shared, "my dir%20#?", "next.db"), "create table t(x); insert into t values (1);")
 
-	oldBound, oldHook := boundFor, beforeSqlite
-	boundFor = func(int64) time.Duration { return 2 * time.Second }
-	swapped := false
-	beforeSqlite = func() {
-		if !swapped {
-			swapped = true
-			must(t, os.Remove(victim))
-			must(t, syscall.Mkfifo(victim, 0o644))
-		}
-	}
-	defer func() { boundFor, beforeSqlite = oldBound, oldHook }()
+			oldHook, swapped := beforeSqlite, false
+			beforeSqlite = func() {
+				if !swapped {
+					swapped = true
+					must(t, os.Remove(victim))
+					must(t, swap(victim))
+				}
+			}
+			defer func() { beforeSqlite = oldHook }()
 
-	start := time.Now()
-	res := Databases(context.Background(), shared, staging, []string{"swapped.db", "next.db"})
-	if took := time.Since(start); took > 20*time.Second {
-		t.Fatalf("took %s", took)
-	}
-	if res[0].Class != DidNotFinish {
-		t.Fatalf("the swapped database: %+v", res[0])
-	}
-	if res[1].Class != OK {
-		t.Fatalf("the database after it: %+v", res[1])
-	}
-	if out, _ := exec.Command("pgrep", "-f", "sqlite3.*swapped.db").Output(); len(out) != 0 {
-		t.Fatalf("a sqlite3 is still running: %s", out)
-	}
-	if _, err := os.Stat(filepath.Join(staging, "swapped.db")); err == nil {
-		t.Fatal("a copy of the swapped database was left in staging")
+			done := make(chan []Result, 1)
+			go func() {
+				done <- Databases(context.Background(), shared, staging, []string{"swapped.db", "my dir%20#?/next.db"})
+			}()
+			var res []Result
+			select {
+			case res = <-done:
+			case <-time.After(15 * time.Second):
+				t.Fatal("still running after 15s: a sqlite3 is waiting on what was swapped in")
+			}
+			if res[0].Class == OK {
+				t.Fatalf("the swapped database: %+v", res[0])
+			}
+			if res[1].Class != OK {
+				t.Fatalf("the database after it: %+v", res[1])
+			}
+			if _, err := os.Stat(filepath.Join(staging, "swapped.db")); err == nil {
+				t.Fatal("a copy of the swapped database was left in staging")
+			}
+			if what == "nothing" {
+				if _, err := os.Lstat(victim); err == nil {
+					t.Fatal("sqlite3 created the missing database in the app's directory")
+				}
+			}
+		})
 	}
 }
 
