@@ -158,6 +158,18 @@ journalctl --no-pager -o cat | grep -q "depends on the environment variable(s) L
 [ "$(snapshots)" = "$n" ] && pass "and uploads nothing" || fail "snapshots went from $n to $(snapshots)"
 tr -d '\n' <"$STATUS" | grep -q '"last_ok"' && pass "what was known about each app is kept in the record" || fail "the record lost the apps: $(cat "$STATUS")"
 
+echo "=== backup 5b: an ordinary production Caddyfile: variables with no default ==="
+# The server has these set; a backup does not have the server's
+# environment, and unset they are parse errors. It adapts with made-up
+# values of the kind each place takes, and the plan is what it would be.
+sed -e 's#admin off#admin off\n\temail {$ACME_EMAIL}#' -e 's#^:8080 {#:{$METRICS_PORT} {\n\trespond metrics\n}\n\n{$SITE_DOMAIN} {#' /root/Caddyfile.base >"$CADDYFILE"
+grep -q '{$ACME_EMAIL}' "$CADDYFILE" && grep -q '^:{$METRICS_PORT} {' "$CADDYFILE" && grep -q '^{$SITE_DOMAIN} {' "$CADDYFILE" || fail "the scenario's Caddyfile does not hold the three variables"
+env -i /usr/bin/hotserve adapt --adapter caddyfile --config "$CADDYFILE" >/dev/null 2>&1 && fail "this Caddyfile adapts with an empty environment: the scenario proves nothing" || pass "with an empty environment this Caddyfile does not adapt"
+run && pass "the run exits 0 all the same" || fail "the run failed: $(cat "$OUT"; journalctl --no-pager -o cat | grep 'hotserve-backup:' | tail -2)"
+expect_class blog ok "variables with no default"
+expect_class shop ok "variables with no default"
+cp /root/Caddyfile.base "$CADDYFILE"
+
 echo "=== backup 6: a symlinked root, and a name systemd would expand ==="
 ln -sfn /var/lib/liveswap /srv/liveswap
 as_app sh -c 'cd /var/lib/liveswap/blog/shared && mkdir -p "up \$RESTIC_PASSWORD %h" && echo x >"up \$RESTIC_PASSWORD %h/f"'

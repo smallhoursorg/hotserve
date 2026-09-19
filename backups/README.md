@@ -176,19 +176,12 @@ they hold the database's path, and `busy.db` is not busy.
 
 ## What it refuses
 
-- A liveswap `root` or a backup path that depends on a Caddyfile
-  `{$NAME}`. A run adapts the Caddyfile without hotserve's environment,
-  so it tries each variable the file and its imports mention, and
-  refuses, naming the variable, if setting it changes the plan. (hotserve
-  itself refuses `root {env.X}` together with a `backup` block.)
-- A variable that no value tried adapts with —
+- A liveswap `root`, an app's name or a backup path that depends on a
+  Caddyfile `{$NAME}`. (hotserve itself refuses `root {env.X}` together
+  with a `backup` block; `{$NAME}` it never sees.) See below.
+- A variable that no made-up value adapts with —
   `import sites/{$ENV:prod}.caddy` — since what the server imports when
   it is set cannot be known here.
-- **A Caddyfile that does not adapt with an empty environment.** `email
-  {$ACME_EMAIL}` with no default is a parse error when the variable is
-  unset, and then no app is backed up. Every `{$NAME}` needs a default
-  that adapts (`{$ACME_EMAIL:you@example.com}`), or the run has to be
-  given the server's environment — which it is not, today.
 - A Caddyfile that imports from outside `/etc/hotserve`: the plan
   unit's view holds nothing else.
 - A symbolic link anywhere in a declared path, or at `<app>/shared`:
@@ -197,6 +190,34 @@ they hold the database's path, and `busy.db` is not busy.
 - An `<app>/shared` that does not belong to the `hotserve` user.
 - A run's leftover unit that will not stop within two minutes: the run
   is refused, and the record says why.
+
+## The Caddyfile is read without the server's environment
+
+The plan comes from `/etc/hotserve/Caddyfile`, which is root's, and not
+from the running server: what gets backed up is not for the process the
+internet talks to to say. The cost is `{$NAME}`, which Caddy fills in,
+in the text, from the environment of whoever adapts the file — and a
+run does not have the server's environment, where its secrets are.
+
+So a run adapts the file with made-up values. A variable written
+somewhere with no default would otherwise leave nothing where its value
+goes — `email {$ACME_EMAIL}`, unset, is a parse error — so each gets a
+placeholder of its own, and where the adapter refuses one (it quotes the
+value: `invalid port 'hsb-placeholder-metrics-port.invalid'`) the next
+kind is tried there: a number, a duration, a path. The structure of what
+is adapted is the server's own; only those values differ, and none of
+them is anywhere a plan looks.
+
+Then every variable is given a second value. If the plan comes out
+different — the root, an app's name or a backup path depends on it — the
+run is refused, naming the variable: the server and the backup would
+otherwise look in different places, and the backup would say "no data
+yet" for ever. Write those three things literally; a per-box `import` of
+a file with a literal `root` does what a variable would.
+
+If no value tried adapts, the run fails with the adapter's own error,
+which names the file and line; a default that adapts
+(`{$NAME:value}`) settles it.
 
 ## By hand, until there is a setup command
 

@@ -90,30 +90,53 @@ func TestEnvNamesFollowsImports(t *testing.T) {
 	write(t, dir+"/sites/a.caddy", "{$DOMAIN:example.com} {\n\timport ../Caddyfile\n\timport deeper/*\n}\n")
 	write(t, dir+"/sites/deeper/b", "root * {$WEBROOT}\n")
 	write(t, dir+"/abs.caddy", "respond {$GREETING}\n")
-	got, err := envNames(dir + "/Caddyfile")
+	got, bare, err := envNames(dir + "/Caddyfile")
 	if err != nil {
 		t.Fatal(err)
+	}
+	// DOMAIN and CONF are only ever written with a default.
+	if want := []string{"ACME_EMAIL", "BEHIND_A_DEFAULT", "GREETING", "QUOTED", "WEBROOT"}; !reflect.DeepEqual(bare, want) {
+		t.Fatalf("with no default = %v, want %v", bare, want)
 	}
 	if want := []string{"ACME_EMAIL", "BEHIND_A_DEFAULT", "CONF", "DOMAIN", "GREETING", "QUOTED", "WEBROOT"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("names = %v, want %v", got, want)
 	}
 }
 
-// fakeHotserve stands in for `hotserve adapt`: the root comes from
-// {$LIVESWAP_ROOT:/var/lib/liveswap}, a backup path from {$DB:app.db},
-// the port from {$PORT:8080} — refused unless numeric, as the real
-// adapter refuses a site address — {$DOMAIN} changes nothing a plan
-// holds, and {$ENV:prod} names a file to import, so that nothing but
-// "prod" adapts. It fails if anything of the caller's environment
-// reaches it.
+// fakeHotserve stands in for `hotserve adapt`, failing where and how
+// the real one does [measured]: a variable with no default, unset or
+// empty, is a parse error ({$ACME_EMAIL}, {$ROOT_NO_DEFAULT}, {$MAGIC});
+// a port ({$METRICS_PORT}, {$ADMIN_PORT}, {$PORT:8080}) has to be a
+// number, and the error quotes the value that is not one; {$ENV:prod}
+// names a file to import, so nothing but "prod" adapts; {$MAGIC} takes
+// one value nobody would guess. The root comes from
+// {$LIVESWAP_ROOT:/var/lib/liveswap} or {$ROOT_NO_DEFAULT}, a backup
+// path from {$DB:app.db}, an app's name from {$APP_NAME:blog}, and
+// {$DOMAIN} changes nothing a plan holds.
+// Which of them the "Caddyfile" uses is read from the file. It fails if
+// anything of the caller's environment reaches it.
 func fakeHotserve(t *testing.T) {
 	t.Helper()
 	script := filepath.Join(t.TempDir(), "hotserve")
 	write(t, script, `#!/bin/sh
 [ -n "$CALLER_SECRET" ] && { echo "the caller's environment reached the adapter" >&2; exit 1; }
-case "${PORT:-8080}" in *[!0-9]*) echo "Error: invalid port" >&2; exit 1;; esac
+for last; do :; done
+uses() { grep -q "{\$$1[:}]" "$last"; }
+for v in ACME_EMAIL ROOT_NO_DEFAULT MAGIC; do
+	if uses $v && eval "[ -z \"\${$v}\" ]"; then echo "Error: wrong argument count or unexpected line ending after '$v'" >&2; exit 1; fi
+done
+if uses MAGIC && [ "$MAGIC" != xyzzy ]; then echo "Error: unrecognized value '$MAGIC'" >&2; exit 1; fi
+for v in METRICS_PORT ADMIN_PORT; do
+	if uses $v; then
+		eval "p=\${$v}"
+		case "$p" in ""|*[!0-9]*) echo "Error: parsing key: invalid port '$p': strconv.Atoi" >&2; exit 1;; esac
+	fi
+done
+case "${PORT:-8080}" in *[!0-9]*) echo "Error: invalid port '$PORT'" >&2; exit 1;; esac
 [ "${ENV:-prod}" = prod ] || { echo "Error: File to import not found: sites/$ENV.caddy" >&2; exit 1; }
-printf '{"apps":{"http":{"domain":"%s"},"liveswap":{"root":"%s","apps":{"blog":{"backup":{"sqlite":["%s"]}}}}}}' "${DOMAIN:-example.com}" "${LIVESWAP_ROOT:-/var/lib/liveswap}" "${DB:-app.db}"
+root=${LIVESWAP_ROOT:-/var/lib/liveswap}
+uses ROOT_NO_DEFAULT && root=$ROOT_NO_DEFAULT
+printf '{"apps":{"http":{"domain":"%s"},"liveswap":{"root":"%s","apps":{"%s":{"backup":{"sqlite":["%s"]}}}}}}' "${DOMAIN:-example.com}" "$root" "${APP_NAME:-blog}" "${DB:-app.db}"
 `)
 	old := hotserve
 	hotserve = script
@@ -136,7 +159,17 @@ func TestMakeRefusesAPlanThatDependsOnTheEnvironment(t *testing.T) {
 		"a variable no trial value adapts with": {"import sites/{$ENV:prod}.caddy\n", []string{"ENV", "does not adapt"}},
 		"the root":                              {"liveswap {\n\troot {$LIVESWAP_ROOT:/var/lib/liveswap}\n}\n", []string{"LIVESWAP_ROOT"}},
 		"a backup path":                         {"backup {\n\tsqlite {$DB:app.db}\n}\n", []string{"DB"}},
-		"both, among others":                    {"{$DOMAIN} :{$PORT} {$LIVESWAP_ROOT} {$DB}\n", []string{"DB, LIVESWAP_ROOT"}},
+		"both, among others":                    {"{$DOMAIN:example.com} :{$PORT:80} {$LIVESWAP_ROOT:/var/lib/liveswap} {$DB:app.db}\n", []string{"DB, LIVESWAP_ROOT"}},
+		// The ordinary production file: variables with no default, which
+		// an empty environment makes a parse error of. Made-up values, of
+		// the kind the adapter takes in each place, and the plan is what
+		// it would be anyway.
+		"an email with no default":             {"email {$ACME_EMAIL}\n", nil},
+		"and a port, which has to be a number": {"email {$ACME_EMAIL}\n:{$METRICS_PORT} {\n}\n", nil},
+		"and a second port":                    {"email {$ACME_EMAIL}\n:{$METRICS_PORT} {\n}\n:{$ADMIN_PORT} {\n}\n", nil},
+		"an app's name":                        {"app {$APP_NAME:blog} {\n}\n", []string{"APP_NAME", "depends on"}},
+		"a root with no default":               {"root {$ROOT_NO_DEFAULT}\n", []string{"ROOT_NO_DEFAULT", "depends on"}},
+		"a value nothing made up will do for":  {"thing {$MAGIC}\n", []string{"unrecognized value", "MAGIC", "default"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			file := filepath.Join(t.TempDir(), "Caddyfile")
