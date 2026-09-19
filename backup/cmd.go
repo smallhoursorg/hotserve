@@ -257,9 +257,17 @@ func cmdStatus(fl caddycmd.Flags, names []string) (int, error) {
 		}
 		return exitCouldNotCheck, err
 	}
+	var since time.Time // this repository's oldest backup among the apps asked about
 	for i := range statuses {
 		statuses[i].Running = unitActive(ctx, unitName(statuses[i].App.Name)+".service")
-		statuses[i].NothingYet = nothingToBackUpYet(statuses[i].App)
+		nothing, err := nothingToBackUpYet(statuses[i].App)
+		if err != nil {
+			return exitCouldNotCheck, err
+		}
+		statuses[i].NothingYet = nothing
+		if first := statuses[i].First; !first.IsZero() && (since.IsZero() || first.Before(since)) {
+			since = first
+		}
 	}
 	verified, err := LastVerification(ctx, inUnit(view, osExec))
 	if err != nil {
@@ -267,7 +275,7 @@ func cmdStatus(fl caddycmd.Flags, names []string) (int, error) {
 	}
 	now := time.Now()
 	FormatStatus(os.Stdout, statuses, now)
-	FormatVerification(os.Stdout, verified, now)
+	FormatVerification(os.Stdout, verified, now, since)
 	if !fl.Bool("check") {
 		return 0, nil
 	}
@@ -282,7 +290,7 @@ func cmdStatus(fl caddycmd.Flags, names []string) (int, error) {
 	if len(stale) > 0 {
 		return caddy1, fmt.Errorf("no clean backup in the last %.1f hours of: %s", StaleAfter.Hours(), strings.Join(stale, ", "))
 	}
-	if verified.Overdue(now) {
+	if verified.Overdue(now, since) {
 		return caddy1, fmt.Errorf("the repository's weekly check is overdue, or did not pass (above)")
 	}
 	return 0, nil
@@ -435,17 +443,25 @@ const exitCouldNotCheck = 2
 // nothingToBackUpYet is whether an app has, right now, none of what it
 // declares: no shared dir (never deployed), or no declared path in it.
 // The hourly run passes over such an app, and says so.
-func nothingToBackUpYet(app App) bool {
+//
+// Only "it is not there" is that. A path that could not be looked at — an
+// I/O error, a mount gone stale — is not known to be absent, and an app
+// excused from --check on that footing would be a report that says all
+// is well because it could not see: the report fails instead (exit 2).
+func nothingToBackUpYet(app App) (bool, error) {
 	for _, e := range app.State {
 		p, err := sharedPath(app.Shared, e.Path)
 		if err != nil {
-			return false
+			return false, nil
 		}
-		if _, err := os.Lstat(p); err == nil {
-			return false
+		switch _, err := os.Lstat(p); {
+		case err == nil:
+			return false, nil
+		case !errors.Is(err, os.ErrNotExist):
+			return false, fmt.Errorf("app %s: whether %s is there could not be seen, so neither can whether it needs backing up: %w", app.Name, p, err)
 		}
 	}
-	return true
+	return true, nil
 }
 
 // unitActive reports whether a systemd unit is running. An error reads

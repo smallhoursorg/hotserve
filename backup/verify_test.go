@@ -102,27 +102,37 @@ func TestLastVerificationAndWhenItIsOverdue(t *testing.T) {
 	bad := func(age time.Duration) Snapshot {
 		return Snapshot{Time: now.Add(-age), Tags: []string{VerifyFailedTag}}
 	}
+	day := 24 * time.Hour
 	for name, tc := range map[string]struct {
 		snaps   []Snapshot
+		since   time.Duration // how long the repository has held backups; 0 for none yet
 		overdue bool
 		says    string
 	}{
-		"never checked":           {nil, false, "not checked yet"},
-		"checked this week":       {[]Snapshot{ok(3 * 24 * time.Hour), ok(10 * 24 * time.Hour)}, false, "nothing wrong"},
-		"two weeks missed":        {[]Snapshot{ok(16 * 24 * time.Hour)}, true, "has not finished since"},
-		"the last one found harm": {[]Snapshot{ok(8 * 24 * time.Hour), bad(24 * time.Hour)}, true, "did not pass"},
-		"mended since":            {[]Snapshot{bad(8 * 24 * time.Hour), ok(24 * time.Hour)}, false, "nothing wrong"},
+		"never checked, new":            {nil, 3 * day, false, "not checked yet"},
+		"never checked, no backups yet": {nil, 0, false, "not checked yet"},
+		// No record is not a pass for ever: a timer that is masked, or a
+		// check that can never reach the repository, writes none.
+		"never checked, in use for a month": {nil, 30 * day, true, "never checked, though it has held backups"},
+		"checked this week":                 {[]Snapshot{ok(3 * day), ok(10 * day)}, 90 * day, false, "nothing wrong"},
+		"two weeks missed":                  {[]Snapshot{ok(16 * day)}, 90 * day, true, "has not finished since"},
+		"the last one found harm":           {[]Snapshot{ok(8 * day), bad(day)}, 90 * day, true, "did not pass"},
+		"mended since":                      {[]Snapshot{bad(8 * day), ok(day)}, 90 * day, false, "nothing wrong"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			v, err := LastVerification(context.Background(), list(tc.snaps...))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if v.Overdue(now) != tc.overdue {
-				t.Errorf("overdue = %v, want %v", v.Overdue(now), tc.overdue)
+			var since time.Time
+			if tc.since > 0 {
+				since = now.Add(-tc.since)
+			}
+			if v.Overdue(now, since) != tc.overdue {
+				t.Errorf("overdue = %v, want %v", v.Overdue(now, since), tc.overdue)
 			}
 			var out strings.Builder
-			FormatVerification(&out, v, now)
+			FormatVerification(&out, v, now, since)
 			if !strings.Contains(out.String(), tc.says) {
 				t.Errorf("want the report to say %q:\n%s", tc.says, out.String())
 			}

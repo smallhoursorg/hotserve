@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -896,6 +897,37 @@ func TestExecuteWithNothingToCopyIsNotABackup(t *testing.T) {
 	for _, c := range rec.calls {
 		if c.name == "restic" && len(c.args) > 0 && c.args[0] == "backup" {
 			t.Errorf("nothing to back up, and restic backup ran: %v", c.args)
+		}
+	}
+}
+
+// A restore puts back files and directories. A declared path that is
+// anything else — a FIFO, a socket — is refused before restic sees it,
+// rather than backed up, vouched for, and then found unrestorable; and a
+// snapshot that holds one all the same does not earn a clean-run record.
+func TestOnlyWhatARestorePutsBackIsBackedUpAsClean(t *testing.T) {
+	rec := &recorder{}
+	job := newJob(t, rec, nil, []string{"uploads"})
+	pipe := filepath.Join(job.Shared, "events")
+	if err := syscall.Mkfifo(pipe, 0o600); err != nil {
+		t.Skipf("no FIFOs here: %v", err)
+	}
+	job.Files = []string{"uploads", "events"}
+	err := job.Execute(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "named pipe") || !strings.Contains(err.Error(), "not a file or a directory") {
+		t.Fatalf("want a declared FIFO refused by name, got %v", err)
+	}
+	if len(rec.calls) != 0 {
+		t.Errorf("nothing should have run: %v", rec.calls)
+	}
+
+	for _, typ := range []string{"fifo", "socket", "chardev"} {
+		x := fake(nil, func(context.Context, string, ...string) ([]byte, error) {
+			return []byte(`{"struct_type":"node","path":"/data/events","type":"` + typ + `"}` + "\n"), nil
+		})
+		err := Job{App: "blog", Exec: x, Log: io.Discard}.verifySnapshot(context.Background(), "s1full", []expectedNode{{path: "/data/events"}})
+		if err == nil || !strings.Contains(err.Error(), "does not put back") {
+			t.Errorf("a snapshot holding a %s must not read back as clean: %v", typ, err)
 		}
 	}
 }

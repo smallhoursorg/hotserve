@@ -498,20 +498,36 @@ func TestFindApp(t *testing.T) {
 func TestNothingToBackUpYetIsNotStale(t *testing.T) {
 	shared := filepath.Join(t.TempDir(), "blog", "shared")
 	app := App{Name: "blog", Shared: shared, State: []StateEntry{{Kind: KindSQLite, Path: "app.db"}, {Kind: KindFiles, Path: "uploads"}}}
-	if !nothingToBackUpYet(app) {
+	nothing := func() bool {
+		t.Helper()
+		got, err := nothingToBackUpYet(app)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	if !nothing() {
 		t.Error("an app that has never been deployed has nothing to back up yet")
 	}
 	if err := os.MkdirAll(shared, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if !nothingToBackUpYet(app) {
+	if !nothing() {
 		t.Error("a deployed app that has created nothing it declares has nothing to back up yet")
 	}
 	if err := os.MkdirAll(filepath.Join(shared, "uploads"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if nothingToBackUpYet(app) {
+	if nothing() {
 		t.Error("one declared path on disk is something to back up")
+	}
+	// Not "not there": a path that cannot be looked at is not known to be
+	// absent, and the report fails rather than excusing the app. (A name
+	// too long for the filesystem is an error stat gives everyone, root
+	// included.)
+	unseeable := App{Name: "blog", Shared: shared, State: []StateEntry{{Kind: KindFiles, Path: strings.Repeat("x", 300)}}}
+	if got, err := nothingToBackUpYet(unseeable); err == nil || got {
+		t.Errorf("want an error for a path that could not be looked at, got %v, %v", got, err)
 	}
 	if (AppStatus{NothingYet: true}).Stale(statusNow) {
 		t.Error("no snapshot and nothing to back up is not a stale backup")

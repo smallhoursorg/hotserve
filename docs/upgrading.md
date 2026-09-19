@@ -107,9 +107,12 @@ What an upgrade leaves alone:
   you turned off stays off, across upgrades and across removing and
   reinstalling the package. (An upgrade from a hotserve that predates
   the timer enables it, since nobody has turned it off yet.) An upgrade
-  can land mid-backup: the job is
-  its own short-lived unit, so it finishes on the old binary and the
-  next hour's run uses the new one.
+  can land mid-backup. A step that is running finishes on the binary it
+  started with; the steps after it — an app's upload after its copy,
+  the apps later in that run — start on the new one, given the same
+  arguments the old run would have given them. Should a release ever
+  change what passes between those steps, the cost is that one run
+  failing for those apps, and the next hour's being whole.
 - **Your `state` declarations**, which live in the Caddyfile like the
   rest of an app's config.
 

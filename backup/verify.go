@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -112,12 +113,21 @@ type Verification struct {
 	Failed bool
 }
 
-// Overdue is whether `status --check` should say so: the last check found
-// damage, or there has been none for two weeks. A repository never yet
-// checked is not overdue — it is named in the report — since the first
-// check comes within a week of setting backups up.
-func (v Verification) Overdue(now time.Time) bool {
-	return v.Failed || (!v.At.IsZero() && now.Sub(v.At) > VerifyOverdue)
+// Overdue is whether `status --check` should say so: the last check did
+// not pass, or there has been none for two weeks. For a repository never
+// yet checked the two weeks run from since — its oldest backup — so a new
+// one is given the time its first weekly check takes to come round, and
+// one whose checks never happen (the timer masked, every check unable to
+// reach it) does not stay green for ever on having no record at all.
+func (v Verification) Overdue(now, since time.Time) bool {
+	switch {
+	case v.Failed:
+		return true
+	case !v.At.IsZero():
+		return now.Sub(v.At) > VerifyOverdue
+	default:
+		return !since.IsZero() && now.Sub(since) > VerifyOverdue
+	}
 }
 
 // LastVerification reads the newest check record, of either kind.
@@ -141,13 +151,15 @@ func LastVerification(ctx context.Context, x Exec) (Verification, error) {
 
 // FormatVerification is the report's last line: about the repository,
 // where every line above it is about an app.
-func FormatVerification(w io.Writer, v Verification, now time.Time) {
+func FormatVerification(w io.Writer, v Verification, now, since time.Time) {
 	switch {
+	case v.At.IsZero() && v.Overdue(now, since):
+		say(w, "\nrepository: ⚠ never checked, though it has held backups for %s: the weekly check has not run, or has not been able to. What it did:\n    journalctl -u hotserve-backup_verify -n 50\nTo check it now: sudo hotserve backup verify", strings.TrimSuffix(humanAge(now.Sub(since)), " ago"))
 	case v.At.IsZero():
 		say(w, "\nrepository: not checked yet — a weekly check reads it back (systemctl list-timers hotserve-backup_verify.timer); to check it now: sudo hotserve backup verify")
 	case v.Failed:
 		say(w, "\nrepository: ⚠ the last check, %s, did not pass: something in it is missing or does not read back. What it found:\n    journalctl -u hotserve-backup_verify -n 50", humanAge(now.Sub(v.At)))
-	case v.Overdue(now):
+	case v.Overdue(now, since):
 		say(w, "\nrepository: ⚠ last checked %s; the weekly check has not finished since. What it did:\n    journalctl -u hotserve-backup_verify -n 50", humanAge(now.Sub(v.At)))
 	default:
 		say(w, "\nrepository: checked %s, nothing wrong", humanAge(now.Sub(v.At)))

@@ -510,7 +510,8 @@ journalctl -u hotserve-backup_verify -n 50   # what the last one did
 What it found is recorded in the repository, and `status` ends with it:
 `repository: checked 3 days ago, nothing wrong`. `status --check` exits 1
 when the last check did not pass, or when there has been none for two
-weeks. (A check that could not reach the repository at all is not a
+weeks — counted, for a repository that has never been checked, from its
+oldest backup. (A check that could not reach the repository at all is not a
 check that failed: it records nothing, its unit fails, and next week
 tries again.) A check wants the repository to itself, so a check and a
 backup wait for each other — up to an hour — rather than the second one

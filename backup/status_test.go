@@ -344,3 +344,30 @@ func TestHumanAge(t *testing.T) {
 		}
 	}
 }
+
+// A clean-run record vouches for a snapshot, and counts for as long as
+// that snapshot is there. With it gone — forgotten by hand, removed at
+// the provider — the record saying "clean, minutes ago" would have the
+// report call fresh a backup that restore cannot take.
+func TestACleanRecordCountsOnlyWhileItsSnapshotIsThere(t *testing.T) {
+	apps := []App{testApp("blog", StateEntry{Kind: KindFiles, Path: "uploads"})}
+	capture, _ := capturing(snapshotsJSON(
+		snap("aaa", "blog", 5*time.Hour),
+		record("blog", "box-1", 5*time.Hour, "aaa"),
+		// The newest clean run's snapshot, "bbb", is not in the repository.
+		record("blog", "box-1", 10*time.Minute, "bbb"),
+	), nil)
+	got, err := Status(context.Background(), apps, capture, "box-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := statusNow.Add(-5 * time.Hour); !got[0].LastSuccess.Equal(want) {
+		t.Errorf("the last clean run with a snapshot to show for it was 5 hours ago, got %v", statusNow.Sub(got[0].LastSuccess))
+	}
+	if !got[0].Stale(statusNow) {
+		t.Error("an app whose only recent clean run vouches for a snapshot that is gone is stale")
+	}
+	if !got[0].First.Equal(statusNow.Add(-5 * time.Hour)) {
+		t.Errorf("First is the app's oldest snapshot, got %v", got[0].First)
+	}
+}

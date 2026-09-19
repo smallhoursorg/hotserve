@@ -41,6 +41,10 @@ type AppStatus struct {
 	// typo, which looks exactly the same to the job. Only the report can
 	// tell them apart, by saying so to someone who knows which it is.
 	NeverThere []string
+	// First is when this app's oldest snapshot in the repository was
+	// taken: how long the repository has been in use, for the weekly
+	// check's grace period (Verification.Overdue).
+	First time.Time
 	// NothingYet is an app with none of what it declares on disk: never
 	// deployed, or deployed and yet to create any of it. Its hourly run
 	// has nothing to copy and says so; with no snapshot either, that is
@@ -112,9 +116,21 @@ func Status(ctx context.Context, apps []App, x Exec, host string) ([]AppStatus, 
 	statuses := make([]AppStatus, 0, len(apps))
 	for _, app := range apps {
 		st := AppStatus{App: app, Snapshots: len(byApp[app.Name])}
+		present := map[string]bool{}
+		for _, s := range byApp[app.Name] {
+			present[s.ID] = true
+			if st.First.IsZero() || s.Time.Before(st.First) {
+				st.First = s.Time
+			}
+		}
 		var lastClean string // the snapshot this box's newest clean run vouches for
 		for _, r := range records[app.Name] {
-			if r.Hostname == host && r.Time.After(st.LastSuccess) {
+			// A record vouches for a snapshot, and counts for as long as
+			// that snapshot is there: forgotten by hand, or removed at
+			// the provider, it is a backup that restore cannot take, and
+			// its record saying "clean, an hour ago" would be the report
+			// calling fresh what is gone.
+			if r.Hostname == host && present[cleanOf(r)] && r.Time.After(st.LastSuccess) {
 				st.LastSuccess, lastClean = r.Time, cleanOf(r)
 			}
 		}

@@ -147,6 +147,12 @@ func (j Job) Execute(ctx context.Context) error {
 			// is the one outcome a backup must never produce quietly.
 			return fmt.Errorf("app %s: state files %s is a symlink to %s: restic would store the link and none of the data, so this would report success and back up nothing — declare the path the app's data really lives at; to keep an app's data on another disk, bind-mount that disk at the app's shared dir (liveswap/README.md, \"Sandbox\")",
 				j.App, rel, linkTarget(p))
+		case !info.Mode().IsRegular() && !info.IsDir():
+			// A FIFO, a socket, a device: restic records the node, and a
+			// restore puts back files and directories and nothing else.
+			// Refused here, in words, rather than backed up, vouched for
+			// and then found unrestorable.
+			return fmt.Errorf("app %s: state files %s is a %s, not a file or a directory: there is nothing in it a restore could put back — declare the file or directory the data is in", j.App, rel, describeMode(info.Mode()))
 		}
 		targets = append(targets, p)
 	}
@@ -454,10 +460,28 @@ func (j Job) verifySnapshot(ctx context.Context, snapshot string, want []expecte
 			return fmt.Errorf("snapshot %s holds %s as a symlink, not its data — nothing behind it could be restored", shortID(snapshot), w.path)
 		case w.database && (n.Type != "file" || n.Size == 0):
 			return fmt.Errorf("snapshot %s holds the database copy %s as an empty %s — the copy did not take", shortID(snapshot), w.path, n.Type)
+		case n.Type != "file" && n.Type != "dir":
+			// What a restore puts back (RestoreJob.Execute): a run that
+			// is recorded as clean is one whose snapshot restores.
+			return fmt.Errorf("snapshot %s holds %s as a %s, which a restore does not put back — only files and directories are", shortID(snapshot), w.path, n.Type)
 		}
 	}
 	j.logf("%s: snapshot %s read back: %d declared path(s) present", j.App, shortID(snapshot), len(want))
 	return nil
+}
+
+// describeMode names what a path is, for the error that refuses it.
+func describeMode(m fs.FileMode) string {
+	switch {
+	case m&fs.ModeNamedPipe != 0:
+		return "named pipe"
+	case m&fs.ModeSocket != 0:
+		return "socket"
+	case m&fs.ModeDevice != 0:
+		return "device"
+	default:
+		return "special file (" + m.Type().String() + ")"
+	}
 }
 
 // listArgs is the one `restic ls` that finds every path in want: of
