@@ -295,12 +295,14 @@ the app up.
 
 ### The box is gone
 
-Install hotserve, put your Caddyfile back, point the box at the same
-repository, restore each app, then deploy:
+Install hotserve, put your Caddyfile back — and any
+`/etc/hotserve/<app>.env` files its `env_file` lines name — start it,
+point the box at the same repository, restore each app, then deploy:
 
 ```
 sudo apt install ./hotserve_*.deb
-sudo cp Caddyfile /etc/hotserve/Caddyfile && sudo systemctl reload hotserve
+sudo cp Caddyfile /etc/hotserve/Caddyfile
+sudo systemctl enable --now hotserve     # installing does not start it
 
 sudo hotserve backup init s3:s3.us-west-004.backblazeb2.com/my-bucket
 # asks for the storage key, then — the repository already exists — for
@@ -350,9 +352,11 @@ shop  1 path                 0          never  ⚠
 ```
 
 For a monitor, `sudo hotserve backup status --check` prints the same
-report and exits non-zero when any app has no current backup. It needs
-root — the repository settings are root-only — so run it from root's
-crontab or a root systemd timer.
+report and exits 1 when any app has no current backup. It exits 2 when
+it could not find out — hotserve not answering, the repository not
+reachable — which is worth a retry before a page. It needs root — the
+repository settings are root-only — so run it from root's crontab or a
+root systemd timer.
 
 Two things it will say that are worth knowing before you see them at
 three in the morning:
@@ -372,6 +376,11 @@ three in the morning:
   app's empty uploads dir is normal), but a typo in a `state files` line
   looks exactly the same, so the report names it until it appears. It
   does not make `--check` fail.
+- **`never  (nothing to back up yet)`** — nothing the app declares is on
+  disk: it has not been deployed, or has created none of it yet. The
+  hourly run passes over it and `--check` does not count it, until
+  there is something to back up. A typo in every `state` line looks
+  like this too.
 
 Freshness is measured from the last clean run's record in this
 repository, not from the newest snapshot, so an app whose every run
@@ -383,9 +392,16 @@ directory and look at it.
 
 ```
 sudo hotserve backup restic -- restore latest --tag app:blog --target /tmp/drill
-sqlite3 /tmp/drill/var/lib/hotserve-backup/blog/data/app.db 'pragma integrity_check'
-ls /tmp/drill/var/lib/liveswap/blog/shared/uploads
+sudo sqlite3 /tmp/drill/var/lib/hotserve-backup/blog/data/app.db 'pragma integrity_check'
+sudo ls /tmp/drill/var/lib/liveswap/blog/shared/uploads
+sudo rm -rf /tmp/drill
 ```
+
+`sudo` throughout: what comes out belongs to the `hotserve` user, with
+the modes the app's data has, and is a plaintext copy of that data —
+remove it when you have looked. (`latest` is restic's newest snapshot,
+whether or not its run finished cleanly; `status`, above, says whether
+the last one did.)
 
 A backup nobody has restored is a hypothesis.
 

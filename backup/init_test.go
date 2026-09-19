@@ -249,6 +249,23 @@ func TestInitShowsTheGeneratedPasswordWhenStoppedWhileCreating(t *testing.T) {
 	}
 }
 
+// systemd trims the space around a key and takes the last assignment, so
+// `RESTIC_PASSWORD = x` in a credentials file would be the password the
+// jobs use — and not the one init printed for the operator to save.
+func TestInitRefusesASettingWhoseNameIsNotAName(t *testing.T) {
+	for _, extra := range []string{"RESTIC_PASSWORD =hunter2", " RESTIC_REPOSITORY=s3:elsewhere/x", "AWS_KEY\nRESTIC_PASSWORD=x", "=value", "1KEY=v"} {
+		o := initOpts(t)
+		o.Extra = []string{extra}
+		err := Init(context.Background(), o, func(context.Context, Cmd) error {
+			t.Errorf("nothing runs on %q", extra)
+			return nil
+		}, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "not a setting's name") {
+			t.Errorf("%q: want a refusal of the name, got %v", extra, err)
+		}
+	}
+}
+
 // A key that can read but not write gets through `restic cat config`
 // and fails on the first real backup. Installing the settings anyway
 // would arm the hourly timer to fail for ever, and the retry would

@@ -41,6 +41,11 @@ type AppStatus struct {
 	// typo, which looks exactly the same to the job. Only the report can
 	// tell them apart, by saying so to someone who knows which it is.
 	NeverThere []string
+	// NothingYet is an app with none of what it declares on disk: never
+	// deployed, or deployed and yet to create any of it. Its hourly run
+	// has nothing to copy and says so; with no snapshot either, that is
+	// not a backup gone stale.
+	NothingYet bool
 }
 
 // StaleAfter is when an hourly backup is late enough to be worth
@@ -58,9 +63,10 @@ const StaleAfter = 2*time.Hour + 30*time.Minute
 // fails part-way would otherwise look healthy for ever.
 func (s AppStatus) Stale(now time.Time) bool {
 	// The snapshots are the backup: an app with none in this repository
-	// is stale, whatever else the listing holds.
+	// is stale, whatever else the listing holds — unless it has nothing
+	// to back up yet, which the run passes over and the report names.
 	if s.Latest == nil {
-		return true
+		return !s.NothingYet
 	}
 	// And no clean run from this box recorded in this repository is the
 	// same answer. Falling back to the newest snapshot here would restore
@@ -149,6 +155,9 @@ func FormatStatus(w io.Writer, statuses []AppStatus, now time.Time) {
 	say(tw, "APP\tDECLARES\tSNAPSHOTS\tLAST BACKUP")
 	for _, s := range statuses {
 		last := "never"
+		if s.Latest == nil && s.NothingYet {
+			last = "never  (nothing to back up yet)"
+		}
 		if s.Latest != nil {
 			last = humanAge(now.Sub(s.Latest.Time)) + "  " + s.Latest.ShortID
 		}
@@ -183,6 +192,9 @@ func FormatStatus(w io.Writer, statuses []AppStatus, now time.Time) {
 		// Not a failure, and not counted by --check: an app may declare
 		// where its data will go before it has any. But a typo in the
 		// path looks exactly like that for ever, so it is said here.
+		if s.Latest == nil && s.NothingYet {
+			say(w, "\n%s: nothing it declares exists yet under %s — the app has not been deployed, or has not created it, or its `state` lines have the paths wrong. Not counted by --check until there is something to back up.", s.App.Name, s.App.Shared)
+		}
 		for _, rel := range s.NeverThere {
 			say(w, "\n%s: %s has not existed at any backup yet — the app has not created it, or `state files %s` has the path wrong (%s)", s.App.Name, rel, rel, filepath.Join(s.App.Shared, rel))
 		}

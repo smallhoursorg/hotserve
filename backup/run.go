@@ -449,25 +449,19 @@ func RunAll(ctx context.Context, apps []App, o LaunchOptions, x Exec, log io.Wri
 	// timer's unit, or Ctrl-C — stops with it (stopWithContext): the unit
 	// it is waiting on, and no other. Nothing else of that name is ever
 	// this run's to stop: the same name is an operator's restore.
-	step := func(app App, args []string) (done bool) {
+	step := func(app App, args []string) (done, noData bool) {
 		err := stopWithContext(ctx, x, unitName(app.Name), Cmd{Name: "systemd-run", Args: args})
 		switch {
 		case err == nil:
-			return true
+			return true, false
 		case ctx.Err() != nil:
 		case exitStatus(err) == exitNoData:
-			// An app can declare its state before it has ever been
-			// deployed — liveswap creates shared/ at the first launch,
-			// and the declaration is config, not a promise that the
-			// files exist. Nothing to copy yet is not a failure; it
-			// would otherwise paint the timer red every hour until the
-			// first deploy.
-			say(log, "%s: no data yet (never deployed), skipping", app.Name)
+			return false, true
 		default:
 			say(log, "%s: FAILED (%v) — journalctl -u %s", app.Name, err, unitName(app.Name))
 			failed = append(failed, app.Name)
 		}
-		return false
+		return false, false
 	}
 	for _, app := range apps {
 		if ctx.Err() != nil {
@@ -479,14 +473,26 @@ func RunAll(ctx context.Context, apps []App, o LaunchOptions, x Exec, log io.Wri
 		if needsStaging(app) {
 			stage := StageArgs(app, o)
 			say(log, "%s: copying its databases in %s, its data writable (SQLite needs that to read one), with no network and no repository settings: %s", app.Name, unitName(app.Name), quoteArgs(jobCommand(stage)))
-			if !step(app, stage) {
+			// A copy that found no data dir has no network to ask
+			// whether that is news: the upload, next, does.
+			if done, noData := step(app, stage); !done && !noData {
 				continue
 			}
 		}
 		args := LaunchArgs(app, o)
 		say(log, "%s: backing up in %s, its data read-only: %s", app.Name, unitName(app.Name), quoteArgs(jobCommand(args)))
-		if step(app, args) {
+		switch done, noData := step(app, args); {
+		case done:
 			say(log, "%s: ok", app.Name)
+		case noData:
+			// An app can declare its state before it has ever been
+			// deployed — liveswap creates shared/ at the first launch,
+			// and the declaration is config, not a promise that the
+			// files exist. Nothing to copy yet is not a failure; it
+			// would otherwise paint the timer red every hour until the
+			// first deploy. (For an app this box HAS backed up, the job
+			// fails instead: missingData.)
+			say(log, "%s: no data yet (never deployed), skipping", app.Name)
 		}
 	}
 	if ctx.Err() != nil {

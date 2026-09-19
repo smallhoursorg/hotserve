@@ -813,3 +813,44 @@ func TestQuoteArgsOnlyQuotesWhatNeedsIt(t *testing.T) {
 		t.Fatalf("got %s, want %s", got, want)
 	}
 }
+
+// Every app's clean-run record has a file name of its own: `restic
+// forget` applies a policy per group of host and paths, and with one name
+// for every app the documented retention keeps one app's records and
+// forgets the others' (measured, restic 0.18).
+func TestEachAppsCleanRecordsAreAGroupOfTheirOwn(t *testing.T) {
+	name := func(app string) string {
+		args := cleanRecordArgs(app, "s1full")
+		return args[slices.Index(args, "--stdin-filename")+1]
+	}
+	if name("blog") == name("shop") {
+		t.Errorf("two apps' records share the name %q, and so one forget group", name("blog"))
+	}
+	if strings.Contains(name("blog"), "/") {
+		t.Errorf("restic 0.18 cannot save a --stdin-filename with a slash in it: %q", name("blog"))
+	}
+}
+
+// An app's whole shared dir gone is "never deployed" only when this box
+// has never backed the app up. Otherwise it is the app's data gone — or
+// its volume not mounted — and a run that skipped it would be green every
+// hour over nothing.
+func TestMissingDataIsNoDataOnlyForAnAppNeverBackedUp(t *testing.T) {
+	rec := &recorder{}
+	job := newJob(t, rec, nil, []string{"uploads"})
+	if err := job.missingData(context.Background()); !errors.Is(err, errNoData) {
+		t.Fatalf("no clean run yet: want errNoData, got %v", err)
+	}
+	if err := job.Execute(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	err := job.missingData(context.Background())
+	if err == nil || errors.Is(err, errNoData) || !strings.Contains(err.Error(), "backed this app up before") {
+		t.Fatalf("after a clean run a missing data dir is a failure, got %v", err)
+	}
+	// Not knowing is not "never deployed".
+	job.Exec = func(_ context.Context, c Cmd) error { return errors.New("repository unreachable") }
+	if err := job.missingData(context.Background()); err == nil || errors.Is(err, errNoData) {
+		t.Fatalf("a repository that cannot be asked fails the run, got %v", err)
+	}
+}

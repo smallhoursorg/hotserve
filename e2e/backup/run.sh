@@ -577,14 +577,26 @@ if section restore-rebuilt "hotserve backup restore, on a rebuilt box"; then
 	# Before the first deploy there is no shared dir at all: restore makes
 	# it as liveswap would — the hotserve user's, 0750 — and fills it.
 	rm -rf /var/lib/liveswap/files-example
-	# An app with no data yet is not a failed backup. It is the job that
-	# says so — the launcher looks at no app's data — and the run passes.
-	if hotserve backup run --admin 127.0.0.1:2019 >/tmp/run-nodata.log 2>&1 \
-		&& grep -q 'files-example: no data yet (never deployed), skipping' /tmp/run-nodata.log \
-		&& ! grep -q 'files-example: ok' /tmp/run-nodata.log && grep -q 'backup-example: ok' /tmp/run-nodata.log; then
-		pass "an app with no data yet is skipped, on its job's word, and the run passes"
+	# This box has backed files-example up, so its data dir being gone is
+	# not "never deployed": the job asks the repository, and the run fails
+	# for that app rather than staying green over nothing.
+	t_gone=$(date +%s)
+	sleep 1
+	if hotserve backup run --admin 127.0.0.1:2019 >/tmp/run-nodata.log 2>&1; then
+		fail "a run over an app whose whole data dir is gone exited 0: $(tail -5 /tmp/run-nodata.log)"
+	elif grep -q 'files-example: FAILED' /tmp/run-nodata.log && grep -q 'backup-example: ok' /tmp/run-nodata.log \
+		&& journalctl --no-pager -u hotserve-backup-files-example.service --since "@$t_gone" | grep -q "this box has backed this app up before"; then
+		pass "an app that has been backed up and whose data dir is gone fails its run, and says why"
 	else
-		fail "a run over an app with no data: $(tail -5 /tmp/run-nodata.log)"
+		fail "a vanished data dir: $(grep -E ': (ok|FAILED|no data)' /tmp/run-nodata.log | tr '\n' ' ') / $(journalctl --no-pager -u hotserve-backup-files-example.service --since "@$t_gone" | tail -3)"
+	fi
+	# A restore that goes no further than its question makes nothing: an
+	# empty shared/ left behind would be an hourly failure of its own.
+	hotserve backup restore files-example --admin 127.0.0.1:2019 </dev/null >/dev/null 2>&1
+	if [ ! -e /var/lib/liveswap/files-example ]; then
+		pass "a restore that is not confirmed leaves no empty data dir behind"
+	else
+		fail "an unconfirmed restore made $(find /var/lib/liveswap/files-example | tr '\n' ' ')"
 	fi
 	rebuilt=$(hotserve backup restore files-example --admin 127.0.0.1:2019 --yes 2>&1)
 	if [ "$(cat "$FILES_SHARED/pages/index.md" 2>/dev/null)" = page ]; then
@@ -636,6 +648,35 @@ if section status "hotserve backup status"; then
 	else
 		fail "--check failed with a current backup: $status_out"
 	fi
+	hotserve backup status --check --admin 127.0.0.1:1 >/dev/null 2>&1
+	check_rc=$?
+	if [ "$check_rc" -eq 2 ]; then
+		pass "--check that could not find out exits 2, which is not the 1 of a stale backup"
+	else
+		fail "--check with hotserve unreachable exited $check_rc, want 2"
+	fi
+fi
+
+if section passthrough "backup restic -- keeps its settings from the hotserve uid"; then
+	# The settings are in that restic's environment, and it runs with the
+	# uid of the internet-facing process, which can read a same-uid
+	# process's environ — unless a user namespace is in the way. Held open
+	# for a few seconds by a backup of a command's output.
+	hotserve backup restic -- backup --quiet --stdin-from-command --stdin-filename e2e-held -- sleep 6 >/dev/null 2>&1 &
+	held_pid=$!
+	if wait_for pgrep -u hotserve -x restic >/dev/null; then
+		rpid=$(pgrep -u hotserve -x restic | head -1)
+		if ! tr '\0' '\n' <"/proc/$rpid/environ" | grep -q '^RESTIC_PASSWORD='; then
+			fail "setup: pid $rpid is not a restic holding the settings, so the check below would be vacuous"
+		elif as_hotserve "cat /proc/$rpid/environ" 2>/dev/null | tr '\0' '\n' | grep -q RESTIC_PASSWORD; then
+			fail "the hotserve uid can read the repository password from the environment of backup restic --"
+		else
+			pass "the hotserve uid cannot read the environment of backup restic --"
+		fi
+	else
+		fail "backup restic -- never started a restic"
+	fi
+	wait "$held_pid"
 fi
 
 if section unvouched "a snapshot no clean run vouches for"; then
@@ -661,6 +702,16 @@ if section unvouched "a snapshot no clean run vouches for"; then
 		pass "restore passes over a snapshot no clean run vouches for, and says so"
 	else
 		fail "restore did not pass over the unvouched snapshot: $picked"
+	fi
+	# Asked for by id, it is what is restored — and said to be unvouched
+	# before anyone confirms, since --delete would remove what it lacks.
+	unvouched=$(hotserve backup restic -- snapshots --json --tag hotserve,app:backup-example 2>/dev/null \
+		| tr ',' '\n' | grep -o '"short_id":"[^"]*"' | tail -1 | cut -d'"' -f4)
+	asked=$(hotserve backup restore backup-example --admin 127.0.0.1:2019 --snapshot "$unvouched" --delete </dev/null 2>&1 || true)
+	if echo "$asked" | grep -q "No clean run vouches for snapshot $unvouched"; then
+		pass "a snapshot asked for by id is said to be unvouched before the operator confirms"
+	else
+		fail "no warning for --snapshot $unvouched --delete: $asked"
 	fi
 fi
 
@@ -997,6 +1048,28 @@ if section ctrl-c "Ctrl-C stops a restore, and the unit with it"; then
 	hotserve backup restore backup-example --admin 127.0.0.1:2019 --yes >/dev/null 2>&1
 fi
 
+if section retention "the retention docs/backups.md suggests keeps every app's clean runs"; then
+	# `restic forget` applies its policy to each group of snapshots with
+	# one host and one set of paths. Were every app's clean-run record
+	# named alike they would be one group, and the hour's last record —
+	# one app's — the only one kept: the other app's newest snapshot would
+	# be left with nothing to vouch for it. (This box's key can delete; on
+	# a real one this runs off the box. --prune is left out: it frees
+	# space, and decides nothing.) It takes two runs' records to show:
+	# the whole suite has many; on its own, ONLY=second-run,retention.
+	if hotserve backup restic -- forget --keep-hourly 24 --keep-daily 30 --keep-monthly 12 >/tmp/forget.log 2>&1; then
+		picked=$(hotserve backup restore backup-example --admin 127.0.0.1:2019 </dev/null 2>&1 || true)
+		if echo "$picked" | grep -q "Restoring backup-example from snapshot" && ! echo "$picked" | grep -q "did not finish cleanly" \
+			&& hotserve backup status --check --admin 127.0.0.1:2019 >/tmp/status-forget.log 2>&1; then
+			pass "after the documented forget, each app's newest snapshot is still vouched for, and --check passes"
+		else
+			fail "after the documented forget: $picked / $(cat /tmp/status-forget.log 2>/dev/null)"
+		fi
+	else
+		fail "the documented forget failed: $(tail -5 /tmp/forget.log)"
+	fi
+fi
+
 if section init-tty "init at a terminal: one command, and it asks"; then
 	# The documented setup is one command: at a terminal, init asks for the
 	# storage key itself (the secret half without echo), so it is typed into
@@ -1042,6 +1115,26 @@ if section init-tty "init at a terminal: one command, and it asks"; then
 	else
 		fail "a wrong password was not refused: $wrong_out"
 	fi
+	# The box is on a repository nothing has been backed up to. An app
+	# whose data dir is not there has, as far as this repository knows,
+	# never been deployed: its job says so, the run passes over it, and
+	# --check does not count it.
+	mv /var/lib/liveswap/files-example /var/lib/liveswap/files-example.aside
+	if hotserve backup run --admin 127.0.0.1:2019 >/tmp/run-never.log 2>&1 \
+		&& grep -q 'files-example: no data yet (never deployed), skipping' /tmp/run-never.log \
+		&& ! grep -q 'files-example: ok' /tmp/run-never.log && grep -q 'backup-example: ok' /tmp/run-never.log; then
+		pass "an app never backed up and with no data yet is skipped, on its job's word, and the run passes"
+	else
+		fail "a run over an app with no data: $(tail -5 /tmp/run-never.log)"
+	fi
+	never_out=$(hotserve backup status --check --admin 127.0.0.1:2019 2>&1)
+	never_rc=$?
+	if [ "$never_rc" -eq 0 ] && echo "$never_out" | grep -qE '^files-example .*nothing to back up yet'; then
+		pass "status names an app with nothing to back up yet, and --check does not count it"
+	else
+		fail "status over an app with nothing to back up (exit $never_rc): $never_out"
+	fi
+	mv /var/lib/liveswap/files-example.aside /var/lib/liveswap/files-example
 fi
 
 echo "=== summary ==="

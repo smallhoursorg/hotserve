@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -320,7 +321,10 @@ func TestCheckSettings(t *testing.T) {
 func TestPassthroughIsAUnitSystemdSetsUp(t *testing.T) {
 	args := PassthroughArgs("/etc/hotserve/backup.env", "hotserve", []string{"snapshots", "--tag", "app:blog"})
 	joined := strings.Join(args, "\n")
-	for _, want := range []string{"--pty", "--pipe", "--wait", "--expand-environment=no", "--property=User=hotserve", "--property=EnvironmentFile=/etc/hotserve/backup.env"} {
+	// PrivateUsers: the settings are in this process's environment, and
+	// it has the uid of the internet-facing process, which reads a
+	// same-uid process's environ unless a user namespace is in the way.
+	for _, want := range []string{"--pty", "--pipe", "--wait", "--expand-environment=no", "--property=User=hotserve", "--property=EnvironmentFile=/etc/hotserve/backup.env", "--property=PrivateUsers=yes"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("missing %q:\n%s", want, joined)
 		}
@@ -328,9 +332,9 @@ func TestPassthroughIsAUnitSystemdSetsUp(t *testing.T) {
 	if tail := args[len(args)-7:]; !slices.Equal(tail, []string{"/bin/sh", "-c", probeScript, "restic", "snapshots", "--tag", "app:blog"}) {
 		t.Errorf("restic is looked up on the unit's PATH, with the operator's arguments as they typed them: %q", tail)
 	}
-	for _, never := range []string{"TemporaryFileSystem", "PrivateUsers"} {
+	for _, never := range []string{"TemporaryFileSystem", "BindPaths", "ProtectSystem"} {
 		if strings.Contains(joined, never) {
-			t.Errorf("the operator's restic is not sandboxed (%s): it restores where they point it", never)
+			t.Errorf("the operator's restic keeps the filesystem (%s): it restores where they point it", never)
 		}
 	}
 }
@@ -485,5 +489,43 @@ func TestFindApp(t *testing.T) {
 	_, err = findApp(nil, "wiki")
 	if err == nil || !strings.Contains(err.Error(), "no app declares state") || !strings.Contains(err.Error(), "reload") {
 		t.Errorf("want an error saying nothing declares state, got %v", err)
+	}
+}
+
+// An app with none of what it declares on disk has nothing to back up
+// yet: the hourly run passes over it, so --check does not call it stale
+// — until it has a snapshot, after which the usual rules hold.
+func TestNothingToBackUpYetIsNotStale(t *testing.T) {
+	shared := filepath.Join(t.TempDir(), "blog", "shared")
+	app := App{Name: "blog", Shared: shared, State: []StateEntry{{Kind: KindSQLite, Path: "app.db"}, {Kind: KindFiles, Path: "uploads"}}}
+	if !nothingToBackUpYet(app) {
+		t.Error("an app that has never been deployed has nothing to back up yet")
+	}
+	if err := os.MkdirAll(shared, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if !nothingToBackUpYet(app) {
+		t.Error("a deployed app that has created nothing it declares has nothing to back up yet")
+	}
+	if err := os.MkdirAll(filepath.Join(shared, "uploads"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if nothingToBackUpYet(app) {
+		t.Error("one declared path on disk is something to back up")
+	}
+	if (AppStatus{NothingYet: true}).Stale(statusNow) {
+		t.Error("no snapshot and nothing to back up is not a stale backup")
+	}
+	if !(AppStatus{}).Stale(statusNow) {
+		t.Error("no snapshot of an app that has data is stale")
+	}
+	old := Snapshot{Time: statusNow.Add(-72 * time.Hour)}
+	if !(AppStatus{NothingYet: true, Latest: &old, LastSuccess: old.Time}).Stale(statusNow) {
+		t.Error("an app that was backed up and whose data is gone is stale like any other")
+	}
+	var report strings.Builder
+	FormatStatus(&report, []AppStatus{{App: app, NothingYet: true}}, statusNow)
+	if !strings.Contains(report.String(), "nothing to back up yet") || !strings.Contains(report.String(), "paths wrong") || strings.Contains(report.String(), "⚠") {
+		t.Errorf("the report names it, with the typo it could be, and does not flag it:\n%s", report.String())
 	}
 }

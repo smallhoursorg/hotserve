@@ -436,8 +436,9 @@ boundaries are these, and each is a rule a change has to keep:
    what the storage sends back. Every call is a unit as `hotserve` in
    the jobs' sandbox (`sandboxProperties`) — the hourly upload, a
    restore, init's checks and `status`'s listing (`asJob`) — and
-   `backup restic --` drops to `hotserve` before it execs
-   (`Passthrough`, backup/restic.go).
+   `backup restic --` is a unit as `hotserve` too (`PassthroughArgs`,
+   backup/restic.go), with the filesystem an operator restores into
+   and a user namespace of its own.
 3. **No backup unit has both the network and an app's data writable.**
    SQLite needs the data writable to read a database at all, so the
    copy is a unit of its own with no network and no credentials
@@ -562,7 +563,7 @@ Who runs as what, and what each can reach:
 | init's checks (`asJob`) | `hotserve` | full | **none** | yes | yes — the settings being tried, from a root-only copy on tmpfs removed after each | restic |
 | `backup status` (`cmdStatus`) | root | none | none | the admin socket | none: looks that the file exists | `systemd-run`, `systemctl` |
 | `status`'s listing (`inUnit`) | `hotserve` | full | **none** | yes | yes | restic |
-| `backup restic -- …` (`PassthroughArgs`, backup/restic.go) | `hotserve`: a unit systemd sets up, `User=` and `EnvironmentFile=` | **none** | everything `hotserve` owns | yes | yes | restic, with the operator's arguments |
+| `backup restic -- …` (`PassthroughArgs`, backup/restic.go) | `hotserve`: a unit systemd sets up, `User=` and `EnvironmentFile=` | a user namespace (`PrivateUsers=`) and nothing else: the settings are in its environment, and without one the hotserve uid reads them from `/proc/<pid>/environ` (measured) | everything `hotserve` owns | yes | yes | restic, with the operator's arguments |
 | `backup app` by hand, no `--phase` | whoever ran it | **none** | whatever that user can reach | yes | from that user's environment | sqlite3, restic |
 
 "Full" is `sandboxProperties`: a private user and PID namespace, an
@@ -607,8 +608,10 @@ every app's snapshots — and delete them, unless the key cannot (see
 "Backup credentials" under Assets). It can also read that one app's
 data, which is what it is there to do. The restore is the one unit with
 both the network and an app's data writable. And `backup restic --` is
-restic as `hotserve` with no sandbox at all: it is for an operator at a
-terminal, and nothing starts it on a schedule.
+restic as `hotserve` with the whole filesystem in view — it is for an
+operator at a terminal, to restore where they say, and nothing starts it
+on a schedule — in a user namespace of its own, which is what keeps its
+environment, the credential in it, from the other processes of that uid.
 
 ### Install-time — `packaging/postinstall.sh`
 

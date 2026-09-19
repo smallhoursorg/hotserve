@@ -447,6 +447,8 @@ func RestoreArgs(app App, o LaunchOptions, snapshot string, del bool) []string {
 // they would be silently absent, and with --delete, deleted. A newer
 // unvouched snapshot is named in the note, for --snapshot, rather than
 // chosen; with no vouched snapshot at all, one has to be chosen by hand.
+// One chosen by hand is restored — and said to be unvouched when it is,
+// before the operator confirms.
 func pickSnapshot(app string, snaps []Snapshot, want string, clean map[string]bool) (Snapshot, string, error) {
 	if len(snaps) == 0 {
 		return Snapshot{}, "", fmt.Errorf("the repository has no snapshot of %s", app)
@@ -479,6 +481,9 @@ func pickSnapshot(app string, snaps []Snapshot, want string, clean map[string]bo
 	case 0:
 		return Snapshot{}, "", fmt.Errorf("no snapshot %s of %s — `sudo hotserve backup restic -- snapshots --tag app:%s` lists them", want, app, app)
 	case 1:
+		if !clean[found[0].ID] {
+			return found[0], fmt.Sprintf("No clean run vouches for snapshot %s: the run that took it may not have finished, so it may be missing files. What it is missing is not put back — and with --delete, is removed from the live data.", found[0].ShortID), nil
+		}
 		return found[0], "", nil
 	default:
 		return Snapshot{}, "", fmt.Errorf("%s matches %d snapshots of %s; give more of its id", want, len(found), app)

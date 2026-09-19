@@ -255,6 +255,34 @@ func humanBytes(n uint64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
+// errNoData is the job's answer for an app that has no data yet.
+var errNoData = errors.New("no data yet")
+
+// missingData is what the job says when the app's shared dir is not
+// there. For an app that has never been deployed that is ordinary
+// (errNoData). For one this box has backed up before it is the whole of
+// the app's data gone — removed, or on a volume that is not mounted —
+// and a run that skipped it would be green every hour over nothing: the
+// same question a single missing path gets (lastCleanPaths), asked of
+// the repository, by the step that can reach it.
+func (j Job) missingData(ctx context.Context) error {
+	env := j.Env
+	if env == nil {
+		env = lookupEnv
+	}
+	if err := checkSettings(env); err != nil {
+		return err
+	}
+	before, err := j.lastCleanPaths(ctx)
+	if err != nil {
+		return fmt.Errorf("app %s: %s is not there, and whether this box has backed the app up before could not be read from the repository: %w", j.App, j.Shared, err)
+	}
+	if len(before) > 0 {
+		return fmt.Errorf("app %s: %s is not there, and this box has backed this app up before: its data has been removed, or the volume it is on is not mounted — nothing was backed up", j.App, j.Shared)
+	}
+	return errNoData
+}
+
 // lastCleanPaths is what this box's newest clean run backed up, as the
 // absolute paths restic was given — read from the repository: the
 // newest clean-run record from this host, then the snapshot it vouches

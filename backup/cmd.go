@@ -94,9 +94,9 @@ reads as root; nothing about backups is configured in the Caddyfile.
       the way the Caddyfile declares it, as sqlite:app.db or
       files:uploads, with paths relative to the app's shared dir:
       every sqlite entry is copied with VACUUM INTO into --staging,
-      then restic gets the copies plus every files entry. Running it by
-      hand is supported, and does both steps here, unsandboxed. 'run'
-      launches them as two sandboxed units (--phase): the copy with the
+      then restic gets the copies plus every files entry. It is what a
+      unit runs, as the backups' user, and refuses to run as root.
+      'run' launches it as two sandboxed units (--phase): the copy with the
       app's data writable — SQLite needs that to read a database — and
       no network or repository settings, then the upload with the app's
       data read-only. ('restore-app' is the same for 'restore', and is
@@ -194,15 +194,15 @@ func cmdStatus(fl caddycmd.Flags) (int, error) {
 	defer stop()
 	apps, err := FetchApps(ctx, fl.String("admin"))
 	if err != nil {
-		return caddy1, err
+		return exitCouldNotCheck, err
 	}
 	envFile := fl.String("env-file")
 	if err := requireSettingsFile(envFile); err != nil {
-		return caddy1, err
+		return exitCouldNotCheck, err
 	}
 	host, err := os.Hostname()
 	if err != nil {
-		return caddy1, fmt.Errorf("finding this box's hostname (restic records it on every snapshot): %w", err)
+		return exitCouldNotCheck, fmt.Errorf("finding this box's hostname (restic records it on every snapshot): %w", err)
 	}
 	// This command is root. restic is not: it talks to the network and
 	// parses what the storage sends back, so it runs where the jobs'
@@ -212,10 +212,11 @@ func cmdStatus(fl caddycmd.Flags) (int, error) {
 	view := jobView{User: fl.String("user"), EnvFile: envFile, Home: statusHome}
 	statuses, err := Status(ctx, apps, inUnit(view, osExec), host)
 	if err != nil {
-		return caddy1, err
+		return exitCouldNotCheck, err
 	}
 	for i := range statuses {
 		statuses[i].Running = unitActive(ctx, unitName(statuses[i].App.Name)+".service")
+		statuses[i].NothingYet = nothingToBackUpYet(statuses[i].App)
 	}
 	now := time.Now()
 	FormatStatus(os.Stdout, statuses, now)
@@ -310,6 +311,28 @@ func cmdInit(fl caddycmd.Flags, args []string) (int, error) {
 		return caddy1, err
 	}
 	return 0, nil
+}
+
+// exitCouldNotCheck is `status` failing to find out — hotserve not
+// answering, the repository not reachable — as opposed to finding out
+// that a backup is stale (1): a monitor pages for the one and retries
+// the other.
+const exitCouldNotCheck = 2
+
+// nothingToBackUpYet is whether an app has, right now, none of what it
+// declares: no shared dir (never deployed), or no declared path in it.
+// The hourly run passes over such an app, and says so.
+func nothingToBackUpYet(app App) bool {
+	for _, e := range app.State {
+		p, err := sharedPath(app.Shared, e.Path)
+		if err != nil {
+			return false
+		}
+		if _, err := os.Lstat(p); err == nil {
+			return false
+		}
+	}
+	return true
 }
 
 // unitActive reports whether a systemd unit is running. An error reads
@@ -439,6 +462,14 @@ func cmdApp(fl caddycmd.Flags, entryArgs []string) (int, error) {
 	if name == "" || shared == "" {
 		return caddy1, fmt.Errorf("--name and --shared are required (this subcommand is normally launched by `hotserve backup run`)")
 	}
+	// In its unit this is the backups' user. By hand as root it would
+	// leave root's copies in the app's staging dir, which the hourly copy
+	// — not root — then cannot clear, every hour (systemd hands a
+	// StateDirectory= to the unit's user by its top directory alone:
+	// measured), and it would run restic as root.
+	if os.Geteuid() == 0 {
+		return caddy1, fmt.Errorf("`backup app` is one app's job, and does not run as root: what it left in the staging dir would be root's, and the hourly job could not clear it. `sudo hotserve backup run` runs every app's job as the backups' user, each in its sandbox")
+	}
 	entries, err := parseEntries(entryArgs)
 	if err != nil {
 		return caddy1, err
@@ -453,12 +484,6 @@ func cmdApp(fl caddycmd.Flags, entryArgs []string) (int, error) {
 	if clean := filepath.Clean(staging); filepath.Base(clean) != name {
 		staging = filepath.Join(clean, name)
 	}
-	// Said by the job, which is given the app's data if there is any,
-	// and not by the launcher, which cannot see every place it may be.
-	if _, err := os.Stat(shared); errors.Is(err, os.ErrNotExist) {
-		fmt.Printf("%s: %s is not there: no data yet (never deployed), nothing to back up\n", name, shared)
-		return exitNoData, nil
-	}
 	app := App{Name: name, Shared: shared, State: entries}
 	job := Job{
 		App:       name,
@@ -468,6 +493,19 @@ func cmdApp(fl caddycmd.Flags, entryArgs []string) (int, error) {
 		Files:     app.Files(),
 		Exec:      osExec,
 		Log:       os.Stdout,
+	}
+	// Said by the job, which is given the app's data if there is any,
+	// and not by the launcher, which cannot see every place it may be.
+	// The copy has no network, so it can only say the dir is not there;
+	// the upload asks the repository whether that is news (missingData).
+	if _, err := os.Stat(shared); errors.Is(err, os.ErrNotExist) {
+		if fl.String("phase") != phaseStage {
+			if err := job.missingData(context.Background()); !errors.Is(err, errNoData) {
+				return caddy1, err
+			}
+		}
+		fmt.Printf("%s: %s is not there: no data yet (never deployed), nothing to back up\n", name, shared)
+		return exitNoData, nil
 	}
 	switch phase := fl.String("phase"); phase {
 	case phaseStage:
@@ -533,11 +571,6 @@ func cmdRestore(fl caddycmd.Flags, args []string) (int, error) {
 		return caddy1, fmt.Errorf("%s is backing up right now; restore once it has finished (journalctl -u %s -f)", name, unit)
 	}
 	staging := filepath.Join(o.StagingRoot, name)
-	// A rebuilt box restores before the first deploy, when liveswap has
-	// not made the app's directories yet.
-	if err := ensureShared(ctx, app.Shared, o.User, osExec); err != nil {
-		return caddy1, err
-	}
 	view := jobView{User: o.User, EnvFile: envFile, Home: StagingRestore(staging)}
 	// This app's backups, and every clean-run record (an OR of the two
 	// --tag flags).
@@ -563,6 +596,14 @@ func cmdRestore(fl caddycmd.Flags, args []string) (int, error) {
 		if err := confirmRestore(name, terminalPrompter(ctx, os.Stdin, os.Stderr)); err != nil {
 			return caddy1, err
 		}
+	}
+	// A rebuilt box restores before the first deploy, when liveswap has
+	// not made the app's directories yet. Made only now, with a snapshot
+	// chosen and the operator's yes: an empty shared/ left by a restore
+	// that went no further would turn that app's hourly "no data yet"
+	// into an hourly failure over a database that is not there.
+	if err := ensureShared(ctx, app.Shared, o.User, osExec); err != nil {
+		return caddy1, err
 	}
 	launch := RestoreArgs(app, o, snap.ID, del)
 	say(os.Stdout, "%s: restoring in %s: %s", name, unit, quoteArgs(jobCommand(launch)))

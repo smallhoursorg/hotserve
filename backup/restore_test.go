@@ -392,9 +392,10 @@ func TestPickSnapshot(t *testing.T) {
 	if err != nil || s.ID != "aaaa1111bbbb" || !strings.Contains(note, "cccc2222") {
 		t.Errorf("want the 03:00 snapshot and a note naming cccc2222, got %v %q %v", s.ID, note, err)
 	}
-	// Asked for by id, it is what was asked for.
-	if s, _, err := pickSnapshot("blog", snaps, "cccc2222", nil); err != nil || s.ID != "cccc2222dddd" {
-		t.Errorf("--snapshot overrides, got %v %v", s.ID, err)
+	// Asked for by id, it is what was asked for — and said to be
+	// unvouched before the operator confirms, --delete above all.
+	if s, note, err := pickSnapshot("blog", snaps, "cccc2222", nil); err != nil || s.ID != "cccc2222dddd" || !strings.Contains(note, "No clean run vouches for snapshot cccc2222") || !strings.Contains(note, "--delete") {
+		t.Errorf("--snapshot overrides, with a note that nothing vouches for it, got %v %q %v", s.ID, note, err)
 	}
 	// No record at all: nothing vouches for any of them, so the choice
 	// is the operator's, and the error names the newest to start from.

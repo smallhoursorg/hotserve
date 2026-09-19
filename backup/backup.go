@@ -90,10 +90,18 @@ func cleanOf(record Snapshot) string {
 
 // cleanRecordArgs writes the record for snapshot id of app. Its content
 // comes from a command restic runs itself, so no file is written for it.
+//
+// The record's file name is the app's own. `restic forget` applies a
+// policy to each group of snapshots with the same host and paths, and
+// with one name for every app all their records are one group: the
+// retention docs/backups.md suggests then keeps the hour's last record —
+// one app's — and forgets every other app's (measured, restic 0.18: two
+// apps, four hours, three of the first app's four records removed). A
+// flat name: restic 0.18 cannot save one with a slash in it.
 func cleanRecordArgs(app, id string) []string {
 	return []string{"backup", "--quiet",
 		"--tag", CleanTag, "--tag", cleanAppTag(app), "--tag", cleanOfTag(id),
-		"--stdin-from-command", "--stdin-filename", CleanTag,
+		"--stdin-from-command", "--stdin-filename", CleanTag + "-" + app,
 		"--", "echo", id}
 }
 

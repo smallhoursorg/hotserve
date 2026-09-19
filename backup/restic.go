@@ -29,6 +29,12 @@ func PassthroughArgs(envFile, username string, args []string) []string {
 		"--wait", "--collect", "--quiet", "--pty", "--pipe", "--expand-environment=no",
 		"--property=User=" + username,
 		"--property=EnvironmentFile=" + envFile,
+		// The settings are in this process's environment, and it runs as
+		// the uid the internet-facing process has. A user namespace of
+		// its own is what keeps that uid out of its /proc/<pid>/environ
+		// (measured, systemd 257: readable without, denied with). The
+		// filesystem stays the operator's to restore into.
+		"--property=PrivateUsers=yes",
 		// Looked up on the unit's PATH, as the jobs' restic is.
 		"/bin/sh", "-c", probeScript, "restic",
 	}

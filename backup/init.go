@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -78,6 +79,13 @@ func Init(ctx context.Context, o InitOptions, x Exec, log io.Writer) (err error)
 	// and checked.
 	for _, kv := range o.Extra {
 		key, _, _ := strings.Cut(kv, "=")
+		// A name first, so the refusals below see what systemd will: it
+		// trims the space around a key, so `RESTIC_PASSWORD = x` is a
+		// second RESTIC_PASSWORD (measured, systemd 257), and a newline
+		// in one would be a line of its own.
+		if !envKeyRe.MatchString(key) {
+			return fmt.Errorf("%q is not a setting's name: letters, digits and underscores, as in AWS_ACCESS_KEY_ID=… — with nothing around the `=`", key)
+		}
 		switch key {
 		case "RESTIC_REPOSITORY_FILE":
 			return fmt.Errorf("RESTIC_REPOSITORY_FILE is not supported: the backup jobs run in a sandbox that cannot see it — pass the repository itself instead")
@@ -533,6 +541,8 @@ func writeEnvFile(path, repo, password string, extra []string) error {
 // line of the attacker's choosing. Refusing is better than guessing:
 // the alternative is a box that initializes happily and backs up
 // somewhere else every hour.
+var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
 func envFileSafe(key, value string) error {
 	if strings.ContainsAny(value, "\n\r\x00") {
 		return fmt.Errorf("%s must not contain a newline: systemd ends the value there, and the rest would become another setting", key)

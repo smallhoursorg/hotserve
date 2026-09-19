@@ -370,8 +370,11 @@ func TestRunAllSkipsAnAppWhoseJobSaysItHasNoData(t *testing.T) {
 	if err := RunAll(context.Background(), apps, launchOpts(t.TempDir()), fake(run, nil), &log); err != nil {
 		t.Fatalf("an undeployed app is not a failure: %v", err)
 	}
-	if strings.Join(launched, ",") != "never-deployed,blog" {
-		t.Errorf("the undeployed app's first step says it has no data, and its second is not run: %v", launched)
+	// The copy has no network: its "no data" is followed by the upload,
+	// which can ask the repository whether that is news, and whose answer
+	// is the one the run takes.
+	if strings.Join(launched, ",") != "never-deployed,never-deployed,blog" {
+		t.Errorf("want the undeployed app's copy, then its upload, then blog: %v", launched)
 	}
 	if !strings.Contains(log.String(), "never-deployed: no data yet") || strings.Contains(log.String(), "never-deployed: ok") || strings.Contains(log.String(), "FAILED") {
 		t.Errorf("the run should say why it skipped, and not that it backed anything up: %q", log.String())
