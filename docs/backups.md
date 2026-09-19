@@ -359,7 +359,10 @@ Type the app's name to restore it: blog
 - **Files added since the snapshot are kept.** `--delete` makes each
   declared files path exactly as it was, removing what was added.
 - **An earlier moment:** `--snapshot <id>`, from
-  `sudo hotserve backup restic -- snapshots --tag app:blog`.
+  `sudo hotserve backup snapshots blog` — the moments there are, newest
+  first, each with whether the run that took it finished cleanly. One
+  that did not may be missing files; `restore` says so again before it
+  asks.
 - **In a script:** `--yes` skips the question. Without a terminal and
   without `--yes`, it refuses.
 

@@ -2,13 +2,16 @@ package backup
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"text/tabwriter"
 	"time"
 )
 
@@ -465,7 +468,7 @@ func pickSnapshot(app string, snaps []Snapshot, want string, clean map[string]bo
 		}
 		switch {
 		case latestClean == nil:
-			return Snapshot{}, "", fmt.Errorf("no snapshot of %s is recorded as coming from a run that finished cleanly, so any of them may be missing files — choose one yourself with --snapshot <id> (`sudo hotserve backup restic -- snapshots --tag app:%s` lists them; the newest is %s)", app, app, latest.ShortID)
+			return Snapshot{}, "", fmt.Errorf("no snapshot of %s is recorded as coming from a run that finished cleanly, so any of them may be missing files — choose one yourself with --snapshot <id> (`sudo hotserve backup snapshots %s` lists them; the newest is %s)", app, app, latest.ShortID)
 		case latestClean.ID != latest.ID:
 			return *latestClean, fmt.Sprintf("Snapshot %s is newer, but the run that took it did not finish cleanly, so it may be missing files; this uses the newest clean one. --snapshot %s restores that one instead.", latest.ShortID, latest.ShortID), nil
 		}
@@ -479,7 +482,7 @@ func pickSnapshot(app string, snaps []Snapshot, want string, clean map[string]bo
 	}
 	switch len(found) {
 	case 0:
-		return Snapshot{}, "", fmt.Errorf("no snapshot %s of %s — `sudo hotserve backup restic -- snapshots --tag app:%s` lists them", want, app, app)
+		return Snapshot{}, "", fmt.Errorf("no snapshot %s of %s — `sudo hotserve backup snapshots %s` lists them", want, app, app)
 	case 1:
 		if !clean[found[0].ID] {
 			return found[0], fmt.Sprintf("No clean run vouches for snapshot %s: the run that took it may not have finished, so it may be missing files. What it is missing is not put back — and with --delete, is removed from the live data.", found[0].ShortID), nil
@@ -488,6 +491,47 @@ func pickSnapshot(app string, snaps []Snapshot, want string, clean map[string]bo
 	default:
 		return Snapshot{}, "", fmt.Errorf("%s matches %d snapshots of %s; give more of its id", want, len(found), app)
 	}
+}
+
+// appSnapshots is one app's backups in the repository, and which of them
+// a clean run vouches for: what `restore` chooses from, and what
+// `snapshots` shows. One listing — this app's backups and every clean-run
+// record, an OR of the two --tag flags — so the two commands cannot come
+// to disagree about which snapshots are clean.
+func appSnapshots(ctx context.Context, x Exec, app string) ([]Snapshot, map[string]bool, error) {
+	out, err := x.output(ctx, restic("snapshots", "--json", "--tag", "hotserve,app:"+app, "--tag", CleanTag))
+	if err != nil {
+		return nil, nil, fmt.Errorf("listing the snapshots of %s: %w", app, err)
+	}
+	var listed []Snapshot
+	if err := json.Unmarshal(out, &listed); err != nil {
+		return nil, nil, fmt.Errorf("restic returned a snapshot list this version cannot read: %w", err)
+	}
+	snaps, cleanIDs, _ := cleanRecords(listed)
+	return snaps, cleanIDs[app], nil
+}
+
+// FormatSnapshots is `backup snapshots <app>`: the moments this app can
+// be restored to, newest first, each with whether the run that took it
+// finished cleanly. restic's own listing cannot say that — the record of
+// a clean run is another snapshot, pointing at this one — and it is the
+// thing to know before choosing: a snapshot no clean run vouches for may
+// be missing files, which a restore does not put back and --delete
+// removes.
+func FormatSnapshots(w io.Writer, app string, snaps []Snapshot, clean map[string]bool, now time.Time) {
+	sorted := slices.Clone(snaps)
+	slices.SortStableFunc(sorted, func(a, b Snapshot) int { return b.Time.Compare(a.Time) })
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	say(tw, "SNAPSHOT\tTAKEN\t\tBOX\tCLEAN RUN")
+	for _, s := range sorted {
+		vouched := "yes"
+		if !clean[s.ID] {
+			vouched = "no — it may be missing files"
+		}
+		say(tw, "%s\t%s\t%s\t%s\t%s", s.ShortID, s.Time.Local().Format("2006-01-02 15:04 MST"), humanAge(now.Sub(s.Time)), s.Hostname, vouched)
+	}
+	_ = tw.Flush()
+	say(w, "\nTo restore one: sudo hotserve backup restore %s --snapshot <id>   (without --snapshot: the newest with a clean run)", app)
 }
 
 // DescribeRestore is what the operator confirms: which snapshot, from

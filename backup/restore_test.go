@@ -2,6 +2,7 @@ package backup
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -504,5 +505,56 @@ func TestRestoreOfNothingIsAFailure(t *testing.T) {
 	}
 	if w := f.writes(); len(w) != 0 {
 		t.Errorf("nothing should have been written: %v", w)
+	}
+}
+
+// `backup snapshots <app>`: newest first, each with whether a clean run
+// vouches for it — the one thing restic's own listing cannot show, and the
+// thing to know before giving one to --snapshot.
+func TestFormatSnapshotsMarksTheOnesACleanRunVouchesFor(t *testing.T) {
+	at := func(h int) time.Time { return time.Date(2026, 9, 18, h, 0, 0, 0, time.UTC) }
+	snaps := []Snapshot{
+		{ID: "aaaa1111bbbb", ShortID: "aaaa1111", Time: at(3), Hostname: "box-1"},
+		{ID: "cccc2222dddd", ShortID: "cccc2222", Time: at(5), Hostname: "box-1"},
+	}
+	var out strings.Builder
+	FormatSnapshots(&out, "blog", snaps, map[string]bool{"aaaa1111bbbb": true}, at(6))
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) < 3 || !strings.HasPrefix(lines[1], "cccc2222") || !strings.HasPrefix(lines[2], "aaaa1111") {
+		t.Fatalf("want a header, then the newest first:\n%s", out.String())
+	}
+	if !strings.Contains(lines[1], "no — it may be missing files") || !strings.HasSuffix(strings.TrimSpace(lines[2]), "yes") {
+		t.Errorf("want the 05:00 snapshot marked as unvouched and the 03:00 one as clean:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "box-1") || !strings.Contains(out.String(), "backup restore blog --snapshot") {
+		t.Errorf("want the box each came from, and how to restore one:\n%s", out.String())
+	}
+}
+
+// restore and snapshots read one listing, so they cannot disagree about
+// which snapshots are clean.
+func TestAppSnapshotsSplitsBackupsFromTheirCleanRecords(t *testing.T) {
+	listing := []Snapshot{
+		{ID: "s1", ShortID: "s1", Tags: []string{"hotserve", "app:blog"}},
+		{ID: "s2", ShortID: "s2", Tags: []string{"hotserve", "app:blog"}},
+		{ID: "r1", ShortID: "r1", Tags: []string{CleanTag, cleanAppTag("blog"), cleanOfTag("s1")}},
+		{ID: "r9", ShortID: "r9", Tags: []string{CleanTag, cleanAppTag("shop"), cleanOfTag("s2")}},
+	}
+	body, err := json.Marshal(listing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	x := fake(nil, func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		if !slices.Contains(args, "hotserve,app:blog") || !slices.Contains(args, CleanTag) {
+			t.Errorf("want this app's backups and every clean-run record asked for: %v", args)
+		}
+		return body, nil
+	})
+	snaps, clean, err := appSnapshots(context.Background(), x, "blog")
+	if err != nil || len(snaps) != 2 {
+		t.Fatalf("want the two backups and not the records: %v, %v", snaps, err)
+	}
+	if !clean["s1"] || clean["s2"] {
+		t.Errorf("s1 is vouched for by blog's record; s2 only by another app's: %v", clean)
 	}
 }

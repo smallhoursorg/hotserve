@@ -2,7 +2,6 @@ package backup
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -67,6 +66,12 @@ reads as root; nothing about backups is configured in the Caddyfile.
       backup and 2 when that could not be found out — hotserve not
       answering, or the repository not answering within --timeout.
       Needs root: the repository settings are root-only.
+
+  hotserve backup snapshots <app>
+      The moments this app can be restored to, newest first, and for
+      each whether the run that took it finished cleanly — which
+      restic's own listing cannot say. It asks the repository and
+      nothing else, so it works while hotserve is down.
 
   hotserve backup restore <app> [--snapshot <id>] [--delete] [--yes]
       Puts the app's declared state back from the newest snapshot a
@@ -154,7 +159,7 @@ func parseEntries(args []string) ([]StateEntry, error) {
 func cmdBackup(fl caddycmd.Flags) (int, error) {
 	args := fl.Args()
 	if len(args) == 0 {
-		return caddy1, fmt.Errorf("say what to do: `hotserve backup init <repository>` (once per box), `status` (is it working), `run [app…]` (back up now), `restore <app>`, or `restic -- <restic arguments>` — `hotserve backup --help` describes each")
+		return caddy1, fmt.Errorf("say what to do: `hotserve backup init <repository>` (once per box), `status` (is it working), `run [app…]` (back up now), `snapshots <app>` and `restore <app>`, or `restic -- <restic arguments>` — `hotserve backup --help` describes each")
 	}
 	switch args[0] {
 	case "init":
@@ -169,12 +174,14 @@ func cmdBackup(fl caddycmd.Flags) (int, error) {
 		return cmdRestic(fl, args[1:])
 	case "restore":
 		return cmdRestore(fl, args[1:])
+	case "snapshots":
+		return cmdSnapshots(fl, args[1:])
 	case "restore-app":
 		return cmdRestoreApp(fl, args[1:])
 	case "check-settings":
 		return cmdCheckSettings()
 	default:
-		return caddy1, fmt.Errorf("unknown subcommand %q: want init, run, status, restore, restic or app", args[0])
+		return caddy1, fmt.Errorf("unknown subcommand %q: want init, run, status, snapshots, restore, restic or app", args[0])
 	}
 }
 
@@ -624,6 +631,40 @@ func cmdApp(fl caddycmd.Flags, entryArgs []string) (int, error) {
 	return 0, nil
 }
 
+// cmdSnapshots lists what one app can be restored to. It does not ask
+// the admin API which apps there are: the question is about the
+// repository, and the moment it is asked may be one in which hotserve is
+// not running. The name is held to an app's alphabet, since it goes into
+// a tag.
+func cmdSnapshots(fl caddycmd.Flags, args []string) (int, error) {
+	if len(args) != 1 {
+		return caddy1, fmt.Errorf("say which app: `hotserve backup snapshots <app>`")
+	}
+	name := args[0]
+	if !appNameRe.MatchString(name) {
+		return caddy1, fmt.Errorf("%q is not an app's name", name)
+	}
+	if err := requireTools("restic"); err != nil {
+		return caddy1, err
+	}
+	envFile := fl.String("env-file")
+	if err := requireSettingsFile(envFile); err != nil {
+		return caddy1, err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	view := jobView{User: fl.String("user"), EnvFile: envFile, Home: statusHome}
+	snaps, clean, err := appSnapshots(ctx, inUnit(view, osExec), name)
+	if err != nil {
+		return caddy1, err
+	}
+	if len(snaps) == 0 {
+		return caddy1, fmt.Errorf("the repository has no snapshot of %s — `sudo hotserve backup status` lists the apps that declare state, and `sudo hotserve backup run %s` takes one now", name, name)
+	}
+	FormatSnapshots(os.Stdout, name, snaps, clean, time.Now())
+	return 0, nil
+}
+
 // noData is the job's exit for an app with nothing to back up yet, with
 // the line that goes before it. systemd logs the status as this unit
 // failing, straight after the job's own line saying why there was
@@ -682,18 +723,11 @@ func cmdRestore(fl caddycmd.Flags, args []string) (int, error) {
 	}
 	staging := filepath.Join(o.StagingRoot, name)
 	view := jobView{User: o.User, EnvFile: envFile, Home: StagingRestore(staging)}
-	// This app's backups, and every clean-run record (an OR of the two
-	// --tag flags).
-	out, err := inUnit(view, osExec).output(ctx, restic("snapshots", "--json", "--tag", "hotserve,app:"+name, "--tag", CleanTag))
+	snaps, clean, err := appSnapshots(ctx, inUnit(view, osExec), name)
 	if err != nil {
-		return caddy1, fmt.Errorf("listing the snapshots of %s: %w", name, err)
+		return caddy1, err
 	}
-	var listed []Snapshot
-	if err := json.Unmarshal(out, &listed); err != nil {
-		return caddy1, fmt.Errorf("restic returned a snapshot list this version cannot read: %w", err)
-	}
-	snaps, cleanIDs, _ := cleanRecords(listed)
-	snap, note, err := pickSnapshot(name, snaps, fl.String("snapshot"), cleanIDs[name])
+	snap, note, err := pickSnapshot(name, snaps, fl.String("snapshot"), clean)
 	if err != nil {
 		return caddy1, err
 	}

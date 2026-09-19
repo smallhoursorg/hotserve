@@ -729,6 +729,14 @@ if section unvouched "a snapshot no clean run vouches for"; then
 	unvouched=$(hotserve backup restic -- snapshots --json --tag hotserve,app:backup-example 2>/dev/null \
 		| tr ',' '\n' | grep -o '"short_id":"[^"]*"' | tail -1 | cut -d'"' -f4)
 	asked=$(hotserve backup restore backup-example --admin 127.0.0.1:2019 --snapshot "$unvouched" --delete </dev/null 2>&1 || true)
+	# The listing an operator chooses from says which is which, as
+	# restic's own cannot.
+	listed=$(hotserve backup snapshots backup-example 2>&1)
+	if echo "$listed" | grep -E "^$unvouched " | grep -q "no — it may be missing files" && echo "$listed" | grep -E "^$snap " | grep -q "yes\$"; then
+		pass "backup snapshots marks the snapshot no clean run vouches for, and the clean ones"
+	else
+		fail "backup snapshots: $listed"
+	fi
 	if echo "$asked" | grep -q "No clean run vouches for snapshot $unvouched"; then
 		pass "a snapshot asked for by id is said to be unvouched before the operator confirms"
 	else
