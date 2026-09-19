@@ -140,6 +140,13 @@ func Init(ctx context.Context, o InitOptions, x Exec, log io.Writer) (err error)
 	if initErr == nil {
 		say(log, "created a new repository")
 	} else {
+		if generated && ctx.Err() != nil {
+			// Stopped while restic was creating the repository: it may
+			// be there, made with a password only this process has. It
+			// is said now, because nothing after this point will.
+			say(log, "\nstopped while the repository was being created. If %s now holds one, this is its password — save it, or empty that location before running init again:\n\n    %s\n", o.Repository, password)
+			return fmt.Errorf("init was stopped while creating a repository at %s; nothing was scheduled: %w", o.Repository, ctx.Err())
+		}
 		// Said first, because the answer can take the whole clock: with
 		// a storage key that is wrong, restic keeps trying until stopped.
 		say(log, "no new repository was made there (restic: %s); looking for one that is there already, for up to %s…", firstLine(out, initErr), openTimeout)

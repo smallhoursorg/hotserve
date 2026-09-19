@@ -213,8 +213,10 @@ func TestAsJobLeavesAFinishedCheckAlone(t *testing.T) {
 // is a unit, as the jobs' user, in their sandbox, with no app's data in
 // its view — and its settings are read by systemd from the settings file
 // itself, as a job's are. Nothing of them is in systemd-run's
-// environment, and no copy is written anywhere. It is not named: a
-// monitor and a person asking at once must not collide.
+// environment, and no copy is written anywhere. Its unit has a name of
+// its own each time — a monitor and a person asking at once must not
+// collide — so that a report whose context ends can stop it, and a name
+// no app's unit can have.
 func TestStatusRunsResticAsTheJobsDo(t *testing.T) {
 	var got Cmd
 	next := func(_ context.Context, c Cmd) error {
@@ -235,10 +237,17 @@ func TestStatusRunsResticAsTheJobsDo(t *testing.T) {
 			t.Errorf("missing %q from status's unit:\n%s", want, joined)
 		}
 	}
-	for _, never := range []string{"--unit=", "/var/lib/liveswap", "BindPaths="} {
+	for _, never := range []string{"/var/lib/liveswap", "BindPaths="} {
 		if strings.Contains(joined, never) {
 			t.Errorf("status's unit must not have %q:\n%s", never, joined)
 		}
+	}
+	unit, ok := strings.CutPrefix(got.Args[0], "--unit=")
+	if !ok || !strings.HasPrefix(unit, "hotserve-backup_") {
+		t.Errorf("status's unit is named so that it can be stopped, and as no app's unit can be (an app's name has no underscore): %q", got.Args[0])
+	}
+	if unit == oneOffUnit("restic") {
+		t.Errorf("two reports at once need two names, got %q twice", unit)
 	}
 	if err := x(context.Background(), Cmd{Name: "sh"}); err == nil {
 		t.Error("only restic is run this way")
@@ -373,7 +382,7 @@ func TestTheJobAndInitsChecksShareOneSandbox(t *testing.T) {
 	j, c := props(job, staging), props(check, scratch)
 	// Two differences by design. The job reads an app's data, and init's
 	// checks read none.
-	sharedBind := "--property=BindReadOnlyPaths=" + shared
+	sharedBind := "--property=BindReadOnlyPaths=-" + shared
 	if !slices.Contains(j, sharedBind) {
 		t.Fatalf("the job should bind the app's data read-only: %v", j)
 	}

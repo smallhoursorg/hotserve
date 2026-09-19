@@ -435,7 +435,7 @@ func TestRestoreRunsInTheBackupJobsUnitAndSandbox(t *testing.T) {
 	}
 	staging := o.StagingRoot + "/blog"
 	swap := map[string]string{
-		"--property=BindReadOnlyPaths=" + app.Shared: "--property=BindPaths=" + app.Shared,
+		"--property=BindReadOnlyPaths=-" + app.Shared: "--property=BindPaths=-" + app.Shared,
 		// Its own part of staging, not the backup's bookkeeping: systemd
 		// makes that dir and puts only it in the view.
 		"--property=StateDirectory=hotserve-backup/blog":                 "--property=StateDirectory=hotserve-backup/blog/restore",
@@ -486,5 +486,22 @@ func TestDescribeRestoreSaysWhatWillHappen(t *testing.T) {
 	DescribeRestore(&deleted, app, snap, true, now)
 	if !strings.Contains(deleted.String(), "files added since are DELETED") {
 		t.Errorf("--delete must be said in capitals before it is confirmed:\n%s", deleted.String())
+	}
+}
+
+// A snapshot holding none of what the app declares — taken under another
+// liveswap root, say, since a snapshot keeps absolute paths — restores
+// nothing, and "restored" would be the one wrong thing to say.
+func TestRestoreOfNothingIsAFailure(t *testing.T) {
+	f := newRestore(t, nil, []string{"uploads", "avatars"})
+	for p := range f.held {
+		delete(f.held, p)
+	}
+	err := f.job.Execute(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "holds none of the paths") || !strings.Contains(err.Error(), "nothing was restored") {
+		t.Fatalf("want a failure that says nothing was restored, got %v", err)
+	}
+	if w := f.writes(); len(w) != 0 {
+		t.Errorf("nothing should have been written: %v", w)
 	}
 }

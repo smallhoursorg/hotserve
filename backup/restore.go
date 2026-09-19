@@ -2,7 +2,6 @@ package backup
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -258,6 +257,15 @@ func (j RestoreJob) Execute(ctx context.Context) error {
 		}
 	}
 
+	// A snapshot holding nothing this app declares is not one of this
+	// app as it is declared here — taken under another liveswap root,
+	// most likely, since a snapshot keeps absolute paths. Restoring
+	// "nothing" from it and saying "restored" is the one answer that is
+	// wrong.
+	if len(j.Databases) == 0 && len(files) == 0 {
+		return fmt.Errorf("app %s: snapshot %s holds none of the paths this app declares under %s — nothing was restored. `hotserve backup restic -- ls %s` shows what it holds; a snapshot taken under another liveswap root keeps its paths under that root", j.App, j.Snapshot, j.Shared, j.Snapshot)
+	}
+
 	// 2. Everything checked out: put it back.
 	for i, rel := range j.Databases {
 		live, err := sharedPath(j.Shared, rel)
@@ -375,28 +383,14 @@ func (j RestoreJob) restoreTree(ctx context.Context, args []string) (restoreErro
 	return errs, err
 }
 
-// list looks every declared path up in the snapshot, with one `ls` of
-// their parents — the same bounded listing verifySnapshot uses.
+// list looks every declared path up in the snapshot: the listing the
+// backup's read-back reads (listNodes), so the two cannot come to read a
+// snapshot differently.
 func (j RestoreJob) list(ctx context.Context, want []expectedNode) (map[string]lsNode, error) {
-	args := []string{"ls", "--json", j.Snapshot}
-	seen := map[string]bool{}
-	for _, w := range want {
-		if parent := filepath.Dir(w.path); !seen[parent] {
-			seen[parent] = true
-			args = append(args, parent)
-		}
-	}
-	j.logf("+ restic %s", quoteArgs(args))
-	out, err := j.Exec.output(ctx, restic(args...))
+	j.logf("+ restic %s", quoteArgs(listArgs(j.Snapshot, want)))
+	nodes, err := listNodes(ctx, j.Exec, j.Snapshot, want)
 	if err != nil {
 		return nil, fmt.Errorf("app %s: listing snapshot %s: %w", j.App, j.Snapshot, err)
-	}
-	nodes := map[string]lsNode{}
-	for line := range strings.SplitSeq(string(out), "\n") {
-		var n lsNode
-		if json.Unmarshal([]byte(line), &n) == nil && n.StructType == "node" {
-			nodes[n.Path] = n
-		}
 	}
 	return nodes, nil
 }
@@ -414,7 +408,7 @@ func (j RestoreJob) logf(format string, a ...any) {
 func RestoreArgs(app App, o LaunchOptions, snapshot string, del bool) []string {
 	staging := o.StagingRoot + "/" + app.Name
 	args := append([]string{
-		"--wait", "--collect", "--quiet", "--pipe",
+		"--wait", "--collect", "--quiet", "--pipe", noExpansion,
 		"--unit=" + unitName(app.Name),
 	}, sandboxProperties(jobView{
 		User:    o.User,

@@ -3,6 +3,7 @@ package backup
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -185,7 +186,12 @@ func cmdRestic(fl caddycmd.Flags, args []string) (int, error) {
 }
 
 func cmdStatus(fl caddycmd.Flags) (int, error) {
-	ctx := context.Background()
+	// A monitor gives this a time limit and ends it with a signal: the
+	// context ends, and the unit restic is running in is stopped with it
+	// (stopWithContext) rather than left retrying a repository that is
+	// not answering, one more for every poll.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	apps, err := FetchApps(ctx, fl.String("admin"))
 	if err != nil {
 		return caddy1, err
@@ -366,7 +372,12 @@ func ownerOf(st *syscall.Stat_t) int64 {
 }
 
 func cmdRun(fl caddycmd.Flags) (int, error) {
-	ctx := context.Background()
+	// `systemctl stop hotserve-backup.service`, or Ctrl-C, ends the
+	// context, and the run stops the job it is waiting on (RunAll). The
+	// jobs are units of their own, outside this one's cgroup: nothing
+	// else would.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	self, err := os.Executable()
 	if err != nil {
 		return caddy1, fmt.Errorf("finding this binary (the jobs re-exec it): %w", err)
@@ -404,7 +415,9 @@ func checkSettingsInUnit(ctx context.Context, o LaunchOptions, x Exec) error {
 	if err := requireSettingsFile(o.EnvFile); err != nil {
 		return err
 	}
-	if err := x(ctx, Cmd{Name: "systemd-run", Args: settingsCheckArgs(o.Self, o.User, o.EnvFile)}); err != nil {
+	unit := oneOffUnit("settings")
+	argv := append([]string{"--unit=" + unit}, settingsCheckArgs(o.Self, o.User, o.EnvFile)...)
+	if err := stopWithContext(ctx, x, unit, Cmd{Name: "systemd-run", Args: argv}); err != nil {
 		return fmt.Errorf("the settings in %s cannot be used (above): %w", o.EnvFile, err)
 	}
 	return nil
@@ -439,6 +452,12 @@ func cmdApp(fl caddycmd.Flags, entryArgs []string) (int, error) {
 	// after Clean, so a trailing slash does not decide it.
 	if clean := filepath.Clean(staging); filepath.Base(clean) != name {
 		staging = filepath.Join(clean, name)
+	}
+	// Said by the job, which is given the app's data if there is any,
+	// and not by the launcher, which cannot see every place it may be.
+	if _, err := os.Stat(shared); errors.Is(err, os.ErrNotExist) {
+		fmt.Printf("%s: %s is not there: no data yet (never deployed), nothing to back up\n", name, shared)
+		return exitNoData, nil
 	}
 	app := App{Name: name, Shared: shared, State: entries}
 	job := Job{
@@ -522,7 +541,7 @@ func cmdRestore(fl caddycmd.Flags, args []string) (int, error) {
 	view := jobView{User: o.User, EnvFile: envFile, Home: StagingRestore(staging)}
 	// This app's backups, and every clean-run record (an OR of the two
 	// --tag flags).
-	out, err := Exec(osExec).output(ctx, Cmd{Name: "systemd-run", Args: resticInUnit(view, []string{"snapshots", "--json", "--tag", "hotserve,app:" + name, "--tag", CleanTag})})
+	out, err := inUnit(view, osExec).output(ctx, restic("snapshots", "--json", "--tag", "hotserve,app:"+name, "--tag", CleanTag))
 	if err != nil {
 		return caddy1, fmt.Errorf("listing the snapshots of %s: %w", name, err)
 	}
@@ -549,11 +568,10 @@ func cmdRestore(fl caddycmd.Flags, args []string) (int, error) {
 	say(os.Stdout, "%s: restoring in %s: %s", name, unit, quoteArgs(jobCommand(launch)))
 	// An interrupt ends systemd-run — the client, not the unit, which
 	// PID 1 owns and would otherwise go on writing the app's data with
-	// nobody watching — so the unit is stopped here, at once, and the
-	// message says what that leaves.
-	err = osExec(ctx, Cmd{Name: "systemd-run", Args: launch})
+	// nobody watching — so the unit is stopped with it, at once
+	// (stopWithContext), and the message says what that leaves.
+	err = stopWithContext(ctx, osExec, unit, Cmd{Name: "systemd-run", Args: launch})
 	if ctx.Err() != nil {
-		_ = exec.Command("systemctl", "stop", unit+".service").Run() //nolint:gosec // a fixed program; the unit name is built here from an app name the config validated
 		return caddy1, fmt.Errorf("interrupted: the restore of %s was stopped, so it may be partly done — run it again to finish it", name)
 	}
 	if err != nil {
@@ -586,7 +604,7 @@ func ensureShared(ctx context.Context, shared, username string, x Exec) error {
 	if _, err := os.Stat(shared); err == nil {
 		return nil
 	}
-	return x(ctx, Cmd{Name: "systemd-run", Args: []string{"--wait", "--collect", "--quiet",
+	return x(ctx, Cmd{Name: "systemd-run", Args: []string{"--wait", "--collect", "--quiet", noExpansion,
 		"--property=User=" + username, "--property=Group=" + username, "--property=UMask=0027",
 		"/bin/mkdir", "-p", shared}})
 }

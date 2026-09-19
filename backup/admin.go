@@ -73,6 +73,11 @@ func FetchApps(ctx context.Context, adminAddr string) ([]App, error) {
 		if !appNameRe.MatchString(name) {
 			return nil, fmt.Errorf("the admin API names an app %q, which is not a name this command will put into a unit's name and its directories (%s): refusing to back anything up on that answer", name, appNameRe)
 		}
+		for _, e := range a.State {
+			if e.Kind != KindSQLite && e.Kind != KindFiles {
+				return nil, fmt.Errorf("the admin API gives app %s a state entry of kind %q, which is neither %s nor %s: refusing to back anything up on that answer", name, e.Kind, KindSQLite, KindFiles)
+			}
+		}
 		apps = append(apps, App{
 			Name:   name,
 			Shared: strings.TrimSuffix(root, "/") + "/" + name + "/shared",
@@ -84,7 +89,9 @@ func FetchApps(ctx context.Context, adminAddr string) ([]App, error) {
 
 // What FetchApps returns goes — as root, in `run` and `restore` — into
 // systemd-run's arguments: a unit's name, its StateDirectory=, the path
-// it binds. And it came over a socket from the hotserve process, which
+// it binds, and — as `kind:path` — the job's own arguments, which systemd
+// is told not to expand (noExpansion) and the job holds to the app's
+// shared dir itself (sharedPath). And it came over a socket from the hotserve process, which
 // is the process an attacker on the internet reaches first. So it is
 // held to rules of this package's own, whatever liveswap checked when it
 // loaded the config: the answer is only as good as what gave it.

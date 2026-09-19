@@ -24,8 +24,9 @@ upgrade|failed-upgrade)
 		# reinstall (postremove masks it; see postinstall).
 		systemctl stop hotserve-backup.timer 2>/dev/null || true
 		systemctl stop hotserve-backup.service 2>/dev/null || true
-		# The per-app jobs are transient units named hotserve-backup-<app>.
-		for u in $(systemctl list-units --no-legend --plain 'hotserve-backup-*.service' 2>/dev/null | awk '{print $1}'); do
+		# The per-app jobs are transient units named hotserve-backup-<app>;
+		# a check, a status report's restic and the like, hotserve-backup_<what>.
+		for u in $(systemctl list-units --no-legend --plain 'hotserve-backup[-_]*.service' 2>/dev/null | awk '{print $1}'); do
 			systemctl stop "$u" 2>/dev/null || true
 		done
 		# Removal is the one time the apps go too: stopping the user

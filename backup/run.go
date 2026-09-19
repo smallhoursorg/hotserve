@@ -2,10 +2,10 @@ package backup
 
 import (
 	"context"
-	"errors"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -107,7 +107,7 @@ const (
 
 func unitArgs(app App, o LaunchOptions, phase string, v jobView) []string {
 	args := append([]string{
-		"--wait", "--collect", "--quiet",
+		"--wait", "--collect", "--quiet", noExpansion,
 		"--unit=" + unitName(app.Name),
 	}, sandboxProperties(v)...)
 	args = append(args,
@@ -124,6 +124,31 @@ func unitArgs(app App, o LaunchOptions, phase string, v jobView) []string {
 	}
 	return args
 }
+
+// noExpansion is on every systemd-run this package makes. Without it
+// systemd expands $VAR and ${VAR} in the command's arguments from the
+// unit's environment — which, for a unit with the settings file, is the
+// repository password and the storage key (measured, systemd 257:
+// `files:${RESTIC_PASSWORD}` reached the job as the password). The
+// arguments carry what the admin API said an app declares, so the
+// credential would land in an argv and in the journal on the word of the
+// process it is kept from; and a path with a `$` in it would be another
+// path.
+const noExpansion = "--expand-environment=no"
+
+// exitNoData is how a job says its app has no data yet — its shared dir
+// is not there, because it has never been deployed — which only the job
+// can say: the launcher's unit cannot see every place a liveswap root
+// may be (ProtectHome= hides /home from it as "no such file"), and the
+// job's view is given the dir if it exists (the `-` in its bind).
+// EX_TEMPFAIL, from sysexits.
+//
+// systemd calls that unit failed, in its journal, for as long as the app
+// has not been deployed; the job's own line above it says why. Telling
+// systemd the status is a success (SuccessExitStatus=) would quiet that,
+// and systemd-run would then hand back 0 (measured), which is the one
+// thing the launcher cannot tell from a backup.
+const exitNoData = 75
 
 // needsStaging is whether an app's backup has a staging step: only when
 // it declares a database.
@@ -212,10 +237,12 @@ func sandboxProperties(v jobView) []string {
 		props = append(props, "--property=PrivateNetwork=yes")
 	}
 	if v.Shared != "" {
+		// `-`: a dir that is not there is left out of the view, and the
+		// job says so (exitNoData), where the unit would fail to start.
 		if v.SharedWritable {
-			props = append(props, "--property=BindPaths="+v.Shared)
+			props = append(props, "--property=BindPaths=-"+v.Shared)
 		} else {
-			props = append(props, "--property=BindReadOnlyPaths="+v.Shared)
+			props = append(props, "--property=BindReadOnlyPaths=-"+v.Shared)
 		}
 	}
 	return props
@@ -268,7 +295,7 @@ func homeProperties(home string) []string {
 // one command looks at its own environment (checkSettings) and says what
 // is wrong with it. Root asks, and never opens the file.
 func settingsCheckArgs(self, user, envFile string) []string {
-	argv := append([]string{"--wait", "--collect", "--quiet", "--pipe", "--expand-environment=no"},
+	argv := append([]string{"--wait", "--collect", "--quiet", "--pipe", noExpansion},
 		sandboxProperties(jobView{User: user, EnvFile: envFile})...)
 	return append(argv, self, "backup", "check-settings")
 }
@@ -282,8 +309,54 @@ func inUnit(v jobView, next Exec) Exec {
 		if c.Name != "restic" {
 			return fmt.Errorf("only restic is run this way (asked for %s)", c.Name)
 		}
-		return next(ctx, Cmd{Name: "systemd-run", Args: resticInUnit(v, c.Args), Stdout: c.Stdout, Stderr: c.Stderr})
+		unit := oneOffUnit("restic")
+		argv := append([]string{"--unit=" + unit}, resticInUnit(v, c.Args)...)
+		return stopWithContext(ctx, next, unit, Cmd{Name: "systemd-run", Args: argv, Stdout: c.Stdout, Stderr: c.Stderr})
 	}
+}
+
+// stopWithContext runs one systemd-run invocation — c, which names its
+// unit `unit` — and stops that unit the moment ctx ends.
+//
+// A context that ends — Ctrl-C, a stop, a check that ran out of time —
+// ends systemd-run, which is only the client. The unit is PID 1's: what
+// runs in it goes on, restic retrying an unreachable repository for many
+// minutes, with nobody watching; and through --pipe it holds the streams
+// this command is reading, so waiting for systemd-run to finish would be
+// waiting for it (measured: a wrong storage key held init for ten
+// minutes). Stopping the unit is what ends everything else.
+//
+// With a context that has already ended nothing is started, and nothing
+// is stopped either: a unit of that name would be somebody else's — an
+// app's unit name is shared with an operator's restore.
+func stopWithContext(ctx context.Context, next Exec, unit string, c Cmd) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	finished := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		select {
+		case <-finished:
+		case <-ctx.Done():
+			_ = next(context.WithoutCancel(ctx), Cmd{Name: "systemctl", Args: []string{"stop", unit + ".service"}, Stdout: io.Discard, Stderr: io.Discard})
+		}
+	}()
+	err := next(ctx, c)
+	close(finished)
+	<-stopped
+	return err
+}
+
+// oneOffUnit names a unit for one command that may run beside another
+// of its kind — two status reports, a report and a restore's listing. An
+// app's name has no underscore in it (appNameRe), so no app's unit
+// (unitName) can be one of these, whatever the app is called.
+func oneOffUnit(purpose string) string {
+	var b [4]byte
+	_, _ = rand.Read(b[:]) // crypto/rand.Read does not fail
+	return "hotserve-backup_" + purpose + "-" + hex.EncodeToString(b[:])
 }
 
 // checkStagingRoot refuses a staging root systemd would not make the
@@ -307,7 +380,7 @@ const probeScript = `exec restic "$@"`
 // resticInUnit is the systemd-run argv that runs one restic command in
 // a unit with the job's sandbox, its output piped back to the caller.
 func resticInUnit(v jobView, args []string) []string {
-	argv := append([]string{"--wait", "--collect", "--quiet", "--pipe", "--expand-environment=no"}, sandboxProperties(v)...)
+	argv := append([]string{"--wait", "--collect", "--quiet", "--pipe", noExpansion}, sandboxProperties(v)...)
 	argv = append(argv, "/bin/sh", "-c", probeScript, "restic")
 	return append(argv, args...)
 }
@@ -349,35 +422,15 @@ func asJob(v jobView, envDir string, next Exec) Exec {
 		// The settings are in the file now: systemd-run itself gets
 		// none of them in its own environment.
 		argv := append([]string{"--unit=" + checkUnit}, resticInUnit(view, c.Args)...)
-		// A context that ends — Ctrl-C, or a check that ran out of time
-		// — ends systemd-run, which is only the client. The unit is
-		// PID 1's: restic in it goes on retrying for minutes, holding
-		// the name and — through --pipe — the streams this command is
-		// reading, so waiting for systemd-run to finish would be waiting
-		// for restic (measured: a wrong storage key held init for ten
-		// minutes). The unit is stopped the moment the context ends,
-		// which is what ends everything else.
-		finished := make(chan struct{})
-		stopped := make(chan struct{})
-		go func() {
-			defer close(stopped)
-			select {
-			case <-finished:
-			case <-ctx.Done():
-				_ = next(context.WithoutCancel(ctx), Cmd{Name: "systemctl", Args: []string{"stop", checkUnit + ".service"}, Stdout: io.Discard, Stderr: io.Discard})
-			}
-		}()
-		err = next(ctx, Cmd{Name: "systemd-run", Args: argv, Stdout: c.Stdout, Stderr: c.Stderr})
-		close(finished)
-		<-stopped
-		return err
+		return stopWithContext(ctx, next, checkUnit, Cmd{Name: "systemd-run", Args: argv, Stdout: c.Stdout, Stderr: c.Stderr})
 	}
 }
 
 // checkUnit is the unit each of init's checks runs as, one after
-// another: named, so that one whose context ends can be stopped, and so
-// that two inits cannot run their checks at once.
-const checkUnit = "hotserve-backup-check"
+// another: one name, so that two inits cannot run their checks at once.
+// The underscore keeps it from being any app's unit (oneOffUnit): an app
+// may be called `check`.
+const checkUnit = "hotserve-backup_check"
 
 // RunAll backs up each app in turn — never concurrently: peak memory
 // is then one job's, not the sum, which is what keeps a box with
@@ -392,16 +445,33 @@ func RunAll(ctx context.Context, apps []App, o LaunchOptions, x Exec, log io.Wri
 		return nil
 	}
 	var failed []string
-	for _, app := range apps {
-		// An app can declare its state before it has ever been
-		// deployed — liveswap creates shared/ at the first launch, and
-		// the declaration is config, not a promise that the files
-		// exist. Nothing to copy yet is not a failure; it would
-		// otherwise paint the timer red every hour until the first
-		// deploy, and a bind of a missing path fails the unit anyway.
-		if _, err := os.Stat(app.Shared); errors.Is(err, fs.ErrNotExist) {
+	// Each step is a unit of its own, which a run that is stopped — the
+	// timer's unit, or Ctrl-C — stops with it (stopWithContext): the unit
+	// it is waiting on, and no other. Nothing else of that name is ever
+	// this run's to stop: the same name is an operator's restore.
+	step := func(app App, args []string) (done bool) {
+		err := stopWithContext(ctx, x, unitName(app.Name), Cmd{Name: "systemd-run", Args: args})
+		switch {
+		case err == nil:
+			return true
+		case ctx.Err() != nil:
+		case exitStatus(err) == exitNoData:
+			// An app can declare its state before it has ever been
+			// deployed — liveswap creates shared/ at the first launch,
+			// and the declaration is config, not a promise that the
+			// files exist. Nothing to copy yet is not a failure; it
+			// would otherwise paint the timer red every hour until the
+			// first deploy.
 			say(log, "%s: no data yet (never deployed), skipping", app.Name)
-			continue
+		default:
+			say(log, "%s: FAILED (%v) — journalctl -u %s", app.Name, err, unitName(app.Name))
+			failed = append(failed, app.Name)
+		}
+		return false
+	}
+	for _, app := range apps {
+		if ctx.Err() != nil {
+			break
 		}
 		// The command each unit runs, not the forty sandbox properties
 		// around it: those are the same every time, and
@@ -409,20 +479,18 @@ func RunAll(ctx context.Context, apps []App, o LaunchOptions, x Exec, log io.Wri
 		if needsStaging(app) {
 			stage := StageArgs(app, o)
 			say(log, "%s: copying its databases in %s, its data writable (SQLite needs that to read one), with no network and no repository settings: %s", app.Name, unitName(app.Name), quoteArgs(jobCommand(stage)))
-			if err := x(ctx, Cmd{Name: "systemd-run", Args: stage}); err != nil {
-				say(log, "%s: FAILED (%v) — journalctl -u %s", app.Name, err, unitName(app.Name))
-				failed = append(failed, app.Name)
+			if !step(app, stage) {
 				continue
 			}
 		}
 		args := LaunchArgs(app, o)
 		say(log, "%s: backing up in %s, its data read-only: %s", app.Name, unitName(app.Name), quoteArgs(jobCommand(args)))
-		if err := x(ctx, Cmd{Name: "systemd-run", Args: args}); err != nil {
-			say(log, "%s: FAILED (%v) — journalctl -u %s", app.Name, err, unitName(app.Name))
-			failed = append(failed, app.Name)
-			continue
+		if step(app, args) {
+			say(log, "%s: ok", app.Name)
 		}
-		say(log, "%s: ok", app.Name)
+	}
+	if ctx.Err() != nil {
+		return fmt.Errorf("stopped: the job this run was waiting on was stopped with it, and the apps after it were not started — the next run backs them up")
 	}
 	if len(failed) > 0 {
 		return fmt.Errorf("%d of %d apps failed to back up: %s", len(failed), len(apps), strings.Join(failed, ", "))

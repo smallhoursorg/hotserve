@@ -288,7 +288,10 @@ Type the app's name to restore it: blog
 
 A restore runs where that app's backup runs — in its unit, as the
 `hotserve` user, in the same sandbox — so a restore and that app's
-hourly backup can never run at the same time.
+hourly backup can never run at the same time. An hourly run that comes
+round during a restore fails that one app — systemd refuses a second
+unit of its name — and leaves the restore alone; the next hour backs
+the app up.
 
 ### The box is gone
 

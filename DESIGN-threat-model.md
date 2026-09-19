@@ -447,8 +447,11 @@ boundaries are these, and each is a rule a change has to keep:
 4. **Only systemd reads the settings file, and the credential reaches a
    unit one way.** systemd reads the root-only file (`EnvironmentFile=`)
    and puts the values in the unit's environment. They are never in an
-   argv and never in `systemd-run`'s environment (`asJob` hands it
-   none), and the file is not in any unit's view. No root command opens
+   argv — systemd is told not to expand `$VAR` in any unit's command
+   (`noExpansion`, backup/run.go: measured, it otherwise writes the
+   password into the argv of a job whose declared path says
+   `${RESTIC_PASSWORD}`) — and never in `systemd-run`'s environment
+   (`asJob` hands it none), and the file is not in any unit's view. No root command opens
    it either: its format is systemd's, and a second reader is a second
    opinion about what it says. `run` and `restore` hold it to this
    package's rules by asking a unit with nothing in its view to look at
@@ -457,7 +460,12 @@ boundaries are these, and each is a rule a change has to keep:
    name the file to systemd and never see inside it. `init` writes it,
    from values it was given, and reads it never.
 5. **One unit name per app** (`unitName`) for its copy, its upload and
-   its restore, so no two of them run at once.
+   its restore, so no two of them run at once — and a unit is stopped
+   only by the command that started it and is waiting on it
+   (`stopWithContext`), never by pattern: the name an hourly run would
+   sweep up is also an operator's restore. Units that are no app's — a
+   check, a report's restic — have an underscore in their names
+   (`oneOffUnit`, `checkUnit`), which no app's name has.
 6. **What decides is the repository or an exit status**, not state on
    the box and not a program's wording: clean runs are records in the
    repository (`CleanTag`), a repository's presence is `cat config`'s
@@ -470,9 +478,11 @@ boundaries are these, and each is a rule a change has to keep:
    systemd splits on whitespace and colons. So the answer is held to
    this package's own rules whatever liveswap validated at config load:
    an app's name to liveswap's alphabet (`appNameRe`, backup/admin.go),
-   the root to a plain absolute path (`checkRootPath`), each declared
-   path to the inside of `shared/` (`sharedPath`, backup/backup.go). A
-   name or a root that fails is refused, and nothing is launched on
+   the root to a plain absolute path (`checkRootPath`), a declaration's
+   kind to the two there are, each declared path to the inside of
+   `shared/` (`sharedPath`, backup/backup.go) by the job, which gets it
+   as an argument systemd passes on untouched (rule 4). A
+   name, a root or a kind that fails is refused, and nothing is launched on
    that answer.
 
 **Why any of it is root.** Four commands start as root — `run`,
@@ -542,7 +552,7 @@ Who runs as what, and what each can reach:
 
 | Process | Runs as | Sandbox | App data | Network | Credential | Runs |
 |---|---|---|---|---|---|---|
-| `backup run` — the timer's launcher (`RunAll`) | root | its unit's: read-only, one capability, no network | `stat` of each `shared/`, nothing more | the admin socket | **none**: looks that the file exists; in its unit, cannot read it | `systemd-run` |
+| `backup run` — the timer's launcher (`RunAll`) | root | its unit's: read-only, one capability, no network | **none**: the job says when its app has no data yet (`exitNoData`) | the admin socket | **none**: looks that the file exists; in its unit, cannot read it | `systemd-run` |
 | the settings check (`settingsCheckArgs`) | `hotserve` | full | none | yes, and uses none | yes: it is what it checks | `hotserve backup check-settings` |
 | the copy (`StageArgs`) | `hotserve` | full | that app's, **writable** | **none** (`PrivateNetwork=`) | **none** | sqlite3 |
 | the upload (`LaunchArgs`) | `hotserve` | full | that app's, read-only | yes | yes | restic |
@@ -578,7 +588,10 @@ settings file), `TestTheJobAndInitsChecksShareOneSandbox` and
 `TestRestoreRunsInTheBackupJobsUnitAndSandbox` (one sandbox),
 `TestStatusRunsResticAsTheJobsDo`, `TestAsJobRunsResticAsTheJobDoes`,
 `TestTheSettingsAreCheckedByAUnitNotByRoot` and
-`TestPassthroughIsAUnitSystemdSetsUp` (rules 2 and 4), `TestRunAllContinuesAfterOneFailureAndReportsIt` (rule
+`TestPassthroughIsAUnitSystemdSetsUp` (rules 2 and 4),
+`TestNoUnitsCommandIsExpandedBySystemd` (rule 4: no unit's command is
+expanded from its settings), `TestRunAllStopsTheJobItIsWaitingOnAndNoOther`
+and `TestInitsCheckUnitIsNoAppsUnit` (rule 5), `TestRunAllContinuesAfterOneFailureAndReportsIt` (rule
 1: the launcher makes nothing under the staging root),
 `TestFetchAppsHoldsTheAdminAPIsAnswerToItsOwnRules` (rule 7: a name or
 a root that is two binds, climbs, or carries a unit suffix launches

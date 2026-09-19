@@ -405,24 +405,9 @@ type lsNode struct {
 // only what was backed up from it, so its listing grows with the number
 // of declarations and nothing else.
 func (j Job) verifySnapshot(ctx context.Context, snapshot string, want []expectedNode) error {
-	args := []string{"ls", "--json", snapshot}
-	seen := map[string]bool{}
-	for _, w := range want {
-		if parent := filepath.Dir(w.path); !seen[parent] {
-			seen[parent] = true
-			args = append(args, parent)
-		}
-	}
-	out, err := j.Exec.output(ctx, restic(args...))
+	nodes, err := listNodes(ctx, j.Exec, snapshot, want)
 	if err != nil {
 		return fmt.Errorf("listing snapshot %s: %w", shortID(snapshot), err)
-	}
-	nodes := map[string]lsNode{}
-	for line := range strings.SplitSeq(string(out), "\n") {
-		var n lsNode
-		if json.Unmarshal([]byte(line), &n) == nil && n.StructType == "node" {
-			nodes[n.Path] = n
-		}
 	}
 	for _, w := range want {
 		n, ok := nodes[w.path]
@@ -437,6 +422,37 @@ func (j Job) verifySnapshot(ctx context.Context, snapshot string, want []expecte
 	}
 	j.logf("%s: snapshot %s read back: %d declared path(s) present", j.App, shortID(snapshot), len(want))
 	return nil
+}
+
+// listArgs is the one `restic ls` that finds every path in want: of
+// their parents, each once (verifySnapshot says why the parents).
+func listArgs(snapshot string, want []expectedNode) []string {
+	args := []string{"ls", "--json", snapshot}
+	seen := map[string]bool{}
+	for _, w := range want {
+		if parent := filepath.Dir(w.path); !seen[parent] {
+			seen[parent] = true
+			args = append(args, parent)
+		}
+	}
+	return args
+}
+
+// listNodes is what a snapshot holds at and beside the paths in want, by
+// path: what the backup's read-back and the restore's lookup both read.
+func listNodes(ctx context.Context, x Exec, snapshot string, want []expectedNode) (map[string]lsNode, error) {
+	out, err := x.output(ctx, restic(listArgs(snapshot, want)...))
+	if err != nil {
+		return nil, err
+	}
+	nodes := map[string]lsNode{}
+	for line := range strings.SplitSeq(string(out), "\n") {
+		var n lsNode
+		if json.Unmarshal([]byte(line), &n) == nil && n.StructType == "node" {
+			nodes[n.Path] = n
+		}
+	}
+	return nodes, nil
 }
 
 // linkTarget names what a symlink points at, for the error that

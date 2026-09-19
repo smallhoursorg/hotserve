@@ -79,9 +79,9 @@ for d in /var/lib/hotserve /var/lib/liveswap; do
 	got=$(stat -c '%U:%G %a' "$d")
 	[ "$got" = "hotserve:hotserve 750" ] || die "$d is '$got', want 'hotserve:hotserve 750'"
 done
-# The backup staging root is root's: root makes and chowns the per-app
-# dirs in it, and hotserve.service, as the hotserve user with /var
-# writable, has no business rearranging what root is about to walk.
+# The backup staging root is root's: systemd makes each job's dir in it
+# (StateDirectory=), and hotserve.service, as the hotserve user with /var
+# writable, has no business in a directory the jobs' copies are kept in.
 got=$(stat -c '%U:%G %a' /var/lib/hotserve-backup)
 [ "$got" = "root:root 750" ] || die "/var/lib/hotserve-backup is '$got', want 'root:root 750'"
 echo "user/group and data dir ownership OK"
@@ -673,24 +673,29 @@ dpkg -i "$deb" >/dev/null
 systemctl is-enabled --quiet hotserve-backup.timer \
 	&& die "remove + reinstall turned back on a backup timer the operator had turned off"
 
-# Stopping the launcher stops any per-app job it left running. Those are
-# transient units outside its cgroup, so without the unit's ExecStopPost
-# one would outlive it — and take the unit name the next hour's run
-# needs. Stand-in job; a launcher that fails at once (hotserve is not
-# running, so the admin API is not there) and therefore stops.
+# The launcher coming to its end stops nothing it did not start. An app's
+# unit name is also an operator's restore of that app, and a first backup
+# run by hand: a launcher that swept up every hotserve-backup-* unit as it
+# exited would cut a restore off half done, every hour. Stand-in for one;
+# a launcher that fails at once (hotserve is not running, so the admin
+# API is not there) and so comes to its end.
 systemd-run --unit=hotserve-backup-smoke sleep 600 >/dev/null 2>&1 \
-	|| die "setup: could not start a stand-in backup job"
+	|| die "setup: could not start a stand-in for an operator's restore"
 systemctl is-active --quiet hotserve-backup-smoke.service \
-	|| die "setup: the stand-in job is not running; the assertion below would be vacuous"
+	|| die "setup: the stand-in is not running; the assertion below would be vacuous"
 printf 'RESTIC_REPOSITORY=s3:s3.example.com/nowhere\nRESTIC_PASSWORD=x\n' > /etc/hotserve/backup.env
 chmod 0600 /etc/hotserve/backup.env
 systemctl start hotserve-backup.service >/dev/null 2>&1 || true
 i=0
-while systemctl is-active --quiet hotserve-backup-smoke.service; do
+while [ "$(systemctl is-active hotserve-backup.service)" = activating ]; do
 	i=$((i + 1))
-	[ "$i" -ge 10 ] && die "a per-app backup job outlived the launcher: the next hour's run would find its unit name taken"
+	[ "$i" -ge 20 ] && die "setup: the launcher did not come to its end"
 	sleep 1
 done
+sleep 1
+systemctl is-active --quiet hotserve-backup-smoke.service \
+	|| die "the launcher's end stopped a unit it did not start: an operator's restore of an app would be cut off by the hourly run"
+systemctl stop hotserve-backup-smoke.service
 rm -f /etc/hotserve/backup.env
 
 # "Backups are off" only when they are.

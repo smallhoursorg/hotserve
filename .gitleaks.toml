@@ -6,9 +6,10 @@
 # is a real secret. The Go tests for the same filter carry a few more
 # inline, each marked gitleaks:allow on its line.
 #
-# The backup env-file parser (backup/backup.go) has the same need: its
-# tests feed it a RESTIC_PASSWORD line to prove a value survives an `=`
-# sign. That one fixture value is allowlisted by its own text rather
+# The backup package's reader of a --credentials-file (CredentialsFile,
+# backup/backup.go) has the same need: its test feeds it an
+# AWS_SECRET_ACCESS_KEY line to prove a value survives an `=` sign. That
+# one fixture value is allowlisted by its own text rather
 # than by file, so anything else that ever lands in that file is still
 # scanned — and by text rather than by a `gitleaks:allow` comment,
 # because this scan reads every commit, including the one that

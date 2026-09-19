@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -15,8 +16,7 @@ func testApp(name string, state ...StateEntry) App {
 	return App{Name: name, Shared: "/var/lib/liveswap/" + name + "/shared", State: state}
 }
 
-// deployedApp is an app whose data exists: RunAll skips one that has
-// never been deployed, so a test about launching needs a real dir.
+// deployedApp is an app whose data exists.
 func deployedApp(t *testing.T, name string, state ...StateEntry) App {
 	t.Helper()
 	shared := filepath.Join(t.TempDir(), name, "shared")
@@ -53,7 +53,7 @@ func TestLaunchArgsSandboxesEachAppToItsOwnData(t *testing.T) {
 		"--property=TemporaryFileSystem=/:ro",
 		// The unit that reaches the network reads the app's data and
 		// cannot write it, database or not.
-		"--property=BindReadOnlyPaths=/var/lib/liveswap/blog/shared",
+		"--property=BindReadOnlyPaths=-/var/lib/liveswap/blog/shared",
 		// systemd makes the job's own dir, owned by the job's user and
 		// in its view; the launcher, which is root, never touches it.
 		"--property=StateDirectory=hotserve-backup/blog",
@@ -133,8 +133,8 @@ func TestTheUnitThatCanWriteAnAppsDataCanReachNothing(t *testing.T) {
 		return out
 	}
 	const (
-		writable = "--property=BindPaths=/var/lib/liveswap/blog/shared"
-		readOnly = "--property=BindReadOnlyPaths=/var/lib/liveswap/blog/shared"
+		writable = "--property=BindPaths=-/var/lib/liveswap/blog/shared"
+		readOnly = "--property=BindReadOnlyPaths=-/var/lib/liveswap/blog/shared"
 		noNet    = "--property=PrivateNetwork=yes"
 		settings = "--property=EnvironmentFile=/etc/hotserve/backup.env"
 	)
@@ -345,17 +345,23 @@ func TestCheckStagingRoot(t *testing.T) {
 
 // An app can declare state before it has ever been deployed. That is
 // not a failure: it would otherwise turn the hourly timer red until
-// the first deploy.
-func TestRunAllSkipsAnAppThatHasNeverBeenDeployed(t *testing.T) {
+// the first deploy. It is the job that says so, with its exit status:
+// the launcher looks at no app's data, because its unit cannot see every
+// place that data may be (under /home, ProtectHome= shows it "no such
+// file" for a dir that is there).
+func TestRunAllSkipsAnAppWhoseJobSaysItHasNoData(t *testing.T) {
 	apps := []App{
-		testApp("never-deployed", StateEntry{Kind: KindFiles, Path: "uploads"}),
-		deployedApp(t, "blog", StateEntry{Kind: KindFiles, Path: "uploads"}),
+		testApp("never-deployed", StateEntry{Kind: KindSQLite, Path: "app.db"}),
+		testApp("blog", StateEntry{Kind: KindFiles, Path: "uploads"}),
 	}
 	var launched []string
 	run := func(_ context.Context, _ string, args ...string) error {
 		for _, a := range args {
 			if name, ok := strings.CutPrefix(a, "--name="); ok {
 				launched = append(launched, name)
+				if name == "never-deployed" {
+					return exited(exitNoData)
+				}
 			}
 		}
 		return nil
@@ -364,11 +370,95 @@ func TestRunAllSkipsAnAppThatHasNeverBeenDeployed(t *testing.T) {
 	if err := RunAll(context.Background(), apps, launchOpts(t.TempDir()), fake(run, nil), &log); err != nil {
 		t.Fatalf("an undeployed app is not a failure: %v", err)
 	}
-	if strings.Join(launched, ",") != "blog" {
-		t.Errorf("only the deployed app should run: %v", launched)
+	if strings.Join(launched, ",") != "never-deployed,blog" {
+		t.Errorf("the undeployed app's first step says it has no data, and its second is not run: %v", launched)
 	}
-	if !strings.Contains(log.String(), "never-deployed: no data yet") {
-		t.Errorf("the run should say why it skipped: %q", log.String())
+	if !strings.Contains(log.String(), "never-deployed: no data yet") || strings.Contains(log.String(), "never-deployed: ok") || strings.Contains(log.String(), "FAILED") {
+		t.Errorf("the run should say why it skipped, and not that it backed anything up: %q", log.String())
+	}
+}
+
+// Stopping a run — the timer's unit, or Ctrl-C — stops the job it is
+// waiting on, which is a unit of its own that nothing else would stop;
+// and it stops no other. The next app's unit name may be an operator's
+// restore, so with the context over nothing is started and nothing is
+// stopped.
+func TestRunAllStopsTheJobItIsWaitingOnAndNoOther(t *testing.T) {
+	apps := []App{
+		testApp("blog", StateEntry{Kind: KindFiles, Path: "uploads"}),
+		testApp("shop", StateEntry{Kind: KindFiles, Path: "uploads"}),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var mu sync.Mutex
+	var calls []string
+	unitStopped := make(chan struct{})
+	x := func(ctx context.Context, c Cmd) error {
+		mu.Lock()
+		calls = append(calls, c.Name+" "+c.Args[len(c.Args)-1])
+		mu.Unlock()
+		if c.Name == "systemctl" {
+			close(unitStopped)
+			return nil
+		}
+		cancel() // stopped while blog's job runs
+		<-unitStopped
+		return errors.New("signal: killed")
+	}
+	var log strings.Builder
+	err := RunAll(ctx, apps, launchOpts(t.TempDir()), x, &log)
+	if err == nil || !strings.Contains(err.Error(), "stopped") {
+		t.Fatalf("a run that was stopped says so: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) != 2 || calls[1] != "systemctl hotserve-backup-blog.service" {
+		t.Errorf("want blog's job, then its stop, and nothing for shop: %q", calls)
+	}
+	if strings.Contains(log.String(), "FAILED") {
+		t.Errorf("a job stopped with its run did not fail: %q", log.String())
+	}
+}
+
+// systemd expands $VAR in a unit's command from the unit's environment,
+// which for these units holds the repository password and the storage
+// key — and the command's arguments carry what the admin API said an app
+// declares. Every systemd-run this package makes turns that off.
+func TestNoUnitsCommandIsExpandedBySystemd(t *testing.T) {
+	app := testApp("blog", StateEntry{Kind: KindSQLite, Path: "app.db"}, StateEntry{Kind: KindFiles, Path: "${RESTIC_PASSWORD}"})
+	o := launchOpts("/var/lib/hotserve-backup")
+	var made []string
+	record := func(_ context.Context, c Cmd) error {
+		if c.Name == "systemd-run" {
+			made = c.Args
+		}
+		return nil
+	}
+	if err := ensureShared(context.Background(), filepath.Join(t.TempDir(), "not-there"), "hotserve", record); err != nil {
+		t.Fatal(err)
+	}
+	for name, argv := range map[string][]string{
+		"the copy":           StageArgs(app, o),
+		"the upload":         LaunchArgs(app, o),
+		"a restore":          RestoreArgs(app, o, "s1full", true),
+		"the settings check": settingsCheckArgs(o.Self, o.User, o.EnvFile),
+		"restic in a unit":   resticInUnit(jobView{User: o.User, EnvFile: o.EnvFile}, []string{"snapshots"}),
+		"backup restic --":   PassthroughArgs(o.EnvFile, o.User, []string{"snapshots"}),
+		"making shared/":     made,
+	} {
+		if !slices.Contains(argv, "--expand-environment=no") {
+			t.Errorf("%s: systemd would expand $VAR in its command from the settings: %v", name, argv)
+		}
+	}
+}
+
+// init's checks run in one named unit, and an app may be called `check`.
+func TestInitsCheckUnitIsNoAppsUnit(t *testing.T) {
+	if !appNameRe.MatchString("check") {
+		t.Fatal("setup: `check` is a name an app may have")
+	}
+	if rest, ok := strings.CutPrefix(checkUnit, "hotserve-backup-"); ok && appNameRe.MatchString(rest) {
+		t.Errorf("%s is the unit of an app called %q: init stopping its check would stop that app's backup, or its restore", checkUnit, rest)
 	}
 }
 

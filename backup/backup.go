@@ -5,8 +5,10 @@
 // systemd timer runs `hotserve backup run`, which asks the admin API
 // which apps declare `state` and then runs one short-lived, sandboxed
 // job per app (`hotserve backup app`). A backup that stalls, leaks or
-// crashes therefore cannot touch traffic, and backups still run while
-// hotserve is being restarted.
+// crashes therefore cannot touch traffic, and a job that is running when
+// hotserve restarts runs on. A run that starts while hotserve is down
+// has nobody to ask what to back up, fails, and is tried again in an
+// hour.
 //
 // restic is an external binary (Debian ships it) — never a library —
 // and every invocation is logged as it is run, so an operator can

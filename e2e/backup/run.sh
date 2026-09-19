@@ -24,10 +24,11 @@
 # apps, a repository, and one clean run made while the app was writing.
 # Sections run in this file's order whatever order ONLY names them in.
 # Each leaves the app's rows and files as it found them, and starts or
-# stops the writer itself rather than counting on the section before it. Two things do carry forward, which is why the order
-# is fixed: the database is WAL until the rollback-journal sections, which
-# put it in that mode themselves and leave it there; and another-repository
-# and init-tty each move the box to a new repository, so the snapshot id
+# stops the writer itself rather than counting on the section before it.
+# Two things do carry forward, which is why the order is fixed: the
+# database is WAL until the rollback-journal sections, which put it in
+# that mode themselves and leave it there; and another-repository and
+# init-tty each move the box to a new repository, so the snapshot id
 # taken from the first run is used only above them.
 set -u
 
@@ -305,7 +306,7 @@ if section init-mistakes "init on a mistake: it answers, and leaves what worked 
 	else
 		fail "init with a wrong storage key: exit $typo_rc after ${typo_took}s: $(tail -4 /tmp/init-wrongkey.log)"
 	fi
-	case "$(systemctl is-active hotserve-backup-check.service 2>/dev/null)" in
+	case "$(systemctl is-active hotserve-backup_check.service 2>/dev/null)" in
 	active | activating | deactivating) fail "the check init gave up on is still running: restic would retry for minutes under a name the next init needs" ;;
 	*) pass "the check init gave up on was stopped with it" ;;
 	esac
@@ -576,6 +577,15 @@ if section restore-rebuilt "hotserve backup restore, on a rebuilt box"; then
 	# Before the first deploy there is no shared dir at all: restore makes
 	# it as liveswap would — the hotserve user's, 0750 — and fills it.
 	rm -rf /var/lib/liveswap/files-example
+	# An app with no data yet is not a failed backup. It is the job that
+	# says so — the launcher looks at no app's data — and the run passes.
+	if hotserve backup run --admin 127.0.0.1:2019 >/tmp/run-nodata.log 2>&1 \
+		&& grep -q 'files-example: no data yet (never deployed), skipping' /tmp/run-nodata.log \
+		&& ! grep -q 'files-example: ok' /tmp/run-nodata.log && grep -q 'backup-example: ok' /tmp/run-nodata.log; then
+		pass "an app with no data yet is skipped, on its job's word, and the run passes"
+	else
+		fail "a run over an app with no data: $(tail -5 /tmp/run-nodata.log)"
+	fi
 	rebuilt=$(hotserve backup restore files-example --admin 127.0.0.1:2019 --yes 2>&1)
 	if [ "$(cat "$FILES_SHARED/pages/index.md" 2>/dev/null)" = page ]; then
 		pass "restore before the first deploy puts the app's files back"
@@ -917,6 +927,38 @@ if section restore-waits "a restore waits for a backup that is running"; then
 	else
 		fail "the held backup: $(tail -5 /tmp/run-held.log)"
 	fi
+fi
+
+if section run-stopped "a run that is stopped stops its job, and nothing else"; then
+	# `systemctl stop hotserve-backup.service` reaches the run as SIGTERM.
+	# The job it is waiting on is a unit of its own, which the run stops;
+	# a unit with another app's name — an operator's restore of it, say —
+	# is none of its business, stopped or not.
+	rollback_journal_idle || fail "could not put the database into rollback-journal mode: $(sq_app 'pragma journal_mode')"
+	hold
+	systemd-run --quiet --collect --unit=hotserve-backup-files-example /bin/sleep 300
+	hotserve backup run --admin 127.0.0.1:2019 >/tmp/run-stopped.log 2>&1 &
+	run_pid=$!
+	if wait_for unit_running; then
+		kill -TERM "$run_pid"
+		wait "$run_pid"
+		stopped_rc=$?
+		if [ "$stopped_rc" -ne 0 ] && grep -q "stopped: the job this run was waiting on was stopped with it" /tmp/run-stopped.log && wait_for unit_stopped; then
+			pass "a run that is stopped stops the job it was waiting on, and says so"
+		else
+			fail "a stopped run (exit $stopped_rc, its job $(systemctl is-active "$unit")): $(tail -3 /tmp/run-stopped.log)"
+		fi
+		if [ "$(systemctl is-active hotserve-backup-files-example.service)" = active ]; then
+			pass "and leaves alone a unit it did not start, whatever its name"
+		else
+			fail "the stopped run took another app's unit with it: an operator's restore would have been cut off"
+		fi
+	else
+		kill "$run_pid" 2>/dev/null
+		fail "the held backup never started: $(tail -5 /tmp/run-stopped.log)"
+	fi
+	systemctl stop hotserve-backup-files-example.service 2>/dev/null
+	release
 fi
 
 if section ctrl-c "Ctrl-C stops a restore, and the unit with it"; then

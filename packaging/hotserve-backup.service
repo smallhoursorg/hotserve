@@ -34,10 +34,14 @@ ExecStart=/usr/bin/hotserve backup run
 # overlapping ones.
 TimeoutStartSec=infinity
 # The per-app jobs are transient units of their own, outside this one's
-# cgroup, so stopping this unit — or it dying — would leave the job it
-# was waiting on running, and the next hour would find that unit name
-# taken. Whenever this unit stops, however it stops, they stop with it.
-ExecStopPost=/usr/bin/systemctl stop hotserve-backup-*.service
+# cgroup. Stopping this unit stops the job it is waiting on, because the
+# command does that itself when it is told to stop (RunAll, backup/run.go)
+# — that one unit, by name, and no other. Nothing here stops units by
+# pattern: an app's unit name is also an operator's restore of that app
+# and a first backup run by hand, and a stop that reached those at the
+# end of every hourly run would leave a restore half done. A job this
+# unit did not get to stop (it was killed outright) finishes by itself,
+# and until then the next hour finds that app's name taken and says so.
 # Backups are background work: they yield to whatever is serving.
 Nice=10
 IOSchedulingClass=idle

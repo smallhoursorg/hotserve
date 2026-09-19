@@ -214,6 +214,41 @@ func TestInitShowsAGeneratedPasswordOnce(t *testing.T) {
 	t.Error("no password in the environment file")
 }
 
+// Stopped while `restic init` runs, the repository may already be there,
+// made with a password only this process has: it is shown before init
+// gives up, since nothing later will show it.
+func TestInitShowsTheGeneratedPasswordWhenStoppedWhileCreating(t *testing.T) {
+	o := initOpts(t)
+	o.Password = ""
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var password string
+	x := func(_ context.Context, c Cmd) error {
+		if c.Name != "restic" || c.Args[0] != "init" {
+			t.Errorf("nothing runs after an init that was stopped: %s %v", c.Name, c.Args)
+			return nil
+		}
+		for _, kv := range c.Env {
+			if pw, ok := strings.CutPrefix(kv, "RESTIC_PASSWORD="); ok {
+				password = pw
+			}
+		}
+		cancel()
+		return errors.New("signal: killed")
+	}
+	var out strings.Builder
+	err := Init(ctx, o, x, &out)
+	if err == nil || !strings.Contains(err.Error(), "stopped while creating") {
+		t.Fatalf("want init to say it was stopped, got %v", err)
+	}
+	if password == "" || !strings.Contains(out.String(), password) {
+		t.Errorf("the password the repository may have been made with must be shown:\n%s", out.String())
+	}
+	if _, err := os.Stat(o.EnvFile); err == nil {
+		t.Error("nothing is scheduled by an init that was stopped")
+	}
+}
+
 // A key that can read but not write gets through `restic cat config`
 // and fails on the first real backup. Installing the settings anyway
 // would arm the hourly timer to fail for ever, and the retry would
