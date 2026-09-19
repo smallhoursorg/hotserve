@@ -90,9 +90,12 @@ func TestEnvNamesFollowsImports(t *testing.T) {
 	write(t, dir+"/sites/a.caddy", "{$DOMAIN:example.com} {\n\timport ../Caddyfile\n\timport deeper/*\n}\n")
 	write(t, dir+"/sites/deeper/b", "root * {$WEBROOT}\n")
 	write(t, dir+"/abs.caddy", "respond {$GREETING}\n")
-	got, bare, err := envNames(dir + "/Caddyfile")
+	got, bare, imported, err := envNames(dir + "/Caddyfile")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if want := []string{"CONF"}; !reflect.DeepEqual(imported, want) {
+		t.Fatalf("used in an import = %v, want %v", imported, want)
 	}
 	// DOMAIN and CONF are only ever written with a default.
 	if want := []string{"ACME_EMAIL", "BEHIND_A_DEFAULT", "GREETING", "QUOTED", "WEBROOT"}; !reflect.DeepEqual(bare, want) {
@@ -156,10 +159,13 @@ func TestMakeRefusesAPlanThatDependsOnTheEnvironment(t *testing.T) {
 		"a variable an arbitrary value breaks": {":{$PORT:8080} {\n}\n", nil}, // cleared by the trial value "1"
 		// The server, with ENV=staging, imports another file, which may
 		// say anything about the root: not knowable here, so refused.
-		"a variable no trial value adapts with": {"import sites/{$ENV:prod}.caddy\n", []string{"ENV", "does not adapt"}},
-		"the root":                              {"liveswap {\n\troot {$LIVESWAP_ROOT:/var/lib/liveswap}\n}\n", []string{"LIVESWAP_ROOT"}},
-		"a backup path":                         {"backup {\n\tsqlite {$DB:app.db}\n}\n", []string{"DB"}},
-		"both, among others":                    {"{$DOMAIN:example.com} :{$PORT:80} {$LIVESWAP_ROOT:/var/lib/liveswap} {$DB:app.db}\n", []string{"DB, LIVESWAP_ROOT"}},
+		"a variable that names a file to import": {"import sites/{$ENV:prod}.caddy\n", []string{"ENV", "imports by"}},
+		// A glob that matches nothing is not an error, so this adapts with
+		// any value at all — and says nothing of what the server reads.
+		"a variable in an import glob": {"import sites/{$ENV:prod}/*.caddy\n", []string{"ENV", "imports by"}},
+		"the root":                     {"liveswap {\n\troot {$LIVESWAP_ROOT:/var/lib/liveswap}\n}\n", []string{"LIVESWAP_ROOT"}},
+		"a backup path":                {"backup {\n\tsqlite {$DB:app.db}\n}\n", []string{"DB"}},
+		"both, among others":           {"{$DOMAIN:example.com} :{$PORT:80} {$LIVESWAP_ROOT:/var/lib/liveswap} {$DB:app.db}\n", []string{"DB, LIVESWAP_ROOT"}},
 		// The ordinary production file: variables with no default, which
 		// an empty environment makes a parse error of. Made-up values, of
 		// the kind the adapter takes in each place, and the plan is what

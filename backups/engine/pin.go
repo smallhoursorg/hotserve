@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/smallhoursorg/hotserve/backups/nofollow"
 	"golang.org/x/sys/unix"
 )
 
@@ -92,15 +93,12 @@ func pinRoot(root string) (pin, error) {
 // anything that would leave p. "No such file" stays that, for the
 // caller to tell absence from everything else.
 func (p pin) beneath(rel string) (pin, error) {
-	fd, err := unix.Openat2(p.fd, rel, &unix.OpenHow{
-		Flags:   unix.O_PATH | unix.O_CLOEXEC,
-		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS,
-	})
-	switch {
-	case errors.Is(err, unix.ELOOP):
+	fd, err := nofollow.Open(p.fd, rel, unix.O_PATH)
+	if errors.Is(err, nofollow.ErrLink) {
 		return pin{}, errLink
-	case err != nil:
-		return pin{}, &os.PathError{Op: "open", Path: rel, Err: err}
+	}
+	if err != nil {
+		return pin{}, err
 	}
 	return pin{fd}, nil
 }

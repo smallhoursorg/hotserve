@@ -133,9 +133,11 @@ func Run(ctx context.Context, cfg Config, r Runner) (*record.Status, error) {
 	if err := os.Mkdir(x.dir, 0o700); err != nil {
 		return x.finish(statusPath, err)
 	}
-	// By the time this runs every mount under it has been taken away
-	// (each by its own defer); what is left is the run's own files.
-	defer os.RemoveAll(x.dir) //nolint:errcheck // root's own directory under /run
+	// Every mount under it has been taken away by then, each by its own
+	// defer — but a mount that would not go is the app's own data, bound
+	// here, and root must never walk into it deleting: removeRunDir does
+	// not recurse.
+	defer removeRunDir(x.dir)
 
 	return x.finish(statusPath, x.apps(ctx))
 }
@@ -204,15 +206,26 @@ func (x *run) carryLastOK(name string) {
 // otherwise stay for good. Names only are read here — the parent is
 // root's — and what is inside is removed by a unit, as always.
 func (x *run) forget(ctx context.Context, p *plan.Plan) {
-	entries, _ := os.ReadDir(filepath.Join(x.cfg.StateDir, "staging"))
+	warn := func(format string, a ...any) {
+		x.status.Warning = strings.TrimSpace(x.status.Warning + " " + record.Text(fmt.Sprintf(format, a...)))
+	}
+	entries, err := os.ReadDir(filepath.Join(x.cfg.StateDir, "staging"))
+	if err != nil {
+		warn("staging could not be looked through for what apps that no longer declare a backup left there: %v.", err)
+		return
+	}
 	for _, e := range entries {
 		name := e.Name()
 		if _, declared := p.Apps[name]; declared || !backupdecl.ValidAppName(name) || !e.IsDir() {
 			continue
 		}
 		dir := filepath.Join(x.cfg.StateDir, "staging", name)
-		if x.clean(ctx, name, dir) == nil {
-			_ = os.Remove(dir) // rmdir: fails, harmlessly, if the unit left anything
+		// Plaintext that stays is said, not shrugged at: the run goes
+		// on, and the record carries it.
+		if err := x.clean(ctx, name, dir); err != nil {
+			warn("plaintext copies of %s, which no longer declares a backup, may still be in %s: emptying it failed: %v.", name, dir, err)
+		} else if err := os.Remove(dir); err != nil { // rmdir: refuses a directory the unit left anything in
+			warn("%s could not be removed: %v.", dir, err)
 		}
 	}
 }
@@ -266,12 +279,26 @@ func (x *run) sweep() error {
 	}
 	for _, e := range entries {
 		if e.IsDir() {
-			if err := os.RemoveAll(filepath.Join(x.cfg.RunDir, e.Name())); err != nil {
-				return err
-			}
+			removeRunDir(filepath.Join(x.cfg.RunDir, e.Name()))
 		}
 	}
 	return nil
+}
+
+// removeRunDir removes a run's directory: its files, and its mount
+// points, which are empty directories once unmounted. It never
+// descends. A mount point that is still mounted holds an app's data,
+// and rmdir refuses it; it is left for the next sweep, which unmounts
+// first.
+func removeRunDir(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		_ = os.Remove(filepath.Join(dir, e.Name())) // unlink or rmdir, never a walk
+	}
+	_ = os.Remove(dir)
 }
 
 // mountsUnder lists the mount points beneath dir, deepest first.
@@ -424,6 +451,14 @@ func (x *run) app(ctx context.Context, root, name string, decl *backupdecl.Confi
 	}
 	defer unmountShared()
 
+	excludeFile := filepath.Join(x.dir, name+".exclude")
+	if err := os.WriteFile(excludeFile, []byte(excludes(name, decl)), 0o644); err != nil { //nolint:gosec // read by the upload unit; it holds the app's own declared paths
+		return fail(record.Failed, "%v", err)
+	}
+	if err := os.Chmod(excludeFile, 0o644); err != nil { //nolint:gosec // as above; the umask may have cut it
+		return fail(record.Failed, "%v", err)
+	}
+
 	dumped := x.dump(ctx, name, sharedSource, staging, declFile, decl, app)
 	if ctx.Err() != nil {
 		return fail(record.Failed, "interrupted before anything was uploaded")
@@ -434,6 +469,7 @@ func (x *run) app(ctx context.Context, root, name string, decl *backupdecl.Confi
 		return fail(record.Failed, "nothing that is declared could be read: %s", firstDetail(app.Items))
 	}
 
+	binds = append(binds, unit.Bind{Source: excludeFile, Dest: excludePath})
 	id, class, detail, wide := x.upload(ctx, name, binds, masked)
 	app.Class, app.Detail = class, detail
 	if id == "" {
@@ -634,6 +670,39 @@ var dataOwner = func() (uid, gid int, err error) {
 	return uid, gid, nil
 }
 
+// excludePath is where the upload unit finds its exclude file: outside
+// /backup/<app>, so it is not itself backed up.
+const excludePath = "/backup-exclude"
+
+// excludes is the restic exclude file for one app: every declared
+// database that sits inside a declared files path, and its sidecars, by
+// their exact paths in the unit's view. It stands behind the masks,
+// which are made when the unit starts and cover only what exists then:
+// a database the app creates, or puts back under its name, while restic
+// walks is not masked, and is excluded all the same. (And what is
+// excluded is not in the snapshot at all, not even as the mask's empty
+// file.)
+//
+// restic reads each line as a pattern and expands $VAR in it
+// [measured], so every pattern character is escaped and every dollar
+// doubled: a database called app*.db excludes itself and not appX.db.
+func excludes(app string, decl *backupdecl.Config) string {
+	var b strings.Builder
+	for _, p := range decl.Files {
+		for _, db := range decl.SQLite {
+			if p != "." && db != p && !strings.HasPrefix(db, p+"/") {
+				continue
+			}
+			for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
+				b.WriteString(excludeEscaper.Replace(path.Join("/backup", app, "files", db)+suffix) + "\n")
+			}
+		}
+	}
+	return b.String()
+}
+
+var excludeEscaper = strings.NewReplacer(`\`, `\\`, `*`, `\*`, `?`, `\?`, `[`, `\[`, `$`, `$$`)
+
 var snapshotRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // upload runs restic. It returns the id of the snapshot this run made —
@@ -643,6 +712,7 @@ func (x *run) upload(ctx context.Context, app string, binds []unit.Bind, masked 
 	o, err := x.start(ctx, unit.Spec{
 		Name: x.name("upload", app), Description: "hotserve backup: upload " + app,
 		Argv: []string{x.cfg.Restic, "backup", "--quiet", "--json", "--retry-lock", retryLock,
+			"--exclude-file", excludePath,
 			"--host", "hotserve", "--tag", "hotserve", "--tag", "app:" + app, "/backup/" + app},
 		// An account of its own, so that the hotserve uid — the server,
 		// every app — can neither read this process's environment nor

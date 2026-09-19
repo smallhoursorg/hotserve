@@ -21,8 +21,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/smallhoursorg/hotserve/backups/nofollow"
+	"golang.org/x/sys/unix"
 )
 
 // sqlite3 is Debian's, by absolute path.
@@ -153,28 +155,27 @@ func one(ctx context.Context, shared, staging, rel string) Result {
 // inspect decides whether rel is a SQLite database file, without ever
 // blocking on it and without following a link out of the shared dir.
 func inspect(shared, rel string) Result {
-	root, err := os.OpenRoot(shared)
+	dir, err := unix.Open(shared, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return Result{Class: Failed, Detail: err.Error()}
 	}
-	defer root.Close() //nolint:errcheck // read-only
-	// A declared path names the database file itself. os.Root follows a
-	// link that stays inside the shared dir (and refuses one that does
-	// not), so a link is turned away here, by name: the copy, and any
-	// restore of it, would otherwise sit at a path that is not where
-	// the data is.
-	if st, err := root.Lstat(rel); err == nil && st.Mode()&fs.ModeSymlink != 0 {
-		return Result{Class: NotADatabase, Detail: "a symbolic link; declare the file it points to"}
-	}
-	// O_NONBLOCK: opening a FIFO for reading otherwise waits for a
-	// writer.
-	f, err := root.OpenFile(rel, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	defer unix.Close(dir) //nolint:errcheck // a path descriptor
+	// A declared path names the database file itself: no symbolic link
+	// anywhere in it is followed — not the last component and not one
+	// on the way — and nothing leaves the shared dir. The copy, and any
+	// restore of it, would otherwise sit at a path that is not where the
+	// data is. O_NONBLOCK: opening a FIFO for reading otherwise waits
+	// for a writer.
+	fd, err := nofollow.Open(dir, rel, unix.O_RDONLY|unix.O_NONBLOCK)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return Result{Class: Missing, Detail: "no such file under the shared dir"}
+	case errors.Is(err, nofollow.ErrLink):
+		return Result{Class: NotADatabase, Detail: "a symbolic link is in the way; declare the real path"}
 	case err != nil:
 		return Result{Class: Failed, Detail: err.Error()}
 	}
+	f := os.NewFile(uintptr(fd), rel)
 	defer f.Close() //nolint:errcheck // read-only
 	st, err := f.Stat()
 	if err != nil {

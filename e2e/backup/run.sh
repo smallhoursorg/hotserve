@@ -81,7 +81,13 @@ grep -q '^/backup/blog/files/uploads/a.png$' /root/ls.blog && grep -q '^/backup/
 grep -q private.txt /root/ls.blog && fail "blog's snapshot holds a file that was not declared" || pass "what blog did not declare is not in its snapshot"
 grep -q '/backup/blog/plan.json$' /root/ls.blog && pass "the snapshot carries its own declaration" || fail "no plan.json in blog's snapshot"
 # files . takes in data/shop.db: the live file must never be what is uploaded.
-awk '$NF=="/backup/shop/files/data/shop.db" {print $4}' /root/ls.shop | grep -qx 0 && pass "a database inside a files path is uploaded there as nothing: the live file is masked" || fail "the live database under files/: $(grep 'files/data/shop.db' /root/ls.shop)"
+if ! grep -q '/backup/shop/files/r.txt$' /root/ls.shop; then
+	fail "shop's snapshot could not be listed, so nothing is known about what is in it"
+elif grep -q '/backup/shop/files/data/shop.db' /root/ls.shop; then
+	fail "the live database, or something in its place, is in the snapshot under files/: $(grep 'files/data/shop.db' /root/ls.shop)"
+else
+	pass "a database inside a files path is not uploaded there at all: only its copy, under sqlite/"
+fi
 rm -rf /root/restored && rr restore -q --no-lock latest --tag app:shop --target /root/restored >/dev/null 2>&1
 [ "$(sqlite3 /root/restored/backup/shop/sqlite/data/shop.db 'pragma integrity_check; select count(*) from orders' 2>&1 | tr '\n' ' ')" = "ok 3 " ] && pass "the copy that comes back out of the repository is intact and has its rows" || fail "the restored copy: $(sqlite3 /root/restored/backup/shop/sqlite/data/shop.db 'pragma integrity_check; select count(*) from orders' 2>&1)"
 rr snapshots --no-lock --json 2>/dev/null | grep -o '"hostname":"[^"]*"' | sort -u | grep -qx '"hostname":"hotserve"' && pass "every snapshot is of host 'hotserve', whatever the box is called ($(hostname))" || fail "snapshot hostnames: $(rr snapshots --no-lock --json | grep -o '"hostname":"[^"]*"' | sort -u)"

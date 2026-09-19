@@ -14,6 +14,7 @@ import (
 	"github.com/smallhoursorg/hotserve/backups/dump"
 	"github.com/smallhoursorg/hotserve/backups/record"
 	"github.com/smallhoursorg/hotserve/backups/unit"
+	"github.com/smallhoursorg/hotserve/liveswap/backupdecl"
 )
 
 const snapA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -44,6 +45,7 @@ type box struct {
 	unmounted  []string
 	leftMounts []string
 	stopErr    error
+	failClean  string // the app whose clean unit fails
 }
 
 var roleRe = regexp.MustCompile(`^hotserve_backup_([a-z]+)[0-9]*_`)
@@ -152,6 +154,9 @@ func (b *box) Run(_ context.Context, s unit.Spec) (unit.Outcome, error) {
 		}
 		write(strings.Join(out, "\n"))
 	}
+	if role == "clean" && b.failClean != "" && strings.Contains(s.Name, "_clean_"+b.failClean+"_") {
+		return unit.Outcome{Result: "exit-code", ExitStatus: 1}, nil
+	}
 	if o, ok := b.outcome[role]; ok {
 		return o, nil
 	}
@@ -237,7 +242,7 @@ func TestWhatEachUnitIsGiven(t *testing.T) {
 		}
 		dests = append(dests, bind.Dest)
 	}
-	if got := strings.Join(dests, " "); got != "/backup/blog/sqlite /backup/blog/plan.json /backup/blog/files/uploads" {
+	if got := strings.Join(dests, " "); got != "/backup/blog/sqlite /backup/blog/plan.json /backup/blog/files/uploads /backup-exclude" {
 		t.Errorf("the upload unit's view: %s", got)
 	}
 	for _, s := range b.specs {
@@ -777,5 +782,87 @@ func TestInterruptedAfterTheDumpUploadsNothing(t *testing.T) {
 	}
 	if app := st.Apps["blog"]; app == nil || !strings.Contains(app.Detail, "interrupted") {
 		t.Fatalf("%+v", st.Apps["blog"])
+	}
+}
+
+// The exclude file stands behind the masks. restic reads a line as a
+// pattern and expands $VAR in it, so a declared name is escaped until
+// it means itself and nothing else.
+func TestExcludesNameExactlyTheDeclaredDatabases(t *testing.T) {
+	decl := &backupdecl.Config{
+		SQLite: []string{`da[t]a/app*.db`, `q?$HOME\x.db`, "elsewhere/other.db"},
+		Files:  []string{"da[t]a", "."},
+	}
+	got := excludes("blog", decl)
+	for _, want := range []string{
+		`/backup/blog/files/da\[t]a/app\*.db` + "\n",
+		`/backup/blog/files/da\[t]a/app\*.db-wal` + "\n",
+		`/backup/blog/files/q\?$$HOME\\x.db-journal` + "\n",
+		"/backup/blog/files/elsewhere/other.db-shm\n", // inside "."
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if none := excludes("blog", &backupdecl.Config{SQLite: []string{"app.db"}, Files: []string{"uploads"}}); none != "" {
+		t.Errorf("a database outside every files path is excluded from nothing, got %q", none)
+	}
+
+	b := newBox(t)
+	b.plan = fmt.Sprintf(`{"root":%q,"apps":{"blog":{"sqlite":["data/app.db"],"files":["."]}}}`, b.root)
+	b.ls = func(string) string { return "" }
+	var file string
+	b.before = func(s unit.Spec) {
+		if roleRe.FindStringSubmatch(s.Name)[1] != "upload" {
+			return
+		}
+		for _, bind := range s.Binds {
+			if bind.Dest == excludePath {
+				raw, _ := os.ReadFile(bind.Source)
+				file = string(raw)
+			}
+		}
+		if !strings.Contains(strings.Join(s.Argv, " "), "--exclude-file "+excludePath+" ") {
+			t.Errorf("restic is not told of it: %v", s.Argv)
+		}
+	}
+	if _, err := Run(context.Background(), b.cfg, b); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(file, "/backup/blog/files/data/app.db-wal\n") {
+		t.Fatalf("the upload unit's exclude file: %q", file)
+	}
+}
+
+// A mount that would not go is an app's data, bound into the run's
+// directory. Root never walks into it deleting.
+func TestRemovingARunDirNeverDescends(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "run")
+	stillMounted := filepath.Join(dir, "mount-1")
+	must(t, os.MkdirAll(stillMounted, 0o700))
+	must(t, os.MkdirAll(filepath.Join(dir, "mount-2"), 0o700)) // unmounted: empty
+	must(t, os.WriteFile(filepath.Join(stillMounted, "the-apps-database"), []byte("precious"), 0o600))
+	must(t, os.WriteFile(filepath.Join(dir, "plan.json"), []byte("{}"), 0o600))
+	removeRunDir(dir)
+	if raw, err := os.ReadFile(filepath.Join(stillMounted, "the-apps-database")); err != nil || string(raw) != "precious" {
+		t.Fatalf("what was under a mount point that is not empty was touched: %q, %v", raw, err)
+	}
+	for _, gone := range []string{"mount-2", "plan.json"} {
+		if _, err := os.Stat(filepath.Join(dir, gone)); err == nil {
+			t.Errorf("%s is still there", gone)
+		}
+	}
+}
+
+func TestPlaintextLeftByADepartedAppIsSaid(t *testing.T) {
+	b := newBox(t)
+	must(t, os.MkdirAll(filepath.Join(b.cfg.StateDir, "staging", "shop"), 0o700))
+	b.failClean = "shop"
+	st, err := Run(context.Background(), b.cfg, b)
+	if err != nil || st.Apps["blog"].Class != record.OK {
+		t.Fatalf("the run goes on: %+v, %v", st.Apps["blog"], err)
+	}
+	if !strings.Contains(st.Warning, "shop") || !strings.Contains(st.Warning, "may still be in") {
+		t.Fatalf("warning: %q", st.Warning)
 	}
 }

@@ -193,6 +193,7 @@ func (r *Runner) Run(ctx context.Context, s Spec) (Outcome, error) {
 	// taken as done by what the manager says of it.
 	look := time.NewTicker(r.lookEvery)
 	defer look.Stop()
+	unreadable := 0
 	for {
 		select {
 		case res := <-job:
@@ -205,7 +206,20 @@ func (r *Runner) Run(ctx context.Context, s Spec) (Outcome, error) {
 		case <-look.C:
 			p, err := r.conn.GetAllPropertiesContext(ctx, s.Name)
 			if err != nil {
-				continue // the next look, or the signal, will say
+				// Now and then is a manager busy; ten looks running is a
+				// unit that cannot be watched, and waiting on it for ever
+				// would hold the run's lock for ever. It is stopped, by
+				// name, and that is the error.
+				if unreadable++; unreadable >= 10 {
+					return Outcome{}, r.stop(s.Name, fmt.Errorf("%s: its state could not be read %d times running: %w", s.Name, unreadable, err))
+				}
+				continue
+			}
+			unreadable = 0
+			if str(p["LoadState"]) == "not-found" {
+				// Gone, and not as failed — a failed unit stays loaded
+				// until it is reset — so its command ended cleanly.
+				return Outcome{Result: "success"}, nil
 			}
 			switch str(p["ActiveState"]) {
 			case "failed":
@@ -246,7 +260,8 @@ func (r *Runner) reap(name, jobResult string) (Outcome, error) {
 	for {
 		var err error
 		if p, err = r.conn.GetAllPropertiesContext(ctx, name); err != nil {
-			return Outcome{}, fmt.Errorf("%s: start job ended %q and its status could not be read: %w", name, jobResult, err)
+			// Not knowing how it ended is not knowing that it ended.
+			return Outcome{}, r.stop(name, fmt.Errorf("%s: start job ended %q and its status could not be read: %w", name, jobResult, err))
 		}
 		if st := str(p["ActiveState"]); st == "inactive" || st == "failed" {
 			break

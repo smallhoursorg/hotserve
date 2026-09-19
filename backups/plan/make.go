@@ -81,9 +81,16 @@ func Make(ctx context.Context, caddyfile string) (*Plan, error) {
 		return p, "", err
 	}
 
-	names, needs, err := envNames(caddyfile)
+	names, needs, imported, err := envNames(caddyfile)
 	if err != nil {
 		return nil, err
+	}
+	// No value tried here says what the server imports with the value it
+	// has: `import sites/{$ENV:prod}/*.caddy` adapts with anything — a
+	// glob that matches nothing is not an error — and the files the
+	// server reads may say anything about the root.
+	if len(imported) > 0 {
+		return nil, fmt.Errorf("the Caddyfile imports by the environment variable(s) %s, so which files the server reads cannot be known here; a backup reads the Caddyfile without hotserve's environment — write those import paths literally", strings.Join(imported, ", "))
 	}
 
 	// The base: nothing set but what has to be, each of those at the
@@ -185,10 +192,12 @@ var (
 // envNames returns every {$NAME} in the Caddyfile and the files it
 // imports, however deep, and those among them written somewhere with
 // no default. An import that names no file — a snippet, a glob matching
-// nothing — contributes nothing.
-func envNames(caddyfile string) (all, noDefault []string, err error) {
+// nothing — contributes nothing. inImport are the names used in an
+// import's argument.
+func envNames(caddyfile string) (all, noDefault, inImport []string, err error) {
 	seen := map[string]bool{}
 	names := map[string]bool{} // true: written somewhere with no default
+	importVars := map[string]bool{}
 	var scan func(file string) error
 	scan = func(file string) error {
 		if seen[file] {
@@ -203,8 +212,12 @@ func envNames(caddyfile string) (all, noDefault []string, err error) {
 			names[string(m[1])] = names[string(m[1])] || len(m[2]) == 0
 		}
 		for _, m := range importRe.FindAllSubmatch(raw, -1) {
+			arg := string(m[1]) + string(m[2]) + string(m[3])
+			for _, v := range envRe.FindAllStringSubmatch(arg, -1) {
+				importVars[v[1]] = true
+			}
 			// As the base adapt sees it: defaults in, unset names empty.
-			pattern := substRe.ReplaceAllString(string(m[1])+string(m[2])+string(m[3]), "$1")
+			pattern := substRe.ReplaceAllString(arg, "$1")
 			if !filepath.IsAbs(pattern) {
 				pattern = filepath.Join(filepath.Dir(file), pattern)
 			}
@@ -221,8 +234,12 @@ func envNames(caddyfile string) (all, noDefault []string, err error) {
 		return nil
 	}
 	if err := scan(caddyfile); err != nil {
-		return nil, nil, fmt.Errorf("reading the Caddyfile for {$NAME}: %w", err)
+		return nil, nil, nil, fmt.Errorf("reading the Caddyfile for {$NAME}: %w", err)
 	}
+	for n := range importVars {
+		inImport = append(inImport, n)
+	}
+	sort.Strings(inImport)
 	for n, bare := range names {
 		all = append(all, n)
 		if bare {
@@ -231,5 +248,5 @@ func envNames(caddyfile string) (all, noDefault []string, err error) {
 	}
 	sort.Strings(all)
 	sort.Strings(noDefault)
-	return all, noDefault, nil
+	return all, noDefault, inImport, nil
 }

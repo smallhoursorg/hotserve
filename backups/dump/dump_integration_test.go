@@ -103,7 +103,7 @@ func TestIntegrationWhatIsNotADatabaseIsNeverGivenToSqlite3(t *testing.T) {
 		"dir.db":                NotADatabase,
 		"link.db":               NotADatabase,
 		"absent.db":             Missing,
-		"sub/escape/outside.db": Failed, // a link out of the shared dir is refused, not followed
+		"sub/escape/outside.db": NotADatabase, // a link on the way is refused, not followed
 	} {
 		done := make(chan Result, 1)
 		go func() { done <- single(t, shared, staging, rel) }()

@@ -5,6 +5,7 @@ package engine
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"sync/atomic"
@@ -22,6 +23,13 @@ import (
 func TestIntegrationWhatIsBoundIsWhatWasPinnedWhateverTheAppDoesToTheName(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root, mount(2) and a system manager")
+	}
+	// Its own account: a fresh box has none, and the packages run in an
+	// order that does not make one first.
+	if exec.Command("id", "hotserve-backup").Run() != nil {
+		if out, err := exec.Command("useradd", "--system", "--no-create-home", "--shell", "/usr/sbin/nologin", "hotserve-backup").CombinedOutput(); err != nil {
+			t.Fatalf("useradd: %v: %s", err, out)
+		}
 	}
 	r, err := unit.NewSystemRunner(context.Background())
 	if err != nil {

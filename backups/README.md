@@ -119,17 +119,25 @@ through a symlinked root the snapshot holds the data, not the link. Each
 app is its own `(host, paths)` group, so a `forget` policy applies to
 each app on its own.
 
-A declared database that sits inside a declared `files` path is masked
-there, with its `-wal`, `-shm` and `-journal`: under `files/` it is an
-empty, mode-0 file, and its contents are under `sqlite/`. The live file
-is never what is uploaded.
+A declared database that sits inside a declared `files` path is not
+uploaded there, nor its `-wal`, `-shm` and `-journal`: its contents are
+under `sqlite/`. Two things see to that. Each is masked in the upload
+unit's view — an empty, unreadable file where it was, made by systemd
+when the unit starts, so the live bytes are not there to read. And each
+is named, exactly, in a root-written restic exclude file, because a mask
+covers only what existed when the unit started: a database the app
+creates, or puts back under its name, while restic walks is excluded all
+the same. (restic reads an exclude line as a pattern and expands `$VAR`
+in it, so every pattern character is escaped and every dollar doubled:
+`app*.db` excludes itself, and not `appX.db`.)
 
 ## Databases
 
 A declared path is handed to `sqlite3` only if it is, right now, a
-regular file with a SQLite header, reached without following a link out
-of `shared/`: a FIFO, a device, a directory, a symbolic link, an empty
-file and a missing file are each reported and never opened.
+regular file with a SQLite header, reached without following a symbolic
+link anywhere on the way: a FIFO, a device, a directory, a link, a path
+through a link, an empty file and a missing file are each reported and
+never opened.
 
 `sqlite3` is started on an in-memory database and `ATTACH`es the real
 one as `file:<path>?mode=rw`. Given the path directly, the `sqlite3`
@@ -179,9 +187,11 @@ they hold the database's path, and `busy.db` is not busy.
 - A liveswap `root`, an app's name or a backup path that depends on a
   Caddyfile `{$NAME}`. (hotserve itself refuses `root {env.X}` together
   with a `backup` block; `{$NAME}` it never sees.) See below.
-- A variable that no made-up value adapts with —
-  `import sites/{$ENV:prod}.caddy` — since what the server imports when
-  it is set cannot be known here.
+- A variable in an `import` — `import sites/{$ENV:prod}/*.caddy` —
+  since which files the server reads when it is set cannot be known
+  here, and a glob that matches nothing adapts with any value. Write
+  import paths literally.
+- A variable that no made-up value adapts with.
 - A Caddyfile that imports from outside `/etc/hotserve`: the plan
   unit's view holds nothing else.
 - A symbolic link anywhere in a declared path, or at `<app>/shared`:
@@ -190,6 +200,8 @@ they hold the database's path, and `busy.db` is not busy.
 - An `<app>/shared` that does not belong to the `hotserve` user.
 - A run's leftover unit that will not stop within two minutes: the run
   is refused, and the record says why.
+- A unit whose state cannot be read ten looks running (five minutes) is
+  stopped, and that step fails.
 
 ## The Caddyfile is read without the server's environment
 

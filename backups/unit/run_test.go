@@ -16,6 +16,7 @@ type fakeConn struct {
 	props     map[string]any
 	stopErr   error
 	stopped   []string
+	readErr   error // what reading the unit's state returns, when set
 }
 
 func (f *fakeConn) StartTransientUnitContext(_ context.Context, _ string, _ string, _ []sddbus.Property, ch chan<- string) (int, error) {
@@ -35,6 +36,9 @@ func (f *fakeConn) StopUnitContext(_ context.Context, name, _ string, ch chan<- 
 }
 
 func (f *fakeConn) GetAllPropertiesContext(context.Context, string) (map[string]any, error) {
+	if f.readErr != nil && len(f.stopped) == 0 {
+		return nil, f.readErr
+	}
 	return f.props, nil
 }
 func (f *fakeConn) ResetFailedUnitContext(context.Context, string) error { return nil }
@@ -75,5 +79,40 @@ func TestAUnitThatCannotBeStoppedIsSaidNotToBeGone(t *testing.T) {
 	}
 	if err := fakeRunner(c).Stop("anything.service"); err == nil {
 		t.Fatal("a name that is not one of this package's was stopped")
+	}
+}
+
+// A unit whose state cannot be read is not waited on for ever — that
+// would hold the run's lock for ever: after ten looks it is stopped, by
+// name, and that is the error.
+func TestAUnitThatCannotBeWatchedIsStoppedNotWaitedOn(t *testing.T) {
+	c := &fakeConn{readErr: errors.New("the manager is not answering"), props: map[string]any{"ActiveState": "inactive"}}
+	done := make(chan error, 1)
+	go func() { _, err := fakeRunner(c).Run(context.Background(), validSpec()); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil || len(c.stopped) != 1 || c.stopped[0] != validSpec().Name {
+			t.Fatalf("err %v, stopped %v", err, c.stopped)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("still waiting")
+	}
+}
+
+// Gone with no word of its job and no failure on record: a failed unit
+// stays loaded until it is reset, so this one ended cleanly.
+func TestAUnitThatIsGoneEndedCleanly(t *testing.T) {
+	out, err := fakeRunner(&fakeConn{props: map[string]any{"LoadState": "not-found", "ActiveState": "inactive"}}).Run(context.Background(), validSpec())
+	if err != nil || !out.OK() {
+		t.Fatalf("%+v, %v", out, err)
+	}
+}
+
+// Not knowing how a unit ended is not knowing that it ended.
+func TestAStatusThatCannotBeReadAfterTheJobEndsStopsTheUnit(t *testing.T) {
+	c := &fakeConn{jobResult: "dependency", readErr: errors.New("no answer"), props: map[string]any{"ActiveState": "inactive"}}
+	_, err := fakeRunner(c).Run(context.Background(), validSpec())
+	if err == nil || len(c.stopped) != 1 {
+		t.Fatalf("err %v, stopped %v", err, c.stopped)
 	}
 }

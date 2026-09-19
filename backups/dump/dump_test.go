@@ -39,7 +39,7 @@ func TestInspect(t *testing.T) {
 
 	for rel, want := range map[string]Class{
 		"real.db":               OK,
-		"sub/inside/../real.db": OK, // a directory link that stays inside is the app's own business
+		"sub/inside/real.db":    NotADatabase, // a link on the way, though it stays inside
 		"fifo.db":               NotADatabase,
 		"empty.db":              NotADatabase,
 		"short.db":              NotADatabase,
@@ -48,7 +48,7 @@ func TestInspect(t *testing.T) {
 		"link.db":               NotADatabase,
 		"out-link.db":           NotADatabase,
 		"absent.db":             Missing,
-		"sub/escape/outside.db": Failed, // a way out of the shared dir is refused, not followed
+		"sub/escape/outside.db": NotADatabase, // a link on the way, and out of the shared dir
 	} {
 		done := make(chan Result, 1)
 		go func() { done <- inspect(shared, rel) }()
