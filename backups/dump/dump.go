@@ -29,8 +29,9 @@ import (
 var sqlite3 = "/usr/bin/sqlite3"
 
 // busyTimeout is how long sqlite3 waits on a locked database; its own
-// default is not to wait at all.
-const busyTimeout = 30 * time.Second
+// default is not to wait at all. A variable so a test need not wait
+// for it.
+var busyTimeout = 30 * time.Second
 
 // openWithin is how long sqlite3 has to open the database, which is not
 // how long it has to copy it. The copy's target file appears some ten
@@ -70,6 +71,16 @@ const (
 	CopyIsDamaged Class = "copy is damaged"
 	Failed        Class = "failed"
 )
+
+// Known reports whether c is one of the classes above: what root
+// checks before it believes a dump unit.
+func Known(c Class) bool {
+	switch c {
+	case OK, Missing, NotADatabase, NeverOpened, DiskFull, Busy, CopyIsDamaged, Failed:
+		return true
+	}
+	return false
+}
 
 // Result is one declared database.
 type Result struct {
@@ -116,9 +127,13 @@ func one(ctx context.Context, shared, staging, rel string) Result {
 		if errors.Is(err, errNeverOpened) {
 			return Result{Class: NeverOpened, Detail: fmt.Sprintf("sqlite3 had not opened the database after %s and was killed: the path stopped being a file it could open", openWithin)}
 		}
-		return classify(stderr)
+		return classify(ctx, err, stderr)
 	}
 	stdout, stderr, err := run(ctx, target, "PRAGMA src.integrity_check", "")
+	if ctx.Err() != nil {
+		_ = os.Remove(target) // as above
+		return Result{Class: Failed, Detail: "interrupted"}
+	}
 	// A damaged copy is reported in two ways [measured]: what is wrong
 	// on stdout with exit 0, or "malformed" on stderr with exit 1. Only
 	// exactly "ok" and exit 0 is a good copy.
@@ -196,8 +211,9 @@ func inspect(shared, rel string) Result {
 // sqlite3 is killed — this process's own child — and the error is
 // errNeverOpened.
 func run(ctx context.Context, db, sql, appears string) (stdout, stderr string, err error) {
-	// -init /dev/null: sqlite3 otherwise reads ~/.sqliterc, and HOME may
-	// be a directory the app writes.
+	// -init /dev/null and a HOME that is nowhere: sqlite3 otherwise
+	// reads ~/.sqliterc, and must never be one environment variable
+	// away from reading the app's.
 	//nolint:gosec // the program is a constant path; db is a declared path under the shared dir, which is the point
 	cmd := exec.CommandContext(ctx, sqlite3, "-batch", "-bail", "-init", "/dev/null",
 		"-cmd", fmt.Sprintf(".timeout %d", busyTimeout.Milliseconds()),
@@ -266,13 +282,22 @@ func uri(abs string) string {
 	return b.String()
 }
 
-func classify(stderr string) Result {
-	low := strings.ToLower(stderr)
-	switch {
-	case strings.Contains(low, "disk is full") || strings.Contains(low, "disk full"):
-		return Result{Class: DiskFull, Detail: "the copy needs as much free space as the database is large"}
-	case strings.Contains(low, "database is locked") || strings.Contains(low, "busy"):
-		return Result{Class: Busy, Detail: fmt.Sprintf("still locked after %s", busyTimeout)}
+// classify puts a failed sqlite3 into words by its exit status, which
+// is SQLite's result code — not by looking for words in what it
+// printed, which holds the database's path: a database called busy.db
+// is not busy.
+func classify(ctx context.Context, err error, stderr string) Result {
+	if ctx.Err() != nil {
+		return Result{Class: Failed, Detail: "interrupted"}
+	}
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		switch exit.ExitCode() {
+		case 5, 6: // SQLITE_BUSY, SQLITE_LOCKED
+			return Result{Class: Busy, Detail: fmt.Sprintf("still locked after %s", busyTimeout)}
+		case 13: // SQLITE_FULL
+			return Result{Class: DiskFull, Detail: "the copy needs as much free space as the database is large"}
+		}
 	}
 	return Result{Class: Failed, Detail: firstLine(stderr)}
 }

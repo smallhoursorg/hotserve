@@ -84,7 +84,9 @@ func write(t *testing.T, path, body string) {
 
 func TestEnvNamesFollowsImports(t *testing.T) {
 	dir := t.TempDir()
-	write(t, dir+"/Caddyfile", "{\n\temail {$ACME_EMAIL}\n}\nimport sites/*.caddy\nimport snippet-name arg\nimport "+dir+"/abs.caddy\n")
+	write(t, dir+"/Caddyfile", "{\n\temail {$ACME_EMAIL}\n}\nimport sites/*.caddy\nimport snippet-name arg\nimport "+dir+"/abs.caddy\nimport \"quoted dir/q.caddy\"\nimport {$CONF:byenv}/e.caddy\n")
+	write(t, dir+"/quoted dir/q.caddy", "respond {$QUOTED}\n")
+	write(t, dir+"/byenv/e.caddy", "respond {$BEHIND_A_DEFAULT}\n")
 	write(t, dir+"/sites/a.caddy", "{$DOMAIN:example.com} {\n\timport ../Caddyfile\n\timport deeper/*\n}\n")
 	write(t, dir+"/sites/deeper/b", "root * {$WEBROOT}\n")
 	write(t, dir+"/abs.caddy", "respond {$GREETING}\n")
@@ -92,7 +94,7 @@ func TestEnvNamesFollowsImports(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"ACME_EMAIL", "DOMAIN", "GREETING", "WEBROOT"}; !reflect.DeepEqual(got, want) {
+	if want := []string{"ACME_EMAIL", "BEHIND_A_DEFAULT", "CONF", "DOMAIN", "GREETING", "QUOTED", "WEBROOT"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("names = %v, want %v", got, want)
 	}
 }
@@ -100,8 +102,9 @@ func TestEnvNamesFollowsImports(t *testing.T) {
 // fakeHotserve stands in for `hotserve adapt`: the root comes from
 // {$LIVESWAP_ROOT:/var/lib/liveswap}, a backup path from {$DB:app.db},
 // the port from {$PORT:8080} — refused unless numeric, as the real
-// adapter refuses a site address — and {$DOMAIN} changes nothing a
-// plan holds. It fails if anything of the caller's environment
+// adapter refuses a site address — {$DOMAIN} changes nothing a plan
+// holds, and {$ENV:prod} names a file to import, so that nothing but
+// "prod" adapts. It fails if anything of the caller's environment
 // reaches it.
 func fakeHotserve(t *testing.T) {
 	t.Helper()
@@ -109,6 +112,7 @@ func fakeHotserve(t *testing.T) {
 	write(t, script, `#!/bin/sh
 [ -n "$CALLER_SECRET" ] && { echo "the caller's environment reached the adapter" >&2; exit 1; }
 case "${PORT:-8080}" in *[!0-9]*) echo "Error: invalid port" >&2; exit 1;; esac
+[ "${ENV:-prod}" = prod ] || { echo "Error: File to import not found: sites/$ENV.caddy" >&2; exit 1; }
 printf '{"apps":{"http":{"domain":"%s"},"liveswap":{"root":"%s","apps":{"blog":{"backup":{"sqlite":["%s"]}}}}}}' "${DOMAIN:-example.com}" "${LIVESWAP_ROOT:-/var/lib/liveswap}" "${DB:-app.db}"
 `)
 	old := hotserve
@@ -126,10 +130,13 @@ func TestMakeRefusesAPlanThatDependsOnTheEnvironment(t *testing.T) {
 	}{
 		"no variables":                         {"liveswap {\n}\n", nil},
 		"a variable that is not the plan's":    {"{$DOMAIN} {\n}\n", nil},
-		"a variable an arbitrary value breaks": {":{$PORT:8080} {\n}\n", nil},
-		"the root":                             {"liveswap {\n\troot {$LIVESWAP_ROOT:/var/lib/liveswap}\n}\n", []string{"LIVESWAP_ROOT"}},
-		"a backup path":                        {"backup {\n\tsqlite {$DB:app.db}\n}\n", []string{"DB"}},
-		"both, among others":                   {"{$DOMAIN} :{$PORT} {$LIVESWAP_ROOT} {$DB}\n", []string{"DB, LIVESWAP_ROOT"}},
+		"a variable an arbitrary value breaks": {":{$PORT:8080} {\n}\n", nil}, // cleared by the trial value "1"
+		// The server, with ENV=staging, imports another file, which may
+		// say anything about the root: not knowable here, so refused.
+		"a variable no trial value adapts with": {"import sites/{$ENV:prod}.caddy\n", []string{"ENV", "does not adapt"}},
+		"the root":                              {"liveswap {\n\troot {$LIVESWAP_ROOT:/var/lib/liveswap}\n}\n", []string{"LIVESWAP_ROOT"}},
+		"a backup path":                         {"backup {\n\tsqlite {$DB:app.db}\n}\n", []string{"DB"}},
+		"both, among others":                    {"{$DOMAIN} :{$PORT} {$LIVESWAP_ROOT} {$DB}\n", []string{"DB, LIVESWAP_ROOT"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			file := filepath.Join(t.TempDir(), "Caddyfile")

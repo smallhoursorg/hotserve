@@ -120,7 +120,7 @@ func TestIntegrationWhatIsNotADatabaseIsNeverGivenToSqlite3(t *testing.T) {
 
 // The app swaps its database for something else after the checks — a
 // FIFO, which blocks a sqlite3 given the path directly for ever; a
-// socket; nothing at all. Each is an error at once, nothing is created
+// directory; a text file; nothing at all. Each is an error at once, nothing is created
 // in the app's directory, and the next database is still dumped.
 func TestIntegrationWhatIsSwappedInAfterTheChecksFailsAtOnce(t *testing.T) {
 	for what, swap := range map[string]func(string) error{
@@ -224,7 +224,7 @@ func TestIntegrationAReadOnlyFifoIsKilledAtTheOpenBound(t *testing.T) {
 	res := Databases(context.Background(), shared, staging, []string{"swapped.db", "next.db"})
 	took := time.Since(start)
 	if res[0].Class != NeverOpened {
-		t.Fatalf("the read-only FIFO: %+v (if it failed at once, this sqlite3 no longer retries read-only and the bound has nothing left to do)", res[0])
+		t.Fatalf("the read-only FIFO: %+v (if it failed at once, this sqlite3 does not retry read-only, and the bound has nothing to do)", res[0])
 	}
 	if took < 3*time.Second || took > 20*time.Second {
 		t.Fatalf("took %s with a 3s bound", took)
@@ -277,7 +277,28 @@ func TestIntegrationALockedDatabaseIsWaitedForBeforeTheTargetExists(t *testing.T
 		t.Fatalf("a database locked for %s, well inside the busy timeout: %+v", held, res)
 	}
 	if at := <-appeared; at < held-500*time.Millisecond {
-		t.Fatalf("the target appeared after %s, while the database was still locked: sqlite3 now creates it first", at)
+		t.Fatalf("the target appeared after %s, while the database was still locked: this sqlite3 creates it first", at)
+	}
+}
+
+// A database locked for longer than the busy timeout: sqlite3's exit
+// status is SQLite's result code, 5, and that is what says "busy".
+func TestIntegrationALockedDatabaseIsBusyByExitStatus(t *testing.T) {
+	shared, staging := dirs(t)
+	db := filepath.Join(shared, "app.db")
+	sql(t, db, "create table t(x); insert into t values (1);")
+	holder := exec.Command(sqlite3, db)
+	stdin, err := holder.StdinPipe()
+	must(t, err)
+	must(t, holder.Start())
+	_, err = fmt.Fprintln(stdin, "begin exclusive; insert into t values (2);")
+	must(t, err)
+	time.Sleep(500 * time.Millisecond)
+	old := busyTimeout
+	busyTimeout = time.Second
+	defer func() { busyTimeout = old; _ = stdin.Close(); _ = holder.Wait() }()
+	if res := single(t, shared, staging, "app.db"); res.Class != Busy {
+		t.Fatalf("%+v", res)
 	}
 }
 

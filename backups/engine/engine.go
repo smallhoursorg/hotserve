@@ -5,10 +5,12 @@
 // that step needs.
 //
 // The engine runs as root and is root-equivalent (it starts system
-// units), so it touches as little as it can: it never opens, reads or
-// removes anything an app wrote, never reads the credential file (it
-// passes the path to the manager), and takes nothing from a unit but
-// an exit status and a small JSON file it parses strictly.
+// units and makes mounts), so it touches as little as it can: it never
+// reads or removes anything an app wrote — it opens an app's
+// directories only as O_PATH, to name them (pin.go) — never reads the
+// credential file (it passes the path to the manager), and takes
+// nothing from a unit but an exit status and a small JSON file, of
+// which it keeps only what it recognises, cleaned (record.Text).
 package engine
 
 import (
@@ -41,7 +43,6 @@ import (
 // Config is where things are. Every field is a constant of the
 // installation, none of it an operator's or an app's string.
 type Config struct {
-	Caddyfile string // /etc/hotserve/Caddyfile
 	ConfigDir string // /etc/hotserve: what the plan unit sees, for the Caddyfile's imports
 	EnvFile   string // /etc/hotserve/backup.env: root-only; read by the manager, never here
 	StateDir  string // /var/lib/hotserve-backup
@@ -95,6 +96,11 @@ func Run(ctx context.Context, cfg Config, r Runner) (*record.Status, error) {
 	if err := os.MkdirAll(cfg.StateDir, 0o755); err != nil { //nolint:gosec // holds status.json, which is for everyone to read
 		return nil, err
 	}
+	// Said again, because a mode given to mkdir is cut by the caller's
+	// umask, and sudo hands down a shell's.
+	if err := os.Chmod(cfg.StateDir, 0o755); err != nil { //nolint:gosec // as above
+		return nil, err
+	}
 	for _, d := range []string{cfg.RunDir, filepath.Join(cfg.StateDir, "staging")} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return nil, err
@@ -112,28 +118,38 @@ func Run(ctx context.Context, cfg Config, r Runner) (*record.Status, error) {
 	}
 	statusPath := filepath.Join(cfg.StateDir, "status.json")
 	prev, err := record.Read(statusPath)
+	unreadable := ""
 	if err != nil {
-		return nil, err
+		// A record that cannot be read costs what it remembered, and is
+		// said; it does not cost the box its backups.
+		unreadable = record.Text(fmt.Sprintf("the previous record could not be read and was replaced: %v", err))
+		prev = &record.Status{Apps: map[string]*record.App{}}
 	}
 	x := &run{cfg: cfg, r: r, nonce: nonce, dir: filepath.Join(cfg.RunDir, nonce), prev: prev,
-		status: &record.Status{Started: time.Now().UTC(), Apps: map[string]*record.App{}}}
+		status: &record.Status{Started: time.Now().UTC(), Warning: unreadable, Apps: map[string]*record.App{}}}
 	if err := x.sweep(); err != nil {
-		return nil, err
+		return x.finish(statusPath, err)
 	}
 	if err := os.Mkdir(x.dir, 0o700); err != nil {
-		return nil, err
+		return x.finish(statusPath, err)
 	}
 	// By the time this runs every mount under it has been taken away
 	// (each by its own defer); what is left is the run's own files.
 	defer os.RemoveAll(x.dir) //nolint:errcheck // root's own directory under /run
 
-	runErr := x.apps(ctx)
+	return x.finish(statusPath, x.apps(ctx))
+}
+
+// finish writes the record, whatever became of the run. An app the run
+// did not reach is recorded as not run — never as whatever the last
+// run found, under this run's date — and keeps only when it was last
+// ok.
+func (x *run) finish(statusPath string, runErr error) (*record.Status, error) {
 	if runErr != nil {
-		x.status.Error = runErr.Error()
-		// What is known about each app is still what the last run found.
-		for name, app := range prev.Apps {
-			if _, ok := x.status.Apps[name]; !ok {
-				x.status.Apps[name] = app
+		x.status.Error = record.Text(runErr.Error())
+		for name, old := range x.prev.Apps {
+			if _, reached := x.status.Apps[name]; !reached && old != nil {
+				x.status.Apps[name] = &record.App{Class: record.NotRun, Detail: "the run ended before it reached this app", Looked: old.Looked, LastOK: old.LastOK, LastSnapshot: old.LastSnapshot}
 			}
 		}
 	}
@@ -150,6 +166,7 @@ func (x *run) apps(ctx context.Context) error {
 		return err
 	}
 	x.status.Root = p.Root
+	x.forget(ctx, p)
 	var stop *record.App // set once the repository refuses for a reason every app shares
 	for _, name := range p.Names() {
 		if ctx.Err() != nil {
@@ -170,11 +187,33 @@ func (x *run) apps(ctx context.Context) error {
 }
 
 func (x *run) carryLastOK(name string) {
-	app := x.status.Apps[name]
-	if app.Class == record.OK && app.Snapshot != nil {
-		app.LastOK = app.Snapshot
-	} else if old := x.prev.Apps[name]; old != nil {
-		app.LastOK = old.LastOK
+	app, old := x.status.Apps[name], x.prev.Apps[name]
+	if old != nil {
+		app.LastOK, app.LastSnapshot = old.LastOK, old.LastSnapshot
+	}
+	if app.Snapshot != nil {
+		app.LastSnapshot = app.Snapshot
+		if app.Class == record.OK {
+			app.LastOK = app.Snapshot
+		}
+	}
+}
+
+// forget empties and removes the staging directory of every app that
+// no longer declares a backup: what a killed run copied there would
+// otherwise stay for good. Names only are read here — the parent is
+// root's — and what is inside is removed by a unit, as always.
+func (x *run) forget(ctx context.Context, p *plan.Plan) {
+	entries, _ := os.ReadDir(filepath.Join(x.cfg.StateDir, "staging"))
+	for _, e := range entries {
+		name := e.Name()
+		if _, declared := p.Apps[name]; declared || !backupdecl.ValidAppName(name) || !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(x.cfg.StateDir, "staging", name)
+		if x.clean(ctx, name, dir) == nil {
+			_ = os.Remove(dir) // rmdir: fails, harmlessly, if the unit left anything
+		}
 	}
 }
 
@@ -309,6 +348,19 @@ func (x *run) app(ctx context.Context, root, name string, decl *backupdecl.Confi
 		return app, false
 	}
 
+	// Plaintext copies do not outlive the run that made them, and do
+	// not wait for the next run that gets this far either: staging is
+	// emptied before anything else is looked at — an earlier run may
+	// have died, and this one may be about to find the data gone — and
+	// again at the end.
+	staging, err := x.staging(name)
+	if err != nil {
+		return fail(record.Failed, "%v", err)
+	}
+	if err := x.clean(ctx, name, staging); err != nil {
+		return fail(record.Failed, "emptying staging before the run: %v", err)
+	}
+
 	// Whether the data is there is decided here, on the real
 	// filesystem, never from inside a unit, where a path that was not
 	// bound looks exactly like a path that does not exist. And only "no
@@ -328,8 +380,8 @@ func (x *run) app(ctx context.Context, root, name string, decl *backupdecl.Confi
 	}
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		if old := x.prev.Apps[name]; old != nil && old.LastOK != nil {
-			return fail(record.DataMissing, "%s does not exist, and this app was last backed up on %s (snapshot %s): its data is gone, or the disk it lives on is not mounted", shared, old.LastOK.Time.Format(time.RFC3339), short(old.LastOK.ID))
+		if old := x.prev.Apps[name]; old != nil && old.LastSnapshot != nil {
+			return fail(record.DataMissing, "%s does not exist, and this app was last backed up on %s (snapshot %s): its data is gone, or the disk it lives on is not mounted", shared, old.LastSnapshot.Time.Format(time.RFC3339), short(old.LastSnapshot.ID))
 		}
 		return fail(record.Pending, "%s does not exist yet: the app has not been deployed", shared)
 	case errors.Is(err, errLink):
@@ -341,25 +393,28 @@ func (x *run) app(ctx context.Context, root, name string, decl *backupdecl.Confi
 	if !sharedPin.isDir() {
 		return fail(record.Failed, "%s is not a directory", shared)
 	}
+	// The Caddyfile's author is not root, and the upload unit reads any
+	// file it is shown: a root written to make <root>/<app>/shared land
+	// on something that is not an app's data is refused by whose it is.
+	if uid, _, err := dataOwner(); err != nil || sharedPin.owner() != uid {
+		return fail(record.Failed, "%s does not belong to the %s user, so it is not an app's data dir (owner uid %d)", shared, dataUser, sharedPin.owner())
+	}
 
-	staging, err := x.staging(name)
-	if err != nil {
-		return fail(record.Failed, "%v", err)
-	}
-	// Plaintext copies never outlive the run that made them: staging is
-	// emptied first, in case an earlier run died, and last.
-	if err := x.clean(ctx, name, staging); err != nil {
-		return fail(record.Failed, "emptying staging before the run: %v", err)
-	}
 	defer func() {
-		if err := x.clean(context.WithoutCancel(ctx), name, staging); err != nil && app.Class == record.OK {
-			app.Class, app.Detail = record.Incomplete, fmt.Sprintf("backed up, but the plaintext copies in %s could not be removed: %v", staging, err)
+		if err := x.clean(context.WithoutCancel(ctx), name, staging); err != nil {
+			if app.Class == record.OK {
+				app.Class = record.Incomplete
+			}
+			app.Detail = strings.TrimSpace(fmt.Sprintf("%s (plaintext copies are still in %s: they could not be removed: %v)", app.Detail, staging, err))
 		}
 	}()
 
 	declFile := filepath.Join(x.dir, name+".plan.json")
 	raw, _ := json.Marshal(decl)
 	if err := os.WriteFile(declFile, raw, 0o644); err != nil { //nolint:gosec // read by units running as other users; it is the app's own declaration
+		return fail(record.Failed, "%v", err)
+	}
+	if err := os.Chmod(declFile, 0o644); err != nil { //nolint:gosec // as above; the umask may have cut it
 		return fail(record.Failed, "%v", err)
 	}
 
@@ -370,6 +425,9 @@ func (x *run) app(ctx context.Context, root, name string, decl *backupdecl.Confi
 	defer unmountShared()
 
 	dumped := x.dump(ctx, name, sharedSource, staging, declFile, decl, app)
+	if ctx.Err() != nil {
+		return fail(record.Failed, "interrupted before anything was uploaded")
+	}
 	binds, masked, present, unpin := x.view(name, sharedPin, staging, declFile, decl, app)
 	defer unpin()
 	if dumped+present == 0 {
@@ -483,17 +541,25 @@ func (x *run) dump(ctx context.Context, app, shared, staging, declFile string, d
 	if rerr != nil || dec.Decode(&results) != nil || len(results) != len(decl.SQLite) {
 		return failAll("the dump unit said nothing usable (exit %d)", o.ExitStatus)
 	}
+	// All of it is checked before any of it is recorded: the unit
+	// handled the app's bytes, and what it says is believed only where
+	// it is an answer to what was asked, in words this side knows.
+	for i, p := range decl.SQLite {
+		if results[i].Path != p {
+			return failAll("the dump unit answered about %q where %q was asked", record.Text(results[i].Path), p)
+		}
+		if !dump.Known(results[i].Class) {
+			return failAll("the dump unit answered %q, which is not an answer", record.Text(string(results[i].Class)))
+		}
+	}
 	n := 0
 	for i, p := range decl.SQLite {
 		res := results[i]
-		if res.Path != p {
-			return failAll("the dump unit answered about %q where %q was asked", res.Path, p)
-		}
-		it := record.Item{Kind: "sqlite", Path: p, OK: res.Class == dump.OK, Detail: res.Detail}
-		if !it.OK {
-			it.Detail = strings.TrimSpace(string(res.Class) + ": " + res.Detail)
-		} else {
+		it := record.Item{Kind: "sqlite", Path: p, OK: res.Class == dump.OK}
+		if it.OK {
 			n++
+		} else {
+			it.Detail = record.Text(string(res.Class) + ": " + res.Detail)
 		}
 		rec.Items = append(rec.Items, it)
 	}
@@ -614,6 +680,11 @@ func resticFailure(o unit.Outcome) (detail string, repositoryWide bool) {
 	if o.Result != "exit-code" {
 		return "restic was ended by " + o.Result, false
 	}
+	// 200 and up are systemd's own, for a unit it could not set up —
+	// 217 the user, 226 the namespace: restic never ran.
+	if o.ExitStatus >= 200 && o.ExitStatus <= 243 {
+		return fmt.Sprintf("systemd could not set the unit up (status %d), so restic never ran", o.ExitStatus), false
+	}
 	switch o.ExitStatus {
 	case 10:
 		return "there is no repository at the configured location (exit 10)", true
@@ -670,27 +741,31 @@ func (x *run) verify(ctx context.Context, app, id string, rec *record.App) error
 		parents = append(parents, p)
 	}
 	sort.Strings(parents)
-	for n, parent := range parents {
-		out := filepath.Join(x.dir, fmt.Sprintf("%s.ls.%d.json", app, n))
-		o, err := x.start(ctx, unit.Spec{
-			Name: x.name(fmt.Sprintf("verify%d", n), app), Description: "hotserve backup: check " + app + "'s snapshot",
-			// --no-lock: a listing must not fail because a check holds
-			// the repository.
-			Argv: []string{x.cfg.Restic, "ls", "--json", "--no-lock", id, parent},
-			User: backupUser, Network: true, EnvironmentFile: x.cfg.EnvFile,
-			Environment:    []string{"RESTIC_CACHE_DIR=/var/cache/hotserve-backup", "HOME=/nonexistent"},
-			CacheDirectory: "hotserve-backup", StdoutFile: out,
-		})
-		if err != nil {
-			return err
-		}
-		if !o.OK() {
-			return fmt.Errorf("restic ls exited %d", o.ExitStatus)
-		}
-		nodes, err := lsNodes(out)
-		if err != nil {
-			return err
-		}
+	out := filepath.Join(x.dir, app+".ls.json")
+	// One listing of every parent. --no-lock: a listing must not fail
+	// because a check holds the repository. The parents are the one
+	// thing on any command line here that comes from a declaration — the
+	// directory part of a declared path, after /backup/<app>/ — and
+	// restic takes each as a path and nothing else: they follow "--",
+	// start with "/", and like every argument are never expanded.
+	o, err := x.start(ctx, unit.Spec{
+		Name: x.name("verify", app), Description: "hotserve backup: check " + app + "'s snapshot",
+		Argv: append([]string{x.cfg.Restic, "ls", "--json", "--no-lock", "--", id}, parents...),
+		User: backupUser, Network: true, EnvironmentFile: x.cfg.EnvFile,
+		Environment:    []string{"RESTIC_CACHE_DIR=/var/cache/hotserve-backup", "HOME=/nonexistent"},
+		CacheDirectory: "hotserve-backup", StdoutFile: out,
+	})
+	if err != nil {
+		return err
+	}
+	if !o.OK() {
+		return fmt.Errorf("restic ls exited %d", o.ExitStatus)
+	}
+	nodes, err := lsNodes(out)
+	if err != nil {
+		return err
+	}
+	for _, parent := range parents {
 		for _, i := range want[parent] {
 			it := &rec.Items[i]
 			full := path.Join(base, "sqlite", it.Path)
@@ -702,7 +777,7 @@ func (x *run) verify(ctx context.Context, app, id string, rec *record.App) error
 			case !ok:
 				it.OK, it.Detail = false, "it is not in the snapshot: it disappeared while the backup ran"
 			case it.Kind == "sqlite" && (node.Type != "file" || node.Size == 0):
-				it.OK, it.Detail = false, fmt.Sprintf("in the snapshot it is a %s of %d bytes, not a database copy", node.Type, node.Size)
+				it.OK, it.Detail = false, fmt.Sprintf("in the snapshot it is a %s of %d bytes, not a database copy", record.Text(node.Type), node.Size)
 			}
 		}
 	}

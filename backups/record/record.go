@@ -1,7 +1,8 @@
 // Package record is what a run leaves behind for whoever asks how the
 // backups are doing: one JSON file, written whole and atomically by
-// root, holding no secret and nothing an app chose except the paths it
-// declared.
+// root, holding no secret. What it holds of an app's choosing — the
+// paths it declared, and what sqlite3 said about its databases — has
+// been through Text.
 package record
 
 import (
@@ -11,7 +12,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+	"unicode"
 )
 
 // Class is how an app's backup ended, in the words a status report
@@ -36,6 +39,9 @@ const (
 	// NotAttempted: the repository refused an earlier app in this run
 	// for a reason that is the same for every app.
 	NotAttempted Class = "not attempted"
+	// NotRun: the run ended before it reached this app. Nothing is said
+	// about it but when it was last ok.
+	NotRun Class = "not run"
 )
 
 // Item is one declared path.
@@ -61,19 +67,42 @@ type App struct {
 	Looked   string    `json:"looked"`
 	Snapshot *Snapshot `json:"snapshot,omitempty"`
 	Items    []Item    `json:"items,omitempty"`
-	// LastOK is the newest run that ended OK, carried from record to
-	// record.
-	LastOK *Snapshot `json:"last_ok,omitempty"`
+	// LastOK is the newest run that ended OK, and LastSnapshot the
+	// newest that made a snapshot at all, each carried from record to
+	// record. An app with a LastSnapshot has been backed up: its data
+	// going missing is never "not deployed yet".
+	LastOK       *Snapshot `json:"last_ok,omitempty"`
+	LastSnapshot *Snapshot `json:"last_snapshot,omitempty"`
 }
 
 // Status is the whole file.
 type Status struct {
 	Started  time.Time `json:"started"`
 	Finished time.Time `json:"finished"`
-	// Error is why the run could not look at any app at all.
-	Error string          `json:"error,omitempty"`
-	Root  string          `json:"root,omitempty"`
-	Apps  map[string]*App `json:"apps"`
+	// Error is why the run ended early; the apps it did not reach are
+	// NotRun.
+	Error string `json:"error,omitempty"`
+	// Warning is something the run got past and a person should know.
+	Warning string          `json:"warning,omitempty"`
+	Root    string          `json:"root,omitempty"`
+	Apps    map[string]*App `json:"apps"`
+}
+
+// Text makes a string from a unit fit to print and to keep: no control
+// characters (a terminal reads escapes in them), and no longer than a
+// line. A unit's words are the app's words, where the unit handled the
+// app's bytes.
+func Text(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, s)
+	if r := []rune(s); len(r) > 300 {
+		s = string(r[:300]) + "…"
+	}
+	return strings.TrimSpace(s)
 }
 
 // Read returns the last status, or an empty one when no run has
@@ -116,8 +145,23 @@ func Write(path string, s *Status) error {
 		tmp.Close() //nolint:errcheck,gosec // as above
 		return err
 	}
+	// To the disk before it takes the old one's place, and the rename
+	// after it: a power cut leaves the old record or the new, not an
+	// empty file.
+	if err := tmp.Sync(); err != nil {
+		tmp.Close() //nolint:errcheck,gosec // as above
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), path)
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close() //nolint:errcheck // read-only
+	return dir.Sync()
 }

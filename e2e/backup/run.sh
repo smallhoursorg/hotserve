@@ -89,7 +89,14 @@ nothing_left "first run"
 [ "$(find /var/lib/liveswap -user root | wc -l)" = 0 ] && pass "nothing root-owned was left in the apps' data" || fail "root-owned in the apps' data: $(find /var/lib/liveswap -user root)"
 [ "$(stat -c %U /var/cache/hotserve-backup)" = hotserve-backup ] && pass "restic's cache belongs to the account restic runs as" || fail "cache owner: $(stat -c %U /var/cache/hotserve-backup)"
 [ "$(stat -c '%U %a' "$STATUS")" = "root 644" ] && ! grep -q -e "$PASSWORD" -e e2e-fixture-key "$STATUS" && pass "the status record is root's, world-readable, and holds no secret" || fail "the status record: $(stat -c '%U %a' "$STATUS")"
-journalctl --no-pager | grep -q -e "$PASSWORD" -e e2e-fixture-key-not-a-secret && fail "a credential is in the journal" || pass "no credential is in the journal"
+journalctl --sync >/dev/null 2>&1
+if ! journalctl --no-pager | grep -q 'hotserve backup: upload blog'; then
+	fail "the journal does not show the run at all, so it cannot show what is not in it"
+elif journalctl --no-pager | grep -q -e "$PASSWORD" -e e2e-fixture-key-not-a-secret; then
+	fail "a credential is in the journal"
+else
+	pass "no credential is in the journal"
+fi
 
 echo "=== backup 2: two apps do not share a retention group ==="
 run; run
@@ -132,7 +139,13 @@ as_app sh -c 'cd /var/lib/liveswap/blog/shared && mv uploads uploads.real && ln 
 run && fail "a run exited 0 with blog's declared path a link to shop's data" || pass "the run exits non-zero"
 expect_class blog incomplete "a declared path that is a link"
 tr -d '\n' <"$STATUS" | sed 's/  */ /g' | grep -q '"path": "uploads", "ok": false, "detail": "[^"]*symbolic link' && pass "and says the path is a symbolic link" || fail "uploads: $(grep -A3 '"uploads"' "$STATUS" | tr -d '\n')"
-rr ls --no-lock latest --tag app:blog 2>/dev/null | grep -q -e r.txt -e 'files/uploads/data' && fail "shop's files are in blog's snapshot: $(rr ls --no-lock latest --tag app:blog 2>/dev/null | grep files/)" || pass "nothing of shop's is in blog's snapshot"
+if ! rr ls --no-lock latest --tag app:blog >/root/ls.blog 2>/dev/null || ! grep -q '^/backup/blog/sqlite/app.db$' /root/ls.blog; then
+	fail "blog's snapshot could not be listed, so nothing is known about what is in it"
+elif grep -q -e r.txt -e 'files/uploads' /root/ls.blog; then
+	fail "shop's files are in blog's snapshot: $(grep files/ /root/ls.blog)"
+else
+	pass "nothing of shop's is in blog's snapshot"
+fi
 expect_class shop ok "a sibling aiming at its data"
 as_app sh -c 'cd /var/lib/liveswap/blog/shared && rm uploads && mv uploads.real uploads'
 
@@ -140,6 +153,7 @@ echo "=== backup 5: a root the server and the backup would read differently ==="
 n=$(snapshots)
 sed 's#root /var/lib/liveswap#root {$LIVESWAP_ROOT:/var/lib/liveswap}#' /root/Caddyfile.base >"$CADDYFILE"
 if run; then fail "a run exited 0 with the root written as {\$LIVESWAP_ROOT:...}"; else pass "the run refuses"; fi
+journalctl --sync >/dev/null 2>&1
 journalctl --no-pager -o cat | grep -q "depends on the environment variable(s) LIVESWAP_ROOT" && pass "naming the variable" || fail "the plan unit said: $(journalctl --no-pager -o cat | grep -i 'hotserve-backup:' | tail -2)"
 [ "$(snapshots)" = "$n" ] && pass "and uploads nothing" || fail "snapshots went from $n to $(snapshots)"
 tr -d '\n' <"$STATUS" | grep -q '"last_ok"' && pass "what was known about each app is kept in the record" || fail "the record lost the apps: $(cat "$STATUS")"
@@ -177,7 +191,8 @@ echo "=== backup 9: no repository where the settings point ==="
 write_env "$REPO/nothing-here" "$PASSWORD"
 run && fail "a run with no repository exited 0" || pass "the run exits non-zero"
 grep -q "blog: failed: there is no repository at the configured location (exit 10)" "$OUT" && pass "and says there is no repository" || fail "no repository: $(grep '^blog' "$OUT")"
-rr snapshots --no-lock >/dev/null 2>&1 && fail "the run created a repository where there was none" || pass "and did not create one"
+rr cat config --no-lock >/dev/null 2>&1
+[ $? = 10 ] && pass "and did not create one (restic still exits 10 there)" || fail "restic no longer says 'no repository' there: the run created one, or the check cannot tell"
 nothing_left "no repository"
 write_env "$REPO" "$PASSWORD"
 
@@ -206,7 +221,7 @@ else
 fi
 
 echo "=== backup 11: a run that is a service takes its units with it, however it dies ==="
-systemd-run --quiet --unit hotserve-backup-suite.service /usr/bin/hotserve-backup run
+systemd-run --quiet --unit hotserve-backup-suite.service -E HOTSERVE_BACKUP_UNIT=hotserve-backup-suite.service /usr/bin/hotserve-backup run
 i=0
 until pid=$(pgrep -x restic); do
 	i=$((i + 1))

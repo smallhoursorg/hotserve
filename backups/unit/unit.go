@@ -10,9 +10,10 @@
 // it.)
 //
 // The unit is Type=oneshot, so its start job ends when the command
-// does, and the job's result is the verdict: "done" is exit 0. Anything
-// else leaves the unit loaded in the failed state, where its exit
-// status can be read before it is reset. Nothing is read from a pipe,
+// does, and the job's result is the verdict: "done" is exit 0, and
+// "failed" leaves the unit loaded in the failed state, where its exit
+// status can be read before it is reset. Any other result is the unit
+// being ended from outside, and is an error (reap). Nothing is read from a pipe,
 // and nothing is ever stopped by a name pattern: a Runner stops the
 // unit it started, by its exact name, and confirms it gone.
 package unit
@@ -39,11 +40,14 @@ type Bind struct {
 	Optional bool
 }
 
-// Spec is one unit. The zero value of every sandbox field is the
-// tighter setting; what a unit may reach is what its Spec names.
+// Spec is one unit. What a unit may reach is what its Spec names: a
+// zero Spec has no network, no capability, no credential and an empty
+// view. (SameUIDNamespaces is the one field whose zero value is the
+// looser setting; it cannot be the default, because a unit with a
+// capability over files cannot have it.)
 type Spec struct {
 	// Name is the unit's name, with its ".service". It matches nameRe,
-	// which no liveswap app unit and no operator's own unit does.
+	// which no liveswap app unit does.
 	Name        string
 	Description string
 	// Argv is the command; Argv[0] is an absolute path. No element is
@@ -54,7 +58,7 @@ type Spec struct {
 	// refused unless AsRoot says so: nothing here runs as root by
 	// omission. There is no DynamicUser=: with it the manager leaves
 	// the whole host filesystem in the view, TemporaryFileSystem=/ or
-	// not (TestIntegrationViewIsWhatIsNamed is what noticed).
+	// not (TestIntegrationViewIsWhatIsNamed).
 	User string
 	// AsRoot runs the command as root, with exactly Capabilities.
 	AsRoot bool
@@ -67,8 +71,9 @@ type Spec struct {
 	Environment     []string
 
 	Binds []Bind
-	// Masked paths exist in the view as empty, unreadable files. A path
-	// that is not there is skipped.
+	// Masked paths exist in the view as empty files of mode 0: read
+	// with CAP_DAC_READ_SEARCH they are empty, and without it they
+	// cannot be opened. A path that is not there is skipped.
 	Masked []string
 
 	// Network leaves the unit in the host's network namespace.
@@ -129,8 +134,7 @@ type Outcome struct {
 // OK reports a clean exit.
 func (o Outcome) OK() bool { return o.Result == "success" && o.ExitStatus == 0 }
 
-// conn is the part of go-systemd's connection a Runner uses; a test
-// supplies its own.
+// conn is the part of go-systemd's connection a Runner uses.
 type conn interface {
 	StartTransientUnitContext(ctx context.Context, name, mode string, properties []sddbus.Property, ch chan<- string) (int, error)
 	StopUnitContext(ctx context.Context, name, mode string, ch chan<- string) (int, error)
@@ -146,6 +150,9 @@ type Runner struct {
 	// context of the Runner's own: the caller's is already cancelled by
 	// the time it is needed.
 	stopWithin time.Duration
+	// lookEvery is how often a running unit's state is read, in case
+	// the signal that its job ended never arrives.
+	lookEvery time.Duration
 }
 
 // NewSystemRunner connects to the system manager. It needs root.
@@ -154,7 +161,7 @@ func NewSystemRunner(ctx context.Context) (*Runner, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connecting to the system manager: %w", err)
 	}
-	return &Runner{conn: c, stopWithin: 2 * time.Minute}, nil
+	return &Runner{conn: c, stopWithin: 2 * time.Minute, lookEvery: 30 * time.Second}, nil
 }
 
 // Close releases the connection. Units are not stopped by it.
@@ -179,14 +186,37 @@ func (r *Runner) Run(ctx context.Context, s Spec) (Outcome, error) {
 		// The request may have reached the manager all the same.
 		return Outcome{}, r.stop(s.Name, fmt.Errorf("starting %s: %w", s.Name, err))
 	}
-	select {
-	case res := <-job:
-		if res == "done" {
-			return Outcome{Result: "success"}, nil
+	// The job's end arrives as a signal, on a connection of its own; a
+	// signal can be lost, and nothing here has a time limit to notice
+	// by. So the unit's state is also looked at now and then: a unit
+	// that has ended with no word of its job is reaped as "failed" or
+	// taken as done by what the manager says of it.
+	look := time.NewTicker(r.lookEvery)
+	defer look.Stop()
+	for {
+		select {
+		case res := <-job:
+			if res == "done" {
+				return Outcome{Result: "success"}, nil
+			}
+			return r.reap(s.Name, res)
+		case <-ctx.Done():
+			return Outcome{}, r.stop(s.Name, ctx.Err())
+		case <-look.C:
+			p, err := r.conn.GetAllPropertiesContext(ctx, s.Name)
+			if err != nil {
+				continue // the next look, or the signal, will say
+			}
+			switch str(p["ActiveState"]) {
+			case "failed":
+				return r.reap(s.Name, "failed")
+			case "inactive":
+				if str(p["Result"]) == "success" {
+					return Outcome{Result: "success"}, nil
+				}
+				return r.reap(s.Name, "failed")
+			}
 		}
-		return r.reap(s.Name, res)
-	case <-ctx.Done():
-		return Outcome{}, r.stop(s.Name, ctx.Err())
 	}
 }
 
@@ -233,10 +263,12 @@ func (r *Runner) reap(name, jobResult string) (Outcome, error) {
 		return out, fmt.Errorf("%s: ended from outside before its command finished (start job %q, unit result %q)", name, jobResult, out.Result)
 	}
 	if out.Result == "" || out.Result == "success" {
-		// The job failed and the unit says nothing went wrong: the
-		// manager refused to run it (a bad property, a missing user).
-		return out, fmt.Errorf("%s: start job failed before the command ran", name)
+		return out, fmt.Errorf("%s: start job failed and the unit records no failure", name)
 	}
+	// A unit the manager could not set up — no such user (217), a
+	// namespace it could not build (226) — ends here too, as
+	// "exit-code" with a status from 200 up: an Outcome like any other,
+	// for the caller to put into words.
 	return out, nil
 }
 

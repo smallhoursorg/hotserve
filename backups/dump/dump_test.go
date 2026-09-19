@@ -117,3 +117,64 @@ func TestRunBoundsTheOpenAndNotTheCopy(t *testing.T) {
 		t.Fatalf("killed after %s with a 1s bound", took)
 	}
 }
+
+// fakeSqlite3 stands a script in for sqlite3: $VACUUM is the exit
+// status of the copy (after making the target, as the real one does),
+// $CHECK what integrity_check prints, with exit $CHECK_EXIT.
+func fakeSqlite3(t *testing.T, env ...string) {
+	t.Helper()
+	script := filepath.Join(t.TempDir(), "sqlite3")
+	must(t, os.WriteFile(script, []byte(`#!/bin/sh
+for last; do :; done
+case "$last" in
+*integrity_check*) printf '%s\n' "${CHECK:-ok}"; exit "${CHECK_EXIT:-0}" ;;
+*) t=${last#*INTO \'}; : > "${t%\'}"; echo "Error: unable to open database \"file:/shared/busy.db disk is full\"" >&2; exit "${VACUUM:-0}" ;;
+esac
+`), 0o755))
+	oldBin, oldTweak := sqlite3, tweakCmd
+	sqlite3 = script
+	tweakCmd = func(c *exec.Cmd) { c.Env = append(c.Env, env...) }
+	t.Cleanup(func() { sqlite3, tweakCmd = oldBin, oldTweak })
+}
+
+// How a copy ends is read from sqlite3's exit status, which is SQLite's
+// result code, and never from its words — which hold the path.
+func TestACopyIsClassifiedByExitStatusNotByWords(t *testing.T) {
+	for name, tc := range map[string]struct {
+		env  []string
+		want Class
+	}{
+		"clean":                           {nil, OK},
+		"busy (5)":                        {[]string{"VACUUM=5"}, Busy},
+		"locked (6)":                      {[]string{"VACUUM=6"}, Busy},
+		"full (13)":                       {[]string{"VACUUM=13"}, DiskFull},
+		"a path with busy and full in it": {[]string{"VACUUM=14"}, Failed},
+		"damage said on stdout, exit 0":   {[]string{"CHECK=row 1 missing from index i"}, CopyIsDamaged},
+		"damage said by exit status":      {[]string{"CHECK=", "CHECK_EXIT=1"}, CopyIsDamaged},
+		"ok and then something else":      {[]string{"CHECK=ok\nbut also this"}, CopyIsDamaged},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fakeSqlite3(t, tc.env...)
+			shared, staging := t.TempDir(), t.TempDir()
+			must(t, os.WriteFile(filepath.Join(shared, "busy.db"), append([]byte(header), make([]byte, 4080)...), 0o644))
+			res := Databases(context.Background(), shared, staging, []string{"busy.db"})[0]
+			if res.Class != tc.want {
+				t.Fatalf("%+v, want %s", res, tc.want)
+			}
+			if _, err := os.Stat(filepath.Join(staging, "busy.db")); (err == nil) != (tc.want == OK) {
+				t.Fatalf("a copy in staging: %v, for a result of %s", err == nil, res.Class)
+			}
+		})
+	}
+}
+
+func TestKnown(t *testing.T) {
+	for _, c := range []Class{OK, Missing, NotADatabase, NeverOpened, DiskFull, Busy, CopyIsDamaged, Failed} {
+		if !Known(c) {
+			t.Errorf("%q is not known", c)
+		}
+	}
+	if Known("fine") || Known("") {
+		t.Error("an unknown class is known")
+	}
+}

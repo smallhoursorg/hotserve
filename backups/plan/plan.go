@@ -16,6 +16,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/smallhoursorg/hotserve/liveswap/backupdecl"
 )
@@ -46,8 +47,8 @@ func (p *Plan) Validate() error {
 		return fmt.Errorf("the liveswap root %q is not an absolute path", p.Root)
 	case path.Clean(p.Root) != p.Root:
 		return fmt.Errorf("the liveswap root %q is not a clean path", p.Root)
-	case strings.ContainsRune(p.Root, 0):
-		return errors.New("the liveswap root contains a NUL")
+	case strings.ContainsFunc(p.Root, unicode.IsControl):
+		return errors.New("the liveswap root contains a control character")
 	}
 	for _, name := range p.Names() {
 		if !backupdecl.ValidAppName(name) {

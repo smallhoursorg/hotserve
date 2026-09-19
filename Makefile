@@ -212,7 +212,8 @@ e2e:
 # The backup suite: a box with systemd, Debian's restic and sqlite3, and
 # an S3 server for the repository. Its own target and its own CI job —
 # it shares nothing with the e2e stack, so run beside it, it costs its
-# own length and not the e2e job's.
+# own length and not the e2e job's. It takes down only its own two
+# services, so it can run beside `make e2e` on one host.
 e2e-backup:
 	$(cgroup2_preflight)
 	$(COMPOSE) up --build -d e2e-s3 e2e-backup-box
@@ -222,7 +223,7 @@ e2e-backup:
 		$(COMPOSE) logs --tail 50 e2e-s3; \
 		$(COMPOSE) exec -T e2e-backup-box journalctl --no-pager -n 200 || true; \
 	fi; \
-	$(COMPOSE) down --remove-orphans; \
+	$(COMPOSE) rm -sf e2e-backup-box e2e-s3 >/dev/null; \
 	exit $$status
 
 # Leak-hunting soak against the product binary: deploy/reload/traffic

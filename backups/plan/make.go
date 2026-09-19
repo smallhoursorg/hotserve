@@ -18,8 +18,10 @@ import (
 // variable only so a test can stand a script in for it.
 var hotserve = "/usr/bin/hotserve"
 
-// sentinel is a value no operator sets a variable to.
-const sentinel = "hotserve-backup-sentinel-value"
+// trials are the values a variable is tried with. The first is one no
+// operator sets anything to; the rest are for a variable that is a
+// number, a duration, a path or a host, where the first does not adapt.
+var trials = []string{"hotserve-backup-trial-value", "1", "1s", "/hotserve-backup-trial", "trial.invalid"}
 
 // Make adapts the Caddyfile and returns its Plan.
 //
@@ -31,9 +33,10 @@ const sentinel = "hotserve-backup-sentinel-value"
 // "no data yet", forever. So every name the Caddyfile and its imports
 // mention is tried: adapted again with that one variable set, and if
 // the plan comes out different, Make refuses, naming the variable. A
-// variable whose trial value makes the adapt fail is being used for
-// something an arbitrary string is wrong for — a port, a duration —
-// and neither a root nor a backup path is that.
+// variable is cleared by a trial value that adapts and leaves the plan
+// as it was. One that no trial value adapts with is refused as well:
+// that is what `import sites/{$ENV:prod}.caddy` looks like from here,
+// and the file the server imports may say anything about the root.
 func Make(ctx context.Context, caddyfile string) (*Plan, error) {
 	// adapt returns the plan as the Caddyfile spells it under env, not
 	// yet validated: a trial value is not a valid root, and a plan that
@@ -60,18 +63,29 @@ func Make(ctx context.Context, caddyfile string) (*Plan, error) {
 	if err != nil {
 		return nil, err
 	}
-	var decisive []string
+	var decisive, opaque []string
 	for _, name := range names {
 		if strings.ContainsAny(name, "=\x00") {
 			continue // cannot be set, so the server does not have it set either
 		}
-		trial, err := adapt([]string{name + "=" + sentinel})
-		if err != nil {
-			continue
+		cleared := false
+		for _, value := range trials {
+			trial, err := adapt([]string{name + "=" + value})
+			if err != nil {
+				continue
+			}
+			cleared = reflect.DeepEqual(base, trial)
+			if !cleared {
+				decisive = append(decisive, name)
+			}
+			break
 		}
-		if !reflect.DeepEqual(base, trial) {
-			decisive = append(decisive, name)
+		if !cleared && (len(decisive) == 0 || decisive[len(decisive)-1] != name) {
+			opaque = append(opaque, name)
 		}
+	}
+	if len(opaque) > 0 {
+		return nil, fmt.Errorf("the Caddyfile does not adapt with the environment variable(s) %s set to any value tried, so what the server reads when they are set — an import, perhaps — cannot be known here; a backup reads the Caddyfile without hotserve's environment", strings.Join(opaque, ", "))
 	}
 	if len(decisive) > 0 {
 		return nil, fmt.Errorf("the liveswap root or a backup path depends on the environment variable(s) %s through the Caddyfile's {$NAME}; a backup reads the Caddyfile without hotserve's environment, so it would look somewhere else than the server does — write those values literally", strings.Join(decisive, ", "))
@@ -85,8 +99,13 @@ func lastLine(s string) string {
 }
 
 var (
-	envRe    = regexp.MustCompile(`\{\$([^}:\s]+)`)
-	importRe = regexp.MustCompile(`(?m)^\s*import\s+(\S+)`)
+	// A name runs to the first ":" (where a default starts) or "}".
+	envRe = regexp.MustCompile(`\{\$([^}:]+)`)
+	// The argument of an import: quoted, backquoted or bare.
+	importRe = regexp.MustCompile("(?m)^\\s*import\\s+(?:\"([^\"]+)\"|`([^`]+)`|(\\S+))")
+	// {$NAME} and {$NAME:default}, as the adapter substitutes them with
+	// nothing set.
+	substRe = regexp.MustCompile(`\{\$[^}:]+(?::([^}]*))?\}`)
 )
 
 // envNames returns every {$NAME} in the Caddyfile and the files it
@@ -109,7 +128,8 @@ func envNames(caddyfile string) ([]string, error) {
 			names[string(m[1])] = true
 		}
 		for _, m := range importRe.FindAllSubmatch(raw, -1) {
-			pattern := string(m[1])
+			// As the base adapt sees it: defaults in, unset names empty.
+			pattern := substRe.ReplaceAllString(string(m[1])+string(m[2])+string(m[3]), "$1")
 			if !filepath.IsAbs(pattern) {
 				pattern = filepath.Join(filepath.Dir(file), pattern)
 			}

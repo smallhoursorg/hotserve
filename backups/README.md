@@ -14,7 +14,8 @@ Caddy.
 **On this branch it is the engine only.** `hotserve-backup run` does one
 backup run. There is no setup command, no timer, no restore and no
 package yet: a run needs `/etc/hotserve/backup.env` written by hand
-(below), and Debian's `restic` and `sqlite3` installed.
+(below), Debian 13's `restic` and `sqlite3` installed, and systemd 257
+(`PrivatePIDs=`), which is Debian 13's.
 
 ## A run
 
@@ -22,15 +23,18 @@ package yet: a run needs `/etc/hotserve/backup.env` written by hand
 
 1. takes the run lock — one run at a time; a second says who holds it;
 2. stops, by exact name, any unit an earlier run recorded and did not
-   live to stop;
+   live to stop, and takes away any mount it left;
 3. has an unprivileged unit adapt `/etc/hotserve/Caddyfile` and print
    the plan — the liveswap root and each app's declaration — and takes
    that plan strictly, validating every field again;
-4. for each app that declares a backup:
-   - looks for `<root>/<app>/shared` on the real filesystem. Only "no
-     such file" is absence: `pending` if the app has never been backed
-     up, `data missing` if it has;
-   - empties the app's staging directory;
+4. empties and removes the staging directory of any app that no longer
+   declares a backup;
+5. for each app that declares a backup:
+   - empties the app's staging directory, before anything else;
+   - looks for `<root>/<app>/shared` on the real filesystem, by opening
+     it. Only "no such file" is absence: `pending` if no run has ever
+     made a snapshot of the app, `data missing` if one has. It must
+     belong to the `hotserve` user;
    - copies each declared database into staging with `VACUUM INTO`, and
      keeps a copy only if `integrity_check` says exactly `ok`;
    - uploads with `restic backup`;
@@ -38,7 +42,8 @@ package yet: a run needs `/etc/hotserve/backup.env` written by hand
      — and looks for every declared item in it, because restic leaves
      out a path that vanishes while it runs, with exit 0;
    - empties staging again, whatever happened;
-5. writes `/var/lib/hotserve-backup/status.json`.
+6. writes `/var/lib/hotserve-backup/status.json` — also when the run
+   ended early, with why, and the apps it did not reach as `not run`.
 
 It exits 0 only if every app is `ok` or `pending`.
 
@@ -56,6 +61,9 @@ run, and what the step is given.
 | upload | `hotserve-backup`, `CAP_DAC_READ_SEARCH` | yes | yes | that app's declared paths and staged copies, read-only |
 | verify | `hotserve-backup`, no capability | yes | yes | nothing of the app |
 
+The run itself needs root, `CAP_SYS_ADMIN` and the host's own mount and
+PID namespaces: it makes bind mounts that the manager then has to see.
+
 - **What parses the app's bytes holds nothing.** `sqlite3` opens files
   the app chose, so it runs as the app's own uid in the app's own kind
   of sandbox, with no network and no credential, seeing one app.
@@ -65,14 +73,35 @@ run, and what the step is given.
   files it does not own, in a view that holds one app and nothing else.
   The run passes the *path* of `backup.env` to systemd, which reads it
   as root; the run itself never opens it.
-- **Nothing an operator or an app wrote reaches a command line.** Units
-  get the app's declaration as a root-written file bound at a fixed
-  path, and declared paths as bind sources. Every property is sent to
-  systemd typed, over D-Bus, and commands as `ExecStartEx` with
-  `no-env-expand`: a directory called `$RESTIC_PASSWORD` is backed up
-  under that name.
-- **Root never reads what an app wrote.** It `lstat`s declared paths,
-  makes each app's staging directory, and starts units.
+- **What an operator or an app wrote stays off command lines**, with
+  one exception. Units get the app's declaration as a root-written file
+  bound at a fixed path, and declared paths as bind sources. Every
+  property is sent to systemd typed, over D-Bus, and commands as
+  `ExecStartEx` with `no-env-expand`: a directory called
+  `$RESTIC_PASSWORD %h` is backed up under that name. The exception is
+  the listing: the directory part of a nested declared path
+  (`media` of `media/uploads`) is an argument to `restic ls`, after
+  `--`, as `/backup/<app>/files/media`.
+- **Root never reads what an app wrote.** It opens `shared/` and each
+  declared path as `O_PATH` — a descriptor that names a file and cannot
+  read it — makes each app's staging directory, makes mounts, and
+  starts units.
+- **An app cannot aim its backup at anything else.** A declared path is
+  the app's own to replace, while it runs, with a link to a sibling's
+  data; a bind source is a path systemd resolves as root, following
+  links; and the upload unit reads any file it is shown. So the run
+  opens each path itself, refusing any symbolic link on the way, and
+  binds what it opened — `mount(2)` from `/proc/self/fd/<n>`, which the
+  kernel follows to that very directory — onto a mount point in its own
+  root-only directory. systemd is given the mount point. (Given
+  `/proc/<pid>/fd/<n>` itself, systemd reads the link's text and walks
+  the path again, and an app flipping the name wins that race now and
+  then.)
+- **What a unit says is not believed because a unit said it.** The
+  plan is decoded strictly and validated again; a dump result has to
+  answer what was asked, in a class the run knows; and words that came
+  from `sqlite3` — which hold names the app chose — lose their control
+  characters and their length before they are kept or printed.
 
 ## What a snapshot holds
 
@@ -124,9 +153,11 @@ and nothing bounds an upload.
 
 `status.json`, per app: `ok`, `incomplete` (a snapshot exists and
 something declared is not in it, or restic exited 3), `pending`, `data
-missing`, `failed`, `not attempted`; each declared item with whether it
-was found in the snapshot; the snapshot's id; and the last run that was
-`ok`.
+missing`, `failed`, `not attempted`, `not run`; each declared item with
+whether it was found in the snapshot; the snapshot's id; the last run
+that was `ok`, and the last that made a snapshot at all. An app a run
+did not reach is `not run`, with those two dates and nothing else:
+never the last run's result under this run's date.
 
 restic's exit statuses are reported as measured on 0.18: 10 is "no
 repository", 11 "locked" (after `--retry-lock 2h`), 12 "wrong
@@ -134,7 +165,14 @@ password". 1 is "the storage could not be reached, or refused the key,
 or something else" — never "no repository": a wrong storage key ends,
 after about fifteen minutes of restic's own retrying, in exit 1 and a
 message about a missing repository. After any of those four the run
-does not try the remaining apps, which would each wait as long.
+does not try the remaining apps, which would each wait as long — so an
+exit 1 that is really about one app (apps are taken in name order)
+keeps the later ones from being tried, run after run, until it is
+dealt with.
+
+How a copy ended is read from `sqlite3`'s exit status, which is
+SQLite's result code (5 and 6 busy, 13 full), never from its words:
+they hold the database's path, and `busy.db` is not busy.
 
 ## What it refuses
 
@@ -143,10 +181,22 @@ does not try the remaining apps, which would each wait as long.
   so it tries each variable the file and its imports mention, and
   refuses, naming the variable, if setting it changes the plan. (hotserve
   itself refuses `root {env.X}` together with a `backup` block.)
+- A variable that no value tried adapts with —
+  `import sites/{$ENV:prod}.caddy` — since what the server imports when
+  it is set cannot be known here.
+- **A Caddyfile that does not adapt with an empty environment.** `email
+  {$ACME_EMAIL}` with no default is a parse error when the variable is
+  unset, and then no app is backed up. Every `{$NAME}` needs a default
+  that adapts (`{$ACME_EMAIL:you@example.com}`), or the run has to be
+  given the server's environment — which it is not, today.
 - A Caddyfile that imports from outside `/etc/hotserve`: the plan
   unit's view holds nothing else.
-- A declared database path that is itself a symbolic link: declare the
-  file it points to.
+- A symbolic link anywhere in a declared path, or at `<app>/shared`:
+  declare the real path, and put data on another disk with a bind
+  mount, as liveswap itself asks. (The liveswap root may be a link.)
+- An `<app>/shared` that does not belong to the `hotserve` user.
+- A run's leftover unit that will not stop within two minutes: the run
+  is refused, and the record says why.
 
 ## By hand, until there is a setup command
 
@@ -176,7 +226,8 @@ left under `/var/cache/hotserve-backup`.
   and sqlite3 itself — a live WAL database, what is swapped in after
   the checks, a read-only FIFO killed at the open bound, a planted
   `.sqliterc`.
+- `make test-integration` also races an app flipping a declared path
+  between its directory and a link to a sibling's, as fast as it can,
+  against real units starting with the read capability.
 - `make e2e-backup` — a box with systemd, restic and sqlite3, and an S3
-  server (`rclone serve s3`): mostly failure paths, each of which has
-  been seen to fail against an engine broken in the way it is there to
-  catch.
+  server (`rclone serve s3`): mostly failure paths.

@@ -95,14 +95,14 @@ func TestIntegrationArgvIsNeverExpanded(t *testing.T) {
 	r := runner(t)
 	stdout := outFile(t)
 	out, err := r.Run(context.Background(), Spec{
-		Name: name(t), Argv: []string{"/bin/echo", "${SECRET}", "$SECRET", "$$"}, User: testUser,
+		Name: name(t), Argv: []string{"/bin/echo", "${SECRET}", "$SECRET", "$$", "%h %n %%"}, User: testUser,
 		Environment: []string{"SECRET=the-repository-password"}, StdoutFile: stdout,
 	})
 	if err != nil || !out.OK() {
 		t.Fatalf("%+v, %v", out, err)
 	}
 	got, _ := os.ReadFile(stdout)
-	if string(got) != "${SECRET} $SECRET $$\n" {
+	if string(got) != "${SECRET} $SECRET $$ %h %n %%\n" {
 		t.Fatalf("the command received %q", got)
 	}
 }
@@ -186,6 +186,9 @@ func TestIntegrationNoNetworkUnlessAsked(t *testing.T) {
 	}
 }
 
+// With the capability the upload unit has, and without: either way
+// nothing of the masked file is read, and with it the file reads as
+// empty rather than refusing — which is what restic meets.
 func TestIntegrationMaskedPathsReadEmptyAndAMissingOneIsSkipped(t *testing.T) {
 	r := runner(t)
 	dir, _ := os.MkdirTemp("/root", "unit-mask-")
@@ -193,18 +196,26 @@ func TestIntegrationMaskedPathsReadEmptyAndAMissingOneIsSkipped(t *testing.T) {
 	must(t, os.Chmod(dir, 0o755))
 	must(t, os.WriteFile(filepath.Join(dir, "app.db"), []byte("LIVE DATABASE BYTES"), 0o644))
 	must(t, os.WriteFile(filepath.Join(dir, "a.png"), []byte("img"), 0o644))
-	stdout := outFile(t)
-	out, err := r.Run(context.Background(), Spec{
-		Name: name(t), User: testUser, StdoutFile: stdout,
-		Argv:   []string{"/bin/sh", "-c", "cat /backup/x/files/app.db; echo \"|\"; cat /backup/x/files/a.png"},
-		Binds:  []Bind{{Source: dir, Dest: "/backup/x/files"}},
-		Masked: []string{"/backup/x/files/app.db", "/backup/x/files/app.db-wal"},
-	})
-	if err != nil {
-		t.Fatalf("%+v, %v", out, err)
-	}
-	if got, _ := os.ReadFile(stdout); string(got) != "|\nimg" {
-		t.Fatalf("through the mask: %q", got)
+	for who, caps := range map[string][]Capability{"with the read capability": {CapDACReadSearch}, "without it": nil} {
+		t.Run(who, func(t *testing.T) {
+			stdout := outFile(t)
+			out, err := r.Run(context.Background(), Spec{
+				Name: name(t), User: testUser, Capabilities: caps, StdoutFile: stdout,
+				Argv:   []string{"/bin/sh", "-c", "cat /backup/x/files/app.db && echo read-it; echo \"|\"; cat /backup/x/files/a.png"},
+				Binds:  []Bind{{Source: dir, Dest: "/backup/x/files"}},
+				Masked: []string{"/backup/x/files/app.db", "/backup/x/files/app.db-wal"},
+			})
+			if err != nil || !out.OK() {
+				t.Fatalf("%+v, %v", out, err)
+			}
+			want := "|\nimg"
+			if caps != nil {
+				want = "read-it\n|\nimg" // opened, and empty
+			}
+			if got, _ := os.ReadFile(stdout); string(got) != want {
+				t.Fatalf("through the mask: %q, want %q", got, want)
+			}
+		})
 	}
 	if entries, _ := os.ReadDir(dir); len(entries) != 2 {
 		t.Fatalf("masking created something in the real directory: %v", entries)

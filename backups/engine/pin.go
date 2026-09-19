@@ -60,6 +60,15 @@ var (
 
 func (p pin) close() { _ = unix.Close(p.fd) }
 
+// owner is the uid that owns what is pinned, or -1.
+func (p pin) owner() int {
+	var st unix.Stat_t
+	if unix.Fstat(p.fd, &st) != nil {
+		return -1
+	}
+	return int(st.Uid)
+}
+
 func (p pin) isDir() bool {
 	var st unix.Stat_t
 	return unix.Fstat(p.fd, &st) == nil && st.Mode&unix.S_IFMT == unix.S_IFDIR

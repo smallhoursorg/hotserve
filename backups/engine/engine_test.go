@@ -43,6 +43,7 @@ type box struct {
 	mounted    map[string]string
 	unmounted  []string
 	leftMounts []string
+	stopErr    error
 }
 
 var roleRe = regexp.MustCompile(`^hotserve_backup_([a-z]+)[0-9]*_`)
@@ -52,8 +53,8 @@ func newBox(t *testing.T) *box {
 	dir := t.TempDir()
 	b := &box{t: t, root: filepath.Join(dir, "liveswap"), outcome: map[string]unit.Outcome{}, err: map[string]error{}}
 	b.cfg = Config{
-		Caddyfile: "/etc/hotserve/Caddyfile", ConfigDir: "/etc/hotserve",
-		EnvFile: filepath.Join(dir, "backup.env"), StateDir: filepath.Join(dir, "state"), RunDir: filepath.Join(dir, "run"),
+		ConfigDir: "/etc/hotserve",
+		EnvFile:   filepath.Join(dir, "backup.env"), StateDir: filepath.Join(dir, "state"), RunDir: filepath.Join(dir, "run"),
 		Self: "/usr/bin/hotserve-backup", Restic: "/usr/bin/restic",
 	}
 	must(t, os.WriteFile(b.cfg.EnvFile, []byte("RESTIC_PASSWORD=the-secret\n"), 0o600))
@@ -101,7 +102,7 @@ func must(t *testing.T, err error) {
 	}
 }
 
-func (b *box) Stop(name string) error { b.stopped = append(b.stopped, name); return nil }
+func (b *box) Stop(name string) error { b.stopped = append(b.stopped, name); return b.stopErr }
 
 func (b *box) Run(_ context.Context, s unit.Spec) (unit.Outcome, error) {
 	b.specs = append(b.specs, s)
@@ -140,7 +141,16 @@ func (b *box) Run(_ context.Context, s unit.Spec) (unit.Outcome, error) {
 	case "upload":
 		write(b.summary)
 	case "verify":
-		write(b.ls(s.Argv[len(s.Argv)-1]))
+		// Everything after "--" and the snapshot id is a parent to list.
+		var out []string
+		for i, arg := range s.Argv {
+			if arg == "--" {
+				for _, parent := range s.Argv[i+2:] {
+					out = append(out, b.ls(parent))
+				}
+			}
+		}
+		write(strings.Join(out, "\n"))
 	}
 	if o, ok := b.outcome[role]; ok {
 		return o, nil
@@ -172,7 +182,7 @@ func TestACleanRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := b.roles(), "plan clean dump upload verify verify clean"; got != want {
+	if got, want := b.roles(), "plan clean dump upload verify clean"; got != want {
 		t.Fatalf("units, in order: %s\nwant:            %s", got, want)
 	}
 	app := st.Apps["blog"]
@@ -284,8 +294,8 @@ func TestNoDataYetAndDataGone(t *testing.T) {
 	if app := st.Apps["blog"]; app.Class != record.Pending || !strings.Contains(app.Detail, b.root) {
 		t.Fatalf("an app never deployed and never backed up: %+v", app)
 	}
-	if got := b.roles(); got != "plan" {
-		t.Fatalf("units started for an app with no data: %s", got)
+	if got := b.roles(); got != "plan clean" {
+		t.Fatalf("units started for an app with no data: %s (staging is emptied whatever is found; nothing else)", got)
 	}
 
 	// Deployed, backed up, and then the data goes.
@@ -435,8 +445,10 @@ func TestAPlanThatCannotBeMadeKeepsWhatWasKnown(t *testing.T) {
 	if b.roles() != "plan" {
 		t.Fatalf("units after a failed plan: %s", b.roles())
 	}
-	if app := st.Apps["blog"]; app == nil || app.LastOK == nil {
-		t.Fatalf("the last known state of blog was dropped: %+v", st.Apps)
+	// Not as whatever the last run found, under this run's date: as not
+	// run, with when it was last ok.
+	if app := st.Apps["blog"]; app == nil || app.Class != record.NotRun || app.Snapshot != nil || app.LastOK == nil || app.LastOK.ID != snapA {
+		t.Fatalf("an app the run never reached: %+v", st.Apps["blog"])
 	}
 
 	// And a plan root would not accept is not acted on, whatever the
@@ -546,7 +558,7 @@ func TestASharedDirReachedThroughALinkIsRefused(t *testing.T) {
 	if app := st.Apps["blog"]; app.Class != record.Failed || !strings.Contains(app.Detail, "symbolic link") {
 		t.Fatalf("%+v", app)
 	}
-	if b.roles() != "plan" {
+	if b.roles() != "plan clean" {
 		t.Fatalf("units were started for it: %s", b.roles())
 	}
 }
@@ -586,5 +598,184 @@ func TestEveryMountIsTakenAwayAndLeftoversAreSwept(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Dir(left)); err == nil {
 		t.Errorf("the earlier run's directory is still there")
+	}
+}
+
+// An app that has only ever been incomplete has still been backed up.
+func TestDataMissingDoesNotNeedAnOKRun(t *testing.T) {
+	b := newBox(t)
+	b.plan = fmt.Sprintf(`{"root":%q,"apps":{"blog":{"files":["uploads","never-there"]}}}`, b.root)
+	b.ls = func(string) string { return `{"struct_type":"node","path":"/backup/blog/files/uploads","type":"dir"}` }
+	st, err := Run(context.Background(), b.cfg, b)
+	if err != nil || st.Apps["blog"].Class != record.Incomplete || st.Apps["blog"].LastOK != nil || st.Apps["blog"].LastSnapshot == nil {
+		t.Fatalf("%+v, %v", st.Apps["blog"], err)
+	}
+	must(t, os.RemoveAll(filepath.Join(b.root, "blog")))
+	for i := 0; i < 2; i++ { // and it stays so on the run after
+		st, err = Run(context.Background(), b.cfg, b)
+		if err != nil || st.Apps["blog"].Class != record.DataMissing {
+			t.Fatalf("run %d after the data went: %+v, %v", i+1, st.Apps["blog"], err)
+		}
+	}
+}
+
+func TestWhatADumpUnitSaysIsCheckedBeforeAnyOfItIsKept(t *testing.T) {
+	for name, tc := range map[string]struct {
+		results []dump.Result
+		want    string
+	}{
+		"right about the first, wrong about the second": {[]dump.Result{{Path: "a.db", Class: dump.OK}, {Path: "other.db", Class: dump.OK}}, "other.db"},
+		"a class that is not one":                       {[]dump.Result{{Path: "a.db", Class: dump.OK}, {Path: "b.db", Class: "ok\x1b[2Jfine"}}, "not an answer"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			b := newBox(t)
+			b.plan = fmt.Sprintf(`{"root":%q,"apps":{"blog":{"sqlite":["a.db","b.db"],"files":["uploads"]}}}`, b.root)
+			b.dump = func([]string) []dump.Result { return tc.results }
+			b.ls = func(string) string { return `{"struct_type":"node","path":"/backup/blog/files/uploads","type":"dir"}` }
+			st, err := Run(context.Background(), b.cfg, b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			items := st.Apps["blog"].Items
+			if len(items) != 3 {
+				t.Fatalf("%d items for three declared paths: %+v", len(items), items)
+			}
+			for _, it := range items[:2] {
+				if it.OK || !strings.Contains(it.Detail, tc.want) || strings.ContainsRune(it.Detail, 0x1b) {
+					t.Errorf("%+v", it)
+				}
+			}
+		})
+	}
+}
+
+// What sqlite3 says of a database holds names the app chose.
+func TestAUnitsWordsAreCleanedBeforeTheyAreKept(t *testing.T) {
+	b := newBox(t)
+	b.dump = func([]string) []dump.Result {
+		return []dump.Result{{Path: "app.db", Class: dump.CopyIsDamaged, Detail: "row 1 missing from index \x1b]0;owned\x07\x1b[2J" + strings.Repeat("x", 2000)}}
+	}
+	b.ls = func(string) string { return `{"struct_type":"node","path":"/backup/blog/files/uploads","type":"dir"}` }
+	st, err := Run(context.Background(), b.cfg, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(b.cfg.StateDir, "status.json"))
+	if d := st.Apps["blog"].Items[0].Detail; strings.ContainsAny(d, "\x1b\x07") || len([]rune(d)) > 320 || strings.Contains(string(raw), `\u001b`) {
+		t.Fatalf("kept as: %q", d)
+	}
+}
+
+func TestADataDirThatIsNotTheDataUsersIsRefused(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("needs root to give a directory away")
+	}
+	b := newBox(t)
+	must(t, os.Chown(filepath.Join(b.root, "blog", "shared"), 12345, 12345))
+	st, err := Run(context.Background(), b.cfg, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app := st.Apps["blog"]; app.Class != record.Failed || !strings.Contains(app.Detail, "does not belong to") {
+		t.Fatalf("%+v", app)
+	}
+	if strings.Contains(b.roles(), "upload") || strings.Contains(b.roles(), "dump") {
+		t.Fatalf("units were shown it: %s", b.roles())
+	}
+}
+
+func TestStagingOfAnAppThatNoLongerDeclaresIsEmptiedAndRemoved(t *testing.T) {
+	b := newBox(t)
+	gone := filepath.Join(b.cfg.StateDir, "staging", "shop")
+	must(t, os.MkdirAll(gone, 0o700))
+	must(t, os.MkdirAll(filepath.Join(b.cfg.StateDir, "staging", "Not_An_App"), 0o700))
+	if _, err := Run(context.Background(), b.cfg, b); err != nil {
+		t.Fatal(err)
+	}
+	var cleaned []string
+	for _, s := range b.specs {
+		if roleRe.FindStringSubmatch(s.Name)[1] == "clean" {
+			cleaned = append(cleaned, s.Binds[0].Source)
+		}
+	}
+	if len(cleaned) < 3 || cleaned[0] != gone {
+		t.Fatalf("cleaned: %v", cleaned)
+	}
+	if _, err := os.Stat(gone); err == nil {
+		t.Errorf("%s is still there", gone)
+	}
+	for _, c := range cleaned {
+		if strings.Contains(c, "Not_An_App") {
+			t.Errorf("a unit was named after a directory that is no app's: %s", c)
+		}
+	}
+}
+
+func TestAnUnreadableRecordIsSaidAndDoesNotStopBackups(t *testing.T) {
+	b := newBox(t)
+	must(t, os.MkdirAll(b.cfg.StateDir, 0o755))
+	must(t, os.WriteFile(filepath.Join(b.cfg.StateDir, "status.json"), nil, 0o644)) // what a power cut leaves
+	st, err := Run(context.Background(), b.cfg, b)
+	if err != nil || st.Apps["blog"].Class != record.OK || !strings.Contains(st.Warning, "could not be read") {
+		t.Fatalf("%+v, %v", st, err)
+	}
+}
+
+// The one declared string on any command line: the directory part of a
+// nested path, to `restic ls`, after "--".
+func TestOnlyTheParentOfANestedPathReachesACommandLine(t *testing.T) {
+	b := newBox(t)
+	nested := "me $DIA %h/up loads"
+	must(t, os.MkdirAll(filepath.Join(b.root, "blog", "shared", nested), 0o755))
+	b.plan = fmt.Sprintf(`{"root":%q,"apps":{"blog":{"files":[%q]}}}`, b.root, nested)
+	b.ls = func(string) string { return "" }
+	if _, err := Run(context.Background(), b.cfg, b); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range b.specs {
+		role := roleRe.FindStringSubmatch(s.Name)[1]
+		for i, arg := range s.Argv {
+			if !strings.ContainsAny(arg, "$%") {
+				continue
+			}
+			if role != "verify" || arg != "/backup/blog/files/me $DIA %h" || i < 2 || s.Argv[i-2] != "--" {
+				t.Errorf("%s: argv[%d] = %q", s.Name, i, arg)
+			}
+		}
+	}
+}
+
+func TestALeftoverThatCannotBeStoppedIsRecorded(t *testing.T) {
+	b := newBox(t)
+	must(t, os.MkdirAll(b.cfg.RunDir, 0o700))
+	must(t, os.WriteFile(filepath.Join(b.cfg.RunDir, "units"), []byte("hotserve_backup_upload_blog_0123456789ab.service\n"), 0o600))
+	b.stopErr = errors.New("it would not stop")
+	st, err := Run(context.Background(), b.cfg, b)
+	if err == nil || st == nil || !strings.Contains(st.Error, "could not be stopped") {
+		t.Fatalf("%+v, %v", st, err)
+	}
+	again, rerr := record.Read(filepath.Join(b.cfg.StateDir, "status.json"))
+	if rerr != nil || again.Error == "" {
+		t.Fatalf("the record of it: %+v, %v", again, rerr)
+	}
+}
+
+func TestInterruptedAfterTheDumpUploadsNothing(t *testing.T) {
+	b := newBox(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	b.before = func(s unit.Spec) {
+		if roleRe.FindStringSubmatch(s.Name)[1] == "dump" {
+			cancel()
+		}
+	}
+	st, _ := Run(ctx, b.cfg, b)
+	if strings.Contains(b.roles(), "upload") {
+		t.Fatalf("an upload was started after the interrupt: %s", b.roles())
+	}
+	if !strings.HasSuffix(b.roles(), "clean") {
+		t.Fatalf("staging was not emptied: %s", b.roles())
+	}
+	if app := st.Apps["blog"]; app == nil || !strings.Contains(app.Detail, "interrupted") {
+		t.Fatalf("%+v", st.Apps["blog"])
 	}
 }

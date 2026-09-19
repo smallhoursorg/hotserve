@@ -10,6 +10,9 @@
 //	hotserve-backup dump    copy the databases /plan.json declares from /shared to /staging
 //	hotserve-backup clean   empty /staging
 //
+// (The one string of a declaration's that does reach a command line is
+// the directory part of a nested path, to `restic ls`: engine.verify.)
+//
 // It does not link Caddy, and hotserve does not run it: the two share a
 // declaration format (liveswap/backupdecl) and nothing else.
 package main
@@ -49,7 +52,7 @@ func main() {
 }
 
 func command(name string) error {
-	// SIGINT and SIGTERM cancel the context; a run then stops the unit
+	// SIGINT, SIGTERM and SIGHUP cancel the context; a run then stops the unit
 	// it is waiting on, by name, and confirms it gone before returning.
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	defer cancel()
@@ -76,7 +79,7 @@ func run(ctx context.Context) error {
 	}
 	defer r.Close()
 	st, err := engine.Run(ctx, engine.Config{
-		Caddyfile: caddyfile, ConfigDir: "/etc/hotserve", EnvFile: "/etc/hotserve/backup.env",
+		ConfigDir: "/etc/hotserve", EnvFile: "/etc/hotserve/backup.env",
 		StateDir: "/var/lib/hotserve-backup", RunDir: "/run/hotserve-backup",
 		Self: "/usr/bin/hotserve-backup", Restic: "/usr/bin/restic",
 		BindsTo: ownService(),
@@ -88,7 +91,7 @@ func run(ctx context.Context) error {
 		return err
 	}
 	for _, app := range st.Apps {
-		if app.Class != record.OK && app.Class != record.Pending {
+		if app == nil || (app.Class != record.OK && app.Class != record.Pending) {
 			return errors.New("not every app was backed up")
 		}
 	}
@@ -104,12 +107,21 @@ func report(st *record.Status) {
 		names = append(names, n)
 	}
 	sort.Strings(names)
+	if st.Warning != "" {
+		fmt.Println("warning:", st.Warning)
+	}
 	if len(names) == 0 && st.Error == "" {
 		fmt.Println("no app declares a backup; nothing was backed up")
 	}
 	for _, n := range names {
 		app := st.Apps[n]
+		if app == nil {
+			continue
+		}
 		line := fmt.Sprintf("%s: %s", n, app.Class)
+		if app.Class == record.NotRun && app.LastOK != nil {
+			line += fmt.Sprintf(" (last ok %s, snapshot %.8s)", app.LastOK.Time.Format("2006-01-02 15:04 MST"), app.LastOK.ID)
+		}
 		if app.Class == record.OK {
 			var found []string
 			for _, it := range app.Items {
@@ -123,19 +135,20 @@ func report(st *record.Status) {
 	}
 }
 
-var serviceRe = regexp.MustCompile(`/([^/]+\.service)$`)
+var serviceRe = regexp.MustCompile(`^[A-Za-z0-9:_.@-]{1,200}\.service$`)
 
-// ownService is the service this process runs in, when it runs in one:
-// the units a run starts are bound to it, so the manager ends them if
-// the run is killed. From a shell there is none, and the signal handler
-// and the next run's sweep do that work.
+// ownService is the unit this run is, when it is one: the units a run
+// starts are bound to it, so the manager ends them if the run is killed.
+// It is what the unit says it is (Environment=HOTSERVE_BACKUP_UNIT=%n in
+// the unit file), not a guess from the cgroup: run from a shell inside
+// tmux, or by cron, the cgroup names a service that is somebody else's,
+// and binding to it would end a backup when sshd restarts — or fail
+// every unit, where the system manager has no such service. From a
+// shell there is none, and the signal handler and the next run's sweep
+// do that work.
 func ownService() string {
-	raw, err := os.ReadFile("/proc/self/cgroup")
-	if err != nil {
-		return ""
-	}
-	if m := serviceRe.FindStringSubmatch(strings.TrimSpace(string(raw))); m != nil && !strings.HasPrefix(m[1], "user@") {
-		return m[1]
+	if name := os.Getenv("HOTSERVE_BACKUP_UNIT"); serviceRe.MatchString(name) {
+		return name
 	}
 	return ""
 }
