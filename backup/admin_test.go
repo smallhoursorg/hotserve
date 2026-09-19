@@ -148,3 +148,38 @@ func TestFetchAppsRefusesARootItCannotUse(t *testing.T) {
 		})
 	}
 }
+
+// `run` and `restore` are root, and what the admin API says becomes a
+// unit's name, its StateDirectory= and a BindPaths= value. The API is
+// served by the hotserve process — the first thing an attacker on the
+// internet reaches — so its answer is held to this package's own rules,
+// whatever liveswap validated when it loaded the config.
+func TestFetchAppsHoldsTheAdminAPIsAnswerToItsOwnRules(t *testing.T) {
+	state := `"state": [{"kind": "files", "path": "uploads"}]`
+	for name, cfg := range map[string]string{
+		"a name that is two binds":    `{"apps": {"a/shared /root:/var/lib/liveswap/b": {` + state + `}}}`,
+		"a name that climbs":          `{"apps": {"../../etc": {` + state + `}}}`,
+		"a name with a unit suffix":   `{"apps": {"blog.service": {` + state + `}}}`,
+		"an empty name":               `{"apps": {"": {` + state + `}}}`,
+		"a root that is two binds":    `{"root": "/srv/apps /etc:/srv", "apps": {"blog": {` + state + `}}}`,
+		"a root with a colon":         `{"root": "/srv/apps:/etc", "apps": {"blog": {` + state + `}}}`,
+		"a root that climbs":          `{"root": "/var/lib/liveswap/../../etc", "apps": {"blog": {` + state + `}}}`,
+		"a root that is not absolute": `{"root": "srv/apps", "apps": {"blog": {` + state + `}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			addr := serveAdmin(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(cfg)) })
+			apps, err := FetchApps(context.Background(), addr)
+			if err == nil {
+				t.Fatalf("accepted, and would have launched units for %+v", apps)
+			}
+		})
+	}
+	// An app that declares no state is never launched, so its name is
+	// nobody's argument: it does not stop the apps that do.
+	ok := `{"root": "/srv/apps/", "apps": {"Odd Name": {}, "blog": {` + state + `}}}`
+	addr := serveAdmin(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(ok)) })
+	apps, err := FetchApps(context.Background(), addr)
+	if err != nil || len(apps) != 1 || apps[0].Shared != "/srv/apps/blog/shared" {
+		t.Fatalf("a plain root with a trailing slash and a plain name are fine: %+v, %v", apps, err)
+	}
+}

@@ -455,6 +455,44 @@ boundaries are these, and each is a rule a change has to keep:
    repository (`CleanTag`), a repository's presence is `cat config`'s
    exit status (`repositoryState`, backup/init.go). The one exception,
    and why, is at `deniedBy`.
+7. **Root believes nothing the admin API says.** Which apps declare
+   state comes over a socket from the hotserve process — the first
+   thing an attacker on the internet reaches — and root turns it into a
+   unit's name, its `StateDirectory=` and a `BindPaths=` value, which
+   systemd splits on whitespace and colons. So the answer is held to
+   this package's own rules whatever liveswap validated at config load:
+   an app's name to liveswap's alphabet (`appNameRe`, backup/admin.go),
+   the root to a plain absolute path (`checkRootPath`), each declared
+   path to the inside of `shared/` (`sharedPath`, backup/backup.go). A
+   name or a root that fails is refused, and nothing is launched on
+   that answer.
+
+**Why any of it is root.** Four commands start as root — `run`,
+`restore`, `init`, `status` — for two things only root can do, and they
+do nothing else:
+
+- **Keep the credential from the `hotserve` uid.** The internet-facing
+  server and every deployed app run as `hotserve` (see "The shared-UID
+  rule"), so a file that uid can read is a file a compromised server
+  can read. The repository password and storage key are therefore
+  root's, `0600`, and reach a unit through PID 1. Measured on Debian 13,
+  as `hotserve` outside any sandbox — what hotserve.service is —
+  against a running backup unit of the same uid: the settings file is
+  "permission denied"; so are the unit process's `/proc/<pid>/environ`
+  and `/proc/<pid>/root`, because the unit is in a user namespace that
+  uid has no capability in; `systemctl show` names the file and not its
+  contents.
+- **Start a unit under the system manager.** Only it can read a
+  root-only `EnvironmentFile=` and then drop to `User=`, which is rule
+  4. As `hotserve`, `systemd-run` of a system unit is "Access denied",
+  and so is stopping a backup that is running. (liveswap's app units
+  are the `hotserve` user manager's, and for a unit there the credential
+  would have to be readable by `hotserve`.)
+
+What root is *not* for: it does not run restic or sqlite3, open an
+app's data, or write where a job writes. Each root command reads the
+admin API (rule 7) and the settings file, asks systemd for units, and
+prints; `init` also writes the settings file.
 
 Who runs as what, and what each can reach:
 
@@ -494,7 +532,10 @@ settings file), `TestTheJobAndInitsChecksShareOneSandbox` and
 `TestRestoreRunsInTheBackupJobsUnitAndSandbox` (one sandbox),
 `TestStatusRunsResticAsTheJobsDo` and `TestAsJobRunsResticAsTheJobDoes`
 (rules 2 and 4), `TestRunAllContinuesAfterOneFailureAndReportsIt` (rule
-1: the launcher makes nothing under the staging root). On a real box
+1: the launcher makes nothing under the staging root),
+`TestFetchAppsHoldsTheAdminAPIsAnswerToItsOwnRules` (rule 7: a name or
+a root that is two binds, climbs, or carries a unit suffix launches
+nothing). On a real box
 the e2e backup suite reads the copy unit's properties from systemd while
 one is held open, plants a failing `restic` first on root's `PATH` for
 `init` and for `status`, and plants a link where a job's directory

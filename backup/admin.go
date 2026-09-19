@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -54,6 +56,9 @@ func FetchApps(ctx context.Context, adminAddr string) ([]App, error) {
 	if !strings.HasPrefix(root, "/") {
 		return nil, fmt.Errorf("liveswap's root reads as %q, which is not an absolute path — backups cannot tell where any app's data is", root)
 	}
+	if err := checkRootPath(root); err != nil {
+		return nil, err
+	}
 	names := make([]string, 0, len(cfg.Apps))
 	for name := range cfg.Apps {
 		names = append(names, name)
@@ -65,6 +70,9 @@ func FetchApps(ctx context.Context, adminAddr string) ([]App, error) {
 		if len(a.State) == 0 {
 			continue
 		}
+		if !appNameRe.MatchString(name) {
+			return nil, fmt.Errorf("the admin API names an app %q, which is not a name this command will put into a unit's name and its directories (%s): refusing to back anything up on that answer", name, appNameRe)
+		}
 		apps = append(apps, App{
 			Name:   name,
 			Shared: strings.TrimSuffix(root, "/") + "/" + name + "/shared",
@@ -72,6 +80,29 @@ func FetchApps(ctx context.Context, adminAddr string) ([]App, error) {
 		})
 	}
 	return apps, nil
+}
+
+// What FetchApps returns goes — as root, in `run` and `restore` — into
+// systemd-run's arguments: a unit's name, its StateDirectory=, the path
+// it binds. And it came over a socket from the hotserve process, which
+// is the process an attacker on the internet reaches first. So it is
+// held to rules of this package's own, whatever liveswap checked when it
+// loaded the config: the answer is only as good as what gave it.
+//
+// appNameRe is liveswap's alphabet for an app name. Should liveswap ever
+// allow more, such an app is refused here by name, which is loud, rather
+// than reaching systemd, which is not.
+var appNameRe = regexp.MustCompile(`^[a-z0-9-]{1,63}$`)
+
+// checkRootPath refuses a root that would not mean, in a BindPaths=
+// value, what it says: systemd splits that value on whitespace and reads
+// a colon as "source:destination", so either would bind something other
+// than the app's data. A path with `..` in it is refused with them.
+func checkRootPath(root string) error {
+	if strings.ContainsAny(root, " \t\n:") || filepath.Clean(root) != strings.TrimSuffix(root, "/") {
+		return fmt.Errorf("liveswap's root reads as %q: it has to be a plain absolute path — no whitespace, no colon, no `..` — because it is bound into each backup unit, and systemd reads those characters as syntax", root)
+	}
+	return nil
 }
 
 // resolveEnvPlaceholders expands the `{env.NAME}` form Caddy resolves
