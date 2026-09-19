@@ -1,7 +1,10 @@
 package dump
 
 import (
+	"context"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -69,5 +72,48 @@ func TestURI(t *testing.T) {
 		if got := uri(abs); got != want {
 			t.Errorf("uri(%q) = %q, want %q", abs, got, want)
 		}
+	}
+}
+
+// A locked database is waited for before the target exists, so a bound
+// on the target's appearing that was not longer than that wait would
+// kill an honest sqlite3.
+func TestOpenBoundExceedsTheBusyTimeout(t *testing.T) {
+	if openWithin < 2*busyTimeout {
+		t.Fatalf("openWithin is %s and busyTimeout %s", openWithin, busyTimeout)
+	}
+}
+
+// The watcher in run, against a real process standing in for sqlite3:
+// one that makes its target promptly and then takes far longer than
+// the bound, and one that never makes it.
+func TestRunBoundsTheOpenAndNotTheCopy(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "sqlite3")
+	// The target's path arrives in $TARGET; the real arguments are ignored.
+	must(t, os.WriteFile(script, []byte("#!/bin/sh\n[ -n \"$SLOW_COPY\" ] && { sleep 0.2; : > \"$TARGET\"; sleep 3; exit 0; }\nexec sleep 600\n"), 0o755))
+	oldBin, oldWithin, oldTweak := sqlite3, openWithin, tweakCmd
+	sqlite3, openWithin = script, time.Second
+	defer func() { sqlite3, openWithin, tweakCmd = oldBin, oldWithin, oldTweak }()
+
+	target := filepath.Join(dir, "copy.db")
+	tweakCmd = func(c *exec.Cmd) { c.Env = append(c.Env, "TARGET="+target, "SLOW_COPY=1") }
+	start := time.Now()
+	if _, _, err := run(context.Background(), "/ignored.db", "ignored", target); err != nil {
+		t.Fatalf("a copy that outlasts the bound three times over: %v", err)
+	}
+	if took := time.Since(start); took < 3*time.Second {
+		t.Fatalf("returned after %s, before the process finished", took)
+	}
+
+	must(t, os.Remove(target))
+	tweakCmd = func(c *exec.Cmd) { c.Env = append(c.Env, "TARGET="+target) }
+	start = time.Now()
+	_, _, err := run(context.Background(), "/ignored.db", "ignored", target)
+	if !errors.Is(err, errNeverOpened) {
+		t.Fatalf("a process that never makes its target: %v", err)
+	}
+	if took := time.Since(start); took < time.Second || took > 10*time.Second {
+		t.Fatalf("killed after %s with a 1s bound", took)
 	}
 }

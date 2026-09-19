@@ -4,6 +4,7 @@ package dump
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -169,6 +170,114 @@ func TestIntegrationWhatIsSwappedInAfterTheChecksFailsAtOnce(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// What the ATTACH form does not close: the read-write open of a FIFO
+// the app has made read-only is refused, SQLite retries read-only, and
+// that open waits for ever. Only as an unprivileged user — root's opens
+// ignore mode bits — so sqlite3 runs as hotserve here, as it does in
+// the dump unit. A real sqlite3, really blocked; the bound on opening is
+// what ends it, and the next database is still dumped.
+func TestIntegrationAReadOnlyFifoIsKilledAtTheOpenBound(t *testing.T) {
+	if exec.Command("id", "-u", "hotserve").Run() != nil {
+		if out, err := exec.Command("useradd", "--system", "--no-create-home", "--shell", "/usr/sbin/nologin", "hotserve").CombinedOutput(); err != nil {
+			t.Fatalf("useradd: %v: %s", err, out)
+		}
+	}
+	var uid, gid uint32
+	out, _ := exec.Command("id", "-u", "hotserve").Output()
+	_, err := fmt.Sscan(string(out), &uid)
+	must(t, err)
+	out, _ = exec.Command("id", "-g", "hotserve").Output()
+	_, err = fmt.Sscan(string(out), &gid)
+	must(t, err)
+
+	base, err := os.MkdirTemp("/var/tmp", "dump-ro-fifo-")
+	must(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	shared, staging := filepath.Join(base, "shared"), filepath.Join(base, "staging")
+	must(t, os.Mkdir(shared, 0o755))
+	must(t, os.Mkdir(staging, 0o755))
+	victim := filepath.Join(shared, "swapped.db")
+	sql(t, victim, "create table t(x);")
+	sql(t, filepath.Join(shared, "next.db"), "create table t(x); insert into t values (1);")
+	must(t, exec.Command("chown", "-R", "hotserve:hotserve", base).Run())
+	must(t, os.Chmod(base, 0o755))
+
+	oldHook, oldWithin, oldTweak, swapped := beforeSqlite, openWithin, tweakCmd, false
+	openWithin = 3 * time.Second
+	tweakCmd = func(c *exec.Cmd) {
+		c.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uid, Gid: gid}}
+	}
+	beforeSqlite = func() {
+		if !swapped {
+			swapped = true
+			must(t, os.Remove(victim))
+			must(t, syscall.Mkfifo(victim, 0o400))
+			must(t, os.Chown(victim, int(uid), int(gid)))
+		}
+	}
+	defer func() { beforeSqlite, openWithin, tweakCmd = oldHook, oldWithin, oldTweak }()
+
+	start := time.Now()
+	res := Databases(context.Background(), shared, staging, []string{"swapped.db", "next.db"})
+	took := time.Since(start)
+	if res[0].Class != NeverOpened {
+		t.Fatalf("the read-only FIFO: %+v (if it failed at once, this sqlite3 no longer retries read-only and the bound has nothing left to do)", res[0])
+	}
+	if took < 3*time.Second || took > 20*time.Second {
+		t.Fatalf("took %s with a 3s bound", took)
+	}
+	if res[1].Class != OK {
+		t.Fatalf("the database after it: %+v", res[1])
+	}
+	if out, _ := exec.Command("pgrep", "-f", "sqlite3.*swapped.db").Output(); len(out) != 0 {
+		t.Fatalf("a sqlite3 is still running: %s", out)
+	}
+}
+
+// Where sqlite3 waits for a locked database: before it creates the
+// target, not after. That ordering is why openWithin has to exceed
+// busyTimeout (TestOpenBoundExceedsTheBusyTimeout), so it is pinned
+// here: if a later SQLite creates the target first, this fails and the
+// comment on openWithin is out of date.
+func TestIntegrationALockedDatabaseIsWaitedForBeforeTheTargetExists(t *testing.T) {
+	shared, staging := dirs(t)
+	db := filepath.Join(shared, "app.db")
+	sql(t, db, "create table t(x); insert into t values (1);")
+	holder := exec.Command(sqlite3, db)
+	stdin, err := holder.StdinPipe()
+	must(t, err)
+	must(t, holder.Start())
+	_, err = fmt.Fprintln(stdin, "begin exclusive; insert into t values (2);")
+	must(t, err)
+	time.Sleep(500 * time.Millisecond)
+
+	const held = 3 * time.Second
+	start := time.Now()
+	appeared := make(chan time.Duration, 1)
+	go func() {
+		for {
+			if _, err := os.Lstat(filepath.Join(staging, "app.db")); err == nil {
+				appeared <- time.Since(start)
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+	go func() {
+		time.Sleep(held)
+		_, _ = fmt.Fprintln(stdin, "commit;")
+		_ = stdin.Close()
+	}()
+	res := single(t, shared, staging, "app.db")
+	_ = holder.Wait()
+	if res.Class != OK {
+		t.Fatalf("a database locked for %s, well inside the busy timeout: %+v", held, res)
+	}
+	if at := <-appeared; at < held-500*time.Millisecond {
+		t.Fatalf("the target appeared after %s, while the database was still locked: sqlite3 now creates it first", at)
 	}
 }
 
