@@ -167,7 +167,7 @@ func adminGet(ctx context.Context, adminAddr, path string) ([]byte, error) {
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("admin API at %s: %w (is hotserve running, and does this user have access to the socket?)", adminAddr, err)
+		return nil, fmt.Errorf("admin API at %s: %w — is hotserve running (`systemctl status hotserve`), and is this command run with sudo? The socket is hotserve's, and the backup commands are root's", adminAddr, err)
 	}
 	defer resp.Body.Close() //nolint:errcheck // a response body this function has finished reading
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))

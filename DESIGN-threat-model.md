@@ -53,8 +53,9 @@ Windows, and macOS-as-a-server are out of scope by product design.
    a delete and says which kind you have (docs/backups.md).
 6. **Staged database copies** — `/var/lib/hotserve-backup/<app>/data`,
    mode `0750` owned by `hotserve`: a consistent copy of that app's
-   declared databases, taken before each upload and replaced on the
-   next run. Plaintext, like the database it came from, and outside
+   declared databases, taken before each upload and removed when it
+   ends (one left by a run that was cut off is cleared by the next).
+   Plaintext, like the database it came from, and outside
    every app's view. What is in those dirs is written by jobs, so the
    launcher, which is root, makes and chowns none of it: systemd makes
    each unit's dir (`StateDirectory=`; `RuntimeDirectory=` for init's
@@ -579,7 +580,7 @@ What is on disk, whose it is, and who writes it:
 | `/run/hotserve-backup/` (tmpfs) | root, `0700`, checked before use (`requireRootOnlyDir`) | `init` alone (`asJob`): the settings one check is tried with, removed when it ends | — |
 | `/run/hotserve-backup-check/` (tmpfs) | `hotserve`, `0700`, made by systemd | init's checks (restic's cache) | never; `init` removes it by name — `/run` is root's, and the removal follows no link |
 | `/var/lib/hotserve-backup/` | root, `0750` | nobody: only systemd makes entries in it | never |
-| `/var/lib/hotserve-backup/<app>/` | `hotserve`, `0750`, made by systemd | that app's copy and upload: `data/` (the staged copies — plaintext, replaced every run), `cache/` | **never** |
+| `/var/lib/hotserve-backup/<app>/` | `hotserve`, `0750`, made by systemd | that app's copy and upload: `data/` (the staged copies — plaintext, there while a run lasts and removed when its upload ends), `cache/` | **never** |
 | `/var/lib/hotserve-backup/<app>/restore/` | `hotserve`, `0750`, made by systemd | that app's restore: its cache, and `copies/`, removed when it ends | **never** |
 | `/var/lib/hotserve-backup-status/` | `hotserve`, `0750`, made by systemd | `status`'s restic (its cache) | never |
 

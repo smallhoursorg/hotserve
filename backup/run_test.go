@@ -376,7 +376,7 @@ func TestRunAllSkipsAnAppWhoseJobSaysItHasNoData(t *testing.T) {
 	if strings.Join(launched, ",") != "never-deployed,never-deployed,blog" {
 		t.Errorf("want the undeployed app's copy, then its upload, then blog: %v", launched)
 	}
-	if !strings.Contains(log.String(), "never-deployed: no data yet") || strings.Contains(log.String(), "never-deployed: ok") || strings.Contains(log.String(), "FAILED") {
+	if !strings.Contains(log.String(), "never-deployed: nothing to back up yet, skipping") || strings.Contains(log.String(), "never-deployed: ok") || strings.Contains(log.String(), "FAILED") {
 		t.Errorf("the run should say why it skipped, and not that it backed anything up: %q", log.String())
 	}
 }
@@ -476,5 +476,20 @@ func TestRunAllWithNothingDeclaredIsNotAnError(t *testing.T) {
 	}
 	if !strings.Contains(log.String(), "nothing to back up") {
 		t.Errorf("the run should say why it did nothing: %q", log.String())
+	}
+}
+
+// `run blog` backs up blog, and a name that is no app's is said to be
+// one rather than quietly meaning "every app".
+func TestSelectApps(t *testing.T) {
+	apps := []App{testApp("blog", StateEntry{Kind: KindFiles, Path: "uploads"}), testApp("shop", StateEntry{Kind: KindFiles, Path: "uploads"})}
+	if got, err := selectApps(apps, nil); err != nil || len(got) != 2 {
+		t.Errorf("no names is every app: %v, %v", got, err)
+	}
+	if got, err := selectApps(apps, []string{"shop"}); err != nil || len(got) != 1 || got[0].Name != "shop" {
+		t.Errorf("a name is that app: %v, %v", got, err)
+	}
+	if _, err := selectApps(apps, []string{"blgo"}); err == nil || !strings.Contains(err.Error(), "blog, shop") {
+		t.Errorf("a name that is no app's is refused, naming the apps there are: %v", err)
 	}
 }

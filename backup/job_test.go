@@ -260,8 +260,11 @@ func TestExecuteStagesDatabasesThenBacksUp(t *testing.T) {
 	if got := stagedPathFromSQL(rec.calls[1].args[len(rec.calls[1].args)-1]); got != wantDst {
 		t.Errorf("staged copy = %q, want %q (the layout under shared/ is kept)", got, wantDst)
 	}
-	if _, err := os.Stat(filepath.Dir(wantDst)); err != nil {
-		t.Errorf("staging subdir not created: %v", err)
+	// The copies are plaintext, and the size of the databases: they go
+	// when the run is over, so a box needs room for one while a run
+	// lasts and not for ever.
+	if _, err := os.Stat(StagingData(job.Staging)); !os.IsNotExist(err) {
+		t.Errorf("the staged copies must not outlive the run: %v", err)
 	}
 	restic := rec.calls[2]
 	if restic.name != "restic" {
@@ -346,19 +349,36 @@ func TestExecuteFilesOnly(t *testing.T) {
 	}
 }
 
-// VACUUM INTO refuses to write a file that exists, so the job must
-// clear last run's copy.
-func TestExecuteClearsStaleStagedCopy(t *testing.T) {
+// VACUUM INTO refuses to write a file that exists, so the copy clears
+// what a run that was cut off left there.
+func TestStageClearsACopyAnInterruptedRunLeft(t *testing.T) {
 	rec := &recorder{touch: true}
 	job := newJob(t, rec, []string{"app.db"}, nil)
-	for i := range 2 {
-		if err := job.Execute(context.Background()); err != nil {
-			t.Fatalf("run %d: %v", i+1, err)
-		}
-	}
 	staged := filepath.Join(StagingData(job.Staging), "app.db")
-	if _, err := os.Stat(staged); err != nil {
-		t.Fatalf("second run should have re-staged the copy: %v", err)
+	if err := os.MkdirAll(filepath.Dir(staged), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(staged, []byte("left by a run that was cut off"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := job.Stage(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(staged); err != nil || string(got) != "db" {
+		t.Fatalf("want this run's copy in place of the one left behind, got %q, %v", got, err)
+	}
+}
+
+// A failed upload removes the copies too: they are no more use after a
+// run that failed than after one that did not.
+func TestExecuteRemovesTheStagedCopiesWhenTheUploadFails(t *testing.T) {
+	rec := &recorder{touch: true, fail: map[string]error{"restic": errors.New("exit status 1")}}
+	job := newJob(t, rec, []string{"app.db"}, nil)
+	if err := job.Execute(context.Background()); err == nil {
+		t.Fatal("setup: the upload should have failed")
+	}
+	if _, err := os.Stat(StagingData(job.Staging)); !os.IsNotExist(err) {
+		t.Errorf("the staged copies must not outlive a failed run: %v", err)
 	}
 }
 
@@ -372,20 +392,25 @@ func TestExecuteDropsStagedCopiesOfUndeclaredDatabases(t *testing.T) {
 	if err := job.Execute(context.Background()); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
+	// A copy a run that was cut off left behind, of a database since
+	// undeclared: the next copy clears it with the rest.
 	stale := filepath.Join(StagingData(job.Staging), "old.db")
-	if _, err := os.Stat(stale); err != nil {
-		t.Fatalf("setup: old.db should have been staged: %v", err)
+	if err := os.MkdirAll(filepath.Dir(stale), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stale, []byte("db"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 
 	job.Databases = []string{"app.db"} // the declaration was removed
-	if err := job.Execute(context.Background()); err != nil {
+	if err := job.Stage(context.Background()); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Errorf("the staged copy of an undeclared database must not survive: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(StagingData(job.Staging), "app.db")); err != nil {
-		t.Errorf("the declared database should still be staged: %v", err)
+		t.Errorf("the declared database should be staged: %v", err)
 	}
 }
 
@@ -852,5 +877,25 @@ func TestMissingDataIsNoDataOnlyForAnAppNeverBackedUp(t *testing.T) {
 	job.Exec = func(_ context.Context, c Cmd) error { return errors.New("repository unreachable") }
 	if err := job.missingData(context.Background()); err == nil || errors.Is(err, errNoData) {
 		t.Fatalf("a repository that cannot be asked fails the run, got %v", err)
+	}
+}
+
+// A run with nothing to hand restic is not a backup, and must not read
+// as one: no restic runs, and the job's answer is errNoData, which the
+// command turns into a status the run reports as a skip — not "backed
+// up", and not "ok".
+func TestExecuteWithNothingToCopyIsNotABackup(t *testing.T) {
+	rec := &recorder{}
+	job := newJob(t, rec, nil, []string{"uploads"})
+	if err := os.RemoveAll(filepath.Join(job.Shared, "uploads")); err != nil {
+		t.Fatal(err)
+	}
+	if err := job.Execute(context.Background()); !errors.Is(err, errNoData) {
+		t.Fatalf("want errNoData, got %v", err)
+	}
+	for _, c := range rec.calls {
+		if c.name == "restic" && len(c.args) > 0 && c.args[0] == "backup" {
+			t.Errorf("nothing to back up, and restic backup ran: %v", c.args)
+		}
 	}
 }

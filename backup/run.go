@@ -147,16 +147,35 @@ const noExpansion = "--expand-environment=no"
 // has not been deployed; the job's own line above it says why. Telling
 // systemd the status is a success (SuccessExitStatus=) would quiet that,
 // and systemd-run would then hand back 0 (measured), which is the one
-// thing the launcher cannot tell from a backup.
+// thing the launcher cannot tell from a backup. docs/backups.md tells an
+// operator what the 75 in that journal is.
 const exitNoData = 75
+
+// selectApps is the apps a command was asked for by name, or all of them
+// when it was asked for none.
+func selectApps(apps []App, names []string) ([]App, error) {
+	if len(names) == 0 {
+		return apps, nil
+	}
+	var picked []App
+	for _, name := range names {
+		app, err := findApp(apps, name)
+		if err != nil {
+			return nil, err
+		}
+		picked = append(picked, app)
+	}
+	return picked, nil
+}
 
 // needsStaging is whether an app's backup has a staging step: only when
 // it declares a database.
 func needsStaging(app App) bool { return len(app.Databases()) > 0 }
 
 // jobCommand is the command a unit runs: LaunchArgs without the
-// systemd-run flags and sandbox properties in front of it — what an
-// operator would type to run the same job by hand.
+// systemd-run flags and sandbox properties in front of it. (By hand, one
+// app's backup is `sudo hotserve backup run <app>`, which runs this the
+// same way.)
 func jobCommand(args []string) []string {
 	for i, a := range args {
 		if !strings.HasPrefix(a, "--") {
@@ -261,8 +280,8 @@ const (
 // systemd refuses to start a unit whose directory is a link, and changes
 // owners without following one (both measured, systemd 257).
 //
-// A state directory stays — the staged copies are cleared by the next
-// run, restic's cache is kept for it. A runtime directory is init's, and
+// A state directory stays — restic's cache is kept in it for the next
+// run; the staged copies are removed when a run's upload ends. A runtime directory is init's, and
 // is kept between its checks (each is a unit of its own, and restic's
 // cache should outlive one) until init removes it.
 //
@@ -492,7 +511,7 @@ func RunAll(ctx context.Context, apps []App, o LaunchOptions, x Exec, log io.Wri
 			// would otherwise paint the timer red every hour until the
 			// first deploy. (For an app this box HAS backed up, the job
 			// fails instead: missingData.)
-			say(log, "%s: no data yet (never deployed), skipping", app.Name)
+			say(log, "%s: nothing to back up yet, skipping — journalctl -u %s says what it is waiting for", app.Name, unitName(app.Name))
 		}
 	}
 	if ctx.Err() != nil {

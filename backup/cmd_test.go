@@ -529,3 +529,24 @@ func TestNothingToBackUpYetIsNotStale(t *testing.T) {
 		t.Errorf("the report names it, with the typo it could be, and does not flag it:\n%s", report.String())
 	}
 }
+
+// The package recommends restic and sqlite3 rather than depending on
+// them. Missing, that is said by name, with the command that installs
+// them, before anything has been asked for — not as "exec: restic: not
+// found" at the end of an error about a bucket.
+func TestRequireToolsNamesWhatIsNotInstalled(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "restic"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := requireToolsIn([]string{t.TempDir(), dir}, "restic"); err != nil {
+		t.Errorf("restic is there: %v", err)
+	}
+	err := requireToolsIn([]string{dir}, "restic", "sqlite3")
+	if err == nil || !strings.Contains(err.Error(), "sqlite3 is not installed") || !strings.Contains(err.Error(), "apt install sqlite3") {
+		t.Errorf("want sqlite3 named, with how to install it: %v", err)
+	}
+	if err := requireToolsFor(nil); err != nil {
+		t.Errorf("no app to back up needs no tool: %v", err)
+	}
+}

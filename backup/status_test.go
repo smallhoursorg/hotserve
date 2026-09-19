@@ -301,8 +301,9 @@ func TestFormatStatusReport(t *testing.T) {
 	text := out.String()
 	for _, want := range []string{
 		"blog", "1 database, 1 path", "24", "12 min ago", "bbb",
+		// Never backed up is not "look at the last run": there was none.
 		"wiki", "never",
-		"journalctl -u hotserve-backup-wiki",
+		"sudo hotserve backup run wiki",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("report missing %q:\n%s", want, text)

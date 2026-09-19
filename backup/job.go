@@ -85,6 +85,11 @@ func (j Job) Execute(ctx context.Context) error {
 		if j.Staged {
 			stage = j.requireStaged
 		}
+		// The copies are plaintext app data the size of the databases,
+		// and the next run makes its own: once this one is over, however
+		// it ends, they are of no use to anything. A box then needs room
+		// for a copy while a run lasts, and not for ever.
+		defer func() { _ = os.RemoveAll(StagingData(j.Staging)) }()
 		if err := stage(ctx); err != nil {
 			return err
 		}
@@ -152,7 +157,7 @@ func (j Job) Execute(ctx context.Context) error {
 	// Saying so and succeeding is the same answer the skip above gives.
 	if len(targets) == 0 {
 		j.logf("%s: nothing to back up yet — every declared path is still to be created", j.App)
-		return nil
+		return errNoData
 	}
 
 	snapshot, err := j.backup(ctx, targets)
@@ -255,8 +260,11 @@ func humanBytes(n uint64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
-// errNoData is the job's answer for an app that has no data yet.
-var errNoData = errors.New("no data yet")
+// errNoData is the job's answer for an app with nothing to back up yet:
+// never deployed, or deployed and yet to create anything it declares. Not
+// a failure, and not a backup: the command says so with a status of its
+// own (exitNoData), and the run reports a skip.
+var errNoData = errors.New("nothing to back up yet")
 
 // missingData is what the job says when the app's shared dir is not
 // there. For an app that has never been deployed that is ordinary
@@ -278,7 +286,7 @@ func (j Job) missingData(ctx context.Context) error {
 		return fmt.Errorf("app %s: %s is not there, and whether this box has backed the app up before could not be read from the repository: %w", j.App, j.Shared, err)
 	}
 	if len(before) > 0 {
-		return fmt.Errorf("app %s: %s is not there, and this box has backed this app up before: its data has been removed, or the volume it is on is not mounted — nothing was backed up", j.App, j.Shared)
+		return fmt.Errorf("app %s: %s is not there, and this box has backed this app up before: its data has been removed, or the volume it is on is not mounted, or this is a rebuilt box that still needs `sudo hotserve backup restore %s` — nothing was backed up", j.App, j.Shared, j.App)
 	}
 	return errNoData
 }

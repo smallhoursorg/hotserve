@@ -344,6 +344,13 @@ if grep -q 'backup-example: ok' /tmp/run1.log && grep -q 'files-example: ok' /tm
 else
 	fail "wrong apps backed up: $(grep -E ': (ok|FAILED)' /tmp/run1.log | tr '\n' ' ')"
 fi
+# The database copies are plaintext and the size of the databases: they
+# are there while a run lasts, and gone when it is over.
+if [ ! -e "$STAGE/data" ] && [ -d "$STAGE/cache" ]; then
+	pass "the staged database copies are removed when the run ends; restic's cache stays"
+else
+	fail "after a run the staging dir holds: $(ls -A "$STAGE" | tr '\n' ' ')"
+fi
 
 # The snapshot from this run is the one taken while the writer was
 # inserting; the restore checks below use it, so it is chosen now,
@@ -480,11 +487,25 @@ if section quoted-repository "a quoted repository: systemd and hotserve read it 
 	cp /tmp/backup.env.good /etc/hotserve/backup.env
 fi
 
-if section second-run "a second run (the staged copy from the first is cleared)"; then
+if section second-run "a second run, and a run of one app"; then
 	if hotserve backup run --admin 127.0.0.1:2019 >/tmp/run2.log 2>&1; then
 		pass "the second run succeeded"
 	else
 		fail "the second run failed: $(tail -3 /tmp/run2.log)"
+	fi
+	# One app, by name: what an operator runs after adding its `state`
+	# lines, rather than waiting on every other app's backup first.
+	if hotserve backup run files-example --admin 127.0.0.1:2019 >/tmp/run-one.log 2>&1 \
+		&& grep -q 'files-example: ok' /tmp/run-one.log && ! grep -q 'backup-example' /tmp/run-one.log; then
+		pass "run <app> backs up that app and no other"
+	else
+		fail "run files-example: $(tail -4 /tmp/run-one.log)"
+	fi
+	one_err=$(hotserve backup run files-exmaple --admin 127.0.0.1:2019 2>&1)
+	if [ $? -ne 0 ] && echo "$one_err" | grep -q "apps that do: backup-example, files-example"; then
+		pass "a name that is no app's is refused, with the names there are"
+	else
+		fail "run with a mistyped app name: $one_err"
 	fi
 fi
 
@@ -885,7 +906,7 @@ if section damaged-copy "a snapshot whose database copy is damaged restores noth
 	# not a stand-in for it — is what refuses it. The staging root is
 	# root's; it is opened to the backup user for as long as this takes.
 	chmod 751 /var/lib/hotserve-backup
-	as_hotserve "rm -f '$STAGE/data/app.db'; sqlite3 -cmd '.timeout 5000' 'file:$SHARED/app.db?mode=ro' \"VACUUM INTO '$STAGE/data/app.db'\"; dd if=/dev/urandom of='$STAGE/data/app.db' bs=1 seek=4096 count=2048 conv=notrunc" >/dev/null 2>&1
+	as_hotserve "mkdir -p '$STAGE/data'; rm -f '$STAGE/data/app.db'; sqlite3 -cmd '.timeout 5000' 'file:$SHARED/app.db?mode=ro' \"VACUUM INTO '$STAGE/data/app.db'\"; dd if=/dev/urandom of='$STAGE/data/app.db' bs=1 seek=4096 count=2048 conv=notrunc" >/dev/null 2>&1
 	hotserve backup restic -- backup --quiet --tag hotserve --tag app:backup-example "$STAGE/data" "$SHARED/uploads" >/dev/null 2>&1
 	chmod 750 /var/lib/hotserve-backup
 	bad=$(hotserve backup restic -- snapshots --json --tag hotserve,app:backup-example 2>/dev/null \
@@ -1121,7 +1142,7 @@ if section init-tty "init at a terminal: one command, and it asks"; then
 	# --check does not count it.
 	mv /var/lib/liveswap/files-example /var/lib/liveswap/files-example.aside
 	if hotserve backup run --admin 127.0.0.1:2019 >/tmp/run-never.log 2>&1 \
-		&& grep -q 'files-example: no data yet (never deployed), skipping' /tmp/run-never.log \
+		&& grep -q 'files-example: nothing to back up yet, skipping' /tmp/run-never.log \
 		&& ! grep -q 'files-example: ok' /tmp/run-never.log && grep -q 'backup-example: ok' /tmp/run-never.log; then
 		pass "an app never backed up and with no data yet is skipped, on its job's word, and the run passes"
 	else

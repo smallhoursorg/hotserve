@@ -54,16 +54,19 @@ reads as root; nothing about backups is configured in the Caddyfile.
       refuse one. (Not sftp: or rclone: — what they need is in files,
       and the jobs' sandbox holds only the settings init writes.)
 
-  hotserve backup run
+  hotserve backup run [<app>...]
       Asks the admin API which apps declare state and backs up each
-      one in its own sandboxed, short-lived systemd unit. This is what
-      the packaged timer runs; it needs root, to create those units.
+      one — or only the apps named — in its own sandboxed, short-lived
+      systemd unit. This is what the packaged timer runs; it needs
+      root, to create those units.
 
-  hotserve backup status [--check]
-      One line per app that declares state: what it declares, how many
-      snapshots it has, and how old the newest one is. --check exits
-      non-zero when an app has no current backup, for a monitor. Needs
-      root: the repository settings are root-only.
+  hotserve backup status [--check] [--timeout 2m] [<app>...]
+      One line per app that declares state (or per app named): what it
+      declares, how many snapshots it has, and how old the newest one
+      is. For a monitor, --check exits 1 when an app has no current
+      backup and 2 when that could not be found out — hotserve not
+      answering, or the repository not answering within --timeout.
+      Needs root: the repository settings are root-only.
 
   hotserve backup restore <app> [--snapshot <id>] [--delete] [--yes]
       Puts the app's declared state back from the newest snapshot a
@@ -108,18 +111,19 @@ the key on the box should not be able to delete, so 'restic forget'
 belongs with the privileged key, off the box.`,
 		Flags: func() *flag.FlagSet {
 			fs := flag.NewFlagSet("backup", flag.ExitOnError)
-			fs.String("admin", DefaultAdminAddress, "admin API address (run)")
-			fs.String("staging", DefaultStagingRoot, "staging root for database copies")
-			fs.String("env-file", "/etc/hotserve/backup.env", "repository credentials, read by systemd as root (run)")
-			fs.String("user", "hotserve", "user the per-app jobs run as (run)")
+			fs.String("admin", DefaultAdminAddress, "admin API address (run, status, restore)")
+			fs.String("staging", DefaultStagingRoot, "staging root for database copies (run, restore)")
+			fs.String("env-file", "/etc/hotserve/backup.env", "repository settings, read by systemd as root (every command)")
+			fs.String("user", "hotserve", "user the jobs, and every restic, run as (every command)")
+			fs.Duration("timeout", 2*time.Minute, "how long the repository may take to answer; after it the report gives up and exits 2. 0 waits for as long as restic retries (status)")
 			fs.String("name", "", "app name (app)")
 			fs.String("shared", "", "the app's shared dir, absolute (app)")
 			fs.String("phase", "", "one step of an app's backup: stage (copy its databases) or upload; both when unset (app; set by run)")
 			fs.String("password-file", "", "the password of a repository that already exists, for a rebuilt box (init)")
 			fs.String("credentials-file", "", "provider credentials as KEY=VALUE lines, instead of on the command line (init)")
 			fs.Bool("force", false, "replace an existing environment file (init)")
-			fs.Bool("check", false, "exit non-zero when an app has no current backup (status)")
-			fs.String("snapshot", "", "the snapshot to restore, by id; the newest when unset (restore)")
+			fs.Bool("check", false, "exit 1 when an app has no current backup, 2 when that could not be found out (status)")
+			fs.String("snapshot", "", "the snapshot to restore, by id; when unset, the newest one a clean run vouches for (restore)")
 			fs.Bool("delete", false, "also delete files added since the snapshot, inside each declared files path (restore)")
 			fs.Bool("yes", false, "restore without asking first, for a script (restore)")
 			return fs
@@ -150,17 +154,17 @@ func parseEntries(args []string) ([]StateEntry, error) {
 func cmdBackup(fl caddycmd.Flags) (int, error) {
 	args := fl.Args()
 	if len(args) == 0 {
-		return caddy1, fmt.Errorf("say what to do: `hotserve backup run` (all apps, sandboxed) or `hotserve backup app --name <app> …` (one app, here)")
+		return caddy1, fmt.Errorf("say what to do: `hotserve backup init <repository>` (once per box), `status` (is it working), `run [app…]` (back up now), `restore <app>`, or `restic -- <restic arguments>` — `hotserve backup --help` describes each")
 	}
 	switch args[0] {
 	case "init":
 		return cmdInit(fl, args[1:])
 	case "run":
-		return cmdRun(fl)
+		return cmdRun(fl, args[1:])
 	case "app":
 		return cmdApp(fl, args[1:])
 	case "status":
-		return cmdStatus(fl)
+		return cmdStatus(fl, args[1:])
 	case "restic":
 		return cmdRestic(fl, args[1:])
 	case "restore":
@@ -179,26 +183,45 @@ func cmdBackup(fl caddycmd.Flags) (int, error) {
 // the jobs' user, so neither `restic` as that user nor `sudo restic`
 // works on its own.
 func cmdRestic(fl caddycmd.Flags, args []string) (int, error) {
+	if err := requireTools("restic"); err != nil {
+		return caddy1, err
+	}
 	if err := Passthrough(context.Background(), fl.String("env-file"), fl.String("user"), args, osExec); err != nil {
 		return caddy1, err
 	}
 	return 0, nil
 }
 
-func cmdStatus(fl caddycmd.Flags) (int, error) {
+func cmdStatus(fl caddycmd.Flags, names []string) (int, error) {
 	// A monitor gives this a time limit and ends it with a signal: the
 	// context ends, and the unit restic is running in is stopped with it
 	// (stopWithContext) rather than left retrying a repository that is
 	// not answering, one more for every poll.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if err := requireTools("restic"); err != nil {
+		return exitCouldNotCheck, err
+	}
 	apps, err := FetchApps(ctx, fl.String("admin"))
 	if err != nil {
+		return exitCouldNotCheck, err
+	}
+	if apps, err = selectApps(apps, names); err != nil {
 		return exitCouldNotCheck, err
 	}
 	envFile := fl.String("env-file")
 	if err := requireSettingsFile(envFile); err != nil {
 		return exitCouldNotCheck, err
+	}
+	// Asked of a repository that is not answering, restic retries for
+	// many minutes, and a monitor asks again long before that: the report
+	// has a time limit of its own, after which its restic is stopped and
+	// the answer is "could not find out".
+	timeout := fl.Duration("timeout")
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
 	}
 	host, err := os.Hostname()
 	if err != nil {
@@ -212,6 +235,9 @@ func cmdStatus(fl caddycmd.Flags) (int, error) {
 	view := jobView{User: fl.String("user"), EnvFile: envFile, Home: statusHome}
 	statuses, err := Status(ctx, apps, inUnit(view, osExec), host)
 	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return exitCouldNotCheck, fmt.Errorf("the repository did not answer within %s (--timeout), and the restic that was asking has been stopped: %w", timeout, err)
+		}
 		return exitCouldNotCheck, err
 	}
 	for i := range statuses {
@@ -225,10 +251,14 @@ func cmdStatus(fl caddycmd.Flags) (int, error) {
 	}
 	// --check makes this usable from a monitor: the report still
 	// prints, and a stale app is the non-zero exit.
+	var stale []string
 	for _, s := range statuses {
 		if s.Stale(now) {
-			return caddy1, fmt.Errorf("%s has no backup newer than %s", s.App.Name, StaleAfter)
+			stale = append(stale, s.App.Name)
 		}
+	}
+	if len(stale) > 0 {
+		return caddy1, fmt.Errorf("no clean backup in the last %.1f hours of: %s", StaleAfter.Hours(), strings.Join(stale, ", "))
 	}
 	return 0, nil
 }
@@ -247,6 +277,11 @@ func cmdInit(fl caddycmd.Flags, args []string) (int, error) {
 	}
 	username := fl.String("user")
 	if err := CheckRepository(args[0]); err != nil {
+		return caddy1, err
+	}
+	// Before anything is asked for: a storage key typed at a prompt and
+	// then "exec: restic: not found" is a key typed for nothing.
+	if err := requireTools("restic"); err != nil {
 		return caddy1, err
 	}
 	// What the checks need on disk is on tmpfs, in two places: the
@@ -311,6 +346,59 @@ func cmdInit(fl caddycmd.Flags, args []string) (int, error) {
 		return caddy1, err
 	}
 	return 0, nil
+}
+
+// unitPath is where a unit looks for a command given by name: systemd's
+// default PATH for a system unit. The jobs' restic and sqlite3 are found
+// there, not on the PATH of whoever ran this command.
+var unitPath = []string{"/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin"}
+
+// requireTools says, before a command has asked for or started anything,
+// that a program its units run is not installed. The package recommends
+// restic and sqlite3 rather than depending on them — a box that never
+// sets backups up does not need them — so `apt install
+// --no-install-recommends` leaves them out, and what a unit then says is
+// "exec: restic: not found" at the end of an error about something else.
+func requireTools(names ...string) error { return requireToolsIn(unitPath, names...) }
+
+func requireToolsIn(dirs []string, names ...string) error {
+	var missing []string
+	for _, name := range names {
+		found := false
+		for _, dir := range dirs {
+			if info, err := os.Stat(filepath.Join(dir, name)); err == nil && info.Mode().IsRegular() && info.Mode()&0o111 != 0 {
+				found = true
+				break
+			}
+		}
+		if !found {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	list, verb := strings.Join(missing, " and "), "is"
+	if len(missing) > 1 {
+		verb = "are"
+	}
+	return fmt.Errorf("%s %s not installed: a backup's units run %s from the distribution — `sudo apt install %s` (the hotserve package recommends them, and an install without recommended packages leaves them out)", list, verb, list, strings.Join(missing, " "))
+}
+
+// requireToolsFor is requireTools for these apps: restic, and sqlite3 if
+// one of them declares a database.
+func requireToolsFor(apps []App) error {
+	if len(apps) == 0 {
+		return nil
+	}
+	tools := []string{"restic"}
+	for _, a := range apps {
+		if len(a.Databases()) > 0 {
+			tools = append(tools, "sqlite3")
+			break
+		}
+	}
+	return requireTools(tools...)
 }
 
 // exitCouldNotCheck is `status` failing to find out — hotserve not
@@ -394,7 +482,7 @@ func ownerOf(st *syscall.Stat_t) int64 {
 	return int64(st.Uid)
 }
 
-func cmdRun(fl caddycmd.Flags) (int, error) {
+func cmdRun(fl caddycmd.Flags, names []string) (int, error) {
 	// `systemctl stop hotserve-backup.service`, or Ctrl-C, ends the
 	// context, and the run stops the job it is waiting on (RunAll). The
 	// jobs are units of their own, outside this one's cgroup: nothing
@@ -407,6 +495,12 @@ func cmdRun(fl caddycmd.Flags) (int, error) {
 	}
 	apps, err := FetchApps(ctx, fl.String("admin"))
 	if err != nil {
+		return caddy1, err
+	}
+	if apps, err = selectApps(apps, names); err != nil {
+		return caddy1, err
+	}
+	if err := requireToolsFor(apps); err != nil {
 		return caddy1, err
 	}
 	o := LaunchOptions{
@@ -504,7 +598,7 @@ func cmdApp(fl caddycmd.Flags, entryArgs []string) (int, error) {
 				return caddy1, err
 			}
 		}
-		fmt.Printf("%s: %s is not there: no data yet (never deployed), nothing to back up\n", name, shared)
+		fmt.Printf("%s: nothing to back up yet — %s is not there: the app has not been deployed\n", name, shared)
 		return exitNoData, nil
 	}
 	switch phase := fl.String("phase"); phase {
@@ -520,7 +614,10 @@ func cmdApp(fl caddycmd.Flags, entryArgs []string) (int, error) {
 	default:
 		return caddy1, fmt.Errorf("unknown --phase %q: want %s or %s", phase, phaseStage, phaseUpload)
 	}
-	if err := job.Execute(context.Background()); err != nil {
+	switch err := job.Execute(context.Background()); {
+	case errors.Is(err, errNoData):
+		return exitNoData, nil // said by the job, in its own words
+	case err != nil:
 		return caddy1, err
 	}
 	fmt.Printf("%s: backed up\n", name)
@@ -548,6 +645,9 @@ func cmdRestore(fl caddycmd.Flags, args []string) (int, error) {
 	}
 	app, err := findApp(apps, name)
 	if err != nil {
+		return caddy1, err
+	}
+	if err := requireToolsFor([]App{app}); err != nil {
 		return caddy1, err
 	}
 	envFile := fl.String("env-file")

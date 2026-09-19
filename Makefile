@@ -211,6 +211,19 @@ endif
 ifeq ($(strip $(E2E_SUITES)),)
 $(error E2E_SUITES is empty: that would run nothing and pass)
 endif
+# A section name that is not one is said here, before the stack is built
+# for it; the suite says the same (it is where the names are).
+ifneq ($(BACKUP_ONLY),)
+ifeq ($(filter backup,$(E2E_SUITES)),)
+$(error BACKUP_ONLY names sections of the backup suite, and E2E_SUITES=$(E2E_SUITES) does not run it)
+endif
+backup_sections := $(shell sed -n 's/^if section \([a-z-]*\) .*/\1/p' e2e/backup/run.sh)
+backup_only_comma := ,
+backup_only_unknown := $(filter-out $(backup_sections),$(subst $(backup_only_comma), ,$(BACKUP_ONLY)))
+ifneq ($(backup_only_unknown),)
+$(error BACKUP_ONLY names no section called: $(backup_only_unknown). The sections are: $(backup_sections))
+endif
+endif
 
 e2e:
 	$(cgroup2_preflight)

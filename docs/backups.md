@@ -7,6 +7,14 @@ under each app's `shared/` dir.
 
 Setting it up is two steps: one command per box, and two lines per app.
 
+Before the command, make the storage key it will ask for — one that can
+add backups and **cannot delete them**
+([Keep the box unable to delete](#keep-the-box-unable-to-delete) says
+which permissions that is). `init` tests the key it is given, so give it
+the one the box will keep. It needs `restic` and `sqlite3`, which the
+package recommends and `apt` installs with it; after an install without
+recommended packages, `sudo apt install restic sqlite3`.
+
 ```
 sudo hotserve backup init s3:s3.us-west-004.backblazeb2.com/my-bucket
 ```
@@ -34,8 +42,15 @@ app blog {
 }
 ```
 
-Reload, and that app is backed up hourly from then on. A second app is
-the same two lines — nothing to enable, no second config file.
+Reload (`sudo systemctl reload hotserve`), and that app is backed up
+hourly from then on. A second app is the same two lines — nothing to
+enable, no second config file. The first backup comes within the hour;
+to take it now, and see it:
+
+```
+sudo hotserve backup run          # or: sudo hotserve backup run blog
+sudo hotserve backup status
+```
 
 ## What is backed up, and what is not
 
@@ -86,7 +101,13 @@ declare state, then runs one short-lived job per app, in turn. Each job:
    way, and this is the step that makes the backup restorable;
 2. hands restic the copies and the declared file paths, as one snapshot
    tagged with the app's name;
-3. exits. Nothing stays running between backups.
+3. exits. Nothing stays running between backups, and the copies are
+   removed when the job ends.
+
+The copies go under `/var/lib/hotserve-backup/<app>/`, with restic's
+cache beside them. A box therefore needs free space for one copy of
+each database while that app's job runs — not for ever — and `VACUUM
+INTO` fails with "database or disk is full" when it has not got it.
 
 Each job runs as the `hotserve` user inside a systemd sandbox whose
 whole filesystem is a read-only empty root, with that one app's
@@ -134,12 +155,31 @@ so both work from the repository alone: on a rebuilt box, and after
 `init --force` onto another repository.
 
 Every `restic` and `sqlite3` command is printed as it runs, so anything
-here can be reproduced by hand:
+here can be followed step by step:
 
 ```
-journalctl -u hotserve-backup.service -n 50     # what the run decided
+journalctl -u hotserve-backup.service -n 50     # what the run decided: ok, skipping or FAILED, per app
 journalctl -u hotserve-backup-blog.service      # one app's job
 ```
+
+Two things in those journals that are not what they look like:
+
+- **`status=75/TEMPFAIL`, and systemd calling `hotserve-backup-blog`
+  failed**, under a line from the job saying there is *nothing to back
+  up yet*: the app has not been deployed, or has created nothing it
+  declares. 75 is how the job tells the run so; the run says
+  `skipping`, and stays green. It stops with the app's first data.
+- **Units named `hotserve-backup_…`**, with an underscore —
+  `hotserve-backup_check`, `hotserve-backup_restic-1a2b3c4d`,
+  `hotserve-backup_settings-…` — are not apps' jobs: they are the
+  restic that `init`, `status` and `restore` ask the repository with,
+  and the check of the settings file, each in the jobs' sandbox. An
+  app's own unit has a hyphen, and its name.
+
+`apt remove` keeps all of this; `apt purge` removes the settings file
+— **the box's only copy of the repository password** — with the staged
+copies and restic's caches. The repository is untouched, and opens
+with the password you saved.
 
 ### What `init` checks, and how
 
@@ -214,15 +254,42 @@ nothing scheduled: fix the key and run the same command again.
 
 **The trade:** old snapshots then accumulate until you remove them
 yourself, with a key that is allowed to. Do that from your laptop, not
-from the box — with a retention policy of your choosing; for example,
-keeping a day of hourly snapshots, a month of dailies and a year of
-monthlies:
+from the box — restic there, a second key that *may* delete, and the
+repository's password — with a retention policy of your choosing; for
+example, keeping a day of hourly snapshots, a month of dailies and a
+year of monthlies:
 
 ```
+export RESTIC_REPOSITORY=s3:s3.us-west-004.backblazeb2.com/my-bucket
+export AWS_ACCESS_KEY_ID=…  AWS_SECRET_ACCESS_KEY=…     # the key that may delete; never on the box
 restic forget --keep-hourly 24 --keep-daily 30 --keep-monthly 12 --prune
+# asks for the repository password: the one init printed
 ```
 
-A few times a year is enough.
+A few times a year is enough. Give it no `--tag`: the records that say
+which runs finished cleanly are snapshots too, under tags of their own,
+and the same policy should thin them alongside the backups they vouch
+for. `forget` keeps the *last* snapshot of each hour, day and month,
+whether or not the run that took it finished cleanly; `restore` passes
+over one that did not, and takes the nearest clean one before it.
+
+### Changing the key, or the repository
+
+Run `init` again with `--force`:
+
+```
+sudo hotserve backup init s3:s3.us-west-004.backblazeb2.com/my-bucket --force
+```
+
+It asks for the (new) storage key, and — the repository being there
+already — for the repository's password, the one you saved: the
+settings file is root-only and `init` does not read it back. The new
+settings go through every check the first ones did, and the file is
+replaced only once they have passed; until then, and if they fail, the
+box backs up exactly as before. Nothing is carried over from the old
+file, so give any extra `KEY=VALUE` settings again. For another
+repository, name that one instead: `status` then reports every app as
+having no clean run *there*, until the next run.
 
 **Not with a lifecycle rule.** Expiring objects on the bucket's own
 schedule does not work here: restic deduplicates, so a pack a rule
@@ -353,8 +420,10 @@ shop  1 path                 0          never  ⚠
 
 For a monitor, `sudo hotserve backup status --check` prints the same
 report and exits 1 when any app has no current backup. It exits 2 when
-it could not find out — hotserve not answering, the repository not
-reachable — which is worth a retry before a page. It needs root — the
+it could not find out — hotserve not answering, or the repository not
+answering within `--timeout` (two minutes unless you say otherwise; left
+alone, restic would go on retrying for many minutes, and a monitor asks
+again long before that) — which is worth a retry before a page. It needs root — the
 repository settings are root-only — so run it from root's crontab or a
 root systemd timer.
 

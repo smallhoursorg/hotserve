@@ -23,6 +23,12 @@ remove)
 	fi
 	;;
 purge)
+	# Said, because it is the one thing here that cannot be put back from
+	# the package: the repository itself is untouched, and opens only with
+	# the password that was in this file.
+	if [ -e /etc/hotserve/backup.env ]; then
+		echo "hotserve: removing /etc/hotserve/backup.env, which held this box's only copy of the backup repository's password. The repository is untouched; restoring from it needs the password printed when backups were set up." >&2
+	fi
 	rm -f /etc/hotserve/backup.env
 	# And any copy of it: the temporary file `init` writes and renames
 	# into place (a crash between the two leaves one), and the settings

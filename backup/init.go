@@ -98,7 +98,7 @@ func Init(ctx context.Context, o InitOptions, x Exec, log io.Writer) (err error)
 	_, statErr := os.Stat(o.EnvFile)
 	replacing := statErr == nil
 	if replacing && !o.Force {
-		return fmt.Errorf("%s already exists: it holds the password for the existing repository, and overwriting it loses access to those backups — pass --force to replace it anyway", o.EnvFile)
+		return fmt.Errorf("%s already exists, and holds this box's only copy of its repository's password. To change the storage key, or to move to another repository, run this again with --force: the file is replaced only once the new settings have passed every check, and until then the box backs up as before. For the same repository, init asks for the password you saved when you first set it up; give every setting again, since nothing is carried over from the old file", o.EnvFile)
 	}
 	for _, kv := range o.Extra {
 		if !strings.Contains(kv, "=") {
@@ -183,7 +183,7 @@ func Init(ctx context.Context, o InitOptions, x Exec, log io.Writer) (err error)
 			// backing up into something it cannot read.
 			return fmt.Errorf("%s already exists, and a new password was generated for it — run init at a terminal to be asked for the password you saved when you first set it up, or pass it with --password-file", o.Repository)
 		case state == repositoryLocked:
-			return fmt.Errorf("%s already exists, and this password cannot open it (%s) — pass --password-file with the password you saved when you first set it up", o.Repository, why)
+			return fmt.Errorf("%s already exists, and this password cannot open it (%s) — run init again with the password you saved when you first set it up (typed at its prompt, or in a root-only file named with --password-file); nothing was changed", o.Repository, why)
 		default:
 			return fmt.Errorf("cannot create a repository at %s: %s\n\nCheck the URL, that the bucket exists, and that the storage key may write to it.\n\n%s", o.Repository, firstLine(out, initErr), asJobHint)
 		}
@@ -237,8 +237,9 @@ func Init(ctx context.Context, o InitOptions, x Exec, log io.Writer) (err error)
 		say(log, "Whether these credentials can erase your backups is unknown — run")
 		say(log, "`hotserve backup init` again when the repository is reachable.")
 	}
-	say(log, "\nBackups run hourly (hotserve-backup.timer). Declare what to keep with")
-	say(log, "`state` lines in each app's block, then check with `hotserve backup status`.")
+	say(log, "\nBackups run hourly (hotserve-backup.timer). Declare what to keep with `state`")
+	say(log, "lines in each app's block and reload; `sudo hotserve backup run` takes the first")
+	say(log, "backup now rather than within the hour, and `sudo hotserve backup status` shows it.")
 	return nil
 }
 

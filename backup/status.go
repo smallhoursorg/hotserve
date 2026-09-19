@@ -186,6 +186,8 @@ func FormatStatus(w io.Writer, statuses []AppStatus, now time.Time) {
 		switch {
 		case s.Stale(now) && s.Running:
 			say(w, "\n%s has no current backup yet; one is running now. Its progress:\n    journalctl -u hotserve-backup-%s -f", s.App.Name, s.App.Name)
+		case s.Stale(now) && s.Latest == nil:
+			say(w, "\n%s has not been backed up to this repository yet. The timer does it within the hour (systemctl list-timers hotserve-backup.timer); to do it now:\n    sudo hotserve backup run %s", s.App.Name, s.App.Name)
 		case s.Stale(now):
 			say(w, "\n%s has no current backup. What the last run did:\n    journalctl -u hotserve-backup-%s -n 30", s.App.Name, s.App.Name)
 		}
