@@ -270,6 +270,7 @@ resolved at config load.
 | `deploy_log_lines` | `40` | How many of the app's last journal lines a failed deploy's response carries (see [Webhook API](#webhook-api)); `0` keeps the app's output on the box (no tail, and no health probe body). At most 1000, and 8 KiB whatever the count |
 | `max_artifact_size` | `100MB` | Download cap; decompressed cap is 10× |
 | `max_artifact_entries` | `100000` | Cap on the files, directories and links one artifact creates (implied parent directories included). The byte cap does not bound what extraction *consumes* — every object costs an inode and most a disk block — so this is what keeps one hostile artifact from filling the disk for everything else on the box. A CI-built artifact is thousands; a Next.js standalone output is ~5–20k |
+| `backup { … }` | — | Declares what under the app's `shared/` is worth backing up: `sqlite` names database files, `files` names files and directories (`.` is all of `shared/`). See [Declaring backups](#declaring-backups) |
 
 Both caps are cliffs an app can grow into, so each successful deploy
 logs the artifact's entry count and decompressed size and, past **75%**
@@ -285,6 +286,47 @@ example unpacks to about 300 MB in two binaries, and it is the
 compressed tarball that has to fit `max_artifact_size`. A million tiny
 files fit the byte budget comfortably; refusing those is the entry
 cap's job.
+
+### Declaring backups
+
+```
+app blog {
+	command ./server
+	backup {
+		sqlite app.db
+		files  uploads
+	}
+}
+```
+
+The block is a declaration: hotserve checks it when the config loads
+— so `hotserve validate` refuses a bad one — and does nothing else
+with it. Nothing in the server reads, copies or schedules anything
+because of it.
+
+Paths are relative to the app's `shared/` and take no placeholders
+(`{shared_dir}/app.db` is written `app.db`). Each line takes one or
+more paths and may repeat. A path is refused when it is empty, is
+absolute, is not clean (`./`, `..`, a doubled or trailing `/`), reaches outside
+`shared/`, holds a control character or is not UTF-8, or is declared
+twice. A `sqlite` path names one file, never `.`.
+
+A database may sit inside a `files` path — `files .` with `sqlite
+app.db` is "everything, and this one is a database". Two `files`
+paths may not contain one another, nothing may be declared under a
+database's path, and a database's own `-wal`, `-shm` and `-journal`
+are part of it: neither they nor anything under their names is
+declared.
+
+An app that declares a backup needs a literal `root`: with `root
+{env.X}` the config is refused, naming the app. Without a `backup`
+block, a placeholder `root` loads.
+
+The Caddyfile's own `{$VAR}` is not caught: it is substituted in the
+text wherever the file is adapted, before hotserve is given the
+config, so the result depends on the environment of whoever adapts
+it. Do not write `root` or a backup path with one in a config that
+declares a backup.
 
 ## Watchdog
 

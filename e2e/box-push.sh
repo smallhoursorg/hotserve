@@ -116,6 +116,20 @@ printf '\n:8181 {\n\tno_such_directive\n}\n' >>"$tmp/bad"
 if push "$tmp/bad"; then fail "push accepted an invalid config"; else pass "push refused an invalid config: $(grep -o 'rejected.*' "$tmp/out")"; fi
 box cmp -s /etc/hotserve/Caddyfile - <"$tmp/v1" && pass "the live file is unchanged" || fail "the live file changed after a rejected push"
 box test ! -e /etc/hotserve/Caddyfile.new && pass "no staged file left behind" || fail "Caddyfile.new left on the box"
+# A backup declaration is checked by the same validate, so one that
+# names a sibling's shared dir stops here too, naming the path.
+sed 's#files  uploads#files  ../../deno-example/shared#' "$tmp/v1" >"$tmp/bad-backup"
+if cmp -s "$tmp/v1" "$tmp/bad-backup"; then
+	fail "the e2e Caddyfile has no \`files  uploads\` line to break"
+elif push "$tmp/bad-backup"; then
+	fail "push accepted a backup path outside the app's shared dir"
+elif grep -q -F 'backup files "../../deno-example/shared": the path reaches outside' "$tmp/out"; then
+	pass "push refused a backup path outside the app's shared dir, naming the path"
+else
+	fail "push refused the config, but not for the backup path: $(tail -3 "$tmp/out")"
+fi
+box cmp -s /etc/hotserve/Caddyfile - <"$tmp/v1" && pass "the live file is unchanged" || fail "the live file changed after a rejected backup declaration"
+box test ! -e /etc/hotserve/Caddyfile.new && pass "no staged file left behind" || fail "Caddyfile.new left after a rejected backup declaration"
 
 echo "=== box 4: a config that validates but fails to load is rolled back ==="
 # Validation does not bind listeners; loading does, and 192.0.2.1

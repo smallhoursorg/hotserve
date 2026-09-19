@@ -10,6 +10,7 @@ import (
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/dustin/go-humanize"
+	"github.com/smallhoursorg/hotserve/liveswap/backupdecl"
 )
 
 func init() {
@@ -69,6 +70,10 @@ func parseWebhookDirective(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler,
 //	        max_artifact_size <size>
 //	        max_artifact_entries <n>
 //	        deploy_log_lines  <n>
+//	        backup {
+//	            sqlite <path>...             # relative to the shared dir
+//	            files  <path>...
+//	        }
 //	    }
 //	}
 func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
@@ -259,6 +264,16 @@ func (cfg *AppConfig) unmarshalBlock(d *caddyfile.Dispenser) error {
 			if err := parseCountArg(d, &cfg.MaxArtifactEntries); err != nil {
 				return err
 			}
+		case "backup":
+			if cfg.Backup != nil {
+				return d.Err("duplicate backup block")
+			}
+			b, err := parseBackup(d)
+			if err != nil {
+				return err
+			}
+			cfg.Backup = b
+			continue // the block consumed its own trailing tokens
 		default:
 			return d.Errf("unknown app subdirective %q", d.Val())
 		}
@@ -293,6 +308,40 @@ func parseDurationArg(d *caddyfile.Dispenser, out *caddy.Duration) error {
 	}
 	*out = caddy.Duration(dur)
 	return nil
+}
+
+// parseBackup parses an app's `backup` block. Each line names one or
+// more paths and may repeat; what makes a declaration valid is
+// backupdecl's to say (App.Validate), so a block that names nothing
+// parses, and is refused there.
+//
+//	backup {
+//	    sqlite app.db
+//	    files  uploads
+//	}
+func parseBackup(d *caddyfile.Dispenser) (*backupdecl.Config, error) {
+	if d.NextArg() {
+		return nil, d.ArgErr() // no positional args; everything is in the block
+	}
+	b := new(backupdecl.Config)
+	for nesting := d.Nesting(); d.NextBlock(nesting); {
+		kind := d.Val()
+		var into *[]string
+		switch kind {
+		case "sqlite":
+			into = &b.SQLite
+		case "files":
+			into = &b.Files
+		default:
+			return nil, d.Errf("unknown backup subdirective %q", kind)
+		}
+		paths := d.RemainingArgs()
+		if len(paths) == 0 {
+			return nil, d.ArgErr()
+		}
+		*into = append(*into, paths...)
+	}
+	return b, nil
 }
 
 // parseDeployTrust parses one `deploy_trust <preset> { ... }` block,

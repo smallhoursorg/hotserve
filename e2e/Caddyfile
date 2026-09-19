@@ -49,6 +49,12 @@
 			# heal the replacement (and re-probe) within seconds.
 			watchdog_grace 5s
 			keep 2
+			# A declaration, which hotserve validates and otherwise
+			# ignores: every scenario here runs with one loaded.
+			backup {
+				sqlite demo.db
+				files  uploads
+			}
 		}
 
 		# The Deno example (examples/deno), with the flags from its own
