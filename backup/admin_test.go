@@ -166,6 +166,9 @@ func TestFetchAppsHoldsTheAdminAPIsAnswerToItsOwnRules(t *testing.T) {
 		"a root that climbs":          `{"root": "/var/lib/liveswap/../../etc", "apps": {"blog": {` + state + `}}}`,
 		"a root that is not absolute": `{"root": "srv/apps", "apps": {"blog": {` + state + `}}}`,
 		"a kind that is a flag":       `{"apps": {"blog": {"state": [{"kind": "--shared=/etc", "path": "x"}]}}}`,
+		"a database inside a dir":     `{"apps": {"blog": {"state": [{"kind": "files", "path": "data"}, {"kind": "sqlite", "path": "data/app.db"}]}}}`,
+		"the same path twice":         `{"apps": {"blog": {"state": [{"kind": "files", "path": "uploads"}, {"kind": "files", "path": "uploads/"}]}}}`,
+		"a path that climbs":          `{"apps": {"blog": {"state": [{"kind": "files", "path": "../other/shared"}]}}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			addr := serveAdmin(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(cfg)) })

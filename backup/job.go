@@ -379,8 +379,20 @@ func (j Job) stageDatabases(ctx context.Context) error {
 		// that is not there is almost always a typo'd path — and a
 		// backup that quietly holds no database is discovered at the
 		// worst possible moment.
-		if _, err := os.Stat(src); errors.Is(err, fs.ErrNotExist) {
+		info, err := os.Stat(src)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
 			return fmt.Errorf("app %s: no database at %s (declared as `state sqlite %s`); check the path, or remove the line if the app no longer keeps one", j.App, src, rel)
+		case err != nil:
+			return fmt.Errorf("app %s: %s: %w", j.App, rel, err)
+		case !info.Mode().IsRegular():
+			// Stat, so a link to a database is followed — the copy is of
+			// the data either way, which is not so for a `files` path.
+			// What it must come to is a file: sqlite3 opening a named
+			// pipe waits for a writer that never comes, and with no limit
+			// on a job's time that is this app's backup and every app's
+			// after it, until someone looks.
+			return fmt.Errorf("app %s: state sqlite %s is a %s, not a database file", j.App, rel, describeMode(info.Mode()))
 		}
 		dst := filepath.Join(StagingData(j.Staging), filepath.Clean(rel))
 		if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
@@ -473,6 +485,8 @@ func (j Job) verifySnapshot(ctx context.Context, snapshot string, want []expecte
 // describeMode names what a path is, for the error that refuses it.
 func describeMode(m fs.FileMode) string {
 	switch {
+	case m.IsDir():
+		return "directory"
 	case m&fs.ModeNamedPipe != 0:
 		return "named pipe"
 	case m&fs.ModeSocket != 0:

@@ -250,14 +250,13 @@ func cmdStatus(fl caddycmd.Flags, names []string) (int, error) {
 	// app's data in its view — and only its listing comes back here. The
 	// settings reach it the way they reach a job: systemd reads the file.
 	view := jobView{User: fl.String("user"), EnvFile: envFile, Home: statusHome}
-	statuses, err := Status(ctx, apps, inUnit(view, osExec), host)
+	statuses, since, err := Status(ctx, apps, inUnit(view, osExec), host)
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return exitCouldNotCheck, fmt.Errorf("the repository did not answer within %s (--timeout), and the restic that was asking has been stopped: %w", timeout, err)
 		}
 		return exitCouldNotCheck, err
 	}
-	var since time.Time // this repository's oldest backup among the apps asked about
 	for i := range statuses {
 		statuses[i].Running = unitActive(ctx, unitName(statuses[i].App.Name)+".service")
 		nothing, err := nothingToBackUpYet(statuses[i].App)
@@ -265,9 +264,6 @@ func cmdStatus(fl caddycmd.Flags, names []string) (int, error) {
 			return exitCouldNotCheck, err
 		}
 		statuses[i].NothingYet = nothing
-		if first := statuses[i].First; !first.IsZero() && (since.IsZero() || first.Before(since)) {
-			since = first
-		}
 	}
 	verified, err := LastVerification(ctx, inUnit(view, osExec))
 	if err != nil {

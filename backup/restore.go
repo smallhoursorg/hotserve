@@ -499,7 +499,10 @@ func pickSnapshot(app string, snaps []Snapshot, want string, clean map[string]bo
 // record, an OR of the two --tag flags — so the two commands cannot come
 // to disagree about which snapshots are clean.
 func appSnapshots(ctx context.Context, x Exec, app string) ([]Snapshot, map[string]bool, error) {
-	out, err := x.output(ctx, restic("snapshots", "--json", "--tag", "hotserve,app:"+app, "--tag", CleanTag))
+	// --no-lock: a listing needs none, and with one it would fail at
+	// once ("repository is already locked") for as long as the weekly
+	// check holds the repository — which is no time to refuse a restore.
+	out, err := x.output(ctx, restic("snapshots", "--no-lock", "--json", "--tag", "hotserve,app:"+app, "--tag", CleanTag))
 	if err != nil {
 		return nil, nil, fmt.Errorf("listing the snapshots of %s: %w", app, err)
 	}

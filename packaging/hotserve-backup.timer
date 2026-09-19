@@ -1,4 +1,4 @@
-# Hourly backups, spread across the hour.
+# Hourly backups, each box at a minute of its own in the hour's first quarter.
 #
 # Hourly rather than continuous because the cost of a full copy is
 # small once restic deduplicates it — a measured ~1 MB per hour for a

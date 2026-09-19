@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // LaunchOptions is what one app's transient unit needs beyond the app
@@ -352,6 +353,12 @@ func stopWithContext(ctx context.Context, next Exec, unit string, c Cmd) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	var once sync.Once
+	stop := func() {
+		once.Do(func() {
+			_ = next(context.WithoutCancel(ctx), Cmd{Name: "systemctl", Args: []string{"stop", unit + ".service"}, Stdout: io.Discard, Stderr: io.Discard})
+		})
+	}
 	finished := make(chan struct{})
 	stopped := make(chan struct{})
 	go func() {
@@ -359,12 +366,19 @@ func stopWithContext(ctx context.Context, next Exec, unit string, c Cmd) error {
 		select {
 		case <-finished:
 		case <-ctx.Done():
-			_ = next(context.WithoutCancel(ctx), Cmd{Name: "systemctl", Args: []string{"stop", unit + ".service"}, Stdout: io.Discard, Stderr: io.Discard})
+			stop()
 		}
 	}()
 	err := next(ctx, c)
 	close(finished)
 	<-stopped
+	// The context ending is also what ends the client, so by the time the
+	// goroutine above is looking both of its cases can be ready, and it
+	// may take "finished". The stop is not left to that: a context that
+	// ended stops the unit, here if not there, and once.
+	if ctx.Err() != nil {
+		stop()
+	}
 	return err
 }
 

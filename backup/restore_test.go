@@ -548,6 +548,11 @@ func TestAppSnapshotsSplitsBackupsFromTheirCleanRecords(t *testing.T) {
 		if !slices.Contains(args, "hotserve,app:blog") || !slices.Contains(args, CleanTag) {
 			t.Errorf("want this app's backups and every clean-run record asked for: %v", args)
 		}
+		// A listing with a lock fails at once while the weekly check
+		// holds the repository, and a restore is what it would refuse.
+		if !slices.Contains(args, "--no-lock") {
+			t.Errorf("choosing a snapshot takes no lock: %v", args)
+		}
 		return body, nil
 	})
 	snaps, clean, err := appSnapshots(context.Background(), x, "blog")

@@ -73,10 +73,8 @@ func FetchApps(ctx context.Context, adminAddr string) ([]App, error) {
 		if !appNameRe.MatchString(name) {
 			return nil, fmt.Errorf("the admin API names an app %q, which is not a name this command will put into a unit's name and its directories (%s): refusing to back anything up on that answer", name, appNameRe)
 		}
-		for _, e := range a.State {
-			if e.Kind != KindSQLite && e.Kind != KindFiles {
-				return nil, fmt.Errorf("the admin API gives app %s a state entry of kind %q, which is neither %s nor %s: refusing to back anything up on that answer", name, e.Kind, KindSQLite, KindFiles)
-			}
+		if err := checkEntries(name, a.State); err != nil {
+			return nil, err
 		}
 		apps = append(apps, App{
 			Name:   name,
@@ -96,6 +94,33 @@ func FetchApps(ctx context.Context, adminAddr string) ([]App, error) {
 // held to rules of this package's own, whatever liveswap checked when it
 // loaded the config: the answer is only as good as what gave it.
 //
+// checkEntries holds what an app declares to what liveswap holds it to at
+// config load — a kind there is, a path inside shared/, and no entry
+// inside another — because the answer is only as good as what gave it,
+// and the last of those is not cosmetic: a database declared inside a
+// declared directory is backed up twice, once as a consistent copy and
+// once as whatever the live file held mid-write, and a restore puts the
+// copy back and then the directory, torn file and all, over it.
+func checkEntries(app string, entries []StateEntry) error {
+	var seen []string
+	for _, e := range entries {
+		if e.Kind != KindSQLite && e.Kind != KindFiles {
+			return fmt.Errorf("the admin API gives app %s a state entry of kind %q, which is neither %s nor %s: refusing to back anything up on that answer", app, e.Kind, KindSQLite, KindFiles)
+		}
+		if _, err := sharedPath("/", e.Path); err != nil {
+			return fmt.Errorf("the admin API gives app %s a state entry that leaves its shared dir (%q): refusing to back anything up on that answer", app, e.Path)
+		}
+		clean := filepath.Clean(e.Path)
+		for _, other := range seen {
+			if clean == other || strings.HasPrefix(clean, other+"/") || strings.HasPrefix(other, clean+"/") {
+				return fmt.Errorf("the admin API gives app %s state entries %q and %q, one inside the other: liveswap refuses that when it loads a config, so this answer is not one it made — refusing to back anything up on it", app, other, clean)
+			}
+		}
+		seen = append(seen, clean)
+	}
+	return nil
+}
+
 // appNameRe is liveswap's alphabet for an app name. Should liveswap ever
 // allow more, such an app is refused here by name, which is loud, rather
 // than reaching systemd, which is not.

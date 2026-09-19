@@ -281,8 +281,12 @@ A few times a year is enough. Give it no `--tag`: the records that say
 which runs finished cleanly are snapshots too, under tags of their own,
 and the same policy should thin them alongside the backups they vouch
 for. `forget` keeps the *last* snapshot of each hour, day and month,
-whether or not the run that took it finished cleanly; `restore` passes
-over one that did not, and takes the nearest clean one before it.
+whether or not the run that took it finished cleanly. For a period whose
+last run failed part-way, what is left of that period is therefore that
+one snapshot, which no clean run vouches for: `restore` does not choose
+it, `backup snapshots <app>` marks it, and `--snapshot <id>` restores it
+with a warning. The newest backups are not affected — a failed run is
+followed, an hour later, by one that is kept.
 
 **Not with a lifecycle rule.** Expiring objects on the bucket's own
 schedule does not work here: restic deduplicates, so a pack a rule

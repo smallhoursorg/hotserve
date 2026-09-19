@@ -493,3 +493,32 @@ func TestSelectApps(t *testing.T) {
 		t.Errorf("a name that is no app's is refused, naming the apps there are: %v", err)
 	}
 }
+
+// A context that ends is also what ends the client, so both of the
+// watcher's cases can be ready at once and it may see "finished" first.
+// The unit is stopped all the same, and once — tried many times, since
+// which case a select takes is chance.
+func TestStopWithContextAlwaysStopsAUnitWhoseContextEnded(t *testing.T) {
+	for i := range 300 {
+		ctx, cancel := context.WithCancel(context.Background())
+		var mu sync.Mutex
+		stops := 0
+		x := func(_ context.Context, c Cmd) error {
+			if c.Name == "systemctl" {
+				mu.Lock()
+				stops++
+				mu.Unlock()
+				return nil
+			}
+			cancel() // the client ends the instant its context does
+			return errors.New("signal: killed")
+		}
+		_ = stopWithContext(ctx, x, "hotserve-backup-blog", Cmd{Name: "systemd-run"})
+		mu.Lock()
+		got := stops
+		mu.Unlock()
+		if got != 1 {
+			t.Fatalf("try %d: the unit was stopped %d times, want exactly once", i, got)
+		}
+	}
+}

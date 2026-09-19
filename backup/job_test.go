@@ -931,3 +931,39 @@ func TestOnlyWhatARestorePutsBackIsBackedUpAsClean(t *testing.T) {
 		}
 	}
 }
+
+// A declared database is a file, or a link to one. A named pipe at its
+// path would have sqlite3 wait for a writer that never comes — and with
+// no limit on a job's time, hold up every app after it.
+func TestStageRefusesADatabaseThatIsNotAFile(t *testing.T) {
+	rec := &recorder{touch: true}
+	job := newJob(t, rec, []string{"app.db"}, nil)
+	live := filepath.Join(job.Shared, "app.db")
+	if err := os.Remove(live); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(live, 0o600); err != nil {
+		t.Skipf("no FIFOs here: %v", err)
+	}
+	err := job.Stage(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "named pipe") {
+		t.Fatalf("want the FIFO refused by name, got %v", err)
+	}
+	if len(rec.calls) != 0 {
+		t.Errorf("sqlite3 must not be given it: %v", rec.calls)
+	}
+	// A link to the database is followed: the copy is of the data.
+	if err := os.Remove(live); err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(job.Shared, "real.db")
+	if err := os.WriteFile(real, []byte("db"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, live); err != nil {
+		t.Fatal(err)
+	}
+	if err := job.Stage(context.Background()); err != nil {
+		t.Errorf("a link to a database file is a database: %v", err)
+	}
+}

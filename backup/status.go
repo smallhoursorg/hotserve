@@ -41,10 +41,6 @@ type AppStatus struct {
 	// typo, which looks exactly the same to the job. Only the report can
 	// tell them apart, by saying so to someone who knows which it is.
 	NeverThere []string
-	// First is when this app's oldest snapshot in the repository was
-	// taken: how long the repository has been in use, for the weekly
-	// check's grace period (Verification.Overdue).
-	First time.Time
 	// NothingYet is an app with none of what it declares on disk: never
 	// deployed, or deployed and yet to create any of it. Its hourly run
 	// has nothing to copy and says so; with no snapshot either, that is
@@ -92,36 +88,41 @@ func (s AppStatus) Stale(now time.Time) bool {
 //
 // host is this box's hostname: freshness is this box's runs, not those
 // of another box writing to the same repository.
-func Status(ctx context.Context, apps []App, x Exec, host string) ([]AppStatus, error) {
+//
+// since is when the repository's oldest hotserve backup was taken — any
+// app's, from any box, whichever apps were asked about — which is how
+// long it has been in use, for the weekly check's grace period
+// (Verification.Overdue). Zero when it holds none.
+func Status(ctx context.Context, apps []App, x Exec, host string) (statuses []AppStatus, since time.Time, err error) {
 	// --no-lock: listing snapshots needs no lock, so status writes
 	// nothing into the repository. Two --tag flags are an OR: the
 	// backups, and the clean-run records.
 	out, err := x.output(ctx, restic("snapshots", "--no-lock", "--json", "--tag", "hotserve", "--tag", CleanTag))
 	if err != nil {
-		return nil, fmt.Errorf("reading snapshots: %w", err)
+		return nil, time.Time{}, fmt.Errorf("reading snapshots: %w", err)
 	}
 	var listed []Snapshot
 	if err := json.Unmarshal(out, &listed); err != nil {
-		return nil, fmt.Errorf("restic returned a snapshot list this version cannot read: %w", err)
+		return nil, time.Time{}, fmt.Errorf("restic returned a snapshot list this version cannot read: %w", err)
 	}
 	snaps, _, records := cleanRecords(listed)
 	byApp := map[string][]Snapshot{}
 	for _, s := range snaps {
+		if since.IsZero() || s.Time.Before(since) {
+			since = s.Time
+		}
 		for _, t := range s.Tags {
 			if name, ok := strings.CutPrefix(t, "app:"); ok {
 				byApp[name] = append(byApp[name], s)
 			}
 		}
 	}
-	statuses := make([]AppStatus, 0, len(apps))
+	statuses = make([]AppStatus, 0, len(apps))
 	for _, app := range apps {
 		st := AppStatus{App: app, Snapshots: len(byApp[app.Name])}
 		present := map[string]bool{}
 		for _, s := range byApp[app.Name] {
 			present[s.ID] = true
-			if st.First.IsZero() || s.Time.Before(st.First) {
-				st.First = s.Time
-			}
 		}
 		var lastClean string // the snapshot this box's newest clean run vouches for
 		for _, r := range records[app.Name] {
@@ -155,7 +156,7 @@ func Status(ctx context.Context, apps []App, x Exec, host string) ([]AppStatus, 
 		statuses = append(statuses, st)
 	}
 	sort.Slice(statuses, func(i, j int) bool { return statuses[i].App.Name < statuses[j].App.Name })
-	return statuses, nil
+	return statuses, since, nil
 }
 
 // FormatStatus writes the report. One line per app, with what it

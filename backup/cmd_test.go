@@ -226,7 +226,7 @@ func TestStatusRunsResticAsTheJobsDo(t *testing.T) {
 		return nil
 	}
 	x := inUnit(jobView{User: "hotserve", EnvFile: "/etc/hotserve/backup.env", Home: statusHome}, next)
-	if _, err := Status(context.Background(), []App{testApp("blog", StateEntry{Kind: KindFiles, Path: "uploads"})}, x, "box-1"); err != nil {
+	if _, _, err := Status(context.Background(), []App{testApp("blog", StateEntry{Kind: KindFiles, Path: "uploads"})}, x, "box-1"); err != nil {
 		t.Fatal(err)
 	}
 	joined := strings.Join(got.Args, "\n")

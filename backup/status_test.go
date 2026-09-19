@@ -60,7 +60,7 @@ func TestStatusMatchesSnapshotsToApps(t *testing.T) {
 		record("shop", "box-1", 19*time.Minute, "ccc"),
 	), nil)
 
-	got, err := Status(context.Background(), apps, capture, "box-1")
+	got, _, err := Status(context.Background(), apps, capture, "box-1")
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestStatusCountsOnlyThisBoxsRecordsInThisRepository(t *testing.T) {
 		snap("aaa", "blog", 10*time.Minute),
 		record("blog", "box-2", 9*time.Minute, "aaa"),
 	), nil)
-	got, err := Status(context.Background(), apps, capture, "box-1")
+	got, _, err := Status(context.Background(), apps, capture, "box-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +221,7 @@ func TestStatusCountsOnlyThisBoxsRecordsInThisRepository(t *testing.T) {
 	// The switched-to repository: snapshots of blog, no record of a
 	// clean run from here.
 	capture, _ = capturing(snapshotsJSON(snap("old", "blog", 5*time.Minute)), nil)
-	got, err = Status(context.Background(), apps, capture, "box-1")
+	got, _, err = Status(context.Background(), apps, capture, "box-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +245,7 @@ func TestStatusNamesADeclaredPathThatHasNeverBeenThere(t *testing.T) {
 		snapOf("bbb", "blog", 30*time.Minute, app.Shared+"/uploads", app.Shared+"/upload"),
 		record("blog", "box-2", 29*time.Minute, "bbb"),
 	), nil)
-	got, err := Status(context.Background(), []App{app}, capture, "box-1")
+	got, _, err := Status(context.Background(), []App{app}, capture, "box-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +263,7 @@ func TestStatusNamesADeclaredPathThatHasNeverBeenThere(t *testing.T) {
 	// Before any clean run on this box there is nothing to compare
 	// with, which is not news: say nothing.
 	capture, _ = capturing(snapshotsJSON(snapOf("aaa", "blog", time.Hour, app.Shared+"/uploads")), nil)
-	got, _ = Status(context.Background(), []App{app}, capture, "box-1")
+	got, _, _ = Status(context.Background(), []App{app}, capture, "box-1")
 	if len(got[0].NeverThere) != 0 {
 		t.Errorf("without a clean run there is nothing to compare with, got %v", got[0].NeverThere)
 	}
@@ -323,7 +323,7 @@ func TestFormatStatusWithNothingDeclared(t *testing.T) {
 
 func TestStatusSurfacesResticFailures(t *testing.T) {
 	capture, _ := capturing(nil, errors.New("Fatal: unable to open repository"))
-	_, err := Status(context.Background(), []App{testApp("blog")}, capture, "box-1")
+	_, _, err := Status(context.Background(), []App{testApp("blog")}, capture, "box-1")
 	if err == nil || !strings.Contains(err.Error(), "reading snapshots") {
 		t.Fatalf("want the restic failure surfaced, got %v", err)
 	}
@@ -357,7 +357,7 @@ func TestACleanRecordCountsOnlyWhileItsSnapshotIsThere(t *testing.T) {
 		// The newest clean run's snapshot, "bbb", is not in the repository.
 		record("blog", "box-1", 10*time.Minute, "bbb"),
 	), nil)
-	got, err := Status(context.Background(), apps, capture, "box-1")
+	got, _, err := Status(context.Background(), apps, capture, "box-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -367,7 +367,27 @@ func TestACleanRecordCountsOnlyWhileItsSnapshotIsThere(t *testing.T) {
 	if !got[0].Stale(statusNow) {
 		t.Error("an app whose only recent clean run vouches for a snapshot that is gone is stale")
 	}
-	if !got[0].First.Equal(statusNow.Add(-5 * time.Hour)) {
-		t.Errorf("First is the app's oldest snapshot, got %v", got[0].First)
+}
+
+// How long the repository has held backups is about the repository: any
+// app's oldest snapshot, whichever apps the report was asked about — or
+// `status new-app`, or an old app's block being removed, would start the
+// weekly check's grace period again.
+func TestStatusSaysHowLongTheRepositoryHasHeldBackups(t *testing.T) {
+	capture, _ := capturing(snapshotsJSON(
+		snap("old", "retired-app", 90*24*time.Hour),
+		snap("new", "blog", 10*time.Minute),
+		record("blog", "box-1", 9*time.Minute, "new"),
+	), nil)
+	_, since, err := Status(context.Background(), []App{testApp("blog", StateEntry{Kind: KindFiles, Path: "uploads"})}, capture, "box-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := statusNow.Add(-90 * 24 * time.Hour); !since.Equal(want) {
+		t.Errorf("since = %v ago, want the 90 days of an app no longer asked about", statusNow.Sub(since))
+	}
+	empty, _ := capturing(snapshotsJSON(), nil)
+	if _, since, _ := Status(context.Background(), nil, empty, "box-1"); !since.IsZero() {
+		t.Errorf("a repository holding no backup has been in use for no time: %v", since)
 	}
 }
