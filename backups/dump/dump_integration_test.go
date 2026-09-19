@@ -3,8 +3,10 @@
 package dump
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -47,25 +49,50 @@ func single(t *testing.T, shared, staging, rel string) Result {
 func TestIntegrationDumpsALiveWALDatabase(t *testing.T) {
 	shared, staging := dirs(t)
 	db := filepath.Join(shared, "data", "app's.db") // a quote, for the SQL the path goes into
-	must(t, os.MkdirAll(filepath.Dir(db), 0o755))
 	sql(t, db, "pragma journal_mode=wal; create table t(x); insert into t values (1),(2),(3);")
-	// A writer holding the database open, mid-transaction-free, as an
-	// app does.
-	writer := exec.Command(sqlite3, db, "insert into t values (4); select 1; .system sleep 3")
+
+	// A writer that is really there: a connection held open over stdin,
+	// in the middle of a write transaction, as an app is at any moment.
+	// (Given as an argument, SQL followed by a dot-command is a syntax
+	// error and sqlite3 is gone in milliseconds.) It says "ready" once
+	// the transaction is open, and the dump starts only then.
+	writer := exec.Command(sqlite3, db)
+	stdin, err := writer.StdinPipe()
+	must(t, err)
+	stdout, err := writer.StdoutPipe()
+	must(t, err)
 	must(t, writer.Start())
-	defer writer.Wait() //nolint:errcheck // only there to hold the database open
+	_, err = fmt.Fprintln(stdin, "begin immediate; insert into t values (4); select 'ready';")
+	must(t, err)
+	line, err := bufio.NewReader(stdout).ReadString('\n')
+	if err != nil || strings.TrimSpace(line) != "ready" {
+		t.Fatalf("the writer did not get as far as its transaction: %q, %v", line, err)
+	}
+	if _, err := os.Stat(db + "-wal"); err != nil {
+		t.Fatalf("there is no -wal beside the database, so nothing is writing it: %v", err)
+	}
 
 	res := single(t, shared, staging, "data/app's.db")
 	if res.Class != OK || res.Bytes == 0 {
 		t.Fatalf("%+v", res)
 	}
-	if got := strings.TrimSpace(sql(t, filepath.Join(staging, "data", "app's.db"), "select count(*) from t")); got != "3" && got != "4" {
-		t.Fatalf("the copy holds %s rows", got)
+	// The copy is of what was committed: the writer's fourth row is not.
+	if got := strings.TrimSpace(sql(t, filepath.Join(staging, "data", "app's.db"), "select count(*) from t")); got != "3" {
+		t.Fatalf("the copy holds %s rows, want the 3 that were committed", got)
 	}
 	for _, side := range []string{"-wal", "-shm"} {
 		if _, err := os.Stat(filepath.Join(staging, "data", "app's.db") + side); err == nil {
 			t.Errorf("the copy has a %s beside it", side)
 		}
+	}
+
+	// And the writer was there throughout: it can still commit.
+	_, err = fmt.Fprintln(stdin, "commit; select count(*) from t;")
+	must(t, err)
+	must(t, stdin.Close())
+	rest, _ := io.ReadAll(stdout)
+	if err := writer.Wait(); err != nil || strings.TrimSpace(string(rest)) != "4" {
+		t.Fatalf("the writer, after the dump: %q, %v", rest, err)
 	}
 }
 

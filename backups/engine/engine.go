@@ -14,6 +14,7 @@
 package engine
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -840,10 +841,7 @@ func (x *run) verify(ctx context.Context, app, id string, rec *record.App) error
 		if !it.OK {
 			continue
 		}
-		full := path.Join(base, "sqlite", it.Path)
-		if it.Kind == "files" {
-			full = path.Join(base, "files", it.Path)
-		}
+		full := itemPath(base, it)
 		want[path.Dir(full)] = append(want[path.Dir(full)], i)
 	}
 	parents := make([]string, 0, len(want))
@@ -852,7 +850,12 @@ func (x *run) verify(ctx context.Context, app, id string, rec *record.App) error
 	}
 	sort.Strings(parents)
 	out := filepath.Join(x.dir, app+".ls.json")
-	// One listing of every parent. --no-lock: a listing must not fail
+	// One listing of every parent. Given a directory, restic 0.18 lists
+	// it and its direct children and no deeper [measured: 2 nodes for a
+	// parent, 409 for the same snapshot with no directory given, 404
+	// with --recursive], so the listing is a handful of lines however
+	// large the app — TestIntegrationResticLsOfADirectoryIsNotRecursive
+	// is what says so if a later restic changes its mind. --no-lock: a listing must not fail
 	// because a check holds the repository. The parents are the one
 	// thing on any command line here that comes from a declaration — the
 	// directory part of a declared path, after /backup/<app>/ — and
@@ -871,18 +874,20 @@ func (x *run) verify(ctx context.Context, app, id string, rec *record.App) error
 	if !o.OK() {
 		return fmt.Errorf("restic ls exited %d", o.ExitStatus)
 	}
-	nodes, err := lsNodes(out)
+	wanted := map[string]bool{}
+	for _, items := range want {
+		for _, i := range items {
+			wanted[itemPath(base, rec.Items[i])] = true
+		}
+	}
+	nodes, err := lsNodes(out, wanted)
 	if err != nil {
 		return err
 	}
 	for _, parent := range parents {
 		for _, i := range want[parent] {
 			it := &rec.Items[i]
-			full := path.Join(base, "sqlite", it.Path)
-			if it.Kind == "files" {
-				full = path.Join(base, "files", it.Path)
-			}
-			node, ok := nodes[full]
+			node, ok := nodes[itemPath(base, *it)]
 			switch {
 			case !ok:
 				it.OK, it.Detail = false, "it is not in the snapshot: it disappeared while the backup ran"
@@ -940,28 +945,42 @@ func (x *run) lastInRepository(ctx context.Context, app string) (last *record.Sn
 	return last, false, nil
 }
 
+// itemPath is where a declared item sits in the snapshot.
+func itemPath(base string, it record.Item) string {
+	if it.Kind == "files" {
+		return path.Join(base, "files", it.Path)
+	}
+	return path.Join(base, "sqlite", it.Path)
+}
+
 type lsNode struct {
 	Type string `json:"type"`
 	Size int64  `json:"size"`
 }
 
-func lsNodes(file string) (map[string]lsNode, error) {
-	raw, err := os.ReadFile(file) //nolint:gosec // written by the manager into root's own run dir
+// lsNodes reads a listing a line at a time and keeps the nodes at the
+// wanted paths, and nothing else: what it costs in memory does not
+// depend on how long the listing is.
+func lsNodes(file string, wanted map[string]bool) (map[string]lsNode, error) {
+	f, err := os.Open(file) //nolint:gosec // written by the manager into root's own run dir
 	if err != nil {
 		return nil, err
 	}
+	defer f.Close() //nolint:errcheck // read-only
 	nodes := map[string]lsNode{}
-	for _, line := range bytes.Split(raw, []byte("\n")) {
+	lines := bufio.NewScanner(f)
+	lines.Buffer(make([]byte, 0, 64<<10), 1<<20)
+	for lines.Scan() {
 		var n struct {
 			StructType string `json:"struct_type"`
 			Path       string `json:"path"`
 			lsNode
 		}
-		if json.Unmarshal(line, &n) == nil && n.StructType == "node" {
+		if json.Unmarshal(lines.Bytes(), &n) == nil && n.StructType == "node" && wanted[n.Path] {
 			nodes[n.Path] = n.lsNode
 		}
 	}
-	return nodes, nil
+	return nodes, lines.Err()
 }
 
 func firstDetail(items []record.Item) string {
