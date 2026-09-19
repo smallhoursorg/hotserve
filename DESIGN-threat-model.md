@@ -494,6 +494,20 @@ app's data, or write where a job writes. Each root command reads the
 admin API (rule 7) and the settings file, asks systemd for units, and
 prints; `init` also writes the settings file.
 
+For the one root command nobody is watching — the timer's launcher —
+that is held to by its unit (packaging/hotserve-backup.service) rather
+than promised by the code: a read-only filesystem, the staging dirs and
+hotserve's own state not in its view at all (`InaccessiblePaths=`, which
+is rule 1 made physical), no network, a system-call filter, and one
+capability left of root's forty — `CAP_DAC_OVERRIDE`, because the admin
+socket is writable by its owner alone, and on a read-only filesystem it
+opens files to read and sockets to connect to and changes nothing. The
+package smoke test starts the real unit against the real socket. It is
+what a fault in reading the admin API's answer has to work with, not a
+boundary against the launcher being taken over outright (see below).
+`restore`, `init` and `status` are run by an operator through `sudo`,
+and are whatever `sudo` makes them.
+
 **Why not a user of its own.** A less privileged `hotserve-backup` user
 would need leave to start units under the system manager, and that
 leave is not a smaller thing than root: whoever may create a transient

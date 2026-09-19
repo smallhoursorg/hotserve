@@ -41,3 +41,46 @@ ExecStopPost=/usr/bin/systemctl stop hotserve-backup-*.service
 # Backups are background work: they yield to whatever is serving.
 Nice=10
 IOSchedulingClass=idle
+
+# This unit is root for two things: reading the settings file, and
+# asking systemd for units (DESIGN-threat-model.md, "Backups"). What it
+# is not for is held to here, by systemd rather than by the code keeping
+# a promise: the filesystem is read-only to it, the staging dirs and
+# hotserve's own state are not there at all, and it has no network — the
+# admin API and systemd are both unix sockets. It reads the admin API's
+# answer, which the hotserve process wrote; this is what a fault in
+# reading it has to work with.
+#
+# One capability is left of root's forty: the admin socket is writable
+# by its owner alone (Caddy makes it so), in a directory that is
+# hotserve's, and only CAP_DAC_OVERRIDE connects to it from here. On a
+# read-only filesystem it opens files to read and sockets to connect to,
+# and changes nothing.
+#
+# (Not a boundary against this unit being taken over outright: whatever
+# may ask systemd for a transient unit may ask for one that is root.)
+CapabilityBoundingSet=CAP_DAC_OVERRIDE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+UMask=0077
+# Where the jobs write, and hotserve's own state (its TLS keys): this
+# unit has no business in either, so neither is in its view.
+InaccessiblePaths=-/var/lib/hotserve-backup -/var/lib/hotserve-backup-status -/var/lib/hotserve

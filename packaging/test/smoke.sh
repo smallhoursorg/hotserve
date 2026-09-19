@@ -464,6 +464,31 @@ journalctl -u hotserve --no-pager | grep -q "$TOKEN" \
 	&& die "deploy token leaked into the journal" || true
 echo "journal is free of the deploy token"
 
+# The backup launcher is root, and its unit holds it to what it is root
+# for (DESIGN-threat-model.md, "Backups"): one capability of root's
+# forty, a read-only filesystem without the staging dirs or hotserve's
+# state in it, no network. It still has to do its job from in there —
+# read the settings, and reach the admin API, a socket only its owner may
+# write, in a directory that is hotserve's. The app here declares no
+# state, so the launcher's answer is the line it prints once it has read
+# both.
+printf 'RESTIC_REPOSITORY=s3:s3.example.com/nowhere\nRESTIC_PASSWORD=x\n' > /etc/hotserve/backup.env
+chmod 0600 /etc/hotserve/backup.env
+t_launch=$(date +%s)
+sleep 1
+systemctl start hotserve-backup.service \
+	|| die "the confined backup launcher failed: $(journalctl --no-pager -u hotserve-backup.service --since "@$t_launch" | tail -5)"
+journalctl --no-pager -u hotserve-backup.service --since "@$t_launch" | grep -q "no app declares state" \
+	|| die "the confined launcher did not get an answer from the admin API: $(journalctl --no-pager -u hotserve-backup.service --since "@$t_launch" | tail -5)"
+for want in "CapabilityBoundingSet=cap_dac_override" "ProtectSystem=strict" "PrivateNetwork=yes" "NoNewPrivileges=yes"; do
+	systemctl show hotserve-backup.service -p "${want%%=*}" | grep -qx "$want" \
+		|| die "hotserve-backup.service is not confined as shipped: $(systemctl show hotserve-backup.service -p "${want%%=*}"), want $want"
+done
+systemctl show hotserve-backup.service -p InaccessiblePaths --value | grep -q "/var/lib/hotserve-backup" \
+	|| die "the staging root is in the launcher's view: root must have no way to touch what jobs write"
+rm -f /etc/hotserve/backup.env
+echo "the backup launcher does its job from inside its sandbox: one capability, read-only, no network, no staging dirs"
+
 stage "stage 2b: a SIGKILLed hotserve is back within seconds, reattached"
 # Stage 3's upgrade restart is a clean stop and start, which never
 # exercises Restart=; this is the one lane that runs the installed
