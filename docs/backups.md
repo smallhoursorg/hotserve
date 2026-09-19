@@ -33,6 +33,13 @@ For a script, give `init` the same things in root-only files instead:
 `--credentials-file` with `KEY=VALUE` lines, and `--password-file` for
 a repository that already exists. Without a terminal it asks nothing.
 
+**One repository per box, with its own key and its own password.** A
+restore takes an app's newest clean snapshot by the app's name, so two
+boxes running the same apps — a dev box and a production box, say —
+must not share a repository: production could be handed dev's data.
+Give each box its own bucket, its own storage key restricted to that
+bucket, and let `init` generate its own password.
+
 ```
 app blog {
 	command ./server
@@ -167,8 +174,11 @@ Two things in those journals that are not what they look like:
 - **`status=75/TEMPFAIL`, and systemd calling `hotserve-backup-blog`
   failed**, under a line from the job saying there is *nothing to back
   up yet*: the app has not been deployed, or has created nothing it
-  declares. 75 is how the job tells the run so; the run says
-  `skipping`, and stays green. It stops with the app's first data.
+  declares. 75 is how the job tells the run so — the job's last line
+  says as much, just above systemd's — and the run says `skipping`, and
+  stays green. It stops with the app's first data. (A declared dir that
+  exists and is empty is backed up like any other: this is about one
+  that is not there yet.)
 - **Units named `hotserve-backup_…`**, with an underscore —
   `hotserve-backup_check`, `hotserve-backup_restic-1a2b3c4d`,
   `hotserve-backup_settings-…` — are not apps' jobs: they are the
@@ -273,6 +283,21 @@ for. `forget` keeps the *last* snapshot of each hour, day and month,
 whether or not the run that took it finished cleanly; `restore` passes
 over one that did not, and takes the nearest clean one before it.
 
+**Not with a lifecycle rule.** Expiring objects on the bucket's own
+schedule does not work here: restic deduplicates, so a pack a rule
+judges old can still hold the only copy of a chunk that this morning's
+snapshot needs, and removing it corrupts backups that are perfectly
+current. Lifecycle rules have one job in this setup — keeping old
+*versions* around, so that hiding cannot become destroying. Retention
+of snapshots is `restic forget --prune`, run by a key that is allowed
+to delete.
+
+**Going further:** storage-level immutability (S3 Object Lock, in
+governance or compliance mode) protects the backups even against
+someone with your storage account. restic cannot use it — it must be
+able to delete its own lock files — so that path means a different tool;
+Kopia supports Object Lock directly.
+
 ### Changing the key, or the repository
 
 Run `init` again with `--force`:
@@ -290,21 +315,6 @@ box backs up exactly as before. Nothing is carried over from the old
 file, so give any extra `KEY=VALUE` settings again. For another
 repository, name that one instead: `status` then reports every app as
 having no clean run *there*, until the next run.
-
-**Not with a lifecycle rule.** Expiring objects on the bucket's own
-schedule does not work here: restic deduplicates, so a pack a rule
-judges old can still hold the only copy of a chunk that this morning's
-snapshot needs, and removing it corrupts backups that are perfectly
-current. Lifecycle rules have one job in this setup — keeping old
-*versions* around, so that hiding cannot become destroying. Retention
-of snapshots is `restic forget --prune`, run by a key that is allowed
-to delete.
-
-**Going further:** storage-level immutability (S3 Object Lock, in
-governance or compliance mode) protects the backups even against
-someone with your storage account. restic cannot use it — it must be
-able to delete its own lock files — so that path means a different tool;
-Kopia supports Object Lock directly.
 
 ## Restoring
 
@@ -423,12 +433,12 @@ report and exits 1 when any app has no current backup. It exits 2 when
 it could not find out — hotserve not answering, or the repository not
 answering within `--timeout` (two minutes unless you say otherwise; left
 alone, restic would go on retrying for many minutes, and a monitor asks
-again long before that) — which is worth a retry before a page. It needs root — the
-repository settings are root-only — so run it from root's crontab or a
-root systemd timer.
+again long before that) — which is worth a retry before a page. It needs
+root — the repository settings are root-only — so run it from root's
+crontab or a root systemd timer.
 
-Two things it will say that are worth knowing before you see them at
-three in the morning:
+What it will say that is worth knowing before you see it at three in
+the morning:
 
 - **`(no clean run on this box)`** — the repository holds snapshots for
   this app, but it has no record of a backup run from *this* machine

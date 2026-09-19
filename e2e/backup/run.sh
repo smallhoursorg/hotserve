@@ -1143,8 +1143,9 @@ if section init-tty "init at a terminal: one command, and it asks"; then
 	mv /var/lib/liveswap/files-example /var/lib/liveswap/files-example.aside
 	if hotserve backup run --admin 127.0.0.1:2019 >/tmp/run-never.log 2>&1 \
 		&& grep -q 'files-example: nothing to back up yet, skipping' /tmp/run-never.log \
+		&& journalctl --no-pager -u hotserve-backup-files-example.service -n 12 | grep -q 'it is not a failure' \
 		&& ! grep -q 'files-example: ok' /tmp/run-never.log && grep -q 'backup-example: ok' /tmp/run-never.log; then
-		pass "an app never backed up and with no data yet is skipped, on its job's word, and the run passes"
+		pass "an app never backed up and with no data yet is skipped, on its job's word, and its journal says the status systemd calls a failure is not one"
 	else
 		fail "a run over an app with no data: $(tail -5 /tmp/run-never.log)"
 	fi

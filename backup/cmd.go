@@ -599,7 +599,7 @@ func cmdApp(fl caddycmd.Flags, entryArgs []string) (int, error) {
 			}
 		}
 		fmt.Printf("%s: nothing to back up yet — %s is not there: the app has not been deployed\n", name, shared)
-		return exitNoData, nil
+		return noData(name), nil
 	}
 	switch phase := fl.String("phase"); phase {
 	case phaseStage:
@@ -616,12 +616,22 @@ func cmdApp(fl caddycmd.Flags, entryArgs []string) (int, error) {
 	}
 	switch err := job.Execute(context.Background()); {
 	case errors.Is(err, errNoData):
-		return exitNoData, nil // said by the job, in its own words
+		return noData(name), nil // why is said by the job, in its own words
 	case err != nil:
 		return caddy1, err
 	}
 	fmt.Printf("%s: backed up\n", name)
 	return 0, nil
+}
+
+// noData is the job's exit for an app with nothing to back up yet, with
+// the line that goes before it. systemd logs the status as this unit
+// failing, straight after the job's own line saying why there was
+// nothing to copy: read together, without this, they look like a reason
+// and then a second problem.
+func noData(app string) int {
+	fmt.Printf("%s: exiting with status %d, which tells the run there was nothing to back up. systemd reports that below as this unit failing; it is not a failure — the run says \"skipping\" and carries on, and this stops once the app has data\n", app, exitNoData)
+	return exitNoData
 }
 
 // cmdRestore puts one app's declared state back from a snapshot: it
