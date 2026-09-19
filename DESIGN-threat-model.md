@@ -494,6 +494,24 @@ app's data, or write where a job writes. Each root command reads the
 admin API (rule 7) and the settings file, asks systemd for units, and
 prints; `init` also writes the settings file.
 
+**Why not a user of its own.** A less privileged `hotserve-backup` user
+would need leave to start units under the system manager, and that
+leave is not a smaller thing than root: whoever may create a transient
+unit chooses its `User=` and its command. (Measured: a root process
+stripped of every capability, with a read-only filesystem and no
+network, still starts a unit that runs as uid 0 and reads
+`/etc/shadow`.) The leave itself would come from polkit, which a Debian
+13 server does not have — systemd only suggests it — so it would be a
+new dependency, to grant something root-equivalent under another name.
+What would be a real reduction is no transient units at all: template
+units shipped in the package, with the sandbox in the unit file, and a
+launcher allowed to *start* them and nothing else. That moves the
+per-app facts a unit is given today — the declarations, liveswap's
+root, a restore's snapshot — out of its arguments and into files
+somebody has to write and somebody else has to trust, which is the
+kind of boundary rules 1 and 6 exist to avoid. It is an idea, not a
+plan.
+
 Who runs as what, and what each can reach:
 
 | Process | Runs as | Sandbox | App data | Network | Credential | Runs |
