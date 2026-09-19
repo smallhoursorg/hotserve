@@ -39,6 +39,7 @@ func Make(ctx context.Context, caddyfile string) (*Plan, error) {
 	// yet validated: a trial value is not a valid root, and a plan that
 	// turns invalid under a trial has changed like any other.
 	adapt := func(env []string) (*Plan, error) {
+		//nolint:gosec // a constant path outside tests; the Caddyfile path is the caller's, a root-owned constant
 		cmd := exec.CommandContext(ctx, hotserve, "adapt", "--adapter", "caddyfile", "--config", caddyfile)
 		cmd.Env = append([]string{}, env...) // never nil: nil means "inherit"
 		var stdout, stderr bytes.Buffer
@@ -100,7 +101,7 @@ func envNames(caddyfile string) ([]string, error) {
 			return nil
 		}
 		seen[file] = true
-		raw, err := os.ReadFile(file)
+		raw, err := os.ReadFile(file) //nolint:gosec // the Caddyfile and what it imports: read here exactly as the adapter reads them, inside a unit whose view holds nothing else
 		if err != nil {
 			return err
 		}
@@ -114,7 +115,7 @@ func envNames(caddyfile string) ([]string, error) {
 			}
 			matches, _ := filepath.Glob(pattern)
 			for _, match := range matches {
-				if st, err := os.Stat(match); err != nil || !st.Mode().IsRegular() {
+				if st, err := os.Stat(match); err != nil || !st.Mode().IsRegular() { //nolint:gosec // as above
 					continue
 				}
 				if err := scan(match); err != nil {

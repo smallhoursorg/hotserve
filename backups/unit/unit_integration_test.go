@@ -35,6 +35,13 @@ func runner(t *testing.T) *Runner {
 	return r
 }
 
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func ensureUser(t *testing.T, name string) {
 	t.Helper()
 	if exec.Command("id", name).Run() == nil {
@@ -57,7 +64,7 @@ func outFile(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return filepath.Join(dir, "stdout")
 }
 
@@ -108,9 +115,9 @@ func TestIntegrationBindSourceIsAPathAndNothingElse(t *testing.T) {
 	}
 	// TempDir is under /tmp, which PrivateTmp hides from the unit but
 	// not from the manager resolving the bind source.
-	os.WriteFile(filepath.Join(dir, "row"), []byte("row\n"), 0o644)
+	must(t, os.WriteFile(filepath.Join(dir, "row"), []byte("row\n"), 0o644))
 	for p := dir; p != "/tmp" && p != "/"; p = filepath.Dir(p) {
-		os.Chmod(p, 0o755)
+		must(t, os.Chmod(p, 0o755))
 	}
 	stdout := outFile(t)
 	out, err := r.Run(context.Background(), Spec{
@@ -182,10 +189,10 @@ func TestIntegrationNoNetworkUnlessAsked(t *testing.T) {
 func TestIntegrationMaskedPathsReadEmptyAndAMissingOneIsSkipped(t *testing.T) {
 	r := runner(t)
 	dir, _ := os.MkdirTemp("/root", "unit-mask-")
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	os.Chmod(dir, 0o755)
-	os.WriteFile(filepath.Join(dir, "app.db"), []byte("LIVE DATABASE BYTES"), 0o644)
-	os.WriteFile(filepath.Join(dir, "a.png"), []byte("img"), 0o644)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	must(t, os.Chmod(dir, 0o755))
+	must(t, os.WriteFile(filepath.Join(dir, "app.db"), []byte("LIVE DATABASE BYTES"), 0o644))
+	must(t, os.WriteFile(filepath.Join(dir, "a.png"), []byte("img"), 0o644))
 	stdout := outFile(t)
 	out, err := r.Run(context.Background(), Spec{
 		Name: name(t), User: testUser, StdoutFile: stdout,
@@ -209,7 +216,7 @@ func TestIntegrationCapabilityReadsAnotherUsersFileAndWritesNothing(t *testing.T
 	ensureUser(t, "hotserve")
 	ensureUser(t, "hotserve-backup")
 	dir, _ := os.MkdirTemp("/root", "unit-cap-")
-	t.Cleanup(func() { os.RemoveAll(dir) })
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	if out, err := exec.Command("sh", "-c", "chmod 0755 "+dir+" && install -d -o hotserve -g hotserve -m 0700 "+dir+"/shared && install -o hotserve -g hotserve -m 0600 /dev/null "+dir+"/shared/secret && echo private > "+dir+"/shared/secret").CombinedOutput(); err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}
@@ -289,11 +296,13 @@ func waitFor(t *testing.T, unit, state string) {
 func TestIntegrationBindsToEndsTheUnitWhenItsOrchestratorIsKilled(t *testing.T) {
 	r := runner(t)
 	orch := "hotserve_backup_test_orchestrator.service"
-	t.Cleanup(func() { exec.Command("systemctl", "stop", orch).Run() })
-	go r.Run(context.Background(), Spec{Name: orch, Argv: []string{"/bin/sleep", "601"}, User: testUser})
+	t.Cleanup(func() { _ = exec.Command("systemctl", "stop", orch).Run() })
+	go func() {
+		_, _ = r.Run(context.Background(), Spec{Name: orch, Argv: []string{"/bin/sleep", "601"}, User: testUser})
+	}()
 	waitFor(t, orch, "activating")
 	n := name(t)
-	t.Cleanup(func() { exec.Command("systemctl", "stop", n).Run() })
+	t.Cleanup(func() { _ = exec.Command("systemctl", "stop", n).Run() })
 	type result struct {
 		out Outcome
 		err error

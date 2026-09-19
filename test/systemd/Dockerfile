@@ -9,13 +9,15 @@
 #
 # libpam-systemd: pam_systemd is what hands user@<uid>.service its
 # XDG_RUNTIME_DIR; without it no user manager can start. dbus: logind.
-# procps: pgrep/ps for the process-tree assertions.
+# procps: pgrep/ps for the process-tree assertions. sqlite3 and restic:
+# Debian's, because what the backups module's integration tests
+# measure is how those two programs behave.
 FROM golang:1.27-trixie
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends \
-		systemd systemd-sysv dbus libpam-systemd procps \
+		systemd systemd-sysv dbus libpam-systemd procps sqlite3 restic \
 	&& rm -rf /var/lib/apt/lists/*
 
 RUN systemctl mask \
