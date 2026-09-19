@@ -226,9 +226,9 @@ somewhere with no default would otherwise leave nothing where its value
 goes — `email {$ACME_EMAIL}`, unset, is a parse error — so each gets a
 placeholder of its own, and where the adapter refuses one (it quotes the
 value: `invalid port 'hsb-placeholder-metrics-port.invalid'`) the next
-kind is tried there: a number, a duration, a path. The structure of what
-is adapted is the server's own; only those values differ, and none of
-them is anywhere a plan looks.
+kind is tried there: a number, a duration, a path. Each made-up value
+is one token, so what is adapted has the structure the Caddyfile has on
+the page, and none of those values is anywhere a plan looks.
 
 Then every variable is given a second value. If the plan comes out
 different — the root, an app's name or a backup path depends on it — the
@@ -240,6 +240,19 @@ a file with a literal `root` does what a variable would.
 If no value tried adapts, the run fails with the adapter's own error,
 which names the file and line; a default that adapts
 (`{$NAME:value}`) settles it.
+
+**What this cannot see.** Caddy substitutes `{$NAME}` into the text
+before it reads a single token, so a value is not bound to be one token:
+with a space in it `command {$CMD}` is two arguments, and with a newline
+in it, it is more lines of Caddyfile — `CMD` set to `./server`, a
+newline, and a `backup` block gives the server's `blog` a declaration
+that is nowhere in the file [measured]. One-token values cannot show
+that no value would do that, and the values the server has are not
+known here. So: **a declaration that exists only through the server's
+environment is not backed up, and nothing says so.** That environment
+is root's to write (`hotserve.service`), like the Caddyfile's own
+directory; keep what it holds to values, and what is declared in the
+Caddyfile.
 
 ## By hand, until there is a setup command
 

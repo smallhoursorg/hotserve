@@ -60,6 +60,13 @@ func kinds(name string) []string {
 // refuses, naming it. One that no second value adapts with is refused
 // as well: that is what `import sites/{$ENV:prod}.caddy` looks like
 // from here, and the file the server imports may say anything.
+//
+// What this does not show: the substitution is textual, so a value
+// with a newline in it is more lines of Caddyfile, and can declare a
+// backup the file does not [measured]. Every value tried here is one
+// token; no set of them shows that no value restructures the file, and
+// the server's values are not known here. A declaration that exists
+// only through the server's environment is not in the plan.
 func Make(ctx context.Context, caddyfile string) (*Plan, error) {
 	// adapt returns the plan as the Caddyfile spells it under env, not
 	// yet validated — a placeholder is not a valid root, and a plan that
