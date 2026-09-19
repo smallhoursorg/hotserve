@@ -87,9 +87,10 @@ jobs:
   # here is the first lever.
   #
   # Two jobs per runner, each with a stack of its own: the backup suite
-  # needs nothing the other suites leave behind, and beside them it
-  # adds no time to a run, where after them it added its whole length.
-  # One `make e2e` on a laptop is still all of it on one stack.
+  # needs nothing the other suites leave behind, so a run waits for the
+  # longer of the two jobs rather than for their sum. Each builds the
+  # stack, which is about half of either job; the backup one is the
+  # longer. One `make e2e` on a laptop is still all of it on one stack.
   e2e:
     strategy:
       fail-fast: false
