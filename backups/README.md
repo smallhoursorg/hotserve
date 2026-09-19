@@ -29,12 +29,19 @@ package yet: a run needs `/etc/hotserve/backup.env` written by hand
    that plan strictly, validating every field again;
 4. empties and removes the staging directory of any app that no longer
    declares a backup;
-5. for each app that declares a backup:
+5. for each app that declares a backup — in name order, but one whose
+   last run `failed` goes last:
    - empties the app's staging directory, before anything else;
    - looks for `<root>/<app>/shared` on the real filesystem, by opening
-     it. Only "no such file" is absence: `pending` if no run has ever
-     made a snapshot of the app, `data missing` if one has. It must
-     belong to the `hotserve` user;
+     it. Only "no such file" is absence: `pending` if nothing has ever
+     been backed up of the app, `data missing` if something has. The
+     record says which; where it holds no snapshot of the app — a
+     rebuilt box, a new disk, or an app that really is new — the
+     repository is asked, on every run that finds it so (an answer of
+     "none" is not kept: it could go stale), and if it cannot be asked
+     the app is `failed`, not `pending`: `pending` is the one absence a
+     run exits 0 on. The directory must belong to the
+     `hotserve` user;
    - copies each declared database into staging with `VACUUM INTO`, and
      keeps a copy only if `integrity_check` says exactly `ok`;
    - uploads with `restic backup`;
@@ -173,10 +180,9 @@ password". 1 is "the storage could not be reached, or refused the key,
 or something else" — never "no repository": a wrong storage key ends,
 after about fifteen minutes of restic's own retrying, in exit 1 and a
 message about a missing repository. After any of those four the run
-does not try the remaining apps, which would each wait as long — so an
-exit 1 that is really about one app (apps are taken in name order)
-keeps the later ones from being tried, run after run, until it is
-dealt with.
+does not try the remaining apps, which would each wait as long. An
+exit 1 that is really about one app costs the apps after it that run
+and no more: an app whose last run failed goes last.
 
 How a copy ended is read from `sqlite3`'s exit status, which is
 SQLite's result code (5 and 6 busy, 13 full), never from its words:
@@ -198,6 +204,10 @@ they hold the database's path, and `busy.db` is not busy.
   declare the real path, and put data on another disk with a bind
   mount, as liveswap itself asks. (The liveswap root may be a link.)
 - An `<app>/shared` that does not belong to the `hotserve` user.
+- A declared `files` path that is a FIFO, a socket or a device: a backup
+  keeps files and directories, and a restore could not put anything
+  else back. (restic does record such a node where it finds one
+  *inside* a declared directory; nothing reads it.)
 - A run's leftover unit that will not stop within two minutes: the run
   is refused, and the record says why.
 - A unit whose state cannot be read ten looks running (five minutes) is

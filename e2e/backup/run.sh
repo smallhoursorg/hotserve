@@ -113,8 +113,8 @@ shop_left=$(rr snapshots --no-lock --tag app:shop --json 2>/dev/null | grep -o '
 [ "$before" = 6 ] && [ "$blog_left" = 1 ] && [ "$shop_left" = 1 ] && pass "after three runs, 'forget --keep-last 1' leaves each app its own latest (6 -> 1 + 1)" || fail "retention: $before snapshots before; blog $blog_left, shop $shop_left after"
 
 echo "=== backup 3: what is not a database is reported, never opened, and stops nothing else ==="
-as_app sh -c 'cd /var/lib/liveswap/blog/shared && mkfifo fifo.db && mkfifo -m 0400 rofifo.db && : >empty.db && ln -s app.db link.db && echo "not a database, only a text file" >text.db'
-sed 's#sqlite app.db#sqlite app.db fifo.db rofifo.db empty.db link.db text.db absent.db#' /root/Caddyfile.base >"$CADDYFILE"
+as_app sh -c 'cd /var/lib/liveswap/blog/shared && mkfifo fifo.db && mkfifo -m 0400 rofifo.db && : >empty.db && ln -s app.db link.db && echo "not a database, only a text file" >text.db && mkfifo pipe'
+sed -e 's#sqlite app.db#sqlite app.db fifo.db rofifo.db empty.db link.db text.db absent.db#' -e 's#files  uploads#files  uploads pipe#' /root/Caddyfile.base >"$CADDYFILE"
 start=$(date +%s)
 if run; then fail "a run with six undumpable databases exited 0"; else pass "the run exits non-zero"; fi
 took=$(($(date +%s) - start))
@@ -125,10 +125,15 @@ for db in fifo.db rofifo.db empty.db link.db text.db; do
 	tr -d '\n' <"$STATUS" | sed 's/  */ /g' | grep -q "\"path\": \"$db\", \"ok\": false, \"detail\": \"not a database" && pass "$db is reported as not a database" || fail "$db: $(grep -A3 "\"$db\"" "$STATUS" | tr -d '\n')"
 done
 tr -d '\n' <"$STATUS" | sed 's/  */ /g' | grep -q '"path": "absent.db", "ok": false, "detail": "missing' && pass "absent.db is reported as missing" || fail "absent.db: $(grep -A3 '"absent.db"' "$STATUS" | tr -d '\n')"
-rr ls --no-lock latest --tag app:blog 2>/dev/null | grep -q '^/backup/blog/sqlite/app.db$' && pass "the one real database was still copied and uploaded" || fail "app.db is not in the snapshot"
+rr ls --no-lock latest --tag app:blog >/root/ls.blog 2>/dev/null
+grep -q '^/backup/blog/sqlite/app.db$' /root/ls.blog && pass "the one real database was still copied and uploaded" || fail "app.db is not in the snapshot"
+# A backup keeps files and directories: a FIFO declared as files is
+# nothing a restore could put back.
+tr -d '\n' <"$STATUS" | sed 's/  */ /g' | grep -q '"path": "pipe", "ok": false, "detail": "it is a fifo' && pass "a FIFO declared as files is refused, in words" || fail "pipe: $(grep -A3 '"pipe"' "$STATUS" | tr -d '\n')"
+grep -q '^/backup/blog/files/uploads/a.png$' /root/ls.blog && ! grep -q 'files/pipe' /root/ls.blog && pass "and is not in the snapshot, while the files beside it are" || fail "the snapshot's files: $(grep files/ /root/ls.blog)"
 [ ! -e /var/lib/liveswap/blog/shared/absent.db ] && pass "the missing database was not created in the app's directory" || fail "absent.db now exists in the app's directory"
 nothing_left "undumpable databases"
-as_app sh -c 'cd /var/lib/liveswap/blog/shared && rm -f fifo.db rofifo.db empty.db link.db text.db'
+as_app sh -c 'cd /var/lib/liveswap/blog/shared && rm -f fifo.db rofifo.db empty.db link.db text.db pipe'
 
 echo "=== backup 4: a declared files path that is not there ==="
 sed 's#files  uploads#files  uploads avatars#' /root/Caddyfile.base >"$CADDYFILE"
@@ -195,6 +200,14 @@ run && fail "a run exited 0 with shop's data gone" || pass "the run exits non-ze
 expect_class shop "data missing" "data gone after a good backup"
 grep -q "shop: data missing: .*was last backed up on .*snapshot [0-9a-f]\{8\}" "$OUT" && pass "and says when it was last backed up, and to which snapshot" || fail "data missing: $(grep '^shop' "$OUT")"
 expect_class blog ok "another app's data going"
+# A rebuilt box: the record is gone as well as the data. The repository
+# remembers what the box does not, so this is still not "pending",
+# which a run exits 0 on.
+rm -f "$STATUS"
+run && fail "a run exited 0 with shop's data gone and no record of it" || pass "with the record gone too, the run still exits non-zero"
+expect_class shop "data missing" "data gone, and no record"
+grep -q "shop: data missing: .*snapshot [0-9a-f]\{8\}" "$OUT" && pass "the snapshot it names came from the repository" || fail "data missing, no record: $(grep '^shop' "$OUT")"
+expect_class notyet pending "an app the repository has never seen"
 mv /root/shop.away /var/lib/liveswap/shop
 
 echo "=== backup 8: the wrong repository password ==="
@@ -208,7 +221,11 @@ nothing_left "wrong password"
 echo "=== backup 9: no repository where the settings point ==="
 write_env "$REPO/nothing-here" "$PASSWORD"
 run && fail "a run with no repository exited 0" || pass "the run exits non-zero"
-grep -q "blog: failed: there is no repository at the configured location (exit 10)" "$OUT" && pass "and says there is no repository" || fail "no repository: $(grep '^blog' "$OUT")"
+# Whichever app meets the repository first says so — an app that failed
+# last run goes last, and one with no data asks the repository about
+# itself — and the rest are not attempted.
+grep -q "there is no repository at the configured location (exit 10)" "$OUT" && pass "and says there is no repository" || fail "no repository: $(cat "$OUT")"
+grep -q "no repository" "$OUT" && ! grep -q ": ok: " "$OUT" && pass "and no app is reported ok" || fail "with no repository: $(cat "$OUT")"
 rr cat config --no-lock >/dev/null 2>&1
 [ $? = 10 ] && pass "and did not create one (restic still exits 10 there)" || fail "restic no longer says 'no repository' there: the run created one, or the check cannot tell"
 nothing_left "no repository"

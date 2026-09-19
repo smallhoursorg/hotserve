@@ -169,8 +169,15 @@ func (x *run) apps(ctx context.Context) error {
 	}
 	x.status.Root = p.Root
 	x.forget(ctx, p)
+	// Name order, but what failed last run goes last: a failure that is
+	// one app's own — and ends the run, as every restic exit 1 does —
+	// costs its neighbours one run, not every run.
+	names := p.Names()
+	sort.SliceStable(names, func(i, j int) bool {
+		return !x.failedLast(names[i]) && x.failedLast(names[j])
+	})
 	var stop *record.App // set once the repository refuses for a reason every app shares
-	for _, name := range p.Names() {
+	for _, name := range names {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -188,10 +195,18 @@ func (x *run) apps(ctx context.Context) error {
 	return ctx.Err()
 }
 
+func (x *run) failedLast(name string) bool {
+	old := x.prev.Apps[name]
+	return old != nil && old.Class == record.Failed
+}
+
 func (x *run) carryLastOK(name string) {
 	app, old := x.status.Apps[name], x.prev.Apps[name]
 	if old != nil {
-		app.LastOK, app.LastSnapshot = old.LastOK, old.LastSnapshot
+		app.LastOK = old.LastOK
+		if app.LastSnapshot == nil { // unless the repository has just said
+			app.LastSnapshot = old.LastSnapshot
+		}
 	}
 	if app.Snapshot != nil {
 		app.LastSnapshot = app.Snapshot
@@ -407,8 +422,28 @@ func (x *run) app(ctx context.Context, root, name string, decl *backupdecl.Confi
 	}
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		if old := x.prev.Apps[name]; old != nil && old.LastSnapshot != nil {
-			return fail(record.DataMissing, "%s does not exist, and this app was last backed up on %s (snapshot %s): its data is gone, or the disk it lives on is not mounted", shared, old.LastSnapshot.Time.Format(time.RFC3339), short(old.LastSnapshot.ID))
+		// "Not deployed yet" is the one absence a run exits 0 on, so it
+		// is said only of an app nothing has ever been backed up of. The
+		// record remembers a snapshot; and where it has none for the app
+		// — a rebuilt box, a new disk, a purge, or an app that really is
+		// new — the repository is asked, every run that finds it so: it
+		// remembers what the box does not, and an answer of "none" is
+		// not kept, so it cannot go stale.
+		old := x.prev.Apps[name]
+		last := (*record.Snapshot)(nil)
+		if old != nil {
+			last = old.LastSnapshot
+		}
+		if last == nil {
+			var wide bool
+			if last, wide, err = x.lastInRepository(ctx, name); err != nil {
+				app.Class, app.Detail = record.Failed, fmt.Sprintf("%s does not exist, and the repository could not be asked whether this app was ever backed up: %v", shared, err)
+				return app, wide
+			}
+			app.LastSnapshot = last
+		}
+		if last != nil {
+			return fail(record.DataMissing, "%s does not exist, and this app was last backed up on %s (snapshot %s): its data is gone, or the disk it lives on is not mounted", shared, last.Time.Format(time.RFC3339), short(last.ID))
 		}
 		return fail(record.Pending, "%s does not exist yet: the app has not been deployed", shared)
 	case errors.Is(err, errLink):
@@ -636,6 +671,11 @@ func (x *run) view(app string, shared pin, staging, declFile string, decl *backu
 			continue
 		}
 		undo = append(undo, item.close)
+		if kind := item.kind(); kind != "" {
+			it.Detail = "it is " + kind + ", not a file or a directory, and a backup keeps only those"
+			rec.Items = append(rec.Items, it)
+			continue
+		}
 		source, unmount, err := x.bound(item)
 		if err != nil {
 			it.Detail = err.Error()
@@ -848,10 +888,56 @@ func (x *run) verify(ctx context.Context, app, id string, rec *record.App) error
 				it.OK, it.Detail = false, "it is not in the snapshot: it disappeared while the backup ran"
 			case it.Kind == "sqlite" && (node.Type != "file" || node.Size == 0):
 				it.OK, it.Detail = false, fmt.Sprintf("in the snapshot it is a %s of %d bytes, not a database copy", record.Text(node.Type), node.Size)
+			case it.Kind == "files" && node.Type != "file" && node.Type != "dir":
+				// It was a file or a directory when it was pinned, and
+				// the app's to replace since.
+				it.OK, it.Detail = false, fmt.Sprintf("in the snapshot it is a %s, not a file or a directory", record.Text(node.Type))
 			}
 		}
 	}
 	return nil
+}
+
+// lastInRepository asks the repository for the newest snapshot of app,
+// or nil when it holds none. It is what a run falls back on where the
+// record holds no snapshot of an app, and what a restore on a rebuilt
+// box starts from.
+func (x *run) lastInRepository(ctx context.Context, app string) (last *record.Snapshot, repositoryWide bool, err error) {
+	out := filepath.Join(x.dir, app+".history.json")
+	o, err := x.start(ctx, unit.Spec{
+		Name: x.name("history", app), Description: "hotserve backup: ask the repository about " + app,
+		Argv: []string{x.cfg.Restic, "snapshots", "--json", "--no-lock", "--host", "hotserve", "--tag", "app:" + app},
+		User: backupUser, Network: true, EnvironmentFile: x.cfg.EnvFile,
+		Environment:    []string{"RESTIC_CACHE_DIR=/var/cache/hotserve-backup", "HOME=/nonexistent"},
+		CacheDirectory: "hotserve-backup", StdoutFile: out,
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	if !o.OK() {
+		detail, wide := resticFailure(o)
+		return nil, wide, errors.New(detail)
+	}
+	raw, err := os.ReadFile(out) //nolint:gosec // written by the manager into root's own run dir
+	if err != nil {
+		return nil, false, err
+	}
+	var snaps []struct {
+		ID   string    `json:"id"`
+		Time time.Time `json:"time"`
+	}
+	if err := json.Unmarshal(raw, &snaps); err != nil {
+		return nil, false, fmt.Errorf("what restic said of its snapshots could not be read: %w", err)
+	}
+	for _, s := range snaps {
+		if !snapshotRe.MatchString(s.ID) {
+			return nil, false, fmt.Errorf("restic named a snapshot %q", record.Text(s.ID))
+		}
+		if last == nil || s.Time.After(last.Time) {
+			last = &record.Snapshot{ID: s.ID, Time: s.Time}
+		}
+	}
+	return last, false, nil
 }
 
 type lsNode struct {

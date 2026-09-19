@@ -70,6 +70,26 @@ func (p pin) owner() int {
 	return int(st.Uid)
 }
 
+// kind is what is pinned, in a word, when it is neither a file nor a
+// directory; "" when it is one of those.
+func (p pin) kind() string {
+	var st unix.Stat_t
+	if unix.Fstat(p.fd, &st) != nil {
+		return "something that cannot be looked at"
+	}
+	switch st.Mode & unix.S_IFMT {
+	case unix.S_IFREG, unix.S_IFDIR:
+		return ""
+	case unix.S_IFIFO:
+		return "a fifo"
+	case unix.S_IFSOCK:
+		return "a socket"
+	case unix.S_IFCHR, unix.S_IFBLK:
+		return "a device"
+	}
+	return "a special file"
+}
+
 func (p pin) isDir() bool {
 	var st unix.Stat_t
 	return unix.Fstat(p.fd, &st) == nil && st.Mode&unix.S_IFMT == unix.S_IFDIR

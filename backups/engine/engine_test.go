@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/smallhoursorg/hotserve/backups/dump"
@@ -45,7 +46,9 @@ type box struct {
 	unmounted  []string
 	leftMounts []string
 	stopErr    error
-	failClean  string // the app whose clean unit fails
+	failClean  string         // the app whose clean unit fails
+	history    string         // what `restic snapshots` prints for an app
+	uploadExit map[string]int // an app whose upload exits with this
 }
 
 var roleRe = regexp.MustCompile(`^hotserve_backup_([a-z]+)[0-9]*_`)
@@ -142,6 +145,8 @@ func (b *box) Run(_ context.Context, s unit.Spec) (unit.Outcome, error) {
 		write(string(raw))
 	case "upload":
 		write(b.summary)
+	case "history":
+		write(b.history)
 	case "verify":
 		// Everything after "--" and the snapshot id is a parent to list.
 		var out []string
@@ -153,6 +158,11 @@ func (b *box) Run(_ context.Context, s unit.Spec) (unit.Outcome, error) {
 			}
 		}
 		write(strings.Join(out, "\n"))
+	}
+	for app, exit := range b.uploadExit {
+		if role == "upload" && strings.Contains(s.Name, "_upload_"+app+"_") {
+			return unit.Outcome{Result: "exit-code", ExitStatus: exit}, nil
+		}
 	}
 	if role == "clean" && b.failClean != "" && strings.Contains(s.Name, "_clean_"+b.failClean+"_") {
 		return unit.Outcome{Result: "exit-code", ExitStatus: 1}, nil
@@ -291,6 +301,7 @@ func TestADatabaseInsideAFilesPathIsMaskedThere(t *testing.T) {
 
 func TestNoDataYetAndDataGone(t *testing.T) {
 	b := newBox(t)
+	b.history = "[]"
 	must(t, os.RemoveAll(filepath.Join(b.root, "blog")))
 	st, err := Run(context.Background(), b.cfg, b)
 	if err != nil {
@@ -299,9 +310,19 @@ func TestNoDataYetAndDataGone(t *testing.T) {
 	if app := st.Apps["blog"]; app.Class != record.Pending || !strings.Contains(app.Detail, b.root) {
 		t.Fatalf("an app never deployed and never backed up: %+v", app)
 	}
-	if got := b.roles(); got != "plan clean" {
-		t.Fatalf("units started for an app with no data: %s (staging is emptied whatever is found; nothing else)", got)
+	// Staging is emptied whatever is found, and — the record holding no
+	// snapshot of this app — the repository is asked: every such run,
+	// since an answer of "none" that was kept could go stale.
+	for i := 0; i < 2; i++ {
+		if got := b.roles(); got != "plan clean history" {
+			t.Fatalf("run %d: units started for an app with no data: %s", i+1, got)
+		}
+		b.specs = nil
+		if st, err = Run(context.Background(), b.cfg, b); err != nil || st.Apps["blog"].Class != record.Pending {
+			t.Fatalf("%+v, %v", st.Apps["blog"], err)
+		}
 	}
+	b.specs = nil
 
 	// Deployed, backed up, and then the data goes.
 	must(t, os.MkdirAll(filepath.Join(b.root, "blog", "shared", "uploads"), 0o755))
@@ -864,5 +885,100 @@ func TestPlaintextLeftByADepartedAppIsSaid(t *testing.T) {
 	}
 	if !strings.Contains(st.Warning, "shop") || !strings.Contains(st.Warning, "may still be in") {
 		t.Fatalf("warning: %q", st.Warning)
+	}
+}
+
+// A rebuilt box: no record, and the data is not there. The repository
+// remembers what the box does not, and "not deployed yet" — which a run
+// exits 0 on — is never said of an app it holds snapshots of.
+func TestWithNoRecordTheRepositoryIsAskedWhetherTheAppWasEverBackedUp(t *testing.T) {
+	older, newer := "1111111111111111111111111111111111111111111111111111111111111111", "2222222222222222222222222222222222222222222222222222222222222222"
+	for name, tc := range map[string]struct {
+		history string
+		outcome *unit.Outcome
+		class   record.Class
+		want    string
+	}{
+		"it holds snapshots of the app": {`[{"id":"` + newer + `","time":"2026-09-18T10:00:00Z"},{"id":"` + older + `","time":"2026-09-01T10:00:00Z"}]`, nil, record.DataMissing, newer[:8]},
+		"it holds none":                 {`[]`, nil, record.Pending, "not been deployed"},
+		"it cannot be asked":            {``, &unit.Outcome{Result: "exit-code", ExitStatus: 1}, record.Failed, "could not be asked"},
+		"it answers nonsense":           {`{"id":"latest"}`, nil, record.Failed, "could not be asked"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			b := newBox(t)
+			must(t, os.RemoveAll(filepath.Join(b.root, "blog")))
+			b.history = tc.history
+			if tc.outcome != nil {
+				b.outcome["history"] = *tc.outcome
+			}
+			st, err := Run(context.Background(), b.cfg, b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			app := st.Apps["blog"]
+			if app.Class != tc.class || !strings.Contains(app.Detail, tc.want) {
+				t.Fatalf("%+v", app)
+			}
+			h := b.spec("history")
+			if h.User != backupUser || !h.Network || h.EnvironmentFile == "" || len(h.Capabilities) != 0 || len(h.Binds) != 0 {
+				t.Errorf("the unit that asks: %+v", h)
+			}
+			if got := strings.Join(h.Argv[1:], " "); got != "snapshots --json --no-lock --host hotserve --tag app:blog" {
+				t.Errorf("asks with: %s", got)
+			}
+		})
+	}
+}
+
+// What a backup keeps is files and directories. A FIFO, a socket or a
+// device at a declared path is not something a restore can put back.
+func TestADeclaredFilesPathThatIsNotAFileOrADirectoryIsRefused(t *testing.T) {
+	b := newBox(t)
+	must(t, syscall.Mkfifo(filepath.Join(b.root, "blog", "shared", "pipe"), 0o644))
+	b.plan = fmt.Sprintf(`{"root":%q,"apps":{"blog":{"files":["uploads","pipe"]}}}`, b.root)
+	// And what the snapshot says a path is counts too.
+	b.ls = func(string) string { return `{"struct_type":"node","path":"/backup/blog/files/uploads","type":"fifo"}` }
+	st, err := Run(context.Background(), b.cfg, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bind := range b.spec("upload").Binds {
+		if strings.Contains(bind.Dest, "pipe") {
+			t.Errorf("the FIFO was bound into the upload unit: %+v", bind)
+		}
+	}
+	items := st.Apps["blog"].Items
+	if items[1].OK || !strings.Contains(items[1].Detail, "fifo") {
+		t.Errorf("the FIFO: %+v", items[1])
+	}
+	if items[0].OK || !strings.Contains(items[0].Detail, "in the snapshot it is a fifo") {
+		t.Errorf("a path the snapshot holds as a FIFO: %+v", items[0])
+	}
+}
+
+// One app's failure is not its neighbours' every run: what failed last
+// time goes last this time.
+func TestAnAppThatFailedLastRunGoesLast(t *testing.T) {
+	b := newBox(t)
+	for _, app := range []string{"aaa", "zzz"} {
+		must(t, os.MkdirAll(filepath.Join(b.root, app, "shared", "uploads"), 0o755))
+	}
+	b.plan = fmt.Sprintf(`{"root":%q,"apps":{"aaa":{"files":["uploads"]},"blog":{"files":["uploads"]},"zzz":{"files":["uploads"]}}}`, b.root)
+	b.ls = func(parent string) string {
+		return `{"struct_type":"node","path":"` + parent + `/uploads","type":"dir"}`
+	}
+	b.uploadExit = map[string]int{"aaa": 1}
+	st, err := Run(context.Background(), b.cfg, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Apps["aaa"].Class != record.Failed || st.Apps["blog"].Class != record.NotAttempted || st.Apps["zzz"].Class != record.NotAttempted {
+		t.Fatalf("the first run: %v %v %v", st.Apps["aaa"].Class, st.Apps["blog"].Class, st.Apps["zzz"].Class)
+	}
+	if st, err = Run(context.Background(), b.cfg, b); err != nil {
+		t.Fatal(err)
+	}
+	if st.Apps["blog"].Class != record.OK || st.Apps["zzz"].Class != record.OK || st.Apps["aaa"].Class != record.Failed {
+		t.Fatalf("the second run, with aaa still failing: blog %v, zzz %v, aaa %v", st.Apps["blog"].Class, st.Apps["zzz"].Class, st.Apps["aaa"].Class)
 	}
 }
