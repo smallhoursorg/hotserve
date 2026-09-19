@@ -166,6 +166,8 @@ func cmdBackup(fl caddycmd.Flags) (int, error) {
 		return cmdRestore(fl, args[1:])
 	case "restore-app":
 		return cmdRestoreApp(fl, args[1:])
+	case "check-settings":
+		return cmdCheckSettings()
 	default:
 		return caddy1, fmt.Errorf("unknown subcommand %q: want init, run, status, restore, restic or app", args[0])
 	}
@@ -176,7 +178,7 @@ func cmdBackup(fl caddycmd.Flags) (int, error) {
 // the jobs' user, so neither `restic` as that user nor `sudo restic`
 // works on its own.
 func cmdRestic(fl caddycmd.Flags, args []string) (int, error) {
-	if err := Passthrough(context.Background(), fl.String("env-file"), fl.String("user"), args, os.Stdout, os.Stderr); err != nil {
+	if err := Passthrough(context.Background(), fl.String("env-file"), fl.String("user"), args, osExec); err != nil {
 		return caddy1, err
 	}
 	return 0, nil
@@ -188,10 +190,8 @@ func cmdStatus(fl caddycmd.Flags) (int, error) {
 	if err != nil {
 		return caddy1, err
 	}
-	// systemd gives the jobs these settings; a person running this by
-	// hand has nothing exported, so read the same file they do.
-	env, err := LoadEnvFile(fl.String("env-file"))
-	if err != nil {
+	envFile := fl.String("env-file")
+	if err := requireSettingsFile(envFile); err != nil {
 		return caddy1, err
 	}
 	host, err := os.Hostname()
@@ -201,12 +201,10 @@ func cmdStatus(fl caddycmd.Flags) (int, error) {
 	// This command is root. restic is not: it talks to the network and
 	// parses what the storage sends back, so it runs where the jobs'
 	// restic runs — a unit, as the jobs' user, in their sandbox, with no
-	// app's data in its view — and only its listing comes back here.
-	if err := prepareCheckRoot(); err != nil {
-		return caddy1, err
-	}
-	view := jobView{User: fl.String("user"), Home: statusHome}
-	statuses, err := Status(ctx, apps, asJob(view, checkRoot, "", osExec).withEnv(env), host)
+	// app's data in its view — and only its listing comes back here. The
+	// settings reach it the way they reach a job: systemd reads the file.
+	view := jobView{User: fl.String("user"), EnvFile: envFile, Home: statusHome}
+	statuses, err := Status(ctx, apps, inUnit(view, osExec), host)
 	if err != nil {
 		return caddy1, err
 	}
@@ -259,7 +257,10 @@ func cmdInit(fl caddycmd.Flags, args []string) (int, error) {
 	// this process outright, so the cleanups below do run.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := prepareCheckRoot(); err != nil {
+	if err := os.MkdirAll(checkRoot, 0o700); err != nil {
+		return caddy1, fmt.Errorf("making %s for the repository checks: %w", checkRoot, err)
+	}
+	if err := requireRootOnlyDir(checkRoot); err != nil {
 		return caddy1, err
 	}
 	// Whatever an init that was killed left there goes first, and what
@@ -299,7 +300,7 @@ func cmdInit(fl caddycmd.Flags, args []string) (int, error) {
 	// their output is captured rather than shown: restic's "repository
 	// does not exist" while init is about to create one reads as an
 	// error when it is the expected answer.
-	if err := Init(ctx, o, asJob(view, checkRoot, checkUnit, osExec), os.Stdout); err != nil {
+	if err := Init(ctx, o, asJob(view, checkRoot, osExec), os.Stdout); err != nil {
 		return caddy1, err
 	}
 	return 0, nil
@@ -336,15 +337,6 @@ const checkRoot = "/run/hotserve-backup"
 // minutes. Beside the staging root, not in it: an app may be named
 // anything.
 const statusHome = "/var/lib/hotserve-backup-status"
-
-// prepareCheckRoot makes the root-only directory a unit's settings are
-// written to while it runs, and refuses one that is not root-only.
-func prepareCheckRoot() error {
-	if err := os.MkdirAll(checkRoot, 0o700); err != nil {
-		return fmt.Errorf("making %s for the repository settings: %w", checkRoot, err)
-	}
-	return requireRootOnlyDir(checkRoot)
-}
 
 // checkHome is the directory init's checks may write: restic's cache,
 // kept from one check to the next. systemd makes it for them, as it
@@ -383,26 +375,45 @@ func cmdRun(fl caddycmd.Flags) (int, error) {
 	if err != nil {
 		return caddy1, err
 	}
-	envFile := fl.String("env-file")
-	// systemd hands the jobs this file; it is read here only to refuse
-	// a repository that is not a backend URL.
-	env, err := LoadEnvFile(envFile)
-	if err != nil {
-		return caddy1, err
-	}
-	if err := checkSettingsRepository(env); err != nil {
-		return caddy1, err
-	}
 	o := LaunchOptions{
 		Self:        self,
 		StagingRoot: fl.String("staging"),
-		EnvFile:     envFile,
+		EnvFile:     fl.String("env-file"),
 		User:        fl.String("user"),
 	}
 	if err := checkStagingRoot(o.StagingRoot); err != nil {
 		return caddy1, err
 	}
+	if len(apps) > 0 {
+		if err := checkSettingsInUnit(ctx, o, osExec); err != nil {
+			return caddy1, err
+		}
+	}
 	if err := RunAll(ctx, apps, o, osExec, os.Stdout); err != nil {
+		return caddy1, err
+	}
+	return 0, nil
+}
+
+// checkSettingsInUnit refuses settings this package will not run on —
+// a repository that is a path on this box, above all — before anything
+// is launched on them, and without this process, which is root, opening
+// the file: systemd reads it for a unit, and the unit says what is wrong
+// (settingsCheckArgs). What the unit prints reaches the operator.
+func checkSettingsInUnit(ctx context.Context, o LaunchOptions, x Exec) error {
+	if err := requireSettingsFile(o.EnvFile); err != nil {
+		return err
+	}
+	if err := x(ctx, Cmd{Name: "systemd-run", Args: settingsCheckArgs(o.Self, o.User, o.EnvFile)}); err != nil {
+		return fmt.Errorf("the settings in %s cannot be used (above): %w", o.EnvFile, err)
+	}
+	return nil
+}
+
+// cmdCheckSettings is checkSettingsInUnit's other half, inside the unit:
+// the settings are this process's environment, as systemd read them.
+func cmdCheckSettings() (int, error) {
+	if err := checkSettings(lookupEnv); err != nil {
 		return caddy1, err
 	}
 	return 0, nil
@@ -483,13 +494,6 @@ func cmdRestore(fl caddycmd.Flags, args []string) (int, error) {
 		return caddy1, err
 	}
 	envFile := fl.String("env-file")
-	env, err := LoadEnvFile(envFile)
-	if err != nil {
-		return caddy1, err
-	}
-	if err := checkSettingsRepository(env); err != nil {
-		return caddy1, err
-	}
 	o := LaunchOptions{
 		Self:        self,
 		StagingRoot: fl.String("staging"),
@@ -497,6 +501,9 @@ func cmdRestore(fl caddycmd.Flags, args []string) (int, error) {
 		User:        fl.String("user"),
 	}
 	if err := checkStagingRoot(o.StagingRoot); err != nil {
+		return caddy1, err
+	}
+	if err := checkSettingsInUnit(ctx, o, osExec); err != nil {
 		return caddy1, err
 	}
 	unit := unitName(name)

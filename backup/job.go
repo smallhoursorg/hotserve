@@ -64,7 +64,7 @@ func (j Job) Execute(ctx context.Context) error {
 	if env == nil {
 		env = lookupEnv
 	}
-	if err := requireResticEnv(env); err != nil {
+	if err := checkSettings(env); err != nil {
 		return err
 	}
 	if len(j.Databases) == 0 && len(j.Files) == 0 {

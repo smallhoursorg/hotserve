@@ -29,6 +29,9 @@ type Cmd struct {
 	// stdout is often parsed (JSON), and stderr must never be mixed in.
 	Stdout io.Writer
 	Stderr io.Writer
+	// Stdin is nothing unless set. The one command given a person's
+	// terminal is the operator's own restic (Passthrough).
+	Stdin io.Reader
 }
 
 // Exec runs one command. Everything this package starts — restic,
@@ -80,6 +83,7 @@ func osExec(ctx context.Context, c Cmd) error {
 	if c.Stderr != nil {
 		cmd.Stderr = c.Stderr
 	}
+	cmd.Stdin = c.Stdin
 	if err := cmd.Run(); err != nil {
 		if _, lookErr := exec.LookPath(c.Name); lookErr != nil {
 			return fmt.Errorf("%s is not installed: %w", c.Name, lookErr)

@@ -4,65 +4,45 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
-	"os/user"
-	"strconv"
-	"syscall"
 )
 
-// Passthrough runs restic with the repository settings this box
-// already has, as the user that owns the backups.
+// PassthroughArgs is the systemd-run invocation behind `hotserve backup
+// restic -- …`: restic with the repository settings this box already
+// has, as the user the backups belong to.
 //
-// The settings live in a root-only file, so `restic snapshots` as the
+// The settings are in a root-only file, so `restic snapshots` as the
 // hotserve user finds no repository at all; and run as that user,
 // restic's cache and anything else it writes belong to the user the
-// hourly jobs run as. Every restore in docs/backups.md goes through
-// here, which is also what lets the e2e suite run those commands
-// exactly as written.
-func Passthrough(ctx context.Context, envFile, username string, args []string, stdout, stderr *os.File) error {
+// hourly jobs run as. systemd does both — reads the file for the unit,
+// as it does for a job, and runs it as User=, with that user's HOME —
+// so nothing here parses the one or switches to the other. Every
+// restore in docs/backups.md goes through here, which is also what lets
+// the e2e suite run those commands exactly as written.
+//
+// Not the jobs' sandbox: this is an operator's tool, and what they ask
+// of it — a restore into a directory of their choosing — needs the
+// filesystem. --pty with --pipe is a terminal when there is one (restic
+// asks for a new key's password) and the caller's streams when there is
+// not (a script reading `snapshots --json`).
+func PassthroughArgs(envFile, username string, args []string) []string {
+	argv := []string{
+		"--wait", "--collect", "--quiet", "--pty", "--pipe", "--expand-environment=no",
+		"--property=User=" + username,
+		"--property=EnvironmentFile=" + envFile,
+		// Looked up on the unit's PATH, as the jobs' restic is.
+		"/bin/sh", "-c", probeScript, "restic",
+	}
+	return append(argv, args...)
+}
+
+// Passthrough runs it, with the caller's terminal or streams.
+func Passthrough(ctx context.Context, envFile, username string, args []string, x Exec) error {
 	if len(args) == 0 {
 		return fmt.Errorf("say what to run, e.g. `hotserve backup restic -- snapshots --tag hotserve`")
 	}
-	env, err := LoadEnvFile(envFile)
-	if err != nil {
+	if err := requireSettingsFile(envFile); err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, "restic", args...) //nolint:gosec // a fixed program; the arguments are what the operator typed after `--` on their own command line
-	cmd.Env = append(os.Environ(), env...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	if os.Geteuid() == 0 && username != "" {
-		cred, home, err := credentialFor(username)
-		if err != nil {
-			return err
-		}
-		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: cred}
-		// And that user's HOME, as `sudo -H` would: restic keeps its
-		// cache under HOME, and with root's HOME, where sudo leaves
-		// it, every command prints "unable to open cache: mkdir
-		// /root/.cache: permission denied" and runs without one.
-		cmd.Env = append(cmd.Env, "HOME="+home)
-	}
-	say(stderr, "+ restic %s", quoteArgs(args))
-	return cmd.Run()
-}
-
-func credentialFor(username string) (*syscall.Credential, string, error) {
-	u, err := user.Lookup(username)
-	if err != nil {
-		return nil, "", fmt.Errorf("looking up the %s user (backups belong to it): %w", username, err)
-	}
-	// Parsed at the width the kernel uses, rather than parsed as an int
-	// and narrowed: a uid that does not fit is a broken passwd entry,
-	// and narrowing it would silently run restic as somebody else.
-	uid, err := strconv.ParseUint(u.Uid, 10, 32)
-	if err != nil {
-		return nil, "", fmt.Errorf("user %s has a uid %q that is not a number in range", username, u.Uid)
-	}
-	gid, err := strconv.ParseUint(u.Gid, 10, 32)
-	if err != nil {
-		return nil, "", fmt.Errorf("user %s has a gid %q that is not a number in range", username, u.Gid)
-	}
-	return &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}, u.HomeDir, nil
+	say(os.Stderr, "+ restic %s", quoteArgs(args))
+	return x(ctx, Cmd{Name: "systemd-run", Args: PassthroughArgs(envFile, username, args), Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr})
 }

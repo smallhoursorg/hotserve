@@ -17,8 +17,10 @@
 package backup
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -136,7 +138,7 @@ func say(w io.Writer, format string, a ...any) {
 	_, _ = fmt.Fprintf(w, format+"\n", a...)
 }
 
-// unquote mirrors what systemd does to an EnvironmentFile= value.
+// unquote drops the quotes around a value in a --credentials-file.
 func unquote(v string) string {
 	if len(v) >= 2 {
 		if (v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'') {
@@ -172,23 +174,32 @@ func CheckRepository(repo string) error {
 	return fmt.Errorf("repository %q is not a backend URL: it must start with one of %s: — a path on this box is not supported", repo, strings.Join(Backends, ":, "))
 }
 
-// checkSettingsRepository checks the repository the settings file
-// names. RESTIC_REPOSITORY_FILE is refused: the jobs' sandbox cannot
-// see the file it points at.
-func checkSettingsRepository(env []string) error {
-	var repo string
-	for _, kv := range env {
-		if strings.HasPrefix(kv, "RESTIC_REPOSITORY_FILE=") {
-			return fmt.Errorf("RESTIC_REPOSITORY_FILE is not supported: the backup jobs run in a sandbox that cannot see it — put RESTIC_REPOSITORY in the environment file instead")
-		}
-		if v, ok := strings.CutPrefix(kv, "RESTIC_REPOSITORY="); ok {
-			repo = v
-		}
+// checkSettings holds the repository settings to this package's rules,
+// reading them from an environment — a unit's, which systemd built from
+// the settings file. Nothing here reads that file: its format is
+// systemd's (quotes, escapes, continuation lines), and a second reader
+// of it is a second opinion about what it says.
+//
+// RESTIC_REPOSITORY_FILE is refused: the jobs' sandbox cannot see the
+// file it points at.
+func checkSettings(env func(string) string) error {
+	if env("RESTIC_REPOSITORY_FILE") != "" {
+		return fmt.Errorf("RESTIC_REPOSITORY_FILE is not supported: the backup jobs run in a sandbox that cannot see it — put RESTIC_REPOSITORY in the environment file instead")
 	}
-	if repo == "" {
-		return fmt.Errorf("no RESTIC_REPOSITORY in the environment file: `hotserve backup init <repository>` writes it")
+	if err := requireResticEnv(env); err != nil {
+		return err
 	}
-	return CheckRepository(repo)
+	return CheckRepository(env("RESTIC_REPOSITORY"))
+}
+
+// requireSettingsFile says so plainly when backups were never set up;
+// systemd's own words for a missing EnvironmentFile= say nothing about
+// how to make one. It looks, and does not read.
+func requireSettingsFile(path string) error {
+	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("backups are not configured on this box: %s does not exist — `hotserve backup init <repository>` writes it", path)
+	}
+	return nil
 }
 
 // DefaultLiveswapRoot repeats liveswap's own default because the
@@ -287,49 +298,17 @@ func vacuumInto(dst string) string {
 
 func lookupEnv(key string) string { return os.Getenv(key) }
 
-// LoadEnvFile reads the repository settings systemd hands the jobs, so
-// a command an operator runs by hand (status, prune) reaches the same
-// repository without them exporting anything. Deliberately not a
-// shell: KEY=VALUE, # comments and blank lines, nothing else.
-func LoadEnvFile(path string) ([]string, error) {
-	return loadEnvFile(path, settingsFile)
-}
-
-// CredentialsFile reads the same format for --credentials-file: the
-// provider's keys, in a file the operator wrote, so that they are not
-// in shell history or in /proc/*/cmdline while init runs. Same parser,
-// different advice when it goes wrong — telling someone to run `init`
-// to create the file they are passing *to* init is a loop.
+// CredentialsFile reads init's --credentials-file: the provider's keys
+// as KEY=VALUE lines, in a file the operator wrote, so that they are not
+// in shell history or in /proc/*/cmdline while init runs. The format is
+// this command's own — KEY=VALUE, # comments and blank lines, a value's
+// surrounding quotes dropped — and what init then writes for systemd is
+// held to envFileSafe, so systemd reads back exactly what was checked.
 func CredentialsFile(path string) ([]string, error) {
-	return loadEnvFile(path, credentialsFile)
-}
-
-type envFileRole int
-
-const (
-	settingsFile envFileRole = iota
-	credentialsFile
-)
-
-func (r envFileRole) missing(path string) error {
-	if r == credentialsFile {
-		return fmt.Errorf("--credentials-file %s does not exist: it is a file you write, holding the provider's keys as KEY=VALUE lines, one per line", path)
-	}
-	return fmt.Errorf("backups are not configured on this box: %s does not exist — `hotserve backup init <repository>` writes it", path)
-}
-
-func (r envFileRole) empty(path string) error {
-	if r == credentialsFile {
-		return fmt.Errorf("--credentials-file %s is empty: it should hold the provider's keys, like AWS_ACCESS_KEY_ID=… and AWS_SECRET_ACCESS_KEY=… (the repository and its password are not set here — they are the argument to init and --password-file)", path)
-	}
-	return fmt.Errorf("%s is empty: it should set RESTIC_REPOSITORY and RESTIC_PASSWORD", path)
-}
-
-func loadEnvFile(path string, role envFileRole) ([]string, error) {
-	body, err := os.ReadFile(path) //nolint:gosec // the operator's own root-only settings file, named on the command line or by the packaged unit
+	body, err := os.ReadFile(path) //nolint:gosec // the operator's own root-only file, named on their command line
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, role.missing(path)
+			return nil, fmt.Errorf("--credentials-file %s does not exist: it is a file you write, holding the provider's keys as KEY=VALUE lines, one per line", path)
 		}
 		return nil, fmt.Errorf("reading %s: %w", path, err)
 	}
@@ -343,14 +322,10 @@ func loadEnvFile(path string, role envFileRole) ([]string, error) {
 		if !ok {
 			return nil, fmt.Errorf("%s: %q is not a KEY=VALUE line", path, line)
 		}
-		// systemd's EnvironmentFile= strips surrounding quotes before
-		// handing the value to the job. Reading the same file any
-		// other way would give this process a different repository
-		// and a different password than the jobs get.
 		env = append(env, key+"="+unquote(value))
 	}
 	if len(env) == 0 {
-		return nil, role.empty(path)
+		return nil, fmt.Errorf("--credentials-file %s is empty: it should hold the provider's keys, like AWS_ACCESS_KEY_ID=… and AWS_SECRET_ACCESS_KEY=… (the repository and its password are not set here — they are the argument to init and --password-file)", path)
 	}
 	return env, nil
 }

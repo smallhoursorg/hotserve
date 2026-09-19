@@ -7,67 +7,44 @@ import (
 	"testing"
 )
 
-func TestLoadEnvFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "backup.env")
-	body := "# written by hotserve backup init\n\nRESTIC_REPOSITORY=s3:example/bucket\nRESTIC_PASSWORD=secret=with=equals\n"
+// --credentials-file is this command's own format: KEY=VALUE lines,
+// # comments and blank lines, a value's surrounding quotes dropped. (The
+// settings file is systemd's, and nothing here reads it.)
+func TestCredentialsFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s3-key")
+	body := "# from the provider's console\n\nAWS_ACCESS_KEY_ID=plain\nAWS_SECRET_ACCESS_KEY=\"secret=with=equals\"\nB2_ACCOUNT_KEY='quoted'\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	env, err := LoadEnvFile(path)
+	env, err := CredentialsFile(path)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	want := []string{"RESTIC_REPOSITORY=s3:example/bucket", "RESTIC_PASSWORD=secret=with=equals"}
-	if strings.Join(env, "\n") != strings.Join(want, "\n") {
-		t.Fatalf("got %v, want %v", env, want)
-	}
-}
-
-// systemd strips surrounding quotes from an EnvironmentFile= value
-// before the jobs see it. Reading the same file any other way has to
-// match, or status and restore read a different repository from the
-// one the jobs use.
-func TestLoadEnvFileStripsQuotesLikeSystemd(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "backup.env")
-	body := "RESTIC_REPOSITORY=\"s3:host/bucket\"\nRESTIC_PASSWORD='p a s s'\nAWS_ACCESS_KEY_ID=plain\n"
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	env, err := LoadEnvFile(path)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	want := []string{"RESTIC_REPOSITORY=s3:host/bucket", "RESTIC_PASSWORD=p a s s", "AWS_ACCESS_KEY_ID=plain"}
+	want := []string{"AWS_ACCESS_KEY_ID=plain", "AWS_SECRET_ACCESS_KEY=secret=with=equals", "B2_ACCOUNT_KEY=quoted"}
 	if strings.Join(env, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("got %q, want %q", env, want)
 	}
-	if err := checkSettingsRepository(env); err != nil {
-		t.Fatalf("a quoted backend URL must still be recognised as one: %v", err)
-	}
 }
 
-// Running `hotserve backup status` on a box where backups were never
-// set up should say that, not fail somewhere inside restic.
-func TestLoadEnvFileMissingSaysHowToConfigure(t *testing.T) {
-	_, err := LoadEnvFile(filepath.Join(t.TempDir(), "absent.env"))
-	if err == nil || !strings.Contains(err.Error(), "hotserve backup init") {
-		t.Fatalf("want an error naming init, got %v", err)
+// What goes wrong with it is said in its own terms: telling someone to
+// run `init` to create the file they are passing to init is a loop.
+func TestCredentialsFileSaysWhatIsWrongWithIt(t *testing.T) {
+	_, err := CredentialsFile(filepath.Join(t.TempDir(), "absent"))
+	if err == nil || !strings.Contains(err.Error(), "a file you write") {
+		t.Errorf("a missing file: %v", err)
 	}
-}
-
-func TestLoadEnvFileRejectsRubbish(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "backup.env")
-	if err := os.WriteFile(path, []byte("RESTIC_REPOSITORY s3:example\n"), 0o600); err != nil {
+	rubbish := filepath.Join(t.TempDir(), "rubbish")
+	if err := os.WriteFile(rubbish, []byte("AWS_ACCESS_KEY_ID plain\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadEnvFile(path); err == nil || !strings.Contains(err.Error(), "KEY=VALUE") {
-		t.Fatalf("want a KEY=VALUE error, got %v", err)
+	if _, err := CredentialsFile(rubbish); err == nil || !strings.Contains(err.Error(), "KEY=VALUE") {
+		t.Errorf("a line that is not KEY=VALUE: %v", err)
 	}
-	empty := filepath.Join(t.TempDir(), "empty.env")
+	empty := filepath.Join(t.TempDir(), "empty")
 	if err := os.WriteFile(empty, []byte("# nothing here\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadEnvFile(empty); err == nil || !strings.Contains(err.Error(), "empty") {
-		t.Fatalf("want an empty-file error, got %v", err)
+	if _, err := CredentialsFile(empty); err == nil || !strings.Contains(err.Error(), "is empty") {
+		t.Errorf("an empty file: %v", err)
 	}
 }

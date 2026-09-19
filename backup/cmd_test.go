@@ -120,7 +120,7 @@ func TestAsJobRunsResticAsTheJobDoes(t *testing.T) {
 	}
 	check := restic("cat", "config")
 	check.Env = settings
-	if err := asJob(view, envDir, checkUnit, record)(context.Background(), check); err != nil {
+	if err := asJob(view, envDir, record)(context.Background(), check); err != nil {
 		t.Fatal(err)
 	}
 
@@ -165,7 +165,7 @@ func TestAsJobStopsTheUnitOfACheckWhoseContextEnded(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	x := asJob(jobView{User: "hotserve", Home: checkHome}, t.TempDir(), checkUnit, next)
+	x := asJob(jobView{User: "hotserve", Home: checkHome}, t.TempDir(), next)
 	if err := x(ctx, restic("cat", "config")); err == nil {
 		t.Fatal("a check whose context ended has not passed")
 	}
@@ -180,10 +180,11 @@ func TestAsJobStopsTheUnitOfACheckWhoseContextEnded(t *testing.T) {
 }
 
 // `status` is root, and its restic is not: the one restic call it makes
-// goes through the same door as init's checks — a unit, as the jobs'
-// user, in their sandbox, the settings in a root-only file and never in
-// systemd-run's environment — with no app's data in its view. It is not
-// named: a monitor and a person asking at once must not collide.
+// is a unit, as the jobs' user, in their sandbox, with no app's data in
+// its view — and its settings are read by systemd from the settings file
+// itself, as a job's are. Nothing of them is in systemd-run's
+// environment, and no copy is written anywhere. It is not named: a
+// monitor and a person asking at once must not collide.
 func TestStatusRunsResticAsTheJobsDo(t *testing.T) {
 	var got Cmd
 	next := func(_ context.Context, c Cmd) error {
@@ -191,7 +192,7 @@ func TestStatusRunsResticAsTheJobsDo(t *testing.T) {
 		_, _ = c.Stdout.Write([]byte("[]"))
 		return nil
 	}
-	x := asJob(jobView{User: "hotserve", Home: statusHome}, t.TempDir(), "", next).withEnv([]string{"RESTIC_REPOSITORY=s3:host/bucket", "RESTIC_PASSWORD=p"})
+	x := inUnit(jobView{User: "hotserve", EnvFile: "/etc/hotserve/backup.env", Home: statusHome}, next)
 	if _, err := Status(context.Background(), []App{testApp("blog", StateEntry{Kind: KindFiles, Path: "uploads"})}, x, "box-1"); err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +200,7 @@ func TestStatusRunsResticAsTheJobsDo(t *testing.T) {
 	if got.Name != "systemd-run" || len(got.Env) != 0 {
 		t.Fatalf("status ran %s with %d settings in its environment, want systemd-run with none", got.Name, len(got.Env))
 	}
-	for _, want := range []string{"--property=User=hotserve", "--property=PrivateUsers=yes", "--property=TemporaryFileSystem=/:ro", "--property=StateDirectory=hotserve-backup-status", "--property=EnvironmentFile="} {
+	for _, want := range []string{"--property=User=hotserve", "--property=PrivateUsers=yes", "--property=TemporaryFileSystem=/:ro", "--property=StateDirectory=hotserve-backup-status", "--property=EnvironmentFile=/etc/hotserve/backup.env"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("missing %q from status's unit:\n%s", want, joined)
 		}
@@ -209,10 +210,94 @@ func TestStatusRunsResticAsTheJobsDo(t *testing.T) {
 			t.Errorf("status's unit must not have %q:\n%s", never, joined)
 		}
 	}
+	if err := x(context.Background(), Cmd{Name: "sh"}); err == nil {
+		t.Error("only restic is run this way")
+	}
+}
+
+// The settings file is systemd's to read. `run` and `restore` are root,
+// and hold it to this package's rules without opening it: a unit with
+// the jobs' sandbox and nothing in its view is given the file by systemd
+// and looks at its own environment.
+func TestTheSettingsAreCheckedByAUnitNotByRoot(t *testing.T) {
+	envFile := t.TempDir() + "/backup.env"
+	if err := os.WriteFile(envFile, []byte("RESTIC_REPOSITORY=/srv/backups\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	o := LaunchOptions{Self: "/usr/bin/hotserve", EnvFile: envFile, User: "hotserve", StagingRoot: "/var/lib/hotserve-backup"}
+	var got Cmd
+	refuse := func(_ context.Context, c Cmd) error { got = c; return exited(1) }
+	err := checkSettingsInUnit(context.Background(), o, refuse)
+	if err == nil || !strings.Contains(err.Error(), envFile) {
+		t.Fatalf("a unit that refuses the settings must stop the command, naming the file: %v", err)
+	}
+	joined := strings.Join(got.Args, "\n")
+	for _, want := range []string{"--pipe", "--property=User=hotserve", "--property=EnvironmentFile=" + envFile, "--property=TemporaryFileSystem=/:ro", "/usr/bin/hotserve\nbackup\ncheck-settings"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing %q from the check's unit:\n%s", want, joined)
+		}
+	}
+	for _, never := range []string{"StateDirectory=", "BindPaths=", "Environment=HOME"} {
+		if strings.Contains(joined, never) {
+			t.Errorf("the check writes nothing and reads no app's data, so it has no %q:\n%s", never, joined)
+		}
+	}
+	// Never set up: said plainly, and no unit is started to find out.
+	o.EnvFile = t.TempDir() + "/absent.env"
+	got = Cmd{}
+	err = checkSettingsInUnit(context.Background(), o, refuse)
+	if err == nil || !strings.Contains(err.Error(), "hotserve backup init") || got.Name != "" {
+		t.Fatalf("want an error naming init and no unit, got %v / %+v", err, got)
+	}
+}
+
+// What the unit checks: its own environment, as systemd read it.
+func TestCheckSettings(t *testing.T) {
+	env := func(kv map[string]string) func(string) string { return func(k string) string { return kv[k] } }
+	if err := checkSettings(env(map[string]string{"RESTIC_REPOSITORY": "s3:host/bucket", "RESTIC_PASSWORD": "x"})); err != nil {
+		t.Errorf("a backend URL with a password is accepted: %v", err)
+	}
+	for name, tc := range map[string]struct {
+		env  map[string]string
+		want string
+	}{
+		"a path":                  {map[string]string{"RESTIC_REPOSITORY": "/srv/backups", "RESTIC_PASSWORD": "x"}, "not a backend URL"},
+		"sftp":                    {map[string]string{"RESTIC_REPOSITORY": "sftp:host:/srv", "RESTIC_PASSWORD": "x"}, "sftp is not supported"},
+		"a repository file":       {map[string]string{"RESTIC_REPOSITORY_FILE": "/etc/hotserve/repo", "RESTIC_PASSWORD": "x"}, "not supported"},
+		"no repository":           {map[string]string{"RESTIC_PASSWORD": "x"}, "backup init"},
+		"no password of any kind": {map[string]string{"RESTIC_REPOSITORY": "s3:host/bucket"}, "no restic password"},
+	} {
+		if err := checkSettings(env(tc.env)); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: want an error saying %q, got %v", name, tc.want, err)
+		}
+	}
+}
+
+// `backup restic --` is an operator's restic: systemd reads the settings
+// for it and runs it as the backups' user — nothing here parses the one
+// or switches to the other — outside the jobs' sandbox, because what is
+// asked of it (a restore into a directory of the operator's choosing)
+// needs the filesystem.
+func TestPassthroughIsAUnitSystemdSetsUp(t *testing.T) {
+	args := PassthroughArgs("/etc/hotserve/backup.env", "hotserve", []string{"snapshots", "--tag", "app:blog"})
+	joined := strings.Join(args, "\n")
+	for _, want := range []string{"--pty", "--pipe", "--wait", "--expand-environment=no", "--property=User=hotserve", "--property=EnvironmentFile=/etc/hotserve/backup.env"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing %q:\n%s", want, joined)
+		}
+	}
+	if tail := args[len(args)-7:]; !slices.Equal(tail, []string{"/bin/sh", "-c", probeScript, "restic", "snapshots", "--tag", "app:blog"}) {
+		t.Errorf("restic is looked up on the unit's PATH, with the operator's arguments as they typed them: %q", tail)
+	}
+	for _, never := range []string{"TemporaryFileSystem", "PrivateUsers"} {
+		if strings.Contains(joined, never) {
+			t.Errorf("the operator's restic is not sandboxed (%s): it restores where they point it", never)
+		}
+	}
 }
 
 func TestAsJobRunsNothingButRestic(t *testing.T) {
-	x := asJob(jobView{User: "hotserve", Home: t.TempDir()}, t.TempDir(), "", fake(nil, nil))
+	x := asJob(jobView{User: "hotserve", Home: t.TempDir()}, t.TempDir(), fake(nil, nil))
 	if err := x(context.Background(), Cmd{Name: "sh", Args: []string{"-c", "id"}}); err == nil {
 		t.Fatal("init's checks run restic and nothing else")
 	}
@@ -233,7 +318,7 @@ func TestTheJobAndInitsChecksShareOneSandbox(t *testing.T) {
 	job := LaunchArgs(app, opts)
 
 	var check []string
-	x := asJob(jobView{User: "hotserve", Home: scratch}, t.TempDir(), checkUnit,
+	x := asJob(jobView{User: "hotserve", Home: scratch}, t.TempDir(),
 		func(_ context.Context, c Cmd) error { check = c.Args; return nil })
 	if err := x(context.Background(), restic("version")); err != nil {
 		t.Fatal(err)

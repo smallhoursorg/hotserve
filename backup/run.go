@@ -171,11 +171,6 @@ func sandboxProperties(v jobView) []string {
 		"--property=Group=" + v.User,
 		"--property=Environment=GOGC=20",
 		"--property=Environment=GOMAXPROCS=1",
-		// restic's cache lives with this unit's own directory, not in
-		// the user's home: the view has no home, and an uncached run
-		// re-reads the whole repository index every hour.
-		"--property=Environment=XDG_CACHE_HOME=" + StagingCache(v.Home),
-		"--property=Environment=HOME=" + v.Home,
 		"--property=MemoryAccounting=yes",
 		// Nice on hotserve-backup.service only lowers the launcher: a
 		// transient unit is started by the system manager, not forked
@@ -247,13 +242,48 @@ const (
 // Anywhere else gets no directory at all, and a unit without its HOME
 // fails at its first write: checkStagingRoot refuses such a root first.
 func homeProperties(home string) []string {
+	if home == "" {
+		return nil // a unit that writes nothing (settingsCheckArgs)
+	}
+	// restic's cache lives with the unit's own directory, not in the
+	// user's home: the view has no home, and an uncached run re-reads
+	// the whole repository index every hour.
+	props := []string{
+		"--property=Environment=HOME=" + home,
+		"--property=Environment=XDG_CACHE_HOME=" + StagingCache(home),
+	}
 	if rel, ok := strings.CutPrefix(home, stateBase); ok {
-		return []string{"--property=StateDirectory=" + rel, "--property=StateDirectoryMode=0750"}
+		return append(props, "--property=StateDirectory="+rel, "--property=StateDirectoryMode=0750")
 	}
 	if rel, ok := strings.CutPrefix(home, runtimeBase); ok {
-		return []string{"--property=RuntimeDirectory=" + rel, "--property=RuntimeDirectoryMode=0700", "--property=RuntimeDirectoryPreserve=yes"}
+		return append(props, "--property=RuntimeDirectory="+rel, "--property=RuntimeDirectoryMode=0700", "--property=RuntimeDirectoryPreserve=yes")
 	}
-	return nil
+	return props
+}
+
+// settingsCheckArgs is the systemd-run invocation that holds the
+// settings file to this package's rules before anything is launched on
+// it. The file is systemd's to read, so the check runs where systemd has
+// read it: a unit with the jobs' sandbox and nothing in its view, whose
+// one command looks at its own environment (checkSettings) and says what
+// is wrong with it. Root asks, and never opens the file.
+func settingsCheckArgs(self, user, envFile string) []string {
+	argv := append([]string{"--wait", "--collect", "--quiet", "--pipe", "--expand-environment=no"},
+		sandboxProperties(jobView{User: user, EnvFile: envFile})...)
+	return append(argv, self, "backup", "check-settings")
+}
+
+// inUnit runs each restic command as a unit with the jobs' sandbox, its
+// settings read by systemd from v.EnvFile, and its output piped back:
+// how a root command gets an answer from the repository without restic
+// ever being root.
+func inUnit(v jobView, next Exec) Exec {
+	return func(ctx context.Context, c Cmd) error {
+		if c.Name != "restic" {
+			return fmt.Errorf("only restic is run this way (asked for %s)", c.Name)
+		}
+		return next(ctx, Cmd{Name: "systemd-run", Args: resticInUnit(v, c.Args), Stdout: c.Stdout, Stderr: c.Stderr})
+	}
 }
 
 // checkStagingRoot refuses a staging root systemd would not make the
@@ -291,12 +321,7 @@ func resticInUnit(v jobView, args []string) []string {
 // same function that writes /etc/hotserve/backup.env, so systemd
 // parses exactly the bytes the jobs will get. Each call writes them
 // to a fresh root-only file beside that one and removes it after.
-//
-// unit names the unit, for a caller whose context can end (init): a
-// named unit is one that can be stopped, and that cannot be started
-// twice. "" leaves systemd to name it, for a caller with nothing to
-// stop and no reason to exclude another of itself (status).
-func asJob(v jobView, envDir, unit string, next Exec) Exec {
+func asJob(v jobView, envDir string, next Exec) Exec {
 	return func(ctx context.Context, c Cmd) error {
 		if c.Name != "restic" {
 			return fmt.Errorf("init runs restic as the job, and nothing else (asked for %s)", c.Name)
@@ -323,17 +348,14 @@ func asJob(v jobView, envDir, unit string, next Exec) Exec {
 		view.EnvFile = f.Name()
 		// The settings are in the file now: systemd-run itself gets
 		// none of them in its own environment.
-		argv := resticInUnit(view, c.Args)
-		if unit != "" {
-			argv = append([]string{"--unit=" + unit}, argv...)
-		}
+		argv := append([]string{"--unit=" + checkUnit}, resticInUnit(view, c.Args)...)
 		err = next(ctx, Cmd{Name: "systemd-run", Args: argv, Stdout: c.Stdout, Stderr: c.Stderr})
 		// A context that ended — Ctrl-C, or a check that ran out of
 		// time — ends systemd-run, the client. The unit is PID 1's, and
 		// restic in it would go on retrying for minutes, holding the
 		// name: it is stopped here.
-		if unit != "" && ctx.Err() != nil {
-			_ = next(context.WithoutCancel(ctx), Cmd{Name: "systemctl", Args: []string{"stop", unit + ".service"}, Stdout: io.Discard, Stderr: io.Discard})
+		if ctx.Err() != nil {
+			_ = next(context.WithoutCancel(ctx), Cmd{Name: "systemctl", Args: []string{"stop", checkUnit + ".service"}, Stdout: io.Discard, Stderr: io.Discard})
 		}
 		return err
 	}

@@ -137,7 +137,17 @@ func stagedPathFromSQL(sql string) string {
 	return strings.ReplaceAll(sql[len(prefix):len(sql)-1], "''", "'")
 }
 
-func testEnv(string) string { return "set" }
+// testEnv is a job's environment as systemd builds it from settings that
+// init wrote: a backend URL and a password, and nothing else.
+func testEnv(key string) string {
+	switch key {
+	case "RESTIC_REPOSITORY":
+		return "s3:s3.example.com/bucket"
+	case "RESTIC_PASSWORD":
+		return "the-repository-password"
+	}
+	return ""
+}
 
 // newJob builds a job over a real shared dir holding the declared
 // data: a declared database that is missing is an error (it is almost

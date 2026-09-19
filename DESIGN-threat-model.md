@@ -40,12 +40,13 @@ Windows, and macOS-as-a-server are out of scope by product design.
    reach a copy of every app's declared state, so they rank with the
    data itself. systemd reads the file as root and passes the values
    to each backup job; no app is ever in a view that contains it, and
-   hotserve itself never reads it. `hotserve backup init` checks new
-   settings by running them the same way, and `hotserve backup status`
-   lists the repository the same way: from a short-lived copy in
-   `/run/hotserve-backup` — a root-only directory on tmpfs, so the copy
-   is removed when each unit ends, and a command that is killed outright
-   leaves it in memory until the next boot at most, never on disk.
+   hotserve itself never reads it — nor does any `hotserve backup`
+   command: systemd is its only reader. `hotserve backup init` checks
+   new settings, before there is a file, by running them the same way
+   from a short-lived copy in `/run/hotserve-backup` — a root-only
+   directory on tmpfs, so the copy is removed when each check ends, and
+   an init that is killed outright leaves it in memory until the next
+   boot at most, never on disk.
    Purge removes both. Who holds the credential, and who can reach
    what, is tabled under "Backups" in "Trust boundaries".
    The box's storage key should not be able to *delete* — `init` tries
@@ -443,11 +444,18 @@ boundaries are these, and each is a rule a change has to keep:
    (`StageArgs`); the upload has the network and the data read-only
    (`LaunchArgs`). The exception is a restore, which has to write what
    it fetches, and which an operator starts and confirms.
-4. **The credential reaches a unit one way.** systemd reads a root-only
-   file (`EnvironmentFile=`) and puts the values in the unit's
-   environment. They are never in an argv, never in the launcher's own
-   environment, and never in `systemd-run`'s (`asJob` hands it none);
-   the file is not in any unit's view.
+4. **Only systemd reads the settings file, and the credential reaches a
+   unit one way.** systemd reads the root-only file (`EnvironmentFile=`)
+   and puts the values in the unit's environment. They are never in an
+   argv and never in `systemd-run`'s environment (`asJob` hands it
+   none), and the file is not in any unit's view. No root command opens
+   it either: its format is systemd's, and a second reader is a second
+   opinion about what it says. `run` and `restore` hold it to this
+   package's rules by asking a unit with nothing in its view to look at
+   its own environment (`settingsCheckArgs`, `checkSettings`), and
+   refuse before anything is launched; `status` and `backup restic --`
+   name the file to systemd and never see inside it. `init` writes it,
+   from values it was given, and reads it never.
 5. **One unit name per app** (`unitName`) for its copy, its upload and
    its restore, so no two of them run at once.
 6. **What decides is the repository or an exit status**, not state on
@@ -471,7 +479,8 @@ boundaries are these, and each is a rule a change has to keep:
 `restore`, `init`, `status` — for two things only root can do, and they
 do nothing else:
 
-- **Keep the credential from the `hotserve` uid.** The internet-facing
+- **Keep the credential from the `hotserve` uid** — which is not the
+  same as holding it, and no root command does. The internet-facing
   server and every deployed app run as `hotserve` (see "The shared-UID
   rule"), so a file that uid can read is a file a compromised server
   can read. The repository password and storage key are therefore
@@ -490,15 +499,18 @@ do nothing else:
   would have to be readable by `hotserve`.)
 
 What root is *not* for: it does not run restic or sqlite3, open an
-app's data, or write where a job writes. Each root command reads the
-admin API (rule 7) and the settings file, asks systemd for units, and
+app's data, write where a job writes, or read the settings file. Each
+root command reads the admin API (rule 7), asks systemd for units, and
 prints; `init` also writes the settings file.
 
 For the one root command nobody is watching — the timer's launcher —
 that is held to by its unit (packaging/hotserve-backup.service) rather
 than promised by the code: a read-only filesystem, the staging dirs and
 hotserve's own state not in its view at all (`InaccessiblePaths=`, which
-is rule 1 made physical), no network, a system-call filter, and one
+is rule 1 made physical), the settings file an empty file that merely
+exists (rule 4 made physical: measured, it reads as nothing from in
+there, and a unit started from in there still gets the values), no
+network, a system-call filter, and one
 capability left of root's forty — `CAP_DAC_OVERRIDE`, because the admin
 socket is writable by its owner alone, and on a read-only filesystem it
 opens files to read and sockets to connect to and changes nothing. The
@@ -530,15 +542,17 @@ Who runs as what, and what each can reach:
 
 | Process | Runs as | Sandbox | App data | Network | Credential | Runs |
 |---|---|---|---|---|---|---|
-| `backup run` — the timer's launcher (`RunAll`) | root | none | `stat` of each `shared/`, nothing more | the admin socket | reads the settings file, to refuse a path; passes nothing on | `systemd-run` |
+| `backup run` — the timer's launcher (`RunAll`) | root | its unit's: read-only, one capability, no network | `stat` of each `shared/`, nothing more | the admin socket | **none**: looks that the file exists; in its unit, cannot read it | `systemd-run` |
+| the settings check (`settingsCheckArgs`) | `hotserve` | full | none | yes, and uses none | yes: it is what it checks | `hotserve backup check-settings` |
 | the copy (`StageArgs`) | `hotserve` | full | that app's, **writable** | **none** (`PrivateNetwork=`) | **none** | sqlite3 |
 | the upload (`LaunchArgs`) | `hotserve` | full | that app's, read-only | yes | yes | restic |
-| `backup restore` — its launcher (`cmdRestore`, backup/cmd.go) | root | none | `stat`; a missing `shared/` is made by a unit as `hotserve` (`ensureShared`) | the admin socket | reads the settings file | `systemd-run`, `systemctl` |
+| `backup restore` — its launcher (`cmdRestore`, backup/cmd.go) | root | none | `stat`; a missing `shared/` is made by a unit as `hotserve` (`ensureShared`) | the admin socket | none: looks that the file exists | `systemd-run`, `systemctl` |
 | the restore (`RestoreArgs`, backup/restore.go) | `hotserve` | full | that app's, **writable** | yes | yes | restic, sqlite3 |
 | `backup init` (`Init`) | root | none | none | none of its own | writes the settings file, last, once the checks pass | `systemd-run` |
-| init's checks, `status`'s listing (`asJob`) | `hotserve` | full | **none** | yes | yes, from a root-only copy on tmpfs removed after each | restic |
-| `backup status` (`cmdStatus`) | root | none | none | the admin socket | reads the settings file | `systemd-run`, `systemctl` |
-| `backup restic -- …` (`Passthrough`) | `hotserve`, dropped from root | **none** | everything `hotserve` owns | yes | yes | restic, with the operator's arguments |
+| init's checks (`asJob`) | `hotserve` | full | **none** | yes | yes — the settings being tried, from a root-only copy on tmpfs removed after each | restic |
+| `backup status` (`cmdStatus`) | root | none | none | the admin socket | none: looks that the file exists | `systemd-run`, `systemctl` |
+| `status`'s listing (`inUnit`) | `hotserve` | full | **none** | yes | yes | restic |
+| `backup restic -- …` (`PassthroughArgs`, backup/restic.go) | `hotserve`: a unit systemd sets up, `User=` and `EnvironmentFile=` | **none** | everything `hotserve` owns | yes | yes | restic, with the operator's arguments |
 | `backup app` by hand, no `--phase` | whoever ran it | **none** | whatever that user can reach | yes | from that user's environment | sqlite3, restic |
 
 "Full" is `sandboxProperties`: a private user and PID namespace, an
@@ -550,8 +564,8 @@ What is on disk, whose it is, and who writes it:
 
 | Path | Owner, mode | Written by | Read by root |
 |---|---|---|---|
-| `/etc/hotserve/backup.env` | root, `0600` | `init`, as a `0600` temp file renamed into place (`writeEnvFile`) | yes — and by systemd, for `EnvironmentFile=` |
-| `/run/hotserve-backup/` (tmpfs) | root, `0700`, checked before use (`requireRootOnlyDir`) | `asJob`: one unit's settings, removed when it ends | — |
+| `/etc/hotserve/backup.env` | root, `0600` | `init`, as a `0600` temp file renamed into place (`writeEnvFile`) | by systemd alone, for `EnvironmentFile=` (rule 4) |
+| `/run/hotserve-backup/` (tmpfs) | root, `0700`, checked before use (`requireRootOnlyDir`) | `init` alone (`asJob`): the settings one check is tried with, removed when it ends | — |
 | `/run/hotserve-backup-check/` (tmpfs) | `hotserve`, `0700`, made by systemd | init's checks (restic's cache) | never; `init` removes it by name — `/run` is root's, and the removal follows no link |
 | `/var/lib/hotserve-backup/` | root, `0750` | nobody: only systemd makes entries in it | never |
 | `/var/lib/hotserve-backup/<app>/` | `hotserve`, `0750`, made by systemd | that app's copy and upload: `data/` (the staged copies — plaintext, replaced every run), `cache/` | **never** |
@@ -562,8 +576,9 @@ Pinned by: `TestTheUnitThatCanWriteAnAppsDataCanReachNothing` (rule 3:
 the two units differ by exactly the data's bind, the network and the
 settings file), `TestTheJobAndInitsChecksShareOneSandbox` and
 `TestRestoreRunsInTheBackupJobsUnitAndSandbox` (one sandbox),
-`TestStatusRunsResticAsTheJobsDo` and `TestAsJobRunsResticAsTheJobDoes`
-(rules 2 and 4), `TestRunAllContinuesAfterOneFailureAndReportsIt` (rule
+`TestStatusRunsResticAsTheJobsDo`, `TestAsJobRunsResticAsTheJobDoes`,
+`TestTheSettingsAreCheckedByAUnitNotByRoot` and
+`TestPassthroughIsAUnitSystemdSetsUp` (rules 2 and 4), `TestRunAllContinuesAfterOneFailureAndReportsIt` (rule
 1: the launcher makes nothing under the staging root),
 `TestFetchAppsHoldsTheAdminAPIsAnswerToItsOwnRules` (rule 7: a name or
 a root that is two binds, climbs, or carries a unit suffix launches

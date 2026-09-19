@@ -254,24 +254,6 @@ func TestCheckRepository(t *testing.T) {
 	}
 }
 
-// The settings file names the repository the jobs use: it is held to the
-// same rule, and RESTIC_REPOSITORY_FILE is refused because the jobs'
-// sandbox cannot see the file it points at.
-func TestCheckSettingsRepository(t *testing.T) {
-	if err := checkSettingsRepository([]string{"RESTIC_PASSWORD=x", "RESTIC_REPOSITORY=s3:host/bucket"}); err != nil {
-		t.Errorf("a backend URL is accepted: %v", err)
-	}
-	if err := checkSettingsRepository([]string{"RESTIC_REPOSITORY=/srv/backups"}); err == nil || !strings.Contains(err.Error(), "not a backend URL") {
-		t.Errorf("a path must be refused, got %v", err)
-	}
-	if err := checkSettingsRepository([]string{"RESTIC_REPOSITORY_FILE=/etc/hotserve/repo"}); err == nil || !strings.Contains(err.Error(), "not supported") {
-		t.Errorf("RESTIC_REPOSITORY_FILE should be refused, got %v", err)
-	}
-	if err := checkSettingsRepository([]string{"RESTIC_PASSWORD=x"}); err == nil || !strings.Contains(err.Error(), "backup init") {
-		t.Errorf("a missing repository should say how to set one, got %v", err)
-	}
-}
-
 // Nothing but the app's data and the unit's own dir is bound into a
 // job: the repository is reached over the network.
 func TestLaunchArgsBindNothingButTheAppAndItsStaging(t *testing.T) {
@@ -351,8 +333,13 @@ func TestCheckStagingRoot(t *testing.T) {
 			t.Errorf("%q must be refused, got %v", bad, err)
 		}
 	}
-	if props := homeProperties("/srv/staging/blog"); len(props) != 0 {
-		t.Errorf("a home systemd cannot make gets no directory property: %v", props)
+	for _, p := range homeProperties("/srv/staging/blog") {
+		if strings.Contains(p, "Directory=") {
+			t.Errorf("a home systemd cannot make gets no directory property: %s", p)
+		}
+	}
+	if props := homeProperties(""); len(props) != 0 {
+		t.Errorf("a unit with no directory of its own gets nothing: %v", props)
 	}
 }
 

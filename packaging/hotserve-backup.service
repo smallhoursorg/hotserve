@@ -42,8 +42,8 @@ ExecStopPost=/usr/bin/systemctl stop hotserve-backup-*.service
 Nice=10
 IOSchedulingClass=idle
 
-# This unit is root for two things: reading the settings file, and
-# asking systemd for units (DESIGN-threat-model.md, "Backups"). What it
+# This unit is root for one thing: asking systemd for units that systemd
+# gives the credential to (DESIGN-threat-model.md, "Backups"). What it
 # is not for is held to here, by systemd rather than by the code keeping
 # a promise: the filesystem is read-only to it, the staging dirs and
 # hotserve's own state are not there at all, and it has no network — the
@@ -84,3 +84,9 @@ UMask=0077
 # Where the jobs write, and hotserve's own state (its TLS keys): this
 # unit has no business in either, so neither is in its view.
 InaccessiblePaths=-/var/lib/hotserve-backup -/var/lib/hotserve-backup-status -/var/lib/hotserve
+# Nor is the credential. The settings file is systemd's to read, for the
+# units this one asks for; here it is an empty file that exists, which
+# is all the launcher looks for (measured: it reads as nothing even with
+# the capability above, and a unit started from here still gets the
+# values).
+InaccessiblePaths=-/etc/hotserve/backup.env
