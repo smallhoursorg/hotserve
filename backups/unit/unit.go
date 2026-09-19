@@ -190,6 +190,16 @@ func (r *Runner) Run(ctx context.Context, s Spec) (Outcome, error) {
 	}
 }
 
+// Stop stops a unit by its exact name and confirms it gone; a unit that
+// does not exist is already gone. It is how a run ends what an earlier
+// run — killed before it could — left behind.
+func (r *Runner) Stop(name string) error {
+	if !nameRe.MatchString(name) {
+		return fmt.Errorf("unit name %q does not match %s", name, nameRe)
+	}
+	return r.stop(name, nil)
+}
+
 // reap reads how a unit whose start job did not end "done" finished,
 // and resets it so the name does not linger as failed.
 //
@@ -233,6 +243,20 @@ func (r *Runner) reap(name, jobResult string) (Outcome, error) {
 // stop stops the unit by name and returns cause once it is observed
 // gone, or ErrNotConfirmedGone wrapping cause.
 func (r *Runner) stop(name string, cause error) error {
+	if cause == nil {
+		cause = errNone
+	}
+	err := r.stopCause(name, cause)
+	if errors.Is(err, errNone) && !errors.Is(err, ErrNotConfirmedGone) {
+		return nil
+	}
+	return err
+}
+
+// errNone stands in for "no cause" so stopCause can always wrap one.
+var errNone = errors.New("stopped on request")
+
+func (r *Runner) stopCause(name string, cause error) error {
 	ctx, cancel := context.WithTimeout(context.Background(), r.stopWithin)
 	defer cancel()
 	job := make(chan string, 1)
