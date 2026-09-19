@@ -175,6 +175,7 @@ No local Go toolchain needed — everything runs in Docker:
 make test              # unit tests, all modules (race + coverage)
 make test-integration  # real deploys through caddytest, under a real systemd user manager
 make e2e               # full stack: both module suites against the shipped binary under systemd, then restart survival + crash recovery
+                       #   E2E_SUITES=core|backup runs one half; BACKUP_ONLY=restore-live,ctrl-c runs those backup sections only
 make lint vet tidy     # golangci-lint (gofmt-gated), go vet, go mod tidy
 make vulncheck         # govulncheck, all modules (tool dep in go.mod — Dependabot-bumped)
 make secretscan        # gitleaks full-history secret scan (same image as the CI gate)

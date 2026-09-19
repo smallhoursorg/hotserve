@@ -85,13 +85,19 @@ jobs:
   # minutes alongside, and peak arm-runner demand is higher — if
   # arm cells start sitting in "queued", restoring `needs: [test]`
   # here is the first lever.
+  #
+  # Two jobs per runner, each with a stack of its own: the backup suite
+  # needs nothing the other suites leave behind, and beside them it
+  # adds no time to a run, where after them it added its whole length.
+  # One `make e2e` on a laptop is still all of it on one stack.
   e2e:
     strategy:
       fail-fast: false
       matrix:
         runner: [ubuntu-latest, ubuntu-24.04-arm]
+        suites: [core, backup]
     runs-on: ${{ matrix.runner }}
-    name: e2e (${{ matrix.runner }})
+    name: e2e ${{ matrix.suites }} (${{ matrix.runner }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Debian 13 does not restrict unprivileged user namespaces, but
@@ -107,7 +113,9 @@ jobs:
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       # make e2e dumps hotserve/upstream/artifact logs itself when
       # scenarios fail.
-      - run: make e2e COMPOSE="$COMPOSE"
+      - run: make e2e E2E_SUITES="$SUITES" COMPOSE="$COMPOSE"
+        env:
+          SUITES: ${{ matrix.suites }}
 
   # Builds the same .deb artifacts a release would, on every
   # commit, and hands them to the install-test matrix below.

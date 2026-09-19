@@ -195,19 +195,43 @@ install-test:
 # that: still serving, deploys still work. Last, the box suite drives
 # examples/box's bin/push from the host against the container, and
 # puts the e2e config back.
+#
+# One `make e2e` is all of it on one stack, in that order. The backup
+# suite needs nothing the others leave behind and leaves nothing they
+# need, so CI runs it as a job of its own beside them:
+# E2E_SUITES=backup, and E2E_SUITES=core for the rest. For work on one
+# part of the backup suite, BACKUP_ONLY names the sections to run
+# (e2e/backup/run.sh says what a section is): `make e2e
+# BACKUP_ONLY=restore-live,ctrl-c`.
+BACKUP_ONLY ?=
+E2E_SUITES ?= $(if $(BACKUP_ONLY),backup,core backup)
+ifneq ($(filter-out core backup,$(E2E_SUITES)),)
+$(error E2E_SUITES takes core and backup, not: $(filter-out core backup,$(E2E_SUITES)))
+endif
+ifeq ($(strip $(E2E_SUITES)),)
+$(error E2E_SUITES is empty: that would run nothing and pass)
+endif
+
 e2e:
 	$(cgroup2_preflight)
 	$(COMPOSE) up --build -d e2e-hotserve e2e-upstream e2e-artifacts e2e-s3
 	status=0; \
-	$(COMPOSE) run --rm e2e-runner || status=1; \
-	echo "════ systemd suite: restart survival, reattach, cgroup teardown ════"; \
-	$(COMPOSE) exec -T e2e-hotserve /bin/sh /suite-systemd.sh || status=1; \
-	echo "════ backup suite: state declarations → sandboxed job → restore ════"; \
-	$(COMPOSE) exec -T e2e-hotserve /bin/sh /suite-backup.sh || status=1; \
-	echo "════ recovery suite: the runner's view after hotserve's unclean death ════"; \
-	$(COMPOSE) run --rm --entrypoint "/bin/sh /suite-recovery.sh" e2e-runner || status=1; \
-	echo "════ box suite: examples/box's bin/push against the e2e box ════"; \
-	COMPOSE="$(COMPOSE)" sh e2e/box-push.sh || status=1; \
+	want() { case " $(E2E_SUITES) " in *" $$1 "*) return 0 ;; esac; return 1; }; \
+	if want core; then \
+		$(COMPOSE) run --rm e2e-runner || status=1; \
+		echo "════ systemd suite: restart survival, reattach, cgroup teardown ════"; \
+		$(COMPOSE) exec -T e2e-hotserve /bin/sh /suite-systemd.sh || status=1; \
+	fi; \
+	if want backup; then \
+		echo "════ backup suite: state declarations → sandboxed job → restore ════"; \
+		$(COMPOSE) exec -T -e ONLY="$(BACKUP_ONLY)" e2e-hotserve /bin/sh /suite-backup.sh || status=1; \
+	fi; \
+	if want core; then \
+		echo "════ recovery suite: the runner's view after hotserve's unclean death ════"; \
+		$(COMPOSE) run --rm --entrypoint "/bin/sh /suite-recovery.sh" e2e-runner || status=1; \
+		echo "════ box suite: examples/box's bin/push against the e2e box ════"; \
+		COMPOSE="$(COMPOSE)" sh e2e/box-push.sh || status=1; \
+	fi; \
 	if [ $$status -ne 0 ]; then \
 		$(COMPOSE) logs e2e-upstream e2e-artifacts e2e-s3; \
 		$(COMPOSE) exec -T e2e-hotserve journalctl --no-pager -n 300 || true; \
