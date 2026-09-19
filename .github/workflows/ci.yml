@@ -22,14 +22,14 @@ env:
   COMPOSE: docker compose -f docker-compose.yml -f docker-compose.ci.yml
 
 jobs:
-  # One cell per module: the three golangci runs share no state, so
+  # One cell per module: the golangci runs share no state, so
   # they parallelize cleanly (serial they were the slowest lane). Cache
   # keys are per-module so each cell restores exactly its own objects.
   lint:
     strategy:
       fail-fast: false
       matrix:
-        module: [".", "liveswap", "penaltybox"]
+        module: [".", "backups", "liveswap", "penaltybox"]
     runs-on: ubuntu-latest
     name: lint (${{ matrix.module }})
     steps:

@@ -17,7 +17,7 @@
 version: 2
 updates:
   - package-ecosystem: gomod
-    directories: ["/", "/liveswap", "/penaltybox"]
+    directories: ["/", "/backups", "/liveswap", "/penaltybox"]
     schedule:
       interval: weekly
     cooldown:
