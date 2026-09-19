@@ -1,0 +1,43 @@
+# The backup suite's box: three apps that declare backups, none of them
+# running — a backup reads this file and the apps' data, not the server.
+{
+	admin off
+	liveswap {
+		root /var/lib/liveswap
+		artifact_allowlist example.com/
+		deploy_trust github {
+			audience hotserve
+			claim repository your-org/app
+		}
+
+		# The two-line declaration.
+		app blog {
+			command ./server
+			backup {
+				sqlite app.db
+				files  uploads
+			}
+		}
+
+		# Everything, one of which is a database in a subdirectory.
+		app shop {
+			command ./server
+			backup {
+				sqlite data/shop.db
+				files  .
+			}
+		}
+
+		# Declared, never deployed.
+		app notyet {
+			command ./server
+			backup {
+				files .
+			}
+		}
+	}
+}
+
+:8080 {
+	respond ok
+}

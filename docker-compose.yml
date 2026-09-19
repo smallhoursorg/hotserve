@@ -127,6 +127,36 @@ services:
     volumes:
       - ./e2e/penaltybox/upstream.Caddyfile:/etc/hotserve/Caddyfile:ro
 
+  # The backup suite's storage and its box (`make e2e-backup`), apart
+  # from the e2e stack above: a backup talks to neither hotserve nor the
+  # apps, and the suite runs as its own CI job. The key is the
+  # fixture's, fixed and public; it guards a tmpfs.
+  e2e-s3:
+    build:
+      context: .
+      dockerfile: e2e/backup/s3.Dockerfile
+    command: ["--auth-key", "AKIDE2EFIXTURE,e2e-fixture-key-not-a-secret"]
+    tmpfs:
+      - /data
+
+  e2e-backup-box:
+    build:
+      context: .
+      dockerfile: e2e/backup/Dockerfile
+    image: hotserve-e2e-backup
+    privileged: true
+    cgroup: host
+    stop_signal: SIGRTMIN+3
+    tmpfs:
+      - /run
+      - /run/lock
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      - ./e2e/lib.sh:/lib.sh:ro
+      - ./e2e/backup/run.sh:/suite-backup.sh:ro
+    depends_on:
+      - e2e-s3
+
   # Runs both scenario suites; its exit code gates `make e2e`. The
   # merged Caddyfile is mounted so the reload scenario can POST it to
   # the admin API mid-traffic.

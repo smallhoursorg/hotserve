@@ -51,7 +51,7 @@ updates:
   # Dockerfile base images (e2e builder/runtime, artifacts server,
   # install-test systemd image, integration-test systemd image).
   - package-ecosystem: docker
-    directories: ["/e2e", "/e2e/liveswap", "/packaging/test", "/test/systemd"]
+    directories: ["/e2e", "/e2e/backup", "/e2e/liveswap", "/packaging/test", "/test/systemd"]
     schedule:
       interval: weekly
     cooldown:

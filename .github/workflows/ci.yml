@@ -109,6 +109,23 @@ jobs:
       # scenarios fail.
       - run: make e2e COMPOSE="$COMPOSE"
 
+  # The backup suite: its own stack (a box with Debian's restic and
+  # sqlite3, and an S3 server), so its own job — run beside e2e it costs
+  # its own length plus a build, not a longer critical path. Same
+  # sysctl as e2e, for the same reason: the dump unit runs in a user
+  # namespace.
+  e2e-backup:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    name: e2e-backup (${{ matrix.runner }})
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: make e2e-backup COMPOSE="$COMPOSE"
+
   # Builds the same .deb artifacts a release would, on every
   # commit, and hands them to the install-test matrix below.
   package:
@@ -208,7 +225,7 @@ jobs:
   # change.
   ci-ok:
     if: always()
-    needs: [lint, test, govulncheck, e2e, package, install-test, gitleaks]
+    needs: [lint, test, govulncheck, e2e, e2e-backup, package, install-test, gitleaks]
     runs-on: ubuntu-latest
     steps:
       - name: assert every needed job succeeded
