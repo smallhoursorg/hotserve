@@ -1077,6 +1077,55 @@ if section ctrl-c "Ctrl-C stops a restore, and the unit with it"; then
 	hotserve backup restore backup-example --admin 127.0.0.1:2019 --yes >/dev/null 2>&1
 fi
 
+if section verify "the weekly check of the repository, and a backup, wait for each other"; then
+	if hotserve backup verify >/tmp/verify.log 2>&1 && grep -q "repository verified" /tmp/verify.log \
+		&& hotserve backup status --admin 127.0.0.1:2019 2>&1 | grep -q "^repository: checked .*nothing wrong"; then
+		pass "verify checks the repository, records it there, and status reports it"
+	else
+		fail "verify: $(tail -4 /tmp/verify.log) / $(hotserve backup status --admin 127.0.0.1:2019 2>&1 | tail -2)"
+	fi
+	# restic's check wants the repository to itself, and restic waits for a
+	# lock only when told to: without that, whichever of a check and a
+	# backup starts second fails at once. A check first, behind a backup
+	# held open for a few seconds.
+	hotserve backup restic -- backup --quiet --stdin-from-command --stdin-filename e2e-held -- sleep 8 >/dev/null 2>&1 &
+	held_pid=$!
+	wait_for pgrep -u hotserve -x restic >/dev/null
+	t_wait=$(date +%s)
+	if hotserve backup verify >/tmp/verify-wait.log 2>&1 && [ $(($(date +%s) - t_wait)) -ge 4 ]; then
+		pass "a check that starts during a backup waits for it, and then passes"
+	else
+		fail "a check during a backup (after $(($(date +%s) - t_wait))s): $(tail -4 /tmp/verify-wait.log)"
+	fi
+	wait "$held_pid"
+	# Then a backup, behind a check made slow enough to be in its way: a
+	# few tens of megabytes to read back, at a few megabytes a second.
+	# files-example has no copy step, so its unit running IS restic
+	# running: with the check still alive at that moment the two overlap,
+	# and a backup that did not wait would have failed at once (exit 11).
+	head -c 45000000 /dev/urandom >/tmp/e2e-big
+	chown hotserve /tmp/e2e-big
+	hotserve backup restic -- backup --quiet /tmp/e2e-big >/dev/null 2>&1
+	hotserve backup restic -- check --read-data --limit-download 3000 >/dev/null 2>&1 &
+	check_pid=$!
+	sleep 3
+	hotserve backup run files-example --admin 127.0.0.1:2019 >/tmp/run-locked.log 2>&1 &
+	locked_pid=$!
+	files_unit_running() { case "$(systemctl is-active hotserve-backup-files-example.service)" in active | activating) return 0 ;; esac; return 1; }
+	if wait_for files_unit_running && kill -0 "$check_pid" 2>/dev/null; then
+		if wait "$locked_pid" && grep -q 'files-example: ok' /tmp/run-locked.log; then
+			pass "a backup that starts during a check waits for the lock, and then succeeds"
+		else
+			fail "a backup during a check: $(tail -3 /tmp/run-locked.log) / $(journalctl --no-pager -u hotserve-backup-files-example.service -n 6 | tail -4)"
+		fi
+	else
+		wait "$locked_pid"
+		fail "setup: the backup and the check did not overlap, so nothing was shown about the lock"
+	fi
+	wait "$check_pid"
+	rm -f /tmp/e2e-big
+fi
+
 if section retention "the retention docs/backups.md suggests keeps every app's clean runs"; then
 	# `restic forget` applies its policy to each group of snapshots with
 	# one host and one set of paths. Were every app's clean-run record

@@ -122,6 +122,12 @@ EOF
 		if [ -d /run/systemd/system ]; then
 			systemctl --system daemon-reload >/dev/null || true
 			deb-systemd-invoke start hotserve-backup.timer >/dev/null || true
+			# The weekly check follows the backup timer (Wants=), which a
+			# timer already running from before an upgrade has not been
+			# asked again: started here if, and only if, the backups are on.
+			if systemctl is-active --quiet hotserve-backup.timer; then
+				systemctl start hotserve-backup_verify.timer >/dev/null 2>&1 || true
+			fi
 		fi
 		;;
 	esac

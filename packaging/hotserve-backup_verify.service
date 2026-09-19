@@ -1,0 +1,53 @@
+# Checks the backup repository itself, once a week: that it is whole, that
+# every pack a snapshot needs is there, and — a different fifty-second of
+# it each week — that the data reads back (`restic check`). The hourly
+# runs cannot show this: each reads back the listing of its own snapshot,
+# and a repository damaged behind them stays green until a restore.
+#
+# The underscore in the name is what keeps it from being an app's unit:
+# those are hotserve-backup-<app>, and an app may be called `verify`.
+#
+# Like hotserve-backup.service this decides and does not do: restic runs
+# in a transient unit of its own, as the hotserve user, in the jobs'
+# sandbox, with no app's data in its view. What it found is recorded in
+# the repository, where `hotserve backup status` reads it.
+[Unit]
+Description=hotserve backups: weekly check of the repository
+Documentation=https://github.com/smallhoursorg/hotserve/blob/main/docs/backups.md
+ConditionPathExists=/etc/hotserve/backup.env
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/hotserve backup verify
+# No timeout: what it reads grows with the repository, and it waits for a
+# backup that holds the repository's lock (as a backup waits for it).
+TimeoutStartSec=infinity
+Nice=10
+IOSchedulingClass=idle
+# Root for one thing, as the hourly launcher is: asking systemd for a unit
+# that systemd gives the credential to. It talks to nothing but systemd,
+# so it keeps no capability at all, and the rest is that unit's list.
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+UMask=0077
+InaccessiblePaths=-/var/lib/hotserve-backup -/var/lib/hotserve-backup-status -/var/lib/hotserve-backup-verify -/var/lib/hotserve
+InaccessiblePaths=-/etc/hotserve/backup.env

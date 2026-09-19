@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 )
@@ -41,6 +42,33 @@ type Exec func(ctx context.Context, c Cmd) error
 
 // restic is the command most of this package runs.
 func restic(args ...string) Cmd { return Cmd{Name: "restic", Args: args} }
+
+// lockWait is how long a job, a restore or the weekly check waits for the
+// repository's lock before giving up.
+//
+// The weekly check holds the repository exclusively, and restic does not
+// wait for a lock unless told to: a backup that starts while a check runs
+// fails at once ("repository is already locked", exit 11), and so does a
+// check that starts during a backup; so do the read-back's `ls` and the
+// job's `snapshots`, which take the lock too. With --retry-lock each
+// waits for the other and then succeeds (all measured, restic 0.18, which
+// takes the wait from this flag alone — not from the environment). An
+// hour: a check reads a fifty-second of the repository, and a backup that
+// waited longer than that would be the next hour's anyway.
+const lockWait = "1h"
+
+// waitingForLock gives every restic command that takes the lock the time
+// to get it. The lines a job prints of its commands are without the flag;
+// run by hand without it, a command does the same thing, or says the
+// repository is locked.
+func waitingForLock(next Exec) Exec {
+	return func(ctx context.Context, c Cmd) error {
+		if c.Name == "restic" && !slices.Contains(c.Args, "--no-lock") {
+			c.Args = append([]string{"--retry-lock", lockWait}, c.Args...)
+		}
+		return next(ctx, c)
+	}
+}
 
 // output runs c and returns what it wrote to stdout, whatever its exit
 // status: sqlite3's integrity check says what is wrong on stdout and

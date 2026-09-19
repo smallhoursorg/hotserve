@@ -486,8 +486,38 @@ for want in "CapabilityBoundingSet=cap_dac_override" "ProtectSystem=strict" "Pri
 done
 systemctl show hotserve-backup.service -p InaccessiblePaths --value | grep -q "/var/lib/hotserve-backup" \
 	|| die "the staging root is in the launcher's view: root must have no way to touch what jobs write"
+# The weekly check of the repository has no enabled state of its own: it
+# runs when the hourly backups do, and stops when they are stopped.
+# (Started here: the package enables the backup timer, and in this image
+# the start that goes with it is held back by the container's policy.)
+systemctl start hotserve-backup.timer \
+	|| die "setup: could not start the backup timer"
+systemctl is-active --quiet hotserve-backup_verify.timer \
+	|| die "the weekly check's timer is not running beside the backup timer: $(systemctl status hotserve-backup_verify.timer 2>&1 | head -5)"
+systemctl stop hotserve-backup.timer
+systemctl is-active --quiet hotserve-backup_verify.timer \
+	&& die "the weekly check's timer outlived the backup timer an operator stopped"
+systemctl start hotserve-backup.timer
+systemctl is-active --quiet hotserve-backup_verify.timer \
+	|| die "starting the backup timer did not start the weekly check's"
+# Its launcher keeps no capability at all, and still does its job from in
+# there: it asks systemd for the unit restic runs in. The repository named
+# here is on a host that does not resolve, and restic exits 1 over that
+# as it does over damage it finds — so the answer has to be "could not be
+# checked", and never that the repository is damaged.
+t_verify=$(date +%s)
+sleep 1
+systemctl start hotserve-backup_verify.service >/dev/null 2>&1 \
+	&& die "the weekly check passed against a repository that is not there"
+verify_said=$(journalctl --no-pager -u hotserve-backup_verify.service --since "@$t_verify")
+echo "$verify_said" | grep -q "could not be checked" \
+	|| die "the weekly check did not say the repository could not be checked: $(echo "$verify_said" | tail -5)"
+echo "$verify_said" | grep -q "did not pass" \
+	&& die "the weekly check called an unreachable repository damaged: $(echo "$verify_said" | tail -5)"
+systemctl reset-failed hotserve-backup_verify.service 2>/dev/null || true
 rm -f /etc/hotserve/backup.env
 echo "the backup launcher does its job from inside its sandbox: one capability, read-only, no network, no staging dirs"
+echo "the weekly check's timer follows the backup timer, and an unreachable repository is not called a damaged one"
 
 stage "stage 2b: a SIGKILLed hotserve is back within seconds, reattached"
 # Stage 3's upgrade restart is a clean stop and start, which never

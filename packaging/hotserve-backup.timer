@@ -9,6 +9,10 @@
 [Unit]
 Description=hotserve backups, hourly
 Documentation=https://github.com/smallhoursorg/hotserve/blob/main/docs/backups.md
+# The weekly check of the repository runs whenever these backups do: it is
+# started with this timer and stopped with it, and has no enabled state of
+# its own (hotserve-backup_verify.timer).
+Wants=hotserve-backup_verify.timer
 
 [Timer]
 OnCalendar=hourly

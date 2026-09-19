@@ -560,6 +560,8 @@ Who runs as what, and what each can reach:
 | the upload (`LaunchArgs`) | `hotserve` | full | that app's, read-only | yes | yes | restic |
 | `backup restore` — its launcher (`cmdRestore`, backup/cmd.go) | root | none | `stat`; a missing `shared/` is made by a unit as `hotserve` (`ensureShared`) | the admin socket | none: looks that the file exists | `systemd-run`, `systemctl` |
 | the restore (`RestoreArgs`, backup/restore.go) | `hotserve` | full | that app's, **writable** | yes | yes | restic, sqlite3 |
+| `backup verify` — the weekly check's launcher (`cmdVerify`) | root | its unit's: read-only, **no capability**, no network | none | none | none: looks that the file exists; in its unit, cannot read it | `systemd-run` |
+| the weekly check (`Verify`, backup/verify.go) | `hotserve` | full | **none** | yes | yes | restic (`check`, then a record of what it found) |
 | `backup init` (`Init`) | root | none | none | none of its own | writes the settings file, last, once the checks pass | `systemd-run` |
 | init's checks (`asJob`) | `hotserve` | full | **none** | yes | yes — the settings being tried, from a root-only copy on tmpfs removed after each | restic |
 | `backup status` (`cmdStatus`) | root | none | none | the admin socket | none: looks that the file exists | `systemd-run`, `systemctl` |
@@ -582,7 +584,8 @@ What is on disk, whose it is, and who writes it:
 | `/var/lib/hotserve-backup/` | root, `0750` | nobody: only systemd makes entries in it | never |
 | `/var/lib/hotserve-backup/<app>/` | `hotserve`, `0750`, made by systemd | that app's copy and upload: `data/` (the staged copies — plaintext, there while a run lasts and removed when its upload ends), `cache/` | **never** |
 | `/var/lib/hotserve-backup/<app>/restore/` | `hotserve`, `0750`, made by systemd | that app's restore: its cache, and `copies/`, removed when it ends | **never** |
-| `/var/lib/hotserve-backup-status/` | `hotserve`, `0750`, made by systemd | `status`'s restic (its cache) | never |
+| `/var/lib/hotserve-backup-status/` | `hotserve`, `0750`, made by systemd | `status`'s and `snapshots`' restic (its cache) | never |
+| `/var/lib/hotserve-backup-verify/` | `hotserve`, `0750`, made by systemd | the weekly check's restic (its cache) | never |
 
 Pinned by: `TestTheUnitThatCanWriteAnAppsDataCanReachNothing` (rule 3:
 the two units differ by exactly the data's bind, the network and the

@@ -41,7 +41,7 @@ purge)
 		deb-systemd-helper purge hotserve-backup.timer >/dev/null || true
 		deb-systemd-helper unmask hotserve-backup.timer >/dev/null || true
 	fi
-	rm -rf /var/lib/hotserve-backup /var/lib/hotserve-backup-status
+	rm -rf /var/lib/hotserve-backup /var/lib/hotserve-backup-status /var/lib/hotserve-backup-verify
 	;;
 esac
 exit 0

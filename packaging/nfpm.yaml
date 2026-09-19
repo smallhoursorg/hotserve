@@ -72,6 +72,14 @@ contents:
     dst: /lib/systemd/system/hotserve-backup.timer
     file_info:
       mode: 0644
+  - src: packaging/hotserve-backup_verify.service
+    dst: /lib/systemd/system/hotserve-backup_verify.service
+    file_info:
+      mode: 0644
+  - src: packaging/hotserve-backup_verify.timer
+    dst: /lib/systemd/system/hotserve-backup_verify.timer
+    file_info:
+      mode: 0644
   - src: packaging/Caddyfile
     dst: /etc/hotserve/Caddyfile
     type: config|noreplace

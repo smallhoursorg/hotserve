@@ -1,0 +1,20 @@
+# The weekly check of the backup repository (hotserve-backup_verify.service).
+#
+# It has no [Install] section, and so no enabled state of its own to keep
+# across upgrades, removals and purges: hotserve-backup.timer wants it, so
+# it runs whenever the hourly backups do — started with that timer, and
+# (PartOf=) stopped with it. An operator who turns the backups off has
+# turned this off too; to have the backups without it, mask it.
+[Unit]
+Description=hotserve backups: weekly check of the repository
+Documentation=https://github.com/smallhoursorg/hotserve/blob/main/docs/backups.md
+PartOf=hotserve-backup.timer
+
+[Timer]
+OnCalendar=weekly
+# A box that was off at the time checks when it is next up.
+Persistent=true
+# Not on the hour, where the backups are; the two wait for each other's
+# lock, and need not.
+RandomizedDelaySec=6h
+FixedRandomDelay=true

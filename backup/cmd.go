@@ -73,6 +73,14 @@ reads as root; nothing about backups is configured in the Caddyfile.
       restic's own listing cannot say. It asks the repository and
       nothing else, so it works while hotserve is down.
 
+  hotserve backup verify
+      Checks the repository itself (restic check): its structure, that
+      every pack a snapshot needs is there, and one fifty-second of the
+      data read back — a different part each week, so all of it in a
+      year. What it found is recorded in the repository, and 'status'
+      reports it. A weekly timer runs this; a backup and a check wait
+      for each other's lock.
+
   hotserve backup restore <app> [--snapshot <id>] [--delete] [--yes]
       Puts the app's declared state back from the newest snapshot a
       clean run recorded in the repository, or the one given. It says
@@ -176,12 +184,14 @@ func cmdBackup(fl caddycmd.Flags) (int, error) {
 		return cmdRestore(fl, args[1:])
 	case "snapshots":
 		return cmdSnapshots(fl, args[1:])
+	case "verify":
+		return cmdVerify(fl)
 	case "restore-app":
 		return cmdRestoreApp(fl, args[1:])
 	case "check-settings":
 		return cmdCheckSettings()
 	default:
-		return caddy1, fmt.Errorf("unknown subcommand %q: want init, run, status, snapshots, restore, restic or app", args[0])
+		return caddy1, fmt.Errorf("unknown subcommand %q: want init, run, status, snapshots, restore, verify, restic or app", args[0])
 	}
 }
 
@@ -251,8 +261,13 @@ func cmdStatus(fl caddycmd.Flags, names []string) (int, error) {
 		statuses[i].Running = unitActive(ctx, unitName(statuses[i].App.Name)+".service")
 		statuses[i].NothingYet = nothingToBackUpYet(statuses[i].App)
 	}
+	verified, err := LastVerification(ctx, inUnit(view, osExec))
+	if err != nil {
+		return exitCouldNotCheck, err
+	}
 	now := time.Now()
 	FormatStatus(os.Stdout, statuses, now)
+	FormatVerification(os.Stdout, verified, now)
 	if !fl.Bool("check") {
 		return 0, nil
 	}
@@ -266,6 +281,9 @@ func cmdStatus(fl caddycmd.Flags, names []string) (int, error) {
 	}
 	if len(stale) > 0 {
 		return caddy1, fmt.Errorf("no clean backup in the last %.1f hours of: %s", StaleAfter.Hours(), strings.Join(stale, ", "))
+	}
+	if verified.Overdue(now) {
+		return caddy1, fmt.Errorf("the repository's weekly check is overdue, or did not pass (above)")
 	}
 	return 0, nil
 }
@@ -592,7 +610,7 @@ func cmdApp(fl caddycmd.Flags, entryArgs []string) (int, error) {
 		Staging:   staging,
 		Databases: app.Databases(),
 		Files:     app.Files(),
-		Exec:      osExec,
+		Exec:      waitingForLock(osExec),
 		Log:       os.Stdout,
 	}
 	// Said by the job, which is given the app's data if there is any,
@@ -628,6 +646,26 @@ func cmdApp(fl caddycmd.Flags, entryArgs []string) (int, error) {
 		return caddy1, err
 	}
 	fmt.Printf("%s: backed up\n", name)
+	return 0, nil
+}
+
+// cmdVerify is the weekly check of the repository, as root: restic runs
+// where every other restic runs — a unit, as the jobs' user, in their
+// sandbox, with no app's data in its view.
+func cmdVerify(fl caddycmd.Flags) (int, error) {
+	if err := requireTools("restic"); err != nil {
+		return caddy1, err
+	}
+	envFile := fl.String("env-file")
+	if err := requireSettingsFile(envFile); err != nil {
+		return caddy1, err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	view := jobView{User: fl.String("user"), EnvFile: envFile, Home: verifyHome}
+	if err := Verify(ctx, waitingForLock(inUnit(view, osExec)), time.Now(), os.Stdout); err != nil {
+		return caddy1, err
+	}
 	return 0, nil
 }
 
@@ -817,7 +855,7 @@ func cmdRestoreApp(fl caddycmd.Flags, entryArgs []string) (int, error) {
 		Databases: app.Databases(),
 		Files:     app.Files(),
 		Delete:    fl.Bool("delete"),
-		Exec:      osExec,
+		Exec:      waitingForLock(osExec),
 		Log:       os.Stdout,
 	}
 	if err := job.Execute(context.Background()); err != nil {

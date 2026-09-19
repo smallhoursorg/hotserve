@@ -180,6 +180,7 @@ Two things in those journals that are not what they look like:
   exists and is empty is backed up like any other: this is about one
   that is not there yet.)
 - **Units named `hotserve-backup_…`**, with an underscore —
+  `hotserve-backup_verify` (the weekly check of the repository),
   `hotserve-backup_check`, `hotserve-backup_restic-1a2b3c4d`,
   `hotserve-backup_settings-…` — are not apps' jobs: they are the
   restic that `init`, `status` and `restore` ask the repository with,
@@ -486,6 +487,35 @@ whether or not its run finished cleanly; `status`, above, says whether
 the last one did.)
 
 A backup nobody has restored is a hypothesis.
+
+### The repository itself is checked weekly
+
+An hourly run reads back the *listing* of the snapshot it just wrote.
+It cannot see damage done behind it — a prune that was cut off, a bucket
+lifecycle rule, an object removed in the provider's console — and with
+only that, such damage is found at a restore. So once a week
+(`hotserve-backup_verify.timer`, which runs whenever the backup timer
+does) the repository itself is checked with `restic check`: that it is
+whole, that every pack a snapshot needs is there, and that the data
+reads back — one fifty-second of it each week, a different part each
+time, so every byte is read once a year for about 2% of the
+repository's size in downloads a week. (A provider that charges for
+downloads charges for that.)
+
+```
+sudo hotserve backup verify                  # now, rather than this week
+journalctl -u hotserve-backup_verify -n 50   # what the last one did
+```
+
+What it found is recorded in the repository, and `status` ends with it:
+`repository: checked 3 days ago, nothing wrong`. `status --check` exits 1
+when the last check did not pass, or when there has been none for two
+weeks. (A check that could not reach the repository at all is not a
+check that failed: it records nothing, its unit fails, and next week
+tries again.) A check wants the repository to itself, so a check and a
+backup wait for each other — up to an hour — rather than the second one
+failing; an hourly run that overlaps the weekly check takes that much
+longer.
 
 ## Not covered: losing less than an hour
 
