@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // Cmd is one external command: what runs, what is added to its
@@ -84,6 +85,11 @@ func osExec(ctx context.Context, c Cmd) error {
 		cmd.Stderr = c.Stderr
 	}
 	cmd.Stdin = c.Stdin
+	// A command that is killed when its context ends may leave a
+	// grandchild holding the pipes its output is read through —
+	// systemd-run --pipe hands them to the unit — and Run would wait on
+	// those for as long as the grandchild lives. It waits this long.
+	cmd.WaitDelay = 5 * time.Second
 	if err := cmd.Run(); err != nil {
 		if _, lookErr := exec.LookPath(c.Name); lookErr != nil {
 			return fmt.Errorf("%s is not installed: %w", c.Name, lookErr)

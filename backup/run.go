@@ -349,14 +349,27 @@ func asJob(v jobView, envDir string, next Exec) Exec {
 		// The settings are in the file now: systemd-run itself gets
 		// none of them in its own environment.
 		argv := append([]string{"--unit=" + checkUnit}, resticInUnit(view, c.Args)...)
+		// A context that ends — Ctrl-C, or a check that ran out of time
+		// — ends systemd-run, which is only the client. The unit is
+		// PID 1's: restic in it goes on retrying for minutes, holding
+		// the name and — through --pipe — the streams this command is
+		// reading, so waiting for systemd-run to finish would be waiting
+		// for restic (measured: a wrong storage key held init for ten
+		// minutes). The unit is stopped the moment the context ends,
+		// which is what ends everything else.
+		finished := make(chan struct{})
+		stopped := make(chan struct{})
+		go func() {
+			defer close(stopped)
+			select {
+			case <-finished:
+			case <-ctx.Done():
+				_ = next(context.WithoutCancel(ctx), Cmd{Name: "systemctl", Args: []string{"stop", checkUnit + ".service"}, Stdout: io.Discard, Stderr: io.Discard})
+			}
+		}()
 		err = next(ctx, Cmd{Name: "systemd-run", Args: argv, Stdout: c.Stdout, Stderr: c.Stderr})
-		// A context that ended — Ctrl-C, or a check that ran out of
-		// time — ends systemd-run, the client. The unit is PID 1's, and
-		// restic in it would go on retrying for minutes, holding the
-		// name: it is stopped here.
-		if ctx.Err() != nil {
-			_ = next(context.WithoutCancel(ctx), Cmd{Name: "systemctl", Args: []string{"stop", checkUnit + ".service"}, Stdout: io.Discard, Stderr: io.Discard})
-		}
+		close(finished)
+		<-stopped
 		return err
 	}
 }

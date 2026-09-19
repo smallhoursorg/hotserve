@@ -2,10 +2,13 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestParseEntries(t *testing.T) {
@@ -152,30 +155,57 @@ func TestAsJobRunsResticAsTheJobDoes(t *testing.T) {
 }
 
 // Ctrl-C, or a check that ran out of time, ends systemd-run — the client.
-// The unit is PID 1's, and restic in it would go on retrying for minutes
-// under a name the next check needs: it is stopped.
+// The unit is PID 1's, and restic in it goes on retrying for minutes,
+// holding the streams this command reads through --pipe: waiting for
+// systemd-run to finish is waiting for restic (measured: a wrong storage
+// key held init for ten minutes). So here the client does not return
+// until the unit has been stopped — and the stop has to come anyway, at
+// once, from the context ending.
 func TestAsJobStopsTheUnitOfACheckWhoseContextEnded(t *testing.T) {
+	var mu sync.Mutex
 	var calls []string
+	unitStopped := make(chan struct{})
 	next := func(ctx context.Context, c Cmd) error {
+		mu.Lock()
 		calls = append(calls, c.Name+" "+strings.Join(c.Args, " "))
-		if c.Name == "systemctl" && ctx.Err() != nil {
-			t.Error("the stop must not be cancelled by the context that just ended")
+		mu.Unlock()
+		if c.Name == "systemctl" {
+			if ctx.Err() != nil {
+				t.Error("the stop must not be cancelled by the context that just ended")
+			}
+			close(unitStopped)
+			return nil
 		}
-		return ctx.Err()
+		<-unitStopped // the client outlives its context for as long as the unit lives
+		return errors.New("signal: killed")
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
 	x := asJob(jobView{User: "hotserve", Home: checkHome}, t.TempDir(), next)
-	if err := x(ctx, restic("cat", "config")); err == nil {
-		t.Fatal("a check whose context ended has not passed")
+	done := make(chan error, 1)
+	go func() { done <- x(ctx, restic("cat", "config")) }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a check whose context ended has not passed")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the check did not end when its context did: nothing stopped the unit it was waiting on")
 	}
+	mu.Lock()
+	defer mu.Unlock()
 	if len(calls) != 2 || !strings.HasPrefix(calls[0], "systemd-run --unit="+checkUnit+" ") || calls[1] != "systemctl stop "+checkUnit+".service" {
 		t.Errorf("want the check, in a named unit, then its stop: %q", calls)
 	}
+}
 
-	calls = nil
+// A check that runs to its end is not stopped.
+func TestAsJobLeavesAFinishedCheckAlone(t *testing.T) {
+	var calls []string
+	next := func(_ context.Context, c Cmd) error { calls = append(calls, c.Name); return nil }
+	x := asJob(jobView{User: "hotserve", Home: checkHome}, t.TempDir(), next)
 	if err := x(context.Background(), restic("cat", "config")); err != nil || len(calls) != 1 {
-		t.Errorf("a check that ran to its end is not stopped: %q, %v", calls, err)
+		t.Errorf("want one systemd-run and no stop: %q, %v", calls, err)
 	}
 }
 

@@ -205,6 +205,50 @@ else
 fi
 cp /tmp/backup.env.good /etc/hotserve/backup.env
 
+echo "=== init on a mistake: it answers, and leaves what worked alone ==="
+# The mistakes an operator makes, over a setup that works. Output goes to
+# a file, not a $(...): a check left running holds the pipe, and this
+# suite would then wait with it.
+settings_before=$(sha256sum /etc/hotserve/backup.env)
+# A wrong storage key. `restic init` fails at once; the look for an
+# existing repository after it is what restic would keep retrying for
+# many minutes (measured: ten, and counting). init gives that a clock,
+# and stops the unit it was waiting on.
+install -m 0600 /dev/null /root/s3-key
+printf 'AWS_ACCESS_KEY_ID=%s\nAWS_SECRET_ACCESS_KEY=not-the-secret\n' "$S3_KEY_ID" >/root/s3-key
+t_typo=$(date +%s)
+RESTIC_PASSWORD=e2e timeout 120 hotserve backup init "s3:$S3/hotserve-e2e-typo" --credentials-file /root/s3-key --force >/tmp/init-wrongkey.log 2>&1
+typo_rc=$?
+typo_took=$(($(date +%s) - t_typo))
+rm -f /root/s3-key
+if [ "$typo_rc" -ne 0 ] && [ "$typo_rc" -ne 124 ] && [ "$typo_took" -lt 60 ] && grep -q "cannot create a repository" /tmp/init-wrongkey.log; then
+	pass "init with a wrong storage key answers (${typo_took}s) and says what to check"
+else
+	fail "init with a wrong storage key: exit $typo_rc after ${typo_took}s: $(tail -4 /tmp/init-wrongkey.log)"
+fi
+case "$(systemctl is-active hotserve-backup-check.service 2>/dev/null)" in
+active | activating | deactivating) fail "the check init gave up on is still running: restic would retry for minutes under a name the next init needs" ;;
+*) pass "the check init gave up on was stopped with it" ;;
+esac
+# A wrong password for a repository that is there: restic says so in its
+# exit status, at once.
+key_file
+t_pw=$(date +%s)
+RESTIC_PASSWORD=not-the-password timeout 120 hotserve backup init "$REPO" --credentials-file /root/s3-key --force >/tmp/init-wrongpw.log 2>&1
+pw_rc=$?
+pw_took=$(($(date +%s) - t_pw))
+rm -f /root/s3-key
+if [ "$pw_rc" -ne 0 ] && [ "$pw_took" -lt 30 ] && grep -q "this password cannot open it" /tmp/init-wrongpw.log; then
+	pass "init with a wrong password for an existing repository says so (${pw_took}s)"
+else
+	fail "init with a wrong password: exit $pw_rc after ${pw_took}s: $(tail -4 /tmp/init-wrongpw.log)"
+fi
+if [ "$(sha256sum /etc/hotserve/backup.env)" = "$settings_before" ] && ! ls -A /run/hotserve-backup | grep -q . && [ ! -e /run/hotserve-backup-check ]; then
+	pass "neither --force changed the working settings, and no copy of a credential was left behind"
+else
+	fail "after two failed inits: settings changed=$([ "$(sha256sum /etc/hotserve/backup.env)" = "$settings_before" ] && echo no || echo YES), left: $(ls -A /run/hotserve-backup /run/hotserve-backup-check 2>&1 | tr '\n' ' ')"
+fi
+
 echo "=== hotserve backup run ==="
 rows_before=$(rows_now)
 if hotserve backup run --admin 127.0.0.1:2019 >/tmp/run1.log 2>&1; then

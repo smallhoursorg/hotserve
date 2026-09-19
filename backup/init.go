@@ -140,6 +140,9 @@ func Init(ctx context.Context, o InitOptions, x Exec, log io.Writer) (err error)
 	if initErr == nil {
 		say(log, "created a new repository")
 	} else {
+		// Said first, because the answer can take the whole clock: with
+		// a storage key that is wrong, restic keeps trying until stopped.
+		say(log, "no new repository was made there (restic: %s); looking for one that is there already, for up to %s…", firstLine(out, initErr), openTimeout)
 		state, why := repositoryState(ctx, x)
 		if state == repositoryLocked && generated && o.AskPassword != nil {
 			// A rebuilt box, at a terminal: the repository is there, so
@@ -250,7 +253,7 @@ const (
 // there is anything to answer about; asked of a bucket that does not
 // exist it retries for many minutes, and the unit is stopped instead
 // (asJob stops a check whose context ends).
-const openTimeout = 30 * time.Second
+const openTimeout = 15 * time.Second
 
 // repositoryState asks whether a repository is there, by exit status —
 // never by what restic prints, which is wording, and which differs with
