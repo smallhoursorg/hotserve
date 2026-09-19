@@ -8,24 +8,55 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// A pin is a directory or file held by descriptor, so that it can be
-// named to the manager as a bind source that no one can re-aim.
+// A pin is a directory or file held by descriptor, so that what a unit
+// is shown is what was found here and nothing an app can re-aim.
 //
 // A bind source is a path the manager resolves as root, following
 // links. An app's declared path is the app's own to replace, while it
 // runs, with a link to a sibling's data or to /etc — and the upload
-// unit reads whatever it is shown [measured: it read the sibling's
-// file]. Checking the path first and binding it afterwards only moves
-// the race. So the path is opened here without following any link, and
-// what the manager is given is /proc/<this pid>/fd/<n>: the thing that
-// was opened, whatever its name points at by then [measured].
+// unit reads whatever it is shown. Checking the path and binding it
+// afterwards only moves the race, and so does handing the manager
+// /proc/<pid>/fd/<n>: it does not follow that link, it reads its text
+// and walks the path again [measured: a pinned directory that was then
+// deleted could not be bound].
 //
-// O_PATH: the descriptor names the file and cannot read it. Root still
-// opens nothing an app wrote.
+// So the path is opened here without following any link, and bound
+// here, by mount(2) from /proc/self/fd/<n> — which the kernel does
+// follow, to the very directory that was opened — onto a mount point in
+// the run's own directory, which only root can reach. That mount point
+// is what the manager is given.
+//
+// O_PATH: the descriptor names the file and cannot read it.
 type pin struct{ fd int }
 
-// source is the pin as a bind source, good for as long as it is open.
-func (p pin) source() string { return fmt.Sprintf("/proc/%d/fd/%d", os.Getpid(), p.fd) }
+// mountAt binds what is pinned onto target, a new directory (or, for a
+// pinned file, a new empty file) only root can reach, and returns how
+// to take it away again. Recursive, so that a disk the operator has
+// mounted inside comes along.
+func (p pin) mountAt(target string) (unmount func(), err error) {
+	if p.isDir() {
+		err = os.Mkdir(target, 0o700)
+	} else {
+		var f *os.File
+		if f, err = os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600); err == nil { //nolint:gosec // a path in the run's own directory, made of a counter
+			err = f.Close()
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := bindMount(fmt.Sprintf("/proc/self/fd/%d", p.fd), target); err != nil {
+		return nil, fmt.Errorf("binding it: %w", err)
+	}
+	return func() { _ = unmountDetach(target) }, nil
+}
+
+// The two mount calls, as variables: a test that is not root stands
+// something else in for them.
+var (
+	bindMount     = func(source, target string) error { return unix.Mount(source, target, "", unix.MS_BIND|unix.MS_REC, "") }
+	unmountDetach = func(target string) error { return unix.Unmount(target, unix.MNT_DETACH) }
+)
 
 func (p pin) close() { _ = unix.Close(p.fd) }
 

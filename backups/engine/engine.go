@@ -80,6 +80,7 @@ type run struct {
 	dir    string // this run's own directory under RunDir
 	status *record.Status
 	prev   *record.Status
+	mounts int // how many mount points this run has made, for their names
 }
 
 // Run does one run and writes the record. The error is about the run as
@@ -122,6 +123,8 @@ func Run(ctx context.Context, cfg Config, r Runner) (*record.Status, error) {
 	if err := os.Mkdir(x.dir, 0o700); err != nil {
 		return nil, err
 	}
+	// By the time this runs every mount under it has been taken away
+	// (each by its own defer); what is left is the run's own files.
 	defer os.RemoveAll(x.dir) //nolint:errcheck // root's own directory under /run
 
 	runErr := x.apps(ctx)
@@ -204,6 +207,57 @@ func (x *run) start(ctx context.Context, s unit.Spec) (unit.Outcome, error) {
 // sweep stops whatever an earlier run recorded and did not live to
 // stop. A unit that is already gone is the usual case.
 func (x *run) sweep() error {
+	if err := x.sweepUnits(); err != nil {
+		return err
+	}
+	// Then the mounts such a run made, deepest first, and its
+	// directory. The lock is held, so whatever is here is nobody's.
+	mounts, err := mountsUnder(x.cfg.RunDir)
+	if err != nil {
+		return err
+	}
+	for _, m := range mounts {
+		if err := unmountDetach(m); err != nil {
+			return fmt.Errorf("a mount from an earlier run is still there: %s: %w", m, err)
+		}
+	}
+	entries, err := os.ReadDir(x.cfg.RunDir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			if err := os.RemoveAll(filepath.Join(x.cfg.RunDir, e.Name())); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// mountsUnder lists the mount points beneath dir, deepest first.
+var mountsUnder = func(dir string) ([]string, error) {
+	raw, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		if f := strings.Fields(line); len(f) > 4 && strings.HasPrefix(unescapeMount(f[4]), dir+"/") {
+			out = append(out, unescapeMount(f[4]))
+		}
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(out)))
+	return out, nil
+}
+
+// unescapeMount undoes mountinfo's octal escapes (space, tab, newline,
+// backslash).
+func unescapeMount(s string) string {
+	return strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`).Replace(s)
+}
+
+func (x *run) sweepUnits() error {
 	list := filepath.Join(x.cfg.RunDir, "units")
 	raw, err := os.ReadFile(list) //nolint:gosec // root's own file under /run
 	if errors.Is(err, fs.ErrNotExist) {
@@ -309,7 +363,13 @@ func (x *run) app(ctx context.Context, root, name string, decl *backupdecl.Confi
 		return fail(record.Failed, "%v", err)
 	}
 
-	dumped := x.dump(ctx, name, sharedPin, staging, declFile, decl, app)
+	sharedSource, unmountShared, err := x.bound(sharedPin)
+	if err != nil {
+		return fail(record.Failed, "%s: %v", shared, err)
+	}
+	defer unmountShared()
+
+	dumped := x.dump(ctx, name, sharedSource, staging, declFile, decl, app)
 	binds, masked, present, unpin := x.view(name, sharedPin, staging, declFile, decl, app)
 	defer unpin()
 	if dumped+present == 0 {
@@ -332,6 +392,15 @@ func (x *run) app(ctx context.Context, root, name string, decl *backupdecl.Confi
 		}
 	}
 	return app, false
+}
+
+// bound mounts what is pinned in the run's own directory and returns
+// the path to give the manager as a bind source.
+func (x *run) bound(p pin) (source string, unmount func(), err error) {
+	x.mounts++
+	source = filepath.Join(x.dir, fmt.Sprintf("mount-%d", x.mounts))
+	unmount, err = p.mountAt(source)
+	return source, unmount, err
 }
 
 // staging is the app's own directory for plaintext copies: at a fixed
@@ -380,7 +449,7 @@ func (x *run) clean(ctx context.Context, app, staging string) error {
 // many copies are in staging. The unit parses what the app chose, so it
 // is the app's own kind of sandbox: the data user in its own
 // namespaces, no network, no credential, one app.
-func (x *run) dump(ctx context.Context, app string, shared pin, staging, declFile string, decl *backupdecl.Config, rec *record.App) int {
+func (x *run) dump(ctx context.Context, app, shared, staging, declFile string, decl *backupdecl.Config, rec *record.App) int {
 	if len(decl.SQLite) == 0 {
 		return 0
 	}
@@ -398,7 +467,7 @@ func (x *run) dump(ctx context.Context, app string, shared pin, staging, declFil
 		Binds: []unit.Bind{
 			// Writable: SQLite reads a WAL database only where it can
 			// create the -shm beside it.
-			{Source: shared.source(), Dest: "/shared", Writable: true},
+			{Source: shared, Dest: "/shared", Writable: true},
 			{Source: staging, Dest: "/staging", Writable: true},
 			{Source: declFile, Dest: "/plan.json"},
 		},
@@ -440,10 +509,10 @@ func (x *run) dump(ctx context.Context, app string, shared pin, staging, declFil
 func (x *run) view(app string, shared pin, staging, declFile string, decl *backupdecl.Config, rec *record.App) (binds []unit.Bind, masked []string, present int, unpin func()) {
 	base := "/backup/" + app
 	binds = []unit.Bind{{Source: staging, Dest: base + "/sqlite"}, {Source: declFile, Dest: base + "/plan.json"}}
-	var pins []pin
+	var undo []func()
 	unpin = func() {
-		for _, p := range pins {
-			p.close()
+		for i := len(undo) - 1; i >= 0; i-- {
+			undo[i]()
 		}
 	}
 	for _, p := range decl.Files {
@@ -464,11 +533,18 @@ func (x *run) view(app string, shared pin, staging, declFile string, decl *backu
 			rec.Items = append(rec.Items, it)
 			continue
 		}
-		pins = append(pins, item)
+		undo = append(undo, item.close)
+		source, unmount, err := x.bound(item)
+		if err != nil {
+			it.Detail = err.Error()
+			rec.Items = append(rec.Items, it)
+			continue
+		}
+		undo = append(undo, unmount)
 		it.OK = true // until the snapshot says otherwise
 		rec.Items = append(rec.Items, it)
 		present++
-		binds = append(binds, unit.Bind{Source: item.source(), Dest: path.Join(base, "files", p)})
+		binds = append(binds, unit.Bind{Source: source, Dest: path.Join(base, "files", p)})
 		for _, db := range decl.SQLite {
 			if p == "." || db == p || strings.HasPrefix(db, p+"/") {
 				for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {

@@ -39,6 +39,10 @@ type box struct {
 	// before runs as a unit is about to start: the moment the manager
 	// would resolve its bind sources.
 	before func(unit.Spec)
+	// mount points, and the directory each was made from
+	mounted    map[string]string
+	unmounted  []string
+	leftMounts []string
 }
 
 var roleRe = regexp.MustCompile(`^hotserve_backup_([a-z]+)[0-9]*_`)
@@ -72,9 +76,21 @@ func newBox(t *testing.T) *box {
 		}
 		return ""
 	}
-	old := dataOwner
+	old, oldMount, oldUnmount, oldUnder := dataOwner, bindMount, unmountDetach, mountsUnder
 	dataOwner = func() (int, int, error) { return os.Getuid(), os.Getgid(), nil }
-	t.Cleanup(func() { dataOwner = old })
+	// mount(2) needs a privilege this lane does not have, and what the
+	// kernel does with it is the integration suite's to show. Here it is
+	// enough to know what was asked for: which directory, at the moment
+	// of asking, onto which mount point.
+	b.mounted = map[string]string{}
+	bindMount = func(source, target string) error {
+		was, err := os.Readlink(source)
+		b.mounted[target] = was
+		return err
+	}
+	unmountDetach = func(target string) error { b.unmounted = append(b.unmounted, target); return nil }
+	mountsUnder = func(string) ([]string, error) { return b.leftMounts, nil }
+	t.Cleanup(func() { dataOwner, bindMount, unmountDetach, mountsUnder = old, oldMount, oldUnmount, oldUnder })
 	return b
 }
 
@@ -472,9 +488,10 @@ func TestNotSetUp(t *testing.T) {
 
 // A declared path is the app's own to replace, and the upload unit
 // reads any file it is shown. A link is refused wherever it sits, and
-// what is bound is what was opened — not what the name leads to by the
-// time the manager resolves it.
-func TestALinkIsNeverFollowedAndABindCannotBeReAimed(t *testing.T) {
+// the manager is never given the app's name for anything: only mount
+// points of the run's own. (That a mount made from a pin cannot be
+// re-aimed is the kernel's doing, and the integration suite's to show.)
+func TestALinkIsNeverFollowedAndNothingIsBoundByName(t *testing.T) {
 	b := newBox(t)
 	sibling := filepath.Join(b.root, "shop", "shared")
 	must(t, os.MkdirAll(sibling, 0o755))
@@ -486,35 +503,24 @@ func TestALinkIsNeverFollowedAndABindCannotBeReAimed(t *testing.T) {
 	b.plan = fmt.Sprintf(`{"root":%q,"apps":{"blog":{"files":["uploads","linked","media/deep/x"]}}}`, b.root)
 	b.ls = func(string) string { return `{"struct_type":"node","path":"/backup/blog/files/uploads","type":"dir"}` }
 
-	// The app swaps its one honest path for a link the moment the
-	// upload unit is about to start — after the engine looked.
-	swapped := ""
-	b.before = func(s unit.Spec) {
-		if roleRe.FindStringSubmatch(s.Name)[1] != "upload" {
-			return
-		}
-		must(t, os.Rename(filepath.Join(shared, "uploads"), filepath.Join(shared, "uploads.real")))
-		must(t, os.Symlink(sibling, filepath.Join(shared, "uploads")))
-		for _, bind := range s.Binds {
-			if bind.Dest == "/backup/blog/files/uploads" {
-				swapped, _ = os.Readlink(bind.Source)
-			}
-		}
-	}
 	st, err := Run(context.Background(), b.cfg, b)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if want := filepath.Join(shared, "uploads.real"); swapped != want {
-		t.Fatalf("after the swap the bind source leads to %q, want the directory that was opened, %q", swapped, want)
 	}
 	up := b.spec("upload")
 	for _, bind := range up.Binds {
 		if strings.Contains(bind.Dest, "linked") || strings.Contains(bind.Dest, "deep") {
 			t.Errorf("a path through a link was bound: %+v", bind)
 		}
-		if strings.HasPrefix(bind.Dest, "/backup/blog/files") && !strings.HasPrefix(bind.Source, "/proc/") {
-			t.Errorf("a declared path is bound by name, which the app can re-aim: %+v", bind)
+		if strings.HasPrefix(bind.Dest, "/backup/blog/files") {
+			// By a mount point of the run's own, never by a name the app
+			// can re-aim between the look and the bind.
+			if !strings.HasPrefix(bind.Source, b.cfg.RunDir+"/") {
+				t.Errorf("a declared path is bound by name: %+v", bind)
+			}
+			if got, want := b.mounted[bind.Source], filepath.Join(shared, "uploads"); got != want {
+				t.Errorf("the mount point was made from %q, want %q", got, want)
+			}
 		}
 	}
 	app := st.Apps["blog"]
@@ -555,5 +561,30 @@ func TestASymlinkedRootIsFollowed(t *testing.T) {
 	st, err := Run(context.Background(), b.cfg, b)
 	if err != nil || st.Apps["blog"].Class != record.OK {
 		t.Fatalf("%+v, %v", st.Apps["blog"], err)
+	}
+}
+
+func TestEveryMountIsTakenAwayAndLeftoversAreSwept(t *testing.T) {
+	b := newBox(t)
+	left := filepath.Join(b.cfg.RunDir, "deadbeef0000", "mount-1")
+	must(t, os.MkdirAll(left, 0o700))
+	b.leftMounts = []string{left}
+	if _, err := Run(context.Background(), b.cfg, b); err != nil {
+		t.Fatal(err)
+	}
+	if len(b.unmounted) == 0 || b.unmounted[0] != left {
+		t.Fatalf("the earlier run's mount was not taken away first: %v", b.unmounted)
+	}
+	for target := range b.mounted {
+		found := false
+		for _, u := range b.unmounted {
+			found = found || u == target
+		}
+		if !found {
+			t.Errorf("%s was mounted and never unmounted", target)
+		}
+	}
+	if _, err := os.Stat(filepath.Dir(left)); err == nil {
+		t.Errorf("the earlier run's directory is still there")
 	}
 }
