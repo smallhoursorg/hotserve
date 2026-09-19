@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -192,7 +193,7 @@ func TestBackupJSONShape(t *testing.T) {
 func FuzzBackupDeclaration(f *testing.F) {
 	for _, seed := range [][2]string{
 		{"app.db", "uploads"}, {"data/app.db", "."}, {"../x", "y"}, {"/abs", "{env.X}"},
-		{"a/../../b", "a//b"}, {"app.db", "app.db-wal"}, {"x\x00y", "z\n"}, {"..", "..."}, {"", "\xff"},
+		{"a/../../b", "a//b"}, {"app.db", "app.db-wal"}, {"x\x00y", "z\n"}, {"..", "..."}, {"", "\xff"}, {"a" + string(rune(0x85)), "b" + string(rune(0x9f))},
 	} {
 		f.Add(seed[0], seed[1])
 	}
@@ -212,6 +213,9 @@ func FuzzBackupDeclaration(f *testing.F) {
 			}
 			if strings.ContainsAny(item, "{}") {
 				t.Fatalf("accepted %q, which a placeholder pass could rewrite", item)
+			}
+			if strings.ContainsFunc(item, unicode.IsControl) {
+				t.Fatalf("accepted %q, which holds a control character", item)
 			}
 		}
 		if sqlite == "." || joinedEqual(shared, sqlite, files) {

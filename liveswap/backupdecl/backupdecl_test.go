@@ -25,6 +25,8 @@ func TestValidateAccepts(t *testing.T) {
 		{"a name that only starts like a sibling", Config{Files: []string{"uploads", "uploads-old"}}},
 		{"spaces, colons, percent and dollar", Config{SQLite: []string{"my data/app:1.db"}, Files: []string{"50% $HOME"}}},
 		{"dots that are not traversal", Config{Files: []string{"..data", ".cache", "a..b", "..."}}},
+		// The neighbours of the control ranges, and ordinary non-ASCII.
+		{"what sits beside the control characters", Config{Files: []string{"a b", "a~b", "a" + string(rune(0xa0)) + "b", "caf" + string(rune(0xe9)), "up" + string(rune(0x2028)) + "loads"}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -56,6 +58,11 @@ func TestValidateRejects(t *testing.T) {
 		{"doubled separator", Config{Files: []string{"media//uploads"}}, "clean"},
 		{"a newline", Config{Files: []string{"up\nloads"}}, "control character"},
 		{"a NUL", Config{SQLite: []string{"app\x00.db"}}, "control character"},
+		{"DEL", Config{Files: []string{"up" + string(rune(0x7f)) + "loads"}}, "control character"},
+		// C1 controls are valid UTF-8, so the UTF-8 rule does not catch
+		// them: NEL is a line break to whatever prints the path.
+		{"a C1 control, NEL", Config{Files: []string{"up" + string(rune(0x85)) + "loads"}}, "control character"},
+		{"the last C1 control", Config{Files: []string{"up" + string(rune(0x9f)) + "loads"}}, "control character"},
 		{"not UTF-8", Config{Files: []string{"up\xffloads"}}, "UTF-8"},
 		{"a database that is the shared dir", Config{SQLite: []string{"."}}, "names a directory"},
 		{"the same database twice", Config{SQLite: []string{"app.db", "app.db"}}, "more than once"},

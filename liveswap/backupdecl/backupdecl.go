@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -79,7 +80,10 @@ func (i item) validate() error {
 		return fmt.Errorf("%s: the path is empty", i)
 	case !utf8.ValidString(p):
 		return fmt.Errorf("%s: the path is not valid UTF-8, and the JSON config it is carried in cannot spell it", i)
-	case strings.ContainsFunc(p, func(r rune) bool { return r < 0x20 || r == 0x7f }):
+	case strings.ContainsFunc(p, unicode.IsControl):
+		// Unicode's Cc: C0, DEL and C1. The C1 range is valid UTF-8, so
+		// the case above does not cover it, and U+0085 is a line break
+		// to whatever prints the path.
 		return fmt.Errorf("%s: the path contains a control character", i)
 	case strings.ContainsAny(p, "{}"):
 		// Not resolved, and not resolvable: whatever reads the
