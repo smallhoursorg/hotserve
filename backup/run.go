@@ -291,7 +291,12 @@ func resticInUnit(v jobView, args []string) []string {
 // same function that writes /etc/hotserve/backup.env, so systemd
 // parses exactly the bytes the jobs will get. Each call writes them
 // to a fresh root-only file beside that one and removes it after.
-func asJob(v jobView, envDir string, next Exec) Exec {
+//
+// unit names the unit, for a caller whose context can end (init): a
+// named unit is one that can be stopped, and that cannot be started
+// twice. "" leaves systemd to name it, for a caller with nothing to
+// stop and no reason to exclude another of itself (status).
+func asJob(v jobView, envDir, unit string, next Exec) Exec {
 	return func(ctx context.Context, c Cmd) error {
 		if c.Name != "restic" {
 			return fmt.Errorf("init runs restic as the job, and nothing else (asked for %s)", c.Name)
@@ -318,14 +323,17 @@ func asJob(v jobView, envDir string, next Exec) Exec {
 		view.EnvFile = f.Name()
 		// The settings are in the file now: systemd-run itself gets
 		// none of them in its own environment.
-		argv := append([]string{"--unit=" + checkUnit}, resticInUnit(view, c.Args)...)
+		argv := resticInUnit(view, c.Args)
+		if unit != "" {
+			argv = append([]string{"--unit=" + unit}, argv...)
+		}
 		err = next(ctx, Cmd{Name: "systemd-run", Args: argv, Stdout: c.Stdout, Stderr: c.Stderr})
 		// A context that ended — Ctrl-C, or a check that ran out of
 		// time — ends systemd-run, the client. The unit is PID 1's, and
 		// restic in it would go on retrying for minutes, holding the
 		// name: it is stopped here.
-		if ctx.Err() != nil {
-			_ = next(context.WithoutCancel(ctx), Cmd{Name: "systemctl", Args: []string{"stop", checkUnit + ".service"}, Stdout: io.Discard, Stderr: io.Discard})
+		if unit != "" && ctx.Err() != nil {
+			_ = next(context.WithoutCancel(ctx), Cmd{Name: "systemctl", Args: []string{"stop", unit + ".service"}, Stdout: io.Discard, Stderr: io.Discard})
 		}
 		return err
 	}

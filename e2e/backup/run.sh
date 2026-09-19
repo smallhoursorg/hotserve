@@ -468,7 +468,18 @@ else
 fi
 
 echo "=== hotserve backup status ==="
-status_out=$(hotserve backup status --admin 127.0.0.1:2019 2>&1)
+# status is root; the restic it runs is not. It talks to the network and
+# parses what the storage sends back, so it runs as the jobs' restic
+# does: in a unit, as the hotserve user, in their sandbox. A failing
+# restic first on root's PATH shows whose PATH found it.
+status_out=$(PATH="/tmp/roots-own-bin:$PATH" hotserve backup status --admin 127.0.0.1:2019 2>&1)
+if echo "$status_out" | grep -q "the restic on root's PATH was used"; then
+	fail "status ran restic as root, from root's PATH: $status_out"
+elif [ "$(stat -c '%U %a' /var/lib/hotserve-backup-status 2>/dev/null)" = "hotserve 750" ] && ! ls -A /run/hotserve-backup | grep -q .; then
+	pass "status runs its restic in a unit as the hotserve user, and leaves no copy of the settings"
+else
+	fail "status's restic: $(stat -c '%U %a' /var/lib/hotserve-backup-status 2>&1) / left in /run/hotserve-backup: $(ls -A /run/hotserve-backup 2>&1)"
+fi
 # The app's own row, not the whole report: the header line would match
 # a `grep -v never` of all of it.
 if echo "$status_out" | grep -qE '^backup-example .*(just now|(min|hours|days) ago)'; then

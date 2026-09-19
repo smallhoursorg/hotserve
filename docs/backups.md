@@ -117,6 +117,11 @@ Those two steps are two sandboxes, because they need opposite things:
 An app that declares only `state files` has no copy step: one unit, its
 data read-only.
 
+restic is never run as root — not by the timer, not by `init`'s checks,
+not by `status`. What every backup process runs as, and what each can
+reach, is one table in
+[DESIGN-threat-model.md](../DESIGN-threat-model.md#backups--backup).
+
 A run counts only once its snapshot has been **read back** out of the
 repository holding every declared path as data: each database as a
 copy with something in it, each `files` path as the real thing, not a

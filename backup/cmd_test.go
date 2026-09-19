@@ -120,7 +120,7 @@ func TestAsJobRunsResticAsTheJobDoes(t *testing.T) {
 	}
 	check := restic("cat", "config")
 	check.Env = settings
-	if err := asJob(view, envDir, record)(context.Background(), check); err != nil {
+	if err := asJob(view, envDir, checkUnit, record)(context.Background(), check); err != nil {
 		t.Fatal(err)
 	}
 
@@ -165,7 +165,7 @@ func TestAsJobStopsTheUnitOfACheckWhoseContextEnded(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	x := asJob(jobView{User: "hotserve", Home: checkHome}, t.TempDir(), next)
+	x := asJob(jobView{User: "hotserve", Home: checkHome}, t.TempDir(), checkUnit, next)
 	if err := x(ctx, restic("cat", "config")); err == nil {
 		t.Fatal("a check whose context ended has not passed")
 	}
@@ -179,8 +179,40 @@ func TestAsJobStopsTheUnitOfACheckWhoseContextEnded(t *testing.T) {
 	}
 }
 
+// `status` is root, and its restic is not: the one restic call it makes
+// goes through the same door as init's checks — a unit, as the jobs'
+// user, in their sandbox, the settings in a root-only file and never in
+// systemd-run's environment — with no app's data in its view. It is not
+// named: a monitor and a person asking at once must not collide.
+func TestStatusRunsResticAsTheJobsDo(t *testing.T) {
+	var got Cmd
+	next := func(_ context.Context, c Cmd) error {
+		got = c
+		_, _ = c.Stdout.Write([]byte("[]"))
+		return nil
+	}
+	x := asJob(jobView{User: "hotserve", Home: statusHome}, t.TempDir(), "", next).withEnv([]string{"RESTIC_REPOSITORY=s3:host/bucket", "RESTIC_PASSWORD=p"})
+	if _, err := Status(context.Background(), []App{testApp("blog", StateEntry{Kind: KindFiles, Path: "uploads"})}, x, "box-1"); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(got.Args, "\n")
+	if got.Name != "systemd-run" || len(got.Env) != 0 {
+		t.Fatalf("status ran %s with %d settings in its environment, want systemd-run with none", got.Name, len(got.Env))
+	}
+	for _, want := range []string{"--property=User=hotserve", "--property=PrivateUsers=yes", "--property=TemporaryFileSystem=/:ro", "--property=StateDirectory=hotserve-backup-status", "--property=EnvironmentFile="} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing %q from status's unit:\n%s", want, joined)
+		}
+	}
+	for _, never := range []string{"--unit=", "/var/lib/liveswap", "BindPaths="} {
+		if strings.Contains(joined, never) {
+			t.Errorf("status's unit must not have %q:\n%s", never, joined)
+		}
+	}
+}
+
 func TestAsJobRunsNothingButRestic(t *testing.T) {
-	x := asJob(jobView{User: "hotserve", Home: t.TempDir()}, t.TempDir(), fake(nil, nil))
+	x := asJob(jobView{User: "hotserve", Home: t.TempDir()}, t.TempDir(), "", fake(nil, nil))
 	if err := x(context.Background(), Cmd{Name: "sh", Args: []string{"-c", "id"}}); err == nil {
 		t.Fatal("init's checks run restic and nothing else")
 	}
@@ -201,7 +233,7 @@ func TestTheJobAndInitsChecksShareOneSandbox(t *testing.T) {
 	job := LaunchArgs(app, opts)
 
 	var check []string
-	x := asJob(jobView{User: "hotserve", Home: scratch}, t.TempDir(),
+	x := asJob(jobView{User: "hotserve", Home: scratch}, t.TempDir(), checkUnit,
 		func(_ context.Context, c Cmd) error { check = c.Args; return nil })
 	if err := x(context.Background(), restic("version")); err != nil {
 		t.Fatal(err)

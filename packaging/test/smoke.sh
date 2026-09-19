@@ -582,6 +582,8 @@ printf 'RESTIC_PASSWORD=secret\n' > /run/hotserve-backup/.backup.env-check-5678
 # And the directory those checks wrote in (restic's cache), which
 # systemd keeps for init until init removes it.
 install -d -m 0700 /run/hotserve-backup-check/cache
+# And the cache of the restic `status` runs, which is kept between reports.
+mkdir -p /var/lib/hotserve-backup-status/cache
 mkdir -p /var/lib/hotserve-backup/smoke/data
 echo staged > /var/lib/hotserve-backup/smoke/data/app.db
 # The operator has turned the backup timer off. A plain remove keeps that
@@ -618,6 +620,8 @@ apt-get purge -y hotserve
 	|| die "purge left the settings an interrupted init's checks ran with"
 [ ! -e /run/hotserve-backup-check ] \
 	|| die "purge left the directory an interrupted init's checks wrote in"
+[ ! -e /var/lib/hotserve-backup-status ] \
+	|| die "purge left the cache of status's restic"
 echo "purge removed the credentials, the staged copies and the conffile"
 
 stage "stage 6: the backup timer through purge, remove and reinstall"

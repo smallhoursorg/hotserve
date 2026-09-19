@@ -198,7 +198,15 @@ func cmdStatus(fl caddycmd.Flags) (int, error) {
 	if err != nil {
 		return caddy1, fmt.Errorf("finding this box's hostname (restic records it on every snapshot): %w", err)
 	}
-	statuses, err := Status(ctx, apps, Exec(osExec).withEnv(env), host)
+	// This command is root. restic is not: it talks to the network and
+	// parses what the storage sends back, so it runs where the jobs'
+	// restic runs — a unit, as the jobs' user, in their sandbox, with no
+	// app's data in its view — and only its listing comes back here.
+	if err := prepareCheckRoot(); err != nil {
+		return caddy1, err
+	}
+	view := jobView{User: fl.String("user"), Home: statusHome}
+	statuses, err := Status(ctx, apps, asJob(view, checkRoot, "", osExec).withEnv(env), host)
 	if err != nil {
 		return caddy1, err
 	}
@@ -251,10 +259,7 @@ func cmdInit(fl caddycmd.Flags, args []string) (int, error) {
 	// this process outright, so the cleanups below do run.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := os.MkdirAll(checkRoot, 0o700); err != nil {
-		return caddy1, fmt.Errorf("making %s for the repository checks: %w", checkRoot, err)
-	}
-	if err := requireRootOnlyDir(checkRoot); err != nil {
+	if err := prepareCheckRoot(); err != nil {
 		return caddy1, err
 	}
 	// Whatever an init that was killed left there goes first, and what
@@ -294,7 +299,7 @@ func cmdInit(fl caddycmd.Flags, args []string) (int, error) {
 	// their output is captured rather than shown: restic's "repository
 	// does not exist" while init is about to create one reads as an
 	// error when it is the expected answer.
-	if err := Init(ctx, o, asJob(view, checkRoot, osExec), os.Stdout); err != nil {
+	if err := Init(ctx, o, asJob(view, checkRoot, checkUnit, osExec), os.Stdout); err != nil {
 		return caddy1, err
 	}
 	return 0, nil
@@ -325,6 +330,21 @@ func unitStateIsRunning(state string) bool {
 // checkRoot holds the settings each of init's checks is started with,
 // while they run. /run is tmpfs.
 const checkRoot = "/run/hotserve-backup"
+
+// statusHome is the directory status's restic may write: its cache,
+// kept from one report to the next, since a monitor asks every few
+// minutes. Beside the staging root, not in it: an app may be named
+// anything.
+const statusHome = "/var/lib/hotserve-backup-status"
+
+// prepareCheckRoot makes the root-only directory a unit's settings are
+// written to while it runs, and refuses one that is not root-only.
+func prepareCheckRoot() error {
+	if err := os.MkdirAll(checkRoot, 0o700); err != nil {
+		return fmt.Errorf("making %s for the repository settings: %w", checkRoot, err)
+	}
+	return requireRootOnlyDir(checkRoot)
+}
 
 // checkHome is the directory init's checks may write: restic's cache,
 // kept from one check to the next. systemd makes it for them, as it

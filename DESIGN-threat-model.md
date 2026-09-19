@@ -41,11 +41,13 @@ Windows, and macOS-as-a-server are out of scope by product design.
    data itself. systemd reads the file as root and passes the values
    to each backup job; no app is ever in a view that contains it, and
    hotserve itself never reads it. `hotserve backup init` checks new
-   settings by running them the same way, from a short-lived copy in
+   settings by running them the same way, and `hotserve backup status`
+   lists the repository the same way: from a short-lived copy in
    `/run/hotserve-backup` — a root-only directory on tmpfs, so the copy
-   is removed when each check ends, and an init that is killed outright
+   is removed when each unit ends, and a command that is killed outright
    leaves it in memory until the next boot at most, never on disk.
-   Purge removes both.
+   Purge removes both. Who holds the credential, and who can reach
+   what, is tabled under "Backups" in "Trust boundaries".
    The box's storage key should not be able to *delete* — `init` tries
    a delete and says which kind you have (docs/backups.md).
 6. **Staged database copies** — `/var/lib/hotserve-backup/<app>/data`,
@@ -415,6 +417,97 @@ inheritance of ACME tokens and any other supervisor secret
 (`TestBuildEnvDoesNotLeakSupervisorSecrets`). The `/proc` route is
 closed twice over (non-dumpable supervisor; cross-namespace refusal);
 the filesystem routes are closed by absence.
+
+### Backups — `backup/`
+
+Backups add root processes, a repository credential, a network peer
+whose answers are parsed, and plaintext copies of app data. The
+boundaries are these, and each is a rule a change has to keep:
+
+1. **Root touches nothing a job writes.** Everything under the staging
+   root is written by unprivileged units, so root neither makes, chowns,
+   reads nor removes any of it: systemd makes each unit's directory
+   (`homeProperties`, backup/run.go — `StateDirectory=`,
+   `RuntimeDirectory=`), and does not start a unit whose directory is a
+   link. What a box has backed up before is read from the repository
+   (`Job.lastCleanPaths`, backup/job.go), not from a file a job left.
+2. **restic never runs as root.** It talks to the network and parses
+   what the storage sends back. Every call is a unit as `hotserve` in
+   the jobs' sandbox (`sandboxProperties`) — the hourly upload, a
+   restore, init's checks and `status`'s listing (`asJob`) — and
+   `backup restic --` drops to `hotserve` before it execs
+   (`Passthrough`, backup/restic.go).
+3. **No backup unit has both the network and an app's data writable.**
+   SQLite needs the data writable to read a database at all, so the
+   copy is a unit of its own with no network and no credentials
+   (`StageArgs`); the upload has the network and the data read-only
+   (`LaunchArgs`). The exception is a restore, which has to write what
+   it fetches, and which an operator starts and confirms.
+4. **The credential reaches a unit one way.** systemd reads a root-only
+   file (`EnvironmentFile=`) and puts the values in the unit's
+   environment. They are never in an argv, never in the launcher's own
+   environment, and never in `systemd-run`'s (`asJob` hands it none);
+   the file is not in any unit's view.
+5. **One unit name per app** (`unitName`) for its copy, its upload and
+   its restore, so no two of them run at once.
+6. **What decides is the repository or an exit status**, not state on
+   the box and not a program's wording: clean runs are records in the
+   repository (`CleanTag`), a repository's presence is `cat config`'s
+   exit status (`repositoryState`, backup/init.go). The one exception,
+   and why, is at `deniedBy`.
+
+Who runs as what, and what each can reach:
+
+| Process | Runs as | Sandbox | App data | Network | Credential | Runs |
+|---|---|---|---|---|---|---|
+| `backup run` — the timer's launcher (`RunAll`) | root | none | `stat` of each `shared/`, nothing more | the admin socket | reads the settings file, to refuse a path; passes nothing on | `systemd-run` |
+| the copy (`StageArgs`) | `hotserve` | full | that app's, **writable** | **none** (`PrivateNetwork=`) | **none** | sqlite3 |
+| the upload (`LaunchArgs`) | `hotserve` | full | that app's, read-only | yes | yes | restic |
+| `backup restore` — its launcher (`cmdRestore`, backup/cmd.go) | root | none | `stat`; a missing `shared/` is made by a unit as `hotserve` (`ensureShared`) | the admin socket | reads the settings file | `systemd-run`, `systemctl` |
+| the restore (`RestoreArgs`, backup/restore.go) | `hotserve` | full | that app's, **writable** | yes | yes | restic, sqlite3 |
+| `backup init` (`Init`) | root | none | none | none of its own | writes the settings file, last, once the checks pass | `systemd-run` |
+| init's checks, `status`'s listing (`asJob`) | `hotserve` | full | **none** | yes | yes, from a root-only copy on tmpfs removed after each | restic |
+| `backup status` (`cmdStatus`) | root | none | none | the admin socket | reads the settings file | `systemd-run`, `systemctl` |
+| `backup restic -- …` (`Passthrough`) | `hotserve`, dropped from root | **none** | everything `hotserve` owns | yes | yes | restic, with the operator's arguments |
+| `backup app` by hand, no `--phase` | whoever ran it | **none** | whatever that user can reach | yes | from that user's environment | sqlite3, restic |
+
+"Full" is `sandboxProperties`: a private user and PID namespace, an
+empty read-only root with `/usr` and a handful of `/etc` files bound
+in, no capabilities, and the unit's own directory. The last two rows
+are an operator's tools, not anything the timer runs.
+
+What is on disk, whose it is, and who writes it:
+
+| Path | Owner, mode | Written by | Read by root |
+|---|---|---|---|
+| `/etc/hotserve/backup.env` | root, `0600` | `init`, as a `0600` temp file renamed into place (`writeEnvFile`) | yes — and by systemd, for `EnvironmentFile=` |
+| `/run/hotserve-backup/` (tmpfs) | root, `0700`, checked before use (`requireRootOnlyDir`) | `asJob`: one unit's settings, removed when it ends | — |
+| `/run/hotserve-backup-check/` (tmpfs) | `hotserve`, `0700`, made by systemd | init's checks (restic's cache) | never; `init` removes it by name — `/run` is root's, and the removal follows no link |
+| `/var/lib/hotserve-backup/` | root, `0750` | nobody: only systemd makes entries in it | never |
+| `/var/lib/hotserve-backup/<app>/` | `hotserve`, `0750`, made by systemd | that app's copy and upload: `data/` (the staged copies — plaintext, replaced every run), `cache/` | **never** |
+| `/var/lib/hotserve-backup/<app>/restore/` | `hotserve`, `0750`, made by systemd | that app's restore: its cache, and `copies/`, removed when it ends | **never** |
+| `/var/lib/hotserve-backup-status/` | `hotserve`, `0750`, made by systemd | `status`'s restic (its cache) | never |
+
+Pinned by: `TestTheUnitThatCanWriteAnAppsDataCanReachNothing` (rule 3:
+the two units differ by exactly the data's bind, the network and the
+settings file), `TestTheJobAndInitsChecksShareOneSandbox` and
+`TestRestoreRunsInTheBackupJobsUnitAndSandbox` (one sandbox),
+`TestStatusRunsResticAsTheJobsDo` and `TestAsJobRunsResticAsTheJobDoes`
+(rules 2 and 4), `TestRunAllContinuesAfterOneFailureAndReportsIt` (rule
+1: the launcher makes nothing under the staging root). On a real box
+the e2e backup suite reads the copy unit's properties from systemd while
+one is held open, plants a failing `restic` first on root's `PATH` for
+`init` and for `status`, and plants a link where a job's directory
+belongs; the package smoke test holds the staging root to root, `0750`.
+
+What these do not give. Every unit that reaches the repository holds the
+same credential, so a compromised restic in one app's upload can read
+every app's snapshots — and delete them, unless the key cannot (see
+"Backup credentials" under Assets). It can also read that one app's
+data, which is what it is there to do. The restore is the one unit with
+both the network and an app's data writable. And `backup restic --` is
+restic as `hotserve` with no sandbox at all: it is for an operator at a
+terminal, and nothing starts it on a schedule.
 
 ### Install-time — `packaging/postinstall.sh`
 
