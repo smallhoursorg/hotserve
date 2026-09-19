@@ -9,6 +9,11 @@ go 1.26.1
 require (
 	github.com/coreos/go-systemd/v22 v22.7.0
 	github.com/godbus/dbus/v5 v5.2.2
+	github.com/smallhoursorg/hotserve/liveswap v0.0.0-00010101000000-000000000000
 )
 
-require golang.org/x/sys v0.27.0 // indirect
+require golang.org/x/sys v0.48.0 // indirect
+
+// Built only from this repo, like the product module: backupdecl is a
+// package of the liveswap module next door.
+replace github.com/smallhoursorg/hotserve/liveswap => ../liveswap
