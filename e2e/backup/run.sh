@@ -401,9 +401,13 @@ if section sandbox "the job ran in its own sandbox"; then
 	# With the writer gone and the database closed cleanly, SQLite removes
 	# -wal and -shm: the idle-app case, which a box hits after a reboot or
 	# while an app is crash-looping. The check below means something only
-	# once the sidecars are gone.
+	# once the sidecars are gone. Stopping the writer can catch a sqlite3
+	# mid-write, and one that is killed closes nothing: the sidecars then
+	# stay until a connection next closes cleanly, so one is opened and
+	# closed here, as the app's user.
 	idle=0
 	for _ in 1 2 3 4 5 6 7 8 9 10; do
+		sq_app 'select 1' >/dev/null 2>&1
 		if ! ls "$SHARED" | grep -qE 'app[.]db-(wal|shm)'; then
 			idle=1
 			break
