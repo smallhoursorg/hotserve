@@ -589,6 +589,15 @@ Initialise the repository once with `restic init`, using a cache
 directory of your own (`RESTIC_CACHE_DIR`) so that nothing of root's is
 left under `/var/cache/hotserve-backup`.
 
+Pointing the box at **another repository** this way leaves
+`/var/lib/hotserve-backup/status.json` speaking of the old one: the
+next run backs up into the new repository and says so, but a restore
+proven there stays "proven" — of a snapshot the new repository does not
+hold, which `status` says, and does not fail on — until the next
+drill. Remove `status.json` with the change: the next run then drills
+what it backs up into the repository it is now using (up to 1 GiB
+restored; above that, `hotserve-backup drill` does).
+
 ## Development
 
 - `make test` — everything that needs neither systemd nor sqlite3: the
