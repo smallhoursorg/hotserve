@@ -4,6 +4,10 @@
 //	hotserve-backup restore <app> [--snapshot <id>] [--to <dir>] [--no-pre-backup] [--yes]
 //	                        one snapshot of one app, into place or into a new directory; root
 //	hotserve-backup drill   fetch and check the newest snapshot of every app, installing nothing; root
+//	hotserve-backup status  whether each app's backup is fresh and a restore of it proven; anyone.
+//	                        Exits 0 healthy, 1 not, 3 when it could not tell
+//	hotserve-backup validate <Caddyfile>
+//	                        whether a run could plan from that Caddyfile, before it goes live; anyone
 //
 // and subcommands that are only ever the command of a unit one of those
 // starts, each with a fixed view and no arguments — nothing an operator
@@ -17,7 +21,8 @@
 //	hotserve-backup extract check it, and install what is sound into /target
 //
 // (The one string of a declaration's that does reach a command line is
-// the directory part of a nested path, to `restic ls`: engine.verify.)
+// the directory part of a nested path, to `restic ls`: engine.verify.
+// validate's argument is a path this process opens; it starts no unit.)
 //
 // It does not link Caddy, and hotserve does not run it: the two share a
 // declaration format (liveswap/backupdecl) and nothing else.
@@ -31,6 +36,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -45,6 +51,7 @@ import (
 	"github.com/smallhoursorg/hotserve/backups/plan"
 	"github.com/smallhoursorg/hotserve/backups/record"
 	"github.com/smallhoursorg/hotserve/backups/restore"
+	"github.com/smallhoursorg/hotserve/backups/status"
 	"github.com/smallhoursorg/hotserve/backups/unit"
 	"github.com/smallhoursorg/hotserve/liveswap/backupdecl"
 )
@@ -53,18 +60,43 @@ const caddyfile = "/etc/hotserve/Caddyfile"
 
 const usage = `usage: hotserve-backup run
        hotserve-backup restore <app> [--snapshot <id>] [--to <dir>] [--no-pre-backup] [--yes]
-       hotserve-backup drill`
+       hotserve-backup drill
+       hotserve-backup status
+       hotserve-backup validate <Caddyfile>`
+
+// arguments says whether a command takes that many: restore takes its
+// own, validate takes one file, and nothing else takes any — least of
+// all the commands of units.
+func arguments(name string, n int) bool {
+	switch name {
+	case "restore":
+		return true
+	case "validate":
+		return n == 1
+	}
+	return n == 0
+}
 
 func main() {
-	if len(os.Args) < 2 || (len(os.Args) > 2 && os.Args[1] != "restore") {
+	if len(os.Args) < 2 || !arguments(os.Args[1], len(os.Args)-2) {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
 	}
 	if err := command(os.Args[1], os.Args[2:]); err != nil {
 		fmt.Fprintln(os.Stderr, "hotserve-backup:", err)
+		if errors.As(err, new(couldNotTell)) {
+			os.Exit(3)
+		}
 		os.Exit(1)
 	}
 }
+
+// couldNotTell is status not having been able to look — no setup, a
+// record it cannot read — which is not the same news as backups that
+// are unhealthy, and does not leave with the same status: 3, not 1.
+type couldNotTell struct{ error }
+
+func (e couldNotTell) Unwrap() error { return e.error }
 
 func command(name string, args []string) error {
 	// SIGINT, SIGTERM and SIGHUP cancel the context; a run then stops the unit
@@ -78,6 +110,10 @@ func command(name string, args []string) error {
 		return restoreApp(ctx, args)
 	case "drill":
 		return drill(ctx)
+	case "status":
+		return showStatus(ctx)
+	case "validate":
+		return validate(ctx, args[0])
 	case "check":
 		return settle(ctx, restore.CheckOnly)
 	case "install":
@@ -174,6 +210,82 @@ func report(st *record.Status) {
 			fmt.Printf("%s: restore proven: snapshot %.8s was fetched and checked whole\n", n, app.RestoreProven.Snapshot.ID)
 		}
 	}
+}
+
+// showStatus needs no root: the record is for everyone to read, and
+// the manager tells anyone what is running.
+func showStatus(ctx context.Context) error {
+	cfg := config()
+	// Only a file that is not there says so. Any other answer — a
+	// directory this user may not search — is not "not set up".
+	env, err := os.Lstat(cfg.EnvFile)
+	if errors.Is(err, fs.ErrNotExist) {
+		return couldNotTell{fmt.Errorf("backups are not set up: %s is not there", cfg.EnvFile)}
+	} else if err != nil {
+		return couldNotTell{fmt.Errorf("whether backups are set up cannot be told from here: %w", err)}
+	}
+	st, err := record.Read(filepath.Join(cfg.StateDir, "status.json"))
+	if err != nil {
+		return couldNotTell{fmt.Errorf("the record of the last run could not be read: %w", err)}
+	}
+	in := status.Input{Record: st, Now: time.Now(), SetUp: env.ModTime()}
+	var active []unit.Active
+	active, in.RunningErr = unit.ListActive(ctx, engine.UnitPattern)
+	for _, a := range active {
+		if role, app, ok := engine.ParseUnitName(a.Name); ok {
+			in.Running = append(in.Running, status.Running{Role: role, App: app, State: a.State, Since: a.Since})
+		} else {
+			in.Unrecognised = append(in.Unrecognised, a.Name)
+		}
+	}
+	lines, healthy := status.Report(in)
+	for _, l := range lines {
+		fmt.Println(l)
+	}
+	if !healthy {
+		return errors.New("not every app has a fresh backup and a restore proven lately")
+	}
+	return nil
+}
+
+// validate says whether a run could turn this Caddyfile into a plan —
+// for whoever is about to make it live, before they do. It starts no
+// unit, takes no lock and needs no root; the run's own plan step does
+// the same to the live file, as another user, inside a view that holds
+// the config directory and nothing else.
+func validate(ctx context.Context, file string) error {
+	abs, err := filepath.Abs(file)
+	if err != nil {
+		return err
+	}
+	if st, err := os.Stat(abs); err != nil {
+		return err
+	} else if !st.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a file", abs)
+	}
+	ins, err := plan.Inspect(ctx, abs)
+	if err != nil {
+		return err
+	}
+	configDir := config().ConfigDir
+	// Beside the Caddyfile is where a copy being checked somewhere else
+	// keeps what it imports; on the box that is the config directory.
+	if unseen := ins.ImportsOutside(configDir, filepath.Dir(abs)); len(unseen) > 0 {
+		return plan.OutsideError(unseen, configDir)
+	}
+	if closed := ins.ImportsClosedToOthers(configDir); len(closed) > 0 {
+		return fmt.Errorf("the Caddyfile imports what a backup run could not read: %s — a run reads the Caddyfile as the %s account, which owns nothing under %s: what is imported has to be readable, and its directories listable, by others (0644, 0755)", strings.Join(closed, ", "), "hotserve-backup", configDir)
+	}
+	names := ins.Plan.Names()
+	if len(names) == 0 {
+		fmt.Println("no app declares a backup: a run would back nothing up")
+	} else {
+		fmt.Printf("a run would back up %s, under %s\n", record.Text(strings.Join(names, ", ")), record.Text(ins.Plan.Root))
+	}
+	for _, n := range ins.Undeclared {
+		fmt.Printf("%s declares no backup: nothing of it would be backed up\n", record.Text(n))
+	}
+	return nil
 }
 
 func restoreApp(ctx context.Context, args []string) error {

@@ -11,11 +11,14 @@ and nothing here talks to hotserve. The two share a declaration format
 (`liveswap/backupdecl`) and nothing more — `hotserve-backup` links no
 Caddy.
 
-**On this branch it is the engine, restore and the restore drill.**
-`hotserve-backup run` does one backup run, `hotserve-backup restore
-<app>` puts a snapshot back, and `hotserve-backup drill` proves that a
-restore would work without doing one. There is no setup command, no
-timer and no package yet: all three need `/etc/hotserve/backup.env`
+**On this branch it is the engine, restore, the restore drill, and
+what says how they are doing.** `hotserve-backup run` does one backup
+run, `hotserve-backup restore <app>` puts a snapshot back,
+`hotserve-backup drill` proves that a restore would work without doing
+one, `hotserve-backup status` says whether each app's backup is fresh
+and its restore proven, and `hotserve-backup validate <Caddyfile>` says
+whether a run could plan from a Caddyfile before it goes live. There is
+no setup command, no timer and no package yet: all but `validate` need `/etc/hotserve/backup.env`
 written by hand (below), Debian 13's `restic` and `sqlite3` installed,
 and systemd 257 (`PrivatePIDs=`), which is Debian 13's.
 
@@ -57,8 +60,30 @@ and systemd 257 (`PrivatePIDs=`), which is Debian 13's.
      first good backup, once; after that it is the drill's. That is the
      whole app fetched back, in plaintext, on a timer, so above 1 GiB
      restored the run leaves it to `hotserve-backup drill`, and says so;
-6. writes `/var/lib/hotserve-backup/status.json` — also when the run
+6. lists the repository, once, for every app (`restic snapshots
+   --no-lock`), and writes beside each snapshot the record names when
+   it was last there (`seen`), and when the listing was answered
+   (`listed`). Not after the repository has refused the run, and not
+   with no snapshot on record to look for. A listing that fails is a
+   warning: it changes no app's result, and makes no snapshot look
+   gone. So is one restic had anything to say beside, on stderr: it
+   leaves a snapshot it cannot load out of the listing and exits 0
+   [measured, with a cold cache]. The listing unit's stderr goes to a
+   file, not to the journal; what restic said of a listing that was
+   not believed is kept in `/var/lib/hotserve-backup/listing.err`,
+   root's to read, until a listing is answered — the record, which is
+   everyone's to read, holds none of restic's words but the id of a
+   snapshot it could not load — and the record says since when
+   listings have gone unanswered (`unlisted`). A snapshot this run itself made, or
+   fetched for its first drill, is judged by the next run's listing,
+   not by this one's;
+7. writes `/var/lib/hotserve-backup/status.json` — also when the run
    ended early, with why, and the apps it did not reach as `not run`.
+
+An app that has left the plan with snapshots in the repository — a
+block deleted, an import that stopped matching — is a warning of the
+run that finds it gone, and of `status` until the next run: once. The
+record then drops it, as its operator may have meant.
 
 It exits 0 only if every app is `ok` or `pending`.
 
@@ -349,7 +374,8 @@ and nothing bounds an upload.
 something declared is not in it, or restic exited 3), `pending`, `data
 missing`, `failed`, `not attempted`, `not run`; each declared item with
 whether it was found in the snapshot; the snapshot's id; the last run
-that was `ok`, and the last that made a snapshot at all. An app a run
+that was `ok`, and the last that made a snapshot at all — each with
+`seen`, when the repository was last found to hold it. An app a run
 did not reach is `not run`, with those two dates and nothing else:
 never the last run's result under this run's date.
 
@@ -367,6 +393,87 @@ How a copy ended is read from `sqlite3`'s exit status, which is
 SQLite's result code (5 and 6 busy, 13 full), never from its words:
 they hold the database's path, and `busy.db` is not busy.
 
+## Status
+
+`hotserve-backup status`, as anyone: `status.json` is world-readable
+and holds no secret, and the manager tells any user which units are
+running. It prints when the last run started — and that no run has
+finished for more than 3 hours, where that is so: the run itself is
+aged, or a record whose apps are all `pending` would read "no data
+yet" for as long as no run replaced it — since when the repository
+has gone unlisted, where it has, when a drill last ran, or why the last
+one could not begin, and then per app:
+
+- how the last run ended, where it looked for the app's data, and the
+  last **complete** backup — the last run that ended `ok` — with its
+  snapshot. An app that is `pending` has nothing else said of it;
+- `stale` when that backup is more than 3 hours old: two hourly runs
+  missed, and some grace. Freshness is the last complete backup's,
+  whatever is running now and whatever a later `incomplete` snapshot
+  holds;
+- `snapshot … is no longer in the repository` when a listing answered
+  since the snapshot was last seen there did not hold it — pruned or
+  forgotten off the box, lost, or rewritten under a new id (`restic
+  rewrite`, `restic tag`). A last complete backup that is gone is not a
+  backup; a *proven* snapshot that is gone is said, and what was proven
+  of it stays proven. With no listing answered since, nothing is said
+  either way: "in the repository" is never claimed, only "gone";
+- `restore last proven: <when>, snapshot <id>`, and `: old` when that
+  is more than 8 days ago — the weekly drill's period and a day;
+- `restore not proven: <why>` when the last drill proved nothing —
+  also beside an older proof: the newest snapshot is the one a restore
+  reaches for — or when no drill has run;
+- and what is running: each unit of a run, a restore or a drill that is
+  running, starting or stopping, by what it does, to which app, since
+  when. A unit whose command is still running is `activating` to
+  systemd, which is not failed. The process that starts those units is
+  not one of them: between two units, `no unit … is running` is what
+  is said. Where the manager cannot be asked, that is said instead.
+
+It exits 0 only if the last run finished within 3 hours and did not end
+early, the repository has not gone unlisted for more than 3 hours, the
+last drill could begin, and every app that is not `pending`
+was backed up by the last run (or not reached by it), has a complete
+backup that is fresh and that no listing since has missed, and a
+restore proven in the last 8 days with no failed drill since. With no
+app declaring a backup there is nothing to fail. A box set up less than
+3 hours ago and not yet run is `pending first run`, exit 0; after that
+it is not. Anything else of those exits 1. What kept `status` from
+looking at all — no `/etc/hotserve/backup.env` (backups are not set
+up), a record that cannot be read — exits 3: not the same news as
+backups that are unhealthy. (2 is the usage text's.)
+
+## Before a Caddyfile goes live
+
+`hotserve-backup validate <Caddyfile>`, as anyone: what a run's plan
+step does to the live file, done to this one by whoever asks — it
+adapts it with `/usr/bin/hotserve adapt` and no environment (below),
+and refuses what that step would refuse, in the same words. It is not
+run as the plan unit's account nor inside its view, so it also refuses
+what those would make of the file once it is live:
+
+- an import from outside `/etc/hotserve` — written relatively, from
+  outside the Caddyfile's own directory, so that a copy can be checked
+  with what it imports beside it. As the run does, it goes by how the
+  import is written, by where the directories it names lead through
+  links, and by where a link among the matched files leads. A line
+  that begins with `import` inside a quoted token, a heredoc or a
+  comment is not an import;
+- under `/etc/hotserve`, an imported file that others may not read, or
+  a directory that others may not list — `/etc/hotserve` itself, those
+  the import names, those its wildcards lead through: a run reads the
+  Caddyfile as the `hotserve-backup` account, which owns nothing
+  there.
+
+It names the apps a run would back up, and each app that declares no
+backup — which is said, not refused. It starts no unit, takes no lock
+and changes nothing.
+
+`examples/box/bin/push` runs it on the staged file after `hotserve
+validate`, where `/usr/bin/hotserve-backup` exists, so a Caddyfile that
+would break backups is refused before it goes live and not by the next
+hourly run. It needs no sudoers line.
+
 ## What it refuses
 
 - A liveswap `root`, an app's name or a backup path that depends on a
@@ -378,7 +485,12 @@ they hold the database's path, and `busy.db` is not busy.
   import paths literally.
 - A variable that no made-up value adapts with.
 - A Caddyfile that imports from outside `/etc/hotserve`: the plan
-  unit's view holds nothing else.
+  unit's view holds nothing else. Refused as the import is written,
+  whatever it matches: inside that view a glob reaching outside matches
+  nothing, which the adapter takes for no error, and the run would plan
+  without the apps declared out there. A directory under
+  `/etc/hotserve` that is a link leading out of it is outside too. A
+  restore and a drill plan the same way, and are refused with the run.
 - A symbolic link anywhere in a declared path, or at `<app>/shared`:
   declare the real path, and put data on another disk with a bind
   mount, as liveswap itself asks. (The liveswap root may be a link.)
@@ -483,7 +595,9 @@ left under `/var/cache/hotserve-backup`.
   restored over, between the real thing and a link to a sibling's while
   real install units run; `restic restore`'s summary and exit statuses;
   a restore over a live database under a writer, and over one with
-  damaged pages; a runner made with the context that is then cancelled.
+  damaged pages; a runner made with the context that is then cancelled;
+  what the manager lists as running, and since when.
 - `make e2e-backup` — a box with systemd, restic and sqlite3, and an S3
-  server (`rclone serve s3`): the backup suite and the restore suite,
-  mostly failure paths.
+  server (`rclone serve s3`): the backup suite, the status suite
+  (`status` and `validate`) and the restore suite, mostly failure
+  paths.
