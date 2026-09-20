@@ -464,6 +464,7 @@ pkill -f "sleep 60" 2>/dev/null; wait "$holder" 2>/dev/null
 unchanged "$blog0" "$(blog_print)" "the database is as it was — one transaction, not begun — and intact"
 nothing_left_of_a_restore "an interrupt in the install"
 as_app sh -c "cd $BLOG && sqlite3 -cmd '.timeout 5000' app.db 'pragma journal_mode=wal;'" >/dev/null
+restore blog --snapshot "$first_blog" --yes --no-pre-backup || fail "putting the rows back after 13d: $(cat "$OUT")"
 
 as_app rm -f "$BLOG/uploads/big.bin"
 run || fail "the run after the interrupted restore: $(cat "$OUT")"
@@ -507,7 +508,8 @@ rm -rf /var/lib/liveswap/blog "$STATUS"
 # A restore that makes the shared dir and then fails takes it away
 # again: an hourly run would otherwise take an empty directory for the
 # app's data, where before it knew the data was missing.
-mount -t tmpfs -o size=1m,mode=0700 tmpfs "$RESTAGING" || fail "fixture: no small filesystem under $RESTAGING"
+# Too small for even this snapshot: the preflight refuses the fetch.
+mount -t tmpfs -o size=4k,mode=0700 tmpfs "$RESTAGING" || fail "fixture: no small filesystem under $RESTAGING"
 made() { journalctl --sync >/dev/null 2>&1; journalctl --no-pager -o cat | grep -c 'Starting hotserve_backup_mkshared_'; }
 before=$(made)
 restore blog --yes && fail "a restore with no room for its fetch exited 0" || true
