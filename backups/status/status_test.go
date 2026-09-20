@@ -170,7 +170,7 @@ func TestWhatStatusSays(t *testing.T) {
 			st: with(func(a *record.App) {
 				a.Class, a.Detail, a.Snapshot = record.DataMissing, "/var/lib/liveswap/blog/shared is gone, and was backed up before", nil
 			}),
-			says: []string{"blog: data missing", "was backed up before"}, never: []string{"pending"},
+			says: []string{"blog: data missing", "was backed up before", "sudo hotserve-backup restore blog"}, never: []string{"pending"},
 		},
 		"a unit three hours in is running, not failed": {
 			st:      with(func(*record.App) {}),

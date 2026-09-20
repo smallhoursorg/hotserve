@@ -389,3 +389,58 @@ func TestAnAppThatLeftThePlanIsSaidOnce(t *testing.T) {
 		t.Errorf("said again: %q", st.Warning)
 	}
 }
+
+// With nothing left on record to look for there is nothing to list, and
+// an old listing failure is no longer about anything: kept, it would
+// turn status unhealthy for good over a repository nobody is asking.
+func TestAnOldListingFailureDoesNotOutliveWhatItWasAbout(t *testing.T) {
+	b := newBox(t)
+	b.listingErr = "Fatal: no\n"
+	first, err := Run(context.Background(), b.cfg, b)
+	must(t, err)
+	kept := filepath.Join(b.cfg.StateDir, "listing.err")
+	if _, statErr := os.Lstat(kept); first.Unlisted == nil || statErr != nil {
+		t.Fatalf("fixture: unlisted %v, %v", first.Unlisted, statErr)
+	}
+	b.plan = fmt.Sprintf(`{"root":%q,"apps":{}}`, b.root)
+	st, err := Run(context.Background(), b.cfg, b)
+	must(t, err)
+	if listings(b) != 1 {
+		t.Fatalf("fixture: a run with nothing on record listed: %s", b.roles())
+	}
+	if st.Unlisted != nil {
+		t.Errorf("unlisted %v, with nothing to list", st.Unlisted)
+	}
+	if _, err := os.Lstat(kept); err == nil {
+		t.Errorf("%s is still there", kept)
+	}
+}
+
+// A drill that fetched a snapshot whole has seen it: every name the
+// record has for that snapshot says so, not only the proof's own copy —
+// or a last good backup that a listing once missed stays "gone" beside
+// the proof that it is there.
+func TestADrillThatFetchedASnapshotHasSeenItUnderEveryName(t *testing.T) {
+	b := restoreBox(t)
+	first, err := Run(context.Background(), b.cfg, b)
+	must(t, err)
+	listed := listedAt(t, first)
+	// A listing that missed it, as the record would then stand.
+	rec, err := record.Read(filepath.Join(b.cfg.StateDir, "status.json"))
+	must(t, err)
+	long := listed.Add(-time.Hour)
+	rec.Apps["blog"].LastOK.Seen, rec.Apps["blog"].LastSnapshot.Seen = &long, &long
+	must(t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), rec))
+
+	st, err := Drill(context.Background(), b.cfg, b)
+	must(t, err)
+	blog := st.Apps["blog"]
+	if blog.RestoreProven == nil || blog.RestoreProven.Snapshot.ID != blog.LastOK.ID {
+		t.Fatalf("fixture: proven %+v, last ok %+v", blog.RestoreProven, blog.LastOK)
+	}
+	for what, snap := range map[string]*record.Snapshot{"last_ok": blog.LastOK, "last_snapshot": blog.LastSnapshot} {
+		if seenAt(t, snap).Before(listed) {
+			t.Errorf("%s: fetched whole by the drill, and still last seen %v, before the listing of %v", what, snap.Seen, listed)
+		}
+	}
+}

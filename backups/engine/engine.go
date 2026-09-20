@@ -271,7 +271,13 @@ func (x *run) list(ctx context.Context) {
 	for _, app := range x.status.Apps {
 		nothing = nothing && len(named(app)) == 0
 	}
+	kept := filepath.Join(x.cfg.StateDir, "listing.err")
 	if nothing {
+		// Nothing to list, so nothing a listing failed to say: an earlier
+		// failure was about snapshots this record no longer names, and
+		// kept, it would turn status unhealthy for good.
+		x.status.Unlisted = nil
+		_ = os.Remove(kept)
 		return
 	}
 	snaps, _, err := x.snapshots(ctx, "listing", "")
@@ -288,7 +294,6 @@ func (x *run) list(ctx context.Context) {
 	// say where the repository is — do not go there either, but for the
 	// id in that one line. They are kept for root, until a listing is
 	// answered.
-	kept := filepath.Join(x.cfg.StateDir, "listing.err")
 	said, readErr := os.ReadFile(filepath.Join(x.dir, ".listing.err"))
 	switch {
 	case err != nil:

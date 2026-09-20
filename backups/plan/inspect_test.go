@@ -301,3 +301,80 @@ func TestClosedDirectoriesAboveAndWithinAGlob(t *testing.T) {
 		t.Fatalf("closed: %q, want %q", closed, want)
 	}
 }
+
+// Lines the import reader has to agree with the adapter's lexer about:
+// a miss here is an import from outside that nothing refuses.
+func TestImportsAsTheAdapterReadsThem(t *testing.T) {
+	fakeHotserve(t)
+	dir := t.TempDir()
+	file := filepath.Join(dir, "Caddyfile")
+	for name, tc := range map[string]struct {
+		body string
+		want []string
+	}{
+		"continued on the next line":   {"import \\\n\t/srv/apps/*.caddy\napp blog\n", []string{"/srv/apps/*.caddy"}},
+		"CRLF":                         {"import /srv/apps/*.caddy\r\napp blog\r\n", []string{"/srv/apps/*.caddy"}},
+		"an escaped quote in the path": {"import \"/srv/a\\\"b/*.caddy\"\napp blog\n", []string{"/srv/a\"b/*.caddy"}},
+		"in a snippet":                 {"(apps) {\n\timport /srv/apps/*.caddy\n}\napp blog\n", []string{"/srv/apps/*.caddy"}},
+		"a heredoc closed by the word": {"respond <<import\nimport /static/app.js\nimport\napp blog\n", nil},
+		"a CRLF heredoc":               {"respond <<JS\r\nimport /static/app.js\r\nJS\r\nimport /srv/apps/*.caddy\r\n", []string{"/srv/apps/*.caddy"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			write(t, file, tc.body)
+			got, err := Inspect(context.Background(), file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var patterns []string
+			for _, imp := range got.Imports {
+				patterns = append(patterns, imp.Pattern)
+			}
+			if !slices.Equal(patterns, tc.want) {
+				t.Fatalf("imports: %q, want %q", patterns, tc.want)
+			}
+		})
+	}
+}
+
+// A link among the imported files that leads somewhere else under the
+// config directory: it is what it leads to, and the way there, that the
+// run's account has to be able to read.
+func TestAnImportedLinkIsReadWhereItLeads(t *testing.T) {
+	fakeHotserve(t)
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "private", "x.caddy"), "# nothing\n")
+	write(t, filepath.Join(dir, "open", "README"), "\n")
+	for p, mode := range map[string]os.FileMode{"": 0o755, "open": 0o755, "private": 0o750, "private/x.caddy": 0o644} {
+		if err := os.Chmod(filepath.Join(dir, p), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("../private/x.caddy", filepath.Join(dir, "open", "x.caddy")); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, "Caddyfile")
+	write(t, file, "import open/*.caddy\napp blog\n")
+	got, err := Inspect(context.Background(), file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed := got.ImportsClosedToOthers(dir); !slices.Equal(closed, []string{filepath.Join(dir, "private")}) {
+		t.Fatalf("closed: %q", closed)
+	}
+}
+
+// An app that declares no backup and takes its name from the
+// environment is named as the server names it only by luck: it is said
+// as that, not under the name a default gives it here.
+func TestAnUndeclaredAppNamedThroughTheEnvironment(t *testing.T) {
+	fakeHotserve(t)
+	file := filepath.Join(t.TempDir(), "Caddyfile")
+	write(t, file, "app {$SHOP_NAME:shop}\n")
+	got, err := Inspect(context.Background(), file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(got.Undeclared, "shop") || !slices.Equal(got.UndeclaredByEnv, []string{"SHOP_NAME"}) {
+		t.Fatalf("undeclared %q, by the environment %q", got.Undeclared, got.UndeclaredByEnv)
+	}
+}

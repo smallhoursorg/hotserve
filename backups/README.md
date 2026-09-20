@@ -441,7 +441,14 @@ app declaring a backup there is nothing to fail. A box set up less than
 it is not. Anything else of those exits 1. What kept `status` from
 looking at all — no `/etc/hotserve/backup.env` (backups are not set
 up), a record that cannot be read — exits 3: not the same news as
-backups that are unhealthy. (2 is the usage text's.)
+backups that are unhealthy. (2 is the usage text's. These are
+`status`'s own: its 3 has nothing to do with restic's exit 3, an
+incomplete backup, which a run records as `incomplete`.)
+
+That anyone may run it is meant. `status.json` is readable by every
+account on the box, and so are the app names, data paths, snapshot ids
+and cleaned error text in it; nothing of the repository's location or
+credentials is.
 
 ## Before a Caddyfile goes live
 
@@ -461,12 +468,14 @@ what those would make of the file once it is live:
   comment is not an import;
 - under `/etc/hotserve`, an imported file that others may not read, or
   a directory that others may not list — `/etc/hotserve` itself, those
-  the import names, those its wildcards lead through: a run reads the
+  the import names, those its wildcards lead through, and where a link
+  among the matched files leads: a run reads the
   Caddyfile as the `hotserve-backup` account, which owns nothing
   there.
 
 It names the apps a run would back up, and each app that declares no
-backup — which is said, not refused. It starts no unit, takes no lock
+backup — which is said, not refused; one named through a `{$NAME}` is
+said by the variable, since what the server calls it is not known here. It starts no unit, takes no lock
 and changes nothing.
 
 `examples/box/bin/push` runs it on the staged file after `hotserve

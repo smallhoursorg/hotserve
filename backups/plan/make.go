@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -44,6 +45,10 @@ type Inspection struct {
 	// Undeclared are the apps that declare no backup, sorted: a new
 	// app's block with the two lines forgotten is otherwise silent.
 	Undeclared []string
+	// UndeclaredByEnv are the environment variables that name an app
+	// which declares no backup: what it is called on the server is not
+	// known here, so it is not in Undeclared under a made-up name.
+	UndeclaredByEnv []string
 	// Imports are the imports of the Caddyfile and of what it imports,
 	// however deep. A run reads them from inside a view that holds the
 	// config directory and nothing else.
@@ -174,6 +179,11 @@ func (i *Inspection) ImportsClosedToOthers(configDir string) (closed []string) {
 				look(file, 0o004)
 				dirs(filepath.Dir(file))
 			}
+			// A link among them is read where it leads, by the way there.
+			if target, err := filepath.EvalSymlinks(file); err == nil && target != file && inside(target) {
+				look(target, 0o004)
+				dirs(filepath.Dir(target))
+			}
 		}
 	}
 	sort.Strings(closed)
@@ -287,7 +297,7 @@ func Inspect(ctx context.Context, caddyfile string) (*Inspection, error) {
 		// as depending on its variable, which is the better thing to say.
 	}
 
-	var decisive, opaque []string
+	var decisive, opaque, byEnv []string
 	for _, name := range names {
 		if strings.ContainsAny(name, "=\x00") {
 			continue // cannot be set, so the server does not have it set either
@@ -303,9 +313,16 @@ func Inspect(ctx context.Context, caddyfile string) (*Inspection, error) {
 					trialEnv[k] = v
 				}
 			}
-			trial, _, _, err := adapt(trialEnv)
+			trial, trialUndeclared, _, err := adapt(trialEnv)
 			if err != nil {
 				continue
+			}
+			// An app that declares no backup and is named through this
+			// variable changes nothing a run does, so it is no refusal;
+			// but its name here is a default's, or a placeholder.
+			if !slices.Equal(undeclared, trialUndeclared) {
+				byEnv = append(byEnv, name)
+				undeclared = slices.DeleteFunc(undeclared, func(n string) bool { return !slices.Contains(trialUndeclared, n) })
 			}
 			verdict = nil
 			if !reflect.DeepEqual(base, trial) {
@@ -326,7 +343,7 @@ func Inspect(ctx context.Context, caddyfile string) (*Inspection, error) {
 	if err := base.Validate(); err != nil {
 		return nil, err
 	}
-	return &Inspection{Plan: base, Undeclared: undeclared, Imports: imports}, nil
+	return &Inspection{Plan: base, Undeclared: undeclared, UndeclaredByEnv: byEnv, Imports: imports}, nil
 }
 
 // Make is the plan alone — what a run needs of an Inspection — and
@@ -422,8 +439,11 @@ func lastLine(s string) string {
 var (
 	// A name runs to the first ":" (where a default starts) or "}".
 	envRe = regexp.MustCompile(`\{\$([^}:]+)(:[^}]*)?\}`)
-	// The argument of an import: quoted, backquoted or bare.
-	importRe = regexp.MustCompile("(?m)^\\s*import\\s+(?:\"([^\"]+)\"|`([^`]+)`|(\\S+))")
+	// The argument of an import: quoted (a backslash escapes), backquoted
+	// or bare — on the import's own line, or on the next after a
+	// backslash that continues it. Never simply on the next: \s would
+	// take the first word of the line after a bare "import".
+	importRe = regexp.MustCompile("(?m)^[ \\t]*import(?:[ \\t]|\\\\\\r?\\n)+(?:\"((?:[^\"\\\\]|\\\\.)+)\"|`([^`]+)`|([^\\s\\\\]\\S*))")
 	// {$NAME} and {$NAME:default}, as the adapter substitutes them with
 	// nothing set.
 	substRe = regexp.MustCompile(`\{\$[^}:]+(?::([^}]*))?\}`)
@@ -464,7 +484,7 @@ func envNames(caddyfile string) (all, noDefault, inImport []string, imports []Im
 					m[g] = raw[at[2*g]:at[2*g+1]]
 				}
 			}
-			arg := string(m[1]) + string(m[2]) + string(m[3])
+			arg := strings.ReplaceAll(string(m[1]), `\"`, `"`) + string(m[2]) + string(m[3])
 			for _, v := range envRe.FindAllStringSubmatch(arg, -1) {
 				importVars[v[1]] = true
 			}

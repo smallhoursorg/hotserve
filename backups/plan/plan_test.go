@@ -141,6 +141,7 @@ root=${LIVESWAP_ROOT:-/var/lib/liveswap}
 uses ROOT_NO_DEFAULT && root=$ROOT_NO_DEFAULT
 more=""
 grep -q "^app shop" "$last" && more=',"shop":{},"cart":{"backup":null}'
+uses SHOP_NAME && more=",\"${SHOP_NAME:-shop}\":{}"
 printf '{"apps":{"http":{"domain":"%s"},"liveswap":{"root":"%s","apps":{"%s":{"backup":{"sqlite":["%s"]}}%s}}}}' "${DOMAIN:-example.com}" "$root" "${APP_NAME:-blog}" "${DB:-app.db}" "$more"
 `)
 	old := hotserve

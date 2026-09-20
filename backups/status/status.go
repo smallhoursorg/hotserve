@@ -140,6 +140,8 @@ func Report(in Input) (lines []string, healthy bool) {
 			say("%s: ok: snapshot %s, made by a restore of what it then restored over (data at %s)", n, short(app.Snapshot.ID), at)
 		case app.Class == record.NotRun:
 			say("%s: not run: %s (data at %s)", n, record.Text(app.Detail), at)
+		case app.Class == record.DataMissing:
+			bad("%s: data missing: %s; `sudo hotserve-backup restore %s` puts its last snapshot back", n, record.Text(app.Detail), n)
 		default:
 			// The last run did not back this app up, however fresh the
 			// run before it.
