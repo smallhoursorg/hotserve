@@ -131,6 +131,32 @@ fi
 box cmp -s /etc/hotserve/Caddyfile - <"$tmp/v1" && pass "the live file is unchanged" || fail "the live file changed after a rejected backup declaration"
 box test ! -e /etc/hotserve/Caddyfile.new && pass "no staged file left behind" || fail "Caddyfile.new left after a rejected backup declaration"
 
+echo "=== box 3b: a config a backup run could not plan from never touches the live file ==="
+# hotserve cannot see a {$NAME}: it is substituted before any module
+# reads a token. A backup run reads the Caddyfile without the server's
+# environment, so a root written with one is a root it cannot know.
+# shellcheck disable=SC2016 # the Caddyfile's own {$NAME}, not the shell's
+sed 's#root /var/lib/liveswap#root {$LIVESWAP_ROOT:/var/lib/liveswap}#' "$tmp/v1" >"$tmp/envroot"
+if admin hotserve validate --adapter caddyfile --config /dev/stdin <"$tmp/envroot" >/dev/null 2>&1; then
+	pass "fixture: hotserve itself accepts a root from the environment"
+else
+	fail "fixture: hotserve rejects the file: the scenario proves nothing about backups"
+fi
+if push "$tmp/envroot"; then
+	fail "push accepted a config a backup run cannot plan from"
+elif grep -q "LIVESWAP_ROOT" "$tmp/out" && grep -q "for backups" "$tmp/out"; then
+	pass "push refused it for backups, naming the variable"
+else
+	fail "push refused the config, but not for backups: $(tail -3 "$tmp/out")"
+fi
+box cmp -s /etc/hotserve/Caddyfile - <"$tmp/v1" && pass "the live file is unchanged" || fail "the live file changed after a push refused for backups"
+box test ! -e /etc/hotserve/Caddyfile.new && pass "no staged file left behind" || fail "Caddyfile.new left after a push refused for backups"
+# A box with no backups installed is pushed to as before.
+box mv /usr/bin/hotserve-backup /usr/bin/hotserve-backup.aside
+if push "$tmp/envroot"; then pass "with no hotserve-backup on the box, the same push is applied"; else fail "push on a box without backups: $(cat "$tmp/out")"; fi
+box mv /usr/bin/hotserve-backup.aside /usr/bin/hotserve-backup
+if push "$tmp/v1"; then pass "and the config before it is pushed back"; else fail "pushing v1 back: $(cat "$tmp/out")"; fi
+
 echo "=== box 4: a config that validates but fails to load is rolled back ==="
 # Validation does not bind listeners; loading does, and 192.0.2.1
 # (TEST-NET-1) is on no interface here.

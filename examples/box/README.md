@@ -102,8 +102,10 @@ make push BOX=alice@box.example.com     # the administrator from Set it up
 ```
 
 `bin/push` copies the file to the box next to the live one, validates
-it there (which needs no privilege), and shows the diff against what the
-box is running — including any edit someone made on the box directly,
+it there (which needs no privilege) — and, on a box with backups
+installed, asks `hotserve-backup validate` whether a backup run could
+still plan from it, which needs none either — and shows the diff
+against what the box is running — including any edit someone made on the box directly,
 which this push would undo. You answer `y` or nothing is applied.
 Then it renames the new file into place and reloads hotserve; if the
 reload fails, it puts the previous file back, so the file on disk is

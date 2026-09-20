@@ -219,6 +219,7 @@ e2e-backup:
 	$(COMPOSE) up --build -d e2e-s3 e2e-backup-box
 	status=0; \
 	$(COMPOSE) exec -T e2e-backup-box /bin/sh /suite-backup.sh || status=1; \
+	$(COMPOSE) exec -T e2e-backup-box /bin/sh /suite-status.sh || status=1; \
 	$(COMPOSE) exec -T e2e-backup-box /bin/sh /suite-restore.sh || status=1; \
 	if [ $$status -ne 0 ]; then \
 		$(COMPOSE) logs --tail 50 e2e-s3; \

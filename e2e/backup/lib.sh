@@ -56,3 +56,33 @@ seed() {
 	as_app sh -c 'umask 077; cd /var/lib/liveswap/blog/shared && sqlite3 app.db "pragma journal_mode=wal; create table posts(n); insert into posts values (1),(2);" >/dev/null && mkdir uploads && echo img >uploads/a.png && echo undeclared >private.txt'
 	as_app sh -c 'umask 077; cd /var/lib/liveswap/shop/shared && mkdir data && sqlite3 data/shop.db "pragma journal_mode=wal; create table orders(n); insert into orders values (1),(2),(3);" >/dev/null && echo receipt >r.txt'
 }
+
+# What the restore and the status suites both need of the repository and
+# of the record.
+newest() { rr snapshots --no-lock --json --tag "app:$1" --host hotserve 2>/dev/null | grep -o '"id":"[0-9a-f]\{64\}"' | tail -1 | cut -d'"' -f4; }
+# app_json <app>: the app's own part of the record.
+app_json() { awk -v open="    \"$1\": {" '$0 == open { on = 1 } on { print } on && /^    },?$/ { exit }' "$STATUS" | tr -d '\n' | sed 's/  */ /g'; }
+proven() { app_json "$1" | sed -n 's/.*"restore_proven": { "snapshot": { "id": "\([0-9a-f]\{64\}\)".*/\1/p'; }
+# craft <app> <dir>: a snapshot of <dir> as /backup/<app>, made by hand
+# with the box's key — what an older engine, another tool or whoever
+# holds that key could have put in the repository. Prints its id.
+craft() {
+	rm -rf /backup
+	mkdir -p /backup
+	cp -a "$2" "/backup/$1"
+	rr backup --quiet --json --host hotserve --tag hotserve --tag "app:$1" "/backup/$1" 2>/dev/null | sed -n 's/.*"snapshot_id":"\([0-9a-f]\{64\}\)".*/\1/p'
+	rm -rf /backup
+}
+# A crafted snapshot is forgotten once its scenario is over, so that the
+# newest snapshot of an app is one the engine made.
+forget() { rr forget --quiet "$@" >/dev/null 2>&1 || fail "the suite could not forget its own snapshot $*"; }
+hold_restic() { # <pattern>: stops the first restic whose command line matches, and sets $pid
+	i=0
+	pid=
+	until pid=$(pgrep -f "$1" | head -1) && [ -n "$pid" ]; do
+		i=$((i + 1))
+		[ "$i" -ge 600 ] && return 1
+		sleep 0.05
+	done
+	kill -STOP "$pid"
+}
