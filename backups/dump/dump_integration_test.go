@@ -5,6 +5,7 @@ package dump
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -360,5 +361,91 @@ func TestIntegrationADamagedDatabaseIsNotAnOKCopy(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(staging, "app.db")); err == nil {
 		t.Fatal("the damaged copy was left in staging")
+	}
+}
+
+// The same swap, against a restore: the live database is a read-only
+// FIFO by the time sqlite3 opens it. sqlite3 is killed at the bound, the
+// marker never having appeared, and nothing was restored anywhere.
+func TestIntegrationRestoreOverAReadOnlyFIFOIsKilledAtTheBound(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root, to run sqlite3 as another user: root ignores a FIFO's mode")
+	}
+	// Not t.TempDir: its parents are closed to everyone but root.
+	base, err := os.MkdirTemp("/var/tmp", "restore-ro-fifo-")
+	must(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	must(t, os.Chmod(base, 0o755))
+	shared, staging := filepath.Join(base, "shared"), filepath.Join(base, "staging")
+	must(t, os.Mkdir(shared, 0o755))
+	must(t, os.Mkdir(staging, 0o755))
+	copyOf := filepath.Join(staging, "copy.db")
+	sql(t, copyOf, "create table t(x); insert into t values (1);")
+	live := filepath.Join(shared, "app.db")
+	must(t, syscall.Mkfifo(live, 0o400))
+	const uid, gid = 65534, 65534
+	for _, p := range []string{shared, staging, live, copyOf} {
+		must(t, os.Chown(p, uid, gid))
+	}
+	oldWithin, oldTweak := openWithin, tweakCmd
+	openWithin = 3 * time.Second
+	tweakCmd = func(c *exec.Cmd) {
+		c.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uid, Gid: gid}}
+	}
+	defer func() { openWithin, tweakCmd = oldWithin, oldTweak }()
+
+	marker := filepath.Join(staging, "marker")
+	start := time.Now()
+	err = RestoreOver(context.Background(), live, copyOf, marker)
+	if !errors.Is(err, ErrNeverOpened) {
+		t.Fatalf("after %s: %v", time.Since(start), err)
+	}
+	if took := time.Since(start); took < 3*time.Second || took > 20*time.Second {
+		t.Errorf("killed after %s, want the bound", took)
+	}
+	if _, err := os.Lstat(marker); err == nil {
+		t.Error("the marker appeared although the database was never opened")
+	}
+
+	// And a restore that does open is not bounded: the marker appears,
+	// and from then on it takes as long as it takes.
+	must(t, os.Remove(live))
+	sql(t, live, "create table t(x); insert into t values (7);")
+	must(t, os.Chown(live, uid, gid))
+	if err := RestoreOver(context.Background(), live, copyOf, marker); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(marker); err != nil {
+		t.Errorf("a restore that worked made no marker: the bound would have killed a long one: %v", err)
+	}
+}
+
+// In rollback-journal mode a reader and a writer exclude each other, so
+// a restore over a database the app is reading waits, and then says the
+// database stayed locked — whichever of its two steps met the lock.
+func TestIntegrationRestoreOverALockedDatabaseIsBusy(t *testing.T) {
+	for name, hold := range map[string]string{
+		"a writer, met on the first read": "begin exclusive; select 1;",
+		"a reader, met by the restore":    "begin; select * from t;",
+	} {
+		t.Run(name, func(t *testing.T) {
+			shared, staging := dirs(t)
+			live, copyOf := filepath.Join(shared, "app.db"), filepath.Join(staging, "copy.db")
+			sql(t, live, "create table t(x); insert into t values (7);")
+			sql(t, copyOf, "create table t(x); insert into t values (1);")
+			holder := exec.Command(sqlite3, live, hold, ".shell sleep 4", "commit;")
+			must(t, holder.Start())
+			time.Sleep(500 * time.Millisecond)
+			old := busyTimeout
+			busyTimeout = time.Second
+			defer func() { busyTimeout = old }()
+			if err := RestoreOver(context.Background(), live, copyOf, filepath.Join(staging, "marker")); !errors.Is(err, ErrBusy) {
+				t.Fatalf("%v", err)
+			}
+			must(t, holder.Wait())
+			if got := sql(t, live, "select x from t"); got != "7\n" {
+				t.Fatalf("a restore that said busy changed the database: %q", got)
+			}
+		})
 	}
 }

@@ -42,13 +42,19 @@ type box struct {
 	// would resolve its bind sources.
 	before func(unit.Spec)
 	// mount points, and the directory each was made from
-	mounted    map[string]string
-	unmounted  []string
-	leftMounts []string
-	stopErr    error
-	failClean  string         // the app whose clean unit fails
-	history    string         // what `restic snapshots` prints for an app
-	uploadExit map[string]int // an app whose upload exits with this
+	mounted     map[string]string
+	unmounted   []string
+	leftMounts  []string
+	stopErr     error
+	failClean   string         // the app whose clean unit fails
+	failUnstage string         // the app whose unstage unit fails
+	history     string         // what `restic snapshots` prints for an app
+	uploadExit  map[string]int // an app whose upload exits with this
+	fetch       string         // what `restic restore --json` prints
+	install     string         // what the install unit, or a drill's check unit, prints
+	size        string         // what `restic stats --mode restore-size` prints
+	free        uint64         // what is free where a fetch lands
+	oneDisk     bool           // the fetch and the install land on one filesystem
 }
 
 var roleRe = regexp.MustCompile(`^hotserve_backup_([a-z]+)[0-9]*_`)
@@ -73,6 +79,9 @@ func newBox(t *testing.T) *box {
 		return out
 	}
 	b.summary = `{"message_type":"summary","snapshot_id":"` + snapA + `"}`
+	b.fetch = `{"message_type":"summary","total_files":4,"files_restored":4}`
+	b.size, b.free = `{"total_size":4096,"total_file_count":4,"snapshots_count":1}`, 1<<30
+	b.install = `{"plan":{"sqlite":["app.db"],"files":["uploads"]},"items":[{"kind":"sqlite","path":"app.db","class":"ok"},{"kind":"files","path":"uploads","class":"ok"}]}`
 	b.ls = func(parent string) string {
 		switch parent {
 		case "/backup/blog/sqlite":
@@ -82,8 +91,13 @@ func newBox(t *testing.T) *box {
 		}
 		return ""
 	}
-	old, oldMount, oldUnmount, oldUnder := dataOwner, bindMount, unmountDetach, mountsUnder
+	oldFree, oldSame := freeUnder, sameFilesystem
+	freeUnder = func(string) (uint64, error) { return b.free, nil }
+	sameFilesystem = func(string, string) (bool, error) { return b.oneDisk, nil }
+	t.Cleanup(func() { freeUnder, sameFilesystem = oldFree, oldSame })
+	old, oldMount, oldUnmount, oldUnder, oldBackup := dataOwner, bindMount, unmountDetach, mountsUnder, backupOwner
 	dataOwner = func() (int, int, error) { return os.Getuid(), os.Getgid(), nil }
+	backupOwner = dataOwner
 	// mount(2) needs a privilege this lane does not have, and what the
 	// kernel does with it is the integration suite's to show. Here it is
 	// enough to know what was asked for: which directory, at the moment
@@ -96,7 +110,9 @@ func newBox(t *testing.T) *box {
 	}
 	unmountDetach = func(target string) error { b.unmounted = append(b.unmounted, target); return nil }
 	mountsUnder = func(string) ([]string, error) { return b.leftMounts, nil }
-	t.Cleanup(func() { dataOwner, bindMount, unmountDetach, mountsUnder = old, oldMount, oldUnmount, oldUnder })
+	t.Cleanup(func() {
+		dataOwner, bindMount, unmountDetach, mountsUnder, backupOwner = old, oldMount, oldUnmount, oldUnder, oldBackup
+	})
 	return b
 }
 
@@ -147,6 +163,17 @@ func (b *box) Run(_ context.Context, s unit.Spec) (unit.Outcome, error) {
 		write(b.summary)
 	case "history":
 		write(b.history)
+	case "size":
+		write(b.size)
+	case "fetch":
+		write(b.fetch)
+	case "install", "extract", "check":
+		write(b.install)
+	case "mkshared":
+		must(b.t, os.MkdirAll(filepath.Join(b.root, "blog", "shared"), 0o755))
+	case "unmake":
+		_ = os.Remove(filepath.Join(b.root, "blog", "shared"))
+		_ = os.Remove(filepath.Join(b.root, "blog"))
 	case "verify":
 		// Everything after "--" and the snapshot id is a parent to list.
 		var out []string
@@ -165,6 +192,9 @@ func (b *box) Run(_ context.Context, s unit.Spec) (unit.Outcome, error) {
 		}
 	}
 	if role == "clean" && b.failClean != "" && strings.Contains(s.Name, "_clean_"+b.failClean+"_") {
+		return unit.Outcome{Result: "exit-code", ExitStatus: 1}, nil
+	}
+	if role == "unstage" && b.failUnstage != "" && strings.Contains(s.Name, "_unstage_"+b.failUnstage+"_") {
 		return unit.Outcome{Result: "exit-code", ExitStatus: 1}, nil
 	}
 	if o, ok := b.outcome[role]; ok {
@@ -197,7 +227,11 @@ func TestACleanRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := b.roles(), "plan clean dump upload verify clean"; got != want {
+	// The backup, and — nothing of this app's having been proven yet — a
+	// drill of the snapshot it made.
+	// The size first: a run says how large its own drill is, and leaves
+	// a large one to the drill.
+	if got, want := b.roles(), "plan clean dump upload verify clean size unstage fetch handover check unstage"; got != want {
 		t.Fatalf("units, in order: %s\nwant:            %s", got, want)
 	}
 	app := st.Apps["blog"]

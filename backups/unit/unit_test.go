@@ -3,6 +3,8 @@ package unit
 import (
 	"strings"
 	"testing"
+
+	sddbus "github.com/coreos/go-systemd/v22/dbus"
 )
 
 func validSpec() Spec {
@@ -71,5 +73,40 @@ func TestPropertiesAlwaysSandboxAndNeverExpand(t *testing.T) {
 		if _, ok := got[never]; ok {
 			t.Errorf("%s is set", never)
 		}
+	}
+}
+
+// A unit that may read another account's files by capability is kept
+// from reaching a file by handle, outside its view [CVE-2014-5277].
+func TestOpenByHandleAtIsDeniedExactlyWhereTheCapabilityIsHeld(t *testing.T) {
+	has := func(props []sddbus.Property, name string) (any, bool) {
+		for _, p := range props {
+			if p.Name == name {
+				return p.Value.Value(), true
+			}
+		}
+		return nil, false
+	}
+	with, err := Spec{Name: "hotserve_backup_x.service", Argv: []string{"/bin/true"}, User: "u", Capabilities: []Capability{CapDACReadSearch}}.properties()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Typed as the manager takes them: a deny-list of one name, and an
+	// errno number — not the unit-file spelling, which the manager refuses.
+	filter, ok := has(with, "SystemCallFilter")
+	if f, isStruct := filter.(syscallFilter); !ok || !isStruct || f.AllowList || len(f.Names) != 1 || f.Names[0] != "open_by_handle_at" {
+		t.Fatalf("a unit with CAP_DAC_READ_SEARCH: %#v", filter)
+	}
+	if errno, ok := has(with, "SystemCallErrorNumber"); !ok || errno != int32(1) {
+		t.Errorf("the denied call kills instead of erroring, or the errno is not a number: %#v", errno)
+	}
+	// A unit without the capability carries no system-call filter: it
+	// would otherwise be a filter to keep working for no reason.
+	without, err := Spec{Name: "hotserve_backup_y.service", Argv: []string{"/bin/true"}, User: "u", Capabilities: []Capability{CapChown}}.properties()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := has(without, "SystemCallFilter"); ok {
+		t.Error("a unit with only CAP_CHOWN carries a system-call filter")
 	}
 }

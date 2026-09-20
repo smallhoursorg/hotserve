@@ -28,6 +28,7 @@ import (
 
 	sddbus "github.com/coreos/go-systemd/v22/dbus"
 	godbus "github.com/godbus/dbus/v5"
+	"golang.org/x/sys/unix"
 )
 
 // Bind is one path put into the unit's view, which is otherwise empty.
@@ -156,8 +157,14 @@ type Runner struct {
 }
 
 // NewSystemRunner connects to the system manager. It needs root.
+//
+// The connection does not end with ctx: the library closes a connection
+// when the context it was made with is cancelled, and a cancelled
+// context — Ctrl-C — is exactly when the connection is needed, to stop
+// the unit that is running and see it gone [measured: "use of closed
+// network connection", and the unit ran on]. Close ends it.
 func NewSystemRunner(ctx context.Context) (*Runner, error) {
-	c, err := sddbus.NewSystemConnectionContext(ctx)
+	c, err := sddbus.NewSystemConnectionContext(context.WithoutCancel(ctx))
 	if err != nil {
 		return nil, fmt.Errorf("connecting to the system manager: %w", err)
 	}
@@ -370,6 +377,15 @@ type (
 		Path          string
 		IgnoreMissing bool
 	}
+	// syscallFilter is SystemCallFilter= over the bus: (bas), an
+	// allow-list flag and the names. The unit-file spelling ~name is the
+	// manager's own rendering of (false, [name]) [measured: sent as a
+	// string array, the manager refuses the unit outright — "Unexpected
+	// message contents"].
+	syscallFilter struct {
+		AllowList bool
+		Names     []string
+	}
 )
 
 const mountRecursive uint64 = 0x4000 // MS_REC
@@ -392,8 +408,10 @@ func (s Spec) properties() ([]sddbus.Property, error) {
 	}
 
 	var caps uint64
+	dacRead := false
 	for _, c := range s.Capabilities {
 		caps |= 1 << c
+		dacRead = dacRead || c == CapDACReadSearch
 	}
 	props := []sddbus.Property{
 		{Name: "Description", Value: v(s.Description)},
@@ -477,6 +495,17 @@ func (s Spec) properties() ([]sddbus.Property, error) {
 	props = append(props, sddbus.Property{Name: "BindReadOnlyPaths", Value: v(ro)})
 	if len(rw) > 0 {
 		props = append(props, sddbus.Property{Name: "BindPaths", Value: v(rw)})
+	}
+	// CAP_DAC_READ_SEARCH is what lets open_by_handle_at reach a file by
+	// its inode without a path — outside the unit's view, on any mounted
+	// filesystem (CVE-2014-5277, "shocker") [measured: the filter blocks
+	// it and leaves restic and chown at exit 0]. A denylist of that one
+	// call, returning EPERM rather than a SIGSYS kill, and nothing else,
+	// so every other syscall is still allowed.
+	if dacRead {
+		props = append(props,
+			sddbus.Property{Name: "SystemCallFilter", Value: v(syscallFilter{false, []string{"open_by_handle_at"}})},
+			sddbus.Property{Name: "SystemCallErrorNumber", Value: v(int32(unix.EPERM))})
 	}
 	if len(s.Masked) > 0 {
 		masked := make([]string, len(s.Masked))
