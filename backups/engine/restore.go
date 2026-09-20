@@ -1026,7 +1026,10 @@ func (x *run) drillApp(ctx context.Context, app string, snap record.Snapshot, si
 		rec.RestoreDrill = &record.Drill{Snapshot: snap, Time: time.Now().UTC(), Detail: record.Text(err.Error())}
 		return errors.As(err, new(repositoryWideError))
 	}
-	rec.RestoreProven, rec.RestoreDrill = &record.Drill{Snapshot: snap, Time: time.Now().UTC()}, nil
+	// Fetched whole, a moment ago: the repository holds it.
+	proven := time.Now().UTC()
+	snap.Seen = &proven
+	rec.RestoreProven, rec.RestoreDrill = &record.Drill{Snapshot: snap, Time: proven}, nil
 	return false
 }
 

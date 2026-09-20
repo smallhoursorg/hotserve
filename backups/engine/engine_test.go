@@ -42,19 +42,22 @@ type box struct {
 	// would resolve its bind sources.
 	before func(unit.Spec)
 	// mount points, and the directory each was made from
-	mounted     map[string]string
-	unmounted   []string
-	leftMounts  []string
-	stopErr     error
-	failClean   string         // the app whose clean unit fails
-	failUnstage string         // the app whose unstage unit fails
-	history     string         // what `restic snapshots` prints for an app
-	uploadExit  map[string]int // an app whose upload exits with this
-	fetch       string         // what `restic restore --json` prints
-	install     string         // what the install unit, or a drill's check unit, prints
-	size        string         // what `restic stats --mode restore-size` prints
-	free        uint64         // what is free where a fetch lands
-	oneDisk     bool           // the fetch and the install land on one filesystem
+	mounted      map[string]string
+	unmounted    []string
+	leftMounts   []string
+	stopErr      error
+	failClean    string         // the app whose clean unit fails
+	failUnstage  string         // the app whose unstage unit fails
+	history      string         // what `restic snapshots` prints for an app
+	listing      string         // what `restic snapshots` prints for every app, at the end of a run
+	listingErr   string         // what it writes to stderr beside that
+	noListingErr bool           // the manager made no stderr file for it
+	uploadExit   map[string]int // an app whose upload exits with this
+	fetch        string         // what `restic restore --json` prints
+	install      string         // what the install unit, or a drill's check unit, prints
+	size         string         // what `restic stats --mode restore-size` prints
+	free         uint64         // what is free where a fetch lands
+	oneDisk      bool           // the fetch and the install land on one filesystem
 }
 
 var roleRe = regexp.MustCompile(`^hotserve_backup_([a-z]+)[0-9]*_`)
@@ -79,6 +82,7 @@ func newBox(t *testing.T) *box {
 		return out
 	}
 	b.summary = `{"message_type":"summary","snapshot_id":"` + snapA + `"}`
+	b.listing = `[{"id":"` + snapA + `","time":"2026-09-02T00:00:00Z","tags":["app:blog"]}]`
 	b.fetch = `{"message_type":"summary","total_files":4,"files_restored":4}`
 	b.size, b.free = `{"total_size":4096,"total_file_count":4,"snapshots_count":1}`, 1<<30
 	b.install = `{"plan":{"sqlite":["app.db"],"files":["uploads"]},"items":[{"kind":"sqlite","path":"app.db","class":"ok"},{"kind":"files","path":"uploads","class":"ok"}]}`
@@ -163,6 +167,13 @@ func (b *box) Run(_ context.Context, s unit.Spec) (unit.Outcome, error) {
 		write(b.summary)
 	case "history":
 		write(b.history)
+	case "listing":
+		write(b.listing)
+		if s.StderrFile == "" {
+			b.t.Errorf("the listing unit keeps nothing of what restic says beside its answer: %+v", s)
+		} else if !b.noListingErr {
+			must(b.t, os.WriteFile(s.StderrFile, []byte(b.listingErr), 0o600))
+		}
 	case "size":
 		write(b.size)
 	case "fetch":
@@ -230,8 +241,8 @@ func TestACleanRun(t *testing.T) {
 	// The backup, and — nothing of this app's having been proven yet — a
 	// drill of the snapshot it made.
 	// The size first: a run says how large its own drill is, and leaves
-	// a large one to the drill.
-	if got, want := b.roles(), "plan clean dump upload verify clean size unstage fetch handover check unstage"; got != want {
+	// a large one to the drill. Last, one listing of the repository.
+	if got, want := b.roles(), "plan clean dump upload verify clean size unstage fetch handover check unstage listing"; got != want {
 		t.Fatalf("units, in order: %s\nwant:            %s", got, want)
 	}
 	app := st.Apps["blog"]
@@ -430,7 +441,8 @@ func TestHowAnUploadEnds(t *testing.T) {
 			if tc.wide != (shop.Class == record.NotAttempted) {
 				t.Fatalf("shop after blog's failure: %+v", shop)
 			}
-			if !strings.HasSuffix(b.roles(), "clean") {
+			// The listing that ends a run comes after it.
+			if !strings.HasSuffix(strings.TrimSuffix(b.roles(), " listing"), "clean") {
 				t.Fatalf("staging was not emptied after the failure: %s", b.roles())
 			}
 		})

@@ -322,6 +322,67 @@ func TestIntegrationARunnerOutlivesTheContextItWasMadeWith(t *testing.T) {
 	}
 }
 
+// The listing is believed only when restic had nothing to say beside
+// it, so what a command writes to stderr has to reach the file named —
+// all of it, none of its stdout, and with the manager taking the
+// property as it is typed here.
+func TestIntegrationStderrReachesTheFileNamed(t *testing.T) {
+	r := runner(t)
+	out := outFile(t)
+	errFile := filepath.Join(filepath.Dir(out), "stderr")
+	o, err := r.Run(context.Background(), Spec{
+		Name: name(t), Argv: []string{"/bin/sh", "-c", "echo to-stdout; echo to-stderr >&2"}, User: testUser,
+		StdoutFile: out, StderrFile: errFile,
+	})
+	if err != nil || !o.OK() {
+		t.Fatalf("%+v, %v", o, err)
+	}
+	gotOut, err := os.ReadFile(out)
+	must(t, err)
+	gotErr, err := os.ReadFile(errFile)
+	must(t, err)
+	if string(gotOut) != "to-stdout\n" || string(gotErr) != "to-stderr\n" {
+		t.Fatalf("stdout %q, stderr %q", gotOut, gotErr)
+	}
+}
+
+// A oneshot whose command is still running is "activating" — never
+// "active", and not failed — and the manager says since when.
+func TestIntegrationListActiveSaysWhatIsRunningAndSinceWhen(t *testing.T) {
+	r := runner(t)
+	n, before := name(t), time.Now().Add(-time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = r.Run(ctx, Spec{Name: n, Argv: []string{"/bin/sleep", "602"}, User: testUser})
+	}()
+	waitFor(t, n, "activating")
+	got, err := ListActive(context.Background(), "hotserve_backup_test_*")
+	must(t, err)
+	found := false
+	for _, a := range got {
+		if a.Name == n {
+			found = true
+			if a.State != "activating" || a.Since.Before(before) || a.Since.After(time.Now()) {
+				t.Errorf("%+v, started after %v", a, before)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("%s is running and was not listed: %+v", n, got)
+	}
+	cancel()
+	<-done
+	got, err = ListActive(context.Background(), "hotserve_backup_test_*")
+	must(t, err)
+	for _, a := range got {
+		if a.Name == n {
+			t.Errorf("stopped, and still listed: %+v", a)
+		}
+	}
+}
+
 func waitFor(t *testing.T, unit, state string) {
 	t.Helper()
 	for deadline := time.Now().Add(20 * time.Second); activeState(unit) != state; time.Sleep(50 * time.Millisecond) {

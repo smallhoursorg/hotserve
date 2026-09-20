@@ -148,7 +148,7 @@ func begin(cfg Config, r Runner) (x *run, end func(), err error) {
 		prev = &record.Status{Apps: map[string]*record.App{}}
 	}
 	x = &run{cfg: cfg, r: r, nonce: nonce, dir: filepath.Join(cfg.RunDir, nonce), prev: prev,
-		status: &record.Status{Started: time.Now().UTC(), Warning: unreadable, Apps: map[string]*record.App{}}}
+		status: &record.Status{Started: time.Now().UTC(), Warning: unreadable, Apps: map[string]*record.App{}, Listed: prev.Listed, Unlisted: prev.Unlisted}}
 	if err := x.sweep(); err != nil {
 		return x, unlock, err
 	}
@@ -190,6 +190,20 @@ func (x *run) apps(ctx context.Context) error {
 		return err
 	}
 	x.status.Root = p.Root
+	// An app that has left the plan with snapshots in the repository — a
+	// block deleted, an import that stopped matching — is said by the
+	// run that finds it gone. Once: this record drops it, as the
+	// operator may have meant it to, and nothing after remembers.
+	var left []string
+	for name, old := range x.prev.Apps {
+		if _, planned := p.Apps[name]; !planned && old != nil && old.LastSnapshot != nil {
+			left = append(left, fmt.Sprintf("%s no longer declares a backup and is not backed up any more: its last snapshot is %.8s, of %s.", name, old.LastSnapshot.ID, old.LastSnapshot.Time.UTC().Format("2006-01-02 15:04 MST")))
+		}
+	}
+	sort.Strings(left)
+	for _, l := range left {
+		x.status.Warning = strings.TrimSpace(x.status.Warning + " " + record.Text(l))
+	}
 	x.forget(ctx, p)
 	x.sweepFetched(ctx)
 	// Name order, but what failed last run goes last: a failure that is
@@ -224,7 +238,101 @@ func (x *run) apps(ctx context.Context) error {
 			}
 		}
 	}
+	// Once the repository has refused for a reason every app shares,
+	// asking it again is one more wait for the same answer.
+	if stop == nil && ctx.Err() == nil {
+		x.list(ctx)
+	}
 	return ctx.Err()
+}
+
+// list asks the repository, once, what it holds of every app, and
+// writes beside each snapshot the record names when it was last there:
+// a snapshot pruned off the box is otherwise "the last good backup" for
+// as long as nothing replaces it. A listing that fails, or that cannot
+// be trusted, is a warning and changes nothing — it is never what makes
+// a snapshot look gone, nor a good backup bad.
+func (x *run) list(ctx context.Context) {
+	named := func(app *record.App) (out []*record.Snapshot) {
+		if app == nil {
+			return nil
+		}
+		for _, snap := range []*record.Snapshot{app.Snapshot, app.LastOK, app.LastSnapshot} {
+			if snap != nil {
+				out = append(out, snap)
+			}
+		}
+		if app.RestoreProven != nil {
+			out = append(out, &app.RestoreProven.Snapshot)
+		}
+		return out
+	}
+	nothing := true
+	for _, app := range x.status.Apps {
+		nothing = nothing && len(named(app)) == 0
+	}
+	if nothing {
+		return
+	}
+	snaps, _, err := x.snapshots(ctx, "listing", "")
+	if ctx.Err() != nil {
+		return
+	}
+	// restic leaves a snapshot it cannot load out of the listing, says
+	// so on stderr alone, and exits 0 [measured, a cold cache]: an
+	// answer that came with anything beside it is not taken for the
+	// whole repository.
+	//
+	// The unit's stderr is in a file, so the journal has none of it, and
+	// the record is for everyone to read, so restic's words — which can
+	// say where the repository is — do not go there either, but for the
+	// id in that one line. They are kept for root, until a listing is
+	// answered.
+	kept := filepath.Join(x.cfg.StateDir, "listing.err")
+	said, readErr := os.ReadFile(filepath.Join(x.dir, ".listing.err"))
+	switch {
+	case err != nil:
+	case readErr != nil:
+		err = fmt.Errorf("what restic said beside the listing could not be read, so the listing is not believed: %w", readErr)
+	case len(bytes.TrimSpace(said)) > 0:
+		if m := ignoringRe.FindSubmatch(said); m != nil {
+			err = fmt.Errorf("restic could not load snapshot %.8s and left it out of the listing", m[1])
+		} else {
+			err = errors.New("restic had something to say beside the listing")
+		}
+	}
+	if err != nil {
+		where := ""
+		if len(bytes.TrimSpace(said)) > 0 && os.WriteFile(kept, said, 0o600) == nil && os.Chmod(kept, 0o600) == nil { //nolint:gosec // a constant name under root's own state dir
+			where = fmt.Sprintf(" What restic said is in %s, root's to read.", kept)
+		}
+		if x.status.Unlisted == nil {
+			since := time.Now().UTC()
+			x.status.Unlisted = &since
+		}
+		x.status.Warning = strings.TrimSpace(x.status.Warning + " " + record.Text(fmt.Sprintf("the repository could not be listed, so nothing is known of whether it still holds each snapshot named here: %v.%s", err, where)))
+		return
+	}
+	_ = os.Remove(kept) // an answered listing: what was said of an earlier one is history
+	x.status.Unlisted = nil
+	held := map[string]bool{} // app, a slash — no app's name holds one — and the id
+	for _, s := range snaps {
+		held[s.App+"/"+s.ID] = true
+	}
+	now := time.Now().UTC()
+	for name, app := range x.status.Apps {
+		for _, snap := range named(app) {
+			// What this run itself saw written, or fetched, is not called
+			// gone by this run's listing: a store that lists a new object
+			// late [not measured of any] would turn every good backup into
+			// a missing one until the next run. The next listing judges it.
+			sawItself := snap.Seen != nil && !snap.Seen.Before(x.status.Started)
+			if held[name+"/"+snap.ID] || sawItself {
+				snap.Seen = &now
+			}
+		}
+	}
+	x.status.Listed = &now
 }
 
 func (x *run) failedLast(name string) bool {
@@ -277,6 +385,22 @@ func (x *run) forget(ctx context.Context, p *plan.Plan) {
 			warn("%s could not be removed: %v.", dir, err)
 		}
 	}
+}
+
+// UnitPattern matches the name of every unit a run, a restore or a
+// drill starts, and no other unit on the box.
+const UnitPattern = "hotserve_backup_*"
+
+var unitNameRe = regexp.MustCompile(`^hotserve_backup_([a-z]+[0-9]*)(?:_([a-z0-9-]{1,63}))?_[0-9a-f]{12}\.service$`)
+
+// ParseUnitName reads what a unit does, and to which app's data, back
+// out of a name that name made. A unit of the whole run has no app.
+func ParseUnitName(unit string) (role, app string, ok bool) {
+	m := unitNameRe.FindStringSubmatch(unit)
+	if m == nil {
+		return "", "", false
+	}
+	return m[1], m[2], true
 }
 
 // name is a unit name no app's unit and no operator's can have (the
@@ -547,7 +671,9 @@ func (x *run) app(ctx context.Context, root, name string, decl *backupdecl.Confi
 	if id == "" {
 		return app, wide
 	}
-	app.Snapshot = &record.Snapshot{ID: id, Time: time.Now().UTC()}
+	// restic has just said it wrote it: the repository holds it now.
+	made := time.Now().UTC()
+	app.Snapshot = &record.Snapshot{ID: id, Time: made, Seen: &made}
 	if err := x.verify(ctx, name, id, app); err != nil {
 		app.Class, app.Detail = record.Incomplete, fmt.Sprintf("snapshot %s was made, but what is in it could not be checked: %v", short(id), err)
 		return app, false
@@ -973,6 +1099,8 @@ func (x *run) lastInRepository(ctx context.Context, app string) (last *record.Sn
 // A listed snapshot is one the repository holds of an app.
 type listed struct {
 	record.Snapshot
+	// App is whose it is, by its tag; empty for a snapshot with none.
+	App string
 	// PreRestore: made by a restore, of what it then restored over.
 	PreRestore bool
 }
@@ -991,10 +1119,28 @@ func newest(snaps []listed) *record.Snapshot {
 // It is what a restore on a rebuilt box starts from: the repository
 // remembers what the box does not.
 func (x *run) history(ctx context.Context, app string) (snaps []listed, repositoryWide bool, err error) {
-	out := filepath.Join(x.dir, app+".history.json")
+	return x.snapshots(ctx, "history", app)
+}
+
+// snapshots asks the repository for the snapshots of app — of every
+// app, where app is empty — oldest first. --no-lock: it reads, and a
+// check that holds the repository exclusively must not fail it.
+func (x *run) snapshots(ctx context.Context, role, app string) (snaps []listed, repositoryWide bool, err error) {
+	out := filepath.Join(x.dir, app+"."+role+".json")
+	argv, about := []string{x.cfg.Restic, "snapshots", "--json", "--no-lock", "--host", "hotserve"}, "every app"
+	if app != "" {
+		argv, about = append(argv, "--tag", "app:"+app), app
+	}
+	// An app's history fails loudly or not at all, and its words belong
+	// in the journal. The listing of every app is the one answer that
+	// is only believed when restic had nothing to say beside it.
+	stderr := ""
+	if app == "" {
+		stderr = filepath.Join(x.dir, "."+role+".err")
+	}
 	o, err := x.start(ctx, unit.Spec{
-		Name: x.name("history", app), Description: "hotserve backup: ask the repository about " + app,
-		Argv: []string{x.cfg.Restic, "snapshots", "--json", "--no-lock", "--host", "hotserve", "--tag", "app:" + app},
+		Name: x.name(role, app), Description: "hotserve backup: ask the repository about " + about,
+		Argv: argv, StderrFile: stderr,
 		User: backupUser, Network: true, EnvironmentFile: x.cfg.EnvFile,
 		Environment:    []string{"RESTIC_CACHE_DIR=/var/cache/hotserve-backup", "HOME=/nonexistent"},
 		CacheDirectory: "hotserve-backup", StdoutFile: out,
@@ -1018,19 +1164,27 @@ func (x *run) history(ctx context.Context, app string) (snaps []listed, reposito
 	if err := json.Unmarshal(raw, &said); err != nil {
 		return nil, false, fmt.Errorf("what restic said of its snapshots could not be read: %w", err)
 	}
+	asked := time.Now().UTC()
 	for _, s := range said {
 		if !snapshotRe.MatchString(s.ID) {
 			return nil, false, fmt.Errorf("restic named a snapshot %q", record.Text(s.ID))
 		}
-		one := listed{Snapshot: record.Snapshot{ID: s.ID, Time: s.Time}}
+		// The repository has just said it holds it.
+		one := listed{Snapshot: record.Snapshot{ID: s.ID, Time: s.Time, Seen: &asked}}
 		for _, tag := range s.Tags {
 			one.PreRestore = one.PreRestore || tag == preRestoreTag
+			if name, ok := strings.CutPrefix(tag, "app:"); ok {
+				one.App = name
+			}
 		}
 		snaps = append(snaps, one)
 	}
 	sort.SliceStable(snaps, func(i, j int) bool { return snaps[i].Time.Before(snaps[j].Time) })
 	return snaps, false, nil
 }
+
+// ignoringRe is what restic says of a snapshot file it cannot load.
+var ignoringRe = regexp.MustCompile(`(?m)^Ignoring "([0-9a-f]{64})"`)
 
 // itemPath is where a declared item sits in the snapshot.
 func itemPath(base string, it record.Item) string {
