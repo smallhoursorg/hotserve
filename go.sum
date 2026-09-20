@@ -131,8 +131,8 @@ github.com/darkweak/storages/core v0.0.19 h1:9++DR/dsMhYfuRY7I0L84Ur+aaQJYcW6S/H
 github.com/darkweak/storages/core v0.0.19/go.mod h1:h36sNSwQ36fdHFMUIqD3j403kv29R4FVJJDaLbyvofM=
 github.com/darkweak/storages/otter v0.0.19 h1:wEOLfUzPXK2R9B4DjBxDe61IxBlyPyQSQ3sBA86BsQo=
 github.com/darkweak/storages/otter v0.0.19/go.mod h1:cgMBcXqNVnUnrJrI7B5+fwnPBkBLvqsR4drlIQEujzk=
-github.com/darkweak/storages/otter/caddy v0.0.19 h1:W81UECSkpDKG1wz+P+b1FjEUMHXAI+Y3zhf/FQN9UHI=
-github.com/darkweak/storages/otter/caddy v0.0.19/go.mod h1:omUli5s3dgtbI1q0SIhKAE49uY0D+9IDmzbJ3o6hLc0=
+github.com/darkweak/storages/otter/caddy v0.0.20 h1:g1Z5s/FYlug6G01VwKWE8dndazeKXrybzDpwkSXYnQw=
+github.com/darkweak/storages/otter/caddy v0.0.20/go.mod h1:omUli5s3dgtbI1q0SIhKAE49uY0D+9IDmzbJ3o6hLc0=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1VwoXQT9A3Wy9MM3WgvqSxFWenqJduM=

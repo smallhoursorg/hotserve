@@ -10,7 +10,7 @@ go 1.26.1
 require (
 	github.com/caddyserver/caddy/v2 v2.11.4
 	github.com/darkweak/souin/plugins/caddy v1.7.8
-	github.com/darkweak/storages/otter/caddy v0.0.19
+	github.com/darkweak/storages/otter/caddy v0.0.20
 	github.com/smallhoursorg/hotserve/liveswap v0.0.0-00010101000000-000000000000
 	github.com/smallhoursorg/hotserve/penaltybox v0.0.0-00010101000000-000000000000
 )
