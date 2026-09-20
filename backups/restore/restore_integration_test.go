@@ -219,3 +219,20 @@ func TestIntegrationASidecarThatCannotBeRemovedIsRefusedBeforeAnything(t *testin
 		t.Error("the copy was installed beside a sidecar that could not be removed")
 	}
 }
+
+// A directory first made on the way to a database — 0700, nothing
+// better known — gets the mode the files item then supplies for it.
+func TestIntegrationADirectoryMadeForADatabaseGetsTheModeTheFilesKnow(t *testing.T) {
+	d := newDirs(t, `{"sqlite":["data/app.db"],"files":["."]}`, map[string]string{"files/data/other.txt": "x", "files/r.txt": "receipt"})
+	copied := copyOf(t, d, "(1),(2)")
+	must(t, os.MkdirAll(filepath.Join(d.staged, "sqlite", "data"), 0o755))
+	must(t, os.Rename(copied, filepath.Join(d.staged, "sqlite", "data", "app.db")))
+	must(t, os.Chmod(filepath.Join(d.staged, "files", "data"), 0o755))
+	a := Run(context.Background(), d.staged, d.target, AllOrNothing)
+	if classes(a) != "sqlite data/app.db: ok, files .: ok" {
+		t.Fatalf("%+v", a)
+	}
+	if st, err := os.Stat(filepath.Join(d.target, "data")); err != nil || st.Mode().Perm() != 0o755 {
+		t.Errorf("data/: %v, want 755 (%v)", st.Mode().Perm(), err)
+	}
+}

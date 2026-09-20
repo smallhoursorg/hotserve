@@ -180,6 +180,14 @@ func Run(ctx context.Context, staged, target string, mode Mode) Answer {
 	trees := map[string]*tree{}
 	for _, p := range j.decl.Files {
 		it, t := j.checkFiles(p)
+		if it.Class == OK && t != nil {
+			// A file or a link where a declared database's directory has
+			// to be: the database step makes the directory, and the files
+			// step would then fail — after the database was changed.
+			if rel, dbPath := j.inTheWayOfADatabase(t); rel != "" {
+				it.Class, it.Detail = Refused, fmt.Sprintf("%q is a file in the snapshot where the database %q needs a directory", rel, dbPath)
+			}
+		}
 		a.Items = append(a.Items, it)
 		trees[p] = t
 	}
@@ -483,6 +491,28 @@ func (j *job) checkFiles(p string) (Item, *tree) {
 	return it, t
 }
 
+// inTheWayOfADatabase finds, in a files tree, a file or link at a path
+// that is a directory on the way to a declared database.
+func (j *job) inTheWayOfADatabase(t *tree) (rel, dbPath string) {
+	dirs := map[string]string{}
+	for _, db := range j.decl.SQLite {
+		for d := path.Dir(db); d != "." && d != "/"; d = path.Dir(d) {
+			dirs[d] = db
+		}
+	}
+	for _, f := range t.files {
+		if db, clash := dirs[f.rel]; clash {
+			return f.rel, db
+		}
+	}
+	for _, l := range t.links {
+		if db, clash := dirs[l.rel]; clash {
+			return l.rel, db
+		}
+	}
+	return "", ""
+}
+
 // kindAt is what rel itself is in the target — not anything on the way
 // to it, which is not followed — or 0 when there is nothing there.
 func (j *job) kindAt(rel string) uint32 {
@@ -722,6 +752,21 @@ func (j *job) closeDirs() error {
 	return errors.Join(errs...)
 }
 
+// madeAlready reports whether this restore made rel, and gives it the
+// mode a later item supplies for it — a directory first made on the way
+// to something, with 0700 and nothing better known.
+func (j *job) madeAlready(rel string, perm uint32) bool {
+	for i := range j.made {
+		if j.made[i].rel == rel {
+			if perm != 0o700 {
+				j.made[i].perm = perm
+			}
+			return true
+		}
+	}
+	return false
+}
+
 // symlink creates the symbolic link rel -> target in the target,
 // beside its name and renamed onto it: it replaces whatever is there
 // (except a directory, refused at the checks) and follows nothing.
@@ -769,6 +814,9 @@ func (j *job) mkdir(rel string, perm uint32) error {
 		j.made = append(j.made, entry{rel, perm}) // the unit's umask cuts a mode given here
 	case !errors.Is(err, unix.EEXIST):
 		return &os.PathError{Op: "mkdir", Path: rel, Err: err}
+	case j.madeAlready(rel, perm):
+		// Made by this restore for an earlier item, on the way to a
+		// database or a file: the mode this item knows is the one it gets.
 	default:
 		// In place already. One its owner has closed to writing — and the
 		// restore is its owner — is opened while it is filled, and closed

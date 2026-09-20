@@ -927,6 +927,19 @@ func TestToUnderTheEnginesOwnDirectoriesIsRefused(t *testing.T) {
 			t.Errorf("--to %s: %v (%s)", to, err, b.roles())
 		}
 	}
+	// And by where the name leads: a link in the parent to the engine's own.
+	outside := t.TempDir()
+	must(t, os.Symlink(filepath.Join(b.cfg.StateDir, "restore"), filepath.Join(outside, "outbase")))
+	to := filepath.Join(outside, "outbase", "blog")
+	// Caught by the name's resolution where the link's target exists
+	// already, else by the directory that was opened: either way before
+	// anything is fetched, and nothing is left made.
+	if _, err := Restore(context.Background(), b.cfg, b, RestoreOptions{App: "blog", To: to}); err == nil || !strings.Contains(err.Error(), "engine's own") || b.started("fetch") {
+		t.Errorf("--to through a link: %v (%s)", err, b.roles())
+	}
+	if _, err := os.Lstat(filepath.Join(b.cfg.StateDir, "restore", "blog")); err == nil {
+		t.Error("a directory was made inside the engine's own")
+	}
 }
 
 // An install unit that ends with no usable answer — killed, out of

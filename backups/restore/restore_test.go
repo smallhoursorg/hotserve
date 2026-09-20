@@ -466,3 +466,16 @@ func TestADeclaredPathThatIsASpecialFileIsRefusedAndListed(t *testing.T) {
 		t.Error("a FIFO was installed")
 	}
 }
+
+// A file in the snapshot where a declared database's directory has to
+// be: caught at the checks, so that all-or-nothing stays so.
+func TestAFileWhereADatabasesDirectoryMustBeIsRefused(t *testing.T) {
+	d := newDirs(t, `{"sqlite":["data/app.db"],"files":["."]}`, map[string]string{"files/data": "a file, not a directory", "files/r.txt": "receipt", "sqlite/data/app.db": "SQLite format 3\x00…"})
+	a := Run(context.Background(), d.staged, d.target, AllOrNothing)
+	if len(a.Items) != 2 || a.Items[1].Class != Refused || !strings.Contains(a.Items[1].Detail, `"data"`) || a.Changed {
+		t.Fatalf("%+v", a)
+	}
+	if left, _ := os.ReadDir(d.target); len(left) != 0 {
+		t.Fatalf("installed: %v", left)
+	}
+}

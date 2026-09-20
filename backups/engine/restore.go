@@ -126,9 +126,14 @@ func Restore(ctx context.Context, cfg Config, r Runner, o RestoreOptions) (rep *
 		}
 		// Not the engine's own directories: under the state dir a restore
 		// would empty what it had just put there as a fetch's leftovers.
-		for _, own := range []string{cfg.StateDir, cfg.RunDir} {
-			if o.To == own || strings.HasPrefix(o.To, own+"/") {
-				return nil, fmt.Errorf("--to %s is under %s, which is the backup engine's own", o.To, own)
+		// By the name, and by where the name leads — a link in its parent
+		// — and again once made, by the directory that was opened.
+		if err := notOwn(o.To, cfg); err != nil {
+			return nil, err
+		}
+		if parent, err := filepath.EvalSymlinks(filepath.Dir(o.To)); err == nil {
+			if err := notOwn(filepath.Join(parent, filepath.Base(o.To)), cfg); err != nil {
+				return nil, err
 			}
 		}
 		if _, err := os.Lstat(o.To); err == nil {
@@ -358,6 +363,16 @@ func (x *run) unmakeShared(ctx context.Context, root, app string) {
 	})
 }
 
+// notOwn refuses a path under the engine's own directories.
+func notOwn(dir string, cfg Config) error {
+	for _, own := range []string{cfg.StateDir, cfg.RunDir} {
+		if dir == own || strings.HasPrefix(dir, own+"/") {
+			return fmt.Errorf("--to %s is under %s, which is the backup engine's own", dir, own)
+		}
+	}
+	return nil
+}
+
 // toDir makes the directory a restore --to goes into, and binds it for
 // the unit. Its parent may be anyone's — /tmp — so from the moment it is
 // made it is held by descriptor: what is chmod'ed, chowned and bound is
@@ -383,6 +398,16 @@ func (x *run) toDir(dir string) (source string, release func(), err error) {
 	if int(st.Uid) != os.Geteuid() {
 		made.close()
 		return "", nil, fmt.Errorf("%s is not the directory that was just made (owner uid %d)", dir, st.Uid)
+	}
+	// Where the directory that was made really is: the kernel's name for
+	// the opened inode, which no link in the parent can bend after the
+	// fact. One inside the engine's own directories is taken away again.
+	if where, err := os.Readlink(fmt.Sprintf("/proc/self/fd/%d", fd)); err == nil {
+		if err := notOwn(where, x.cfg); err != nil {
+			made.close()
+			_ = os.Remove(dir) // empty, just made
+			return "", nil, err
+		}
 	}
 	if err := errors.Join(unix.Fchmod(fd, 0o700), unix.Fchown(fd, uid, gid)); err != nil {
 		made.close()
