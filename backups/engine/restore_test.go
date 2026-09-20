@@ -1107,3 +1107,21 @@ func TestARecordSaysWhenADrillLastRan(t *testing.T) {
 		t.Fatalf("the record on disk: %+v, %v", again, err)
 	}
 }
+
+// --to is made relative to its parent held by descriptor: a parent that
+// is a link is followed once, where the operator's name leads, and the
+// directory is made there.
+func TestToIsMadeInTheParentTheNameLedTo(t *testing.T) {
+	b := restoreBox(t)
+	real := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "alias")
+	must(t, os.Symlink(real, alias))
+	to := filepath.Join(alias, "out")
+	rep, err := Restore(context.Background(), b.cfg, b, RestoreOptions{App: "blog", To: to})
+	if err != nil || rep.Into != to {
+		t.Fatalf("%+v, %v", rep, err)
+	}
+	if st, err := os.Lstat(filepath.Join(real, "out")); err != nil || !st.IsDir() {
+		t.Fatalf("not made where the name led: %v", err)
+	}
+}

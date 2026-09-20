@@ -434,7 +434,8 @@ if drill; then pass "a drill, which installs nothing, needs the fetch alone, and
 mount -o remount,size=200m /srv/small || fail "fixture: /srv/small could not be grown"
 rm -rf /srv/small/out
 if restore blog --snapshot "$big" --to /srv/small/out; then pass "with room for both, the same restore exits 0" || fail "with room for both: $(cat "$OUT")"; fi
-umount "$RESTAGING"; umount /srv/small || fail "fixture: /srv/small could not be unmounted"
+umount "$RESTAGING" || fail "fixture: $RESTAGING could not be unmounted"
+umount /srv/small || fail "fixture: /srv/small could not be unmounted"
 nothing_left_of_a_restore "fits once, not twice"
 
 echo "=== restore 13d: Ctrl-C while the install waits on the live database ==="

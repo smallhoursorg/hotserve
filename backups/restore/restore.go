@@ -466,7 +466,11 @@ func (j *job) checkFiles(p string) (Item, *tree) {
 	switch st.Mode & unix.S_IFMT {
 	case unix.S_IFREG:
 		t.single = true
-		t.files = []entry{{rel: p, perm: st.Mode & 0o777}}
+		e := entry{rel: p, perm: st.Mode & 0o777}
+		if st.Nlink > 1 {
+			e.ino = st.Ino
+		}
+		t.files = []entry{e}
 	case unix.S_IFDIR:
 		t.dirs = []entry{{rel: p, perm: st.Mode & 0o777}}
 		if err := j.walk(src, p, t); err != nil {
@@ -809,6 +813,32 @@ func (j *job) closeDirs() error {
 	return errors.Join(errs...)
 }
 
+// inPlace is a directory already there. It gets the snapshot's mode,
+// last, where the snapshot says one; and one its owner has closed to
+// writing — the restore is its owner — is opened while it is filled,
+// and closed again after, to the snapshot's mode or its own. One
+// carrying a bit above 0777 — setgid on a shared uploads dir — is left
+// with its mode: the unit could not set such a bit back.
+func (j *job) inPlace(rel string, perm uint32) {
+	fd, err := nofollow.Open(j.target, rel, unix.O_RDONLY|unix.O_DIRECTORY)
+	if err != nil {
+		return
+	}
+	defer unix.Close(fd) //nolint:errcheck // read-only
+	var st unix.Stat_t
+	if unix.Fstat(fd, &st) != nil {
+		return
+	}
+	final := st.Mode & 0o777
+	if perm != noPerm && st.Mode&0o7000 == 0 {
+		final = perm
+	}
+	opened := st.Mode&0o300 == 0o300 || unix.Fchmod(fd, st.Mode&0o7777|0o700) == nil
+	if opened && (final != st.Mode&0o777 || st.Mode&0o300 != 0o300) {
+		j.record(rel, final)
+	}
+}
+
 // madeAlready reports whether this restore made rel, and gives it the
 // mode a later item supplies for it — a directory first made on the way
 // to something, with 0700 and nothing better known.
@@ -893,11 +923,18 @@ func (j *job) symlink(rel, target string) error {
 // mkdir makes the directory rel in the target, and whatever of the way
 // there is missing; what exists is left as it is.
 func (j *job) mkdir(rel string, perm uint32) error {
-	if rel == "." {
-		return nil
-	}
 	if j.seen[rel] && perm == noPerm {
 		return nil // looked at already, and nothing new to say of it
+	}
+	if rel == "." {
+		// The target itself: never made, but `files .` carries its mode,
+		// and one closed to writing is opened as any other.
+		if j.seen == nil {
+			j.seen = map[string]bool{}
+		}
+		j.seen[rel] = true
+		j.inPlace(rel, perm)
+		return nil
 	}
 	if parent := path.Dir(rel); parent != "." {
 		if err := j.mkdir(parent, noPerm); err != nil {
@@ -926,26 +963,7 @@ func (j *job) mkdir(rel string, perm uint32) error {
 		// Made by this restore for an earlier item, on the way to a
 		// database or a file: the mode this item knows is the one it gets.
 	default:
-		// In place already. It gets the snapshot's mode, last, where the
-		// snapshot says one; and one its owner has closed to writing —
-		// the restore is its owner — is opened while it is filled, and
-		// closed again after, to the snapshot's mode or its own. One
-		// carrying a bit above 0777 — setgid on a shared uploads dir — is
-		// left with its mode: the unit could not set such a bit back.
-		if fd, err := nofollow.Open(j.target, rel, unix.O_RDONLY|unix.O_DIRECTORY); err == nil {
-			var st unix.Stat_t
-			if unix.Fstat(fd, &st) == nil {
-				final := st.Mode & 0o777
-				if perm != noPerm && st.Mode&0o7000 == 0 {
-					final = perm
-				}
-				opened := st.Mode&0o300 == 0o300 || unix.Fchmod(fd, st.Mode&0o7777|0o700) == nil
-				if opened && (final != st.Mode&0o777 || st.Mode&0o300 != 0o300) {
-					j.record(rel, final)
-				}
-			}
-			unix.Close(fd) //nolint:errcheck,gosec // read-only
-		}
+		j.inPlace(rel, perm)
 	}
 	// Whatever is there now is a directory, reached through no link.
 	fd, err := nofollow.Open(j.target, rel, unix.O_PATH|unix.O_DIRECTORY)

@@ -535,3 +535,36 @@ func TestALinkIsNeverRenamedOverALiveDatabaseOrAFIFO(t *testing.T) {
 		t.Fatalf("a link where a fifo is: %+v", a)
 	}
 }
+
+// `files .` carries the shared dir's own mode, and one closed to writing
+// is opened for the restore like any other.
+func TestTheDeclaredRootItselfGetsItsMode(t *testing.T) {
+	old := syscall.Umask(0o077)
+	defer syscall.Umask(old)
+	d := newDirs(t, `{"files":["."]}`, map[string]string{"files/r.txt": "receipt"})
+	must(t, os.Chmod(filepath.Join(d.staged, "files"), 0o750))
+	must(t, os.Chmod(d.target, 0o500)) // closed to writing in place
+	t.Cleanup(func() { _ = os.Chmod(d.target, 0o755) })
+	a := Run(context.Background(), d.staged, d.target, AllOrNothing)
+	if classes(a) != "files .: ok" || read(t, filepath.Join(d.target, "r.txt")) != "receipt" {
+		t.Fatalf("%+v", a)
+	}
+	if st, _ := os.Stat(d.target); st.Mode().Perm() != 0o750 {
+		t.Errorf("the root: %v, want 750", st.Mode().Perm())
+	}
+}
+
+// Two declared files that are one file come back as one.
+func TestTwoDeclaredFilesThatAreOneComeBackAsOne(t *testing.T) {
+	d := newDirs(t, `{"files":["a.bin","b.bin"]}`, map[string]string{"files/a.bin": "data"})
+	must(t, os.Link(filepath.Join(d.staged, "files", "a.bin"), filepath.Join(d.staged, "files", "b.bin")))
+	if a := Run(context.Background(), d.staged, d.target, AllOrNothing); classes(a) != "files a.bin: ok, files b.bin: ok" {
+		t.Fatalf("%+v", a)
+	}
+	var sa, sb syscall.Stat_t
+	must(t, syscall.Lstat(filepath.Join(d.target, "a.bin"), &sa))
+	must(t, syscall.Lstat(filepath.Join(d.target, "b.bin"), &sb))
+	if sa.Ino != sb.Ino {
+		t.Errorf("two files: %d %d", sa.Ino, sb.Ino)
+	}
+}

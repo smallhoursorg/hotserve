@@ -395,13 +395,35 @@ func (x *run) toDir(dir string) (source string, release func(), err error) {
 	if err != nil {
 		return "", nil, err
 	}
-	if err := os.Mkdir(dir, 0o700); err != nil {
+	// The parent may be anyone's — /tmp — and a name in it is theirs to
+	// swap for a link between a look and a mkdir that walks it as root.
+	// So the parent is held by descriptor: what the operator's name led
+	// to when it was resolved, and nothing else, is where the directory
+	// is made, relative to that descriptor.
+	parent, base := filepath.Split(dir)
+	parent = filepath.Clean(parent)
+	named, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		return "", nil, &os.PathError{Op: "resolve", Path: parent, Err: err}
+	}
+	pfd, err := unix.Open(parent, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return "", nil, &os.PathError{Op: "open", Path: parent, Err: err}
+	}
+	defer unix.Close(pfd) //nolint:errcheck // a path descriptor
+	if where, err := os.Readlink(fmt.Sprintf("/proc/self/fd/%d", pfd)); err == nil && where != named {
+		return "", nil, fmt.Errorf("%s led to %s when it was looked at and to %s when it was opened: it is not held still, and the restore will not follow it", parent, named, where)
+	}
+	if err := notOwn(filepath.Join(named, base), x.cfg); err != nil {
 		return "", nil, err
+	}
+	if err := unix.Mkdirat(pfd, base, 0o700); err != nil {
+		return "", nil, &os.PathError{Op: "mkdir", Path: dir, Err: err}
 	}
 	// Until this has worked, what was made is taken away again: an empty
 	// --to left by a bind that failed would refuse every try after.
-	undo := func() { _ = os.Remove(dir) }
-	fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	undo := func() { _ = unix.Unlinkat(pfd, base, unix.AT_REMOVEDIR) }
+	fd, err := unix.Openat(pfd, base, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		undo()
 		return "", nil, &os.PathError{Op: "open", Path: dir, Err: err}
@@ -416,16 +438,6 @@ func (x *run) toDir(dir string) (source string, release func(), err error) {
 	if int(st.Uid) != os.Geteuid() {
 		made.close()
 		return "", nil, fmt.Errorf("%s is not the directory that was just made (owner uid %d)", dir, st.Uid)
-	}
-	// Where the directory that was made really is: the kernel's name for
-	// the opened inode, which no link in the parent can bend after the
-	// fact. One inside the engine's own directories is taken away again.
-	if where, err := os.Readlink(fmt.Sprintf("/proc/self/fd/%d", fd)); err == nil {
-		if err := notOwn(where, x.cfg); err != nil {
-			made.close()
-			undo()
-			return "", nil, err
-		}
 	}
 	if err := errors.Join(unix.Fchmod(fd, 0o700), unix.Fchown(fd, uid, gid)); err != nil {
 		made.close()
