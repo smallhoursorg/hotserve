@@ -158,7 +158,9 @@ that costs is below, under "what a restore cannot tell".
    damaged thing, often — the restore stops and says so;
    `--no-pre-backup` restores without one. Where there is no
    `<root>/<app>/shared` there is nothing to back up or overwrite: a
-   unit running as `hotserve` makes it, mode 0750.
+   unit running as `hotserve` makes it, mode 0750 — and takes it away
+   again if the restore then puts nothing in it, since an hourly run
+   would take an empty directory for the app's data.
 5. **fetch**: `restic restore <id>:/backup/<app>` into an empty directory
    under `/var/lib/hotserve-backup/restore`, as `hotserve-backup` with
    no capability. Not in a user namespace: there every `chown` restic

@@ -171,6 +171,9 @@ func (b *box) Run(_ context.Context, s unit.Spec) (unit.Outcome, error) {
 		write(b.install)
 	case "mkshared":
 		must(b.t, os.MkdirAll(filepath.Join(b.root, "blog", "shared"), 0o755))
+	case "unmake":
+		_ = os.Remove(filepath.Join(b.root, "blog", "shared"))
+		_ = os.Remove(filepath.Join(b.root, "blog"))
 	case "verify":
 		// Everything after "--" and the snapshot id is a parent to list.
 		var out []string

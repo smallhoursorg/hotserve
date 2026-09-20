@@ -431,6 +431,40 @@ if restore blog --snapshot "$big" --to /srv/small/out; then pass "with room for 
 umount "$RESTAGING"; umount /srv/small || fail "fixture: /srv/small could not be unmounted"
 nothing_left_of_a_restore "fits once, not twice"
 
+echo "=== restore 13d: Ctrl-C while the install waits on the live database ==="
+# The interrupt lands inside the unit that changes things — held there
+# by a writer that has the database, in rollback-journal mode, where a
+# restore waits for it. The unit is stopped with the restore, the
+# database is as it was and intact, and the restore says what it leaves.
+as_app sh -c "cd $BLOG && sqlite3 -cmd '.timeout 5000' app.db 'pragma journal_mode=delete; delete from posts; insert into posts values (55);'" >/dev/null
+blog0=$(blog_print)
+as_app sh -c "cd $BLOG && sqlite3 app.db 'begin exclusive; select 1;' '.shell sleep 60' 'commit;'" >/dev/null 2>&1 &
+holder=$!
+sleep 1
+hotserve-backup restore blog --snapshot "$first_blog" --yes --no-pre-backup >/root/first.out 2>&1 &
+first=$!
+i=0
+until [ "$(systemctl list-units --plain --no-legend --state=activating 'hotserve_backup_install_*' | wc -l)" != 0 ]; do
+	i=$((i + 1))
+	[ "$i" -ge 600 ] && break
+	sleep 0.1
+done
+if [ "$(systemctl list-units --plain --no-legend --state=activating 'hotserve_backup_install_*' | wc -l)" != 0 ]; then
+	pass "the install unit is running, waiting on the database"
+	sleep 2
+	kill -INT "$first"
+	wait "$first"
+	[ $? != 0 ] && grep -q "partly restored" /root/first.out && pass "interrupted there, the restore exits non-zero and says the data may be partly restored" || fail "interrupted in the install: $(cat /root/first.out)"
+	[ "$(units_running)" = 0 ] && pass "its unit was stopped with it, not left writing with nobody watching" || fail "units still running: $(systemctl list-units --plain --no-legend 'hotserve_backup_*')"
+else
+	fail "the install unit never started: $(cat /root/first.out)"
+	kill -KILL "$first" 2>/dev/null
+fi
+pkill -f "sleep 60" 2>/dev/null; wait "$holder" 2>/dev/null
+unchanged "$blog0" "$(blog_print)" "the database is as it was — one transaction, not begun — and intact"
+nothing_left_of_a_restore "an interrupt in the install"
+as_app sh -c "cd $BLOG && sqlite3 -cmd '.timeout 5000' app.db 'pragma journal_mode=wal;'" >/dev/null
+
 as_app rm -f "$BLOG/uploads/big.bin"
 run || fail "the run after the interrupted restore: $(cat "$OUT")"
 
@@ -470,6 +504,16 @@ err=$(groupmod -g 4242 hotserve 2>&1 && usermod -u 4242 -g 4242 hotserve 2>&1) |
 find / -xdev \( -uid "$old_uid" -o -gid "$old_gid" \) -exec chown -h hotserve:hotserve {} + 2>/dev/null
 [ "$(id -u hotserve)" = 4242 ] && pass "fixture: hotserve is now uid 4242, not $old_uid as when the snapshot was made" || fail "fixture: hotserve is uid $(id -u hotserve)"
 rm -rf /var/lib/liveswap/blog "$STATUS"
+# A restore that makes the shared dir and then fails takes it away
+# again: an hourly run would otherwise take an empty directory for the
+# app's data, where before it knew the data was missing.
+mount -t tmpfs -o size=1m,mode=0700 tmpfs "$RESTAGING" || fail "fixture: no small filesystem under $RESTAGING"
+made() { journalctl --sync >/dev/null 2>&1; journalctl --no-pager -o cat | grep -c 'Starting hotserve_backup_mkshared_'; }
+before=$(made)
+restore blog --yes && fail "a restore with no room for its fetch exited 0" || true
+[ "$(made)" != "$before" ] && pass "fixture: the restore made the shared dir before it failed" || fail "fixture: the shared dir was never made, so the scenario proves nothing: $(cat "$OUT")"
+[ ! -e /var/lib/liveswap/blog ] && pass "a restore that was confirmed and then failed leaves no empty data dir behind" || fail "left behind: $(find /var/lib/liveswap/blog | tr '\n' ' ')"
+umount "$RESTAGING"
 if restore blog --yes; then pass "with no record and no data dir, a restore exits 0"; else fail "a restore on a rebuilt box: $(cat "$OUT")"; fi
 grep -q "snapshot $(echo "$rebuilt" | cut -c1-8)" "$OUT" && pass "it found the newest snapshot in the repository alone" || fail "the restore's own words: $(cat "$OUT")"
 [ "$(rows "$BLOG/app.db" 'select count(*) from posts')" = "ok 2 " ] && [ "$(cat "$BLOG/uploads/a.png" 2>/dev/null)" = img ] && pass "the data is back" || fail "blog's data: $(find /var/lib/liveswap/blog | head -10)"

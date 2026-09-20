@@ -198,10 +198,21 @@ func Restore(ctx context.Context, cfg Config, r Runner, o RestoreOptions) (rep *
 	if o.To == "" {
 		role = "install"
 		var release func()
-		if target, release, err = x.inPlace(ctx, p.Root, o, decl, rep); err != nil {
+		var made bool
+		if target, release, made, err = x.inPlace(ctx, p.Root, o, decl, rep); err != nil {
 			return rep, err
 		}
 		defer release()
+		if made {
+			// A shared dir this restore made and then put nothing in is
+			// not left: an hourly run would take it for the app's data,
+			// empty, where before it knew the data was missing.
+			defer func() {
+				if retErr != nil && (rep == nil || len(rep.Items) == 0) {
+					x.unmakeShared(context.WithoutCancel(ctx), p.Root, o.App)
+				}
+			}()
+		}
 	} else {
 		var release func()
 		if target, release, err = x.toDir(o.To); err != nil {
@@ -236,11 +247,13 @@ func Restore(ctx context.Context, cfg Config, r Runner, o RestoreOptions) (rep *
 // inPlace readies a restore over the app's own shared dir: the dir
 // itself — made, where a rebuilt box has none — pinned and bound, and
 // the app backed up first.
-func (x *run) inPlace(ctx context.Context, root string, o RestoreOptions, decl *backupdecl.Config, rep *RestoreReport) (target string, release func(), err error) {
+//
+// made says the shared dir was made here, for a rebuilt box.
+func (x *run) inPlace(ctx context.Context, root string, o RestoreOptions, decl *backupdecl.Config, rep *RestoreReport) (target string, release func(), made bool, err error) {
 	shared := backupdecl.SharedDir(root, o.App)
 	rootPin, err := pinRoot(root)
 	if err != nil {
-		return "", nil, fmt.Errorf("looking at the liveswap root: %w", err)
+		return "", nil, false, fmt.Errorf("looking at the liveswap root: %w", err)
 	}
 	var undo []func()
 	release = func() {
@@ -256,21 +269,22 @@ func (x *run) inPlace(ctx context.Context, root string, o RestoreOptions, decl *
 		// overwrite. The dir is made by the data user, in a unit that
 		// sees the liveswap root and nothing else.
 		if err = x.makeShared(ctx, rootPin, o.App); err == nil {
+			made = true
 			sharedPin, err = rootPin.beneath(o.App + "/shared")
 		}
 	}
 	switch {
 	case errors.Is(err, errLink):
 		release()
-		return "", nil, fmt.Errorf("%s is reached through a symbolic link, which a restore does not follow; liveswap itself takes a bind mount there, not a link", shared)
+		return "", nil, made, fmt.Errorf("%s is reached through a symbolic link, which a restore does not follow; liveswap itself takes a bind mount there, not a link", shared)
 	case err != nil:
 		release()
-		return "", nil, fmt.Errorf("looking at %s: %w", shared, err)
+		return "", nil, made, fmt.Errorf("looking at %s: %w", shared, err)
 	}
 	undo = append(undo, sharedPin.close)
 	if uid, _, err := dataOwner(); err != nil || !sharedPin.isDir() || sharedPin.owner() != uid {
 		release()
-		return "", nil, fmt.Errorf("%s is not a directory of the %s user's, so it is not an app's data dir (owner uid %d)", shared, dataUser, sharedPin.owner())
+		return "", nil, made, fmt.Errorf("%s is not a directory of the %s user's, so it is not an app's data dir (owner uid %d)", shared, dataUser, sharedPin.owner())
 	}
 
 	if existed && !o.NoPreBackup {
@@ -300,24 +314,46 @@ func (x *run) inPlace(ctx context.Context, root string, o RestoreOptions, decl *
 		st.Apps[o.App] = app
 		if err := record.Write(filepath.Join(x.cfg.StateDir, "status.json"), &st); err != nil {
 			release()
-			return "", nil, err
+			return "", nil, made, err
 		}
 		if app.Class != record.OK {
 			release()
-			return "", nil, fmt.Errorf("the backup a restore makes first did not end ok (%s: %s), so nothing was restored over; --no-pre-backup restores without one, and what is in place now is then not kept anywhere", app.Class, app.Detail)
+			return "", nil, made, fmt.Errorf("the backup a restore makes first did not end ok (%s: %s), so nothing was restored over; --no-pre-backup restores without one, and what is in place now is then not kept anywhere", app.Class, app.Detail)
 		}
 	}
 	if ctx.Err() != nil {
 		release()
-		return "", nil, ctx.Err()
+		return "", nil, made, ctx.Err()
 	}
 	target, unmount, err := x.bound(sharedPin)
 	if err != nil {
 		release()
-		return "", nil, fmt.Errorf("%s: %w", shared, err)
+		return "", nil, made, fmt.Errorf("%s: %w", shared, err)
 	}
 	undo = append(undo, unmount)
-	return target, release, nil
+	return target, release, made, nil
+}
+
+// unmakeShared takes away what makeShared made, where nothing was put
+// in it — rmdir, which refuses a directory with anything in it, as the
+// data user in the same view. What it cannot take away it leaves.
+func (x *run) unmakeShared(ctx context.Context, root, app string) {
+	rootPin, err := pinRoot(root)
+	if err != nil {
+		return
+	}
+	defer rootPin.close()
+	source, unmount, err := x.bound(rootPin)
+	if err != nil {
+		return
+	}
+	defer unmount()
+	_, _ = x.start(ctx, unit.Spec{
+		Name: x.name("unmake", app), Description: "hotserve backup: take away " + app + "'s empty shared dir",
+		Argv: []string{"/usr/bin/rmdir", "/liveswap/" + app + "/shared", "/liveswap/" + app},
+		User: dataUser, SameUIDNamespaces: true,
+		Binds: []unit.Bind{{Source: source, Dest: "/liveswap", Writable: true}},
+	})
 }
 
 // toDir makes the directory a restore --to goes into, and binds it for

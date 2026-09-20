@@ -950,3 +950,30 @@ func TestAnInstallThatEndsWithoutAnAnswerIsCalledPartlyRestored(t *testing.T) {
 		t.Fatalf("%+v, %v", st.Apps["blog"], err)
 	}
 }
+
+// On a rebuilt box a restore makes the shared dir; one that then puts
+// nothing in it takes it away again, or the next hourly run would take
+// an empty directory for the app's data.
+func TestAFailedRestoreOnARebuiltBoxLeavesNoEmptySharedDir(t *testing.T) {
+	b := restoreBox(t)
+	must(t, os.RemoveAll(filepath.Join(b.root, "blog")))
+	b.outcome["fetch"] = unit.Outcome{Result: "exit-code", ExitStatus: 12}
+	if _, err := Restore(context.Background(), b.cfg, b, inPlace()); err == nil {
+		t.Fatal("a fetch that failed")
+	}
+	if !b.started("mkshared") || !b.started("unmake") {
+		t.Fatalf("%s", b.roles())
+	}
+	if _, err := os.Lstat(filepath.Join(b.root, "blog")); err == nil {
+		t.Fatal("an empty data dir was left behind")
+	}
+	// One that put something in it, or had nothing to do, leaves it.
+	b = restoreBox(t)
+	must(t, os.RemoveAll(filepath.Join(b.root, "blog")))
+	if _, err := Restore(context.Background(), b.cfg, b, inPlace()); err != nil || b.started("unmake") {
+		t.Fatalf("%v (%s)", err, b.roles())
+	}
+	if _, err := os.Lstat(filepath.Join(b.root, "blog", "shared")); err != nil {
+		t.Fatal("the shared dir a restore filled is gone")
+	}
+}
