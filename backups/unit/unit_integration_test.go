@@ -293,6 +293,35 @@ func TestIntegrationCancelStopsTheUnitAndConfirmsItGone(t *testing.T) {
 	}
 }
 
+// As the command does it: one context, the signal's, for the connection
+// and for the run. Cancelling it must not take away the connection the
+// stop goes over.
+func TestIntegrationARunnerOutlivesTheContextItWasMadeWith(t *testing.T) {
+	runner(t) // the accounts, and the skip
+	ctx, cancel := context.WithCancel(context.Background())
+	r, err := NewSystemRunner(ctx)
+	must(t, err)
+	defer r.Close()
+	n := name(t)
+	go func() {
+		for activeState(n) != "activating" {
+			time.Sleep(50 * time.Millisecond)
+		}
+		cancel()
+	}()
+	_, err = r.Run(ctx, Spec{Name: n, Argv: []string{"/bin/sleep", "601"}, User: testUser})
+	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrNotConfirmedGone) {
+		t.Fatalf("want the context's error and a confirmed stop, got %v", err)
+	}
+	if st := activeState(n); st != "inactive" {
+		t.Fatalf("after Run returned the unit is %q", st)
+	}
+	// And the next unit — the one that removes plaintext — still starts.
+	if o, err := r.Run(context.Background(), Spec{Name: name(t), Argv: []string{"/bin/true"}, User: testUser}); err != nil || !o.OK() {
+		t.Fatalf("a unit after the cancel: %+v, %v", o, err)
+	}
+}
+
 func waitFor(t *testing.T, unit, state string) {
 	t.Helper()
 	for deadline := time.Now().Add(20 * time.Second); activeState(unit) != state; time.Sleep(50 * time.Millisecond) {

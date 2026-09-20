@@ -152,6 +152,10 @@ func one(ctx context.Context, shared, staging, rel string) Result {
 	return Result{Class: OK, Bytes: st.Size()}
 }
 
+// Inspect is inspect, for a restore: the same look at a copy that came
+// back out of the repository, and at the database it is restored over.
+func Inspect(dir, rel string) Result { return inspect(dir, rel) }
+
 // inspect decides whether rel is a SQLite database file, without ever
 // blocking on it and without following a link out of the shared dir.
 func inspect(shared, rel string) Result {
@@ -212,13 +216,19 @@ func inspect(shared, rel string) Result {
 // sqlite3 is killed — this process's own child — and the error is
 // errNeverOpened.
 func run(ctx context.Context, db, sql, appears string) (stdout, stderr string, err error) {
+	return execute(ctx, appears, "ATTACH "+quote(uri(db))+" AS src; "+sql)
+}
+
+// execute is one sqlite3, started on an in-memory database, given
+// commands — SQL, or the shell's own dot-commands — that ATTACH whatever
+// they work on.
+func execute(ctx context.Context, appears string, commands ...string) (stdout, stderr string, err error) {
 	// -init /dev/null and a HOME that is nowhere: sqlite3 otherwise
 	// reads ~/.sqliterc, and must never be one environment variable
 	// away from reading the app's.
-	//nolint:gosec // the program is a constant path; db is a declared path under the shared dir, which is the point
-	cmd := exec.CommandContext(ctx, sqlite3, "-batch", "-bail", "-init", "/dev/null",
-		"-cmd", fmt.Sprintf(".timeout %d", busyTimeout.Milliseconds()),
-		":memory:", "ATTACH "+quote(uri(db))+" AS src; "+sql)
+	//nolint:gosec // the program is a constant path; the commands name declared paths under the shared dir, which is the point
+	cmd := exec.CommandContext(ctx, sqlite3, append([]string{"-batch", "-bail", "-init", "/dev/null",
+		"-cmd", fmt.Sprintf(".timeout %d", busyTimeout.Milliseconds()), ":memory:"}, commands...)...)
 	cmd.Env = []string{"HOME=/nonexistent", "LC_ALL=C"}
 	cmd.WaitDelay = 5 * time.Second
 	var o, e bytes.Buffer
@@ -282,6 +292,68 @@ func uri(abs string) string {
 	b.WriteString("?mode=rw")
 	return b.String()
 }
+
+// withQuery is uri with another query: "immutable=1", "mode=rwc".
+func withQuery(abs, query string) string { return strings.TrimSuffix(uri(abs), "mode=rw") + query }
+
+// CheckCopy is the integrity check of a copy that has come back out of
+// the repository, read where it lies: immutable, so with no lock, and no
+// -shm made beside it whatever journal mode its header claims. said is
+// sqlite3's first line when the copy is not sound.
+func CheckCopy(ctx context.Context, file string) (sound bool, said string) {
+	stdout, stderr, err := execute(ctx, "", "ATTACH "+quote(withQuery(file, "immutable=1"))+" AS src; PRAGMA src.integrity_check")
+	// As for a dump's own copy: only exactly "ok" and exit 0 is sound.
+	if err != nil || stdout != "ok\n" {
+		return false, firstLine(stdout + stderr)
+	}
+	return true, ""
+}
+
+// ErrNeverOpened and ErrBusy are how RestoreOver fails without sqlite3
+// having anything to say.
+var (
+	ErrNeverOpened = errNeverOpened
+	ErrBusy        = errors.New("the database stayed locked")
+)
+
+// RestoreOver restores the copy over the live database with SQLite's own
+// backup, as one transaction: a writer waits, and sees the old rows or
+// the new [measured under a writer in WAL mode, and into a database with
+// damaged pages].
+//
+// The live database is as much the app's to swap for a FIFO as the one a
+// dump reads, so sqlite3 is run the same way — it ATTACHes the path as
+// mode=rw, which never creates it — and has the same openWithin to open
+// it. What shows that it has: once it has read from the live database it
+// creates marker, a scratch database of its own, and from then on it has
+// as long as the restore takes.
+func RestoreOver(ctx context.Context, live, copyOf, marker string) error {
+	beforeSqlite()
+	_, stderr, err := execute(ctx, marker,
+		"ATTACH "+quote(uri(live))+" AS dst",
+		"PRAGMA dst.schema_version",
+		"ATTACH "+quote(withQuery(marker, "mode=rwc"))+" AS opened; CREATE TABLE opened.t(x); DETACH opened",
+		".restore dst "+quote(withQuery(copyOf, "immutable=1")))
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, errNeverOpened):
+		return errNeverOpened
+	case ctx.Err() != nil:
+		return ctx.Err()
+	}
+	// A lock met when the database is first read is SQLite's result code,
+	// as for a dump. One met by .restore itself is not: a dot-command
+	// that fails exits 1 whatever the code was, and says this, which holds
+	// no path [measured: a reader holding a rollback-journal database].
+	if res := classify(ctx, err, stderr); res.Class == Busy || firstLine(stderr) == "Error: source database is busy" {
+		return ErrBusy
+	}
+	return errors.New(firstLine(stderr))
+}
+
+// OpenWithin is how long sqlite3 has to open a database.
+func OpenWithin() time.Duration { return openWithin }
 
 // classify puts a failed sqlite3 into words by its exit status, which
 // is SQLite's result code — not by looking for words in what it

@@ -73,6 +73,20 @@ type App struct {
 	// going missing is never "not deployed yet".
 	LastOK       *Snapshot `json:"last_ok,omitempty"`
 	LastSnapshot *Snapshot `json:"last_snapshot,omitempty"`
+	// RestoreProven is the last restore drill that fetched a snapshot,
+	// handed it over and read it whole; RestoreDrill is the last drill
+	// that proved nothing, until one does. Both are carried from record
+	// to record: a backup run does not unprove a restore.
+	RestoreProven *Drill `json:"restore_proven,omitempty"`
+	RestoreDrill  *Drill `json:"restore_drill,omitempty"`
+}
+
+// Drill is one restore drill of one snapshot: when, and — where it
+// proved nothing — why.
+type Drill struct {
+	Snapshot Snapshot  `json:"snapshot"`
+	Time     time.Time `json:"time"`
+	Detail   string    `json:"detail,omitempty"`
 }
 
 // Status is the whole file.
