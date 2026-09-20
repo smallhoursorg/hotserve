@@ -78,7 +78,7 @@ run, and what the step is given.
 | size | `hotserve-backup`, no capability | yes | yes | nothing of the app |
 | fetch | `hotserve-backup`, no capability | yes | yes | one empty directory, writable |
 | hand-over | root, `CAP_CHOWN` and `CAP_DAC_READ_SEARCH` | no | no | that directory and nothing else |
-| install, check | `hotserve`, own user+PID namespaces | no | no | what was fetched, read-only; and (install) that app's `shared/` |
+| install, check | `hotserve`, own user+PID namespaces | no | no | what was fetched — writable: it is this run's scratch, and a copy closed to its owner is opened to be read — and (install) that app's `shared/` |
 | unstage | `hotserve`, own user+PID namespaces | no | no | what was fetched, to remove it |
 | mkshared | `hotserve`, own user+PID namespaces | no | no | the liveswap root, to make `<app>/shared` on a rebuilt box |
 
@@ -183,7 +183,8 @@ that costs is below, under "what a restore cannot tell".
    `CAP_DAC_READ_SEARCH` beside `CAP_CHOWN`: root without it cannot read
    a directory that is another account's and closed.
 7. **install**, as `hotserve` in its own namespaces with no network and
-   no credential, given what was fetched read-only and the app's
+   no credential, given what was fetched (writable: it is scratch, and
+   opened to be read where the app kept it closed) and the app's
    `shared/` — pinned and bound by the run itself, as for an upload.
    **Every check comes before any change**:
    - the snapshot's own `plan.json` says which paths are databases — not
@@ -377,7 +378,8 @@ they hold the database's path, and `busy.db` is not busy.
   directory, or restore another snapshot.
 - A snapshot whose `plan.json` is missing, is not a valid declaration, or
   holds a field this version does not know.
-- `--to` a directory that exists, and `--to` or `--snapshot` given with
+- `--to` a directory that exists, one under `/var/lib/hotserve-backup`
+  or `/run/hotserve-backup`, and `--to` or `--snapshot` given with
   nothing in it.
 - A file that would land on a live database (above).
 - A restore or a drill of a snapshot larger than what is free under

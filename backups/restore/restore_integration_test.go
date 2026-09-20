@@ -204,3 +204,18 @@ func TestIntegrationADatabasesClosedDirectoryIsClosedAgain(t *testing.T) {
 		t.Errorf("data/ after the restore: %v", st.Mode().Perm())
 	}
 }
+
+// A sidecar of an absent database that is not a file cannot be removed
+// for the copy to go in: found at the checks, nothing changed.
+func TestIntegrationASidecarThatCannotBeRemovedIsRefusedBeforeAnything(t *testing.T) {
+	d := newDirs(t, `{"sqlite":["app.db"],"files":["uploads"]}`, map[string]string{"files/uploads/a.png": "img"})
+	copyOf(t, d, "(1),(2)")
+	must(t, os.MkdirAll(filepath.Join(d.target, "app.db-wal"), 0o755))
+	a := Run(context.Background(), d.staged, d.target, AllOrNothing)
+	if len(a.Items) != 2 || a.Items[0].Class != Refused || !strings.Contains(a.Items[0].Detail, "app.db-wal") || a.Items[1].Class != HeldBack || a.Changed {
+		t.Fatalf("%+v", a)
+	}
+	if _, err := os.Lstat(filepath.Join(d.target, "app.db")); err == nil {
+		t.Error("the copy was installed beside a sidecar that could not be removed")
+	}
+}

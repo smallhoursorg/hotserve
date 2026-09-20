@@ -917,3 +917,36 @@ func TestARestoreSaysWhenTheSnapshotIsNotTheLastOK(t *testing.T) {
 		t.Fatalf("no record: %+v, %v", rep.LastOK, err)
 	}
 }
+
+// --to under the engine's own directories would be emptied as a fetch's
+// leftovers by the next sweep — or by this restore's own unstage.
+func TestToUnderTheEnginesOwnDirectoriesIsRefused(t *testing.T) {
+	b := restoreBox(t)
+	for _, to := range []string{filepath.Join(b.cfg.StateDir, "restore", "blog"), filepath.Join(b.cfg.StateDir, "out"), b.cfg.StateDir, filepath.Join(b.cfg.RunDir, "x")} {
+		if _, err := Restore(context.Background(), b.cfg, b, RestoreOptions{App: "blog", To: to}); err == nil || !strings.Contains(err.Error(), "engine's own") || len(b.specs) != 0 {
+			t.Errorf("--to %s: %v (%s)", to, err, b.roles())
+		}
+	}
+}
+
+// An install unit that ends with no usable answer — killed, out of
+// memory — may have begun: that is said, whatever the cause.
+func TestAnInstallThatEndsWithoutAnAnswerIsCalledPartlyRestored(t *testing.T) {
+	b := restoreBox(t)
+	b.install = ""
+	b.outcome["install"] = unit.Outcome{Result: "oom-kill", ExitStatus: 137}
+	o := inPlace()
+	o.NoPreBackup = true
+	_, err := Restore(context.Background(), b.cfg, b, o)
+	if err == nil || !strings.Contains(err.Error(), "partly restored") {
+		t.Fatalf("%v", err)
+	}
+	// A check unit that ends the same way changed nothing, and says nothing of the kind.
+	b = restoreBox(t)
+	b.install = ""
+	b.outcome["check"] = unit.Outcome{Result: "oom-kill", ExitStatus: 137}
+	st, err := Drill(context.Background(), b.cfg, b)
+	if err != nil || st.Apps["blog"].RestoreDrill == nil || strings.Contains(st.Apps["blog"].RestoreDrill.Detail, "partly") {
+		t.Fatalf("%+v, %v", st.Apps["blog"], err)
+	}
+}

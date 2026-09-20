@@ -384,14 +384,21 @@ func TestAFileItsOwnerCannotReadIsRestoredWithItsMode(t *testing.T) {
 		must(t, os.WriteFile(filepath.Join(d.staged, "plan.json"), []byte(`{"files":["uploads"]}`), 0o644))
 		write(t, filepath.Join(d.staged, "files/uploads/zero"), "secret")
 		write(t, filepath.Join(d.staged, "files/uploads/shut/f"), "deep")
+		// ajar is written below, for both paths.
 	} else {
 		d = newDirs(t, `{"files":["uploads"]}`, map[string]string{"files/uploads/zero": "secret", "files/uploads/shut/f": "deep"})
 	}
+	write(t, filepath.Join(d.staged, "files/uploads/ajar/g"), "readable, not searchable")
 	must(t, os.Chmod(filepath.Join(d.staged, "files", "uploads", "zero"), 0o000))
 	must(t, os.Chmod(filepath.Join(d.staged, "files", "uploads", "shut"), 0o000))
+	must(t, os.Chmod(filepath.Join(d.staged, "files", "uploads", "ajar"), 0o400)) // opens for reading; its children do not
 	a := Run(context.Background(), d.staged, d.target, AllOrNothing)
 	if classes(a) != "files uploads: ok" {
 		t.Fatalf("%+v", a)
+	}
+	_ = os.Chmod(filepath.Join(d.target, "uploads", "ajar"), 0o700)
+	if read(t, filepath.Join(d.target, "uploads", "ajar", "g")) != "readable, not searchable" {
+		t.Errorf("a file under a 0400 directory was lost")
 	}
 	_ = os.Chmod(filepath.Join(d.target, "uploads", "zero"), 0o600) // to read it back
 	_ = os.Chmod(filepath.Join(d.target, "uploads", "shut"), 0o700)
@@ -442,5 +449,20 @@ func TestWhatLooksLikeALeftoverIsTheAppsAllTheSame(t *testing.T) {
 	}
 	if read(t, filepath.Join(d.target, "uploads", looksLikeOne+"2")) != "in place, not in the snapshot" || strings.Join(a.Left, " ") != "uploads/"+looksLikeOne+"2" {
 		t.Errorf("a file in place was removed, or not listed, for its name: left %v", a.Left)
+	}
+}
+
+// A declared path that is itself a FIFO is a snapshot a backup would
+// not have made: refused, and listed with what is left out — never
+// "restored", there being nothing of it to put back.
+func TestADeclaredPathThatIsASpecialFileIsRefusedAndListed(t *testing.T) {
+	d := newDirs(t, `{"files":["pipe","uploads"]}`, map[string]string{"files/uploads/a.png": "img"})
+	must(t, syscall.Mkfifo(filepath.Join(d.staged, "files", "pipe"), 0o644))
+	a := Run(context.Background(), d.staged, d.target, AllOrNothing)
+	if classes(a) != "files pipe: refused, files uploads: held back" || len(a.Skipped) != 1 || a.Skipped[0].Path != "pipe" {
+		t.Fatalf("%s; skipped %+v", classes(a), a.Skipped)
+	}
+	if _, err := os.Lstat(filepath.Join(d.target, "pipe")); err == nil {
+		t.Error("a FIFO was installed")
 	}
 }

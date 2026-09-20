@@ -323,6 +323,17 @@ func (j *job) checkDatabase(p string) Item {
 	}
 	if err := j.checkTarget(p, false); err != nil {
 		it.Class, it.Detail = Refused, err.Error()
+		return it
+	}
+	// Where there is no database, its sidecars' names are removed before
+	// the copy goes in; one that is not a file cannot be.
+	if !j.exists(p) {
+		for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+			if kind := j.kindAt(p + suffix); kind != 0 && kind != unix.S_IFREG && kind != unix.S_IFLNK {
+				it.Class, it.Detail = Refused, fmt.Sprintf("%q is not there, and %q beside it is %s, which a restore does not remove", p, p+suffix, kindWord(kind))
+				return it
+			}
+		}
 	}
 	return it
 }
@@ -427,7 +438,14 @@ func (j *job) checkFiles(p string) (Item, *tree) {
 			return it, nil
 		}
 	default:
-		it.Class, it.Detail = Missing, "in the snapshot it is "+kindWord(st.Mode&unix.S_IFMT)+", which a restore does not install"
+		// A backup refuses a declared path that is not a file or a
+		// directory, so this is a snapshot made some other way. There is
+		// nothing of the item to put back, which is not what "restored"
+		// means: it is refused, and listed with what is left out.
+		if len(j.answer.Skipped) < named {
+			j.answer.Skipped = append(j.answer.Skipped, Skipped{Path: p, Kind: kindWord(st.Mode & unix.S_IFMT)})
+		}
+		it.Class, it.Detail = Refused, "in the snapshot it is "+kindWord(st.Mode&unix.S_IFMT)+" — the declared path itself — which a restore does not install"
 		return it, nil
 	}
 	if j.target < 0 {
@@ -571,14 +589,12 @@ func (j *job) walk(src, rel string, t *tree) error {
 // owner rwx first where it lacks it: what was fetched is scratch to be
 // read now and removed after.
 func (j *job) readableStagedDir(rel string) (int, error) {
-	fd, err := nofollow.Open(j.staged, rel, unix.O_RDONLY|unix.O_DIRECTORY)
-	if errors.Is(err, unix.EACCES) {
-		if err := j.chmodStaged(rel, 0o700); err != nil {
-			return -1, err
-		}
-		fd, err = nofollow.Open(j.staged, rel, unix.O_RDONLY|unix.O_DIRECTORY)
+	// Read and search both: a directory that opens (0400) but cannot be
+	// searched fails at its first child, not here.
+	if err := j.chmodStaged(rel, 0o700); err != nil {
+		return -1, err
 	}
-	return fd, err
+	return nofollow.Open(j.staged, rel, unix.O_RDONLY|unix.O_DIRECTORY)
 }
 
 // chmodStaged gives the owner what it needs of the staged entry rel —
@@ -598,6 +614,9 @@ func (j *job) chmodStaged(rel string, mode uint32) error {
 	}
 	if st.Mode&unix.S_IFMT == unix.S_IFLNK {
 		return &os.PathError{Op: "chmod", Path: rel, Err: unix.ELOOP}
+	}
+	if st.Mode&mode == mode {
+		return nil
 	}
 	if err := unix.Fchmodat(dir, path.Base(rel), st.Mode&0o777|mode, 0); err != nil {
 		return &os.PathError{Op: "chmod", Path: rel, Err: err}
@@ -893,12 +912,17 @@ func (j *job) installDatabase(p string) error {
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		// Sidecars of a database that is gone would be read as this one's.
-		if dir, err := nofollow.Open(j.target, path.Dir(p), unix.O_PATH|unix.O_DIRECTORY); err == nil {
-			for _, suffix := range []string{"-wal", "-shm", "-journal"} {
-				_ = unix.Unlinkat(dir, path.Base(p)+suffix, 0)
-			}
-			unix.Close(dir) //nolint:errcheck,gosec // a path descriptor
+		dir, err := nofollow.Open(j.target, path.Dir(p), unix.O_PATH|unix.O_DIRECTORY)
+		if err != nil {
+			return err
 		}
+		for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+			if err := unix.Unlinkat(dir, path.Base(p)+suffix, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+				unix.Close(dir) //nolint:errcheck,gosec // a path descriptor
+				return &os.PathError{Op: "remove", Path: p + suffix, Err: err}
+			}
+		}
+		unix.Close(dir) //nolint:errcheck,gosec // a path descriptor
 		// Nothing here can stop the app: one that re-creates its database
 		// meanwhile keeps writing to a file that is no longer there.
 		return j.copyFile(copyOf, p, 0o600)

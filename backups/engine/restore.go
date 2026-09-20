@@ -124,6 +124,13 @@ func Restore(ctx context.Context, cfg Config, r Runner, o RestoreOptions) (rep *
 		if !filepath.IsAbs(o.To) || filepath.Clean(o.To) != o.To {
 			return nil, fmt.Errorf("--to %q: give the directory as a clean absolute path", o.To)
 		}
+		// Not the engine's own directories: under the state dir a restore
+		// would empty what it had just put there as a fetch's leftovers.
+		for _, own := range []string{cfg.StateDir, cfg.RunDir} {
+			if o.To == own || strings.HasPrefix(o.To, own+"/") {
+				return nil, fmt.Errorf("--to %s is under %s, which is the backup engine's own", o.To, own)
+			}
+		}
 		if _, err := os.Lstat(o.To); err == nil {
 			return nil, fmt.Errorf("--to %s exists: a restore to a directory makes the directory, so that nothing is overwritten", o.To)
 		}
@@ -441,8 +448,11 @@ func (x *run) bring(ctx context.Context, app, id, role, target string, size uint
 			return ctx.Err()
 		}
 		answer, err = x.settle(ctx, app, role, fetched, target)
-		if err != nil && ctx.Err() != nil && role != "check" {
-			return fmt.Errorf("interrupted while installing: what was being restored into may be partly restored; the same restore, run again, goes over it: %w", ctx.Err())
+		if err != nil && role != "check" {
+			// The unit changes things; one that ended with no usable
+			// answer — interrupted, killed, out of memory — may have
+			// begun. That is said, whatever the cause.
+			return fmt.Errorf("the install ended with no usable answer, so what was being restored into may be partly restored; the same restore, run again, goes over it: %w", err)
 		}
 		return err
 	}()
