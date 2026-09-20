@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -442,5 +443,30 @@ func TestADrillThatFetchedASnapshotHasSeenItUnderEveryName(t *testing.T) {
 		if seenAt(t, snap).Before(listed) {
 			t.Errorf("%s: fetched whole by the drill, and still last seen %v, before the listing of %v", what, snap.Seen, listed)
 		}
+	}
+}
+
+// A run writes a record of its own, and what the last drill said goes
+// into it: a drill that could not begin is not forgotten by the next
+// hourly run, with no drill since to say otherwise.
+func TestARunKeepsWhatTheLastDrillSaid(t *testing.T) {
+	b := restoreBox(t)
+	_, err := Run(context.Background(), b.cfg, b)
+	must(t, err)
+	b.err["plan"] = errors.New("the plan unit: no")
+	drilled, err := Drill(context.Background(), b.cfg, b)
+	if err == nil || drilled == nil || drilled.LastDrill == nil || drilled.LastDrill.Detail == "" {
+		t.Fatalf("fixture: a drill that could not begin: %+v, %v", drilled, err)
+	}
+	delete(b.err, "plan")
+	st, err := Run(context.Background(), b.cfg, b)
+	must(t, err)
+	if st.LastDrill == nil || !st.LastDrill.Time.Equal(drilled.LastDrill.Time) || st.LastDrill.Detail != drilled.LastDrill.Detail {
+		t.Fatalf("after the next run: last drill %+v, want %+v", st.LastDrill, drilled.LastDrill)
+	}
+	again, err := record.Read(filepath.Join(b.cfg.StateDir, "status.json"))
+	must(t, err)
+	if again.LastDrill == nil || again.LastDrill.Detail == "" {
+		t.Fatalf("the record on disk: %+v", again.LastDrill)
 	}
 }

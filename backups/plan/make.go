@@ -242,9 +242,16 @@ func Inspect(ctx context.Context, caddyfile string) (*Inspection, error) {
 		return p, undeclared, "", err
 	}
 
-	names, needs, imported, imports, err := envNames(caddyfile)
+	names, needs, imported, imports, byArgument, err := scanCaddyfile(caddyfile)
 	if err != nil {
 		return nil, err
+	}
+	// The adapter fills a snippet's argument in from wherever the snippet
+	// is used, and this reader does not: one of those uses can name
+	// files outside the directory, which a run's view does not hold —
+	// its glob would match nothing there, and the run plan without them.
+	if len(byArgument) > 0 {
+		return nil, fmt.Errorf("the Caddyfile imports by a snippet's argument (%s), so which files the server reads cannot be known here; a backup has to know every file the Caddyfile is made of — write those import paths literally", strings.Join(byArgument, "; "))
 	}
 	// No value tried here says what the server imports with the value it
 	// has: `import sites/{$ENV:prod}/*.caddy` adapts with anything — a
@@ -452,6 +459,8 @@ var (
 	// backslash that continues it. Never simply on the next: \s would
 	// take the first word of the line after a bare "import".
 	importRe = regexp.MustCompile("(?m)^[ \\t]*import(?:[ \\t]|\\\\\\r?\\n)+(?:\"((?:[^\"\\\\]|\\\\.)+)\"|`([^`]+)`|([^\\s\\\\]\\S*))")
+	// A snippet's argument: {args[0]}, {args[:]}, and the older {args.0}.
+	snippetArgRe = regexp.MustCompile(`\{args[\[.]`)
 	// {$NAME} and {$NAME:default}, as the adapter substitutes them with
 	// nothing set.
 	substRe = regexp.MustCompile(`\{\$[^}:]+(?::([^}]*))?\}`)
@@ -463,6 +472,13 @@ var (
 // nothing — contributes nothing. inImport are the names used in an
 // import's argument, and imports every import line read.
 func envNames(caddyfile string) (all, noDefault, inImport []string, imports []Import, err error) {
+	all, noDefault, inImport, imports, _, err = scanCaddyfile(caddyfile)
+	return all, noDefault, inImport, imports, err
+}
+
+// scanCaddyfile is envNames, and byArgument: the import lines whose path
+// is a snippet's argument, as written.
+func scanCaddyfile(caddyfile string) (all, noDefault, inImport []string, imports []Import, byArgument []string, err error) {
 	seen := map[string]bool{}
 	names := map[string]bool{} // true: written somewhere with no default
 	importVars := map[string]bool{}
@@ -493,6 +509,10 @@ func envNames(caddyfile string) (all, noDefault, inImport []string, imports []Im
 				}
 			}
 			arg := strings.ReplaceAll(string(m[1]), `\"`, `"`) + string(m[2]) + string(m[3])
+			if snippetArgRe.MatchString(arg) {
+				byArgument = append(byArgument, "import "+arg)
+				continue
+			}
 			for _, v := range envRe.FindAllStringSubmatch(arg, -1) {
 				importVars[v[1]] = true
 			}
@@ -518,7 +538,7 @@ func envNames(caddyfile string) (all, noDefault, inImport []string, imports []Im
 		return nil
 	}
 	if err := scan(caddyfile); err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("reading the Caddyfile for {$NAME}: %w", err)
+		return nil, nil, nil, nil, nil, fmt.Errorf("reading the Caddyfile for {$NAME}: %w", err)
 	}
 
 	for n := range importVars {
@@ -533,5 +553,5 @@ func envNames(caddyfile string) (all, noDefault, inImport []string, imports []Im
 	}
 	sort.Strings(all)
 	sort.Strings(noDefault)
-	return all, noDefault, inImport, imports, nil
+	return all, noDefault, inImport, imports, byArgument, nil
 }

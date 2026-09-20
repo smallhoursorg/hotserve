@@ -389,3 +389,33 @@ func TestAnUndeclaredAppNamedThroughTheEnvironment(t *testing.T) {
 		t.Fatalf("with an unrelated variable after it: undeclared %q, by the environment %q", got.Undeclared, got.UndeclaredByEnv)
 	}
 }
+
+// An import whose path is a snippet's argument is a path this reader
+// does not know: the adapter fills it in from wherever the snippet is
+// used, and one of those uses can name files outside the directory —
+// which a run would then plan without. It is refused, by the line.
+func TestAnImportByASnippetArgumentIsRefused(t *testing.T) {
+	fakeHotserve(t)
+	file := filepath.Join(t.TempDir(), "Caddyfile")
+	for _, body := range []string{
+		"(apps) {\n\timport {args[0]}\n}\nimport apps /srv/apps/*.caddy\napp blog\n",
+		"(apps) {\n\timport sites/{args[1]}/*.caddy\n}\napp blog\n",
+		"(apps) {\n\timport {args.0}\n}\napp blog\n",
+		"(apps) {\n\timport \"{args[:]}\"\n}\napp blog\n",
+	} {
+		write(t, file, body)
+		for what, err := range map[string]error{"Inspect": second(Inspect(context.Background(), file)), "Make": second(Make(context.Background(), file))} {
+			if err == nil || !strings.Contains(err.Error(), "{args") || !strings.Contains(err.Error(), "literally") {
+				t.Errorf("%s of %q: %v", what, body, err)
+			}
+		}
+	}
+	// A snippet's argument anywhere else is nobody's business here, and
+	// neither is a snippet used with arguments that imports nothing by them.
+	write(t, file, "(site) {\n\trespond {args[0]}\n\timport sites/*.caddy\n}\nimport site hello\napp blog\n")
+	if _, err := Make(context.Background(), file); err != nil {
+		t.Errorf("an argument that is not an import's path: %v", err)
+	}
+}
+
+func second[T any](_ T, err error) error { return err }

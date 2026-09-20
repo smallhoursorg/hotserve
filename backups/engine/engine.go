@@ -148,7 +148,7 @@ func begin(cfg Config, r Runner) (x *run, end func(), err error) {
 		prev = &record.Status{Apps: map[string]*record.App{}}
 	}
 	x = &run{cfg: cfg, r: r, nonce: nonce, dir: filepath.Join(cfg.RunDir, nonce), prev: prev,
-		status: &record.Status{Started: time.Now().UTC(), Warning: unreadable, Apps: map[string]*record.App{}, Listed: prev.Listed, Unlisted: prev.Unlisted}}
+		status: &record.Status{Started: time.Now().UTC(), Warning: unreadable, Apps: map[string]*record.App{}, Listed: prev.Listed, Unlisted: prev.Unlisted, LastDrill: prev.LastDrill}}
 	if err := x.sweep(); err != nil {
 		return x, unlock, err
 	}

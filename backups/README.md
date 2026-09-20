@@ -500,6 +500,10 @@ hourly run. It needs no sudoers line.
   without the apps declared out there. A directory under
   `/etc/hotserve` that is a link leading out of it is outside too. A
   restore and a drill plan the same way, and are refused with the run.
+- A Caddyfile that imports by a snippet's argument (`import {args[0]}`):
+  the adapter fills the path in from wherever the snippet is used, and
+  one of those uses can name files outside `/etc/hotserve`, which
+  nothing here would see. Write the import's path literally.
 - A symbolic link anywhere in a declared path, or at `<app>/shared`:
   declare the real path, and put data on another disk with a bind
   mount, as liveswap itself asks. (The liveswap root may be a link.)
