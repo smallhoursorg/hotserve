@@ -1,14 +1,20 @@
 // Command hotserve-backup backs up what hotserve's apps declare.
 //
 //	hotserve-backup run     one backup run; root; what the timer starts
+//	hotserve-backup restore <app> [--snapshot <id>] [--to <dir>] [--no-pre-backup] [--yes]
+//	                        one snapshot of one app, into place or into a new directory; root
+//	hotserve-backup drill   fetch and check the newest snapshot of every app, installing nothing; root
 //
-// and three subcommands that are only ever the command of a unit a run
+// and subcommands that are only ever the command of a unit one of those
 // starts, each with a fixed view and no arguments — nothing an operator
 // or an app wrote reaches a command line:
 //
 //	hotserve-backup plan    print the plan read from /etc/hotserve/Caddyfile
 //	hotserve-backup dump    copy the databases /plan.json declares from /shared to /staging
 //	hotserve-backup clean   empty /staging
+//	hotserve-backup check   check the snapshot fetched into /restore
+//	hotserve-backup install check it, and install it into /target if all of it is sound
+//	hotserve-backup extract check it, and install what is sound into /target
 //
 // (The one string of a declaration's that does reach a command line is
 // the directory part of a nested path, to `restic ls`: engine.verify.)
@@ -18,10 +24,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -29,29 +38,35 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/smallhoursorg/hotserve/backups/dump"
 	"github.com/smallhoursorg/hotserve/backups/engine"
 	"github.com/smallhoursorg/hotserve/backups/plan"
 	"github.com/smallhoursorg/hotserve/backups/record"
+	"github.com/smallhoursorg/hotserve/backups/restore"
 	"github.com/smallhoursorg/hotserve/backups/unit"
 	"github.com/smallhoursorg/hotserve/liveswap/backupdecl"
 )
 
 const caddyfile = "/etc/hotserve/Caddyfile"
 
+const usage = `usage: hotserve-backup run
+       hotserve-backup restore <app> [--snapshot <id>] [--to <dir>] [--no-pre-backup] [--yes]
+       hotserve-backup drill`
+
 func main() {
-	if len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: hotserve-backup run")
+	if len(os.Args) < 2 || (len(os.Args) > 2 && os.Args[1] != "restore") {
+		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
 	}
-	if err := command(os.Args[1]); err != nil {
+	if err := command(os.Args[1], os.Args[2:]); err != nil {
 		fmt.Fprintln(os.Stderr, "hotserve-backup:", err)
 		os.Exit(1)
 	}
 }
 
-func command(name string) error {
+func command(name string, args []string) error {
 	// SIGINT, SIGTERM and SIGHUP cancel the context; a run then stops the unit
 	// it is waiting on, by name, and confirms it gone before returning.
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
@@ -59,6 +74,16 @@ func command(name string) error {
 	switch name {
 	case "run":
 		return run(ctx)
+	case "restore":
+		return restoreApp(ctx, args)
+	case "drill":
+		return drill(ctx)
+	case "check":
+		return settle(ctx, restore.CheckOnly)
+	case "install":
+		return settle(ctx, restore.AllOrNothing)
+	case "extract":
+		return settle(ctx, restore.WhatIsSound)
 	case "plan":
 		return printPlan(ctx)
 	case "dump":
@@ -69,21 +94,30 @@ func command(name string) error {
 	return fmt.Errorf("unknown command %q", name)
 }
 
-func run(ctx context.Context) error {
-	if os.Geteuid() != 0 {
-		return errors.New("a run starts system units, which needs root: sudo hotserve-backup run")
-	}
-	r, err := unit.NewSystemRunner(ctx)
-	if err != nil {
-		return err
-	}
-	defer r.Close()
-	st, err := engine.Run(ctx, engine.Config{
+func config() engine.Config {
+	return engine.Config{
 		ConfigDir: "/etc/hotserve", EnvFile: "/etc/hotserve/backup.env",
 		StateDir: "/var/lib/hotserve-backup", RunDir: "/run/hotserve-backup",
 		Self: "/usr/bin/hotserve-backup", Restic: "/usr/bin/restic",
 		BindsTo: ownService(),
-	}, r)
+	}
+}
+
+// runner connects to the system manager, which takes root.
+func runner(ctx context.Context, what string) (*unit.Runner, error) {
+	if os.Geteuid() != 0 {
+		return nil, fmt.Errorf("a %s starts system units, which needs root: sudo hotserve-backup %s", what, what)
+	}
+	return unit.NewSystemRunner(ctx)
+}
+
+func run(ctx context.Context) error {
+	r, err := runner(ctx, "run")
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	st, err := engine.Run(ctx, config(), r)
 	if st != nil {
 		report(st)
 	}
@@ -132,7 +166,205 @@ func report(st *record.Status) {
 			line += ": " + app.Detail
 		}
 		fmt.Println(line)
+		// A run that drilled says what the drill found; one that did not
+		// says nothing of it.
+		if app.RestoreDrill != nil && !app.RestoreDrill.Time.Before(st.Started) {
+			fmt.Printf("%s: restore not proven: %s\n", n, app.RestoreDrill.Detail)
+		} else if app.RestoreProven != nil && !app.RestoreProven.Time.Before(st.Started) {
+			fmt.Printf("%s: restore proven: snapshot %.8s was fetched and checked whole\n", n, app.RestoreProven.Snapshot.ID)
+		}
 	}
+}
+
+func restoreApp(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		return errors.New(usage)
+	}
+	o := engine.RestoreOptions{App: args[0]}
+	var yes bool
+	fs := flag.NewFlagSet("restore", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&o.Snapshot, "snapshot", "", "")
+	fs.StringVar(&o.To, "to", "", "")
+	fs.BoolVar(&o.NoPreBackup, "no-pre-backup", false, "")
+	fs.BoolVar(&yes, "yes", false, "")
+	if err := fs.Parse(args[1:]); err != nil || fs.NArg() != 0 {
+		return errors.New(usage)
+	}
+	// A flag given with nothing in it — --to "$DIR", and DIR unset — is
+	// not the same restore without the flag: that one overwrites.
+	var empty string
+	fs.Visit(func(f *flag.Flag) {
+		if f.Value.String() == "" {
+			empty = f.Name
+		}
+	})
+	if empty != "" {
+		return fmt.Errorf("--%s was given with nothing in it", empty)
+	}
+	if !yes {
+		o.Confirm = confirm(ctx)
+	}
+	r, err := runner(ctx, "restore")
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	rep, err := engine.Restore(ctx, config(), r, o)
+	if rep != nil {
+		reportRestore(rep)
+	}
+	return err
+}
+
+// answerWithin is how long a restore waits to be answered. It holds the
+// run lock while it waits, and a backup run that comes due then does
+// nothing: an abandoned question must not be what ends a box's backups.
+const answerWithin = 10 * time.Minute
+
+// confirm asks on standard input, and takes "y" or "yes" and nothing
+// else for a yes. With nobody there to answer it says how to go without
+// being asked, and that is a no; so is an interrupt, and so is silence.
+func confirm(ctx context.Context) func(engine.RestoreAsk) bool {
+	return func(a engine.RestoreAsk) bool {
+		fmt.Printf("%s: restore snapshot %.8s, made %s, into %s?\n", a.App, a.Snapshot.ID, a.Snapshot.Time.Format("2006-01-02 15:04 MST"), a.Into)
+		if a.LastOK != nil {
+			fmt.Println(notLastOK(a.App, a.LastOK))
+		}
+		if a.PreBackup {
+			fmt.Println("What is there is backed up first. Its databases are then replaced and its files overwritten; what the snapshot does not hold is left.")
+		} else {
+			fmt.Println("Its databases are replaced and its files overwritten, with no backup first; what the snapshot does not hold is left.")
+		}
+		fmt.Print("Type yes to go on: ")
+		type reply struct {
+			line string
+			err  error
+		}
+		said := make(chan reply, 1)
+		go func() {
+			line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+			said <- reply{line, err}
+		}()
+		select {
+		case r := <-said:
+			if r.err != nil && r.line == "" {
+				fmt.Println("\nnobody answered: pass --yes to restore without being asked")
+				return false
+			}
+			answer := strings.ToLower(strings.TrimSpace(r.line))
+			return answer == "y" || answer == "yes"
+		case <-ctx.Done():
+			fmt.Println()
+			return false
+		case <-time.After(answerWithin):
+			fmt.Printf("\nno answer in %s\n", answerWithin)
+			return false
+		}
+	}
+}
+
+// notLastOK says that the snapshot is not the last one a run ended ok
+// on, and which that is: a run that ended incomplete leaves a snapshot
+// with files left out that no check at restore can see.
+func notLastOK(app string, ok *record.Snapshot) string {
+	return fmt.Sprintf("%s: this is not the last snapshot a backup run ended ok on — that is %.8s, made %s. A run that ended incomplete leaves files out of a directory it read, which a restore cannot tell; --snapshot %.8s restores that one", app, ok.ID, ok.Time.Format("2006-01-02 15:04 MST"), ok.ID)
+}
+
+// reportRestore says what was restored, what was left and what was not,
+// and never "restored" of an item that was not.
+func reportRestore(rep *engine.RestoreReport) {
+	if rep.Warning != "" {
+		fmt.Println("warning:", rep.Warning)
+	}
+	if rep.LastOK != nil {
+		fmt.Println(notLastOK(rep.App, rep.LastOK))
+	}
+	if rep.PreBackup != nil {
+		fmt.Printf("%s: backed up first: snapshot %.8s (restore --snapshot %.8s puts back what was there)\n", rep.App, rep.PreBackup.ID, rep.PreBackup.ID)
+	}
+	var restored, not []string
+	for _, it := range rep.Items {
+		if it.OK {
+			restored = append(restored, it.Kind+" "+it.Path)
+		} else {
+			not = append(not, fmt.Sprintf("%s %s (%s)", it.Kind, it.Path, it.Detail))
+		}
+	}
+	from := fmt.Sprintf("snapshot %.8s of %s", rep.Snapshot.ID, rep.Snapshot.Time.Format("2006-01-02 15:04 MST"))
+	if len(restored) > 0 {
+		// The items are the ones the snapshot's own plan.json declares.
+		fmt.Printf("%s: restored from %s into %s: %s\n", rep.App, from, rep.Into, strings.Join(restored, ", "))
+	} else {
+		fmt.Printf("%s: nothing was restored from %s\n", rep.App, from)
+	}
+	if len(not) > 0 {
+		fmt.Printf("%s: not restored: %s\n", rep.App, strings.Join(not, "; "))
+	}
+	list := func(what string, names []string, more int) {
+		if len(names) == 0 {
+			return
+		}
+		line := what + ": " + strings.Join(names, ", ")
+		if more > 0 {
+			line += fmt.Sprintf(", and %d more", more)
+		}
+		fmt.Println(line)
+	}
+	list("left in place, not in the snapshot", rep.Left, rep.LeftMore)
+	list("in the snapshot and not installed, being neither files, directories nor links (a FIFO, socket or device)", rep.Skipped, rep.SkippedMore)
+}
+
+func drill(ctx context.Context) error {
+	r, err := runner(ctx, "drill")
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	st, err := engine.Drill(ctx, config(), r)
+	unproven := false
+	if st != nil {
+		names := make([]string, 0, len(st.Apps))
+		for n := range st.Apps {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			app := st.Apps[n]
+			switch {
+			case app == nil:
+			case app.RestoreDrill != nil:
+				unproven = true
+				line := fmt.Sprintf("%s: restore not proven", n)
+				if app.RestoreDrill.Snapshot.ID != "" {
+					line += fmt.Sprintf(": snapshot %.8s", app.RestoreDrill.Snapshot.ID)
+				}
+				line += ": " + app.RestoreDrill.Detail
+				if app.RestoreProven != nil {
+					line += fmt.Sprintf(" (last proven: snapshot %.8s, on %s)", app.RestoreProven.Snapshot.ID, app.RestoreProven.Time.Format("2006-01-02 15:04 MST"))
+				}
+				fmt.Println(line)
+			case app.RestoreProven != nil:
+				fmt.Printf("%s: restore proven: snapshot %.8s, on %s\n", n, app.RestoreProven.Snapshot.ID, app.RestoreProven.Time.Format("2006-01-02 15:04 MST"))
+			default:
+				fmt.Printf("%s: nothing to prove: the repository holds no snapshot of it\n", n)
+			}
+		}
+	}
+	if err != nil {
+		return err
+	}
+	if unproven {
+		return errors.New("not every app's restore was proven")
+	}
+	return nil
+}
+
+// settle is the unit that reads a fetched snapshot. Each item is
+// reported on its own, so the unit's exit status says only whether it
+// could report at all.
+func settle(ctx context.Context, mode restore.Mode) error {
+	return json.NewEncoder(os.Stdout).Encode(restore.Run(ctx, "/restore", "/target", mode))
 }
 
 var serviceRe = regexp.MustCompile(`^[A-Za-z0-9:_.@-]{1,200}\.service$`)
@@ -179,13 +411,20 @@ func dumpDatabases(ctx context.Context) error {
 }
 
 // clean empties dir without removing it (it is a mount point), and
-// without following anything out of it.
+// without following anything out of it. What is in it may be a tree out
+// of a snapshot, whose modes are the app's: a directory closed to
+// writing — or to its owner altogether — is opened first, or what is in
+// it could never be removed, and plaintext would stay for good.
 func clean(dir string) error {
+	// Best effort: what the opening could not reach, the removing says.
+	_ = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err == nil && d.IsDir() && p != dir { // by lstat: a link to a directory is not one
+			_ = os.Chmod(p, 0o700) //nolint:gosec // a directory about to be removed
+		}
+		return nil
+	})
 	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return err
-	}
-	var errs []error
+	errs := []error{err}
 	for _, e := range entries {
 		errs = append(errs, os.RemoveAll(filepath.Join(dir, e.Name())))
 	}

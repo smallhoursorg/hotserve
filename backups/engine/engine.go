@@ -85,40 +85,61 @@ type run struct {
 	mounts int // how many mount points this run has made, for their names
 }
 
+// preRestoreTag is on a snapshot a restore made of what it was about to
+// restore over. Such a snapshot is there to undo that restore, by name:
+// it is never what "the newest" means to a restore or to a drill — it
+// holds, as often as not, the damage that was being restored over.
+const preRestoreTag = "pre-restore"
+
 // Run does one run and writes the record. The error is about the run as
 // a whole; how each app fared is in the record.
 func Run(ctx context.Context, cfg Config, r Runner) (*record.Status, error) {
+	x, end, err := begin(cfg, r)
+	if x == nil {
+		return nil, err
+	}
+	defer end()
+	if err != nil {
+		return x.finish(err)
+	}
+	return x.finish(x.apps(ctx))
+}
+
+// begin is how a run, a restore and a drill each start: the one lock,
+// the last record, whatever an earlier one left running or mounted taken
+// away, and a directory of its own. With an error and a run, the lock is
+// held and the record is still to be written; end removes the directory
+// and releases the lock.
+func begin(cfg Config, r Runner) (x *run, end func(), err error) {
 	if _, err := os.Lstat(cfg.EnvFile); err != nil {
-		return nil, fmt.Errorf("backups are not set up: %s: %w", cfg.EnvFile, err)
+		return nil, nil, fmt.Errorf("backups are not set up: %s: %w", cfg.EnvFile, err)
 	}
 	// The state dir is where the status record is read from by anyone;
 	// everything else is root's alone. Units reach staging through
 	// binds the manager makes, not by walking here.
 	if err := os.MkdirAll(cfg.StateDir, 0o755); err != nil { //nolint:gosec // holds status.json, which is for everyone to read
-		return nil, err
+		return nil, nil, err
 	}
 	// Said again, because a mode given to mkdir is cut by the caller's
 	// umask, and sudo hands down a shell's.
 	if err := os.Chmod(cfg.StateDir, 0o755); err != nil { //nolint:gosec // as above
-		return nil, err
+		return nil, nil, err
 	}
-	for _, d := range []string{cfg.RunDir, filepath.Join(cfg.StateDir, "staging")} {
+	for _, d := range []string{cfg.RunDir, filepath.Join(cfg.StateDir, "staging"), filepath.Join(cfg.StateDir, "restore")} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	unlock, err := lock(filepath.Join(cfg.RunDir, "lock"))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	defer unlock()
-
 	nonce, err := newNonce()
 	if err != nil {
-		return nil, err
+		unlock()
+		return nil, nil, err
 	}
-	statusPath := filepath.Join(cfg.StateDir, "status.json")
-	prev, err := record.Read(statusPath)
+	prev, err := record.Read(filepath.Join(cfg.StateDir, "status.json"))
 	unreadable := ""
 	if err != nil {
 		// A record that cannot be read costs what it remembered, and is
@@ -126,33 +147,33 @@ func Run(ctx context.Context, cfg Config, r Runner) (*record.Status, error) {
 		unreadable = record.Text(fmt.Sprintf("the previous record could not be read and was replaced: %v", err))
 		prev = &record.Status{Apps: map[string]*record.App{}}
 	}
-	x := &run{cfg: cfg, r: r, nonce: nonce, dir: filepath.Join(cfg.RunDir, nonce), prev: prev,
+	x = &run{cfg: cfg, r: r, nonce: nonce, dir: filepath.Join(cfg.RunDir, nonce), prev: prev,
 		status: &record.Status{Started: time.Now().UTC(), Warning: unreadable, Apps: map[string]*record.App{}}}
 	if err := x.sweep(); err != nil {
-		return x.finish(statusPath, err)
+		return x, unlock, err
 	}
 	if err := os.Mkdir(x.dir, 0o700); err != nil {
-		return x.finish(statusPath, err)
+		return x, unlock, err
 	}
 	// Every mount under it has been taken away by then, each by its own
 	// defer — but a mount that would not go is the app's own data, bound
 	// here, and root must never walk into it deleting: removeRunDir does
 	// not recurse.
-	defer removeRunDir(x.dir)
-
-	return x.finish(statusPath, x.apps(ctx))
+	return x, func() { removeRunDir(x.dir); unlock() }, nil
 }
 
 // finish writes the record, whatever became of the run. An app the run
 // did not reach is recorded as not run — never as whatever the last
 // run found, under this run's date — and keeps only when it was last
 // ok.
-func (x *run) finish(statusPath string, runErr error) (*record.Status, error) {
+func (x *run) finish(runErr error) (*record.Status, error) {
+	statusPath := filepath.Join(x.cfg.StateDir, "status.json")
 	if runErr != nil {
 		x.status.Error = record.Text(runErr.Error())
 		for name, old := range x.prev.Apps {
 			if _, reached := x.status.Apps[name]; !reached && old != nil {
-				x.status.Apps[name] = &record.App{Class: record.NotRun, Detail: "the run ended before it reached this app", Looked: old.Looked, LastOK: old.LastOK, LastSnapshot: old.LastSnapshot}
+				x.status.Apps[name] = &record.App{Class: record.NotRun, Detail: "the run ended before it reached this app", Looked: old.Looked, LastOK: old.LastOK, LastSnapshot: old.LastSnapshot,
+					RestoreProven: old.RestoreProven, RestoreDrill: old.RestoreDrill}
 			}
 		}
 	}
@@ -170,6 +191,7 @@ func (x *run) apps(ctx context.Context) error {
 	}
 	x.status.Root = p.Root
 	x.forget(ctx, p)
+	x.sweepFetched(ctx)
 	// Name order, but what failed last run goes last: a failure that is
 	// one app's own — and ends the run, as every restic exit 1 does —
 	// costs its neighbours one run, not every run.
@@ -192,6 +214,15 @@ func (x *run) apps(ctx context.Context) error {
 			}
 		}
 		x.carryLastOK(name)
+		// A backup nobody has restored is a hypothesis: an app's first
+		// good backup has its snapshot fetched and checked, there and
+		// then. After that — proven or not — it is the drill's: a drill
+		// that keeps failing is not re-fetched, in full, every hour.
+		if app := x.status.Apps[name]; app.Class == record.OK && app.RestoreProven == nil && app.RestoreDrill == nil && ctx.Err() == nil {
+			if x.firstDrill(ctx, name, app) {
+				stop = &record.App{Detail: app.RestoreDrill.Detail}
+			}
+		}
 	}
 	return ctx.Err()
 }
@@ -204,6 +235,8 @@ func (x *run) failedLast(name string) bool {
 func (x *run) carryLastOK(name string) {
 	app, old := x.status.Apps[name], x.prev.Apps[name]
 	if old != nil {
+		// A backup run does not unprove a restore.
+		app.RestoreProven, app.RestoreDrill = old.RestoreProven, old.RestoreDrill
 		app.LastOK = old.LastOK
 		if app.LastSnapshot == nil { // unless the repository has just said
 			app.LastSnapshot = old.LastSnapshot
@@ -383,7 +416,10 @@ func (x *run) plan(ctx context.Context) (*plan.Plan, error) {
 
 // app backs one app up. repositoryWide reports a failure that every
 // other app would meet too — and meet slowly.
-func (x *run) app(ctx context.Context, root, name string, decl *backupdecl.Config) (app *record.App, repositoryWide bool) {
+//
+// tags go on the snapshot beside the app's own; a restore names what it
+// backs up first with preRestoreTag.
+func (x *run) app(ctx context.Context, root, name string, decl *backupdecl.Config, tags ...string) (app *record.App, repositoryWide bool) {
 	shared := backupdecl.SharedDir(root, name)
 	app = &record.App{Looked: shared}
 	fail := func(class record.Class, format string, a ...any) (*record.App, bool) {
@@ -506,7 +542,7 @@ func (x *run) app(ctx context.Context, root, name string, decl *backupdecl.Confi
 	}
 
 	binds = append(binds, unit.Bind{Source: excludeFile, Dest: excludePath})
-	id, class, detail, wide := x.upload(ctx, name, binds, masked)
+	id, class, detail, wide := x.upload(ctx, name, binds, masked, tags)
 	app.Class, app.Detail = class, detail
 	if id == "" {
 		return app, wide
@@ -560,8 +596,15 @@ func (x *run) staging(app string) (string, error) {
 }
 
 func (x *run) clean(ctx context.Context, app, staging string) error {
+	return x.cleanAs(ctx, "clean", app, staging)
+}
+
+// cleanAs is the one unit that empties a directory of plaintext as the
+// data user, under the role it plays: "clean" for a dump's staging,
+// "unstage" for what a restore fetched.
+func (x *run) cleanAs(ctx context.Context, role, app, staging string) error {
 	o, err := x.start(ctx, unit.Spec{
-		Name: x.name("clean", app), Description: "hotserve backup: remove " + app + "'s plaintext copies",
+		Name: x.name(role, app), Description: "hotserve backup: remove " + app + "'s plaintext copies",
 		Argv: []string{x.cfg.Self, "clean"},
 		User: dataUser, SameUIDNamespaces: true,
 		Binds: []unit.Bind{{Source: staging, Dest: "/staging", Writable: true}},
@@ -699,15 +742,24 @@ func (x *run) view(app string, shared pin, staging, declFile string, decl *backu
 	return binds, masked, present, unpin
 }
 
-// dataOwner is the data user's ids; a variable so a test can run where
-// that account does not exist.
-var dataOwner = func() (uid, gid int, err error) {
-	u, err := user.Lookup(dataUser)
+// dataOwner and backupOwner are the two accounts' ids; variables so a
+// test can run where the accounts do not exist.
+var (
+	dataOwner   = func() (uid, gid int, err error) { return ids(dataUser) }
+	backupOwner = func() (uid, gid int, err error) { return ids(backupUser) }
+)
+
+func ids(name string) (uid, gid int, err error) {
+	u, err := user.Lookup(name)
 	if err != nil {
 		return 0, 0, err
 	}
-	uid, _ = strconv.Atoi(u.Uid)
-	gid, _ = strconv.Atoi(u.Gid)
+	if uid, err = strconv.Atoi(u.Uid); err != nil {
+		return 0, 0, fmt.Errorf("%s's uid %q is not a number", name, u.Uid)
+	}
+	if gid, err = strconv.Atoi(u.Gid); err != nil {
+		return 0, 0, fmt.Errorf("%s's gid %q is not a number", name, u.Gid)
+	}
 	return uid, gid, nil
 }
 
@@ -748,13 +800,17 @@ var snapshotRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // upload runs restic. It returns the id of the snapshot this run made —
 // from this run's own summary, never "the latest" — or none.
-func (x *run) upload(ctx context.Context, app string, binds []unit.Bind, masked []string) (id string, class record.Class, detail string, repositoryWide bool) {
+func (x *run) upload(ctx context.Context, app string, binds []unit.Bind, masked []string, tags []string) (id string, class record.Class, detail string, repositoryWide bool) {
 	out := filepath.Join(x.dir, app+".summary.json")
+	argv := []string{x.cfg.Restic, "backup", "--quiet", "--json", "--retry-lock", retryLock,
+		"--exclude-file", excludePath,
+		"--host", "hotserve", "--tag", "hotserve", "--tag", "app:" + app}
+	for _, tag := range tags {
+		argv = append(argv, "--tag", tag)
+	}
 	o, err := x.start(ctx, unit.Spec{
 		Name: x.name("upload", app), Description: "hotserve backup: upload " + app,
-		Argv: []string{x.cfg.Restic, "backup", "--quiet", "--json", "--retry-lock", retryLock,
-			"--exclude-file", excludePath,
-			"--host", "hotserve", "--tag", "hotserve", "--tag", "app:" + app, "/backup/" + app},
+		Argv: append(argv, "/backup/"+app),
 		// An account of its own, so that the hotserve uid — the server,
 		// every app — can neither read this process's environment nor
 		// signal it; and one capability, to read files that account
@@ -905,9 +961,36 @@ func (x *run) verify(ctx context.Context, app, id string, rec *record.App) error
 
 // lastInRepository asks the repository for the newest snapshot of app,
 // or nil when it holds none. It is what a run falls back on where the
-// record holds no snapshot of an app, and what a restore on a rebuilt
-// box starts from.
+// record holds no snapshot of an app.
 func (x *run) lastInRepository(ctx context.Context, app string) (last *record.Snapshot, repositoryWide bool, err error) {
+	snaps, wide, err := x.history(ctx, app)
+	if err != nil || len(snaps) == 0 {
+		return nil, wide, err
+	}
+	return &snaps[len(snaps)-1].Snapshot, false, nil
+}
+
+// A listed snapshot is one the repository holds of an app.
+type listed struct {
+	record.Snapshot
+	// PreRestore: made by a restore, of what it then restored over.
+	PreRestore bool
+}
+
+// newest is the newest snapshot a backup run made, or nil.
+func newest(snaps []listed) *record.Snapshot {
+	for i := len(snaps) - 1; i >= 0; i-- {
+		if !snaps[i].PreRestore {
+			return &snaps[i].Snapshot
+		}
+	}
+	return nil
+}
+
+// history asks the repository for every snapshot of app, oldest first.
+// It is what a restore on a rebuilt box starts from: the repository
+// remembers what the box does not.
+func (x *run) history(ctx context.Context, app string) (snaps []listed, repositoryWide bool, err error) {
 	out := filepath.Join(x.dir, app+".history.json")
 	o, err := x.start(ctx, unit.Spec{
 		Name: x.name("history", app), Description: "hotserve backup: ask the repository about " + app,
@@ -927,22 +1010,26 @@ func (x *run) lastInRepository(ctx context.Context, app string) (last *record.Sn
 	if err != nil {
 		return nil, false, err
 	}
-	var snaps []struct {
+	var said []struct {
 		ID   string    `json:"id"`
 		Time time.Time `json:"time"`
+		Tags []string  `json:"tags"`
 	}
-	if err := json.Unmarshal(raw, &snaps); err != nil {
+	if err := json.Unmarshal(raw, &said); err != nil {
 		return nil, false, fmt.Errorf("what restic said of its snapshots could not be read: %w", err)
 	}
-	for _, s := range snaps {
+	for _, s := range said {
 		if !snapshotRe.MatchString(s.ID) {
 			return nil, false, fmt.Errorf("restic named a snapshot %q", record.Text(s.ID))
 		}
-		if last == nil || s.Time.After(last.Time) {
-			last = &record.Snapshot{ID: s.ID, Time: s.Time}
+		one := listed{Snapshot: record.Snapshot{ID: s.ID, Time: s.Time}}
+		for _, tag := range s.Tags {
+			one.PreRestore = one.PreRestore || tag == preRestoreTag
 		}
+		snaps = append(snaps, one)
 	}
-	return last, false, nil
+	sort.SliceStable(snaps, func(i, j int) bool { return snaps[i].Time.Before(snaps[j].Time) })
+	return snaps, false, nil
 }
 
 // itemPath is where a declared item sits in the snapshot.

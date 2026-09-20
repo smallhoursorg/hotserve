@@ -11,11 +11,13 @@ and nothing here talks to hotserve. The two share a declaration format
 (`liveswap/backupdecl`) and nothing more — `hotserve-backup` links no
 Caddy.
 
-**On this branch it is the engine only.** `hotserve-backup run` does one
-backup run. There is no setup command, no timer, no restore and no
-package yet: a run needs `/etc/hotserve/backup.env` written by hand
-(below), Debian 13's `restic` and `sqlite3` installed, and systemd 257
-(`PrivatePIDs=`), which is Debian 13's.
+**On this branch it is the engine, restore and the restore drill.**
+`hotserve-backup run` does one backup run, `hotserve-backup restore
+<app>` puts a snapshot back, and `hotserve-backup drill` proves that a
+restore would work without doing one. There is no setup command, no
+timer and no package yet: all three need `/etc/hotserve/backup.env`
+written by hand (below), Debian 13's `restic` and `sqlite3` installed,
+and systemd 257 (`PrivatePIDs=`), which is Debian 13's.
 
 ## A run
 
@@ -28,7 +30,8 @@ package yet: a run needs `/etc/hotserve/backup.env` written by hand
    the plan — the liveswap root and each app's declaration — and takes
    that plan strictly, validating every field again;
 4. empties and removes the staging directory of any app that no longer
-   declares a backup;
+   declares a backup, and empties whatever a restore or a drill that was
+   killed had fetched;
 5. for each app that declares a backup — in name order, but one whose
    last run `failed` goes last:
    - empties the app's staging directory, before anything else;
@@ -49,6 +52,11 @@ package yet: a run needs `/etc/hotserve/backup.env` written by hand
      — and looks for every declared item in it, because restic leaves
      out a path that vanishes while it runs, with exit 0;
    - empties staging again, whatever happened;
+   - and, if the app is `ok` and no drill of it is on record — proven
+     or failed — drills the snapshot it has just made (below): an app's
+     first good backup, once; after that it is the drill's. That is the
+     whole app fetched back, in plaintext, on a timer, so above 1 GiB
+     restored the run leaves it to `hotserve-backup drill`, and says so;
 6. writes `/var/lib/hotserve-backup/status.json` — also when the run
    ended early, with why, and the apps it did not reach as `not run`.
 
@@ -67,6 +75,12 @@ run, and what the step is given.
 | dump, clean | `hotserve`, own user+PID namespaces | no | no | that app's `shared/` (dump only) and staging |
 | upload | `hotserve-backup`, `CAP_DAC_READ_SEARCH` | yes | yes | that app's declared paths and staged copies, read-only |
 | verify | `hotserve-backup`, no capability | yes | yes | nothing of the app |
+| size | `hotserve-backup`, no capability | yes | yes | nothing of the app |
+| fetch | `hotserve-backup`, no capability | yes | yes | one empty directory, writable |
+| hand-over | root, `CAP_CHOWN` and `CAP_DAC_READ_SEARCH` | no | no | that directory and nothing else |
+| install, check | `hotserve`, own user+PID namespaces | no | no | what was fetched, read-only; and (install) that app's `shared/` |
+| unstage | `hotserve`, own user+PID namespaces | no | no | what was fetched, to remove it |
+| mkshared | `hotserve`, own user+PID namespaces | no | no | the liveswap root, to make `<app>/shared` on a rebuilt box |
 
 The run itself needs root, `CAP_SYS_ADMIN` and the host's own mount and
 PID namespaces: it makes bind mounts that the manager then has to see.
@@ -109,6 +123,151 @@ PID namespaces: it makes bind mounts that the manager then has to see.
   answer what was asked, in a class the run knows; and words that came
   from `sqlite3` — which hold names the app chose — lose their control
   characters and their length before they are kept or printed.
+
+## A restore
+
+`hotserve-backup restore <app> [--snapshot <id>] [--to <dir>]
+[--no-pre-backup] [--yes]`, as root. It works from the repository and
+the Caddyfile alone: a rebuilt box has no record, and needs none. What
+that costs is below, under "what a restore cannot tell".
+
+1. The lock, the leftovers and the plan, as for a run. The app has to
+   declare a backup: the liveswap root is taken from the plan. The lock
+   is the run's own, and is held from here to the end — the question
+   below included — so a backup run that comes due meanwhile says a run
+   is in progress, and does nothing. The question waits ten minutes for
+   its answer, and no answer is a no; the backup made first, the fetch
+   and the install are not bounded, so a large restore is hours in
+   which no app is backed up. On one box that is the accepted cost: a
+   restore is the one thing the box is doing.
+2. The repository is asked for the app's snapshots (host `hotserve`, tag
+   `app:<name>`). The newest that a backup run made is restored, or the
+   one `--snapshot` names by its hex id, or by eight or more characters
+   from the start of it — never `latest` — and only if it is among the
+   app's. "Newest" is by the time restic recorded. Where the record
+   says the last snapshot a run ended `ok` on is another one, the
+   question and the report say so, and name it.
+3. It asks, naming the snapshot and when it was made. `--yes` answers;
+   with nobody to answer it refuses. Nothing has happened yet.
+4. **The app is backed up first**, by the steps of a run, so the restore
+   can be undone: the snapshot is tagged `pre-restore` and named in what
+   the restore prints, also when the restore then fails. It holds what
+   was being restored over — the damage, as often as not — so it is
+   restored only by name: it is never "the newest", to a restore or to a
+   drill. If that backup does not end `ok` — the live database being the
+   damaged thing, often — the restore stops and says so;
+   `--no-pre-backup` restores without one. Where there is no
+   `<root>/<app>/shared` there is nothing to back up or overwrite: a
+   unit running as `hotserve` makes it, mode 0750.
+5. **fetch**: `restic restore <id>:/backup/<app>` into an empty directory
+   under `/var/lib/hotserve-backup/restore`, as `hotserve-backup` with
+   no capability. Not in a user namespace: there every `chown` restic
+   tries fails in a way it does not overlook. Always `<id>:<path>`: a
+   path the snapshot does not hold is then exit 1, where `--include`
+   matching nothing is exit 0. Exit 0 is still not a restore: restic's
+   summary has to say it restored something, and everything. **A fetch
+   is the whole app, in plaintext, under `/var/lib/hotserve-backup`, and
+   needs that much room there** — a drill too. So the repository is
+   asked first how large the snapshot is restored (`restic stats --mode
+   restore-size`), and a fetch that is larger than what is free there is
+   not begun: the restore, or that app's drill, says how much it needs
+   and how much there is. An install then writes the app a second time
+   while the fetch is still there, and on the usual box that is the
+   same disk — the one the live apps write to — so a restore into place
+   or `--to` needs **twice** the snapshot free on one filesystem, or
+   the snapshot on each of two. A drill, which installs nothing, needs
+   the fetch alone.
+6. **hand-over**: `chown -hR hotserve:` of that directory, by root, in a
+   view that holds nothing else, with no network. By name, so a restore
+   does not depend on the uid the snapshot was made under. It needs
+   `CAP_DAC_READ_SEARCH` beside `CAP_CHOWN`: root without it cannot read
+   a directory that is another account's and closed.
+7. **install**, as `hotserve` in its own namespaces with no network and
+   no credential, given what was fetched read-only and the app's
+   `shared/` — pinned and bound by the run itself, as for an upload.
+   **Every check comes before any change**:
+   - the snapshot's own `plan.json` says which paths are databases — not
+     the box's declaration, which may have changed. It is read strictly
+     and validated as a declaration is anywhere;
+   - each database copy has to be a SQLite file of which
+     `integrity_check` says exactly `ok`;
+   - every declared item has to be in the snapshot;
+   - nothing may be in the way: a symbolic link at `shared/`, at a
+     declared directory or on the way to it, or at a database, is
+     refused; and so is a file that has a `-wal` beside it in place — a
+     live database that this snapshot holds only as a file, which put
+     back under the app would be read with a log that is not its own.
+     Nothing here can stop the app: restore before it is first deployed,
+     or `--to` a directory and move the file into place with the app
+     stopped.
+
+   If anything fails, nothing is installed — the files neither. Then a
+   database is restored over the live one by SQLite's own backup, as one
+   transaction, with the app running: a writer waits and carries on.
+   (`sqlite3` is started as for a dump, and has the same five minutes to
+   *open* the live database; in rollback-journal mode, where a reader
+   and a writer exclude each other, a restore that stays locked out says
+   so.) Where there is no live database the copy is put there, and any
+   `-wal`, `-shm` or `-journal` left beside its name removed. Nothing
+   here can stop the app, and one that re-creates its database meanwhile
+   keeps writing to a file that is no longer there: with no database in
+   place, restore before the app is first deployed. A copy is in
+   rollback-journal mode; an app that wants WAL sets it when it opens. Files are written beside their names and renamed onto
+   them, in directories opened without following a link: a link where a
+   file goes is replaced, never written through, and a symbolic link the
+   snapshot holds comes back as the same link, its text stored and never
+   followed. A copy the app kept closed to its own owner is read all the
+   same — what was fetched is this run's scratch, under a directory no
+   app can enter — and the target gets the mode the snapshot held.
+   Directories the restore makes get the modes they had, and one that is
+   closed to writing in place is opened while it is filled. If something fails
+   once installing has begun, the restore says the data is partly
+   restored — never that nothing was changed — and the same restore, run
+   again, goes over it.
+8. **Nothing of the app's is ever removed.** What is in place under a declared path
+   and not in the snapshot is left, and listed. What is in the snapshot
+   and could not be app data and could not be put back — a FIFO, a
+   socket, a device — is listed and not installed, and the restore is
+   none the worse for it. A declared database is never installed from
+   `files/`, whatever stands there.
+9. What was fetched is removed, first and last, by a unit an interrupt
+   does not reach; a run, a restore and a drill each remove what a
+   killed one left.
+
+`--to <dir>` does the same into a directory it makes (it must not
+exist), owned by `hotserve` and laid out as `shared/` is. Nothing is
+asked and nothing backed up, since nothing is overwritten; and what is
+sound lands even when something else is not — a damaged copy is never
+handed out as a database — with a non-zero exit. It is how to look into
+an `incomplete` snapshot, which cannot be restored into place.
+
+### What a restore cannot tell
+
+A run that ends `incomplete` because restic exited 3 — a file
+unreadable, or gone while it was read, which is ordinary for a live
+uploads directory — leaves a snapshot with files left out of a
+directory it did read. Every check at install passes on it, and a
+restore of it puts back fewer files than the previous `ok` one would,
+and says it restored. On a box with a record the restore says when the
+snapshot is not the last one a run ended `ok` on, and names that one.
+On a rebuilt box there is no record and nothing in the repository says
+how a run ended, so a restore cannot tell: that is the cost of needing
+no record. `status.json` on the box that made the backups is what
+knows.
+
+## The restore drill
+
+`hotserve-backup drill`, as root: for every app the repository holds a
+snapshot of, the newest is fetched, handed over and checked exactly as a
+restore checks it — and nothing is installed; no unit of a drill sees
+any app's data. The record then says, per app, `restore_proven` (which
+snapshot, and when it was proven) and, until the next drill that proves
+one, `restore_drill` (which snapshot proved nothing, when, and why). A
+drill that fails never replaces what was proven, a drill that is
+interrupted writes nothing, and a backup run carries both. It exits 0
+if no drill failed; an app the repository holds no snapshot of has
+nothing to prove. A `run` that drills — an app's first good backup —
+says what the drill found on a line of its own.
 
 ## What a snapshot holds
 
@@ -210,6 +369,19 @@ they hold the database's path, and `busy.db` is not busy.
   *inside* a declared directory; nothing reads it.)
 - A run's leftover unit that will not stop within two minutes: the run
   is refused, and the record says why.
+- A restore into place of a snapshot that lacks something its own
+  `plan.json` declares, or holds a damaged copy: restore it `--to` a
+  directory, or restore another snapshot.
+- A snapshot whose `plan.json` is missing, is not a valid declaration, or
+  holds a field this version does not know.
+- `--to` a directory that exists, and `--to` or `--snapshot` given with
+  nothing in it.
+- A file that would land on a live database (above).
+- A restore or a drill of a snapshot larger than what is free under
+  `/var/lib/hotserve-backup`, and a restore of one larger than half of
+  it where the app's data is on the same filesystem.
+- A run's own first drill of a snapshot above 1 GiB restored: that one
+  is `hotserve-backup drill`'s.
 - A unit whose state cannot be read ten looks running (five minutes) is
   stopped, and that step fails.
 
@@ -285,5 +457,11 @@ left under `/var/cache/hotserve-backup`.
 - `make test-integration` also races an app flipping a declared path
   between its directory and a link to a sibling's, as fast as it can,
   against real units starting with the read capability.
+- and an app flipping the directory restored into, and the database
+  restored over, between the real thing and a link to a sibling's while
+  real install units run; `restic restore`'s summary and exit statuses;
+  a restore over a live database under a writer, and over one with
+  damaged pages; a runner made with the context that is then cancelled.
 - `make e2e-backup` — a box with systemd, restic and sqlite3, and an S3
-  server (`rclone serve s3`): mostly failure paths.
+  server (`rclone serve s3`): the backup suite and the restore suite,
+  mostly failure paths.
