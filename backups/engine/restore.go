@@ -81,7 +81,11 @@ type RestoreReport struct {
 	Into     string
 	// PreBackup is the snapshot made of the app before it was restored
 	// over; nil when there was nothing to back up or it was skipped.
-	PreBackup *record.Snapshot
+	// PreBackupClass and PreBackupDetail say how that backup ended:
+	// one that did not end ok holds less than what was there.
+	PreBackup       *record.Snapshot
+	PreBackupClass  record.Class
+	PreBackupDetail string
 	// Warning is something the restore got past and a person should know.
 	Warning string
 	// LastOK is set when the snapshot restored is not the last one the
@@ -205,6 +209,9 @@ func Restore(ctx context.Context, cfg Config, r Runner, o RestoreOptions) (rep *
 		var release func()
 		var made bool
 		if target, release, made, err = x.inPlace(ctx, p.Root, o, decl, rep); err != nil {
+			if made {
+				x.unmakeShared(context.WithoutCancel(ctx), p.Root, o.App)
+			}
 			return rep, err
 		}
 		defer release()
@@ -308,7 +315,7 @@ func (x *run) inPlace(ctx context.Context, root string, o RestoreOptions, decl *
 		} else {
 			app.LastOK = nil
 		}
-		rep.PreBackup = app.Snapshot // whether or not it ended ok: it is in the repository
+		rep.PreBackup, rep.PreBackupClass, rep.PreBackupDetail = app.Snapshot, app.Class, app.Detail // whether or not it ended ok: it is in the repository
 		// The record: this app under this restore's own time, every other
 		// app as the last run left it — never this app's result under
 		// the last run's date.
@@ -365,7 +372,13 @@ func (x *run) unmakeShared(ctx context.Context, root, app string) {
 
 // notOwn refuses a path under the engine's own directories.
 func notOwn(dir string, cfg Config) error {
+	owns := []string{cfg.StateDir, cfg.RunDir}
 	for _, own := range []string{cfg.StateDir, cfg.RunDir} {
+		if real, err := filepath.EvalSymlinks(own); err == nil && real != own {
+			owns = append(owns, real) // /var/lib an alias of a data disk, say
+		}
+	}
+	for _, own := range owns {
 		if dir == own || strings.HasPrefix(dir, own+"/") {
 			return fmt.Errorf("--to %s is under %s, which is the backup engine's own", dir, own)
 		}
@@ -518,7 +531,7 @@ func (x *run) bring(ctx context.Context, app, id, role, target string, size uint
 			return ctx.Err()
 		}
 		answer, err = x.settle(ctx, app, role, fetched, target)
-		if err != nil && role != "check" {
+		if err != nil && role != "check" && !errors.As(err, new(refusedError)) {
 			// The unit changes things; one that ended with no usable
 			// answer — interrupted, killed, out of memory — may have
 			// begun. That is said, whatever the cause.
@@ -657,7 +670,16 @@ var sameFilesystem = func(a, b string) (bool, error) {
 	if err := unix.Stat(b, &sb); err != nil {
 		return false, &os.PathError{Op: "stat", Path: b, Err: err}
 	}
-	return sa.Dev == sb.Dev, nil
+	if sa.Dev == sb.Dev {
+		return true, nil
+	}
+	// One pool under two device numbers — btrfs subvolumes — shares its
+	// room all the same; the filesystem id says so where st_dev does not.
+	var fa, fb unix.Statfs_t
+	if unix.Statfs(a, &fa) != nil || unix.Statfs(b, &fb) != nil {
+		return false, nil
+	}
+	return fa.Fsid == fb.Fsid && fa.Type == fb.Type, nil
 }
 
 // room refuses a fetch that could not fit where it lands — and, where
@@ -746,6 +768,12 @@ func (x *run) fetch(ctx context.Context, app, id, fetched string) error {
 	return fetchedAll(out, id)
 }
 
+// refusedError is a unit's own word that it did nothing, in an answer
+// it could give — as against one that gave none.
+type refusedError struct{ error }
+
+func (e refusedError) Unwrap() error { return e.error }
+
 // repositoryWideError is a failure every other app would meet too, and
 // meet as slowly.
 type repositoryWideError struct{ error }
@@ -829,7 +857,9 @@ func (x *run) settle(ctx context.Context, app, role, fetched, target string) (*r
 		return nil, fmt.Errorf("the %s unit said nothing usable (exit %d); `journalctl -u %s` may say why", role, o.ExitStatus, x.name(role, app))
 	}
 	if answer.Error != "" {
-		return nil, errors.New(record.Text(answer.Error))
+		// The unit's own word that it did nothing: a plan.json it could
+		// not take. Not a failure of the install, and never "partly".
+		return nil, refusedError{errors.New(record.Text(answer.Error))}
 	}
 	if answer.Plan == nil || answer.Plan.Validate() != nil {
 		return nil, fmt.Errorf("the %s unit answered about a plan that is not a declaration", role)
@@ -851,6 +881,9 @@ func (x *run) settle(ctx context.Context, app, role, fetched, target string) (*r
 		if !restore.Known(it.Class) {
 			return nil, fmt.Errorf("the %s unit answered %q, which is not an answer", role, record.Text(string(it.Class)))
 		}
+	}
+	if role == "check" && (answer.Changed || len(answer.Left) > 0 || answer.LeftMore > 0) {
+		return nil, fmt.Errorf("the check unit says it changed something, or lists what is in place, and it was shown no place")
 	}
 	for i := range answer.Left {
 		answer.Left[i] = record.Text(answer.Left[i])
@@ -960,12 +993,16 @@ func Drill(ctx context.Context, cfg Config, r Runner) (*record.Status, error) {
 	if err != nil {
 		return nil, err
 	}
+	st := x.prev
+	st.LastDrill = &record.Drill{Time: time.Now().UTC()}
 	p, err := x.plan(ctx)
 	if err != nil {
-		return nil, err
+		// Said in the record, so that a drill failing here week after
+		// week does not pass for "proven" ageing quietly.
+		st.LastDrill.Detail = record.Text(err.Error())
+		return st, errors.Join(err, record.Write(filepath.Join(cfg.StateDir, "status.json"), st))
 	}
 	x.sweepFetched(ctx)
-	st := x.prev
 	// An app that has left the plan has nothing left to prove.
 	for name, rec := range st.Apps {
 		if _, declared := p.Apps[name]; !declared && rec != nil {

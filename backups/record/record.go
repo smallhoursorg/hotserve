@@ -100,6 +100,9 @@ type Status struct {
 	Warning string          `json:"warning,omitempty"`
 	Root    string          `json:"root,omitempty"`
 	Apps    map[string]*App `json:"apps"`
+	// LastDrill is when a drill last ran, and — where it could not
+	// drill anything — why; each app's own verdict is on the app.
+	LastDrill *Drill `json:"last_drill,omitempty"`
 }
 
 // Text makes a string from a unit fit to print and to keep: no control

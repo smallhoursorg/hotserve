@@ -6,9 +6,12 @@
 // shared dir.
 //
 // A restore puts back what the snapshot holds: files, directories and
-// the symbolic links between them, each with the mode it had. Only what
-// a restore could not put back and an app could not have as data — a
-// FIFO, a socket, a device — is listed and left out.
+// the symbolic links between them, each with the mode it had, and a
+// file with several names as one file with those names. Only what a
+// restore could not put back and an app could not have as data — a
+// FIFO, a socket, a device — is listed and left out. Not put back:
+// setuid, setgid and sticky bits (the unit cannot set them), extended
+// attributes and ACLs, and directories' times.
 //
 // Every check comes before any change. What is restored into is the
 // app's own to rearrange while this runs, so nothing in it is reached by
@@ -36,6 +39,7 @@ import (
 	"os"
 	"path"
 	"sort"
+	"strings"
 
 	"github.com/smallhoursorg/hotserve/backups/dump"
 	"github.com/smallhoursorg/hotserve/backups/nofollow"
@@ -142,7 +146,20 @@ type job struct {
 	excluded               map[string]bool // declared databases and their sidecars, relative to the shared dir
 	answer                 *Answer
 	made                   []entry // the directories this restore made, for their modes
+	// placed is where the first name of a staged file with several
+	// names went, by its inode, for the names after it.
+	placed map[uint64]string
+	// madeAt indexes made by rel, and seen is every directory this
+	// restore has found in place or made: neither is walked twice.
+	madeAt map[string]int
+	seen   map[string]bool
+	// skipped is every snapshot entry listed as left out, by its place.
+	skipped map[string]bool
 }
+
+// noPerm is the mode of a directory made only on the way to something:
+// nothing known, so nothing set.
+const noPerm = ^uint32(0)
 
 // Run checks the snapshot in the directory staged, and installs it into
 // target as mode says. target is not looked at when mode is CheckOnly.
@@ -333,6 +350,13 @@ func (j *job) checkDatabase(p string) Item {
 		it.Class, it.Detail = Refused, err.Error()
 		return it
 	}
+	// A live file sqlite3 could not open — a first page that is noise —
+	// would be found when the restore has begun. An empty file it opens
+	// as an empty database.
+	if res := dump.Inspect(j.targetPath, p); res.Class == dump.NotADatabase && !strings.HasPrefix(res.Detail, "no SQLite header (0 bytes)") {
+		it.Class, it.Detail = Refused, fmt.Sprintf("%q in place is not a database sqlite3 can open (%s); move it aside, and a restore puts the copy in its place", p, res.Detail)
+		return it
+	}
 	// Where there is no database, its sidecars' names are removed before
 	// the copy goes in; one that is not a file cannot be.
 	if !j.exists(p) {
@@ -393,6 +417,10 @@ type tree struct {
 type entry struct {
 	rel  string // relative to the shared dir
 	perm uint32
+	// ino is the staged file's inode where it has more than one name: a
+	// hardlinked pair comes back as one file with two names, not two
+	// files — as restic put it in the scratch, and as it was.
+	ino uint64
 }
 
 // link is a symbolic link the snapshot holds: its place, and the text it
@@ -438,9 +466,9 @@ func (j *job) checkFiles(p string) (Item, *tree) {
 	switch st.Mode & unix.S_IFMT {
 	case unix.S_IFREG:
 		t.single = true
-		t.files = []entry{{p, st.Mode & 0o777}}
+		t.files = []entry{{rel: p, perm: st.Mode & 0o777}}
 	case unix.S_IFDIR:
-		t.dirs = []entry{{p, st.Mode & 0o777}}
+		t.dirs = []entry{{rel: p, perm: st.Mode & 0o777}}
 		if err := j.walk(src, p, t); err != nil {
 			it.Class, it.Detail = Failed, "in the snapshot: "+err.Error()
 			return it, nil
@@ -539,9 +567,13 @@ func (j *job) checkLinkTarget(rel string) error {
 	if err := j.checkTarget(path.Dir(rel), true); err != nil {
 		return err
 	}
-	if fd, err := nofollow.Open(j.target, rel, unix.O_PATH|unix.O_DIRECTORY); err == nil {
-		unix.Close(fd) //nolint:errcheck,gosec // a path descriptor
-		return fmt.Errorf("%q is a directory in place and a symbolic link in the snapshot", rel)
+	switch kind := j.kindAt(rel); kind {
+	case 0, unix.S_IFREG, unix.S_IFLNK:
+	default:
+		return fmt.Errorf("%q is %s in place and a symbolic link in the snapshot", rel, kindWord(kind))
+	}
+	if j.exists(rel + "-wal") {
+		return fmt.Errorf("%q is a live SQLite database in place (a -wal is beside it) that this snapshot holds as a symbolic link: nothing here can stop the app; restore before it is first deployed, or restore --to a directory", rel)
 	}
 	return nil
 }
@@ -589,11 +621,15 @@ func (j *job) walk(src, rel string, t *tree) error {
 		switch kind := st.Mode & unix.S_IFMT; kind {
 		case unix.S_IFREG:
 			if j.target >= 0 { // a drill keeps no list: it has nothing to install
-				t.files = append(t.files, entry{childRel, st.Mode & 0o777})
+				e := entry{rel: childRel, perm: st.Mode & 0o777}
+				if st.Nlink > 1 {
+					e.ino = st.Ino
+				}
+				t.files = append(t.files, e)
 			}
 		case unix.S_IFDIR:
 			if j.target >= 0 {
-				t.dirs = append(t.dirs, entry{childRel, st.Mode & 0o777})
+				t.dirs = append(t.dirs, entry{rel: childRel, perm: st.Mode & 0o777})
 			}
 			if err := j.walk(path.Join(src, name), childRel, t); err != nil {
 				return err
@@ -607,6 +643,10 @@ func (j *job) walk(src, rel string, t *tree) error {
 				t.links = append(t.links, link{childRel, target})
 			}
 		default:
+			if j.skipped == nil {
+				j.skipped = map[string]bool{}
+			}
+			j.skipped[childRel] = true
 			if len(j.answer.Skipped) < named {
 				j.answer.Skipped = append(j.answer.Skipped, Skipped{Path: childRel, Kind: kindWord(kind)})
 			} else {
@@ -696,7 +736,7 @@ func readDir(dirfd int, rel string) ([]string, error) {
 func (j *job) installFiles(p string, t *tree) error {
 	if t.single {
 		// A declared file's directory may not be there yet: a rebuilt box.
-		if err := j.mkdir(path.Dir(p), 0o700); err != nil {
+		if err := j.mkdir(path.Dir(p), noPerm); err != nil {
 			return err
 		}
 	}
@@ -713,8 +753,20 @@ func (j *job) installFiles(p string, t *tree) error {
 		if t.single {
 			src = path.Join("files", p)
 		}
+		if first, seen := j.placed[f.ino]; f.ino != 0 && seen {
+			if err := j.hardlink(first, f.rel); err != nil {
+				return fmt.Errorf("%q: %w", f.rel, err)
+			}
+			continue
+		}
 		if err := j.copyFile(src, f.rel, f.perm); err != nil {
 			return fmt.Errorf("%q: %w", f.rel, err)
+		}
+		if f.ino != 0 {
+			if j.placed == nil {
+				j.placed = map[uint64]string{}
+			}
+			j.placed[f.ino] = f.rel
 		}
 	}
 	for _, l := range t.links {
@@ -736,8 +788,13 @@ func (j *job) installFiles(p string, t *tree) error {
 // it had. Deepest last-opened first, and once, after every item — an
 // item that failed, or a database's directory, is no exception.
 func (j *job) closeDirs() error {
+	// Deepest first, whatever order they were seen in: a parent closed
+	// before its child could not be opened to close the child.
+	sort.SliceStable(j.made, func(a, b int) bool {
+		return strings.Count(j.made[a].rel, "/") > strings.Count(j.made[b].rel, "/")
+	})
 	var errs []error
-	for i := len(j.made) - 1; i >= 0; i-- {
+	for i := range j.made {
 		d := j.made[i]
 		fd, err := nofollow.Open(j.target, d.rel, unix.O_RDONLY|unix.O_DIRECTORY)
 		if err == nil {
@@ -748,7 +805,7 @@ func (j *job) closeDirs() error {
 			errs = append(errs, fmt.Errorf("%q: %w", d.rel, err))
 		}
 	}
-	j.made = nil
+	j.made, j.madeAt = nil, nil
 	return errors.Join(errs...)
 }
 
@@ -756,22 +813,62 @@ func (j *job) closeDirs() error {
 // mode a later item supplies for it — a directory first made on the way
 // to something, with 0700 and nothing better known.
 func (j *job) madeAlready(rel string, perm uint32) bool {
-	for i := range j.made {
-		if j.made[i].rel == rel {
-			if perm != 0o700 {
-				j.made[i].perm = perm
-			}
-			return true
-		}
+	i, ok := j.madeAt[rel]
+	if ok && perm != noPerm {
+		j.made[i].perm = perm
 	}
-	return false
+	return ok
+}
+
+// record remembers a directory whose mode is to be set last.
+func (j *job) record(rel string, perm uint32) {
+	if j.madeAt == nil {
+		j.madeAt = map[string]int{}
+	}
+	if i, ok := j.madeAt[rel]; ok {
+		j.made[i].perm = perm
+		return
+	}
+	j.madeAt[rel] = len(j.made)
+	j.made = append(j.made, entry{rel: rel, perm: perm})
+}
+
+// hardlink gives the file already placed at first another name, rel:
+// made beside its name and renamed onto it, like a file, in directories
+// opened without following a link.
+func (j *job) hardlink(first, rel string) error {
+	if err := j.mkdir(path.Dir(rel), noPerm); err != nil {
+		return err
+	}
+	from, err := nofollow.Open(j.target, path.Dir(first), unix.O_PATH|unix.O_DIRECTORY)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(from) //nolint:errcheck // a path descriptor
+	dir, err := nofollow.Open(j.target, path.Dir(rel), unix.O_PATH|unix.O_DIRECTORY)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(dir) //nolint:errcheck // a path descriptor
+	tmp, err := tmpName()
+	if err != nil {
+		return err
+	}
+	if err := unix.Linkat(from, path.Base(first), dir, tmp, 0); err != nil {
+		return &os.PathError{Op: "link", Path: rel, Err: err}
+	}
+	if err := unix.Renameat(dir, tmp, dir, path.Base(rel)); err != nil {
+		_ = unix.Unlinkat(dir, tmp, 0) // this restore's own
+		return err
+	}
+	return nil
 }
 
 // symlink creates the symbolic link rel -> target in the target,
 // beside its name and renamed onto it: it replaces whatever is there
 // (except a directory, refused at the checks) and follows nothing.
 func (j *job) symlink(rel, target string) error {
-	if err := j.mkdir(path.Dir(rel), 0o700); err != nil {
+	if err := j.mkdir(path.Dir(rel), noPerm); err != nil {
 		return err
 	}
 	dir, err := nofollow.Open(j.target, path.Dir(rel), unix.O_PATH|unix.O_DIRECTORY)
@@ -799,8 +896,11 @@ func (j *job) mkdir(rel string, perm uint32) error {
 	if rel == "." {
 		return nil
 	}
+	if j.seen[rel] && perm == noPerm {
+		return nil // looked at already, and nothing new to say of it
+	}
 	if parent := path.Dir(rel); parent != "." {
-		if err := j.mkdir(parent, 0o700); err != nil {
+		if err := j.mkdir(parent, noPerm); err != nil {
 			return err
 		}
 	}
@@ -809,9 +909,17 @@ func (j *job) mkdir(rel string, perm uint32) error {
 		return err
 	}
 	defer unix.Close(dir) //nolint:errcheck // a path descriptor
+	if j.seen == nil {
+		j.seen = map[string]bool{}
+	}
+	j.seen[rel] = true
 	switch err := unix.Mkdirat(dir, path.Base(rel), 0o700); {
 	case err == nil:
-		j.made = append(j.made, entry{rel, perm}) // the unit's umask cuts a mode given here
+		final := perm
+		if final == noPerm {
+			final = 0o700
+		}
+		j.record(rel, final) // the unit's umask cuts a mode given here
 	case !errors.Is(err, unix.EEXIST):
 		return &os.PathError{Op: "mkdir", Path: rel, Err: err}
 	case j.madeAlready(rel, perm):
@@ -819,21 +927,21 @@ func (j *job) mkdir(rel string, perm uint32) error {
 		// database or a file: the mode this item knows is the one it gets.
 	default:
 		// In place already. It gets the snapshot's mode, last, where the
-		// snapshot says one (perm other than the 0700 of a directory made
-		// on the way to something); and one its owner has closed to
-		// writing — the restore is its owner — is opened while it is
-		// filled, and closed again after, to the snapshot's mode or its
-		// own.
+		// snapshot says one; and one its owner has closed to writing —
+		// the restore is its owner — is opened while it is filled, and
+		// closed again after, to the snapshot's mode or its own. One
+		// carrying a bit above 0777 — setgid on a shared uploads dir — is
+		// left with its mode: the unit could not set such a bit back.
 		if fd, err := nofollow.Open(j.target, rel, unix.O_RDONLY|unix.O_DIRECTORY); err == nil {
 			var st unix.Stat_t
 			if unix.Fstat(fd, &st) == nil {
 				final := st.Mode & 0o777
-				if perm != 0o700 {
+				if perm != noPerm && st.Mode&0o7000 == 0 {
 					final = perm
 				}
-				opened := st.Mode&0o300 == 0o300 || unix.Fchmod(fd, st.Mode&0o777|0o700) == nil
+				opened := st.Mode&0o300 == 0o300 || unix.Fchmod(fd, st.Mode&0o7777|0o700) == nil
 				if opened && (final != st.Mode&0o777 || st.Mode&0o300 != 0o300) {
-					j.made = append(j.made, entry{rel, final})
+					j.record(rel, final)
 				}
 			}
 			unix.Close(fd) //nolint:errcheck,gosec // read-only
@@ -946,7 +1054,9 @@ func (j *job) left(src, rel string) {
 		if j.excluded[childRel] {
 			continue
 		}
-		if !held[name] {
+		if !held[name] || j.skipped[childRel] {
+			// Not in the snapshot — or in it as something a restore does
+			// not install, so neither overwritten nor to be left unsaid.
 			if len(j.answer.Left) < named {
 				j.answer.Left = append(j.answer.Left, childRel)
 			} else {
@@ -964,7 +1074,7 @@ func (j *job) left(src, rel string) {
 // installDatabase restores the checked copy of p over the live database
 // (dump.RestoreOver), or — where there is none — puts the copy there.
 func (j *job) installDatabase(p string) error {
-	if err := j.mkdir(path.Dir(p), 0o700); err != nil {
+	if err := j.mkdir(path.Dir(p), noPerm); err != nil {
 		return err
 	}
 	copyOf := path.Join("sqlite", p)

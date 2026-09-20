@@ -118,6 +118,10 @@ PID namespaces: it makes bind mounts that the manager then has to see.
   `/proc/<pid>/fd/<n>` itself, systemd reads the link's text and walks
   the path again, and an app flipping the name wins that race now and
   then.)
+- **The hardening is systemd's, on a kernel with seccomp.** Debian 13's
+  has it; on one without, `SystemCallFilter=`, `RestrictSUIDSGID=` and
+  `LockPersonality=` are warnings in the journal, not refusals, and the
+  view and the accounts are what is left.
 - **What a unit says is not believed because a unit said it.** The
   plan is decoded strictly and validated again; a dump result has to
   answer what was asked, in a class the run knows; and words that came
@@ -223,7 +227,10 @@ that costs is below, under "what a restore cannot tell".
    left half written under its temporary name is listed as left in place,
    never removed: a name is not a reason — and a symbolic link the
    snapshot holds comes back as the same link, its text stored and never
-   followed. A copy the app kept closed to its own owner is read all the
+   followed; a file with several names comes back as one file with those
+   names. Not put back: setuid, setgid and sticky bits (the unit cannot
+   set them), extended attributes and ACLs, and directories' times. A
+   copy the app kept closed to its own owner is read all the
    same — what was fetched is this run's scratch, under a directory no
    app can enter — and the target gets the mode the snapshot held.
    Directories the restore makes get the modes they had, and one that is

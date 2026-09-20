@@ -1021,3 +1021,89 @@ func TestAToThatCouldNotBeReadiedIsNotLeftMade(t *testing.T) {
 		t.Fatalf("the try after: %v", err)
 	}
 }
+
+// A unit's own word that it did nothing — a plan.json it could not take
+// — is a refusal, never "partly restored"; a unit that gave no word may
+// have begun.
+func TestARefusalIsNotAPartialRestore(t *testing.T) {
+	b := restoreBox(t)
+	b.install = `{"error":"the snapshot's plan.json: the snapshot holds none, so it does not say what it is a snapshot of"}`
+	o := inPlace()
+	o.NoPreBackup = true
+	rep, err := Restore(context.Background(), b.cfg, b, o)
+	if err == nil || strings.Contains(err.Error(), "partly") || !strings.Contains(err.Error(), "plan.json") {
+		t.Fatalf("%v", err)
+	}
+	if rep == nil || len(rep.Items) != 0 {
+		t.Fatalf("%+v", rep)
+	}
+}
+
+// A shared dir made for a rebuilt box is taken away also when the restore
+// fails before it fetches anything — interrupted right after making it.
+func TestASharedDirMadeAndThenNotUsedIsTakenAwayWhateverFailed(t *testing.T) {
+	b := restoreBox(t)
+	must(t, os.RemoveAll(filepath.Join(b.root, "blog")))
+	ctx, cancel := context.WithCancel(context.Background())
+	b.before = func(s unit.Spec) {
+		if strings.Contains(s.Name, "_mkshared_") {
+			cancel()
+		}
+	}
+	if _, err := Restore(ctx, b.cfg, b, inPlace()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("%v", err)
+	}
+	if !b.started("unmake") {
+		t.Fatalf("%s", b.roles())
+	}
+	if _, err := os.Lstat(filepath.Join(b.root, "blog")); err == nil {
+		t.Fatal("an empty data dir was left behind")
+	}
+}
+
+// The backup a restore makes first is named for what it is: one that
+// ended incomplete holds less than what was there, and the report says
+// so rather than "puts back what was there".
+func TestAnIncompletePreBackupIsSaidToBeOne(t *testing.T) {
+	b := restoreBox(t)
+	b.ls = func(string) string { return `{"struct_type":"node","path":"/backup/blog/files/uploads","type":"dir"}` } // app.db not in the snapshot
+	rep, err := Restore(context.Background(), b.cfg, b, inPlace())
+	if err == nil || rep == nil || rep.PreBackup == nil || rep.PreBackupClass != record.Incomplete || rep.PreBackupDetail == "" {
+		t.Fatalf("%+v, %v", rep, err)
+	}
+}
+
+// A check unit is shown no place: an answer that says it changed
+// something, or lists what is in place, is not an answer.
+func TestACheckUnitThatChangedSomethingIsNotBelieved(t *testing.T) {
+	for _, answer := range []string{
+		`{"plan":{"files":["uploads"]},"changed":true,"items":[{"kind":"files","path":"uploads","class":"ok"}]}`,
+		`{"plan":{"files":["uploads"]},"left":["uploads/x"],"items":[{"kind":"files","path":"uploads","class":"ok"}]}`,
+	} {
+		b := restoreBox(t)
+		b.install = answer
+		st, err := Drill(context.Background(), b.cfg, b)
+		if err != nil || st.Apps["blog"].RestoreProven != nil || st.Apps["blog"].RestoreDrill == nil {
+			t.Errorf("%s: %+v, %v", answer, st.Apps["blog"], err)
+		}
+	}
+}
+
+// The record says when a drill last ran, and why it could drill nothing.
+func TestARecordSaysWhenADrillLastRan(t *testing.T) {
+	b := restoreBox(t)
+	before := time.Now().UTC().Add(-time.Second)
+	st, err := Drill(context.Background(), b.cfg, b)
+	if err != nil || st.LastDrill == nil || st.LastDrill.Time.Before(before) || st.LastDrill.Detail != "" {
+		t.Fatalf("%+v, %v", st.LastDrill, err)
+	}
+	b = restoreBox(t)
+	b.err["plan"] = errors.New("the plan unit: no")
+	if st, err = Drill(context.Background(), b.cfg, b); err == nil || st == nil || st.LastDrill == nil || !strings.Contains(st.LastDrill.Detail, "no") {
+		t.Fatalf("a drill that could not begin: %+v, %v", st, err)
+	}
+	again, err := record.Read(filepath.Join(b.cfg.StateDir, "status.json"))
+	if err != nil || again.LastDrill == nil || again.LastDrill.Detail == "" {
+		t.Fatalf("the record on disk: %+v, %v", again, err)
+	}
+}

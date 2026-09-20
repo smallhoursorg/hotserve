@@ -492,3 +492,46 @@ func TestAFileWhereADatabasesDirectoryMustBeIsRefused(t *testing.T) {
 		t.Fatalf("installed: %v", left)
 	}
 }
+
+// A file with two names in the snapshot comes back as one file with
+// two names — not two files, which is twice the room and not what it was.
+func TestAHardlinkedPairComesBackAsOne(t *testing.T) {
+	d := newDirs(t, `{"files":["uploads"]}`, map[string]string{"files/uploads/big": "data"})
+	must(t, os.Link(filepath.Join(d.staged, "files", "uploads", "big"), filepath.Join(d.staged, "files", "uploads", "hard")))
+	must(t, os.MkdirAll(filepath.Join(d.staged, "files", "uploads", "sub"), 0o755))
+	must(t, os.Link(filepath.Join(d.staged, "files", "uploads", "big"), filepath.Join(d.staged, "files", "uploads", "sub", "third")))
+	a := Run(context.Background(), d.staged, d.target, AllOrNothing)
+	if classes(a) != "files uploads: ok" {
+		t.Fatalf("%+v", a)
+	}
+	ino := func(name string) uint64 {
+		var st syscall.Stat_t
+		must(t, syscall.Lstat(filepath.Join(d.target, "uploads", name), &st))
+		return st.Ino
+	}
+	if ino("big") != ino("hard") || ino("big") != ino("sub/third") {
+		t.Errorf("the names are not one file: %d %d %d", ino("big"), ino("hard"), ino("sub/third"))
+	}
+	if read(t, filepath.Join(d.target, "uploads", "hard")) != "data" {
+		t.Error("the second name holds nothing")
+	}
+}
+
+// A link in the snapshot is held to what a file is: never renamed over a
+// live database, and never over what is neither a file nor a link.
+func TestALinkIsNeverRenamedOverALiveDatabaseOrAFIFO(t *testing.T) {
+	d := newDirs(t, `{"files":["."]}`, map[string]string{"files/r.txt": "receipt"})
+	must(t, os.Symlink("elsewhere", filepath.Join(d.staged, "files", "app.db")))
+	write(t, filepath.Join(d.target, "app.db"), "the live database")
+	write(t, filepath.Join(d.target, "app.db-wal"), "its log")
+	a := Run(context.Background(), d.staged, d.target, AllOrNothing)
+	if a.Items[0].Class != Refused || !strings.Contains(a.Items[0].Detail, "app.db") || a.Changed {
+		t.Fatalf("%+v", a)
+	}
+	d = newDirs(t, `{"files":["."]}`, map[string]string{"files/r.txt": "receipt"})
+	must(t, os.Symlink("elsewhere", filepath.Join(d.staged, "files", "pipe")))
+	must(t, syscall.Mkfifo(filepath.Join(d.target, "pipe"), 0o644))
+	if a := Run(context.Background(), d.staged, d.target, AllOrNothing); a.Items[0].Class != Refused || !strings.Contains(a.Items[0].Detail, "fifo") {
+		t.Fatalf("a link where a fifo is: %+v", a)
+	}
+}

@@ -281,7 +281,11 @@ func reportRestore(rep *engine.RestoreReport) {
 		fmt.Println(notLastOK(rep.App, rep.LastOK))
 	}
 	if rep.PreBackup != nil {
-		fmt.Printf("%s: backed up first: snapshot %.8s (restore --snapshot %.8s puts back what was there)\n", rep.App, rep.PreBackup.ID, rep.PreBackup.ID)
+		if rep.PreBackupClass == record.OK {
+			fmt.Printf("%s: backed up first: snapshot %.8s (restore --snapshot %.8s puts back what was there)\n", rep.App, rep.PreBackup.ID, rep.PreBackup.ID)
+		} else {
+			fmt.Printf("%s: backed up first, and that backup ended %s: %s — snapshot %.8s holds what it could, not all of what was there\n", rep.App, rep.PreBackupClass, rep.PreBackupDetail, rep.PreBackup.ID)
+		}
 	}
 	var restored, not []string
 	for _, it := range rep.Items {
@@ -292,11 +296,14 @@ func reportRestore(rep *engine.RestoreReport) {
 		}
 	}
 	from := fmt.Sprintf("snapshot %.8s of %s", rep.Snapshot.ID, rep.Snapshot.Time.Format("2006-01-02 15:04 MST"))
-	if len(restored) > 0 {
+	switch {
+	case len(restored) > 0:
 		// The items are the ones the snapshot's own plan.json declares.
 		fmt.Printf("%s: restored from %s into %s: %s\n", rep.App, from, rep.Into, strings.Join(restored, ", "))
-	} else {
+	case len(rep.Items) > 0:
 		fmt.Printf("%s: nothing was restored from %s\n", rep.App, from)
+	default:
+		// No answer came back: the error that follows says what is known.
 	}
 	if len(not) > 0 {
 		fmt.Printf("%s: not restored: %s\n", rep.App, strings.Join(not, "; "))

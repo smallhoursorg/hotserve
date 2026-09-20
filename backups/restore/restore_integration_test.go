@@ -236,3 +236,50 @@ func TestIntegrationADirectoryMadeForADatabaseGetsTheModeTheFilesKnow(t *testing
 		t.Errorf("data/: %v, want 755 (%v)", st.Mode().Perm(), err)
 	}
 }
+
+// Directories are closed deepest first whatever order they were seen
+// in: the database step makes data/ (nothing known of it), the files
+// item then names data/ read-only and data/deep in it — closed in the
+// order seen, data/ would shut before deep/ could be closed.
+func TestIntegrationDirectoriesAreClosedDeepestFirst(t *testing.T) {
+	d := newDirs(t, `{"sqlite":["data/app.db"],"files":["."]}`, map[string]string{"files/data/deep/f": "x"})
+	copied := copyOf(t, d, "(1),(2)")
+	must(t, os.MkdirAll(filepath.Join(d.staged, "sqlite", "data"), 0o755))
+	must(t, os.Rename(copied, filepath.Join(d.staged, "sqlite", "data", "app.db")))
+	must(t, os.Chmod(filepath.Join(d.staged, "files", "data", "deep"), 0o500))
+	must(t, os.Chmod(filepath.Join(d.staged, "files", "data"), 0o500))
+	t.Cleanup(func() {
+		for _, p := range []string{filepath.Join(d.staged, "files", "data"), filepath.Join(d.target, "data")} {
+			_ = os.Chmod(p, 0o755)
+			_ = os.Chmod(filepath.Join(p, "deep"), 0o755)
+		}
+	})
+	a := Run(context.Background(), d.staged, d.target, AllOrNothing)
+	if classes(a) != "sqlite data/app.db: ok, files .: ok" {
+		t.Fatalf("%+v", a)
+	}
+	for name, want := range map[string]os.FileMode{"data": 0o500, "data/deep": 0o500} {
+		if st, err := os.Stat(filepath.Join(d.target, name)); err != nil || st.Mode().Perm() != want {
+			t.Errorf("%s: %v, want %o (%v)", name, st.Mode().Perm(), want, err)
+		}
+	}
+}
+
+// A live file sqlite3 could not open — noise where the first page is —
+// is found at the checks, not once the restore has begun.
+func TestIntegrationALiveFileThatIsNotADatabaseIsFoundAtTheChecks(t *testing.T) {
+	d := newDirs(t, `{"sqlite":["app.db"],"files":["uploads"]}`, map[string]string{"files/uploads/a.png": "img"})
+	copyOf(t, d, "(1),(2)")
+	write(t, filepath.Join(d.target, "app.db"), "noise where a database was, and not a header in sight")
+	a := Run(context.Background(), d.staged, d.target, AllOrNothing)
+	if len(a.Items) != 2 || a.Items[0].Class != Refused || !strings.Contains(a.Items[0].Detail, "move it aside") || a.Items[1].Class != HeldBack || a.Changed {
+		t.Fatalf("%+v", a)
+	}
+	// An empty file is an empty database, and is restored over.
+	d = newDirs(t, `{"sqlite":["app.db"]}`, nil)
+	copyOf(t, d, "(1),(2)")
+	write(t, filepath.Join(d.target, "app.db"), "")
+	if a := Run(context.Background(), d.staged, d.target, AllOrNothing); classes(a) != "sqlite app.db: ok" {
+		t.Fatalf("an empty file: %+v", a)
+	}
+}
