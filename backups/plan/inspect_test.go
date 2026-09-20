@@ -377,4 +377,15 @@ func TestAnUndeclaredAppNamedThroughTheEnvironment(t *testing.T) {
 	if slices.Contains(got.Undeclared, "shop") || !slices.Equal(got.UndeclaredByEnv, []string{"SHOP_NAME"}) {
 		t.Fatalf("undeclared %q, by the environment %q", got.Undeclared, got.UndeclaredByEnv)
 	}
+
+	// A variable tried after it, that names nothing, is not blamed for it
+	// — and one that also names an undeclared app is.
+	write(t, file, "app {$SHOP_NAME:shop}\nemail {$Z_EMAIL:a@example.com}\n")
+	got, err = Inspect(context.Background(), file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got.UndeclaredByEnv, []string{"SHOP_NAME"}) || len(got.Undeclared) != 0 {
+		t.Fatalf("with an unrelated variable after it: undeclared %q, by the environment %q", got.Undeclared, got.UndeclaredByEnv)
+	}
 }

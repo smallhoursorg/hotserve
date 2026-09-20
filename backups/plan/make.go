@@ -298,6 +298,7 @@ func Inspect(ctx context.Context, caddyfile string) (*Inspection, error) {
 	}
 
 	var decisive, opaque, byEnv []string
+	displaced := map[string]bool{} // undeclared names that some variable's value changes
 	for _, name := range names {
 		if strings.ContainsAny(name, "=\x00") {
 			continue // cannot be set, so the server does not have it set either
@@ -319,10 +320,16 @@ func Inspect(ctx context.Context, caddyfile string) (*Inspection, error) {
 			}
 			// An app that declares no backup and is named through this
 			// variable changes nothing a run does, so it is no refusal;
-			// but its name here is a default's, or a placeholder.
+			// but its name here is a default's, or a placeholder. Every
+			// trial is held against the base's names as they were: the
+			// names a variable displaces are taken out after the last one.
 			if !slices.Equal(undeclared, trialUndeclared) {
 				byEnv = append(byEnv, name)
-				undeclared = slices.DeleteFunc(undeclared, func(n string) bool { return !slices.Contains(trialUndeclared, n) })
+				for _, n := range undeclared {
+					if !slices.Contains(trialUndeclared, n) {
+						displaced[n] = true
+					}
+				}
 			}
 			verdict = nil
 			if !reflect.DeepEqual(base, trial) {
@@ -343,6 +350,7 @@ func Inspect(ctx context.Context, caddyfile string) (*Inspection, error) {
 	if err := base.Validate(); err != nil {
 		return nil, err
 	}
+	undeclared = slices.DeleteFunc(undeclared, func(n string) bool { return displaced[n] })
 	return &Inspection{Plan: base, Undeclared: undeclared, UndeclaredByEnv: byEnv, Imports: imports}, nil
 }
 
