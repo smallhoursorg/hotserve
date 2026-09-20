@@ -332,11 +332,24 @@ func TestDirectoriesGetTheModesTheyHad(t *testing.T) {
 	if read(t, filepath.Join(d.target, "uploads", "ro", "f")) != "x" {
 		t.Error("the read-only directory was closed before it was filled")
 	}
+	// The staged tree is scratch a run opens as it reads it (ro became
+	// 0755 above); a restore fetches afresh, so the fixture is set back.
+	reset := func() { must(t, os.Chmod(filepath.Join(d.staged, "files", "uploads", "ro"), 0o555)) }
+	reset()
+	// A directory in place with another mode gets the snapshot's.
+	must(t, os.Chmod(filepath.Join(d.target, "uploads", "pub"), 0o700))
+	if a := Run(context.Background(), d.staged, d.target, AllOrNothing); classes(a) != "files uploads: ok" {
+		t.Fatalf("over a directory with another mode: %+v", a)
+	}
+	if st, _ := os.Stat(filepath.Join(d.target, "uploads", "pub")); st.Mode().Perm() != 0o755 {
+		t.Errorf("uploads/pub in place at 0700 was left so; the snapshot says 0755: %v", st.Mode().Perm())
+	}
 	// And again, over what is now in place: a directory that is closed to
 	// writing is restored into all the same, and is closed again after.
 	must(t, os.Chmod(filepath.Join(d.target, "uploads", "ro"), 0o755))
 	must(t, os.WriteFile(filepath.Join(d.target, "uploads", "ro", "f"), []byte("changed since"), 0o644))
 	must(t, os.Chmod(filepath.Join(d.target, "uploads", "ro"), 0o555))
+	reset()
 	if a := Run(context.Background(), d.staged, d.target, AllOrNothing); classes(a) != "files uploads: ok" {
 		t.Fatalf("over a read-only directory in place: %+v", a)
 	}

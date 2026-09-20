@@ -818,13 +818,23 @@ func (j *job) mkdir(rel string, perm uint32) error {
 		// Made by this restore for an earlier item, on the way to a
 		// database or a file: the mode this item knows is the one it gets.
 	default:
-		// In place already. One its owner has closed to writing — and the
-		// restore is its owner — is opened while it is filled, and closed
-		// again with the directories this restore made.
+		// In place already. It gets the snapshot's mode, last, where the
+		// snapshot says one (perm other than the 0700 of a directory made
+		// on the way to something); and one its owner has closed to
+		// writing — the restore is its owner — is opened while it is
+		// filled, and closed again after, to the snapshot's mode or its
+		// own.
 		if fd, err := nofollow.Open(j.target, rel, unix.O_RDONLY|unix.O_DIRECTORY); err == nil {
 			var st unix.Stat_t
-			if unix.Fstat(fd, &st) == nil && st.Mode&0o300 != 0o300 && unix.Fchmod(fd, st.Mode&0o777|0o700) == nil {
-				j.made = append(j.made, entry{rel, st.Mode & 0o777})
+			if unix.Fstat(fd, &st) == nil {
+				final := st.Mode & 0o777
+				if perm != 0o700 {
+					final = perm
+				}
+				opened := st.Mode&0o300 == 0o300 || unix.Fchmod(fd, st.Mode&0o777|0o700) == nil
+				if opened && (final != st.Mode&0o777 || st.Mode&0o300 != 0o300) {
+					j.made = append(j.made, entry{rel, final})
+				}
 			}
 			unix.Close(fd) //nolint:errcheck,gosec // read-only
 		}

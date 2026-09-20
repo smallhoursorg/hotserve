@@ -1001,3 +1001,23 @@ func TestAFailedRestoreOnARebuiltBoxLeavesNoEmptySharedDir(t *testing.T) {
 		t.Fatal("the shared dir a restore filled is gone")
 	}
 }
+
+// A --to that could not be readied — bound, here — is not left made:
+// the try after would otherwise be refused for it existing.
+func TestAToThatCouldNotBeReadiedIsNotLeftMade(t *testing.T) {
+	b := restoreBox(t)
+	old := bindMount
+	bindMount = func(string, string) error { return errors.New("mount: no") }
+	t.Cleanup(func() { bindMount = old })
+	to := filepath.Join(t.TempDir(), "out")
+	if _, err := Restore(context.Background(), b.cfg, b, RestoreOptions{App: "blog", To: to}); err == nil {
+		t.Fatal("a bind that failed")
+	}
+	if _, err := os.Lstat(to); err == nil {
+		t.Fatal("the --to directory was left made")
+	}
+	bindMount = old
+	if _, err := Restore(context.Background(), b.cfg, b, RestoreOptions{App: "blog", To: to}); err != nil {
+		t.Fatalf("the try after: %v", err)
+	}
+}

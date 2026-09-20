@@ -385,14 +385,19 @@ func (x *run) toDir(dir string) (source string, release func(), err error) {
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		return "", nil, err
 	}
+	// Until this has worked, what was made is taken away again: an empty
+	// --to left by a bind that failed would refuse every try after.
+	undo := func() { _ = os.Remove(dir) }
 	fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
+		undo()
 		return "", nil, &os.PathError{Op: "open", Path: dir, Err: err}
 	}
 	made := pin{fd}
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
 		made.close()
+		undo()
 		return "", nil, err
 	}
 	if int(st.Uid) != os.Geteuid() {
@@ -405,17 +410,19 @@ func (x *run) toDir(dir string) (source string, release func(), err error) {
 	if where, err := os.Readlink(fmt.Sprintf("/proc/self/fd/%d", fd)); err == nil {
 		if err := notOwn(where, x.cfg); err != nil {
 			made.close()
-			_ = os.Remove(dir) // empty, just made
+			undo()
 			return "", nil, err
 		}
 	}
 	if err := errors.Join(unix.Fchmod(fd, 0o700), unix.Fchown(fd, uid, gid)); err != nil {
 		made.close()
+		undo()
 		return "", nil, err
 	}
 	source, unmount, err := x.bound(made)
 	if err != nil {
 		made.close()
+		undo()
 		return "", nil, err
 	}
 	return source, func() { unmount(); made.close() }, nil
