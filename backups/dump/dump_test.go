@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -176,5 +177,24 @@ func TestKnown(t *testing.T) {
 	}
 	if Known("fine") || Known("") {
 		t.Error("an unknown class is known")
+	}
+}
+
+// sqlite3 given a path over its VFS limit opens an empty temporary
+// database in its place and calls it sound [measured]: the path is
+// refused before sqlite3 sees it, in every place one is handed over.
+func TestAPathTooLongForSqlite3IsRefusedBeforeItIsGivenOne(t *testing.T) {
+	long := "/shared/" + strings.Repeat("d/", 250) + "x.db"
+	if err := tooLong(long); !errors.Is(err, ErrPathTooLong) {
+		t.Fatalf("%d bytes: %v", len(long), err)
+	}
+	if err := tooLong("/shared/" + strings.Repeat("d/", 100) + "x.db"); err != nil {
+		t.Fatalf("a path well within the limit: %v", err)
+	}
+	if sound, said := CheckCopy(context.Background(), long); sound || !strings.Contains(said, "too long") {
+		t.Fatalf("CheckCopy: %v %q", sound, said)
+	}
+	if err := RestoreOver(context.Background(), long, "/restore/sqlite/x.db", "/tmp/m"); !errors.Is(err, ErrPathTooLong) {
+		t.Fatalf("RestoreOver: %v", err)
 	}
 }

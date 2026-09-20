@@ -126,6 +126,9 @@ func one(ctx context.Context, shared, staging, rel string) Result {
 	source := filepath.Join(shared, rel)
 	if _, stderr, err := run(ctx, source, "VACUUM src INTO "+quote(target), target); err != nil {
 		_ = os.Remove(target) // a partial copy, if there is one; the clean unit empties staging whatever happens here
+		if errors.Is(err, ErrPathTooLong) {
+			return Result{Class: NotADatabase, Detail: err.Error()}
+		}
 		if errors.Is(err, errNeverOpened) {
 			return Result{Class: NeverOpened, Detail: fmt.Sprintf("sqlite3 had not opened the database after %s and was killed: the path stopped being a file it could open", openWithin)}
 		}
@@ -216,6 +219,9 @@ func inspect(shared, rel string) Result {
 // sqlite3 is killed — this process's own child — and the error is
 // errNeverOpened.
 func run(ctx context.Context, db, sql, appears string) (stdout, stderr string, err error) {
+	if err := tooLong(db); err != nil {
+		return "", "", err
+	}
 	return execute(ctx, appears, "ATTACH "+quote(uri(db))+" AS src; "+sql)
 }
 
@@ -296,11 +302,32 @@ func uri(abs string) string {
 // withQuery is uri with another query: "immutable=1", "mode=rwc".
 func withQuery(abs, query string) string { return strings.TrimSuffix(uri(abs), "mode=rw") + query }
 
+// pathLimit is the longest path sqlite3 is given. Its unix VFS holds a
+// path in 512 bytes, and a longer one is not refused: ATTACH of it, even
+// as mode=rw, opens an empty temporary database in its place, which
+// integrity_check calls ok [measured at 513 bytes] — a dump of nothing,
+// or a restore of nothing over what is there. So the length is checked
+// here, where the path is made, and never trusted to sqlite3.
+const pathLimit = 480
+
+// ErrPathTooLong is the error for a path sqlite3 would not open as itself.
+var ErrPathTooLong = errors.New("the path is too long for sqlite3 to open as itself")
+
+func tooLong(abs string) error {
+	if len(abs) > pathLimit {
+		return fmt.Errorf("%w (%d bytes, %d at most)", ErrPathTooLong, len(abs), pathLimit)
+	}
+	return nil
+}
+
 // CheckCopy is the integrity check of a copy that has come back out of
 // the repository, read where it lies: immutable, so with no lock, and no
 // -shm made beside it whatever journal mode its header claims. said is
 // sqlite3's first line when the copy is not sound.
 func CheckCopy(ctx context.Context, file string) (sound bool, said string) {
+	if err := tooLong(file); err != nil {
+		return false, err.Error()
+	}
 	stdout, stderr, err := execute(ctx, "", "ATTACH "+quote(withQuery(file, "immutable=1"))+" AS src; PRAGMA src.integrity_check")
 	// As for a dump's own copy: only exactly "ok" and exit 0 is sound.
 	if err != nil || stdout != "ok\n" {
@@ -328,6 +355,11 @@ var (
 // creates marker, a scratch database of its own, and from then on it has
 // as long as the restore takes.
 func RestoreOver(ctx context.Context, live, copyOf, marker string) error {
+	for _, p := range []string{live, copyOf, marker} {
+		if err := tooLong(p); err != nil {
+			return err
+		}
+	}
 	beforeSqlite()
 	_, stderr, err := execute(ctx, marker,
 		"ATTACH "+quote(uri(live))+" AS dst",
