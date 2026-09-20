@@ -249,7 +249,12 @@ that costs is below, under "what a restore cannot tell".
    killed one left.
 
 `--to <dir>` does the same into a directory it makes (it must not
-exist), owned by `hotserve` and laid out as `shared/` is. Nothing is
+exist), owned by `hotserve` and laid out as `shared/` is. Every
+directory on the way to it has to be root's own and writable by nobody
+else — `/root`, `/srv`, `/var/backups`, a root-owned directory of your
+own; not `/tmp`, and nothing an app's user owns — since the restore is
+made where the name leads, and anyone who could write a directory on
+the way could have put a link there first. Nothing is
 asked and nothing backed up, since nothing is overwritten; and what is
 sound lands even when something else is not — a damaged copy is never
 handed out as a database — with a non-zero exit. It is how to look into
@@ -390,8 +395,9 @@ they hold the database's path, and `busy.db` is not busy.
 - A snapshot whose `plan.json` is missing, is not a valid declaration, or
   holds a field this version does not know.
 - `--to` a directory that exists, one under `/var/lib/hotserve-backup`
-  or `/run/hotserve-backup`, and `--to` or `--snapshot` given with
-  nothing in it.
+  or `/run/hotserve-backup`, one any directory on the way to which is
+  not root's own or can be written by others, and `--to` or
+  `--snapshot` given with nothing in it.
 - A file that would land on a live database (above).
 - A restore or a drill of a snapshot larger than what is free under
   `/var/lib/hotserve-backup`, and a restore of one larger than half of

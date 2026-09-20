@@ -330,6 +330,12 @@ blog0=$(blog_print)
 before=$(snapshots)
 mkdir -p /srv/exists
 if restore blog --snapshot "$first_blog" --to /srv/exists; then fail "--to a directory that exists exited 0"; else grep -qi "exists" "$OUT" && pass "--to a directory that exists is refused" || fail "--to an existing directory: $(cat "$OUT")"; fi
+# Every directory on the way has to be root's own and writable by
+# nobody else: not /tmp, where anyone could have put a link first.
+if restore blog --snapshot "$first_blog" --to /tmp/out; then fail "--to under /tmp exited 0"; else grep -q "written by others" "$OUT" && [ ! -e /tmp/out ] && pass "--to under /tmp is refused: anyone could have put a link there first" || fail "--to /tmp/out: $(cat "$OUT")"; fi
+install -d -o hotserve -g hotserve -m 0700 /srv/theirs
+if restore blog --snapshot "$first_blog" --to /srv/theirs/out; then fail "--to under the app user's directory exited 0"; else grep -q "not root" "$OUT" && [ ! -e /srv/theirs/out ] && pass "--to under a directory the app's user owns is refused" || fail "--to /srv/theirs/out: $(cat "$OUT")"; fi
+rmdir /srv/theirs
 rm -rf /srv/out
 if restore blog --snapshot "$first_blog" --to /srv/out; then pass "--to a new directory exits 0, asking nothing"; else fail "--to: $(cat "$OUT")"; fi
 [ "$(rows /srv/out/app.db 'select count(*) from posts')" = "ok 2 " ] && [ "$(cat /srv/out/uploads/a.png 2>/dev/null)" = img ] && pass "it holds the app's data laid out as its shared dir is" || fail "/srv/out: $(find /srv/out | head -10)"

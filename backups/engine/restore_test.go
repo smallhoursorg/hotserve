@@ -406,9 +406,23 @@ func TestARestoreIsNotAimedByALink(t *testing.T) {
 	}
 }
 
+// toParent is a directory --to may be made in: root's own and closed to
+// others, which a temp dir is only when the test runs as root.
+func toParent(t *testing.T) string {
+	t.Helper()
+	if os.Getuid() != 0 {
+		t.Skip("--to needs a parent that is root's own: run as root")
+	}
+	// Not t.TempDir: /tmp is everyone's to add to, and the rule says no.
+	dir, err := os.MkdirTemp("/root", "hotserve-backup-test-")
+	must(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 func TestToADirectory(t *testing.T) {
 	b := restoreBox(t)
-	to := filepath.Join(t.TempDir(), "up $RESTIC_PASSWORD %h")
+	to := filepath.Join(toParent(t), "up $RESTIC_PASSWORD %h")
 	asked := false
 	o := RestoreOptions{App: "blog", To: to, Confirm: func(RestoreAsk) bool { asked = true; return true }}
 	rep, err := Restore(context.Background(), b.cfg, b, o)
@@ -447,7 +461,7 @@ func TestToADirectory(t *testing.T) {
 	}
 
 	b = restoreBox(t)
-	if _, err := Restore(context.Background(), b.cfg, b, RestoreOptions{App: "blog", To: t.TempDir()}); err == nil || !strings.Contains(err.Error(), "exists") || b.started("fetch") {
+	if _, err := Restore(context.Background(), b.cfg, b, RestoreOptions{App: "blog", To: toParent(t)}); err == nil || !strings.Contains(err.Error(), "exists") || b.started("fetch") {
 		t.Errorf("a directory that exists: %v (%s)", err, b.roles())
 	}
 }
@@ -928,7 +942,10 @@ func TestToUnderTheEnginesOwnDirectoriesIsRefused(t *testing.T) {
 		}
 	}
 	// And by where the name leads: a link in the parent to the engine's own.
-	outside := t.TempDir()
+	// (The engine's directory exists, as on a box; the test's lives under
+	// /tmp, which the walk would otherwise refuse first, for its mode.)
+	must(t, os.MkdirAll(filepath.Join(b.cfg.StateDir, "restore"), 0o700))
+	outside := toParent(t)
 	must(t, os.Symlink(filepath.Join(b.cfg.StateDir, "restore"), filepath.Join(outside, "outbase")))
 	to := filepath.Join(outside, "outbase", "blog")
 	// Caught by the name's resolution where the link's target exists
@@ -1009,7 +1026,7 @@ func TestAToThatCouldNotBeReadiedIsNotLeftMade(t *testing.T) {
 	old := bindMount
 	bindMount = func(string, string) error { return errors.New("mount: no") }
 	t.Cleanup(func() { bindMount = old })
-	to := filepath.Join(t.TempDir(), "out")
+	to := filepath.Join(toParent(t), "out")
 	if _, err := Restore(context.Background(), b.cfg, b, RestoreOptions{App: "blog", To: to}); err == nil {
 		t.Fatal("a bind that failed")
 	}
@@ -1108,18 +1125,47 @@ func TestARecordSaysWhenADrillLastRan(t *testing.T) {
 	}
 }
 
-// --to is made relative to its parent held by descriptor: a parent that
-// is a link is followed once, where the operator's name leads, and the
-// directory is made there.
-func TestToIsMadeInTheParentTheNameLedTo(t *testing.T) {
-	b := restoreBox(t)
-	real := t.TempDir()
-	alias := filepath.Join(t.TempDir(), "alias")
+// Every directory on the way to --to is root's own and writable by
+// nobody else: one that is not is refused, by name, before anything is
+// made. As root the test makes such directories; as anyone else its own
+// temp dir is already one.
+func TestToIsMadeOnlyUnderDirectoriesThatAreRootsOwn(t *testing.T) {
+	refused := func(parent, want string) {
+		t.Helper()
+		b := restoreBox(t)
+		to := filepath.Join(parent, "out")
+		if _, err := Restore(context.Background(), b.cfg, b, RestoreOptions{App: "blog", To: to}); err == nil || !strings.Contains(err.Error(), want) || len(b.specs) != 0 {
+			t.Errorf("under %s: %v, want %q (%s)", parent, err, want, b.roles())
+		}
+		if _, err := os.Lstat(to); err == nil {
+			t.Errorf("under %s: made all the same", parent)
+		}
+	}
+	if os.Getuid() != 0 {
+		refused(t.TempDir(), "not root")
+		return
+	}
+	refused(t.TempDir(), "written by others") // /tmp itself
+	theirs := filepath.Join(toParent(t), "theirs")
+	must(t, os.Mkdir(theirs, 0o700))
+	must(t, os.Chown(theirs, 65534, 65534))
+	refused(theirs, "not root")
+	open := filepath.Join(toParent(t), "open")
+	must(t, os.Mkdir(open, 0o777))
+	must(t, os.Chmod(open, 0o777)) // the umask would cut it
+	refused(open, "written by others")
+	// And a directory that is root's own, on the way to which one is not.
+	deep := filepath.Join(open, "root-owned")
+	must(t, os.Mkdir(deep, 0o700))
+	refused(deep, "written by others")
+	// One that qualifies works, with a root-owned link on the way.
+	real := toParent(t)
+	alias := filepath.Join(toParent(t), "alias")
 	must(t, os.Symlink(real, alias))
+	b := restoreBox(t)
 	to := filepath.Join(alias, "out")
-	rep, err := Restore(context.Background(), b.cfg, b, RestoreOptions{App: "blog", To: to})
-	if err != nil || rep.Into != to {
-		t.Fatalf("%+v, %v", rep, err)
+	if rep, err := Restore(context.Background(), b.cfg, b, RestoreOptions{App: "blog", To: to}); err != nil || rep.Into != to {
+		t.Fatalf("through a root-owned link: %+v, %v", rep, err)
 	}
 	if st, err := os.Lstat(filepath.Join(real, "out")); err != nil || !st.IsDir() {
 		t.Fatalf("not made where the name led: %v", err)

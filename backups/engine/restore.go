@@ -135,10 +135,17 @@ func Restore(ctx context.Context, cfg Config, r Runner, o RestoreOptions) (rep *
 		if err := notOwn(o.To, cfg); err != nil {
 			return nil, err
 		}
+		// Looked at here too, before any unit: the same walk toDir makes
+		// again right before it makes the directory.
 		if parent, err := filepath.EvalSymlinks(filepath.Dir(o.To)); err == nil {
 			if err := notOwn(filepath.Join(parent, filepath.Base(o.To)), cfg); err != nil {
 				return nil, err
 			}
+			fd, err := rootsOwn(parent)
+			if err != nil {
+				return nil, fmt.Errorf("--to: %w", err)
+			}
+			unix.Close(fd) //nolint:errcheck,gosec // a path descriptor
 		}
 		if _, err := os.Lstat(o.To); err == nil {
 			return nil, fmt.Errorf("--to %s exists: a restore to a directory makes the directory, so that nothing is overwritten", o.To)
@@ -370,6 +377,59 @@ func (x *run) unmakeShared(ctx context.Context, root, app string) {
 	})
 }
 
+// rootsOwn walks the resolved directory dir from /, one component at a
+// time without following a link — none should be left, and one that has
+// appeared since is the swap this refuses — and requires each to belong
+// to root and to be writable by nobody else. It returns a descriptor
+// for dir, which is then the only way it is reached.
+func rootsOwn(dir string) (int, error) {
+	fd, err := unix.Open("/", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, err
+	}
+	sofar := "/"
+	check := func(fd int, at string) error {
+		var st unix.Stat_t
+		if err := unix.Fstat(fd, &st); err != nil {
+			return &os.PathError{Op: "stat", Path: at, Err: err}
+		}
+		switch {
+		case st.Mode&unix.S_IFMT != unix.S_IFDIR:
+			return fmt.Errorf("%s is not a directory", at)
+		case st.Uid != 0:
+			return fmt.Errorf("%s belongs to uid %d, not root. A restore is made where the name leads, and every directory on the way has to be root's own and writable by nobody else, or someone else could have put a link there first: /root, /srv, /var/backups, or a root-owned directory of your own", at, st.Uid)
+		case st.Mode&0o022 != 0:
+			return fmt.Errorf("%s can be written by others (mode %04o). A restore is made where the name leads, and every directory on the way has to be root's own and writable by nobody else, or someone else could have put a link there first: not /tmp — /root, /srv, /var/backups, or a root-owned directory of your own", at, st.Mode&0o7777)
+		}
+		return nil
+	}
+	if err := check(fd, sofar); err != nil {
+		unix.Close(fd) //nolint:errcheck,gosec // a path descriptor
+		return -1, err
+	}
+	rel := strings.TrimPrefix(dir, "/")
+	if rel == "" {
+		return fd, nil
+	}
+	for _, part := range strings.Split(rel, "/") {
+		next, err := unix.Openat(fd, part, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		unix.Close(fd) //nolint:errcheck,gosec // a path descriptor
+		if errors.Is(err, unix.ELOOP) || errors.Is(err, unix.ENOTDIR) {
+			return -1, fmt.Errorf("%s is a link now, and was not when it was looked at: it is not held still, and the restore will not follow it", filepath.Join(sofar, part))
+		}
+		if err != nil {
+			return -1, &os.PathError{Op: "open", Path: filepath.Join(sofar, part), Err: err}
+		}
+		sofar = filepath.Join(sofar, part)
+		if err := check(next, sofar); err != nil {
+			unix.Close(next) //nolint:errcheck,gosec // a path descriptor
+			return -1, err
+		}
+		fd = next
+	}
+	return fd, nil
+}
+
 // notOwn refuses a path under the engine's own directories.
 func notOwn(dir string, cfg Config) error {
 	owns := []string{cfg.StateDir, cfg.RunDir}
@@ -406,14 +466,17 @@ func (x *run) toDir(dir string) (source string, release func(), err error) {
 	if err != nil {
 		return "", nil, &os.PathError{Op: "resolve", Path: parent, Err: err}
 	}
-	pfd, err := unix.Open(parent, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	// And root's own, every step of the way: a name the operator typed
+	// can only mean what root meant by it if nobody else could have put
+	// a link at any step — before the command was typed, which no look
+	// at the time can tell. So each directory on the way, from /, has to
+	// belong to root and be writable by nobody else: not /tmp, which
+	// everyone may add to, and nothing an app's user owns.
+	pfd, err := rootsOwn(named)
 	if err != nil {
-		return "", nil, &os.PathError{Op: "open", Path: parent, Err: err}
+		return "", nil, err
 	}
 	defer unix.Close(pfd) //nolint:errcheck // a path descriptor
-	if where, err := os.Readlink(fmt.Sprintf("/proc/self/fd/%d", pfd)); err == nil && where != named {
-		return "", nil, fmt.Errorf("%s led to %s when it was looked at and to %s when it was opened: it is not held still, and the restore will not follow it", parent, named, where)
-	}
 	if err := notOwn(filepath.Join(named, base), x.cfg); err != nil {
 		return "", nil, err
 	}
