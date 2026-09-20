@@ -418,7 +418,7 @@ type entry struct {
 	rel  string // relative to the shared dir
 	perm uint32
 	// ino is the staged file's inode where it has more than one name: a
-	// hardlinked pair comes back as one file with two names, not two
+	// pair of names for one file comes back as one file with two names, not two
 	// files — as restic put it in the scratch, and as it was.
 	ino uint64
 }
