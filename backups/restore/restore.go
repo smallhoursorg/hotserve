@@ -444,6 +444,8 @@ func (j *job) checkFiles(p string) (Item, *tree) {
 		// means: it is refused, and listed with what is left out.
 		if len(j.answer.Skipped) < named {
 			j.answer.Skipped = append(j.answer.Skipped, Skipped{Path: p, Kind: kindWord(st.Mode & unix.S_IFMT)})
+		} else {
+			j.answer.SkippedMore++
 		}
 		it.Class, it.Detail = Refused, "in the snapshot it is "+kindWord(st.Mode&unix.S_IFMT)+" — the declared path itself — which a restore does not install"
 		return it, nil

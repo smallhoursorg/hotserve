@@ -206,9 +206,11 @@ func Restore(ctx context.Context, cfg Config, r Runner, o RestoreOptions) (rep *
 		if made {
 			// A shared dir this restore made and then put nothing in is
 			// not left: an hourly run would take it for the app's data,
-			// empty, where before it knew the data was missing.
+			// empty, where before it knew the data was missing. Whether
+			// anything went in is rmdir's to say — it refuses a directory
+			// with anything in it — not a report's.
 			defer func() {
-				if retErr != nil && (rep == nil || len(rep.Items) == 0) {
+				if retErr != nil {
 					x.unmakeShared(context.WithoutCancel(ctx), p.Root, o.App)
 				}
 			}()

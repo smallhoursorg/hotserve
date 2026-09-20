@@ -222,9 +222,10 @@ func restoreApp(ctx context.Context, args []string) error {
 // nothing: an abandoned question must not be what ends a box's backups.
 const answerWithin = 10 * time.Minute
 
-// confirm asks on standard input, and takes "y" or "yes" and nothing
-// else for a yes. With nobody there to answer it says how to go without
-// being asked, and that is a no; so is an interrupt, and so is silence.
+// confirm asks on standard input, and takes the app's own name, typed,
+// and nothing else for a yes: not "y", which a hand types on its own.
+// With nobody there to answer it says how to go without being asked,
+// and that is a no; so is an interrupt, and so is silence.
 func confirm(ctx context.Context) func(engine.RestoreAsk) bool {
 	return func(a engine.RestoreAsk) bool {
 		fmt.Printf("%s: restore snapshot %.8s, made %s, into %s?\n", a.App, a.Snapshot.ID, a.Snapshot.Time.Format("2006-01-02 15:04 MST"), a.Into)
@@ -236,7 +237,7 @@ func confirm(ctx context.Context) func(engine.RestoreAsk) bool {
 		} else {
 			fmt.Println("Its databases are replaced and its files overwritten, with no backup first; what the snapshot does not hold is left.")
 		}
-		fmt.Print("Type yes to go on: ")
+		fmt.Printf("Type the app's name, %s, to go on: ", a.App)
 		type reply struct {
 			line string
 			err  error
@@ -252,8 +253,7 @@ func confirm(ctx context.Context) func(engine.RestoreAsk) bool {
 				fmt.Println("\nnobody answered: pass --yes to restore without being asked")
 				return false
 			}
-			answer := strings.ToLower(strings.TrimSpace(r.line))
-			return answer == "y" || answer == "yes"
+			return strings.TrimSpace(r.line) == a.App
 		case <-ctx.Done():
 			fmt.Println()
 			return false

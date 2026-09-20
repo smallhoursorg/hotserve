@@ -147,8 +147,10 @@ that costs is below, under "what a restore cannot tell".
    app's. "Newest" is by the time restic recorded. Where the record
    says the last snapshot a run ended `ok` on is another one, the
    question and the report say so, and name it.
-3. It asks, naming the snapshot and when it was made. `--yes` answers;
-   with nobody to answer it refuses. Nothing has happened yet.
+3. It asks, naming the snapshot and when it was made, and takes the
+   app's name typed back — not "y", which a hand types on its own — for
+   a yes. `--yes` answers; with nobody to answer it refuses. Nothing has
+   happened yet.
 4. **The app is backed up first**, by the steps of a run, so the restore
    can be undone: the snapshot is tagged `pre-restore` and named in what
    the restore prints, also when the restore then fails. It holds what

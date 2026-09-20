@@ -967,6 +967,17 @@ func TestAFailedRestoreOnARebuiltBoxLeavesNoEmptySharedDir(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(b.root, "blog")); err == nil {
 		t.Fatal("an empty data dir was left behind")
 	}
+	// The same where the checks refused everything: a report with items
+	// in it is not data that landed.
+	b = restoreBox(t)
+	must(t, os.RemoveAll(filepath.Join(b.root, "blog")))
+	b.install = `{"plan":{"sqlite":["app.db"],"files":["uploads"]},"items":[{"kind":"sqlite","path":"app.db","class":"damaged","detail":"x"},{"kind":"files","path":"uploads","class":"held back"}]}`
+	if _, err := Restore(context.Background(), b.cfg, b, inPlace()); err == nil || !b.started("unmake") {
+		t.Fatalf("%v (%s)", err, b.roles())
+	}
+	if _, err := os.Lstat(filepath.Join(b.root, "blog")); err == nil {
+		t.Fatal("an empty data dir was left behind after a refused restore")
+	}
 	// One that put something in it, or had nothing to do, leaves it.
 	b = restoreBox(t)
 	must(t, os.RemoveAll(filepath.Join(b.root, "blog")))

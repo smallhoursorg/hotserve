@@ -158,8 +158,14 @@ before=$(snapshots)
 if hotserve-backup restore blog </dev/null >"$OUT" 2>&1; then fail "a restore with nobody to ask and no --yes exited 0"; else grep -q -e '--yes' "$OUT" && pass "with nobody to ask, a restore refuses and names --yes" || fail "nobody to ask: $(cat "$OUT")"; fi
 unchanged "$blog0" "$(blog_print)" "and changed nothing"
 [ "$(snapshots)" = "$before" ] && pass "and made no backup either: nothing happens before the answer" || fail "snapshots went from $before to $(snapshots) before anyone said yes"
-if printf 'n\n' | hotserve-backup restore blog >"$OUT" 2>&1; then fail "a restore answered 'n' exited 0"; else grep -qi "nothing was changed" "$OUT" && pass "answered 'n', a restore exits non-zero and says nothing was changed" || fail "answered 'n': $(cat "$OUT")"; fi
+for answer in n y yes shop; do
+	if printf '%s\n' "$answer" | hotserve-backup restore blog >"$OUT" 2>&1; then fail "a restore answered '$answer' exited 0"; else grep -qi "nothing was changed" "$OUT" && pass "answered '$answer', a restore exits non-zero and says nothing was changed: only the app's own name is a yes" || fail "answered '$answer': $(cat "$OUT")"; fi
+done
 unchanged "$blog0" "$(blog_print)" "and changed nothing"
+# The app's name, typed, is a yes.
+before=$(snapshots)
+if printf 'blog\n' | hotserve-backup restore blog --snapshot "$first_blog" >"$OUT" 2>&1; then grep -q "blog: restored from snapshot" "$OUT" && [ "$(snapshots)" = $((before + 1)) ] && pass "typed the app's name, the restore backs up first and goes on" || fail "typed the name: $(cat "$OUT")"; else fail "typed the name: $(cat "$OUT")"; fi
+blog0=$(blog_print)
 for flag in --to --snapshot; do
 	if restore blog "$flag" "" --yes; then fail "$flag '' exited 0"; else [ "$(units_left)" = 0 ] && grep -q "nothing in it" "$OUT" && pass "$flag given with nothing in it is refused: it is not the same restore without the flag" || fail "$flag '': $(cat "$OUT")"; fi
 done
