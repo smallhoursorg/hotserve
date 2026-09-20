@@ -153,7 +153,9 @@ services:
     volumes:
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
       - ./e2e/lib.sh:/lib.sh:ro
+      - ./e2e/backup/lib.sh:/lib-backup.sh:ro
       - ./e2e/backup/run.sh:/suite-backup.sh:ro
+      - ./e2e/backup/restore.sh:/suite-restore.sh:ro
     depends_on:
       - e2e-s3
 
