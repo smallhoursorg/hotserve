@@ -308,8 +308,10 @@ Paths are relative to the app's `shared/` and take no placeholders
 (`{shared_dir}/app.db` is written `app.db`). Each line takes one or
 more paths and may repeat. A path is refused when it is empty, is
 absolute, is not clean (`./`, `..`, a doubled or trailing `/`), reaches outside
-`shared/`, holds a control character or is not UTF-8, or is declared
-twice. A `sqlite` path names one file, never `.`.
+`shared/`, holds a control character or is not UTF-8, is longer than
+400 bytes (sqlite3 opens nothing at a path past its own limit, and does
+not say so), or is declared twice. A `sqlite` path names one file,
+never `.`.
 
 A database may sit inside a `files` path — `files .` with `sqlite
 app.db` is "everything, and this one is a database". Two `files`
