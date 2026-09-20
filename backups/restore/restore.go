@@ -19,8 +19,9 @@
 // under a directory no app can enter, so a copy closed to its owner is
 // opened to be read (a backup reads with a capability; a restore is the
 // owner) and the target still gets the mode the snapshot held. Nothing
-// of the app's is removed: only what a restore itself left half written,
-// and the sidecars of a database that is no longer there.
+// of the app's is removed — not even what looks like a file a killed
+// restore left, which an app may well have named so itself — only the
+// sidecars of a database that is no longer there.
 package restore
 
 import (
@@ -35,7 +36,6 @@ import (
 	"os"
 	"path"
 	"sort"
-	"strings"
 
 	"github.com/smallhoursorg/hotserve/backups/dump"
 	"github.com/smallhoursorg/hotserve/backups/nofollow"
@@ -274,6 +274,11 @@ func readPlan(staged int) (*backupdecl.Config, error) {
 	decl := new(backupdecl.Config)
 	if err := dec.Decode(decl); err != nil {
 		return nil, err
+	}
+	// One declaration and nothing after it: a decoder takes the first
+	// value and leaves the rest unread.
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, errors.New("something follows the declaration")
 	}
 	if err := decl.Validate(); err != nil {
 		return nil, err
@@ -533,9 +538,6 @@ func (j *job) walk(src, rel string, t *tree) error {
 		}
 		switch kind := st.Mode & unix.S_IFMT; kind {
 		case unix.S_IFREG:
-			if ownTmp(name) {
-				continue // what a killed restore left, backed up since: never the app's
-			}
 			if j.target >= 0 { // a drill keeps no list: it has nothing to install
 				t.files = append(t.files, entry{childRel, st.Mode & 0o777})
 			}
@@ -829,19 +831,11 @@ func (j *job) copyFile(src, rel string, perm uint32) error {
 }
 
 // tmpPrefix marks a file a restore is writing. One that a killed restore
-// left is removed by the next, where it lists what is in place, and is
-// never installed out of a snapshot made in between.
+// left is the app's from then on, like anything else under its name: it
+// is listed as left in place, backed up, and restored — a name is never
+// a reason to remove a file or to leave one out, since an app may call
+// a file of its own anything.
 const tmpPrefix = ".hotserve-restore-"
-
-// ownTmp reports whether name is one tmpName makes.
-func ownTmp(name string) bool {
-	hexPart, found := strings.CutPrefix(name, tmpPrefix)
-	if !found || len(hexPart) != 16 {
-		return false
-	}
-	_, err := hex.DecodeString(hexPart)
-	return err == nil
-}
 
 func tmpName() (string, error) {
 	b := make([]byte, 8)
@@ -871,13 +865,6 @@ func (j *job) left(src, rel string) {
 	for _, name := range inPlace {
 		childRel := path.Join(rel, name)
 		if j.excluded[childRel] {
-			continue
-		}
-		if ownTmp(name) {
-			if dir, err := nofollow.Open(j.target, rel, unix.O_PATH|unix.O_DIRECTORY); err == nil {
-				_ = unix.Unlinkat(dir, name, 0) // a restore's own: a directory by that name is not, and stays
-				unix.Close(dir)                 //nolint:errcheck,gosec // a path descriptor
-			}
 			continue
 		}
 		if !held[name] {

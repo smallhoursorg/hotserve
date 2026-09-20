@@ -214,7 +214,9 @@ that costs is below, under "what a restore cannot tell".
    place, restore before the app is first deployed. A copy is in
    rollback-journal mode; an app that wants WAL sets it when it opens. Files are written beside their names and renamed onto
    them, in directories opened without following a link: a link where a
-   file goes is replaced, never written through, and a symbolic link the
+   file goes is replaced, never written through — a file a killed restore
+   left half written under its temporary name is listed as left in place,
+   never removed: a name is not a reason — and a symbolic link the
    snapshot holds comes back as the same link, its text stored and never
    followed. A copy the app kept closed to its own owner is read all the
    same — what was fetched is this run's scratch, under a directory no
@@ -264,7 +266,8 @@ any app's data. The record then says, per app, `restore_proven` (which
 snapshot, and when it was proven) and, until the next drill that proves
 one, `restore_drill` (which snapshot proved nothing, when, and why). A
 drill that fails never replaces what was proven, a drill that is
-interrupted writes nothing, and a backup run carries both. It exits 0
+interrupted records what it finished and nothing of the app it was
+interrupted on, and a backup run carries both. It exits 0
 if no drill failed; an app the repository holds no snapshot of has
 nothing to prove. A `run` that drills — an app's first good backup —
 says what the drill found on a line of its own.

@@ -270,6 +270,16 @@ func (x *run) inPlace(ctx context.Context, root string, o RestoreOptions, decl *
 		app, _ := x.app(ctx, root, o.App, decl, preRestoreTag)
 		x.status.Apps[o.App] = app
 		x.carryLastOK(o.App)
+		// A backup of what is about to be restored over is never "the
+		// last one a backup run ended ok on": that is what a later
+		// restore's question compares against, and this holds, as often
+		// as not, the damage. It is the last snapshot, so the data going
+		// missing is still never "not deployed yet".
+		if old := x.prev.Apps[o.App]; old != nil {
+			app.LastOK = old.LastOK
+		} else {
+			app.LastOK = nil
+		}
 		rep.PreBackup = app.Snapshot // whether or not it ended ok: it is in the repository
 		// The record: this app under this restore's own time, every other
 		// app as the last run left it — never this app's result under
@@ -587,7 +597,7 @@ func room(size uint64, fetched, target, stateDir string) error {
 		return err
 	}
 	if size > free {
-		return fmt.Errorf("%w for a fetch of snapshot: it needs %s, and %s has %s free. A fetch is the whole app, in plaintext, until the restore or the drill is over", errNoRoom, mib(size), stateDir, mib(free))
+		return fmt.Errorf("%w for the fetch: it needs %s, and %s has %s free. A fetch is the whole app, in plaintext, until the restore or the drill is over", errNoRoom, mib(size), stateDir, mib(free))
 	}
 	if target == "" {
 		return nil
@@ -598,7 +608,7 @@ func room(size uint64, fetched, target, stateDir string) error {
 	}
 	if same {
 		if 2*size > free {
-			return fmt.Errorf("%w for a restore of snapshot: it needs %s — twice %s, since the fetch and the install land on one filesystem, and the fetch stays until the install is done — and %s has %s free. Restore --to a directory on another disk, or make room", errNoRoom, mib(2*size), mib(size), stateDir, mib(free))
+			return fmt.Errorf("%w for the restore: it needs %s — twice %s, since the fetch and the install land on one filesystem, and the fetch stays until the install is done — and %s has %s free. Restore --to a directory on another disk, or make room", errNoRoom, mib(2*size), mib(size), stateDir, mib(free))
 		}
 		return nil
 	}
@@ -607,7 +617,7 @@ func room(size uint64, fetched, target, stateDir string) error {
 		return err
 	}
 	if size > freeThere {
-		return fmt.Errorf("%w for a restore of snapshot: the install needs %s where it goes, which has %s free", errNoRoom, mib(size), mib(freeThere))
+		return fmt.Errorf("%w for the install: it needs %s where it goes, which has %s free", errNoRoom, mib(size), mib(freeThere))
 	}
 	return nil
 }
@@ -918,6 +928,8 @@ func Drill(ctx context.Context, cfg Config, r Runner) (*record.Status, error) {
 		st.Apps[name] = rec
 	}
 	st.Warning = strings.TrimSpace(st.Warning + " " + x.status.Warning)
+	// What was finished is written, an interrupt or not: each verdict is
+	// an app's own, and the app the interrupt landed on has none.
 	if err := record.Write(filepath.Join(cfg.StateDir, "status.json"), st); err != nil {
 		return st, err
 	}

@@ -841,6 +841,7 @@ func TestThePreBackupIsRecordedUnderTheRestoresOwnTime(t *testing.T) {
 	must(t, os.MkdirAll(b.cfg.StateDir, 0o755))
 	old := time.Date(2026, 9, 1, 3, 0, 0, 0, time.UTC)
 	must(t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), &record.Status{Started: old, Finished: old, Apps: map[string]*record.App{
+		"blog": {Class: record.OK, LastOK: &record.Snapshot{ID: snapB}, LastSnapshot: &record.Snapshot{ID: snapB}},
 		"shop": {Class: record.Incomplete, Detail: "as the last run left it"},
 	}}))
 	before := time.Now().UTC().Add(-time.Second)
@@ -854,6 +855,12 @@ func TestThePreBackupIsRecordedUnderTheRestoresOwnTime(t *testing.T) {
 	}
 	if st.Apps["blog"] == nil || st.Apps["blog"].Class != record.OK || st.Apps["shop"] == nil || st.Apps["shop"].Class != record.Incomplete {
 		t.Errorf("the apps: blog %+v shop %+v", st.Apps["blog"], st.Apps["shop"])
+	}
+	// The pre-restore backup is the last snapshot, and not the last ok
+	// one a backup run made: a later restore's question compares against
+	// that, and this one holds what was being restored over.
+	if blog := st.Apps["blog"]; blog.LastSnapshot == nil || blog.LastSnapshot.ID != snapA || blog.LastOK == nil || blog.LastOK.ID != snapB {
+		t.Errorf("last snapshot %+v, last ok %+v", blog.LastSnapshot, blog.LastOK)
 	}
 }
 

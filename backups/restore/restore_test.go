@@ -209,6 +209,8 @@ func TestAPlanThatIsNotADeclarationIsAnErrorAndNothingIsInstalled(t *testing.T) 
 		"leaves the app":   `{"files":["../../shop/shared"]}`,
 		"absolute":         `{"files":["/etc"]}`,
 		"declares nothing": `{}`,
+		"something after":  `{"files":["uploads"]} {"files":["/etc"]}`,
+		"garbage after":    `{"files":["uploads"]} not json`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			d := newDirs(t, plan, map[string]string{"files/uploads/a.png": "img"})
@@ -423,19 +425,22 @@ func TestAFileIsNeverRenamedOverALiveDatabase(t *testing.T) {
 	}
 }
 
-func TestWhatAKilledRestoreLeftIsRemovedAndNeverInstalled(t *testing.T) {
-	const leftover = tmpPrefix + "0123456789abcdef"
-	d := newDirs(t, uploadsPlan, map[string]string{"files/uploads/a.png": "img", "files/uploads/" + leftover: "half of a file, backed up since"})
-	write(t, filepath.Join(d.target, "uploads", leftover), "half of a file")
-	write(t, filepath.Join(d.target, "uploads", tmpPrefix+"not-ours"), "the app's own, whatever it is called")
+// What a killed restore left half written under its temporary name is
+// the app's from then on: listed as left in place, never removed, and
+// restored like any file when a snapshot holds it — an app may call a
+// file of its own anything, and a name is never a reason to remove one.
+func TestWhatLooksLikeALeftoverIsTheAppsAllTheSame(t *testing.T) {
+	const looksLikeOne = tmpPrefix + "0123456789abcdef"
+	d := newDirs(t, uploadsPlan, map[string]string{"files/uploads/a.png": "img", "files/uploads/" + looksLikeOne: "in the snapshot"})
+	write(t, filepath.Join(d.target, "uploads", looksLikeOne+"2"), "in place, not in the snapshot")
 	a := Run(context.Background(), d.staged, d.target, AllOrNothing)
 	if classes(a) != "files uploads: ok" {
 		t.Fatalf("%+v", a)
 	}
-	if _, err := os.Lstat(filepath.Join(d.target, "uploads", leftover)); err == nil {
-		t.Error("the leftover is still there, or was installed again")
+	if read(t, filepath.Join(d.target, "uploads", looksLikeOne)) != "in the snapshot" {
+		t.Error("a file the snapshot holds was left out for its name")
 	}
-	if read(t, filepath.Join(d.target, "uploads", tmpPrefix+"not-ours")) == "" || strings.Join(a.Left, " ") != "uploads/"+tmpPrefix+"not-ours" {
-		t.Errorf("a name that only looks like one: left %v", a.Left)
+	if read(t, filepath.Join(d.target, "uploads", looksLikeOne+"2")) != "in place, not in the snapshot" || strings.Join(a.Left, " ") != "uploads/"+looksLikeOne+"2" {
+		t.Errorf("a file in place was removed, or not listed, for its name: left %v", a.Left)
 	}
 }
