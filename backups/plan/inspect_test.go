@@ -3,9 +3,11 @@ package plan
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -419,3 +421,70 @@ func TestAnImportByASnippetArgumentIsRefused(t *testing.T) {
 }
 
 func second[T any](_ T, err error) error { return err }
+
+// A directory a wildcard leads through that whoever is asking may not
+// enter either: from there a glob of the whole way down simply does not
+// match what is under it, so each segment is matched, and looked at,
+// before the next. Root enters any directory, so under root the test
+// builds the tree and runs itself again as an unprivileged uid — as an
+// administrator's validate is.
+func TestAClosedDirectoryOnAWildcardsWayIsSeenWithoutPrivilege(t *testing.T) {
+	const asUID = 65534
+	base := os.Getenv("PLAN_TEST_CONFIG_DIR")
+	if base == "" {
+		var err error
+		if base, err = os.MkdirTemp("/var/tmp", "plan-closed-"); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(base) })
+		write(t, filepath.Join(base, "sites", "open", "conf", "a.caddy"), "# nothing\n")
+		write(t, filepath.Join(base, "sites", "private", "conf", "b.caddy"), "app shop {\n}\n")
+		write(t, filepath.Join(base, "Caddyfile"), "import sites/*/conf/*.caddy\napp blog\n")
+		for p, mode := range map[string]os.FileMode{
+			"": 0o755, "Caddyfile": 0o644, "sites": 0o755,
+			"sites/open": 0o755, "sites/open/conf": 0o755, "sites/open/conf/a.caddy": 0o644,
+			"sites/private/conf": 0o755, "sites/private/conf/b.caddy": 0o644, "sites/private": 0o700,
+		} {
+			if err := os.Chmod(filepath.Join(base, p), mode); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if os.Getuid() == 0 {
+			// The test binary sits where only root can go; a copy the uid
+			// can run, outside the tree it is about to look at.
+			bin, err := os.MkdirTemp("/var/tmp", "plan-closed-bin-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(bin) })
+			self, err := os.ReadFile(os.Args[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(bin, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(bin, "plan.test"), self, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			child := exec.Command(filepath.Join(bin, "plan.test"), "-test.run=^TestAClosedDirectoryOnAWildcardsWayIsSeenWithoutPrivilege$", "-test.v")
+			child.Env = append(os.Environ(), "PLAN_TEST_CONFIG_DIR="+base)
+			child.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: asUID, Gid: asUID}}
+			out, err := child.CombinedOutput()
+			if err != nil || !strings.Contains(string(out), "--- PASS") {
+				t.Fatalf("as uid %d: %v\n%s", asUID, err, out)
+			}
+			return
+		}
+	} else if _, err := os.ReadDir(filepath.Join(base, "sites", "private")); err == nil {
+		t.Fatalf("fixture: uid %d can list sites/private: the test proves nothing", os.Getuid())
+	}
+	fakeHotserve(t)
+	got, err := Inspect(context.Background(), filepath.Join(base, "Caddyfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed := got.ImportsClosedToOthers(base); !slices.Equal(closed, []string{filepath.Join(base, "sites", "private")}) {
+		t.Fatalf("closed to others: %q, want sites/private alone", closed)
+	}
+}

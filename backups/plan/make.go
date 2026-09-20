@@ -134,8 +134,9 @@ func leadsOut(dir string, roots ...string) bool {
 
 // ImportsClosedToOthers are the imported files under configDir that
 // "other" may not read, and the directories on the way to them —
-// configDir itself, those the pattern names, those its wildcards lead
-// through — that "other" may not list and walk: the plan unit
+// configDir itself and every one the pattern leads through, wildcards
+// included, matched a segment at a time — that "other" may not list
+// and walk: the plan unit
 // runs as an account that owns nothing there and is in no group that
 // does. A closed file fails every run; a closed directory makes its glob
 // match nothing, and the run plan without what is declared in it.
@@ -148,7 +149,7 @@ func (i *Inspection) ImportsClosedToOthers(configDir string) (closed []string) {
 			return
 		}
 		seen[p] = true
-		if st, err := os.Stat(p); err == nil && st.Mode().Perm()&need != need {
+		if st, err := os.Stat(p); err == nil && st.Mode().Perm()&need != need { //nolint:gosec // the Caddyfile's own imports, looked at for their mode and never opened
 			closed = append(closed, p)
 		}
 	}
@@ -162,16 +163,40 @@ func (i *Inspection) ImportsClosedToOthers(configDir string) (closed []string) {
 		if inside(imp.Pattern) {
 			look(configDir, 0o005)
 		}
-		// The directories the pattern names before its first wildcard,
-		// matched or not: one that whoever is asking may not list either
-		// matches nothing here too, and only the pattern says it is there.
-		dirs(literalDir(imp.Pattern))
-		// And every directory the pattern leads through that can be seen
-		// from here, whether or not a file in it matches.
-		through, _ := filepath.Glob(filepath.Dir(imp.Pattern))
-		for _, d := range through {
-			if st, err := os.Stat(d); err == nil && st.IsDir() {
-				dirs(d)
+		// Every directory the pattern leads through, one segment at a
+		// time, each looked at before anything under it is: a directory
+		// whoever is asking may not enter either has nothing under it
+		// that a glob of the whole way down would match, and only the
+		// way itself says it is there. Entries are read and matched by
+		// name, never joined back into a pattern: a directory may be
+		// called "a[1]".
+		if inside(imp.Pattern) {
+			rel := strings.TrimPrefix(filepath.Dir(imp.Pattern), configDir)
+			level := []string{configDir}
+			for _, seg := range strings.Split(strings.Trim(rel, string(filepath.Separator)), string(filepath.Separator)) {
+				if seg == "" {
+					continue
+				}
+				var next []string
+				for _, d := range level {
+					if !strings.ContainsAny(seg, "*?[") {
+						next = append(next, filepath.Join(d, seg))
+						continue
+					}
+					entries, _ := os.ReadDir(d) // one it may not list has been looked at, and said
+					for _, e := range entries {
+						if ok, _ := filepath.Match(seg, e.Name()); ok {
+							next = append(next, filepath.Join(d, e.Name()))
+						}
+					}
+				}
+				level = level[:0]
+				for _, d := range next {
+					if st, err := os.Stat(d); err == nil && st.IsDir() { //nolint:gosec // as above
+						look(d, 0o005)
+						level = append(level, d)
+					}
+				}
 			}
 		}
 		for _, file := range imp.Files {
