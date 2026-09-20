@@ -58,6 +58,7 @@ func TestValidateRejects(t *testing.T) {
 		{"doubled separator", Config{Files: []string{"media//uploads"}}, "clean"},
 		{"a newline", Config{Files: []string{"up\nloads"}}, "control character"},
 		{"a NUL", Config{SQLite: []string{"app\x00.db"}}, "control character"},
+		{"too long", Config{SQLite: []string{strings.Repeat("d/", 200) + "x.db"}}, "at most"},
 		{"DEL", Config{Files: []string{"up" + string(rune(0x7f)) + "loads"}}, "control character"},
 		// C1 controls are valid UTF-8, so the UTF-8 rule does not catch
 		// them: NEL is a line break to whatever prints the path.

@@ -36,6 +36,15 @@ type Config struct {
 // so neither they nor anything under their names is declared.
 var sidecars = []string{"-wal", "-shm", "-journal"}
 
+// PathLimit is the longest path a declaration takes, in bytes. SQLite's
+// unix VFS holds a path in 512 bytes and does not refuse a longer one:
+// asked to open it, it opens an empty temporary database in its place
+// [measured at 513 bytes]. A declared path is used under the app's own
+// shared dir (`/var/lib/liveswap/<app>/shared/`, 89 bytes at most) and
+// under a backup unit's shorter mount points; 400 keeps every one of
+// them under the limit with room to spare.
+const PathLimit = 400
+
 type item struct{ kind, path string }
 
 func (i item) String() string { return fmt.Sprintf("%s %q", i.kind, i.path) }
@@ -92,6 +101,8 @@ func (i item) validate() error {
 		return fmt.Errorf("%s: the path contains a placeholder ({ or }), and a backup path takes none; it is relative to the app's shared dir already, so `{shared_dir}/app.db` is written `app.db`", i)
 	case strings.HasPrefix(p, "/"):
 		return fmt.Errorf("%s: the path must be relative to the app's shared dir, not absolute", i)
+	case len(p) > PathLimit:
+		return fmt.Errorf("%s: the path is %d bytes, and a backup path is %d at most: sqlite3 opens nothing at a path past its limit, and does not say so", i, len(p), PathLimit)
 	}
 	// Outside before unclean: the clean spelling of a path that leaves
 	// the shared dir is not advice worth giving.
