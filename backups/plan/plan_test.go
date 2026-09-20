@@ -90,7 +90,7 @@ func TestEnvNamesFollowsImports(t *testing.T) {
 	write(t, dir+"/sites/a.caddy", "{$DOMAIN:example.com} {\n\timport ../Caddyfile\n\timport deeper/*\n}\n")
 	write(t, dir+"/sites/deeper/b", "root * {$WEBROOT}\n")
 	write(t, dir+"/abs.caddy", "respond {$GREETING}\n")
-	got, bare, imported, err := envNames(dir + "/Caddyfile")
+	got, bare, imported, _, err := envNames(dir + "/Caddyfile")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,9 @@ case "${PORT:-8080}" in *[!0-9]*) echo "Error: invalid port '$PORT'" >&2; exit 1
 [ "${ENV:-prod}" = prod ] || { echo "Error: File to import not found: sites/$ENV.caddy" >&2; exit 1; }
 root=${LIVESWAP_ROOT:-/var/lib/liveswap}
 uses ROOT_NO_DEFAULT && root=$ROOT_NO_DEFAULT
-printf '{"apps":{"http":{"domain":"%s"},"liveswap":{"root":"%s","apps":{"%s":{"backup":{"sqlite":["%s"]}}}}}}' "${DOMAIN:-example.com}" "$root" "${APP_NAME:-blog}" "${DB:-app.db}"
+more=""
+grep -q "^app shop" "$last" && more=',"shop":{},"cart":{"backup":null}'
+printf '{"apps":{"http":{"domain":"%s"},"liveswap":{"root":"%s","apps":{"%s":{"backup":{"sqlite":["%s"]}}%s}}}}' "${DOMAIN:-example.com}" "$root" "${APP_NAME:-blog}" "${DB:-app.db}" "$more"
 `)
 	old := hotserve
 	hotserve = script

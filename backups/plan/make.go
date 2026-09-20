@@ -37,7 +37,151 @@ func kinds(name string) []string {
 	return []string{own + ".invalid", own + "-2.invalid", "1", "2", "1s", "2s", "/" + own, "/" + own + "-2"}
 }
 
-// Make adapts the Caddyfile and returns its Plan.
+// Inspection is a Caddyfile's plan, and what a person about to make
+// that Caddyfile live should hear besides.
+type Inspection struct {
+	Plan *Plan
+	// Undeclared are the apps that declare no backup, sorted: a new
+	// app's block with the two lines forgotten is otherwise silent.
+	Undeclared []string
+	// Imports are the imports of the Caddyfile and of what it imports,
+	// however deep. A run reads them from inside a view that holds the
+	// config directory and nothing else.
+	Imports []Import
+}
+
+// Import is one import line that names files.
+type Import struct {
+	// Pattern is what is imported, as an absolute, clean path — a glob,
+	// where the line was one — with the adapter's defaults in.
+	Pattern string
+	// Relative: written relative to the file the line is in.
+	Relative bool
+	// Files are the files it matches here.
+	Files []string
+}
+
+// ImportsOutside are the imports a run could not read once the
+// Caddyfile is live: the patterns that are not under configDir — or,
+// written relatively, under ownDir, the Caddyfile's own directory, which
+// on the box is configDir — and the matched files that lead, through a
+// link, out of both.
+//
+// The pattern is judged as written, before anything it matches: inside
+// a run's view a glob that reaches outside matches nothing, which to
+// the adapter is no error, so the apps declared out there would simply
+// not be in the plan.
+func (i *Inspection) ImportsOutside(configDir, ownDir string) (out []string) {
+	under := func(p, dir string) bool {
+		return strings.HasPrefix(p, strings.TrimSuffix(filepath.Clean(dir), string(filepath.Separator))+string(filepath.Separator))
+	}
+	resolved := func(p string) string {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return r
+		}
+		return filepath.Clean(p)
+	}
+	for _, imp := range i.Imports {
+		inside := under(imp.Pattern, configDir) || (imp.Relative && under(imp.Pattern, ownDir))
+		if !inside || leadsOut(literalDir(imp.Pattern), resolved(configDir), resolved(ownDir)) {
+			out = append(out, imp.Pattern)
+			continue
+		}
+		for _, file := range imp.Files {
+			if r := resolved(file); !under(r, resolved(configDir)) && !under(r, resolved(ownDir)) {
+				out = append(out, file)
+			}
+		}
+	}
+	return out
+}
+
+// literalDir is the directory a pattern names before its first
+// wildcard.
+func literalDir(pattern string) string {
+	if at := strings.IndexAny(pattern, "*?["); at >= 0 {
+		pattern = pattern[:at]
+	}
+	return filepath.Dir(pattern)
+}
+
+// leadsOut says whether dir, followed through its links, is under
+// neither root — or cannot be followed because a link on the way
+// dangles, which is what a link out of a run's view looks like from
+// inside it, where the glob then matches nothing. A directory that is
+// simply not there leads nowhere.
+func leadsOut(dir string, roots ...string) bool {
+	if r, err := filepath.EvalSymlinks(dir); err == nil {
+		for _, root := range roots {
+			if r == root || strings.HasPrefix(r, root+string(filepath.Separator)) {
+				return false
+			}
+		}
+		return true
+	}
+	for d := dir; d != filepath.Dir(d); d = filepath.Dir(d) {
+		if st, err := os.Lstat(d); err == nil && st.Mode()&os.ModeSymlink != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// ImportsClosedToOthers are the imported files under configDir that
+// "other" may not read, and the directories on the way to them —
+// configDir itself, those the pattern names, those its wildcards lead
+// through — that "other" may not list and walk: the plan unit
+// runs as an account that owns nothing there and is in no group that
+// does. A closed file fails every run; a closed directory makes its glob
+// match nothing, and the run plan without what is declared in it.
+// Imports elsewhere — a copy being checked — say nothing of the box.
+func (i *Inspection) ImportsClosedToOthers(configDir string) (closed []string) {
+	configDir = filepath.Clean(configDir)
+	seen := map[string]bool{}
+	look := func(p string, need os.FileMode) {
+		if seen[p] {
+			return
+		}
+		seen[p] = true
+		if st, err := os.Stat(p); err == nil && st.Mode().Perm()&need != need {
+			closed = append(closed, p)
+		}
+	}
+	inside := func(p string) bool { return strings.HasPrefix(p, configDir+string(filepath.Separator)) }
+	dirs := func(from string) {
+		for d := from; inside(d); d = filepath.Dir(d) {
+			look(d, 0o005)
+		}
+	}
+	for _, imp := range i.Imports {
+		if inside(imp.Pattern) {
+			look(configDir, 0o005)
+		}
+		// The directories the pattern names before its first wildcard,
+		// matched or not: one that whoever is asking may not list either
+		// matches nothing here too, and only the pattern says it is there.
+		dirs(literalDir(imp.Pattern))
+		// And every directory the pattern leads through that can be seen
+		// from here, whether or not a file in it matches.
+		through, _ := filepath.Glob(filepath.Dir(imp.Pattern))
+		for _, d := range through {
+			if st, err := os.Stat(d); err == nil && st.IsDir() {
+				dirs(d)
+			}
+		}
+		for _, file := range imp.Files {
+			if inside(file) {
+				look(file, 0o004)
+				dirs(filepath.Dir(file))
+			}
+		}
+	}
+	sort.Strings(closed)
+	return closed
+}
+
+// Inspect adapts the Caddyfile and returns its Plan, with the apps that
+// declare no backup and the files it imports.
 //
 // It does not have the environment hotserve adapts it in, and is not
 // given it: that environment is where the server's secrets are. But the
@@ -67,12 +211,12 @@ func kinds(name string) []string {
 // token; no set of them shows that no value restructures the file, and
 // the server's values are not known here. A declaration that exists
 // only through the server's environment is not in the plan.
-func Make(ctx context.Context, caddyfile string) (*Plan, error) {
+func Inspect(ctx context.Context, caddyfile string) (*Inspection, error) {
 	// adapt returns the plan as the Caddyfile spells it under env, not
 	// yet validated — a placeholder is not a valid root, and a plan that
 	// turns invalid under one has changed like any other — or what the
 	// adapter said.
-	adapt := func(env map[string]string) (*Plan, string, error) {
+	adapt := func(env map[string]string) (*Plan, []string, string, error) {
 		//nolint:gosec // a constant path outside tests; the Caddyfile path is the caller's, a root-owned constant
 		cmd := exec.CommandContext(ctx, hotserve, "adapt", "--adapter", "caddyfile", "--config", caddyfile)
 		cmd.Env = []string{} // never nil: nil means "inherit"
@@ -82,13 +226,13 @@ func Make(ctx context.Context, caddyfile string) (*Plan, error) {
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr
 		if err := cmd.Run(); err != nil {
-			return nil, stderr.String(), fmt.Errorf("%s adapt: %w: %s", hotserve, err, lastLine(stderr.String()))
+			return nil, nil, stderr.String(), fmt.Errorf("%s adapt: %w: %s", hotserve, err, lastLine(stderr.String()))
 		}
-		p, err := extract(stdout.Bytes())
-		return p, "", err
+		p, undeclared, err := extractAll(stdout.Bytes())
+		return p, undeclared, "", err
 	}
 
-	names, needs, imported, err := envNames(caddyfile)
+	names, needs, imported, imports, err := envNames(caddyfile)
 	if err != nil {
 		return nil, err
 	}
@@ -109,9 +253,10 @@ func Make(ctx context.Context, caddyfile string) (*Plan, error) {
 		env[n] = kinds(n)[0]
 	}
 	var base *Plan
+	var undeclared []string // as the base adapt has them
 	for {
 		var said string
-		if base, said, err = adapt(env); err == nil {
+		if base, undeclared, said, err = adapt(env); err == nil {
 			break
 		}
 		moved := false
@@ -158,7 +303,7 @@ func Make(ctx context.Context, caddyfile string) (*Plan, error) {
 					trialEnv[k] = v
 				}
 			}
-			trial, _, err := adapt(trialEnv)
+			trial, _, _, err := adapt(trialEnv)
 			if err != nil {
 				continue
 			}
@@ -178,7 +323,95 @@ func Make(ctx context.Context, caddyfile string) (*Plan, error) {
 	if len(opaque) > 0 {
 		return nil, fmt.Errorf("the Caddyfile does not adapt with the environment variable(s) %s set to any value tried, so what the server reads when they are set — an import, perhaps — cannot be known here; a backup reads the Caddyfile without hotserve's environment", strings.Join(opaque, ", "))
 	}
-	return base, base.Validate()
+	if err := base.Validate(); err != nil {
+		return nil, err
+	}
+	return &Inspection{Plan: base, Undeclared: undeclared, Imports: imports}, nil
+}
+
+// Make is the plan alone — what a run needs of an Inspection — and
+// refuses a Caddyfile that imports from outside its own directory: the
+// plan unit's view holds that directory and nothing else.
+func Make(ctx context.Context, caddyfile string) (*Plan, error) {
+	i, err := Inspect(ctx, caddyfile)
+	if err != nil {
+		return nil, err
+	}
+	dir := filepath.Dir(caddyfile)
+	if out := i.ImportsOutside(dir, dir); len(out) > 0 {
+		return nil, OutsideError(out, dir)
+	}
+	return i.Plan, nil
+}
+
+// OutsideError is the refusal of imports from outside dir.
+func OutsideError(imports []string, dir string) error {
+	return fmt.Errorf("the Caddyfile imports %s from outside %s: a backup run reads the Caddyfile inside a view that holds that directory and nothing else, so what is declared out there would not be backed up — keep what is imported under %s", strings.Join(imports, ", "), dir, dir)
+}
+
+// insideQuotes says of each byte of a Caddyfile whether it is inside a
+// quoted token — "…", `…`, or a heredoc, each of which may run over
+// lines — or a comment: text, where a line that begins with a
+// directive's name is not that directive. It follows the adapter's
+// lexer in what opens one: only the start of a token.
+func insideQuotes(raw []byte) []bool {
+	in := make([]bool, len(raw))
+	tokenStart := true
+	for i := 0; i < len(raw); {
+		c := raw[i]
+		switch {
+		case !tokenStart:
+			tokenStart = c == ' ' || c == '\t' || c == '\n' || c == '\r'
+			i++
+		case c == '#':
+			for ; i < len(raw) && raw[i] != '\n'; i++ {
+				in[i] = true
+			}
+		case c == '"' || c == '`':
+			in[i] = true
+			for i++; i < len(raw) && raw[i] != c; i++ {
+				in[i] = true
+				if c == '"' && raw[i] == '\\' && i+1 < len(raw) {
+					i++
+					in[i] = true
+				}
+			}
+			if i < len(raw) {
+				in[i] = true
+				i++
+			}
+			tokenStart = false
+		case c == '<' && bytes.HasPrefix(raw[i:], []byte("<<")):
+			eol := bytes.IndexByte(raw[i:], '\n')
+			if eol < 0 {
+				return in
+			}
+			marker := bytes.TrimSpace(raw[i+2 : i+eol])
+			i += eol + 1
+			for i < len(raw) {
+				end := bytes.IndexByte(raw[i:], '\n')
+				if end < 0 {
+					end = len(raw) - i
+				}
+				closes := len(marker) > 0 && bytes.Equal(bytes.TrimSpace(raw[i:i+end]), marker)
+				for j := i; j < i+end; j++ {
+					in[j] = true
+				}
+				i += end
+				if closes {
+					break
+				}
+				if i < len(raw) {
+					i++ // the newline
+				}
+			}
+			tokenStart = false
+		default:
+			tokenStart = c == ' ' || c == '\t' || c == '\n' || c == '\r'
+			i++
+		}
+	}
+	return in
 }
 
 func lastLine(s string) string {
@@ -200,8 +433,8 @@ var (
 // imports, however deep, and those among them written somewhere with
 // no default. An import that names no file — a snippet, a glob matching
 // nothing — contributes nothing. inImport are the names used in an
-// import's argument.
-func envNames(caddyfile string) (all, noDefault, inImport []string, err error) {
+// import's argument, and imports every import line read.
+func envNames(caddyfile string) (all, noDefault, inImport []string, imports []Import, err error) {
 	seen := map[string]bool{}
 	names := map[string]bool{} // true: written somewhere with no default
 	importVars := map[string]bool{}
@@ -218,31 +451,48 @@ func envNames(caddyfile string) (all, noDefault, inImport []string, err error) {
 		for _, m := range envRe.FindAllSubmatch(raw, -1) {
 			names[string(m[1])] = names[string(m[1])] || len(m[2]) == 0
 		}
-		for _, m := range importRe.FindAllSubmatch(raw, -1) {
+		text := insideQuotes(raw)
+		for _, at := range importRe.FindAllSubmatchIndex(raw, -1) {
+			// The line's first word, where that word is not inside a quoted
+			// token or a comment that began on a line before.
+			if text[at[0]+bytes.Index(raw[at[0]:at[1]], []byte("import"))] {
+				continue
+			}
+			var m [4][]byte
+			for g := 1; g <= 3; g++ {
+				if at[2*g] >= 0 {
+					m[g] = raw[at[2*g]:at[2*g+1]]
+				}
+			}
 			arg := string(m[1]) + string(m[2]) + string(m[3])
 			for _, v := range envRe.FindAllStringSubmatch(arg, -1) {
 				importVars[v[1]] = true
 			}
 			// As the base adapt sees it: defaults in, unset names empty.
 			pattern := substRe.ReplaceAllString(arg, "$1")
-			if !filepath.IsAbs(pattern) {
+			imp := Import{Relative: !filepath.IsAbs(pattern)}
+			if imp.Relative {
 				pattern = filepath.Join(filepath.Dir(file), pattern)
 			}
+			imp.Pattern = filepath.Clean(pattern)
 			matches, _ := filepath.Glob(pattern)
 			for _, match := range matches {
 				if st, err := os.Stat(match); err != nil || !st.Mode().IsRegular() { //nolint:gosec // as above
 					continue
 				}
+				imp.Files = append(imp.Files, match)
 				if err := scan(match); err != nil {
 					return err
 				}
 			}
+			imports = append(imports, imp)
 		}
 		return nil
 	}
 	if err := scan(caddyfile); err != nil {
-		return nil, nil, nil, fmt.Errorf("reading the Caddyfile for {$NAME}: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("reading the Caddyfile for {$NAME}: %w", err)
 	}
+
 	for n := range importVars {
 		inImport = append(inImport, n)
 	}
@@ -255,5 +505,5 @@ func envNames(caddyfile string) (all, noDefault, inImport []string, err error) {
 	}
 	sort.Strings(all)
 	sort.Strings(noDefault)
-	return all, noDefault, inImport, nil
+	return all, noDefault, inImport, imports, nil
 }
