@@ -286,8 +286,9 @@ var envRe = regexp.MustCompile(`\{\$([^}:\s]+)(:[^}]*)?\}`)
 // syntax: a name from a file nothing imports costs one trial adapt that
 // changes nothing, and one that is missed has no default given, which
 // the adapter says loudly. A file here that may not be read (another
-// app's env file) is passed over, and so is one of over a megabyte: a
-// file the Caddyfile imports that could not be read fails the adapt.
+// app's env file) is passed over: one the Caddyfile imports that could
+// not be read fails the adapt. However large a file is, it is read: a
+// variable in it is as able to move the root.
 func envNames(caddyfile string, beside bool) (all, noDefault []string, err error) {
 	names := map[string]bool{} // true: written somewhere with no default
 	read := func(file string) error {
@@ -310,9 +311,7 @@ func envNames(caddyfile string, beside bool) (all, noDefault []string, err error
 		if err != nil || !d.Type().IsRegular() {
 			return nil // one it may not list or read is passed over, as above
 		}
-		if info, err := d.Info(); err == nil && info.Size() <= 1<<20 {
-			_ = read(p)
-		}
+		_ = read(p)
 		return nil
 	})
 	return sorted(names)

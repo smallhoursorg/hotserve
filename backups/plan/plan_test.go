@@ -105,16 +105,17 @@ func TestEnvNamesReadsEveryFileBesideTheCaddyfile(t *testing.T) {
 	write(t, dir+"/sites/a.caddy", "{$DOMAIN:example.com} {\n\timport deeper/*\n}\n")
 	write(t, dir+"/sites/deeper/b", "root * {$WEBROOT}\n")
 	write(t, dir+"/not-imported.caddy", "respond {$UNUSED:x}\n")
-	write(t, dir+"/huge.caddy", "respond {$TOO_FAR_IN}\n"+strings.Repeat("#\n", 1<<20))
+	// However large: a variable in it is as able to move the root.
+	write(t, dir+"/huge.caddy", "root {$HUGE_ROOT:/safe}\n"+strings.Repeat("#\n", 1<<20))
 	got, bare, err := envNames(dir+"/Caddyfile", true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// DOMAIN, CONF and UNUSED are only ever written with a default.
+	// DOMAIN, CONF, HUGE_ROOT and UNUSED are only ever written with a default.
 	if want := []string{"ACME_EMAIL", "BEHIND_A_DEFAULT", "QUOTED", "WEBROOT"}; !reflect.DeepEqual(bare, want) {
 		t.Fatalf("with no default = %v, want %v", bare, want)
 	}
-	if want := []string{"ACME_EMAIL", "BEHIND_A_DEFAULT", "CONF", "DOMAIN", "QUOTED", "UNUSED", "WEBROOT"}; !reflect.DeepEqual(got, want) {
+	if want := []string{"ACME_EMAIL", "BEHIND_A_DEFAULT", "CONF", "DOMAIN", "HUGE_ROOT", "QUOTED", "UNUSED", "WEBROOT"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("names = %v, want %v", got, want)
 	}
 
