@@ -366,6 +366,11 @@ func TestImportsAsTheAdapterReadsThem(t *testing.T) {
 		"in a snippet":                 {"(apps) {\n\timport /srv/apps/*.caddy\n}\napp blog\n", []string{"/srv/apps/*.caddy"}},
 		"a heredoc closed by the word": {"respond <<import\nimport /static/app.js\nimport\napp blog\n", nil},
 		"a CRLF heredoc":               {"respond <<JS\r\nimport /static/app.js\r\nJS\r\nimport /srv/apps/*.caddy\r\n", []string{"/srv/apps/*.caddy"}},
+		// Caddy's own documented form: the marker ends the heredoc, and the
+		// rest of its line is tokens.
+		"a heredoc closed with more on the line": {"respond <<HTML\n\t<p>hi</p>\n\tHTML 200\nimport /srv/apps/*.caddy\napp blog\n", []string{"/srv/apps/*.caddy"}},
+		"a marker that is part of a word":        {"respond <<END\nthe END 200\nimport /srv/apps/*.caddy\n", []string{"/srv/apps/*.caddy"}},
+		"<< and a space is a token":              {"respond << x\nimport /srv/apps/*.caddy\n", []string{"/srv/apps/*.caddy"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			write(t, file, tc.body)

@@ -471,30 +471,29 @@ func insideQuotes(raw []byte) []bool {
 			}
 			tokenStart = false
 		case c == '<' && bytes.HasPrefix(raw[i:], []byte("<<")):
-			eol := bytes.IndexByte(raw[i:], '\n')
-			if eol < 0 {
-				return in
-			}
-			marker := bytes.TrimSpace(raw[i+2 : i+eol])
-			i += eol + 1
-			for i < len(raw) {
-				end := bytes.IndexByte(raw[i:], '\n')
-				if end < 0 {
-					end = len(raw) - i
-				}
-				closes := len(marker) > 0 && bytes.Equal(bytes.TrimSpace(raw[i:i+end]), marker)
-				for j := i; j < i+end; j++ {
-					in[j] = true
-				}
-				i += end
-				if closes {
-					break
-				}
-				if i < len(raw) {
-					i++ // the newline
-				}
+			// A heredoc opens where "<<" and its marker run to the end of
+			// the line, a CR before it skipped; "<<" and a space is an
+			// ordinary token. It closes the moment its text ends with the
+			// marker, wherever on a line that is — `HTML 200` — and the
+			// rest of that line is tokens [Caddy's lexer; measured].
+			j := i + 2
+			for j < len(raw) && raw[j] != ' ' && raw[j] != '\t' && raw[j] != '\n' {
+				j++
 			}
 			tokenStart = false
+			if j == len(raw) || raw[j] != '\n' {
+				i = j
+				continue
+			}
+			marker := bytes.TrimSuffix(raw[i+2:j], []byte("\r"))
+			i = j + 1
+			end := len(raw)
+			if k := bytes.Index(raw[i:], marker); len(marker) > 0 && k >= 0 {
+				end = i + k + len(marker)
+			}
+			for ; i < end; i++ {
+				in[i] = true
+			}
 		default:
 			tokenStart = c == ' ' || c == '\t' || c == '\n' || c == '\r'
 			i++
