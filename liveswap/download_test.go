@@ -411,17 +411,24 @@ func TestDownloadRefusesHTTPSToHTTPDowngrade(t *testing.T) {
 	}
 }
 
-// closedPort returns a loopback port nothing listens on, so a request
-// to it fails at connect — a transport failure on a chosen hop.
-func closedPort(t *testing.T) string {
+// unreachableHost is a host the test client refuses to dial: a
+// transport failure on a chosen hop, deterministic and without a
+// name lookup (the transport hands DialContext the address as-is).
+const unreachableHost = "unreachable.invalid"
+
+// refusingDownloadClient is the real download client with one host
+// unreachable at the dial, every other address dialed as usual.
+func refusingDownloadClient(t *testing.T) *http.Client {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	client := newDownloadClient(true)
+	dialer := &net.Dialer{}
+	client.Transport.(*http.Transport).DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if host, _, err := net.SplitHostPort(addr); err == nil && host == unreachableHost {
+			return nil, errors.New("dial refused by the test")
+		}
+		return dialer.DialContext(ctx, network, addr)
 	}
-	_, port, _ := net.SplitHostPort(l.Addr().String())
-	_ = l.Close()
-	return port
+	return client
 }
 
 // A failure on a later hop is reported by the client as that hop's
@@ -430,17 +437,17 @@ func closedPort(t *testing.T) string {
 // error must name the hop without its query, and stay a *url.Error
 // for callers that look for one.
 func TestDownloadFailureOnRedirectTargetKeepsItsQueryOut(t *testing.T) {
-	target := "http://127.0.0.1:" + closedPort(t) + "/asset?X-Amz-Signature=SECRETTWO"
+	target := "http://" + unreachableHost + "/asset?X-Amz-Signature=SECRETTWO"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, target, http.StatusFound)
 	}))
 	defer srv.Close()
 
 	opts := testDownloadOpts(t, srv.URL+"/a.tgz")
-	opts.client = newDownloadClient(true)
+	opts.client = refusingDownloadClient(t)
 	_, err := downloadArtifact(context.Background(), opts)
 	if err == nil {
-		t.Fatal("a redirect to a closed port must fail")
+		t.Fatal("a redirect to an unreachable host must fail")
 	}
 	if strings.Contains(err.Error(), "SECRETTWO") || strings.Contains(err.Error(), "?") {
 		t.Fatalf("hop failure leaked the redirect target's query: %v", err)
@@ -458,16 +465,39 @@ func TestDownloadFailureOnRedirectTargetKeepsItsQueryOut(t *testing.T) {
 // URL the operator declared by name); a connect failure there quotes
 // it the same way.
 func TestDownloadFailureOnFirstHopKeepsItsQueryOut(t *testing.T) {
-	port := closedPort(t)
-	opts := testDownloadOpts(t, "http://127.0.0.1:"+port+"/a.tgz?token=SECRETONE")
-	opts.allowlist = mustAllowlist(t, "127.0.0.1:"+port+"?token")
-	opts.client = newDownloadClient(true)
+	opts := testDownloadOpts(t, "http://"+unreachableHost+"/a.tgz?token=SECRETONE")
+	opts.allowlist = mustAllowlist(t, unreachableHost+"?token")
+	opts.client = refusingDownloadClient(t)
 	_, err := downloadArtifact(context.Background(), opts)
 	if err == nil {
-		t.Fatal("a closed port must fail")
+		t.Fatal("an unreachable host must fail")
 	}
 	if strings.Contains(err.Error(), "SECRETONE") || strings.Contains(err.Error(), "?") {
 		t.Fatalf("first-hop failure leaked the query: %v", err)
+	}
+}
+
+// A Location header the client cannot parse is quoted inside the
+// cause, not in the URL, and the parse error inside that quotes it
+// again. Neither copy may survive.
+func TestDownloadUnparseableLocationKeepsItsQueryOut(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "/bad%zz?token=SECRETFIVE")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer srv.Close()
+
+	opts := testDownloadOpts(t, srv.URL+"/a.tgz")
+	opts.client = newDownloadClient(true)
+	_, err := downloadArtifact(context.Background(), opts)
+	if err == nil {
+		t.Fatal("an unparseable Location must fail")
+	}
+	if strings.Contains(err.Error(), "SECRETFIVE") || strings.Contains(err.Error(), "?") || strings.Contains(err.Error(), "%zz") {
+		t.Fatalf("unparseable Location leaked the header: %v", err)
+	}
+	if !strings.Contains(err.Error(), "Location") {
+		t.Fatalf("the cause should still say what failed: %v", err)
 	}
 }
 

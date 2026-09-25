@@ -206,6 +206,12 @@ func redactURL(u *url.URL) string {
 // redacted and the wrapped text would print the secret anyway. The
 // error is this request's own, so it is rewritten in place and the
 // chain (and the caller's errors.As) is kept.
+//
+// A Location header the client cannot parse is the one failure whose
+// text quotes the header inside the cause rather than in URL (twice:
+// the client's message and the parse error it wraps). That cause
+// carries nothing a caller looks for, so it is replaced by the same
+// message without the header.
 func redactRequestError(err error) error {
 	var ue *url.Error
 	if !errors.As(err, &ue) {
@@ -222,8 +228,17 @@ func redactRequestError(err error) error {
 		// A relative Location header, quoted raw by a refused redirect.
 		ue.URL = u.EscapedPath()
 	}
+	if ue.Err != nil && strings.HasPrefix(ue.Err.Error(), unparseableLocation) {
+		ue.Err = errors.New(unparseableLocation)
+	}
 	return err
 }
+
+// unparseableLocation is how net/http's client begins the error for a
+// redirect whose Location header does not parse; the rest of that
+// message is the header itself. The wording is the stdlib's, so the
+// tests assert on what must not appear rather than on this prefix.
+const unparseableLocation = "failed to parse Location header"
 
 // fetcher turns a webhook request into an extracted release directory,
 // reporting what the archive cost against the app's caps (zero for a
