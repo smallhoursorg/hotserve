@@ -129,7 +129,7 @@ func checkBackups(cmd string, args []string) (warning string, err error) {
 	if cmd != "validate" && !sameFile(main, backupCaddyfile) {
 		elsewhere = fmt.Sprintf("this %s runs %s, which declares backups, but hotserve-backup reads %s: backups follow that file, not this one, and an app only in this one would not be backed up", cmd, main, backupCaddyfile)
 		if _, err := os.Stat(backupBinary); err != nil {
-			warning = elsewhere + " (were hotserve-backup installed, this would be refused)"
+			warning = elsewhere + " (were hotserve-backup installed, a reload of it would be refused)"
 			elsewhere = ""
 		} else {
 			elsewhere += fmt.Sprintf(" — to see what a backup run would make of this file, `hotserve-backup validate %s`; to make it the one backups read, put it at %s (bin/push does)", main, backupCaddyfile)
@@ -206,15 +206,23 @@ func checkBackups(cmd string, args []string) (warning string, err error) {
 	return warning, errors.New(strings.Join(errs, "; and "))
 }
 
-// sameFile says whether a and b are one file: the same path, or the same
-// file where each leads.
+// sameFile says whether a and b are one Caddyfile: the same path, or the
+// same file where each leads, read from the same directory. Caddy
+// resolves a Caddyfile's relative imports from the directory it was
+// given in, so the same file from another directory imports what is
+// beside it there.
 func sameFile(a, b string) bool {
 	if filepath.Clean(a) == filepath.Clean(b) {
 		return true
 	}
 	sa, errA := os.Stat(a)
 	sb, errB := os.Stat(b)
-	return errA == nil && errB == nil && os.SameFile(sa, sb)
+	if errA != nil || errB != nil || !os.SameFile(sa, sb) {
+		return false
+	}
+	da, errA := os.Stat(filepath.Dir(a))
+	db, errB := os.Stat(filepath.Dir(b))
+	return errA == nil && errB == nil && os.SameFile(da, db)
 }
 
 // under says whether p is below dir.

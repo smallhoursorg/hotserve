@@ -341,6 +341,17 @@ func TestAReloadOfAnotherCaddyfileIsRefusedWhereBackupsReadTheCanonicalOne(t *te
 		t.Fatal(err)
 	}
 	checked(t, "reload", "--config", config+"/current", "--adapter", "caddyfile")
+	// The same file from another directory is not: Caddy resolves its
+	// relative imports from there, beside other files than a backup run's.
+	elsewhere := t.TempDir()
+	write(t, elsewhere+"/apps/blog.caddy", app, 0o644)
+	if err := os.Symlink(config+"/Caddyfile", elsewhere+"/Caddyfile"); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	if !gate([]string{"reload", "--config", elsewhere + "/Caddyfile"}, &stderr) {
+		t.Errorf("a link to the Caddyfile from another directory was taken for it: %s", stderr.String())
+	}
 	// Another that declares no backup is none of this.
 	write(t, config+"/Caddyfile.plain", "http://:8080 {\n\trespond hi\n}\n", 0o644)
 	if w, err := checkBackups("reload", []string{"--config", config + "/Caddyfile.plain"}); w != "" || err != nil {
@@ -352,11 +363,15 @@ func TestAReloadOfAnotherCaddyfileIsWarnedWhereBackupsAreNotInstalled(t *testing
 	config, _ := dirs(t)
 	write(t, config+"/apps/blog.caddy", app, 0o644)
 	write(t, config+"/Caddyfile.new", global("\t\timport apps/*.caddy\n"), 0o644)
-	var stderr bytes.Buffer
-	if gate([]string{"reload", "--config", config + "/Caddyfile.new"}, &stderr) {
-		t.Fatalf("stopped: %s", stderr.String())
-	}
-	if said := stderr.String(); !strings.HasPrefix(said, "WARNING: ") || !strings.Contains(said, "/etc/hotserve/Caddyfile") || strings.Contains(said, "hotserve-backup validate") {
-		t.Fatalf("said %q", said)
+	for _, cmd := range []string{"reload", "run"} {
+		var stderr bytes.Buffer
+		if gate([]string{cmd, "--config", config + "/Caddyfile.new"}, &stderr) {
+			t.Fatalf("%s stopped: %s", cmd, stderr.String())
+		}
+		// A start is never refused, installed or not: what would be is a reload.
+		if said := stderr.String(); !strings.HasPrefix(said, "WARNING: ") || !strings.Contains(said, "/etc/hotserve/Caddyfile") ||
+			strings.Contains(said, "hotserve-backup validate") || !strings.Contains(said, "a reload of it would be refused") {
+			t.Fatalf("%s said %q", cmd, said)
+		}
 	}
 }
