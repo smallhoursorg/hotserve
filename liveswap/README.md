@@ -330,6 +330,38 @@ config, so the result depends on the environment of whoever adapts
 it. Do not write `root` or a backup path with one in a config that
 declares a backup.
 
+Where a backup is declared matters as much as what. A backup run
+(`hotserve-backup`) reads the Caddyfile inside a view that holds the
+Caddyfile's own directory and nothing else, as an account that owns
+nothing there: an app whose `app` line, `backup` block or `root` it
+cannot read there is not in its plan, and is not backed up. So once
+any app declares a backup, `hotserve validate` and `hotserve reload`
+refuse a Caddyfile in which one of those was read from a file outside
+its directory — an import, or the file a snippet is defined in — or
+from a file others may not read, or under a directory others may not
+enter — a link is followed to where it leads. A refused reload leaves
+the running config serving. `hotserve run` is never refused for it — a
+start that refused would take every site down — and logs the same
+error instead.
+
+hotserve-backup reads one Caddyfile, `/etc/hotserve/Caddyfile`. Where
+it is installed (`/usr/bin/hotserve-backup`), `hotserve reload` of any
+other Caddyfile that declares a backup is refused as well: the server
+would run what no backup run reads, and an app only in it would never
+be backed up. The refusal names `hotserve-backup validate <file>` for a
+look at what a backup run would make of it, and `/etc/hotserve/Caddyfile`
+as where to put it (`bin/push` does). Where hotserve-backup is not
+installed, it is a warning. `hotserve validate` of a candidate file —
+`bin/push` validates `Caddyfile.new` before it is moved into place — is
+not asked; `hotserve run` logs it and serves.
+
+The check adapts the Caddyfile in the environment the command was
+started in. It does not load `--envfile` first, as Caddy's own
+`validate` and `run` do: a `{$NAME}` set only there, in an import's
+path, is judged here as unset. The packaged service passes no
+`--envfile`, and `hotserve-backup` refuses an import whose path depends
+on a variable.
+
 ## Watchdog
 
 Deploys and boot recovery start instances; the watchdog keeps them

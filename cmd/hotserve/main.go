@@ -7,6 +7,8 @@
 package main
 
 import (
+	"os"
+
 	caddycmd "github.com/caddyserver/caddy/v2/cmd"
 
 	// Standard Caddy modules — this is what makes the binary equivalent
@@ -25,5 +27,11 @@ import (
 )
 
 func main() {
+	// Before Caddy's own validate and reload, whether a backup run would
+	// see what the Caddyfile declares (backupcheck.go). Caddy's commands
+	// cannot be registered twice, so this comes first.
+	if gate(os.Args[1:], os.Stderr) {
+		os.Exit(1)
+	}
 	caddycmd.Main()
 }

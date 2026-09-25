@@ -157,6 +157,38 @@ if push "$tmp/envroot"; then pass "with no hotserve-backup on the box, the same 
 box mv /usr/bin/hotserve-backup.aside /usr/bin/hotserve-backup
 if push "$tmp/v1"; then pass "and the config before it is pushed back"; else fail "pushing v1 back: $(cat "$tmp/out")"; fi
 
+echo "=== box 3c: a backup declaration hotserve-backup would not see stops validate and reload, not a start ==="
+# The same Caddyfile, but its backup block comes from a snippet defined
+# outside /etc/hotserve: a backup run's view holds /etc/hotserve alone,
+# so that app would not be backed up while every run said ok.
+box sh -c 'mkdir -p /srv/outside && printf "(bk) {\n\tbackup {\n\t\tsqlite demo.db\n\t\tfiles  uploads\n\t}\n}\n" >/srv/outside/bk.caddy && chmod 0644 /srv/outside/bk.caddy'
+{ echo "import /srv/outside/bk.caddy"; awk '/^			backup \{$/ { print "			import bk"; skip = 1; next } skip && /^			\}$/ { skip = 0; next } !skip' "$tmp/v1"; } >"$tmp/outside"
+if ! grep -q "import bk" "$tmp/outside"; then
+	fail "the e2e Caddyfile has no backup block to move"
+elif push "$tmp/outside"; then
+	fail "push accepted a backup declared outside /etc/hotserve"
+elif grep -q -F "read from /srv/outside/bk.caddy, outside /etc/hotserve" "$tmp/out"; then
+	pass "push refused a backup declared outside /etc/hotserve, naming the file"
+else
+	fail "push refused the config, but not for where the backup is declared: $(tail -3 "$tmp/out")"
+fi
+box cmp -s /etc/hotserve/Caddyfile - <"$tmp/v1" && pass "the live file is unchanged" || fail "the live file changed after a refused push"
+box test ! -e /etc/hotserve/Caddyfile.new && pass "no staged file left behind" || fail "Caddyfile.new left after a refused push"
+# By hand, without bin/push: the reload refuses, and the running config
+# goes on.
+box sh -c 'cat >/etc/hotserve/Caddyfile' <"$tmp/outside"
+if box systemctl reload hotserve >"$tmp/out" 2>&1; then fail "systemctl reload took a backup declared outside /etc/hotserve"; else pass "a reload by hand is refused"; fi
+box journalctl -u hotserve -n 20 --no-pager -o cat 2>/dev/null | grep -q -F "read from /srv/outside/bk.caddy, outside /etc/hotserve" && pass "and the journal says why" || fail "the journal does not say why"
+box systemctl is-active --quiet hotserve && [ "$(served 8180)" = "pushed" ] && pass "and the running config goes on serving" || fail "after the refused reload: '$(served 8180)'"
+# A start is never refused for it: every site would be down.
+box systemctl restart hotserve
+for i in $(seq 40); do [ "$(served 8180)" = "pushed" ] && break; sleep 0.5; done
+[ "$(served 8180)" = "pushed" ] && pass "a start with it serves all the same" || fail "after a start: '$(served 8180)'"
+box journalctl -u hotserve -n 200 --no-pager -o cat 2>/dev/null | grep -q "served all the same" && pass "and says why it is wrong, in the journal" || fail "the start said nothing of the backup"
+box sh -c 'cat >/etc/hotserve/Caddyfile' <"$tmp/v1"
+box systemctl reload hotserve && pass "and with the backup back under /etc/hotserve, a reload is taken" || fail "the reload after mending it"
+box rm -rf /srv/outside
+
 echo "=== box 4: a config that validates but fails to load is rolled back ==="
 # Validation does not bind listeners; loading does, and 192.0.2.1
 # (TEST-NET-1) is on no interface here.
