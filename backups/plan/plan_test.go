@@ -5,14 +5,25 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/smallhoursorg/hotserve/liveswap/backupdecl"
 )
 
+// fromAdapted is what the plan step makes of `hotserve adapt`'s output:
+// the plan, validated.
+func fromAdapted(raw []byte) (*Plan, error) {
+	p, _, err := extractAll(raw)
+	if err != nil {
+		return nil, err
+	}
+	return p, p.Validate()
+}
+
 func TestFromAdapted(t *testing.T) {
-	p, err := FromAdapted([]byte(`{"apps":{"http":{},"liveswap":{"apps":{
+	p, err := fromAdapted([]byte(`{"apps":{"http":{},"liveswap":{"apps":{
 		"blog":{"command":["./server"],"backup":{"sqlite":["app.db"],"files":["uploads"]}},
 		"api":{"command":["./api"]}}}}}`))
 	if err != nil {
@@ -22,10 +33,10 @@ func TestFromAdapted(t *testing.T) {
 	if !reflect.DeepEqual(p, want) {
 		t.Fatalf("plan = %+v, want the default root and only the app that declares a backup", p)
 	}
-	if p, err := FromAdapted([]byte(`{"apps":{"liveswap":{"root":"/srv/live swap"}}}`)); err != nil || p.Root != "/srv/live swap" {
+	if p, err := fromAdapted([]byte(`{"apps":{"liveswap":{"root":"/srv/live swap"}}}`)); err != nil || p.Root != "/srv/live swap" {
 		t.Fatalf("an explicit root: %+v, %v", p, err)
 	}
-	if p, err := FromAdapted([]byte(`{"apps":{"http":{}}}`)); err != nil || len(p.Apps) != 0 {
+	if p, err := fromAdapted([]byte(`{"apps":{"http":{}}}`)); err != nil || len(p.Apps) != 0 {
 		t.Fatalf("a config with no liveswap app is an empty plan, got %+v, %v", p, err)
 	}
 }
@@ -43,7 +54,7 @@ func TestFromAdaptedRefuses(t *testing.T) {
 		"a declaration of nothing": {`{"apps":{"liveswap":{"apps":{"blog":{"backup":{}}}}}}`, "declares nothing"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := FromAdapted([]byte(tc.raw)); err == nil || !strings.Contains(err.Error(), tc.want) {
+			if _, err := fromAdapted([]byte(tc.raw)); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("want error containing %q, got %v", tc.want, err)
 			}
 		})
@@ -95,7 +106,7 @@ func TestEnvNamesReadsEveryFileBesideTheCaddyfile(t *testing.T) {
 	write(t, dir+"/sites/deeper/b", "root * {$WEBROOT}\n")
 	write(t, dir+"/not-imported.caddy", "respond {$UNUSED:x}\n")
 	write(t, dir+"/huge.caddy", "respond {$TOO_FAR_IN}\n"+strings.Repeat("#\n", 1<<20))
-	got, bare, err := envNames(dir + "/Caddyfile")
+	got, bare, err := envNames(dir+"/Caddyfile", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,6 +116,19 @@ func TestEnvNamesReadsEveryFileBesideTheCaddyfile(t *testing.T) {
 	}
 	if want := []string{"ACME_EMAIL", "BEHIND_A_DEFAULT", "CONF", "DOMAIN", "QUOTED", "UNUSED", "WEBROOT"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("names = %v, want %v", got, want)
+	}
+
+	// A copy checked away from the box — a checkout, a home directory —
+	// is read alone: what is beside it there is not what a run's view
+	// holds, and could be a whole tree.
+	if got, _, err := envNames(dir+"/Caddyfile", false); err != nil || !reflect.DeepEqual(got, []string{"ACME_EMAIL", "CONF"}) {
+		t.Fatalf("the Caddyfile alone: %v, %v", got, err)
+	}
+	// Nor is text that only looks like a name one: `{$` and a `}` lines
+	// apart in a page's JavaScript.
+	write(t, dir+"/page.js", "const a = {$\n  b: 1 }\n")
+	if got, _, _ := envNames(dir+"/Caddyfile", true); slices.ContainsFunc(got, func(n string) bool { return strings.ContainsAny(n, " \t\n") }) {
+		t.Fatalf("names = %q", got)
 	}
 }
 

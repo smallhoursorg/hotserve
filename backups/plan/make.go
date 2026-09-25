@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -96,7 +97,7 @@ type Inspection struct {
 // token; no set of them shows that no value restructures the file, and
 // the server's values are not known here. A declaration that exists
 // only through the server's environment is not in the plan.
-func Inspect(ctx context.Context, caddyfile string) (*Inspection, error) {
+func Inspect(ctx context.Context, caddyfile, configDir string) (*Inspection, error) {
 	// adapt returns the plan as the Caddyfile spells it under env, not
 	// yet validated — a placeholder is not a valid root, and a plan that
 	// turns invalid under one has changed like any other — or what the
@@ -114,14 +115,15 @@ func Inspect(ctx context.Context, caddyfile string) (*Inspection, error) {
 			return nil, nil, stderr.String(), fmt.Errorf("%s adapt: %w: %s", hotserve, err, lastLine(stderr.String()))
 		}
 		if globs := emptyGlobs(stderr.Bytes()); len(globs) > 0 {
-			dir := filepath.Dir(caddyfile)
-			return nil, nil, stderr.String(), fmt.Errorf("the Caddyfile imports %s, which matches no file: a backup run reads the Caddyfile inside a view that holds %s and nothing else, where an import from outside it matches nothing and what is declared there would not be backed up — so every import glob has to match a file, and what is imported has to be under %s, readable by others", strings.Join(globs, ", "), dir, dir)
+			return nil, nil, stderr.String(), &emptyGlobError{globs}
 		}
 		p, undeclared, err := extractAll(stdout.Bytes())
 		return p, undeclared, "", err
 	}
 
-	names, needs, err := envNames(caddyfile)
+	// What is beside the live Caddyfile is what a run's view holds; beside
+	// a copy checked anywhere else, it could be a whole tree.
+	names, needs, err := envNames(caddyfile, filepath.Clean(filepath.Dir(caddyfile)) == filepath.Clean(configDir))
 	if err != nil {
 		return nil, err
 	}
@@ -140,6 +142,13 @@ func Inspect(ctx context.Context, caddyfile string) (*Inspection, error) {
 		var said string
 		if base, undeclared, said, err = adapt(env); err == nil {
 			break
+		}
+		// An empty glob no made-up value is in is no variable's doing.
+		var empty *emptyGlobError
+		if errors.As(err, &empty) && !slices.ContainsFunc(empty.patterns, func(p string) bool {
+			return slices.ContainsFunc(needs, func(n string) bool { return strings.Contains(p, env[n]) })
+		}) {
+			return nil, err
 		}
 		moved := false
 		for pass := 0; pass < 2 && !moved; pass++ {
@@ -228,11 +237,19 @@ func Inspect(ctx context.Context, caddyfile string) (*Inspection, error) {
 
 // Make is the plan alone: what a run needs of an Inspection.
 func Make(ctx context.Context, caddyfile string) (*Plan, error) {
-	i, err := Inspect(ctx, caddyfile)
+	i, err := Inspect(ctx, caddyfile, filepath.Dir(caddyfile))
 	if err != nil {
 		return nil, err
 	}
 	return i.Plan, nil
+}
+
+// emptyGlobError is the adapter's word that an import glob matches no
+// file.
+type emptyGlobError struct{ patterns []string }
+
+func (e *emptyGlobError) Error() string {
+	return fmt.Sprintf("the Caddyfile imports %s, which matches no file: a backup run reads the Caddyfile inside a view that holds its own directory and nothing else, where an import from outside it matches nothing and what is declared there would not be backed up — so every import glob has to match a file, and what is imported has to be under the Caddyfile's directory, readable by others", strings.Join(e.patterns, ", "))
 }
 
 // emptyGlobs are the import patterns the adapter says match no file, as
@@ -256,19 +273,22 @@ func lastLine(s string) string {
 	return lines[len(lines)-1]
 }
 
-// A name runs to the first ":" (where a default starts) or "}".
-var envRe = regexp.MustCompile(`\{\$([^}:]+)(:[^}]*)?\}`)
+// A name runs to the first ":" (where a default starts) or "}", and has
+// no white space in it: text that only looks like one — `{$` and a `}`
+// lines apart, in a page's JavaScript — would cost a trial adapt each.
+var envRe = regexp.MustCompile(`\{\$([^}:\s]+)(:[^}]*)?\}`)
 
-// envNames returns every {$NAME} in the Caddyfile and in the files
-// beside it and below — the directory a run's view holds, so every file
-// the adapter can read there, imported or not — and those among them
-// written somewhere with no default. Nothing here reads a Caddyfile's
+// envNames returns every {$NAME} in the Caddyfile and, with beside, in
+// the files beside it and below — the directory a run's view holds, so
+// every file the adapter can read there, imported or not — and those
+// among them written somewhere with no default. A copy checked anywhere
+// else is read alone. Nothing here reads a Caddyfile's
 // syntax: a name from a file nothing imports costs one trial adapt that
 // changes nothing, and one that is missed has no default given, which
 // the adapter says loudly. A file here that may not be read (another
 // app's env file) is passed over, and so is one of over a megabyte: a
 // file the Caddyfile imports that could not be read fails the adapt.
-func envNames(caddyfile string) (all, noDefault []string, err error) {
+func envNames(caddyfile string, beside bool) (all, noDefault []string, err error) {
 	names := map[string]bool{} // true: written somewhere with no default
 	read := func(file string) error {
 		raw, err := os.ReadFile(file) //nolint:gosec // the Caddyfile and the files beside it, read for {$NAME} alone
@@ -283,6 +303,9 @@ func envNames(caddyfile string) (all, noDefault []string, err error) {
 	if err := read(caddyfile); err != nil {
 		return nil, nil, fmt.Errorf("reading the Caddyfile for {$NAME}: %w", err)
 	}
+	if !beside {
+		return sorted(names)
+	}
 	_ = filepath.WalkDir(filepath.Dir(caddyfile), func(p string, d fs.DirEntry, err error) error {
 		if err != nil || !d.Type().IsRegular() {
 			return nil // one it may not list or read is passed over, as above
@@ -292,6 +315,11 @@ func envNames(caddyfile string) (all, noDefault []string, err error) {
 		}
 		return nil
 	})
+	return sorted(names)
+}
+
+// sorted is envNames' names, and those with no default, each sorted.
+func sorted(names map[string]bool) (all, noDefault []string, err error) {
 	for n, bare := range names {
 		all = append(all, n)
 		if bare {

@@ -266,9 +266,11 @@ func validate(ctx context.Context, file string) error {
 	} else if !st.Mode().IsRegular() {
 		return fmt.Errorf("%s is not a file", abs)
 	}
-	ins, err := plan.Inspect(ctx, abs)
+	ins, err := plan.Inspect(ctx, abs, config().ConfigDir)
 	if err != nil {
-		return err
+		// It quotes the adapter, which quotes the Caddyfile: text fit for
+		// a terminal only once it holds no control character.
+		return errors.New(record.Clean(err.Error()))
 	}
 	names := ins.Plan.Names()
 	if len(names) == 0 {

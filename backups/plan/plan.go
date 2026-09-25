@@ -83,24 +83,10 @@ func Decode(raw []byte) (*Plan, error) {
 	return p, nil
 }
 
-// FromAdapted reads a Plan out of what `hotserve adapt` prints: the
+// extractAll reads a Plan out of what `hotserve adapt` prints — the
 // config as written, in which an unset root is absent rather than
-// defaulted.
-func FromAdapted(raw []byte) (*Plan, error) {
-	p, err := extract(raw)
-	if err != nil {
-		return nil, err
-	}
-	return p, p.Validate()
-}
-
-// extract is FromAdapted without the validation.
-func extract(raw []byte) (*Plan, error) {
-	p, _, err := extractAll(raw)
-	return p, err
-}
-
-// extractAll is extract, and the apps that declare no backup, sorted.
+// defaulted — not yet validated, and the apps that declare no backup,
+// sorted.
 func extractAll(raw []byte) (*Plan, []string, error) {
 	var cfg struct {
 		Apps struct {

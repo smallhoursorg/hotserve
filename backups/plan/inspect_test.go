@@ -14,7 +14,7 @@ func TestInspectNamesTheAppsThatDeclareNoBackup(t *testing.T) {
 	fakeHotserve(t)
 	file := filepath.Join(t.TempDir(), "Caddyfile")
 	write(t, file, "app blog\napp shop\n")
-	got, err := Inspect(context.Background(), file)
+	got, err := Inspect(context.Background(), file, filepath.Dir(file))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +34,7 @@ func TestInspectWithEveryAppDeclared(t *testing.T) {
 	fakeHotserve(t)
 	file := filepath.Join(t.TempDir(), "Caddyfile")
 	write(t, file, "app blog\n")
-	got, err := Inspect(context.Background(), file)
+	got, err := Inspect(context.Background(), file, filepath.Dir(file))
 	if err != nil || len(got.Undeclared) != 0 {
 		t.Fatalf("%+v, %v", got, err)
 	}
@@ -52,9 +52,9 @@ func TestAnImportGlobThatMatchesNothingIsRefused(t *testing.T) {
 	file := filepath.Join(dir, "Caddyfile")
 	for _, line := range []string{"import /srv/apps/*.caddy", "import sites/*.caddy"} {
 		write(t, file, line+"\napp blog\n")
-		for what, err := range map[string]error{"Inspect": second(Inspect(context.Background(), file)), "Make": second(Make(context.Background(), file))} {
+		for what, err := range map[string]error{"Inspect": second(Inspect(context.Background(), file, filepath.Dir(file))), "Make": second(Make(context.Background(), file))} {
 			pattern := strings.TrimPrefix(line, "import ")
-			if err == nil || !strings.Contains(err.Error(), pattern+", which matches no file") || !strings.Contains(err.Error(), dir) {
+			if err == nil || !strings.Contains(err.Error(), pattern+", which matches no file") || !strings.Contains(err.Error(), "its own directory") {
 				t.Errorf("%s of %q: %v", what, line, err)
 			}
 		}
@@ -64,6 +64,18 @@ func TestAnImportGlobThatMatchesNothingIsRefused(t *testing.T) {
 	write(t, file, "import sites/*.caddy\napp blog\n")
 	if _, err := Make(context.Background(), file); err != nil {
 		t.Fatalf("a glob that matches: %v", err)
+	}
+}
+
+// An empty glob with no variable in it is not the variables' doing: it
+// is said as it is, and no made-up value is tried in its place.
+func TestAnEmptyGlobIsNotBlamedOnAVariable(t *testing.T) {
+	fakeHotserve(t)
+	file := filepath.Join(t.TempDir(), "Caddyfile")
+	write(t, file, "email {$ACME_EMAIL}\nimport /srv/none/*.caddy\napp blog\n")
+	_, err := Make(context.Background(), file)
+	if err == nil || !strings.Contains(err.Error(), "/srv/none/*.caddy, which matches no file") || strings.Contains(err.Error(), "made-up values") {
+		t.Fatalf("%v", err)
 	}
 }
 
@@ -88,7 +100,7 @@ func TestAnUndeclaredAppNamedThroughTheEnvironment(t *testing.T) {
 	fakeHotserve(t)
 	file := filepath.Join(t.TempDir(), "Caddyfile")
 	write(t, file, "app {$SHOP_NAME:shop}\n")
-	got, err := Inspect(context.Background(), file)
+	got, err := Inspect(context.Background(), file, filepath.Dir(file))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +111,7 @@ func TestAnUndeclaredAppNamedThroughTheEnvironment(t *testing.T) {
 	// A variable tried after it, that names nothing, is not blamed for it
 	// — and one that also names an undeclared app is.
 	write(t, file, "app {$SHOP_NAME:shop}\nemail {$Z_EMAIL:a@example.com}\n")
-	got, err = Inspect(context.Background(), file)
+	got, err = Inspect(context.Background(), file, filepath.Dir(file))
 	if err != nil {
 		t.Fatal(err)
 	}

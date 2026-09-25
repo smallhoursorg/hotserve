@@ -130,7 +130,7 @@ grep -q "app shop" "$CADDYFILE" && fail "fixture: shop is still in the Caddyfile
 hotserve validate --config "$CADDYFILE" --adapter caddyfile >/dev/null 2>&1 && pass "fixture: and hotserve accepts what is left" || fail "fixture: hotserve rejects the file: the scenario proves nothing"
 run || fail "the run without shop: $(cat "$OUT")"
 grep -q "warning: .*shop no longer declares a backup" "$OUT" && pass "the run that finds shop gone says so" || fail "the run said: $(cat "$OUT")"
-st
+st_exits 0 "an app that left the plan, which is a warning"
 says "warning: .*shop no longer declares a backup" && pass "and status says it after" || fail "status said: $(cat "$OUT")"
 run || fail "the second run without shop: $(cat "$OUT")"
 grep -q "shop no longer" "$OUT" && fail "and the run after says it again" || pass "the run after does not say it again"
@@ -213,6 +213,7 @@ echo "=== validate 8b: and the run itself refuses what its view hides ==="
 # the run's view, which holds /etc/hotserve alone, it matches nothing.
 mkdir -p "$V/apps" && echo "# nothing" >"$V/apps/x.caddy"
 { echo "import $V/apps/*.caddy"; cat /root/Caddyfile.base; } >"$CADDYFILE"
+if validate "$CADDYFILE"; then pass "fixture: validate on the box sees the glob match"; else fail "fixture: validate refused it, so the run's refusal proves nothing of its view: $(cat "$OUT")"; fi
 journalctl --sync >/dev/null 2>&1
 before=$(journalctl --no-pager -o cat | grep -c "which matches no file")
 if run; then fail "a run exited 0 on a Caddyfile that imports from outside /etc/hotserve"; else pass "the run exits non-zero"; fi
@@ -223,6 +224,7 @@ if st; then fail "status exited 0 after a run that could not plan"; else says "t
 # lists it, and validate as root sees the match; the run does not.
 mkdir -p /etc/hotserve/sites && echo "# nothing" >/etc/hotserve/sites/a.caddy && chmod 0644 /etc/hotserve/sites/a.caddy && chmod 0700 /etc/hotserve/sites
 { echo "import sites/*.caddy"; cat /root/Caddyfile.base; } >"$CADDYFILE"
+if validate "$CADDYFILE"; then pass "fixture: validate as root lists it"; else fail "fixture: validate refused it: $(cat "$OUT")"; fi
 if run; then fail "a run exited 0 through a directory its account may not list"; else pass "a run through a directory its account may not list exits non-zero"; fi
 rm -rf /etc/hotserve/sites
 cp /root/Caddyfile.base "$CADDYFILE"

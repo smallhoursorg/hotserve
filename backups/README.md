@@ -463,6 +463,10 @@ read, can pass here and fail the run: those are for `hotserve validate`
 to refuse, where the adapter itself says which file each `backup` block
 comes from.
 
+A copy checked anywhere but `/etc/hotserve` — a checkout, a home
+directory — is judged where it is: an import glob relative to it has to
+match there, and only the file itself is read for `{$NAME}`.
+
 It names the apps a run would back up, and each app that declares no
 backup — which is said, not refused; one named through a `{$NAME}` is
 said by the variable, since what the server calls it is not known here. It starts no unit, takes no lock
