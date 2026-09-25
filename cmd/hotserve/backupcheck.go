@@ -7,7 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/caddyserver/caddy/v2/caddyconfig"
+	caddycmd "github.com/caddyserver/caddy/v2/cmd"
+	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
 	"github.com/smallhoursorg/hotserve/liveswap"
@@ -46,55 +47,32 @@ func gate(args []string, stderr io.Writer) (stop bool) {
 	return true
 }
 
-// commandFlags parses a command's flags as Caddy's own command does —
-// the same flag library, the same flags (caddy/cmd/commands.go) — so
-// that every form Caddy takes (`-cFILE`, `-fc FILE`, `--config=FILE`)
-// names the same file here. An error is Caddy's to report.
-func commandFlags(cmd string, args []string) (file, adapter string, ok bool) {
-	fs := pflag.NewFlagSet(cmd, pflag.ContinueOnError)
+// commandFlags parses a command's arguments with the flags Caddy's own
+// command declares — its own definition, whatever Caddy is linked in,
+// never a copy that could drift — so that every form Caddy takes
+// (`-cFILE`, `-fc FILE`, `--config=FILE`) names the same file here. An
+// error is Caddy's to report.
+func commandFlags(name string, args []string) (*pflag.FlagSet, bool) {
+	c, ok := caddycmd.Commands()[name]
+	if !ok || c.CobraFunc == nil {
+		return nil, false
+	}
+	cmd := &cobra.Command{Use: name}
+	c.CobraFunc(cmd)
+	fs := cmd.Flags()
 	fs.SetOutput(io.Discard)
-	fs.StringP("config", "c", "", "")
-	fs.StringP("adapter", "a", "", "")
-	switch cmd {
-	case "validate":
-		fs.StringSlice("envfile", nil, "")
-	case "reload":
-		fs.String("address", "", "")
-		fs.BoolP("force", "f", false, "")
-	case "run":
-		fs.StringSlice("envfile", nil, "")
-		fs.BoolP("environ", "e", false, "")
-		fs.BoolP("resume", "r", false, "")
-		fs.BoolP("watch", "w", false, "")
-		fs.String("pidfile", "", "")
-		fs.String("pingback", "", "")
-	}
 	if err := fs.Parse(args); err != nil {
-		return "", "", false
+		return nil, false
 	}
-	file, _ = fs.GetString("config")
-	adapter, _ = fs.GetString("adapter")
-	return file, adapter, true
+	return fs, true
 }
 
-// isCaddyfile is Caddy's own rule for when a config is adapted as a
-// Caddyfile (caddy/cmd/main.go): the adapter says so, or, with none, the
-// name begins "caddyfile" or ends ".caddyfile", any case, and is not
-// ".json". Anything else Caddy reads as JSON.
-func isCaddyfile(file, adapter string) bool {
-	if adapter == "caddyfile" {
-		return true
-	}
-	base := strings.ToLower(filepath.Base(file))
-	return adapter == "" && filepath.Ext(base) != ".json" &&
-		(strings.HasPrefix(base, "caddyfile") || strings.HasSuffix(base, ".caddyfile"))
-}
-
-// checkBackups adapts the Caddyfile the command's flags name, as Caddy
-// would, and holds every file a backup declaration came from to the
-// Caddyfile's directory. An adapt that fails says nothing here: Caddy's
-// own command says it next, in its own words. So does a config that is
-// not a Caddyfile, or not a file.
+// checkBackups loads the config the command's flags name with Caddy's
+// own LoadConfig — its default Caddyfile, its rule for what is one, its
+// adapt — and holds every file a backup declaration came from to the
+// Caddyfile's directory. A config that does not load says nothing here:
+// Caddy's own command says it next, in its own words. So does a config
+// that is not a Caddyfile, or not a file.
 //
 // What this does not do: load `--envfile`. Caddy loads it before it
 // adapts, and a {$NAME} it sets can change what the Caddyfile imports;
@@ -102,27 +80,24 @@ func isCaddyfile(file, adapter string) bool {
 // started in. The packaged service passes none, and hotserve-backup
 // refuses an import that depends on a variable.
 func checkBackups(cmd string, args []string) error {
-	file, adapter, ok := commandFlags(cmd, args)
+	fs, ok := commandFlags(cmd, args)
 	if !ok {
 		return nil
 	}
-	if file == "" && adapter == "" {
-		file = "Caddyfile" // Caddy's own default, where there is one
-	}
-	if !isCaddyfile(file, adapter) {
-		return nil
-	}
+	file, _ := fs.GetString("config")
+	adapter, _ := fs.GetString("adapter")
 	// Stdin or a pipe is Caddy's to read, once; and a pipe nobody writes
 	// to would never answer.
-	if st, err := os.Stat(file); err != nil || !st.Mode().IsRegular() { //nolint:gosec // the config the command was given, looked at before it is read
-		return nil
+	probe := file
+	if probe == "" {
+		probe = "Caddyfile" // what LoadConfig reads with none
 	}
-	body, err := os.ReadFile(file) //nolint:gosec // the config the command was given, which it reads next
-	if err != nil {
+	if st, err := os.Stat(probe); file == "-" || err == nil && !st.Mode().IsRegular() { //nolint:gosec // the config the command was given, looked at before Caddy reads it
 		return nil
 	}
 	liveswap.ClearBackupSources()
-	if _, _, err := caddyconfig.GetAdapter("caddyfile").Adapt(body, map[string]any{"filename": file}); err != nil {
+	_, file, adapter, err := caddycmd.LoadConfig(file, adapter)
+	if err != nil || adapter != "caddyfile" {
 		return nil
 	}
 	sources := liveswap.BackupSources()

@@ -265,3 +265,21 @@ func TestUnderTheRoot(t *testing.T) {
 		}
 	}
 }
+
+// The check takes each command's flags from Caddy's own definition of
+// it, not a copy: were that to stop being there, the check would skip
+// itself, silently, for every Caddyfile.
+func TestCaddysOwnFlagsAreWhereTheCheckTakesThem(t *testing.T) {
+	for _, name := range []string{"validate", "reload", "run"} {
+		fs, ok := commandFlags(name, nil)
+		if !ok {
+			t.Errorf("%s: no flags from Caddy's own command", name)
+			continue
+		}
+		for _, flag := range []string{"config", "adapter"} {
+			if fs.Lookup(flag) == nil {
+				t.Errorf("%s: Caddy's command has no --%s", name, flag)
+			}
+		}
+	}
+}
