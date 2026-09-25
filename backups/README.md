@@ -74,7 +74,11 @@ and systemd 257 (`PrivatePIDs=`), which is Debian 13's.
    root's to read, until a listing is answered — the record, which is
    everyone's to read, holds none of restic's words but the id of a
    snapshot it could not load — and the record says since when
-   listings have gone unanswered (`unlisted`). A snapshot this run itself made, or
+   listings have gone unanswered (`unlisted`). That is meant, and
+   strict: anything at all on restic's stderr beside a listing makes
+   it not believed, so a restic that one day prints a harmless notice
+   on every command leaves every box unlisted, and after 3 hours
+   unhealthy — `listing.err` says what it printed. A snapshot this run itself made, or
    fetched for its first drill, is judged by the next run's listing,
    not by this one's;
 7. writes `/var/lib/hotserve-backup/status.json` — also when the run
@@ -466,6 +470,14 @@ comes from.
 A copy checked anywhere but `/etc/hotserve` — a checkout, a home
 directory — is judged where it is: an import glob relative to it has to
 match there, and only the file itself is read for `{$NAME}`.
+
+Keep `/etc/hotserve` to config. A run reads every file there that
+others may read, whole, every hour, for `{$NAME}` — however large: a
+variable in a large imported file moves a root as well as one in a
+small one. A tarball or a package parked there is read into the plan
+unit's memory each time, and anything `{$X}`-shaped inside any file
+there becomes a variable name, tried with made-up values and named in
+a refusal (its name, never a value).
 
 It names the apps a run would back up, and each app that declares no
 backup — which is said, not refused; one named through a `{$NAME}` is

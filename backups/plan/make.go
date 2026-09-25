@@ -255,6 +255,17 @@ func (e *emptyGlobError) Error() string {
 // emptyGlobs are the import patterns the adapter says match no file, as
 // the adapter logs them: after its own substitutions, and a relative
 // one relative to the file it is in.
+//
+// It rests on three things, each of which, gone, would make the refusal
+// vanish without a word — and a run plan without what its view hides:
+// the wording of Caddy's warning (caddyconfig/caddyfile/parse.go); its
+// being JSON, which Caddy's default logger writes only when stderr is
+// not a terminal — Inspect gives the adapter a buffer, never one; and
+// nothing of the operator's shell choosing the logger's format — the
+// adapter runs with an empty environment. The first is held to the real
+// adapter, built from this repository, by
+// TestIntegrationTheAdapterWarnsOfAnEmptyGlobAsTheRefusalReadsIt, so a
+// Caddy bump that changes it fails `make test-integration`.
 func emptyGlobs(stderr []byte) (patterns []string) {
 	for _, line := range bytes.Split(stderr, []byte("\n")) {
 		var w struct {
