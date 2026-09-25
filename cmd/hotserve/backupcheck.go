@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/caddyserver/caddy/v2/caddyconfig"
+	"github.com/spf13/pflag"
 
 	"github.com/smallhoursorg/hotserve/liveswap"
 )
@@ -33,7 +34,7 @@ func gate(args []string, stderr io.Writer) (stop bool) {
 	if cmd != "validate" && cmd != "reload" && cmd != "run" {
 		return false
 	}
-	err := checkBackups(args[1:])
+	err := checkBackups(cmd, args[1:])
 	if err == nil {
 		return false
 	}
@@ -45,37 +46,70 @@ func gate(args []string, stderr io.Writer) (stop bool) {
 	return true
 }
 
+// commandFlags parses a command's flags as Caddy's own command does —
+// the same flag library, the same flags (caddy/cmd/commands.go) — so
+// that every form Caddy takes (`-cFILE`, `-fc FILE`, `--config=FILE`)
+// names the same file here. An error is Caddy's to report.
+func commandFlags(cmd string, args []string) (file, adapter string, ok bool) {
+	fs := pflag.NewFlagSet(cmd, pflag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringP("config", "c", "", "")
+	fs.StringP("adapter", "a", "", "")
+	switch cmd {
+	case "validate":
+		fs.StringSlice("envfile", nil, "")
+	case "reload":
+		fs.String("address", "", "")
+		fs.BoolP("force", "f", false, "")
+	case "run":
+		fs.StringSlice("envfile", nil, "")
+		fs.BoolP("environ", "e", false, "")
+		fs.BoolP("resume", "r", false, "")
+		fs.BoolP("watch", "w", false, "")
+		fs.String("pidfile", "", "")
+		fs.String("pingback", "", "")
+	}
+	if err := fs.Parse(args); err != nil {
+		return "", "", false
+	}
+	file, _ = fs.GetString("config")
+	adapter, _ = fs.GetString("adapter")
+	return file, adapter, true
+}
+
+// isCaddyfile is Caddy's own rule for when a config is adapted as a
+// Caddyfile (caddy/cmd/main.go): the adapter says so, or, with none, the
+// name begins "caddyfile" or ends ".caddyfile", any case, and is not
+// ".json". Anything else Caddy reads as JSON.
+func isCaddyfile(file, adapter string) bool {
+	if adapter == "caddyfile" {
+		return true
+	}
+	base := strings.ToLower(filepath.Base(file))
+	return adapter == "" && filepath.Ext(base) != ".json" &&
+		(strings.HasPrefix(base, "caddyfile") || strings.HasSuffix(base, ".caddyfile"))
+}
+
 // checkBackups adapts the Caddyfile the command's flags name, as Caddy
 // would, and holds every file a backup declaration came from to the
 // Caddyfile's directory. An adapt that fails says nothing here: Caddy's
 // own command says it next, in its own words. So does a config that is
 // not a Caddyfile, or not a file.
-func checkBackups(flags []string) error {
-	file, adapter := "", ""
-	for i, flag := range flags {
-		name, value, inline := strings.Cut(flag, "=")
-		if name != "--config" && name != "-c" && name != "--adapter" && name != "-a" {
-			continue
-		}
-		if !inline {
-			if i+1 == len(flags) {
-				return nil
-			}
-			value = flags[i+1]
-		}
-		if name == "--config" || name == "-c" {
-			file = value
-		} else {
-			adapter = value
-		}
+//
+// What this does not do: load `--envfile`. Caddy loads it before it
+// adapts, and a {$NAME} it sets can change what the Caddyfile imports;
+// here the Caddyfile is adapted in the environment the command was
+// started in. The packaged service passes none, and hotserve-backup
+// refuses an import that depends on a variable.
+func checkBackups(cmd string, args []string) error {
+	file, adapter, ok := commandFlags(cmd, args)
+	if !ok {
+		return nil
 	}
-	if file == "" {
+	if file == "" && adapter == "" {
 		file = "Caddyfile" // Caddy's own default, where there is one
-		if _, err := os.Stat(file); err != nil {
-			return nil
-		}
 	}
-	if adapter != "" && adapter != "caddyfile" || adapter == "" && strings.HasSuffix(file, ".json") {
+	if !isCaddyfile(file, adapter) {
 		return nil
 	}
 	// Stdin or a pipe is Caddy's to read, once; and a pipe nobody writes
@@ -100,6 +134,12 @@ func checkBackups(flags []string) error {
 		return err
 	}
 	dir := filepath.Dir(main)
+	// What a backup run's view holds is the directory itself, and so what
+	// a file leads to is judged against where the directory leads.
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return err
+	}
 	var problems []string
 	seen := map[string]bool{}
 	say := func(format string, a ...any) {
@@ -108,39 +148,56 @@ func checkBackups(flags []string) error {
 			problems = append(problems, p)
 		}
 	}
+	// check says what a backup run could not read of file: that it is not
+	// under the directory, as written or where it leads through a link,
+	// or that others may not read it or enter a directory on its way.
 	check := func(what, file string) {
 		// Only the main Caddyfile is ever relative, as it was given here.
 		if abs, err := filepath.Abs(file); err == nil {
 			file = abs
 		}
-		if !strings.HasPrefix(file, dir+string(filepath.Separator)) {
-			say("%s in %s, outside %s", what, file, dir)
+		if !under(file, dir) {
+			say("%s is read from %s, outside %s", what, file, dir)
 			return
 		}
-		st, err := os.Stat(file)
+		real, err := filepath.EvalSymlinks(file)
 		switch {
 		case err != nil:
-			say("%s in %s, which cannot be looked at: %v", what, file, err)
+			say("%s is read from %s, which cannot be followed: %v", what, file, err)
 			return
-		case st.Mode().Perm()&0o004 == 0:
-			say("%s in %s, which others may not read", what, file)
+		case !under(real, realDir):
+			say("%s is read from %s, which leads to %s, outside %s", what, file, real, dir)
+			return
 		}
-		for d := filepath.Dir(file); d != filepath.Dir(dir); d = filepath.Dir(d) {
+		if st, err := os.Stat(real); err == nil && st.Mode().Perm()&0o004 == 0 {
+			say("%s is read from %s, which others may not read", what, file)
+		}
+		for d := filepath.Dir(real); ; d = filepath.Dir(d) {
 			if st, err := os.Stat(d); err == nil && st.Mode().Perm()&0o001 == 0 {
-				say("%s under %s, which others may not enter", what, d)
+				say("%s is read from under %s, which others may not enter", what, d)
+			}
+			if !under(d, realDir) {
+				break // realDir itself, the last
 			}
 		}
 	}
-	check("the Caddyfile is", main)
+	if st, err := os.Stat(main); err == nil && st.Mode().Perm()&0o004 == 0 {
+		say("the Caddyfile, %s, may not be read by others", main)
+	}
 	for _, s := range sources {
 		if s.App == "" {
-			check("the liveswap root is set", s.File)
+			check("the liveswap root", s.File)
 		} else {
-			check(s.App+"'s backup is declared", s.File)
+			check(s.App+"'s backup", s.File)
 		}
 	}
 	if len(problems) == 0 {
 		return nil
 	}
 	return fmt.Errorf("a backup run would not see what this Caddyfile declares: %s — a backup run reads the Caddyfile inside a view that holds %s and nothing else, as an account that owns nothing there, so keep every file a backup is declared in under %s, readable by others (0644, directories 0755)", strings.Join(problems, "; "), dir, dir)
+}
+
+// under says whether p is below dir.
+func under(p, dir string) bool {
+	return strings.HasPrefix(p, strings.TrimSuffix(dir, string(filepath.Separator))+string(filepath.Separator))
 }

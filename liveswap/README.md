@@ -339,9 +339,17 @@ any app declares a backup, `hotserve validate` and `hotserve reload`
 refuse a Caddyfile in which one of those was read from a file outside
 its directory — an import, or the file a snippet is defined in — or
 from a file others may not read, or under a directory others may not
-enter. A refused reload leaves the running config serving. `hotserve
-run` is never refused for it — a start that refused would take every
-site down — and logs the same error instead.
+enter — a link is followed to where it leads. A refused reload leaves
+the running config serving. `hotserve run` is never refused for it — a
+start that refused would take every site down — and logs the same
+error instead.
+
+The check adapts the Caddyfile in the environment the command was
+started in. It does not load `--envfile` first, as Caddy's own
+`validate` and `run` do: a `{$NAME}` set only there, in an import's
+path, is judged here as unset. The packaged service passes no
+`--envfile`, and `hotserve-backup` refuses an import whose path depends
+on a variable.
 
 ## Watchdog
 

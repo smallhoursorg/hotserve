@@ -141,7 +141,7 @@ if ! grep -q "import bk" "$tmp/outside"; then
 	fail "the e2e Caddyfile has no backup block to move"
 elif push "$tmp/outside"; then
 	fail "push accepted a backup declared outside /etc/hotserve"
-elif grep -q -F "declared in /srv/outside/bk.caddy, outside /etc/hotserve" "$tmp/out"; then
+elif grep -q -F "read from /srv/outside/bk.caddy, outside /etc/hotserve" "$tmp/out"; then
 	pass "push refused a backup declared outside /etc/hotserve, naming the file"
 else
 	fail "push refused the config, but not for where the backup is declared: $(tail -3 "$tmp/out")"
@@ -152,7 +152,7 @@ box test ! -e /etc/hotserve/Caddyfile.new && pass "no staged file left behind" |
 # goes on.
 box sh -c 'cat >/etc/hotserve/Caddyfile' <"$tmp/outside"
 if box systemctl reload hotserve >"$tmp/out" 2>&1; then fail "systemctl reload took a backup declared outside /etc/hotserve"; else pass "a reload by hand is refused"; fi
-box journalctl -u hotserve -n 20 --no-pager -o cat 2>/dev/null | grep -q -F "declared in /srv/outside/bk.caddy, outside /etc/hotserve" && pass "and the journal says why" || fail "the journal does not say why"
+box journalctl -u hotserve -n 20 --no-pager -o cat 2>/dev/null | grep -q -F "read from /srv/outside/bk.caddy, outside /etc/hotserve" && pass "and the journal says why" || fail "the journal does not say why"
 box systemctl is-active --quiet hotserve && [ "$(served 8180)" = "pushed" ] && pass "and the running config goes on serving" || fail "after the refused reload: '$(served 8180)'"
 # A start is never refused for it: every site would be down.
 box systemctl restart hotserve
