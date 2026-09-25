@@ -10,8 +10,6 @@ package liveswap
 
 import (
 	"archive/tar"
-	"bytes"
-	"compress/gzip"
 	"fmt"
 	"io/fs"
 	"net/url"
@@ -22,22 +20,19 @@ import (
 	"testing"
 )
 
+// fuzzTgzEntries builds a .tar.gz from several entries; a seed that
+// fails to render is a test-author error, so it panics.
+func fuzzTgzEntries(entries []tarEntry) []byte {
+	data, err := tgzBytes(entries)
+	if err != nil {
+		panic(err)
+	}
+	return data
+}
+
 // fuzzTgz builds a small .tar.gz with a single entry.
 func fuzzTgz(name string, mode int64, typeflag byte, linkname, content string) []byte {
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	tw := tar.NewWriter(gz)
-	_ = tw.WriteHeader(&tar.Header{
-		Name:     name,
-		Mode:     mode,
-		Typeflag: typeflag,
-		Linkname: linkname,
-		Size:     int64(len(content)),
-	})
-	_, _ = tw.Write([]byte(content))
-	_ = tw.Close()
-	_ = gz.Close()
-	return buf.Bytes()
+	return fuzzTgzEntries([]tarEntry{{name: name, mode: mode, typeflag: typeflag, linkname: linkname, body: content}})
 }
 
 func FuzzExtractArchive(f *testing.F) {
@@ -48,6 +43,38 @@ func FuzzExtractArchive(f *testing.F) {
 	f.Add(fuzzTgz("dev", 0o644, tar.TypeChar, "", ""))
 	f.Add([]byte("not a gzip stream at all"))
 	f.Add([]byte{0x1f, 0x8b, 0x08}) // truncated gzip header
+	// Multi-entry shapes the single-entry helper cannot express: a
+	// symlink chain that is inside symbolically and outside on disk (the
+	// file variant lands in dest's parent, exactly where the walk below
+	// looks); a link target that climbs out through another link, in
+	// both orders; and a hard link to a symlink, which re-bases that
+	// symlink's relative target.
+	f.Add(fuzzTgzEntries(symlinkChainEntries()))
+	f.Add(fuzzTgzEntries([]tarEntry{
+		{name: "l1", typeflag: tar.TypeSymlink, linkname: "."},
+		{name: "l1/x/y", typeflag: tar.TypeSymlink, linkname: "../.."},
+		{name: "l1/x/y/evil", body: "outside"},
+	}))
+	f.Add(fuzzTgzEntries([]tarEntry{
+		{name: "a", typeflag: tar.TypeSymlink, linkname: "."},
+		{name: "l", typeflag: tar.TypeSymlink, linkname: "a/.."},
+	}))
+	f.Add(fuzzTgzEntries([]tarEntry{
+		{name: "l", typeflag: tar.TypeSymlink, linkname: "a/.."},
+		{name: "a", typeflag: tar.TypeSymlink, linkname: "."},
+	}))
+	f.Add(fuzzTgzEntries([]tarEntry{
+		{name: "deep/a/b/link", typeflag: tar.TypeSymlink, linkname: "../../../x"},
+		{name: "h", typeflag: tar.TypeLink, linkname: "deep/a/b/link"},
+	}))
+	// An escape behind more symlink hops than os.Root follows, and a
+	// dangling target whose missing part climbs — mutation does not
+	// reach either shape from the seeds above.
+	f.Add(fuzzTgzEntries(append(hopChainEntries(9), tarEntry{name: "l", typeflag: tar.TypeSymlink, linkname: "c1/../x"})))
+	f.Add(fuzzTgzEntries([]tarEntry{
+		{name: "a", typeflag: tar.TypeSymlink, linkname: "."},
+		{name: "l", typeflag: tar.TypeSymlink, linkname: "gap/../a/../x"},
+	}))
 
 	f.Fuzz(func(t *testing.T, archive []byte) {
 		parent := t.TempDir()
@@ -55,7 +82,12 @@ func FuzzExtractArchive(f *testing.F) {
 		if err := os.WriteFile(arch, archive, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		dest := filepath.Join(parent, "dest")
+		// Deep enough under parent that a chain climbing several
+		// hops still lands inside the walked tree.
+		dest := filepath.Join(parent, "apps", "app", "releases", "dest")
+		if err := os.MkdirAll(filepath.Dir(dest), 0o750); err != nil {
+			t.Fatal(err)
+		}
 
 		if _, err := extractArchive(arch, dest, archiveLimits{maxBytes: 1 << 20, maxEntries: 100_000}); err != nil {
 			return // rejection is always a valid outcome
@@ -67,11 +99,12 @@ func FuzzExtractArchive(f *testing.F) {
 		if err != nil {
 			t.Fatalf("dest vanished after extract: %v", err)
 		}
+		sep := string(filepath.Separator)
 		_ = filepath.WalkDir(parent, func(p string, d fs.DirEntry, err error) error {
 			if err != nil || p == parent || p == arch {
 				return nil
 			}
-			if p != dest && !strings.HasPrefix(p, dest+string(filepath.Separator)) {
+			if p != dest && !strings.HasPrefix(p, dest+sep) && !strings.HasPrefix(dest, p+sep) {
 				t.Errorf("extraction wrote outside dest: %s", p)
 			}
 			if d.Type()&fs.ModeSymlink != 0 {

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -22,6 +23,15 @@ type tarEntry struct {
 
 func buildTarGz(t *testing.T, entries []tarEntry) string {
 	t.Helper()
+	data, err := tgzBytes(entries)
+	must(t, err)
+	path := filepath.Join(t.TempDir(), "artifact.tar.gz")
+	must(t, os.WriteFile(path, data, 0o600))
+	return path
+}
+
+// tgzBytes renders entries as a .tar.gz, for tests and fuzz seeds alike.
+func tgzBytes(entries []tarEntry) ([]byte, error) {
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
@@ -41,17 +51,53 @@ func buildTarGz(t *testing.T, entries []tarEntry) string {
 			hdr.Typeflag = tar.TypeReg
 		}
 		if err := tw.WriteHeader(hdr); err != nil {
-			t.Fatal(err)
+			return nil, err
 		}
 		if _, err := tw.Write([]byte(e.body)); err != nil {
-			t.Fatal(err)
+			return nil, err
 		}
 	}
-	must(t, tw.Close())
-	must(t, gz.Close())
-	path := filepath.Join(t.TempDir(), "artifact.tar.gz")
-	must(t, os.WriteFile(path, buf.Bytes(), 0o600))
-	return path
+	if err := tw.Close(); err != nil {
+		return nil, err
+	}
+	if err := gz.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// hopChainEntries is c1 -> c2 -> … -> cN -> ".": N symlink hops that
+// each stay inside as a string and land on the root. os.Root follows
+// fewer hops than the kernel before giving up, so a target that climbs
+// out *after* the chain (`c1/../x`) is one the Root cannot judge and
+// the kernel resolves outside; it must be refused, not passed as a
+// loop.
+func hopChainEntries(n int) []tarEntry {
+	entries := make([]tarEntry, 0, n)
+	for i := 1; i <= n; i++ {
+		target := "."
+		if i < n {
+			target = fmt.Sprintf("c%d", i+1)
+		}
+		entries = append(entries, tarEntry{name: fmt.Sprintf("c%d", i), typeflag: tar.TypeSymlink, linkname: target})
+	}
+	return entries
+}
+
+// symlinkChainEntries is the archive that defeated the symbolic
+// containment check on its own: every link target is inside the root
+// as a string, but on disk each hop resolves through the previous
+// link and climbs one directory further. The regular file lands two
+// levels above the extraction root; the hardlink pulls a file from
+// there into the release.
+func symlinkChainEntries() []tarEntry {
+	return []tarEntry{
+		{name: "l1", typeflag: tar.TypeSymlink, linkname: "."},
+		{name: "l1/x/y", typeflag: tar.TypeSymlink, linkname: "../.."},
+		{name: "l1/x/y/z/w", typeflag: tar.TypeSymlink, linkname: "../.."},
+		{name: "l1/x/y/z/w/state.json", body: `{"pwned":true}`},
+		{name: "stolen", typeflag: tar.TypeLink, linkname: "l1/x/y/z/w/secret.env"},
+	}
 }
 
 // testLimits is roomy enough that no happy-path fixture is near a cap.
@@ -138,6 +184,190 @@ func TestExtractAllowsInternalRelativeSymlink(t *testing.T) {
 	dest := filepath.Join(t.TempDir(), "out")
 	_, err := extractArchive(archive, dest, testLimits)
 	must(t, err)
+}
+
+// Links that resolve *inside* the root are ordinary tarball shapes and
+// must extract, however they get there: a chain of indirection (a
+// venv's python -> python3 -> python3.12), a link to a directory that
+// real entries also populate, a link declared before the tree it
+// points into, an entry written through a link to an inside directory,
+// a `..` that climbs back into the root through a link to `.`, a hard
+// link to a regular file — and dangling links (a stale `.bin` link, a
+// target through a file, a gap ahead of anything that would climb),
+// which nothing can follow and the running app could plant anyway.
+func TestExtractAllowsLinksResolvingInside(t *testing.T) {
+	archive := buildTarGz(t, []tarEntry{
+		{name: "bin/python3.12", body: "x", mode: 0o755},
+		{name: "bin/python3", typeflag: tar.TypeSymlink, linkname: "python3.12"},
+		{name: "bin/python", typeflag: tar.TypeSymlink, linkname: "python3"},
+		{name: "current", typeflag: tar.TypeSymlink, linkname: "lib"},
+		{name: "lib/mod.js", body: "x"},
+		{name: "node_modules/.bin/mod", typeflag: tar.TypeSymlink, linkname: "../../lib/mod.js"},
+		{name: "current/planted.js", body: "x"},
+		{name: "self", typeflag: tar.TypeSymlink, linkname: "."},
+		{name: "back", typeflag: tar.TypeSymlink, linkname: "self/lib/.."},
+		{name: "d/a", typeflag: tar.TypeSymlink, linkname: "."},
+		{name: "d/l", typeflag: tar.TypeSymlink, linkname: "a/../lib"},
+		{name: "dangling", typeflag: tar.TypeSymlink, linkname: "lib/not-shipped"},
+		{name: "node_modules/.bin/stale", typeflag: tar.TypeSymlink, linkname: "../pkg/bin/stale"},
+		{name: "through-a-file", typeflag: tar.TypeSymlink, linkname: "lib/mod.js/x"},
+		{name: "gap-first", typeflag: tar.TypeSymlink, linkname: "gap/../self/../x"},
+		{name: "alias", typeflag: tar.TypeLink, linkname: "bin/python3.12"},
+	})
+	dest := filepath.Join(t.TempDir(), "out")
+	_, err := extractArchive(archive, dest, testLimits)
+	must(t, err)
+	for _, p := range []string{"bin/python", "current/mod.js", "node_modules/.bin/mod", "lib/planted.js", "back/lib", "d/l/mod.js", "alias"} {
+		if _, err := os.Stat(filepath.Join(dest, filepath.FromSlash(p))); err != nil {
+			t.Fatalf("%s must resolve inside the root: %v", p, err)
+		}
+	}
+}
+
+// Links that resolve *outside* the root are refused by the filesystem's
+// own resolution, whatever their shape and whichever order the archive
+// lists them in, and nothing lands outside the destination. The
+// destination itself may hold the partial tree; the caller removes it,
+// as for any mid-write failure.
+func TestExtractRefusesLinksResolvingOutside(t *testing.T) {
+	cases := []struct {
+		name    string
+		entries []tarEntry
+		want    string
+	}{
+		{"symlink chain climbs out", symlinkChainEntries(), `archive entry "l1/x/y/z/w"`},
+		{"chain with a file written through it", []tarEntry{
+			{name: "l1", typeflag: tar.TypeSymlink, linkname: "."},
+			{name: "l1/x/y", typeflag: tar.TypeSymlink, linkname: "../.."},
+			{name: "l1/x/y/evil", body: "outside"},
+		}, `archive entry "l1/x/y/evil"`},
+		{"target climbs out through a link to the root", []tarEntry{
+			{name: "a", typeflag: tar.TypeSymlink, linkname: "."},
+			{name: "l", typeflag: tar.TypeSymlink, linkname: "a/.."},
+		}, `archive symlink "l" -> "a/..": `},
+		{"target climbs out through a link declared after it", []tarEntry{
+			{name: "l", typeflag: tar.TypeSymlink, linkname: "a/.."},
+			{name: "a", typeflag: tar.TypeSymlink, linkname: "."},
+		}, `archive symlink "l" -> "a/..": `},
+		{"dangling target that leaves before it dangles", []tarEntry{
+			{name: "a", typeflag: tar.TypeSymlink, linkname: "."},
+			{name: "l", typeflag: tar.TypeSymlink, linkname: "a/../not-yet/state.json"},
+		}, `archive symlink "l" -> "a/../not-yet/state.json": `},
+		{"target that leaves and re-enters by the staging dir's name", []tarEntry{
+			{name: "lib/mod.js", body: "x"},
+			{name: "a", typeflag: tar.TypeSymlink, linkname: "."},
+			{name: "l", typeflag: tar.TypeSymlink, linkname: "a/../out/lib"},
+		}, `archive symlink "l" -> "a/../out/lib": `},
+		{"hard link to a symlink re-bases its target", []tarEntry{
+			{name: "deep/a/b/link", typeflag: tar.TypeSymlink, linkname: "../../../x"},
+			{name: "h", typeflag: tar.TypeLink, linkname: "deep/a/b/link"},
+		}, `archive symlink "h" -> "../../../x": `},
+		// Refused at the chain's first link, which the Root already
+		// cannot follow to its end; the escape behind it never gets
+		// the chance to pass as "unresolvable".
+		{"escape behind more hops than os.Root follows", append(hopChainEntries(9), tarEntry{
+			name: "l", typeflag: tar.TypeSymlink, linkname: "c1/../x",
+		}), `archive symlink "c1" -> "c2": `},
+		{"symlink loop", []tarEntry{
+			{name: "a", typeflag: tar.TypeSymlink, linkname: "b"},
+			{name: "b", typeflag: tar.TypeSymlink, linkname: "a"},
+		}, `archive symlink "a" -> "b": `},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			archive := buildTarGz(t, tc.entries)
+			// The destination sits deep enough under the watched tree
+			// that every hop of the longest chain lands inside it.
+			parent := t.TempDir()
+			dest := filepath.Join(parent, "apps", "app", "releases", "out")
+			must(t, os.MkdirAll(filepath.Dir(dest), 0o750))
+			_, err := extractArchive(archive, dest, testLimits)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want error containing %q, got %v", tc.want, err)
+			}
+			assertOnlyUnder(t, parent, dest)
+		})
+	}
+}
+
+// assertOnlyUnder fails if anything exists under parent other than
+// dest, dest's ancestors, and dest's own contents.
+func assertOnlyUnder(t *testing.T, parent, dest string) {
+	t.Helper()
+	must(t, filepath.WalkDir(parent, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		sep := string(filepath.Separator)
+		switch {
+		case p == parent, p == dest, strings.HasPrefix(p, dest+sep), strings.HasPrefix(dest, p+sep):
+			return nil
+		}
+		t.Errorf("extraction created %q outside the destination", p)
+		return nil
+	}))
+}
+
+// The write pass alone — validation bypassed — still cannot write
+// outside its destination: os.Root refuses the resolution, and the
+// refusal names the archive entry.
+func TestWriteArchiveRootRefusesEscape(t *testing.T) {
+	appDir := t.TempDir()
+	releases := filepath.Join(appDir, "releases")
+	dest := filepath.Join(releases, "v1")
+	must(t, os.MkdirAll(releases, 0o750))
+	must(t, os.WriteFile(filepath.Join(appDir, "secret.env"), []byte("S3CRET"), 0o600))
+	archive := buildTarGz(t, symlinkChainEntries())
+
+	err := writeArchive(archive, dest, testLimits)
+	if err == nil || !strings.Contains(err.Error(), `archive entry "l1/x/y/z/w"`) {
+		t.Fatalf("want an os.Root refusal naming the entry, got %v", err)
+	}
+	if _, statErr := os.Lstat(filepath.Join(appDir, "state.json")); !os.IsNotExist(statErr) {
+		t.Fatal("the write pass wrote through the symlink chain into the app directory")
+	}
+	// Whatever the chain did land is inside dest: nothing new above it.
+	entries, err := os.ReadDir(appDir)
+	must(t, err)
+	for _, e := range entries {
+		if e.Name() != "releases" && e.Name() != "secret.env" {
+			t.Fatalf("write pass created %q outside the extraction root", e.Name())
+		}
+	}
+	entries, err = os.ReadDir(releases)
+	must(t, err)
+	for _, e := range entries {
+		if e.Name() != "v1" {
+			t.Fatalf("write pass created %q beside the extraction root", e.Name())
+		}
+	}
+}
+
+// A hard link whose source resolves outside the root through planted
+// links is refused by Root.Link itself — the chain test never reaches
+// its hard link, so this pins that path on its own.
+func TestWriteArchiveRootRefusesHardLinkFromOutside(t *testing.T) {
+	appDir := t.TempDir()
+	releases := filepath.Join(appDir, "releases")
+	dest := filepath.Join(releases, "v1")
+	must(t, os.MkdirAll(releases, 0o750))
+	must(t, os.WriteFile(filepath.Join(appDir, "secret.env"), []byte("S3CRET"), 0o600))
+	// The source has no `..` of its own — safeRelPath would clean that
+	// away before the Root saw it — so the climb is all in the links.
+	archive := buildTarGz(t, []tarEntry{
+		{name: "a", typeflag: tar.TypeSymlink, linkname: "."},
+		{name: "b", typeflag: tar.TypeSymlink, linkname: "a/.."},
+		{name: "c", typeflag: tar.TypeSymlink, linkname: "b/.."},
+		{name: "stolen", typeflag: tar.TypeLink, linkname: "c/secret.env"},
+	})
+
+	err := writeArchive(archive, dest, testLimits)
+	if err == nil || !strings.Contains(err.Error(), `archive entry "stolen"`) || !strings.Contains(err.Error(), "escapes") {
+		t.Fatalf("want an os.Root escape refusal naming the hard link, got %v", err)
+	}
+	if _, statErr := os.Lstat(filepath.Join(dest, "stolen")); !os.IsNotExist(statErr) {
+		t.Fatal("the write pass hard-linked a file from outside the root into it")
+	}
 }
 
 func TestExtractDecompressionCap(t *testing.T) {
