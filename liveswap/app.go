@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"regexp"
 	"strings"
 	"sync"
@@ -279,7 +278,7 @@ type managedApp struct {
 	activeSocket atomic.Pointer[socketRef]
 
 	// Watchdog plumbing. The goroutine is pool-scoped like everything
-	// else here: started once (first Provision), never touched by
+	// else here: started once (first Start), never touched by
 	// reloads, torn down in Destruct BEFORE the child is stopped so a
 	// mid-restart watchdog can never orphan a fresh process.
 	wdStarted bool // under specMu
@@ -422,12 +421,15 @@ type appConfigState struct {
 }
 
 // owner is the config installing this definition (see rollbackConfig).
+// verifiers is the app's deploy_trust as the config resolved (and
+// warmed) it in Provision; configure installs, never resolves, so the
+// discovery cache a verifier carries is the one the handler sees.
 // manager is the connection a runner built here talks to, passed in
 // rather than reached for globally so a test can install its own; it
 // is read only when this managedApp has no runner yet, because a
 // pooled app keeps the runner — and so the connection — it was first
 // started with across every later reload.
-func (ma *managedApp) configure(owner any, spec *appSpec, logger *zap.Logger, clients *fetchClients, manager systemdConn) {
+func (ma *managedApp) configure(owner any, spec *appSpec, verifiers []verifier, logger *zap.Logger, clients *fetchClients, manager systemdConn) {
 	ma.specMu.Lock()
 	defer ma.specMu.Unlock()
 	changed := ma.spec != nil && !specEqual(ma.spec, spec)
@@ -438,7 +440,7 @@ func (ma *managedApp) configure(owner any, spec *appSpec, logger *zap.Logger, cl
 	ma.spec = spec
 	// Deploy auth is not tied to the running process, so — unlike the
 	// runner — it is rewired on every reload and takes effect at once.
-	ma.verifiers = resolveVerifiers(spec.trust, clients.jwks)
+	ma.verifiers = verifiers
 	ma.logger = logger
 	if ma.runner == nil {
 		ma.runner = newSystemdRunner(manager, logger)
@@ -1037,10 +1039,14 @@ func (ma *managedApp) ensureRunning() error {
 
 	inst, err := ma.launchVersion(c, st.CurrentVersion)
 	if err != nil {
-		// A binary that cannot be found will not appear by retrying;
-		// everything else here (sweep, manager, unit reconcile) can.
-		var execErr *exec.Error
-		if errors.As(err, &execErr) {
+		// A preflight refusal is the release as shipped or the command
+		// as configured — a binary that is not there, not executable,
+		// or outside the sandbox view (the launch runs resolveInView;
+		// the architecture check is the deploy's Preflight, not run
+		// here). None of that appears by retrying; everything else
+		// here (sweep, manager, unit reconcile) can.
+		var pe *preflightError
+		if errors.As(err, &pe) {
 			return &permanentRecoveryError{fmt.Errorf("relaunching %s: %w", st.CurrentVersion, err)}
 		}
 		return &transientRecoveryError{fmt.Errorf("relaunching %s: %w", st.CurrentVersion, err)}

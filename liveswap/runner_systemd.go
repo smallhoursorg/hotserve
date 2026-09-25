@@ -849,8 +849,12 @@ func (r *systemdRunner) sweep(parent context.Context, app string, keep handle, s
 		if u.Name == keepUnit || !unitBelongsTo(u.Name, app) {
 			continue
 		}
+		// The listing carries only the load/active/sub states; the
+		// exit and PID the lines below record are read off the unit,
+		// once per stray or leftover (both rare).
 		if !u.running() {
 			if u.loaded() {
+				u = r.unitStatusOf(parent, u)
 				r.log().Warn("resetting leftover unit", zap.String("unit", u.Name), zap.String("active_state", u.ActiveState), zap.String("exit", u.exitString()))
 				ctx, cancel := context.WithTimeout(parent, pollTimeout)
 				if rerr := r.resetFailed(ctx, u.Name); rerr != nil {
@@ -863,7 +867,24 @@ func (r *systemdRunner) sweep(parent context.Context, app string, keep handle, s
 		wg.Add(1)
 		go func(u unitStatus) {
 			defer wg.Done()
-			budget := r.stopBudgetFor(parent, u.Name, 0)
+			// One read serves both the stop budget and the pid logged.
+			// A stray that ended between the listing and this read is
+			// a leftover now: reset if still loaded, never stopped — a
+			// stop of a unit the manager has already unloaded fails,
+			// and would report the whole sweep unconfirmed.
+			u = r.unitStatusOf(parent, u)
+			if !u.running() {
+				if u.loaded() {
+					r.log().Warn("resetting leftover unit", zap.String("unit", u.Name), zap.String("active_state", u.ActiveState), zap.String("exit", u.exitString()))
+					ctx, cancel := context.WithTimeout(parent, pollTimeout)
+					defer cancel()
+					if rerr := r.resetFailed(ctx, u.Name); rerr != nil {
+						record(rerr)
+					}
+				}
+				return
+			}
+			budget := u.stopBudget(0)
 			if still != nil && !still() {
 				r.log().Info("stray unit adopted by a config meanwhile; leaving it", zap.String("unit", u.Name))
 				return
@@ -955,17 +976,28 @@ func (r *systemdRunner) finish(h *systemdHandle, st unitStatus) {
 	close(h.done)
 }
 
+// unitStatusOf re-reads a listed unit in full, bounded by pollTimeout.
+// What the caller already knows of the unit (a listing's states, or
+// just its name) stands in when the manager cannot answer — logged,
+// so an exit rendered off that ("no process exit recorded") is not
+// mistaken for a unit that never ran.
+func (r *systemdRunner) unitStatusOf(parent context.Context, listed unitStatus) unitStatus {
+	ctx, cancel := context.WithTimeout(parent, pollTimeout)
+	defer cancel()
+	st, err := r.conn.UnitStatus(ctx, listed.Name)
+	if err != nil {
+		r.log().Warn("cannot read unit; acting on what is already known of it", zap.String("unit", listed.Name), zap.Error(err))
+		return listed
+	}
+	st.Name = listed.Name
+	return st
+}
+
 // stopBudgetFor is how long stopping unit may take before SIGKILL: its
 // own TimeoutStopSec when readable, else the caller's grace, else the
 // default — one policy for Stop and sweep alike.
 func (r *systemdRunner) stopBudgetFor(parent context.Context, unit string, grace time.Duration) time.Duration {
-	ctx, cancel := context.WithTimeout(parent, pollTimeout)
-	defer cancel()
-	st, err := r.conn.UnitStatus(ctx, unit)
-	if err != nil {
-		st = unitStatus{}
-	}
-	return st.stopBudget(grace)
+	return r.unitStatusOf(parent, unitStatus{Name: unit}).stopBudget(grace)
 }
 
 // reapFailed reads a failed unit's exit facts and resets it.

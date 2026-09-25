@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // entryFor derives the literal allowlist entry covering rawURL —
@@ -415,6 +416,34 @@ func TestDownloadRefusesHTTPSToHTTPDowngrade(t *testing.T) {
 // transport failure on a chosen hop, deterministic and without a
 // name lookup (the transport hands DialContext the address as-is).
 const unreachableHost = "unreachable.invalid"
+
+func TestDownloadClientBoundsEveryStageBeforeTheBody(t *testing.T) {
+	// A host that accepts the TCP connection and then stalls — at the
+	// handshake or before its headers — must be cut off by the client
+	// itself: the request context has no deadline, so an unbounded
+	// stage would hold the per-app deploy lock for as long as the CI
+	// client stays on the line.
+	tr := newDownloadClient(false).Transport.(*http.Transport)
+	if tr.DialContext == nil {
+		t.Fatal("the connect stage must be bounded by a dialer with a timeout")
+	}
+	if tr.TLSHandshakeTimeout <= 0 {
+		t.Fatal("the TLS handshake must be bounded")
+	}
+	if tr.ResponseHeaderTimeout <= 0 {
+		t.Fatal("the wait for response headers must be bounded")
+	}
+	if !tr.ForceAttemptHTTP2 {
+		t.Fatal("a custom dialer turns off net/http's automatic h2; the fetch must keep asking for it")
+	}
+	for name, d := range map[string]time.Duration{
+		"dial": downloadDialTimeout, "tls": downloadTLSHandshakeTimeout, "headers": downloadResponseHeaderTimeout,
+	} {
+		if d <= 0 || d > time.Minute {
+			t.Fatalf("%s bound %v is not a bound a stalled host should get", name, d)
+		}
+	}
+}
 
 // refusingDownloadClient is the real download client with one host
 // unreachable at the dial, every other address dialed as usual.

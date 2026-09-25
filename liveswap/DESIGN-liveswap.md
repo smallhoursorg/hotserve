@@ -465,7 +465,7 @@ author's beliefs about systemd, and only the real thing corrects them.
 Design summary (full operator docs in README.md "Watchdog"):
 
 - One goroutine per pooled `managedApp` (`watchdog.go`), started at
-  first Provision, torn down in `Destruct` **before** the child is
+  first Start, torn down in `Destruct` **before** the child is
   stopped — that ordering is the invariant that makes a mid-restart
   watchdog unable to orphan a freshly started process. Reloads never
   touch the goroutine; it re-snapshots the spec every cycle.

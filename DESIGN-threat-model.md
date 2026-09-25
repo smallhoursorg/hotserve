@@ -280,9 +280,13 @@ host can redirect the fetch to *any* https host — LAN, internal, an
 https metadata endpoint. "https-only" is a partial SSRF barrier (it
 stops plain-http metadata endpoints, not an attacker's https target).
 Reaching it requires a valid deploy token **and** an allowlisted first hop.
-Secondary: a malicious host can trickle bytes under the cap (only a
-30 s `ResponseHeaderTimeout`, set in `newDownloadClient`) to hold the
-per-app deploy lock open — DoS-of-deploys, not of serving.
+Secondary: a malicious host can trickle bytes under the cap to hold the
+per-app deploy lock open — DoS-of-deploys, not of serving. The stages
+before the body are each bounded on their own (30 s connect, 10 s TLS
+handshake, 30 s to response headers, set in `newDownloadClient`), so
+the stall has to be in the body, which is bounded only by the caller
+keeping its request open: the webhook request context carries no
+deadline, so a CI job's own timeout is the bound on that trickle.
 
 ### Tar extraction — `liveswap/extract.go`
 

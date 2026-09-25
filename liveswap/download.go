@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -70,10 +71,9 @@ func downloadArtifact(ctx context.Context, opts downloadOpts) (string, error) {
 	// From here on the request's URL is never used directly. The URL
 	// the fetch uses is a single concatenation whose provenance reads
 	// left to right — scheme (constant), host and port (THE ALLOWLIST
-	// ENTRY'S OWN CONFIG BYTES; the request's port bytes only under a
-	// declared :* wildcard), the pinned prefix (config bytes again),
-	// and only then the request's path suffix and vetted query. See
-	// pinnedURLString.
+	// ENTRY'S OWN CONFIG BYTES; the request's port is compared, never
+	// emitted), the pinned prefix (config bytes again), and only then
+	// the request's path suffix and vetted query. See pinnedURLString.
 	pinned, err := entry.pinnedURLString(u, escapedPath)
 	if err != nil {
 		return "", err
@@ -154,10 +154,22 @@ func (d digestMismatch) Unwrap() error { return validationError{d.Error()} }
 // for the zero value.
 func (d digestMismatch) names() []string { return []string{d.pinned, d.got} }
 
+// The per-stage bounds of the artifact fetch. Connect and handshake
+// match net/http's DefaultTransport; the header wait is the one this
+// client always had.
+const (
+	downloadDialTimeout           = 30 * time.Second
+	downloadTLSHandshakeTimeout   = 10 * time.Second
+	downloadResponseHeaderTimeout = 30 * time.Second
+)
+
 // newDownloadClient builds the shared artifact HTTP client. No overall
-// timeout — large artifacts on slow links are legitimate — but a
-// server that accepts the connection and then stalls is cut off at the
-// header stage, and the request context bounds the rest.
+// timeout — large artifacts on slow links are legitimate — but every
+// stage before the body is bounded on its own: the TCP connect, the
+// TLS handshake and the wait for response headers. A host that accepts
+// the connection and then stalls at any of them is cut off, rather
+// than holding the per-app deploy lock for as long as the CI client
+// stays on the line; the request context bounds the body.
 //
 // CheckRedirect enforces the scheme policy on EVERY hop: Go's client
 // happily follows an https -> http redirect (it strips Authorization
@@ -171,7 +183,12 @@ func (d digestMismatch) names() []string { return []string{d.pinned, d.got} }
 func newDownloadClient(allowInsecure bool) *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
-			ResponseHeaderTimeout: 30 * time.Second,
+			DialContext: (&net.Dialer{Timeout: downloadDialTimeout}).DialContext,
+			// A custom dialer switches off net/http's automatic h2
+			// unless asked for, as DefaultTransport asks.
+			ForceAttemptHTTP2:     true,
+			TLSHandshakeTimeout:   downloadTLSHandshakeTimeout,
+			ResponseHeaderTimeout: downloadResponseHeaderTimeout,
 			Proxy:                 http.ProxyFromEnvironment,
 		},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {

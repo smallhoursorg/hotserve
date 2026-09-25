@@ -11,7 +11,7 @@
 //     the per-app orchestration state
 //   - http.handlers.liveswap_webhook (handler.go): the deploy trigger
 //   - http.reverse_proxy.upstreams.liveswap (upstreams.go): routes
-//     reverse_proxy traffic to the active version's port
+//     reverse_proxy traffic to the active version's socket
 package liveswap
 
 import (
@@ -127,6 +127,11 @@ type App struct {
 	allowlist       []artifactAllowEntry
 	globalTrust     []trustSource // resolved global DeployTrust, for the unknown-app path
 	globalVerifiers []verifier
+	// appVerifiers is each app's resolved deploy_trust, built once in
+	// Provision and installed by Start. The OIDC discovery/JWKS cache
+	// lives on the verifier object, so the set Provision warms must be
+	// the set the handler is later handed — not a fresh resolution.
+	appVerifiers map[string][]verifier
 }
 
 // AppConfig defines one managed application.
@@ -335,9 +340,14 @@ func (a *App) Provision(ctx caddy.Context) error {
 	}
 	// Warm OIDC discovery in the background so the first verification of a
 	// known app is not slower (by JWKS-fetch latency) than an unknown one.
+	// The objects warmed here are the ones Start installs (appVerifiers):
+	// resolving again at Start would hand the handler a cold set.
+	a.appVerifiers = make(map[string][]verifier, len(specs))
 	sets := [][]verifier{a.globalVerifiers}
-	for _, spec := range specs {
-		sets = append(sets, resolveVerifiers(spec.trust, clients.jwks))
+	for name, spec := range specs {
+		vs := resolveVerifiers(spec.trust, clients.jwks)
+		a.appVerifiers[name] = vs
+		sets = append(sets, vs)
 	}
 	warmVerifiers(sets...)
 	return nil
@@ -536,6 +546,14 @@ func (a *App) Validate() error {
 		if cfg.Soak < 0 || cfg.Drain < 0 {
 			return fmt.Errorf("app %s: soak and drain must not be negative", name)
 		}
+		// The deadline bounds the whole gate, soak included: a soak
+		// the deadline cannot contain is a deploy that can never pass.
+		// Equal is allowed — the gate judges the soak on the tick at
+		// the deadline — so a config that loaded before this check
+		// and could deploy still does.
+		if cfg.Soak > cfg.Deadline {
+			return fmt.Errorf("app %s: soak (%v) must not exceed deadline (%v), which bounds the whole health gate including the soak", name, time.Duration(cfg.Soak), time.Duration(cfg.Deadline))
+		}
 		if cfg.Watchdog != "on" && cfg.Watchdog != "off" {
 			return fmt.Errorf("app %s: watchdog must be \"on\" or \"off\", got %q", name, cfg.Watchdog)
 		}
@@ -607,7 +625,7 @@ func (a *App) Start() error {
 		}
 	}
 	for name, ma := range a.managed {
-		ma.configure(a, a.specs[name], a.logger.Named(name), a.clients, a.systemdConn())
+		ma.configure(a, a.specs[name], a.appVerifiers[name], a.logger.Named(name), a.clients, a.systemdConn())
 		ma.startWatchdog()
 	}
 	a.started = true

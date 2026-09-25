@@ -102,7 +102,7 @@ func validPortDecl(port string) error {
 		return fmt.Errorf("port wildcards are not supported; declare the literal port (e.g. :8443)")
 	}
 	if port == "" {
-		return fmt.Errorf("dangling colon — declare a port number (e.g. :8443), :* for any, or drop the colon")
+		return fmt.Errorf("dangling colon — declare a port number (e.g. :8443) or drop the colon")
 	}
 	if len(port) > 5 || port[0] == '0' {
 		return fmt.Errorf("port %q is not a valid port number", port)
@@ -386,11 +386,11 @@ func matchAllowlist(entries []artifactAllowEntry, u *url.URL) (artifactAllowEntr
 //	consts       CONFIG BYTES  CONFIG BYTES    input    input, names vetted
 //
 // The port is the entry's own declaration; the input's port bytes are
-// used only under a declared :* wildcard.
+// compared against it and never emitted (there is no wildcard).
 //
 // Everything before the suffix is a constant or the allowlist entry's
-// own config string — the request contributes only its numeric port,
-// the path suffix beyond the pinned prefix, and the query, whose
+// own config string — the request contributes only the path suffix
+// beyond the pinned prefix, and the query, whose
 // parameter names must all be declared by the entry (values pass
 // through untouched: signed URLs break if the query is re-encoded).
 // Userinfo and fragment are structurally absent: credentials travel
