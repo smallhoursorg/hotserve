@@ -422,7 +422,11 @@ func refusingDownloadClient(t *testing.T) *http.Client {
 	t.Helper()
 	client := newDownloadClient(true)
 	dialer := &net.Dialer{}
-	client.Transport.(*http.Transport).DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+	tr := client.Transport.(*http.Transport)
+	// No proxy: with HTTP_PROXY in the environment the dial would be
+	// to the proxy, not the host the test names.
+	tr.Proxy = nil
+	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		if host, _, err := net.SplitHostPort(addr); err == nil && host == unreachableHost {
 			return nil, errors.New("dial refused by the test")
 		}
