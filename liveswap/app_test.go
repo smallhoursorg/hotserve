@@ -765,6 +765,27 @@ func TestEnsureRunningRelaunchesFromState(t *testing.T) {
 	}
 }
 
+func TestEnsureRunningMissingBinaryIsPermanent(t *testing.T) {
+	// The runner refuses a launch whose command is not there (or not
+	// executable, or outside the view) with a preflightError. That is
+	// the release as shipped: no retry changes it, so recovery must
+	// classify it permanent and stop, not warn once a minute forever.
+	rig := newTestRig(t)
+	rig.store.state = appState{CurrentVersion: "v7", Nonce: recordedNonce, Handle: handleState{PID: 1}}
+	rig.store.ok = true
+	if err := os.MkdirAll(rig.spec.dirs.release("v7"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rig.runner.setStartErr(&preflightError{"exec: \"server\": executable file not found"})
+	err := rig.ma.ensureRunning()
+	if err == nil || transientRecovery(err) {
+		t.Fatalf("a missing binary must be a permanent recovery error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "relaunching v7") {
+		t.Fatalf("the error must name the version it could not relaunch: %v", err)
+	}
+}
+
 func TestEnsureRunningReattachesWhenRunnerCan(t *testing.T) {
 	rig := newTestRig(t)
 	rig.runner.reattachOK = true

@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"regexp"
 	"strings"
 	"sync"
@@ -1040,10 +1039,14 @@ func (ma *managedApp) ensureRunning() error {
 
 	inst, err := ma.launchVersion(c, st.CurrentVersion)
 	if err != nil {
-		// A binary that cannot be found will not appear by retrying;
-		// everything else here (sweep, manager, unit reconcile) can.
-		var execErr *exec.Error
-		if errors.As(err, &execErr) {
+		// A preflight refusal is the release as shipped or the command
+		// as configured — a binary that is not there, not executable,
+		// or outside the sandbox view (the launch runs resolveInView;
+		// the architecture check is the deploy's Preflight, not run
+		// here). None of that appears by retrying; everything else
+		// here (sweep, manager, unit reconcile) can.
+		var pe *preflightError
+		if errors.As(err, &pe) {
 			return &permanentRecoveryError{fmt.Errorf("relaunching %s: %w", st.CurrentVersion, err)}
 		}
 		return &transientRecoveryError{fmt.Errorf("relaunching %s: %w", st.CurrentVersion, err)}
