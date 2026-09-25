@@ -1567,14 +1567,29 @@ func TestDestructOnUnconfiguredAppIsANoop(t *testing.T) {
 	must(t, ma.Destruct())
 }
 
+func TestConfigureInstallsTheVerifiersItIsGiven(t *testing.T) {
+	// The OIDC discovery cache lives on the verifier object, so the
+	// set Provision warms is only useful if configure installs those
+	// same objects rather than resolving a cold set of its own.
+	rig := newTestRig(t)
+	spec := testSpec(t)
+	spec.trust = []trustSource{{kind: "oidc", issuer: "https://issuer.example", audience: "aud"}}
+	warmed := resolveVerifiers(spec.trust, nil)
+	rig.ma.configure(new(int), spec, warmed, zap.NewNop(), &fetchClients{}, userManager)
+	got := rig.ma.currentVerifiers()
+	if len(got) != 1 || got[0] != warmed[0] {
+		t.Fatalf("configure must install the verifiers it was handed (the warmed ones); got %v want %v", got, warmed)
+	}
+}
+
 func TestRollbackConfigRestoresTheServingDefinition(t *testing.T) {
 	rig := newTestRig(t)
 	clients := &fetchClients{}
 	specA, specB := testSpec(t), testSpec(t)
 	specB.grace = 99 * time.Second
 	ownerA, ownerB := new(int), new(int)
-	rig.ma.configure(ownerA, specA, zap.NewNop(), clients, userManager)
-	rig.ma.configure(ownerB, specB, zap.NewNop(), clients, userManager)
+	rig.ma.configure(ownerA, specA, resolveVerifiers(specA.trust, nil), zap.NewNop(), clients, userManager)
+	rig.ma.configure(ownerB, specB, resolveVerifiers(specB.trust, nil), zap.NewNop(), clients, userManager)
 	// A successful reload: A is cleaned up after B configured — not
 	// the last writer, nothing happens.
 	if rig.ma.rollbackConfig(ownerA) || rig.ma.snapshot().spec != specB {
@@ -1595,8 +1610,8 @@ func TestRollbackConfigWakesTheWatchdog(t *testing.T) {
 	on, off := testSpec(t), testSpec(t)
 	off.watchdogOn = false
 	ownerA, ownerB := new(int), new(int)
-	rig.ma.configure(ownerA, on, zap.NewNop(), clients, userManager)
-	rig.ma.configure(ownerB, off, zap.NewNop(), clients, userManager)
+	rig.ma.configure(ownerA, on, resolveVerifiers(on.trust, nil), zap.NewNop(), clients, userManager)
+	rig.ma.configure(ownerB, off, resolveVerifiers(off.trust, nil), zap.NewNop(), clients, userManager)
 	// Drain the pokes configure sent, then roll back: the rollback
 	// itself must poke, or a parked loop never re-reads watchdog=on.
 	for len(rig.ma.wdNotify) > 0 {

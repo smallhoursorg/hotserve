@@ -422,12 +422,15 @@ type appConfigState struct {
 }
 
 // owner is the config installing this definition (see rollbackConfig).
+// verifiers is the app's deploy_trust as the config resolved (and
+// warmed) it in Provision; configure installs, never resolves, so the
+// discovery cache a verifier carries is the one the handler sees.
 // manager is the connection a runner built here talks to, passed in
 // rather than reached for globally so a test can install its own; it
 // is read only when this managedApp has no runner yet, because a
 // pooled app keeps the runner — and so the connection — it was first
 // started with across every later reload.
-func (ma *managedApp) configure(owner any, spec *appSpec, logger *zap.Logger, clients *fetchClients, manager systemdConn) {
+func (ma *managedApp) configure(owner any, spec *appSpec, verifiers []verifier, logger *zap.Logger, clients *fetchClients, manager systemdConn) {
 	ma.specMu.Lock()
 	defer ma.specMu.Unlock()
 	changed := ma.spec != nil && !specEqual(ma.spec, spec)
@@ -438,7 +441,7 @@ func (ma *managedApp) configure(owner any, spec *appSpec, logger *zap.Logger, cl
 	ma.spec = spec
 	// Deploy auth is not tied to the running process, so — unlike the
 	// runner — it is rewired on every reload and takes effect at once.
-	ma.verifiers = resolveVerifiers(spec.trust, clients.jwks)
+	ma.verifiers = verifiers
 	ma.logger = logger
 	if ma.runner == nil {
 		ma.runner = newSystemdRunner(manager, logger)
