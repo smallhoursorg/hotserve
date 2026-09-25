@@ -276,6 +276,52 @@ func TestAnImportThroughALinkedDirectoryIsOutside(t *testing.T) {
 	}
 }
 
+// A directory a wildcard matches can be a link out as well: from inside
+// a run's view it dangles and the glob matches nothing, and on the host,
+// where the adapter follows it, it may match nothing yet. So each
+// directory the pattern leads through is followed, a segment at a time.
+func TestAnImportThroughAWildcardsLinkedDirectoryIsOutside(t *testing.T) {
+	fakeHotserve(t)
+	for name, tc := range map[string]struct {
+		link, to, line string
+		outside        bool
+	}{
+		"dangling, as in a run's view":      {"ext", "nowhere", "import */*.caddy", true},
+		"out, matching nothing yet":         {"ext", "", "import */none-match-*.caddy", true},
+		"out, after a literal segment":      {"sites/a/conf", "", "import sites/*/conf/*.caddy", true},
+		"out, a segment after the wildcard": {"sites/a", "", "import sites/*/conf/*.caddy", true},
+		"in, to a directory beside it":      {"ext", "real", "import */*.caddy", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir, elsewhere := t.TempDir(), t.TempDir()
+			write(t, filepath.Join(elsewhere, "conf", "x.caddy"), "# nothing\n")
+			write(t, filepath.Join(dir, "real", "x.caddy"), "# nothing\n")
+			to := elsewhere
+			if tc.to != "" {
+				to = filepath.Join(dir, tc.to)
+			}
+			if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, tc.link)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(to, filepath.Join(dir, tc.link)); err != nil {
+				t.Fatal(err)
+			}
+			file := filepath.Join(dir, "Caddyfile")
+			write(t, file, tc.line+"\napp blog\n")
+			got, err := Inspect(context.Background(), file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if out := got.ImportsOutside(dir, dir); (len(out) > 0) != tc.outside {
+				t.Fatalf("outside: %q, want outside = %v", out, tc.outside)
+			}
+			if _, err := Make(context.Background(), file); (err != nil) != tc.outside {
+				t.Fatalf("Make: %v", err)
+			}
+		})
+	}
+}
+
 // The config directory itself, and a directory a glob leads through.
 func TestClosedDirectoriesAboveAndWithinAGlob(t *testing.T) {
 	fakeHotserve(t)
@@ -417,6 +463,27 @@ func TestAnImportByASnippetArgumentIsRefused(t *testing.T) {
 	write(t, file, "(site) {\n\trespond {args[0]}\n\timport sites/*.caddy\n}\nimport site hello\napp blog\n")
 	if _, err := Make(context.Background(), file); err != nil {
 		t.Errorf("an argument that is not an import's path: %v", err)
+	}
+}
+
+// An import whose path is a heredoc is followed by the adapter like any
+// other [measured: `import <<PATH` / an outside glob / `PATH` adapts
+// with what that glob matches], and its body is quoted text to this
+// reader. It is refused, by the line.
+func TestAnImportByAHeredocIsRefused(t *testing.T) {
+	fakeHotserve(t)
+	file := filepath.Join(t.TempDir(), "Caddyfile")
+	for _, body := range []string{
+		"import <<PATH\n/srv/apps/*.caddy\nPATH\napp blog\n",
+		"import <<PATH\r\n/srv/apps/*.caddy\r\nPATH\r\napp blog\r\n",
+		"(apps) {\n\timport <<P\n\tsites/*.caddy\n\tP\n}\napp blog\n",
+	} {
+		write(t, file, body)
+		for what, err := range map[string]error{"Inspect": second(Inspect(context.Background(), file)), "Make": second(Make(context.Background(), file))} {
+			if err == nil || !strings.Contains(err.Error(), "heredoc") || !strings.Contains(err.Error(), "literally") {
+				t.Errorf("%s of %q: %v", what, body, err)
+			}
+		}
 	}
 }
 

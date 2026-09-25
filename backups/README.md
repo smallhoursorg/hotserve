@@ -462,8 +462,8 @@ what those would make of the file once it is live:
 - an import from outside `/etc/hotserve` — written relatively, from
   outside the Caddyfile's own directory, so that a copy can be checked
   with what it imports beside it. As the run does, it goes by how the
-  import is written, by where the directories it names lead through
-  links, and by where a link among the matched files leads. A line
+  import is written, by where the directories it names or its
+  wildcards match lead through links, and by where a link among the matched files leads. A line
   that begins with `import` inside a quoted token, a heredoc or a
   comment is not an import;
 - under `/etc/hotserve`, an imported file that others may not read, or
@@ -498,12 +498,16 @@ hourly run. It needs no sudoers line.
   whatever it matches: inside that view a glob reaching outside matches
   nothing, which the adapter takes for no error, and the run would plan
   without the apps declared out there. A directory under
-  `/etc/hotserve` that is a link leading out of it is outside too. A
+  `/etc/hotserve` that is a link leading out of it is outside too,
+  where the import names it and where a wildcard matches it. A
   restore and a drill plan the same way, and are refused with the run.
 - A Caddyfile that imports by a snippet's argument (`import {args[0]}`):
   the adapter fills the path in from wherever the snippet is used, and
   one of those uses can name files outside `/etc/hotserve`, which
   nothing here would see. Write the import's path literally.
+- A Caddyfile that imports by a heredoc (`import <<PATH`, the path on
+  the lines after it): the adapter follows it like any other path, and
+  this reader does not. Write the import's path on its own line.
 - A symbolic link anywhere in a declared path, or at `<app>/shared`:
   declare the real path, and put data on another disk with a bind
   mount, as liveswap itself asks. (The liveswap root may be a link.)
