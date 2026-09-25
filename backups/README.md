@@ -81,7 +81,8 @@ and systemd 257 (`PrivatePIDs=`), which is Debian 13's.
    ended early, with why, and the apps it did not reach as `not run`.
 
 An app that has left the plan with snapshots in the repository — a
-block deleted, an import that stopped matching — is a warning of the
+block deleted, or an imported file removed while its glob still matches
+others — is a warning of the
 run that finds it gone, and of `status` until the next run: once. The
 record then drops it, as its operator may have meant.
 
@@ -456,22 +457,11 @@ credentials is.
 step does to the live file, done to this one by whoever asks — it
 adapts it with `/usr/bin/hotserve adapt` and no environment (below),
 and refuses what that step would refuse, in the same words. It is not
-run as the plan unit's account nor inside its view, so it also refuses
-what those would make of the file once it is live:
-
-- an import from outside `/etc/hotserve` — written relatively, from
-  outside the Caddyfile's own directory, so that a copy can be checked
-  with what it imports beside it. As the run does, it goes by how the
-  import is written, by where the directories it names or its
-  wildcards match lead through links, and by where a link among the matched files leads. A line
-  that begins with `import` inside a quoted token, a heredoc or a
-  comment is not an import;
-- under `/etc/hotserve`, the Caddyfile itself or an imported file that
-  others may not read, or a directory that others may not list —
-  `/etc/hotserve` itself, those the import names, those its wildcards
-  lead through, and where a link among the matched files leads: a run
-  reads the Caddyfile as the `hotserve-backup` account, which owns
-  nothing there.
+run as the plan unit's account nor inside its view, so an import from
+outside `/etc/hotserve`, or one the `hotserve-backup` account may not
+read, can pass here and fail the run: those are for `hotserve validate`
+to refuse, where the adapter itself says which file each `backup` block
+comes from.
 
 It names the apps a run would back up, and each app that declares no
 backup — which is said, not refused; one named through a `{$NAME}` is
@@ -488,31 +478,20 @@ hourly run. It needs no sudoers line.
 - A liveswap `root`, an app's name or a backup path that depends on a
   Caddyfile `{$NAME}`. (hotserve itself refuses `root {env.X}` together
   with a `backup` block; `{$NAME}` it never sees.) See below.
-- A variable in an `import` — `import sites/{$ENV:prod}/*.caddy` —
-  since which files the server reads when it is set cannot be known
-  here, and a glob that matches nothing adapts with any value. Write
-  import paths literally.
-- A variable that no made-up value adapts with.
-- A Caddyfile that imports from outside `/etc/hotserve`: the plan
-  unit's view holds nothing else. Refused as the import is written,
-  whatever it matches: inside that view a glob reaching outside matches
-  nothing, which the adapter takes for no error, and the run would plan
-  without the apps declared out there. A directory under
-  `/etc/hotserve` that is a link leading out of it is outside too,
-  where the import names it and where a wildcard matches it. A
-  restore and a drill plan the same way, and are refused with the run.
-- A directory on an import's way under `/etc/hotserve` that the
-  `hotserve-backup` account may not enter — or, where a wildcard is
-  matched in it, list: a glob that cannot look matches nothing, which
-  the adapter takes for no error. `validate` says so before a push; this
-  is for a mode changed after one.
-- A Caddyfile that imports by a snippet's argument (`import {args[0]}`):
-  the adapter fills the path in from wherever the snippet is used, and
-  one of those uses can name files outside `/etc/hotserve`, which
-  nothing here would see. Write the import's path literally.
-- A Caddyfile that imports by a heredoc (`import <<PATH`, the path on
-  the lines after it): the adapter follows it like any other path, and
-  this reader does not. Write the import's path on its own line.
+- A variable that no made-up value adapts with — among them a variable
+  in an import, `import sites/{$ENV:prod}/*.caddy`: with any other value
+  it names a file that is not there, and what the server reads when it
+  is set cannot be known here. Write import paths literally.
+- An import glob that matches no file. The adapter takes it for no
+  error; but inside the plan unit's view, which holds `/etc/hotserve`
+  and nothing else, an import from outside it matches nothing — and so
+  does one through a directory the `hotserve-backup` account may not
+  list, or through a link that leads out — and the run would plan
+  without the apps declared there. The adapter's own warning is what is
+  read, after its snippets, heredocs and `{$NAME}`. A restore and a
+  drill plan the same way, and are refused with the run. Not seen: a
+  wildcard directory, `apps/*/Caddyfile`, where a link out sits beside
+  real directories — the glob still matches the real ones.
 - A symbolic link anywhere in a declared path, or at `<app>/shared`:
   declare the real path, and put data on another disk with a bind
   mount, as liveswap itself asks. (The liveswap root may be a link.)

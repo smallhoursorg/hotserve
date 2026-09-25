@@ -252,37 +252,23 @@ func showStatus(ctx context.Context) error {
 // for whoever is about to make it live, before they do. It starts no
 // unit, takes no lock and needs no root; the run's own plan step does
 // the same to the live file, as another user, inside a view that holds
-// the config directory and nothing else.
+// the config directory and nothing else. What that view and that user
+// would make of an import it cannot say from here, where the whole
+// filesystem is in view: that is `hotserve validate`'s, which has the
+// adapter's own word on where each backup block comes from.
 func validate(ctx context.Context, file string) error {
 	abs, err := filepath.Abs(file)
 	if err != nil {
 		return err
 	}
-	st, err := os.Stat(abs)
-	if err != nil {
+	if st, err := os.Stat(abs); err != nil {
 		return err
-	}
-	if !st.Mode().IsRegular() {
+	} else if !st.Mode().IsRegular() {
 		return fmt.Errorf("%s is not a file", abs)
 	}
 	ins, err := plan.Inspect(ctx, abs)
 	if err != nil {
 		return err
-	}
-	configDir := config().ConfigDir
-	// Beside the Caddyfile is where a copy being checked somewhere else
-	// keeps what it imports; on the box that is the config directory.
-	if unseen := ins.ImportsOutside(configDir, filepath.Dir(abs)); len(unseen) > 0 {
-		return plan.OutsideError(unseen, configDir)
-	}
-	closed := ins.ImportsClosedToOthers(configDir)
-	// The Caddyfile itself, where it is on the box: a run reads it as
-	// the same account.
-	if strings.HasPrefix(abs, filepath.Clean(configDir)+string(filepath.Separator)) && st.Mode().Perm()&0o004 == 0 {
-		closed = append([]string{abs}, closed...)
-	}
-	if len(closed) > 0 {
-		return fmt.Errorf("the Caddyfile imports what a backup run could not read: %s — a run reads the Caddyfile as the %s account, which owns nothing under %s: what is imported has to be readable, and its directories listable, by others (0644, 0755)", strings.Join(closed, ", "), "hotserve-backup", configDir)
 	}
 	names := ins.Plan.Names()
 	if len(names) == 0 {

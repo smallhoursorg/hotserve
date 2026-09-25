@@ -186,30 +186,19 @@ sed 's#root /var/lib/liveswap#root {$LIVESWAP_ROOT:/var/lib/liveswap}#' /root/Ca
 hotserve validate --config "$V/envroot" --adapter caddyfile >/dev/null 2>&1 && pass "fixture: hotserve accepts a root from the environment: push would let it through" || fail "fixture: hotserve rejects the file: the scenario proves nothing"
 if validate "$V/envroot"; then fail "a root that depends on the environment validated"; else says "LIVESWAP_ROOT" && pass "a root that depends on the environment is refused, by the variable's name" || fail "said: $(cat "$OUT")"; fi
 
-echo "# nothing" >"$V/extra.caddy"
-{ echo "import $V/extra.caddy"; cat /root/Caddyfile.base; } >/etc/hotserve/Caddyfile.new
-hotserve validate --config /etc/hotserve/Caddyfile.new --adapter caddyfile >/dev/null 2>&1 && pass "fixture: hotserve accepts an import from outside /etc/hotserve" || fail "fixture: hotserve rejects the file: the scenario proves nothing"
-if validate /etc/hotserve/Caddyfile.new; then fail "an import a run cannot see validated"; else says "imports $V/extra.caddy from outside /etc/hotserve" && pass "an import from outside /etc/hotserve is refused, by name: a run's view holds nothing else" || fail "said: $(cat "$OUT")"; fi
-
 # A glob that reaches outside matches nothing inside a run's view, which
 # to the adapter is no error: the run would plan without what is
-# declared out there. So it is refused as it is written, matching or not.
+# declared out there. The adapter's own warning is refused — here,
+# where it matches nothing on the box either, and inside
+# /etc/hotserve, where a run would see nothing more than validate does.
 { echo "import $V/apps/*.caddy"; cat /root/Caddyfile.base; } >/etc/hotserve/Caddyfile.new
 hotserve validate --config /etc/hotserve/Caddyfile.new --adapter caddyfile >/dev/null 2>&1 && pass "fixture: hotserve accepts a glob import that matches nothing" || fail "fixture: hotserve rejects the file: the scenario proves nothing"
-if validate /etc/hotserve/Caddyfile.new; then fail "a glob import from outside /etc/hotserve validated"; else says "imports $V/apps/\*.caddy from outside /etc/hotserve" && pass "a glob import from outside is refused as written, though it matches nothing" || fail "said: $(cat "$OUT")"; fi
-
-# A run reads the Caddyfile as an account that owns nothing under
-# /etc/hotserve.
-mkdir -p /etc/hotserve/sites && chmod 0755 /etc/hotserve/sites
-echo "# nothing" >/etc/hotserve/sites/a.caddy && chmod 0640 /etc/hotserve/sites/a.caddy
+if validate /etc/hotserve/Caddyfile.new; then fail "a glob import that matches nothing validated"; else says "imports $V/apps/\*.caddy, which matches no file" && pass "a glob import that matches nothing is refused, by its pattern" || fail "said: $(cat "$OUT")"; fi
 { echo "import sites/*.caddy"; cat /root/Caddyfile.base; } >/etc/hotserve/Caddyfile.new
-hotserve validate --config /etc/hotserve/Caddyfile.new --adapter caddyfile >/dev/null 2>&1 && pass "fixture: hotserve accepts an import only root and its group can read" || fail "fixture: hotserve rejects the file: the scenario proves nothing"
-if validate /etc/hotserve/Caddyfile.new; then fail "an import a run's account cannot read validated"; else says "could not read: /etc/hotserve/sites/a.caddy" && pass "an import closed to others is refused, by name" || fail "said: $(cat "$OUT")"; fi
-chmod 0644 /etc/hotserve/sites/a.caddy
-if validate /etc/hotserve/Caddyfile.new; then pass "and validates once others may read it"; else fail "with the import readable: $(cat "$OUT")"; fi
-# The Caddyfile itself is read by that account too.
-cp /root/Caddyfile.base /etc/hotserve/Caddyfile.new && chmod 0640 /etc/hotserve/Caddyfile.new
-if validate /etc/hotserve/Caddyfile.new; then fail "a Caddyfile a run's account cannot read validated"; else says "could not read: /etc/hotserve/Caddyfile.new" && pass "a Caddyfile closed to others is refused, by name" || fail "said: $(cat "$OUT")"; fi
+if validate /etc/hotserve/Caddyfile.new; then fail "an empty glob under /etc/hotserve validated"; else says "imports sites/\*.caddy, which matches no file" && pass "and so is one under /etc/hotserve" || fail "said: $(cat "$OUT")"; fi
+mkdir -p /etc/hotserve/sites && chmod 0755 /etc/hotserve/sites
+echo "# nothing" >/etc/hotserve/sites/a.caddy && chmod 0644 /etc/hotserve/sites/a.caddy
+if validate /etc/hotserve/Caddyfile.new; then pass "and validates once it matches a file"; else fail "with a match: $(cat "$OUT")"; fi
 rm -rf /etc/hotserve/Caddyfile.new /etc/hotserve/sites
 
 if validate "$V/absent"; then fail "a file that is not there validated"; else says "$V/absent" && pass "a file that is not there is refused, by name" || fail "said: $(cat "$OUT")"; fi
@@ -217,17 +206,25 @@ says "declare" && fail "and something is said about what it declares: $(cat "$OU
 [ "$(sha256sum "$CADDYFILE" "$STATUS")" = "$before" ] && pass "validate changed neither the Caddyfile nor the record" || fail "validate changed something"
 [ "$(units_left)" = 0 ] && pass "and started no unit" || fail "units: $(systemctl list-units --all --plain --no-legend 'hotserve_backup_*')"
 
-echo "=== validate 8b: and the run itself refuses what validate refuses ==="
+echo "=== validate 8b: and the run itself refuses what its view hides ==="
 # validate is a courtesy to whoever pushes; the plan step is what stands
-# between an import from outside and a run that plans without it.
+# between an import the run cannot see and a run that plans without it.
+# Here the glob matches on the box, so validate lets it through: inside
+# the run's view, which holds /etc/hotserve alone, it matches nothing.
 mkdir -p "$V/apps" && echo "# nothing" >"$V/apps/x.caddy"
 { echo "import $V/apps/*.caddy"; cat /root/Caddyfile.base; } >"$CADDYFILE"
 journalctl --sync >/dev/null 2>&1
-before=$(journalctl --no-pager -o cat | grep -c "from outside /etc/hotserve")
+before=$(journalctl --no-pager -o cat | grep -c "which matches no file")
 if run; then fail "a run exited 0 on a Caddyfile that imports from outside /etc/hotserve"; else pass "the run exits non-zero"; fi
 journalctl --sync >/dev/null 2>&1
-[ "$(journalctl --no-pager -o cat | grep -c "from outside /etc/hotserve")" -gt "$before" ] && pass "and its plan unit says why, in the journal" || fail "the journal does not say: $(cat "$OUT")"
+[ "$(journalctl --no-pager -o cat | grep -c "which matches no file")" -gt "$before" ] && pass "and its plan unit says why, in the journal" || fail "the journal does not say: $(cat "$OUT")"
 if st; then fail "status exited 0 after a run that could not plan"; else says "the last run ended early" && pass "status says the last run ended early" || fail "said: $(cat "$OUT")"; fi
+# A directory under /etc/hotserve the run's account may not list: root
+# lists it, and validate as root sees the match; the run does not.
+mkdir -p /etc/hotserve/sites && echo "# nothing" >/etc/hotserve/sites/a.caddy && chmod 0644 /etc/hotserve/sites/a.caddy && chmod 0700 /etc/hotserve/sites
+{ echo "import sites/*.caddy"; cat /root/Caddyfile.base; } >"$CADDYFILE"
+if run; then fail "a run exited 0 through a directory its account may not list"; else pass "a run through a directory its account may not list exits non-zero"; fi
+rm -rf /etc/hotserve/sites
 cp /root/Caddyfile.base "$CADDYFILE"
 run || fail "the run after: $(cat "$OUT")"
 if st; then pass "and after a good run, status exits 0 again"; else fail "status after: $(cat "$OUT")"; fi

@@ -82,26 +82,28 @@ func write(t *testing.T, path, body string) {
 	}
 }
 
-func TestEnvNamesFollowsImports(t *testing.T) {
+// Every file beside the Caddyfile and below is read for {$NAME} —
+// what a run's view holds, imported or not — with nothing of the
+// Caddyfile's syntax read: an import by a snippet's argument, a heredoc,
+// a variable, a file nothing imports; all of it is only text here.
+func TestEnvNamesReadsEveryFileBesideTheCaddyfile(t *testing.T) {
 	dir := t.TempDir()
-	write(t, dir+"/Caddyfile", "{\n\temail {$ACME_EMAIL}\n}\nimport sites/*.caddy\nimport snippet-name arg\nimport "+dir+"/abs.caddy\nimport \"quoted dir/q.caddy\"\nimport {$CONF:byenv}/e.caddy\n")
+	write(t, dir+"/Caddyfile", "{\n\temail {$ACME_EMAIL}\n}\n(s) {\n\timport {args[0]}\n}\nimport <<P\nsites/*.caddy\nP\nimport {$CONF:byenv}/e.caddy\n")
 	write(t, dir+"/quoted dir/q.caddy", "respond {$QUOTED}\n")
 	write(t, dir+"/byenv/e.caddy", "respond {$BEHIND_A_DEFAULT}\n")
-	write(t, dir+"/sites/a.caddy", "{$DOMAIN:example.com} {\n\timport ../Caddyfile\n\timport deeper/*\n}\n")
+	write(t, dir+"/sites/a.caddy", "{$DOMAIN:example.com} {\n\timport deeper/*\n}\n")
 	write(t, dir+"/sites/deeper/b", "root * {$WEBROOT}\n")
-	write(t, dir+"/abs.caddy", "respond {$GREETING}\n")
-	got, bare, imported, _, _, _, err := scanCaddyfile(dir + "/Caddyfile")
+	write(t, dir+"/not-imported.caddy", "respond {$UNUSED:x}\n")
+	write(t, dir+"/huge.caddy", "respond {$TOO_FAR_IN}\n"+strings.Repeat("#\n", 1<<20))
+	got, bare, err := envNames(dir + "/Caddyfile")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"CONF"}; !reflect.DeepEqual(imported, want) {
-		t.Fatalf("used in an import = %v, want %v", imported, want)
-	}
-	// DOMAIN and CONF are only ever written with a default.
-	if want := []string{"ACME_EMAIL", "BEHIND_A_DEFAULT", "GREETING", "QUOTED", "WEBROOT"}; !reflect.DeepEqual(bare, want) {
+	// DOMAIN, CONF and UNUSED are only ever written with a default.
+	if want := []string{"ACME_EMAIL", "BEHIND_A_DEFAULT", "QUOTED", "WEBROOT"}; !reflect.DeepEqual(bare, want) {
 		t.Fatalf("with no default = %v, want %v", bare, want)
 	}
-	if want := []string{"ACME_EMAIL", "BEHIND_A_DEFAULT", "CONF", "DOMAIN", "GREETING", "QUOTED", "WEBROOT"}; !reflect.DeepEqual(got, want) {
+	if want := []string{"ACME_EMAIL", "BEHIND_A_DEFAULT", "CONF", "DOMAIN", "QUOTED", "UNUSED", "WEBROOT"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("names = %v, want %v", got, want)
 	}
 }
@@ -137,6 +139,16 @@ for v in METRICS_PORT ADMIN_PORT; do
 done
 case "${PORT:-8080}" in *[!0-9]*) echo "Error: invalid port '$PORT'" >&2; exit 1;; esac
 [ "${ENV:-prod}" = prod ] || { echo "Error: File to import not found: sites/$ENV.caddy" >&2; exit 1; }
+# An import glob of the file's own that matches nothing: a warning, and
+# the config all the same.
+dir=$(dirname "$last")
+grep -E '^[[:space:]]*import[[:space:]]' "$last" | while read -r _ pat _; do
+	case "$pat" in *'*'*) ;; *) continue ;; esac
+	pat=$(printf '%s' "$pat" | sed 's|{\$ENV:prod}|'"${ENV:-prod}"'|')
+	case "$pat" in /*) p=$pat ;; *) p=$dir/$pat ;; esac
+	set -- $p
+	[ -e "$1" ] || printf '{"level":"warn","ts":1,"msg":"No files matching import glob pattern","pattern":"%s"}\n' "$pat" >&2
+done
 root=${LIVESWAP_ROOT:-/var/lib/liveswap}
 uses ROOT_NO_DEFAULT && root=$ROOT_NO_DEFAULT
 more=""
@@ -161,14 +173,14 @@ func TestMakeRefusesAPlanThatDependsOnTheEnvironment(t *testing.T) {
 		"a variable that is not the plan's":    {"{$DOMAIN} {\n}\n", nil},
 		"a variable an arbitrary value breaks": {":{$PORT:8080} {\n}\n", nil}, // cleared by the trial value "1"
 		// The server, with ENV=staging, imports another file, which may
-		// say anything about the root: not knowable here, so refused.
-		"a variable that names a file to import": {"import sites/{$ENV:prod}.caddy\n", []string{"ENV", "imports by"}},
-		// A glob that matches nothing is not an error, so this adapts with
-		// any value at all — and says nothing of what the server reads.
-		"a variable in an import glob": {"import sites/{$ENV:prod}/*.caddy\n", []string{"ENV", "imports by"}},
-		"the root":                     {"liveswap {\n\troot {$LIVESWAP_ROOT:/var/lib/liveswap}\n}\n", []string{"LIVESWAP_ROOT"}},
-		"a backup path":                {"backup {\n\tsqlite {$DB:app.db}\n}\n", []string{"DB"}},
-		"both, among others":           {"{$DOMAIN:example.com} :{$PORT:80} {$LIVESWAP_ROOT:/var/lib/liveswap} {$DB:app.db}\n", []string{"DB, LIVESWAP_ROOT"}},
+		// say anything about the root: not knowable here, so refused — as
+		// a variable no other value adapts with, since a file that is not
+		// there is an error, and so, here, is a glob that matches nothing.
+		"a variable that names a file to import": {"import sites/{$ENV:prod}.caddy\n", []string{"ENV", "does not adapt"}},
+		"a variable in an import glob":           {"import sites/{$ENV:prod}/*.caddy\n", []string{"ENV", "does not adapt"}},
+		"the root":                               {"liveswap {\n\troot {$LIVESWAP_ROOT:/var/lib/liveswap}\n}\n", []string{"LIVESWAP_ROOT"}},
+		"a backup path":                          {"backup {\n\tsqlite {$DB:app.db}\n}\n", []string{"DB"}},
+		"both, among others":                     {"{$DOMAIN:example.com} :{$PORT:80} {$LIVESWAP_ROOT:/var/lib/liveswap} {$DB:app.db}\n", []string{"DB, LIVESWAP_ROOT"}},
 		// The ordinary production file: variables with no default, which
 		// an empty environment makes a parse error of. Made-up values, of
 		// the kind the adapter takes in each place, and the plan is what
@@ -183,6 +195,7 @@ func TestMakeRefusesAPlanThatDependsOnTheEnvironment(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			file := filepath.Join(t.TempDir(), "Caddyfile")
 			write(t, file, tc.caddyfile)
+			write(t, filepath.Join(filepath.Dir(file), "sites", "prod", "a.caddy"), "# what the default imports\n")
 			p, err := Make(context.Background(), file)
 			if tc.want == nil {
 				if err != nil || p.Root != "/var/lib/liveswap" {
