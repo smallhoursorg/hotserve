@@ -258,7 +258,7 @@ resolved at config load.
 | `health_path` | `/health` | 2xx = healthy; `off` = process-liveness only |
 | `health_interval` / `health_timeout` | `5s` / `2s` | Probe cadence |
 | `soak` | `15s` | Continuous health required before cutover |
-| `deadline` | `5m` | Bound on pre_start and the health gate |
+| `deadline` | `5m` | Bound on pre_start and, separately, on the health gate (soak included, so `soak` cannot exceed it). The gate is judged once per `health_interval`, so it can run over by one interval plus two `health_timeout`s (the probe before the last tick and the one on it); a soak that falls due on that first tick past the deadline still passes |
 | `drain` | `5s` | In-flight grace after cutover, before SIGTERM |
 | `grace` | `10s` | SIGTERM → SIGKILL window |
 | `watchdog` | `on` | Continuous supervision: restart on crash or sustained health failure (`off` to disable) |
@@ -845,8 +845,12 @@ Because the response is synchronous through the whole pipeline, the
 POST's wall time includes the health soak, the `drain` pause and the
 old version's graceful stop — with defaults, a healthy deploy answers
 in roughly soak + drain (~20s). Budget your CI step timeout for
-`deadline` plus drain and grace, and expect a concurrent deploy to
-409 until the first one finishes.
+`deadline` plus one `health_interval` and two `health_timeout`s (the
+gate is judged once per interval, and the tick that completes the soak
+still probes), plus drain and grace — and a second `deadline` when
+`pre_start` is configured, since the pre_start step gets a full
+`deadline` of its own before the health gate starts. Expect a
+concurrent deploy to 409 until the first one finishes.
 
 **A failed deploy says why, from the app's side.** The 5xx body's
 `status.last_deploy` carries the phase it stopped in, `phases` — each

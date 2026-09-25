@@ -546,6 +546,14 @@ func (a *App) Validate() error {
 		if cfg.Soak < 0 || cfg.Drain < 0 {
 			return fmt.Errorf("app %s: soak and drain must not be negative", name)
 		}
+		// The deadline bounds the whole gate, soak included: a soak
+		// the deadline cannot contain is a deploy that can never pass.
+		// Equal is allowed — the gate judges the soak on the tick at
+		// the deadline — so a config that loaded before this check
+		// and could deploy still does.
+		if cfg.Soak > cfg.Deadline {
+			return fmt.Errorf("app %s: soak (%v) must not exceed deadline (%v), which bounds the whole health gate including the soak", name, time.Duration(cfg.Soak), time.Duration(cfg.Deadline))
+		}
 		if cfg.Watchdog != "on" && cfg.Watchdog != "off" {
 			return fmt.Errorf("app %s: watchdog must be \"on\" or \"off\", got %q", name, cfg.Watchdog)
 		}

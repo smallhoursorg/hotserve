@@ -56,10 +56,18 @@ func (p *httpProber) waitHealthy(ctx context.Context, sock *socketRef, alive fun
 			return &healthGateError{err: errProcessExited, probe: lastProbe}
 		}
 		now := p.clock.Now()
-		if now.After(deadline) {
-			return &healthGateError{err: fmt.Errorf("not healthy within deadline %v: %w", hc.deadline, lastErr), probe: lastProbe}
+		// Past the deadline, a probe is issued only if it can complete
+		// the soak: ticks are interval-granular, so a soak that falls
+		// due on the first tick past the deadline is met, not refused —
+		// and a tick that could not meet it is refused before it spends
+		// a probe (up to health_timeout) on an answer that cannot
+		// change the verdict.
+		pastDeadline := now.After(deadline)
+		soakDue := !healthySince.IsZero() && now.Sub(healthySince) >= hc.soak
+		if pastDeadline && !soakDue {
+			return deadlineVerdict(hc, healthySince, deadline, lastErr, lastProbe)
 		}
-
+		wasHealthySince := healthySince // the run a failed probe below resets
 		if hc.path == "" {
 			// No HTTP check: soak on process liveness alone.
 			if healthySince.IsZero() {
@@ -81,8 +89,27 @@ func (p *httpProber) waitHealthy(ctx context.Context, sock *socketRef, alive fun
 		if !healthySince.IsZero() && now.Sub(healthySince) >= hc.soak {
 			return nil
 		}
+		if pastDeadline {
+			// The one probe that could have completed the soak failed:
+			// say how long the run was, and what that probe answered.
+			return &healthGateError{err: fmt.Errorf("healthy for %v of the %v soak, then the probe past the %v deadline failed: %w",
+				now.Sub(wasHealthySince), hc.soak, hc.deadline, lastErr), probe: lastProbe}
+		}
 		p.clock.Sleep(hc.interval)
 	}
+}
+
+// deadlineVerdict is the gate's failure at the deadline: an instance
+// that was healthy but short of its soak is told how much had accrued
+// when the deadline expired (not at the later tick that noticed), and
+// no probe from before the healthy run is blamed; one that never got
+// there gets the last failure and the last probe the app answered.
+func deadlineVerdict(hc healthConfig, healthySince, deadline time.Time, lastErr error, lastProbe *probeError) error {
+	if !healthySince.IsZero() {
+		return &healthGateError{err: fmt.Errorf("healthy for %v of the %v soak when the %v deadline expired",
+			deadline.Sub(healthySince), hc.soak, hc.deadline)}
+	}
+	return &healthGateError{err: fmt.Errorf("not healthy within deadline %v: %w", hc.deadline, lastErr), probe: lastProbe}
 }
 
 // probeOnce issues one GET over the instance's socket and demands a

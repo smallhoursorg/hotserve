@@ -105,6 +105,109 @@ func TestProberDeadlineExceeded(t *testing.T) {
 	}
 }
 
+func TestProberDeadlineDuringSoakNamesTheHealthyRun(t *testing.T) {
+	// The app answers 503 for its first ten probes, then 200: healthy
+	// from t=10s, so a 20s soak would finish at 30s — after the 25s
+	// deadline. The verdict must say the app was healthy but not for
+	// long enough, and must not carry the stale 503 as the cause.
+	var n atomic.Int32
+	sock := unixServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if n.Add(1) <= 10 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	clk := newFakeClock()
+	p := &httpProber{clock: clk}
+	hc := testHealthConfig()
+	hc.soak = 20 * time.Second
+	hc.deadline = 25 * time.Second
+	err := p.waitHealthy(context.Background(), testSocketRef(t, sock), alwaysAlive, hc)
+	if err == nil || !strings.Contains(err.Error(), "healthy for 15s of the 20s soak when the 25s deadline expired") {
+		t.Fatalf("want a healthy-but-short verdict, got %v", err)
+	}
+	if strings.Contains(err.Error(), "503") || strings.Contains(err.Error(), "%!w") {
+		t.Fatalf("verdict must not blame the pre-healthy probe or format a nil error: %v", err)
+	}
+	var pe *probeError
+	if errors.As(err, &pe) {
+		t.Fatalf("a probe from before the healthy run must not be the failure detail: %v", pe)
+	}
+}
+
+func TestProberSoakMetOnTheDeadlineTickPasses(t *testing.T) {
+	// Healthy from the first probe, soak 26s, deadline 27s (a config
+	// Validate accepts), ticks every 5s: the tick at t=30s is the
+	// first to satisfy the soak and also the first past the deadline,
+	// and the soak must win. Ticks are interval-granular, so judging
+	// the deadline first would refuse a config Validate accepts.
+	sock := unixServer(t, statusHandler(http.StatusOK))
+	clk := newFakeClock()
+	p := &httpProber{clock: clk}
+	hc := testHealthConfig()
+	hc.interval = 5 * time.Second
+	hc.soak = 26 * time.Second
+	hc.deadline = 27 * time.Second
+	if err := p.waitHealthy(context.Background(), testSocketRef(t, sock), alwaysAlive, hc); err != nil {
+		t.Fatalf("a soak completed on the deadline tick must pass, got %v", err)
+	}
+}
+
+func TestProberFailedProbePastTheDeadlineNamesTheHealthyRun(t *testing.T) {
+	// 1s ticks, 503 for the first two probes, healthy from t=2 with a
+	// 5s soak (due at t=7) and a 6s deadline: the tick at t=7 is past
+	// the deadline with the soak due, so it probes — and that probe
+	// answers 503. The verdict must name the 5s healthy run AND the
+	// probe that failed, not read as an instance that was never well.
+	var n atomic.Int32
+	sock := unixServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if k := n.Add(1); k <= 2 || k >= 8 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	clk := newFakeClock()
+	p := &httpProber{clock: clk}
+	hc := testHealthConfig()
+	hc.soak = 5 * time.Second
+	hc.deadline = 6 * time.Second
+	err := p.waitHealthy(context.Background(), testSocketRef(t, sock), alwaysAlive, hc)
+	if err == nil || !strings.Contains(err.Error(), "healthy for 5s of the 5s soak") || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("want the healthy run and the failed probe named, got %v", err)
+	}
+	var pe *probeError
+	if !errors.As(err, &pe) || pe.status != http.StatusServiceUnavailable {
+		t.Fatalf("the failed probe must be the failure detail, got %v", err)
+	}
+	if got := n.Load(); got != 8 {
+		t.Fatalf("probes issued = %d, want 8 (t=0..7)", got)
+	}
+}
+
+func TestProberDoesNotProbePastADeadlineItCannotMeet(t *testing.T) {
+	// Never healthy, deadline 5s, 1s ticks: probes at t=0..5, then the
+	// tick at t=6 is past the deadline with no soak to complete and
+	// must return the verdict without spending another probe.
+	var n atomic.Int32
+	sock := unixServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	clk := newFakeClock()
+	p := &httpProber{clock: clk}
+	hc := testHealthConfig()
+	hc.deadline = 5 * time.Second
+	err := p.waitHealthy(context.Background(), testSocketRef(t, sock), alwaysAlive, hc)
+	if err == nil || !strings.Contains(err.Error(), "deadline") {
+		t.Fatalf("want deadline error, got %v", err)
+	}
+	if got := n.Load(); got != 6 {
+		t.Fatalf("probes issued = %d, want 6 (t=0..5): none past a deadline the soak cannot meet", got)
+	}
+}
+
 func TestProberProcessDeath(t *testing.T) {
 	sock := unixServer(t, statusHandler(http.StatusOK))
 	clk := newFakeClock()
