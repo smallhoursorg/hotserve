@@ -391,6 +391,38 @@ func TestAnAppThatLeftThePlanIsSaidOnce(t *testing.T) {
 	}
 }
 
+// A run that ends early keeps, as not run, the apps it did not reach —
+// never one that has left the plan: that one is said once, by the run
+// that found it gone, interrupted or not.
+func TestAnAppThatLeftThePlanIsNotKeptByARunThatEndsEarly(t *testing.T) {
+	b := newBox(t)
+	must(t, os.MkdirAll(filepath.Join(b.root, "shop", "shared"), 0o755))
+	b.plan = fmt.Sprintf(`{"root":%q,"apps":{"blog":{"files":["uploads"]},"shop":{"files":["."]}}}`, b.root)
+	b.history = "[]"
+	_, err := Run(context.Background(), b.cfg, b)
+	must(t, err)
+	b.plan = fmt.Sprintf(`{"root":%q,"apps":{"shop":{"files":["."]}}}`, b.root)
+	ctx, cancel := context.WithCancel(context.Background())
+	b.before = func(s unit.Spec) {
+		if roleRe.FindStringSubmatch(s.Name)[1] == "upload" {
+			cancel()
+		}
+	}
+	st, _ := Run(ctx, b.cfg, b)
+	if st.Error == "" || !strings.Contains(st.Warning, "blog no longer declares a backup") {
+		t.Fatalf("fixture: error %q, warning %q", st.Error, st.Warning)
+	}
+	if st.Apps["blog"] != nil {
+		t.Errorf("kept: %+v", st.Apps["blog"])
+	}
+	b.before = nil
+	st, err = Run(context.Background(), b.cfg, b)
+	must(t, err)
+	if strings.Contains(st.Warning, "no longer") {
+		t.Errorf("said again: %q", st.Warning)
+	}
+}
+
 // With nothing left on record to look for there is nothing to list, and
 // an old listing failure is no longer about anything: kept, it would
 // turn status unhealthy for good over a repository nobody is asking.

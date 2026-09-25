@@ -83,6 +83,9 @@ type run struct {
 	status *record.Status
 	prev   *record.Status
 	mounts int // how many mount points this run has made, for their names
+	// left are the apps on the last record that this run's plan no
+	// longer has: said once, by this run, and never kept.
+	left map[string]bool
 }
 
 // preRestoreTag is on a snapshot a restore made of what it was about to
@@ -171,7 +174,7 @@ func (x *run) finish(runErr error) (*record.Status, error) {
 	if runErr != nil {
 		x.status.Error = record.Text(runErr.Error())
 		for name, old := range x.prev.Apps {
-			if _, reached := x.status.Apps[name]; !reached && old != nil {
+			if _, reached := x.status.Apps[name]; !reached && old != nil && !x.left[name] {
 				x.status.Apps[name] = &record.App{Class: record.NotRun, Detail: "the run ended before it reached this app", Looked: old.Looked, LastOK: old.LastOK, LastSnapshot: old.LastSnapshot,
 					RestoreProven: old.RestoreProven, RestoreDrill: old.RestoreDrill}
 			}
@@ -195,8 +198,13 @@ func (x *run) apps(ctx context.Context) error {
 	// run that finds it gone. Once: this record drops it, as the
 	// operator may have meant it to, and nothing after remembers.
 	var left []string
+	x.left = map[string]bool{}
 	for name, old := range x.prev.Apps {
-		if _, planned := p.Apps[name]; !planned && old != nil && old.LastSnapshot != nil {
+		if _, planned := p.Apps[name]; planned {
+			continue
+		}
+		x.left[name] = true
+		if old != nil && old.LastSnapshot != nil {
 			left = append(left, fmt.Sprintf("%s no longer declares a backup and is not backed up any more: its last snapshot is %.8s, of %s.", name, old.LastSnapshot.ID, old.LastSnapshot.Time.UTC().Format("2006-01-02 15:04 MST")))
 		}
 	}
