@@ -257,7 +257,7 @@ func (w *watchdogState) statusSnapshot(now time.Time, window time.Duration) *wat
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.state == "" {
-		return nil // watchdog never armed (e.g. before first Provision)
+		return nil // watchdog never armed (e.g. before first Start)
 	}
 	inWindow := 0
 	for _, t := range w.restarts {

@@ -71,10 +71,9 @@ func downloadArtifact(ctx context.Context, opts downloadOpts) (string, error) {
 	// From here on the request's URL is never used directly. The URL
 	// the fetch uses is a single concatenation whose provenance reads
 	// left to right — scheme (constant), host and port (THE ALLOWLIST
-	// ENTRY'S OWN CONFIG BYTES; the request's port bytes only under a
-	// declared :* wildcard), the pinned prefix (config bytes again),
-	// and only then the request's path suffix and vetted query. See
-	// pinnedURLString.
+	// ENTRY'S OWN CONFIG BYTES; the request's port is compared, never
+	// emitted), the pinned prefix (config bytes again), and only then
+	// the request's path suffix and vetted query. See pinnedURLString.
 	pinned, err := entry.pinnedURLString(u, escapedPath)
 	if err != nil {
 		return "", err

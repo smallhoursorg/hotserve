@@ -278,7 +278,7 @@ type managedApp struct {
 	activeSocket atomic.Pointer[socketRef]
 
 	// Watchdog plumbing. The goroutine is pool-scoped like everything
-	// else here: started once (first Provision), never touched by
+	// else here: started once (first Start), never touched by
 	// reloads, torn down in Destruct BEFORE the child is stopped so a
 	// mid-restart watchdog can never orphan a fresh process.
 	wdStarted bool // under specMu

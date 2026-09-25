@@ -11,7 +11,7 @@
 //     the per-app orchestration state
 //   - http.handlers.liveswap_webhook (handler.go): the deploy trigger
 //   - http.reverse_proxy.upstreams.liveswap (upstreams.go): routes
-//     reverse_proxy traffic to the active version's port
+//     reverse_proxy traffic to the active version's socket
 package liveswap
 
 import (
