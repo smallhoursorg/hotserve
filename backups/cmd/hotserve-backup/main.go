@@ -258,9 +258,11 @@ func validate(ctx context.Context, file string) error {
 	if err != nil {
 		return err
 	}
-	if st, err := os.Stat(abs); err != nil {
+	st, err := os.Stat(abs)
+	if err != nil {
 		return err
-	} else if !st.Mode().IsRegular() {
+	}
+	if !st.Mode().IsRegular() {
 		return fmt.Errorf("%s is not a file", abs)
 	}
 	ins, err := plan.Inspect(ctx, abs)
@@ -273,7 +275,13 @@ func validate(ctx context.Context, file string) error {
 	if unseen := ins.ImportsOutside(configDir, filepath.Dir(abs)); len(unseen) > 0 {
 		return plan.OutsideError(unseen, configDir)
 	}
-	if closed := ins.ImportsClosedToOthers(configDir); len(closed) > 0 {
+	closed := ins.ImportsClosedToOthers(configDir)
+	// The Caddyfile itself, where it is on the box: a run reads it as
+	// the same account.
+	if strings.HasPrefix(abs, filepath.Clean(configDir)+string(filepath.Separator)) && st.Mode().Perm()&0o004 == 0 {
+		closed = append([]string{abs}, closed...)
+	}
+	if len(closed) > 0 {
 		return fmt.Errorf("the Caddyfile imports what a backup run could not read: %s — a run reads the Caddyfile as the %s account, which owns nothing under %s: what is imported has to be readable, and its directories listable, by others (0644, 0755)", strings.Join(closed, ", "), "hotserve-backup", configDir)
 	}
 	names := ins.Plan.Names()

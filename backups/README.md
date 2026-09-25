@@ -466,12 +466,12 @@ what those would make of the file once it is live:
   wildcards match lead through links, and by where a link among the matched files leads. A line
   that begins with `import` inside a quoted token, a heredoc or a
   comment is not an import;
-- under `/etc/hotserve`, an imported file that others may not read, or
-  a directory that others may not list — `/etc/hotserve` itself, those
-  the import names, those its wildcards lead through, and where a link
-  among the matched files leads: a run reads the
-  Caddyfile as the `hotserve-backup` account, which owns nothing
-  there.
+- under `/etc/hotserve`, the Caddyfile itself or an imported file that
+  others may not read, or a directory that others may not list —
+  `/etc/hotserve` itself, those the import names, those its wildcards
+  lead through, and where a link among the matched files leads: a run
+  reads the Caddyfile as the `hotserve-backup` account, which owns
+  nothing there.
 
 It names the apps a run would back up, and each app that declares no
 backup — which is said, not refused; one named through a `{$NAME}` is
@@ -501,6 +501,11 @@ hourly run. It needs no sudoers line.
   `/etc/hotserve` that is a link leading out of it is outside too,
   where the import names it and where a wildcard matches it. A
   restore and a drill plan the same way, and are refused with the run.
+- A directory on an import's way under `/etc/hotserve` that the
+  `hotserve-backup` account may not enter — or, where a wildcard is
+  matched in it, list: a glob that cannot look matches nothing, which
+  the adapter takes for no error. `validate` says so before a push; this
+  is for a mode changed after one.
 - A Caddyfile that imports by a snippet's argument (`import {args[0]}`):
   the adapter fills the path in from wherever the snippet is used, and
   one of those uses can name files outside `/etc/hotserve`, which

@@ -322,6 +322,33 @@ func TestAnImportThroughAWildcardsLinkedDirectoryIsOutside(t *testing.T) {
 	}
 }
 
+// A directory that is simply not there leads nowhere — also below a
+// link that stays inside, where it is the link's target that is judged.
+func TestAMissingDirectoryBelowALinkInsideIsNotOutside(t *testing.T) {
+	fakeHotserve(t)
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "sites-enabled"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("sites-enabled", filepath.Join(dir, "sites")); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, "Caddyfile")
+	for _, line := range []string{"import sites/optional/*.caddy", "import sites/*/optional/*.caddy"} {
+		write(t, file, line+"\napp blog\n")
+		got, err := Inspect(context.Background(), file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out := got.ImportsOutside(dir, dir); len(out) > 0 {
+			t.Errorf("%s: outside: %q", line, out)
+		}
+		if _, err := Make(context.Background(), file); err != nil {
+			t.Errorf("%s: Make: %v", line, err)
+		}
+	}
+}
+
 // The config directory itself, and a directory a glob leads through.
 func TestClosedDirectoriesAboveAndWithinAGlob(t *testing.T) {
 	fakeHotserve(t)
@@ -512,8 +539,11 @@ func TestAClosedDirectoryOnAWildcardsWayIsSeenWithoutPrivilege(t *testing.T) {
 		write(t, filepath.Join(base, "sites", "open", "conf", "a.caddy"), "# nothing\n")
 		write(t, filepath.Join(base, "sites", "private", "conf", "b.caddy"), "app shop {\n}\n")
 		write(t, filepath.Join(base, "Caddyfile"), "import sites/*/conf/*.caddy\napp blog\n")
+		write(t, filepath.Join(base, "tight", "Caddyfile"), "import blog.caddy\napp blog\n")
+		write(t, filepath.Join(base, "tight", "blog.caddy"), "# nothing\n")
 		for p, mode := range map[string]os.FileMode{
 			"": 0o755, "Caddyfile": 0o644, "sites": 0o755,
+			"tight": 0o711, "tight/Caddyfile": 0o644, "tight/blog.caddy": 0o644,
 			"sites/open": 0o755, "sites/open/conf": 0o755, "sites/open/conf/a.caddy": 0o644,
 			"sites/private/conf": 0o755, "sites/private/conf/b.caddy": 0o644, "sites/private": 0o700,
 		} {
@@ -558,5 +588,15 @@ func TestAClosedDirectoryOnAWildcardsWayIsSeenWithoutPrivilege(t *testing.T) {
 	}
 	if closed := got.ImportsClosedToOthers(base); !slices.Equal(closed, []string{filepath.Join(base, "sites", "private")}) {
 		t.Fatalf("closed to others: %q, want sites/private alone", closed)
+	}
+	// The run's own plan step, as the run's account: validate's word was
+	// given before a mode changed, and a glob that cannot look is no
+	// error to the adapter.
+	if _, err := Make(context.Background(), filepath.Join(base, "Caddyfile")); err == nil || !strings.Contains(err.Error(), filepath.Join(base, "sites", "private")) {
+		t.Fatalf("Make took it: %v", err)
+	}
+	// A path walked by name needs only the walk.
+	if _, err := Make(context.Background(), filepath.Join(base, "tight", "Caddyfile")); err != nil {
+		t.Fatalf("a directory it may walk and not list: %v", err)
 	}
 }

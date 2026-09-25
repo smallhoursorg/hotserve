@@ -3,7 +3,9 @@ package plan
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -78,23 +80,20 @@ type Import struct {
 // the adapter is no error, so the apps declared out there would simply
 // not be in the plan.
 func (i *Inspection) ImportsOutside(configDir, ownDir string) (out []string) {
-	under := func(p, dir string) bool {
-		return strings.HasPrefix(p, strings.TrimSuffix(filepath.Clean(dir), string(filepath.Separator))+string(filepath.Separator))
-	}
 	resolved := func(p string) string {
 		if r, err := filepath.EvalSymlinks(p); err == nil {
 			return r
 		}
 		return filepath.Clean(p)
 	}
+	roots := []string{resolved(configDir), resolved(ownDir)}
 	for _, imp := range i.Imports {
-		inside := under(imp.Pattern, configDir) || (imp.Relative && under(imp.Pattern, ownDir))
-		roots := []string{resolved(configDir), resolved(ownDir)}
+		inside := within(imp.Pattern, configDir) || (imp.Relative && within(imp.Pattern, ownDir))
 		// A directory a wildcard matches may be a link out as well, and
 		// in a run's view dangle: every one on the way is followed.
 		linked := false
 		if inside {
-			wayDown(literalDir(imp.Pattern), filepath.Dir(imp.Pattern), func(d string) bool {
+			wayDown(literalDir(imp.Pattern), imp.Pattern, func(d, _ string) bool {
 				if leadsOut(d, roots...) {
 					linked = true
 					return false
@@ -103,12 +102,12 @@ func (i *Inspection) ImportsOutside(configDir, ownDir string) (out []string) {
 				return err == nil && st.IsDir()
 			})
 		}
-		if !inside || linked || leadsOut(literalDir(imp.Pattern), roots...) {
+		if !inside || linked {
 			out = append(out, imp.Pattern)
 			continue
 		}
 		for _, file := range imp.Files {
-			if r := resolved(file); !under(r, resolved(configDir)) && !under(r, resolved(ownDir)) {
+			if r := resolved(file); !within(r, roots[0]) && !within(r, roots[1]) {
 				out = append(out, file)
 			}
 		}
@@ -129,22 +128,37 @@ func literalDir(pattern string) string {
 // neither root — or cannot be followed because a link on the way
 // dangles, which is what a link out of a run's view looks like from
 // inside it, where the glob then matches nothing. A directory that is
-// simply not there leads nowhere.
+// simply not there leads nowhere: what is judged is the deepest of it
+// and the directories above it that is there, a link that dangles
+// included.
 func leadsOut(dir string, roots ...string) bool {
-	if r, err := filepath.EvalSymlinks(dir); err == nil {
-		for _, root := range roots {
-			if r == root || strings.HasPrefix(r, root+string(filepath.Separator)) {
-				return false
-			}
+	d := filepath.Clean(dir)
+	for {
+		if _, err := os.Lstat(d); err == nil {
+			break
 		}
-		return true
+		if d == filepath.Dir(d) {
+			return false
+		}
+		d = filepath.Dir(d)
 	}
-	for d := dir; d != filepath.Dir(d); d = filepath.Dir(d) {
-		if st, err := os.Lstat(d); err == nil && st.Mode()&os.ModeSymlink != 0 { //nolint:gosec // the way to an import of the Caddyfile's own, looked at and never opened
-			return true
+	r, err := filepath.EvalSymlinks(d)
+	if err != nil {
+		// A way it may not walk is the closed-directory check's to say.
+		return errors.Is(err, fs.ErrNotExist)
+	}
+	for _, root := range roots {
+		if within(r, root) {
+			return false
 		}
 	}
-	return false
+	return true
+}
+
+// within says whether p is dir or under it.
+func within(p, dir string) bool {
+	p, dir = filepath.Clean(p), filepath.Clean(dir)
+	return p == dir || strings.HasPrefix(p, strings.TrimSuffix(dir, string(filepath.Separator))+string(filepath.Separator))
 }
 
 // ImportsClosedToOthers are the imported files under configDir that
@@ -168,23 +182,20 @@ func (i *Inspection) ImportsClosedToOthers(configDir string) (closed []string) {
 			closed = append(closed, p)
 		}
 	}
-	inside := func(p string) bool { return strings.HasPrefix(p, configDir+string(filepath.Separator)) }
+	inside := func(p string) bool { return within(p, configDir) }
 	dirs := func(from string) {
 		for d := from; inside(d); d = filepath.Dir(d) {
 			look(d, 0o005)
 		}
 	}
 	for _, imp := range i.Imports {
+		// configDir, and every directory the pattern leads through, one
+		// segment at a time, each looked at before anything under it
+		// is: a directory whoever is asking may not enter either has
+		// nothing under it that a glob of the whole way down would
+		// match, and only the way itself says it is there.
 		if inside(imp.Pattern) {
-			look(configDir, 0o005)
-		}
-		// Every directory the pattern leads through, one segment at a
-		// time, each looked at before anything under it is: a directory
-		// whoever is asking may not enter either has nothing under it
-		// that a glob of the whole way down would match, and only the
-		// way itself says it is there.
-		if inside(imp.Pattern) {
-			wayDown(configDir, filepath.Dir(imp.Pattern), func(d string) bool {
+			wayDown(configDir, imp.Pattern, func(d, _ string) bool {
 				if st, err := os.Stat(d); err == nil && st.IsDir() { //nolint:gosec // as above
 					look(d, 0o005)
 					return true
@@ -208,20 +219,28 @@ func (i *Inspection) ImportsClosedToOthers(configDir string) (closed []string) {
 	return closed
 }
 
-// wayDown calls visit on every path the directory dir leads through
-// below from, a segment at a time, and goes on below a path only where
-// visit says to. A wildcard segment is matched against the entries of
-// each directory above it, read by whoever is asking — one it may not
-// list has been visited, and matches nothing — and never joined back
-// into a pattern: a directory may be called "a[1]".
-func wayDown(from, dir string, visit func(p string) bool) {
-	level := []string{from}
-	for _, seg := range strings.Split(strings.Trim(strings.TrimPrefix(dir, from), string(filepath.Separator)), string(filepath.Separator)) {
-		if seg == "" {
-			continue
+// wayDown walks the directories pattern leads through from from, a
+// segment at a time: visit is given each, from itself on, with the
+// segment about to be matched in it, and the walk goes on below a
+// directory only where visit says to. A wildcard segment is matched
+// against the entries of the directory, read by whoever is asking —
+// one it may not list matches nothing — and never joined back into a
+// pattern: a directory may be called "a[1]".
+func wayDown(from, pattern string, visit func(dir, seg string) bool) {
+	sep := string(filepath.Separator)
+	var segs []string
+	for _, seg := range strings.Split(strings.TrimPrefix(filepath.Clean(pattern), filepath.Clean(from)), sep) {
+		if seg != "" {
+			segs = append(segs, seg)
 		}
+	}
+	level := []string{from}
+	for k, seg := range segs {
 		var next []string
 		for _, d := range level {
+			if !visit(d, seg) || k == len(segs)-1 {
+				continue
+			}
 			if !strings.ContainsAny(seg, "*?[") {
 				next = append(next, filepath.Join(d, seg))
 				continue
@@ -233,13 +252,42 @@ func wayDown(from, dir string, visit func(p string) bool) {
 				}
 			}
 		}
-		level = level[:0]
-		for _, d := range next {
-			if visit(d) {
-				level = append(level, d)
-			}
-		}
+		level = next
 	}
+}
+
+// ImportsClosedHere are the directories under configDir, on an import's
+// way, that whoever is asking may not walk — or, where a wildcard is
+// matched in one, list. It is the run's own check, made as the run's
+// account: the adapter takes a glob that cannot look for nothing to
+// match, and the run would plan without what is declared past it. A
+// path it walks by name needs only the walk.
+func (i *Inspection) ImportsClosedHere(configDir string) (closed []string) {
+	seen := map[string]bool{}
+	for _, imp := range i.Imports {
+		if !within(imp.Pattern, configDir) {
+			continue
+		}
+		wayDown(configDir, imp.Pattern, func(d, seg string) bool {
+			var err error
+			if strings.ContainsAny(seg, "*?[") {
+				_, err = os.ReadDir(d)
+			} else {
+				_, err = os.Lstat(filepath.Join(d, seg)) //nolint:gosec // the way to an import of the Caddyfile's own, looked at and never opened
+			}
+			if errors.Is(err, fs.ErrPermission) {
+				if !seen[d] {
+					seen[d] = true
+					closed = append(closed, d)
+				}
+				return false
+			}
+			st, err := os.Stat(d) //nolint:gosec // a directory the Caddyfile's own import leads through, looked at and never opened
+			return err == nil && st.IsDir()
+		})
+	}
+	sort.Strings(closed)
+	return closed
 }
 
 // Inspect adapts the Caddyfile and returns its Plan, with the apps that
@@ -430,6 +478,9 @@ func Make(ctx context.Context, caddyfile string) (*Plan, error) {
 	if out := i.ImportsOutside(dir, dir); len(out) > 0 {
 		return nil, OutsideError(out, dir)
 	}
+	if closed := i.ImportsClosedHere(dir); len(closed) > 0 {
+		return nil, fmt.Errorf("the Caddyfile imports through %s, which this account may not enter or list: a wildcard there matches nothing, and what is declared past it would not be backed up — make it listable by others (0755)", strings.Join(closed, ", "))
+	}
 	return i.Plan, nil
 }
 
@@ -522,19 +573,13 @@ var (
 	substRe = regexp.MustCompile(`\{\$[^}:]+(?::([^}]*))?\}`)
 )
 
-// envNames returns every {$NAME} in the Caddyfile and the files it
-// imports, however deep, and those among them written somewhere with
+// scanCaddyfile returns every {$NAME} in the Caddyfile and the files
+// it imports, however deep, and those among them written somewhere with
 // no default. An import that names no file — a snippet, a glob matching
 // nothing — contributes nothing. inImport are the names used in an
-// import's argument, and imports every import line read.
-func envNames(caddyfile string) (all, noDefault, inImport []string, imports []Import, err error) {
-	all, noDefault, inImport, imports, _, _, err = scanCaddyfile(caddyfile)
-	return all, noDefault, inImport, imports, err
-}
-
-// scanCaddyfile is envNames, and byArgument: the import lines whose path
-// is a snippet's argument, as written; and byHeredoc: those whose path
-// is a heredoc, up to its marker.
+// import's argument, and imports every import line read; byArgument the
+// import lines whose path is a snippet's argument, as written, and
+// byHeredoc those whose path is a heredoc, up to its marker.
 func scanCaddyfile(caddyfile string) (all, noDefault, inImport []string, imports []Import, byArgument, byHeredoc []string, err error) {
 	seen := map[string]bool{}
 	names := map[string]bool{} // true: written somewhere with no default

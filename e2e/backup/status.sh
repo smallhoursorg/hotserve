@@ -207,6 +207,9 @@ hotserve validate --config /etc/hotserve/Caddyfile.new --adapter caddyfile >/dev
 if validate /etc/hotserve/Caddyfile.new; then fail "an import a run's account cannot read validated"; else says "could not read: /etc/hotserve/sites/a.caddy" && pass "an import closed to others is refused, by name" || fail "said: $(cat "$OUT")"; fi
 chmod 0644 /etc/hotserve/sites/a.caddy
 if validate /etc/hotserve/Caddyfile.new; then pass "and validates once others may read it"; else fail "with the import readable: $(cat "$OUT")"; fi
+# The Caddyfile itself is read by that account too.
+cp /root/Caddyfile.base /etc/hotserve/Caddyfile.new && chmod 0640 /etc/hotserve/Caddyfile.new
+if validate /etc/hotserve/Caddyfile.new; then fail "a Caddyfile a run's account cannot read validated"; else says "could not read: /etc/hotserve/Caddyfile.new" && pass "a Caddyfile closed to others is refused, by name" || fail "said: $(cat "$OUT")"; fi
 rm -rf /etc/hotserve/Caddyfile.new /etc/hotserve/sites
 
 if validate "$V/absent"; then fail "a file that is not there validated"; else says "$V/absent" && pass "a file that is not there is refused, by name" || fail "said: $(cat "$OUT")"; fi

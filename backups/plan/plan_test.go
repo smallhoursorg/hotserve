@@ -90,7 +90,7 @@ func TestEnvNamesFollowsImports(t *testing.T) {
 	write(t, dir+"/sites/a.caddy", "{$DOMAIN:example.com} {\n\timport ../Caddyfile\n\timport deeper/*\n}\n")
 	write(t, dir+"/sites/deeper/b", "root * {$WEBROOT}\n")
 	write(t, dir+"/abs.caddy", "respond {$GREETING}\n")
-	got, bare, imported, _, err := envNames(dir + "/Caddyfile")
+	got, bare, imported, _, _, _, err := scanCaddyfile(dir + "/Caddyfile")
 	if err != nil {
 		t.Fatal(err)
 	}
