@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -377,9 +378,11 @@ func TestDownloadRefusesHTTPSToHTTPDowngrade(t *testing.T) {
 		_, _ = w.Write([]byte("plaintext"))
 	}))
 	defer httpSrv.Close()
-	// The https entry point that tries the downgrade.
+	// The https entry point that tries the downgrade, with a presigned
+	// query on the refused hop: the refusal quotes the raw Location
+	// header, and must not carry it.
 	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, httpSrv.URL, http.StatusFound)
+		http.Redirect(w, r, httpSrv.URL+"/asset?X-Amz-Signature=SECRETTHREE", http.StatusFound)
 	}))
 	defer tlsSrv.Close()
 
@@ -402,6 +405,133 @@ func TestDownloadRefusesHTTPSToHTTPDowngrade(t *testing.T) {
 	}
 	if reached {
 		t.Fatal("the cleartext destination was contacted despite the refusal")
+	}
+	if strings.Contains(err.Error(), "SECRETTHREE") {
+		t.Fatalf("refusal leaked the redirect target's query: %v", err)
+	}
+}
+
+// unreachableHost is a host the test client refuses to dial: a
+// transport failure on a chosen hop, deterministic and without a
+// name lookup (the transport hands DialContext the address as-is).
+const unreachableHost = "unreachable.invalid"
+
+// refusingDownloadClient is the real download client with one host
+// unreachable at the dial, every other address dialed as usual.
+func refusingDownloadClient(t *testing.T) *http.Client {
+	t.Helper()
+	client := newDownloadClient(true)
+	dialer := &net.Dialer{}
+	tr := client.Transport.(*http.Transport)
+	// No proxy: with HTTP_PROXY in the environment the dial would be
+	// to the proxy, not the host the test names.
+	tr.Proxy = nil
+	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if host, _, err := net.SplitHostPort(addr); err == nil && host == unreachableHost {
+			return nil, errors.New("dial refused by the test")
+		}
+		return dialer.DialContext(ctx, network, addr)
+	}
+	return client
+}
+
+// A failure on a later hop is reported by the client as that hop's
+// URL — the redirect target, query included — and a redirect target
+// is exactly where a presigned URL (S3, GitLab) lives. The wrapped
+// error must name the hop without its query, and stay a *url.Error
+// for callers that look for one.
+func TestDownloadFailureOnRedirectTargetKeepsItsQueryOut(t *testing.T) {
+	target := "http://" + unreachableHost + "/asset?X-Amz-Signature=SECRETTWO"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target, http.StatusFound)
+	}))
+	defer srv.Close()
+
+	opts := testDownloadOpts(t, srv.URL+"/a.tgz")
+	opts.client = refusingDownloadClient(t)
+	_, err := downloadArtifact(context.Background(), opts)
+	if err == nil {
+		t.Fatal("a redirect to an unreachable host must fail")
+	}
+	if strings.Contains(err.Error(), "SECRETTWO") || strings.Contains(err.Error(), "?") {
+		t.Fatalf("hop failure leaked the redirect target's query: %v", err)
+	}
+	var ue *url.Error
+	if !errors.As(err, &ue) {
+		t.Fatalf("the client's *url.Error must survive redaction, got %T: %v", err, err)
+	}
+	if !strings.Contains(ue.URL, "/asset") {
+		t.Fatalf("redaction must keep the failing hop's host and path, got %q", ue.URL)
+	}
+}
+
+// The first hop's own URL may carry a vouched query too (a presigned
+// URL the operator declared by name); a connect failure there quotes
+// it the same way.
+func TestDownloadFailureOnFirstHopKeepsItsQueryOut(t *testing.T) {
+	opts := testDownloadOpts(t, "http://"+unreachableHost+"/a.tgz?token=SECRETONE")
+	opts.allowlist = mustAllowlist(t, unreachableHost+"?token")
+	opts.client = refusingDownloadClient(t)
+	_, err := downloadArtifact(context.Background(), opts)
+	if err == nil {
+		t.Fatal("an unreachable host must fail")
+	}
+	if strings.Contains(err.Error(), "SECRETONE") || strings.Contains(err.Error(), "?") {
+		t.Fatalf("first-hop failure leaked the query: %v", err)
+	}
+}
+
+// A Location header the client cannot parse is quoted inside the
+// cause, not in the URL, and the parse error inside that quotes it
+// again. Neither copy may survive.
+func TestDownloadUnparseableLocationKeepsItsQueryOut(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "/bad%zz?token=SECRETFIVE")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer srv.Close()
+
+	opts := testDownloadOpts(t, srv.URL+"/a.tgz")
+	opts.client = newDownloadClient(true)
+	_, err := downloadArtifact(context.Background(), opts)
+	if err == nil {
+		t.Fatal("an unparseable Location must fail")
+	}
+	if strings.Contains(err.Error(), "SECRETFIVE") || strings.Contains(err.Error(), "?") || strings.Contains(err.Error(), "%zz") {
+		t.Fatalf("unparseable Location leaked the header: %v", err)
+	}
+	if !strings.Contains(err.Error(), "Location") {
+		t.Fatalf("the cause should still say what failed: %v", err)
+	}
+}
+
+// A refused redirect quotes the raw Location header, which may be
+// relative; the redirect cap is the refusal that needs no second host.
+func TestDownloadRedirectCapKeepsTheRelativeLocationQueryOut(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/loop?sig=SECRETFOUR", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	opts := testDownloadOpts(t, srv.URL+"/a.tgz")
+	opts.client = newDownloadClient(true)
+	_, err := downloadArtifact(context.Background(), opts)
+	if err == nil || !strings.Contains(err.Error(), "10 redirects") {
+		t.Fatalf("want the redirect cap, got %v", err)
+	}
+	if strings.Contains(err.Error(), "SECRETFOUR") || strings.Contains(err.Error(), "?") {
+		t.Fatalf("redirect cap leaked the Location query: %v", err)
+	}
+	if !strings.Contains(err.Error(), "/loop") {
+		t.Fatalf("the refused Location's path should still be named: %v", err)
+	}
+}
+
+// Anything that is not the client's own error passes through untouched.
+func TestRedactRequestErrorLeavesOtherErrorsAlone(t *testing.T) {
+	err := errors.New("plain")
+	if got := redactRequestError(err); got.Error() != "plain" || !errors.Is(got, err) {
+		t.Fatalf("got %v", got)
 	}
 }
 

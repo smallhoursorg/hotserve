@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -96,7 +97,7 @@ func downloadArtifact(ctx context.Context, opts downloadOpts) (string, error) {
 	if err != nil {
 		// req.URL, not u: report the pinned URL the request actually
 		// went to (host casing comes from config, not the payload).
-		return "", fmt.Errorf("download %s: %w", redactURL(req.URL), err)
+		return "", fmt.Errorf("download %s: %w", redactURL(req.URL), redactRequestError(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
@@ -195,6 +196,49 @@ func redactURL(u *url.URL) string {
 	// having a query or fragment it never had.
 	return u.Scheme + "://" + u.Host + u.EscapedPath()
 }
+
+// redactRequestError strips the query from the URL an http.Client
+// failure names. The client wraps every failure in a *url.Error whose
+// text quotes the URL of the hop that failed — the redirect target,
+// not the pinned first hop — and a refused redirect quotes the raw
+// Location header. Either is where a presigned query (S3, GitLab)
+// lives, so without this the "download ... :" prefix would be
+// redacted and the wrapped text would print the secret anyway. The
+// error is this request's own, so it is rewritten in place and the
+// chain (and the caller's errors.As) is kept.
+//
+// A Location header the client cannot parse is the one failure whose
+// text quotes the header inside the cause rather than in URL (twice:
+// the client's message and the parse error it wraps). That cause
+// carries nothing a caller looks for, so it is replaced by the same
+// message without the header.
+func redactRequestError(err error) error {
+	var ue *url.Error
+	if !errors.As(err, &ue) {
+		return err
+	}
+	switch u, perr := url.Parse(ue.URL); {
+	case perr != nil:
+		// Unparseable, so there is nothing to keep: the outer message
+		// already names the pinned URL.
+		ue.URL = ""
+	case u.IsAbs():
+		ue.URL = redactURL(u)
+	default:
+		// A relative Location header, quoted raw by a refused redirect.
+		ue.URL = u.EscapedPath()
+	}
+	if ue.Err != nil && strings.HasPrefix(ue.Err.Error(), unparseableLocation) {
+		ue.Err = errors.New(unparseableLocation)
+	}
+	return err
+}
+
+// unparseableLocation is how net/http's client begins the error for a
+// redirect whose Location header does not parse; the rest of that
+// message is the header itself. The wording is the stdlib's, so the
+// tests assert on what must not appear rather than on this prefix.
+const unparseableLocation = "failed to parse Location header"
 
 // fetcher turns a webhook request into an extracted release directory,
 // reporting what the archive cost against the app's caps (zero for a
