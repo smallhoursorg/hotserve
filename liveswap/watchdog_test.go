@@ -320,9 +320,17 @@ func TestWatchdogRestartsAfterConsecutiveHealthFailures(t *testing.T) {
 	rig.prober.setProbeErr(errors.New("health check returned 500"))
 	rig.startWatchdogT(t)
 
+	// Wait for the restart to be RECORDED, not merely for the runner's
+	// second Start: the cause is written after the launch returns, so
+	// a predicate on the start count alone can observe the launch and
+	// read the status a moment before the record lands.
 	advanceUntil(t, rig, rig.spec.healthInterval, "restart after threshold", func() bool {
-		return rig.runner.startCount() == 2
+		s := rig.ma.status()
+		return s.Watchdog != nil && s.Watchdog.LastRestartCause != ""
 	})
+	if got := rig.runner.startCount(); got != 2 {
+		t.Fatalf("expected exactly one relaunch (2 starts), got %d", got)
+	}
 	if calls := rig.prober.calls(); calls < rig.spec.wdFailures {
 		t.Fatalf("restarted after only %d probes, threshold is %d", calls, rig.spec.wdFailures)
 	}
