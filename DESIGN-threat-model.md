@@ -291,24 +291,58 @@ Two-pass (validate-all, then write — no partial residue,
 `filepath.IsLocal`, which both passes reach through `safeRelPath`.
 Symlink/hardlink targets must resolve inside the archive root
 (`linkTargetStaysInside`). Modes: `Perm()|0600` strips
-setuid/setgid/sticky structurally (`writeEntry`); dirs forced `0750`.
+setuid/setgid/sticky structurally (`rootWriter.write`); dirs forced `0750`.
 Devices/FIFOs rejected. Decompression bomb capped at
 `max_artifact_size × 10` over the *decompressed* stream
 (`decompressionRatioCap`, enforced by the `io.LimitedReader` in
 `walkArchive`).
 
+Containment is enforced twice, because the string checks above are
+not the filesystem's. Once an earlier entry's symlink exists on disk,
+a later name or link target that passes *through* it lands wherever
+the link points, and a chain of links that are each inside as strings
+(`l1 -> .`, `l1/x/y -> ../..`, `l1/x/y/z/w -> ../..`, then a regular
+file or hardlink under the last) climbs out one directory per hop —
+into the app dir, a sibling app, the supervisor's own state, or the
+user manager's unit directory, as the `hotserve` uid. So the kernel,
+not a model of it, judges what resolves where. The write pass goes
+through an `os.Root` (`writeArchive`): every mkdir, open, symlink and
+link is resolved by the Root's own walk, which refuses any hop that
+leaves the staging dir — the chain above fails at its third hop, named
+by entry, with nothing written outside. Then
+`checkLinksResolveInside` walks the extracted tree and resolves every
+symlink through the same Root (`Root.Stat`), refusing any whose
+resolution leaves it: a `..` that climbs out through a link to `.`
+(`a/..` is `.` as a string), a hard link to a symlink (that symlink's
+relative target re-based to a new directory, which the walk sees as a
+symlink), a target that leaves and comes back in by the staging dir's
+own name (it would dangle once the tree is renamed into place), in
+whichever order the archive listed them. Anything else the Root cannot
+follow is refused too, a loop included: the Root gives up after 8
+symlink hops where the kernel allows 40, so a link it calls
+unresolvable may still resolve — outside — for a reader that is not
+the Root (the price is that a chain of more than 8 inside links is
+refused too, worded as a loop). A dangling target (a component that
+does not exist, or a file where a directory was needed) is the one
+thing accepted without resolving: the walk reports an escape ahead of
+a gap, so everything up to the gap resolved inside, and what the gap
+becomes later is the running app's business — its release is
+writable, and an app that wants an outward link plants one, which is
+why the supervisor trusts no link under an app dir (the one it
+resolves, the app command, is refused unless it lands inside the
+sandbox view). A
+refusal leaves the partial tree in the staging dir, which the caller
+removes as it does for any mid-write failure (`releaseFetcher.fetch`,
+liveswap/download.go).
+Links that resolve inside — a venv's `python -> python3 ->
+python3.12`, a `.bin` link into a sibling directory — extract as
+before. `TestWriteArchiveRootRefusesEscape` and
+`TestWriteArchiveRootRefusesHardLinkFromOutside` exercise the write
+pass with validation bypassed; `TestExtractRefusesLinksResolvingOutside`
+the resolution check.
+
 Residual items for the model:
 
-- **Link TOCTOU shape (unproven, worth review):** validation is
-  *symbolic* (string resolution); writing (`writeEntry`,
-  liveswap/extract.go) does `os.Symlink` then later
-  `os.Link`/`os.OpenFile` under `destDir` with no `openat`-style
-  re-check after intermediate symlinks exist on disk. Each entry name
-  passes `IsLocal`, but nothing resolves the on-disk path *through*
-  an earlier-written symlink. Blast radius is bounded (targets must stay
-  symbolically under root; extraction is into a hidden staging dir
-  `os.Rename`d on success, in `releaseFetcher.fetch`,
-  liveswap/download.go). Not asserted as exploitable.
 - **Entry and name caps, independent of the byte budget.** The byte
   cap bounds the tar *stream*, not what extraction consumes: every
   entry costs an inode and most a 4 KB block, so 1 GB of 1-byte files
@@ -423,8 +457,9 @@ scope for the runtime model, in scope for release signing (roadmap).
 For **T2**: deploy-arbitrary-code (a push is contained by nothing but
 the claim scope; a pull additionally by the allowlist); deliberate
 rollback. For **T3**: archive-borne CPU (bounded by the byte and
-entry caps; inode exhaustion is closed by the entry cap); the
-link-TOCTOU shape (unproven); first-hop→any-https SSRF. For **T4**:
+entry caps; inode exhaustion is closed by the entry cap; a link chain
+out of the staging dir is refused by the `os.Root` write pass and the
+post-write symlink resolution check); first-hop→any-https SSRF. For **T4**:
 log-amplification, bounded by the auth-failure throttle (online
 *token forgery* is infeasible).
 For **T5**: total, by definition — the containment question is
