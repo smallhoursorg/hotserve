@@ -124,6 +124,9 @@ func Report(in Input) (lines []string, healthy bool) {
 	for _, name := range names {
 		app, n := st.Apps[name], record.Text(name)
 		if app == nil {
+			// Never written by a run, but a record that reads: no result
+			// is nothing to be healthy about.
+			bad("%s: no result on record, until the next run writes the record again", n)
 			continue
 		}
 		at := record.Text(app.Looked)

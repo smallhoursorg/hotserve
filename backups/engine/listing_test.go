@@ -97,6 +97,28 @@ func TestASnapshotTheListingLacksKeepsWhenItWasLastSeen(t *testing.T) {
 	}
 }
 
+// A snapshot tagged for more than one app — hotserve writes one app tag,
+// but a tag can be added off the box — is held for each of them: the
+// last tag alone would call blog's snapshot gone while app:blog is on it.
+func TestASnapshotTaggedForTwoAppsIsHeldForBoth(t *testing.T) {
+	b := newBox(t)
+	first, err := Run(context.Background(), b.cfg, b)
+	must(t, err)
+	seen := seenAt(t, first.Apps["blog"].LastOK)
+
+	b.summary = `{"message_type":"summary"}` // this run makes no snapshot: last_ok stays the first run's
+	b.listing = `[{"id":"` + snapA + `","time":"2026-09-02T00:00:00Z","tags":["app:blog","app:shop"]}]`
+	st, err := Run(context.Background(), b.cfg, b)
+	must(t, err)
+	blog := st.Apps["blog"]
+	if blog.LastOK == nil || blog.LastOK.ID != snapA {
+		t.Fatalf("fixture: %+v", blog)
+	}
+	if blog.LastOK.Seen == nil || !blog.LastOK.Seen.After(seen) {
+		t.Errorf("blog's snapshot, still tagged app:blog, was not seen by the listing: seen %v, listed %v", blog.LastOK.Seen, st.Listed)
+	}
+}
+
 // What this run itself saw written is not called gone by this run's own
 // listing: a store that lists a new object late would otherwise turn
 // every good backup into a missing one for an hour.

@@ -330,7 +330,9 @@ func (x *run) list(ctx context.Context) {
 	x.status.Unlisted = nil
 	held := map[string]bool{} // app, a slash — no app's name holds one — and the id
 	for _, s := range snaps {
-		held[s.App+"/"+s.ID] = true
+		for _, app := range s.Apps {
+			held[app+"/"+s.ID] = true
+		}
 	}
 	now := time.Now().UTC()
 	for name, app := range x.status.Apps {
@@ -1112,8 +1114,10 @@ func (x *run) lastInRepository(ctx context.Context, app string) (last *record.Sn
 // A listed snapshot is one the repository holds of an app.
 type listed struct {
 	record.Snapshot
-	// App is whose it is, by its tag; empty for a snapshot with none.
-	App string
+	// Apps are whose it is, by its tags: one, as hotserve writes it —
+	// though a tag can be added off the box — and none for a snapshot
+	// with none.
+	Apps []string
 	// PreRestore: made by a restore, of what it then restored over.
 	PreRestore bool
 }
@@ -1187,7 +1191,7 @@ func (x *run) snapshots(ctx context.Context, role, app string) (snaps []listed, 
 		for _, tag := range s.Tags {
 			one.PreRestore = one.PreRestore || tag == preRestoreTag
 			if name, ok := strings.CutPrefix(tag, "app:"); ok {
-				one.App = name
+				one.Apps = append(one.Apps, name)
 			}
 		}
 		snaps = append(snaps, one)

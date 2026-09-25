@@ -116,6 +116,12 @@ func TestWhatStatusSays(t *testing.T) {
 			says:  []string{"blog: restore not proven", "app.db: the copy is damaged", "hotserve-backup drill"},
 			never: []string{"blog: restore last proven"},
 		},
+		// An app on record with no result — a record the engine never
+		// writes, but one that reads — is nothing to be healthy about.
+		"an app on record with no result": {
+			st:   of(map[string]*record.App{"blog": nil, "shop": sound()}),
+			says: []string{"blog: no result on record"},
+		},
 		// A drill that could not ask the repository has no snapshot to name.
 		"a drill that could not ask": {
 			st: with(func(a *record.App) {
