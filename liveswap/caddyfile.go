@@ -2,6 +2,7 @@ package liveswap
 
 import (
 	"math"
+	"slices"
 	"strconv"
 
 	"github.com/caddyserver/caddy/v2"
@@ -76,7 +77,11 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	if d.NextArg() {
 		return d.ArgErr() // no positional args; everything is in the block
 	}
+	seen := map[string]bool{}
 	for d.NextBlock(0) {
+		if err := refuseRepeat(d, seen, "deploy_trust", "artifact_allowlist", "app"); err != nil {
+			return err
+		}
 		switch d.Val() {
 		case "root":
 			if !d.NextArg() {
@@ -128,7 +133,11 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 }
 
 func (cfg *AppConfig) unmarshalBlock(d *caddyfile.Dispenser) error {
+	seen := map[string]bool{}
 	for d.NextBlock(1) {
+		if err := refuseRepeat(d, seen, "env", "deploy_trust", "artifact_allowlist"); err != nil {
+			return err
+		}
 		switch d.Val() {
 		case "command":
 			args := d.RemainingArgs()
@@ -269,6 +278,25 @@ func (cfg *AppConfig) unmarshalBlock(d *caddyfile.Dispenser) error {
 	return nil
 }
 
+// refuseRepeat records the subdirective the dispenser is on and
+// refuses it if the block already had one — every subdirective sets a
+// single value, so a repeat would silently override the earlier line
+// (a stale env_file left under a new one keeps loading; the second of
+// two command lines wins with no diagnostic). additive names the
+// subdirectives that add an entry per line instead and may repeat;
+// env refuses a repeated KEY itself.
+func refuseRepeat(d *caddyfile.Dispenser, seen map[string]bool, additive ...string) error {
+	key := d.Val()
+	if slices.Contains(additive, key) {
+		return nil
+	}
+	if seen[key] {
+		return d.Errf("duplicate %s: the earlier line would be silently overridden", key)
+	}
+	seen[key] = true
+	return nil
+}
+
 func parseCountArg(d *caddyfile.Dispenser, out *int) error {
 	name := d.Val()
 	if !d.NextArg() {
@@ -316,7 +344,11 @@ func parseDeployTrust(d *caddyfile.Dispenser) (TrustConfig, error) {
 	if d.NextArg() {
 		return tc, d.ArgErr() // only the preset name, then a block
 	}
+	seen := map[string]bool{}
 	for nesting := d.Nesting(); d.NextBlock(nesting); {
+		if err := refuseRepeat(d, seen, "claim"); err != nil {
+			return tc, err
+		}
 		switch d.Val() {
 		case "issuer":
 			if !d.NextArg() {
