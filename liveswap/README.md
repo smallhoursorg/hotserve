@@ -330,6 +330,19 @@ config, so the result depends on the environment of whoever adapts
 it. Do not write `root` or a backup path with one in a config that
 declares a backup.
 
+Where a backup is declared matters as much as what. A backup run
+(`hotserve-backup`) reads the Caddyfile inside a view that holds the
+Caddyfile's own directory and nothing else, as an account that owns
+nothing there: an app whose `app` line, `backup` block or `root` it
+cannot read there is not in its plan, and is not backed up. So once
+any app declares a backup, `hotserve validate` and `hotserve reload`
+refuse a Caddyfile in which one of those was read from a file outside
+its directory — an import, or the file a snippet is defined in — or
+from a file others may not read, or under a directory others may not
+enter. A refused reload leaves the running config serving. `hotserve
+run` is never refused for it — a start that refused would take every
+site down — and logs the same error instead.
+
 ## Watchdog
 
 Deploys and boot recovery start instances; the watchdog keeps them

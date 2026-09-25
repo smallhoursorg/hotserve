@@ -81,9 +81,12 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	if d.NextArg() {
 		return d.ArgErr() // no positional args; everything is in the block
 	}
+	var found []BackupSource
+	rootFile := ""
 	for d.NextBlock(0) {
 		switch d.Val() {
 		case "root":
+			rootFile = d.File()
 			if !d.NextArg() {
 				return d.ArgErr()
 			}
@@ -109,7 +112,7 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			if !d.NextArg() {
 				return d.ArgErr()
 			}
-			name := d.Val()
+			name, appFile := d.Val(), d.File()
 			if a.Apps == nil {
 				a.Apps = make(map[string]*AppConfig)
 			}
@@ -117,10 +120,16 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				return d.Errf("duplicate app %q", name)
 			}
 			cfg := new(AppConfig)
-			if err := cfg.unmarshalBlock(d); err != nil {
+			var backupFiles []string
+			if err := cfg.unmarshalBlock(d, &backupFiles); err != nil {
 				return err
 			}
 			a.Apps[name] = cfg
+			if cfg.Backup != nil {
+				for _, f := range append([]string{appFile}, backupFiles...) {
+					found = append(found, BackupSource{App: name, File: f})
+				}
+			}
 			continue // the app block consumed its own trailing tokens
 		default:
 			return d.Errf("unknown subdirective %q", d.Val())
@@ -129,10 +138,16 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			return d.ArgErr() // no simple subdirective takes more args
 		}
 	}
+	if len(found) > 0 && rootFile != "" {
+		found = append([]BackupSource{{File: rootFile}}, found...)
+	}
+	setBackupSources(found)
 	return nil
 }
 
-func (cfg *AppConfig) unmarshalBlock(d *caddyfile.Dispenser) error {
+// unmarshalBlock parses an app's block; backupFiles gets the file each
+// token of its backup block was read from.
+func (cfg *AppConfig) unmarshalBlock(d *caddyfile.Dispenser, backupFiles *[]string) error {
 	for d.NextBlock(1) {
 		switch d.Val() {
 		case "command":
@@ -268,7 +283,8 @@ func (cfg *AppConfig) unmarshalBlock(d *caddyfile.Dispenser) error {
 			if cfg.Backup != nil {
 				return d.Err("duplicate backup block")
 			}
-			b, err := parseBackup(d)
+			*backupFiles = append(*backupFiles, d.File())
+			b, err := parseBackup(d, backupFiles)
 			if err != nil {
 				return err
 			}
@@ -319,13 +335,14 @@ func parseDurationArg(d *caddyfile.Dispenser, out *caddy.Duration) error {
 //	    sqlite app.db
 //	    files  uploads
 //	}
-func parseBackup(d *caddyfile.Dispenser) (*backupdecl.Config, error) {
+func parseBackup(d *caddyfile.Dispenser, files *[]string) (*backupdecl.Config, error) {
 	if d.NextArg() {
 		return nil, d.ArgErr() // no positional args; everything is in the block
 	}
 	b := new(backupdecl.Config)
 	for nesting := d.Nesting(); d.NextBlock(nesting); {
 		kind := d.Val()
+		*files = append(*files, d.File())
 		var into *[]string
 		switch kind {
 		case "sqlite":
