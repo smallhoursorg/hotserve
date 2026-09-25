@@ -110,3 +110,30 @@ func TestOpenByHandleAtIsDeniedExactlyWhereTheCapabilityIsHeld(t *testing.T) {
 		t.Error("a unit with only CAP_CHOWN carries a system-call filter")
 	}
 }
+
+// A unit's stderr goes to the journal unless the Spec names a file for
+// it — never to both names at once, and never to a pipe.
+func TestStderrGoesToTheJournalOrToAFile(t *testing.T) {
+	find := func(s Spec) map[string]string {
+		props, err := s.properties()
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]string{}
+		for _, p := range props {
+			if _, twice := got[p.Name]; twice {
+				t.Errorf("%s is sent twice", p.Name)
+			}
+			got[p.Name] = p.Value.String()
+		}
+		return got
+	}
+	if got := find(validSpec()); got["StandardError"] != `"journal"` || got["StandardErrorFileToTruncate"] != "" {
+		t.Errorf("with no file: %s, %s", got["StandardError"], got["StandardErrorFileToTruncate"])
+	}
+	s := validSpec()
+	s.StderrFile = "/run/x/err"
+	if got := find(s); got["StandardErrorFileToTruncate"] != `"/run/x/err"` || got["StandardError"] != "" {
+		t.Errorf("with a file: %s, %s", got["StandardError"], got["StandardErrorFileToTruncate"])
+	}
+}

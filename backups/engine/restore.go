@@ -1026,7 +1026,18 @@ func (x *run) drillApp(ctx context.Context, app string, snap record.Snapshot, si
 		rec.RestoreDrill = &record.Drill{Snapshot: snap, Time: time.Now().UTC(), Detail: record.Text(err.Error())}
 		return errors.As(err, new(repositoryWideError))
 	}
-	rec.RestoreProven, rec.RestoreDrill = &record.Drill{Snapshot: snap, Time: time.Now().UTC()}, nil
+	// Fetched whole, a moment ago: the repository holds it.
+	proven := time.Now().UTC()
+	snap.Seen = &proven
+	// Under every name the record has for it: a last good backup that a
+	// listing once missed is not still "gone" beside the proof that it
+	// is there.
+	for _, named := range []*record.Snapshot{rec.Snapshot, rec.LastOK, rec.LastSnapshot} {
+		if named != nil && named.ID == snap.ID {
+			named.Seen = &proven
+		}
+	}
+	rec.RestoreProven, rec.RestoreDrill = &record.Drill{Snapshot: snap, Time: proven}, nil
 	return false
 }
 

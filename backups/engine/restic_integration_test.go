@@ -136,3 +136,46 @@ func TestIntegrationResticRestoreSaysWhatItRestored(t *testing.T) {
 		t.Fatalf("a restore of nothing exited %d and said %q: a zero count is no longer left out, or nothing is no longer exit 0", exit, out)
 	}
 }
+
+// What the engine's listing leans on: restic snapshots leaves out a
+// snapshot it cannot load, exits 0 all the same, and says so on stderr
+// alone. With a warm cache it does not even notice, which is why the
+// cache goes first here.
+func TestIntegrationResticSnapshotsLeavesOutWhatItCannotLoadAndExitsZero(t *testing.T) {
+	const restic = "/usr/bin/restic"
+	base := t.TempDir()
+	must(t, os.WriteFile(filepath.Join(base, "f"), []byte("1"), 0o644))
+	env := append(os.Environ(), "RESTIC_PASSWORD=pw", "RESTIC_REPOSITORY="+filepath.Join(base, "repo"), "RESTIC_CACHE_DIR="+filepath.Join(base, "cache"))
+	run := func(args ...string) (stdout, stderr string) {
+		t.Helper()
+		cmd := exec.Command(restic, args...)
+		var e strings.Builder
+		cmd.Env, cmd.Dir, cmd.Stderr = env, base, &e
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("restic %v: %v: %s", args, err, e.String())
+		}
+		return string(out), e.String()
+	}
+	run("init", "-q")
+	run("backup", "-q", "--host", "hotserve", "--tag", "app:blog", "f")
+	must(t, os.WriteFile(filepath.Join(base, "f"), []byte("2"), 0o644))
+	run("backup", "-q", "--host", "hotserve", "--tag", "app:blog", "f")
+	if out, said := run("snapshots", "--json", "--no-lock"); strings.Count(out, `"short_id"`) != 2 || said != "" {
+		t.Fatalf("fixture: %q, stderr %q", out, said)
+	}
+	files, err := filepath.Glob(filepath.Join(base, "repo", "snapshots", "*"))
+	if err != nil || len(files) != 2 {
+		t.Fatalf("fixture: snapshot files %v, %v", files, err)
+	}
+	must(t, os.Chmod(files[0], 0o600))
+	must(t, os.WriteFile(files[0], []byte("not a snapshot, only forty bytes of noise"), 0o600))
+	must(t, os.RemoveAll(filepath.Join(base, "cache")))
+	out, said := run("snapshots", "--json", "--no-lock") // run fails the test on a non-zero exit
+	if strings.Count(out, `"short_id"`) != 1 {
+		t.Errorf("listed: %q", out)
+	}
+	if !strings.Contains(said, "Ignoring") || !strings.Contains(said, filepath.Base(files[0])) {
+		t.Errorf("stderr: %q", said)
+	}
+}

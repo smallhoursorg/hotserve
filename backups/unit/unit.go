@@ -87,8 +87,12 @@ type Spec struct {
 
 	// StdoutFile receives the command's stdout, truncated first. The
 	// manager opens it, so it may be somewhere the command cannot
-	// reach. Stderr goes to the journal.
+	// reach. Stderr goes to the journal, unless StderrFile names a file.
 	StdoutFile string
+	// StderrFile receives the command's stderr instead, truncated
+	// first, for a command whose answer on stdout is only to be
+	// believed when it had nothing to say beside it.
+	StderrFile string
 	// CacheDirectory is a name under /var/cache, made by the manager
 	// and owned by User.
 	CacheDirectory   string
@@ -437,7 +441,11 @@ func (s Spec) properties() ([]sddbus.Property, error) {
 		{Name: "RestrictSUIDSGID", Value: v(true)},
 		{Name: "LockPersonality", Value: v(true)},
 		{Name: "UMask", Value: v(uint32(0o077))},
-		{Name: "StandardError", Value: v("journal")},
+	}
+	if s.StderrFile != "" {
+		props = append(props, sddbus.Property{Name: "StandardErrorFileToTruncate", Value: v(s.StderrFile)})
+	} else {
+		props = append(props, sddbus.Property{Name: "StandardError", Value: v("journal")})
 	}
 	if s.User != "" {
 		props = append(props, sddbus.Property{Name: "User", Value: v(s.User)})

@@ -15,7 +15,8 @@ FROM denoland/deno:bin-2.9.6 AS deno
 FROM golang:1.27-trixie AS builder
 WORKDIR /src
 COPY . .
-RUN CGO_ENABLED=0 GOFLAGS=-buildvcs=false go build -trimpath -o /hotserve ./cmd/hotserve
+RUN CGO_ENABLED=0 GOFLAGS=-buildvcs=false go build -trimpath -o /hotserve ./cmd/hotserve \
+	&& cd backups && CGO_ENABLED=0 GOFLAGS=-buildvcs=false go build -trimpath -o /hotserve-backup ./cmd/hotserve-backup
 
 FROM debian:trixie-slim
 ENV DEBIAN_FRONTEND=noninteractive
@@ -37,6 +38,9 @@ RUN systemctl mask \
 	|| true
 
 COPY --from=builder /hotserve /usr/bin/hotserve
+# bin/push asks it whether a backup run could plan from the Caddyfile
+# being pushed; nothing here runs a backup.
+COPY --from=builder /hotserve-backup /usr/bin/hotserve-backup
 COPY --from=deno /deno /usr/local/bin/deno
 # The example pins the Deno its workflow builds with in .deno-version;
 # the FROM above is Dependabot's to bump. Refuse to build when the two

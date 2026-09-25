@@ -83,19 +83,11 @@ func Decode(raw []byte) (*Plan, error) {
 	return p, nil
 }
 
-// FromAdapted reads a Plan out of what `hotserve adapt` prints: the
+// extractAll reads a Plan out of what `hotserve adapt` prints — the
 // config as written, in which an unset root is absent rather than
-// defaulted.
-func FromAdapted(raw []byte) (*Plan, error) {
-	p, err := extract(raw)
-	if err != nil {
-		return nil, err
-	}
-	return p, p.Validate()
-}
-
-// extract is FromAdapted without the validation.
-func extract(raw []byte) (*Plan, error) {
+// defaulted — not yet validated, and the apps that declare no backup,
+// sorted.
+func extractAll(raw []byte) (*Plan, []string, error) {
 	var cfg struct {
 		Apps struct {
 			Liveswap *struct {
@@ -107,20 +99,24 @@ func extract(raw []byte) (*Plan, error) {
 		} `json:"apps"`
 	}
 	if err := json.Unmarshal(raw, &cfg); err != nil {
-		return nil, fmt.Errorf("reading the adapted config: %w", err)
+		return nil, nil, fmt.Errorf("reading the adapted config: %w", err)
 	}
 	p := &Plan{Root: backupdecl.DefaultRoot, Apps: map[string]*backupdecl.Config{}}
 	ls := cfg.Apps.Liveswap
 	if ls == nil {
-		return p, nil
+		return p, nil, nil
 	}
 	if ls.Root != "" {
 		p.Root = ls.Root
 	}
+	var undeclared []string
 	for name, app := range ls.Apps {
 		if app != nil && app.Backup != nil {
 			p.Apps[name] = app.Backup
+		} else {
+			undeclared = append(undeclared, name)
 		}
 	}
-	return p, nil
+	sort.Strings(undeclared)
+	return p, undeclared, nil
 }

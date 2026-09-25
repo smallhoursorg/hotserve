@@ -4,7 +4,8 @@
 #   BOX=alice@box.example.com bin/push  (or: make push BOX=alice@box.example.com)
 #
 # In order: stage the file next to the live one; validate it on the
-# box; show the diff and ask; swap it in with a rename; reload. If the
+# box, for hotserve and — where they are installed — for backups; show
+# the diff and ask; swap it in with a rename; reload. If the
 # reload fails, the previous file goes back, so the file on disk always
 # matches the config that is running — a bad file left behind would
 # not break anything now, but it would stop the next restart or
@@ -52,6 +53,30 @@ if ! on_box hotserve validate --config "$live.new"; then
 	echo "push: the box rejected $config; nothing changed" >&2
 	exit 1
 fi
+
+# A Caddyfile hotserve accepts can still be one a backup run cannot
+# plan from — it reads the file without hotserve's environment — and
+# the first to say so would be an hourly run, failing. Asked here
+# instead, without privilege, where backups are installed at all.
+# test says 1 for "not there"; anything else is the box not answering,
+# which is not "no backups here".
+backups=0
+on_box test -x /usr/bin/hotserve-backup || backups=$?
+case $backups in
+0)
+	if ! on_box /usr/bin/hotserve-backup validate "$live.new"; then
+		as_root rm -f "$live.new"
+		echo "push: the box rejected $config for backups; nothing changed" >&2
+		exit 1
+	fi
+	;;
+1) ;;
+*)
+	as_root rm -f "$live.new" || true
+	echo "push: could not ask the box whether backups are installed; nothing changed" >&2
+	exit 1
+	;;
+esac
 
 if on_box cmp -s "$live" "$live.new"; then
 	as_root rm -f "$live.new"

@@ -62,33 +62,6 @@ unchanged() { # <before> <after> <what>
 	[ "$1" = "$2" ] && pass "$3" || fail "$3 — before: $(echo "$1" | tr '\n' '|') after: $(echo "$2" | tr '\n' '|')"
 }
 rows() { as_app sqlite3 -cmd '.timeout 5000' "$1" "pragma integrity_check; $2" 2>&1 | tr '\n' ' '; }
-newest() { rr snapshots --no-lock --json --tag "app:$1" --host hotserve 2>/dev/null | grep -o '"id":"[0-9a-f]\{64\}"' | tail -1 | cut -d'"' -f4; }
-# app_json <app>: the app's own part of the record.
-app_json() { awk -v open="    \"$1\": {" '$0 == open { on = 1 } on { print } on && /^    },?$/ { exit }' "$STATUS" | tr -d '\n' | sed 's/  */ /g'; }
-proven() { app_json "$1" | sed -n 's/.*"restore_proven": { "snapshot": { "id": "\([0-9a-f]\{64\}\)".*/\1/p'; }
-# craft <app> <dir>: a snapshot of <dir> as /backup/<app>, made by hand
-# with the box's key — what an older engine, another tool or whoever
-# holds that key could have put in the repository. Prints its id.
-craft() {
-	rm -rf /backup
-	mkdir -p /backup
-	cp -a "$2" "/backup/$1"
-	rr backup --quiet --json --host hotserve --tag hotserve --tag "app:$1" "/backup/$1" 2>/dev/null | sed -n 's/.*"snapshot_id":"\([0-9a-f]\{64\}\)".*/\1/p'
-	rm -rf /backup
-}
-# A crafted snapshot is forgotten once its scenario is over, so that the
-# newest snapshot of an app is one the engine made.
-forget() { rr forget --quiet "$@" >/dev/null 2>&1 || fail "the suite could not forget its own snapshot $*"; }
-hold_restic() { # <pattern>: stops the first restic whose command line matches, and sets $pid
-	i=0
-	pid=
-	until pid=$(pgrep -f "$1" | head -1) && [ -n "$pid" ]; do
-		i=$((i + 1))
-		[ "$i" -ge 600 ] && return 1
-		sleep 0.05
-	done
-	kill -STOP "$pid"
-}
 
 rm -f "$STATUS"
 seed

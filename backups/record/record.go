@@ -56,6 +56,11 @@ type Item struct {
 type Snapshot struct {
 	ID   string    `json:"id"`
 	Time time.Time `json:"time"`
+	// Seen is when the repository was last found to hold this snapshot:
+	// by the run that made it, a drill that fetched it, or a run's
+	// listing. One older than Status.Listed — or none, under a Listed —
+	// is of a snapshot a listing since did not hold: it is gone.
+	Seen *time.Time `json:"seen,omitempty"`
 }
 
 // App is one app's last run.
@@ -103,6 +108,13 @@ type Status struct {
 	// LastDrill is when a drill last ran, and — where it could not
 	// drill anything — why; each app's own verdict is on the app.
 	LastDrill *Drill `json:"last_drill,omitempty"`
+	// Listed is when a run last listed the repository and was answered.
+	// A listing that failed leaves it, and every Seen, as they were.
+	Listed *time.Time `json:"listed,omitempty"`
+	// Unlisted is since when every listing a run tried has gone
+	// unanswered, or been answered in a way not to be believed; none,
+	// once one is answered.
+	Unlisted *time.Time `json:"unlisted,omitempty"`
 }
 
 // Text makes a string from a unit fit to print and to keep: no control
@@ -110,16 +122,23 @@ type Status struct {
 // line. A unit's words are the app's words, where the unit handled the
 // app's bytes.
 func Text(s string) string {
-	s = strings.Map(func(r rune) rune {
+	s = Clean(s)
+	if r := []rune(s); len(r) > 300 {
+		s = strings.TrimSpace(string(r[:300])) + "…"
+	}
+	return s
+}
+
+// Clean is Text without the cut, for what is bounded already — a
+// warning each part of which was cut as it was written, a list of the
+// Caddyfile's own app names — and is lost at its end when cut again.
+func Clean(s string) string {
+	return strings.TrimSpace(strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) {
 			return ' '
 		}
 		return r
-	}, s)
-	if r := []rune(s); len(r) > 300 {
-		s = string(r[:300]) + "…"
-	}
-	return strings.TrimSpace(s)
+	}, s))
 }
 
 // Read returns the last status, or an empty one when no run has
