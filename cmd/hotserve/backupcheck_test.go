@@ -17,6 +17,24 @@ import (
 // adapt them: where each backup declaration comes from is Caddy's word,
 // after its imports, snippets and heredocs.
 
+// TestMain makes every test one on a box where hotserve-backup is not
+// installed, unless it says otherwise (installed): whether this machine
+// has it is not the test's business.
+func TestMain(m *testing.M) {
+	backupBinary = "/nonexistent/hotserve-backup"
+	os.Exit(m.Run())
+}
+
+// installed stands a hotserve-backup in, reading caddyfile.
+func installed(t *testing.T, caddyfile string) {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), "hotserve-backup")
+	write(t, bin, "#!/bin/sh\n", 0o755)
+	oldBin, oldFile := backupBinary, backupCaddyfile
+	backupBinary, backupCaddyfile = bin, caddyfile
+	t.Cleanup(func() { backupBinary, backupCaddyfile = oldBin, oldFile })
+}
+
 func write(t *testing.T, path, body string, mode os.FileMode) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -52,7 +70,7 @@ func dirs(t *testing.T) (config, outside string) {
 func checked(t *testing.T, cmd string, flags ...string) {
 	t.Helper()
 	liveswap.ClearBackupSources()
-	if err := checkBackups(cmd, flags); err != nil {
+	if _, err := checkBackups(cmd, flags); err != nil {
 		t.Fatalf("%s %q: %v", cmd, flags, err)
 	}
 	if len(liveswap.BackupSources()) == 0 {
@@ -130,7 +148,7 @@ func TestABackupDeclaredOutsideTheCaddyfilesDirectoryIsRefused(t *testing.T) {
 			config, outside := dirs(t)
 			write(t, filepath.Join(outside, tc.outsideFile), tc.outsideBody, 0o644)
 			write(t, config+"/Caddyfile", strings.ReplaceAll(tc.caddyfile, "OUTSIDE", outside), 0o644)
-			err := checkBackups("validate", []string{"--config", config + "/Caddyfile"})
+			_, err := checkBackups("validate", []string{"--config", config + "/Caddyfile"})
 			for _, w := range tc.want {
 				w = strings.NewReplacer("OUTSIDE", outside, "CONFIG", config).Replace(w)
 				if err == nil || !strings.Contains(err.Error(), w) {
@@ -157,7 +175,7 @@ func TestWhatOthersMayNotReadIsRefused(t *testing.T) {
 			if err := os.Chmod(config+"/apps", tc.appsMode); err != nil {
 				t.Fatal(err)
 			}
-			err := checkBackups("validate", []string{"--config", config + "/Caddyfile"})
+			_, err := checkBackups("validate", []string{"--config", config + "/Caddyfile"})
 			if w := strings.ReplaceAll(tc.want, "CONFIG", config); err == nil || !strings.Contains(err.Error(), w) {
 				t.Fatalf("want %q in the error, got %v", w, err)
 			}
@@ -185,7 +203,7 @@ func TestNothingIsAskedOfWhatHasNoBackupToLose(t *testing.T) {
 		// ".caddyfile" as JSON, with no --adapter; so is it left here.
 		{"--config", config + "/sites.conf"},
 	} {
-		if err := checkBackups("validate", flags); err != nil {
+		if _, err := checkBackups("validate", flags); err != nil {
 			t.Errorf("%q: %v", flags, err)
 		}
 	}
@@ -222,7 +240,7 @@ func TestAConfigThatIsNotAFileIsLeftToCaddy(t *testing.T) {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
-	go func() { done <- checkBackups("validate", []string{"--config", fifo}) }()
+	go func() { _, err := checkBackups("validate", []string{"--config", fifo}); done <- err }()
 	select {
 	case err := <-done:
 		if err != nil {
@@ -243,7 +261,7 @@ func TestABackupReadThroughALinkOutIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	write(t, config+"/Caddyfile", global("\t\timport apps/*.caddy\n"), 0o644)
-	err := checkBackups("validate", []string{"--config", config + "/Caddyfile"})
+	_, err := checkBackups("validate", []string{"--config", config + "/Caddyfile"})
 	if w := "blog's backup is read from " + config + "/apps/blog.caddy, which leads to " + outside + "/blog.caddy, outside " + config; err == nil || !strings.Contains(err.Error(), w) {
 		t.Fatalf("want %q in the error, got %v", w, err)
 	}
@@ -281,5 +299,64 @@ func TestCaddysOwnFlagsAreWhereTheCheckTakesThem(t *testing.T) {
 				t.Errorf("%s: Caddy's command has no --%s", name, flag)
 			}
 		}
+	}
+}
+
+// hotserve-backup reads one Caddyfile, /etc/hotserve/Caddyfile. Where it
+// is installed, a reload that would run another, declaring a backup, is
+// refused: the server would run what no backup run reads, and an app
+// only in it would never be backed up while status said all was well.
+// A start is not refused; validate is of a candidate, and is not asked.
+// Where it is not installed, a reload is warned.
+func TestAReloadOfAnotherCaddyfileIsRefusedWhereBackupsReadTheCanonicalOne(t *testing.T) {
+	config, _ := dirs(t)
+	write(t, config+"/apps/blog.caddy", app, 0o644)
+	body := global("\t\timport apps/*.caddy\n")
+	write(t, config+"/Caddyfile", body, 0o644)
+	write(t, config+"/Caddyfile.new", body, 0o644)
+	other := config + "/Caddyfile.new"
+
+	installed(t, config+"/Caddyfile")
+	for cmd, stops := range map[string]bool{"reload": true, "run": false, "validate": false} {
+		var stderr bytes.Buffer
+		if got := gate([]string{cmd, "--config", other}, &stderr); got != stops {
+			t.Errorf("%s of another Caddyfile: stop = %v, want %v (%s)", cmd, got, stops, stderr.String())
+		}
+		said := stderr.String()
+		if cmd == "validate" {
+			if said != "" {
+				t.Errorf("validate said %q", said)
+			}
+			continue
+		}
+		for _, w := range []string{"runs " + other + ", which declares backups", "hotserve-backup reads " + config + "/Caddyfile", "`hotserve-backup validate " + other + "`"} {
+			if !strings.Contains(said, w) {
+				t.Errorf("%s: want %q in %q", cmd, w, said)
+			}
+		}
+	}
+	// The one it reads, however it is named.
+	checked(t, "reload", "--config", config+"/Caddyfile")
+	if err := os.Symlink(config+"/Caddyfile", config+"/current"); err != nil {
+		t.Fatal(err)
+	}
+	checked(t, "reload", "--config", config+"/current", "--adapter", "caddyfile")
+	// Another that declares no backup is none of this.
+	write(t, config+"/Caddyfile.plain", "http://:8080 {\n\trespond hi\n}\n", 0o644)
+	if w, err := checkBackups("reload", []string{"--config", config + "/Caddyfile.plain"}); w != "" || err != nil {
+		t.Errorf("no backup declared: %q, %v", w, err)
+	}
+}
+
+func TestAReloadOfAnotherCaddyfileIsWarnedWhereBackupsAreNotInstalled(t *testing.T) {
+	config, _ := dirs(t)
+	write(t, config+"/apps/blog.caddy", app, 0o644)
+	write(t, config+"/Caddyfile.new", global("\t\timport apps/*.caddy\n"), 0o644)
+	var stderr bytes.Buffer
+	if gate([]string{"reload", "--config", config + "/Caddyfile.new"}, &stderr) {
+		t.Fatalf("stopped: %s", stderr.String())
+	}
+	if said := stderr.String(); !strings.HasPrefix(said, "WARNING: ") || !strings.Contains(said, "/etc/hotserve/Caddyfile") || strings.Contains(said, "hotserve-backup validate") {
+		t.Fatalf("said %q", said)
 	}
 }

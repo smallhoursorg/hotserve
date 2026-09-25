@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -35,17 +36,28 @@ func gate(args []string, stderr io.Writer) (stop bool) {
 	if cmd != "validate" && cmd != "reload" && cmd != "run" {
 		return false
 	}
-	err := checkBackups(cmd, args[1:])
-	if err == nil {
-		return false
+	warning, err := checkBackups(cmd, args[1:])
+	switch {
+	case err != nil && cmd == "run":
+		_, _ = fmt.Fprintf(stderr, "ERROR: %v (served all the same; `hotserve reload` refuses this until it is mended)\n", err)
+	case err != nil:
+		_, _ = fmt.Fprintf(stderr, "Error: %v\n", err)
+		stop = true
 	}
-	if cmd == "run" {
-		_, _ = fmt.Fprintf(stderr, "ERROR: %v (served all the same; `hotserve validate` and `hotserve reload` refuse this Caddyfile until it is mended)\n", err)
-		return false
+	if warning != "" {
+		_, _ = fmt.Fprintf(stderr, "WARNING: %s\n", warning)
 	}
-	_, _ = fmt.Fprintf(stderr, "Error: %v\n", err)
-	return true
+	return stop
 }
+
+// backupCaddyfile is the Caddyfile hotserve-backup reads, and
+// backupBinary hotserve-backup itself (backups/cmd/hotserve-backup):
+// both fixed by its package, which ships beside this one. Variables only
+// so a test can stand others in.
+var (
+	backupCaddyfile = "/etc/hotserve/Caddyfile"
+	backupBinary    = "/usr/bin/hotserve-backup"
+)
 
 // commandFlags parses a command's arguments with the flags Caddy's own
 // command declares — its own definition, whatever Caddy is linked in,
@@ -79,10 +91,10 @@ func commandFlags(name string, args []string) (*pflag.FlagSet, bool) {
 // here the Caddyfile is adapted in the environment the command was
 // started in. The packaged service passes none, and hotserve-backup
 // refuses an import that depends on a variable.
-func checkBackups(cmd string, args []string) error {
+func checkBackups(cmd string, args []string) (warning string, err error) {
 	fs, ok := commandFlags(cmd, args)
 	if !ok {
-		return nil
+		return "", nil
 	}
 	file, _ := fs.GetString("config")
 	adapter, _ := fs.GetString("adapter")
@@ -93,27 +105,42 @@ func checkBackups(cmd string, args []string) error {
 		probe = "Caddyfile" // what LoadConfig reads with none
 	}
 	if st, err := os.Stat(probe); file == "-" || err == nil && !st.Mode().IsRegular() { //nolint:gosec // the config the command was given, looked at before Caddy reads it
-		return nil
+		return "", nil
 	}
 	liveswap.ClearBackupSources()
-	_, file, adapter, err := caddycmd.LoadConfig(file, adapter)
+	_, file, adapter, err = caddycmd.LoadConfig(file, adapter)
 	if err != nil || adapter != "caddyfile" {
-		return nil
+		return "", nil
 	}
 	sources := liveswap.BackupSources()
 	if len(sources) == 0 {
-		return nil
+		return "", nil
 	}
 	main, err := filepath.Abs(file)
 	if err != nil {
-		return err
+		return "", err
+	}
+	// hotserve-backup reads one Caddyfile. A server run from another,
+	// declaring a backup, runs what no backup run reads: an app only in
+	// it is never backed up, and status says all is well. Refused where
+	// hotserve-backup is installed (a start is not refused: gate), said
+	// where it is not; a candidate being validated is not asked.
+	var elsewhere string
+	if cmd != "validate" && !sameFile(main, backupCaddyfile) {
+		elsewhere = fmt.Sprintf("this %s runs %s, which declares backups, but hotserve-backup reads %s: backups follow that file, not this one, and an app only in this one would not be backed up", cmd, main, backupCaddyfile)
+		if _, err := os.Stat(backupBinary); err != nil {
+			warning = elsewhere + " (were hotserve-backup installed, this would be refused)"
+			elsewhere = ""
+		} else {
+			elsewhere += fmt.Sprintf(" — to see what a backup run would make of this file, `hotserve-backup validate %s`; to make it the one backups read, put it at %s (bin/push does)", main, backupCaddyfile)
+		}
 	}
 	dir := filepath.Dir(main)
 	// What a backup run's view holds is the directory itself, and so what
 	// a file leads to is judged against where the directory leads.
 	realDir, err := filepath.EvalSymlinks(dir)
 	if err != nil {
-		return err
+		return warning, err
 	}
 	var problems []string
 	seen := map[string]bool{}
@@ -166,10 +193,28 @@ func checkBackups(cmd string, args []string) error {
 			check(s.App+"'s backup", s.File)
 		}
 	}
-	if len(problems) == 0 {
-		return nil
+	var errs []string
+	if elsewhere != "" {
+		errs = append(errs, elsewhere)
 	}
-	return fmt.Errorf("a backup run would not see what this Caddyfile declares: %s — a backup run reads the Caddyfile inside a view that holds %s and nothing else, as an account that owns nothing there, so keep every file a backup is declared in under %s, readable by others (0644, directories 0755)", strings.Join(problems, "; "), dir, dir)
+	if len(problems) > 0 {
+		errs = append(errs, fmt.Sprintf("a backup run would not see what this Caddyfile declares: %s — a backup run reads the Caddyfile inside a view that holds %s and nothing else, as an account that owns nothing there, so keep every file a backup is declared in under %s, readable by others (0644, directories 0755)", strings.Join(problems, "; "), dir, dir))
+	}
+	if len(errs) == 0 {
+		return warning, nil
+	}
+	return warning, errors.New(strings.Join(errs, "; and "))
+}
+
+// sameFile says whether a and b are one file: the same path, or the same
+// file where each leads.
+func sameFile(a, b string) bool {
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	sa, errA := os.Stat(a)
+	sb, errB := os.Stat(b)
+	return errA == nil && errB == nil && os.SameFile(sa, sb)
 }
 
 // under says whether p is below dir.

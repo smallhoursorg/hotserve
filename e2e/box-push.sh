@@ -131,7 +131,7 @@ fi
 box cmp -s /etc/hotserve/Caddyfile - <"$tmp/v1" && pass "the live file is unchanged" || fail "the live file changed after a rejected backup declaration"
 box test ! -e /etc/hotserve/Caddyfile.new && pass "no staged file left behind" || fail "Caddyfile.new left after a rejected backup declaration"
 
-echo "=== box 3c: a backup a backup run would not see stops validate and reload, not a start ==="
+echo "=== box 3c: a backup declaration hotserve-backup would not see stops validate and reload, not a start ==="
 # The same Caddyfile, but its backup block comes from a snippet defined
 # outside /etc/hotserve: a backup run's view holds /etc/hotserve alone,
 # so that app would not be backed up while every run said ok.

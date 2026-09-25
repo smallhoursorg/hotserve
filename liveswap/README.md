@@ -344,6 +344,17 @@ the running config serving. `hotserve run` is never refused for it — a
 start that refused would take every site down — and logs the same
 error instead.
 
+hotserve-backup reads one Caddyfile, `/etc/hotserve/Caddyfile`. Where
+it is installed (`/usr/bin/hotserve-backup`), `hotserve reload` of any
+other Caddyfile that declares a backup is refused as well: the server
+would run what no backup run reads, and an app only in it would never
+be backed up. The refusal names `hotserve-backup validate <file>` for a
+look at what a backup run would make of it, and `/etc/hotserve/Caddyfile`
+as where to put it (`bin/push` does). Where hotserve-backup is not
+installed, it is a warning. `hotserve validate` of a candidate file —
+`bin/push` validates `Caddyfile.new` before it is moved into place — is
+not asked; `hotserve run` logs it and serves.
+
 The check adapts the Caddyfile in the environment the command was
 started in. It does not load `--envfile` first, as Caddy's own
 `validate` and `run` do: a `{$NAME}` set only there, in an import's
