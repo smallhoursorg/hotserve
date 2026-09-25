@@ -102,7 +102,7 @@ func Report(in Input) (lines []string, healthy bool) {
 		bad("the last run ended early: %s", record.Text(st.Error))
 	}
 	if st.Warning != "" {
-		say("warning: %s", record.Text(st.Warning))
+		say("warning: %s", record.Clean(st.Warning))
 	}
 
 	// gone: a listing was answered after the snapshot was last seen.
@@ -176,7 +176,11 @@ func Report(in Input) (lines []string, healthy bool) {
 		// it that proved nothing is not made good by an older proof.
 		switch d := app.RestoreDrill; {
 		case d != nil:
-			bad("%s: restore not proven: %s (snapshot %s, %s); `sudo hotserve-backup drill` tries again", n, record.Text(d.Detail), short(d.Snapshot.ID), when(d.Time))
+			of := ""
+			if d.Snapshot.ID != "" { // one it could not ask the repository for has none
+				of = "snapshot " + short(d.Snapshot.ID) + ", "
+			}
+			bad("%s: restore not proven: %s (%s%s); `sudo hotserve-backup drill` tries again", n, record.Text(d.Detail), of, when(d.Time))
 		case app.RestoreProven == nil:
 			bad("%s: restore not proven: no drill of it has run; `sudo hotserve-backup drill` proves it", n)
 		}

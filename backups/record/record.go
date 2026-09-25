@@ -122,16 +122,23 @@ type Status struct {
 // line. A unit's words are the app's words, where the unit handled the
 // app's bytes.
 func Text(s string) string {
-	s = strings.Map(func(r rune) rune {
+	s = Clean(s)
+	if r := []rune(s); len(r) > 300 {
+		s = strings.TrimSpace(string(r[:300])) + "…"
+	}
+	return s
+}
+
+// Clean is Text without the cut, for what is bounded already — a
+// warning each part of which was cut as it was written, a list of the
+// Caddyfile's own app names — and is lost at its end when cut again.
+func Clean(s string) string {
+	return strings.TrimSpace(strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) {
 			return ' '
 		}
 		return r
-	}, s)
-	if r := []rune(s); len(r) > 300 {
-		s = string(r[:300]) + "…"
-	}
-	return strings.TrimSpace(s)
+	}, s))
 }
 
 // Read returns the last status, or an empty one when no run has

@@ -116,6 +116,27 @@ func TestWhatStatusSays(t *testing.T) {
 			says:  []string{"blog: restore not proven", "app.db: the copy is damaged", "hotserve-backup drill"},
 			never: []string{"blog: restore last proven"},
 		},
+		// A drill that could not ask the repository has no snapshot to name.
+		"a drill that could not ask": {
+			st: with(func(a *record.App) {
+				a.RestoreProven = nil
+				a.RestoreDrill = &record.Drill{Time: ago(time.Hour), Detail: "the repository could not be asked for this app's snapshots: no"}
+			}),
+			says:  []string{"blog: restore not proven: the repository could not be asked", "hotserve-backup drill"},
+			never: []string{"snapshot ,", "snapshot )"},
+		},
+		// Each part of a warning is cut on its own when the run writes it;
+		// cut again as a whole, the last part — where the listing's
+		// stderr is — would be lost.
+		"a long warning is said whole": {
+			st: func() *record.Status {
+				st := with(func(*record.App) {})
+				st.Warning = strings.Repeat("shop no longer declares a backup. ", 8) + "the repository could not be listed. What restic said is in /var/lib/hotserve-backup/listing.err"
+				return st
+			}(),
+			healthy: true,
+			says:    []string{"What restic said is in /var/lib/hotserve-backup/listing.err"},
+		},
 		"no drill at all yet": {
 			st:   with(func(a *record.App) { a.RestoreProven = nil }),
 			says: []string{"blog: restore not proven", "hotserve-backup drill"},

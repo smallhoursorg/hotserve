@@ -280,10 +280,10 @@ func validate(ctx context.Context, file string) error {
 	if len(names) == 0 {
 		fmt.Println("no app declares a backup: a run would back nothing up")
 	} else {
-		fmt.Printf("a run would back up %s, under %s\n", record.Text(strings.Join(names, ", ")), record.Text(ins.Plan.Root))
+		fmt.Printf("a run would back up %s, under %s\n", record.Clean(strings.Join(names, ", ")), record.Text(ins.Plan.Root))
 	}
 	if len(ins.UndeclaredByEnv) > 0 {
-		fmt.Printf("an app named through the environment variable(s) %s declares no backup: nothing of it would be backed up\n", record.Text(strings.Join(ins.UndeclaredByEnv, ", ")))
+		fmt.Printf("an app named through the environment variable(s) %s declares no backup: nothing of it would be backed up\n", record.Clean(strings.Join(ins.UndeclaredByEnv, ", ")))
 	}
 	for _, n := range ins.Undeclared {
 		fmt.Printf("%s declares no backup: nothing of it would be backed up\n", record.Text(n))
