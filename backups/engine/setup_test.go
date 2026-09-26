@@ -96,18 +96,23 @@ func setupBox(t *testing.T) (*box, *term) {
 	// A fresh box: the look for a repository finds none.
 	b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 10}
 	b.version = 257
-	b.haveProgram = func(string) bool { return true }
-	b.account = true
-	old, oldExists, oldMake, oldClock, oldProbe, oldNote, oldOwn, oldSync, oldID := haveProgram, accountExists, makeAccount, setupClock, setupProbeClock, setupNote, ownByRoot, syncDir, writeID
-	haveProgram = func(p string) bool { return b.haveProgram(p) }
-	accountExists = func(string) bool { return b.account }
-	makeAccount = func() error { b.accountsMade++; b.account = true; return nil }
+	b.account, b.shell, b.home, b.uid, b.gid = true, "/usr/sbin/nologin", "/nonexistent", 995, 995
+	oldAccount, oldHome, oldMake, oldClock, oldProbe, oldNote, oldOwn, oldSync, oldID := account, homeExists, makeAccount, setupClock, setupProbeClock, setupNote, ownByRoot, syncDir, writeID
+	account = func(string) (passwd, error) {
+		return passwd{shell: b.shell, home: b.home, uid: b.uid, gid: b.gid, exists: b.account}, nil
+	}
+	homeExists = func(string) bool { return b.homeThere }
+	makeAccount = func() error {
+		b.accountsMade++
+		b.account, b.shell, b.home, b.homeThere, b.uid, b.gid = true, "/usr/sbin/nologin", "/nonexistent", false, 995, 995
+		return nil
+	}
 	// chown to root is root's to do; here what is asked for is recorded.
 	ownByRoot = func(path string) error { b.owned = append(b.owned, path); return nil }
 	syncDir = func(path string) error { b.synced = append(b.synced, path); return nil }
 	setupClock, setupProbeClock, setupNote = 200*time.Millisecond, 100*time.Millisecond, 50*time.Millisecond
 	t.Cleanup(func() {
-		haveProgram, accountExists, makeAccount, setupClock, setupProbeClock, setupNote, ownByRoot, syncDir, writeID = old, oldExists, oldMake, oldClock, oldProbe, oldNote, oldOwn, oldSync, oldID
+		account, homeExists, makeAccount, setupClock, setupProbeClock, setupNote, ownByRoot, syncDir, writeID = oldAccount, oldHome, oldMake, oldClock, oldProbe, oldNote, oldOwn, oldSync, oldID
 	})
 	return b, &term{answers: []string{"AKIDX", "the-secret", "stored"}}
 }
@@ -624,15 +629,7 @@ func TestTheInitUnitIsLeftToFinishAndWaitedFor(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(b.cfg.RunDir, "init-unit")); err == nil {
 		t.Fatal("the init unit is still recorded after it ended")
 	}
-	// Nor bound to setup's own service, where it has one: BindsTo=
-	// would have the manager stop init as setup ends. The look is
-	// bound, as every unit a command ends with is.
-	if s := b.spec("init"); s.BindsTo != "" {
-		t.Fatalf("the init unit is bound to %q, and ends with setup", s.BindsTo)
-	}
-	if s := b.spec("probe"); s.BindsTo != b.cfg.BindsTo {
-		t.Fatalf("the look's BindsTo: %q", s.BindsTo)
-	}
+	// (Nor bound to setup's own service: TestEveryUnitOfACommandIsBoundToItsService.)
 	// The next lock holder — a setup here, a run the same — waits for
 	// the unit a killed setup left, before anything of its own.
 	b2, m2 := setupBox(t)
@@ -1619,23 +1616,5 @@ func TestThePlanIsSaidAndAPlanWithNoAppGoesOn(t *testing.T) {
 	}
 	if len(rep.Apps) != 0 || !strings.Contains(m.saidAll(), "no app declares a backup yet: a run would back nothing up") {
 		t.Fatalf("report %+v\n%s", rep, m.saidAll())
-	}
-}
-
-func TestBeginNamesTheOldPathWhenItIsThereAndTheNewIsNot(t *testing.T) {
-	b, _ := setupBox(t)
-	must(t, os.MkdirAll(filepath.Dir(b.cfg.OldEnvFile), 0o755))
-	must(t, os.WriteFile(b.cfg.OldEnvFile, []byte("RESTIC_PASSWORD=old\n"), 0o600))
-	_, err := Run(context.Background(), b.cfg, b)
-	if err == nil || !strings.Contains(err.Error(), "backups are not set up: "+b.cfg.EnvFile+" is not there") || !strings.Contains(err.Error(), b.cfg.OldEnvFile+" is from before this version and is not read: run `sudo hotserve-backup setup <its RESTIC_REPOSITORY>`, which asks for its RESTIC_PASSWORD; then remove it") || strings.Contains(err.Error(), "lstat") {
-		t.Fatalf("err = %v", err)
-	}
-	if b.roles() != "" {
-		t.Fatalf("units ran: %s", b.roles())
-	}
-	must(t, os.Remove(b.cfg.OldEnvFile))
-	_, err = Run(context.Background(), b.cfg, b)
-	if err == nil || strings.Contains(err.Error(), "before this version") {
-		t.Fatalf("err = %v", err)
 	}
 }

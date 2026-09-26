@@ -152,6 +152,13 @@ func begin(ctx context.Context, cfg Config, r Runner) (x *run, end func(), err e
 		end()
 		return nil, nil, fmt.Errorf("backups are not set up: %s: %w", cfg.EnvFile, err)
 	}
+	// With the run in hand and the lock held: a run records the refusal
+	// as its own error and a drill as one that could not begin, so that
+	// status fails with the red unit rather than reporting the run
+	// before as ok for three hours.
+	if err := programsInstalled(cfg); err != nil {
+		return x, end, err
+	}
 	return x, end, nil
 }
 

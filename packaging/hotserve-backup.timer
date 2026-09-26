@@ -1,0 +1,17 @@
+# hotserve-backup.timer — the hourly backup run (the owner, 2026-09-26):
+# on the hour, plus one offset of up to ten minutes that is this box's
+# own and stays the same, so that the interval is an hour and a fleet
+# does not reach one storage at :00; a box that was off runs at boot.
+# Enabled by the package; the service itself waits for setup.
+[Unit]
+Description=hotserve backup run, hourly
+Documentation=https://github.com/smallhoursorg/hotserve/blob/main/backups/README.md
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=10min
+FixedRandomDelay=true
+Persistent=true
+
+[Install]
+WantedBy=timers.target

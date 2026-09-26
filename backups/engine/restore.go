@@ -1076,17 +1076,21 @@ func Drill(ctx context.Context, cfg Config, r Runner) (*record.Status, error) {
 		return nil, err
 	}
 	defer end()
-	if err != nil {
-		return nil, err
-	}
 	st := x.prev
 	st.LastDrill = &record.Drill{Time: time.Now().UTC()}
-	p, err := x.plan(ctx)
-	if err != nil {
-		// Said in the record, so that a drill failing here week after
-		// week does not pass for "proven" ageing quietly.
+	// Said in the record — a refusal from begin (a program not there)
+	// as a plan that cannot be made — so that a drill failing here week
+	// after week does not pass for "proven" ageing quietly.
+	couldNotBegin := func(err error) (*record.Status, error) {
 		st.LastDrill.Detail = record.Text(err.Error())
 		return st, errors.Join(err, record.Write(filepath.Join(cfg.StateDir, "status.json"), st))
+	}
+	if err != nil {
+		return couldNotBegin(err)
+	}
+	p, err := x.plan(ctx)
+	if err != nil {
+		return couldNotBegin(err)
 	}
 	x.sweepFetched(ctx)
 	// An app that has left the plan has nothing left to prove.

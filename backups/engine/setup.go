@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -76,8 +76,32 @@ var (
 		st, err := os.Stat(path)
 		return err == nil && st.Mode().IsRegular() && st.Mode()&0o001 != 0
 	}
-	accountExists = func(name string) bool { _, err := user.Lookup(name); return err == nil }
-	makeAccount   = func() error {
+	// account is the account as the manager itself resolves it — getent,
+	// so NSS, where os/user reads /etc/passwd alone and knows no shell:
+	// its shell and home, and whether it is there at all. getent's
+	// argv is constant; its exit 2 is "not found".
+	account = func(name string) (passwd, error) {
+		out, err := exec.Command(getent, "passwd", name).Output() //nolint:gosec // a constant program; name is backupUser, a constant
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 2 {
+			return passwd{}, nil
+		}
+		if err != nil {
+			return passwd{}, fmt.Errorf("%s passwd %s: %w", getent, name, err)
+		}
+		fields := strings.Split(strings.TrimRight(string(out), "\n"), ":")
+		if len(fields) != 7 {
+			return passwd{}, fmt.Errorf("%s passwd %s: not a passwd line: %s", getent, name, record.Text(string(out)))
+		}
+		uid, uerr := strconv.Atoi(fields[2])
+		gid, gerr := strconv.Atoi(fields[3])
+		if uerr != nil || gerr != nil {
+			return passwd{}, fmt.Errorf("%s passwd %s: not a passwd line: %s", getent, name, record.Text(string(out)))
+		}
+		return passwd{uid: uid, gid: gid, home: fields[5], shell: fields[6], exists: true}, nil
+	}
+	homeExists  = func(path string) bool { _, err := os.Lstat(path); return err == nil }
+	makeAccount = func() error {
 		if out, err := exec.Command(useradd[0], useradd[1:]...).CombinedOutput(); err != nil {
 			return fmt.Errorf("%s: %w: %s", useraddArgv(), err, record.Text(string(out)))
 		}
@@ -86,10 +110,78 @@ var (
 )
 
 // useradd makes the account restic runs as: no home, no shell, and
-// nothing of its own but the cache the manager makes for it.
+// nothing of its own but the cache the manager makes for it. The
+// package's postinstall makes it with the same line, before setup ever
+// runs (TestPostinstallMakesTheAccountAsSetupDoes).
 var useradd = []string{"/usr/sbin/useradd", "--system", "--no-create-home", "--home-dir", "/nonexistent", "--shell", "/usr/sbin/nologin", backupUser}
 
+const getent = "/usr/bin/getent"
+
+// passwd is an account as getent gives it: its uid and gid, its home
+// and its shell, and whether it is there at all.
+type passwd struct {
+	uid, gid    int
+	home, shell string
+	exists      bool
+}
+
 func useraddArgv() string { return strings.Join(useradd, " ") }
+
+// accountUsable is what setup asks of an account that is already there:
+// a shell nobody can log in with, and no home that exists. Every restic
+// unit runs as it, and whoever can log in as it can read the repository
+// credential from a running restic's environment. An account made
+// wrongly is refused, never changed: an administrator may have meant
+// it, and the message says the two ways to mend it.
+func accountUsable(acct passwd) error {
+	var wrong []string
+	// The account is what every restic unit runs as, User= by name:
+	// root, or the hotserve data user, would run restic with the
+	// credential as the two uids the design keeps it away from.
+	if acct.uid == 0 {
+		wrong = append(wrong, "uid 0 (root)")
+	}
+	if acct.gid == 0 {
+		wrong = append(wrong, "gid 0 (root)")
+	}
+	if uid, _, err := dataOwner(); err == nil && acct.uid == uid && uid != 0 {
+		wrong = append(wrong, fmt.Sprintf("the hotserve user's uid (%d)", uid))
+	}
+	switch filepath.Base(acct.shell) {
+	case "nologin", "false":
+	case ".", "": // no shell set: login gives /bin/sh
+		wrong = append(wrong, "a login shell (none set, which is /bin/sh)")
+	default:
+		wrong = append(wrong, fmt.Sprintf("a login shell (%s)", record.Text(acct.shell)))
+	}
+	// /nonexistent is the home setup gives; a directory of that name is
+	// nobody's home, and refusing it would refuse setup's own account.
+	if acct.home != "/nonexistent" && homeExists(acct.home) {
+		wrong = append(wrong, fmt.Sprintf("a home directory that exists (%s)", record.Text(acct.home)))
+	}
+	if len(wrong) == 0 {
+		return nil
+	}
+	return fmt.Errorf("the %s account exists with %s: every restic unit runs as it, and whoever can log in as it — or is it — can read the repository credential from restic's environment; lock it (usermod --shell /usr/sbin/nologin --home /nonexistent %s), or remove it and make it as setup would (%s)",
+		backupUser, strings.Join(wrong, " and "), backupUser, useraddArgv())
+}
+
+// programs are what the units run, and where. A unit whose command is
+// not there ends 203/EXEC, which says nothing of what to install: setup
+// and a run each refuse first, in the same words.
+func programsInstalled(cfg Config) error {
+	for _, p := range []struct{ name, path, fix string }{
+		{"restic", cfg.Restic, ": apt install restic"},
+		{"sqlite3", dump.Program(), ": apt install sqlite3"},
+		{"hotserve", plan.Program(), ""},
+		{"hotserve-backup", cfg.Self, ", where the units run it"},
+	} {
+		if !haveProgram(p.path) {
+			return fmt.Errorf("%s is not installed at %s%s", p.name, p.path, p.fix)
+		}
+	}
+	return nil
+}
 
 // errByHand marks a backend the run can use and this command does not
 // set up: the file is written by hand.
@@ -230,15 +322,8 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 	if err := repositoryValue(o.Repository); err != nil {
 		return nil, err
 	}
-	for _, p := range []struct{ name, path, fix string }{
-		{"restic", cfg.Restic, ": apt install restic"},
-		{"sqlite3", dump.Program(), ": apt install sqlite3"},
-		{"hotserve", plan.Program(), ""},
-		{"hotserve-backup", cfg.Self, ", where the units run it"},
-	} {
-		if !haveProgram(p.path) {
-			return nil, fmt.Errorf("%s is not installed at %s%s", p.name, p.path, p.fix)
-		}
+	if err := programsInstalled(cfg); err != nil {
+		return nil, err
 	}
 	if v, err := r.ManagerVersion(ctx); err != nil {
 		return nil, err
@@ -246,7 +331,15 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 		return nil, fmt.Errorf("systemd 257 or later is needed (Debian 13's); this box has %d", v)
 	}
 	rep := &SetupReport{Account: "present"}
-	if !accountExists(backupUser) {
+	acct, err := account(backupUser)
+	if err != nil {
+		return nil, err
+	}
+	if acct.exists {
+		if err := accountUsable(acct); err != nil {
+			return nil, err
+		}
+	} else {
 		if err := makeAccount(); err != nil {
 			return nil, fmt.Errorf("making the %s account: %w", backupUser, err)
 		}

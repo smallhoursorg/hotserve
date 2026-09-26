@@ -32,6 +32,37 @@ if ! in_group; then
 	echo "hotserve: the hotserve user is not a member of the hotserve group; add it with \`usermod -aG hotserve hotserve\` if its state directories become unreadable" >&2
 fi
 chown hotserve:hotserve /var/lib/hotserve /var/lib/liveswap
+# The account hotserve-backup's restic units run as: the one line
+# `hotserve-backup setup` uses (backups/engine/setup.go, held to this
+# script by a test), which also makes it when it is missing. No home,
+# no shell, nothing of its own but the cache the manager makes for it.
+# An account that exists is left as it is — an administrator may have
+# meant it — and setup refuses one with a login shell or a home that
+# exists, since whoever can log in as it can read the repository
+# credential from a running restic's environment. Never removed on
+# purge (Debian policy: system accounts stay).
+if command -v useradd >/dev/null 2>&1; then
+	getent passwd hotserve-backup >/dev/null 2>&1 || useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hotserve-backup
+else
+	adduser -S -H -h /nonexistent -s /sbin/nologin hotserve-backup 2>/dev/null || true # busybox
+fi
+if line=$(getent passwd hotserve-backup 2>/dev/null); then
+	shell=${line##*:}
+	home=$(printf '%s' "$line" | cut -d: -f6)
+	case "$(basename "$shell")" in nologin | false) ;; *)
+		echo "hotserve: the hotserve-backup account has a login shell ($shell); hotserve-backup setup will refuse it — lock it with \`usermod --shell /usr/sbin/nologin hotserve-backup\`" >&2 ;;
+	esac
+	if [ "$home" != /nonexistent ] && [ -e "$home" ]; then
+		echo "hotserve: the hotserve-backup account has a home directory that exists ($home); hotserve-backup setup will refuse it — \`usermod --home /nonexistent hotserve-backup\`" >&2
+	fi
+	uid=$(printf '%s' "$line" | cut -d: -f3)
+	if [ "$uid" = 0 ] || [ "$uid" = "$(id -u hotserve)" ]; then
+		echo "hotserve: the hotserve-backup account has uid $uid, which is root's or the hotserve user's; hotserve-backup setup will refuse it — remove it and let setup make it" >&2
+	fi
+else
+	echo "hotserve: the hotserve-backup system user does not exist and could not be created" >&2
+	exit 1
+fi
 # Packages before the Debian-13-only matrix copied an AppArmor profile
 # into /etc/apparmor.d (which the package itself does not own, so dpkg
 # will not remove it on upgrade). Unload and delete it: apparmor.service
@@ -81,4 +112,40 @@ EOF
 	systemctl try-restart hotserve 2>/dev/null || true
 	echo "hotserve installed. Start it with:"
 	echo "  sudo systemctl enable --now hotserve"
+fi
+# The backup timers, the way dh_installsystemd would have it: enabled on
+# first installation; an administrator's `disable` kept across upgrades
+# (was-enabled is false then, and update-state only tidies the
+# symlinks); started, or restarted on an upgrade ($2 is the version
+# upgraded from), by deb-systemd-invoke, which starts nothing that is
+# disabled or masked. The services they start do nothing until
+# `hotserve-backup setup` has written the credential file
+# (ConditionPathExists= in the unit files): an install runs no backup.
+if [ -x /usr/bin/deb-systemd-helper ]; then
+	for u in hotserve-backup.timer hotserve-backup-drill.timer; do
+		deb-systemd-helper unmask "$u" >/dev/null || true
+		if deb-systemd-helper --quiet was-enabled "$u"; then
+			deb-systemd-helper enable "$u" >/dev/null || true
+		else
+			deb-systemd-helper update-state "$u" >/dev/null || true
+		fi
+	done
+fi
+if [ -d /run/systemd/system ]; then
+	systemctl --system daemon-reload >/dev/null || true
+	if [ -n "${2:-}" ]; then action=restart; else action=start; fi
+	if [ -x /usr/bin/deb-systemd-invoke ]; then
+		deb-systemd-invoke "$action" hotserve-backup.timer hotserve-backup-drill.timer >/dev/null || true
+	else
+		# No helper (a systemd host that is not Debian): enabled here,
+		# and started, with no memory of an administrator's disable.
+		systemctl enable hotserve-backup.timer hotserve-backup-drill.timer 2>/dev/null || true
+		systemctl "$action" hotserve-backup.timer hotserve-backup-drill.timer 2>/dev/null || true
+	fi
+	if systemctl is-enabled --quiet hotserve-backup.timer 2>/dev/null; then
+		echo "Backups: the hourly timer and the Sunday restore drill are enabled, and run nothing until:"
+		echo "  sudo hotserve-backup setup <repository>"
+	else
+		echo "Backups: the hourly timer and the Sunday restore drill are disabled, as they were left; sudo systemctl enable --now hotserve-backup.timer hotserve-backup-drill.timer turns them on"
+	fi
 fi

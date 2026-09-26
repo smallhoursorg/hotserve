@@ -185,6 +185,20 @@ func (r *Runner) Close() { r.conn.Close() }
 // since every property here is systemd 257's (PrivatePIDs= above all).
 // The property is a string the manager formats ("257.13-1~deb13u1");
 // only its leading number is read.
+// Active says whether a unit of the manager's — a timer, here — is
+// running: what setup asks before it says what runs next. A oneshot
+// whose command runs is "activating" to the manager and a ticking
+// timer "active"; a name the manager never loaded is inactive to it,
+// not an error.
+func (r *Runner) Active(ctx context.Context, name string) (bool, error) {
+	props, err := r.conn.GetAllPropertiesContext(ctx, name)
+	if err != nil {
+		return false, fmt.Errorf("asking the manager about %s: %w", name, err)
+	}
+	state := str(props["ActiveState"])
+	return state == "active" || state == "activating", nil
+}
+
 func (r *Runner) ManagerVersion(context.Context) (int, error) {
 	raw, err := r.conn.GetManagerProperty("Version")
 	if err != nil {

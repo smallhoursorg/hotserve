@@ -11,6 +11,16 @@ upgrade|failed-upgrade)
 	;;
 *)
 	if command -v systemctl >/dev/null 2>&1; then
+		# The backup timers first, then anything they started: a run
+		# under way gets SIGTERM, stops its own units by name and removes
+		# its plaintext copies (TimeoutStopSec=3min in the unit file).
+		if [ -d /run/systemd/system ]; then
+			if [ -x /usr/bin/deb-systemd-invoke ]; then
+				deb-systemd-invoke stop hotserve-backup.timer hotserve-backup-drill.timer hotserve-backup.service hotserve-backup-drill.service >/dev/null || true
+			else
+				systemctl stop hotserve-backup.timer hotserve-backup-drill.timer hotserve-backup.service hotserve-backup-drill.service 2>/dev/null || true
+			fi
+		fi
 		systemctl stop hotserve 2>/dev/null || true
 		systemctl disable hotserve 2>/dev/null || true
 		# Removal is the one time the apps go too: stopping the user

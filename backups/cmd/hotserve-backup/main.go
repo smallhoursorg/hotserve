@@ -177,12 +177,28 @@ func setup(ctx context.Context, repository string) error {
 		return err
 	}
 	t.Say(fmt.Sprintf("credentials: %s (root, 0600)", cfg.EnvFile))
-	if len(rep.Apps) > 0 {
-		t.Say("next: sudo hotserve-backup run, then hotserve-backup status. Nothing runs it on a schedule on this branch: until the package's timer exists, run it hourly from a timer or cron entry of your own.")
-	} else {
-		t.Say("next: declare a backup in an app's Caddyfile block (liveswap/README.md), then sudo hotserve-backup run")
+	// What runs next is what is so on this box: the package's timer,
+	// or nothing — the raw-binary tarball, an administrator's disable.
+	timer, err := r.Active(ctx, "hotserve-backup.timer")
+	if err != nil {
+		return err
 	}
+	t.Say(nextLine(len(rep.Apps), timer))
 	return nil
+}
+
+// nextLine is setup's last word: what happens now, from whether the
+// package's hourly timer is active on this box.
+func nextLine(apps int, timerActive bool) string {
+	switch {
+	case apps > 0 && timerActive:
+		return "next: the first backup runs within the hour and ten minutes (systemctl list-timers hotserve-backup.timer); to run one now, sudo systemctl start hotserve-backup.service; then hotserve-backup status"
+	case apps > 0:
+		return "next: nothing runs it on a schedule: sudo systemctl enable --now hotserve-backup.timer, or run sudo hotserve-backup run hourly from a timer or cron entry of your own; then hotserve-backup status"
+	case timerActive:
+		return "next: declare a backup in an app's Caddyfile block (liveswap/README.md); the hourly timer backs it up from then on, or sudo systemctl start hotserve-backup.service runs one now"
+	}
+	return "next: declare a backup in an app's Caddyfile block (liveswap/README.md); nothing runs it on a schedule: sudo systemctl enable --now hotserve-backup.timer, or run sudo hotserve-backup run hourly from a timer or cron entry of your own"
 }
 
 func run(ctx context.Context) error {

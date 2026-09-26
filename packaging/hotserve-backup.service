@@ -1,0 +1,77 @@
+# hotserve-backup.service — one backup run, started by hotserve-backup.timer
+# (hourly). Root-equivalent by definition: it starts transient system
+# units (backups/README.md, "Who runs as what"). What it is given is
+# what the run needs and nothing else; every omission below is on
+# purpose, and the drill's unit says the same lines
+# (cmd/hotserve-backup/units_test.go holds both to it).
+[Unit]
+Description=hotserve backup run
+Documentation=https://github.com/smallhoursorg/hotserve/blob/main/backups/README.md
+After=network-online.target
+Wants=network-online.target
+# Nothing starts before `hotserve-backup setup` has written the
+# credential file: the timer keeps ticking, and a start with no file is
+# skipped, not failed. The run refuses on its own behind this, for a
+# file that goes between the check and the run.
+ConditionPathExists=/etc/hotserve-backup/repository.env
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/hotserve-backup run
+# The run binds the units it starts to the unit it is, so that the
+# manager ends them if this one dies, however it dies. %n is the
+# manager's expansion of this unit's name.
+Environment=HOTSERVE_BACKUP_UNIT=%n
+# No time cap on a run (PLAN D4); a stop gives the run its two minutes
+# to end its own units by name and confirm them gone, and the manager's
+# SIGKILL after that leaves BindsTo= to end them.
+TimeoutStartSec=infinity
+TimeoutStopSec=3min
+
+# Root, with what a run needs of it [measured, PLAN M54]: CAP_SYS_ADMIN
+# to bind-mount a pinned directory onto its own mount point (the one
+# way a bind source cannot be swapped under the manager, M22),
+# CAP_DAC_READ_SEARCH to walk into an app's 0750 directory and name it
+# with O_PATH, CAP_CHOWN to give the app its staging directory and the
+# backup account its fetch directory, CAP_FOWNER to chmod those once
+# they are no longer root's (the drill's fetch directory, kept between
+# drills: without it, "chmod …/restore/blog: operation not permitted").
+# No ambient capability: root holds these in its bounding set.
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_READ_SEARCH CAP_CHOWN CAP_FOWNER
+# The run itself needs no network — restic runs in units of its own,
+# started by the manager in the host's namespace — and reaches the
+# manager over its unix socket: no other address family. (Not
+# PrivateNetwork=: see below.)
+RestrictAddressFamilies=AF_UNIX
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+MemoryDenyWriteExecute=yes
+RestrictNamespaces=yes
+ProtectClock=yes
+DevicePolicy=closed
+SystemCallArchitectures=native
+# What a service needs, and mount(2)/umount2 [M55]. The run holds
+# CAP_DAC_READ_SEARCH, and every unit that does denies open_by_handle_at
+# [M34]. No SystemCallErrorNumber=: a call the filter refuses ends the
+# run loudly rather than failing it quietly somewhere else.
+SystemCallFilter=@system-service @mount
+SystemCallFilter=~open_by_handle_at
+
+# Not here, on purpose — each of these puts the unit in a mount
+# namespace of its own, where the mounts the run makes are invisible to
+# the manager, which then binds the bare mount point — root's, empty —
+# into the units instead of the app's data [M22, M54]:
+# ProtectSystem=, ProtectHome=, PrivateTmp=, PrivateDevices=,
+# ProtectKernelTunables=, ProtectKernelLogs=, ProtectControlGroups=,
+# ProtectProc=, ProtectHostname=, ReadOnlyPaths=, InaccessiblePaths=,
+# TemporaryFileSystem=, BindPaths=, PrivateMounts= — and, measured to
+# do the same, PrivateNetwork= (a private /sys for its namespace) and
+# ProtectKernelModules= (/usr/lib/modules made inaccessible): with
+# either, every database copy failed "open app.db: permission denied"
+# and the files uploaded were an empty directory's. Nor PrivatePIDs=:
+# the run's pins are made from /proc/self/fd in the host's view. Nor
+# User=: the mounts are root's to make. Nor Restart= or OnFailure=: a
+# run that failed is a failed unit until the next succeeds, and the
+# record says why.

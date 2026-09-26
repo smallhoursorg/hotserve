@@ -172,5 +172,8 @@ moment for it.
 - **Patching the box** (`apt upgrade`) reaches an app only at its next
   launch too; after patching, push a commit to each app or reboot
   ([Upgrading](upgrading.md#patching-the-host)).
+- **Backups:** the package ships `hotserve-backup` and its timers; what
+  to declare, `sudo hotserve-backup setup`, and a restore are the lines
+  under "On a fresh box" in [backups/README.md](../backups/README.md#on-a-fresh-box).
 - **Everything else:** [liveswap/README.md](../liveswap/README.md) is the
   reference for every option, status code and edge.
