@@ -619,3 +619,31 @@ func TestIntegrationWaitReturnsOnceTheUnitEndsOnItsOwn(t *testing.T) {
 	}
 	must(t, r.Stop(name(t)))
 }
+
+// Active is what setup asks of the package's timer before saying what
+// runs next: true of a unit whose command is running, false of one
+// that has ended, and false — not an error — of a name the manager
+// has never loaded, which is every box without the package's units.
+func TestIntegrationActiveSaysWhetherAUnitIs(t *testing.T) {
+	r := runner(t)
+	done := make(chan Outcome, 1)
+	go func() {
+		out, _ := r.Run(context.Background(), Spec{Name: name(t), Argv: []string{"/bin/sleep", "2"}, User: testUser})
+		done <- out
+	}()
+	for activeState(name(t)) != "activating" {
+		time.Sleep(50 * time.Millisecond)
+	}
+	// A oneshot whose command is running is activating to the manager;
+	// a timer that ticks is active. Both are "not inactive" to Active.
+	if active, err := r.Active(context.Background(), name(t)); err != nil || !active {
+		t.Fatalf("a running unit: active=%v, err=%v", active, err)
+	}
+	<-done
+	if active, err := r.Active(context.Background(), name(t)); err != nil || active {
+		t.Fatalf("an ended unit: active=%v, err=%v", active, err)
+	}
+	if active, err := r.Active(context.Background(), "hotserve_backup_never_loaded_0123456789ab.timer"); err != nil || active {
+		t.Fatalf("a unit that was never loaded: active=%v, err=%v", active, err)
+	}
+}

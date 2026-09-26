@@ -185,6 +185,15 @@ if as_nobody hotserve-backup validate "$V/cart" >"$OUT" 2>&1; then says "^cart d
 sed 's#root /var/lib/liveswap#root {$LIVESWAP_ROOT:/var/lib/liveswap}#' /root/Caddyfile.base >"$V/envroot"
 hotserve validate --config "$V/envroot" --adapter caddyfile >/dev/null 2>&1 && pass "fixture: hotserve accepts a root from the environment: push would let it through" || fail "fixture: hotserve rejects the file: the scenario proves nothing"
 if validate "$V/envroot"; then fail "a root that depends on the environment validated"; else says "LIVESWAP_ROOT" && pass "a root that depends on the environment is refused, by the variable's name" || fail "said: $(cat "$OUT")"; fi
+# The same root on a box where no app declares a backup is no refusal:
+# a run backs nothing up there, and bin/push must not refuse a config
+# that works today for a feature the box does not use (the owner, 4a:
+# decided in 4c).
+sed '/backup {/,/}/d' "$V/envroot" >"$V/envroot-nobackup"
+grep -q "backup {" "$V/envroot-nobackup" && fail "fixture: a backup block is still in the file" || pass "fixture: no app declares a backup in the file"
+# shellcheck disable=SC2016 # the Caddyfile's own {$NAME}
+grep -q 'root {$LIVESWAP_ROOT' "$V/envroot-nobackup" && pass "fixture: and the root still depends on the environment" || fail "fixture: the root is not the environment's: $(grep root "$V/envroot-nobackup")"
+if validate "$V/envroot-nobackup"; then says "^no app declares a backup: a run would back nothing up" && ! says "LIVESWAP_ROOT" && pass "with no backup declared, a root from the environment is no refusal, and is not spoken of" || fail "said: $(cat "$OUT")"; else fail "refused with no backup declared: $(cat "$OUT")"; fi
 
 # A glob that reaches outside matches nothing inside a run's view, which
 # to the adapter is no error: the run would plan without what is

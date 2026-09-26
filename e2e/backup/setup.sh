@@ -13,6 +13,7 @@
 # below is content with a non-zero exit alone.
 . /lib.sh
 . /lib-backup.sh
+. /tty.sh
 
 S3=s3:http://e2e-s3:9000
 REPO=$S3/setuprepo
@@ -25,47 +26,7 @@ wait_for_systemd
 cp "$CADDYFILE" /root/Caddyfile.base
 seed
 
-# at_tty <cmd...>: the command at a real terminal, script(1)'s, typing
-# what is on stdin — for a command that asks nothing.
-at_tty() { script -qec "$*" /dev/null; }
-# converse <cmd> [<prompt> <answer>]...: the command at a real terminal,
-# each answer typed once its prompt is the last thing on the screen —
-# a pty echoes what arrives before echo is off, and a loaded runner
-# takes its time to a prompt — and then once the screen has moved on,
-# so that the same prompt asked again is waited for again. Output in
-# $OUT; exit status the command's.
-converse() {
-	cmd=$1
-	shift
-	rm -f /root/in
-	mkfifo /root/in
-	script -qec "$cmd" /dev/null </root/in >"$OUT" 2>&1 &
-	cv=$!
-	exec 3>/root/in
-	while [ $# -ge 2 ]; do
-		p=$1
-		a=$2
-		shift 2
-		i=0
-		until [ "$(tail -c "${#p}" "$OUT" 2>/dev/null)" = "$p" ] || ! kill -0 "$cv" 2>/dev/null || [ "$i" -ge 600 ]; do
-			i=$((i + 1))
-			sleep 0.1
-		done
-		kill -0 "$cv" 2>/dev/null || break
-		printf '%s\n' "$a" >&3
-		i=0
-		while [ "$(tail -c "${#p}" "$OUT" 2>/dev/null)" = "$p" ] && kill -0 "$cv" 2>/dev/null && [ "$i" -lt 100 ]; do
-			i=$((i + 1))
-			sleep 0.1
-		done
-	done
-	exec 3>&-
-	wait "$cv"
-}
-P_KEY="Storage key id (AWS_ACCESS_KEY_ID): "
-P_SECRET="Storage secret key (AWS_SECRET_ACCESS_KEY): "
-P_STORED="Type stored to go on: "
-P_PW="Repository password: "
+# at_tty, converse and the prompts: /tty.sh.
 setup() { hotserve-backup setup "$@" >"$OUT" 2>&1; }
 says() { grep -q -e "$1" "$OUT"; }
 sum() { sha256sum "$ENVFILE" 2>/dev/null | cut -d' ' -f1; }
@@ -97,6 +58,15 @@ printf 'x\n' | at_tty hotserve-backup setup "$REPO" >"$OUT" 2>&1 && fail "setup 
 says "Storage key id" && fail "a prompt was asked before the preflight passed" || pass "and asked nothing"
 id hotserve-backup >/dev/null 2>&1 && fail "the account was made before the preflight passed" || pass "and made no account"
 mv /usr/bin/restic.aside /usr/bin/restic
+# An account of that name made by hand, with a shell and a home: whoever
+# can log in as it can read the credential from restic's environment.
+# Refused, naming both, and left as it is — never normalised.
+useradd --system --shell /bin/sh --home-dir /home/hsb -m hotserve-backup
+printf 'x\n' | at_tty hotserve-backup setup "$REPO" >"$OUT" 2>&1 && fail "setup with an account that has a login shell exited 0" || { says "the hotserve-backup account exists with a login shell (/bin/sh) and a home directory that exists (/home/hsb)" && says "usermod --shell /usr/sbin/nologin --home /nonexistent hotserve-backup" && says "useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hotserve-backup" && pass "an account made wrong is refused, naming what is wrong and the two ways to mend it" || fail "the wrong account: $(cat "$OUT")"; }
+says "Storage key id" && fail "a prompt was asked with a wrong account" || pass "and asked nothing"
+getent passwd hotserve-backup | grep -q ':/home/hsb:/bin/sh$' && [ -d /home/hsb ] && pass "and the account was left as it was" || fail "the account was changed: $(getent passwd hotserve-backup)"
+userdel -r hotserve-backup 2>/dev/null
+[ ! -e "$ETC" ] && pass "and nothing was made under /etc" || fail "$ETC exists"
 for r in sftp:user@host:/srv/backups /srv/backups local:/srv/backups rclone:remote:bucket azure:container:path gs:bucket:path swift:container:/path rest:https://host:8000/ "s3:http://user:pass@e2e-s3:9000/box" "s3:user:pass@e2e-s3:9000/box" "s3://user:pass@e2e-s3:9000/box" "ftp://host/x" "s3:"; do
 	if printf 'x\n' | at_tty hotserve-backup setup "$r" >"$OUT" 2>&1; then
 		fail "setup $r exited 0"
@@ -137,7 +107,10 @@ says "account hotserve-backup: made" && getent passwd hotserve-backup | grep -q 
 rr cat config --no-lock >/dev/null 2>&1 && pass "the repository answers the credential the file holds" || fail "the repository does not answer: $(rr cat config --no-lock 2>&1)"
 says "a run would back up blog, notyet, shop, under /var/lib/liveswap" && pass "the plan was read first, and said" || fail "the plan: $(cat "$OUT")"
 says "^looking for a repository at $REPO" && pass "the repository was looked for before a password was made" || fail "the look: $(cat "$OUT")"
-says "^next: sudo hotserve-backup run, then hotserve-backup status. Nothing runs it on a schedule on this branch" && pass "and what to do next, and what does not happen by itself" || fail "next: $(cat "$OUT")"
+# This box's timer is not active (the image undoes the package's
+# enabling): setup says so, and how to have it; the package smoke sees
+# the other wording, with the timer active.
+says "^next: nothing runs it on a schedule: sudo systemctl enable --now hotserve-backup.timer, or run sudo hotserve-backup run hourly from a timer or cron entry of your own; then hotserve-backup status" && pass "and what to do next, from the timer being inactive here" || fail "next: $(cat "$OUT")"
 journalctl --sync >/dev/null 2>&1
 if ! journalctl --no-pager | grep -q "hotserve backup: init the repository"; then
 	fail "the journal does not show the init unit, so it cannot show what is not in it"
