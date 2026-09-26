@@ -309,36 +309,28 @@ func Write(path string, pairs []Pair) error {
 // a dotfile beside it, with what os.CreateTemp appends.
 func tempPattern(base string) string { return "." + base + "-*" }
 
-// IsLeftover says whether name, beside base, is a file a Write that
-// did not live to its rename left behind, or one setup wrote beside
-// the working file under base.<12 hex> for its units to read — the two
-// shapes a sweep may remove, and the only two: what an operator keeps
-// beside the file under another name is theirs.
-func IsLeftover(name, base string) bool {
-	if rest, ok := strings.CutPrefix(name, base+"."); ok {
-		return nonce(rest)
-	}
-	// What Write makes on the way to base, or to base.<nonce>.
-	rest, ok := strings.CutPrefix(name, "."+base)
-	if !ok {
-		return false
-	}
-	if n, ok := strings.CutPrefix(rest, "."); ok {
-		if n, rest, ok = strings.Cut(n, "-"); !ok || !nonce(n) {
-			return false
-		}
-		rest = "-" + rest
-	}
-	digits, ok := strings.CutPrefix(rest, "-")
-	return ok && digits != "" && strings.Trim(digits, "0123456789") == ""
-}
+// Staged is where setup writes the file beside the working one at
+// path, for its units to read until the repository has answered: one
+// name, since setup holds the run lock and no two write at once.
+func Staged(path string) string { return path + ".staged" }
 
-// nonce is twelve hex characters: what setup names its file with.
-func nonce(s string) bool {
-	if len(s) != 12 {
-		return false
+// IsLeftover says whether name, beside base, is a file a setup that
+// did not live to the end left behind: the staged file, or what a
+// Write on the way to it or to base made — the two shapes a sweep may
+// remove, and the only two: what an operator keeps beside the file
+// under another name is theirs.
+func IsLeftover(name, base string) bool {
+	staged := filepath.Base(Staged(base))
+	if name == staged {
+		return true
 	}
-	return strings.Trim(s, "0123456789abcdef") == ""
+	// What Write makes on the way to base, or to the staged file.
+	for _, to := range []string{base, staged} {
+		if digits, ok := strings.CutPrefix(name, "."+to+"-"); ok && digits != "" && strings.Trim(digits, "0123456789") == "" {
+			return true
+		}
+	}
+	return false
 }
 
 // Commit renames from over to, and puts the directory on the disk.

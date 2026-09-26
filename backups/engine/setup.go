@@ -184,6 +184,26 @@ func OldEnvFileNote(cfg Config) string {
 	return fmt.Sprintf(" (%s is from before this version and is not read: run `sudo hotserve-backup setup <its RESTIC_REPOSITORY>`, which asks for its RESTIC_PASSWORD; then remove it)", cfg.OldEnvFile)
 }
 
+// setup is one setup under way: the run whose lock it holds, the
+// operator, the repository, the file being written beside the working
+// one, and what has become of the password shown, where one was.
+type setup struct {
+	*run
+	term Terminal
+	repo string
+	// staged is the file beside the working one, which the units here
+	// read, and which takes the working one's place at the end.
+	staged string
+	// password is the one made for a new repository: shown once, and
+	// kept through a key typed wrong — it has taken effect nowhere
+	// until init has made the repository with it. Empty until shown.
+	password string
+	// initRan is whether restic init has been started with password
+	// at all: from then on no failure proves it unused, and it is never
+	// said to be.
+	initRan bool
+}
+
 // Setup makes the box ready to back up into one repository: the
 // account, the directories, and the credential file — written whole and
 // put in place only once the repository has answered. Everything that
@@ -230,8 +250,9 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 		return nil, err
 	}
 	defer end()
+	s := &setup{run: x, term: term, repo: o.Repository, staged: envfile.Staged(cfg.EnvFile)}
 	if err != nil {
-		return nil, x.setupErr(err, "")
+		return nil, s.err(err)
 	}
 	dir := filepath.Dir(cfg.EnvFile)
 	// Anyone may see that the file is there and when it was written —
@@ -279,7 +300,7 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 
 	p, err := x.planWith(ctx, filepath.Join(x.dir, "plan.err"))
 	if err != nil {
-		return nil, x.setupErr(err, "")
+		return nil, s.err(err)
 	}
 	rep.Apps = p.Names()
 	if len(rep.Apps) == 0 {
@@ -288,33 +309,26 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 		term.Say(fmt.Sprintf("a run would back up %s, under %s", record.Clean(strings.Join(rep.Apps, ", ")), record.Text(p.Root)))
 	}
 
-	// The file is written beside the working one, under a name the
-	// manager reads for the units here, and takes the working one's
+	// The file is written beside the working one, staged under a name
+	// the manager reads for the units here, and takes the working one's
 	// place only once the repository has answered. Whatever ends this
-	// command before that, the working file is as it was and the temp
+	// command before that, the working file is as it was and the staged
 	// file goes with it. Until a password is made it holds a throwaway
 	// one: what the look for a repository needs, and nothing that takes
 	// effect anywhere.
-	tmp := cfg.EnvFile + "." + x.nonce
-	defer os.Remove(tmp) //nolint:errcheck // gone already once it was put in place
+	defer os.Remove(s.staged) //nolint:errcheck // gone already once it was put in place
 	throwaway, err := newPassword()
 	if err != nil {
 		return nil, err
 	}
-	// password is the one made for a new repository: shown once, and
-	// kept through a key typed wrong — it has taken effect nowhere
-	// until init has made the repository with it. Once init has been
-	// started with it at all (x.initRan), no failure proves it unused,
-	// and it is never said to be.
-	var password string
 	exists := false
 	// A repository that is there has a password of its own, which is
 	// asked for below; one shown here is not it, and init, where it
 	// ran, made nothing with it.
 	needsOwn := func() {
-		exists, x.initRan = true, false
+		exists, s.initRan = true, false
 		msg := "the repository exists; its password is needed"
-		if password != "" {
+		if s.password != "" {
 			msg += " (the one shown above is not it)"
 		}
 		term.Say(msg)
@@ -323,15 +337,15 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 	for attempt := 1; ; attempt++ {
 		pairs = pairs[:2]
 		for _, c := range creds {
-			v, err := ask(ctx, term, c.label+" ("+c.variable+"): ", c.secret)
+			v, err := s.ask(ctx, c.label+" ("+c.variable+"): ", c.secret)
 			if err != nil {
-				return nil, x.setupErr(err, password)
+				return nil, s.err(err)
 			}
 			pairs = append(pairs, envfile.Pair{Key: c.variable, Value: v})
 		}
 		pairs[1].Value = throwaway
-		if err := writeEnv(tmp, pairs); err != nil {
-			return nil, x.setupErr(err, password)
+		if err := writeEnv(s.staged, pairs); err != nil {
+			return nil, s.err(err)
 		}
 		// Before any password is made: is there a repository already?
 		// With a right key restic says at once — none (10), or one this
@@ -339,23 +353,23 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 		// for the password it has, not shown one it does not need.
 		// Where the look cannot tell, init answers, and says why.
 		term.Say(fmt.Sprintf("looking for a repository at %s (up to %s)", o.Repository, setupProbeClock))
-		found, err := x.look(ctx, term, o.Repository, tmp)
+		found, err := s.look(ctx)
 		if err != nil {
-			return nil, x.setupErr(err, password)
+			return nil, s.err(err)
 		}
 		switch {
-		case found == lookFound && password != "" && x.initRan:
+		case found == lookFound && s.password != "" && s.initRan:
 			// A repository is there, and an earlier attempt's init ran
 			// with the password shown: the throwaway not opening it says
 			// nothing of that one. Tried first — a repository it opens is
 			// one this setup made.
-			pairs[1].Value = password
-			if err := writeEnv(tmp, pairs); err != nil {
-				return nil, x.setupErr(err, password)
+			pairs[1].Value = s.password
+			if err := writeEnv(s.staged, pairs); err != nil {
+				return nil, s.err(err)
 			}
-			id, opened, err := x.openRepository(ctx, term, o.Repository, tmp)
+			id, opened, err := s.openRepository(ctx)
 			if err != nil {
-				return nil, x.setupErr(err, password)
+				return nil, s.err(err)
 			}
 			if opened {
 				term.Say("the repository exists, and the password shown above opens it: it was made by an earlier attempt of this setup")
@@ -367,7 +381,7 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 			needsOwn()
 		case found == lookNone:
 			// None: one is made below.
-		case password != "":
+		case s.password != "":
 			term.Say(fmt.Sprintf("no repository answered within %s: a bucket not made yet, a wrong key and a wrong host look alike here; a new repository will be made, and the password shown above still applies", setupProbeClock))
 		default:
 			term.Say(fmt.Sprintf("no repository answered within %s: a bucket not made yet, a wrong key and a wrong host look alike here; a new repository will be made, and if that fails the password shown next was never used", setupProbeClock))
@@ -375,31 +389,31 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 		if exists || rep.New {
 			break
 		}
-		if password == "" {
-			if password, err = newPassword(); err != nil {
+		if s.password == "" {
+			if s.password, err = newPassword(); err != nil {
 				return nil, err
 			}
-			term.Say("Repository password (new): " + password)
+			term.Say("Repository password (new): " + s.password)
 			term.Say("Store it off the box now, with the repository URL, " + o.Repository + ", and the storage key: with those three, `restic -r <url>` reads every backup from any machine; without the password nothing can.")
-			if err := x.confirmStored(ctx, term); err != nil {
-				return nil, x.setupErr(err, password)
+			if err := s.confirmStored(ctx); err != nil {
+				return nil, s.err(err)
 			}
 		}
-		pairs[1].Value = password
-		if err := writeEnv(tmp, pairs); err != nil {
-			return nil, x.setupErr(err, password)
+		pairs[1].Value = s.password
+		if err := writeEnv(s.staged, pairs); err != nil {
+			return nil, s.err(err)
 		}
-		x.initRan = true
-		o1, message, err := x.makeRepository(ctx, term, o.Repository, tmp)
+		s.initRan = true
+		o1, message, err := s.makeRepository(ctx)
 		if err != nil {
-			return nil, x.setupErr(err, password)
+			return nil, s.err(err)
 		}
 		if o1.OK() {
 			if rep.RepositoryID = initializedID(filepath.Join(x.dir, "init.out")); rep.RepositoryID == "" {
 				// Exit 0 is a repository made, with the password that was
 				// shown: whatever restic did not say, that password is now
 				// the repository's, and is never said to be dead.
-				return nil, fateSaid(errors.New("restic made the repository and exited 0 but said nothing of it; the password shown above is the repository's: keep it, and run setup again to open it"))
+				return nil, errors.New("restic made the repository and exited 0 but said nothing of it; the password shown above is the repository's: keep it, and run setup again to open it")
 			}
 			rep.New = true
 			break
@@ -428,21 +442,21 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 			detail, _ := resticFailure(o1)
 			failure = errors.New(detail)
 		}
-		return nil, x.setupErr(failure, password)
+		return nil, s.err(failure)
 	}
 	if exists {
 		for attempt := 1; ; attempt++ {
-			own, err := ask(ctx, term, "Repository password: ", true)
+			own, err := s.ask(ctx, "Repository password: ", true)
 			if err != nil {
-				return nil, x.setupErr(err, password)
+				return nil, s.err(err)
 			}
 			pairs[1].Value = own
-			if err := writeEnv(tmp, pairs); err != nil {
-				return nil, x.setupErr(err, password)
+			if err := writeEnv(s.staged, pairs); err != nil {
+				return nil, s.err(err)
 			}
-			id, opened, err := x.openRepository(ctx, term, o.Repository, tmp)
+			id, opened, err := s.openRepository(ctx)
 			if err != nil {
-				return nil, x.setupErr(err, password)
+				return nil, s.err(err)
 			}
 			if opened {
 				rep.RepositoryID = id
@@ -452,7 +466,7 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 				term.Say("this password cannot open the repository (exit 12): again")
 				continue
 			}
-			return nil, x.setupErr(errors.New("this password cannot open the repository (exit 12)"), password)
+			return nil, s.err(errors.New("this password cannot open the repository (exit 12)"))
 		}
 	}
 	// The record speaks of the repository it was written against,
@@ -505,17 +519,17 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 	if why != "" {
 		rep.Aside = statusPath + ".aside-" + time.Now().UTC().Format("20060102T150405Z")
 		if err := os.Rename(statusPath, rep.Aside); err != nil {
-			return nil, x.setupErr(err, password)
+			return nil, s.err(err)
 		}
 		if err := syncDir(cfg.StateDir); err != nil {
-			return nil, x.setupErr(putBack(err), password)
+			return nil, s.err(putBack(err))
 		}
 	}
-	if err := commit(tmp, cfg.EnvFile); err != nil {
+	if err := commit(s.staged, cfg.EnvFile); err != nil {
 		if why != "" {
-			return nil, x.setupErr(putBack(err), password)
+			return nil, s.err(putBack(err))
 		}
-		return nil, x.setupErr(err, password)
+		return nil, s.err(err)
 	}
 	// The id goes on the disk once the file is in place, never before:
 	// a power cut between the two must not leave the new id beside the
@@ -528,13 +542,13 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 	// doubt. Said, and the record left aside with it.
 	inPlace := "the credential file is in place and holds the repository's password (the one shown above, where one was shown: keep it)"
 	if err := writeID(idFile, rep.RepositoryID); err != nil {
-		return nil, fateSaid(fmt.Errorf("%s; the repository's id could not be kept beside the record, so the next setup puts the record aside: %w", inPlace, err))
+		return nil, fmt.Errorf("%s; the repository's id could not be kept beside the record, so the next setup puts the record aside: %w", inPlace, err)
 	}
 	if err := syncDir(cfg.StateDir); err != nil {
-		return nil, fateSaid(fmt.Errorf("%s; the state directory could not be synced to the disk: %w", inPlace, err))
+		return nil, fmt.Errorf("%s; the state directory could not be synced to the disk: %w", inPlace, err)
 	}
 	if err := syncDir(dir); err != nil {
-		return nil, fateSaid(fmt.Errorf("%s; its directory could not be synced to the disk: %w", inPlace, err))
+		return nil, fmt.Errorf("%s; its directory could not be synced to the disk: %w", inPlace, err)
 	}
 	if why != "" {
 		term.Say(fmt.Sprintf("the record was put aside (%s): %s; the next run drills what it backs up", why, rep.Aside))
@@ -544,7 +558,7 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 		kind = "new"
 	}
 	term.Say(fmt.Sprintf("repository ready: %s (%s, id %s)", o.Repository, kind, short(rep.RepositoryID)))
-	if password != "" && !rep.New {
+	if s.password != "" && !rep.New {
 		term.Say("the password shown above was never used: discard it")
 	}
 	// The file from before this version, if it is still there, is
@@ -560,9 +574,9 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 // confirmStored has the operator type "stored" — a word that means
 // something, not "y" — with one more asking for a word that is not
 // it; anything then is a no.
-func (x *run) confirmStored(ctx context.Context, term Terminal) error {
+func (s *setup) confirmStored(ctx context.Context) error {
 	for i := 0; i < 2; i++ {
-		said, err := term.Ask(ctx, "Type stored to go on: ", false)
+		said, err := s.term.Ask(ctx, "Type stored to go on: ", false)
 		if err != nil {
 			return fmt.Errorf("nobody answered: %w", err)
 		}
@@ -570,55 +584,54 @@ func (x *run) confirmStored(ctx context.Context, term Terminal) error {
 			return nil
 		}
 		if i == 0 {
-			term.Say("that is not stored: type stored to go on, or anything else to stop")
+			s.term.Say("that is not stored: type stored to go on, or anything else to stop")
 		}
 	}
 	return errors.New("the password was not confirmed stored: nothing was written")
 }
 
-// setupErr is an error in the operator's words: an interrupt is said
-// as one, and a password that was shown and never used is said to be
-// dead.
-func (x *run) setupErr(err error, password string) error {
+// err is an error ending setup, in the operator's words: an interrupt
+// is said as one, and what became of the password shown, where one
+// was, is said with it — nothing here returns an error after the
+// showing but through this.
+func (s *setup) err(err error) error {
 	// A unit that could not be seen gone may still be making the
 	// repository with that password: nothing is said of it but the
-	// runner's own words. And a fate already said is not said again.
-	if errors.Is(err, unit.ErrNotConfirmedGone) || errors.Is(err, errFateSaid) {
+	// runner's own words.
+	if errors.Is(err, unit.ErrNotConfirmedGone) {
 		return err
 	}
-	dead := ""
+	fate := ""
 	switch {
-	case password != "" && x.initRan:
+	case s.password != "" && s.initRan:
 		// Started, init may have written some or all of a repository
-		// before it was stopped or failed: nothing here proves the
+		// before it failed or was left running: nothing here proves the
 		// password unused, so it is kept.
-		dead = "; keep the password shown above: restic init ran with it, and may have made the repository; run setup again, which looks first and asks for it if the repository is there"
-	case password != "":
-		dead = "; the password shown above was never used: discard it"
+		fate = "; keep the password shown above: restic init ran with it, and may have made the repository; run setup again, which looks first and asks for it if the repository is there"
+	case s.password != "":
+		fate = "; the password shown above was never used: discard it"
 	}
 	if errors.Is(err, context.Canceled) {
-		return interrupted("interrupted: nothing has been written" + dead)
+		return interrupted("interrupted: nothing has been written" + fate)
 	}
-	if dead != "" {
-		return fateSaid(fmt.Errorf("%w%s", err, dead))
+	if fate != "" {
+		return fmt.Errorf("%w%s", err, fate)
 	}
 	return err
 }
 
 // interrupted is context.Canceled in the operator's words: it is that
-// error to errors.Is, and says nothing of contexts; its fate is said.
+// error to errors.Is, and says nothing of contexts.
 type interrupted string
 
-func (e interrupted) Error() string { return string(e) }
-func (interrupted) Is(target error) bool {
-	return target == context.Canceled || target == errFateSaid
-}
+func (e interrupted) Error() string      { return string(e) }
+func (interrupted) Is(target error) bool { return target == context.Canceled }
 
 // ask asks up to three times for a value the file can hold, and says
 // each time why it cannot.
-func ask(ctx context.Context, term Terminal, prompt string, secret bool) (string, error) {
+func (s *setup) ask(ctx context.Context, prompt string, secret bool) (string, error) {
 	for i := 0; i < 3; i++ {
-		v, err := term.Ask(ctx, prompt, secret)
+		v, err := s.term.Ask(ctx, prompt, secret)
 		if err != nil {
 			return "", fmt.Errorf("nobody answered: %w", err)
 		}
@@ -626,7 +639,7 @@ func ask(ctx context.Context, term Terminal, prompt string, secret bool) (string
 		if why == nil {
 			return v, nil
 		}
-		term.Say(fmt.Sprintf("that cannot go in the file: %v; again", why))
+		s.term.Say(fmt.Sprintf("that cannot go in the file: %v; again", why))
 	}
 	return "", errors.New("no usable value was given in three times")
 }
@@ -691,8 +704,8 @@ const (
 // could not tell — restic's exit 1 (the storage retrying) and the
 // clock — and those fall through to init; any other failure is the
 // unit's own, and ends setup before any password is made.
-func (x *run) look(ctx context.Context, term Terminal, repo, envFile string) (lookResult, error) {
-	o, _, err := x.repository(ctx, term, repo, "probe", envFile, setupProbeClock, x.cfg.Restic, "cat", "config", "--no-lock")
+func (s *setup) look(ctx context.Context) (lookResult, error) {
+	o, _, err := s.repository(ctx, "probe", setupProbeClock, s.cfg.Restic, "cat", "config", "--no-lock")
 	if err != nil {
 		if errors.Is(err, errDidNotAnswer) {
 			return lookUnsure, nil
@@ -717,22 +730,22 @@ func (x *run) look(ctx context.Context, term Terminal, repo, envFile string) (lo
 // makes the repository with the password that was shown. Its clock, and
 // an interrupt, end the waiting, not the unit: it is left running,
 // recorded for the next lock holder to wait for, and said so.
-func (x *run) makeRepository(ctx context.Context, term Terminal, repo, envFile string) (unit.Outcome, string, error) {
-	return x.repository(ctx, term, repo, "init", envFile, setupClock, x.cfg.Restic, "init", "--json")
+func (s *setup) makeRepository(ctx context.Context) (unit.Outcome, string, error) {
+	return s.repository(ctx, "init", setupClock, s.cfg.Restic, "init", "--json")
 }
 
 // openRepository opens the repository with the password the file holds
 // (restic cat config): the repository's id and true, or false where the
 // password does not open it (exit 12); anything else is an error, in
 // restic's words where it has any.
-func (x *run) openRepository(ctx context.Context, term Terminal, repo, envFile string) (id string, opened bool, err error) {
-	o, message, err := x.repository(ctx, term, repo, "open", envFile, setupClock, x.cfg.Restic, "cat", "config", "--no-lock")
+func (s *setup) openRepository(ctx context.Context) (id string, opened bool, err error) {
+	o, message, err := s.repository(ctx, "open", setupClock, s.cfg.Restic, "cat", "config", "--no-lock")
 	if err != nil {
 		return "", false, err
 	}
 	switch {
 	case o.OK():
-		if id = configID(filepath.Join(x.dir, "open.out")); id == "" {
+		if id = configID(filepath.Join(s.dir, "open.out")); id == "" {
 			return "", false, errors.New("restic exited 0 but said nothing of the repository's id")
 		}
 		return id, true, nil
@@ -758,7 +771,7 @@ var errDidNotAnswer = errors.New("the repository did not answer")
 // and on an interrupt. Init is not (see makeRepository): the clock and
 // an interrupt end the waiting, the unit runs on, and the error names
 // it.
-func (x *run) repository(ctx context.Context, term Terminal, repo, role, envFile string, within time.Duration, argv ...string) (unit.Outcome, string, error) {
+func (s *setup) repository(ctx context.Context, role string, within time.Duration, argv ...string) (unit.Outcome, string, error) {
 	clock, cancel := context.WithTimeout(ctx, within)
 	defer cancel()
 	// A person waiting is told what for, and what Ctrl-C would do:
@@ -770,27 +783,27 @@ func (x *run) repository(ctx context.Context, term Terminal, repo, role, envFile
 	note := time.AfterFunc(setupNote, func() {
 		defer close(noteDone)
 		if role == "init" {
-			term.Say("still waiting for " + repo + " (Ctrl-C leaves restic init running, and the next setup waits for it; it may be making the repository with the password shown: keep it)")
+			s.term.Say("still waiting for " + s.repo + " (Ctrl-C leaves restic init running, and the next setup waits for it; it may be making the repository with the password shown: keep it)")
 			return
 		}
-		term.Say("still waiting for " + repo + " (Ctrl-C is safe: nothing has been written)")
+		s.term.Say("still waiting for " + s.repo + " (Ctrl-C is safe: nothing has been written)")
 	})
 	defer func() {
 		if !note.Stop() {
 			<-noteDone
 		}
 	}()
-	errFile := filepath.Join(x.dir, role+".err")
+	errFile := filepath.Join(s.dir, role+".err")
 	spec := unit.Spec{
-		Name: x.name(role, ""), Description: "hotserve backup: " + role + " the repository",
+		Name: s.name(role, ""), Description: "hotserve backup: " + role + " the repository",
 		Argv: argv,
-		User: backupUser, Network: true, EnvironmentFile: envFile,
+		User: backupUser, Network: true, EnvironmentFile: s.staged,
 		Environment:    []string{"RESTIC_CACHE_DIR=/var/cache/hotserve-backup", "HOME=/nonexistent"},
 		CacheDirectory: "hotserve-backup",
-		StdoutFile:     filepath.Join(x.dir, role+".out"), StderrFile: errFile,
+		StdoutFile:     filepath.Join(s.dir, role+".out"), StderrFile: errFile,
 	}
 	if role != "init" {
-		o, err := x.start(clock, spec)
+		o, err := s.start(clock, spec)
 		if err != nil {
 			if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, unit.ErrNotConfirmedGone) {
 				return o, "", fmt.Errorf("%w within %s; the unit was stopped", errDidNotAnswer, within)
@@ -802,7 +815,7 @@ func (x *run) repository(ctx context.Context, term Terminal, repo, role, envFile
 	// Init: recorded for the next lock holder to wait for, not to stop
 	// (the record goes once it was seen to end), and run on a context
 	// nothing here cancels. The clock and an interrupt end this wait alone.
-	marker := filepath.Join(x.cfg.RunDir, "init-unit")
+	marker := filepath.Join(s.cfg.RunDir, "init-unit")
 	if err := os.WriteFile(marker, []byte(spec.Name+"\n"), 0o600); err != nil {
 		return unit.Outcome{}, "", err
 	}
@@ -814,7 +827,7 @@ func (x *run) repository(ctx context.Context, term Terminal, repo, role, envFile
 	}
 	done := make(chan ended, 1)
 	go func() {
-		o, err := x.r.Run(context.WithoutCancel(ctx), spec)
+		o, err := s.r.Run(context.WithoutCancel(ctx), spec)
 		if err == nil {
 			// Seen to its end. A runner error is a unit lost sight
 			// of — the request may have reached the manager all the
@@ -837,21 +850,6 @@ func (x *run) repository(ctx context.Context, term Terminal, repo, role, envFile
 		return unit.Outcome{}, "", fmt.Errorf("%w within %s; restic init is left running as %s, and the next run or setup waits for it (if it must be ended: systemctl stop %s)", errDidNotAnswer, within, spec.Name, spec.Name)
 	}
 }
-
-// errFateSaid marks an error whose text already says what became of
-// the password that was shown.
-var errFateSaid = errors.New("the password's fate is said")
-
-// fateSaid marks err as saying the password's fate itself; the mark
-// is not in its text.
-func fateSaid(err error) error { return withFate{err} }
-
-// withFate is an error whose fate is said, to errors.Is.
-type withFate struct{ err error }
-
-func (e withFate) Error() string      { return e.err.Error() }
-func (e withFate) Unwrap() error      { return e.err }
-func (withFate) Is(target error) bool { return target == errFateSaid }
 
 // repositoryExists reads restic's word for a repository that is there
 // already, out of an init that exited 1: two wordings, one condition

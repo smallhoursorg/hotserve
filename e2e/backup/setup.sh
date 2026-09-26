@@ -69,7 +69,7 @@ P_PW="Repository password: "
 setup() { hotserve-backup setup "$@" >"$OUT" 2>&1; }
 says() { grep -q -e "$1" "$OUT"; }
 sum() { sha256sum "$ENVFILE" 2>/dev/null | cut -d' ' -f1; }
-temps() { ls -A "$ETC" 2>/dev/null | grep -c '^\.\{0,1\}repository\.env\.[0-9a-f]\{12\}'; }
+temps() { ls -A "$ETC" 2>/dev/null | grep -c '^\.\{0,1\}repository\.env\.staged'; }
 shown_password() { grep -o 'Repository password (new): [a-z2-7]\{52\}' "$1" | cut -d' ' -f4; }
 as_nobody() { setpriv --reuid nobody --regid nogroup --clear-groups "$@"; }
 until_units() { # <n> <pattern>: waits up to a minute for that many units of the pattern to be running

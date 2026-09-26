@@ -207,8 +207,9 @@ func TestWriteIsWholeAndRootOnly(t *testing.T) {
 }
 
 // What a sweep may remove is exactly what Write and setup leave: the
-// name os.CreateTemp makes from Write's own pattern, and the nonce
-// shape — never a name an operator chose.
+// staged file, under the one name Staged gives it, and the name
+// os.CreateTemp makes from Write's own pattern on the way to either —
+// never a name an operator chose.
 func TestALeftoverIsWhatWriteOrSetupLeaves(t *testing.T) {
 	dir := t.TempDir()
 	tmp, err := os.CreateTemp(dir, tempPattern("repository.env"))
@@ -217,16 +218,19 @@ func TestALeftoverIsWhatWriteOrSetupLeaves(t *testing.T) {
 	if !IsLeftover(filepath.Base(tmp.Name()), "repository.env") {
 		t.Fatalf("what Write makes on the way, %s, is not a leftover", filepath.Base(tmp.Name()))
 	}
-	if !IsLeftover("repository.env.0123456789ab", "repository.env") {
-		t.Fatal("setup's own file is not a leftover")
+	if Staged("/etc/hotserve-backup/repository.env") != "/etc/hotserve-backup/repository.env.staged" {
+		t.Fatalf("the staged name: %s", Staged("/etc/hotserve-backup/repository.env"))
 	}
-	nonced, err := os.CreateTemp(dir, tempPattern("repository.env.0123456789ab"))
+	if !IsLeftover(filepath.Base(Staged("repository.env")), "repository.env") {
+		t.Fatal("setup's own staged file is not a leftover")
+	}
+	staged, err := os.CreateTemp(dir, tempPattern(filepath.Base(Staged("repository.env"))))
 	must(t, err)
-	must(t, nonced.Close())
-	if !IsLeftover(filepath.Base(nonced.Name()), "repository.env") {
-		t.Fatalf("what Write makes on the way to setup's file, %s, is not a leftover", filepath.Base(nonced.Name()))
+	must(t, staged.Close())
+	if !IsLeftover(filepath.Base(staged.Name()), "repository.env") {
+		t.Fatalf("what Write makes on the way to the staged file, %s, is not a leftover", filepath.Base(staged.Name()))
 	}
-	for _, kept := range []string{"repository.env", "repository.env.bak", "repository.env.old", "repository.env.gs", ".repository.env.swp", "repository.env.0123456789ab.bak", ".repository.env.0123456789ab", "notes.txt", "repository.env.0123456789ABCD"} {
+	for _, kept := range []string{"repository.env", "repository.env.bak", "repository.env.old", "repository.env.gs", ".repository.env.swp", "repository.env.staged.bak", ".repository.env.staged", "repository.env.0123456789ab", ".repository.env.0123456789ab-4207310592", "notes.txt", "repository.env.STAGED"} {
 		if IsLeftover(kept, "repository.env") {
 			t.Errorf("%s would be swept", kept)
 		}

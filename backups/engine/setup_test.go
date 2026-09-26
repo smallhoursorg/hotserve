@@ -1518,11 +1518,11 @@ func TestALeftoverTempFileIsRemovedFirstAndSaid(t *testing.T) {
 	dir := filepath.Dir(b.cfg.EnvFile)
 	must(t, os.MkdirAll(dir, 0o755))
 	// The two shapes a setup that did not live to the end leaves: the
-	// file the units read, and the one envfile.Write makes on the way
-	// to it. What an operator keeps beside the file is theirs.
-	stale := b.cfg.EnvFile + ".0123456789ab"
-	dotted := filepath.Join(dir, ".repository.env.0123456789ab-4207310592")
-	kept := []string{b.cfg.EnvFile + ".bak", b.cfg.EnvFile + ".old", filepath.Join(dir, "repository.env.gs"), filepath.Join(dir, "notes.txt")}
+	// staged file the units read, and the one envfile.Write makes on
+	// the way to it. What an operator keeps beside the file is theirs.
+	stale := envfile.Staged(b.cfg.EnvFile)
+	dotted := filepath.Join(dir, ".repository.env.staged-4207310592")
+	kept := []string{b.cfg.EnvFile + ".bak", b.cfg.EnvFile + ".old", filepath.Join(dir, "repository.env.gs"), filepath.Join(dir, "notes.txt"), b.cfg.EnvFile + ".0123456789ab"}
 	for _, f := range append([]string{stale, dotted}, kept...) {
 		must(t, os.WriteFile(f, []byte("RESTIC_PASSWORD=leaked\n"), 0o600))
 	}

@@ -626,10 +626,10 @@ What can be known to fail is refused before anything is asked for
    `0755`: anyone may see that the file is there and when it was
    written, which is how `status` tells a fresh setup from one that
    never ran; nobody but root what is in it), and a file an interrupted
-   setup left beside the credential file (`repository.env.<id>`, or the
-   dotfile `envfile` makes on the way to it — the two shapes `envfile`
-   itself names) is removed and said — a copy an operator keeps there
-   under another name is left alone;
+   setup left beside the credential file (`repository.env.staged`, or
+   the dotfile `envfile` makes on the way to it — the two shapes
+   `envfile` itself names) is removed and said — a copy an operator
+   keeps there under another name is left alone;
 3. the plan is read from `/etc/hotserve/Caddyfile` as a run reads it,
    and said — the apps a run would back up, or that no app declares a
    backup yet;
@@ -648,8 +648,9 @@ What can be known to fail is refused before anything is asked for
    up to three times; one the plain form would not carry — whitespace
    at either end, a leading quote — is written double-quoted, as the
    manager reads it [measured];
-5. the file is written beside the working one — `repository.env.<id>`,
-   root-only, with a throwaway password — and the repository is
+5. the file is written beside the working one — `repository.env.staged`
+   (one name: setup holds the run lock), root-only, with a throwaway
+   password — and the repository is
    **looked for**: `restic cat config` as `hotserve-backup`, under a
    ten-second clock, said as "looking for a repository at …". With a
    right key restic says at once whether there is no repository (exit
