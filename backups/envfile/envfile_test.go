@@ -44,6 +44,10 @@ func TestParseReadsAsTheManagerDoes(t *testing.T) {
 		`SQESC='it\'s'`,
 		`ESCSP=trail\ `,
 		`export EXP=1`,
+		`ODD=abc\\\`,
+		`JOINED=yes`,
+		`EVEN=abc\\`,
+		`NOTJOINED=yes`,
 		`LEADQ="abc`,
 		`SWALLOWED=yes`,
 		``,
@@ -53,6 +57,7 @@ func TestParseReadsAsTheManagerDoes(t *testing.T) {
 		"HASHIN": "a#b", "TRAIL": "trail", "BS": `ab\c`, "DQBS": `a\b\c"d`, "DOLLAR": "$HOME x", "CONT": "one two",
 		"EMPTY": "", "MIDQ": `ab"cd"ef`, "TAB": "a\tb", "SEMIIN": "a;b", "PCT": "100%s", "UTF": "héllo",
 		"MULTI": "one\ntwo", "AFTERQ": "ab", "AFTERC": "v# prod", "DQDOLLAR": "a$b", "DQBT": "a`b", "SQESC": `it\s'`, "ESCSP": "trail ",
+		"ODD": `abc\JOINED=yes`, "EVEN": `abc\`, "NOTJOINED": "yes",
 		"LEADQ": "abc\nSWALLOWED=yes\n",
 	}
 	got, findings := Parse([]byte(raw))
@@ -72,7 +77,7 @@ func TestParseReadsAsTheManagerDoes(t *testing.T) {
 		"line 6: DUP is set again; the manager takes this one",
 		"line 17: not KEY=value; the manager skips it",
 		`line 31: "export EXP" is not a name the manager takes; it skips the line`,
-		"line 32: the quote is never closed; the manager reads everything after it, to the end of the file, as LEADQ's value",
+		"line 36: the quote is never closed; the manager reads everything after it, to the end of the file, as LEADQ's value",
 	} {
 		if !strings.Contains(joined, f) {
 			t.Errorf("findings lack %q:\n%s", f, joined)
@@ -173,6 +178,33 @@ func TestWriteIsWholeAndRootOnly(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
 		t.Fatalf("left beside it: %v", entries)
+	}
+}
+
+// What a sweep may remove is exactly what Write and setup leave: the
+// name os.CreateTemp makes from Write's own pattern, and the nonce
+// shape — never a name an operator chose.
+func TestALeftoverIsWhatWriteOrSetupLeaves(t *testing.T) {
+	dir := t.TempDir()
+	tmp, err := os.CreateTemp(dir, tempPattern("repository.env"))
+	must(t, err)
+	must(t, tmp.Close())
+	if !IsLeftover(filepath.Base(tmp.Name()), "repository.env") {
+		t.Fatalf("what Write makes on the way, %s, is not a leftover", filepath.Base(tmp.Name()))
+	}
+	if !IsLeftover("repository.env.0123456789ab", "repository.env") {
+		t.Fatal("setup's own file is not a leftover")
+	}
+	nonced, err := os.CreateTemp(dir, tempPattern("repository.env.0123456789ab"))
+	must(t, err)
+	must(t, nonced.Close())
+	if !IsLeftover(filepath.Base(nonced.Name()), "repository.env") {
+		t.Fatalf("what Write makes on the way to setup's file, %s, is not a leftover", filepath.Base(nonced.Name()))
+	}
+	for _, kept := range []string{"repository.env", "repository.env.bak", "repository.env.old", "repository.env.gs", ".repository.env.swp", "repository.env.0123456789ab.bak", ".repository.env.0123456789ab", "notes.txt", "repository.env.0123456789ABCD"} {
+		if IsLeftover(kept, "repository.env") {
+			t.Errorf("%s would be swept", kept)
+		}
 	}
 }
 

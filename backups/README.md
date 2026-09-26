@@ -552,8 +552,9 @@ hourly run. It needs no sudoers line.
   home directory, which no unit has), `rclone:` (a config file, the
   same), `azure:` (not in Debian's restic), `gs:` and `swift:` (a
   credentials file, or a dozen variables: write the file by hand,
-  below), a URL with `user:pass@` in it (a command line and a shell
-  history are no place for a secret), and a scheme restic does not
+  below), a URL with `user:pass@` in it, with or without a scheme
+  before the host (a command line and a shell history are no place for
+  a secret), and a scheme restic does not
   know; restic, sqlite3 or hotserve not installed; a systemd older than
   257; a Caddyfile a run could not plan from; another run, restore or
   drill under way.
@@ -624,8 +625,9 @@ What can be known to fail is refused before anything is asked for
    written, which is how `status` tells a fresh setup from one that
    never ran; nobody but root what is in it), and a file an interrupted
    setup left beside the credential file (`repository.env.<id>`, or the
-   dotfile on the way to it) is removed and said — a copy an operator
-   keeps there under another name is left alone;
+   dotfile `envfile` makes on the way to it — the two shapes `envfile`
+   itself names) is removed and said — a copy an operator keeps there
+   under another name is left alone;
 3. the plan is read from `/etc/hotserve/Caddyfile` as a run reads it,
    and said — the apps a run would back up, or that no app declares a
    backup yet;
@@ -651,7 +653,10 @@ What can be known to fail is refused before anything is asked for
    10) or one this password does not open (exit 12) [measured]; a
    bucket not there yet, a wrong key or a host that does not resolve
    make it retry, so the look is given up on, said as such — the
-   three look alike there — and init answers instead;
+   three look alike there — and init answers instead. A look that
+   failed on its own account — a unit the manager could not set up, one
+   that could not be started — is said as that, before any password is
+   made;
 6. where none was found, a repository password is made — 32 random
    bytes, base32, 52 characters — and **shown**, once, with what to
    store beside it (the repository URL and the storage key: with those
@@ -660,8 +665,12 @@ What can be known to fail is refused before anything is asked for
    go on, and gets one more asking for any other word. Then
    `restic init --json` runs with that password, under a two-minute
    clock; after 20 seconds a person waiting is told what for, and that
-   Ctrl-C is safe. restic answers at once whatever is wrong with the
-   key, the host or the port [measured], and setup then asks for the
+   Ctrl-C is safe. This one unit is not recorded for the next run or
+   setup to stop: stopped half way it would leave a repository with a
+   config and no key, which no password opens, where left to its few
+   seconds it makes the repository with the password that was shown —
+   what the next setup asks for. restic answers at once whatever is
+   wrong with the key, the host or the port [measured], and setup then asks for the
    key id and secret again, up to three times, the one password
    standing: it has taken effect nowhere until the repository is made
    with it. When setup ends without having used it — three refusals,
@@ -673,7 +682,7 @@ What can be known to fail is refused before anything is asked for
    reused — is asked for its own password (echo off), and nothing is
    made or shown; setup opens it with `restic cat config`, and a wrong
    password is refused (exit 12) and asked for again, up to three
-   times. Where the look could not tell and init finds the repository
+   times; a storage that refuses the opening is said in restic's words. Where the look could not tell and init finds the repository
    there after all ("already initialized", whatever the password), the
    same follows, and the password just shown is said not to be the
    one;
@@ -687,7 +696,10 @@ What can be known to fail is refused before anything is asked for
    backs up into the repository now in use, and `status` does not say
    "proven" of a snapshot this repository does not hold. The same
    repository, opened, keeps its record. The last line names the
-   repository, whether it was made or opened, and its id.
+   repository, whether it was made or opened, and its id — and, when
+   `/etc/hotserve/backup.env` from before this version is still there,
+   that it is, and to remove it: that file is where an administrator's
+   sudoers reaches.
 
 Whatever ends setup before the last step — Ctrl-C ("interrupted:
 nothing has been written"), a refusal, a kill — leaves the working file

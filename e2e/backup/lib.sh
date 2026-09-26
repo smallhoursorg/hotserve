@@ -24,6 +24,10 @@ wait_for_systemd() {
 # setup would write it — the suites that are not about setup start
 # from one.
 write_env() {
+	# The account restic runs as, which setup makes: a suite that
+	# writes the file by hand stands on its own, whatever the setup
+	# suite found.
+	id hotserve-backup >/dev/null 2>&1 || useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hotserve-backup
 	mkdir -p "$(dirname "$ENVFILE")" && chmod 0755 "$(dirname "$ENVFILE")"
 	printf 'RESTIC_REPOSITORY=%s\nRESTIC_PASSWORD=%s\nAWS_ACCESS_KEY_ID=AKIDE2EFIXTURE\nAWS_SECRET_ACCESS_KEY=e2e-fixture-key-not-a-secret\n' "$1" "$2" >"$ENVFILE"
 	chmod 0600 "$ENVFILE"

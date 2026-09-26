@@ -300,6 +300,8 @@ func TestARepositoryTheBoxCannotUseIsRefusedBeforeAnyPrompt(t *testing.T) {
 		{"", "no repository was given"},
 		{"s3:", "s3: names no bucket"},
 		{"s3:http://e2e-s3:9000/box ", "the repository URL has whitespace at an end"},
+		{"s3:AKID:secret@s3.example.com/bucket", "credentials in the repository URL"},
+		{"rest:user:pass@host:8000/", "credentials in the repository URL"},
 		{"s3:http://e2e-s3:9000/b\x01x", "the repository URL cannot go in the file: it holds a control character"},
 	} {
 		t.Run(tc.repo, func(t *testing.T) {
@@ -465,6 +467,79 @@ func TestAnExistingRepositoryIsOpenedWithItsOwnPassword(t *testing.T) {
 	}
 	if rep.New || rep.RepositoryID != repoID || !strings.Contains(m.saidAll(), "repository ready: s3:http://e2e-s3:9000/box (existing, id bbd0e899)") {
 		t.Fatalf("report %+v\nsaid:\n%s", rep, m.saidAll())
+	}
+}
+
+// A look that failed for a reason of the unit's own — a manager that
+// could not set it up, a unit that could not be started — is said as
+// such, before any password is made.
+func TestALookThatFailedOnItsOwnIsSaidBeforeAnyPassword(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(b *box)
+		want string
+	}{
+		{"the manager could not set the unit up", func(b *box) { b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 217} }, "looking for the repository: systemd could not set the unit up (status 217)"},
+		{"ended by a signal", func(b *box) { b.outcome["probe"] = unit.Outcome{Result: "signal"} }, "looking for the repository: restic was ended by signal"},
+		{"could not be started", func(b *box) { b.err["probe"] = errors.New("starting hotserve_backup_probe: no such user") }, "no such user"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, m := setupBox(t)
+			tc.set(b)
+			_, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+			if len(passwordRe.FindAllString(m.saidAll(), -1)) != 0 || strings.Contains(b.roles(), "init") {
+				t.Fatalf("a password was made, or init ran (%s):\n%s", b.roles(), m.saidAll())
+			}
+			m.asked = nil
+			nothingWritten(t, b, m)
+		})
+	}
+}
+
+// The init unit is the one not recorded for the next lock holder to
+// stop: stopped half way it leaves a repository no password opens.
+func TestTheInitUnitIsLeftToFinish(t *testing.T) {
+	b, m := setupBox(t)
+	if _, err := b.setup(t, m, "s3:http://e2e-s3:9000/box"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(b.cfg.RunDir, "units"))
+	must(t, err)
+	recorded := string(raw)
+	if !strings.Contains(recorded, "_plan_") || !strings.Contains(recorded, "_probe_") {
+		t.Fatalf("the plan and the look are not recorded: %q", recorded)
+	}
+	if strings.Contains(recorded, "_init_") {
+		t.Fatalf("the init unit is recorded, and the next run would stop it half way: %q", recorded)
+	}
+	if s := b.spec("init"); s.BindsTo != b.cfg.BindsTo {
+		t.Fatalf("the init unit's BindsTo: %q", s.BindsTo)
+	}
+}
+
+// The file from before this version, still there after a setup, is
+// where the credential was reachable from: said, with what to do.
+func TestTheOldFileStillThereIsSaid(t *testing.T) {
+	b, m := setupBox(t)
+	must(t, os.MkdirAll(filepath.Dir(b.cfg.OldEnvFile), 0o755))
+	must(t, os.WriteFile(b.cfg.OldEnvFile, []byte("RESTIC_PASSWORD=old\n"), 0o600))
+	rep, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.OldEnvFile != b.cfg.OldEnvFile || !strings.Contains(m.saidAll(), b.cfg.OldEnvFile+" is still there, from before this version, and is not read; an administrator's sudoers may reach it: remove it (sudo rm "+b.cfg.OldEnvFile+")") {
+		t.Fatalf("report %+v\nsaid:\n%s", rep, m.saidAll())
+	}
+	if _, err := os.Lstat(b.cfg.OldEnvFile); err != nil {
+		t.Fatal("the old file was removed")
+	}
+	b, m = setupBox(t)
+	rep, err = b.setup(t, m, "s3:http://e2e-s3:9000/box")
+	if err != nil || rep.OldEnvFile != "" || strings.Contains(m.saidAll(), "still there") {
+		t.Fatalf("with no old file: %v %+v", err, rep)
 	}
 }
 
@@ -708,6 +783,12 @@ func TestAMistakeLeavesAWorkingSetupAsItWas(t *testing.T) {
 			b.probeOut = ""
 			m.answers = []string{"AKIDX", "the-secret", "pw"}
 		}, "there is no repository at the configured location (exit 10)"},
+		{"the storage refusing the opening, in restic's words", func(b *box, m *term) {
+			b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 12}
+			b.outcome["open"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+			b.probeOut, b.openErr = "", "Fatal: unable to open repository: AccessDenied: keys/ is not yours to read\n"
+			m.answers = []string{"AKIDX", "the-secret", "pw"}
+		}, "restic could not open the repository (exit 1): Fatal: unable to open repository: AccessDenied: keys/ is not yours to read"},
 		{"init exits 0 and names no repository", func(b *box, m *term) { b.initOut = "" }, "restic exited 0 but said nothing of a repository"},
 		{"init ended by a signal", func(b *box, m *term) {
 			b.outcome["init"] = unit.Outcome{Result: "signal"}
@@ -899,7 +980,7 @@ func TestALeftoverTempFileIsRemovedFirstAndSaid(t *testing.T) {
 	// file the units read, and the one envfile.Write makes on the way
 	// to it. What an operator keeps beside the file is theirs.
 	stale := b.cfg.EnvFile + ".0123456789ab"
-	dotted := filepath.Join(dir, ".repository.env.0123456789ab-42")
+	dotted := filepath.Join(dir, ".repository.env.0123456789ab-4207310592")
 	kept := []string{b.cfg.EnvFile + ".bak", b.cfg.EnvFile + ".old", filepath.Join(dir, "repository.env.gs"), filepath.Join(dir, "notes.txt")}
 	for _, f := range append([]string{stale, dotted}, kept...) {
 		must(t, os.WriteFile(f, []byte("RESTIC_PASSWORD=leaked\n"), 0o600))

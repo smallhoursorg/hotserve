@@ -145,10 +145,11 @@ func config() engine.Config {
 	}
 }
 
-// runner connects to the system manager, which takes root.
-func runner(ctx context.Context, what string) (*unit.Runner, error) {
+// runner connects to the system manager, which takes root; the
+// refusal names the invocation to repeat under sudo.
+func runner(ctx context.Context, what, invocation string) (*unit.Runner, error) {
 	if os.Geteuid() != 0 {
-		return nil, fmt.Errorf("a %s starts system units, which needs root: sudo hotserve-backup %s", what, what)
+		return nil, fmt.Errorf("a %s starts system units, which needs root: sudo hotserve-backup %s", what, invocation)
 	}
 	return unit.NewSystemRunner(ctx)
 }
@@ -158,24 +159,22 @@ func runner(ctx context.Context, what string) (*unit.Runner, error) {
 // line. The engine checks what else can be known to fail before it
 // asks for one.
 func setup(ctx context.Context, repository string) error {
-	if os.Geteuid() != 0 {
-		return errors.New("a setup starts system units, which needs root: sudo hotserve-backup setup <repository>")
-	}
-	r, err := unit.NewSystemRunner(ctx)
+	cfg := config()
+	r, err := runner(ctx, "setup", "setup <repository>")
 	if err != nil {
 		return err
 	}
 	defer r.Close()
-	t, err := openTTY()
+	t, err := openTTY(cfg.EnvFile)
 	if err != nil {
 		return err
 	}
 	defer t.Close()
-	rep, err := engine.Setup(ctx, config(), r, engine.SetupOptions{Repository: repository, Terminal: t})
+	rep, err := engine.Setup(ctx, cfg, r, engine.SetupOptions{Repository: repository, Terminal: t})
 	if err != nil {
 		return err
 	}
-	t.Say(fmt.Sprintf("credentials: %s (root, 0600)", config().EnvFile))
+	t.Say(fmt.Sprintf("credentials: %s (root, 0600)", cfg.EnvFile))
 	if len(rep.Apps) > 0 {
 		t.Say("next: sudo hotserve-backup run, then hotserve-backup status. Nothing runs it on a schedule on this branch: until the package's timer exists, run it hourly from a timer or cron entry of your own.")
 	} else {
@@ -185,7 +184,7 @@ func setup(ctx context.Context, repository string) error {
 }
 
 func run(ctx context.Context) error {
-	r, err := runner(ctx, "run")
+	r, err := runner(ctx, "run", "run")
 	if err != nil {
 		return err
 	}
@@ -369,7 +368,7 @@ func restoreApp(ctx context.Context, args []string) error {
 	if !yes {
 		o.Confirm = confirm(ctx)
 	}
-	r, err := runner(ctx, "restore")
+	r, err := runner(ctx, "restore", "restore "+args[0])
 	if err != nil {
 		return err
 	}
@@ -402,29 +401,48 @@ func confirm(ctx context.Context) func(engine.RestoreAsk) bool {
 			fmt.Println("Its databases are replaced and its files overwritten, with no backup first; what the snapshot does not hold is left.")
 		}
 		fmt.Printf("Type the app's name, %s, to go on: ", a.App)
-		type reply struct {
-			line string
-			err  error
-		}
-		said := make(chan reply, 1)
-		go func() {
-			line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-			said <- reply{line, err}
-		}()
-		select {
-		case r := <-said:
-			if r.err != nil && r.line == "" {
-				fmt.Println("\nnobody answered: pass --yes to restore without being asked")
-				return false
-			}
-			return strings.TrimSpace(r.line) == a.App
-		case <-ctx.Done():
-			fmt.Println()
-			return false
-		case <-time.After(answerWithin):
+		line, err := readLine(ctx, bufio.NewReader(os.Stdin))
+		switch {
+		case errors.Is(err, errNoAnswer):
 			fmt.Printf("\nno answer in %s\n", answerWithin)
 			return false
+		case errors.Is(err, context.Canceled):
+			fmt.Println()
+			return false
+		case err != nil:
+			fmt.Println("\nnobody answered: pass --yes to restore without being asked")
+			return false
 		}
+		return strings.TrimSpace(line) == a.App
+	}
+}
+
+// errNoAnswer is silence for answerWithin.
+var errNoAnswer = errors.New("no answer")
+
+// readLine reads one line from r, without its line end, for as long as
+// answerWithin, or until ctx ends. What a read that ended with nothing
+// says — end of input, nobody there — is the error as it came.
+func readLine(ctx context.Context, r *bufio.Reader) (string, error) {
+	type reply struct {
+		line string
+		err  error
+	}
+	said := make(chan reply, 1)
+	go func() {
+		line, err := r.ReadString('\n')
+		said <- reply{line, err}
+	}()
+	select {
+	case rep := <-said:
+		if rep.err != nil && rep.line == "" {
+			return "", rep.err
+		}
+		return strings.TrimRight(rep.line, "\r\n"), nil
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case <-time.After(answerWithin):
+		return "", errNoAnswer
 	}
 }
 
@@ -487,7 +505,7 @@ func reportRestore(rep *engine.RestoreReport) {
 }
 
 func drill(ctx context.Context) error {
-	r, err := runner(ctx, "drill")
+	r, err := runner(ctx, "drill", "drill")
 	if err != nil {
 		return err
 	}

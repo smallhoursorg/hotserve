@@ -50,8 +50,9 @@ func Parse(raw []byte) (Values, []string) {
 	for i := 0; i < len(lines); i++ {
 		n := i + 1
 		line := lines[i]
-		// A trailing backslash continues the line on the next.
-		for strings.HasSuffix(line, `\`) && !strings.HasSuffix(line, `\\`) && i+1 < len(lines) {
+		// A trailing backslash continues the line on the next — one that
+		// is not itself escaped, so an odd run of them [measured].
+		for oddTrailingBackslashes(line) && i+1 < len(lines) {
 			i++
 			line = strings.TrimSuffix(line, `\`) + lines[i]
 		}
@@ -93,6 +94,16 @@ func Parse(raw []byte) (Values, []string) {
 		v[k] = readValue(value)
 	}
 	return v, findings
+}
+
+// oddTrailingBackslashes says whether the line ends in an unescaped
+// backslash: an odd run of them.
+func oddTrailingBackslashes(line string) bool {
+	n := 0
+	for i := len(line) - 1; i >= 0 && line[i] == '\\'; i-- {
+		n++
+	}
+	return n%2 == 1
 }
 
 // utf8FirstInvalid is the offset of the first byte that is not UTF-8.
@@ -208,7 +219,7 @@ func Write(path string, pairs []Pair) error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*")
+	tmp, err := os.CreateTemp(filepath.Dir(path), tempPattern(filepath.Base(path)))
 	if err != nil {
 		return err
 	}
@@ -229,6 +240,42 @@ func Write(path string, pairs []Pair) error {
 		return err
 	}
 	return Commit(tmp.Name(), path)
+}
+
+// tempPattern is the name Write makes a file under on the way to base:
+// a dotfile beside it, with what os.CreateTemp appends.
+func tempPattern(base string) string { return "." + base + "-*" }
+
+// IsLeftover says whether name, beside base, is a file a Write that
+// did not live to its rename left behind, or one setup wrote beside
+// the working file under base.<12 hex> for its units to read — the two
+// shapes a sweep may remove, and the only two: what an operator keeps
+// beside the file under another name is theirs.
+func IsLeftover(name, base string) bool {
+	if rest, ok := strings.CutPrefix(name, base+"."); ok {
+		return nonce(rest)
+	}
+	// What Write makes on the way to base, or to base.<nonce>.
+	rest, ok := strings.CutPrefix(name, "."+base)
+	if !ok {
+		return false
+	}
+	if n, ok := strings.CutPrefix(rest, "."); ok {
+		if n, rest, ok = strings.Cut(n, "-"); !ok || !nonce(n) {
+			return false
+		}
+		rest = "-" + rest
+	}
+	digits, ok := strings.CutPrefix(rest, "-")
+	return ok && digits != "" && strings.Trim(digits, "0123456789") == ""
+}
+
+// nonce is twelve hex characters: what setup names its file with.
+func nonce(s string) bool {
+	if len(s) != 12 {
+		return false
+	}
+	return strings.Trim(s, "0123456789abcdef") == ""
 }
 
 // Commit renames from over to, and puts the directory on the disk.

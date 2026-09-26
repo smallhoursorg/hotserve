@@ -97,7 +97,7 @@ printf 'x\n' | at_tty hotserve-backup setup "$REPO" >"$OUT" 2>&1 && fail "setup 
 says "Storage key id" && fail "a prompt was asked before the preflight passed" || pass "and asked nothing"
 id hotserve-backup >/dev/null 2>&1 && fail "the account was made before the preflight passed" || pass "and made no account"
 mv /usr/bin/restic.aside /usr/bin/restic
-for r in sftp:user@host:/srv/backups /srv/backups local:/srv/backups rclone:remote:bucket azure:container:path gs:bucket:path swift:container:/path "s3:http://user:pass@e2e-s3:9000/box" "ftp://host/x" "s3:"; do
+for r in sftp:user@host:/srv/backups /srv/backups local:/srv/backups rclone:remote:bucket azure:container:path gs:bucket:path swift:container:/path "s3:http://user:pass@e2e-s3:9000/box" "s3:user:pass@e2e-s3:9000/box" "ftp://host/x" "s3:"; do
 	if printf 'x\n' | at_tty hotserve-backup setup "$r" >"$OUT" 2>&1; then
 		fail "setup $r exited 0"
 	elif says "Storage key id"; then
@@ -168,8 +168,12 @@ run && fail "a run with only the old file exited 0" || { says "not set up: $ENVF
 [ "$(units_left)" = 0 ] && pass "and started nothing" || fail "units: $(systemctl list-units --all --no-legend 'hotserve_backup_*')"
 hotserve-backup status >"$OUT" 2>&1
 [ $? = 3 ] && says "$OLD is from before this version" && pass "status exits 3 and says the same" || fail "status: $(cat "$OUT")"
-rm -f "$OLD"
+# A setup that goes through with the old file still there says so at
+# the end: that file is where an administrator's sudoers reaches.
 mv /root/env.keep "$ENVFILE"
+converse "hotserve-backup setup $REPO" "$P_KEY" "$KEYID" "$P_SECRET" "$SECRET" "$P_PW" "$pw"
+[ $? = 0 ] && says "$OLD is still there, from before this version, and is not read; an administrator's sudoers may reach it: remove it (sudo rm $OLD)" && [ -f "$OLD" ] && pass "a setup with the old file still there says to remove it, and does not itself" || fail "the old file after a setup: $(grep "$OLD" "$OUT"; ls -la "$OLD" 2>&1)"
+rm -f "$OLD"
 
 echo "=== setup 6: mistakes over a working setup leave it as it was ==="
 before=$(sum)

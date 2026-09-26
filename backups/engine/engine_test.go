@@ -62,6 +62,7 @@ type box struct {
 	// a role whose unit never ends, the manager's version, which
 	// programs are installed and whether the account is
 	initOut, initErr, probeOut string
+	openErr                    string // what the open unit says on stderr
 	planErr                    string // what the plan unit says on stderr
 	hang                       string
 	version                    int
@@ -219,7 +220,11 @@ func (b *box) Run(ctx context.Context, s unit.Spec) (unit.Outcome, error) {
 	case "probe", "open":
 		write(b.probeOut)
 		if s.StderrFile != "" {
-			must(b.t, os.WriteFile(s.StderrFile, nil, 0o600))
+			stderr := ""
+			if role == "open" {
+				stderr = b.openErr
+			}
+			must(b.t, os.WriteFile(s.StderrFile, []byte(stderr), 0o600))
 		}
 	case "verify":
 		// Everything after "--" and the snapshot id is a parent to list.

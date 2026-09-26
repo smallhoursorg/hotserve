@@ -7,12 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -45,6 +43,7 @@ type SetupReport struct {
 	RepositoryID string
 	Aside        string   // where the record of the previous repository went, if anywhere
 	Swept        []string // files an interrupted setup left, removed
+	OldEnvFile   string   // a credential file from before this version, still there
 }
 
 // setupClock bounds restic init and the opening of an existing
@@ -123,7 +122,15 @@ func backendOf(repo, envFile string) ([]credential, error) {
 		if rest == "" {
 			return nil, fmt.Errorf("%s: names no bucket", scheme)
 		}
-		if u, err := url.Parse(rest); err == nil && u.User != nil {
+		// restic takes the host with or without a scheme (s3:host/bucket):
+		// what is looked at is the authority either way, not what
+		// url.Parse makes of "user:pass@host" with no scheme before it.
+		authority := rest
+		if i := strings.Index(rest, "://"); i >= 0 {
+			authority = rest[i+3:]
+		}
+		authority, _, _ = strings.Cut(authority, "/")
+		if strings.Contains(authority, "@") {
 			return nil, errors.New("credentials in the repository URL are on the command line and in the shell's history; give the URL without them, and type them when asked")
 		}
 		if scheme == "rest" {
@@ -158,15 +165,6 @@ func OldEnvFileNote(cfg Config) string {
 		return ""
 	}
 	return fmt.Sprintf(" (%s is from before this version and is not read: run `sudo hotserve-backup setup <its RESTIC_REPOSITORY>`, which asks for its RESTIC_PASSWORD; then remove it)", cfg.OldEnvFile)
-}
-
-// tempRe is the shape of the file setup writes beside the working one
-// (repository.env.<nonce>), and of the file envfile.Write makes on the
-// way to it (.repository.env.<nonce>-<n>): what a setup that did not
-// live to remove them leaves, and all the sweep touches — a copy an
-// operator keeps beside the file under another name is theirs.
-func tempRe(envFile string) *regexp.Regexp {
-	return regexp.MustCompile(`^\.?` + regexp.QuoteMeta(filepath.Base(envFile)) + `\.[0-9a-f]{12}(-[0-9]+)?$`)
 }
 
 // Setup makes the box ready to back up into one repository: the
@@ -240,9 +238,11 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 	if err != nil {
 		return nil, err
 	}
-	shape := tempRe(cfg.EnvFile)
 	for _, e := range entries {
-		if !shape.MatchString(e.Name()) {
+		// What a setup that did not live to remove them leaves, and
+		// nothing else: a copy an operator keeps beside the file under
+		// another name is theirs.
+		if !envfile.IsLeftover(e.Name(), filepath.Base(cfg.EnvFile)) {
 			continue
 		}
 		f := filepath.Join(dir, e.Name())
@@ -311,8 +311,17 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 		// Where the look cannot tell, init answers, and says why.
 		term.Say(fmt.Sprintf("looking for a repository at %s (up to %s)", o.Repository, setupProbeClock))
 		o0, _, err := x.repository(ctx, term, o.Repository, "probe", tmp, setupProbeClock, cfg.Restic, "cat", "config", "--no-lock")
-		if err != nil && (ctx.Err() != nil || errors.Is(err, unit.ErrNotConfirmedGone)) {
+		// Only two answers say the look could not tell: restic's exit 1
+		// — the storage retrying — and the clock. Anything else is a
+		// fault of the unit's own, said as such before any password is
+		// made: a manager that could not set it up, a unit that could
+		// not be started or seen gone.
+		if err != nil && !errors.Is(err, errDidNotAnswer) {
 			return nil, x.setupErr(err, password)
+		}
+		if err == nil && !lookAnswered(o0) {
+			detail, _ := resticFailure(o0)
+			return nil, x.setupErr(errors.New("looking for the repository: "+detail), password)
 		}
 		switch {
 		case err == nil && o0.Result == "exit-code" && o0.ExitStatus == 12:
@@ -392,7 +401,7 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 			if err := envfile.Write(tmp, pairs); err != nil {
 				return nil, err
 			}
-			o2, _, err := x.repository(ctx, term, o.Repository, "open", tmp, setupClock, cfg.Restic, "cat", "config", "--no-lock")
+			o2, message, err := x.repository(ctx, term, o.Repository, "open", tmp, setupClock, cfg.Restic, "cat", "config", "--no-lock")
 			if err != nil {
 				return nil, x.setupErr(err, password)
 			}
@@ -408,6 +417,9 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 					continue
 				}
 				return nil, x.setupErr(errors.New("this password cannot open the repository (exit 12)"), password)
+			}
+			if o2.Result == "exit-code" && o2.ExitStatus == 1 {
+				return nil, x.setupErr(errors.New("restic could not open the repository (exit 1): "+record.Text(message)), password)
 			}
 			detail, _ := resticFailure(o2)
 			return nil, x.setupErr(errors.New(detail), password)
@@ -443,6 +455,13 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 	term.Say(fmt.Sprintf("repository ready: %s (%s, id %s)", o.Repository, kind, short(rep.RepositoryID)))
 	if password != "" && !rep.New {
 		term.Say("the password shown above was never used: discard it")
+	}
+	// The file from before this version, if it is still there, is
+	// where the credential was reachable from: said, not removed — it
+	// is root's, and an operator may want its contents once more.
+	if _, err := os.Lstat(cfg.OldEnvFile); cfg.OldEnvFile != "" && err == nil {
+		rep.OldEnvFile = cfg.OldEnvFile
+		term.Say(fmt.Sprintf("%s is still there, from before this version, and is not read; an administrator's sudoers may reach it: remove it (sudo rm %s)", cfg.OldEnvFile, cfg.OldEnvFile))
 	}
 	return rep, nil
 }
@@ -513,11 +532,32 @@ func ask(ctx context.Context, term Terminal, prompt string, secret bool) (string
 	return "", errors.New("no usable value was given in three times")
 }
 
+// lookAnswered says whether the look ended as a look can: none there
+// (10), one there (12), or restic unable to tell (1; and 0, which a
+// throwaway password cannot earn, is taken the same way). Anything
+// else is the unit's own failure.
+func lookAnswered(o unit.Outcome) bool {
+	if o.OK() {
+		return true
+	}
+	return o.Result == "exit-code" && (o.ExitStatus == 1 || o.ExitStatus == 10 || o.ExitStatus == 12)
+}
+
+// errDidNotAnswer is a unit stopped at its clock.
+var errDidNotAnswer = errors.New("the repository did not answer")
+
 // repository runs one restic command against the repository as the
 // backup account, with the credential file the manager reads, under a
 // clock; a person waiting is told what for. It returns what restic
 // said on stderr, cleaned — the message of its exit_error line where it
 // wrote one — for the caller to match and show.
+//
+// The init unit is the one unit here that is not recorded for the next
+// lock holder to stop: stopped half way it leaves a repository with a
+// config and no key, which no password opens, where left to its few
+// seconds it makes the repository with the password that was shown —
+// what the next setup then asks for. It holds the credential in its
+// environment as every restic unit does, for as long as init takes.
 func (x *run) repository(ctx context.Context, term Terminal, repo, role, envFile string, within time.Duration, argv ...string) (unit.Outcome, string, error) {
 	clock, cancel := context.WithTimeout(ctx, within)
 	defer cancel()
@@ -526,7 +566,14 @@ func (x *run) repository(ctx context.Context, term Terminal, repo, role, envFile
 	})
 	defer note.Stop()
 	errFile := filepath.Join(x.dir, role+".err")
-	o, err := x.start(clock, unit.Spec{
+	start := x.start
+	if role == "init" {
+		start = func(ctx context.Context, s unit.Spec) (unit.Outcome, error) {
+			s.BindsTo = x.cfg.BindsTo
+			return x.r.Run(ctx, s)
+		}
+	}
+	o, err := start(clock, unit.Spec{
 		Name: x.name(role, ""), Description: "hotserve backup: " + role + " the repository",
 		Argv: argv,
 		User: backupUser, Network: true, EnvironmentFile: envFile,
@@ -539,7 +586,7 @@ func (x *run) repository(ctx context.Context, term Terminal, repo, role, envFile
 		// runner says it could not confirm that, which is then the error,
 		// in its own words.
 		if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, unit.ErrNotConfirmedGone) {
-			return o, "", fmt.Errorf("the repository did not answer within %s; the unit was stopped", within)
+			return o, "", fmt.Errorf("%w within %s; the unit was stopped", errDidNotAnswer, within)
 		}
 		return o, "", err
 	}

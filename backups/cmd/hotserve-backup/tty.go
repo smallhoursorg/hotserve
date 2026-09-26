@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
-	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -21,10 +19,12 @@ type tty struct {
 	in *bufio.Reader
 }
 
-func openTTY() (*tty, error) {
+// openTTY opens the terminal; with none, the refusal names the file a
+// provisioning tool writes instead.
+func openTTY(envFile string) (*tty, error) {
 	f, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 	if err != nil {
-		return nil, errors.New("setup asks for secrets at a terminal, and there is none here; from a provisioning tool, write /etc/hotserve-backup/repository.env by hand (backups/README.md, \"By hand\")")
+		return nil, fmt.Errorf("setup asks for secrets at a terminal, and there is none here; from a provisioning tool, write %s by hand (backups/README.md, \"By hand\")", envFile)
 	}
 	return &tty{f: f, in: bufio.NewReader(f)}, nil
 }
@@ -52,26 +52,11 @@ func (t *tty) Ask(ctx context.Context, prompt string, secret bool) (string, erro
 		defer func() { _, _ = fmt.Fprintln(t.f) }()
 	}
 	_, _ = fmt.Fprint(t.f, prompt)
-	type reply struct {
-		line string
-		err  error
-	}
-	said := make(chan reply, 1)
-	go func() {
-		line, err := t.in.ReadString('\n')
-		said <- reply{line, err}
-	}()
-	select {
-	case r := <-said:
-		if r.err != nil && r.line == "" {
-			return "", r.err
-		}
-		return strings.TrimRight(r.line, "\r\n"), nil
-	case <-ctx.Done():
-		return "", ctx.Err()
-	case <-time.After(answerWithin):
+	line, err := readLine(ctx, t.in)
+	if errors.Is(err, errNoAnswer) {
 		return "", fmt.Errorf("no answer in %s", answerWithin)
 	}
+	return line, err
 }
 
 // echoOff turns the terminal's echo off and returns what turns it on
