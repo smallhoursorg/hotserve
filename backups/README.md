@@ -551,9 +551,9 @@ hourly run. It needs no sudoers line.
 - `setup`, before it asks for anything: a repository that is a path on
   this box (`/srv/backups`, `local:`), `sftp:` (ssh takes its key from a
   home directory, which no unit has), `rclone:` (a config file, the
-  same), `azure:` (not in Debian's restic), `gs:` and `swift:` (a
-  credentials file, or a dozen variables: write the file by hand,
-  below), a URL with `user:pass@` in it, with or without a scheme
+  same), `azure:` (not in Debian's restic), `rest:`, `gs:` and `swift:`
+  (not set up by this command: write the file by hand, below), a URL
+  with `user:pass@` in it, with or without a scheme
   before the host (a command line and a shell history are no place for
   a secret), and a scheme restic does not
   know; restic, sqlite3 or hotserve not installed; a systemd older than
@@ -563,8 +563,9 @@ hourly run. It needs no sudoers line.
   control character, or one that is not UTF-8 — the file cannot hold
   it — three times; and a password not confirmed `stored`.
 - `setup`, after two minutes with no answer from the repository (ten
-  seconds for the look that comes first): the unit is stopped, and
-  nothing has been written.
+  seconds for the look that comes first): the look or the opening is
+  stopped, and nothing has been written; init is left running, said,
+  and waited for by whatever comes next.
 
 ## The Caddyfile is read without the server's environment
 
@@ -640,8 +641,9 @@ What can be known to fail is refused before anything is asked for
    what was shown). The error a setup ends on goes to stderr, as every
    command's does. For `s3:` they are
    `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, for `b2:`
-   `B2_ACCOUNT_ID` and `B2_ACCOUNT_KEY`, for `rest:`
-   `RESTIC_REST_USERNAME` and `RESTIC_REST_PASSWORD`. A value the file
+   `B2_ACCOUNT_ID` and `B2_ACCOUNT_KEY`; nothing else is set up by this
+   command (`rest:`, `gs:` and `swift:` are written by hand, below). A
+   value the file
    cannot hold (a line break, a control character) is asked for again,
    up to three times; one the plain form would not carry — whitespace
    at either end, a leading quote — is written double-quoted, as the
@@ -743,7 +745,7 @@ or cron entry of your own, or `status` goes unhealthy after 3 hours.
 
 ### By hand
 
-For `gs:` and `swift:`, or a provisioning tool, the file setup would
+For `rest:`, `gs:` and `swift:`, or a provisioning tool, the file setup would
 have written — one `KEY=value` a line, a backslash doubled, a value
 with whitespace at an end or a leading quote in double quotes with `\`
 and `"` escaped, as systemd reads it:

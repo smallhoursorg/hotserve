@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 
 	"golang.org/x/sys/unix"
 )
@@ -17,6 +18,9 @@ import (
 type tty struct {
 	f  *os.File
 	in *bufio.Reader
+	// mu serialises the writes: a line said from the clock's goroutine
+	// must not tear a prompt, nor race the record of a failed write.
+	mu sync.Mutex
 	// failed is the first write that did not reach the terminal: after
 	// it, what was to be shown may not have been, and no question is
 	// asked — least of all whether a password was stored.
@@ -39,6 +43,8 @@ func (t *tty) Close() { _ = t.f.Close() }
 // setup shows that is a secret — a new repository's password — must
 // reach the person at the terminal and nothing that stdout was sent to.
 func (t *tty) Say(line string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	if _, err := fmt.Fprintln(t.f, line); err != nil && t.failed == nil {
 		t.failed = err
 	}
@@ -51,8 +57,8 @@ func (t *tty) Say(line string) {
 // silence ends the question. An interrupt is no answer; so is silence
 // for answerWithin.
 func (t *tty) Ask(ctx context.Context, prompt string, secret bool) (string, error) {
-	if t.failed != nil {
-		return "", fmt.Errorf("the terminal could not be written to, so what was to be shown may not have been: %w", t.failed)
+	if err := t.write(prompt, secret); err != nil {
+		return "", err
 	}
 	if secret {
 		restore, err := t.echoOff()
@@ -60,16 +66,38 @@ func (t *tty) Ask(ctx context.Context, prompt string, secret bool) (string, erro
 			return "", err
 		}
 		defer restore()
-		defer func() { _, _ = fmt.Fprintln(t.f) }()
-	}
-	if _, err := fmt.Fprint(t.f, prompt); err != nil {
-		return "", fmt.Errorf("the terminal could not be written to: %w", err)
+		defer t.Say("")
+		t.mu.Lock()
+		_, perr := fmt.Fprint(t.f, prompt)
+		t.mu.Unlock()
+		if perr != nil {
+			return "", fmt.Errorf("the terminal could not be written to: %w", perr)
+		}
 	}
 	line, err := readLine(ctx, t.in)
 	if errors.Is(err, errNoAnswer) {
 		return "", fmt.Errorf("no answer in %s", answerWithin)
 	}
 	return line, err
+}
+
+// write puts a prompt on the terminal, under the lock, unless a write
+// before it failed — in which case nothing is asked.
+func (t *tty) write(prompt string, secret bool) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.failed != nil {
+		return fmt.Errorf("the terminal could not be written to, so what was to be shown may not have been: %w", t.failed)
+	}
+	if secret {
+		// Echo goes off before the prompt shows, so nothing typed ahead
+		// of it is echoed after it.
+		return nil
+	}
+	if _, err := fmt.Fprint(t.f, prompt); err != nil {
+		return fmt.Errorf("the terminal could not be written to: %w", err)
+	}
+	return nil
 }
 
 // echoOff turns the terminal's echo off and returns what turns it on

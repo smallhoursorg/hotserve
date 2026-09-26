@@ -72,6 +72,7 @@ type box struct {
 	owned, synced              []string // what setup asked to be root's, and put on the disk
 	waited                     []string // units a lock holder waited for
 	waitErr                    error
+	release                    chan struct{} // closed at the test's end: a hung init ends
 }
 
 func (b *box) ManagerVersion(context.Context) (int, error) { return b.version, nil }
@@ -81,7 +82,8 @@ var roleRe = regexp.MustCompile(`^hotserve_backup_([a-z]+)[0-9]*_`)
 func newBox(t *testing.T) *box {
 	t.Helper()
 	dir := t.TempDir()
-	b := &box{t: t, root: filepath.Join(dir, "liveswap"), outcome: map[string]unit.Outcome{}, err: map[string]error{}}
+	b := &box{t: t, root: filepath.Join(dir, "liveswap"), outcome: map[string]unit.Outcome{}, err: map[string]error{}, release: make(chan struct{})}
+	t.Cleanup(func() { close(b.release) })
 	b.cfg = Config{
 		ConfigDir: "/etc/hotserve",
 		EnvFile:   filepath.Join(dir, "backup.env"), StateDir: filepath.Join(dir, "state"), RunDir: filepath.Join(dir, "run"),
@@ -171,8 +173,13 @@ func (b *box) Run(ctx context.Context, s unit.Spec) (unit.Outcome, error) {
 	if role == b.hang {
 		// As the real runner: the unit is stopped by name once the
 		// context ends, and what could not be confirmed gone wraps the
-		// cause in ErrNotConfirmedGone.
-		<-ctx.Done()
+		// cause in ErrNotConfirmedGone. Init runs on a context nothing
+		// cancels; its hang ends with the test.
+		select {
+		case <-ctx.Done():
+		case <-b.release:
+			return unit.Outcome{Result: "success"}, nil
+		}
 		b.stopped = append(b.stopped, s.Name)
 		if b.stopErr != nil {
 			return unit.Outcome{}, fmt.Errorf("%w: %s: %w", b.stopErr, s.Name, ctx.Err())

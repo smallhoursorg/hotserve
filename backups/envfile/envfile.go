@@ -46,33 +46,29 @@ func Parse(raw []byte) (Values, []string) {
 		n := 1 + bytes.Count(raw[:utf8FirstInvalid(raw)], []byte("\n"))
 		return v, []string{fmt.Sprintf("line %d holds a byte that is not UTF-8: the manager refuses the whole file, and no unit that needs it starts", n)}
 	}
-	lines := strings.Split(string(raw), "\n")
-	for i := 0; i < len(lines); i++ {
-		n := i + 1
-		line := lines[i]
-		// Outside quotes a trailing backslash continues the line on the
-		// next — one that is not itself escaped, so an odd run of them
-		// [measured]. Inside quotes the line ends where the quote does
-		// (below): in double quotes a backslash-newline is dropped, in
-		// single quotes it is kept as it is [measured].
-		if _, value, ok := strings.Cut(line, "="); !ok || !opensQuote(value) {
-			for oddTrailingBackslashes(line) && i+1 < len(lines) {
-				i++
-				line = strings.TrimSuffix(line, `\`) + lines[i]
-			}
+	text := string(raw)
+	for pos := 0; pos < len(text); {
+		n := 1 + strings.Count(text[:pos], "\n")
+		eol := strings.IndexByte(text[pos:], '\n')
+		if eol < 0 {
+			eol = len(text) - pos
 		}
+		line := text[pos : pos+eol]
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || trimmed[0] == '#' || trimmed[0] == ';' {
+			pos += eol + 1
 			continue
 		}
-		key, value, ok := strings.Cut(line, "=")
+		key, _, ok := strings.Cut(line, "=")
 		if !ok {
 			findings = append(findings, fmt.Sprintf("line %d: not KEY=value; the manager skips it", n))
+			pos += eol + 1
 			continue
 		}
 		k := strings.TrimSpace(key)
 		if !keyRe.MatchString(k) {
 			findings = append(findings, fmt.Sprintf("line %d: %q is not a name the manager takes; it skips the line", n, k))
+			pos += eol + 1
 			continue
 		}
 		if k != key {
@@ -81,41 +77,14 @@ func Parse(raw []byte) (Values, []string) {
 		if _, again := v[k]; again {
 			findings = append(findings, fmt.Sprintf("line %d: %s is set again; the manager takes this one", n, k))
 		}
-		value = strings.TrimLeftFunc(value, unicode.IsSpace)
-		// A quoted value runs on until the quote is closed — on a later
-		// line, or never, in which case it takes the rest of the file.
-		if len(value) > 0 && (value[0] == '"' || value[0] == '\'') && !closed(value) {
-			for i+1 < len(lines) {
-				i++
-				value += "\n" + lines[i]
-				if closed(value) {
-					break
-				}
-			}
-			if !closed(value) {
-				findings = append(findings, fmt.Sprintf("line %d: the quote is never closed; the manager reads everything after it, to the end of the file, as %s's value", n, k))
-			}
+		value, used, unclosed := readValue(text[pos+len(key)+1:])
+		if unclosed {
+			findings = append(findings, fmt.Sprintf("line %d: the quote is never closed; the manager reads everything after it, to the end of the file, as %s's value", n, k))
 		}
-		v[k] = readValue(value)
+		v[k] = value
+		pos += len(key) + 1 + used
 	}
 	return v, findings
-}
-
-// opensQuote says whether a value, its leading whitespace aside, begins
-// with a quote.
-func opensQuote(value string) bool {
-	v := strings.TrimLeftFunc(value, unicode.IsSpace)
-	return v != "" && (v[0] == '"' || v[0] == '\'')
-}
-
-// oddTrailingBackslashes says whether the line ends in an unescaped
-// backslash: an odd run of them.
-func oddTrailingBackslashes(line string) bool {
-	n := 0
-	for i := len(line) - 1; i >= 0 && line[i] == '\\'; i-- {
-		n++
-	}
-	return n%2 == 1
 }
 
 // utf8FirstInvalid is the offset of the first byte that is not UTF-8.
@@ -130,64 +99,76 @@ func utf8FirstInvalid(raw []byte) int {
 	return len(raw)
 }
 
-// closed says whether a value that opens with a quote closes it.
-func closed(value string) bool {
-	q := value[0]
-	for i := 1; i < len(value); i++ {
-		if value[i] == '\\' && q == '"' {
-			i++
-			continue
-		}
-		if value[i] == q {
-			return true
-		}
-	}
-	return false
-}
-
-// readValue is a value as the manager reads it: a quote that opens it
-// stripped and its escapes undone, what follows the closing quote
-// appended, and whitespace at the end trimmed where it is neither
-// quoted nor escaped. A quote anywhere but first is a character.
-func readValue(s string) string {
+// readValue reads one value from the start of s as the manager does,
+// and says how much of s it took (the line end included) and whether a
+// quote was left open to the end. Outside quotes: leading whitespace
+// is skipped; a backslash escapes the character after it, a newline
+// included, which joins the next line; an unescaped newline ends the
+// value; trailing whitespace that is neither escaped nor quoted is
+// trimmed. A quote where the value begins runs to its closing quote —
+// a newline inside kept — with \, ", $ and ` escapable in double
+// quotes, nothing in single; what follows the closing quote, its
+// leading whitespace skipped, is read by the outside rules.
+func readValue(s string) (value string, used int, unclosed bool) {
 	var out strings.Builder
 	kept := 0 // how much of out is quoted or escaped, and so not trimmed
-	for i := 0; i < len(s); i++ {
-		switch c := s[i]; {
-		case i == 0 && (c == '"' || c == '\''):
-			// Up to the closing quote, or the end.
-			j := i + 1
-			for ; j < len(s) && s[j] != c; j++ {
-				if c == '"' && s[j] == '\\' && j+1 < len(s) {
-					if s[j+1] == '\n' {
-						j++ // a line joined: the backslash and the newline go
-						continue
-					}
-					if strings.IndexByte("\\\"$`", s[j+1]) >= 0 {
-						j++
-					}
+	i := 0
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+		i++
+	}
+	if i < len(s) && (s[i] == '"' || s[i] == '\'') {
+		q := s[i]
+		i++
+		closed := false
+		for i < len(s) {
+			c := s[i]
+			if c == q {
+				closed = true
+				i++
+				break
+			}
+			if q == '"' && c == '\\' && i+1 < len(s) {
+				if s[i+1] == '\n' {
+					i += 2 // a line joined: the backslash and the newline go
+					continue
 				}
-				out.WriteByte(s[j])
+				if strings.IndexByte("\\\"$`", s[i+1]) >= 0 {
+					i++
+					c = s[i]
+				}
 			}
-			kept = out.Len()
-			// After the closing quote, whitespace is skipped and the rest
-			// is appended as it is.
-			for i = j + 1; i < len(s) && (s[i] == ' ' || s[i] == '\t'); i++ {
-			}
-			if i < len(s) {
-				out.WriteString(s[i:])
-			}
-			i = len(s)
+			out.WriteByte(c)
+			i++
+		}
+		kept = out.Len()
+		if !closed {
+			return out.String(), len(s), true
+		}
+		for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+			i++
+		}
+	}
+	for i < len(s) {
+		c := s[i]
+		switch {
+		case c == '\n':
+			i++
+			res := out.String()
+			return res[:kept] + strings.TrimRightFunc(res[kept:], unicode.IsSpace), i, false
 		case c == '\\' && i+1 < len(s):
 			i++
-			out.WriteByte(s[i])
-			kept = out.Len()
+			if s[i] != '\n' { // a backslash-newline joins the lines and is itself gone
+				out.WriteByte(s[i])
+				kept = out.Len()
+			}
+			i++
 		default:
 			out.WriteByte(c)
+			i++
 		}
 	}
 	res := out.String()
-	return res[:kept] + strings.TrimRightFunc(res[kept:], unicode.IsSpace)
+	return res[:kept] + strings.TrimRightFunc(res[kept:], unicode.IsSpace), i, false
 }
 
 // Refuse says why value cannot be written so that the manager reads it
@@ -301,7 +282,13 @@ func Commit(from, to string) error {
 	if err := os.Rename(from, to); err != nil {
 		return err
 	}
-	dir, err := os.Open(filepath.Dir(to))
+	return SyncDir(filepath.Dir(to))
+}
+
+// SyncDir puts a directory's entries on the disk: what a rename in it
+// needs before anything counts on it after a power cut.
+func SyncDir(path string) error {
+	dir, err := os.Open(path) //nolint:gosec // a directory of the installation's, from a constant path
 	if err != nil {
 		return err
 	}

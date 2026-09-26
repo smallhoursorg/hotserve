@@ -78,6 +78,9 @@ type Runner interface {
 	// Wait waits for a unit to end on its own: one a setup left to
 	// finish making the repository.
 	Wait(ctx context.Context, name string) error
+	// ManagerVersion is the manager's major version: setup refuses one
+	// older than the properties here are built on.
+	ManagerVersion(ctx context.Context) (int, error)
 }
 
 // initWait bounds the wait for a restic init an earlier setup left
@@ -565,7 +568,7 @@ func (x *run) awaitInit(ctx context.Context, say func(string)) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			return fmt.Errorf("a restic init from an earlier setup is still running: %w", err)
+			return fmt.Errorf("a restic init from an earlier setup is still running after %s (%w); if it must be ended: systemctl stop %s", initWait, err, name)
 		}
 	}
 	return os.Remove(file)

@@ -307,13 +307,13 @@ func TestARepositoryTheBoxCannotUseIsRefusedBeforeAnyPrompt(t *testing.T) {
 		{"gs:bucket:path", "gs: and swift: are not set up by this command"},
 		{"swift:container:/path", "gs: and swift: are not set up by this command"},
 		{"s3:http://user:pass@e2e-s3:9000/box", "credentials in the repository URL"},
-		{"rest:https://user:pass@host/", "credentials in the repository URL"},
+		{"rest:https://user:pass@host/", "rest:, gs: and swift: are not set up by this command"},
 		{"ftp://host/x", `"ftp:" is not a repository restic knows`},
 		{"", "no repository was given"},
 		{"s3:", "s3: names no bucket"},
 		{"s3:http://e2e-s3:9000/box ", "the repository URL has whitespace at an end"},
 		{"s3:AKID:secret@s3.example.com/bucket", "credentials in the repository URL"},
-		{"rest:user:pass@host:8000/", "credentials in the repository URL"},
+		{"rest:user:pass@host:8000/", "rest:, gs: and swift: are not set up by this command"},
 		{"s3:http://e2e-s3:9000/b\x01x", "the repository URL cannot go in the file: it holds a control character"},
 	} {
 		t.Run(tc.repo, func(t *testing.T) {
@@ -367,7 +367,6 @@ func TestEachBackendIsAskedForItsOwnVariables(t *testing.T) {
 		keys    []string
 	}{
 		{"b2:bucket:path", "Storage key id (B2_ACCOUNT_ID): \nsecret:Storage secret key (B2_ACCOUNT_KEY): \nType stored to go on: ", []string{"B2_ACCOUNT_ID", "B2_ACCOUNT_KEY"}},
-		{"rest:https://host:8000/", "Storage user name (RESTIC_REST_USERNAME): \nsecret:Storage password (RESTIC_REST_PASSWORD): \nType stored to go on: ", []string{"RESTIC_REST_USERNAME", "RESTIC_REST_PASSWORD"}},
 	} {
 		t.Run(tc.repo, func(t *testing.T) {
 			b, m := setupBox(t)
@@ -523,6 +522,19 @@ func TestALookThatFailedOnItsOwnIsSaidBeforeAnyPassword(t *testing.T) {
 			m.asked = nil
 			nothingWritten(t, b, m)
 		})
+	}
+}
+
+// A restic that is there but not executable is refused as not
+// installed, before anything is asked.
+func TestAResticThatCannotRunIsNotInstalled(t *testing.T) {
+	b, m := setupBox(t)
+	b.haveProgram = func(p string) bool { return p != b.cfg.Restic }
+	if _, err := b.setup(t, m, "s3:http://e2e-s3:9000/box"); err == nil || !strings.Contains(err.Error(), "restic is not installed") {
+		t.Fatalf("err = %v", err)
+	}
+	if len(m.asked) != 0 {
+		t.Fatalf("asked %q", m.asked)
 	}
 }
 
@@ -879,27 +891,32 @@ func TestAKeyTheStorageRefusesIsAskedForAgain(t *testing.T) {
 	if !errors.Is(err, context.Canceled) || err.Error() != "interrupted: nothing has been written; the password shown above was never used: discard it" {
 		t.Fatalf("err = %v", err)
 	}
-	// Unless the unit could not be seen gone: init may still be making
-	// the repository with that password, so it is not called dead, and
-	// the runner's own words are the error.
-	b, m = setupBox(t)
-	ctx, cancel = context.WithCancel(context.Background())
-	b.hang, b.stopErr = "init", unit.ErrNotConfirmedGone
-	b.before = func(s unit.Spec) {
-		if strings.Contains(s.Name, "_init_") {
-			cancel()
-		}
-	}
-	_, err = Setup(ctx, b.cfg, b, SetupOptions{Repository: "s3:http://e2e-s3:9000/box", Terminal: m})
-	if !errors.Is(err, unit.ErrNotConfirmedGone) || strings.Contains(err.Error(), "discard it") || strings.Contains(err.Error(), "nothing has been written") {
-		t.Fatalf("err = %v", err)
-	}
-	// Nor is a look that could not be seen gone passed over.
+	// A look that could not be seen gone is not passed over: the
+	// runner's own words are the error, and init never runs.
 	b, m = setupBox(t)
 	b.hang, b.stopErr = "probe", unit.ErrNotConfirmedGone
 	_, err = b.setup(t, m, "s3:http://e2e-s3:9000/box")
 	if !errors.Is(err, unit.ErrNotConfirmedGone) || strings.Contains(b.roles(), "init") {
 		t.Fatalf("err = %v after %s", err, b.roles())
+	}
+}
+
+// Only restic's two wordings for a repository that exists count as
+// one: a storage saying "already exists" of something else is a
+// failure of init, and the password stays with it.
+func TestOnlyResticsOwnWordsSayTheRepositoryExists(t *testing.T) {
+	for _, tc := range []struct {
+		message string
+		exists  bool
+	}{
+		{"Fatal: create key in repository at s3:x failed: repository master key and config already initialized", true},
+		{"Fatal: create repository at s3:x failed: Fatal: unable to open repository at s3:x: config file already exists", true},
+		{"Fatal: create repository at s3:x failed: BucketAlreadyExists: the bucket already exists in another region", false},
+		{"Fatal: create repository at s3:x failed: a lock already exists", false},
+	} {
+		if got := repositoryExists(tc.message); got != tc.exists {
+			t.Errorf("%q: exists %v, want %v", tc.message, got, tc.exists)
+		}
 	}
 }
 
@@ -1037,22 +1054,31 @@ func TestAMistakeLeavesAWorkingSetupAsItWas(t *testing.T) {
 	}
 }
 
-func TestARepositoryThatDoesNotAnswerIsGivenUpOnAndTheUnitStopped(t *testing.T) {
+// A repository that does not answer init is given up on — the waiting,
+// not the unit: init is never stopped half way (a config and no key is
+// a repository no password opens), so it is left running, recorded for
+// the next lock holder to wait for, and the operator is told how to end
+// it if it must be.
+func TestARepositoryThatDoesNotAnswerIsGivenUpOnAndInitLeftRunning(t *testing.T) {
 	b, m := setupBox(t)
 	b.hang = "init"
 	_, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
-	if err == nil || !strings.Contains(err.Error(), "the repository did not answer within") {
+	if err == nil || !strings.Contains(err.Error(), "the repository did not answer within") || !strings.Contains(err.Error(), "restic init is left running as hotserve_backup_init_") || !strings.Contains(err.Error(), "systemctl stop hotserve_backup_init_") || !strings.HasSuffix(err.Error(), "keep the password shown above: restic init ran with it, and may have made the repository; run setup again, which looks first and asks for it if the repository is there") {
 		t.Fatalf("err = %v", err)
 	}
-	if len(b.stopped) != 1 || !strings.Contains(b.stopped[0], "_init_") {
-		t.Fatalf("stopped: %v", b.stopped)
+	if len(b.stopped) != 0 {
+		t.Fatalf("init was stopped: %v", b.stopped)
+	}
+	if _, err := os.Lstat(filepath.Join(b.cfg.RunDir, "init-unit")); err != nil {
+		t.Fatal("the running init is not recorded for the next lock holder")
 	}
 	m.asked = nil
 	nothingWritten(t, b, m)
-	// What a person waiting on init is told: Ctrl-C stops a unit that
-	// may have made the repository with the shown password — never
-	// "nothing has been written", which is the look's and the opening's.
-	if !strings.Contains(m.saidAll(), "still waiting for s3:http://e2e-s3:9000/box (Ctrl-C stops it; restic init may have made the repository with the password shown: keep it)") || strings.Contains(m.saidAll(), "nothing has been written") {
+	// What a person waiting on init is told: Ctrl-C leaves a unit
+	// running that may have made the repository with the shown password
+	// — never "nothing has been written", which is the look's and the
+	// opening's.
+	if !strings.Contains(m.saidAll(), "still waiting for s3:http://e2e-s3:9000/box (Ctrl-C leaves restic init running, and the next setup waits for it; it may be making the repository with the password shown: keep it)") || strings.Contains(m.saidAll(), "nothing has been written") {
 		t.Fatalf("said:\n%s", m.saidAll())
 	}
 	b, m = setupBox(t)
@@ -1065,14 +1091,18 @@ func TestARepositoryThatDoesNotAnswerIsGivenUpOnAndTheUnitStopped(t *testing.T) 
 	// A unit the runner could not see gone is not said to have been
 	// stopped: the runner's own words are the error.
 	b, m = setupBox(t)
-	b.hang, b.stopErr = "init", unit.ErrNotConfirmedGone
+	b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 12}
+	b.hang, b.stopErr = "open", unit.ErrNotConfirmedGone
+	m.answers = []string{"AKIDX", "the-secret", "its-own-password"}
 	_, err = b.setup(t, m, "s3:http://e2e-s3:9000/box")
 	if err == nil || strings.Contains(err.Error(), "the unit was stopped") || !errors.Is(err, unit.ErrNotConfirmedGone) {
 		t.Fatalf("err = %v", err)
 	}
 }
 
-func TestAnInterruptDuringInitStopsTheUnitAndWritesNothing(t *testing.T) {
+// An interrupt during init leaves it running — recorded for the next
+// lock holder — and writes nothing; the password shown is to be kept.
+func TestAnInterruptDuringInitLeavesItRunningAndWritesNothing(t *testing.T) {
 	b, m := setupBox(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	b.hang = "init"
@@ -1082,11 +1112,14 @@ func TestAnInterruptDuringInitStopsTheUnitAndWritesNothing(t *testing.T) {
 		}
 	}
 	_, err := Setup(ctx, b.cfg, b, SetupOptions{Repository: "s3:http://e2e-s3:9000/box", Terminal: m})
-	if !errors.Is(err, context.Canceled) {
+	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "keep the password shown above") {
 		t.Fatalf("err = %v", err)
 	}
-	if len(b.stopped) != 1 {
-		t.Fatalf("stopped: %v", b.stopped)
+	if len(b.stopped) != 0 {
+		t.Fatalf("init was stopped: %v", b.stopped)
+	}
+	if _, err := os.Lstat(filepath.Join(b.cfg.RunDir, "init-unit")); err != nil {
+		t.Fatal("the running init is not recorded for the next lock holder")
 	}
 	m.asked = nil
 	nothingWritten(t, b, m)

@@ -487,6 +487,10 @@ func TestIntegrationSystemdReadsAnEnvFileAsParseDoes(t *testing.T) {
 		`b'`,
 		`DQCONT="a\`,
 		`b"`,
+		`AFTERQC="v"\`,
+		`NEXT=1`,
+		`AFTERQS="v" x\`,
+		`NEXT2=2`,
 		`LEADQ="abc`,
 		`SWALLOWED=yes`,
 		``,
@@ -500,7 +504,7 @@ func TestIntegrationSystemdReadsAnEnvFileAsParseDoes(t *testing.T) {
 			t.Errorf("%s: Parse reads %q, the manager gives the unit %q (present: %v)", k, v, u, ok)
 		}
 	}
-	for _, k := range []string{"COMMENT", "SEMI", "NOEQ", "two", "SWALLOWED", "EXP"} {
+	for _, k := range []string{"COMMENT", "SEMI", "NOEQ", "two", "SWALLOWED", "EXP", "NEXT", "NEXT2"} {
 		if _, ok := unit[k]; ok {
 			t.Errorf("the manager gave the unit %s, which Parse skips", k)
 		}

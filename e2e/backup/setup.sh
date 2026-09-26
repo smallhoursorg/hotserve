@@ -97,7 +97,7 @@ printf 'x\n' | at_tty hotserve-backup setup "$REPO" >"$OUT" 2>&1 && fail "setup 
 says "Storage key id" && fail "a prompt was asked before the preflight passed" || pass "and asked nothing"
 id hotserve-backup >/dev/null 2>&1 && fail "the account was made before the preflight passed" || pass "and made no account"
 mv /usr/bin/restic.aside /usr/bin/restic
-for r in sftp:user@host:/srv/backups /srv/backups local:/srv/backups rclone:remote:bucket azure:container:path gs:bucket:path swift:container:/path "s3:http://user:pass@e2e-s3:9000/box" "s3:user:pass@e2e-s3:9000/box" "ftp://host/x" "s3:"; do
+for r in sftp:user@host:/srv/backups /srv/backups local:/srv/backups rclone:remote:bucket azure:container:path gs:bucket:path swift:container:/path rest:https://host:8000/ "s3:http://user:pass@e2e-s3:9000/box" "s3:user:pass@e2e-s3:9000/box" "ftp://host/x" "s3:"; do
 	if printf 'x\n' | at_tty hotserve-backup setup "$r" >"$OUT" 2>&1; then
 		fail "setup $r exited 0"
 	elif says "Storage key id"; then
@@ -281,9 +281,22 @@ t0=$(date +%s)
 converse "hotserve-backup setup s3:http://127.0.0.1:9999/blackhole" "$P_KEY" "$KEYID" "$P_SECRET" "$SECRET" "$P_STORED" stored
 rc=$?
 took=$(($(date +%s) - t0))
-[ "$rc" != 0 ] && says "still waiting for s3:http://127.0.0.1:9999/blackhole (Ctrl-C stops it; restic init may have made the repository with the password shown: keep it)" && pass "a person waiting on init is told what for, and what Ctrl-C would do" || fail "the wait: exit $rc after ${took}s: $(cat "$OUT")"
-says "the repository did not answer within 2m0s; the unit was stopped" && [ "$took" -ge 130 ] && [ "$took" -lt 190 ] && pass "given up on after the look's 10 s and the clock's 2 min (${took}s)" || fail "the clock: exit $rc after ${took}s: $(tail -3 "$OUT")"
-[ "$(units_left)" = 0 ] && [ "$(temps)" = 0 ] && [ "$(sum)" = "$before" ] && pass "the unit is gone, nothing is left, the working file is as it was" || fail "after the clock: units=$(units_left) temps=$(temps)"
+[ "$rc" != 0 ] && says "still waiting for s3:http://127.0.0.1:9999/blackhole (Ctrl-C leaves restic init running, and the next setup waits for it; it may be making the repository with the password shown: keep it)" && pass "a person waiting on init is told what for, and what Ctrl-C would do" || fail "the wait: exit $rc after ${took}s: $(cat "$OUT")"
+says "the repository did not answer within 2m0s; restic init is left running as hotserve_backup_init_[0-9a-f]\{12\}.service, and the next run or setup waits for it (if it must be ended: systemctl stop hotserve_backup_init_" && [ "$took" -ge 130 ] && [ "$took" -lt 190 ] && pass "given up on after the look's 10 s and the clock's 2 min (${took}s): the waiting, not the unit" || fail "the clock: exit $rc after ${took}s: $(tail -3 "$OUT")"
+init_unit=$(systemctl list-units --plain --no-legend --state=activating 'hotserve_backup_init_*' | awk '{print $1}')
+[ -n "$init_unit" ] && [ -f /run/hotserve-backup/init-unit ] && [ "$(cat /run/hotserve-backup/init-unit)" = "$init_unit" ] && pass "init is still running, and recorded for the next lock holder" || fail "after the clock: init unit '$init_unit', marker $(cat /run/hotserve-backup/init-unit 2>&1)"
+[ "$(temps)" = 0 ] && [ "$(sum)" = "$before" ] && pass "nothing is left beside the working file, which is as it was" || fail "after the clock: temps=$(temps)"
+# A setup that comes now waits for that init, up to three minutes, and
+# says so; the operator ends it the way the message says.
+converse "hotserve-backup setup $S3/afterclock" "$P_KEY" "$KEYID" &
+sp=$!
+i=0; until grep -q "waiting for the restic init a setup that did not finish left running: $init_unit" "$OUT" || [ "$i" -ge 300 ]; do i=$((i + 1)); sleep 0.1; done
+grep -q "waiting for the restic init a setup that did not finish left running: $init_unit" "$OUT" && pass "the next setup waits for the init that was left running, and says which" || fail "the next setup: $(cat "$OUT")"
+systemctl stop "$init_unit"
+wait "$sp"
+[ $? != 0 ] && grep -q "$P_KEY" "$OUT" && pass "once it ended, the next setup went on to its own prompts" || fail "after the init ended: $(tail -3 "$OUT")"
+until_units 0 'hotserve_backup_*'
+[ "$(units_left)" = 0 ] && [ ! -f /run/hotserve-backup/init-unit ] && pass "the unit is gone, and its record with it" || fail "after stopping by hand: units=$(units_left), marker $(ls /run/hotserve-backup/)"
 converse "hotserve-backup setup s3:http://127.0.0.1:9999/blackhole" "$P_KEY" "$KEYID" "$P_SECRET" "$SECRET" "$P_STORED" stored &
 sp=$!
 until_units 1 'hotserve_backup_init_*'
@@ -291,8 +304,11 @@ until_units 1 'hotserve_backup_init_*'
 kill -INT "$(pgrep -x hotserve-backup)"
 wait "$sp"
 [ $? != 0 ] && grep -q "interrupted: nothing has been written; keep the password shown above: restic init ran with it" "$OUT" && pass "interrupted during init, setup exits non-zero and says to keep the shown password" || fail "interrupted setup: $(tail -2 "$OUT")"
+init_unit=$(systemctl list-units --plain --no-legend --state=activating 'hotserve_backup_init_*' | awk '{print $1}')
+[ -n "$init_unit" ] && [ "$(temps)" = 0 ] && [ "$(sum)" = "$before" ] && pass "Ctrl-C left init running and nothing else" || fail "after Ctrl-C: init '$init_unit' temps=$(temps)"
+systemctl stop "$init_unit" 2>/dev/null
 until_units 0 'hotserve_backup_*'
-[ "$(units_running)" = 0 ] && [ "$(temps)" = 0 ] && [ "$(sum)" = "$before" ] && pass "Ctrl-C stopped the unit and left nothing" || fail "after Ctrl-C: units=$(units_running) temps=$(temps)"
+[ "$(units_running)" = 0 ] && pass "ended by hand, as the message says" || fail "units still running: $(units_running)"
 kill "$bh" 2>/dev/null
 
 echo "=== setup 12: status as root says where the file is not read as written; as nobody it cannot look ==="

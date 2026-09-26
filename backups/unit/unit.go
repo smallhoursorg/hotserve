@@ -274,14 +274,25 @@ func (r *Runner) Wait(ctx context.Context, name string) error {
 	if !nameRe.MatchString(name) {
 		return fmt.Errorf("unit name %q does not match %s", name, nameRe)
 	}
+	unreadable := 0
 	for {
 		p, err := r.conn.GetAllPropertiesContext(ctx, name)
 		if err != nil {
 			if isNoSuchUnit(err) {
 				return nil
 			}
-			return fmt.Errorf("%s: reading its state: %w", name, err)
+			// Now and then is a manager busy, as Run allows for.
+			if unreadable++; unreadable >= 10 {
+				return fmt.Errorf("%s: its state could not be read %d times: %w", name, unreadable, err)
+			}
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("%s: its state could not be read: %w", name, ctx.Err())
+			case <-time.After(time.Second):
+			}
+			continue
 		}
+		unreadable = 0
 		if str(p["LoadState"]) == "not-found" {
 			return nil
 		}
