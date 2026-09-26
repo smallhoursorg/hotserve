@@ -146,10 +146,11 @@ func config() engine.Config {
 }
 
 // runner connects to the system manager, which takes root; the
-// refusal names the invocation to repeat under sudo.
-func runner(ctx context.Context, what, invocation string) (*unit.Runner, error) {
+// refusal names the command as it was given, to repeat under sudo —
+// every argument of it, a restore's options included.
+func runner(ctx context.Context, what string) (*unit.Runner, error) {
 	if os.Geteuid() != 0 {
-		return nil, fmt.Errorf("a %s starts system units, which needs root: sudo hotserve-backup %s", what, invocation)
+		return nil, fmt.Errorf("a %s starts system units, which needs root: sudo hotserve-backup %s", what, record.Clean(strings.Join(os.Args[1:], " ")))
 	}
 	return unit.NewSystemRunner(ctx)
 }
@@ -160,7 +161,7 @@ func runner(ctx context.Context, what, invocation string) (*unit.Runner, error) 
 // asks for one.
 func setup(ctx context.Context, repository string) error {
 	cfg := config()
-	r, err := runner(ctx, "setup", "setup <repository>")
+	r, err := runner(ctx, "setup")
 	if err != nil {
 		return err
 	}
@@ -184,7 +185,7 @@ func setup(ctx context.Context, repository string) error {
 }
 
 func run(ctx context.Context) error {
-	r, err := runner(ctx, "run", "run")
+	r, err := runner(ctx, "run")
 	if err != nil {
 		return err
 	}
@@ -373,7 +374,7 @@ func restoreApp(ctx context.Context, args []string) error {
 	if !yes {
 		o.Confirm = confirm(ctx)
 	}
-	r, err := runner(ctx, "restore", "restore "+args[0])
+	r, err := runner(ctx, "restore")
 	if err != nil {
 		return err
 	}
@@ -510,7 +511,7 @@ func reportRestore(rep *engine.RestoreReport) {
 }
 
 func drill(ctx context.Context) error {
-	r, err := runner(ctx, "drill", "drill")
+	r, err := runner(ctx, "drill")
 	if err != nil {
 		return err
 	}

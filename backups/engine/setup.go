@@ -654,7 +654,15 @@ var errDidNotAnswer = errors.New("the repository did not answer")
 func (x *run) repository(ctx context.Context, term Terminal, repo, role, envFile string, within time.Duration, argv ...string) (unit.Outcome, string, error) {
 	clock, cancel := context.WithTimeout(ctx, within)
 	defer cancel()
+	// A person waiting is told what for, and what Ctrl-C would do:
+	// nothing, for the look and the opening, which only read; for init,
+	// stop a unit that may have made the repository with the password
+	// shown.
 	note := time.AfterFunc(setupNote, func() {
+		if role == "init" {
+			term.Say("still waiting for " + repo + " (Ctrl-C stops it; restic init may have made the repository with the password shown: keep it)")
+			return
+		}
 		term.Say("still waiting for " + repo + " (Ctrl-C is safe: nothing has been written)")
 	})
 	defer note.Stop()

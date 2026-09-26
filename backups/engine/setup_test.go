@@ -891,8 +891,18 @@ func TestARepositoryThatDoesNotAnswerIsGivenUpOnAndTheUnitStopped(t *testing.T) 
 	}
 	m.asked = nil
 	nothingWritten(t, b, m)
-	if !strings.Contains(m.saidAll(), "still waiting for s3:http://e2e-s3:9000/box (Ctrl-C is safe: nothing has been written)") {
+	// What a person waiting on init is told: Ctrl-C stops a unit that
+	// may have made the repository with the shown password — never
+	// "nothing has been written", which is the look's and the opening's.
+	if !strings.Contains(m.saidAll(), "still waiting for s3:http://e2e-s3:9000/box (Ctrl-C stops it; restic init may have made the repository with the password shown: keep it)") || strings.Contains(m.saidAll(), "nothing has been written") {
 		t.Fatalf("said:\n%s", m.saidAll())
+	}
+	b, m = setupBox(t)
+	b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 12}
+	b.hang = "open"
+	m.answers = []string{"AKIDX", "the-secret", "its-own-password"}
+	if _, err := b.setup(t, m, "s3:http://e2e-s3:9000/box"); err == nil || !strings.Contains(m.saidAll(), "still waiting for s3:http://e2e-s3:9000/box (Ctrl-C is safe: nothing has been written)") {
+		t.Fatalf("err %v\nsaid:\n%s", err, m.saidAll())
 	}
 	// A unit the runner could not see gone is not said to have been
 	// stopped: the runner's own words are the error.

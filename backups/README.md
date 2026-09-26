@@ -665,8 +665,10 @@ What can be known to fail is refused before anything is asked for
    without the password nothing can); the operator types `stored` to
    go on, and gets one more asking for any other word. Then
    `restic init --json` runs with that password, under a two-minute
-   clock; after 20 seconds a person waiting is told what for, and that
-   Ctrl-C is safe. This one unit is not recorded for the next run or
+   clock; after 20 seconds a person waiting is told what for, and what
+   Ctrl-C would do — stop a unit that may have made the repository
+   with the password shown, which is then to be kept (for the look and
+   the opening, which only read, Ctrl-C is safe). This one unit is not recorded for the next run or
    setup to stop: stopped half way it would leave a repository with a
    config and no key, which no password opens, where left to its few
    seconds it makes the repository with the password that was shown —
@@ -687,21 +689,19 @@ What can be known to fail is refused before anything is asked for
    there after all ("already initialized", whatever the password), the
    same follows, and the password just shown is said not to be the
    one;
-8. once the repository has answered, the file takes the working one's
-   place — whole, root `0600` — the record having gone aside first
-   where it must (next);
-9. then the record (`status.json`) is put aside as
-   `status.json.aside-<time>`, and why is said, if the file before
-   named another repository, or there was no file before, or this
-   setup made the repository — a repository just made holds none of
-   the record's snapshots, whatever its URL: a run then drills what it
-   backs up into the repository now in use, and `status` does not say
-   "proven" of a snapshot this repository does not hold. The record
-   goes aside just before the file takes the working one's place, and
-   comes back if the file cannot, so that nothing that ends setup
-   between the two leaves a credential file with another repository's
-   record beside it. The same repository, opened, keeps its record.
-   The last line names the
+8. once the repository has answered, the record (`status.json`) is
+   put aside as `status.json.aside-<time>`, and why is said, if the
+   file before named another repository, or there was no file before,
+   or this setup made the repository — a repository just made holds
+   none of the record's snapshots, whatever its URL: a run then drills
+   what it backs up into the repository now in use, and `status` does
+   not say "proven" of a snapshot this repository does not hold. The
+   same repository, opened, keeps its record;
+9. then the file takes the working one's place — whole, root `0600`.
+   The record goes aside first, and comes back if the file cannot take
+   its place, and each step is on the disk before the next, so that
+   nothing that ends setup between the two leaves a credential file
+   with another repository's record beside it. The last line names the
    repository, whether it was made or opened, and its id — and, when
    `/etc/hotserve/backup.env` from before this version is still there,
    that it is, and to remove it: that file is where an administrator's
