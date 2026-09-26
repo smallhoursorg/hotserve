@@ -202,8 +202,9 @@ type setup struct {
 	password string
 	// initRan is whether restic init has been started with password
 	// at all: from then on no failure proves it unused, and it is never
-	// said to be.
-	initRan bool
+	// said to be. made is more: the repository has that password for
+	// certain — init made it, or it opened one an earlier init made.
+	initRan, made bool
 	// initLeft is whether init was left running — by its clock or an
 	// interrupt — and so still has the staged file and the run
 	// directory to read: the manager opens both in the unit's own first
@@ -280,24 +281,9 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 	if err := os.Chmod(dir, 0o755); err != nil { //nolint:gosec // said again past the caller's umask
 		return nil, err
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-	for _, e := range entries {
-		// What a setup that did not live to remove them leaves, and
-		// nothing else: a copy an operator keeps beside the file under
-		// another name is theirs.
-		if !envfile.IsLeftover(e.Name(), filepath.Base(cfg.EnvFile)) {
-			continue
-		}
-		f := filepath.Join(dir, e.Name())
-		if err := os.Remove(f); err != nil {
-			return nil, fmt.Errorf("a file an interrupted setup left could not be removed: %w", err)
-		}
-		term.Say("removed a file an interrupted setup left: " + f)
-		rep.Swept = append(rep.Swept, f)
-	}
+	// What a setup that did not live to remove them left was swept by
+	// open, after the wait for its init, and said.
+	rep.Swept = x.swept
 	// Whether there was a file before: with none, no run could have
 	// written the record against this repository. What it names is not
 	// read — the record's repository is known by its id, below.
@@ -419,11 +405,12 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 			return nil, s.err(err)
 		}
 		if o1.OK() {
+			// Exit 0 is a repository made, with the password that was
+			// shown: whatever restic did not say, that password is now
+			// the repository's.
+			s.made = true
 			if rep.RepositoryID = initializedID(filepath.Join(x.dir, "init.out")); rep.RepositoryID == "" {
-				// Exit 0 is a repository made, with the password that was
-				// shown: whatever restic did not say, that password is now
-				// the repository's, and is never said to be dead.
-				return nil, errors.New("restic made the repository and exited 0 but said nothing of it; the password shown above is the repository's: keep it, and run setup again to open it")
+				return nil, s.err(errors.New("restic made the repository and exited 0 but said nothing of its id; run setup again, which opens it"))
 			}
 			rep.New = true
 			break
@@ -550,27 +537,26 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 		}
 		return nil, s.err(err)
 	}
-	// The id goes on the disk once the file is in place, never before:
-	// a power cut between the two must not leave the new id beside the
-	// old file, or a record the next run writes against the old
-	// repository would pass for the new one's. Left old by a cut here,
-	// it puts the record aside once more — a fresh start, which the
-	// next run mends. Renamed, not synced, the file is in place for
-	// every reader, and stays, the password shown being the
-	// repository's; only what the disk holds after a power cut is in
-	// doubt. Said, and the record left aside with it.
-	inPlace := "the credential file is in place and holds the repository's password (the one shown above, where one was shown: keep it)"
+	// The file on the disk first, then the id: a power cut must never
+	// leave the new id beside the old file, or a record the next run
+	// writes against the old repository would pass for the new one's
+	// — the old id beside the new file, at worst, which puts the record
+	// aside once more, a fresh start the next run mends. From here the
+	// file is in place for every reader, and stays; what fails after is
+	// said with the record's whereabouts, and the password's fate from
+	// what setup knows.
+	inPlace := "the credential file is in place"
 	if rep.Aside != "" {
 		inPlace += "; the record was put aside: " + rep.Aside
 	}
+	if err := syncDir(dir); err != nil {
+		return nil, s.err(fmt.Errorf("%s; its directory could not be synced to the disk, and the repository's id was not recorded beside the record, so the next setup puts the record aside: %w", inPlace, err))
+	}
 	if err := writeID(idFile, rep.RepositoryID); err != nil {
-		return nil, fmt.Errorf("%s; the repository's id could not be kept beside the record, so the next setup puts the record aside: %w", inPlace, err)
+		return nil, s.err(fmt.Errorf("%s; the repository's id could not be kept beside the record, so the next setup puts the record aside: %w", inPlace, err))
 	}
 	if err := syncDir(cfg.StateDir); err != nil {
-		return nil, fmt.Errorf("%s; the state directory could not be synced to the disk: %w", inPlace, err)
-	}
-	if err := syncDir(dir); err != nil {
-		return nil, fmt.Errorf("%s; its directory could not be synced to the disk: %w", inPlace, err)
+		return nil, s.err(fmt.Errorf("%s; the state directory could not be synced to the disk: %w", inPlace, err))
 	}
 	if why != "" {
 		term.Say(fmt.Sprintf("the record was put aside (%s): %s; the next run drills what it backs up", why, rep.Aside))
@@ -593,6 +579,12 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 	return rep, nil
 }
 
+// leaveInit is init left running, whichever way: the staged file it
+// reads and the run directory it writes to stay, since the manager
+// opens both in the unit's own first moments, which this end may come
+// before. The next lock holder waits for it, then sweeps both.
+func (s *setup) leaveInit() { s.initLeft, s.keepDir = true, true }
+
 // tryShown opens the repository with the password shown — the staged
 // file holds it — after an earlier attempt's init ran with it: one it
 // opens is one this setup made; else the repository's own is needed.
@@ -603,7 +595,7 @@ func (s *setup) tryShown(ctx context.Context, rep *SetupReport, needsOwn func())
 	}
 	if opened {
 		s.term.Say("the repository exists, and the password shown above opens it: it was made by an earlier attempt of this setup")
-		rep.RepositoryID, rep.New = id, true
+		rep.RepositoryID, rep.New, s.made = id, true, true
 		return nil
 	}
 	needsOwn()
@@ -636,6 +628,8 @@ func (s *setup) confirmStored(ctx context.Context) error {
 func (s *setup) err(err error) error {
 	fate := ""
 	switch {
+	case s.password != "" && s.made:
+		fate = "; the password shown above is the repository's: keep it"
 	case s.password != "" && s.initRan:
 		// Started, init may have written some or all of a repository
 		// before it failed or was left running: nothing here proves the
@@ -873,13 +867,13 @@ func (s *setup) repository(ctx context.Context, role string, within time.Duratio
 	select {
 	case e := <-done:
 		if e.err != nil {
+			// Lost sight of, and recorded still: left what it needs.
+			s.leaveInit()
 			return e.o, "", e.err
 		}
 		return e.o, resticMessage(errFile), nil
 	case <-clock.Done():
-		// Left running: with what it reads and writes, which the manager
-		// may not have opened yet.
-		s.initLeft, s.keepDir = true, true
+		s.leaveInit()
 		if ctx.Err() != nil {
 			return unit.Outcome{}, "", ctx.Err()
 		}

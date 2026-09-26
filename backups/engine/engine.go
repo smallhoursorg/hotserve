@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/smallhoursorg/hotserve/backups/dump"
+	"github.com/smallhoursorg/hotserve/backups/envfile"
 	"github.com/smallhoursorg/hotserve/backups/plan"
 	"github.com/smallhoursorg/hotserve/backups/record"
 	"github.com/smallhoursorg/hotserve/backups/unit"
@@ -106,6 +107,8 @@ type run struct {
 	// files in the unit's own first moments, which the end may come
 	// before. The next lock holder's sweep removes it, after waiting.
 	keepDir bool
+	// swept is what open removed of an interrupted setup's leavings.
+	swept []string
 }
 
 // preRestoreTag is on a snapshot a restore made of what it was about to
@@ -134,12 +137,22 @@ func Run(ctx context.Context, cfg Config, r Runner) (*record.Status, error) {
 // held and the record is still to be written; end removes the directory
 // and releases the lock.
 func begin(ctx context.Context, cfg Config, r Runner) (x *run, end func(), err error) {
+	// The lock, the wait for an init a setup left running, and the sweep
+	// of what it left come first, whatever the box is: a first setup
+	// interrupted mid-init leaves no credential file, and its init is
+	// still every lock holder's to wait for.
+	x, end, err = open(ctx, cfg, r, nil)
+	if err != nil {
+		return x, end, err
+	}
 	if _, err := os.Lstat(cfg.EnvFile); errors.Is(err, fs.ErrNotExist) {
+		end()
 		return nil, nil, fmt.Errorf("backups are not set up: %s is not there%s", cfg.EnvFile, OldEnvFileNote(cfg))
 	} else if err != nil {
+		end()
 		return nil, nil, fmt.Errorf("backups are not set up: %s: %w", cfg.EnvFile, err)
 	}
-	return open(ctx, cfg, r, nil)
+	return x, end, nil
 }
 
 // open is begin without the credential file: what setup, which is
@@ -185,6 +198,9 @@ func open(ctx context.Context, cfg Config, r Runner, say func(string)) (x *run, 
 		return x, unlock, err
 	}
 	if err := x.sweep(); err != nil {
+		return x, unlock, err
+	}
+	if err := x.sweepStaged(say); err != nil {
 		return x, unlock, err
 	}
 	if err := os.Mkdir(x.dir, 0o700); err != nil {
@@ -596,6 +612,39 @@ func (x *run) sweepUnits() error {
 		}
 	}
 	return os.Remove(list)
+}
+
+// sweepStaged removes what a setup that did not live to the end left
+// beside the credential file — its staged file, or the one envfile
+// makes on the way to it, and nothing else: a copy an operator keeps
+// there under another name is theirs — once the init that may still
+// read it has been waited for. Said, where there is someone to tell;
+// what was removed is in x.swept.
+func (x *run) sweepStaged(say func(string)) error {
+	dir := filepath.Dir(x.cfg.EnvFile)
+	// A directory that is a link is not root's own, and is setup's to
+	// refuse; nothing is removed through it.
+	if st, err := os.Lstat(dir); err != nil || st.Mode()&os.ModeSymlink != 0 {
+		return nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if !envfile.IsLeftover(e.Name(), filepath.Base(x.cfg.EnvFile)) {
+			continue
+		}
+		f := filepath.Join(dir, e.Name())
+		if err := os.Remove(f); err != nil {
+			return fmt.Errorf("a file an interrupted setup left could not be removed: %w", err)
+		}
+		if say != nil {
+			say("removed a file an interrupted setup left: " + f)
+		}
+		x.swept = append(x.swept, f)
+	}
+	return nil
 }
 
 func (x *run) plan(ctx context.Context) (*plan.Plan, error) { return x.planWith(ctx, "") }

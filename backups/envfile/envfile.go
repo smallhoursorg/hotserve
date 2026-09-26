@@ -103,6 +103,8 @@ func Parse(raw []byte) (Values, []string) {
 	}
 	for i := 0; i < len(raw); i++ {
 		c := raw[i]
+		// A line, to say which, is an editor's line: a carriage return
+		// the manager ends a line at shows on that line, as ^M.
 		if c == '\n' {
 			line++
 		}

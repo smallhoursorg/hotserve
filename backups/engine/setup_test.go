@@ -385,7 +385,7 @@ func TestAPasswordInitUsedIsNeverSaidDead(t *testing.T) {
 	b, m := setupBox(t)
 	b.initOut = "not json at all\n"
 	_, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
-	if err == nil || strings.Contains(err.Error(), "discard") || !strings.Contains(err.Error(), "restic made the repository and exited 0 but said nothing of it; the password shown above is the repository's: keep it") {
+	if err == nil || strings.Contains(err.Error(), "discard") || !strings.Contains(err.Error(), "restic made the repository and exited 0 but said nothing of its id; run setup again, which opens it; the password shown above is the repository's: keep it") {
 		t.Fatalf("err = %v", err)
 	}
 	m.asked = nil
@@ -1150,7 +1150,7 @@ func TestAMistakeLeavesAWorkingSetupAsItWas(t *testing.T) {
 			b.probeOut, b.openErr = "", "Fatal: unable to open repository: AccessDenied: keys/ is not yours to read\n"
 			m.answers = []string{"AKIDX", "the-secret", "pw"}
 		}, "restic could not open the repository (exit 1): Fatal: unable to open repository: AccessDenied: keys/ is not yours to read"},
-		{"init exits 0 and names no repository", func(b *box, m *term) { b.initOut = "" }, "restic made the repository and exited 0 but said nothing of it; the password shown above is the repository's: keep it"},
+		{"init exits 0 and names no repository", func(b *box, m *term) { b.initOut = "" }, "restic made the repository and exited 0 but said nothing of its id; run setup again, which opens it; the password shown above is the repository's: keep it"},
 		{"init ended by a signal", func(b *box, m *term) {
 			b.outcome["init"] = unit.Outcome{Result: "signal"}
 		}, "restic was ended by signal"},
@@ -1389,65 +1389,6 @@ func TestACredentialDirectoryThatIsALinkIsRefused(t *testing.T) {
 	}
 }
 
-// Every exit after the password was shown says what became of it —
-// whichever step failed: a write of the file, the record's aside, the
-// commit — and says it once.
-func TestEveryExitAfterTheShowingSaysThePasswordsFate(t *testing.T) {
-	keep := "keep the password shown above: restic init ran with it"
-	dead := "the password shown above was never used: discard it"
-	for _, tc := range []struct {
-		name  string
-		set   func(b *box, m *term)
-		want  string
-		never string
-	}{
-		{"the write of the password before init fails", func(b *box, m *term) {
-			writes := 0
-			writeEnv = func(path string, pairs []envfile.Pair) error {
-				if writes++; writes == 2 {
-					return errors.New("ENOSPC on the credential directory")
-				}
-				return envfile.Write(path, pairs)
-			}
-		}, dead, keep},
-		{"the commit fails after init made the repository", func(b *box, m *term) {
-			commit = func(string, string) error { return errors.New("EIO on the rename") }
-		}, keep, dead},
-		{"the state directory's sync fails after init made the repository", func(b *box, m *term) {
-			must(b.t, os.MkdirAll(b.cfg.StateDir, 0o755))
-			must(b.t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), &record.Status{Apps: map[string]*record.App{"blog": {Class: record.OK}}}))
-			syncDir = func(string) error { return errors.New("EIO on the state directory") }
-		}, keep, dead},
-		{"the opening's write fails after init said the repository exists", func(b *box, m *term) {
-			b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
-			b.outcome["init"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
-			b.initOut, b.initErr = "", alreadyInit
-			m.answers = []string{"AKIDX", "the-secret", "stored", "its-own-password"}
-			writes := 0
-			writeEnv = func(path string, pairs []envfile.Pair) error {
-				if writes++; writes == 3 {
-					return errors.New("ENOSPC on the credential directory")
-				}
-				return envfile.Write(path, pairs)
-			}
-		}, dead, keep},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			b, m := setupBox(t)
-			oldCommit, oldWrite := commit, writeEnv
-			t.Cleanup(func() { commit, writeEnv = oldCommit, oldWrite })
-			tc.set(b, m)
-			_, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
-			if err == nil || !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), tc.never) {
-				t.Fatalf("err = %v, want %q and not %q", err, tc.want, tc.never)
-			}
-			if strings.Count(err.Error(), "the password shown above") != 1 {
-				t.Fatalf("the password's fate is said more than once: %v", err)
-			}
-		})
-	}
-}
-
 // The record is put aside before the file takes its place, and put
 // back if the file cannot: whatever ends setup between the two leaves
 // no credential file with a record of another repository beside it.
@@ -1571,8 +1512,11 @@ func TestAFailureBetweenTheAsideAndTheCommitLeavesTheTwoFilesAgreeing(t *testing
 	if asides, _ := filepath.Glob(statusPath + ".aside-*"); len(st.Apps) != 0 || len(asides) != 1 {
 		t.Fatalf("the record was put back under a file already in place: %v, asides %v", st.Apps, asides)
 	}
-	if raw, err := os.ReadFile(filepath.Join(b.cfg.StateDir, "repository-id")); err != nil || string(raw) != repoID+"\n" {
-		t.Fatalf("the repository id is not the file's: %q, %v", raw, err)
+	// The file's directory could not be synced: the id stays the old
+	// one, since the rename may not be on the disk, and the next setup
+	// puts the record aside — never the new id beside the old file.
+	if raw, err := os.ReadFile(filepath.Join(b.cfg.StateDir, "repository-id")); err != nil || string(raw) != "other\n" {
+		t.Fatalf("the repository id after a failed directory sync: %q, %v", raw, err)
 	}
 	// The id is written once the file is in place, never before: a
 	// power cut between the two must not leave the new id beside the

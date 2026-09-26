@@ -725,12 +725,14 @@ What can be known to fail is refused before anything is asked for
    repository, opened, keeps its record;
 9. then the file takes the working one's place — whole, root `0600`.
    The record goes aside first, and comes back if the file cannot take
-   its place; the id is written only once the file is in place, so
-   that a power cut leaves the new id beside the old file never, and
-   the old id beside the new file at worst — which puts the record
-   aside once more; each step is on the disk before the next, so that
-   nothing that ends setup between them leaves a credential file with
-   another repository's record beside it. Then setup names the
+   its place; the id is written only once the file is in place and on
+   the disk, so that a power cut leaves the new id beside the old file
+   never, and the old id beside the new file at worst — which puts the
+   record aside once more; each step is on the disk before the next,
+   so that nothing that ends setup between them leaves a credential
+   file with another repository's record beside it. Whatever fails
+   after the file is in place is said with where the record went, and
+   what became of the password. Then setup names the
    repository, whether it was made or opened, and its id — and, when
    `/etc/hotserve/backup.env` from before this version is still there,
    that it is, and to remove it: that file is where an administrator's
