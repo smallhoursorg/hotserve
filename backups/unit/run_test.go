@@ -16,7 +16,8 @@ type fakeConn struct {
 	props     map[string]any
 	stopErr   error
 	stopped   []string
-	readErr   error // what reading the unit's state returns, when set
+	readErr   error  // what reading the unit's state returns, when set
+	version   string // what the manager says its Version is
 }
 
 func (f *fakeConn) StartTransientUnitContext(_ context.Context, _ string, _ string, _ []sddbus.Property, ch chan<- string) (int, error) {
@@ -114,5 +115,29 @@ func TestAStatusThatCannotBeReadAfterTheJobEndsStopsTheUnit(t *testing.T) {
 	_, err := fakeRunner(c).Run(context.Background(), validSpec())
 	if err == nil || len(c.stopped) != 1 {
 		t.Fatalf("err %v, stopped %v", err, c.stopped)
+	}
+}
+
+func (f *fakeConn) GetManagerProperty(string) (string, error) { return f.version, nil }
+
+// Setup refuses a manager older than the one whose properties every
+// unit here is built on. The property is a string the manager formats
+// ("257.13-1~deb13u1"), read for its leading number.
+func TestManagerVersionIsTheLeadingNumber(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want int
+	}{
+		{`"257.13-1~deb13u1"`, 257}, {"257", 257}, {`"258~rc1"`, 258},
+	} {
+		got, err := fakeRunner(&fakeConn{version: tc.raw}).ManagerVersion(context.Background())
+		if err != nil || got != tc.want {
+			t.Errorf("%q: %d, %v; want %d", tc.raw, got, err, tc.want)
+		}
+	}
+	for _, raw := range []string{"", `""`, "v257", "garbage"} {
+		if got, err := fakeRunner(&fakeConn{version: raw}).ManagerVersion(context.Background()); err == nil {
+			t.Errorf("%q read as %d", raw, got)
+		}
 	}
 }

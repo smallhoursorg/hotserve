@@ -58,7 +58,19 @@ type box struct {
 	size         string         // what `restic stats --mode restore-size` prints
 	free         uint64         // what is free where a fetch lands
 	oneDisk      bool           // the fetch and the install land on one filesystem
+	// setup's own: what `restic init` and `restic cat config` print,
+	// a role whose unit never ends, the manager's version, which
+	// programs are installed and whether the account is
+	initOut, initErr, probeOut string
+	planErr                    string // what the plan unit says on stderr
+	hang                       string
+	version                    int
+	haveProgram                func(string) bool
+	account                    bool
+	accountsMade               int
 }
+
+func (b *box) ManagerVersion(context.Context) (int, error) { return b.version, nil }
 
 var roleRe = regexp.MustCompile(`^hotserve_backup_([a-z]+)[0-9]*_`)
 
@@ -129,7 +141,7 @@ func must(t *testing.T, err error) {
 
 func (b *box) Stop(name string) error { b.stopped = append(b.stopped, name); return b.stopErr }
 
-func (b *box) Run(_ context.Context, s unit.Spec) (unit.Outcome, error) {
+func (b *box) Run(ctx context.Context, s unit.Spec) (unit.Outcome, error) {
 	b.specs = append(b.specs, s)
 	if b.before != nil {
 		b.before(s)
@@ -142,6 +154,17 @@ func (b *box) Run(_ context.Context, s unit.Spec) (unit.Outcome, error) {
 	if err := b.err[role]; err != nil {
 		return unit.Outcome{}, err
 	}
+	if role == b.hang {
+		// As the real runner: the unit is stopped by name once the
+		// context ends, and what could not be confirmed gone wraps the
+		// cause in ErrNotConfirmedGone.
+		<-ctx.Done()
+		b.stopped = append(b.stopped, s.Name)
+		if b.stopErr != nil {
+			return unit.Outcome{}, fmt.Errorf("%w: %s: %w", b.stopErr, s.Name, ctx.Err())
+		}
+		return unit.Outcome{}, ctx.Err()
+	}
 	write := func(body string) {
 		if s.StdoutFile != "" {
 			must(b.t, os.WriteFile(s.StdoutFile, []byte(body), 0o600))
@@ -150,6 +173,9 @@ func (b *box) Run(_ context.Context, s unit.Spec) (unit.Outcome, error) {
 	switch role {
 	case "plan":
 		write(b.plan)
+		if s.StderrFile != "" {
+			must(b.t, os.WriteFile(s.StderrFile, []byte(b.planErr), 0o600))
+		}
 	case "dump":
 		var decl struct {
 			SQLite []string `json:"sqlite"`
@@ -185,6 +211,16 @@ func (b *box) Run(_ context.Context, s unit.Spec) (unit.Outcome, error) {
 	case "unmake":
 		_ = os.Remove(filepath.Join(b.root, "blog", "shared"))
 		_ = os.Remove(filepath.Join(b.root, "blog"))
+	case "init":
+		write(b.initOut)
+		if s.StderrFile != "" {
+			must(b.t, os.WriteFile(s.StderrFile, []byte(b.initErr), 0o600))
+		}
+	case "probe":
+		write(b.probeOut)
+		if s.StderrFile != "" {
+			must(b.t, os.WriteFile(s.StderrFile, nil, 0o600))
+		}
 	case "verify":
 		// Everything after "--" and the snapshot id is a parent to list.
 		var out []string

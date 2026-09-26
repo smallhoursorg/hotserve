@@ -45,11 +45,16 @@ import (
 // installation, none of it an operator's or an app's string.
 type Config struct {
 	ConfigDir string // /etc/hotserve: what the plan unit sees, for the Caddyfile's imports
-	EnvFile   string // /etc/hotserve/backup.env: root-only; read by the manager, never here
-	StateDir  string // /var/lib/hotserve-backup
-	RunDir    string // /run/hotserve-backup
-	Self      string // /usr/bin/hotserve-backup
-	Restic    string // /usr/bin/restic
+	EnvFile   string // /etc/hotserve-backup/repository.env: root-only; read by the manager, never here
+	// OldEnvFile is where an earlier version of this branch kept the
+	// credential file. It is never read: named, when it is there and
+	// EnvFile is not, so that a box set up by hand is told to run setup
+	// rather than left wondering.
+	OldEnvFile string
+	StateDir   string // /var/lib/hotserve-backup
+	RunDir     string // /run/hotserve-backup
+	Self       string // /usr/bin/hotserve-backup
+	Restic     string // /usr/bin/restic
 	// BindsTo is the engine's own service when it has one, so that the
 	// manager ends its units if it dies; empty when run from a shell.
 	BindsTo string
@@ -115,8 +120,14 @@ func Run(ctx context.Context, cfg Config, r Runner) (*record.Status, error) {
 // and releases the lock.
 func begin(cfg Config, r Runner) (x *run, end func(), err error) {
 	if _, err := os.Lstat(cfg.EnvFile); err != nil {
-		return nil, nil, fmt.Errorf("backups are not set up: %s: %w", cfg.EnvFile, err)
+		return nil, nil, fmt.Errorf("backups are not set up: %s: %w%s", cfg.EnvFile, err, OldEnvFileNote(cfg))
 	}
+	return open(cfg, r)
+}
+
+// open is begin without the credential file: what setup, which is
+// about to write that file, shares with a run.
+func open(cfg Config, r Runner) (x *run, end func(), err error) {
 	// The state dir is where the status record is read from by anyone;
 	// everything else is root's alone. Units reach staging through
 	// binds the manager makes, not by walking here.
@@ -528,7 +539,13 @@ func (x *run) sweepUnits() error {
 	return os.Remove(list)
 }
 
-func (x *run) plan(ctx context.Context) (*plan.Plan, error) {
+func (x *run) plan(ctx context.Context) (*plan.Plan, error) { return x.planWith(ctx, "") }
+
+// planWith reads the plan, keeping the unit's stderr in stderrFile when
+// one is named: what setup shows at the terminal, where an operator is
+// waiting for the reason. A run leaves it in the journal — the
+// adapter quotes the Caddyfile, and the record is everyone's to read.
+func (x *run) planWith(ctx context.Context, stderrFile string) (*plan.Plan, error) {
 	out := filepath.Join(x.dir, "plan.json")
 	o, err := x.start(ctx, unit.Spec{
 		Name: x.name("plan", ""), Description: "hotserve backup: read what each app declares",
@@ -538,12 +555,17 @@ func (x *run) plan(ctx context.Context) (*plan.Plan, error) {
 		// an account with the unit that will hold the credential.
 		User: backupUser, SameUIDNamespaces: true,
 		Binds:      []unit.Bind{{Source: x.cfg.ConfigDir}},
-		StdoutFile: out,
+		StdoutFile: out, StderrFile: stderrFile,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("reading the plan: %w", err)
 	}
 	if !o.OK() {
+		if stderrFile != "" {
+			if said, err := os.ReadFile(stderrFile); err == nil && len(bytes.TrimSpace(said)) > 0 { //nolint:gosec // written by the manager into root's own run dir
+				return nil, fmt.Errorf("the Caddyfile could not be turned into a plan (exit %d): %s", o.ExitStatus, record.Text(string(said)))
+			}
+		}
 		return nil, fmt.Errorf("the Caddyfile could not be turned into a plan (exit %d); `journalctl -u %s` has the reason", o.ExitStatus, x.name("plan", ""))
 	}
 	raw, err := os.ReadFile(out) //nolint:gosec // written by the manager into root's own run dir
@@ -1009,20 +1031,31 @@ func resticFailure(o unit.Outcome) (detail string, repositoryWide bool) {
 // summaryID reads the snapshot id out of restic's --json output, of
 // which --quiet leaves one line, the summary.
 func summaryID(file string) string {
+	var m struct {
+		SnapshotID string `json:"snapshot_id"`
+	}
+	if jsonLine(file, "summary", &m) && snapshotRe.MatchString(m.SnapshotID) {
+		return m.SnapshotID
+	}
+	return ""
+}
+
+// jsonLine reads restic's --json output a line at a time and decodes
+// into v the first line whose message_type is the one wanted.
+func jsonLine(file, messageType string, v any) bool {
 	raw, err := os.ReadFile(file) //nolint:gosec // written by the manager into root's own run dir
 	if err != nil {
-		return ""
+		return false
 	}
 	for _, line := range bytes.Split(raw, []byte("\n")) {
 		var m struct {
 			MessageType string `json:"message_type"`
-			SnapshotID  string `json:"snapshot_id"`
 		}
-		if json.Unmarshal(line, &m) == nil && m.MessageType == "summary" && snapshotRe.MatchString(m.SnapshotID) {
-			return m.SnapshotID
+		if json.Unmarshal(line, &m) == nil && m.MessageType == messageType && json.Unmarshal(line, v) == nil {
+			return true
 		}
 	}
-	return ""
+	return false
 }
 
 // verify looks in the snapshot for every declared item that was given

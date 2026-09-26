@@ -1,5 +1,7 @@
 // Command hotserve-backup backs up what hotserve's apps declare.
 //
+//	hotserve-backup setup <repository>
+//	                        the account, the directories, the credential file, the repository; root, at a terminal
 //	hotserve-backup run     one backup run; root; what the timer starts
 //	hotserve-backup restore <app> [--snapshot <id>] [--to <dir>] [--no-pre-backup] [--yes]
 //	                        one snapshot of one app, into place or into a new directory; root
@@ -48,6 +50,7 @@ import (
 
 	"github.com/smallhoursorg/hotserve/backups/dump"
 	"github.com/smallhoursorg/hotserve/backups/engine"
+	"github.com/smallhoursorg/hotserve/backups/envfile"
 	"github.com/smallhoursorg/hotserve/backups/plan"
 	"github.com/smallhoursorg/hotserve/backups/record"
 	"github.com/smallhoursorg/hotserve/backups/restore"
@@ -58,20 +61,21 @@ import (
 
 const caddyfile = "/etc/hotserve/Caddyfile"
 
-const usage = `usage: hotserve-backup run
+const usage = `usage: hotserve-backup setup <repository>
+       hotserve-backup run
        hotserve-backup restore <app> [--snapshot <id>] [--to <dir>] [--no-pre-backup] [--yes]
        hotserve-backup drill
        hotserve-backup status
        hotserve-backup validate <Caddyfile>`
 
 // arguments says whether a command takes that many: restore takes its
-// own, validate takes one file, and nothing else takes any — least of
-// all the commands of units.
+// own, validate takes one file, setup one repository, and nothing else
+// takes any — least of all the commands of units.
 func arguments(name string, n int) bool {
 	switch name {
 	case "restore":
 		return true
-	case "validate":
+	case "validate", "setup":
 		return n == 1
 	}
 	return n == 0
@@ -104,6 +108,8 @@ func command(name string, args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	defer cancel()
 	switch name {
+	case "setup":
+		return setup(ctx, args[0])
 	case "run":
 		return run(ctx)
 	case "restore":
@@ -132,7 +138,7 @@ func command(name string, args []string) error {
 
 func config() engine.Config {
 	return engine.Config{
-		ConfigDir: "/etc/hotserve", EnvFile: "/etc/hotserve/backup.env",
+		ConfigDir: "/etc/hotserve", EnvFile: "/etc/hotserve-backup/repository.env", OldEnvFile: "/etc/hotserve/backup.env",
 		StateDir: "/var/lib/hotserve-backup", RunDir: "/run/hotserve-backup",
 		Self: "/usr/bin/hotserve-backup", Restic: "/usr/bin/restic",
 		BindsTo: ownService(),
@@ -145,6 +151,34 @@ func runner(ctx context.Context, what string) (*unit.Runner, error) {
 		return nil, fmt.Errorf("a %s starts system units, which needs root: sudo hotserve-backup %s", what, what)
 	}
 	return unit.NewSystemRunner(ctx)
+}
+
+// setup needs root and a terminal, and says so before anything else:
+// the secrets are typed there, with echo off, never given on a command
+// line. The engine checks what else can be known to fail before it
+// asks for one.
+func setup(ctx context.Context, repository string) error {
+	r, err := runner(ctx, "setup")
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	t, err := openTTY()
+	if err != nil {
+		return err
+	}
+	defer t.Close()
+	rep, err := engine.Setup(ctx, config(), r, engine.SetupOptions{Repository: repository, Terminal: t})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("credentials: %s (root, 0600)\n", config().EnvFile)
+	if len(rep.Apps) > 0 {
+		fmt.Println("next: sudo hotserve-backup run, then hotserve-backup status; the hourly timer comes with the package")
+	} else {
+		fmt.Println("next: declare a backup in an app's Caddyfile block (liveswap/README.md), then sudo hotserve-backup run")
+	}
+	return nil
 }
 
 func run(ctx context.Context) error {
@@ -220,13 +254,29 @@ func showStatus(ctx context.Context) error {
 	// directory this user may not search — is not "not set up".
 	env, err := os.Lstat(cfg.EnvFile)
 	if errors.Is(err, fs.ErrNotExist) {
-		return couldNotTell{fmt.Errorf("backups are not set up: %s is not there", cfg.EnvFile)}
+		return couldNotTell{fmt.Errorf("backups are not set up: %s is not there%s", cfg.EnvFile, engine.OldEnvFileNote(cfg))}
 	} else if err != nil {
 		return couldNotTell{fmt.Errorf("whether backups are set up cannot be told from here: %w", err)}
 	}
 	st, err := record.Read(filepath.Join(cfg.StateDir, "status.json"))
 	if err != nil {
 		return couldNotTell{fmt.Errorf("the record of the last run could not be read: %w", err)}
+	}
+	// As root, the file itself: where a line of it is not read as it
+	// was written, the manager's rules being what they are. Said, and
+	// nothing more: what the run makes of the file the run says.
+	if os.Geteuid() == 0 {
+		if raw, err := os.ReadFile(cfg.EnvFile); err == nil {
+			v, findings := envfile.Parse(raw)
+			for _, l := range envfile.Lint(v, findings) {
+				fmt.Printf("warning: %s: %s\n", cfg.EnvFile, l)
+			}
+			if repo, ok := v["RESTIC_REPOSITORY"]; ok {
+				if err := engine.RepositoryUsable(repo, cfg.EnvFile); err != nil {
+					fmt.Printf("warning: %s: RESTIC_REPOSITORY: %v\n", cfg.EnvFile, err)
+				}
+			}
+		}
 	}
 	in := status.Input{Record: st, Now: time.Now(), SetUp: env.ModTime()}
 	var active []unit.Active

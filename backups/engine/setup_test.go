@@ -1,0 +1,720 @@
+package engine
+
+import (
+	"context"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/smallhoursorg/hotserve/backups/envfile"
+	"github.com/smallhoursorg/hotserve/backups/record"
+	"github.com/smallhoursorg/hotserve/backups/unit"
+)
+
+const (
+	repoID = "bbd0e899f1b628ed8f158336b70b450ef1c2e86ff7eb636f5e85b5911ca42fe1"
+	// What restic 0.18 says [measured, M39/M40]: one line on stdout for
+	// a repository it made; on stderr, as --json puts it, for one that
+	// was there already; and its config, for a password that opens it.
+	initialized = `{"message_type":"initialized","id":"` + repoID + `","repository":"s3:http://e2e-s3:9000/box"}` + "\n"
+	alreadyInit = `{"message_type":"exit_error","code":1,"message":"Fatal: create key in repository at s3:http://e2e-s3:9000/box failed: repository master key and config already initialized\n"}` + "\n"
+	// The other wording restic has for it, where the backend's Stat of
+	// the config answers [measured: a local repository].
+	alreadyThere = `{"message_type":"exit_error","code":1,"message":"Fatal: create repository at s3:http://e2e-s3:9000/box failed: Fatal: unable to open repository at s3:http://e2e-s3:9000/box: config file already exists\n"}` + "\n"
+	wrongKey     = `{"message_type":"exit_error","code":1,"message":"Fatal: create repository at s3:http://e2e-s3:9000/box failed: Fatal: unable to open repository at s3:http://e2e-s3:9000/box: client.BucketExists: The request signature we calculated does not match the signature you provided. Check your key and signing method.\n"}` + "\n"
+	configJSON   = `{"version": 2, "id": "` + repoID + `", "chunker_polynomial": "27ec33083365e9"}` + "\n"
+)
+
+// term is the operator: it answers in order, and remembers what it was
+// asked and told. An answer that is not there is nobody answering.
+type term struct {
+	mu      sync.Mutex // Say is called from the clock's goroutine too
+	answers []string
+	asked   []string // the prompts, in order; "secret:" marks one asked with echo off
+	said    []string
+	// at runs at every prompt, before the answer: the moment to look at
+	// what exists on disk.
+	at func(prompt string)
+}
+
+func (m *term) Ask(_ context.Context, prompt string, secret bool) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if secret {
+		prompt = "secret:" + prompt
+	}
+	m.asked = append(m.asked, prompt)
+	if m.at != nil {
+		m.at(prompt)
+	}
+	if len(m.answers) == 0 {
+		return "", io.EOF
+	}
+	a := m.answers[0]
+	m.answers = m.answers[1:]
+	return a, nil
+}
+
+func (m *term) Say(line string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.said = append(m.said, line)
+}
+
+func (m *term) saidAll() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return strings.Join(m.said, "\n")
+}
+
+func (m *term) askedAll() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return strings.Join(m.asked, "\n")
+}
+
+// setupBox is a box with no credential file, whose init unit makes a
+// repository, and whose account is there.
+func setupBox(t *testing.T) (*box, *term) {
+	t.Helper()
+	b := newBox(t)
+	must(t, os.Remove(b.cfg.EnvFile))
+	b.cfg.EnvFile = filepath.Join(filepath.Dir(b.cfg.EnvFile), "etc", "hotserve-backup", "repository.env")
+	b.cfg.OldEnvFile = filepath.Join(filepath.Dir(b.cfg.EnvFile), "..", "hotserve", "backup.env")
+	b.initOut, b.probeOut = initialized, configJSON
+	b.version = 257
+	b.haveProgram = func(string) bool { return true }
+	b.account = true
+	old, oldExists, oldMake, oldClock, oldNote := haveProgram, accountExists, makeAccount, setupClock, setupNote
+	haveProgram = func(p string) bool { return b.haveProgram(p) }
+	accountExists = func(string) bool { return b.account }
+	makeAccount = func() error { b.accountsMade++; b.account = true; return nil }
+	setupClock, setupNote = 200*time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() {
+		haveProgram, accountExists, makeAccount, setupClock, setupNote = old, oldExists, oldMake, oldClock, oldNote
+	})
+	return b, &term{answers: []string{"AKIDX", "the-secret", "stored"}}
+}
+
+func (b *box) setup(t *testing.T, m *term, repo string) (*SetupReport, error) {
+	t.Helper()
+	return Setup(context.Background(), b.cfg, b, SetupOptions{Repository: repo, Terminal: m})
+}
+
+func envOf(t *testing.T, path string) envfile.Values {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	must(t, err)
+	v, findings := envfile.Parse(raw)
+	if len(findings) != 0 {
+		t.Fatalf("the file setup wrote is not read as written: %q", findings)
+	}
+	return v
+}
+
+func nothingWritten(t *testing.T, b *box, m *term) {
+	t.Helper()
+	if _, err := os.Lstat(b.cfg.EnvFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the credential file exists: %v", err)
+	}
+	if left, _ := filepath.Glob(b.cfg.EnvFile + ".*"); len(left) != 0 {
+		t.Fatalf("left beside it: %v", left)
+	}
+	if len(m.asked) != 0 {
+		t.Fatalf("prompts were asked: %q", m.asked)
+	}
+}
+
+var passwordRe = regexp.MustCompile(`\b([a-z2-7]{52})\b`)
+
+func shownPassword(t *testing.T, m *term) string {
+	t.Helper()
+	pw := passwordRe.FindStringSubmatch(m.saidAll())
+	if pw == nil {
+		t.Fatalf("no password was shown:\n%s", m.saidAll())
+	}
+	return pw[1]
+}
+
+func TestAFreshSetupShowsThePasswordBeforeAnythingIsWritten(t *testing.T) {
+	b, m := setupBox(t)
+	var unitsBeforeStored, tmpAtStored, finalAtStored string
+	m.at = func(prompt string) {
+		if strings.Contains(prompt, "stored") {
+			unitsBeforeStored = b.roles()
+			left, _ := filepath.Glob(b.cfg.EnvFile + "*")
+			tmpAtStored = strings.Join(left, " ")
+			if _, err := os.Lstat(b.cfg.EnvFile); err == nil {
+				finalAtStored = "exists"
+			}
+		}
+	}
+	var finalAtInit bool
+	b.before = func(s unit.Spec) {
+		if strings.Contains(s.Name, "_init_") {
+			_, err := os.Lstat(b.cfg.EnvFile)
+			finalAtInit = err == nil
+		}
+	}
+	rep, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
+	if err != nil {
+		t.Fatalf("%v\nsaid:\n%s", err, m.saidAll())
+	}
+	if got, want := b.roles(), "plan init"; got != want {
+		t.Fatalf("units: %s, want %s", got, want)
+	}
+	if unitsBeforeStored != "plan" {
+		t.Fatalf("before the password was confirmed stored, units had run: %s", unitsBeforeStored)
+	}
+	if tmpAtStored != "" || finalAtStored != "" {
+		t.Fatalf("a file existed before the password was confirmed stored: %q %q", tmpAtStored, finalAtStored)
+	}
+	if finalAtInit {
+		t.Fatal("the credential file was in place before the repository had answered")
+	}
+	pw := shownPassword(t, m)
+	if got, want := m.askedAll(), "Storage key id (AWS_ACCESS_KEY_ID): \nsecret:Storage secret key (AWS_SECRET_ACCESS_KEY): \nType stored to go on: "; got != want {
+		t.Fatalf("asked:\n%s\nwant:\n%s", got, want)
+	}
+	v := envOf(t, b.cfg.EnvFile)
+	want := envfile.Values{"RESTIC_REPOSITORY": "s3:http://e2e-s3:9000/box", "RESTIC_PASSWORD": pw, "AWS_ACCESS_KEY_ID": "AKIDX", "AWS_SECRET_ACCESS_KEY": "the-secret"}
+	if len(v) != len(want) {
+		t.Fatalf("the file holds %v", v)
+	}
+	for k, w := range want {
+		if v[k] != w {
+			t.Fatalf("%s = %q, want %q", k, v[k], w)
+		}
+	}
+	st, err := os.Stat(b.cfg.EnvFile)
+	must(t, err)
+	if st.Mode().Perm() != 0o600 {
+		t.Fatalf("the file is %o", st.Mode().Perm())
+	}
+	if d, err := os.Stat(filepath.Dir(b.cfg.EnvFile)); err != nil || d.Mode().Perm() != 0o755 {
+		t.Fatalf("the directory: %v %v", d, err)
+	}
+	if left, _ := filepath.Glob(b.cfg.EnvFile + ".*"); len(left) != 0 {
+		t.Fatalf("left beside it: %v", left)
+	}
+	// The init unit: the backup account, the credential through the
+	// manager, network, no capability, and the temp file — the working
+	// file is not touched until the repository has answered.
+	s := b.spec("init")
+	if s.User != backupUser || !s.Network || len(s.Capabilities) != 0 || s.SameUIDNamespaces || s.CacheDirectory != "hotserve-backup" {
+		t.Fatalf("the init unit: %+v", s)
+	}
+	if s.EnvironmentFile == b.cfg.EnvFile || !strings.HasPrefix(s.EnvironmentFile, b.cfg.EnvFile+".") {
+		t.Fatalf("the init unit reads %q", s.EnvironmentFile)
+	}
+	if got, want := strings.Join(s.Argv, " "), "/usr/bin/restic init --json"; got != want {
+		t.Fatalf("argv %q", got)
+	}
+	if s.StdoutFile == "" || s.StderrFile == "" {
+		t.Fatalf("restic's words are not kept where the run can read them: %+v", s)
+	}
+	for _, s := range b.specs {
+		all := strings.Join(s.Argv, " ") + strings.Join(s.Environment, " ") + s.Description
+		if strings.Contains(all, pw) || strings.Contains(all, "the-secret") || strings.Contains(all, "AKIDX") {
+			t.Fatalf("a secret reached a unit's argv or environment: %+v", s)
+		}
+	}
+	if !rep.New || rep.RepositoryID != repoID || rep.Account != "present" {
+		t.Fatalf("report %+v", rep)
+	}
+	if !strings.Contains(m.saidAll(), "repository ready: s3:http://e2e-s3:9000/box (new, id bbd0e899)") {
+		t.Fatalf("said:\n%s", m.saidAll())
+	}
+	if !strings.Contains(m.saidAll(), "no app declares a backup yet") && !strings.Contains(m.saidAll(), "blog") {
+		t.Fatalf("the plan was not said:\n%s", m.saidAll())
+	}
+}
+
+func TestNothingIsAskedBeforeThePreflightPasses(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		break_ func(b *box)
+		want   string
+	}{
+		{"restic missing", func(b *box) { b.haveProgram = func(p string) bool { return p != b.cfg.Restic } }, "restic is not installed at /usr/bin/restic: apt install restic"},
+		{"sqlite3 missing", func(b *box) { b.haveProgram = func(p string) bool { return p != "/usr/bin/sqlite3" } }, "sqlite3 is not installed at /usr/bin/sqlite3: apt install sqlite3"},
+		{"hotserve missing", func(b *box) { b.haveProgram = func(p string) bool { return p != "/usr/bin/hotserve" } }, "hotserve is not installed at /usr/bin/hotserve"},
+		{"old systemd", func(b *box) { b.version = 255 }, "systemd 257 or later is needed (Debian 13's); this box has 255"},
+		{"the plan fails", func(b *box) {
+			b.outcome["plan"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+			b.planErr = "root depends on {$LIVESWAP_ROOT}\x1b[0m: give it a literal value\n"
+		}, "could not be turned into a plan (exit 1): root depends on {$LIVESWAP_ROOT} [0m: give it a literal value"},
+		{"the plan fails with nothing said", func(b *box) { b.outcome["plan"] = unit.Outcome{Result: "exit-code", ExitStatus: 1} }, "could not be turned into a plan (exit 1); `journalctl -u hotserve_backup_plan_"},
+		{"a run holds the lock", func(b *box) {
+			unlock, err := lock(filepath.Join(b.cfg.RunDir, "lock"))
+			must(b.t, err)
+			b.t.Cleanup(unlock)
+		}, "another backup run is in progress"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, m := setupBox(t)
+			must(t, os.MkdirAll(b.cfg.RunDir, 0o700))
+			tc.break_(b)
+			_, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+			nothingWritten(t, b, m)
+			if strings.Contains(b.roles(), "init") {
+				t.Fatalf("a repository unit ran: %s", b.roles())
+			}
+		})
+	}
+}
+
+func TestARepositoryTheBoxCannotUseIsRefusedBeforeAnyPrompt(t *testing.T) {
+	for _, tc := range []struct{ repo, want string }{
+		{"sftp:user@host:/srv/backups", "sftp: is not supported"},
+		{"/srv/backups", "a path on this box is not a repository"},
+		{"local:/srv/backups", "a path on this box is not a repository"},
+		{"rclone:remote:bucket", "rclone: is not supported"},
+		{"azure:container:path", "azure: is not a backend Debian's restic has"},
+		{"gs:bucket:path", "gs: and swift: are not set up by this command"},
+		{"swift:container:/path", "gs: and swift: are not set up by this command"},
+		{"s3:http://user:pass@e2e-s3:9000/box", "credentials in the repository URL"},
+		{"rest:https://user:pass@host/", "credentials in the repository URL"},
+		{"ftp://host/x", `"ftp:" is not a repository restic knows`},
+		{"", "no repository was given"},
+		{"s3:", "s3: names no bucket"},
+		{"s3:http://e2e-s3:9000/box ", "the repository URL has whitespace at an end"},
+		{"s3:http://e2e-s3:9000/b\x01x", "the repository URL cannot go in the file: it holds a control character"},
+	} {
+		t.Run(tc.repo, func(t *testing.T) {
+			b, m := setupBox(t)
+			_, err := b.setup(t, m, tc.repo)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+			nothingWritten(t, b, m)
+			if b.roles() != "" {
+				t.Fatalf("units ran: %s", b.roles())
+			}
+		})
+	}
+}
+
+// What setup does not ask for, the run still uses: status must not
+// warn of it.
+func TestABackendWrittenByHandIsUsable(t *testing.T) {
+	for _, repo := range []string{"gs:bucket:path", "swift:container:/path", "s3:http://h/b", "b2:b:p", "rest:https://h/"} {
+		if err := RepositoryUsable(repo, "/etc/x"); err != nil {
+			t.Errorf("%s: %v", repo, err)
+		}
+	}
+	for _, repo := range []string{"sftp:h:/p", "local:/x", "/x", "azure:c:p", "rclone:r:b", "s3:http://u:p@h/b"} {
+		if err := RepositoryUsable(repo, "/etc/x"); err == nil {
+			t.Errorf("%s: usable", repo)
+		}
+	}
+}
+
+func TestEachBackendIsAskedForItsOwnVariables(t *testing.T) {
+	for _, tc := range []struct {
+		repo    string
+		prompts string
+		keys    []string
+	}{
+		{"b2:bucket:path", "Storage key id (B2_ACCOUNT_ID): \nsecret:Storage secret key (B2_ACCOUNT_KEY): \nType stored to go on: ", []string{"B2_ACCOUNT_ID", "B2_ACCOUNT_KEY"}},
+		{"rest:https://host:8000/", "Storage user name (RESTIC_REST_USERNAME): \nsecret:Storage password (RESTIC_REST_PASSWORD): \nType stored to go on: ", []string{"RESTIC_REST_USERNAME", "RESTIC_REST_PASSWORD"}},
+	} {
+		t.Run(tc.repo, func(t *testing.T) {
+			b, m := setupBox(t)
+			if _, err := b.setup(t, m, tc.repo); err != nil {
+				t.Fatal(err)
+			}
+			if m.askedAll() != tc.prompts {
+				t.Fatalf("asked:\n%s", m.askedAll())
+			}
+			v := envOf(t, b.cfg.EnvFile)
+			if v[tc.keys[0]] != "AKIDX" || v[tc.keys[1]] != "the-secret" || len(v) != 4 {
+				t.Fatalf("the file holds %v", v)
+			}
+		})
+	}
+}
+
+func TestThePasswordNotConfirmedStoredWritesNothing(t *testing.T) {
+	for _, answer := range []string{"y", "", "Stored", "stored "} {
+		t.Run(answer, func(t *testing.T) {
+			b, m := setupBox(t)
+			m.answers = []string{"AKIDX", "the-secret", answer}
+			_, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
+			if err == nil || !strings.Contains(err.Error(), "not confirmed stored: nothing was written") {
+				t.Fatalf("err = %v", err)
+			}
+			shownPassword(t, m)
+			m.asked = nil
+			nothingWritten(t, b, m)
+			if strings.Contains(b.roles(), "init") {
+				t.Fatalf("a repository unit ran: %s", b.roles())
+			}
+		})
+	}
+	t.Run("nobody answers", func(t *testing.T) {
+		b, m := setupBox(t)
+		m.answers = []string{"AKIDX"}
+		_, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
+		if err == nil || !strings.Contains(err.Error(), "nobody answered") {
+			t.Fatalf("err = %v", err)
+		}
+		m.asked = nil
+		nothingWritten(t, b, m)
+	})
+}
+
+func TestAValueTheFileCannotHoldIsAskedAgain(t *testing.T) {
+	b, m := setupBox(t)
+	m.answers = []string{"AKIDX", "a\x01b", "a\rb", "good", "stored"}
+	if _, err := b.setup(t, m, "s3:http://e2e-s3:9000/box"); err != nil {
+		t.Fatal(err)
+	}
+	if v := envOf(t, b.cfg.EnvFile); v["AWS_SECRET_ACCESS_KEY"] != "good" {
+		t.Fatalf("the file holds %q", v["AWS_SECRET_ACCESS_KEY"])
+	}
+	if strings.Count(m.saidAll(), "it holds a control character; again") != 2 {
+		t.Fatalf("said:\n%s", m.saidAll())
+	}
+	// A value the plain form would not carry is written all the same,
+	// quoted: a password made elsewhere is what it is.
+	b, m = setupBox(t)
+	m.answers = []string{" AKIDX ", `"the-secret`, "stored"}
+	if _, err := b.setup(t, m, "s3:http://e2e-s3:9000/box"); err != nil {
+		t.Fatal(err)
+	}
+	if v := envOf(t, b.cfg.EnvFile); v["AWS_ACCESS_KEY_ID"] != " AKIDX " || v["AWS_SECRET_ACCESS_KEY"] != `"the-secret` {
+		t.Fatalf("the file holds %q", v)
+	}
+	b, m = setupBox(t)
+	m.answers = []string{"", "", "", "x", "stored"}
+	if _, err := b.setup(t, m, "s3:http://e2e-s3:9000/box"); err == nil || !strings.Contains(err.Error(), "three times") {
+		t.Fatalf("err = %v", err)
+	}
+	m.asked = nil
+	nothingWritten(t, b, m)
+}
+
+func TestAnExistingRepositoryIsOpenedWithItsOwnPassword(t *testing.T) {
+	for _, wording := range []string{alreadyInit, alreadyThere} {
+		t.Run(wording[60:90], func(t *testing.T) { existingRepository(t, wording) })
+	}
+}
+
+func existingRepository(t *testing.T, wording string) {
+	b, m := setupBox(t)
+	b.outcome["init"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+	// The phrase comes after the URL, which may be long: a message cut
+	// for showing must not be the one matched.
+	b.initOut, b.initErr = "", strings.ReplaceAll(wording, "s3:http://e2e-s3:9000/box", "s3:https://"+strings.Repeat("a-very-long-host-name.", 12)+"example/bucket")
+	m.answers = []string{"AKIDX", "the-secret", "stored", "its-own-password"}
+	rep, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
+	if err != nil {
+		t.Fatalf("%v\nsaid:\n%s", err, m.saidAll())
+	}
+	if got, want := b.roles(), "plan init probe"; got != want {
+		t.Fatalf("units: %s, want %s", got, want)
+	}
+	if !strings.HasSuffix(m.askedAll(), "secret:Repository password: ") {
+		t.Fatalf("asked:\n%s", m.askedAll())
+	}
+	if !strings.Contains(m.saidAll(), "the repository exists; its password is needed (the one shown above is not it)") {
+		t.Fatalf("said:\n%s", m.saidAll())
+	}
+	pw := shownPassword(t, m)
+	v := envOf(t, b.cfg.EnvFile)
+	if v["RESTIC_PASSWORD"] != "its-own-password" {
+		t.Fatalf("the file holds password %q", v["RESTIC_PASSWORD"])
+	}
+	raw, _ := os.ReadFile(b.cfg.EnvFile)
+	if strings.Contains(string(raw), pw) {
+		t.Fatal("the generated password is in the file")
+	}
+	if len(passwordRe.FindAllString(m.saidAll(), -1)) != 1 {
+		t.Fatalf("a second password was generated:\n%s", m.saidAll())
+	}
+	s := b.spec("probe")
+	if got, want := strings.Join(s.Argv, " "), "/usr/bin/restic cat config --no-lock"; got != want {
+		t.Fatalf("the probe's argv: %q", got)
+	}
+	if s.User != backupUser || !s.Network || len(s.Capabilities) != 0 || !strings.HasPrefix(s.EnvironmentFile, b.cfg.EnvFile+".") {
+		t.Fatalf("the probe unit: %+v", s)
+	}
+	if rep.New || rep.RepositoryID != repoID || !strings.Contains(m.saidAll(), "repository ready: s3:http://e2e-s3:9000/box (existing, id bbd0e899)") {
+		t.Fatalf("report %+v\nsaid:\n%s", rep, m.saidAll())
+	}
+}
+
+// A mistake over a working setup leaves the working file byte for byte,
+// with no copy of a credential beside it and no unit running.
+func TestAMistakeLeavesAWorkingSetupAsItWas(t *testing.T) {
+	const working = "RESTIC_REPOSITORY=s3:http://e2e-s3:9000/box\nRESTIC_PASSWORD=old\nAWS_ACCESS_KEY_ID=A\nAWS_SECRET_ACCESS_KEY=B\n"
+	for _, tc := range []struct {
+		name   string
+		break_ func(b *box, m *term)
+		want   string
+	}{
+		{"wrong key", func(b *box, m *term) {
+			b.outcome["init"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+			b.initOut, b.initErr = "", wrongKey
+		}, "restic could not make or open the repository (exit 1): Fatal: create repository at"},
+		{"wrong password for an existing repository", func(b *box, m *term) {
+			b.outcome["init"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+			b.initOut, b.initErr = "", alreadyInit
+			b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 12}
+			b.probeOut = ""
+			m.answers = append(m.answers, "not-the-password")
+		}, "this password cannot open the repository (exit 12)"},
+		{"no repository, said by the probe", func(b *box, m *term) {
+			b.outcome["init"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+			b.initOut, b.initErr = "", alreadyInit
+			b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 10}
+			b.probeOut = ""
+			m.answers = append(m.answers, "pw")
+		}, "there is no repository at the configured location (exit 10)"},
+		{"init exits 0 and names no repository", func(b *box, m *term) { b.initOut = "" }, "restic exited 0 but said nothing of a repository"},
+		{"init ended by a signal", func(b *box, m *term) {
+			b.outcome["init"] = unit.Outcome{Result: "signal"}
+		}, "restic was ended by signal"},
+		{"the manager could not set the unit up", func(b *box, m *term) {
+			b.outcome["init"] = unit.Outcome{Result: "exit-code", ExitStatus: 217}
+		}, "systemd could not set the unit up (status 217)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, m := setupBox(t)
+			must(t, os.MkdirAll(filepath.Dir(b.cfg.EnvFile), 0o755))
+			must(t, os.WriteFile(b.cfg.EnvFile, []byte(working), 0o600))
+			tc.break_(b, m)
+			_, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want %q\nsaid:\n%s", err, tc.want, m.saidAll())
+			}
+			raw, _ := os.ReadFile(b.cfg.EnvFile)
+			if string(raw) != working {
+				t.Fatalf("the working file was changed:\n%s", raw)
+			}
+			if left, _ := filepath.Glob(b.cfg.EnvFile + ".*"); len(left) != 0 {
+				t.Fatalf("a copy of a credential was left: %v", left)
+			}
+			if entries, _ := os.ReadDir(filepath.Dir(b.cfg.EnvFile)); len(entries) != 1 {
+				t.Fatalf("left in the directory: %v", entries)
+			}
+			if strings.Contains(err.Error(), "no repository") && tc.name == "wrong key" {
+				t.Fatalf("an exit 1 was called no repository: %v", err)
+			}
+		})
+	}
+}
+
+func TestARepositoryThatDoesNotAnswerIsGivenUpOnAndTheUnitStopped(t *testing.T) {
+	b, m := setupBox(t)
+	b.hang = "init"
+	_, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
+	if err == nil || !strings.Contains(err.Error(), "the repository did not answer within") {
+		t.Fatalf("err = %v", err)
+	}
+	if len(b.stopped) != 1 || !strings.Contains(b.stopped[0], "_init_") {
+		t.Fatalf("stopped: %v", b.stopped)
+	}
+	m.asked = nil
+	nothingWritten(t, b, m)
+	if !strings.Contains(m.saidAll(), "still waiting for s3:http://e2e-s3:9000/box (Ctrl-C is safe: nothing has been written)") {
+		t.Fatalf("said:\n%s", m.saidAll())
+	}
+	// A unit the runner could not see gone is not said to have been
+	// stopped: the runner's own words are the error.
+	b, m = setupBox(t)
+	b.hang, b.stopErr = "init", unit.ErrNotConfirmedGone
+	_, err = b.setup(t, m, "s3:http://e2e-s3:9000/box")
+	if err == nil || strings.Contains(err.Error(), "the unit was stopped") || !errors.Is(err, unit.ErrNotConfirmedGone) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestAnInterruptDuringInitStopsTheUnitAndWritesNothing(t *testing.T) {
+	b, m := setupBox(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	b.hang = "init"
+	b.before = func(s unit.Spec) {
+		if strings.Contains(s.Name, "_init_") {
+			cancel()
+		}
+	}
+	_, err := Setup(ctx, b.cfg, b, SetupOptions{Repository: "s3:http://e2e-s3:9000/box", Terminal: m})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+	if len(b.stopped) != 1 {
+		t.Fatalf("stopped: %v", b.stopped)
+	}
+	m.asked = nil
+	nothingWritten(t, b, m)
+}
+
+func TestTheRecordIsPutAsideWithAChangeOfRepository(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		old   string // the file before, or none
+		aside bool
+	}{
+		{"another repository", "RESTIC_REPOSITORY=s3:http://e2e-s3:9000/other\nRESTIC_PASSWORD=x\n", true},
+		{"the same repository", "RESTIC_REPOSITORY=s3:http://e2e-s3:9000/box\nRESTIC_PASSWORD=x\n", false},
+		{"the same, quoted", "RESTIC_REPOSITORY=\"s3:http://e2e-s3:9000/box\"\nRESTIC_PASSWORD=x\n", false},
+		{"no file before", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, m := setupBox(t)
+			if tc.old != "" {
+				must(t, os.MkdirAll(filepath.Dir(b.cfg.EnvFile), 0o755))
+				must(t, os.WriteFile(b.cfg.EnvFile, []byte(tc.old), 0o600))
+			}
+			must(t, os.MkdirAll(b.cfg.StateDir, 0o755))
+			must(t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), &record.Status{Apps: map[string]*record.App{"blog": {Class: record.OK}}}))
+			rep, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
+			if err != nil {
+				t.Fatal(err)
+			}
+			st, err := record.Read(filepath.Join(b.cfg.StateDir, "status.json"))
+			must(t, err)
+			asides, _ := filepath.Glob(filepath.Join(b.cfg.StateDir, "status.json.aside-*"))
+			if tc.aside {
+				if len(st.Apps) != 0 || len(asides) != 1 || rep.Aside != asides[0] || !strings.Contains(m.saidAll(), "put aside: "+asides[0]) {
+					t.Fatalf("the record was kept: %v %v %+v\n%s", st.Apps, asides, rep, m.saidAll())
+				}
+				if st, err := os.Stat(asides[0]); err != nil || st.Mode().Perm() != 0o644 {
+					t.Fatalf("the aside: %v %v", st, err)
+				}
+			} else if len(st.Apps) != 1 || len(asides) != 0 || rep.Aside != "" {
+				t.Fatalf("the record was put aside: %v %v", st.Apps, asides)
+			}
+		})
+	}
+	t.Run("no record", func(t *testing.T) {
+		b, m := setupBox(t)
+		if _, err := b.setup(t, m, "s3:http://e2e-s3:9000/box"); err != nil {
+			t.Fatal(err)
+		}
+		if asides, _ := filepath.Glob(filepath.Join(b.cfg.StateDir, "status.json*")); len(asides) != 0 {
+			t.Fatalf("a record appeared: %v", asides)
+		}
+	})
+}
+
+// A file that could not be put in place keeps the record it goes
+// with: the box is still on the old repository.
+func TestARecordIsPutAsideOnlyOnceTheFileIsInPlace(t *testing.T) {
+	b, m := setupBox(t)
+	must(t, os.MkdirAll(b.cfg.StateDir, 0o755))
+	must(t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), &record.Status{Apps: map[string]*record.App{"blog": {Class: record.OK}}}))
+	// A directory where the file has to go: the rename over it fails.
+	must(t, os.MkdirAll(b.cfg.EnvFile, 0o755))
+	_, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
+	if err == nil {
+		t.Fatal("setup succeeded with a directory in the file's place")
+	}
+	st, err := record.Read(filepath.Join(b.cfg.StateDir, "status.json"))
+	must(t, err)
+	if asides, _ := filepath.Glob(filepath.Join(b.cfg.StateDir, "status.json.aside-*")); len(st.Apps) != 1 || len(asides) != 0 {
+		t.Fatalf("the record was put aside: %v %v", st.Apps, asides)
+	}
+}
+
+func TestTheAccountIsMadeWhenMissingAndLeftAloneWhenNot(t *testing.T) {
+	b, m := setupBox(t)
+	b.account = false
+	rep, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.accountsMade != 1 || rep.Account != "made" || !strings.Contains(m.saidAll(), "account hotserve-backup: made") {
+		t.Fatalf("made %d, report %+v\n%s", b.accountsMade, rep, m.saidAll())
+	}
+	b, m = setupBox(t)
+	if _, err := b.setup(t, m, "s3:http://e2e-s3:9000/box"); err != nil {
+		t.Fatal(err)
+	}
+	if b.accountsMade != 0 || !strings.Contains(m.saidAll(), "account hotserve-backup: present") {
+		t.Fatalf("made %d\n%s", b.accountsMade, m.saidAll())
+	}
+	if !strings.Contains(useraddArgv(), "useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hotserve-backup") {
+		t.Fatalf("useradd: %s", useraddArgv())
+	}
+}
+
+func TestALeftoverTempFileIsRemovedFirstAndSaid(t *testing.T) {
+	b, m := setupBox(t)
+	dir := filepath.Dir(b.cfg.EnvFile)
+	must(t, os.MkdirAll(dir, 0o755))
+	// The two shapes a setup that did not live to the end leaves: the
+	// file the units read, and the one envfile.Write makes on the way
+	// to it. What an operator keeps beside the file is theirs.
+	stale := b.cfg.EnvFile + ".0123456789ab"
+	dotted := filepath.Join(dir, ".repository.env.0123456789ab-42")
+	kept := []string{b.cfg.EnvFile + ".bak", b.cfg.EnvFile + ".old", filepath.Join(dir, "repository.env.gs"), filepath.Join(dir, "notes.txt")}
+	for _, f := range append([]string{stale, dotted}, kept...) {
+		must(t, os.WriteFile(f, []byte("RESTIC_PASSWORD=leaked\n"), 0o600))
+	}
+	rep, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{stale, dotted} {
+		if _, err := os.Lstat(f); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("the leftover %s is still there", f)
+		}
+	}
+	for _, f := range kept {
+		if _, err := os.Lstat(f); err != nil {
+			t.Errorf("the operator's %s was removed", f)
+		}
+	}
+	if len(rep.Swept) != 2 || !strings.Contains(m.saidAll(), "removed a file an interrupted setup left: "+stale) || !strings.Contains(m.saidAll(), "removed a file an interrupted setup left: "+dotted) {
+		t.Fatalf("report %+v\n%s", rep, m.saidAll())
+	}
+}
+
+func TestThePlanIsSaidAndAPlanWithNoAppGoesOn(t *testing.T) {
+	b, m := setupBox(t)
+	if _, err := b.setup(t, m, "s3:http://e2e-s3:9000/box"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(m.saidAll(), "a run would back up blog, under "+b.root) {
+		t.Fatalf("said:\n%s", m.saidAll())
+	}
+	b, m = setupBox(t)
+	b.plan = `{"root":"/var/lib/liveswap","apps":{}}`
+	rep, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Apps) != 0 || !strings.Contains(m.saidAll(), "no app declares a backup yet: a run would back nothing up") {
+		t.Fatalf("report %+v\n%s", rep, m.saidAll())
+	}
+}
+
+func TestBeginNamesTheOldPathWhenItIsThereAndTheNewIsNot(t *testing.T) {
+	b, _ := setupBox(t)
+	must(t, os.MkdirAll(filepath.Dir(b.cfg.OldEnvFile), 0o755))
+	must(t, os.WriteFile(b.cfg.OldEnvFile, []byte("RESTIC_PASSWORD=old\n"), 0o600))
+	_, err := Run(context.Background(), b.cfg, b)
+	if err == nil || !strings.Contains(err.Error(), "backups are not set up: "+b.cfg.EnvFile) || !strings.Contains(err.Error(), b.cfg.OldEnvFile+" is from before this version and is not read: run `hotserve-backup setup`") {
+		t.Fatalf("err = %v", err)
+	}
+	if b.roles() != "" {
+		t.Fatalf("units ran: %s", b.roles())
+	}
+	must(t, os.Remove(b.cfg.OldEnvFile))
+	_, err = Run(context.Background(), b.cfg, b)
+	if err == nil || strings.Contains(err.Error(), "before this version") {
+		t.Fatalf("err = %v", err)
+	}
+}

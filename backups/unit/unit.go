@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -145,6 +146,7 @@ type conn interface {
 	StopUnitContext(ctx context.Context, name, mode string, ch chan<- string) (int, error)
 	GetAllPropertiesContext(ctx context.Context, unit string) (map[string]any, error)
 	ResetFailedUnitContext(ctx context.Context, name string) error
+	GetManagerProperty(prop string) (string, error)
 	Close()
 }
 
@@ -177,6 +179,26 @@ func NewSystemRunner(ctx context.Context) (*Runner, error) {
 
 // Close releases the connection. Units are not stopped by it.
 func (r *Runner) Close() { r.conn.Close() }
+
+// ManagerVersion is the major version of the manager the Runner is
+// connected to: what setup checks before asking anyone for a secret,
+// since every property here is systemd 257's (PrivatePIDs= above all).
+// The property is a string the manager formats ("257.13-1~deb13u1");
+// only its leading number is read.
+func (r *Runner) ManagerVersion(context.Context) (int, error) {
+	raw, err := r.conn.GetManagerProperty("Version")
+	if err != nil {
+		return 0, fmt.Errorf("asking the manager its version: %w", err)
+	}
+	digits := strings.TrimLeft(strings.Trim(raw, `"`), " ")
+	if i := strings.IndexFunc(digits, func(c rune) bool { return c < '0' || c > '9' }); i >= 0 {
+		digits = digits[:i]
+	}
+	if digits == "" {
+		return 0, fmt.Errorf("the manager's version %q has no leading number", raw)
+	}
+	return strconv.Atoi(digits)
+}
 
 // ErrNotConfirmedGone wraps the cause when a unit could not be stopped
 // and observed gone: the one case in which something may still be
