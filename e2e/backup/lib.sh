@@ -3,7 +3,7 @@
 # suite's own look into the repository, and what a run must never leave
 # behind. Callers source /lib.sh first, for pass and fail.
 
-ENVFILE=/etc/hotserve/backup.env
+ENVFILE=/etc/hotserve-backup/repository.env
 STATUS=/var/lib/hotserve-backup/status.json
 CADDYFILE=/etc/hotserve/Caddyfile
 PASSWORD=e2e-repository-password
@@ -20,7 +20,11 @@ wait_for_systemd() {
 	done
 }
 
-write_env() { # <repository> <password>
+# write_env <repository> <password>: the credential file by hand, as
+# setup would write it — the suites that are not about setup start
+# from one.
+write_env() {
+	mkdir -p "$(dirname "$ENVFILE")" && chmod 0755 "$(dirname "$ENVFILE")"
 	printf 'RESTIC_REPOSITORY=%s\nRESTIC_PASSWORD=%s\nAWS_ACCESS_KEY_ID=AKIDE2EFIXTURE\nAWS_SECRET_ACCESS_KEY=e2e-fixture-key-not-a-secret\n' "$1" "$2" >"$ENVFILE"
 	chmod 0600 "$ENVFILE"
 }

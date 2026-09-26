@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/smallhoursorg/hotserve/backups/envfile"
 )
 
 // These run as root against a real system manager (make
@@ -47,7 +49,7 @@ func ensureUser(t *testing.T, name string) {
 	if exec.Command("id", name).Run() == nil {
 		return
 	}
-	if out, err := exec.Command("useradd", "--system", "--no-create-home", "--shell", "/usr/sbin/nologin", name).CombinedOutput(); err != nil {
+	if out, err := exec.Command("useradd", "--system", "--no-create-home", "--home-dir", "/nonexistent", "--shell", "/usr/sbin/nologin", name).CombinedOutput(); err != nil {
 		t.Fatalf("useradd %s: %v: %s", name, err, out)
 	}
 }
@@ -429,4 +431,105 @@ func TestIntegrationBindsToEndsTheUnitWhenItsOrchestratorIsKilled(t *testing.T) 
 	if out, _ := exec.Command("pgrep", "-f", "^/bin/sleep 602$").Output(); len(out) != 0 {
 		t.Fatalf("the process is still running: %s", out)
 	}
+}
+
+// The credential file is written by setup and read by the manager, and
+// the two have to agree on what a line means: envfile.Parse is what
+// status lints with and setup reads the old file with. This is the
+// measurement Parse is held to [M41]: one file with every shape a hand
+// might write, a unit that prints its environment, and Parse of the
+// same bytes.
+func TestIntegrationSystemdReadsAnEnvFileAsParseDoes(t *testing.T) {
+	r := runner(t)
+	stdout := outFile(t)
+	raw := strings.Join([]string{
+		`PLAIN=value`,
+		` SPACEKEY = spaced `,
+		`DQ="double quoted"`,
+		`SQ='single quoted'`,
+		`DUP=first`,
+		`DUP=second`,
+		`# COMMENT=no`,
+		`; SEMI=no`,
+		`HASHIN=a#b`,
+		`TRAIL=trail   `,
+		`BS=a\b\\c`,
+		`DQBS="a\b\\c\"d"`,
+		`DOLLAR=$HOME x`,
+		`CONT=one \`,
+		`two`,
+		`EMPTY=`,
+		`NOEQ`,
+		`MIDQ=ab"cd"ef`,
+		`TAB=a	b`,
+		`SEMIIN=a;b`,
+		`PCT=100%s`,
+		`UTF=héllo`,
+		`MULTI="one`,
+		`two"`,
+		`QLEAD="\"quoted\""`,
+		`QPAD="  both  "`,
+		`QTAB="	tab"`,
+		`QSQ="it's"`,
+		`SQLEAD='"q'`,
+		`LEADQ="abc`,
+		`SWALLOWED=yes`,
+		``,
+	}, "\n")
+	file := filepath.Join(filepath.Dir(stdout), "test.env")
+	must(t, os.WriteFile(file, []byte(raw), 0o600))
+	unit := envOfUnit(t, r, file, stdout)
+	parsed, findings := envfile.Parse([]byte(raw))
+	for k, v := range parsed {
+		if u, ok := unit[k]; !ok || u != v {
+			t.Errorf("%s: Parse reads %q, the manager gives the unit %q (present: %v)", k, v, u, ok)
+		}
+	}
+	for _, k := range []string{"COMMENT", "SEMI", "NOEQ", "two", "SWALLOWED"} {
+		if _, ok := unit[k]; ok {
+			t.Errorf("the manager gave the unit %s, which Parse skips", k)
+		}
+	}
+	// Every key the file sets that the manager passes on, Parse reads.
+	for k := range unit {
+		if _, ok := parsed[k]; !ok && strings.Contains(raw, "\n"+k+"=") {
+			t.Errorf("the manager gave the unit %s=%q, which Parse did not read", k, unit[k])
+		}
+	}
+	if len(findings) != 4 {
+		t.Errorf("findings: %q", findings)
+	}
+	// And the other way: what the writer writes of awkward values, the
+	// manager reads back as they were.
+	pairs := []envfile.Pair{{Key: "PLAIN", Value: "s3:https://h/b"}, {Key: "PW", Value: `p#a$s;s"w'o=rd\x`}, {Key: "QLEAD", Value: `"quoted"`},
+		{Key: "SQLEAD", Value: `'q`}, {Key: "QPAD", Value: "  both  "}, {Key: "QTRAIL", Value: `trail\ `}, {Key: "UTF", Value: "héllo"}}
+	written, err := envfile.Format(pairs)
+	must(t, err)
+	must(t, os.WriteFile(file, written, 0o600))
+	unit = envOfUnit(t, r, file, stdout)
+	for _, p := range pairs {
+		if unit[p.Key] != p.Value {
+			t.Errorf("%s: Format wrote %q as %q, the manager gives the unit %q", p.Key, p.Value, written, unit[p.Key])
+		}
+	}
+}
+
+// envOfUnit is the environment a unit is given from file.
+func envOfUnit(t *testing.T, r *Runner, file, stdout string) map[string]string {
+	t.Helper()
+	out, err := r.Run(context.Background(), Spec{
+		Name: name(t), Argv: []string{"/usr/bin/env", "-0"}, User: testUser,
+		EnvironmentFile: file, StdoutFile: stdout,
+	})
+	if err != nil || !out.OK() {
+		t.Fatalf("%+v, %v", out, err)
+	}
+	got, _ := os.ReadFile(stdout)
+	unit := map[string]string{}
+	for _, kv := range strings.Split(string(got), "\x00") {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			unit[k] = v
+		}
+	}
+	return unit
 }
