@@ -145,12 +145,13 @@ func config() engine.Config {
 	}
 }
 
-// runner connects to the system manager, which takes root; the
-// refusal names the command as it was given, to repeat under sudo —
-// every argument of it, a restore's options included.
+// runner connects to the system manager, which takes root. The refusal
+// says to repeat the command under sudo and renders none of it: an
+// argument printed back would have to be quoted for a shell, and one
+// that was refused for holding a credential must not be echoed.
 func runner(ctx context.Context, what string) (*unit.Runner, error) {
 	if os.Geteuid() != 0 {
-		return nil, fmt.Errorf("a %s starts system units, which needs root: sudo hotserve-backup %s", what, record.Clean(strings.Join(os.Args[1:], " ")))
+		return nil, fmt.Errorf("a %s starts system units, which needs root: run the same command again under sudo", what)
 	}
 	return unit.NewSystemRunner(ctx)
 }
@@ -261,13 +262,10 @@ func showStatus(ctx context.Context) error {
 	} else if err != nil {
 		return couldNotTell{fmt.Errorf("whether backups are set up cannot be told from here: %w", err)}
 	}
-	st, err := record.Read(filepath.Join(cfg.StateDir, "status.json"))
-	if err != nil {
-		return couldNotTell{fmt.Errorf("the record of the last run could not be read: %w", err)}
-	}
-	// As root, the file itself: where a line of it is not read as it
-	// was written, the manager's rules being what they are. Said, and
-	// nothing more: what the run makes of the file the run says.
+	// As root, the file itself, before anything else can end the look:
+	// where a line of it is not read as it was written, the manager's
+	// rules being what they are. Said, and nothing more: what the run
+	// makes of the file the run says.
 	if os.Geteuid() == 0 {
 		if raw, err := os.ReadFile(cfg.EnvFile); err != nil {
 			// There (Lstat said so) and not readable — a directory in
@@ -285,6 +283,10 @@ func showStatus(ctx context.Context) error {
 				}
 			}
 		}
+	}
+	st, err := record.Read(filepath.Join(cfg.StateDir, "status.json"))
+	if err != nil {
+		return couldNotTell{fmt.Errorf("the record of the last run could not be read: %w", err)}
 	}
 	in := status.Input{Record: st, Now: time.Now(), SetUp: env.ModTime()}
 	var active []unit.Active

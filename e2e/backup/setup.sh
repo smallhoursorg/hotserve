@@ -85,7 +85,7 @@ setup && fail "setup with no repository exited 0" || { says "^usage: hotserve-ba
 setup a b && fail "setup with two arguments exited 0" || { says "^usage:" && pass "and so is setup with two" || fail "said: $(cat "$OUT")"; }
 
 echo "=== setup 1: not root, no terminal: refused before anything is touched ==="
-as_nobody hotserve-backup setup "$REPO" >"$OUT" 2>&1 && fail "setup as nobody exited 0" || { says "needs root: sudo hotserve-backup setup $REPO\$" && pass "setup as nobody names the command to repeat under sudo, argument included" || fail "as nobody: $(cat "$OUT")"; }
+as_nobody hotserve-backup setup "$REPO" >"$OUT" 2>&1 && fail "setup as nobody exited 0" || { says "needs root: run the same command again under sudo" && ! says "$REPO" && pass "setup as nobody says to repeat the command under sudo, and renders none of it" || fail "as nobody: $(cat "$OUT")"; }
 setup "$REPO" </dev/null && fail "setup with no terminal exited 0" || { says "asks for secrets at a terminal, and there is none here; from a provisioning tool, write $ENVFILE by hand" && ! says "^usage" && ! says "no such device" && pass "setup with no terminal says so, and where to go" || fail "no terminal: $(cat "$OUT")"; }
 [ ! -e "$ETC" ] && pass "and nothing was made under /etc" || fail "$ETC exists: $(ls -la "$ETC")"
 [ "$(units_left)" = 0 ] && pass "and no unit was started" || fail "units: $(systemctl list-units --all --no-legend 'hotserve_backup_*')"

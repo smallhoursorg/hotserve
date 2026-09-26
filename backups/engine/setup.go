@@ -325,8 +325,8 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 			pairs = append(pairs, envfile.Pair{Key: c.variable, Value: v})
 		}
 		pairs[1].Value = throwaway
-		if err := envfile.Write(tmp, pairs); err != nil {
-			return nil, err
+		if err := writeEnv(tmp, pairs); err != nil {
+			return nil, x.setupErr(err, password)
 		}
 		// Before any password is made: is there a repository already?
 		// With a right key restic says at once — none (10), or one this
@@ -376,8 +376,8 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 			}
 		}
 		pairs[1].Value = password
-		if err := envfile.Write(tmp, pairs); err != nil {
-			return nil, err
+		if err := writeEnv(tmp, pairs); err != nil {
+			return nil, x.setupErr(err, password)
 		}
 		x.initRan = true
 		o1, message, err := x.repository(ctx, term, o.Repository, "init", tmp, setupClock, cfg.Restic, "init", "--json")
@@ -429,8 +429,8 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 				return nil, x.setupErr(err, password)
 			}
 			pairs[1].Value = own
-			if err := envfile.Write(tmp, pairs); err != nil {
-				return nil, err
+			if err := writeEnv(tmp, pairs); err != nil {
+				return nil, x.setupErr(err, password)
 			}
 			o2, message, err := x.repository(ctx, term, o.Repository, "open", tmp, setupClock, cfg.Restic, "cat", "config", "--no-lock")
 			if err != nil {
@@ -494,23 +494,23 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 	if why != "" {
 		rep.Aside = statusPath + ".aside-" + time.Now().UTC().Format("20060102T150405Z")
 		if err := os.Rename(statusPath, rep.Aside); err != nil {
-			return nil, err
+			return nil, x.setupErr(err, password)
 		}
 		if err := syncDir(cfg.StateDir); err != nil {
-			return nil, putBack(err)
+			return nil, x.setupErr(putBack(err), password)
 		}
 	}
 	if err := commit(tmp, cfg.EnvFile); err != nil {
 		if why != "" {
-			return nil, putBack(err)
+			return nil, x.setupErr(putBack(err), password)
 		}
-		return nil, err
+		return nil, x.setupErr(err, password)
 	}
 	if err := syncDir(dir); err != nil {
 		// Renamed, not synced: the file is in place for every reader,
 		// and stays; only what the disk holds after a power cut is in
 		// doubt. Said, and the record left aside with it.
-		return nil, fmt.Errorf("the credential file is in place, and its directory could not be synced to the disk: %w", err)
+		return nil, x.setupErr(fmt.Errorf("the credential file is in place, and its directory could not be synced to the disk: %w", err), password)
 	}
 	if why != "" {
 		term.Say(fmt.Sprintf("the record was put aside (%s): %s; the next run drills what it backs up", why, rep.Aside))
@@ -558,8 +558,8 @@ func (x *run) confirmStored(ctx context.Context, term Terminal) error {
 func (x *run) setupErr(err error, password string) error {
 	// A unit that could not be seen gone may still be making the
 	// repository with that password: nothing is said of it but the
-	// runner's own words.
-	if errors.Is(err, unit.ErrNotConfirmedGone) {
+	// runner's own words. And a fate already said is not said again.
+	if errors.Is(err, unit.ErrNotConfirmedGone) || strings.Contains(err.Error(), "the password shown above") {
 		return err
 	}
 	dead := ""
@@ -617,9 +617,13 @@ func lookAnswered(o unit.Outcome) bool {
 }
 
 // commit puts the file in place — the rename alone; its directory is
-// synced by the caller, which has to know which of the two failed. A
-// variable so that a test can look at the moment it happens.
-var commit = os.Rename
+// synced by the caller, which has to know which of the two failed —
+// and writeEnv writes the file beside it. Variables so that a test
+// can look at the moment each happens, and make it fail.
+var (
+	commit   = os.Rename
+	writeEnv = envfile.Write
+)
 
 // ownByRoot makes a directory root's, and syncDir puts a directory's
 // entries on the disk; variables so that the flow can be tested by an

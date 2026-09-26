@@ -1033,6 +1033,65 @@ func TestACredentialDirectoryThatIsALinkIsRefused(t *testing.T) {
 	}
 }
 
+// Every exit after the password was shown says what became of it —
+// whichever step failed: a write of the file, the record's aside, the
+// commit — and says it once.
+func TestEveryExitAfterTheShowingSaysThePasswordsFate(t *testing.T) {
+	keep := "keep the password shown above: restic init ran with it"
+	dead := "the password shown above was never used: discard it"
+	for _, tc := range []struct {
+		name  string
+		set   func(b *box, m *term)
+		want  string
+		never string
+	}{
+		{"the write of the password before init fails", func(b *box, m *term) {
+			writes := 0
+			writeEnv = func(path string, pairs []envfile.Pair) error {
+				if writes++; writes == 2 {
+					return errors.New("ENOSPC on the credential directory")
+				}
+				return envfile.Write(path, pairs)
+			}
+		}, dead, keep},
+		{"the commit fails after init made the repository", func(b *box, m *term) {
+			commit = func(string, string) error { return errors.New("EIO on the rename") }
+		}, keep, dead},
+		{"the state directory's sync fails after init made the repository", func(b *box, m *term) {
+			must(b.t, os.MkdirAll(b.cfg.StateDir, 0o755))
+			must(b.t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), &record.Status{Apps: map[string]*record.App{"blog": {Class: record.OK}}}))
+			syncDir = func(string) error { return errors.New("EIO on the state directory") }
+		}, keep, dead},
+		{"the opening's write fails after init said the repository exists", func(b *box, m *term) {
+			b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+			b.outcome["init"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+			b.initOut, b.initErr = "", alreadyInit
+			m.answers = []string{"AKIDX", "the-secret", "stored", "its-own-password"}
+			writes := 0
+			writeEnv = func(path string, pairs []envfile.Pair) error {
+				if writes++; writes == 3 {
+					return errors.New("ENOSPC on the credential directory")
+				}
+				return envfile.Write(path, pairs)
+			}
+		}, dead, keep},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, m := setupBox(t)
+			oldCommit, oldWrite := commit, writeEnv
+			t.Cleanup(func() { commit, writeEnv = oldCommit, oldWrite })
+			tc.set(b, m)
+			_, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
+			if err == nil || !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), tc.never) {
+				t.Fatalf("err = %v, want %q and not %q", err, tc.want, tc.never)
+			}
+			if strings.Count(err.Error(), "the password shown above") != 1 {
+				t.Fatalf("the password's fate is said more than once: %v", err)
+			}
+		})
+	}
+}
+
 // The record is put aside before the file takes its place, and put
 // back if the file cannot: whatever ends setup between the two leaves
 // no credential file with a record of another repository beside it.
