@@ -154,6 +154,7 @@ services:
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
       - ./e2e/lib.sh:/lib.sh:ro
       - ./e2e/backup/lib.sh:/lib-backup.sh:ro
+      - ./e2e/backup/setup.sh:/suite-setup.sh:ro
       - ./e2e/backup/run.sh:/suite-backup.sh:ro
       - ./e2e/backup/status.sh:/suite-status.sh:ro
       - ./e2e/backup/restore.sh:/suite-restore.sh:ro

@@ -26,13 +26,12 @@ RUN systemctl mask \
 COPY --from=builder /hotserve /usr/bin/hotserve
 COPY --from=builder /hotserve-backup /usr/bin/hotserve-backup
 # The production layout from the package's own postinstall, as in
-# e2e/Dockerfile; the account restic runs as is made here by hand until
-# the package makes it.
+# e2e/Dockerfile. The account restic runs as is not made here: the
+# setup suite, which runs first, has `hotserve-backup setup` make it.
 COPY packaging/postinstall.sh /tmp/postinstall.sh
 RUN mkdir -p /var/lib/hotserve /var/lib/liveswap /etc/hotserve \
 	&& chmod 750 /var/lib/hotserve /var/lib/liveswap \
-	&& sh /tmp/postinstall.sh && rm /tmp/postinstall.sh \
-	&& useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hotserve-backup
+	&& sh /tmp/postinstall.sh && rm /tmp/postinstall.sh
 COPY e2e/backup/Caddyfile /etc/hotserve/Caddyfile
 STOPSIGNAL SIGRTMIN+3
 CMD ["/sbin/init"]

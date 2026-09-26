@@ -22,6 +22,10 @@ import (
 // variable only so a test can stand a script in for it.
 var hotserve = "/usr/bin/hotserve"
 
+// Program is the path the plan unit runs hotserve from: what setup
+// checks is installed before asking anyone for a secret.
+func Program() string { return hotserve }
+
 // kinds are the values a variable can be given here, in the order they
 // are tried: a name of its own, then the other things a Caddyfile asks
 // for — a number, a duration, a path. Two of each, because seeing

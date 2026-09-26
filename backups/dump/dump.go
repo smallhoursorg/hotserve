@@ -30,6 +30,10 @@ import (
 // sqlite3 is Debian's, by absolute path.
 var sqlite3 = "/usr/bin/sqlite3"
 
+// Program is the path the dump unit runs sqlite3 from: what setup
+// checks is installed before asking anyone for a secret.
+func Program() string { return sqlite3 }
+
 // busyTimeout is how long sqlite3 waits on a locked database; its own
 // default is not to wait at all. A variable so a test need not wait
 // for it.

@@ -151,6 +151,10 @@ sudo install -m 0640 -o root -g hotserve -T /dev/null /etc/hotserve/example.env 
 sudoedit /etc/hotserve/example.env      # DATABASE_URL=postgres://…
 ```
 
+The backup repository's credential is not one of these: `hotserve-backup
+setup` keeps it at `/etc/hotserve-backup/repository.env`, root's alone,
+where neither line above reaches ([backups/README.md](../../backups/README.md#setup)).
+
 Whoever can push the Caddyfile can read these anyway: one line makes
 hotserve serve any file the `hotserve` user can read, its TLS keys
 included, and another adds a `deploy_trust` of their own. The sudoers
