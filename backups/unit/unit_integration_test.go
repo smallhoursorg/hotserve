@@ -499,6 +499,8 @@ func TestIntegrationSystemdReadsAnEnvFileAsParseDoes(t *testing.T) {
 		`CRB=2`,
 		"CRMID=x\ry",
 		"CRQ=\"a\rb\"",
+		"  # an indented comment",
+		`AFTERIC=1`,
 		`LEADQ="abc`,
 		`SWALLOWED=yes`,
 		`EOFBS=abc\`,

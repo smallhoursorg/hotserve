@@ -721,11 +721,13 @@ What can be known to fail is refused before anything is asked for
    it (runs from a file written by hand) goes aside too. The same
    repository, opened, keeps its record;
 9. then the file takes the working one's place — whole, root `0600`.
-   The record goes aside and the id is written first, and both come
-   back if the file cannot take its place, and each step is on the disk
-   before the next, so that
-   nothing that ends setup between the two leaves a credential file
-   with another repository's record beside it. Then setup names the
+   The record goes aside first, and comes back if the file cannot take
+   its place; the id is written only once the file is in place, so
+   that a power cut leaves the new id beside the old file never, and
+   the old id beside the new file at worst — which puts the record
+   aside once more; each step is on the disk before the next, so that
+   nothing that ends setup between them leaves a credential file with
+   another repository's record beside it. Then setup names the
    repository, whether it was made or opened, and its id — and, when
    `/etc/hotserve/backup.env` from before this version is still there,
    that it is, and to remove it: that file is where an administrator's
@@ -787,8 +789,9 @@ sudo systemd-run --quiet --pipe --wait --collect \
 ```
 
 Pointing the box at **another repository** this way leaves
-`status.json` speaking of the old one: remove it with the change, as
-setup does.
+`status.json` speaking of the old one, and `repository-id` beside it
+naming the old one: remove both with the change, as setup does — an
+id left behind would tie a later record to the wrong repository.
 
 ## Development
 

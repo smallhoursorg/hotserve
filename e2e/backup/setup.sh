@@ -97,7 +97,7 @@ printf 'x\n' | at_tty hotserve-backup setup "$REPO" >"$OUT" 2>&1 && fail "setup 
 says "Storage key id" && fail "a prompt was asked before the preflight passed" || pass "and asked nothing"
 id hotserve-backup >/dev/null 2>&1 && fail "the account was made before the preflight passed" || pass "and made no account"
 mv /usr/bin/restic.aside /usr/bin/restic
-for r in sftp:user@host:/srv/backups /srv/backups local:/srv/backups rclone:remote:bucket azure:container:path gs:bucket:path swift:container:/path rest:https://host:8000/ "s3:http://user:pass@e2e-s3:9000/box" "s3:user:pass@e2e-s3:9000/box" "ftp://host/x" "s3:"; do
+for r in sftp:user@host:/srv/backups /srv/backups local:/srv/backups rclone:remote:bucket azure:container:path gs:bucket:path swift:container:/path rest:https://host:8000/ "s3:http://user:pass@e2e-s3:9000/box" "s3:user:pass@e2e-s3:9000/box" "s3://user:pass@e2e-s3:9000/box" "ftp://host/x" "s3:"; do
 	if printf 'x\n' | at_tty hotserve-backup setup "$r" >"$OUT" 2>&1; then
 		fail "setup $r exited 0"
 	elif says "Storage key id"; then

@@ -71,8 +71,10 @@ var (
 // against a box that lacks them.
 var (
 	haveProgram = func(path string) bool {
+		// Run as hotserve-backup and as the app's own uid, never as root:
+		// the execute bit that counts is the one for everyone.
 		st, err := os.Stat(path)
-		return err == nil && st.Mode().IsRegular() && st.Mode()&0o111 != 0
+		return err == nil && st.Mode().IsRegular() && st.Mode()&0o001 != 0
 	}
 	accountExists = func(name string) bool { _, err := user.Lookup(name); return err == nil }
 	makeAccount   = func() error {
@@ -128,7 +130,7 @@ func backendOf(repo, envFile string) ([]credential, error) {
 		// restic takes the host with or without a scheme (s3:host/bucket):
 		// what is looked at is the authority either way, not what
 		// url.Parse makes of "user:pass@host" with no scheme before it.
-		authority := rest
+		authority := strings.TrimPrefix(rest, "//") // s3://host/bucket: restic's other form
 		if i := strings.Index(rest, "://"); i >= 0 {
 			authority = rest[i+3:]
 		}
@@ -335,6 +337,10 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 	}
 	pairs := []envfile.Pair{{Key: "RESTIC_REPOSITORY", Value: o.Repository}, {Key: "RESTIC_PASSWORD"}}
 	for attempt := 1; ; attempt++ {
+		// Whether an earlier attempt's init ran with the shown password:
+		// a repository found there, by the look or by this attempt's
+		// init, may be one that init made.
+		ranBefore := s.initRan
 		pairs = pairs[:2]
 		for _, c := range creds {
 			v, err := s.ask(ctx, c.label+" ("+c.variable+"): ", c.secret)
@@ -358,7 +364,7 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 			return nil, s.err(err)
 		}
 		switch {
-		case found == lookFound && s.password != "" && s.initRan:
+		case found == lookFound && ranBefore:
 			// A repository is there, and an earlier attempt's init ran
 			// with the password shown: the throwaway not opening it says
 			// nothing of that one. Tried first — a repository it opens is
@@ -367,15 +373,8 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 			if err := writeEnv(s.staged, pairs); err != nil {
 				return nil, s.err(err)
 			}
-			id, opened, err := s.openRepository(ctx)
-			if err != nil {
+			if err := s.tryShown(ctx, rep, needsOwn); err != nil {
 				return nil, s.err(err)
-			}
-			if opened {
-				term.Say("the repository exists, and the password shown above opens it: it was made by an earlier attempt of this setup")
-				rep.RepositoryID, rep.New = id, true
-			} else {
-				needsOwn()
 			}
 		case found == lookFound:
 			needsOwn()
@@ -384,7 +383,7 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 		case s.password != "":
 			term.Say(fmt.Sprintf("no repository answered within %s: a bucket not made yet, a wrong key and a wrong host look alike here; a new repository will be made, and the password shown above still applies", setupProbeClock))
 		default:
-			term.Say(fmt.Sprintf("no repository answered within %s: a bucket not made yet, a wrong key and a wrong host look alike here; a new repository will be made, and if that fails the password shown next was never used", setupProbeClock))
+			term.Say(fmt.Sprintf("no repository answered within %s: a bucket not made yet, a wrong key and a wrong host look alike here; a new repository will be made with the password shown next", setupProbeClock))
 		}
 		if exists || rep.New {
 			break
@@ -420,10 +419,17 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 		}
 		if o1.Result == "exit-code" && o1.ExitStatus == 1 && repositoryExists(message) {
 			// The look could not tell, and init can: the repository has a
-			// password already, and the one just shown is not it — init
-			// made nothing with it, so it is unused again, whatever ends
-			// the opening that follows.
-			needsOwn()
+			// password already. This init made nothing with the one
+			// shown; an earlier attempt's may have, and is tried first,
+			// as above. Otherwise it is unused again, whatever ends the
+			// opening that follows.
+			if ranBefore {
+				if err := s.tryShown(ctx, rep, needsOwn); err != nil {
+					return nil, s.err(err)
+				}
+			} else {
+				needsOwn()
+			}
 			break
 		}
 		var failure error
@@ -517,7 +523,9 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 		return cause
 	}
 	if why != "" {
-		rep.Aside = statusPath + ".aside-" + time.Now().UTC().Format("20060102T150405Z")
+		// Named by the time and this setup's nonce, so that no aside
+		// replaces another: two in one second, or a clock set back.
+		rep.Aside = statusPath + ".aside-" + time.Now().UTC().Format("20060102T150405Z") + "-" + s.nonce
 		if err := os.Rename(statusPath, rep.Aside); err != nil {
 			return nil, s.err(err)
 		}
@@ -541,6 +549,9 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 	// repository's; only what the disk holds after a power cut is in
 	// doubt. Said, and the record left aside with it.
 	inPlace := "the credential file is in place and holds the repository's password (the one shown above, where one was shown: keep it)"
+	if rep.Aside != "" {
+		inPlace += "; the record was put aside: " + rep.Aside
+	}
 	if err := writeID(idFile, rep.RepositoryID); err != nil {
 		return nil, fmt.Errorf("%s; the repository's id could not be kept beside the record, so the next setup puts the record aside: %w", inPlace, err)
 	}
@@ -571,6 +582,23 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 	return rep, nil
 }
 
+// tryShown opens the repository with the password shown — the staged
+// file holds it — after an earlier attempt's init ran with it: one it
+// opens is one this setup made; else the repository's own is needed.
+func (s *setup) tryShown(ctx context.Context, rep *SetupReport, needsOwn func()) error {
+	id, opened, err := s.openRepository(ctx)
+	if err != nil {
+		return err
+	}
+	if opened {
+		s.term.Say("the repository exists, and the password shown above opens it: it was made by an earlier attempt of this setup")
+		rep.RepositoryID, rep.New = id, true
+		return nil
+	}
+	needsOwn()
+	return nil
+}
+
 // confirmStored has the operator type "stored" — a word that means
 // something, not "y" — with one more asking for a word that is not
 // it; anything then is a no.
@@ -595,12 +623,6 @@ func (s *setup) confirmStored(ctx context.Context) error {
 // was, is said with it — nothing here returns an error after the
 // showing but through this.
 func (s *setup) err(err error) error {
-	// A unit that could not be seen gone may still be making the
-	// repository with that password: nothing is said of it but the
-	// runner's own words.
-	if errors.Is(err, unit.ErrNotConfirmedGone) {
-		return err
-	}
 	fate := ""
 	switch {
 	case s.password != "" && s.initRan:

@@ -205,6 +205,7 @@ func Parse(raw []byte) (Values, []string) {
 		case comment:
 			if strings.IndexByte(newline, c) >= 0 {
 				state = preKey
+				padded = false // the comment's own indent is not the next key's
 			}
 		}
 	}

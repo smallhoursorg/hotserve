@@ -64,6 +64,8 @@ func TestParseReadsAsTheManagerDoes(t *testing.T) {
 		`CRB=2`,
 		"CRMID=x\ry",
 		"CRQ=\"a\rb\"",
+		"  # an indented comment",
+		`AFTERIC=1`,
 		`LEADQ="abc`,
 		`SWALLOWED=yes`,
 		`EOFBS=abc\`,
@@ -75,7 +77,7 @@ func TestParseReadsAsTheManagerDoes(t *testing.T) {
 		"MULTI": "one\ntwo", "AFTERQ": "ab", "AFTERC": "v# prod", "DQDOLLAR": "a$b", "DQBT": "a`b", "SQESC": `it\s'`, "ESCSP": "trail ",
 		"ODD": `abc\JOINED=yes`, "EVEN": `abc\`, "NOTJOINED": "yes", "SQCONT": "a\\\nb", "DQCONT": "ab", "AFTERQC": "vNEXT=1", "AFTERQS": "vxNEXT2=2",
 		"NBSPV": "bucket\u00a0", "REQ": "ab", "SQIDIOM": "it's", "CRCONT": "one ", "CRB": "2", "CRMID": "x", "CRQ": "a\rb",
-		"LEADQ": "abc\nSWALLOWED=yes\nEOFBS=abc",
+		"AFTERIC": "1", "LEADQ": "abc\nSWALLOWED=yes\nEOFBS=abc",
 	}
 	got, findings := Parse([]byte(raw))
 	for k, v := range want {
@@ -96,7 +98,7 @@ func TestParseReadsAsTheManagerDoes(t *testing.T) {
 		`line 31: "export EXP" is not a name the manager takes; it skips the line`,
 		`line 45: "\u00a0NBSPK" is not a name the manager takes; it skips the line`,
 		"line 50: not KEY=value; the manager skips it",
-		"line 52: the quote is never closed; the manager reads everything after it, to the end of the file, as LEADQ's value",
+		"line 54: the quote is never closed; the manager reads everything after it, to the end of the file, as LEADQ's value",
 	} {
 		if !strings.Contains(joined, f) {
 			t.Errorf("findings lack %q:\n%s", f, joined)

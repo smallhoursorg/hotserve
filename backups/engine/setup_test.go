@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -314,6 +315,7 @@ func TestARepositoryTheBoxCannotUseIsRefusedBeforeAnyPrompt(t *testing.T) {
 		{"s3:", "s3: names no bucket"},
 		{"s3:http://e2e-s3:9000/box ", "the repository URL has whitespace at an end"},
 		{"s3:AKID:secret@s3.example.com/bucket", "credentials in the repository URL"},
+		{"s3://AKID:secret@s3.example.com/bucket", "credentials in the repository URL"},
 		{"rest:user:pass@host:8000/", "rest:, gs: and swift: are not set up by this command"},
 		{"s3:http://e2e-s3:9000/b\x01x", "the repository URL cannot go in the file: it holds a control character"},
 	} {
@@ -526,6 +528,28 @@ func TestALookThatFailedOnItsOwnIsSaidBeforeAnyPassword(t *testing.T) {
 	}
 }
 
+// A program is one every account can run: the units run restic as
+// hotserve-backup and sqlite3 as the app's own uid, so an execute bit
+// for root alone is not installed either.
+func TestAProgramIsOneEveryAccountCanRun(t *testing.T) {
+	dir := t.TempDir()
+	for _, tc := range []struct {
+		name string
+		mode os.FileMode
+		want bool
+	}{{"for-all", 0o755, true}, {"root-only", 0o700, false}, {"not-executable", 0o644, false}} {
+		p := filepath.Join(dir, tc.name)
+		must(t, os.WriteFile(p, []byte("#!/bin/sh\n"), tc.mode))
+		must(t, os.Chmod(p, tc.mode))
+		if got := haveProgram(p); got != tc.want {
+			t.Errorf("%s (%o): %v, want %v", tc.name, tc.mode, got, tc.want)
+		}
+	}
+	if haveProgram(dir) {
+		t.Error("a directory passes for a program")
+	}
+}
+
 // A restic that is there but not executable is refused as not
 // installed, before anything is asked.
 func TestAResticThatCannotRunIsNotInstalled(t *testing.T) {
@@ -621,6 +645,15 @@ func TestAnInitTheRunnerLostSightOfStaysRecorded(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "could not be read 10 times") || !strings.Contains(err.Error(), "keep the password shown above") {
 		t.Fatalf("err = %v", err)
 	}
+	// One the runner tried to stop and could not confirm gone says the
+	// fate the same: init ran with the password, whatever the runner
+	// could see of it.
+	b, m = setupBox(t)
+	b.err["init"] = fmt.Errorf("%w: hotserve_backup_init: its state could not be read (stopping it: timeout)", unit.ErrNotConfirmedGone)
+	_, err = b.setup(t, m, "s3:http://e2e-s3:9000/box")
+	if err == nil || !errors.Is(err, unit.ErrNotConfirmedGone) || !strings.Contains(err.Error(), "keep the password shown above") {
+		t.Fatalf("err = %v", err)
+	}
 	raw, err := os.ReadFile(filepath.Join(b.cfg.RunDir, "init-unit"))
 	if err != nil || !strings.Contains(string(raw), "_init_") {
 		t.Fatalf("the init unit is not recorded for the next lock holder: %q, %v", raw, err)
@@ -712,6 +745,43 @@ func TestAfterAFailedInitTheShownPasswordIsTriedBeforeItIsCalledUnused(t *testin
 		t.Fatalf("%v\nsaid:\n%s", err, m.saidAll())
 	}
 	if got, want := b.roles(), "plan probe init probe open open"; got != want || rep.New || !strings.Contains(m.saidAll(), "the password shown above was never used: discard it") {
+		t.Fatalf("units %s, report %+v\nsaid:\n%s", got, rep, m.saidAll())
+	}
+	// Where the second attempt's look cannot tell either, and its init
+	// says the repository exists: an earlier init ran with the shown
+	// password, so it is tried before it is called unused, the same.
+	b, m = setupBox(t)
+	b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+	b.outcome["init"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+	b.initOut, b.initErr = "", wrongKey
+	inits = 0
+	b.before = func(s unit.Spec) {
+		if strings.Contains(s.Name, "_init_") {
+			if inits++; inits == 2 {
+				b.initErr = alreadyInit
+			}
+		}
+	}
+	m.answers = []string{"AKIDX", "wrong", "stored", "AKIDX", "the-secret"}
+	rep, err = b.setup(t, m, "s3:http://e2e-s3:9000/box")
+	if err != nil {
+		t.Fatalf("%v\nsaid:\n%s", err, m.saidAll())
+	}
+	if got, want := b.roles(), "plan probe init probe init open"; got != want || !rep.New || rep.RepositoryID != repoID || strings.Contains(m.saidAll(), "discard it") || strings.Contains(m.askedAll(), "Repository password: ") {
+		t.Fatalf("units %s, report %+v\nsaid:\n%s", got, rep, m.saidAll())
+	}
+	// A first init that says the repository exists ran with no earlier
+	// one: nothing to try, the operator is asked, as before.
+	b, m = setupBox(t)
+	b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+	b.outcome["init"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+	b.initOut, b.initErr = "", alreadyInit
+	m.answers = []string{"AKIDX", "the-secret", "stored", "its-own-password"}
+	rep, err = b.setup(t, m, "s3:http://e2e-s3:9000/box")
+	if err != nil {
+		t.Fatalf("%v\nsaid:\n%s", err, m.saidAll())
+	}
+	if got, want := b.roles(), "plan probe init open"; got != want || rep.New || !strings.Contains(m.saidAll(), "the password shown above was never used: discard it") {
 		t.Fatalf("units %s, report %+v\nsaid:\n%s", got, rep, m.saidAll())
 	}
 }
@@ -862,13 +932,19 @@ func TestAKeyTheStorageRefusesIsAskedForAgain(t *testing.T) {
 		t.Fatalf("the password was shown more than once:\n%s", m.saidAll())
 	}
 	for _, want := range []string{
-		"no repository answered within 100ms: a bucket not made yet, a wrong key and a wrong host look alike here; a new repository will be made, and if that fails the password shown next was never used",
+		"no repository answered within 100ms: a bucket not made yet, a wrong key and a wrong host look alike here; a new repository will be made with the password shown next",
 		"restic could not make or open the repository (exit 1): Fatal: create repository at",
 		"the storage refused the key, or could not be reached: the key id and secret again (the password shown above still applies)",
 	} {
 		if !strings.Contains(m.saidAll(), want) {
 			t.Fatalf("said lacks %q:\n%s", want, m.saidAll())
 		}
+	}
+	// And promises nothing of the password's fate: three refusals end
+	// with "keep it", since init ran with it, and the look's message
+	// must not have said the opposite.
+	if strings.Contains(m.saidAll(), "was never used") {
+		t.Fatalf("the look promised a fate the ending contradicts:\n%s", m.saidAll())
 	}
 	if v := envOf(t, b.cfg.EnvFile); v["RESTIC_PASSWORD"] != pw || v["AWS_SECRET_ACCESS_KEY"] != "the-secret" || !rep.New {
 		t.Fatalf("the file holds %v; report %+v", v, rep)
@@ -1150,6 +1226,8 @@ func TestAnInterruptDuringInitLeavesItRunningAndWritesNothing(t *testing.T) {
 	nothingWritten(t, b, m)
 }
 
+var asideRe = regexp.MustCompile(`^status\.json\.aside-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$`)
+
 func TestTheRecordIsPutAsideWithAChangeOfRepository(t *testing.T) {
 	const other = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	for _, tc := range []struct {
@@ -1205,6 +1283,12 @@ func TestTheRecordIsPutAsideWithAChangeOfRepository(t *testing.T) {
 				}
 				if st, err := os.Stat(asides[0]); err != nil || st.Mode().Perm() != 0o644 {
 					t.Fatalf("the aside: %v %v", st, err)
+				}
+				// Named by the time and this setup's nonce: two asides in
+				// one second, or a clock set back, do not replace one
+				// another.
+				if !asideRe.MatchString(filepath.Base(asides[0])) {
+					t.Fatalf("the aside's name: %s", asides[0])
 				}
 			} else if len(st.Apps) != 1 || len(asides) != 0 || rep.Aside != "" || strings.Contains(m.saidAll(), "put aside") {
 				t.Fatalf("the record was put aside: %v %v\n%s", st.Apps, asides, m.saidAll())
@@ -1446,8 +1530,9 @@ func TestAFailureBetweenTheAsideAndTheCommitLeavesTheTwoFilesAgreeing(t *testing
 		return nil
 	}
 	_, err = b.setup(t, m, "s3:http://e2e-s3:9000/box")
-	if err == nil || !strings.Contains(err.Error(), "EIO on the credential directory") || !strings.Contains(err.Error(), "the credential file is in place") {
-		t.Fatalf("err = %v", err)
+	asides, _ := filepath.Glob(statusPath + ".aside-*")
+	if err == nil || !strings.Contains(err.Error(), "EIO on the credential directory") || !strings.Contains(err.Error(), "the credential file is in place") || len(asides) != 1 || !strings.Contains(err.Error(), "the record was put aside: "+asides[0]) {
+		t.Fatalf("err = %v (asides %v)", err, asides)
 	}
 	if _, err := os.Lstat(b.cfg.EnvFile); err != nil {
 		t.Fatal("the credential file is not in place")
