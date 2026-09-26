@@ -216,7 +216,7 @@ func (b *box) Run(ctx context.Context, s unit.Spec) (unit.Outcome, error) {
 		if s.StderrFile != "" {
 			must(b.t, os.WriteFile(s.StderrFile, []byte(b.initErr), 0o600))
 		}
-	case "probe":
+	case "probe", "open":
 		write(b.probeOut)
 		if s.StderrFile != "" {
 			must(b.t, os.WriteFile(s.StderrFile, nil, 0o600))

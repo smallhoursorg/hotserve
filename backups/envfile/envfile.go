@@ -5,18 +5,20 @@
 //
 // The manager's rules are measured, not assumed
 // (TestIntegrationSystemdReadsAnEnvFileAsParseDoes): whitespace around a
-// key is trimmed; a value's surrounding quotes are stripped and its
-// whitespace trimmed; the last assignment of a key wins; a line whose
-// first character is # or ; is a comment; a line with no = is skipped; a
-// trailing backslash joins the next line; outside quotes a backslash
-// escapes the character after it, inside double quotes only \ and "; a
-// quote runs on to the line that closes it, and one that is never
-// closed takes the rest of the file. Inside double quotes whitespace at
-// either end, a tab and an escaped quote are kept, so the writer quotes
-// a value the plain form would not carry.
+// key is trimmed; the last assignment of a key wins; a line whose
+// first character is # or ; is a comment; a line with no =, or with a
+// name the manager does not take, is skipped; a trailing backslash
+// joins the next line; a byte that is not UTF-8 makes the manager
+// refuse the whole file. In a value: whitespace at either end is
+// trimmed unless escaped or quoted; outside quotes a backslash escapes
+// the character after it; inside double quotes only \, ", $ and `;
+// inside single quotes nothing; a quote runs on to the line that closes
+// it, and one that is never closed takes the rest of the file; what
+// follows a closing quote, whitespace skipped, is appended as it is.
 package envfile
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -40,6 +42,10 @@ var keyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 func Parse(raw []byte) (Values, []string) {
 	v := Values{}
 	var findings []string
+	if !utf8.Valid(raw) {
+		n := 1 + bytes.Count(raw[:utf8FirstInvalid(raw)], []byte("\n"))
+		return v, []string{fmt.Sprintf("line %d holds a byte that is not UTF-8: the manager refuses the whole file, and no unit that needs it starts", n)}
+	}
 	lines := strings.Split(string(raw), "\n")
 	for i := 0; i < len(lines); i++ {
 		n := i + 1
@@ -69,7 +75,7 @@ func Parse(raw []byte) (Values, []string) {
 		if _, again := v[k]; again {
 			findings = append(findings, fmt.Sprintf("line %d: %s is set again; the manager takes this one", n, k))
 		}
-		value = strings.TrimSpace(value)
+		value = strings.TrimLeftFunc(value, unicode.IsSpace)
 		// A quoted value runs on until the quote is closed — on a later
 		// line, or never, in which case it takes the rest of the file.
 		if len(value) > 0 && (value[0] == '"' || value[0] == '\'') && !closed(value) {
@@ -84,9 +90,21 @@ func Parse(raw []byte) (Values, []string) {
 				findings = append(findings, fmt.Sprintf("line %d: the quote is never closed; the manager reads everything after it, to the end of the file, as %s's value", n, k))
 			}
 		}
-		v[k] = unquote(value)
+		v[k] = readValue(value)
 	}
 	return v, findings
+}
+
+// utf8FirstInvalid is the offset of the first byte that is not UTF-8.
+func utf8FirstInvalid(raw []byte) int {
+	for i := 0; i < len(raw); {
+		r, size := utf8.DecodeRune(raw[i:])
+		if r == utf8.RuneError && size == 1 {
+			return i
+		}
+		i += size
+	}
+	return len(raw)
 }
 
 // closed says whether a value that opens with a quote closes it.
@@ -104,37 +122,43 @@ func closed(value string) bool {
 	return false
 }
 
-// unquote strips a value's surrounding quotes and undoes its escapes.
-func unquote(s string) string {
-	if s == "" {
-		return s
-	}
-	q := s[0]
-	if q == '"' || q == '\'' {
-		s = s[1:]
-		if q == '\'' {
-			before, _, _ := strings.Cut(s, "'")
-			return before
-		}
-		var out strings.Builder
-		for i := 0; i < len(s); i++ {
-			if s[i] == '\\' && i+1 < len(s) && (s[i+1] == '\\' || s[i+1] == '"') {
-				i++
-			} else if s[i] == '"' {
-				break
-			}
-			out.WriteByte(s[i])
-		}
-		return out.String()
-	}
+// readValue is a value as the manager reads it: a quote that opens it
+// stripped and its escapes undone, what follows the closing quote
+// appended, and whitespace at the end trimmed where it is neither
+// quoted nor escaped. A quote anywhere but first is a character.
+func readValue(s string) string {
 	var out strings.Builder
+	kept := 0 // how much of out is quoted or escaped, and so not trimmed
 	for i := 0; i < len(s); i++ {
-		if s[i] == '\\' && i+1 < len(s) {
+		switch c := s[i]; {
+		case i == 0 && (c == '"' || c == '\''):
+			// Up to the closing quote, or the end.
+			j := i + 1
+			for ; j < len(s) && s[j] != c; j++ {
+				if c == '"' && s[j] == '\\' && j+1 < len(s) && strings.IndexByte("\\\"$`", s[j+1]) >= 0 {
+					j++
+				}
+				out.WriteByte(s[j])
+			}
+			kept = out.Len()
+			// After the closing quote, whitespace is skipped and the rest
+			// is appended as it is.
+			for i = j + 1; i < len(s) && (s[i] == ' ' || s[i] == '\t'); i++ {
+			}
+			if i < len(s) {
+				out.WriteString(s[i:])
+			}
+			i = len(s)
+		case c == '\\' && i+1 < len(s):
 			i++
+			out.WriteByte(s[i])
+			kept = out.Len()
+		default:
+			out.WriteByte(c)
 		}
-		out.WriteByte(s[i])
 	}
-	return out.String()
+	res := out.String()
+	return res[:kept] + strings.TrimRightFunc(res[kept:], unicode.IsSpace)
 }
 
 // Refuse says why value cannot be written so that the manager reads it

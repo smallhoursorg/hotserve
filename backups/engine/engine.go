@@ -119,8 +119,10 @@ func Run(ctx context.Context, cfg Config, r Runner) (*record.Status, error) {
 // held and the record is still to be written; end removes the directory
 // and releases the lock.
 func begin(cfg Config, r Runner) (x *run, end func(), err error) {
-	if _, err := os.Lstat(cfg.EnvFile); err != nil {
-		return nil, nil, fmt.Errorf("backups are not set up: %s: %w%s", cfg.EnvFile, err, OldEnvFileNote(cfg))
+	if _, err := os.Lstat(cfg.EnvFile); errors.Is(err, fs.ErrNotExist) {
+		return nil, nil, fmt.Errorf("backups are not set up: %s is not there%s", cfg.EnvFile, OldEnvFileNote(cfg))
+	} else if err != nil {
+		return nil, nil, fmt.Errorf("backups are not set up: %s: %w", cfg.EnvFile, err)
 	}
 	return open(cfg, r)
 }

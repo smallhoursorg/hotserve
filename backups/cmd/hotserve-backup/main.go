@@ -158,7 +158,10 @@ func runner(ctx context.Context, what string) (*unit.Runner, error) {
 // line. The engine checks what else can be known to fail before it
 // asks for one.
 func setup(ctx context.Context, repository string) error {
-	r, err := runner(ctx, "setup")
+	if os.Geteuid() != 0 {
+		return errors.New("a setup starts system units, which needs root: sudo hotserve-backup setup <repository>")
+	}
+	r, err := unit.NewSystemRunner(ctx)
 	if err != nil {
 		return err
 	}
@@ -172,11 +175,11 @@ func setup(ctx context.Context, repository string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("credentials: %s (root, 0600)\n", config().EnvFile)
+	t.Say(fmt.Sprintf("credentials: %s (root, 0600)", config().EnvFile))
 	if len(rep.Apps) > 0 {
-		fmt.Println("next: sudo hotserve-backup run, then hotserve-backup status; the hourly timer comes with the package")
+		t.Say("next: sudo hotserve-backup run, then hotserve-backup status. Nothing runs it on a schedule on this branch: until the package's timer exists, run it hourly from a timer or cron entry of your own.")
 	} else {
-		fmt.Println("next: declare a backup in an app's Caddyfile block (liveswap/README.md), then sudo hotserve-backup run")
+		t.Say("next: declare a backup in an app's Caddyfile block (liveswap/README.md), then sudo hotserve-backup run")
 	}
 	return nil
 }

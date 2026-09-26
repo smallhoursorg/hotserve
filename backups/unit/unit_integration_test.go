@@ -472,6 +472,13 @@ func TestIntegrationSystemdReadsAnEnvFileAsParseDoes(t *testing.T) {
 		`QTAB="	tab"`,
 		`QSQ="it's"`,
 		`SQLEAD='"q'`,
+		`AFTERQ="a" b`,
+		`AFTERC="v" # prod`,
+		`DQDOLLAR="a\$b"`,
+		"DQBT=\"a\\`b\"",
+		`SQESC='it\'s'`,
+		`ESCSP=trail\ `,
+		`export EXP=1`,
 		`LEADQ="abc`,
 		`SWALLOWED=yes`,
 		``,
@@ -485,7 +492,7 @@ func TestIntegrationSystemdReadsAnEnvFileAsParseDoes(t *testing.T) {
 			t.Errorf("%s: Parse reads %q, the manager gives the unit %q (present: %v)", k, v, u, ok)
 		}
 	}
-	for _, k := range []string{"COMMENT", "SEMI", "NOEQ", "two", "SWALLOWED"} {
+	for _, k := range []string{"COMMENT", "SEMI", "NOEQ", "two", "SWALLOWED", "EXP"} {
 		if _, ok := unit[k]; ok {
 			t.Errorf("the manager gave the unit %s, which Parse skips", k)
 		}
@@ -496,8 +503,18 @@ func TestIntegrationSystemdReadsAnEnvFileAsParseDoes(t *testing.T) {
 			t.Errorf("the manager gave the unit %s=%q, which Parse did not read", k, unit[k])
 		}
 	}
-	if len(findings) != 4 {
+	if len(findings) != 5 {
 		t.Errorf("findings: %q", findings)
+	}
+	// A byte that is not UTF-8: does the manager skip the line, or
+	// refuse the file? Measured here, and mirrored by Lint.
+	must(t, os.WriteFile(file, []byte("OK=1\nBAD=caf\xe9\nAFTER=2\n"), 0o600))
+	out, err := r.Run(context.Background(), Spec{Name: name(t), Argv: []string{"/usr/bin/env", "-0"}, User: testUser, EnvironmentFile: file, StdoutFile: stdout})
+	if err != nil || out.Result != "resources" {
+		t.Fatalf("a file with a non-UTF-8 byte: outcome %+v, err %v; want the unit refused for want of its environment (result resources)", out, err)
+	}
+	if bad, findings := envfile.Parse([]byte("OK=1\nBAD=caf\xe9\nAFTER=2\n")); len(bad) != 0 || len(findings) != 1 || !strings.Contains(findings[0], "refuses the whole file") {
+		t.Fatalf("Parse of a file the manager refuses: %v %q", bad, findings)
 	}
 	// And the other way: what the writer writes of awkward values, the
 	// manager reads back as they were.

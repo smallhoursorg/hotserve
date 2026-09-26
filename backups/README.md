@@ -101,7 +101,8 @@ run, and what the step is given.
 
 | Unit | Runs as | Network | Credential | Sees |
 |---|---|---|---|---|
-| the run itself, and setup | root | — | never reads it (setup writes it) | its own state and run dirs |
+| the run itself | root | — | never reads it | its own state and run dirs |
+| setup | root | — | writes it; reads the one before for its `RESTIC_REPOSITORY` alone | its own state and run dirs, and the terminal |
 | plan | `hotserve-backup`, own user+PID namespaces | no | no | `/etc/hotserve`, read-only |
 | init, probe (setup's) | `hotserve-backup`, no capability | yes | yes, the file setup is about to put in place | nothing of the app |
 | dump, clean | `hotserve`, own user+PID namespaces | no | no | that app's `shared/` (dump only) and staging |
@@ -459,8 +460,10 @@ and cleaned error text in it; nothing of the repository's location or
 credentials is. Run as root, `status` also reads the credential file
 and says, as `warning:` lines, where a hand-edited line is not what the
 manager reads (a key with whitespace around it, a key set twice — the
-last wins — a line that is not `KEY=value`, a quote never closed, which
-takes the rest of the file), where `RESTIC_REPOSITORY`
+last wins — a line that is not `KEY=value` or whose name the manager
+does not take, a quote never closed, which takes the rest of the file,
+a byte that is not UTF-8, which makes the manager refuse the whole
+file), where `RESTIC_REPOSITORY`
 or `RESTIC_PASSWORD` is not set, and where the repository is one the
 box cannot use; its exit status does not change for it.
 
@@ -554,11 +557,12 @@ hourly run. It needs no sudoers line.
   know; restic, sqlite3 or hotserve not installed; a systemd older than
   257; a Caddyfile a run could not plan from; another run, restore or
   drill under way.
-- `setup`, at a prompt: a value with a line break or a control
-  character — the file cannot hold it — three times; and a password not
-  confirmed `stored`.
-- `setup`, after two minutes with no answer from the repository: the
-  unit is stopped, and nothing has been written.
+- `setup`, at a prompt: an empty value, one with a line break or a
+  control character, or one that is not UTF-8 — the file cannot hold
+  it — three times; and a password not confirmed `stored`.
+- `setup`, after two minutes with no answer from the repository (ten
+  seconds for the look that comes first): the unit is stopped, and
+  nothing has been written.
 
 ## The Caddyfile is read without the server's environment
 
@@ -627,8 +631,11 @@ What can be known to fail is refused before anything is asked for
    backup yet;
 4. the storage key id is asked for, with echo on, and the secret key
    with echo off — on `/dev/tty`, whatever stdin and stdout are, so
-   that a pipe or a log holds neither; everything setup says goes there
-   too, the password above all. For `s3:` they are
+   that nothing stdout or stderr is sent to holds them; everything
+   setup says goes there too, the password above all (what records the
+   terminal itself — scrollback, `sudo`'s I/O log, `script` — holds
+   what was shown). The error a setup ends on goes to stderr, as every
+   command's does. For `s3:` they are
    `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, for `b2:`
    `B2_ACCOUNT_ID` and `B2_ACCOUNT_KEY`, for `rest:`
    `RESTIC_REST_USERNAME` and `RESTIC_REST_PASSWORD`. A value the file
@@ -636,38 +643,59 @@ What can be known to fail is refused before anything is asked for
    up to three times; one the plain form would not carry — whitespace
    at either end, a leading quote — is written double-quoted, as the
    manager reads it [measured];
-5. a repository password is made — 32 random bytes, base32, 52
-   characters — and **shown**, once; the operator types `stored` to go
-   on. Store it off the box: without it no backup can be read. Anything
-   else is a no, and nothing has been written;
-6. the file is written beside the working one — `repository.env.<id>`,
-   root-only — and `restic init --json` runs as `hotserve-backup`, with
-   that file, under a two-minute clock; after 20 seconds a person
-   waiting is told what for, and that Ctrl-C is safe. restic answers at
-   once whatever is wrong with the key, the host or the port
-   [measured]; the clock is for a storage that takes the connection and
-   never answers, after which the unit is stopped and the file removed;
+5. the file is written beside the working one — `repository.env.<id>`,
+   root-only, with a throwaway password — and the repository is
+   **looked for**: `restic cat config` as `hotserve-backup`, under a
+   ten-second clock, said as "looking for a repository at …". With a
+   right key restic says at once whether there is no repository (exit
+   10) or one this password does not open (exit 12) [measured]; a
+   bucket not there yet, a wrong key or a host that does not resolve
+   make it retry, so the look is given up on, said as such — the
+   three look alike there — and init answers instead;
+6. where none was found, a repository password is made — 32 random
+   bytes, base32, 52 characters — and **shown**, once, with what to
+   store beside it (the repository URL and the storage key: with those
+   three `restic -r <url>` reads every backup from any machine;
+   without the password nothing can); the operator types `stored` to
+   go on, and gets one more asking for any other word. Then
+   `restic init --json` runs with that password, under a two-minute
+   clock; after 20 seconds a person waiting is told what for, and that
+   Ctrl-C is safe. restic answers at once whatever is wrong with the
+   key, the host or the port [measured], and setup then asks for the
+   key id and secret again, up to three times, the one password
+   standing: it has taken effect nowhere until the repository is made
+   with it. When setup ends without having used it — three refusals,
+   Ctrl-C, any failure after the showing — the last line says so:
+   "the password shown above was never used: discard it". The clock is
+   for a storage that takes the connection and never answers, after
+   which the unit is stopped and the file removed;
 7. a repository that **exists already** — a rebuilt box, a bucket
-   reused — answers "already initialized", whatever the password. Setup
-   says so, asks for that repository's own password (echo off), writes
-   it in place of the one it made, and opens the repository with
-   `restic cat config`: a wrong one is refused (exit 12), and nothing
-   has changed;
+   reused — is asked for its own password (echo off), and nothing is
+   made or shown; setup opens it with `restic cat config`, and a wrong
+   password is refused (exit 12) and asked for again, up to three
+   times. Where the look could not tell and init finds the repository
+   there after all ("already initialized", whatever the password), the
+   same follows, and the password just shown is said not to be the
+   one;
 8. once the repository has answered, the file takes the working one's
    place — whole, root `0600`;
 9. then the record (`status.json`) is put aside as
-   `status.json.aside-<time>` if the file before named another
-   repository, or there was no file before: a run then drills what it
+   `status.json.aside-<time>`, and why is said, if the file before
+   named another repository, or there was no file before, or this
+   setup made the repository — a repository just made holds none of
+   the record's snapshots, whatever its URL: a run then drills what it
    backs up into the repository now in use, and `status` does not say
    "proven" of a snapshot this repository does not hold. The same
-   repository keeps its record. The last line names the repository,
-   whether it was made or opened, and its id.
+   repository, opened, keeps its record. The last line names the
+   repository, whether it was made or opened, and its id.
 
-Whatever ends setup before the last step — Ctrl-C, a refusal, a kill —
-leaves the working file byte for byte as it was, or absent as it was,
-and no copy of a credential beside it; a `kill -9` between `restic
-init` and the last step leaves the file under its temporary name,
-root-only, which the next setup removes first. A password that has
+Whatever ends setup before the last step — Ctrl-C ("interrupted:
+nothing has been written"), a refusal, a kill — leaves the working file
+byte for byte as it was, or absent as it was, and no copy of a
+credential beside it; a `kill -9` at any point after the storage key
+was typed leaves the file under its temporary name, root-only, holding
+that key and — after `restic init` began — the password, which the
+next setup removes first. A password that has
 taken effect anywhere has been shown, and confirmed stored, before it
 did: a setup killed after `restic init` made the repository is followed
 by one that says the repository exists and asks for the password that
@@ -677,7 +705,15 @@ was shown.
 the example sudoers lets an administrator create and edit any
 `/etc/hotserve/*.env`, and the repository credential is root's alone.
 A `/etc/hotserve/backup.env` from an earlier version of this branch is
-not read; a run and `status` say so and name `setup`.
+not read; a run and `status` say so, and what to do: run setup with
+its `RESTIC_REPOSITORY`, type its `RESTIC_PASSWORD` when asked, then
+remove it. With no credential file at the new path, setup cannot tie
+the record to the repository and puts it aside; the next run drills
+what it backs up.
+
+Nothing on this branch runs a backup on a schedule: until the
+package's timer exists, run `hotserve-backup run` hourly from a timer
+or cron entry of your own, or `status` goes unhealthy after 3 hours.
 
 ### By hand
 
@@ -694,11 +730,18 @@ AWS_ACCESS_KEY_ID=…
 AWS_SECRET_ACCESS_KEY=…
 ```
 
-plus the account, as setup makes it (above), and `restic init` with a
-cache directory of your own (`RESTIC_CACHE_DIR`) so that nothing of
-root's is left under `/var/cache/hotserve-backup`. Pointing the box at
-**another repository** this way leaves `status.json` speaking of the
-old one: remove it with the change, as setup does.
+plus the account, as setup makes it (above), and `restic init` from
+the file — never with a secret on a command line — with a cache
+directory of your own, so that nothing of root's is left under
+`/var/cache/hotserve-backup`:
+
+```sh
+sudo sh -c 'set -a; . /etc/hotserve-backup/repository.env; set +a; RESTIC_CACHE_DIR=$(mktemp -d) restic init'
+```
+
+Pointing the box at **another repository** this way leaves
+`status.json` speaking of the old one: remove it with the change, as
+setup does.
 
 ## Development
 

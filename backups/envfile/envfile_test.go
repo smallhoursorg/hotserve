@@ -37,6 +37,13 @@ func TestParseReadsAsTheManagerDoes(t *testing.T) {
 		`UTF=héllo`,
 		`MULTI="one`,
 		`two"`,
+		`AFTERQ="a" b`,
+		`AFTERC="v" # prod`,
+		`DQDOLLAR="a\$b"`,
+		"DQBT=\"a\\`b\"",
+		`SQESC='it\'s'`,
+		`ESCSP=trail\ `,
+		`export EXP=1`,
 		`LEADQ="abc`,
 		`SWALLOWED=yes`,
 		``,
@@ -45,7 +52,8 @@ func TestParseReadsAsTheManagerDoes(t *testing.T) {
 		"PLAIN": "value", "SPACEKEY": "spaced", "DQ": "double quoted", "SQ": "single quoted", "DUP": "second",
 		"HASHIN": "a#b", "TRAIL": "trail", "BS": `ab\c`, "DQBS": `a\b\c"d`, "DOLLAR": "$HOME x", "CONT": "one two",
 		"EMPTY": "", "MIDQ": `ab"cd"ef`, "TAB": "a\tb", "SEMIIN": "a;b", "PCT": "100%s", "UTF": "héllo",
-		"MULTI": "one\ntwo", "LEADQ": "abc\nSWALLOWED=yes\n",
+		"MULTI": "one\ntwo", "AFTERQ": "ab", "AFTERC": "v# prod", "DQDOLLAR": "a$b", "DQBT": "a`b", "SQESC": `it\s'`, "ESCSP": "trail ",
+		"LEADQ": "abc\nSWALLOWED=yes\n",
 	}
 	got, findings := Parse([]byte(raw))
 	for k, v := range want {
@@ -63,14 +71,21 @@ func TestParseReadsAsTheManagerDoes(t *testing.T) {
 		"line 2: the key is written with whitespace around it; the manager reads it as SPACEKEY",
 		"line 6: DUP is set again; the manager takes this one",
 		"line 17: not KEY=value; the manager skips it",
-		"line 25: the quote is never closed; the manager reads everything after it, to the end of the file, as LEADQ's value",
+		`line 31: "export EXP" is not a name the manager takes; it skips the line`,
+		"line 32: the quote is never closed; the manager reads everything after it, to the end of the file, as LEADQ's value",
 	} {
 		if !strings.Contains(joined, f) {
 			t.Errorf("findings lack %q:\n%s", f, joined)
 		}
 	}
-	if len(findings) != 4 {
-		t.Errorf("findings = %q, want exactly four", findings)
+	if len(findings) != 5 {
+		t.Errorf("findings = %q, want exactly five", findings)
+	}
+	// A byte that is not UTF-8 is not a line the manager skips: it
+	// refuses the whole file, and no unit that needs it starts.
+	got, findings = Parse([]byte("OK=1\nBAD=caf\xe9\nAFTER=2\n"))
+	if len(got) != 0 || len(findings) != 1 || !strings.Contains(findings[0], "line 2 holds a byte that is not UTF-8: the manager refuses the whole file, and no unit that needs it starts") {
+		t.Errorf("a non-UTF-8 file: %v %q", got, findings)
 	}
 }
 

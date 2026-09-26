@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -23,7 +24,7 @@ type tty struct {
 func openTTY() (*tty, error) {
 	f, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 	if err != nil {
-		return nil, fmt.Errorf("setup asks for secrets at a terminal, and there is none here: %w", err)
+		return nil, errors.New("setup asks for secrets at a terminal, and there is none here; from a provisioning tool, write /etc/hotserve-backup/repository.env by hand (backups/README.md, \"By hand\")")
 	}
 	return &tty{f: f, in: bufio.NewReader(f)}, nil
 }

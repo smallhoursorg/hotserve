@@ -47,16 +47,24 @@ type SetupReport struct {
 	Swept        []string // files an interrupted setup left, removed
 }
 
-// setupClock bounds each of setup's two restic units. restic init
-// answers at once whatever is wrong — a wrong key, a host that does not
-// resolve, a port nobody listens on, all measured — and after 30 s for
-// a host that swallows packets; a probe of an existing repository with
-// a wrong password answers at once (exit 12). The clock is for what
-// was not measured. setupNote is when a person waiting is told what
-// for.
+// setupClock bounds restic init and the opening of an existing
+// repository. restic init answers at once whatever is wrong — a wrong
+// key, a host that does not resolve, a port nobody listens on, all
+// measured — and after 30 s for a host that swallows packets; opening
+// with a wrong password answers at once (exit 12). The clock is for
+// what was not measured. setupNote is when a person waiting is told
+// what for.
+//
+// setupProbeClock bounds the look for a repository that comes before
+// any password is made: `cat config` with a throwaway password answers
+// at once with a right key — exit 10 where there is no repository, 12
+// where there is one — and retries for minutes on a bucket not there
+// yet, a wrong key, a host that does not resolve [measured]. Those are
+// init's to answer, at once, so the look is given up on soon.
 var (
-	setupClock = 2 * time.Minute
-	setupNote  = 20 * time.Second
+	setupClock      = 2 * time.Minute
+	setupProbeClock = 10 * time.Second
+	setupNote       = 20 * time.Second
 )
 
 // What setup checks the box has before it asks anyone for a secret, and
@@ -149,7 +157,7 @@ func OldEnvFileNote(cfg Config) string {
 	if _, err := os.Lstat(cfg.OldEnvFile); cfg.OldEnvFile == "" || err != nil {
 		return ""
 	}
-	return fmt.Sprintf(" (%s is from before this version and is not read: run `hotserve-backup setup`)", cfg.OldEnvFile)
+	return fmt.Sprintf(" (%s is from before this version and is not read: run `sudo hotserve-backup setup <its RESTIC_REPOSITORY>`, which asks for its RESTIC_PASSWORD; then remove it)", cfg.OldEnvFile)
 }
 
 // tempRe is the shape of the file setup writes beside the working one
@@ -264,105 +272,229 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 		term.Say(fmt.Sprintf("a run would back up %s, under %s", record.Clean(strings.Join(rep.Apps, ", ")), record.Text(p.Root)))
 	}
 
-	pairs := []envfile.Pair{{Key: "RESTIC_REPOSITORY", Value: o.Repository}, {Key: "RESTIC_PASSWORD", Value: ""}}
-	for _, c := range creds {
-		v, err := ask(ctx, term, c.label+" ("+c.variable+"): ", c.secret)
-		if err != nil {
-			return nil, err
-		}
-		pairs = append(pairs, envfile.Pair{Key: c.variable, Value: v})
-	}
-	password, err := newPassword()
-	if err != nil {
-		return nil, err
-	}
-	term.Say("Repository password (new): " + password)
-	term.Say("Store it off the box now: without it no backup can be read.")
-	stored, err := term.Ask(ctx, "Type stored to go on: ", false)
-	if err != nil {
-		return nil, fmt.Errorf("nobody answered: %w", err)
-	}
-	if stored != "stored" {
-		return nil, errors.New("the password was not confirmed stored: nothing was written")
-	}
-	pairs[1].Value = password
-
 	// The file is written beside the working one, under a name the
-	// manager reads for the two units here, and takes the working one's
+	// manager reads for the units here, and takes the working one's
 	// place only once the repository has answered. Whatever ends this
 	// command before that, the working file is as it was and the temp
-	// file goes with it.
+	// file goes with it. Until a password is made it holds a throwaway
+	// one: what the look for a repository needs, and nothing that takes
+	// effect anywhere.
 	tmp := cfg.EnvFile + "." + x.nonce
 	defer os.Remove(tmp) //nolint:errcheck // gone already once it was put in place
-	if err := envfile.Write(tmp, pairs); err != nil {
-		return nil, err
-	}
-	o1, message, err := x.repository(ctx, term, o.Repository, "init", tmp, cfg.Restic, "init", "--json")
+	throwaway, err := newPassword()
 	if err != nil {
 		return nil, err
 	}
-	switch {
-	case o1.OK():
-		if rep.RepositoryID = initializedID(filepath.Join(x.dir, "init.out")); rep.RepositoryID == "" {
-			return nil, errors.New("restic exited 0 but said nothing of a repository")
+	// password is the one made for a new repository: shown once, and
+	// kept through a key typed wrong — it has taken effect nowhere
+	// until init has made the repository with it.
+	var password string
+	exists := false
+	pairs := []envfile.Pair{{Key: "RESTIC_REPOSITORY", Value: o.Repository}, {Key: "RESTIC_PASSWORD", Value: throwaway}}
+	for attempt := 1; ; attempt++ {
+		pairs = pairs[:2]
+		for _, c := range creds {
+			v, err := ask(ctx, term, c.label+" ("+c.variable+"): ", c.secret)
+			if err != nil {
+				return nil, x.setupErr(err, password)
+			}
+			pairs = append(pairs, envfile.Pair{Key: c.variable, Value: v})
 		}
-		rep.New = true
-	case o1.Result == "exit-code" && o1.ExitStatus == 1 && repositoryExists(message):
-		// A rebuilt box, or a bucket reused: the repository has a
-		// password already, and the one just shown is not it.
-		term.Say("the repository exists; its password is needed (the one shown above is not it)")
-		own, err := ask(ctx, term, "Repository password: ", true)
-		if err != nil {
-			return nil, err
-		}
-		pairs[1].Value = own
+		pairs[1].Value = throwaway
 		if err := envfile.Write(tmp, pairs); err != nil {
 			return nil, err
 		}
-		o2, _, err := x.repository(ctx, term, o.Repository, "probe", tmp, cfg.Restic, "cat", "config", "--no-lock")
-		if err != nil {
+		// Before any password is made: is there a repository already?
+		// With a right key restic says at once — none (10), or one this
+		// password does not open (12) — and a rebuilt box is then asked
+		// for the password it has, not shown one it does not need.
+		// Where the look cannot tell, init answers, and says why.
+		term.Say(fmt.Sprintf("looking for a repository at %s (up to %s)", o.Repository, setupProbeClock))
+		o0, _, err := x.repository(ctx, term, o.Repository, "probe", tmp, setupProbeClock, cfg.Restic, "cat", "config", "--no-lock")
+		if err != nil && (ctx.Err() != nil || errors.Is(err, unit.ErrNotConfirmedGone)) {
+			return nil, x.setupErr(err, password)
+		}
+		switch {
+		case err == nil && o0.Result == "exit-code" && o0.ExitStatus == 12:
+			exists = true
+			if password != "" {
+				term.Say("the repository exists; its password is needed (the one shown above is not it)")
+			} else {
+				term.Say("the repository exists; its password is needed")
+			}
+		case err == nil && o0.Result == "exit-code" && o0.ExitStatus == 10:
+			// None: one is made below.
+		case password != "":
+			term.Say(fmt.Sprintf("no repository answered within %s: a bucket not made yet, a wrong key and a wrong host look alike here; a new repository will be made, and the password shown above still applies", setupProbeClock))
+		default:
+			term.Say(fmt.Sprintf("no repository answered within %s: a bucket not made yet, a wrong key and a wrong host look alike here; a new repository will be made, and if that fails the password shown next was never used", setupProbeClock))
+		}
+		if exists {
+			break
+		}
+		if password == "" {
+			if password, err = newPassword(); err != nil {
+				return nil, err
+			}
+			term.Say("Repository password (new): " + password)
+			term.Say("Store it off the box now, with the repository URL, " + o.Repository + ", and the storage key: with those three, `restic -r <url>` reads every backup from any machine; without the password nothing can.")
+			if err := x.confirmStored(ctx, term); err != nil {
+				return nil, x.setupErr(err, password)
+			}
+		}
+		pairs[1].Value = password
+		if err := envfile.Write(tmp, pairs); err != nil {
 			return nil, err
 		}
-		if !o2.OK() {
+		o1, message, err := x.repository(ctx, term, o.Repository, "init", tmp, setupClock, cfg.Restic, "init", "--json")
+		if err != nil {
+			return nil, x.setupErr(err, password)
+		}
+		if o1.OK() {
+			if rep.RepositoryID = initializedID(filepath.Join(x.dir, "init.out")); rep.RepositoryID == "" {
+				return nil, x.setupErr(errors.New("restic exited 0 but said nothing of a repository"), password)
+			}
+			rep.New = true
+			break
+		}
+		if o1.Result == "exit-code" && o1.ExitStatus == 1 && repositoryExists(message) {
+			// The look could not tell, and init can: the repository has a
+			// password already, and the one just shown is not it.
+			term.Say("the repository exists; its password is needed (the one shown above is not it)")
+			exists = true
+			break
+		}
+		var failure error
+		if o1.Result == "exit-code" && o1.ExitStatus == 1 {
+			failure = errors.New("restic could not make or open the repository (exit 1): " + record.Text(message))
+			// What the storage says of the key, the host or the bucket is
+			// a mistake in what was typed, as often as not: the key is
+			// asked for again. The password stands: it has taken effect
+			// nowhere.
+			if attempt < 3 {
+				term.Say(failure.Error())
+				term.Say("the storage refused the key, or could not be reached: the key id and secret again (the password shown above still applies)")
+				continue
+			}
+		} else {
+			detail, _ := resticFailure(o1)
+			failure = errors.New(detail)
+		}
+		return nil, x.setupErr(failure, password)
+	}
+	if exists {
+		for attempt := 1; ; attempt++ {
+			own, err := ask(ctx, term, "Repository password: ", true)
+			if err != nil {
+				return nil, x.setupErr(err, password)
+			}
+			pairs[1].Value = own
+			if err := envfile.Write(tmp, pairs); err != nil {
+				return nil, err
+			}
+			o2, _, err := x.repository(ctx, term, o.Repository, "open", tmp, setupClock, cfg.Restic, "cat", "config", "--no-lock")
+			if err != nil {
+				return nil, x.setupErr(err, password)
+			}
+			if o2.OK() {
+				if rep.RepositoryID = configID(filepath.Join(x.dir, "open.out")); rep.RepositoryID == "" {
+					return nil, x.setupErr(errors.New("restic exited 0 but said nothing of the repository's id"), password)
+				}
+				break
+			}
 			if o2.Result == "exit-code" && o2.ExitStatus == 12 {
-				return nil, errors.New("this password cannot open the repository (exit 12)")
+				if attempt < 3 {
+					term.Say("this password cannot open the repository (exit 12): again")
+					continue
+				}
+				return nil, x.setupErr(errors.New("this password cannot open the repository (exit 12)"), password)
 			}
 			detail, _ := resticFailure(o2)
-			return nil, errors.New(detail)
+			return nil, x.setupErr(errors.New(detail), password)
 		}
-		if rep.RepositoryID = configID(filepath.Join(x.dir, "probe.out")); rep.RepositoryID == "" {
-			return nil, errors.New("restic exited 0 but said nothing of the repository's id")
-		}
-	case o1.Result == "exit-code" && o1.ExitStatus == 1:
-		return nil, errors.New("restic could not make or open the repository (exit 1): " + record.Text(message))
-	default:
-		detail, _ := resticFailure(o1)
-		return nil, errors.New(detail)
 	}
-
 	if err := envfile.Commit(tmp, cfg.EnvFile); err != nil {
 		return nil, err
 	}
 	// The record speaks of the repository it was written against. With
-	// another one now in use it is put aside, so that the next run
-	// drills what it backs up into the repository it is now using —
-	// after the file is in place, so that a file that could not be put
-	// in place keeps the record it goes with.
+	// another one now in use — or none known — it is put aside, so
+	// that the next run drills what it backs up into the repository it
+	// is now using; after the file is in place, so that a file that
+	// could not be put in place keeps the record it goes with.
 	statusPath := filepath.Join(cfg.StateDir, "status.json")
-	if _, err := os.Lstat(statusPath); err == nil && (!hadOld || oldRepository != o.Repository) {
+	if _, err := os.Lstat(statusPath); err == nil && (!hadOld || oldRepository != o.Repository || rep.New) {
+		why := "the previous credential file named another repository"
+		switch {
+		case rep.New:
+			why = "the repository was made by this setup, so it holds none of the record's snapshots"
+		case !hadOld:
+			why = "no credential file was there to tie it to this repository"
+		}
 		rep.Aside = statusPath + ".aside-" + time.Now().UTC().Format("20060102T150405Z")
 		if err := os.Rename(statusPath, rep.Aside); err != nil {
 			return nil, err
 		}
-		term.Say("the record of the previous repository was put aside: " + rep.Aside)
+		term.Say(fmt.Sprintf("the record was put aside (%s): %s; the next run drills what it backs up", why, rep.Aside))
 	}
 	kind := "existing"
 	if rep.New {
 		kind = "new"
 	}
 	term.Say(fmt.Sprintf("repository ready: %s (%s, id %s)", o.Repository, kind, short(rep.RepositoryID)))
+	if password != "" && !rep.New {
+		term.Say("the password shown above was never used: discard it")
+	}
 	return rep, nil
 }
+
+// confirmStored has the operator type "stored" — a word that means
+// something, not "y" — with one more asking for a word that is not
+// it; anything then is a no.
+func (x *run) confirmStored(ctx context.Context, term Terminal) error {
+	for i := 0; i < 2; i++ {
+		said, err := term.Ask(ctx, "Type stored to go on: ", false)
+		if err != nil {
+			return fmt.Errorf("nobody answered: %w", err)
+		}
+		if strings.EqualFold(strings.TrimSpace(said), "stored") {
+			return nil
+		}
+		if i == 0 {
+			term.Say("that is not stored: type stored to go on, or anything else to stop")
+		}
+	}
+	return errors.New("the password was not confirmed stored: nothing was written")
+}
+
+// setupErr is an error in the operator's words: an interrupt is said
+// as one, and a password that was shown and never used is said to be
+// dead.
+func (x *run) setupErr(err error, password string) error {
+	// A unit that could not be seen gone may still be making the
+	// repository with that password: nothing is said of it but the
+	// runner's own words.
+	if errors.Is(err, unit.ErrNotConfirmedGone) {
+		return err
+	}
+	dead := ""
+	if password != "" {
+		dead = "; the password shown above was never used: discard it"
+	}
+	if errors.Is(err, context.Canceled) {
+		return interrupted("interrupted: nothing has been written" + dead)
+	}
+	if dead != "" {
+		return fmt.Errorf("%w%s", err, dead)
+	}
+	return err
+}
+
+// interrupted is context.Canceled in the operator's words: it is that
+// error to errors.Is, and says nothing of contexts.
+type interrupted string
+
+func (e interrupted) Error() string      { return string(e) }
+func (interrupted) Is(target error) bool { return target == context.Canceled }
 
 // ask asks up to three times for a value the file can hold, and says
 // each time why it cannot.
@@ -382,12 +514,12 @@ func ask(ctx context.Context, term Terminal, prompt string, secret bool) (string
 }
 
 // repository runs one restic command against the repository as the
-// backup account, with the credential file the manager reads, under
-// the clock; a person waiting is told what for. It returns what restic
+// backup account, with the credential file the manager reads, under a
+// clock; a person waiting is told what for. It returns what restic
 // said on stderr, cleaned — the message of its exit_error line where it
 // wrote one — for the caller to match and show.
-func (x *run) repository(ctx context.Context, term Terminal, repo, role, envFile string, argv ...string) (unit.Outcome, string, error) {
-	clock, cancel := context.WithTimeout(ctx, setupClock)
+func (x *run) repository(ctx context.Context, term Terminal, repo, role, envFile string, within time.Duration, argv ...string) (unit.Outcome, string, error) {
+	clock, cancel := context.WithTimeout(ctx, within)
 	defer cancel()
 	note := time.AfterFunc(setupNote, func() {
 		term.Say("still waiting for " + repo + " (Ctrl-C is safe: nothing has been written)")
@@ -407,7 +539,7 @@ func (x *run) repository(ctx context.Context, term Terminal, repo, role, envFile
 		// runner says it could not confirm that, which is then the error,
 		// in its own words.
 		if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, unit.ErrNotConfirmedGone) {
-			return o, "", fmt.Errorf("the repository did not answer within %s; the unit was stopped", setupClock)
+			return o, "", fmt.Errorf("the repository did not answer within %s; the unit was stopped", within)
 		}
 		return o, "", err
 	}
