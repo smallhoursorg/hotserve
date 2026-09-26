@@ -147,8 +147,11 @@ func (b *box) Stop(name string) error { b.stopped = append(b.stopped, name); ret
 
 // Wait is what a lock holder does about a unit an earlier setup left
 // to finish: recorded, and the unit taken as gone.
-func (b *box) Wait(_ context.Context, name string) error {
+func (b *box) Wait(ctx context.Context, name string) error {
 	b.waited = append(b.waited, name)
+	if ctx.Err() != nil {
+		return fmt.Errorf("%s: still activating: %w", name, ctx.Err())
+	}
 	return b.waitErr
 }
 

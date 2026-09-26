@@ -590,6 +590,95 @@ func TestTheInitUnitIsLeftToFinishAndWaitedFor(t *testing.T) {
 	}
 }
 
+// Ctrl-C while waiting for an earlier setup's init is an interrupt like
+// any other, at once — and leaves the marker for the next lock holder,
+// since the init it names is still to be waited for.
+func TestAnInterruptDuringTheWaitForAnEarlierInitIsHonoured(t *testing.T) {
+	b, m := setupBox(t)
+	must(t, os.MkdirAll(b.cfg.RunDir, 0o700))
+	marker := filepath.Join(b.cfg.RunDir, "init-unit")
+	must(t, os.WriteFile(marker, []byte("hotserve_backup_init_0123456789ab.service\n"), 0o600))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := Setup(ctx, b.cfg, b, SetupOptions{Repository: "s3:http://e2e-s3:9000/box", Terminal: m})
+	if !errors.Is(err, context.Canceled) || len(b.waited) != 1 || b.roles() != "" {
+		t.Fatalf("err %v, waited %v, units %s", err, b.waited, b.roles())
+	}
+	if _, err := os.Lstat(marker); err != nil {
+		t.Fatal("the marker was removed though the wait was interrupted")
+	}
+	// A run, the same.
+	must(t, os.MkdirAll(filepath.Dir(b.cfg.EnvFile), 0o755))
+	must(t, os.WriteFile(b.cfg.EnvFile, []byte("RESTIC_PASSWORD=x\n"), 0o600))
+	if _, err := Run(ctx, b.cfg, b); !errors.Is(err, context.Canceled) || b.roles() != "" {
+		t.Fatalf("a run: %v, units %s", err, b.roles())
+	}
+}
+
+// After an init attempt that failed, the next attempt's look saying
+// "exists" does not prove the shown password is not that repository's:
+// the failed init may have made it. The shown password is tried first,
+// and a repository it opens is one this setup made.
+func TestAfterAFailedInitTheShownPasswordIsTriedBeforeItIsCalledUnused(t *testing.T) {
+	b, m := setupBox(t)
+	b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+	b.outcome["init"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+	b.initOut, b.initErr = "", wrongKey
+	inits := 0
+	b.before = func(s unit.Spec) {
+		if strings.Contains(s.Name, "_init_") {
+			if inits++; inits == 1 {
+				// The second attempt's look finds a repository.
+				b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 12}
+			}
+		}
+	}
+	m.answers = []string{"AKIDX", "wrong", "stored", "AKIDX", "the-secret"}
+	rep, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
+	if err != nil {
+		t.Fatalf("%v\nsaid:\n%s", err, m.saidAll())
+	}
+	if got, want := b.roles(), "plan probe init probe open"; got != want {
+		t.Fatalf("units: %s, want %s", got, want)
+	}
+	if strings.Contains(m.askedAll(), "Repository password: ") {
+		t.Fatalf("the operator was asked for a password the setup had shown:\n%s", m.askedAll())
+	}
+	pw := shownPassword(t, m)
+	if v := envOf(t, b.cfg.EnvFile); v["RESTIC_PASSWORD"] != pw {
+		t.Fatalf("the file holds %q, not the shown password", v["RESTIC_PASSWORD"])
+	}
+	if !rep.New || rep.RepositoryID != repoID || strings.Contains(m.saidAll(), "discard it") || !strings.Contains(m.saidAll(), "the repository exists, and the password shown above opens it: it was made by an earlier attempt of this setup") {
+		t.Fatalf("report %+v\nsaid:\n%s", rep, m.saidAll())
+	}
+	// The shown password does not open it: it is not ours, and the
+	// operator is asked, as before.
+	b, m = setupBox(t)
+	b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+	b.outcome["init"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+	b.initOut, b.initErr = "", wrongKey
+	opens := 0
+	b.before = func(s unit.Spec) {
+		if strings.Contains(s.Name, "_init_") {
+			b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 12}
+			b.outcome["open"] = unit.Outcome{Result: "exit-code", ExitStatus: 12}
+		}
+		if strings.Contains(s.Name, "_open_") {
+			if opens++; opens == 2 {
+				delete(b.outcome, "open")
+			}
+		}
+	}
+	m.answers = []string{"AKIDX", "wrong", "stored", "AKIDX", "the-secret", "its-own-password"}
+	rep, err = b.setup(t, m, "s3:http://e2e-s3:9000/box")
+	if err != nil {
+		t.Fatalf("%v\nsaid:\n%s", err, m.saidAll())
+	}
+	if got, want := b.roles(), "plan probe init probe open open"; got != want || rep.New || !strings.Contains(m.saidAll(), "the password shown above was never used: discard it") {
+		t.Fatalf("units %s, report %+v\nsaid:\n%s", got, rep, m.saidAll())
+	}
+}
+
 // Ctrl-C while the plan is read is said as an interrupt, like every
 // other: nothing has been written.
 func TestAnInterruptDuringThePlanIsSaidAsOne(t *testing.T) {
@@ -822,14 +911,23 @@ func TestAPasswordShownAndNotUsedIsSaidDeadOnSuccessToo(t *testing.T) {
 	b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
 	b.outcome["init"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
 	b.initOut, b.initErr = "", wrongKey
+	opens := 0
 	b.before = func(s unit.Spec) {
 		if strings.Contains(s.Name, "_init_") {
+			// The second attempt's look finds a repository the shown
+			// password does not open: not ours.
 			b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 12}
+			b.outcome["open"] = unit.Outcome{Result: "exit-code", ExitStatus: 12}
+		}
+		if strings.Contains(s.Name, "_open_") {
+			if opens++; opens == 2 {
+				delete(b.outcome, "open")
+			}
 		}
 	}
 	m.answers = []string{"AKIDX", "wrong", "stored", "AKIDX", "the-secret", "its-own-password"}
 	rep, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
-	if err != nil || rep.New || b.roles() != "plan probe init probe open" {
+	if err != nil || rep.New || b.roles() != "plan probe init probe open open" {
 		t.Fatalf("%v %+v %s", err, rep, b.roles())
 	}
 	for _, want := range []string{"the repository exists; its password is needed (the one shown above is not it)", "the password shown above was never used: discard it"} {

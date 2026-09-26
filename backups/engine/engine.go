@@ -112,7 +112,7 @@ const preRestoreTag = "pre-restore"
 // Run does one run and writes the record. The error is about the run as
 // a whole; how each app fared is in the record.
 func Run(ctx context.Context, cfg Config, r Runner) (*record.Status, error) {
-	x, end, err := begin(cfg, r)
+	x, end, err := begin(ctx, cfg, r)
 	if x == nil {
 		return nil, err
 	}
@@ -128,19 +128,19 @@ func Run(ctx context.Context, cfg Config, r Runner) (*record.Status, error) {
 // away, and a directory of its own. With an error and a run, the lock is
 // held and the record is still to be written; end removes the directory
 // and releases the lock.
-func begin(cfg Config, r Runner) (x *run, end func(), err error) {
+func begin(ctx context.Context, cfg Config, r Runner) (x *run, end func(), err error) {
 	if _, err := os.Lstat(cfg.EnvFile); errors.Is(err, fs.ErrNotExist) {
 		return nil, nil, fmt.Errorf("backups are not set up: %s is not there%s", cfg.EnvFile, OldEnvFileNote(cfg))
 	} else if err != nil {
 		return nil, nil, fmt.Errorf("backups are not set up: %s: %w", cfg.EnvFile, err)
 	}
-	return open(cfg, r, nil)
+	return open(ctx, cfg, r, nil)
 }
 
 // open is begin without the credential file: what setup, which is
 // about to write that file, shares with a run. say, when there is
 // someone to tell, hears of a wait for an earlier setup's init.
-func open(cfg Config, r Runner, say func(string)) (x *run, end func(), err error) {
+func open(ctx context.Context, cfg Config, r Runner, say func(string)) (x *run, end func(), err error) {
 	// The state dir is where the status record is read from by anyone;
 	// everything else is root's alone. Units reach staging through
 	// binds the manager makes, not by walking here.
@@ -176,7 +176,7 @@ func open(cfg Config, r Runner, say func(string)) (x *run, end func(), err error
 	}
 	x = &run{cfg: cfg, r: r, nonce: nonce, dir: filepath.Join(cfg.RunDir, nonce), prev: prev,
 		status: &record.Status{Started: time.Now().UTC(), Warning: unreadable, Apps: map[string]*record.App{}, Listed: prev.Listed, Unlisted: prev.Unlisted, LastDrill: prev.LastDrill}}
-	if err := x.awaitInit(say); err != nil {
+	if err := x.awaitInit(ctx, say); err != nil {
 		return x, unlock, err
 	}
 	if err := x.sweep(); err != nil {
@@ -542,7 +542,7 @@ func unescapeMount(s string) string {
 // running — recorded under RunDir/init-unit, not stopped: stopped half
 // way it would leave a repository no password opens — before anything
 // here looks at or makes a repository.
-func (x *run) awaitInit(say func(string)) error {
+func (x *run) awaitInit(ctx context.Context, say func(string)) error {
 	file := filepath.Join(x.cfg.RunDir, "init-unit")
 	raw, err := os.ReadFile(file) //nolint:gosec // root's own file under /run
 	if errors.Is(err, fs.ErrNotExist) {
@@ -556,9 +556,15 @@ func (x *run) awaitInit(say func(string)) error {
 		if say != nil {
 			say("waiting for the restic init a setup that did not finish left running: " + name)
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), initWait)
+		// Bounded by the command's own context too: an interrupt ends
+		// the wait at once, and leaves the marker for the next lock
+		// holder — the init it names is still to be waited for.
+		within, cancel := context.WithTimeout(ctx, initWait)
 		defer cancel()
-		if err := x.r.Wait(ctx, name); err != nil {
+		if err := x.r.Wait(within, name); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			return fmt.Errorf("a restic init from an earlier setup is still running: %w", err)
 		}
 	}

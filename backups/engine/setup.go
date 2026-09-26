@@ -230,7 +230,7 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 	}
 	term.Say("account " + backupUser + ": " + rep.Account)
 
-	x, end, err := open(cfg, r, term.Say)
+	x, end, err := open(ctx, cfg, r, term.Say)
 	if x == nil {
 		return nil, err
 	}
@@ -348,6 +348,34 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 			return nil, x.setupErr(errors.New("looking for the repository: "+detail), password)
 		}
 		switch {
+		case err == nil && o0.Result == "exit-code" && o0.ExitStatus == 12 && password != "" && x.initRan:
+			// A repository is there, and an earlier attempt's init ran
+			// with the password shown: the throwaway not opening it says
+			// nothing of that one. Tried first — a repository it opens is
+			// one this setup made.
+			pairs[1].Value = password
+			if err := writeEnv(tmp, pairs); err != nil {
+				return nil, x.setupErr(err, password)
+			}
+			o2, _, err := x.repository(ctx, term, o.Repository, "open", tmp, setupClock, cfg.Restic, "cat", "config", "--no-lock")
+			if err != nil {
+				return nil, x.setupErr(err, password)
+			}
+			switch {
+			case o2.OK():
+				if rep.RepositoryID = configID(filepath.Join(x.dir, "open.out")); rep.RepositoryID == "" {
+					return nil, x.setupErr(errors.New("restic exited 0 but said nothing of the repository's id"), password)
+				}
+				term.Say("the repository exists, and the password shown above opens it: it was made by an earlier attempt of this setup")
+				rep.New = true
+			case o2.Result == "exit-code" && o2.ExitStatus == 12:
+				exists = true
+				x.initRan = false
+				term.Say("the repository exists; its password is needed (the one shown above is not it)")
+			default:
+				detail, _ := resticFailure(o2)
+				return nil, x.setupErr(errors.New(detail), password)
+			}
 		case err == nil && o0.Result == "exit-code" && o0.ExitStatus == 12:
 			exists = true
 			if password != "" {
@@ -362,7 +390,7 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 		default:
 			term.Say(fmt.Sprintf("no repository answered within %s: a bucket not made yet, a wrong key and a wrong host look alike here; a new repository will be made, and if that fails the password shown next was never used", setupProbeClock))
 		}
-		if exists {
+		if exists || rep.New {
 			break
 		}
 		if password == "" {
