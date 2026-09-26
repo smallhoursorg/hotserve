@@ -11,16 +11,17 @@ and nothing here talks to hotserve. The two share a declaration format
 (`liveswap/backupdecl`) and nothing more — `hotserve-backup` links no
 Caddy.
 
-**On this branch it is the engine, restore, the restore drill, and
-what says how they are doing.** `hotserve-backup run` does one backup
-run, `hotserve-backup restore <app>` puts a snapshot back,
-`hotserve-backup drill` proves that a restore would work without doing
-one, `hotserve-backup status` says whether each app's backup is fresh
-and its restore proven, and `hotserve-backup validate <Caddyfile>` says
-whether a run could plan from a Caddyfile before it goes live. There is
-no setup command, no timer and no package yet: all but `validate` need `/etc/hotserve/backup.env`
-written by hand (below), Debian 13's `restic` and `sqlite3` installed,
-and systemd 257 (`PrivatePIDs=`), which is Debian 13's.
+**On this branch it is setup, the engine, restore, the restore drill,
+and what says how they are doing.** `hotserve-backup setup <repository>`
+makes the box ready for one repository (below), `hotserve-backup run`
+does one backup run, `hotserve-backup restore <app>` puts a snapshot
+back, `hotserve-backup drill` proves that a restore would work without
+doing one, `hotserve-backup status` says whether each app's backup is
+fresh and its restore proven, and `hotserve-backup validate <Caddyfile>`
+says whether a run could plan from a Caddyfile before it goes live.
+There is no timer and no package yet: `setup` needs Debian 13's `restic`
+and `sqlite3` installed, and systemd 257 (`PrivatePIDs=`), which is
+Debian 13's, and says so before it asks for anything.
 
 ## A run
 
@@ -101,7 +102,9 @@ run, and what the step is given.
 | Unit | Runs as | Network | Credential | Sees |
 |---|---|---|---|---|
 | the run itself | root | — | never reads it | its own state and run dirs |
+| setup | root | — | writes it; reads the one before for its `RESTIC_REPOSITORY` alone | its own state and run dirs, and the terminal |
 | plan | `hotserve-backup`, own user+PID namespaces | no | no | `/etc/hotserve`, read-only |
+| init, probe (setup's) | `hotserve-backup`, no capability | yes | yes, the file setup is about to put in place | nothing of the app |
 | dump, clean | `hotserve`, own user+PID namespaces | no | no | that app's `shared/` (dump only) and staging |
 | upload | `hotserve-backup`, `CAP_DAC_READ_SEARCH` | yes | yes | that app's declared paths and staged copies, read-only |
 | verify | `hotserve-backup`, no capability | yes | yes | nothing of the app |
@@ -122,8 +125,9 @@ PID namespaces: it makes bind mounts that the manager then has to see.
   as an account of its own, so the server and every app can neither
   read its environment nor signal it. The one capability lets it read
   files it does not own, in a view that holds one app and nothing else.
-  The run passes the *path* of `backup.env` to systemd, which reads it
-  as root; the run itself never opens it.
+  The run passes the *path* of `repository.env` to systemd, which reads
+  it as root; the run itself never opens it. `setup` is its one writer,
+  and `status`, as root, its one other reader.
 - **What an operator or an app wrote stays off command lines**, with
   one exception. Units get the app's declaration as a root-written file
   bound at a fixed path, and declared paths as bind sources. Every
@@ -444,8 +448,8 @@ restore proven in the last 8 days with no failed drill since. With no
 app declaring a backup there is nothing to fail. A box set up less than
 3 hours ago and not yet run is `pending first run`, exit 0; after that
 it is not. Anything else of those exits 1. What kept `status` from
-looking at all — no `/etc/hotserve/backup.env` (backups are not set
-up), a record that cannot be read — exits 3: not the same news as
+looking at all — no `/etc/hotserve-backup/repository.env` (backups are
+not set up), a record that cannot be read — exits 3: not the same news as
 backups that are unhealthy. (2 is the usage text's. These are
 `status`'s own: its 3 has nothing to do with restic's exit 3, an
 incomplete backup, which a run records as `incomplete`.)
@@ -453,7 +457,16 @@ incomplete backup, which a run records as `incomplete`.)
 That anyone may run it is meant. `status.json` is readable by every
 account on the box, and so are the app names, data paths, snapshot ids
 and cleaned error text in it; nothing of the repository's location or
-credentials is.
+credentials is. Run as root, `status` also reads the credential file
+and says, as `warning:` lines, where a hand-edited line is not what the
+manager reads (a key with whitespace around it, a key set twice — the
+last wins — a line that is not `KEY=value` or whose name the manager
+does not take, a quote never closed, which takes the rest of the file,
+a byte that is not UTF-8, which makes the manager refuse the whole
+file), where `RESTIC_REPOSITORY` or `RESTIC_PASSWORD` is not set or
+set to nothing, where the repository is one the box cannot use or a
+value setup would refuse, and where the file is there and cannot be
+read at all; its exit status does not change for it.
 
 ## Before a Caddyfile goes live
 
@@ -535,6 +548,23 @@ hourly run. It needs no sudoers line.
   is `hotserve-backup drill`'s.
 - A unit whose state cannot be read ten looks running (five minutes) is
   stopped, and that step fails.
+- `setup`, before it asks for anything: a repository that is a path on
+  this box (`/srv/backups`, `local:`), `sftp:` (ssh takes its key from a
+  home directory, which no unit has), `rclone:` (a config file, the
+  same), `azure:` (not in Debian's restic), `gs:` and `swift:` (a
+  credentials file, or a dozen variables: write the file by hand,
+  below), a URL with `user:pass@` in it, with or without a scheme
+  before the host (a command line and a shell history are no place for
+  a secret), and a scheme restic does not
+  know; restic, sqlite3 or hotserve not installed; a systemd older than
+  257; a Caddyfile a run could not plan from; another run, restore or
+  drill under way.
+- `setup`, at a prompt: an empty value, one with a line break or a
+  control character, or one that is not UTF-8 — the file cannot hold
+  it — three times; and a password not confirmed `stored`.
+- `setup`, after two minutes with no answer from the repository (ten
+  seconds for the look that comes first): the unit is stopped, and
+  nothing has been written.
 
 ## The Caddyfile is read without the server's environment
 
@@ -577,30 +607,172 @@ is root's to write (`hotserve.service`), like the Caddyfile's own
 directory; keep what it holds to values, and what is declared in the
 Caddyfile.
 
-## By hand, until there is a setup command
+## Setup
+
+`sudo hotserve-backup setup <repository>`, at a terminal. The
+repository is a restic URL — `s3:https://s3.example.com/bucket`,
+`b2:bucket:path`, `rest:https://host:8000/` — and not a secret; the
+secrets are typed at the terminal, never given on the command line.
+What can be known to fail is refused before anything is asked for
+("What it refuses"). In order:
+
+1. the `hotserve-backup` account is made if it is not there
+   (`useradd --system --no-create-home --home-dir /nonexistent --shell
+   /usr/sbin/nologin`), and left alone if it is;
+2. the run lock is taken and held to the end — a backup run that comes
+   due meanwhile says who holds it — the state and run directories are
+   made as a run makes them, `/etc/hotserve-backup` is made (root,
+   `0755`: anyone may see that the file is there and when it was
+   written, which is how `status` tells a fresh setup from one that
+   never ran; nobody but root what is in it), and a file an interrupted
+   setup left beside the credential file (`repository.env.<id>`, or the
+   dotfile `envfile` makes on the way to it — the two shapes `envfile`
+   itself names) is removed and said — a copy an operator keeps there
+   under another name is left alone;
+3. the plan is read from `/etc/hotserve/Caddyfile` as a run reads it,
+   and said — the apps a run would back up, or that no app declares a
+   backup yet;
+4. the storage key id is asked for, with echo on, and the secret key
+   with echo off — on `/dev/tty`, whatever stdin and stdout are, so
+   that nothing stdout or stderr is sent to holds them; everything
+   setup says goes there too, the password above all (what records the
+   terminal itself — scrollback, `sudo`'s I/O log, `script` — holds
+   what was shown). The error a setup ends on goes to stderr, as every
+   command's does. For `s3:` they are
+   `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, for `b2:`
+   `B2_ACCOUNT_ID` and `B2_ACCOUNT_KEY`, for `rest:`
+   `RESTIC_REST_USERNAME` and `RESTIC_REST_PASSWORD`. A value the file
+   cannot hold (a line break, a control character) is asked for again,
+   up to three times; one the plain form would not carry — whitespace
+   at either end, a leading quote — is written double-quoted, as the
+   manager reads it [measured];
+5. the file is written beside the working one — `repository.env.<id>`,
+   root-only, with a throwaway password — and the repository is
+   **looked for**: `restic cat config` as `hotserve-backup`, under a
+   ten-second clock, said as "looking for a repository at …". With a
+   right key restic says at once whether there is no repository (exit
+   10) or one this password does not open (exit 12) [measured]; a
+   bucket not there yet, a wrong key or a host that does not resolve
+   make it retry, so the look is given up on, said as such — the
+   three look alike there — and init answers instead. A look that
+   failed on its own account — a unit the manager could not set up, one
+   that could not be started — is said as that, before any password is
+   made;
+6. where none was found, a repository password is made — 32 random
+   bytes, base32, 52 characters — and **shown**, once, with what to
+   store beside it (the repository URL and the storage key: with those
+   three `restic -r <url>` reads every backup from any machine;
+   without the password nothing can); the operator types `stored` to
+   go on, and gets one more asking for any other word. Then
+   `restic init --json` runs with that password, under a two-minute
+   clock; after 20 seconds a person waiting is told what for, and what
+   Ctrl-C would do — stop a unit that may have made the repository
+   with the password shown, which is then to be kept (for the look and
+   the opening, which only read, Ctrl-C is safe). This one unit is not recorded for the next run or
+   setup to stop: stopped half way it would leave a repository with a
+   config and no key, which no password opens, where left to its few
+   seconds it makes the repository with the password that was shown —
+   what the next setup asks for. restic answers at once whatever is
+   wrong with the key, the host or the port [measured], and setup then asks for the
+   key id and secret again, up to three times, the one password
+   standing: it has taken effect nowhere until the repository is made
+   with it. When setup ends after the showing, the last line says what
+   became of the password: before `restic init` has been started with
+   it (a refusal at the `stored` prompt, Ctrl-C there, a file that
+   could not be written), "never used: discard it"; once init has been
+   started with it — three storage refusals, Ctrl-C or the clock
+   during init, any failure after — "keep the password shown above:
+   restic init ran with it, and may have made the repository", since a
+   stopped init may have written some or all of one, and the next setup
+   looks first and asks for it if the repository is there; and where
+   init itself answers that the repository exists, it made nothing with
+   the password, and "discard it" is said again. The clock is
+   for a storage that takes the connection and never answers, after
+   which the unit is stopped and the file removed;
+7. a repository that **exists already** — a rebuilt box, a bucket
+   reused — is asked for its own password (echo off), and nothing is
+   made or shown; setup opens it with `restic cat config`, and a wrong
+   password is refused (exit 12) and asked for again, up to three
+   times; a storage that refuses the opening is said in restic's words. Where the look could not tell and init finds the repository
+   there after all ("already initialized", whatever the password), the
+   same follows, and the password just shown is said not to be the
+   one;
+8. once the repository has answered, the record (`status.json`) is
+   put aside as `status.json.aside-<time>`, and why is said, if the
+   file before named another repository, or there was no file before,
+   or this setup made the repository — a repository just made holds
+   none of the record's snapshots, whatever its URL: a run then drills
+   what it backs up into the repository now in use, and `status` does
+   not say "proven" of a snapshot this repository does not hold. The
+   same repository, opened, keeps its record;
+9. then the file takes the working one's place — whole, root `0600`.
+   The record goes aside first, and comes back if the file cannot take
+   its place, and each step is on the disk before the next, so that
+   nothing that ends setup between the two leaves a credential file
+   with another repository's record beside it. The last line names the
+   repository, whether it was made or opened, and its id — and, when
+   `/etc/hotserve/backup.env` from before this version is still there,
+   that it is, and to remove it: that file is where an administrator's
+   sudoers reaches.
+
+Whatever ends setup before the last step — Ctrl-C ("interrupted:
+nothing has been written"), a refusal, a kill — leaves the working file
+byte for byte as it was, or absent as it was, and no copy of a
+credential beside it; a `kill -9` at any point after the storage key
+was typed leaves the file under its temporary name, root-only, holding
+that key and — after `restic init` began — the password, which the
+next setup removes first. A password that has
+taken effect anywhere has been shown, and confirmed stored, before it
+did: a setup killed after `restic init` made the repository is followed
+by one that says the repository exists and asks for the password that
+was shown.
+
+`/etc/hotserve-backup/repository.env` is not under `/etc/hotserve`:
+the example sudoers lets an administrator create and edit any
+`/etc/hotserve/*.env`, and the repository credential is root's alone.
+A `/etc/hotserve/backup.env` from an earlier version of this branch is
+not read; a run and `status` say so, and what to do: run setup with
+its `RESTIC_REPOSITORY`, type its `RESTIC_PASSWORD` when asked, then
+remove it. With no credential file at the new path, setup cannot tie
+the record to the repository and puts it aside; the next run drills
+what it backs up.
+
+Nothing on this branch runs a backup on a schedule: until the
+package's timer exists, run `hotserve-backup run` hourly from a timer
+or cron entry of your own, or `status` goes unhealthy after 3 hours.
+
+### By hand
+
+For `gs:` and `swift:`, or a provisioning tool, the file setup would
+have written — one `KEY=value` a line, a backslash doubled, a value
+with whitespace at an end or a leading quote in double quotes with `\`
+and `"` escaped, as systemd reads it:
 
 ```
-# /etc/hotserve/backup.env — root:root 0600
+# /etc/hotserve-backup/repository.env — root:root 0600, in a root 0755 directory
 RESTIC_REPOSITORY=s3:https://…/bucket
 RESTIC_PASSWORD=…
 AWS_ACCESS_KEY_ID=…
 AWS_SECRET_ACCESS_KEY=…
 ```
 
-and an account for restic: `useradd --system --no-create-home
---home-dir /nonexistent --shell /usr/sbin/nologin hotserve-backup`.
-Initialise the repository once with `restic init`, using a cache
-directory of your own (`RESTIC_CACHE_DIR`) so that nothing of root's is
-left under `/var/cache/hotserve-backup`.
+plus the account, as setup makes it (above), and `restic init` the way
+a run's units get the file: read by the manager, as root, and handed
+to restic running as the account — never sourced by a shell, whose
+`$`, backticks and `;` are not systemd's, and never with a secret on a
+command line — with the cache where the units keep it, owned by the
+account:
+
+```sh
+sudo systemd-run --quiet --pipe --wait --collect \
+  -p User=hotserve-backup -p EnvironmentFile=/etc/hotserve-backup/repository.env \
+  -p CacheDirectory=hotserve-backup -E RESTIC_CACHE_DIR=/var/cache/hotserve-backup -E HOME=/nonexistent \
+  /usr/bin/restic init
+```
 
 Pointing the box at **another repository** this way leaves
-`/var/lib/hotserve-backup/status.json` speaking of the old one: the
-next run backs up into the new repository and says so, but a restore
-proven there stays "proven" — of a snapshot the new repository does not
-hold, which `status` says, and does not fail on — until the next
-drill. Remove `status.json` with the change: the next run then drills
-what it backs up into the repository it is now using (up to 1 GiB
-restored; above that, `hotserve-backup drill` does).
+`status.json` speaking of the old one: remove it with the change, as
+setup does.
 
 ## Development
 
@@ -623,7 +795,13 @@ restored; above that, `hotserve-backup drill` does).
   a restore over a live database under a writer, and over one with
   damaged pages; a runner made with the context that is then cancelled;
   what the manager lists as running, and since when.
+- and what the manager makes of each shape of line in the credential
+  file, held against what `envfile` reads; what `restic init` and
+  `cat config` say of a repository that exists, and with a wrong
+  password.
 - `make e2e-backup` — a box with systemd, restic and sqlite3, and an S3
-  server (`rclone serve s3`): the backup suite, the status suite
-  (`status` and `validate`) and the restore suite, mostly failure
-  paths.
+  server (`rclone serve s3`): the setup suite (at a real terminal,
+  `script(1)`'s), the backup suite, the status suite (`status` and
+  `validate`) and the restore suite, mostly failure paths. The box
+  image does not make the `hotserve-backup` account: the setup suite,
+  which runs first, has `setup` make it.

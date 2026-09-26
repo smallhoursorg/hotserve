@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/smallhoursorg/hotserve/backups/envfile"
 )
 
 // These run as root against a real system manager (make
@@ -47,7 +49,7 @@ func ensureUser(t *testing.T, name string) {
 	if exec.Command("id", name).Run() == nil {
 		return
 	}
-	if out, err := exec.Command("useradd", "--system", "--no-create-home", "--shell", "/usr/sbin/nologin", name).CombinedOutput(); err != nil {
+	if out, err := exec.Command("useradd", "--system", "--no-create-home", "--home-dir", "/nonexistent", "--shell", "/usr/sbin/nologin", name).CombinedOutput(); err != nil {
 		t.Fatalf("useradd %s: %v: %s", name, err, out)
 	}
 }
@@ -429,4 +431,170 @@ func TestIntegrationBindsToEndsTheUnitWhenItsOrchestratorIsKilled(t *testing.T) 
 	if out, _ := exec.Command("pgrep", "-f", "^/bin/sleep 602$").Output(); len(out) != 0 {
 		t.Fatalf("the process is still running: %s", out)
 	}
+}
+
+// The credential file is written by setup and read by the manager, and
+// the two have to agree on what a line means: envfile.Parse is what
+// status lints with and setup reads the old file with. This is the
+// measurement Parse is held to [M41]: one file with every shape a hand
+// might write, a unit that prints its environment, and Parse of the
+// same bytes.
+func TestIntegrationSystemdReadsAnEnvFileAsParseDoes(t *testing.T) {
+	r := runner(t)
+	stdout := outFile(t)
+	raw := strings.Join([]string{
+		`PLAIN=value`,
+		` SPACEKEY = spaced `,
+		`DQ="double quoted"`,
+		`SQ='single quoted'`,
+		`DUP=first`,
+		`DUP=second`,
+		`# COMMENT=no`,
+		`; SEMI=no`,
+		`HASHIN=a#b`,
+		`TRAIL=trail   `,
+		`BS=a\b\\c`,
+		`DQBS="a\b\\c\"d"`,
+		`DOLLAR=$HOME x`,
+		`CONT=one \`,
+		`two`,
+		`EMPTY=`,
+		`NOEQ`,
+		`MIDQ=ab"cd"ef`,
+		`TAB=a	b`,
+		`SEMIIN=a;b`,
+		`PCT=100%s`,
+		`UTF=héllo`,
+		`MULTI="one`,
+		`two"`,
+		`QLEAD="\"quoted\""`,
+		`QPAD="  both  "`,
+		`QTAB="	tab"`,
+		`QSQ="it's"`,
+		`SQLEAD='"q'`,
+		`AFTERQ="a" b`,
+		`AFTERC="v" # prod`,
+		`DQDOLLAR="a\$b"`,
+		"DQBT=\"a\\`b\"",
+		`SQESC='it\'s'`,
+		`ESCSP=trail\ `,
+		`export EXP=1`,
+		`ODD=abc\\\`,
+		`JOINED=yes`,
+		`EVEN=abc\\`,
+		`NOTJOINED=yes`,
+		`SQCONT='a\`,
+		`b'`,
+		`DQCONT="a\`,
+		`b"`,
+		`LEADQ="abc`,
+		`SWALLOWED=yes`,
+		``,
+	}, "\n")
+	file := filepath.Join(filepath.Dir(stdout), "test.env")
+	must(t, os.WriteFile(file, []byte(raw), 0o600))
+	unit := envOfUnit(t, r, file, stdout)
+	parsed, findings := envfile.Parse([]byte(raw))
+	for k, v := range parsed {
+		if u, ok := unit[k]; !ok || u != v {
+			t.Errorf("%s: Parse reads %q, the manager gives the unit %q (present: %v)", k, v, u, ok)
+		}
+	}
+	for _, k := range []string{"COMMENT", "SEMI", "NOEQ", "two", "SWALLOWED", "EXP"} {
+		if _, ok := unit[k]; ok {
+			t.Errorf("the manager gave the unit %s, which Parse skips", k)
+		}
+	}
+	// Every key the file sets that the manager passes on, Parse reads.
+	for k := range unit {
+		if _, ok := parsed[k]; !ok && strings.Contains(raw, "\n"+k+"=") {
+			t.Errorf("the manager gave the unit %s=%q, which Parse did not read", k, unit[k])
+		}
+	}
+	if len(findings) != 5 {
+		t.Errorf("findings: %q", findings)
+	}
+	// A byte that is not UTF-8: does the manager skip the line, or
+	// refuse the file? Measured here, and mirrored by Lint.
+	must(t, os.WriteFile(file, []byte("OK=1\nBAD=caf\xe9\nAFTER=2\n"), 0o600))
+	out, err := r.Run(context.Background(), Spec{Name: name(t), Argv: []string{"/usr/bin/env", "-0"}, User: testUser, EnvironmentFile: file, StdoutFile: stdout})
+	if err != nil || out.Result != "resources" {
+		t.Fatalf("a file with a non-UTF-8 byte: outcome %+v, err %v; want the unit refused for want of its environment (result resources)", out, err)
+	}
+	if bad, findings := envfile.Parse([]byte("OK=1\nBAD=caf\xe9\nAFTER=2\n")); len(bad) != 0 || len(findings) != 1 || !strings.Contains(findings[0], "refuses the whole file") {
+		t.Fatalf("Parse of a file the manager refuses: %v %q", bad, findings)
+	}
+	// And the other way: what the writer writes of awkward values, the
+	// manager reads back as they were.
+	pairs := []envfile.Pair{{Key: "PLAIN", Value: "s3:https://h/b"}, {Key: "PW", Value: `p#a$s;s"w'o=rd\x`}, {Key: "QLEAD", Value: `"quoted"`},
+		{Key: "SQLEAD", Value: `'q`}, {Key: "QPAD", Value: "  both  "}, {Key: "QTRAIL", Value: `trail\ `}, {Key: "UTF", Value: "héllo"}}
+	written, err := envfile.Format(pairs)
+	must(t, err)
+	must(t, os.WriteFile(file, written, 0o600))
+	unit = envOfUnit(t, r, file, stdout)
+	for _, p := range pairs {
+		if unit[p.Key] != p.Value {
+			t.Errorf("%s: Format wrote %q as %q, the manager gives the unit %q", p.Key, p.Value, written, unit[p.Key])
+		}
+	}
+}
+
+// envOfUnit is the environment a unit is given from file.
+func envOfUnit(t *testing.T, r *Runner, file, stdout string) map[string]string {
+	t.Helper()
+	out, err := r.Run(context.Background(), Spec{
+		Name: name(t), Argv: []string{"/usr/bin/env", "-0"}, User: testUser,
+		EnvironmentFile: file, StdoutFile: stdout,
+	})
+	if err != nil || !out.OK() {
+		t.Fatalf("%+v, %v", out, err)
+	}
+	got, _ := os.ReadFile(stdout)
+	unit := map[string]string{}
+	for _, kv := range strings.Split(string(got), "\x00") {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			unit[k] = v
+		}
+	}
+	return unit
+}
+
+// Wait is what a lock holder does about a restic init an earlier setup
+// left to finish: it returns once the unit has ended on its own, reaps
+// it, and takes a unit that is not there as ended.
+func TestIntegrationWaitReturnsOnceTheUnitEndsOnItsOwn(t *testing.T) {
+	r := runner(t)
+	done := make(chan Outcome, 1)
+	go func() {
+		out, _ := r.Run(context.Background(), Spec{Name: name(t), Argv: []string{"/bin/sleep", "2"}, User: testUser})
+		done <- out
+	}()
+	for activeState(name(t)) != "activating" {
+		time.Sleep(50 * time.Millisecond)
+	}
+	start := time.Now()
+	if err := r.Wait(context.Background(), name(t)); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if took := time.Since(start); took < time.Second || took > 10*time.Second {
+		t.Fatalf("Wait returned after %s of a 2 s unit", took)
+	}
+	if out := <-done; !out.OK() {
+		t.Fatalf("the unit Wait watched: %+v", out)
+	}
+	if err := r.Wait(context.Background(), "hotserve_backup_test_never_started.service"); err != nil {
+		t.Fatalf("Wait on a unit that is not there: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	go func() {
+		_, _ = r.Run(context.Background(), Spec{Name: name(t), Argv: []string{"/bin/sleep", "3"}, User: testUser})
+	}()
+	for activeState(name(t)) != "activating" {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err := r.Wait(ctx, name(t)); err == nil || !strings.Contains(err.Error(), "still activating") {
+		t.Fatalf("Wait past its context: %v", err)
+	}
+	must(t, r.Stop(name(t)))
 }

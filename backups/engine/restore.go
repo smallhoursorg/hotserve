@@ -151,7 +151,7 @@ func Restore(ctx context.Context, cfg Config, r Runner, o RestoreOptions) (rep *
 			return nil, fmt.Errorf("--to %s exists: a restore to a directory makes the directory, so that nothing is overwritten", o.To)
 		}
 	}
-	x, end, err := begin(cfg, r)
+	x, end, err := begin(ctx, cfg, r)
 	if x == nil {
 		return nil, err
 	}
@@ -1071,7 +1071,7 @@ func (x *run) firstDrill(ctx context.Context, app string, rec *record.App) (repo
 // the newest can be fetched, handed over and read whole, and writes what
 // it found into the record beside what the last backup run found.
 func Drill(ctx context.Context, cfg Config, r Runner) (*record.Status, error) {
-	x, end, err := begin(cfg, r)
+	x, end, err := begin(ctx, cfg, r)
 	if x == nil {
 		return nil, err
 	}

@@ -179,3 +179,60 @@ func TestIntegrationResticSnapshotsLeavesOutWhatItCannotLoadAndExitsZero(t *test
 		t.Errorf("stderr: %q", said)
 	}
 }
+
+// Setup leans on what restic 0.18 says of a repository [M39, M40]:
+// `init --json` prints one line, message_type initialized, with the
+// repository's id; asked to init a repository that exists it exits 1
+// and says so — on stderr, as an exit_error line; "config file already
+// exists" here, "already initialized" against the S3 fixture —
+// whatever password it was given; `cat config --no-lock` prints the
+// config with that id for the right password, exits 12 for a wrong
+// one and 10 where there is no repository. A wrong password is not
+// something init can tell: the probe is what tells it.
+func TestIntegrationResticInitSaysWhenTheRepositoryExists(t *testing.T) {
+	const restic = "/usr/bin/restic"
+	if _, err := os.Stat(restic); err != nil {
+		t.Fatalf("%s is not installed in the integration image: %v", restic, err)
+	}
+	base := t.TempDir()
+	run := func(password, repo string, args ...string) (stdout, stderr string, exit int) {
+		t.Helper()
+		cmd := exec.Command(restic, args...)
+		cmd.Env = append(os.Environ(), "RESTIC_PASSWORD="+password, "RESTIC_REPOSITORY="+filepath.Join(base, repo), "RESTIC_CACHE_DIR="+filepath.Join(base, "cache"))
+		var out, errOut strings.Builder
+		cmd.Stdout, cmd.Stderr = &out, &errOut
+		err := cmd.Run()
+		var exitErr *exec.ExitError
+		if err != nil && !errors.As(err, &exitErr) {
+			t.Fatalf("restic %v: %v", args, err)
+		}
+		return out.String(), errOut.String(), cmd.ProcessState.ExitCode()
+	}
+	out, errOut, exit := run("pw", "repo", "init", "--json")
+	if exit != 0 || errOut != "" {
+		t.Fatalf("init: exit %d, stderr %q", exit, errOut)
+	}
+	must(t, os.WriteFile(filepath.Join(base, "init.out"), []byte(out), 0o600))
+	id := initializedID(filepath.Join(base, "init.out"))
+	if id == "" || strings.Count(strings.TrimSpace(out), "\n") != 0 {
+		t.Fatalf("init --json printed %q; initializedID read %q", out, id)
+	}
+	for _, password := range []string{"pw", "another"} {
+		_, errOut, exit = run(password, "repo", "init", "--json")
+		must(t, os.WriteFile(filepath.Join(base, "init.err"), []byte(errOut), 0o600))
+		if msg := resticMessage(filepath.Join(base, "init.err")); exit != 1 || !repositoryExists(msg) {
+			t.Fatalf("init on an existing repository with password %q: exit %d, message %q", password, exit, msg)
+		}
+	}
+	out, _, exit = run("pw", "repo", "cat", "config", "--no-lock")
+	must(t, os.WriteFile(filepath.Join(base, "probe.out"), []byte(out), 0o600))
+	if exit != 0 || configID(filepath.Join(base, "probe.out")) != id {
+		t.Fatalf("cat config: exit %d, %q; want id %s", exit, out, id)
+	}
+	if _, _, exit = run("wrong", "repo", "cat", "config", "--no-lock"); exit != 12 {
+		t.Fatalf("cat config with a wrong password: exit %d, want 12", exit)
+	}
+	if _, _, exit = run("pw", "nothing-here", "cat", "config", "--no-lock"); exit != 10 {
+		t.Fatalf("cat config where there is no repository: exit %d, want 10", exit)
+	}
+}

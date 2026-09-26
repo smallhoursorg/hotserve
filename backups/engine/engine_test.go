@@ -58,7 +58,23 @@ type box struct {
 	size         string         // what `restic stats --mode restore-size` prints
 	free         uint64         // what is free where a fetch lands
 	oneDisk      bool           // the fetch and the install land on one filesystem
+	// setup's own: what `restic init` and `restic cat config` print,
+	// a role whose unit never ends, the manager's version, which
+	// programs are installed and whether the account is
+	initOut, initErr, probeOut string
+	openErr                    string // what the open unit says on stderr
+	planErr                    string // what the plan unit says on stderr
+	hang                       string
+	version                    int
+	haveProgram                func(string) bool
+	account                    bool
+	accountsMade               int
+	owned, synced              []string // what setup asked to be root's, and put on the disk
+	waited                     []string // units a lock holder waited for
+	waitErr                    error
 }
+
+func (b *box) ManagerVersion(context.Context) (int, error) { return b.version, nil }
 
 var roleRe = regexp.MustCompile(`^hotserve_backup_([a-z]+)[0-9]*_`)
 
@@ -129,7 +145,17 @@ func must(t *testing.T, err error) {
 
 func (b *box) Stop(name string) error { b.stopped = append(b.stopped, name); return b.stopErr }
 
-func (b *box) Run(_ context.Context, s unit.Spec) (unit.Outcome, error) {
+// Wait is what a lock holder does about a unit an earlier setup left
+// to finish: recorded, and the unit taken as gone.
+func (b *box) Wait(ctx context.Context, name string) error {
+	b.waited = append(b.waited, name)
+	if ctx.Err() != nil {
+		return fmt.Errorf("%s: still activating: %w", name, ctx.Err())
+	}
+	return b.waitErr
+}
+
+func (b *box) Run(ctx context.Context, s unit.Spec) (unit.Outcome, error) {
 	b.specs = append(b.specs, s)
 	if b.before != nil {
 		b.before(s)
@@ -142,6 +168,17 @@ func (b *box) Run(_ context.Context, s unit.Spec) (unit.Outcome, error) {
 	if err := b.err[role]; err != nil {
 		return unit.Outcome{}, err
 	}
+	if role == b.hang {
+		// As the real runner: the unit is stopped by name once the
+		// context ends, and what could not be confirmed gone wraps the
+		// cause in ErrNotConfirmedGone.
+		<-ctx.Done()
+		b.stopped = append(b.stopped, s.Name)
+		if b.stopErr != nil {
+			return unit.Outcome{}, fmt.Errorf("%w: %s: %w", b.stopErr, s.Name, ctx.Err())
+		}
+		return unit.Outcome{}, ctx.Err()
+	}
 	write := func(body string) {
 		if s.StdoutFile != "" {
 			must(b.t, os.WriteFile(s.StdoutFile, []byte(body), 0o600))
@@ -150,6 +187,9 @@ func (b *box) Run(_ context.Context, s unit.Spec) (unit.Outcome, error) {
 	switch role {
 	case "plan":
 		write(b.plan)
+		if s.StderrFile != "" {
+			must(b.t, os.WriteFile(s.StderrFile, []byte(b.planErr), 0o600))
+		}
 	case "dump":
 		var decl struct {
 			SQLite []string `json:"sqlite"`
@@ -185,6 +225,20 @@ func (b *box) Run(_ context.Context, s unit.Spec) (unit.Outcome, error) {
 	case "unmake":
 		_ = os.Remove(filepath.Join(b.root, "blog", "shared"))
 		_ = os.Remove(filepath.Join(b.root, "blog"))
+	case "init":
+		write(b.initOut)
+		if s.StderrFile != "" {
+			must(b.t, os.WriteFile(s.StderrFile, []byte(b.initErr), 0o600))
+		}
+	case "probe", "open":
+		write(b.probeOut)
+		if s.StderrFile != "" {
+			stderr := ""
+			if role == "open" {
+				stderr = b.openErr
+			}
+			must(b.t, os.WriteFile(s.StderrFile, []byte(stderr), 0o600))
+		}
 	case "verify":
 		// Everything after "--" and the snapshot id is a parent to list.
 		var out []string
