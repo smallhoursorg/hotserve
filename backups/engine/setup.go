@@ -150,11 +150,28 @@ func backendOf(repo, envFile string) ([]credential, error) {
 // credential file names, or nil: what status says of a hand-edited
 // file. A backend setup does not ask for, the run still uses.
 func RepositoryUsable(repo, envFile string) error {
+	if err := repositoryValue(repo); err != nil {
+		return err
+	}
 	_, err := backendOf(repo, envFile)
 	if errors.Is(err, errByHand) {
 		return nil
 	}
 	return err
+}
+
+// repositoryValue is what setup refuses of the URL as a value, before
+// it looks at it as a URL: what a prompt would refuse of any value,
+// and whitespace at an end, which the manager trims of a plain value
+// and keeps of a quoted one.
+func repositoryValue(repo string) error {
+	if strings.TrimSpace(repo) != repo {
+		return errors.New("the repository URL has whitespace at an end")
+	}
+	if err := envfile.Refuse(repo); err != nil {
+		return fmt.Errorf("the repository URL cannot go in the file: %w", err)
+	}
+	return nil
 }
 
 // OldEnvFileNote is what a run and status add when the credential file
@@ -181,11 +198,8 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 	}
 	// The one value not typed at a prompt: refused here for what a
 	// prompt would refuse, before anyone is asked for anything.
-	if strings.TrimSpace(o.Repository) != o.Repository {
-		return nil, errors.New("the repository URL has whitespace at an end")
-	}
-	if err := envfile.Refuse(o.Repository); err != nil {
-		return nil, fmt.Errorf("the repository URL cannot go in the file: %w", err)
+	if err := repositoryValue(o.Repository); err != nil {
+		return nil, err
 	}
 	for _, p := range []struct{ name, path, fix string }{
 		{"restic", cfg.Restic, ": apt install restic"},
@@ -361,7 +375,10 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 		}
 		if o1.OK() {
 			if rep.RepositoryID = initializedID(filepath.Join(x.dir, "init.out")); rep.RepositoryID == "" {
-				return nil, x.setupErr(errors.New("restic exited 0 but said nothing of a repository"), password)
+				// Exit 0 is a repository made, with the password that was
+				// shown: whatever restic did not say, that password is now
+				// the repository's, and is never said to be dead.
+				return nil, errors.New("restic made the repository and exited 0 but said nothing of it; the password shown above is the repository's: keep it, and run setup again to open it")
 			}
 			rep.New = true
 			break
@@ -425,27 +442,42 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 			return nil, x.setupErr(errors.New(detail), password)
 		}
 	}
-	if err := envfile.Commit(tmp, cfg.EnvFile); err != nil {
-		return nil, err
-	}
 	// The record speaks of the repository it was written against. With
-	// another one now in use — or none known — it is put aside, so
-	// that the next run drills what it backs up into the repository it
-	// is now using; after the file is in place, so that a file that
-	// could not be put in place keeps the record it goes with.
+	// another one now in use — or none known, or one this setup made —
+	// it is put aside, so that the next run drills what it backs up
+	// into the repository it is now using. Aside first, then the file:
+	// whatever ends setup between the two leaves no credential file with
+	// a record of another repository beside it (a record aside with the
+	// old file in place is a fresh start, which the next run mends); a
+	// file that could not be put in place gets its record back.
 	statusPath := filepath.Join(cfg.StateDir, "status.json")
-	if _, err := os.Lstat(statusPath); err == nil && (!hadOld || oldRepository != o.Repository || rep.New) {
-		why := "the previous credential file named another repository"
+	why := ""
+	if _, err := os.Lstat(statusPath); err == nil {
 		switch {
 		case rep.New:
 			why = "the repository was made by this setup, so it holds none of the record's snapshots"
 		case !hadOld:
 			why = "no credential file was there to tie it to this repository"
+		case oldRepository != o.Repository:
+			why = "the previous credential file named another repository"
 		}
+	}
+	if why != "" {
 		rep.Aside = statusPath + ".aside-" + time.Now().UTC().Format("20060102T150405Z")
 		if err := os.Rename(statusPath, rep.Aside); err != nil {
 			return nil, err
 		}
+	}
+	if err := commit(tmp, cfg.EnvFile); err != nil {
+		if why != "" {
+			if back := os.Rename(rep.Aside, statusPath); back != nil {
+				return nil, fmt.Errorf("%w; and the record, put aside first, could not be put back from %s: %w", err, rep.Aside, back)
+			}
+			rep.Aside = ""
+		}
+		return nil, err
+	}
+	if why != "" {
 		term.Say(fmt.Sprintf("the record was put aside (%s): %s; the next run drills what it backs up", why, rep.Aside))
 	}
 	kind := "existing"
@@ -542,6 +574,10 @@ func lookAnswered(o unit.Outcome) bool {
 	}
 	return o.Result == "exit-code" && (o.ExitStatus == 1 || o.ExitStatus == 10 || o.ExitStatus == 12)
 }
+
+// commit puts the file in place: envfile.Commit, a variable so that a
+// test can look at the moment it happens.
+var commit = envfile.Commit
 
 // errDidNotAnswer is a unit stopped at its clock.
 var errDidNotAnswer = errors.New("the repository did not answer")

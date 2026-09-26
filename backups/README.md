@@ -463,9 +463,10 @@ manager reads (a key with whitespace around it, a key set twice — the
 last wins — a line that is not `KEY=value` or whose name the manager
 does not take, a quote never closed, which takes the rest of the file,
 a byte that is not UTF-8, which makes the manager refuse the whole
-file), where `RESTIC_REPOSITORY`
-or `RESTIC_PASSWORD` is not set, and where the repository is one the
-box cannot use; its exit status does not change for it.
+file), where `RESTIC_REPOSITORY` or `RESTIC_PASSWORD` is not set or
+set to nothing, where the repository is one the box cannot use or a
+value setup would refuse, and where the file is there and cannot be
+read at all; its exit status does not change for it.
 
 ## Before a Caddyfile goes live
 
@@ -687,15 +688,20 @@ What can be known to fail is refused before anything is asked for
    same follows, and the password just shown is said not to be the
    one;
 8. once the repository has answered, the file takes the working one's
-   place — whole, root `0600`;
+   place — whole, root `0600` — the record having gone aside first
+   where it must (next);
 9. then the record (`status.json`) is put aside as
    `status.json.aside-<time>`, and why is said, if the file before
    named another repository, or there was no file before, or this
    setup made the repository — a repository just made holds none of
    the record's snapshots, whatever its URL: a run then drills what it
    backs up into the repository now in use, and `status` does not say
-   "proven" of a snapshot this repository does not hold. The same
-   repository, opened, keeps its record. The last line names the
+   "proven" of a snapshot this repository does not hold. The record
+   goes aside just before the file takes the working one's place, and
+   comes back if the file cannot, so that nothing that ends setup
+   between the two leaves a credential file with another repository's
+   record beside it. The same repository, opened, keeps its record.
+   The last line names the
    repository, whether it was made or opened, and its id — and, when
    `/etc/hotserve/backup.env` from before this version is still there,
    that it is, and to remove it: that file is where an administrator's
@@ -742,13 +748,18 @@ AWS_ACCESS_KEY_ID=…
 AWS_SECRET_ACCESS_KEY=…
 ```
 
-plus the account, as setup makes it (above), and `restic init` from
-the file — never with a secret on a command line — with a cache
-directory of your own, so that nothing of root's is left under
-`/var/cache/hotserve-backup`:
+plus the account, as setup makes it (above), and `restic init` the way
+a run's units get the file: read by the manager, as root, and handed
+to restic running as the account — never sourced by a shell, whose
+`$`, backticks and `;` are not systemd's, and never with a secret on a
+command line — with the cache where the units keep it, owned by the
+account:
 
 ```sh
-sudo sh -c 'set -a; . /etc/hotserve-backup/repository.env; set +a; RESTIC_CACHE_DIR=$(mktemp -d) restic init'
+sudo systemd-run --quiet --pipe --wait --collect \
+  -p User=hotserve-backup -p EnvironmentFile=/etc/hotserve-backup/repository.env \
+  -p CacheDirectory=hotserve-backup -E RESTIC_CACHE_DIR=/var/cache/hotserve-backup -E HOME=/nonexistent \
+  /usr/bin/restic init
 ```
 
 Pointing the box at **another repository** this way leaves

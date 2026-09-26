@@ -50,11 +50,16 @@ func Parse(raw []byte) (Values, []string) {
 	for i := 0; i < len(lines); i++ {
 		n := i + 1
 		line := lines[i]
-		// A trailing backslash continues the line on the next — one that
-		// is not itself escaped, so an odd run of them [measured].
-		for oddTrailingBackslashes(line) && i+1 < len(lines) {
-			i++
-			line = strings.TrimSuffix(line, `\`) + lines[i]
+		// Outside quotes a trailing backslash continues the line on the
+		// next — one that is not itself escaped, so an odd run of them
+		// [measured]. Inside quotes the line ends where the quote does
+		// (below): in double quotes a backslash-newline is dropped, in
+		// single quotes it is kept as it is [measured].
+		if _, value, ok := strings.Cut(line, "="); !ok || !opensQuote(value) {
+			for oddTrailingBackslashes(line) && i+1 < len(lines) {
+				i++
+				line = strings.TrimSuffix(line, `\`) + lines[i]
+			}
 		}
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || trimmed[0] == '#' || trimmed[0] == ';' {
@@ -94,6 +99,13 @@ func Parse(raw []byte) (Values, []string) {
 		v[k] = readValue(value)
 	}
 	return v, findings
+}
+
+// opensQuote says whether a value, its leading whitespace aside, begins
+// with a quote.
+func opensQuote(value string) bool {
+	v := strings.TrimLeftFunc(value, unicode.IsSpace)
+	return v != "" && (v[0] == '"' || v[0] == '\'')
 }
 
 // oddTrailingBackslashes says whether the line ends in an unescaped
@@ -146,8 +158,14 @@ func readValue(s string) string {
 			// Up to the closing quote, or the end.
 			j := i + 1
 			for ; j < len(s) && s[j] != c; j++ {
-				if c == '"' && s[j] == '\\' && j+1 < len(s) && strings.IndexByte("\\\"$`", s[j+1]) >= 0 {
-					j++
+				if c == '"' && s[j] == '\\' && j+1 < len(s) {
+					if s[j+1] == '\n' {
+						j++ // a line joined: the backslash and the newline go
+						continue
+					}
+					if strings.IndexByte("\\\"$`", s[j+1]) >= 0 {
+						j++
+					}
 				}
 				out.WriteByte(s[j])
 			}
@@ -296,8 +314,10 @@ func Commit(from, to string) error {
 func Lint(v Values, findings []string) []string {
 	out := append([]string(nil), findings...)
 	for _, k := range []string{"RESTIC_REPOSITORY", "RESTIC_PASSWORD"} {
-		if _, ok := v[k]; !ok {
+		if val, ok := v[k]; !ok {
 			out = append(out, k+" is not set: no unit that needs the repository can run")
+		} else if val == "" {
+			out = append(out, k+" is set to nothing: no unit that needs the repository can run")
 		}
 	}
 	return out

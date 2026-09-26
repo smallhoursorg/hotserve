@@ -319,18 +319,33 @@ func TestARepositoryTheBoxCannotUseIsRefusedBeforeAnyPrompt(t *testing.T) {
 }
 
 // What setup does not ask for, the run still uses: status must not
-// warn of it.
+// warn of it. What setup refuses of the value itself — whitespace at an
+// end, a control character — status warns of too.
 func TestABackendWrittenByHandIsUsable(t *testing.T) {
 	for _, repo := range []string{"gs:bucket:path", "swift:container:/path", "s3:http://h/b", "b2:b:p", "rest:https://h/"} {
 		if err := RepositoryUsable(repo, "/etc/x"); err != nil {
 			t.Errorf("%s: %v", repo, err)
 		}
 	}
-	for _, repo := range []string{"sftp:h:/p", "local:/x", "/x", "azure:c:p", "rclone:r:b", "s3:http://u:p@h/b"} {
+	for _, repo := range []string{"sftp:h:/p", "local:/x", "/x", "azure:c:p", "rclone:r:b", "s3:http://u:p@h/b", "s3:u:p@h/b", "s3:http://h/b ", " s3:http://h/b", "s3:http://h/b\x01", ""} {
 		if err := RepositoryUsable(repo, "/etc/x"); err == nil {
-			t.Errorf("%s: usable", repo)
+			t.Errorf("%q: usable", repo)
 		}
 	}
+}
+
+// restic init that exited 0 has made the repository with the password
+// that was shown: whatever else went wrong after, that password is the
+// repository's, and is never said to be dead.
+func TestAPasswordInitUsedIsNeverSaidDead(t *testing.T) {
+	b, m := setupBox(t)
+	b.initOut = "not json at all\n"
+	_, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
+	if err == nil || strings.Contains(err.Error(), "discard") || !strings.Contains(err.Error(), "restic made the repository and exited 0 but said nothing of it; the password shown above is the repository's: keep it") {
+		t.Fatalf("err = %v", err)
+	}
+	m.asked = nil
+	nothingWritten(t, b, m)
 }
 
 func TestEachBackendIsAskedForItsOwnVariables(t *testing.T) {
@@ -789,7 +804,7 @@ func TestAMistakeLeavesAWorkingSetupAsItWas(t *testing.T) {
 			b.probeOut, b.openErr = "", "Fatal: unable to open repository: AccessDenied: keys/ is not yours to read\n"
 			m.answers = []string{"AKIDX", "the-secret", "pw"}
 		}, "restic could not open the repository (exit 1): Fatal: unable to open repository: AccessDenied: keys/ is not yours to read"},
-		{"init exits 0 and names no repository", func(b *box, m *term) { b.initOut = "" }, "restic exited 0 but said nothing of a repository"},
+		{"init exits 0 and names no repository", func(b *box, m *term) { b.initOut = "" }, "restic made the repository and exited 0 but said nothing of it; the password shown above is the repository's: keep it"},
 		{"init ended by a signal", func(b *box, m *term) {
 			b.outcome["init"] = unit.Outcome{Result: "signal"}
 		}, "restic was ended by signal"},
@@ -947,6 +962,33 @@ func TestARecordIsPutAsideOnlyOnceTheFileIsInPlace(t *testing.T) {
 	must(t, err)
 	if asides, _ := filepath.Glob(filepath.Join(b.cfg.StateDir, "status.json.aside-*")); len(st.Apps) != 1 || len(asides) != 0 {
 		t.Fatalf("the record was put aside: %v %v", st.Apps, asides)
+	}
+}
+
+// The record is put aside before the file takes its place, and put
+// back if the file cannot: whatever ends setup between the two leaves
+// no credential file with a record of another repository beside it.
+func TestTheRecordIsAsideBeforeTheFileIsInPlace(t *testing.T) {
+	b, m := setupBox(t)
+	must(t, os.MkdirAll(b.cfg.StateDir, 0o755))
+	statusPath := filepath.Join(b.cfg.StateDir, "status.json")
+	must(t, record.Write(statusPath, &record.Status{Apps: map[string]*record.App{"blog": {Class: record.OK}}}))
+	var recordAtCommit string
+	oldCommit := commit
+	commit = func(from, to string) error {
+		if _, err := os.Lstat(statusPath); err == nil {
+			recordAtCommit = "in place"
+		} else {
+			recordAtCommit = "aside"
+		}
+		return oldCommit(from, to)
+	}
+	t.Cleanup(func() { commit = oldCommit })
+	if _, err := b.setup(t, m, "s3:http://e2e-s3:9000/box"); err != nil {
+		t.Fatal(err)
+	}
+	if recordAtCommit != "aside" {
+		t.Fatalf("at the moment the file took its place the record was %s", recordAtCommit)
 	}
 }
 

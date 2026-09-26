@@ -48,6 +48,10 @@ func TestParseReadsAsTheManagerDoes(t *testing.T) {
 		`JOINED=yes`,
 		`EVEN=abc\\`,
 		`NOTJOINED=yes`,
+		`SQCONT='a\`,
+		`b'`,
+		`DQCONT="a\`,
+		`b"`,
 		`LEADQ="abc`,
 		`SWALLOWED=yes`,
 		``,
@@ -57,7 +61,7 @@ func TestParseReadsAsTheManagerDoes(t *testing.T) {
 		"HASHIN": "a#b", "TRAIL": "trail", "BS": `ab\c`, "DQBS": `a\b\c"d`, "DOLLAR": "$HOME x", "CONT": "one two",
 		"EMPTY": "", "MIDQ": `ab"cd"ef`, "TAB": "a\tb", "SEMIIN": "a;b", "PCT": "100%s", "UTF": "héllo",
 		"MULTI": "one\ntwo", "AFTERQ": "ab", "AFTERC": "v# prod", "DQDOLLAR": "a$b", "DQBT": "a`b", "SQESC": `it\s'`, "ESCSP": "trail ",
-		"ODD": `abc\JOINED=yes`, "EVEN": `abc\`, "NOTJOINED": "yes",
+		"ODD": `abc\JOINED=yes`, "EVEN": `abc\`, "NOTJOINED": "yes", "SQCONT": "a\\\nb", "DQCONT": "ab",
 		"LEADQ": "abc\nSWALLOWED=yes\n",
 	}
 	got, findings := Parse([]byte(raw))
@@ -77,7 +81,7 @@ func TestParseReadsAsTheManagerDoes(t *testing.T) {
 		"line 6: DUP is set again; the manager takes this one",
 		"line 17: not KEY=value; the manager skips it",
 		`line 31: "export EXP" is not a name the manager takes; it skips the line`,
-		"line 36: the quote is never closed; the manager reads everything after it, to the end of the file, as LEADQ's value",
+		"line 40: the quote is never closed; the manager reads everything after it, to the end of the file, as LEADQ's value",
 	} {
 		if !strings.Contains(joined, f) {
 			t.Errorf("findings lack %q:\n%s", f, joined)
@@ -221,6 +225,12 @@ func TestLintNamesWhatARunNeeds(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Errorf("lint lacks %q:\n%s", want, joined)
 		}
+	}
+	// Set to nothing is as good as not set: restic opens nothing with it.
+	got, findings = Parse([]byte("RESTIC_REPOSITORY=\nRESTIC_PASSWORD=\"\"\n"))
+	lines = Lint(got, findings)
+	if len(lines) != 2 || !strings.Contains(lines[0], "RESTIC_REPOSITORY is set to nothing") || !strings.Contains(lines[1], "RESTIC_PASSWORD is set to nothing") {
+		t.Errorf("lint of empty values = %q", lines)
 	}
 }
 

@@ -268,12 +268,17 @@ func showStatus(ctx context.Context) error {
 	// was written, the manager's rules being what they are. Said, and
 	// nothing more: what the run makes of the file the run says.
 	if os.Geteuid() == 0 {
-		if raw, err := os.ReadFile(cfg.EnvFile); err == nil {
+		if raw, err := os.ReadFile(cfg.EnvFile); err != nil {
+			// There (Lstat said so) and not readable — a directory in
+			// its place, a file root itself cannot open: nothing the
+			// manager could give a unit either.
+			fmt.Printf("warning: %s: could not be read: %v\n", cfg.EnvFile, err)
+		} else {
 			v, findings := envfile.Parse(raw)
 			for _, l := range envfile.Lint(v, findings) {
 				fmt.Printf("warning: %s: %s\n", cfg.EnvFile, l)
 			}
-			if repo, ok := v["RESTIC_REPOSITORY"]; ok {
+			if repo, ok := v["RESTIC_REPOSITORY"]; ok && repo != "" {
 				if err := engine.RepositoryUsable(repo, cfg.EnvFile); err != nil {
 					fmt.Printf("warning: %s: RESTIC_REPOSITORY: %v\n", cfg.EnvFile, err)
 				}

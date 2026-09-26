@@ -305,11 +305,30 @@ rc_root=$?
 says "warning: $ENVFILE: line 5: the key is written with whitespace around it; the manager reads it as RESTIC_REPOSITORY" && says "warning: $ENVFILE: line 5: RESTIC_REPOSITORY is set again; the manager takes this one" && pass "status as root says what the manager makes of a hand-edited line" || fail "status as root: $(cat "$OUT")"
 [ "$rc_root" = "$rc_before" ] && pass "and its verdict is unchanged by it" || fail "status exited $rc_root, $rc_before before the edit"
 as_nobody cat "$ENVFILE" >/dev/null 2>&1 && fail "fixture: nobody can read the credential file" || pass "fixture: nobody cannot read the credential file"
+# A file that is there and cannot be read — a directory in its place —
+# is said, not passed over.
+cp /root/env.keep "$ENVFILE"
+mv "$ENVFILE" /root/env.keep2 && mkdir "$ENVFILE"
+hotserve-backup status >"$OUT" 2>&1
+says "warning: $ENVFILE: could not be read: " && pass "status as root says when the file cannot be read" || fail "a directory in the file's place: $(cat "$OUT")"
+rmdir "$ENVFILE" && mv /root/env.keep2 "$ENVFILE"
 as_nobody hotserve-backup status >"$OUT" 2>&1
 [ $? = "$rc_root" ] && ! says "warning: $ENVFILE" && pass "as nobody, the same verdict and no word of the file" || fail "as nobody: $(cat "$OUT")"
 cp /root/env.keep "$ENVFILE"
 
-echo "=== setup 13: setup while a run holds the lock ==="
+echo "=== setup 13: the file written by hand, and the documented init that never sources it ==="
+# The README's by-hand path: the file as setup would write it, and
+# restic init through the manager's own reading of it — never a shell's.
+write_env "$S3/byhand" 'p#a$s;s`w"x'
+sudo_run() { systemd-run --quiet --pipe --wait --collect -p User=hotserve-backup -p EnvironmentFile="$ENVFILE" -p CacheDirectory=hotserve-backup -E RESTIC_CACHE_DIR=/var/cache/hotserve-backup -E HOME=/nonexistent /usr/bin/restic "$@"; }
+# The suite's own rr sources the file through the shell, which is the
+# very thing the scenario is about: the repository is read back the
+# way the manager reads the file.
+sudo_run init >"$OUT" 2>&1 && sudo_run cat config --no-lock >/root/byhand.cfg 2>&1 && grep -q '"id"' /root/byhand.cfg && pass "the documented by-hand init makes a repository the file opens, with a password a shell would have mangled" || fail "by hand: $(cat "$OUT" /root/byhand.cfg 2>&1 | tail -3)"
+[ "$(stat -c %U /var/cache/hotserve-backup)" = hotserve-backup ] && pass "and leaves the cache the account's" || fail "cache owner: $(stat -c %U /var/cache/hotserve-backup)"
+cp /root/env.keep "$ENVFILE"
+
+echo "=== setup 14: setup while a run holds the lock ==="
 hotserve-backup run >/root/first.out 2>&1 &
 first=$!
 if hold_restic "restic backup"; then
