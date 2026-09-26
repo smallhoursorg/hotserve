@@ -396,8 +396,11 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 		}
 		if o1.Result == "exit-code" && o1.ExitStatus == 1 && repositoryExists(message) {
 			// The look could not tell, and init can: the repository has a
-			// password already, and the one just shown is not it.
+			// password already, and the one just shown is not it — init
+			// made nothing with it, so it is unused again, whatever ends
+			// the opening that follows.
 			term.Say("the repository exists; its password is needed (the one shown above is not it)")
+			x.initRan = false
 			exists = true
 			break
 		}
@@ -475,25 +478,39 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 	}
 	// On the disk before the file is — the two live in different
 	// directories, and a power cut must not keep the new file and lose
-	// the aside — and so is a put-back.
+	// the aside — and so is a put-back. Whatever fails, the two files
+	// are left agreeing: the record comes back while the old file is
+	// still in place, and stays aside once the new one is.
+	putBack := func(cause error) error {
+		if back := os.Rename(rep.Aside, statusPath); back != nil {
+			return fmt.Errorf("%w; and the record, put aside first, could not be put back from %s: %w", cause, rep.Aside, back)
+		}
+		rep.Aside = ""
+		if sync := syncDir(cfg.StateDir); sync != nil {
+			return fmt.Errorf("%w; and the record, put back, could not be synced: %w", cause, sync)
+		}
+		return cause
+	}
 	if why != "" {
 		rep.Aside = statusPath + ".aside-" + time.Now().UTC().Format("20060102T150405Z")
 		if err := os.Rename(statusPath, rep.Aside); err != nil {
 			return nil, err
 		}
 		if err := syncDir(cfg.StateDir); err != nil {
-			return nil, err
+			return nil, putBack(err)
 		}
 	}
 	if err := commit(tmp, cfg.EnvFile); err != nil {
 		if why != "" {
-			if back := os.Rename(rep.Aside, statusPath); back != nil {
-				return nil, fmt.Errorf("%w; and the record, put aside first, could not be put back from %s: %w", err, rep.Aside, back)
-			}
-			_ = syncDir(cfg.StateDir)
-			rep.Aside = ""
+			return nil, putBack(err)
 		}
 		return nil, err
+	}
+	if err := syncDir(dir); err != nil {
+		// Renamed, not synced: the file is in place for every reader,
+		// and stays; only what the disk holds after a power cut is in
+		// doubt. Said, and the record left aside with it.
+		return nil, fmt.Errorf("the credential file is in place, and its directory could not be synced to the disk: %w", err)
 	}
 	if why != "" {
 		term.Say(fmt.Sprintf("the record was put aside (%s): %s; the next run drills what it backs up", why, rep.Aside))
@@ -599,9 +616,10 @@ func lookAnswered(o unit.Outcome) bool {
 	return o.Result == "exit-code" && (o.ExitStatus == 1 || o.ExitStatus == 10 || o.ExitStatus == 12)
 }
 
-// commit puts the file in place: envfile.Commit, a variable so that a
-// test can look at the moment it happens.
-var commit = envfile.Commit
+// commit puts the file in place — the rename alone; its directory is
+// synced by the caller, which has to know which of the two failed. A
+// variable so that a test can look at the moment it happens.
+var commit = os.Rename
 
 // ownByRoot makes a directory root's, and syncDir puts a directory's
 // entries on the disk; variables so that the flow can be tested by an

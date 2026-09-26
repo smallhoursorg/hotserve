@@ -602,6 +602,9 @@ func TestWhereTheProbeCannotTellInitAnswers(t *testing.T) {
 				if !strings.Contains(m.saidAll(), "the repository exists; its password is needed (the one shown above is not it)") {
 					t.Fatalf("said:\n%s", m.saidAll())
 				}
+				if !strings.Contains(m.saidAll(), "the password shown above was never used: discard it") {
+					t.Fatalf("the unused password was not said dead on the way out:\n%s", m.saidAll())
+				}
 				pw := shownPassword(t, m)
 				raw, _ := os.ReadFile(b.cfg.EnvFile)
 				if strings.Contains(string(raw), pw) || len(passwordRe.FindAllString(m.saidAll(), -1)) != 1 {
@@ -613,8 +616,20 @@ func TestWhereTheProbeCannotTellInitAnswers(t *testing.T) {
 			}
 		})
 	}
-	// A probe that never answers is given up on, and init goes on.
+	// And a failure after init has said the repository exists is not
+	// told to keep that password: init did not make anything with it.
 	b, m := setupBox(t)
+	b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+	b.outcome["init"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+	b.initOut, b.initErr = "", alreadyInit
+	b.outcome["open"] = unit.Outcome{Result: "exit-code", ExitStatus: 12}
+	m.answers = []string{"AKIDX", "the-secret", "stored", "a", "b", "c"}
+	_, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
+	if err == nil || !strings.HasSuffix(err.Error(), "the password shown above was never used: discard it") || strings.Contains(err.Error(), "keep the password") {
+		t.Fatalf("err = %v", err)
+	}
+	// A probe that never answers is given up on, and init goes on.
+	b, m = setupBox(t)
 	b.hang = "probe"
 	rep, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
 	if err != nil || !rep.New {
@@ -1050,6 +1065,81 @@ func TestTheRecordIsAsideBeforeTheFileIsInPlace(t *testing.T) {
 	must(t, os.MkdirAll(b.cfg.EnvFile, 0o755))
 	if _, err := b.setup(t, m, "s3:http://e2e-s3:9000/box"); err == nil || len(b.synced) != 2 {
 		t.Fatalf("err %v, synced %v", err, b.synced)
+	}
+}
+
+// What each failure between the aside and the commit leaves: the two
+// files agree, whichever step failed.
+func TestAFailureBetweenTheAsideAndTheCommitLeavesTheTwoFilesAgreeing(t *testing.T) {
+	seed := func(t *testing.T) (*box, *term, string) {
+		b, m := setupBox(t)
+		must(t, os.MkdirAll(b.cfg.StateDir, 0o755))
+		statusPath := filepath.Join(b.cfg.StateDir, "status.json")
+		must(t, record.Write(statusPath, &record.Status{Apps: map[string]*record.App{"blog": {Class: record.OK}}}))
+		return b, m, statusPath
+	}
+	recordInPlace := func(t *testing.T, statusPath string) {
+		t.Helper()
+		st, err := record.Read(statusPath)
+		must(t, err)
+		if asides, _ := filepath.Glob(statusPath + ".aside-*"); len(st.Apps) != 1 || len(asides) != 0 {
+			t.Fatalf("the record: %v, asides %v", st.Apps, asides)
+		}
+	}
+	// The sync after the aside fails: the record is put back, and that
+	// put-back is synced, before the error is returned.
+	b, m, statusPath := seed(t)
+	calls := 0
+	syncDir = func(path string) error {
+		calls++
+		b.synced = append(b.synced, path)
+		if calls == 1 {
+			return errors.New("EIO on the state directory")
+		}
+		return nil
+	}
+	_, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
+	if err == nil || !strings.Contains(err.Error(), "EIO on the state directory") {
+		t.Fatalf("err = %v", err)
+	}
+	recordInPlace(t, statusPath)
+	if _, err := os.Lstat(b.cfg.EnvFile); err == nil {
+		t.Fatal("the credential file was put in place after the aside could not be synced")
+	}
+	if len(b.synced) != 2 {
+		t.Fatalf("the put-back was not synced: %v", b.synced)
+	}
+	// The credential's rename fails: the record is put back.
+	b, m, statusPath = seed(t)
+	must(t, os.MkdirAll(b.cfg.EnvFile, 0o755))
+	if _, err := b.setup(t, m, "s3:http://e2e-s3:9000/box"); err == nil {
+		t.Fatal("setup succeeded with a directory in the file's place")
+	}
+	recordInPlace(t, statusPath)
+	// The credential directory's sync fails after the rename: the file
+	// is in place, so the record stays aside — the two agree — and the
+	// error says what state was left.
+	b, m, statusPath = seed(t)
+	calls = 0
+	syncDir = func(path string) error {
+		calls++
+		b.synced = append(b.synced, path)
+		if path == filepath.Dir(b.cfg.EnvFile) {
+			return errors.New("EIO on the credential directory")
+		}
+		return nil
+	}
+	_, err = b.setup(t, m, "s3:http://e2e-s3:9000/box")
+	if err == nil || !strings.Contains(err.Error(), "EIO on the credential directory") || !strings.Contains(err.Error(), "the credential file is in place") {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := os.Lstat(b.cfg.EnvFile); err != nil {
+		t.Fatal("the credential file is not in place")
+	}
+	st, err := record.Read(statusPath)
+	must(t, err)
+	if asides, _ := filepath.Glob(statusPath + ".aside-*"); len(st.Apps) != 0 || len(asides) != 1 {
+		t.Fatalf("the record was put back under a file already in place: %v, asides %v", st.Apps, asides)
 	}
 }
 
