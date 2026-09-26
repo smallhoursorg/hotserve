@@ -91,6 +91,9 @@ type run struct {
 	// left are the apps on the last record that this run's plan no
 	// longer has: said once, by this run, and never kept.
 	left map[string]bool
+	// initRan is setup's: whether restic init has been started with
+	// the password that was shown.
+	initRan bool
 }
 
 // preRestoreTag is on a snapshot a restore made of what it was about to

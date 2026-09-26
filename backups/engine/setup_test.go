@@ -43,7 +43,7 @@ type term struct {
 	at func(prompt string)
 }
 
-func (m *term) Ask(_ context.Context, prompt string, secret bool) (string, error) {
+func (m *term) Ask(ctx context.Context, prompt string, secret bool) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if secret {
@@ -52,6 +52,10 @@ func (m *term) Ask(_ context.Context, prompt string, secret bool) (string, error
 	m.asked = append(m.asked, prompt)
 	if m.at != nil {
 		m.at(prompt)
+	}
+	// An interrupt at the prompt is no answer, as at a real terminal.
+	if ctx.Err() != nil {
+		return "", ctx.Err()
 	}
 	if len(m.answers) == 0 {
 		return "", io.EOF
@@ -93,13 +97,16 @@ func setupBox(t *testing.T) (*box, *term) {
 	b.version = 257
 	b.haveProgram = func(string) bool { return true }
 	b.account = true
-	old, oldExists, oldMake, oldClock, oldProbe, oldNote := haveProgram, accountExists, makeAccount, setupClock, setupProbeClock, setupNote
+	old, oldExists, oldMake, oldClock, oldProbe, oldNote, oldOwn, oldSync := haveProgram, accountExists, makeAccount, setupClock, setupProbeClock, setupNote, ownByRoot, syncDir
 	haveProgram = func(p string) bool { return b.haveProgram(p) }
 	accountExists = func(string) bool { return b.account }
 	makeAccount = func() error { b.accountsMade++; b.account = true; return nil }
+	// chown to root is root's to do; here what is asked for is recorded.
+	ownByRoot = func(path string) error { b.owned = append(b.owned, path); return nil }
+	syncDir = func(path string) error { b.synced = append(b.synced, path); return nil }
 	setupClock, setupProbeClock, setupNote = 200*time.Millisecond, 100*time.Millisecond, 50*time.Millisecond
 	t.Cleanup(func() {
-		haveProgram, accountExists, makeAccount, setupClock, setupProbeClock, setupNote = old, oldExists, oldMake, oldClock, oldProbe, oldNote
+		haveProgram, accountExists, makeAccount, setupClock, setupProbeClock, setupNote, ownByRoot, syncDir = old, oldExists, oldMake, oldClock, oldProbe, oldNote, oldOwn, oldSync
 	})
 	return b, &term{answers: []string{"AKIDX", "the-secret", "stored"}}
 }
@@ -208,6 +215,11 @@ func TestAFreshSetupShowsThePasswordBeforeAnythingIsWritten(t *testing.T) {
 	}
 	if d, err := os.Stat(filepath.Dir(b.cfg.EnvFile)); err != nil || d.Mode().Perm() != 0o755 {
 		t.Fatalf("the directory: %v %v", d, err)
+	}
+	// The directory is made root's whoever made it before, and before
+	// anything is written into it.
+	if len(b.owned) != 1 || b.owned[0] != filepath.Dir(b.cfg.EnvFile) {
+		t.Fatalf("owned by root: %v", b.owned)
 	}
 	if left, _ := filepath.Glob(b.cfg.EnvFile + ".*"); len(left) != 0 {
 		t.Fatalf("left beside it: %v", left)
@@ -668,7 +680,7 @@ func TestAKeyTheStorageRefusesIsAskedForAgain(t *testing.T) {
 	b.initOut, b.initErr = "", wrongKey
 	m.answers = []string{"AKIDX", "wrong", "stored", "AKIDX", "wrong", "AKIDX", "wrong"}
 	_, err = b.setup(t, m, "s3:http://e2e-s3:9000/box")
-	if err == nil || !strings.HasSuffix(err.Error(), "the password shown above was never used: discard it") || !strings.Contains(err.Error(), "signature") {
+	if err == nil || !strings.HasSuffix(err.Error(), "keep the password shown above: restic init ran with it, and may have made the repository; run setup again, which looks first and asks for it if the repository is there") || !strings.Contains(err.Error(), "signature") {
 		t.Fatalf("err = %v", err)
 	}
 	if got, want := b.roles(), "plan probe init probe init probe init"; got != want {
@@ -682,6 +694,20 @@ func TestAKeyTheStorageRefusesIsAskedForAgain(t *testing.T) {
 	b.hang = "init"
 	b.before = func(s unit.Spec) {
 		if strings.Contains(s.Name, "_init_") {
+			cancel()
+		}
+	}
+	_, err = Setup(ctx, b.cfg, b, SetupOptions{Repository: "s3:http://e2e-s3:9000/box", Terminal: m})
+	if !errors.Is(err, context.Canceled) || err.Error() != "interrupted: nothing has been written; keep the password shown above: restic init ran with it, and may have made the repository; run setup again, which looks first and asks for it if the repository is there" {
+		t.Fatalf("err = %v", err)
+	}
+	// Before init has started — at the stored prompt, say — the
+	// password has taken effect nowhere and is said to be dead.
+	b, m = setupBox(t)
+	ctx, cancel = context.WithCancel(context.Background())
+	m.answers = []string{"AKIDX", "the-secret"}
+	m.at = func(prompt string) {
+		if strings.Contains(prompt, "stored") {
 			cancel()
 		}
 	}
@@ -965,9 +991,27 @@ func TestARecordIsPutAsideOnlyOnceTheFileIsInPlace(t *testing.T) {
 	}
 }
 
+// A credential directory that is a link leads the root-only file
+// somewhere else: refused, before anything is written.
+func TestACredentialDirectoryThatIsALinkIsRefused(t *testing.T) {
+	b, m := setupBox(t)
+	dir := filepath.Dir(b.cfg.EnvFile)
+	must(t, os.MkdirAll(filepath.Dir(dir), 0o755))
+	elsewhere := t.TempDir()
+	must(t, os.Symlink(elsewhere, dir))
+	_, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
+	if err == nil || !strings.Contains(err.Error(), dir+" is a link, and the credential file has to be in a directory of root's own") {
+		t.Fatalf("err = %v", err)
+	}
+	if entries, _ := os.ReadDir(elsewhere); len(entries) != 0 || len(m.asked) != 0 {
+		t.Fatalf("written through the link: %v; asked %v", entries, m.asked)
+	}
+}
+
 // The record is put aside before the file takes its place, and put
 // back if the file cannot: whatever ends setup between the two leaves
 // no credential file with a record of another repository beside it.
+// The aside is on the disk before the file is, and so is a put-back.
 func TestTheRecordIsAsideBeforeTheFileIsInPlace(t *testing.T) {
 	b, m := setupBox(t)
 	must(t, os.MkdirAll(b.cfg.StateDir, 0o755))
@@ -984,11 +1028,28 @@ func TestTheRecordIsAsideBeforeTheFileIsInPlace(t *testing.T) {
 		return oldCommit(from, to)
 	}
 	t.Cleanup(func() { commit = oldCommit })
+	var syncedAtCommit int
+	inner := commit
+	commit = func(from, to string) error {
+		syncedAtCommit = len(b.synced)
+		return inner(from, to)
+	}
 	if _, err := b.setup(t, m, "s3:http://e2e-s3:9000/box"); err != nil {
 		t.Fatal(err)
 	}
 	if recordAtCommit != "aside" {
 		t.Fatalf("at the moment the file took its place the record was %s", recordAtCommit)
+	}
+	if syncedAtCommit != 1 || b.synced[0] != b.cfg.StateDir {
+		t.Fatalf("the state directory was not put on the disk before the file was committed: synced %v", b.synced)
+	}
+	// And a put-back is synced too.
+	b, m = setupBox(t)
+	must(t, os.MkdirAll(b.cfg.StateDir, 0o755))
+	must(t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), &record.Status{Apps: map[string]*record.App{"blog": {Class: record.OK}}}))
+	must(t, os.MkdirAll(b.cfg.EnvFile, 0o755))
+	if _, err := b.setup(t, m, "s3:http://e2e-s3:9000/box"); err == nil || len(b.synced) != 2 {
+		t.Fatalf("err %v, synced %v", err, b.synced)
 	}
 }
 

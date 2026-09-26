@@ -241,8 +241,16 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 	dir := filepath.Dir(cfg.EnvFile)
 	// Anyone may see that the file is there and when it was written —
 	// that is how status tells a fresh setup from one that never ran —
-	// and nobody but root what is in it.
+	// and nobody but root what is in it: root's own directory, whoever
+	// made it before (a directory's writer may rename or remove what is
+	// in it), and not a link, which would put the file somewhere else.
+	if st, err := os.Lstat(dir); err == nil && st.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%s is a link, and the credential file has to be in a directory of root's own", dir)
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // holds one root-only file
+		return nil, err
+	}
+	if err := ownByRoot(dir); err != nil {
 		return nil, err
 	}
 	if err := os.Chmod(dir, 0o755); err != nil { //nolint:gosec // said again past the caller's umask
@@ -301,7 +309,9 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 	}
 	// password is the one made for a new repository: shown once, and
 	// kept through a key typed wrong — it has taken effect nowhere
-	// until init has made the repository with it.
+	// until init has made the repository with it. Once init has been
+	// started with it at all (x.initRan), no failure proves it unused,
+	// and it is never said to be.
 	var password string
 	exists := false
 	pairs := []envfile.Pair{{Key: "RESTIC_REPOSITORY", Value: o.Repository}, {Key: "RESTIC_PASSWORD", Value: throwaway}}
@@ -369,6 +379,7 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 		if err := envfile.Write(tmp, pairs); err != nil {
 			return nil, err
 		}
+		x.initRan = true
 		o1, message, err := x.repository(ctx, term, o.Repository, "init", tmp, setupClock, cfg.Restic, "init", "--json")
 		if err != nil {
 			return nil, x.setupErr(err, password)
@@ -462,9 +473,15 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 			why = "the previous credential file named another repository"
 		}
 	}
+	// On the disk before the file is — the two live in different
+	// directories, and a power cut must not keep the new file and lose
+	// the aside — and so is a put-back.
 	if why != "" {
 		rep.Aside = statusPath + ".aside-" + time.Now().UTC().Format("20060102T150405Z")
 		if err := os.Rename(statusPath, rep.Aside); err != nil {
+			return nil, err
+		}
+		if err := syncDir(cfg.StateDir); err != nil {
 			return nil, err
 		}
 	}
@@ -473,6 +490,7 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 			if back := os.Rename(rep.Aside, statusPath); back != nil {
 				return nil, fmt.Errorf("%w; and the record, put aside first, could not be put back from %s: %w", err, rep.Aside, back)
 			}
+			_ = syncDir(cfg.StateDir)
 			rep.Aside = ""
 		}
 		return nil, err
@@ -528,7 +546,13 @@ func (x *run) setupErr(err error, password string) error {
 		return err
 	}
 	dead := ""
-	if password != "" {
+	switch {
+	case password != "" && x.initRan:
+		// Started, init may have written some or all of a repository
+		// before it was stopped or failed: nothing here proves the
+		// password unused, so it is kept.
+		dead = "; keep the password shown above: restic init ran with it, and may have made the repository; run setup again, which looks first and asks for it if the repository is there"
+	case password != "":
 		dead = "; the password shown above was never used: discard it"
 	}
 	if errors.Is(err, context.Canceled) {
@@ -578,6 +602,21 @@ func lookAnswered(o unit.Outcome) bool {
 // commit puts the file in place: envfile.Commit, a variable so that a
 // test can look at the moment it happens.
 var commit = envfile.Commit
+
+// ownByRoot makes a directory root's, and syncDir puts a directory's
+// entries on the disk; variables so that the flow can be tested by an
+// account that is not root.
+var (
+	ownByRoot = func(path string) error { return os.Lchown(path, 0, 0) }
+	syncDir   = func(path string) error {
+		d, err := os.Open(path) //nolint:gosec // the state directory, a constant path of the installation
+		if err != nil {
+			return err
+		}
+		defer d.Close() //nolint:errcheck // read-only
+		return d.Sync()
+	}
+)
 
 // errDidNotAnswer is a unit stopped at its clock.
 var errDidNotAnswer = errors.New("the repository did not answer")

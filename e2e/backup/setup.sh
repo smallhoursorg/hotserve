@@ -184,7 +184,7 @@ took=$(($(date +%s) - t0))
 [ "$rc" != 0 ] && says "restic could not make or open the repository (exit 1): .*signature" && [ "$took" -lt 90 ] && pass "a wrong storage key is refused by the storage (${took}s), and said" || fail "wrong key: exit $rc after ${took}s: $(cat "$OUT")"
 says "there is no repository at the configured location" && fail "an exit 1 was called 'no repository'" || pass "and not called 'no repository'"
 [ "$(grep -c 'the key id and secret again (the password shown above still applies)' "$OUT")" = 2 ] && [ "$(grep -c 'Storage key id' "$OUT")" = 3 ] && pass "the key was asked for again, twice, the one password standing" || fail "the retries: $(grep -c 'Storage key id' "$OUT") askings, $(grep -c 'again' "$OUT") agains"
-[ "$(grep -c 'Repository password (new)' "$OUT")" = 1 ] && says "the password shown above was never used: discard it" && pass "one password was shown, and said to be dead at the end" || fail "the dead password: $(grep -c 'Repository password (new)' "$OUT") shown; $(tail -1 "$OUT")"
+[ "$(grep -c 'Repository password (new)' "$OUT")" = 1 ] && says "keep the password shown above: restic init ran with it, and may have made the repository; run setup again" && pass "one password was shown, and said to be kept at the end: init ran with it" || fail "the password's fate: $(grep -c 'Repository password (new)' "$OUT") shown; $(tail -1 "$OUT")"
 says "no repository answered within 10s: a bucket not made yet, a wrong key and a wrong host look alike here" && pass "the silent look was explained" || fail "the look: $(grep looking -A1 "$OUT" | head -3)"
 # A host that does not resolve: the look retries and is given up on,
 # init says so at once [measured], and the key is asked for again.
@@ -290,7 +290,7 @@ until_units 1 'hotserve_backup_init_*'
 [ "$(systemctl list-units --plain --no-legend --state=activating 'hotserve_backup_init_*' | wc -l)" = 1 ] && pass "the init unit is waiting on the repository" || fail "no init unit is running"
 kill -INT "$(pgrep -x hotserve-backup)"
 wait "$sp"
-[ $? != 0 ] && grep -q "interrupted: nothing has been written; the password shown above was never used: discard it" "$OUT" && pass "interrupted, setup exits non-zero and says the shown password is dead" || fail "interrupted setup: $(tail -2 "$OUT")"
+[ $? != 0 ] && grep -q "interrupted: nothing has been written; keep the password shown above: restic init ran with it" "$OUT" && pass "interrupted during init, setup exits non-zero and says to keep the shown password" || fail "interrupted setup: $(tail -2 "$OUT")"
 until_units 0 'hotserve_backup_*'
 [ "$(units_running)" = 0 ] && [ "$(temps)" = 0 ] && [ "$(sum)" = "$before" ] && pass "Ctrl-C stopped the unit and left nothing" || fail "after Ctrl-C: units=$(units_running) temps=$(temps)"
 kill "$bh" 2>/dev/null

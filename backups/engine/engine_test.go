@@ -69,6 +69,7 @@ type box struct {
 	haveProgram                func(string) bool
 	account                    bool
 	accountsMade               int
+	owned, synced              []string // what setup asked to be root's, and put on the disk
 }
 
 func (b *box) ManagerVersion(context.Context) (int, error) { return b.version, nil }
