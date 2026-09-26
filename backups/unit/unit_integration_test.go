@@ -435,7 +435,7 @@ func TestIntegrationBindsToEndsTheUnitWhenItsOrchestratorIsKilled(t *testing.T) 
 
 // The credential file is written by setup and read by the manager, and
 // the two have to agree on what a line means: envfile.Parse is what
-// status lints with and setup reads the old file with. This is the
+// status lints a hand-edited file with. This is the
 // measurement Parse is held to [M41]: one file with every shape a hand
 // might write, a unit that prints its environment, and Parse of the
 // same bytes.
@@ -491,9 +491,17 @@ func TestIntegrationSystemdReadsAnEnvFileAsParseDoes(t *testing.T) {
 		`NEXT=1`,
 		`AFTERQS="v" x\`,
 		`NEXT2=2`,
+		"NBSPV=bucket\u00a0",
+		"\u00a0NBSPK=v",
+		`REQ="a" "b"`,
+		`SQIDIOM='it'"'"'s'`,
+		"CRCONT=one \\\r",
+		`CRB=2`,
+		"CRMID=x\ry",
+		"CRQ=\"a\rb\"",
 		`LEADQ="abc`,
 		`SWALLOWED=yes`,
-		``,
+		`EOFBS=abc\`,
 	}, "\n")
 	file := filepath.Join(filepath.Dir(stdout), "test.env")
 	must(t, os.WriteFile(file, []byte(raw), 0o600))
@@ -504,7 +512,7 @@ func TestIntegrationSystemdReadsAnEnvFileAsParseDoes(t *testing.T) {
 			t.Errorf("%s: Parse reads %q, the manager gives the unit %q (present: %v)", k, v, u, ok)
 		}
 	}
-	for _, k := range []string{"COMMENT", "SEMI", "NOEQ", "two", "SWALLOWED", "EXP", "NEXT", "NEXT2"} {
+	for _, k := range []string{"COMMENT", "SEMI", "NOEQ", "two", "SWALLOWED", "EXP", "NEXT", "NEXT2", "NBSPK", "\u00a0NBSPK", "y", "EOFBS"} {
 		if _, ok := unit[k]; ok {
 			t.Errorf("the manager gave the unit %s, which Parse skips", k)
 		}
@@ -515,8 +523,15 @@ func TestIntegrationSystemdReadsAnEnvFileAsParseDoes(t *testing.T) {
 			t.Errorf("the manager gave the unit %s=%q, which Parse did not read", k, unit[k])
 		}
 	}
-	if len(findings) != 5 {
+	if len(findings) != 7 {
 		t.Errorf("findings: %q", findings)
+	}
+	// A backslash as the last byte of the file, outside quotes: dropped,
+	// and the space before it kept.
+	must(t, os.WriteFile(file, []byte("A=x\nB=abc \\"), 0o600))
+	unit = envOfUnit(t, r, file, stdout)
+	if bs, _ := envfile.Parse([]byte("A=x\nB=abc \\")); unit["B"] != "abc " || bs["B"] != unit["B"] {
+		t.Errorf("a backslash at the end of the file: the manager gives %q, Parse reads %q", unit["B"], bs["B"])
 	}
 	// A byte that is not UTF-8: does the manager skip the line, or
 	// refuse the file? Measured here, and mirrored by Lint.

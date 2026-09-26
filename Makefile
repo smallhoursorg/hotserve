@@ -216,6 +216,7 @@ e2e:
 # services, so it can run beside `make e2e` on one host.
 e2e-backup:
 	$(cgroup2_preflight)
+	$(COMPOSE) rm -sf e2e-backup-box e2e-s3 >/dev/null
 	$(COMPOSE) up --build -d e2e-s3 e2e-backup-box
 	status=0; \
 	$(COMPOSE) exec -T e2e-backup-box /bin/sh /suite-setup.sh || status=1; \

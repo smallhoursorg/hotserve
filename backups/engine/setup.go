@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"os/user"
@@ -206,6 +205,7 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 		{"restic", cfg.Restic, ": apt install restic"},
 		{"sqlite3", dump.Program(), ": apt install sqlite3"},
 		{"hotserve", plan.Program(), ""},
+		{"hotserve-backup", cfg.Self, ", where the units run it"},
 	} {
 		if !haveProgram(p.path) {
 			return nil, fmt.Errorf("%s is not installed at %s%s", p.name, p.path, p.fix)
@@ -308,6 +308,17 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 	// and it is never said to be.
 	var password string
 	exists := false
+	// A repository that is there has a password of its own, which is
+	// asked for below; one shown here is not it, and init, where it
+	// ran, made nothing with it.
+	needsOwn := func() {
+		exists, x.initRan = true, false
+		msg := "the repository exists; its password is needed"
+		if password != "" {
+			msg += " (the one shown above is not it)"
+		}
+		term.Say(msg)
+	}
 	pairs := []envfile.Pair{{Key: "RESTIC_REPOSITORY", Value: o.Repository}, {Key: "RESTIC_PASSWORD"}}
 	for attempt := 1; ; attempt++ {
 		pairs = pairs[:2]
@@ -350,17 +361,10 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 				term.Say("the repository exists, and the password shown above opens it: it was made by an earlier attempt of this setup")
 				rep.RepositoryID, rep.New = id, true
 			} else {
-				exists = true
-				x.initRan = false
-				term.Say("the repository exists; its password is needed (the one shown above is not it)")
+				needsOwn()
 			}
 		case found == lookFound:
-			exists = true
-			if password != "" {
-				term.Say("the repository exists; its password is needed (the one shown above is not it)")
-			} else {
-				term.Say("the repository exists; its password is needed")
-			}
+			needsOwn()
 		case found == lookNone:
 			// None: one is made below.
 		case password != "":
@@ -405,9 +409,7 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 			// password already, and the one just shown is not it — init
 			// made nothing with it, so it is unused again, whatever ends
 			// the opening that follows.
-			term.Say("the repository exists; its password is needed (the one shown above is not it)")
-			x.initRan = false
-			exists = true
+			needsOwn()
 			break
 		}
 		var failure error
@@ -487,23 +489,14 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 	}
 	// On the disk before the file is — the two live in different
 	// directories, and a power cut must not keep the new file and lose
-	// the aside — and so is a put-back. Whatever fails, the files are
-	// left agreeing: the record and the id come back while the old file
-	// is still in place, and stay once the new one is.
+	// the aside — and so is a put-back. Whatever fails, the two files
+	// are left agreeing: the record comes back while the old file is
+	// still in place, and stays aside once the new one is.
 	putBack := func(cause error) error {
-		if rep.Aside != "" {
-			if back := os.Rename(rep.Aside, statusPath); back != nil {
-				return fmt.Errorf("%w; and the record, put aside first, could not be put back from %s: %w", cause, rep.Aside, back)
-			}
-			rep.Aside = ""
+		if back := os.Rename(rep.Aside, statusPath); back != nil {
+			return fmt.Errorf("%w; and the record, put aside first, could not be put back from %s: %w", cause, rep.Aside, back)
 		}
-		back := os.Remove(idFile)
-		if prevID != "" {
-			back = writeID(idFile, prevID)
-		}
-		if back != nil && !errors.Is(back, fs.ErrNotExist) {
-			return fmt.Errorf("%w; and the repository id could not be put back: %w", cause, back)
-		}
+		rep.Aside = ""
 		if sync := syncDir(cfg.StateDir); sync != nil {
 			return fmt.Errorf("%w; and the record, put back, could not be synced: %w", cause, sync)
 		}
@@ -514,22 +507,34 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 		if err := os.Rename(statusPath, rep.Aside); err != nil {
 			return nil, x.setupErr(err, password)
 		}
-	}
-	if err := writeID(idFile, rep.RepositoryID); err != nil {
-		return nil, x.setupErr(putBack(err), password)
-	}
-	if err := syncDir(cfg.StateDir); err != nil {
-		return nil, x.setupErr(putBack(err), password)
+		if err := syncDir(cfg.StateDir); err != nil {
+			return nil, x.setupErr(putBack(err), password)
+		}
 	}
 	if err := commit(tmp, cfg.EnvFile); err != nil {
-		return nil, x.setupErr(putBack(err), password)
+		if why != "" {
+			return nil, x.setupErr(putBack(err), password)
+		}
+		return nil, x.setupErr(err, password)
+	}
+	// The id goes on the disk once the file is in place, never before:
+	// a power cut between the two must not leave the new id beside the
+	// old file, or a record the next run writes against the old
+	// repository would pass for the new one's. Left old by a cut here,
+	// it puts the record aside once more — a fresh start, which the
+	// next run mends. Renamed, not synced, the file is in place for
+	// every reader, and stays, the password shown being the
+	// repository's; only what the disk holds after a power cut is in
+	// doubt. Said, and the record left aside with it.
+	inPlace := "the credential file is in place and holds the repository's password (the one shown above, where one was shown: keep it)"
+	if err := writeID(idFile, rep.RepositoryID); err != nil {
+		return nil, fateSaid(fmt.Errorf("%s; the repository's id could not be kept beside the record, so the next setup puts the record aside: %w", inPlace, err))
+	}
+	if err := syncDir(cfg.StateDir); err != nil {
+		return nil, fateSaid(fmt.Errorf("%s; the state directory could not be synced to the disk: %w", inPlace, err))
 	}
 	if err := syncDir(dir); err != nil {
-		// Renamed, not synced: the file is in place for every reader,
-		// and stays, the password shown being the repository's; only
-		// what the disk holds after a power cut is in doubt. Said, and
-		// the record left aside with it.
-		return nil, fateSaid(fmt.Errorf("the credential file is in place and holds the repository's password (the one shown above, where one was shown: keep it); its directory could not be synced to the disk: %w", err))
+		return nil, fateSaid(fmt.Errorf("%s; its directory could not be synced to the disk: %w", inPlace, err))
 	}
 	if why != "" {
 		term.Say(fmt.Sprintf("the record was put aside (%s): %s; the next run drills what it backs up", why, rep.Aside))
@@ -550,25 +555,6 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 		term.Say(fmt.Sprintf("%s is still there, from before this version, and is not read; an administrator's sudoers may reach it: remove it (sudo rm %s)", cfg.OldEnvFile, cfg.OldEnvFile))
 	}
 	return rep, nil
-}
-
-// writeID keeps the repository's id beside the record, on the disk
-// before it returns: for everyone to read, as the record is, and
-// nothing a password guards.
-func writeID(path, id string) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644) //nolint:gosec // an id, beside status.json
-	if err != nil {
-		return err
-	}
-	if _, err := f.WriteString(id + "\n"); err != nil {
-		f.Close() //nolint:errcheck,gosec // the write's error is the one
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close() //nolint:errcheck,gosec // the sync's error is the one
-		return err
-	}
-	return f.Close()
 }
 
 // confirmStored has the operator type "stored" — a word that means
@@ -659,13 +645,35 @@ var (
 // account that is not root.
 var (
 	ownByRoot = func(path string) error { return os.Lchown(path, 0, 0) }
-	syncDir   = func(path string) error {
-		d, err := os.Open(path) //nolint:gosec // the state directory, a constant path of the installation
+	syncDir   = envfile.SyncDir
+	// writeID keeps the repository's id beside the record: whole, on
+	// the disk before it returns, and for everyone to read whatever the
+	// caller's umask, as the record is — nothing a password guards.
+	writeID = func(path, id string) error {
+		tmp := path + ".new"
+		f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644) //nolint:gosec // an id, beside status.json
 		if err != nil {
 			return err
 		}
-		defer d.Close() //nolint:errcheck // read-only
-		return d.Sync()
+		write := func() error {
+			if _, err := f.WriteString(id + "\n"); err != nil {
+				return err
+			}
+			if err := f.Chmod(0o644); err != nil {
+				return err
+			}
+			return f.Sync()
+		}
+		if err := write(); err != nil {
+			f.Close()      //nolint:errcheck,gosec // the write's error is the one
+			os.Remove(tmp) //nolint:errcheck,gosec // as above
+			return err
+		}
+		if err := f.Close(); err != nil {
+			os.Remove(tmp) //nolint:errcheck,gosec // the close's error is the one
+			return err
+		}
+		return os.Rename(tmp, path)
 	}
 )
 
@@ -798,7 +806,8 @@ func (x *run) repository(ctx context.Context, term Terminal, repo, role, envFile
 	if err := os.WriteFile(marker, []byte(spec.Name+"\n"), 0o600); err != nil {
 		return unit.Outcome{}, "", err
 	}
-	spec.BindsTo = x.cfg.BindsTo
+	// Not bound to setup's own service, where it has one: BindsTo=
+	// would have the manager stop it as setup ends.
 	type ended struct {
 		o   unit.Outcome
 		err error

@@ -16,12 +16,14 @@ func TestAFailedWriteEndsTheNextQuestion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Nothing reads: the pipe fills, and a write into it fails once the
-	// reader is gone.
+	// Nobody reads: with the reader gone, a write fails at once (EPIPE;
+	// no signal, the pipe not being standard output).
 	must(t, r.Close())
 	term := &tty{f: w, in: bufio.NewReader(strings.NewReader("stored\n"))}
 	term.Say("Repository password (new): shown-to-nobody")
-	if _, err := term.Ask(context.Background(), "Type stored to go on: ", false); err == nil || !strings.Contains(err.Error(), "the terminal could not be written to") {
+	// The question ends on the showing's failure — its own words — and
+	// not merely because its prompt could not be written either.
+	if _, err := term.Ask(context.Background(), "Type stored to go on: ", false); err == nil || !strings.Contains(err.Error(), "so what was to be shown may not have been") {
 		t.Fatalf("the question was answered though the showing failed: %v", err)
 	}
 }

@@ -56,9 +56,17 @@ func TestParseReadsAsTheManagerDoes(t *testing.T) {
 		`NEXT=1`,
 		`AFTERQS="v" x\`,
 		`NEXT2=2`,
+		"NBSPV=bucket\u00a0",
+		"\u00a0NBSPK=v",
+		`REQ="a" "b"`,
+		`SQIDIOM='it'"'"'s'`,
+		"CRCONT=one \\\r",
+		`CRB=2`,
+		"CRMID=x\ry",
+		"CRQ=\"a\rb\"",
 		`LEADQ="abc`,
 		`SWALLOWED=yes`,
-		``,
+		`EOFBS=abc\`,
 	}, "\n")
 	want := map[string]string{
 		"PLAIN": "value", "SPACEKEY": "spaced", "DQ": "double quoted", "SQ": "single quoted", "DUP": "second",
@@ -66,7 +74,8 @@ func TestParseReadsAsTheManagerDoes(t *testing.T) {
 		"EMPTY": "", "MIDQ": `ab"cd"ef`, "TAB": "a\tb", "SEMIIN": "a;b", "PCT": "100%s", "UTF": "héllo",
 		"MULTI": "one\ntwo", "AFTERQ": "ab", "AFTERC": "v# prod", "DQDOLLAR": "a$b", "DQBT": "a`b", "SQESC": `it\s'`, "ESCSP": "trail ",
 		"ODD": `abc\JOINED=yes`, "EVEN": `abc\`, "NOTJOINED": "yes", "SQCONT": "a\\\nb", "DQCONT": "ab", "AFTERQC": "vNEXT=1", "AFTERQS": "vxNEXT2=2",
-		"LEADQ": "abc\nSWALLOWED=yes\n",
+		"NBSPV": "bucket\u00a0", "REQ": "ab", "SQIDIOM": "it's", "CRCONT": "one ", "CRB": "2", "CRMID": "x", "CRQ": "a\rb",
+		"LEADQ": "abc\nSWALLOWED=yes\nEOFBS=abc",
 	}
 	got, findings := Parse([]byte(raw))
 	for k, v := range want {
@@ -85,14 +94,22 @@ func TestParseReadsAsTheManagerDoes(t *testing.T) {
 		"line 6: DUP is set again; the manager takes this one",
 		"line 17: not KEY=value; the manager skips it",
 		`line 31: "export EXP" is not a name the manager takes; it skips the line`,
-		"line 44: the quote is never closed; the manager reads everything after it, to the end of the file, as LEADQ's value",
+		`line 45: "\u00a0NBSPK" is not a name the manager takes; it skips the line`,
+		"line 50: not KEY=value; the manager skips it",
+		"line 52: the quote is never closed; the manager reads everything after it, to the end of the file, as LEADQ's value",
 	} {
 		if !strings.Contains(joined, f) {
 			t.Errorf("findings lack %q:\n%s", f, joined)
 		}
 	}
-	if len(findings) != 5 {
-		t.Errorf("findings = %q, want exactly five", findings)
+	if len(findings) != 7 {
+		t.Errorf("findings = %q, want exactly seven", findings)
+	}
+	// A backslash as the file's last byte is dropped, and what it
+	// follows is kept as it is.
+	got, findings = Parse([]byte("A=x\nB=abc \\"))
+	if got["B"] != "abc " || len(findings) != 0 {
+		t.Errorf("a backslash at the end of the file: %q %q", got, findings)
 	}
 	// A byte that is not UTF-8 is not a line the manager skips: it
 	// refuses the whole file, and no unit that needs it starts.

@@ -97,7 +97,7 @@ func setupBox(t *testing.T) (*box, *term) {
 	b.version = 257
 	b.haveProgram = func(string) bool { return true }
 	b.account = true
-	old, oldExists, oldMake, oldClock, oldProbe, oldNote, oldOwn, oldSync := haveProgram, accountExists, makeAccount, setupClock, setupProbeClock, setupNote, ownByRoot, syncDir
+	old, oldExists, oldMake, oldClock, oldProbe, oldNote, oldOwn, oldSync, oldID := haveProgram, accountExists, makeAccount, setupClock, setupProbeClock, setupNote, ownByRoot, syncDir, writeID
 	haveProgram = func(p string) bool { return b.haveProgram(p) }
 	accountExists = func(string) bool { return b.account }
 	makeAccount = func() error { b.accountsMade++; b.account = true; return nil }
@@ -106,7 +106,7 @@ func setupBox(t *testing.T) (*box, *term) {
 	syncDir = func(path string) error { b.synced = append(b.synced, path); return nil }
 	setupClock, setupProbeClock, setupNote = 200*time.Millisecond, 100*time.Millisecond, 50*time.Millisecond
 	t.Cleanup(func() {
-		haveProgram, accountExists, makeAccount, setupClock, setupProbeClock, setupNote, ownByRoot, syncDir = old, oldExists, oldMake, oldClock, oldProbe, oldNote, oldOwn, oldSync
+		haveProgram, accountExists, makeAccount, setupClock, setupProbeClock, setupNote, ownByRoot, syncDir, writeID = old, oldExists, oldMake, oldClock, oldProbe, oldNote, oldOwn, oldSync, oldID
 	})
 	return b, &term{answers: []string{"AKIDX", "the-secret", "stored"}}
 }
@@ -269,6 +269,7 @@ func TestNothingIsAskedBeforeThePreflightPasses(t *testing.T) {
 		{"restic missing", func(b *box) { b.haveProgram = func(p string) bool { return p != b.cfg.Restic } }, "restic is not installed at /usr/bin/restic: apt install restic"},
 		{"sqlite3 missing", func(b *box) { b.haveProgram = func(p string) bool { return p != "/usr/bin/sqlite3" } }, "sqlite3 is not installed at /usr/bin/sqlite3: apt install sqlite3"},
 		{"hotserve missing", func(b *box) { b.haveProgram = func(p string) bool { return p != "/usr/bin/hotserve" } }, "hotserve is not installed at /usr/bin/hotserve"},
+		{"this command elsewhere", func(b *box) { b.haveProgram = func(p string) bool { return p != b.cfg.Self } }, "hotserve-backup is not installed at /usr/bin/hotserve-backup, where the units run it"},
 		{"old systemd", func(b *box) { b.version = 255 }, "systemd 257 or later is needed (Debian 13's); this box has 255"},
 		{"the plan fails", func(b *box) {
 			b.outcome["plan"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
@@ -544,6 +545,7 @@ func TestAResticThatCannotRunIsNotInstalled(t *testing.T) {
 // nothing probes or makes the same repository while it still writes.
 func TestTheInitUnitIsLeftToFinishAndWaitedFor(t *testing.T) {
 	b, m := setupBox(t)
+	b.cfg.BindsTo = "hs-setup.service"
 	var initUnitDuring string
 	b.before = func(s unit.Spec) {
 		if strings.Contains(s.Name, "_init_") {
@@ -569,8 +571,14 @@ func TestTheInitUnitIsLeftToFinishAndWaitedFor(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(b.cfg.RunDir, "init-unit")); err == nil {
 		t.Fatal("the init unit is still recorded after it ended")
 	}
-	if s := b.spec("init"); s.BindsTo != b.cfg.BindsTo {
-		t.Fatalf("the init unit's BindsTo: %q", s.BindsTo)
+	// Nor bound to setup's own service, where it has one: BindsTo=
+	// would have the manager stop init as setup ends. The look is
+	// bound, as every unit a command ends with is.
+	if s := b.spec("init"); s.BindsTo != "" {
+		t.Fatalf("the init unit is bound to %q, and ends with setup", s.BindsTo)
+	}
+	if s := b.spec("probe"); s.BindsTo != b.cfg.BindsTo {
+		t.Fatalf("the look's BindsTo: %q", s.BindsTo)
 	}
 	// The next lock holder — a setup here, a run the same — waits for
 	// the unit a killed setup left, before anything of its own.
@@ -1451,6 +1459,35 @@ func TestAFailureBetweenTheAsideAndTheCommitLeavesTheTwoFilesAgreeing(t *testing
 	}
 	if raw, err := os.ReadFile(filepath.Join(b.cfg.StateDir, "repository-id")); err != nil || string(raw) != repoID+"\n" {
 		t.Fatalf("the repository id is not the file's: %q, %v", raw, err)
+	}
+	// The id is written once the file is in place, never before: a
+	// power cut between the two must not leave the new id beside the
+	// old file, or a record the next run writes against the old
+	// repository would be kept by a setup onto the new one. An id that
+	// could not be written after the commit is said, with the file in
+	// place; the old id stays, and the next setup puts the record aside.
+	b, m, _ = seed(t)
+	idAtCommit := ""
+	inner := commit
+	commit = func(from, to string) error {
+		raw, _ := os.ReadFile(filepath.Join(b.cfg.StateDir, "repository-id"))
+		idAtCommit = string(raw)
+		return inner(from, to)
+	}
+	t.Cleanup(func() { commit = inner })
+	writeID = func(string, string) error { return errors.New("EIO on the id") }
+	_, err = b.setup(t, m, "s3:http://e2e-s3:9000/box")
+	if idAtCommit != "other\n" {
+		t.Fatalf("at the moment the file took its place the id was %q", idAtCommit)
+	}
+	if err == nil || !strings.Contains(err.Error(), "EIO on the id") || !strings.Contains(err.Error(), "the credential file is in place") || !strings.Contains(err.Error(), "keep it") {
+		t.Fatalf("err = %v", err)
+	}
+	if raw, _ := os.ReadFile(filepath.Join(b.cfg.StateDir, "repository-id")); string(raw) != "other\n" {
+		t.Fatalf("the id after a failed write: %q", raw)
+	}
+	if _, err := os.Lstat(b.cfg.EnvFile); err != nil {
+		t.Fatal("the credential file is not in place")
 	}
 }
 

@@ -186,6 +186,7 @@ says "there is no repository at the configured location" && fail "an exit 1 was 
 [ "$(grep -c 'the key id and secret again (the password shown above still applies)' "$OUT")" = 2 ] && [ "$(grep -c 'Storage key id' "$OUT")" = 3 ] && pass "the key was asked for again, twice, the one password standing" || fail "the retries: $(grep -c 'Storage key id' "$OUT") askings, $(grep -c 'again' "$OUT") agains"
 [ "$(grep -c 'Repository password (new)' "$OUT")" = 1 ] && says "keep the password shown above: restic init ran with it, and may have made the repository; run setup again" && pass "one password was shown, and said to be kept at the end: init ran with it" || fail "the password's fate: $(grep -c 'Repository password (new)' "$OUT") shown; $(tail -1 "$OUT")"
 says "no repository answered within 10s: a bucket not made yet, a wrong key and a wrong host look alike here" && pass "the silent look was explained" || fail "the look: $(grep looking -A1 "$OUT" | head -3)"
+[ "$(sum)" = "$before" ] && [ "$(temps)" = 0 ] && [ "$(units_left)" = 0 ] && pass "the working file is byte-identical, no copy of a credential is left, no unit is running" || fail "after a wrong key: same=$([ "$(sum)" = "$before" ] && echo yes || echo NO), temps=$(temps), units=$(units_left)"
 # A host that does not resolve: the look retries and is given up on,
 # init says so at once [measured], and the key is asked for again.
 t0=$(date +%s)
@@ -194,7 +195,6 @@ rc=$?
 took=$(($(date +%s) - t0))
 [ "$rc" != 0 ] && says "no such host" && says "the key id and secret again" && [ "$took" -lt 40 ] && pass "a host that does not resolve is said at once after the look (${took}s)" || fail "no such host: exit $rc after ${took}s: $(tail -4 "$OUT")"
 [ "$(sum)" = "$before" ] && [ "$(temps)" = 0 ] && [ "$(units_left)" = 0 ] && pass "and left the working setup as it was" || fail "after a bad host: temps=$(temps), units=$(units_left)"
-[ "$(sum)" = "$before" ] && [ "$(temps)" = 0 ] && [ "$(units_left)" = 0 ] && pass "the working file is byte-identical, no copy of a credential is left, no unit is running" || fail "after a wrong key: same=$([ "$(sum)" = "$before" ] && echo yes || echo NO), temps=$(temps), units=$(units_left)"
 converse "hotserve-backup setup $REPO" "$P_KEY" "$KEYID" "$P_SECRET" "$SECRET" "$P_PW" not-the-password "$P_PW" not-that-one "$P_PW" nor-this
 rc=$?
 [ "$rc" != 0 ] && says "the repository exists; its password is needed" && says "this password cannot open the repository (exit 12)" && pass "a wrong password for the repository that exists is refused, and said" || fail "wrong password: exit $rc: $(cat "$OUT")"
@@ -362,6 +362,18 @@ else
 	fail "no restic backup appeared to hold still"
 fi
 nothing_left "at the end"
+
+echo "=== setup 15: a secret typed ahead of its prompt is not taken ==="
+# The key and a line after it in one paste, at the key's prompt: the
+# line discipline echoes the second line as it arrives, and the flush
+# that turns echo off discards it — the secret is asked for, and typed,
+# afresh. Without the flush the pasted line is the secret, and setup
+# goes on with a key the storage refuses.
+converse "hotserve-backup setup $S3/setupahead" "$P_KEY" "$KEYID
+typed-ahead-not-the-secret" "$P_SECRET" "$SECRET" "$P_STORED" stored
+rc=$?
+[ "$rc" = 0 ] && says "repository ready: $S3/setupahead (new" && grep -q "^AWS_SECRET_ACCESS_KEY=$SECRET\$" "$ENVFILE" && ! grep -q typed-ahead "$ENVFILE" && pass "the line typed ahead was discarded, and the secret typed at its prompt is the one in the file" || fail "typed ahead: exit $rc: $(grep -c 'Storage secret key' "$OUT") askings; $(tail -3 "$OUT")"
+cp /root/env.keep "$ENVFILE"
 
 # The other suites start from a record of their own.
 rm -f "$STATUS" /var/lib/hotserve-backup/status.json.aside-* /var/lib/hotserve-backup/repository-id

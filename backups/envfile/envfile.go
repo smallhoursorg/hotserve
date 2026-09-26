@@ -1,20 +1,25 @@
 // Package envfile writes and reads the credential file the way systemd's
-// EnvironmentFile= does. It has one writer, setup, and two readers: setup
-// again, to compare the repository with the one before, and status as
-// root, to say where a hand-edited line is not read as it was written.
+// EnvironmentFile= does. It has one writer, setup, and one reader,
+// status as root, to say where a hand-edited line is not read as it
+// was written.
 //
 // The manager's rules are measured, not assumed
-// (TestIntegrationSystemdReadsAnEnvFileAsParseDoes): whitespace around a
-// key is trimmed; the last assignment of a key wins; a line whose
-// first character is # or ; is a comment; a line with no =, or with a
-// name the manager does not take, is skipped; a trailing backslash
-// joins the next line; a byte that is not UTF-8 makes the manager
-// refuse the whole file. In a value: whitespace at either end is
-// trimmed unless escaped or quoted; outside quotes a backslash escapes
-// the character after it; inside double quotes only \, ", $ and `;
-// inside single quotes nothing; a quote runs on to the line that closes
-// it, and one that is never closed takes the rest of the file; what
-// follows a closing quote, whitespace skipped, is appended as it is.
+// (TestIntegrationSystemdReadsAnEnvFileAsParseDoes), and Parse walks
+// the same states env-file.c does: a line ends at a newline or a
+// carriage return; whitespace is a space, a tab or either of those and
+// nothing else; whitespace around a key is trimmed; the last assignment
+// of a key wins; a line whose first character is # or ; is a comment; a
+// line with no =, or with a name the manager does not take, is skipped;
+// a byte that is not UTF-8 makes the manager refuse the whole file. In
+// a value: whitespace at either end is trimmed unless escaped or
+// quoted; outside quotes a backslash escapes the byte after it, a line
+// end included, which joins the lines; inside double quotes only \, ",
+// $ and ` are unescaped and any other byte keeps its backslash; inside
+// single quotes nothing; a quote runs on to the line that closes it,
+// and one that is never closed takes the rest of the file; after a
+// closing quote the value goes on by the unquoted rules, whitespace
+// skipped, a quote opening another quoted run; a backslash that ends
+// the file is gone.
 package envfile
 
 import (
@@ -37,8 +42,9 @@ type Pair struct{ Key, Value string }
 
 var keyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-// Parse reads raw as the manager does, and says of each line that the
-// manager reads other than as it was written, or not at all.
+// Parse reads raw as the manager does — the same states, byte by byte,
+// as systemd's env-file.c — and says of each line that the manager
+// reads other than as it was written, or not at all.
 func Parse(raw []byte) (Values, []string) {
 	v := Values{}
 	var findings []string
@@ -46,43 +52,173 @@ func Parse(raw []byte) (Values, []string) {
 		n := 1 + bytes.Count(raw[:utf8FirstInvalid(raw)], []byte("\n"))
 		return v, []string{fmt.Sprintf("line %d holds a byte that is not UTF-8: the manager refuses the whole file, and no unit that needs it starts", n)}
 	}
-	text := string(raw)
-	for pos := 0; pos < len(text); {
-		n := 1 + strings.Count(text[:pos], "\n")
-		eol := strings.IndexByte(text[pos:], '\n')
-		if eol < 0 {
-			eol = len(text) - pos
+	const (
+		preKey = iota
+		inKey
+		preValue
+		inValue
+		valueEscape
+		singleQuoted
+		doubleQuoted
+		doubleQuotedEscape
+		comment
+	)
+	// The manager's whitespace and line ends are these bytes and no
+	// other: a non-breaking space is part of a name or a value.
+	const whitespace, newline = " \t\n\r", "\n\r"
+	state := preKey
+	var key, value strings.Builder
+	keyWS, valueWS := -1, -1 // where trailing whitespace begins, if any
+	padded := false          // whitespace skipped before the key
+	line, keyLine := 1, 1
+	push := func(strip bool) {
+		name := key.String()
+		if keyWS >= 0 {
+			name = name[:keyWS]
 		}
-		line := text[pos : pos+eol]
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || trimmed[0] == '#' || trimmed[0] == ';' {
-			pos += eol + 1
-			continue
+		val := value.String()
+		if strip && valueWS >= 0 {
+			val = val[:valueWS]
 		}
-		key, _, ok := strings.Cut(line, "=")
-		if !ok {
-			findings = append(findings, fmt.Sprintf("line %d: not KEY=value; the manager skips it", n))
-			pos += eol + 1
-			continue
+		switch {
+		case !keyRe.MatchString(name):
+			findings = append(findings, fmt.Sprintf("line %d: %q is not a name the manager takes; it skips the line", keyLine, name))
+		default:
+			if padded || keyWS >= 0 {
+				findings = append(findings, fmt.Sprintf("line %d: the key is written with whitespace around it; the manager reads it as %s", keyLine, name))
+			}
+			if _, again := v[name]; again {
+				findings = append(findings, fmt.Sprintf("line %d: %s is set again; the manager takes this one", keyLine, name))
+			}
+			v[name] = val
 		}
-		k := strings.TrimSpace(key)
-		if !keyRe.MatchString(k) {
-			findings = append(findings, fmt.Sprintf("line %d: %q is not a name the manager takes; it skips the line", n, k))
-			pos += eol + 1
-			continue
+		key.Reset()
+		value.Reset()
+		keyWS, valueWS, padded = -1, -1, false
+	}
+	noValue := func() {
+		findings = append(findings, fmt.Sprintf("line %d: not KEY=value; the manager skips it", keyLine))
+		key.Reset()
+		keyWS, padded = -1, false
+	}
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if c == '\n' {
+			line++
 		}
-		if k != key {
-			findings = append(findings, fmt.Sprintf("line %d: the key is written with whitespace around it; the manager reads it as %s", n, k))
+		switch state {
+		case preKey:
+			switch {
+			case c == '#' || c == ';':
+				state = comment
+			case strings.IndexByte(newline, c) >= 0:
+				padded = false
+			case strings.IndexByte(whitespace, c) >= 0:
+				padded = true
+			default:
+				state = inKey
+				keyLine = line
+				key.WriteByte(c)
+			}
+		case inKey:
+			switch {
+			case strings.IndexByte(newline, c) >= 0:
+				noValue()
+				state = preKey
+			case c == '=':
+				state = preValue
+			default:
+				if strings.IndexByte(whitespace, c) < 0 {
+					keyWS = -1
+				} else if keyWS < 0 {
+					keyWS = key.Len()
+				}
+				key.WriteByte(c)
+			}
+		case preValue:
+			// Where a value begins, and where it goes on after a closing
+			// quote: whitespace skipped, a quote opening a quoted run.
+			switch {
+			case strings.IndexByte(newline, c) >= 0:
+				push(false)
+				state = preKey
+			case c == '\'':
+				state = singleQuoted
+			case c == '"':
+				state = doubleQuoted
+			case c == '\\':
+				state = valueEscape
+			case strings.IndexByte(whitespace, c) < 0:
+				state = inValue
+				value.WriteByte(c)
+			}
+		case inValue:
+			switch {
+			case strings.IndexByte(newline, c) >= 0:
+				push(true)
+				state = preKey
+			case c == '\\':
+				state = valueEscape
+				valueWS = -1
+			default:
+				if strings.IndexByte(whitespace, c) < 0 {
+					valueWS = -1
+				} else if valueWS < 0 {
+					valueWS = value.Len()
+				}
+				value.WriteByte(c)
+			}
+		case valueEscape:
+			// The byte after a backslash, as it is; a line end there
+			// joins the lines and is itself gone.
+			state = inValue
+			if strings.IndexByte(newline, c) < 0 {
+				value.WriteByte(c)
+				valueWS = -1
+			}
+		case singleQuoted:
+			if c == '\'' {
+				state = preValue
+			} else {
+				value.WriteByte(c)
+			}
+		case doubleQuoted:
+			switch c {
+			case '"':
+				state = preValue
+			case '\\':
+				state = doubleQuotedEscape
+			default:
+				value.WriteByte(c)
+			}
+		case doubleQuotedEscape:
+			// Only \, ", $ and ` are unescaped; any other byte keeps its
+			// backslash, as a shell would; a newline is joined.
+			state = doubleQuoted
+			switch {
+			case strings.IndexByte("\"\\`$", c) >= 0:
+				value.WriteByte(c)
+			case c != '\n':
+				value.WriteByte('\\')
+				value.WriteByte(c)
+			}
+		case comment:
+			if strings.IndexByte(newline, c) >= 0 {
+				state = preKey
+			}
 		}
-		if _, again := v[k]; again {
-			findings = append(findings, fmt.Sprintf("line %d: %s is set again; the manager takes this one", n, k))
-		}
-		value, used, unclosed := readValue(text[pos+len(key)+1:])
-		if unclosed {
-			findings = append(findings, fmt.Sprintf("line %d: the quote is never closed; the manager reads everything after it, to the end of the file, as %s's value", n, k))
-		}
-		v[k] = value
-		pos += len(key) + 1 + used
+	}
+	// The end of the file ends a value that was under way, a quote
+	// still open included; a key with no = is nothing; a backslash
+	// waiting for its byte is gone.
+	switch state {
+	case inKey:
+		noValue()
+	case singleQuoted, doubleQuoted, doubleQuotedEscape:
+		findings = append(findings, fmt.Sprintf("line %d: the quote is never closed; the manager reads everything after it, to the end of the file, as %s's value", keyLine, key.String()))
+		push(false)
+	case preValue, inValue, valueEscape:
+		push(state == inValue)
 	}
 	return v, findings
 }
@@ -97,78 +233,6 @@ func utf8FirstInvalid(raw []byte) int {
 		i += size
 	}
 	return len(raw)
-}
-
-// readValue reads one value from the start of s as the manager does,
-// and says how much of s it took (the line end included) and whether a
-// quote was left open to the end. Outside quotes: leading whitespace
-// is skipped; a backslash escapes the character after it, a newline
-// included, which joins the next line; an unescaped newline ends the
-// value; trailing whitespace that is neither escaped nor quoted is
-// trimmed. A quote where the value begins runs to its closing quote —
-// a newline inside kept — with \, ", $ and ` escapable in double
-// quotes, nothing in single; what follows the closing quote, its
-// leading whitespace skipped, is read by the outside rules.
-func readValue(s string) (value string, used int, unclosed bool) {
-	var out strings.Builder
-	kept := 0 // how much of out is quoted or escaped, and so not trimmed
-	i := 0
-	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
-		i++
-	}
-	if i < len(s) && (s[i] == '"' || s[i] == '\'') {
-		q := s[i]
-		i++
-		closed := false
-		for i < len(s) {
-			c := s[i]
-			if c == q {
-				closed = true
-				i++
-				break
-			}
-			if q == '"' && c == '\\' && i+1 < len(s) {
-				if s[i+1] == '\n' {
-					i += 2 // a line joined: the backslash and the newline go
-					continue
-				}
-				if strings.IndexByte("\\\"$`", s[i+1]) >= 0 {
-					i++
-					c = s[i]
-				}
-			}
-			out.WriteByte(c)
-			i++
-		}
-		kept = out.Len()
-		if !closed {
-			return out.String(), len(s), true
-		}
-		for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
-			i++
-		}
-	}
-	for i < len(s) {
-		c := s[i]
-		switch {
-		case c == '\n':
-			i++
-			res := out.String()
-			return res[:kept] + strings.TrimRightFunc(res[kept:], unicode.IsSpace), i, false
-		case c == '\\' && i+1 < len(s):
-			i++
-			if s[i] != '\n' { // a backslash-newline joins the lines and is itself gone
-				out.WriteByte(s[i])
-				kept = out.Len()
-			}
-			i++
-		default:
-			out.WriteByte(c)
-			i++
-		}
-	}
-	res := out.String()
-	return res[:kept] + strings.TrimRightFunc(res[kept:], unicode.IsSpace), i, false
 }
 
 // Refuse says why value cannot be written so that the manager reads it

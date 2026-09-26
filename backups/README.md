@@ -102,9 +102,9 @@ run, and what the step is given.
 | Unit | Runs as | Network | Credential | Sees |
 |---|---|---|---|---|
 | the run itself | root | — | never reads it | its own state and run dirs |
-| setup | root | — | writes it; reads the one before for its `RESTIC_REPOSITORY` alone | its own state and run dirs, and the terminal |
+| setup | root | — | writes it; sees whether one was there before, and reads none | its own state and run dirs, and the terminal |
 | plan | `hotserve-backup`, own user+PID namespaces | no | no | `/etc/hotserve`, read-only |
-| init, probe (setup's) | `hotserve-backup`, no capability | yes | yes, the file setup is about to put in place | nothing of the app |
+| probe, init, open (setup's) | `hotserve-backup`, no capability | yes | yes, the file setup is about to put in place | nothing of the app |
 | dump, clean | `hotserve`, own user+PID namespaces | no | no | that app's `shared/` (dump only) and staging |
 | upload | `hotserve-backup`, `CAP_DAC_READ_SEARCH` | yes | yes | that app's declared paths and staged copies, read-only |
 | verify | `hotserve-backup`, no capability | yes | yes | nothing of the app |
@@ -682,8 +682,8 @@ What can be known to fail is refused before anything is asked for
    wrong with the key, the host or the port [measured], and setup then asks for the
    key id and secret again, up to three times, the one password
    standing: it has taken effect nowhere until the repository is made
-   with it. When setup ends after the showing, the last line says what
-   became of the password: before `restic init` has been started with
+   with it. When setup ends after the showing, the error it ends on
+   says what became of the password: before `restic init` has been started with
    it (a refusal at the `stored` prompt, Ctrl-C there, a file that
    could not be written), "never used: discard it"; once init has been
    started with it — three storage refusals, Ctrl-C or the clock
@@ -724,7 +724,7 @@ What can be known to fail is refused before anything is asked for
    back if the file cannot take its place, and each step is on the disk
    before the next, so that
    nothing that ends setup between the two leaves a credential file
-   with another repository's record beside it. The last line names the
+   with another repository's record beside it. Then setup names the
    repository, whether it was made or opened, and its id — and, when
    `/etc/hotserve/backup.env` from before this version is still there,
    that it is, and to remove it: that file is where an administrator's

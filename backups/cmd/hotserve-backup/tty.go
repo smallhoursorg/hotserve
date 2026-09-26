@@ -110,8 +110,13 @@ func (t *tty) echoOff() (func(), error) {
 	}
 	now := *was
 	now.Lflag &^= unix.ECHO
-	if err := unix.IoctlSetTermios(fd, unix.TCSETS, &now); err != nil {
+	// Set with the input queue flushed (TCSETSF: what getpass, sudo and
+	// ssh do): a secret typed ahead of its prompt was echoed as it was
+	// typed, and is not taken as the answer. What the reader had
+	// buffered goes the same way.
+	if err := unix.IoctlSetTermios(fd, unix.TCSETSF, &now); err != nil {
 		return nil, fmt.Errorf("turning the terminal's echo off: %w", err)
 	}
+	_, _ = t.in.Discard(t.in.Buffered())
 	return func() { _ = unix.IoctlSetTermios(fd, unix.TCSETS, was) }, nil
 }
