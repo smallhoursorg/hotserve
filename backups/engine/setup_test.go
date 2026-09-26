@@ -602,6 +602,23 @@ func TestTheInitUnitIsLeftToFinishAndWaitedFor(t *testing.T) {
 	}
 }
 
+// An init the runner lost sight of — the request may have reached the
+// manager all the same, or its state could not be read — stays
+// recorded: the next lock holder waits for it, and a unit that is not
+// there has ended.
+func TestAnInitTheRunnerLostSightOfStaysRecorded(t *testing.T) {
+	b, m := setupBox(t)
+	b.err["init"] = errors.New("hotserve_backup_init: its state could not be read 10 times running")
+	_, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
+	if err == nil || !strings.Contains(err.Error(), "could not be read 10 times") || !strings.Contains(err.Error(), "keep the password shown above") {
+		t.Fatalf("err = %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(b.cfg.RunDir, "init-unit"))
+	if err != nil || !strings.Contains(string(raw), "_init_") {
+		t.Fatalf("the init unit is not recorded for the next lock holder: %q, %v", raw, err)
+	}
+}
+
 // Ctrl-C while waiting for an earlier setup's init is an interrupt like
 // any other, at once — and leaves the marker for the next lock holder,
 // since the init it names is still to be waited for.
@@ -1126,22 +1143,26 @@ func TestAnInterruptDuringInitLeavesItRunningAndWritesNothing(t *testing.T) {
 }
 
 func TestTheRecordIsPutAsideWithAChangeOfRepository(t *testing.T) {
+	const other = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	for _, tc := range []struct {
-		name  string
-		old   string // the file before, or none
-		aside bool
+		name string
+		old  string // the file before, or none
+		id   string // the repository id setup keeps beside the record, or none
+		why  string // why the record goes aside; kept when empty
 	}{
-		{"another repository", "RESTIC_REPOSITORY=s3:http://e2e-s3:9000/other\nRESTIC_PASSWORD=x\n", true},
-		{"the same repository", "RESTIC_REPOSITORY=s3:http://e2e-s3:9000/box\nRESTIC_PASSWORD=x\n", false},
-		{"the same, quoted", "RESTIC_REPOSITORY=\"s3:http://e2e-s3:9000/box\"\nRESTIC_PASSWORD=x\n", false},
-		{"no file before", "", true},
-		{"the same URL, re-made", "RESTIC_REPOSITORY=s3:http://e2e-s3:9000/box\nRESTIC_PASSWORD=x\n", true},
+		{"another repository", "RESTIC_REPOSITORY=s3:http://e2e-s3:9000/other\nRESTIC_PASSWORD=x\n", other, "it was written against another repository (id 01234567)"},
+		{"the same URL, another repository", "RESTIC_REPOSITORY=s3:http://e2e-s3:9000/box\nRESTIC_PASSWORD=x\n", other, "it was written against another repository (id 01234567)"},
+		{"the same repository", "RESTIC_REPOSITORY=s3:http://e2e-s3:9000/box\nRESTIC_PASSWORD=x\n", repoID, ""},
+		{"the same repository, by another URL", "RESTIC_REPOSITORY=s3:http://e2e-s3.internal:9000/box\nRESTIC_PASSWORD=x\n", repoID, ""},
+		{"no id recorded", "RESTIC_REPOSITORY=s3:http://e2e-s3:9000/box\nRESTIC_PASSWORD=x\n", "", "no setup recorded which repository it was written against"},
+		{"no file before", "", repoID, "no credential file was there to tie it to this repository"},
+		{"the same URL, re-made", "RESTIC_REPOSITORY=s3:http://e2e-s3:9000/box\nRESTIC_PASSWORD=x\n", repoID, "the repository was made by this setup, so it holds none of the record's snapshots"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b, m := setupBox(t)
 			if tc.name != "the same URL, re-made" {
-				// The repository is there: the look finds it, and the
-				// record it goes with is kept.
+				// The repository is there: the look finds it, and it is
+				// opened with its own password.
 				b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 12}
 				m.answers = []string{"AKIDX", "the-secret", "its-own-password"}
 			}
@@ -1150,30 +1171,35 @@ func TestTheRecordIsPutAsideWithAChangeOfRepository(t *testing.T) {
 				must(t, os.WriteFile(b.cfg.EnvFile, []byte(tc.old), 0o600))
 			}
 			must(t, os.MkdirAll(b.cfg.StateDir, 0o755))
+			idFile := filepath.Join(b.cfg.StateDir, "repository-id")
+			if tc.id != "" {
+				must(t, os.WriteFile(idFile, []byte(tc.id+"\n"), 0o644))
+			}
 			must(t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), &record.Status{Apps: map[string]*record.App{"blog": {Class: record.OK}}}))
 			rep, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
 			if err != nil {
 				t.Fatal(err)
 			}
+			// The id of the repository the file now names is kept beside
+			// the record, for everyone to read, as the record is.
+			if raw, err := os.ReadFile(idFile); err != nil || string(raw) != repoID+"\n" {
+				t.Fatalf("the repository id beside the record: %q, %v", raw, err)
+			}
+			if st, err := os.Stat(idFile); err != nil || st.Mode().Perm() != 0o644 {
+				t.Fatalf("the id file: %v %v", st, err)
+			}
 			st, err := record.Read(filepath.Join(b.cfg.StateDir, "status.json"))
 			must(t, err)
 			asides, _ := filepath.Glob(filepath.Join(b.cfg.StateDir, "status.json.aside-*"))
-			if tc.aside {
-				why := "the previous credential file named another repository"
-				switch {
-				case tc.old == "":
-					why = "no credential file was there to tie it to this repository"
-				case tc.name == "the same URL, re-made":
-					why = "the repository was made by this setup, so it holds none of the record's snapshots"
-				}
-				if len(st.Apps) != 0 || len(asides) != 1 || rep.Aside != asides[0] || !strings.Contains(m.saidAll(), "the record was put aside ("+why+"): "+asides[0]+"; the next run drills what it backs up") {
+			if tc.why != "" {
+				if len(st.Apps) != 0 || len(asides) != 1 || rep.Aside != asides[0] || !strings.Contains(m.saidAll(), "the record was put aside ("+tc.why+"): "+asides[0]+"; the next run drills what it backs up") {
 					t.Fatalf("the record was kept: %v %v %+v\n%s", st.Apps, asides, rep, m.saidAll())
 				}
 				if st, err := os.Stat(asides[0]); err != nil || st.Mode().Perm() != 0o644 {
 					t.Fatalf("the aside: %v %v", st, err)
 				}
-			} else if len(st.Apps) != 1 || len(asides) != 0 || rep.Aside != "" {
-				t.Fatalf("the record was put aside: %v %v", st.Apps, asides)
+			} else if len(st.Apps) != 1 || len(asides) != 0 || rep.Aside != "" || strings.Contains(m.saidAll(), "put aside") {
+				t.Fatalf("the record was put aside: %v %v\n%s", st.Apps, asides, m.saidAll())
 			}
 		})
 	}
@@ -1185,6 +1211,9 @@ func TestTheRecordIsPutAsideWithAChangeOfRepository(t *testing.T) {
 		if asides, _ := filepath.Glob(filepath.Join(b.cfg.StateDir, "status.json*")); len(asides) != 0 {
 			t.Fatalf("a record appeared: %v", asides)
 		}
+		if raw, err := os.ReadFile(filepath.Join(b.cfg.StateDir, "repository-id")); err != nil || string(raw) != repoID+"\n" {
+			t.Fatalf("the repository id beside the record: %q, %v", raw, err)
+		}
 	})
 }
 
@@ -1194,6 +1223,8 @@ func TestARecordIsPutAsideOnlyOnceTheFileIsInPlace(t *testing.T) {
 	b, m := setupBox(t)
 	must(t, os.MkdirAll(b.cfg.StateDir, 0o755))
 	must(t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), &record.Status{Apps: map[string]*record.App{"blog": {Class: record.OK}}}))
+	idFile := filepath.Join(b.cfg.StateDir, "repository-id")
+	must(t, os.WriteFile(idFile, []byte("other\n"), 0o644))
 	// A directory where the file has to go: the rename over it fails.
 	must(t, os.MkdirAll(b.cfg.EnvFile, 0o755))
 	_, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
@@ -1204,6 +1235,19 @@ func TestARecordIsPutAsideOnlyOnceTheFileIsInPlace(t *testing.T) {
 	must(t, err)
 	if asides, _ := filepath.Glob(filepath.Join(b.cfg.StateDir, "status.json.aside-*")); len(st.Apps) != 1 || len(asides) != 0 {
 		t.Fatalf("the record was put aside: %v %v", st.Apps, asides)
+	}
+	// And the id beside it is the old repository's again.
+	if raw, err := os.ReadFile(idFile); err != nil || string(raw) != "other\n" {
+		t.Fatalf("the repository id: %q, %v", raw, err)
+	}
+	// Where there was none, none is left.
+	b, m = setupBox(t)
+	must(t, os.MkdirAll(b.cfg.EnvFile, 0o755))
+	if _, err := b.setup(t, m, "s3:http://e2e-s3:9000/box"); err == nil {
+		t.Fatal("setup succeeded with a directory in the file's place")
+	}
+	if _, err := os.Lstat(filepath.Join(b.cfg.StateDir, "repository-id")); err == nil {
+		t.Fatal("a repository id was left beside no credential file")
 	}
 }
 
@@ -1336,6 +1380,7 @@ func TestAFailureBetweenTheAsideAndTheCommitLeavesTheTwoFilesAgreeing(t *testing
 		must(t, os.MkdirAll(b.cfg.StateDir, 0o755))
 		statusPath := filepath.Join(b.cfg.StateDir, "status.json")
 		must(t, record.Write(statusPath, &record.Status{Apps: map[string]*record.App{"blog": {Class: record.OK}}}))
+		must(t, os.WriteFile(filepath.Join(b.cfg.StateDir, "repository-id"), []byte("other\n"), 0o644))
 		return b, m, statusPath
 	}
 	recordInPlace := func(t *testing.T, statusPath string) {
@@ -1344,6 +1389,9 @@ func TestAFailureBetweenTheAsideAndTheCommitLeavesTheTwoFilesAgreeing(t *testing
 		must(t, err)
 		if asides, _ := filepath.Glob(statusPath + ".aside-*"); len(st.Apps) != 1 || len(asides) != 0 {
 			t.Fatalf("the record: %v, asides %v", st.Apps, asides)
+		}
+		if raw, err := os.ReadFile(filepath.Join(filepath.Dir(statusPath), "repository-id")); err != nil || string(raw) != "other\n" {
+			t.Fatalf("the repository id beside the record: %q, %v", raw, err)
 		}
 	}
 	// The sync after the aside fails: the record is put back, and that
@@ -1400,6 +1448,9 @@ func TestAFailureBetweenTheAsideAndTheCommitLeavesTheTwoFilesAgreeing(t *testing
 	must(t, err)
 	if asides, _ := filepath.Glob(statusPath + ".aside-*"); len(st.Apps) != 0 || len(asides) != 1 {
 		t.Fatalf("the record was put back under a file already in place: %v, asides %v", st.Apps, asides)
+	}
+	if raw, err := os.ReadFile(filepath.Join(b.cfg.StateDir, "repository-id")); err != nil || string(raw) != repoID+"\n" {
+		t.Fatalf("the repository id is not the file's: %q, %v", raw, err)
 	}
 }
 

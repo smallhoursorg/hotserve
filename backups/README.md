@@ -611,8 +611,8 @@ Caddyfile.
 ## Setup
 
 `sudo hotserve-backup setup <repository>`, at a terminal. The
-repository is a restic URL — `s3:https://s3.example.com/bucket`,
-`b2:bucket:path`, `rest:https://host:8000/` — and not a secret; the
+repository is a restic URL — `s3:https://s3.example.com/bucket` or
+`b2:bucket:path` — and not a secret; the
 secrets are typed at the terminal, never given on the command line.
 What can be known to fail is refused before anything is asked for
 ("What it refuses"). In order:
@@ -668,13 +668,17 @@ What can be known to fail is refused before anything is asked for
    go on, and gets one more asking for any other word. Then
    `restic init --json` runs with that password, under a two-minute
    clock; after 20 seconds a person waiting is told what for, and what
-   Ctrl-C would do — stop a unit that may have made the repository
-   with the password shown, which is then to be kept (for the look and
-   the opening, which only read, Ctrl-C is safe). This one unit is not recorded for the next run or
-   setup to stop: stopped half way it would leave a repository with a
-   config and no key, which no password opens, where left to its few
-   seconds it makes the repository with the password that was shown —
-   what the next setup asks for. restic answers at once whatever is
+   Ctrl-C would do — end the waiting, not the unit, which may be making
+   the repository with the password shown, so that password is to be
+   kept (for the look and the opening, which only read, Ctrl-C stops
+   the unit, and is safe). Init is never stopped, by Ctrl-C or by the
+   clock: stopped half way it would leave a repository with a config
+   and no key, which no password opens, where left to its few seconds
+   it makes the repository with the password that was shown — what the
+   next setup asks for. It is recorded instead
+   (`/run/hotserve-backup/init-unit`) for the next run or setup to
+   wait for, up to three minutes, saying which unit, and the message
+   names it and the `systemctl stop` that ends it if it must be. restic answers at once whatever is
    wrong with the key, the host or the port [measured], and setup then asks for the
    key id and secret again, up to three times, the one password
    standing: it has taken effect nowhere until the repository is made
@@ -684,13 +688,15 @@ What can be known to fail is refused before anything is asked for
    could not be written), "never used: discard it"; once init has been
    started with it — three storage refusals, Ctrl-C or the clock
    during init, any failure after — "keep the password shown above:
-   restic init ran with it, and may have made the repository", since a
-   stopped init may have written some or all of one, and the next setup
-   looks first and asks for it if the repository is there; and where
+   restic init ran with it, and may have made the repository", since an
+   init still running, or one that failed, may have written some or all
+   of one, and the next setup looks first and asks for it if the
+   repository is there; and where
    init itself answers that the repository exists, it made nothing with
    the password, and "discard it" is said again. The clock is
-   for a storage that takes the connection and never answers, after
-   which the unit is stopped and the file removed;
+   for a storage that takes the connection and never answers: the
+   waiting ends and the temporary file is removed, and the unit runs
+   on, recorded as above;
 7. a repository that **exists already** — a rebuilt box, a bucket
    reused — is asked for its own password (echo off), and nothing is
    made or shown; setup opens it with `restic cat config`, and a wrong
@@ -700,16 +706,23 @@ What can be known to fail is refused before anything is asked for
    same follows, and the password just shown is said not to be the
    one;
 8. once the repository has answered, the record (`status.json`) is
-   put aside as `status.json.aside-<time>`, and why is said, if the
-   file before named another repository, or there was no file before,
-   or this setup made the repository — a repository just made holds
-   none of the record's snapshots, whatever its URL: a run then drills
-   what it backs up into the repository now in use, and `status` does
-   not say "proven" of a snapshot this repository does not hold. The
-   same repository, opened, keeps its record;
+   put aside as `status.json.aside-<time>`, and why is said, if it was
+   written against another repository, or there was no file before, or
+   this setup made the repository — a repository just made holds none
+   of the record's snapshots, whatever its URL: a run then drills what
+   it backs up into the repository now in use, and `status` does not
+   say "proven" of a snapshot this repository does not hold. A
+   repository is known by its id, not its URL — a bucket emptied and
+   made again is another repository at the same URL, and one reached
+   by another URL is the same — and setup keeps the id of the one the
+   file names beside the record (`/var/lib/hotserve-backup/repository-id`,
+   for everyone to read, as the record is); a record with no id beside
+   it (runs from a file written by hand) goes aside too. The same
+   repository, opened, keeps its record;
 9. then the file takes the working one's place — whole, root `0600`.
-   The record goes aside first, and comes back if the file cannot take
-   its place, and each step is on the disk before the next, so that
+   The record goes aside and the id is written first, and both come
+   back if the file cannot take its place, and each step is on the disk
+   before the next, so that
    nothing that ends setup between the two leaves a credential file
    with another repository's record beside it. The last line names the
    repository, whether it was made or opened, and its id — and, when

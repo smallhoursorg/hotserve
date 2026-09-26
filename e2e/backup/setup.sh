@@ -259,7 +259,7 @@ if hold_restic "restic init"; then
 	[ -f "$ENVFILE.bak" ] && ! says "$ENVFILE.bak" && pass "and left the operator's own copy beside it alone" || fail "the operator's copy: $(ls "$ETC") — $(grep bak "$OUT")"
 	rm -f "$ENVFILE.bak"
 	[ "$rc" = 0 ] && says "the repository exists; its password is needed" && says "repository ready: $S3/setupkill (existing" && pass "the password the killed setup showed opens the repository it made" || fail "exit $rc: $(cat "$OUT")"
-	says "the record was put aside (the previous credential file named another repository): /var/lib/hotserve-backup/status.json.aside-" && [ "$(ls /var/lib/hotserve-backup/status.json.aside-* | wc -l)" = 1 ] && pass "the record of the other repository was put aside, and why was said" || fail "the record: $(ls /var/lib/hotserve-backup) — $(grep aside "$OUT")"
+	says "the record was put aside (it was written against another repository (id [0-9a-f]\{8\})): /var/lib/hotserve-backup/status.json.aside-" && [ "$(ls /var/lib/hotserve-backup/status.json.aside-* | wc -l)" = 1 ] && pass "the record of the other repository was put aside, and why was said" || fail "the record: $(ls /var/lib/hotserve-backup) — $(grep aside "$OUT")"
 	[ "$(stat -c '%U %a' /var/lib/hotserve-backup/status.json.aside-*)" = "root 644" ] && pass "the aside is as the record was" || fail "the aside: $(stat -c '%U %a' /var/lib/hotserve-backup/status.json.aside-*)"
 	nothing_left "after the sweep"
 else
@@ -271,8 +271,15 @@ if hotserve-backup status >"$OUT" 2>&1; then says "pending first run" && pass "s
 run && pass "the run into the new repository" || fail "the run: $(cat "$OUT")"
 proof=$(proven blog)
 [ -n "$proof" ] && rr snapshots --no-lock --json 2>/dev/null | grep -q "\"id\":\"$proof\"" && pass "and it drilled the snapshot it made there: restore proven on the repository in use" || fail "proof $proof is not in $S3/setupkill: $(cat "$OUT")"
+# The same repository set up again is known by the id beside the
+# record, and keeps it: the proof stands.
+ID_FILE=/var/lib/hotserve-backup/repository-id
+converse "hotserve-backup setup $S3/setupkill" "$P_KEY" "$KEYID" "$P_SECRET" "$SECRET" "$P_PW" "$pw1"
+rc=$?
+[ "$(stat -c '%U %a' "$ID_FILE")" = "root 644" ] && says "repository ready: $S3/setupkill (existing, id $(cut -c1-8 "$ID_FILE"))" && pass "the repository's id is kept beside the record, for everyone to read" || fail "the id file: $(ls -l "$ID_FILE" 2>&1) $(cat "$ID_FILE" 2>&1)"
+[ "$rc" = 0 ] && ! says "put aside" && [ "$(proven blog)" = "$proof" ] && [ "$(ls /var/lib/hotserve-backup/status.json.aside-* | wc -l)" = 1 ] && pass "the same repository set up again keeps its record" || fail "set up again: exit $rc, proof $(proven blog), $(grep aside "$OUT")"
 
-echo "=== setup 11: a repository that does not answer: told what is waited for, then given up on, the unit stopped ==="
+echo "=== setup 11: a repository that does not answer: told what is waited for, then given up on, init left running and recorded ==="
 systemd-socket-activate -l 127.0.0.1:9999 /bin/sleep 3600 >/dev/null 2>&1 &
 bh=$!
 sleep 1
@@ -357,7 +364,7 @@ fi
 nothing_left "at the end"
 
 # The other suites start from a record of their own.
-rm -f "$STATUS" /var/lib/hotserve-backup/status.json.aside-*
+rm -f "$STATUS" /var/lib/hotserve-backup/status.json.aside-* /var/lib/hotserve-backup/repository-id
 
 if [ "$FAILURES" = 0 ]; then
 	echo "ALL SETUP SCENARIOS PASSED"

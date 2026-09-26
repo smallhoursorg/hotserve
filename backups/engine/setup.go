@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/user"
@@ -268,13 +269,12 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 		term.Say("removed a file an interrupted setup left: " + f)
 		rep.Swept = append(rep.Swept, f)
 	}
-	// The file before, if any: its repository decides what becomes of
-	// the record. Root's own file, written by this command alone.
-	var oldRepository string
+	// Whether there was a file before: with none, no run could have
+	// written the record against this repository. What it names is not
+	// read — the record's repository is known by its id, below.
 	hadOld := false
-	if raw, err := os.ReadFile(cfg.EnvFile); err == nil {
-		v, _ := envfile.Parse(raw)
-		oldRepository, hadOld = v["RESTIC_REPOSITORY"], true
+	if _, err := os.Lstat(cfg.EnvFile); err == nil {
+		hadOld = true
 	}
 
 	p, err := x.planWith(ctx, filepath.Join(x.dir, "plan.err"))
@@ -453,15 +453,25 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 			return nil, x.setupErr(errors.New("this password cannot open the repository (exit 12)"), password)
 		}
 	}
-	// The record speaks of the repository it was written against. With
-	// another one now in use — or none known, or one this setup made —
-	// it is put aside, so that the next run drills what it backs up
-	// into the repository it is now using. Aside first, then the file:
-	// whatever ends setup between the two leaves no credential file with
-	// a record of another repository beside it (a record aside with the
-	// old file in place is a fresh start, which the next run mends); a
-	// file that could not be put in place gets its record back.
+	// The record speaks of the repository it was written against,
+	// known by its id: the one setup keeps beside it (`repository-id`)
+	// for the file it puts in place. A URL says only where — a bucket
+	// emptied and made again is another repository at the same one,
+	// and one reached by another URL is the same. With another
+	// repository now in use — or none known, or one this setup made —
+	// the record is put aside, so that the next run drills what it
+	// backs up into the repository it is now using. Aside first, then
+	// the file: whatever ends setup between the two leaves no credential
+	// file with a record of another repository beside it (a record aside
+	// with the old file in place is a fresh start, which the next run
+	// mends); a file that could not be put in place gets its record
+	// back.
 	statusPath := filepath.Join(cfg.StateDir, "status.json")
+	idFile := filepath.Join(cfg.StateDir, "repository-id")
+	prevID := ""
+	if raw, err := os.ReadFile(idFile); err == nil { //nolint:gosec // root's own file under the state directory
+		prevID = strings.TrimSpace(string(raw))
+	}
 	why := ""
 	if _, err := os.Lstat(statusPath); err == nil {
 		switch {
@@ -469,20 +479,31 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 			why = "the repository was made by this setup, so it holds none of the record's snapshots"
 		case !hadOld:
 			why = "no credential file was there to tie it to this repository"
-		case oldRepository != o.Repository:
-			why = "the previous credential file named another repository"
+		case prevID == "":
+			why = "no setup recorded which repository it was written against"
+		case prevID != rep.RepositoryID:
+			why = fmt.Sprintf("it was written against another repository (id %s)", short(prevID))
 		}
 	}
 	// On the disk before the file is — the two live in different
 	// directories, and a power cut must not keep the new file and lose
-	// the aside — and so is a put-back. Whatever fails, the two files
-	// are left agreeing: the record comes back while the old file is
-	// still in place, and stays aside once the new one is.
+	// the aside — and so is a put-back. Whatever fails, the files are
+	// left agreeing: the record and the id come back while the old file
+	// is still in place, and stay once the new one is.
 	putBack := func(cause error) error {
-		if back := os.Rename(rep.Aside, statusPath); back != nil {
-			return fmt.Errorf("%w; and the record, put aside first, could not be put back from %s: %w", cause, rep.Aside, back)
+		if rep.Aside != "" {
+			if back := os.Rename(rep.Aside, statusPath); back != nil {
+				return fmt.Errorf("%w; and the record, put aside first, could not be put back from %s: %w", cause, rep.Aside, back)
+			}
+			rep.Aside = ""
 		}
-		rep.Aside = ""
+		back := os.Remove(idFile)
+		if prevID != "" {
+			back = writeID(idFile, prevID)
+		}
+		if back != nil && !errors.Is(back, fs.ErrNotExist) {
+			return fmt.Errorf("%w; and the repository id could not be put back: %w", cause, back)
+		}
 		if sync := syncDir(cfg.StateDir); sync != nil {
 			return fmt.Errorf("%w; and the record, put back, could not be synced: %w", cause, sync)
 		}
@@ -493,15 +514,15 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 		if err := os.Rename(statusPath, rep.Aside); err != nil {
 			return nil, x.setupErr(err, password)
 		}
-		if err := syncDir(cfg.StateDir); err != nil {
-			return nil, x.setupErr(putBack(err), password)
-		}
+	}
+	if err := writeID(idFile, rep.RepositoryID); err != nil {
+		return nil, x.setupErr(putBack(err), password)
+	}
+	if err := syncDir(cfg.StateDir); err != nil {
+		return nil, x.setupErr(putBack(err), password)
 	}
 	if err := commit(tmp, cfg.EnvFile); err != nil {
-		if why != "" {
-			return nil, x.setupErr(putBack(err), password)
-		}
-		return nil, x.setupErr(err, password)
+		return nil, x.setupErr(putBack(err), password)
 	}
 	if err := syncDir(dir); err != nil {
 		// Renamed, not synced: the file is in place for every reader,
@@ -529,6 +550,25 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 		term.Say(fmt.Sprintf("%s is still there, from before this version, and is not read; an administrator's sudoers may reach it: remove it (sudo rm %s)", cfg.OldEnvFile, cfg.OldEnvFile))
 	}
 	return rep, nil
+}
+
+// writeID keeps the repository's id beside the record, on the disk
+// before it returns: for everyone to read, as the record is, and
+// nothing a password guards.
+func writeID(path, id string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644) //nolint:gosec // an id, beside status.json
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString(id + "\n"); err != nil {
+		f.Close() //nolint:errcheck,gosec // the write's error is the one
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close() //nolint:errcheck,gosec // the sync's error is the one
+		return err
+	}
+	return f.Close()
 }
 
 // confirmStored has the operator type "stored" — a word that means
@@ -752,8 +792,8 @@ func (x *run) repository(ctx context.Context, term Terminal, repo, role, envFile
 		return o, resticMessage(errFile), nil
 	}
 	// Init: recorded for the next lock holder to wait for, not to stop
-	// (the record goes once it has ended), and run on a context nothing
-	// here cancels. The clock and an interrupt end this wait alone.
+	// (the record goes once it was seen to end), and run on a context
+	// nothing here cancels. The clock and an interrupt end this wait alone.
 	marker := filepath.Join(x.cfg.RunDir, "init-unit")
 	if err := os.WriteFile(marker, []byte(spec.Name+"\n"), 0o600); err != nil {
 		return unit.Outcome{}, "", err
@@ -766,7 +806,13 @@ func (x *run) repository(ctx context.Context, term Terminal, repo, role, envFile
 	done := make(chan ended, 1)
 	go func() {
 		o, err := x.r.Run(context.WithoutCancel(ctx), spec)
-		_ = os.Remove(marker)
+		if err == nil {
+			// Seen to its end. A runner error is a unit lost sight
+			// of — the request may have reached the manager all the
+			// same — and the record stays for the next lock holder,
+			// whose wait treats a unit that is not there as ended.
+			_ = os.Remove(marker)
+		}
 		done <- ended{o, err}
 	}()
 	select {
