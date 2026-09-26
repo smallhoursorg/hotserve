@@ -70,6 +70,8 @@ type box struct {
 	account                    bool
 	accountsMade               int
 	owned, synced              []string // what setup asked to be root's, and put on the disk
+	waited                     []string // units a lock holder waited for
+	waitErr                    error
 }
 
 func (b *box) ManagerVersion(context.Context) (int, error) { return b.version, nil }
@@ -142,6 +144,13 @@ func must(t *testing.T, err error) {
 }
 
 func (b *box) Stop(name string) error { b.stopped = append(b.stopped, name); return b.stopErr }
+
+// Wait is what a lock holder does about a unit an earlier setup left
+// to finish: recorded, and the unit taken as gone.
+func (b *box) Wait(_ context.Context, name string) error {
+	b.waited = append(b.waited, name)
+	return b.waitErr
+}
 
 func (b *box) Run(ctx context.Context, s unit.Spec) (unit.Outcome, error) {
 	b.specs = append(b.specs, s)

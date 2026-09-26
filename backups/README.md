@@ -676,9 +676,17 @@ What can be known to fail is refused before anything is asked for
    wrong with the key, the host or the port [measured], and setup then asks for the
    key id and secret again, up to three times, the one password
    standing: it has taken effect nowhere until the repository is made
-   with it. When setup ends without having used it — three refusals,
-   Ctrl-C, any failure after the showing — the last line says so:
-   "the password shown above was never used: discard it". The clock is
+   with it. When setup ends after the showing, the last line says what
+   became of the password: before `restic init` has been started with
+   it (a refusal at the `stored` prompt, Ctrl-C there, a file that
+   could not be written), "never used: discard it"; once init has been
+   started with it — three storage refusals, Ctrl-C or the clock
+   during init, any failure after — "keep the password shown above:
+   restic init ran with it, and may have made the repository", since a
+   stopped init may have written some or all of one, and the next setup
+   looks first and asks for it if the repository is there; and where
+   init itself answers that the repository exists, it made nothing with
+   the password, and "discard it" is said again. The clock is
    for a storage that takes the connection and never answers, after
    which the unit is stopped and the file removed;
 7. a repository that **exists already** — a rebuilt box, a bucket

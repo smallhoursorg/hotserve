@@ -17,6 +17,10 @@ import (
 type tty struct {
 	f  *os.File
 	in *bufio.Reader
+	// failed is the first write that did not reach the terminal: after
+	// it, what was to be shown may not have been, and no question is
+	// asked — least of all whether a password was stored.
+	failed error
 }
 
 // openTTY opens the terminal; with none, the refusal names the file a
@@ -34,7 +38,11 @@ func (t *tty) Close() { _ = t.f.Close() }
 // Say goes to the terminal too, not to standard output: the one thing
 // setup shows that is a secret — a new repository's password — must
 // reach the person at the terminal and nothing that stdout was sent to.
-func (t *tty) Say(line string) { _, _ = fmt.Fprintln(t.f, line) }
+func (t *tty) Say(line string) {
+	if _, err := fmt.Fprintln(t.f, line); err != nil && t.failed == nil {
+		t.failed = err
+	}
+}
 
 // Ask puts the prompt on the terminal and reads one line from it. A
 // secret is read with echo off — off before the prompt is shown, so
@@ -43,6 +51,9 @@ func (t *tty) Say(line string) { _, _ = fmt.Fprintln(t.f, line) }
 // silence ends the question. An interrupt is no answer; so is silence
 // for answerWithin.
 func (t *tty) Ask(ctx context.Context, prompt string, secret bool) (string, error) {
+	if t.failed != nil {
+		return "", fmt.Errorf("the terminal could not be written to, so what was to be shown may not have been: %w", t.failed)
+	}
 	if secret {
 		restore, err := t.echoOff()
 		if err != nil {
@@ -51,7 +62,9 @@ func (t *tty) Ask(ctx context.Context, prompt string, secret bool) (string, erro
 		defer restore()
 		defer func() { _, _ = fmt.Fprintln(t.f) }()
 	}
-	_, _ = fmt.Fprint(t.f, prompt)
+	if _, err := fmt.Fprint(t.f, prompt); err != nil {
+		return "", fmt.Errorf("the terminal could not be written to: %w", err)
+	}
 	line, err := readLine(ctx, t.in)
 	if errors.Is(err, errNoAnswer) {
 		return "", fmt.Errorf("no answer in %s", answerWithin)

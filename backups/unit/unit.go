@@ -267,6 +267,37 @@ func (r *Runner) Run(ctx context.Context, s Spec) (Outcome, error) {
 	}
 }
 
+// Wait waits for a unit by its exact name to end on its own — a unit an
+// earlier command left to finish — and reaps it; a unit that does not
+// exist has ended. It looks every second for as long as ctx allows.
+func (r *Runner) Wait(ctx context.Context, name string) error {
+	if !nameRe.MatchString(name) {
+		return fmt.Errorf("unit name %q does not match %s", name, nameRe)
+	}
+	for {
+		p, err := r.conn.GetAllPropertiesContext(ctx, name)
+		if err != nil {
+			if isNoSuchUnit(err) {
+				return nil
+			}
+			return fmt.Errorf("%s: reading its state: %w", name, err)
+		}
+		if str(p["LoadState"]) == "not-found" {
+			return nil
+		}
+		switch str(p["ActiveState"]) {
+		case "inactive", "failed":
+			_ = r.conn.ResetFailedUnitContext(ctx, name)
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%s: still %s: %w", name, str(p["ActiveState"]), ctx.Err())
+		case <-time.After(time.Second):
+		}
+	}
+}
+
 // Stop stops a unit by its exact name and confirms it gone; a unit that
 // does not exist is already gone. It is how a run ends what an earlier
 // run — killed before it could — left behind.

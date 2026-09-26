@@ -527,9 +527,18 @@ func TestALookThatFailedOnItsOwnIsSaidBeforeAnyPassword(t *testing.T) {
 }
 
 // The init unit is the one not recorded for the next lock holder to
-// stop: stopped half way it leaves a repository no password opens.
-func TestTheInitUnitIsLeftToFinish(t *testing.T) {
+// stop: stopped half way it leaves a repository no password opens. It
+// is recorded for the next lock holder to wait for instead, so that
+// nothing probes or makes the same repository while it still writes.
+func TestTheInitUnitIsLeftToFinishAndWaitedFor(t *testing.T) {
 	b, m := setupBox(t)
+	var initUnitDuring string
+	b.before = func(s unit.Spec) {
+		if strings.Contains(s.Name, "_init_") {
+			raw, _ := os.ReadFile(filepath.Join(b.cfg.RunDir, "init-unit"))
+			initUnitDuring = strings.TrimSpace(string(raw))
+		}
+	}
 	if _, err := b.setup(t, m, "s3:http://e2e-s3:9000/box"); err != nil {
 		t.Fatal(err)
 	}
@@ -540,10 +549,61 @@ func TestTheInitUnitIsLeftToFinish(t *testing.T) {
 		t.Fatalf("the plan and the look are not recorded: %q", recorded)
 	}
 	if strings.Contains(recorded, "_init_") {
-		t.Fatalf("the init unit is recorded, and the next run would stop it half way: %q", recorded)
+		t.Fatalf("the init unit is recorded to be stopped, and the next run would stop it half way: %q", recorded)
+	}
+	if !strings.Contains(initUnitDuring, "_init_") {
+		t.Fatalf("while init ran, nothing recorded it for the next lock holder to wait for: %q", initUnitDuring)
+	}
+	if _, err := os.Lstat(filepath.Join(b.cfg.RunDir, "init-unit")); err == nil {
+		t.Fatal("the init unit is still recorded after it ended")
 	}
 	if s := b.spec("init"); s.BindsTo != b.cfg.BindsTo {
 		t.Fatalf("the init unit's BindsTo: %q", s.BindsTo)
+	}
+	// The next lock holder — a setup here, a run the same — waits for
+	// the unit a killed setup left, before anything of its own.
+	b2, m2 := setupBox(t)
+	must(t, os.MkdirAll(b2.cfg.RunDir, 0o700))
+	must(t, os.WriteFile(filepath.Join(b2.cfg.RunDir, "init-unit"), []byte("hotserve_backup_init_0123456789ab.service\n"), 0o600))
+	if _, err := b2.setup(t, m2, "s3:http://e2e-s3:9000/box"); err != nil {
+		t.Fatal(err)
+	}
+	if len(b2.waited) != 1 || b2.waited[0] != "hotserve_backup_init_0123456789ab.service" {
+		t.Fatalf("waited for %v", b2.waited)
+	}
+	if !strings.Contains(m2.saidAll(), "waiting for the restic init a setup that did not finish left running: hotserve_backup_init_0123456789ab.service") {
+		t.Fatalf("said:\n%s", m2.saidAll())
+	}
+	if _, err := os.Lstat(filepath.Join(b2.cfg.RunDir, "init-unit")); err == nil {
+		t.Fatal("the waited-for unit is still recorded")
+	}
+	// A run waits too, and a unit that cannot be seen to its end stops
+	// the lock holder with the runner's words.
+	b3, _ := setupBox(t)
+	must(t, os.MkdirAll(b3.cfg.RunDir, 0o700))
+	must(t, os.WriteFile(filepath.Join(b3.cfg.RunDir, "init-unit"), []byte("hotserve_backup_init_0123456789ab.service\n"), 0o600))
+	must(t, os.MkdirAll(filepath.Dir(b3.cfg.EnvFile), 0o755))
+	must(t, os.WriteFile(b3.cfg.EnvFile, []byte("RESTIC_PASSWORD=x\n"), 0o600))
+	b3.waitErr = errors.New("still running after 3m")
+	if _, err := Run(context.Background(), b3.cfg, b3); err == nil || !strings.Contains(err.Error(), "still running after 3m") || len(b3.waited) != 1 || b3.roles() != "" {
+		t.Fatalf("err %v, waited %v, units %s", err, b3.waited, b3.roles())
+	}
+}
+
+// Ctrl-C while the plan is read is said as an interrupt, like every
+// other: nothing has been written.
+func TestAnInterruptDuringThePlanIsSaidAsOne(t *testing.T) {
+	b, m := setupBox(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	b.hang = "plan"
+	b.before = func(s unit.Spec) {
+		if strings.Contains(s.Name, "_plan_") {
+			cancel()
+		}
+	}
+	_, err := Setup(ctx, b.cfg, b, SetupOptions{Repository: "s3:http://e2e-s3:9000/box", Terminal: m})
+	if !errors.Is(err, context.Canceled) || err.Error() != "interrupted: nothing has been written" {
+		t.Fatalf("err = %v", err)
 	}
 }
 

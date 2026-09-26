@@ -75,7 +75,14 @@ const retryLock = "2h"
 type Runner interface {
 	Run(ctx context.Context, s unit.Spec) (unit.Outcome, error)
 	Stop(name string) error
+	// Wait waits for a unit to end on its own: one a setup left to
+	// finish making the repository.
+	Wait(ctx context.Context, name string) error
 }
+
+// initWait bounds the wait for a restic init an earlier setup left
+// running: its own clock, and slack.
+const initWait = 3 * time.Minute
 
 // ErrBusy is returned when another run holds the lock.
 var ErrBusy = errors.New("another backup run is in progress")
@@ -127,12 +134,13 @@ func begin(cfg Config, r Runner) (x *run, end func(), err error) {
 	} else if err != nil {
 		return nil, nil, fmt.Errorf("backups are not set up: %s: %w", cfg.EnvFile, err)
 	}
-	return open(cfg, r)
+	return open(cfg, r, nil)
 }
 
 // open is begin without the credential file: what setup, which is
-// about to write that file, shares with a run.
-func open(cfg Config, r Runner) (x *run, end func(), err error) {
+// about to write that file, shares with a run. say, when there is
+// someone to tell, hears of a wait for an earlier setup's init.
+func open(cfg Config, r Runner, say func(string)) (x *run, end func(), err error) {
 	// The state dir is where the status record is read from by anyone;
 	// everything else is root's alone. Units reach staging through
 	// binds the manager makes, not by walking here.
@@ -168,6 +176,9 @@ func open(cfg Config, r Runner) (x *run, end func(), err error) {
 	}
 	x = &run{cfg: cfg, r: r, nonce: nonce, dir: filepath.Join(cfg.RunDir, nonce), prev: prev,
 		status: &record.Status{Started: time.Now().UTC(), Warning: unreadable, Apps: map[string]*record.App{}, Listed: prev.Listed, Unlisted: prev.Unlisted, LastDrill: prev.LastDrill}}
+	if err := x.awaitInit(say); err != nil {
+		return x, unlock, err
+	}
 	if err := x.sweep(); err != nil {
 		return x, unlock, err
 	}
@@ -500,9 +511,9 @@ func removeRunDir(dir string) {
 		return
 	}
 	for _, e := range entries {
-		_ = os.Remove(filepath.Join(dir, e.Name())) // unlink or rmdir, never a walk
+		_ = os.Remove(filepath.Join(dir, e.Name())) //nolint:gosec // root's own run directory, and an entry it made; unlink or rmdir, never a walk
 	}
-	_ = os.Remove(dir)
+	_ = os.Remove(dir) //nolint:gosec // as above
 }
 
 // mountsUnder lists the mount points beneath dir, deepest first.
@@ -525,6 +536,33 @@ var mountsUnder = func(dir string) ([]string, error) {
 // backslash).
 func unescapeMount(s string) string {
 	return strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`).Replace(s)
+}
+
+// awaitInit waits for the restic init a setup that did not finish left
+// running — recorded under RunDir/init-unit, not stopped: stopped half
+// way it would leave a repository no password opens — before anything
+// here looks at or makes a repository.
+func (x *run) awaitInit(say func(string)) error {
+	file := filepath.Join(x.cfg.RunDir, "init-unit")
+	raw, err := os.ReadFile(file) //nolint:gosec // root's own file under /run
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	name := strings.TrimSpace(string(raw))
+	if name != "" {
+		if say != nil {
+			say("waiting for the restic init a setup that did not finish left running: " + name)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), initWait)
+		defer cancel()
+		if err := x.r.Wait(ctx, name); err != nil {
+			return fmt.Errorf("a restic init from an earlier setup is still running: %w", err)
+		}
+	}
+	return os.Remove(file)
 }
 
 func (x *run) sweepUnits() error {

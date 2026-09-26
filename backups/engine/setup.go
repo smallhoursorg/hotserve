@@ -230,7 +230,7 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 	}
 	term.Say("account " + backupUser + ": " + rep.Account)
 
-	x, end, err := open(cfg, r)
+	x, end, err := open(cfg, r, term.Say)
 	if x == nil {
 		return nil, err
 	}
@@ -285,7 +285,7 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 
 	p, err := x.planWith(ctx, filepath.Join(x.dir, "plan.err"))
 	if err != nil {
-		return nil, err
+		return nil, x.setupErr(err, "")
 	}
 	rep.Apps = p.Names()
 	if len(rep.Apps) == 0 {
@@ -673,8 +673,15 @@ func (x *run) repository(ctx context.Context, term Terminal, repo, role, envFile
 	errFile := filepath.Join(x.dir, role+".err")
 	start := x.start
 	if role == "init" {
+		// Recorded for the next lock holder to wait for, not to stop;
+		// the record goes once init has ended, either way.
 		start = func(ctx context.Context, s unit.Spec) (unit.Outcome, error) {
 			s.BindsTo = x.cfg.BindsTo
+			file := filepath.Join(x.cfg.RunDir, "init-unit")
+			if err := os.WriteFile(file, []byte(s.Name+"\n"), 0o600); err != nil {
+				return unit.Outcome{}, err
+			}
+			defer os.Remove(file) //nolint:errcheck // gone with the unit
 			return x.r.Run(ctx, s)
 		}
 	}

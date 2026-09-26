@@ -558,3 +558,43 @@ func envOfUnit(t *testing.T, r *Runner, file, stdout string) map[string]string {
 	}
 	return unit
 }
+
+// Wait is what a lock holder does about a restic init an earlier setup
+// left to finish: it returns once the unit has ended on its own, reaps
+// it, and takes a unit that is not there as ended.
+func TestIntegrationWaitReturnsOnceTheUnitEndsOnItsOwn(t *testing.T) {
+	r := runner(t)
+	done := make(chan Outcome, 1)
+	go func() {
+		out, _ := r.Run(context.Background(), Spec{Name: name(t), Argv: []string{"/bin/sleep", "2"}, User: testUser})
+		done <- out
+	}()
+	for activeState(name(t)) != "activating" {
+		time.Sleep(50 * time.Millisecond)
+	}
+	start := time.Now()
+	if err := r.Wait(context.Background(), name(t)); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if took := time.Since(start); took < time.Second || took > 10*time.Second {
+		t.Fatalf("Wait returned after %s of a 2 s unit", took)
+	}
+	if out := <-done; !out.OK() {
+		t.Fatalf("the unit Wait watched: %+v", out)
+	}
+	if err := r.Wait(context.Background(), "hotserve_backup_test_never_started.service"); err != nil {
+		t.Fatalf("Wait on a unit that is not there: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	go func() {
+		_, _ = r.Run(context.Background(), Spec{Name: name(t), Argv: []string{"/bin/sleep", "3"}, User: testUser})
+	}()
+	for activeState(name(t)) != "activating" {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err := r.Wait(ctx, name(t)); err == nil || !strings.Contains(err.Error(), "still activating") {
+		t.Fatalf("Wait past its context: %v", err)
+	}
+	must(t, r.Stop(name(t)))
+}
