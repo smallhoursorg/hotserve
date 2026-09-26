@@ -204,6 +204,12 @@ type setup struct {
 	// at all: from then on no failure proves it unused, and it is never
 	// said to be.
 	initRan bool
+	// initLeft is whether init was left running — by its clock or an
+	// interrupt — and so still has the staged file and the run
+	// directory to read: the manager opens both in the unit's own first
+	// moments, which the end of this command may come before. Both are
+	// then left for it, and swept by the next lock holder after its wait.
+	initLeft bool
 }
 
 // Setup makes the box ready to back up into one repository: the
@@ -315,10 +321,15 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 	// the manager reads for the units here, and takes the working one's
 	// place only once the repository has answered. Whatever ends this
 	// command before that, the working file is as it was and the staged
-	// file goes with it. Until a password is made it holds a throwaway
-	// one: what the look for a repository needs, and nothing that takes
-	// effect anywhere.
-	defer os.Remove(s.staged) //nolint:errcheck // gone already once it was put in place
+	// file goes with it — unless init was left running to read it, in
+	// which case the next setup removes it. Until a password is made it
+	// holds a throwaway one: what the look for a repository needs, and
+	// nothing that takes effect anywhere.
+	defer func() {
+		if !s.initLeft {
+			os.Remove(s.staged) //nolint:errcheck,gosec // gone already once it was put in place
+		}
+	}()
 	throwaway, err := newPassword()
 	if err != nil {
 		return nil, err
@@ -866,6 +877,9 @@ func (s *setup) repository(ctx context.Context, role string, within time.Duratio
 		}
 		return e.o, resticMessage(errFile), nil
 	case <-clock.Done():
+		// Left running: with what it reads and writes, which the manager
+		// may not have opened yet.
+		s.initLeft, s.keepDir = true, true
 		if ctx.Err() != nil {
 			return unit.Outcome{}, "", ctx.Err()
 		}

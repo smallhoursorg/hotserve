@@ -128,6 +128,35 @@ func envOf(t *testing.T, path string) envfile.Values {
 	return v
 }
 
+// leftForInit: the working file untouched, and what the running init
+// reads and writes left in place for it — the staged file it takes its
+// environment from, and the run directory its output goes to — since
+// the manager opens both in the unit's own first moments, which an
+// interrupt may come before. The next lock holder waits for init, then
+// sweeps both.
+func leftForInit(t *testing.T, b *box, m *term) {
+	t.Helper()
+	if _, err := os.Lstat(b.cfg.EnvFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the credential file exists: %v", err)
+	}
+	if left, _ := filepath.Glob(b.cfg.EnvFile + ".*"); len(left) != 1 || left[0] != envfile.Staged(b.cfg.EnvFile) {
+		t.Fatalf("beside the working file: %v, want the staged file alone", left)
+	}
+	entries, _ := os.ReadDir(b.cfg.RunDir)
+	dirs := 0
+	for _, e := range entries {
+		if e.IsDir() {
+			dirs++
+		}
+	}
+	if dirs != 1 {
+		t.Fatalf("the run directory init writes to is gone: %v", entries)
+	}
+	if len(m.asked) != 0 {
+		t.Fatalf("prompts were asked: %q", m.asked)
+	}
+}
+
 func nothingWritten(t *testing.T, b *box, m *term) {
 	t.Helper()
 	if _, err := os.Lstat(b.cfg.EnvFile); !errors.Is(err, os.ErrNotExist) {
@@ -1174,7 +1203,7 @@ func TestARepositoryThatDoesNotAnswerIsGivenUpOnAndInitLeftRunning(t *testing.T)
 		t.Fatal("the running init is not recorded for the next lock holder")
 	}
 	m.asked = nil
-	nothingWritten(t, b, m)
+	leftForInit(t, b, m)
 	// What a person waiting on init is told: Ctrl-C leaves a unit
 	// running that may have made the repository with the shown password
 	// — never "nothing has been written", which is the look's and the
@@ -1223,7 +1252,7 @@ func TestAnInterruptDuringInitLeavesItRunningAndWritesNothing(t *testing.T) {
 		t.Fatal("the running init is not recorded for the next lock holder")
 	}
 	m.asked = nil
-	nothingWritten(t, b, m)
+	leftForInit(t, b, m)
 }
 
 var asideRe = regexp.MustCompile(`^status\.json\.aside-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$`)

@@ -696,8 +696,11 @@ What can be known to fail is refused before anything is asked for
    init itself answers that the repository exists, it made nothing with
    the password, and "discard it" is said again. The clock is
    for a storage that takes the connection and never answers: the
-   waiting ends and the temporary file is removed, and the unit runs
-   on, recorded as above;
+   waiting ends, and the unit runs on, recorded as above, with the
+   staged file it reads and the run directory it writes to left in
+   place for it — the manager opens both in the unit's first moments,
+   which the clock or Ctrl-C may come before — and the next run or
+   setup, having waited for it, removes both and says so;
 7. a repository that **exists already** — a rebuilt box, a bucket
    reused — is asked for its own password (echo off), and nothing is
    made or shown; setup opens it with `restic cat config`, and a wrong
@@ -736,10 +739,11 @@ What can be known to fail is refused before anything is asked for
 Whatever ends setup before the last step — Ctrl-C ("interrupted:
 nothing has been written"), a refusal, a kill — leaves the working file
 byte for byte as it was, or absent as it was, and no copy of a
-credential beside it; a `kill -9` at any point after the storage key
-was typed leaves the file under its temporary name, root-only, holding
-that key and — after `restic init` began — the password, which the
-next setup removes first. A password that has
+credential beside it — but for a `restic init` left running, which
+keeps its staged file; a `kill -9` at any point after the storage key
+was typed leaves the file under its staged name the same, root-only,
+holding that key and — after `restic init` began — the password. The
+next setup removes it first, and says so. A password that has
 taken effect anywhere has been shown, and confirmed stored, before it
 did: a setup killed after `restic init` made the repository is followed
 by one that says the repository exists and asks for the password that

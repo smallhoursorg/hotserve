@@ -292,7 +292,10 @@ took=$(($(date +%s) - t0))
 says "the repository did not answer within 2m0s; restic init is left running as hotserve_backup_init_[0-9a-f]\{12\}.service, and the next run or setup waits for it (if it must be ended: systemctl stop hotserve_backup_init_" && [ "$took" -ge 130 ] && [ "$took" -lt 190 ] && pass "given up on after the look's 10 s and the clock's 2 min (${took}s): the waiting, not the unit" || fail "the clock: exit $rc after ${took}s: $(tail -3 "$OUT")"
 init_unit=$(systemctl list-units --plain --no-legend --state=activating 'hotserve_backup_init_*' | awk '{print $1}')
 [ -n "$init_unit" ] && [ -f /run/hotserve-backup/init-unit ] && [ "$(cat /run/hotserve-backup/init-unit)" = "$init_unit" ] && pass "init is still running, and recorded for the next lock holder" || fail "after the clock: init unit '$init_unit', marker $(cat /run/hotserve-backup/init-unit 2>&1)"
-[ "$(temps)" = 0 ] && [ "$(sum)" = "$before" ] && pass "nothing is left beside the working file, which is as it was" || fail "after the clock: temps=$(temps)"
+# The staged file and the run directory stay for the unit — the manager
+# opens both in the unit's first moments, which the clock or Ctrl-C may
+# come before — and the next setup removes them after its wait.
+[ "$(temps)" = 1 ] && [ "$(sum)" = "$before" ] && pass "the staged file is left for init, and the working file is as it was" || fail "after the clock: temps=$(temps)"
 # A setup that comes now waits for that init, up to three minutes, and
 # says so; the operator ends it the way the message says.
 converse "hotserve-backup setup $S3/afterclock" "$P_KEY" "$KEYID" &
@@ -301,7 +304,7 @@ i=0; until grep -q "waiting for the restic init a setup that did not finish left
 grep -q "waiting for the restic init a setup that did not finish left running: $init_unit" "$OUT" && pass "the next setup waits for the init that was left running, and says which" || fail "the next setup: $(cat "$OUT")"
 systemctl stop "$init_unit"
 wait "$sp"
-[ $? != 0 ] && grep -q "$P_KEY" "$OUT" && pass "once it ended, the next setup went on to its own prompts" || fail "after the init ended: $(tail -3 "$OUT")"
+[ $? != 0 ] && grep -q "$P_KEY" "$OUT" && says "removed a file an interrupted setup left: $ENVFILE.staged" && [ "$(temps)" = 0 ] && pass "once it ended, the next setup removed the staged file it left, and went on to its own prompts" || fail "after the init ended: temps=$(temps): $(tail -3 "$OUT")"
 until_units 0 'hotserve_backup_*'
 [ "$(units_left)" = 0 ] && [ ! -f /run/hotserve-backup/init-unit ] && pass "the unit is gone, and its record with it" || fail "after stopping by hand: units=$(units_left), marker $(ls /run/hotserve-backup/)"
 converse "hotserve-backup setup s3:http://127.0.0.1:9999/blackhole" "$P_KEY" "$KEYID" "$P_SECRET" "$SECRET" "$P_STORED" stored &
@@ -312,11 +315,12 @@ kill -INT "$(pgrep -x hotserve-backup)"
 wait "$sp"
 [ $? != 0 ] && grep -q "interrupted: nothing has been written; keep the password shown above: restic init ran with it" "$OUT" && pass "interrupted during init, setup exits non-zero and says to keep the shown password" || fail "interrupted setup: $(tail -2 "$OUT")"
 init_unit=$(systemctl list-units --plain --no-legend --state=activating 'hotserve_backup_init_*' | awk '{print $1}')
-[ -n "$init_unit" ] && [ "$(temps)" = 0 ] && [ "$(sum)" = "$before" ] && pass "Ctrl-C left init running and nothing else" || fail "after Ctrl-C: init '$init_unit' temps=$(temps)"
+[ -n "$init_unit" ] && [ "$(temps)" = 1 ] && [ "$(sum)" = "$before" ] && pass "Ctrl-C left init running, with its staged file, and the working file as it was" || fail "after Ctrl-C: init '$init_unit' temps=$(temps)"
 systemctl stop "$init_unit" 2>/dev/null
 until_units 0 'hotserve_backup_*'
 [ "$(units_running)" = 0 ] && pass "ended by hand, as the message says" || fail "units still running: $(units_running)"
 kill "$bh" 2>/dev/null
+rm -f "$ENVFILE.staged"
 
 echo "=== setup 12: status as root says where the file is not read as written; as nobody it cannot look ==="
 cp "$ENVFILE" /root/env.keep

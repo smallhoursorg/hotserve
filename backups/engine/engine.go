@@ -101,6 +101,11 @@ type run struct {
 	// left are the apps on the last record that this run's plan no
 	// longer has: said once, by this run, and never kept.
 	left map[string]bool
+	// keepDir keeps the run directory when the command ends: a unit
+	// left running writes its output there, and the manager opens those
+	// files in the unit's own first moments, which the end may come
+	// before. The next lock holder's sweep removes it, after waiting.
+	keepDir bool
 }
 
 // preRestoreTag is on a snapshot a restore made of what it was about to
@@ -189,7 +194,12 @@ func open(ctx context.Context, cfg Config, r Runner, say func(string)) (x *run, 
 	// defer — but a mount that would not go is the app's own data, bound
 	// here, and root must never walk into it deleting: removeRunDir does
 	// not recurse.
-	return x, func() { removeRunDir(x.dir); unlock() }, nil
+	return x, func() {
+		if !x.keepDir {
+			removeRunDir(x.dir)
+		}
+		unlock()
+	}, nil
 }
 
 // finish writes the record, whatever became of the run. An app the run
