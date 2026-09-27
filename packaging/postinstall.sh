@@ -49,7 +49,7 @@ fi
 if line=$(getent passwd hotserve-backup 2>/dev/null); then
 	shell=${line##*:}
 	home=$(printf '%s' "$line" | cut -d: -f6)
-	case "$(basename "$shell")" in nologin | false) ;; *)
+	case "$shell" in /usr/sbin/nologin | /sbin/nologin | /bin/false | /usr/bin/false) ;; *)
 		echo "hotserve: the hotserve-backup account has a login shell ($shell); hotserve-backup setup will refuse it — lock it with \`usermod --shell /usr/sbin/nologin hotserve-backup\`" >&2 ;;
 	esac
 	if [ "$home" != /nonexistent ] && [ -e "$home" ]; then
@@ -65,6 +65,10 @@ if line=$(getent passwd hotserve-backup 2>/dev/null); then
 	fi
 	if [ "$bgid" = 0 ]; then
 		echo "hotserve: the hotserve-backup account has gid 0, root's group; hotserve-backup setup will refuse it — remove it and let setup make it" >&2
+	fi
+	others=$(getent passwd 2>/dev/null | awk -F: -v u="$buid" '$3 == u && $1 != "hotserve-backup" { print $1 }' | tr '\n' ' ')
+	if [ -n "$others" ]; then
+		echo "hotserve: the hotserve-backup account shares its uid $buid with $others; hotserve-backup setup will refuse it — remove it and let setup make it" >&2
 	fi
 else
 	echo "hotserve: the hotserve-backup system user does not exist and could not be created" >&2

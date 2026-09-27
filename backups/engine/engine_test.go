@@ -71,6 +71,7 @@ type box struct {
 	shell, home                string // as the account has them, where it exists
 	homeThere                  bool   // whether that home is a directory that exists
 	uid, gid                   int
+	holders                    []string // the accounts that hold that uid, the backup account among them
 	accountsMade               int
 	owned, synced              []string // what setup asked to be root's, and put on the disk
 	waited                     []string // units a lock holder waited for
@@ -93,6 +94,21 @@ func newBox(t *testing.T) *box {
 	oldHave := haveProgram
 	haveProgram = func(p string) bool { return b.haveProgram(p) }
 	t.Cleanup(func() { haveProgram = oldHave })
+	// The account restic runs as, as setup makes it, unless a test says
+	// otherwise: a run looks at it before any unit, as setup does.
+	b.account, b.shell, b.home, b.uid, b.gid, b.holders = true, "/usr/sbin/nologin", "/nonexistent", 995, 995, []string{"hotserve-backup"}
+	oldAccount, oldHolders, oldHome, oldMake := account, holders, homeExists, makeAccount
+	account = func(string) (passwd, error) {
+		return passwd{shell: b.shell, home: b.home, uid: b.uid, gid: b.gid, exists: b.account}, nil
+	}
+	holders = func(int) ([]string, error) { return b.holders, nil }
+	homeExists = func(string) bool { return b.homeThere }
+	makeAccount = func() error {
+		b.accountsMade++
+		b.account, b.shell, b.home, b.homeThere, b.uid, b.gid, b.holders = true, "/usr/sbin/nologin", "/nonexistent", false, 995, 995, []string{"hotserve-backup"}
+		return nil
+	}
+	t.Cleanup(func() { account, holders, homeExists, makeAccount = oldAccount, oldHolders, oldHome, oldMake })
 	b.cfg = Config{
 		ConfigDir: "/etc/hotserve",
 		EnvFile:   filepath.Join(dir, "backup.env"), StateDir: filepath.Join(dir, "state"), RunDir: filepath.Join(dir, "run"),

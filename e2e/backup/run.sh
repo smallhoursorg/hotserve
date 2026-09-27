@@ -20,6 +20,15 @@ seed
 write_env "$REPO" "$PASSWORD"
 rr init -q || { echo "FATAL: could not initialise the repository at $REPO"; exit 1; }
 
+echo "=== backup 0b: an account someone else can be stops a run, before any unit ==="
+# It is the run that puts the credential in the account's environment:
+# what setup refuses of the account, a run refuses too.
+usermod --shell /bin/sh hotserve-backup
+if run; then fail "a run with a login shell on the account exited 0"; else grep -q "the hotserve-backup account exists with a login shell (/bin/sh, not one of /usr/sbin/nologin" "$OUT" && pass "a run refuses the account with a login shell, in setup's words" || fail "said: $(cat "$OUT")"; fi
+[ "$(units_left)" = 0 ] && pass "and started no unit" || fail "units: $(systemctl list-units --all --no-legend 'hotserve_backup_*')"
+grep -q '"error": "the hotserve-backup account exists with a login shell' "$STATUS" && pass "and the record says so, for status" || fail "the record: $(head -c 300 "$STATUS")"
+usermod --shell /usr/sbin/nologin hotserve-backup
+
 echo "=== backup 1: a run backs up what is declared, and only that ==="
 if run; then pass "the run exits 0"; else fail "the run failed: $(cat "$OUT")"; fi
 expect_class blog ok "first run"

@@ -100,6 +100,31 @@ var (
 		}
 		return passwd{uid: uid, gid: gid, home: fields[5], shell: fields[6], exists: true}, nil
 	}
+	// holders is every account that holds a uid, from the whole passwd
+	// database as getent enumerates it — where NSS refuses to enumerate
+	// (exit 3), the one entry the uid looks up. Authorization is by
+	// uid: whoever else holds it is the restic process.
+	holders = func(uid int) ([]string, error) {
+		out, err := exec.Command(getent, "passwd").Output()
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 3 {
+			out, err = exec.Command(getent, "passwd", strconv.Itoa(uid)).Output() //nolint:gosec // as above; the uid is a number
+			if errors.As(err, &exit) && exit.ExitCode() == 2 {
+				return nil, nil
+			}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%s passwd: %w", getent, err)
+		}
+		var names []string
+		for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+			fields := strings.Split(line, ":")
+			if len(fields) == 7 && fields[2] == strconv.Itoa(uid) {
+				names = append(names, fields[0])
+			}
+		}
+		return names, nil
+	}
 	homeExists  = func(path string) bool { _, err := os.Lstat(path); return err == nil }
 	makeAccount = func() error {
 		if out, err := exec.Command(useradd[0], useradd[1:]...).CombinedOutput(); err != nil {
@@ -135,24 +160,38 @@ func useraddArgv() string { return strings.Join(useradd, " ") }
 // it, and the message says the two ways to mend it.
 func accountUsable(acct passwd) error {
 	var wrong []string
-	// The account is what every restic unit runs as, User= by name:
-	// root, or the hotserve data user, would run restic with the
-	// credential as the two uids the design keeps it away from.
+	// The account is what every restic unit runs as, User= by name, and
+	// authorization is by uid: root's is root, and any other account
+	// holding the uid — the hotserve data user's among them — is the
+	// restic process, and reads its environment. The gid is looked at
+	// for root's alone: a group reads no process's environment.
 	if acct.uid == 0 {
 		wrong = append(wrong, "uid 0 (root)")
 	}
 	if acct.gid == 0 {
 		wrong = append(wrong, "gid 0 (root)")
 	}
-	if uid, _, err := dataOwner(); err == nil && acct.uid == uid && uid != 0 {
-		wrong = append(wrong, fmt.Sprintf("the hotserve user's uid (%d)", uid))
+	names, err := holders(acct.uid)
+	if err != nil {
+		return err
 	}
-	switch filepath.Base(acct.shell) {
-	case "nologin", "false":
-	case ".", "": // no shell set: login gives /bin/sh
+	var others []string
+	for _, n := range names {
+		if n != backupUser {
+			others = append(others, record.Text(n))
+		}
+	}
+	if len(others) > 0 && acct.uid != 0 {
+		wrong = append(wrong, fmt.Sprintf("a uid shared with %s (%d)", strings.Join(others, ", "), acct.uid))
+	}
+	// The shell is what login runs: the paths known to refuse a login,
+	// not a name (a copy of bash at /tmp/nologin is a login shell).
+	switch acct.shell {
+	case "/usr/sbin/nologin", "/sbin/nologin", "/bin/false", "/usr/bin/false":
+	case "": // no shell set: login gives /bin/sh
 		wrong = append(wrong, "a login shell (none set, which is /bin/sh)")
 	default:
-		wrong = append(wrong, fmt.Sprintf("a login shell (%s)", record.Text(acct.shell)))
+		wrong = append(wrong, fmt.Sprintf("a login shell (%s, not one of /usr/sbin/nologin, /sbin/nologin, /bin/false, /usr/bin/false)", record.Text(acct.shell)))
 	}
 	// /nonexistent is the home setup gives; a directory of that name is
 	// nobody's home, and refusing it would refuse setup's own account.
@@ -164,6 +203,23 @@ func accountUsable(acct passwd) error {
 	}
 	return fmt.Errorf("the %s account exists with %s: every restic unit runs as it, and whoever can log in as it — or is it — can read the repository credential from restic's environment; lock it (usermod --shell /usr/sbin/nologin --home /nonexistent %s), or remove it and make it as setup would (%s)",
 		backupUser, strings.Join(wrong, " and "), backupUser, useraddArgv())
+}
+
+// accountReady is what a run, a restore and a drill ask of the account
+// restic runs as, before any unit: that it is there, and that nobody
+// else can be it — what setup asks of one that exists, held at every
+// run, since it is the run that puts the credential in that account's
+// environment. Not there: a box with a credential file written by
+// hand and no account, whose units would end 217/USER.
+func accountReady() error {
+	acct, err := account(backupUser)
+	if err != nil {
+		return err
+	}
+	if !acct.exists {
+		return fmt.Errorf("the %s account is not there: sudo hotserve-backup setup <repository> makes it (%s)", backupUser, useraddArgv())
+	}
+	return accountUsable(acct)
 }
 
 // programs are what the units run, and where. A unit whose command is

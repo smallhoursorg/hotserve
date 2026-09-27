@@ -655,12 +655,16 @@ hourly run. It needs no sudoers line.
   know; restic, sqlite3 or hotserve not installed (a run, a restore and
   a drill refuse the same, in the same words, before any unit); a
   systemd older than 257; a `hotserve-backup` account that is there
-  with a login shell, a home directory that exists, uid or gid 0, or
-  the `hotserve` user's uid — whoever can log in as it, or is it, can
-  read the repository credential from a running restic's environment —
-  named with the `usermod` that locks it and the `useradd` setup would
-  have used, and never changed by setup; a Caddyfile a run could not
-  plan from; another run, restore or drill under way.
+  with a shell that is not one of `/usr/sbin/nologin`, `/sbin/nologin`,
+  `/bin/false` and `/usr/bin/false`, a home directory that exists, uid
+  or gid 0, or a uid any other account holds — whoever can log in as
+  it, or is it, can read the repository credential from a running
+  restic's environment — named with the `usermod` that locks it and
+  the `useradd` setup would have used, and never changed by setup; a
+  Caddyfile a run could not plan from; another run, restore or drill
+  under way. **A run, a restore and a drill ask the same of the
+  account** before any unit — it is the run that puts the credential
+  in that account's environment — and refuse one that is not there.
 - `setup`, at a prompt: an empty value, one with a line break or a
   control character, or one that is not UTF-8 — the file cannot hold
   it — three times; and a password not confirmed `stored`.
@@ -723,9 +727,9 @@ What can be known to fail is refused before anything is asked for
    (`useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hotserve-backup`
    — the package's postinstall makes it with the same line, so on a
    `.deb` box it is there already), and one that is there is left
-   alone once seen to be nobody's to log in as: no login shell, no
-   home that exists, and neither root's uid or gid nor the `hotserve`
-   user's ("What it refuses");
+   alone once seen to be nobody's to log in as: a shell that refuses a
+   login, no home that exists, not root's uid or gid, and a uid no
+   other account holds ("What it refuses"; every run asks the same);
 2. the run lock is taken and held to the end — a backup run that comes
    due meanwhile says who holds it — the state and run directories are
    made as a run makes them, `/etc/hotserve-backup` is made (root,

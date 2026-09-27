@@ -159,6 +159,9 @@ func begin(ctx context.Context, cfg Config, r Runner) (x *run, end func(), err e
 	if err := programsInstalled(cfg); err != nil {
 		return x, end, err
 	}
+	if err := accountReady(); err != nil {
+		return x, end, err
+	}
 	return x, end, nil
 }
 

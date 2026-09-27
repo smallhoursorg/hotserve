@@ -153,25 +153,35 @@ func neverStarted(t *testing.T, b *box, m *term) {
 	}
 }
 
-// A run under the timer refuses a missing restic, sqlite3 or hotserve
-// with setup's own words, before any unit: a unit whose command is not
-// there ends 203/EXEC, which says nothing of what to install. The same
-// check, in the one place a run, a restore and a drill share. A run
+// What setup refuses, a run refuses, in setup's words and before any
+// unit: a missing restic, sqlite3 or hotserve (a unit whose command is
+// not there ends 203/EXEC, which says nothing of what to install), and
+// the account restic runs as — not there, or one someone else can be
+// (Copilot on #153: the credential reaches restic's environment on
+// every run, not at setup, so the run is where the check has to hold).
+// One check, in the one place a run, a restore and a drill share. A run
 // records the refusal as the run's own error and a drill as one that
 // could not begin, so that status fails with the unit rather than
 // reporting the run before as ok for three hours; a restore says it
 // at the terminal, as every refusal of a restore is.
-func TestARunRefusesAMissingProgramWithSetupsWords(t *testing.T) {
-	for _, p := range []struct{ path, want string }{
-		{"/usr/bin/restic", "restic is not installed at /usr/bin/restic: apt install restic"},
-		{"/usr/bin/sqlite3", "sqlite3 is not installed at /usr/bin/sqlite3: apt install sqlite3"},
-		{"/usr/bin/hotserve", "hotserve is not installed at /usr/bin/hotserve"},
-		{"/usr/bin/hotserve-backup", "hotserve-backup is not installed at /usr/bin/hotserve-backup, where the units run it"},
+func TestARunRefusesWhatSetupRefusesWithSetupsWords(t *testing.T) {
+	for _, p := range []struct {
+		name string
+		set  func(b *box)
+		want string
+	}{
+		{"restic", func(b *box) { b.haveProgram = func(path string) bool { return path != "/usr/bin/restic" } }, "restic is not installed at /usr/bin/restic: apt install restic"},
+		{"sqlite3", func(b *box) { b.haveProgram = func(path string) bool { return path != "/usr/bin/sqlite3" } }, "sqlite3 is not installed at /usr/bin/sqlite3: apt install sqlite3"},
+		{"hotserve", func(b *box) { b.haveProgram = func(path string) bool { return path != "/usr/bin/hotserve" } }, "hotserve is not installed at /usr/bin/hotserve"},
+		{"hotserve-backup", func(b *box) { b.haveProgram = func(path string) bool { return path != "/usr/bin/hotserve-backup" } }, "hotserve-backup is not installed at /usr/bin/hotserve-backup, where the units run it"},
+		{"the account", func(b *box) { b.account = false }, "the hotserve-backup account is not there: sudo hotserve-backup setup <repository> makes it (" + useraddArgv() + ")"},
+		{"a login shell", func(b *box) { b.shell = "/bin/bash" }, "the hotserve-backup account exists with a login shell (/bin/bash, not one of /usr/sbin/nologin, /sbin/nologin, /bin/false, /usr/bin/false)"},
+		{"a shared uid", func(b *box) { b.holders = []string{"alice", "hotserve-backup"} }, "a uid shared with alice (995)"},
 	} {
 		for _, cmd := range runDrillRestore {
-			t.Run(cmd.name+" without "+p.path, func(t *testing.T) {
+			t.Run(cmd.name+" without "+p.name, func(t *testing.T) {
 				b, m := cmd.box(t)
-				b.haveProgram = func(path string) bool { return path != p.path }
+				p.set(b)
 				err := cmd.do(t, b, m)
 				if err == nil || !strings.Contains(err.Error(), p.want) {
 					t.Fatalf("err = %v", err)
@@ -265,9 +275,7 @@ func TestPostinstallMakesTheAccountAsSetupDoes(t *testing.T) {
 // deferred to 4c).
 func TestAnAccountMadeWrongIsRefusedNotNormalised(t *testing.T) {
 	usermod := "usermod --shell /usr/sbin/nologin --home /nonexistent hotserve-backup"
-	// The hotserve data user, as this box knows it: a uid of its own,
-	// not the test's (which is root's on the systemd lane).
-	me := 1000
+	me := 1000 // the hotserve data user's uid on this box
 	for _, tc := range []struct {
 		name, shell, home string
 		homeThere         bool
@@ -276,27 +284,41 @@ func TestAnAccountMadeWrongIsRefusedNotNormalised(t *testing.T) {
 	}{
 		{"as setup makes it", "/usr/sbin/nologin", "/nonexistent", false, 995, 995, nil},
 		{"false for a shell", "/bin/false", "/nonexistent", false, 995, 995, nil},
+		{"the other paths", "/sbin/nologin", "/nonexistent", false, 995, 995, nil},
+		// The shell is what login runs: only the paths that are known
+		// to refuse a login are taken, not a name (a copy of bash at
+		// /tmp/nologin is a login shell).
+		{"a shell named nologin elsewhere", "/tmp/nologin", "/nonexistent", false, 995, 995, []string{"a login shell (/tmp/nologin, not one of /usr/sbin/nologin, /sbin/nologin, /bin/false, /usr/bin/false)"}},
 		{"a home named and not there", "/usr/sbin/nologin", "/home/hotserve-backup", false, 995, 995, nil},
 		// /nonexistent is the home setup gives, and a directory of that
 		// name is nobody's home: not refused, or setup's own account
 		// would be, and the usermod the message names would change nothing.
 		{"/nonexistent, which exists on this box", "/usr/sbin/nologin", "/nonexistent", true, 995, 995, nil},
-		{"a login shell", "/bin/bash", "/nonexistent", false, 995, 995, []string{"a login shell (/bin/bash)"}},
+		{"a login shell", "/bin/bash", "/nonexistent", false, 995, 995, []string{"a login shell (/bin/bash, not one of /usr/sbin/nologin, /sbin/nologin, /bin/false, /usr/bin/false)"}},
 		{"no shell at all, which login reads as /bin/sh", "", "/nonexistent", false, 995, 995, []string{"a login shell (none set, which is /bin/sh)"}},
 		{"a home that exists", "/usr/sbin/nologin", "/home/hotserve-backup", true, 995, 995, []string{"a home directory that exists (/home/hotserve-backup)"}},
-		{"both", "/bin/sh", "/var/lib/hotserve-backup", true, 995, 995, []string{"a login shell (/bin/sh)", "a home directory that exists (/var/lib/hotserve-backup)"}},
+		{"both", "/bin/sh", "/var/lib/hotserve-backup", true, 995, 995, []string{"a login shell (/bin/sh, not one of", "a home directory that exists (/var/lib/hotserve-backup)"}},
 		// The account is what every restic unit runs as: root, or the
 		// hotserve data user, would run restic with the credential as
 		// root or as the apps' own uid — the two the design keeps it
 		// away from.
 		{"uid 0", "/usr/sbin/nologin", "/nonexistent", false, 0, 995, []string{"uid 0 (root)"}},
 		{"gid 0", "/usr/sbin/nologin", "/nonexistent", false, 995, 0, []string{"gid 0 (root)"}},
-		{"the hotserve user's uid", "/usr/sbin/nologin", "/nonexistent", false, me, 995, []string{"the hotserve user's uid (1000)"}},
+		// Authorization is by uid: whoever else holds it is the restic
+		// process, and reads its environment. The hotserve user is one
+		// such account; any other is the same.
+		{"the hotserve user's uid", "/usr/sbin/nologin", "/nonexistent", false, me, 995, []string{"a uid shared with hotserve (1000)"}},
+		{"a uid shared with two accounts", "/usr/sbin/nologin", "/nonexistent", false, 1001, 995, []string{"a uid shared with alice, bob (1001)"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b, m := setupBox(t)
 			b.shell, b.home, b.homeThere, b.uid, b.gid = tc.shell, tc.home, tc.homeThere, tc.uid, tc.gid
-			dataOwner = func() (int, int, error) { return me, me, nil } // restored by the box's cleanup
+			switch tc.uid {
+			case me:
+				b.holders = []string{"hotserve", "hotserve-backup"}
+			case 1001:
+				b.holders = []string{"alice", "hotserve-backup", "bob"}
+			}
 			rep, err := b.setup(t, m, testRepo)
 			if tc.refused == nil {
 				if err != nil || rep.Account != "present" {

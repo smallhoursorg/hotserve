@@ -96,23 +96,14 @@ func setupBox(t *testing.T) (*box, *term) {
 	// A fresh box: the look for a repository finds none.
 	b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 10}
 	b.version = 257
-	b.account, b.shell, b.home, b.uid, b.gid = true, "/usr/sbin/nologin", "/nonexistent", 995, 995
-	oldAccount, oldHome, oldMake, oldClock, oldProbe, oldNote, oldOwn, oldSync, oldID := account, homeExists, makeAccount, setupClock, setupProbeClock, setupNote, ownByRoot, syncDir, writeID
-	account = func(string) (passwd, error) {
-		return passwd{shell: b.shell, home: b.home, uid: b.uid, gid: b.gid, exists: b.account}, nil
-	}
-	homeExists = func(string) bool { return b.homeThere }
-	makeAccount = func() error {
-		b.accountsMade++
-		b.account, b.shell, b.home, b.homeThere, b.uid, b.gid = true, "/usr/sbin/nologin", "/nonexistent", false, 995, 995
-		return nil
-	}
+	// The account hooks are newBox's: a run looks at the account too.
+	oldClock, oldProbe, oldNote, oldOwn, oldSync, oldID := setupClock, setupProbeClock, setupNote, ownByRoot, syncDir, writeID
 	// chown to root is root's to do; here what is asked for is recorded.
 	ownByRoot = func(path string) error { b.owned = append(b.owned, path); return nil }
 	syncDir = func(path string) error { b.synced = append(b.synced, path); return nil }
 	setupClock, setupProbeClock, setupNote = 200*time.Millisecond, 100*time.Millisecond, 50*time.Millisecond
 	t.Cleanup(func() {
-		account, homeExists, makeAccount, setupClock, setupProbeClock, setupNote, ownByRoot, syncDir, writeID = oldAccount, oldHome, oldMake, oldClock, oldProbe, oldNote, oldOwn, oldSync, oldID
+		setupClock, setupProbeClock, setupNote, ownByRoot, syncDir, writeID = oldClock, oldProbe, oldNote, oldOwn, oldSync, oldID
 	})
 	return b, &term{answers: []string{"AKIDX", "the-secret", "stored"}}
 }

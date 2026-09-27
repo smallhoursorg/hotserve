@@ -62,10 +62,17 @@ mv /usr/bin/restic.aside /usr/bin/restic
 # can log in as it can read the credential from restic's environment.
 # Refused, naming both, and left as it is — never normalised.
 useradd --system --shell /bin/sh --home-dir /home/hsb -m hotserve-backup
-printf 'x\n' | at_tty hotserve-backup setup "$REPO" >"$OUT" 2>&1 && fail "setup with an account that has a login shell exited 0" || { says "the hotserve-backup account exists with a login shell (/bin/sh) and a home directory that exists (/home/hsb)" && says "usermod --shell /usr/sbin/nologin --home /nonexistent hotserve-backup" && says "useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hotserve-backup" && pass "an account made wrong is refused, naming what is wrong and the two ways to mend it" || fail "the wrong account: $(cat "$OUT")"; }
+printf 'x\n' | at_tty hotserve-backup setup "$REPO" >"$OUT" 2>&1 && fail "setup with an account that has a login shell exited 0" || { says "the hotserve-backup account exists with a login shell (/bin/sh, not one of /usr/sbin/nologin, /sbin/nologin, /bin/false, /usr/bin/false) and a home directory that exists (/home/hsb)" && says "usermod --shell /usr/sbin/nologin --home /nonexistent hotserve-backup" && says "useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hotserve-backup" && pass "an account made wrong is refused, naming what is wrong and the two ways to mend it" || fail "the wrong account: $(cat "$OUT")"; }
 says "Storage key id" && fail "a prompt was asked with a wrong account" || pass "and asked nothing"
 getent passwd hotserve-backup | grep -q ':/home/hsb:/bin/sh$' && [ -d /home/hsb ] && pass "and the account was left as it was" || fail "the account was changed: $(getent passwd hotserve-backup)"
 userdel -r hotserve-backup 2>/dev/null
+# And one whose uid another account holds: authorization is by uid, and
+# that account is the restic process.
+useradd -m alice
+useradd -o -u "$(id -u alice)" --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hotserve-backup
+printf 'x\n' | at_tty hotserve-backup setup "$REPO" >"$OUT" 2>&1 && fail "setup with a uid shared with alice exited 0" || { says "the hotserve-backup account exists with a uid shared with alice ($(id -u alice))" && pass "an account whose uid another account holds is refused, naming it" || fail "the shared uid: $(cat "$OUT")"; }
+userdel hotserve-backup 2>/dev/null
+userdel -r alice 2>/dev/null
 [ ! -e "$ETC" ] && pass "and nothing was made under /etc" || fail "$ETC exists"
 for r in sftp:user@host:/srv/backups /srv/backups local:/srv/backups rclone:remote:bucket azure:container:path gs:bucket:path swift:container:/path rest:https://host:8000/ "s3:http://user:pass@e2e-s3:9000/box" "s3:user:pass@e2e-s3:9000/box" "s3://user:pass@e2e-s3:9000/box" "ftp://host/x" "s3:"; do
 	if printf 'x\n' | at_tty hotserve-backup setup "$r" >"$OUT" 2>&1; then
