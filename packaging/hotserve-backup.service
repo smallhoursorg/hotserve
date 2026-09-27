@@ -19,8 +19,9 @@ ConditionPathExists=/etc/hotserve-backup/repository.env
 Type=oneshot
 ExecStart=/usr/bin/hotserve-backup run
 # The run binds the units it starts to the unit it is, so that the
-# manager ends them if this one dies, however it dies. %n is the
-# manager's expansion of this unit's name.
+# manager ends them if this one dies, however it dies — but the two
+# that remove plaintext, which a run being stopped still has to start.
+# %n is the manager's expansion of this unit's name.
 Environment=HOTSERVE_BACKUP_UNIT=%n
 # No time cap on a run (PLAN D4); a stop gives the run its two minutes
 # to end its own units by name and confirm them gone, and the manager's

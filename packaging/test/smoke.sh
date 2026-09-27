@@ -542,6 +542,9 @@ for u in hotserve-backup.service hotserve-backup-drill.service; do
 done
 grep -q "sudo hotserve-backup setup <repository>" /tmp/install.log \
 	|| die "postinstall did not say that the timers wait for setup"
+grep -q "refuse that account" /tmp/install.log \
+	&& die "postinstall warned of the account it had just made: $(grep hotserve-backup /tmp/install.log)" || true
+hotserve-backup account >/dev/null || die "the account postinstall made is not one setup accepts: $(hotserve-backup account 2>&1)"
 echo "the package's own: restic and sqlite3 by Recommends, the account, the units, the timers enabled and waiting"
 
 # The repository the README's lines are pointed at: rclone serve s3
@@ -709,6 +712,51 @@ as_admin "sudo systemctl enable --now hotserve-backup.timer hotserve-backup-dril
 dpkg -i "$deb" >/dev/null
 expect_backup_state "after an upgrade, enabled before it" enabled active "$CRED_SHA"
 systemctl is-active --quiet hotserve || die "hotserve not active after the upgrade cycle"
+# An upgrade stops a backup under way before the new binary is
+# unpacked: the old run would otherwise start its remaining helper
+# units from the new version's binary. Staged with a run held at its
+# upload; the upgrade has to end it, its units and its plaintext, and
+# leave the timers as they were.
+su -s /bin/sh hotserve -c 'head -c 50000000 /dev/urandom >/var/lib/liveswap/demo/shared/uploads/big.bin'
+systemctl start --no-block hotserve-backup.service
+i=0
+until up=$(systemctl list-units --plain --no-legend --state=activating 'hotserve_backup_upload_*' | awk '{print $1}' | head -1) && [ -n "$up" ]; do
+	i=$((i + 1))
+	[ "$i" -ge 300 ] && die "no upload unit appeared under the service: the upgrade row would prove nothing"
+	sleep 0.1
+done
+rpid=$(systemctl show -p ExecMainPID --value "$up")
+[ -n "$rpid" ] && [ "$rpid" != 0 ] && kill -STOP "$rpid" || die "could not hold the upload's restic (pid '$rpid')"
+dpkg -i "$deb" >/tmp/upgrade-run.log 2>&1 || { cat /tmp/upgrade-run.log; die "the upgrade with a run under way failed"; }
+left=$(systemctl list-units --plain --no-legend --state=active,activating,deactivating 'hotserve_backup_*' | awk '{print $1}' | tr '\n' ' ')
+[ -z "$left" ] || die "units of the old run are still running after the upgrade: $left"
+[ "$(systemctl show -p ActiveState --value hotserve-backup.service)" != activating ] \
+	|| die "the old run is still under way after the upgrade"
+kill -0 "$rpid" 2>/dev/null && die "the old run's restic (pid $rpid) survived the upgrade" || true
+[ -z "$(find /var/lib/hotserve-backup/staging -mindepth 2 2>/dev/null)" ] \
+	|| die "the stopped run left plaintext in staging: $(find /var/lib/hotserve-backup/staging -mindepth 2)"
+systemctl reset-failed hotserve-backup.service 2>/dev/null || true
+su -s /bin/sh hotserve -c 'rm -f /var/lib/liveswap/demo/shared/uploads/big.bin'
+expect_backup_state "after an upgrade with a run under way" enabled active "$CRED_SHA"
+systemctl start hotserve-backup.service || die "a run after that upgrade failed: $(journalctl -u hotserve-backup.service --no-pager | tail -20)"
+echo "an upgrade stopped the run under way, its units and its plaintext; the timers as they were, and the next run works"
+# The account is every run's to check, and an upgrade says so in
+# setup's own words: put in the hotserve group — where restic and the
+# plan unit would read the apps' env files — it is warned of at the
+# upgrade, refused by a run, and accepted again once taken out.
+usermod -aG hotserve hotserve-backup
+dpkg -i "$deb" >/tmp/upgrade-group.log 2>&1 || { cat /tmp/upgrade-group.log; die "the upgrade with the account in the hotserve group failed: a warning must not fail an install"; }
+grep -q "the hotserve group among its groups" /tmp/upgrade-group.log && grep -q "refuse that account" /tmp/upgrade-group.log \
+	|| die "postinstall did not warn of the account in the hotserve group: $(cat /tmp/upgrade-group.log)"
+grep -q "usermod --shell" /tmp/upgrade-group.log && die "the warning names a usermod of the shell for a fault of who the account is" || true
+systemctl start hotserve-backup.service && die "a run with the account in the hotserve group exited 0" || true
+journalctl -u hotserve-backup.service --no-pager | grep -q "the hotserve group among its groups" \
+	|| die "the run did not say why it refused: $(journalctl -u hotserve-backup.service --no-pager | tail -5)"
+gpasswd -d hotserve-backup hotserve >/dev/null
+systemctl reset-failed hotserve-backup.service 2>/dev/null || true
+hotserve-backup account >/dev/null || die "the account is not accepted once out of the group: $(hotserve-backup account 2>&1)"
+systemctl start hotserve-backup.service || die "a run after the account was mended failed: $(journalctl -u hotserve-backup.service --no-pager | tail -20)"
+echo "in the hotserve group: warned of at the upgrade in setup's words, refused by a run, accepted once out of it"
 
 stage "stage 4: removal"
 apt-get remove -y hotserve

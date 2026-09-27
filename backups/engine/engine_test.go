@@ -72,6 +72,8 @@ type box struct {
 	homeThere                  bool   // whether that home is a directory that exists
 	uid, gid                   int
 	holders                    []string // the accounts that hold that uid, the backup account among them
+	groups                     []int    // the account's groups, its primary among them
+	hotserveGid                int      // the gid of the group named hotserve
 	accountsMade               int
 	owned, synced              []string // what setup asked to be root's, and put on the disk
 	waited                     []string // units a lock holder waited for
@@ -96,8 +98,11 @@ func newBox(t *testing.T) *box {
 	t.Cleanup(func() { haveProgram = oldHave })
 	// The account restic runs as, as setup makes it, unless a test says
 	// otherwise: a run looks at it before any unit, as setup does.
-	b.account, b.shell, b.home, b.uid, b.gid, b.holders = true, "/usr/sbin/nologin", "/nonexistent", 995, 995, []string{"hotserve-backup"}
-	oldAccount, oldHolders, oldHome, oldMake := account, holders, homeExists, makeAccount
+	b.account, b.shell, b.home, b.uid, b.gid, b.holders, b.groups = true, "/usr/sbin/nologin", "/nonexistent", 995, 995, []string{"hotserve-backup"}, []int{995}
+	oldAccount, oldHolders, oldHome, oldMake, oldGroups, oldGroup := account, holders, homeExists, makeAccount, groupsOf, groupNamed
+	groupsOf = func(string) ([]int, error) { return b.groups, nil }
+	b.hotserveGid = 1000
+	groupNamed = func(string) (int, bool, error) { return b.hotserveGid, true, nil }
 	account = func(string) (passwd, error) {
 		return passwd{shell: b.shell, home: b.home, uid: b.uid, gid: b.gid, exists: b.account}, nil
 	}
@@ -105,10 +110,12 @@ func newBox(t *testing.T) *box {
 	homeExists = func(string) bool { return b.homeThere }
 	makeAccount = func() error {
 		b.accountsMade++
-		b.account, b.shell, b.home, b.homeThere, b.uid, b.gid, b.holders = true, "/usr/sbin/nologin", "/nonexistent", false, 995, 995, []string{"hotserve-backup"}
+		b.account, b.shell, b.home, b.homeThere, b.uid, b.gid, b.holders, b.groups = true, "/usr/sbin/nologin", "/nonexistent", false, 995, 995, []string{"hotserve-backup"}, []int{995}
 		return nil
 	}
-	t.Cleanup(func() { account, holders, homeExists, makeAccount = oldAccount, oldHolders, oldHome, oldMake })
+	t.Cleanup(func() {
+		account, holders, homeExists, makeAccount, groupsOf, groupNamed = oldAccount, oldHolders, oldHome, oldMake, oldGroups, oldGroup
+	})
 	b.cfg = Config{
 		ConfigDir: "/etc/hotserve",
 		EnvFile:   filepath.Join(dir, "backup.env"), StateDir: filepath.Join(dir, "state"), RunDir: filepath.Join(dir, "run"),

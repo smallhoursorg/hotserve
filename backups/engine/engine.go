@@ -496,6 +496,15 @@ func (x *run) name(role, app string) string {
 // name, never by pattern.
 func (x *run) start(ctx context.Context, s unit.Spec) (unit.Outcome, error) {
 	s.BindsTo = x.cfg.BindsTo
+	// The two that remove plaintext are bound to nothing: a service
+	// being stopped — an upgrade, a remove, systemctl stop — has a stop
+	// job queued, and the manager refuses to start a unit bound to it
+	// ("transaction is destructive" [M62]), so the copies a stopped run
+	// had made stayed until the next run. They hold no credential and
+	// no network, and are over in moments.
+	if strings.HasPrefix(s.Name, "hotserve_backup_clean_") || strings.HasPrefix(s.Name, "hotserve_backup_unstage_") {
+		s.BindsTo = ""
+	}
 	f, err := os.OpenFile(filepath.Join(x.cfg.RunDir, "units"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return unit.Outcome{}, err

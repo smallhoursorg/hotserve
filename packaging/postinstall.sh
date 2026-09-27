@@ -37,8 +37,8 @@ chown hotserve:hotserve /var/lib/hotserve /var/lib/liveswap
 # script by a test), which also makes it when it is missing. No home,
 # no shell, nothing of its own but the cache the manager makes for it.
 # An account that exists is left as it is — an administrator may have
-# meant it — and setup refuses one with a login shell or a home that
-# exists, since whoever can log in as it can read the repository
+# meant it — and setup and every run refuse one that someone else can
+# be or log in as, since that someone can read the repository
 # credential from a running restic's environment. Never removed on
 # purge (Debian policy: system accounts stay).
 if command -v useradd >/dev/null 2>&1; then
@@ -46,29 +46,13 @@ if command -v useradd >/dev/null 2>&1; then
 else
 	adduser -S -H -h /nonexistent -s /sbin/nologin hotserve-backup 2>/dev/null || true # busybox
 fi
-if line=$(getent passwd hotserve-backup 2>/dev/null); then
-	shell=${line##*:}
-	home=$(printf '%s' "$line" | cut -d: -f6)
-	case "$shell" in /usr/sbin/nologin | /sbin/nologin | /bin/false | /usr/bin/false) ;; *)
-		echo "hotserve: the hotserve-backup account has a login shell ($shell); hotserve-backup setup will refuse it — lock it with \`usermod --shell /usr/sbin/nologin hotserve-backup\`" >&2 ;;
-	esac
-	if [ "$home" != /nonexistent ] && [ -e "$home" ]; then
-		echo "hotserve: the hotserve-backup account has a home directory that exists ($home); hotserve-backup setup will refuse it — \`usermod --home /nonexistent hotserve-backup\`" >&2
-	fi
-	# Its own variable: $uid is the hotserve user's, and names the
-	# user@<uid> drop-ins below (CI's install-test found the clobber:
-	# the limits drop-in went to the backup account's manager).
-	buid=$(printf '%s' "$line" | cut -d: -f3)
-	bgid=$(printf '%s' "$line" | cut -d: -f4)
-	if [ "$buid" = 0 ] || [ "$buid" = "$uid" ]; then
-		echo "hotserve: the hotserve-backup account has uid $buid, which is root's or the hotserve user's; hotserve-backup setup will refuse it — remove it and let setup make it" >&2
-	fi
-	if [ "$bgid" = 0 ]; then
-		echo "hotserve: the hotserve-backup account has gid 0, root's group; hotserve-backup setup will refuse it — remove it and let setup make it" >&2
-	fi
-	others=$(getent passwd 2>/dev/null | awk -F: -v u="$buid" '$3 == u && $1 != "hotserve-backup" { print $1 }' | tr '\n' ' ')
-	if [ -n "$others" ]; then
-		echo "hotserve: the hotserve-backup account shares its uid $buid with $others; hotserve-backup setup will refuse it — remove it and let setup make it" >&2
+if getent passwd hotserve-backup >/dev/null 2>&1; then
+	# The rule is setup's, and in setup's words: the binary this package
+	# has just installed says whether the account is one setup and every
+	# run accept. A warning, never the install's failure.
+	if [ -x /usr/bin/hotserve-backup ] && ! said=$(/usr/bin/hotserve-backup account 2>&1); then
+		echo "hotserve: ${said#hotserve-backup: }" >&2
+		echo "hotserve: hotserve-backup setup, and every run, restore and drill, refuse that account until it is put right; hotserve-backup account says when it is" >&2
 	fi
 else
 	echo "hotserve: the hotserve-backup system user does not exist and could not be created" >&2

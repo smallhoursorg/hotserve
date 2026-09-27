@@ -10,6 +10,8 @@
 //	                        Exits 0 healthy, 1 not, 3 when it could not tell
 //	hotserve-backup validate <Caddyfile>
 //	                        whether a run could plan from that Caddyfile, before it goes live; anyone
+//	hotserve-backup account whether the account restic runs as is one setup and a run accept; anyone;
+//	                        what the package's postinstall asks
 //
 // and subcommands that are only ever the command of a unit one of those
 // starts, each with a fixed view and no arguments — nothing an operator
@@ -66,7 +68,8 @@ const usage = `usage: hotserve-backup setup <repository>
        hotserve-backup restore <app> [--snapshot <id>] [--to <dir>] [--no-pre-backup] [--yes]
        hotserve-backup drill
        hotserve-backup status
-       hotserve-backup validate <Caddyfile>`
+       hotserve-backup validate <Caddyfile>
+       hotserve-backup account`
 
 // arguments says whether a command takes that many: restore takes its
 // own, validate takes one file, setup one repository, and nothing else
@@ -120,6 +123,15 @@ func command(name string, args []string) error {
 		return showStatus(ctx)
 	case "validate":
 		return validate(ctx, args[0])
+	case "account":
+		// What setup and every run ask of the account restic runs as,
+		// in their words; the package's postinstall asks it, and an
+		// administrator after mending the account.
+		if err := engine.AccountReady(); err != nil {
+			return err
+		}
+		fmt.Println("the hotserve-backup account is one setup and a run accept")
+		return nil
 	case "check":
 		return settle(ctx, restore.CheckOnly)
 	case "install":
@@ -179,33 +191,44 @@ func setup(ctx context.Context, repository string) error {
 	t.Say(fmt.Sprintf("credentials: %s (root, 0600)", cfg.EnvFile))
 	// What runs next is what is so on this box: the package's timer,
 	// or nothing — the raw-binary tarball, an administrator's disable.
-	timer, err := r.Active(ctx, "hotserve-backup.timer")
-	t.Say(closing(len(rep.Apps), timer, err))
+	active, enabled, err := r.Scheduled(ctx, "hotserve-backup.timer")
+	t.Say(closing(len(rep.Apps), active, enabled, err))
 	return nil
 }
 
 // closing is setup's last word, which never fails a setup that has
 // succeeded: with the manager not answering, that it could not tell,
 // and the line for a box with no timer.
-func closing(apps int, timerActive bool, err error) string {
+func closing(apps int, active, enabled bool, err error) string {
 	if err != nil {
-		return "next: could not tell whether hotserve-backup.timer is active (" + err.Error() + "); " + strings.TrimPrefix(nextLine(apps, false), "next: ") + "; the timer's own line: systemctl list-timers hotserve-backup.timer"
+		// No advice from not knowing: a scheduler added beside one that
+		// is there meets it on the run lock every hour.
+		return "next: could not tell whether hotserve-backup.timer is scheduled (" + err.Error() + "): systemctl list-timers hotserve-backup.timer says; to run a backup now, sudo systemctl start hotserve-backup.service"
 	}
-	return nextLine(apps, timerActive)
+	return nextLine(apps, active, enabled)
 }
 
 // nextLine is what happens now, from whether the package's hourly
 // timer is active on this box.
-func nextLine(apps int, timerActive bool) string {
+func nextLine(apps int, active, enabled bool) string {
+	const (
+		notEnabled = "hotserve-backup.timer is not enabled: after a reboot nothing runs it (sudo systemctl enable hotserve-backup.timer)"
+		nothing    = "nothing runs it on a schedule: sudo systemctl enable --now hotserve-backup.timer, or run sudo hotserve-backup run hourly from a timer or cron entry of your own"
+		declare    = "next: declare a backup in an app's Caddyfile block (liveswap/README.md); "
+	)
 	switch {
-	case apps > 0 && timerActive:
+	case apps > 0 && active && enabled:
 		return "next: the first backup runs within the hour and ten minutes (systemctl list-timers hotserve-backup.timer); to run one now, sudo systemctl start hotserve-backup.service; then hotserve-backup status"
+	case apps > 0 && active:
+		return "next: the first backup runs within the hour and ten minutes, but " + notEnabled + "; then hotserve-backup status"
 	case apps > 0:
-		return "next: nothing runs it on a schedule: sudo systemctl enable --now hotserve-backup.timer, or run sudo hotserve-backup run hourly from a timer or cron entry of your own; then hotserve-backup status"
-	case timerActive:
-		return "next: declare a backup in an app's Caddyfile block (liveswap/README.md); the hourly timer backs it up from then on, or sudo systemctl start hotserve-backup.service runs one now"
+		return "next: " + nothing + "; then hotserve-backup status"
+	case active && enabled:
+		return declare + "the hourly timer backs it up from then on, or sudo systemctl start hotserve-backup.service runs one now"
+	case active:
+		return declare + "the hourly timer backs it up from then on, but " + notEnabled
 	}
-	return "next: declare a backup in an app's Caddyfile block (liveswap/README.md); nothing runs it on a schedule: sudo systemctl enable --now hotserve-backup.timer, or run sudo hotserve-backup run hourly from a timer or cron entry of your own"
+	return declare + nothing
 }
 
 func run(ctx context.Context) error {

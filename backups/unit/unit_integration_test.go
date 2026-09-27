@@ -620,11 +620,13 @@ func TestIntegrationWaitReturnsOnceTheUnitEndsOnItsOwn(t *testing.T) {
 	must(t, r.Stop(name(t)))
 }
 
-// Active is what setup asks of the package's timer before saying what
-// runs next: true of a unit whose command is running, false of one
-// that has ended, and false — not an error — of a name the manager
-// has never loaded, which is every box without the package's units.
-func TestIntegrationActiveSaysWhetherAUnitIs(t *testing.T) {
+// Scheduled is what setup asks of the package's timer before saying
+// what runs next: running of a unit whose command is running, not
+// running of one that has ended, and neither running nor enabled — not
+// an error — of a name the manager has never loaded, which is every
+// box without the package's units. A transient unit has no unit file
+// to be enabled by.
+func TestIntegrationScheduledSaysWhetherAUnitIs(t *testing.T) {
 	r := runner(t)
 	done := make(chan Outcome, 1)
 	go func() {
@@ -637,16 +639,14 @@ func TestIntegrationActiveSaysWhetherAUnitIs(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	// A oneshot whose command is running is activating to the manager;
-	// a timer that ticks is active. Both are "not inactive" to Active.
-	if active, err := r.Active(context.Background(), name(t)); err != nil || !active {
-		t.Fatalf("a running unit: active=%v, err=%v", active, err)
+	if active, enabled, err := r.Scheduled(context.Background(), name(t)); err != nil || !active || enabled {
+		t.Fatalf("a running transient unit: active=%v enabled=%v, err=%v", active, enabled, err)
 	}
 	<-done
-	if active, err := r.Active(context.Background(), name(t)); err != nil || active {
+	if active, _, err := r.Scheduled(context.Background(), name(t)); err != nil || active {
 		t.Fatalf("an ended unit: active=%v, err=%v", active, err)
 	}
-	if active, err := r.Active(context.Background(), "hotserve_backup_never_loaded_0123456789ab.timer"); err != nil || active {
-		t.Fatalf("a unit that was never loaded: active=%v, err=%v", active, err)
+	if active, enabled, err := r.Scheduled(context.Background(), "hotserve_backup_never_loaded_0123456789ab.timer"); err != nil || active || enabled {
+		t.Fatalf("a unit that was never loaded: active=%v enabled=%v, err=%v", active, enabled, err)
 	}
 }

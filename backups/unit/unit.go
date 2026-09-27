@@ -180,18 +180,19 @@ func NewSystemRunner(ctx context.Context) (*Runner, error) {
 // Close releases the connection. Units are not stopped by it.
 func (r *Runner) Close() { r.conn.Close() }
 
-// Active says whether a unit of the manager's — a timer, here — is
-// running: what setup asks before it says what runs next. A oneshot
-// whose command runs is "activating" to the manager and a ticking
-// timer "active"; a name the manager never loaded is inactive to it,
-// not an error.
-func (r *Runner) Active(ctx context.Context, name string) (bool, error) {
+// Scheduled says of a unit of the manager's — a timer, here — whether
+// it is running now and whether it is enabled, which is whether it
+// will be after a reboot: what setup asks before it says what runs
+// next. A oneshot whose command runs is "activating" to the manager
+// and a ticking timer "active"; a name the manager never loaded is
+// inactive and not enabled to it, not an error.
+func (r *Runner) Scheduled(ctx context.Context, name string) (active, enabled bool, err error) {
 	props, err := r.conn.GetAllPropertiesContext(ctx, name)
 	if err != nil {
-		return false, fmt.Errorf("asking the manager about %s: %w", name, err)
+		return false, false, fmt.Errorf("asking the manager about %s: %w", name, err)
 	}
 	state := str(props["ActiveState"])
-	return state == "active" || state == "activating", nil
+	return state == "active" || state == "activating", str(props["UnitFileState"]) == "enabled", nil
 }
 
 // ManagerVersion is the major version of the manager the Runner is

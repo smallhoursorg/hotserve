@@ -76,7 +76,7 @@ through upgrade, remove, reinstall and purge, holding it to this table:
 | Transition | The timers | The credential file |
 |---|---|---|
 | install | enabled, running; their services untouched until setup | not made — setup's |
-| upgrade | as they were: an administrator's `disable` is kept | byte for byte |
+| upgrade | as they were: an administrator's `disable` is kept. A run or a drill under way is stopped before the new binary is unpacked — its helper units are started by path, and an old run must not start the new version's — and the next hour's run does the backup | byte for byte |
 | remove | stopped and masked; the unit files gone | kept, with `/var/lib/hotserve-backup` |
 | reinstall after remove | enabled and running again | byte for byte; a run works |
 | purge | their enable state gone with the masks | **kept, and said why**: it holds the repository password, the one way to read the backups already made. The record, the repository id, the listing's stderr and restic's cache go; `staging/` and `restore/` go only when empty — a directory with something in it holds copies of an app's data a killed run left, which root does not remove, and is named |
@@ -92,6 +92,13 @@ thing; the unit is for whatever watches units. Nothing acts on it. A
 drill that comes due while a run is under way waits for it (`After=`);
 a run that comes due while the drill holds the lock says so and is that
 hour's failed unit.
+
+A run's units are bound to its service, so that they end with it
+however it dies — but the two that remove plaintext. A service that is
+stopped (`systemctl stop`, an upgrade, a remove) has a stop job queued,
+and the manager starts nothing that is bound to it [measured]; unbound,
+a stopped run removes the copies it had made on its way out, and a
+killed one leaves them to the next run, which empties staging first.
 
 The services run as root with `CAP_SYS_ADMIN`, `CAP_DAC_READ_SEARCH`,
 `CAP_CHOWN` and `CAP_FOWNER` and nothing else of root's, reach nothing
@@ -657,14 +664,19 @@ hourly run. It needs no sudoers line.
   systemd older than 257; a `hotserve-backup` account that is there
   with a shell that is not one of `/usr/sbin/nologin`, `/sbin/nologin`,
   `/bin/false` and `/usr/bin/false`, a home directory that exists, uid
-  or gid 0, or a uid any other account holds — whoever can log in as
-  it, or is it, can read the repository credential from a running
-  restic's environment — named with the `usermod` that locks it and
-  the `useradd` setup would have used, and never changed by setup; a
-  Caddyfile a run could not plan from; another run, restore or drill
-  under way. **A run, a restore and a drill ask the same of the
-  account** before any unit — it is the run that puts the credential
-  in that account's environment — and refuse one that is not there.
+  or gid 0, a uid any other account holds, or root's group or the
+  `hotserve` group among its groups — whoever can log in as it, or is
+  it, can read the repository credential from a running restic's
+  environment, and in the `hotserve` group restic and the plan unit
+  read the apps' env files — named with the remedy that fits: the
+  `usermod` that locks a shell or a home, or, for who the account is,
+  removing it and the `useradd` setup would have used; never changed
+  by setup; a Caddyfile a run could not plan from; another run,
+  restore or drill under way. **A run, a restore and a drill ask the
+  same of the account** before any unit — it is the run that puts the
+  credential in that account's environment — and refuse one that is
+  not there. `hotserve-backup account`, as anyone, asks it by itself:
+  the package's postinstall does, and warns in those words.
 - `setup`, at a prompt: an empty value, one with a line break or a
   control character, or one that is not UTF-8 — the file cannot hold
   it — three times; and a password not confirmed `stored`.

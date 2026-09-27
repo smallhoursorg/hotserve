@@ -84,8 +84,14 @@ func TestNothingStartsBeforeSetup(t *testing.T) {
 // when it is one — the manager then ends them if the command is killed,
 // however it dies [M8] — and to nothing when it is a shell's: from a
 // shell there is no service, and the signal handler and the next lock
-// holder's sweep do that work. The one exception is setup's init unit,
-// left to finish making the repository whatever becomes of setup.
+// holder's sweep do that work. Three are never bound. Setup's init
+// unit, left to finish making the repository whatever becomes of
+// setup. And the two that remove plaintext, clean and unstage: a
+// service that is being stopped has a stop job queued, and the manager
+// refuses to start a unit bound to it ("transaction is destructive"
+// [M62]), so bound, the copies a stopped run made stayed until the
+// next run; they hold no credential and no network, and are over in
+// moments.
 func TestEveryUnitOfACommandIsBoundToItsService(t *testing.T) {
 	for _, cmd := range append(runDrillRestore, setupCommand) {
 		for _, own := range []string{"hotserve-backup.service", ""} {
@@ -98,14 +104,19 @@ func TestEveryUnitOfACommandIsBoundToItsService(t *testing.T) {
 				if len(b.specs) == 0 {
 					t.Fatal("no unit ran: the row proves nothing")
 				}
+				unbound := 0
 				for _, s := range b.specs {
 					want := own
-					if strings.Contains(s.Name, "_init_") {
+					if strings.Contains(s.Name, "_init_") || strings.Contains(s.Name, "_clean_") || strings.Contains(s.Name, "_unstage_") {
 						want = ""
+						unbound++
 					}
 					if s.BindsTo != want {
 						t.Errorf("%s: BindsTo = %q, want %q", s.Name, s.BindsTo, want)
 					}
+				}
+				if unbound == len(b.specs) {
+					t.Fatal("no unit of the command is one that is bound: the row proves nothing")
 				}
 			})
 		}
@@ -177,6 +188,7 @@ func TestARunRefusesWhatSetupRefusesWithSetupsWords(t *testing.T) {
 		{"the account", func(b *box) { b.account = false }, "the hotserve-backup account is not there: sudo hotserve-backup setup <repository> makes it (" + useraddArgv() + ")"},
 		{"a login shell", func(b *box) { b.shell = "/bin/bash" }, "the hotserve-backup account exists with a login shell (/bin/bash, not one of /usr/sbin/nologin, /sbin/nologin, /bin/false, /usr/bin/false)"},
 		{"a shared uid", func(b *box) { b.holders = []string{"alice", "hotserve-backup"} }, "a uid shared with alice (995)"},
+		{"the hotserve group", func(b *box) { b.groups = []int{995, b.hotserveGid} }, "the hotserve group among its groups"},
 	} {
 		for _, cmd := range runDrillRestore {
 			t.Run(cmd.name+" without "+p.name, func(t *testing.T) {
@@ -274,51 +286,76 @@ func TestPostinstallMakesTheAccountAsSetupDoes(t *testing.T) {
 // on purpose is not setup's to do (Copilot round 11 on #152; the owner,
 // deferred to 4c).
 func TestAnAccountMadeWrongIsRefusedNotNormalised(t *testing.T) {
-	usermod := "usermod --shell /usr/sbin/nologin --home /nonexistent hotserve-backup"
-	me := 1000 // the hotserve data user's uid on this box
+	const (
+		lock   = "lock it (usermod --shell /usr/sbin/nologin --home /nonexistent hotserve-backup)"
+		remake = "remove it (userdel hotserve-backup) and make it as setup would"
+		shells = ", not one of /usr/sbin/nologin, /sbin/nologin, /bin/false, /usr/bin/false)"
+	)
+	me := 1000 // the hotserve data user's uid, and the gid of the group named hotserve
+	ok := acct{shell: "/usr/sbin/nologin", home: "/nonexistent", uid: 995, gid: 995}
+	with := func(f func(a *acct)) acct { a := ok; f(&a); return a }
 	for _, tc := range []struct {
-		name, shell, home string
-		homeThere         bool
-		uid, gid          int
-		refused           []string // in the error; nil means accepted
+		name    string
+		a       acct
+		refused []string // in the error; nil means accepted
+		remedy  string   // the one the fault is mended by; the other must not be named alone
 	}{
-		{"as setup makes it", "/usr/sbin/nologin", "/nonexistent", false, 995, 995, nil},
-		{"false for a shell", "/bin/false", "/nonexistent", false, 995, 995, nil},
-		{"the other paths", "/sbin/nologin", "/nonexistent", false, 995, 995, nil},
-		// The shell is what login runs: only the paths that are known
-		// to refuse a login are taken, not a name (a copy of bash at
-		// /tmp/nologin is a login shell).
-		{"a shell named nologin elsewhere", "/tmp/nologin", "/nonexistent", false, 995, 995, []string{"a login shell (/tmp/nologin, not one of /usr/sbin/nologin, /sbin/nologin, /bin/false, /usr/bin/false)"}},
-		{"a home named and not there", "/usr/sbin/nologin", "/home/hotserve-backup", false, 995, 995, nil},
+		{"as setup makes it", ok, nil, ""},
+		{"false for a shell", with(func(a *acct) { a.shell = "/bin/false" }), nil, ""},
+		{"the other paths", with(func(a *acct) { a.shell = "/sbin/nologin" }), nil, ""},
+		{"a home named and not there", with(func(a *acct) { a.home = "/home/hotserve-backup" }), nil, ""},
 		// /nonexistent is the home setup gives, and a directory of that
 		// name is nobody's home: not refused, or setup's own account
 		// would be, and the usermod the message names would change nothing.
-		{"/nonexistent, which exists on this box", "/usr/sbin/nologin", "/nonexistent", true, 995, 995, nil},
-		{"a login shell", "/bin/bash", "/nonexistent", false, 995, 995, []string{"a login shell (/bin/bash, not one of /usr/sbin/nologin, /sbin/nologin, /bin/false, /usr/bin/false)"}},
-		{"no shell at all, which login reads as /bin/sh", "", "/nonexistent", false, 995, 995, []string{"a login shell (none set, which is /bin/sh)"}},
-		{"a home that exists", "/usr/sbin/nologin", "/home/hotserve-backup", true, 995, 995, []string{"a home directory that exists (/home/hotserve-backup)"}},
-		{"both", "/bin/sh", "/var/lib/hotserve-backup", true, 995, 995, []string{"a login shell (/bin/sh, not one of", "a home directory that exists (/var/lib/hotserve-backup)"}},
-		// The account is what every restic unit runs as: root, or the
-		// hotserve data user, would run restic with the credential as
-		// root or as the apps' own uid — the two the design keeps it
-		// away from.
-		{"uid 0", "/usr/sbin/nologin", "/nonexistent", false, 0, 995, []string{"uid 0 (root)"}},
-		{"gid 0", "/usr/sbin/nologin", "/nonexistent", false, 995, 0, []string{"gid 0 (root)"}},
-		// Authorization is by uid: whoever else holds it is the restic
-		// process, and reads its environment. The hotserve user is one
-		// such account; any other is the same.
-		{"the hotserve user's uid", "/usr/sbin/nologin", "/nonexistent", false, me, 995, []string{"a uid shared with hotserve (1000)"}},
-		{"a uid shared with two accounts", "/usr/sbin/nologin", "/nonexistent", false, 1001, 995, []string{"a uid shared with alice, bob (1001)"}},
+		{"/nonexistent, which exists on this box", with(func(a *acct) { a.homeThere = true }), nil, ""},
+
+		// What a usermod mends: the shell, which is what login runs —
+		// only the paths known to refuse a login, not a name (a copy of
+		// bash at /tmp/nologin is a login shell) — and the home.
+		{"a login shell", with(func(a *acct) { a.shell = "/bin/bash" }), []string{"a login shell (/bin/bash" + shells}, lock},
+		{"a shell named nologin elsewhere", with(func(a *acct) { a.shell = "/tmp/nologin" }), []string{"a login shell (/tmp/nologin" + shells}, lock},
+		{"no shell at all, which login reads as /bin/sh", with(func(a *acct) { a.shell = "" }), []string{"a login shell (none set, which is /bin/sh)"}, lock},
+		{"a home that exists", with(func(a *acct) { a.home, a.homeThere = "/home/hotserve-backup", true }), []string{"a home directory that exists (/home/hotserve-backup)"}, lock},
+		{"both", with(func(a *acct) { a.shell, a.home, a.homeThere = "/bin/sh", "/var/lib/hotserve-backup", true }), []string{"a login shell (/bin/sh, not one of", "a home directory that exists (/var/lib/hotserve-backup)"}, lock},
+
+		// What no usermod of the shell mends: who the account is. It is
+		// what every restic unit runs as, User= by name, and
+		// authorization is by uid — whoever else holds it is the restic
+		// process — and by group: the manager gives a unit its
+		// account's groups, and in the hotserve group the plan unit and
+		// restic read the apps' env files and their 0750 directories,
+		// the separation the account exists for.
+		{"uid 0", with(func(a *acct) { a.uid = 0 }), []string{"uid 0 (root)"}, remake},
+		{"gid 0", with(func(a *acct) { a.gid = 0; a.groups = []int{0} }), []string{"gid 0 (root)"}, remake},
+		{"the hotserve user's uid", with(func(a *acct) { a.uid = me; a.holders = []string{"hotserve", "hotserve-backup"} }), []string{"a uid shared with hotserve (1000)"}, remake},
+		{"a uid shared with two accounts", with(func(a *acct) { a.uid = 1001; a.holders = []string{"alice", "hotserve-backup", "bob"} }), []string{"a uid shared with alice, bob (1001)"}, remake},
+		{"root's group among its groups", with(func(a *acct) { a.groups = []int{995, 0} }), []string{"root's group among its groups (gid 0)"}, remake},
+		{"the hotserve group among its groups", with(func(a *acct) { a.groups = []int{995, me} }), []string{"the hotserve group among its groups (gid 1000)"}, remake},
+		{"the hotserve group as its own", with(func(a *acct) { a.gid = me; a.groups = []int{me} }), []string{"the hotserve group among its groups (gid 1000)"}, remake},
+		// The group is the one named hotserve, which the apps' env files
+		// and directories belong to — not whatever the hotserve user's
+		// primary group is: an account made by hand may have another
+		// (the package smoke found the difference).
+		{"the hotserve group, the hotserve user's primary group being another", with(func(a *acct) { a.groups = []int{995, me}; a.dataGid = 2000 }), []string{"the hotserve group among its groups (gid 1000)"}, remake},
+		{"the hotserve user's primary group, which is not the hotserve group", with(func(a *acct) { a.groups = []int{995, 2000}; a.dataGid = 2000 }), nil, ""},
+
+		// Both kinds: both remedies, each said of what it mends.
+		{"a login shell and a shared uid", with(func(a *acct) { a.shell = "/bin/bash"; a.holders = []string{"alice", "hotserve-backup"} }), []string{"a login shell (/bin/bash", "a uid shared with alice (995)", remake}, remake},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b, m := setupBox(t)
-			b.shell, b.home, b.homeThere, b.uid, b.gid = tc.shell, tc.home, tc.homeThere, tc.uid, tc.gid
-			switch tc.uid {
-			case me:
-				b.holders = []string{"hotserve", "hotserve-backup"}
-			case 1001:
-				b.holders = []string{"alice", "hotserve-backup", "bob"}
+			b.shell, b.home, b.homeThere, b.uid, b.gid = tc.a.shell, tc.a.home, tc.a.homeThere, tc.a.uid, tc.a.gid
+			if tc.a.holders != nil {
+				b.holders = tc.a.holders
 			}
+			if tc.a.groups != nil {
+				b.groups = tc.a.groups
+			}
+			dataGid := me
+			if tc.a.dataGid != 0 {
+				dataGid = tc.a.dataGid
+			}
+			dataOwner = func() (int, int, error) { return me, dataGid, nil } // restored by the box's cleanup
 			rep, err := b.setup(t, m, testRepo)
 			if tc.refused == nil {
 				if err != nil || rep.Account != "present" {
@@ -329,12 +366,20 @@ func TestAnAccountMadeWrongIsRefusedNotNormalised(t *testing.T) {
 			if err == nil {
 				t.Fatalf("not refused: %+v", rep)
 			}
-			for _, w := range append(tc.refused, "the hotserve-backup account", usermod, useraddArgv()) {
+			for _, w := range append(tc.refused, "the hotserve-backup account", tc.remedy) {
 				if !strings.Contains(err.Error(), w) {
 					t.Errorf("err = %v\nwant it to say %q", err, w)
 				}
 			}
-			if b.accountsMade != 0 || b.shell != tc.shell || b.home != tc.home {
+			// A remedy that does not mend the fault is not named: a
+			// usermod of the shell changes nothing of who the account is.
+			if tc.remedy == remake && len(tc.refused) == 1 && strings.Contains(err.Error(), "usermod") {
+				t.Errorf("err = %v\nnames a usermod for a fault it does not mend", err)
+			}
+			if tc.remedy == remake && !strings.Contains(err.Error(), useraddArgv()) {
+				t.Errorf("err = %v\nwant the useradd line", err)
+			}
+			if b.accountsMade != 0 || b.shell != tc.a.shell || b.home != tc.a.home {
 				t.Fatalf("the account was changed: made %d, shell %q, home %q", b.accountsMade, b.shell, b.home)
 			}
 			neverStarted(t, b, m)
@@ -343,4 +388,14 @@ func TestAnAccountMadeWrongIsRefusedNotNormalised(t *testing.T) {
 			}
 		})
 	}
+}
+
+// acct is an account as a row of the table has it.
+type acct struct {
+	shell, home string
+	homeThere   bool
+	uid, gid    int
+	holders     []string
+	groups      []int
+	dataGid     int // the hotserve user's primary gid, where it is not the hotserve group's
 }

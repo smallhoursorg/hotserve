@@ -205,28 +205,42 @@ func readUnit(t *testing.T, name string) map[string]map[string][]string {
 // tarball, "By hand", an administrator's disable — that nothing runs
 // on a schedule, and how to have it.
 func TestSetupsClosingLineFollowsTheTimer(t *testing.T) {
+	const cron = "timer or cron entry of your own"
 	for _, tc := range []struct {
-		apps        int
-		timerActive bool
-		want, never string
+		apps            int
+		active, enabled bool
+		want            string
+		never           []string
 	}{
-		{1, true, "the first backup runs within the hour and ten minutes (systemctl list-timers hotserve-backup.timer)", "nothing runs it on a schedule"},
-		{1, false, "nothing runs it on a schedule: sudo systemctl enable --now hotserve-backup.timer, or run sudo hotserve-backup run hourly from a timer or cron entry of your own", "within the hour"},
-		{0, true, "the hourly timer backs it up from then on", "nothing runs it on a schedule"},
-		{0, false, "nothing runs it on a schedule", "hourly timer backs it up"},
+		{1, true, true, "the first backup runs within the hour and ten minutes (systemctl list-timers hotserve-backup.timer)", []string{"nothing runs it on a schedule", "not enabled"}},
+		// Active now and not enabled — started by hand, or disabled
+		// without --now: true until the next boot, and said so.
+		{1, true, false, "the first backup runs within the hour and ten minutes, but hotserve-backup.timer is not enabled: after a reboot nothing runs it (sudo systemctl enable hotserve-backup.timer)", []string{cron}},
+		{1, false, true, "nothing runs it on a schedule: sudo systemctl enable --now hotserve-backup.timer, or run sudo hotserve-backup run hourly from a " + cron, []string{"within the hour"}},
+		{1, false, false, "nothing runs it on a schedule: sudo systemctl enable --now hotserve-backup.timer", []string{"within the hour"}},
+		{0, true, true, "the hourly timer backs it up from then on", []string{"nothing runs it on a schedule", "not enabled"}},
+		{0, true, false, "hotserve-backup.timer is not enabled: after a reboot nothing runs it", []string{cron}},
+		{0, false, false, "nothing runs it on a schedule", []string{"hourly timer backs it up"}},
 	} {
-		got := nextLine(tc.apps, tc.timerActive)
-		if !strings.Contains(got, tc.want) || strings.Contains(got, tc.never) {
-			t.Errorf("apps=%d timer=%v: %q", tc.apps, tc.timerActive, got)
+		got := nextLine(tc.apps, tc.active, tc.enabled)
+		if !strings.Contains(got, tc.want) {
+			t.Errorf("apps=%d active=%v enabled=%v: %q", tc.apps, tc.active, tc.enabled, got)
+		}
+		for _, n := range tc.never {
+			if strings.Contains(got, n) {
+				t.Errorf("apps=%d active=%v enabled=%v says %q: %q", tc.apps, tc.active, tc.enabled, n, got)
+			}
 		}
 	}
 	// The manager not answering is no failure of a setup that has
-	// succeeded: the line says it could not tell, and what to do.
-	got := closing(1, false, errors.New("asking the manager about hotserve-backup.timer: no reply"))
-	if !strings.Contains(got, "could not tell whether hotserve-backup.timer is active (asking the manager about hotserve-backup.timer: no reply)") || !strings.Contains(got, "systemctl list-timers hotserve-backup.timer") {
+	// succeeded, and no ground for advice: the line says it could not
+	// tell and how to look, not to add a scheduler beside one that may
+	// be there.
+	got := closing(1, false, false, errors.New("asking the manager about hotserve-backup.timer: no reply"))
+	if !strings.Contains(got, "could not tell whether hotserve-backup.timer is scheduled (asking the manager about hotserve-backup.timer: no reply)") || !strings.Contains(got, "systemctl list-timers hotserve-backup.timer") || strings.Contains(got, cron) || strings.Contains(got, "nothing runs it") {
 		t.Errorf("with the manager not answering: %q", got)
 	}
-	if got := closing(1, true, nil); got != nextLine(1, true) {
+	if got := closing(1, true, true, nil); got != nextLine(1, true, true) {
 		t.Errorf("with an answer: %q", got)
 	}
 }

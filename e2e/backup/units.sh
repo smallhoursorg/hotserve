@@ -98,6 +98,22 @@ else
 	systemctl stop $S 2>/dev/null
 	systemctl reset-failed $S 2>/dev/null
 fi
+# Stopped, not killed — what an upgrade and a remove do: the run ends
+# its units and removes its plaintext itself, though its service has a
+# stop job queued by then, which is why the units that remove
+# plaintext are bound to nothing [M62].
+systemctl start --no-block $S
+if hold_restic "restic backup"; then
+	[ "$(staged)" != 0 ] && pass "fixture: a copy is in staging while the upload is held" || fail "fixture: nothing is staged: the stop below proves nothing of plaintext"
+	systemctl stop $S
+	[ "$(units_running)" = 0 ] && pass "stopped mid-upload, the service's units are gone" || fail "units still running after the stop: $(systemctl list-units --plain --no-legend 'hotserve_backup_*')"
+	[ "$(staged)" = 0 ] && pass "and the run removed its plaintext on its way out, with no later run to tidy up" || fail "left in staging by a stopped run: $(find /var/lib/hotserve-backup/staging -mindepth 2) — $(journalctl -u $S --no-pager | tail -4)"
+	pgrep -x restic >/dev/null && fail "restic is still running" || pass "and restic is gone"
+else
+	fail "no restic appeared under the service: the stop row proves nothing"
+	systemctl stop $S 2>/dev/null
+fi
+systemctl reset-failed $S 2>/dev/null
 as_app rm -f /var/lib/liveswap/blog/shared/uploads/big.bin
 t0=$(date +%s)
 if systemctl start $S >"$OUT" 2>&1; then pass "a run as the service exits 0 [M54/M55: the hardening set is what a run needs]"; else fail "a run as the service failed: $(cat "$OUT") — $(journalctl -u $S --no-pager | tail -20)"; fi

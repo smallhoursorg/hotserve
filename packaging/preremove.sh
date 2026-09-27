@@ -8,6 +8,21 @@
 # serving right through that restart.
 case "${1:-}" in
 upgrade|failed-upgrade)
+	# The backup units are the exception: a run or a drill under way
+	# starts its helper units from /usr/bin/hotserve-backup by path, and
+	# after the unpack that path is the new version's — an old run with
+	# new helpers. Stopped here, a run ends as any stopped run does (its
+	# units ended, its plaintext removed by the run itself on its way
+	# out [M62]); postinstall starts
+	# the timers again, those that were enabled, and the next hour's run
+	# does the backup this one did not finish.
+	if [ -d /run/systemd/system ]; then
+		if [ -x /usr/bin/deb-systemd-invoke ]; then
+			deb-systemd-invoke stop hotserve-backup.timer hotserve-backup-drill.timer hotserve-backup.service hotserve-backup-drill.service >/dev/null || true
+		else
+			systemctl stop hotserve-backup.timer hotserve-backup-drill.timer hotserve-backup.service hotserve-backup-drill.service 2>/dev/null || true
+		fi
+	fi
 	;;
 *)
 	if command -v systemctl >/dev/null 2>&1; then
