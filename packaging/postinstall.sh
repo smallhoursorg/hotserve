@@ -55,9 +55,12 @@ if line=$(getent passwd hotserve-backup 2>/dev/null); then
 	if [ "$home" != /nonexistent ] && [ -e "$home" ]; then
 		echo "hotserve: the hotserve-backup account has a home directory that exists ($home); hotserve-backup setup will refuse it — \`usermod --home /nonexistent hotserve-backup\`" >&2
 	fi
-	uid=$(printf '%s' "$line" | cut -d: -f3)
-	if [ "$uid" = 0 ] || [ "$uid" = "$(id -u hotserve)" ]; then
-		echo "hotserve: the hotserve-backup account has uid $uid, which is root's or the hotserve user's; hotserve-backup setup will refuse it — remove it and let setup make it" >&2
+	# Its own variable: $uid is the hotserve user's, and names the
+	# user@<uid> drop-ins below (CI's install-test found the clobber:
+	# the limits drop-in went to the backup account's manager).
+	buid=$(printf '%s' "$line" | cut -d: -f3)
+	if [ "$buid" = 0 ] || [ "$buid" = "$uid" ]; then
+		echo "hotserve: the hotserve-backup account has uid $buid, which is root's or the hotserve user's; hotserve-backup setup will refuse it — remove it and let setup make it" >&2
 	fi
 else
 	echo "hotserve: the hotserve-backup system user does not exist and could not be created" >&2
