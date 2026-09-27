@@ -41,10 +41,18 @@ chown hotserve:hotserve /var/lib/hotserve /var/lib/liveswap
 # be or log in as, since that someone can read the repository
 # credential from a running restic's environment. Never removed on
 # purge (Debian policy: system accounts stay).
-if command -v useradd >/dev/null 2>&1; then
-	getent passwd hotserve-backup >/dev/null 2>&1 || useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hotserve-backup
-else
-	adduser -S -H -h /nonexistent -s /sbin/nologin hotserve-backup 2>/dev/null || true # busybox
+#
+# Where it cannot be made — a group of its name is there without it,
+# and useradd exits 9 [M66] — that is said, and the configure goes on
+# (the owner, 2026-09-27): hotserve is installed on a box that may use
+# no backups, and setup, which makes the account when it is missing,
+# is where that is refused.
+if ! getent passwd hotserve-backup >/dev/null 2>&1; then
+	if command -v useradd >/dev/null 2>&1; then
+		why=$(useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hotserve-backup 2>&1) || true
+	else
+		why=$(adduser -S -H -h /nonexistent -s /sbin/nologin hotserve-backup 2>&1) || true # busybox
+	fi
 fi
 if getent passwd hotserve-backup >/dev/null 2>&1; then
 	# The rule is setup's, and in setup's words: the binary this package
@@ -55,8 +63,7 @@ if getent passwd hotserve-backup >/dev/null 2>&1; then
 		echo "hotserve: hotserve-backup setup, and every run, restore and drill, refuse that account until it is put right; hotserve-backup account says when it is" >&2
 	fi
 else
-	echo "hotserve: the hotserve-backup system user does not exist and could not be created" >&2
-	exit 1
+	echo "hotserve: the hotserve-backup account could not be made (${why:-no reason was given}); backups wait for it, and nothing else of hotserve does: sudo hotserve-backup setup <repository> makes it, or says why it cannot" >&2
 fi
 # Packages before the Debian-13-only matrix copied an AppArmor profile
 # into /etc/apparmor.d (which the package itself does not own, so dpkg
@@ -131,6 +138,17 @@ if [ -d /run/systemd/system ]; then
 	if [ -n "${2:-}" ]; then action=restart; else action=start; fi
 	if [ -x /usr/bin/deb-systemd-invoke ]; then
 		deb-systemd-invoke "$action" hotserve-backup.timer hotserve-backup-drill.timer >/dev/null || true
+		# What preremove stopped for the upgrade, this starts again:
+		# preremove's stop is systemctl's own, whatever a policy-rc.d
+		# says [M69], and under one deb-systemd-invoke has just started
+		# nothing. Only on an upgrade, and only a timer that is enabled.
+		if [ -n "${2:-}" ]; then
+			for u in hotserve-backup.timer hotserve-backup-drill.timer; do
+				if systemctl is-enabled --quiet "$u" 2>/dev/null && ! systemctl is-active --quiet "$u" 2>/dev/null; then
+					systemctl start "$u" 2>/dev/null || true
+				fi
+			done
+		fi
 	else
 		# No helper (a systemd host that is not Debian): enabled here,
 		# and started, with no memory of an administrator's disable.

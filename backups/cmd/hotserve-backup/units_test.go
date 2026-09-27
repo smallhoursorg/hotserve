@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -78,10 +80,8 @@ func TestTheShippedUnitsSayWhatTheEngineNeeds(t *testing.T) {
 					t.Errorf("[%s] %s: want %q, have %q", row.section, row.key, row.want, u[row.section][row.key])
 				}
 			}
-			for _, absent := range append(slices.Clone(mountNamespaceProperties), "SuccessExitStatus", "EnvironmentFile", "User", "Restart", "OnFailure", "SystemCallErrorNumber") {
-				if v, ok := u["Service"][absent]; ok {
-					t.Errorf("[Service] %s=%q is set, and must not be", absent, v)
-				}
+			for _, set := range forbiddenIn(u) {
+				t.Errorf("%s is set, and must not be", set)
 			}
 			// %n is the manager's own expansion of the unit's name, and
 			// the run binds its units to it only when it is a name the
@@ -134,14 +134,23 @@ func TestTheShippedUnitsSayWhatTheEngineNeeds(t *testing.T) {
 			{"Timer", "Persistent", "true"},
 			{"Install", "WantedBy", "timers.target"},
 		},
+		// The drill's has the hourly's spread (the owner, 2026-09-27):
+		// it fetches whole snapshots, and a fleet does not reach one
+		// storage at 03:30. One offset, this box's own, every week.
 		"hotserve-backup-drill.timer": {
 			{"Timer", "OnCalendar", "Sun *-*-* 03:30"},
+			{"Timer", "RandomizedDelaySec", "10min"},
+			{"Timer", "FixedRandomDelay", "true"},
+			{"Timer", "AccuracySec", "1s"},
 			{"Timer", "Persistent", "true"},
 			{"Install", "WantedBy", "timers.target"},
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			u := readUnit(t, name)
+			for _, set := range forbiddenIn(u) {
+				t.Errorf("%s is set, and must not be", set)
+			}
 			for _, row := range rows {
 				if !slices.Contains(u[row.section][row.key], row.want) {
 					t.Errorf("[%s] %s: want %q, have %q", row.section, row.key, row.want, u[row.section][row.key])
@@ -159,10 +168,51 @@ func TestTheShippedUnitsSayWhatTheEngineNeeds(t *testing.T) {
 	}
 }
 
-// readUnit reads a unit file the way the manager does for what is
-// asserted here: [Section], KEY=value, a key repeated adding a value;
-// comments and blank lines skipped. No continuation lines: none is
-// written.
+// forbidden is what none of the unit files may say, in any section.
+var forbidden = append(slices.Clone(mountNamespaceProperties), "SuccessExitStatus", "EnvironmentFile", "User", "Restart", "OnFailure", "SystemCallErrorNumber")
+
+// forbiddenIn is every forbidden key a unit sets, as "[Section]
+// Key=value", whatever section it is written in: the manager reads
+// each key in its own, and a table that looks in one section holds
+// only the keys that belong there.
+func forbiddenIn(u map[string]map[string][]string) []string {
+	var set []string
+	for section, keys := range u {
+		for _, key := range forbidden {
+			if v, ok := keys[key]; ok {
+				set = append(set, fmt.Sprintf("[%s] %s=%q", section, key, v))
+			}
+		}
+	}
+	slices.Sort(set)
+	return set
+}
+
+// A forbidden key is seen wherever it is written: OnFailure= is a
+// [Unit] setting, and looked for in [Service] alone its row could
+// never fail (the owner's /code-review on #153).
+func TestTheUnitTableSeesAForbiddenKeyWhereverItIs(t *testing.T) {
+	for _, tc := range []struct {
+		name, unit string
+		want       []string
+	}{
+		{"nothing forbidden", "[Unit]\nDescription=x\n[Service]\nType=oneshot\n", nil},
+		{"OnFailure= where the manager reads it", "[Unit]\nOnFailure=notify.service\n[Service]\nType=oneshot\n", []string{`[Unit] OnFailure=["notify.service"]`}},
+		{"Restart= in its own section", "[Service]\nRestart=on-failure\n", []string{`[Service] Restart=["on-failure"]`}},
+		{"a mount namespace", "[Service]\nProtectSystem=strict\n", []string{`[Service] ProtectSystem=["strict"]`}},
+		{"a key in a section the manager ignores it in is still written, and still said", "[Install]\nUser=nobody\n", []string{`[Install] User=["nobody"]`}},
+		{"two, in two sections", "[Unit]\nOnFailure=a.service\n[Service]\nPrivateTmp=yes\n", []string{`[Service] PrivateTmp=["yes"]`, `[Unit] OnFailure=["a.service"]`}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := forbiddenIn(parseUnit(t, tc.name, strings.NewReader(tc.unit)))
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("forbidden keys seen: %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// readUnit reads a unit file the package ships.
 func readUnit(t *testing.T, name string) map[string]map[string][]string {
 	t.Helper()
 	f, err := os.Open(filepath.Join(unitsDir, name))
@@ -170,6 +220,14 @@ func readUnit(t *testing.T, name string) map[string]map[string][]string {
 		t.Fatal(err)
 	}
 	defer f.Close() //nolint:errcheck // read only
+	return parseUnit(t, name, f)
+}
+
+// parseUnit reads a unit the way the manager does for what is asserted
+// here: [Section], KEY=value, a key repeated adding a value; comments
+// and blank lines skipped. No continuation lines: none is written.
+func parseUnit(t *testing.T, name string, f io.Reader) map[string]map[string][]string {
+	t.Helper()
 	u := map[string]map[string][]string{}
 	section := ""
 	sc := bufio.NewScanner(f)

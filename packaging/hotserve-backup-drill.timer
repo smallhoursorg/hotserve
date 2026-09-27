@@ -1,12 +1,20 @@
 # hotserve-backup-drill.timer — the weekly restore drill, Sunday 03:30
-# (the owner, 2026-09-20), caught up at boot if the box was off then.
-# Enabled by the package; the service itself waits for setup.
+# (the owner, 2026-09-20), plus one offset of up to ten minutes that is
+# this box's own and stays the same, as the hourly run has (the owner,
+# 2026-09-27): a drill fetches whole snapshots, and a fleet does not
+# reach one storage at 03:30. The manager's default accuracy of a
+# minute would be added after the delay, so it is a second here.
+# Caught up at boot if the box was off then. Enabled by the package;
+# the service itself waits for setup.
 [Unit]
 Description=hotserve backup restore drill, weekly
 Documentation=https://github.com/smallhoursorg/hotserve/blob/main/backups/README.md
 
 [Timer]
 OnCalendar=Sun *-*-* 03:30
+RandomizedDelaySec=10min
+FixedRandomDelay=true
+AccuracySec=1s
 Persistent=true
 
 [Install]

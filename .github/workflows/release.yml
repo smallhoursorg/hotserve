@@ -38,11 +38,18 @@ jobs:
       # README saying what the packages would have done for you):
       # Apache-2.0 redistribution should carry the license text, the
       # compressed download is a third the size, and the shape matches
-      # what Caddy itself ships.
+      # what Caddy itself ships. hotserve-backup and its four unit
+      # files come along (the owner, 2026-09-27), as the package has
+      # them: built, and no more tested than the rest of the archive.
       - run: |
           for arch in amd64 arm64; do
             staging=$(mktemp -d)
             cp "build/hotserve-linux-$arch" "$staging/hotserve"
+            cp "build/hotserve-backup-linux-$arch" "$staging/hotserve-backup"
+            mkdir "$staging/systemd"
+            cp packaging/hotserve-backup.service packaging/hotserve-backup.timer \
+              packaging/hotserve-backup-drill.service packaging/hotserve-backup-drill.timer \
+              "$staging/systemd/"
             cp LICENSE "$staging/LICENSE"
             cat > "$staging/README.txt" <<'EOF'
           hotserve — raw binary distribution
@@ -78,11 +85,40 @@ jobs:
               cannot start at all
             - a starter config at /etc/hotserve/Caddyfile
 
+          Backups: hotserve-backup, and systemd/ with its two services
+          and two timers. What the package would have set up, and you
+          now own:
+            - hotserve-backup at /usr/bin/hotserve-backup, beside
+              /usr/bin/hotserve, /usr/bin/restic (0.18) and
+              /usr/bin/sqlite3: the units it starts run each by that
+              path, and it refuses a box where one is missing
+            - the four unit files in /etc/systemd/system, then:
+                systemctl daemon-reload
+                systemctl enable --now hotserve-backup.timer \
+                  hotserve-backup-drill.timer
+            - the account restic runs as, which setup also makes when
+              it is missing:
+                useradd --system --no-create-home \
+                  --home-dir /nonexistent --shell /usr/sbin/nologin \
+                  hotserve-backup
+            - nothing runs until you have run:
+                sudo hotserve-backup setup <repository>
+            - and on the way out, what the package's scripts do: stop
+              the two timers and the two services before replacing or
+              removing the binary; unmount whatever is still mounted
+              under /run/hotserve-backup before removing it (never
+              rm -r it with a mount there: that removes an app's
+              files); and remove, with the unit files,
+                /var/lib/systemd/timers/stamp-hotserve-backup*.timer
+              or a later install catches up a run nobody missed
+
           Docs: https://github.com/smallhoursorg/hotserve
+          (backups: backups/README.md there)
           EOF
-            chmod 0755 "$staging/hotserve"
+            chmod 0755 "$staging/hotserve" "$staging/hotserve-backup"
+            chmod 0644 "$staging"/systemd/*
             tar -czf "dist/hotserve_${GITHUB_REF_NAME#v}_linux_${arch}.tar.gz" \
-              -C "$staging" hotserve LICENSE README.txt
+              -C "$staging" hotserve hotserve-backup systemd LICENSE README.txt
           done
           # GitHub mangles "~" in asset filenames to "." — so rename
           # prerelease packages (0.0.1~rc1 -> 0.0.1.rc1) BEFORE

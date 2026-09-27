@@ -57,6 +57,7 @@ prop $T TimersCalendar | grep -q '\*-\*-\* \*:00:00' && pass "the hourly timer i
 [ "$(prop $T RandomizedDelayUSec)" = 10min ] && [ "$(prop $T FixedRandomDelay)" = yes ] && [ "$(prop $T Persistent)" = yes ] && pass "with a fixed delay of up to ten minutes, and catching up a missed one" || fail "the hourly timer: $(systemctl show -p RandomizedDelayUSec,FixedRandomDelay,Persistent $T | tr '\n' ' ')"
 [ "$(prop $T AccuracyUSec)" = 1s ] && pass "and an accuracy of a second, so that ten minutes is the bound" || fail "AccuracyUSec=$(prop $T AccuracyUSec): the manager's default minute is added after the delay"
 prop $DT TimersCalendar | grep -q 'Sun \*-\*-\* 03:30:00' && [ "$(prop $DT Persistent)" = yes ] && pass "the drill's timer is Sunday 03:30, catching up a missed one" || fail "the drill's timer: $(systemctl show -p TimersCalendar,Persistent $DT | tr '\n' ' ')"
+[ "$(prop $DT RandomizedDelayUSec)" = 10min ] && [ "$(prop $DT FixedRandomDelay)" = yes ] && [ "$(prop $DT AccuracyUSec)" = 1s ] && pass "with the hourly's spread: a fixed delay of up to ten minutes, to the second (the owner, 2026-09-27)" || fail "the drill's timer: $(systemctl show -p RandomizedDelayUSec,FixedRandomDelay,AccuracyUSec $DT | tr '\n' ' ')"
 [ "$(prop $T Unit)" = "$S" ] && [ "$(prop $DT Unit)" = "$D" ] && pass "each timer starts the service of its name" || fail "Unit=: $(prop $T Unit), $(prop $DT Unit)"
 for f in $S $T $D $DT; do
 	[ "$(stat -c '%U:%G %a' "/lib/systemd/system/$f")" = "root:root 644" ] && pass "$f is root's, 0644" || fail "$f: $(stat -c '%U:%G %a' "/lib/systemd/system/$f")"
@@ -206,7 +207,10 @@ systemctl restart $T
 [ "$(date -d "$(prop $T NextElapseUSecRealtime)" +%M:%S)" = "$(date -d "$next" +%M:%S)" ] && pass "the offset is this box's own, the same after a reload and a restart [M60]" || fail "the offset moved: $next → $(prop $T NextElapseUSecRealtime)"
 until_state $S inactive 180 || fail "a run the restart caught up did not end: $(systemctl show -p ActiveState,Result $S | tr '\n' ' ')"
 dnext=$(prop $DT NextElapseUSecRealtime)
-[ "$(date -d "$dnext" '+%a %H:%M')" = "Sun 03:30" ] && pass "the drill's next elapse is a Sunday at 03:30 ($dnext)" || fail "the drill's next elapse: '$dnext'"
+dpast=$(($(date -d "$dnext" +%s) - $(date -d "$(date -d "$dnext" '+%Y-%m-%d') 03:30:00" +%s)))
+[ "$(date -d "$dnext" +%a)" = Sun ] && [ "$dpast" -ge 0 ] && [ "$dpast" -le 600 ] && pass "the drill's next elapse is a Sunday, between 03:30 and 03:40 ($dnext)" || fail "the drill's next elapse: '$dnext' (${dpast}s past 03:30)"
+systemctl restart $DT
+[ "$(prop $DT NextElapseUSecRealtime)" = "$dnext" ] && pass "and its offset is this box's own, the same after a reload and a restart" || fail "the drill's offset moved: $dnext → $(prop $DT NextElapseUSecRealtime)"
 # One real firing on the calendar, from a drop-in that makes the timer
 # a minute's; the service it starts is the shipped one, with the
 # credential file there.
@@ -230,6 +234,37 @@ systemctl stop $T $DT
 systemctl daemon-reload
 [ "$(prop $T ActiveState)" = inactive ] && [ "$(prop $DT ActiveState)" = inactive ] && pass "the timers are stopped again for the suites after this one" || fail "timers: $(systemctl show -p ActiveState $T $DT | tr '\n' ' ')"
 nothing_left "after the firing"
+
+echo "=== units 6: an upload shown something else in an item's place is said, and not taken as backed up ==="
+# What the unit files must never give the service is a mount namespace
+# of its own: the manager then cannot see the run's mounts, and binds
+# the bare mount point — root's, empty — into the units in place of the
+# app's data [M54]. The unit table holds the files to that; this is
+# what a run says where it happens all the same. The snapshot has a
+# directory of the item's name, and it is not the directory that was
+# given: another inode, another owner [M63].
+mkdir -p /run/systemd/system/$S.d
+printf '[Service]\nPrivateNetwork=yes\n' >/run/systemd/system/$S.d/10-units-suite.conf
+systemctl daemon-reload
+[ "$(prop $S PrivateNetwork)" = yes ] && pass "fixture: the service has a namespace of its own" || fail "fixture: PrivateNetwork=$(prop $S PrivateNetwork): the row proves nothing"
+systemctl start $S >"$OUT" 2>&1 && fail "a run whose units were shown bare mount points exited 0" || pass "a run whose units were shown bare mount points exits non-zero"
+app_json blog | grep -q "in the snapshot it is not the directory that was given to the backup: it is inode [0-9]*, owner 0:0, and what was given is inode [0-9]*, owner $(id -u hotserve):$(id -g hotserve)" \
+	&& pass "blog's uploads is said to be another directory than the one given: root's, by its inode and owner" || fail "blog's record: $(app_json blog)"
+[ "$(class blog)" != ok ] && pass "and blog is not ok" || fail "blog is ok with an empty directory uploaded in place of its files"
+rm -rf /run/systemd/system/$S.d
+systemctl daemon-reload
+systemctl reset-failed $S 2>/dev/null
+if systemctl start $S >"$OUT" 2>&1; then pass "without the namespace the run works again"; else fail "the run after the drop-in went: $(journalctl -u $S --no-pager | tail -10)"; fi
+expect_class blog ok "without the namespace"
+as_app sh -c 'mkdir /var/lib/liveswap/blog/shared/empty'
+sed -i 's|^\(\t*\)files  *uploads$|&\n\1files empty|' "$CADDYFILE"
+if grep -q 'files empty' "$CADDYFILE"; then
+	systemctl start $S >"$OUT" 2>&1 && pass "a run with a declared directory that is empty exits 0" || fail "a run with an empty directory declared: $(journalctl -u $S --no-pager | tail -10)"
+	expect_class blog ok "with an empty directory, which is the one given"
+else
+	fail "fixture: no 'files uploads' line in $CADDYFILE to declare an empty directory beside"
+fi
+nothing_left "after the namespace"
 
 rm -rf /root/bare
 systemctl reset-failed 2>/dev/null

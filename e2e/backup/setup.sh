@@ -82,6 +82,61 @@ useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nolo
 printf 'x\n' | at_tty hotserve-backup setup "$REPO" >"$OUT" 2>&1 && fail "setup with the account in the hotserve group exited 0" || { says "the hotserve group among its groups (gid $(getent group hotserve | cut -d: -f3))" && pass "an account in the hotserve group is refused, naming the group" || fail "the group: $(cat "$OUT")"; }
 userdel hotserve-backup 2>/dev/null
 userdel -r alice 2>/dev/null
+# A password on it: the shell refuses whoever logs in with one, and an
+# sshd that serves sftp itself runs no shell [M70]. Refused until it is
+# locked, which is how useradd --system leaves it.
+useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hotserve-backup
+hotserve-backup account >"$OUT" 2>&1 && pass "the account as useradd --system leaves it, its password locked, is accepted" || fail "the account as made: $(cat "$OUT")"
+echo 'hotserve-backup:e2e-not-a-secret' | chpasswd
+printf 'x\n' | at_tty hotserve-backup setup "$REPO" >"$OUT" 2>&1 && fail "setup with an account that has a password exited 0" || { says "the hotserve-backup account exists with a password that is not locked" && says "usermod --lock --shell /usr/sbin/nologin --home /nonexistent hotserve-backup" && pass "an account with a password is refused, naming the usermod that locks it" || fail "the account with a password: $(cat "$OUT")"; }
+says "Storage key id" && fail "a prompt was asked of an account with a password" || pass "and asked nothing"
+says 'e2e-not-a-secret\|\$y\$' && fail "the refusal shows the password or its hash: $(cat "$OUT")" || pass "and shows nothing of the password"
+# Without root the shadow database cannot be read: what was not looked
+# at is said, and the account is not called right.
+as_nobody hotserve-backup account >"$OUT" 2>&1 && fail "account as nobody exited 0 of an account it could not look at whole" || { says "whether it has a password is root's to read, and was not looked at: sudo hotserve-backup account" && pass "as nobody, account says what it could not look at" || fail "account as nobody: $(cat "$OUT")"; }
+usermod --lock --shell /usr/sbin/nologin --home /nonexistent hotserve-backup
+hotserve-backup account >"$OUT" 2>&1 && pass "locked as the refusal says, it is accepted" || fail "after the usermod the refusal names: $(cat "$OUT")"
+userdel hotserve-backup 2>/dev/null
+# A uid a directory holds and does not enumerate: sssd, its default,
+# fronting a second passwd file. getent passwd lists no such account,
+# and the lookup of the uid answers with the first source's; each
+# source asked for the uid is what finds it [M65].
+useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hotserve-backup
+buid=$(id -u hotserve-backup)
+mkdir -p /var/lib/extrausers
+printf 'dirk:x:%s:%s::/home/dirk:/bin/bash\n' "$buid" "$buid" >/var/lib/extrausers/passwd
+: >/var/lib/extrausers/group
+: >/var/lib/extrausers/shadow
+printf '[sssd]\nservices = nss\ndomains = dir\n[nss]\nfilter_users = root\n[domain/dir]\nid_provider = proxy\nproxy_lib_name = extrausers\nauth_provider = none\nenumerate = false\nmin_id = 1\n' >/etc/sssd/sssd.conf
+chmod 600 /etc/sssd/sssd.conf
+cp /etc/nsswitch.conf /root/nsswitch.conf.base
+sed -i 's/^passwd:.*/passwd:         files systemd sss/' /etc/nsswitch.conf
+grep -q '^passwd:' /etc/nsswitch.conf || echo 'passwd: files systemd sss' >>/etc/nsswitch.conf
+sssd -i --logger=stderr >/root/sssd.log 2>&1 &
+sssd_pid=$!
+i=0
+until [ -n "$(getent -s sss passwd "$buid" 2>/dev/null)" ] || [ "$i" -ge 300 ]; do
+	i=$((i + 1))
+	sleep 0.1
+done
+[ "$(getent -s sss passwd "$buid" | cut -d: -f1)" = dirk ] && pass "fixture: the directory holds dirk at the account's uid" || fail "fixture: sssd does not answer for uid $buid: $(tail -5 /root/sssd.log)"
+getent passwd | grep -q '^dirk:' && fail "fixture: the directory enumerates dirk: the row proves nothing of one that does not" || pass "fixture: and does not enumerate him"
+[ "$(getent passwd "$buid" | cut -d: -f1)" = hotserve-backup ] && pass "fixture: the uid looked up answers with the account, the first source's" || fail "fixture: getent passwd $buid: $(getent passwd "$buid")"
+printf 'x\n' | at_tty hotserve-backup setup "$REPO" >"$OUT" 2>&1 && fail "setup with a uid a directory holds exited 0" || { says "the hotserve-backup account exists with a uid shared with dirk ($buid)" && pass "a uid a directory holds without enumerating it is refused, naming the holder" || fail "the directory's holder: $(cat "$OUT")"; }
+says "Storage key id" && fail "a prompt was asked with the uid shared" || pass "and asked nothing"
+hotserve-backup account >"$OUT" 2>&1 && fail "account exited 0 with a uid a directory holds" || { says "a uid shared with dirk ($buid)" && pass "hotserve-backup account says the same" || fail "account: $(cat "$OUT")"; }
+# The directory gone — its daemon stopped, its cache with it — the
+# source does not answer, which is what absence says: nothing local
+# tells the two apart, and the account passes. Said in the README.
+kill "$sssd_pid" 2>/dev/null
+wait "$sssd_pid" 2>/dev/null
+rm -f /var/lib/sss/mc/* /var/lib/sss/db/*
+getent -s sss passwd "$buid" >/dev/null 2>&1
+[ $? = 2 ] && pass "fixture: with sssd stopped the source says what absence says (exit 2)" || fail "fixture: getent -s sss passwd $buid did not exit 2 with sssd stopped"
+hotserve-backup account >"$OUT" 2>&1 && pass "a source that does not answer is not a holder: the account passes, as the README says it does" || fail "with the directory gone: $(cat "$OUT")"
+cp /root/nsswitch.conf.base /etc/nsswitch.conf
+rm -f /etc/sssd/sssd.conf /var/lib/extrausers/passwd /var/lib/extrausers/group /var/lib/extrausers/shadow /root/nsswitch.conf.base /root/sssd.log
+userdel hotserve-backup 2>/dev/null
 [ ! -e "$ETC" ] && pass "and nothing was made under /etc" || fail "$ETC exists"
 for r in sftp:user@host:/srv/backups /srv/backups local:/srv/backups rclone:remote:bucket azure:container:path gs:bucket:path swift:container:/path rest:https://host:8000/ "s3:http://user:pass@e2e-s3:9000/box" "s3:user:pass@e2e-s3:9000/box" "s3://user:pass@e2e-s3:9000/box" "ftp://host/x" "s3:"; do
 	if printf 'x\n' | at_tty hotserve-backup setup "$r" >"$OUT" 2>&1; then

@@ -47,7 +47,9 @@ to start and `loginctl` to stay alive without a login.
 <summary><b>Without the package</b> — the raw binary, for other systemd hosts</summary>
 
 The `hotserve_<version>_linux_<arch>.tar.gz` archives on the same page
-hold the **raw binary** (plus LICENSE and a README), for other systemd
+hold the **raw binary** (plus LICENSE and a README; and
+`hotserve-backup` with its unit files, for [backups](backups/README.md)),
+for other systemd
 hosts you wire up yourself — a NixOS-style distro, say. Prefer the
 packages where you can: going this way you take on what the package
 does for you, namely a dedicated `hotserve` user, a `Type=notify`

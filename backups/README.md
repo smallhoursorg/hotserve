@@ -32,7 +32,8 @@ The package (`docs/first-deploy.md`) sets up: `hotserve-backup`; the
 `hotserve-backup` account restic runs as, with setup's own `useradd`
 line; `hotserve-backup.timer`, hourly — on the hour plus an offset of
 up to ten minutes that is this box's own and stays the same — and
-`hotserve-backup-drill.timer`, Sunday 03:30, both enabled, both catching
+`hotserve-backup-drill.timer`, Sunday between 03:30 and 03:40 — an
+offset of the same kind — both enabled, both catching
 up a missed elapse at boot; and `restic` and `sqlite3` as recommended
 packages (`apt install ./hotserve_….deb` brings them; with
 `--no-install-recommends` it does not, and setup and every run then say
@@ -77,11 +78,36 @@ through upgrade, remove, reinstall and purge, holding it to this table:
 |---|---|---|
 | install | enabled, running; their services untouched until setup | not made — setup's |
 | upgrade | as they were: an administrator's `disable` is kept. A run or a drill under way is stopped before the new binary is unpacked — its helper units are started by path, and an old run must not start the new version's — and the next hour's run does the backup | byte for byte |
-| remove | stopped and masked; the unit files gone | kept, with `/var/lib/hotserve-backup` |
-| reinstall after remove | enabled and running again | byte for byte; a run works |
+| remove | stopped and masked; the unit files gone, and the timers' stamps with them | kept, with `/var/lib/hotserve-backup` |
+| reinstall after remove | enabled and running again; nothing is caught up, since nothing was missed | byte for byte; a run works |
 | purge | their enable state gone with the masks | **kept, and said why**: it holds the repository password, the one way to read the backups already made. The record, the repository id, the listing's stderr and restic's cache go; `staging/` and `restore/` go only when empty — a directory with something in it holds copies of an app's data a killed run left, which root does not remove, and is named |
 
 The account stays through remove and purge, as system accounts do.
+
+At the edges of those:
+
+- **Where the account cannot be made** — a group named
+  `hotserve-backup` is there without it, and `useradd` refuses — the
+  install says so and completes: hotserve is installed, and `setup`,
+  which makes the account, is where backups wait.
+- **The stop at an upgrade and at a remove is `systemctl stop`
+  itself**, whatever a `policy-rc.d` says of what packages may stop,
+  and what an upgrade stopped it starts again. A unit that will not
+  stop is named, with its state, and the upgrade goes on: an upgrade
+  of hotserve is not held back by a backup. So is a command run from
+  a shell — `sudo hotserve-backup run`, a restore at its prompt —
+  which holds the run lock and is no unit: it is named by its pid and
+  left to run, with a binary that changes, or goes, under it. Let it
+  end first.
+- **What a killed run left mounted** under `/run/hotserve-backup` —
+  an app's data, bound there for the upload — is unmounted at a remove
+  and at a purge, since no next run will sweep it. Never
+  `rm -r /run/hotserve-backup` while anything is mounted under it
+  (`grep /run/hotserve-backup /proc/self/mountinfo`): that removes the
+  app's files through the mount. A mount that would not go is named.
+- **What purge keeps in `/var/lib/hotserve-backup`** it names for what
+  it is: `staging/` and `restore/` for copies of an app's data, the
+  directory itself for a file the package did not make.
 
 A run under the timer that fails — an app not backed up, restic not
 installed, another run holding the lock — is a failed unit,
@@ -146,7 +172,13 @@ run and a drill from the shipped files.
    - uploads with `restic backup`;
    - lists the snapshot that upload made — by the id in its own summary
      — and looks for every declared item in it, because restic leaves
-     out a path that vanishes while it runs, with exit 0;
+     out a path that vanishes while it runs, with exit 0; and holds
+     each file or directory it finds to the one that was given to the
+     upload, by its inode and its owner, which the listing prints: a
+     directory of the right name that is another directory — the
+     upload shown an empty one in its place — is `incomplete`, and the
+     record says both inodes. A declared directory that is empty is
+     backed up, empty;
    - empties staging again, whatever happened;
    - and, if the app is `ok` and no drill of it is on record — proven
      or failed — drills the snapshot it has just made (below): an app's
@@ -418,7 +450,8 @@ interrupted on, and a backup run carries both. It exits 0
 if no drill failed; an app the repository holds no snapshot of has
 nothing to prove. A `run` that drills — an app's first good backup —
 says what the drill found on a line of its own. The package runs it
-every Sunday at 03:30 (`hotserve-backup-drill.timer`, catching up a
+every Sunday between 03:30 and 03:40, at an offset that is this box's
+own and stays the same (`hotserve-backup-drill.timer`, catching up a
 missed one at boot); a drill that proved nothing leaves
 `hotserve-backup-drill.service` failed until the next one proves.
 
@@ -663,20 +696,43 @@ hourly run. It needs no sudoers line.
   a drill refuse the same, in the same words, before any unit); a
   systemd older than 257; a `hotserve-backup` account that is there
   with a shell that is not one of `/usr/sbin/nologin`, `/sbin/nologin`,
-  `/bin/false` and `/usr/bin/false`, a home directory that exists, uid
+  `/bin/false` and `/usr/bin/false`, a home directory that exists, a
+  password that is not locked, uid
   or gid 0, a uid any other account holds, or root's group or the
   `hotserve` group among its groups — whoever can log in as it, or is
   it, can read the repository credential from a running restic's
   environment, and in the `hotserve` group restic and the plan unit
   read the apps' env files — named with the remedy that fits: the
-  `usermod` that locks a shell or a home, or, for who the account is,
+  `usermod` that locks a password, a shell or a home, or, for who the
+  account is,
   removing it and the `useradd` setup would have used; never changed
   by setup; a Caddyfile a run could not plan from; another run,
   restore or drill under way. **A run, a restore and a drill ask the
   same of the account** before any unit — it is the run that puts the
   credential in that account's environment — and refuse one that is
-  not there. `hotserve-backup account`, as anyone, asks it by itself:
-  the package's postinstall does, and warns in those words.
+  not there. `hotserve-backup account` asks it by itself: the
+  package's postinstall does, and warns in those words. Asked without
+  root it says what it can see, and that the password is root's to
+  look at.
+
+  **What the check is, and what it cannot see.** It is a guard
+  against an account named `hotserve-backup` that is on the box for
+  another reason, which someone who is not root has a way to use;
+  what root sets up on its own box — a sudoers rule, a crontab, an
+  sshd that takes keys from outside home directories, a group the
+  account was put in — is root's, and is not looked at. Who else
+  holds the account's uid is asked twice: of the passwd database as
+  `getent passwd` lists it, and of each source on `nsswitch.conf`'s
+  passwd line by the uid, since a directory (LDAP, sssd) need not
+  list its accounts to hold one. Two things no lookup on the box
+  finds: an account in a directory that does not answer when it is
+  asked — its daemon down, its module not installed: `getent` says of
+  it what it says of absence — and a second account at the uid inside
+  one directory that does not list them. Every run asks again. A
+  password a directory holds for the account is the directory's to
+  know. Each lookup is given ten seconds; a directory that does not
+  answer in that time refuses the run, which says which lookup it
+  was.
 - `setup`, at a prompt: an empty value, one with a line break or a
   control character, or one that is not UTF-8 — the file cannot hold
   it — three times; and a password not confirmed `stored`.
@@ -740,7 +796,8 @@ What can be known to fail is refused before anything is asked for
    — the package's postinstall makes it with the same line, so on a
    `.deb` box it is there already), and one that is there is left
    alone once seen to be nobody's to log in as: a shell that refuses a
-   login, no home that exists, not root's uid or gid, and a uid no
+   login, no home that exists, no password that is not locked, not
+   root's uid or gid, and a uid no
    other account holds ("What it refuses"; every run asks the same);
 2. the run lock is taken and held to the end — a backup run that comes
    due meanwhile says who holds it — the state and run directories are
@@ -954,7 +1011,8 @@ id left behind would tie a later record to the wrong repository.
   `script(1)`'s), the backup suite, the units suite (the shipped unit
   files: a run and a drill under their hardening, their units bound to
   them, nothing before setup, a failed run a failed unit, the drill
-  ordered behind a run, the timers as written and one firing), the
+  ordered behind a run, the timers as written and one firing, an
+  upload shown another directory than the one given), the
   status suite (`status` and `validate`) and the restore suite, mostly
   failure paths. The box image runs the package's postinstall and then
   undoes two things of it: the `hotserve-backup` account, which the
@@ -963,4 +1021,4 @@ id left behind would tie a later record to the wrong repository.
 - `make package` and `make install-test` — the `.deb` built and
   installed under real systemd on a fresh Debian 13: the README's "On
   a fresh box" lines as an administrator, and the package's transitions
-  table.
+  table with its edges.

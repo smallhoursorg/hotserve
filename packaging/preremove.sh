@@ -6,36 +6,58 @@
 # restart into the new binary in postinstall — and the deployed apps,
 # which live under the hotserve user's own systemd manager, keep
 # serving right through that restart.
+# stop_backups <what comes next, in words>: the backup timers and the
+# services they start, stopped and then looked at. By systemctl itself:
+# deb-systemd-invoke asks /usr/sbin/policy-rc.d first, and where that
+# says no it skips the stop and exits 0 [M69], which would leave a run
+# under way. The timers first, then anything they started: a run under
+# way gets SIGTERM, stops its own units by name and removes its
+# plaintext copies (TimeoutStopSec=3min in the unit file).
+#
+# What will not stop is said, by name, with its state and the
+# manager's own words, and nothing fails for it (the owner,
+# 2026-09-27): an upgrade of hotserve is not held back by a backup.
+# And a command run from a shell — sudo hotserve-backup run, a restore
+# at its prompt — is no unit of the package's: it holds the run lock,
+# is said by what the lock says of it, and is left to run.
+stop_backups() {
+	[ -d /run/systemd/system ] || return 0
+	said=$(systemctl stop hotserve-backup.timer hotserve-backup-drill.timer hotserve-backup.service hotserve-backup-drill.service 2>&1) || true
+	stuck=""
+	for u in hotserve-backup.timer hotserve-backup-drill.timer hotserve-backup.service hotserve-backup-drill.service; do
+		state=$(systemctl show -p ActiveState --value "$u" 2>/dev/null) || state=""
+		case "$state" in
+		inactive | failed | "") ;;
+		*)
+			stuck="$stuck $u"
+			echo "hotserve: $u would not stop (it is $state): a backup is still under way, and $1" >&2
+			;;
+		esac
+	done
+	if [ -n "$stuck" ]; then
+		[ -z "$said" ] || echo "hotserve: systemctl stop said: $(echo "$said" | head -1)" >&2
+		return 0
+	fi
+	lock=/run/hotserve-backup/lock
+	if [ -f "$lock" ] && command -v flock >/dev/null 2>&1 && ! flock -n "$lock" true 2>/dev/null; then
+		echo "hotserve: a backup command is under way from a shell ($(head -1 "$lock" 2>/dev/null)), and is left to run: $1" >&2
+	fi
+}
 case "${1:-}" in
-upgrade|failed-upgrade)
+upgrade | failed-upgrade)
 	# The backup units are the exception: a run or a drill under way
 	# starts its helper units from /usr/bin/hotserve-backup by path, and
 	# after the unpack that path is the new version's — an old run with
 	# new helpers. Stopped here, a run ends as any stopped run does (its
 	# units ended, its plaintext removed by the run itself on its way
-	# out [M62]); postinstall starts
-	# the timers again, those that were enabled, and the next hour's run
-	# does the backup this one did not finish.
-	if [ -d /run/systemd/system ]; then
-		if [ -x /usr/bin/deb-systemd-invoke ]; then
-			deb-systemd-invoke stop hotserve-backup.timer hotserve-backup-drill.timer hotserve-backup.service hotserve-backup-drill.service >/dev/null || true
-		else
-			systemctl stop hotserve-backup.timer hotserve-backup-drill.timer hotserve-backup.service hotserve-backup-drill.service 2>/dev/null || true
-		fi
-	fi
+	# out [M62]); postinstall starts the timers again, those that were
+	# enabled, and the next hour's run does the backup this one did not
+	# finish.
+	stop_backups "what it starts from here on is the new version's; the upgrade goes on"
 	;;
 *)
 	if command -v systemctl >/dev/null 2>&1; then
-		# The backup timers first, then anything they started: a run
-		# under way gets SIGTERM, stops its own units by name and removes
-		# its plaintext copies (TimeoutStopSec=3min in the unit file).
-		if [ -d /run/systemd/system ]; then
-			if [ -x /usr/bin/deb-systemd-invoke ]; then
-				deb-systemd-invoke stop hotserve-backup.timer hotserve-backup-drill.timer hotserve-backup.service hotserve-backup-drill.service >/dev/null || true
-			else
-				systemctl stop hotserve-backup.timer hotserve-backup-drill.timer hotserve-backup.service hotserve-backup-drill.service 2>/dev/null || true
-			fi
-		fi
+		stop_backups "its program is about to be removed; the removal goes on"
 		systemctl stop hotserve 2>/dev/null || true
 		systemctl disable hotserve 2>/dev/null || true
 		# Removal is the one time the apps go too: stopping the user
