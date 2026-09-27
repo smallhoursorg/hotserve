@@ -15,18 +15,6 @@ RUN apt-get update \
 	&& apt-get install -y --no-install-recommends \
 		systemd systemd-sysv dbus libpam-systemd procps ca-certificates restic sqlite3 \
 	&& rm -rf /var/lib/apt/lists/*
-# A directory that does not enumerate its accounts, for the setup
-# suite's one scenario of it: sssd, fronting a second passwd file
-# through its proxy provider [M65]. Installed and no more: the package
-# writes sss into nsswitch.conf and enables its service, and both are
-# undone here, so that every other scenario runs on the box as Debian
-# ships it. The scenario writes the passwd line and starts sssd itself.
-RUN cp /etc/nsswitch.conf /etc/nsswitch.conf.debian \
-	&& apt-get update \
-	&& apt-get install -y --no-install-recommends sssd-common sssd-proxy libnss-sss libnss-extrausers \
-	&& rm -rf /var/lib/apt/lists/* \
-	&& mv /etc/nsswitch.conf.debian /etc/nsswitch.conf \
-	&& systemctl mask sssd.service sssd-nss.socket sssd-pam.socket sssd-pam-priv.socket sssd-autofs.socket sssd-ssh.socket sssd-sudo.socket sssd-pac.socket sssd-kcm.socket sssd-kcm.service
 RUN systemctl mask \
 	systemd-udevd.service \
 	systemd-udevd-kernel.socket \

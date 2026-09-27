@@ -304,3 +304,23 @@ func TestAHelperOfAnotherVersionEndsTheCommand(t *testing.T) {
 		}
 	})
 }
+
+// Which file a command hashes for its helpers: the program running,
+// where it is the installed one — replaced under it since it started,
+// the kernel still holds the old file, and the old command must not
+// take the new one's hash (Copilot on #155) — and the installed file
+// where the command was started from anywhere else, whose helpers are
+// the installed program.
+func TestACommandHashesTheProgramItIs(t *testing.T) {
+	for _, tc := range []struct{ exe, want string }{
+		{"/usr/bin/hotserve-backup", "/proc/self/exe"},
+		{"/usr/bin/hotserve-backup (deleted)", "/proc/self/exe"},
+		{"/home/dev/hotserve/build/hotserve-backup", "/usr/bin/hotserve-backup"},
+		{"/usr/local/bin/hotserve-backup", "/usr/bin/hotserve-backup"},
+		{"", "/usr/bin/hotserve-backup"},
+	} {
+		if got := programPath("/usr/bin/hotserve-backup", tc.exe); got != tc.want {
+			t.Errorf("running %q: hashes %q, want %q", tc.exe, got, tc.want)
+		}
+	}
+}

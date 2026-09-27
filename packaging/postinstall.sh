@@ -70,9 +70,9 @@ backup_st=0
 nss getent passwd hotserve-backup >/dev/null 2>&1 || backup_st=$?
 if [ "$backup_st" = 2 ]; then
 	if command -v useradd >/dev/null 2>&1; then
-		why=$(useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hotserve-backup 2>&1) || true
+		why=$(useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin --comment made-by-hotserve hotserve-backup 2>&1) || true
 	else
-		why=$(adduser -S -H -h /nonexistent -s /sbin/nologin hotserve-backup 2>&1) || true # busybox
+		why=$(adduser -S -H -h /nonexistent -s /sbin/nologin -g made-by-hotserve hotserve-backup 2>&1) || true # busybox
 	fi
 fi
 if [ "$backup_st" != 0 ] && [ "$backup_st" != 2 ]; then
@@ -150,18 +150,6 @@ fi
 # disabled or masked. The services they start do nothing until
 # `hotserve-backup setup` has written the credential file
 # (ConditionPathExists= in the unit files): an install runs no backup.
-# Which timers this configure starts, rather than leaving as they were:
-# on an install, all; on an upgrade, those new to the box — the helper
-# has no state for them, as on every box upgraded from a release
-# before backups — and those a remove masked, which the helper records
-# as its own mask (an administrator's mask it does not record, and
-# leaves). Read before the helper is asked anything.
-fresh=""
-for u in hotserve-backup.timer hotserve-backup-drill.timer; do
-	if [ -z "${2:-}" ] || [ -e "/var/lib/systemd/deb-systemd-helper-masked/$u" ] || ! [ -e "/var/lib/systemd/deb-systemd-helper-enabled/$u.dsh-also" ]; then
-		fresh="$fresh $u"
-	fi
-done
 if [ -x /usr/bin/deb-systemd-helper ]; then
 	for u in hotserve-backup.timer hotserve-backup-drill.timer; do
 		deb-systemd-helper unmask "$u" >/dev/null || true
@@ -172,23 +160,24 @@ if [ -x /usr/bin/deb-systemd-helper ]; then
 		fi
 	done
 fi
-# The fresh ones are started. The others are left running as they
-# were — nothing stopped them (preremove leaves the backup units alone
-# at an upgrade) — and restarted only where they run, to take up a
-# changed timer file: one an administrator stopped stays stopped.
+# Started on an install, restarted on an upgrade ($2 is the version
+# upgraded from), exactly as dh_installsystemd does it (the owner,
+# 2026-09-27): deb-systemd-invoke starts nothing disabled or masked,
+# and obeys a policy-rc.d. So an upgrade starts again a timer an
+# administrator stopped and left enabled — disable it to keep it off.
+# Nothing of the backups was stopped for an upgrade: a run under way
+# is left to finish.
 if [ -d /run/systemd/system ]; then
 	systemctl --system daemon-reload >/dev/null || true
-	for u in hotserve-backup.timer hotserve-backup-drill.timer; do
-		case " $fresh " in *" $u "*) action=start ;; *) action=try-restart ;; esac
-		if [ -x /usr/bin/deb-systemd-invoke ]; then
-			deb-systemd-invoke "$action" "$u" >/dev/null || true
-		else
-			# No helper (a systemd host that is not Debian): enabled here,
-			# and started, with no memory of an administrator's disable.
-			systemctl enable "$u" 2>/dev/null || true
-			systemctl "$action" "$u" 2>/dev/null || true
-		fi
-	done
+	if [ -n "${2:-}" ]; then action=restart; else action=start; fi
+	if [ -x /usr/bin/deb-systemd-invoke ]; then
+		deb-systemd-invoke "$action" hotserve-backup.timer hotserve-backup-drill.timer >/dev/null || true
+	else
+		# No helper (a systemd host that is not Debian): enabled here,
+		# and started, with no memory of an administrator's disable.
+		systemctl enable hotserve-backup.timer hotserve-backup-drill.timer 2>/dev/null || true
+		systemctl "$action" hotserve-backup.timer hotserve-backup-drill.timer 2>/dev/null || true
+	fi
 	if systemctl is-enabled --quiet hotserve-backup.timer 2>/dev/null; then
 		echo "Backups: the hourly timer and the Sunday restore drill are enabled, and run nothing until:"
 		echo "  sudo hotserve-backup setup <repository>"

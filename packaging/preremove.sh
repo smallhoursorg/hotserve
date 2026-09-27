@@ -8,42 +8,30 @@
 # serving right through that restart.
 # An upgrade leaves the backup units alone (the owner, 2026-09-27): a
 # run or a drill under way goes on as the program it was started as,
-# and its upload, which is restic's, finishes — stopped, it was sent
-# again whole. The helpers it starts from then on are the new
-# version's, and each does nothing for a command of another version,
-# saying so; that hour's unit is red, and the next run is whole.
+# and its upload, which is restic's, finishes. The helpers it starts
+# from then on are the new version's, and each does nothing for a
+# command of another version, saying so.
 #
-# stop_backups: at a remove, the backup timers and the services they
-# start, stopped and then looked at — the program is about to go. By
-# systemctl itself: deb-systemd-invoke asks /usr/sbin/policy-rc.d
-# first, and where that says no it skips the stop and exits 0 [M69].
-# The timers first, then anything they started: a run under way gets
-# SIGTERM, stops its own units by name and removes its plaintext
-# copies (TimeoutStopSec=3min in the unit file). What will not stop is
-# said, by name and state, and the removal goes on; so is a command
-# run from a shell, which holds the run lock and is no unit.
-# postremove sweeps what is left, with the lock held.
+# stop_backups: at a remove, the timers and the services, stopped as
+# dh_installsystemd stops them (the owner, 2026-09-27); then, while the
+# program is still there, `hotserve-backup sweep`: the engine's own
+# sweep of what a killed command left — its units, by the names it
+# recorded, and what it left mounted under /run/hotserve-backup, made
+# private and taken away — under the run lock, as the next command
+# would have, since there will be none. A command that holds the lock
+# — from a shell, or a service that did not stop — is left to run,
+# and the sweep says so in the lock's own words.
 stop_backups() {
 	[ -d /run/systemd/system ] || return 0
-	said=$(systemctl stop hotserve-backup.timer hotserve-backup-drill.timer hotserve-backup.service hotserve-backup-drill.service 2>&1) || true
-	stuck=""
-	for u in hotserve-backup.timer hotserve-backup-drill.timer hotserve-backup.service hotserve-backup-drill.service; do
-		state=$(systemctl show -p ActiveState --value "$u" 2>/dev/null) || state=""
-		case "$state" in
-		inactive | failed | "") ;;
-		*)
-			stuck="$stuck $u"
-			echo "hotserve: $u would not stop (it is $state): a backup is still under way, and its program is about to be removed; the removal goes on" >&2
-			;;
-		esac
-	done
-	if [ -n "$stuck" ]; then
-		[ -z "$said" ] || echo "hotserve: systemctl stop said: $(echo "$said" | head -1)" >&2
-		return 0
+	if [ -x /usr/bin/deb-systemd-invoke ]; then
+		deb-systemd-invoke stop hotserve-backup.timer hotserve-backup-drill.timer hotserve-backup.service hotserve-backup-drill.service >/dev/null || true
+	else
+		systemctl stop hotserve-backup.timer hotserve-backup-drill.timer hotserve-backup.service hotserve-backup-drill.service 2>/dev/null || true
 	fi
-	lock=/run/hotserve-backup/lock
-	if [ -f "$lock" ] && command -v flock >/dev/null 2>&1 && ! flock -n "$lock" true 2>/dev/null; then
-		echo "hotserve: a backup command is under way from a shell ($(head -1 "$lock" 2>/dev/null)), and is left to run: its program is about to be removed; the removal goes on" >&2
+	[ -x /usr/bin/hotserve-backup ] || return 0
+	if command -v timeout >/dev/null 2>&1; then sweep="timeout 300 /usr/bin/hotserve-backup sweep"; else sweep="/usr/bin/hotserve-backup sweep"; fi
+	if ! said=$($sweep 2>&1); then
+		echo "hotserve: what a backup command left was not swept, and is left: ${said#hotserve-backup: }" >&2
 	fi
 }
 case "${1:-}" in

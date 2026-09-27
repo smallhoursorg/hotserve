@@ -1557,7 +1557,7 @@ func TestTheAccountIsMadeWhenMissingAndLeftAloneWhenNot(t *testing.T) {
 	if b.accountsMade != 0 || !strings.Contains(m.saidAll(), "account hotserve-backup: present") {
 		t.Fatalf("made %d\n%s", b.accountsMade, m.saidAll())
 	}
-	if !strings.Contains(useraddArgv(), "useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hotserve-backup") {
+	if !strings.Contains(useraddArgv(), "useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin --comment made-by-hotserve hotserve-backup") {
 		t.Fatalf("useradd: %s", useraddArgv())
 	}
 }

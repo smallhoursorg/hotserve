@@ -69,13 +69,8 @@ type box struct {
 	version                    int
 	haveProgram                func(string) bool
 	account                    bool   // whether the hotserve-backup account exists
-	shell, home                string // as the account has them, where it exists
-	homeThere                  bool   // whether that home is a directory that exists
+	comment                    string // its comment: hotserve's mark, where hotserve made it
 	uid, gid                   int
-	passwordField              string   // the second field of its passwd line: "x" where the shadow database holds it
-	shadow                     string   // its password as the shadow database holds it
-	noShadow                   bool     // the shadow database holds no entry for it
-	shadowErr                  error    // the shadow database could not be asked
 	unseen                     bool     // the manager does not see this command's mounts
 	seesErr                    error    // the manager could not be asked
 	lookedFor                  []string // the mounts the manager was asked about
@@ -83,9 +78,6 @@ type box struct {
 	accountLookups             int      // how often the account was looked up
 	owned4                     []passwd // the accounts a fetch's directory was given to
 	bareNodes                  bool     // the listing says nothing of which file a node is
-	holders                    []string // the accounts that hold that uid, the backup account among them
-	groups                     []int    // the account's groups, its primary among them
-	hotserveGid                int      // the gid of the group named hotserve
 	accountsMade               int
 	owned, synced              []string // what setup asked to be root's, and put on the disk
 	waited                     []string // units a lock holder waited for
@@ -117,28 +109,18 @@ func newBox(t *testing.T) *box {
 	t.Cleanup(func() { haveProgram = oldHave })
 	// The account restic runs as, as setup makes it, unless a test says
 	// otherwise: a run looks at it before any unit, as setup does.
-	b.account, b.shell, b.home, b.uid, b.gid, b.holders, b.groups = true, "/usr/sbin/nologin", "/nonexistent", 995, 995, []string{"hotserve-backup"}, []int{995}
-	b.passwordField, b.shadow = "x", "!"
-	oldAccount, oldHolders, oldHome, oldMake, oldGroups, oldGroup, oldShadowed := account, holders, homeExists, makeAccount, groupsOf, groupNamed, shadowed
-	shadowed = func(context.Context, string) (string, bool, error) { return b.shadow, !b.noShadow, b.shadowErr }
-	groupsOf = func(context.Context, string) ([]int, error) { return b.groups, nil }
-	b.hotserveGid = 1000
-	groupNamed = func(context.Context, string) (int, bool, error) { return b.hotserveGid, true, nil }
+	b.account, b.comment, b.uid, b.gid = true, accountMark, 995, 995
+	oldAccount, oldMake := account, makeAccount
 	account = func(context.Context, string) (passwd, error) {
 		b.accountLookups++
-		return passwd{name: backupUser, password: b.passwordField, shell: b.shell, home: b.home, uid: b.uid, gid: b.gid, exists: b.account}, nil
+		return passwd{name: backupUser, comment: b.comment, uid: b.uid, gid: b.gid, exists: b.account}, nil
 	}
-	holders = func(context.Context, int) ([]string, error) { return b.holders, nil }
-	homeExists = func(string) bool { return b.homeThere }
 	makeAccount = func() error {
 		b.accountsMade++
-		b.account, b.shell, b.home, b.homeThere, b.uid, b.gid, b.holders, b.groups = true, "/usr/sbin/nologin", "/nonexistent", false, 995, 995, []string{"hotserve-backup"}, []int{995}
-		b.passwordField, b.shadow, b.noShadow = "x", "!", false
+		b.account, b.comment, b.uid, b.gid = true, accountMark, 995, 995
 		return nil
 	}
-	t.Cleanup(func() {
-		account, holders, homeExists, makeAccount, groupsOf, groupNamed, shadowed = oldAccount, oldHolders, oldHome, oldMake, oldGroups, oldGroup, oldShadowed
-	})
+	t.Cleanup(func() { account, makeAccount = oldAccount, oldMake })
 	b.cfg = Config{
 		ConfigDir: "/etc/hotserve",
 		EnvFile:   filepath.Join(dir, "backup.env"), StateDir: filepath.Join(dir, "state"), RunDir: filepath.Join(dir, "run"),

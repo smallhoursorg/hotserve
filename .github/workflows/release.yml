@@ -98,7 +98,7 @@ jobs:
                   hotserve-backup-drill.timer
             - the account restic runs as, which setup also makes when
               it is missing:
-                useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hotserve-backup
+                useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin --comment made-by-hotserve hotserve-backup
             - nothing runs until you have run:
                 sudo hotserve-backup setup <repository>
             - and on the way out, what the package's scripts do: to

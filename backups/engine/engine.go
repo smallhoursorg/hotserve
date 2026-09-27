@@ -301,11 +301,39 @@ func (x *run) seen(ctx context.Context) error {
 	return nil
 }
 
+// Sweep takes away what a killed command left — the units it
+// recorded, stopped by those names, and what it left mounted under the
+// run directory, made private and taken away — under the run lock, as
+// the next command would. The package's preremove asks it at a remove,
+// while the program is still there: after it there is no next command
+// (the owner, 2026-09-27: the engine's own sweep, not a shell copy).
+func Sweep(ctx context.Context, cfg Config, r Runner) error {
+	_, end, err := open(ctx, cfg, r, nil)
+	if end != nil {
+		end()
+	}
+	return err
+}
+
+// programPath is the file a command hashes for its helpers: the
+// program running, where it is the installed one — replaced under it
+// since it started, the kernel still holds the old file, and the old
+// command must not take the new one's hash — and the installed file
+// where it was started from anywhere else, whose helpers are the
+// installed program.
+func programPath(self, running string) string {
+	if strings.TrimSuffix(running, " (deleted)") == self {
+		return "/proc/self/exe"
+	}
+	return self
+}
+
 // open is begin without the credential file: what setup, which is
 // about to write that file, shares with a run. say, when there is
 // someone to tell, hears of a wait for an earlier setup's init.
 func open(ctx context.Context, cfg Config, r Runner, say func(string)) (x *run, end func(), err error) {
-	program, err := programOf(cfg.Self)
+	running, _ := os.Readlink("/proc/self/exe")
+	program, err := programOf(programPath(cfg.Self, running))
 	if err != nil {
 		return nil, nil, fmt.Errorf("which version of hotserve-backup this is could not be read: %w", err)
 	}
@@ -683,6 +711,15 @@ func (x *run) sweep() error {
 	if err != nil {
 		return err
 	}
+	// Private first, every one, parents before children: an unmount
+	// propagates by the parent's sharing, not the mount's own, so a
+	// nested mount taken away under a parent still shared takes the
+	// operator's disk beneath the app's own directory with it [M71].
+	// One that cannot be made private is not detached as it is
+	// (unmountDetach), and the sweep says so.
+	for i := len(mounts) - 1; i >= 0; i-- {
+		_ = private(mounts[i])
+	}
 	for _, m := range mounts {
 		if err := unmountDetach(m); err != nil {
 			return fmt.Errorf("a mount from an earlier run is still there: %s: %w", m, err)
@@ -781,6 +818,11 @@ func (x *run) sweepUnits() error {
 		return err
 	}
 	for _, name := range strings.Fields(string(raw)) {
+		// The file is root's own, and still: a name the engine does not
+		// write is not the manager's to be asked to stop.
+		if _, _, ok := ParseUnitName(name); !ok {
+			continue
+		}
 		if err := x.r.Stop(name); err != nil {
 			return fmt.Errorf("a unit from an earlier run is still there and could not be stopped: %w", err)
 		}

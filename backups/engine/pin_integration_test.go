@@ -142,9 +142,9 @@ func TestIntegrationTakingABindAwayLeavesTheAppsDiskMounted(t *testing.T) {
 	sh("mount", "-t", "tmpfs", "tmpfs", base)
 	t.Cleanup(func() { _ = exec.Command("umount", "-R", "-l", base).Run() })
 	sh("mount", "--make-rshared", base)
-	shared, disk, run := filepath.Join(base, "blog", "shared"), filepath.Join(base, "blog", "shared", "uploads", "disk"), filepath.Join(base, "run")
+	shared, disk, runDir := filepath.Join(base, "blog", "shared"), filepath.Join(base, "blog", "shared", "uploads", "disk"), filepath.Join(base, "run")
 	must(t, os.MkdirAll(disk, 0o755))
-	must(t, os.MkdirAll(run, 0o700))
+	must(t, os.MkdirAll(runDir, 0o700))
 	sh("mount", "-t", "tmpfs", "tmpfs", disk)
 	must(t, os.WriteFile(filepath.Join(disk, "kept"), []byte("the operator's\n"), 0o644))
 	mounted := func(when string) {
@@ -158,24 +158,45 @@ func TestIntegrationTakingABindAwayLeavesTheAppsDiskMounted(t *testing.T) {
 	p, err := pinRoot(shared)
 	must(t, err)
 	defer p.close()
-	unmount, err := p.mountAt(filepath.Join(run, "mount-1"))
+	unmount, err := p.mountAt(filepath.Join(runDir, "mount-1"))
 	must(t, err)
-	if _, err := os.Stat(filepath.Join(run, "mount-1", "uploads", "disk", "kept")); err != nil {
+	if _, err := os.Stat(filepath.Join(runDir, "mount-1", "uploads", "disk", "kept")); err != nil {
 		t.Fatalf("the disk did not come along with the bind: %v", err)
 	}
 	unmount()
 	mounted("a run's bind taken away")
 
 	// As an earlier version bound it, and a killed run left it.
-	left := filepath.Join(run, "mount-2")
+	left := filepath.Join(runDir, "mount-2")
 	must(t, os.Mkdir(left, 0o700))
 	sh("mount", "--rbind", shared, left)
 	must(t, unmountDetach(left))
-	mounted("a bind an earlier version left, swept")
-	under, err := mountsUnder(run)
+	mounted("a bind an earlier version left, taken away")
+	under, err := mountsUnder(runDir)
 	must(t, err)
 	if len(under) != 0 {
 		t.Fatalf("still mounted under the run directory: %q", under)
+	}
+
+	// And by the sweep, as a run begins and as the package's remove
+	// asks: every mount under the run directory, the disk's own among
+	// them. An unmount propagates by the parent's sharing, not the
+	// mount's own, so a nested mount taken away first, under a parent
+	// still shared, took the operator's disk with it (the package
+	// smoke, on a shared root, after the sweep became the remove's).
+	dead := filepath.Join(runDir, "0123456789ab")
+	must(t, os.MkdirAll(filepath.Join(dead, "mount-1"), 0o700))
+	sh("mount", "--rbind", shared, filepath.Join(dead, "mount-1"))
+	if _, err := os.Stat(filepath.Join(dead, "mount-1", "uploads", "disk", "kept")); err != nil {
+		t.Fatalf("the disk did not come along with the leftover bind: %v", err)
+	}
+	x := &run{cfg: Config{RunDir: runDir}}
+	must(t, x.sweep())
+	mounted("a killed run's bind swept")
+	under, err = mountsUnder(runDir)
+	must(t, err)
+	if len(under) != 0 {
+		t.Fatalf("still mounted under the run directory after the sweep: %q", under)
 	}
 }
 

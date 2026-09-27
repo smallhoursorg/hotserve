@@ -723,30 +723,24 @@ expect_backup_state "after an upgrade, disabled before it" disabled inactive "$C
 as_admin "sudo systemctl enable --now hotserve-backup.timer hotserve-backup-drill.timer"
 dpkg -i "$deb" >/dev/null
 expect_backup_state "after an upgrade, enabled before it" enabled active "$CRED_SHA"
-# And stopped by the administrator, left enabled: an upgrade restarts
-# only what runs, and that timer stays stopped.
-as_admin "sudo systemctl stop hotserve-backup-drill.timer"
+# The timers as dh_installsystemd has them (the owner, 2026-09-27): an
+# upgrade restarts a timer that is enabled, one an administrator
+# stopped among them — the README says so, and to disable it to keep
+# it off — and leaves one the administrator masked masked.
+as_admin "sudo systemctl stop hotserve-backup.timer"
+as_admin "sudo systemctl mask --now hotserve-backup-drill.timer"
 dpkg -i "$deb" >/dev/null
-[ "$(systemctl is-active hotserve-backup-drill.timer || true)" = inactive ] && [ "$(systemctl is-enabled hotserve-backup-drill.timer || true)" = enabled ] \
-	|| die "after an upgrade, stopped before it: hotserve-backup-drill.timer is $(systemctl is-active hotserve-backup-drill.timer || true), $(systemctl is-enabled hotserve-backup-drill.timer || true): an upgrade started a timer the administrator had stopped"
 [ "$(systemctl is-active hotserve-backup.timer || true)" = active ] \
-	|| die "after an upgrade, the other timer stopped before it: hotserve-backup.timer is $(systemctl is-active hotserve-backup.timer || true)"
-as_admin "sudo systemctl start hotserve-backup-drill.timer"
-expect_backup_state "after an upgrade, one timer stopped before it and started after" enabled active "$CRED_SHA"
-# And one masked by the administrator, the other stopped: a mask of
-# the administrator's is no remove's, so this is an upgrade, and the
-# stopped timer stays stopped and the masked one masked (Copilot on
-# #155: any mask was read as a reinstall's).
-as_admin "sudo systemctl stop hotserve-backup.timer hotserve-backup-drill.timer"
-as_admin "sudo systemctl mask hotserve-backup-drill.timer"
-dpkg -i "$deb" >/dev/null
-[ "$(systemctl is-active hotserve-backup.timer || true)" = inactive ] \
-	|| die "after an upgrade, one timer masked and one stopped by the administrator: hotserve-backup.timer is $(systemctl is-active hotserve-backup.timer || true) — an administrator's mask was taken for a reinstall"
-[ "$(systemctl is-enabled hotserve-backup-drill.timer || true)" = masked ] \
-	|| die "after an upgrade, the administrator's mask of hotserve-backup-drill.timer is $(systemctl is-enabled hotserve-backup-drill.timer || true)"
+	|| die "after an upgrade, a timer stopped and left enabled is $(systemctl is-active hotserve-backup.timer || true): dh_installsystemd restarts it"
+# (Debian's helper asks the manager to restart it all the same, which
+# a mask refuses: masked, and failed rather than inactive, and not
+# running either way.)
+[ "$(systemctl is-enabled hotserve-backup-drill.timer || true)" = masked ] && [ "$(systemctl is-active hotserve-backup-drill.timer || true)" != active ] \
+	|| die "after an upgrade, the administrator's mask of hotserve-backup-drill.timer is $(systemctl is-enabled hotserve-backup-drill.timer || true), $(systemctl is-active hotserve-backup-drill.timer || true)"
 as_admin "sudo systemctl unmask hotserve-backup-drill.timer"
-as_admin "sudo systemctl start hotserve-backup.timer hotserve-backup-drill.timer"
-expect_backup_state "after an upgrade, one timer masked and one stopped, and both put back" enabled active "$CRED_SHA"
+systemctl reset-failed hotserve-backup-drill.timer 2>/dev/null || true
+as_admin "sudo systemctl start hotserve-backup-drill.timer"
+expect_backup_state "after an upgrade, one timer stopped and one masked, and the mask taken off" enabled active "$CRED_SHA"
 systemctl is-active --quiet hotserve || die "hotserve not active after the upgrade cycle"
 # A user directory that does not answer: postinstall's lookups of the
 # accounts are bounded, and one that does not answer is "could not
@@ -854,22 +848,22 @@ rm -f /usr/sbin/policy-rc.d
 expect_backup_state "after an upgrade under a policy-rc.d" enabled active "$CRED_SHA"
 echo "an upgrade under a policy-rc.d left the timers running"
 # The account is every run's to check, and an upgrade says so in
-# setup's own words: put in the hotserve group — where restic and the
-# plan unit would read the apps' env files — it is warned of at the
-# upgrade, refused by a run, and accepted again once taken out.
-usermod -aG hotserve hotserve-backup
-dpkg -i "$deb" >/tmp/upgrade-group.log 2>&1 || { cat /tmp/upgrade-group.log; die "the upgrade with the account in the hotserve group failed: a warning must not fail an install"; }
-grep -q "the hotserve group among its groups" /tmp/upgrade-group.log && grep -q "refuse that account" /tmp/upgrade-group.log \
-	|| die "postinstall did not warn of the account in the hotserve group: $(cat /tmp/upgrade-group.log)"
-grep -q "usermod --shell" /tmp/upgrade-group.log && die "the warning names a usermod of the shell for a fault of who the account is" || true
-systemctl start hotserve-backup.service && die "a run with the account in the hotserve group exited 0" || true
-journalctl -u hotserve-backup.service --no-pager | grep -q "the hotserve group among its groups" \
+# setup's own words: hotserve uses only an account it made, marked as
+# its own; with the mark gone — one made by someone else stands in —
+# it is warned of at the upgrade, refused by a run, and accepted again
+# once it is hotserve's.
+usermod --comment "made by someone else" hotserve-backup
+dpkg -i "$deb" >/tmp/upgrade-mark.log 2>&1 || { cat /tmp/upgrade-mark.log; die "the upgrade with an account hotserve did not make failed: a warning must not fail an install"; }
+grep -q "was not made by hotserve" /tmp/upgrade-mark.log && grep -q "refuse that account" /tmp/upgrade-mark.log \
+	|| die "postinstall did not warn of an account hotserve did not make: $(cat /tmp/upgrade-mark.log)"
+systemctl start hotserve-backup.service && die "a run with an account hotserve did not make exited 0" || true
+journalctl -u hotserve-backup.service --no-pager | grep -q "was not made by hotserve" \
 	|| die "the run did not say why it refused: $(journalctl -u hotserve-backup.service --no-pager | tail -5)"
-gpasswd -d hotserve-backup hotserve >/dev/null
+usermod --comment made-by-hotserve hotserve-backup
 systemctl reset-failed hotserve-backup.service 2>/dev/null || true
-hotserve-backup account >/dev/null || die "the account is not accepted once out of the group: $(hotserve-backup account 2>&1)"
-systemctl start hotserve-backup.service || die "a run after the account was mended failed: $(journalctl -u hotserve-backup.service --no-pager | tail -20)"
-echo "in the hotserve group: warned of at the upgrade in setup's words, refused by a run, accepted once out of it"
+hotserve-backup account >/dev/null || die "hotserve's account is not accepted: $(hotserve-backup account 2>&1)"
+systemctl start hotserve-backup.service || die "a run after the account was hotserve's again failed: $(journalctl -u hotserve-backup.service --no-pager | tail -20)"
+echo "an account hotserve did not make: warned of at the upgrade in setup's words, refused by a run, accepted once it is hotserve's"
 
 stage "stage 4: removal"
 # What remove has to take with it, staged: the persistent timers'
@@ -912,8 +906,8 @@ grep -q " /run/hotserve-backup/" /proc/self/mountinfo \
 	&& die "remove left a killed run's mount: $(grep ' /run/hotserve-backup/' /proc/self/mountinfo)" || true
 [ -f /var/lib/liveswap/demo/shared/app.db ] && [ -f /var/lib/liveswap/demo/shared/uploads/a.png ] \
 	|| die "remove took the app's data with the mount"
-[ -d /run/hotserve-backup/dead00000001 ] || die "remove removed a run's directory: that is purge's, and the next run's"
-echo "remove took the timers' stamps and a killed run's mount, and nothing of the app's"
+[ ! -e /run/hotserve-backup/dead00000001 ] || die "remove left a killed run's directory, which the engine's sweep takes: $(ls -la /run/hotserve-backup/dead00000001)"
+echo "remove took the timers' stamps, and the engine's sweep a killed run's mount and its directory, and nothing of the app's"
 systemctl is-active --quiet hotserve && die "service still active after remove (preremove did not stop it)" || true
 [ ! -e /usr/bin/hotserve ] || die "/usr/bin/hotserve still present after remove"
 [ -f /etc/hotserve/Caddyfile ] || die "conffile deleted on remove (should survive until purge)"
@@ -1073,10 +1067,10 @@ echo plaintext >/var/lib/hotserve-backup/staging/demo/app.db
 echo mine >/var/lib/hotserve-backup/notes.txt
 apt-get purge -y hotserve >/tmp/purge-held.log 2>&1 || { cat /tmp/purge-held.log; die "apt-get purge with a command under way failed"; }
 cat /tmp/purge-held.log
-grep -q "hotserve: a backup command is under way from a shell (pid [0-9]*, since 2026-09-27T00:00:00Z), and is left to run" /tmp/purge-held.log \
+grep -q "hotserve: what a backup command left was not swept, and is left: another backup run is in progress: pid [0-9]*, since 2026-09-27T00:00:00Z" /tmp/purge-held.log \
 	|| die "preremove did not say that a command holds the run lock"
-grep -q "hotserve: the run lock is held (pid [0-9]*, since 2026-09-27T00:00:00Z): a backup is still under way, and is left to run; /run/hotserve-backup, its units and what is mounted under it are left to it" /tmp/purge-held.log \
-	|| die "postremove did not say that the run lock is held, and what it left alone"
+grep -q "hotserve: kept /run/hotserve-backup: something is mounted at or under it" /tmp/purge-held.log \
+	|| die "postremove did not say why it kept the run directory"
 [ -f /run/hotserve-backup/11fe00000001/mount-1/app.db ] || die "purge unmounted under a command that holds the run lock"
 grep -q "hotserve: kept /var/lib/hotserve-backup/staging: not empty — copies of an app's data" /tmp/purge-held.log \
 	|| die "purge did not say that staging is kept, and what is in it"
@@ -1090,14 +1084,12 @@ kill "$holder" 2>/dev/null || true
 umount /run/hotserve-backup/11fe00000001/mount-1
 rm -rf /run/hotserve-backup /var/lib/hotserve-backup
 echo "purge under a command's lock: said, its mount left; what is kept is said for what it is"
-# Mounts under the run directory that are none the engine makes — its
-# own are mount-<n> and seen, under twelve hex digits: right on a
-# directory of the run directory, of a name with a space and of one
-# without; under a run's own directory, of another name; under a
-# directory that is no run's. None is unmounted; each is named; and
-# nothing beneath the run directory is removed while one is there —
-# its files are an app's. (Copilot on #155: by its name with a space
-# alone, a mount was left only for what mountinfo makes of a space.)
+# Mounts under the run directory of names the engine does not make:
+# the directory is root's alone, 0700, and nothing but the engine
+# mounts there, so its sweep takes every mount under it — made
+# private first, so that what was beneath the app's own directory
+# stays — and the app's files stay (the owner, 2026-09-27: the
+# engine's sweep, not a shell copy with its own rules).
 apt-get install -y "$deb" >/tmp/install-again.log 2>&1 || { cat /tmp/install-again.log; die "the install before the last purge failed"; }
 ODD="/run/hotserve-backup/odd /run/hotserve-backup/dead00000001/other /run/hotserve-backup/notarun/mount-1"
 mkdir -p "/run/hotserve-backup/odd dir" /run/hotserve-backup/dead00000001/mount-1 $ODD
@@ -1106,25 +1098,14 @@ for m in "/run/hotserve-backup/odd dir" $ODD /run/hotserve-backup/dead00000001/m
 	mount --bind /var/lib/liveswap/demo/shared "$m" || die "could not stage a mount at $m"
 done
 cp /var/lib/dpkg/info/hotserve.postrm /tmp/hotserve.postrm
-apt-get purge -y hotserve >/tmp/purge-odd.log 2>&1 || { cat /tmp/purge-odd.log; die "apt-get purge with mounts that are none of the engine's failed"; }
+apt-get purge -y hotserve >/tmp/purge-odd.log 2>&1 || { cat /tmp/purge-odd.log; die "apt-get purge with mounts of other names failed"; }
 cat /tmp/purge-odd.log
 [ -f /var/lib/liveswap/demo/shared/app.db ] && [ -f /var/lib/liveswap/demo/shared/uploads/a.png ] \
 	|| die "purge removed the app's files through a mount under the run directory"
-mountpoint -q /run/hotserve-backup/dead00000001/mount-1 && die "purge left a mount that is the engine's own, beside ones that are not" || true
-for m in "/run/hotserve-backup/odd dir" $ODD; do
-	mountpoint -q "$m" || die "purge unmounted $m, which is none of the engine's"
-done
-for m in '/run/hotserve-backup/odd\\040dir' $ODD; do
-	grep "hotserve: still mounted under /run/hotserve-backup: " /tmp/purge-odd.log | grep -q "$m " \
-		|| die "purge did not name $m among the mounts it left: $(grep 'still mounted' /tmp/purge-odd.log)"
-done
-grep -q "unmount each yourself (sudo umount), and do not rm -r /run/hotserve-backup before" /tmp/purge-odd.log \
-	|| die "purge did not say what to do about the mounts it left"
-grep "still mounted" /tmp/purge-odd.log | grep -q "dead00000001/mount-1" && die "purge named a mount it had unmounted" || true
-[ -f /run/hotserve-backup/dead00000001/plan.json ] || die "purge removed from the run directory with something still mounted beneath it"
-for m in "/run/hotserve-backup/odd dir" $ODD; do umount "$m"; done
-rm -rf /run/hotserve-backup
-echo "mounts that are none of the engine's: named, left, and nothing removed beneath the run directory"
+grep -q " /run/hotserve-backup" /proc/self/mountinfo \
+	&& die "purge left mounts under the run directory: $(grep ' /run/hotserve-backup' /proc/self/mountinfo | awk '{print $5}' | tr '\n' ' ')" || true
+[ ! -e /run/hotserve-backup ] || die "purge left /run/hotserve-backup: $(find /run/hotserve-backup)"
+echo "mounts of other names under the run directory: taken away by the engine's sweep, and nothing of the app's with them"
 
 stage "stage 7: purge where the mount table cannot be read"
 # In a chroot or a namespace with no /proc, postremove cannot see what
@@ -1149,10 +1130,24 @@ unshare --mount --propagation private sh -c '
 [ "$rc" != 3 ] || die "the mount table could still be read: the row proves nothing"
 [ "$rc" = 0 ] || die "purge with no mount table removed the app's files through a mount under the run directory (exit $rc): $(cat /tmp/purge-noproc.log)"
 [ -f /var/lib/liveswap/demo/shared/app.db ] && [ -f /var/lib/liveswap/demo/shared/uploads/a.png ] || die "purge with no mount table removed the app's files"
-grep -q "hotserve: what is mounted under /run/hotserve-backup could not be read (/proc/self/mountinfo): nothing under it is removed" /tmp/purge-noproc.log \
+grep -q "hotserve: kept /run/hotserve-backup: something is mounted at or under it, or what is mounted cannot be read; nothing under it is removed" /tmp/purge-noproc.log \
 	|| die "postremove did not say that it could not read the mount table: $(cat /tmp/purge-noproc.log)"
 rm -rf /run/hotserve-backup
 echo "no mount table: purge removed nothing under the run directory, and said why"
+# And a mount on the run directory itself, with /proc there: purge
+# removes the run directory's own files by name, and through such a
+# mount those would be the app's (Copilot on #155).
+mkdir -p /run/hotserve-backup /tmp/at-run
+echo "the app's" >/tmp/at-run/lock
+echo "the app's" >/tmp/at-run/units
+mount --bind /tmp/at-run /run/hotserve-backup
+sh /tmp/hotserve.postrm purge >/tmp/purge-atrun.log 2>&1 || true
+umount /run/hotserve-backup
+[ -f /tmp/at-run/lock ] && [ -f /tmp/at-run/units ] || die "purge removed files through a mount on the run directory itself: $(ls -la /tmp/at-run)"
+grep -q "hotserve: kept /run/hotserve-backup: something is mounted at or under it" /tmp/purge-atrun.log \
+	|| die "postremove did not say why it kept the run directory: $(cat /tmp/purge-atrun.log)"
+rm -rf /run/hotserve-backup /tmp/at-run
+echo "a mount on the run directory itself: purge removed nothing through it, and said why"
 
 echo ""
 echo "ALL PACKAGE SMOKE STAGES PASSED ($deb on $(. /etc/os-release && echo "$PRETTY_NAME"))"

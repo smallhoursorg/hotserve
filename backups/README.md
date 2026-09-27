@@ -77,7 +77,7 @@ through upgrade, remove, reinstall and purge, holding it to this table:
 | Transition | The timers | The credential file |
 |---|---|---|
 | install | enabled, running; their services untouched until setup | not made — setup's |
-| upgrade | as they were: an administrator's `disable`, or `stop`, is kept. A run or a drill under way is left alone: its upload finishes. The helpers it starts afterwards are the new version's, and each does nothing for a command of another version — that app fails for the hour, said as the upgrade, and the next run is whole | byte for byte |
+| upgrade | restarted where enabled, as `dh_installsystemd` does it: an administrator's `disable` or `mask` is kept, a `stop` is not — disable a timer to keep it off. A run or a drill under way is left alone: its upload finishes. The helpers it starts afterwards are the new version's, and each does nothing for a command of another version — that app fails for the hour, said as the upgrade, and the next run is whole | byte for byte |
 | remove | stopped and masked; the unit files gone, and the timers' stamps with them | kept, with `/var/lib/hotserve-backup` |
 | reinstall after remove | enabled and running again; nothing is caught up, since nothing was missed | byte for byte; a run works |
 | purge | their enable state gone with the masks | **kept, and said why**: it holds the repository password, the one way to read the backups already made. The record, the repository id, the listing's stderr and restic's cache go; `staging/` and `restore/` go only when empty — a directory with something in it holds copies of an app's data a killed run left, which root does not remove, and is named |
@@ -90,13 +90,15 @@ At the edges of those:
   `hotserve-backup` is there without it, and `useradd` refuses — the
   install says so and completes: hotserve is installed, and `setup`,
   which makes the account, is where backups wait.
-- **The stop at a remove is `systemctl stop` itself**, whatever a
-  `policy-rc.d` says of what packages may stop: the program is about to
-  go. A unit that will not stop is named, with its state, and the
-  removal goes on. So is a command run from a shell — `sudo
-  hotserve-backup run`, a restore at its prompt — which holds the run
-  lock and is no unit: it is named by its pid and left to run, with its
-  program gone from under it. Let it end first.
+- **At a remove** the timers and the services are stopped as
+  `dh_installsystemd` stops them, and then, while the program is still
+  there, `hotserve-backup sweep` takes away what a killed command left:
+  the units it had started, by the exact names it recorded, and what it
+  left mounted under `/run/hotserve-backup` — as the next run would
+  have, since there will be none. A command that holds the run lock —
+  `sudo hotserve-backup run` from a shell, a restore at its prompt — is
+  named by what the lock says and left to run, with its program gone
+  from under it. Let it end first.
 - **A command and its helpers are one version.** A run starts its
   helpers — the plan, the dump, a restore's check and install — from
   `/usr/bin/hotserve-backup` by path, and after an upgrade that is the
@@ -105,21 +107,17 @@ At the edges of those:
   so; the run records the upgrade as that app's failure and tries no
   app after it. The helper that removes plaintext copies works for any
   version.
-- **What a killed command left** under `/run/hotserve-backup` — the
-  units it had started, which from a shell no service ends with it,
-  and an app's data, bound there for the upload — is swept at a remove
-  and at a purge as the next run would have swept it, since there is
-  none: the units stopped by the exact names the command recorded,
-  the mounts taken away. Never
-  `rm -r /run/hotserve-backup` while anything is mounted under it
-  (`grep /run/hotserve-backup /proc/self/mountinfo`): that removes the
-  app's files through the mount. A mount that is still there is named,
-  and purge then removes nothing beneath the directory.
+- **Purge removes nothing under `/run/hotserve-backup`** where anything
+  is mounted at or under it, or where what is mounted cannot be read,
+  and says so; otherwise its own files, and its directories by `rmdir`
+  alone. Never `rm -r /run/hotserve-backup` while anything is mounted
+  under it (`grep /run/hotserve-backup /proc/self/mountinfo`): that
+  removes the app's files through the mount.
 - **A disk mounted inside an app's data stays mounted.** A run binds
   the app's data recursively, so that such a disk is backed up with
   it, and makes what it has bound private before it does anything
-  else with it, and again before it takes it away; so do remove and
-  purge. On a box systemd has booted the root mount is shared, and a
+  else with it, and again before it takes it away; so does the sweep
+  at a remove. On a box systemd has booted the root mount is shared, and a
   bind of it that is taken away as it was made takes the disk beneath
   the app's own directory with it [measured; a container's root is
   private, and shows nothing of this].
@@ -725,47 +723,23 @@ hourly run. It needs no sudoers line.
   a secret), and a scheme restic does not
   know; restic, sqlite3 or hotserve not installed (a run, a restore and
   a drill refuse the same, in the same words, before any unit); a
-  systemd older than 257; a `hotserve-backup` account that is there
-  with a shell that is not one of `/usr/sbin/nologin`, `/sbin/nologin`,
-  `/bin/false` and `/usr/bin/false`, a home directory that exists, a
-  password that is not locked, uid
-  or gid 0, a uid any other account holds, or root's group or the
-  `hotserve` group among its groups — whoever can log in as it, or is
-  it, can read the repository credential from a running restic's
-  environment, and in the `hotserve` group restic and the plan unit
-  read the apps' env files — named with the remedy that fits: the
-  `usermod` that locks a password, a shell or a home, or, for who the
-  account is,
-  removing it and the `useradd` setup would have used; never changed
-  by setup; a Caddyfile a run could not plan from; another run,
-  restore or drill under way. **A run, a restore and a drill ask the
-  same of the account** before any unit — it is the run that puts the
-  credential in that account's environment — and refuse one that is
-  not there. `hotserve-backup account` asks it by itself: the
-  package's postinstall does, and warns in those words. Asked without
-  root it says what it can see, and that the password is root's to
-  look at.
-
-  **What the check is, and what it cannot see.** It is a guard
-  against an account named `hotserve-backup` that is on the box for
-  another reason, which someone who is not root has a way to use;
-  what root sets up on its own box — a sudoers rule, a crontab, an
-  sshd that takes keys from outside home directories, a group the
-  account was put in — is root's, and is not looked at. Who else
-  holds the account's uid is asked twice: of the passwd database as
-  `getent passwd` lists it, and of each source on `nsswitch.conf`'s
-  passwd line by the uid, since a directory (LDAP, sssd) need not
-  list its accounts to hold one. Two things no lookup on the box
-  finds: an account in a directory that does not answer when it is
-  asked — its daemon down, its module not installed: `getent` says of
-  it what it says of absence — and a second account at the uid inside
-  one directory that does not list them. Every run asks again. A
-  password a directory holds for the account is the directory's to
-  know. Each lookup is given ten seconds, and the one that lists the
-  whole passwd database a minute, since it takes as long as a
-  directory is large; a directory that does not answer in that time
-  refuses the run, which says which lookup it was. The `hotserve`
-  account is looked up the same way, through `getent`.
+  systemd older than 257; a `hotserve-backup` account that hotserve
+  did not make — hotserve makes it with its mark, the comment
+  `made-by-hotserve`, and uses no other, since every restic unit runs
+  as it and whoever is it reads the repository credential from a
+  running restic's environment: an account of that name made by hand,
+  by another package, or by this branch before the mark, is refused,
+  never changed, and the remedy is to remove it (`userdel
+  hotserve-backup`) and run setup, which makes it; a Caddyfile a run
+  could not plan from; another run, restore or drill under way. **A
+  run, a restore and a drill ask the same of the account** before any
+  unit — it is the run that puts the credential in that account's
+  environment — and refuse one that is not there. `hotserve-backup
+  account` asks it by itself: the package's postinstall does, and warns
+  in those words. What root does to hotserve's account after it is
+  made — a shell, a password, a group — is root's: root reads the
+  credential file itself. The lookup is given ten seconds; one that
+  does not answer refuses the run, and says so.
 - `setup`, at a prompt: an empty value, one with a line break or a
   control character, or one that is not UTF-8 — the file cannot hold
   it — three times; and a password not confirmed `stored`.
@@ -825,13 +799,11 @@ What can be known to fail is refused before anything is asked for
 ("What it refuses"). In order:
 
 1. the `hotserve-backup` account is made if it is not there
-   (`useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hotserve-backup`
+   (`useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin --comment made-by-hotserve hotserve-backup`
    — the package's postinstall makes it with the same line, so on a
-   `.deb` box it is there already), and one that is there is left
-   alone once seen to be nobody's to log in as: a shell that refuses a
-   login, no home that exists, no password that is not locked, not
-   root's uid or gid, and a uid no
-   other account holds ("What it refuses"; every run asks the same);
+   `.deb` box it is there already), and one that is there is used
+   only where hotserve made it, which its comment says ("What it
+   refuses"; every run asks the same);
 2. the run lock is taken and held to the end — a backup run that comes
    due meanwhile says who holds it — the state and run directories are
    made as a run makes them, `/etc/hotserve-backup` is made (root,

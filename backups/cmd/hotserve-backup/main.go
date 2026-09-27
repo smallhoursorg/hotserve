@@ -173,6 +173,16 @@ func command(name string, args []string) error {
 		}
 		fmt.Println("the hotserve-backup account is one setup and a run accept")
 		return nil
+	case "sweep":
+		// The package's preremove, at a remove, while this program is
+		// still there: what a killed command left, swept as the next
+		// command would have, since there will be none.
+		r, err := runner(ctx, "sweep")
+		if err != nil {
+			return err
+		}
+		defer r.Close()
+		return engine.Sweep(ctx, config(), r)
 	case "check":
 		return settle(ctx, restore.CheckOnly)
 	case "install":
