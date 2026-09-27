@@ -18,17 +18,21 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -64,6 +68,51 @@ const (
 	dataUser   = "hotserve"        // owns the apps' data; the only uid that reads a live database
 	backupUser = "hotserve-backup" // holds the credential while restic runs; runs nothing else
 )
+
+// A command and the helpers it starts are one version, or the helper
+// does nothing. An upgrade leaves a command under way alone (the
+// owner, 2026-09-27) — its upload is restic's and finishes, where a
+// stopped one was sent again whole — and the helpers it starts from
+// then on, by path, are the new version's. Their answers are read
+// strictly, which refuses another shape; an answer of the same shape
+// that means something else is what nothing would see. So each unit
+// started from this program is told which program that is, in
+// RunIdentityEnv, and a helper that is another exits
+// OtherVersionStatus having done nothing: 75, which no helper exits
+// otherwise and the manager never does.
+const (
+	RunIdentityEnv     = "HOTSERVE_BACKUP_RUN_IS"
+	OtherVersionStatus = 75
+)
+
+// WhichProgram is which program this is: the hash of the file it was
+// started from, as the kernel still holds it — whatever is at its path
+// by now. Not a version's name: two builds of one name are two
+// programs, and a build with no name is one.
+func WhichProgram() (string, error) { return whichProgram() }
+
+var whichProgram = sync.OnceValues(func() (string, error) {
+	f, err := os.Open("/proc/self/exe")
+	if err != nil {
+		return "", err
+	}
+	defer f.Close() //nolint:errcheck // read only
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+})
+
+// otherVersion is a helper that was another version's, and did
+// nothing: the unit's own word, so nothing had begun; and every helper
+// after it would say the same, so nothing after it is tried.
+func otherVersion(o unit.Outcome, role string) error {
+	if o.Result != "exit-code" || o.ExitStatus != OtherVersionStatus {
+		return nil
+	}
+	return repositoryWideError{refusedError{fmt.Errorf("the package was upgraded while this command was under way: its %s helper is another version's, and did nothing; the same command, run again, is of one version", role)}}
+}
 
 // retryLock is how long restic waits for a repository something else
 // holds — a check takes it exclusively. A flag, because restic 0.18
@@ -116,6 +165,10 @@ type run struct {
 	dataUID, dataGID int
 	dataErr          error
 	account          passwd
+	// program is which program this is, told to every helper.
+	program string
+	// upgraded is set once a helper was another version's.
+	upgraded error
 	// given is which file each files item of the app under way is, by
 	// its path in the upload unit's view: what the snapshot is held to.
 	given map[string]identity
@@ -168,6 +221,12 @@ func begin(ctx context.Context, cfg Config, r Runner) (x *run, end func(), err e
 	// before as ok for three hours.
 	if err := programsInstalled(cfg); err != nil {
 		return x, end, err
+	}
+	// The data user's lookup, made as the command opened: a lookup that
+	// failed stops the command here, in its own words, whether or not
+	// anything after would have used its answer.
+	if x.dataErr != nil {
+		return x, end, x.dataErr
 	}
 	if x.account, err = accountReady(ctx); err != nil {
 		return x, end, err
@@ -222,6 +281,10 @@ func (x *run) seen(ctx context.Context) error {
 // about to write that file, shares with a run. say, when there is
 // someone to tell, hears of a wait for an earlier setup's init.
 func open(ctx context.Context, cfg Config, r Runner, say func(string)) (x *run, end func(), err error) {
+	program, err := whichProgram()
+	if err != nil {
+		return nil, nil, fmt.Errorf("which version of hotserve-backup this is could not be read: %w", err)
+	}
 	// The state dir is where the status record is read from by anyone;
 	// everything else is root's alone. Units reach staging through
 	// binds the manager makes, not by walking here.
@@ -256,7 +319,7 @@ func open(ctx context.Context, cfg Config, r Runner, say func(string)) (x *run, 
 		prev = &record.Status{Apps: map[string]*record.App{}}
 	}
 	uid, gid, derr := dataOwner(ctx)
-	x = &run{cfg: cfg, r: r, nonce: nonce, dir: filepath.Join(cfg.RunDir, nonce), prev: prev, dataUID: uid, dataGID: gid, dataErr: derr,
+	x = &run{cfg: cfg, r: r, nonce: nonce, dir: filepath.Join(cfg.RunDir, nonce), prev: prev, dataUID: uid, dataGID: gid, dataErr: derr, program: program,
 		status: &record.Status{Started: time.Now().UTC(), Warning: unreadable, Apps: map[string]*record.App{}, Listed: prev.Listed, Unlisted: prev.Unlisted, LastDrill: prev.LastDrill}}
 	if err := x.awaitInit(ctx, say); err != nil {
 		return x, unlock, err
@@ -563,6 +626,10 @@ func (x *run) start(ctx context.Context, s unit.Spec) (unit.Outcome, error) {
 	if strings.HasPrefix(s.Name, "hotserve_backup_clean_") || strings.HasPrefix(s.Name, "hotserve_backup_unstage_") {
 		s.BindsTo = ""
 	}
+	// A unit of this program is told which program that is.
+	if len(s.Argv) > 0 && s.Argv[0] == x.cfg.Self {
+		s.Environment = append(slices.Clone(s.Environment), RunIdentityEnv+"="+x.program)
+	}
 	f, err := os.OpenFile(filepath.Join(x.cfg.RunDir, "units"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return unit.Outcome{}, err
@@ -745,6 +812,9 @@ func (x *run) planWith(ctx context.Context, stderrFile string) (*plan.Plan, erro
 	if err != nil {
 		return nil, fmt.Errorf("reading the plan: %w", err)
 	}
+	if err := otherVersion(o, "plan"); err != nil {
+		return nil, err
+	}
 	if !o.OK() {
 		if stderrFile != "" {
 			if said, err := os.ReadFile(stderrFile); err == nil && len(bytes.TrimSpace(said)) > 0 { //nolint:gosec // written by the manager into root's own run dir
@@ -881,6 +951,12 @@ func (x *run) app(ctx context.Context, root, name string, decl *backupdecl.Confi
 	if ctx.Err() != nil {
 		return fail(record.Failed, "interrupted before anything was uploaded")
 	}
+	// Nothing is uploaded of an app whose databases nobody copied, and
+	// no app after it is tried: its helpers are the same program's.
+	if x.upgraded != nil {
+		app.Class, app.Detail = record.Failed, record.Text(x.upgraded.Error())
+		return app, true
+	}
 	binds, masked, present, unpin := x.view(name, sharedPin, staging, declFile, decl, app)
 	defer unpin()
 	if dumped+present == 0 {
@@ -996,6 +1072,9 @@ func (x *run) dump(ctx context.Context, app, shared, staging, declFile string, d
 	})
 	if err != nil {
 		return failAll("the dump unit: %v", err)
+	}
+	if x.upgraded = otherVersion(o, "dump"); x.upgraded != nil {
+		return failAll("%v", x.upgraded)
 	}
 	raw, rerr := os.ReadFile(out) //nolint:gosec // written by the manager into root's own run dir
 	var results []dump.Result

@@ -6,8 +6,8 @@
 # measurement of that set, PLAN M54/M55 — bind their units to
 # themselves, do nothing before setup, fail as units when they fail,
 # order the drill behind a run, fire from their timers as written,
-# refuse in a mount namespace of their own, and leave an operator's
-# disk mounted.
+# refuse in a mount namespace of their own, leave an operator's disk
+# mounted, and a helper of another version does nothing.
 # Nothing here enables a timer for good: a timer firing into another
 # suite would take the run lock from under it.
 . /lib.sh
@@ -304,6 +304,41 @@ umount /var/lib/liveswap/blog/shared/uploads/disk
 as_app rmdir /var/lib/liveswap/blog/shared/uploads/disk
 rm -rf /root/disk
 nothing_left "after the disk"
+
+echo "=== units 8: a helper of another version does nothing for a run under way ==="
+# An upgrade leaves a run alone (the owner, 2026-09-27), and the
+# helpers it starts from then on are the new program's: each is told
+# which program started it, and one that is another does nothing and
+# says so. Staged as dpkg replaces a file — written beside, renamed
+# over — with a program that differs by one byte, while blog's upload
+# is held: blog's upload finishes and its plaintext is removed (the
+# clean helper works for any version); shop's dump, the next helper,
+# is the other program's.
+seed
+big
+systemctl reset-failed $S 2>/dev/null
+systemctl start --no-block $S
+if hold_restic "restic backup"; then
+	cp /usr/bin/hotserve-backup /usr/bin/hotserve-backup.suite-aside
+	cp /usr/bin/hotserve-backup /usr/bin/.hotserve-backup.new
+	printf x >>/usr/bin/.hotserve-backup.new
+	mv /usr/bin/.hotserve-backup.new /usr/bin/hotserve-backup
+	kill -CONT "$pid"
+	until_state $S failed 240 && pass "the run whose helper was another version's is a failed unit" || fail "the run: $(systemctl show -p ActiveState,Result $S | tr '\n' ' ') — $(journalctl -u $S --no-pager | tail -5)"
+	expect_class blog ok "with its upload under way at the upgrade"
+	expect_class shop failed "whose helper was another version's"
+	app_json shop | grep -q "the package was upgraded while this command was under way: its dump helper is another version's, and did nothing" && pass "shop says the package was upgraded mid-run" || fail "shop: $(app_json shop)"
+	journalctl -u "hotserve_backup_dump_shop_*" --no-pager 2>/dev/null | grep -q "this helper is not the version of the command that started it" && pass "and the helper said so in its own journal" || fail "the dump helper's journal: $(journalctl --no-pager | grep -i 'dump_shop' | tail -3)"
+	mv /usr/bin/hotserve-backup.suite-aside /usr/bin/hotserve-backup
+	systemctl reset-failed $S
+	if systemctl start $S >"$OUT" 2>&1; then pass "the next run, of one version, works"; else fail "the next run: $(journalctl -u $S --no-pager | tail -10)"; fi
+	expect_class shop ok "the next run"
+else
+	fail "no restic appeared under the service: the row proves nothing"
+	systemctl stop $S 2>/dev/null
+fi
+as_app rm -f /var/lib/liveswap/blog/shared/uploads/big.bin
+nothing_left "after the other version"
 
 rm -rf /root/bare
 systemctl reset-failed 2>/dev/null

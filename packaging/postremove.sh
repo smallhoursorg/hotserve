@@ -42,12 +42,6 @@ set -e
 timers="hotserve-backup.timer hotserve-backup-drill.timer"
 run=/run/hotserve-backup
 
-# lock_held: something holds the run lock — a command run from a
-# shell, or a service that would not stop, which preremove has named.
-lock_held() {
-	[ -f "$run/lock" ] && command -v flock >/dev/null 2>&1 && ! flock -n "$run/lock" true 2>/dev/null
-}
-
 # mounted_beneath: the mount points under the run directory, as
 # mountinfo writes them — a space as \040 — shallowest first.
 mounted_beneath() {
@@ -75,18 +69,23 @@ stop_left() {
 }
 
 # unmount_left: what is mounted under the run directory, taken away.
-# Each of the engine's own mount points — mount-<n> under a hex name,
-# nothing mountinfo escapes — is made private with all beneath it,
+# Each of the engine's own mount points — mount-<n>, and seen, under a
+# run's twelve hex digits, and nothing else: a mount of another name
+# there is none the engine made — is made private with all beneath it,
 # and then detached with all beneath it, as the run's own sweep does:
 # a disk that came along with the bind, whatever its name, goes with
-# it and takes nothing of the app's. What is still mounted after that
-# is named, once.
+# it and takes nothing of the app's. One that cannot be made private
+# is not detached as it is, which would take the app's disk with it:
+# it is unmounted plainly, which is refused while anything is mounted
+# beneath it, or left. What is still mounted after that is named,
+# once.
 unmount_left() {
-	for m in $(mounted_beneath | grep -v '\\' || true); do
-		# Gone with its parent, a line ago.
-		grep -qF " $m " /proc/self/mountinfo || continue
-		mount --make-rprivate "$m" 2>/dev/null || continue
-		umount -l "$m" 2>/dev/null || true
+	for m in $(mounted_beneath | grep -E "^$run/[0-9a-f]{12}/(mount-[0-9]+|seen)\$" || true); do
+		if mount --make-rprivate "$m" 2>/dev/null; then
+			umount -l "$m" 2>/dev/null || true
+		else
+			umount "$m" 2>/dev/null || true
+		fi
 	done
 	# printf, not echo: a shell's echo may read mountinfo's escapes, and
 	# what is printed is what mountinfo says, whatever the shell.
@@ -116,17 +115,29 @@ remove_run() {
 	rmdir "$run" 2>/dev/null || echo "hotserve: kept $run: not empty — $(ls -A "$run" | tr '\n' ' ')is still there; it is gone at the next boot" >&2
 }
 
+# sweep: what a killed command left, swept with the run lock held from
+# the first of it to the last, so that nothing is another command's by
+# the time it is touched. Exit 3: the lock is somebody's.
+sweep() {
+	if command -v flock >/dev/null 2>&1; then
+		flock -n 9 || return 3
+	fi
+	stop_left
+	unmount_left
+	[ "$1" != purge ] || remove_run
+}
+
 case "${1:-}" in
 remove | purge)
 	for u in $timers; do
 		rm -f "/var/lib/systemd/timers/stamp-$u"
 	done
-	if lock_held; then
-		echo "hotserve: the run lock is held ($(head -1 "$run/lock" 2>/dev/null)): a backup is still under way, and is left to run; $run, its units and what is mounted under it are left to it" >&2
-	else
-		stop_left
-		unmount_left
-		[ "$1" != purge ] || remove_run
+	if [ -d "$run" ]; then
+		swept=0
+		(sweep "$1") 9>>"$run/lock" || swept=$?
+		if [ "$swept" = 3 ]; then
+			echo "hotserve: the run lock is held ($(head -1 "$run/lock" 2>/dev/null)): a backup is still under way, and is left to run; $run, its units and what is mounted under it are left to it" >&2
+		fi
 	fi
 	;;
 esac

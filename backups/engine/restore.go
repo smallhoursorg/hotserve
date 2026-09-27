@@ -921,6 +921,9 @@ func (x *run) settle(ctx context.Context, app, role, fetched, target string) (*r
 	if err != nil {
 		return nil, fmt.Errorf("the %s unit: %w", role, err)
 	}
+	if err := otherVersion(o, role); err != nil {
+		return nil, err
+	}
 	raw, rerr := os.ReadFile(out) //nolint:gosec // written by the manager into root's own run dir
 	answer := new(restore.Answer)
 	dec := json.NewDecoder(bytes.NewReader(raw))

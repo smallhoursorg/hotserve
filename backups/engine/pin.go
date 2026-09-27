@@ -65,24 +65,44 @@ func (p pin) mountAt(target string) (unmount func(), err error) {
 // them away takes nothing else. Before the unmount as well as after
 // the bind: a mount a killed run of an earlier version left is swept
 // by this one.
+//
+// And where it cannot be made private it is never detached as it is,
+// which is the very thing making it private is for: it is unmounted
+// plainly, which the kernel refuses while anything is mounted beneath
+// it — so that what goes had nothing to take along — and is otherwise
+// left where it is, and said, for a sweep that can do better.
 var (
 	bindMount = func(source, target string) error {
 		if err := unix.Mount(source, target, "", unix.MS_BIND|unix.MS_REC, ""); err != nil {
 			return err
 		}
-		if err := private(target); err != nil {
-			_ = unix.Unmount(target, unix.MNT_DETACH)
-			return fmt.Errorf("making it private: %w", err)
-		}
-		return nil
+		return unshared(target, private(target))
 	}
 	unmountDetach = func(target string) error {
-		// Not a mount, or gone already: the unmount says so.
-		_ = private(target)
+		if err := private(target); err != nil {
+			if plain := unix.Unmount(target, 0); plain == nil || errors.Is(plain, unix.EINVAL) {
+				// Gone, with nothing beneath it; or no mount at all,
+				// which the unmount says as it always did.
+				return plain
+			}
+			return unshared(target, err)
+		}
 		return unix.Unmount(target, unix.MNT_DETACH)
 	}
 	private = func(target string) error { return unix.Mount("", target, "", unix.MS_REC|unix.MS_PRIVATE, "") }
 )
+
+// unshared is what becomes of a bind that could not be made private,
+// and nil where it could.
+func unshared(target string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if unix.Unmount(target, 0) == nil {
+		return fmt.Errorf("what was bound at %s could not be made private, and was unmounted: %w", target, err)
+	}
+	return fmt.Errorf("what was bound at %s could not be made private (%w), and is left mounted: taken away as it is, it would take with it what is mounted beneath what it was bound from", target, err)
+}
 
 func (p pin) close() { _ = unix.Close(p.fd) }
 

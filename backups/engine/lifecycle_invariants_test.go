@@ -197,6 +197,18 @@ func TestARunRefusesWhatSetupRefusesWithSetupsWords(t *testing.T) {
 		// it shows any unit anything, and before any upload [M72].
 		{"the manager's sight of its mounts", func(b *box) { b.unseen = true }, "runs in a mount namespace of its own: the manager does not see the mounts it makes"},
 		{"an answer from the manager about its mounts", func(b *box) { b.seesErr = errors.New("no reply") }, "whether the manager sees the mounts this command makes could not be asked: no reply"},
+		// The data user's lookup is every command's to fail on, in the
+		// lookup's own words: kept for whoever asked first, it was never
+		// said where no app was reached, and where one was it came out
+		// as "does not belong to the hotserve user" (Copilot on #155).
+		{"the hotserve account", func(b *box) {
+			dataOwner = func(context.Context) (int, int, error) { return 0, 0, errors.New("the hotserve account is not there") }
+		}, "the hotserve account is not there"},
+		{"an answer about the hotserve account", func(b *box) {
+			dataOwner = func(context.Context) (int, int, error) {
+				return 0, 0, errors.New("/usr/bin/getent passwd hotserve did not answer within 10s")
+			}
+		}, "/usr/bin/getent passwd hotserve did not answer within 10s"},
 	} {
 		for _, cmd := range runDrillRestore {
 			t.Run(cmd.name+" without "+p.name, func(t *testing.T) {

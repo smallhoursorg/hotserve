@@ -302,3 +302,39 @@ func TestSetupsClosingLineFollowsTheTimer(t *testing.T) {
 		t.Errorf("with an answer: %q", got)
 	}
 }
+
+// A helper works only for a command of its own version: told which
+// program started it, one that is another does nothing, and says so
+// with a status of its own. Not told — started by hand — it works; and
+// the helper that removes plaintext works whatever it is told.
+func TestAHelperWorksOnlyForACommandOfItsOwnVersion(t *testing.T) {
+	const own, other = "aaaa", "bbbb"
+	for _, name := range []string{"plan", "dump", "check", "install", "extract"} {
+		if err := forThisCommand(name, "", func() (string, error) { return own, nil }); err != nil {
+			t.Errorf("%s, told nothing: %v", name, err)
+		}
+		if err := forThisCommand(name, own, func() (string, error) { return own, nil }); err != nil {
+			t.Errorf("%s, told its own version: %v", name, err)
+		}
+		err := forThisCommand(name, other, func() (string, error) { return own, nil })
+		if !errors.Is(err, errOtherVersion) || !strings.Contains(err.Error(), "this helper is not the version of the command that started it (the package was upgraded while that command was under way), and does nothing") {
+			t.Errorf("%s, told another version: %v", name, err)
+		}
+		// One that cannot read itself cannot say it is the same.
+		err = forThisCommand(name, own, func() (string, error) { return "", errors.New("open /proc/self/exe: permission denied") })
+		if !errors.Is(err, errOtherVersion) || !strings.Contains(err.Error(), "permission denied") {
+			t.Errorf("%s, which could not read itself: %v", name, err)
+		}
+	}
+	for _, name := range []string{"clean", "run", "drill", "restore", "setup", "status", "validate", "account"} {
+		if err := forThisCommand(name, other, func() (string, error) { return own, nil }); err != nil {
+			t.Errorf("%s, told another version: %v", name, err)
+		}
+	}
+	if exitStatus(errOtherVersion) != 75 || exitStatus(fmt.Errorf("x: %w", errOtherVersion)) != 75 {
+		t.Errorf("a helper of another version exits %d", exitStatus(errOtherVersion))
+	}
+	if exitStatus(errors.New("x")) != 1 || exitStatus(couldNotTell{errors.New("x")}) != 3 {
+		t.Errorf("the other statuses moved: %d, %d", exitStatus(errors.New("x")), exitStatus(couldNotTell{errors.New("x")}))
+	}
+}

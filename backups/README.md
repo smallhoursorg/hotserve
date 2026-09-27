@@ -77,7 +77,7 @@ through upgrade, remove, reinstall and purge, holding it to this table:
 | Transition | The timers | The credential file |
 |---|---|---|
 | install | enabled, running; their services untouched until setup | not made — setup's |
-| upgrade | as they were: an administrator's `disable` is kept. A run or a drill under way is stopped before the new binary is unpacked — its helper units are started by path, and an old run must not start the new version's — and the next hour's run does the backup | byte for byte |
+| upgrade | as they were: an administrator's `disable`, or `stop`, is kept. A run or a drill under way is left alone: its upload finishes. The helpers it starts afterwards are the new version's, and each does nothing for a command of another version — that app fails for the hour, said as the upgrade, and the next run is whole | byte for byte |
 | remove | stopped and masked; the unit files gone, and the timers' stamps with them | kept, with `/var/lib/hotserve-backup` |
 | reinstall after remove | enabled and running again; nothing is caught up, since nothing was missed | byte for byte; a run works |
 | purge | their enable state gone with the masks | **kept, and said why**: it holds the repository password, the one way to read the backups already made. The record, the repository id, the listing's stderr and restic's cache go; `staging/` and `restore/` go only when empty — a directory with something in it holds copies of an app's data a killed run left, which root does not remove, and is named |
@@ -90,16 +90,21 @@ At the edges of those:
   `hotserve-backup` is there without it, and `useradd` refuses — the
   install says so and completes: hotserve is installed, and `setup`,
   which makes the account, is where backups wait.
-- **The stop at an upgrade and at a remove is `systemctl stop`
-  itself**, whatever a `policy-rc.d` says of what packages may stop,
-  and the timers an upgrade stopped — those, and no other — it starts
-  again. A unit that will not
-  stop is named, with its state, and the upgrade goes on: an upgrade
-  of hotserve is not held back by a backup. So is a command run from
-  a shell — `sudo hotserve-backup run`, a restore at its prompt —
-  which holds the run lock and is no unit: it is named by its pid and
-  left to run, with a binary that changes, or goes, under it. Let it
-  end first.
+- **The stop at a remove is `systemctl stop` itself**, whatever a
+  `policy-rc.d` says of what packages may stop: the program is about to
+  go. A unit that will not stop is named, with its state, and the
+  removal goes on. So is a command run from a shell — `sudo
+  hotserve-backup run`, a restore at its prompt — which holds the run
+  lock and is no unit: it is named by its pid and left to run, with its
+  program gone from under it. Let it end first.
+- **A command and its helpers are one version.** A run starts its
+  helpers — the plan, the dump, a restore's check and install — from
+  `/usr/bin/hotserve-backup` by path, and after an upgrade that is the
+  new program. Each is told which program started it (by the hash of
+  the file) and one that is another does nothing, exits 75, and says
+  so; the run records the upgrade as that app's failure and tries no
+  app after it. The helper that removes plaintext copies works for any
+  version.
 - **What a killed command left** under `/run/hotserve-backup` — the
   units it had started, which from a shell no service ends with it,
   and an app's data, bound there for the upload — is swept at a remove

@@ -123,6 +123,12 @@ fi
 # disabled or masked. The services they start do nothing until
 # `hotserve-backup setup` has written the credential file
 # (ConditionPathExists= in the unit files): an install runs no backup.
+# A timer masked here is one a remove masked: this is a reinstall, and
+# it is started as on an install, not left as an upgrade leaves it.
+reinstall=""
+for u in hotserve-backup.timer hotserve-backup-drill.timer; do
+	if [ "$(readlink "/etc/systemd/system/$u" 2>/dev/null)" = /dev/null ]; then reinstall=yes; fi
+done
 if [ -x /usr/bin/deb-systemd-helper ]; then
 	for u in hotserve-backup.timer hotserve-backup-drill.timer; do
 		deb-systemd-helper unmask "$u" >/dev/null || true
@@ -133,33 +139,22 @@ if [ -x /usr/bin/deb-systemd-helper ]; then
 		fi
 	done
 fi
+# On an install, and a reinstall after a remove, the timers are
+# started. On an upgrade they are left running as they were — nothing
+# stopped them (preremove leaves the backup units alone) — and
+# restarted only where they run, to take up a changed timer file: one
+# an administrator stopped and left enabled stays stopped.
 if [ -d /run/systemd/system ]; then
 	systemctl --system daemon-reload >/dev/null || true
-	if [ -n "${2:-}" ]; then action=restart; else action=start; fi
+	if [ -n "${2:-}" ] && [ -z "$reinstall" ]; then action=try-restart; else action=start; fi
 	if [ -x /usr/bin/deb-systemd-invoke ]; then
 		deb-systemd-invoke "$action" hotserve-backup.timer hotserve-backup-drill.timer >/dev/null || true
-		# What preremove stopped for the upgrade, this starts again:
-		# preremove's stop is systemctl's own, whatever a policy-rc.d
-		# says [M69], and under one deb-systemd-invoke has just started
-		# nothing. Only the timers preremove wrote down as running when
-		# it stopped them — not one an administrator had stopped, and
-		# none on an install that is no upgrade — and only where it is
-		# still enabled.
-		stopped=/run/hotserve-backup.stopped-for-upgrade
-		if [ -f "$stopped" ]; then
-			for u in hotserve-backup.timer hotserve-backup-drill.timer; do
-				if grep -qx "$u" "$stopped" && systemctl is-enabled --quiet "$u" 2>/dev/null && ! systemctl is-active --quiet "$u" 2>/dev/null; then
-					systemctl start "$u" 2>/dev/null || true
-				fi
-			done
-		fi
 	else
 		# No helper (a systemd host that is not Debian): enabled here,
 		# and started, with no memory of an administrator's disable.
 		systemctl enable hotserve-backup.timer hotserve-backup-drill.timer 2>/dev/null || true
 		systemctl "$action" hotserve-backup.timer hotserve-backup-drill.timer 2>/dev/null || true
 	fi
-	rm -f /run/hotserve-backup.stopped-for-upgrade
 	if systemctl is-enabled --quiet hotserve-backup.timer 2>/dev/null; then
 		echo "Backups: the hourly timer and the Sunday restore drill are enabled, and run nothing until:"
 		echo "  sudo hotserve-backup setup <repository>"

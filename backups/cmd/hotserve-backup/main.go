@@ -91,11 +91,49 @@ func main() {
 	}
 	if err := command(os.Args[1], os.Args[2:]); err != nil {
 		fmt.Fprintln(os.Stderr, "hotserve-backup:", err)
-		if errors.As(err, new(couldNotTell)) {
-			os.Exit(3)
-		}
-		os.Exit(1)
+		os.Exit(exitStatus(err))
 	}
+}
+
+// exitStatus is what the command leaves with.
+func exitStatus(err error) int {
+	switch {
+	case errors.Is(err, errOtherVersion):
+		return engine.OtherVersionStatus
+	case errors.As(err, new(couldNotTell)):
+		return 3
+	}
+	return 1
+}
+
+// errOtherVersion is a helper that is not the version of the command
+// that started it.
+var errOtherVersion = errors.New("this helper is not the version of the command that started it (the package was upgraded while that command was under way), and does nothing")
+
+// forThisCommand is whether a helper may work for the command that
+// started it, which told it which program it is (engine.RunIdentityEnv):
+// one that is another program does nothing, and one that cannot read
+// which it is cannot say it is the same. Told nothing — started by
+// hand, or by a version from before there was anything to tell — it
+// works. clean works whatever it is told: it empties one directory of
+// plaintext copies, which is every version's to want done at once.
+func forThisCommand(name, told string, own func() (string, error)) error {
+	switch name {
+	case "plan", "dump", "check", "install", "extract":
+	default:
+		return nil
+	}
+	if told == "" {
+		return nil
+	}
+	is, err := own()
+	if err != nil {
+		return fmt.Errorf("%w: which version this is could not be read: %w", errOtherVersion, err)
+	}
+	if is != told {
+		return errOtherVersion
+	}
+	return nil
 }
 
 // couldNotTell is status not having been able to look — no setup, a
@@ -110,6 +148,9 @@ func command(name string, args []string) error {
 	// it is waiting on, by name, and confirms it gone before returning.
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	defer cancel()
+	if err := forThisCommand(name, os.Getenv(engine.RunIdentityEnv), engine.WhichProgram); err != nil {
+		return err
+	}
 	switch name {
 	case "setup":
 		return setup(ctx, args[0])

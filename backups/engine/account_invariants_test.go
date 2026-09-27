@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -445,5 +446,24 @@ func TestTheAccountIsOneAnswer(t *testing.T) {
 	databases(t, "passwd: files\n", map[string]said{"/usr/bin/getent passwd hotserve": {exit: 2}})
 	if _, _, err := realDataOwner(context.Background()); err == nil || !strings.Contains(err.Error(), "the hotserve account is not there") {
 		t.Fatalf("with no data user: err = %v", err)
+	}
+}
+
+// A lookup that failed stops the command whether or not anything
+// would have used its answer: a run whose plan has no app reaches no
+// caller of the data user's ids, and ended ok beside a lookup that
+// had not answered.
+func TestAFailedLookupStopsACommandThatWouldNotHaveUsedIt(t *testing.T) {
+	b := newBox(t)
+	b.plan = fmt.Sprintf(`{"root":%q,"apps":{}}`, b.root)
+	dataOwner = func(context.Context) (int, int, error) {
+		return 0, 0, errors.New("/usr/bin/getent passwd hotserve did not answer within 10s")
+	}
+	st, err := Run(context.Background(), b.cfg, b)
+	if err == nil || !strings.Contains(err.Error(), "did not answer within 10s") {
+		t.Fatalf("a run with no app, the data user's lookup having failed: err = %v, record %+v", err, st)
+	}
+	if len(b.specs) != 0 {
+		t.Fatalf("units were started: %s", b.roles())
 	}
 }

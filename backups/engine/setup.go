@@ -770,6 +770,11 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 	if err != nil {
 		return nil, s.err(err)
 	}
+	// Knowable before anyone is asked for a secret: every run dumps and
+	// cleans as the data user.
+	if x.dataErr != nil {
+		return nil, s.err(x.dataErr)
+	}
 	dir := filepath.Dir(cfg.EnvFile)
 	// Anyone may see that the file is there and when it was written —
 	// that is how status tells a fresh setup from one that never ran —
