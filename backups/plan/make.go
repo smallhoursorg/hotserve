@@ -174,6 +174,13 @@ func Inspect(ctx context.Context, caddyfile, configDir string) (*Inspection, err
 			return nil, fmt.Errorf("%w%s", err, hint)
 		}
 	}
+	// A plan with no app declaring a backup has no root: a run backs
+	// nothing up, and nothing downstream is to read a placeholder, or a
+	// path, as where anything lives — whatever the root says, {env.X}
+	// included, which the adapter prints as written.
+	if len(base.Apps) == 0 {
+		base.Root = ""
+	}
 	if err := base.Validate(); err != nil {
 		if len(needs) == 0 {
 			return nil, err
@@ -217,7 +224,7 @@ func Inspect(ctx context.Context, caddyfile, configDir string) (*Inspection, err
 				}
 			}
 			verdict = nil
-			if !reflect.DeepEqual(base, trial) {
+			if changesARun(base, trial) {
 				verdict = &decisive
 			}
 			break
@@ -237,6 +244,19 @@ func Inspect(ctx context.Context, caddyfile, configDir string) (*Inspection, err
 	}
 	undeclared = slices.DeleteFunc(undeclared, func(n string) bool { return displaced[n] })
 	return &Inspection{Plan: base, Undeclared: undeclared, UndeclaredByEnv: byEnv}, nil
+}
+
+// changesARun says whether a variable's value changes what a run does:
+// which apps are backed up and what of them, and — only where some app
+// is — the root they are found under. A root that depends on the
+// environment is refused only where an app declares a backup (the
+// owner, 2026-09-20: decide in 4c): on a box that uses no backups a run
+// backs nothing up, and the root is not its business.
+func changesARun(base, trial *Plan) bool {
+	if !reflect.DeepEqual(base.Apps, trial.Apps) {
+		return true
+	}
+	return len(base.Apps) > 0 && base.Root != trial.Root
 }
 
 // Make is the plan alone: what a run needs of an Inspection.

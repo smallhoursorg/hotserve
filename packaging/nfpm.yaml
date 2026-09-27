@@ -26,6 +26,13 @@ license: Apache-2.0
 # user's systemd manager (user@<uid>.service). pam_systemd is what
 # gives that manager its runtime directory; without libpam-systemd it
 # cannot start at all. dbus: loginctl (lingering) needs the system bus.
+# hotserve-backup runs Debian's restic and sqlite3 in units of its own
+# (backups/README.md). Recommends, not Depends: a box that uses no
+# backups need not carry them, and `hotserve-backup setup` — and the
+# hourly run — name the package to install when one is missing.
+recommends:
+  - restic
+  - sqlite3
 depends:
   # No systemd version floor is declared even though the sandbox needs
   # 256+ (Debian 13 ships 257): the per-app sandbox is probe-gated at
@@ -55,6 +62,30 @@ contents:
     dst: /lib/systemd/system/hotserve.service
     file_info:
       mode: 0644
+  # The backup program and its units: the hourly run and the Sunday
+  # restore drill, enabled by postinstall and running nothing until
+  # `hotserve-backup setup` has written /etc/hotserve-backup/repository.env,
+  # which the package neither ships nor removes (postremove says why).
+  - src: build/hotserve-backup
+    dst: /usr/bin/hotserve-backup
+    file_info:
+      mode: 0755
+  - src: packaging/hotserve-backup.service
+    dst: /lib/systemd/system/hotserve-backup.service
+    file_info:
+      mode: 0644
+  - src: packaging/hotserve-backup.timer
+    dst: /lib/systemd/system/hotserve-backup.timer
+    file_info:
+      mode: 0644
+  - src: packaging/hotserve-backup-drill.service
+    dst: /lib/systemd/system/hotserve-backup-drill.service
+    file_info:
+      mode: 0644
+  - src: packaging/hotserve-backup-drill.timer
+    dst: /lib/systemd/system/hotserve-backup-drill.timer
+    file_info:
+      mode: 0644
   - src: packaging/Caddyfile
     dst: /etc/hotserve/Caddyfile
     type: config|noreplace
@@ -72,3 +103,4 @@ contents:
 scripts:
   postinstall: packaging/postinstall.sh
   preremove: packaging/preremove.sh
+  postremove: packaging/postremove.sh

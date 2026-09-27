@@ -1076,17 +1076,28 @@ func Drill(ctx context.Context, cfg Config, r Runner) (*record.Status, error) {
 		return nil, err
 	}
 	defer end()
-	if err != nil {
-		return nil, err
-	}
 	st := x.prev
 	st.LastDrill = &record.Drill{Time: time.Now().UTC()}
+	// Said in the record — a refusal from begin (a program not there)
+	// as a plan that cannot be made — so that a drill failing here week
+	// after week does not pass for "proven" ageing quietly.
+	couldNotBegin := func(err error) (*record.Status, error) {
+		st.LastDrill.Detail = record.Text(err.Error())
+		st.Warning = strings.TrimSpace(st.Warning + " " + x.status.Warning)
+		return st, errors.Join(err, record.Write(filepath.Join(cfg.StateDir, "status.json"), st))
+	}
+	if err != nil {
+		// An interrupt is no verdict: stopped while it waits, the drill
+		// leaves the last drill's as it was, as it leaves the app an
+		// interrupt lands on.
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		return couldNotBegin(err)
+	}
 	p, err := x.plan(ctx)
 	if err != nil {
-		// Said in the record, so that a drill failing here week after
-		// week does not pass for "proven" ageing quietly.
-		st.LastDrill.Detail = record.Text(err.Error())
-		return st, errors.Join(err, record.Write(filepath.Join(cfg.StateDir, "status.json"), st))
+		return couldNotBegin(err)
 	}
 	x.sweepFetched(ctx)
 	// An app that has left the plan has nothing left to prove.

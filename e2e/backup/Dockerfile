@@ -25,13 +25,25 @@ RUN systemctl mask \
 	|| true
 COPY --from=builder /hotserve /usr/bin/hotserve
 COPY --from=builder /hotserve-backup /usr/bin/hotserve-backup
+# The package's unit files, where the .deb puts them: the units suite
+# starts the services from them, and the timers' schedule is read off
+# them.
+COPY packaging/hotserve-backup.service packaging/hotserve-backup.timer \
+	packaging/hotserve-backup-drill.service packaging/hotserve-backup-drill.timer /lib/systemd/system/
 # The production layout from the package's own postinstall, as in
-# e2e/Dockerfile. The account restic runs as is not made here: the
-# setup suite, which runs first, has `hotserve-backup setup` make it.
+# e2e/Dockerfile. Two things it does are undone here: the account
+# restic runs as, which the setup suite — first of the five — shows
+# `hotserve-backup setup` making; and the two timers' enable state,
+# since a timer firing into a scenario would take the run lock from
+# under it — the units suite starts the services itself, and the smoke
+# test (make install-test) is where the package's enabling is asserted.
 COPY packaging/postinstall.sh /tmp/postinstall.sh
 RUN mkdir -p /var/lib/hotserve /var/lib/liveswap /etc/hotserve \
 	&& chmod 750 /var/lib/hotserve /var/lib/liveswap \
-	&& sh /tmp/postinstall.sh && rm /tmp/postinstall.sh
+	&& sh /tmp/postinstall.sh && rm /tmp/postinstall.sh \
+	&& userdel hotserve-backup \
+	&& rm -f /etc/systemd/system/timers.target.wants/hotserve-backup.timer /etc/systemd/system/timers.target.wants/hotserve-backup-drill.timer \
+	&& rm -rf /var/lib/systemd/deb-systemd-helper-enabled
 COPY e2e/backup/Caddyfile /etc/hotserve/Caddyfile
 STOPSIGNAL SIGRTMIN+3
 CMD ["/sbin/init"]

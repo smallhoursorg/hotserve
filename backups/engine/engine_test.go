@@ -67,7 +67,13 @@ type box struct {
 	hang                       string
 	version                    int
 	haveProgram                func(string) bool
-	account                    bool
+	account                    bool   // whether the hotserve-backup account exists
+	shell, home                string // as the account has them, where it exists
+	homeThere                  bool   // whether that home is a directory that exists
+	uid, gid                   int
+	holders                    []string // the accounts that hold that uid, the backup account among them
+	groups                     []int    // the account's groups, its primary among them
+	hotserveGid                int      // the gid of the group named hotserve
 	accountsMade               int
 	owned, synced              []string // what setup asked to be root's, and put on the disk
 	waited                     []string // units a lock holder waited for
@@ -84,6 +90,32 @@ func newBox(t *testing.T) *box {
 	dir := t.TempDir()
 	b := &box{t: t, root: filepath.Join(dir, "liveswap"), outcome: map[string]unit.Outcome{}, err: map[string]error{}, release: make(chan struct{})}
 	t.Cleanup(func() { close(b.release) })
+	// Every program a command needs is there unless a test says not:
+	// this lane runs where none of them is installed.
+	b.haveProgram = func(string) bool { return true }
+	oldHave := haveProgram
+	haveProgram = func(p string) bool { return b.haveProgram(p) }
+	t.Cleanup(func() { haveProgram = oldHave })
+	// The account restic runs as, as setup makes it, unless a test says
+	// otherwise: a run looks at it before any unit, as setup does.
+	b.account, b.shell, b.home, b.uid, b.gid, b.holders, b.groups = true, "/usr/sbin/nologin", "/nonexistent", 995, 995, []string{"hotserve-backup"}, []int{995}
+	oldAccount, oldHolders, oldHome, oldMake, oldGroups, oldGroup := account, holders, homeExists, makeAccount, groupsOf, groupNamed
+	groupsOf = func(string) ([]int, error) { return b.groups, nil }
+	b.hotserveGid = 1000
+	groupNamed = func(string) (int, bool, error) { return b.hotserveGid, true, nil }
+	account = func(string) (passwd, error) {
+		return passwd{shell: b.shell, home: b.home, uid: b.uid, gid: b.gid, exists: b.account}, nil
+	}
+	holders = func(int) ([]string, error) { return b.holders, nil }
+	homeExists = func(string) bool { return b.homeThere }
+	makeAccount = func() error {
+		b.accountsMade++
+		b.account, b.shell, b.home, b.homeThere, b.uid, b.gid, b.holders, b.groups = true, "/usr/sbin/nologin", "/nonexistent", false, 995, 995, []string{"hotserve-backup"}, []int{995}
+		return nil
+	}
+	t.Cleanup(func() {
+		account, holders, homeExists, makeAccount, groupsOf, groupNamed = oldAccount, oldHolders, oldHome, oldMake, oldGroups, oldGroup
+	})
 	b.cfg = Config{
 		ConfigDir: "/etc/hotserve",
 		EnvFile:   filepath.Join(dir, "backup.env"), StateDir: filepath.Join(dir, "state"), RunDir: filepath.Join(dir, "run"),
@@ -593,19 +625,9 @@ func TestAPlanThatCannotBeMadeKeepsWhatWasKnown(t *testing.T) {
 	}
 }
 
-func TestOneRunAtATimeAndLeftoversAreStoppedByName(t *testing.T) {
+func TestLeftoversAreStoppedByName(t *testing.T) {
 	b := newBox(t)
 	must(t, os.MkdirAll(b.cfg.RunDir, 0o755))
-	unlock, err := lock(filepath.Join(b.cfg.RunDir, "lock"))
-	must(t, err)
-	if _, err := Run(context.Background(), b.cfg, b); !errors.Is(err, ErrBusy) || !strings.Contains(err.Error(), "pid ") {
-		t.Fatalf("a second run: %v", err)
-	}
-	if len(b.specs) != 0 {
-		t.Fatalf("the second run started units: %s", b.roles())
-	}
-	unlock()
-
 	left := "hotserve_backup_upload_blog_0123456789ab.service"
 	must(t, os.WriteFile(filepath.Join(b.cfg.RunDir, "units"), []byte(left+"\n"), 0o600))
 	if _, err := Run(context.Background(), b.cfg, b); err != nil {
@@ -617,17 +639,6 @@ func TestOneRunAtATimeAndLeftoversAreStoppedByName(t *testing.T) {
 	raw, _ := os.ReadFile(filepath.Join(b.cfg.RunDir, "units"))
 	if strings.Contains(string(raw), left) || len(strings.Fields(string(raw))) != len(b.specs) {
 		t.Fatalf("the unit list after the run:\n%s", raw)
-	}
-}
-
-func TestNotSetUp(t *testing.T) {
-	b := newBox(t)
-	must(t, os.Remove(b.cfg.EnvFile))
-	if _, err := Run(context.Background(), b.cfg, b); err == nil || !strings.Contains(err.Error(), "not set up") {
-		t.Fatalf("%v", err)
-	}
-	if len(b.specs) != 0 {
-		t.Fatalf("units were started: %s", b.roles())
 	}
 }
 

@@ -40,6 +40,11 @@ func (p *Plan) Names() []string {
 
 // Validate reports the first thing that makes the plan unusable.
 func (p *Plan) Validate() error {
+	// No app, no root: what Inspect makes of a Caddyfile in which no app
+	// declares a backup, whatever its root says.
+	if p.Root == "" && p.Apps != nil && len(p.Apps) == 0 {
+		return nil
+	}
 	switch {
 	case strings.ContainsAny(p.Root, "{}"):
 		return fmt.Errorf("the liveswap root %q is written with a placeholder ({ or }), which only hotserve's own environment can resolve; write the root as a literal path", p.Root)

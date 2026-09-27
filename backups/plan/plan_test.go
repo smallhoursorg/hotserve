@@ -66,11 +66,17 @@ func TestDecodeIsStrict(t *testing.T) {
 	if _, err := Decode([]byte(good)); err != nil {
 		t.Fatalf("a good plan: %v", err)
 	}
+	// A plan with no app has no root: what the plan unit prints for a
+	// Caddyfile in which no app declares a backup.
+	if _, err := Decode([]byte(`{"apps":{}}`)); err != nil {
+		t.Fatalf("a plan of nothing: %v", err)
+	}
 	for name, tc := range map[string]struct{ raw, want string }{
 		"an unknown field":           {`{"root":"/var/lib/liveswap","apps":{},"exec":"/bin/sh"}`, "unknown field"},
 		"an unknown field in an app": {`{"root":"/var/lib/liveswap","apps":{"blog":{"sqlite":["a.db"],"user":"root"}}}`, "unknown field"},
 		"something after the plan":   {good + `{"root":"/"}`, "something follows"},
-		"no root":                    {`{"apps":{}}`, "not an absolute path"},
+		"no root, with an app":       {`{"apps":{"blog":{"sqlite":["a.db"]}}}`, "not an absolute path"},
+		"a bare object":              {`{}`, "not an absolute path"}, // no apps key at all: the plan unit always prints one
 		"a null declaration":         {`{"root":"/var/lib/liveswap","apps":{"blog":null}}`, "is null"},
 		"an app name with a slash":   {`{"root":"/var/lib/liveswap","apps":{"a/b":{"files":["."]}}}`, "is not one liveswap accepts"},
 		"a path that escapes":        {`{"root":"/var/lib/liveswap","apps":{"blog":{"files":["../x"]}}}`, "outside"},
@@ -176,10 +182,20 @@ grep -E '^[[:space:]]*import[[:space:]]' "$last" | while read -r _ pat _; do
 done
 root=${LIVESWAP_ROOT:-/var/lib/liveswap}
 uses ROOT_NO_DEFAULT && root=$ROOT_NO_DEFAULT
+# A {env.NAME} root is the server's to resolve: the adapter prints it as
+# it is written [measured].
+grep -q '^root {env\.' "$last" && root='{env.LIVESWAP_ROOT}'
 more=""
 grep -q "^app shop" "$last" && more=',"shop":{},"cart":{"backup":null}'
 uses SHOP_NAME && more=",\"${SHOP_NAME:-shop}\":{}"
-printf '{"apps":{"http":{"domain":"%s"},"liveswap":{"root":"%s","apps":{"%s":{"backup":{"sqlite":["%s"]}}%s}}}}' "${DOMAIN:-example.com}" "$root" "${APP_NAME:-blog}" "${DB:-app.db}" "$more"
+# A box where the app declares no backup, or where there is no app.
+if grep -q "^# no app declares a backup" "$last"; then
+	printf '{"apps":{"http":{"domain":"%s"},"liveswap":{"root":"%s","apps":{"%s":{}%s}}}}' "${DOMAIN:-example.com}" "$root" "${APP_NAME:-blog}" "$more"
+elif grep -q "^# no app" "$last"; then
+	printf '{"apps":{"http":{"domain":"%s"},"liveswap":{"root":"%s","apps":{}}}}' "${DOMAIN:-example.com}" "$root"
+else
+	printf '{"apps":{"http":{"domain":"%s"},"liveswap":{"root":"%s","apps":{"%s":{"backup":{"sqlite":["%s"]}}%s}}}}' "${DOMAIN:-example.com}" "$root" "${APP_NAME:-blog}" "${DB:-app.db}" "$more"
+fi
 `)
 	old := hotserve
 	hotserve = script

@@ -12,16 +12,108 @@ and nothing here talks to hotserve. The two share a declaration format
 Caddy.
 
 **On this branch it is setup, the engine, restore, the restore drill,
-and what says how they are doing.** `hotserve-backup setup <repository>`
-makes the box ready for one repository (below), `hotserve-backup run`
-does one backup run, `hotserve-backup restore <app>` puts a snapshot
-back, `hotserve-backup drill` proves that a restore would work without
-doing one, `hotserve-backup status` says whether each app's backup is
-fresh and its restore proven, and `hotserve-backup validate <Caddyfile>`
-says whether a run could plan from a Caddyfile before it goes live.
-There is no timer and no package yet: `setup` needs Debian 13's `restic`
-and `sqlite3` installed, and systemd 257 (`PrivatePIDs=`), which is
-Debian 13's, and says so before it asks for anything.
+what says how they are doing, and the package.** `hotserve-backup setup
+<repository>` makes the box ready for one repository (below),
+`hotserve-backup run` does one backup run, `hotserve-backup restore
+<app>` puts a snapshot back, `hotserve-backup drill` proves that a
+restore would work without doing one, `hotserve-backup status` says
+whether each app's backup is fresh and its restore proven, and
+`hotserve-backup validate <Caddyfile>` says whether a run could plan
+from a Caddyfile before it goes live. The `hotserve` package carries
+the program, an hourly timer for the run and a Sunday one for the
+drill ("On a fresh box", below), and recommends Debian 13's `restic`
+and `sqlite3`; `setup` and every run need those, and systemd 257
+(`PrivatePIDs=`), which is Debian 13's, and say so before anything
+else.
+
+## On a fresh box
+
+The package (`docs/first-deploy.md`) sets up: `hotserve-backup`; the
+`hotserve-backup` account restic runs as, with setup's own `useradd`
+line; `hotserve-backup.timer`, hourly — on the hour plus an offset of
+up to ten minutes that is this box's own and stays the same — and
+`hotserve-backup-drill.timer`, Sunday 03:30, both enabled, both catching
+up a missed elapse at boot; and `restic` and `sqlite3` as recommended
+packages (`apt install ./hotserve_….deb` brings them; with
+`--no-install-recommends` it does not, and setup and every run then say
+which to install). Nothing runs until `setup` has written the credential
+file: each service is conditioned on `/etc/hotserve-backup/repository.env`,
+and a start before that is skipped, not failed. As the administrator
+(`docs/after-first-deploy.md`), with `sudo`:
+
+<!-- smoke: begin -->
+```sh
+# 1. In the app's block of /etc/hotserve/Caddyfile, what to back up:
+#        backup {
+#            sqlite app.db
+#            files  uploads
+#        }
+#    then, before it goes live, whether a run could plan from it:
+sudo hotserve-backup validate /etc/hotserve/Caddyfile
+sudo systemctl reload hotserve
+# 2. The repository, once: the storage key is asked for at the terminal,
+#    and a new repository's password is shown once, to store elsewhere.
+sudo hotserve-backup setup s3:https://s3.example.com/my-backups
+# 3. The first backup runs within the hour and ten minutes
+#    (systemctl list-timers hotserve-backup.timer), or now:
+sudo systemctl start hotserve-backup.service
+hotserve-backup status
+# 4. A restore: into a directory of root's own to look at, or into
+#    place — which backs the app up first, tagged pre-restore, and asks.
+sudo hotserve-backup restore demo --to /root/demo-restored
+sudo hotserve-backup restore demo
+```
+<!-- smoke: end -->
+
+The package's smoke test (`make install-test`) runs exactly those lines,
+read out of this file, as an administrator under `sudo`, on a fresh
+Debian 13 with the `.deb` just installed and an S3 server beside it;
+watches the timer fire; reads `status` as that administrator; refuses
+`--to /tmp/…` (every directory on the way has to be root's own, "A
+restore"); finds the `pre-restore` snapshot; and takes the package
+through upgrade, remove, reinstall and purge, holding it to this table:
+
+| Transition | The timers | The credential file |
+|---|---|---|
+| install | enabled, running; their services untouched until setup | not made — setup's |
+| upgrade | as they were: an administrator's `disable` is kept. A run or a drill under way is stopped before the new binary is unpacked — its helper units are started by path, and an old run must not start the new version's — and the next hour's run does the backup | byte for byte |
+| remove | stopped and masked; the unit files gone | kept, with `/var/lib/hotserve-backup` |
+| reinstall after remove | enabled and running again | byte for byte; a run works |
+| purge | their enable state gone with the masks | **kept, and said why**: it holds the repository password, the one way to read the backups already made. The record, the repository id, the listing's stderr and restic's cache go; `staging/` and `restore/` go only when empty — a directory with something in it holds copies of an app's data a killed run left, which root does not remove, and is named |
+
+The account stays through remove and purge, as system accounts do.
+
+A run under the timer that fails — an app not backed up, restic not
+installed, another run holding the lock — is a failed unit,
+`hotserve-backup.service` in `systemctl --failed`, until the next run
+succeeds; a drill that proved nothing, or could not begin, the same for
+`hotserve-backup-drill.service`. The record and `status` say the same
+thing; the unit is for whatever watches units. Nothing acts on it. A
+drill that comes due while a run is under way waits for it (`After=`);
+a run that comes due while the drill holds the lock says so and is that
+hour's failed unit.
+
+A run's units are bound to its service, so that they end with it
+however it dies — but the two that remove plaintext. A service that is
+stopped (`systemctl stop`, an upgrade, a remove) has a stop job queued,
+and the manager starts nothing that is bound to it [measured]; unbound,
+a stopped run removes the copies it had made on its way out, and a
+killed one leaves them to the next run, which empties staging first.
+
+The services run as root with `CAP_SYS_ADMIN`, `CAP_DAC_READ_SEARCH`,
+`CAP_CHOWN` and `CAP_FOWNER` and nothing else of root's, reach nothing
+but the manager's unix socket (restic runs in units of its own), and
+carry the hardening systemd offers a root service that has to make
+mounts the manager can see: none of `ProtectSystem=`, `ProtectHome=`,
+`PrivateTmp=`, `ProtectKernelTunables=` and their kin, nor
+`PrivateNetwork=` or `ProtectKernelModules=` — each of these puts the
+service in a mount namespace of its own, and the manager then binds the
+bare mount point, root's and empty, into the units instead of the app's
+data [measured: every database copy failed "permission denied", and
+the files uploaded were an empty directory's]. The unit files say at
+each line why it is there or not; `cmd/hotserve-backup/units_test.go`
+holds the two services to one set, and the e2e units suite starts a
+run and a drill from the shipped files.
 
 ## A run
 
@@ -115,8 +207,12 @@ run, and what the step is given.
 | unstage | `hotserve`, own user+PID namespaces | no | no | what was fetched, to remove it |
 | mkshared | `hotserve`, own user+PID namespaces | no | no | the liveswap root, to make `<app>/shared` on a rebuilt box |
 
-The run itself needs root, `CAP_SYS_ADMIN` and the host's own mount and
-PID namespaces: it makes bind mounts that the manager then has to see.
+The run itself needs root — `CAP_SYS_ADMIN`, `CAP_DAC_READ_SEARCH`,
+`CAP_CHOWN` and `CAP_FOWNER` of it, the unit file being the one list —
+and the host's own mount and PID namespaces: it
+makes bind mounts that the manager then has to see. Under the timer it
+is `hotserve-backup.service` ("On a fresh box"), which says so line by
+line.
 
 - **What parses the app's bytes holds nothing.** `sqlite3` opens files
   the app chose, so it runs as the app's own uid in the app's own kind
@@ -321,7 +417,10 @@ interrupted records what it finished and nothing of the app it was
 interrupted on, and a backup run carries both. It exits 0
 if no drill failed; an app the repository holds no snapshot of has
 nothing to prove. A `run` that drills — an app's first good backup —
-says what the drill found on a line of its own.
+says what the drill found on a line of its own. The package runs it
+every Sunday at 03:30 (`hotserve-backup-drill.timer`, catching up a
+missed one at boot); a drill that proved nothing leaves
+`hotserve-backup-drill.service` failed until the next one proves.
 
 ## What a snapshot holds
 
@@ -505,8 +604,12 @@ hourly run. It needs no sudoers line.
 ## What it refuses
 
 - A liveswap `root`, an app's name or a backup path that depends on a
-  Caddyfile `{$NAME}`. (hotserve itself refuses `root {env.X}` together
-  with a `backup` block; `{$NAME}` it never sees.) See below.
+  Caddyfile `{$NAME}` — the root only where some app declares a backup:
+  where none does, a run backs nothing up and the root is not its
+  business, so `validate` says "no app declares a backup" and a run
+  plans nothing, whatever the root says. (hotserve itself refuses
+  `root {env.X}` together with a `backup` block; `{$NAME}` it never
+  sees.) See below.
 - A variable that no made-up value adapts with — among them a variable
   in an import, `import sites/{$ENV:prod}/*.caddy`: with any other value
   it names a file that is not there, and what the server reads when it
@@ -556,9 +659,24 @@ hourly run. It needs no sudoers line.
   with `user:pass@` in it, with or without a scheme
   before the host (a command line and a shell history are no place for
   a secret), and a scheme restic does not
-  know; restic, sqlite3 or hotserve not installed; a systemd older than
-  257; a Caddyfile a run could not plan from; another run, restore or
-  drill under way.
+  know; restic, sqlite3 or hotserve not installed (a run, a restore and
+  a drill refuse the same, in the same words, before any unit); a
+  systemd older than 257; a `hotserve-backup` account that is there
+  with a shell that is not one of `/usr/sbin/nologin`, `/sbin/nologin`,
+  `/bin/false` and `/usr/bin/false`, a home directory that exists, uid
+  or gid 0, a uid any other account holds, or root's group or the
+  `hotserve` group among its groups — whoever can log in as it, or is
+  it, can read the repository credential from a running restic's
+  environment, and in the `hotserve` group restic and the plan unit
+  read the apps' env files — named with the remedy that fits: the
+  `usermod` that locks a shell or a home, or, for who the account is,
+  removing it and the `useradd` setup would have used; never changed
+  by setup; a Caddyfile a run could not plan from; another run,
+  restore or drill under way. **A run, a restore and a drill ask the
+  same of the account** before any unit — it is the run that puts the
+  credential in that account's environment — and refuse one that is
+  not there. `hotserve-backup account`, as anyone, asks it by itself:
+  the package's postinstall does, and warns in those words.
 - `setup`, at a prompt: an empty value, one with a line break or a
   control character, or one that is not UTF-8 — the file cannot hold
   it — three times; and a password not confirmed `stored`.
@@ -618,8 +736,12 @@ What can be known to fail is refused before anything is asked for
 ("What it refuses"). In order:
 
 1. the `hotserve-backup` account is made if it is not there
-   (`useradd --system --no-create-home --home-dir /nonexistent --shell
-   /usr/sbin/nologin`), and left alone if it is;
+   (`useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hotserve-backup`
+   — the package's postinstall makes it with the same line, so on a
+   `.deb` box it is there already), and one that is there is left
+   alone once seen to be nobody's to log in as: a shell that refuses a
+   login, no home that exists, not root's uid or gid, and a uid no
+   other account holds ("What it refuses"; every run asks the same);
 2. the run lock is taken and held to the end — a backup run that comes
    due meanwhile says who holds it — the state and run directories are
    made as a run makes them, `/etc/hotserve-backup` is made (root,
@@ -761,9 +883,11 @@ remove it. With no credential file at the new path, setup cannot tie
 the record to the repository and puts it aside; the next run drills
 what it backs up.
 
-Nothing on this branch runs a backup on a schedule: until the
-package's timer exists, run `hotserve-backup run` hourly from a timer
-or cron entry of your own, or `status` goes unhealthy after 3 hours.
+With the package, the first backup runs from `hotserve-backup.timer`
+within the hour and ten minutes of setup ("On a fresh box"), or now
+with `sudo systemctl start hotserve-backup.service`; setup's last line
+says so. Without it, run `hotserve-backup run` hourly from a timer or
+cron entry of your own, or `status` goes unhealthy after 3 hours.
 
 ### By hand
 
@@ -780,7 +904,8 @@ AWS_ACCESS_KEY_ID=…
 AWS_SECRET_ACCESS_KEY=…
 ```
 
-plus the account, as setup makes it (above), and `restic init` the way
+plus the account, as setup makes it (above; the package's postinstall
+has made it already on a `.deb` box), and `restic init` the way
 a run's units get the file: read by the manager, as root, and handed
 to restic running as the account — never sourced by a shell, whose
 `$`, backticks and `;` are not systemd's, and never with a secret on a
@@ -826,7 +951,16 @@ id left behind would tie a later record to the wrong repository.
   password.
 - `make e2e-backup` — a box with systemd, restic and sqlite3, and an S3
   server (`rclone serve s3`): the setup suite (at a real terminal,
-  `script(1)`'s), the backup suite, the status suite (`status` and
-  `validate`) and the restore suite, mostly failure paths. The box
-  image does not make the `hotserve-backup` account: the setup suite,
-  which runs first, has `setup` make it.
+  `script(1)`'s), the backup suite, the units suite (the shipped unit
+  files: a run and a drill under their hardening, their units bound to
+  them, nothing before setup, a failed run a failed unit, the drill
+  ordered behind a run, the timers as written and one firing), the
+  status suite (`status` and `validate`) and the restore suite, mostly
+  failure paths. The box image runs the package's postinstall and then
+  undoes two things of it: the `hotserve-backup` account, which the
+  setup suite shows `setup` making, and the timers' enable state, so
+  that no timer fires into a scenario.
+- `make package` and `make install-test` — the `.deb` built and
+  installed under real systemd on a fresh Debian 13: the README's "On
+  a fresh box" lines as an administrator, and the package's transitions
+  table.

@@ -13,6 +13,15 @@
 # the exact packaging interaction (ProtectSystem=full, User=hotserve,
 # lingering, the user@<uid> drop-in) no other test layer exercises.
 # Stage 3 then proves the app survives the upgrade restart.
+#
+# Stage 2c runs the backups README's "On a fresh box" lines — read out
+# of the README itself, mounted at /README-backups.md, so the lines run
+# are the lines written — as an administrator under sudo, against an
+# S3 server in this container, and then holds the package to the table
+# in backups/README.md: the timers enabled once, an administrator's
+# disable kept across an upgrade, stopped and masked on remove, enabled
+# again on reinstall, and purge keeping the credential file and saying
+# why (expect_backup_state, a row per transition).
 set -eu
 
 # TOKEN is minted in stage 2 with a local deploy key (deploy_trust
@@ -52,7 +61,8 @@ stage "stage 1: install, service basics, reload"
 # Depends (libpam-systemd, dbus) resolve the way they would on a real
 # box — that resolution is part of what this stage proves.
 apt-get update -qq
-apt-get install -y "$deb"
+apt-get install -y "$deb" >/tmp/install.log 2>&1 || { cat /tmp/install.log; die "apt-get install of the package failed"; }
+cat /tmp/install.log
 
 id hotserve >/dev/null || die "postinstall did not create the hotserve user"
 # The package ships no user-manager wrapper and no AppArmor profile:
@@ -240,7 +250,8 @@ tar -czf /srv/art/demo.tar.gz -C "$workdir" server sandbox-view.sh
 /usr/bin/hotserve file-server --listen 127.0.0.1:8200 --root /srv/art \
 	>/tmp/artserver.log 2>&1 &
 ART_PID=$!
-trap 'kill $ART_PID 2>/dev/null || true' EXIT
+S3_PID=""
+trap 'kill $ART_PID $S3_PID 2>/dev/null || true' EXIT
 i=0
 until curl -fs -o /dev/null http://127.0.0.1:8200/demo.tar.gz; do
 	i=$((i + 1))
@@ -486,6 +497,166 @@ status=$(curl -s --max-time 5 -H "Authorization: Bearer $TOKEN" "$HOOK")
 curl -fsS --max-time 5 "$PROXY/" | grep -q "hello smoke" || die "app not served after hotserve's automatic restart"
 echo "SIGKILL: systemd restarted hotserve (NRestarts=1); app pid $pid_live reattached"
 
+stage "stage 2c: backups — the README's 'On a fresh box' lines, as an administrator"
+# What the package set up, before any line of the README runs: the
+# programs it recommends (apt brings Recommends by default), the
+# account as setup makes it, the four unit files, the timers enabled
+# and running and their services untouched, and no credential file —
+# that is setup's, and postinstall says so.
+S3REPO=s3:http://127.0.0.1:9000/hotserve
+S3KEY=AKIDSMOKEFIXTURE
+S3SECRET=smoke-fixture-key-not-a-secret
+CRED=/etc/hotserve-backup/repository.env
+TIMERS="hotserve-backup.timer hotserve-backup-drill.timer"
+# expect_backup_state <step> <is-enabled> <is-active> <absent|sha256>:
+# one row of the table, for both timers and the credential file.
+expect_backup_state() {
+	local u got
+	for u in $TIMERS; do
+		got=$(systemctl is-enabled "$u" 2>/dev/null || true)
+		[ "$got" = "$2" ] || die "$1: $u is-enabled '$got', want '$2'"
+		got=$(systemctl is-active "$u" 2>/dev/null || true)
+		[ "$got" = "$3" ] || die "$1: $u is-active '$got', want '$3'"
+	done
+	if [ "$4" = absent ]; then
+		[ ! -e "$CRED" ] || die "$1: $CRED exists, and the package must not make it"
+	else
+		got=$(sha256sum "$CRED" | cut -d' ' -f1)
+		[ "$got" = "$4" ] || die "$1: $CRED changed (was $4, is $got)"
+	fi
+	echo "$1: timers $2, $3; credential file $4 — as the table says"
+}
+command -v restic >/dev/null && command -v sqlite3 >/dev/null \
+	|| die "restic and sqlite3 did not come with the package: Recommends: did not resolve (apt installs them by default)"
+getent passwd hotserve-backup | grep -q ':/nonexistent:/usr/sbin/nologin$' \
+	|| die "postinstall did not make the hotserve-backup account as setup does: $(getent passwd hotserve-backup || echo none)"
+for u in hotserve-backup.service hotserve-backup-drill.service $TIMERS; do
+	got=$(stat -c '%U:%G %a' "/lib/systemd/system/$u")
+	[ "$got" = "root:root 644" ] || die "/lib/systemd/system/$u is '$got', want 'root:root 644'"
+done
+expect_backup_state "after install" enabled active absent
+[ ! -e /etc/hotserve-backup ] || die "the package made /etc/hotserve-backup; that is setup's"
+for u in hotserve-backup.service hotserve-backup-drill.service; do
+	[ "$(systemctl show -p ActiveState --value "$u")" = inactive ] && [ "$(systemctl show -p Result --value "$u")" = success ] \
+		|| die "$u after install: $(systemctl show -p ActiveState,Result "$u" | tr '\n' ' ') — nothing may start before setup"
+done
+grep -q "sudo hotserve-backup setup <repository>" /tmp/install.log \
+	|| die "postinstall did not say that the timers wait for setup"
+grep -q "refuse that account" /tmp/install.log \
+	&& die "postinstall warned of the account it had just made: $(grep hotserve-backup /tmp/install.log)" || true
+hotserve-backup account >/dev/null || die "the account postinstall made is not one setup accepts: $(hotserve-backup account 2>&1)"
+echo "the package's own: restic and sqlite3 by Recommends, the account, the units, the timers enabled and waiting"
+
+# The repository the README's lines are pointed at: rclone serve s3
+# here, on the loopback, with a key that is no secret.
+mkdir -p /srv/s3
+rclone serve s3 --addr 127.0.0.1:9000 --auth-key "$S3KEY,$S3SECRET" /srv/s3 >/tmp/s3.log 2>&1 &
+S3_PID=$!
+i=0
+until curl -s -o /dev/null http://127.0.0.1:9000/; do
+	i=$((i + 1))
+	[ "$i" -ge 30 ] && die "rclone serve s3 not up within 15s: $(cat /tmp/s3.log)"
+	sleep 0.5
+done
+# The administrator the README is written for: not root, sudo.
+useradd -m admin
+echo 'admin ALL=(ALL) NOPASSWD: ALL' >/etc/sudoers.d/admin
+chmod 0440 /etc/sudoers.d/admin
+visudo -c -q || die "the smoke's sudoers line does not parse"
+# runuser, not `su -`: su -c drops the controlling terminal (sudo
+# then finds no /dev/tty to ask at), runuser keeps it [measured].
+as_admin() { runuser -u admin -- sh -c "$1"; }
+# The app's data, as the app itself would make it: a database and an
+# uploads directory under its shared/, the hotserve user's.
+su -s /bin/sh hotserve -c 'cd /var/lib/liveswap/demo/shared && sqlite3 app.db "create table t(n); insert into t values (1),(2);" && mkdir -p uploads && echo pic >uploads/a.png' \
+	|| die "could not seed the demo app's data"
+# Step 1 of the README, the declaration in the app's block, put there
+# the way an administrator would edit it in.
+sed -i 's|^\t\tapp demo {$|&\n\t\t\tbackup {\n\t\t\t\tsqlite app.db\n\t\t\t\tfiles  uploads\n\t\t\t}|' /etc/hotserve/Caddyfile
+[ "$(grep -c 'sqlite app.db' /etc/hotserve/Caddyfile)" = 1 ] || die "the backup block did not go into the demo app's block"
+
+# The README's lines, between its smoke markers; the example
+# repository URL is this box's, and the app is demo, as written.
+OUT=/tmp/docs.out
+. /tty.sh
+mapfile -t docs < <(awk '/<!-- smoke: begin -->/{on=1; next} /<!-- smoke: end -->/{on=0} on' /README-backups.md | grep -v '^```' | grep -v '^#' | grep -v '^$' | sed "s|s3:https://s3.example.com/my-backups|$S3REPO|")
+[ "${#docs[@]}" -ge 6 ] || die "the README's smoke block holds ${#docs[@]} lines; the markers moved?"
+for line in "${docs[@]}"; do
+	echo "README: $line"
+	case "$line" in
+	"sudo hotserve-backup setup "*)
+		converse "runuser -u admin -- sh -c '$line'" "$P_KEY" "$S3KEY" "$P_SECRET" "$S3SECRET" "$P_STORED" stored \
+			|| die "setup as the administrator failed: $(cat "$OUT")"
+		grep -q "account hotserve-backup: present" "$OUT" || die "setup did not find the package's account: $(cat "$OUT")"
+		grep -q "repository ready: $S3REPO (new, id " "$OUT" || die "setup did not make the repository: $(cat "$OUT")"
+		grep -q "^next: the first backup runs within the hour and ten minutes (systemctl list-timers hotserve-backup.timer)" "$OUT" \
+			|| die "setup's closing line does not name the timer: $(grep next: "$OUT")"
+		grep -q "$S3SECRET" "$OUT" && die "the storage secret was echoed at the terminal" || true
+		[ "$(stat -c '%U %a' "$CRED")" = "root 600" ] || die "$CRED is '$(stat -c '%U %a' "$CRED")', want 'root 600'"
+		CRED_SHA=$(sha256sum "$CRED" | cut -d' ' -f1)
+		expect_backup_state "after setup" enabled active "$CRED_SHA"
+		# The README's next claim: the first backup comes from the timer,
+		# within the hour and ten minutes. Not waited an hour for: a
+		# drop-in makes the timer a minute's, one firing is watched, the
+		# drop-in goes. The service it starts is the shipped one.
+		# A persistent timer writes its stamp at its first activation —
+		# postinstall's start — and fires nothing; the service has not
+		# run yet, and what will say it ran is its main process's start
+		# time (LastTriggerUSec shows the stamp's time after a restart,
+		# which is no firing) [M61].
+		[ -f /var/lib/systemd/timers/stamp-hotserve-backup.timer ] || die "the timer's first activation at install wrote no stamp"
+		started0=$(systemctl show -p ExecMainStartTimestampMonotonic --value hotserve-backup.service)
+		[ "$started0" = 0 ] || die "the backup service ran before anything asked it to (main process started at $started0)"
+		mkdir -p /run/systemd/system/hotserve-backup.timer.d
+		printf '[Timer]\nOnCalendar=\nOnCalendar=*-*-* *:*:00\nRandomizedDelaySec=0\n' >/run/systemd/system/hotserve-backup.timer.d/10-smoke.conf
+		systemctl daemon-reload
+		systemctl restart hotserve-backup.timer
+		i=0
+		until [ "$(systemctl show -p ExecMainStartTimestampMonotonic --value hotserve-backup.service)" != "$started0" ] || [ "$i" -ge 150 ]; do
+			i=$((i + 1))
+			sleep 0.5
+		done
+		[ "$i" -lt 150 ] || die "the hourly timer, made a minute's, did not start the service within 75s: $(systemctl show -p LastTriggerUSec,NextElapseUSecRealtime,ActiveState hotserve-backup.timer | tr '\n' ' '); $(systemctl show -p ActiveState,Result,ConditionResult hotserve-backup.service | tr '\n' ' ')"
+		i=0
+		until [ "$(systemctl show -p ActiveState --value hotserve-backup.service)" = inactive ] || [ "$i" -ge 240 ]; do
+			i=$((i + 1))
+			sleep 0.5
+		done
+		rm -rf /run/systemd/system/hotserve-backup.timer.d
+		systemctl daemon-reload
+		systemctl restart hotserve-backup.timer
+		[ "$(systemctl show -p Result --value hotserve-backup.service)" = success ] \
+			|| die "the run the timer fired ended '$(systemctl show -p Result --value hotserve-backup.service)': $(journalctl -u hotserve-backup.service --no-pager | tail -20)"
+		[ -f /var/lib/hotserve-backup/status.json ] || die "the timer's run wrote no record"
+		echo "the timer fired ($((i / 2))s after the minute), and its run ended success under the unit's hardening"
+		;;
+	"sudo hotserve-backup restore demo")
+		printf 'demo\n' | as_admin "$line" >"$OUT" 2>&1 || die "the restore into place failed: $(cat "$OUT")"
+		grep -q "demo: backed up first: snapshot [0-9a-f]\{8\} (restore --snapshot" "$OUT" || die "the restore into place did not back the app up first: $(cat "$OUT")"
+		grep -q "demo: restored from snapshot" "$OUT" || die "the restore into place restored nothing: $(cat "$OUT")"
+		;;
+	"hotserve-backup status")
+		as_admin "$line" >"$OUT" 2>&1 || die "status as the administrator, no sudo, exits $?: $(cat "$OUT")"
+		grep -q "^demo: ok: " "$OUT" || die "status does not say demo is ok: $(cat "$OUT")"
+		grep -q "restore last proven" "$OUT" || die "status does not say demo's restore is proven: $(cat "$OUT")"
+		;;
+	*)
+		as_admin "$line" >"$OUT" 2>&1 || die "'$line' as the administrator exits $?: $(cat "$OUT")"
+		;;
+	esac
+done
+[ -f /root/demo-restored/uploads/a.png ] && [ "$(sqlite3 /root/demo-restored/app.db 'select count(*) from t')" = 2 ] \
+	|| die "the restore --to put nothing there: $(find /root/demo-restored 2>&1 | head)"
+# Not in the README's lines, and true of them: the --to rule, and the
+# pre-restore snapshot the restore into place named.
+as_admin "sudo hotserve-backup restore demo --to /tmp/demo-restored" >"$OUT" 2>&1 && die "a restore --to /tmp was accepted" || true
+grep -q "not /tmp — /root, /srv, /var/backups, or a root-owned directory of your own" "$OUT" || die "the --to rule's words are missing: $(cat "$OUT")"
+[ ! -e /tmp/demo-restored ] || die "a refused --to made its directory"
+snaps=$(systemd-run --quiet --pipe --wait --collect -p User=hotserve-backup -p EnvironmentFile=$CRED -p CacheDirectory=hotserve-backup -E RESTIC_CACHE_DIR=/var/cache/hotserve-backup -E HOME=/nonexistent /usr/bin/restic snapshots --no-lock --json --tag pre-restore 2>/dev/null | grep -o '"short_id"' | wc -l)
+[ "$snaps" = 1 ] || die "want one pre-restore snapshot, the repository holds $snaps"
+curl -fsS --max-time 5 "$PROXY/" | grep -q "hello smoke" || die "the app is not served after the backups"
+echo "the README's lines ran as written, as the administrator: validate, reload, setup, a run, status, a restore --to, a restore into place with its pre-restore snapshot"
+
 stage "stage 3: reinstall — upgrade path, conffile preservation, app survival"
 pid_before=$(printf '%s' "$status" | sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p')
 [ -n "$pid_before" ] || die "status missing pid: $status"
@@ -527,6 +698,65 @@ pid_after=$(printf '%s' "$status" | sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p')
 case "$status" in *'"running":true'*) : ;; *) die "reattached app not running: $status" ;; esac
 curl -fsS --max-time 5 "$PROXY/" | grep -q "hello smoke" || die "reattached app not served"
 echo "reinstall preserved config and user; hotserve restarted and reattached to the running app (pid $pid_after)"
+# The table's upgrade rows: as installed, the timers stay enabled and
+# running and the credential file is not touched; disabled by the
+# administrator, an upgrade leaves them disabled (was-enabled is false,
+# and deb-systemd-invoke starts nothing disabled); enabled again, an
+# upgrade keeps them so.
+expect_backup_state "after an upgrade" enabled active "$CRED_SHA"
+as_admin "sudo systemctl disable --now hotserve-backup.timer hotserve-backup-drill.timer"
+expect_backup_state "disabled by the administrator" disabled inactive "$CRED_SHA"
+dpkg -i "$deb" >/dev/null
+expect_backup_state "after an upgrade, disabled before it" disabled inactive "$CRED_SHA"
+as_admin "sudo systemctl enable --now hotserve-backup.timer hotserve-backup-drill.timer"
+dpkg -i "$deb" >/dev/null
+expect_backup_state "after an upgrade, enabled before it" enabled active "$CRED_SHA"
+systemctl is-active --quiet hotserve || die "hotserve not active after the upgrade cycle"
+# An upgrade stops a backup under way before the new binary is
+# unpacked: the old run would otherwise start its remaining helper
+# units from the new version's binary. Staged with a run held at its
+# upload; the upgrade has to end it, its units and its plaintext, and
+# leave the timers as they were.
+su -s /bin/sh hotserve -c 'head -c 50000000 /dev/urandom >/var/lib/liveswap/demo/shared/uploads/big.bin'
+systemctl start --no-block hotserve-backup.service
+i=0
+until up=$(systemctl list-units --plain --no-legend --state=activating 'hotserve_backup_upload_*' | awk '{print $1}' | head -1) && [ -n "$up" ]; do
+	i=$((i + 1))
+	[ "$i" -ge 300 ] && die "no upload unit appeared under the service: the upgrade row would prove nothing"
+	sleep 0.1
+done
+rpid=$(systemctl show -p ExecMainPID --value "$up")
+[ -n "$rpid" ] && [ "$rpid" != 0 ] && kill -STOP "$rpid" || die "could not hold the upload's restic (pid '$rpid')"
+dpkg -i "$deb" >/tmp/upgrade-run.log 2>&1 || { cat /tmp/upgrade-run.log; die "the upgrade with a run under way failed"; }
+left=$(systemctl list-units --plain --no-legend --state=active,activating,deactivating 'hotserve_backup_*' | awk '{print $1}' | tr '\n' ' ')
+[ -z "$left" ] || die "units of the old run are still running after the upgrade: $left"
+[ "$(systemctl show -p ActiveState --value hotserve-backup.service)" != activating ] \
+	|| die "the old run is still under way after the upgrade"
+kill -0 "$rpid" 2>/dev/null && die "the old run's restic (pid $rpid) survived the upgrade" || true
+[ -z "$(find /var/lib/hotserve-backup/staging -mindepth 2 2>/dev/null)" ] \
+	|| die "the stopped run left plaintext in staging: $(find /var/lib/hotserve-backup/staging -mindepth 2)"
+systemctl reset-failed hotserve-backup.service 2>/dev/null || true
+su -s /bin/sh hotserve -c 'rm -f /var/lib/liveswap/demo/shared/uploads/big.bin'
+expect_backup_state "after an upgrade with a run under way" enabled active "$CRED_SHA"
+systemctl start hotserve-backup.service || die "a run after that upgrade failed: $(journalctl -u hotserve-backup.service --no-pager | tail -20)"
+echo "an upgrade stopped the run under way, its units and its plaintext; the timers as they were, and the next run works"
+# The account is every run's to check, and an upgrade says so in
+# setup's own words: put in the hotserve group — where restic and the
+# plan unit would read the apps' env files — it is warned of at the
+# upgrade, refused by a run, and accepted again once taken out.
+usermod -aG hotserve hotserve-backup
+dpkg -i "$deb" >/tmp/upgrade-group.log 2>&1 || { cat /tmp/upgrade-group.log; die "the upgrade with the account in the hotserve group failed: a warning must not fail an install"; }
+grep -q "the hotserve group among its groups" /tmp/upgrade-group.log && grep -q "refuse that account" /tmp/upgrade-group.log \
+	|| die "postinstall did not warn of the account in the hotserve group: $(cat /tmp/upgrade-group.log)"
+grep -q "usermod --shell" /tmp/upgrade-group.log && die "the warning names a usermod of the shell for a fault of who the account is" || true
+systemctl start hotserve-backup.service && die "a run with the account in the hotserve group exited 0" || true
+journalctl -u hotserve-backup.service --no-pager | grep -q "the hotserve group among its groups" \
+	|| die "the run did not say why it refused: $(journalctl -u hotserve-backup.service --no-pager | tail -5)"
+gpasswd -d hotserve-backup hotserve >/dev/null
+systemctl reset-failed hotserve-backup.service 2>/dev/null || true
+hotserve-backup account >/dev/null || die "the account is not accepted once out of the group: $(hotserve-backup account 2>&1)"
+systemctl start hotserve-backup.service || die "a run after the account was mended failed: $(journalctl -u hotserve-backup.service --no-pager | tail -20)"
+echo "in the hotserve group: warned of at the upgrade in setup's words, refused by a run, accepted once out of it"
 
 stage "stage 4: removal"
 apt-get remove -y hotserve
@@ -539,6 +769,50 @@ systemctl is-active --quiet "user@$uid.service" && die "user manager still runni
 [ ! -e /var/lib/systemd/linger/hotserve ] || die "lingering left enabled"
 kill -0 "$pid_after" 2>/dev/null && die "deployed app (pid $pid_after) survived package removal" || true
 echo "removal stopped the service and the apps, kept the conffile"
+# The table's remove row: the timers stopped and masked, the unit files
+# gone, the credential file and the account kept.
+expect_backup_state "after remove" masked inactive "$CRED_SHA"
+for u in hotserve-backup.service hotserve-backup-drill.service $TIMERS; do
+	[ ! -e "/lib/systemd/system/$u" ] || die "/lib/systemd/system/$u still present after remove"
+done
+systemctl is-active --quiet hotserve-backup.service && die "a backup run is still active after remove" || true
+getent passwd hotserve-backup >/dev/null || die "the hotserve-backup account was removed with the package"
+[ ! -e /usr/bin/hotserve-backup ] || die "/usr/bin/hotserve-backup still present after remove"
+
+stage "stage 5: reinstall after remove, and purge"
+apt-get install -y "$deb" >/tmp/reinstall.log 2>&1 || { cat /tmp/reinstall.log; die "reinstall after remove failed"; }
+expect_backup_state "reinstalled after remove" enabled active "$CRED_SHA"
+timeout 300 systemctl enable --now hotserve || die "hotserve did not start after the reinstall"
+systemctl start hotserve-backup.service || die "a run after the reinstall failed: $(journalctl -u hotserve-backup.service --no-pager | tail -20)"
+[ "$(systemctl show -p Result --value hotserve-backup.service)" = success ] || die "the run after the reinstall ended '$(systemctl show -p Result --value hotserve-backup.service)'"
+echo "reinstalled after remove: the timers enabled and running again, the same credential file, a run works"
+# What a killed run can leave behind: a bind mount of an app's data
+# under the run directory, and the record writer's temp file. Purge
+# must remove nothing of the app's through the first, and not be
+# defeated by the second.
+mkdir -p /run/hotserve-backup/deadrun/m0
+mount --bind /var/lib/liveswap/demo/shared /run/hotserve-backup/deadrun/m0 || die "could not stage a leftover bind mount"
+[ -f /run/hotserve-backup/deadrun/m0/app.db ] || die "the staged mount does not show the app's data: the purge check would prove nothing"
+: >/var/lib/hotserve-backup/.status-crash
+apt-get purge -y hotserve >/tmp/purge.log 2>&1 || { cat /tmp/purge.log; die "apt-get purge failed"; }
+[ -f /var/lib/liveswap/demo/shared/app.db ] && [ -f /var/lib/liveswap/demo/shared/uploads/a.png ] \
+	|| die "purge removed the app's data through a mount a killed run left under /run/hotserve-backup"
+umount /run/hotserve-backup/deadrun/m0 && rm -rf /run/hotserve-backup
+cat /tmp/purge.log
+grep -q "$CRED is kept: it holds the repository password, the only way to read the backups already made" /tmp/purge.log \
+	|| die "purge did not say that the credential file is kept, and why"
+[ "$(sha256sum "$CRED" | cut -d' ' -f1)" = "$CRED_SHA" ] || die "purge changed or removed $CRED"
+[ ! -e /var/lib/hotserve-backup/status.json ] && [ ! -e /var/lib/hotserve-backup/repository-id ] || die "purge left the record or the repository id"
+[ ! -e /var/lib/hotserve-backup ] || die "purge left /var/lib/hotserve-backup, though nothing of an app's was in it: $(find /var/lib/hotserve-backup)"
+[ ! -e /var/cache/hotserve-backup ] || die "purge left restic's cache"
+getent passwd hotserve-backup >/dev/null || die "purge removed the hotserve-backup account"
+for u in $TIMERS; do
+	[ ! -e "/etc/systemd/system/$u" ] || die "purge left $u masked"
+	[ ! -e "/etc/systemd/system/timers.target.wants/$u" ] || die "purge left $u enabled"
+	[ ! -e "/var/lib/systemd/deb-systemd-helper-enabled/$u.dsh-also" ] || die "purge left the helper's state for $u"
+done
+[ ! -f /etc/hotserve/Caddyfile ] || die "purge left the conffile"
+echo "purge kept the credential file and said why, removed the package's own state and the cache, kept the account"
 
 echo ""
 echo "ALL PACKAGE SMOKE STAGES PASSED ($deb on $(. /etc/os-release && echo "$PRETTY_NAME"))"

@@ -13,6 +13,7 @@
 # below is content with a non-zero exit alone.
 . /lib.sh
 . /lib-backup.sh
+. /tty.sh
 
 S3=s3:http://e2e-s3:9000
 REPO=$S3/setuprepo
@@ -25,47 +26,7 @@ wait_for_systemd
 cp "$CADDYFILE" /root/Caddyfile.base
 seed
 
-# at_tty <cmd...>: the command at a real terminal, script(1)'s, typing
-# what is on stdin — for a command that asks nothing.
-at_tty() { script -qec "$*" /dev/null; }
-# converse <cmd> [<prompt> <answer>]...: the command at a real terminal,
-# each answer typed once its prompt is the last thing on the screen —
-# a pty echoes what arrives before echo is off, and a loaded runner
-# takes its time to a prompt — and then once the screen has moved on,
-# so that the same prompt asked again is waited for again. Output in
-# $OUT; exit status the command's.
-converse() {
-	cmd=$1
-	shift
-	rm -f /root/in
-	mkfifo /root/in
-	script -qec "$cmd" /dev/null </root/in >"$OUT" 2>&1 &
-	cv=$!
-	exec 3>/root/in
-	while [ $# -ge 2 ]; do
-		p=$1
-		a=$2
-		shift 2
-		i=0
-		until [ "$(tail -c "${#p}" "$OUT" 2>/dev/null)" = "$p" ] || ! kill -0 "$cv" 2>/dev/null || [ "$i" -ge 600 ]; do
-			i=$((i + 1))
-			sleep 0.1
-		done
-		kill -0 "$cv" 2>/dev/null || break
-		printf '%s\n' "$a" >&3
-		i=0
-		while [ "$(tail -c "${#p}" "$OUT" 2>/dev/null)" = "$p" ] && kill -0 "$cv" 2>/dev/null && [ "$i" -lt 100 ]; do
-			i=$((i + 1))
-			sleep 0.1
-		done
-	done
-	exec 3>&-
-	wait "$cv"
-}
-P_KEY="Storage key id (AWS_ACCESS_KEY_ID): "
-P_SECRET="Storage secret key (AWS_SECRET_ACCESS_KEY): "
-P_STORED="Type stored to go on: "
-P_PW="Repository password: "
+# at_tty, converse and the prompts: /tty.sh.
 setup() { hotserve-backup setup "$@" >"$OUT" 2>&1; }
 says() { grep -q -e "$1" "$OUT"; }
 sum() { sha256sum "$ENVFILE" 2>/dev/null | cut -d' ' -f1; }
@@ -97,6 +58,31 @@ printf 'x\n' | at_tty hotserve-backup setup "$REPO" >"$OUT" 2>&1 && fail "setup 
 says "Storage key id" && fail "a prompt was asked before the preflight passed" || pass "and asked nothing"
 id hotserve-backup >/dev/null 2>&1 && fail "the account was made before the preflight passed" || pass "and made no account"
 mv /usr/bin/restic.aside /usr/bin/restic
+# An account of that name made by hand, with a shell and a home: whoever
+# can log in as it can read the credential from restic's environment.
+# Refused, naming both, and left as it is — never normalised.
+useradd --system --shell /bin/sh --home-dir /home/hsb -m hotserve-backup
+printf 'x\n' | at_tty hotserve-backup setup "$REPO" >"$OUT" 2>&1 && fail "setup with an account that has a login shell exited 0" || { says "the hotserve-backup account exists with a login shell (/bin/sh, not one of /usr/sbin/nologin, /sbin/nologin, /bin/false, /usr/bin/false) and a home directory that exists (/home/hsb)" && says "usermod --shell /usr/sbin/nologin --home /nonexistent hotserve-backup" && says "useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hotserve-backup" && pass "an account made wrong is refused, naming what is wrong and the two ways to mend it" || fail "the wrong account: $(cat "$OUT")"; }
+says "Storage key id" && fail "a prompt was asked with a wrong account" || pass "and asked nothing"
+getent passwd hotserve-backup | grep -q ':/home/hsb:/bin/sh$' && [ -d /home/hsb ] && pass "and the account was left as it was" || fail "the account was changed: $(getent passwd hotserve-backup)"
+# The same rule, asked by itself: what the package's postinstall asks,
+# and an administrator after mending the account. It needs no root.
+as_nobody hotserve-backup account >"$OUT" 2>&1 && fail "account exited 0 of an account with a login shell" || { says "the hotserve-backup account exists with a login shell (/bin/sh" && pass "hotserve-backup account says the same, as anyone" || fail "account said: $(cat "$OUT")"; }
+userdel -r hotserve-backup 2>/dev/null
+# And one whose uid another account holds: authorization is by uid, and
+# that account is the restic process.
+useradd -m alice
+useradd -o -u "$(id -u alice)" --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hotserve-backup
+printf 'x\n' | at_tty hotserve-backup setup "$REPO" >"$OUT" 2>&1 && fail "setup with a uid shared with alice exited 0" || { says "the hotserve-backup account exists with a uid shared with alice ($(id -u alice))" && pass "an account whose uid another account holds is refused, naming it" || fail "the shared uid: $(cat "$OUT")"; }
+says "usermod" && fail "a usermod is named for a uid that is shared, which no usermod of the shell mends" || pass "and the remedy named is to remake it, not to lock it"
+userdel hotserve-backup 2>/dev/null
+# In the hotserve group the plan unit and restic would read the apps'
+# env files: refused, by the group's name.
+useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin -G hotserve hotserve-backup
+printf 'x\n' | at_tty hotserve-backup setup "$REPO" >"$OUT" 2>&1 && fail "setup with the account in the hotserve group exited 0" || { says "the hotserve group among its groups (gid $(getent group hotserve | cut -d: -f3))" && pass "an account in the hotserve group is refused, naming the group" || fail "the group: $(cat "$OUT")"; }
+userdel hotserve-backup 2>/dev/null
+userdel -r alice 2>/dev/null
+[ ! -e "$ETC" ] && pass "and nothing was made under /etc" || fail "$ETC exists"
 for r in sftp:user@host:/srv/backups /srv/backups local:/srv/backups rclone:remote:bucket azure:container:path gs:bucket:path swift:container:/path rest:https://host:8000/ "s3:http://user:pass@e2e-s3:9000/box" "s3:user:pass@e2e-s3:9000/box" "s3://user:pass@e2e-s3:9000/box" "ftp://host/x" "s3:"; do
 	if printf 'x\n' | at_tty hotserve-backup setup "$r" >"$OUT" 2>&1; then
 		fail "setup $r exited 0"
@@ -130,6 +116,7 @@ pw=$(shown_password "$OUT")
 [ -n "$pw" ] && pass "a password was shown" || fail "no password was shown: $(cat "$OUT")"
 says "Store it off the box now, with the repository URL, $REPO, and the storage key" && says "Type stored to go on" && pass "and had to be confirmed stored, with what to store beside it" || fail "the stored step: $(cat "$OUT")"
 says "account hotserve-backup: made" && getent passwd hotserve-backup | grep -q ':/nonexistent:/usr/sbin/nologin$' && pass "the account was made: no home, no shell" || fail "the account: $(getent passwd hotserve-backup) — $(grep account "$OUT")"
+hotserve-backup account >/dev/null 2>&1 && pass "and hotserve-backup account accepts it" || fail "account: $(hotserve-backup account 2>&1)"
 [ "$(stat -c '%U %a' "$ETC")" = "root 755" ] && [ "$(stat -c '%U %a' "$ENVFILE")" = "root 600" ] && pass "the directory is root's and open to look into; the file is root's alone" || fail "$ETC: $(stat -c '%U %a' "$ETC"), $ENVFILE: $(stat -c '%U %a' "$ENVFILE")"
 [ "$(grep -c '^' "$ENVFILE")" = 4 ] && grep -q "^RESTIC_REPOSITORY=$REPO\$" "$ENVFILE" && grep -q "^RESTIC_PASSWORD=$pw\$" "$ENVFILE" && grep -q "^AWS_ACCESS_KEY_ID=$KEYID\$" "$ENVFILE" && grep -q "^AWS_SECRET_ACCESS_KEY=$SECRET\$" "$ENVFILE" && pass "the file holds the four settings, the password among them, and nothing else" || fail "the file: $(sed 's/PASSWORD=.*/PASSWORD=…/' "$ENVFILE")"
 [ "$(temps)" = 0 ] && pass "nothing was left beside it" || fail "left beside it: $(ls "$ETC")"
@@ -137,7 +124,10 @@ says "account hotserve-backup: made" && getent passwd hotserve-backup | grep -q 
 rr cat config --no-lock >/dev/null 2>&1 && pass "the repository answers the credential the file holds" || fail "the repository does not answer: $(rr cat config --no-lock 2>&1)"
 says "a run would back up blog, notyet, shop, under /var/lib/liveswap" && pass "the plan was read first, and said" || fail "the plan: $(cat "$OUT")"
 says "^looking for a repository at $REPO" && pass "the repository was looked for before a password was made" || fail "the look: $(cat "$OUT")"
-says "^next: sudo hotserve-backup run, then hotserve-backup status. Nothing runs it on a schedule on this branch" && pass "and what to do next, and what does not happen by itself" || fail "next: $(cat "$OUT")"
+# This box's timer is not active (the image undoes the package's
+# enabling): setup says so, and how to have it; the package smoke sees
+# the other wording, with the timer active.
+says "^next: nothing runs it on a schedule: sudo systemctl enable --now hotserve-backup.timer, or run sudo hotserve-backup run hourly from a timer or cron entry of your own; then hotserve-backup status" && pass "and what to do next, from the timer being inactive here" || fail "next: $(cat "$OUT")"
 journalctl --sync >/dev/null 2>&1
 if ! journalctl --no-pager | grep -q "hotserve backup: init the repository"; then
 	fail "the journal does not show the init unit, so it cannot show what is not in it"

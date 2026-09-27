@@ -1,0 +1,13 @@
+# hotserve-backup-drill.timer — the weekly restore drill, Sunday 03:30
+# (the owner, 2026-09-20), caught up at boot if the box was off then.
+# Enabled by the package; the service itself waits for setup.
+[Unit]
+Description=hotserve backup restore drill, weekly
+Documentation=https://github.com/smallhoursorg/hotserve/blob/main/backups/README.md
+
+[Timer]
+OnCalendar=Sun *-*-* 03:30
+Persistent=true
+
+[Install]
+WantedBy=timers.target

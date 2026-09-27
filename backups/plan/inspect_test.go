@@ -121,3 +121,56 @@ func TestAnUndeclaredAppNamedThroughTheEnvironment(t *testing.T) {
 }
 
 func second[T any](_ T, err error) error { return err }
+
+// A root that depends on the environment is refused only where an app
+// declares a backup: with none declared a run backs nothing up, and the
+// root is not its business — `bin/push` on a box that uses no backups
+// would otherwise refuse a Caddyfile that works today (the owner, 4a:
+// decide in 4c). Such a plan carries no root at all, so that nothing
+// downstream reads a placeholder as a path. What hides an app — an
+// import through a variable, a glob that matches nothing — is refused
+// as before, backup or no backup.
+func TestAPlaceholderRootIsRefusedOnlyWhereABackupIsDeclared(t *testing.T) {
+	fakeHotserve(t)
+	for _, tc := range []struct {
+		name, caddyfile string
+		refused         string // in the error; empty means the plan is made
+		root            string // of the plan made
+	}{
+		{"a defaulted root, a backup declared", "root {$LIVESWAP_ROOT:/var/lib/liveswap}\n", "LIVESWAP_ROOT", ""},
+		{"a defaulted root, no backup declared", "# no app declares a backup\nroot {$LIVESWAP_ROOT:/var/lib/liveswap}\n", "", ""},
+		{"a defaulted root, no app", "# no app\nroot {$LIVESWAP_ROOT:/var/lib/liveswap}\n", "", ""},
+		{"a root with no default, a backup declared", "root {$ROOT_NO_DEFAULT}\n", "ROOT_NO_DEFAULT", ""},
+		{"a root with no default, no backup declared", "# no app declares a backup\nroot {$ROOT_NO_DEFAULT}\n", "", ""},
+		{"a literal root, no backup declared", "# no app declares a backup\nroot /var/lib/liveswap\n", "", ""},
+		{"a literal root, a backup declared", "root /var/lib/liveswap\n", "", "/var/lib/liveswap"},
+		// A {env.NAME} root reaches the plan as written, no variable to
+		// try: refused for a backup's sake only.
+		{"an env root, a backup declared", "root {env.LIVESWAP_ROOT}\n", "placeholder", ""},
+		{"an env root, no backup declared", "# no app declares a backup\nroot {env.LIVESWAP_ROOT}\n", "", ""},
+		{"an import through a variable, no backup declared", "# no app declares a backup\nimport sites/{$ENV:prod}.caddy\n", "ENV", ""},
+		{"an empty glob, no backup declared", "# no app declares a backup\nimport nowhere/*.caddy\n", "matches no file", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			file := filepath.Join(t.TempDir(), "Caddyfile")
+			write(t, file, tc.caddyfile)
+			ins, err := Inspect(context.Background(), file, filepath.Dir(file))
+			made, merr := Make(context.Background(), file)
+			if tc.refused != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.refused) || merr == nil || !strings.Contains(merr.Error(), tc.refused) {
+					t.Fatalf("want a refusal naming %q: validate %v, run %v", tc.refused, err, merr)
+				}
+				return
+			}
+			if err != nil || merr != nil {
+				t.Fatalf("refused: validate %v, run %v", err, merr)
+			}
+			if ins.Plan.Root != tc.root || made.Root != tc.root {
+				t.Fatalf("root: validate %q, run %q, want %q", ins.Plan.Root, made.Root, tc.root)
+			}
+			if p := ins.Plan; tc.root == "" && len(p.Apps) != 0 {
+				t.Fatalf("a plan with no root has apps: %+v", p.Apps)
+			}
+		})
+	}
+}

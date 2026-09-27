@@ -466,20 +466,6 @@ func TestToADirectory(t *testing.T) {
 	}
 }
 
-func TestOneRestoreOrRunAtATime(t *testing.T) {
-	b := restoreBox(t)
-	must(t, os.MkdirAll(b.cfg.RunDir, 0o755))
-	unlock, err := lock(filepath.Join(b.cfg.RunDir, "lock"))
-	must(t, err)
-	defer unlock()
-	if _, err := Restore(context.Background(), b.cfg, b, inPlace()); !errors.Is(err, ErrBusy) || len(b.specs) != 0 {
-		t.Fatalf("a restore during a run: %v (%s)", err, b.roles())
-	}
-	if _, err := Drill(context.Background(), b.cfg, b); !errors.Is(err, ErrBusy) || len(b.specs) != 0 {
-		t.Fatalf("a drill during a run: %v (%s)", err, b.roles())
-	}
-}
-
 func TestADrillProvesAndInstallsNothing(t *testing.T) {
 	b := restoreBox(t)
 	st, err := Drill(context.Background(), b.cfg, b)

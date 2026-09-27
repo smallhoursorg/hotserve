@@ -1,0 +1,40 @@
+# hotserve-backup-drill.service — the weekly restore drill, started by
+# hotserve-backup-drill.timer: the newest snapshot of every app fetched
+# and checked as a restore would, nothing installed. The [Service]
+# section is the run's, line for line: one hardening set, one
+# measurement (cmd/hotserve-backup/units_test.go holds the two to it,
+# and hotserve-backup.service says why each line is there and what is
+# left out). A drill that proved nothing exits 1 and leaves this unit
+# failed until the next one proves (the owner, 2026-09-26).
+[Unit]
+Description=hotserve backup restore drill
+Documentation=https://github.com/smallhoursorg/hotserve/blob/main/backups/README.md
+# Queued while a run's start job is still running, the drill's waits
+# for it rather than failing on the run lock. The run's unit does not
+# say the same of the drill: a transaction holding both would be an
+# ordering cycle, and a run that meets a running drill says so and is
+# an hour's red unit.
+After=network-online.target
+After=hotserve-backup.service
+Wants=network-online.target
+ConditionPathExists=/etc/hotserve-backup/repository.env
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/hotserve-backup drill
+Environment=HOTSERVE_BACKUP_UNIT=%n
+TimeoutStartSec=infinity
+TimeoutStopSec=3min
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_READ_SEARCH CAP_CHOWN CAP_FOWNER
+RestrictAddressFamilies=AF_UNIX
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+MemoryDenyWriteExecute=yes
+RestrictNamespaces=yes
+ProtectClock=yes
+DevicePolicy=closed
+SystemCallArchitectures=native
+SystemCallFilter=@system-service @mount
+SystemCallFilter=~open_by_handle_at

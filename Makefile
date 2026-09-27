@@ -135,7 +135,9 @@ build:
 		git config --global --add safe.directory /src; \
 		GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o build/hotserve-linux-amd64 ./cmd/hotserve & p1=$$!; \
 		GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o build/hotserve-linux-arm64 ./cmd/hotserve & p2=$$!; \
-		wait $$p1 || exit 1; wait $$p2 || exit 1; \
+		(cd backups && GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o ../build/hotserve-backup-linux-amd64 ./cmd/hotserve-backup) & p3=$$!; \
+		(cd backups && GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o ../build/hotserve-backup-linux-arm64 ./cmd/hotserve-backup) & p4=$$!; \
+		wait $$p1 || exit 1; wait $$p2 || exit 1; wait $$p3 || exit 1; wait $$p4 || exit 1; \
 		chmod -R a+rwX build'
 
 # Builds .deb for both arches into dist/. .deb only, and no .apk
@@ -143,22 +145,32 @@ build:
 # fallback runner, so an Alpine/OpenRC package would install a hotserve
 # that serves but refuses any Caddyfile defining an app — see
 # packaging/nfpm.yaml. The packages carry the systemd unit, the starter
-# /etc/hotserve/Caddyfile and the data dirs; postinstall creates the
-# hotserve system user.
+# /etc/hotserve/Caddyfile and the data dirs, and hotserve-backup with
+# its two timers; postinstall creates the hotserve and hotserve-backup
+# system users. Both arches are staged and packaged inside ONE nfpm
+# container: staged on the host between two containers, a binary
+# replaced in place kept its old size in Docker Desktop's bind-mount
+# attribute cache, and nfpm wrote a tar header of the amd64 size over
+# the arm64 content ("missed writing 286720 bytes").
 package: build
 	mkdir -p dist
-	for a in amd64 arm64; do \
-		cp build/hotserve-linux-$$a build/hotserve; \
-		for f in deb; do \
-			$(COMPOSE) run --rm -e NFPM_ARCH=$$a -e NFPM_VERSION=$(VERSION) nfpm \
-				package -f packaging/nfpm.yaml -p $$f -t dist/ || exit 1; \
+	$(COMPOSE) run --rm --entrypoint sh -e NFPM_VERSION=$(VERSION) nfpm -c '\
+		set -e; \
+		for a in amd64 arm64; do \
+			rm -f build/hotserve build/hotserve-backup; \
+			cp build/hotserve-linux-$$a build/hotserve; \
+			cp build/hotserve-backup-linux-$$a build/hotserve-backup; \
+			for f in deb; do \
+				NFPM_ARCH=$$a nfpm package -f packaging/nfpm.yaml -p $$f -t dist/; \
+			done; \
 		done; \
-	done; \
-	rm -f build/hotserve
+		rm -f build/hotserve build/hotserve-backup'
 
 # Installs the freshly built .deb inside a systemd container (DISTRO
 # picks the base image) and runs the staged smoke test: install, unit
-# boot, a real liveswap deploy under the sandbox, reinstall, remove.
+# boot, a real liveswap deploy under the sandbox, the backups README's
+# "On a fresh box" lines as an administrator (the README is mounted:
+# the lines run are the lines written), reinstall, remove, purge.
 # Needs dist/ populated first (make package). --privileged +
 # --cgroupns=host with the cgroup mount is the reliable
 # systemd-in-docker recipe on cgroup-v2 hosts (GitHub runners and
@@ -174,6 +186,8 @@ install-test:
 		-v $(CURDIR)/dist:/dist:ro \
 		-v $(CURDIR)/packaging/test/smoke.sh:/smoke.sh:ro \
 		-v $(CURDIR)/liveswap/testdata/sandbox-view.sh:/sandbox-view.sh:ro \
+		-v $(CURDIR)/e2e/backup/tty.sh:/tty.sh:ro \
+		-v $(CURDIR)/backups/README.md:/README-backups.md:ro \
 		hotserve-install-test-$(subst :,-,$(DISTRO))
 	docker exec hotserve-smoke /bin/bash /smoke.sh; status=$$?; \
 	if [ $$status -ne 0 ]; then \
@@ -221,6 +235,7 @@ e2e-backup:
 	status=0; \
 	$(COMPOSE) exec -T e2e-backup-box /bin/sh /suite-setup.sh || status=1; \
 	$(COMPOSE) exec -T e2e-backup-box /bin/sh /suite-backup.sh || status=1; \
+	$(COMPOSE) exec -T e2e-backup-box /bin/sh /suite-units.sh || status=1; \
 	$(COMPOSE) exec -T e2e-backup-box /bin/sh /suite-status.sh || status=1; \
 	$(COMPOSE) exec -T e2e-backup-box /bin/sh /suite-restore.sh || status=1; \
 	if [ $$status -ne 0 ]; then \

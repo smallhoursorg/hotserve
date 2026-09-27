@@ -9,8 +9,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -76,8 +77,97 @@ var (
 		st, err := os.Stat(path)
 		return err == nil && st.Mode().IsRegular() && st.Mode()&0o001 != 0
 	}
-	accountExists = func(name string) bool { _, err := user.Lookup(name); return err == nil }
-	makeAccount   = func() error {
+	// account is the account as the manager itself resolves it — getent,
+	// so NSS, where os/user reads /etc/passwd alone and knows no shell:
+	// its shell and home, and whether it is there at all. getent's
+	// argv is constant; its exit 2 is "not found".
+	account = func(name string) (passwd, error) {
+		out, err := exec.Command(getent, "passwd", name).Output() //nolint:gosec // a constant program; name is backupUser, a constant
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 2 {
+			return passwd{}, nil
+		}
+		if err != nil {
+			return passwd{}, fmt.Errorf("%s passwd %s: %w", getent, name, err)
+		}
+		fields := strings.Split(strings.TrimRight(string(out), "\n"), ":")
+		if len(fields) != 7 {
+			return passwd{}, fmt.Errorf("%s passwd %s: not a passwd line: %s", getent, name, record.Text(string(out)))
+		}
+		uid, uerr := strconv.Atoi(fields[2])
+		gid, gerr := strconv.Atoi(fields[3])
+		if uerr != nil || gerr != nil {
+			return passwd{}, fmt.Errorf("%s passwd %s: not a passwd line: %s", getent, name, record.Text(string(out)))
+		}
+		return passwd{uid: uid, gid: gid, home: fields[5], shell: fields[6], exists: true}, nil
+	}
+	// holders is every account that holds a uid, from the whole passwd
+	// database as getent enumerates it — where NSS refuses to enumerate
+	// (exit 3), the one entry the uid looks up. Authorization is by
+	// uid: whoever else holds it is the restic process.
+	holders = func(uid int) ([]string, error) {
+		out, err := exec.Command(getent, "passwd").Output()
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 3 {
+			out, err = exec.Command(getent, "passwd", strconv.Itoa(uid)).Output() //nolint:gosec // as above; the uid is a number
+			if errors.As(err, &exit) && exit.ExitCode() == 2 {
+				return nil, nil
+			}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%s passwd: %w", getent, err)
+		}
+		var names []string
+		for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+			fields := strings.Split(line, ":")
+			if len(fields) == 7 && fields[2] == strconv.Itoa(uid) {
+				names = append(names, fields[0])
+			}
+		}
+		return names, nil
+	}
+	// groupNamed is a group by its name, as getent resolves it: the
+	// hotserve group is the one the apps' env files and directories
+	// belong to, whatever the hotserve user's primary group is.
+	groupNamed = func(name string) (gid int, exists bool, err error) {
+		out, err := exec.Command(getent, "group", name).Output() //nolint:gosec // a constant program; name is a constant
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 2 {
+			return 0, false, nil
+		}
+		if err != nil {
+			return 0, false, fmt.Errorf("%s group %s: %w", getent, name, err)
+		}
+		fields := strings.Split(strings.TrimRight(string(out), "\n"), ":")
+		if len(fields) < 3 {
+			return 0, false, fmt.Errorf("%s group %s: not a group line: %s", getent, name, record.Text(string(out)))
+		}
+		gid, err = strconv.Atoi(fields[2])
+		if err != nil {
+			return 0, false, fmt.Errorf("%s group %s: not a group line: %s", getent, name, record.Text(string(out)))
+		}
+		return gid, true, nil
+	}
+	// groupsOf is every group the account is in, its primary among
+	// them, as id(1) resolves them: what the manager gives a unit that
+	// runs as the account.
+	groupsOf = func(name string) ([]int, error) {
+		out, err := exec.Command("/usr/bin/id", "-G", name).Output() //nolint:gosec // a constant program; name is backupUser, a constant
+		if err != nil {
+			return nil, fmt.Errorf("/usr/bin/id -G %s: %w", name, err)
+		}
+		var gids []int
+		for _, f := range strings.Fields(string(out)) {
+			g, err := strconv.Atoi(f)
+			if err != nil {
+				return nil, fmt.Errorf("/usr/bin/id -G %s: not a gid: %s", name, record.Text(f))
+			}
+			gids = append(gids, g)
+		}
+		return gids, nil
+	}
+	homeExists  = func(path string) bool { _, err := os.Lstat(path); return err == nil }
+	makeAccount = func() error {
 		if out, err := exec.Command(useradd[0], useradd[1:]...).CombinedOutput(); err != nil {
 			return fmt.Errorf("%s: %w: %s", useraddArgv(), err, record.Text(string(out)))
 		}
@@ -86,10 +176,150 @@ var (
 )
 
 // useradd makes the account restic runs as: no home, no shell, and
-// nothing of its own but the cache the manager makes for it.
+// nothing of its own but the cache the manager makes for it. The
+// package's postinstall makes it with the same line, before setup ever
+// runs (TestPostinstallMakesTheAccountAsSetupDoes).
 var useradd = []string{"/usr/sbin/useradd", "--system", "--no-create-home", "--home-dir", "/nonexistent", "--shell", "/usr/sbin/nologin", backupUser}
 
+const getent = "/usr/bin/getent"
+
+// passwd is an account as getent gives it: its uid and gid, its home
+// and its shell, and whether it is there at all.
+type passwd struct {
+	uid, gid    int
+	home, shell string
+	exists      bool
+}
+
 func useraddArgv() string { return strings.Join(useradd, " ") }
+
+// accountUsable is what setup asks of an account that is already there:
+// a shell nobody can log in with, and no home that exists. Every restic
+// unit runs as it, and whoever can log in as it can read the repository
+// credential from a running restic's environment. An account made
+// wrongly is refused, never changed: an administrator may have meant
+// it, and the message says the two ways to mend it.
+func accountUsable(acct passwd) error {
+	// Two kinds of fault, mended differently. Who the account is: it
+	// is what every restic unit runs as, User= by name, and
+	// authorization is by uid — root's is root, and any other account
+	// holding the uid is the restic process and reads its environment
+	// — and by group: the manager gives a unit its account's groups,
+	// and in the hotserve group the plan unit and restic read the
+	// apps' env files and their 0750 directories, the separation the
+	// account exists for; in root's, what root's group reads. (A gid
+	// of its own is not asked for: a group reads no process's
+	// environment.)
+	var identity, lockable []string
+	if acct.uid == 0 {
+		identity = append(identity, "uid 0 (root)")
+	}
+	if acct.gid == 0 {
+		identity = append(identity, "gid 0 (root)")
+	}
+	names, err := holders(acct.uid)
+	if err != nil {
+		return err
+	}
+	var others []string
+	for _, n := range names {
+		if n != backupUser {
+			others = append(others, record.Text(n))
+		}
+	}
+	if len(others) > 0 && acct.uid != 0 {
+		identity = append(identity, fmt.Sprintf("a uid shared with %s (%d)", strings.Join(others, ", "), acct.uid))
+	}
+	groups, err := groupsOf(backupUser)
+	if err != nil {
+		return err
+	}
+	if acct.gid != 0 && slices.Contains(groups, 0) {
+		identity = append(identity, "root's group among its groups (gid 0)")
+	}
+	// The group named hotserve — what the apps' env files and their
+	// directories belong to — not the hotserve user's primary group,
+	// which on a box where that account was made by hand is another.
+	gid, there, err := groupNamed(dataUser)
+	if err != nil {
+		return err
+	}
+	if there && gid != 0 && (acct.gid == gid || slices.Contains(groups, gid)) {
+		identity = append(identity, fmt.Sprintf("the %s group among its groups (gid %d)", dataUser, gid))
+	}
+	// What can be locked: the shell, which is what login runs — the
+	// paths known to refuse a login, not a name (a copy of bash at
+	// /tmp/nologin is a login shell) — and the home.
+	switch acct.shell {
+	case "/usr/sbin/nologin", "/sbin/nologin", "/bin/false", "/usr/bin/false":
+	case "": // no shell set: login gives /bin/sh
+		lockable = append(lockable, "a login shell (none set, which is /bin/sh)")
+	default:
+		lockable = append(lockable, fmt.Sprintf("a login shell (%s, not one of /usr/sbin/nologin, /sbin/nologin, /bin/false, /usr/bin/false)", record.Text(acct.shell)))
+	}
+	// /nonexistent is the home setup gives; a directory of that name is
+	// nobody's home, and refusing it would refuse setup's own account.
+	if acct.home != "/nonexistent" && homeExists(acct.home) {
+		lockable = append(lockable, fmt.Sprintf("a home directory that exists (%s)", record.Text(acct.home)))
+	}
+	if len(identity)+len(lockable) == 0 {
+		return nil
+	}
+	// The remedy that fits the fault: locking mends the shell and the
+	// home, and nothing of who the account is.
+	const lock = "lock it (usermod --shell /usr/sbin/nologin --home /nonexistent " + backupUser + ")"
+	remake := "remove it (userdel " + backupUser + ") and make it as setup would (" + useraddArgv() + ")"
+	var remedy string
+	switch {
+	case len(identity) == 0:
+		remedy = lock + ", or " + remake
+	case len(lockable) == 0:
+		remedy = remake + "; nothing short of that changes who the account is"
+	default:
+		remedy = remake + ", which mends all of it; to " + lock + " would mend the shell and the home alone"
+	}
+	return fmt.Errorf("the %s account exists with %s: every restic unit runs as it, with its groups, and whoever can log in as it — or is it — can read the repository credential from restic's environment; %s",
+		backupUser, strings.Join(append(identity, lockable...), " and "), remedy)
+}
+
+// AccountReady is accountReady for the `account` command: what the
+// package's postinstall asks, so that its warning is setup's own words,
+// and what an administrator asks after mending the account.
+func AccountReady() error { return accountReady() }
+
+// accountReady is what a run, a restore and a drill ask of the account
+// restic runs as, before any unit: that it is there, and that nobody
+// else can be it — what setup asks of one that exists, held at every
+// run, since it is the run that puts the credential in that account's
+// environment. Not there: a box with a credential file written by
+// hand and no account, whose units would end 217/USER.
+func accountReady() error {
+	acct, err := account(backupUser)
+	if err != nil {
+		return err
+	}
+	if !acct.exists {
+		return fmt.Errorf("the %s account is not there: sudo hotserve-backup setup <repository> makes it (%s)", backupUser, useraddArgv())
+	}
+	return accountUsable(acct)
+}
+
+// programs are what the units run, and where. A unit whose command is
+// not there ends 203/EXEC, which says nothing of what to install: setup
+// and a run each refuse first, in the same words.
+func programsInstalled(cfg Config) error {
+	for _, p := range []struct{ name, path, fix string }{
+		{"restic", cfg.Restic, ": apt install restic"},
+		{"sqlite3", dump.Program(), ": apt install sqlite3"},
+		{"hotserve", plan.Program(), ""},
+		{"hotserve-backup", cfg.Self, ", where the units run it"},
+	} {
+		if !haveProgram(p.path) {
+			return fmt.Errorf("%s is not installed at %s%s", p.name, p.path, p.fix)
+		}
+	}
+	return nil
+}
 
 // errByHand marks a backend the run can use and this command does not
 // set up: the file is written by hand.
@@ -230,15 +460,8 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 	if err := repositoryValue(o.Repository); err != nil {
 		return nil, err
 	}
-	for _, p := range []struct{ name, path, fix string }{
-		{"restic", cfg.Restic, ": apt install restic"},
-		{"sqlite3", dump.Program(), ": apt install sqlite3"},
-		{"hotserve", plan.Program(), ""},
-		{"hotserve-backup", cfg.Self, ", where the units run it"},
-	} {
-		if !haveProgram(p.path) {
-			return nil, fmt.Errorf("%s is not installed at %s%s", p.name, p.path, p.fix)
-		}
+	if err := programsInstalled(cfg); err != nil {
+		return nil, err
 	}
 	if v, err := r.ManagerVersion(ctx); err != nil {
 		return nil, err
@@ -246,7 +469,15 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 		return nil, fmt.Errorf("systemd 257 or later is needed (Debian 13's); this box has %d", v)
 	}
 	rep := &SetupReport{Account: "present"}
-	if !accountExists(backupUser) {
+	acct, err := account(backupUser)
+	if err != nil {
+		return nil, err
+	}
+	if acct.exists {
+		if err := accountUsable(acct); err != nil {
+			return nil, err
+		}
+	} else {
 		if err := makeAccount(); err != nil {
 			return nil, fmt.Errorf("making the %s account: %w", backupUser, err)
 		}
