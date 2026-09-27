@@ -9,7 +9,7 @@ go 1.26.1
 
 require (
 	github.com/caddyserver/caddy/v2 v2.11.4
-	github.com/darkweak/souin/plugins/caddy v1.7.8
+	github.com/darkweak/souin/plugins/caddy v1.7.9
 	github.com/darkweak/storages/otter/caddy v0.0.20
 	github.com/smallhoursorg/hotserve/liveswap v0.0.0-00010101000000-000000000000
 	github.com/smallhoursorg/hotserve/penaltybox v0.0.0-00010101000000-000000000000
@@ -45,9 +45,8 @@ require (
 	github.com/coreos/go-oidc/v3 v3.21.0 // indirect
 	github.com/coreos/go-systemd/v22 v22.7.0 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.7 // indirect
-	github.com/darkweak/go-esi v0.0.6 // indirect
-	github.com/darkweak/souin v1.7.8 // indirect
-	github.com/darkweak/storages/core v0.0.19 // indirect
+	github.com/darkweak/souin v1.7.9 // indirect
+	github.com/darkweak/storages/core v0.0.20 // indirect
 	github.com/darkweak/storages/otter v0.0.19 // indirect
 	github.com/dgraph-io/badger v1.6.2 // indirect
 	github.com/dgraph-io/badger/v2 v2.2007.4 // indirect
@@ -55,7 +54,7 @@ require (
 	github.com/dgryski/go-farm v0.0.0-20240924180020-3414d57e47da // indirect
 	github.com/dlclark/regexp2 v1.12.0 // indirect
 	github.com/dolthub/maphash v0.1.0 // indirect
-	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/gammazero/deque v0.2.1 // indirect
@@ -98,7 +97,7 @@ require (
 	github.com/mitchellh/reflectwalk v1.0.2 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pbnjay/memory v0.0.0-20210728143218-7b4eea64cf58 // indirect
-	github.com/pierrec/lz4/v4 v4.1.23 // indirect
+	github.com/pierrec/lz4/v4 v4.1.29 // indirect
 	github.com/pires/go-proxyproto v0.12.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pquerna/cachecontrol v0.2.0 // indirect
@@ -188,7 +187,7 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260803160001-6ac0973c030d // indirect
 	google.golang.org/grpc v1.83.2 // indirect
 	google.golang.org/grpc/cmd/protoc-gen-go-grpc v1.5.1 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
+	google.golang.org/protobuf v1.36.12 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	howett.net/plist v1.0.1 // indirect
 )
