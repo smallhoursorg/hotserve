@@ -743,8 +743,13 @@ hourly run. It needs no sudoers line.
   made-by-hotserve hotserve-backup`), which keeps the credential file.
   Hotserve's account is local as well as marked: the one in
   `/etc/passwd`, which only root writes, and the one the box resolves
-  by that name; a directory's account of that name (LDAP, sssd) is
-  refused, whatever its comment says; a Caddyfile a run
+  by that name, line for line; a directory's account of that name
+  (LDAP, sssd) answered first is refused, whatever its comment says. A
+  directory the box is joined to is otherwise trusted as root is (the
+  owner, 2026-09-27): its administrator can give any account of its own
+  the backup account's uid, and whoever holds that uid is the restic
+  process. No check on the box stops that; join backups' box only to a
+  directory you trust with its data; a Caddyfile a run
   could not plan from; another run, restore or drill under way. **A
   run, a restore and a drill ask the same of the account** before any
   unit — it is the run that puts the credential in that account's

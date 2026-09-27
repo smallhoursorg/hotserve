@@ -71,6 +71,7 @@ type box struct {
 	account                    bool     // whether the hotserve-backup account exists
 	comment                    string   // its comment: hotserve's mark, where hotserve made it
 	localComment               string   // its comment in /etc/passwd
+	nssLine, localLine         string   // the whole line the box resolves, and /etc/passwd's, where a row sets them
 	notLocal                   bool     // /etc/passwd holds no account of that name
 	madePrivate                []string // what was made private, in order
 	unmountedAt                []string // every unmount, in order, the probe's among them
@@ -117,12 +118,12 @@ func newBox(t *testing.T) *box {
 	b.account, b.comment, b.localComment, b.uid, b.gid = true, accountMark, accountMark, 995, 995
 	oldAccount, oldMake, oldLocal := account, makeAccount, localAccount
 	localAccount = func(context.Context, string) (passwd, error) {
-		return passwd{name: backupUser, comment: b.localComment, uid: b.uid, gid: b.gid, exists: b.account && !b.notLocal}, nil
+		return passwd{name: backupUser, comment: b.localComment, uid: b.uid, gid: b.gid, line: b.localLine, exists: b.account && !b.notLocal}, nil
 	}
 	t.Cleanup(func() { localAccount = oldLocal })
 	account = func(context.Context, string) (passwd, error) {
 		b.accountLookups++
-		return passwd{name: backupUser, comment: b.comment, uid: b.uid, gid: b.gid, exists: b.account}, nil
+		return passwd{name: backupUser, comment: b.comment, uid: b.uid, gid: b.gid, line: b.nssLine, exists: b.account}, nil
 	}
 	makeAccount = func() error {
 		b.accountsMade++

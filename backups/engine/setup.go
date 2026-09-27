@@ -179,12 +179,13 @@ func passwdLine(line, from string) (passwd, error) {
 	if uerr != nil || gerr != nil {
 		return passwd{}, fmt.Errorf("%s: not a passwd line: %s", from, record.Text(line))
 	}
-	return passwd{name: fields[0], uid: uid, gid: gid, comment: fields[4], exists: true}, nil
+	return passwd{line: line, name: fields[0], uid: uid, gid: gid, comment: fields[4], exists: true}, nil
 }
 
 // passwd is an account as getent gives it: its uid and gid, its
 // comment, and whether it is there at all.
 type passwd struct {
+	line     string // the whole line, as it was answered
 	name     string
 	uid, gid int
 	comment  string
@@ -222,9 +223,12 @@ func accountUsable(ctx context.Context, acct passwd) error {
 	case !local.exists:
 		return fmt.Errorf("the %s account this box resolves is not in /etc/passwd — a directory's, whose comment is its administrator's to write — so it is not one hotserve made: every restic unit runs as it; %s",
 			backupUser, remedy)
-	case local.uid != acct.uid || local.comment != acct.comment:
-		return fmt.Errorf("the %s account this box resolves is not the one in /etc/passwd (uid %d and %q, where /etc/passwd has uid %d and %q): another source answers for the name first, so it is not one hotserve made; %s",
-			backupUser, acct.uid, record.Text(acct.comment), local.uid, record.Text(local.comment), remedy)
+	case local.uid != acct.uid || local.comment != acct.comment || local.line != acct.line:
+		// The whole line, not the uid and the mark alone: a source asked
+		// before files can answer with both, and a shell or a home of
+		// its own (Copilot on #155).
+		return fmt.Errorf("the %s account this box resolves is not the one in /etc/passwd (%s, where /etc/passwd has %s): another source answers for the name first, so it is not one hotserve made; %s",
+			backupUser, record.Text(acct.line), record.Text(local.line), remedy)
 	}
 	return nil
 }

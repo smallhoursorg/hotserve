@@ -389,6 +389,13 @@ func TestOursIsTheLocalAccount(t *testing.T) {
 			}
 			b.t.Cleanup(func() { localAccount = old })
 		}, "is not the one in /etc/passwd"},
+		// The same uid and the same mark, and a login shell: the box
+		// resolves the directory's line, not /etc/passwd's (Copilot on
+		// #155). The whole line is held to the local one.
+		{"a directory's, with the mark and the uid, and a login shell", func(b *box) {
+			b.localLine = "hotserve-backup:x:995:995:made-by-hotserve:/nonexistent:/usr/sbin/nologin"
+			b.nssLine = "hotserve-backup:*:995:995:made-by-hotserve:/home/hotserve-backup:/bin/bash"
+		}, "is not the one in /etc/passwd"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b, m := setupBox(t)
