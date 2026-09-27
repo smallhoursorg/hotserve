@@ -127,7 +127,7 @@ func command(name string, args []string) error {
 		// What setup and every run ask of the account restic runs as,
 		// in their words; the package's postinstall asks it, and an
 		// administrator after mending the account.
-		if err := engine.AccountReady(); err != nil {
+		if err := engine.AccountReady(ctx); err != nil {
 			return err
 		}
 		fmt.Println("the hotserve-backup account is one setup and a run accept")

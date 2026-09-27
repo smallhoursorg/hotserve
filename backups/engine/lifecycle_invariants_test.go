@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/smallhoursorg/hotserve/backups/record"
+	"github.com/smallhoursorg/hotserve/backups/unit"
 )
 
 // The invariants of unit lifecycle across every command, as tables — the
@@ -189,6 +190,7 @@ func TestARunRefusesWhatSetupRefusesWithSetupsWords(t *testing.T) {
 		{"a login shell", func(b *box) { b.shell = "/bin/bash" }, "the hotserve-backup account exists with a login shell (/bin/bash, not one of /usr/sbin/nologin, /sbin/nologin, /bin/false, /usr/bin/false)"},
 		{"a shared uid", func(b *box) { b.holders = []string{"alice", "hotserve-backup"} }, "a uid shared with alice (995)"},
 		{"the hotserve group", func(b *box) { b.groups = []int{995, b.hotserveGid} }, "the hotserve group among its groups"},
+		{"a password", func(b *box) { b.shadow = "$y$j9T$abc" }, "a password that is not locked"},
 	} {
 		for _, cmd := range runDrillRestore {
 			t.Run(cmd.name+" without "+p.name, func(t *testing.T) {
@@ -245,6 +247,31 @@ func TestADrillStoppedWhileItWaitsIsNoVerdict(t *testing.T) {
 		t.Fatalf("the last drill's verdict was replaced by an interrupt: %+v", st.LastDrill)
 	}
 
+	// Stopped during the plan unit, the same: the plan that could not be
+	// read is the interrupt's doing, and no verdict either.
+	b = restoreBox(t)
+	must(t, os.MkdirAll(b.cfg.StateDir, 0o755))
+	must(t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), &record.Status{LastDrill: last, Apps: map[string]*record.App{}}))
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+	b.before = func(s unit.Spec) {
+		if strings.Contains(s.Name, "_plan_") {
+			cancel()
+		}
+	}
+	b.err["plan"] = context.Canceled
+	if _, err := Drill(ctx, b.cfg, b); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+	if !b.started("plan") {
+		t.Fatal("the plan unit never started: the row proves nothing")
+	}
+	st, err = record.Read(filepath.Join(b.cfg.StateDir, "status.json"))
+	must(t, err)
+	if st.LastDrill == nil || !st.LastDrill.Time.Equal(last.Time) || st.LastDrill.Detail != "" {
+		t.Fatalf("the last drill's verdict was replaced by an interrupt during the plan: %+v", st.LastDrill)
+	}
+
 	// A record that could not be read is said by the drill that could
 	// not begin, beside why it could not.
 	b = restoreBox(t)
@@ -288,11 +315,12 @@ func TestPostinstallMakesTheAccountAsSetupDoes(t *testing.T) {
 func TestAnAccountMadeWrongIsRefusedNotNormalised(t *testing.T) {
 	const (
 		lock   = "lock it (usermod --shell /usr/sbin/nologin --home /nonexistent hotserve-backup)"
+		locked = "lock it (usermod --lock --shell /usr/sbin/nologin --home /nonexistent hotserve-backup)"
 		remake = "remove it (userdel hotserve-backup) and make it as setup would"
 		shells = ", not one of /usr/sbin/nologin, /sbin/nologin, /bin/false, /usr/bin/false)"
 	)
 	me := 1000 // the hotserve data user's uid, and the gid of the group named hotserve
-	ok := acct{shell: "/usr/sbin/nologin", home: "/nonexistent", uid: 995, gid: 995}
+	ok := acct{shell: "/usr/sbin/nologin", home: "/nonexistent", uid: 995, gid: 995, passwordField: "x", shadow: "!"}
 	with := func(f func(a *acct)) acct { a := ok; f(&a); return a }
 	for _, tc := range []struct {
 		name    string
@@ -317,6 +345,22 @@ func TestAnAccountMadeWrongIsRefusedNotNormalised(t *testing.T) {
 		{"no shell at all, which login reads as /bin/sh", with(func(a *acct) { a.shell = "" }), []string{"a login shell (none set, which is /bin/sh)"}, lock},
 		{"a home that exists", with(func(a *acct) { a.home, a.homeThere = "/home/hotserve-backup", true }), []string{"a home directory that exists (/home/hotserve-backup)"}, lock},
 		{"both", with(func(a *acct) { a.shell, a.home, a.homeThere = "/bin/sh", "/var/lib/hotserve-backup", true }), []string{"a login shell (/bin/sh, not one of", "a home directory that exists (/var/lib/hotserve-backup)"}, lock},
+
+		// A password: the shell refuses whoever logs in with it, and an
+		// sshd that serves sftp itself runs no shell [M70]. Locked is
+		// what useradd --system leaves, and what is asked for.
+		{"a password locked, as useradd leaves it", with(func(a *acct) { a.shadow = "!" }), nil, ""},
+		{"a password set and then locked", with(func(a *acct) { a.shadow = "!$y$j9T$abc" }), nil, ""},
+		{"no login by password", with(func(a *acct) { a.shadow = "*" }), nil, ""},
+		{"no shadow entry: nothing to log in with", with(func(a *acct) { a.noShadow = true }), nil, ""},
+		// A directory's account: its passwd line holds the mark, and the
+		// password, if it has one, is the directory's to know.
+		{"a mark in the passwd line itself", with(func(a *acct) { a.passwordField = "*"; a.shadow = "$y$never-asked-for" }), nil, ""},
+		{"a password", with(func(a *acct) { a.shadow = "$y$j9T$abc" }), []string{"a password that is not locked"}, locked},
+		{"an empty password", with(func(a *acct) { a.shadow = "" }), []string{"no password at all, so that anyone logs in as it"}, locked},
+		{"a password in the passwd line itself", with(func(a *acct) { a.passwordField = "$1$old" }), []string{"a password that is not locked"}, locked},
+		{"an empty password field in the passwd line", with(func(a *acct) { a.passwordField = "" }), []string{"no password at all, so that anyone logs in as it"}, locked},
+		{"a password and a login shell", with(func(a *acct) { a.shadow, a.shell = "$y$j9T$abc", "/bin/bash" }), []string{"a password that is not locked", "a login shell (/bin/bash"}, locked},
 
 		// What no usermod of the shell mends: who the account is. It is
 		// what every restic unit runs as, User= by name, and
@@ -345,6 +389,7 @@ func TestAnAccountMadeWrongIsRefusedNotNormalised(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			b, m := setupBox(t)
 			b.shell, b.home, b.homeThere, b.uid, b.gid = tc.a.shell, tc.a.home, tc.a.homeThere, tc.a.uid, tc.a.gid
+			b.passwordField, b.shadow, b.noShadow = tc.a.passwordField, tc.a.shadow, tc.a.noShadow
 			if tc.a.holders != nil {
 				b.holders = tc.a.holders
 			}
@@ -398,4 +443,8 @@ type acct struct {
 	holders     []string
 	groups      []int
 	dataGid     int // the hotserve user's primary gid, where it is not the hotserve group's
+	// The second field of its passwd line, its password as the shadow
+	// database holds it, and whether that database holds it at all.
+	passwordField, shadow string
+	noShadow              bool
 }

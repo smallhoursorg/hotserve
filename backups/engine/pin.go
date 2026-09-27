@@ -61,6 +61,21 @@ var (
 
 func (p pin) close() { _ = unix.Close(p.fd) }
 
+// identity is which file is pinned: its inode and whose it is. Read
+// from the descriptor, so of the very file that is bound.
+type identity struct {
+	inode    uint64
+	uid, gid uint32
+}
+
+func (p pin) identity() (identity, error) {
+	var st unix.Stat_t
+	if err := unix.Fstat(p.fd, &st); err != nil {
+		return identity{}, err
+	}
+	return identity{inode: st.Ino, uid: st.Uid, gid: st.Gid}, nil
+}
+
 // owner is the uid that owns what is pinned, or -1.
 func (p pin) owner() int {
 	var st unix.Stat_t

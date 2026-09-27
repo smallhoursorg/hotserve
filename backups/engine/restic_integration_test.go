@@ -68,6 +68,97 @@ func TestIntegrationResticLsOfADirectoryIsNotRecursive(t *testing.T) {
 	}
 }
 
+// verify holds a files item in the snapshot to the file that was given
+// to the upload, and leans on two things for it [M63]: restic's listing
+// says which file a node is — its inode, its uid, its gid — and what a
+// bind mount shows is the bound file's own, so that what the pin's
+// fstat says here is what restic says from inside the unit's view. A
+// bare mount point in its place is another inode. If a later restic
+// stops printing the inode, or prints another, every files item would
+// be refused: this is what says so first.
+func TestIntegrationResticLsSaysWhichFileANodeIs(t *testing.T) {
+	const restic = "/usr/bin/restic"
+	if _, err := os.Stat(restic); err != nil {
+		t.Fatalf("%s is not installed in the integration image: %v", restic, err)
+	}
+	if os.Getuid() != 0 {
+		t.Skip("a bind mount is root's to make")
+	}
+	base := t.TempDir()
+	shared := filepath.Join(base, "shared")
+	must(t, os.MkdirAll(filepath.Join(shared, "uploads"), 0o755))
+	must(t, os.WriteFile(filepath.Join(shared, "uploads", "a.png"), []byte("pic"), 0o644))
+	must(t, os.MkdirAll(filepath.Join(shared, "empty"), 0o755))
+	// Not root's: what is given is told from a bare mount point by its
+	// owner as well as by its inode.
+	for _, p := range []string{"uploads", "uploads/a.png", "empty"} {
+		must(t, os.Chown(filepath.Join(shared, p), 4242, 4243))
+	}
+	view := filepath.Join(base, "backup", "blog", "files")
+	must(t, os.MkdirAll(view, 0o755))
+	root, err := pinRoot(shared)
+	must(t, err)
+	defer root.close()
+	given := map[string]identity{}
+	for _, item := range []string{"uploads", "empty", "uploads/a.png"} {
+		p, err := root.beneath(item)
+		must(t, err)
+		defer p.close()
+		name := strings.ReplaceAll(item, "/", "-")
+		unmount, err := p.mountAt(filepath.Join(view, name))
+		must(t, err)
+		defer unmount()
+		given["/backup/blog/files/"+name], err = p.identity()
+		must(t, err)
+	}
+	// And what the defect shows the upload: a directory of the item's
+	// name that is no mount of anything.
+	must(t, os.Mkdir(filepath.Join(view, "bare"), 0o700))
+
+	env := append(os.Environ(), "RESTIC_PASSWORD=pw", "RESTIC_REPOSITORY="+filepath.Join(base, "repo"), "RESTIC_CACHE_DIR="+filepath.Join(base, "cache"))
+	run := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command(restic, args...)
+		cmd.Env, cmd.Dir = env, base
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("restic %v: %v", args, err)
+		}
+		return string(out)
+	}
+	run("init", "-q")
+	id := regexp.MustCompile(`"snapshot_id":"([0-9a-f]{64})"`).FindStringSubmatch(run("backup", "--quiet", "--json", "backup/blog"))
+	if id == nil {
+		t.Fatal("no snapshot id")
+	}
+	listing := filepath.Join(base, "ls.json")
+	must(t, os.WriteFile(listing, []byte(run("ls", "--json", "--no-lock", "--", id[1], "/backup/blog/files")), 0o600))
+	wanted := map[string]bool{"/backup/blog/files/bare": true}
+	for p := range given {
+		wanted[p] = true
+	}
+	nodes, err := lsNodes(listing, wanted)
+	must(t, err)
+	for p, g := range given {
+		n, ok := nodes[p]
+		if !ok || n.Inode == nil {
+			t.Fatalf("%s: the listing does not say which file it is: %+v (in it: %v)", p, n, ok)
+		}
+		if *n.Inode != g.inode || n.UID != g.uid || n.GID != g.gid || g.uid != 4242 || g.gid != 4243 {
+			t.Errorf("%s: the listing says inode %d, owner %d:%d; what was bound is inode %d, owner %d:%d", p, *n.Inode, n.UID, n.GID, g.inode, g.uid, g.gid)
+		}
+	}
+	bare, ok := nodes["/backup/blog/files/bare"]
+	if !ok || bare.Inode == nil {
+		t.Fatalf("the bare directory: %+v (in the listing: %v)", bare, ok)
+	}
+	for p, g := range given {
+		if *bare.Inode == g.inode && bare.UID == g.uid && bare.GID == g.gid {
+			t.Errorf("a bare directory is told from %s by nothing: inode %d, owner %d:%d", p, *bare.Inode, bare.UID, bare.GID)
+		}
+	}
+}
+
 // A fetch's verdict leans on three things restic 0.18 does. Asked for
 // `<id>:<path>` where the snapshot has no such path, it exits 1 — where
 // `--include`, matching nothing, exits 0 having restored nothing, which

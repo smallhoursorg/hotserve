@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -81,47 +83,68 @@ var (
 	// so NSS, where os/user reads /etc/passwd alone and knows no shell:
 	// its shell and home, and whether it is there at all. getent's
 	// argv is constant; its exit 2 is "not found".
-	account = func(name string) (passwd, error) {
-		out, err := exec.Command(getent, "passwd", name).Output() //nolint:gosec // a constant program; name is backupUser, a constant
-		var exit *exec.ExitError
-		if errors.As(err, &exit) && exit.ExitCode() == 2 {
+	account = func(ctx context.Context, name string) (passwd, error) {
+		out, exit, err := lookup(ctx, getent, "passwd", name)
+		if err != nil {
+			return passwd{}, err
+		}
+		switch exit {
+		case 0:
+			return passwdLine(strings.TrimRight(string(out), "\n"), getent+" passwd "+name)
+		case 2:
 			return passwd{}, nil
 		}
-		if err != nil {
-			return passwd{}, fmt.Errorf("%s passwd %s: %w", getent, name, err)
-		}
-		fields := strings.Split(strings.TrimRight(string(out), "\n"), ":")
-		if len(fields) != 7 {
-			return passwd{}, fmt.Errorf("%s passwd %s: not a passwd line: %s", getent, name, record.Text(string(out)))
-		}
-		uid, uerr := strconv.Atoi(fields[2])
-		gid, gerr := strconv.Atoi(fields[3])
-		if uerr != nil || gerr != nil {
-			return passwd{}, fmt.Errorf("%s passwd %s: not a passwd line: %s", getent, name, record.Text(string(out)))
-		}
-		return passwd{uid: uid, gid: gid, home: fields[5], shell: fields[6], exists: true}, nil
+		return passwd{}, fmt.Errorf("%s passwd %s: exit status %d", getent, name, exit)
 	}
-	// holders is every account that holds a uid, from the whole passwd
-	// database as getent enumerates it — where NSS refuses to enumerate
-	// (exit 3), the one entry the uid looks up. Authorization is by
-	// uid: whoever else holds it is the restic process.
-	holders = func(uid int) ([]string, error) {
-		out, err := exec.Command(getent, "passwd").Output()
-		var exit *exec.ExitError
-		if errors.As(err, &exit) && exit.ExitCode() == 3 {
-			out, err = exec.Command(getent, "passwd", strconv.Itoa(uid)).Output() //nolint:gosec // as above; the uid is a number
-			if errors.As(err, &exit) && exit.ExitCode() == 2 {
-				return nil, nil
-			}
-		}
+	// holders is every account that holds a uid. Authorization is by
+	// uid: whoever else holds it is the restic process. Two lookups,
+	// since neither finds what the other does: the passwd database as
+	// getent enumerates it, which finds every holder a source lists —
+	// two in one file — and nothing of a directory that does not
+	// enumerate, which says so by leaving its accounts out, exit 0; and
+	// each source of the passwd line asked for the uid, which a
+	// directory answers whether it enumerates or not, with the one
+	// account it has there [M65]. A source that does not answer — its
+	// daemon down, its module not installed — exits 2, as absence does:
+	// what it holds is not known, and nothing local can know it.
+	holders = func(ctx context.Context, uid int) ([]string, error) {
+		out, exit, err := lookup(ctx, getent, "passwd")
 		if err != nil {
-			return nil, fmt.Errorf("%s passwd: %w", getent, err)
+			return nil, err
+		}
+		if exit != 0 {
+			return nil, fmt.Errorf("%s passwd: exit status %d", getent, exit)
 		}
 		var names []string
 		for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
 			fields := strings.Split(line, ":")
-			if len(fields) == 7 && fields[2] == strconv.Itoa(uid) {
+			if len(fields) == 7 && fields[2] == strconv.Itoa(uid) && !slices.Contains(names, fields[0]) {
 				names = append(names, fields[0])
+			}
+		}
+		sources, err := passwdSources()
+		if err != nil {
+			return nil, err
+		}
+		for _, source := range sources {
+			argv := []string{getent, "-s", source, "passwd", strconv.Itoa(uid)}
+			out, exit, err := lookup(ctx, argv...)
+			if err != nil {
+				return nil, err
+			}
+			switch exit {
+			case 0:
+			case 2:
+				continue
+			default:
+				return nil, fmt.Errorf("%s: exit status %d", strings.Join(argv, " "), exit)
+			}
+			held, err := passwdLine(strings.TrimRight(string(out), "\n"), strings.Join(argv, " "))
+			if err != nil {
+				return nil, err
+			}
+			if !slices.Contains(names, held.name) {
+				names = append(names, held.name)
 			}
 		}
 		return names, nil
@@ -129,14 +152,17 @@ var (
 	// groupNamed is a group by its name, as getent resolves it: the
 	// hotserve group is the one the apps' env files and directories
 	// belong to, whatever the hotserve user's primary group is.
-	groupNamed = func(name string) (gid int, exists bool, err error) {
-		out, err := exec.Command(getent, "group", name).Output() //nolint:gosec // a constant program; name is a constant
-		var exit *exec.ExitError
-		if errors.As(err, &exit) && exit.ExitCode() == 2 {
-			return 0, false, nil
-		}
+	groupNamed = func(ctx context.Context, name string) (gid int, exists bool, err error) {
+		out, exit, err := lookup(ctx, getent, "group", name)
 		if err != nil {
-			return 0, false, fmt.Errorf("%s group %s: %w", getent, name, err)
+			return 0, false, err
+		}
+		switch exit {
+		case 0:
+		case 2:
+			return 0, false, nil
+		default:
+			return 0, false, fmt.Errorf("%s group %s: exit status %d", getent, name, exit)
 		}
 		fields := strings.Split(strings.TrimRight(string(out), "\n"), ":")
 		if len(fields) < 3 {
@@ -151,18 +177,26 @@ var (
 	// groupsOf is every group the account is in, its primary among
 	// them, as id(1) resolves them: what the manager gives a unit that
 	// runs as the account.
-	groupsOf = func(name string) ([]int, error) {
-		out, err := exec.Command("/usr/bin/id", "-G", name).Output() //nolint:gosec // a constant program; name is backupUser, a constant
+	groupsOf = func(ctx context.Context, name string) ([]int, error) {
+		out, exit, err := lookup(ctx, idProgram, "-G", name)
 		if err != nil {
-			return nil, fmt.Errorf("/usr/bin/id -G %s: %w", name, err)
+			return nil, err
+		}
+		if exit != 0 {
+			return nil, fmt.Errorf("%s -G %s: exit status %d", idProgram, name, exit)
 		}
 		var gids []int
 		for _, f := range strings.Fields(string(out)) {
 			g, err := strconv.Atoi(f)
 			if err != nil {
-				return nil, fmt.Errorf("/usr/bin/id -G %s: not a gid: %s", name, record.Text(f))
+				return nil, fmt.Errorf("%s -G %s: not a gid: %s", idProgram, name, record.Text(f))
 			}
 			gids = append(gids, g)
+		}
+		// An account is in its own group at the least: no group is no
+		// answer.
+		if len(gids) == 0 {
+			return nil, fmt.Errorf("%s -G %s: no group in what it said", idProgram, name)
 		}
 		return gids, nil
 	}
@@ -181,11 +215,167 @@ var (
 // runs (TestPostinstallMakesTheAccountAsSetupDoes).
 var useradd = []string{"/usr/sbin/useradd", "--system", "--no-create-home", "--home-dir", "/nonexistent", "--shell", "/usr/sbin/nologin", backupUser}
 
-const getent = "/usr/bin/getent"
+const (
+	getent    = "/usr/bin/getent"
+	idProgram = "/usr/bin/id"
+)
+
+// lookupClock bounds one lookup in the account databases. They answer
+// at once from a file, and from a directory in the time its own
+// timeouts give it; a run holds the lock while it asks, so a directory
+// that never answers is given up on, and said.
+var lookupClock = 10 * time.Second
+
+// lookup runs one program of the account databases — getent, id — with
+// a constant argv, and returns what it printed and its exit status. The
+// command ends with the context, and at the bound: an error is a
+// command that could not be run or did not answer, never an exit
+// status, which is the caller's to read.
+var lookup = func(ctx context.Context, argv ...string) (out []byte, exit int, err error) {
+	bounded, cancel := context.WithTimeout(ctx, lookupClock)
+	defer cancel()
+	cmd := exec.CommandContext(bounded, argv[0], argv[1:]...) //nolint:gosec // a constant program; the arguments are constants, a uid, or a source's name that matched sourceRe
+	// What the command leaves behind holding its pipe is not waited for.
+	cmd.WaitDelay = time.Second
+	out, err = cmd.Output()
+	var ended *exec.ExitError
+	switch {
+	case err == nil:
+		return out, 0, nil
+	case ctx.Err() != nil:
+		return nil, 0, fmt.Errorf("%s: %w", strings.Join(argv, " "), ctx.Err())
+	case bounded.Err() != nil:
+		return nil, 0, fmt.Errorf("%s did not answer within %s", strings.Join(argv, " "), lookupClock)
+	case errors.As(err, &ended) && ended.ExitCode() >= 0:
+		return out, ended.ExitCode(), nil
+	}
+	return nil, 0, fmt.Errorf("%s: %w", strings.Join(argv, " "), err)
+}
+
+// nsswitchFile is where the box says which sources answer for the
+// account databases.
+var nsswitchFile = "/etc/nsswitch.conf"
+
+// passwdSources is the sources of the passwd database, in the order
+// the box asks them. No file is glibc's default, files; a file that is
+// there and cannot be read leaves the sources unknown, and refuses.
+func passwdSources() ([]string, error) {
+	raw, err := os.ReadFile(nsswitchFile)
+	if errors.Is(err, fs.ErrNotExist) {
+		return []string{"files"}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("the sources of the passwd database could not be read: %w", err)
+	}
+	sources, err := sourcesOf(string(raw))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", nsswitchFile, err)
+	}
+	return sources, nil
+}
+
+// sourceRe is a source's name: what becomes libnss_<name>.so, and an
+// argument of getent here. The file is root's; a name that could be
+// read as an option is refused all the same.
+var sourceRe = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
+
+// sourcesOf reads the passwd line out of an nsswitch.conf as glibc
+// does: the last line for the database counts, "#" begins a comment,
+// what stands in brackets is an action on the source before it and no
+// source, and a source named twice is one. No line, or none with a
+// source on it, is files.
+func sourcesOf(conf string) ([]string, error) {
+	var sources []string
+	for _, line := range strings.Split(conf, "\n") {
+		line, _, _ = strings.Cut(line, "#")
+		database, rest, ok := strings.Cut(line, ":")
+		if !ok || strings.TrimSpace(database) != "passwd" {
+			continue
+		}
+		sources = nil
+		for rest = strings.TrimSpace(rest); rest != ""; rest = strings.TrimSpace(rest) {
+			if strings.HasPrefix(rest, "[") {
+				_, after, closed := strings.Cut(rest, "]")
+				if !closed {
+					return nil, fmt.Errorf("the passwd line holds an action that is never closed: %s", record.Text(rest))
+				}
+				rest = after
+				continue
+			}
+			source := rest
+			if i := strings.IndexAny(rest, " \t["); i >= 0 {
+				source = rest[:i]
+			}
+			rest = rest[len(source):]
+			if !sourceRe.MatchString(source) {
+				return nil, fmt.Errorf("the passwd line names a source that is no name: %s", record.Text(source))
+			}
+			if !slices.Contains(sources, source) {
+				sources = append(sources, source)
+			}
+		}
+	}
+	if len(sources) == 0 {
+		return []string{"files"}, nil
+	}
+	return sources, nil
+}
+
+// errNeedsRoot is a lookup that is root's alone to make.
+var errNeedsRoot = errors.New("root's to read")
+
+// isRoot is whether this command is root's: a variable so that a test
+// can be either.
+var isRoot = func() bool { return os.Geteuid() == 0 }
+
+// shadowed is the account's password as the shadow database holds it:
+// the second field of its entry, and whether there is an entry. The
+// database is root's to read, and getent asked by anyone else answers
+// "not found" for an entry that is there — so anyone else gets
+// errNeedsRoot, never that the account has no password.
+var shadowed = func(ctx context.Context, name string) (field string, found bool, err error) {
+	if !isRoot() {
+		return "", false, errNeedsRoot
+	}
+	out, exit, err := lookup(ctx, getent, "shadow", name)
+	if err != nil {
+		return "", false, err
+	}
+	switch exit {
+	case 0:
+	case 2:
+		return "", false, nil
+	default:
+		return "", false, fmt.Errorf("%s shadow %s: exit status %d", getent, name, exit)
+	}
+	fields := strings.Split(strings.TrimRight(string(out), "\n"), ":")
+	if len(fields) < 2 {
+		// Never shown: what is on the line may be a password's hash.
+		return "", false, fmt.Errorf("%s shadow %s: not a shadow line", getent, name)
+	}
+	return fields[1], true, nil
+}
+
+// passwdLine reads one line of the passwd database, as from says it
+// was asked for.
+func passwdLine(line, from string) (passwd, error) {
+	fields := strings.Split(line, ":")
+	if len(fields) != 7 {
+		return passwd{}, fmt.Errorf("%s: not a passwd line: %s", from, record.Text(line))
+	}
+	uid, uerr := strconv.Atoi(fields[2])
+	gid, gerr := strconv.Atoi(fields[3])
+	if uerr != nil || gerr != nil {
+		return passwd{}, fmt.Errorf("%s: not a passwd line: %s", from, record.Text(line))
+	}
+	return passwd{name: fields[0], password: fields[1], uid: uid, gid: gid, home: fields[5], shell: fields[6], exists: true}, nil
+}
 
 // passwd is an account as getent gives it: its uid and gid, its home
 // and its shell, and whether it is there at all.
 type passwd struct {
+	name        string
+	password    string // the second field: "x" where the shadow database holds it
 	uid, gid    int
 	home, shell string
 	exists      bool
@@ -194,12 +384,16 @@ type passwd struct {
 func useraddArgv() string { return strings.Join(useradd, " ") }
 
 // accountUsable is what setup asks of an account that is already there:
-// a shell nobody can log in with, and no home that exists. Every restic
+// a shell nobody can log in with, no password, and no home that exists
+// — and that nobody else is it. It is a guard against an account of
+// this name that is on the box for another reason, which someone who is
+// not root has been given a way to use: setup would otherwise take it
+// by its name, and hand that someone the repository. Every restic
 // unit runs as it, and whoever can log in as it can read the repository
 // credential from a running restic's environment. An account made
 // wrongly is refused, never changed: an administrator may have meant
 // it, and the message says the two ways to mend it.
-func accountUsable(acct passwd) error {
+func accountUsable(ctx context.Context, acct passwd) error {
 	// Two kinds of fault, mended differently. Who the account is: it
 	// is what every restic unit runs as, User= by name, and
 	// authorization is by uid — root's is root, and any other account
@@ -217,7 +411,7 @@ func accountUsable(acct passwd) error {
 	if acct.gid == 0 {
 		identity = append(identity, "gid 0 (root)")
 	}
-	names, err := holders(acct.uid)
+	names, err := holders(ctx, acct.uid)
 	if err != nil {
 		return err
 	}
@@ -230,7 +424,7 @@ func accountUsable(acct passwd) error {
 	if len(others) > 0 && acct.uid != 0 {
 		identity = append(identity, fmt.Sprintf("a uid shared with %s (%d)", strings.Join(others, ", "), acct.uid))
 	}
-	groups, err := groupsOf(backupUser)
+	groups, err := groupsOf(ctx, backupUser)
 	if err != nil {
 		return err
 	}
@@ -240,16 +434,49 @@ func accountUsable(acct passwd) error {
 	// The group named hotserve — what the apps' env files and their
 	// directories belong to — not the hotserve user's primary group,
 	// which on a box where that account was made by hand is another.
-	gid, there, err := groupNamed(dataUser)
+	gid, there, err := groupNamed(ctx, dataUser)
 	if err != nil {
 		return err
 	}
 	if there && gid != 0 && (acct.gid == gid || slices.Contains(groups, gid)) {
 		identity = append(identity, fmt.Sprintf("the %s group among its groups (gid %d)", dataUser, gid))
 	}
-	// What can be locked: the shell, which is what login runs — the
-	// paths known to refuse a login, not a name (a copy of bash at
-	// /tmp/nologin is a login shell) — and the home.
+	// What can be locked. The password: the shell refuses whoever logs
+	// in with one, and an sshd that serves sftp itself runs no shell —
+	// with the password it read a unit's environment out of /proc
+	// [M70]. "x" says the shadow database holds it, and no entry there
+	// is nothing to log in with; any other field is the password
+	// itself, as a directory's "*" is. Locked is "!" or "*" first,
+	// which is how useradd --system leaves it.
+	//
+	// Asked by someone who is not root, the shadow database cannot be
+	// read: what else is wrong is said all the same, with that beside
+	// it, and an account with nothing else wrong is not called right.
+	const unseen = "whether it has a password is root's to read, and was not looked at: sudo hotserve-backup account"
+	password, looked := acct.password, true
+	if password == "x" {
+		field, found, err := shadowed(ctx, backupUser)
+		switch {
+		case errors.Is(err, errNeedsRoot):
+			password, looked = "!", false
+		case err != nil:
+			return err
+		case !found:
+			password = "!"
+		default:
+			password = field
+		}
+	}
+	var withPassword bool
+	switch {
+	case password == "":
+		lockable, withPassword = append(lockable, "no password at all, so that anyone logs in as it"), true
+	case !strings.HasPrefix(password, "!") && !strings.HasPrefix(password, "*"):
+		lockable, withPassword = append(lockable, "a password that is not locked"), true
+	}
+	// The shell, which is what login runs — the paths known to refuse a
+	// login, not a name (a copy of bash at /tmp/nologin is a login
+	// shell) — and the home.
 	switch acct.shell {
 	case "/usr/sbin/nologin", "/sbin/nologin", "/bin/false", "/usr/bin/false":
 	case "": // no shell set: login gives /bin/sh
@@ -263,11 +490,17 @@ func accountUsable(acct passwd) error {
 		lockable = append(lockable, fmt.Sprintf("a home directory that exists (%s)", record.Text(acct.home)))
 	}
 	if len(identity)+len(lockable) == 0 {
+		if !looked {
+			return fmt.Errorf("the %s account has nothing wrong that can be seen without root; %s", backupUser, unseen)
+		}
 		return nil
 	}
 	// The remedy that fits the fault: locking mends the shell and the
 	// home, and nothing of who the account is.
-	const lock = "lock it (usermod --shell /usr/sbin/nologin --home /nonexistent " + backupUser + ")"
+	lock := "lock it (usermod --shell /usr/sbin/nologin --home /nonexistent " + backupUser + ")"
+	if withPassword {
+		lock = "lock it (usermod --lock --shell /usr/sbin/nologin --home /nonexistent " + backupUser + ")"
+	}
 	remake := "remove it (userdel " + backupUser + ") and make it as setup would (" + useraddArgv() + ")"
 	var remedy string
 	switch {
@@ -278,6 +511,9 @@ func accountUsable(acct passwd) error {
 	default:
 		remedy = remake + ", which mends all of it; to " + lock + " would mend the shell and the home alone"
 	}
+	if !looked {
+		remedy += "; " + unseen
+	}
 	return fmt.Errorf("the %s account exists with %s: every restic unit runs as it, with its groups, and whoever can log in as it — or is it — can read the repository credential from restic's environment; %s",
 		backupUser, strings.Join(append(identity, lockable...), " and "), remedy)
 }
@@ -285,7 +521,7 @@ func accountUsable(acct passwd) error {
 // AccountReady is accountReady for the `account` command: what the
 // package's postinstall asks, so that its warning is setup's own words,
 // and what an administrator asks after mending the account.
-func AccountReady() error { return accountReady() }
+func AccountReady(ctx context.Context) error { return accountReady(ctx) }
 
 // accountReady is what a run, a restore and a drill ask of the account
 // restic runs as, before any unit: that it is there, and that nobody
@@ -293,15 +529,15 @@ func AccountReady() error { return accountReady() }
 // run, since it is the run that puts the credential in that account's
 // environment. Not there: a box with a credential file written by
 // hand and no account, whose units would end 217/USER.
-func accountReady() error {
-	acct, err := account(backupUser)
+func accountReady(ctx context.Context) error {
+	acct, err := account(ctx, backupUser)
 	if err != nil {
 		return err
 	}
 	if !acct.exists {
 		return fmt.Errorf("the %s account is not there: sudo hotserve-backup setup <repository> makes it (%s)", backupUser, useraddArgv())
 	}
-	return accountUsable(acct)
+	return accountUsable(ctx, acct)
 }
 
 // programs are what the units run, and where. A unit whose command is
@@ -469,12 +705,12 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 		return nil, fmt.Errorf("systemd 257 or later is needed (Debian 13's); this box has %d", v)
 	}
 	rep := &SetupReport{Account: "present"}
-	acct, err := account(backupUser)
+	acct, err := account(ctx, backupUser)
 	if err != nil {
 		return nil, err
 	}
 	if acct.exists {
-		if err := accountUsable(acct); err != nil {
+		if err := accountUsable(ctx, acct); err != nil {
 			return nil, err
 		}
 	} else {

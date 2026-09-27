@@ -109,6 +109,9 @@ type run struct {
 	keepDir bool
 	// swept is what open removed of an interrupted setup's leavings.
 	swept []string
+	// given is which file each files item of the app under way is, by
+	// its path in the upload unit's view: what the snapshot is held to.
+	given map[string]identity
 }
 
 // preRestoreTag is on a snapshot a restore made of what it was about to
@@ -159,7 +162,7 @@ func begin(ctx context.Context, cfg Config, r Runner) (x *run, end func(), err e
 	if err := programsInstalled(cfg); err != nil {
 		return x, end, err
 	}
-	if err := accountReady(); err != nil {
+	if err := accountReady(ctx); err != nil {
 		return x, end, err
 	}
 	return x, end, nil
@@ -980,6 +983,7 @@ func (x *run) dump(ctx context.Context, app, shared, staging, declFile string, d
 func (x *run) view(app string, shared pin, staging, declFile string, decl *backupdecl.Config, rec *record.App) (binds []unit.Bind, masked []string, present int, unpin func()) {
 	base := "/backup/" + app
 	binds = []unit.Bind{{Source: staging, Dest: base + "/sqlite"}, {Source: declFile, Dest: base + "/plan.json"}}
+	x.given = map[string]identity{}
 	var undo []func()
 	unpin = func() {
 		for i := len(undo) - 1; i >= 0; i-- {
@@ -1010,6 +1014,13 @@ func (x *run) view(app string, shared pin, staging, declFile string, decl *backu
 			rec.Items = append(rec.Items, it)
 			continue
 		}
+		// Which file it is, for the snapshot to be held to.
+		given, err := item.identity()
+		if err != nil {
+			it.Detail = err.Error()
+			rec.Items = append(rec.Items, it)
+			continue
+		}
 		source, unmount, err := x.bound(item)
 		if err != nil {
 			it.Detail = err.Error()
@@ -1017,6 +1028,7 @@ func (x *run) view(app string, shared pin, staging, declFile string, decl *backu
 			continue
 		}
 		undo = append(undo, unmount)
+		x.given[path.Join(base, "files", p)] = given
 		it.OK = true // until the snapshot says otherwise
 		rec.Items = append(rec.Items, it)
 		present++
@@ -1033,10 +1045,22 @@ func (x *run) view(app string, shared pin, staging, declFile string, decl *backu
 }
 
 // dataOwner and backupOwner are the two accounts' ids; variables so a
-// test can run where the accounts do not exist.
+// test can run where the accounts do not exist. The backup account's
+// are what the account check was answered with, by the same lookup:
+// os/user reads /etc/passwd alone, and an account a directory holds
+// would pass the check and be unknown here.
 var (
 	dataOwner   = func() (uid, gid int, err error) { return ids(dataUser) }
-	backupOwner = func() (uid, gid int, err error) { return ids(backupUser) }
+	backupOwner = func(ctx context.Context) (uid, gid int, err error) {
+		acct, err := account(ctx, backupUser)
+		if err != nil {
+			return 0, 0, err
+		}
+		if !acct.exists {
+			return 0, 0, fmt.Errorf("the %s account is not there", backupUser)
+		}
+		return acct.uid, acct.gid, nil
+	}
 )
 
 func ids(name string) (uid, gid int, err error) {
@@ -1254,6 +1278,26 @@ func (x *run) verify(ctx context.Context, app, id string, rec *record.App) error
 				// It was a file or a directory when it was pinned, and
 				// the app's to replace since.
 				it.OK, it.Detail = false, fmt.Sprintf("in the snapshot it is a %s, not a file or a directory", record.Text(node.Type))
+			case it.Kind == "files":
+				// A node of the right name and kind is not yet the file
+				// that was given: shown a bare mount point in its place,
+				// restic uploads an empty directory of that name [M54].
+				// What was bound is the pinned file itself, and a bind
+				// mount shows its inode and its owner [M63].
+				given, pinned := x.given[itemPath(base, *it)]
+				what := "file"
+				if node.Type == "dir" {
+					what = "directory"
+				}
+				switch {
+				case !pinned:
+					it.OK, it.Detail = false, "which file was given to the backup is not known, so the snapshot cannot be held to it"
+				case node.Inode == nil:
+					it.OK, it.Detail = false, "the listing does not say which file it is, so the snapshot cannot be held to what was given"
+				case *node.Inode != given.inode || node.UID != given.uid || node.GID != given.gid:
+					it.OK, it.Detail = false, fmt.Sprintf("in the snapshot it is not the %s that was given to the backup: it is inode %d, owner %d:%d, and what was given is inode %d, owner %d:%d — the upload was shown something else in its place",
+						what, *node.Inode, node.UID, node.GID, given.inode, given.uid, given.gid)
+				}
 			}
 		}
 	}
@@ -1374,6 +1418,11 @@ func itemPath(base string, it record.Item) string {
 type lsNode struct {
 	Type string `json:"type"`
 	Size int64  `json:"size"`
+	// Which file it is, as restic found it in the unit's view: what a
+	// bind mount shows is the bound file's own inode and owner [M63].
+	Inode *uint64 `json:"inode"`
+	UID   uint32  `json:"uid"`
+	GID   uint32  `json:"gid"`
 }
 
 // lsNodes reads a listing a line at a time and keeps the nodes at the
