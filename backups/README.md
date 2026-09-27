@@ -200,8 +200,9 @@ run, and what the step is given.
 | unstage | `hotserve`, own user+PID namespaces | no | no | what was fetched, to remove it |
 | mkshared | `hotserve`, own user+PID namespaces | no | no | the liveswap root, to make `<app>/shared` on a rebuilt box |
 
-The run itself needs root — `CAP_SYS_ADMIN`, `CAP_DAC_READ_SEARCH` and
-`CAP_CHOWN` of it — and the host's own mount and PID namespaces: it
+The run itself needs root — `CAP_SYS_ADMIN`, `CAP_DAC_READ_SEARCH`,
+`CAP_CHOWN` and `CAP_FOWNER` of it, the unit file being the one list —
+and the host's own mount and PID namespaces: it
 makes bind mounts that the manager then has to see. Under the timer it
 is `hotserve-backup.service` ("On a fresh box"), which says so line by
 line.

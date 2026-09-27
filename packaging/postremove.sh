@@ -16,6 +16,10 @@
 #   app data) — and is named and kept.
 # - /var/cache/hotserve-backup, restic's cache, owned by the account and
 #   holding nothing of an app's, goes.
+# - /run/hotserve-backup is NOT touched: a run killed mid-way leaves
+#   an app's data bind-mounted under its run directory, and an rm -r
+#   there would remove the app's files through the mount. It is tmpfs,
+#   gone at boot, and the next run's sweep takes such mounts away.
 # - The hotserve-backup account stays (Debian policy: system accounts
 #   are never removed).
 set -e
@@ -34,10 +38,12 @@ purge)
 		# shellcheck disable=SC2086
 		deb-systemd-helper unmask $timers >/dev/null || true
 	fi
-	rm -rf /var/cache/hotserve-backup /run/hotserve-backup
+	rm -rf /var/cache/hotserve-backup
 	state=/var/lib/hotserve-backup
 	if [ -d "$state" ]; then
-		rm -f "$state/status.json" "$state"/status.json.aside-* "$state/repository-id" "$state/listing.err"
+		# The record, its asides, the id, the listing's stderr, and the
+		# temp file the record's writer leaves when killed mid-write.
+		rm -f "$state/status.json" "$state"/status.json.aside-* "$state"/.status-* "$state/repository-id" "$state/listing.err"
 		kept=""
 		for d in "$state/staging" "$state/restore"; do
 			[ -d "$d" ] || continue
@@ -46,7 +52,7 @@ purge)
 			for a in "$d"/*; do [ -d "$a" ] && rmdir "$a" 2>/dev/null || true; done
 			rmdir "$d" 2>/dev/null || kept="$kept $d"
 		done
-		rmdir "$state" 2>/dev/null || true
+		rmdir "$state" 2>/dev/null || kept="$kept $state"
 		if [ -n "$kept" ]; then
 			echo "hotserve: kept$kept: not empty — copies of an app's data a backup run or a restore left there; look, then remove them yourself" >&2
 		fi

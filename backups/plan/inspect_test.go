@@ -144,6 +144,10 @@ func TestAPlaceholderRootIsRefusedOnlyWhereABackupIsDeclared(t *testing.T) {
 		{"a root with no default, no backup declared", "# no app declares a backup\nroot {$ROOT_NO_DEFAULT}\n", "", ""},
 		{"a literal root, no backup declared", "# no app declares a backup\nroot /var/lib/liveswap\n", "", ""},
 		{"a literal root, a backup declared", "root /var/lib/liveswap\n", "", "/var/lib/liveswap"},
+		// A {env.NAME} root reaches the plan as written, no variable to
+		// try: refused for a backup's sake only.
+		{"an env root, a backup declared", "root {env.LIVESWAP_ROOT}\n", "placeholder", ""},
+		{"an env root, no backup declared", "# no app declares a backup\nroot {env.LIVESWAP_ROOT}\n", "", ""},
 		{"an import through a variable, no backup declared", "# no app declares a backup\nimport sites/{$ENV:prod}.caddy\n", "ENV", ""},
 		{"an empty glob, no backup declared", "# no app declares a backup\nimport nowhere/*.caddy\n", "matches no file", ""},
 	} {

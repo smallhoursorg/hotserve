@@ -180,11 +180,6 @@ func NewSystemRunner(ctx context.Context) (*Runner, error) {
 // Close releases the connection. Units are not stopped by it.
 func (r *Runner) Close() { r.conn.Close() }
 
-// ManagerVersion is the major version of the manager the Runner is
-// connected to: what setup checks before asking anyone for a secret,
-// since every property here is systemd 257's (PrivatePIDs= above all).
-// The property is a string the manager formats ("257.13-1~deb13u1");
-// only its leading number is read.
 // Active says whether a unit of the manager's — a timer, here — is
 // running: what setup asks before it says what runs next. A oneshot
 // whose command runs is "activating" to the manager and a ticking
@@ -199,6 +194,11 @@ func (r *Runner) Active(ctx context.Context, name string) (bool, error) {
 	return state == "active" || state == "activating", nil
 }
 
+// ManagerVersion is the major version of the manager the Runner is
+// connected to: what setup checks before asking anyone for a secret,
+// since every property here is systemd 257's (PrivatePIDs= above all).
+// The property is a string the manager formats ("257.13-1~deb13u1");
+// only its leading number is read.
 func (r *Runner) ManagerVersion(context.Context) (int, error) {
 	raw, err := r.conn.GetManagerProperty("Version")
 	if err != nil {

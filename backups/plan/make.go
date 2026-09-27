@@ -174,6 +174,13 @@ func Inspect(ctx context.Context, caddyfile, configDir string) (*Inspection, err
 			return nil, fmt.Errorf("%w%s", err, hint)
 		}
 	}
+	// A plan with no app declaring a backup has no root: a run backs
+	// nothing up, and nothing downstream is to read a placeholder, or a
+	// path, as where anything lives — whatever the root says, {env.X}
+	// included, which the adapter prints as written.
+	if len(base.Apps) == 0 {
+		base.Root = ""
+	}
 	if err := base.Validate(); err != nil {
 		if len(needs) == 0 {
 			return nil, err
@@ -231,12 +238,6 @@ func Inspect(ctx context.Context, caddyfile, configDir string) (*Inspection, err
 	}
 	if len(opaque) > 0 {
 		return nil, fmt.Errorf("the Caddyfile does not adapt with the environment variable(s) %s set to any value tried, so what the server reads when they are set — an import, perhaps — cannot be known here; a backup reads the Caddyfile without hotserve's environment", strings.Join(opaque, ", "))
-	}
-	// A plan with no app declaring a backup has no root: a run backs
-	// nothing up, and nothing downstream is to read a placeholder, or a
-	// path, as where anything lives.
-	if len(base.Apps) == 0 {
-		base.Root = ""
 	}
 	if err := base.Validate(); err != nil {
 		return nil, err

@@ -180,15 +180,22 @@ func setup(ctx context.Context, repository string) error {
 	// What runs next is what is so on this box: the package's timer,
 	// or nothing — the raw-binary tarball, an administrator's disable.
 	timer, err := r.Active(ctx, "hotserve-backup.timer")
-	if err != nil {
-		return err
-	}
-	t.Say(nextLine(len(rep.Apps), timer))
+	t.Say(closing(len(rep.Apps), timer, err))
 	return nil
 }
 
-// nextLine is setup's last word: what happens now, from whether the
-// package's hourly timer is active on this box.
+// closing is setup's last word, which never fails a setup that has
+// succeeded: with the manager not answering, that it could not tell,
+// and the line for a box with no timer.
+func closing(apps int, timerActive bool, err error) string {
+	if err != nil {
+		return "next: could not tell whether hotserve-backup.timer is active (" + err.Error() + "); " + strings.TrimPrefix(nextLine(apps, false), "next: ") + "; the timer's own line: systemctl list-timers hotserve-backup.timer"
+	}
+	return nextLine(apps, timerActive)
+}
+
+// nextLine is what happens now, from whether the package's hourly
+// timer is active on this box.
 func nextLine(apps int, timerActive bool) string {
 	switch {
 	case apps > 0 && timerActive:

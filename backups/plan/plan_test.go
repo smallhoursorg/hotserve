@@ -182,6 +182,9 @@ grep -E '^[[:space:]]*import[[:space:]]' "$last" | while read -r _ pat _; do
 done
 root=${LIVESWAP_ROOT:-/var/lib/liveswap}
 uses ROOT_NO_DEFAULT && root=$ROOT_NO_DEFAULT
+# A {env.NAME} root is the server's to resolve: the adapter prints it as
+# it is written [measured].
+grep -q '^root {env\.' "$last" && root='{env.LIVESWAP_ROOT}'
 more=""
 grep -q "^app shop" "$last" && more=',"shop":{},"cart":{"backup":null}'
 uses SHOP_NAME && more=",\"${SHOP_NAME:-shop}\":{}"

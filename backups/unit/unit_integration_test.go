@@ -631,7 +631,10 @@ func TestIntegrationActiveSaysWhetherAUnitIs(t *testing.T) {
 		out, _ := r.Run(context.Background(), Spec{Name: name(t), Argv: []string{"/bin/sleep", "2"}, User: testUser})
 		done <- out
 	}()
-	for activeState(name(t)) != "activating" {
+	for i := 0; activeState(name(t)) != "activating"; i++ {
+		if i >= 200 {
+			t.Fatalf("the unit never came up: %s", activeState(name(t)))
+		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	// A oneshot whose command is running is activating to the manager;

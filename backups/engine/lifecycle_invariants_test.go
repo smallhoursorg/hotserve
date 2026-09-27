@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/smallhoursorg/hotserve/backups/record"
 )
@@ -195,6 +196,46 @@ func TestARunRefusesAMissingProgramWithSetupsWords(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A drill that could not begin records why — a program not there, a
+// unit that would not stop — but an interrupt is no verdict: stopped
+// while it waits, the drill leaves the last drill's time and detail as
+// they were, as it leaves the app an interrupt lands on. And what open
+// had to say — a record it could not read and replaced — reaches the
+// record it writes.
+func TestADrillStoppedWhileItWaitsIsNoVerdict(t *testing.T) {
+	b := restoreBox(t)
+	last := &record.Drill{Time: time.Date(2026, 9, 20, 3, 30, 0, 0, time.UTC), Detail: ""}
+	must(t, os.MkdirAll(b.cfg.StateDir, 0o755))
+	must(t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), &record.Status{LastDrill: last, Apps: map[string]*record.App{}}))
+	must(t, os.MkdirAll(b.cfg.RunDir, 0o700))
+	must(t, os.WriteFile(filepath.Join(b.cfg.RunDir, "init-unit"), []byte("hotserve_backup_init_0123456789ab.service\n"), 0o600))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := Drill(ctx, b.cfg, b); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+	st, err := record.Read(filepath.Join(b.cfg.StateDir, "status.json"))
+	must(t, err)
+	if st.LastDrill == nil || !st.LastDrill.Time.Equal(last.Time) || st.LastDrill.Detail != "" {
+		t.Fatalf("the last drill's verdict was replaced by an interrupt: %+v", st.LastDrill)
+	}
+
+	// A record that could not be read is said by the drill that could
+	// not begin, beside why it could not.
+	b = restoreBox(t)
+	b.haveProgram = func(path string) bool { return path != "/usr/bin/restic" }
+	must(t, os.MkdirAll(b.cfg.StateDir, 0o755))
+	must(t, os.WriteFile(filepath.Join(b.cfg.StateDir, "status.json"), []byte("not json"), 0o644))
+	if _, err := Drill(context.Background(), b.cfg, b); err == nil {
+		t.Fatal("a drill without restic began")
+	}
+	st, err = record.Read(filepath.Join(b.cfg.StateDir, "status.json"))
+	must(t, err)
+	if st.LastDrill == nil || !strings.Contains(st.LastDrill.Detail, "restic is not installed") || !strings.Contains(st.Warning, "could not be read and was replaced") {
+		t.Fatalf("the record: last drill %+v, warning %q", st.LastDrill, st.Warning)
 	}
 }
 

@@ -738,7 +738,18 @@ timeout 300 systemctl enable --now hotserve || die "hotserve did not start after
 systemctl start hotserve-backup.service || die "a run after the reinstall failed: $(journalctl -u hotserve-backup.service --no-pager | tail -20)"
 [ "$(systemctl show -p Result --value hotserve-backup.service)" = success ] || die "the run after the reinstall ended '$(systemctl show -p Result --value hotserve-backup.service)'"
 echo "reinstalled after remove: the timers enabled and running again, the same credential file, a run works"
+# What a killed run can leave behind: a bind mount of an app's data
+# under the run directory, and the record writer's temp file. Purge
+# must remove nothing of the app's through the first, and not be
+# defeated by the second.
+mkdir -p /run/hotserve-backup/deadrun/m0
+mount --bind /var/lib/liveswap/demo/shared /run/hotserve-backup/deadrun/m0 || die "could not stage a leftover bind mount"
+[ -f /run/hotserve-backup/deadrun/m0/app.db ] || die "the staged mount does not show the app's data: the purge check would prove nothing"
+: >/var/lib/hotserve-backup/.status-crash
 apt-get purge -y hotserve >/tmp/purge.log 2>&1 || { cat /tmp/purge.log; die "apt-get purge failed"; }
+[ -f /var/lib/liveswap/demo/shared/app.db ] && [ -f /var/lib/liveswap/demo/shared/uploads/a.png ] \
+	|| die "purge removed the app's data through a mount a killed run left under /run/hotserve-backup"
+umount /run/hotserve-backup/deadrun/m0 && rm -rf /run/hotserve-backup
 cat /tmp/purge.log
 grep -q "$CRED is kept: it holds the repository password, the only way to read the backups already made" /tmp/purge.log \
 	|| die "purge did not say that the credential file is kept, and why"

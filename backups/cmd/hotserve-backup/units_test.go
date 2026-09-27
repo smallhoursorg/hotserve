@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -214,5 +215,14 @@ func TestSetupsClosingLineFollowsTheTimer(t *testing.T) {
 		if !strings.Contains(got, tc.want) || strings.Contains(got, tc.never) {
 			t.Errorf("apps=%d timer=%v: %q", tc.apps, tc.timerActive, got)
 		}
+	}
+	// The manager not answering is no failure of a setup that has
+	// succeeded: the line says it could not tell, and what to do.
+	got := closing(1, false, errors.New("asking the manager about hotserve-backup.timer: no reply"))
+	if !strings.Contains(got, "could not tell whether hotserve-backup.timer is active (asking the manager about hotserve-backup.timer: no reply)") || !strings.Contains(got, "systemctl list-timers hotserve-backup.timer") {
+		t.Errorf("with the manager not answering: %q", got)
+	}
+	if got := closing(1, true, nil); got != nextLine(1, true) {
+		t.Errorf("with an answer: %q", got)
 	}
 }
