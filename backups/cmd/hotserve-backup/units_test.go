@@ -127,6 +127,10 @@ func TestTheShippedUnitsSayWhatTheEngineNeeds(t *testing.T) {
 			{"Timer", "OnCalendar", "hourly"},
 			{"Timer", "RandomizedDelaySec", "10min"},
 			{"Timer", "FixedRandomDelay", "true"},
+			// The manager's default accuracy of a minute is applied after
+			// the delay: "within the hour and ten minutes" holds only with
+			// the accuracy tight (Copilot on #153).
+			{"Timer", "AccuracySec", "1s"},
 			{"Timer", "Persistent", "true"},
 			{"Install", "WantedBy", "timers.target"},
 		},

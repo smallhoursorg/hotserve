@@ -2,6 +2,8 @@
 # on the hour, plus one offset of up to ten minutes that is this box's
 # own and stays the same, so that the interval is an hour and a fleet
 # does not reach one storage at :00; a box that was off runs at boot.
+# The manager's default accuracy of a minute would be added after the
+# delay, so it is a second here: ten minutes is the bound the docs give.
 # Enabled by the package; the service itself waits for setup.
 [Unit]
 Description=hotserve backup run, hourly
@@ -11,6 +13,7 @@ Documentation=https://github.com/smallhoursorg/hotserve/blob/main/backups/README
 OnCalendar=hourly
 RandomizedDelaySec=10min
 FixedRandomDelay=true
+AccuracySec=1s
 Persistent=true
 
 [Install]

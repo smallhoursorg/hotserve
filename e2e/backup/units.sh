@@ -55,6 +55,7 @@ prop $D After | tr ' ' '\n' | grep -qx "$S" && pass "the drill is After= the run
 prop $S After | tr ' ' '\n' | grep -qx "$D" && fail "the run is After= the drill too: an ordering cycle" || pass "the run is not After= the drill"
 prop $T TimersCalendar | grep -q '\*-\*-\* \*:00:00' && pass "the hourly timer is on the hour" || fail "TimersCalendar=$(prop $T TimersCalendar)"
 [ "$(prop $T RandomizedDelayUSec)" = 10min ] && [ "$(prop $T FixedRandomDelay)" = yes ] && [ "$(prop $T Persistent)" = yes ] && pass "with a fixed delay of up to ten minutes, and catching up a missed one" || fail "the hourly timer: $(systemctl show -p RandomizedDelayUSec,FixedRandomDelay,Persistent $T | tr '\n' ' ')"
+[ "$(prop $T AccuracyUSec)" = 1s ] && pass "and an accuracy of a second, so that ten minutes is the bound" || fail "AccuracyUSec=$(prop $T AccuracyUSec): the manager's default minute is added after the delay"
 prop $DT TimersCalendar | grep -q 'Sun \*-\*-\* 03:30:00' && [ "$(prop $DT Persistent)" = yes ] && pass "the drill's timer is Sunday 03:30, catching up a missed one" || fail "the drill's timer: $(systemctl show -p TimersCalendar,Persistent $DT | tr '\n' ' ')"
 [ "$(prop $T Unit)" = "$S" ] && [ "$(prop $DT Unit)" = "$D" ] && pass "each timer starts the service of its name" || fail "Unit=: $(prop $T Unit), $(prop $DT Unit)"
 for f in $S $T $D $DT; do

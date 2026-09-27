@@ -59,8 +59,12 @@ if line=$(getent passwd hotserve-backup 2>/dev/null); then
 	# user@<uid> drop-ins below (CI's install-test found the clobber:
 	# the limits drop-in went to the backup account's manager).
 	buid=$(printf '%s' "$line" | cut -d: -f3)
+	bgid=$(printf '%s' "$line" | cut -d: -f4)
 	if [ "$buid" = 0 ] || [ "$buid" = "$uid" ]; then
 		echo "hotserve: the hotserve-backup account has uid $buid, which is root's or the hotserve user's; hotserve-backup setup will refuse it — remove it and let setup make it" >&2
+	fi
+	if [ "$bgid" = 0 ]; then
+		echo "hotserve: the hotserve-backup account has gid 0, root's group; hotserve-backup setup will refuse it — remove it and let setup make it" >&2
 	fi
 else
 	echo "hotserve: the hotserve-backup system user does not exist and could not be created" >&2
