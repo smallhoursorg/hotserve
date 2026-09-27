@@ -123,11 +123,17 @@ fi
 # disabled or masked. The services they start do nothing until
 # `hotserve-backup setup` has written the credential file
 # (ConditionPathExists= in the unit files): an install runs no backup.
-# A timer masked here is one a remove masked: this is a reinstall, and
-# it is started as on an install, not left as an upgrade leaves it.
-reinstall=""
+# Which timers this configure starts, rather than leaving as they were:
+# on an install, all; on an upgrade, those new to the box — the helper
+# has no state for them, as on every box upgraded from a release
+# before backups — and those a remove masked, which the helper records
+# as its own mask (an administrator's mask it does not record, and
+# leaves). Read before the helper is asked anything.
+fresh=""
 for u in hotserve-backup.timer hotserve-backup-drill.timer; do
-	if [ "$(readlink "/etc/systemd/system/$u" 2>/dev/null)" = /dev/null ]; then reinstall=yes; fi
+	if [ -z "${2:-}" ] || [ -e "/var/lib/systemd/deb-systemd-helper-masked/$u" ] || ! [ -e "/var/lib/systemd/deb-systemd-helper-enabled/$u.dsh-also" ]; then
+		fresh="$fresh $u"
+	fi
 done
 if [ -x /usr/bin/deb-systemd-helper ]; then
 	for u in hotserve-backup.timer hotserve-backup-drill.timer; do
@@ -139,22 +145,23 @@ if [ -x /usr/bin/deb-systemd-helper ]; then
 		fi
 	done
 fi
-# On an install, and a reinstall after a remove, the timers are
-# started. On an upgrade they are left running as they were — nothing
-# stopped them (preremove leaves the backup units alone) — and
-# restarted only where they run, to take up a changed timer file: one
-# an administrator stopped and left enabled stays stopped.
+# The fresh ones are started. The others are left running as they
+# were — nothing stopped them (preremove leaves the backup units alone
+# at an upgrade) — and restarted only where they run, to take up a
+# changed timer file: one an administrator stopped stays stopped.
 if [ -d /run/systemd/system ]; then
 	systemctl --system daemon-reload >/dev/null || true
-	if [ -n "${2:-}" ] && [ -z "$reinstall" ]; then action=try-restart; else action=start; fi
-	if [ -x /usr/bin/deb-systemd-invoke ]; then
-		deb-systemd-invoke "$action" hotserve-backup.timer hotserve-backup-drill.timer >/dev/null || true
-	else
-		# No helper (a systemd host that is not Debian): enabled here,
-		# and started, with no memory of an administrator's disable.
-		systemctl enable hotserve-backup.timer hotserve-backup-drill.timer 2>/dev/null || true
-		systemctl "$action" hotserve-backup.timer hotserve-backup-drill.timer 2>/dev/null || true
-	fi
+	for u in hotserve-backup.timer hotserve-backup-drill.timer; do
+		case " $fresh " in *" $u "*) action=start ;; *) action=try-restart ;; esac
+		if [ -x /usr/bin/deb-systemd-invoke ]; then
+			deb-systemd-invoke "$action" "$u" >/dev/null || true
+		else
+			# No helper (a systemd host that is not Debian): enabled here,
+			# and started, with no memory of an administrator's disable.
+			systemctl enable "$u" 2>/dev/null || true
+			systemctl "$action" "$u" 2>/dev/null || true
+		fi
+	done
 	if systemctl is-enabled --quiet hotserve-backup.timer 2>/dev/null; then
 		echo "Backups: the hourly timer and the Sunday restore drill are enabled, and run nothing until:"
 		echo "  sudo hotserve-backup setup <repository>"

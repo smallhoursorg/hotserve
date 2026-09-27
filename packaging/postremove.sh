@@ -58,7 +58,9 @@ mounted_beneath() {
 stop_left() {
 	[ -f "$run/units" ] && [ -d /run/systemd/system ] || return 0
 	while read -r u; do
-		echo "$u" | grep -Eq '^hotserve_backup_[a-z0-9_-]+\.service$' || continue
+		# The engine's own grammar (engine.go, unitNameRe): a role, an
+		# app where there is one, a run's twelve hex digits.
+		echo "$u" | grep -Eq '^hotserve_backup_[a-z]+[0-9]*(_[a-z0-9-]{1,63})?_[0-9a-f]{12}\.service$' || continue
 		systemctl stop "$u" 2>/dev/null || true
 		state=$(systemctl show -p ActiveState --value "$u" 2>/dev/null) || state=""
 		case "$state" in

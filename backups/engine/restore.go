@@ -1022,6 +1022,12 @@ func (x *run) drillApp(ctx context.Context, app string, snap record.Snapshot, si
 	if ctx.Err() != nil {
 		return false // interrupted: nothing was found out, so nothing is written
 	}
+	// A helper of another version: nothing was found out either, and no
+	// app after it would find anything.
+	if errors.As(err, new(upgradedError)) {
+		x.upgraded = err
+		return true
+	}
 	if err != nil {
 		rec.RestoreDrill = &record.Drill{Snapshot: snap, Time: time.Now().UTC(), Detail: record.Text(err.Error())}
 		return errors.As(err, new(repositoryWideError))
@@ -1077,6 +1083,7 @@ func Drill(ctx context.Context, cfg Config, r Runner) (*record.Status, error) {
 	}
 	defer end()
 	st := x.prev
+	lastBefore := st.LastDrill
 	st.LastDrill = &record.Drill{Time: time.Now().UTC()}
 	// Said in the record — a refusal from begin (a program not there)
 	// as a plan that cannot be made — so that a drill failing here week
@@ -1108,7 +1115,7 @@ func Drill(ctx context.Context, cfg Config, r Runner) (*record.Status, error) {
 	}
 	var refused string // set once the repository refuses for a reason every app shares
 	for _, name := range p.Names() {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || x.upgraded != nil {
 			break
 		}
 		rec := st.Apps[name]
@@ -1135,17 +1142,26 @@ func Drill(ctx context.Context, cfg Config, r Runner) (*record.Status, error) {
 			}
 			continue
 		default:
-			if x.drillApp(ctx, name, *newest(snaps), 0, rec) {
+			if x.drillApp(ctx, name, *newest(snaps), 0, rec) && x.upgraded == nil {
 				refused = rec.RestoreDrill.Detail
 			}
 		}
 		st.Apps[name] = rec
 	}
 	st.Warning = strings.TrimSpace(st.Warning + " " + x.status.Warning)
+	// A drill an upgrade ended found nothing out from there on: the
+	// verdicts it reached stand, and the last drill's time is not this
+	// one's, so that the next drill is not a week away.
+	if x.upgraded != nil {
+		st.LastDrill = lastBefore
+	}
 	// What was finished is written, an interrupt or not: each verdict is
 	// an app's own, and the app the interrupt landed on has none.
 	if err := record.Write(filepath.Join(cfg.StateDir, "status.json"), st); err != nil {
 		return st, err
+	}
+	if x.upgraded != nil {
+		return st, x.upgraded
 	}
 	return st, ctx.Err()
 }

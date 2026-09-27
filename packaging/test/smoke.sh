@@ -733,7 +733,31 @@ dpkg -i "$deb" >/dev/null
 	|| die "after an upgrade, the other timer stopped before it: hotserve-backup.timer is $(systemctl is-active hotserve-backup.timer || true)"
 as_admin "sudo systemctl start hotserve-backup-drill.timer"
 expect_backup_state "after an upgrade, one timer stopped before it and started after" enabled active "$CRED_SHA"
+# And one masked by the administrator, the other stopped: a mask of
+# the administrator's is no remove's, so this is an upgrade, and the
+# stopped timer stays stopped and the masked one masked (Copilot on
+# #155: any mask was read as a reinstall's).
+as_admin "sudo systemctl stop hotserve-backup.timer hotserve-backup-drill.timer"
+as_admin "sudo systemctl mask hotserve-backup-drill.timer"
+dpkg -i "$deb" >/dev/null
+[ "$(systemctl is-active hotserve-backup.timer || true)" = inactive ] \
+	|| die "after an upgrade, one timer masked and one stopped by the administrator: hotserve-backup.timer is $(systemctl is-active hotserve-backup.timer || true) — an administrator's mask was taken for a reinstall"
+[ "$(systemctl is-enabled hotserve-backup-drill.timer || true)" = masked ] \
+	|| die "after an upgrade, the administrator's mask of hotserve-backup-drill.timer is $(systemctl is-enabled hotserve-backup-drill.timer || true)"
+as_admin "sudo systemctl unmask hotserve-backup-drill.timer"
+as_admin "sudo systemctl start hotserve-backup.timer hotserve-backup-drill.timer"
+expect_backup_state "after an upgrade, one timer masked and one stopped, and both put back" enabled active "$CRED_SHA"
 systemctl is-active --quiet hotserve || die "hotserve not active after the upgrade cycle"
+# An upgrade from a release that had no backup timers — every box that
+# first gets this feature: the helper has no state for them, and they
+# are enabled and started as on an install, not left stopped until a
+# reboot (the owner's review of #155). Staged as that release leaves a
+# box: no enable state, no stamps, the timers stopped.
+systemctl disable --now hotserve-backup.timer hotserve-backup-drill.timer >/dev/null 2>&1
+rm -f /var/lib/systemd/deb-systemd-helper-enabled/hotserve-backup*.dsh-also /var/lib/systemd/deb-systemd-helper-enabled/timers.target.wants/hotserve-backup* /var/lib/systemd/timers/stamp-hotserve-backup*
+systemctl reset-failed $TIMERS 2>/dev/null || true
+dpkg -i "$deb" >/tmp/upgrade-first.log 2>&1 || { cat /tmp/upgrade-first.log; die "the upgrade from a release without the timers failed"; }
+expect_backup_state "after an upgrade from a release without the timers" enabled active "$CRED_SHA"
 # An upgrade leaves a backup under way alone (the owner, 2026-09-27):
 # its upload, which is restic's, finishes, and the run goes on as the
 # program it was started as — here the same program, so its helpers
@@ -940,7 +964,10 @@ echo '{}' >/run/hotserve-backup/dead00000001/plan.json
 LEFT=hotserve_backup_upload_demo_0123456789ab.service
 systemd-run --quiet --unit="$LEFT" -p User=hotserve-backup /usr/bin/sleep 600 || die "could not stage a unit a killed command left running"
 systemd-run --quiet --unit=smoke-bystander.service /usr/bin/sleep 600 || die "could not stage a unit that is none of the engine's"
-printf '%s\nsmoke-bystander.service\n' "$LEFT" >/run/hotserve-backup/units
+# And one of the engine's prefix that is no name the engine writes: no
+# role and app, no run's twelve hex digits (Copilot on #155).
+systemd-run --quiet --unit=hotserve_backup_bystander.service /usr/bin/sleep 600 || die "could not stage a unit of the engine's prefix"
+printf '%s\nsmoke-bystander.service\nhotserve_backup_bystander.service\n' "$LEFT" >/run/hotserve-backup/units
 [ "$(systemctl is-active "$LEFT" || true)" = active ] || die "the staged unit is not running: the purge row would prove nothing"
 : >/var/lib/hotserve-backup/.status-crash
 echo 0123 >/var/lib/hotserve-backup/repository-id.new
@@ -951,9 +978,11 @@ cat /tmp/purge.log
 disks_mounted "after purge"
 [ "$(systemctl is-active "$LEFT" || true)" != active ] \
 	|| die "purge left a unit a killed command had left running, and removed the one record of it: $LEFT is still active, with the credential"
-[ "$(systemctl is-active smoke-bystander.service || true)" = active ] \
-	|| die "purge stopped a unit that is none of the engine's, for being written in the units file"
-systemctl stop smoke-bystander.service
+for u in smoke-bystander.service hotserve_backup_bystander.service; do
+	[ "$(systemctl is-active "$u" || true)" = active ] \
+		|| die "purge stopped $u, which is no name the engine writes, for being written in the units file"
+done
+systemctl stop smoke-bystander.service hotserve_backup_bystander.service
 grep -q " /run/hotserve-backup" /proc/self/mountinfo \
 	&& die "purge left a killed run's mounts, with no next run to sweep them: $(grep ' /run/hotserve-backup' /proc/self/mountinfo)" || true
 [ ! -e /run/hotserve-backup ] || die "purge left /run/hotserve-backup: $(find /run/hotserve-backup)"

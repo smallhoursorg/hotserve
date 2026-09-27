@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/smallhoursorg/hotserve/backups/record"
 	"github.com/smallhoursorg/hotserve/backups/unit"
@@ -32,9 +34,9 @@ const thisRun = "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0
 
 func sameVersion(t *testing.T) {
 	t.Helper()
-	old := whichProgram
-	whichProgram = func() (string, error) { return thisRun, nil }
-	t.Cleanup(func() { whichProgram = old })
+	old := programOf
+	programOf = func(string) (string, error) { return thisRun, nil }
+	t.Cleanup(func() { programOf = old })
 }
 
 // Every unit a command starts from its own program is told which
@@ -42,8 +44,8 @@ func sameVersion(t *testing.T) {
 func TestEveryHelperIsToldWhichProgramStartedIt(t *testing.T) {
 	for _, cmd := range append(runDrillRestore, setupCommand) {
 		t.Run(cmd.name, func(t *testing.T) {
-			sameVersion(t)
 			b, m := cmd.box(t)
+			sameVersion(t)
 			if err := cmd.do(t, b, m); err != nil {
 				t.Fatal(err)
 			}
@@ -76,12 +78,14 @@ func TestEveryHelperIsToldWhichProgramStartedIt(t *testing.T) {
 func TestACommandThatCannotReadItselfStartsNothing(t *testing.T) {
 	for _, cmd := range runDrillRestore {
 		t.Run(cmd.name, func(t *testing.T) {
-			old := whichProgram
-			whichProgram = func() (string, error) { return "", fmt.Errorf("open /proc/self/exe: permission denied") }
-			t.Cleanup(func() { whichProgram = old })
 			b, m := cmd.box(t)
+			old := programOf
+			programOf = func(string) (string, error) {
+				return "", fmt.Errorf("open /usr/bin/hotserve-backup: permission denied")
+			}
+			t.Cleanup(func() { programOf = old })
 			err := cmd.do(t, b, m)
-			if err == nil || !strings.Contains(err.Error(), "which version of hotserve-backup this is could not be read: open /proc/self/exe: permission denied") {
+			if err == nil || !strings.Contains(err.Error(), "which version of hotserve-backup this is could not be read: open /usr/bin/hotserve-backup: permission denied") {
 				t.Fatalf("err = %v", err)
 			}
 			if len(b.specs) != 0 {
@@ -91,17 +95,89 @@ func TestACommandThatCannotReadItselfStartsNothing(t *testing.T) {
 	}
 }
 
-// What the program is: the hash of the file it was started from, as
-// the kernel still holds it, whatever is at its path by now.
+// What the program is, to a helper: the hash of the file it was
+// started from, as the kernel still holds it, whatever is at its path
+// by now.
 func TestWhichProgramThisIs(t *testing.T) {
 	self, err := os.Executable()
 	must(t, err)
 	raw, err := os.ReadFile(self)
 	must(t, err)
 	sum := sha256.Sum256(raw)
-	got, err := whichProgram()
+	got, err := WhichProgram()
 	if err != nil || got != hex.EncodeToString(sum[:]) {
-		t.Fatalf("whichProgram = %q, %v; the file is %s", got, err, hex.EncodeToString(sum[:]))
+		t.Fatalf("WhichProgram = %q, %v; the file is %s", got, err, hex.EncodeToString(sum[:]))
+	}
+}
+
+// And to the command, the file its helpers are started from, as it is
+// when the command begins — not the command's own: run from a build
+// directory or another path, the helpers are the installed program's,
+// and a command that told them its own hash would find every one
+// "upgraded", and running again would not help (the owner's review).
+func TestACommandTellsItsHelpersTheFileTheyAreStartedFrom(t *testing.T) {
+	b := restoreBox(t)
+	dir := t.TempDir()
+	b.cfg.Self = filepath.Join(dir, "hotserve-backup")
+	must(t, os.WriteFile(b.cfg.Self, []byte("the installed program"), 0o755))
+	sum := sha256.Sum256([]byte("the installed program"))
+	if _, err := Drill(context.Background(), b.cfg, b); err != nil {
+		t.Fatal(err)
+	}
+	told := 0
+	for _, s := range b.specs {
+		if len(s.Argv) > 0 && s.Argv[0] == b.cfg.Self {
+			told++
+			if !slices.Contains(s.Environment, RunIdentityEnv+"="+hex.EncodeToString(sum[:])) {
+				t.Errorf("%s is told %q, not the hash of %s", s.Name, s.Environment, b.cfg.Self)
+			}
+		}
+	}
+	if told == 0 {
+		t.Fatal("no helper ran: the row proves nothing")
+	}
+}
+
+// A drill whose helper was another version's found nothing out: no
+// app's drill is recorded as not proven for it — status would say so
+// until the next Sunday — and the last drill's verdict stands, as it
+// does for an interrupt. The command says the upgrade, and fails.
+func TestAnUpgradeIsNoDrillVerdict(t *testing.T) {
+	b := restoreBox(t)
+	sameVersion(t)
+	must(t, os.MkdirAll(filepath.Join(b.root, "shop", "shared", "uploads"), 0o755))
+	b.plan = fmt.Sprintf(`{"root":%q,"apps":{"blog":{"files":["uploads"]},"shop":{"files":["uploads"]}}}`, b.root)
+	proven := &record.Drill{Snapshot: record.Snapshot{ID: snapB}, Time: time.Date(2026, 9, 20, 3, 30, 0, 0, time.UTC)}
+	last := &record.Drill{Time: time.Date(2026, 9, 20, 3, 30, 0, 0, time.UTC)}
+	must(t, os.MkdirAll(b.cfg.StateDir, 0o755))
+	must(t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), &record.Status{LastDrill: last, Apps: map[string]*record.App{
+		"blog": {Class: record.OK, RestoreProven: proven}, "shop": {Class: record.OK, RestoreProven: proven},
+	}}))
+	b.outcome["check"] = anotherVersions
+	if _, err := Drill(context.Background(), b.cfg, b); err == nil || !strings.Contains(err.Error(), fmt.Sprintf(upgraded, "check")) {
+		t.Fatalf("err = %v", err)
+	}
+	st, rerr := record.Read(filepath.Join(b.cfg.StateDir, "status.json"))
+	must(t, rerr)
+	for _, app := range []string{"blog", "shop"} {
+		if a := st.Apps[app]; a == nil || a.RestoreDrill != nil || a.RestoreProven == nil {
+			t.Errorf("%s: an upgrade was recorded as a drill's verdict: %+v", app, a)
+		}
+	}
+	if st.LastDrill == nil || !st.LastDrill.Time.Equal(last.Time) {
+		t.Errorf("the last drill's time was replaced by one that found nothing out: %+v", st.LastDrill)
+	}
+
+	// And a run's first drill of a new backup: not recorded, so the
+	// next hour's run drills it again; and the run says the upgrade.
+	b = newBox(t)
+	b.outcome["check"] = anotherVersions
+	rst, err := Run(context.Background(), b.cfg, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := rst.Apps["blog"]; a == nil || a.Class != record.OK || a.RestoreDrill != nil || a.RestoreProven != nil || !strings.Contains(rst.Warning, fmt.Sprintf(upgraded, "check")) {
+		t.Fatalf("the run: blog %+v, warning %q", a, rst.Warning)
 	}
 }
 
@@ -116,8 +192,8 @@ func TestAHelperOfAnotherVersionEndsTheCommand(t *testing.T) {
 		b.plan = fmt.Sprintf(`{"root":%q,"apps":{"blog":{"sqlite":["app.db"],"files":["uploads"]},"shop":{"sqlite":["app.db"],"files":["uploads"]}}}`, b.root)
 	}
 	t.Run("the plan, of a run", func(t *testing.T) {
-		sameVersion(t)
 		b := newBox(t)
+		sameVersion(t)
 		b.outcome["plan"] = anotherVersions
 		st, err := Run(context.Background(), b.cfg, b)
 		want := fmt.Sprintf(upgraded, "plan")
@@ -132,8 +208,8 @@ func TestAHelperOfAnotherVersionEndsTheCommand(t *testing.T) {
 		}
 	})
 	t.Run("the plan, of a drill", func(t *testing.T) {
-		sameVersion(t)
 		b := restoreBox(t)
+		sameVersion(t)
 		b.outcome["plan"] = anotherVersions
 		st, err := Drill(context.Background(), b.cfg, b)
 		want := fmt.Sprintf(upgraded, "plan")
@@ -142,8 +218,8 @@ func TestAHelperOfAnotherVersionEndsTheCommand(t *testing.T) {
 		}
 	})
 	t.Run("the plan, of a restore", func(t *testing.T) {
-		sameVersion(t)
 		b := restoreBox(t)
+		sameVersion(t)
 		b.outcome["plan"] = anotherVersions
 		_, err := Restore(context.Background(), b.cfg, b, inPlace())
 		if err == nil || !strings.Contains(err.Error(), fmt.Sprintf(upgraded, "plan")) {
@@ -154,8 +230,8 @@ func TestAHelperOfAnotherVersionEndsTheCommand(t *testing.T) {
 		}
 	})
 	t.Run("the dump, of the first of two apps", func(t *testing.T) {
-		sameVersion(t)
 		b := newBox(t)
+		sameVersion(t)
 		two(b)
 		b.outcome["dump"] = anotherVersions
 		st, err := Run(context.Background(), b.cfg, b)
@@ -184,17 +260,12 @@ func TestAHelperOfAnotherVersionEndsTheCommand(t *testing.T) {
 		}
 	})
 	t.Run("the check, of a drill of two apps", func(t *testing.T) {
-		sameVersion(t)
 		b := restoreBox(t)
+		sameVersion(t)
 		two(b)
 		b.outcome["check"] = anotherVersions
-		st, err := Drill(context.Background(), b.cfg, b)
-		want := fmt.Sprintf(upgraded, "check")
-		if err != nil || st.Apps["blog"] == nil || st.Apps["blog"].RestoreDrill == nil || !strings.Contains(st.Apps["blog"].RestoreDrill.Detail, want) {
-			t.Fatalf("err = %v, blog %+v", err, st.Apps["blog"])
-		}
-		if st.Apps["shop"] == nil || st.Apps["shop"].RestoreDrill == nil || !strings.Contains(st.Apps["shop"].RestoreDrill.Detail, want) {
-			t.Fatalf("shop: %+v", st.Apps["shop"])
+		if _, err := Drill(context.Background(), b.cfg, b); err == nil || !strings.Contains(err.Error(), fmt.Sprintf(upgraded, "check")) {
+			t.Fatalf("err = %v", err)
 		}
 		if n := strings.Count(" "+b.roles()+" ", " fetch "); n != 1 {
 			t.Fatalf("a second app was fetched for a helper that would do nothing: %s", b.roles())
@@ -204,8 +275,8 @@ func TestAHelperOfAnotherVersionEndsTheCommand(t *testing.T) {
 		}
 	})
 	t.Run("the install, of a restore into place", func(t *testing.T) {
-		sameVersion(t)
 		b := restoreBox(t)
+		sameVersion(t)
 		b.outcome["install"] = anotherVersions
 		_, err := Restore(context.Background(), b.cfg, b, inPlace())
 		if err == nil || !strings.Contains(err.Error(), fmt.Sprintf(upgraded, "install")) {
@@ -221,8 +292,8 @@ func TestAHelperOfAnotherVersionEndsTheCommand(t *testing.T) {
 	// — here the one that empties staging before the dump — and never
 	// taken for an upgrade.
 	t.Run("the clean, which is every version's", func(t *testing.T) {
-		sameVersion(t)
 		b := newBox(t)
+		sameVersion(t)
 		b.outcome["clean"] = anotherVersions
 		st, err := Run(context.Background(), b.cfg, b)
 		if err != nil {

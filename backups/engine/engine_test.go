@@ -174,6 +174,16 @@ func newBox(t *testing.T) *box {
 	t.Cleanup(func() { freeUnder, sameFilesystem = oldFree, oldSame })
 	old, oldMount, oldUnmount, oldUnder := dataOwner, bindMount, unmountDetach, mountsUnder
 	dataOwner = func(context.Context) (int, int, error) { return os.Getuid(), os.Getgid(), nil }
+	// Which program the helpers are started from: the file, where the
+	// test made one; this lane has no /usr/bin/hotserve-backup.
+	oldProgramOf := programOf
+	programOf = func(path string) (string, error) {
+		if _, err := os.Stat(path); err == nil {
+			return oldProgramOf(path)
+		}
+		return "the program under test", nil
+	}
+	t.Cleanup(func() { programOf = oldProgramOf })
 	oldOwnerOf, oldSelfBind := ownerOf, selfBind
 	ownerOf = func(acct passwd) (int, int) { b.owned4 = append(b.owned4, acct); return os.Getuid(), os.Getgid() }
 	selfBind = func(dir string) error { b.selfBound = append(b.selfBound, dir); return nil }

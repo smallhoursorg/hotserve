@@ -101,9 +101,11 @@ jobs:
                 useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hotserve-backup
             - nothing runs until you have run:
                 sudo hotserve-backup setup <repository>
-            - and on the way out, what the package's scripts do: stop
-              the two timers and the two services before replacing or
-              removing the binary; unmount whatever is still mounted
+            - and on the way out, what the package's scripts do: to
+              replace the binary, nothing — a backup under way is left
+              to finish, and a helper of another version does nothing
+              for it; to remove it, stop the two timers and the two
+              services first; unmount whatever is still mounted
               under /run/hotserve-backup before removing it (never
               rm -r it with a mount there: that removes an app's
               files); and remove, with the unit files,

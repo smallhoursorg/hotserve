@@ -85,6 +85,24 @@ const (
 	OtherVersionStatus = 75
 )
 
+// programOf is which program a file is: its hash. A command tells its
+// helpers that of the file they are started from, as it is when the
+// command begins — not its own: run from a build directory or another
+// path, the helpers are the installed program, and a command that told
+// them its own hash would find every one "upgraded" for good.
+var programOf = func(path string) (string, error) {
+	f, err := os.Open(path) //nolint:gosec // cfg.Self, a constant of the installation
+	if err != nil {
+		return "", err
+	}
+	defer f.Close() //nolint:errcheck // read only
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
 // WhichProgram is which program this is: the hash of the file it was
 // started from, as the kernel still holds it — whatever is at its path
 // by now. Not a version's name: two builds of one name are two
@@ -111,8 +129,14 @@ func otherVersion(o unit.Outcome, role string) error {
 	if o.Result != "exit-code" || o.ExitStatus != OtherVersionStatus {
 		return nil
 	}
-	return repositoryWideError{refusedError{fmt.Errorf("the package was upgraded while this command was under way: its %s helper is another version's, and did nothing; the same command, run again, is of one version", role)}}
+	return repositoryWideError{upgradedError{refusedError{fmt.Errorf("the package was upgraded while this command was under way: its %s helper is another version's, and did nothing; the same command, run again, is of one version", role)}}}
 }
+
+// upgradedError is a helper that did nothing because it is another
+// version's: nothing was found out, so it is no drill's verdict.
+type upgradedError struct{ error }
+
+func (e upgradedError) Unwrap() error { return e.error }
 
 // retryLock is how long restic waits for a repository something else
 // holds — a check takes it exclusively. A flag, because restic 0.18
@@ -281,7 +305,7 @@ func (x *run) seen(ctx context.Context) error {
 // about to write that file, shares with a run. say, when there is
 // someone to tell, hears of a wait for an earlier setup's init.
 func open(ctx context.Context, cfg Config, r Runner, say func(string)) (x *run, end func(), err error) {
-	program, err := whichProgram()
+	program, err := programOf(cfg.Self)
 	if err != nil {
 		return nil, nil, fmt.Errorf("which version of hotserve-backup this is could not be read: %w", err)
 	}
@@ -426,7 +450,13 @@ func (x *run) apps(ctx context.Context) error {
 		// that keeps failing is not re-fetched, in full, every hour.
 		if app := x.status.Apps[name]; app.Class == record.OK && app.RestoreProven == nil && app.RestoreDrill == nil && ctx.Err() == nil {
 			if x.firstDrill(ctx, name, app) {
-				stop = &record.App{Detail: app.RestoreDrill.Detail}
+				if x.upgraded != nil {
+					// No verdict: the next run drills it again.
+					stop = &record.App{Detail: record.Text(x.upgraded.Error())}
+					x.status.Warning = strings.TrimSpace(x.status.Warning + " " + stop.Detail)
+				} else {
+					stop = &record.App{Detail: app.RestoreDrill.Detail}
+				}
 			}
 		}
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -476,4 +477,37 @@ type acct struct {
 	// database holds it, and whether that database holds it at all.
 	passwordField, shadow string
 	noShadow              bool
+}
+
+// postremove stops the units a killed command left by the names it
+// recorded, and only names the engine writes: its pattern and the
+// engine's own grammar agree on every name (Copilot on #155: a broader
+// pattern stopped hotserve_backup_bystander.service).
+func TestPostremoveStopsOnlyNamesTheEngineWrites(t *testing.T) {
+	raw, err := os.ReadFile("../../packaging/postremove.sh")
+	must(t, err)
+	m := regexp.MustCompile(`grep -Eq '(\^hotserve_backup_[^']+)'`).FindStringSubmatch(string(raw))
+	if m == nil {
+		t.Fatal("postremove holds no pattern of the engine's unit names")
+	}
+	shell := regexp.MustCompilePOSIX(m[1])
+	for _, name := range []string{
+		"hotserve_backup_upload_demo_0123456789ab.service",
+		"hotserve_backup_plan_0123456789ab.service",
+		"hotserve_backup_listing_0123456789ab.service",
+		"hotserve_backup_upload_my-app2_0123456789ab.service",
+		"hotserve_backup_bystander.service",
+		"hotserve_backup_upload_demo_0123456789a.service",
+		"hotserve_backup_upload_demo_0123456789AB.service",
+		"hotserve_backup_upload_Demo_0123456789ab.service",
+		"hotserve_backup__0123456789ab.service",
+		"smoke-bystander.service",
+		"hotserve_backup_upload_demo_0123456789ab.timer",
+		"hotserve_backup_upload_demo_0123456789ab.service.d",
+	} {
+		_, _, engine := ParseUnitName(name)
+		if got := shell.MatchString(name); got != engine {
+			t.Errorf("%s: postremove says %v, the engine %v", name, got, engine)
+		}
+	}
 }
