@@ -54,9 +54,34 @@ func (p pin) mountAt(target string) (unmount func(), err error) {
 
 // The two mount calls, as variables: a test that is not root stands
 // something else in for them.
+//
+// What is bound is made private, the whole tree of it, before anything
+// else is done with it and again before it is taken away. A recursive
+// bind of a mount that is shared — and on a box systemd has booted the
+// root mount is, though in a container it is not — is a peer of what
+// it was bound from: unmounting a disk beneath the bind unmounts, by
+// propagation, the disk beneath the app's own directory, under the
+// live app [M71]. Private, the bind's mounts are its own, and taking
+// them away takes nothing else. Before the unmount as well as after
+// the bind: a mount a killed run of an earlier version left is swept
+// by this one.
 var (
-	bindMount     = func(source, target string) error { return unix.Mount(source, target, "", unix.MS_BIND|unix.MS_REC, "") }
-	unmountDetach = func(target string) error { return unix.Unmount(target, unix.MNT_DETACH) }
+	bindMount = func(source, target string) error {
+		if err := unix.Mount(source, target, "", unix.MS_BIND|unix.MS_REC, ""); err != nil {
+			return err
+		}
+		if err := private(target); err != nil {
+			_ = unix.Unmount(target, unix.MNT_DETACH)
+			return fmt.Errorf("making it private: %w", err)
+		}
+		return nil
+	}
+	unmountDetach = func(target string) error {
+		// Not a mount, or gone already: the unmount says so.
+		_ = private(target)
+		return unix.Unmount(target, unix.MNT_DETACH)
+	}
+	private = func(target string) error { return unix.Mount("", target, "", unix.MS_REC|unix.MS_PRIVATE, "") }
 )
 
 func (p pin) close() { _ = unix.Close(p.fd) }

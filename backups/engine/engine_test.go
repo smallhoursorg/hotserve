@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -75,6 +76,12 @@ type box struct {
 	shadow                     string   // its password as the shadow database holds it
 	noShadow                   bool     // the shadow database holds no entry for it
 	shadowErr                  error    // the shadow database could not be asked
+	unseen                     bool     // the manager does not see this command's mounts
+	seesErr                    error    // the manager could not be asked
+	lookedFor                  []string // the mounts the manager was asked about
+	selfBound, selfUnbound     []string // the probe's own mount, made and taken away
+	accountLookups             int      // how often the account was looked up
+	owned4                     []passwd // the accounts a fetch's directory was given to
 	bareNodes                  bool     // the listing says nothing of which file a node is
 	holders                    []string // the accounts that hold that uid, the backup account among them
 	groups                     []int    // the account's groups, its primary among them
@@ -87,6 +94,13 @@ type box struct {
 }
 
 func (b *box) ManagerVersion(context.Context) (int, error) { return b.version, nil }
+
+// Sees: the manager sees the mounts this command makes, unless a test
+// says the command has a mount namespace of its own.
+func (b *box) Sees(_ context.Context, mountPoint string) (bool, error) {
+	b.lookedFor = append(b.lookedFor, mountPoint)
+	return !b.unseen, b.seesErr
+}
 
 var roleRe = regexp.MustCompile(`^hotserve_backup_([a-z]+)[0-9]*_`)
 
@@ -111,6 +125,7 @@ func newBox(t *testing.T) *box {
 	b.hotserveGid = 1000
 	groupNamed = func(context.Context, string) (int, bool, error) { return b.hotserveGid, true, nil }
 	account = func(context.Context, string) (passwd, error) {
+		b.accountLookups++
 		return passwd{name: backupUser, password: b.passwordField, shell: b.shell, home: b.home, uid: b.uid, gid: b.gid, exists: b.account}, nil
 	}
 	holders = func(context.Context, int) ([]string, error) { return b.holders, nil }
@@ -157,9 +172,12 @@ func newBox(t *testing.T) *box {
 	freeUnder = func(string) (uint64, error) { return b.free, nil }
 	sameFilesystem = func(string, string) (bool, error) { return b.oneDisk, nil }
 	t.Cleanup(func() { freeUnder, sameFilesystem = oldFree, oldSame })
-	old, oldMount, oldUnmount, oldUnder, oldBackup := dataOwner, bindMount, unmountDetach, mountsUnder, backupOwner
-	dataOwner = func() (int, int, error) { return os.Getuid(), os.Getgid(), nil }
-	backupOwner = func(context.Context) (int, int, error) { return os.Getuid(), os.Getgid(), nil }
+	old, oldMount, oldUnmount, oldUnder := dataOwner, bindMount, unmountDetach, mountsUnder
+	dataOwner = func(context.Context) (int, int, error) { return os.Getuid(), os.Getgid(), nil }
+	oldOwnerOf, oldSelfBind := ownerOf, selfBind
+	ownerOf = func(acct passwd) (int, int) { b.owned4 = append(b.owned4, acct); return os.Getuid(), os.Getgid() }
+	selfBind = func(dir string) error { b.selfBound = append(b.selfBound, dir); return nil }
+	t.Cleanup(func() { ownerOf, selfBind = oldOwnerOf, oldSelfBind })
 	// mount(2) needs a privilege this lane does not have, and what the
 	// kernel does with it is the integration suite's to show. Here it is
 	// enough to know what was asked for: which directory, at the moment
@@ -170,10 +188,17 @@ func newBox(t *testing.T) *box {
 		b.mounted[target] = was
 		return err
 	}
-	unmountDetach = func(target string) error { b.unmounted = append(b.unmounted, target); return nil }
+	unmountDetach = func(target string) error {
+		if slices.Contains(b.selfBound, target) {
+			b.selfUnbound = append(b.selfUnbound, target)
+			return nil
+		}
+		b.unmounted = append(b.unmounted, target)
+		return nil
+	}
 	mountsUnder = func(string) ([]string, error) { return b.leftMounts, nil }
 	t.Cleanup(func() {
-		dataOwner, bindMount, unmountDetach, mountsUnder, backupOwner = old, oldMount, oldUnmount, oldUnder, oldBackup
+		dataOwner, bindMount, unmountDetach, mountsUnder = old, oldMount, oldUnmount, oldUnder
 	})
 	return b
 }

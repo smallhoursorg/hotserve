@@ -20,8 +20,18 @@
 # And a command run from a shell — sudo hotserve-backup run, a restore
 # at its prompt — is no unit of the package's: it holds the run lock,
 # is said by what the lock says of it, and is left to run.
+#
+# $2, where it is given, is a file to write the timers that were
+# running into: what an upgrade stopped, postinstall starts again, and
+# nothing else.
 stop_backups() {
 	[ -d /run/systemd/system ] || return 0
+	if [ -n "${2:-}" ]; then
+		: >"$2"
+		for u in hotserve-backup.timer hotserve-backup-drill.timer; do
+			if systemctl is-active --quiet "$u" 2>/dev/null; then echo "$u" >>"$2"; fi
+		done
+	fi
 	said=$(systemctl stop hotserve-backup.timer hotserve-backup-drill.timer hotserve-backup.service hotserve-backup-drill.service 2>&1) || true
 	stuck=""
 	for u in hotserve-backup.timer hotserve-backup-drill.timer hotserve-backup.service hotserve-backup-drill.service; do
@@ -53,7 +63,7 @@ upgrade | failed-upgrade)
 	# out [M62]); postinstall starts the timers again, those that were
 	# enabled, and the next hour's run does the backup this one did not
 	# finish.
-	stop_backups "what it starts from here on is the new version's; the upgrade goes on"
+	stop_backups "what it starts from here on is the new version's; the upgrade goes on" /run/hotserve-backup.stopped-for-upgrade
 	;;
 *)
 	if command -v systemctl >/dev/null 2>&1; then

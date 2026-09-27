@@ -84,7 +84,7 @@ var (
 	// its shell and home, and whether it is there at all. getent's
 	// argv is constant; its exit 2 is "not found".
 	account = func(ctx context.Context, name string) (passwd, error) {
-		out, exit, err := lookup(ctx, getent, "passwd", name)
+		out, exit, err := lookup(ctx, lookupClock, getent, "passwd", name)
 		if err != nil {
 			return passwd{}, err
 		}
@@ -108,7 +108,7 @@ var (
 	// daemon down, its module not installed — exits 2, as absence does:
 	// what it holds is not known, and nothing local can know it.
 	holders = func(ctx context.Context, uid int) ([]string, error) {
-		out, exit, err := lookup(ctx, getent, "passwd")
+		out, exit, err := lookup(ctx, enumerationClock, getent, "passwd")
 		if err != nil {
 			return nil, err
 		}
@@ -128,7 +128,7 @@ var (
 		}
 		for _, source := range sources {
 			argv := []string{getent, "-s", source, "passwd", strconv.Itoa(uid)}
-			out, exit, err := lookup(ctx, argv...)
+			out, exit, err := lookup(ctx, lookupClock, argv...)
 			if err != nil {
 				return nil, err
 			}
@@ -153,7 +153,7 @@ var (
 	// hotserve group is the one the apps' env files and directories
 	// belong to, whatever the hotserve user's primary group is.
 	groupNamed = func(ctx context.Context, name string) (gid int, exists bool, err error) {
-		out, exit, err := lookup(ctx, getent, "group", name)
+		out, exit, err := lookup(ctx, lookupClock, getent, "group", name)
 		if err != nil {
 			return 0, false, err
 		}
@@ -178,7 +178,7 @@ var (
 	// them, as id(1) resolves them: what the manager gives a unit that
 	// runs as the account.
 	groupsOf = func(ctx context.Context, name string) ([]int, error) {
-		out, exit, err := lookup(ctx, idProgram, "-G", name)
+		out, exit, err := lookup(ctx, lookupClock, idProgram, "-G", name)
 		if err != nil {
 			return nil, err
 		}
@@ -226,13 +226,32 @@ const (
 // that never answers is given up on, and said.
 var lookupClock = 10 * time.Second
 
+// enumerationClock bounds the one lookup that lists a whole database,
+// which takes as long as the database is large: on a box joined to a
+// directory of tens of thousands of accounts, ten seconds would refuse
+// every run (the owner, 2026-09-27: a minute).
+var enumerationClock = time.Minute
+
+// readable is whether a file can be opened to be read, by whoever this
+// command is; nothing of it is read.
+var readable = func(path string) error {
+	f, err := os.Open(path) //nolint:gosec // a constant path, opened and closed
+	if err != nil {
+		return err
+	}
+	return f.Close()
+}
+
+// shadowFile is the shadow database's own file.
+var shadowFile = "/etc/shadow"
+
 // lookup runs one program of the account databases — getent, id — with
 // a constant argv, and returns what it printed and its exit status. The
 // command ends with the context, and at the bound: an error is a
 // command that could not be run or did not answer, never an exit
 // status, which is the caller's to read.
-var lookup = func(ctx context.Context, argv ...string) (out []byte, exit int, err error) {
-	bounded, cancel := context.WithTimeout(ctx, lookupClock)
+var lookup = func(ctx context.Context, within time.Duration, argv ...string) (out []byte, exit int, err error) {
+	bounded, cancel := context.WithTimeout(ctx, within)
 	defer cancel()
 	cmd := exec.CommandContext(bounded, argv[0], argv[1:]...) //nolint:gosec // a constant program; the arguments are constants, a uid, or a source's name that matched sourceRe
 	// What the command leaves behind holding its pipe is not waited for.
@@ -245,7 +264,7 @@ var lookup = func(ctx context.Context, argv ...string) (out []byte, exit int, er
 	case ctx.Err() != nil:
 		return nil, 0, fmt.Errorf("%s: %w", strings.Join(argv, " "), ctx.Err())
 	case bounded.Err() != nil:
-		return nil, 0, fmt.Errorf("%s did not answer within %s", strings.Join(argv, " "), lookupClock)
+		return nil, 0, fmt.Errorf("%s did not answer within %s", strings.Join(argv, " "), within)
 	case errors.As(err, &ended) && ended.ExitCode() >= 0:
 		return out, ended.ExitCode(), nil
 	}
@@ -337,13 +356,21 @@ var shadowed = func(ctx context.Context, name string) (field string, found bool,
 	if !isRoot() {
 		return "", false, errNeedsRoot
 	}
-	out, exit, err := lookup(ctx, getent, "shadow", name)
+	out, exit, err := lookup(ctx, lookupClock, getent, "shadow", name)
 	if err != nil {
 		return "", false, err
 	}
 	switch exit {
 	case 0:
 	case 2:
+		// "Not found" is believed only of a database that could be
+		// read: getent says 2 as well where root could not open it — a
+		// security module, a root that is one in name — and an account
+		// with a password would pass as one with nothing to log in
+		// with. No file at all is no database.
+		if err := readable(shadowFile); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return "", false, fmt.Errorf("%s could not be read, so whether the %s account has a password is not known: %w", shadowFile, name, err)
+		}
 		return "", false, nil
 	default:
 		return "", false, fmt.Errorf("%s shadow %s: exit status %d", getent, name, exit)
@@ -404,7 +431,7 @@ func accountUsable(ctx context.Context, acct passwd) error {
 	// account exists for; in root's, what root's group reads. (A gid
 	// of its own is not asked for: a group reads no process's
 	// environment.)
-	var identity, lockable []string
+	var identity, lockable, mended []string
 	if acct.uid == 0 {
 		identity = append(identity, "uid 0 (root)")
 	}
@@ -474,20 +501,23 @@ func accountUsable(ctx context.Context, acct passwd) error {
 	case !strings.HasPrefix(password, "!") && !strings.HasPrefix(password, "*"):
 		lockable, withPassword = append(lockable, "a password that is not locked"), true
 	}
+	if withPassword {
+		mended = append(mended, "the password")
+	}
 	// The shell, which is what login runs — the paths known to refuse a
 	// login, not a name (a copy of bash at /tmp/nologin is a login
 	// shell) — and the home.
 	switch acct.shell {
 	case "/usr/sbin/nologin", "/sbin/nologin", "/bin/false", "/usr/bin/false":
 	case "": // no shell set: login gives /bin/sh
-		lockable = append(lockable, "a login shell (none set, which is /bin/sh)")
+		lockable, mended = append(lockable, "a login shell (none set, which is /bin/sh)"), append(mended, "the shell")
 	default:
-		lockable = append(lockable, fmt.Sprintf("a login shell (%s, not one of /usr/sbin/nologin, /sbin/nologin, /bin/false, /usr/bin/false)", record.Text(acct.shell)))
+		lockable, mended = append(lockable, fmt.Sprintf("a login shell (%s, not one of /usr/sbin/nologin, /sbin/nologin, /bin/false, /usr/bin/false)", record.Text(acct.shell))), append(mended, "the shell")
 	}
 	// /nonexistent is the home setup gives; a directory of that name is
 	// nobody's home, and refusing it would refuse setup's own account.
 	if acct.home != "/nonexistent" && homeExists(acct.home) {
-		lockable = append(lockable, fmt.Sprintf("a home directory that exists (%s)", record.Text(acct.home)))
+		lockable, mended = append(lockable, fmt.Sprintf("a home directory that exists (%s)", record.Text(acct.home))), append(mended, "the home")
 	}
 	if len(identity)+len(lockable) == 0 {
 		if !looked {
@@ -509,7 +539,13 @@ func accountUsable(ctx context.Context, acct passwd) error {
 	case len(lockable) == 0:
 		remedy = remake + "; nothing short of that changes who the account is"
 	default:
-		remedy = remake + ", which mends all of it; to " + lock + " would mend the shell and the home alone"
+		// Said of the faults the account has: the password, the shell,
+		// the home.
+		what := mended[0]
+		if n := len(mended); n > 1 {
+			what = strings.Join(mended[:n-1], ", ") + " and " + mended[n-1]
+		}
+		remedy = remake + ", which mends all of it; to " + lock + " would mend " + what + " alone"
 	}
 	if !looked {
 		remedy += "; " + unseen
@@ -521,7 +557,7 @@ func accountUsable(ctx context.Context, acct passwd) error {
 // AccountReady is accountReady for the `account` command: what the
 // package's postinstall asks, so that its warning is setup's own words,
 // and what an administrator asks after mending the account.
-func AccountReady(ctx context.Context) error { return accountReady(ctx) }
+func AccountReady(ctx context.Context) error { _, err := accountReady(ctx); return err }
 
 // accountReady is what a run, a restore and a drill ask of the account
 // restic runs as, before any unit: that it is there, and that nobody
@@ -529,15 +565,19 @@ func AccountReady(ctx context.Context) error { return accountReady(ctx) }
 // run, since it is the run that puts the credential in that account's
 // environment. Not there: a box with a credential file written by
 // hand and no account, whose units would end 217/USER.
-func accountReady(ctx context.Context) error {
+//
+// The account it returns is the one that was looked at: what a fetch
+// gives its directory to, with no second lookup for a directory to
+// answer otherwise.
+func accountReady(ctx context.Context) (passwd, error) {
 	acct, err := account(ctx, backupUser)
 	if err != nil {
-		return err
+		return passwd{}, err
 	}
 	if !acct.exists {
-		return fmt.Errorf("the %s account is not there: sudo hotserve-backup setup <repository> makes it (%s)", backupUser, useraddArgv())
+		return passwd{}, fmt.Errorf("the %s account is not there: sudo hotserve-backup setup <repository> makes it (%s)", backupUser, useraddArgv())
 	}
-	return accountUsable(ctx, acct)
+	return acct, accountUsable(ctx, acct)
 }
 
 // programs are what the units run, and where. A unit whose command is

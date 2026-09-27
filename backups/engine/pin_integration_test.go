@@ -112,3 +112,67 @@ func TestIntegrationWhatIsBoundIsWhatWasPinnedWhateverTheAppDoesToTheName(t *tes
 	}
 	t.Logf("%d units, %d flips of the name meanwhile, %d pins refused mid-flip", shown, n, refused)
 }
+
+// What a run binds and takes away is its own, and nothing of the
+// app's goes with it. On a box systemd has booted the root mount is
+// shared — in a container it is not, which is why no lane saw this —
+// and a recursive bind of a shared mount is a peer of what it was
+// bound from: unmounting the disk beneath the bind unmounted, by
+// propagation, the operator's disk beneath the app's own directory,
+// under the live app, at the end of every run [M71]. Staged on a
+// shared mount of the test's own: the disk stays where the operator
+// put it, through a bind taken away, and through the sweep of one a
+// killed run of an earlier version left shared.
+func TestIntegrationTakingABindAwayLeavesTheAppsDiskMounted(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root and mount(2)")
+	}
+	base, err := os.MkdirTemp("/root", "propagation-")
+	must(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	sh := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command(args[0], args[1:]...).CombinedOutput(); err != nil {
+			t.Fatalf("%v: %v: %s", args, err, out)
+		}
+	}
+	// A box's root, as systemd leaves it: shared.
+	sh("mount", "-t", "tmpfs", "tmpfs", base)
+	t.Cleanup(func() { _ = exec.Command("umount", "-R", "-l", base).Run() })
+	sh("mount", "--make-rshared", base)
+	shared, disk, run := filepath.Join(base, "blog", "shared"), filepath.Join(base, "blog", "shared", "uploads", "disk"), filepath.Join(base, "run")
+	must(t, os.MkdirAll(disk, 0o755))
+	must(t, os.MkdirAll(run, 0o700))
+	sh("mount", "-t", "tmpfs", "tmpfs", disk)
+	must(t, os.WriteFile(filepath.Join(disk, "kept"), []byte("the operator's\n"), 0o644))
+	mounted := func(when string) {
+		t.Helper()
+		if _, err := os.Stat(filepath.Join(disk, "kept")); err != nil {
+			t.Fatalf("%s, the disk inside the app's own directory was unmounted with it: %v", when, err)
+		}
+	}
+	mounted("before anything")
+
+	p, err := pinRoot(shared)
+	must(t, err)
+	defer p.close()
+	unmount, err := p.mountAt(filepath.Join(run, "mount-1"))
+	must(t, err)
+	if _, err := os.Stat(filepath.Join(run, "mount-1", "uploads", "disk", "kept")); err != nil {
+		t.Fatalf("the disk did not come along with the bind: %v", err)
+	}
+	unmount()
+	mounted("a run's bind taken away")
+
+	// As an earlier version bound it, and a killed run left it.
+	left := filepath.Join(run, "mount-2")
+	must(t, os.Mkdir(left, 0o700))
+	sh("mount", "--rbind", shared, left)
+	must(t, unmountDetach(left))
+	mounted("a bind an earlier version left, swept")
+	under, err := mountsUnder(run)
+	must(t, err)
+	if len(under) != 0 {
+		t.Fatalf("still mounted under the run directory: %q", under)
+	}
+}

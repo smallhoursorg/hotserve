@@ -141,10 +141,14 @@ if [ -d /run/systemd/system ]; then
 		# What preremove stopped for the upgrade, this starts again:
 		# preremove's stop is systemctl's own, whatever a policy-rc.d
 		# says [M69], and under one deb-systemd-invoke has just started
-		# nothing. Only on an upgrade, and only a timer that is enabled.
-		if [ -n "${2:-}" ]; then
+		# nothing. Only the timers preremove wrote down as running when
+		# it stopped them — not one an administrator had stopped, and
+		# none on an install that is no upgrade — and only where it is
+		# still enabled.
+		stopped=/run/hotserve-backup.stopped-for-upgrade
+		if [ -f "$stopped" ]; then
 			for u in hotserve-backup.timer hotserve-backup-drill.timer; do
-				if systemctl is-enabled --quiet "$u" 2>/dev/null && ! systemctl is-active --quiet "$u" 2>/dev/null; then
+				if grep -qx "$u" "$stopped" && systemctl is-enabled --quiet "$u" 2>/dev/null && ! systemctl is-active --quiet "$u" 2>/dev/null; then
 					systemctl start "$u" 2>/dev/null || true
 				fi
 			done
@@ -155,6 +159,7 @@ if [ -d /run/systemd/system ]; then
 		systemctl enable hotserve-backup.timer hotserve-backup-drill.timer 2>/dev/null || true
 		systemctl "$action" hotserve-backup.timer hotserve-backup-drill.timer 2>/dev/null || true
 	fi
+	rm -f /run/hotserve-backup.stopped-for-upgrade
 	if systemctl is-enabled --quiet hotserve-backup.timer 2>/dev/null; then
 		echo "Backups: the hourly timer and the Sunday restore drill are enabled, and run nothing until:"
 		echo "  sudo hotserve-backup setup <repository>"

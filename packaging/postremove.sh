@@ -16,15 +16,21 @@
 #   app data) — and is named and kept.
 # - /var/cache/hotserve-backup, restic's cache, owned by the account and
 #   holding nothing of an app's, goes.
-# - /run/hotserve-backup: a run killed mid-way leaves an app's data
-#   bind-mounted under its run directory, and an rm -r there would
-#   remove the app's files through the mount [measured in #153]. After
-#   a remove or a purge there is no next run to sweep such mounts, so
-#   they are unmounted here, deepest first, as the sweep does; never
-#   rm -r. On purge the run directories then go by rmdir, and their
-#   files one by one; what would not unmount is named, and left.
-#   Nothing of it is touched while a command holds the run lock: the
-#   mounts are that command's.
+# - /run/hotserve-backup: a command killed mid-way leaves units
+#   running — from a shell it has no service to bind them to — and an
+#   app's data bind-mounted under its run directory. After a remove or
+#   a purge there is no next run to sweep either, so they are swept
+#   here as a run sweeps them: the units stopped by the exact names
+#   the command recorded, never by a pattern; the mounts made private
+#   and taken away. Private first: on a box systemd has booted the
+#   root mount is shared, a recursive bind of it is its peer, and
+#   unmounting the disk beneath the bind unmounts the disk beneath the
+#   app's own directory [M71]. Never rm -r: through a mount that
+#   removes the app's files [measured in #153]. On purge the run
+#   directories then go by rmdir, and their files one by one — and not
+#   at all while anything is still mounted beneath, which is named.
+#   None of it is touched while anything holds the run lock: the units
+#   and the mounts are that command's.
 # - The persistent timers' stamps go, on remove and on purge: with
 #   them, and the credential file kept, a reinstall reads a run and a
 #   drill as missed and catches up inside the install [M68]. Without
@@ -36,40 +42,64 @@ set -e
 timers="hotserve-backup.timer hotserve-backup-drill.timer"
 run=/run/hotserve-backup
 
-# lock_held: a command run from a shell holds the run lock. preremove
-# stopped the services, so whoever holds it now is no unit's.
+# lock_held: something holds the run lock — a command run from a
+# shell, or a service that would not stop, which preremove has named.
 lock_held() {
 	[ -f "$run/lock" ] && command -v flock >/dev/null 2>&1 && ! flock -n "$run/lock" true 2>/dev/null
 }
 
-# unmount_left: what mountinfo lists under the run directory,
-# unmounted deepest first. Detached, as the run's own sweep does it: a
-# mount that is busy goes once it no longer is, and its mount point is
-# free at once. A path mountinfo escapes (a space, a backslash) is none
-# a run makes — its mount points are mount-<n> under a hex name — and
-# is named rather than guessed at.
-unmount_left() {
+# mounted_beneath: the mount points under the run directory, as
+# mountinfo writes them — a space as \040 — shallowest first.
+mounted_beneath() {
 	[ -r /proc/self/mountinfo ] || return 0
-	left=$(awk -v dir="$run/" 'index($5, dir) == 1 { print $5 }' /proc/self/mountinfo | sort -r)
-	for m in $left; do
-		case "$m" in
-		*\\*) echo "hotserve: $m is still mounted: a mount point this package does not make; unmount it yourself (sudo umount), and do not rm -r $run before" >&2 ;;
-		*) umount -l "$m" 2>/dev/null || true ;;
+	awk -v dir="$run/" 'index($5, dir) == 1 { print $5 }' /proc/self/mountinfo | sort
+}
+
+# stop_left: the units a killed command left running, by the exact
+# names it recorded as it started each, as the next run would have
+# stopped them. A line that is not a name the engine writes is not
+# passed to the manager. init-unit is not among them, and is left to
+# end: it is a restic init, which stopped half way leaves a repository
+# no password opens.
+stop_left() {
+	[ -f "$run/units" ] && [ -d /run/systemd/system ] || return 0
+	while read -r u; do
+		echo "$u" | grep -Eq '^hotserve_backup_[a-z0-9_-]+\.service$' || continue
+		systemctl stop "$u" 2>/dev/null || true
+		state=$(systemctl show -p ActiveState --value "$u" 2>/dev/null) || state=""
+		case "$state" in
+		inactive | failed | "") systemctl reset-failed "$u" 2>/dev/null || true ;;
+		*) echo "hotserve: $u, which a backup command left running, would not stop (it is $state): it holds the repository credential; stop it yourself (sudo systemctl stop $u)" >&2 ;;
 		esac
+	done <"$run/units"
+}
+
+# unmount_left: what is mounted under the run directory, taken away.
+# Each of the engine's own mount points — mount-<n> under a hex name,
+# nothing mountinfo escapes — is made private with all beneath it,
+# and then detached with all beneath it, as the run's own sweep does:
+# a disk that came along with the bind, whatever its name, goes with
+# it and takes nothing of the app's. What is still mounted after that
+# is named, once.
+unmount_left() {
+	for m in $(mounted_beneath | grep -v '\\' || true); do
+		# Gone with its parent, a line ago.
+		grep -qF " $m " /proc/self/mountinfo || continue
+		mount --make-rprivate "$m" 2>/dev/null || continue
+		umount -l "$m" 2>/dev/null || true
 	done
-	for m in $(awk -v dir="$run/" 'index($5, dir) == 1 { print $5 }' /proc/self/mountinfo | sort -r); do
-		case "$m" in
-		*\\*) ;;
-		*) echo "hotserve: $m would not unmount: an app's data is mounted there; unmount it yourself (sudo umount $m), and do not rm -r $run before" >&2 ;;
-		esac
-	done
+	# printf, not echo: a shell's echo may read mountinfo's escapes, and
+	# what is printed is what mountinfo says, whatever the shell.
+	left=$(mounted_beneath | tr '\n' ' ')
+	[ -z "$left" ] || printf '%s\n' "hotserve: still mounted under $run: $left— unmount each yourself (sudo umount), and do not rm -r $run before: that removes an app's files through the mount" >&2
 }
 
 # remove_run: the run directory's own files and directories, one by
-# one and by rmdir. A mount point still mounted refuses both, and
-# whatever stays is named.
+# one and by rmdir — and nothing at all while anything is mounted
+# beneath it, which unmount_left has named.
 remove_run() {
 	[ -d "$run" ] || return 0
+	[ -z "$(mounted_beneath)" ] || return 0
 	for d in "$run"/*/; do
 		[ -d "$d" ] || continue
 		for f in "$d"* "$d".[!.]*; do
@@ -92,8 +122,9 @@ remove | purge)
 		rm -f "/var/lib/systemd/timers/stamp-$u"
 	done
 	if lock_held; then
-		echo "hotserve: a backup command is under way from a shell ($(head -1 "$run/lock" 2>/dev/null)), and is left to run: $run and what is mounted under it are left to it" >&2
+		echo "hotserve: the run lock is held ($(head -1 "$run/lock" 2>/dev/null)): a backup is still under way, and is left to run; $run, its units and what is mounted under it are left to it" >&2
 	else
+		stop_left
 		unmount_left
 		[ "$1" != purge ] || remove_run
 	fi

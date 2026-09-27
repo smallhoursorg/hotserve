@@ -5,7 +5,9 @@
 # drill with the hardening the files say and nothing more — the
 # measurement of that set, PLAN M54/M55 — bind their units to
 # themselves, do nothing before setup, fail as units when they fail,
-# order the drill behind a run, and fire from their timers as written.
+# order the drill behind a run, fire from their timers as written,
+# refuse in a mount namespace of their own, and leave an operator's
+# disk mounted.
 # Nothing here enables a timer for good: a timer firing into another
 # suite would take the run lock from under it.
 . /lib.sh
@@ -235,27 +237,37 @@ systemctl daemon-reload
 [ "$(prop $T ActiveState)" = inactive ] && [ "$(prop $DT ActiveState)" = inactive ] && pass "the timers are stopped again for the suites after this one" || fail "timers: $(systemctl show -p ActiveState $T $DT | tr '\n' ' ')"
 nothing_left "after the firing"
 
-echo "=== units 6: an upload shown something else in an item's place is said, and not taken as backed up ==="
+echo "=== units 6: a run in a mount namespace of its own refuses, before any upload ==="
 # What the unit files must never give the service is a mount namespace
 # of its own: the manager then cannot see the run's mounts, and binds
 # the bare mount point — root's, empty — into the units in place of the
-# app's data [M54]. The unit table holds the files to that; this is
-# what a run says where it happens all the same. The snapshot has a
-# directory of the item's name, and it is not the directory that was
-# given: another inode, another owner [M63].
+# app's data [M54]. The unit table holds the files to that; a drop-in
+# is an administrator's to write. The run makes one mount of its own,
+# asks the manager whether it sees it, and refuses where it does not
+# [M72]: nothing is uploaded, so no snapshot of empty directories
+# becomes the newest one.
+before=$(snapshots)
 mkdir -p /run/systemd/system/$S.d
 printf '[Service]\nPrivateNetwork=yes\n' >/run/systemd/system/$S.d/10-units-suite.conf
 systemctl daemon-reload
 [ "$(prop $S PrivateNetwork)" = yes ] && pass "fixture: the service has a namespace of its own" || fail "fixture: PrivateNetwork=$(prop $S PrivateNetwork): the row proves nothing"
-systemctl start $S >"$OUT" 2>&1 && fail "a run whose units were shown bare mount points exited 0" || pass "a run whose units were shown bare mount points exits non-zero"
-app_json blog | grep -q "in the snapshot it is not the directory that was given to the backup: it is inode [0-9]*, owner 0:0, and what was given is inode [0-9]*, owner $(id -u hotserve):$(id -g hotserve)" \
-	&& pass "blog's uploads is said to be another directory than the one given: root's, by its inode and owner" || fail "blog's record: $(app_json blog)"
-[ "$(class blog)" != ok ] && pass "and blog is not ok" || fail "blog is ok with an empty directory uploaded in place of its files"
+systemctl start $S >"$OUT" 2>&1 && fail "a run in a mount namespace of its own exited 0" || pass "a run in a mount namespace of its own exits non-zero"
+journalctl --sync >/dev/null 2>&1
+journalctl -u $S --no-pager | grep -q "this command runs in a mount namespace of its own: the manager does not see the mounts it makes" && pass "saying that the manager does not see its mounts" || fail "the journal: $(journalctl -u $S --no-pager | tail -5)"
+journalctl -u $S --no-pager | grep -q "$S is given one by a property it must not have .* systemctl cat $S shows it" && pass "and where to look: systemctl cat, by the unit's name" || fail "the journal names no remedy: $(journalctl -u $S --no-pager | tail -3)"
+[ "$(snapshots)" = "$before" ] && pass "nothing was uploaded: the repository holds the $before snapshots it held" || fail "the repository held $before snapshots and holds $(snapshots): a run that refused uploaded"
+grep -q "runs in a mount namespace of its own" "$STATUS" && pass "and the record says why the run ended" || fail "the record: $(tr -d '\n' <"$STATUS" | cut -c1-300)"
+[ "$(units_left)" = 0 ] && pass "no unit was started for it" || fail "units: $(systemctl list-units --all --no-legend 'hotserve_backup_*')"
+grep -q " /run/hotserve-backup/" /proc/self/mountinfo && fail "the run left its own mount behind: $(grep ' /run/hotserve-backup/' /proc/self/mountinfo)" || pass "and the mount it asked about is gone"
 rm -rf /run/systemd/system/$S.d
 systemctl daemon-reload
 systemctl reset-failed $S 2>/dev/null
 if systemctl start $S >"$OUT" 2>&1; then pass "without the namespace the run works again"; else fail "the run after the drop-in went: $(journalctl -u $S --no-pager | tail -10)"; fi
 expect_class blog ok "without the namespace"
+# Behind that refusal the snapshot is held to the file that was given,
+# by its inode and owner [M63] (the engine's table, and the
+# integration lane against restic); what that must not cost: a
+# declared directory that is empty is the one given, and is backed up.
 as_app sh -c 'mkdir /var/lib/liveswap/blog/shared/empty'
 sed -i 's|^\(\t*\)files  *uploads$|&\n\1files empty|' "$CADDYFILE"
 if grep -q 'files empty' "$CADDYFILE"; then
@@ -264,7 +276,34 @@ if grep -q 'files empty' "$CADDYFILE"; then
 else
 	fail "fixture: no 'files uploads' line in $CADDYFILE to declare an empty directory beside"
 fi
+cp /root/Caddyfile.base "$CADDYFILE"
+as_app rmdir /var/lib/liveswap/blog/shared/empty
 nothing_left "after the namespace"
+
+echo "=== units 7: a disk inside an app's data is backed up with it, and stays where the operator mounted it ==="
+# On a box systemd has booted the root mount is shared; in a container
+# it is left private, and what a shared mount does is never seen. A
+# run binds an app's data recursively, so that a disk mounted inside
+# comes along — and a recursive bind of a shared mount is its peer:
+# taken away as it was, it took the operator's disk from under the
+# live app with it, at the end of every run [M71].
+mount --make-rshared /
+[ "$(findmnt -no PROPAGATION /)" = shared ] && pass "fixture: the root mount is shared, as a booted box has it" || fail "fixture: the root mount is $(findmnt -no PROPAGATION /)"
+mkdir -p /root/disk
+echo on-the-disk >/root/disk/kept.txt
+chown -R hotserve:hotserve /root/disk
+as_app mkdir /var/lib/liveswap/blog/shared/uploads/disk
+mount --bind /root/disk /var/lib/liveswap/blog/shared/uploads/disk
+mountpoint -q /var/lib/liveswap/blog/shared/uploads/disk && pass "fixture: a disk is mounted inside blog's uploads" || fail "fixture: no disk is mounted: the row proves nothing"
+if systemctl start $S >"$OUT" 2>&1; then pass "a run with a disk inside an app's data exits 0"; else fail "the run: $(journalctl -u $S --no-pager | tail -10)"; fi
+expect_class blog ok "with a disk inside its data"
+mountpoint -q /var/lib/liveswap/blog/shared/uploads/disk && [ -f /var/lib/liveswap/blog/shared/uploads/disk/kept.txt ] && pass "the disk is still mounted where the operator put it" || fail "the run unmounted the operator's disk from under the app: $(grep liveswap/blog /proc/self/mountinfo | awk '{print $5}' | tr '\n' ' ')"
+rr ls --no-lock "$(newest blog)" 2>/dev/null | grep -q '^/backup/blog/files/uploads/disk/kept.txt$' && pass "and what is on it is in the snapshot" || fail "the snapshot does not hold the disk's file: $(rr ls --no-lock "$(newest blog)" 2>&1 | grep uploads | head -5)"
+grep -q " /run/hotserve-backup/" /proc/self/mountinfo && fail "mounts of the run are left: $(grep ' /run/hotserve-backup/' /proc/self/mountinfo | awk '{print $5}' | tr '\n' ' ')" || pass "and nothing of the run's is left mounted"
+umount /var/lib/liveswap/blog/shared/uploads/disk
+as_app rmdir /var/lib/liveswap/blog/shared/uploads/disk
+rm -rf /root/disk
+nothing_left "after the disk"
 
 rm -rf /root/bare
 systemctl reset-failed 2>/dev/null

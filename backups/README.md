@@ -92,19 +92,32 @@ At the edges of those:
   which makes the account, is where backups wait.
 - **The stop at an upgrade and at a remove is `systemctl stop`
   itself**, whatever a `policy-rc.d` says of what packages may stop,
-  and what an upgrade stopped it starts again. A unit that will not
+  and the timers an upgrade stopped — those, and no other — it starts
+  again. A unit that will not
   stop is named, with its state, and the upgrade goes on: an upgrade
   of hotserve is not held back by a backup. So is a command run from
   a shell — `sudo hotserve-backup run`, a restore at its prompt —
   which holds the run lock and is no unit: it is named by its pid and
   left to run, with a binary that changes, or goes, under it. Let it
   end first.
-- **What a killed run left mounted** under `/run/hotserve-backup` —
-  an app's data, bound there for the upload — is unmounted at a remove
-  and at a purge, since no next run will sweep it. Never
+- **What a killed command left** under `/run/hotserve-backup` — the
+  units it had started, which from a shell no service ends with it,
+  and an app's data, bound there for the upload — is swept at a remove
+  and at a purge as the next run would have swept it, since there is
+  none: the units stopped by the exact names the command recorded,
+  the mounts taken away. Never
   `rm -r /run/hotserve-backup` while anything is mounted under it
   (`grep /run/hotserve-backup /proc/self/mountinfo`): that removes the
-  app's files through the mount. A mount that would not go is named.
+  app's files through the mount. A mount that is still there is named,
+  and purge then removes nothing beneath the directory.
+- **A disk mounted inside an app's data stays mounted.** A run binds
+  the app's data recursively, so that such a disk is backed up with
+  it, and makes what it has bound private before it does anything
+  else with it, and again before it takes it away; so do remove and
+  purge. On a box systemd has booted the root mount is shared, and a
+  bind of it that is taken away as it was made takes the disk beneath
+  the app's own directory with it [measured; a container's root is
+  private, and shows nothing of this].
 - **What purge keeps in `/var/lib/hotserve-backup`** it names for what
   it is: `staging/` and `restore/` for copies of an app's data, the
   directory itself for a file the package did not make.
@@ -667,6 +680,19 @@ hourly run. It needs no sudoers line.
   *inside* a declared directory; nothing reads it.)
 - A run's leftover unit that will not stop within two minutes: the run
   is refused, and the record says why.
+- A run, a restore or a drill in a mount namespace of its own: the
+  manager binds what it sees into a unit, and where it does not see
+  the mounts a command makes it binds the bare mount point — root's,
+  empty — in the place of an app's data, and the upload is a snapshot
+  of empty directories. A service has such a namespace from any of
+  `PrivateMounts=`, `ProtectSystem=`, `PrivateTmp=`, `PrivateNetwork=`
+  and their kin, which is why the shipped unit files have none of
+  them and a drop-in must add none; a command from a shell, where the
+  shell has one. Each command makes one mount of its own, of nothing,
+  asks the manager for the mount unit it keeps for every mount it
+  sees, and refuses where there is none, naming the unit to look at
+  (`systemctl cat`): before any unit is started, and before anything
+  is uploaded.
 - A restore into place of a snapshot that lacks something its own
   `plan.json` declares, or holds a damaged copy: restore it `--to` a
   directory, or restore another snapshot.
@@ -730,9 +756,11 @@ hourly run. It needs no sudoers line.
   it what it says of absence — and a second account at the uid inside
   one directory that does not list them. Every run asks again. A
   password a directory holds for the account is the directory's to
-  know. Each lookup is given ten seconds; a directory that does not
-  answer in that time refuses the run, which says which lookup it
-  was.
+  know. Each lookup is given ten seconds, and the one that lists the
+  whole passwd database a minute, since it takes as long as a
+  directory is large; a directory that does not answer in that time
+  refuses the run, which says which lookup it was. The `hotserve`
+  account is looked up the same way, through `getent`.
 - `setup`, at a prompt: an empty value, one with a line break or a
   control character, or one that is not UTF-8 — the file cannot hold
   it — three times; and a password not confirmed `stored`.

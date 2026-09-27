@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -193,6 +194,63 @@ func (r *Runner) Scheduled(ctx context.Context, name string) (active, enabled bo
 	}
 	state := str(props["ActiveState"])
 	return state == "active" || state == "activating", str(props["UnitFileState"]) == "enabled", nil
+}
+
+// seesWithin bounds the wait for the manager to have read a mount that
+// was just made: it reads its mounts when the kernel tells it they
+// changed, which is at once [M72], and not before it answers a call
+// that reached it first.
+const seesWithin = 5 * time.Second
+
+// Sees says whether the manager sees a mount at mountPoint, which the
+// caller has just made: the manager keeps a mount unit for every mount
+// of its own mount namespace, and none for a mount made in another. A
+// command the manager does not see the mounts of cannot have them
+// bound into a unit.
+func (r *Runner) Sees(ctx context.Context, mountPoint string) (bool, error) {
+	name := MountUnit(mountPoint)
+	until := time.Now().Add(seesWithin)
+	for {
+		props, err := r.conn.GetAllPropertiesContext(ctx, name)
+		switch {
+		case err != nil && !isNoSuchUnit(err):
+			return false, fmt.Errorf("asking the manager about %s: %w", name, err)
+		case err == nil && str(props["ActiveState"]) == "active":
+			return true, nil
+		case !time.Now().Before(until):
+			return false, nil
+		}
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+// MountUnit is the name of the manager's mount unit for a path, as
+// systemd-escape --path --suffix=mount writes it: the path without its
+// first and last slash, each slash a dash, and every byte that is not
+// a letter, a digit, ":", "_" or "." — and a "." that comes first —
+// as \x and its two hex digits. The root is "-".
+func MountUnit(path string) string {
+	path = strings.Trim(filepath.Clean(path), "/")
+	if path == "" {
+		return "-.mount"
+	}
+	var b strings.Builder
+	for i := 0; i < len(path); i++ {
+		c := path[i]
+		switch {
+		case c == '/':
+			b.WriteByte('-')
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == ':', c == '_', c == '.' && i > 0:
+			b.WriteByte(c)
+		default:
+			fmt.Fprintf(&b, `\x%02x`, c)
+		}
+	}
+	return b.String() + ".mount"
 }
 
 // ManagerVersion is the major version of the manager the Runner is

@@ -24,12 +24,10 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"os/user"
 	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -82,6 +80,10 @@ type Runner interface {
 	// ManagerVersion is the manager's major version: setup refuses one
 	// older than the properties here are built on.
 	ManagerVersion(ctx context.Context) (int, error)
+	// Sees says whether the manager sees a mount at the path: whether
+	// a mount this command makes is one the manager can bind into a
+	// unit.
+	Sees(ctx context.Context, mountPoint string) (bool, error)
 }
 
 // initWait bounds the wait for a restic init an earlier setup left
@@ -109,6 +111,11 @@ type run struct {
 	keepDir bool
 	// swept is what open removed of an interrupted setup's leavings.
 	swept []string
+	// data is the data user's ids, looked up once as the command
+	// begins, and account the backup account as the check found it.
+	dataUID, dataGID int
+	dataErr          error
+	account          passwd
 	// given is which file each files item of the app under way is, by
 	// its path in the upload unit's view: what the snapshot is held to.
 	given map[string]identity
@@ -162,10 +169,53 @@ func begin(ctx context.Context, cfg Config, r Runner) (x *run, end func(), err e
 	if err := programsInstalled(cfg); err != nil {
 		return x, end, err
 	}
-	if err := accountReady(ctx); err != nil {
+	if x.account, err = accountReady(ctx); err != nil {
+		return x, end, err
+	}
+	if err := x.seen(ctx); err != nil {
 		return x, end, err
 	}
 	return x, end, nil
+}
+
+// seen is whether the manager sees the mounts this command makes. It
+// binds what it sees: where it does not — this command in a mount
+// namespace of its own, which a service gets from any of a dozen
+// properties [M22, M54] — it binds the bare mount point, root's and
+// empty, into every unit in the place of an app's data, and an upload
+// is a snapshot of empty directories. So the command makes one mount
+// of its own, of nothing, asks the manager whether it has a mount unit
+// for it, and refuses where it has none: once, before any unit is
+// shown anything [M72]. (The manager's namespace is not this
+// command's to read: /proc/1/ns/mnt asks for more capabilities than
+// the run's service has.)
+func (x *run) seen(ctx context.Context) error {
+	probe := filepath.Join(x.dir, "seen")
+	if err := os.Mkdir(probe, 0o700); err != nil {
+		return err
+	}
+	defer os.Remove(probe) //nolint:errcheck // an empty directory of the run's own; removeRunDir is behind it
+	if err := selfBind(probe); err != nil {
+		return fmt.Errorf("making a mount of this command's own: %w", err)
+	}
+	seen, err := x.r.Sees(ctx, probe)
+	if uerr := unmountDetach(probe); uerr != nil && err == nil {
+		err = fmt.Errorf("taking away the mount of this command's own: %w", uerr)
+	}
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("whether the manager sees the mounts this command makes could not be asked: %w", err)
+	}
+	if !seen {
+		where := "it was started from a shell that has one: run it from the box's own"
+		if x.cfg.BindsTo != "" {
+			where = fmt.Sprintf("%s is given one by a property it must not have — PrivateMounts=, ProtectSystem=, PrivateTmp=, PrivateNetwork= and their kin: systemctl cat %s shows it, a drop-in among what it lists", x.cfg.BindsTo, x.cfg.BindsTo)
+		}
+		return fmt.Errorf("this command runs in a mount namespace of its own: the manager does not see the mounts it makes, and would show every unit an empty directory in the place of an app's data; nothing was uploaded; %s", where)
+	}
+	return nil
 }
 
 // open is begin without the credential file: what setup, which is
@@ -205,7 +255,8 @@ func open(ctx context.Context, cfg Config, r Runner, say func(string)) (x *run, 
 		unreadable = record.Text(fmt.Sprintf("the previous record could not be read and was replaced: %v", err))
 		prev = &record.Status{Apps: map[string]*record.App{}}
 	}
-	x = &run{cfg: cfg, r: r, nonce: nonce, dir: filepath.Join(cfg.RunDir, nonce), prev: prev,
+	uid, gid, derr := dataOwner(ctx)
+	x = &run{cfg: cfg, r: r, nonce: nonce, dir: filepath.Join(cfg.RunDir, nonce), prev: prev, dataUID: uid, dataGID: gid, dataErr: derr,
 		status: &record.Status{Started: time.Now().UTC(), Warning: unreadable, Apps: map[string]*record.App{}, Listed: prev.Listed, Unlisted: prev.Unlisted, LastDrill: prev.LastDrill}}
 	if err := x.awaitInit(ctx, say); err != nil {
 		return x, unlock, err
@@ -252,6 +303,10 @@ func (x *run) finish(runErr error) (*record.Status, error) {
 	}
 	return x.status, runErr
 }
+
+// dataOwner is the data user's ids, as they were looked up when the
+// command began.
+func (x *run) dataOwner() (uid, gid int, err error) { return x.dataUID, x.dataGID, x.dataErr }
 
 func (x *run) apps(ctx context.Context) error {
 	p, err := x.plan(ctx)
@@ -786,7 +841,7 @@ func (x *run) app(ctx context.Context, root, name string, decl *backupdecl.Confi
 	// The Caddyfile's author is not root, and the upload unit reads any
 	// file it is shown: a root written to make <root>/<app>/shared land
 	// on something that is not an app's data is refused by whose it is.
-	if uid, _, err := dataOwner(); err != nil || sharedPin.owner() != uid {
+	if uid, _, err := x.dataOwner(); err != nil || sharedPin.owner() != uid {
 		return fail(record.Failed, "%s does not belong to the %s user, so it is not an app's data dir (owner uid %d)", shared, dataUser, sharedPin.owner())
 	}
 
@@ -868,7 +923,7 @@ func (x *run) bound(p pin) (source string, unmount func(), err error) {
 // looks inside.
 func (x *run) staging(app string) (string, error) {
 	dir := filepath.Join(x.cfg.StateDir, "staging", app)
-	uid, gid, err := dataOwner()
+	uid, gid, err := x.dataOwner()
 	if err != nil {
 		return "", err
 	}
@@ -1044,37 +1099,31 @@ func (x *run) view(app string, shared pin, staging, declFile string, decl *backu
 	return binds, masked, present, unpin
 }
 
-// dataOwner and backupOwner are the two accounts' ids; variables so a
-// test can run where the accounts do not exist. The backup account's
-// are what the account check was answered with, by the same lookup:
-// os/user reads /etc/passwd alone, and an account a directory holds
-// would pass the check and be unknown here.
+// dataOwner is the data user's ids, and ownerOf those of the backup
+// account as the account check found it; variables so a test can run
+// where the accounts do not exist. Both by the lookup the check makes,
+// getent: os/user reads /etc/passwd alone in this build, and an account
+// a directory holds — which postinstall finds, and makes no local one
+// beside — would be unknown here.
 var (
-	dataOwner   = func() (uid, gid int, err error) { return ids(dataUser) }
-	backupOwner = func(ctx context.Context) (uid, gid int, err error) {
-		acct, err := account(ctx, backupUser)
-		if err != nil {
-			return 0, 0, err
-		}
-		if !acct.exists {
-			return 0, 0, fmt.Errorf("the %s account is not there", backupUser)
-		}
-		return acct.uid, acct.gid, nil
-	}
+	dataOwner = func(ctx context.Context) (uid, gid int, err error) { return ids(ctx, dataUser) }
+	// ownerOf is the ids of an account that was looked up; a variable
+	// so that a test that is not root can stand its own in.
+	ownerOf = func(acct passwd) (uid, gid int) { return acct.uid, acct.gid }
+	// selfBind makes a mount of a directory onto itself: a mount of
+	// this command's own making, with nothing of an app's in it.
+	selfBind = func(dir string) error { return bindMount(dir, dir) }
 )
 
-func ids(name string) (uid, gid int, err error) {
-	u, err := user.Lookup(name)
+func ids(ctx context.Context, name string) (uid, gid int, err error) {
+	acct, err := account(ctx, name)
 	if err != nil {
 		return 0, 0, err
 	}
-	if uid, err = strconv.Atoi(u.Uid); err != nil {
-		return 0, 0, fmt.Errorf("%s's uid %q is not a number", name, u.Uid)
+	if !acct.exists {
+		return 0, 0, fmt.Errorf("the %s account is not there", name)
 	}
-	if gid, err = strconv.Atoi(u.Gid); err != nil {
-		return 0, 0, fmt.Errorf("%s's gid %q is not a number", name, u.Gid)
-	}
-	return uid, gid, nil
+	return acct.uid, acct.gid, nil
 }
 
 // excludePath is where the upload unit finds its exclude file: outside

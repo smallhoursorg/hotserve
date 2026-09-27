@@ -303,7 +303,7 @@ func (x *run) inPlace(ctx context.Context, root string, o RestoreOptions, decl *
 		return "", nil, made, fmt.Errorf("looking at %s: %w", shared, err)
 	}
 	undo = append(undo, sharedPin.close)
-	if uid, _, err := dataOwner(); err != nil || !sharedPin.isDir() || sharedPin.owner() != uid {
+	if uid, _, err := x.dataOwner(); err != nil || !sharedPin.isDir() || sharedPin.owner() != uid {
 		release()
 		return "", nil, made, fmt.Errorf("%s is not a directory of the %s user's, so it is not an app's data dir (owner uid %d)", shared, dataUser, sharedPin.owner())
 	}
@@ -451,7 +451,7 @@ func notOwn(dir string, cfg Config) error {
 // made it is held by descriptor: what is chmod'ed, chowned and bound is
 // the directory that was made, whatever its name leads to by then.
 func (x *run) toDir(dir string) (source string, release func(), err error) {
-	uid, gid, err := dataOwner()
+	uid, gid, err := x.dataOwner()
 	if err != nil {
 		return "", nil, err
 	}
@@ -653,7 +653,7 @@ func (x *run) unstage(ctx context.Context, app, dir string) error {
 			return err
 		}
 	}
-	uid, gid, err := dataOwner()
+	uid, gid, err := x.dataOwner()
 	if err != nil {
 		return err
 	}
@@ -803,10 +803,7 @@ func room(size uint64, fetched, target, stateDir string) error {
 func mib(n uint64) string { return fmt.Sprintf("%d MiB", (n+1<<20-1)>>20) }
 
 func (x *run) fetch(ctx context.Context, app, id, fetched string) error {
-	uid, gid, err := backupOwner(ctx)
-	if err != nil {
-		return err
-	}
+	uid, gid := ownerOf(x.account)
 	if err := errors.Join(os.Chmod(fetched, 0o700), os.Lchown(fetched, uid, gid)); err != nil { //nolint:gosec // a directory, and the backup account's alone
 		return err
 	}

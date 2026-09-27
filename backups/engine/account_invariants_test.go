@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -19,7 +20,11 @@ import (
 // how it is asked.
 
 // The lookups as they are, kept from before any box stands in for them.
-var realAccount, realHolders, realGroupsOf, realGroupNamed, realShadowed, realLookup, realBackupOwner = account, holders, groupsOf, groupNamed, shadowed, lookup, backupOwner
+var realAccount, realHolders, realGroupsOf, realGroupNamed, realShadowed, realLookup, realDataOwner, realOwnerOf = account, holders, groupsOf, groupNamed, shadowed, lookup, dataOwner, ownerOf
+
+// given is how long each command line was given to answer, of those
+// the last databases was asked.
+var given map[string]time.Duration
 
 // said is what a program of the account databases answers.
 type said struct {
@@ -33,14 +38,17 @@ type said struct {
 // test. A command line no row wrote is not found, and said.
 func databases(t *testing.T, conf string, answers map[string]said) {
 	t.Helper()
-	oldLookup, oldConf, oldRoot := lookup, nsswitchFile, isRoot
-	t.Cleanup(func() { lookup, nsswitchFile, isRoot = oldLookup, oldConf, oldRoot })
+	oldLookup, oldConf, oldRoot, oldReadable := lookup, nsswitchFile, isRoot, readable
+	t.Cleanup(func() { lookup, nsswitchFile, isRoot, readable = oldLookup, oldConf, oldRoot, oldReadable })
 	isRoot = func() bool { return true }
+	readable = func(string) error { return nil }
+	given = map[string]time.Duration{}
 	nsswitchFile = filepath.Join(t.TempDir(), "nsswitch.conf")
 	if conf != "" {
 		must(t, os.WriteFile(nsswitchFile, []byte(conf), 0o644))
 	}
-	lookup = func(_ context.Context, argv ...string) ([]byte, int, error) {
+	lookup = func(_ context.Context, within time.Duration, argv ...string) ([]byte, int, error) {
+		given[strings.Join(argv, " ")] = within
 		a, ok := answers[strings.Join(argv, " ")]
 		if !ok {
 			t.Errorf("asked %q, which no row answers", strings.Join(argv, " "))
@@ -137,6 +145,29 @@ func TestEveryHolderOfTheUidIsFound(t *testing.T) {
 			}
 		})
 	}
+	// The listing of the whole database is given a minute (the owner,
+	// 2026-09-27): on a box joined to a large directory it is the one
+	// lookup that takes as long as the directory is large, and ten
+	// seconds would refuse every run there. The lookups by a key are
+	// given ten.
+	databases(t, "passwd: files sss\n", map[string]said{
+		"/usr/bin/getent passwd":              {out: backupLine},
+		"/usr/bin/getent -s files passwd 995": {out: backupLine},
+		"/usr/bin/getent -s sss passwd 995":   {exit: 2},
+	})
+	if _, err := realHolders(context.Background(), 995); err != nil {
+		t.Fatal(err)
+	}
+	for command, want := range map[string]time.Duration{
+		"/usr/bin/getent passwd":              time.Minute,
+		"/usr/bin/getent -s files passwd 995": 10 * time.Second,
+		"/usr/bin/getent -s sss passwd 995":   10 * time.Second,
+	} {
+		if given[command] != want {
+			t.Errorf("%s was given %s to answer, want %s", command, given[command], want)
+		}
+	}
+
 	// An nsswitch.conf that is there and cannot be read refuses: what
 	// the sources are is not known.
 	databases(t, "", map[string]said{"/usr/bin/getent passwd": {out: backupLine}})
@@ -261,6 +292,20 @@ func TestALookupThatFailsRefuses(t *testing.T) {
 	if _, found, err := realShadowed(ctx, backupUser); err != nil || found {
 		t.Fatalf("a shadow entry that is not there: %v, %v", found, err)
 	}
+	// And "not found" of the shadow database is believed only where
+	// the database could be read: getent says 2 as well where root
+	// could not open it — a security module, a root that is one in
+	// name — and an account with a password would pass as one with
+	// nothing to log in with. No file at all is no database.
+	readable = func(string) error { return fs.ErrPermission }
+	if _, found, err := realShadowed(ctx, backupUser); err == nil || found || !strings.Contains(err.Error(), "/etc/shadow could not be read, so whether the hotserve-backup account has a password is not known") {
+		t.Fatalf("a shadow database that could not be read: found = %v, err = %v", found, err)
+	}
+	readable = func(string) error { return fs.ErrNotExist }
+	if _, found, err := realShadowed(ctx, backupUser); err != nil || found {
+		t.Fatalf("no shadow database at all: found = %v, err = %v", found, err)
+	}
+	readable = func(string) error { return nil }
 	// The shadow database is root's to read: asked by anyone else it
 	// answers "not found" for an entry that is there, so anyone else is
 	// told that it could not be asked.
@@ -279,12 +324,8 @@ func TestALookupIsBoundedAndEndsWithItsCommand(t *testing.T) {
 	if _, err := os.Stat("/bin/sleep"); err != nil {
 		t.Skip("no /bin/sleep here")
 	}
-	old := lookupClock
-	lookupClock = 300 * time.Millisecond
-	t.Cleanup(func() { lookupClock = old })
-
 	began := time.Now()
-	_, _, err := realLookup(context.Background(), "/bin/sleep", "5")
+	_, _, err := realLookup(context.Background(), 300*time.Millisecond, "/bin/sleep", "5")
 	if err == nil || !strings.Contains(err.Error(), "/bin/sleep 5 did not answer within 300ms") || errors.Is(err, context.Canceled) {
 		t.Fatalf("a lookup that never answers: err = %v", err)
 	}
@@ -292,11 +333,10 @@ func TestALookupIsBoundedAndEndsWithItsCommand(t *testing.T) {
 		t.Fatalf("a lookup bounded at 300ms took %s", took)
 	}
 
-	lookupClock = time.Minute
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(100*time.Millisecond, cancel)
 	began = time.Now()
-	_, _, err = realLookup(ctx, "/bin/sleep", "5")
+	_, _, err = realLookup(ctx, time.Minute, "/bin/sleep", "5")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("a lookup whose command was stopped: err = %v", err)
 	}
@@ -306,11 +346,11 @@ func TestALookupIsBoundedAndEndsWithItsCommand(t *testing.T) {
 
 	// What it answers otherwise: what was printed, and the exit status,
 	// which is the caller's to read and no error.
-	out, exit, err := realLookup(context.Background(), "/bin/sh", "-c", "echo found; exit 2")
+	out, exit, err := realLookup(context.Background(), time.Minute, "/bin/sh", "-c", "echo found; exit 2")
 	if err != nil || exit != 2 || string(out) != "found\n" {
 		t.Fatalf("out = %q, exit = %d, err = %v", out, exit, err)
 	}
-	if _, _, err := realLookup(context.Background(), "/nonexistent/getent", "passwd"); err == nil {
+	if _, _, err := realLookup(context.Background(), time.Minute, "/nonexistent/getent", "passwd"); err == nil {
 		t.Fatal("a program that is not there answered")
 	}
 }
@@ -343,6 +383,19 @@ func TestTheAccountCheckRunsOnItsCommandsContext(t *testing.T) {
 		if !slices.Contains(asked, want) {
 			t.Errorf("a drill never asked %s: %q", want, asked)
 		}
+	}
+	// And the account is one answer: looked up once, as the command
+	// begins, and what a fetch gives its directory to is the account
+	// that was looked at then — not a second lookup's, which a
+	// directory may answer otherwise.
+	if n := strings.Count(strings.Join(asked, " "), "account"); n != 1 {
+		t.Errorf("the account was looked up %d times in one drill: %q", n, asked)
+	}
+	if !b.started("fetch") {
+		t.Fatal("the drill fetched nothing: the row proves nothing")
+	}
+	if len(b.owned4) == 0 || b.owned4[0].uid != 995 || b.owned4[0].name != backupUser {
+		t.Errorf("the fetch's directory was given to %+v, not to the account the check looked at", b.owned4)
 	}
 }
 
@@ -377,15 +430,20 @@ func TestTheAccountAskedWithoutRoot(t *testing.T) {
 // /etc/passwd alone holds, which knows nothing of an account a
 // directory holds.
 func TestTheAccountIsOneAnswer(t *testing.T) {
-	databases(t, "passwd: files\n", map[string]said{
-		"/usr/bin/getent passwd hotserve-backup": {out: "hotserve-backup:*:4242:4243::/nonexistent:/usr/sbin/nologin\n"},
-	})
-	uid, gid, err := realBackupOwner(context.Background())
-	if err != nil || uid != 4242 || gid != 4243 {
-		t.Fatalf("the account's ids = %d, %d, %v; the lookup said 4242, 4243", uid, gid, err)
+	if uid, gid := realOwnerOf(passwd{name: backupUser, uid: 4242, gid: 4243, exists: true}); uid != 4242 || gid != 4243 {
+		t.Fatalf("the account's ids = %d, %d; the lookup said 4242, 4243", uid, gid)
 	}
-	databases(t, "passwd: files\n", map[string]said{"/usr/bin/getent passwd hotserve-backup": {exit: 2}})
-	if _, _, err := realBackupOwner(context.Background()); err == nil || !strings.Contains(err.Error(), "the hotserve-backup account is not there") {
-		t.Fatalf("with no account: err = %v", err)
+	// The data user the same: the account the box resolves, a
+	// directory's if it is one, as postinstall found it with getent.
+	databases(t, "passwd: files\n", map[string]said{
+		"/usr/bin/getent passwd hotserve": {out: "hotserve:*:5151:5152::/var/lib/hotserve:/usr/sbin/nologin\n"},
+	})
+	uid, gid, err := realDataOwner(context.Background())
+	if err != nil || uid != 5151 || gid != 5152 {
+		t.Fatalf("the data user's ids = %d, %d, %v; the lookup said 5151, 5152", uid, gid, err)
+	}
+	databases(t, "passwd: files\n", map[string]said{"/usr/bin/getent passwd hotserve": {exit: 2}})
+	if _, _, err := realDataOwner(context.Background()); err == nil || !strings.Contains(err.Error(), "the hotserve account is not there") {
+		t.Fatalf("with no data user: err = %v", err)
 	}
 }

@@ -191,6 +191,12 @@ func TestARunRefusesWhatSetupRefusesWithSetupsWords(t *testing.T) {
 		{"a shared uid", func(b *box) { b.holders = []string{"alice", "hotserve-backup"} }, "a uid shared with alice (995)"},
 		{"the hotserve group", func(b *box) { b.groups = []int{995, b.hotserveGid} }, "the hotserve group among its groups"},
 		{"a password", func(b *box) { b.shadow = "$y$j9T$abc" }, "a password that is not locked"},
+		// The manager binds what it sees: where it does not see this
+		// command's mounts it would show every unit a bare mount point
+		// in an app's data's place [M54], so the command refuses before
+		// it shows any unit anything, and before any upload [M72].
+		{"the manager's sight of its mounts", func(b *box) { b.unseen = true }, "runs in a mount namespace of its own: the manager does not see the mounts it makes"},
+		{"an answer from the manager about its mounts", func(b *box) { b.seesErr = errors.New("no reply") }, "whether the manager sees the mounts this command makes could not be asked: no reply"},
 	} {
 		for _, cmd := range runDrillRestore {
 			t.Run(cmd.name+" without "+p.name, func(t *testing.T) {
@@ -296,7 +302,7 @@ func TestPostinstallMakesTheAccountAsSetupDoes(t *testing.T) {
 	line := "useradd " + strings.Join(useradd[1:], " ")
 	// And the e2e fixture that makes it by hand, and the README that
 	// says how: every copy of the line, or one drifts.
-	for _, f := range []string{"../../packaging/postinstall.sh", "../../e2e/backup/lib.sh", "../README.md"} {
+	for _, f := range []string{"../../packaging/postinstall.sh", "../../e2e/backup/lib.sh", "../README.md", "../../.github/workflows/release.yml"} {
 		raw, err := os.ReadFile(f)
 		must(t, err)
 		if !strings.Contains(string(raw), line) {
@@ -361,6 +367,17 @@ func TestAnAccountMadeWrongIsRefusedNotNormalised(t *testing.T) {
 		{"a password in the passwd line itself", with(func(a *acct) { a.passwordField = "$1$old" }), []string{"a password that is not locked"}, locked},
 		{"an empty password field in the passwd line", with(func(a *acct) { a.passwordField = "" }), []string{"no password at all, so that anyone logs in as it"}, locked},
 		{"a password and a login shell", with(func(a *acct) { a.shadow, a.shell = "$y$j9T$abc", "/bin/bash" }), []string{"a password that is not locked", "a login shell (/bin/bash"}, locked},
+		// Both kinds of fault: what locking would mend is said of the
+		// faults the account has, not of two it may not have.
+		{"a password and a shared uid", with(func(a *acct) { a.shadow = "$y$j9T$abc"; a.holders = []string{"alice", "hotserve-backup"} }), []string{"a password that is not locked", "to " + locked + " would mend the password alone"}, remake},
+		{"a home and a shared uid", with(func(a *acct) {
+			a.home, a.homeThere = "/home/hsb", true
+			a.holders = []string{"alice", "hotserve-backup"}
+		}), []string{"a home directory that exists (/home/hsb)", "to " + lock + " would mend the home alone"}, remake},
+		{"a password, a shell, a home and a shared uid", with(func(a *acct) {
+			a.shadow, a.shell, a.home, a.homeThere = "$y$j9T$abc", "/bin/sh", "/home/hsb", true
+			a.holders = []string{"alice", "hotserve-backup"}
+		}), []string{"a password that is not locked", "to " + locked + " would mend the password, the shell and the home alone"}, remake},
 
 		// What no usermod of the shell mends: who the account is. It is
 		// what every restic unit runs as, User= by name, and
@@ -384,7 +401,7 @@ func TestAnAccountMadeWrongIsRefusedNotNormalised(t *testing.T) {
 		{"the hotserve user's primary group, which is not the hotserve group", with(func(a *acct) { a.groups = []int{995, 2000}; a.dataGid = 2000 }), nil, ""},
 
 		// Both kinds: both remedies, each said of what it mends.
-		{"a login shell and a shared uid", with(func(a *acct) { a.shell = "/bin/bash"; a.holders = []string{"alice", "hotserve-backup"} }), []string{"a login shell (/bin/bash", "a uid shared with alice (995)", remake}, remake},
+		{"a login shell and a shared uid", with(func(a *acct) { a.shell = "/bin/bash"; a.holders = []string{"alice", "hotserve-backup"} }), []string{"a login shell (/bin/bash", "a uid shared with alice (995)", remake, "to " + lock + " would mend the shell alone"}, remake},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b, m := setupBox(t)
@@ -400,7 +417,7 @@ func TestAnAccountMadeWrongIsRefusedNotNormalised(t *testing.T) {
 			if tc.a.dataGid != 0 {
 				dataGid = tc.a.dataGid
 			}
-			dataOwner = func() (int, int, error) { return me, dataGid, nil } // restored by the box's cleanup
+			dataOwner = func(context.Context) (int, int, error) { return me, dataGid, nil } // restored by the box's cleanup
 			rep, err := b.setup(t, m, testRepo)
 			if tc.refused == nil {
 				if err != nil || rep.Account != "present" {

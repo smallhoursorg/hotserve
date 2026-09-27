@@ -61,6 +61,14 @@ set -- /dist/hotserve_*_"$arch".deb
 deb=$1
 echo "package under test: $deb"
 
+# The root mount as a box systemd has booted has it: shared. In a
+# container systemd leaves it as it found it, private, and what a
+# shared mount does is then never seen: a recursive bind of it is its
+# peer, and unmounting a disk beneath the bind unmounts the disk
+# beneath what was bound [M71].
+mount --make-rshared /
+[ "$(findmnt -no PROPAGATION /)" = shared ] || die "the root mount is $(findmnt -no PROPAGATION /), not shared: the mount rows would prove nothing of a real box"
+
 stage "stage 1: install, service basics, reload"
 # The image ships without apt lists; refresh them so the package's
 # Depends (libpam-systemd, dbus) resolve the way they would on a real
@@ -773,7 +781,21 @@ dpkg -i "$deb" >/tmp/upgrade-policy.log 2>&1 || { cat /tmp/upgrade-policy.log; r
 rm -f /usr/sbin/policy-rc.d
 run_ended "an upgrade under a policy-rc.d ends the run"
 expect_backup_state "after an upgrade under a policy-rc.d" enabled active "$CRED_SHA"
-echo "an upgrade under a policy-rc.d ended the run all the same, and left the timers running"
+# What the upgrade starts again is what it stopped, and no more: a
+# timer the administrator had stopped, and left enabled, is not
+# started against the policy.
+printf '#!/bin/sh\nexit 101\n' >/usr/sbin/policy-rc.d
+chmod 755 /usr/sbin/policy-rc.d
+systemctl stop hotserve-backup-drill.timer
+dpkg -i "$deb" >/tmp/upgrade-policy-stopped.log 2>&1 || { cat /tmp/upgrade-policy-stopped.log; rm -f /usr/sbin/policy-rc.d; die "the upgrade under a policy-rc.d failed"; }
+rm -f /usr/sbin/policy-rc.d
+[ "$(systemctl is-active hotserve-backup-drill.timer || true)" = inactive ] \
+	|| die "under a policy-rc.d the upgrade started a timer the administrator had stopped: hotserve-backup-drill.timer is $(systemctl is-active hotserve-backup-drill.timer || true)"
+[ "$(systemctl is-active hotserve-backup.timer || true)" = active ] \
+	|| die "under a policy-rc.d the upgrade left the timer it had stopped itself $(systemctl is-active hotserve-backup.timer || true)"
+[ ! -e /run/hotserve-backup.stopped-for-upgrade ] || die "the upgrade left its note of what it stopped"
+systemctl start hotserve-backup-drill.timer
+echo "an upgrade under a policy-rc.d ended the run all the same, started again the timers it had stopped, and no other"
 # A unit that will not stop is said, and the upgrade goes on (the
 # owner, 2026-09-27). Staged with a drop-in that has the manager
 # refuse the stop.
@@ -845,11 +867,30 @@ for u in $TIMERS; do
 	[ -f "/var/lib/systemd/timers/stamp-$u" ] || die "no stamp for $u before the remove: the row would prove nothing"
 	touch -d '8 days ago' "/var/lib/systemd/timers/stamp-$u"
 done
-mkdir -p /run/hotserve-backup/deadrun/mount-1
-mount --bind /var/lib/liveswap/demo/shared /run/hotserve-backup/deadrun/mount-1 || die "could not stage a leftover bind mount"
-[ -f /run/hotserve-backup/deadrun/mount-1/app.db ] || die "the staged mount does not show the app's data: the remove row would prove nothing"
+# As a run binds it: recursively, with the disks an operator has
+# mounted inside the app's data — one of a name with a space in it,
+# which mountinfo escapes. Through a bind taken away, each disk stays
+# mounted where the operator put it.
+su -s /bin/sh hotserve -c 'mkdir -p /var/lib/liveswap/demo/shared/uploads/disk "/var/lib/liveswap/demo/shared/uploads/my disk"'
+mkdir -p /run/hotserve-backup/deadrun/mount-1 /tmp/disk "/tmp/my disk"
+echo on-the-disk >/tmp/disk/kept.txt
+echo on-my-disk >"/tmp/my disk/kept.txt"
+mount --bind /tmp/disk /var/lib/liveswap/demo/shared/uploads/disk || die "could not stage a disk inside the app's data"
+mount --bind "/tmp/my disk" "/var/lib/liveswap/demo/shared/uploads/my disk" || die "could not stage a disk of a name with a space inside the app's data"
+disks_mounted() { # <when>
+	mountpoint -q /var/lib/liveswap/demo/shared/uploads/disk && mountpoint -q "/var/lib/liveswap/demo/shared/uploads/my disk" \
+		&& [ -f /var/lib/liveswap/demo/shared/uploads/disk/kept.txt ] && [ -f "/var/lib/liveswap/demo/shared/uploads/my disk/kept.txt" ] \
+		|| die "$1: a disk inside the app's data was unmounted from under the app: $(grep liveswap/demo /proc/self/mountinfo | awk '{print $5}' | tr '\n' ' ')"
+}
+mount --rbind /var/lib/liveswap/demo/shared /run/hotserve-backup/deadrun/mount-1 || die "could not stage a leftover bind mount"
+[ -f /run/hotserve-backup/deadrun/mount-1/app.db ] && [ -f "/run/hotserve-backup/deadrun/mount-1/uploads/my disk/kept.txt" ] \
+	|| die "the staged mount does not show the app's data: the remove row would prove nothing"
+disks_mounted "before the remove"
 apt-get remove -y hotserve >/tmp/remove.log 2>&1 || { cat /tmp/remove.log; die "apt-get remove failed"; }
 cat /tmp/remove.log
+disks_mounted "after remove"
+grep -q "unmount .*yourself" /tmp/remove.log \
+	&& die "remove told the administrator to unmount what it had unmounted: $(grep yourself /tmp/remove.log)" || true
 for u in $TIMERS; do
 	[ ! -e "/var/lib/systemd/timers/stamp-$u" ] || die "remove left the stamp of $u: a reinstall would catch up a run nobody missed"
 done
@@ -891,8 +932,9 @@ for u in $TIMERS; do
 		|| die "reinstalled after remove: the stamp of $u is not this install's: $(ls -la --time-style=full-iso /var/lib/systemd/timers/)"
 done
 dnext=$(systemctl show -p NextElapseUSecRealtime --value hotserve-backup-drill.timer)
-[ "$(date -d "$dnext" '+%a %H:3')" = "Sun 03:3" ] || [ "$(date -d "$dnext" '+%a %H:%M')" = "Sun 03:40" ] \
-	|| die "reinstalled after remove: the drill's next elapse is '$dnext', not a Sunday between 03:30 and 03:40: a catch-up"
+dpast=$(($(date -d "$dnext" +%s) - $(date -d "$(date -d "$dnext" '+%Y-%m-%d') 03:30:00" +%s)))
+[ "$(date -d "$dnext" +%a)" = Sun ] && [ "$dpast" -ge 0 ] && [ "$dpast" -le 600 ] \
+	|| die "reinstalled after remove: the drill's next elapse is '$dnext' (${dpast}s past 03:30 of its day), not a Sunday between 03:30 and 03:40: a catch-up"
 for u in hotserve-backup.service hotserve-backup-drill.service; do
 	[ "$(systemctl show -p ExecMainStartTimestampMonotonic --value "$u")" = 0 ] \
 		|| die "reinstalled after remove: $u ran inside the install"
@@ -909,30 +951,43 @@ echo "reinstalled after remove: the timers enabled and running again, the same c
 # A directory and a file, as a run binds them, a mount inside a mount,
 # and the files a run keeps beside them; and the temp file setup's
 # writer of the repository id leaves when it is killed mid-write.
-su -s /bin/sh hotserve -c 'mkdir -p /var/lib/liveswap/demo/shared/uploads/disk && echo inner >/var/lib/liveswap/demo/shared/uploads/inner.txt'
-mkdir -p /run/hotserve-backup/deadrun/mount-1 /tmp/disk
-echo on-the-disk >/tmp/disk/kept.txt
+su -s /bin/sh hotserve -c 'echo inner >/var/lib/liveswap/demo/shared/uploads/inner.txt'
+mkdir -p /run/hotserve-backup/deadrun/mount-1
 : >/run/hotserve-backup/deadrun/mount-2
-mount --bind /tmp/disk /var/lib/liveswap/demo/shared/uploads/disk || die "could not stage a disk inside the app's data"
+disks_mounted "before the purge"
 mount --rbind /var/lib/liveswap/demo/shared /run/hotserve-backup/deadrun/mount-1 || die "could not stage a leftover bind mount"
 mount --bind /var/lib/liveswap/demo/shared/app.db /run/hotserve-backup/deadrun/mount-2 || die "could not stage a leftover bind mount of a file"
 [ -f /run/hotserve-backup/deadrun/mount-1/app.db ] && [ -f /run/hotserve-backup/deadrun/mount-1/uploads/disk/kept.txt ] \
 	|| die "the staged mounts do not show the app's data: the purge check would prove nothing"
 echo '{}' >/run/hotserve-backup/deadrun/plan.json
 : >/run/hotserve-backup/deadrun/.listing.err
-echo hotserve_backup_upload_demo_deadrun.service >/run/hotserve-backup/units
+# And the units a command killed from a shell left running — it has no
+# service for the manager to end them with — recorded by their exact
+# names, as a run records each before it starts it. A line that is no
+# name the engine writes is nothing to stop.
+LEFT=hotserve_backup_upload_demo_0123456789ab.service
+systemd-run --quiet --unit="$LEFT" -p User=hotserve-backup /usr/bin/sleep 600 || die "could not stage a unit a killed command left running"
+systemd-run --quiet --unit=smoke-bystander.service /usr/bin/sleep 600 || die "could not stage a unit that is none of the engine's"
+printf '%s\nsmoke-bystander.service\n' "$LEFT" >/run/hotserve-backup/units
+[ "$(systemctl is-active "$LEFT" || true)" = active ] || die "the staged unit is not running: the purge row would prove nothing"
 : >/var/lib/hotserve-backup/.status-crash
 echo 0123 >/var/lib/hotserve-backup/repository-id.new
 apt-get purge -y hotserve >/tmp/purge.log 2>&1 || { cat /tmp/purge.log; die "apt-get purge failed"; }
 cat /tmp/purge.log
 [ -f /var/lib/liveswap/demo/shared/app.db ] && [ -f /var/lib/liveswap/demo/shared/uploads/a.png ] && [ -f /var/lib/liveswap/demo/shared/uploads/inner.txt ] && [ -f /tmp/disk/kept.txt ] \
 	|| die "purge removed the app's data through a mount a killed run left under /run/hotserve-backup"
+disks_mounted "after purge"
+[ "$(systemctl is-active "$LEFT" || true)" != active ] \
+	|| die "purge left a unit a killed command had left running, and removed the one record of it: $LEFT is still active, with the credential"
+[ "$(systemctl is-active smoke-bystander.service || true)" = active ] \
+	|| die "purge stopped a unit that is none of the engine's, for being written in the units file"
+systemctl stop smoke-bystander.service
 grep -q " /run/hotserve-backup" /proc/self/mountinfo \
 	&& die "purge left a killed run's mounts, with no next run to sweep them: $(grep ' /run/hotserve-backup' /proc/self/mountinfo)" || true
 [ ! -e /run/hotserve-backup ] || die "purge left /run/hotserve-backup: $(find /run/hotserve-backup)"
-grep -q "would not unmount\|/run/hotserve-backup" /tmp/purge.log \
+grep -q "still mounted\|/run/hotserve-backup" /tmp/purge.log \
 	&& die "purge spoke of a run directory it removed whole: $(grep 'hotserve-backup' /tmp/purge.log)" || true
-umount /var/lib/liveswap/demo/shared/uploads/disk
+umount /var/lib/liveswap/demo/shared/uploads/disk "/var/lib/liveswap/demo/shared/uploads/my disk"
 [ ! -e /var/lib/hotserve-backup/repository-id.new ] || die "purge left setup's temp file, repository-id.new"
 grep -q "kept.*/var/lib/hotserve-backup" /tmp/purge.log \
 	&& die "purge kept the state directory, which held nothing but the package's own: $(grep kept /tmp/purge.log)" || true
@@ -996,7 +1051,9 @@ echo mine >/var/lib/hotserve-backup/notes.txt
 apt-get purge -y hotserve >/tmp/purge-held.log 2>&1 || { cat /tmp/purge-held.log; die "apt-get purge with a command under way failed"; }
 cat /tmp/purge-held.log
 grep -q "hotserve: a backup command is under way from a shell (pid [0-9]*, since 2026-09-27T00:00:00Z), and is left to run" /tmp/purge-held.log \
-	|| die "purge did not say that a command holds the run lock"
+	|| die "preremove did not say that a command holds the run lock"
+grep -q "hotserve: the run lock is held (pid [0-9]*, since 2026-09-27T00:00:00Z): a backup is still under way, and is left to run; /run/hotserve-backup, its units and what is mounted under it are left to it" /tmp/purge-held.log \
+	|| die "postremove did not say that the run lock is held, and what it left alone"
 [ -f /run/hotserve-backup/liverun/mount-1/app.db ] || die "purge unmounted under a command that holds the run lock"
 grep -q "hotserve: kept /var/lib/hotserve-backup/staging: not empty — copies of an app's data" /tmp/purge-held.log \
 	|| die "purge did not say that staging is kept, and what is in it"
@@ -1010,6 +1067,24 @@ kill "$holder" 2>/dev/null || true
 umount /run/hotserve-backup/liverun/mount-1
 rm -rf /run/hotserve-backup /var/lib/hotserve-backup
 echo "purge under a command's lock: said, its mount left; what is kept is said for what it is"
+# A mount right on a directory of the run directory, of a name the
+# engine does not make: not unmounted, since it is none of the
+# engine's; named; and nothing beneath the run directory is removed
+# while it is there — its files are an app's.
+apt-get install -y "$deb" >/tmp/install-again.log 2>&1 || { cat /tmp/install-again.log; die "the install before the last purge failed"; }
+mkdir -p "/run/hotserve-backup/odd dir" /run/hotserve-backup/deadrun
+echo '{}' >/run/hotserve-backup/deadrun/plan.json
+mount --bind /var/lib/liveswap/demo/shared "/run/hotserve-backup/odd dir" || die "could not stage a mount on a run directory"
+apt-get purge -y hotserve >/tmp/purge-odd.log 2>&1 || { cat /tmp/purge-odd.log; die "apt-get purge with a mount on a run directory failed"; }
+cat /tmp/purge-odd.log
+[ -f /var/lib/liveswap/demo/shared/app.db ] && [ -f /var/lib/liveswap/demo/shared/uploads/a.png ] \
+	|| die "purge removed the app's files through a mount on a run directory"
+grep -q 'hotserve: still mounted under /run/hotserve-backup: /run/hotserve-backup/odd\\040dir — unmount each yourself (sudo umount), and do not rm -r /run/hotserve-backup before' /tmp/purge-odd.log \
+	|| die "purge did not name the mount it left"
+[ -f /run/hotserve-backup/deadrun/plan.json ] || die "purge removed from the run directory with something still mounted beneath it"
+umount "/run/hotserve-backup/odd dir"
+rm -rf /run/hotserve-backup
+echo "a mount that is none of the engine's: named, left, and nothing removed beneath the run directory"
 
 echo ""
 echo "ALL PACKAGE SMOKE STAGES PASSED ($deb on $(. /etc/os-release && echo "$PRETTY_NAME"))"

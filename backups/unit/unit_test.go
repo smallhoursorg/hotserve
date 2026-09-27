@@ -137,3 +137,22 @@ func TestStderrGoesToTheJournalOrToAFile(t *testing.T) {
 		t.Errorf("with a file: %s, %s", got["StandardError"], got["StandardErrorFileToTruncate"])
 	}
 }
+
+// The manager's mount unit for a path, as systemd-escape writes it
+// [the integration lane holds these to systemd-escape itself].
+func TestAMountUnitIsNamedAsTheManagerNamesIt(t *testing.T) {
+	for path, want := range map[string]string{
+		"/run/hotserve-backup/0a1b2c3d4e5f/seen":  `run-hotserve\x2dbackup-0a1b2c3d4e5f-seen.mount`,
+		"/run/hotserve-backup/0a1b2c3d4e5f/seen/": `run-hotserve\x2dbackup-0a1b2c3d4e5f-seen.mount`,
+		"/":                  "-.mount",
+		"/var/lib/a b":       `var-lib-a\x20b.mount`,
+		"/.hidden/x.y":       `\x2ehidden-x.y.mount`,
+		"/srv//data/./disk1": "srv-data-disk1.mount",
+		"/mnt/é":             `mnt-\xc3\xa9.mount`,
+		"/a_b:c":             "a_b:c.mount",
+	} {
+		if got := MountUnit(path); got != want {
+			t.Errorf("MountUnit(%q) = %q, want %q", path, got, want)
+		}
+	}
+}
