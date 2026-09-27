@@ -276,12 +276,12 @@ var lookup = func(ctx context.Context, within time.Duration, argv ...string) (ou
 var nsswitchFile = "/etc/nsswitch.conf"
 
 // passwdSources is the sources of the passwd database, in the order
-// the box asks them. No file is glibc's default, files; a file that is
+// the box asks them. No file is glibc's default; a file that is
 // there and cannot be read leaves the sources unknown, and refuses.
 func passwdSources() ([]string, error) {
 	raw, err := os.ReadFile(nsswitchFile)
 	if errors.Is(err, fs.ErrNotExist) {
-		return []string{"files"}, nil
+		return defaultSources(), nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("the sources of the passwd database could not be read: %w", err)
@@ -302,7 +302,7 @@ var sourceRe = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 // does: the last line for the database counts, "#" begins a comment,
 // what stands in brackets is an action on the source before it and no
 // source, and a source named twice is one. No line, or none with a
-// source on it, is files.
+// source on it, is glibc's default.
 func sourcesOf(conf string) ([]string, error) {
 	var sources []string
 	for _, line := range strings.Split(conf, "\n") {
@@ -335,10 +335,15 @@ func sourcesOf(conf string) ([]string, error) {
 		}
 	}
 	if len(sources) == 0 {
-		return []string{"files"}, nil
+		return defaultSources(), nil
 	}
 	return sources, nil
 }
+
+// defaultSources is glibc's own rule for the passwd database where
+// nsswitch.conf names none: compat, then files (Copilot on #155).
+// Asking a source a box has no module for is an answer of absence.
+func defaultSources() []string { return []string{"compat", "files"} }
 
 // errNeedsRoot is a lookup that is root's alone to make.
 var errNeedsRoot = errors.New("root's to read")

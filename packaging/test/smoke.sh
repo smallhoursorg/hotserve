@@ -748,6 +748,24 @@ as_admin "sudo systemctl unmask hotserve-backup-drill.timer"
 as_admin "sudo systemctl start hotserve-backup.timer hotserve-backup-drill.timer"
 expect_backup_state "after an upgrade, one timer masked and one stopped, and both put back" enabled active "$CRED_SHA"
 systemctl is-active --quiet hotserve || die "hotserve not active after the upgrade cycle"
+# A user directory that does not answer: postinstall's lookups of the
+# accounts are bounded, and one that does not answer is "could not
+# tell" — never "absent", which would make a local account beside the
+# directory's — and the configure completes (Copilot on #155: dpkg
+# hung). Staged with a getent ahead of the real one on dpkg's PATH that
+# never answers for the backup account.
+printf '#!/bin/sh\ncase "$*" in *hotserve-backup*) exec sleep 600 ;; esac\nexec /usr/bin/getent "$@"\n' >/usr/local/sbin/getent
+chmod 755 /usr/local/sbin/getent
+t0=$(date +%s)
+timeout 300 dpkg -i "$deb" >/tmp/upgrade-nss.log 2>&1 || { cat /tmp/upgrade-nss.log; rm -f /usr/local/sbin/getent; die "the upgrade with a directory that does not answer did not complete within 300s"; }
+took=$(($(date +%s) - t0))
+rm -f /usr/local/sbin/getent
+[ "$took" -le 150 ] || die "the upgrade with a directory that does not answer took ${took}s"
+grep -q "hotserve: whether the hotserve-backup account exists could not be told (the user directory did not answer within 30s)" /tmp/upgrade-nss.log \
+	|| die "postinstall did not say that the directory did not answer: $(cat /tmp/upgrade-nss.log)"
+[ "$(getent passwd hotserve-backup | wc -l)" = 1 ] || die "a second hotserve-backup account was made: $(getent passwd | grep hotserve-backup)"
+dpkg -s hotserve | grep -q '^Status: install ok installed$' || die "hotserve is not configured after the upgrade with a directory that does not answer"
+echo "a directory that does not answer: postinstall said so within ${took}s, made no account, and the configure completed"
 # An upgrade from a release that had no backup timers — every box that
 # first gets this feature: the helper has no state for them, and they
 # are enabled and started as on an install, not left stopped until a
@@ -799,6 +817,10 @@ until [ "$(systemctl show -p ActiveState --value hotserve-backup.service)" != ac
 	i=$((i + 1))
 	sleep 0.5
 done
+# Ended, and not still under way: a hung run keeps the Result= of the
+# run before it (Copilot on #155).
+[ "$(systemctl show -p ActiveState --value hotserve-backup.service)" != activating ] \
+	|| die "the run under way at the upgrade had not ended 120s after it was let go: $(journalctl -u hotserve-backup.service --no-pager | tail -10)"
 [ "$(systemctl show -p Result --value hotserve-backup.service)" = success ] \
 	|| die "the run under way at the upgrade ended '$(systemctl show -p Result --value hotserve-backup.service)': $(journalctl -u hotserve-backup.service --no-pager | tail -10)"
 grep -q '"demo": {' /var/lib/hotserve-backup/status.json && tr -d '\n' </var/lib/hotserve-backup/status.json | grep -q '"demo": { *"class": "ok"' \
@@ -1083,6 +1105,7 @@ echo '{}' >/run/hotserve-backup/dead00000001/plan.json
 for m in "/run/hotserve-backup/odd dir" $ODD /run/hotserve-backup/dead00000001/mount-1; do
 	mount --bind /var/lib/liveswap/demo/shared "$m" || die "could not stage a mount at $m"
 done
+cp /var/lib/dpkg/info/hotserve.postrm /tmp/hotserve.postrm
 apt-get purge -y hotserve >/tmp/purge-odd.log 2>&1 || { cat /tmp/purge-odd.log; die "apt-get purge with mounts that are none of the engine's failed"; }
 cat /tmp/purge-odd.log
 [ -f /var/lib/liveswap/demo/shared/app.db ] && [ -f /var/lib/liveswap/demo/shared/uploads/a.png ] \
@@ -1102,6 +1125,34 @@ grep "still mounted" /tmp/purge-odd.log | grep -q "dead00000001/mount-1" && die 
 for m in "/run/hotserve-backup/odd dir" $ODD; do umount "$m"; done
 rm -rf /run/hotserve-backup
 echo "mounts that are none of the engine's: named, left, and nothing removed beneath the run directory"
+
+stage "stage 7: purge where the mount table cannot be read"
+# In a chroot or a namespace with no /proc, postremove cannot see what
+# is mounted under the run directory: it removes nothing there, and
+# says so, rather than taking an empty mount table for none (Copilot
+# on #155). Run in a mount namespace of its own with /proc gone, the
+# script as the package shipped it, against a bind of the app's data
+# sitting right on a run directory.
+[ -f /tmp/hotserve.postrm ] || die "the package's postremove was not kept for this stage"
+unshare --mount --propagation private sh -c '
+	set -e
+	# Right on a run directory, whose files purge removes one by one
+	# once it believes nothing is mounted there.
+	mkdir -p /run/hotserve-backup/0123456789ab
+	mount --bind /var/lib/liveswap/demo/shared /run/hotserve-backup/0123456789ab
+	[ -f /run/hotserve-backup/0123456789ab/app.db ] || { echo "FIXTURE: the bind shows nothing"; exit 3; }
+	umount -l /proc
+	[ ! -r /proc/self/mountinfo ] || { echo "FIXTURE: /proc is still there"; exit 3; }
+	sh /tmp/hotserve.postrm purge >/tmp/purge-noproc.log 2>&1 || true
+	[ -f /run/hotserve-backup/0123456789ab/app.db ] || { echo "GONE"; exit 4; }
+' ; rc=$?
+[ "$rc" != 3 ] || die "the mount table could still be read: the row proves nothing"
+[ "$rc" = 0 ] || die "purge with no mount table removed the app's files through a mount under the run directory (exit $rc): $(cat /tmp/purge-noproc.log)"
+[ -f /var/lib/liveswap/demo/shared/app.db ] && [ -f /var/lib/liveswap/demo/shared/uploads/a.png ] || die "purge with no mount table removed the app's files"
+grep -q "hotserve: what is mounted under /run/hotserve-backup could not be read (/proc/self/mountinfo): nothing under it is removed" /tmp/purge-noproc.log \
+	|| die "postremove did not say that it could not read the mount table: $(cat /tmp/purge-noproc.log)"
+rm -rf /run/hotserve-backup
+echo "no mount table: purge removed nothing under the run directory, and said why"
 
 echo ""
 echo "ALL PACKAGE SMOKE STAGES PASSED ($deb on $(. /etc/os-release && echo "$PRETTY_NAME"))"

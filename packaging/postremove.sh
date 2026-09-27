@@ -97,9 +97,15 @@ unmount_left() {
 
 # remove_run: the run directory's own files and directories, one by
 # one and by rmdir — and nothing at all while anything is mounted
-# beneath it, which unmount_left has named.
+# beneath it, which unmount_left has named, or where what is mounted
+# cannot be read: an empty answer is then no answer (Copilot on #155:
+# with no /proc, a bind on a run directory lost the app's files).
 remove_run() {
 	[ -d "$run" ] || return 0
+	if [ ! -r /proc/self/mountinfo ]; then
+		echo "hotserve: what is mounted under $run could not be read (/proc/self/mountinfo): nothing under it is removed; it is gone at the next boot, and is not to be rm -r'd before" >&2
+		return 0
+	fi
 	[ -z "$(mounted_beneath)" ] || return 0
 	for d in "$run"/*/; do
 		[ -d "$d" ] || continue

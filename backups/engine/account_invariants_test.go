@@ -104,10 +104,11 @@ func TestEveryHolderOfTheUidIsFound(t *testing.T) {
 			"/usr/bin/getent passwd":              {out: rootLine + backupLine},
 			"/usr/bin/getent -s files passwd 995": {out: backupLine},
 		}, []string{"hotserve-backup"}, ""},
-		{"no nsswitch.conf, which is files", "", map[string]said{
-			"/usr/bin/getent passwd":              {out: backupLine},
-			"/usr/bin/getent -s files passwd 995": {out: backupLine},
-		}, []string{"hotserve-backup"}, ""},
+		{"no nsswitch.conf, which is compat then files", "", map[string]said{
+			"/usr/bin/getent passwd":               {out: backupLine},
+			"/usr/bin/getent -s compat passwd 995": {out: aliceLine},
+			"/usr/bin/getent -s files passwd 995":  {out: backupLine},
+		}, []string{"hotserve-backup", "alice"}, ""},
 
 		// A lookup that fails is never an account that passes.
 		{"a source that fails", "passwd: files sss\n", map[string]said{
@@ -197,9 +198,12 @@ func TestThePasswdLineIsReadAsGlibcReadsIt(t *testing.T) {
 		{"a line commented out", "#passwd: ldap\npasswd: files\n", []string{"files"}, ""},
 		{"a source twice", "passwd: files sss files\n", []string{"files", "sss"}, ""},
 		{"the last line of two wins, as glibc has it", "passwd: files\npasswd: files ldap\n", []string{"files", "ldap"}, ""},
-		{"another database's line", "group: files ldap\nshadow: files\n", []string{"files"}, ""},
-		{"no source on the line", "passwd:\n", []string{"files"}, ""},
-		{"an empty file", "", []string{"files"}, ""},
+		{"another database's line", "group: files ldap\nshadow: files\n", []string{"compat", "files"}, ""},
+		// Where the file names no source, glibc's own default: compat
+		// then files (Copilot on #155). Asking a source a box has no
+		// module for is an answer of absence, and costs nothing.
+		{"no source on the line", "passwd:\n", []string{"compat", "files"}, ""},
+		{"an empty file", "", []string{"compat", "files"}, ""},
 		{"a digit and an underscore", "passwd: files nis_plus2\n", []string{"files", "nis_plus2"}, ""},
 		{"a name that is an option", "passwd: files -s\n", nil, "names a source that is no name: -s"},
 		{"a bracket never closed", "passwd: files [NOTFOUND=return ldap\n", nil, "an action that is never closed"},

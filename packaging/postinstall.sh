@@ -1,16 +1,35 @@
 #!/bin/sh
 set -e
+# nss <getent or id arguments>: one lookup in the account databases,
+# bounded — a user directory that does not answer would otherwise hold
+# dpkg's configure for as long as it likes (Copilot on #155). Exit 2 is
+# "not found"; 124 is "did not answer", which is never taken for "not
+# found": that would make a local account beside the directory's.
+nss() {
+	if command -v timeout >/dev/null 2>&1; then
+		timeout 30 "$@"
+	else
+		"$@"
+	fi
+}
+# absent <getent arguments>: the entry is not there, as the databases
+# answered; 0 only for that.
+absent() {
+	st=0
+	nss getent "$@" >/dev/null 2>&1 || st=$?
+	[ "$st" = 2 ]
+}
 if command -v useradd >/dev/null 2>&1; then
-	getent group hotserve >/dev/null 2>&1 || groupadd --system hotserve
-	getent passwd hotserve >/dev/null 2>&1 || useradd --system \
+	if absent group hotserve; then groupadd --system hotserve; fi
+	if absent passwd hotserve; then useradd --system \
 		--gid hotserve --home-dir /var/lib/hotserve \
-		--shell /usr/sbin/nologin --comment "hotserve server" hotserve
+		--shell /usr/sbin/nologin --comment "hotserve server" hotserve; fi
 else
 	# Alpine (busybox) fallback.
 	addgroup -S hotserve 2>/dev/null || true
 	adduser -S -G hotserve -h /var/lib/hotserve -s /sbin/nologin hotserve 2>/dev/null || true
 fi
-if ! uid=$(id -u hotserve 2>/dev/null); then
+if ! uid=$(nss id -u hotserve 2>/dev/null); then
 	echo "hotserve: the hotserve system user does not exist and could not be created" >&2
 	exit 1
 fi
@@ -20,7 +39,7 @@ fi
 # whatever groups it had, and the state directories chowned below are
 # group-hotserve. Not fatal: nothing the package installs is reachable
 # only through the group.
-in_group() { id -nG hotserve 2>/dev/null | tr ' ' '\n' | grep -qx hotserve; }
+in_group() { nss id -nG hotserve 2>/dev/null | tr ' ' '\n' | grep -qx hotserve; }
 if ! in_group; then
 	if command -v usermod >/dev/null 2>&1; then
 		usermod -aG hotserve hotserve || true
@@ -47,14 +66,22 @@ chown hotserve:hotserve /var/lib/hotserve /var/lib/liveswap
 # (the owner, 2026-09-27): hotserve is installed on a box that may use
 # no backups, and setup, which makes the account when it is missing,
 # is where that is refused.
-if ! getent passwd hotserve-backup >/dev/null 2>&1; then
+backup_st=0
+nss getent passwd hotserve-backup >/dev/null 2>&1 || backup_st=$?
+if [ "$backup_st" = 2 ]; then
 	if command -v useradd >/dev/null 2>&1; then
 		why=$(useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hotserve-backup 2>&1) || true
 	else
 		why=$(adduser -S -H -h /nonexistent -s /sbin/nologin hotserve-backup 2>&1) || true # busybox
 	fi
 fi
-if getent passwd hotserve-backup >/dev/null 2>&1; then
+if [ "$backup_st" != 0 ] && [ "$backup_st" != 2 ]; then
+	case "$backup_st" in
+	124) why="the user directory did not answer within 30s" ;;
+	*) why="getent exited $backup_st" ;;
+	esac
+	echo "hotserve: whether the hotserve-backup account exists could not be told ($why); no account is made beside the directory's, and backups wait for it: sudo hotserve-backup account says when it is right" >&2
+elif nss getent passwd hotserve-backup >/dev/null 2>&1; then
 	# The rule is setup's, and in setup's words: the binary this package
 	# has just installed says whether the account is one setup and every
 	# run accept. A warning, never the install's failure.
