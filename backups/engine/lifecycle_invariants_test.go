@@ -335,6 +335,8 @@ func TestAnAccountHotserveDidNotMakeIsRefused(t *testing.T) {
 		{"as hotserve makes it", accountMark, false},
 		{"no comment: plain useradd, or this branch before the mark", "", true},
 		{"another package's", "Debian backup account", true},
+		// The remedy for an account made by hand for hotserve is the mark,
+		// which keeps the credential file: said beside userdel.
 		{"a comment that holds the mark", "not " + accountMark, true},
 		{"the mark with a space after", accountMark + " ", true},
 	} {
@@ -351,7 +353,7 @@ func TestAnAccountHotserveDidNotMakeIsRefused(t *testing.T) {
 			if err == nil {
 				t.Fatalf("not refused: %+v", rep)
 			}
-			for _, w := range []string{"the hotserve-backup account on this box was not made by hotserve", "remove it (userdel hotserve-backup)", useraddArgv()} {
+			for _, w := range []string{"the hotserve-backup account on this box was not made by hotserve", "remove it (userdel hotserve-backup)", useraddArgv(), "if it is one you made for hotserve, mark it: usermod --comment made-by-hotserve hotserve-backup"} {
 				if !strings.Contains(err.Error(), w) {
 					t.Errorf("err = %v\nwant it to say %q", err, w)
 				}
@@ -367,19 +369,57 @@ func TestAnAccountHotserveDidNotMakeIsRefused(t *testing.T) {
 	}
 }
 
+// Ours is local as well as marked: the account in /etc/passwd, which
+// only root writes and where useradd puts it, and the one the system
+// resolves by that name. A directory's account of that name carries
+// whatever comment its administrator gives it, the mark among them,
+// and is refused (the owner's review of #155).
+func TestOursIsTheLocalAccount(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(b *box)
+		want string
+	}{
+		{"a directory's, with the mark, none in /etc/passwd", func(b *box) { b.notLocal = true }, "is not in /etc/passwd"},
+		{"a directory's, with the mark, shadowing an unmarked local one", func(b *box) { b.localComment = "" }, "is not the one in /etc/passwd"},
+		{"a directory's, with the mark, at another uid than the local one", func(b *box) {
+			old := localAccount
+			localAccount = func(context.Context, string) (passwd, error) {
+				return passwd{name: backupUser, comment: accountMark, uid: 4242, gid: 995, exists: true}, nil
+			}
+			b.t.Cleanup(func() { localAccount = old })
+		}, "is not the one in /etc/passwd"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, m := setupBox(t)
+			tc.set(b)
+			_, err := b.setup(t, m, testRepo)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v", err)
+			}
+			neverStarted(t, b, m)
+		})
+	}
+}
+
 // Sweep is what the package's preremove asks at a remove, while the
 // program is still there: what a killed command left — the units it
 // recorded, stopped by those names, and what it left mounted under the
 // run directory, made private and taken away — swept under the run
 // lock, as the next run would have, since there will be none. The
 // engine's own sweep, in Go, in the place of a shell copy of it (the
-// owner, 2026-09-27).
+// owner, 2026-09-27); and no more than that sweep: no state
+// directories made on a box that never set backups up, no wait for an
+// init a setup left running, which would leave the rest unswept.
 func TestSweepTakesAwayWhatAKilledCommandLeft(t *testing.T) {
 	b := restoreBox(t)
 	must(t, os.MkdirAll(filepath.Join(b.cfg.RunDir, "0123456789ab"), 0o700))
 	must(t, os.WriteFile(filepath.Join(b.cfg.RunDir, "units"), []byte(
 		"hotserve_backup_upload_blog_0123456789ab.service\nsmoke-bystander.service\nhotserve_backup_bystander.service\n"), 0o600))
-	b.leftMounts = []string{filepath.Join(b.cfg.RunDir, "0123456789ab", "mount-1")}
+	must(t, os.WriteFile(filepath.Join(b.cfg.RunDir, "init-unit"), []byte("hotserve_backup_init_0123456789ab.service\n"), 0o600))
+	top := filepath.Join(b.cfg.RunDir, "0123456789ab", "mount-1")
+	nested := filepath.Join(top, "uploads", "disk")
+	b.leftMounts = []string{nested, top}
 	if err := Sweep(context.Background(), b.cfg, b); err != nil {
 		t.Fatal(err)
 	}
@@ -389,14 +429,24 @@ func TestSweepTakesAwayWhatAKilledCommandLeft(t *testing.T) {
 	if len(b.stopped) != 1 || b.stopped[0] != "hotserve_backup_upload_blog_0123456789ab.service" {
 		t.Errorf("stopped %q", b.stopped)
 	}
-	if !slices.Contains(b.unmounted, b.leftMounts[0]) {
-		t.Errorf("the leftover mount was not taken away: unmounted %q", b.unmounted)
+	// The engine's own mount point alone, made private with all beneath
+	// it and detached with all beneath it: the nested one's path runs
+	// through an app's directory, which the app can re-aim at another's
+	// with a link between the look and the call (the owner's review).
+	// (That it is made private first is unmountDetach's own, held by
+	// the integration pin on a shared mount; this lane stands the mount
+	// calls in, and asks what they were asked of.)
+	if !slices.Equal(b.unmountedAt, []string{top}) || slices.Contains(b.madePrivate, nested) {
+		t.Errorf("made private %q, unmounted %q; want %q alone, and nothing of %q", b.madePrivate, b.unmountedAt, top, nested)
 	}
 	if _, err := os.Lstat(filepath.Join(b.cfg.RunDir, "units")); err == nil {
 		t.Error("the list of units is still there")
 	}
-	if len(b.specs) != 0 {
-		t.Errorf("units were started: %s", b.roles())
+	if len(b.specs) != 0 || len(b.waited) != 0 {
+		t.Errorf("units were started %s, or waited for %q", b.roles(), b.waited)
+	}
+	if _, err := os.Lstat(b.cfg.StateDir); err == nil {
+		t.Error("a sweep made the state directory")
 	}
 
 	// With the lock held — a command from a shell — nothing is touched,
@@ -412,5 +462,41 @@ func TestSweepTakesAwayWhatAKilledCommandLeft(t *testing.T) {
 	}
 	if len(b.stopped) != 0 {
 		t.Errorf("stopped under a held lock: %q", b.stopped)
+	}
+
+	// No run directory: nothing was ever left, and nothing is made.
+	b = restoreBox(t)
+	if err := Sweep(context.Background(), b.cfg, b); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(b.cfg.RunDir); err == nil {
+		t.Error("a sweep made the run directory")
+	}
+}
+
+// Something mounted on the run directory itself — nothing of the
+// engine's is — and everything a command does there, the lock, the
+// list of units, a run's files, would be done through it: a run, a
+// restore, a drill, setup and the sweep refuse before any of it
+// (Copilot and the owner's review on #155).
+func TestAMountOnTheRunDirectoryIsRefused(t *testing.T) {
+	for _, cmd := range append(runDrillRestore, setupCommand, command{"a sweep", plainBox, func(_ *testing.T, b *box, _ *term) error {
+		return Sweep(context.Background(), b.cfg, b)
+	}}) {
+		t.Run(cmd.name, func(t *testing.T) {
+			b, m := cmd.box(t)
+			must(t, os.MkdirAll(b.cfg.RunDir, 0o700))
+			b.runDirMounted = true
+			err := cmd.do(t, b, m)
+			if err == nil || !strings.Contains(err.Error(), b.cfg.RunDir+" is itself a mount point") {
+				t.Fatalf("err = %v", err)
+			}
+			if _, err := os.Lstat(filepath.Join(b.cfg.RunDir, "lock")); err == nil {
+				t.Fatal("the lock was taken through the mount")
+			}
+			if len(b.specs) != 0 || len(b.stopped) != 0 {
+				t.Fatalf("units were started %s or stopped %q", b.roles(), b.stopped)
+			}
+		})
 	}
 }

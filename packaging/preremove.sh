@@ -29,7 +29,10 @@ stop_backups() {
 		systemctl stop hotserve-backup.timer hotserve-backup-drill.timer hotserve-backup.service hotserve-backup-drill.service 2>/dev/null || true
 	fi
 	[ -x /usr/bin/hotserve-backup ] || return 0
-	if command -v timeout >/dev/null 2>&1; then sweep="timeout 300 /usr/bin/hotserve-backup sweep"; else sweep="/usr/bin/hotserve-backup sweep"; fi
+	# Bounded: SIGTERM at five minutes, which the sweep takes as a
+	# cancel, and SIGKILL ten seconds after — a unit slow to stop, or a
+	# manager that does not answer, must not hold the remove.
+	if command -v timeout >/dev/null 2>&1; then sweep="timeout -k 10 300 /usr/bin/hotserve-backup sweep"; else sweep="/usr/bin/hotserve-backup sweep"; fi
 	if ! said=$($sweep 2>&1); then
 		echo "hotserve: what a backup command left was not swept, and is left: ${said#hotserve-backup: }" >&2
 	fi

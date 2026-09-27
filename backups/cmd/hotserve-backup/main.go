@@ -12,6 +12,9 @@
 //	                        whether a run could plan from that Caddyfile, before it goes live; anyone
 //	hotserve-backup account whether the account restic runs as is one setup and a run accept; anyone;
 //	                        what the package's postinstall asks
+//	hotserve-backup sweep   take away what a killed command left — its units, its mounts under
+//	                        /run/hotserve-backup — as the next command would; root; what the
+//	                        package's preremove asks at a remove
 //
 // and subcommands that are only ever the command of a unit one of those
 // starts, each with a fixed view and no arguments — nothing an operator
@@ -69,7 +72,8 @@ const usage = `usage: hotserve-backup setup <repository>
        hotserve-backup drill
        hotserve-backup status
        hotserve-backup validate <Caddyfile>
-       hotserve-backup account`
+       hotserve-backup account
+       hotserve-backup sweep`
 
 // arguments says whether a command takes that many: restore takes its
 // own, validate takes one file, setup one repository, and nothing else

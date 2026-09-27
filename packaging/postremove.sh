@@ -87,6 +87,12 @@ purge)
 	if [ -d "$run" ]; then
 		if mounted; then
 			echo "hotserve: kept $run: something is mounted at or under it, or what is mounted cannot be read; nothing under it is removed — it is gone at the next boot, and is not to be rm -r'd before" >&2
+		elif [ -f "$run/lock" ] && command -v flock >/dev/null 2>&1 && ! flock -n "$run/lock" true 2>/dev/null; then
+			# A command that holds the run lock — a restore at its prompt
+			# — keeps what is its: the lock, the list of the units it has
+			# started, an init marker. Removed from under it, no sweep
+			# would ever stop those units.
+			echo "hotserve: kept $run: the run lock is held ($(head -1 "$run/lock" 2>/dev/null)); a backup command is under way, and what it keeps there is its own — it is gone at the next boot" >&2
 		else
 			rm -f "$run/lock" "$run/units" "$run/init-unit"
 			for d in "$run"/*/; do [ -d "$d" ] && rmdir "$d" 2>/dev/null || true; done

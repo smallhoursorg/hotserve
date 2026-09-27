@@ -77,9 +77,9 @@ var (
 		return err == nil && st.Mode().IsRegular() && st.Mode()&0o001 != 0
 	}
 	// account is the account as the manager itself resolves it — getent,
-	// so NSS, where os/user reads /etc/passwd alone and knows no shell:
-	// its shell and home, and whether it is there at all. getent's
-	// argv is constant; its exit 2 is "not found".
+	// so NSS, where os/user reads /etc/passwd alone: its uid, gid and
+	// comment, and whether it is there at all. getent's argv is
+	// constant; its exit 2 is "not found".
 	account = func(ctx context.Context, name string) (passwd, error) {
 		out, exit, err := lookup(ctx, lookupClock, getent, "passwd", name)
 		if err != nil {
@@ -113,6 +113,23 @@ var (
 // outlives a purge, so a reinstall finds it still ours.
 var useradd = []string{"/usr/sbin/useradd", "--system", "--no-create-home", "--home-dir", "/nonexistent", "--shell", "/usr/sbin/nologin", "--comment", accountMark, backupUser}
 
+// localAccount is the account as /etc/passwd holds it — which only
+// root writes, and where useradd puts it — asked of the files source
+// alone. Exit 2 is "not there".
+var localAccount = func(ctx context.Context, name string) (passwd, error) {
+	out, exit, err := lookup(ctx, lookupClock, getent, "-s", "files", "passwd", name)
+	if err != nil {
+		return passwd{}, err
+	}
+	switch exit {
+	case 0:
+		return passwdLine(strings.TrimRight(string(out), "\n"), getent+" -s files passwd "+name)
+	case 2:
+		return passwd{}, nil
+	}
+	return passwd{}, fmt.Errorf("%s -s files passwd %s: exit status %d", getent, name, exit)
+}
+
 // accountMark is the comment hotserve gives the account it makes.
 const accountMark = "made-by-hotserve"
 
@@ -124,7 +141,7 @@ const getent = "/usr/bin/getent"
 // that never answers is given up on, and said.
 var lookupClock = 10 * time.Second
 
-// lookup runs one program of the account databases — getent, id — with
+// lookup runs one program of the account databases — getent — with
 // a constant argv, and returns what it printed and its exit status. The
 // command ends with the context, and at the bound: an error is a
 // command that could not be run or did not answer, never an exit
@@ -132,7 +149,7 @@ var lookupClock = 10 * time.Second
 var lookup = func(ctx context.Context, within time.Duration, argv ...string) (out []byte, exit int, err error) {
 	bounded, cancel := context.WithTimeout(ctx, within)
 	defer cancel()
-	cmd := exec.CommandContext(bounded, argv[0], argv[1:]...) //nolint:gosec // a constant program; the arguments are constants, a uid, or a source's name that matched sourceRe
+	cmd := exec.CommandContext(bounded, argv[0], argv[1:]...) //nolint:gosec // a constant program and constant arguments
 	// What the command leaves behind holding its pipe is not waited for.
 	cmd.WaitDelay = time.Second
 	out, err = cmd.Output()
@@ -185,12 +202,31 @@ func useraddArgv() string { return strings.Join(useradd, " ") }
 // taken by its name, and never changed (the owner, 2026-09-27). What
 // root does to hotserve's account after is root's: root reads the
 // credential file itself.
-func accountUsable(_ context.Context, acct passwd) error {
-	if acct.comment == accountMark {
-		return nil
+//
+// Ours is local as well as marked: the account in /etc/passwd, and the
+// one the system resolves by that name. A directory's account of that
+// name carries whatever comment its administrator gives it, the mark
+// among them (the owner's review of #155).
+func accountUsable(ctx context.Context, acct passwd) error {
+	remedy := fmt.Sprintf("remove it (userdel %s) and run sudo hotserve-backup setup <repository>, which makes it (%s); or, if it is one you made for hotserve, mark it: usermod --comment %s %s",
+		backupUser, useraddArgv(), accountMark, backupUser)
+	if acct.comment != accountMark {
+		return fmt.Errorf("the %s account on this box was not made by hotserve (its comment is %q, not %q): every restic unit runs as it, so hotserve uses only an account it made itself; %s",
+			backupUser, record.Text(acct.comment), accountMark, remedy)
 	}
-	return fmt.Errorf("the %s account on this box was not made by hotserve (its comment is %q, not %q): every restic unit runs as it, so hotserve uses only an account it made itself; remove it (userdel %s) and run sudo hotserve-backup setup <repository>, which makes it (%s)",
-		backupUser, record.Text(acct.comment), accountMark, backupUser, useraddArgv())
+	local, err := localAccount(ctx, backupUser)
+	if err != nil {
+		return err
+	}
+	switch {
+	case !local.exists:
+		return fmt.Errorf("the %s account this box resolves is not in /etc/passwd — a directory's, whose comment is its administrator's to write — so it is not one hotserve made: every restic unit runs as it; %s",
+			backupUser, remedy)
+	case local.uid != acct.uid || local.comment != acct.comment:
+		return fmt.Errorf("the %s account this box resolves is not the one in /etc/passwd (uid %d and %q, where /etc/passwd has uid %d and %q): another source answers for the name first, so it is not one hotserve made; %s",
+			backupUser, acct.uid, record.Text(acct.comment), local.uid, record.Text(local.comment), remedy)
+	}
+	return nil
 }
 
 // AccountReady is accountReady for the `account` command: what the

@@ -55,11 +55,13 @@ chown hotserve:hotserve /var/lib/hotserve /var/lib/liveswap
 # `hotserve-backup setup` uses (backups/engine/setup.go, held to this
 # script by a test), which also makes it when it is missing. No home,
 # no shell, nothing of its own but the cache the manager makes for it.
-# An account that exists is left as it is — an administrator may have
-# meant it — and setup and every run refuse one that someone else can
-# be or log in as, since that someone can read the repository
-# credential from a running restic's environment. Never removed on
-# purge (Debian policy: system accounts stay).
+# Its comment, made-by-hotserve, marks it as hotserve's. An account of
+# that name that exists is left as it is — an administrator may have
+# meant it — and setup and every run use it only where it is
+# hotserve's: in /etc/passwd, with the mark. Whoever is the account
+# reads the repository credential from a running restic's
+# environment. Never removed on purge (Debian policy: system accounts
+# stay).
 #
 # Where it cannot be made — a group of its name is there without it,
 # and useradd exits 9 [M66] — that is said, and the configure goes on

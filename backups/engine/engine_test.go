@@ -68,8 +68,13 @@ type box struct {
 	hang                       string
 	version                    int
 	haveProgram                func(string) bool
-	account                    bool   // whether the hotserve-backup account exists
-	comment                    string // its comment: hotserve's mark, where hotserve made it
+	account                    bool     // whether the hotserve-backup account exists
+	comment                    string   // its comment: hotserve's mark, where hotserve made it
+	localComment               string   // its comment in /etc/passwd
+	notLocal                   bool     // /etc/passwd holds no account of that name
+	madePrivate                []string // what was made private, in order
+	unmountedAt                []string // every unmount, in order, the probe's among them
+	runDirMounted              bool     // something is mounted on the run directory itself
 	uid, gid                   int
 	unseen                     bool     // the manager does not see this command's mounts
 	seesErr                    error    // the manager could not be asked
@@ -109,15 +114,19 @@ func newBox(t *testing.T) *box {
 	t.Cleanup(func() { haveProgram = oldHave })
 	// The account restic runs as, as setup makes it, unless a test says
 	// otherwise: a run looks at it before any unit, as setup does.
-	b.account, b.comment, b.uid, b.gid = true, accountMark, 995, 995
-	oldAccount, oldMake := account, makeAccount
+	b.account, b.comment, b.localComment, b.uid, b.gid = true, accountMark, accountMark, 995, 995
+	oldAccount, oldMake, oldLocal := account, makeAccount, localAccount
+	localAccount = func(context.Context, string) (passwd, error) {
+		return passwd{name: backupUser, comment: b.localComment, uid: b.uid, gid: b.gid, exists: b.account && !b.notLocal}, nil
+	}
+	t.Cleanup(func() { localAccount = oldLocal })
 	account = func(context.Context, string) (passwd, error) {
 		b.accountLookups++
 		return passwd{name: backupUser, comment: b.comment, uid: b.uid, gid: b.gid, exists: b.account}, nil
 	}
 	makeAccount = func() error {
 		b.accountsMade++
-		b.account, b.comment, b.uid, b.gid = true, accountMark, 995, 995
+		b.account, b.comment, b.localComment, b.notLocal, b.uid, b.gid = true, accountMark, accountMark, false, 995, 995
 		return nil
 	}
 	t.Cleanup(func() { account, makeAccount = oldAccount, oldMake })
@@ -180,7 +189,12 @@ func newBox(t *testing.T) *box {
 		b.mounted[target] = was
 		return err
 	}
+	oldPrivate, oldMountPoint := private, mountPoint
+	private = func(target string) error { b.madePrivate = append(b.madePrivate, target); return nil }
+	mountPoint = func(string) (bool, error) { return b.runDirMounted, nil }
+	t.Cleanup(func() { private, mountPoint = oldPrivate, oldMountPoint })
 	unmountDetach = func(target string) error {
+		b.unmountedAt = append(b.unmountedAt, target)
 		if slices.Contains(b.selfBound, target) {
 			b.selfUnbound = append(b.selfUnbound, target)
 			return nil

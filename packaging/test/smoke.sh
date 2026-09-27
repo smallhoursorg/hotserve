@@ -800,7 +800,10 @@ hold_upload() {
 survived() {
 	[ "$(systemctl is-active "$up" || true)" = activating ] && kill -0 "$rpid" 2>/dev/null \
 		|| die "$1: the upgrade ended the upload under way ($up is $(systemctl is-active "$up" || true))"
-	grep -q "would not stop\|under way from a shell" "$2" && die "$1: the upgrade spoke of a run it leaves alone: $(cat "$2")" || true
+	# An upgrade stops and sweeps nothing: none of what a stop or a
+	# sweep says is in its output (the owner's review of #155: this
+	# looked for words no script prints any more).
+	grep -q "not swept\|hotserve-backup sweep\|Stopping\|Stopped" "$2" && die "$1: the upgrade stopped or swept something of the backups: $(cat "$2")" || true
 	kill -CONT "$rpid"
 }
 hold_upload "systemctl start --no-block hotserve-backup.service"
@@ -1148,6 +1151,32 @@ grep -q "hotserve: kept /run/hotserve-backup: something is mounted at or under i
 	|| die "postremove did not say why it kept the run directory: $(cat /tmp/purge-atrun.log)"
 rm -rf /run/hotserve-backup /tmp/at-run
 echo "a mount on the run directory itself: purge removed nothing through it, and said why"
+# And a command that holds the run lock with nothing mounted — a
+# restore waiting at its prompt: purge leaves the lock, the list of
+# its units and the init marker to it, and says so (the owner's
+# review of #155: they were removed from under it, and the units it
+# had started had no record left for any sweep).
+mkdir -p /run/hotserve-backup
+chmod 700 /run/hotserve-backup
+echo hotserve_backup_upload_demo_0123456789ab.service >/run/hotserve-backup/units
+echo hotserve_backup_init_0123456789ab.service >/run/hotserve-backup/init-unit
+flock /run/hotserve-backup/lock -c 'echo "pid $$, since 2026-09-27T00:00:00Z" >/run/hotserve-backup/lock; exec sleep 300' &
+holder=$!
+i=0
+until ! flock -n /run/hotserve-backup/lock true 2>/dev/null; do
+	i=$((i + 1))
+	[ "$i" -ge 50 ] && die "could not hold the run lock: the row would prove nothing"
+	sleep 0.1
+done
+sh /tmp/hotserve.postrm purge >/tmp/purge-locked.log 2>&1 || true
+pkill -P "$holder" 2>/dev/null || true
+kill "$holder" 2>/dev/null || true
+[ -f /run/hotserve-backup/units ] && [ -f /run/hotserve-backup/init-unit ] && [ -f /run/hotserve-backup/lock ] \
+	|| die "purge removed the run directory's files from under a command that holds the run lock: $(ls -la /run/hotserve-backup 2>&1)"
+grep -q "hotserve: kept /run/hotserve-backup: the run lock is held (pid [0-9]*, since 2026-09-27T00:00:00Z)" /tmp/purge-locked.log \
+	|| die "postremove did not say that the run lock is held: $(cat /tmp/purge-locked.log)"
+rm -rf /run/hotserve-backup
+echo "a command holding the run lock: purge left its files, and said why"
 
 echo ""
 echo "ALL PACKAGE SMOKE STAGES PASSED ($deb on $(. /etc/os-release && echo "$PRETTY_NAME"))"

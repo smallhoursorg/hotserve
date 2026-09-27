@@ -307,12 +307,23 @@ func (x *run) seen(ctx context.Context) error {
 // the next command would. The package's preremove asks it at a remove,
 // while the program is still there: after it there is no next command
 // (the owner, 2026-09-27: the engine's own sweep, not a shell copy).
+//
+// No more than that: no state directories made on a box that never set
+// backups up, no wait for an init a setup left running — which would
+// leave the rest unswept — and nothing looked up or hashed.
 func Sweep(ctx context.Context, cfg Config, r Runner) error {
-	_, end, err := open(ctx, cfg, r, nil)
-	if end != nil {
-		end()
+	if _, err := os.Lstat(cfg.RunDir); errors.Is(err, fs.ErrNotExist) {
+		return nil
 	}
-	return err
+	if err := runDirUsable(cfg.RunDir); err != nil {
+		return err
+	}
+	unlock, err := lock(filepath.Join(cfg.RunDir, "lock"))
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return (&run{cfg: cfg, r: r}).sweep()
 }
 
 // programPath is the file a command hashes for its helpers: the
@@ -352,6 +363,9 @@ func open(ctx context.Context, cfg Config, r Runner, say func(string)) (x *run, 
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return nil, nil, err
 		}
+	}
+	if err := runDirUsable(cfg.RunDir); err != nil {
+		return nil, nil, err
 	}
 	unlock, err := lock(filepath.Join(cfg.RunDir, "lock"))
 	if err != nil {
@@ -644,6 +658,35 @@ func (x *run) forget(ctx context.Context, p *plan.Plan) {
 	}
 }
 
+// mountPoint is whether something is mounted on dir itself. Nothing of
+// the engine's is mounted on its run directory; a mount there would
+// have the lock, the list of units and a run's files written, and
+// removed, through it.
+var mountPoint = func(dir string) (bool, error) {
+	raw, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return false, err
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if f := strings.Fields(line); len(f) > 4 && unescapeMount(f[4]) == dir {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// runDirUsable refuses a run directory that is itself a mount point.
+func runDirUsable(dir string) error {
+	mounted, err := mountPoint(dir)
+	if err != nil {
+		return fmt.Errorf("whether %s is itself a mount point could not be read: %w", dir, err)
+	}
+	if mounted {
+		return fmt.Errorf("%s is itself a mount point: nothing of hotserve-backup's is mounted there, and what it writes and removes there would be written and removed through the mount; unmount it (sudo umount %s)", dir, dir)
+	}
+	return nil
+}
+
 // UnitPattern matches the name of every unit a run, a restore or a
 // drill starts, and no other unit on the box.
 const UnitPattern = "hotserve_backup_*"
@@ -705,22 +748,22 @@ func (x *run) sweep() error {
 	if err := x.sweepUnits(); err != nil {
 		return err
 	}
-	// Then the mounts such a run made, deepest first, and its
-	// directory. The lock is held, so whatever is here is nobody's.
+	// Then the mounts such a run made, and its directory. The lock is
+	// held, so whatever is here is nobody's. The engine's own mount
+	// points alone — those with no mount above them under the run
+	// directory, at paths only root can reach — each made private with
+	// all beneath it and detached with all beneath it (unmountDetach).
+	// Never a nested one by its path: that runs through an app's
+	// directory, which the app can re-aim at another's with a link
+	// between the look and the call (the owner's review of #155); and a
+	// nested one taken away under a parent still shared takes the disk
+	// beneath the app's own directory with it [M71]. One that cannot be
+	// made private is not detached as it is, and the sweep says so.
 	mounts, err := mountsUnder(x.cfg.RunDir)
 	if err != nil {
 		return err
 	}
-	// Private first, every one, parents before children: an unmount
-	// propagates by the parent's sharing, not the mount's own, so a
-	// nested mount taken away under a parent still shared takes the
-	// operator's disk beneath the app's own directory with it [M71].
-	// One that cannot be made private is not detached as it is
-	// (unmountDetach), and the sweep says so.
-	for i := len(mounts) - 1; i >= 0; i-- {
-		_ = private(mounts[i])
-	}
-	for _, m := range mounts {
+	for _, m := range topmost(mounts) {
 		if err := unmountDetach(m); err != nil {
 			return fmt.Errorf("a mount from an earlier run is still there: %s: %w", m, err)
 		}
@@ -735,6 +778,25 @@ func (x *run) sweep() error {
 		}
 	}
 	return nil
+}
+
+// topmost is the mounts with no other of them above: the ones a
+// recursive private and a detach take away with all beneath them.
+func topmost(mounts []string) []string {
+	var out []string
+	for _, m := range mounts {
+		above := false
+		for _, o := range mounts {
+			if o != m && strings.HasPrefix(m, o+"/") {
+				above = true
+				break
+			}
+		}
+		if !above {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // removeRunDir removes a run's directory: its files, and its mount

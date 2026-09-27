@@ -105,10 +105,12 @@ jobs:
               replace the binary, nothing — a backup under way is left
               to finish, and a helper of another version does nothing
               for it; to remove it, stop the two timers and the two
-              services first; unmount whatever is still mounted
-              under /run/hotserve-backup before removing it (never
-              rm -r it with a mount there: that removes an app's
-              files); and remove, with the unit files,
+              services first, then run sudo hotserve-backup sweep,
+              which takes away what a killed command left under
+              /run/hotserve-backup — never unmount or rm -r there by
+              hand: a nested mount taken away first, or an rm through
+              a mount, loses an app's files; and remove, with the unit
+              files,
                 /var/lib/systemd/timers/stamp-hotserve-backup*.timer
               or a later install catches up a run nobody missed
 

@@ -683,6 +683,14 @@ hourly run. It needs no sudoers line.
   *inside* a declared directory; nothing reads it.)
 - A run's leftover unit that will not stop within two minutes: the run
   is refused, and the record says why.
+- A run directory, `/run/hotserve-backup`, that is itself a mount
+  point: nothing of hotserve-backup's is mounted there, and what it
+  writes and removes there would go through the mount. Every command
+  refuses, and names the `umount`.
+- By hand, after a command was killed: `sudo hotserve-backup sweep`
+  takes away what it left — the units it recorded, and its mounts
+  under `/run/hotserve-backup`, made private first — as the next run
+  would. Never unmount or `rm -r` there by hand.
 - A run, a restore or a drill in a mount namespace of its own: the
   manager binds what it sees into a unit, and where it does not see
   the mounts a command makes it binds the bare mount point — root's,
@@ -730,7 +738,13 @@ hourly run. It needs no sudoers line.
   running restic's environment: an account of that name made by hand,
   by another package, or by this branch before the mark, is refused,
   never changed, and the remedy is to remove it (`userdel
-  hotserve-backup`) and run setup, which makes it; a Caddyfile a run
+  hotserve-backup`) and run setup, which makes it — or, for one you
+  made for hotserve yourself, to mark it (`usermod --comment
+  made-by-hotserve hotserve-backup`), which keeps the credential file.
+  Hotserve's account is local as well as marked: the one in
+  `/etc/passwd`, which only root writes, and the one the box resolves
+  by that name; a directory's account of that name (LDAP, sssd) is
+  refused, whatever its comment says; a Caddyfile a run
   could not plan from; another run, restore or drill under way. **A
   run, a restore and a drill ask the same of the account** before any
   unit — it is the run that puts the credential in that account's
