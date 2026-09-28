@@ -42,6 +42,10 @@ watches:
 # Requires the DEPENDABOT_ALERTS_TOKEN secret (fine-grained PAT,
 # "Dependabot alerts: read-write" on this repo only) — the Actions
 # GITHUB_TOKEN cannot access the Dependabot alerts API.
+# Optional `govulncheck: GO-YYYY-NNNN` names the same advisory's Go
+# vulndb ID: `make vulncheck` (.github/scripts/vulncheck.sh) then
+# tolerates it, and FAILS once no module reports it any more — so the
+# entry is deleted when the fix lands, clearing both gates at once.
 
 alert_dismissals:
   - ghsa: GHSA-gcjh-h69q-9w9g
@@ -59,6 +63,25 @@ alert_dismissals:
       never uses ext.NativeTypes, and CEL expressions are operator
       config, not request input. Evidence + exit condition versioned
       in .github/pin-watch.yml (cel-go watch).
+  - ghsa: GHSA-w34q-cm8f-9c5x
+    govulncheck: GO-2026-6508
+    reason: not_used
+    # otlploggrpc < 0.21 ignores the env TLS certs, bypassing mTLS and
+    # pinning. Unreachable: the otel log modules arrive only through
+    # caddy's contrib/exporters/autoexport, and caddy calls only
+    # autoexport.NewSpanExporter/NewMetricReader — never a log
+    # exporter. govulncheck still flags every module because the vulndb
+    # entry (published 2026-09-28) is unreviewed and names no symbols,
+    # so any import counts as a call. Not bumped alone: otel/log 0.21
+    # removed types the 0.19 set uses, and the set moves with
+    # autoexport (0.21 needs autoexport >= v0.70; caddy v2.11.4 pins
+    # v0.68) — PR #131, closed 2026-09-18. Cleared when caddy releases
+    # with autoexport >= v0.70 and Dependabot follows.
+    comment: >-
+      Unreachable: otlploggrpc arrives only via caddy's autoexport, and
+      caddy never builds a log exporter. The fix needs autoexport >=
+      v0.70, which caddy has not released. Evidence + exit condition
+      versioned in .github/pin-watch.yml.
 
 # Code-scanning (CodeQL) triage as code, same contract as above: alerts
 # matching rule + file are auto-dismissed by the pin-watch workflow, so
