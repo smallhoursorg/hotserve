@@ -92,14 +92,26 @@ purge)
 		# and only names the engine writes (engine.go, unitNameRe; a test
 		# holds the two together), where nothing holds the lock now
 		# (Copilot on #155).
+		# One that will not stop is said, by name, and the record of it
+		# is kept (Copilot on #155).
+		stuck=""
 		if [ -f "$run/units" ] && [ -d /run/systemd/system ] && { ! command -v flock >/dev/null 2>&1 || flock -n "$run/lock" true 2>/dev/null; }; then
 			while read -r u; do
 				echo "$u" | grep -Eq '^hotserve_backup_[a-z]+[0-9]*(_[a-z0-9-]{1,63})?_[0-9a-f]{12}\.service$' || continue
 				systemctl stop "$u" 2>/dev/null || true
-				systemctl reset-failed "$u" 2>/dev/null || true
+				state=$(systemctl show -p ActiveState --value "$u" 2>/dev/null) || state=""
+				case "$state" in
+				inactive | failed | "") systemctl reset-failed "$u" 2>/dev/null || true ;;
+				*)
+					stuck=yes
+					echo "hotserve: $u, which a backup command left running, would not stop (it is $state): it holds the repository credential; stop it yourself (sudo systemctl stop $u)" >&2
+					;;
+				esac
 			done <"$run/units"
 		fi
-		if mounted; then
+		if [ -n "$stuck" ]; then
+			echo "hotserve: kept $run: a unit named in $run/units would not stop, and that list is its only record" >&2
+		elif mounted; then
 			echo "hotserve: kept $run: something is mounted at or under it, or what is mounted cannot be read; nothing under it is removed — it is gone at the next boot, and is not to be rm -r'd before" >&2
 		elif [ -f "$run/lock" ] && command -v flock >/dev/null 2>&1 && ! flock -n "$run/lock" true 2>/dev/null; then
 			# A command that holds the run lock — a restore at its prompt

@@ -1202,6 +1202,27 @@ grep -q "hotserve: kept /run/hotserve-backup: something is mounted at or under i
 umount /run/hotserve-backup/0123456789ab/mount-1
 rm -rf /run/hotserve-backup
 echo "a killed command's units after a remove: stopped by purge, by their recorded names; its mount left, and said"
+# And one that will not stop: said, by name, and its record kept, so
+# that the name is not lost with the credential still in its
+# environment (Copilot on #155).
+STUCK=hotserve_backup_upload_demo_0123456789ab.service
+mkdir -p "/run/systemd/system/$STUCK.d"
+printf '[Unit]\nRefuseManualStop=yes\n' >"/run/systemd/system/$STUCK.d/10-smoke.conf"
+systemd-run --quiet --unit="$STUCK" /usr/bin/sleep 600 || die "could not stage a unit that will not stop"
+systemctl daemon-reload
+mkdir -p /run/hotserve-backup
+chmod 700 /run/hotserve-backup
+echo "$STUCK" >/run/hotserve-backup/units
+sh /tmp/hotserve.postrm purge >/tmp/purge-stuck.log 2>&1 || true
+[ "$(systemctl is-active "$STUCK" || true)" = active ] || die "the unit staged as one that will not stop stopped: the row proves nothing"
+grep -q "hotserve: $STUCK, which a backup command left running, would not stop" /tmp/purge-stuck.log \
+	|| die "purge did not say that a unit would not stop: $(cat /tmp/purge-stuck.log)"
+grep -qx "$STUCK" /run/hotserve-backup/units 2>/dev/null || die "purge removed the record of a unit that would not stop"
+rm -rf "/run/systemd/system/$STUCK.d"
+systemctl daemon-reload
+systemctl stop "$STUCK" 2>/dev/null || true
+rm -rf /run/hotserve-backup
+echo "a unit that would not stop: said by name, and its record kept"
 
 echo ""
 echo "ALL PACKAGE SMOKE STAGES PASSED ($deb on $(. /etc/os-release && echo "$PRETTY_NAME"))"
