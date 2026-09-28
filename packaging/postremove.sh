@@ -99,9 +99,16 @@ purge)
 			while read -r u; do
 				echo "$u" | grep -Eq '^hotserve_backup_[a-z]+[0-9]*(_[a-z0-9-]{1,63})?_[0-9a-f]{12}\.service$' || continue
 				systemctl stop "$u" 2>/dev/null || true
+				# A unit the manager has none of reads "inactive"
+				# [measured]; nothing at all is a manager that did not
+				# answer, which is no "gone" (Copilot on #155).
 				state=$(systemctl show -p ActiveState --value "$u" 2>/dev/null) || state=""
 				case "$state" in
-				inactive | failed | "") systemctl reset-failed "$u" 2>/dev/null || true ;;
+				inactive | failed) systemctl reset-failed "$u" 2>/dev/null || true ;;
+				"")
+					stuck=yes
+					echo "hotserve: $u, which a backup command left running, could not be asked about: the manager did not answer; if it runs, it holds the repository credential (sudo systemctl stop $u)" >&2
+					;;
 				*)
 					stuck=yes
 					echo "hotserve: $u, which a backup command left running, would not stop (it is $state): it holds the repository credential; stop it yourself (sudo systemctl stop $u)" >&2
@@ -110,7 +117,7 @@ purge)
 			done <"$run/units"
 		fi
 		if [ -n "$stuck" ]; then
-			echo "hotserve: kept $run: a unit named in $run/units would not stop, and that list is its only record" >&2
+			echo "hotserve: kept $run: a unit named in $run/units would not stop, or could not be asked about, and that list is its only record" >&2
 		elif mounted; then
 			echo "hotserve: kept $run: something is mounted at or under it, or what is mounted cannot be read; nothing under it is removed — it is gone at the next boot, and is not to be rm -r'd before" >&2
 		elif [ -f "$run/lock" ] && command -v flock >/dev/null 2>&1 && ! flock -n "$run/lock" true 2>/dev/null; then

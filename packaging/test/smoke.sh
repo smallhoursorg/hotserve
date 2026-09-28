@@ -1223,6 +1223,24 @@ systemctl daemon-reload
 systemctl stop "$STUCK" 2>/dev/null || true
 rm -rf /run/hotserve-backup
 echo "a unit that would not stop: said by name, and its record kept"
+# And the manager unreachable: its state cannot be asked, which is no
+# "gone" — a missing unit reads "inactive" [measured] — so it is said,
+# and the record kept (Copilot on #155).
+LEFT=hotserve_backup_upload_demo_0123456789ab.service
+systemd-run --quiet --unit="$LEFT" /usr/bin/sleep 600 || die "could not stage a unit a killed command left running"
+mkdir -p /run/hotserve-backup
+chmod 700 /run/hotserve-backup
+echo "$LEFT" >/run/hotserve-backup/units
+mv /run/systemd/private /run/systemd/private.smoke-aside
+systemctl show -p ActiveState --value "$LEFT" >/dev/null 2>&1 && { mv /run/systemd/private.smoke-aside /run/systemd/private; die "the manager still answered: the row proves nothing"; }
+sh /tmp/hotserve.postrm purge >/tmp/purge-nobus.log 2>&1 || true
+mv /run/systemd/private.smoke-aside /run/systemd/private
+grep -qx "$LEFT" /run/hotserve-backup/units 2>/dev/null || die "purge removed the record of a unit whose state could not be asked: $(cat /tmp/purge-nobus.log)"
+grep -q "hotserve: $LEFT, which a backup command left running, could not be asked about" /tmp/purge-nobus.log \
+	|| die "purge did not say that it could not ask about a unit: $(cat /tmp/purge-nobus.log)"
+systemctl stop "$LEFT" 2>/dev/null || true
+rm -rf /run/hotserve-backup
+echo "the manager unreachable: said, and the record kept"
 
 echo ""
 echo "ALL PACKAGE SMOKE STAGES PASSED ($deb on $(. /etc/os-release && echo "$PRETTY_NAME"))"
