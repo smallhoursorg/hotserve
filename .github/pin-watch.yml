@@ -44,8 +44,10 @@ watches:
 # GITHUB_TOKEN cannot access the Dependabot alerts API.
 # Optional `govulncheck: GO-YYYY-NNNN` names the same advisory's Go
 # vulndb ID: `make vulncheck` (.github/scripts/vulncheck.sh) then
-# tolerates it, and FAILS once no module reports it any more — so the
-# entry is deleted when the fix lands, clearing both gates at once.
+# tolerates it as called, and FAILS once no module calls it any more
+# (fix landed, or the vulndb entry gained symbols we never reach) —
+# then the govulncheck key goes; the dismissal stays until its alert
+# is gone.
 
 alert_dismissals:
   - ghsa: GHSA-gcjh-h69q-9w9g
