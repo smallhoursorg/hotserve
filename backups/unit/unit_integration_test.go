@@ -650,3 +650,69 @@ func TestIntegrationScheduledSaysWhetherAUnitIs(t *testing.T) {
 		t.Fatalf("a unit that was never loaded: active=%v enabled=%v, err=%v", active, enabled, err)
 	}
 }
+
+// Sees is how a command knows that the manager can bind its mounts
+// into a unit: the manager keeps a mount unit for every mount of its
+// own namespace, and none for one made in another [M72]. A mount made
+// here, in the manager's namespace, is seen at once; the same path
+// with no mount on it is not, after the wait; and the unit's name is
+// the one systemd-escape gives the path.
+func TestIntegrationSeesAMountOfTheManagersNamespace(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root and mount(2)")
+	}
+	r := runner(t)
+	dir, err := os.MkdirTemp("/run", "sees a-mount.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(dir) })
+	escaped, err := exec.Command("systemd-escape", "--path", "--suffix=mount", dir).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := MountUnit(dir); got != strings.TrimSpace(string(escaped)) {
+		t.Fatalf("MountUnit(%q) = %q, systemd-escape says %q", dir, got, strings.TrimSpace(string(escaped)))
+	}
+	began := time.Now()
+	if seen, err := r.Sees(context.Background(), dir); err != nil || seen {
+		t.Fatalf("a directory with no mount on it: seen=%v, err=%v", seen, err)
+	}
+	if waited := time.Since(began); waited < seesWithin {
+		t.Fatalf("a mount that is not there was given up on after %s, before the manager had %s to read it", waited, seesWithin)
+	}
+	if out, err := exec.Command("mount", "--bind", dir, dir).CombinedOutput(); err != nil {
+		t.Fatalf("mount --bind: %v: %s", err, out)
+	}
+	t.Cleanup(func() { _ = exec.Command("umount", "-l", dir).Run() })
+	began = time.Now()
+	if seen, err := r.Sees(context.Background(), dir); err != nil || !seen {
+		t.Fatalf("a mount made in the manager's namespace: seen=%v, err=%v", seen, err)
+	}
+	if waited := time.Since(began); waited > 2*time.Second {
+		t.Errorf("the manager took %s to see a mount of its own namespace", waited)
+	}
+	// And one made where the manager does not look: in a mount
+	// namespace of its own, as a service with PrivateMounts= has.
+	other, err := os.MkdirTemp("/run", "sees-elsewhere.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(other) })
+	held := exec.Command("unshare", "--mount", "--propagation", "private", "sh", "-c", "mount --bind \"$0\" \"$0\" && echo mounted && exec sleep 30", other)
+	out, err := held.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := held.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = held.Process.Kill(); _ = held.Wait() })
+	line := make([]byte, 8)
+	if n, _ := out.Read(line); !strings.HasPrefix(string(line[:n]), "mounted") {
+		t.Fatalf("the mount in a namespace of its own was not made: %q", line[:n])
+	}
+	if seen, err := r.Sees(context.Background(), other); err != nil || seen {
+		t.Fatalf("a mount made in a mount namespace of its own: seen=%v, err=%v", seen, err)
+	}
+}

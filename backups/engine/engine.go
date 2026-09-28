@@ -18,19 +18,21 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
-	"os/user"
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
-	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -67,6 +69,75 @@ const (
 	backupUser = "hotserve-backup" // holds the credential while restic runs; runs nothing else
 )
 
+// A command and the helpers it starts are one version, or the helper
+// does nothing. An upgrade leaves a command under way alone (the
+// owner, 2026-09-27) — its upload is restic's and finishes, where a
+// stopped one was sent again whole — and the helpers it starts from
+// then on, by path, are the new version's. Their answers are read
+// strictly, which refuses another shape; an answer of the same shape
+// that means something else is what nothing would see. So each unit
+// started from this program is told which program that is, in
+// RunIdentityEnv, and a helper that is another exits
+// OtherVersionStatus having done nothing: 75, which no helper exits
+// otherwise and the manager never does.
+const (
+	RunIdentityEnv     = "HOTSERVE_BACKUP_RUN_IS"
+	OtherVersionStatus = 75
+)
+
+// programOf is which program a file is: its hash. A command tells its
+// helpers that of the file they are started from, as it is when the
+// command begins — not its own: run from a build directory or another
+// path, the helpers are the installed program, and a command that told
+// them its own hash would find every one "upgraded" for good.
+var programOf = func(path string) (string, error) {
+	f, err := os.Open(path) //nolint:gosec // cfg.Self, a constant of the installation
+	if err != nil {
+		return "", err
+	}
+	defer f.Close() //nolint:errcheck // read only
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// WhichProgram is which program this is: the hash of the file it was
+// started from, as the kernel still holds it — whatever is at its path
+// by now. Not a version's name: two builds of one name are two
+// programs, and a build with no name is one.
+func WhichProgram() (string, error) { return whichProgram() }
+
+var whichProgram = sync.OnceValues(func() (string, error) {
+	f, err := os.Open("/proc/self/exe")
+	if err != nil {
+		return "", err
+	}
+	defer f.Close() //nolint:errcheck // read only
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+})
+
+// otherVersion is a helper that was another version's, and did
+// nothing: the unit's own word, so nothing had begun; and every helper
+// after it would say the same, so nothing after it is tried.
+func otherVersion(o unit.Outcome, role string) error {
+	if o.Result != "exit-code" || o.ExitStatus != OtherVersionStatus {
+		return nil
+	}
+	return repositoryWideError{upgradedError{refusedError{fmt.Errorf("the package was upgraded while this command was under way: its %s helper is another version's, and did nothing; the same command, run again, is of one version", role)}}}
+}
+
+// upgradedError is a helper that did nothing because it is another
+// version's: nothing was found out, so it is no drill's verdict.
+type upgradedError struct{ error }
+
+func (e upgradedError) Unwrap() error { return e.error }
+
 // retryLock is how long restic waits for a repository something else
 // holds — a check takes it exclusively. A flag, because restic 0.18
 // does not read it from the environment.
@@ -82,6 +153,10 @@ type Runner interface {
 	// ManagerVersion is the manager's major version: setup refuses one
 	// older than the properties here are built on.
 	ManagerVersion(ctx context.Context) (int, error)
+	// Sees says whether the manager sees a mount at the path: whether
+	// a mount this command makes is one the manager can bind into a
+	// unit.
+	Sees(ctx context.Context, mountPoint string) (bool, error)
 }
 
 // initWait bounds the wait for a restic init an earlier setup left
@@ -109,6 +184,18 @@ type run struct {
 	keepDir bool
 	// swept is what open removed of an interrupted setup's leavings.
 	swept []string
+	// data is the data user's ids, looked up once as the command
+	// begins, and account the backup account as the check found it.
+	dataUID, dataGID int
+	dataErr          error
+	account          passwd
+	// program is which program this is, told to every helper.
+	program string
+	// upgraded is set once a helper was another version's.
+	upgraded error
+	// given is which file each files item of the app under way is, by
+	// its path in the upload unit's view: what the snapshot is held to.
+	given map[string]identity
 }
 
 // preRestoreTag is on a snapshot a restore made of what it was about to
@@ -159,16 +246,108 @@ func begin(ctx context.Context, cfg Config, r Runner) (x *run, end func(), err e
 	if err := programsInstalled(cfg); err != nil {
 		return x, end, err
 	}
-	if err := accountReady(); err != nil {
+	// The data user's lookup, made as the command opened: a lookup that
+	// failed stops the command here, in its own words, whether or not
+	// anything after would have used its answer.
+	if x.dataErr != nil {
+		return x, end, x.dataErr
+	}
+	if x.account, err = accountReady(ctx); err != nil {
+		return x, end, err
+	}
+	if err := x.seen(ctx); err != nil {
 		return x, end, err
 	}
 	return x, end, nil
+}
+
+// seen is whether the manager sees the mounts this command makes. It
+// binds what it sees: where it does not — this command in a mount
+// namespace of its own, which a service gets from any of a dozen
+// properties [M22, M54] — it binds the bare mount point, root's and
+// empty, into every unit in the place of an app's data, and an upload
+// is a snapshot of empty directories. So the command makes one mount
+// of its own, of nothing, asks the manager whether it has a mount unit
+// for it, and refuses where it has none: once, before any unit is
+// shown anything [M72]. (The manager's namespace is not this
+// command's to read: /proc/1/ns/mnt asks for more capabilities than
+// the run's service has.)
+func (x *run) seen(ctx context.Context) error {
+	probe := filepath.Join(x.dir, "seen")
+	if err := os.Mkdir(probe, 0o700); err != nil {
+		return err
+	}
+	defer os.Remove(probe) //nolint:errcheck // an empty directory of the run's own; removeRunDir is behind it
+	if err := selfBind(probe); err != nil {
+		return fmt.Errorf("making a mount of this command's own: %w", err)
+	}
+	seen, err := x.r.Sees(ctx, probe)
+	if uerr := unmountDetach(probe); uerr != nil && err == nil {
+		err = fmt.Errorf("taking away the mount of this command's own: %w", uerr)
+	}
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("whether the manager sees the mounts this command makes could not be asked: %w", err)
+	}
+	if !seen {
+		where := "it was started from a shell that has one: run it from the box's own"
+		if x.cfg.BindsTo != "" {
+			where = fmt.Sprintf("%s is given one by a property it must not have — PrivateMounts=, ProtectSystem=, PrivateTmp=, PrivateNetwork= and their kin: systemctl cat %s shows it, a drop-in among what it lists", x.cfg.BindsTo, x.cfg.BindsTo)
+		}
+		return fmt.Errorf("this command runs in a mount namespace of its own: the manager does not see the mounts it makes, and would show every unit an empty directory in the place of an app's data; nothing was uploaded; %s", where)
+	}
+	return nil
+}
+
+// Sweep takes away what a killed command left — the units it
+// recorded, stopped by those names, and what it left mounted under the
+// run directory, made private and taken away — under the run lock, as
+// the next command would. The package's preremove asks it at a remove,
+// while the program is still there: after it there is no next command
+// (the owner, 2026-09-27: the engine's own sweep, not a shell copy).
+//
+// No more than that: no state directories made on a box that never set
+// backups up, no wait for an init a setup left running — which would
+// leave the rest unswept — and nothing looked up or hashed.
+func Sweep(ctx context.Context, cfg Config, r Runner) error {
+	if _, err := os.Lstat(cfg.RunDir); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err := runDirUsable(cfg.RunDir); err != nil {
+		return err
+	}
+	unlock, err := lock(filepath.Join(cfg.RunDir, "lock"))
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return (&run{cfg: cfg, r: r}).sweep()
+}
+
+// programPath is the file a command hashes for its helpers: the
+// program running, where it is the installed one — replaced under it
+// since it started, the kernel still holds the old file, and the old
+// command must not take the new one's hash — and the installed file
+// where it was started from anywhere else, whose helpers are the
+// installed program.
+func programPath(self, running string) string {
+	if strings.TrimSuffix(running, " (deleted)") == self {
+		return "/proc/self/exe"
+	}
+	return self
 }
 
 // open is begin without the credential file: what setup, which is
 // about to write that file, shares with a run. say, when there is
 // someone to tell, hears of a wait for an earlier setup's init.
 func open(ctx context.Context, cfg Config, r Runner, say func(string)) (x *run, end func(), err error) {
+	running, _ := os.Readlink("/proc/self/exe")
+	program, err := programOf(programPath(cfg.Self, running))
+	if err != nil {
+		return nil, nil, fmt.Errorf("which version of hotserve-backup this is could not be read: %w", err)
+	}
 	// The state dir is where the status record is read from by anyone;
 	// everything else is root's alone. Units reach staging through
 	// binds the manager makes, not by walking here.
@@ -184,6 +363,9 @@ func open(ctx context.Context, cfg Config, r Runner, say func(string)) (x *run, 
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return nil, nil, err
 		}
+	}
+	if err := runDirUsable(cfg.RunDir); err != nil {
+		return nil, nil, err
 	}
 	unlock, err := lock(filepath.Join(cfg.RunDir, "lock"))
 	if err != nil {
@@ -202,7 +384,8 @@ func open(ctx context.Context, cfg Config, r Runner, say func(string)) (x *run, 
 		unreadable = record.Text(fmt.Sprintf("the previous record could not be read and was replaced: %v", err))
 		prev = &record.Status{Apps: map[string]*record.App{}}
 	}
-	x = &run{cfg: cfg, r: r, nonce: nonce, dir: filepath.Join(cfg.RunDir, nonce), prev: prev,
+	uid, gid, derr := dataOwner(ctx)
+	x = &run{cfg: cfg, r: r, nonce: nonce, dir: filepath.Join(cfg.RunDir, nonce), prev: prev, dataUID: uid, dataGID: gid, dataErr: derr, program: program,
 		status: &record.Status{Started: time.Now().UTC(), Warning: unreadable, Apps: map[string]*record.App{}, Listed: prev.Listed, Unlisted: prev.Unlisted, LastDrill: prev.LastDrill}}
 	if err := x.awaitInit(ctx, say); err != nil {
 		return x, unlock, err
@@ -249,6 +432,10 @@ func (x *run) finish(runErr error) (*record.Status, error) {
 	}
 	return x.status, runErr
 }
+
+// dataOwner is the data user's ids, as they were looked up when the
+// command began.
+func (x *run) dataOwner() (uid, gid int, err error) { return x.dataUID, x.dataGID, x.dataErr }
 
 func (x *run) apps(ctx context.Context) error {
 	p, err := x.plan(ctx)
@@ -305,7 +492,13 @@ func (x *run) apps(ctx context.Context) error {
 		// that keeps failing is not re-fetched, in full, every hour.
 		if app := x.status.Apps[name]; app.Class == record.OK && app.RestoreProven == nil && app.RestoreDrill == nil && ctx.Err() == nil {
 			if x.firstDrill(ctx, name, app) {
-				stop = &record.App{Detail: app.RestoreDrill.Detail}
+				if x.upgraded != nil {
+					// No verdict: the next run drills it again.
+					stop = &record.App{Detail: record.Text(x.upgraded.Error())}
+					x.status.Warning = strings.TrimSpace(x.status.Warning + " " + stop.Detail)
+				} else {
+					stop = &record.App{Detail: app.RestoreDrill.Detail}
+				}
 			}
 		}
 	}
@@ -465,6 +658,35 @@ func (x *run) forget(ctx context.Context, p *plan.Plan) {
 	}
 }
 
+// mountPoint is whether something is mounted on dir itself. Nothing of
+// the engine's is mounted on its run directory; a mount there would
+// have the lock, the list of units and a run's files written, and
+// removed, through it.
+var mountPoint = func(dir string) (bool, error) {
+	raw, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return false, err
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if f := strings.Fields(line); len(f) > 4 && unescapeMount(f[4]) == dir {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// runDirUsable refuses a run directory that is itself a mount point.
+func runDirUsable(dir string) error {
+	mounted, err := mountPoint(dir)
+	if err != nil {
+		return fmt.Errorf("whether %s is itself a mount point could not be read: %w", dir, err)
+	}
+	if mounted {
+		return fmt.Errorf("%s is itself a mount point: nothing of hotserve-backup's is mounted there, and what it writes and removes there would be written and removed through the mount; unmount it (sudo umount %s)", dir, dir)
+	}
+	return nil
+}
+
 // UnitPattern matches the name of every unit a run, a restore or a
 // drill starts, and no other unit on the box.
 const UnitPattern = "hotserve_backup_*"
@@ -505,6 +727,10 @@ func (x *run) start(ctx context.Context, s unit.Spec) (unit.Outcome, error) {
 	if strings.HasPrefix(s.Name, "hotserve_backup_clean_") || strings.HasPrefix(s.Name, "hotserve_backup_unstage_") {
 		s.BindsTo = ""
 	}
+	// A unit of this program is told which program that is.
+	if len(s.Argv) > 0 && s.Argv[0] == x.cfg.Self {
+		s.Environment = append(slices.Clone(s.Environment), RunIdentityEnv+"="+x.program)
+	}
 	f, err := os.OpenFile(filepath.Join(x.cfg.RunDir, "units"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return unit.Outcome{}, err
@@ -522,13 +748,26 @@ func (x *run) sweep() error {
 	if err := x.sweepUnits(); err != nil {
 		return err
 	}
-	// Then the mounts such a run made, deepest first, and its
-	// directory. The lock is held, so whatever is here is nobody's.
+	// Then the mounts such a run made, and its directory. The lock is
+	// held, so whatever is here is nobody's. Every mount under the run
+	// directory is taken away, by the topmost ones alone — those with
+	// no mount above them, at paths only root can reach, since the
+	// directory is root's and 0700 — each made private with all beneath
+	// it and detached with all beneath it (unmountDetach). A mount there
+	// of another name is root's own doing, and is taken away too: left,
+	// the removal of the run's directories below would remove files
+	// through it.
+	// Never a nested one by its path: that runs through an app's
+	// directory, which the app can re-aim at another's with a link
+	// between the look and the call (the owner's review of #155); and a
+	// nested one taken away under a parent still shared takes the disk
+	// beneath the app's own directory with it [M71]. One that cannot be
+	// made private is not detached as it is, and the sweep says so.
 	mounts, err := mountsUnder(x.cfg.RunDir)
 	if err != nil {
 		return err
 	}
-	for _, m := range mounts {
+	for _, m := range topmost(mounts) {
 		if err := unmountDetach(m); err != nil {
 			return fmt.Errorf("a mount from an earlier run is still there: %s: %w", m, err)
 		}
@@ -543,6 +782,25 @@ func (x *run) sweep() error {
 		}
 	}
 	return nil
+}
+
+// topmost is the mounts with no other of them above: the ones a
+// recursive private and a detach take away with all beneath them.
+func topmost(mounts []string) []string {
+	var out []string
+	for _, m := range mounts {
+		above := false
+		for _, o := range mounts {
+			if o != m && strings.HasPrefix(m, o+"/") {
+				above = true
+				break
+			}
+		}
+		if !above {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // removeRunDir removes a run's directory: its files, and its mount
@@ -626,6 +884,11 @@ func (x *run) sweepUnits() error {
 		return err
 	}
 	for _, name := range strings.Fields(string(raw)) {
+		// The file is root's own, and still: a name the engine does not
+		// write is not the manager's to be asked to stop.
+		if _, _, ok := ParseUnitName(name); !ok {
+			continue
+		}
 		if err := x.r.Stop(name); err != nil {
 			return fmt.Errorf("a unit from an earlier run is still there and could not be stopped: %w", err)
 		}
@@ -686,6 +949,9 @@ func (x *run) planWith(ctx context.Context, stderrFile string) (*plan.Plan, erro
 	})
 	if err != nil {
 		return nil, fmt.Errorf("reading the plan: %w", err)
+	}
+	if err := otherVersion(o, "plan"); err != nil {
+		return nil, err
 	}
 	if !o.OK() {
 		if stderrFile != "" {
@@ -783,7 +1049,7 @@ func (x *run) app(ctx context.Context, root, name string, decl *backupdecl.Confi
 	// The Caddyfile's author is not root, and the upload unit reads any
 	// file it is shown: a root written to make <root>/<app>/shared land
 	// on something that is not an app's data is refused by whose it is.
-	if uid, _, err := dataOwner(); err != nil || sharedPin.owner() != uid {
+	if uid, _, err := x.dataOwner(); err != nil || sharedPin.owner() != uid {
 		return fail(record.Failed, "%s does not belong to the %s user, so it is not an app's data dir (owner uid %d)", shared, dataUser, sharedPin.owner())
 	}
 
@@ -822,6 +1088,12 @@ func (x *run) app(ctx context.Context, root, name string, decl *backupdecl.Confi
 	dumped := x.dump(ctx, name, sharedSource, staging, declFile, decl, app)
 	if ctx.Err() != nil {
 		return fail(record.Failed, "interrupted before anything was uploaded")
+	}
+	// Nothing is uploaded of an app whose databases nobody copied, and
+	// no app after it is tried: its helpers are the same program's.
+	if x.upgraded != nil {
+		app.Class, app.Detail = record.Failed, record.Text(x.upgraded.Error())
+		return app, true
 	}
 	binds, masked, present, unpin := x.view(name, sharedPin, staging, declFile, decl, app)
 	defer unpin()
@@ -865,7 +1137,7 @@ func (x *run) bound(p pin) (source string, unmount func(), err error) {
 // looks inside.
 func (x *run) staging(app string) (string, error) {
 	dir := filepath.Join(x.cfg.StateDir, "staging", app)
-	uid, gid, err := dataOwner()
+	uid, gid, err := x.dataOwner()
 	if err != nil {
 		return "", err
 	}
@@ -939,6 +1211,9 @@ func (x *run) dump(ctx context.Context, app, shared, staging, declFile string, d
 	if err != nil {
 		return failAll("the dump unit: %v", err)
 	}
+	if x.upgraded = otherVersion(o, "dump"); x.upgraded != nil {
+		return failAll("%v", x.upgraded)
+	}
 	raw, rerr := os.ReadFile(out) //nolint:gosec // written by the manager into root's own run dir
 	var results []dump.Result
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -980,6 +1255,7 @@ func (x *run) dump(ctx context.Context, app, shared, staging, declFile string, d
 func (x *run) view(app string, shared pin, staging, declFile string, decl *backupdecl.Config, rec *record.App) (binds []unit.Bind, masked []string, present int, unpin func()) {
 	base := "/backup/" + app
 	binds = []unit.Bind{{Source: staging, Dest: base + "/sqlite"}, {Source: declFile, Dest: base + "/plan.json"}}
+	x.given = map[string]identity{}
 	var undo []func()
 	unpin = func() {
 		for i := len(undo) - 1; i >= 0; i-- {
@@ -1010,6 +1286,13 @@ func (x *run) view(app string, shared pin, staging, declFile string, decl *backu
 			rec.Items = append(rec.Items, it)
 			continue
 		}
+		// Which file it is, for the snapshot to be held to.
+		given, err := item.identity()
+		if err != nil {
+			it.Detail = err.Error()
+			rec.Items = append(rec.Items, it)
+			continue
+		}
 		source, unmount, err := x.bound(item)
 		if err != nil {
 			it.Detail = err.Error()
@@ -1017,6 +1300,7 @@ func (x *run) view(app string, shared pin, staging, declFile string, decl *backu
 			continue
 		}
 		undo = append(undo, unmount)
+		x.given[path.Join(base, "files", p)] = given
 		it.OK = true // until the snapshot says otherwise
 		rec.Items = append(rec.Items, it)
 		present++
@@ -1032,25 +1316,31 @@ func (x *run) view(app string, shared pin, staging, declFile string, decl *backu
 	return binds, masked, present, unpin
 }
 
-// dataOwner and backupOwner are the two accounts' ids; variables so a
-// test can run where the accounts do not exist.
+// dataOwner is the data user's ids, and ownerOf those of the backup
+// account as the account check found it; variables so a test can run
+// where the accounts do not exist. Both by the lookup the check makes,
+// getent: os/user reads /etc/passwd alone in this build, and an account
+// a directory holds — which postinstall finds, and makes no local one
+// beside — would be unknown here.
 var (
-	dataOwner   = func() (uid, gid int, err error) { return ids(dataUser) }
-	backupOwner = func() (uid, gid int, err error) { return ids(backupUser) }
+	dataOwner = func(ctx context.Context) (uid, gid int, err error) { return ids(ctx, dataUser) }
+	// ownerOf is the ids of an account that was looked up; a variable
+	// so that a test that is not root can stand its own in.
+	ownerOf = func(acct passwd) (uid, gid int) { return acct.uid, acct.gid }
+	// selfBind makes a mount of a directory onto itself: a mount of
+	// this command's own making, with nothing of an app's in it.
+	selfBind = func(dir string) error { return bindMount(dir, dir) }
 )
 
-func ids(name string) (uid, gid int, err error) {
-	u, err := user.Lookup(name)
+func ids(ctx context.Context, name string) (uid, gid int, err error) {
+	acct, err := account(ctx, name)
 	if err != nil {
 		return 0, 0, err
 	}
-	if uid, err = strconv.Atoi(u.Uid); err != nil {
-		return 0, 0, fmt.Errorf("%s's uid %q is not a number", name, u.Uid)
+	if !acct.exists {
+		return 0, 0, fmt.Errorf("the %s account is not there", name)
 	}
-	if gid, err = strconv.Atoi(u.Gid); err != nil {
-		return 0, 0, fmt.Errorf("%s's gid %q is not a number", name, u.Gid)
-	}
-	return uid, gid, nil
+	return acct.uid, acct.gid, nil
 }
 
 // excludePath is where the upload unit finds its exclude file: outside
@@ -1254,6 +1544,26 @@ func (x *run) verify(ctx context.Context, app, id string, rec *record.App) error
 				// It was a file or a directory when it was pinned, and
 				// the app's to replace since.
 				it.OK, it.Detail = false, fmt.Sprintf("in the snapshot it is a %s, not a file or a directory", record.Text(node.Type))
+			case it.Kind == "files":
+				// A node of the right name and kind is not yet the file
+				// that was given: shown a bare mount point in its place,
+				// restic uploads an empty directory of that name [M54].
+				// What was bound is the pinned file itself, and a bind
+				// mount shows its inode and its owner [M63].
+				given, pinned := x.given[itemPath(base, *it)]
+				what := "file"
+				if node.Type == "dir" {
+					what = "directory"
+				}
+				switch {
+				case !pinned:
+					it.OK, it.Detail = false, "which file was given to the backup is not known, so the snapshot cannot be held to it"
+				case node.Inode == nil:
+					it.OK, it.Detail = false, "the listing does not say which file it is, so the snapshot cannot be held to what was given"
+				case *node.Inode != given.inode || node.UID != given.uid || node.GID != given.gid:
+					it.OK, it.Detail = false, fmt.Sprintf("in the snapshot it is not the %s that was given to the backup: it is inode %d, owner %d:%d, and what was given is inode %d, owner %d:%d — the upload was shown something else in its place",
+						what, *node.Inode, node.UID, node.GID, given.inode, given.uid, given.gid)
+				}
 			}
 		}
 	}
@@ -1374,6 +1684,11 @@ func itemPath(base string, it record.Item) string {
 type lsNode struct {
 	Type string `json:"type"`
 	Size int64  `json:"size"`
+	// Which file it is, as restic found it in the unit's view: what a
+	// bind mount shows is the bound file's own inode and owner [M63].
+	Inode *uint64 `json:"inode"`
+	UID   uint32  `json:"uid"`
+	GID   uint32  `json:"gid"`
 }
 
 // lsNodes reads a listing a line at a time and keeps the nodes at the

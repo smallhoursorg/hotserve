@@ -1,16 +1,37 @@
 #!/bin/sh
 set -e
+# nss <getent or id arguments>: one lookup in the account databases,
+# bounded — a user directory that does not answer would otherwise hold
+# dpkg's configure for as long as it likes (Copilot on #155). Exit 2 is
+# "not found"; 124 is "did not answer", which is never taken for "not
+# found": that would make a local account beside the directory's.
+nss() {
+	if command -v timeout >/dev/null 2>&1; then
+		# And killed ten seconds after: a lookup that ignores the
+		# SIGTERM must not hold the configure either (Copilot on #155).
+		timeout -k 10 30 "$@"
+	else
+		"$@"
+	fi
+}
+# absent <getent arguments>: the entry is not there, as the databases
+# answered; 0 only for that.
+absent() {
+	st=0
+	nss getent "$@" >/dev/null 2>&1 || st=$?
+	[ "$st" = 2 ]
+}
 if command -v useradd >/dev/null 2>&1; then
-	getent group hotserve >/dev/null 2>&1 || groupadd --system hotserve
-	getent passwd hotserve >/dev/null 2>&1 || useradd --system \
+	if absent group hotserve; then groupadd --system hotserve; fi
+	if absent passwd hotserve; then useradd --system \
 		--gid hotserve --home-dir /var/lib/hotserve \
-		--shell /usr/sbin/nologin --comment "hotserve server" hotserve
+		--shell /usr/sbin/nologin --comment "hotserve server" hotserve; fi
 else
 	# Alpine (busybox) fallback.
 	addgroup -S hotserve 2>/dev/null || true
 	adduser -S -G hotserve -h /var/lib/hotserve -s /sbin/nologin hotserve 2>/dev/null || true
 fi
-if ! uid=$(id -u hotserve 2>/dev/null); then
+if ! uid=$(nss id -u hotserve 2>/dev/null); then
 	echo "hotserve: the hotserve system user does not exist and could not be created" >&2
 	exit 1
 fi
@@ -20,7 +41,7 @@ fi
 # whatever groups it had, and the state directories chowned below are
 # group-hotserve. Not fatal: nothing the package installs is reachable
 # only through the group.
-in_group() { id -nG hotserve 2>/dev/null | tr ' ' '\n' | grep -qx hotserve; }
+in_group() { nss id -nG hotserve 2>/dev/null | tr ' ' '\n' | grep -qx hotserve; }
 if ! in_group; then
 	if command -v usermod >/dev/null 2>&1; then
 		usermod -aG hotserve hotserve || true
@@ -36,17 +57,35 @@ chown hotserve:hotserve /var/lib/hotserve /var/lib/liveswap
 # `hotserve-backup setup` uses (backups/engine/setup.go, held to this
 # script by a test), which also makes it when it is missing. No home,
 # no shell, nothing of its own but the cache the manager makes for it.
-# An account that exists is left as it is — an administrator may have
-# meant it — and setup and every run refuse one that someone else can
-# be or log in as, since that someone can read the repository
-# credential from a running restic's environment. Never removed on
-# purge (Debian policy: system accounts stay).
-if command -v useradd >/dev/null 2>&1; then
-	getent passwd hotserve-backup >/dev/null 2>&1 || useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hotserve-backup
-else
-	adduser -S -H -h /nonexistent -s /sbin/nologin hotserve-backup 2>/dev/null || true # busybox
+# Its comment, made-by-hotserve, marks it as hotserve's. An account of
+# that name that exists is left as it is — an administrator may have
+# meant it — and setup and every run use it only where it is
+# hotserve's: in /etc/passwd, with the mark. Whoever is the account
+# reads the repository credential from a running restic's
+# environment. Never removed on purge (Debian policy: system accounts
+# stay).
+#
+# Where it cannot be made — a group of its name is there without it,
+# and useradd exits 9 [M66] — that is said, and the configure goes on
+# (the owner, 2026-09-27): hotserve is installed on a box that may use
+# no backups, and setup, which makes the account when it is missing,
+# is where that is refused.
+backup_st=0
+nss getent passwd hotserve-backup >/dev/null 2>&1 || backup_st=$?
+if [ "$backup_st" = 2 ]; then
+	if command -v useradd >/dev/null 2>&1; then
+		why=$(useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin --comment made-by-hotserve hotserve-backup 2>&1) || true
+	else
+		why=$(adduser -S -H -h /nonexistent -s /sbin/nologin -g made-by-hotserve hotserve-backup 2>&1) || true # busybox
+	fi
 fi
-if getent passwd hotserve-backup >/dev/null 2>&1; then
+if [ "$backup_st" != 0 ] && [ "$backup_st" != 2 ]; then
+	case "$backup_st" in
+	124 | 137) why="the user directory did not answer within 30s" ;; # 137: killed after ignoring the SIGTERM
+	*) why="getent exited $backup_st" ;;
+	esac
+	echo "hotserve: whether the hotserve-backup account exists could not be told ($why); no account is made beside the directory's, and backups wait for it: sudo hotserve-backup account says when it is right" >&2
+elif nss getent passwd hotserve-backup >/dev/null 2>&1; then
 	# The rule is setup's, and in setup's words: the binary this package
 	# has just installed says whether the account is one setup and every
 	# run accept. A warning, never the install's failure.
@@ -55,8 +94,7 @@ if getent passwd hotserve-backup >/dev/null 2>&1; then
 		echo "hotserve: hotserve-backup setup, and every run, restore and drill, refuse that account until it is put right; hotserve-backup account says when it is" >&2
 	fi
 else
-	echo "hotserve: the hotserve-backup system user does not exist and could not be created" >&2
-	exit 1
+	echo "hotserve: the hotserve-backup account could not be made (${why:-no reason was given}); backups wait for it, and nothing else of hotserve does: sudo hotserve-backup setup <repository> makes it, or says why it cannot" >&2
 fi
 # Packages before the Debian-13-only matrix copied an AppArmor profile
 # into /etc/apparmor.d (which the package itself does not own, so dpkg
@@ -126,6 +164,13 @@ if [ -x /usr/bin/deb-systemd-helper ]; then
 		fi
 	done
 fi
+# Started on an install, restarted on an upgrade ($2 is the version
+# upgraded from), exactly as dh_installsystemd does it (the owner,
+# 2026-09-27): deb-systemd-invoke starts nothing disabled or masked,
+# and obeys a policy-rc.d. So an upgrade starts again a timer an
+# administrator stopped and left enabled — disable it to keep it off.
+# Nothing of the backups was stopped for an upgrade: a run under way
+# is left to finish.
 if [ -d /run/systemd/system ]; then
 	systemctl --system daemon-reload >/dev/null || true
 	if [ -n "${2:-}" ]; then action=restart; else action=start; fi

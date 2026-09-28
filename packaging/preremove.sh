@@ -6,36 +6,42 @@
 # restart into the new binary in postinstall — and the deployed apps,
 # which live under the hotserve user's own systemd manager, keep
 # serving right through that restart.
-case "${1:-}" in
-upgrade|failed-upgrade)
-	# The backup units are the exception: a run or a drill under way
-	# starts its helper units from /usr/bin/hotserve-backup by path, and
-	# after the unpack that path is the new version's — an old run with
-	# new helpers. Stopped here, a run ends as any stopped run does (its
-	# units ended, its plaintext removed by the run itself on its way
-	# out [M62]); postinstall starts
-	# the timers again, those that were enabled, and the next hour's run
-	# does the backup this one did not finish.
-	if [ -d /run/systemd/system ]; then
-		if [ -x /usr/bin/deb-systemd-invoke ]; then
-			deb-systemd-invoke stop hotserve-backup.timer hotserve-backup-drill.timer hotserve-backup.service hotserve-backup-drill.service >/dev/null || true
-		else
-			systemctl stop hotserve-backup.timer hotserve-backup-drill.timer hotserve-backup.service hotserve-backup-drill.service 2>/dev/null || true
-		fi
+# An upgrade leaves the backup units alone (the owner, 2026-09-27): a
+# run or a drill under way goes on as the program it was started as,
+# and its upload, which is restic's, finishes. The helpers it starts
+# from then on are the new version's, and each does nothing for a
+# command of another version, saying so.
+#
+# stop_backups: at a remove, the timers and the services, stopped as
+# dh_installsystemd stops them (the owner, 2026-09-27); then, while the
+# program is still there, `hotserve-backup sweep`: the engine's own
+# sweep of what a killed command left — its units, by the names it
+# recorded, and what it left mounted under /run/hotserve-backup, made
+# private and taken away — under the run lock, as the next command
+# would have, since there will be none. A command that holds the lock
+# — from a shell, or a service that did not stop — is left to run,
+# and the sweep says so in the lock's own words.
+stop_backups() {
+	[ -d /run/systemd/system ] || return 0
+	if [ -x /usr/bin/deb-systemd-invoke ]; then
+		deb-systemd-invoke stop hotserve-backup.timer hotserve-backup-drill.timer hotserve-backup.service hotserve-backup-drill.service >/dev/null || true
+	else
+		systemctl stop hotserve-backup.timer hotserve-backup-drill.timer hotserve-backup.service hotserve-backup-drill.service 2>/dev/null || true
 	fi
-	;;
+	[ -x /usr/bin/hotserve-backup ] || return 0
+	# Bounded: SIGTERM at five minutes, which the sweep takes as a
+	# cancel, and SIGKILL ten seconds after — a unit slow to stop, or a
+	# manager that does not answer, must not hold the remove.
+	if command -v timeout >/dev/null 2>&1; then sweep="timeout -k 10 300 /usr/bin/hotserve-backup sweep"; else sweep="/usr/bin/hotserve-backup sweep"; fi
+	if ! said=$($sweep 2>&1); then
+		echo "hotserve: what a backup command left was not swept, and is left: ${said#hotserve-backup: }" >&2
+	fi
+}
+case "${1:-}" in
+upgrade | failed-upgrade) ;;
 *)
 	if command -v systemctl >/dev/null 2>&1; then
-		# The backup timers first, then anything they started: a run
-		# under way gets SIGTERM, stops its own units by name and removes
-		# its plaintext copies (TimeoutStopSec=3min in the unit file).
-		if [ -d /run/systemd/system ]; then
-			if [ -x /usr/bin/deb-systemd-invoke ]; then
-				deb-systemd-invoke stop hotserve-backup.timer hotserve-backup-drill.timer hotserve-backup.service hotserve-backup-drill.service >/dev/null || true
-			else
-				systemctl stop hotserve-backup.timer hotserve-backup-drill.timer hotserve-backup.service hotserve-backup-drill.service 2>/dev/null || true
-			fi
-		fi
+		stop_backups
 		systemctl stop hotserve 2>/dev/null || true
 		systemctl disable hotserve 2>/dev/null || true
 		# Removal is the one time the apps go too: stopping the user

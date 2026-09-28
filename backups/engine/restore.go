@@ -303,7 +303,7 @@ func (x *run) inPlace(ctx context.Context, root string, o RestoreOptions, decl *
 		return "", nil, made, fmt.Errorf("looking at %s: %w", shared, err)
 	}
 	undo = append(undo, sharedPin.close)
-	if uid, _, err := dataOwner(); err != nil || !sharedPin.isDir() || sharedPin.owner() != uid {
+	if uid, _, err := x.dataOwner(); err != nil || !sharedPin.isDir() || sharedPin.owner() != uid {
 		release()
 		return "", nil, made, fmt.Errorf("%s is not a directory of the %s user's, so it is not an app's data dir (owner uid %d)", shared, dataUser, sharedPin.owner())
 	}
@@ -451,7 +451,7 @@ func notOwn(dir string, cfg Config) error {
 // made it is held by descriptor: what is chmod'ed, chowned and bound is
 // the directory that was made, whatever its name leads to by then.
 func (x *run) toDir(dir string) (source string, release func(), err error) {
-	uid, gid, err := dataOwner()
+	uid, gid, err := x.dataOwner()
 	if err != nil {
 		return "", nil, err
 	}
@@ -653,7 +653,7 @@ func (x *run) unstage(ctx context.Context, app, dir string) error {
 			return err
 		}
 	}
-	uid, gid, err := dataOwner()
+	uid, gid, err := x.dataOwner()
 	if err != nil {
 		return err
 	}
@@ -803,10 +803,7 @@ func room(size uint64, fetched, target, stateDir string) error {
 func mib(n uint64) string { return fmt.Sprintf("%d MiB", (n+1<<20-1)>>20) }
 
 func (x *run) fetch(ctx context.Context, app, id, fetched string) error {
-	uid, gid, err := backupOwner()
-	if err != nil {
-		return err
-	}
+	uid, gid := ownerOf(x.account)
 	if err := errors.Join(os.Chmod(fetched, 0o700), os.Lchown(fetched, uid, gid)); err != nil { //nolint:gosec // a directory, and the backup account's alone
 		return err
 	}
@@ -924,6 +921,9 @@ func (x *run) settle(ctx context.Context, app, role, fetched, target string) (*r
 	if err != nil {
 		return nil, fmt.Errorf("the %s unit: %w", role, err)
 	}
+	if err := otherVersion(o, role); err != nil {
+		return nil, err
+	}
 	raw, rerr := os.ReadFile(out) //nolint:gosec // written by the manager into root's own run dir
 	answer := new(restore.Answer)
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -1022,6 +1022,12 @@ func (x *run) drillApp(ctx context.Context, app string, snap record.Snapshot, si
 	if ctx.Err() != nil {
 		return false // interrupted: nothing was found out, so nothing is written
 	}
+	// A helper of another version: nothing was found out either, and no
+	// app after it would find anything.
+	if errors.As(err, new(upgradedError)) {
+		x.upgraded = err
+		return true
+	}
 	if err != nil {
 		rec.RestoreDrill = &record.Drill{Snapshot: snap, Time: time.Now().UTC(), Detail: record.Text(err.Error())}
 		return errors.As(err, new(repositoryWideError))
@@ -1077,22 +1083,30 @@ func Drill(ctx context.Context, cfg Config, r Runner) (*record.Status, error) {
 	}
 	defer end()
 	st := x.prev
+	lastBefore := st.LastDrill
 	st.LastDrill = &record.Drill{Time: time.Now().UTC()}
 	// Said in the record — a refusal from begin (a program not there)
 	// as a plan that cannot be made — so that a drill failing here week
 	// after week does not pass for "proven" ageing quietly.
 	couldNotBegin := func(err error) (*record.Status, error) {
+		// An interrupt is no verdict: stopped while it waits, or while
+		// the plan is read, the drill leaves the last drill's as it
+		// was, as it leaves the app an interrupt lands on.
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		// Nor is an upgrade: the plan's helper was another version's,
+		// and nothing was found out.
+		if errors.As(err, new(upgradedError)) {
+			st.LastDrill = lastBefore
+			st.Warning = strings.TrimSpace(st.Warning + " " + x.status.Warning)
+			return st, errors.Join(err, record.Write(filepath.Join(cfg.StateDir, "status.json"), st))
+		}
 		st.LastDrill.Detail = record.Text(err.Error())
 		st.Warning = strings.TrimSpace(st.Warning + " " + x.status.Warning)
 		return st, errors.Join(err, record.Write(filepath.Join(cfg.StateDir, "status.json"), st))
 	}
 	if err != nil {
-		// An interrupt is no verdict: stopped while it waits, the drill
-		// leaves the last drill's as it was, as it leaves the app an
-		// interrupt lands on.
-		if ctx.Err() != nil {
-			return nil, err
-		}
 		return couldNotBegin(err)
 	}
 	p, err := x.plan(ctx)
@@ -1108,7 +1122,7 @@ func Drill(ctx context.Context, cfg Config, r Runner) (*record.Status, error) {
 	}
 	var refused string // set once the repository refuses for a reason every app shares
 	for _, name := range p.Names() {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || x.upgraded != nil {
 			break
 		}
 		rec := st.Apps[name]
@@ -1135,17 +1149,26 @@ func Drill(ctx context.Context, cfg Config, r Runner) (*record.Status, error) {
 			}
 			continue
 		default:
-			if x.drillApp(ctx, name, *newest(snaps), 0, rec) {
+			if x.drillApp(ctx, name, *newest(snaps), 0, rec) && x.upgraded == nil {
 				refused = rec.RestoreDrill.Detail
 			}
 		}
 		st.Apps[name] = rec
 	}
 	st.Warning = strings.TrimSpace(st.Warning + " " + x.status.Warning)
+	// A drill an upgrade ended found nothing out from there on: the
+	// verdicts it reached stand, and the last drill's time is not this
+	// one's, so that the next drill is not a week away.
+	if x.upgraded != nil {
+		st.LastDrill = lastBefore
+	}
 	// What was finished is written, an interrupt or not: each verdict is
 	// an app's own, and the app the interrupt landed on has none.
 	if err := record.Write(filepath.Join(cfg.StateDir, "status.json"), st); err != nil {
 		return st, err
+	}
+	if x.upgraded != nil {
+		return st, x.upgraded
 	}
 	return st, ctx.Err()
 }

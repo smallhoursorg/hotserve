@@ -12,6 +12,9 @@
 //	                        whether a run could plan from that Caddyfile, before it goes live; anyone
 //	hotserve-backup account whether the account restic runs as is one setup and a run accept; anyone;
 //	                        what the package's postinstall asks
+//	hotserve-backup sweep   take away what a killed command left — its units, its mounts under
+//	                        /run/hotserve-backup — as the next command would; root; what the
+//	                        package's preremove asks at a remove
 //
 // and subcommands that are only ever the command of a unit one of those
 // starts, each with a fixed view and no arguments — nothing an operator
@@ -69,7 +72,8 @@ const usage = `usage: hotserve-backup setup <repository>
        hotserve-backup drill
        hotserve-backup status
        hotserve-backup validate <Caddyfile>
-       hotserve-backup account`
+       hotserve-backup account
+       hotserve-backup sweep`
 
 // arguments says whether a command takes that many: restore takes its
 // own, validate takes one file, setup one repository, and nothing else
@@ -91,11 +95,49 @@ func main() {
 	}
 	if err := command(os.Args[1], os.Args[2:]); err != nil {
 		fmt.Fprintln(os.Stderr, "hotserve-backup:", err)
-		if errors.As(err, new(couldNotTell)) {
-			os.Exit(3)
-		}
-		os.Exit(1)
+		os.Exit(exitStatus(err))
 	}
+}
+
+// exitStatus is what the command leaves with.
+func exitStatus(err error) int {
+	switch {
+	case errors.Is(err, errOtherVersion):
+		return engine.OtherVersionStatus
+	case errors.As(err, new(couldNotTell)):
+		return 3
+	}
+	return 1
+}
+
+// errOtherVersion is a helper that is not the version of the command
+// that started it.
+var errOtherVersion = errors.New("this helper is not the version of the command that started it (the package was upgraded while that command was under way), and does nothing")
+
+// forThisCommand is whether a helper may work for the command that
+// started it, which told it which program it is (engine.RunIdentityEnv):
+// one that is another program does nothing, and one that cannot read
+// which it is cannot say it is the same. Told nothing — started by
+// hand, or by a version from before there was anything to tell — it
+// works. clean works whatever it is told: it empties one directory of
+// plaintext copies, which is every version's to want done at once.
+func forThisCommand(name, told string, own func() (string, error)) error {
+	switch name {
+	case "plan", "dump", "check", "install", "extract":
+	default:
+		return nil
+	}
+	if told == "" {
+		return nil
+	}
+	is, err := own()
+	if err != nil {
+		return fmt.Errorf("%w: which version this is could not be read: %w", errOtherVersion, err)
+	}
+	if is != told {
+		return errOtherVersion
+	}
+	return nil
 }
 
 // couldNotTell is status not having been able to look — no setup, a
@@ -110,6 +152,9 @@ func command(name string, args []string) error {
 	// it is waiting on, by name, and confirms it gone before returning.
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	defer cancel()
+	if err := forThisCommand(name, os.Getenv(engine.RunIdentityEnv), engine.WhichProgram); err != nil {
+		return err
+	}
 	switch name {
 	case "setup":
 		return setup(ctx, args[0])
@@ -127,11 +172,21 @@ func command(name string, args []string) error {
 		// What setup and every run ask of the account restic runs as,
 		// in their words; the package's postinstall asks it, and an
 		// administrator after mending the account.
-		if err := engine.AccountReady(); err != nil {
+		if err := engine.AccountReady(ctx); err != nil {
 			return err
 		}
 		fmt.Println("the hotserve-backup account is one setup and a run accept")
 		return nil
+	case "sweep":
+		// The package's preremove, at a remove, while this program is
+		// still there: what a killed command left, swept as the next
+		// command would have, since there will be none.
+		r, err := runner(ctx, "sweep")
+		if err != nil {
+			return err
+		}
+		defer r.Close()
+		return engine.Sweep(ctx, config(), r)
 	case "check":
 		return settle(ctx, restore.CheckOnly)
 	case "install":

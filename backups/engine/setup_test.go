@@ -297,6 +297,9 @@ func TestNothingIsAskedBeforeThePreflightPasses(t *testing.T) {
 		{"hotserve missing", func(b *box) { b.haveProgram = func(p string) bool { return p != "/usr/bin/hotserve" } }, "hotserve is not installed at /usr/bin/hotserve"},
 		{"this command elsewhere", func(b *box) { b.haveProgram = func(p string) bool { return p != b.cfg.Self } }, "hotserve-backup is not installed at /usr/bin/hotserve-backup, where the units run it"},
 		{"old systemd", func(b *box) { b.version = 255 }, "systemd 257 or later is needed (Debian 13's); this box has 255"},
+		{"the hotserve account missing", func(b *box) {
+			dataOwner = func(context.Context) (int, int, error) { return 0, 0, errors.New("the hotserve account is not there") }
+		}, "the hotserve account is not there"},
 		{"the plan fails", func(b *box) {
 			b.outcome["plan"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
 			b.planErr = "root depends on {$LIVESWAP_ROOT}\x1b[0m: give it a literal value\n"
@@ -1554,7 +1557,7 @@ func TestTheAccountIsMadeWhenMissingAndLeftAloneWhenNot(t *testing.T) {
 	if b.accountsMade != 0 || !strings.Contains(m.saidAll(), "account hotserve-backup: present") {
 		t.Fatalf("made %d\n%s", b.accountsMade, m.saidAll())
 	}
-	if !strings.Contains(useraddArgv(), "useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hotserve-backup") {
+	if !strings.Contains(useraddArgv(), "useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin --comment made-by-hotserve hotserve-backup") {
 		t.Fatalf("useradd: %s", useraddArgv())
 	}
 }

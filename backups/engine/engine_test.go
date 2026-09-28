@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -67,13 +68,22 @@ type box struct {
 	hang                       string
 	version                    int
 	haveProgram                func(string) bool
-	account                    bool   // whether the hotserve-backup account exists
-	shell, home                string // as the account has them, where it exists
-	homeThere                  bool   // whether that home is a directory that exists
+	account                    bool     // whether the hotserve-backup account exists
+	comment                    string   // its comment: hotserve's mark, where hotserve made it
+	localComment               string   // its comment in /etc/passwd
+	nssLine, localLine         string   // the whole line the box resolves, and /etc/passwd's, where a row sets them
+	notLocal                   bool     // /etc/passwd holds no account of that name
+	madePrivate                []string // what was made private, in order
+	unmountedAt                []string // every unmount, in order, the probe's among them
+	runDirMounted              bool     // something is mounted on the run directory itself
 	uid, gid                   int
-	holders                    []string // the accounts that hold that uid, the backup account among them
-	groups                     []int    // the account's groups, its primary among them
-	hotserveGid                int      // the gid of the group named hotserve
+	unseen                     bool     // the manager does not see this command's mounts
+	seesErr                    error    // the manager could not be asked
+	lookedFor                  []string // the mounts the manager was asked about
+	selfBound, selfUnbound     []string // the probe's own mount, made and taken away
+	accountLookups             int      // how often the account was looked up
+	owned4                     []passwd // the accounts a fetch's directory was given to
+	bareNodes                  bool     // the listing says nothing of which file a node is
 	accountsMade               int
 	owned, synced              []string // what setup asked to be root's, and put on the disk
 	waited                     []string // units a lock holder waited for
@@ -82,6 +92,13 @@ type box struct {
 }
 
 func (b *box) ManagerVersion(context.Context) (int, error) { return b.version, nil }
+
+// Sees: the manager sees the mounts this command makes, unless a test
+// says the command has a mount namespace of its own.
+func (b *box) Sees(_ context.Context, mountPoint string) (bool, error) {
+	b.lookedFor = append(b.lookedFor, mountPoint)
+	return !b.unseen, b.seesErr
+}
 
 var roleRe = regexp.MustCompile(`^hotserve_backup_([a-z]+)[0-9]*_`)
 
@@ -98,24 +115,22 @@ func newBox(t *testing.T) *box {
 	t.Cleanup(func() { haveProgram = oldHave })
 	// The account restic runs as, as setup makes it, unless a test says
 	// otherwise: a run looks at it before any unit, as setup does.
-	b.account, b.shell, b.home, b.uid, b.gid, b.holders, b.groups = true, "/usr/sbin/nologin", "/nonexistent", 995, 995, []string{"hotserve-backup"}, []int{995}
-	oldAccount, oldHolders, oldHome, oldMake, oldGroups, oldGroup := account, holders, homeExists, makeAccount, groupsOf, groupNamed
-	groupsOf = func(string) ([]int, error) { return b.groups, nil }
-	b.hotserveGid = 1000
-	groupNamed = func(string) (int, bool, error) { return b.hotserveGid, true, nil }
-	account = func(string) (passwd, error) {
-		return passwd{shell: b.shell, home: b.home, uid: b.uid, gid: b.gid, exists: b.account}, nil
+	b.account, b.comment, b.localComment, b.uid, b.gid = true, accountMark, accountMark, 995, 995
+	oldAccount, oldMake, oldLocal := account, makeAccount, localAccount
+	localAccount = func(context.Context, string) (passwd, error) {
+		return passwd{name: backupUser, comment: b.localComment, uid: b.uid, gid: b.gid, line: b.localLine, exists: b.account && !b.notLocal}, nil
 	}
-	holders = func(int) ([]string, error) { return b.holders, nil }
-	homeExists = func(string) bool { return b.homeThere }
+	t.Cleanup(func() { localAccount = oldLocal })
+	account = func(context.Context, string) (passwd, error) {
+		b.accountLookups++
+		return passwd{name: backupUser, comment: b.comment, uid: b.uid, gid: b.gid, line: b.nssLine, exists: b.account}, nil
+	}
 	makeAccount = func() error {
 		b.accountsMade++
-		b.account, b.shell, b.home, b.homeThere, b.uid, b.gid, b.holders, b.groups = true, "/usr/sbin/nologin", "/nonexistent", false, 995, 995, []string{"hotserve-backup"}, []int{995}
+		b.account, b.comment, b.localComment, b.notLocal, b.uid, b.gid = true, accountMark, accountMark, false, 995, 995
 		return nil
 	}
-	t.Cleanup(func() {
-		account, holders, homeExists, makeAccount, groupsOf, groupNamed = oldAccount, oldHolders, oldHome, oldMake, oldGroups, oldGroup
-	})
+	t.Cleanup(func() { account, makeAccount = oldAccount, oldMake })
 	b.cfg = Config{
 		ConfigDir: "/etc/hotserve",
 		EnvFile:   filepath.Join(dir, "backup.env"), StateDir: filepath.Join(dir, "state"), RunDir: filepath.Join(dir, "run"),
@@ -149,9 +164,22 @@ func newBox(t *testing.T) *box {
 	freeUnder = func(string) (uint64, error) { return b.free, nil }
 	sameFilesystem = func(string, string) (bool, error) { return b.oneDisk, nil }
 	t.Cleanup(func() { freeUnder, sameFilesystem = oldFree, oldSame })
-	old, oldMount, oldUnmount, oldUnder, oldBackup := dataOwner, bindMount, unmountDetach, mountsUnder, backupOwner
-	dataOwner = func() (int, int, error) { return os.Getuid(), os.Getgid(), nil }
-	backupOwner = dataOwner
+	old, oldMount, oldUnmount, oldUnder := dataOwner, bindMount, unmountDetach, mountsUnder
+	dataOwner = func(context.Context) (int, int, error) { return os.Getuid(), os.Getgid(), nil }
+	// Which program the helpers are started from: the file, where the
+	// test made one; this lane has no /usr/bin/hotserve-backup.
+	oldProgramOf := programOf
+	programOf = func(path string) (string, error) {
+		if _, err := os.Stat(path); err == nil {
+			return oldProgramOf(path)
+		}
+		return "the program under test", nil
+	}
+	t.Cleanup(func() { programOf = oldProgramOf })
+	oldOwnerOf, oldSelfBind := ownerOf, selfBind
+	ownerOf = func(acct passwd) (int, int) { b.owned4 = append(b.owned4, acct); return os.Getuid(), os.Getgid() }
+	selfBind = func(dir string) error { b.selfBound = append(b.selfBound, dir); return nil }
+	t.Cleanup(func() { ownerOf, selfBind = oldOwnerOf, oldSelfBind })
 	// mount(2) needs a privilege this lane does not have, and what the
 	// kernel does with it is the integration suite's to show. Here it is
 	// enough to know what was asked for: which directory, at the moment
@@ -162,12 +190,66 @@ func newBox(t *testing.T) *box {
 		b.mounted[target] = was
 		return err
 	}
-	unmountDetach = func(target string) error { b.unmounted = append(b.unmounted, target); return nil }
+	oldPrivate, oldMountPoint := private, mountPoint
+	private = func(target string) error { b.madePrivate = append(b.madePrivate, target); return nil }
+	mountPoint = func(string) (bool, error) { return b.runDirMounted, nil }
+	t.Cleanup(func() { private, mountPoint = oldPrivate, oldMountPoint })
+	unmountDetach = func(target string) error {
+		b.unmountedAt = append(b.unmountedAt, target)
+		if slices.Contains(b.selfBound, target) {
+			b.selfUnbound = append(b.selfUnbound, target)
+			return nil
+		}
+		b.unmounted = append(b.unmounted, target)
+		return nil
+	}
 	mountsUnder = func(string) ([]string, error) { return b.leftMounts, nil }
 	t.Cleanup(func() {
-		dataOwner, bindMount, unmountDetach, mountsUnder, backupOwner = old, oldMount, oldUnmount, oldUnder, oldBackup
+		dataOwner, bindMount, unmountDetach, mountsUnder = old, oldMount, oldUnmount, oldUnder
 	})
 	return b
+}
+
+// whichFile is restic saying which file each node is: the inode and
+// the owner of what the upload unit was shown at that path — what was
+// bound there, as the kernel shows a bind mount [M63]. A node a test
+// wrote with an inode of its own is left as written.
+func (b *box) whichFile(listing string) string {
+	if b.bareNodes {
+		return listing
+	}
+	shown := map[string]string{} // a path in the unit's view -> what was bound there
+	for _, s := range b.specs {
+		if m := roleRe.FindStringSubmatch(s.Name); m != nil && m[1] == "upload" {
+			for _, bind := range s.Binds {
+				if was, ok := b.mounted[bind.Source]; ok {
+					shown[bind.Dest] = was
+				}
+			}
+		}
+	}
+	lines := strings.Split(listing, "\n")
+	for i, line := range lines {
+		var n map[string]any
+		if json.Unmarshal([]byte(line), &n) != nil || n["struct_type"] != "node" {
+			continue
+		}
+		if _, said := n["inode"]; said {
+			continue
+		}
+		was, ok := shown[fmt.Sprint(n["path"])]
+		if !ok {
+			continue
+		}
+		var st syscall.Stat_t
+		if err := syscall.Stat(was, &st); err != nil {
+			continue
+		}
+		n["inode"], n["uid"], n["gid"] = st.Ino, st.Uid, st.Gid
+		raw, _ := json.Marshal(n)
+		lines[i] = string(raw)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func must(t *testing.T, err error) {
@@ -288,7 +370,7 @@ func (b *box) Run(ctx context.Context, s unit.Spec) (unit.Outcome, error) {
 				}
 			}
 		}
-		write(strings.Join(out, "\n"))
+		write(b.whichFile(strings.Join(out, "\n")))
 	}
 	for app, exit := range b.uploadExit {
 		if role == "upload" && strings.Contains(s.Name, "_upload_"+app+"_") {
@@ -537,6 +619,84 @@ func TestHowAnUploadEnds(t *testing.T) {
 			// The listing that ends a run comes after it.
 			if !strings.HasSuffix(strings.TrimSuffix(b.roles(), " listing"), "clean") {
 				t.Fatalf("staging was not emptied after the failure: %s", b.roles())
+			}
+		})
+	}
+}
+
+// A snapshot holds the file that was given to the backup: the listing
+// says which file each node is, its inode and its owner, and through a
+// bind mount those are the bound file's own [M63] — so an item the
+// upload unit was shown something else in place of (a bare mount
+// point, where the manager could not see the run's mount [M54]) is not
+// taken as backed up for being a directory of the right name. An empty
+// directory that is the one given is backed up, empty.
+func TestASnapshotHoldsTheFileThatWasGiven(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		files string // the declared path
+		node  func(given syscall.Stat_t) string
+		bare  bool
+		want  string // in the item's detail; empty means ok
+	}{
+		{"the directory that was given, and it is empty", "uploads", nil, false, ""},
+		{"another directory in its place", "uploads", func(given syscall.Stat_t) string {
+			return fmt.Sprintf(`{"struct_type":"node","path":"/backup/blog/files/uploads","type":"dir","inode":%d,"uid":%d,"gid":%d}`, given.Ino+1, given.Uid, given.Gid)
+		}, false, "in the snapshot it is not the directory that was given to the backup"},
+		{"the same inode, and root's", "uploads", func(given syscall.Stat_t) string {
+			return fmt.Sprintf(`{"struct_type":"node","path":"/backup/blog/files/uploads","type":"dir","inode":%d,"uid":%d,"gid":%d}`, given.Ino, given.Uid+1, given.Gid)
+		}, false, "in the snapshot it is not the directory that was given to the backup"},
+		{"the same inode, another group's", "uploads", func(given syscall.Stat_t) string {
+			return fmt.Sprintf(`{"struct_type":"node","path":"/backup/blog/files/uploads","type":"dir","inode":%d,"uid":%d,"gid":%d}`, given.Ino, given.Uid, given.Gid+1)
+		}, false, "in the snapshot it is not the directory that was given to the backup"},
+		{"a listing that does not say which file it is", "uploads", nil, true, "the listing does not say which file it is"},
+		{"the file that was given", "uploads/a.png", nil, false, ""},
+		{"another file in its place", "uploads/a.png", func(given syscall.Stat_t) string {
+			return fmt.Sprintf(`{"struct_type":"node","path":"/backup/blog/files/uploads/a.png","type":"file","size":3,"inode":%d,"uid":%d,"gid":%d}`, given.Ino+1, given.Uid, given.Gid)
+		}, false, "in the snapshot it is not the file that was given to the backup"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newBox(t)
+			must(t, os.WriteFile(filepath.Join(b.root, "blog", "shared", "uploads", "a.png"), []byte("pic"), 0o644))
+			if tc.files == "uploads" {
+				must(t, os.Remove(filepath.Join(b.root, "blog", "shared", "uploads", "a.png")))
+			}
+			b.plan = fmt.Sprintf(`{"root":%q,"apps":{"blog":{"files":[%q]}}}`, b.root, tc.files)
+			var given syscall.Stat_t
+			must(t, syscall.Stat(filepath.Join(b.root, "blog", "shared", tc.files), &given))
+			kind := "dir"
+			if tc.files != "uploads" {
+				kind = "file"
+			}
+			b.bareNodes = tc.bare
+			b.ls = func(string) string {
+				if tc.node != nil {
+					return tc.node(given)
+				}
+				return fmt.Sprintf(`{"struct_type":"node","path":"/backup/blog/files/%s","type":%q,"size":3}`, tc.files, kind)
+			}
+			st, err := Run(context.Background(), b.cfg, b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			app := st.Apps["blog"]
+			if len(app.Items) != 1 {
+				t.Fatalf("%+v", app)
+			}
+			it := app.Items[0]
+			if tc.want == "" {
+				if !it.OK || app.Class != record.OK {
+					t.Fatalf("not ok: %+v, %+v", app, it)
+				}
+				return
+			}
+			if it.OK || !strings.Contains(it.Detail, tc.want) || app.Class != record.Incomplete || app.LastOK != nil {
+				t.Fatalf("taken as backed up: %+v, %+v\nwant the item to say %q", app, it, tc.want)
+			}
+			// What it is and what was given, so that whoever reads the
+			// record can look: the inodes and the owners.
+			if tc.node != nil && !strings.Contains(it.Detail, fmt.Sprintf("inode %d, owner %d:%d", given.Ino, given.Uid, given.Gid)) {
+				t.Errorf("the detail does not say what was given: %q", it.Detail)
 			}
 		})
 	}

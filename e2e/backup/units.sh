@@ -5,7 +5,9 @@
 # drill with the hardening the files say and nothing more — the
 # measurement of that set, PLAN M54/M55 — bind their units to
 # themselves, do nothing before setup, fail as units when they fail,
-# order the drill behind a run, and fire from their timers as written.
+# order the drill behind a run, fire from their timers as written,
+# refuse in a mount namespace of their own, leave an operator's disk
+# mounted, and a helper of another version does nothing.
 # Nothing here enables a timer for good: a timer firing into another
 # suite would take the run lock from under it.
 . /lib.sh
@@ -57,6 +59,7 @@ prop $T TimersCalendar | grep -q '\*-\*-\* \*:00:00' && pass "the hourly timer i
 [ "$(prop $T RandomizedDelayUSec)" = 10min ] && [ "$(prop $T FixedRandomDelay)" = yes ] && [ "$(prop $T Persistent)" = yes ] && pass "with a fixed delay of up to ten minutes, and catching up a missed one" || fail "the hourly timer: $(systemctl show -p RandomizedDelayUSec,FixedRandomDelay,Persistent $T | tr '\n' ' ')"
 [ "$(prop $T AccuracyUSec)" = 1s ] && pass "and an accuracy of a second, so that ten minutes is the bound" || fail "AccuracyUSec=$(prop $T AccuracyUSec): the manager's default minute is added after the delay"
 prop $DT TimersCalendar | grep -q 'Sun \*-\*-\* 03:30:00' && [ "$(prop $DT Persistent)" = yes ] && pass "the drill's timer is Sunday 03:30, catching up a missed one" || fail "the drill's timer: $(systemctl show -p TimersCalendar,Persistent $DT | tr '\n' ' ')"
+[ "$(prop $DT RandomizedDelayUSec)" = 10min ] && [ "$(prop $DT FixedRandomDelay)" = yes ] && [ "$(prop $DT AccuracyUSec)" = 1s ] && pass "with the hourly's spread: a fixed delay of up to ten minutes, to the second (the owner, 2026-09-27)" || fail "the drill's timer: $(systemctl show -p RandomizedDelayUSec,FixedRandomDelay,AccuracyUSec $DT | tr '\n' ' ')"
 [ "$(prop $T Unit)" = "$S" ] && [ "$(prop $DT Unit)" = "$D" ] && pass "each timer starts the service of its name" || fail "Unit=: $(prop $T Unit), $(prop $DT Unit)"
 for f in $S $T $D $DT; do
 	[ "$(stat -c '%U:%G %a' "/lib/systemd/system/$f")" = "root:root 644" ] && pass "$f is root's, 0644" || fail "$f: $(stat -c '%U:%G %a' "/lib/systemd/system/$f")"
@@ -206,7 +209,10 @@ systemctl restart $T
 [ "$(date -d "$(prop $T NextElapseUSecRealtime)" +%M:%S)" = "$(date -d "$next" +%M:%S)" ] && pass "the offset is this box's own, the same after a reload and a restart [M60]" || fail "the offset moved: $next → $(prop $T NextElapseUSecRealtime)"
 until_state $S inactive 180 || fail "a run the restart caught up did not end: $(systemctl show -p ActiveState,Result $S | tr '\n' ' ')"
 dnext=$(prop $DT NextElapseUSecRealtime)
-[ "$(date -d "$dnext" '+%a %H:%M')" = "Sun 03:30" ] && pass "the drill's next elapse is a Sunday at 03:30 ($dnext)" || fail "the drill's next elapse: '$dnext'"
+dpast=$(($(date -d "$dnext" +%s) - $(date -d "$(date -d "$dnext" '+%Y-%m-%d') 03:30:00" +%s)))
+[ "$(date -d "$dnext" +%a)" = Sun ] && [ "$dpast" -ge 0 ] && [ "$dpast" -le 600 ] && pass "the drill's next elapse is a Sunday, between 03:30 and 03:40 ($dnext)" || fail "the drill's next elapse: '$dnext' (${dpast}s past 03:30)"
+systemctl restart $DT
+[ "$(prop $DT NextElapseUSecRealtime)" = "$dnext" ] && pass "and its offset is this box's own, the same after a reload and a restart" || fail "the drill's offset moved: $dnext → $(prop $DT NextElapseUSecRealtime)"
 # One real firing on the calendar, from a drop-in that makes the timer
 # a minute's; the service it starts is the shipped one, with the
 # credential file there.
@@ -230,6 +236,109 @@ systemctl stop $T $DT
 systemctl daemon-reload
 [ "$(prop $T ActiveState)" = inactive ] && [ "$(prop $DT ActiveState)" = inactive ] && pass "the timers are stopped again for the suites after this one" || fail "timers: $(systemctl show -p ActiveState $T $DT | tr '\n' ' ')"
 nothing_left "after the firing"
+
+echo "=== units 6: a run in a mount namespace of its own refuses, before any upload ==="
+# What the unit files must never give the service is a mount namespace
+# of its own: the manager then cannot see the run's mounts, and binds
+# the bare mount point — root's, empty — into the units in place of the
+# app's data [M54]. The unit table holds the files to that; a drop-in
+# is an administrator's to write. The run makes one mount of its own,
+# asks the manager whether it sees it, and refuses where it does not
+# [M72]: nothing is uploaded, so no snapshot of empty directories
+# becomes the newest one.
+before=$(snapshots)
+mkdir -p /run/systemd/system/$S.d
+printf '[Service]\nPrivateNetwork=yes\n' >/run/systemd/system/$S.d/10-units-suite.conf
+systemctl daemon-reload
+[ "$(prop $S PrivateNetwork)" = yes ] && pass "fixture: the service has a namespace of its own" || fail "fixture: PrivateNetwork=$(prop $S PrivateNetwork): the row proves nothing"
+systemctl start $S >"$OUT" 2>&1 && fail "a run in a mount namespace of its own exited 0" || pass "a run in a mount namespace of its own exits non-zero"
+journalctl --sync >/dev/null 2>&1
+journalctl -u $S --no-pager | grep -q "this command runs in a mount namespace of its own: the manager does not see the mounts it makes" && pass "saying that the manager does not see its mounts" || fail "the journal: $(journalctl -u $S --no-pager | tail -5)"
+journalctl -u $S --no-pager | grep -q "$S is given one by a property it must not have .* systemctl cat $S shows it" && pass "and where to look: systemctl cat, by the unit's name" || fail "the journal names no remedy: $(journalctl -u $S --no-pager | tail -3)"
+[ "$(snapshots)" = "$before" ] && pass "nothing was uploaded: the repository holds the $before snapshots it held" || fail "the repository held $before snapshots and holds $(snapshots): a run that refused uploaded"
+grep -q "runs in a mount namespace of its own" "$STATUS" && pass "and the record says why the run ended" || fail "the record: $(tr -d '\n' <"$STATUS" | cut -c1-300)"
+[ "$(units_left)" = 0 ] && pass "no unit was started for it" || fail "units: $(systemctl list-units --all --no-legend 'hotserve_backup_*')"
+grep -q " /run/hotserve-backup/" /proc/self/mountinfo && fail "the run left its own mount behind: $(grep ' /run/hotserve-backup/' /proc/self/mountinfo)" || pass "and the mount it asked about is gone"
+rm -rf /run/systemd/system/$S.d
+systemctl daemon-reload
+systemctl reset-failed $S 2>/dev/null
+if systemctl start $S >"$OUT" 2>&1; then pass "without the namespace the run works again"; else fail "the run after the drop-in went: $(journalctl -u $S --no-pager | tail -10)"; fi
+expect_class blog ok "without the namespace"
+# Behind that refusal the snapshot is held to the file that was given,
+# by its inode and owner [M63] (the engine's table, and the
+# integration lane against restic); what that must not cost: a
+# declared directory that is empty is the one given, and is backed up.
+as_app sh -c 'mkdir /var/lib/liveswap/blog/shared/empty'
+sed -i 's|^\(\t*\)files  *uploads$|&\n\1files empty|' "$CADDYFILE"
+if grep -q 'files empty' "$CADDYFILE"; then
+	systemctl start $S >"$OUT" 2>&1 && pass "a run with a declared directory that is empty exits 0" || fail "a run with an empty directory declared: $(journalctl -u $S --no-pager | tail -10)"
+	expect_class blog ok "with an empty directory, which is the one given"
+else
+	fail "fixture: no 'files uploads' line in $CADDYFILE to declare an empty directory beside"
+fi
+cp /root/Caddyfile.base "$CADDYFILE"
+as_app rmdir /var/lib/liveswap/blog/shared/empty
+nothing_left "after the namespace"
+
+echo "=== units 7: a disk inside an app's data is backed up with it, and stays where the operator mounted it ==="
+# On a box systemd has booted the root mount is shared; in a container
+# it is left private, and what a shared mount does is never seen. A
+# run binds an app's data recursively, so that a disk mounted inside
+# comes along — and a recursive bind of a shared mount is its peer:
+# taken away as it was, it took the operator's disk from under the
+# live app with it, at the end of every run [M71].
+mount --make-rshared /
+[ "$(findmnt -no PROPAGATION /)" = shared ] && pass "fixture: the root mount is shared, as a booted box has it" || fail "fixture: the root mount is $(findmnt -no PROPAGATION /)"
+mkdir -p /root/disk
+echo on-the-disk >/root/disk/kept.txt
+chown -R hotserve:hotserve /root/disk
+as_app mkdir /var/lib/liveswap/blog/shared/uploads/disk
+mount --bind /root/disk /var/lib/liveswap/blog/shared/uploads/disk
+mountpoint -q /var/lib/liveswap/blog/shared/uploads/disk && pass "fixture: a disk is mounted inside blog's uploads" || fail "fixture: no disk is mounted: the row proves nothing"
+if systemctl start $S >"$OUT" 2>&1; then pass "a run with a disk inside an app's data exits 0"; else fail "the run: $(journalctl -u $S --no-pager | tail -10)"; fi
+expect_class blog ok "with a disk inside its data"
+mountpoint -q /var/lib/liveswap/blog/shared/uploads/disk && [ -f /var/lib/liveswap/blog/shared/uploads/disk/kept.txt ] && pass "the disk is still mounted where the operator put it" || fail "the run unmounted the operator's disk from under the app: $(grep liveswap/blog /proc/self/mountinfo | awk '{print $5}' | tr '\n' ' ')"
+rr ls --no-lock "$(newest blog)" 2>/dev/null | grep -q '^/backup/blog/files/uploads/disk/kept.txt$' && pass "and what is on it is in the snapshot" || fail "the snapshot does not hold the disk's file: $(rr ls --no-lock "$(newest blog)" 2>&1 | grep uploads | head -5)"
+grep -q " /run/hotserve-backup/" /proc/self/mountinfo && fail "mounts of the run are left: $(grep ' /run/hotserve-backup/' /proc/self/mountinfo | awk '{print $5}' | tr '\n' ' ')" || pass "and nothing of the run's is left mounted"
+umount /var/lib/liveswap/blog/shared/uploads/disk
+as_app rmdir /var/lib/liveswap/blog/shared/uploads/disk
+rm -rf /root/disk
+nothing_left "after the disk"
+
+echo "=== units 8: a helper of another version does nothing for a run under way ==="
+# An upgrade leaves a run alone (the owner, 2026-09-27), and the
+# helpers it starts from then on are the new program's: each is told
+# which program started it, and one that is another does nothing and
+# says so. Staged as dpkg replaces a file — written beside, renamed
+# over — with a program that differs by one byte, while blog's upload
+# is held: blog's upload finishes and its plaintext is removed (the
+# clean helper works for any version); shop's dump, the next helper,
+# is the other program's.
+seed
+big
+systemctl reset-failed $S 2>/dev/null
+systemctl start --no-block $S
+if hold_restic "restic backup"; then
+	cp /usr/bin/hotserve-backup /usr/bin/hotserve-backup.suite-aside
+	cp /usr/bin/hotserve-backup /usr/bin/.hotserve-backup.new
+	printf x >>/usr/bin/.hotserve-backup.new
+	mv /usr/bin/.hotserve-backup.new /usr/bin/hotserve-backup
+	kill -CONT "$pid"
+	until_state $S failed 240 && pass "the run whose helper was another version's is a failed unit" || fail "the run: $(systemctl show -p ActiveState,Result $S | tr '\n' ' ') — $(journalctl -u $S --no-pager | tail -5)"
+	expect_class blog ok "with its upload under way at the upgrade"
+	expect_class shop failed "whose helper was another version's"
+	app_json shop | grep -q "the package was upgraded while this command was under way: its dump helper is another version's, and did nothing" && pass "shop says the package was upgraded mid-run" || fail "shop: $(app_json shop)"
+	journalctl -u "hotserve_backup_dump_shop_*" --no-pager 2>/dev/null | grep -q "this helper is not the version of the command that started it" && pass "and the helper said so in its own journal" || fail "the dump helper's journal: $(journalctl --no-pager | grep -i 'dump_shop' | tail -3)"
+	mv /usr/bin/hotserve-backup.suite-aside /usr/bin/hotserve-backup
+	systemctl reset-failed $S
+	if systemctl start $S >"$OUT" 2>&1; then pass "the next run, of one version, works"; else fail "the next run: $(journalctl -u $S --no-pager | tail -10)"; fi
+	expect_class shop ok "the next run"
+else
+	fail "no restic appeared under the service: the row proves nothing"
+	systemctl stop $S 2>/dev/null
+fi
+as_app rm -f /var/lib/liveswap/blog/shared/uploads/big.bin
+nothing_left "after the other version"
 
 rm -rf /root/bare
 systemctl reset-failed 2>/dev/null

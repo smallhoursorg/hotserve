@@ -5,11 +5,14 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/smallhoursorg/hotserve/backups/record"
+	"github.com/smallhoursorg/hotserve/backups/unit"
 )
 
 // The invariants of unit lifecycle across every command, as tables — the
@@ -186,9 +189,25 @@ func TestARunRefusesWhatSetupRefusesWithSetupsWords(t *testing.T) {
 		{"hotserve", func(b *box) { b.haveProgram = func(path string) bool { return path != "/usr/bin/hotserve" } }, "hotserve is not installed at /usr/bin/hotserve"},
 		{"hotserve-backup", func(b *box) { b.haveProgram = func(path string) bool { return path != "/usr/bin/hotserve-backup" } }, "hotserve-backup is not installed at /usr/bin/hotserve-backup, where the units run it"},
 		{"the account", func(b *box) { b.account = false }, "the hotserve-backup account is not there: sudo hotserve-backup setup <repository> makes it (" + useraddArgv() + ")"},
-		{"a login shell", func(b *box) { b.shell = "/bin/bash" }, "the hotserve-backup account exists with a login shell (/bin/bash, not one of /usr/sbin/nologin, /sbin/nologin, /bin/false, /usr/bin/false)"},
-		{"a shared uid", func(b *box) { b.holders = []string{"alice", "hotserve-backup"} }, "a uid shared with alice (995)"},
-		{"the hotserve group", func(b *box) { b.groups = []int{995, b.hotserveGid} }, "the hotserve group among its groups"},
+		{"an account hotserve did not make", func(b *box) { b.comment = "" }, "the hotserve-backup account on this box was not made by hotserve"},
+		// The manager binds what it sees: where it does not see this
+		// command's mounts it would show every unit a bare mount point
+		// in an app's data's place [M54], so the command refuses before
+		// it shows any unit anything, and before any upload [M72].
+		{"the manager's sight of its mounts", func(b *box) { b.unseen = true }, "runs in a mount namespace of its own: the manager does not see the mounts it makes"},
+		{"an answer from the manager about its mounts", func(b *box) { b.seesErr = errors.New("no reply") }, "whether the manager sees the mounts this command makes could not be asked: no reply"},
+		// The data user's lookup is every command's to fail on, in the
+		// lookup's own words: kept for whoever asked first, it was never
+		// said where no app was reached, and where one was it came out
+		// as "does not belong to the hotserve user" (Copilot on #155).
+		{"the hotserve account", func(b *box) {
+			dataOwner = func(context.Context) (int, int, error) { return 0, 0, errors.New("the hotserve account is not there") }
+		}, "the hotserve account is not there"},
+		{"an answer about the hotserve account", func(b *box) {
+			dataOwner = func(context.Context) (int, int, error) {
+				return 0, 0, errors.New("/usr/bin/getent passwd hotserve did not answer within 10s")
+			}
+		}, "/usr/bin/getent passwd hotserve did not answer within 10s"},
 	} {
 		for _, cmd := range runDrillRestore {
 			t.Run(cmd.name+" without "+p.name, func(t *testing.T) {
@@ -245,6 +264,31 @@ func TestADrillStoppedWhileItWaitsIsNoVerdict(t *testing.T) {
 		t.Fatalf("the last drill's verdict was replaced by an interrupt: %+v", st.LastDrill)
 	}
 
+	// Stopped during the plan unit, the same: the plan that could not be
+	// read is the interrupt's doing, and no verdict either.
+	b = restoreBox(t)
+	must(t, os.MkdirAll(b.cfg.StateDir, 0o755))
+	must(t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), &record.Status{LastDrill: last, Apps: map[string]*record.App{}}))
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+	b.before = func(s unit.Spec) {
+		if strings.Contains(s.Name, "_plan_") {
+			cancel()
+		}
+	}
+	b.err["plan"] = context.Canceled
+	if _, err := Drill(ctx, b.cfg, b); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+	if !b.started("plan") {
+		t.Fatal("the plan unit never started: the row proves nothing")
+	}
+	st, err = record.Read(filepath.Join(b.cfg.StateDir, "status.json"))
+	must(t, err)
+	if st.LastDrill == nil || !st.LastDrill.Time.Equal(last.Time) || st.LastDrill.Detail != "" {
+		t.Fatalf("the last drill's verdict was replaced by an interrupt during the plan: %+v", st.LastDrill)
+	}
+
 	// A record that could not be read is said by the drill that could
 	// not begin, beside why it could not.
 	b = restoreBox(t)
@@ -269,7 +313,7 @@ func TestPostinstallMakesTheAccountAsSetupDoes(t *testing.T) {
 	line := "useradd " + strings.Join(useradd[1:], " ")
 	// And the e2e fixture that makes it by hand, and the README that
 	// says how: every copy of the line, or one drifts.
-	for _, f := range []string{"../../packaging/postinstall.sh", "../../e2e/backup/lib.sh", "../README.md"} {
+	for _, f := range []string{"../../packaging/postinstall.sh", "../../e2e/backup/lib.sh", "../README.md", "../../.github/workflows/release.yml"} {
 		raw, err := os.ReadFile(f)
 		must(t, err)
 		if !strings.Contains(string(raw), line) {
@@ -278,109 +322,45 @@ func TestPostinstallMakesTheAccountAsSetupDoes(t *testing.T) {
 	}
 }
 
-// An existing hotserve-backup account is not trusted by name: made by
-// hand with a login shell or a real home, whoever can log in as it can
-// read the repository credential from a running restic's environment.
-// Setup refuses it, naming what is wrong and the two ways to mend it,
-// and changes nothing — normalising an account an administrator made
-// on purpose is not setup's to do (Copilot round 11 on #152; the owner,
-// deferred to 4c).
-func TestAnAccountMadeWrongIsRefusedNotNormalised(t *testing.T) {
-	const (
-		lock   = "lock it (usermod --shell /usr/sbin/nologin --home /nonexistent hotserve-backup)"
-		remake = "remove it (userdel hotserve-backup) and make it as setup would"
-		shells = ", not one of /usr/sbin/nologin, /sbin/nologin, /bin/false, /usr/bin/false)"
-	)
-	me := 1000 // the hotserve data user's uid, and the gid of the group named hotserve
-	ok := acct{shell: "/usr/sbin/nologin", home: "/nonexistent", uid: 995, gid: 995}
-	with := func(f func(a *acct)) acct { a := ok; f(&a); return a }
+// An existing hotserve-backup account is not trusted by its name:
+// hotserve uses only an account it made, which carries its mark, and
+// refuses any other — made by hand, by another package, by an earlier
+// version of this branch — before any prompt, changing nothing, and
+// naming the remedy (the owner, 2026-09-27: a clear refusal, where the
+// account was judged by its shell, home, password, uid and groups).
+func TestAnAccountHotserveDidNotMakeIsRefused(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		a       acct
-		refused []string // in the error; nil means accepted
-		remedy  string   // the one the fault is mended by; the other must not be named alone
+		name, comment string
+		refused       bool
 	}{
-		{"as setup makes it", ok, nil, ""},
-		{"false for a shell", with(func(a *acct) { a.shell = "/bin/false" }), nil, ""},
-		{"the other paths", with(func(a *acct) { a.shell = "/sbin/nologin" }), nil, ""},
-		{"a home named and not there", with(func(a *acct) { a.home = "/home/hotserve-backup" }), nil, ""},
-		// /nonexistent is the home setup gives, and a directory of that
-		// name is nobody's home: not refused, or setup's own account
-		// would be, and the usermod the message names would change nothing.
-		{"/nonexistent, which exists on this box", with(func(a *acct) { a.homeThere = true }), nil, ""},
-
-		// What a usermod mends: the shell, which is what login runs —
-		// only the paths known to refuse a login, not a name (a copy of
-		// bash at /tmp/nologin is a login shell) — and the home.
-		{"a login shell", with(func(a *acct) { a.shell = "/bin/bash" }), []string{"a login shell (/bin/bash" + shells}, lock},
-		{"a shell named nologin elsewhere", with(func(a *acct) { a.shell = "/tmp/nologin" }), []string{"a login shell (/tmp/nologin" + shells}, lock},
-		{"no shell at all, which login reads as /bin/sh", with(func(a *acct) { a.shell = "" }), []string{"a login shell (none set, which is /bin/sh)"}, lock},
-		{"a home that exists", with(func(a *acct) { a.home, a.homeThere = "/home/hotserve-backup", true }), []string{"a home directory that exists (/home/hotserve-backup)"}, lock},
-		{"both", with(func(a *acct) { a.shell, a.home, a.homeThere = "/bin/sh", "/var/lib/hotserve-backup", true }), []string{"a login shell (/bin/sh, not one of", "a home directory that exists (/var/lib/hotserve-backup)"}, lock},
-
-		// What no usermod of the shell mends: who the account is. It is
-		// what every restic unit runs as, User= by name, and
-		// authorization is by uid — whoever else holds it is the restic
-		// process — and by group: the manager gives a unit its
-		// account's groups, and in the hotserve group the plan unit and
-		// restic read the apps' env files and their 0750 directories,
-		// the separation the account exists for.
-		{"uid 0", with(func(a *acct) { a.uid = 0 }), []string{"uid 0 (root)"}, remake},
-		{"gid 0", with(func(a *acct) { a.gid = 0; a.groups = []int{0} }), []string{"gid 0 (root)"}, remake},
-		{"the hotserve user's uid", with(func(a *acct) { a.uid = me; a.holders = []string{"hotserve", "hotserve-backup"} }), []string{"a uid shared with hotserve (1000)"}, remake},
-		{"a uid shared with two accounts", with(func(a *acct) { a.uid = 1001; a.holders = []string{"alice", "hotserve-backup", "bob"} }), []string{"a uid shared with alice, bob (1001)"}, remake},
-		{"root's group among its groups", with(func(a *acct) { a.groups = []int{995, 0} }), []string{"root's group among its groups (gid 0)"}, remake},
-		{"the hotserve group among its groups", with(func(a *acct) { a.groups = []int{995, me} }), []string{"the hotserve group among its groups (gid 1000)"}, remake},
-		{"the hotserve group as its own", with(func(a *acct) { a.gid = me; a.groups = []int{me} }), []string{"the hotserve group among its groups (gid 1000)"}, remake},
-		// The group is the one named hotserve, which the apps' env files
-		// and directories belong to — not whatever the hotserve user's
-		// primary group is: an account made by hand may have another
-		// (the package smoke found the difference).
-		{"the hotserve group, the hotserve user's primary group being another", with(func(a *acct) { a.groups = []int{995, me}; a.dataGid = 2000 }), []string{"the hotserve group among its groups (gid 1000)"}, remake},
-		{"the hotserve user's primary group, which is not the hotserve group", with(func(a *acct) { a.groups = []int{995, 2000}; a.dataGid = 2000 }), nil, ""},
-
-		// Both kinds: both remedies, each said of what it mends.
-		{"a login shell and a shared uid", with(func(a *acct) { a.shell = "/bin/bash"; a.holders = []string{"alice", "hotserve-backup"} }), []string{"a login shell (/bin/bash", "a uid shared with alice (995)", remake}, remake},
+		{"as hotserve makes it", accountMark, false},
+		{"no comment: plain useradd, or this branch before the mark", "", true},
+		{"another package's", "Debian backup account", true},
+		// The remedy for an account made by hand for hotserve is the mark,
+		// which keeps the credential file: said beside userdel.
+		{"a comment that holds the mark", "not " + accountMark, true},
+		{"the mark with a space after", accountMark + " ", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b, m := setupBox(t)
-			b.shell, b.home, b.homeThere, b.uid, b.gid = tc.a.shell, tc.a.home, tc.a.homeThere, tc.a.uid, tc.a.gid
-			if tc.a.holders != nil {
-				b.holders = tc.a.holders
-			}
-			if tc.a.groups != nil {
-				b.groups = tc.a.groups
-			}
-			dataGid := me
-			if tc.a.dataGid != 0 {
-				dataGid = tc.a.dataGid
-			}
-			dataOwner = func() (int, int, error) { return me, dataGid, nil } // restored by the box's cleanup
+			b.comment = tc.comment
 			rep, err := b.setup(t, m, testRepo)
-			if tc.refused == nil {
+			if !tc.refused {
 				if err != nil || rep.Account != "present" {
-					t.Fatalf("accepted account refused: %+v, %v", rep, err)
+					t.Fatalf("hotserve's account refused: %+v, %v", rep, err)
 				}
 				return
 			}
 			if err == nil {
 				t.Fatalf("not refused: %+v", rep)
 			}
-			for _, w := range append(tc.refused, "the hotserve-backup account", tc.remedy) {
+			for _, w := range []string{"the hotserve-backup account on this box was not made by hotserve", "remove it (userdel hotserve-backup)", useraddArgv(), "if it is one you made for hotserve, mark it: usermod --comment made-by-hotserve hotserve-backup"} {
 				if !strings.Contains(err.Error(), w) {
 					t.Errorf("err = %v\nwant it to say %q", err, w)
 				}
 			}
-			// A remedy that does not mend the fault is not named: a
-			// usermod of the shell changes nothing of who the account is.
-			if tc.remedy == remake && len(tc.refused) == 1 && strings.Contains(err.Error(), "usermod") {
-				t.Errorf("err = %v\nnames a usermod for a fault it does not mend", err)
-			}
-			if tc.remedy == remake && !strings.Contains(err.Error(), useraddArgv()) {
-				t.Errorf("err = %v\nwant the useradd line", err)
-			}
-			if b.accountsMade != 0 || b.shell != tc.a.shell || b.home != tc.a.home {
-				t.Fatalf("the account was changed: made %d, shell %q, home %q", b.accountsMade, b.shell, b.home)
+			if b.accountsMade != 0 || b.comment != tc.comment {
+				t.Fatalf("the account was changed: made %d, comment %q", b.accountsMade, b.comment)
 			}
 			neverStarted(t, b, m)
 			if _, err := os.Lstat(filepath.Dir(b.cfg.EnvFile)); err == nil {
@@ -390,12 +370,176 @@ func TestAnAccountMadeWrongIsRefusedNotNormalised(t *testing.T) {
 	}
 }
 
-// acct is an account as a row of the table has it.
-type acct struct {
-	shell, home string
-	homeThere   bool
-	uid, gid    int
-	holders     []string
-	groups      []int
-	dataGid     int // the hotserve user's primary gid, where it is not the hotserve group's
+// Ours is local as well as marked: the account in /etc/passwd, which
+// only root writes and where useradd puts it, and the one the system
+// resolves by that name. A directory's account of that name carries
+// whatever comment its administrator gives it, the mark among them,
+// and is refused (the owner's review of #155).
+func TestOursIsTheLocalAccount(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(b *box)
+		want string
+	}{
+		{"a directory's, with the mark, none in /etc/passwd", func(b *box) { b.notLocal = true }, "is not in /etc/passwd"},
+		{"a directory's, with the mark, shadowing an unmarked local one", func(b *box) { b.localComment = "" }, "is not the one in /etc/passwd"},
+		{"a directory's, with the mark, at another uid than the local one", func(b *box) {
+			old := localAccount
+			localAccount = func(context.Context, string) (passwd, error) {
+				return passwd{name: backupUser, comment: accountMark, uid: 4242, gid: 995, exists: true}, nil
+			}
+			b.t.Cleanup(func() { localAccount = old })
+		}, "is not the one in /etc/passwd"},
+		// The same uid and the same mark, and a login shell: the box
+		// resolves the directory's line, not /etc/passwd's (Copilot on
+		// #155). The whole line is held to the local one.
+		{"a directory's, with the mark and the uid, and a login shell", func(b *box) {
+			b.localLine = "hotserve-backup:x:995:995:made-by-hotserve:/nonexistent:/usr/sbin/nologin"
+			b.nssLine = "hotserve-backup:*:995:995:made-by-hotserve:/home/hotserve-backup:/bin/bash"
+		}, "is not the one in /etc/passwd"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, m := setupBox(t)
+			tc.set(b)
+			_, err := b.setup(t, m, testRepo)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v", err)
+			}
+			neverStarted(t, b, m)
+		})
+	}
+}
+
+// Sweep is what the package's preremove asks at a remove, while the
+// program is still there: what a killed command left — the units it
+// recorded, stopped by those names, and what it left mounted under the
+// run directory, made private and taken away — swept under the run
+// lock, as the next run would have, since there will be none. The
+// engine's own sweep, in Go, in the place of a shell copy of it (the
+// owner, 2026-09-27); and no more than that sweep: no state
+// directories made on a box that never set backups up, no wait for an
+// init a setup left running, which would leave the rest unswept.
+func TestSweepTakesAwayWhatAKilledCommandLeft(t *testing.T) {
+	b := restoreBox(t)
+	must(t, os.MkdirAll(filepath.Join(b.cfg.RunDir, "0123456789ab"), 0o700))
+	must(t, os.WriteFile(filepath.Join(b.cfg.RunDir, "units"), []byte(
+		"hotserve_backup_upload_blog_0123456789ab.service\nsmoke-bystander.service\nhotserve_backup_bystander.service\n"), 0o600))
+	must(t, os.WriteFile(filepath.Join(b.cfg.RunDir, "init-unit"), []byte("hotserve_backup_init_0123456789ab.service\n"), 0o600))
+	top := filepath.Join(b.cfg.RunDir, "0123456789ab", "mount-1")
+	nested := filepath.Join(top, "uploads", "disk")
+	b.leftMounts = []string{nested, top}
+	if err := Sweep(context.Background(), b.cfg, b); err != nil {
+		t.Fatal(err)
+	}
+	// By the names the engine writes, and no other: the file is root's
+	// own, and still a name it did not write is not the manager's to be
+	// asked to stop.
+	if len(b.stopped) != 1 || b.stopped[0] != "hotserve_backup_upload_blog_0123456789ab.service" {
+		t.Errorf("stopped %q", b.stopped)
+	}
+	// The engine's own mount point alone, made private with all beneath
+	// it and detached with all beneath it: the nested one's path runs
+	// through an app's directory, which the app can re-aim at another's
+	// with a link between the look and the call (the owner's review).
+	// (That it is made private first is unmountDetach's own, held by
+	// the integration pin on a shared mount; this lane stands the mount
+	// calls in, and asks what they were asked of.)
+	if !slices.Equal(b.unmountedAt, []string{top}) || slices.Contains(b.madePrivate, nested) {
+		t.Errorf("made private %q, unmounted %q; want %q alone, and nothing of %q", b.madePrivate, b.unmountedAt, top, nested)
+	}
+	if _, err := os.Lstat(filepath.Join(b.cfg.RunDir, "units")); err == nil {
+		t.Error("the list of units is still there")
+	}
+	if len(b.specs) != 0 || len(b.waited) != 0 {
+		t.Errorf("units were started %s, or waited for %q", b.roles(), b.waited)
+	}
+	if _, err := os.Lstat(b.cfg.StateDir); err == nil {
+		t.Error("a sweep made the state directory")
+	}
+
+	// With the lock held — a command from a shell — nothing is touched,
+	// and it is said by the lock's own words.
+	b = restoreBox(t)
+	must(t, os.MkdirAll(b.cfg.RunDir, 0o700))
+	unlock, err := lock(filepath.Join(b.cfg.RunDir, "lock"))
+	must(t, err)
+	defer unlock()
+	must(t, os.WriteFile(filepath.Join(b.cfg.RunDir, "units"), []byte("hotserve_backup_upload_blog_0123456789ab.service\n"), 0o600))
+	if err := Sweep(context.Background(), b.cfg, b); !errors.Is(err, ErrBusy) || !strings.Contains(err.Error(), "pid ") {
+		t.Fatalf("err = %v", err)
+	}
+	if len(b.stopped) != 0 {
+		t.Errorf("stopped under a held lock: %q", b.stopped)
+	}
+
+	// No run directory: nothing was ever left, and nothing is made.
+	b = restoreBox(t)
+	if err := Sweep(context.Background(), b.cfg, b); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(b.cfg.RunDir); err == nil {
+		t.Error("a sweep made the run directory")
+	}
+}
+
+// Something mounted on the run directory itself — nothing of the
+// engine's is — and everything a command does there, the lock, the
+// list of units, a run's files, would be done through it: a run, a
+// restore, a drill, setup and the sweep refuse before any of it
+// (Copilot and the owner's review on #155).
+func TestAMountOnTheRunDirectoryIsRefused(t *testing.T) {
+	for _, cmd := range append(runDrillRestore, setupCommand, command{"a sweep", plainBox, func(_ *testing.T, b *box, _ *term) error {
+		return Sweep(context.Background(), b.cfg, b)
+	}}) {
+		t.Run(cmd.name, func(t *testing.T) {
+			b, m := cmd.box(t)
+			must(t, os.MkdirAll(b.cfg.RunDir, 0o700))
+			b.runDirMounted = true
+			err := cmd.do(t, b, m)
+			if err == nil || !strings.Contains(err.Error(), b.cfg.RunDir+" is itself a mount point") {
+				t.Fatalf("err = %v", err)
+			}
+			if _, err := os.Lstat(filepath.Join(b.cfg.RunDir, "lock")); err == nil {
+				t.Fatal("the lock was taken through the mount")
+			}
+			if len(b.specs) != 0 || len(b.stopped) != 0 {
+				t.Fatalf("units were started %s or stopped %q", b.roles(), b.stopped)
+			}
+		})
+	}
+}
+
+// postremove stops the units a killed command left by the names it
+// recorded — at a purge, with the program gone and no sweep to ask
+// (Copilot on #155: a shell command killed between a remove and a
+// purge left its upload unit running, with the credential) — and only
+// names the engine writes: its pattern and the engine's own grammar
+// agree on every name.
+func TestPostremoveStopsOnlyNamesTheEngineWrites(t *testing.T) {
+	raw, err := os.ReadFile("../../packaging/postremove.sh")
+	must(t, err)
+	m := regexp.MustCompile(`grep -Eq '(\^hotserve_backup_[^']+)'`).FindStringSubmatch(string(raw))
+	if m == nil {
+		t.Fatal("postremove holds no pattern of the engine's unit names")
+	}
+	shell := regexp.MustCompilePOSIX(m[1])
+	for _, name := range []string{
+		"hotserve_backup_upload_demo_0123456789ab.service",
+		"hotserve_backup_plan_0123456789ab.service",
+		"hotserve_backup_listing_0123456789ab.service",
+		"hotserve_backup_upload_my-app2_0123456789ab.service",
+		"hotserve_backup_bystander.service",
+		"hotserve_backup_upload_demo_0123456789a.service",
+		"hotserve_backup_upload_demo_0123456789AB.service",
+		"hotserve_backup_upload_Demo_0123456789ab.service",
+		"hotserve_backup__0123456789ab.service",
+		"smoke-bystander.service",
+		"hotserve_backup_upload_demo_0123456789ab.timer",
+		"hotserve_backup_upload_demo_0123456789ab.service.d",
+	} {
+		_, _, engine := ParseUnitName(name)
+		if got := shell.MatchString(name); got != engine {
+			t.Errorf("%s: postremove says %v, the engine %v", name, got, engine)
+		}
+	}
 }

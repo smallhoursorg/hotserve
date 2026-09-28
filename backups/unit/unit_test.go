@@ -1,8 +1,11 @@
 package unit
 
 import (
+	"context"
+	godbus "github.com/godbus/dbus/v5"
 	"strings"
 	"testing"
+	"time"
 
 	sddbus "github.com/coreos/go-systemd/v22/dbus"
 )
@@ -135,5 +138,59 @@ func TestStderrGoesToTheJournalOrToAFile(t *testing.T) {
 	s.StderrFile = "/run/x/err"
 	if got := find(s); got["StandardErrorFileToTruncate"] != `"/run/x/err"` || got["StandardError"] != "" {
 		t.Errorf("with a file: %s, %s", got["StandardError"], got["StandardErrorFileToTruncate"])
+	}
+}
+
+// The manager's mount unit for a path, as systemd-escape writes it
+// [the integration lane holds these to systemd-escape itself].
+func TestAMountUnitIsNamedAsTheManagerNamesIt(t *testing.T) {
+	for path, want := range map[string]string{
+		"/run/hotserve-backup/0a1b2c3d4e5f/seen":  `run-hotserve\x2dbackup-0a1b2c3d4e5f-seen.mount`,
+		"/run/hotserve-backup/0a1b2c3d4e5f/seen/": `run-hotserve\x2dbackup-0a1b2c3d4e5f-seen.mount`,
+		"/":                  "-.mount",
+		"/var/lib/a b":       `var-lib-a\x20b.mount`,
+		"/.hidden/x.y":       `\x2ehidden-x.y.mount`,
+		"/srv//data/./disk1": "srv-data-disk1.mount",
+		"/mnt/é":             `mnt-\xc3\xa9.mount`,
+		"/a_b:c":             "a_b:c.mount",
+	} {
+		if got := MountUnit(path); got != want {
+			t.Errorf("MountUnit(%q) = %q, want %q", path, got, want)
+		}
+	}
+}
+
+// Sees gives the manager its five seconds, and no more: a manager that
+// takes the question and never answers is given up on at the bound
+// and said, where the command would otherwise wait for it for good
+// (Copilot on #155).
+func TestSeesIsBoundedWhenTheManagerDoesNotAnswer(t *testing.T) {
+	old := seesWithin
+	seesWithin = 200 * time.Millisecond
+	t.Cleanup(func() { seesWithin = old })
+	r := fakeRunner(&fakeConn{silent: true})
+	done := make(chan error, 1)
+	go func() { _, err := r.Sees(context.Background(), "/run/hotserve-backup/0123456789ab/seen"); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "did not answer within") {
+			t.Fatalf("err = %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Sees waited on a manager that does not answer for three seconds, against a bound of 200ms")
+	}
+}
+
+// And a manager that answers "no such unit" until the bound is one
+// that does not see the mount: not seen, which the command refuses as a
+// namespace of its own — never "did not answer".
+func TestSeesSaysNotSeenWhenTheManagerAnswersUntilTheBound(t *testing.T) {
+	old := seesWithin
+	seesWithin = 200 * time.Millisecond
+	t.Cleanup(func() { seesWithin = old })
+	r := fakeRunner(&fakeConn{readErr: godbus.Error{Name: "org.freedesktop.systemd1.NoSuchUnit"}})
+	seen, err := r.Sees(context.Background(), "/run/hotserve-backup/0123456789ab/seen")
+	if err != nil || seen {
+		t.Fatalf("seen = %v, err = %v", seen, err)
 	}
 }

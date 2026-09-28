@@ -17,6 +17,7 @@ type fakeConn struct {
 	stopErr   error
 	stopped   []string
 	readErr   error  // what reading the unit's state returns, when set
+	silent    bool   // reading a unit's state is never answered: the call waits for its context
 	version   string // what the manager says its Version is
 }
 
@@ -36,7 +37,15 @@ func (f *fakeConn) StopUnitContext(_ context.Context, name, _ string, ch chan<- 
 	return 1, nil
 }
 
-func (f *fakeConn) GetAllPropertiesContext(context.Context, string) (map[string]any, error) {
+func (f *fakeConn) GetAllPropertiesContext(ctx context.Context, _ string) (map[string]any, error) {
+	if f.silent {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	// As a real call: one made on a context that has ended fails.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if f.readErr != nil && len(f.stopped) == 0 {
 		return nil, f.readErr
 	}

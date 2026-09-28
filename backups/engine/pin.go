@@ -54,12 +54,72 @@ func (p pin) mountAt(target string) (unmount func(), err error) {
 
 // The two mount calls, as variables: a test that is not root stands
 // something else in for them.
+//
+// What is bound is made private, the whole tree of it, before anything
+// else is done with it and again before it is taken away. A recursive
+// bind of a mount that is shared — and on a box systemd has booted the
+// root mount is, though in a container it is not — is a peer of what
+// it was bound from: unmounting a disk beneath the bind unmounts, by
+// propagation, the disk beneath the app's own directory, under the
+// live app [M71]. Private, the bind's mounts are its own, and taking
+// them away takes nothing else. Before the unmount as well as after
+// the bind: a mount a killed run of an earlier version left is swept
+// by this one.
+//
+// And where it cannot be made private it is never detached as it is,
+// which is the very thing making it private is for: it is unmounted
+// plainly, which the kernel refuses while anything is mounted beneath
+// it — so that what goes had nothing to take along — and is otherwise
+// left where it is, and said, for a sweep that can do better.
 var (
-	bindMount     = func(source, target string) error { return unix.Mount(source, target, "", unix.MS_BIND|unix.MS_REC, "") }
-	unmountDetach = func(target string) error { return unix.Unmount(target, unix.MNT_DETACH) }
+	bindMount = func(source, target string) error {
+		if err := unix.Mount(source, target, "", unix.MS_BIND|unix.MS_REC, ""); err != nil {
+			return err
+		}
+		return unshared(target, private(target))
+	}
+	unmountDetach = func(target string) error {
+		if err := private(target); err != nil {
+			if plain := unix.Unmount(target, 0); plain == nil || errors.Is(plain, unix.EINVAL) {
+				// Gone, with nothing beneath it; or no mount at all,
+				// which the unmount says as it always did.
+				return plain
+			}
+			return unshared(target, err)
+		}
+		return unix.Unmount(target, unix.MNT_DETACH)
+	}
+	private = func(target string) error { return unix.Mount("", target, "", unix.MS_REC|unix.MS_PRIVATE, "") }
 )
 
+// unshared is what becomes of a bind that could not be made private,
+// and nil where it could.
+func unshared(target string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if unix.Unmount(target, 0) == nil {
+		return fmt.Errorf("what was bound at %s could not be made private, and was unmounted: %w", target, err)
+	}
+	return fmt.Errorf("what was bound at %s could not be made private (%w), and is left mounted: taken away as it is, it would take with it what is mounted beneath what it was bound from", target, err)
+}
+
 func (p pin) close() { _ = unix.Close(p.fd) }
+
+// identity is which file is pinned: its inode and whose it is. Read
+// from the descriptor, so of the very file that is bound.
+type identity struct {
+	inode    uint64
+	uid, gid uint32
+}
+
+func (p pin) identity() (identity, error) {
+	var st unix.Stat_t
+	if err := unix.Fstat(p.fd, &st); err != nil {
+		return identity{}, err
+	}
+	return identity{inode: st.Ino, uid: st.Uid, gid: st.Gid}, nil
+}
 
 // owner is the uid that owns what is pinned, or -1.
 func (p pin) owner() int {

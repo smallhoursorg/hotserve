@@ -47,7 +47,9 @@ to start and `loginctl` to stay alive without a login.
 <summary><b>Without the package</b> — the raw binary, for other systemd hosts</summary>
 
 The `hotserve_<version>_linux_<arch>.tar.gz` archives on the same page
-hold the **raw binary** (plus LICENSE and a README), for other systemd
+hold the **raw binary** (plus LICENSE and a README; and
+`hotserve-backup` with its unit files, for [backups](backups/README.md)),
+for other systemd
 hosts you wire up yourself — a NixOS-style distro, say. Prefer the
 packages where you can: going this way you take on what the package
 does for you, namely a dedicated `hotserve` user, a `Type=notify`
@@ -216,7 +218,9 @@ weekly `pin-watch` workflow:
   in the same file is never silently swallowed) — each with a reviewed
   reason and evidence comment, so triage decisions are versioned
   instead of buried in the UI. Unlisted alerts stay open and notify as
-  normal. This needs the
+  normal. An `alert_dismissals` entry may also name the advisory's Go
+  vulndb ID (`govulncheck:`); `make vulncheck` then lets that one ID
+  through, and fails once nothing calls it any more. This needs the
   `DEPENDABOT_ALERTS_TOKEN` Actions secret — a fine-grained PAT with
   **Dependabot alerts: read-write** on this repository only — because
   the Actions `GITHUB_TOKEN` cannot access the alerts API.
@@ -256,7 +260,8 @@ runner). GitHub Actions are pinned to commit SHAs.
 
 What keeps this honest: `govulncheck` gates every PR and runs weekly
 against the fresh vulnerability database (reachable-code analysis, all
-modules), every release is blocked until the full test matrix passes —
+modules; the only exceptions are the reviewed `govulncheck:` entries
+in `pin-watch.yml`, each with its evidence), every release is blocked until the full test matrix passes —
 including installing the actual `.deb` under systemd on Debian 13, on
 both architectures — and any dependency bump has to survive all of the
 above before it merges.
