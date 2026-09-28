@@ -749,10 +749,14 @@ func (x *run) sweep() error {
 		return err
 	}
 	// Then the mounts such a run made, and its directory. The lock is
-	// held, so whatever is here is nobody's. The engine's own mount
-	// points alone — those with no mount above them under the run
-	// directory, at paths only root can reach — each made private with
-	// all beneath it and detached with all beneath it (unmountDetach).
+	// held, so whatever is here is nobody's. Every mount under the run
+	// directory is taken away, by the topmost ones alone — those with
+	// no mount above them, at paths only root can reach, since the
+	// directory is root's and 0700 — each made private with all beneath
+	// it and detached with all beneath it (unmountDetach). A mount there
+	// of another name is root's own doing, and is taken away too: left,
+	// the removal of the run's directories below would remove files
+	// through it.
 	// Never a nested one by its path: that runs through an app's
 	// directory, which the app can re-aim at another's with a link
 	// between the look and the call (the owner's review of #155); and a

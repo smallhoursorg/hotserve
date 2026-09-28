@@ -105,7 +105,9 @@ At the edges of those:
   new program. Each is told which program started it (by the hash of
   the file) and one that is another does nothing, exits 75, and says
   so; the run records the upgrade as that app's failure and tries no
-  app after it. The helper that removes plaintext copies works for any
+  app after it. An app whose backup needs no helper of this program —
+  files alone, which restic uploads — is backed up by the run as it
+  was started: no versions mix. The helper that removes plaintext copies works for any
   version.
 - **Purge removes nothing under `/run/hotserve-backup`** where anything
   is mounted at or under it, or where what is mounted cannot be read,

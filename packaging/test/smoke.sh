@@ -1177,6 +1177,29 @@ grep -q "hotserve: kept /run/hotserve-backup: the run lock is held (pid [0-9]*, 
 	|| die "postremove did not say that the run lock is held: $(cat /tmp/purge-locked.log)"
 rm -rf /run/hotserve-backup
 echo "a command holding the run lock: purge left its files, and said why"
+# A command from a shell, killed between a remove and a purge: its
+# upload unit, which no service ends, still runs with the credential,
+# and its mounts are there. The program is gone, so no sweep: purge
+# stops the units the command recorded, by the engine's grammar, and
+# leaves the mounts, as it says (Copilot on #155).
+LEFT=hotserve_backup_upload_demo_0123456789ab.service
+systemd-run --quiet --unit="$LEFT" /usr/bin/sleep 600 || die "could not stage a unit a killed command left running"
+systemd-run --quiet --unit=smoke-bystander.service /usr/bin/sleep 600 || die "could not stage a unit that is none of the engine's"
+mkdir -p /run/hotserve-backup/0123456789ab/mount-1
+chmod 700 /run/hotserve-backup
+mount --bind /var/lib/liveswap/demo/shared /run/hotserve-backup/0123456789ab/mount-1 || die "could not stage a killed command's mount"
+printf '%s\nsmoke-bystander.service\n' "$LEFT" >/run/hotserve-backup/units
+sh /tmp/hotserve.postrm purge >/tmp/purge-killed.log 2>&1 || true
+[ "$(systemctl is-active "$LEFT" || true)" != active ] \
+	|| die "purge left a killed command's upload unit running, with the credential: $(cat /tmp/purge-killed.log)"
+[ "$(systemctl is-active smoke-bystander.service || true)" = active ] || die "purge stopped a unit that is none of the engine's"
+systemctl stop smoke-bystander.service
+mountpoint -q /run/hotserve-backup/0123456789ab/mount-1 || die "purge took a mount away without the engine's sweep"
+[ -f /var/lib/liveswap/demo/shared/app.db ] || die "purge removed the app's files"
+grep -q "hotserve: kept /run/hotserve-backup: something is mounted at or under it" /tmp/purge-killed.log || die "purge did not say why it kept the run directory"
+umount /run/hotserve-backup/0123456789ab/mount-1
+rm -rf /run/hotserve-backup
+echo "a killed command's units after a remove: stopped by purge, by their recorded names; its mount left, and said"
 
 echo ""
 echo "ALL PACKAGE SMOKE STAGES PASSED ($deb on $(. /etc/os-release && echo "$PRETTY_NAME"))"

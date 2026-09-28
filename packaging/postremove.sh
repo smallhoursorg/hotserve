@@ -85,6 +85,20 @@ purge)
 		fi
 	fi
 	if [ -d "$run" ]; then
+		# A command from a shell killed after the remove's sweep — which
+		# found it holding the lock, and left it — leaves units no service
+		# ends, an upload among them with the credential, and there is no
+		# program left to sweep. Stopped here by the names it recorded,
+		# and only names the engine writes (engine.go, unitNameRe; a test
+		# holds the two together), where nothing holds the lock now
+		# (Copilot on #155).
+		if [ -f "$run/units" ] && [ -d /run/systemd/system ] && { ! command -v flock >/dev/null 2>&1 || flock -n "$run/lock" true 2>/dev/null; }; then
+			while read -r u; do
+				echo "$u" | grep -Eq '^hotserve_backup_[a-z]+[0-9]*(_[a-z0-9-]{1,63})?_[0-9a-f]{12}\.service$' || continue
+				systemctl stop "$u" 2>/dev/null || true
+				systemctl reset-failed "$u" 2>/dev/null || true
+			done <"$run/units"
+		fi
 		if mounted; then
 			echo "hotserve: kept $run: something is mounted at or under it, or what is mounted cannot be read; nothing under it is removed — it is gone at the next boot, and is not to be rm -r'd before" >&2
 		elif [ -f "$run/lock" ] && command -v flock >/dev/null 2>&1 && ! flock -n "$run/lock" true 2>/dev/null; then
