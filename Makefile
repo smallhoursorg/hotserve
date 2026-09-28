@@ -107,12 +107,10 @@ fuzz:
 # version literal here (`go run ...@vX`) would be a pin nothing
 # watches: no ecosystem parses shell strings. The vuln database itself
 # always updates regardless of tool version, which is why vulncheck.yml
-# also runs this on a weekly cron.
+# also runs this on a weekly cron. Accepted (unreachable, not yet
+# fixable) advisories are alert_dismissals in .github/pin-watch.yml.
 vulncheck:
-	for m in $(MODULES); do \
-		$(COMPOSE) run --rm -w /src/$$m dev \
-			go tool govulncheck ./... || exit 1; \
-	done
+	$(COMPOSE) run --rm dev sh .github/scripts/vulncheck.sh $(MODULES)
 
 # Full-history secret scan — the same engine and image as CI's gitleaks
 # gate (the image is pinned in docker-compose.yml, where Dependabot
