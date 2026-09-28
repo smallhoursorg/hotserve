@@ -7,7 +7,9 @@ set -e
 # found": that would make a local account beside the directory's.
 nss() {
 	if command -v timeout >/dev/null 2>&1; then
-		timeout 30 "$@"
+		# And killed ten seconds after: a lookup that ignores the
+		# SIGTERM must not hold the configure either (Copilot on #155).
+		timeout -k 10 30 "$@"
 	else
 		"$@"
 	fi
@@ -79,7 +81,7 @@ if [ "$backup_st" = 2 ]; then
 fi
 if [ "$backup_st" != 0 ] && [ "$backup_st" != 2 ]; then
 	case "$backup_st" in
-	124) why="the user directory did not answer within 30s" ;;
+	124 | 137) why="the user directory did not answer within 30s" ;; # 137: killed after ignoring the SIGTERM
 	*) why="getent exited $backup_st" ;;
 	esac
 	echo "hotserve: whether the hotserve-backup account exists could not be told ($why); no account is made beside the directory's, and backups wait for it: sudo hotserve-backup account says when it is right" >&2

@@ -1095,6 +1095,13 @@ func Drill(ctx context.Context, cfg Config, r Runner) (*record.Status, error) {
 		if ctx.Err() != nil {
 			return nil, err
 		}
+		// Nor is an upgrade: the plan's helper was another version's,
+		// and nothing was found out.
+		if errors.As(err, new(upgradedError)) {
+			st.LastDrill = lastBefore
+			st.Warning = strings.TrimSpace(st.Warning + " " + x.status.Warning)
+			return st, errors.Join(err, record.Write(filepath.Join(cfg.StateDir, "status.json"), st))
+		}
 		st.LastDrill.Detail = record.Text(err.Error())
 		st.Warning = strings.TrimSpace(st.Warning + " " + x.status.Warning)
 		return st, errors.Join(err, record.Write(filepath.Join(cfg.StateDir, "status.json"), st))

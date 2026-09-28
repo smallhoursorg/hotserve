@@ -207,14 +207,24 @@ func TestAHelperOfAnotherVersionEndsTheCommand(t *testing.T) {
 			t.Fatalf("units started: %s", got)
 		}
 	})
+	// No verdict, as for an interrupt: the last drill's stands, so that
+	// the next drill is not a week away, and the command says the
+	// upgrade (Copilot on #155: the plan's helper was recorded as one).
 	t.Run("the plan, of a drill", func(t *testing.T) {
 		b := restoreBox(t)
 		sameVersion(t)
+		last := &record.Drill{Time: time.Date(2026, 9, 20, 3, 30, 0, 0, time.UTC)}
+		must(t, os.MkdirAll(b.cfg.StateDir, 0o755))
+		must(t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), &record.Status{LastDrill: last, Apps: map[string]*record.App{}}))
 		b.outcome["plan"] = anotherVersions
-		st, err := Drill(context.Background(), b.cfg, b)
-		want := fmt.Sprintf(upgraded, "plan")
-		if err == nil || st == nil || st.LastDrill == nil || !strings.Contains(st.LastDrill.Detail, want) {
-			t.Fatalf("err = %v, record %+v", err, st)
+		_, err := Drill(context.Background(), b.cfg, b)
+		if err == nil || !strings.Contains(err.Error(), fmt.Sprintf(upgraded, "plan")) {
+			t.Fatalf("err = %v", err)
+		}
+		st, rerr := record.Read(filepath.Join(b.cfg.StateDir, "status.json"))
+		must(t, rerr)
+		if st.LastDrill == nil || !st.LastDrill.Time.Equal(last.Time) || st.LastDrill.Detail != "" {
+			t.Fatalf("an upgrade during the plan was recorded as the drill's verdict: %+v", st.LastDrill)
 		}
 	})
 	t.Run("the plan, of a restore", func(t *testing.T) {

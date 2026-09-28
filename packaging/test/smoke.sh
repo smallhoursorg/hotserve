@@ -748,7 +748,9 @@ systemctl is-active --quiet hotserve || die "hotserve not active after the upgra
 # directory's — and the configure completes (Copilot on #155: dpkg
 # hung). Staged with a getent ahead of the real one on dpkg's PATH that
 # never answers for the backup account.
-printf '#!/bin/sh\ncase "$*" in *hotserve-backup*) exec sleep 600 ;; esac\nexec /usr/bin/getent "$@"\n' >/usr/local/sbin/getent
+# It ignores the SIGTERM a timeout sends first, as a lookup stuck in
+# the kernel does: only the kill that follows ends it.
+printf '#!/bin/sh\ncase "$*" in *hotserve-backup*) trap "" TERM; sleep 600; exit 0 ;; esac\nexec /usr/bin/getent "$@"\n' >/usr/local/sbin/getent
 chmod 755 /usr/local/sbin/getent
 t0=$(date +%s)
 timeout 300 dpkg -i "$deb" >/tmp/upgrade-nss.log 2>&1 || { cat /tmp/upgrade-nss.log; rm -f /usr/local/sbin/getent; die "the upgrade with a directory that does not answer did not complete within 300s"; }
