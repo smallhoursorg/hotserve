@@ -4,12 +4,15 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // decompressionRatioCap bounds the decompressed size of an artifact at
@@ -67,6 +70,19 @@ type archiveStats struct {
 // special files (devices, FIFOs). Validation is a full first pass over
 // the archive so nothing is written to disk unless every entry is
 // clean — the entry and byte caps included.
+//
+// The validate pass judges names and link targets as strings; the
+// filesystem does not. Once one entry's symlink exists on disk, a
+// later name or link target that passes through it lands wherever the
+// link points, and a chain of links that are each inside as strings
+// (`l -> .`, `l/x/y -> ../..`, …) climbs out one directory per hop. So
+// the kernel is the judge of what actually resolves where: the write
+// pass goes through an os.Root, which refuses any write whose path
+// leaves destDir, and after it the extracted tree's symlinks are
+// resolved through the same Root and any whose resolution leaves it
+// is refused (checkLinksResolveInside). A refusal there leaves the
+// partial tree for the caller to remove, as it does for any mid-write
+// failure.
 func extractArchive(archivePath, destDir string, lim archiveLimits) (archiveStats, error) {
 	validate := func(hdr *tar.Header, r io.Reader) error {
 		// PATH_MAX counts the whole path and its NUL, and the entry
@@ -85,15 +101,74 @@ func extractArchive(archivePath, destDir string, lim archiveLimits) (archiveStat
 	if err != nil {
 		return archiveStats{}, err
 	}
-	if err := os.MkdirAll(destDir, 0o750); err != nil {
-		return archiveStats{}, err
-	}
-	if _, err := walkArchive(archivePath, lim, func(hdr *tar.Header, r io.Reader) error {
-		return writeEntry(destDir, hdr, r)
-	}); err != nil {
+	if err := writeArchive(archivePath, destDir, lim); err != nil {
 		return archiveStats{}, err
 	}
 	return stats, nil
+}
+
+// writeArchive is the write pass: every entry materialized under
+// destDir through one os.Root, so a path that resolves outside it —
+// through a symlink the archive itself planted, or one that was there
+// before — is refused by the kernel-side walk rather than followed;
+// then every symlink the tree ended up with is resolved through the
+// same Root (checkLinksResolveInside). It assumes the validate pass
+// ran; on its own it still cannot write outside destDir, which is
+// what TestWriteArchiveRootRefusesEscape pins.
+func writeArchive(archivePath, destDir string, lim archiveLimits) error {
+	if err := os.MkdirAll(destDir, 0o750); err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(destDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	w := &rootWriter{root: root}
+	if _, err := walkArchive(archivePath, lim, w.entry); err != nil {
+		return err
+	}
+	return checkLinksResolveInside(root)
+}
+
+// checkLinksResolveInside walks the extracted tree and refuses any
+// symlink whose resolution leaves the root. It is the same walk that
+// judged every write, applied to what the writes left behind: a chain
+// of individually-inside links, a `..` that climbs out of a link to
+// `.`, a hard link to a symlink (that symlink's relative target
+// re-based to a new directory, and a symlink to this walk), a target
+// that leaves and comes back in by the staging dir's own name (which
+// dangles once the tree is renamed into place) — Root.Stat follows
+// each and refuses the hop that leaves. Anything else the Root cannot
+// follow is refused too, a loop included: the Root gives up after 8
+// symlink hops where the kernel allows 40, so "unresolvable" here is
+// not "unresolvable" to a reader outside it — and a chain of more
+// than 8 inside links is refused with the same wording as a loop.
+//
+// The one thing that passes without resolving is a dangling target —
+// one the walk loses to a component that does not exist, or runs
+// through a file. The walk reports an escape ahead of a gap, so
+// everything up to the gap resolved inside; what the gap might become
+// is the running app's business, whose release is writable and which
+// can plant an outward link of its own any time.
+func checkLinksResolveInside(root *os.Root) error {
+	return fs.WalkDir(root.FS(), ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return fmt.Errorf("archive tree %q: %w", p, err)
+		}
+		if d.Type()&fs.ModeSymlink == 0 {
+			return nil
+		}
+		_, err = root.Stat(p)
+		if err == nil || errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+			return nil
+		}
+		target, rerr := root.Readlink(p)
+		if rerr != nil {
+			target = "(unreadable: " + rerr.Error() + ")"
+		}
+		return fmt.Errorf("archive symlink %q -> %q: %w", p, target, err)
+	})
 }
 
 // walkArchive iterates the archive's entries under three caps, all
@@ -195,25 +270,47 @@ func validateEntry(hdr *tar.Header, r io.Reader) error {
 	return err
 }
 
-// writeEntry materializes one already-validated entry under destDir.
-func writeEntry(destDir string, hdr *tar.Header, r io.Reader) error {
+// rootWriter materializes entries inside one os.Root. Every path goes
+// through the Root, so an intermediate symlink that leads out of it —
+// planted by an earlier entry, or already there — fails the operation
+// instead of redirecting it. A Root walk costs one openat per
+// component, so the parent directory an entry needs is ensured once
+// per run of entries that share it (tar lists a directory's files
+// together), not once per entry.
+type rootWriter struct {
+	root    *os.Root
+	lastDir string
+}
+
+// entry writes one already-validated entry. The refusal names the
+// entry: the Root's own text names the path it was creating at the
+// time — a parent directory, for a deep entry — not the entry itself.
+func (w *rootWriter) entry(hdr *tar.Header, r io.Reader) error {
+	if err := w.write(hdr, r); err != nil {
+		return fmt.Errorf("archive entry %q: %w", hdr.Name, err)
+	}
+	return nil
+}
+
+func (w *rootWriter) write(hdr *tar.Header, r io.Reader) error {
 	name, err := safeRelPath(hdr.Name)
 	if err != nil {
 		return err
 	}
-	target := filepath.Join(destDir, filepath.FromSlash(name))
+	target := filepath.FromSlash(name)
+	if hdr.Typeflag == tar.TypeDir {
+		return w.parent(target)
+	}
+	if err := w.parent(filepath.Dir(target)); err != nil {
+		return err
+	}
 	switch hdr.Typeflag {
-	case tar.TypeDir:
-		return os.MkdirAll(target, 0o750)
 	case tar.TypeReg:
-		if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
-			return err
-		}
 		// Perm() keeps rwx bits only — setuid/setgid/sticky never
 		// survive extraction. Owner rwx is forced so the app user can
 		// always read (and re-deploys can delete) what it shipped.
 		mode := hdr.FileInfo().Mode().Perm() | 0o600
-		f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode) //nolint:gosec // target passed safeRelPath containment in validateEntry
+		f, err := w.root.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
 		if err != nil {
 			return err
 		}
@@ -223,27 +320,35 @@ func writeEntry(destDir string, hdr *tar.Header, r io.Reader) error {
 		}
 		return err
 	case tar.TypeSymlink:
-		if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
-			return err
-		}
-		return os.Symlink(hdr.Linkname, target)
+		return w.root.Symlink(hdr.Linkname, target)
 	case tar.TypeLink:
 		linkSrc, err := safeRelPath(hdr.Linkname)
 		if err != nil {
 			return err
 		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
-			return err
-		}
-		return os.Link(filepath.Join(destDir, filepath.FromSlash(linkSrc)), target)
+		return w.root.Link(filepath.FromSlash(linkSrc), target)
 	default:
 		return fmt.Errorf("unsupported type %q reached extraction", hdr.Typeflag)
 	}
 }
 
+// parent ensures dir exists, skipping the walk when it is the directory
+// the previous entry already ensured. Nothing extraction does removes
+// a directory, so a directory ensured once stays ensured.
+func (w *rootWriter) parent(dir string) error {
+	if dir == w.lastDir {
+		return nil
+	}
+	if err := w.root.MkdirAll(dir, 0o750); err != nil {
+		return err
+	}
+	w.lastDir = dir
+	return nil
+}
+
 // objectCounter counts the distinct filesystem objects a sequence of
 // entry names creates: each name once, and each parent directory it
-// implies once (writeEntry MkdirAlls them). Keyed by a SHA-256 of the
+// implies once (rootWriter MkdirAlls them). Keyed by a SHA-256 of the
 // path rather than the path itself so a hostile archive of maximal
 // names costs the counter a few megabytes, not hundreds — and by a
 // cryptographic hash rather than a fast one because the names are the

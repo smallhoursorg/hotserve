@@ -16,6 +16,7 @@ import (
 
 	godbus "github.com/godbus/dbus/v5"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // fakeSystemdConn scripts the manager: it records every unit it is
@@ -44,8 +45,11 @@ type fakeSystemdConn struct {
 	listErr     error
 	resetErr    error
 	listCalls   int
-	listHook    func()        // runs inside ListUnits, before it returns (interleaving tests)
-	stopDelay   time.Duration // StopUnit sleeps this long (concurrency tests)
+	listHook    func() // runs inside ListUnits, before it returns (interleaving tests)
+	// vanishOnRead names units that disappear on their next UnitStatus
+	// read: listed, then gone by the time the reader looks.
+	vanishOnRead map[string]bool
+	stopDelay    time.Duration // StopUnit sleeps this long (concurrency tests)
 }
 
 func newFakeSystemdConn() *fakeSystemdConn {
@@ -115,6 +119,12 @@ func (f *fakeSystemdConn) UnitStatus(_ context.Context, name string) (unitStatus
 	if f.statusErr != nil {
 		return unitStatus{}, f.statusErr
 	}
+	if f.vanishOnRead[name] {
+		// The unit ended and was unloaded between a listing and this
+		// read: gone from here on.
+		delete(f.status, name)
+		delete(f.vanishOnRead, name)
+	}
 	st, ok := f.status[name]
 	if !ok {
 		return unitStatus{LoadState: "not-found"}, nil
@@ -146,8 +156,9 @@ func (f *fakeSystemdConn) ListUnits(_ context.Context, pattern string) ([]unitSt
 	var out []unitStatus
 	for name, st := range f.status {
 		if ok, _ := path.Match(pattern, name); ok {
-			st.Name = name
-			out = append(out, st)
+			// As the manager's listing: the states only. Exit facts,
+			// PID and argv are on the unit (UnitStatus).
+			out = append(out, unitStatus{Name: name, LoadState: st.LoadState, ActiveState: st.ActiveState, SubState: st.SubState})
 		}
 	}
 	return out, nil
@@ -757,6 +768,64 @@ func TestSystemdRunnerRunOnceCancelUnconfirmedWhenStopFails(t *testing.T) {
 	err := r.RunOnce(ctx, testApp(t))
 	if !unitUnconfirmed(err) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("a cancelled pre_start that could not be stopped is unconfirmed and still carries the cause, got %v", err)
+	}
+}
+
+func TestSystemdRunnerSweepLogsTheLeftoverExitItReadOffTheUnit(t *testing.T) {
+	// ListUnits reports states only, so a leftover's exit rendered
+	// from the listing always read "no process exit recorded" — on the
+	// one line an operator would learn why it stopped. The sweep reads
+	// the unit before logging.
+	r, conn := newTestSystemdRunner(t)
+	core, logs := observer.New(zap.WarnLevel)
+	r.setLogger(zap.New(core))
+	spec := testApp(t)
+	keep, err := r.Start(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oom := failedStatus
+	oom.ExecMainCode, oom.ExecMainStatus = 2, 9 // CLD_KILLED by SIGKILL
+	conn.setStatus("hotserve-demo.v0.9.1111111111111111.service", oom)
+	if err := r.Sweep("demo", keep); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	var got string
+	for _, e := range logs.All() {
+		if e.Message == "resetting leftover unit" {
+			got = e.ContextMap()["exit"].(string)
+		}
+	}
+	if got != "killed by signal 9 (killed)" {
+		t.Fatalf("leftover exit logged as %q, want the unit's own exit", got)
+	}
+}
+
+func TestSystemdRunnerSweepDoesNotStopAStrayThatEndedAfterTheListing(t *testing.T) {
+	// A stray in its last moments: listed as active, gone by the time
+	// the sweep reads it. Stopping a unit the manager has unloaded
+	// fails and would report the whole sweep unconfirmed — refusing a
+	// launch over a unit that no longer exists. The fresh read must
+	// route it to the leftover branch instead.
+	r, conn := newTestSystemdRunner(t)
+	spec := testApp(t)
+	keep, err := r.Start(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const stray = "hotserve-demo.v2.4444444444444444.service"
+	conn.setStatus(stray, unitStatus{LoadState: "loaded", ActiveState: "active", Sandboxed: true})
+	conn.mu.Lock()
+	conn.vanishOnRead = map[string]bool{stray: true}
+	conn.mu.Unlock()
+	if err := r.Sweep("demo", keep); err != nil {
+		t.Fatalf("a stray that ended on its own must not make the sweep unconfirmed: %v", err)
+	}
+	if stops := conn.stops(); len(stops) != 0 {
+		t.Fatalf("no stop may be sent to a unit that is already gone, got %v", stops)
+	}
+	if rs := conn.resets(); len(rs) != 0 {
+		t.Fatalf("an unloaded unit has nothing to reset, got %v", rs)
 	}
 }
 

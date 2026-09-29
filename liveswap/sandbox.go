@@ -644,7 +644,7 @@ func warnEnvFileInView(logger *zap.Logger, specs map[string]*appSpec) {
 				zap.String("app", name), zap.String("env_file", f),
 				zap.String("fix", "move it outside the liveswap root (the documented location is /etc/hotserve), where no app can see it"))
 		case within(spec.dirs.releases):
-			logger.Warn("env_file is inside the app's release dir, so the app can read the file as well as receive its variables",
+			logger.Warn("env_file is inside the app's release dir, which the app can read and rewrite inside its sandbox, as well as receive its variables",
 				zap.String("app", name), zap.String("env_file", f),
 				zap.String("fix", "move it outside the liveswap root (the documented location is /etc/hotserve), where no app can see it"))
 		}
@@ -739,14 +739,14 @@ func validateEnvFileIsolation(a *App) error {
 				if other == name || ocfg == nil {
 					continue
 				}
-				// The neighbour's own bound directories. Its release
-				// dirs are read-only in its unit and its shared dir is
-				// read-write, so this is the one route on which the
-				// file can also be REWRITTEN by another app.
+				// The neighbour's own bound directories, both bound
+				// read-write into its unit (the release being started
+				// and its shared dir), so this is the one route on
+				// which the file can also be REWRITTEN by another app.
 				od := newAppDirs(a.Root, other)
 				for _, d := range []struct{ path, what, rw string }{
 					{od.shared, "shared dir", "read and rewrite"},
-					{od.releases, "release dirs", "read"},
+					{od.releases, "release dirs", "read and rewrite"},
 				} {
 					// Both spellings: the env file is compared
 					// canonically, so a lexical

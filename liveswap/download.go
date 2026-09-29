@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -69,10 +71,9 @@ func downloadArtifact(ctx context.Context, opts downloadOpts) (string, error) {
 	// From here on the request's URL is never used directly. The URL
 	// the fetch uses is a single concatenation whose provenance reads
 	// left to right — scheme (constant), host and port (THE ALLOWLIST
-	// ENTRY'S OWN CONFIG BYTES; the request's port bytes only under a
-	// declared :* wildcard), the pinned prefix (config bytes again),
-	// and only then the request's path suffix and vetted query. See
-	// pinnedURLString.
+	// ENTRY'S OWN CONFIG BYTES; the request's port is compared, never
+	// emitted), the pinned prefix (config bytes again), and only then
+	// the request's path suffix and vetted query. See pinnedURLString.
 	pinned, err := entry.pinnedURLString(u, escapedPath)
 	if err != nil {
 		return "", err
@@ -96,7 +97,7 @@ func downloadArtifact(ctx context.Context, opts downloadOpts) (string, error) {
 	if err != nil {
 		// req.URL, not u: report the pinned URL the request actually
 		// went to (host casing comes from config, not the payload).
-		return "", fmt.Errorf("download %s: %w", redactURL(req.URL), err)
+		return "", fmt.Errorf("download %s: %w", redactURL(req.URL), redactRequestError(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
@@ -153,10 +154,22 @@ func (d digestMismatch) Unwrap() error { return validationError{d.Error()} }
 // for the zero value.
 func (d digestMismatch) names() []string { return []string{d.pinned, d.got} }
 
+// The per-stage bounds of the artifact fetch. Connect and handshake
+// match net/http's DefaultTransport; the header wait is the one this
+// client always had.
+const (
+	downloadDialTimeout           = 30 * time.Second
+	downloadTLSHandshakeTimeout   = 10 * time.Second
+	downloadResponseHeaderTimeout = 30 * time.Second
+)
+
 // newDownloadClient builds the shared artifact HTTP client. No overall
-// timeout — large artifacts on slow links are legitimate — but a
-// server that accepts the connection and then stalls is cut off at the
-// header stage, and the request context bounds the rest.
+// timeout — large artifacts on slow links are legitimate — but every
+// stage before the body is bounded on its own: the TCP connect, the
+// TLS handshake and the wait for response headers. A host that accepts
+// the connection and then stalls at any of them is cut off, rather
+// than holding the per-app deploy lock for as long as the CI client
+// stays on the line; the request context bounds the body.
 //
 // CheckRedirect enforces the scheme policy on EVERY hop: Go's client
 // happily follows an https -> http redirect (it strips Authorization
@@ -170,7 +183,12 @@ func (d digestMismatch) names() []string { return []string{d.pinned, d.got} }
 func newDownloadClient(allowInsecure bool) *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
-			ResponseHeaderTimeout: 30 * time.Second,
+			DialContext: (&net.Dialer{Timeout: downloadDialTimeout}).DialContext,
+			// A custom dialer switches off net/http's automatic h2
+			// unless asked for, as DefaultTransport asks.
+			ForceAttemptHTTP2:     true,
+			TLSHandshakeTimeout:   downloadTLSHandshakeTimeout,
+			ResponseHeaderTimeout: downloadResponseHeaderTimeout,
 			Proxy:                 http.ProxyFromEnvironment,
 		},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -195,6 +213,49 @@ func redactURL(u *url.URL) string {
 	// having a query or fragment it never had.
 	return u.Scheme + "://" + u.Host + u.EscapedPath()
 }
+
+// redactRequestError strips the query from the URL an http.Client
+// failure names. The client wraps every failure in a *url.Error whose
+// text quotes the URL of the hop that failed — the redirect target,
+// not the pinned first hop — and a refused redirect quotes the raw
+// Location header. Either is where a presigned query (S3, GitLab)
+// lives, so without this the "download ... :" prefix would be
+// redacted and the wrapped text would print the secret anyway. The
+// error is this request's own, so it is rewritten in place and the
+// chain (and the caller's errors.As) is kept.
+//
+// A Location header the client cannot parse is the one failure whose
+// text quotes the header inside the cause rather than in URL (twice:
+// the client's message and the parse error it wraps). That cause
+// carries nothing a caller looks for, so it is replaced by the same
+// message without the header.
+func redactRequestError(err error) error {
+	var ue *url.Error
+	if !errors.As(err, &ue) {
+		return err
+	}
+	switch u, perr := url.Parse(ue.URL); {
+	case perr != nil:
+		// Unparseable, so there is nothing to keep: the outer message
+		// already names the pinned URL.
+		ue.URL = ""
+	case u.IsAbs():
+		ue.URL = redactURL(u)
+	default:
+		// A relative Location header, quoted raw by a refused redirect.
+		ue.URL = u.EscapedPath()
+	}
+	if ue.Err != nil && strings.HasPrefix(ue.Err.Error(), unparseableLocation) {
+		ue.Err = errors.New(unparseableLocation)
+	}
+	return err
+}
+
+// unparseableLocation is how net/http's client begins the error for a
+// redirect whose Location header does not parse; the rest of that
+// message is the header itself. The wording is the stdlib's, so the
+// tests assert on what must not appear rather than on this prefix.
+const unparseableLocation = "failed to parse Location header"
 
 // fetcher turns a webhook request into an extracted release directory,
 // reporting what the archive cost against the app's caps (zero for a

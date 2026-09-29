@@ -156,6 +156,15 @@ func TestCaddyfileUnmarshalErrors(t *testing.T) {
 		{"unknown app key", "liveswap {\n\tapp a {\n\t\tbogus x\n\t}\n}", "unknown app subdirective"},
 		{"duplicate app", "liveswap {\n\tapp a {\n\t\tcommand x\n\t}\n\tapp a {\n\t\tcommand y\n\t}\n}", "duplicate app"},
 		{"duplicate env", "liveswap {\n\tapp a {\n\t\tenv K 1\n\t\tenv K 2\n\t}\n}", "duplicate env"},
+		{"duplicate command", "liveswap {\n\tapp a {\n\t\tcommand x\n\t\tcommand y\n\t}\n}", "duplicate command"},
+		{"duplicate env_file", "liveswap {\n\tapp a {\n\t\tenv_file /a\n\t\tenv_file /b\n\t}\n}", "duplicate env_file"},
+		{"duplicate keep", "liveswap {\n\tapp a {\n\t\tkeep 3\n\t\tkeep 4\n\t}\n}", "duplicate keep"},
+		{"duplicate soak", "liveswap {\n\tapp a {\n\t\tsoak 1s\n\t\tsoak 2s\n\t}\n}", "duplicate soak"},
+		{"duplicate watchdog", "liveswap {\n\tapp a {\n\t\twatchdog on\n\t\twatchdog off\n\t}\n}", "duplicate watchdog"},
+		{"duplicate root", "liveswap {\n\troot /a\n\troot /b\n}", "duplicate root"},
+		{"duplicate audience in a trust block", "liveswap {\n\tdeploy_trust github {\n\t\taudience a\n\t\taudience b\n\t}\n}", "duplicate audience"},
+		{"duplicate public_key in a trust block", "liveswap {\n\tapp a {\n\t\tdeploy_trust local {\n\t\t\tpublic_key /k1\n\t\t\tpublic_key /k2\n\t\t}\n\t}\n}", "duplicate public_key"},
+		{"duplicate allow_insecure_http", "liveswap {\n\tallow_insecure_http\n\tallow_insecure_http\n}", "duplicate allow_insecure_http"},
 		{"bad duration", "liveswap {\n\tapp a {\n\t\tsoak banana\n\t}\n}", "invalid soak"},
 		{"bad keep", "liveswap {\n\tapp a {\n\t\tkeep many\n\t}\n}", "invalid keep"},
 		{"bad size", "liveswap {\n\tapp a {\n\t\tmax_artifact_size huge\n\t}\n}", "invalid max_artifact_size"},
@@ -174,6 +183,48 @@ func TestCaddyfileUnmarshalErrors(t *testing.T) {
 				t.Fatalf("want error containing %q, got %v", tc.want, err)
 			}
 		})
+	}
+}
+
+func TestCaddyfileRepeatedAdditiveSubdirectivesAccumulate(t *testing.T) {
+	// The subdirectives that add an entry per line may repeat, at both
+	// levels; every other one sets a single value and a repeat is
+	// refused rather than silently overriding the earlier line.
+	var a App
+	err := a.UnmarshalCaddyfile(caddyfile.NewTestDispenser(`liveswap {
+		artifact_allowlist github.com/a/
+		artifact_allowlist github.com/b/
+		deploy_trust github {
+			audience one
+			claim repository a/b
+			claim ref refs/heads/main
+		}
+		deploy_trust github {
+			audience two
+		}
+		app x {
+			command x
+			artifact_allowlist github.com/c/
+			artifact_allowlist github.com/d/
+			env A 1
+			env B 2
+			deploy_trust local {
+				public_key /k1
+			}
+			deploy_trust local {
+				public_key /k2
+			}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("repeated additive subdirectives must accumulate: %v", err)
+	}
+	if got := a.ArtifactAllowlist; len(got) != 2 || len(a.DeployTrust) != 2 {
+		t.Fatalf("global lines did not accumulate: allowlist %v, trust %d", got, len(a.DeployTrust))
+	}
+	x := a.Apps["x"]
+	if len(x.ArtifactAllowlist) != 2 || len(x.Env) != 2 || len(x.DeployTrust) != 2 {
+		t.Fatalf("app lines did not accumulate: allowlist %v, env %v, trust %d", x.ArtifactAllowlist, x.Env, len(x.DeployTrust))
 	}
 }
 

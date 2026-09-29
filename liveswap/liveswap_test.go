@@ -141,6 +141,7 @@ func TestValidate(t *testing.T) {
 		{"bad watchdog value", func(a *App) { a.Apps["blog"].Watchdog = "auto" }, "watchdog must be"},
 		{"zero watchdog failures", func(a *App) { a.Apps["blog"].WatchdogFailures = -1 }, "watchdog_failures must be at least 1"},
 		{"zero watchdog restarts", func(a *App) { a.Apps["blog"].WatchdogRestarts = -1 }, "watchdog_restarts must be at least 1"},
+		{"soak beyond deadline", func(a *App) { a.Apps["blog"].Soak = a.Apps["blog"].Deadline + caddy.Duration(time.Second) }, "soak (5m1s) must not exceed deadline (5m0s)"},
 		{"negative watchdog grace", func(a *App) { a.Apps["blog"].WatchdogGrace = caddy.Duration(-time.Second) }, "watchdog_grace must not be negative"},
 		{"negative watchdog window", func(a *App) { a.Apps["blog"].WatchdogWindow = caddy.Duration(-time.Second) }, "watchdog_window must be positive"},
 		{"bad env key", func(a *App) { a.Apps["blog"].Env = map[string]string{"my-var": "1"} }, `env key "my-var"`},
