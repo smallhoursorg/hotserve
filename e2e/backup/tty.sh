@@ -4,11 +4,11 @@
 # suite and the package smoke test, which runs the README's setup line
 # as an administrator. Callers set OUT first.
 
-# at_tty <cmd...>: the command at a real terminal, typing what is on
-# stdin — for a command that asks nothing. Give it </dev/null: a prompt
-# still shows in the output, and script(1) waits 2 s at stdin's end for
-# the child to read anything typed that it never asked for [measured].
-at_tty() { script -qec "$*" /dev/null; }
+# at_tty <cmd...>: the command at a real terminal, typing nothing — for
+# a command that asks nothing. A prompt it did ask would still show in
+# the output. Nothing, and not a line nobody reads: script(1) waits 2 s
+# at stdin's end for the child to read what was typed [measured].
+at_tty() { script -qec "$*" /dev/null </dev/null; }
 
 # converse <cmd> [<prompt> <answer>]...: the command at a real terminal,
 # each answer typed once its prompt is the last thing on the screen —

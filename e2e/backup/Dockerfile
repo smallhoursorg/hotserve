@@ -4,7 +4,9 @@
 # programs whose behaviour the suite is about. hotserve itself is not
 # started: nothing in a backup talks to it. The two binaries come
 # built, from build/e2e-backup (the bin context, docker-compose.yml),
-# which `make e2e-backup` fills first.
+# which `make e2e-backup` fills first. Build this image through that
+# target only: built by hand it copies whatever binaries the last run
+# left there, not the source as it is now.
 FROM debian:trixie-slim
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \

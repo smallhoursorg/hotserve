@@ -143,7 +143,8 @@ services:
     build:
       context: .
       dockerfile: e2e/backup/Dockerfile
-      # The binaries `make e2e-backup` builds before it starts the box.
+      # The binaries `make e2e-backup` builds before it starts the box:
+      # build the box through that target, or it gets the last run's.
       additional_contexts:
         bin: ./build/e2e-backup
     image: hotserve-e2e-backup
