@@ -19,7 +19,11 @@ import (
 	"github.com/smallhoursorg/hotserve/liveswap/backupdecl"
 )
 
-const snapA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+const (
+	snapA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	// snapC is the id of a clean-run record: a snapshot of its own.
+	snapC = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+)
 
 // box is a liveswap root with one deployed app, the engine's
 // directories, and a scripted Runner standing in for the manager. What
@@ -89,6 +93,13 @@ type box struct {
 	waited                     []string // units a lock holder waited for
 	waitErr                    error
 	release                    chan struct{} // closed at the test's end: a hung init ends
+	// then is how a role's units end one after another, before outcome
+	// speaks for the rest: the probe before a check and the one after.
+	then map[string][]unit.Outcome
+	// What the repository check prints, what the unit that writes a
+	// clean-run record prints, and what the listing of those records
+	// prints.
+	repocheck, vouch, vouches string
 }
 
 func (b *box) ManagerVersion(context.Context) (int, error) { return b.version, nil }
@@ -151,6 +162,10 @@ func newBox(t *testing.T) *box {
 	b.fetch = `{"message_type":"summary","total_files":4,"files_restored":4}`
 	b.size, b.free = `{"total_size":4096,"total_file_count":4,"snapshots_count":1}`, 1<<30
 	b.install = `{"plan":{"sqlite":["app.db"],"files":["uploads"]},"items":[{"kind":"sqlite","path":"app.db","class":"ok"},{"kind":"files","path":"uploads","class":"ok"}]}`
+	b.then = map[string][]unit.Outcome{}
+	b.repocheck = `{"message_type":"summary","num_errors":0,"broken_packs":null,"suggest_repair_index":false,"suggest_prune":false}`
+	b.vouch = `{"message_type":"summary","snapshot_id":"` + snapC + `"}`
+	b.vouches = `[]`
 	b.ls = func(parent string) string {
 		switch parent {
 		case "/backup/blog/sqlite":
@@ -341,6 +356,12 @@ func (b *box) Run(ctx context.Context, s unit.Spec) (unit.Outcome, error) {
 		write(b.fetch)
 	case "install", "extract", "check":
 		write(b.install)
+	case "repocheck":
+		write(b.repocheck)
+	case "vouch":
+		write(b.vouch)
+	case "vouches":
+		write(b.vouches)
 	case "mkshared":
 		must(b.t, os.MkdirAll(filepath.Join(b.root, "blog", "shared"), 0o755))
 	case "unmake":
@@ -383,6 +404,10 @@ func (b *box) Run(ctx context.Context, s unit.Spec) (unit.Outcome, error) {
 	if role == "unstage" && b.failUnstage != "" && strings.Contains(s.Name, "_unstage_"+b.failUnstage+"_") {
 		return unit.Outcome{Result: "exit-code", ExitStatus: 1}, nil
 	}
+	if next := b.then[role]; len(next) > 0 {
+		b.then[role] = next[1:]
+		return next[0], nil
+	}
 	if o, ok := b.outcome[role]; ok {
 		return o, nil
 	}
@@ -416,8 +441,9 @@ func TestACleanRun(t *testing.T) {
 	// The backup, and — nothing of this app's having been proven yet — a
 	// drill of the snapshot it made.
 	// The size first: a run says how large its own drill is, and leaves
-	// a large one to the drill. Last, one listing of the repository.
-	if got, want := b.roles(), "plan clean dump upload verify clean size unstage fetch handover check unstage listing"; got != want {
+	// a large one to the drill. The record that the run ended ok on the
+	// app, once its copies are gone. Last, one listing of the repository.
+	if got, want := b.roles(), "plan clean dump upload verify clean vouch size unstage fetch handover check unstage listing"; got != want {
 		t.Fatalf("units, in order: %s\nwant:            %s", got, want)
 	}
 	app := st.Apps["blog"]

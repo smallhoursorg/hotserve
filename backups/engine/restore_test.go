@@ -36,8 +36,10 @@ func TestACleanRestore(t *testing.T) {
 	var asked RestoreAsk
 	o := inPlace()
 	o.Confirm = func(a RestoreAsk) bool {
-		// Asked once the snapshot is known, and before anything else.
-		if got := b.roles(); got != "plan history" {
+		// Asked once the snapshot is known, and before anything else but
+		// reads: this box has no record, so the repository's records of
+		// clean runs are asked what the record would have said.
+		if got := b.roles(); got != "plan history vouches" {
 			t.Errorf("units started before the question: %s", got)
 		}
 		asked = a
@@ -49,7 +51,7 @@ func TestACleanRestore(t *testing.T) {
 	}
 	// The app is backed up first; what was fetched is removed first and
 	// last; the hand-over sits between the fetch and whatever reads it.
-	if got, want := b.roles(), "plan history clean dump upload verify clean unstage size fetch handover install unstage"; got != want {
+	if got, want := b.roles(), "plan history vouches clean dump upload verify clean unstage size fetch handover install unstage"; got != want {
 		t.Fatalf("units, in order: %s\nwant:            %s", got, want)
 	}
 	shared := filepath.Join(b.root, "blog", "shared")
@@ -288,7 +290,8 @@ func TestNothingHappensBeforeTheAnswerAndNothingAfterANo(t *testing.T) {
 	if _, err := Restore(context.Background(), b.cfg, b, o); !errors.Is(err, ErrDeclined) {
 		t.Fatalf("%v", err)
 	}
-	if got := b.roles(); got != "plan history" {
+	// Reads alone: the history, and the records of clean runs.
+	if got := b.roles(); got != "plan history vouches" {
 		t.Errorf("units started around a no: %s", got)
 	}
 }
@@ -472,7 +475,7 @@ func TestADrillProvesAndInstallsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := b.roles(), "plan history unstage size fetch handover check unstage"; got != want {
+	if got, want := b.roles(), "plan history unstage size fetch handover check unstage probe repocheck"; got != want {
 		t.Fatalf("units, in order: %s\nwant:            %s", got, want)
 	}
 	for _, s := range b.specs {
@@ -525,8 +528,8 @@ func TestADrillThatProvesNothingKeepsWhatWasProven(t *testing.T) {
 			if app.Class != record.OK || app.LastOK == nil {
 				t.Errorf("a drill rewrote the backup's own result: %+v", app)
 			}
-			if got := b.roles(); !strings.HasSuffix(got, " unstage") {
-				t.Errorf("what was fetched was not removed: %s", got)
+			if got := b.roles(); !strings.HasSuffix(got, " unstage probe repocheck") {
+				t.Errorf("what was fetched was not removed, before the repository was checked: %s", got)
 			}
 		})
 	}

@@ -72,6 +72,9 @@ type RestoreAsk struct {
 	// LastOK is the last snapshot the record says a run ended ok on,
 	// when the one about to be restored is not it: see RestoreReport.
 	LastOK *record.Snapshot
+	// NotKnown is why whether a run ended ok on the snapshot is not
+	// known: see RestoreReport.
+	NotKnown string
 }
 
 // RestoreReport is what a restore did.
@@ -93,8 +96,14 @@ type RestoreReport struct {
 	// — restic exit 3, files left out of a directory it did read — leaves
 	// a snapshot every check at install passes, and a restore of it puts
 	// back fewer files than the ok one would: the record is what knows,
-	// and only on a box that has one.
+	// and where the box's has no run of the app that ended ok — a
+	// rebuilt box — the records of clean runs in the repository.
 	LastOK *record.Snapshot
+	// NotKnown is why it is not known whether a run ended ok on the
+	// snapshot, where the box's record cannot say and the repository's
+	// records did not: none vouches for any snapshot of the app, or they
+	// could not be asked.
+	NotKnown string
 	// Items are what the snapshot's own plan.json declares, each with
 	// whether it was restored.
 	Items []record.Item
@@ -178,8 +187,14 @@ func Restore(ctx context.Context, cfg Config, r Runner, o RestoreOptions) (rep *
 		return nil, err
 	}
 	rep = &RestoreReport{App: o.App, Snapshot: snap, Into: o.To}
-	if old := x.prev.Apps[o.App]; old != nil && old.LastOK != nil && old.LastOK.ID != snap.ID {
-		rep.LastOK = old.LastOK
+	if old := x.prev.Apps[o.App]; old != nil && old.LastOK != nil {
+		if old.LastOK.ID != snap.ID {
+			rep.LastOK = old.LastOK
+		}
+	} else {
+		// No run this box remembers ended ok on the app — a rebuilt box,
+		// most often: the repository's records of clean runs say.
+		rep.LastOK, rep.NotKnown = x.lastVouched(ctx, o.App, snaps, snap)
 	}
 	defer func() {
 		if rep != nil {
@@ -191,7 +206,7 @@ func Restore(ctx context.Context, cfg Config, r Runner, o RestoreOptions) (rep *
 		if o.Confirm != nil {
 			// Whether there is anything there to back up is looked at
 			// before the question promises it.
-			ask := RestoreAsk{App: o.App, Snapshot: snap, Into: rep.Into, PreBackup: !o.NoPreBackup, LastOK: rep.LastOK}
+			ask := RestoreAsk{App: o.App, Snapshot: snap, Into: rep.Into, PreBackup: !o.NoPreBackup, LastOK: rep.LastOK, NotKnown: rep.NotKnown}
 			if rootPin, err := pinRoot(p.Root); err == nil {
 				if sharedPin, err := rootPin.beneath(o.App + "/shared"); err == nil {
 					sharedPin.close()
@@ -567,6 +582,66 @@ func pick(app string, snaps []listed, asked string) (record.Snapshot, error) {
 		return record.Snapshot{}, fmt.Errorf("%s is not a snapshot of %s: the repository holds %d of it, the newest %s", asked, app, len(snaps), short(snaps[len(snaps)-1].ID))
 	}
 	return record.Snapshot{}, fmt.Errorf("%s is the start of %d snapshots of %s; give more of it", asked, len(found), app)
+}
+
+// lastVouched is, of an app's snapshots, the newest that a clean-run
+// record in the repository vouches for, where that is not snap; or why
+// whether a run ended ok on snap is not known. It is what a box's own
+// record says of its last ok, for a box that has none.
+func (x *run) lastVouched(ctx context.Context, app string, snaps []listed, snap record.Snapshot) (*record.Snapshot, string) {
+	vouched, err := x.vouched(ctx)
+	if err != nil {
+		return nil, "the repository's records of clean runs could not be asked: " + err.Error()
+	}
+	for i := len(snaps) - 1; i >= 0; i-- {
+		if s := snaps[i].Snapshot; vouched[s.ID] {
+			if s.ID == snap.ID {
+				return nil, ""
+			}
+			return &s, ""
+		}
+	}
+	return nil, fmt.Sprintf("nothing in the repository vouches for any snapshot of %s: no record there says that a run which made one ended ok", app)
+}
+
+// vouched is which snapshots the clean-run records in the repository
+// vouch for (vouchArgv). --no-lock, and given up at listClock, as every
+// listing is.
+func (x *run) vouched(ctx context.Context) (map[string]bool, error) {
+	out := filepath.Join(x.dir, "vouches.json")
+	o, err := x.startWithin(ctx, listClock, unit.Spec{
+		Name: x.name("vouches", ""), Description: "hotserve backup: ask the repository which backups ended ok",
+		Argv: []string{x.cfg.Restic, "snapshots", "--json", "--no-lock", "--host", "hotserve", "--tag", cleanTag},
+		User: backupUser, Network: true, EnvironmentFile: x.cfg.EnvFile,
+		Environment:    []string{"RESTIC_CACHE_DIR=/var/cache/hotserve-backup", "HOME=/nonexistent"},
+		CacheDirectory: "hotserve-backup", StdoutFile: out,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !o.OK() {
+		detail, _ := resticFailure(o)
+		return nil, errors.New(detail)
+	}
+	raw, err := os.ReadFile(out) //nolint:gosec // written by the manager into root's own run dir
+	if err != nil {
+		return nil, err
+	}
+	var said []struct {
+		Tags []string `json:"tags"`
+	}
+	if err := json.Unmarshal(raw, &said); err != nil {
+		return nil, fmt.Errorf("what restic said of them could not be read: %w", err)
+	}
+	vouched := map[string]bool{}
+	for _, s := range said {
+		for _, tag := range s.Tags {
+			if id, ok := strings.CutPrefix(tag, vouchesTag); ok && snapshotRe.MatchString(id) {
+				vouched[id] = true
+			}
+		}
+	}
+	return vouched, nil
 }
 
 // bring fetches a snapshot, hands it over, and has it checked — and, as
@@ -1161,6 +1236,13 @@ func Drill(ctx context.Context, cfg Config, r Runner) (*record.Status, error) {
 	// one's, so that the next drill is not a week away.
 	if x.upgraded != nil {
 		st.LastDrill = lastBefore
+	} else if ctx.Err() == nil {
+		// Then the repository itself, whatever became of the apps: a
+		// refusal every app met is the check's to say in its own words.
+		// An interrupt is no verdict, and leaves the last one.
+		if c := x.checkRepository(ctx); c != nil {
+			st.LastCheck = c
+		}
 	}
 	// What was finished is written, an interrupt or not: each verdict is
 	// an app's own, and the app the interrupt landed on has none.

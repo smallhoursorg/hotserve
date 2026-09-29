@@ -1020,11 +1020,8 @@ func (s *setup) repository(ctx context.Context, role string, within time.Duratio
 		StdoutFile:     filepath.Join(s.dir, role+".out"), StderrFile: errFile,
 	}
 	if role != "init" {
-		o, err := s.start(clock, spec)
+		o, err := s.startWithin(ctx, within, spec)
 		if err != nil {
-			if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, unit.ErrNotConfirmedGone) {
-				return o, "", fmt.Errorf("%w within %s; the unit was stopped", errDidNotAnswer, within)
-			}
 			return o, "", err
 		}
 		return o, resticMessage(errFile), nil

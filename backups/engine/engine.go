@@ -386,7 +386,7 @@ func open(ctx context.Context, cfg Config, r Runner, say func(string)) (x *run, 
 	}
 	uid, gid, derr := dataOwner(ctx)
 	x = &run{cfg: cfg, r: r, nonce: nonce, dir: filepath.Join(cfg.RunDir, nonce), prev: prev, dataUID: uid, dataGID: gid, dataErr: derr, program: program,
-		status: &record.Status{Started: time.Now().UTC(), Warning: unreadable, Apps: map[string]*record.App{}, Listed: prev.Listed, Unlisted: prev.Unlisted, LastDrill: prev.LastDrill}}
+		status: &record.Status{Started: time.Now().UTC(), Warning: unreadable, Apps: map[string]*record.App{}, Listed: prev.Listed, Unlisted: prev.Unlisted, LastDrill: prev.LastDrill, LastCheck: prev.LastCheck}}
 	if err := x.awaitInit(ctx, say); err != nil {
 		return x, unlock, err
 	}
@@ -483,6 +483,12 @@ func (x *run) apps(ctx context.Context) error {
 			x.status.Apps[name] = app
 			if repositoryWide {
 				stop = app
+			}
+			// Said in the repository too, once nothing of the app's run is
+			// left to change how it ended: what a rebuilt box, which has
+			// no record, has to go on.
+			if app.Class == record.OK && ctx.Err() == nil {
+				x.vouch(ctx, name, app.Snapshot.ID)
 			}
 		}
 		x.carryLastOK(name)
@@ -1419,6 +1425,35 @@ func (x *run) upload(ctx context.Context, app string, binds []unit.Bind, masked 
 	return "", record.Failed, detail + "; `journalctl -u " + x.name("upload", app) + "` has restic's own words", repositoryWide
 }
 
+// vouch writes into the repository the record that this run ended ok
+// on app's snapshot id (vouchArgv). One that could not be written is
+// said, and costs nothing else: the backup is sound, and only a rebuilt
+// box goes without the word for it.
+func (x *run) vouch(ctx context.Context, app, id string) {
+	out := filepath.Join(x.dir, app+".vouch.json")
+	o, err := x.start(ctx, unit.Spec{
+		Name: x.name("vouch", app), Description: "hotserve backup: record in the repository that " + app + "'s backup ended ok",
+		Argv: vouchArgv(x.cfg.Restic, app, id),
+		User: backupUser, Network: true, EnvironmentFile: x.cfg.EnvFile,
+		Environment:    []string{"RESTIC_CACHE_DIR=/var/cache/hotserve-backup", "HOME=/nonexistent"},
+		CacheDirectory: "hotserve-backup", StdoutFile: out,
+	})
+	var why string
+	switch {
+	case ctx.Err() != nil:
+		return
+	case err != nil:
+		why = err.Error()
+	case !o.OK():
+		why, _ = resticFailure(o)
+	case summaryID(out) == "":
+		why = "restic exited 0 but its summary names no snapshot"
+	default:
+		return
+	}
+	x.status.Warning = strings.TrimSpace(x.status.Warning + " " + record.Text(fmt.Sprintf("%s: the record that this run ended ok could not be written into the repository (%s): a restore on a rebuilt box will not know that snapshot %s is a complete backup.", app, why, short(id))))
+}
+
 // resticFailure puts restic 0.18's exit statuses into words [measured].
 // 1 is "anything else", and is never called "no repository": a wrong
 // storage key ends, after a quarter of an hour of retrying, in exit 1
@@ -1508,7 +1543,7 @@ func (x *run) verify(ctx context.Context, app, id string, rec *record.App) error
 	// directory part of a declared path, after /backup/<app>/ — and
 	// restic takes each as a path and nothing else: they follow "--",
 	// start with "/", and like every argument are never expanded.
-	o, err := x.start(ctx, unit.Spec{
+	o, err := x.startWithin(ctx, listClock, unit.Spec{
 		Name: x.name("verify", app), Description: "hotserve backup: check " + app + "'s snapshot",
 		Argv: append([]string{x.cfg.Restic, "ls", "--json", "--no-lock", "--", id}, parents...),
 		User: backupUser, Network: true, EnvironmentFile: x.cfg.EnvFile,
@@ -1611,7 +1646,8 @@ func (x *run) history(ctx context.Context, app string) (snaps []listed, reposito
 
 // snapshots asks the repository for the snapshots of app — of every
 // app, where app is empty — oldest first. --no-lock: it reads, and a
-// check that holds the repository exclusively must not fail it.
+// check that holds the repository exclusively must not fail it. Given
+// up at listClock.
 func (x *run) snapshots(ctx context.Context, role, app string) (snaps []listed, repositoryWide bool, err error) {
 	out := filepath.Join(x.dir, app+"."+role+".json")
 	argv, about := []string{x.cfg.Restic, "snapshots", "--json", "--no-lock", "--host", "hotserve"}, "every app"
@@ -1625,7 +1661,7 @@ func (x *run) snapshots(ctx context.Context, role, app string) (snaps []listed, 
 	if app == "" {
 		stderr = filepath.Join(x.dir, "."+role+".err")
 	}
-	o, err := x.start(ctx, unit.Spec{
+	o, err := x.startWithin(ctx, listClock, unit.Spec{
 		Name: x.name(role, app), Description: "hotserve backup: ask the repository about " + about,
 		Argv: argv, StderrFile: stderr,
 		User: backupUser, Network: true, EnvironmentFile: x.cfg.EnvFile,
@@ -1633,7 +1669,8 @@ func (x *run) snapshots(ctx context.Context, role, app string) (snaps []listed, 
 		CacheDirectory: "hotserve-backup", StdoutFile: out,
 	})
 	if err != nil {
-		return nil, false, err
+		// A repository that did not answer one app will not answer the next.
+		return nil, errors.Is(err, errDidNotAnswer), err
 	}
 	if !o.OK() {
 		detail, wide := resticFailure(o)
