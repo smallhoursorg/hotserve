@@ -164,6 +164,7 @@ services:
       - ./e2e/backup/units.sh:/suite-units.sh:ro
       - ./e2e/backup/status.sh:/suite-status.sh:ro
       - ./e2e/backup/restore.sh:/suite-restore.sh:ro
+      - ./e2e/backup/check.sh:/suite-check.sh:ro
     depends_on:
       - e2e-s3
 
