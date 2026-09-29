@@ -1,5 +1,5 @@
 #!/bin/sh
-# The setup suite. Runs inside e2e-backup-box as root, first of the four,
+# The setup suite. Runs inside an e2e-backup-box of its own as root,
 # against real systemd, Debian's restic and the S3 server at e2e-s3. It
 # holds `hotserve-backup setup <repository>` to its word: everything
 # knowable is refused before a secret is asked for; the secrets are
@@ -54,7 +54,7 @@ setup "$REPO" </dev/null && fail "setup with no terminal exited 0" || { says "as
 echo "=== setup 2: what is knowable is refused before any prompt, and before the account is made ==="
 id hotserve-backup >/dev/null 2>&1 && fail "fixture: the hotserve-backup account exists before setup ran, so nothing below can show setup making it" || pass "fixture: no hotserve-backup account before setup"
 mv /usr/bin/restic /usr/bin/restic.aside
-printf 'x\n' | at_tty hotserve-backup setup "$REPO" >"$OUT" 2>&1 && fail "setup without restic exited 0" || { says "restic is not installed at /usr/bin/restic: apt install restic" && pass "without restic, setup names the package" || fail "without restic: $(cat "$OUT")"; }
+at_tty hotserve-backup setup "$REPO" </dev/null >"$OUT" 2>&1 && fail "setup without restic exited 0" || { says "restic is not installed at /usr/bin/restic: apt install restic" && pass "without restic, setup names the package" || fail "without restic: $(cat "$OUT")"; }
 says "Storage key id" && fail "a prompt was asked before the preflight passed" || pass "and asked nothing"
 id hotserve-backup >/dev/null 2>&1 && fail "the account was made before the preflight passed" || pass "and made no account"
 mv /usr/bin/restic.aside /usr/bin/restic
@@ -65,7 +65,7 @@ mv /usr/bin/restic.aside /usr/bin/restic
 # would, with the same line and no mark: a nologin shell and no home do
 # not make it hotserve's.
 useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hotserve-backup
-printf 'x\n' | at_tty hotserve-backup setup "$REPO" >"$OUT" 2>&1 && fail "setup with an account hotserve did not make exited 0" || { says "the hotserve-backup account on this box was not made by hotserve" && says "remove it (userdel hotserve-backup)" && says "useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin --comment made-by-hotserve hotserve-backup" && pass "an account hotserve did not make is refused, naming the remedy" || fail "the account not made by hotserve: $(cat "$OUT")"; }
+at_tty hotserve-backup setup "$REPO" </dev/null >"$OUT" 2>&1 && fail "setup with an account hotserve did not make exited 0" || { says "the hotserve-backup account on this box was not made by hotserve" && says "remove it (userdel hotserve-backup)" && says "useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin --comment made-by-hotserve hotserve-backup" && pass "an account hotserve did not make is refused, naming the remedy" || fail "the account not made by hotserve: $(cat "$OUT")"; }
 says "Storage key id" && fail "a prompt was asked with an account hotserve did not make" || pass "and asked nothing"
 [ -z "$(getent passwd hotserve-backup | cut -d: -f5)" ] && pass "and the account was left as it was" || fail "the account was changed: $(getent passwd hotserve-backup)"
 # The same rule, asked by itself: what the package's postinstall asks,
@@ -74,7 +74,7 @@ as_nobody hotserve-backup account >"$OUT" 2>&1 && fail "account exited 0 of an a
 userdel hotserve-backup 2>/dev/null
 [ ! -e "$ETC" ] && pass "and nothing was made under /etc" || fail "$ETC exists"
 for r in sftp:user@host:/srv/backups /srv/backups local:/srv/backups rclone:remote:bucket azure:container:path gs:bucket:path swift:container:/path rest:https://host:8000/ "s3:http://user:pass@e2e-s3:9000/box" "s3:user:pass@e2e-s3:9000/box" "s3://user:pass@e2e-s3:9000/box" "ftp://host/x" "s3:"; do
-	if printf 'x\n' | at_tty hotserve-backup setup "$r" >"$OUT" 2>&1; then
+	if at_tty hotserve-backup setup "$r" </dev/null >"$OUT" 2>&1; then
 		fail "setup $r exited 0"
 	elif says "Storage key id"; then
 		fail "setup $r asked before refusing"
@@ -136,7 +136,7 @@ echo "=== setup 4: a Caddyfile a run could not plan from is refused before any p
 sed 's#root /var/lib/liveswap#root {$LIVESWAP_ROOT:/var/lib/liveswap}#' /root/Caddyfile.base >"$CADDYFILE"
 hotserve validate --config "$CADDYFILE" --adapter caddyfile >/dev/null 2>&1 && pass "fixture: hotserve accepts the file" || fail "fixture: hotserve rejects the file: the scenario proves nothing"
 before=$(sum)
-printf 'x\n' | at_tty hotserve-backup setup "$S3/other" >"$OUT" 2>&1 && fail "setup exited 0 with a Caddyfile a run cannot plan from" || { says "could not be turned into a plan (exit 1): .*LIVESWAP_ROOT" && ! says "Storage key id" && pass "refused with the adapter's reason, naming the variable, before any prompt" || fail "said: $(cat "$OUT")"; }
+at_tty hotserve-backup setup "$S3/other" </dev/null >"$OUT" 2>&1 && fail "setup exited 0 with a Caddyfile a run cannot plan from" || { says "could not be turned into a plan (exit 1): .*LIVESWAP_ROOT" && ! says "Storage key id" && pass "refused with the adapter's reason, naming the variable, before any prompt" || fail "said: $(cat "$OUT")"; }
 [ "$(sum)" = "$before" ] && pass "the working file is as it was" || fail "the working file changed"
 cp /root/Caddyfile.base "$CADDYFILE"
 
@@ -339,7 +339,7 @@ echo "=== setup 14: setup while a run holds the lock ==="
 hotserve-backup run >/root/first.out 2>&1 &
 first=$!
 if hold_restic "restic backup"; then
-	printf 'x\n' | at_tty hotserve-backup setup "$REPO" >"$OUT" 2>&1 && fail "setup exited 0 while a run held the lock" || { says "another backup run is in progress: pid $first" && ! says "Storage key id" && pass "setup says who holds the lock, and asks nothing" || fail "said: $(cat "$OUT")"; }
+	at_tty hotserve-backup setup "$REPO" </dev/null >"$OUT" 2>&1 && fail "setup exited 0 while a run held the lock" || { says "another backup run is in progress: pid $first" && ! says "Storage key id" && pass "setup says who holds the lock, and asks nothing" || fail "said: $(cat "$OUT")"; }
 	kill -CONT "$pid"
 	wait "$first"
 else

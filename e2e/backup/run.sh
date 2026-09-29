@@ -1,6 +1,7 @@
 #!/bin/sh
-# The backup suite. Runs inside e2e-backup-box as root, against real
-# systemd, Debian's restic and sqlite3, and the S3 server at e2e-s3.
+# The backup suite. Runs inside an e2e-backup-box of its own as root,
+# against real systemd, Debian's restic and sqlite3, and the S3 server
+# at e2e-s3.
 # Mostly failure paths: what a run says, and leaves behind, when
 # something is wrong.
 . /lib.sh

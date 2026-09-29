@@ -1,6 +1,6 @@
 #!/bin/sh
-# The status suite. Runs inside e2e-backup-box as root, after the backup
-# suite and before the restore suite, against a repository of its own.
+# The status suite. Runs inside an e2e-backup-box of its own as root,
+# against a repository of its own.
 #
 # What it holds the commands to:
 #

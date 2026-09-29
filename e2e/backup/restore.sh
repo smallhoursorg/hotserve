@@ -1,6 +1,6 @@
 #!/bin/sh
-# The restore suite. Runs inside e2e-backup-box as root, after the
-# backup suite, against a repository of its own. Nearly all failure
+# The restore suite. Runs inside an e2e-backup-box of its own as root,
+# against a repository of its own. Nearly all failure
 # paths: what a restore and a restore drill say, change and leave behind
 # when the snapshot, the repository or the place restored into is not
 # what it should be.

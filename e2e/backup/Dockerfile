@@ -6,7 +6,11 @@
 FROM golang:1.27-trixie AS builder
 WORKDIR /src
 COPY . .
-RUN CGO_ENABLED=0 GOFLAGS=-buildvcs=false go build -trimpath -o /hotserve ./cmd/hotserve \
+# The module and build caches outlive the layer, which any change to
+# the context throws away: a rebuild after editing a suite compiles
+# what changed, and downloads nothing.
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+	CGO_ENABLED=0 GOFLAGS=-buildvcs=false go build -trimpath -o /hotserve ./cmd/hotserve \
 	&& cd backups && CGO_ENABLED=0 GOFLAGS=-buildvcs=false go build -trimpath -o /hotserve-backup ./cmd/hotserve-backup
 
 FROM debian:trixie-slim
@@ -32,7 +36,7 @@ COPY packaging/hotserve-backup.service packaging/hotserve-backup.timer \
 	packaging/hotserve-backup-drill.service packaging/hotserve-backup-drill.timer /lib/systemd/system/
 # The production layout from the package's own postinstall, as in
 # e2e/Dockerfile. Two things it does are undone here: the account
-# restic runs as, which the setup suite — first of the five — shows
+# restic runs as, which the setup suite, on a box of its own, shows
 # `hotserve-backup setup` making; and the two timers' enable state,
 # since a timer firing into a scenario would take the run lock from
 # under it — the units suite starts the services itself, and the smoke

@@ -226,20 +226,35 @@ e2e:
 # it shares nothing with the e2e stack, so run beside it, it costs its
 # own length and not the e2e job's. It takes down only its own two
 # services, so it can run beside `make e2e` on one host.
+#
+# Each suite has a box of its own, and they run at once: each seeds its
+# own apps and writes its own credential file for a repository of its
+# own on the one S3 server, so none depends on another's leftovers.
+# Their output is held and printed a suite at a time, in order.
+BACKUP_SUITES = setup backup units status restore
 e2e-backup:
 	$(cgroup2_preflight)
 	$(COMPOSE) rm -sf e2e-backup-box e2e-s3 >/dev/null
-	$(COMPOSE) up --build -d e2e-s3 e2e-backup-box
-	status=0; \
-	$(COMPOSE) exec -T e2e-backup-box /bin/sh /suite-setup.sh || status=1; \
-	$(COMPOSE) exec -T e2e-backup-box /bin/sh /suite-backup.sh || status=1; \
-	$(COMPOSE) exec -T e2e-backup-box /bin/sh /suite-units.sh || status=1; \
-	$(COMPOSE) exec -T e2e-backup-box /bin/sh /suite-status.sh || status=1; \
-	$(COMPOSE) exec -T e2e-backup-box /bin/sh /suite-restore.sh || status=1; \
-	if [ $$status -ne 0 ]; then \
-		$(COMPOSE) logs --tail 50 e2e-s3; \
-		$(COMPOSE) exec -T e2e-backup-box journalctl --no-pager -n 200 || true; \
-	fi; \
+	$(COMPOSE) up --build -d --scale e2e-backup-box=$(words $(BACKUP_SUITES)) e2e-s3 e2e-backup-box
+	logs=$$(mktemp -d); i=0; \
+	for s in $(BACKUP_SUITES); do \
+		i=$$((i + 1)); \
+		( $(COMPOSE) exec -T --index $$i e2e-backup-box /bin/sh /suite-$$s.sh >$$logs/$$s.log 2>&1; echo $$? >$$logs/$$s.rc ) & \
+	done; \
+	wait; \
+	status=0; i=0; \
+	for s in $(BACKUP_SUITES); do \
+		i=$$((i + 1)); \
+		echo "════ $$s suite (box $$i) ════"; \
+		cat $$logs/$$s.log; \
+		if [ "$$(cat $$logs/$$s.rc)" != 0 ]; then \
+			status=1; \
+			echo "════ $$s suite failed: box $$i's journal ════"; \
+			$(COMPOSE) exec -T --index $$i e2e-backup-box journalctl --no-pager -n 200 || true; \
+		fi; \
+	done; \
+	if [ $$status -ne 0 ]; then $(COMPOSE) logs --tail 50 e2e-s3; fi; \
+	rm -rf $$logs; \
 	$(COMPOSE) rm -sf e2e-backup-box e2e-s3 >/dev/null; \
 	exit $$status
 
