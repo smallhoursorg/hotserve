@@ -1,11 +1,13 @@
 # hotserve-backup-drill.service — the weekly restore drill, started by
 # hotserve-backup-drill.timer: the newest snapshot of every app fetched
-# and checked as a restore would, nothing installed. The [Service]
-# section is the run's, line for line: one hardening set, one
-# measurement (cmd/hotserve-backup/units_test.go holds the two to it,
-# and hotserve-backup.service says why each line is there and what is
-# left out). A drill that proved nothing exits 1 and leaves this unit
-# failed until the next one proves (the owner, 2026-09-26).
+# and checked as a restore would, nothing installed; then the
+# repository itself checked, its structure and the week's fifty-second
+# of its data. The [Service] section is the run's, line for line: one
+# hardening set, one measurement (cmd/hotserve-backup/units_test.go
+# holds the two to it, and hotserve-backup.service says why each line
+# is there and what is left out). A drill that proved nothing, or whose
+# check of the repository was not clean, exits 1 and leaves this unit
+# failed until the next one is (the owner, 2026-09-26).
 [Unit]
 Description=hotserve backup restore drill
 Documentation=https://github.com/smallhoursorg/hotserve/blob/main/backups/README.md
