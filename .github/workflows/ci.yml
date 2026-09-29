@@ -126,6 +126,18 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The box's binaries are built in the dev container, whose Go
+      # caches are ./.cache here: per arch, since a build cache is.
+      # Keyed by commit too: a cache is saved only when its key missed,
+      # so one keyed by go.sum alone would stay as its first run left it
+      # while the code moved on, and each run would compile more.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cache
+          key: e2e-backup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            e2e-backup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/go.sum') }}-
+            e2e-backup-${{ runner.os }}-${{ runner.arch }}-
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: make e2e-backup COMPOSE="$COMPOSE"
 

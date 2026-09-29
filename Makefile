@@ -136,6 +136,9 @@ build:
 		(cd backups && GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o ../build/hotserve-backup-linux-amd64 ./cmd/hotserve-backup) & p3=$$!; \
 		(cd backups && GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o ../build/hotserve-backup-linux-arm64 ./cmd/hotserve-backup) & p4=$$!; \
 		wait $$p1 || exit 1; wait $$p2 || exit 1; wait $$p3 || exit 1; wait $$p4 || exit 1; \
+		if go version -m build/hotserve-backup-linux-amd64 build/hotserve-backup-linux-arm64 | grep -q -- "-tags=.*e2e"; then \
+			echo "build/hotserve-backup-linux-*: built with -tags e2e, which shortens the setup clock for the e2e box: not a binary to ship"; exit 1; \
+		fi; \
 		chmod -R a+rwX build'
 
 # Builds .deb for both arches into dist/. .deb only, and no .apk
@@ -226,20 +229,55 @@ e2e:
 # it shares nothing with the e2e stack, so run beside it, it costs its
 # own length and not the e2e job's. It takes down only its own two
 # services, so it can run beside `make e2e` on one host.
+#
+# Each suite has a box of its own, and they run at once: each seeds its
+# own apps and writes its own credential file for a repository of its
+# own on the one S3 server, so none depends on another's leftovers.
+# Their output is held and printed a suite at a time, in order, with
+# how long each took. Each suite is ended at SUITE_LIMIT, inside its
+# box, so that a wedged one — nothing in a backup has a time limit —
+# still prints what it got to, and its box's journal, well before the
+# CI job's own limit ends everything with nothing printed.
+#
+# The box's two binaries are built first, in the dev container, for
+# this host's arch: its Go caches are the volumes `make build` uses
+# (in CI, ./.cache under actions/cache), where a build inside the
+# image started cold every time. hotserve-backup is built with -tags
+# e2e, which shortens setup's clock alone (backups/engine/
+# setupclock_e2e.go): the package's binary is never built with it,
+# and `make build` refuses one that was.
+BACKUP_SUITES = setup backup units status restore
+SUITE_LIMIT ?= 600
 e2e-backup:
 	$(cgroup2_preflight)
+	$(COMPOSE) run --rm -e CGO_ENABLED=0 dev sh -c '\
+		go build -trimpath -o build/e2e-backup/hotserve ./cmd/hotserve & p1=$$!; \
+		(cd backups && go build -trimpath -tags e2e -o ../build/e2e-backup/hotserve-backup ./cmd/hotserve-backup) & p2=$$!; \
+		wait $$p1 || exit 1; wait $$p2 || exit 1; \
+		chmod -R a+rwX build'
 	$(COMPOSE) rm -sf e2e-backup-box e2e-s3 >/dev/null
-	$(COMPOSE) up --build -d e2e-s3 e2e-backup-box
-	status=0; \
-	$(COMPOSE) exec -T e2e-backup-box /bin/sh /suite-setup.sh || status=1; \
-	$(COMPOSE) exec -T e2e-backup-box /bin/sh /suite-backup.sh || status=1; \
-	$(COMPOSE) exec -T e2e-backup-box /bin/sh /suite-units.sh || status=1; \
-	$(COMPOSE) exec -T e2e-backup-box /bin/sh /suite-status.sh || status=1; \
-	$(COMPOSE) exec -T e2e-backup-box /bin/sh /suite-restore.sh || status=1; \
-	if [ $$status -ne 0 ]; then \
-		$(COMPOSE) logs --tail 50 e2e-s3; \
-		$(COMPOSE) exec -T e2e-backup-box journalctl --no-pager -n 200 || true; \
-	fi; \
+	$(COMPOSE) up --build -d --scale e2e-backup-box=$(words $(BACKUP_SUITES)) e2e-s3 e2e-backup-box
+	logs=$$(mktemp -d); i=0; \
+	for s in $(BACKUP_SUITES); do \
+		i=$$((i + 1)); \
+		( t0=$$(date +%s); $(COMPOSE) exec -T --index $$i e2e-backup-box timeout $(SUITE_LIMIT) /bin/sh /suite-$$s.sh >$$logs/$$s.log 2>&1; echo "$$? $$(($$(date +%s) - t0))" >$$logs/$$s.rc ) & \
+	done; \
+	wait; \
+	status=0; i=0; \
+	for s in $(BACKUP_SUITES); do \
+		i=$$((i + 1)); \
+		rc=; took=; read rc took <$$logs/$$s.rc || rc=unknown; \
+		echo "════ $$s suite (box $$i, $${took:-?}s) ════"; \
+		cat $$logs/$$s.log; \
+		if [ "$$rc" = 124 ]; then echo "════ $$s suite ended at SUITE_LIMIT ($(SUITE_LIMIT)s) ════"; fi; \
+		if [ "$$rc" != 0 ]; then \
+			status=1; \
+			echo "════ $$s suite failed: box $$i's journal ════"; \
+			$(COMPOSE) exec -T --index $$i e2e-backup-box journalctl --no-pager -n 200 || true; \
+		fi; \
+	done; \
+	if [ $$status -ne 0 ]; then $(COMPOSE) logs --tail 300 e2e-s3; fi; \
+	rm -rf $$logs; \
 	$(COMPOSE) rm -sf e2e-backup-box e2e-s3 >/dev/null; \
 	exit $$status
 

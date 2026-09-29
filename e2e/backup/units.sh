@@ -1,5 +1,5 @@
 #!/bin/sh
-# The units suite. Runs inside e2e-backup-box as root, third of the five,
+# The units suite. Runs inside an e2e-backup-box of its own as root,
 # against the unit files the package ships (copied into the image where
 # the .deb puts them) and real systemd: the services start a run and a
 # drill with the hardening the files say and nothing more — the
