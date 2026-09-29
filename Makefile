@@ -236,13 +236,15 @@ e2e:
 # The box's two binaries are built first, in the dev container, for
 # this host's arch: its Go caches are the volumes `make build` uses
 # (in CI, ./.cache under actions/cache), where a build inside the
-# image started cold every time.
+# image started cold every time. hotserve-backup is built with -tags
+# e2e, which shortens setup's clock alone (backups/engine/
+# setupclock_e2e.go): the package's binary is never built with it.
 BACKUP_SUITES = setup backup units status restore
 e2e-backup:
 	$(cgroup2_preflight)
 	$(COMPOSE) run --rm -e CGO_ENABLED=0 dev sh -c '\
 		go build -trimpath -o build/e2e-backup/hotserve ./cmd/hotserve \
-		&& cd backups && go build -trimpath -o ../build/e2e-backup/hotserve-backup ./cmd/hotserve-backup \
+		&& cd backups && go build -trimpath -tags e2e -o ../build/e2e-backup/hotserve-backup ./cmd/hotserve-backup \
 		&& chmod -R a+rwX ../build'
 	$(COMPOSE) rm -sf e2e-backup-box e2e-s3 >/dev/null
 	$(COMPOSE) up --build -d --scale e2e-backup-box=$(words $(BACKUP_SUITES)) e2e-s3 e2e-backup-box

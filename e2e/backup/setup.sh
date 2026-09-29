@@ -269,7 +269,10 @@ converse "hotserve-backup setup s3:http://127.0.0.1:9999/blackhole" "$P_KEY" "$K
 rc=$?
 took=$(($(date +%s) - t0))
 [ "$rc" != 0 ] && says "still waiting for s3:http://127.0.0.1:9999/blackhole (Ctrl-C leaves restic init running, and the next setup waits for it; it may be making the repository with the password shown: keep it)" && pass "a person waiting on init is told what for, and what Ctrl-C would do" || fail "the wait: exit $rc after ${took}s: $(cat "$OUT")"
-says "the repository did not answer within 2m0s; restic init is left running as hotserve_backup_init_[0-9a-f]\{12\}.service, and the next run or setup waits for it (if it must be ended: systemctl stop hotserve_backup_init_" && [ "$took" -ge 130 ] && [ "$took" -lt 190 ] && pass "given up on after the look's 10 s and the clock's 2 min (${took}s): the waiting, not the unit" || fail "the clock: exit $rc after ${took}s: $(tail -3 "$OUT")"
+# The box's binary is built with -tags e2e, whose clock is 30 s where
+# the package's is two minutes (backups/engine/setupclock_e2e.go; the
+# shipped value is held by a unit test).
+says "the repository did not answer within 30s; restic init is left running as hotserve_backup_init_[0-9a-f]\{12\}.service, and the next run or setup waits for it (if it must be ended: systemctl stop hotserve_backup_init_" && [ "$took" -ge 40 ] && [ "$took" -lt 100 ] && pass "given up on after the look's 10 s and the clock's 30 s (${took}s): the waiting, not the unit" || fail "the clock: exit $rc after ${took}s: $(tail -3 "$OUT")"
 init_unit=$(systemctl list-units --plain --no-legend --state=activating 'hotserve_backup_init_*' | awk '{print $1}')
 [ -n "$init_unit" ] && [ -f /run/hotserve-backup/init-unit ] && [ "$(cat /run/hotserve-backup/init-unit)" = "$init_unit" ] && pass "init is still running, and recorded for the next lock holder" || fail "after the clock: init unit '$init_unit', marker $(cat /run/hotserve-backup/init-unit 2>&1)"
 # The staged file and the run directory stay for the unit — the manager
