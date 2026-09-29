@@ -2,17 +2,9 @@
 # hotserve binary (the engine's plan unit runs `hotserve adapt`),
 # hotserve-backup, and Debian's own restic and sqlite3 — the two
 # programs whose behaviour the suite is about. hotserve itself is not
-# started: nothing in a backup talks to it.
-FROM golang:1.27-trixie AS builder
-WORKDIR /src
-COPY . .
-# The module and build caches outlive the layer, which any change to
-# the context throws away: a rebuild after editing a suite compiles
-# what changed, and downloads nothing.
-RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
-	CGO_ENABLED=0 GOFLAGS=-buildvcs=false go build -trimpath -o /hotserve ./cmd/hotserve \
-	&& cd backups && CGO_ENABLED=0 GOFLAGS=-buildvcs=false go build -trimpath -o /hotserve-backup ./cmd/hotserve-backup
-
+# started: nothing in a backup talks to it. The two binaries come
+# built, from build/e2e-backup (the bin context, docker-compose.yml),
+# which `make e2e-backup` fills first.
 FROM debian:trixie-slim
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
@@ -27,8 +19,7 @@ RUN systemctl mask \
 	getty.target \
 	console-getty.service \
 	|| true
-COPY --from=builder /hotserve /usr/bin/hotserve
-COPY --from=builder /hotserve-backup /usr/bin/hotserve-backup
+COPY --from=bin hotserve hotserve-backup /usr/bin/
 # The package's unit files, where the .deb puts them: the units suite
 # starts the services from them, and the timers' schedule is read off
 # them.

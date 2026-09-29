@@ -143,6 +143,9 @@ services:
     build:
       context: .
       dockerfile: e2e/backup/Dockerfile
+      # The binaries `make e2e-backup` builds before it starts the box.
+      additional_contexts:
+        bin: ./build/e2e-backup
     image: hotserve-e2e-backup
     privileged: true
     cgroup: host

@@ -230,24 +230,35 @@ e2e:
 # Each suite has a box of its own, and they run at once: each seeds its
 # own apps and writes its own credential file for a repository of its
 # own on the one S3 server, so none depends on another's leftovers.
-# Their output is held and printed a suite at a time, in order.
+# Their output is held and printed a suite at a time, in order, with
+# how long each took.
+#
+# The box's two binaries are built first, in the dev container, for
+# this host's arch: its Go caches are the volumes `make build` uses
+# (in CI, ./.cache under actions/cache), where a build inside the
+# image started cold every time.
 BACKUP_SUITES = setup backup units status restore
 e2e-backup:
 	$(cgroup2_preflight)
+	$(COMPOSE) run --rm -e CGO_ENABLED=0 dev sh -c '\
+		go build -trimpath -o build/e2e-backup/hotserve ./cmd/hotserve \
+		&& cd backups && go build -trimpath -o ../build/e2e-backup/hotserve-backup ./cmd/hotserve-backup \
+		&& chmod -R a+rwX ../build'
 	$(COMPOSE) rm -sf e2e-backup-box e2e-s3 >/dev/null
 	$(COMPOSE) up --build -d --scale e2e-backup-box=$(words $(BACKUP_SUITES)) e2e-s3 e2e-backup-box
 	logs=$$(mktemp -d); i=0; \
 	for s in $(BACKUP_SUITES); do \
 		i=$$((i + 1)); \
-		( $(COMPOSE) exec -T --index $$i e2e-backup-box /bin/sh /suite-$$s.sh >$$logs/$$s.log 2>&1; echo $$? >$$logs/$$s.rc ) & \
+		( t0=$$(date +%s); $(COMPOSE) exec -T --index $$i e2e-backup-box /bin/sh /suite-$$s.sh >$$logs/$$s.log 2>&1; echo "$$? $$(($$(date +%s) - t0))" >$$logs/$$s.rc ) & \
 	done; \
 	wait; \
 	status=0; i=0; \
 	for s in $(BACKUP_SUITES); do \
 		i=$$((i + 1)); \
-		echo "════ $$s suite (box $$i) ════"; \
+		read rc took <$$logs/$$s.rc; \
+		echo "════ $$s suite (box $$i, $${took}s) ════"; \
 		cat $$logs/$$s.log; \
-		if [ "$$(cat $$logs/$$s.rc)" != 0 ]; then \
+		if [ "$$rc" != 0 ]; then \
 			status=1; \
 			echo "════ $$s suite failed: box $$i's journal ════"; \
 			$(COMPOSE) exec -T --index $$i e2e-backup-box journalctl --no-pager -n 200 || true; \
