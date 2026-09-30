@@ -47,9 +47,9 @@ var (
 )
 
 // checkGroup is the group of its data a first check on day t reads: its
-// ISO week's.
+// ISO week's, in UTC, whatever zone the box's clock is in.
 func checkGroup(t time.Time) string {
-	_, week := t.ISOWeek()
+	_, week := t.UTC().ISOWeek()
 	return fmt.Sprintf("%d/%d", (week-1)%checkGroups+1, checkGroups)
 }
 

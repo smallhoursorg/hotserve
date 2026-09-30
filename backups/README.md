@@ -493,8 +493,8 @@ itself: `restic check --no-lock --read-data-subset=n/52`, as the backup
 account — its structure, and one fifty-second of its data, read back
 and verified. n is the group after the one the last check that read the
 data read (`check_read` in the record, moved on only by a verdict of
-`clean` or `damaged`), and the ISO week's (`((week − 1) mod 52) + 1`)
-where no check has read any. Which group a pack falls in is fixed by
+`clean` or `damaged`), and the ISO week's in UTC (`((week − 1) mod
+52) + 1`) where no check has read any. Which group a pack falls in is fixed by
 its id, so fifty-two checks read every pack once, whatever weeks a box
 was off or a check came to nothing — the whole repository a year,
 about 2% of it in downloads each week. On 28.5 GB over a link of 25 ms each way and 50 Mbit/s it read

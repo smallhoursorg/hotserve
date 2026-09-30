@@ -61,6 +61,11 @@ func TestTheWeeksGroup(t *testing.T) {
 			t.Errorf("%s: group %q, want %q", day, got, want)
 		}
 	}
+	// The week is UTC's, whatever zone the box's clock is in: Monday
+	// 01:00 at UTC+2 is still Sunday, week 39, in UTC (Copilot on #161).
+	if got := checkGroup(time.Date(2026, 9, 28, 1, 0, 0, 0, time.FixedZone("UTC+2", 2*60*60))); got != "39/52" {
+		t.Errorf("Monday 01:00 at UTC+2: group %q, want UTC's week, 39/52", got)
+	}
 	seen := map[string]bool{}
 	for w, d := 0, time.Date(2027, 1, 4, 3, 30, 0, 0, time.UTC); w < 52; w, d = w+1, d.AddDate(0, 0, 7) {
 		seen[checkGroup(d)] = true
