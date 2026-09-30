@@ -51,7 +51,9 @@ func TestARunListsTheRepositoryOnceAtTheEnd(t *testing.T) {
 		t.Fatalf("units: %s", b.roles())
 	}
 	s := b.spec("listing")
-	if !slices.Contains(s.Argv, "--no-lock") || slices.Contains(s.Argv, "--tag") || s.Argv[0] != b.cfg.Restic || s.Argv[1] != "snapshots" {
+	// Every app's: no app's own tag (`hotserve` is every app's, and no
+	// clean-run record's).
+	if !slices.Contains(s.Argv, "--no-lock") || slices.ContainsFunc(s.Argv, func(a string) bool { return strings.HasPrefix(a, "app:") }) || s.Argv[0] != b.cfg.Restic || s.Argv[1] != "snapshots" {
 		t.Errorf("argv: %q", s.Argv)
 	}
 	if s.User != backupUser || !s.Network || s.EnvironmentFile != b.cfg.EnvFile || len(s.Binds) != 0 {

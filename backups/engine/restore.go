@@ -589,9 +589,20 @@ func pick(app string, snaps []listed, asked string) (record.Snapshot, error) {
 // whether a run ended ok on snap is not known. It is what a box's own
 // record says of its last ok, for a box that has none.
 func (x *run) lastVouched(ctx context.Context, app string, snaps []listed, snap record.Snapshot) (*record.Snapshot, string) {
-	vouched, err := x.vouched(ctx)
+	records, _, err := x.snapshots(ctx, "vouches", "", cleanTag)
+	if err == nil {
+		if _, said := x.besides("vouches"); said != nil {
+			err = fmt.Errorf("%w, so what it said of them is not believed", said)
+		}
+	}
 	if err != nil {
 		return nil, "the repository's records of clean runs could not be asked: " + err.Error()
+	}
+	vouched := map[string]bool{}
+	for _, r := range records {
+		for _, id := range r.Vouches {
+			vouched[id] = true
+		}
 	}
 	for i := len(snaps) - 1; i >= 0; i-- {
 		if s := snaps[i].Snapshot; vouched[s.ID] {
@@ -602,46 +613,6 @@ func (x *run) lastVouched(ctx context.Context, app string, snaps []listed, snap 
 		}
 	}
 	return nil, fmt.Sprintf("nothing in the repository vouches for any snapshot of %s: no record there says that a run which made one ended ok", app)
-}
-
-// vouched is which snapshots the clean-run records in the repository
-// vouch for (vouchArgv). --no-lock, and given up at listClock, as every
-// listing is.
-func (x *run) vouched(ctx context.Context) (map[string]bool, error) {
-	out := filepath.Join(x.dir, "vouches.json")
-	o, err := x.startWithin(ctx, listClock, unit.Spec{
-		Name: x.name("vouches", ""), Description: "hotserve backup: ask the repository which backups ended ok",
-		Argv: []string{x.cfg.Restic, "snapshots", "--json", "--no-lock", "--host", "hotserve", "--tag", cleanTag},
-		User: backupUser, Network: true, EnvironmentFile: x.cfg.EnvFile,
-		Environment:    []string{"RESTIC_CACHE_DIR=/var/cache/hotserve-backup", "HOME=/nonexistent"},
-		CacheDirectory: "hotserve-backup", StdoutFile: out,
-	})
-	if err != nil {
-		return nil, err
-	}
-	if !o.OK() {
-		detail, _ := resticFailure(o)
-		return nil, errors.New(detail)
-	}
-	raw, err := os.ReadFile(out) //nolint:gosec // written by the manager into root's own run dir
-	if err != nil {
-		return nil, err
-	}
-	var said []struct {
-		Tags []string `json:"tags"`
-	}
-	if err := json.Unmarshal(raw, &said); err != nil {
-		return nil, fmt.Errorf("what restic said of them could not be read: %w", err)
-	}
-	vouched := map[string]bool{}
-	for _, s := range said {
-		for _, tag := range s.Tags {
-			if id, ok := strings.CutPrefix(tag, vouchesTag); ok && snapshotRe.MatchString(id) {
-				vouched[id] = true
-			}
-		}
-	}
-	return vouched, nil
 }
 
 // bring fetches a snapshot, hands it over, and has it checked — and, as
@@ -778,13 +749,8 @@ var freeUnder = func(dir string) (uint64, error) {
 // exits 0 [measured]: only one snapshot, counted, is an answer.
 func (x *run) snapshotSize(ctx context.Context, app, id string) (uint64, error) {
 	out := filepath.Join(x.dir, app+".size.json")
-	o, err := x.start(ctx, unit.Spec{
-		Name: x.name("size", app), Description: "hotserve backup: ask how large a snapshot of " + app + " is",
-		Argv: []string{x.cfg.Restic, "stats", "--quiet", "--json", "--no-lock", "--mode", "restore-size", id},
-		User: backupUser, Network: true, EnvironmentFile: x.cfg.EnvFile,
-		Environment:    []string{"RESTIC_CACHE_DIR=/var/cache/hotserve-backup", "HOME=/nonexistent"},
-		CacheDirectory: "hotserve-backup", StdoutFile: out,
-	})
+	o, err := x.start(ctx, resticUnit(x.name("size", app), "hotserve backup: ask how large a snapshot of "+app+" is", x.cfg.EnvFile,
+		[]string{x.cfg.Restic, "stats", "--quiet", "--json", "--no-lock", "--mode", "restore-size", id}, out))
 	if err != nil {
 		return 0, fmt.Errorf("the size unit: %w", err)
 	}
@@ -886,15 +852,10 @@ func (x *run) fetch(ctx context.Context, app, id, fetched string) error {
 	// <id>:<path>, never --include: asked for a path the snapshot does
 	// not hold, the first exits 1 and the second exits 0 having restored
 	// nothing [measured].
-	o, err := x.start(ctx, unit.Spec{
-		Name: x.name("fetch", app), Description: "hotserve backup: fetch a snapshot of " + app,
-		Argv: []string{x.cfg.Restic, "restore", "--quiet", "--json", "--retry-lock", retryLock, id + ":/backup/" + app, "--target", "/restore"},
-		User: backupUser, Network: true, EnvironmentFile: x.cfg.EnvFile,
-		Environment:    []string{"RESTIC_CACHE_DIR=/var/cache/hotserve-backup", "HOME=/nonexistent"},
-		CacheDirectory: "hotserve-backup",
-		Binds:          []unit.Bind{{Source: fetched, Dest: "/restore", Writable: true}},
-		StdoutFile:     out,
-	})
+	s := resticUnit(x.name("fetch", app), "hotserve backup: fetch a snapshot of "+app, x.cfg.EnvFile,
+		[]string{x.cfg.Restic, "restore", "--quiet", "--json", "--retry-lock", retryLock, id + ":/backup/" + app, "--target", "/restore"}, out)
+	s.Binds = []unit.Bind{{Source: fetched, Dest: "/restore", Writable: true}}
+	o, err := x.start(ctx, s)
 	if err != nil {
 		return fmt.Errorf("the fetch unit: %w", err)
 	}
@@ -1240,8 +1201,14 @@ func Drill(ctx context.Context, cfg Config, r Runner) (*record.Status, error) {
 		// Then the repository itself, whatever became of the apps: a
 		// refusal every app met is the check's to say in its own words.
 		// An interrupt is no verdict, and leaves the last one.
-		if c := x.checkRepository(ctx); c != nil {
+		// The group after the last one read; only a check that read the
+		// data moves it on.
+		group := nextGroup(st.CheckRead, time.Now())
+		if c := x.checkRepository(ctx, group); c != nil {
 			st.LastCheck = c
+			if c.Class == record.CheckClean || c.Class == record.CheckDamaged {
+				st.CheckRead = group
+			}
 		}
 	}
 	// What was finished is written, an interrupt or not: each verdict is

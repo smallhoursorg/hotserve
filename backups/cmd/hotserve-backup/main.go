@@ -6,8 +6,8 @@
 //	hotserve-backup restore <app> [--snapshot <id>] [--to <dir>] [--no-pre-backup] [--yes]
 //	                        one snapshot of one app, into place or into a new directory; root
 //	hotserve-backup drill   fetch and check the newest snapshot of every app, installing nothing,
-//	                        then check the repository itself and this week's fifty-second of
-//	                        its data; root
+//	                        then check the repository itself and one fifty-second of its
+//	                        data; root
 //	hotserve-backup status  whether each app's backup is fresh and a restore of it proven; anyone.
 //	                        Exits 0 healthy, 1 not, 3 when it could not tell
 //	hotserve-backup validate <Caddyfile>
@@ -634,7 +634,11 @@ func drill(ctx context.Context) error {
 		return err
 	}
 	defer r.Close()
-	began := time.Now()
+	var before *record.Check
+	if prev, err := record.Read(filepath.Join(config().StateDir, "status.json")); err == nil && prev.LastCheck != nil {
+		c := *prev.LastCheck
+		before = &c
+	}
 	st, err := engine.Drill(ctx, config(), r)
 	unproven, unchecked := false, false
 	if st != nil {
@@ -665,7 +669,7 @@ func drill(ctx context.Context) error {
 			}
 		}
 		// The repository's own check, where this drill made one.
-		if c := st.LastCheck; c != nil && !c.Time.Before(began) {
+		if c := st.LastCheck; newCheck(before, c) {
 			line := fmt.Sprintf("repository: its structure, and data group %s: %s", c.Group, c.Class)
 			if c.Detail != "" {
 				line += ": " + c.Detail
@@ -686,6 +690,13 @@ func drill(ctx context.Context) error {
 		return errors.New("the repository's check was not clean")
 	}
 	return nil
+}
+
+// newCheck is whether the last check after a drill is one it made: not
+// the one on record before it. Read off the record, never the clock,
+// which a box that has just booted may step back while the drill runs.
+func newCheck(before, after *record.Check) bool {
+	return after != nil && (before == nil || *after != *before)
 }
 
 // settle is the unit that reads a fetched snapshot. Each item is

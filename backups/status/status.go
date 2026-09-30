@@ -22,7 +22,7 @@ const (
 	// CheckOldAfter is how old the last clean check of the repository
 	// may be, and how long a box set up may go without one: the weekly
 	// drill's period and a day.
-	CheckOldAfter = 8 * 24 * time.Hour
+	CheckOldAfter = ProvenOldAfter
 )
 
 const timeFormat = "2006-01-02 15:04 MST"
@@ -96,10 +96,12 @@ func Report(in Input) (lines []string, healthy bool) {
 	}
 	// The repository itself, as the weekly drill last checked it. None
 	// yet is said, and is unhealthy only once a box has gone a week and a
-	// day since it was set up: a new box is not failing.
+	// day since it was set up with no drill either: a new box is not
+	// failing, nor one set up before the check was, whose next drill
+	// checks — every drill that gets past its apps does.
 	old := int(CheckOldAfter.Hours() / 24)
 	switch c := st.LastCheck; {
-	case c == nil && !in.SetUp.IsZero() && now.Sub(in.SetUp) > CheckOldAfter:
+	case c == nil && !in.SetUp.IsZero() && now.Sub(in.SetUp) > CheckOldAfter && (st.LastDrill == nil || now.Sub(st.LastDrill.Time) > CheckOldAfter):
 		bad("the repository has not been checked since backups were set up, %s, more than %d days ago; `sudo hotserve-backup drill` checks it", when(in.SetUp), old)
 	case c == nil && !st.Started.IsZero():
 		say("the repository has not been checked yet: the weekly drill checks it")

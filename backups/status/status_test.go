@@ -332,6 +332,24 @@ func TestWhatStatusSays(t *testing.T) {
 			st: with(func(*record.App) {}), setUp: ago(9 * 24 * time.Hour),
 			says: []string{"the repository has not been checked since backups were set up, 2026-09-11 15:00 UTC, more than 8 days ago; `sudo hotserve-backup drill` checks it"},
 		},
+		// A box set up before the check existed: none on record, but a
+		// drill lately, and the next drill checks. Not failing.
+		"no check, set up nine days ago, a drill three days ago": {
+			st: func() *record.Status {
+				st := with(func(*record.App) {})
+				st.LastDrill = &record.Drill{Time: ago(3 * 24 * time.Hour)}
+				return st
+			}(), setUp: ago(9 * 24 * time.Hour), healthy: true,
+			says: []string{"the repository has not been checked yet: the weekly drill checks it"},
+		},
+		"no check, set up nine days ago, the last drill nine days ago": {
+			st: func() *record.Status {
+				st := with(func(*record.App) {})
+				st.LastDrill = &record.Drill{Time: ago(9 * 24 * time.Hour)}
+				return st
+			}(), setUp: ago(30 * 24 * time.Hour),
+			says: []string{"the repository has not been checked since backups were set up"},
+		},
 		"checked clean lately": {
 			st: checked(record.CheckClean, "", 48*time.Hour), setUp: ago(30 * 24 * time.Hour), healthy: true,
 			says:  []string{"repository last checked 2026-09-18 15:00 UTC: its structure, and data group 38/52: clean"},

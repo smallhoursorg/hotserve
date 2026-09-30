@@ -5,8 +5,9 @@
 # What it holds the commands to:
 #
 #	hotserve-backup drill     checks the repository itself after its apps:
-#	                          its structure, and this week's fifty-second
-#	                          of its data, taking no lock
+#	                          its structure, and one fifty-second of its
+#	                          data — the group after the last one read, the
+#	                          ISO week's where none was — taking no lock
 #	hotserve-backup run       writes into the repository the record that it
 #	                          ended ok on an app
 #	hotserve-backup restore   on a box with no record, says what those
@@ -33,10 +34,13 @@ says() { grep -q -e "$1" "$OUT"; }
 # The record's last_check, on one line, and its class.
 last_check() { tr -d '\n' <"$STATUS" | sed 's/  */ /g' | sed -n 's/.*"last_check": {\([^}]*\)}.*/\1/p'; }
 check_class() { last_check | sed -n 's/.*"class": "\([^"]*\)".*/\1/p'; }
-# This week's group, as the engine reads it: the ISO week's, in UTC.
+# A first check's group, as the engine reads it: the ISO week's, in UTC.
 week=$(date -u +%V)
 week=${week#0}
-GROUP="$(((week - 1) % 52 + 1))/52"
+g=$(((week - 1) % 52 + 1))
+GROUP="$g/52"
+# The check after one that read GROUP reads the group after it.
+NEXT="$((g % 52 + 1))/52"
 # records: the ids the repository's clean-run records vouch for.
 records() { rr snapshots --no-lock --json --host hotserve --tag hotserve-clean 2>/dev/null | grep -o '"vouches:[0-9a-f]\{64\}"' | cut -d: -f2 | tr -d '"'; }
 # data_pack <bucket>: a pack that holds file data, from the repository's
@@ -75,10 +79,15 @@ grep -qx "$blog_id" /root/records && grep -qx "$shop_id" /root/records && [ "$(w
 paths=$(rr snapshots --no-lock --json --tag hotserve-clean 2>/dev/null | grep -o '"paths":\["[^"]*"\]' | sort -u | tr '\n' ' ')
 [ "$paths" = '"paths":["/hotserve-clean-blog"] "paths":["/hotserve-clean-shop"] ' ] && pass "each app's records are a group of their own, as its snapshots are" || fail "the records' paths: $paths"
 rr snapshots --no-lock --json --tag app:blog 2>/dev/null | grep -q hotserve-clean && fail "a record is among blog's own snapshots" || pass "and none is among an app's own snapshots"
+# At the snapshot's own time, to the second: a forget policy that keeps
+# the snapshot for a period keeps its record, in the same period.
+made=$(rr cat snapshot --no-lock "$blog_id" 2>/dev/null | grep -o '"time": *"[^"]*"' | head -1 | sed 's/.*: *"//' | cut -c1-19)
+recorded=$(rr snapshots --no-lock --json --tag "vouches:$blog_id" 2>/dev/null | grep -o '"time":"[^"]*"' | head -1 | cut -d'"' -f4 | cut -c1-19)
+[ -n "$made" ] && [ "$made" = "$recorded" ] && pass "blog's record is at its snapshot's own time, $made" || fail "blog's snapshot was made $made, its record is at $recorded"
 
 echo "=== check 2: a drill checks the repository, and a sound one is clean ==="
 if drill; then pass "a drill of a sound repository exits 0"; else fail "the drill: $(cat "$OUT")"; fi
-says "^repository: its structure, and data group $GROUP: clean$" && pass "and says the repository's structure and this week's group, $GROUP, are clean" || fail "the drill said: $(cat "$OUT")"
+says "^repository: its structure, and data group $GROUP: clean$" && pass "and says the repository's structure and, a first check, the ISO week's group, $GROUP, are clean" || fail "the drill said: $(cat "$OUT")"
 [ "$(check_class)" = clean ] && last_check | grep -q "\"group\": \"$GROUP\"" && pass "the record's last_check says so" || fail "last_check: $(last_check)"
 hotserve-backup status >/root/status.out 2>&1 && grep -q "repository last checked .*: its structure, and data group $GROUP: clean" /root/status.out && pass "status says when it was checked, and is content" || fail "status: $(cat /root/status.out)"
 
@@ -88,9 +97,11 @@ pack=$(data_pack)
 code=$(s3_delete "checkrepo/data/$(echo "$pack" | cut -c1-2)/$pack")
 [ "$code" = 204 ] && pass "fixture: pack $(echo "$pack" | cut -c1-8) deleted through the storage's API" || fail "fixture: the delete answered $code"
 if drill; then fail "a drill of a repository missing a pack exited 0"; else pass "a drill of a repository missing a pack exits non-zero"; fi
-says "^repository: its structure, and data group $GROUP: damaged: restic check found 1 error; \`journalctl -u hotserve_backup_repocheck_[0-9a-f]*.service\` has restic's own words" && pass "and says damaged, how much, and where restic's words are" || fail "the drill said: $(cat "$OUT")"
+# A second check reads the group after the first's; and the count is
+# restic's — two where the pack gone is in the group read as well.
+says "^repository: its structure, and data group $NEXT: damaged: restic check found [0-9][0-9]* errors*; \`journalctl -u hotserve_backup_repocheck_[0-9a-f]*.service\` has restic's own words" && pass "and says damaged, how much, and where restic's words are, of the group after the last one read, $NEXT" || fail "the drill said: $(cat "$OUT")"
 [ "$(check_class)" = damaged ] && pass "the record's last_check is damaged" || fail "last_check: $(last_check)"
-if hotserve-backup status >/root/status.out 2>&1; then fail "status exited 0 on a damaged repository"; else grep -q "the repository check of .* (data group $GROUP): damaged: restic check found 1 error" /root/status.out && pass "status is unhealthy, and says why" || fail "status: $(cat /root/status.out)"; fi
+if hotserve-backup status >/root/status.out 2>&1; then fail "status exited 0 on a damaged repository"; else grep -q "the repository check of .* (data group $NEXT): damaged: restic check found [0-9][0-9]* error" /root/status.out && pass "status is unhealthy, and says why" || fail "status: $(cat /root/status.out)"; fi
 run
 [ "$(newest blog)" != "$blog_id" ] && [ "$(newest shop)" != "$shop_id" ] && pass "and the next run still backs both apps up: the box does not stop for damage" || fail "after damage the run made no snapshot: $(cat "$OUT")"
 

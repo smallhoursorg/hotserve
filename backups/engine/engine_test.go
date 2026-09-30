@@ -100,6 +100,7 @@ type box struct {
 	// clean-run record prints, and what the listing of those records
 	// prints.
 	repocheck, vouch, vouches string
+	vouchesErr                string // what restic says on stderr beside that listing
 }
 
 func (b *box) ManagerVersion(context.Context) (int, error) { return b.version, nil }
@@ -169,7 +170,7 @@ func newBox(t *testing.T) *box {
 	b.ls = func(parent string) string {
 		switch parent {
 		case "/backup/blog/sqlite":
-			return `{"struct_type":"snapshot"}` + "\n" + `{"struct_type":"node","path":"/backup/blog/sqlite/app.db","type":"file","size":4096}`
+			return `{"struct_type":"snapshot","time":"2026-09-02T07:08:09.123456789Z"}` + "\n" + `{"struct_type":"node","path":"/backup/blog/sqlite/app.db","type":"file","size":4096}`
 		case "/backup/blog/files":
 			return `{"struct_type":"node","path":"/backup/blog/files/uploads","type":"dir"}`
 		}
@@ -362,6 +363,11 @@ func (b *box) Run(ctx context.Context, s unit.Spec) (unit.Outcome, error) {
 		write(b.vouch)
 	case "vouches":
 		write(b.vouches)
+		if s.StderrFile == "" {
+			b.t.Errorf("the records' listing keeps nothing of what restic says beside its answer: %+v", s)
+		} else {
+			must(b.t, os.WriteFile(s.StderrFile, []byte(b.vouchesErr), 0o600))
+		}
 	case "mkshared":
 		must(b.t, os.MkdirAll(filepath.Join(b.root, "blog", "shared"), 0o755))
 	case "unmake":

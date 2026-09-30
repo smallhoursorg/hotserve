@@ -95,8 +95,8 @@ type Drill struct {
 }
 
 // Check is one check of the repository itself: its structure, and one
-// group of its data — a fifty-second, a different one each week, so
-// that every pack is read once a year.
+// group of its data — a fifty-second, the one after the last read, so
+// that fifty-two checks read every pack once.
 type Check struct {
 	Time time.Time `json:"time"`
 	// Group is which fifty-second of the data was read, "n/52".
@@ -110,8 +110,8 @@ type Check struct {
 type CheckClass string
 
 const (
-	// CheckClean: restic read the structure and the week's group of
-	// data, and said it found nothing wrong.
+	// CheckClean: restic read the structure and the group of data, and
+	// said it found nothing wrong.
 	CheckClean CheckClass = "clean"
 	// CheckDamaged: restic said it found something wrong, and the
 	// repository answered both before and after it: not a check that
@@ -149,6 +149,11 @@ type Status struct {
 	// verdict, which the weekly drill makes after its apps. An
 	// interrupted check comes to none, and leaves the one before.
 	LastCheck *Check `json:"last_check,omitempty"`
+	// CheckRead is the group of the data the last check that read it
+	// read — one that came to clean or damaged — and what the next check
+	// reads the group after: every group once in fifty-two checks,
+	// whatever weeks were missed.
+	CheckRead string `json:"check_read,omitempty"`
 	// Listed is when a run last listed the repository and was answered.
 	// A listing that failed leaves it, and every Seen, as they were.
 	Listed *time.Time `json:"listed,omitempty"`

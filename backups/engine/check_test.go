@@ -14,9 +14,38 @@ import (
 	"github.com/smallhoursorg/hotserve/backups/unit"
 )
 
-// The week's group: every pack once a year, a different fifty-second
-// each week, and the fifty-third week of a long year the first again.
-func TestTheCheckReadsItsWeeksGroup(t *testing.T) {
+// The first check reads its ISO week's group; each after it the group
+// after the last one read (the owner, 2026-09-30: whatever weeks were
+// missed, every group once in fifty-two checks).
+func TestWhichGroupACheckReads(t *testing.T) {
+	sunday := time.Date(2026, 9, 27, 3, 30, 0, 0, time.UTC) // ISO week 39
+	for last, want := range map[string]string{
+		"":      "39/52",
+		"40/52": "41/52",
+		"51/52": "52/52",
+		"52/52": "1/52",
+		"1/52":  "2/52",
+		"0/52":  "39/52", // not a group: as though none had been read
+		"53/52": "39/52",
+		"7/12":  "39/52",
+		"x":     "39/52",
+	} {
+		if got := nextGroup(last, sunday); got != want {
+			t.Errorf("after %q: group %q, want %q", last, got, want)
+		}
+	}
+	seen, last := map[string]bool{}, "17/52"
+	for i := 0; i < checkGroups; i++ {
+		last = nextGroup(last, sunday)
+		seen[last] = true
+	}
+	if len(seen) != checkGroups {
+		t.Errorf("52 checks in a row read %d groups, not every one: %v", len(seen), seen)
+	}
+}
+
+// The ISO week's group, where a first check starts.
+func TestTheWeeksGroup(t *testing.T) {
 	for day, want := range map[string]string{
 		"2026-01-01": "1/52", // ISO week 1 of 2026
 		"2026-09-29": "40/52",
@@ -174,6 +203,11 @@ func TestTheCheckTakesNoLockAndReadsItsWeeksGroup(t *testing.T) {
 	if probe := b.spec("probe"); !slices.Equal(probe.Argv, []string{"/usr/bin/restic", "cat", "config", "--no-lock"}) {
 		t.Errorf("the probe's command: %q", probe.Argv)
 	}
+	// The config it prints is the repository's, decrypted: root's run
+	// directory, never the journal.
+	if out := b.spec("probe").StdoutFile; out == "" || !strings.HasPrefix(out, b.cfg.RunDir+"/") {
+		t.Errorf("the probe's stdout goes to %q, not a file under %s", out, b.cfg.RunDir)
+	}
 	for _, s := range []unit.Spec{check, b.spec("probe")} {
 		if s.User != backupUser || !s.Network || s.EnvironmentFile != b.cfg.EnvFile || s.CacheDirectory != "hotserve-backup" || len(s.Binds) != 0 || len(s.Capabilities) != 0 {
 			t.Errorf("%s is not a query of the repository as the backup account, shown nothing: %+v", s.Name, s)
@@ -276,7 +310,11 @@ func TestAnOKBackupIsVouchedForInTheRepository(t *testing.T) {
 	if !strings.HasPrefix(b.roles(), "plan clean dump upload verify clean vouch ") {
 		t.Errorf("units: %s\nwant the record after the backup is verified and its copies removed", b.roles())
 	}
+	// At the snapshot's own time, to the second, which restic reads in
+	// the zone it is given: so that a forget policy that keeps the
+	// snapshot keeps its record, which falls in the same period.
 	want := []string{"/usr/bin/restic", "backup", "--quiet", "--json", "--retry-lock", retryLock, "--host", "hotserve",
+		"--time", "2026-09-02 07:08:09",
 		"--tag", "hotserve-clean", "--tag", "vouches:" + snapA,
 		"--stdin-from-command", "--stdin-filename", "hotserve-clean-blog", "--", "/usr/bin/echo", snapA}
 	s := b.spec("vouch")
@@ -285,6 +323,9 @@ func TestAnOKBackupIsVouchedForInTheRepository(t *testing.T) {
 	}
 	if s.User != backupUser || !s.Network || s.EnvironmentFile != b.cfg.EnvFile || len(s.Binds) != 0 || len(s.Capabilities) != 0 {
 		t.Errorf("the record's unit is not the backup account's, shown nothing: %+v", s)
+	}
+	if !slices.Contains(s.Environment, "TZ=UTC") {
+		t.Errorf("the record's time is read in the unit's own zone: %q", s.Environment)
 	}
 	if st.Apps["blog"].Class != record.OK || st.Warning != "" {
 		t.Errorf("%+v, warning %q", st.Apps["blog"], st.Warning)
@@ -311,11 +352,20 @@ func TestOnlyAnOKRunIsVouchedForAndARecordNotWrittenIsSaid(t *testing.T) {
 		},
 		"the record not written": {
 			set:   func(b *box) { b.outcome["vouch"] = unit.Outcome{Result: "exit-code", ExitStatus: 1} },
-			class: record.OK, vouch: true, warn: "blog: the record that this run ended ok could not be written into the repository",
+			class: record.OK, vouch: true, warn: "blog: snapshot aaaaaaaa is a complete backup, and the record that says so could not be written into the repository",
 		},
 		"the record with no id": {
 			set:   func(b *box) { b.vouch = "" },
-			class: record.OK, vouch: true, warn: "blog: the record that this run ended ok could not be written into the repository",
+			class: record.OK, vouch: true, warn: "blog: snapshot aaaaaaaa is a complete backup, and the record that says so could not be written into the repository",
+		},
+		"no time for the snapshot in its listing": {
+			set: func(b *box) {
+				ls := b.ls
+				b.ls = func(parent string) string {
+					return strings.Replace(ls(parent), `,"time":"2026-09-02T07:08:09.123456789Z"`, "", 1)
+				}
+			},
+			class: record.OK, warn: "blog: snapshot aaaaaaaa is a complete backup, and the record that says so was not written: its listing said nothing of when it was made",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -335,6 +385,24 @@ func TestOnlyAnOKRunIsVouchedForAndARecordNotWrittenIsSaid(t *testing.T) {
 				t.Errorf("warning %q, want %q", st.Warning, tc.warn)
 			}
 		})
+	}
+}
+
+// The warning of a record not written names the snapshot before
+// anything a cut could take, whatever the app is called.
+func TestARecordNotWrittenNamesItsSnapshotWhateverTheName(t *testing.T) {
+	b := newBox(t)
+	long := strings.Repeat("a", 63)
+	must(t, os.MkdirAll(filepath.Join(b.root, long, "shared", "uploads"), 0o755))
+	b.plan = strings.Replace(b.plan, `"blog":`, `"`+long+`":`, 1)
+	ls := b.ls
+	b.ls = func(parent string) string {
+		return strings.ReplaceAll(ls(strings.Replace(parent, "/backup/"+long, "/backup/blog", 1)), "/backup/blog", "/backup/"+long)
+	}
+	b.outcome["vouch"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+	st, _ := Run(context.Background(), b.cfg, b)
+	if st == nil || !strings.Contains(st.Warning, "snapshot aaaaaaaa") || !strings.Contains(st.Warning, "could not be written") {
+		t.Errorf("the warning: %q", st.Warning)
 	}
 }
 
@@ -375,6 +443,16 @@ func TestARestoreOnARebuiltBoxSaysWhatVouches(t *testing.T) {
 		"the records say nothing readable": {
 			set:      func(b *box) { b.vouches = "not json" },
 			notKnown: "could not be asked", asked: true,
+		},
+		// restic leaves a snapshot it cannot load out and exits 0 — a
+		// cold cache, which is every rebuilt box's [measured]: an answer
+		// with anything beside it is not taken for the whole.
+		"restic said something beside the records": {
+			set: func(b *box) {
+				b.vouches = vouching(snapB)
+				b.vouchesErr = `Ignoring "` + snapC + `", could not load snapshot: ciphertext verification failed`
+			},
+			notKnown: "not believed", asked: true,
 		},
 		"the box's own record knows": {
 			set: func(b *box) {
@@ -417,7 +495,7 @@ func TestARestoreOnARebuiltBoxSaysWhatVouches(t *testing.T) {
 			}
 			if tc.asked {
 				s := b.spec("vouches")
-				if want := []string{"/usr/bin/restic", "snapshots", "--json", "--no-lock", "--host", "hotserve", "--tag", "hotserve-clean"}; !slices.Equal(s.Argv, want) {
+				if want := []string{"/usr/bin/restic", "snapshots", "--json", "--no-lock", "--host", "hotserve", "--tag", "hotserve-clean"}; !slices.Equal(s.Argv, want) || s.StderrFile == "" {
 					t.Errorf("the records' listing: %q", s.Argv)
 				}
 			}
@@ -440,13 +518,13 @@ func TestAListingThatDoesNotAnswerIsGivenUpAtItsBackstop(t *testing.T) {
 		t.Cleanup(cancel)
 		return ctx
 	}
-	two := func(b *box) {
+	two := func(t *testing.T, b *box) {
 		must(t, os.MkdirAll(filepath.Join(b.root, "shop", "shared"), 0o755))
 		b.plan = strings.Replace(b.plan, `"apps":{`, `"apps":{"shop":{"files":["."]},`, 1)
 	}
 	t.Run("history, in a drill", func(t *testing.T) {
 		b := restoreBox(t)
-		two(b)
+		two(t, b)
 		b.hang = "history"
 		st, _ := Drill(bounded(t), b.cfg, b)
 		if n := strings.Count(b.roles(), "history"); n != 1 {
@@ -480,6 +558,20 @@ func TestAListingThatDoesNotAnswerIsGivenUpAtItsBackstop(t *testing.T) {
 			t.Errorf("warning %q", st.Warning)
 		}
 	})
+	// The record is a write of some four hundred bytes: bounded as a
+	// listing is (the owner, 2026-09-30), and a record not written is
+	// the run's warning, the app still ok.
+	t.Run("the record, in a run", func(t *testing.T) {
+		b := newBox(t)
+		b.hang = "vouch"
+		st, _ := Run(bounded(t), b.cfg, b)
+		if app := st.Apps["blog"]; app.Class != record.OK || !strings.Contains(st.Warning, "did not answer within") {
+			t.Errorf("%+v, warning %q", app, st.Warning)
+		}
+		if !slices.Contains(b.stopped, b.spec("vouch").Name) {
+			t.Errorf("the record's unit was not stopped: %v", b.stopped)
+		}
+	})
 	t.Run("the records, in a restore", func(t *testing.T) {
 		b := restoreBox(t)
 		b.hang = "vouches"
@@ -488,4 +580,87 @@ func TestAListingThatDoesNotAnswerIsGivenUpAtItsBackstop(t *testing.T) {
 			t.Errorf("%+v, %v", rep, err)
 		}
 	})
+}
+
+// The run's listing of every app is of the apps' snapshots: the records
+// of clean runs, one per app per run, are none of its business, and
+// would double what it loads.
+func TestTheRunsListingLeavesTheRecordsOut(t *testing.T) {
+	b := newBox(t)
+	if _, err := Run(context.Background(), b.cfg, b); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := b.spec("listing").Argv, []string{"/usr/bin/restic", "snapshots", "--json", "--no-lock", "--host", "hotserve", "--tag", "hotserve"}; !slices.Equal(got, want) {
+		t.Errorf("the listing: %q\nwant %q", got, want)
+	}
+}
+
+// A check reads the group after the last one read, and only a check
+// that read the data — clean, or damaged — moves it on.
+func TestTheNextCheckReadsTheGroupAfterTheLastOneRead(t *testing.T) {
+	for name, tc := range map[string]struct {
+		last, reads, after string
+		set                func(*box)
+	}{
+		"after 40": {last: "40/52", reads: "41/52", after: "41/52", set: func(*box) {}},
+		"after 52": {last: "52/52", reads: "1/52", after: "1/52", set: func(*box) {}},
+		"damage read": {last: "40/52", reads: "41/52", after: "41/52", set: func(b *box) {
+			b.outcome["repocheck"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+			b.repocheck = `{"message_type":"summary","num_errors":1}`
+		}},
+		"unreachable":        {last: "40/52", after: "40/52", set: func(b *box) { b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 1} }},
+		"killed by a signal": {last: "40/52", reads: "41/52", after: "40/52", set: func(b *box) { b.outcome["repocheck"] = unit.Outcome{Result: "signal"} }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			b := restoreBox(t)
+			must(t, os.MkdirAll(b.cfg.StateDir, 0o755))
+			must(t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), &record.Status{Apps: map[string]*record.App{}, CheckRead: tc.last}))
+			tc.set(b)
+			st, _ := Drill(context.Background(), b.cfg, b)
+			if tc.reads != "" {
+				if argv := b.spec("repocheck").Argv; argv[len(argv)-1] != "--read-data-subset="+tc.reads {
+					t.Errorf("the check read %q, want group %s", argv[len(argv)-1], tc.reads)
+				}
+			}
+			on, err := record.Read(filepath.Join(b.cfg.StateDir, "status.json"))
+			if err != nil || st.CheckRead != tc.after || on.CheckRead != tc.after {
+				t.Errorf("last group read: %q (on disk %q, %v), want %q", st.CheckRead, on.CheckRead, err, tc.after)
+			}
+		})
+	}
+}
+
+// Every command carries the group last read, as it carries the last
+// check.
+func TestARunCarriesTheGroupLastRead(t *testing.T) {
+	b := newBox(t)
+	must(t, os.MkdirAll(b.cfg.StateDir, 0o755))
+	must(t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), &record.Status{Apps: map[string]*record.App{}, CheckRead: "17/52"}))
+	st, err := Run(context.Background(), b.cfg, b)
+	if err != nil || st.CheckRead != "17/52" {
+		t.Errorf("after a run: %q, %v", st.CheckRead, err)
+	}
+}
+
+// Damage found while something else held the repository — a drill
+// that met exit 11 — is still damage, and says what may explain it:
+// a prune run off the box makes packs vanish under a check that takes
+// no lock.
+func TestDamageFoundBesideSomethingThatHeldTheRepositorySaysSo(t *testing.T) {
+	b := restoreBox(t)
+	b.outcome["fetch"] = unit.Outcome{Result: "exit-code", ExitStatus: 11}
+	b.outcome["repocheck"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+	b.repocheck = `{"message_type":"summary","num_errors":1}`
+	st, _ := Drill(context.Background(), b.cfg, b)
+	if c := st.LastCheck; c == nil || c.Class != record.CheckDamaged || !strings.Contains(c.Detail, "something else held the repository locked during this drill") {
+		t.Errorf("%+v", c)
+	}
+	// And not said where nothing did.
+	b = restoreBox(t)
+	b.outcome["repocheck"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+	b.repocheck = `{"message_type":"summary","num_errors":1}`
+	st, _ = Drill(context.Background(), b.cfg, b)
+	if c := st.LastCheck; c == nil || strings.Contains(c.Detail, "held the repository") {
+		t.Errorf("%+v", c)
+	}
 }

@@ -1,8 +1,8 @@
 # hotserve-backup-drill.service — the weekly restore drill, started by
 # hotserve-backup-drill.timer: the newest snapshot of every app fetched
 # and checked as a restore would, nothing installed; then the
-# repository itself checked, its structure and the week's fifty-second
-# of its data. The [Service] section is the run's, line for line: one
+# repository itself checked, its structure and one fifty-second of its
+# data, the group after the last one read. The [Service] section is the run's, line for line: one
 # hardening set, one measurement (cmd/hotserve-backup/units_test.go
 # holds the two to it, and hotserve-backup.service says why each line
 # is there and what is left out). A drill that proved nothing, or whose

@@ -46,13 +46,23 @@ var (
 	listClock = 30 * time.Minute
 )
 
-// checkGroup is the group of the data a check on day t reads: its ISO
-// week's. Which group a pack is in is fixed by its id [M74], so
-// fifty-two weeks read every pack; the fifty-third week of a long year
-// reads the first group again.
+// checkGroup is the group of its data a first check on day t reads: its
+// ISO week's.
 func checkGroup(t time.Time) string {
 	_, week := t.ISOWeek()
 	return fmt.Sprintf("%d/%d", (week-1)%checkGroups+1, checkGroups)
+}
+
+// nextGroup is the group a check reads: the one after the last a check
+// read, or on day t the ISO week's where none was (the owner,
+// 2026-09-30). Which group a pack is in is fixed by its id [M74], so
+// fifty-two checks read every pack once, whatever weeks were missed.
+func nextGroup(last string, t time.Time) string {
+	var n, of int
+	if _, err := fmt.Sscanf(last, "%d/%d", &n, &of); err != nil || of != checkGroups || n < 1 || n > checkGroups || fmt.Sprintf("%d/%d", n, of) != last {
+		return checkGroup(t)
+	}
+	return fmt.Sprintf("%d/%d", n%checkGroups+1, checkGroups)
 }
 
 // checkArgv is the check of one group: no lock, restic's words as JSON,
@@ -62,11 +72,11 @@ func checkArgv(restic, group string) []string {
 	return []string{restic, "check", "--no-lock", "--json", "--cleanup-cache", "--read-data-subset=" + group}
 }
 
-// checkRepository checks the repository and says what it found, or
-// nothing where it was interrupted: an interrupt is no verdict.
-func (x *run) checkRepository(ctx context.Context) *record.Check {
-	now := time.Now().UTC()
-	c := &record.Check{Time: now, Group: checkGroup(now)}
+// checkRepository checks the repository's structure and one group of
+// its data, and says what it found, or nothing where it was
+// interrupted: an interrupt is no verdict.
+func (x *run) checkRepository(ctx context.Context, group string) *record.Check {
+	c := &record.Check{Time: time.Now().UTC(), Group: group}
 	verdict := func(class record.CheckClass, detail string) *record.Check {
 		if ctx.Err() != nil {
 			return nil
@@ -79,13 +89,7 @@ func (x *run) checkRepository(ctx context.Context) *record.Check {
 	}
 	name := x.name("repocheck", "")
 	out := filepath.Join(x.dir, "repocheck.json")
-	o, err := x.start(ctx, unit.Spec{
-		Name: name, Description: "hotserve backup: check the repository, and data group " + c.Group,
-		Argv: checkArgv(x.cfg.Restic, c.Group),
-		User: backupUser, Network: true, EnvironmentFile: x.cfg.EnvFile,
-		Environment:    []string{"RESTIC_CACHE_DIR=/var/cache/hotserve-backup", "HOME=/nonexistent"},
-		CacheDirectory: "hotserve-backup", StdoutFile: out,
-	})
+	o, err := x.start(ctx, resticUnit(name, "hotserve backup: check the repository, and data group "+c.Group, x.cfg.EnvFile, checkArgv(x.cfg.Restic, c.Group), out))
 	if err != nil {
 		return verdict(record.CheckFailed, "the check's unit: "+err.Error())
 	}
@@ -115,19 +119,22 @@ func (x *run) checkRepository(ctx context.Context) *record.Check {
 	if n := len(said.BrokenPacks); n > 0 {
 		found += fmt.Sprintf(", in %s", plural(n, "damaged pack"))
 	}
-	return verdict(record.CheckDamaged, fmt.Sprintf("%s; `journalctl -u %s` has restic's own words, and the repair they name is made off the box, with a key that may delete", found, name))
+	found += fmt.Sprintf("; `journalctl -u %s` has restic's own words, and any repair is made off the box", name)
+	// Still damage — a check never masks it — but where something else
+	// held the repository meanwhile, what may explain it is said.
+	if x.metLock {
+		found += "; something else held the repository locked during this drill: a prune off the box makes packs vanish under a check that takes no lock"
+	}
+	return verdict(record.CheckDamaged, found)
 }
 
 // probe asks the repository for its config, under probeClock: nothing
 // where it answered, else the verdict and why.
 func (x *run) probe(ctx context.Context) (record.CheckClass, string) {
-	o, err := x.startWithin(ctx, probeClock, unit.Spec{
-		Name: x.name("probe", ""), Description: "hotserve backup: whether the repository answers, and the password opens it",
-		Argv: []string{x.cfg.Restic, "cat", "config", "--no-lock"},
-		User: backupUser, Network: true, EnvironmentFile: x.cfg.EnvFile,
-		Environment:    []string{"RESTIC_CACHE_DIR=/var/cache/hotserve-backup", "HOME=/nonexistent"},
-		CacheDirectory: "hotserve-backup",
-	})
+	// Its answer, the repository's config decrypted, into root's run
+	// directory: never the journal.
+	o, err := x.startWithin(ctx, probeClock, resticUnit(x.name("probe", ""), "hotserve backup: whether the repository answers, and the password opens it", x.cfg.EnvFile,
+		[]string{x.cfg.Restic, "cat", "config", "--no-lock"}, filepath.Join(x.dir, "probe.json")))
 	switch {
 	case errors.Is(err, errDidNotAnswer):
 		return record.CheckUnreachable, err.Error() + ": the storage could not be reached, or refused the key"
@@ -179,13 +186,16 @@ func (x *run) startWithin(ctx context.Context, within time.Duration, s unit.Spec
 	return o, err
 }
 
-// vouchArgv writes the record that a run ended ok on snapshot id of app
-// [M76]: a snapshot of its own, holding the id — one of nothing is
-// restic's exit 3 — tagged with it, and in a (host, paths) group of its
-// own, so that a forget policy keeps each app's records as it keeps the
-// app's snapshots, and no app's history ever lists one.
-func vouchArgv(restic, app, id string) []string {
+// vouchArgv writes the record that a run ended ok on snapshot id of app,
+// made at: a snapshot of its own [M76], holding the id — one of nothing
+// is restic's exit 3 — tagged with it, in a (host, paths) group of its
+// own, which no app's history lists; and at the snapshot's own time, to
+// the second — restic reads --time in the zone it runs in, so the unit
+// is given UTC — so that a forget policy that keeps a snapshot for a
+// period keeps the record that falls in the same one.
+func vouchArgv(restic, app, id string, at time.Time) []string {
 	return []string{restic, "backup", "--quiet", "--json", "--retry-lock", retryLock, "--host", "hotserve",
+		"--time", at.UTC().Format(time.DateTime),
 		"--tag", cleanTag, "--tag", vouchesTag + id,
 		"--stdin-from-command", "--stdin-filename", "hotserve-clean-" + app, "--", "/usr/bin/echo", id}
 }

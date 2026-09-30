@@ -152,7 +152,11 @@ func TestIntegrationACleanRunRecordIsASnapshotOfItsOwn(t *testing.T) {
 	if exit != 0 || id == "" {
 		t.Fatalf("fixture: exit %d, %q %s", exit, out, said)
 	}
-	argv := vouchArgv(restic, "blog", id)
+	// At the snapshot's own time, to the second, read in the zone the
+	// unit is given.
+	made := time.Date(2026, 9, 2, 7, 8, 9, 123456789, time.UTC)
+	argv := vouchArgv(restic, "blog", id, made)
+	t.Setenv("TZ", "UTC")
 	out, said, exit = resticIn(t, base, time.Minute, argv...)
 	must(t, os.WriteFile(filepath.Join(base, "record"), []byte(out), 0o600))
 	record := summaryID(filepath.Join(base, "record"))
@@ -160,9 +164,10 @@ func TestIntegrationACleanRunRecordIsASnapshotOfItsOwn(t *testing.T) {
 		t.Fatalf("the record: exit %d, %q, stderr %q", exit, out, said)
 	}
 	var snaps []struct {
-		ID    string   `json:"id"`
-		Paths []string `json:"paths"`
-		Tags  []string `json:"tags"`
+		ID    string    `json:"id"`
+		Time  time.Time `json:"time"`
+		Paths []string  `json:"paths"`
+		Tags  []string  `json:"tags"`
 	}
 	list := func(tag string) {
 		t.Helper()
@@ -179,6 +184,9 @@ func TestIntegrationACleanRunRecordIsASnapshotOfItsOwn(t *testing.T) {
 	list("hotserve-clean")
 	if len(snaps) != 1 || snaps[0].ID != record || !slices.Equal(snaps[0].Paths, []string{"/hotserve-clean-blog"}) || !slices.Contains(snaps[0].Tags, "vouches:"+id) {
 		t.Errorf("the record: %+v", snaps)
+	}
+	if len(snaps) == 1 && !snaps[0].Time.Equal(made.Truncate(time.Second)) {
+		t.Errorf("the record's time is %s, not the snapshot's %s to the second", snaps[0].Time, made)
 	}
 	if held, _, exit := resticIn(t, base, time.Minute, restic, "dump", "--no-lock", record, "/hotserve-clean-blog"); exit != 0 || strings.TrimSpace(held) != id {
 		t.Errorf("the record holds %q (exit %d), not the id it vouches for", held, exit)
