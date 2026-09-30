@@ -1112,35 +1112,39 @@ func (x *run) firstDrill(ctx context.Context, app string, rec *record.App) (repo
 // Drill proves, for every app the repository holds a snapshot of, that
 // the newest can be fetched, handed over and read whole, and writes what
 // it found into the record beside what the last backup run found.
-func Drill(ctx context.Context, cfg Config, r Runner) (*record.Status, error) {
+// Then it checks the repository itself, and returns, beside the record,
+// the check it made: nil where it made none, whatever check the record
+// holds — which another command may have written since its caller last
+// looked.
+func Drill(ctx context.Context, cfg Config, r Runner) (st *record.Status, checked *record.Check, err error) {
 	x, end, err := begin(ctx, cfg, r)
 	if x == nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer end()
-	st := x.prev
+	st = x.prev
 	lastBefore := st.LastDrill
 	st.LastDrill = &record.Drill{Time: time.Now().UTC()}
 	// Said in the record — a refusal from begin (a program not there)
 	// as a plan that cannot be made — so that a drill failing here week
 	// after week does not pass for "proven" ageing quietly.
-	couldNotBegin := func(err error) (*record.Status, error) {
+	couldNotBegin := func(err error) (*record.Status, *record.Check, error) {
 		// An interrupt is no verdict: stopped while it waits, or while
 		// the plan is read, the drill leaves the last drill's as it
 		// was, as it leaves the app an interrupt lands on.
 		if ctx.Err() != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		// Nor is an upgrade: the plan's helper was another version's,
 		// and nothing was found out.
 		if errors.As(err, new(upgradedError)) {
 			st.LastDrill = lastBefore
 			st.Warning = strings.TrimSpace(st.Warning + " " + x.status.Warning)
-			return st, errors.Join(err, record.Write(filepath.Join(cfg.StateDir, "status.json"), st))
+			return st, nil, errors.Join(err, record.Write(filepath.Join(cfg.StateDir, "status.json"), st))
 		}
 		st.LastDrill.Detail = record.Text(err.Error())
 		st.Warning = strings.TrimSpace(st.Warning + " " + x.status.Warning)
-		return st, errors.Join(err, record.Write(filepath.Join(cfg.StateDir, "status.json"), st))
+		return st, nil, errors.Join(err, record.Write(filepath.Join(cfg.StateDir, "status.json"), st))
 	}
 	if err != nil {
 		return couldNotBegin(err)
@@ -1202,10 +1206,13 @@ func Drill(ctx context.Context, cfg Config, r Runner) (*record.Status, error) {
 		// refusal every app met is the check's to say in its own words.
 		// An interrupt is no verdict, and leaves the last one.
 		// The group after the last one read; only a check that read the
-		// data moves it on.
-		group := nextGroup(st.CheckRead, time.Now())
-		if c := x.checkRepository(ctx, group); c != nil {
-			st.LastCheck = c
+		// data moves it on. One reading of the clock, for the group and
+		// the check's time both: two, either side of Sunday's midnight,
+		// would record one week's time beside the other's group.
+		now := checkClock().UTC()
+		group := nextGroup(st.CheckRead, now)
+		if c := x.checkRepository(ctx, group, now); c != nil {
+			st.LastCheck, checked = c, c
 			if c.Class == record.CheckClean || c.Class == record.CheckDamaged {
 				st.CheckRead = group
 			}
@@ -1214,10 +1221,10 @@ func Drill(ctx context.Context, cfg Config, r Runner) (*record.Status, error) {
 	// What was finished is written, an interrupt or not: each verdict is
 	// an app's own, and the app the interrupt landed on has none.
 	if err := record.Write(filepath.Join(cfg.StateDir, "status.json"), st); err != nil {
-		return st, err
+		return st, checked, err
 	}
 	if x.upgraded != nil {
-		return st, x.upgraded
+		return st, checked, x.upgraded
 	}
-	return st, ctx.Err()
+	return st, checked, ctx.Err()
 }

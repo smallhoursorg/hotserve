@@ -36,7 +36,10 @@ type command struct {
 // elsewhere, as the restore tests do.
 var runDrillRestore = []command{
 	{"a run", plainBox, func(_ *testing.T, b *box, _ *term) error { _, err := Run(context.Background(), b.cfg, b); return err }},
-	{"a drill", plainBox, func(_ *testing.T, b *box, _ *term) error { _, err := Drill(context.Background(), b.cfg, b); return err }},
+	{"a drill", plainBox, func(_ *testing.T, b *box, _ *term) error {
+		_, _, err := Drill(context.Background(), b.cfg, b)
+		return err
+	}},
 	{"a restore in place", plainBox, func(_ *testing.T, b *box, _ *term) error {
 		_, err := Restore(context.Background(), b.cfg, b, inPlace())
 		return err
@@ -255,7 +258,7 @@ func TestADrillStoppedWhileItWaitsIsNoVerdict(t *testing.T) {
 	must(t, os.WriteFile(filepath.Join(b.cfg.RunDir, "init-unit"), []byte("hotserve_backup_init_0123456789ab.service\n"), 0o600))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := Drill(ctx, b.cfg, b); !errors.Is(err, context.Canceled) {
+	if _, _, err := Drill(ctx, b.cfg, b); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v", err)
 	}
 	st, err := record.Read(filepath.Join(b.cfg.StateDir, "status.json"))
@@ -277,7 +280,7 @@ func TestADrillStoppedWhileItWaitsIsNoVerdict(t *testing.T) {
 		}
 	}
 	b.err["plan"] = context.Canceled
-	if _, err := Drill(ctx, b.cfg, b); !errors.Is(err, context.Canceled) {
+	if _, _, err := Drill(ctx, b.cfg, b); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v", err)
 	}
 	if !b.started("plan") {
@@ -295,7 +298,7 @@ func TestADrillStoppedWhileItWaitsIsNoVerdict(t *testing.T) {
 	b.haveProgram = func(path string) bool { return path != "/usr/bin/restic" }
 	must(t, os.MkdirAll(b.cfg.StateDir, 0o755))
 	must(t, os.WriteFile(filepath.Join(b.cfg.StateDir, "status.json"), []byte("not json"), 0o644))
-	if _, err := Drill(context.Background(), b.cfg, b); err == nil {
+	if _, _, err := Drill(context.Background(), b.cfg, b); err == nil {
 		t.Fatal("a drill without restic began")
 	}
 	st, err = record.Read(filepath.Join(b.cfg.StateDir, "status.json"))

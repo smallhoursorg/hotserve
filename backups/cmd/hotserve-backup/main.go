@@ -634,12 +634,7 @@ func drill(ctx context.Context) error {
 		return err
 	}
 	defer r.Close()
-	var before *record.Check
-	if prev, err := record.Read(filepath.Join(config().StateDir, "status.json")); err == nil && prev.LastCheck != nil {
-		c := *prev.LastCheck
-		before = &c
-	}
-	st, err := engine.Drill(ctx, config(), r)
+	st, checked, err := engine.Drill(ctx, config(), r)
 	unproven, unchecked := false, false
 	if st != nil {
 		names := make([]string, 0, len(st.Apps))
@@ -668,8 +663,10 @@ func drill(ctx context.Context) error {
 				fmt.Printf("%s: nothing to prove: the repository holds no snapshot of it\n", n)
 			}
 		}
-		// The repository's own check, where this drill made one.
-		if c := st.LastCheck; newCheck(before, c) {
+		// The repository's own check, where this drill made one: the
+		// engine's word, not the record's last check, which another
+		// command may have written since.
+		if c := checked; c != nil {
 			line := fmt.Sprintf("repository: its structure, and data group %s: %s", c.Group, c.Class)
 			if c.Detail != "" {
 				line += ": " + c.Detail
@@ -690,13 +687,6 @@ func drill(ctx context.Context) error {
 		return errors.New("the repository's check was not clean")
 	}
 	return nil
-}
-
-// newCheck is whether the last check after a drill is one it made: not
-// the one on record before it. Read off the record, never the clock,
-// which a box that has just booted may step back while the drill runs.
-func newCheck(before, after *record.Check) bool {
-	return after != nil && (before == nil || *after != *before)
 }
 
 // settle is the unit that reads a fetched snapshot. Each item is

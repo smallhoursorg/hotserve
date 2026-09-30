@@ -2,7 +2,9 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -162,11 +164,14 @@ func TestWhatTheCheckMeets(t *testing.T) {
 			// rather than the test binary.
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			st, _ := Drill(ctx, b.cfg, b)
+			st, checked, _ := Drill(ctx, b.cfg, b)
 			if st == nil || st.LastCheck == nil {
 				t.Fatalf("no verdict: %+v", st)
 			}
 			c := st.LastCheck
+			if checked == nil || *checked != *c {
+				t.Errorf("the drill says it made %+v, and the record holds %+v", checked, c)
+			}
 			if c.Class != tc.class || !strings.Contains(c.Detail, tc.detail) {
 				t.Errorf("verdict %q: %q\nwant %q, saying %q", c.Class, c.Detail, tc.class, tc.detail)
 			}
@@ -197,7 +202,7 @@ func TestWhatTheCheckMeets(t *testing.T) {
 // lock [M75, the owner], no retrying for one; and the week's group.
 func TestTheCheckTakesNoLockAndReadsItsWeeksGroup(t *testing.T) {
 	b := restoreBox(t)
-	if _, err := Drill(context.Background(), b.cfg, b); err != nil {
+	if _, _, err := Drill(context.Background(), b.cfg, b); err != nil {
 		t.Fatal(err)
 	}
 	check := b.spec("repocheck")
@@ -239,9 +244,12 @@ func TestAnInterruptedCheckLeavesTheLastOne(t *testing.T) {
 					cancel()
 				}
 			}
-			st, err := Drill(ctx, b.cfg, b)
+			st, checked, err := Drill(ctx, b.cfg, b)
 			if !errors.Is(err, context.Canceled) {
 				t.Errorf("the drill's error: %v", err)
+			}
+			if checked != nil {
+				t.Errorf("an interrupted drill says it made a check: %+v", checked)
 			}
 			on, rerr := record.Read(filepath.Join(b.cfg.StateDir, "status.json"))
 			if rerr != nil || on.LastCheck == nil || *on.LastCheck != *last {
@@ -265,7 +273,14 @@ func TestNoCheckWhereTheDrillCouldNotGoOn(t *testing.T) {
 			must(t, os.MkdirAll(b.cfg.StateDir, 0o755))
 			must(t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), &record.Status{Apps: map[string]*record.App{}, LastCheck: last}))
 			set(b)
-			_, _ = Drill(context.Background(), b.cfg, b)
+			// The record holds a check — another drill's, written since the
+			// caller last looked, for all the caller can tell — and this
+			// drill made none: it says none, and the check on record is not
+			// taken for its own.
+			_, checked, _ := Drill(context.Background(), b.cfg, b)
+			if checked != nil {
+				t.Errorf("a drill that made no check says it made %+v", checked)
+			}
 			if b.started("probe") || b.started("repocheck") {
 				t.Errorf("checked where the drill could not go on: %s", b.roles())
 			}
@@ -531,7 +546,7 @@ func TestAListingThatDoesNotAnswerIsGivenUpAtItsBackstop(t *testing.T) {
 		b := restoreBox(t)
 		two(t, b)
 		b.hang = "history"
-		st, _ := Drill(bounded(t), b.cfg, b)
+		st, _, _ := Drill(bounded(t), b.cfg, b)
 		if n := strings.Count(b.roles(), "history"); n != 1 {
 			t.Errorf("asked %d times: %s", n, b.roles())
 		}
@@ -621,7 +636,7 @@ func TestTheNextCheckReadsTheGroupAfterTheLastOneRead(t *testing.T) {
 			must(t, os.MkdirAll(b.cfg.StateDir, 0o755))
 			must(t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), &record.Status{Apps: map[string]*record.App{}, CheckRead: tc.last}))
 			tc.set(b)
-			st, _ := Drill(context.Background(), b.cfg, b)
+			st, _, _ := Drill(context.Background(), b.cfg, b)
 			if tc.reads != "" {
 				if argv := b.spec("repocheck").Argv; argv[len(argv)-1] != "--read-data-subset="+tc.reads {
 					t.Errorf("the check read %q, want group %s", argv[len(argv)-1], tc.reads)
@@ -656,16 +671,56 @@ func TestDamageFoundBesideSomethingThatHeldTheRepositorySaysSo(t *testing.T) {
 	b.outcome["fetch"] = unit.Outcome{Result: "exit-code", ExitStatus: 11}
 	b.outcome["repocheck"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
 	b.repocheck = `{"message_type":"summary","num_errors":1}`
-	st, _ := Drill(context.Background(), b.cfg, b)
-	if c := st.LastCheck; c == nil || c.Class != record.CheckDamaged || !strings.Contains(c.Detail, "something else held the repository locked during this drill") {
+	st, _, _ := Drill(context.Background(), b.cfg, b)
+	if c := st.LastCheck; c == nil || c.Class != record.CheckDamaged || !strings.Contains(c.Detail, "something else held the repository") {
 		t.Errorf("%+v", c)
+	}
+	// Whole, however much restic found: a verdict cut at the record's
+	// three hundred runes loses what it says last.
+	b = restoreBox(t)
+	b.outcome["fetch"] = unit.Outcome{Result: "exit-code", ExitStatus: 11}
+	b.outcome["repocheck"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+	var broken []string
+	for i := 0; i < 9999; i++ {
+		broken = append(broken, fmt.Sprintf("%064x", i))
+	}
+	raw, _ := json.Marshal(broken)
+	b.repocheck = `{"message_type":"summary","num_errors":9999,"broken_packs":` + string(raw) + `}`
+	st, _, _ = Drill(context.Background(), b.cfg, b)
+	if c := st.LastCheck; c == nil || strings.HasSuffix(c.Detail, "…") || !strings.Contains(c.Detail, "9999 damaged packs") || !strings.Contains(c.Detail, "held the repository") || !strings.Contains(c.Detail, "journalctl -u "+b.spec("repocheck").Name) {
+		t.Errorf("cut, or not all said: %+v", c)
 	}
 	// And not said where nothing did.
 	b = restoreBox(t)
 	b.outcome["repocheck"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
 	b.repocheck = `{"message_type":"summary","num_errors":1}`
-	st, _ = Drill(context.Background(), b.cfg, b)
+	st, _, _ = Drill(context.Background(), b.cfg, b)
 	if c := st.LastCheck; c == nil || strings.Contains(c.Detail, "held the repository") {
 		t.Errorf("%+v", c)
+	}
+}
+
+// A first check's group and its time are one reading of the clock: two
+// either side of Sunday's midnight in UTC would record Monday's time
+// beside Sunday's week (Copilot on #161).
+func TestAChecksGroupAndTimeAreOneReadingOfTheClock(t *testing.T) {
+	old := checkClock
+	t.Cleanup(func() { checkClock = old })
+	readings := []time.Time{
+		time.Date(2026, 9, 27, 23, 59, 59, 999_000_000, time.UTC), // Sunday, ISO week 39
+		time.Date(2026, 9, 28, 0, 0, 0, 1_000_000, time.UTC),      // Monday, ISO week 40
+	}
+	checkClock = func() time.Time {
+		now := readings[0]
+		if len(readings) > 1 {
+			readings = readings[1:]
+		}
+		return now
+	}
+	b := restoreBox(t)
+	st, _, _ := Drill(context.Background(), b.cfg, b)
+	c := st.LastCheck
+	if c == nil || c.Group != "39/52" || c.Group != checkGroup(c.Time) {
+		t.Errorf("a first check read group %q and is recorded at %v, which is week %s", c.Group, c.Time, checkGroup(c.Time))
 	}
 }

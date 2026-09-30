@@ -471,7 +471,7 @@ func TestToADirectory(t *testing.T) {
 
 func TestADrillProvesAndInstallsNothing(t *testing.T) {
 	b := restoreBox(t)
-	st, err := Drill(context.Background(), b.cfg, b)
+	st, _, err := Drill(context.Background(), b.cfg, b)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -513,7 +513,7 @@ func TestADrillThatProvesNothingKeepsWhatWasProven(t *testing.T) {
 				"blog": {Class: record.OK, LastOK: made, LastSnapshot: made, RestoreProven: proven},
 			}}))
 			breakIt(b)
-			st, err := Drill(context.Background(), b.cfg, b)
+			st, _, err := Drill(context.Background(), b.cfg, b)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -596,7 +596,7 @@ func TestWhatARestoreBackedUpFirstIsNeverTheNewest(t *testing.T) {
 
 	b = restoreBox(t)
 	b.history = history
-	st, err := Drill(context.Background(), b.cfg, b)
+	st, _, err := Drill(context.Background(), b.cfg, b)
 	if err != nil || st.Apps["blog"].RestoreProven == nil || st.Apps["blog"].RestoreProven.Snapshot.ID != snapB {
 		t.Fatalf("a drill proved %+v, %v", st.Apps["blog"], err)
 	}
@@ -650,7 +650,7 @@ func TestADrillOfOneAppFailingIsThatAppsOwnAndAnInterruptIsNoVerdict(t *testing.
 			delete(b.outcome, "fetch")
 		}
 	}
-	st, err := Drill(context.Background(), b.cfg, b)
+	st, _, err := Drill(context.Background(), b.cfg, b)
 	if err != nil || st.Apps["blog"].RestoreDrill == nil || st.Apps["shop"] == nil || st.Apps["shop"].RestoreProven == nil {
 		t.Fatalf("blog %+v shop %+v, %v", st.Apps["blog"], st.Apps["shop"], err)
 	}
@@ -664,7 +664,7 @@ func TestADrillOfOneAppFailingIsThatAppsOwnAndAnInterruptIsNoVerdict(t *testing.
 			cancel()
 		}
 	}
-	st, err = Drill(ctx, b.cfg, b)
+	st, _, err = Drill(ctx, b.cfg, b)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("%v", err)
 	}
@@ -677,7 +677,7 @@ func TestADrillOfOneAppFailingIsThatAppsOwnAndAnInterruptIsNoVerdict(t *testing.
 	must(t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), &record.Status{Apps: map[string]*record.App{
 		"gone": {Class: record.OK, RestoreDrill: &record.Drill{Detail: "could not be asked"}},
 	}}))
-	if st, err = Drill(context.Background(), b.cfg, b); err != nil || st.Apps["gone"].RestoreDrill != nil {
+	if st, _, err = Drill(context.Background(), b.cfg, b); err != nil || st.Apps["gone"].RestoreDrill != nil {
 		t.Fatalf("%+v, %v", st.Apps["gone"], err)
 	}
 }
@@ -727,7 +727,7 @@ func TestAFetchThatCannotFitIsNotBegun(t *testing.T) {
 	}
 	b = restoreBox(t)
 	b.size, b.free, b.oneDisk = `{"total_size":41943040,"snapshots_count":1}`, 41943040+1<<20, true
-	if st, err := Drill(context.Background(), b.cfg, b); err != nil || st.Apps["blog"].RestoreProven == nil {
+	if st, _, err := Drill(context.Background(), b.cfg, b); err != nil || st.Apps["blog"].RestoreProven == nil {
 		t.Fatalf("a drill where the fetch alone fits: %+v, %v", st.Apps["blog"], err)
 	}
 	b = restoreBox(t)
@@ -759,7 +759,7 @@ func TestAFetchThatCannotFitIsNotBegun(t *testing.T) {
 			b.free = 1
 		}
 	}
-	st, err := Drill(context.Background(), b.cfg, b)
+	st, _, err := Drill(context.Background(), b.cfg, b)
 	if err != nil || st.Apps["blog"].RestoreDrill == nil || !strings.Contains(st.Apps["blog"].RestoreDrill.Detail, "no room") || st.Apps["shop"].RestoreProven == nil {
 		t.Fatalf("blog %+v shop %+v, %v", st.Apps["blog"], st.Apps["shop"], err)
 	}
@@ -882,7 +882,7 @@ func TestARunLeavesALargeFirstDrillToTheDrill(t *testing.T) {
 	}
 	// The drill itself has no such limit, and proves it (given the room).
 	b.specs, b.free = nil, 4<<30
-	if st, err = Drill(context.Background(), b.cfg, b); err != nil || st.Apps["blog"].RestoreProven == nil || st.Apps["blog"].RestoreDrill != nil {
+	if st, _, err = Drill(context.Background(), b.cfg, b); err != nil || st.Apps["blog"].RestoreProven == nil || st.Apps["blog"].RestoreDrill != nil {
 		t.Fatalf("the drill: %+v, %v", st.Apps["blog"], err)
 	}
 }
@@ -964,7 +964,7 @@ func TestAnInstallThatEndsWithoutAnAnswerIsCalledPartlyRestored(t *testing.T) {
 	b = restoreBox(t)
 	b.install = ""
 	b.outcome["check"] = unit.Outcome{Result: "oom-kill", ExitStatus: 137}
-	st, err := Drill(context.Background(), b.cfg, b)
+	st, _, err := Drill(context.Background(), b.cfg, b)
 	if err != nil || st.Apps["blog"].RestoreDrill == nil || strings.Contains(st.Apps["blog"].RestoreDrill.Detail, "partly") {
 		t.Fatalf("%+v, %v", st.Apps["blog"], err)
 	}
@@ -1088,7 +1088,7 @@ func TestACheckUnitThatChangedSomethingIsNotBelieved(t *testing.T) {
 	} {
 		b := restoreBox(t)
 		b.install = answer
-		st, err := Drill(context.Background(), b.cfg, b)
+		st, _, err := Drill(context.Background(), b.cfg, b)
 		if err != nil || st.Apps["blog"].RestoreProven != nil || st.Apps["blog"].RestoreDrill == nil {
 			t.Errorf("%s: %+v, %v", answer, st.Apps["blog"], err)
 		}
@@ -1099,13 +1099,13 @@ func TestACheckUnitThatChangedSomethingIsNotBelieved(t *testing.T) {
 func TestARecordSaysWhenADrillLastRan(t *testing.T) {
 	b := restoreBox(t)
 	before := time.Now().UTC().Add(-time.Second)
-	st, err := Drill(context.Background(), b.cfg, b)
+	st, _, err := Drill(context.Background(), b.cfg, b)
 	if err != nil || st.LastDrill == nil || st.LastDrill.Time.Before(before) || st.LastDrill.Detail != "" {
 		t.Fatalf("%+v, %v", st.LastDrill, err)
 	}
 	b = restoreBox(t)
 	b.err["plan"] = errors.New("the plan unit: no")
-	if st, err = Drill(context.Background(), b.cfg, b); err == nil || st == nil || st.LastDrill == nil || !strings.Contains(st.LastDrill.Detail, "no") {
+	if st, _, err = Drill(context.Background(), b.cfg, b); err == nil || st == nil || st.LastDrill == nil || !strings.Contains(st.LastDrill.Detail, "no") {
 		t.Fatalf("a drill that could not begin: %+v, %v", st, err)
 	}
 	again, err := record.Read(filepath.Join(b.cfg.StateDir, "status.json"))

@@ -44,6 +44,9 @@ var (
 	// answers held the run lock, and every hourly run with it, for as
 	// long as restic kept trying.
 	listClock = 30 * time.Minute
+	// checkClock is the clock a drill reads, once, for the group a
+	// first check reads and the time the check is recorded at.
+	checkClock = time.Now
 )
 
 // checkGroup is the group of its data a first check on day t reads: its
@@ -73,10 +76,10 @@ func checkArgv(restic, group string) []string {
 }
 
 // checkRepository checks the repository's structure and one group of
-// its data, and says what it found, or nothing where it was
-// interrupted: an interrupt is no verdict.
-func (x *run) checkRepository(ctx context.Context, group string) *record.Check {
-	c := &record.Check{Time: time.Now().UTC(), Group: group}
+// its data, beginning at, and says what it found, or nothing where it
+// was interrupted: an interrupt is no verdict.
+func (x *run) checkRepository(ctx context.Context, group string, at time.Time) *record.Check {
+	c := &record.Check{Time: at, Group: group}
 	verdict := func(class record.CheckClass, detail string) *record.Check {
 		if ctx.Err() != nil {
 			return nil
@@ -119,13 +122,13 @@ func (x *run) checkRepository(ctx context.Context, group string) *record.Check {
 	if n := len(said.BrokenPacks); n > 0 {
 		found += fmt.Sprintf(", in %s", plural(n, "damaged pack"))
 	}
-	found += fmt.Sprintf("; `journalctl -u %s` has restic's own words, and any repair is made off the box", name)
 	// Still damage — a check never masks it — but where something else
 	// held the repository meanwhile, what may explain it is said.
 	if x.metLock {
-		found += "; something else held the repository locked during this drill: a prune off the box makes packs vanish under a check that takes no lock"
+		found += "; something else held the repository during this drill (exit 11): a prune off the box makes packs vanish under a lock-free check"
 	}
-	return verdict(record.CheckDamaged, found)
+	// Short enough, whatever the counts, that record.Text never cuts it.
+	return verdict(record.CheckDamaged, fmt.Sprintf("%s; restic's own words: `journalctl -u %s`", found, name))
 }
 
 // probe asks the repository for its config, under probeClock: nothing

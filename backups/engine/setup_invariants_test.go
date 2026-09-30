@@ -89,7 +89,7 @@ func TestEveryLockHolderWaitsForAnInitLeftRunningThenSweeps(t *testing.T) {
 			return err
 		}},
 		{"a run", func(b *box) error { _, err := Run(context.Background(), b.cfg, b); return err }},
-		{"a drill", func(b *box) error { _, err := Drill(context.Background(), b.cfg, b); return err }},
+		{"a drill", func(b *box) error { _, _, err := Drill(context.Background(), b.cfg, b); return err }},
 	}
 	for _, box := range []string{"with a credential file", "with the staged file alone"} {
 		for _, h := range holders {

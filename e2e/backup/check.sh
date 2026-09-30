@@ -99,7 +99,7 @@ code=$(s3_delete "checkrepo/data/$(echo "$pack" | cut -c1-2)/$pack")
 if drill; then fail "a drill of a repository missing a pack exited 0"; else pass "a drill of a repository missing a pack exits non-zero"; fi
 # A second check reads the group after the first's; and the count is
 # restic's — two where the pack gone is in the group read as well.
-says "^repository: its structure, and data group $NEXT: damaged: restic check found [0-9][0-9]* errors*; \`journalctl -u hotserve_backup_repocheck_[0-9a-f]*.service\` has restic's own words" && pass "and says damaged, how much, and where restic's words are, of the group after the last one read, $NEXT" || fail "the drill said: $(cat "$OUT")"
+says "^repository: its structure, and data group $NEXT: damaged: restic check found [0-9][0-9]* errors*; restic's own words: \`journalctl -u hotserve_backup_repocheck_[0-9a-f]*.service\`$" && pass "and says damaged, how much, and where restic's words are, of the group after the last one read, $NEXT" || fail "the drill said: $(cat "$OUT")"
 [ "$(check_class)" = damaged ] && pass "the record's last_check is damaged" || fail "last_check: $(last_check)"
 if hotserve-backup status >/root/status.out 2>&1; then fail "status exited 0 on a damaged repository"; else grep -q "the repository check of .* (data group $NEXT): damaged: restic check found [0-9][0-9]* error" /root/status.out && pass "status is unhealthy, and says why" || fail "status: $(cat /root/status.out)"; fi
 run
