@@ -567,7 +567,11 @@ that says how a run ended: restic writes a snapshot of a run that
 failed half way too. Each app's records are a `(host, paths)` group of
 their own, beside the app's snapshots, so a `forget` policy thins them
 as a group of their own, and no app's history lists them. One that
-could not be written is a warning of the run; the app stays `ok`.
+could not be written is a warning of the run, and so is one the run
+was stopped while writing — Ctrl-C, `systemctl stop`, a shutdown —
+which restic may or may not have saved first: said as possibly
+missing. The app stays `ok` either way: its snapshot was verified
+before the record was begun.
 
 A declared database that sits inside a declared `files` path is not
 uploaded there, nor its `-wal`, `-shm` and `-journal`: its contents are

@@ -1442,13 +1442,20 @@ func (x *run) vouch(ctx context.Context, app, id string) {
 	s.Environment = append(s.Environment, "TZ=UTC")
 	o, err := x.startWithin(ctx, listClock, s)
 	switch {
-	case ctx.Err() != nil:
+	case err == nil && o.OK() && summaryID(out) != "":
+		// Written: a stop that came as it finished changes nothing.
+	case err != nil && ctx.Err() != nil:
+		// Stopped — Ctrl-C, systemctl stop, a shutdown — while restic was
+		// writing it: it may have saved the record first, or not, and
+		// which is not known here.
+		warn("may not have been written: the command was stopped while it was being written")
 	case err != nil:
 		warn("could not be written into the repository (" + err.Error() + ")")
 	case !o.OK():
+		// Ended on its own, a stop or not: its own failure is what is said.
 		detail, _ := resticFailure(o)
 		warn("could not be written into the repository (" + detail + ")")
-	case summaryID(out) == "":
+	default:
 		warn("could not be written into the repository (restic exited 0 but its summary names no snapshot)")
 	}
 }

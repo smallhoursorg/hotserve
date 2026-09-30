@@ -171,6 +171,33 @@ says "restore snapshot $(echo "$crafted" | cut -c1-8)" && pass "and still offers
 forget "$crafted"
 echo n | hotserve-backup restore blog >"$OUT" 2>&1
 says "not the last snapshot" || says "is not known" && fail "the newest, vouched for, is said not to be: $(cat "$OUT")" || pass "with the newest vouched for, nothing is said of it"
+echo "=== check 8: a run stopped while it writes a record says the record may be missing, and the next run writes one ==="
+hotserve-backup run >"$OUT" 2>&1 &
+running=$!
+if hold_restic "hotserve-clean-blog"; then
+	# Held as it starts, before restic has written anything. The run is
+	# stopped as Ctrl-C stops it, and restic let go only once the manager
+	# is stopping its unit: it cannot finish its write first.
+	kill -INT "$running"
+	i=0
+	until systemctl list-units --plain --no-legend --state=deactivating 'hotserve_backup_vouch_*' | grep -q .; do
+		i=$((i + 1))
+		[ "$i" -ge 200 ] && break
+		sleep 0.05
+	done
+	kill -CONT "$pid"
+	if wait "$running"; then fail "a run stopped while it wrote a record exited 0"; else pass "a run stopped while it wrote a record exits non-zero"; fi
+	grep -q "blog: snapshot [0-9a-f]\{8\} is a complete backup, and the record that says so may not have been written: the command was stopped while it was being written" "$STATUS" && pass "the record says blog's record of a clean run may not have been written, and why" || fail "the record's warning: $(grep '"warning"' "$STATUS")"
+	[ "$(class blog)" = ok ] && pass "and blog's backup, which is sound, is still ok" || fail "blog: $(app_json blog)"
+	hotserve-backup status >/root/status.out 2>&1
+	grep -q "^warning: .*blog: snapshot [0-9a-f]\{8\} is a complete backup, and the record that says so may not have been written" /root/status.out && pass "status says so" || fail "status: $(cat /root/status.out)"
+	[ "$(units_left)" = 0 ] && pass "no unit is left" || fail "units left: $(systemctl list-units --all --no-legend 'hotserve_backup_*')"
+else
+	wait "$running"
+	fail "fixture: no restic writing blog's record was seen to hold: $(cat "$OUT")"
+fi
+run || fail "the run after: $(cat "$OUT")"
+records | grep -qx "$(newest blog)" && pass "the next run writes the record of its own snapshot" || fail "the records vouch for: $(records | tr '\n' ' '); blog's newest is $(newest blog)"
 nothing_left "the check suite"
 
 cp /root/Caddyfile.base "$CADDYFILE"

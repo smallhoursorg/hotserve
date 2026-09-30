@@ -408,6 +408,67 @@ func TestOnlyAnOKRunIsVouchedForAndARecordNotWrittenIsSaid(t *testing.T) {
 	}
 }
 
+// A run stopped while the record is being written says so: the record
+// may or may not be in the repository, which is not known, and the
+// backup itself is sound. One written, or one that failed, before the
+// stop reached it is said as what it is.
+func TestARecordStoppedWhileItIsWrittenIsSaid(t *testing.T) {
+	const stopped = "blog: snapshot aaaaaaaa is a complete backup, and the record that says so may not have been written: the command was stopped while it was being written"
+	for name, tc := range map[string]struct {
+		hang    bool  // the record's unit runs until it is stopped
+		stopErr error // stopping it could not be confirmed
+		exit    int   // how it ended where it did not hang
+		warn    string
+		never   string
+	}{
+		"stopped while it is written":             {hang: true, warn: stopped},
+		"stopped, and not confirmed gone":         {hang: true, stopErr: unit.ErrNotConfirmedGone, warn: stopped},
+		"written just before the stop reached it": {never: "the record that says so"},
+		"failed just before the stop reached it":  {exit: 1, warn: "blog: snapshot aaaaaaaa is a complete backup, and the record that says so could not be written into the repository (restic failed (exit 1)", never: "stopped while"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			b := newBox(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.hang {
+				b.hang = "vouch"
+			}
+			b.stopErr = tc.stopErr
+			if tc.exit != 0 {
+				b.outcome["vouch"] = unit.Outcome{Result: "exit-code", ExitStatus: tc.exit}
+			}
+			// The stop — Ctrl-C, systemctl stop, a shutdown — lands as the
+			// record's unit starts.
+			b.before = func(s unit.Spec) {
+				if strings.Contains(s.Name, "_vouch_") {
+					cancel()
+				}
+			}
+			st, err := Run(ctx, b.cfg, b)
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("the run's error: %v", err)
+			}
+			if st == nil || st.Apps["blog"] == nil || st.Apps["blog"].Class != record.OK {
+				t.Fatalf("the backup itself is sound, and is not ok: %+v", st)
+			}
+			if tc.warn != "" && !strings.Contains(st.Warning, tc.warn) {
+				t.Errorf("warning %q\nwant %q", st.Warning, tc.warn)
+			}
+			if tc.never != "" && strings.Contains(st.Warning, tc.never) {
+				t.Errorf("warning %q says %q", st.Warning, tc.never)
+			}
+			if tc.hang && !slices.Contains(b.stopped, b.spec("vouch").Name) {
+				t.Errorf("the record's unit was not stopped: %v", b.stopped)
+			}
+			// What the run wrote says so too.
+			on, rerr := record.Read(filepath.Join(b.cfg.StateDir, "status.json"))
+			if rerr != nil || on.Warning != st.Warning || on.Error == "" {
+				t.Errorf("the record on disk: warning %q, error %q (%v)", on.Warning, on.Error, rerr)
+			}
+		})
+	}
+}
+
 // The warning of a record not written names the snapshot before
 // anything a cut could take, whatever the app is called.
 func TestARecordNotWrittenNamesItsSnapshotWhateverTheName(t *testing.T) {
