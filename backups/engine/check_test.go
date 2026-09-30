@@ -201,12 +201,17 @@ func TestWhatTheCheckMeets(t *testing.T) {
 // The check reads, and writes nothing that could hold a backup up: no
 // lock [M75, the owner], no retrying for one; and the week's group.
 func TestTheCheckTakesNoLockAndReadsItsWeeksGroup(t *testing.T) {
+	// The group from the clock the drill reads, not a second reading of
+	// one here: two either side of Sunday's midnight would disagree.
+	old := checkClock
+	t.Cleanup(func() { checkClock = old })
+	checkClock = func() time.Time { return time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC) } // ISO week 39
 	b := restoreBox(t)
 	if _, _, err := Drill(context.Background(), b.cfg, b); err != nil {
 		t.Fatal(err)
 	}
 	check := b.spec("repocheck")
-	want := []string{"/usr/bin/restic", "check", "--no-lock", "--json", "--cleanup-cache", "--read-data-subset=" + checkGroup(time.Now())}
+	want := []string{"/usr/bin/restic", "check", "--no-lock", "--json", "--cleanup-cache", "--read-data-subset=39/52"}
 	if !slices.Equal(check.Argv, want) {
 		t.Errorf("the check's command:\n%q\nwant\n%q", check.Argv, want)
 	}
@@ -333,7 +338,9 @@ func TestAnOKBackupIsVouchedForInTheRepository(t *testing.T) {
 	// At the snapshot's own time, to the second, which restic reads in
 	// the zone it is given: so that a forget policy that keeps the
 	// snapshot keeps its record, which falls in the same period.
-	want := []string{"/usr/bin/restic", "backup", "--quiet", "--json", "--retry-lock", retryLock, "--host", "hotserve",
+	// It waits for a lock less long than its clock: a lock is said as
+	// one, not as a storage that did not answer.
+	want := []string{"/usr/bin/restic", "backup", "--quiet", "--json", "--retry-lock", "20m", "--host", "hotserve",
 		"--time", "2026-09-02 07:08:09",
 		"--tag", "hotserve-clean", "--tag", "vouches:" + snapA,
 		"--stdin-from-command", "--stdin-filename", "hotserve-clean-blog", "--", "/usr/bin/echo", snapA}
@@ -346,6 +353,9 @@ func TestAnOKBackupIsVouchedForInTheRepository(t *testing.T) {
 	}
 	if !slices.Contains(s.Environment, "TZ=UTC") {
 		t.Errorf("the record's time is read in the unit's own zone: %q", s.Environment)
+	}
+	if wait, err := time.ParseDuration(vouchRetryLock); err != nil || wait >= listClock {
+		t.Errorf("the record waits %s for a lock, and is given up at %s", vouchRetryLock, listClock)
 	}
 	if st.Apps["blog"].Class != record.OK || st.Warning != "" {
 		t.Errorf("%+v, warning %q", st.Apps["blog"], st.Warning)
@@ -374,9 +384,28 @@ func TestOnlyAnOKRunIsVouchedForAndARecordNotWrittenIsSaid(t *testing.T) {
 			set:   func(b *box) { b.outcome["vouch"] = unit.Outcome{Result: "exit-code", ExitStatus: 1} },
 			class: record.OK, vouch: true, warn: "blog: snapshot aaaaaaaa is a complete backup, and the record that says so could not be written into the repository",
 		},
+		// restic said it saved it, and named nothing: whether it did is
+		// not known.
 		"the record with no id": {
 			set:   func(b *box) { b.vouch = "" },
-			class: record.OK, vouch: true, warn: "blog: snapshot aaaaaaaa is a complete backup, and the record that says so could not be written into the repository",
+			class: record.OK, vouch: true, warn: "blog: snapshot aaaaaaaa is a complete backup, and the record that says so may not have been written: restic exited 0 and its summary names no snapshot",
+		},
+		"the record locked out": {
+			set:   func(b *box) { b.outcome["vouch"] = unit.Outcome{Result: "exit-code", ExitStatus: 11} },
+			class: record.OK, vouch: true, warn: "blog: snapshot aaaaaaaa is a complete backup, and the record that says so could not be written into the repository (it stayed locked by something else for 20m, exit 11)",
+		},
+		// Ended from outside — systemctl stop reaches the bound unit before
+		// the command sees its own stop — or by a signal: restic may have
+		// saved it first.
+		"the record's unit ended from outside": {
+			set: func(b *box) {
+				b.err["vouch"] = errors.New("hotserve_backup_vouch_blog_x.service: ended from outside before its command finished")
+			},
+			class: record.OK, vouch: true, warn: "blog: snapshot aaaaaaaa is a complete backup, and the record that says so may not have been written: hotserve_backup_vouch_blog_x.service: ended from outside",
+		},
+		"the record ended by a signal": {
+			set:   func(b *box) { b.outcome["vouch"] = unit.Outcome{Result: "signal"} },
+			class: record.OK, vouch: true, warn: "blog: snapshot aaaaaaaa is a complete backup, and the record that says so may not have been written: restic was ended by signal",
 		},
 		"no time for the snapshot in its listing": {
 			set: func(b *box) {
@@ -418,9 +447,11 @@ func TestARecordStoppedWhileItIsWrittenIsSaid(t *testing.T) {
 		hang    bool  // the record's unit runs until it is stopped
 		stopErr error // stopping it could not be confirmed
 		exit    int   // how it ended where it did not hang
+		early   bool  // the stop lands as the app's copies are removed, before the record
 		warn    string
 		never   string
 	}{
+		"stopped before it was begun":             {early: true, warn: "blog: snapshot aaaaaaaa is a complete backup, and the record that says so was not written: the command was stopped before it was begun"},
 		"stopped while it is written":             {hang: true, warn: stopped},
 		"stopped, and not confirmed gone":         {hang: true, stopErr: unit.ErrNotConfirmedGone, warn: stopped},
 		"written just before the stop reached it": {never: "the record that says so"},
@@ -438,9 +469,14 @@ func TestARecordStoppedWhileItIsWrittenIsSaid(t *testing.T) {
 				b.outcome["vouch"] = unit.Outcome{Result: "exit-code", ExitStatus: tc.exit}
 			}
 			// The stop — Ctrl-C, systemctl stop, a shutdown — lands as the
-			// record's unit starts.
+			// record's unit starts; or, early, as the app's last clean unit
+			// does, which runs on to the end.
+			cleans := 0
 			b.before = func(s unit.Spec) {
-				if strings.Contains(s.Name, "_vouch_") {
+				if strings.Contains(s.Name, "_clean_blog_") {
+					cleans++
+				}
+				if !tc.early && strings.Contains(s.Name, "_vouch_") || tc.early && cleans == 2 && strings.Contains(s.Name, "_clean_blog_") {
 					cancel()
 				}
 			}
@@ -456,6 +492,9 @@ func TestARecordStoppedWhileItIsWrittenIsSaid(t *testing.T) {
 			}
 			if tc.never != "" && strings.Contains(st.Warning, tc.never) {
 				t.Errorf("warning %q says %q", st.Warning, tc.never)
+			}
+			if tc.early && b.started("vouch") {
+				t.Errorf("the record was begun after the stop: %s", b.roles())
 			}
 			if tc.hang && !slices.Contains(b.stopped, b.spec("vouch").Name) {
 				t.Errorf("the record's unit was not stopped: %v", b.stopped)
@@ -620,15 +659,47 @@ func TestAListingThatDoesNotAnswerIsGivenUpAtItsBackstop(t *testing.T) {
 			}
 		}
 	})
+	// Not answering one app, the repository will not answer the next:
+	// the run stops asking, and no unbounded upload is left to hang.
 	t.Run("verify, in a run", func(t *testing.T) {
 		b := newBox(t)
+		two(t, b)
 		b.hang = "verify"
 		st, _ := Run(bounded(t), b.cfg, b)
 		if app := st.Apps["blog"]; app.Class != record.Incomplete || !strings.Contains(app.Detail, "did not answer within") {
-			t.Errorf("%+v", app)
+			t.Errorf("blog: %+v", app)
+		}
+		if n := strings.Count(b.roles(), "upload"); n != 1 {
+			t.Errorf("uploads after the repository did not answer: %s", b.roles())
+		}
+		if app := st.Apps["shop"]; app == nil || app.Class != record.NotAttempted {
+			t.Errorf("shop: %+v", app)
 		}
 		if b.started("vouch") {
 			t.Error("vouched for a snapshot that was not checked")
+		}
+	})
+	// Given up at the clock and not confirmed gone: the repository did
+	// not answer all the same.
+	t.Run("history not confirmed gone, in a drill", func(t *testing.T) {
+		b := restoreBox(t)
+		two(t, b)
+		b.hang, b.stopErr = "history", unit.ErrNotConfirmedGone
+		_, _, _ = Drill(bounded(t), b.cfg, b)
+		if n := strings.Count(b.roles(), "history"); n != 1 {
+			t.Errorf("asked %d times: %s", n, b.roles())
+		}
+	})
+	t.Run("size, in a drill", func(t *testing.T) {
+		b := restoreBox(t)
+		two(t, b)
+		b.hang = "size"
+		st, _, _ := Drill(bounded(t), b.cfg, b)
+		if a := st.Apps["blog"]; a == nil || a.RestoreDrill == nil || !strings.Contains(a.RestoreDrill.Detail, "did not answer within") {
+			t.Errorf("blog: %+v", a)
+		}
+		if n := strings.Count(b.roles(), "size"); n != 1 {
+			t.Errorf("asked %d times: %s", n, b.roles())
 		}
 	})
 	t.Run("the listing, in a run", func(t *testing.T) {
@@ -653,19 +724,63 @@ func TestAListingThatDoesNotAnswerIsGivenUpAtItsBackstop(t *testing.T) {
 			t.Errorf("the record's unit was not stopped: %v", b.stopped)
 		}
 	})
-	t.Run("the records, in a restore", func(t *testing.T) {
-		b := restoreBox(t)
-		b.hang = "vouches"
-		rep, err := Restore(bounded(t), b.cfg, b, inPlace())
-		if err != nil || !strings.Contains(rep.NotKnown, "did not answer within") {
-			t.Errorf("%+v, %v", rep, err)
+}
+
+// A restore's own reads of the repository have no backstop (the owner,
+// 2026-09-30): someone started it and can stop it, and a rebuilt box's
+// first listing, from an empty cache, is the longest a box makes. Each
+// is stopped by the stop, never by a clock.
+func TestARestoresOwnReadsHaveNoBackstop(t *testing.T) {
+	old := listClock
+	t.Cleanup(func() { listClock = old })
+	listClock = 20 * time.Millisecond
+	for _, role := range []string{"history", "vouches", "size", "verify"} {
+		t.Run(role, func(t *testing.T) {
+			b := restoreBox(t)
+			b.hang = role
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			b.before = func(s unit.Spec) {
+				if strings.Contains(s.Name, "_"+role+"_") {
+					time.AfterFunc(300*time.Millisecond, cancel)
+				}
+			}
+			_, err := Restore(ctx, b.cfg, b, inPlace())
+			if err == nil || strings.Contains(err.Error(), "did not answer") {
+				t.Errorf("the restore's %s: %v", role, err)
+			}
+			if !slices.Contains(b.stopped, b.spec(role).Name) {
+				t.Errorf("the %s unit was not stopped: %v", role, b.stopped)
+			}
+		})
+	}
+}
+
+// Interrupted while the repository's records are asked, a restore is
+// interrupted: it does not go on to ask its question.
+func TestARestoreInterruptedWhileTheRecordsAreAskedAsksNothing(t *testing.T) {
+	b := restoreBox(t)
+	b.hang = "vouches"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b.before = func(s unit.Spec) {
+		if strings.Contains(s.Name, "_vouches_") {
+			cancel()
 		}
-	})
+	}
+	asked := false
+	o := inPlace()
+	o.Confirm = func(RestoreAsk) bool { asked = true; return false }
+	_, err := Restore(ctx, b.cfg, b, o)
+	if !errors.Is(err, context.Canceled) || asked {
+		t.Errorf("asked %v, error %v", asked, err)
+	}
 }
 
 // The run's listing of every app is of the apps' snapshots: the records
-// of clean runs, one per app per run, are none of its business, and
-// would double what it loads.
+// of clean runs, one per app per run, are none of its business. (restic
+// loads every snapshot file before it filters, so the tag narrows what
+// the listing answers, not what it reads.)
 func TestTheRunsListingLeavesTheRecordsOut(t *testing.T) {
 	b := newBox(t)
 	if _, err := Run(context.Background(), b.cfg, b); err != nil {
@@ -685,7 +800,7 @@ func TestTheNextCheckReadsTheGroupAfterTheLastOneRead(t *testing.T) {
 	}{
 		"after 40": {last: "40/52", reads: "41/52", after: "41/52", set: func(*box) {}},
 		"after 52": {last: "52/52", reads: "1/52", after: "1/52", set: func(*box) {}},
-		"damage read": {last: "40/52", reads: "41/52", after: "41/52", set: func(b *box) {
+		"damage read": {last: "40/52", reads: "41/52", after: "40/52", set: func(b *box) {
 			b.outcome["repocheck"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
 			b.repocheck = `{"message_type":"summary","num_errors":1}`
 		}},
@@ -723,41 +838,29 @@ func TestARunCarriesTheGroupLastRead(t *testing.T) {
 	}
 }
 
-// Damage found while something else held the repository — a drill
-// that met exit 11 — is still damage, and says what may explain it:
-// a prune run off the box makes packs vanish under a check that takes
-// no lock.
-func TestDamageFoundBesideSomethingThatHeldTheRepositorySaysSo(t *testing.T) {
-	b := restoreBox(t)
-	b.outcome["fetch"] = unit.Outcome{Result: "exit-code", ExitStatus: 11}
-	b.outcome["repocheck"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
-	b.repocheck = `{"message_type":"summary","num_errors":1}`
-	st, _, _ := Drill(context.Background(), b.cfg, b)
-	if c := st.LastCheck; c == nil || c.Class != record.CheckDamaged || !strings.Contains(c.Detail, "something else held the repository") {
-		t.Errorf("%+v", c)
-	}
-	// Whole, however much restic found: a verdict cut at the record's
-	// three hundred runes loses what it says last.
-	b = restoreBox(t)
-	b.outcome["fetch"] = unit.Outcome{Result: "exit-code", ExitStatus: 11}
-	b.outcome["repocheck"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
-	var broken []string
-	for i := 0; i < 9999; i++ {
-		broken = append(broken, fmt.Sprintf("%064x", i))
-	}
-	raw, _ := json.Marshal(broken)
-	b.repocheck = `{"message_type":"summary","num_errors":9999,"broken_packs":` + string(raw) + `}`
-	st, _, _ = Drill(context.Background(), b.cfg, b)
-	if c := st.LastCheck; c == nil || strings.HasSuffix(c.Detail, "…") || !strings.Contains(c.Detail, "9999 damaged packs") || !strings.Contains(c.Detail, "held the repository") || !strings.Contains(c.Detail, "journalctl -u "+b.spec("repocheck").Name) {
-		t.Errorf("cut, or not all said: %+v", c)
-	}
-	// And not said where nothing did.
-	b = restoreBox(t)
-	b.outcome["repocheck"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
-	b.repocheck = `{"message_type":"summary","num_errors":1}`
-	st, _, _ = Drill(context.Background(), b.cfg, b)
-	if c := st.LastCheck; c == nil || strings.Contains(c.Detail, "held the repository") {
-		t.Errorf("%+v", c)
+// Damage says what else looks like it — a prune run off the box during
+// the check, whose packs vanish under a check that takes no lock — and
+// that the next check reads the same group again, which settles it;
+// whole, however much restic found.
+func TestDamageSaysWhatElseLooksLikeIt(t *testing.T) {
+	for name, errs := range map[string]int{"one error": 1, "9999 errors in as many packs": 9999} {
+		t.Run(name, func(t *testing.T) {
+			b := restoreBox(t)
+			b.outcome["repocheck"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+			var broken []string
+			for i := 0; i < errs && errs > 1; i++ {
+				broken = append(broken, fmt.Sprintf("%064x", i))
+			}
+			raw, _ := json.Marshal(broken)
+			b.repocheck = fmt.Sprintf(`{"message_type":"summary","num_errors":%d,"broken_packs":%s}`, errs, raw)
+			st, _, _ := Drill(context.Background(), b.cfg, b)
+			c := st.LastCheck
+			if c == nil || c.Class != record.CheckDamaged || strings.HasSuffix(c.Detail, "…") ||
+				!strings.Contains(c.Detail, "a prune run off the box during the check looks the same, and the next check reads this group again") ||
+				!strings.Contains(c.Detail, "journalctl -u "+b.spec("repocheck").Name) {
+				t.Errorf("%+v", c)
+			}
+		})
 	}
 }
 
@@ -783,5 +886,28 @@ func TestAChecksGroupAndTimeAreOneReadingOfTheClock(t *testing.T) {
 	c := st.LastCheck
 	if c == nil || c.Group != "39/52" || c.Group != checkGroup(c.Time) {
 		t.Errorf("a first check read group %q and is recorded at %v, which is week %s", c.Group, c.Time, checkGroup(c.Time))
+	}
+}
+
+// Every restic unit runs in UTC, so that a snapshot and its record are
+// in one zone: forget sorts each into days by the zone it was stored in
+// [measured], and a Berlin box's 23:30 snapshot and its record, one at
+// +02:00 and the other at Z, fell into different days — --keep-daily
+// kept the snapshot and removed its record.
+func TestEveryResticUnitRunsInUTC(t *testing.T) {
+	if s := resticUnit("hotserve_backup_x_000000000000.service", "", "/env", []string{"/usr/bin/restic"}, ""); !slices.Contains(s.Environment, "TZ=UTC") {
+		t.Errorf("resticUnit: %q", s.Environment)
+	}
+	b := restoreBox(t)
+	_, err := Run(context.Background(), b.cfg, b)
+	must(t, err)
+	_, _, err = Drill(context.Background(), b.cfg, b)
+	must(t, err)
+	_, err = Restore(context.Background(), b.cfg, b, inPlace())
+	must(t, err)
+	for _, s := range b.specs {
+		if len(s.Argv) > 0 && s.Argv[0] == b.cfg.Restic && !slices.Contains(s.Environment, "TZ=UTC") {
+			t.Errorf("%s: %q", s.Name, s.Environment)
+		}
 	}
 }

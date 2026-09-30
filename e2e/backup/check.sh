@@ -28,6 +28,9 @@ REPO=s3:$S3/checkrepo
 wait_for_systemd
 [ -f /root/Caddyfile.base ] || cp "$CADDYFILE" /root/Caddyfile.base
 cp /root/Caddyfile.base "$CADDYFILE"
+# A box in a zone of its own: every unit sees /etc/localtime, and restic
+# stores a snapshot's time in the zone it runs in.
+ln -sf /usr/share/zoneinfo/Europe/Berlin /etc/localtime
 
 drill() { hotserve-backup drill >"$OUT" 2>&1; }
 says() { grep -q -e "$1" "$OUT"; }
@@ -81,7 +84,11 @@ paths=$(rr snapshots --no-lock --json --tag hotserve-clean 2>/dev/null | grep -o
 rr snapshots --no-lock --json --tag app:blog 2>/dev/null | grep -q hotserve-clean && fail "a record is among blog's own snapshots" || pass "and none is among an app's own snapshots"
 # At the snapshot's own time, to the second: a forget policy that keeps
 # the snapshot for a period keeps its record, in the same period.
-made=$(rr cat snapshot --no-lock "$blog_id" 2>/dev/null | grep -o '"time": *"[^"]*"' | head -1 | sed 's/.*: *"//' | cut -c1-19)
+stored=$(rr cat snapshot --no-lock "$blog_id" 2>/dev/null | grep -o '"time": *"[^"]*"' | head -1 | sed 's/.*: *"//; s/"$//')
+made=$(echo "$stored" | cut -c1-19)
+# In UTC, on a box in Berlin: forget sorts a snapshot into its days by
+# the zone it was stored in, and its record is in UTC.
+case "$stored" in *Z) pass "on a box in Berlin, blog's snapshot is stored in UTC ($stored)" ;; *) fail "on a box in Berlin, blog's snapshot is stored at $stored, not in UTC" ;; esac
 recorded=$(rr snapshots --no-lock --json --tag "vouches:$blog_id" 2>/dev/null | grep -o '"time":"[^"]*"' | head -1 | cut -d'"' -f4 | cut -c1-19)
 [ -n "$made" ] && [ "$made" = "$recorded" ] && pass "blog's record is at its snapshot's own time, $made" || fail "blog's snapshot was made $made, its record is at $recorded"
 
@@ -99,9 +106,13 @@ code=$(s3_delete "checkrepo/data/$(echo "$pack" | cut -c1-2)/$pack")
 if drill; then fail "a drill of a repository missing a pack exited 0"; else pass "a drill of a repository missing a pack exits non-zero"; fi
 # A second check reads the group after the first's; and the count is
 # restic's — two where the pack gone is in the group read as well.
-says "^repository: its structure, and data group $NEXT: damaged: restic check found [0-9][0-9]* errors*; restic's own words: \`journalctl -u hotserve_backup_repocheck_[0-9a-f]*.service\`$" && pass "and says damaged, how much, and where restic's words are, of the group after the last one read, $NEXT" || fail "the drill said: $(cat "$OUT")"
+says "^repository: its structure, and data group $NEXT: damaged: restic check found [0-9][0-9]* errors*; a prune run off the box during the check looks the same, and the next check reads this group again; restic's own words: \`journalctl -u hotserve_backup_repocheck_[0-9a-f]*.service\`$" && pass "and says damaged, how much, and where restic's words are, of the group after the last one read, $NEXT" || fail "the drill said: $(cat "$OUT")"
 [ "$(check_class)" = damaged ] && pass "the record's last_check is damaged" || fail "last_check: $(last_check)"
 if hotserve-backup status >/root/status.out 2>&1; then fail "status exited 0 on a damaged repository"; else grep -q "the repository check of .* (data group $NEXT): damaged: restic check found [0-9][0-9]* error" /root/status.out && pass "status is unhealthy, and says why" || fail "status: $(cat /root/status.out)"; fi
+# Damage keeps its group: the next check reads it again, and says so
+# until it reads clean (the owner, 2026-09-30).
+drill
+says "^repository: its structure, and data group $NEXT: damaged: " && pass "the next drill reads the same group again, $NEXT, and it is damaged still" || fail "the next drill said: $(grep '^repository' "$OUT")"
 run
 [ "$(newest blog)" != "$blog_id" ] && [ "$(newest shop)" != "$shop_id" ] && pass "and the next run still backs both apps up: the box does not stop for damage" || fail "after damage the run made no snapshot: $(cat "$OUT")"
 
@@ -201,6 +212,7 @@ records | grep -qx "$(newest blog)" && pass "the next run writes the record of i
 nothing_left "the check suite"
 
 cp /root/Caddyfile.base "$CADDYFILE"
+ln -sf /usr/share/zoneinfo/Etc/UTC /etc/localtime
 rm -f /root/records /root/status.out
 
 echo ""

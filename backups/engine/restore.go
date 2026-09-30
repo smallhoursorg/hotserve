@@ -168,6 +168,7 @@ func Restore(ctx context.Context, cfg Config, r Runner, o RestoreOptions) (rep *
 	if err != nil {
 		return nil, err
 	}
+	x.attended = true
 	p, err := x.plan(ctx)
 	if err != nil {
 		return nil, err
@@ -195,6 +196,9 @@ func Restore(ctx context.Context, cfg Config, r Runner, o RestoreOptions) (rep *
 		// No run this box remembers ended ok on the app — a rebuilt box,
 		// most often: the repository's records of clean runs say.
 		rep.LastOK, rep.NotKnown = x.lastVouched(ctx, o.App, snaps, snap)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 	}
 	defer func() {
 		if rep != nil {
@@ -590,11 +594,6 @@ func pick(app string, snaps []listed, asked string) (record.Snapshot, error) {
 // record says of its last ok, for a box that has none.
 func (x *run) lastVouched(ctx context.Context, app string, snaps []listed, snap record.Snapshot) (*record.Snapshot, string) {
 	records, _, err := x.snapshots(ctx, "vouches", "", cleanTag)
-	if err == nil {
-		if _, said := x.besides("vouches"); said != nil {
-			err = fmt.Errorf("%w, so what it said of them is not believed", said)
-		}
-	}
 	if err != nil {
 		return nil, "the repository's records of clean runs could not be asked: " + err.Error()
 	}
@@ -749,10 +748,14 @@ var freeUnder = func(dir string) (uint64, error) {
 // exits 0 [measured]: only one snapshot, counted, is an answer.
 func (x *run) snapshotSize(ctx context.Context, app, id string) (uint64, error) {
 	out := filepath.Join(x.dir, app+".size.json")
-	o, err := x.start(ctx, resticUnit(x.name("size", app), "hotserve backup: ask how large a snapshot of "+app+" is", x.cfg.EnvFile,
+	o, err := x.startWithin(ctx, x.readClock(), resticUnit(x.name("size", app), "hotserve backup: ask how large a snapshot of "+app+" is", x.cfg.EnvFile,
 		[]string{x.cfg.Restic, "stats", "--quiet", "--json", "--no-lock", "--mode", "restore-size", id}, out))
 	if err != nil {
-		return 0, fmt.Errorf("the size unit: %w", err)
+		err = fmt.Errorf("the size unit: %w", err)
+		if didNotAnswer(ctx, err) {
+			return 0, repositoryWideError{err}
+		}
+		return 0, err
 	}
 	if !o.OK() {
 		detail, wide := resticFailure(o)
@@ -1213,7 +1216,9 @@ func Drill(ctx context.Context, cfg Config, r Runner) (st *record.Status, checke
 		group := nextGroup(st.CheckRead, now)
 		if c := x.checkRepository(ctx, group, now); c != nil {
 			st.LastCheck, checked = c, c
-			if c.Class == record.CheckClean || c.Class == record.CheckDamaged {
+			// Damage keeps the group: the next check reads it again, and
+			// only a clean one moves on (the owner, 2026-09-30).
+			if c.Class == record.CheckClean {
 				st.CheckRead = group
 			}
 		}

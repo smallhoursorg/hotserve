@@ -198,3 +198,43 @@ func TestIntegrationACleanRunRecordIsASnapshotOfItsOwn(t *testing.T) {
 		t.Errorf("a record of nothing: exit %d, want restic's 3", exit)
 	}
 }
+
+// restic stores a snapshot's time in the zone it runs in, and forget
+// sorts each snapshot into its days by that zone [measured]: so every
+// restic unit is given UTC (resticUnit), whatever the box's own zone —
+// here Berlin's — and a snapshot and its record, both in UTC, fall into
+// the same days.
+func TestIntegrationAResticUnitStoresItsTimesInUTC(t *testing.T) {
+	const restic = "/usr/bin/restic"
+	base := t.TempDir()
+	must(t, os.WriteFile(filepath.Join(base, "f"), []byte("data"), 0o644))
+	t.Setenv("TZ", "Europe/Berlin")
+	resticIn(t, base, time.Minute, restic, "init", "-q")
+	stored := func() string {
+		t.Helper()
+		out, said, exit := resticIn(t, base, time.Minute, restic, "snapshots", "--json", "--no-lock", "latest")
+		var snaps []struct {
+			Time string `json:"time"`
+		}
+		if exit != 0 || json.Unmarshal([]byte(out), &snaps) != nil || len(snaps) != 1 {
+			t.Fatalf("snapshots: exit %d, %q %s", exit, out, said)
+		}
+		return snaps[0].Time
+	}
+	// The box's zone, as a unit sees it without being told otherwise.
+	resticIn(t, base, time.Minute, restic, "backup", "-q", "f")
+	if got := stored(); !strings.HasSuffix(got, "+02:00") && !strings.HasSuffix(got, "+01:00") {
+		t.Fatalf("fixture: restic in Berlin stored %s: the zone it runs in is not what it stores", got)
+	}
+	// The environment a restic unit is given.
+	for _, kv := range resticUnit("hotserve_backup_x_000000000000.service", "", "", []string{restic}, "").Environment {
+		k, v, _ := strings.Cut(kv, "=")
+		if k == "TZ" {
+			t.Setenv(k, v)
+		}
+	}
+	resticIn(t, base, time.Minute, restic, "backup", "-q", "f")
+	if got := stored(); !strings.HasSuffix(got, "Z") {
+		t.Errorf("a restic unit stored %s, not UTC", got)
+	}
+}

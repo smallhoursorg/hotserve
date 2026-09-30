@@ -491,12 +491,14 @@ missed one at boot); a drill that proved nothing leaves
 After its apps, whatever became of them, a drill checks the repository
 itself: `restic check --no-lock --read-data-subset=n/52`, as the backup
 account — its structure, and one fifty-second of its data, read back
-and verified. n is the group after the one the last check that read the
-data read (`check_read` in the record, moved on only by a verdict of
-`clean` or `damaged`), and the ISO week's in UTC (`((week − 1) mod
-52) + 1`) where no check has read any. Which group a pack falls in is fixed by
-its id, so fifty-two checks read every pack once, whatever weeks a box
-was off or a check came to nothing — the whole repository a year,
+and verified. n is the group after the one the last clean check read
+(`check_read` in the record), and the ISO week's in UTC (`((week − 1)
+mod 52) + 1`) where none has. Only a `clean` verdict moves it on: a
+check that finds damage leaves it, so the next reads the same group
+again, and says `damaged` until a check of it is clean (the owner,
+2026-09-30). Which group a pack falls in is fixed by its id, so
+fifty-two clean checks read every pack once, whatever weeks a box was
+off or a check came to nothing — the whole repository a year,
 about 2% of it in downloads each week. On 28.5 GB over a link of 25 ms each way and 50 Mbit/s it read
 about 600 MiB in three to four minutes, holding the run lock
 throughout: an hourly run that comes due meanwhile says so and is that
@@ -514,7 +516,7 @@ why):
 | verdict | what it means |
 |---|---|
 | `clean` | restic read the structure and the group and found nothing wrong |
-| `damaged` | restic found errors, and the repository answered before and after it: the count, the damaged packs, and `journalctl -u hotserve_backup_repocheck_…` for restic's own words — and, where a restic of the same drill met a lock something else held (exit 11), that it did |
+| `damaged` | restic found errors, and the repository answered before and after it: the count, the damaged packs, that a prune run off the box during the check looks the same and the next check reads the group again, and `journalctl -u hotserve_backup_repocheck_…` for restic's own words |
 | `unreachable` | the probe was not answered in 30 seconds, or restic exited 1 on it: the storage could not be reached, or refused the key — or the check lost the storage half way ("could not finish") |
 | `no repository` | the storage answered, and holds none there (10) |
 | `wrong password` | the password does not open it (12) |
@@ -526,7 +528,7 @@ restic 0.18 never passes a stale lock by itself, so every backup after
 would fail until someone ran `restic unlock` [measured]. What that
 costs: a `prune` run off the box at the same moment can make packs
 vanish under it, and the verdict say `damaged` though nothing
-is; the next check says otherwise. A check killed hard leaves its
+is; the next check reads the same group again, and says otherwise. A check killed hard leaves its
 temporary cache, some tens of MiB, in `/var/cache/hotserve-backup`;
 the next check removes one that is a month old (`--cleanup-cache`).
 
@@ -566,12 +568,41 @@ policy keeps the snapshot and not its record. It is the one thing in the reposit
 that says how a run ended: restic writes a snapshot of a run that
 failed half way too. Each app's records are a `(host, paths)` group of
 their own, beside the app's snapshots, so a `forget` policy thins them
-as a group of their own, and no app's history lists them. One that
-could not be written is a warning of the run, and so is one the run
-was stopped while writing — Ctrl-C, `systemctl stop`, a shutdown —
-which restic may or may not have saved first: said as possibly
-missing. The app stays `ok` either way: its snapshot was verified
-before the record was begun.
+as a group of their own, and no app's history lists them. A record
+not written is a warning of the run, and the app stays `ok`: its
+snapshot was verified before the record was begun. The warning says
+which: "could not be written", where restic itself said it failed;
+"may not have been written", where restic may have saved it first —
+the run stopped while it wrote (Ctrl-C, `systemctl stop`, a shutdown),
+its clock, its unit ended from outside or by a signal, an exit 0 that
+named nothing; and "was not written", where the run was stopped before
+it was begun.
+
+Every time is stored in UTC. restic stores a snapshot's time in the
+zone it runs in, every unit sees the box's `/etc/localtime`, and
+`forget` sorts each snapshot into its hours, days and months by the
+zone it was stored in [measured]: a box in Berlin stored its app
+snapshots at `+02:00` and their records at `Z`, and `--keep-daily`
+kept a 23:30 snapshot and removed its record. So every restic unit is
+given `TZ=UTC`, and a `forget` policy's days and weeks turn at UTC
+midnight, whatever the box's zone.
+
+### Retention
+
+Nothing on the box deletes: `forget` and `prune` are run off the box,
+with the key that may delete (the box's may not). Without them every
+hourly run adds a snapshot of each app and a record of each that ended
+`ok` — two snapshots an app an hour — and every listing of the
+repository reads every snapshot file, on a rebuilt box from an empty
+cache: 1,506 snapshots took 19.6 s over 25 ms each way and 50 Mbit/s
+[measured]. At 7 apps a year of that is some 120,000, and at that rate
+a first listing of some 26 minutes [extrapolated, not measured] —
+close to the 30 minutes at which a run or a drill gives a listing up;
+a restore waits it out. An ordinary `forget` policy
+by `(host, paths)` group — `--keep-hourly 24 --keep-daily 30
+--keep-monthly 12`, say, the default grouping — thins each app's
+snapshots and its records alike, each group on its own, and keeps a
+listing to a few hundred.
 
 A declared database that sits inside a declared `files` path is not
 uploaded there, nor its `-wal`, `-shm` and `-journal`: its contents are
@@ -811,19 +842,24 @@ hourly run. It needs no sudoers line.
   is `hotserve-backup drill`'s.
 - A unit whose state cannot be read ten looks running (five minutes) is
   stopped, and that step fails.
-- A listing of the repository — an app's snapshots, the run's listing,
-  the look into a snapshot after its upload, the records of clean runs
-  — and the writing of a record, not answered in 30 minutes: stopped,
-  and said as the repository not answering. The run's listing is then a
-  warning, the app's backup `incomplete`, a drill's app not proven (and
-  no other app asked), a restore refused, a record not written the
-  run's warning (the app still `ok`). The slowest measured was 24.6 s — 1,506 snapshots,
-  28.5 GB, a cold cache, 25 ms each way and 50 Mbit/s — and restic
-  itself gives up on a wrong key after about a quarter of an hour; it
-  is there for a storage that takes connections and never answers,
-  which held the run lock, and every hourly run, for as long as restic
-  kept trying. An upload, a fetch and the check itself are not bounded:
-  their length is the data's.
+- In a run or a drill, a read of the repository — an app's snapshots,
+  the run's listing, the look into a snapshot after its upload, the
+  size of a snapshot before its fetch — and the writing of a record,
+  not answered in 30 minutes: stopped, and said as the repository not
+  answering, which it will not do for the next app either, so no other
+  app is asked. The run's listing is then a warning, the app's backup
+  `incomplete`, a drill's app not proven, a record not written the
+  run's warning (the app still `ok`). The slowest measured: a listing
+  24.6 s (1,506 snapshots, 28.5 GB, a cold cache, 25 ms each way and
+  50 Mbit/s), a snapshot's size 6.4 s (200,203 files, the same link);
+  restic itself gives up on a wrong key after about a quarter of an
+  hour. It is there for a storage that takes connections and never
+  answers, which held the run lock, and every hourly run, for as long
+  as restic kept trying. A restore's reads have none (the owner,
+  2026-09-30): someone started it and can stop it, and a rebuilt box's
+  first listing, from an empty cache, is the longest a box makes
+  ("Retention", above). An upload, a fetch and the check itself are not
+  bounded: their length is the data's.
 - The repository check, where `restic cat config` has not answered in
   30 seconds: that check's verdict is `unreachable`, and the check is not
   made.

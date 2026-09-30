@@ -122,13 +122,12 @@ func (x *run) checkRepository(ctx context.Context, group string, at time.Time) *
 	if n := len(said.BrokenPacks); n > 0 {
 		found += fmt.Sprintf(", in %s", plural(n, "damaged pack"))
 	}
-	// Still damage — a check never masks it — but where something else
-	// held the repository meanwhile, what may explain it is said.
-	if x.metLock {
-		found += "; something else held the repository during this drill (exit 11): a prune off the box makes packs vanish under a lock-free check"
-	}
-	// Short enough, whatever the counts, that record.Text never cuts it.
-	return verdict(record.CheckDamaged, fmt.Sprintf("%s; restic's own words: `journalctl -u %s`", found, name))
+	// Still damage — a check never masks it — and what else looks the
+	// same: a prune off the box makes packs vanish under a check that
+	// takes no lock. The next check reads this group again, and settles
+	// it. Short enough, whatever the counts, that record.Text never cuts
+	// it.
+	return verdict(record.CheckDamaged, fmt.Sprintf("%s; a prune run off the box during the check looks the same, and the next check reads this group again; restic's own words: `journalctl -u %s`", found, name))
 }
 
 // probe asks the repository for its config, under probeClock: nothing
@@ -176,10 +175,33 @@ func plural(n int, what string) string {
 	return fmt.Sprintf("%d %ss", n, what)
 }
 
-// startWithin is start under a clock of its own. At the clock the unit
-// is stopped, and the error says it did not answer; an interrupt is the
-// caller's context's, and is returned as it came.
+// readClock is the backstop a read of the repository is given: listClock
+// where nobody is there to stop it — a run, a drill, which hold the run
+// lock unwatched — and none in a restore (the owner, 2026-09-30), which
+// someone started and can stop, and whose listings, a rebuilt box's
+// from an empty cache, are the longest a box makes.
+func (x *run) readClock() time.Duration {
+	if x.attended {
+		return 0
+	}
+	return listClock
+}
+
+// didNotAnswer is whether err is a unit given up at its clock — stopped,
+// or not confirmed gone — rather than an interrupt: the repository not
+// answering, which it will not do for the next app either.
+func didNotAnswer(ctx context.Context, err error) bool {
+	return errors.Is(err, errDidNotAnswer) || ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded)
+}
+
+// startWithin is start under a clock of its own, or none where within is
+// 0. At the clock the unit is stopped, and the error says it did not
+// answer; an interrupt is the caller's context's, and is returned as it
+// came.
 func (x *run) startWithin(ctx context.Context, within time.Duration, s unit.Spec) (unit.Outcome, error) {
+	if within <= 0 {
+		return x.start(ctx, s)
+	}
 	clock, cancel := context.WithTimeout(ctx, within)
 	defer cancel()
 	o, err := x.start(clock, s)
@@ -197,11 +219,16 @@ func (x *run) startWithin(ctx context.Context, within time.Duration, s unit.Spec
 // is given UTC — so that a forget policy that keeps a snapshot for a
 // period keeps the record that falls in the same one.
 func vouchArgv(restic, app, id string, at time.Time) []string {
-	return []string{restic, "backup", "--quiet", "--json", "--retry-lock", retryLock, "--host", "hotserve",
+	return []string{restic, "backup", "--quiet", "--json", "--retry-lock", vouchRetryLock, "--host", "hotserve",
 		"--time", at.UTC().Format(time.DateTime),
 		"--tag", cleanTag, "--tag", vouchesTag + id,
 		"--stdin-from-command", "--stdin-filename", "hotserve-clean-" + app, "--", "/usr/bin/echo", id}
 }
+
+// vouchRetryLock is how long a record waits for a lock something else
+// holds: less than its clock (listClock), so that a lock is said as one,
+// not as a storage that did not answer.
+const vouchRetryLock = "20m"
 
 // The tags of a clean-run record.
 const (

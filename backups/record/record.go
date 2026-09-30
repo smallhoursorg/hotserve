@@ -149,10 +149,10 @@ type Status struct {
 	// verdict, which the weekly drill makes after its apps. An
 	// interrupted check comes to none, and leaves the one before.
 	LastCheck *Check `json:"last_check,omitempty"`
-	// CheckRead is the group of the data the last check that read it
-	// read — one that came to clean or damaged — and what the next check
-	// reads the group after: every group once in fifty-two checks,
-	// whatever weeks were missed.
+	// CheckRead is the group of the data the last clean check read, and
+	// what the next check reads the group after: every group once in
+	// fifty-two clean checks, whatever weeks were missed. A check that
+	// finds damage leaves it, so that the next reads that group again.
 	CheckRead string `json:"check_read,omitempty"`
 	// Listed is when a run last listed the repository and was answered.
 	// A listing that failed leaves it, and every Seen, as they were.

@@ -199,9 +199,9 @@ type run struct {
 	// made is when restic says it made each app's snapshot of this run,
 	// from the listing that verified it: its clean-run record's time.
 	made map[string]time.Time
-	// metLock is set once a restic of this command met a lock something
-	// else held (exit 11).
-	metLock bool
+	// attended is a command someone started and can stop — a restore:
+	// its reads of the repository have no backstop (readClock).
+	attended bool
 }
 
 // preRestoreTag is on a snapshot a restore made of what it was about to
@@ -493,7 +493,7 @@ func (x *run) apps(ctx context.Context) error {
 			// Said in the repository too, once nothing of the app's run is
 			// left to change how it ended: what a rebuilt box, which has
 			// no record, has to go on.
-			if app.Class == record.OK && ctx.Err() == nil {
+			if app.Class == record.OK {
 				x.vouch(ctx, name, app.Snapshot.ID)
 			}
 		}
@@ -565,13 +565,10 @@ func (x *run) list(ctx context.Context) {
 	// say where the repository is — do not go there either, but for the
 	// id in that one line. They are kept for root, until a listing is
 	// answered.
-	said, berr := x.besides("listing")
-	if err == nil {
-		err = berr
-	}
+	said, _ := os.ReadFile(filepath.Join(x.dir, ".listing.err"))
 	if err != nil {
 		where := ""
-		if len(bytes.TrimSpace(said)) > 0 && os.WriteFile(kept, said, 0o600) == nil && os.Chmod(kept, 0o600) == nil {
+		if len(bytes.TrimSpace(said)) > 0 && os.WriteFile(kept, said, 0o600) == nil && os.Chmod(kept, 0o600) == nil { //nolint:gosec // a constant name under root's own state dir
 			where = fmt.Sprintf(" What restic said is in %s, root's to read.", kept)
 		}
 		if x.status.Unlisted == nil {
@@ -738,13 +735,7 @@ func (x *run) start(ctx context.Context, s unit.Spec) (unit.Outcome, error) {
 	if cerr := f.Close(); werr != nil || cerr != nil {
 		return unit.Outcome{}, errors.Join(werr, cerr)
 	}
-	o, err := x.r.Run(ctx, s)
-	// A restic that met a lock something else held: what the check,
-	// which takes none, then says beside any damage it finds.
-	if len(s.Argv) > 0 && s.Argv[0] == x.cfg.Restic && o.Result == "exit-code" && o.ExitStatus == 11 {
-		x.metLock = true
-	}
-	return o, err
+	return x.r.Run(ctx, s)
 }
 
 // sweep stops whatever an earlier run recorded and did not live to
@@ -1117,7 +1108,9 @@ func (x *run) app(ctx context.Context, root, name string, decl *backupdecl.Confi
 	app.Snapshot = &record.Snapshot{ID: id, Time: made, Seen: &made}
 	if err := x.verify(ctx, name, id, app); err != nil {
 		app.Class, app.Detail = record.Incomplete, fmt.Sprintf("snapshot %s was made, but what is in it could not be checked: %v", short(id), err)
-		return app, false
+		// A repository that did not answer this app will not answer the
+		// next, whose upload nothing bounds.
+		return app, didNotAnswer(ctx, err)
 	}
 	for _, it := range app.Items {
 		if !it.OK && app.Class == record.OK {
@@ -1431,32 +1424,40 @@ func (x *run) vouch(ctx context.Context, app, id string) {
 	warn := func(what string) {
 		x.status.Warning = strings.TrimSpace(x.status.Warning + " " + record.Text(fmt.Sprintf("%s: snapshot %s is a complete backup, and the record that says so %s: a restore on a rebuilt box will not know it.", app, short(id), what)))
 	}
+	// Stopped — Ctrl-C, systemctl stop, a shutdown — after the app's run
+	// ended ok and before its record was begun.
+	if ctx.Err() != nil {
+		warn("was not written: the command was stopped before it was begun")
+		return
+	}
 	at, ok := x.made[app]
 	if !ok {
 		warn("was not written: its listing said nothing of when it was made")
 		return
 	}
 	out := filepath.Join(x.dir, app+".vouch.json")
-	s := resticUnit(x.name("vouch", app), "hotserve backup: record in the repository that "+app+"'s backup ended ok", x.cfg.EnvFile, vouchArgv(x.cfg.Restic, app, id, at), out)
-	// restic reads --time in the zone it runs in [measured].
-	s.Environment = append(s.Environment, "TZ=UTC")
-	o, err := x.startWithin(ctx, listClock, s)
+	o, err := x.startWithin(ctx, listClock, resticUnit(x.name("vouch", app), "hotserve backup: record in the repository that "+app+"'s backup ended ok", x.cfg.EnvFile, vouchArgv(x.cfg.Restic, app, id, at), out))
+	// Only restic's own word that it failed is "could not": a stop, a
+	// clock, a unit ended from outside or by a signal, an exit 0 that
+	// names nothing — restic may have saved it first, and which is not
+	// known here.
 	switch {
 	case err == nil && o.OK() && summaryID(out) != "":
 		// Written: a stop that came as it finished changes nothing.
-	case err != nil && ctx.Err() != nil:
-		// Stopped — Ctrl-C, systemctl stop, a shutdown — while restic was
-		// writing it: it may have saved the record first, or not, and
-		// which is not known here.
-		warn("may not have been written: the command was stopped while it was being written")
-	case err != nil:
-		warn("could not be written into the repository (" + err.Error() + ")")
-	case !o.OK():
-		// Ended on its own, a stop or not: its own failure is what is said.
+	case err == nil && o.Result == "exit-code" && o.ExitStatus == 11:
+		warn("could not be written into the repository (it stayed locked by something else for " + vouchRetryLock + ", exit 11)")
+	case err == nil && o.Result == "exit-code" && o.ExitStatus != 0:
 		detail, _ := resticFailure(o)
 		warn("could not be written into the repository (" + detail + ")")
+	case err == nil && o.OK():
+		warn("may not have been written: restic exited 0 and its summary names no snapshot")
+	case err == nil:
+		detail, _ := resticFailure(o)
+		warn("may not have been written: " + detail)
+	case ctx.Err() != nil:
+		warn("may not have been written: the command was stopped while it was being written")
 	default:
-		warn("could not be written into the repository (restic exited 0 but its summary names no snapshot)")
+		warn("may not have been written: " + err.Error())
 	}
 }
 
@@ -1464,11 +1465,18 @@ func (x *run) vouch(ctx context.Context, app, id string) {
 // credential file the manager reads, the network and restic's own
 // cache — what every restic unit has — and stdout into a file of the
 // command's. The caller adds what its command needs beyond that.
+//
+// In UTC (the owner, 2026-09-30): restic stores a snapshot's time in
+// the zone it runs in, and forget sorts each into its days by that zone
+// [measured] — a Berlin box's 23:30 snapshot at +02:00 and its record
+// at Z fell into different days, and --keep-daily kept the one and
+// removed the other. A unit sees the box's /etc/localtime, so the zone
+// is said here, for every restic alike.
 func resticUnit(name, description, envFile string, argv []string, stdout string) unit.Spec {
 	return unit.Spec{
 		Name: name, Description: description, Argv: argv,
 		User: backupUser, Network: true, EnvironmentFile: envFile,
-		Environment:    []string{"RESTIC_CACHE_DIR=/var/cache/hotserve-backup", "HOME=/nonexistent"},
+		Environment:    []string{"RESTIC_CACHE_DIR=/var/cache/hotserve-backup", "HOME=/nonexistent", "TZ=UTC"},
 		CacheDirectory: "hotserve-backup", StdoutFile: stdout,
 	}
 }
@@ -1562,7 +1570,7 @@ func (x *run) verify(ctx context.Context, app, id string, rec *record.App) error
 	// directory part of a declared path, after /backup/<app>/ — and
 	// restic takes each as a path and nothing else: they follow "--",
 	// start with "/", and like every argument are never expanded.
-	o, err := x.startWithin(ctx, listClock, resticUnit(x.name("verify", app), "hotserve backup: check "+app+"'s snapshot", x.cfg.EnvFile,
+	o, err := x.startWithin(ctx, x.readClock(), resticUnit(x.name("verify", app), "hotserve backup: check "+app+"'s snapshot", x.cfg.EnvFile,
 		append([]string{x.cfg.Restic, "ls", "--json", "--no-lock", "--", id}, parents...), out))
 	if err != nil {
 		return err
@@ -1693,10 +1701,10 @@ func (x *run) snapshots(ctx context.Context, role, app, tag string) (snaps []lis
 	s := resticUnit(x.name(role, app), "hotserve backup: ask the repository about "+about, x.cfg.EnvFile,
 		[]string{x.cfg.Restic, "snapshots", "--json", "--no-lock", "--host", "hotserve", "--tag", tag}, out)
 	s.StderrFile = stderr
-	o, err := x.startWithin(ctx, listClock, s)
+	o, err := x.startWithin(ctx, x.readClock(), s)
 	if err != nil {
 		// A repository that did not answer one app will not answer the next.
-		return nil, errors.Is(err, errDidNotAnswer), err
+		return nil, didNotAnswer(ctx, err), err
 	}
 	if !o.OK() {
 		detail, wide := resticFailure(o)
@@ -1733,11 +1741,17 @@ func (x *run) snapshots(ctx context.Context, role, app, tag string) (snaps []lis
 		snaps = append(snaps, one)
 	}
 	sort.SliceStable(snaps, func(i, j int) bool { return snaps[i].Time.Before(snaps[j].Time) })
+	if stderr != "" {
+		if _, err := x.besides(role); err != nil {
+			return nil, false, err
+		}
+	}
 	return snaps, false, nil
 }
 
 // besides is what restic said on stderr beside a listing of every app's
-// snapshots, or of the records, and an error where it said anything: it
+// snapshots, or of the records — snapshots holds each such listing to
+// it — and an error where it said anything: it
 // leaves a snapshot it cannot load out of the listing, says so on stderr
 // alone, and exits 0 [measured, a cold cache], so an answer that came
 // with anything beside it is not taken for the whole.
@@ -1750,9 +1764,9 @@ func (x *run) besides(role string) (said []byte, err error) {
 		return said, nil
 	}
 	if m := ignoringRe.FindSubmatch(said); m != nil {
-		return said, fmt.Errorf("restic could not load snapshot %.8s and left it out of the listing", m[1])
+		return said, fmt.Errorf("restic could not load snapshot %.8s and left it out of the listing, so the listing is not believed", m[1])
 	}
-	return said, errors.New("restic had something to say beside the listing")
+	return said, errors.New("restic had something to say beside the listing, so the listing is not believed")
 }
 
 // ignoringRe is what restic says of a snapshot file it cannot load.
