@@ -209,6 +209,9 @@ run and a drill from the shipped files.
      first good backup, once; after that it is the drill's. That is the
      whole app fetched back, in plaintext, on a timer, so above 1 GiB
      restored the run leaves it to `hotserve-backup drill`, and says so;
+     and where the repository has just not answered — the app's record
+     given up at its clock — it drills nothing, records no verdict, and
+     the next run drills it;
 6. lists the repository, once, for every app (`restic snapshots
    --no-lock --tag hotserve`, which leaves the records of clean runs
    out), and writes beside each snapshot the record names when

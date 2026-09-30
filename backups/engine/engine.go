@@ -505,8 +505,10 @@ func (x *run) apps(ctx context.Context) error {
 		// A backup nobody has restored is a hypothesis: an app's first
 		// good backup has its snapshot fetched and checked, there and
 		// then. After that — proven or not — it is the drill's: a drill
-		// that keeps failing is not re-fetched, in full, every hour.
-		if app := x.status.Apps[name]; app.Class == record.OK && app.RestoreProven == nil && app.RestoreDrill == nil && ctx.Err() == nil {
+		// that keeps failing is not re-fetched, in full, every hour. Not
+		// where the repository has just not answered — the app's record
+		// given up at its clock: no verdict, so the next run drills it.
+		if app := x.status.Apps[name]; app.Class == record.OK && app.RestoreProven == nil && app.RestoreDrill == nil && ctx.Err() == nil && x.unanswered == nil {
 			if x.firstDrill(ctx, name, app) {
 				// An upgrade leaves no verdict: stopAfter says it instead.
 				detail := ""

@@ -745,8 +745,22 @@ func TestAListingThatDoesNotAnswerIsGivenUpAtItsBackstop(t *testing.T) {
 		if n := strings.Count(b.roles(), "upload"); n != 1 {
 			t.Errorf("uploads after the repository did not answer: %s", b.roles())
 		}
+		// Nor blog's own first drill (Copilot on #161): not begun, and no
+		// verdict of it on record, so that the next run drills it.
+		if b.started("size") || b.started("fetch") {
+			t.Errorf("blog's first drill was begun after the repository did not answer: %s", b.roles())
+		}
+		if app := st.Apps["blog"]; app.RestoreDrill != nil || app.RestoreProven != nil {
+			t.Errorf("blog's first drill has a verdict: %+v %+v", app.RestoreDrill, app.RestoreProven)
+		}
 		if app := st.Apps["shop"]; app == nil || app.Class != record.NotAttempted || !strings.Contains(app.Detail, "did not answer") {
 			t.Errorf("shop: %+v", app)
+		}
+		// The repository answering again, the next run drills blog.
+		b.hang, b.specs = "", nil
+		st, _ = Run(bounded(t), b.cfg, b)
+		if app := st.Apps["blog"]; app == nil || app.RestoreProven == nil || !b.started("fetch") {
+			t.Errorf("the next run did not drill blog: %s; %+v", b.roles(), app)
 		}
 	})
 }
