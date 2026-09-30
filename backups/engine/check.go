@@ -68,11 +68,9 @@ func nextGroup(last string, t time.Time) string {
 	return fmt.Sprintf("%d/%d", n%checkGroups+1, checkGroups)
 }
 
-// checkArgv is the check of one group: no lock, restic's words as JSON,
-// and the temporary cache a check killed hard leaves behind removed once
-// it is a month old [M79].
+// checkArgv is the check of one group: no lock, restic's words as JSON.
 func checkArgv(restic, group string) []string {
-	return []string{restic, "check", "--no-lock", "--json", "--cleanup-cache", "--read-data-subset=" + group}
+	return []string{restic, "check", "--no-lock", "--json", "--read-data-subset=" + group}
 }
 
 // checkRepository checks the repository's structure and one group of
@@ -87,13 +85,21 @@ func (x *run) checkRepository(ctx context.Context, group string, at time.Time) *
 		c.Class, c.Detail = class, record.Text(detail)
 		return c
 	}
-	if class, detail := x.probe(ctx); class != "" {
+	switch class, detail, none := x.probe(ctx); {
+	case none:
+		return nil
+	case class != "":
 		return verdict(class, detail)
 	}
 	name := x.name("repocheck", "")
 	out := filepath.Join(x.dir, "repocheck.json")
 	o, err := x.start(ctx, resticUnit(name, "hotserve backup: check the repository, and data group "+c.Group, x.cfg.EnvFile, checkArgv(x.cfg.Restic, c.Group), out))
-	if err != nil {
+	switch {
+	case err != nil && errors.Is(err, unit.ErrEndedFromOutside):
+		// Stopped by someone, or with the drill's service — maybe before
+		// the drill sees its own stop: nothing was found out.
+		return nil
+	case err != nil:
 		return verdict(record.CheckFailed, "the check's unit: "+err.Error())
 	}
 	var said struct {
@@ -112,7 +118,16 @@ func (x *run) checkRepository(ctx context.Context, group string, at time.Time) *
 	}
 	// Exit 1: damage found, or the storage lost half way. The probe
 	// after says which.
-	if class, detail := x.probe(ctx); class != "" {
+	switch class, detail, none := x.probe(ctx); {
+	case none && counted && *said.NumErrors > 0:
+		// Stopped before it could say: what restic counted is never
+		// dropped. Not damage for certain; failed, which status does not
+		// call healthy, and the group read again.
+		c.Class, c.Detail = record.CheckFailed, record.Text(fmt.Sprintf("restic check counted %s, and was stopped before damage could be told from a storage that went away; the next check reads this group again; restic's own words: `journalctl -u %s`", plural(*said.NumErrors, "error"), name))
+		return c
+	case none:
+		return nil
+	case class != "":
 		return verdict(class, "the check could not finish: "+detail)
 	}
 	if !counted || *said.NumErrors == 0 {
@@ -127,25 +142,35 @@ func (x *run) checkRepository(ctx context.Context, group string, at time.Time) *
 	// takes no lock. The next check reads this group again, and settles
 	// it. Short enough, whatever the counts, that record.Text never cuts
 	// it.
-	return verdict(record.CheckDamaged, fmt.Sprintf("%s; a prune run off the box during the check looks the same, and the next check reads this group again; restic's own words: `journalctl -u %s`", found, name))
+	return verdict(record.CheckDamaged, fmt.Sprintf("%s; a prune run off the box, or the storage failing, during the check looks the same, and the next check reads this group again; restic's own words: `journalctl -u %s`", found, name))
 }
 
 // probe asks the repository for its config, under probeClock: nothing
-// where it answered, else the verdict and why.
-func (x *run) probe(ctx context.Context) (record.CheckClass, string) {
+// where it answered, else the verdict and why — or none, where it was
+// stopped, or its unit ended from outside, and so found nothing out.
+//
+// It also removes what a check killed hard left in the cache a month
+// on (--cleanup-cache): a check works in a temporary cache of its own,
+// and cleans nothing else; this, in the cache it leaves behind in, does
+// [measured].
+func (x *run) probe(ctx context.Context) (class record.CheckClass, detail string, none bool) {
 	// Its answer, the repository's config decrypted, into root's run
 	// directory: never the journal.
 	o, err := x.startWithin(ctx, probeClock, resticUnit(x.name("probe", ""), "hotserve backup: whether the repository answers, and the password opens it", x.cfg.EnvFile,
-		[]string{x.cfg.Restic, "cat", "config", "--no-lock"}, filepath.Join(x.dir, "probe.json")))
+		[]string{x.cfg.Restic, "cat", "config", "--no-lock", "--cleanup-cache"}, filepath.Join(x.dir, "probe.json")))
 	switch {
-	case errors.Is(err, errDidNotAnswer):
-		return record.CheckUnreachable, err.Error() + ": the storage could not be reached, or refused the key"
+	case err != nil && (ctx.Err() != nil || errors.Is(err, unit.ErrEndedFromOutside)):
+		return "", "", true
+	case errors.Is(err, errDidNotAnswer), err != nil && errors.Is(err, context.DeadlineExceeded):
+		// At its clock, stopped — or not confirmed gone.
+		return record.CheckUnreachable, err.Error() + ": the storage could not be reached, or refused the key", false
 	case err != nil:
-		return record.CheckFailed, "the probe's unit: " + err.Error()
+		return record.CheckFailed, "the probe's unit: " + err.Error(), false
 	case o.OK():
-		return "", ""
+		return "", "", false
 	}
-	return checkClass(o)
+	class, detail = checkClass(o)
+	return class, detail, false
 }
 
 // checkClass is how a probe or a check ended, as a verdict.
@@ -187,13 +212,6 @@ func (x *run) readClock() time.Duration {
 	return listClock
 }
 
-// didNotAnswer is whether err is a unit given up at its clock — stopped,
-// or not confirmed gone — rather than an interrupt: the repository not
-// answering, which it will not do for the next app either.
-func didNotAnswer(ctx context.Context, err error) bool {
-	return errors.Is(err, errDidNotAnswer) || ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded)
-}
-
 // startWithin is start under a clock of its own, or none where within is
 // 0. At the clock the unit is stopped, and the error says it did not
 // answer; an interrupt is the caller's context's, and is returned as it
@@ -205,8 +223,15 @@ func (x *run) startWithin(ctx context.Context, within time.Duration, s unit.Spec
 	clock, cancel := context.WithTimeout(ctx, within)
 	defer cancel()
 	o, err := x.start(clock, s)
-	if err != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, unit.ErrNotConfirmedGone) {
-		return o, fmt.Errorf("%w within %s; the unit was stopped", errDidNotAnswer, within)
+	if err != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+		if !errors.Is(err, unit.ErrNotConfirmedGone) {
+			err = fmt.Errorf("%w within %s; the unit was stopped", errDidNotAnswer, within)
+		}
+		// Stopped or not confirmed gone, the repository did not answer:
+		// remembered, so that nothing more is asked of it.
+		if x.unanswered == nil {
+			x.unanswered = err
+		}
 	}
 	return o, err
 }

@@ -421,7 +421,7 @@ func TestIntegrationBindsToEndsTheUnitWhenItsOrchestratorIsKilled(t *testing.T) 
 	}
 	select {
 	case res := <-done:
-		if res.err == nil || !strings.Contains(res.err.Error(), "ended from outside") {
+		if res.err == nil || !strings.Contains(res.err.Error(), "ended from outside") || !errors.Is(res.err, ErrEndedFromOutside) {
 			t.Fatalf("want an error saying the unit was ended from outside, got %+v, %v", res.out, res.err)
 		}
 	case <-time.After(30 * time.Second):

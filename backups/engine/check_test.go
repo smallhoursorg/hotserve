@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -211,11 +212,14 @@ func TestTheCheckTakesNoLockAndReadsItsWeeksGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 	check := b.spec("repocheck")
-	want := []string{"/usr/bin/restic", "check", "--no-lock", "--json", "--cleanup-cache", "--read-data-subset=39/52"}
+	want := []string{"/usr/bin/restic", "check", "--no-lock", "--json", "--read-data-subset=39/52"}
 	if !slices.Equal(check.Argv, want) {
 		t.Errorf("the check's command:\n%q\nwant\n%q", check.Argv, want)
 	}
-	if probe := b.spec("probe"); !slices.Equal(probe.Argv, []string{"/usr/bin/restic", "cat", "config", "--no-lock"}) {
+	// The probe, which uses the cache a killed check leaves its own in,
+	// is what removes one a month old: a check works in a temporary cache
+	// of its own, and cleans nothing else [measured].
+	if probe := b.spec("probe"); !slices.Equal(probe.Argv, []string{"/usr/bin/restic", "cat", "config", "--no-lock", "--cleanup-cache"}) {
 		t.Errorf("the probe's command: %q", probe.Argv)
 	}
 	// The config it prints is the repository's, decrypted: root's run
@@ -270,7 +274,6 @@ func TestNoCheckWhereTheDrillCouldNotGoOn(t *testing.T) {
 	last := &record.Check{Time: time.Date(2026, 9, 20, 3, 30, 0, 0, time.UTC), Group: "38/52", Class: record.CheckClean}
 	for name, set := range map[string]func(*box){
 		"restic not installed":        func(b *box) { b.haveProgram = func(p string) bool { return p != "/usr/bin/restic" } },
-		"the plan could not be made":  func(b *box) { b.outcome["plan"] = unit.Outcome{Result: "exit-code", ExitStatus: 1} },
 		"a helper of another version": func(b *box) { b.outcome["check"] = unit.Outcome{Result: "exit-code", ExitStatus: OtherVersionStatus} },
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -389,6 +392,11 @@ func TestOnlyAnOKRunIsVouchedForAndARecordNotWrittenIsSaid(t *testing.T) {
 		"the record with no id": {
 			set:   func(b *box) { b.vouch = "" },
 			class: record.OK, vouch: true, warn: "blog: snapshot aaaaaaaa is a complete backup, and the record that says so may not have been written: restic exited 0 and its summary names no snapshot",
+		},
+		// restic exits 3 having saved a snapshot all the same.
+		"the record exit 3": {
+			set:   func(b *box) { b.outcome["vouch"] = unit.Outcome{Result: "exit-code", ExitStatus: 3} },
+			class: record.OK, vouch: true, warn: "blog: snapshot aaaaaaaa is a complete backup, and the record that says so may not have been written: restic exited 3, having saved a snapshot of what it could read",
 		},
 		"the record locked out": {
 			set:   func(b *box) { b.outcome["vouch"] = unit.Outcome{Result: "exit-code", ExitStatus: 11} },
@@ -539,6 +547,8 @@ func TestARestoreOnARebuiltBoxSaysWhatVouches(t *testing.T) {
 	}
 	for name, tc := range map[string]struct {
 		set      func(*box)
+		ask      string // --snapshot
+		restored string // what is restored, where not the newest
 		lastOK   string
 		notKnown string
 		asked    bool // whether the repository's records were asked for
@@ -574,6 +584,10 @@ func TestARestoreOnARebuiltBoxSaysWhatVouches(t *testing.T) {
 			},
 			notKnown: "not believed", asked: true,
 		},
+		"an older one asked for, and vouched for itself": {
+			set: func(b *box) { b.vouches = vouching(snapB, snapA) }, ask: snapB[:8],
+			restored: snapB, asked: true,
+		},
 		"the box's own record knows": {
 			set: func(b *box) {
 				must(b.t, os.MkdirAll(b.cfg.StateDir, 0o755))
@@ -588,13 +602,14 @@ func TestARestoreOnARebuiltBoxSaysWhatVouches(t *testing.T) {
 			tc.set(b)
 			var asked *RestoreAsk
 			o := inPlace()
+			o.Snapshot = tc.ask
 			o.Confirm = func(a RestoreAsk) bool { asked = &a; return true }
 			rep, err := Restore(context.Background(), b.cfg, b, o)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if rep.Snapshot.ID != snapA {
-				t.Errorf("restored %.8s, not the newest", rep.Snapshot.ID)
+			if want := cmp.Or(tc.restored, snapA); rep.Snapshot.ID != want {
+				t.Errorf("restored %.8s, want %.8s", rep.Snapshot.ID, want)
 			}
 			if b.started("vouches") != tc.asked {
 				t.Errorf("the repository's records asked for: %v, want %v (%s)", b.started("vouches"), tc.asked, b.roles())
@@ -672,7 +687,8 @@ func TestAListingThatDoesNotAnswerIsGivenUpAtItsBackstop(t *testing.T) {
 		if n := strings.Count(b.roles(), "upload"); n != 1 {
 			t.Errorf("uploads after the repository did not answer: %s", b.roles())
 		}
-		if app := st.Apps["shop"]; app == nil || app.Class != record.NotAttempted {
+		// In the repository's words, not blog's: shop made no snapshot.
+		if app := st.Apps["shop"]; app == nil || app.Class != record.NotAttempted || !strings.Contains(app.Detail, "did not answer") || strings.Contains(app.Detail, "was made") {
 			t.Errorf("shop: %+v", app)
 		}
 		if b.started("vouch") {
@@ -715,6 +731,7 @@ func TestAListingThatDoesNotAnswerIsGivenUpAtItsBackstop(t *testing.T) {
 	// the run's warning, the app still ok.
 	t.Run("the record, in a run", func(t *testing.T) {
 		b := newBox(t)
+		two(t, b)
 		b.hang = "vouch"
 		st, _ := Run(bounded(t), b.cfg, b)
 		if app := st.Apps["blog"]; app.Class != record.OK || !strings.Contains(st.Warning, "did not answer within") {
@@ -722,6 +739,14 @@ func TestAListingThatDoesNotAnswerIsGivenUpAtItsBackstop(t *testing.T) {
 		}
 		if !slices.Contains(b.stopped, b.spec("vouch").Name) {
 			t.Errorf("the record's unit was not stopped: %v", b.stopped)
+		}
+		// A storage that did not answer blog's record will not answer
+		// shop's upload, which nothing bounds.
+		if n := strings.Count(b.roles(), "upload"); n != 1 {
+			t.Errorf("uploads after the repository did not answer: %s", b.roles())
+		}
+		if app := st.Apps["shop"]; app == nil || app.Class != record.NotAttempted || !strings.Contains(app.Detail, "did not answer") {
+			t.Errorf("shop: %+v", app)
 		}
 	})
 }
@@ -856,7 +881,7 @@ func TestDamageSaysWhatElseLooksLikeIt(t *testing.T) {
 			st, _, _ := Drill(context.Background(), b.cfg, b)
 			c := st.LastCheck
 			if c == nil || c.Class != record.CheckDamaged || strings.HasSuffix(c.Detail, "…") ||
-				!strings.Contains(c.Detail, "a prune run off the box during the check looks the same, and the next check reads this group again") ||
+				!strings.Contains(c.Detail, "a prune run off the box, or the storage failing, during the check looks the same, and the next check reads this group again") ||
 				!strings.Contains(c.Detail, "journalctl -u "+b.spec("repocheck").Name) {
 				t.Errorf("%+v", c)
 			}
@@ -909,5 +934,118 @@ func TestEveryResticUnitRunsInUTC(t *testing.T) {
 		if len(s.Argv) > 0 && s.Argv[0] == b.cfg.Restic && !slices.Contains(s.Environment, "TZ=UTC") {
 			t.Errorf("%s: %q", s.Name, s.Environment)
 		}
+	}
+}
+
+// A plan that cannot be made — a broken Caddyfile — stops the drill's
+// apps, and not the repository's check, which needs no plan.
+func TestAPlanThatCannotBeMadeStillChecksTheRepository(t *testing.T) {
+	b := restoreBox(t)
+	b.outcome["plan"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+	st, checked, err := Drill(context.Background(), b.cfg, b)
+	if err == nil {
+		t.Error("a drill with no plan exited 0")
+	}
+	if checked == nil || st.LastCheck == nil || *checked != *st.LastCheck || checked.Class != record.CheckClean {
+		t.Errorf("checked %+v, record %+v (units %s)", checked, st, b.roles())
+	}
+	on, rerr := record.Read(filepath.Join(b.cfg.StateDir, "status.json"))
+	if rerr != nil || on.LastCheck == nil || on.LastDrill == nil || on.LastDrill.Detail == "" {
+		t.Errorf("on disk: %+v, %v", on, rerr)
+	}
+}
+
+// Damage restic counted is never dropped: stopped, or its unit ended
+// from outside, before the repository could be asked again, the check
+// is recorded as failed — status unhealthy, the group read again —
+// not as no verdict.
+func TestDamageCountedAndThenStoppedIsNotLost(t *testing.T) {
+	for name, how := range map[string]string{"interrupted": "interrupt", "the probe ended from outside": "outside"} {
+		t.Run(name, func(t *testing.T) {
+			b := restoreBox(t)
+			must(t, os.MkdirAll(b.cfg.StateDir, 0o755))
+			must(t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), &record.Status{Apps: map[string]*record.App{}, CheckRead: "40/52",
+				LastCheck: &record.Check{Time: time.Date(2026, 9, 20, 3, 30, 0, 0, time.UTC), Group: "40/52", Class: record.CheckClean}}))
+			b.outcome["repocheck"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+			b.repocheck = `{"message_type":"summary","num_errors":3,"broken_packs":["3b47"]}`
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			probes := 0
+			b.before = func(s unit.Spec) {
+				if !strings.Contains(s.Name, "_probe_") {
+					return
+				}
+				if probes++; probes == 2 {
+					if how == "interrupt" {
+						b.hang = "probe"
+						cancel()
+					} else {
+						b.err["probe"] = fmt.Errorf("%s: %w (start job \"canceled\")", s.Name, unit.ErrEndedFromOutside)
+					}
+				}
+			}
+			st, checked, _ := Drill(ctx, b.cfg, b)
+			c := st.LastCheck
+			if c == nil || c.Class != record.CheckFailed || !strings.Contains(c.Detail, "restic check counted 3 errors") || !strings.Contains(c.Detail, "the next check reads this group again") || checked == nil {
+				t.Errorf("verdict %+v, checked %+v", c, checked)
+			}
+			if st.CheckRead != "40/52" {
+				t.Errorf("the group read moved on: %q", st.CheckRead)
+			}
+		})
+	}
+}
+
+// A check or a probe whose unit is ended from outside — the drill's
+// service being stopped, which the manager does to the units bound to
+// it, maybe before the drill sees its own stop — found nothing out:
+// no verdict, and the last check stands.
+func TestACheckEndedFromOutsideIsNoVerdict(t *testing.T) {
+	last := &record.Check{Time: time.Date(2026, 9, 20, 3, 30, 0, 0, time.UTC), Group: "38/52", Class: record.CheckClean}
+	for _, role := range []string{"probe", "repocheck"} {
+		t.Run(role, func(t *testing.T) {
+			b := restoreBox(t)
+			must(t, os.MkdirAll(b.cfg.StateDir, 0o755))
+			must(t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), &record.Status{Apps: map[string]*record.App{}, LastCheck: last}))
+			b.err[role] = fmt.Errorf("hotserve_backup_%s_x.service: %w (start job \"canceled\")", role, unit.ErrEndedFromOutside)
+			st, checked, _ := Drill(context.Background(), b.cfg, b)
+			if checked != nil || st.LastCheck == nil || *st.LastCheck != *last {
+				t.Errorf("a check ended from outside came to %+v; the record holds %+v", checked, st.LastCheck)
+			}
+		})
+	}
+}
+
+// A drill notes when the first drill that checks ran on this record: a
+// check that never comes to a verdict — every drill stopped, week on
+// week — turns status unhealthy eight days after, where a fresh
+// last_drill would otherwise hide it for good.
+func TestADrillNotesWhenChecksBegan(t *testing.T) {
+	b := restoreBox(t)
+	b.hang = "repocheck"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b.before = func(s unit.Spec) {
+		if strings.Contains(s.Name, "_repocheck_") {
+			cancel()
+		}
+	}
+	st, _, _ := Drill(ctx, b.cfg, b)
+	if st.LastCheck != nil || st.CheckSince == nil {
+		t.Fatalf("check %+v, since %v", st.LastCheck, st.CheckSince)
+	}
+	first := *st.CheckSince
+	// A later drill keeps the first date; a run carries it.
+	b = restoreBox(t)
+	must(t, os.MkdirAll(b.cfg.StateDir, 0o755))
+	must(t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), &record.Status{Apps: map[string]*record.App{}, CheckSince: &first}))
+	st, err := Run(context.Background(), b.cfg, b)
+	must(t, err)
+	if st.CheckSince == nil || !st.CheckSince.Equal(first) {
+		t.Errorf("a run: since %v, want %v", st.CheckSince, first)
+	}
+	st, _, _ = Drill(context.Background(), b.cfg, b)
+	if st.CheckSince == nil || !st.CheckSince.Equal(first) {
+		t.Errorf("a drill: since %v, want %v", st.CheckSince, first)
 	}
 }

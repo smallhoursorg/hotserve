@@ -488,8 +488,9 @@ missed one at boot); a drill that proved nothing leaves
 
 ### The repository check
 
-After its apps, whatever became of them, a drill checks the repository
-itself: `restic check --no-lock --read-data-subset=n/52`, as the backup
+After its apps, whatever became of them — and where the Caddyfile
+cannot be turned into a plan, without them: the repository needs none —
+a drill checks the repository itself: `restic check --no-lock --read-data-subset=n/52`, as the backup
 account — its structure, and one fifty-second of its data, read back
 and verified. n is the group after the one the last clean check read
 (`check_read` in the record), and the ISO week's in UTC (`((week − 1)
@@ -516,21 +517,29 @@ why):
 | verdict | what it means |
 |---|---|
 | `clean` | restic read the structure and the group and found nothing wrong |
-| `damaged` | restic found errors, and the repository answered before and after it: the count, the damaged packs, that a prune run off the box during the check looks the same and the next check reads the group again, and `journalctl -u hotserve_backup_repocheck_…` for restic's own words |
+| `damaged` | restic found errors, and the repository answered before and after it: the count, the damaged packs, that a prune run off the box or the storage failing during the check looks the same and the next check reads the group again, and `journalctl -u hotserve_backup_repocheck_…` for restic's own words |
 | `unreachable` | the probe was not answered in 30 seconds, or restic exited 1 on it: the storage could not be reached, or refused the key — or the check lost the storage half way ("could not finish") |
 | `no repository` | the storage answered, and holds none there (10) |
 | `wrong password` | the password does not open it (12) |
 | `failed` | anything else: a unit systemd could not set up, a check ended by a signal, a summary that could not be read or did not add up |
 
-An interrupted drill comes to no verdict and leaves the last one. The
-check takes no lock: one killed hard with a lock written leaves it, and
+An interrupted drill comes to no verdict and leaves the last one, and
+so does a check or a probe whose unit is ended from outside — stopped
+by someone, or with the drill's own service, maybe before the drill
+sees its own stop. One exception: a check that exited 1 having counted
+errors, stopped before the repository could be asked again, is
+recorded `failed` — "restic check counted N errors, and was stopped
+before damage could be told from a storage that went away" — never
+dropped, and its group is read again. The check takes no lock: one killed hard with a lock written leaves it, and
 restic 0.18 never passes a stale lock by itself, so every backup after
 would fail until someone ran `restic unlock` [measured]. What that
 costs: a `prune` run off the box at the same moment can make packs
 vanish under it, and the verdict say `damaged` though nothing
 is; the next check reads the same group again, and says otherwise. A check killed hard leaves its
 temporary cache, some tens of MiB, in `/var/cache/hotserve-backup`;
-the next check removes one that is a month old (`--cleanup-cache`).
+the probe before a later check removes one that is a month old
+(`restic cat config --cleanup-cache`: a check works in a temporary
+cache of its own, and cleans nothing else [measured]).
 
 Damage is said — by the drill, which exits 1, by
 `hotserve-backup-drill.service` failed, and by `status` — and nothing
@@ -646,7 +655,10 @@ and nothing bounds an upload.
 
 `status.json`, per app: `ok`, `incomplete` (a snapshot exists and
 something declared is not in it, or restic exited 3), `pending`, `data
-missing`, `failed`, `not attempted`, `not run`; each declared item with
+missing`, `failed`, `not attempted` (in the words of why: a
+repository that did not answer, or refused an earlier app's backup for
+a reason every app shares, or a helper of another version), `not run`;
+each declared item with
 whether it was found in the snapshot; the snapshot's id; the last run
 that was `ok`, and the last that made a snapshot at all — each with
 `seen`, when the repository was last found to hold it. An app a run
@@ -708,9 +720,10 @@ when, and then per app:
 It exits 0 only if the last run finished within 3 hours and did not end
 early, the repository has not gone unlisted for more than 3 hours, the
 last drill could begin, the last check of the repository was `clean`
-and is no more than 8 days old — or, with none yet, backups were set
-up, or a drill ran, no more than 8 days ago — and every app that is
-not `pending`
+and is no more than 8 days old — or, with none yet, the first drill
+that checks ran no more than 8 days ago (`check_since` in the record),
+or, before any has, backups were set up or a drill ran no more than 8
+days ago — and every app that is not `pending`
 was backed up by the last run (or not reached by it), has a complete
 backup that is fresh and that no listing since has missed, and a
 restore proven in the last 8 days with no failed drill since. With no

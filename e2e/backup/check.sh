@@ -38,12 +38,24 @@ says() { grep -q -e "$1" "$OUT"; }
 last_check() { tr -d '\n' <"$STATUS" | sed 's/  */ /g' | sed -n 's/.*"last_check": {\([^}]*\)}.*/\1/p'; }
 check_class() { last_check | sed -n 's/.*"class": "\([^"]*\)".*/\1/p'; }
 # A first check's group, as the engine reads it: the ISO week's, in UTC.
-week=$(date -u +%V)
-week=${week#0}
-g=$(((week - 1) % 52 + 1))
-GROUP="$g/52"
-# The check after one that read GROUP reads the group after it.
-NEXT="$((g % 52 + 1))/52"
+wk() {
+	w=$(date -u +%V)
+	w=${w#0}
+	echo "$(((w - 1) % 52 + 1))/52"
+}
+# first_drill: a drill whose check is a first one, with no clean check on
+# record. Its group is the ISO week's at the moment it reads the clock —
+# the week before or after a Monday midnight the drill may cross: GROUP
+# is set to the one it read, and held to those two.
+first_drill() {
+	before=$(wk)
+	drill
+	rc=$?
+	after=$(wk)
+	GROUP=$(sed -n 's|^repository: its structure, and data group \([0-9]*/52\):.*|\1|p' "$OUT")
+	[ "$GROUP" = "$before" ] || [ "$GROUP" = "$after" ] || fail "a first check read group '$GROUP', not the ISO week's around the drill ($before, $after)"
+	return $rc
+}
 # records: the ids the repository's clean-run records vouch for.
 records() { rr snapshots --no-lock --json --host hotserve --tag hotserve-clean 2>/dev/null | grep -o '"vouches:[0-9a-f]\{64\}"' | cut -d: -f2 | tr -d '"'; }
 # data_pack <bucket>: a pack that holds file data, from the repository's
@@ -93,7 +105,9 @@ recorded=$(rr snapshots --no-lock --json --tag "vouches:$blog_id" 2>/dev/null | 
 [ -n "$made" ] && [ "$made" = "$recorded" ] && pass "blog's record is at its snapshot's own time, $made" || fail "blog's snapshot was made $made, its record is at $recorded"
 
 echo "=== check 2: a drill checks the repository, and a sound one is clean ==="
-if drill; then pass "a drill of a sound repository exits 0"; else fail "the drill: $(cat "$OUT")"; fi
+if first_drill; then pass "a drill of a sound repository exits 0"; else fail "the drill: $(cat "$OUT")"; fi
+# The check after one that read GROUP reads the group after it.
+NEXT="$((${GROUP%/52} % 52 + 1))/52"
 says "^repository: its structure, and data group $GROUP: clean$" && pass "and says the repository's structure and, a first check, the ISO week's group, $GROUP, are clean" || fail "the drill said: $(cat "$OUT")"
 [ "$(check_class)" = clean ] && last_check | grep -q "\"group\": \"$GROUP\"" && pass "the record's last_check says so" || fail "last_check: $(last_check)"
 hotserve-backup status >/root/status.out 2>&1 && grep -q "repository last checked .*: its structure, and data group $GROUP: clean" /root/status.out && pass "status says when it was checked, and is content" || fail "status: $(cat /root/status.out)"
@@ -106,7 +120,7 @@ code=$(s3_delete "checkrepo/data/$(echo "$pack" | cut -c1-2)/$pack")
 if drill; then fail "a drill of a repository missing a pack exited 0"; else pass "a drill of a repository missing a pack exits non-zero"; fi
 # A second check reads the group after the first's; and the count is
 # restic's — two where the pack gone is in the group read as well.
-says "^repository: its structure, and data group $NEXT: damaged: restic check found [0-9][0-9]* errors*; a prune run off the box during the check looks the same, and the next check reads this group again; restic's own words: \`journalctl -u hotserve_backup_repocheck_[0-9a-f]*.service\`$" && pass "and says damaged, how much, and where restic's words are, of the group after the last one read, $NEXT" || fail "the drill said: $(cat "$OUT")"
+says "^repository: its structure, and data group $NEXT: damaged: restic check found [0-9][0-9]* errors*; a prune run off the box, or the storage failing, during the check looks the same, and the next check reads this group again; restic's own words: \`journalctl -u hotserve_backup_repocheck_[0-9a-f]*.service\`$" && pass "and says damaged, how much, and where restic's words are, of the group after the last one read, $NEXT" || fail "the drill said: $(cat "$OUT")"
 [ "$(check_class)" = damaged ] && pass "the record's last_check is damaged" || fail "last_check: $(last_check)"
 if hotserve-backup status >/root/status.out 2>&1; then fail "status exited 0 on a damaged repository"; else grep -q "the repository check of .* (data group $NEXT): damaged: restic check found [0-9][0-9]* error" /root/status.out && pass "status is unhealthy, and says why" || fail "status: $(cat /root/status.out)"; fi
 # Damage keeps its group: the next check reads it again, and says so
@@ -125,7 +139,7 @@ rm -f "$STATUS"
 echo "=== check 4: the wrong password is said, and in seconds ==="
 write_env "$REPO" not-the-password
 t0=$(date +%s)
-if drill; then fail "a drill with the wrong password exited 0"; else pass "a drill with the wrong password exits non-zero"; fi
+if first_drill; then fail "a drill with the wrong password exited 0"; else pass "a drill with the wrong password exits non-zero"; fi
 says "^repository: its structure, and data group $GROUP: wrong password: the repository password is wrong (exit 12)$" && [ "$(took "$t0")" -lt 60 ] && pass "the check says wrong password, within a minute ($(took "$t0")s)" || fail "the drill said, in $(took "$t0")s: $(cat "$OUT")"
 [ "$(check_class)" = "wrong password" ] && pass "the record's last_check is wrong password" || fail "last_check: $(last_check)"
 
@@ -138,11 +152,11 @@ grep -q '^[[:space:]]*backup {' "$CADDYFILE" && fail "fixture: the Caddyfile sti
 write_env "$REPO" "$PASSWORD"
 sed -i 's/^AWS_SECRET_ACCESS_KEY=.*/AWS_SECRET_ACCESS_KEY=not-the-key/' "$ENVFILE"
 t0=$(date +%s)
-if drill; then fail "a drill with the wrong storage key exited 0"; else pass "a drill with the wrong storage key exits non-zero"; fi
+if first_drill; then fail "a drill with the wrong storage key exited 0"; else pass "a drill with the wrong storage key exits non-zero"; fi
 says "^repository: its structure, and data group $GROUP: unreachable: the repository did not answer within 30s; the unit was stopped: the storage could not be reached, or refused the key$" && [ "$(took "$t0")" -lt 90 ] && pass "the check says unreachable or refused, within a minute and a half ($(took "$t0")s)" || fail "the drill said, in $(took "$t0")s: $(cat "$OUT")"
 write_env "s3:http://no-such-host.invalid:9000/checkrepo2" "$PASSWORD"
 t0=$(date +%s)
-drill
+first_drill
 says "^repository: its structure, and data group $GROUP: unreachable: " && [ "$(took "$t0")" -lt 90 ] && pass "a host that does not resolve is unreachable too ($(took "$t0")s) — never damaged" || fail "the drill said, in $(took "$t0")s: $(cat "$OUT")"
 [ "$(units_left)" = 0 ] && pass "no unit is left" || fail "units left: $(systemctl list-units --all --no-legend 'hotserve_backup_*')"
 cp /root/Caddyfile.base "$CADDYFILE"
@@ -159,7 +173,7 @@ drilling=$!
 if hold_restic "/usr/bin/restic check"; then
 	kill -KILL "$pid"
 	wait "$drilling"
-	says "^repository: its structure, and data group $GROUP: failed: restic was ended by signal$" && pass "a check killed hard is said to have failed, not to be damaged" || fail "the drill said: $(cat "$OUT")"
+	says "^repository: its structure, and data group [0-9]*/52: failed: restic was ended by signal$" && pass "a check killed hard is said to have failed, not to be damaged" || fail "the drill said: $(cat "$OUT")"
 	[ "$(check_class)" = failed ] && pass "the record's last_check is failed" || fail "last_check: $(last_check)"
 	[ "$(units_left)" = 0 ] && pass "no unit is left" || fail "units left: $(systemctl list-units --all --no-legend 'hotserve_backup_*')"
 	before=$(newest blog)

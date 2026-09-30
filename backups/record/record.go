@@ -154,6 +154,10 @@ type Status struct {
 	// fifty-two clean checks, whatever weeks were missed. A check that
 	// finds damage leaves it, so that the next reads that group again.
 	CheckRead string `json:"check_read,omitempty"`
+	// CheckSince is when the first drill that checks the repository ran
+	// on this record: with no check come to a verdict eight days after,
+	// status is unhealthy, however recent the last drill.
+	CheckSince *time.Time `json:"check_since,omitempty"`
 	// Listed is when a run last listed the repository and was answered.
 	// A listing that failed leaves it, and every Seen, as they were.
 	Listed *time.Time `json:"listed,omitempty"`

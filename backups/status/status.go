@@ -95,13 +95,17 @@ func Report(in Input) (lines []string, healthy bool) {
 		say("last drill %s", when(d.Time))
 	}
 	// The repository itself, as the weekly drill last checked it. None
-	// yet is said, and is unhealthy only once a box has gone a week and a
-	// day since it was set up with no drill either: a new box is not
-	// failing, nor one set up before the check was, whose next drill
-	// checks — every drill that gets past its apps does.
+	// yet is said, and is unhealthy a week and a day after the first
+	// drill that checks — or, before there has been one, after setup with
+	// no drill either: a new box is not failing, nor one set up before the
+	// check was, whose next drill checks.
 	old := int(CheckOldAfter.Hours() / 24)
 	switch c := st.LastCheck; {
-	case c == nil && !in.SetUp.IsZero() && now.Sub(in.SetUp) > CheckOldAfter && (st.LastDrill == nil || now.Sub(st.LastDrill.Time) > CheckOldAfter):
+	case c == nil && st.CheckSince != nil && now.Sub(*st.CheckSince) > CheckOldAfter:
+		// Drills that check have run, and none came to a verdict — each
+		// stopped, week on week — however recent the last of them.
+		bad("no check of the repository has come to a verdict since %s, more than %d days ago; `sudo hotserve-backup drill` checks it", when(*st.CheckSince), old)
+	case c == nil && st.CheckSince == nil && !in.SetUp.IsZero() && now.Sub(in.SetUp) > CheckOldAfter && (st.LastDrill == nil || now.Sub(st.LastDrill.Time) > CheckOldAfter):
 		bad("the repository has not been checked since backups were set up, %s, more than %d days ago; `sudo hotserve-backup drill` checks it", when(in.SetUp), old)
 	case c == nil && !st.Started.IsZero():
 		say("the repository has not been checked yet: the weekly drill checks it")

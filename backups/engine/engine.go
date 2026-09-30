@@ -202,6 +202,10 @@ type run struct {
 	// attended is a command someone started and can stop — a restore:
 	// its reads of the repository have no backstop (readClock).
 	attended bool
+	// unanswered is the first unit this command gave up at its clock:
+	// the repository not answering, which it will not do for the next
+	// app either. startWithin sets it; the loops over apps stop on it.
+	unanswered error
 }
 
 // preRestoreTag is on a snapshot a restore made of what it was about to
@@ -392,7 +396,7 @@ func open(ctx context.Context, cfg Config, r Runner, say func(string)) (x *run, 
 	}
 	uid, gid, derr := dataOwner(ctx)
 	x = &run{cfg: cfg, r: r, nonce: nonce, dir: filepath.Join(cfg.RunDir, nonce), prev: prev, dataUID: uid, dataGID: gid, dataErr: derr, program: program,
-		status: &record.Status{Started: time.Now().UTC(), Warning: unreadable, Apps: map[string]*record.App{}, Listed: prev.Listed, Unlisted: prev.Unlisted, LastDrill: prev.LastDrill, LastCheck: prev.LastCheck, CheckRead: prev.CheckRead}}
+		status: &record.Status{Started: time.Now().UTC(), Warning: unreadable, Apps: map[string]*record.App{}, Listed: prev.Listed, Unlisted: prev.Unlisted, LastDrill: prev.LastDrill, LastCheck: prev.LastCheck, CheckRead: prev.CheckRead, CheckSince: prev.CheckSince}}
 	if err := x.awaitInit(ctx, say); err != nil {
 		return x, unlock, err
 	}
@@ -488,7 +492,7 @@ func (x *run) apps(ctx context.Context) error {
 			app, repositoryWide := x.app(ctx, p.Root, name, p.Apps[name])
 			x.status.Apps[name] = app
 			if repositoryWide {
-				stop = app
+				stop = x.stopAfter(name, app.Detail)
 			}
 			// Said in the repository too, once nothing of the app's run is
 			// left to change how it ended: what a rebuilt box, which has
@@ -504,14 +508,23 @@ func (x *run) apps(ctx context.Context) error {
 		// that keeps failing is not re-fetched, in full, every hour.
 		if app := x.status.Apps[name]; app.Class == record.OK && app.RestoreProven == nil && app.RestoreDrill == nil && ctx.Err() == nil {
 			if x.firstDrill(ctx, name, app) {
+				// An upgrade leaves no verdict: stopAfter says it instead.
+				detail := ""
+				if app.RestoreDrill != nil {
+					detail = app.RestoreDrill.Detail
+				}
+				stop = x.stopAfter(name, detail)
 				if x.upgraded != nil {
 					// No verdict: the next run drills it again.
-					stop = &record.App{Detail: record.Text(x.upgraded.Error())}
 					x.status.Warning = strings.TrimSpace(x.status.Warning + " " + stop.Detail)
-				} else {
-					stop = &record.App{Detail: app.RestoreDrill.Detail}
 				}
 			}
+		}
+		// A read or a write given up at its clock — a verify, a listing, a
+		// size, a record — is a repository that will not answer the next
+		// app either, whose upload nothing bounds.
+		if stop == nil && x.unanswered != nil {
+			stop = x.stopAfter(name, "")
 		}
 	}
 	// Once the repository has refused for a reason every app shares,
@@ -1108,9 +1121,7 @@ func (x *run) app(ctx context.Context, root, name string, decl *backupdecl.Confi
 	app.Snapshot = &record.Snapshot{ID: id, Time: made, Seen: &made}
 	if err := x.verify(ctx, name, id, app); err != nil {
 		app.Class, app.Detail = record.Incomplete, fmt.Sprintf("snapshot %s was made, but what is in it could not be checked: %v", short(id), err)
-		// A repository that did not answer this app will not answer the
-		// next, whose upload nothing bounds.
-		return app, didNotAnswer(ctx, err)
+		return app, false
 	}
 	for _, it := range app.Items {
 		if !it.OK && app.Class == record.OK {
@@ -1411,6 +1422,21 @@ func (x *run) upload(ctx context.Context, app string, binds []unit.Bind, masked 
 	return "", record.Failed, detail + "; `journalctl -u " + x.name("upload", app) + "` has restic's own words", repositoryWide
 }
 
+// stopAfter is what a run says of every app after name, once there is
+// no point asking the repository for them: in the words of why — a
+// helper of another version, a repository that did not answer, or one
+// that refused name's backup for a reason every app shares — never as
+// though what befell name were theirs.
+func (x *run) stopAfter(name, detail string) *record.App {
+	switch {
+	case x.upgraded != nil:
+		return &record.App{Detail: record.Text(x.upgraded.Error())}
+	case x.unanswered != nil:
+		return &record.App{Detail: record.Text(fmt.Sprintf("the repository did not answer (%v), so nothing more was asked of it", x.unanswered))}
+	}
+	return &record.App{Detail: record.Text(fmt.Sprintf("the repository refused %s's backup for a reason every app shares: %s", name, detail))}
+}
+
 // vouch writes into the repository the record that this run ended ok
 // on app's snapshot id (vouchArgv). One that could not be written is
 // said, and costs nothing else: the backup is sound, and only a rebuilt
@@ -1444,6 +1470,8 @@ func (x *run) vouch(ctx context.Context, app, id string) {
 	switch {
 	case err == nil && o.OK() && summaryID(out) != "":
 		// Written: a stop that came as it finished changes nothing.
+	case err == nil && o.Result == "exit-code" && o.ExitStatus == 3:
+		warn("may not have been written: restic exited 3, having saved a snapshot of what it could read")
 	case err == nil && o.Result == "exit-code" && o.ExitStatus == 11:
 		warn("could not be written into the repository (it stayed locked by something else for " + vouchRetryLock + ", exit 11)")
 	case err == nil && o.Result == "exit-code" && o.ExitStatus != 0:
@@ -1703,8 +1731,7 @@ func (x *run) snapshots(ctx context.Context, role, app, tag string) (snaps []lis
 	s.StderrFile = stderr
 	o, err := x.startWithin(ctx, x.readClock(), s)
 	if err != nil {
-		// A repository that did not answer one app will not answer the next.
-		return nil, didNotAnswer(ctx, err), err
+		return nil, false, err
 	}
 	if !o.OK() {
 		detail, wide := resticFailure(o)
@@ -1742,31 +1769,30 @@ func (x *run) snapshots(ctx context.Context, role, app, tag string) (snaps []lis
 	}
 	sort.SliceStable(snaps, func(i, j int) bool { return snaps[i].Time.Before(snaps[j].Time) })
 	if stderr != "" {
-		if _, err := x.besides(role); err != nil {
+		if err := x.besides(role); err != nil {
 			return nil, false, err
 		}
 	}
 	return snaps, false, nil
 }
 
-// besides is what restic said on stderr beside a listing of every app's
-// snapshots, or of the records — snapshots holds each such listing to
-// it — and an error where it said anything: it
-// leaves a snapshot it cannot load out of the listing, says so on stderr
-// alone, and exits 0 [measured, a cold cache], so an answer that came
-// with anything beside it is not taken for the whole.
-func (x *run) besides(role string) (said []byte, err error) {
-	said, err = os.ReadFile(filepath.Join(x.dir, "."+role+".err")) //nolint:gosec // written by the manager into root's own run dir
+// besides says whether restic said anything on stderr beside a listing
+// of every app's snapshots, or of the records — snapshots holds each such
+// listing to it: it leaves a snapshot it cannot load out of the listing,
+// says so on stderr alone, and exits 0 [measured, a cold cache], so an
+// answer that came with anything beside it is not taken for the whole.
+func (x *run) besides(role string) error {
+	said, err := os.ReadFile(filepath.Join(x.dir, "."+role+".err")) //nolint:gosec // written by the manager into root's own run dir
 	switch {
 	case err != nil:
-		return nil, fmt.Errorf("what restic said beside the listing could not be read, so the listing is not believed: %w", err)
+		return fmt.Errorf("what restic said beside the listing could not be read, so the listing is not believed: %w", err)
 	case len(bytes.TrimSpace(said)) == 0:
-		return said, nil
+		return nil
 	}
 	if m := ignoringRe.FindSubmatch(said); m != nil {
-		return said, fmt.Errorf("restic could not load snapshot %.8s and left it out of the listing, so the listing is not believed", m[1])
+		return fmt.Errorf("restic could not load snapshot %.8s and left it out of the listing, so the listing is not believed", m[1])
 	}
-	return said, errors.New("restic had something to say beside the listing, so the listing is not believed")
+	return errors.New("restic had something to say beside the listing, so the listing is not believed")
 }
 
 // ignoringRe is what restic says of a snapshot file it cannot load.

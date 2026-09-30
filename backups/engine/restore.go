@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -588,12 +589,42 @@ func pick(app string, snaps []listed, asked string) (record.Snapshot, error) {
 	return record.Snapshot{}, fmt.Errorf("%s is the start of %d snapshots of %s; give more of it", asked, len(found), app)
 }
 
+// checkInto checks the repository and writes the verdict into st: the
+// check made, or nil — an interrupt, or a unit ended from outside, is no
+// verdict, and leaves the last one. The group is the one after the last
+// clean check's; only a clean check moves it on — damage keeps it, so
+// that the next check reads it again (the owner, 2026-09-30). One
+// reading of the clock serves the group and the check's time both: two,
+// either side of Sunday's midnight, would record one week's time beside
+// the other's group.
+func (x *run) checkInto(ctx context.Context, st *record.Status) *record.Check {
+	now := checkClock().UTC()
+	group := nextGroup(st.CheckRead, now)
+	c := x.checkRepository(ctx, group, now)
+	if c == nil {
+		return nil
+	}
+	st.LastCheck = c
+	if c.Class == record.CheckClean {
+		st.CheckRead = group
+	}
+	return c
+}
+
 // lastVouched is, of an app's snapshots, the newest that a clean-run
 // record in the repository vouches for, where that is not snap; or why
 // whether a run ended ok on snap is not known. It is what a box's own
 // record says of its last ok, for a box that has none.
 func (x *run) lastVouched(ctx context.Context, app string, snaps []listed, snap record.Snapshot) (*record.Snapshot, string) {
 	records, _, err := x.snapshots(ctx, "vouches", "", cleanTag)
+	if err == nil {
+		for _, r := range records {
+			// The snapshot itself vouched for: nothing to say.
+			if slices.Contains(r.Vouches, snap.ID) {
+				return nil, ""
+			}
+		}
+	}
 	if err != nil {
 		return nil, "the repository's records of clean runs could not be asked: " + err.Error()
 	}
@@ -751,11 +782,7 @@ func (x *run) snapshotSize(ctx context.Context, app, id string) (uint64, error) 
 	o, err := x.startWithin(ctx, x.readClock(), resticUnit(x.name("size", app), "hotserve backup: ask how large a snapshot of "+app+" is", x.cfg.EnvFile,
 		[]string{x.cfg.Restic, "stats", "--quiet", "--json", "--no-lock", "--mode", "restore-size", id}, out))
 	if err != nil {
-		err = fmt.Errorf("the size unit: %w", err)
-		if didNotAnswer(ctx, err) {
-			return 0, repositoryWideError{err}
-		}
-		return 0, err
+		return 0, fmt.Errorf("the size unit: %w", err)
 	}
 	if !o.OK() {
 		detail, wide := resticFailure(o)
@@ -1128,6 +1155,12 @@ func Drill(ctx context.Context, cfg Config, r Runner) (st *record.Status, checke
 	st = x.prev
 	lastBefore := st.LastDrill
 	st.LastDrill = &record.Drill{Time: time.Now().UTC()}
+	// The first drill that checks, on this record: what status ages a
+	// check that never comes to a verdict from.
+	if st.LastCheck == nil && st.CheckSince == nil {
+		since := st.LastDrill.Time
+		st.CheckSince = &since
+	}
 	// Said in the record — a refusal from begin (a program not there)
 	// as a plan that cannot be made — so that a drill failing here week
 	// after week does not pass for "proven" ageing quietly.
@@ -1154,7 +1187,14 @@ func Drill(ctx context.Context, cfg Config, r Runner) (st *record.Status, checke
 	}
 	p, err := x.plan(ctx)
 	if err != nil {
-		return couldNotBegin(err)
+		// No plan stops the apps, not the repository's check, which needs
+		// none — unless the plan's helper was another version's, or the
+		// drill was interrupted.
+		if ctx.Err() == nil && !errors.As(err, new(upgradedError)) {
+			checked = x.checkInto(ctx, st)
+		}
+		st, _, err = couldNotBegin(err)
+		return st, checked, err
 	}
 	x.sweepFetched(ctx)
 	// An app that has left the plan has nothing left to prove.
@@ -1197,6 +1237,11 @@ func Drill(ctx context.Context, cfg Config, r Runner) (st *record.Status, checke
 			}
 		}
 		st.Apps[name] = rec
+		// A read given up at its clock — the history, a size — is a
+		// repository that will not answer the next app either.
+		if refused == "" && x.unanswered != nil {
+			refused = record.Text(fmt.Sprintf("the repository did not answer (%v), so nothing more was asked of it", x.unanswered))
+		}
 	}
 	st.Warning = strings.TrimSpace(st.Warning + " " + x.status.Warning)
 	// A drill an upgrade ended found nothing out from there on: the
@@ -1207,21 +1252,7 @@ func Drill(ctx context.Context, cfg Config, r Runner) (st *record.Status, checke
 	} else if ctx.Err() == nil {
 		// Then the repository itself, whatever became of the apps: a
 		// refusal every app met is the check's to say in its own words.
-		// An interrupt is no verdict, and leaves the last one.
-		// The group after the last one read; only a check that read the
-		// data moves it on. One reading of the clock, for the group and
-		// the check's time both: two, either side of Sunday's midnight,
-		// would record one week's time beside the other's group.
-		now := checkClock().UTC()
-		group := nextGroup(st.CheckRead, now)
-		if c := x.checkRepository(ctx, group, now); c != nil {
-			st.LastCheck, checked = c, c
-			// Damage keeps the group: the next check reads it again, and
-			// only a clean one moves on (the owner, 2026-09-30).
-			if c.Class == record.CheckClean {
-				st.CheckRead = group
-			}
-		}
+		checked = x.checkInto(ctx, st)
 	}
 	// What was finished is written, an interrupt or not: each verdict is
 	// an app's own, and the app the interrupt landed on has none.
