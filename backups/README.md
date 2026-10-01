@@ -1266,9 +1266,10 @@ for n in $(seq 500); do for a in a b c; do head -c 64k /dev/urandom | restic bac
 id=$(restic snapshots --json --no-lock --tag app:tree | grep -o '"id":"[0-9a-f]*"' | head -1 | cut -d'"' -f4)
 apt-get update && apt-get install -y iproute2
 tc qdisc add dev lo root netem delay 25ms rate 50mbit
-rm -rf "$RESTIC_CACHE_DIR"
+# Each read from an empty cache, as each was measured.
 for r in "snapshots --no-lock --json" "ls --no-lock --json $id /var/tmp/tree" \
 	"stats --no-lock --quiet --json --mode restore-size $id" "check --no-lock --read-data-subset=1/52"; do
+	rm -rf "$RESTIC_CACHE_DIR"
 	echo "restic $r"; time restic $r >/dev/null
 done
 tc qdisc del dev lo root
