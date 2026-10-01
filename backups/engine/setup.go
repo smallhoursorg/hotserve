@@ -93,11 +93,23 @@ var (
 		}
 		return passwd{}, fmt.Errorf("%s passwd %s: exit status %d", getent, name, exit)
 	}
-	makeAccount = func() error {
-		if out, err := exec.Command(useradd[0], useradd[1:]...).CombinedOutput(); err != nil {
-			return fmt.Errorf("%s: %w: %s", useraddArgv(), err, record.Text(string(out)))
+	// makeAccount ends with setup's command, and has no clock of its own:
+	// setup is attended (D4). Ended, useradd is interrupted, as Ctrl-C at
+	// the terminal interrupts it — it writes the account databases, and
+	// what it does about an interrupt is its own — and killed only where
+	// it is still there 10 s on.
+	makeAccount = func(ctx context.Context) error {
+		cmd := exec.CommandContext(ctx, useradd[0], useradd[1:]...)
+		cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+		cmd.WaitDelay = 10 * time.Second
+		out, err := cmd.CombinedOutput()
+		switch {
+		case err == nil:
+			return nil
+		case ctx.Err() != nil:
+			return fmt.Errorf("%s: %w", useraddArgv(), ctx.Err())
 		}
-		return nil
+		return fmt.Errorf("%s: %w: %s", useraddArgv(), err, record.Text(string(out)))
 	}
 )
 
@@ -432,7 +444,7 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 			return nil, err
 		}
 	} else {
-		if err := makeAccount(); err != nil {
+		if err := makeAccount(ctx); err != nil {
 			return nil, fmt.Errorf("making the %s account: %w", backupUser, err)
 		}
 		rep.Account = "made"
@@ -692,7 +704,7 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 		case prevID == "":
 			why = "no setup recorded which repository it was written against"
 		case prevID != rep.RepositoryID:
-			why = fmt.Sprintf("it was written against another repository (id %s)", short(prevID))
+			why = fmt.Sprintf("it was written against another repository (id %s)", record.Short(prevID))
 		}
 	}
 	// On the disk before the file is — the two live in different
@@ -755,7 +767,7 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 	if rep.New {
 		kind = "new"
 	}
-	term.Say(fmt.Sprintf("repository ready: %s (%s, id %s)", o.Repository, kind, short(rep.RepositoryID)))
+	term.Say(fmt.Sprintf("repository ready: %s (%s, id %s)", o.Repository, kind, record.Short(rep.RepositoryID)))
 	if s.password != "" && !rep.New {
 		term.Say("the password shown above was never used: discard it")
 	}

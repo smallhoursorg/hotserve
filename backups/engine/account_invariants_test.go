@@ -18,7 +18,7 @@ import (
 // it is asked.
 
 // The lookups as they are, kept from before any box stands in for them.
-var realAccount, realLookup, realDataOwner, realOwnerOf = account, lookup, dataOwner, ownerOf
+var realAccount, realLookup, realDataOwner, realOwnerOf, realMakeAccount = account, lookup, dataOwner, ownerOf, makeAccount
 
 // said is what a program of the account databases answers.
 type said struct {
@@ -118,6 +118,31 @@ func TestALookupIsBoundedAndEndsWithItsCommand(t *testing.T) {
 	}
 	if _, _, err := realLookup(context.Background(), time.Minute, "/nonexistent/getent", "passwd"); err == nil {
 		t.Fatal("a program that is not there answered")
+	}
+}
+
+// Making the account ends with setup's command: an interrupt — Ctrl-C
+// at the terminal setup runs at — ends a useradd that does not return
+// (a directory it asks that is not there), and is no account made. It
+// has no bound of its own: setup is attended, someone is there to stop
+// it (D4), and a clock would be a new limit on a box whose directory is
+// slow.
+func TestMakingTheAccountEndsWithItsCommand(t *testing.T) {
+	if _, err := os.Stat("/bin/sleep"); err != nil {
+		t.Skip("no /bin/sleep here")
+	}
+	old := useradd
+	useradd = []string{"/bin/sleep", "5"}
+	t.Cleanup(func() { useradd = old })
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(100*time.Millisecond, cancel)
+	began := time.Now()
+	err := realMakeAccount(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("a useradd whose command was stopped: err = %v", err)
+	}
+	if took := time.Since(began); took > 3*time.Second {
+		t.Fatalf("a useradd whose command was stopped at 100ms took %s", took)
 	}
 }
 

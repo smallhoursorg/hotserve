@@ -137,7 +137,7 @@ func newBox(t *testing.T) *box {
 		b.accountLookups++
 		return passwd{name: backupUser, comment: b.comment, uid: b.uid, gid: b.gid, line: b.nssLine, exists: b.account}, nil
 	}
-	makeAccount = func() error {
+	makeAccount = func(context.Context) error {
 		b.accountsMade++
 		b.account, b.comment, b.localComment, b.notLocal, b.uid, b.gid = true, accountMark, accountMark, false, 995, 995
 		return nil
@@ -1209,7 +1209,9 @@ func TestWithNoRecordTheRepositoryIsAskedWhetherTheAppWasEverBackedUp(t *testing
 		class   record.Class
 		want    string
 	}{
-		"it holds snapshots of the app": {`[{"id":"` + newer + `","time":"2026-09-18T10:00:00Z"},{"id":"` + older + `","time":"2026-09-01T10:00:00Z"}]`, nil, record.DataMissing, newer[:8]},
+		// The newest stored in another zone than UTC, as a restic run in
+		// the box's own zone stores it: said as every command says a time.
+		"it holds snapshots of the app": {`[{"id":"` + newer + `","time":"2026-09-18T12:00:00+02:00"},{"id":"` + older + `","time":"2026-09-01T10:00:00Z"}]`, nil, record.DataMissing, "last backed up on 2026-09-18 10:00 UTC (snapshot " + newer[:8] + ")"},
 		"it holds none":                 {`[]`, nil, record.Pending, "not been deployed"},
 		"it cannot be asked":            {``, &unit.Outcome{Result: "exit-code", ExitStatus: 1}, record.Failed, "could not be asked"},
 		"it answers nonsense":           {`{"id":"latest"}`, nil, record.Failed, "could not be asked"},

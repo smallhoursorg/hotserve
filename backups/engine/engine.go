@@ -465,7 +465,7 @@ func (x *run) apps(ctx context.Context) error {
 		}
 		x.left[name] = true
 		if old != nil && old.LastSnapshot != nil {
-			left = append(left, fmt.Sprintf("%s no longer declares a backup and is not backed up any more: its last snapshot is %.8s, of %s.", name, old.LastSnapshot.ID, old.LastSnapshot.Time.UTC().Format("2006-01-02 15:04 MST")))
+			left = append(left, fmt.Sprintf("%s no longer declares a backup and is not backed up any more: its last snapshot is %s, of %s.", name, record.Short(old.LastSnapshot.ID), record.When(old.LastSnapshot.Time)))
 		}
 	}
 	sort.Strings(left)
@@ -1045,7 +1045,7 @@ func (x *run) app(ctx context.Context, root, name string, decl *backupdecl.Confi
 			app.LastSnapshot = last
 		}
 		if last != nil {
-			return fail(record.DataMissing, "%s does not exist, and this app was last backed up on %s (snapshot %s): its data is gone, or the disk it lives on is not mounted", shared, last.Time.Format(time.RFC3339), short(last.ID))
+			return fail(record.DataMissing, "%s does not exist, and this app was last backed up on %s (snapshot %s): its data is gone, or the disk it lives on is not mounted", shared, record.When(last.Time), record.Short(last.ID))
 		}
 		return fail(record.Pending, "%s does not exist yet: the app has not been deployed", shared)
 	case errors.Is(err, errLink):
@@ -1122,12 +1122,12 @@ func (x *run) app(ctx context.Context, root, name string, decl *backupdecl.Confi
 	made := time.Now().UTC()
 	app.Snapshot = &record.Snapshot{ID: id, Time: made, Seen: &made}
 	if err := x.verify(ctx, name, id, app); err != nil {
-		app.Class, app.Detail = record.Incomplete, fmt.Sprintf("snapshot %s was made, but what is in it could not be checked: %v", short(id), err)
+		app.Class, app.Detail = record.Incomplete, fmt.Sprintf("snapshot %s was made, but what is in it could not be checked: %v", record.Short(id), err)
 		return app, false
 	}
 	for _, it := range app.Items {
 		if !it.OK && app.Class == record.OK {
-			app.Class, app.Detail = record.Incomplete, fmt.Sprintf("snapshot %s lacks %s %q: %s", short(id), it.Kind, it.Path, it.Detail)
+			app.Class, app.Detail = record.Incomplete, fmt.Sprintf("snapshot %s lacks %s %q: %s", record.Short(id), it.Kind, it.Path, it.Detail)
 		}
 	}
 	return app, false
@@ -1418,7 +1418,7 @@ func (x *run) upload(ctx context.Context, app string, binds []unit.Bind, masked 
 		// without this run's own id.
 		return "", record.Failed, "restic exited 0 but its summary names no snapshot", false
 	case o.ExitStatus == 3 && id != "":
-		return id, record.Incomplete, "restic could not read everything it was given (exit 3); snapshot " + short(id) + " holds the rest", false
+		return id, record.Incomplete, "restic could not read everything it was given (exit 3); snapshot " + record.Short(id) + " holds the rest", false
 	}
 	detail, repositoryWide = resticFailure(o)
 	return "", record.Failed, detail + "; `journalctl -u " + x.name("upload", app) + "` has restic's own words", repositoryWide
@@ -1450,7 +1450,7 @@ func (x *run) stopAfter(name, detail string) *record.App {
 func (x *run) vouch(ctx context.Context, app, id string) {
 	// The snapshot first, before anything a cut could take.
 	warn := func(what string) {
-		x.status.Warning = strings.TrimSpace(x.status.Warning + " " + record.Text(fmt.Sprintf("%s: snapshot %s is a complete backup, and the record that says so %s: a restore on a rebuilt box will not know it.", app, short(id), what)))
+		x.status.Warning = strings.TrimSpace(x.status.Warning + " " + record.Text(fmt.Sprintf("%s: snapshot %s is a complete backup, and the record that says so %s: a restore on a rebuilt box will not know it.", app, record.Short(id), what)))
 	}
 	// Stopped — Ctrl-C, systemctl stop, a shutdown — after the app's run
 	// ended ok and before its record was begun.
@@ -1792,7 +1792,7 @@ func (x *run) besides(role string) error {
 		return nil
 	}
 	if m := ignoringRe.FindSubmatch(said); m != nil {
-		return fmt.Errorf("restic could not load snapshot %.8s and left it out of the listing, so the listing is not believed", m[1])
+		return fmt.Errorf("restic could not load snapshot %s and left it out of the listing, so the listing is not believed", record.Short(string(m[1])))
 	}
 	return errors.New("restic had something to say beside the listing, so the listing is not believed")
 }
@@ -1856,13 +1856,6 @@ func firstDetail(items []record.Item) string {
 		}
 	}
 	return "nothing is declared"
-}
-
-func short(id string) string {
-	if len(id) > 8 {
-		return id[:8]
-	}
-	return id
 }
 
 func newNonce() (string, error) {

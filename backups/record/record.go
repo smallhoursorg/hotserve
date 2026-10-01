@@ -191,6 +191,15 @@ func Clean(s string) string {
 	}, s))
 }
 
+// Short is an id — a snapshot's, a repository's — as it is printed: its
+// first eight characters. A record is root's, and still nothing of it
+// reaches a terminal unlooked at.
+func Short(id string) string { return fmt.Sprintf("%.8s", Clean(id)) }
+
+// When is a time as it is printed: to the minute, in UTC — the zone the
+// record and every restic unit keep — whatever zone it was read in.
+func When(t time.Time) string { return t.UTC().Format("2006-01-02 15:04 MST") }
+
 // Read returns the last status, or an empty one when no run has
 // written any.
 func Read(path string) (*Status, error) {

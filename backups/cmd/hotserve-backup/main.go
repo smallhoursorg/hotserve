@@ -331,14 +331,14 @@ func report(st *record.Status) {
 		}
 		line := fmt.Sprintf("%s: %s", n, app.Class)
 		if app.Class == record.NotRun && app.LastOK != nil {
-			line += fmt.Sprintf(" (last ok %s, snapshot %.8s)", app.LastOK.Time.Format("2006-01-02 15:04 MST"), app.LastOK.ID)
+			line += fmt.Sprintf(" (last ok %s, snapshot %s)", record.When(app.LastOK.Time), record.Short(app.LastOK.ID))
 		}
 		if app.Class == record.OK {
 			var found []string
 			for _, it := range app.Items {
 				found = append(found, it.Kind+" "+it.Path)
 			}
-			line += fmt.Sprintf(": snapshot %.8s holds %s", app.Snapshot.ID, strings.Join(found, ", "))
+			line += fmt.Sprintf(": snapshot %s holds %s", record.Short(app.Snapshot.ID), strings.Join(found, ", "))
 		} else if app.Detail != "" {
 			line += ": " + app.Detail
 		}
@@ -348,7 +348,7 @@ func report(st *record.Status) {
 		if app.RestoreDrill != nil && !app.RestoreDrill.Time.Before(st.Started) {
 			fmt.Printf("%s: restore not proven: %s\n", n, app.RestoreDrill.Detail)
 		} else if app.RestoreProven != nil && !app.RestoreProven.Time.Before(st.Started) {
-			fmt.Printf("%s: restore proven: snapshot %.8s was fetched and checked whole\n", n, app.RestoreProven.Snapshot.ID)
+			fmt.Printf("%s: restore proven: snapshot %s was fetched and checked whole\n", n, record.Short(app.RestoreProven.Snapshot.ID))
 		}
 	}
 }
@@ -502,7 +502,7 @@ const answerWithin = 10 * time.Minute
 // and that is a no; so is an interrupt, and so is silence.
 func confirm(ctx context.Context) func(engine.RestoreAsk) bool {
 	return func(a engine.RestoreAsk) bool {
-		fmt.Printf("%s: restore snapshot %.8s, made %s, into %s?\n", a.App, a.Snapshot.ID, a.Snapshot.Time.Format("2006-01-02 15:04 MST"), a.Into)
+		fmt.Printf("%s: restore snapshot %s, made %s, into %s?\n", a.App, record.Short(a.Snapshot.ID), record.When(a.Snapshot.Time), a.Into)
 		if a.LastOK != nil {
 			fmt.Println(notLastOK(a.App, a.LastOK))
 		}
@@ -564,7 +564,7 @@ func readLine(ctx context.Context, r *bufio.Reader) (string, error) {
 // on, and which that is: a run that ended incomplete leaves a snapshot
 // with files left out that no check at restore can see.
 func notLastOK(app string, ok *record.Snapshot) string {
-	return fmt.Sprintf("%s: this is not the last snapshot a backup run ended ok on — that is %.8s, made %s. A run that ended incomplete leaves files out of a directory it read, which a restore cannot tell; --snapshot %.8s restores that one", app, ok.ID, ok.Time.Format("2006-01-02 15:04 MST"), ok.ID)
+	return fmt.Sprintf("%s: this is not the last snapshot a backup run ended ok on — that is %s, made %s. A run that ended incomplete leaves files out of a directory it read, which a restore cannot tell; --snapshot %s restores that one", app, record.Short(ok.ID), record.When(ok.Time), record.Short(ok.ID))
 }
 
 // notKnown says that whether a run ended ok on the snapshot is not
@@ -588,9 +588,9 @@ func reportRestore(rep *engine.RestoreReport) {
 	}
 	if rep.PreBackup != nil {
 		if rep.PreBackupClass == record.OK {
-			fmt.Printf("%s: backed up first: snapshot %.8s (restore --snapshot %.8s puts back what was there)\n", rep.App, rep.PreBackup.ID, rep.PreBackup.ID)
+			fmt.Printf("%s: backed up first: snapshot %s (restore --snapshot %s puts back what was there)\n", rep.App, record.Short(rep.PreBackup.ID), record.Short(rep.PreBackup.ID))
 		} else {
-			fmt.Printf("%s: backed up first, and that backup ended %s: %s — snapshot %.8s holds what it could, not all of what was there\n", rep.App, rep.PreBackupClass, rep.PreBackupDetail, rep.PreBackup.ID)
+			fmt.Printf("%s: backed up first, and that backup ended %s: %s — snapshot %s holds what it could, not all of what was there\n", rep.App, rep.PreBackupClass, rep.PreBackupDetail, record.Short(rep.PreBackup.ID))
 		}
 	}
 	var restored, not []string
@@ -601,7 +601,7 @@ func reportRestore(rep *engine.RestoreReport) {
 			not = append(not, fmt.Sprintf("%s %s (%s)", it.Kind, it.Path, it.Detail))
 		}
 	}
-	from := fmt.Sprintf("snapshot %.8s of %s", rep.Snapshot.ID, rep.Snapshot.Time.Format("2006-01-02 15:04 MST"))
+	from := fmt.Sprintf("snapshot %s of %s", record.Short(rep.Snapshot.ID), record.When(rep.Snapshot.Time))
 	switch {
 	case len(restored) > 0:
 		// The items are the ones the snapshot's own plan.json declares.
@@ -637,43 +637,7 @@ func drill(ctx context.Context) error {
 	st, checked, err := engine.Drill(ctx, config(), r)
 	unproven, unchecked := false, false
 	if st != nil {
-		names := make([]string, 0, len(st.Apps))
-		for n := range st.Apps {
-			names = append(names, n)
-		}
-		sort.Strings(names)
-		for _, n := range names {
-			app := st.Apps[n]
-			switch {
-			case app == nil:
-			case app.RestoreDrill != nil:
-				unproven = true
-				line := fmt.Sprintf("%s: restore not proven", n)
-				if app.RestoreDrill.Snapshot.ID != "" {
-					line += fmt.Sprintf(": snapshot %.8s", app.RestoreDrill.Snapshot.ID)
-				}
-				line += ": " + app.RestoreDrill.Detail
-				if app.RestoreProven != nil {
-					line += fmt.Sprintf(" (last proven: snapshot %.8s, on %s)", app.RestoreProven.Snapshot.ID, app.RestoreProven.Time.Format("2006-01-02 15:04 MST"))
-				}
-				fmt.Println(line)
-			case app.RestoreProven != nil:
-				fmt.Printf("%s: restore proven: snapshot %.8s, on %s\n", n, app.RestoreProven.Snapshot.ID, app.RestoreProven.Time.Format("2006-01-02 15:04 MST"))
-			default:
-				fmt.Printf("%s: nothing to prove: the repository holds no snapshot of it\n", n)
-			}
-		}
-		// The repository's own check, where this drill made one: the
-		// engine's word, not the record's last check, which another
-		// command may have written since.
-		if c := checked; c != nil {
-			line := fmt.Sprintf("repository: its structure, and data group %s: %s", c.Group, c.Class)
-			if c.Detail != "" {
-				line += ": " + c.Detail
-			}
-			fmt.Println(line)
-			unchecked = c.Class != record.CheckClean
-		}
+		unproven, unchecked = reportDrill(st, checked)
 	}
 	if err != nil {
 		return err
@@ -687,6 +651,50 @@ func drill(ctx context.Context) error {
 		return errors.New("the repository's check was not clean")
 	}
 	return nil
+}
+
+// reportDrill says what a drill proved of each app, and what its check
+// of the repository found where it made one, and whether anything was
+// left unproven or unchecked.
+func reportDrill(st *record.Status, checked *record.Check) (unproven, unchecked bool) {
+	names := make([]string, 0, len(st.Apps))
+	for n := range st.Apps {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		app := st.Apps[n]
+		switch {
+		case app == nil:
+		case app.RestoreDrill != nil:
+			unproven = true
+			line := fmt.Sprintf("%s: restore not proven", n)
+			if app.RestoreDrill.Snapshot.ID != "" {
+				line += fmt.Sprintf(": snapshot %s", record.Short(app.RestoreDrill.Snapshot.ID))
+			}
+			line += ": " + app.RestoreDrill.Detail
+			if app.RestoreProven != nil {
+				line += fmt.Sprintf(" (last proven: snapshot %s, on %s)", record.Short(app.RestoreProven.Snapshot.ID), record.When(app.RestoreProven.Time))
+			}
+			fmt.Println(line)
+		case app.RestoreProven != nil:
+			fmt.Printf("%s: restore proven: snapshot %s, on %s\n", n, record.Short(app.RestoreProven.Snapshot.ID), record.When(app.RestoreProven.Time))
+		default:
+			fmt.Printf("%s: nothing to prove: the repository holds no snapshot of it\n", n)
+		}
+	}
+	// The repository's own check, where this drill made one: the
+	// engine's word, not the record's last check, which another command
+	// may have written since.
+	if c := checked; c != nil {
+		line := fmt.Sprintf("repository: its structure, and data group %s: %s", c.Group, c.Class)
+		if c.Detail != "" {
+			line += ": " + c.Detail
+		}
+		fmt.Println(line)
+		unchecked = c.Class != record.CheckClean
+	}
+	return unproven, unchecked
 }
 
 // settle is the unit that reads a fetched snapshot. Each item is
