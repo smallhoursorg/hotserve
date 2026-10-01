@@ -206,6 +206,26 @@ func TestWhatTheCheckMeets(t *testing.T) {
 	}
 }
 
+// A probe given up at its clock whose unit could not be confirmed
+// stopped is unreachable, said in words: that it did not answer, that
+// its unit may run on and where to look — not Go's own error text.
+func TestAProbeWhoseStopIsNotConfirmedSaysSoInWords(t *testing.T) {
+	old := probeClock
+	t.Cleanup(func() { probeClock = old })
+	probeClock = 20 * time.Millisecond
+	b := restoreBox(t)
+	b.hang, b.stopErr = "probe", unit.ErrNotConfirmedGone
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	st, _, _ := Drill(ctx, b.cfg, b)
+	c := st.LastCheck
+	if c == nil || c.Class != record.CheckUnreachable ||
+		!strings.Contains(c.Detail, "the repository did not answer within 20ms, and its unit could not be confirmed stopped (`systemctl status "+b.spec("probe").Name+"` says whether it runs on)") ||
+		strings.Contains(c.Detail, "context deadline exceeded") {
+		t.Errorf("%+v", c)
+	}
+}
+
 // The check reads, and writes nothing that could hold a backup up: no
 // lock [M75, the owner], no retrying for one; and the week's group.
 func TestTheCheckTakesNoLockAndReadsItsWeeksGroup(t *testing.T) {
@@ -840,9 +860,7 @@ func TestTheRunsListingLeavesTheRecordsOut(t *testing.T) {
 // A check reads the group check_next names — the ISO week's where it
 // names none — and its verdict says what the next reads: a clean one, the
 // group after; any other, the same group again, a first check included
-// (Copilot on #161: a first check that found damage left nothing to read
-// again by, and the next week read the next week's group); no verdict,
-// what was there before.
+// (Copilot on #161); no verdict, check_next as it was.
 func TestWhatAVerdictDoesToTheNextGroup(t *testing.T) {
 	old := checkClock
 	t.Cleanup(func() { checkClock = old })

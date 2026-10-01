@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -597,11 +596,10 @@ func pick(app string, snaps []listed, asked string) (record.Snapshot, error) {
 // check). A clean check leaves the group after it to be read next; any
 // other verdict leaves the same group — damage, until a check of it is
 // clean (the owner, 2026-09-30), and a check that read nothing, the
-// storage not answering — a first check's included, which before left
-// nothing to read again by, so that the next week read its own week's
-// group (Copilot on #161). One reading of the clock serves the group and
-// the check's time both: two, either side of Sunday's midnight, would
-// record one week's time beside the other's group.
+// storage not answering — a first check's as well as any other's. One
+// reading of the clock serves the group and the check's time both: two,
+// either side of Sunday's midnight, would record one week's time beside
+// the other's group.
 func (x *run) checkInto(ctx context.Context, st *record.Status) *record.Check {
 	now := checkClock().UTC()
 	group := groupToRead(st.CheckNext, now)
@@ -618,20 +616,14 @@ func (x *run) checkInto(ctx context.Context, st *record.Status) *record.Check {
 	return c
 }
 
-// lastVouched is, of an app's snapshots, the newest that a clean-run
-// record in the repository vouches for, where that is not snap; or why
-// whether a run ended ok on snap is not known. It is what a box's own
-// record says of its last ok, for a box that has none.
+// lastVouched is what the repository's clean-run records say of snap,
+// for a box whose own record has no run of the app that ended ok — what
+// a box's record says of its last ok: nothing, where a record vouches
+// for snap itself; where none does, the newest of the app's snapshots a
+// record vouches for; and where none vouches for any, or the records
+// could not be asked, why whether a run ended ok on snap is not known.
 func (x *run) lastVouched(ctx context.Context, app string, snaps []listed, snap record.Snapshot) (*record.Snapshot, string) {
 	records, _, err := x.snapshots(ctx, "vouches", "", cleanTag)
-	if err == nil {
-		for _, r := range records {
-			// The snapshot itself vouched for: nothing to say.
-			if slices.Contains(r.Vouches, snap.ID) {
-				return nil, ""
-			}
-		}
-	}
 	if err != nil {
 		return nil, "the repository's records of clean runs could not be asked: " + err.Error()
 	}
@@ -641,11 +633,11 @@ func (x *run) lastVouched(ctx context.Context, app string, snaps []listed, snap 
 			vouched[id] = true
 		}
 	}
+	if vouched[snap.ID] {
+		return nil, ""
+	}
 	for i := len(snaps) - 1; i >= 0; i-- {
 		if s := snaps[i].Snapshot; vouched[s.ID] {
-			if s.ID == snap.ID {
-				return nil, ""
-			}
 			return &s, ""
 		}
 	}

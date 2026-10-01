@@ -176,14 +176,19 @@ func (x *run) checkRepository(ctx context.Context, group string, at time.Time) *
 func (x *run) probe(ctx context.Context) (class record.CheckClass, detail string, none bool) {
 	// Its answer, the repository's config decrypted, into root's run
 	// directory: never the journal.
-	o, err := x.startWithin(ctx, probeClock, resticUnit(x.name("probe", ""), "hotserve backup: whether the repository answers, and the password opens it", x.cfg.EnvFile,
+	name := x.name("probe", "")
+	o, err := x.startWithin(ctx, probeClock, resticUnit(name, "hotserve backup: whether the repository answers, and the password opens it", x.cfg.EnvFile,
 		[]string{x.cfg.Restic, "cat", "config", "--no-lock", "--cleanup-cache"}, filepath.Join(x.dir, "probe.json")))
 	switch {
 	case err != nil && (ctx.Err() != nil || errors.Is(err, unit.ErrEndedFromOutside)):
 		return "", "", true
-	case errors.Is(err, errDidNotAnswer), err != nil && errors.Is(err, context.DeadlineExceeded):
-		// At its clock, stopped — or not confirmed gone.
+	case errors.Is(err, errDidNotAnswer):
+		// At its clock, and stopped.
 		return record.CheckUnreachable, err.Error() + ": the storage could not be reached, or refused the key", false
+	case err != nil && errors.Is(err, context.DeadlineExceeded):
+		// At its clock, and its stop not confirmed: said in words, not in
+		// the error's.
+		return record.CheckUnreachable, fmt.Sprintf("the repository did not answer within %s, and its unit could not be confirmed stopped (`systemctl status %s` says whether it runs on): the storage could not be reached, or refused the key", probeClock, name), false
 	case err != nil:
 		return record.CheckFailed, "the probe's unit: " + err.Error(), false
 	case o.OK():
