@@ -1226,7 +1226,9 @@ programs under the same code.
    `packaging/test/Dockerfile`.
 2. `make test-integration`, `make e2e-backup`, `make package
    install-test`. A behaviour that changed fails the test that holds
-   it, by name.
+   it, by name: the integration lane runs every test afresh
+   (`-count=1`), since Go's test cache does not know that a program
+   under a test has changed.
 3. What no lane can hold — it takes a large repository, or a quarter
    of an hour — is measured by hand, against the suites' S3 server:
    - the reads at scale, from a cold cache over a slow link. The

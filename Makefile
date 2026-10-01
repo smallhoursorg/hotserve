@@ -38,6 +38,12 @@ endef
 # real transient units, and the caddytest scenarios deploy a real app
 # through them. -p 1: the modules' caddytest suites all pin admin :2999
 # / http :9080, so their test binaries must not run in parallel.
+# -count=1: these tests hold what systemd, restic and sqlite3 do, and
+# Go's test cache knows none of them — given the same test binary and
+# flags it replays the last result, a pass included, after the program
+# under it has changed [measured: a restic whose stuck-request default
+# changed, its pin "(cached)" and passing]. A new Debian release is
+# exactly such a change.
 test-integration:
 	$(cgroup2_preflight)
 	$(COMPOSE) up --build -d dev-systemd
@@ -45,7 +51,7 @@ test-integration:
 	$(COMPOSE) exec -T dev-systemd /bin/sh /src/test/systemd/ready.sh || status=1; \
 	if [ $$status -eq 0 ]; then \
 		$(COMPOSE) exec -T -e XDG_RUNTIME_DIR=/run/user/0 dev-systemd \
-			go test -race -tags integration -v -run Integration -p 1 ./backups/... ./liveswap/... ./penaltybox/... || status=1; \
+			go test -count=1 -race -tags integration -v -run Integration -p 1 ./backups/... ./liveswap/... ./penaltybox/... || status=1; \
 	fi; \
 	if [ $$status -ne 0 ]; then $(COMPOSE) exec -T dev-systemd journalctl --no-pager -n 100 || true; fi; \
 	$(COMPOSE) rm -sf dev-systemd >/dev/null; \
