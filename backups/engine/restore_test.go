@@ -36,8 +36,10 @@ func TestACleanRestore(t *testing.T) {
 	var asked RestoreAsk
 	o := inPlace()
 	o.Confirm = func(a RestoreAsk) bool {
-		// Asked once the snapshot is known, and before anything else.
-		if got := b.roles(); got != "plan history" {
+		// Asked once the snapshot is known, and before anything else but
+		// reads: this box has no record, so the repository's records of
+		// clean runs are asked what the record would have said.
+		if got := b.roles(); got != "plan history vouches" {
 			t.Errorf("units started before the question: %s", got)
 		}
 		asked = a
@@ -49,7 +51,7 @@ func TestACleanRestore(t *testing.T) {
 	}
 	// The app is backed up first; what was fetched is removed first and
 	// last; the hand-over sits between the fetch and whatever reads it.
-	if got, want := b.roles(), "plan history clean dump upload verify clean unstage size fetch handover install unstage"; got != want {
+	if got, want := b.roles(), "plan history vouches clean dump upload verify clean unstage size fetch handover install unstage"; got != want {
 		t.Fatalf("units, in order: %s\nwant:            %s", got, want)
 	}
 	shared := filepath.Join(b.root, "blog", "shared")
@@ -288,7 +290,8 @@ func TestNothingHappensBeforeTheAnswerAndNothingAfterANo(t *testing.T) {
 	if _, err := Restore(context.Background(), b.cfg, b, o); !errors.Is(err, ErrDeclined) {
 		t.Fatalf("%v", err)
 	}
-	if got := b.roles(); got != "plan history" {
+	// Reads alone: the history, and the records of clean runs.
+	if got := b.roles(); got != "plan history vouches" {
 		t.Errorf("units started around a no: %s", got)
 	}
 }
@@ -468,11 +471,11 @@ func TestToADirectory(t *testing.T) {
 
 func TestADrillProvesAndInstallsNothing(t *testing.T) {
 	b := restoreBox(t)
-	st, err := Drill(context.Background(), b.cfg, b)
+	st, _, err := Drill(context.Background(), b.cfg, b)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := b.roles(), "plan history unstage size fetch handover check unstage"; got != want {
+	if got, want := b.roles(), "plan history unstage size fetch handover check unstage probe repocheck"; got != want {
 		t.Fatalf("units, in order: %s\nwant:            %s", got, want)
 	}
 	for _, s := range b.specs {
@@ -510,7 +513,7 @@ func TestADrillThatProvesNothingKeepsWhatWasProven(t *testing.T) {
 				"blog": {Class: record.OK, LastOK: made, LastSnapshot: made, RestoreProven: proven},
 			}}))
 			breakIt(b)
-			st, err := Drill(context.Background(), b.cfg, b)
+			st, _, err := Drill(context.Background(), b.cfg, b)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -525,8 +528,8 @@ func TestADrillThatProvesNothingKeepsWhatWasProven(t *testing.T) {
 			if app.Class != record.OK || app.LastOK == nil {
 				t.Errorf("a drill rewrote the backup's own result: %+v", app)
 			}
-			if got := b.roles(); !strings.HasSuffix(got, " unstage") {
-				t.Errorf("what was fetched was not removed: %s", got)
+			if got := b.roles(); !strings.HasSuffix(got, " unstage probe repocheck") {
+				t.Errorf("what was fetched was not removed, before the repository was checked: %s", got)
 			}
 		})
 	}
@@ -593,7 +596,7 @@ func TestWhatARestoreBackedUpFirstIsNeverTheNewest(t *testing.T) {
 
 	b = restoreBox(t)
 	b.history = history
-	st, err := Drill(context.Background(), b.cfg, b)
+	st, _, err := Drill(context.Background(), b.cfg, b)
 	if err != nil || st.Apps["blog"].RestoreProven == nil || st.Apps["blog"].RestoreProven.Snapshot.ID != snapB {
 		t.Fatalf("a drill proved %+v, %v", st.Apps["blog"], err)
 	}
@@ -647,7 +650,7 @@ func TestADrillOfOneAppFailingIsThatAppsOwnAndAnInterruptIsNoVerdict(t *testing.
 			delete(b.outcome, "fetch")
 		}
 	}
-	st, err := Drill(context.Background(), b.cfg, b)
+	st, _, err := Drill(context.Background(), b.cfg, b)
 	if err != nil || st.Apps["blog"].RestoreDrill == nil || st.Apps["shop"] == nil || st.Apps["shop"].RestoreProven == nil {
 		t.Fatalf("blog %+v shop %+v, %v", st.Apps["blog"], st.Apps["shop"], err)
 	}
@@ -661,7 +664,7 @@ func TestADrillOfOneAppFailingIsThatAppsOwnAndAnInterruptIsNoVerdict(t *testing.
 			cancel()
 		}
 	}
-	st, err = Drill(ctx, b.cfg, b)
+	st, _, err = Drill(ctx, b.cfg, b)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("%v", err)
 	}
@@ -674,7 +677,7 @@ func TestADrillOfOneAppFailingIsThatAppsOwnAndAnInterruptIsNoVerdict(t *testing.
 	must(t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), &record.Status{Apps: map[string]*record.App{
 		"gone": {Class: record.OK, RestoreDrill: &record.Drill{Detail: "could not be asked"}},
 	}}))
-	if st, err = Drill(context.Background(), b.cfg, b); err != nil || st.Apps["gone"].RestoreDrill != nil {
+	if st, _, err = Drill(context.Background(), b.cfg, b); err != nil || st.Apps["gone"].RestoreDrill != nil {
 		t.Fatalf("%+v, %v", st.Apps["gone"], err)
 	}
 }
@@ -724,7 +727,7 @@ func TestAFetchThatCannotFitIsNotBegun(t *testing.T) {
 	}
 	b = restoreBox(t)
 	b.size, b.free, b.oneDisk = `{"total_size":41943040,"snapshots_count":1}`, 41943040+1<<20, true
-	if st, err := Drill(context.Background(), b.cfg, b); err != nil || st.Apps["blog"].RestoreProven == nil {
+	if st, _, err := Drill(context.Background(), b.cfg, b); err != nil || st.Apps["blog"].RestoreProven == nil {
 		t.Fatalf("a drill where the fetch alone fits: %+v, %v", st.Apps["blog"], err)
 	}
 	b = restoreBox(t)
@@ -756,7 +759,7 @@ func TestAFetchThatCannotFitIsNotBegun(t *testing.T) {
 			b.free = 1
 		}
 	}
-	st, err := Drill(context.Background(), b.cfg, b)
+	st, _, err := Drill(context.Background(), b.cfg, b)
 	if err != nil || st.Apps["blog"].RestoreDrill == nil || !strings.Contains(st.Apps["blog"].RestoreDrill.Detail, "no room") || st.Apps["shop"].RestoreProven == nil {
 		t.Fatalf("blog %+v shop %+v, %v", st.Apps["blog"], st.Apps["shop"], err)
 	}
@@ -879,7 +882,7 @@ func TestARunLeavesALargeFirstDrillToTheDrill(t *testing.T) {
 	}
 	// The drill itself has no such limit, and proves it (given the room).
 	b.specs, b.free = nil, 4<<30
-	if st, err = Drill(context.Background(), b.cfg, b); err != nil || st.Apps["blog"].RestoreProven == nil || st.Apps["blog"].RestoreDrill != nil {
+	if st, _, err = Drill(context.Background(), b.cfg, b); err != nil || st.Apps["blog"].RestoreProven == nil || st.Apps["blog"].RestoreDrill != nil {
 		t.Fatalf("the drill: %+v, %v", st.Apps["blog"], err)
 	}
 }
@@ -961,7 +964,7 @@ func TestAnInstallThatEndsWithoutAnAnswerIsCalledPartlyRestored(t *testing.T) {
 	b = restoreBox(t)
 	b.install = ""
 	b.outcome["check"] = unit.Outcome{Result: "oom-kill", ExitStatus: 137}
-	st, err := Drill(context.Background(), b.cfg, b)
+	st, _, err := Drill(context.Background(), b.cfg, b)
 	if err != nil || st.Apps["blog"].RestoreDrill == nil || strings.Contains(st.Apps["blog"].RestoreDrill.Detail, "partly") {
 		t.Fatalf("%+v, %v", st.Apps["blog"], err)
 	}
@@ -1085,7 +1088,7 @@ func TestACheckUnitThatChangedSomethingIsNotBelieved(t *testing.T) {
 	} {
 		b := restoreBox(t)
 		b.install = answer
-		st, err := Drill(context.Background(), b.cfg, b)
+		st, _, err := Drill(context.Background(), b.cfg, b)
 		if err != nil || st.Apps["blog"].RestoreProven != nil || st.Apps["blog"].RestoreDrill == nil {
 			t.Errorf("%s: %+v, %v", answer, st.Apps["blog"], err)
 		}
@@ -1096,13 +1099,13 @@ func TestACheckUnitThatChangedSomethingIsNotBelieved(t *testing.T) {
 func TestARecordSaysWhenADrillLastRan(t *testing.T) {
 	b := restoreBox(t)
 	before := time.Now().UTC().Add(-time.Second)
-	st, err := Drill(context.Background(), b.cfg, b)
+	st, _, err := Drill(context.Background(), b.cfg, b)
 	if err != nil || st.LastDrill == nil || st.LastDrill.Time.Before(before) || st.LastDrill.Detail != "" {
 		t.Fatalf("%+v, %v", st.LastDrill, err)
 	}
 	b = restoreBox(t)
 	b.err["plan"] = errors.New("the plan unit: no")
-	if st, err = Drill(context.Background(), b.cfg, b); err == nil || st == nil || st.LastDrill == nil || !strings.Contains(st.LastDrill.Detail, "no") {
+	if st, _, err = Drill(context.Background(), b.cfg, b); err == nil || st == nil || st.LastDrill == nil || !strings.Contains(st.LastDrill.Detail, "no") {
 		t.Fatalf("a drill that could not begin: %+v, %v", st, err)
 	}
 	again, err := record.Read(filepath.Join(b.cfg.StateDir, "status.json"))

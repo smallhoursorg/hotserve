@@ -69,11 +69,16 @@ fi
 
 echo "=== backup 2: two apps do not share a retention group ==="
 run; run
-before=$(snapshots)
+tagged() { rr snapshots --no-lock --tag "$1" --json 2>/dev/null | grep -o '"short_id"' | wc -l; }
+before=$(tagged hotserve)
+records=$(tagged hotserve-clean)
 rr forget --keep-last 1 >/dev/null 2>&1
-blog_left=$(rr snapshots --no-lock --tag app:blog --json 2>/dev/null | grep -o '"short_id"' | wc -l)
-shop_left=$(rr snapshots --no-lock --tag app:shop --json 2>/dev/null | grep -o '"short_id"' | wc -l)
+blog_left=$(tagged app:blog)
+shop_left=$(tagged app:shop)
 [ "$before" = 6 ] && [ "$blog_left" = 1 ] && [ "$shop_left" = 1 ] && pass "after three runs, 'forget --keep-last 1' leaves each app its own latest (6 -> 1 + 1)" || fail "retention: $before snapshots before; blog $blog_left, shop $shop_left after"
+# And the records that each run ended ok on an app are each app's own
+# group too: the last record of each is kept, not one of both.
+[ "$records" = 6 ] && [ "$(tagged hotserve-clean)" = 2 ] && rr snapshots --no-lock --json --tag hotserve-clean 2>/dev/null | grep -q '"paths":\["/hotserve-clean-blog"\]' && rr snapshots --no-lock --json --tag hotserve-clean 2>/dev/null | grep -q '"paths":\["/hotserve-clean-shop"\]' && pass "and leaves each app its own latest record of a clean run (6 -> 1 + 1)" || fail "records: $records before; after: $(rr snapshots --no-lock --json --tag hotserve-clean 2>/dev/null | grep -o '"paths":\[[^]]*\]' | tr '\n' ' ')"
 
 echo "=== backup 3: what is not a database is reported, never opened, and stops nothing else ==="
 as_app sh -c 'cd /var/lib/liveswap/blog/shared && mkfifo fifo.db && mkfifo -m 0400 rofifo.db && : >empty.db && ln -s app.db link.db && echo "not a database, only a text file" >text.db && mkfifo pipe'

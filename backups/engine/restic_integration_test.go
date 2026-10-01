@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 // verify leans on one thing restic does: given a directory, `ls` lists
@@ -137,8 +138,13 @@ func TestIntegrationResticLsSaysWhichFileANodeIs(t *testing.T) {
 	for p := range given {
 		wanted[p] = true
 	}
-	nodes, err := lsNodes(listing, wanted)
+	nodes, made, err := lsNodes(listing, wanted)
 	must(t, err)
+	// The snapshot's own line says when it was made: the time its
+	// clean-run record is given.
+	if made.IsZero() || time.Since(made) > time.Hour || time.Until(made) > time.Minute {
+		t.Errorf("the listing says the snapshot was made %v", made)
+	}
 	for p, g := range given {
 		n, ok := nodes[p]
 		if !ok || n.Inode == nil {

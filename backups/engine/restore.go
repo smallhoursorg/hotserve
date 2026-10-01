@@ -72,6 +72,9 @@ type RestoreAsk struct {
 	// LastOK is the last snapshot the record says a run ended ok on,
 	// when the one about to be restored is not it: see RestoreReport.
 	LastOK *record.Snapshot
+	// NotKnown is why whether a run ended ok on the snapshot is not
+	// known: see RestoreReport.
+	NotKnown string
 }
 
 // RestoreReport is what a restore did.
@@ -93,8 +96,14 @@ type RestoreReport struct {
 	// — restic exit 3, files left out of a directory it did read — leaves
 	// a snapshot every check at install passes, and a restore of it puts
 	// back fewer files than the ok one would: the record is what knows,
-	// and only on a box that has one.
+	// and where the box's has no run of the app that ended ok — a
+	// rebuilt box — the records of clean runs in the repository.
 	LastOK *record.Snapshot
+	// NotKnown is why it is not known whether a run ended ok on the
+	// snapshot, where the box's record cannot say and the repository's
+	// records did not: none vouches for any snapshot of the app, or they
+	// could not be asked.
+	NotKnown string
 	// Items are what the snapshot's own plan.json declares, each with
 	// whether it was restored.
 	Items []record.Item
@@ -159,6 +168,7 @@ func Restore(ctx context.Context, cfg Config, r Runner, o RestoreOptions) (rep *
 	if err != nil {
 		return nil, err
 	}
+	x.attended = true
 	p, err := x.plan(ctx)
 	if err != nil {
 		return nil, err
@@ -178,8 +188,17 @@ func Restore(ctx context.Context, cfg Config, r Runner, o RestoreOptions) (rep *
 		return nil, err
 	}
 	rep = &RestoreReport{App: o.App, Snapshot: snap, Into: o.To}
-	if old := x.prev.Apps[o.App]; old != nil && old.LastOK != nil && old.LastOK.ID != snap.ID {
-		rep.LastOK = old.LastOK
+	if old := x.prev.Apps[o.App]; old != nil && old.LastOK != nil {
+		if old.LastOK.ID != snap.ID {
+			rep.LastOK = old.LastOK
+		}
+	} else {
+		// No run this box remembers ended ok on the app — a rebuilt box,
+		// most often: the repository's records of clean runs say.
+		rep.LastOK, rep.NotKnown = x.lastVouched(ctx, o.App, snaps, snap)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 	}
 	defer func() {
 		if rep != nil {
@@ -191,7 +210,7 @@ func Restore(ctx context.Context, cfg Config, r Runner, o RestoreOptions) (rep *
 		if o.Confirm != nil {
 			// Whether there is anything there to back up is looked at
 			// before the question promises it.
-			ask := RestoreAsk{App: o.App, Snapshot: snap, Into: rep.Into, PreBackup: !o.NoPreBackup, LastOK: rep.LastOK}
+			ask := RestoreAsk{App: o.App, Snapshot: snap, Into: rep.Into, PreBackup: !o.NoPreBackup, LastOK: rep.LastOK, NotKnown: rep.NotKnown}
 			if rootPin, err := pinRoot(p.Root); err == nil {
 				if sharedPin, err := rootPin.beneath(o.App + "/shared"); err == nil {
 					sharedPin.close()
@@ -569,6 +588,62 @@ func pick(app string, snaps []listed, asked string) (record.Snapshot, error) {
 	return record.Snapshot{}, fmt.Errorf("%s is the start of %d snapshots of %s; give more of it", asked, len(found), app)
 }
 
+// checkInto checks the repository and writes the verdict into st: the
+// check made, or nil — an interrupt, or a unit ended from outside, is no
+// verdict, and leaves the last check and check_next as they were.
+//
+// The group is the one check_next names (the ISO week's for a first
+// check). A clean check leaves the group after it to be read next; any
+// other verdict leaves the same group — damage, until a check of it is
+// clean (the owner, 2026-09-30), and a check that read nothing, the
+// storage not answering — a first check's as well as any other's. One
+// reading of the clock serves the group and the check's time both: two,
+// either side of Sunday's midnight, would record one week's time beside
+// the other's group.
+func (x *run) checkInto(ctx context.Context, st *record.Status) *record.Check {
+	now := checkClock().UTC()
+	group := groupToRead(st.CheckNext, now)
+	c := x.checkRepository(ctx, group, now)
+	if c == nil {
+		return nil
+	}
+	st.LastCheck = c
+	if c.Class == record.CheckClean {
+		st.CheckNext = groupAfter(group)
+	} else {
+		st.CheckNext = group
+	}
+	return c
+}
+
+// lastVouched is what the repository's clean-run records say of snap,
+// for a box whose own record has no run of the app that ended ok — what
+// a box's record says of its last ok: nothing, where a record vouches
+// for snap itself; where none does, the newest of the app's snapshots a
+// record vouches for; and where none vouches for any, or the records
+// could not be asked, why whether a run ended ok on snap is not known.
+func (x *run) lastVouched(ctx context.Context, app string, snaps []listed, snap record.Snapshot) (*record.Snapshot, string) {
+	records, _, err := x.snapshots(ctx, "vouches", "", cleanTag)
+	if err != nil {
+		return nil, "the repository's records of clean runs could not be asked: " + err.Error()
+	}
+	vouched := map[string]bool{}
+	for _, r := range records {
+		for _, id := range r.Vouches {
+			vouched[id] = true
+		}
+	}
+	if vouched[snap.ID] {
+		return nil, ""
+	}
+	for i := len(snaps) - 1; i >= 0; i-- {
+		if s := snaps[i].Snapshot; vouched[s.ID] {
+			return &s, ""
+		}
+	}
+	return nil, fmt.Sprintf("nothing in the repository vouches for any snapshot of %s: no record there says that a run which made one ended ok", app)
+}
+
 // bring fetches a snapshot, hands it over, and has it checked — and, as
 // role says, installed into target. What was fetched is removed first
 // and last, whatever happens in between, by a unit the caller's
@@ -703,13 +778,8 @@ var freeUnder = func(dir string) (uint64, error) {
 // exits 0 [measured]: only one snapshot, counted, is an answer.
 func (x *run) snapshotSize(ctx context.Context, app, id string) (uint64, error) {
 	out := filepath.Join(x.dir, app+".size.json")
-	o, err := x.start(ctx, unit.Spec{
-		Name: x.name("size", app), Description: "hotserve backup: ask how large a snapshot of " + app + " is",
-		Argv: []string{x.cfg.Restic, "stats", "--quiet", "--json", "--no-lock", "--mode", "restore-size", id},
-		User: backupUser, Network: true, EnvironmentFile: x.cfg.EnvFile,
-		Environment:    []string{"RESTIC_CACHE_DIR=/var/cache/hotserve-backup", "HOME=/nonexistent"},
-		CacheDirectory: "hotserve-backup", StdoutFile: out,
-	})
+	o, err := x.startWithin(ctx, x.readClock(), resticUnit(x.name("size", app), "hotserve backup: ask how large a snapshot of "+app+" is", x.cfg.EnvFile,
+		[]string{x.cfg.Restic, "stats", "--quiet", "--json", "--no-lock", "--mode", "restore-size", id}, out))
 	if err != nil {
 		return 0, fmt.Errorf("the size unit: %w", err)
 	}
@@ -811,15 +881,10 @@ func (x *run) fetch(ctx context.Context, app, id, fetched string) error {
 	// <id>:<path>, never --include: asked for a path the snapshot does
 	// not hold, the first exits 1 and the second exits 0 having restored
 	// nothing [measured].
-	o, err := x.start(ctx, unit.Spec{
-		Name: x.name("fetch", app), Description: "hotserve backup: fetch a snapshot of " + app,
-		Argv: []string{x.cfg.Restic, "restore", "--quiet", "--json", "--retry-lock", retryLock, id + ":/backup/" + app, "--target", "/restore"},
-		User: backupUser, Network: true, EnvironmentFile: x.cfg.EnvFile,
-		Environment:    []string{"RESTIC_CACHE_DIR=/var/cache/hotserve-backup", "HOME=/nonexistent"},
-		CacheDirectory: "hotserve-backup",
-		Binds:          []unit.Bind{{Source: fetched, Dest: "/restore", Writable: true}},
-		StdoutFile:     out,
-	})
+	s := resticUnit(x.name("fetch", app), "hotserve backup: fetch a snapshot of "+app, x.cfg.EnvFile,
+		[]string{x.cfg.Restic, "restore", "--quiet", "--json", "--retry-lock", retryLock, id + ":/backup/" + app, "--target", "/restore"}, out)
+	s.Binds = []unit.Bind{{Source: fetched, Dest: "/restore", Writable: true}}
+	o, err := x.start(ctx, s)
 	if err != nil {
 		return fmt.Errorf("the fetch unit: %w", err)
 	}
@@ -1076,42 +1141,59 @@ func (x *run) firstDrill(ctx context.Context, app string, rec *record.App) (repo
 // Drill proves, for every app the repository holds a snapshot of, that
 // the newest can be fetched, handed over and read whole, and writes what
 // it found into the record beside what the last backup run found.
-func Drill(ctx context.Context, cfg Config, r Runner) (*record.Status, error) {
+// Then it checks the repository itself, and returns, beside the record,
+// the check it made: nil where it made none, whatever check the record
+// holds — which another command may have written since its caller last
+// looked.
+func Drill(ctx context.Context, cfg Config, r Runner) (st *record.Status, checked *record.Check, err error) {
 	x, end, err := begin(ctx, cfg, r)
 	if x == nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer end()
-	st := x.prev
+	st = x.prev
 	lastBefore := st.LastDrill
 	st.LastDrill = &record.Drill{Time: time.Now().UTC()}
+	// The first drill that checks, on this record: what status ages a
+	// check that never comes to a verdict from.
+	if st.LastCheck == nil && st.CheckSince == nil {
+		since := st.LastDrill.Time
+		st.CheckSince = &since
+	}
 	// Said in the record — a refusal from begin (a program not there)
 	// as a plan that cannot be made — so that a drill failing here week
 	// after week does not pass for "proven" ageing quietly.
-	couldNotBegin := func(err error) (*record.Status, error) {
+	couldNotBegin := func(err error) (*record.Status, *record.Check, error) {
 		// An interrupt is no verdict: stopped while it waits, or while
 		// the plan is read, the drill leaves the last drill's as it
 		// was, as it leaves the app an interrupt lands on.
 		if ctx.Err() != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		// Nor is an upgrade: the plan's helper was another version's,
 		// and nothing was found out.
 		if errors.As(err, new(upgradedError)) {
 			st.LastDrill = lastBefore
 			st.Warning = strings.TrimSpace(st.Warning + " " + x.status.Warning)
-			return st, errors.Join(err, record.Write(filepath.Join(cfg.StateDir, "status.json"), st))
+			return st, nil, errors.Join(err, record.Write(filepath.Join(cfg.StateDir, "status.json"), st))
 		}
 		st.LastDrill.Detail = record.Text(err.Error())
 		st.Warning = strings.TrimSpace(st.Warning + " " + x.status.Warning)
-		return st, errors.Join(err, record.Write(filepath.Join(cfg.StateDir, "status.json"), st))
+		return st, nil, errors.Join(err, record.Write(filepath.Join(cfg.StateDir, "status.json"), st))
 	}
 	if err != nil {
 		return couldNotBegin(err)
 	}
 	p, err := x.plan(ctx)
 	if err != nil {
-		return couldNotBegin(err)
+		// No plan stops the apps, not the repository's check, which needs
+		// none — unless the plan's helper was another version's, or the
+		// drill was interrupted.
+		if ctx.Err() == nil && !errors.As(err, new(upgradedError)) {
+			checked = x.checkInto(ctx, st)
+		}
+		st, _, err = couldNotBegin(err)
+		return st, checked, err
 	}
 	x.sweepFetched(ctx)
 	// An app that has left the plan has nothing left to prove.
@@ -1154,6 +1236,11 @@ func Drill(ctx context.Context, cfg Config, r Runner) (*record.Status, error) {
 			}
 		}
 		st.Apps[name] = rec
+		// A read given up at its clock — the history, a size — is a
+		// repository that will not answer the next app either.
+		if refused == "" && x.unanswered != nil {
+			refused = record.Text(fmt.Sprintf("the repository did not answer (%v), so nothing more was asked of it", x.unanswered))
+		}
 	}
 	st.Warning = strings.TrimSpace(st.Warning + " " + x.status.Warning)
 	// A drill an upgrade ended found nothing out from there on: the
@@ -1161,14 +1248,18 @@ func Drill(ctx context.Context, cfg Config, r Runner) (*record.Status, error) {
 	// one's, so that the next drill is not a week away.
 	if x.upgraded != nil {
 		st.LastDrill = lastBefore
+	} else if ctx.Err() == nil {
+		// Then the repository itself, whatever became of the apps: a
+		// refusal every app met is the check's to say in its own words.
+		checked = x.checkInto(ctx, st)
 	}
 	// What was finished is written, an interrupt or not: each verdict is
 	// an app's own, and the app the interrupt landed on has none.
 	if err := record.Write(filepath.Join(cfg.StateDir, "status.json"), st); err != nil {
-		return st, err
+		return st, checked, err
 	}
 	if x.upgraded != nil {
-		return st, x.upgraded
+		return st, checked, x.upgraded
 	}
-	return st, ctx.Err()
+	return st, checked, ctx.Err()
 }

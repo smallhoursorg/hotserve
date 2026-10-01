@@ -246,7 +246,7 @@ e2e:
 # e2e, which shortens setup's clock alone (backups/engine/
 # setupclock_e2e.go): the package's binary is never built with it,
 # and `make build` refuses one that was.
-BACKUP_SUITES = setup backup units status restore
+BACKUP_SUITES = setup backup units status restore check
 SUITE_LIMIT ?= 600
 e2e-backup:
 	$(cgroup2_preflight)

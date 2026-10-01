@@ -19,6 +19,10 @@ const (
 	// ProvenOldAfter is how old a proven restore may be: the weekly
 	// drill's period and a day.
 	ProvenOldAfter = 8 * 24 * time.Hour
+	// CheckOldAfter is how old the last clean check of the repository
+	// may be, and how long a box set up may go without one: the weekly
+	// drill's period and a day.
+	CheckOldAfter = ProvenOldAfter
 )
 
 const timeFormat = "2006-01-02 15:04 MST"
@@ -89,6 +93,29 @@ func Report(in Input) (lines []string, healthy bool) {
 		bad("the last drill, %s, could not begin: %s", when(d.Time), record.Text(d.Detail))
 	} else if d != nil {
 		say("last drill %s", when(d.Time))
+	}
+	// The repository itself, as the weekly drill last checked it. None
+	// yet is said, and is unhealthy a week and a day after the first
+	// drill that checks — or, before there has been one, after setup with
+	// no drill either: a new box is not failing, nor one set up before the
+	// check was, whose next drill checks.
+	old := int(CheckOldAfter.Hours() / 24)
+	switch c := st.LastCheck; {
+	case c == nil && st.CheckSince != nil && now.Sub(*st.CheckSince) > CheckOldAfter:
+		// Drills that check have run, and none came to a verdict — each
+		// stopped, week on week — however recent the last of them.
+		bad("no check of the repository has come to a verdict since %s, more than %d days ago; `sudo hotserve-backup drill` checks it", when(*st.CheckSince), old)
+	case c == nil && st.CheckSince == nil && !in.SetUp.IsZero() && now.Sub(in.SetUp) > CheckOldAfter && (st.LastDrill == nil || now.Sub(st.LastDrill.Time) > CheckOldAfter):
+		bad("the repository has not been checked since backups were set up, %s, more than %d days ago; `sudo hotserve-backup drill` checks it", when(in.SetUp), old)
+	case c == nil && !st.Started.IsZero():
+		say("the repository has not been checked yet: the weekly drill checks it")
+	case c == nil:
+	case c.Class == record.CheckClean && now.Sub(c.Time) > CheckOldAfter:
+		bad("repository last checked %s: its structure, and data group %s: clean: old, more than %d days ago; `sudo hotserve-backup drill` checks it", when(c.Time), record.Text(c.Group), old)
+	case c.Class == record.CheckClean:
+		say("repository last checked %s: its structure, and data group %s: clean", when(c.Time), record.Text(c.Group))
+	default:
+		bad("the repository check of %s (data group %s): %s: %s", when(c.Time), record.Text(c.Group), record.Text(string(c.Class)), record.Text(c.Detail))
 	}
 	// One listing unanswered is the run's warning, below. Unanswered for
 	// longer than a backup may be old, it is what would keep a snapshot

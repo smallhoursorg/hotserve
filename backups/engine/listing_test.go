@@ -51,7 +51,9 @@ func TestARunListsTheRepositoryOnceAtTheEnd(t *testing.T) {
 		t.Fatalf("units: %s", b.roles())
 	}
 	s := b.spec("listing")
-	if !slices.Contains(s.Argv, "--no-lock") || slices.Contains(s.Argv, "--tag") || s.Argv[0] != b.cfg.Restic || s.Argv[1] != "snapshots" {
+	// Every app's: no app's own tag (`hotserve` is every app's, and no
+	// clean-run record's).
+	if !slices.Contains(s.Argv, "--no-lock") || slices.ContainsFunc(s.Argv, func(a string) bool { return strings.HasPrefix(a, "app:") }) || s.Argv[0] != b.cfg.Restic || s.Argv[1] != "snapshots" {
 		t.Errorf("argv: %q", s.Argv)
 	}
 	if s.User != backupUser || !s.Network || s.EnvironmentFile != b.cfg.EnvFile || len(s.Binds) != 0 {
@@ -268,7 +270,7 @@ func TestADrillAndARestoreKeepWhatTheListingSaid(t *testing.T) {
 	first, err := Run(context.Background(), b.cfg, b)
 	must(t, err)
 	listed := listedAt(t, first)
-	st, err := Drill(context.Background(), b.cfg, b)
+	st, _, err := Drill(context.Background(), b.cfg, b)
 	must(t, err)
 	if st.Listed == nil || !st.Listed.Equal(listed) || st.Apps["blog"].LastOK.Seen == nil {
 		t.Errorf("after a drill: listed %v, last_ok %+v", st.Listed, st.Apps["blog"].LastOK)
@@ -327,7 +329,7 @@ func TestTheRecordSaysSinceWhenListingsHaveFailed(t *testing.T) {
 	if third.Unlisted == nil || !third.Unlisted.Equal(*second.Unlisted) {
 		t.Fatalf("a second failure moved it: %v, was %v", third.Unlisted, second.Unlisted)
 	}
-	st, err := Drill(context.Background(), b.cfg, b)
+	st, _, err := Drill(context.Background(), b.cfg, b)
 	must(t, err)
 	if st.Unlisted == nil || !st.Unlisted.Equal(*second.Unlisted) {
 		t.Fatalf("a drill lost it: %v", st.Unlisted)
@@ -487,7 +489,7 @@ func TestADrillThatFetchedASnapshotHasSeenItUnderEveryName(t *testing.T) {
 	rec.Apps["blog"].LastOK.Seen, rec.Apps["blog"].LastSnapshot.Seen = &long, &long
 	must(t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), rec))
 
-	st, err := Drill(context.Background(), b.cfg, b)
+	st, _, err := Drill(context.Background(), b.cfg, b)
 	must(t, err)
 	blog := st.Apps["blog"]
 	if blog.RestoreProven == nil || blog.RestoreProven.Snapshot.ID != blog.LastOK.ID {
@@ -508,7 +510,7 @@ func TestARunKeepsWhatTheLastDrillSaid(t *testing.T) {
 	_, err := Run(context.Background(), b.cfg, b)
 	must(t, err)
 	b.err["plan"] = errors.New("the plan unit: no")
-	drilled, err := Drill(context.Background(), b.cfg, b)
+	drilled, _, err := Drill(context.Background(), b.cfg, b)
 	if err == nil || drilled == nil || drilled.LastDrill == nil || drilled.LastDrill.Detail == "" {
 		t.Fatalf("fixture: a drill that could not begin: %+v, %v", drilled, err)
 	}

@@ -48,6 +48,14 @@ func with(change func(*record.App)) *record.Status {
 	return of(map[string]*record.App{"blog": a, "shop": sound()})
 }
 
+// checked is a sound record whose last check of the repository, d ago,
+// read group 38/52 and came to class.
+func checked(class record.CheckClass, detail string, d time.Duration) *record.Status {
+	st := with(func(*record.App) {})
+	st.LastCheck = &record.Check{Time: ago(d), Group: "38/52", Class: class, Detail: detail}
+	return st
+}
+
 func TestWhatStatusSays(t *testing.T) {
 	for name, tc := range map[string]struct {
 		st         *record.Status
@@ -312,6 +320,73 @@ func TestWhatStatusSays(t *testing.T) {
 			}),
 			says: []string{"blog: not attempted: the repository's password is wrong"},
 		},
+		// The repository's own check: none yet is said, and is unhealthy
+		// only once a box has been set up for longer than a week and a
+		// day; a clean one is said, and ages; any other verdict is
+		// unhealthy until a clean one.
+		"no check yet, set up two days ago": {
+			st: with(func(*record.App) {}), setUp: ago(48 * time.Hour), healthy: true,
+			says: []string{"the repository has not been checked yet: the weekly drill checks it"},
+		},
+		"no check, set up nine days ago": {
+			st: with(func(*record.App) {}), setUp: ago(9 * 24 * time.Hour),
+			says: []string{"the repository has not been checked since backups were set up, 2026-09-11 15:00 UTC, more than 8 days ago; `sudo hotserve-backup drill` checks it"},
+		},
+		// A box set up before the check existed: none on record, but a
+		// drill lately, and the next drill checks. Not failing.
+		"no check, set up nine days ago, a drill three days ago": {
+			st: func() *record.Status {
+				st := with(func(*record.App) {})
+				st.LastDrill = &record.Drill{Time: ago(3 * 24 * time.Hour)}
+				return st
+			}(), setUp: ago(9 * 24 * time.Hour), healthy: true,
+			says: []string{"the repository has not been checked yet: the weekly drill checks it"},
+		},
+		"no check, set up nine days ago, the last drill nine days ago": {
+			st: func() *record.Status {
+				st := with(func(*record.App) {})
+				st.LastDrill = &record.Drill{Time: ago(9 * 24 * time.Hour)}
+				return st
+			}(), setUp: ago(30 * 24 * time.Hour),
+			says: []string{"the repository has not been checked since backups were set up"},
+		},
+		// Drills that never come to a verdict — each stopped, week on
+		// week — refresh last_drill; the date checks began is what ages.
+		"checks begun nine days ago, none come to a verdict": {
+			st: func() *record.Status {
+				st := with(func(*record.App) {})
+				st.LastDrill = &record.Drill{Time: ago(24 * time.Hour)}
+				st.CheckSince = at(9 * 24 * time.Hour)
+				return st
+			}(), setUp: ago(30 * 24 * time.Hour),
+			says: []string{"no check of the repository has come to a verdict since 2026-09-11 15:00 UTC, more than 8 days ago; `sudo hotserve-backup drill` checks it"},
+		},
+		"checks begun three days ago": {
+			st: func() *record.Status {
+				st := with(func(*record.App) {})
+				st.LastDrill = &record.Drill{Time: ago(24 * time.Hour)}
+				st.CheckSince = at(3 * 24 * time.Hour)
+				return st
+			}(), setUp: ago(30 * 24 * time.Hour), healthy: true,
+			says: []string{"the repository has not been checked yet: the weekly drill checks it"},
+		},
+		"checked clean lately": {
+			st: checked(record.CheckClean, "", 48*time.Hour), setUp: ago(30 * 24 * time.Hour), healthy: true,
+			says:  []string{"repository last checked 2026-09-18 15:00 UTC: its structure, and data group 38/52: clean"},
+			never: []string{"not been checked"},
+		},
+		"checked clean, nine days ago": {
+			st:   checked(record.CheckClean, "", 9*24*time.Hour),
+			says: []string{"repository last checked 2026-09-11 15:00 UTC: its structure, and data group 38/52: clean: old, more than 8 days ago; `sudo hotserve-backup drill` checks it"},
+		},
+		"checked and found damaged": {
+			st:   checked(record.CheckDamaged, "restic check found 2 errors, in 2 damaged packs", 48*time.Hour),
+			says: []string{"the repository check of 2026-09-18 15:00 UTC (data group 38/52): damaged: restic check found 2 errors, in 2 damaged packs"},
+		},
+		"a check that could not reach it": {
+			st:   checked(record.CheckUnreachable, "the repository did not answer within 30s", 48*time.Hour),
+			says: []string{"the repository check of 2026-09-18 15:00 UTC (data group 38/52): unreachable: the repository did not answer within 30s"},
+		},
 		"a run that ended early, and a warning": {
 			st: func() *record.Status {
 				st := with(func(*record.App) {})
@@ -351,6 +426,7 @@ func TestAReportHoldsNoControlCharacters(t *testing.T) {
 		a.RestoreProven.Snapshot.ID = "\x1b[2Jbbbb"
 	})
 	st.Apps["sh\x1bop"] = sound()
+	st.LastCheck = &record.Check{Time: ago(time.Hour), Group: "3\x1b[2J8/52", Class: "dam\x1b[2Jaged", Detail: "\x1b]0;x\x07found"}
 	lines, _ := Report(Input{Record: st, Now: now})
 	if len(lines) == 0 {
 		t.Fatal("nothing was said")

@@ -196,6 +196,16 @@ type run struct {
 	// given is which file each files item of the app under way is, by
 	// its path in the upload unit's view: what the snapshot is held to.
 	given map[string]identity
+	// made is when restic says it made each app's snapshot of this run,
+	// from the listing that verified it: its clean-run record's time.
+	made map[string]time.Time
+	// attended is a command someone started and can stop — a restore:
+	// its reads of the repository have no backstop (readClock).
+	attended bool
+	// unanswered is the first unit this command gave up at its clock:
+	// the repository not answering, which it will not do for the next
+	// app either. startWithin sets it; the loops over apps stop on it.
+	unanswered error
 }
 
 // preRestoreTag is on a snapshot a restore made of what it was about to
@@ -386,7 +396,7 @@ func open(ctx context.Context, cfg Config, r Runner, say func(string)) (x *run, 
 	}
 	uid, gid, derr := dataOwner(ctx)
 	x = &run{cfg: cfg, r: r, nonce: nonce, dir: filepath.Join(cfg.RunDir, nonce), prev: prev, dataUID: uid, dataGID: gid, dataErr: derr, program: program,
-		status: &record.Status{Started: time.Now().UTC(), Warning: unreadable, Apps: map[string]*record.App{}, Listed: prev.Listed, Unlisted: prev.Unlisted, LastDrill: prev.LastDrill}}
+		status: &record.Status{Started: time.Now().UTC(), Warning: unreadable, Apps: map[string]*record.App{}, Listed: prev.Listed, Unlisted: prev.Unlisted, LastDrill: prev.LastDrill, LastCheck: prev.LastCheck, CheckNext: prev.CheckNext, CheckSince: prev.CheckSince}}
 	if err := x.awaitInit(ctx, say); err != nil {
 		return x, unlock, err
 	}
@@ -482,24 +492,41 @@ func (x *run) apps(ctx context.Context) error {
 			app, repositoryWide := x.app(ctx, p.Root, name, p.Apps[name])
 			x.status.Apps[name] = app
 			if repositoryWide {
-				stop = app
+				stop = x.stopAfter(name, app.Detail)
+			}
+			// Said in the repository too, once nothing of the app's run is
+			// left to change how it ended: what a rebuilt box, which has
+			// no record, has to go on.
+			if app.Class == record.OK {
+				x.vouch(ctx, name, app.Snapshot.ID)
 			}
 		}
 		x.carryLastOK(name)
 		// A backup nobody has restored is a hypothesis: an app's first
 		// good backup has its snapshot fetched and checked, there and
 		// then. After that — proven or not — it is the drill's: a drill
-		// that keeps failing is not re-fetched, in full, every hour.
-		if app := x.status.Apps[name]; app.Class == record.OK && app.RestoreProven == nil && app.RestoreDrill == nil && ctx.Err() == nil {
+		// that keeps failing is not re-fetched, in full, every hour. Not
+		// where the repository has just not answered — the app's record
+		// given up at its clock: no verdict, so the next run drills it.
+		if app := x.status.Apps[name]; app.Class == record.OK && app.RestoreProven == nil && app.RestoreDrill == nil && ctx.Err() == nil && x.unanswered == nil {
 			if x.firstDrill(ctx, name, app) {
+				// An upgrade leaves no verdict: stopAfter says it instead.
+				detail := ""
+				if app.RestoreDrill != nil {
+					detail = app.RestoreDrill.Detail
+				}
+				stop = x.stopAfter(name, detail)
 				if x.upgraded != nil {
 					// No verdict: the next run drills it again.
-					stop = &record.App{Detail: record.Text(x.upgraded.Error())}
 					x.status.Warning = strings.TrimSpace(x.status.Warning + " " + stop.Detail)
-				} else {
-					stop = &record.App{Detail: app.RestoreDrill.Detail}
 				}
 			}
+		}
+		// A read or a write given up at its clock — a verify, a listing, a
+		// size, a record — is a repository that will not answer the next
+		// app either, whose upload nothing bounds.
+		if stop == nil && x.unanswered != nil {
+			stop = x.stopAfter(name, "")
 		}
 	}
 	// Once the repository has refused for a reason every app shares,
@@ -544,32 +571,16 @@ func (x *run) list(ctx context.Context) {
 		_ = os.Remove(kept)
 		return
 	}
-	snaps, _, err := x.snapshots(ctx, "listing", "")
+	snaps, _, err := x.snapshots(ctx, "listing", "", "hotserve")
 	if ctx.Err() != nil {
 		return
 	}
-	// restic leaves a snapshot it cannot load out of the listing, says
-	// so on stderr alone, and exits 0 [measured, a cold cache]: an
-	// answer that came with anything beside it is not taken for the
-	// whole repository.
-	//
 	// The unit's stderr is in a file, so the journal has none of it, and
 	// the record is for everyone to read, so restic's words — which can
 	// say where the repository is — do not go there either, but for the
 	// id in that one line. They are kept for root, until a listing is
 	// answered.
-	said, readErr := os.ReadFile(filepath.Join(x.dir, ".listing.err"))
-	switch {
-	case err != nil:
-	case readErr != nil:
-		err = fmt.Errorf("what restic said beside the listing could not be read, so the listing is not believed: %w", readErr)
-	case len(bytes.TrimSpace(said)) > 0:
-		if m := ignoringRe.FindSubmatch(said); m != nil {
-			err = fmt.Errorf("restic could not load snapshot %.8s and left it out of the listing", m[1])
-		} else {
-			err = errors.New("restic had something to say beside the listing")
-		}
-	}
+	said, _ := os.ReadFile(filepath.Join(x.dir, ".listing.err"))
 	if err != nil {
 		where := ""
 		if len(bytes.TrimSpace(said)) > 0 && os.WriteFile(kept, said, 0o600) == nil && os.Chmod(kept, 0o600) == nil { //nolint:gosec // a constant name under root's own state dir
@@ -1388,19 +1399,13 @@ func (x *run) upload(ctx context.Context, app string, binds []unit.Bind, masked 
 	for _, tag := range tags {
 		argv = append(argv, "--tag", tag)
 	}
-	o, err := x.start(ctx, unit.Spec{
-		Name: x.name("upload", app), Description: "hotserve backup: upload " + app,
-		Argv: append(argv, "/backup/"+app),
-		// An account of its own, so that the hotserve uid — the server,
-		// every app — can neither read this process's environment nor
-		// signal it; and one capability, to read files that account
-		// does not own, in a view that holds this app and nothing else.
-		User: backupUser, Capabilities: []unit.Capability{unit.CapDACReadSearch},
-		Network: true, EnvironmentFile: x.cfg.EnvFile,
-		Environment:    []string{"RESTIC_CACHE_DIR=/var/cache/hotserve-backup", "HOME=/nonexistent"},
-		CacheDirectory: "hotserve-backup",
-		Binds:          binds, Masked: masked, StdoutFile: out,
-	})
+	s := resticUnit(x.name("upload", app), "hotserve backup: upload "+app, x.cfg.EnvFile, append(argv, "/backup/"+app), out)
+	// An account of its own, so that the hotserve uid — the server,
+	// every app — can neither read this process's environment nor
+	// signal it; and one capability, to read files that account does not
+	// own, in a view that holds this app and nothing else.
+	s.Capabilities, s.Binds, s.Masked = []unit.Capability{unit.CapDACReadSearch}, binds, masked
+	o, err := x.start(ctx, s)
 	if err != nil {
 		return "", record.Failed, fmt.Sprintf("the upload unit: %v", err), false
 	}
@@ -1417,6 +1422,93 @@ func (x *run) upload(ctx context.Context, app string, binds []unit.Bind, masked 
 	}
 	detail, repositoryWide = resticFailure(o)
 	return "", record.Failed, detail + "; `journalctl -u " + x.name("upload", app) + "` has restic's own words", repositoryWide
+}
+
+// stopAfter is what a run says of every app after name, once there is
+// no point asking the repository for them: in the words of why — a
+// helper of another version, a repository that did not answer, or one
+// that refused name's backup for a reason every app shares — never as
+// though what befell name were theirs.
+func (x *run) stopAfter(name, detail string) *record.App {
+	switch {
+	case x.upgraded != nil:
+		return &record.App{Detail: record.Text(x.upgraded.Error())}
+	case x.unanswered != nil:
+		return &record.App{Detail: record.Text(fmt.Sprintf("the repository did not answer (%v), so nothing more was asked of it", x.unanswered))}
+	}
+	return &record.App{Detail: record.Text(fmt.Sprintf("the repository refused %s's backup for a reason every app shares: %s", name, detail))}
+}
+
+// vouch writes into the repository the record that this run ended ok
+// on app's snapshot id (vouchArgv). One that could not be written is
+// said, and costs nothing else: the backup is sound, and only a rebuilt
+// box goes without the word for it.
+//
+// It is given up at listClock, as a listing is (the owner, 2026-09-30):
+// a write of some four hundred bytes, which a storage that stops
+// answering must not turn into a run that never ends.
+func (x *run) vouch(ctx context.Context, app, id string) {
+	// The snapshot first, before anything a cut could take.
+	warn := func(what string) {
+		x.status.Warning = strings.TrimSpace(x.status.Warning + " " + record.Text(fmt.Sprintf("%s: snapshot %s is a complete backup, and the record that says so %s: a restore on a rebuilt box will not know it.", app, short(id), what)))
+	}
+	// Stopped — Ctrl-C, systemctl stop, a shutdown — after the app's run
+	// ended ok and before its record was begun.
+	if ctx.Err() != nil {
+		warn("was not written: the command was stopped before it was begun")
+		return
+	}
+	at, ok := x.made[app]
+	if !ok {
+		warn("was not written: its listing said nothing of when it was made")
+		return
+	}
+	out := filepath.Join(x.dir, app+".vouch.json")
+	o, err := x.startWithin(ctx, listClock, resticUnit(x.name("vouch", app), "hotserve backup: record in the repository that "+app+"'s backup ended ok", x.cfg.EnvFile, vouchArgv(x.cfg.Restic, app, id, at), out))
+	// Only restic's own word that it failed is "could not": a stop, a
+	// clock, a unit ended from outside or by a signal, an exit 0 that
+	// names nothing — restic may have saved it first, and which is not
+	// known here.
+	switch {
+	case err == nil && o.OK() && summaryID(out) != "":
+		// Written: a stop that came as it finished changes nothing.
+	case err == nil && o.Result == "exit-code" && o.ExitStatus == 3:
+		warn("may not have been written: restic exited 3, having saved a snapshot of what it could read")
+	case err == nil && o.Result == "exit-code" && o.ExitStatus == 11:
+		warn("could not be written into the repository (it stayed locked by something else for " + vouchRetryLock + ", exit 11)")
+	case err == nil && o.Result == "exit-code" && o.ExitStatus != 0:
+		detail, _ := resticFailure(o)
+		warn("could not be written into the repository (" + detail + ")")
+	case err == nil && o.OK():
+		warn("may not have been written: restic exited 0 and its summary names no snapshot")
+	case err == nil:
+		detail, _ := resticFailure(o)
+		warn("may not have been written: " + detail)
+	case ctx.Err() != nil:
+		warn("may not have been written: the command was stopped while it was being written")
+	default:
+		warn("may not have been written: " + err.Error())
+	}
+}
+
+// resticUnit is a unit that runs restic as the backup account, with the
+// credential file the manager reads, the network and restic's own
+// cache — what every restic unit has — and stdout into a file of the
+// command's. The caller adds what its command needs beyond that.
+//
+// In UTC (the owner, 2026-09-30): restic stores a snapshot's time in
+// the zone it runs in, and forget sorts each into its days by that zone
+// [measured] — a Berlin box's 23:30 snapshot at +02:00 and its record
+// at Z fell into different days, and --keep-daily kept the one and
+// removed the other. A unit sees the box's /etc/localtime, so the zone
+// is said here, for every restic alike.
+func resticUnit(name, description, envFile string, argv []string, stdout string) unit.Spec {
+	return unit.Spec{
+		Name: name, Description: description, Argv: argv,
+		User: backupUser, Network: true, EnvironmentFile: envFile,
+		Environment:    []string{"RESTIC_CACHE_DIR=/var/cache/hotserve-backup", "HOME=/nonexistent", "TZ=UTC"},
+		CacheDirectory: "hotserve-backup", StdoutFile: stdout,
+	}
 }
 
 // resticFailure puts restic 0.18's exit statuses into words [measured].
@@ -1508,13 +1600,8 @@ func (x *run) verify(ctx context.Context, app, id string, rec *record.App) error
 	// directory part of a declared path, after /backup/<app>/ — and
 	// restic takes each as a path and nothing else: they follow "--",
 	// start with "/", and like every argument are never expanded.
-	o, err := x.start(ctx, unit.Spec{
-		Name: x.name("verify", app), Description: "hotserve backup: check " + app + "'s snapshot",
-		Argv: append([]string{x.cfg.Restic, "ls", "--json", "--no-lock", "--", id}, parents...),
-		User: backupUser, Network: true, EnvironmentFile: x.cfg.EnvFile,
-		Environment:    []string{"RESTIC_CACHE_DIR=/var/cache/hotserve-backup", "HOME=/nonexistent"},
-		CacheDirectory: "hotserve-backup", StdoutFile: out,
-	})
+	o, err := x.startWithin(ctx, x.readClock(), resticUnit(x.name("verify", app), "hotserve backup: check "+app+"'s snapshot", x.cfg.EnvFile,
+		append([]string{x.cfg.Restic, "ls", "--json", "--no-lock", "--", id}, parents...), out))
 	if err != nil {
 		return err
 	}
@@ -1527,9 +1614,17 @@ func (x *run) verify(ctx context.Context, app, id string, rec *record.App) error
 			wanted[itemPath(base, rec.Items[i])] = true
 		}
 	}
-	nodes, err := lsNodes(out, wanted)
+	nodes, made, err := lsNodes(out, wanted)
 	if err != nil {
 		return err
+	}
+	// When restic says it made the snapshot: the time its clean-run
+	// record is given.
+	if !made.IsZero() {
+		if x.made == nil {
+			x.made = map[string]time.Time{}
+		}
+		x.made[app] = made
 	}
 	for _, parent := range parents {
 		for _, i := range want[parent] {
@@ -1590,6 +1685,9 @@ type listed struct {
 	Apps []string
 	// PreRestore: made by a restore, of what it then restored over.
 	PreRestore bool
+	// Vouches are the snapshots a clean-run record says a run ended ok
+	// on: none, but for a record.
+	Vouches []string
 }
 
 // newest is the newest snapshot a backup run made, or nil.
@@ -1606,32 +1704,34 @@ func newest(snaps []listed) *record.Snapshot {
 // It is what a restore on a rebuilt box starts from: the repository
 // remembers what the box does not.
 func (x *run) history(ctx context.Context, app string) (snaps []listed, repositoryWide bool, err error) {
-	return x.snapshots(ctx, "history", app)
+	return x.snapshots(ctx, "history", app, "app:"+app)
 }
 
 // snapshots asks the repository for the snapshots of app — of every
-// app, where app is empty — oldest first. --no-lock: it reads, and a
-// check that holds the repository exclusively must not fail it.
-func (x *run) snapshots(ctx context.Context, role, app string) (snaps []listed, repositoryWide bool, err error) {
+// app, where app is empty — oldest first, of those tagged tag: the
+// app's own, every app's (`hotserve`, which no clean-run record has), or
+// the records (cleanTag). --no-lock: it reads, and a check that holds
+// the repository exclusively must not fail it. Given up at listClock.
+func (x *run) snapshots(ctx context.Context, role, app, tag string) (snaps []listed, repositoryWide bool, err error) {
 	out := filepath.Join(x.dir, app+"."+role+".json")
-	argv, about := []string{x.cfg.Restic, "snapshots", "--json", "--no-lock", "--host", "hotserve"}, "every app"
-	if app != "" {
-		argv, about = append(argv, "--tag", "app:"+app), app
+	about := app
+	switch {
+	case tag == cleanTag:
+		about = "which backups ended ok"
+	case app == "":
+		about = "every app"
 	}
 	// An app's history fails loudly or not at all, and its words belong
-	// in the journal. The listing of every app is the one answer that
-	// is only believed when restic had nothing to say beside it.
+	// in the journal. A listing of every app's, or of the records, is
+	// only believed when restic had nothing to say beside it (besides).
 	stderr := ""
 	if app == "" {
 		stderr = filepath.Join(x.dir, "."+role+".err")
 	}
-	o, err := x.start(ctx, unit.Spec{
-		Name: x.name(role, app), Description: "hotserve backup: ask the repository about " + about,
-		Argv: argv, StderrFile: stderr,
-		User: backupUser, Network: true, EnvironmentFile: x.cfg.EnvFile,
-		Environment:    []string{"RESTIC_CACHE_DIR=/var/cache/hotserve-backup", "HOME=/nonexistent"},
-		CacheDirectory: "hotserve-backup", StdoutFile: out,
-	})
+	s := resticUnit(x.name(role, app), "hotserve backup: ask the repository about "+about, x.cfg.EnvFile,
+		[]string{x.cfg.Restic, "snapshots", "--json", "--no-lock", "--host", "hotserve", "--tag", tag}, out)
+	s.StderrFile = stderr
+	o, err := x.startWithin(ctx, x.readClock(), s)
 	if err != nil {
 		return nil, false, err
 	}
@@ -1663,11 +1763,38 @@ func (x *run) snapshots(ctx context.Context, role, app string) (snaps []listed, 
 			if name, ok := strings.CutPrefix(tag, "app:"); ok {
 				one.Apps = append(one.Apps, name)
 			}
+			if id, ok := strings.CutPrefix(tag, vouchesTag); ok && snapshotRe.MatchString(id) {
+				one.Vouches = append(one.Vouches, id)
+			}
 		}
 		snaps = append(snaps, one)
 	}
 	sort.SliceStable(snaps, func(i, j int) bool { return snaps[i].Time.Before(snaps[j].Time) })
+	if stderr != "" {
+		if err := x.besides(role); err != nil {
+			return nil, false, err
+		}
+	}
 	return snaps, false, nil
+}
+
+// besides says whether restic said anything on stderr beside a listing
+// of every app's snapshots, or of the records — snapshots holds each such
+// listing to it: it leaves a snapshot it cannot load out of the listing,
+// says so on stderr alone, and exits 0 [measured, a cold cache], so an
+// answer that came with anything beside it is not taken for the whole.
+func (x *run) besides(role string) error {
+	said, err := os.ReadFile(filepath.Join(x.dir, "."+role+".err")) //nolint:gosec // written by the manager into root's own run dir
+	switch {
+	case err != nil:
+		return fmt.Errorf("what restic said beside the listing could not be read, so the listing is not believed: %w", err)
+	case len(bytes.TrimSpace(said)) == 0:
+		return nil
+	}
+	if m := ignoringRe.FindSubmatch(said); m != nil {
+		return fmt.Errorf("restic could not load snapshot %.8s and left it out of the listing, so the listing is not believed", m[1])
+	}
+	return errors.New("restic had something to say beside the listing, so the listing is not believed")
 }
 
 // ignoringRe is what restic says of a snapshot file it cannot load.
@@ -1694,26 +1821,32 @@ type lsNode struct {
 // lsNodes reads a listing a line at a time and keeps the nodes at the
 // wanted paths, and nothing else: what it costs in memory does not
 // depend on how long the listing is.
-func lsNodes(file string, wanted map[string]bool) (map[string]lsNode, error) {
+func lsNodes(file string, wanted map[string]bool) (nodes map[string]lsNode, made time.Time, err error) {
 	f, err := os.Open(file) //nolint:gosec // written by the manager into root's own run dir
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
 	defer f.Close() //nolint:errcheck // read-only
-	nodes := map[string]lsNode{}
+	nodes = map[string]lsNode{}
 	lines := bufio.NewScanner(f)
 	lines.Buffer(make([]byte, 0, 64<<10), 1<<20)
 	for lines.Scan() {
 		var n struct {
 			StructType string `json:"struct_type"`
 			Path       string `json:"path"`
+			// The snapshot's own line says when it was made.
+			Time time.Time `json:"time"`
 			lsNode
 		}
-		if json.Unmarshal(lines.Bytes(), &n) == nil && n.StructType == "node" && wanted[n.Path] {
+		switch {
+		case json.Unmarshal(lines.Bytes(), &n) != nil:
+		case n.StructType == "snapshot" && made.IsZero():
+			made = n.Time
+		case n.StructType == "node" && wanted[n.Path]:
 			nodes[n.Path] = n.lsNode
 		}
 	}
-	return nodes, lines.Err()
+	return nodes, made, lines.Err()
 }
 
 func firstDetail(items []record.Item) string {

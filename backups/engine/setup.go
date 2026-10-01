@@ -1011,20 +1011,11 @@ func (s *setup) repository(ctx context.Context, role string, within time.Duratio
 		}
 	}()
 	errFile := filepath.Join(s.dir, role+".err")
-	spec := unit.Spec{
-		Name: s.name(role, ""), Description: "hotserve backup: " + role + " the repository",
-		Argv: argv,
-		User: backupUser, Network: true, EnvironmentFile: s.staged,
-		Environment:    []string{"RESTIC_CACHE_DIR=/var/cache/hotserve-backup", "HOME=/nonexistent"},
-		CacheDirectory: "hotserve-backup",
-		StdoutFile:     filepath.Join(s.dir, role+".out"), StderrFile: errFile,
-	}
+	spec := resticUnit(s.name(role, ""), "hotserve backup: "+role+" the repository", s.staged, argv, filepath.Join(s.dir, role+".out"))
+	spec.StderrFile = errFile
 	if role != "init" {
-		o, err := s.start(clock, spec)
+		o, err := s.startWithin(ctx, within, spec)
 		if err != nil {
-			if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, unit.ErrNotConfirmedGone) {
-				return o, "", fmt.Errorf("%w within %s; the unit was stopped", errDidNotAnswer, within)
-			}
 			return o, "", err
 		}
 		return o, resticMessage(errFile), nil

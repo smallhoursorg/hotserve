@@ -138,7 +138,7 @@ func TestTheAccountCheckRunsOnItsCommandsContext(t *testing.T) {
 		asked++
 		return passwd{name: backupUser, comment: accountMark, uid: 995, gid: 995, exists: true}, nil
 	}
-	if _, err := Drill(ctx, b.cfg, b); err != nil {
+	if _, _, err := Drill(ctx, b.cfg, b); err != nil {
 		t.Fatal(err)
 	}
 	if asked != 1 {

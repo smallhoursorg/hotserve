@@ -289,6 +289,12 @@ func (r *Runner) ManagerVersion(context.Context) (int, error) {
 	return strconv.Atoi(digits)
 }
 
+// ErrEndedFromOutside is a unit ended before its command finished by
+// something other than its command: stopped by someone, or by the
+// manager because what it is bound to ended. The command gave no
+// verdict.
+var ErrEndedFromOutside = errors.New("ended from outside before its command finished")
+
 // ErrNotConfirmedGone wraps the cause when a unit could not be stopped
 // and observed gone: the one case in which something may still be
 // running after Run returns.
@@ -439,7 +445,7 @@ func (r *Runner) reap(name, jobResult string) (Outcome, error) {
 	out := Outcome{Result: str(p["Result"]), ExitStatus: integer(p["ExecMainStatus"])}
 	_ = r.conn.ResetFailedUnitContext(ctx, name)
 	if jobResult != "failed" {
-		return out, fmt.Errorf("%s: ended from outside before its command finished (start job %q, unit result %q)", name, jobResult, out.Result)
+		return out, fmt.Errorf("%s: %w (start job %q, unit result %q)", name, ErrEndedFromOutside, jobResult, out.Result)
 	}
 	if out.Result == "" || out.Result == "success" {
 		return out, fmt.Errorf("%s: start job failed and the unit records no failure", name)

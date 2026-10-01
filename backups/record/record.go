@@ -94,6 +94,43 @@ type Drill struct {
 	Detail   string    `json:"detail,omitempty"`
 }
 
+// Check is one check of the repository itself: its structure, and one
+// group of its data — a fifty-second, the one after the last read, so
+// that fifty-two checks read every pack once.
+type Check struct {
+	Time time.Time `json:"time"`
+	// Group is which fifty-second of the data was read, "n/52".
+	Group  string     `json:"group"`
+	Class  CheckClass `json:"class"`
+	Detail string     `json:"detail,omitempty"`
+}
+
+// CheckClass is what a check of the repository found, in the words a
+// status report uses. Only CheckClean is a repository known sound.
+type CheckClass string
+
+const (
+	// CheckClean: restic read the structure and the group of data, and
+	// said it found nothing wrong.
+	CheckClean CheckClass = "clean"
+	// CheckDamaged: restic said it found something wrong, and the
+	// repository answered both before and after it: not a check that
+	// lost the storage half way.
+	CheckDamaged CheckClass = "damaged"
+	// CheckUnreachable: the storage did not answer in time, or refused
+	// the key — restic's exit 1, which says no more than that.
+	CheckUnreachable CheckClass = "unreachable"
+	// CheckNoRepository: the storage answered, and holds no repository
+	// there (exit 10).
+	CheckNoRepository CheckClass = "no repository"
+	// CheckWrongPassword: the repository is there, and the password does
+	// not open it (exit 12).
+	CheckWrongPassword CheckClass = "wrong password"
+	// CheckFailed: anything else — a unit that could not be set up, one
+	// ended by a signal, an answer that could not be believed.
+	CheckFailed CheckClass = "failed"
+)
+
 // Status is the whole file.
 type Status struct {
 	Started  time.Time `json:"started"`
@@ -108,6 +145,19 @@ type Status struct {
 	// LastDrill is when a drill last ran, and — where it could not
 	// drill anything — why; each app's own verdict is on the app.
 	LastDrill *Drill `json:"last_drill,omitempty"`
+	// LastCheck is the last check of the repository that came to a
+	// verdict, which the weekly drill makes after its apps. An
+	// interrupted check comes to none, and leaves the one before.
+	LastCheck *Check `json:"last_check,omitempty"`
+	// CheckNext is the group of the data the next check reads: the one
+	// after a clean check's, and after any other verdict the same group
+	// again — damage, until a check of it is clean. None, before a first
+	// check comes to a verdict: that one reads its ISO week's.
+	CheckNext string `json:"check_next,omitempty"`
+	// CheckSince is when the first drill that checks the repository ran
+	// on this record: with no check come to a verdict eight days after,
+	// status is unhealthy, however recent the last drill.
+	CheckSince *time.Time `json:"check_since,omitempty"`
 	// Listed is when a run last listed the repository and was answered.
 	// A listing that failed leaves it, and every Seen, as they were.
 	Listed *time.Time `json:"listed,omitempty"`

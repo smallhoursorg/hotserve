@@ -12,12 +12,14 @@ and nothing here talks to hotserve. The two share a declaration format
 Caddy.
 
 **On this branch it is setup, the engine, restore, the restore drill,
-what says how they are doing, and the package.** `hotserve-backup setup
+the repository check, what says how they are doing, and the
+package.** `hotserve-backup setup
 <repository>` makes the box ready for one repository (below),
 `hotserve-backup run` does one backup run, `hotserve-backup restore
 <app>` puts a snapshot back, `hotserve-backup drill` proves that a
-restore would work without doing one, `hotserve-backup status` says
-whether each app's backup is fresh and its restore proven, and
+restore would work without doing one and checks the repository itself,
+`hotserve-backup status` says whether each app's backup is fresh and
+its restore proven, and
 `hotserve-backup validate <Caddyfile>` says whether a run could plan
 from a Caddyfile before it goes live. The `hotserve` package carries
 the program, an hourly timer for the run and a Sunday one for the
@@ -130,7 +132,8 @@ At the edges of those:
 A run under the timer that fails — an app not backed up, restic not
 installed, another run holding the lock — is a failed unit,
 `hotserve-backup.service` in `systemctl --failed`, until the next run
-succeeds; a drill that proved nothing, or could not begin, the same for
+succeeds; a drill that proved nothing, could not begin, or whose check
+of the repository was not `clean`, the same for
 `hotserve-backup-drill.service`. The record and `status` say the same
 thing; the unit is for whatever watches units. Nothing acts on it. A
 drill that comes due while a run is under way waits for it (`After=`);
@@ -198,13 +201,20 @@ run and a drill from the shipped files.
      record says both inodes. A declared directory that is empty is
      backed up, empty;
    - empties staging again, whatever happened;
+   - if the app is `ok`, writes into the repository the record that
+     this run ended `ok` on it ("What a snapshot holds", below): what a
+     rebuilt box, which has no record, has to go on;
    - and, if the app is `ok` and no drill of it is on record — proven
      or failed — drills the snapshot it has just made (below): an app's
      first good backup, once; after that it is the drill's. That is the
      whole app fetched back, in plaintext, on a timer, so above 1 GiB
      restored the run leaves it to `hotserve-backup drill`, and says so;
+     and where the repository has just not answered — the app's record
+     given up at its clock — it drills nothing, records no verdict, and
+     the next run drills it;
 6. lists the repository, once, for every app (`restic snapshots
-   --no-lock`), and writes beside each snapshot the record names when
+   --no-lock --tag hotserve`, which leaves the records of clean runs
+   out), and writes beside each snapshot the record names when
    it was last there (`seen`), and when the listing was answered
    (`listed`). Not after the repository has refused the run, and not
    with no snapshot on record to look for. A listing that fails is a
@@ -449,10 +459,16 @@ directory it did read. Every check at install passes on it, and a
 restore of it puts back fewer files than the previous `ok` one would,
 and says it restored. On a box with a record the restore says when the
 snapshot is not the last one a run ended `ok` on, and names that one.
-On a rebuilt box there is no record and nothing in the repository says
-how a run ended, so a restore cannot tell: that is the cost of needing
-no record. `status.json` on the box that made the backups is what
-knows.
+On a box whose record has no run of the app that ended `ok` — a
+rebuilt box, most often — the repository says: a run that ends `ok` on
+an app writes a record of it there (below, "What a snapshot holds"),
+and the restore asks for those records and says the same, naming the
+newest snapshot one vouches for. It restores what it would have
+restored either way; the question comes first. What it still cannot
+tell: a snapshot whose run's record could not be written (the run said
+so, as a warning), or whose record was forgotten off the box — then it
+says that nothing in the repository vouches for any snapshot of the
+app, or that the records could not be asked, and why.
 
 ## The restore drill
 
@@ -473,6 +489,71 @@ own and stays the same (`hotserve-backup-drill.timer`, catching up a
 missed one at boot); a drill that proved nothing leaves
 `hotserve-backup-drill.service` failed until the next one proves.
 
+### The repository check
+
+After its apps, whatever became of them — and where the Caddyfile
+cannot be turned into a plan, without them: the repository needs none —
+a drill checks the repository itself: `restic check --no-lock --read-data-subset=n/52`, as the backup
+account — its structure, and one fifty-second of its data, read back
+and verified. n is the group `check_next` in the record names, and the
+ISO week's in UTC (`((week − 1) mod 52) + 1`) for a first check. A
+`clean` verdict sets `check_next` to the group after; any other verdict
+leaves it on the same group — so a check that finds damage, a first one
+included, is followed by one that reads the same group again, and says
+`damaged` until a check of it is clean (the owner, 2026-09-30) — and an
+interrupt, which is no verdict, leaves it as it was. Which group a pack
+falls in is fixed by its id, so
+fifty-two clean checks read every pack once, whatever weeks a box was
+off or a check came to nothing — the whole repository a year,
+about 2% of it in downloads each week. On 28.5 GB over a link of 25 ms each way and 50 Mbit/s it read
+about 600 MiB in three to four minutes, holding the run lock
+throughout: an hourly run that comes due meanwhile says so and is that
+hour's failed unit, as with the drill.
+
+restic's exit 1 means both "damaged" and "could not reach the
+storage", and its summary counts an error where it could not open the
+repository at all. So `restic cat config --no-lock` is asked first,
+under a clock of 30 seconds — it answers in about a second where the
+storage answers at all, and retries for a quarter of an hour where it
+does not, or refuses the key — and again after a check that exited 1.
+The verdict, in `status.json` as `last_check` (when, which group, and
+why):
+
+| verdict | what it means |
+|---|---|
+| `clean` | restic read the structure and the group and found nothing wrong |
+| `damaged` | restic found errors, and the repository answered before and after it: the count, the damaged packs, that a prune run off the box or the storage failing during the check looks the same and the next check reads the group again, and `journalctl -u hotserve_backup_repocheck_…` for restic's own words |
+| `unreachable` | the probe was not answered in 30 seconds, or restic exited 1 on it: the storage could not be reached, or refused the key — or the check lost the storage half way ("could not finish") |
+| `no repository` | the storage answered, and holds none there (10) |
+| `wrong password` | the password does not open it (12) |
+| `failed` | anything else: a unit systemd could not set up, a check ended by a signal, a summary that could not be read or did not add up |
+
+An interrupted drill comes to no verdict and leaves the last one, and
+so does a check or a probe whose unit is ended from outside — stopped
+by someone, or with the drill's own service, maybe before the drill
+sees its own stop. One exception: a check that exited 1 having counted
+errors, stopped before the repository could be asked again, is
+recorded `failed` — "restic check counted N errors, and was stopped
+before damage could be told from a storage that went away" — never
+dropped, and its group is read again. The check takes no lock: one killed hard with a lock written leaves it, and
+restic 0.18 never passes a stale lock by itself, so every backup after
+would fail until someone ran `restic unlock` [measured]. What that
+costs: a `prune` run off the box at the same moment can make packs
+vanish under it, and the verdict say `damaged` though nothing
+is; the next check reads the same group again, and says otherwise. A check killed hard leaves its
+temporary cache, some tens of MiB, in `/var/cache/hotserve-backup`;
+the probe before a later check removes one that is a month old
+(`restic cat config --cleanup-cache`: a check works in a temporary
+cache of its own, and cleans nothing else [measured]).
+
+Damage is said — by the drill, which exits 1, by
+`hotserve-backup-drill.service` failed, and by `status` — and nothing
+more: backups go on (a new snapshot of what changed is still worth
+having), and the box never repairs, since `restic repair` deletes and
+the box's key should not be able to. What restic's words name is run
+off the box, with the key that may delete, and the next drill says
+whether it worked.
+
 ## What a snapshot holds
 
 One snapshot per app per run, host `hotserve`, tagged `hotserve` and
@@ -488,6 +569,54 @@ The paths are the same on every box, whatever its liveswap root, and
 through a symlinked root the snapshot holds the data, not the link. Each
 app is its own `(host, paths)` group, so a `forget` policy applies to
 each app on its own.
+
+A run that ends `ok` on an app then writes one more snapshot, the
+record that it did: host `hotserve`, tagged `hotserve-clean` and
+`vouches:<the app's snapshot id>`, of one file,
+`/hotserve-clean-<app>`, which holds that id — some four hundred bytes
+(`restic backup --stdin-from-command -- /usr/bin/echo <id>`; a record
+of nothing is restic's exit 3) — at the snapshot's own time, to the
+second, as the listing that checked the snapshot gives it: a record a
+few seconds later could fall in the next day, where a `--keep-daily`
+policy keeps the snapshot and not its record. It is the one thing in the repository
+that says how a run ended: restic writes a snapshot of a run that
+failed half way too. Each app's records are a `(host, paths)` group of
+their own, beside the app's snapshots, so a `forget` policy thins them
+as a group of their own, and no app's history lists them. A record
+not written is a warning of the run, and the app stays `ok`: its
+snapshot was verified before the record was begun. The warning says
+which: "could not be written", where restic itself said it failed;
+"may not have been written", where restic may have saved it first —
+the run stopped while it wrote (Ctrl-C, `systemctl stop`, a shutdown),
+its clock, its unit ended from outside or by a signal, an exit 0 that
+named nothing; and "was not written", where the run was stopped before
+it was begun.
+
+Every time is stored in UTC. restic stores a snapshot's time in the
+zone it runs in, every unit sees the box's `/etc/localtime`, and
+`forget` sorts each snapshot into its hours, days and months by the
+zone it was stored in [measured]: a box in Berlin stored its app
+snapshots at `+02:00` and their records at `Z`, and `--keep-daily`
+kept a 23:30 snapshot and removed its record. So every restic unit is
+given `TZ=UTC`, and a `forget` policy's days and weeks turn at UTC
+midnight, whatever the box's zone.
+
+### Retention
+
+Nothing on the box deletes: `forget` and `prune` are run off the box,
+with the key that may delete (the box's may not). Without them every
+hourly run adds a snapshot of each app and a record of each that ended
+`ok` — two snapshots an app an hour — and every listing of the
+repository reads every snapshot file, on a rebuilt box from an empty
+cache: 1,506 snapshots took 19.6 s over 25 ms each way and 50 Mbit/s
+[measured]. At 7 apps a year of that is some 120,000, and at that rate
+a first listing of some 26 minutes [extrapolated, not measured] —
+close to the 30 minutes at which a run or a drill gives a listing up;
+a restore waits it out. An ordinary `forget` policy
+by `(host, paths)` group — `--keep-hourly 24 --keep-daily 30
+--keep-monthly 12`, say, the default grouping — thins each app's
+snapshots and its records alike, each group on its own, and keeps a
+listing to a few hundred.
 
 A declared database that sits inside a declared `files` path is not
 uploaded there, nor its `-wal`, `-shm` and `-journal`: its contents are
@@ -531,7 +660,10 @@ and nothing bounds an upload.
 
 `status.json`, per app: `ok`, `incomplete` (a snapshot exists and
 something declared is not in it, or restic exited 3), `pending`, `data
-missing`, `failed`, `not attempted`, `not run`; each declared item with
+missing`, `failed`, `not attempted` (in the words of why: a
+repository that did not answer, or refused an earlier app's backup for
+a reason every app shares, or a helper of another version), `not run`;
+each declared item with
 whether it was found in the snapshot; the snapshot's id; the last run
 that was `ok`, and the last that made a snapshot at all — each with
 `seen`, when the repository was last found to hold it. An app a run
@@ -561,7 +693,8 @@ finished for more than 3 hours, where that is so: the run itself is
 aged, or a record whose apps are all `pending` would read "no data
 yet" for as long as no run replaced it — since when the repository
 has gone unlisted, where it has, when a drill last ran, or why the last
-one could not begin, and then per app:
+one could not begin, what the last check of the repository found and
+when, and then per app:
 
 - how the last run ended, where it looked for the app's data, and the
   last **complete** backup — the last run that ended `ok` — with its
@@ -591,7 +724,11 @@ one could not begin, and then per app:
 
 It exits 0 only if the last run finished within 3 hours and did not end
 early, the repository has not gone unlisted for more than 3 hours, the
-last drill could begin, and every app that is not `pending`
+last drill could begin, the last check of the repository was `clean`
+and is no more than 8 days old — or, with none yet, the first drill
+that checks ran no more than 8 days ago (`check_since` in the record),
+or, before any has, backups were set up or a drill ran no more than 8
+days ago — and every app that is not `pending`
 was backed up by the last run (or not reached by it), has a complete
 backup that is fresh and that no listing since has missed, and a
 restore proven in the last 8 days with no failed drill since. With no
@@ -723,6 +860,27 @@ hourly run. It needs no sudoers line.
   is `hotserve-backup drill`'s.
 - A unit whose state cannot be read ten looks running (five minutes) is
   stopped, and that step fails.
+- In a run or a drill, a read of the repository — an app's snapshots,
+  the run's listing, the look into a snapshot after its upload, the
+  size of a snapshot before its fetch — and the writing of a record,
+  not answered in 30 minutes: stopped, and said as the repository not
+  answering, which it will not do for the next app either, so no other
+  app is asked. The run's listing is then a warning, the app's backup
+  `incomplete`, a drill's app not proven, a record not written the
+  run's warning (the app still `ok`). The slowest measured: a listing
+  24.6 s (1,506 snapshots, 28.5 GB, a cold cache, 25 ms each way and
+  50 Mbit/s), a snapshot's size 6.4 s (200,203 files, the same link);
+  restic itself gives up on a wrong key after about a quarter of an
+  hour. It is there for a storage that takes connections and never
+  answers, which held the run lock, and every hourly run, for as long
+  as restic kept trying. A restore's reads have none (the owner,
+  2026-09-30): someone started it and can stop it, and a rebuilt box's
+  first listing, from an empty cache, is the longest a box makes
+  ("Retention", above). An upload, a fetch and the check itself are not
+  bounded: their length is the data's.
+- The repository check, where `restic cat config` has not answered in
+  30 seconds: that check's verdict is `unreachable`, and the check is not
+  made.
 - `setup`, before it asks for anything: a repository that is a path on
   this box (`/srv/backups`, `local:`), `sftp:` (ssh takes its key from a
   home directory, which no unit has), `rclone:` (a config file, the

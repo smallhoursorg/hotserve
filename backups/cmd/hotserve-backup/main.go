@@ -5,7 +5,9 @@
 //	hotserve-backup run     one backup run; root; what the timer starts
 //	hotserve-backup restore <app> [--snapshot <id>] [--to <dir>] [--no-pre-backup] [--yes]
 //	                        one snapshot of one app, into place or into a new directory; root
-//	hotserve-backup drill   fetch and check the newest snapshot of every app, installing nothing; root
+//	hotserve-backup drill   fetch and check the newest snapshot of every app, installing nothing,
+//	                        then check the repository itself and one fifty-second of its
+//	                        data; root
 //	hotserve-backup status  whether each app's backup is fresh and a restore of it proven; anyone.
 //	                        Exits 0 healthy, 1 not, 3 when it could not tell
 //	hotserve-backup validate <Caddyfile>
@@ -504,6 +506,9 @@ func confirm(ctx context.Context) func(engine.RestoreAsk) bool {
 		if a.LastOK != nil {
 			fmt.Println(notLastOK(a.App, a.LastOK))
 		}
+		if a.NotKnown != "" {
+			fmt.Println(notKnown(a.App, a.NotKnown))
+		}
 		if a.PreBackup {
 			fmt.Println("What is there is backed up first. Its databases are then replaced and its files overwritten; what the snapshot does not hold is left.")
 		} else {
@@ -562,6 +567,13 @@ func notLastOK(app string, ok *record.Snapshot) string {
 	return fmt.Sprintf("%s: this is not the last snapshot a backup run ended ok on — that is %.8s, made %s. A run that ended incomplete leaves files out of a directory it read, which a restore cannot tell; --snapshot %.8s restores that one", app, ok.ID, ok.Time.Format("2006-01-02 15:04 MST"), ok.ID)
 }
 
+// notKnown says that whether a run ended ok on the snapshot is not
+// known, and why: the box has no record of the app ending ok, and the
+// repository's records of clean runs could not say.
+func notKnown(app, why string) string {
+	return fmt.Sprintf("%s: whether the run that made this snapshot ended ok is not known — %s. A run that ended incomplete leaves files out of a directory it read, which a restore cannot tell", app, why)
+}
+
 // reportRestore says what was restored, what was left and what was not,
 // and never "restored" of an item that was not.
 func reportRestore(rep *engine.RestoreReport) {
@@ -570,6 +582,9 @@ func reportRestore(rep *engine.RestoreReport) {
 	}
 	if rep.LastOK != nil {
 		fmt.Println(notLastOK(rep.App, rep.LastOK))
+	}
+	if rep.NotKnown != "" {
+		fmt.Println(notKnown(rep.App, rep.NotKnown))
 	}
 	if rep.PreBackup != nil {
 		if rep.PreBackupClass == record.OK {
@@ -619,8 +634,8 @@ func drill(ctx context.Context) error {
 		return err
 	}
 	defer r.Close()
-	st, err := engine.Drill(ctx, config(), r)
-	unproven := false
+	st, checked, err := engine.Drill(ctx, config(), r)
+	unproven, unchecked := false, false
 	if st != nil {
 		names := make([]string, 0, len(st.Apps))
 		for n := range st.Apps {
@@ -648,12 +663,28 @@ func drill(ctx context.Context) error {
 				fmt.Printf("%s: nothing to prove: the repository holds no snapshot of it\n", n)
 			}
 		}
+		// The repository's own check, where this drill made one: the
+		// engine's word, not the record's last check, which another
+		// command may have written since.
+		if c := checked; c != nil {
+			line := fmt.Sprintf("repository: its structure, and data group %s: %s", c.Group, c.Class)
+			if c.Detail != "" {
+				line += ": " + c.Detail
+			}
+			fmt.Println(line)
+			unchecked = c.Class != record.CheckClean
+		}
 	}
 	if err != nil {
 		return err
 	}
-	if unproven {
+	switch {
+	case unproven && unchecked:
+		return errors.New("not every app's restore was proven, and the repository's check was not clean")
+	case unproven:
 		return errors.New("not every app's restore was proven")
+	case unchecked:
+		return errors.New("the repository's check was not clean")
 	}
 	return nil
 }

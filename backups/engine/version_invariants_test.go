@@ -121,7 +121,7 @@ func TestACommandTellsItsHelpersTheFileTheyAreStartedFrom(t *testing.T) {
 	b.cfg.Self = filepath.Join(dir, "hotserve-backup")
 	must(t, os.WriteFile(b.cfg.Self, []byte("the installed program"), 0o755))
 	sum := sha256.Sum256([]byte("the installed program"))
-	if _, err := Drill(context.Background(), b.cfg, b); err != nil {
+	if _, _, err := Drill(context.Background(), b.cfg, b); err != nil {
 		t.Fatal(err)
 	}
 	told := 0
@@ -154,7 +154,7 @@ func TestAnUpgradeIsNoDrillVerdict(t *testing.T) {
 		"blog": {Class: record.OK, RestoreProven: proven}, "shop": {Class: record.OK, RestoreProven: proven},
 	}}))
 	b.outcome["check"] = anotherVersions
-	if _, err := Drill(context.Background(), b.cfg, b); err == nil || !strings.Contains(err.Error(), fmt.Sprintf(upgraded, "check")) {
+	if _, _, err := Drill(context.Background(), b.cfg, b); err == nil || !strings.Contains(err.Error(), fmt.Sprintf(upgraded, "check")) {
 		t.Fatalf("err = %v", err)
 	}
 	st, rerr := record.Read(filepath.Join(b.cfg.StateDir, "status.json"))
@@ -217,7 +217,7 @@ func TestAHelperOfAnotherVersionEndsTheCommand(t *testing.T) {
 		must(t, os.MkdirAll(b.cfg.StateDir, 0o755))
 		must(t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), &record.Status{LastDrill: last, Apps: map[string]*record.App{}}))
 		b.outcome["plan"] = anotherVersions
-		_, err := Drill(context.Background(), b.cfg, b)
+		_, _, err := Drill(context.Background(), b.cfg, b)
 		if err == nil || !strings.Contains(err.Error(), fmt.Sprintf(upgraded, "plan")) {
 			t.Fatalf("err = %v", err)
 		}
@@ -274,7 +274,7 @@ func TestAHelperOfAnotherVersionEndsTheCommand(t *testing.T) {
 		sameVersion(t)
 		two(b)
 		b.outcome["check"] = anotherVersions
-		if _, err := Drill(context.Background(), b.cfg, b); err == nil || !strings.Contains(err.Error(), fmt.Sprintf(upgraded, "check")) {
+		if _, _, err := Drill(context.Background(), b.cfg, b); err == nil || !strings.Contains(err.Error(), fmt.Sprintf(upgraded, "check")) {
 			t.Fatalf("err = %v", err)
 		}
 		if n := strings.Count(" "+b.roles()+" ", " fetch "); n != 1 {

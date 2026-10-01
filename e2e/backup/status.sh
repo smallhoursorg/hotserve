@@ -85,7 +85,7 @@ cmp -s "$OUT" /root/status.root && pass "and says what it says to root" || fail 
 
 echo "=== status 4: a last good snapshot that is gone from the repository is said, and is not fresh ==="
 forget "$blog_id"
-if rr snapshots --no-lock --json | grep -q "$blog_id"; then fail "fixture: $blog_id is still in the repository: the scenario proves nothing"; else pass "fixture: blog's last good snapshot has been forgotten off the box"; fi
+if rr snapshots --no-lock --json | grep -q "\"id\":\"$blog_id\""; then fail "fixture: $blog_id is still in the repository: the scenario proves nothing"; else pass "fixture: blog's last good snapshot has been forgotten off the box"; fi
 sed 's#sqlite app.db#sqlite app.db absent.db#' /root/Caddyfile.base >"$CADDYFILE"
 run && fail "fixture: a run with an absent database exited 0"
 expect_class blog incomplete "an absent database"

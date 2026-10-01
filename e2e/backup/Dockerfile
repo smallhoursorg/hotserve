@@ -1,8 +1,10 @@
 # The box the backup suite runs on: Debian 13 with systemd as PID 1, the
 # hotserve binary (the engine's plan unit runs `hotserve adapt`),
 # hotserve-backup, and Debian's own restic and sqlite3 — the two
-# programs whose behaviour the suite is about. hotserve itself is not
-# started: nothing in a backup talks to it. The two binaries come
+# programs whose behaviour the suite is about — and curl, with which the
+# check suite deletes a pack through the storage's own API, as someone
+# holding a key that may delete would, off the box. hotserve itself is
+# not started: nothing in a backup talks to it. The two binaries come
 # built, from build/e2e-backup (the bin context, docker-compose.yml),
 # which `make e2e-backup` fills first. Build this image through that
 # target only: built by hand it copies whatever binaries the last run
@@ -11,7 +13,7 @@ FROM debian:trixie-slim
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends \
-		systemd systemd-sysv dbus libpam-systemd procps ca-certificates restic sqlite3 \
+		systemd systemd-sysv dbus libpam-systemd procps ca-certificates restic sqlite3 curl \
 	&& rm -rf /var/lib/apt/lists/*
 RUN systemctl mask \
 	systemd-udevd.service \
