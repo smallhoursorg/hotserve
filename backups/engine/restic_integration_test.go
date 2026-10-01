@@ -41,16 +41,10 @@ func TestIntegrationResticLsOfADirectoryIsNotRecursive(t *testing.T) {
 	must(t, os.WriteFile(filepath.Join(base, "backup", "blog", "sqlite", "app.db"), []byte("db"), 0o644))
 
 	// A local repository, as a measuring stick only: the product has none.
-	env := append(os.Environ(), "RESTIC_PASSWORD=pw", "RESTIC_REPOSITORY="+filepath.Join(base, "repo"), "RESTIC_CACHE_DIR="+filepath.Join(base, "cache"))
 	run := func(args ...string) string {
 		t.Helper()
-		cmd := exec.Command(restic, args...)
-		cmd.Env, cmd.Dir = env, base
-		out, err := cmd.Output()
-		if err != nil {
-			t.Fatalf("restic %v: %v", args, err)
-		}
-		return string(out)
+		out, _ := resticOK(t, base, append([]string{restic}, args...)...)
+		return out
 	}
 	run("init", "-q")
 	summary := run("backup", "--quiet", "--json", "backup/blog")
@@ -122,16 +116,10 @@ func TestIntegrationResticLsSaysWhichFileANodeIs(t *testing.T) {
 	// name that is no mount of anything.
 	must(t, os.Mkdir(filepath.Join(view, "bare"), 0o700))
 
-	env := append(os.Environ(), "RESTIC_PASSWORD=pw", "RESTIC_REPOSITORY="+filepath.Join(base, "repo"), "RESTIC_CACHE_DIR="+filepath.Join(base, "cache"))
 	run := func(args ...string) string {
 		t.Helper()
-		cmd := exec.Command(restic, args...)
-		cmd.Env, cmd.Dir = env, base
-		out, err := cmd.Output()
-		if err != nil {
-			t.Fatalf("restic %v: %v", args, err)
-		}
-		return string(out)
+		out, _ := resticOK(t, base, append([]string{restic}, args...)...)
+		return out
 	}
 	run("init", "-q")
 	id := regexp.MustCompile(`"snapshot_id":"([0-9a-f]{64})"`).FindStringSubmatch(run("backup", "--quiet", "--json", "backup/blog"))
@@ -200,17 +188,10 @@ func TestIntegrationResticRestoreSaysWhatItRestored(t *testing.T) {
 	must(t, os.Symlink("/etc/passwd", filepath.Join(uploads, "link")))
 	const entries = 6 // files, uploads, a.png, link, sqlite, app.db
 
-	env := append(os.Environ(), "RESTIC_PASSWORD=pw", "RESTIC_REPOSITORY="+filepath.Join(base, "repo"), "RESTIC_CACHE_DIR="+filepath.Join(base, "cache"))
 	run := func(args ...string) (string, int) {
 		t.Helper()
-		cmd := exec.Command(restic, args...)
-		cmd.Env, cmd.Dir = env, base
-		out, err := cmd.Output()
-		var exit *exec.ExitError
-		if err != nil && !errors.As(err, &exit) {
-			t.Fatalf("restic %v: %v", args, err)
-		}
-		return string(out), cmd.ProcessState.ExitCode()
+		out, _, exit := resticIn(t, base, time.Minute, append([]string{restic}, args...)...)
+		return out, exit
 	}
 	run("init", "-q")
 	summary, _ := run("backup", "--quiet", "--json", "backup/blog")
@@ -255,17 +236,9 @@ func TestIntegrationResticSnapshotsLeavesOutWhatItCannotLoadAndExitsZero(t *test
 	const restic = "/usr/bin/restic"
 	base := t.TempDir()
 	must(t, os.WriteFile(filepath.Join(base, "f"), []byte("1"), 0o644))
-	env := append(os.Environ(), "RESTIC_PASSWORD=pw", "RESTIC_REPOSITORY="+filepath.Join(base, "repo"), "RESTIC_CACHE_DIR="+filepath.Join(base, "cache"))
 	run := func(args ...string) (stdout, stderr string) {
 		t.Helper()
-		cmd := exec.Command(restic, args...)
-		var e strings.Builder
-		cmd.Env, cmd.Dir, cmd.Stderr = env, base, &e
-		out, err := cmd.Output()
-		if err != nil {
-			t.Fatalf("restic %v: %v: %s", args, err, e.String())
-		}
-		return string(out), e.String()
+		return resticOK(t, base, append([]string{restic}, args...)...)
 	}
 	run("init", "-q")
 	run("backup", "-q", "--host", "hotserve", "--tag", "app:blog", "f")
@@ -431,10 +404,10 @@ func TestIntegrationALockHeldForTheWholeRetryIsExit11(t *testing.T) {
 // D4: an upload, a fetch and the repository check have no backstop —
 // their length is the data's — because restic bounds its own waiting:
 // a request that moves nothing is retried after five minutes [M10], and
-// the retries end [M15]. None of them passes the flag; what is leaned on
-// is its default. A restic with another, or none, is a run that may hold
-// the run lock for as long as a storage takes connections and never
-// answers.
+// the retries end [M15]. None of them passes the flag
+// (TestWhatEveryResticUnitIsGiven); what is leaned on is its default. A
+// restic with another, or none, is a run that may hold the run lock for
+// as long as a storage takes connections and never answers.
 func TestIntegrationResticRetriesAStuckRequestByItself(t *testing.T) {
 	out, said, exit := resticIn(t, t.TempDir(), time.Minute, "/usr/bin/restic", "backup", "--help")
 	if exit != 0 || !regexp.MustCompile(`(?m)^\s*--stuck-request-timeout duration\s.*\(default 5m0s\)\s*$`).MatchString(out) {
@@ -535,7 +508,14 @@ func TestIntegrationTheExcludeFileLeavesOutTheDeclaredDatabasesAndNothingElse(t 
 	}
 	const app = "pin-exclude"
 	files := filepath.Join("/backup", app, "files")
-	t.Cleanup(func() { _ = os.RemoveAll(filepath.Join("/backup", app)); _ = os.Remove("/backup") })
+	_, err := os.Lstat("/backup")
+	made := errors.Is(err, fs.ErrNotExist)
+	t.Cleanup(func() {
+		_ = os.RemoveAll(filepath.Join("/backup", app))
+		if made {
+			_ = os.Remove("/backup")
+		}
+	})
 	databases := []string{"app*.db", "da[t]a/x.db", "$HOME_SECRET.db", `back\slash.db`, "q?.db"}
 	lookalikes := []string{"appX.db", "appX.db-wal", "data/x.db", "leaked.db", "qZ.db"}
 	for _, f := range append(append(slices.Clone(databases), "app*.db-wal", "q?.db-journal"), lookalikes...) {

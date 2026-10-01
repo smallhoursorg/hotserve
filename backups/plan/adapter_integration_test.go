@@ -4,10 +4,12 @@ package plan
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -48,22 +50,46 @@ func TestIntegrationTheAdapterWarnsOfAnEmptyGlobAsTheRefusalReadsIt(t *testing.T
 	}
 }
 
-// realAdapter builds hotserve from this repository and has Make adapt
-// with it for the rest of the test.
+// The adapter, hotserve built from this repository: once, by the first
+// test that asks, and removed after the last (TestMain).
+var (
+	adapterOnce sync.Once
+	adapterDir  string
+	adapterErr  error
+)
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if adapterDir != "" {
+		_ = os.RemoveAll(adapterDir)
+	}
+	os.Exit(code)
+}
+
+// realAdapter has Make adapt with the real adapter for the rest of the
+// test.
 func realAdapter(t *testing.T) {
 	t.Helper()
-	root, err := filepath.Abs("../..") // the workspace: the hotserve module is its root
-	if err != nil {
-		t.Fatal(err)
-	}
-	bin := filepath.Join(t.TempDir(), "hotserve")
-	build := exec.Command("go", "build", "-o", bin, "./cmd/hotserve")
-	build.Dir = root
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("building hotserve: %v\n%s", err, out)
+	adapterOnce.Do(func() {
+		root, err := filepath.Abs("../..") // the workspace: the hotserve module is its root
+		if err != nil {
+			adapterErr = err
+			return
+		}
+		if adapterDir, adapterErr = os.MkdirTemp("", "plan-adapter-"); adapterErr != nil {
+			return
+		}
+		build := exec.Command("go", "build", "-o", filepath.Join(adapterDir, "hotserve"), "./cmd/hotserve")
+		build.Dir = root
+		if out, err := build.CombinedOutput(); err != nil {
+			adapterErr = fmt.Errorf("building hotserve: %w\n%s", err, out)
+		}
+	})
+	if adapterErr != nil {
+		t.Fatal(adapterErr)
 	}
 	old := hotserve
-	hotserve = bin
+	hotserve = filepath.Join(adapterDir, "hotserve")
 	t.Cleanup(func() { hotserve = old })
 }
 

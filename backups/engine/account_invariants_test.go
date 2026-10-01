@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -121,28 +122,24 @@ func TestALookupIsBoundedAndEndsWithItsCommand(t *testing.T) {
 	}
 }
 
-// Making the account ends with setup's command: an interrupt — Ctrl-C
-// at the terminal setup runs at — ends a useradd that does not return
-// (a directory it asks that is not there), and is no account made. It
-// has no bound of its own: setup is attended, someone is there to stop
-// it (D4), and a clock would be a new limit on a box whose directory is
-// slow.
-func TestMakingTheAccountEndsWithItsCommand(t *testing.T) {
-	if _, err := os.Stat("/bin/sleep"); err != nil {
-		t.Skip("no /bin/sleep here")
-	}
-	old := useradd
-	useradd = []string{"/bin/sleep", "5"}
-	t.Cleanup(func() { useradd = old })
+// Making the account runs to its end, whatever becomes of setup's
+// command meanwhile: useradd commits passwd, shadow, group and gshadow
+// one rename at a time [measured], and stopped part way it leaves the
+// account without its group. Ctrl-C at the terminal reaches it as it
+// reaches setup, the two sharing a process group; setup's own context —
+// a SIGTERM to setup alone — does not.
+func TestMakingTheAccountRunsToItsEnd(t *testing.T) {
+	b, m := setupBox(t)
+	b.account = false
+	made := filepath.Join(t.TempDir(), "made")
+	oldUseradd, oldMake := useradd, makeAccount
+	useradd, makeAccount = []string{"/bin/sh", "-c", "sleep 1; touch " + made}, realMakeAccount
+	t.Cleanup(func() { useradd, makeAccount = oldUseradd, oldMake })
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(100*time.Millisecond, cancel)
-	began := time.Now()
-	err := realMakeAccount(ctx)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("a useradd whose command was stopped: err = %v", err)
-	}
-	if took := time.Since(began); took > 3*time.Second {
-		t.Fatalf("a useradd whose command was stopped at 100ms took %s", took)
+	_, _ = Setup(ctx, b.cfg, b, SetupOptions{Repository: "s3:http://e2e-s3:9000/box", Terminal: m})
+	if _, err := os.Stat(made); err != nil {
+		t.Fatalf("setup's context, ended, stopped useradd part way: %v", err)
 	}
 }
 

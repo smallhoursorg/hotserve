@@ -104,7 +104,7 @@ func (i item) validate() error {
 	case strings.HasPrefix(p, "/"):
 		return fmt.Errorf("%s: the path must be relative to the app's shared dir, not absolute", i)
 	case len(p) > PathLimit:
-		return fmt.Errorf("%s: the path is %d bytes, and a backup path is %d at most: sqlite3 opens nothing at a path past its limit, and does not say so", i, len(p), PathLimit)
+		return fmt.Errorf("%s: the path is %d bytes, and a backup path is %d at most: sqlite3 does not open a path past its own limit as itself", i, len(p), PathLimit)
 	}
 	// Outside before unclean: the clean spelling of a path that leaves
 	// the shared dir is not advice worth giving.

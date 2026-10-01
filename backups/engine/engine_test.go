@@ -137,7 +137,7 @@ func newBox(t *testing.T) *box {
 		b.accountLookups++
 		return passwd{name: backupUser, comment: b.comment, uid: b.uid, gid: b.gid, line: b.nssLine, exists: b.account}, nil
 	}
-	makeAccount = func(context.Context) error {
+	makeAccount = func() error {
 		b.accountsMade++
 		b.account, b.comment, b.localComment, b.notLocal, b.uid, b.gid = true, accountMark, accountMark, false, 995, 995
 		return nil

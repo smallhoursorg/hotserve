@@ -309,6 +309,10 @@ func run(ctx context.Context) error {
 	return nil
 }
 
+// say prints a line made of a record's words: a record is root's, and
+// still nothing of it reaches a terminal unlooked at.
+func say(line string) { fmt.Println(record.Clean(line)) }
+
 // report is one line an app, and never says "backed up" of anything
 // that was not: the class, and for an ok run the snapshot and what was
 // found in it.
@@ -319,7 +323,7 @@ func report(st *record.Status) {
 	}
 	sort.Strings(names)
 	if st.Warning != "" {
-		fmt.Println("warning:", st.Warning)
+		say("warning: " + st.Warning)
 	}
 	if len(names) == 0 && st.Error == "" {
 		fmt.Println("no app declares a backup; nothing was backed up")
@@ -342,13 +346,13 @@ func report(st *record.Status) {
 		} else if app.Detail != "" {
 			line += ": " + app.Detail
 		}
-		fmt.Println(line)
+		say(line)
 		// A run that drilled says what the drill found; one that did not
 		// says nothing of it.
 		if app.RestoreDrill != nil && !app.RestoreDrill.Time.Before(st.Started) {
-			fmt.Printf("%s: restore not proven: %s\n", n, app.RestoreDrill.Detail)
+			say(fmt.Sprintf("%s: restore not proven: %s", n, app.RestoreDrill.Detail))
 		} else if app.RestoreProven != nil && !app.RestoreProven.Time.Before(st.Started) {
-			fmt.Printf("%s: restore proven: snapshot %s was fetched and checked whole\n", n, record.Short(app.RestoreProven.Snapshot.ID))
+			say(fmt.Sprintf("%s: restore proven: snapshot %s was fetched and checked whole", n, record.Short(app.RestoreProven.Snapshot.ID)))
 		}
 	}
 }
@@ -676,11 +680,11 @@ func reportDrill(st *record.Status, checked *record.Check) (unproven, unchecked 
 			if app.RestoreProven != nil {
 				line += fmt.Sprintf(" (last proven: snapshot %s, on %s)", record.Short(app.RestoreProven.Snapshot.ID), record.When(app.RestoreProven.Time))
 			}
-			fmt.Println(line)
+			say(line)
 		case app.RestoreProven != nil:
-			fmt.Printf("%s: restore proven: snapshot %s, on %s\n", n, record.Short(app.RestoreProven.Snapshot.ID), record.When(app.RestoreProven.Time))
+			say(fmt.Sprintf("%s: restore proven: snapshot %s, on %s", n, record.Short(app.RestoreProven.Snapshot.ID), record.When(app.RestoreProven.Time)))
 		default:
-			fmt.Printf("%s: nothing to prove: the repository holds no snapshot of it\n", n)
+			say(fmt.Sprintf("%s: nothing to prove: the repository holds no snapshot of it", n))
 		}
 	}
 	// The repository's own check, where this drill made one: the
@@ -691,7 +695,7 @@ func reportDrill(st *record.Status, checked *record.Check) (unproven, unchecked 
 		if c.Detail != "" {
 			line += ": " + c.Detail
 		}
-		fmt.Println(line)
+		say(line)
 		unchecked = c.Class != record.CheckClean
 	}
 	return unproven, unchecked

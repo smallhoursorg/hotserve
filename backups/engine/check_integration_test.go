@@ -28,6 +28,17 @@ func resticIn(t *testing.T, base string, within time.Duration, argv ...string) (
 	return resticAs(t, base, nil, within, argv...)
 }
 
+// resticOK is resticIn of a command that has to succeed, within a
+// minute: its stdout and stderr, or the test fails.
+func resticOK(t *testing.T, base string, argv ...string) (stdout, stderr string) {
+	t.Helper()
+	stdout, stderr, exit := resticIn(t, base, time.Minute, argv...)
+	if exit != 0 {
+		t.Fatalf("restic %q: exit %d: %s", argv[1:], exit, stderr)
+	}
+	return stdout, stderr
+}
+
 // resticEnv is the environment resticIn gives restic.
 func resticEnv(base string) []string {
 	return append(os.Environ(), "RESTIC_PASSWORD=pw", "RESTIC_REPOSITORY="+filepath.Join(base, "repo"), "RESTIC_CACHE_DIR="+filepath.Join(base, "cache"))

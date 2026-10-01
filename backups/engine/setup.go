@@ -93,23 +93,16 @@ var (
 		}
 		return passwd{}, fmt.Errorf("%s passwd %s: exit status %d", getent, name, exit)
 	}
-	// makeAccount ends with setup's command, and has no clock of its own:
-	// setup is attended (D4). Ended, useradd is interrupted, as Ctrl-C at
-	// the terminal interrupts it — it writes the account databases, and
-	// what it does about an interrupt is its own — and killed only where
-	// it is still there 10 s on.
-	makeAccount = func(ctx context.Context) error {
-		cmd := exec.CommandContext(ctx, useradd[0], useradd[1:]...)
-		cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
-		cmd.WaitDelay = 10 * time.Second
-		out, err := cmd.CombinedOutput()
-		switch {
-		case err == nil:
-			return nil
-		case ctx.Err() != nil:
-			return fmt.Errorf("%s: %w", useraddArgv(), ctx.Err())
+	// makeAccount runs useradd to its end, with no context and no clock:
+	// it commits passwd, shadow, group and gshadow one rename at a time
+	// [measured], and stopped part way leaves the account without its
+	// group. Ctrl-C at the terminal reaches it as it reaches setup, the
+	// two sharing a process group; and setup is attended (D4).
+	makeAccount = func() error {
+		if out, err := exec.Command(useradd[0], useradd[1:]...).CombinedOutput(); err != nil {
+			return fmt.Errorf("%s: %w: %s", useraddArgv(), err, record.Text(string(out)))
 		}
-		return fmt.Errorf("%s: %w: %s", useraddArgv(), err, record.Text(string(out)))
+		return nil
 	}
 )
 
@@ -444,7 +437,7 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 			return nil, err
 		}
 	} else {
-		if err := makeAccount(ctx); err != nil {
+		if err := makeAccount(); err != nil {
 			return nil, fmt.Errorf("making the %s account: %w", backupUser, err)
 		}
 		rep.Account = "made"

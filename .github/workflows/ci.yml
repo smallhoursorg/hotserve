@@ -128,17 +128,23 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # The box's binaries are built in the dev container, whose Go
       # caches are ./.cache here: per arch, since a build cache is.
-      # Keyed by go.sum, not by commit: a cache is saved only when its
-      # key missed, and one saved per commit (~540 MB an arch) filled
-      # the repository's 10 GB and pushed every other job's out. One left
-      # by an older commit costs little: Go's build cache is keyed by
-      # content, so only what changed is compiled again [measured: 0.9 s
-      # over all of PR 5's changes, against 34.5 s from nothing].
+      # Keyed by the Go they are built with and by go.sum, not by
+      # commit: a cache is saved only when its key missed, and one saved
+      # per commit (~540 MB an arch) filled the repository's 10 GB and
+      # pushed every other job's out. One left by an older commit costs
+      # little: Go's build cache is keyed by content, so only what
+      # changed is compiled again [measured: 0.9 s over all of PR 5's
+      # changes, against 34.5 s from nothing]. One left by another Go is
+      # no build cache at all, and the dev image follows Go's patch
+      # releases: so its Go is in the key.
+      - id: go
+        run: echo "version=$(docker compose run --rm -T --no-deps dev go env GOVERSION)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .cache
-          key: e2e-backup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/go.sum') }}
+          key: e2e-backup-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.version }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
+            e2e-backup-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.version }}-
             e2e-backup-${{ runner.os }}-${{ runner.arch }}-
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: make e2e-backup COMPOSE="$COMPOSE"
