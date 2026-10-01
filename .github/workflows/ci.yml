@@ -136,7 +136,10 @@ jobs:
       # changed is compiled again [measured: 0.9 s over all of PR 5's
       # changes, against 34.5 s from nothing]. One left by another Go is
       # no build cache at all, and the dev image follows Go's patch
-      # releases: so its Go is in the key.
+      # releases: so its Go is in the key. Asked of plain `docker
+      # compose`, the base file alone, and never of $COMPOSE: the CI
+      # file's ./.cache bind sources, made now, would be root's, and the
+      # restore below could not unpack into them.
       - id: go
         run: echo "version=$(docker compose run --rm -T --no-deps dev go env GOVERSION)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
