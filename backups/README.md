@@ -1190,6 +1190,13 @@ id left behind would tie a later record to the wrong repository.
   file, held against what `envfile` reads; what `restic init` and
   `cat config` say of a repository that exists, and with a wrong
   password.
+- and every other behaviour of restic, sqlite3, systemd and Caddy that
+  the code leans on, each a test of its own whose comment names what
+  rests on it: restic's exit statuses (3 with the snapshot still named,
+  11 for a lock held through `--retry-lock`), its JSON, its default for
+  a stuck request, a restore as a user who cannot give files their
+  owners, the exclude file's escaping; sqlite3 at the path limit; the
+  filter on `open_by_handle_at`; Caddy's `{$NAME}`.
 - `make e2e-backup` — a box with systemd, restic and sqlite3, and an S3
   server (`rclone serve s3`): the setup suite (at a real terminal,
   `script(1)`'s), the backup suite, the units suite (the shipped unit

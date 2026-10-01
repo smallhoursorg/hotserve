@@ -6,13 +6,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/smallhoursorg/hotserve/backups/unit"
+	"github.com/smallhoursorg/hotserve/liveswap/backupdecl"
 )
 
 // verify leans on one thing restic does: given a directory, `ls` lists
@@ -154,6 +160,13 @@ func TestIntegrationResticLsSaysWhichFileANodeIs(t *testing.T) {
 			t.Errorf("%s: the listing says inode %d, owner %d:%d; what was bound is inode %d, owner %d:%d", p, *n.Inode, n.UID, n.GID, g.inode, g.uid, g.gid)
 		}
 	}
+	// And what it is: verify holds a database copy to a file of more than
+	// no bytes, and a files item to a file or a directory.
+	for p, want := range map[string]lsNode{"/backup/blog/files/uploads": {Type: "dir"}, "/backup/blog/files/empty": {Type: "dir"}, "/backup/blog/files/uploads-a.png": {Type: "file", Size: 3}} {
+		if n := nodes[p]; n.Type != want.Type || n.Size != want.Size {
+			t.Errorf("%s: the listing says a %q of %d bytes, want a %q of %d", p, n.Type, n.Size, want.Type, want.Size)
+		}
+	}
 	bare, ok := nodes["/backup/blog/files/bare"]
 	if !ok || bare.Inode == nil {
 		t.Fatalf("the bare directory: %+v (in the listing: %v)", bare, ok)
@@ -272,7 +285,8 @@ func TestIntegrationResticSnapshotsLeavesOutWhatItCannotLoadAndExitsZero(t *test
 	if strings.Count(out, `"short_id"`) != 1 {
 		t.Errorf("listed: %q", out)
 	}
-	if !strings.Contains(said, "Ignoring") || !strings.Contains(said, filepath.Base(files[0])) {
+	// As besides reads it, to say which.
+	if m := ignoringRe.FindStringSubmatch(said); m == nil || m[1] != filepath.Base(files[0]) {
 		t.Errorf("stderr: %q", said)
 	}
 }
@@ -331,5 +345,237 @@ func TestIntegrationResticInitSaysWhenTheRepositoryExists(t *testing.T) {
 	}
 	if _, _, exit = run("pw", "nothing-here", "cat", "config", "--no-lock"); exit != 10 {
 		t.Fatalf("cat config where there is no repository: exit %d, want 10", exit)
+	}
+}
+
+// nobody runs restic as the backup account does: a user of its own, no
+// capability.
+var nobody = &syscall.Credential{Uid: 65534, Gid: 65534}
+
+// openBase is a directory others may enter, for a restic run as nobody:
+// t.TempDir's parents are closed to everyone but root.
+func openBase(t *testing.T) string {
+	t.Helper()
+	if os.Geteuid() != 0 {
+		t.Skip("needs root, to run restic as another user")
+	}
+	base, err := os.MkdirTemp("/var/tmp", "restic-pin-")
+	must(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	must(t, os.Chmod(base, 0o755))
+	return base
+}
+
+// restic writes a snapshot even when it could not read everything,
+// exits 3, and names that snapshot in its summary all the same [H]: a
+// run records the app incomplete, with the snapshot that holds the rest
+// (upload), rather than failed with none. As the backup account, over a
+// file only root may read.
+func TestIntegrationResticNamesTheSnapshotOfAnIncompleteBackup(t *testing.T) {
+	const restic = "/usr/bin/restic"
+	base := openBase(t)
+	app := filepath.Join(base, "backup", "shop")
+	must(t, os.MkdirAll(app, 0o755))
+	must(t, os.WriteFile(filepath.Join(app, "r.txt"), []byte("readable"), 0o644))
+	must(t, os.WriteFile(filepath.Join(app, "s.txt"), []byte("root's alone"), 0o600))
+	resticIn(t, base, time.Minute, restic, "init", "-q")
+	must(t, exec.Command("chmod", "-R", "a+rwX", filepath.Join(base, "repo")).Run())
+	out, said, exit := resticAs(t, base, nobody, time.Minute, restic, "backup", "--quiet", "--json", "backup/shop")
+	must(t, os.WriteFile(filepath.Join(base, "summary"), []byte(out), 0o600))
+	if id := summaryID(filepath.Join(base, "summary")); exit != 3 || id == "" {
+		t.Fatalf("a backup that could not read s.txt: exit %d, snapshot %q, want exit 3 and the snapshot it made: %s %s", exit, id, out, said)
+	}
+}
+
+// A run leans on restic's exit 11 for a lock something else held for the
+// whole of --retry-lock (resticFailure): every app would meet it, so the
+// run stops asking — where any other status would have each app after
+// wait retryLock again. Held here with a real exclusive lock: a check's,
+// kept by an index file made a FIFO, which the check opens once it has
+// locked, and waits on for ever.
+func TestIntegrationALockHeldForTheWholeRetryIsExit11(t *testing.T) {
+	const restic = "/usr/bin/restic"
+	base := t.TempDir()
+	must(t, os.WriteFile(filepath.Join(base, "f"), []byte("data"), 0o644))
+	resticIn(t, base, time.Minute, restic, "init", "-q")
+	resticIn(t, base, time.Minute, restic, "backup", "-q", "f")
+	indexes, err := filepath.Glob(filepath.Join(base, "repo", "index", "*"))
+	if err != nil || len(indexes) == 0 {
+		t.Fatalf("fixture: no index file: %v", err)
+	}
+	must(t, os.Remove(indexes[0]))
+	must(t, syscall.Mkfifo(indexes[0], 0o600))
+	holder := exec.Command(restic, "check")
+	holder.Env, holder.Dir = resticEnv(base), base
+	must(t, holder.Start())
+	// SIGKILL: blocked opening the FIFO, it does not end on SIGTERM.
+	t.Cleanup(func() { _ = holder.Process.Kill(); _ = holder.Wait() })
+	for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if locks, _ := os.ReadDir(filepath.Join(base, "repo", "locks")); len(locks) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("fixture: the check took no lock within 20s")
+		}
+	}
+	began := time.Now()
+	_, said, exit := resticIn(t, base, time.Minute, restic, "backup", "--quiet", "--json", "--retry-lock", "2s", "f")
+	if took := time.Since(began); exit != 11 || took < 2*time.Second {
+		t.Fatalf("a backup meeting an exclusive lock for the whole of --retry-lock 2s: exit %d after %s, want 11 after 2s: %s", exit, took.Round(time.Millisecond), said)
+	}
+	if detail, wide := resticFailure(unit.Outcome{Result: "exit-code", ExitStatus: 11}); !wide || !strings.Contains(detail, "locked") {
+		t.Errorf("exit 11 is said as %q, repository-wide %v", detail, wide)
+	}
+}
+
+// D4: an upload, a fetch and the repository check have no backstop —
+// their length is the data's — because restic bounds its own waiting:
+// a request that moves nothing is retried after five minutes [M10], and
+// the retries end [M15]. None of them passes the flag; what is leaned on
+// is its default. A restic with another, or none, is a run that may hold
+// the run lock for as long as a storage takes connections and never
+// answers.
+func TestIntegrationResticRetriesAStuckRequestByItself(t *testing.T) {
+	out, said, exit := resticIn(t, t.TempDir(), time.Minute, "/usr/bin/restic", "backup", "--help")
+	if exit != 0 || !regexp.MustCompile(`(?m)^\s*--stuck-request-timeout duration\s.*\(default 5m0s\)\s*$`).MatchString(out) {
+		t.Fatalf("restic backup --help (exit %d) does not give --stuck-request-timeout a default of 5m0s:\n%s%s", exit, out, said)
+	}
+}
+
+// Every fetch — a restore's, a drill's — runs restic as the backup
+// account, which holds no CAP_CHOWN: restic 0.18 tries to give each entry
+// its owner by number, is refused, overlooks it, and exits 0 with every
+// entry restored, each the restorer's [M6] — the handover unit gives them
+// to the data user after. A restic that took the refusal for an error
+// would fail every restore and drill.
+func TestIntegrationResticRestoresAsAnUnprivilegedUserWhateverTheOwners(t *testing.T) {
+	const restic = "/usr/bin/restic"
+	base := openBase(t)
+	uploads := filepath.Join(base, "backup", "blog", "files", "uploads")
+	must(t, os.MkdirAll(uploads, 0o755))
+	must(t, os.WriteFile(filepath.Join(uploads, "a.png"), []byte("img"), 0o644))
+	must(t, os.Symlink("/etc/passwd", filepath.Join(uploads, "link")))
+	must(t, exec.Command("chown", "-hR", "4242:4243", filepath.Join(base, "backup")).Run())
+	resticIn(t, base, time.Minute, restic, "init", "-q")
+	out, said, exit := resticIn(t, base, time.Minute, restic, "backup", "--quiet", "--json", "backup/blog")
+	must(t, os.WriteFile(filepath.Join(base, "summary"), []byte(out), 0o600))
+	id := summaryID(filepath.Join(base, "summary"))
+	if exit != 0 || id == "" {
+		t.Fatalf("fixture: exit %d, %q %s", exit, out, said)
+	}
+	must(t, exec.Command("chmod", "-R", "a+rwX", filepath.Join(base, "repo")).Run())
+	target := filepath.Join(base, "restore")
+	must(t, os.Mkdir(target, 0o700))
+	must(t, os.Chown(target, int(nobody.Uid), int(nobody.Gid)))
+	// As fetch asks, but for its target.
+	out, said, exit = resticAs(t, base, nobody, time.Minute, restic, "restore", "--quiet", "--json", "--retry-lock", "1m", id+":/backup/blog", "--target", target)
+	must(t, os.WriteFile(filepath.Join(base, "fetch.json"), []byte(out), 0o600))
+	if err := fetchedAll(filepath.Join(base, "fetch.json"), id); exit != 0 || err != nil {
+		t.Fatalf("a restore as uid %d of files owned 4242:4243: exit %d, %v: %s %s", nobody.Uid, exit, err, out, said)
+	}
+	must(t, filepath.WalkDir(target, func(p string, _ fs.DirEntry, err error) error {
+		must(t, err)
+		st, err := os.Lstat(p)
+		must(t, err)
+		if s := st.Sys().(*syscall.Stat_t); s.Uid != nobody.Uid || s.Gid != nobody.Gid {
+			t.Errorf("%s is owned %d:%d, not by the user who restored it", p, s.Uid, s.Gid)
+		}
+		return nil
+	}))
+}
+
+// Before every fetch, restic is asked how much room it needs: the size
+// of the snapshot once restored [M33]. Of an id the repository does not
+// hold it says zero of zero snapshots and exits 0, so only one snapshot,
+// counted, is an answer (restoreSize).
+func TestIntegrationResticSaysHowLargeASnapshotIsOnceRestored(t *testing.T) {
+	const restic = "/usr/bin/restic"
+	base := t.TempDir()
+	app := filepath.Join(base, "backup", "blog")
+	must(t, os.MkdirAll(filepath.Join(app, "files"), 0o755))
+	must(t, os.WriteFile(filepath.Join(app, "files", "a.png"), make([]byte, 1000), 0o644))
+	must(t, os.WriteFile(filepath.Join(app, "plan.json"), make([]byte, 24), 0o644))
+	resticIn(t, base, time.Minute, restic, "init", "-q")
+	out, said, exit := resticIn(t, base, time.Minute, restic, "backup", "--quiet", "--json", "backup/blog")
+	must(t, os.WriteFile(filepath.Join(base, "summary"), []byte(out), 0o600))
+	id := summaryID(filepath.Join(base, "summary"))
+	if exit != 0 || id == "" {
+		t.Fatalf("fixture: exit %d, %q %s", exit, out, said)
+	}
+	size := func(id string) (uint64, error) {
+		t.Helper()
+		out, said, exit := resticIn(t, base, time.Minute, restic, "stats", "--quiet", "--json", "--no-lock", "--mode", "restore-size", id)
+		if exit != 0 {
+			t.Fatalf("stats of %.8s: exit %d: %s", id, exit, said)
+		}
+		must(t, os.WriteFile(filepath.Join(base, "size.json"), []byte(out), 0o600))
+		return restoreSize(filepath.Join(base, "size.json"), id)
+	}
+	if got, err := size(id); err != nil || got != 1024 {
+		t.Errorf("a snapshot of 1024 bytes: %d, %v", got, err)
+	}
+	if got, err := size(strings.Repeat("0", 64)); err == nil {
+		t.Errorf("an id the repository does not hold was taken for an answer: %d", got)
+	}
+}
+
+// A declared database inside a declared files path is left out of the
+// upload by an exclude file (excludes): the mask over its live bytes
+// covers only what exists as the unit starts. restic reads each line as
+// a pattern and expands $VAR in it [M24], so every pattern character is
+// escaped and every dollar doubled: each database goes, with its
+// sidecars, and nothing that only looks like one. Wrong, a file the app
+// keeps beside them is not backed up, and nothing says so. restic
+// matches against the path on disk, so the app is where the upload
+// unit's view puts it.
+func TestIntegrationTheExcludeFileLeavesOutTheDeclaredDatabasesAndNothingElse(t *testing.T) {
+	const restic = "/usr/bin/restic"
+	if os.Geteuid() != 0 {
+		t.Skip("needs root, for /backup")
+	}
+	const app = "pin-exclude"
+	files := filepath.Join("/backup", app, "files")
+	t.Cleanup(func() { _ = os.RemoveAll(filepath.Join("/backup", app)); _ = os.Remove("/backup") })
+	databases := []string{"app*.db", "da[t]a/x.db", "$HOME_SECRET.db", `back\slash.db`, "q?.db"}
+	lookalikes := []string{"appX.db", "appX.db-wal", "data/x.db", "leaked.db", "qZ.db"}
+	for _, f := range append(append(slices.Clone(databases), "app*.db-wal", "q?.db-journal"), lookalikes...) {
+		must(t, os.MkdirAll(filepath.Dir(filepath.Join(files, f)), 0o755))
+		must(t, os.WriteFile(filepath.Join(files, f), []byte("x"), 0o644))
+	}
+	t.Setenv("HOME_SECRET", "leaked")
+	base := t.TempDir()
+	must(t, os.WriteFile(filepath.Join(base, "exclude"), []byte(excludes(app, &backupdecl.Config{SQLite: databases, Files: []string{"."}})), 0o600))
+	resticIn(t, base, time.Minute, restic, "init", "-q")
+	out, said, exit := resticIn(t, base, time.Minute, restic, "backup", "--quiet", "--json", "--exclude-file", filepath.Join(base, "exclude"), filepath.Join("/backup", app))
+	must(t, os.WriteFile(filepath.Join(base, "summary"), []byte(out), 0o600))
+	id := summaryID(filepath.Join(base, "summary"))
+	if exit != 0 || id == "" {
+		t.Fatalf("the backup: exit %d, %q %s", exit, out, said)
+	}
+	listing, said, exit := resticIn(t, base, time.Minute, restic, "ls", "--json", "--no-lock", id)
+	if exit != 0 {
+		t.Fatalf("ls: exit %d: %s", exit, said)
+	}
+	in := map[string]bool{}
+	for _, line := range strings.Split(listing, "\n") {
+		var n struct {
+			StructType string `json:"struct_type"`
+			Path       string `json:"path"`
+		}
+		if json.Unmarshal([]byte(line), &n) == nil && n.StructType == "node" {
+			in[strings.TrimPrefix(n.Path, files+"/")] = true
+		}
+	}
+	for _, db := range databases {
+		for _, f := range []string{db, db + "-wal", db + "-journal"} {
+			if in[f] {
+				t.Errorf("%s is in the snapshot: the exclude file did not leave it out", f)
+			}
+		}
+	}
+	for _, f := range lookalikes {
+		if !in[f] {
+			t.Errorf("%s is not in the snapshot: the exclude file left out what only looks like a declared database", f)
+		}
 	}
 }

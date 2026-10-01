@@ -791,7 +791,13 @@ func (x *run) snapshotSize(ctx context.Context, app, id string) (uint64, error) 
 		}
 		return 0, err
 	}
-	raw, err := os.ReadFile(out) //nolint:gosec // written by the manager into root's own run dir
+	return restoreSize(out, id)
+}
+
+// restoreSize reads what restic said of snapshot id's size once
+// restored: one snapshot, counted, and its size, or no answer.
+func restoreSize(file, id string) (uint64, error) {
+	raw, err := os.ReadFile(file) //nolint:gosec // written by the manager into root's own run dir
 	if err != nil {
 		return 0, err
 	}

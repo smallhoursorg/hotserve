@@ -37,12 +37,14 @@ type Config struct {
 var sidecars = []string{"-wal", "-shm", "-journal"}
 
 // PathLimit is the longest path a declaration takes, in bytes. SQLite's
-// unix VFS holds a path in 512 bytes and does not refuse a longer one:
-// asked to open it, it opens an empty temporary database in its place
-// [measured at 513 bytes]. A declared path is used under the app's own
-// shared dir (`/var/lib/liveswap/<app>/shared/`, 89 bytes at most) and
-// under a backup unit's shorter mount points; 400 keeps every one of
-// them under the limit with room to spare.
+// unix VFS holds a path in 512 bytes, with room for "-journal" beside
+// it, and does not open a longer one as itself: sqlite3 3.46.1 refuses
+// it, from 505 bytes [measured]; an empty temporary database in its
+// place was measured once, at 513 bytes, and not since. A declared path
+// is used under the app's own shared dir
+// (`/var/lib/liveswap/<app>/shared/`, 89 bytes at most) and under a
+// backup unit's shorter mount points; 400 keeps every one of them under
+// the limit with room to spare.
 const PathLimit = 400
 
 type item struct{ kind, path string }
