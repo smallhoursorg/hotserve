@@ -495,12 +495,14 @@ After its apps, whatever became of them — and where the Caddyfile
 cannot be turned into a plan, without them: the repository needs none —
 a drill checks the repository itself: `restic check --no-lock --read-data-subset=n/52`, as the backup
 account — its structure, and one fifty-second of its data, read back
-and verified. n is the group after the one the last clean check read
-(`check_read` in the record), and the ISO week's in UTC (`((week − 1)
-mod 52) + 1`) where none has. Only a `clean` verdict moves it on: a
-check that finds damage leaves it, so the next reads the same group
-again, and says `damaged` until a check of it is clean (the owner,
-2026-09-30). Which group a pack falls in is fixed by its id, so
+and verified. n is the group `check_next` in the record names, and the
+ISO week's in UTC (`((week − 1) mod 52) + 1`) for a first check. A
+`clean` verdict sets `check_next` to the group after; any other verdict
+leaves it on the same group — so a check that finds damage, a first one
+included, is followed by one that reads the same group again, and says
+`damaged` until a check of it is clean (the owner, 2026-09-30) — and an
+interrupt, which is no verdict, leaves it as it was. Which group a pack
+falls in is fixed by its id, so
 fifty-two clean checks read every pack once, whatever weeks a box was
 off or a check came to nothing — the whole repository a year,
 about 2% of it in downloads each week. On 28.5 GB over a link of 25 ms each way and 50 Mbit/s it read

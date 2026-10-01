@@ -17,33 +17,40 @@ import (
 	"github.com/smallhoursorg/hotserve/backups/unit"
 )
 
-// The first check reads its ISO week's group; each after it the group
-// after the last one read (the owner, 2026-09-30: whatever weeks were
-// missed, every group once in fifty-two checks).
+// check_next is the group the next check reads; where it is not one —
+// none yet, or a word the record should not hold — the ISO week's, in
+// UTC, as for a first check. A clean check moves it to the group after.
 func TestWhichGroupACheckReads(t *testing.T) {
 	sunday := time.Date(2026, 9, 27, 3, 30, 0, 0, time.UTC) // ISO week 39
-	for last, want := range map[string]string{
+	for next, want := range map[string]string{
 		"":      "39/52",
-		"40/52": "41/52",
-		"51/52": "52/52",
-		"52/52": "1/52",
-		"1/52":  "2/52",
-		"0/52":  "39/52", // not a group: as though none had been read
+		"41/52": "41/52",
+		"52/52": "52/52",
+		"1/52":  "1/52",
+		"0/52":  "39/52", // not a group
 		"53/52": "39/52",
 		"7/12":  "39/52",
+		"01/52": "39/52",
 		"x":     "39/52",
 	} {
-		if got := nextGroup(last, sunday); got != want {
-			t.Errorf("after %q: group %q, want %q", last, got, want)
+		if got := groupToRead(next, sunday); got != want {
+			t.Errorf("told %q: group %q, want %q", next, got, want)
 		}
 	}
-	seen, last := map[string]bool{}, "17/52"
+	// A word that is not a group is given back as it came, and read as
+	// none by the next check.
+	for g, want := range map[string]string{"40/52": "41/52", "51/52": "52/52", "52/52": "1/52", "1/52": "2/52", "x": "x", "": ""} {
+		if got := groupAfter(g); got != want {
+			t.Errorf("after %s: %q, want %q", g, got, want)
+		}
+	}
+	seen, g := map[string]bool{}, "17/52"
 	for i := 0; i < checkGroups; i++ {
-		last = nextGroup(last, sunday)
-		seen[last] = true
+		g = groupAfter(g)
+		seen[g] = true
 	}
 	if len(seen) != checkGroups {
-		t.Errorf("52 checks in a row read %d groups, not every one: %v", len(seen), seen)
+		t.Errorf("52 clean checks in a row read %d groups, not every one: %v", len(seen), seen)
 	}
 }
 
@@ -830,26 +837,45 @@ func TestTheRunsListingLeavesTheRecordsOut(t *testing.T) {
 	}
 }
 
-// A check reads the group after the last one read, and only a check
-// that read the data — clean, or damaged — moves it on.
-func TestTheNextCheckReadsTheGroupAfterTheLastOneRead(t *testing.T) {
+// A check reads the group check_next names — the ISO week's where it
+// names none — and its verdict says what the next reads: a clean one, the
+// group after; any other, the same group again, a first check included
+// (Copilot on #161: a first check that found damage left nothing to read
+// again by, and the next week read the next week's group); no verdict,
+// what was there before.
+func TestWhatAVerdictDoesToTheNextGroup(t *testing.T) {
+	old := checkClock
+	t.Cleanup(func() { checkClock = old })
+	checkClock = func() time.Time { return time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC) } // ISO week 39
+	damaged := func(b *box) {
+		b.outcome["repocheck"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+		b.repocheck = `{"message_type":"summary","num_errors":1}`
+	}
 	for name, tc := range map[string]struct {
-		last, reads, after string
+		next, reads, after string
 		set                func(*box)
 	}{
-		"after 40": {last: "40/52", reads: "41/52", after: "41/52", set: func(*box) {}},
-		"after 52": {last: "52/52", reads: "1/52", after: "1/52", set: func(*box) {}},
-		"damage read": {last: "40/52", reads: "41/52", after: "40/52", set: func(b *box) {
-			b.outcome["repocheck"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
-			b.repocheck = `{"message_type":"summary","num_errors":1}`
+		"told 41, clean":       {next: "41/52", reads: "41/52", after: "42/52", set: func(*box) {}},
+		"told 52, clean":       {next: "52/52", reads: "52/52", after: "1/52", set: func(*box) {}},
+		"told 41, damaged":     {next: "41/52", reads: "41/52", after: "41/52", set: damaged},
+		"told 41, unreachable": {next: "41/52", after: "41/52", set: func(b *box) { b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 1} }},
+		"told 41, killed":      {next: "41/52", reads: "41/52", after: "41/52", set: func(b *box) { b.outcome["repocheck"] = unit.Outcome{Result: "signal"} }},
+		"first, clean":         {reads: "39/52", after: "40/52", set: func(*box) {}},
+		"first, damaged":       {reads: "39/52", after: "39/52", set: damaged},
+		"first, unreachable":   {after: "39/52", set: func(b *box) { b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 1} }},
+		"first, killed":        {reads: "39/52", after: "39/52", set: func(b *box) { b.outcome["repocheck"] = unit.Outcome{Result: "signal"} }},
+		"not a group, clean":   {next: "x", reads: "39/52", after: "40/52", set: func(*box) {}},
+		"first, ended from outside": {after: "", set: func(b *box) {
+			b.err["repocheck"] = fmt.Errorf("hotserve_backup_repocheck_x.service: %w", unit.ErrEndedFromOutside)
 		}},
-		"unreachable":        {last: "40/52", after: "40/52", set: func(b *box) { b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 1} }},
-		"killed by a signal": {last: "40/52", reads: "41/52", after: "40/52", set: func(b *box) { b.outcome["repocheck"] = unit.Outcome{Result: "signal"} }},
+		"told 41, ended from outside": {next: "41/52", reads: "41/52", after: "41/52", set: func(b *box) {
+			b.err["repocheck"] = fmt.Errorf("hotserve_backup_repocheck_x.service: %w", unit.ErrEndedFromOutside)
+		}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			b := restoreBox(t)
 			must(t, os.MkdirAll(b.cfg.StateDir, 0o755))
-			must(t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), &record.Status{Apps: map[string]*record.App{}, CheckRead: tc.last}))
+			must(t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), &record.Status{Apps: map[string]*record.App{}, CheckNext: tc.next}))
 			tc.set(b)
 			st, _, _ := Drill(context.Background(), b.cfg, b)
 			if tc.reads != "" {
@@ -858,22 +884,67 @@ func TestTheNextCheckReadsTheGroupAfterTheLastOneRead(t *testing.T) {
 				}
 			}
 			on, err := record.Read(filepath.Join(b.cfg.StateDir, "status.json"))
-			if err != nil || st.CheckRead != tc.after || on.CheckRead != tc.after {
-				t.Errorf("last group read: %q (on disk %q, %v), want %q", st.CheckRead, on.CheckRead, err, tc.after)
+			if err != nil || st.CheckNext != tc.after || on.CheckNext != tc.after {
+				t.Errorf("check_next %q (on disk %q, %v), want %q", st.CheckNext, on.CheckNext, err, tc.after)
 			}
 		})
 	}
 }
 
-// Every command carries the group last read, as it carries the last
-// check.
-func TestARunCarriesTheGroupLastRead(t *testing.T) {
+// The case Copilot named, end to end: a box's first check finds damage
+// in its week's group; a week later the next check reads that group
+// again, not its own week's, and says damaged still; and once a check
+// of it is clean, rotation moves on from there.
+func TestAFirstCheckThatFindsDamageIsReadAgainTheWeekAfter(t *testing.T) {
+	old := checkClock
+	t.Cleanup(func() { checkClock = old })
+	week := func(n int) func() time.Time { // n weeks after the Sunday of ISO week 39
+		return func() time.Time { return time.Date(2026, 9, 27+7*n, 12, 0, 0, 0, time.UTC) }
+	}
+	b := restoreBox(t)
+	read := func(clock func() time.Time, set func()) (string, *record.Status) {
+		t.Helper()
+		checkClock, b.specs = clock, nil
+		set()
+		st, _, _ := Drill(context.Background(), b.cfg, b)
+		argv := b.spec("repocheck").Argv
+		return strings.TrimPrefix(argv[len(argv)-1], "--read-data-subset="), st
+	}
+	damaged := func() {
+		b.outcome["repocheck"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+		b.repocheck = `{"message_type":"summary","num_errors":1}`
+	}
+	clean := func() {
+		delete(b.outcome, "repocheck")
+		b.repocheck = `{"message_type":"summary","num_errors":0}`
+	}
+	if g, st := read(week(0), damaged); g != "39/52" || st.LastCheck.Class != record.CheckDamaged {
+		t.Fatalf("week 39: read %s, %+v", g, st.LastCheck)
+	}
+	if g, st := read(week(1), damaged); g != "39/52" || st.LastCheck.Class != record.CheckDamaged {
+		t.Errorf("week 40, after a first check found damage in 39: read %s, %+v", g, st.LastCheck)
+	}
+	if g, st := read(week(2), clean); g != "39/52" || st.LastCheck.Class != record.CheckClean || st.CheckNext != "40/52" {
+		t.Errorf("week 41, the damaged group repaired: read %s, %+v, next %q", g, st.LastCheck, st.CheckNext)
+	}
+	if g, _ := read(week(3), clean); g != "40/52" {
+		t.Errorf("week 42: read %s, want the group after the one read clean, 40/52", g)
+	}
+}
+
+// Every command carries the group the next check reads, as it carries
+// the last check.
+func TestARunCarriesTheGroupToReadNext(t *testing.T) {
 	b := newBox(t)
 	must(t, os.MkdirAll(b.cfg.StateDir, 0o755))
-	must(t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), &record.Status{Apps: map[string]*record.App{}, CheckRead: "17/52"}))
+	must(t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), &record.Status{Apps: map[string]*record.App{}, CheckNext: "17/52"}))
 	st, err := Run(context.Background(), b.cfg, b)
-	if err != nil || st.CheckRead != "17/52" {
-		t.Errorf("after a run: %q, %v", st.CheckRead, err)
+	if err != nil || st.CheckNext != "17/52" {
+		t.Errorf("after a run: %q, %v", st.CheckNext, err)
+	}
+	on, rerr := record.Read(filepath.Join(b.cfg.StateDir, "status.json"))
+	if rerr != nil || on.CheckNext != "17/52" {
+		t.Errorf("on disk: %q, %v", on.CheckNext, rerr)
 	}
 }
 
@@ -978,7 +1049,7 @@ func TestDamageCountedAndThenStoppedIsNotLost(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			b := restoreBox(t)
 			must(t, os.MkdirAll(b.cfg.StateDir, 0o755))
-			must(t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), &record.Status{Apps: map[string]*record.App{}, CheckRead: "40/52",
+			must(t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), &record.Status{Apps: map[string]*record.App{}, CheckNext: "41/52",
 				LastCheck: &record.Check{Time: time.Date(2026, 9, 20, 3, 30, 0, 0, time.UTC), Group: "40/52", Class: record.CheckClean}}))
 			b.outcome["repocheck"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
 			b.repocheck = `{"message_type":"summary","num_errors":3,"broken_packs":["3b47"]}`
@@ -1003,8 +1074,8 @@ func TestDamageCountedAndThenStoppedIsNotLost(t *testing.T) {
 			if c == nil || c.Class != record.CheckFailed || !strings.Contains(c.Detail, "restic check counted 3 errors") || !strings.Contains(c.Detail, "the next check reads this group again") || checked == nil {
 				t.Errorf("verdict %+v, checked %+v", c, checked)
 			}
-			if st.CheckRead != "40/52" {
-				t.Errorf("the group read moved on: %q", st.CheckRead)
+			if st.CheckNext != "41/52" {
+				t.Errorf("the group to read next moved on: %q", st.CheckNext)
 			}
 		})
 	}

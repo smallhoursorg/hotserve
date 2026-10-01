@@ -591,22 +591,29 @@ func pick(app string, snaps []listed, asked string) (record.Snapshot, error) {
 
 // checkInto checks the repository and writes the verdict into st: the
 // check made, or nil — an interrupt, or a unit ended from outside, is no
-// verdict, and leaves the last one. The group is the one after the last
-// clean check's; only a clean check moves it on — damage keeps it, so
-// that the next check reads it again (the owner, 2026-09-30). One
-// reading of the clock serves the group and the check's time both: two,
-// either side of Sunday's midnight, would record one week's time beside
-// the other's group.
+// verdict, and leaves the last check and check_next as they were.
+//
+// The group is the one check_next names (the ISO week's for a first
+// check). A clean check leaves the group after it to be read next; any
+// other verdict leaves the same group — damage, until a check of it is
+// clean (the owner, 2026-09-30), and a check that read nothing, the
+// storage not answering — a first check's included, which before left
+// nothing to read again by, so that the next week read its own week's
+// group (Copilot on #161). One reading of the clock serves the group and
+// the check's time both: two, either side of Sunday's midnight, would
+// record one week's time beside the other's group.
 func (x *run) checkInto(ctx context.Context, st *record.Status) *record.Check {
 	now := checkClock().UTC()
-	group := nextGroup(st.CheckRead, now)
+	group := groupToRead(st.CheckNext, now)
 	c := x.checkRepository(ctx, group, now)
 	if c == nil {
 		return nil
 	}
 	st.LastCheck = c
 	if c.Class == record.CheckClean {
-		st.CheckRead = group
+		st.CheckNext = groupAfter(group)
+	} else {
+		st.CheckNext = group
 	}
 	return c
 }

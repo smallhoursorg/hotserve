@@ -396,7 +396,7 @@ func open(ctx context.Context, cfg Config, r Runner, say func(string)) (x *run, 
 	}
 	uid, gid, derr := dataOwner(ctx)
 	x = &run{cfg: cfg, r: r, nonce: nonce, dir: filepath.Join(cfg.RunDir, nonce), prev: prev, dataUID: uid, dataGID: gid, dataErr: derr, program: program,
-		status: &record.Status{Started: time.Now().UTC(), Warning: unreadable, Apps: map[string]*record.App{}, Listed: prev.Listed, Unlisted: prev.Unlisted, LastDrill: prev.LastDrill, LastCheck: prev.LastCheck, CheckRead: prev.CheckRead, CheckSince: prev.CheckSince}}
+		status: &record.Status{Started: time.Now().UTC(), Warning: unreadable, Apps: map[string]*record.App{}, Listed: prev.Listed, Unlisted: prev.Unlisted, LastDrill: prev.LastDrill, LastCheck: prev.LastCheck, CheckNext: prev.CheckNext, CheckSince: prev.CheckSince}}
 	if err := x.awaitInit(ctx, say); err != nil {
 		return x, unlock, err
 	}

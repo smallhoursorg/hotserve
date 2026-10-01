@@ -56,16 +56,36 @@ func checkGroup(t time.Time) string {
 	return fmt.Sprintf("%d/%d", (week-1)%checkGroups+1, checkGroups)
 }
 
-// nextGroup is the group a check reads: the one after the last a check
-// read, or on day t the ISO week's where none was (the owner,
-// 2026-09-30). Which group a pack is in is fixed by its id [M74], so
-// fifty-two checks read every pack once, whatever weeks were missed.
-func nextGroup(last string, t time.Time) string {
-	var n, of int
-	if _, err := fmt.Sscanf(last, "%d/%d", &n, &of); err != nil || of != checkGroups || n < 1 || n > checkGroups || fmt.Sprintf("%d/%d", n, of) != last {
-		return checkGroup(t)
+// groupToRead is the group a check reads: next — check_next in the
+// record — where it names one, and on day t the ISO week's, in UTC,
+// where it does not: a first check, or a word the record should not hold.
+func groupToRead(next string, t time.Time) string {
+	if _, ok := groupNumber(next); ok {
+		return next
+	}
+	return checkGroup(t)
+}
+
+// groupAfter is the group after g: what a clean check of g leaves the
+// next check to read (the owner, 2026-09-30). Which group a pack is in is
+// fixed by its id [M74], so fifty-two clean checks read every pack once,
+// whatever weeks were missed. g is a group, as groupToRead gives one; a
+// word that is not is given back as it came, and read as none.
+func groupAfter(g string) string {
+	n, ok := groupNumber(g)
+	if !ok {
+		return g
 	}
 	return fmt.Sprintf("%d/%d", n%checkGroups+1, checkGroups)
+}
+
+// groupNumber is n of a group "n/52", written as the record writes one.
+func groupNumber(s string) (int, bool) {
+	var n, of int
+	if _, err := fmt.Sscanf(s, "%d/%d", &n, &of); err != nil || of != checkGroups || n < 1 || n > checkGroups || fmt.Sprintf("%d/%d", n, of) != s {
+		return 0, false
+	}
+	return n, true
 }
 
 // checkArgv is the check of one group: no lock, restic's words as JSON.

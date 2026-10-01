@@ -43,7 +43,7 @@ wk() {
 	w=${w#0}
 	echo "$(((w - 1) % 52 + 1))/52"
 }
-# first_drill: a drill whose check is a first one, with no clean check on
+# first_drill: a drill whose check is a first one, with no check_next on
 # record. Its group is the ISO week's at the moment it reads the clock —
 # the week before or after a Monday midnight the drill may cross: GROUP
 # is set to the one it read, and held to those two.
@@ -152,11 +152,13 @@ grep -q '^[[:space:]]*backup {' "$CADDYFILE" && fail "fixture: the Caddyfile sti
 write_env "$REPO" "$PASSWORD"
 sed -i 's/^AWS_SECRET_ACCESS_KEY=.*/AWS_SECRET_ACCESS_KEY=not-the-key/' "$ENVFILE"
 t0=$(date +%s)
-if first_drill; then fail "a drill with the wrong storage key exited 0"; else pass "a drill with the wrong storage key exits non-zero"; fi
+# Not a first check: check 4's verdict, not clean, left its group to be
+# read again (check_next), whatever week it is now.
+if drill; then fail "a drill with the wrong storage key exited 0"; else pass "a drill with the wrong storage key exits non-zero"; fi
 says "^repository: its structure, and data group $GROUP: unreachable: the repository did not answer within 30s; the unit was stopped: the storage could not be reached, or refused the key$" && [ "$(took "$t0")" -lt 90 ] && pass "the check says unreachable or refused, within a minute and a half ($(took "$t0")s)" || fail "the drill said, in $(took "$t0")s: $(cat "$OUT")"
 write_env "s3:http://no-such-host.invalid:9000/checkrepo2" "$PASSWORD"
 t0=$(date +%s)
-first_drill
+drill
 says "^repository: its structure, and data group $GROUP: unreachable: " && [ "$(took "$t0")" -lt 90 ] && pass "a host that does not resolve is unreachable too ($(took "$t0")s) — never damaged" || fail "the drill said, in $(took "$t0")s: $(cat "$OUT")"
 [ "$(units_left)" = 0 ] && pass "no unit is left" || fail "units left: $(systemctl list-units --all --no-legend 'hotserve_backup_*')"
 cp /root/Caddyfile.base "$CADDYFILE"
