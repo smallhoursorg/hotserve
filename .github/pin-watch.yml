@@ -16,21 +16,7 @@
 #     min_version: <vX.Y.Z>            #   …at at least this version
 #   action:      what to do when the condition fires
 
-watches:
-  - id: cel-go
-    ignores: "github.com/google/cel-go"
-    reason: >-
-      caddy v2.11.x does not compile against cel-go >= 0.29 (the
-      interpreter.NewCall signature changed); the 0.29.0 bump broke
-      main on 2026-08-16.
-    unblock:
-      type: upstream-gomod-requires
-      repo: caddyserver/caddy
-      module: github.com/google/cel-go
-      min_version: v0.29.0
-    action: >-
-      Delete this watch and the cel-go ignore in .github/dependabot.yml,
-      then let Dependabot bump cel-go together with caddy.
+watches: []
 
 # Dependabot alert triage as code: alerts whose GHSA is listed here are
 # auto-dismissed by the pin-watch workflow with the given reason and
@@ -59,14 +45,14 @@ alert_dismissals:
     # in caddyserver/caddy — and CEL expressions are operator-written
     # config, not request input. This GHSA is not in the Go vulndb, so
     # govulncheck cannot vouch; triaged manually 2026-08-16. Cleared
-    # for real when caddy releases with cel-go >= 0.29.
+    # by caddy v2.11.6, which moved to cel.dev/cel-go v0.32 — the old
+    # module left every go.sum, so the alert should close on its own;
+    # delete this entry once it has.
     comment: >-
-      Unreachable: caddy's celmatcher (the only cel-go consumer here)
-      never uses ext.NativeTypes, and CEL expressions are operator
-      config, not request input. Evidence + exit condition versioned
-      in .github/pin-watch.yml (cel-go watch).
+      Fixed transitively by caddy v2.11.6, which replaced the vulnerable
+      github.com/google/cel-go module with cel.dev/cel-go v0.32. Retaining
+      this dismissal only until GitHub closes the existing alert.
   - ghsa: GHSA-w34q-cm8f-9c5x
-    govulncheck: GO-2026-6508
     reason: not_used
     # otlploggrpc < 0.21 ignores the env TLS certs, bypassing mTLS and
     # pinning. Unreachable: the otel log modules arrive only through
@@ -77,13 +63,14 @@ alert_dismissals:
     # so any import counts as a call. Not bumped alone: otel/log 0.21
     # removed types the 0.19 set uses, and the set moves with
     # autoexport (0.21 needs autoexport >= v0.70; caddy v2.11.4 pins
-    # v0.68) — PR #131, closed 2026-09-18. Cleared when caddy releases
-    # with autoexport >= v0.70 and Dependabot follows.
+    # v0.68) — PR #131, closed 2026-09-18. Cleared by caddy v2.11.6
+    # (autoexport v0.71, otlploggrpc v0.22): the govulncheck key went
+    # with that bump; delete this entry once the alert has closed.
     comment: >-
-      Unreachable: otlploggrpc arrives only via caddy's autoexport, and
-      caddy never builds a log exporter. The fix needs autoexport >=
-      v0.70, which caddy has not released. Evidence + exit condition
-      versioned in .github/pin-watch.yml.
+      Fixed transitively by caddy v2.11.6, which pulls autoexport v0.71
+      and otlploggrpc v0.22. Before that it was unreachable: caddy never
+      builds a log exporter. Retaining this dismissal only until GitHub
+      closes the existing alert.
 
 # Code-scanning (CodeQL) triage as code, same contract as above: alerts
 # matching rule + file are auto-dismissed by the pin-watch workflow, so
