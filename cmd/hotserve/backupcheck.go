@@ -183,7 +183,7 @@ func checkBackups(cmd string, args []string) (warning string, err error) {
 			}
 		}
 	}
-	if st, err := os.Stat(main); err == nil && st.Mode().Perm()&0o004 == 0 {
+	if st, err := os.Stat(main); err == nil && st.Mode().Perm()&0o004 == 0 { //nolint:gosec // the Caddyfile the command was given; its mode is what is checked
 		say("the Caddyfile, %s, may not be read by others", main)
 	}
 	for _, s := range sources {
@@ -215,12 +215,12 @@ func sameFile(a, b string) bool {
 	if filepath.Clean(a) == filepath.Clean(b) {
 		return true
 	}
-	sa, errA := os.Stat(a)
+	sa, errA := os.Stat(a) //nolint:gosec // Caddyfile paths the command was given, compared, never read
 	sb, errB := os.Stat(b)
 	if errA != nil || errB != nil || !os.SameFile(sa, sb) {
 		return false
 	}
-	da, errA := os.Stat(filepath.Dir(a))
+	da, errA := os.Stat(filepath.Dir(a)) //nolint:gosec // the directory of a Caddyfile path the command was given
 	db, errB := os.Stat(filepath.Dir(b))
 	return errA == nil && errB == nil && os.SameFile(da, db)
 }
