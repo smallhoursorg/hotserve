@@ -49,10 +49,9 @@ alert_dismissals:
     # module left every go.sum, so the alert should close on its own;
     # delete this entry once it has.
     comment: >-
-      Unreachable: caddy's celmatcher (the only cel-go consumer here)
-      never uses ext.NativeTypes, and CEL expressions are operator
-      config, not request input. Evidence + exit condition versioned
-      in .github/pin-watch.yml (cel-go watch).
+      Fixed transitively by caddy v2.11.6, which replaced the vulnerable
+      github.com/google/cel-go module with cel.dev/cel-go v0.32. Retaining
+      this dismissal only until GitHub closes the existing alert.
   - ghsa: GHSA-w34q-cm8f-9c5x
     reason: not_used
     # otlploggrpc < 0.21 ignores the env TLS certs, bypassing mTLS and
