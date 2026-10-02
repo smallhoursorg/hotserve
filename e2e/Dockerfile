@@ -10,7 +10,7 @@
 # /usr/local, inside every app's sandbox view. A FROM, so Dependabot
 # watches it; keep it the same version as the build image in
 # e2e/liveswap/artifacts.Dockerfile and the example's workflow.
-FROM denoland/deno:bin-2.9.6 AS deno
+FROM denoland/deno:bin-2.9.7 AS deno
 
 FROM golang:1.27-trixie AS builder
 WORKDIR /src
