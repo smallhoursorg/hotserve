@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -65,6 +66,12 @@ func TestIntegrationWhatIsBoundIsWhatWasPinnedWhateverTheAppDoesToTheName(t *tes
 		}
 		toggled <- n
 	}()
+	// However the test ends, the flipping ends first: left running after
+	// a failure, it raced the cleanup that removes base [measured: 9 of
+	// 40 failing runs left it behind] and spun on through the package's
+	// later tests.
+	flips := sync.OnceValue(func() int { stop.Store(true); return <-toggled })
+	t.Cleanup(func() { flips() })
 
 	root, err := pinRoot(base)
 	must(t, err)
@@ -73,22 +80,27 @@ func TestIntegrationWhatIsBoundIsWhatWasPinnedWhateverTheAppDoesToTheName(t *tes
 	must(t, err)
 	defer sharedPin.close()
 
-	units := 60
-	if n, err := strconv.Atoi(os.Getenv("PIN_RACE_UNITS")); err == nil {
-		units = n
-	}
+	units := raceUnits(t, 60)
 	shown, refused := 0, 0
 	for i := 0; shown < units && i < 100*units; i++ {
 		item, err := sharedPin.beneath("uploads")
-		if err != nil { // caught mid-flip: a link, or nothing — refused, which is fine
+		if err != nil {
+			// Caught mid-flip — a link, or nothing — is refused, which
+			// is fine. Anything else is not the race, and is said.
+			if !errors.Is(err, errLink) && !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("pinning uploads: %v", err)
+			}
 			refused++
 			// An attempt takes microseconds and a flip does not: a
-			// flipper descheduled mid-flip holds the name refused for
-			// its whole time slice, and attempts made back to back
-			// spend the budget inside it [measured: with six busy
-			// loops on six CPUs, all of 100 runs used up their
-			// attempts and showed five or six units]. A moment's wait
-			// lets the flipper run.
+			// flipper descheduled mid-flip leaves the name refused for
+			// as long as other threads hold the CPU, and attempts made
+			// back to back spent the whole budget inside that wait
+			// [measured: with six busy loops on six CPUs, all of 100
+			// runs used up their attempts and showed five or six
+			// units]. Each refusal gives the CPU up for at least 1 ms,
+			// so the budget is time as much as attempts — at least
+			// 100 ms of refusals a unit [measured: 30 of 30 runs passed
+			// at twelve busy loops, and at eighteen].
 			time.Sleep(time.Millisecond)
 			continue
 		}
@@ -116,12 +128,42 @@ func TestIntegrationWhatIsBoundIsWhatWasPinnedWhateverTheAppDoesToTheName(t *tes
 		}
 		shown++
 	}
-	stop.Store(true)
-	n := <-toggled
+	n := flips()
+	unmountedAll(t, mounts)
 	if shown < units || n < 100 {
 		t.Fatalf("%d units shown the directory, %d flips (%d pins refused mid-flip): not enough of a race to mean anything", shown, n, refused)
 	}
 	t.Logf("%d units, %d flips of the name meanwhile, %d pins refused mid-flip", shown, n, refused)
+}
+
+// raceUnits is how many units a race test starts: its own count, or
+// PIN_RACE_UNITS for a longer run. A count below one would test
+// nothing, and is refused as what it is rather than failed as "not
+// enough of a race".
+func raceUnits(t *testing.T, units int) int {
+	t.Helper()
+	v, set := os.LookupEnv("PIN_RACE_UNITS")
+	if !set {
+		return units
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		t.Fatalf("PIN_RACE_UNITS=%q: a count of units, one or more", v)
+	}
+	return n
+}
+
+// unmountedAll fails the test if anything is still mounted under the
+// run directory: what each unit was shown is taken away again, which a
+// race test passed without, every bind left mounted [measured: 60 and
+// 40, with the unmount made to do nothing].
+func unmountedAll(t *testing.T, runDir string) {
+	t.Helper()
+	under, err := mountsUnder(runDir)
+	must(t, err)
+	if len(under) != 0 {
+		t.Fatalf("still mounted under the run directory: %q", under)
+	}
 }
 
 // What a run binds and takes away is its own, and nothing of the

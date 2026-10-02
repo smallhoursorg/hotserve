@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -88,6 +89,12 @@ func TestIntegrationARestoreNeverLandsInASiblingsDataWhateverTheAppDoesToTheName
 		}
 		toggled <- n
 	}()
+	// However the test ends, the flipping ends first: left running after
+	// a failure, it raced the cleanup that removes base [measured: 16 of
+	// 20 failing runs left it behind] and spun on through the package's
+	// later tests.
+	flips := sync.OnceValue(func() int { stop.Store(true); return <-toggled })
+	t.Cleanup(func() { flips() })
 
 	root, err := pinRoot(filepath.Join(base, "root"))
 	must(t, err)
@@ -96,10 +103,7 @@ func TestIntegrationARestoreNeverLandsInASiblingsDataWhateverTheAppDoesToTheName
 	must(t, err)
 	defer sharedPin.close()
 
-	units := 40
-	if n, err := strconv.Atoi(os.Getenv("PIN_RACE_UNITS")); err == nil {
-		units = n
-	}
+	units := raceUnits(t, 40)
 	installed, refused := 0, 0
 	for i := 0; i < units; i++ {
 		target := filepath.Join(mounts, "m"+strconv.Itoa(i))
@@ -138,8 +142,8 @@ func TestIntegrationARestoreNeverLandsInASiblingsDataWhateverTheAppDoesToTheName
 			t.Fatalf("unit %d: blog's file landed in the sibling's data", i)
 		}
 	}
-	stop.Store(true)
-	n := <-toggled
+	n := flips()
+	unmountedAll(t, mounts)
 	if got := sqlite(filepath.Join(sibling, "shop.db"), "select group_concat(n) from posts"); got != "41" {
 		t.Fatalf("the sibling's database was restored over: %q", got)
 	}
