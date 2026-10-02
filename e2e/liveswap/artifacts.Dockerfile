@@ -20,6 +20,8 @@ ARG TARGETARCH
 WORKDIR /build
 COPY e2e/liveswap/testapp/main.go e2e/liveswap/workers.sh e2e/liveswap/probe-server.sh e2e/liveswap/crash.sh liveswap/testdata/sandbox-view.sh ./
 RUN CGO_ENABLED=0 go build -o server main.go
+COPY e2e/liveswap/artifacts/main.go ./artifacts/
+RUN CGO_ENABLED=0 go build -o artifacts-server ./artifacts/main.go
 RUN other=amd64; [ "$TARGETARCH" = amd64 ] && other=arm64; CGO_ENABLED=0 GOARCH=$other go build -o server-other main.go
 RUN mkdir /out \
 	&& for v in v1 v2; do \
@@ -73,8 +75,11 @@ WORKDIR /example
 COPY examples/node/ ./
 RUN sh scripts/bundle.sh
 
-FROM caddy:2.11.4
+# The server is e2e/liveswap/artifacts/main.go, a static binary, so the
+# image is nothing but it and the tarballs.
+FROM scratch
+COPY --from=build /build/artifacts-server /artifacts-server
 COPY --from=build /out /srv/artifacts
 COPY --from=deno-build /example/app.tar.gz /srv/artifacts/deno-example.tar.gz
 COPY --from=node-build /example/app.tar.gz /srv/artifacts/node-example.tar.gz
-COPY e2e/liveswap/artifacts.Caddyfile /etc/caddy/Caddyfile
+ENTRYPOINT ["/artifacts-server"]
