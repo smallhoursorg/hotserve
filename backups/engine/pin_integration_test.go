@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/smallhoursorg/hotserve/backups/unit"
 )
@@ -81,6 +82,14 @@ func TestIntegrationWhatIsBoundIsWhatWasPinnedWhateverTheAppDoesToTheName(t *tes
 		item, err := sharedPin.beneath("uploads")
 		if err != nil { // caught mid-flip: a link, or nothing — refused, which is fine
 			refused++
+			// An attempt takes microseconds and a flip does not: a
+			// flipper descheduled mid-flip holds the name refused for
+			// its whole time slice, and attempts made back to back
+			// spend the budget inside it [measured: with six busy
+			// loops on six CPUs, all of 100 runs used up their
+			// attempts and showed five or six units]. A moment's wait
+			// lets the flipper run.
+			time.Sleep(time.Millisecond)
 			continue
 		}
 		target := filepath.Join(mounts, "m"+strconv.Itoa(shown))
