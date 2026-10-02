@@ -18,11 +18,17 @@ type fakeJournal struct {
 	of    tailOf
 	since time.Time
 	n     int
+	// behind is how many reads find nothing yet: a journal that has
+	// not caught up with the process.
+	behind int
 }
 
 func (j *fakeJournal) tail(_ context.Context, of tailOf, since time.Time, n int) ([]string, error) {
 	j.calls++
 	j.of, j.since, j.n = of, since, n
+	if j.calls <= j.behind {
+		return nil, j.err
+	}
 	return j.lines, j.err
 }
 
@@ -65,8 +71,8 @@ func TestFailureDetailPreStartExit(t *testing.T) {
 	// And by the pre_start's main process, the pid the manager recorded,
 	// under the app's identifier: journald keeps no unit on a line it
 	// reads after its writer has gone.
-	if len(j.of.pids) != 1 || j.of.pids[0] != 731 || j.of.ident != "hotserve-demo" {
-		t.Fatalf("journal asked by pids %v under %q, want [731] under hotserve-demo", j.of.pids, j.of.ident)
+	if j.of.pid != 731 || j.of.ident != "hotserve-demo" {
+		t.Fatalf("journal asked by pid %d under %q, want 731 under hotserve-demo", j.of.pid, j.of.ident)
 	}
 	var names []string
 	for _, p := range ld.Phases {
@@ -100,8 +106,8 @@ func TestFailureDetailAppDiesOnStart(t *testing.T) {
 		t.Fatalf("log tail = %v", ld.Detail.LogTail)
 	}
 	// The journal is asked by the pid the app's main process had.
-	if len(j.of.pids) != 1 || j.of.pids[0] != 4242 {
-		t.Fatalf("journal asked by pids %v, want the app's [4242]", j.of.pids)
+	if j.of.pid != 4242 {
+		t.Fatalf("journal asked by pid %d, want the app's 4242", j.of.pid)
 	}
 }
 
@@ -120,6 +126,23 @@ func TestFailureDetailNoneBeforeLaunch(t *testing.T) {
 	}
 	if d := rig.ma.status().LastDeploy.Detail; d != nil || j.calls != 0 {
 		t.Fatalf("detail before any launch: %+v (journal calls %d)", d, j.calls)
+	}
+}
+
+// A journal behind the process: the first reads find nothing, and the
+// tail is asked for again rather than given up as empty.
+func TestFailureDetailWaitsForAJournalBehind(t *testing.T) {
+	rig := newTestRig(t)
+	rig.spec.preStart = []string{"./migrate"}
+	rig.spec.deployLogLines = 40
+	rig.runner.runOnceErr = runOnceExit("exit status 3", "u", "failed", 731)
+	j := &fakeJournal{lines: []string{"migrate: cannot open app.db"}, behind: 2}
+	rig.ma.journal = j
+	if err := deployOnceV1(t, rig); err == nil {
+		t.Fatal("deploy should have failed in pre_start")
+	}
+	if d := rig.ma.status().LastDeploy.Detail; d == nil || strings.Join(d.LogTail, "|") != "migrate: cannot open app.db" {
+		t.Fatalf("a journal two reads behind: detail %+v after %d reads", d, j.calls)
 	}
 }
 
@@ -147,12 +170,18 @@ func TestFailureDetailProbe(t *testing.T) {
 	rig := newTestRig(t)
 	rig.spec.deployLogLines = 40
 	rig.prober.err = fmt.Errorf("not healthy within deadline 5m: %w", &probeError{status: 400, location: "", body: "Invalid HTTP_HOST header: 'localhost'."})
-	rig.ma.journal = &fakeJournal{}
+	j := &fakeJournal{}
+	rig.ma.journal = j
 
 	if err := deployOnceV1(t, rig); err == nil {
 		t.Fatal("deploy should have failed the health gate")
 	}
 	ld := rig.ma.status().LastDeploy
+	// Still running when the gate gave up on it: the journal is asked by
+	// the pid it runs as, all the same.
+	if j.of.pid != 4242 {
+		t.Fatalf("journal asked by pid %d, want the instance's 4242", j.of.pid)
+	}
 	if ld.Detail == nil || ld.Detail.Probe == nil || ld.Detail.Probe.Status != 400 || !strings.Contains(ld.Detail.Probe.Body, "HTTP_HOST") {
 		t.Fatalf("detail = %+v", ld.Detail)
 	}
@@ -216,14 +245,14 @@ func TestJournalArgs(t *testing.T) {
 	since := time.Unix(1790000000, 0)
 	window := "--user --no-pager --quiet -n 41 --since @1789999999"
 	units := "_SYSTEMD_USER_UNIT=a.prestart.service _SYSTEMD_USER_UNIT=a.service"
-	of := tailOf{units: []string{"a.prestart.service", "a.service"}, pids: []int{0, 731}, ident: "hotserve-demo"}
+	of := tailOf{units: []string{"a.prestart.service", "a.service"}, pid: 731, ident: "hotserve-demo"}
 	for _, c := range []struct {
 		name      string
 		got, want []string
 	}{
-		{"streams, by unit or by pid", streamArgs(of, since, 40), strings.Fields(window + " -o json --output-fields=_STREAM_ID " + units + " + _PID=731 SYSLOG_IDENTIFIER=hotserve-demo")},
-		{"streams, no pid recorded", streamArgs(tailOf{units: of.units, pids: []int{0}, ident: of.ident}, since, 40), strings.Fields(window + " -o json --output-fields=_STREAM_ID " + units)},
-		{"streams, no identifier to go with the pid", streamArgs(tailOf{units: of.units, pids: []int{731}}, since, 40), strings.Fields(window + " -o json --output-fields=_STREAM_ID " + units)},
+		{"streams, by unit or by pid", streamArgs(of, since, 40), strings.Fields(window + " -o cat --output-fields=_STREAM_ID " + units + " + _PID=731 SYSLOG_IDENTIFIER=hotserve-demo")},
+		{"streams, no pid recorded", streamArgs(tailOf{units: of.units, ident: of.ident}, since, 40), strings.Fields(window + " -o cat --output-fields=_STREAM_ID " + units)},
+		{"streams, no identifier to go with the pid", streamArgs(tailOf{units: of.units, pid: 731}, since, 40), strings.Fields(window + " -o cat --output-fields=_STREAM_ID " + units)},
 		{"tail, the units or their streams", tailArgs(of.units, []string{"0123456789abcdef0123456789abcdef", "fedcba9876543210fedcba9876543210"}, since, 40), strings.Fields(window + " -o cat " + units + " + _STREAM_ID=0123456789abcdef0123456789abcdef _STREAM_ID=fedcba9876543210fedcba9876543210")},
 		{"tail, no stream learnt", tailArgs(of.units, nil, since, 40), strings.Fields(window + " -o cat " + units)},
 	} {
@@ -233,19 +262,19 @@ func TestJournalArgs(t *testing.T) {
 	}
 }
 
-// The stream ids are read off journalctl's JSON, each once, in the
-// order met; what is not one, as journald prints one, is passed over.
+// The stream ids are read off journalctl's output, one an entry, each
+// kept once, in the order met; what is not one as journald prints one
+// is passed over.
 func TestStreamIDs(t *testing.T) {
 	a, b := "0123456789abcdef0123456789abcdef", "fedcba9876543210fedcba9876543210"
 	out := strings.Join([]string{
-		`ID":"` + a + `"}`, // the first entry, its start cut by the byte bound
-		`{"__CURSOR":"s=1","_STREAM_ID":"` + a + `"}`,
-		`{"__CURSOR":"s=2"}`, // a line sent to the journal directly: no stream
-		`{"_STREAM_ID":"` + b + `"}`,
-		`{"_STREAM_ID":"` + a + `"}`, // met again
-		`{"_STREAM_ID":"0123456789ABCDEF0123456789ABCDEF"}`,
-		`{"_STREAM_ID":"x _PID=1"}`,
-		`{"_STREAM_ID":[1,2]}`, // a field given twice
+		"89abcdef0123456789abcdef", // the first, its start cut by the byte bound
+		a,
+		"", // an entry with no stream
+		b,
+		a, // met again
+		"0123456789ABCDEF0123456789ABCDEF",
+		"x _PID=1",
 		"",
 	}, "\n")
 	if got := strings.Join(streamIDs([]byte(out)), ","); got != a+","+b {

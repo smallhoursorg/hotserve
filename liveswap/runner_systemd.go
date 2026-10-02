@@ -649,7 +649,7 @@ func (r *systemdRunner) Exit(h handle) (string, int) {
 	}
 	st := sh.exit.Load()
 	if st == nil {
-		return "", 0
+		return "", int(sh.pid.Load())
 	}
 	// The pid as the manager recorded it; from a unit unloaded before
 	// that could be read, the one the handle followed.

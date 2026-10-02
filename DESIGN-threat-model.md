@@ -89,8 +89,9 @@ Properties that matter to the model:
   them on it, or when it is in one of their output streams —
   journald's `_STREAM_ID`, which no client can set and only the unit's
   processes hold — learnt from the lines that name a unit and from
-  those written under the app's identifier by the process whose exit
-  is reported, found by the pid the manager recorded for it, which
+  those written under the app's identifier by the main process of the
+  `pre_start` or app that failed, found by its pid (as the manager
+  recorded it, or as the runner follows it while it runs), which
   another process could hold only once pids wrap. `deploy_log_lines 0`
   keeps the app's bytes — the tail and the probe body both — on the
   box; the exit status and the probe's status code are hotserve's

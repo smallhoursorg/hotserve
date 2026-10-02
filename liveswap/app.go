@@ -557,15 +557,16 @@ func (ma *managedApp) failureDetail(c collaborators, spec *appSpec, err error, a
 	d := &deployDetail{}
 	var ee *exitError
 	var pe *probeError
-	// With the exit, the pid the manager recorded for the process that
-	// made it: the journal finds that process's lines by it when
-	// journald could not tell their unit (journal.go).
-	pid := 0
+	// With the exit, the pid of the process that failed — the pre_start's
+	// as the manager recorded it, or the app's: the journal finds that
+	// process's lines by it when journald could not tell their unit
+	// (journal.go).
+	pid := appPID
 	switch {
 	case errors.As(err, &ee):
 		d.Exit, pid = ee.exit, ee.pid
 	case appExit != "":
-		d.Exit, pid = appExit, appPID
+		d.Exit = appExit
 	}
 	if errors.As(err, &pe) {
 		d.Probe = &probeDetail{Status: pe.status, Location: pe.location}
@@ -576,10 +577,7 @@ func (ma *managedApp) failureDetail(c collaborators, spec *appSpec, err error, a
 		}
 	}
 	if spec.deployLogLines > 0 && c.journal != nil {
-		of := tailOf{ident: syslogIdentifier(spec.name)}
-		if pid > 0 {
-			of.pids = []int{pid}
-		}
+		of := tailOf{pid: pid, ident: syslogIdentifier(spec.name)}
 		for _, oneshot := range []bool{true, false} {
 			if u, err := unitName(l.startSpec(spec, spec.command), oneshot); err == nil {
 				of.units = append(of.units, u)
@@ -599,7 +597,10 @@ func (ma *managedApp) failureDetail(c collaborators, spec *appSpec, err error, a
 			}
 			grew := len(got) > len(lines)
 			lines = got
-			if len(lines) > spec.deployLogLines || (attempt > 0 && !grew) {
+			// Done past the cap, or once a read adds nothing to what an
+			// earlier one found — not while there is nothing yet: the
+			// journal may still be behind the process.
+			if len(lines) > spec.deployLogLines || (attempt > 0 && !grew && len(lines) > 0) {
 				break
 			}
 			c.clock.Sleep(200 * time.Millisecond)
@@ -652,7 +653,7 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	var detail *deployDetail // filled by the failure-detail defer below, which runs first
 	launched := false        // a pre_start or Start was attempted: there are units to ask about
 	appExit := ""            // the app's exit, read before hotserve stops a failed instance
-	appPID := 0              // and its main process's pid, as the manager recorded it
+	appPID := 0              // and its main process's pid (runner.Exit)
 	defer func() {
 		finished := c.clock.Now()
 		result := deployResult{
@@ -856,9 +857,12 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		deployErr := fmt.Errorf("health gate: %w", err)
 		// The exit is the app's own only when it died on its own; read
 		// it now, before the Stop below would make every failure look
-		// like a SIGTERM.
+		// like a SIGTERM. Its pid is read either way: what the journal
+		// finds its lines by.
+		exit, pid := c.runner.Exit(newHandle)
+		appPID = pid
 		if errors.Is(err, errProcessExited) {
-			appExit, appPID = c.runner.Exit(newHandle)
+			appExit = exit
 		}
 		// If Stop can't confirm the instance is gone, surface that — and
 		// the cleanup defer then leaves the release in place rather than

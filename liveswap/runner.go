@@ -60,8 +60,9 @@ type runner interface {
 	// "killed by signal 9 (killed)"), or "" while it runs. Non-empty
 	// whenever Alive is false: the runner records the exit before it
 	// declares the handle dead (finish, runner_systemd.go). With it,
-	// the process's pid, as the manager recorded it (0 if it did not):
-	// what the process's journal lines carry.
+	// the main process's pid — as the manager recorded it once the
+	// process has ended, the one the handle follows while it runs; 0
+	// when neither is known: what the process's journal lines carry.
 	Exit(h handle) (string, int)
 
 	// Wait returns a channel that is closed once the instance exits.

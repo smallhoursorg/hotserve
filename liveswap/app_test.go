@@ -181,8 +181,11 @@ func (r *fakeRunner) Preflight(spec startSpec) error {
 
 func (r *fakeRunner) Exit(h handle) (string, int) {
 	fh, ok := h.(*fakeHandle)
-	if !ok || fh.isAlive() {
+	if !ok {
 		return "", 0
+	}
+	if fh.isAlive() {
+		return "", fh.state().PID
 	}
 	fh.mu.Lock()
 	defer fh.mu.Unlock()

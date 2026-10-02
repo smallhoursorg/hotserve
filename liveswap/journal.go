@@ -2,9 +2,9 @@ package liveswap
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -18,7 +18,7 @@ import (
 // journal back means running journalctl — the product binary is built
 // without cgo, so the sd-journal library is out — which is the one
 // external program hotserve executes. The argument lists are built
-// here, of unit names, pids the manager recorded, stream ids journald
+// here, of unit names, a pid the manager recorded, stream ids journald
 // printed, a count and a timestamp; the output is bounded
 // (deployLogMaxBytes, and the line count the operator sets with
 // deploy_log_lines); a journalctl that is missing or fails leaves the
@@ -38,12 +38,13 @@ type journalReader interface {
 	tail(ctx context.Context, of tailOf, since time.Time, n int) ([]string, error)
 }
 
-// tailOf is whose lines a tail reads: a launch's units; the pids
-// their main processes had, as the manager recorded them, where one
-// ended; and the identifier every unit of the app writes under.
+// tailOf is whose lines a tail reads: a launch's units; the pid of
+// the main process of the pre_start or app that failed (runner.Exit,
+// exitError; 0 where none is known); and the identifier every unit of
+// the app writes under.
 type tailOf struct {
 	units []string
-	pids  []int
+	pid   int
 	ident string
 }
 
@@ -63,10 +64,14 @@ const journalctlPath = "/usr/bin/journalctl"
 // gives the stream its id, a client cannot set it, and only the
 // unit's own processes hold the stream. So the tail is read in two
 // runs: the streams first, from the lines that kept their unit and
-// from those the unit's main process wrote — by its pid, as the
-// manager recorded it, under the app's identifier — and then every
-// line of those streams, with any line journald attributed to the
-// units otherwise (one an app sent the journal directly).
+// from those the failed process wrote — by its pid, as the manager
+// recorded it, under the app's identifier — and then every line of
+// those streams, with any line journald attributed to the units
+// otherwise. A stream none of whose lines did either stays unknown,
+// and its lines out of the tail: a wrapper script that runs its app
+// without exec and prints nothing itself, when the app prints its
+// error and exits; a pre_start that succeeded, every line of it read
+// late (its pid is gone with its unit).
 type journalctlReader struct{}
 
 func (journalctlReader) tail(ctx context.Context, of tailOf, since time.Time, n int) ([]string, error) {
@@ -115,16 +120,10 @@ func journalWindow(since time.Time, n int) []string {
 // app's identifier. Several matches of one field are OR'd, different
 // fields AND'd, and "+" ORs the two groups.
 func streamArgs(of tailOf, since time.Time, n int) []string {
-	args := append(journalWindow(since, n), "-o", "json", "--output-fields=_STREAM_ID")
+	args := append(journalWindow(since, n), "-o", "cat", "--output-fields=_STREAM_ID")
 	args = append(args, unitMatches(of.units)...)
-	var pids []string
-	for _, p := range of.pids {
-		if p > 0 {
-			pids = append(pids, "_PID="+strconv.Itoa(p))
-		}
-	}
-	if len(pids) > 0 && of.ident != "" {
-		args = append(append(append(args, "+"), pids...), "SYSLOG_IDENTIFIER="+of.ident)
+	if of.pid > 0 && of.ident != "" {
+		args = append(args, "+", "_PID="+strconv.Itoa(of.pid), "SYSLOG_IDENTIFIER="+of.ident)
 	}
 	return args
 }
@@ -151,43 +150,29 @@ func unitMatches(units []string) []string {
 	return m
 }
 
-// streamsMaxBytes bounds the first run's output: an entry with its
-// one field asked for is some 420 bytes of JSON, and deploy_log_lines
-// is at most 1000.
-const streamsMaxBytes = 1 << 20
+// streamsMaxBytes bounds the first run's output: an entry prints as
+// its stream id and a newline, 33 bytes, and deploy_log_lines is at
+// most 1000.
+const streamsMaxBytes = 64 * 1024
 
-// streamIDs reads journalctl's JSON entries for their distinct
-// stream ids, in the order first met. An entry it cannot read — the
-// first, cut by the byte bound — or an id not shaped as journald
-// prints one is passed over: it becomes an argument of the next run.
+// streamIDRe is a stream id as journald prints one.
+var streamIDRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+// streamIDs reads journalctl's output, an entry a line, for the
+// distinct stream ids, in the order first met. What is not one — the
+// first line cut by the byte bound, the empty line of an entry with no
+// stream — is passed over: each id becomes an argument of the next run.
 func streamIDs(out []byte) []string {
 	var ids []string
 	seen := map[string]bool{}
-	for _, line := range strings.Split(string(out), "\n") {
-		var e struct {
-			ID string `json:"_STREAM_ID"`
-		}
-		if json.Unmarshal([]byte(line), &e) != nil || !isID128(e.ID) || seen[e.ID] {
+	for _, id := range strings.Split(string(out), "\n") {
+		if !streamIDRe.MatchString(id) || seen[id] {
 			continue
 		}
-		seen[e.ID] = true
-		ids = append(ids, e.ID)
+		seen[id] = true
+		ids = append(ids, id)
 	}
 	return ids
-}
-
-// isID128 reports an id as journald prints one: 32 lowercase hex
-// digits.
-func isID128(s string) bool {
-	if len(s) != 32 {
-		return false
-	}
-	for _, c := range s {
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return false
-		}
-	}
-	return true
 }
 
 // runJournalctl runs journalctl, keeping the last limit bytes of what
