@@ -67,10 +67,10 @@ alert_dismissals:
     # (autoexport v0.71, otlploggrpc v0.22): the govulncheck key went
     # with that bump; delete this entry once the alert has closed.
     comment: >-
-      Unreachable: otlploggrpc arrives only via caddy's autoexport, and
-      caddy never builds a log exporter. The fix needs autoexport >=
-      v0.70, which caddy has not released. Evidence + exit condition
-      versioned in .github/pin-watch.yml.
+      Fixed transitively by caddy v2.11.6, which pulls autoexport v0.71
+      and otlploggrpc v0.22. Before that it was unreachable: caddy never
+      builds a log exporter. Retaining this dismissal only until GitHub
+      closes the existing alert.
 
 # Code-scanning (CodeQL) triage as code, same contract as above: alerts
 # matching rule + file are auto-dismissed by the pin-watch workflow, so
