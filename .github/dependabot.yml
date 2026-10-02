@@ -25,16 +25,10 @@ updates:
     groups:
       go-deps:
         patterns: ["*"]
-    ignore:
-      # Every ignore here MUST have a matching watch declaring its exit
-      # condition in .github/pin-watch.yml — the pin-watch workflow
-      # opens an issue when the condition is met, and flags any ignore
-      # without a watch.
-      #
-      # cel-go: caddy v2.11.x does not compile against >= 0.29; only
-      # the incompatible line is blocked so 0.28.x patches still flow.
-      - dependency-name: "github.com/google/cel-go"
-        versions: [">= 0.29.0"]
+    # A Dependabot `ignore` here MUST have a matching watch declaring
+    # its exit condition in .github/pin-watch.yml — the pin-watch
+    # workflow opens an issue when the condition is met, and flags any
+    # ignore without a watch.
 
   - package-ecosystem: github-actions
     # The examples' deploy workflows are SHA-pinned like ours and are

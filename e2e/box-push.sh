@@ -123,7 +123,9 @@ if cmp -s "$tmp/v1" "$tmp/bad-backup"; then
 	fail "the e2e Caddyfile has no \`files  uploads\` line to break"
 elif push "$tmp/bad-backup"; then
 	fail "push accepted a backup path outside the app's shared dir"
-elif grep -q -F 'backup files "../../deno-example/shared": the path reaches outside' "$tmp/out"; then
+# Caddy logs a command's error (JSON off a terminal, quotes escaped)
+# since v2.11.6, where it printed a plain "Error:" line before.
+elif grep -q -E 'backup files \\?"\.\./\.\./deno-example/shared\\?": the path reaches outside' "$tmp/out"; then
 	pass "push refused a backup path outside the app's shared dir, naming the path"
 else
 	fail "push refused the config, but not for the backup path: $(tail -3 "$tmp/out")"

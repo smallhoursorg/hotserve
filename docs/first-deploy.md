@@ -186,7 +186,7 @@ the above:
    `.deno-version`, which is what its workflow builds with:
 
    ```sh
-   v=v2.9.6                              # what examples/deno/.deno-version says
+   v=v$(cat .deno-version)               # from a checkout; on the box, type what the file says
    f=deno-$(uname -m)-unknown-linux-gnu.zip
    curl -fsSLO "https://github.com/denoland/deno/releases/download/$v/$f"
    curl -fsSLO "https://github.com/denoland/deno/releases/download/$v/$f.sha256sum"

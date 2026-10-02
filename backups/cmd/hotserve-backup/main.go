@@ -428,7 +428,7 @@ func validate(ctx context.Context, file string) error {
 	if err != nil {
 		return err
 	}
-	if st, err := os.Stat(abs); err != nil {
+	if st, err := os.Stat(abs); err != nil { //nolint:gosec // the Caddyfile the command was given, checked to be a file
 		return err
 	} else if !st.Mode().IsRegular() {
 		return fmt.Errorf("%s is not a file", abs)

@@ -40,7 +40,7 @@ services:
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
 
   lint:
-    image: golangci/golangci-lint:v2.13.2
+    image: golangci/golangci-lint:v2.14.0
     working_dir: /src
     environment:
       GOFLAGS: -buildvcs=false
