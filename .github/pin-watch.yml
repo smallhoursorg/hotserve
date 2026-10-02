@@ -35,42 +35,7 @@ watches: []
 # then the govulncheck key goes; the dismissal stays until its alert
 # is gone.
 
-alert_dismissals:
-  - ghsa: GHSA-gcjh-h69q-9w9g
-    reason: not_used
-    # GitHub caps dismissal comments at 280 chars; the full evidence
-    # lives here, versioned: the only cel-go consumer in this build is
-    # caddy's celmatcher, which registers ext.Strings/Bindings/Lists/
-    # Math — ext.NativeTypes (the vulnerable feature) appears nowhere
-    # in caddyserver/caddy — and CEL expressions are operator-written
-    # config, not request input. This GHSA is not in the Go vulndb, so
-    # govulncheck cannot vouch; triaged manually 2026-08-16. Cleared
-    # by caddy v2.11.6, which moved to cel.dev/cel-go v0.32 — the old
-    # module left every go.sum, so the alert should close on its own;
-    # delete this entry once it has.
-    comment: >-
-      Fixed transitively by caddy v2.11.6, which replaced the vulnerable
-      github.com/google/cel-go module with cel.dev/cel-go v0.32. Retaining
-      this dismissal only until GitHub closes the existing alert.
-  - ghsa: GHSA-w34q-cm8f-9c5x
-    reason: not_used
-    # otlploggrpc < 0.21 ignores the env TLS certs, bypassing mTLS and
-    # pinning. Unreachable: the otel log modules arrive only through
-    # caddy's contrib/exporters/autoexport, and caddy calls only
-    # autoexport.NewSpanExporter/NewMetricReader — never a log
-    # exporter. govulncheck still flags every module because the vulndb
-    # entry (published 2026-09-28) is unreviewed and names no symbols,
-    # so any import counts as a call. Not bumped alone: otel/log 0.21
-    # removed types the 0.19 set uses, and the set moves with
-    # autoexport (0.21 needs autoexport >= v0.70; caddy v2.11.4 pins
-    # v0.68) — PR #131, closed 2026-09-18. Cleared by caddy v2.11.6
-    # (autoexport v0.71, otlploggrpc v0.22): the govulncheck key went
-    # with that bump; delete this entry once the alert has closed.
-    comment: >-
-      Fixed transitively by caddy v2.11.6, which pulls autoexport v0.71
-      and otlploggrpc v0.22. Before that it was unreachable: caddy never
-      builds a log exporter. Retaining this dismissal only until GitHub
-      closes the existing alert.
+alert_dismissals: []
 
 # Code-scanning (CodeQL) triage as code, same contract as above: alerts
 # matching rule + file are auto-dismissed by the pin-watch workflow, so
