@@ -60,7 +60,7 @@ RUN mkdir /out \
 
 # The Deno example, built by its own scripts/bundle.sh with the same
 # Deno version e2e/Dockerfile installs on the box.
-FROM denoland/deno:2.9.6 AS deno-build
+FROM denoland/deno:2.9.7 AS deno-build
 WORKDIR /example
 COPY examples/deno/ ./
 # Same pin as the example's .deno-version (and e2e/Dockerfile), or fail.
