@@ -1017,12 +1017,16 @@ func TestAChecksGroupAndTimeAreOneReadingOfTheClock(t *testing.T) {
 	}
 }
 
-// Every restic unit runs in UTC, so that a snapshot and its record are
-// in one zone: forget sorts each into days by the zone it was stored in
-// [measured], and a Berlin box's 23:30 snapshot and its record, one at
-// +02:00 and the other at Z, fell into different days — --keep-daily
-// kept the snapshot and removed its record.
-func TestEveryResticUnitRunsInUTC(t *testing.T) {
+// What every restic unit of a run, a drill and a restore is given, and
+// is not. UTC, so that a snapshot and its record are in one zone: forget
+// sorts each into days by the zone it was stored in [measured], and a
+// Berlin box's 23:30 snapshot and its record, one at +02:00 and the
+// other at Z, fell into different days — --keep-daily kept the snapshot
+// and removed its record. And restic's own bound on a stuck request, as
+// it comes (TestIntegrationResticRetriesAStuckRequestByItself): an
+// upload, a fetch and the check have no backstop of ours because restic
+// has one (D4).
+func TestWhatEveryResticUnitIsGiven(t *testing.T) {
 	if s := resticUnit("hotserve_backup_x_000000000000.service", "", "/env", []string{"/usr/bin/restic"}, ""); !slices.Contains(s.Environment, "TZ=UTC") {
 		t.Errorf("resticUnit: %q", s.Environment)
 	}
@@ -1034,8 +1038,14 @@ func TestEveryResticUnitRunsInUTC(t *testing.T) {
 	_, err = Restore(context.Background(), b.cfg, b, inPlace())
 	must(t, err)
 	for _, s := range b.specs {
-		if len(s.Argv) > 0 && s.Argv[0] == b.cfg.Restic && !slices.Contains(s.Environment, "TZ=UTC") {
+		if len(s.Argv) == 0 || s.Argv[0] != b.cfg.Restic {
+			continue
+		}
+		if !slices.Contains(s.Environment, "TZ=UTC") {
 			t.Errorf("%s: %q", s.Name, s.Environment)
+		}
+		if slices.ContainsFunc(s.Argv, func(a string) bool { return strings.HasPrefix(a, "--stuck-request-timeout") }) {
+			t.Errorf("%s sets restic's own bound on a stuck request: %q", s.Name, s.Argv)
 		}
 	}
 }

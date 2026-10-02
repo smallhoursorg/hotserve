@@ -583,7 +583,7 @@ func pick(app string, snaps []listed, asked string) (record.Snapshot, error) {
 	case 1:
 		return found[0], nil
 	case 0:
-		return record.Snapshot{}, fmt.Errorf("%s is not a snapshot of %s: the repository holds %d of it, the newest %s", asked, app, len(snaps), short(snaps[len(snaps)-1].ID))
+		return record.Snapshot{}, fmt.Errorf("%s is not a snapshot of %s: the repository holds %d of it, the newest %s", asked, app, len(snaps), record.Short(snaps[len(snaps)-1].ID))
 	}
 	return record.Snapshot{}, fmt.Errorf("%s is the start of %d snapshots of %s; give more of it", asked, len(found), app)
 }
@@ -785,13 +785,19 @@ func (x *run) snapshotSize(ctx context.Context, app, id string) (uint64, error) 
 	}
 	if !o.OK() {
 		detail, wide := resticFailure(o)
-		err := fmt.Errorf("asking how large snapshot %s is: %s", short(id), detail)
+		err := fmt.Errorf("asking how large snapshot %s is: %s", record.Short(id), detail)
 		if wide {
 			return 0, repositoryWideError{err}
 		}
 		return 0, err
 	}
-	raw, err := os.ReadFile(out) //nolint:gosec // written by the manager into root's own run dir
+	return restoreSize(out, id)
+}
+
+// restoreSize reads what restic said of snapshot id's size once
+// restored: one snapshot, counted, and its size, or no answer.
+func restoreSize(file, id string) (uint64, error) {
+	raw, err := os.ReadFile(file) //nolint:gosec // written by the manager into root's own run dir
 	if err != nil {
 		return 0, err
 	}
@@ -800,7 +806,7 @@ func (x *run) snapshotSize(ctx context.Context, app, id string) (uint64, error) 
 		Snapshots int     `json:"snapshots_count"`
 	}
 	if err := json.Unmarshal(bytes.TrimSpace(raw), &said); err != nil || said.TotalSize == nil || said.Snapshots != 1 {
-		return 0, fmt.Errorf("restic did not say how large snapshot %s is (it counted %d snapshots), so whether a fetch of it fits is not known", short(id), said.Snapshots)
+		return 0, fmt.Errorf("restic did not say how large snapshot %s is (it counted %d snapshots), so whether a fetch of it fits is not known", record.Short(id), said.Snapshots)
 	}
 	return *said.TotalSize, nil
 }
@@ -896,7 +902,7 @@ func (x *run) fetch(ctx context.Context, app, id, fetched string) error {
 			// under the state dir — and the repository has just answered.
 			detail, wide = fmt.Sprintf("restic could not restore all of it (exit 1): %s may be out of room — a fetch needs as much there as the app's data takes — or the storage stopped answering", x.cfg.StateDir), false
 		}
-		err := fmt.Errorf("fetching snapshot %s: %s; `journalctl -u %s` has restic's own words", short(id), detail, x.name("fetch", app))
+		err := fmt.Errorf("fetching snapshot %s: %s; `journalctl -u %s` has restic's own words", record.Short(id), detail, x.name("fetch", app))
 		if wide {
 			return repositoryWideError{err}
 		}
@@ -936,14 +942,14 @@ func fetchedAll(file, id string) error {
 			continue
 		}
 		if m.FilesRestored == 0 {
-			return fmt.Errorf("restic exited 0 and restored nothing of snapshot %s", short(id))
+			return fmt.Errorf("restic exited 0 and restored nothing of snapshot %s", record.Short(id))
 		}
 		if m.FilesRestored != m.TotalFiles {
-			return fmt.Errorf("restic exited 0 having restored %d of the %d entries of snapshot %s", m.FilesRestored, m.TotalFiles, short(id))
+			return fmt.Errorf("restic exited 0 having restored %d of the %d entries of snapshot %s", m.FilesRestored, m.TotalFiles, record.Short(id))
 		}
 		return nil
 	}
-	return fmt.Errorf("restic exited 0 and its output holds no summary, so what it restored of snapshot %s is not known", short(id))
+	return fmt.Errorf("restic exited 0 and its output holds no summary, so what it restored of snapshot %s is not known", record.Short(id))
 }
 
 func (x *run) handover(ctx context.Context, app, fetched string) error {

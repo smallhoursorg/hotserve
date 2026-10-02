@@ -307,11 +307,15 @@ func uri(abs string) string {
 func withQuery(abs, query string) string { return strings.TrimSuffix(uri(abs), "mode=rw") + query }
 
 // pathLimit is the longest path sqlite3 is given. Its unix VFS holds a
-// path in 512 bytes, and a longer one is not refused: ATTACH of it, even
-// as mode=rw, opens an empty temporary database in its place, which
-// integrity_check calls ok [measured at 513 bytes] — a dump of nothing,
-// or a restore of nothing over what is there. So the length is checked
-// here, where the path is made, and never trusted to sqlite3.
+// path in 512 bytes, with room for "-journal" beside it, and a longer
+// one is not opened as itself: sqlite3 3.46.1 refuses it, exit 14 from
+// 505 bytes [measured]; where ATTACH of one opens an empty temporary
+// database in its place instead [measured once, at 513 bytes, and not
+// since], integrity_check calls that ok — a dump of nothing, or a
+// restore of nothing over what is there. So the length is checked here,
+// where the path is made, and never trusted to sqlite3;
+// TestIntegrationADatabaseAtThePathLimitIsDumpedAsItself holds it below
+// sqlite3's own.
 const pathLimit = 480
 
 // ErrPathTooLong is the error for a path sqlite3 would not open as itself.

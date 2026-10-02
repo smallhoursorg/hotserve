@@ -449,3 +449,33 @@ func TestIntegrationRestoreOverALockedDatabaseIsBusy(t *testing.T) {
 		})
 	}
 }
+
+// A path longer than pathLimit is refused before sqlite3 sees it,
+// because past its unix VFS's own limit sqlite3 does not open the file
+// as itself [M83]. Every path up to pathLimit, then, has to be opened as
+// itself: a database at exactly that length is copied whole. A later
+// SQLite whose limit fell below pathLimit fails this.
+func TestIntegrationADatabaseAtThePathLimitIsDumpedAsItself(t *testing.T) {
+	shared, staging := dirs(t)
+	at := pathLimit
+	rel := ""
+	for len(shared)+1+len(rel)+len("dddddddd/")+len("n.db") < at {
+		rel += "dddddddd/"
+	}
+	rel += strings.Repeat("n", at-len(shared)-1-len(rel)-len(".db")) + ".db"
+	db := filepath.Join(shared, rel)
+	if len(db) != at || len(filepath.Join(staging, rel)) != at {
+		t.Fatalf("fixture: %d bytes, want %d", len(db), at)
+	}
+	// Made where sqlite3 opens it by name, then moved into place.
+	made := filepath.Join(t.TempDir(), "app.db")
+	sql(t, made, "create table t(x); insert into t values (1),(2);")
+	must(t, os.MkdirAll(filepath.Dir(db), 0o755))
+	must(t, os.Rename(made, db))
+	if res := single(t, shared, staging, rel); res.Class != OK {
+		t.Fatalf("a database at %d bytes: %+v", at, res)
+	}
+	if got := strings.TrimSpace(sql(t, filepath.Join(staging, rel), "select count(*) from t")); got != "2" {
+		t.Fatalf("the copy of a database at %d bytes holds %s rows, not its 2: it was not opened as itself", at, got)
+	}
+}

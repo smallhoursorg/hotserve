@@ -25,8 +25,6 @@ const (
 	CheckOldAfter = ProvenOldAfter
 )
 
-const timeFormat = "2006-01-02 15:04 MST"
-
 // Running is one unit of a run, a restore or a drill that the manager
 // holds right now.
 type Running struct {
@@ -65,11 +63,7 @@ func Report(in Input) (lines []string, healthy bool) {
 	healthy = true
 	say := func(format string, a ...any) { lines = append(lines, fmt.Sprintf(format, a...)) }
 	bad := func(format string, a ...any) { healthy = false; say(format, a...) }
-	when := func(t time.Time) string { return t.UTC().Format(timeFormat) }
-
-	// short is a snapshot's id as it is printed. The record is root's,
-	// and still nothing of it reaches a terminal unlooked at.
-	short := func(id string) string { return fmt.Sprintf("%.8s", record.Text(id)) }
+	when, short := record.When, record.Short
 
 	// The run itself is aged, not only each backup: a record whose apps
 	// are all pending, or that has none, would otherwise read "nothing

@@ -93,6 +93,11 @@ var (
 		}
 		return passwd{}, fmt.Errorf("%s passwd %s: exit status %d", getent, name, exit)
 	}
+	// makeAccount runs useradd to its end, with no context and no clock:
+	// it commits passwd, shadow, group and gshadow one rename at a time
+	// [measured], and stopped part way leaves the account without its
+	// group. Ctrl-C at the terminal reaches it as it reaches setup, the
+	// two sharing a process group; and setup is attended (D4).
 	makeAccount = func() error {
 		if out, err := exec.Command(useradd[0], useradd[1:]...).CombinedOutput(); err != nil {
 			return fmt.Errorf("%s: %w: %s", useraddArgv(), err, record.Text(string(out)))
@@ -692,7 +697,7 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 		case prevID == "":
 			why = "no setup recorded which repository it was written against"
 		case prevID != rep.RepositoryID:
-			why = fmt.Sprintf("it was written against another repository (id %s)", short(prevID))
+			why = fmt.Sprintf("it was written against another repository (id %s)", record.Short(prevID))
 		}
 	}
 	// On the disk before the file is — the two live in different
@@ -755,7 +760,7 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 	if rep.New {
 		kind = "new"
 	}
-	term.Say(fmt.Sprintf("repository ready: %s (%s, id %s)", o.Repository, kind, short(rep.RepositoryID)))
+	term.Say(fmt.Sprintf("repository ready: %s (%s, id %s)", o.Repository, kind, record.Short(rep.RepositoryID)))
 	if s.password != "" && !rep.New {
 		term.Say("the password shown above was never used: discard it")
 	}

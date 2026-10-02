@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -24,14 +25,44 @@ import (
 // that outlives within, fails the test.
 func resticIn(t *testing.T, base string, within time.Duration, argv ...string) (stdout, stderr string, exit int) {
 	t.Helper()
+	return resticAs(t, base, nil, within, argv...)
+}
+
+// resticOK is resticIn of a command that has to succeed, within a
+// minute: its stdout and stderr, or the test fails.
+func resticOK(t *testing.T, base string, argv ...string) (stdout, stderr string) {
+	t.Helper()
+	stdout, stderr, exit := resticIn(t, base, time.Minute, argv...)
+	if exit != 0 {
+		t.Fatalf("restic %q: exit %d: %s", argv[1:], exit, stderr)
+	}
+	return stdout, stderr
+}
+
+// resticEnv is the environment resticIn gives restic.
+func resticEnv(base string) []string {
+	return append(os.Environ(), "RESTIC_PASSWORD=pw", "RESTIC_REPOSITORY="+filepath.Join(base, "repo"), "RESTIC_CACHE_DIR="+filepath.Join(base, "cache"))
+}
+
+// resticAs is resticIn run as who — as root where who is nil — with a
+// cache of who's own.
+func resticAs(t *testing.T, base string, who *syscall.Credential, within time.Duration, argv ...string) (stdout, stderr string, exit int) {
+	t.Helper()
 	if _, err := os.Stat(argv[0]); err != nil {
 		t.Fatalf("%s is not installed in the integration image: %v", argv[0], err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), within)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-	cmd.Env = append(os.Environ(), "RESTIC_PASSWORD=pw", "RESTIC_REPOSITORY="+filepath.Join(base, "repo"), "RESTIC_CACHE_DIR="+filepath.Join(base, "cache"))
+	cmd.Env = resticEnv(base)
 	cmd.Dir = base
+	if who != nil {
+		cache := filepath.Join(base, fmt.Sprintf("cache-%d", who.Uid))
+		must(t, os.MkdirAll(cache, 0o700))
+		must(t, os.Chown(cache, int(who.Uid), int(who.Gid)))
+		cmd.Env = append(cmd.Env, "RESTIC_CACHE_DIR="+cache)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: who}
+	}
 	var out, errOut strings.Builder
 	cmd.Stdout, cmd.Stderr = &out, &errOut
 	err := cmd.Run()

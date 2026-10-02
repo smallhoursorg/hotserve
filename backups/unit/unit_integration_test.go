@@ -5,12 +5,15 @@ package unit
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/smallhoursorg/hotserve/backups/envfile"
 )
@@ -714,5 +717,82 @@ func TestIntegrationSeesAMountOfTheManagersNamespace(t *testing.T) {
 	}
 	if seen, err := r.Sees(context.Background(), other); err != nil || seen {
 		t.Fatalf("a mount made in a mount namespace of its own: seen=%v, err=%v", seen, err)
+	}
+}
+
+// probeEnv, set, makes this test binary a probe a unit runs (TestMain).
+const probeEnv = "HOTSERVE_BACKUP_UNIT_PROBE"
+
+func TestMain(m *testing.M) {
+	if os.Getenv(probeEnv) == "open_by_handle_at" {
+		capEff := ""
+		status, _ := os.ReadFile("/proc/self/status")
+		for _, line := range strings.Split(string(status), "\n") {
+			if v, ok := strings.CutPrefix(line, "CapEff:"); ok {
+				capEff = strings.TrimSpace(v)
+			}
+		}
+		var errno unix.Errno
+		errors.As(openByHandleAt(), &errno)
+		fmt.Println(capEff, int(errno))
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+// openByHandleAt asks for a file by a handle that names none: who
+// answers is what is asked.
+func openByHandleAt() error {
+	root, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(root) //nolint:errcheck // read-only
+	fd, err := unix.OpenByHandleAt(root, unix.NewFileHandle(1, make([]byte, 8)), unix.O_RDONLY)
+	if err == nil {
+		_ = unix.Close(fd)
+	}
+	return err
+}
+
+// A unit that holds CAP_DAC_READ_SEARCH is denied open_by_handle_at,
+// through which that capability reads any file of a filesystem by its
+// handle, whatever the view [M34]. That the property is sent is
+// TestOpenByHandleAtIsDeniedExactlyWhereTheCapabilityIsHeld; this is the
+// manager's filter answering it. A handle that names nothing tells the
+// two apart: to a caller that holds the capability the kernel says
+// ESTALE, and the filter says EPERM.
+func TestIntegrationTheFilterDeniesOpenByHandleAtWhereTheCapabilityIsHeld(t *testing.T) {
+	r := runner(t)
+	if err := openByHandleAt(); !errors.Is(err, unix.ESTALE) {
+		t.Fatalf("fixture: the kernel answered this process %v, not ESTALE, so its answer cannot be told from the filter's", err)
+	}
+	self, err := os.Executable()
+	must(t, err)
+	raw, err := os.ReadFile(self)
+	must(t, err)
+	// Where the unit's view holds it.
+	probe := "/usr/local/bin/hotserve-backup-unit-probe"
+	must(t, os.WriteFile(probe, raw, 0o755))
+	t.Cleanup(func() { _ = os.Remove(probe) })
+	stdout := outFile(t)
+	out, err := r.Run(context.Background(), Spec{
+		Name: name(t), Argv: []string{probe}, User: testUser, Capabilities: []Capability{CapDACReadSearch},
+		Environment: []string{probeEnv + "=open_by_handle_at"}, StdoutFile: stdout,
+	})
+	if err != nil || !out.OK() {
+		t.Fatalf("%+v, %v", out, err)
+	}
+	said, _ := os.ReadFile(stdout)
+	var capEff uint64
+	var errno int
+	if _, err := fmt.Sscanf(string(said), "%x %d", &capEff, &errno); err != nil {
+		t.Fatalf("the probe said %q: %v", said, err)
+	}
+	if capEff&(1<<unix.CAP_DAC_READ_SEARCH) == 0 {
+		t.Fatalf("the unit does not hold CAP_DAC_READ_SEARCH (CapEff %x): the test proves nothing", capEff)
+	}
+	if unix.Errno(errno) != unix.EPERM {
+		t.Errorf("open_by_handle_at in a unit that holds CAP_DAC_READ_SEARCH: %v, want EPERM, the filter's", unix.Errno(errno))
 	}
 }

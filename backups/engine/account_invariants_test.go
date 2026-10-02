@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -18,7 +19,7 @@ import (
 // it is asked.
 
 // The lookups as they are, kept from before any box stands in for them.
-var realAccount, realLookup, realDataOwner, realOwnerOf = account, lookup, dataOwner, ownerOf
+var realAccount, realLookup, realDataOwner, realOwnerOf, realMakeAccount = account, lookup, dataOwner, ownerOf, makeAccount
 
 // said is what a program of the account databases answers.
 type said struct {
@@ -118,6 +119,27 @@ func TestALookupIsBoundedAndEndsWithItsCommand(t *testing.T) {
 	}
 	if _, _, err := realLookup(context.Background(), time.Minute, "/nonexistent/getent", "passwd"); err == nil {
 		t.Fatal("a program that is not there answered")
+	}
+}
+
+// Making the account runs to its end, whatever becomes of setup's
+// command meanwhile: useradd commits passwd, shadow, group and gshadow
+// one rename at a time [measured], and stopped part way it leaves the
+// account without its group. Ctrl-C at the terminal reaches it as it
+// reaches setup, the two sharing a process group; setup's own context —
+// a SIGTERM to setup alone — does not.
+func TestMakingTheAccountRunsToItsEnd(t *testing.T) {
+	b, m := setupBox(t)
+	b.account = false
+	made := filepath.Join(t.TempDir(), "made")
+	oldUseradd, oldMake := useradd, makeAccount
+	useradd, makeAccount = []string{"/bin/sh", "-c", "sleep 1; touch " + made}, realMakeAccount
+	t.Cleanup(func() { useradd, makeAccount = oldUseradd, oldMake })
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(100*time.Millisecond, cancel)
+	_, _ = Setup(ctx, b.cfg, b, SetupOptions{Repository: "s3:http://e2e-s3:9000/box", Terminal: m})
+	if _, err := os.Stat(made); err != nil {
+		t.Fatalf("setup's context, ended, stopped useradd part way: %v", err)
 	}
 }
 

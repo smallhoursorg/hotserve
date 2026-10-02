@@ -44,3 +44,29 @@ func TestReadRefusesWhatIsNotARecord(t *testing.T) {
 		t.Fatal("garbage read as a record")
 	}
 }
+
+// Every command prints a snapshot by its first eight characters, and a
+// time to the minute in UTC — the zone the record and every restic unit
+// keep — whatever zone the time was read in: one form, so that status,
+// a run and a restore name the same snapshot and the same minute alike.
+func TestASnapshotAndATimeArePrintedOneWay(t *testing.T) {
+	for id, want := range map[string]string{
+		"5f422bce75a41b7f86515ed9050c3d535df6b5728b7815f6c146eb774197d91f": "5f422bce",
+		"5f42":                      "5f42",
+		"\x1b[2J5f422bce75a41b7f86": "[2J5f422",
+	} {
+		if got := Short(id); got != want {
+			t.Errorf("Short(%q) = %q, want %q", id, got, want)
+		}
+	}
+	// As JSON gives back a time written at +02:00: a zone with no name.
+	berlin := time.FixedZone("", 2*60*60)
+	for _, at := range []time.Time{
+		time.Date(2026, 10, 1, 12, 34, 56, 0, time.UTC),
+		time.Date(2026, 10, 1, 14, 34, 56, 0, berlin),
+	} {
+		if got := When(at); got != "2026-10-01 12:34 UTC" {
+			t.Errorf("When(%s) = %q, want 2026-10-01 12:34 UTC", at, got)
+		}
+	}
+}

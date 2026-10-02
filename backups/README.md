@@ -1190,6 +1190,13 @@ id left behind would tie a later record to the wrong repository.
   file, held against what `envfile` reads; what `restic init` and
   `cat config` say of a repository that exists, and with a wrong
   password.
+- and every other behaviour of restic, sqlite3, systemd and Caddy that
+  the code leans on, each a test of its own whose comment names what
+  rests on it: restic's exit statuses (3 with the snapshot still named,
+  11 for a lock held through `--retry-lock`), its JSON, its default for
+  a stuck request, a restore as a user who cannot give files their
+  owners, the exclude file's escaping; sqlite3 at the path limit; the
+  filter on `open_by_handle_at`; Caddy's `{$NAME}`.
 - `make e2e-backup` — a box with systemd, restic and sqlite3, and an S3
   server (`rclone serve s3`): the setup suite (at a real terminal,
   `script(1)`'s), the backup suite, the units suite (the shipped unit
@@ -1206,3 +1213,71 @@ id left behind would tie a later record to the wrong repository.
   installed under real systemd on a fresh Debian 13: the README's "On
   a fresh box" lines as an administrator, and the package's transitions
   table with its edges.
+
+### On a new Debian release
+
+restic, sqlite3 and systemd are Debian's, so a new release is new
+programs under the same code.
+
+1. Name the release where the backup lanes' images are:
+   `test/systemd/Dockerfile` (`golang:<version>-<codename>`),
+   `e2e/backup/Dockerfile` (`debian:<codename>-slim`), and the package
+   lanes' `DISTRO` — the `Makefile`, `ci.yml`'s install-test matrix,
+   `packaging/test/Dockerfile`.
+2. `make test-integration`, `make e2e-backup`, `make package
+   install-test`. A behaviour that changed fails the test that holds
+   it, by name: the integration lane runs every test afresh
+   (`-count=1`), since Go's test cache does not know that a program
+   under a test has changed.
+3. What no lane can hold — it takes a large repository, or a quarter
+   of an hour — is measured by hand, against the suites' S3 server:
+   - the reads at scale, from a cold cache over a slow link. The
+     30-minute backstop on a listing (`listClock`) is seventy times the
+     slowest measured with restic 0.18 on 28.5 GB and 1,506 snapshots,
+     25 ms each way and 50 Mbit/s: `snapshots` 19.6 s, `ls` of a
+     200-entry directory 24.6 s, `stats` of a 200,000-file snapshot
+     6.4 s. The check of one fifty-second has no backstop: 155–217 s.
+   - that a wrong storage key ends by itself: restic 0.18 gives up after
+     a quarter of an hour (864 s and 900 s measured), exit 1.
+     `listClock` is twice that, and an upload, a fetch and the check,
+     which have no backstop, end by it.
+
+```sh
+docker build -t hsb-s3 -f e2e/backup/s3.Dockerfile .
+docker compose up --build -d dev-systemd
+# On a disk volume: the server's own tmpfs is too small. In the
+# client's network, so that one qdisc on lo is the link both ways.
+docker run -d --name hsb-scale-s3 --network container:$(docker compose ps -q dev-systemd) \
+	-v hsb-scale:/data hsb-s3 --auth-key AKIDE2EFIXTURE,e2e-fixture-key-not-a-secret
+docker compose exec dev-systemd bash
+```
+
+```sh
+export RESTIC_REPOSITORY=s3:http://127.0.0.1:9000/scale RESTIC_PASSWORD=pw \
+	AWS_ACCESS_KEY_ID=AKIDE2EFIXTURE AWS_SECRET_ACCESS_KEY=e2e-fixture-key-not-a-secret \
+	RESTIC_CACHE_DIR=/var/tmp/scale-cache
+restic init
+# As measured: five 5 GiB streams, 200 directories of 1,000 files, and
+# 500 runs of three small apps.
+for i in 1 2 3 4 5; do head -c 5G /dev/urandom | restic backup -q --stdin --stdin-filename stream-$i; done
+for d in $(seq 200); do mkdir -p /var/tmp/tree/$d; for f in $(seq 1000); do echo "$d/$f" >/var/tmp/tree/$d/$f; done; done
+restic backup -q --host hotserve --tag app:tree /var/tmp/tree
+for n in $(seq 500); do for a in a b c; do head -c 64k /dev/urandom | restic backup -q --host hotserve --tag app:$a --stdin --stdin-filename $a.db; done; done
+id=$(restic snapshots --json --no-lock --tag app:tree | grep -o '"id":"[0-9a-f]*"' | head -1 | cut -d'"' -f4)
+apt-get update && apt-get install -y iproute2
+tc qdisc add dev lo root netem delay 25ms rate 50mbit
+# Each read from an empty cache, as each was measured.
+for r in "snapshots --no-lock --json" "ls --no-lock --json $id /var/tmp/tree" \
+	"stats --no-lock --quiet --json --mode restore-size $id" "check --no-lock --read-data-subset=1/52"; do
+	rm -rf "$RESTIC_CACHE_DIR"
+	echo "restic $r"; time restic $r >/dev/null
+done
+tc qdisc del dev lo root
+time AWS_SECRET_ACCESS_KEY=wrong restic cat config --no-lock
+exit
+```
+
+```sh
+docker rm -f hsb-scale-s3 && docker volume rm hsb-scale
+docker compose rm -sf dev-systemd
+```
