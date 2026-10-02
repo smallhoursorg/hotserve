@@ -531,6 +531,7 @@ func statusFromProps(props map[string]any) unitStatus {
 		SubState:       propString(props, "SubState"),
 		Result:         propString(props, "Result"),
 		MainPID:        propInt(props, "MainPID"),
+		ExecMainPID:    propInt(props, "ExecMainPID"),
 		ExecStart:      propExecStart(props),
 		Sandboxed:      propYes(props, "PrivateUsers") && propYes(props, "PrivatePIDs"),
 		ExecMainCode:   propInt(props, "ExecMainCode"),

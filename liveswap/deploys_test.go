@@ -22,7 +22,7 @@ func TestDeployRecordsAreWrittenAndListed(t *testing.T) {
 	rig := newTestRig(t)
 	rig.spec.envFile = filepath.Join(t.TempDir(), "app.env")
 	must(t, os.WriteFile(rig.spec.envFile, []byte("SECRET=hunter2hunter2hunter2\n"), 0o600))
-	rig.runner.runOnceErr = runOnceExit("exit status 3", "u", "failed")
+	rig.runner.runOnceErr = runOnceExit("exit status 3", "u", "failed", 0)
 	rig.spec.preStart = []string{"./migrate"}
 	rig.spec.deployLogLines = 40
 	rig.ma.journal = &fakeJournal{lines: []string{"migrate: SECRET=hunter2hunter2hunter2 refused"}}
@@ -535,7 +535,7 @@ func TestDeployRecordOutcomeSurvivesAVocabularySecret(t *testing.T) {
 		t.Fatalf("status rewritten on disk: %s", rec)
 	}
 	rig.spec.preStart = []string{"./migrate"}
-	rig.runner.runOnceErr = runOnceExit("exit status 1", "u", "failed")
+	rig.runner.runOnceErr = runOnceExit("exit status 1", "u", "failed", 0)
 	if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://example.test/v2.tgz", version: "v2", by: "test"}); err == nil {
 		t.Fatal("v2 should have failed")
 	}

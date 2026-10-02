@@ -15,14 +15,14 @@ type fakeJournal struct {
 	lines []string
 	err   error
 	calls int
-	units []string
+	of    tailOf
 	since time.Time
 	n     int
 }
 
-func (j *fakeJournal) tail(_ context.Context, units []string, since time.Time, n int) ([]string, error) {
+func (j *fakeJournal) tail(_ context.Context, of tailOf, since time.Time, n int) ([]string, error) {
 	j.calls++
-	j.units, j.since, j.n = units, since, n
+	j.of, j.since, j.n = of, since, n
 	return j.lines, j.err
 }
 
@@ -38,7 +38,7 @@ func TestFailureDetailPreStartExit(t *testing.T) {
 	rig := newTestRig(t)
 	rig.spec.preStart = []string{"./migrate"}
 	rig.spec.deployLogLines = 40
-	rig.runner.runOnceErr = runOnceExit("exit status 3", "hotserve-demo.v1.x.prestart.service", "failed")
+	rig.runner.runOnceErr = runOnceExit("exit status 3", "hotserve-demo.v1.x.prestart.service", "failed", 731)
 	j := &fakeJournal{lines: []string{"migrate: schema v1 -> v2", "migrate: cannot open app.db"}}
 	rig.ma.journal = j
 
@@ -56,11 +56,17 @@ func TestFailureDetailPreStartExit(t *testing.T) {
 		t.Fatalf("log tail = %v (truncated %v)", ld.Detail.LogTail, ld.Detail.LogTailTruncated)
 	}
 	// Asked twice: once, and once more to see the count stop growing.
-	if j.calls != 2 || j.n != 40 || len(j.units) != 2 || !strings.HasSuffix(j.units[0], ".prestart.service") || !strings.HasSuffix(j.units[1], ".service") {
-		t.Fatalf("journal asked %d times for %d lines of %v", j.calls, j.n, j.units)
+	if j.calls != 2 || j.n != 40 || len(j.of.units) != 2 || !strings.HasSuffix(j.of.units[0], ".prestart.service") || !strings.HasSuffix(j.of.units[1], ".service") {
+		t.Fatalf("journal asked %d times for %d lines of %v", j.calls, j.n, j.of.units)
 	}
 	if !j.since.Equal(ld.StartedAt) {
 		t.Fatalf("journal since %v, deploy started %v", j.since, ld.StartedAt)
+	}
+	// And by the pre_start's main process, the pid the manager recorded,
+	// under the app's identifier: journald keeps no unit on a line it
+	// reads after its writer has gone.
+	if len(j.of.pids) != 1 || j.of.pids[0] != 731 || j.of.ident != "hotserve-demo" {
+		t.Fatalf("journal asked by pids %v under %q, want [731] under hotserve-demo", j.of.pids, j.of.ident)
 	}
 	var names []string
 	for _, p := range ld.Phases {
@@ -78,7 +84,8 @@ func TestFailureDetailAppDiesOnStart(t *testing.T) {
 	rig.spec.deployLogLines = 40
 	rig.runner.startDies = "killed by signal 9 (killed)"
 	rig.prober.err = &healthGateError{err: errProcessExited, probe: &probeError{status: 500, body: "booting"}}
-	rig.ma.journal = &fakeJournal{lines: []string{"fatal: SOCKET not set"}}
+	j := &fakeJournal{lines: []string{"fatal: SOCKET not set"}}
+	rig.ma.journal = j
 
 	if err := deployOnceV1(t, rig); err == nil {
 		t.Fatal("deploy should have failed the health gate")
@@ -91,6 +98,10 @@ func TestFailureDetailAppDiesOnStart(t *testing.T) {
 	}
 	if len(ld.Detail.LogTail) != 1 || ld.Detail.LogTail[0] != "fatal: SOCKET not set" {
 		t.Fatalf("log tail = %v", ld.Detail.LogTail)
+	}
+	// The journal is asked by the pid the app's main process had.
+	if len(j.of.pids) != 1 || j.of.pids[0] != 4242 {
+		t.Fatalf("journal asked by pids %v, want the app's [4242]", j.of.pids)
 	}
 }
 
@@ -118,7 +129,7 @@ func TestFailureDetailCaps(t *testing.T) {
 	rig := newTestRig(t)
 	rig.spec.deployLogLines = 2
 	rig.spec.preStart = []string{"./migrate"}
-	rig.runner.runOnceErr = runOnceExit("exit status 1", "u", "failed")
+	rig.runner.runOnceErr = runOnceExit("exit status 1", "u", "failed", 0)
 	rig.ma.journal = &fakeJournal{lines: []string{"one", "two", "three"}} // journalctl asked for 3, returned 3
 	if err := deployOnceV1(t, rig); err == nil {
 		t.Fatal("deploy should have failed")
@@ -160,7 +171,7 @@ func TestFailureDetailSwitches(t *testing.T) {
 	rig := newTestRig(t)
 	rig.spec.deployLogLines = 0
 	rig.spec.preStart = []string{"./migrate"}
-	rig.runner.runOnceErr = runOnceExit("exit status 1", "u", "failed")
+	rig.runner.runOnceErr = runOnceExit("exit status 1", "u", "failed", 0)
 	j := &fakeJournal{lines: []string{"never read"}}
 	rig.ma.journal = j
 	if err := deployOnceV1(t, rig); err == nil {
@@ -173,7 +184,7 @@ func TestFailureDetailSwitches(t *testing.T) {
 	rig = newTestRig(t)
 	rig.spec.deployLogLines = 40
 	rig.spec.preStart = []string{"./migrate"}
-	rig.runner.runOnceErr = runOnceExit("exit status 1", "u", "failed")
+	rig.runner.runOnceErr = runOnceExit("exit status 1", "u", "failed", 0)
 	rig.ma.journal = &fakeJournal{err: errors.New("journalctl: not found")}
 	if err := deployOnceV1(t, rig); err == nil {
 		t.Fatal("deploy should have failed")
@@ -194,6 +205,51 @@ func TestFailureDetailSwitches(t *testing.T) {
 	}
 	if len(ld.Phases) == 0 || ld.Phases[len(ld.Phases)-1].Name != "promoting" && ld.Phases[len(ld.Phases)-1].Name != "stopping_old" {
 		t.Fatalf("phases = %+v", ld.Phases)
+	}
+}
+
+// The tail's two runs, argument by argument: the streams are learnt
+// from the lines that name the launch — by a unit, or by a main
+// process's pid under the app's identifier — and the tail is the units'
+// lines and every line of those streams.
+func TestJournalArgs(t *testing.T) {
+	since := time.Unix(1790000000, 0)
+	window := "--user --no-pager --quiet -n 41 --since @1789999999"
+	units := "_SYSTEMD_USER_UNIT=a.prestart.service _SYSTEMD_USER_UNIT=a.service"
+	of := tailOf{units: []string{"a.prestart.service", "a.service"}, pids: []int{0, 731}, ident: "hotserve-demo"}
+	for _, c := range []struct {
+		name      string
+		got, want []string
+	}{
+		{"streams, by unit or by pid", streamArgs(of, since, 40), strings.Fields(window + " -o json --output-fields=_STREAM_ID " + units + " + _PID=731 SYSLOG_IDENTIFIER=hotserve-demo")},
+		{"streams, no pid recorded", streamArgs(tailOf{units: of.units, pids: []int{0}, ident: of.ident}, since, 40), strings.Fields(window + " -o json --output-fields=_STREAM_ID " + units)},
+		{"streams, no identifier to go with the pid", streamArgs(tailOf{units: of.units, pids: []int{731}}, since, 40), strings.Fields(window + " -o json --output-fields=_STREAM_ID " + units)},
+		{"tail, the units or their streams", tailArgs(of.units, []string{"0123456789abcdef0123456789abcdef", "fedcba9876543210fedcba9876543210"}, since, 40), strings.Fields(window + " -o cat " + units + " + _STREAM_ID=0123456789abcdef0123456789abcdef _STREAM_ID=fedcba9876543210fedcba9876543210")},
+		{"tail, no stream learnt", tailArgs(of.units, nil, since, 40), strings.Fields(window + " -o cat " + units)},
+	} {
+		if strings.Join(c.got, " ") != strings.Join(c.want, " ") {
+			t.Errorf("%s:\n got %q\nwant %q", c.name, c.got, c.want)
+		}
+	}
+}
+
+// The stream ids are read off journalctl's JSON, each once, in the
+// order met; what is not one, as journald prints one, is passed over.
+func TestStreamIDs(t *testing.T) {
+	a, b := "0123456789abcdef0123456789abcdef", "fedcba9876543210fedcba9876543210"
+	out := strings.Join([]string{
+		`ID":"` + a + `"}`, // the first entry, its start cut by the byte bound
+		`{"__CURSOR":"s=1","_STREAM_ID":"` + a + `"}`,
+		`{"__CURSOR":"s=2"}`, // a line sent to the journal directly: no stream
+		`{"_STREAM_ID":"` + b + `"}`,
+		`{"_STREAM_ID":"` + a + `"}`, // met again
+		`{"_STREAM_ID":"0123456789ABCDEF0123456789ABCDEF"}`,
+		`{"_STREAM_ID":"x _PID=1"}`,
+		`{"_STREAM_ID":[1,2]}`, // a field given twice
+		"",
+	}, "\n")
+	if got := strings.Join(streamIDs([]byte(out)), ","); got != a+","+b {
+		t.Fatalf("stream ids = %q, want %q", got, a+","+b)
 	}
 }
 

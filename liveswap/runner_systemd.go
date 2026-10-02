@@ -125,6 +125,10 @@ type unitStatus struct {
 	SubState    string
 	Result      string // service Result= once it has stopped
 	MainPID     int
+	// ExecMainPID is the main process's pid as the manager recorded it,
+	// kept after the process has ended (MainPID is 0 by then) until the
+	// unit is reset: the pid its journal lines carry.
+	ExecMainPID int
 	// ExecStart is the argv the manager runs, read back rather than
 	// remembered — which is also what makes it right after a Reattach.
 	ExecStart []string
@@ -449,7 +453,7 @@ func (r *systemdRunner) unitFor(spec startSpec, oneshot bool) (unitSpec, error) 
 	return unitSpec{
 		Name:             name,
 		Description:      desc,
-		SyslogIdentifier: "hotserve-" + spec.app,
+		SyslogIdentifier: syslogIdentifier(spec.app),
 		WorkingDirectory: spec.dir,
 		ExecStart:        append([]string{argv0}, spec.command[1:]...),
 		Environment:      env,
@@ -459,6 +463,11 @@ func (r *systemdRunner) unitFor(spec startSpec, oneshot bool) (unitSpec, error) 
 		Socket:           spec.socket,
 	}, nil
 }
+
+// syslogIdentifier is what every unit of an app writes its output
+// under, the pre_start's and every instance's alike: what `journalctl
+// -t hotserve-<app>` finds it by.
+func syslogIdentifier(app string) string { return "hotserve-" + app }
 
 // Start creates the unit; the start job of a simple service completes
 // once the manager has forked it, so this returns promptly. A unit
@@ -479,7 +488,7 @@ func (r *systemdRunner) Start(spec startSpec) (handle, error) {
 	}
 	if res != "done" {
 		st := r.reapFailed(ctx, u.Name)
-		return nil, startExit(st.exitString(), u.Name, res)
+		return nil, startExit(st.exitString(), u.Name, res, st.ExecMainPID)
 	}
 	return r.adopt(ctx, u.Name, time.Now(), u.StopTimeout), nil
 }
@@ -628,21 +637,27 @@ func (r *systemdRunner) RunOnce(ctx context.Context, spec startSpec) error {
 	reapCtx, cancel := context.WithTimeout(r.ctx, stopSlack)
 	defer cancel()
 	st := r.reapFailed(reapCtx, u.Name)
-	return runOnceExit(st.exitString(), u.Name, res)
+	return runOnceExit(st.exitString(), u.Name, res, st.ExecMainPID)
 }
 
 // Exit is the recorded end of the instance's main process, once the
 // watcher has seen it (finish); "" before that.
-func (r *systemdRunner) Exit(h handle) string {
+func (r *systemdRunner) Exit(h handle) (string, int) {
 	sh, ok := h.(*systemdHandle)
 	if !ok {
-		return ""
+		return "", 0
 	}
 	st := sh.exit.Load()
 	if st == nil {
-		return ""
+		return "", 0
 	}
-	return st.exitAfterEnd()
+	// The pid as the manager recorded it; from a unit unloaded before
+	// that could be read, the one the handle followed.
+	pid := st.ExecMainPID
+	if pid == 0 {
+		pid = int(sh.pid.Load())
+	}
+	return st.exitAfterEnd(), pid
 }
 
 // exitAfterEnd is exitString for a unit the watcher saw end. A clean

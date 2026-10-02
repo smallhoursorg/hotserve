@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -357,43 +358,91 @@ func TestIntegrationSystemdRunOnce(t *testing.T) {
 
 // A failed pre_start reports its exit through exitError, and the
 // journal tail reads back what the unit wrote, stdout and stderr, in
-// order, under the real user manager.
+// order, under the real user manager — a child's line too. journald
+// names a line's unit from its writer's /proc entry when it reads the
+// line, and a shell reaps its child at once: a child that prints one
+// line and exits leaves it with no unit field [measured: 20 of 20, the
+// journal idle], and only the unit's stream holds it.
 func TestIntegrationSystemdJournalTail(t *testing.T) {
 	r := integrationRunner(t)
-	spec := scriptApp(t, "echo first line\necho second line >&2\nexit 2\n")
+	spec := scriptApp(t, "echo first line\necho second line >&2\nsh -c 'echo from a child'\nexit 2\n")
 	since := time.Now()
 	err := r.RunOnce(context.Background(), spec)
 	var ee *exitError
 	if err == nil || !errors.As(err, &ee) || ee.exit != "exit status 2" {
 		t.Fatalf("RunOnce: %v (want an exitError with exit status 2)", err)
 	}
+	of := journalTailOf(t, spec, ee)
+	if got := strings.Join(waitTail(t, of, since, 3), "|"); got != "first line|second line|from a child" {
+		t.Fatalf("tail = %q", got)
+	}
+	// Nothing since a moment after the exit: the window is honoured.
+	if lines, err := (journalctlReader{}).tail(context.Background(), of, time.Now().Add(5*time.Second), 40); err != nil || len(lines) != 0 {
+		t.Fatalf("tail since the future: %v, %v", lines, err)
+	}
+}
+
+// journald behind: the unit's lines reach it only after the unit has
+// ended and its processes are reaped, so it stores every one of them
+// with no unit field — the lane's flake, which journald stopped for
+// the unit's life reproduces every time. The tail finds them all the
+// same: by the pid the manager recorded for the main process, and then
+// by its stream.
+func TestIntegrationSystemdJournalTailWhenJournaldIsBehind(t *testing.T) {
+	r := integrationRunner(t)
+	spec := scriptApp(t, "echo first line\necho second line >&2\nexit 2\n")
+	since := time.Now()
+	resume := pauseJournald(t)
+	err := r.RunOnce(context.Background(), spec)
+	resume()
+	var ee *exitError
+	if err == nil || !errors.As(err, &ee) || ee.exit != "exit status 2" {
+		t.Fatalf("RunOnce: %v (want an exitError with exit status 2)", err)
+	}
+	if got := strings.Join(waitTail(t, journalTailOf(t, spec, ee), since, 2), "|"); got != "first line|second line" {
+		t.Fatalf("tail = %q", got)
+	}
+}
+
+// journalTailOf is what a failed deploy asks the journal for, after a
+// pre_start that failed: its unit, and its main process's pid under the
+// app's identifier.
+func journalTailOf(t *testing.T, spec startSpec, ee *exitError) tailOf {
+	t.Helper()
 	unit, err := unitName(spec, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The journal lags the process by a moment; ask until both lines
-	// are there or the deadline passes.
-	var lines []string
+	return tailOf{units: []string{unit}, pids: []int{ee.pid}, ident: syslogIdentifier(spec.app)}
+}
+
+// waitTail reads the tail until it holds want lines or 5 s have
+// passed: the journal lags the process by a moment.
+func waitTail(t *testing.T, of tailOf, since time.Time, want int) []string {
+	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), journalTailTimeout)
-		lines, err = journalctlReader{}.tail(ctx, []string{unit}, since, 40)
+		lines, err := journalctlReader{}.tail(ctx, of, since, 40)
 		cancel()
-		if err == nil && len(lines) >= 2 {
-			break
+		if err == nil && len(lines) >= want {
+			return lines
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("journal tail of %s: %v, %v", unit, lines, err)
+			t.Fatalf("journal tail of %v (pids %v): %q, %v", of.units, of.pids, lines, err)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	if got := strings.Join(lines, "|"); got != "first line|second line" {
-		t.Fatalf("tail = %q", got)
-	}
-	// Nothing since a moment after the exit: the window is honoured.
-	if lines, err := (journalctlReader{}).tail(context.Background(), []string{unit}, time.Now().Add(5*time.Second), 40); err != nil || len(lines) != 0 {
-		t.Fatalf("tail since the future: %v, %v", lines, err)
-	}
+}
+
+// pauseJournald stops journald until resume is called or the test
+// ends: a journald behind its writers, on demand.
+func pauseJournald(t *testing.T) (resume func()) {
+	t.Helper()
+	run(t, "pkill", "-STOP", "-x", "systemd-journal")
+	resume = sync.OnceFunc(func() { _ = exec.Command("pkill", "-CONT", "-x", "systemd-journal").Run() })
+	t.Cleanup(resume)
+	return resume
 }
 
 func TestIntegrationSystemdReattachAdoptsLiveUnit(t *testing.T) {

@@ -82,12 +82,19 @@ Properties that matter to the model:
   not. A failed deploy's body carries the app's own bytes on purpose
   (liveswap/journal.go, `deployDetail` in liveswap/app.go): the last
   lines its units wrote, read back with `journalctl` — the one
-  external program hotserve runs, with a fixed argument list —
-  bounded by `deploy_log_lines` (default 40) and 8 KiB; the first 512
-  bytes of a failing health probe's body; and the exit status the
-  runner recorded. `deploy_log_lines 0` keeps the app's bytes — the
-  tail and the probe body both — on the box; the exit status and the
-  probe's status code are hotserve's observations and stay. Reading
+  external program hotserve runs, with argument lists of its own
+  making — bounded by `deploy_log_lines` (default 40) and 8 KiB; the
+  first 512 bytes of a failing health probe's body; and the exit status
+  the runner recorded. A line is the units' when journald named one of
+  them on it, or when it is in one of their output streams —
+  journald's `_STREAM_ID`, which no client can set and only the unit's
+  processes hold — learnt from the lines that name a unit and from
+  those written under the app's identifier by the process whose exit
+  is reported, found by the pid the manager recorded for it, which
+  another process could hold only once pids wrap. `deploy_log_lines 0`
+  keeps the app's bytes — the tail and the probe body both — on the
+  box; the exit status and the probe's status code are hotserve's
+  observations and stay. Reading
   the journal is a grant: journald keeps a system user's output in the
   system journal, so the packaged unit puts hotserve's process in
   `systemd-journal` (`SupplementaryGroups=`, the process and not the

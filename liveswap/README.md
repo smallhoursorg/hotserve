@@ -868,7 +868,12 @@ launch happened, `detail`:
 - `log_tail` — the last lines the `pre_start` and the app wrote to the
   journal since the deploy began, up to `deploy_log_lines` of them and
   8 KiB; `log_tail_truncated` when a cap dropped some, `log_tail_error`
-  when the journal could not be read. `journalctl` reads it; journald
+  when the journal could not be read. Their child processes' lines are
+  in it too: journald stores a line it reads after its writer has gone
+  — a child's last words, or any line while journald is behind —
+  without the unit's name, and the tail finds such lines by the unit's
+  output stream, which journald names and only the unit's processes
+  write to. `journalctl` reads it; journald
   keeps a system user's output in the system journal, so the packaged
   unit gives hotserve's own process the `systemd-journal` group
   (`SupplementaryGroups=` in `hotserve.service` — the process, not
