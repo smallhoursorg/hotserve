@@ -944,9 +944,20 @@ launch happened, `detail`:
 - `log_tail` — the last lines the `pre_start` and the app wrote to the
   journal since the deploy began, up to `deploy_log_lines` of them and
   8 KiB; `log_tail_truncated` when a cap dropped some, `log_tail_error`
-  when the journal could not be read. `journalctl` reads it; journald
-  keeps a system user's output in the system journal, so the packaged
-  unit gives hotserve's own process the `systemd-journal` group
+  when the journal could not be read. journald stores a line it reads
+  after its writer has gone — a child's last words, or any line while
+  journald is behind — without the unit's name; the tail finds such
+  lines by the unit's output stream, which journald names and only the
+  unit's processes write to, once any line of that stream carries the
+  unit's name or was written by the main process of the `pre_start`
+  or app that failed. A unit none of whose lines does either leaves
+  its lines out: a wrapper script that runs the app without `exec` and
+  prints nothing itself, when the app prints its error and exits; a
+  `pre_start` that succeeded, when journald read all of it late.
+  `journalctl -t hotserve-<app>` on the box has every line.
+  `journalctl` reads the tail; journald keeps a system user's output
+  in the system journal, so the packaged unit gives hotserve's own
+  process the `systemd-journal` group
   (`SupplementaryGroups=` in `hotserve.service` — the process, not
   the account, so the apps do not get it). A raw-binary install
   without that grant gets `log_tail_error` instead of a tail.

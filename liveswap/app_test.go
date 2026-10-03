@@ -179,14 +179,17 @@ func (r *fakeRunner) Preflight(spec startSpec) error {
 	return r.preflightErr
 }
 
-func (r *fakeRunner) Exit(h handle) string {
+func (r *fakeRunner) Exit(h handle) (string, int) {
 	fh, ok := h.(*fakeHandle)
-	if !ok || fh.isAlive() {
-		return ""
+	if !ok {
+		return "", 0
+	}
+	if fh.isAlive() {
+		return "", fh.state().PID
 	}
 	fh.mu.Lock()
 	defer fh.mu.Unlock()
-	return fh.exit
+	return fh.exit, fh.state().PID
 }
 
 func (r *fakeRunner) RunOnce(_ context.Context, spec startSpec) error {
