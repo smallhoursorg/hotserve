@@ -54,9 +54,11 @@ hotserve-backup: restic could not make or open the repository (exit 1): …; kee
 ## 2. Set up, a first backup, status and the drill, over real TLS
 
 [Set it up](backups.md#set-it-up) as written, then
-`sudo hotserve-backup drill` and `hotserve-backup status`. Each line as
-[Backups](backups.md) shows it: **unverified** over a provider's TLS;
-the e2e server over TLS from a private CA gave exactly those lines.
+`sudo hotserve-backup drill`, `hotserve-backup status`, and the
+[look from your own machine](backups.md#look-from-your-own-machine),
+both its lines. Each as [Backups](backups.md) shows it: **unverified**
+over a provider's TLS; the e2e server over TLS from a private CA gave
+exactly those lines, and MinIO the look's.
 
 ## 3. Keys that cannot destroy a version
 
@@ -80,6 +82,15 @@ nothing, on the other hand, stopped the probe at 22 minutes —
 `Fatal: unable to save snapshot: context canceled`, exit 1, seven locks
 left. Remove the probe after: `restic forget <its id>`.
 
+On B2, the bucket's own rule as well: a second bucket set to keep
+prior versions for **1** day, with a key without `deleteFiles`; upload
+a file and remove it (`rclone delete`), and after the next daily run —
+two days on, to be sure — `backblaze-b2 ls --long --versions -r
+b2://<that bucket>` should list neither the file's version nor its hide
+marker: B2's documentation says it removes a hide marker itself once
+nothing is under it. **Unverified**; on S3 the guide's rule asks for it
+(expired delete markers), and Hetzner's cannot.
+
 ## 4. An attack with the box's key, and the recovery
 
 On a bucket you can spare. From the off-box machine, with rclone set up
@@ -94,7 +105,9 @@ rclone delete --s3-versions store:<bucket>    # on B2: --b2-versions
 
 Then on the box, `sudo systemctl start hotserve-backup.service` and
 `hotserve-backup status`, and [After an attack](backups.md#after-an-attack)
-as written, with the account's key. That the deletion only hides (on
+as written, with the account's key and `status`'s minute — and the
+exact moment from the bucket's history as well, to compare. That the
+deletion only hides (on
 B2, restic's and rclone's deletes hide where the key may not delete),
 that destroying a version is refused for every one, that the run fails
 `exit 10`, and that the copy, checked, holds the last complete backup:
