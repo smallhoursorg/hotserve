@@ -592,7 +592,18 @@ sed -i 's|^\t\tapp demo {$|&\n\t\t\tbackup {\n\t\t\t\tsqlite app.db\n\t\t\t\tfil
 OUT=/tmp/docs.out
 . /tty.sh
 mapfile -t docs < <(awk '/<!-- smoke: begin -->/{on=1; next} /<!-- smoke: end -->/{on=0} on' /docs-backups.md | grep -v '^```' | grep -v '^#' | grep -v '^$' | sed "s|s3:https://s3.example.com/my-backups|$S3REPO|")
-[ "${#docs[@]}" -ge 6 ] || die "the guide's smoke block holds ${#docs[@]} lines; the markers moved?"
+# Exactly the lines this stage runs and checks: a line dropped from the
+# guide, or one added that nothing here checks, fails rather than
+# passing as "ran as written".
+want="hotserve-backup validate /etc/hotserve/Caddyfile
+sudo systemctl reload hotserve
+sudo hotserve-backup setup $S3REPO
+sudo systemctl start hotserve-backup.service
+hotserve-backup status
+sudo hotserve-backup restore demo --to /root/demo-restored
+sudo hotserve-backup restore demo"
+[ "$(printf '%s\n' "${docs[@]}")" = "$want" ] \
+	|| die "the guide's smoke block is not the seven lines this stage runs and checks; it holds: $(printf '%s | ' "${docs[@]}")"
 for line in "${docs[@]}"; do
 	echo "docs/backups.md: $line"
 	case "$line" in

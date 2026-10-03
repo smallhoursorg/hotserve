@@ -2,12 +2,15 @@
 
 A release candidate is a pushed tag such as `v0.2.0-rc1`: the release
 workflow runs the whole CI on it and publishes it as a prerelease. Its
-backups have only ever met the e2e suites' S3 server, which has one key
-that may do anything, makes a bucket when asked and enforces no
-policy. These eight checks are what that server cannot show. Run them
-on a fresh Debian 13 box with the candidate's `.deb`
-([Your first deploy](first-deploy.md)), against a bucket made for the
-purpose, following [Backups](backups.md) as written.
+backups have met the e2e suites' S3 server, which has one key that may
+do anything, makes a bucket when asked and enforces no policy, and
+MinIO standing in for a provider's versions and key policies. These
+eight checks are what neither can show. Run them on a fresh Debian 13
+box with the candidate's `.deb` ([Your first deploy](first-deploy.md)),
+against a bucket made for the purpose as
+[Backups](backups.md#before-you-start-the-bucket-and-what-it-protects)
+makes it — on B2 first, the provider it is easiest on — following
+[Backups](backups.md) as written.
 
 Each check gives its commands, and what the e2e server showed beside
 the word **unverified** where only a real provider can say. Write down
@@ -16,8 +19,8 @@ what the provider showed; each answer replaces an **unverified** in
 
 `<url>` is the bucket's repository URL, `s3:https://…/<bucket>` or
 `b2:<bucket>:`. The off-box machine is your own, with Debian's restic
-0.18 and the [retention](backups.md#retention-off-the-box) lines'
-first three set.
+0.18 and the [look](backups.md#look-from-your-own-machine) lines' first
+three set, with its own key.
 
 ## 1. A bucket that does not exist, and a wrong secret
 
@@ -55,56 +58,56 @@ hotserve-backup: restic could not make or open the repository (exit 1): …; kee
 [Backups](backups.md) shows it: **unverified** over a provider's TLS;
 the e2e server over TLS from a private CA gave exactly those lines.
 
-## 3. A key that cannot delete
+## 3. Keys that cannot destroy a version
 
-The box set up with a key the provider forbids to delete. Then:
+The bucket and both keys as [Backups](backups.md#before-you-start-the-bucket-and-what-it-protects)
+makes them. First, a locking command past restic's 22-minute mark:
+from the off-box machine, with the *box's* key, a backup that holds its
+lock for half an hour, and what it leaves:
 
-```sh
-sudo systemctl start hotserve-backup.service
-sudo systemctl start hotserve-backup.service
-sudo hotserve-backup drill
-hotserve-backup status
-```
-
-and from the off-box machine, with the key that may delete, now and
-again after a day of hourly runs:
-
-```sh
-restic list locks --no-lock | wc -l
-restic unlock
+```bash
+(sleep 1800; echo probe) | restic backup --stdin --stdin-filename rc-lock-probe
 restic list locks --no-lock | wc -l
 ```
 
-That the runs end `ok`, the drill proves and its check is `clean`, and
-whether locks pile up while the box's key cannot remove its own:
-**unverified**. On the e2e server, whose key may delete, no lock was
-left and `restic unlock` said nothing.
+Then on the box, `sudo systemctl start hotserve-backup.service` twice,
+`sudo hotserve-backup drill` and `hotserve-backup status`. That the
+probe ends `snapshot … saved` after 30 minutes with no lock left, the
+runs end `ok`, and the drill proves and its check is `clean`:
+**unverified**. On MinIO all of that held; a key that may delete
+nothing, on the other hand, stopped the probe at 22 minutes —
+`failed to refresh stale lock: client.RemoveObject: Access Denied.`,
+`Fatal: unable to save snapshot: context canceled`, exit 1, seven locks
+left. Remove the probe after: `restic forget <its id>`.
 
-## 4. B2: what the box's key does to a `forget`
+## 4. An attack with the box's key, and the recovery
 
-On B2 only, with the box's no-delete key, by hand, on the box (it never
-runs `forget` itself). Pick a snapshot you can lose from
-`restic snapshots` off the box — an old `pre-restore` one:
+On a bucket you can spare. From the off-box machine, with rclone set up
+as in [After an attack](backups.md#after-an-attack) but holding the
+*box's* key, delete every file, then try to destroy the old versions
+too:
 
-```sh
-sudo systemd-run --quiet --pipe --wait --collect \
-  -p User=hotserve-backup -p EnvironmentFile=/etc/hotserve-backup/repository.env \
-  -p CacheDirectory=hotserve-backup -E RESTIC_CACHE_DIR=/var/cache/hotserve-backup -E HOME=/nonexistent \
-  /usr/bin/restic forget <id>
+```bash
+rclone delete store:<bucket>
+rclone delete --s3-versions store:<bucket>    # on B2: --b2-versions
 ```
 
-then, off the box, whether `restic snapshots` still lists it, and
-whether B2's console (or `b2 ls --versions`) shows its file under
-`snapshots/` deleted, or hidden with the version still there. The
-prediction is hidden: `restic` says it is gone and it is not, so no
-probe of "can this key delete?" can be trusted on B2.
-**Unverified.** On the e2e server the box's key deleted it
-(`1 / 1 files deleted`, the file gone).
+Then on the box, `sudo systemctl start hotserve-backup.service` and
+`hotserve-backup status`, and [After an attack](backups.md#after-an-attack)
+as written, with the account's key. That the deletion only hides (on
+B2, restic's and rclone's deletes hide where the key may not delete),
+that destroying a version is refused for every one, that the run fails
+`exit 10`, and that the copy, checked, holds the last complete backup:
+**unverified**. On MinIO the first emptied the bucket's listing, the
+second was `AccessDenied` for each of 48 old versions, all of which
+remained; the run said
+`there is no repository at the configured location (exit 10)`, and
+the copy as written held the last complete backup and checked clean.
 
 ## 5. Retention off the box, then status on the box
 
 [Retention, off the box](backups.md#retention-off-the-box) as written,
-with the second key; then on the box
+with the off-box machine's key; then on the box
 `sudo systemctl start hotserve-backup.service` and
 `hotserve-backup status`. Each line as [Backups](backups.md) shows it:
 **unverified** on a provider; on the e2e server, as shown there.

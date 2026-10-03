@@ -46,11 +46,12 @@ file: each service is conditioned on `/etc/hotserve-backup/repository.env`,
 and a start before that is skipped, not failed. The lines that set it
 up — the declaration, `validate`, `setup`, a first run, `status`, a
 restore — are under "Set it up" in
-[docs/backups.md](../docs/backups.md#set-it-up). Those under `sudo` are
-root's: the provider's console, or an administrator whose `sudo` is
-root's. The administrator `docs/after-first-deploy.md` creates has the
-`hotserve` user's reach and not root's (`examples/box/sudoers`), and
-runs `validate` and `status`, which need no root.
+[docs/backups.md](../docs/backups.md#set-it-up). Those under `sudo` but
+the reload are root's: the provider's console, or an administrator
+whose `sudo` is root's. The administrator `docs/after-first-deploy.md`
+creates has the `hotserve` user's reach and not root's
+(`examples/box/sudoers`): the reload, and `validate` and `status`,
+which need no root.
 
 The package's smoke test (`make install-test`) runs exactly those lines,
 read out of that page, as an administrator under `sudo`, on a fresh
@@ -538,9 +539,9 @@ cache of its own, and cleans nothing else [measured]).
 Damage is said — by the drill, which exits 1, by
 `hotserve-backup-drill.service` failed, and by `status` — and nothing
 more: backups go on (a new snapshot of what changed is still worth
-having), and the box never repairs, since `restic repair` deletes and
-the box's key should not be able to. What restic's words name is run
-off the box, with the key that may delete, and the next drill says
+having), and the box never repairs, since `restic repair` removes data
+and nothing on the box removes anything. What restic's words name is
+run off the box, with a key of its own, and the next drill says
 whether it worked.
 
 ## What a snapshot holds
@@ -594,8 +595,11 @@ midnight, whatever the box's zone.
 
 ### Retention
 
-Nothing on the box deletes: `forget` and `prune` are run off the box,
-with the key that may delete (the box's may not). Without them every
+Nothing on the box removes anything: `forget` and `prune` are run off
+the box, with a key of their own — on the bucket
+[docs/backups.md](../docs/backups.md#before-you-start-the-bucket-and-what-it-protects)
+describes, one that cannot destroy a version either, so what they
+remove stays an old version for 90 days. Without them every
 hourly run adds a snapshot of each app and a record of each that ended
 `ok` — two snapshots an app an hour — and every listing of the
 repository reads every snapshot file, on a rebuilt box from an empty
