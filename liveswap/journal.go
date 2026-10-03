@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -16,10 +17,12 @@ import (
 // exited 3, the stack trace of an app that died on start. Reading the
 // journal back means running journalctl — the product binary is built
 // without cgo, so the sd-journal library is out — which is the one
-// external program hotserve executes. The argument list is fixed and
-// the output is bounded (deployLogMaxBytes, and the line count the
-// operator sets with deploy_log_lines); a journalctl that is missing
-// or fails leaves the tail out and says why.
+// external program hotserve executes. The argument lists are built
+// here, of unit names, a pid the manager recorded, stream ids journald
+// printed, a count and a timestamp; the output is bounded
+// (deployLogMaxBytes, and the line count the operator sets with
+// deploy_log_lines); a journalctl that is missing or fails leaves the
+// tail out and says why.
 //
 // Everything read here passes the response filter (redact.go) like
 // any other body, and deploy_log_lines 0 keeps app output on the box
@@ -30,9 +33,19 @@ import (
 // journalReader is the seam: the real reader runs journalctl, tests
 // script one.
 type journalReader interface {
-	// tail returns up to n of the most recent lines the named units
+	// tail returns up to n of the most recent lines a launch's units
 	// wrote since a point in time, oldest first.
-	tail(ctx context.Context, units []string, since time.Time, n int) ([]string, error)
+	tail(ctx context.Context, of tailOf, since time.Time, n int) ([]string, error)
+}
+
+// tailOf is whose lines a tail reads: a launch's units; the pid of
+// the main process of the pre_start or app that failed (runner.Exit,
+// exitError; 0 where none is known); and the identifier every unit of
+// the app writes under.
+type tailOf struct {
+	units []string
+	pid   int
+	ident string
 }
 
 // journalctlPath is where Debian's systemd package puts journalctl —
@@ -41,25 +54,33 @@ const journalctlPath = "/usr/bin/journalctl"
 
 // journalctlReader reads the hotserve user's own journal, where the
 // units on its user manager write.
+//
+// journald names a line's unit from /proc/<pid> of the process that
+// wrote it, when it gets to the line, and a line whose writer was
+// reaped first is stored with no unit field at all: a child that
+// prints its error and exits, every time; any line, while journald is
+// behind. What every line a unit writes to stdout or stderr does
+// carry, its children's included, is the unit's one stream: journald
+// gives the stream its id, a client cannot set it, and only the
+// unit's own processes hold the stream. So the tail is read in two
+// runs: the streams first, from the lines that kept their unit and
+// from those the failed process wrote — by its pid, as the manager
+// recorded it, under the app's identifier — and then every line of
+// those streams, with any line journald attributed to the units
+// otherwise. A stream none of whose lines did either stays unknown,
+// and its lines out of the tail: a wrapper script that runs its app
+// without exec and prints nothing itself, when the app prints its
+// error and exits; a pre_start that succeeded, every line of it read
+// late (its pid is gone with its unit).
 type journalctlReader struct{}
 
-func (journalctlReader) tail(ctx context.Context, units []string, since time.Time, n int) ([]string, error) {
-	if n <= 0 || len(units) == 0 {
+func (journalctlReader) tail(ctx context.Context, of tailOf, since time.Time, n int) ([]string, error) {
+	if n <= 0 || len(of.units) == 0 {
 		return nil, nil
 	}
-	// A second of slack: the deploy's clock and the journal's need not
-	// agree to the millisecond, and a line a moment before the start is
-	// harmless where a line lost is not.
-	// The unit field, matched directly rather than through -u: -u also
-	// selects the manager's own lines about the unit ("Starting …",
-	// "Main process exited, code=exited, status=2"), which say what
-	// `exit` already says. Several matches of one field are OR'd. One
-	// line more than asked, so the caller can tell "all of it" from
-	// "there was more" (capTail sets the flag).
-	args := []string{"--user", "--no-pager", "--quiet", "-o", "cat",
-		"-n", strconv.Itoa(n + 1), "--since", "@" + strconv.FormatInt(since.Add(-time.Second).Unix(), 10)}
-	for _, u := range units {
-		args = append(args, "_SYSTEMD_USER_UNIT="+u)
+	found, err := runJournalctl(ctx, streamArgs(of, since, n), streamsMaxBytes)
+	if err != nil {
+		return nil, err
 	}
 	// The line count bounds the entries, not their size: a single entry
 	// can be as long as journald lets a line be. The output streams
@@ -67,9 +88,99 @@ func (journalctlReader) tail(ctx context.Context, units []string, since time.Tim
 	// response cap so that capTail still sees "there was more" (a
 	// dropped prefix leaves a partial first line for it to cut), and
 	// memory is fixed whatever the app wrote.
-	out := &tailWriter{max: 2 * deployLogMaxBytes}
+	out, err := runJournalctl(ctx, tailArgs(of.units, streamIDs(found), since, n), 2*deployLogMaxBytes)
+	if err != nil {
+		return nil, err
+	}
+	text := strings.TrimRight(string(out), "\n")
+	if text == "" {
+		return nil, nil
+	}
+	return strings.Split(text, "\n"), nil
+}
+
+// journalWindow is what both runs share. A second of slack: the
+// deploy's clock and the journal's need not agree to the millisecond,
+// and a line a moment before the start is harmless where a line lost
+// is not. One line more than asked, so the caller can tell "all of
+// it" from "there was more" (capTail sets the flag). The streams are
+// learnt in the same window: a launch's units run one after the
+// other, so a stream with none of its named lines among the last n+1
+// has none of its lines among the tail's last n+1 either.
+func journalWindow(since time.Time, n int) []string {
+	return []string{"--user", "--no-pager", "--quiet", "-n", strconv.Itoa(n + 1),
+		"--since", "@" + strconv.FormatInt(since.Add(-time.Second).Unix(), 10)}
+}
+
+// streamArgs asks for the stream ids of the lines that name the
+// launch: the unit field, matched directly rather than through -u
+// (which also selects the manager's own lines about the unit,
+// "Starting …", "Main process exited, code=exited, status=2" — what
+// `exit` already says); or a main process's pid together with the
+// app's identifier. Several matches of one field are OR'd, different
+// fields AND'd, and "+" ORs the two groups.
+func streamArgs(of tailOf, since time.Time, n int) []string {
+	args := append(journalWindow(since, n), "-o", "cat", "--output-fields=_STREAM_ID")
+	args = append(args, unitMatches(of.units)...)
+	if of.pid > 0 && of.ident != "" {
+		args = append(args, "+", "_PID="+strconv.Itoa(of.pid), "SYSLOG_IDENTIFIER="+of.ident)
+	}
+	return args
+}
+
+// tailArgs asks for the lines themselves: the units', and every line
+// of their streams.
+func tailArgs(units, streams []string, since time.Time, n int) []string {
+	args := append(journalWindow(since, n), "-o", "cat")
+	args = append(args, unitMatches(units)...)
+	if len(streams) > 0 {
+		args = append(args, "+")
+		for _, s := range streams {
+			args = append(args, "_STREAM_ID="+s)
+		}
+	}
+	return args
+}
+
+func unitMatches(units []string) []string {
+	m := make([]string, 0, len(units))
+	for _, u := range units {
+		m = append(m, "_SYSTEMD_USER_UNIT="+u)
+	}
+	return m
+}
+
+// streamsMaxBytes bounds the first run's output: an entry prints as
+// its stream id and a newline, 33 bytes, and deploy_log_lines is at
+// most 1000.
+const streamsMaxBytes = 64 * 1024
+
+// streamIDRe is a stream id as journald prints one.
+var streamIDRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+// streamIDs reads journalctl's output, an entry a line, for the
+// distinct stream ids, in the order first met. What is not one — the
+// first line cut by the byte bound, the empty line of an entry with no
+// stream — is passed over: each id becomes an argument of the next run.
+func streamIDs(out []byte) []string {
+	var ids []string
+	seen := map[string]bool{}
+	for _, id := range strings.Split(string(out), "\n") {
+		if !streamIDRe.MatchString(id) || seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// runJournalctl runs journalctl, keeping the last limit bytes of what
+// it prints.
+func runJournalctl(ctx context.Context, args []string, limit int) ([]byte, error) {
+	out := &tailWriter{max: limit}
 	stderr := &tailWriter{max: 1024}
-	cmd := exec.CommandContext(ctx, journalctlPath, args...) //nolint:gosec // a fixed program by absolute path; the arguments are validated unit names, a count and a timestamp built here, never request input
+	cmd := exec.CommandContext(ctx, journalctlPath, args...) //nolint:gosec // a fixed program by absolute path; the arguments are validated unit names, pids the manager recorded, stream ids of journald's shape, a count and a timestamp built here, never request input
 	cmd.Stdout, cmd.Stderr = out, stderr
 	if err := cmd.Run(); err != nil {
 		if msg := strings.TrimSpace(string(stderr.buf)); msg != "" {
@@ -77,11 +188,7 @@ func (journalctlReader) tail(ctx context.Context, units []string, since time.Tim
 		}
 		return nil, fmt.Errorf("journalctl: %w", err)
 	}
-	text := strings.TrimRight(string(out.buf), "\n")
-	if text == "" {
-		return nil, nil
-	}
-	return strings.Split(text, "\n"), nil
+	return out.buf, nil
 }
 
 // tailWriter keeps the last max bytes written to it.
