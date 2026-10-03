@@ -24,8 +24,12 @@ three set, with its own key.
 
 ## 1. A bucket that does not exist, and a wrong secret
 
-On a box not set up yet (a failed setup writes nothing; one that
-succeeds is set up, and check 2 can carry on from it):
+On a box not set up yet, with buckets of their own — not the one
+checks 2 to 8 use (a failed setup writes nothing; one that succeeds
+leaves the box on a bucket nobody made as
+[Backups](backups.md#before-you-start-the-bucket-and-what-it-protects)
+says, so set the box up afresh for check 2). A key made as Backups
+says should not be able to make a bucket at all:
 
 ```sh
 time sudo hotserve-backup setup <url of a bucket nobody has made>
@@ -64,8 +68,11 @@ exactly those lines, and MinIO the look's.
 
 The bucket and both keys as [Backups](backups.md#before-you-start-the-bucket-and-what-it-protects)
 makes them. First, a locking command past restic's 22-minute mark:
-from the off-box machine, with the *box's* key, a backup that holds its
-lock for half an hour, and what it leaves:
+with the box's timers stopped, so that no run of its own holds a lock
+meanwhile (`sudo systemctl stop hotserve-backup.timer
+hotserve-backup-drill.timer`, and `start` after), from the off-box
+machine, with the *box's* key, a backup that holds its lock for half an
+hour, and what it leaves:
 
 ```bash
 (sleep 1800; echo probe) | restic backup --stdin --stdin-filename rc-lock-probe
@@ -95,25 +102,27 @@ nothing is under it. **Unverified**; on S3 the guide's rule asks for it
 
 On a bucket you can spare. From the off-box machine, with rclone set up
 as in [After an attack](backups.md#after-an-attack) but holding the
-*box's* key, delete every file, then try to destroy the old versions
-too:
+*box's* key, try to destroy, then delete every file:
 
 ```bash
-rclone delete store:<bucket>
-rclone delete --s3-versions store:<bucket>    # on B2: --b2-versions
+rclone delete --b2-hard-delete store:<bucket>    # B2: every file refused, nothing gone
+rclone delete --s3-versions store:<bucket>       # S3: every old version refused (see below)
+rclone delete store:<bucket>                     # every file hidden
 ```
+
+(On B2 `--b2-versions` would not do: in that mode rclone refuses every
+write itself, and B2 is never asked. On AWS the box's key may not list
+versions, so the S3 line stops before it tries — open on #168.)
 
 Then on the box, `sudo systemctl start hotserve-backup.service` and
 `hotserve-backup status`, and [After an attack](backups.md#after-an-attack)
-as written, with the account's key and `status`'s minute — and the
-exact moment from the bucket's history as well, to compare. That the
-deletion only hides (on
-B2, restic's and rclone's deletes hide where the key may not delete),
-that destroying a version is refused for every one, that the run fails
-`exit 10`, and that the copy, checked, holds the last complete backup:
-**unverified**. On MinIO the first emptied the bucket's listing, the
-second was `AccessDenied` for each of 48 old versions, all of which
-remained; the run said
+as written, with the account's key, from `status`'s minute and from the
+bucket's history, to compare. That destroying is refused for every
+file, that the deletion only hides, that the run fails `exit 10`, and
+that the copy, checked, holds the last complete backup:
+**unverified**. On MinIO, run after the deletion, the S3 line was
+`AccessDenied` for each of 48 versions, all of which remained, and the
+deletion emptied the bucket's listing; the run said
 `there is no repository at the configured location (exit 10)`, and
 the copy as written held the last complete backup and checked clean.
 

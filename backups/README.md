@@ -540,7 +540,7 @@ Damage is said — by the drill, which exits 1, by
 `hotserve-backup-drill.service` failed, and by `status` — and nothing
 more: backups go on (a new snapshot of what changed is still worth
 having), and the box never repairs, since `restic repair` removes data
-and nothing on the box removes anything. What restic's words name is
+and nothing on the box forgets, prunes or repairs. What restic's words name is
 run off the box, with a key of its own, and the next drill says
 whether it worked.
 
@@ -595,11 +595,11 @@ midnight, whatever the box's zone.
 
 ### Retention
 
-Nothing on the box removes anything: `forget` and `prune` are run off
-the box, with a key of their own — on the bucket
+Nothing on the box forgets, prunes or repairs: `forget` and `prune` are
+run off the box, with a key of their own — on the bucket
 [docs/backups.md](../docs/backups.md#before-you-start-the-bucket-and-what-it-protects)
 describes, one that cannot destroy a version either, so what they
-remove stays an old version for 90 days. Without them every
+remove stays an old version for 180 days. Without them every
 hourly run adds a snapshot of each app and a record of each that ended
 `ok` — two snapshots an app an hour — and every listing of the
 repository reads every snapshot file, on a rebuilt box from an empty

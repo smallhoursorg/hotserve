@@ -37,12 +37,12 @@ terminal it runs in.
 A backup that an attacker can delete is no backup. The bucket below
 keeps every version of every file, and neither key you make for it can
 destroy one: what a key deletes or overwrites stays an old version for
-90 days, and only the bucket's own rule removes it after that. So
+180 days, and only the bucket's own rule removes it after that. So
 **nothing the box or your own machine holds can destroy a backup, and a
-deletion or overwrite made with either key can be undone for 90 days —
-if someone [looks from off the box](#look-from-your-own-machine) within
-those 90 days**, since whoever has the box can make its own `status`
-say anything. A stolen login to the provider account can destroy
+deletion or overwrite made with either key can be undone for 180 days —
+if someone [looks from off the box](#look-from-your-own-machine) at
+least once every 90 days**, which leaves another 90 to recover; whoever
+has the box can make its own `status` say anything. A stolen login to the provider account can destroy
 everything: give it a second factor, and never put its keys on the
 box. On MinIO standing in for S3, an attack made with the box's own key
 was refused every destruction and [undone](#after-an-attack); on a real
@@ -51,7 +51,7 @@ provider it is **unverified**.
 - **A bucket of its own**, one per box: on Backblaze B2 or S3 (`setup`
   asks for those two; `rest:`, `gs:` and `swift:` are written
   [by hand](../backups/README.md#by-hand)). Versioning on, and one
-  lifecycle rule: old (noncurrent) versions are removed after 90 days.
+  lifecycle rule: old (noncurrent) versions are removed after 180 days.
   Never a rule that expires current objects by age: a pack judged old
   can hold the only copy of data every backup uses.
 - **Two keys**, neither able to destroy a version: the box's, which
@@ -72,11 +72,11 @@ destroys every version of what it removes. The web console offers
 presets rather than single capabilities, so make the keys with the
 `b2` command line.
 In the bucket's Lifecycle Settings, "Keep prior versions for this
-number of days": 90. B2 then removes a hide marker itself once the
+number of days": 180. B2 then removes a hide marker itself once the
 versions under it are gone (its documentation; **unverified**).
 
 **On AWS S3**, turn Versioning on, add a lifecycle rule that
-permanently deletes noncurrent versions after 90 days and deletes
+permanently deletes noncurrent versions after 180 days and deletes
 expired object delete markers — restic leaves about two markers a
 command, and S3 keeps each one after its versions are gone, unless told
 — and make each key a user of its own with this policy (`my-backups`
@@ -211,44 +211,53 @@ What every line of `status` means is under
 ### Look from your own machine
 
 The box's `status` is only as honest as the box. Right after `setup`,
-and at least once in every 90 days, look from a machine of your own
-with Debian's restic (0.18), in `bash`, with your own machine's key and
-the repository's password — `restic snapshots` for whether the backups
-are fresh, `restic check --read-data` for whether anything under them
-was hidden, overwritten or damaged, which a fresh-looking listing does
-not show:
+and at least once in every 90 days — half the time old versions are
+kept, so that the other half is left to recover — look from a machine
+of your own with Debian's restic (0.18), in `bash`, with your own
+machine's key and the repository's password: `restic snapshots` for
+whether the backups are fresh, and `restic check --read-data` for
+whether anything under them was hidden, overwritten or damaged, which a
+fresh-looking listing does not show.
 
 ```bash
 export RESTIC_REPOSITORY=s3:https://s3.example.com/my-backups
 read -r AWS_ACCESS_KEY_ID && export AWS_ACCESS_KEY_ID          # your own machine's key
 read -rs AWS_SECRET_ACCESS_KEY && export AWS_SECRET_ACCESS_KEY
 # restic asks for the repository's password, for each.
-restic snapshots --latest 1
+restic snapshots --latest 1 --tag hotserve --group-by host,paths,tags
 restic check --no-lock --read-data
 ```
 
 On B2 the two key lines are `B2_ACCOUNT_ID` and `B2_ACCOUNT_KEY`. The
-newest snapshot of each app should be within the hour, beside the
-record that its run ended ok:
+newest backup of each app should be within the hour; a snapshot a
+restore made of what it restored over (tagged `pre-restore`) is listed
+apart, and is not a backup:
 
 ```
-ID        Time                 Host        Tags                       Paths                 Size
---------------------------------------------------------------------------------------------------
-482d5f35  2026-10-03 09:01:35  hotserve    hotserve-clean,vouches:…   /hotserve-clean-demo  65 B
-7993b1d3  2026-10-03 09:01:35  hotserve    hotserve,app:demo          /backup/demo          400.008 MiB
---------------------------------------------------------------------------------------------------
-2 snapshots
+snapshots for (host [hotserve], tags [app:demo, hotserve], paths [/backup/demo]):
+ID        Time                 Host        Tags               Paths         Size
+---------------------------------------------------------------------------------------
+66724c5e  2026-10-03 11:48:35  hotserve    app:demo,hotserve  /backup/demo  400.008 MiB
+---------------------------------------------------------------------------------------
+1 snapshots
+snapshots for (host [hotserve], tags [app:demo, hotserve, pre-restore], paths [/backup/demo]):
+ID        Time                 Host        Tags                           Paths         Size
+---------------------------------------------------------------------------------------------------
+6efa7a46  2026-10-03 08:48:42  hotserve    app:demo,hotserve,pre-restore  /backup/demo  400.008 MiB
+---------------------------------------------------------------------------------------------------
+1 snapshots
 ```
 
-and the check should end `no errors were found`. It reads the whole
+The check should end `no errors were found`. It reads the whole
 repository back: the repository's size in egress each time (S3: $0.09/GB
 past the free 100 GB a month; B2: free up to three times what is
 stored; Hetzner: within its 1 TB). `--no-lock` keeps the box's runs
 from waiting on it; run it when you are not pruning, which could make
-it report damage that is not there. A wrong password is asked for again
-twice, and then `Fatal: wrong password or no key found`, exit 12.
-Nothing there, a check that finds errors, or no repository at all:
-[after an attack](#after-an-attack).
+it report damage that is not there. `Fatal: wrong password or no key
+found`, exit 12, after the third asking, is a password typed wrong — or,
+where the stored password is right, key files hidden by an attack
+[measured]. That, nothing there, a check that finds errors, or no
+repository at all: [after an attack](#after-an-attack).
 
 ## Restore
 
@@ -380,32 +389,31 @@ All **unverified** against a bill: one real drill's egress is
 
 ## Retention, off the box
 
-Nothing on the box removes anything. Without retention every hourly
+Nothing on the box forgets, prunes or repairs. Without retention every hourly
 run adds two snapshots an app — the backup, and a small record that the
 run ended ok — and listings slow as they grow
 ([Retention](../backups/README.md#retention)). Thin them from your own
-machine, with Debian's restic (0.18), in `bash`, with your own
-machine's key and the repository's password:
+machine, after the first three lines of
+[the look](#look-from-your-own-machine):
 
 ```bash
-export RESTIC_REPOSITORY=s3:https://s3.example.com/my-backups
-read -r AWS_ACCESS_KEY_ID && export AWS_ACCESS_KEY_ID          # your own machine's key
-read -rs AWS_SECRET_ACCESS_KEY && export AWS_SECRET_ACCESS_KEY
-# restic asks for the repository's password.
-restic forget --tag hotserve --group-by host,paths,tags \
+# restic asks for the repository's password, for each.
+restic forget --retry-lock 1h --tag hotserve --group-by host,paths,tags \
   --keep-hourly 24 --keep-daily 30 --keep-monthly 12
-restic forget --tag hotserve-clean \
+restic forget --retry-lock 1h --tag hotserve-clean \
   --keep-hourly 24 --keep-daily 30 --keep-monthly 12
-restic prune
+restic prune --retry-lock 1h
 ```
 
-On B2 the two key lines are `B2_ACCOUNT_ID` and `B2_ACCOUNT_KEY`. The
+Each needs the repository to itself, and without `--retry-lock` gives up
+at once while a run of the box's holds a lock: `repository is already
+locked`, exit 11 [measured]; with it, it waits. The
 first `forget` thins each app's backups, and the snapshots a restore
 made of what it restored over (tagged `pre-restore`) apart from them;
 the second, the records that runs ended ok. One `forget` would keep a
 restore's snapshot in place of that hour's backup
 ([why](../backups/README.md#retention)). Add `--dry-run` to either to
-see first. What they remove stays an old version for 90 days, so the
+see first. What they remove stays an old version for 180 days, so the
 space comes back then. On the e2e S3 server, after four runs, a restore
 and its undo in one hour, the first kept both `pre-restore` snapshots
 and the first and last backups (restic keeps the oldest too) and
@@ -442,7 +450,7 @@ from 03:30, the box's time).
 ## After an attack
 
 With the box's key, or your own machine's, someone can hide, overwrite
-or delete every file, and still destroy nothing for 90 days. On MinIO
+or delete every file, and still destroy nothing for 180 days. On MinIO
 an attack that did all three, and then tried to destroy the versions
 (`Access Denied`), made the next run fail and `status` exit 1:
 
@@ -450,13 +458,16 @@ an attack that did all three, and then tried to destroy the versions
 demo: failed: there is no repository at the configured location (exit 10); …
 ```
 
+A quieter one — a single pack overwritten — left the hourly runs ending
+`ok`, `status` moving its "last complete backup" on past the attack,
+and only the next drill saying so (`restore not proven`, and its check
+`damaged`) [measured]; the [look's](#look-from-your-own-machine)
+`restic check --read-data` finds the same.
+
 Recovery is a copy of the bucket as it was before the attack, into a
 new bucket made as [above](#before-you-start-the-bucket-and-what-it-protects),
 with a key the attacker never had that may read old versions — the
-provider account's own — and Debian's rclone (1.60), in `bash`. The
-moment to copy from is the minute `status` gave for the last complete
-backup, as printed, in UTC: `last complete backup 2026-10-03 08:49 UTC`
-is `2026-10-03T08:49:00Z`.
+provider account's own — and Debian's rclone (1.60), in `bash`:
 
 ```bash
 export RCLONE_CONFIG_STORE_TYPE=s3 RCLONE_CONFIG_STORE_PROVIDER=AWS RCLONE_CONFIG_STORE_REGION=<the bucket's region>
@@ -465,14 +476,12 @@ read -rs RCLONE_CONFIG_STORE_SECRET_ACCESS_KEY && export RCLONE_CONFIG_STORE_SEC
 rclone copy "store,version_at='2026-10-03T08:49:00Z':my-backups" store:my-backups-recovered
 ```
 
-That minute is always before the attack, which came after the backup
-finished, and loses at most the backups made inside it — with hourly
-runs, that one. A moment that falls in the middle of a run is safe too:
-restic finds the run's unfinished files, says `1 additional files were
-found in the repo, which likely contain duplicate data. This is
-non-critical`, and the check finds no errors [measured]. A minute
-rounded *up* can fall after the attack began, and bring it along. Three
-things the copy needs, each seen going wrong without it:
+On another S3 provider, `RCLONE_CONFIG_STORE_PROVIDER=Other` and
+`RCLONE_CONFIG_STORE_ENDPOINT=https://<its endpoint>` in place of the
+region; on B2, `RCLONE_CONFIG_STORE_TYPE=b2` with `…_ACCOUNT` and
+`…_KEY`, and the same `store,version_at='…'` — **unverified**, as is all
+of this on a real provider. Three things the copy needs, each seen
+going wrong without it:
 
 - the time in UTC, with its `T` and `Z`: `2026-10-03 08:49:48` is read
   in your machine's zone, and in Berlin found nothing;
@@ -482,48 +491,65 @@ things the copy needs, each seen going wrong without it:
 - the single quotes, without which the time's colons cut it short:
   `couldn't parse config item "version_at" = "2026-10-03T08"`.
 
-Check the copy before trusting it, with `RESTIC_REPOSITORY` set to the
-new bucket: `restic snapshots --latest 1` holds the newest backup from
-before that moment, and `restic check --no-lock --read-data` should find
-no errors — as on MinIO, where a copy at `status`'s minute held the
-backup before it and checked clean. Then give the new bucket new keys
-(the old ones are the attacker's) and follow
-[A rebuilt box](#a-rebuilt-box) with its URL. The copy went through the
-machine running rclone, every object: the whole repository comes down
-and goes up again, at the provider's egress price. On B2 it is
-`RCLONE_CONFIG_STORE_TYPE=b2`, `…_ACCOUNT` and `…_KEY`, and
-`b2,version_at=…` — **unverified**, as is all of this on a real
-provider.
+**The moment** has to be before the attack's first change, and the copy
+decides whether it was: with `RESTIC_REPOSITORY` set to the new bucket,
+`restic snapshots` and `restic check --no-lock --read-data`. A check
+that finds errors means the moment was too late — make another copy,
+earlier; the copy never changes the attacked bucket, so trying again
+costs only the copy. Earlier is safe: a moment in the middle of a run
+leaves that run's unfinished files, which restic calls "non-critical"
+(`1 additional files were found in the repo, which likely contain
+duplicate data`), and the check finds no errors [measured]. Where to
+start:
 
-**To keep that last backup too, or with no `status` to ask** (the box
-lost), take the exact moment from the bucket's history: every write and
-every delete, with its time in UTC, from the provider's own tool —
-Debian's `awscli`, with the account's key in `AWS_ACCESS_KEY_ID` and
-`AWS_SECRET_ACCESS_KEY`:
+- **The attack stopped the runs** (the next run failed, as above):
+  the minute `status` gave for the last complete backup, as printed —
+  `last complete backup 2026-10-03 08:49 UTC` is `2026-10-03T08:49:00Z`.
+  On MinIO a copy there held the backup before it and checked clean.
+  Never that minute rounded up, which can fall after the attack began.
+- **The look's check or the drill found it, or the box is not to be
+  trusted** — the runs went on, so `status` is no guide: the moment from
+  the bucket's history, every write and delete with its time in UTC,
+  from the provider's own tool — Debian's `awscli`, with the account's
+  key in `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (and
+  `--endpoint-url https://<its endpoint>` on another S3 provider):
 
-```bash
-aws s3api list-object-versions --bucket my-backups --output text \
-  --query "[Versions[].[LastModified,'write ',Key], DeleteMarkers[].[LastModified,'delete',Key]][]" | sort
-```
+  ```bash
+  aws s3api list-object-versions --bucket my-backups --output text \
+    --query "[Versions[].[LastModified,'write ',Key], DeleteMarkers[].[LastModified,'delete',Key]][]" | sort
+  ```
 
-```
-2026-10-03T08:49:40.290000+00:00  write   locks/ae3ab8a0…
-2026-10-03T08:49:40.526000+00:00  write   data/2b/2b3113e7…
-2026-10-03T08:49:40.532000+00:00  write   index/4050462a…
-2026-10-03T08:49:40.536000+00:00  write   snapshots/9db598a5…
-2026-10-03T08:49:40.539000+00:00  delete  locks/ae3ab8a0…
-2026-10-03T08:49:51.695000+00:00  write   config
-2026-10-03T08:49:52.027000+00:00  write   data/16/16b7af23…
-```
+  ```
+  2026-10-03T08:49:40.290000+00:00  write   locks/ae3ab8a0…
+  2026-10-03T08:49:40.526000+00:00  write   data/2b/2b3113e7…
+  2026-10-03T08:49:40.532000+00:00  write   index/4050462a…
+  2026-10-03T08:49:40.536000+00:00  write   snapshots/9db598a5…
+  2026-10-03T08:49:40.539000+00:00  delete  locks/ae3ab8a0…
+  2026-10-03T08:49:51.695000+00:00  write   config
+  2026-10-03T08:49:52.027000+00:00  write   data/16/16b7af23…
+  ```
 
-A run ends by deleting its lock. The attack begins at the first thing
-restic never does: a write to a name already there — restic writes
-every file once, `config` at `init` — or a delete of `config` or
-`keys/…`. Any moment between the two will do: `2026-10-03T08:49:45Z`
-here. A deletion of snapshots and data alone looks like a `prune`:
-compare it with when you last pruned. On B2, Debian's `backblaze-b2 ls
---long --versions -r b2://my-backups` lists each upload and hide with its
-time — **unverified**.
+  A run ends by deleting its lock. The attack begins at the first thing
+  restic never does: a write to a name already there — restic writes
+  every file once, `config` at `init` — or a delete of `config` or
+  `keys/…`. Any moment between the two will do: `2026-10-03T08:49:45Z`
+  here. A deletion of snapshots and data alone looks like a `prune`:
+  compare it with when you last pruned. On B2, Debian's `backblaze-b2
+  ls --long --versions -r b2://my-backups` lists each upload and hide
+  with its time — **unverified**.
+
+Once the copy checks clean, give the new bucket new keys (the old ones
+are the attacker's) and follow [A rebuilt box](#a-rebuilt-box) with its
+URL. The copy went through the machine running rclone, every object:
+the whole repository comes down and goes up again, at the provider's
+egress price.
+
+New keys stop the attacker writing; they do not unknow the repository's
+password. Whoever had root on the box had the credential file, and so
+the password and, through the key files, the master key that encrypts
+every backup — and restic changes a master key only by moving the data
+into a new repository (`restic copy`) or starting a new one. Anyone who
+later reads the bucket with them can read the backups.
 
 ## Not yet tried against a real provider
 
@@ -534,7 +560,7 @@ Each is **unverified**, and a check the release candidate runs
   private CA added to the box's trust store, `setup`, runs, restores
   and the drill all worked.
 - **The bucket above**: versioning, keys that cannot destroy a
-  version, the 90-day rule, and B2 removing its own hide markers. On
+  version, the 180-day rule, and B2 removing its own hide markers. On
   MinIO the whole of it worked, an attack and its recovery included; not
   yet on AWS, B2 or Hetzner. On B2, that restic hides where its key may
   not delete is read in restic's own code, not seen.
