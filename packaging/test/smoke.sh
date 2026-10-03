@@ -14,9 +14,9 @@
 # lingering, the user@<uid> drop-in) no other test layer exercises.
 # Stage 3 then proves the app survives the upgrade restart.
 #
-# Stage 2c runs the backups README's "On a fresh box" lines — read out
-# of the README itself, mounted at /README-backups.md, so the lines run
-# are the lines written — as an administrator under sudo, against an
+# Stage 2c runs the "Set it up" lines of the backups guide — read out
+# of docs/backups.md itself, mounted at /docs-backups.md, so the lines
+# run are the lines written — as an administrator under sudo, against an
 # S3 server in this container, and then holds the package to the table
 # in backups/README.md: the timers enabled once, an administrator's
 # disable kept across an upgrade, stopped and masked on remove, enabled
@@ -509,8 +509,8 @@ status=$(curl -s --max-time 5 -H "Authorization: Bearer $TOKEN" "$HOOK")
 curl -fsS --max-time 5 "$PROXY/" | grep -q "hello smoke" || die "app not served after hotserve's automatic restart"
 echo "SIGKILL: systemd restarted hotserve (NRestarts=1); app pid $pid_live reattached"
 
-stage "stage 2c: backups — the README's 'On a fresh box' lines, as an administrator"
-# What the package set up, before any line of the README runs: the
+stage "stage 2c: backups — the guide's 'Set it up' lines, as an administrator"
+# What the package set up, before any line of the guide runs: the
 # programs it recommends (apt brings Recommends by default), the
 # account as setup makes it, the four unit files, the timers enabled
 # and running and their services untouched, and no credential file —
@@ -559,7 +559,7 @@ grep -q "refuse that account" /tmp/install.log \
 hotserve-backup account >/dev/null || die "the account postinstall made is not one setup accepts: $(hotserve-backup account 2>&1)"
 echo "the package's own: restic and sqlite3 by Recommends, the account, the units, the timers enabled and waiting"
 
-# The repository the README's lines are pointed at: rclone serve s3
+# The repository the guide's lines are pointed at: rclone serve s3
 # here, on the loopback, with a key that is no secret.
 mkdir -p /srv/s3
 rclone serve s3 --addr 127.0.0.1:9000 --auth-key "$S3KEY,$S3SECRET" /srv/s3 >/tmp/s3.log 2>&1 &
@@ -570,7 +570,7 @@ until curl -s -o /dev/null http://127.0.0.1:9000/; do
 	[ "$i" -ge 30 ] && die "rclone serve s3 not up within 15s: $(cat /tmp/s3.log)"
 	sleep 0.5
 done
-# The administrator the README is written for: not root, sudo.
+# The administrator the guide is written for: not root, sudo.
 useradd -m admin
 echo 'admin ALL=(ALL) NOPASSWD: ALL' >/etc/sudoers.d/admin
 chmod 0440 /etc/sudoers.d/admin
@@ -582,19 +582,30 @@ as_admin() { runuser -u admin -- sh -c "$1"; }
 # uploads directory under its shared/, the hotserve user's.
 su -s /bin/sh hotserve -c 'cd /var/lib/liveswap/demo/shared && sqlite3 app.db "create table t(n); insert into t values (1),(2);" && mkdir -p uploads && echo pic >uploads/a.png' \
 	|| die "could not seed the demo app's data"
-# Step 1 of the README, the declaration in the app's block, put there
+# Step 1 of the guide, the declaration in the app's block, put there
 # the way an administrator would edit it in.
 sed -i 's|^\t\tapp demo {$|&\n\t\t\tbackup {\n\t\t\t\tsqlite app.db\n\t\t\t\tfiles  uploads\n\t\t\t}|' /etc/hotserve/Caddyfile
 [ "$(grep -c 'sqlite app.db' /etc/hotserve/Caddyfile)" = 1 ] || die "the backup block did not go into the demo app's block"
 
-# The README's lines, between its smoke markers; the example
+# The guide's lines, between its smoke markers; the example
 # repository URL is this box's, and the app is demo, as written.
 OUT=/tmp/docs.out
 . /tty.sh
-mapfile -t docs < <(awk '/<!-- smoke: begin -->/{on=1; next} /<!-- smoke: end -->/{on=0} on' /README-backups.md | grep -v '^```' | grep -v '^#' | grep -v '^$' | sed "s|s3:https://s3.example.com/my-backups|$S3REPO|")
-[ "${#docs[@]}" -ge 6 ] || die "the README's smoke block holds ${#docs[@]} lines; the markers moved?"
+mapfile -t docs < <(awk '/<!-- smoke: begin -->/{on=1; next} /<!-- smoke: end -->/{on=0} on' /docs-backups.md | grep -v '^```' | grep -v '^#' | grep -v '^$' | sed "s|s3:https://s3.example.com/my-backups|$S3REPO|")
+# Exactly the lines this stage runs and checks: a line dropped from the
+# guide, or one added that nothing here checks, fails rather than
+# passing as "ran as written".
+want="hotserve-backup validate /etc/hotserve/Caddyfile
+sudo systemctl reload hotserve
+sudo hotserve-backup setup $S3REPO
+sudo systemctl start hotserve-backup.service
+hotserve-backup status
+sudo hotserve-backup restore demo --to /root/demo-restored
+sudo hotserve-backup restore demo"
+[ "$(printf '%s\n' "${docs[@]}")" = "$want" ] \
+	|| die "the guide's smoke block is not the seven lines this stage runs and checks; it holds: $(printf '%s | ' "${docs[@]}")"
 for line in "${docs[@]}"; do
-	echo "README: $line"
+	echo "docs/backups.md: $line"
 	case "$line" in
 	"sudo hotserve-backup setup "*)
 		converse "runuser -u admin -- sh -c '$line'" "$P_KEY" "$S3KEY" "$P_SECRET" "$S3SECRET" "$P_STORED" stored \
@@ -607,7 +618,7 @@ for line in "${docs[@]}"; do
 		[ "$(stat -c '%U %a' "$CRED")" = "root 600" ] || die "$CRED is '$(stat -c '%U %a' "$CRED")', want 'root 600'"
 		CRED_SHA=$(sha256sum "$CRED" | cut -d' ' -f1)
 		expect_backup_state "after setup" enabled active "$CRED_SHA"
-		# The README's next claim: the first backup comes from the timer,
+		# The guide's next claim: the first backup comes from the timer,
 		# within the hour and ten minutes. Not waited an hour for: a
 		# drop-in makes the timer a minute's, one firing is watched, the
 		# drop-in goes. The service it starts is the shipped one.
@@ -659,7 +670,7 @@ for line in "${docs[@]}"; do
 done
 [ -f /root/demo-restored/uploads/a.png ] && [ "$(sqlite3 /root/demo-restored/app.db 'select count(*) from t')" = 2 ] \
 	|| die "the restore --to put nothing there: $(find /root/demo-restored 2>&1 | head)"
-# Not in the README's lines, and true of them: the --to rule, and the
+# Not in the guide's lines, and true of them: the --to rule, and the
 # pre-restore snapshot the restore into place named.
 as_admin "sudo hotserve-backup restore demo --to /tmp/demo-restored" >"$OUT" 2>&1 && die "a restore --to /tmp was accepted" || true
 grep -q "not /tmp — /root, /srv, /var/backups, or a root-owned directory of your own" "$OUT" || die "the --to rule's words are missing: $(cat "$OUT")"
@@ -667,7 +678,7 @@ grep -q "not /tmp — /root, /srv, /var/backups, or a root-owned directory of yo
 snaps=$(systemd-run --quiet --pipe --wait --collect -p User=hotserve-backup -p EnvironmentFile=$CRED -p CacheDirectory=hotserve-backup -E RESTIC_CACHE_DIR=/var/cache/hotserve-backup -E HOME=/nonexistent /usr/bin/restic snapshots --no-lock --json --tag pre-restore 2>/dev/null | grep -o '"short_id"' | wc -l)
 [ "$snaps" = 1 ] || die "want one pre-restore snapshot, the repository holds $snaps"
 curl -fsS --max-time 5 "$PROXY/" | grep -q "hello smoke" || die "the app is not served after the backups"
-echo "the README's lines ran as written, as the administrator: validate, reload, setup, a run, status, a restore --to, a restore into place with its pre-restore snapshot"
+echo "the guide's lines ran as written, as the administrator: validate, reload, setup, a run, status, a restore --to, a restore into place with its pre-restore snapshot"
 
 stage "stage 3: reinstall — upgrade path, conffile preservation, app survival"
 pid_before=$(printf '%s' "$status" | sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p')

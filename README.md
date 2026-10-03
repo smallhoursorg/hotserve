@@ -108,6 +108,10 @@ Both apps serve on the socket hotserve hands them, answer `/health`,
 migrate before each version starts, stop cleanly, and deploy from
 GitHub Actions with no stored secret.
 
+[Backups](docs/backups.md) copies each app's databases and files into a
+bucket off the box every hour, proves weekly that a restore would
+work, and puts an app back.
+
 
 ## What hotserve is (and isn't)
 

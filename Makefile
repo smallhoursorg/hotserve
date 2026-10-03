@@ -175,9 +175,9 @@ package: build
 
 # Installs the freshly built .deb inside a systemd container (DISTRO
 # picks the base image) and runs the staged smoke test: install, unit
-# boot, a real liveswap deploy under the sandbox, the backups README's
-# "On a fresh box" lines as an administrator (the README is mounted:
-# the lines run are the lines written), reinstall, remove, purge.
+# boot, a real liveswap deploy under the sandbox, the "Set it up" lines
+# of docs/backups.md as an administrator (the page is mounted: the lines
+# run are the lines written), reinstall, remove, purge.
 # Needs dist/ populated first (make package). --privileged +
 # --cgroupns=host with the cgroup mount is the reliable
 # systemd-in-docker recipe on cgroup-v2 hosts (GitHub runners and
@@ -194,7 +194,7 @@ install-test:
 		-v $(CURDIR)/packaging/test/smoke.sh:/smoke.sh:ro \
 		-v $(CURDIR)/liveswap/testdata/sandbox-view.sh:/sandbox-view.sh:ro \
 		-v $(CURDIR)/e2e/backup/tty.sh:/tty.sh:ro \
-		-v $(CURDIR)/backups/README.md:/README-backups.md:ro \
+		-v $(CURDIR)/docs/backups.md:/docs-backups.md:ro \
 		hotserve-install-test-$(subst :,-,$(DISTRO))
 	docker exec hotserve-smoke /bin/bash /smoke.sh; status=$$?; \
 	if [ $$status -ne 0 ]; then \

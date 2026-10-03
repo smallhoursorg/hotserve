@@ -1,8 +1,8 @@
 #!/bin/sh
 # A real terminal for a command that asks (sourced, not run): script(1)'s
 # pty, the answers typed as each prompt appears. Shared by the setup
-# suite and the package smoke test, which runs the README's setup line
-# as an administrator. Callers set OUT first.
+# suite and the package smoke test, which runs the setup line of
+# docs/backups.md as an administrator. Callers set OUT first.
 
 # at_tty <cmd...>: the command at a real terminal, typing nothing — for
 # a command that asks nothing. A prompt it did ask would still show in

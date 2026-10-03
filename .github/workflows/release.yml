@@ -115,7 +115,8 @@ jobs:
               or a later install catches up a run nobody missed
 
           Docs: https://github.com/smallhoursorg/hotserve
-          (backups: backups/README.md there)
+          (backups: docs/backups.md there, and backups/README.md for how
+          they work)
           EOF
             chmod 0755 "$staging/hotserve" "$staging/hotserve-backup"
             chmod 0644 "$staging"/systemd/*
