@@ -172,8 +172,10 @@ moment for it.
 - **Patching the box** (`apt upgrade`) reaches an app only at its next
   launch too; after patching, push a commit to each app or reboot
   ([Upgrading](upgrading.md#patching-the-host)).
-- **Backups:** the package ships `hotserve-backup` and its timers; what
-  to declare, `sudo hotserve-backup setup`, and a restore are the lines
-  under "On a fresh box" in [backups/README.md](../backups/README.md#on-a-fresh-box).
+- **Backups:** the package ships `hotserve-backup` and its timers;
+  setting them up, checking on them and restoring are
+  [Backups](backups.md). Its `sudo` lines are root's — the provider's
+  console — and not `alice`'s; `hotserve-backup status` needs no
+  privilege.
 - **Everything else:** [liveswap/README.md](../liveswap/README.md) is the
   reference for every option, status code and edge.

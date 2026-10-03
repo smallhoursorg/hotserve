@@ -11,9 +11,11 @@ and nothing here talks to hotserve. The two share a declaration format
 (`liveswap/backupdecl`) and nothing more — `hotserve-backup` links no
 Caddy.
 
-**On this branch it is setup, the engine, restore, the restore drill,
+**This release carries setup, the engine, restore, the restore drill,
 the repository check, what says how they are doing, and the
-package.** `hotserve-backup setup
+package.** [docs/backups.md](../docs/backups.md) is the operator's
+guide to them, every transcript in it observed on a fresh box; this
+page is how they work. `hotserve-backup setup
 <repository>` makes the box ready for one repository (below),
 `hotserve-backup run` does one backup run, `hotserve-backup restore
 <app>` puts a snapshot back, `hotserve-backup drill` proves that a
@@ -41,35 +43,17 @@ packages (`apt install ./hotserve_….deb` brings them; with
 `--no-install-recommends` it does not, and setup and every run then say
 which to install). Nothing runs until `setup` has written the credential
 file: each service is conditioned on `/etc/hotserve-backup/repository.env`,
-and a start before that is skipped, not failed. As the administrator
-(`docs/after-first-deploy.md`), with `sudo`:
-
-<!-- smoke: begin -->
-```sh
-# 1. In the app's block of /etc/hotserve/Caddyfile, what to back up:
-#        backup {
-#            sqlite app.db
-#            files  uploads
-#        }
-#    then, before it goes live, whether a run could plan from it:
-sudo hotserve-backup validate /etc/hotserve/Caddyfile
-sudo systemctl reload hotserve
-# 2. The repository, once: the storage key is asked for at the terminal,
-#    and a new repository's password is shown once, to store elsewhere.
-sudo hotserve-backup setup s3:https://s3.example.com/my-backups
-# 3. The first backup runs within the hour and ten minutes
-#    (systemctl list-timers hotserve-backup.timer), or now:
-sudo systemctl start hotserve-backup.service
-hotserve-backup status
-# 4. A restore: into a directory of root's own to look at, or into
-#    place — which backs the app up first, tagged pre-restore, and asks.
-sudo hotserve-backup restore demo --to /root/demo-restored
-sudo hotserve-backup restore demo
-```
-<!-- smoke: end -->
+and a start before that is skipped, not failed. The lines that set it
+up — the declaration, `validate`, `setup`, a first run, `status`, a
+restore — are under "Set it up" in
+[docs/backups.md](../docs/backups.md#set-it-up). Those under `sudo` are
+root's: the provider's console, or an administrator whose `sudo` is
+root's. The administrator `docs/after-first-deploy.md` creates has the
+`hotserve` user's reach and not root's (`examples/box/sudoers`), and
+runs `validate` and `status`, which need no root.
 
 The package's smoke test (`make install-test`) runs exactly those lines,
-read out of this file, as an administrator under `sudo`, on a fresh
+read out of that page, as an administrator under `sudo`, on a fresh
 Debian 13 with the `.deb` just installed and an S3 server beside it;
 watches the timer fire; reads `status` as that administrator; refuses
 `--to /tmp/…` (every directory on the way has to be root's own, "A
@@ -444,7 +428,12 @@ directory on the way to it has to be root's own and writable by nobody
 else — `/root`, `/srv`, `/var/backups`, a root-owned directory of your
 own; not `/tmp`, and nothing an app's user owns — since the restore is
 made where the name leads, and anyone who could write a directory on
-the way could have put a link there first. Nothing is
+the way could have put a link there first. That rule does not keep
+root's own directories out of reach, so `--to` is root's alone and is
+never to be granted through `sudo`: whoever chooses the directory
+chooses where root puts bytes the app wrote — restored into
+`/etc/systemd/system/<unit>.d`, an app's `files` became that unit's
+settings at the next `daemon-reload` [measured]. Nothing is
 asked and nothing backed up, since nothing is overwritten; and what is
 sound lands even when something else is not — a damaged copy is never
 handed out as a database — with a non-zero exit. It is how to look into
@@ -568,7 +557,9 @@ One snapshot per app per run, host `hotserve`, tagged `hotserve` and
 The paths are the same on every box, whatever its liveswap root, and
 through a symlinked root the snapshot holds the data, not the link. Each
 app is its own `(host, paths)` group, so a `forget` policy applies to
-each app on its own.
+each app on its own — and to the snapshot a restore makes of what it
+restores over, which is in that group too, tagged `pre-restore` besides
+("Retention", below).
 
 A run that ends `ok` on an app then writes one more snapshot, the
 record that it did: host `hotserve`, tagged `hotserve-clean` and
@@ -612,11 +603,19 @@ cache: 1,506 snapshots took 19.6 s over 25 ms each way and 50 Mbit/s
 [measured]. At 7 apps a year of that is some 120,000, and at that rate
 a first listing of some 26 minutes [extrapolated, not measured] —
 close to the 30 minutes at which a run or a drill gives a listing up;
-a restore waits it out. An ordinary `forget` policy
-by `(host, paths)` group — `--keep-hourly 24 --keep-daily 30
---keep-monthly 12`, say, the default grouping — thins each app's
-snapshots and its records alike, each group on its own, and keeps a
-listing to a few hundred.
+a restore waits it out. A policy such as `--keep-hourly 24 --keep-daily
+30 --keep-monthly 12` keeps a listing to a few hundred — run as two
+`forget`s, not one ([docs/backups.md](../docs/backups.md#retention-off-the-box)).
+In the default grouping a restore's `pre-restore` snapshot can be the
+newest of its hour in the app's group, and then `--keep-hourly` keeps it
+and removes that hour's backup: dry-run after a restore, the policy
+would have removed the last complete backup, which was also the last
+proven, and with `--keep-tag pre-restore` it kept the restore's
+snapshot and would still have removed the backup [measured]. Grouped by tags as well, the app's backups and
+its `pre-restore` snapshots are thinned apart; but each record's
+`vouches:` tag is its own, so the records are thinned by `(host,
+paths)` in a `forget` of their own (`--tag hotserve-clean`), and the
+backups in the other (`--tag hotserve`, which no record carries).
 
 A declared database that sits inside a declared `files` path is not
 uploaded there, nor its `-wal`, `-shm` and `-journal`: its contents are
@@ -1210,9 +1209,9 @@ id left behind would tie a later record to the wrong repository.
   setup suite shows `setup` making, and the timers' enable state, so
   that no timer fires into a scenario.
 - `make package` and `make install-test` — the `.deb` built and
-  installed under real systemd on a fresh Debian 13: the README's "On
-  a fresh box" lines as an administrator, and the package's transitions
-  table with its edges.
+  installed under real systemd on a fresh Debian 13: the "Set it up"
+  lines of `docs/backups.md` as an administrator, and the package's
+  transitions table with its edges.
 
 ### On a new Debian release
 
