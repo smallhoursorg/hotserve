@@ -25,7 +25,7 @@ its restore proven, and
 `hotserve-backup validate <Caddyfile>` says whether a run could plan
 from a Caddyfile before it goes live. The `hotserve` package carries
 the program, an hourly timer for the run and a Sunday one for the
-drill ("On a fresh box", below), and recommends Debian 13's `restic`
+drill ("On a fresh box", below), and depends on Debian 13's `restic`
 and `sqlite3`; `setup` and every run need those, and systemd 257
 (`PrivatePIDs=`), which is Debian 13's, and say so before anything
 else.
@@ -38,10 +38,12 @@ line; `hotserve-backup.timer`, hourly — on the hour plus an offset of
 up to ten minutes that is this box's own and stays the same — and
 `hotserve-backup-drill.timer`, Sunday between 03:30 and 03:40 — an
 offset of the same kind — both enabled, both catching
-up a missed elapse at boot; and `restic` and `sqlite3` as recommended
-packages (`apt install ./hotserve_….deb` brings them; with
-`--no-install-recommends` it does not, and setup and every run then say
-which to install). Nothing runs until `setup` has written the credential
+up a missed elapse at boot; and `restic`, `sqlite3` and
+`ca-certificates` as dependencies, so that `apt install
+./hotserve_….deb` brings them also where an image leaves recommended
+packages out (Hetzner's Debian 13 sets `APT::Install-Recommends
+"false"`); setup and every run still look for the two programs, and say
+which to install. Nothing runs until `setup` has written the credential
 file: each service is conditioned on `/etc/hotserve-backup/repository.env`,
 and a start before that is skipped, not failed. The lines that set it
 up — the declaration, `validate`, `setup`, a first run, `status`, a
@@ -241,7 +243,7 @@ run, and what the step is given.
 | the run itself | root | — | never reads it | its own state and run dirs |
 | setup | root | — | writes it; sees whether one was there before, and reads none | its own state and run dirs, and the terminal |
 | plan | `hotserve-backup`, own user+PID namespaces | no | no | `/etc/hotserve`, read-only |
-| probe, init, open (setup's) | `hotserve-backup`, no capability | yes | yes, the file setup is about to put in place | nothing of the app |
+| probe, init, open, write (setup's) | `hotserve-backup`, no capability | yes | yes, the file setup is about to put in place | nothing of the app |
 | dump, clean | `hotserve`, own user+PID namespaces | no | no | that app's `shared/` (dump only) and staging |
 | upload | `hotserve-backup`, `CAP_DAC_READ_SEARCH` | yes | yes | that app's declared paths and staged copies, read-only |
 | verify | `hotserve-backup`, no capability | yes | yes | nothing of the app |
@@ -926,9 +928,11 @@ hourly run. It needs no sudoers line.
   control character, or one that is not UTF-8 — the file cannot hold
   it — three times; and a password not confirmed `stored`.
 - `setup`, after two minutes with no answer from the repository (ten
-  seconds for the look that comes first): the look or the opening is
-  stopped, and nothing has been written; init is left running, said,
-  and waited for by whatever comes next.
+  seconds for the look that comes first): the look, the opening or the
+  write is stopped, and nothing has been written; init is left running,
+  said, and waited for by whatever comes next.
+- `setup`, for a repository that is there already: a key that reads it
+  and cannot write a lock file to it ("Setup", 7).
 
 ## The Caddyfile is read without the server's environment
 
@@ -1071,7 +1075,19 @@ What can be known to fail is refused before anything is asked for
    reused — is asked for its own password (echo off), and nothing is
    made or shown; setup opens it with `restic cat config`, and a wrong
    password is refused (exit 12) and asked for again, up to three
-   times; a storage that refuses the opening is said in restic's words. Where the look could not tell and init finds the repository
+   times; a storage that refuses the opening is said in restic's words.
+   The opening only reads, so the key is then held to **writing**: the
+   same command without `--no-lock`, which writes a lock file and
+   removes it (0.7 s [measured]), said as "checking that this key can
+   write to it". A key that may read and not write is refused, in
+   restic's words, before anything is written: at once where the
+   storage says so plainly (S3's 403: restic exits 1), at the two-minute
+   clock where restic retries (B2's 401, which it retried for a quarter
+   of an hour [measured]) — a run with such a key fails that long after
+   it starts, every hour. Where another restic holds the repository
+   (exit 11: a prune or a check from elsewhere) nothing was learned of
+   the key; that is said, and setup goes on. A repository setup itself
+   made was written by its init, and is not asked. Where the look could not tell and init finds the repository
    there after all ("already initialized", whatever the password), the
    same follows, and the password just shown is said not to be the
    one;
@@ -1192,7 +1208,7 @@ id left behind would tie a later record to the wrong repository.
 - and what the manager makes of each shape of line in the credential
   file, held against what `envfile` reads; what `restic init` and
   `cat config` say of a repository that exists, and with a wrong
-  password.
+  password; that `cat config` writes a lock file unless told not to.
 - and every other behaviour of restic, sqlite3, systemd and Caddy that
   the code leans on, each a test of its own whose comment names what
   rests on it: restic's exit statuses (3 with the snapshot still named,
