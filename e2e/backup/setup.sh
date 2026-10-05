@@ -181,6 +181,40 @@ rc=$?
 [ "$(grep -c 'Repository password: ' "$OUT")" = 3 ] && [ "$(grep -c 'cannot open the repository (exit 12): again' "$OUT")" = 2 ] && pass "and asked for again, twice, before giving up" || fail "the password retries: $(grep -c 'Repository password: ' "$OUT") askings"
 says "Repository password (new)" && fail "a password was made for a repository that exists" || pass "no password was made for a repository that exists"
 [ "$(sum)" = "$before" ] && [ "$(temps)" = 0 ] && [ "$(units_left)" = 0 ] && pass "the working file is byte-identical, no copy of a credential is left, no unit is running" || fail "after a wrong password: temps=$(temps), units=$(units_left)"
+# A key that may read and not write. The storage through a proxy of the
+# box's own that passes every read and refuses every write: plainly
+# (403), where restic exits 1 at once, and then in a way restic retries
+# (500, as B2's 401 was retried for a quarter of an hour [RC check 6]),
+# which the clock ends — 30 s in this box's binary. The opening only
+# reads, so both were taken, and every run after failed.
+readonly_storage() { # <the status a write gets>
+	printf '{\n\tadmin off\n\tauto_https off\n}\nhttp://127.0.0.1:9100 {\n\t@write method PUT POST DELETE\n\trespond @write %s\n\treverse_proxy e2e-s3:9000\n}\n' "$1" >/root/readonly.Caddyfile
+	systemctl stop readonly-storage.service 2>/dev/null
+	systemd-run --quiet --unit=readonly-storage.service /usr/bin/hotserve run --config /root/readonly.Caddyfile --adapter caddyfile
+	i=0
+	until curl -s -o /dev/null http://127.0.0.1:9100/ || [ "$i" -ge 100 ]; do
+		i=$((i + 1))
+		sleep 0.1
+	done
+}
+RO=s3:http://127.0.0.1:9100/setuprepo
+readonly_storage 403
+t0=$(date +%s)
+converse "hotserve-backup setup $RO" "$P_KEY" "$KEYID" "$P_SECRET" "$SECRET" "$P_PW" "$pw"
+rc=$?
+took=$(($(date +%s) - t0))
+[ "$rc" != 0 ] && says "the repository exists; its password is needed" && says "checking that this key can write to it (up to 30s)" && says "this key read the repository and could not write a lock file to it (exit 1): a key that may only read cannot back up (restic said: .*Access Denied" && [ "$took" -lt 20 ] && pass "a key the storage refuses every write, plainly, is refused at once (${took}s), in restic's words" || fail "a read-only key, refused plainly: exit $rc after ${took}s: $(cat "$OUT")"
+says "repository ready" && fail "setup said the repository was ready" || pass "and not called ready"
+[ "$(sum)" = "$before" ] && [ "$(temps)" = 0 ] && [ "$(units_left)" = 0 ] && pass "the working file is byte-identical, no copy of a credential is left, no unit is running" || fail "after a read-only key: same=$([ "$(sum)" = "$before" ] && echo yes || echo NO), temps=$(temps), units=$(units_left)"
+readonly_storage 500
+t0=$(date +%s)
+converse "hotserve-backup setup $RO" "$P_KEY" "$KEYID" "$P_SECRET" "$SECRET" "$P_PW" "$pw"
+rc=$?
+took=$(($(date +%s) - t0))
+[ "$rc" != 0 ] && says "still waiting for $RO (Ctrl-C is safe: nothing has been written)" && says "this key read the repository and wrote no lock file to it within 30s: a key that may only read cannot back up (restic said: .*Save(<lock/" && [ "$took" -ge 30 ] && [ "$took" -lt 90 ] && pass "a write restic retries is given up on at the clock (${took}s), and said as a key that cannot write" || fail "a read-only key, retried: exit $rc after ${took}s: $(cat "$OUT")"
+[ "$(sum)" = "$before" ] && [ "$(temps)" = 0 ] && [ "$(units_left)" = 0 ] && pass "and left the working setup as it was, its unit stopped" || fail "after the clock: same=$([ "$(sum)" = "$before" ] && echo yes || echo NO), temps=$(temps), units=$(units_left)"
+systemctl stop readonly-storage.service
+[ "$(rr list locks --no-lock 2>/dev/null | wc -l)" = 0 ] && pass "no lock file is left in the repository" || fail "locks left: $(rr list locks --no-lock 2>&1)"
 
 echo "=== setup 7: a rebuilt box opens the repository it already has, with its own password ==="
 rm -f "$ENVFILE"
@@ -190,6 +224,7 @@ rc=$?
 grep -q "^RESTIC_PASSWORD=$pw\$" "$ENVFILE" && pass "the file holds the repository's own password" || fail "the file holds: $(grep PASSWORD "$ENVFILE" | sed 's/=.*/=…/')"
 says "$pw" && fail "the repository's password was shown as it was typed" || pass "the repository's password was not shown as it was typed"
 says "the repository exists; its password is needed" && ! says "Repository password (new)" && ! says "stored" && pass "a rebuilt box is asked for the password it has, and shown none" || fail "the rebuilt box was shown: $(grep -i password "$OUT")"
+says "checking that this key can write to it (up to 30s)" && pass "and its key is held to writing, before the file is put in place" || fail "the write check was not said: $(cat "$OUT")"
 rr cat config --no-lock >/dev/null 2>&1 && pass "the repository answers" || fail "the repository does not answer"
 # With no file before, the record cannot be tied to this repository: it
 # is put aside, and the next run drills what it backs up here.

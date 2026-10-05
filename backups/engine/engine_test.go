@@ -68,6 +68,7 @@ type box struct {
 	// programs are installed and whether the account is
 	initOut, initErr, probeOut string
 	openErr                    string // what the open unit says on stderr
+	writeErr                   string // what the write unit says on stderr
 	planErr                    string // what the plan unit says on stderr
 	hang                       string
 	version                    int
@@ -378,12 +379,15 @@ func (b *box) Run(ctx context.Context, s unit.Spec) (unit.Outcome, error) {
 		if s.StderrFile != "" {
 			must(b.t, os.WriteFile(s.StderrFile, []byte(b.initErr), 0o600))
 		}
-	case "probe", "open":
+	case "probe", "open", "write":
 		write(b.probeOut)
 		if s.StderrFile != "" {
 			stderr := ""
-			if role == "open" {
+			switch role {
+			case "open":
 				stderr = b.openErr
+			case "write":
+				stderr = b.writeErr
 			}
 			must(b.t, os.WriteFile(s.StderrFile, []byte(stderr), 0o600))
 		}

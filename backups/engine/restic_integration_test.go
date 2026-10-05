@@ -399,6 +399,42 @@ func TestIntegrationALockHeldForTheWholeRetryIsExit11(t *testing.T) {
 	if detail, wide := resticFailure(unit.Outcome{Result: "exit-code", ExitStatus: 11}); !wide || !strings.Contains(detail, "locked") {
 		t.Errorf("exit 11 is said as %q, repository-wide %v", detail, wide)
 	}
+	// Setup's write check (writable) asks with no --retry-lock, and takes
+	// exit 11 for another restic's hold, not for a key that cannot write:
+	// it has to come at once, where a refused write may be retried.
+	began = time.Now()
+	if _, said, exit := resticIn(t, base, time.Minute, restic, "cat", "config"); exit != 11 || time.Since(began) > 10*time.Second {
+		t.Fatalf("cat config meeting an exclusive lock: exit %d after %s, want 11 at once: %s", exit, time.Since(began).Round(time.Millisecond), said)
+	}
+}
+
+// Setup's write check (writable) leans on what `restic cat config` does
+// without --no-lock: it writes a lock file and removes it, so a storage
+// the key may read and not write refuses it — where --no-lock, the
+// opening's, reads on. Refused plainly, restic 0.18 exits 1 at once and
+// names the lock; a refusal it retries is the check's clock's to end
+// [measured on B2: a quarter of an hour]. As the backup account's
+// stand-in, over a repository it may read and not write.
+func TestIntegrationResticCatConfigWritesALockFileUnlessNoLock(t *testing.T) {
+	const restic = "/usr/bin/restic"
+	base := openBase(t)
+	resticIn(t, base, time.Minute, restic, "init", "-q")
+	must(t, exec.Command("chmod", "-R", "a+rX", filepath.Join(base, "repo")).Run())
+	if _, said, exit := resticAs(t, base, nobody, time.Minute, restic, "cat", "config", "--no-lock"); exit != 0 {
+		t.Fatalf("cat config --no-lock of a repository that may be read: exit %d: %s", exit, said)
+	}
+	began := time.Now()
+	_, said, exit := resticAs(t, base, nobody, time.Minute, restic, "cat", "config")
+	if took := time.Since(began); exit != 1 || !strings.Contains(said, "lock") || took > 20*time.Second {
+		t.Fatalf("cat config where no lock file can be written: exit %d after %s, want 1 at once, naming the lock: %s", exit, took.Round(time.Millisecond), said)
+	}
+	// Where it may write, it leaves no lock behind.
+	if _, said, exit := resticIn(t, base, time.Minute, restic, "cat", "config"); exit != 0 {
+		t.Fatalf("cat config of a repository that may be written: exit %d: %s", exit, said)
+	}
+	if locks, err := os.ReadDir(filepath.Join(base, "repo", "locks")); err != nil || len(locks) != 0 {
+		t.Fatalf("cat config left %d lock files (%v)", len(locks), err)
+	}
 }
 
 // D4: an upload, a fetch and the repository check have no backstop —

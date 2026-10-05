@@ -499,7 +499,7 @@ func TestAnExistingRepositoryIsOpenedWithItsOwnPassword(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v\nsaid:\n%s", err, m.saidAll())
 	}
-	if got, want := b.roles(), "plan probe open"; got != want {
+	if got, want := b.roles(), "plan probe open write"; got != want {
 		t.Fatalf("units: %s, want %s", got, want)
 	}
 	if got, want := m.askedAll(), "Storage key id (AWS_ACCESS_KEY_ID): \nsecret:Storage secret key (AWS_SECRET_ACCESS_KEY): \nsecret:Repository password: "; got != want {
@@ -521,6 +521,18 @@ func TestAnExistingRepositoryIsOpenedWithItsOwnPassword(t *testing.T) {
 	}
 	if s.User != backupUser || !s.Network || len(s.Capabilities) != 0 || !strings.HasPrefix(s.EnvironmentFile, b.cfg.EnvFile+".") {
 		t.Fatalf("the open unit: %+v", s)
+	}
+	// Then written to, by the same account from the same staged file:
+	// the opening's command without --no-lock, which takes a lock file.
+	w := b.spec("write")
+	if got, want := strings.Join(w.Argv, " "), "/usr/bin/restic cat config"; got != want {
+		t.Fatalf("the write unit's argv: %q", got)
+	}
+	if w.User != backupUser || !w.Network || len(w.Capabilities) != 0 || w.EnvironmentFile != s.EnvironmentFile {
+		t.Fatalf("the write unit: %+v", w)
+	}
+	if !strings.Contains(m.saidAll(), "checking that this key can write to it (up to 200ms)") {
+		t.Fatalf("said:\n%s", m.saidAll())
 	}
 	if rep.New || rep.RepositoryID != repoID || !strings.Contains(m.saidAll(), "repository ready: s3:http://e2e-s3:9000/box (existing, id bbd0e899)") {
 		t.Fatalf("report %+v\nsaid:\n%s", rep, m.saidAll())
@@ -764,7 +776,7 @@ func TestAfterAFailedInitTheShownPasswordIsTriedBeforeItIsCalledUnused(t *testin
 	if err != nil {
 		t.Fatalf("%v\nsaid:\n%s", err, m.saidAll())
 	}
-	if got, want := b.roles(), "plan probe init probe open open"; got != want || rep.New || !strings.Contains(m.saidAll(), "the password shown above was never used: discard it") {
+	if got, want := b.roles(), "plan probe init probe open open write"; got != want || rep.New || !strings.Contains(m.saidAll(), "the password shown above was never used: discard it") {
 		t.Fatalf("units %s, report %+v\nsaid:\n%s", got, rep, m.saidAll())
 	}
 	// Where the second attempt's look cannot tell either, and its init
@@ -801,7 +813,7 @@ func TestAfterAFailedInitTheShownPasswordIsTriedBeforeItIsCalledUnused(t *testin
 	if err != nil {
 		t.Fatalf("%v\nsaid:\n%s", err, m.saidAll())
 	}
-	if got, want := b.roles(), "plan probe init open"; got != want || rep.New || !strings.Contains(m.saidAll(), "the password shown above was never used: discard it") {
+	if got, want := b.roles(), "plan probe init open write"; got != want || rep.New || !strings.Contains(m.saidAll(), "the password shown above was never used: discard it") {
 		t.Fatalf("units %s, report %+v\nsaid:\n%s", got, rep, m.saidAll())
 	}
 }
@@ -872,7 +884,7 @@ func TestWhereTheProbeCannotTellInitAnswers(t *testing.T) {
 				if err != nil {
 					t.Fatalf("%v\nsaid:\n%s", err, m.saidAll())
 				}
-				if got, want := b.roles(), "plan probe init open"; got != want {
+				if got, want := b.roles(), "plan probe init open write"; got != want {
 					t.Fatalf("units: %s, want %s", got, want)
 				}
 				if !strings.Contains(m.saidAll(), "the repository exists; its password is needed (the one shown above is not it)") {
@@ -1065,7 +1077,7 @@ func TestAPasswordShownAndNotUsedIsSaidDeadOnSuccessToo(t *testing.T) {
 	}
 	m.answers = []string{"AKIDX", "wrong", "stored", "AKIDX", "the-secret", "its-own-password"}
 	rep, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
-	if err != nil || rep.New || b.roles() != "plan probe init probe open open" {
+	if err != nil || rep.New || b.roles() != "plan probe init probe open open write" {
 		t.Fatalf("%v %+v %s", err, rep, b.roles())
 	}
 	for _, want := range []string{"the repository exists; its password is needed (the one shown above is not it)", "the password shown above was never used: discard it"} {
@@ -1093,7 +1105,7 @@ func TestAWrongRepositoryPasswordIsAskedForAgain(t *testing.T) {
 	if _, err := b.setup(t, m, "s3:http://e2e-s3:9000/box"); err != nil {
 		t.Fatalf("%v\nsaid:\n%s", err, m.saidAll())
 	}
-	if got, want := b.roles(), "plan probe open open"; got != want || !strings.Contains(m.saidAll(), "this password cannot open the repository (exit 12): again") {
+	if got, want := b.roles(), "plan probe open open write"; got != want || !strings.Contains(m.saidAll(), "this password cannot open the repository (exit 12): again") {
 		t.Fatalf("units: %s\nsaid:\n%s", got, m.saidAll())
 	}
 	if v := envOf(t, b.cfg.EnvFile); v["RESTIC_PASSWORD"] != "its-own-password" {

@@ -658,6 +658,9 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 				return nil, s.err(err)
 			}
 			if opened {
+				if err := s.writable(ctx); err != nil {
+					return nil, s.err(err)
+				}
 				rep.RepositoryID = id
 				break
 			}
@@ -980,6 +983,44 @@ func (s *setup) openRepository(ctx context.Context) (id string, opened bool, err
 	return "", false, errors.New(detail)
 }
 
+// writable is whether this key can write to a repository that was
+// there already; one setup made was written by its init. The opening
+// only reads, and a key that may read and not write passed it: every
+// run then failed a quarter of an hour in [RC check 6, on B2]. Asked
+// with the opening's own command without --no-lock, which writes a lock
+// file and removes it — 0.7 s where the key may write [measured]. Where
+// it may not, restic exits 1 at once on a storage that says so plainly
+// (S3's 403) and retries for a quarter of an hour on one that does not
+// (B2's 401) [measured], so it has the opening's clock. Another restic
+// holding the repository exclusively (exit 11, at once [measured]) is
+// no refusal of the key: said, and setup goes on.
+func (s *setup) writable(ctx context.Context) error {
+	s.term.Say(fmt.Sprintf("checking that this key can write to it (up to %s)", setupClock))
+	const readOnly = ": a key that may only read cannot back up"
+	said := func() string {
+		if m := resticMessage(filepath.Join(s.dir, "write.err")); m != "" {
+			return " (restic said: " + record.Text(m) + ")"
+		}
+		return ""
+	}
+	o, _, err := s.repository(ctx, "write", setupClock, s.cfg.Restic, "cat", "config")
+	switch {
+	case errors.Is(err, errDidNotAnswer):
+		return fmt.Errorf("this key read the repository and wrote no lock file to it within %s%s%s", setupClock, readOnly, said())
+	case err != nil:
+		return err
+	case o.OK():
+		return nil
+	case o.Result == "exit-code" && o.ExitStatus == 11:
+		s.term.Say("the repository is locked by another restic (exit 11) — a prune or a check from elsewhere: whether this key can write to it was not checked")
+		return nil
+	case o.Result == "exit-code" && o.ExitStatus == 1:
+		return errors.New("this key read the repository and could not write a lock file to it (exit 1)" + readOnly + said())
+	}
+	detail, _ := resticFailure(o)
+	return errors.New("writing to the repository: " + detail)
+}
+
 // errDidNotAnswer is a unit given up on at its clock.
 var errDidNotAnswer = errors.New("the repository did not answer")
 
@@ -989,8 +1030,9 @@ var errDidNotAnswer = errors.New("the repository did not answer")
 // said on stderr, cleaned — the message of its exit_error line where it
 // wrote one — for the caller to match and show.
 //
-// The look and the opening only read, and are stopped at their clock
-// and on an interrupt. Init is not (see makeRepository): the clock and
+// The look and the opening only read, the write leaves nothing but a
+// lock file it removes, and all three are stopped at their clock and on
+// an interrupt. Init is not (see makeRepository): the clock and
 // an interrupt end the waiting, the unit runs on, and the error names
 // it.
 func (s *setup) repository(ctx context.Context, role string, within time.Duration, argv ...string) (unit.Outcome, string, error) {

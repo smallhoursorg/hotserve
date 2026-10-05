@@ -74,6 +74,70 @@ func TestWhateverLeavesInitRunningLeavesItWhatItNeeds(t *testing.T) {
 	}
 }
 
+// A repository that was there already is written to before the box is
+// pointed at it: setup only read one, and a key that may read and not
+// write was taken, every run after failing a quarter of an hour in [RC
+// check 6, on B2]. However the write is refused, setup ends before
+// anything is written; and what is no refusal of the key — another
+// restic holding the repository — is said, and is none of setup's.
+func TestAKeyThatCannotWriteAnExistingRepositoryIsRefusedBeforeAnythingIsWritten(t *testing.T) {
+	const denied = "Save(<lock/b8e7993d85>) failed: client.PutObject: Access Denied."
+	for _, tc := range []struct {
+		name    string
+		set     func(b *box)
+		refused string // in the error; "" where setup goes on
+		said    string
+	}{
+		{"the storage refuses the write at once (S3's 403: exit 1)", func(b *box) {
+			b.outcome["write"], b.writeErr = unit.Outcome{Result: "exit-code", ExitStatus: 1}, denied
+		}, "this key read the repository and could not write a lock file to it (exit 1): a key that may only read cannot back up (restic said: " + denied + ")", ""},
+		{"restic retries the write to the clock (B2's 401)", func(b *box) { b.hang = "write" },
+			"this key read the repository and wrote no lock file to it within 200ms: a key that may only read cannot back up", ""},
+		{"the unit could not be set up", func(b *box) { b.outcome["write"] = unit.Outcome{Result: "exit-code", ExitStatus: 217} },
+			"writing to the repository: systemd could not set the unit up (status 217)", ""},
+		{"the unit could not be started", func(b *box) { b.err["write"] = errors.New("starting hotserve_backup_write: no such user") },
+			"no such user", ""},
+		{"another restic holds the repository (exit 11): not the key's doing", func(b *box) {
+			b.outcome["write"] = unit.Outcome{Result: "exit-code", ExitStatus: 11}
+		}, "", "the repository is locked by another restic (exit 11) — a prune or a check from elsewhere: whether this key can write to it was not checked"},
+		{"the key writes", func(*box) {}, "", "repository ready"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, m := setupBox(t)
+			b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 12}
+			m.answers = []string{"AKIDX", "the-secret", "its-own-password"}
+			tc.set(b)
+			_, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
+			if tc.refused == "" {
+				if err != nil || !strings.Contains(m.saidAll(), tc.said) {
+					t.Fatalf("err %v\nsaid:\n%s", err, m.saidAll())
+				}
+				if envOf(t, b.cfg.EnvFile)["RESTIC_PASSWORD"] != "its-own-password" {
+					t.Fatal("the file was not put in place")
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.refused) {
+				t.Fatalf("err = %v\nsaid:\n%s", err, m.saidAll())
+			}
+			if _, err := os.Lstat(b.cfg.EnvFile); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("the working file was written")
+			}
+			if _, err := os.Lstat(envfile.Staged(b.cfg.EnvFile)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("the staged file, and the key in it, was left behind")
+			}
+			if _, err := os.Lstat(filepath.Join(b.cfg.StateDir, "repository-id")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("the repository's id was recorded")
+			}
+		})
+	}
+	// A repository this setup made was written by its init: not asked.
+	b, m := setupBox(t)
+	if _, err := b.setup(t, m, "s3:http://e2e-s3:9000/box"); err != nil || strings.Contains(b.roles(), "write") {
+		t.Fatalf("err %v, units %s", err, b.roles())
+	}
+}
+
 // Every lock holder waits for an init left running, then sweeps what
 // it was left: setup, a run and a drill alike, on a box with a
 // credential file and on one with none but the staged file — a first
