@@ -24,7 +24,7 @@ FROM ${BASE_IMAGE}
 
 # sudo: the backups README's lines are run as an administrator, under
 # sudo, the way they are written. restic and sqlite3 are NOT here: the
-# package recommends them, and the smoke test proves apt brings them.
+# package depends on them, and the smoke test proves apt brings them.
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends \

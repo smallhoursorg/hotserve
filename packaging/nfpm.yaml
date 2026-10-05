@@ -27,12 +27,12 @@ license: Apache-2.0
 # gives that manager its runtime directory; without libpam-systemd it
 # cannot start at all. dbus: loginctl (lingering) needs the system bus.
 # hotserve-backup runs Debian's restic and sqlite3 in units of its own
-# (backups/README.md). Recommends, not Depends: a box that uses no
-# backups need not carry them, and `hotserve-backup setup` — and the
-# hourly run — name the package to install when one is missing.
-recommends:
-  - restic
-  - sqlite3
+# (backups/README.md). Depends, not Recommends: a provider's image may
+# leave recommended packages out (Hetzner's Debian 13 sets
+# APT::Install-Recommends "false"), and backups then stopped at setup's
+# first line. ca-certificates: restic verifies the storage's
+# certificate against /etc/ssl/certs, and Debian's restic does not
+# depend on it.
 depends:
   # No systemd version floor is declared even though the sandbox needs
   # 256+ (Debian 13 ships 257): the per-app sandbox is probe-gated at
@@ -45,6 +45,9 @@ depends:
   # (DESIGN-threat-model.md, "The shared-UID rule").
   - libpam-systemd
   - dbus
+  - restic
+  - sqlite3
+  - ca-certificates
 
 # Every entry pins its mode. Without file_info nfpm copies the mode of
 # the file on the build host, so the package would carry whatever the

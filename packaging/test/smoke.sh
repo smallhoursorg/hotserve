@@ -70,10 +70,13 @@ mount --make-rshared /
 
 stage "stage 1: install, service basics, reload"
 # The image ships without apt lists; refresh them so the package's
-# Depends (libpam-systemd, dbus) resolve the way they would on a real
-# box — that resolution is part of what this stage proves.
+# Depends (libpam-systemd, dbus, restic, sqlite3, ca-certificates)
+# resolve the way they would on a real box — that resolution is part of
+# what this stage proves. Without recommends: a provider's image may
+# set APT::Install-Recommends "false" (Hetzner's Debian 13 does), and
+# what the package needs has to arrive there too.
 apt-get update -qq
-apt-get install -y "$deb" >/tmp/install.log 2>&1 || { cat /tmp/install.log; die "apt-get install of the package failed"; }
+apt-get install -y --no-install-recommends "$deb" >/tmp/install.log 2>&1 || { cat /tmp/install.log; die "apt-get install of the package failed"; }
 cat /tmp/install.log
 
 id hotserve >/dev/null || die "postinstall did not create the hotserve user"
@@ -511,7 +514,7 @@ echo "SIGKILL: systemd restarted hotserve (NRestarts=1); app pid $pid_live reatt
 
 stage "stage 2c: backups — the guide's 'Set it up' lines, as an administrator"
 # What the package set up, before any line of the guide runs: the
-# programs it recommends (apt brings Recommends by default), the
+# programs it depends on (installed above without recommends), the
 # account as setup makes it, the four unit files, the timers enabled
 # and running and their services untouched, and no credential file —
 # that is setup's, and postinstall says so.
@@ -539,7 +542,10 @@ expect_backup_state() {
 	echo "$1: timers $2, $3; credential file $4 — as the table says"
 }
 command -v restic >/dev/null && command -v sqlite3 >/dev/null \
-	|| die "restic and sqlite3 did not come with the package: Recommends: did not resolve (apt installs them by default)"
+	|| die "restic and sqlite3 did not come with the package, installed without recommends: they have to be Depends"
+for p in restic sqlite3 ca-certificates; do
+	dpkg-deb -f "$deb" Depends | tr ',' '\n' | grep -qx " *$p" || die "the package does not depend on $p: $(dpkg-deb -f "$deb" Depends)"
+done
 getent passwd hotserve-backup | grep -q ':/nonexistent:/usr/sbin/nologin$' \
 	|| die "postinstall did not make the hotserve-backup account as setup does: $(getent passwd hotserve-backup || echo none)"
 for u in hotserve-backup.service hotserve-backup-drill.service $TIMERS; do
@@ -557,7 +563,7 @@ grep -q "sudo hotserve-backup setup <repository>" /tmp/install.log \
 grep -q "refuse that account" /tmp/install.log \
 	&& die "postinstall warned of the account it had just made: $(grep hotserve-backup /tmp/install.log)" || true
 hotserve-backup account >/dev/null || die "the account postinstall made is not one setup accepts: $(hotserve-backup account 2>&1)"
-echo "the package's own: restic and sqlite3 by Recommends, the account, the units, the timers enabled and waiting"
+echo "the package's own: restic and sqlite3 by Depends, the account, the units, the timers enabled and waiting"
 
 # The repository the guide's lines are pointed at: rclone serve s3
 # here, on the loopback, with a key that is no secret.
@@ -582,11 +588,6 @@ as_admin() { runuser -u admin -- sh -c "$1"; }
 # uploads directory under its shared/, the hotserve user's.
 su -s /bin/sh hotserve -c 'cd /var/lib/liveswap/demo/shared && sqlite3 app.db "create table t(n); insert into t values (1),(2);" && mkdir -p uploads && echo pic >uploads/a.png' \
 	|| die "could not seed the demo app's data"
-# Step 1 of the guide, the declaration in the app's block, put there
-# the way an administrator would edit it in.
-sed -i 's|^\t\tapp demo {$|&\n\t\t\tbackup {\n\t\t\t\tsqlite app.db\n\t\t\t\tfiles  uploads\n\t\t\t}|' /etc/hotserve/Caddyfile
-[ "$(grep -c 'sqlite app.db' /etc/hotserve/Caddyfile)" = 1 ] || die "the backup block did not go into the demo app's block"
-
 # The guide's lines, between its smoke markers; the example
 # repository URL is this box's, and the app is demo, as written.
 OUT=/tmp/docs.out
@@ -595,9 +596,9 @@ mapfile -t docs < <(awk '/<!-- smoke: begin -->/{on=1; next} /<!-- smoke: end --
 # Exactly the lines this stage runs and checks: a line dropped from the
 # guide, or one added that nothing here checks, fails rather than
 # passing as "ran as written".
-want="hotserve-backup validate /etc/hotserve/Caddyfile
+want="sudo hotserve-backup setup $S3REPO
+hotserve-backup validate /etc/hotserve/Caddyfile
 sudo systemctl reload hotserve
-sudo hotserve-backup setup $S3REPO
 sudo systemctl start hotserve-backup.service
 hotserve-backup status
 sudo hotserve-backup restore demo --to /root/demo-restored
@@ -611,13 +612,25 @@ for line in "${docs[@]}"; do
 		converse "runuser -u admin -- sh -c '$line'" "$P_KEY" "$S3KEY" "$P_SECRET" "$S3SECRET" "$P_STORED" stored \
 			|| die "setup as the administrator failed: $(cat "$OUT")"
 		grep -q "account hotserve-backup: present" "$OUT" || die "setup did not find the package's account: $(cat "$OUT")"
+		grep -q "no app declares a backup yet: a run would back nothing up" "$OUT" || die "setup, before any block is declared, did not say so: $(cat "$OUT")"
 		grep -q "repository ready: $S3REPO (new, id " "$OUT" || die "setup did not make the repository: $(cat "$OUT")"
-		grep -q "^next: the first backup runs within the hour and ten minutes (systemctl list-timers hotserve-backup.timer)" "$OUT" \
-			|| die "setup's closing line does not name the timer: $(grep next: "$OUT")"
+		grep -q "^next: declare a backup in an app's Caddyfile block (liveswap/README.md); the hourly timer backs it up from then on" "$OUT" \
+			|| die "setup's closing line does not say to declare a backup: $(grep next: "$OUT")"
 		grep -q "$S3SECRET" "$OUT" && die "the storage secret was echoed at the terminal" || true
 		[ "$(stat -c '%U %a' "$CRED")" = "root 600" ] || die "$CRED is '$(stat -c '%U %a' "$CRED")', want 'root 600'"
 		CRED_SHA=$(sha256sum "$CRED" | cut -d' ' -f1)
 		expect_backup_state "after setup" enabled active "$CRED_SHA"
+		;;
+	"hotserve-backup validate "*)
+		# Step 2 of the guide, the declaration in the app's block, put
+		# there the way an administrator would edit it in.
+		sed -i 's|^\t\tapp demo {$|&\n\t\t\tbackup {\n\t\t\t\tsqlite app.db\n\t\t\t\tfiles  uploads\n\t\t\t}|' /etc/hotserve/Caddyfile
+		[ "$(grep -c 'sqlite app.db' /etc/hotserve/Caddyfile)" = 1 ] || die "the backup block did not go into the demo app's block"
+		as_admin "$line" >"$OUT" 2>&1 || die "'$line' as the administrator exits $?: $(cat "$OUT")"
+		grep -q "a run would back up demo" "$OUT" || die "validate does not name demo: $(cat "$OUT")"
+		;;
+	"sudo systemctl reload hotserve")
+		as_admin "$line" >"$OUT" 2>&1 || die "'$line' as the administrator exits $?: $(cat "$OUT")"
 		# The guide's next claim: the first backup comes from the timer,
 		# within the hour and ten minutes. Not waited an hour for: a
 		# drop-in makes the timer a minute's, one firing is watched, the
