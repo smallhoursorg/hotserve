@@ -517,7 +517,15 @@ parses under fixed names and small caps, runs `ssh-keygen` as uid
 65534, trusts the handler for nothing but a well-formed bundle, and
 refuses a Caddyfile with any `import` — an imported file is unsigned
 bytes, and one under a hotserve-writable path would be T5's way to
-make a change outlast a restart. A
+make a change outlast a restart — including one spelled as a
+placeholder: Caddy expands `{$NAME:default}` before it tokenizes, so
+the applier refuses any `{$` at directive position, in a site address
+or in the `box` block, and checks the file again after expanding
+placeholders with an empty environment (box/DESIGN-box.md, "Reading
+the signed file"). What the workflow is *told* remains the serving
+process's word: the response and the result poll are served by
+hotserve, so a T5 can lie to CI; it cannot change root's record or
+root's file. A
 supervisor RCE can drop anything and skip validation, and gains a
 failed reload and a rollback; it cannot write the file,
 `applied.json` or a result.

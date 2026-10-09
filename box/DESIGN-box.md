@@ -125,8 +125,13 @@ deploy.example.com {
   thing the channel exists to deny it. `init`, the handler and the
   applier refuse a file with an `import` token at directive position,
   and the `box` block and `box_webhook` are read from the raw token
-  stream (see "Reading the signed file"). Snippets are inlined; a
-  second box is a second file.
+  stream (see "Reading the signed file"). Nor can a directive be
+  spelled as a placeholder: no token at directive position, in a site
+  address or inside the `box` block contains `{$`, because Caddy
+  expands `{$NAME:default}` before it tokenizes and `{$UNSET:import}`
+  would otherwise be an `import` the literal check never sees.
+  Placeholders stay legal in values. Snippets are inlined; a second
+  box is a second file.
 
 ## Behaviour specification (normative)
 
@@ -212,23 +217,40 @@ disk is unchanged; the result names the step (messages in "Refusals").
    push on a box whose template predates the applier. If the marker
    exists, an install was interrupted after the rollback copy was
    taken and before its terminal result was written (the marker is the
-   last thing a transaction removes, step 20). Three cases, told apart
-   by digests. The installed `Caddyfile` equals `applied.json`'s
-   `sha256`: the apply had finished — reload succeeded, record written
-   — and only the result or the marker's removal was lost; the `work/`
-   entry gets `applied`. The installed file equals the marker's bytes:
-   a rollback had reached the disk but its reload was not confirmed;
-   if hotserve is active a reload runs and the entry gets `rolled_back`
-   or, if that reload fails, `unknown`; if hotserve is not running,
-   `failed` — "interrupted; the previous Caddyfile is on disk; hotserve
-   is not running". Neither: the swap happened and nothing after it is
-   known; the marker's bytes are written to a temporary name in
-   `/etc/hotserve/` and renamed over `Caddyfile`, then the same reload
-   and the same three outcomes. Every entry left in `work/` with no
-   marker at all gets `failed` — "interrupted before the Caddyfile
-   changed; nothing changed". In every case the result is written
-   first and the marker removed after it, so a crash inside recovery
-   is recovered the same way. A bundle is never resumed, because it was read once and a
+   last thing a transaction removes, step 20). The marker is two
+   files: `prev`, the previous Caddyfile's bytes, and `txn.json` —
+   `{id, commit, prev_sha256, new_sha256, phase}` with `phase` one of
+   `installing` or `rolling_back` — written durably before anything
+   else changes, because digests alone cannot tell the states apart
+   (before the swap, the installed file, `prev` and `applied.json` all
+   describe the old file). Recovery reads `txn.json` and the installed
+   file's digest `d`:
+   - `d == new_sha256` and `applied.json.sha == commit`: the apply had
+     finished and only its cleanup was lost; the entry gets `applied`.
+   - `d == new_sha256` otherwise: the swap happened and the reload is
+     unconfirmed; the previous bytes are written back (temporary name,
+     rename, `fsync`), `phase` becomes `rolling_back`, and if hotserve
+     is active a reload runs: `rolled_back`, or `unknown` if it fails;
+     not running, `failed` — "interrupted; the previous Caddyfile is
+     on disk; hotserve is not running".
+   - `d == prev_sha256` with `phase == installing`: the swap never
+     happened; `failed` — "interrupted before the Caddyfile changed;
+     nothing changed".
+   - `d == prev_sha256` with `phase == rolling_back`: the rollback is
+     on disk and its reload unconfirmed; reload if active, with the
+     same three outcomes as above.
+   - `d` matches neither: the file changed under the transaction (a
+     console edit mid-flight); nothing is written to `/etc/hotserve`,
+     the entry gets `unknown` — "the Caddyfile changed during the
+     transaction; it is left as found" — and the journal says so at
+     warning level.
+   A `work/` entry with no marker is one whose transaction ended: if
+   its terminal `out/<id>.json` exists, that result stands and only the
+   entry is removed; if neither marker nor result exists, the entry
+   never reached step 17 and gets `failed` — "interrupted before the
+   Caddyfile changed; nothing changed". In every case the result is
+   written first and the marker removed after it, so a crash inside
+   recovery is recovered the same way. A bundle is never resumed, because it was read once and a
    crash is not a reason to read it again (the workflow re-runs the
    push). Only then is every entry of `in/` renamed into `work/` and
    processed in lexical order of id. An id is 32
@@ -351,12 +373,13 @@ disk is unchanged; the result names the step (messages in "Refusals").
     writes its terminal result directly); after `verified` the only
     phases are `applied`, `failed`, `rolled_back` and `unknown`, each
     terminal, each saying what is on disk and what is running.
-18. **Install.** First the rollback copy: the buffer from step 10 is
-    written to a temporary name and renamed to
-    `/var/lib/hotserve-box/prev`, and only once that rename has
-    returned is the new file written to a temporary name in
-    `/etc/hotserve/` (mode 0644, root) and renamed over `Caddyfile`,
-    which therefore exists at every instant. Every write in this
+18. **Install.** First the transaction record: the buffer from step 10
+    is written to a temporary name and renamed to
+    `/var/lib/hotserve-box/prev`, then `txn.json` (`{id, commit,
+    prev_sha256, new_sha256, phase: installing}`) the same way, and
+    only once both are durable is the new file written to a temporary
+    name in `/etc/hotserve/` (mode 0644, root) and renamed over
+    `Caddyfile`, which therefore exists at every instant. Every write in this
     transaction is durable before the next step begins: the temporary
     is `fsync`ed before its rename and the parent directory `fsync`ed
     after it, for the marker, the Caddyfile, `applied.json` and the
@@ -376,20 +399,23 @@ disk is unchanged; the result names the step (messages in "Refusals").
     shorter than systemd's own (`TimeoutStartSec=240s` on
     hotserve.service bounds the reload). Success: `applied.json`
     records HEAD (temporary name, rename, `fsync`), and the phase is
-    `applied`. Failure: the marker's bytes are written back over
+    `applied`. Failure: `txn.json`'s `phase` becomes `rolling_back`
+    (rewritten durably), `prev`'s bytes are written back over
     `Caddyfile` (temporary name, rename, `fsync`) and the reload is run
     **again**, so that the file on disk is the one running by
     construction, not by inference from an exit status; the phase is
     `rolled_back`, or `unknown` if the second reload also fails (the
     journal says so at warning level; the file on disk is the previous
-    one). The marker is not touched in this step: it outlives both
-    reloads, so a crash anywhere here leaves a marker for step 9 to
-    reason from, and step 9 can tell every state apart by digests.
+    one). The marker is not removed in this step: it outlives both
+    reloads, so a crash anywhere here leaves a record for step 9 to
+    reason from, and step 9 can tell every state apart by its `phase`
+    and the digests it names.
 20. **Result, then the marker.** `out/<id>.json` is rewritten
     (temporary name, rename, `fsync`) with the terminal phase; only
-    then is the marker removed, and the `work/` entry after it. The
-    marker is the last thing a transaction lets go of, which is what
-    makes "marker present" mean exactly "no terminal result yet". Every
+    then is the marker removed (`txn.json` first, then `prev`), and the
+    `work/` entry after it. The marker is the last thing a transaction
+    lets go of, which is what makes "marker present" mean exactly "no
+    terminal result yet", and a result with no marker mean "done". Every
     `work/` entry leaves with its result, so `work/` is empty on every
     exit as `in/` is. Only `out/` is swept by age (results older than a
     day), by the applier; the handler sweeps its own `stage/`.
@@ -428,7 +454,27 @@ stays literal, `import` is a token — which is what makes it safe to
 run as root on pushed input. The walk also refuses the file if an
 `import` token stands at directive position anywhere in it ("The
 shape"): the committed file is the effective configuration, or it is
-not applied. The same walk is what `hotserve box webhook`
+not applied.
+
+A literal check is not enough on its own, because Caddy's `Parse`
+expands `{$NAME}` and `{$NAME:default}` placeholders on the raw bytes
+*before* it tokenizes (`replaceEnvVars`, caddyconfig/caddyfile/
+parse.go): `{$UNSET:import}` at directive position is one token to
+`Tokenize` and the word `import` to Caddy. So the walk applies two
+more rules. First, no token at directive position, in a site address,
+or anywhere inside the `box` block may contain `{$` — a directive's
+*name* is never computed, whatever the environment; placeholders stay
+legal in values (`email {$ACME_EMAIL}`, an ACME DNS token), where they
+cannot change what the line *is*. Second, the walk runs twice: once on
+the raw bytes, and once after applying Caddy's own placeholder
+expansion with an **empty** environment — unset names become empty,
+defaults take effect — so that anything a default could smuggle in
+(a newline and an `import` inside `{$X:…}`) is seen as the tokens it
+would become. The expansion is reimplemented in `box` (it is a few
+lines) and pinned by a test against `caddyfile.Parse` on fixtures with
+the environment cleared. What the service's real environment expands
+at reload is root's: it comes from `hotserve.service` and its
+drop-ins, which the hotserve uid cannot write. The same walk is what `hotserve box webhook`
 prints the address from and what `make check` prints its mapping line
 from, so there is one reading of the file, not three.
 
@@ -439,7 +485,7 @@ Written before the code, as liveswap's deploy-record store was.
 | Path | Mode | Owner | Rule |
 |---|---|---|---|
 | `/etc/hotserve/Caddyfile` | 0644 | root:root | Written only by root: `init`, the applier, the console. Read by hotserve (serving), by the handler (signers for the pre-check) and by the applier (the signer list and the rollback copy). The conffile the package ships. |
-| `/var/lib/hotserve-box/prev` | 0600 | root:root | The rollback copy of the installed Caddyfile, written and renamed into place before `Caddyfile` is replaced (step 18); removed only after the terminal result is written (step 20), whichever way the transaction ended. Its presence at startup therefore means exactly "a transaction has no terminal result yet", which the applier (step 9) and `init` settle by digests before anything else. Deliberately not `/etc/hotserve/Caddyfile.prev`: `bin/push` and its sudoers line write that name, and the path unit must never fire on a legacy push. |
+| `/var/lib/hotserve-box/prev`, `…/txn.json` | 0600 | root:root | The transaction record: the previous Caddyfile's bytes, and `{id, commit, prev_sha256, new_sha256, phase}` — both written durably before `Caddyfile` is replaced (step 18), `phase` rewritten to `rolling_back` on a failed reload (step 19), both removed only after the terminal result is written (step 20), whichever way the transaction ended. Their presence at startup therefore means exactly "a transaction has no terminal result yet", which the applier (step 9) and `init` settle from the record before anything else. Deliberately not `/etc/hotserve/Caddyfile.prev`: `bin/push` and its sudoers line write that name, and the path unit must never fire on a legacy push. |
 | `/etc/hotserve/age/` | 0700 | root:root | Reserved, empty, created by `init`; the secrets PR puts the box's age key here. |
 | `/var/lib/hotserve-box/` | 0750 | root:hotserve | Created by `tmpfiles.d`, not by either process. Not under `/var/lib/hotserve`, which is 0750 hotserve:hotserve and which a root unit without `CAP_DAC_OVERRIDE` cannot traverse. Joins `sandboxHotservePaths` (liveswap/sandbox.go): never a bind source. |
 | `…/stage/` | 0700 | hotserve:hotserve | The handler assembles a bundle here. Not watched. |
@@ -591,7 +637,7 @@ reads tokens, not the adapted config.
 
 `hotserve-box-apply.path` (`DirectoryNotEmpty=/var/lib/hotserve-box/in`,
 `DirectoryNotEmpty=/var/lib/hotserve-box/work`,
-`PathExists=/var/lib/hotserve-box/prev` — the second and third are
+`PathExists=/var/lib/hotserve-box/txn.json` — the second and third are
 what make step 9's recovery run after a crash, at boot included, since
 a bundle already moved out of `in/` would otherwise wait forever; all
 three paths are written by the applier and the handler alone, never
@@ -693,7 +739,8 @@ nothing more than they do for a deploy.
   box_webhook site's address is not one bare hostname (<address>); no
   scheme, port, path, wildcard, placeholder or second name` / `… imports
   <path>; the box applies only a self-contained Caddyfile — inline the
-  snippet`
+  snippet` / `… has a placeholder where a directive name, a site
+  address or a box line goes (<token>); placeholders are for values`
   / `… drops the key that signed this commit (<principal>); add the new
   key in one push, let the box apply it, then remove the old one in a
   second push` / `… box deploy_trust: <parse error>`.
@@ -765,7 +812,7 @@ full placement is DESIGN-threat-model.md, "Config webhook" and T6.
 | Leaked PAT, stolen session, OAuth/GitHub App with `contents:write` | Push to `main`; make the run red; stop every later push until its commit is removed from the first-parent history (loud, recoverable; a `required_signatures` ruleset stops an unsigned push, not a squash) | Produce an SSH signature by a listed key; ride into the box under a later signed commit (every commit on the chain is checked); therefore change the box |
 | Compromised laptop holding a software signing key | Everything the operator can: sign and push any config | Nothing the operator cannot; this is the operator |
 | Compromised laptop, hardware-held key (`sk-` types) | Push unsigned or GPG-signed commits (refused) | Sign without a touch; so cannot change the box unattended |
-| Supervisor RCE (T5, the hotserve uid) | Drop any bundle; skip validation (the reload fails and rolls back); report "loaded" for a reload that did nothing (the exit status is the hotserve uid's word); read `out/` and `applied.json` | Write `/etc/hotserve/Caddyfile` or `applied.json`; forge a result; make root install an unsigned, non-descendant or other-box file; persist a configuration across a restart (root's file is the authority at the next start, `systemctl restart` the operator's remedy) |
+| Supervisor RCE (T5, the hotserve uid) | Drop any bundle; skip validation (the reload fails and rolls back); report "loaded" for a reload that did nothing (the exit status is the hotserve uid's word); read `out/` and `applied.json`; answer the workflow anything it likes — the POST response and the result poll are served by the hotserve process, so what CI *sees* is the serving process's word | Write `/etc/hotserve/Caddyfile`, `applied.json` or a result file (root's record of what happened is root's, whatever CI was told); make root install an unsigned, non-descendant, other-box or placeholder-smuggled file; persist a configuration across a restart (root's file is the authority at the next start, `systemctl restart` the operator's remedy) |
 | Root on the box | Everything, by definition | — |
 
 Residuals accepted here and listed in the threat model: `systemctl
