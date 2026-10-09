@@ -788,8 +788,9 @@ token alone. The example workflows send it; a push carries no pin,
 because its bytes are the request itself. The pin is kept as `sha256`
 in the version's deploy record and in `last_deploy` (see
 [Deploy records](#deploy-records)), so "are the bytes serving the ones
-CI built?" can still be answered for as long as the record is kept,
-after the journal has rotated.
+CI built?" can still be answered after the journal has rotated, for as
+long as the record is kept — with the exceptions listed there (a pin
+the filter redacts, and a rollback onto a re-deployed version).
 
 **2. Push an uploaded tarball** — no artifact host needed. Stream the
 `.tar.gz` as the request body with a gzip content type; the version is

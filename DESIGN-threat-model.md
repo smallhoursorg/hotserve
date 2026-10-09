@@ -454,7 +454,9 @@ scope for the runtime model, in scope for release signing (roadmap).
   and the tarball bytes, unless the pull carries `sha256`, which the
   example workflows do: then other bytes are a 422, and what remains
   is withholding. The pin is kept in the version's deploy record, for
-  as long as the record is. Faces `extract.go` and the first-hop SSRF gap.
+  as long as the record is, unless the filter would redact it (it
+  equals or holds an `env_file` value, or those values could not be
+  read whole); liveswap/README.md, Deploy records, has the exceptions. Faces `extract.go` and the first-hop SSRF gap.
 - **T4 — Unauthenticated network attacker** on the public webhook/proxy.
   Faces the token gate — forgery needs a private key, so there is no
   guessing oracle; the realer wins are log-amplification, the CPU cost of
