@@ -473,8 +473,10 @@ handler did. It reads the bundle once into memory and never from disk
 again; takes the signer list from the installed file's raw tokens
 (never from the running configuration, which the hotserve uid
 authors); requires the incoming file's `box_webhook` host to equal the
-installed one (the box's identity — another box's equally signed file
-is refused); verifies the SSH signature with `ssh-keygen -Y` as uid
+installed one and the bundle's path to equal the path `init` recorded
+(the box's identity and which file is its: another box's equally
+signed file, or another file for this host elsewhere in the same
+tree, is refused); verifies the SSH signature with `ssh-keygen -Y` as uid
 65534 against that list, on `HEAD` and on every first-parent commit
 above the recorded baseline (an unsigned commit would otherwise ride
 in under the next signed one); proves the file is the committed file

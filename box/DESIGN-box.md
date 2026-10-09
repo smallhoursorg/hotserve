@@ -192,23 +192,32 @@ disk is unchanged; the result names the step (messages in "Refusals").
 
 9. **Recover, then take.** Under an exclusive lock, the applier first
    settles whatever a crash left behind, before it looks at `in/`; the
-   path unit watches `work/` and the `.prev` marker as well as `in/`,
+   path unit watches `work/` and the rollback marker as well as `in/`,
    so a crash that left either behind starts the applier again, at
-   boot included. If `/etc/hotserve/Caddyfile.prev` exists, an install
-   was interrupted between the swap and a successful reload: the
-   previous file is renamed back over `Caddyfile` (which removes the
-   marker whatever happens next) and, if hotserve is active, reloaded
-   — the same handling as a failed reload (step 19). `applied.json` is
-   written only after a reload succeeds, so it still names the
-   previous commit and nothing disagrees. Every entry left in `work/`
+   boot included. The marker is `/var/lib/hotserve-box/prev`, the
+   rollback copy of the installed file, in the applier's own root-only
+   directory and under a name nothing else writes — not
+   `/etc/hotserve/Caddyfile.prev`, which `examples/box/bin/push` and
+   its sudoers line create, and which would have the path unit race a
+   push on a box whose template predates the applier. If the marker
+   exists, an install was interrupted after the rollback copy was
+   taken. Two cases, told apart by `applied.json`'s `sha256`: if it
+   equals the digest of the installed `Caddyfile`, the apply had
+   finished — reload succeeded, record written — and only the marker's
+   removal was lost; the marker is removed and the `work/` entry, if
+   still there, gets `applied`. Otherwise the swap or its reload did
+   not complete: the marker's bytes are written to a temporary name in
+   `/etc/hotserve/` and renamed over `Caddyfile`, the marker is
+   removed, and, if hotserve is active, a reload runs — the same
+   handling as a failed reload (step 19). Every entry left in `work/`
    is then given a terminal result that says what is true and removed:
-   with no `.prev` found, `failed` — "interrupted before the Caddyfile
-   changed; nothing changed"; with `.prev` restored and the reload
-   successful, `rolled_back` — "interrupted; the previous Caddyfile is
-   back and running"; restored but hotserve not running, `failed` —
-   "interrupted; the previous Caddyfile is on disk; hotserve is not
-   running"; restored and the reload failed, `unknown`, with its usual
-   message. A bundle is never resumed, because it was read once and a
+   with no marker found, `failed` — "interrupted before the Caddyfile
+   changed; nothing changed"; with the previous file restored and the
+   reload successful, `rolled_back` — "interrupted; the previous
+   Caddyfile is back and running"; restored but hotserve not running,
+   `failed` — "interrupted; the previous Caddyfile is on disk; hotserve
+   is not running"; restored and the reload failed, `unknown`, with its
+   usual message. A bundle is never resumed, because it was read once and a
    crash is not a reason to read it again (the workflow re-runs the
    push). Only then is every entry of `in/` renamed into `work/` and
    processed in lexical order of id. An id is 32
@@ -232,8 +241,13 @@ disk is unchanged; the result names the step (messages in "Refusals").
     empty signer list refuses: the box's own file is the only
     authority, and a file with no signers has no authority.
 11. **Identity.** The incoming file's single `box_webhook` site host
-    must equal the installed file's. Another box's file is refused by
-    name.
+    must equal the installed file's, and the bundle's `path` must equal
+    the path `init` recorded in `applied.json` (see "The box's
+    identity"). Another box's file, or another file for this box's
+    host elsewhere in the same tree, is refused by name. An address or
+    path quoted in the refusal is bounded and Go-quoted the way
+    liveswap's `boundRefusal` bounds a token's claims: it is signer- or
+    token-holder-chosen text going into root's journal line.
 12. **Signature.** The commit's `gpgsig` is an SSH signature over the
     commit object with that header removed (git's rule, continuation
     lines included). An allowed_signers file is generated from the
@@ -253,8 +267,8 @@ disk is unchanged; the result names the step (messages in "Refusals").
     from; the bundle's own name is the 32-hex request id and names no
     commit. `sha1("tree <n>\0" +
     raw)` of the root tree must be the commit's `tree`; the path's
-    components (the bundle's `path`, a hint only — it carries no
-    trust, and is checked to be safe components before use) are walked
+    components (the bundle's `path`, already required by step 11 to be
+    the path `init` recorded, and checked to be safe components) are walked
     through the bundled trees, at most 32 deep; the
     last entry must be a blob (mode `100644` or `100755`) whose id is
     `sha1("blob <n>\0" + file)`. A symlink, a submodule or a tree at
@@ -327,32 +341,40 @@ disk is unchanged; the result names the step (messages in "Refusals").
     phases are `applied`, `failed`, `rolled_back` and `unknown`, each
     terminal, each saying what is on disk and what is running.
 18. **Install.** First the rollback copy: the buffer from step 10 is
-    written to a temporary name and renamed to `Caddyfile.prev`, and
-    only once that rename has returned is the new file written to a
-    temporary name in `/etc/hotserve/` (mode 0644, root) and renamed
-    over `Caddyfile`. A failure writing either temporary (`ENOSPC`,
-    say) leaves `Caddyfile` untouched, removes whatever temporary was
-    made **and `Caddyfile.prev` if it had already landed** — `.prev` is
-    the interrupted-swap marker (step 9), and no swap happened — and
-    ends the push as `failed` — "the install failed before the
-    Caddyfile changed; nothing changed" — a terminal phase after
-    `verified`, not a refusal; the live file never changes without
-    its restore copy already in place.
+    written to a temporary name and renamed to
+    `/var/lib/hotserve-box/prev`, and only once that rename has
+    returned is the new file written to a temporary name in
+    `/etc/hotserve/` (mode 0644, root) and renamed over `Caddyfile`,
+    which therefore exists at every instant. A failure writing either
+    temporary (`ENOSPC`, say) leaves `Caddyfile` untouched, removes
+    whatever temporary was made **and the marker if it had already
+    landed** — it is the interrupted-swap marker (step 9), and no swap
+    happened — and ends the push as `failed` — "the install failed
+    before the Caddyfile changed; nothing changed" — a terminal phase
+    after `verified`, not a refusal; the live file never changes
+    without its restore copy already in place. `init` runs this same
+    code path (and step 19's), under the same lock.
 19. **Reload.** `systemctl reload hotserve` — which runs the unit's
     `ExecReload` (`hotserve reload --config /etc/hotserve/Caddyfile
     --force`) as the hotserve user — with no applier-side timeout
     shorter than systemd's own (`TimeoutStartSec=240s` on
-    hotserve.service bounds the reload). Success: `.prev` is removed,
-    `applied.json` records HEAD, the result is `applied`. Failure:
-    `.prev` is renamed back over `Caddyfile` and the reload is run
-    **again**, so that the file on disk is the one running by
-    construction, not by inference from an exit status; the result is
-    `rolled_back`. If the second reload also fails the result is
-    `unknown`, the journal says so at warning level, and the file on
+    hotserve.service bounds the reload). Success, in this order:
+    `applied.json` records HEAD (temporary name, rename), then the
+    marker is removed, then the result is `applied` — so a crash
+    between the two writes leaves a record that matches the installed
+    file, which is how step 9 tells a finished apply from an
+    interrupted one. Failure: the marker's bytes are written back over
+    `Caddyfile` (temporary name, rename), the marker removed, and the
+    reload is run **again**, so that the file on disk is the one
+    running by construction, not by inference from an exit status; the
+    result is `rolled_back`. If the second reload also fails the result
+    is `unknown`, the journal says so at warning level, and the file on
     disk is the previous one.
 20. **Result.** `out/<id>.json` is rewritten (temporary name, rename)
-    with the final phase. The applier sweeps `work/` and `out/` by age
-    and exits with `in/` empty.
+    with the final phase and the `work/` entry is removed; every
+    `work/` entry leaves with its result, so `work/` is empty on every
+    exit as `in/` is. Only `out/` is swept by age (results older than a
+    day), by the applier; the handler sweeps its own `stage/`.
 
 Running apps are never restarted by an apply, as with any reload
 (liveswap's "reload trap"): a changed `app` block applies at the app's
@@ -397,18 +419,18 @@ Written before the code, as liveswap's deploy-record store was.
 | Path | Mode | Owner | Rule |
 |---|---|---|---|
 | `/etc/hotserve/Caddyfile` | 0644 | root:root | Written only by root: `init`, the applier, the console. Read by hotserve (serving), by the handler (signers for the pre-check) and by the applier (the signer list and the rollback copy). The conffile the package ships. |
-| `/etc/hotserve/Caddyfile.prev` | 0644 | root:root | Written and renamed into place before `Caddyfile` is replaced (step 18); removed when the reload succeeds (step 19). Exists only between the two — so its presence at startup is the marker of an interrupted install, and the applier (step 9) and `init` both restore it before anything else. |
+| `/var/lib/hotserve-box/prev` | 0600 | root:root | The rollback copy of the installed Caddyfile, written and renamed into place before `Caddyfile` is replaced (step 18); removed after `applied.json` is written on a successful reload (step 19). Exists only between the two, so its presence at startup is the marker of an interrupted install, which the applier (step 9) and `init` settle before anything else. Deliberately not `/etc/hotserve/Caddyfile.prev`: `bin/push` and its sudoers line write that name, and the path unit must never fire on a legacy push. |
 | `/etc/hotserve/age/` | 0700 | root:root | Reserved, empty, created by `init`; the secrets PR puts the box's age key here. |
 | `/var/lib/hotserve-box/` | 0750 | root:hotserve | Created by `tmpfiles.d`, not by either process. Not under `/var/lib/hotserve`, which is 0750 hotserve:hotserve and which a root unit without `CAP_DAC_OVERRIDE` cannot traverse. Joins `sandboxHotservePaths` (liveswap/sandbox.go): never a bind source. |
 | `…/stage/` | 0700 | hotserve:hotserve | The handler assembles a bundle here. Not watched. |
-| `…/stage/<id>.auth` | 0600 | hotserve:hotserve | `sha256` of the bearer token that posted `<id>`, with the token's `exp`; lets that token read `out/<id>.json` after a reload changed `deploy_trust` ("Handler contract"). Removed by the handler when the result is read or the `exp` has passed; a digest, never the token; root has no use for it. |
+| `…/stage/<id>.auth` | 0600 | hotserve:hotserve | `sha256` of the bearer token that posted `<id>`, with the token's `exp`; lets that token read `out/<id>.json` after a reload changed `deploy_trust` ("Handler contract"). Removed by the handler when a *terminal* result is read for `<id>` or the `exp` has passed — never on the `verified` read, which is the one before the reload; a digest, never the token; root has no use for it. |
 | `…/in/` | 0770 | root:hotserve | The handler renames a complete bundle in; the applier renames everything out before reading anything. `DirectoryNotEmpty=` watches it, so it must be empty on every applier exit, or the path unit re-triggers until its start-rate limit fails it. |
 | `…/in/<id>.tar` | 0644 | hotserve:hotserve | `<id>` matches `^[0-9a-f]{32}$`: 16 hex of the handler's nanosecond clock, then 16 random (step 9); a name that does not match is moved to `work/` and refused like any other. The content is a public commit; 0644 so root reads it without DAC capabilities. |
 | `…/work/` | 0700 | root:root | Bundles land here by rename and are read once. Never a source of truth after that read. |
 | `/tmp/box-verify-<id>/` (the unit's `PrivateTmp`) | 0755 / files 0644 | root:root | The payload, the signature and the generated allowed_signers for `ssh-keygen` running as uid 65534, which cannot traverse `work/` (0700) or `/var/lib/hotserve-box` (0750 root:hotserve). The private `/tmp` is gone with the unit. |
 | `…/out/` | 0750 | root:hotserve | Results, written to a temporary name and renamed so the handler never reads a partial file. Root sweeps by age; hotserve only reads. |
 | `…/out/<id>.json` | 0640 | root:hotserve | `{id, phase, commit, signer, path, diff, apps, box_webhook, error, caddyfile_edited_out_of_band}`. The `diff` passed the redactor. |
-| `…/applied.json` | 0640 | root:hotserve | `{sha, sha256, signer, when}`, written to a temporary name and renamed, and only after a reload has succeeded (or, in `init`, after the file is installed on a box where hotserve is not running): the baseline, the installed file's digest (an out-of-band edit is visible, not refused — root's file is root's), the principal whose key root verified. Nothing the handler reported about the caller is in it; that is the handler's journal line. The box's host is read from the installed file, never recorded. |
+| `…/applied.json` | 0640 | root:hotserve | `{sha, path, sha256, signer, when}`, written to a temporary name and renamed, and only after a reload has succeeded (or, in `init`, after the file is installed on a box where hotserve is not running): the baseline; the repository path of this box's file, set by `init` and changed only by `init`; the installed file's digest (an out-of-band edit is visible, not refused — root's file is root's; and step 9 reads it to tell a finished apply from an interrupted one); the principal whose key root verified. Nothing the handler reported about the caller is in it; that is the handler's journal line. The box's host is read from the installed file, never recorded. |
 | `…/lock` | 0600 | root:root | `flock`; one apply at a time. |
 
 Caps: Caddyfile and blob ≤ 1 MiB; a tree object ≤ 1 MiB; a commit
@@ -420,10 +442,14 @@ output bounded into the error text; every child process has a
 deadline and a `WaitDelay`.
 
 Nothing read from `in/`, `work/` or the bundle is trusted for anything
-but its bytes, and no bytes from a bundle reach a result's `error`
-field: refusals quote ids, principals and hosts the applier derived,
-never file content. The `path` hint is validated as safe components
-before it is used to walk trees.
+but its bytes, and nothing from a bundle reaches a result's `error`
+field or root's journal line except two things a refusal must name to
+be useful — a `box_webhook` address and the `path` — each bounded to
+300 runes and Go-quoted as liveswap's `boundRefusal` does, so a
+newline or a control byte in either cannot split or forge a log line.
+Everything else a refusal quotes (ids, principals, hosts) the applier
+derived itself. The `path` is validated as safe components before it
+is used to walk trees.
 
 ## The box's identity
 
@@ -439,14 +465,27 @@ refused before it can make two spellings of one box, or one spelling
 of two. Shipping box2's file to box1 is refused as "this file is for
 deploy2.example.com; this box is deploy.example.com".
 
-The directory name is not an identity. It is a label the operator
-picks, `box1` in the template; `make check` and the run print
+The host says which box; it cannot say which *file*. A repository may
+hold two files that both name this host — a staging copy with a
+relaxed `deploy_trust`, an old one under `archive/` — and both sit in
+the same signed tree, so a compromised Action holding the OIDC token
+could choose the one the signer never meant to run. The bundle's
+`path` is therefore not a free hint: `init` records `<dir>/Caddyfile`
+in `applied.json` from the directory it was given, and the applier
+requires the bundle's `path` to equal it (step 11). A mismatch is
+refused naming both paths. Changing the recorded path is `init` again,
+as a host rename is; `hotserve box baseline` does not touch it.
+
+The directory name is still not an identity. It is a label the
+operator picks, `box1` in the template; `make check` and the run print
 `box1/Caddyfile → https://deploy.example.com/ (1 app, 1 signer)` so
 the mapping is always in view, and the README may suggest naming the
-directory after the host but never enforces it. Renaming the deploy
-host is a console step — `hotserve init` again from a copied
-directory — which is honest: the new host has no certificate until the
-box serves it, so the rename could not be a plain push in any case.
+directory after the host but never enforces it. What the record pins
+is which path in the repository this box applies, not what the
+directory is called. Renaming the deploy host is a console step —
+`hotserve init` again from a copied directory — which is honest: the
+new host has no certificate until the box serves it, so the rename
+could not be a plain push in any case.
 
 ## Handler contract
 
@@ -463,7 +502,11 @@ box serves it, so the rename could not be a plain push in any case.
   no longer accepts it. The same token was verified when it posted
   the bundle; what it learns is the outcome of its own push. Without
   this, a push that changes `deploy_trust` would lock its own workflow
-  out of the result with a 401 the moment the reload succeeded.
+  out of the result with a 401 the moment the reload succeeded. The
+  workflow therefore polls with the token it posted with, not a
+  freshly minted one (a new token has a new digest), and the token's
+  lifetime (GitHub's is about ten minutes) comfortably covers two
+  bounded reloads.
 - Anything else — 405. Every answer passes liveswap's response filter
   (the shape and entropy layers; a `diff` additionally passes the
   environment layer in the applier before it is written).
@@ -484,19 +527,21 @@ hotserve user, never as root (the same reasoning as step 6), with the
 environment `hotserve.service` gives the service and nothing of
 root's shell — dropping the uid does not drop the environment, and
 the adapter would expand `{$VAR}` from whatever it inherited; then
-runs the applier's own install transaction (steps 18 and 19, and the
-recovery of step 9 first if a `Caddyfile.prev` is lying there): the
-existing file, when there is one, is renamed to `Caddyfile.prev`
-before the new file lands 0644 root by temporary name and rename;
-`/etc/hotserve/age/` is created; hotserve is reloaded if it is active,
-and on a failed reload the previous file is renamed back, reloaded
-again, `applied.json` left as it was, and `init` exits non-zero
-saying so — a re-run of `init` as the break-glass must not leave a
-box that cannot restart. Only after the reload succeeds is
-`applied.json {sha, sha256}` written; when hotserve is not running it
-is written on install and `init` says the file loads at the next
-start, since a person is at the console for `init` in a way nobody is
-for the applier. Then it prints what it found and did:
+takes the applier's lock and runs the applier's install transaction —
+the same code, not a description of it: step 9's recovery first if
+the marker is lying there, then step 18 (the existing file copied to
+the marker, the new file landing 0644 root by temporary name and
+rename, so `/etc/hotserve/Caddyfile` exists at every instant) and
+step 19 (reload if hotserve is active; on failure the previous file
+written back, reloaded again, `applied.json` left as it was, and
+`init` exits non-zero saying so — a re-run of `init` as the
+break-glass must not leave a box that cannot restart).
+`/etc/hotserve/age/` is created. Only after the reload succeeds is
+`applied.json {sha, path, sha256}` written, with `path` =
+`<dir>/Caddyfile` from the directory's base name; when hotserve is not
+running it is written on install and `init` says the file loads at the
+next start, since a person is at the console for `init` in a way
+nobody is for the applier. Then it prints what it found and did:
 
 ```
 init: box1/Caddyfile validates; 1 app (example); box_webhook on deploy.example.com; 1 signer (alice@example.com)
@@ -526,9 +571,11 @@ reads tokens, not the adapted config.
 
 `hotserve-box-apply.path` (`DirectoryNotEmpty=/var/lib/hotserve-box/in`,
 `DirectoryNotEmpty=/var/lib/hotserve-box/work`,
-`PathExists=/etc/hotserve/Caddyfile.prev` — the second and third are
+`PathExists=/var/lib/hotserve-box/prev` — the second and third are
 what make step 9's recovery run after a crash, at boot included, since
-a bundle already moved out of `in/` would otherwise wait forever;
+a bundle already moved out of `in/` would otherwise wait forever; all
+three paths are written by the applier and the handler alone, never
+by a sudoers line or a laptop script, so nothing else can fire it;
 `TriggerLimitIntervalSec=10s`, `TriggerLimitBurst=20`, enabled,
 `WantedBy=multi-user.target`) starts `hotserve-box-apply.service`
 (`Type=oneshot`, `ExecStart=/usr/bin/hotserve box apply`, root, not
@@ -540,8 +587,13 @@ style: `ProtectSystem=strict` with `ReadWritePaths=/etc/hotserve
 CAP_SETGID` (to run `ssh-keygen` as 65534; nothing else — root's uid
 is what writes `/etc/hotserve`. `init` is not this unit: it runs as
 root over SSH and drops to the hotserve user for `validate` by
-itself), `TimeoutStartSec=10min` (longer than two reloads),
-and a reason above every line. `box/units_test.go` parses both shipped
+itself), `TimeoutStartSec=infinity` as the backups units have it — a
+run is bounded from inside, not by systemd killing it mid-transaction:
+each reload by hotserve.service's own 240 s, each child by its
+deadline and `WaitDelay`, and the drain loop processes one bundle at a
+time, so a run of recovery plus several bundles is long but never
+interrupted between a swap and its reload — and a reason above every
+line. `box/units_test.go` parses both shipped
 units and holds them to this list.
 
 The path unit fires at boot if `in/` is non-empty from before a
@@ -597,14 +649,25 @@ nothing more than they do for a deploy.
   regular file` / `<sha> is in a SHA-256 repository, which the box
   does not read` / `bundle: path is not a relative path of safe
   components`.
-- `<sha> does not descend from the commit this box runs (<baseline>);
-  the history no longer contains it — a rewind or a replay is refused
-  on purpose; if main was rewritten below it, hotserve box baseline
-  <sha> as root on the box resets trust to <sha>, whose ancestors the
-  box will not examine`.
+- `<sha> does not descend from the commit this box runs (<baseline>).
+  If the box already runs a later commit than this run's, nothing is
+  wrong: a newer push applied first. A rewind or a replay is refused on
+  purpose. Only if main was rewritten below <baseline> does hotserve
+  box baseline <sha>, as root on the box, reset trust to <sha> — whose
+  ancestors the box will then never examine`. The workflow does not
+  normally reach this: before posting, it checks `git merge-base
+  --is-ancestor HEAD <baseline>` and, when the box's commit already
+  descends from this run's HEAD, exits green with "superseded by a
+  later push"; and its `concurrency` group keeps runs in order. The
+  message is for the box, which cannot tell the two apart from the
+  bundle alone.
 - `the chain from <baseline> to <sha> is longer than 500 commits; run
   hotserve box baseline <sha> as root on the box`.
 - `this file is for <host2>; this box is <host1>`.
+- `this box's file is <recorded path>; the bundle is <path> — the same
+  host appears in more than one file of the repository, or the
+  directory was renamed; hotserve init again as root records a new
+  path`.
 - `the new Caddyfile has no box block` / `… no signer` / `… no site
   with box_webhook` / `… more than one site with box_webhook` / `… the
   box_webhook site's address is not one bare hostname (<address>); no
@@ -665,9 +728,10 @@ refuses every push after it until it is rebased away and
 force-pushed (the box's baseline is below it and stays valid; no
 console step). The box repository's README states this;
 nothing on GitHub enforces it. A `required_signatures` ruleset on
-`main` is the one GitHub-side setting that prevents the mistake
-rather than reporting it, and the README recommends it; the box does
-not depend on it.
+`main` stops the *rebase* button and any unsigned push at the push,
+and the README recommends it for that; it does not stop the *squash*
+button, whose web-flow GPG signature satisfies GitHub and not the box.
+The box depends on neither.
 
 ## Threat-model deltas
 
@@ -676,8 +740,8 @@ full placement is DESIGN-threat-model.md, "Config webhook" and T6.
 
 | Actor | Can | Cannot |
 |---|---|---|
-| Holder of a box-repo OIDC token (the repo's own CI, a compromised action) | Reach the handler; make it validate a Caddyfile a *signer* committed (pre-check first); replay HEAD (a `no_change`); flood `in/` up to one pending bundle (409 after that) | Install anything not signed by a listed key; replay an older signed commit (descent); land another box's file (identity) |
-| Leaked PAT, stolen session, OAuth/GitHub App with `contents:write` | Push to `main`; make the run red; stop every later push until its commit is removed from the first-parent history (loud, recoverable; a `required_signatures` ruleset stops it at the push) | Produce an SSH signature by a listed key; ride into the box under a later signed commit (every commit on the chain is checked); therefore change the box |
+| Holder of a box-repo OIDC token (the repo's own CI, a compromised action) | Reach the handler; make it validate a Caddyfile a *signer* committed (pre-check first); replay HEAD (a `no_change`); flood `in/` up to one pending bundle (409 after that) | Install anything not signed by a listed key; replay an older signed commit (descent); land another box's file, or another file for this host elsewhere in the tree (identity: host and recorded path) |
+| Leaked PAT, stolen session, OAuth/GitHub App with `contents:write` | Push to `main`; make the run red; stop every later push until its commit is removed from the first-parent history (loud, recoverable; a `required_signatures` ruleset stops an unsigned push, not a squash) | Produce an SSH signature by a listed key; ride into the box under a later signed commit (every commit on the chain is checked); therefore change the box |
 | Compromised laptop holding a software signing key | Everything the operator can: sign and push any config | Nothing the operator cannot; this is the operator |
 | Compromised laptop, hardware-held key (`sk-` types) | Push unsigned or GPG-signed commits (refused) | Sign without a touch; so cannot change the box unattended |
 | Supervisor RCE (T5, the hotserve uid) | Drop any bundle; skip validation (the reload fails and rolls back); report "loaded" for a reload that did nothing (the exit status is the hotserve uid's word); read `out/` and `applied.json` | Write `/etc/hotserve/Caddyfile` or `applied.json`; forge a result; make root install an unsigned, non-descendant or other-box file; persist a configuration across a restart (root's file is the authority at the next start, `systemctl restart` the operator's remedy) |
@@ -726,7 +790,9 @@ Dated one-liners; the full text of each is in git.
   liveswap.
 - 2026-10-09 — Design written. Decided: `init` takes the baseline sha
   (no null state); the box's identity is its `box_webhook` host, the
-  directory name a label; validation runs in the handler, never in
+  directory name a label, and (after a self-review found that an OIDC
+  holder could pick any file in the signed tree naming that host) the
+  file's path is recorded by `init` and must match; validation runs in the handler, never in
   root; `verified` before reload and a 202 + poll, because a request
   held across `systemctl reload` deadlocks on `Shutdown`; the exchange
   tree at `/var/lib/hotserve-box`; one bundle file per request read
