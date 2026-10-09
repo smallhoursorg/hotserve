@@ -12,7 +12,8 @@
 # comes up as a transient unit under that user's own systemd manager —
 # the exact packaging interaction (ProtectSystem=full, User=hotserve,
 # lingering, the user@<uid> drop-in) no other test layer exercises.
-# Stage 3 then proves the app survives the upgrade restart.
+# Stage 3 then proves the app survives the upgrade restart, and stage
+# 3c that an upgrade restart the new binary refuses is reported.
 set -eu
 
 # TOKEN is minted in stage 2 with a local deploy key (deploy_trust
@@ -52,7 +53,12 @@ stage "stage 1: install, service basics, reload"
 # Depends (libpam-systemd, dbus) resolve the way they would on a real
 # box — that resolution is part of what this stage proves.
 apt-get update -qq
-apt-get install -y "$deb"
+apt-get install -y "$deb" >/tmp/install.out 2>&1 \
+	|| { cat /tmp/install.out; die "apt-get install of the package failed"; }
+cat /tmp/install.out
+# Not enabled yet, so postinstall owes the operator the start command.
+grep -q 'systemctl enable --now hotserve' /tmp/install.out \
+	|| die "a fresh install did not print the 'systemctl enable --now hotserve' hint"
 
 id hotserve >/dev/null || die "postinstall did not create the hotserve user"
 # The package ships no user-manager wrapper and no AppArmor profile:
@@ -502,7 +508,17 @@ usermod -g smoketest-other hotserve \
 	|| die "could not move the hotserve account off its primary group; the reinstall assertion below would be vacuous"
 id -nG hotserve | tr ' ' '\n' | grep -qx hotserve \
 	&& die "the hotserve account is still in the hotserve group; the reinstall assertion below would be vacuous"
-dpkg -i "$deb"
+dpkg -i "$deb" >/tmp/reinstall.out 2>/tmp/reinstall.err \
+	|| { cat /tmp/reinstall.out /tmp/reinstall.err; die "reinstall (dpkg -i) failed"; }
+cat /tmp/reinstall.out /tmp/reinstall.err
+# hotserve is enabled and running: the start hint would be noise, and a
+# restart that went fine must not read as one that failed.
+grep -q 'enable --now' /tmp/reinstall.out /tmp/reinstall.err \
+	&& die "reinstall over an enabled hotserve printed the 'enable --now' start hint"
+grep -q 'journalctl -u hotserve' /tmp/reinstall.err \
+	&& die "reinstall printed the failed-restart hint although the restart succeeded"
+grep -qx 'hotserve restarted.' /tmp/reinstall.out \
+	|| die "reinstall over a running hotserve did not say it restarted"
 id -nG hotserve | tr ' ' '\n' | grep -qx hotserve \
 	|| die "reinstall did not restore the hotserve user's group membership: the package's group-owned directories would be unreachable"
 grep -q liveswap_webhook /etc/hotserve/Caddyfile \
@@ -549,6 +565,51 @@ systemctl is-active --quiet "user@$uid.service" || die "prerm deconfigure stoppe
 kill -0 "$pid_after" 2>/dev/null || die "deployed app (pid $pid_after) did not survive prerm deconfigure"
 curl -fsS --max-time 5 "$PROXY/" | grep -q "hello smoke" || die "app not served after prerm deconfigure"
 echo "prerm deconfigure left the service, the user manager and the app (pid $pid_after) running"
+
+stage "stage 3c: an upgrade restart the new version refuses is reported"
+# An upgrade whose config the new binary refuses stops the old one and
+# fails to start the new: the site is down. postinstall must say so on
+# stderr — and still exit 0, or the package is left half-configured.
+# A subdirective no version accepts stands in for one an upgrade stops
+# accepting; reinstalling the same .deb runs the same try-restart.
+cp /etc/hotserve/Caddyfile /tmp/Caddyfile.good
+sed -i '/^[[:space:]]*liveswap {$/a smoke_retired_option on' /etc/hotserve/Caddyfile
+hotserve adapt --config /etc/hotserve/Caddyfile >/dev/null 2>&1 \
+	&& die "the broken Caddyfile adapts; the failed-restart assertions below would be vacuous"
+dpkg -i "$deb" >/tmp/refused.out 2>/tmp/refused.err \
+	|| { cat /tmp/refused.out /tmp/refused.err; die "dpkg -i exited non-zero over a refused config: a failed restart must not fail the package"; }
+cat /tmp/refused.out /tmp/refused.err
+[ "$(dpkg-query -W -f='${Status}' hotserve)" = "install ok installed" ] \
+	|| die "package state is '$(dpkg-query -W -f='${Status}' hotserve)' after a refused restart, want 'install ok installed'"
+systemctl is-active --quiet hotserve \
+	&& die "hotserve is active after a restart over a refused config; this stage tests nothing"
+grep -q 'journalctl -u hotserve -e' /tmp/refused.err \
+	|| die "a failed upgrade restart printed no journalctl hint on stderr (postinstall swallowed it)"
+grep -q 'systemctl status hotserve' /tmp/refused.err \
+	|| die "a failed upgrade restart printed no systemctl status hint on stderr"
+grep -q 'enable --now' /tmp/refused.out /tmp/refused.err \
+	&& die "a failed upgrade restart printed the 'enable --now' start hint, as if all were well"
+grep -q 'restarted\.' /tmp/refused.out \
+	&& die "a failed upgrade restart claimed hotserve restarted"
+kill -0 "$pid_after" 2>/dev/null || die "deployed app (pid $pid_after) did not survive hotserve's refused start"
+# Recover the way the hint says, so stage 4 starts from a serving box.
+# reset-failed first: stages 3 to 3c started the unit often enough in
+# a few seconds to reach systemd's start limit (5 in 10 s), which an
+# operator fixing the config by hand would have long outlived.
+cp /tmp/Caddyfile.good /etc/hotserve/Caddyfile
+systemctl reset-failed hotserve
+timeout 300 systemctl restart hotserve || die "hotserve did not start again on the restored config"
+i=0
+until [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$HOOK")" = "200" ]; do
+	i=$((i + 1))
+	[ "$i" -ge 30 ] && die "webhook not back within 30s of the recovery restart"
+	sleep 1
+done
+status=$(curl -s --max-time 5 -H "Authorization: Bearer $TOKEN" "$HOOK")
+[ "$(printf '%s' "$status" | sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p')" = "$pid_after" ] \
+	|| die "app pid changed across the refused restart and recovery: reattach failed: $status"
+curl -fsS --max-time 5 "$PROXY/" | grep -q "hello smoke" || die "app not served after recovery"
+echo "refused restart: dpkg exit 0, hint on stderr, no start hint; recovered and reattached to pid $pid_after"
 
 stage "stage 4: removal"
 apt-get remove -y hotserve
