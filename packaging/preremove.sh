@@ -7,9 +7,9 @@
 # Upgrades instead restart into the new binary in postinstall — and the
 # deployed apps, which live under the hotserve user's own systemd
 # manager, keep serving right through that restart. `deconfigure` is
-# not removal either: dpkg runs it when a dependency (dbus,
-# libpam-systemd) is swapped out during a dist-upgrade, the package
-# stays installed, and postinstall's later `configure` only
+# not removal either: dpkg runs it when a package being installed
+# Breaks hotserve or one of its dependencies (dbus, libpam-systemd,
+# swapped out during a dist-upgrade), the package stays installed, and postinstall's later `configure` only
 # try-restarts — nothing would re-enable a torn-down box.
 case "${1:-}" in
 remove)
@@ -33,6 +33,7 @@ remove)
 	fi
 	;;
 *)
+	# upgrade, failed-upgrade, deconfigure: keep serving.
 	;;
 esac
 exit 0
