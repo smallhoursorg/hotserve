@@ -540,10 +540,19 @@ placeholders with an empty environment (box/DESIGN-box.md, "Reading
 the signed file"). What the workflow is *told* remains the serving
 process's word: the response and the result poll are served by
 hotserve, so a T5 can lie to CI; it cannot change root's record or
-root's file. A
-supervisor RCE can drop anything and skip validation, and gains a
-failed reload and a rollback; it cannot write the file,
-`applied.json` or a result.
+root's file *itself*. What it can do through root is bounded by the
+signers, not closed: the token-to-commit binding is the handler's
+check, and root cannot repeat it (the token is not in the bundle, and
+verifying one offline would mean a root unit fetching issuer keys or
+trusting the handler's cache), so a supervisor RCE that drops a bundle
+straight into `in/` can have root install any configuration a signer
+signed that descends from the baseline and whose objects it holds —
+`HEAD` again, which undoes a console edit, or a signer's signed but
+unmerged branch. It cannot have root install anything a signer did not
+sign; dropping an unsigned or self-authored file, or skipping
+validation, gains a failed reload and a rollback. The box repository's
+README rule that unmerged configuration stays unsigned is what keeps
+that set to `main`'s own history.
 
 What it does not close. `systemctl reload`'s exit status is the
 hotserve uid's word; the `applied` phase trusts it, the file on disk
@@ -625,9 +634,9 @@ to that question (the "Config webhook" section says what keeps it
 closed). For **T6**: a push credential gets a red run and a stalled
 `main` until its commit is removed, or a signer's own signed branch
 landed early; an OIDC holder gets a replay of `HEAD` (a `no_change`,
-or the undoing of a console edit), one pending bundle at a time, and
-the handler's validate on a signer's file; a signer's software key gets
-the box.
+or the undoing of a console edit), one bundle in `in/` at a time with
+no age-out and one in root's hands, and the handler's validate on a
+signer's file; a signer's software key gets the box.
 
 ## The shared-UID rule
 
