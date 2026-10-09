@@ -227,15 +227,24 @@ disk is unchanged; the result names the step (messages in "Refusals").
     box under the next signed commit on top of it, since HEAD's tree
     contains whatever that commit changed. The price is that one
     unsigned (or OpenPGP-signed) commit on `main` stops every later
-    push until it is removed from the first-parent history (rebase it
-    away, force-push, `hotserve box baseline`); the refusal names the
-    commit and says so. A merge commit a signer signed vouches for the
+    push until it is removed from the first-parent history: rebase it
+    away and force-push. The baseline sits below the removed commit,
+    so the rewritten history still descends from it and the next push
+    applies — `hotserve box baseline` is **not** part of this recovery,
+    and must not be: moving the baseline up to a signed HEAD empties
+    the chain and skips every ancestor below it, which is the ride-in
+    this step exists to prevent. The refusal names the commit and says
+    so. A merge commit a signer signed vouches for the
     branch it merges, whose own commits are off the first-parent line
     and not examined. HEAD equal to the baseline passes (an empty
     chain) and step 16 decides whether there is anything to do. A
-    chain that misses the baseline is a force-push, a rewind, or a
-    replay of an older signed commit, and all three are refused the
-    same way; the message names `hotserve box baseline`.
+    chain that misses the baseline is a history that no longer
+    contains the commit the box runs — a rewind, a replay of an older
+    signed commit, or a rebase that rewrote the baseline itself — and
+    all are refused the same way. Only that case is what `hotserve box
+    baseline` is for: a trust reset by root at the console, naming a
+    commit whose ancestors the box will then never examine, so the
+    message says that too.
 15. **Never cut the branch you sit on.** The incoming file must have a
     `box` block with at least one `signer`, a `deploy_trust` that
     parses non-empty, exactly one site carrying `box_webhook`, and must
@@ -261,9 +270,13 @@ disk is unchanged; the result names the step (messages in "Refusals").
     can answer (step 8). Every refusal precedes `verified`; after it
     the only phases are `applied`, `no_change`, `rolled_back` and
     `unknown`.
-18. **Install.** The new file is written to a temporary name in
-    `/etc/hotserve/` (mode 0644, root) and renamed over `Caddyfile`;
-    the buffer from step 10 is written as `Caddyfile.prev`.
+18. **Install.** First the rollback copy: the buffer from step 10 is
+    written to a temporary name and renamed to `Caddyfile.prev`, and
+    only once that rename has returned is the new file written to a
+    temporary name in `/etc/hotserve/` (mode 0644, root) and renamed
+    over `Caddyfile`. A failure writing either temporary (`ENOSPC`,
+    say) leaves `Caddyfile` untouched and the result `refused`; the
+    live file never changes without its restore copy already in place.
 19. **Reload.** `systemctl reload hotserve` — which runs the unit's
     `ExecReload` (`hotserve reload --config /etc/hotserve/Caddyfile
     --force`) as the hotserve user — with no applier-side timeout
@@ -320,7 +333,7 @@ Written before the code, as liveswap's deploy-record store was.
 | Path | Mode | Owner | Rule |
 |---|---|---|---|
 | `/etc/hotserve/Caddyfile` | 0644 | root:root | Written only by root: `init`, the applier, the console. Read by hotserve (serving), by the handler (signers for the pre-check) and by the applier (the signer list and the rollback copy). The conffile the package ships. |
-| `/etc/hotserve/Caddyfile.prev` | 0644 | root:root | Exists only between steps 18 and 19. |
+| `/etc/hotserve/Caddyfile.prev` | 0644 | root:root | Written and renamed into place before `Caddyfile` is replaced (step 18); removed when the reload succeeds (step 19). Exists only between the two. |
 | `/etc/hotserve/age/` | 0700 | root:root | Reserved, empty, created by `init`; the secrets PR puts the box's age key here. |
 | `/var/lib/hotserve-box/` | 0750 | root:hotserve | Created by `tmpfiles.d`, not by either process. Not under `/var/lib/hotserve`, which is 0750 hotserve:hotserve and which a root unit without `CAP_DAC_OVERRIDE` cannot traverse. Joins `sandboxHotservePaths` (liveswap/sandbox.go): never a bind source. |
 | `…/stage/` | 0700 | hotserve:hotserve | The handler assembles a bundle here. Not watched. |
@@ -402,10 +415,15 @@ init: installed /etc/hotserve/Caddyfile; this box applies commits descending fro
 init: reloaded. From here, config changes are pushes to your-org/boxes.
 ```
 
-`hotserve box baseline <sha>` (root) rewrites the baseline only. It is
-the recovery from a force-push, a rewind, or a chain longer than 500
-commits, and the message that refuses those names it. A revert commit
-is the normal path and needs nothing on the box.
+`hotserve box baseline <sha>` (root) rewrites the baseline only, and
+it is a trust reset: the box will never examine `<sha>`'s ancestors,
+so it is for the case where `main`'s history no longer contains the
+commit the box runs (a rewrite below it, a chain longer than 500
+commits), and the messages that refuse those name it. It is not the
+recovery from an unsigned commit above the baseline — that is a
+rebase and a force-push, after which the unchanged baseline is still
+an ancestor and the next push applies. A revert commit is the normal
+path for a bad change and needs nothing on the box.
 
 `hotserve box webhook <Caddyfile>` prints `https://<host>/` for the one
 site carrying `box_webhook`; it refuses zero, more than one, or a
@@ -431,12 +449,20 @@ and a reason above every line. `box/units_test.go` parses both shipped
 units and holds them to this list.
 
 The path unit fires at boot if `in/` is non-empty from before a
-crash; hotserve may not be up yet, and step 19's "not active" refusal
-is what that case meets. Entries that arrive while the service runs
-are picked up by the re-trigger when it exits — which is also why the
-service must leave `in/` empty: a non-empty `in/` on exit is an
-immediate re-trigger, and twenty of those in ten seconds fail the
-path unit until `systemctl reset-failed`.
+crash; hotserve may not be up yet, and step 17's "not active" refusal
+is what that case meets. The applier drains in a loop: it takes every
+entry a listing of `in/` shows, processes them, lists again, and exits
+only after a listing comes back empty. A bundle that lands between
+that last listing and the exit is the one case `in/` is non-empty
+when the service stops; systemd re-evaluates `DirectoryNotEmpty=` on
+the stop and starts the service once more, which drains it. That is
+one re-trigger per late arrival, not a loop. The loop the rate limit
+guards against is an entry the applier declines to take — a name it
+does not like, a file it cannot open — left in place: so every entry
+the applier sees is moved to `work/` whatever it is, and refused from
+there. Twenty re-triggers in ten seconds would fail the path unit
+until `systemctl reset-failed`; the invariant is what keeps the count
+at one.
 
 The package depends on `openssh-client` (for `ssh-keygen`) and ships
 the `tmpfiles.d` file; `postinstall.sh` runs `systemd-tmpfiles
@@ -465,16 +491,18 @@ nothing more than they do for a deploy.
 - `<sha> is signed by a key that is not a signer in the Caddyfile this
   box runs`.
 - `<sha2>, between the commit this box runs and <sha>, is not signed
-  by a signer; every commit on main must be — remove it from the
-  history (rebase, force-push, then hotserve box baseline <sha> as
-  root on the box)`.
+  by a signer; every commit on main must be — rebase it out of the
+  history and force-push; the box still runs <baseline>, so no
+  baseline change is needed`.
 - `the file sent is not <path> in <sha>` / `<path> in <sha> is not a
   regular file` / `<sha> is in a SHA-256 repository, which the box
   does not read` / `bundle: path is not a relative path of safe
   components`.
 - `<sha> does not descend from the commit this box runs (<baseline>);
-  a force-push, a rewind or a replay — revert instead, or run hotserve
-  box baseline <sha> as root on the box`.
+  the history no longer contains it — a rewind or a replay is refused
+  on purpose; if main was rewritten below it, hotserve box baseline
+  <sha> as root on the box resets trust to <sha>, whose ancestors the
+  box will not examine`.
 - `the chain from <baseline> to <sha> is longer than 500 commits; run
   hotserve box baseline <sha> as root on the box`.
 - `this file is for <host2>; this box is <host1>`.
@@ -511,7 +539,9 @@ point: the repository is the truth and the edit is a bridge back to it
 is reported, not refused). A change that validates but misbehaves — a
 wrong domain, a flag the app does not expect — is reverted like any
 commit: `git revert`, push, and the box runs the previous file in the
-time a workflow run takes. A force-push is `hotserve box baseline`.
+time a workflow run takes. A history rewritten *below* the commit the
+box runs is `hotserve box baseline`; one rewritten above it (an
+unsigned commit rebased away) needs nothing on the box.
 
 ## The merge button
 
@@ -525,8 +555,9 @@ branch's commits all are; a contributor who is not a signer is landed
 by `git merge --squash` and one signed commit, which is also the
 commit whose diff the signer read. Pressing the button anyway does
 more harm than a red run: the commit it lands sits on `main` and
-refuses every push after it until it is rebased away, force-pushed
-and the box re-baselined. The box repository's README states this;
+refuses every push after it until it is rebased away and
+force-pushed (the box's baseline is below it and stays valid; no
+console step). The box repository's README states this;
 nothing on GitHub enforces it. A `required_signatures` ruleset on
 `main` is the one GitHub-side setting that prevents the mistake
 rather than reporting it, and the README recommends it; the box does
