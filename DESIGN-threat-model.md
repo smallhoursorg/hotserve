@@ -514,7 +514,10 @@ path walk, an `ssh-keygen` invocation, lock and rename handling — and
 what keeps T5 from reaching root through it is that the applier
 re-verifies everything from the bytes, reads them once into memory,
 parses under fixed names and small caps, runs `ssh-keygen` as uid
-65534, and trusts the handler for nothing but a well-formed bundle. A
+65534, trusts the handler for nothing but a well-formed bundle, and
+refuses a Caddyfile with any `import` — an imported file is unsigned
+bytes, and one under a hotserve-writable path would be T5's way to
+make a change outlast a restart. A
 supervisor RCE can drop anything and skip validation, and gains a
 failed reload and a rollback; it cannot write the file,
 `applied.json` or a result.
