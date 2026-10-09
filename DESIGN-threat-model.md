@@ -434,6 +434,54 @@ inheritance of ACME tokens and any other supervisor secret
 closed twice over (non-dumpable supervisor; cross-namespace refusal);
 the filesystem routes are closed by absence.
 
+**Where `env_file` values sit once the app runs.** hotserve reads the
+file itself and hands the pairs to the manager as the transient unit's
+inline `Environment=` property (`unitProperties`,
+liveswap/systemd_dbus.go), never `EnvironmentFile=`. From then on the
+`hotserve` uid — the trust domain that read the file — holds them by
+four routes, with a host-dependent fifth, and nothing else holds them
+by any:
+
+- **The unit's property**, for as long as the unit exists:
+  `systemctl --user -M hotserve@ show -p Environment <unit>` (as that
+  uid or as root; a bare `--user` targets the caller's own manager). A
+  key that inline `env` or the injected `SOCKET` also sets is not
+  here: `buildEnvFull` (liveswap/app.go) emits both and the manager
+  keeps the last.
+- **The transient unit file** the manager writes under
+  `/run/user/<uid>/systemd/transient/`, which carries the un-merged
+  `Environment=` line — overridden values included — until the unit
+  is garbage-collected.
+- **The running app's `/proc/<pid>/environ`.** The user-namespace
+  closure measured on the spike ("The shared-UID rule", below) runs
+  the other way, app to supervisor; this direction follows from the
+  same `ptrace_may_access` rule, since the app's namespace is owned by
+  the hotserve uid, which holds `CAP_SYS_PTRACE` in it. Not measured.
+- **hotserve's own memory**, which keeps every value it has read — for
+  a launch, or for the response filter, which reads the file without
+  one (`managedApp.secrets` and `redactorFor`, liveswap/app.go) — for
+  as long as the app stays configured, behind the non-dumpable floor.
+- **A core dump, where the host writes one.** Nothing makes an app
+  non-dumpable (the floor under "A non-dumpable supervisor is the
+  floor" is the supervisor's own) and no unit sets `LimitCORE=`, so an
+  app crash can write its memory, values included, past the unit's
+  life: under the kernel's default pattern into the crashing process's
+  working directory — the release dir unless the app moved, anywhere
+  writable in its view if it did; under systemd-coredump into its
+  store, with an access entry for the uid. Same uid and root. Closing
+  it (`LimitCORE=0` on app units) is a code change, not made here.
+
+No account gains a read it did not already have: the file is
+root:hotserve 0640 by the tutorial's install line (nothing in hotserve
+enforces that), `/run/user` — the manager's socket and the transient
+file alike — is outside every view (`sandboxNeverReachable`,
+liveswap/sandbox.go), and the PID namespace hides the process from
+siblings. Stated because the manager's two copies are not obvious from
+the file's mode. `LoadCredential=` delivery would take the values out
+of the unit's properties and environment, not out of the uid's reach,
+and what it closes under this sandbox is unmeasured: an open question,
+not a plan.
+
 ### Config webhook — `box/`
 
 The second authenticated entry point, and the only one whose outcome
