@@ -236,13 +236,18 @@ disk is unchanged; the result names the step (messages in "Refusals").
    token's attribution, as a deploy's `deployed_by`) and `remote` — to
    the journal; nothing about the caller is handed to root, whose
    record names the signer it proved, not the token the handler saw.
-8. **Answer.** The handler waits at most 30 s for the applier's
-   `verified` result and answers: 422 with the refusal; 200 `no_change`
-   when the file already runs (nothing reloads); 202 with `{id, commit}`
-   when the applier is about to install the file; 504 with `{id}` when
-   no result arrived in time (the apply continues; `GET /?result=<id>`
-   has the outcome). The handler never waits past `verified` — see
-   "Why 202 and a poll".
+8. **Answer.** The handler waits at most 30 s for the applier's first
+   result and answers by the phase it finds: `refused` → 422 with the
+   refusal; `no_change` → 200; `verified`, or any phase that follows it
+   (`applied`, `failed`, `rolled_back`, `unknown` — the applier does
+   not wait to be read, so a fast transaction may already be terminal
+   by the handler's next poll) → 202 with `{id, commit, phase}`, and
+   the workflow reads the outcome from `GET /?result=<id>` whatever the
+   phase was; no result within 30 s → 504 with `{id}` (the apply
+   continues; the same poll has the outcome). One rule, then: a POST
+   that was not refused outright is answered 202 or 200 and never
+   carries a terminal verdict itself. The handler never waits past the
+   first result — see "Why 202 and a poll".
 
 **In the applier (`hotserve box apply`, root, one shot, path-triggered):**
 
@@ -581,7 +586,7 @@ Written before the code, as liveswap's deploy-record store was.
 | `/tmp/box-verify-<id>/` (the unit's `PrivateTmp`) | 0755 / files 0644 | root:root | The payload, the signature and the generated allowed_signers for `ssh-keygen` running as uid 65534, which cannot traverse `work/` (0700) or `/var/lib/hotserve-box` (0750 root:hotserve). The private `/tmp` is gone with the unit. |
 | `…/out/` | 2750 | root:hotserve | Results, written to a temporary name and renamed so the handler never reads a partial file; setgid, so a result root creates is group `hotserve` and readable by the handler without a `chown`. Root sweeps by age (a day); hotserve only reads. |
 | `…/out/<id>.json` | 0640 | root:hotserve | `{id, phase, commit, signer, path, diff, apps, box_webhook, error, caddyfile_edited_out_of_band}`. The `diff` passed the redactor. |
-| `…/applied.json` | 0640 | root:hotserve | `{sha, path, sha256, signer, when}`, written to a temporary name and renamed, and only inside a transaction whose record says `applied` (a reload succeeded) or `no_change` (the baseline alone advances), or by `init` on a box where hotserve is not running: the baseline; the repository path of this box's file, set by `init` and changed only by `init`; the installed file's digest (an out-of-band edit is visible, not refused — root's file is root's); the principal whose key root verified. Nothing the handler reported about the caller is in it; that is the handler's journal line. The box's host is read from the installed file, never recorded. |
+| `…/applied.json` | 0640 | root:hotserve | `{sha, path, sha256, signer, when}`, written to a temporary name, renamed and `fsync`ed, and only by a holder of root's `lock`: inside a transaction whose record says `applied` (a reload succeeded) or `no_change` (the baseline alone advances), by `init` on a box where hotserve is not running, or by `hotserve box baseline` after it has settled any transaction left on disk — never concurrently with an apply, so a trust reset cannot be overwritten by an apply verified against the old baseline, nor by a recovery of an older transaction: the baseline; the repository path of this box's file, set by `init` and changed only by `init`; the installed file's digest (an out-of-band edit is visible, not refused — root's file is root's); the principal whose key root verified. Nothing the handler reported about the caller is in it; that is the handler's journal line. The box's host is read from the installed file, never recorded. |
 | `…/lock` | 0600 | root:root | `flock`; one apply at a time. |
 
 Caps: Caddyfile and blob ≤ 1 MiB; a tree object ≤ 1 MiB; a commit
@@ -724,7 +729,11 @@ init: installed /etc/hotserve/Caddyfile; this box applies commits descending fro
 init: reloaded. From here, config changes are pushes to your-org/boxes.
 ```
 
-`hotserve box baseline <sha>` (root) rewrites the baseline only, and
+`hotserve box baseline <sha>` (root) rewrites the baseline only — under
+root's blocking `lock`, after running step 9's recovery so that any
+transaction left on disk is settled first, and durably (temporary name,
+rename, `fsync`), so that no apply verified against the old baseline
+and no recovery of an older transaction can overwrite the reset — and
 it is a trust reset: the box will never examine `<sha>`'s ancestors,
 so it is for the case where `main`'s history no longer contains the
 commit the box runs (a rewrite below it, a chain longer than 500

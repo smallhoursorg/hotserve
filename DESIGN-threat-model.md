@@ -444,9 +444,11 @@ config reaches the box the way `examples/box/README.md` describes:
 root hand-edits `/etc/hotserve/Caddyfile` on day 0, and afterwards a
 laptop script (`examples/box/bin/push`) stages, validates, swaps and
 reloads it over SSH as an administrator whose sudoers file
-(`examples/box/sudoers`) allows exactly those eight commands plus
-`sudoedit` of the per-app env files. This section describes what
-replaces the first eight.
+(`examples/box/sudoers`) allows exactly those eight commands plus two
+for the per-app env files — a root `install -m 0640 -o root -g
+hotserve -T /dev/null /etc/hotserve/<app>.env` that creates one, and
+`sudoedit` of it. This section describes what replaces the first
+eight.
 
 The operator's config repository is the only writer of
 `/etc/hotserve/Caddyfile`. Its workflow mints an OIDC token and POSTs
@@ -494,8 +496,9 @@ from root's environment.
 What this closes, once shipped. The `HOTSERVE_CONFIG` half of the
 administrator's sudoers grant — the eight commands that moved and
 reloaded the Caddyfile — goes, and with it the only account that could
-change config; the `HOTSERVE_SECRETS` half (`sudoedit` of
-`/etc/hotserve/*.env`) stays until secrets ride the same channel, so
+change config; the `HOTSERVE_SECRETS` half (a root `install` that
+creates `/etc/hotserve/<app>.env` 0640 root:hotserve, and `sudoedit` of
+it) stays until secrets ride the same channel, so
 the administrator account itself remains until then. A leaked PAT, a
 stolen GitHub session or an OAuth app with `contents:write` can push
 to `main` and cannot produce the signature, so it cannot change the
