@@ -183,9 +183,9 @@ func FuzzReadBundle(f *testing.F) {
 		if len(b.Parents) > MaxChain {
 			t.Fatal("over the chain cap")
 		}
-		for id, c := range b.Parents {
-			if c.ID != id || ObjectID("commit", c.Raw) != id {
-				t.Fatalf("parent %s filed as %s", c.ID, id)
+		for _, c := range b.Parents {
+			if c.ID != ObjectID("commit", c.Raw) {
+				t.Fatalf("parent %s", c.ID)
 			}
 		}
 		for id, tr := range b.Trees {

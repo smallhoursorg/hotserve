@@ -89,11 +89,11 @@ func TestWalkAccepts(t *testing.T) {
 		"heredoc value":            strings.Replace(good, "\tbox_webhook\n", "\trespond <<EOF\n\thello\n\timport nothing\n\tEOF 200\n\tbox_webhook\n", 1),
 		"quoted multiline":         strings.Replace(good, "\tbox_webhook\n", "\trespond \"a\nimport b\n\"\n\tbox_webhook\n", 1),
 		"nested close on the line": strings.Replace(good, "\tbox_webhook\n", "\troute {\n\t\tbox_webhook }\n", 1),
-		"site without body":        good + "\nother.example.com\n",
 		"empty box_webhook":        strings.Replace(good, "\tbox_webhook\n", "\tbox_webhook {\n\t}\n", 1),
 		"comments":                 strings.Replace(good, "\tbox_webhook\n", "\t# import x\n\tbox_webhook # not import\n", 1),
 		"single label host":        strings.Replace(good, "deploy.example.com {", "localhost {", 1),
 		"ip host":                  strings.Replace(good, "deploy.example.com {", "192.0.2.1 {", 1),
+		"braced empty site":        good + "\nother.example.com {\n}\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			s, err := Walk(file(in))
@@ -161,6 +161,9 @@ func TestWalkRefuses(t *testing.T) {
 		"import snippet body":     {"(s) {\n\timport x\n}\n" + good, "imports x;"},
 		"unclosed":                {strings.TrimSuffix(good, "}\n"), "does not parse: a block is not closed"},
 		"stray close":             {good + "}\n", "does not parse: a } with no block open"},
+		"braceless site":          {good + "\nother.example.com\n", "has a site written without braces (other.example.com); every site block in the signed file must be braced"},
+		"braceless site body":     {strings.Replace(good, "deploy.example.com {\n\tliveswap_webhook\n\tbox_webhook\n}\n", "deploy.example.com\nliveswap_webhook\nbox_webhook\n", 1), "has a site written without braces (deploy.example.com)"},
+		"braceless continued":     {good + "\na.com,\nb.com\n", "has a site written without braces (a.com, b.com)"},
 		"site closed on a line":   {strings.Replace(good, "\tbox_webhook\n}\n", "\tbox_webhook }\n", 1), "does not parse: a } that closes a top-level block on a directive's line"},
 		"global closed on a line": {strings.Replace(good, "\t}\n}\n\nexample.com", "\t} }\n\nexample.com", 1), "does not parse: a } that closes a top-level block"},
 		"token after brace":       {strings.Replace(good, "deploy.example.com {", "deploy.example.com { box_webhook", 1), "does not parse"},

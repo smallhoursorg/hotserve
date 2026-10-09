@@ -283,9 +283,8 @@ func TestProveFileHandMade(t *testing.T) {
 
 func TestChainHandMade(t *testing.T) {
 	// A straight line of unsigned commits, c0 ← c1 ← … ← cN.
-	line := func(n int) ([]*Commit, map[string]*Commit) {
+	line := func(n int) []*Commit {
 		var cs []*Commit
-		all := map[string]*Commit{}
 		parent := ""
 		for i := 0; i <= n; i++ {
 			var parents []string
@@ -297,43 +296,70 @@ func TestChainHandMade(t *testing.T) {
 				t.Fatal(err)
 			}
 			cs = append(cs, c)
-			all[c.ID] = c
 			parent = c.ID
 		}
-		return cs, all
+		return cs
 	}
-	cs, all := line(3)
-	chain, err := Chain(cs[3], all, cs[0].ID)
+	// below is the parents the workflow bundles for head cs[i] down to
+	// (not including) cs[j]: cs[i-1] … cs[j+1].
+	below := func(cs []*Commit, i, j int) []*Commit {
+		var out []*Commit
+		for k := i - 1; k > j; k-- {
+			out = append(out, cs[k])
+		}
+		return out
+	}
+	cs := line(3)
+	chain, err := Chain(cs[3], below(cs, 3, 0), cs[0].ID)
 	if err != nil || len(chain) != 3 || chain[0] != cs[3] || chain[2] != cs[1] {
 		t.Fatalf("%v %v", chain, err)
 	}
-	if chain, err := Chain(cs[3], all, cs[3].ID); err != nil || chain != nil {
+	if chain, err := Chain(cs[3], nil, cs[3].ID); err != nil || chain != nil {
+		t.Fatalf("%v %v", chain, err)
+	}
+	if chain, err := Chain(cs[3], nil, cs[2].ID); err != nil || len(chain) != 1 {
 		t.Fatalf("%v %v", chain, err)
 	}
 	// Root reached: a baseline that is not in the history.
-	_, err = Chain(cs[3], all, zeroID)
-	refusalContaining(t, err, cs[3].ID+" does not descend from the commit this box runs ("+zeroID+")")
+	_, err = Chain(cs[3], below(cs, 3, -1), zeroID)
+	refusalContaining(t, err, cs[3].ID+" does not descend from the commit this box runs ("+zeroID+") along main's first-parent line", "hotserve box baseline "+cs[3].ID)
+	// Too few parents bundled: the walk ends before the baseline.
+	_, err = Chain(cs[3], below(cs, 3, 1), cs[0].ID)
+	refusalContaining(t, err, "does not descend")
+	// Position and hash must agree: an entry that is not the previous
+	// commit's first parent, and an entry past the baseline.
+	_, err = Chain(cs[3], []*Commit{cs[1]}, cs[0].ID)
+	refusalContaining(t, err, "bundle: parents/0001 is not the first parent of "+cs[3].ID)
+	_, err = Chain(cs[3], []*Commit{cs[2], cs[0]}, cs[0].ID)
+	refusalContaining(t, err, "bundle: parents/0002 is not the first parent of "+cs[2].ID)
+	_, err = Chain(cs[3], []*Commit{cs[2], cs[1], cs[0]}, cs[1].ID)
+	refusalContaining(t, err, "bundle: parents/0002 is past the end of the chain")
+	_, err = Chain(cs[3], []*Commit{cs[2]}, cs[3].ID)
+	refusalContaining(t, err, "bundle: parents/0001 is past the end of the chain")
+	_, err = Chain(cs[1], []*Commit{cs[0], cs[0]}, zeroID)
+	refusalContaining(t, err, "bundle: parents/0002 is past the end of the chain")
 	// A merge: the second parent is not walked.
 	m, err := ParseCommit(commitObject(emptyTree, []string{cs[1].ID, cs[3].ID}, nil, "merge\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	all[m.ID] = m
-	if chain, err := Chain(m, all, cs[0].ID); err != nil || len(chain) != 2 {
+	if chain, err := Chain(m, []*Commit{cs[1]}, cs[0].ID); err != nil || len(chain) != 2 {
 		t.Fatalf("%v %v", chain, err)
 	}
-	_, err = Chain(m, all, cs[2].ID)
-	refusalContaining(t, err, "does not descend")
+	_, err = Chain(m, []*Commit{cs[3]}, cs[2].ID)
+	refusalContaining(t, err, "bundle: parents/0001 is not the first parent of")
+	_, err = Chain(m, []*Commit{cs[1], cs[0]}, cs[2].ID)
+	refusalContaining(t, err, "does not descend", "merged main into itself")
 	// The cap: MaxChain commits above the baseline pass, one more does
 	// not. With head cs[N], the baseline cs[N-MaxChain] leaves exactly
 	// MaxChain above it.
-	cs, all = line(MaxChain + 2)
+	cs = line(MaxChain + 2)
 	head := cs[len(cs)-1]
-	_, err = Chain(head, all, cs[0].ID)
+	_, err = Chain(head, below(cs, len(cs)-1, 0), cs[0].ID)
 	refusalContaining(t, err, "the chain from "+cs[0].ID+" to "+head.ID+" is longer than 500 commits; run hotserve box baseline "+head.ID+" as root on the box")
-	_, err = Chain(head, all, cs[1].ID)
+	_, err = Chain(head, below(cs, len(cs)-1, 1), cs[1].ID)
 	refusalContaining(t, err, "is longer than 500 commits")
-	if chain, err := Chain(head, all, cs[2].ID); err != nil || len(chain) != MaxChain {
+	if chain, err := Chain(head, below(cs, len(cs)-1, 2), cs[2].ID); err != nil || len(chain) != MaxChain {
 		t.Fatalf("%d %v", len(chain), err)
 	}
 }

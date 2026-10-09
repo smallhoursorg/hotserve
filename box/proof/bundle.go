@@ -19,10 +19,12 @@ const (
 
 // Bundle is one push, parsed from memory under strict rules: regular
 // files only, fixed names — `path`, `Caddyfile`, `commit`,
-// `parents/NNNN`, `trees/<sha>` — and nothing else. Parents are keyed
-// by the id computed from each object; trees by the id they are filed
-// under, which the object must hash to. The same parser runs in the
-// handler (step 3) and in the applier (step 9).
+// `parents/NNNN`, `trees/<sha>` — and nothing else. Parents are in
+// the workflow's order, `parents/0001` first, a sequence with no gap;
+// Chain checks that each is the first parent of the one before. Trees
+// are keyed by the id they are filed under, which the object must hash
+// to. The same parser runs in the handler (step 3) and in the applier
+// (step 9).
 type Bundle struct {
 	// Path is the file's path in the repository, as the workflow knows
 	// it: a relative path of safe components (SplitPath).
@@ -30,7 +32,7 @@ type Bundle struct {
 	Caddyfile []byte
 	// Commit is HEAD, the commit the token's sha claim must name.
 	Commit  *Commit
-	Parents map[string]*Commit
+	Parents []*Commit
 	Trees   map[string]*Tree
 }
 
@@ -45,9 +47,9 @@ func ReadBundle(gz []byte) (*Bundle, error) {
 	}
 	lr := &io.LimitedReader{R: zr, N: MaxBundle + 1}
 	tr := tar.NewReader(lr)
-	b := &Bundle{Parents: map[string]*Commit{}, Trees: map[string]*Tree{}}
+	b := &Bundle{Trees: map[string]*Tree{}}
 	seen := map[string]bool{}
-	var parentIndexes []int
+	parents := map[int]*Commit{}
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -107,11 +109,7 @@ func ReadBundle(gz []byte) (*Bundle, error) {
 			if err != nil {
 				return nil, err
 			}
-			if _, dup := b.Parents[c.ID]; dup {
-				return nil, refuse("bundle: commit %s is bundled twice", c.ID)
-			}
-			b.Parents[c.ID] = c
-			parentIndexes = append(parentIndexes, n)
+			parents[n] = c
 		case strings.HasPrefix(name, "trees/"):
 			id := name[len("trees/"):]
 			t, err := ParseTree(data)
@@ -134,12 +132,12 @@ func ReadBundle(gz []byte) (*Bundle, error) {
 	}
 	// parents/NNNN is a sequence 0001..N: the chain as the workflow
 	// listed it, with nothing missing from the middle.
-	present := make([]bool, len(parentIndexes)+1)
-	for _, n := range parentIndexes {
-		if n > len(parentIndexes) || present[n] {
+	for n := 1; n <= len(parents); n++ {
+		c, ok := parents[n]
+		if !ok {
 			return nil, refuse("bundle: parents/ is not a sequence from 0001")
 		}
-		present[n] = true
+		b.Parents = append(b.Parents, c)
 	}
 	return b, nil
 }

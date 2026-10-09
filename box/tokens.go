@@ -42,10 +42,11 @@ func refuse(reason string) error { return &Refusal{Reason: reason} }
 // walk, which expands nothing and follows nothing. It refuses the
 // file if an `import` token stands at directive position anywhere; if
 // a token at directive position, in a site address or anywhere inside
-// the `box` block contains `{$`; if there is no `box` block, no
-// `signer`, no `deploy_trust` block with a line in it; or if the sites
-// carrying `box_webhook` are not exactly one, with exactly one address
-// that is a bare hostname.
+// the `box` block contains `{$`; if a site is written without braces
+// (Caddy allows one, whose directives would then sit at depth zero);
+// if there is no `box` block, no `signer`, no `deploy_trust` block
+// with a line in it; or if the sites carrying `box_webhook` are not
+// exactly one, with exactly one address that is a bare hostname.
 //
 // The walk runs twice: on the raw bytes, and on the bytes after
 // Caddy's own placeholder expansion with an empty environment, because
@@ -143,10 +144,10 @@ func walk(input []byte) (*Shape, error) {
 			}
 			pending = nil
 			if !opens {
-				if len(addrs) > 0 {
-					sites = append(sites, &site{addresses: addrs})
-				}
-				continue
+				// Caddy allows one brace-less site, whose directives
+				// then sit at depth zero where this walk would read
+				// them as addresses; every site here is braced.
+				return nil, refuse("has a site written without braces (" + proof.Bound(strings.Join(addrs, ", ")) + "); every site block in the signed file must be braced")
 			}
 			f := frame{kind: kindOther}
 			switch {

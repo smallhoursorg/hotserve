@@ -28,7 +28,12 @@ func newHandMade(t testing.TB) handMade {
 	if err != nil {
 		t.Fatal(err)
 	}
-	parent, err := ParseCommit(commitObject(emptyTree, nil, nil, "base\n"))
+	// base is the baseline: not bundled, named by parent's header.
+	base, err := ParseCommit(commitObject(emptyTree, nil, nil, "base\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := ParseCommit(commitObject(emptyTree, []string{base.ID}, nil, "parent\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,15 +91,24 @@ func TestReadBundle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b.Path != "box1/Caddyfile" || !bytes.Equal(b.Caddyfile, h.file) || b.Commit.ID != h.head.ID || len(b.Parents) != 1 || b.Parents[h.parent.ID] == nil || len(b.Trees) != 2 || b.Trees[h.root.ID] == nil || b.Trees[h.inner.ID] == nil {
+	if b.Path != "box1/Caddyfile" || !bytes.Equal(b.Caddyfile, h.file) || b.Commit.ID != h.head.ID || len(b.Parents) != 1 || b.Parents[0].ID != h.parent.ID || len(b.Trees) != 2 || b.Trees[h.root.ID] == nil || b.Trees[h.inner.ID] == nil {
 		t.Fatalf("%s", b)
 	}
 	if err := ProveFile(b.Commit, b.Trees, b.Path, b.Caddyfile); err != nil {
 		t.Fatal(err)
 	}
-	if chain, err := Chain(b.Commit, b.Parents, h.parent.ID); err != nil || len(chain) != 1 {
+	baseline := h.parent.Parents[0]
+	if chain, err := Chain(b.Commit, b.Parents, baseline); err != nil || len(chain) != 2 {
 		t.Fatal(chain, err)
 	}
+	// The same object twice reads as two parents; the chain walk is
+	// what refuses it, as an entry past the end.
+	b, err = ReadBundle(tgz(t, h.with("parents/0002", h.parent.Raw)))
+	if err != nil || len(b.Parents) != 2 {
+		t.Fatal(b, err)
+	}
+	_, err = Chain(b.Commit, b.Parents, baseline)
+	refusalContaining(t, err, "bundle: parents/0002 is past the end of the chain")
 	// One trailing newline on the path is forgiven; two are not.
 	if b, err := ReadBundle(tgz(t, h.with("path", []byte("box1/Caddyfile\n")))); err != nil || b.Path != "box1/Caddyfile" {
 		t.Fatal(b, err)
@@ -123,7 +137,6 @@ func TestReadBundle(t *testing.T) {
 		"parents zero":        {h.with("parents/0000", h.parent.Raw), "bundle: parents/0000 is outside parents/0001 to parents/0500"},
 		"parents 501":         {h.with("parents/0501", h.parent.Raw), "is outside parents/0001 to parents/0500"},
 		"parents gap":         {h.moved("parents/0001", "parents/0003"), "bundle: parents/ is not a sequence from 0001"},
-		"parent twice":        {h.with("parents/0002", h.parent.Raw), "bundle: commit " + h.parent.ID + " is bundled twice"},
 		"parent malformed":    {h.with("parents/0001", []byte("junk")), "bundle: commit:"},
 		"trees short name":    {h.with("trees/abc", h.root.Raw), "bundle: trees/abc is not a bundle file"},
 		"trees upper name":    {h.with("trees/"+strings.ToUpper(h.root.ID), h.root.Raw), "is not a bundle file"},

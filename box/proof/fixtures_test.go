@@ -127,6 +127,24 @@ func (fx *fixtures) commit(t *testing.T, name string) *Commit {
 	return c
 }
 
+// parentsFor is what the workflow bundles under parents/ for that
+// case: first parents from its commit down to, not including, the
+// baseline — or to the root, when the baseline is not an ancestor.
+func (fx *fixtures) parentsFor(t *testing.T, name, baseline string) []*Commit {
+	t.Helper()
+	var out []*Commit
+	cur := fx.commit(t, name)
+	for len(cur.Parents) > 0 && cur.Parents[0] != baseline {
+		p, ok := fx.commits[cur.Parents[0]]
+		if !ok {
+			break
+		}
+		out = append(out, p)
+		cur = p
+	}
+	return out
+}
+
 func (fx *fixtures) file(t *testing.T, name string) []byte {
 	t.Helper()
 	b, ok := fx.objects[fx.m.Cases[name].File]
@@ -147,17 +165,8 @@ func (fx *fixtures) bundleFor(t *testing.T, name, baseline string) []byte {
 		"Caddyfile": fx.file(t, name),
 		"commit":    head.Raw,
 	}
-	cur := head
-	for i := 1; ; i++ {
-		if len(cur.Parents) == 0 || cur.Parents[0] == baseline {
-			break
-		}
-		p, ok := fx.commits[cur.Parents[0]]
-		if !ok {
-			break
-		}
-		files["parents/"+pad4(i)] = p.Raw
-		cur = p
+	for i, p := range fx.parentsFor(t, name, baseline) {
+		files["parents/"+pad4(i+1)] = p.Raw
 	}
 	id := head.Tree
 	for _, comp := range strings.Split(fx.m.Path, "/") {
@@ -315,43 +324,36 @@ func runFixtureTable(t *testing.T, fx *fixtures) {
 	})
 
 	t.Run("chain", func(t *testing.T) {
-		chain, err := Chain(fx.commit(t, "head"), fx.commits, baseline)
+		head, mid, base := fx.commit(t, "head"), fx.commit(t, "mid"), fx.commit(t, "base")
+		chain, err := Chain(head, fx.parentsFor(t, "head", baseline), baseline)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(chain) != 2 || chain[0] != fx.commit(t, "head") || chain[1] != fx.commit(t, "mid") {
+		if len(chain) != 2 || chain[0] != head || chain[1] != mid {
 			t.Fatalf("chain: %v", chain)
 		}
-		if chain, err := Chain(fx.commit(t, "base"), fx.commits, baseline); err != nil || len(chain) != 0 {
+		if chain, err := Chain(base, nil, baseline); err != nil || len(chain) != 0 {
 			t.Fatalf("head == baseline: %v %v", chain, err)
 		}
 		// mid is the baseline: head's chain is head alone.
-		if chain, err := Chain(fx.commit(t, "head"), fx.commits, fx.m.Cases["mid"].Commit); err != nil || len(chain) != 1 {
+		if chain, err := Chain(head, nil, mid.ID); err != nil || len(chain) != 1 {
 			t.Fatalf("one above: %v %v", chain, err)
 		}
 		// A replay: base pushed when the box runs head.
-		_, err = Chain(fx.commit(t, "base"), fx.commits, fx.m.Cases["head"].Commit)
-		refusalContaining(t, err, baseline+" does not descend from the commit this box runs ("+fx.m.Cases["head"].Commit+")", "hotserve box baseline "+baseline)
+		_, err = Chain(base, nil, head.ID)
+		refusalContaining(t, err, baseline+" does not descend from the commit this box runs ("+head.ID+") along main's first-parent line", "hotserve box baseline "+baseline)
 		// Another history: the orphan root.
-		_, err = Chain(fx.commit(t, "orphan"), fx.commits, baseline)
+		_, err = Chain(fx.commit(t, "orphan"), nil, baseline)
 		refusalContaining(t, err, "does not descend")
-		// The bundle withholding mid.
-		without := map[string]*Commit{}
-		for id, c := range fx.commits {
-			if id != fx.m.Cases["mid"].Commit {
-				without[id] = c
-			}
-		}
-		_, err = Chain(fx.commit(t, "head"), without, baseline)
+		// The bundle withholding mid: the walk ends early.
+		_, err = Chain(head, nil, baseline)
 		refusalContaining(t, err, "does not descend")
-		// A bundled object filed under an id it does not hash to.
-		forged := map[string]*Commit{}
-		for id, c := range fx.commits {
-			forged[id] = c
-		}
-		forged[fx.m.Cases["mid"].Commit] = fx.commit(t, "base")
-		_, err = Chain(fx.commit(t, "head"), forged, baseline)
-		refusalContaining(t, err, "does not descend")
+		// An object in mid's slot that is not mid.
+		_, err = Chain(head, []*Commit{base}, baseline)
+		refusalContaining(t, err, "bundle: parents/0001 is not the first parent of "+head.ID)
+		// An object past the baseline.
+		_, err = Chain(head, []*Commit{mid, base}, baseline)
+		refusalContaining(t, err, "bundle: parents/0002 is past the end of the chain")
 	})
 
 	t.Run("verify", func(t *testing.T) {
@@ -397,34 +399,48 @@ func runFixtureTable(t *testing.T, fx *fixtures) {
 	})
 
 	t.Run("verify chain", func(t *testing.T) {
-		chain, err := Chain(fx.commit(t, "head"), fx.commits, baseline)
+		chain, err := Chain(fx.commit(t, "head"), fx.parentsFor(t, "head", baseline), baseline)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if p, err := VerifyChain(ctx, v, chain, fx.signers, baseline); err != nil || p != fx.signers[0].Principal {
+		if p, err := VerifyChain(ctx, v, chain, fx.signers, fx.signers, baseline); err != nil || p != fx.signers[0].Principal {
 			t.Fatalf("head chain: %q %v", p, err)
 		}
-		if p, err := VerifyChain(ctx, v, nil, fx.signers, baseline); err != nil || p != "" {
+		if p, err := VerifyChain(ctx, v, nil, fx.signers, fx.signers, baseline); err != nil || p != "" {
 			t.Fatalf("empty chain: %q %v", p, err)
 		}
 		// after_unsigned → unsigned → head → mid → base: the unsigned
 		// commit in the middle refuses the push, naming it, with HEAD
 		// and the baseline the message is about.
 		au := fx.commit(t, "after_unsigned")
-		chain, err = Chain(au, fx.commits, baseline)
+		chain, err = Chain(au, fx.parentsFor(t, "after_unsigned", baseline), baseline)
 		if err != nil || len(chain) != 4 {
 			t.Fatalf("chain: %v %v", chain, err)
 		}
-		_, err = VerifyChain(ctx, v, chain, fx.signers, baseline)
+		_, err = VerifyChain(ctx, v, chain, fx.signers, fx.signers, baseline)
 		u := fx.commit(t, "unsigned")
-		refusalContaining(t, err, u.ID+", between the commit this box runs and "+au.ID+", is not signed by a signer; every commit on main must be — rebase it out of the history and force-push; the box still runs "+baseline+", so no baseline change is needed")
+		refusalContaining(t, err, u.ID+", between the commit this box runs and "+au.ID+", is not signed; every commit on main must be — rebase it out of the history and force-push; the box still runs "+baseline+", so no baseline change is needed")
 		// HEAD itself unsigned: its own message, not the between one.
-		chain, err = Chain(u, fx.commits, baseline)
+		chain, err = Chain(u, fx.parentsFor(t, "unsigned", baseline), baseline)
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, err = VerifyChain(ctx, v, chain, fx.signers, baseline)
+		_, err = VerifyChain(ctx, v, chain, fx.signers, fx.signers, baseline)
 		refusalContaining(t, err, u.ID+" is not signed;")
+		// A between-commit signed by a key the box did not list when it
+		// last applied: named by the principal the incoming file gives
+		// it, or treated as unsigned when the incoming file lists it no
+		// more than the installed one. (VerifyChain reads no linkage,
+		// so the chain is assembled by hand: head over bob's commit.)
+		alice, bob := fx.signers[:1], fx.signers
+		b := fx.commit(t, "bob")
+		_, err = VerifyChain(ctx, v, []*Commit{fx.commit(t, "head"), b}, alice, bob, baseline)
+		refusalContaining(t, err, b.ID+", between the commit this box runs and "+fx.commit(t, "head").ID+", is signed by a key this box did not list when it last applied ("+bob[1].Principal+"); the commit that adds the key must apply first — force main back to it, let the box apply it, then push the rest")
+		_, err = VerifyChain(ctx, v, []*Commit{fx.commit(t, "head"), b}, alice, alice, baseline)
+		refusalContaining(t, err, b.ID+", between the commit this box runs and ", ", is not signed; every commit on main must be")
+		// The same key at HEAD is HEAD's own refusal.
+		_, err = VerifyChain(ctx, v, []*Commit{b}, alice, bob, baseline)
+		refusalContaining(t, err, b.ID+" is signed by a key that is not a signer in the Caddyfile this box runs")
 	})
 
 	t.Run("bundle round trip", func(t *testing.T) {
@@ -436,7 +452,7 @@ func runFixtureTable(t *testing.T, fx *fixtures) {
 		if b.Path != path || b.Commit.ID != head.ID || !bytes.Equal(b.Caddyfile, fx.file(t, "head")) {
 			t.Fatalf("bundle: %s", b)
 		}
-		if len(b.Parents) != 1 || b.Parents[fx.m.Cases["mid"].Commit] == nil {
+		if len(b.Parents) != 1 || b.Parents[0].ID != fx.m.Cases["mid"].Commit {
 			t.Fatalf("parents: %v", b.Parents)
 		}
 		if len(b.Trees) != 2 || b.Trees[head.Tree] == nil {
@@ -450,7 +466,7 @@ func runFixtureTable(t *testing.T, fx *fixtures) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if p, err := VerifyChain(ctx, v, chain, fx.signers, baseline); err != nil || p != fx.signers[0].Principal {
+		if p, err := VerifyChain(ctx, v, chain, fx.signers, fx.signers, baseline); err != nil || p != fx.signers[0].Principal {
 			t.Fatalf("%q %v", p, err)
 		}
 		// HEAD == baseline: a bundle with no parents.
