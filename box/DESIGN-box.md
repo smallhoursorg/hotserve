@@ -456,7 +456,20 @@ disk is unchanged; the result names the step (messages in "Refusals").
     asks for. So config a signer does not yet mean to run is committed
     *unsigned* (`git -c commit.gpgsign=false commit`, which `make wip`
     wraps) or in a fork; an unsigned branch is one the chain rule
-    refuses whoever fast-forwards it.
+    refuses whoever fast-forwards it. The exposure has a shape worth
+    knowing: a signed commit, once fetched, is the holder's for ever —
+    deleting the branch on GitHub removes nothing — but it lands only
+    while the box still runs the commit it forked from. Once a later
+    commit has *applied*, the stale one's chain never reaches the new
+    baseline, and the holder can neither rebase nor merge it forward
+    without a signature. The baseline is the commit the box applied,
+    not `main`'s tip, so a push that never applied (box down, refused)
+    leaves the window open behind a `main` that has moved; a GitHub
+    ruleset that blocks force-pushes closes the only route back, and
+    the README recommends it beside `required_signatures`. After a
+    credential leak the remedy is the usual one — rotate it — plus one
+    applied push to `main`, which puts every stale signed object below
+    the baseline.
 15. **Never cut the branch you sit on.** The incoming file must have a
     `box` block with at least one `signer` and a `deploy_trust` block
     with at least one line in it (presence at the token level — root
@@ -1014,7 +1027,11 @@ fast-forward, naming the case); and configuration a signer does not
 yet mean to run is committed unsigned (`make wip`) or kept in a fork,
 because a push credential that cannot sign can still fast-forward a
 fully signed branch onto `main`, and the box applies what `main`
-says. Pressing the button anyway does
+says — for as long as the box still runs the commit that branch forked
+from, which is why the README also recommends a ruleset that blocks
+force-pushes (the only route to put a stale commit back under a `main`
+that has moved) and why one applied push after a credential leak
+retires every stale signed object at once. Pressing the button anyway does
 more harm than a red run: the commit it lands sits on `main` and
 refuses every push after it until it is rebased away and
 force-pushed (the box's baseline is below it and stays valid; no
