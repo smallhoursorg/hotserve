@@ -175,8 +175,8 @@ vendors' documentation — that is a stated product goal, not nice-to-have:
   HAProxy stick tables ([docs.haproxy.org](https://docs.haproxy.org/) —
   `stick-table`, `http-response sc-inc-gpc0`, `sc0_gpc0_rate`).
 - State the wire contract it consumes (`X-Rate-Limit-Level`, values
-  `"1"|"2"|"3"`, absence = 1) and link the CMS docs; note any app can emit
-  the same header — the module is not HotSauce-specific.
+  `"1"|"2"|"3"`, absence = 1); note any app can emit the same header —
+  the module is not tied to any particular application.
 - State the reactive trade-off plainly (budget-worth of requests before
   boxing) and the per-instance state limitation.
 - `xcaddy` build one-liner + minimal Caddyfile.

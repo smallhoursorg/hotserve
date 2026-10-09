@@ -13,7 +13,7 @@
 # where hotserve and the apps keep their files.
 
 [Unit]
-Description=hotserve — the Hot Sauce server, powered by Caddy
+Description=hotserve — zero-downtime app deploys, powered by Caddy
 Documentation=https://github.com/smallhoursorg/hotserve
 After=network.target network-online.target
 Requires=network-online.target
