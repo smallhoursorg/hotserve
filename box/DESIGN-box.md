@@ -289,11 +289,12 @@ disk is unchanged; the result names the step (messages in "Refusals").
    /?result=<id>` bearing `poll_token`, whatever the phase was; no
    result within 30 s → 504 with `{id, poll_token}` (the apply
    continues; the same poll has the outcome). One rule, then: a POST
-   that was not refused outright is answered 202 or 200, and the
-   `phase` in a 202 body is read exactly as a poll answer would be —
-   `verified` means keep polling, a terminal phase means the outcome
-   is already known and the workflow may stop. The handler never waits
-   past the first result — see "Why 202 and a poll".
+   that was not refused outright is answered 200, 202 or 504, never a
+   terminal verdict of its own; the `phase` in a 202 body is read
+   exactly as a poll answer would be — `verified` means keep polling, a
+   terminal phase means the outcome is already known and the workflow
+   may stop — and a 504 means poll from the start. The handler never
+   waits past the first result — see "Why 202 and a poll".
 
 **In the applier (`hotserve box apply`, root, one shot, path-triggered):**
 
@@ -614,13 +615,18 @@ disk is unchanged; the result names the step (messages in "Refusals").
     ages out) `404`, fails red naming the journal, which has the
     outcome. Every
     `work/` entry leaves with its result, so `work/` is empty on every
-    exit as `in/` is. Only `out/` is swept, by the applier, and by two
-    rules at once: results older than a day go, and at most 32 results
-    are kept, oldest first to go — a count, because an OIDC holder can
+    exit as `in/` is. Retention has one owner: the applier sweeps
+    `out/<id>.json` and `stage/<id>.auth` together, as a pair, by two
+    rules at once — a pair older than a day goes, and at most 32 pairs
+    are kept, oldest first to go. A count, because an OIDC holder can
     post the already-applied `HEAD` as often as it likes and each fast
-    `no_change` is a new result, and an age alone would let a day of
-    those fill the disk or the inode table. The handler sweeps its own
-    `stage/` by the same two rules (a day, or 32 markers).
+    `no_change` is a new pair, and an age alone would let a day of those
+    fill the disk or the inode table. One owner, because two sweepers
+    in two processes could not keep the pair whole: a marker without
+    its result reports `pending` for ever, a result without its marker
+    has no poll secret. The handler sweeps nothing in `stage/` but its
+    own unfinished `.tar` temporaries; root reaches `stage/` through
+    the capabilities it already holds.
 
 Running apps are never restarted by an apply, as with any reload
 (liveswap's "reload trap"): a changed `app` block applies at the app's
@@ -700,7 +706,7 @@ Written before the code, as liveswap's deploy-record store was.
 | `/var/lib/hotserve-box/` | 2750 | root:hotserve | Created by `tmpfiles.d`, not by either process. Setgid, so `applied.json` written here by root is born group `hotserve` without a `chown` (the unit has no `CAP_CHOWN`, and root is not in the group). Not under `/var/lib/hotserve`, which is 0750 hotserve:hotserve. Joins `sandboxHotservePaths` (liveswap/sandbox.go): never a bind source. |
 | `…/stage/` | 0700 | hotserve:hotserve | The handler assembles a bundle here. Not watched. |
 | `…/stage/lock` | 0600 | hotserve:hotserve | The admission lock (step 2): a non-blocking `flock` held from the pending check through the `.auth` write, so admission is atomic across concurrent requests and across the reload. Distinct from root's `lock`, which serialises applies. |
-| `…/stage/<id>.auth` | 0600 | hotserve:hotserve | `{sha256 of the poll secret issued for <id>, posted}`, written only after `in/<id>.tar` is in place (step 7). Two jobs: it is the *pending* marker (step 2) — a push is pending while this exists, is under fifteen minutes old, and no terminal `out/<id>.json` does; a bundle still in `in/` blocks admission on its own, with no age-out, whatever this marker says — and it authorises `GET /?result=<id>` for the bearer of that secret, for fifteen minutes from `posted`, whatever the running `deploy_trust` says ("Handler contract"). Not removed on a read, because a read is not a delivery: the response can fail after the file is gone, and the retry must still be authorised. Swept by the handler once `posted` is a day old and no `out/<id>.json` remains, or when more than 32 exist (oldest first) — the same two rules root applies to results, so a `404` means swept, never "not yet", and a holder of a valid token who posts `HEAD` in a loop fills neither directory. A digest, never the token; root has no use for it. |
+| `…/stage/<id>.auth` | 0600 | hotserve:hotserve | `{sha256 of the poll secret issued for <id>, posted}`, written only after `in/<id>.tar` is in place (step 7). Two jobs: it is the *pending* marker (step 2) — a push is pending while this exists, is under fifteen minutes old, and no terminal `out/<id>.json` does; a bundle still in `in/` blocks admission on its own, with no age-out, whatever this marker says — and it authorises `GET /?result=<id>` for the bearer of that secret, for fifteen minutes from `posted`, whatever the running `deploy_trust` says ("Handler contract"). Not removed on a read, because a read is not a delivery: the response can fail after the file is gone, and the retry must still be authorised. Swept by root, together with its `out/<id>.json` as one pair (step 20): a pair older than a day, or beyond the 32 newest, goes — one owner, so neither half outlives the other; a `404` therefore means swept, never "not yet", and a holder of a valid token who posts `HEAD` in a loop fills neither directory. A digest, never the token; root reads it only to delete it. |
 | `…/in/` | 0770 | root:hotserve | The handler renames a complete bundle in; the applier renames everything out before reading anything. `DirectoryNotEmpty=` watches it, so it must be empty on every applier exit, or the path unit re-triggers until its start-rate limit fails it. |
 | `…/in/<id>.tar` | 0644 | hotserve:hotserve | `<id>` matches `^[0-9a-f]{32}$`: 16 hex of the handler's nanosecond clock, then 16 random (step 9); a name that does not match — or an entry that is not a regular file at all — is moved to `work/` and refused like any other, which the unit's `CAP_DAC_OVERRIDE`/`CAP_FOWNER` exist to guarantee. The content is a public commit; 0644. |
 | `…/work/` | 0700 | root:root | Bundles land here by rename and are read once. Never a source of truth after that read. |
@@ -803,7 +809,14 @@ could not be a plain push in any case.
   read, so a poll whose response was lost can be retried.
 - Another method on `/` — 405; another path — not this handler's,
   passed on (see "The shape"). Every answer passes liveswap's response
-  filter: the shape and entropy layers. The `diff` in a result was
+  filter — the shape and entropy layers — with the protocol's own
+  fields on the filter's safe list: `id`, `commit`, `sha256`,
+  `poll_token`, `box_webhook` and `phase` are placed by the handler and
+  must reach the client intact, and the entropy layer would otherwise
+  mask every one of them (a 32-hex id, a 40-hex commit, a 64-hex
+  digest and a random secret are exactly what it exists to catch).
+  Only `diff` and `error` text, which carry bundle-derived bytes, go
+  through every layer. The `diff` in a result was
   redacted by the applier before it was written, with those same two
   layers — the applier has no service environment to prime the
   environment layer with, and says so rather than pretending to.
@@ -964,7 +977,8 @@ refuses itself, by the applier with `id`, `commit`, `signer` and `box`
 nothing more than they do for a deploy.
 
 - `no bearer token` / the flat 401 — liveswap's.
-- `a push is already in progress` — 409.
+- `a push is being admitted; retry in a moment` / `a push is pending:
+  <id>, <age> old` — the two 409s of step 2, and no third.
 - `the bundle is larger than 16 MiB` — 413; `bundle: <what>` — 422, a
   file or name the format does not allow, a cap exceeded.
 - `the token names commit <a>; the bundle is <b>`.
