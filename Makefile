@@ -143,8 +143,19 @@ build:
 # packaging/nfpm.yaml. The packages carry the systemd unit, the starter
 # /etc/hotserve/Caddyfile and the data dirs; postinstall creates the
 # hotserve system user.
+#
+# The rm clears every .deb an earlier run left behind, whatever its
+# version (a tagged build is hotserve_0.2.1_*, an untagged one
+# hotserve_0.0.0~dev_*, so a rebuild does not always overwrite).
+# install-test mounts dist/ as it finds it: a leftover beside the new
+# build fails smoke.sh's one-.deb-per-arch check, and a leftover with
+# no new build beside it (this run failed part-way) would be certified
+# in its place. One run writes both arches, so the rm loses nothing a
+# later step needs; the release's tarballs and checksums.txt land in
+# dist/ after this and do not match the glob.
 package: build
 	mkdir -p dist
+	rm -f dist/hotserve_*.deb
 	for a in amd64 arm64; do \
 		cp build/hotserve-linux-$$a build/hotserve; \
 		for f in deb; do \
