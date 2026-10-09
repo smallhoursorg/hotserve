@@ -1,9 +1,10 @@
 # hotserve
 
-**The Hot Sauce server.** One binary that is your reverse proxy, your
-deploy pipeline, your rate limiter, and your page cache — for indie
-hackers, solo devs, and small businesses running real apps on cheap
-servers. No Docker, no Kubernetes, no SSH keys in CI. Powered by
+**Deploy from `git push` to a single cheap server, with zero downtime.**
+One binary that is your reverse proxy, your deploy pipeline, your rate
+limiter, and your page cache — for indie hackers, solo devs, and small
+businesses running real apps on cheap servers. No Docker, no
+Kubernetes, no SSH keys in CI. Powered by
 [Caddy](https://caddyserver.com).
 
 ```

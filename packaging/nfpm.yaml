@@ -13,12 +13,12 @@ platform: linux
 version: "${NFPM_VERSION}"
 section: web
 priority: optional
-maintainer: "Hot Sauce Team <davey@web-shed.com>"
+maintainer: "smallhours <15802017+EarthlingDavey@users.noreply.github.com>"
 description: |
-  hotserve — the Hot Sauce server, powered by Caddy.
+  hotserve — zero-downtime app deploys on one server, powered by Caddy.
   Zero-downtime app deploys (liveswap), rate-limit hint enforcement
   (penaltybox) and HTTP caching (Souin + Otter) in one binary.
-vendor: Hot Sauce Team
+vendor: smallhours
 homepage: https://github.com/smallhoursorg/hotserve
 license: Apache-2.0
 
