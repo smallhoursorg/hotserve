@@ -462,9 +462,10 @@ memory under fixed names and caps, binds the bundle's commit to the
 token's `sha` claim, pre-checks the signature, runs `hotserve
 validate` (and `hotserve-backup validate` where installed) as bounded
 children with their output redacted, and drops the bundle as one
-regular file for root. It answers 202 before anything is installed;
-the outcome is polled, because a request held across the reload
-deadlocks on the HTTP server's shutdown.
+regular file for root. It answers 202 as soon as root has published
+`verified`, which precedes the install; the outcome is polled, because
+a request held across the reload deadlocks on the HTTP server's
+shutdown.
 
 **The applier** (`hotserve-box-apply.service`, root, one shot, started
 by a path unit watching the drop directory) trusts nothing the

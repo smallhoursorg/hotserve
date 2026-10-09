@@ -103,10 +103,17 @@ deploy.example.com {
   may appear). Key types: `ssh-ed25519`, `ecdsa-sha2-nistp256/384/521`,
   `sk-ssh-ed25519@openssh.com`, `sk-ecdsa-sha2-nistp256@openssh.com`,
   `ssh-rsa`. The base64 must decode to a key of the declared type.
-- `box_webhook` takes no arguments. The directory name (`box1`) is a
-  label the operator chooses; the box's identity in the repository is
-  the host of the one site that carries `box_webhook` (see "The
-  box's identity").
+- `box_webhook` takes no arguments. The site that carries it has
+  exactly one address, and that address is a bare hostname: no
+  scheme, no port, no path, no wildcard, no placeholder, no second
+  name after a comma. `deploy.example.com` qualifies;
+  `https://deploy.example.com:8443`, `deploy.example.com,
+  deploy2.example.com` and `{$DEPLOY_HOST}` do not, and `init`, the
+  applier and `hotserve box webhook` refuse them with the same
+  message. That one hostname is the address the workflow posts to
+  (`https://<host>/`) and the box's identity in the repository (see
+  "The box's identity"); the directory name (`box1`) is a label the
+  operator chooses.
 - `box` and `box_webhook` are read by the applier from the raw token
   stream (see "Reading the signed file"), so both must be written in
   the file itself, never reached through `import`.
@@ -128,8 +135,10 @@ disk is unchanged; the result names the step (messages in "Refusals").
    (one per client address across both webhooks).
 2. **Method and body.** `GET /` and `GET /?result=<id>` answer status
    (below). `POST /` takes one gzip tarball — the *bundle* — of at most
-   16 MiB; anything else is 405 or 413. One push at a time: a second
-   `POST` while one is pending is 409.
+   16 MiB, declared as `application/gzip`, `application/x-gzip` or
+   `application/octet-stream`; another method is 405, another media
+   type 415, a larger body 413, all after authentication. One push at
+   a time: a second `POST` while one is pending is 409.
 3. **Bundle.** Parsed from memory under strict rules: regular files
    only; fixed names — `path` (the file's path in the repository, as
    the workflow knows it), `Caddyfile`, `commit`, `parents/NNNN`,
@@ -153,10 +162,13 @@ disk is unchanged; the result names the step (messages in "Refusals").
    runs as a bounded child of the hotserve process, and so does
    `/usr/bin/hotserve-backup validate <file>` when `/usr/bin/hotserve-backup`
    is executable (`test -x` exit 1 is "not installed"; any other
-   failure is "could not tell", which refuses). Their output reaches
-   the response and the journal only through liveswap's redactor
-   primed with the process environment, because Caddy's errors quote
-   expanded values. Root never runs either: `caddy validate`
+   failure is "could not tell", which refuses). Each child gets the
+   environment the service runs with — the hotserve process's own, as
+   `hotserve.service` set it — so a `{$VAR}` line expands as it will
+   at reload and no more; their output reaches the response and the
+   journal only through liveswap's redactor primed with that same
+   environment, because Caddy's errors quote expanded values. Root
+   never runs either: `caddy validate`
    provisions every module (liveswap's `App.Provision` builds OIDC
    clients and warms JWKS over the network), and the Caddyfile adapter
    expands `{$VAR}` from the caller's environment and runs each
@@ -200,8 +212,9 @@ disk is unchanged; the result names the step (messages in "Refusals").
     lines included). An allowed_signers file is generated from the
     installed signers, each line `<principal> namespaces="git" <type>
     <base64>`, and `ssh-keygen -Y find-principals` then `ssh-keygen -Y
-    verify -n git -I <principal>` run as uid 65534 on the payload; the
-    verdict is the exit status alone. A commit with no `gpgsig`, an
+    verify -n git -I <principal>` run as uid 65534 on the payload with
+    an environment of `PATH` alone; the verdict is the exit status
+    alone. A commit with no `gpgsig`, an
     OpenPGP `gpgsig`, a `gpgsig-sha256`, or a key not listed is refused
     by name — the OpenPGP case tells the operator GitHub's merge button
     signed it.
@@ -267,9 +280,13 @@ disk is unchanged; the result names the step (messages in "Refusals").
     for the next start with a person watching; here nobody is, and the
     path unit may fire at boot before hotserve is up. Then the result
     file is written, before anything changes on disk, so the handler
-    can answer (step 8). Every refusal precedes `verified`; after it
-    the only phases are `applied`, `no_change`, `rolled_back` and
-    `unknown`.
+    can answer (step 8). The applier does not wait for that answer:
+    it goes on to install while the handler is still polling, and the
+    file stays readable through the reload, so the handler returns
+    within one poll interval and a reload that has already begun waits
+    that long for the request, not the handler's whole timeout. Every
+    refusal precedes `verified`; after it the only phases are
+    `applied`, `no_change`, `rolled_back` and `unknown`.
 18. **Install.** First the rollback copy: the buffer from step 10 is
     written to a temporary name and renamed to `Caddyfile.prev`, and
     only once that rename has returned is the new file written to a
@@ -307,8 +324,11 @@ deadline (no `grace_period` is set, and setting one would turn the
 wait into a cut connection), and `Shutdown` waits for every in-flight
 request — including the one waiting for the reload. The cycle breaks
 only at the handler's timeout. So the applier publishes `verified`
-before it reloads, the handler answers at once, and the workflow asks
-`GET /?result=<id>` — a fresh request, served by whichever
+before it reloads and does not wait to be read: the handler, polling
+`out/`, sees it within one interval and answers 202, and if the
+reload has already begun, `Shutdown` waits that one interval for the
+request to finish rather than the handler's timeout. The workflow then
+asks `GET /?result=<id>` — a fresh request, served by whichever
 configuration is running — until the phase is final. A push that
 changes nothing is answered 200 synchronously, because nothing
 reloads. liveswap never met this: a deploy does not reload Caddy.
@@ -364,10 +384,14 @@ before it is used to walk trees.
 
 The repository may hold several boxes; both files sit in the same
 signed commit, so the proof alone cannot tell box1's file from box2's.
-The box therefore requires the incoming file's `box_webhook` host to
-equal the installed file's: already in the signed file, already what
-the workflow derives the POST address from, already bound to one box
-by DNS. Shipping box2's file to box1 is refused as "this file is for
+The box therefore requires the incoming file's `box_webhook` hostname
+to equal the installed file's: already in the signed file, already
+what the workflow derives the POST address from, already bound to one
+box by DNS. Because the site's address is required to be exactly one
+bare hostname (see "The shape"), the comparison is of two lowercase
+hostnames and nothing else; a scheme, a port or a second address is
+refused before it can make two spellings of one box, or one spelling
+of two. Shipping box2's file to box1 is refused as "this file is for
 deploy2.example.com; this box is deploy.example.com".
 
 The directory name is not an identity. It is a label the operator
@@ -382,7 +406,7 @@ box serves it, so the rename could not be a plain push in any case.
 ## Handler contract
 
 - `POST /` — the bundle. Answers as in step 8. `Content-Type:
-  application/gzip` (or `x-gzip`, `octet-stream`).
+  application/gzip` (or `x-gzip`, `octet-stream`); anything else 415.
 - `GET /` — `{"commit": "<sha>", "box_webhook": "<host>", "sha256":
   "<hex>"}` from `applied.json` and the installed file. The workflow
   reads `commit` to bundle exactly `git rev-list --first-parent
@@ -399,11 +423,16 @@ box serves it, so the rename could not be a plain push in any case.
 `init` is the second and last thing root does over SSH. It refuses
 unless it is root; reads `<dir>/Caddyfile`; refuses, by name, a file
 with no `box` block, no `signer`, no site carrying `box_webhook`, more
-than one, a host that is not concrete (a placeholder, a wildcard,
-empty), or `box`/`box_webhook` reached through `import`; requires a
-40-hex `<sha>` — the commit the operator is about to push, so no null
-baseline ever exists; runs `hotserve validate` as the hotserve user,
-never as root (the same reasoning as step 6); installs the file 0644
+than one, a `box_webhook` site whose address is not exactly one bare
+hostname (a scheme, a port, a path, a wildcard, a placeholder, a
+second name), or `box`/`box_webhook` reached through `import`;
+requires a 40-hex `<sha>` — the commit the operator is about to push,
+so no null baseline ever exists; runs `hotserve validate` as the
+hotserve user, never as root (the same reasoning as step 6), with the
+environment `hotserve.service` gives the service and nothing of
+root's shell — dropping the uid does not drop the environment, and
+the adapter would expand `{$VAR}` from whatever it inherited; installs
+the file 0644
 root by temporary name and rename; creates `/etc/hotserve/age/`;
 writes `applied.json {sha, sha256}`; reloads hotserve if it is active,
 or says the file will be loaded at the next start; and prints what it
@@ -426,9 +455,12 @@ an ancestor and the next push applies. A revert commit is the normal
 path for a bad change and needs nothing on the box.
 
 `hotserve box webhook <Caddyfile>` prints `https://<host>/` for the one
-site carrying `box_webhook`; it refuses zero, more than one, or a
-non-concrete host, with the message the workflow shows. It runs on the
-laptop and in CI, so it reads tokens, not the adapted config.
+site carrying `box_webhook`; it refuses zero such sites, more than
+one, or an address that is not exactly one bare hostname, with the
+message the workflow shows — the same rule and the same reading of the
+file as `init` and the applier, so the three cannot disagree about
+which address a file names. It runs on the laptop and in CI, so it
+reads tokens, not the adapted config.
 
 ## The applier unit
 
@@ -507,7 +539,9 @@ nothing more than they do for a deploy.
   hotserve box baseline <sha> as root on the box`.
 - `this file is for <host2>; this box is <host1>`.
 - `the new Caddyfile has no box block` / `… no signer` / `… no site
-  with box_webhook` / `… more than one site with box_webhook` / `… box
+  with box_webhook` / `… more than one site with box_webhook` / `… the
+  box_webhook site's address is not one bare hostname (<address>); no
+  scheme, port, path, wildcard, placeholder or second name` / `… box
   or box_webhook reached through import; write them in the file itself`
   / `… drops the key that signed this commit (<principal>); add the new
   key in one push, let the box apply it, then remove the old one in a
