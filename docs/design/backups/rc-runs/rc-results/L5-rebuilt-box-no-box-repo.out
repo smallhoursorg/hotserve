@@ -1,0 +1,64 @@
+## box1: a copy of /etc/hotserve, kept off the box
+bob@box1:~$ sudo tar -czf /home/bob/etc-hotserve.tar.gz -C /etc hotserve && tar -tzf /home/bob/etc-hotserve.tar.gz
+^@hotserve/
+hotserve/deploy.key
+hotserve/Caddyfile
+hotserve/deploy.key.pub
+[exit 0, 0.0411935s, 2026-10-05T18:02:19Z]
+## box2, as root: another uid for hotserve, first-deploy.md step 2, bob
+Setting up restic (0.18.0-1+b4) ...
+Setting up hotserve (0.3.0~rc1) ...
+Setting up sqlite3 (3.46.1-7+deb13u2) ...
+hotserve uid 993
+## box2, as bob: /etc/hotserve put back from the copy
+bob@box2:~$ sudo tar -xzf etc-hotserve.tar.gz -C /etc && ls -l /etc/hotserve
+^@total 12
+-rw-r--r-- 1 root root 419 Oct  5 18:01 Caddyfile
+-rw------- 1 root root 119 Oct  5 17:59 deploy.key
+-rw-r--r-- 1 root root 113 Oct  5 17:59 deploy.key.pub
+[exit 0, 0.0403917s, 2026-10-05T18:02:27Z]
+bob@box2:~$ hotserve validate --config /etc/hotserve/Caddyfile 2>&1 | tail -1
+Valid configuration
+[exit 0, 0.0392563s, 2026-10-05T18:02:28Z]
+bob@box2:~$ hotserve-backup validate /etc/hotserve/Caddyfile
+a run would back up demo, under /var/lib/liveswap
+[exit 0, 0.0395658s, 2026-10-05T18:02:28Z]
+bob@box2:~$ sudo systemctl reload hotserve
+[exit 0, 0.115489s, 2026-10-05T18:02:28Z]
+bob@box2:~$ sudo hotserve-backup setup s3:https://s3.docs.test:9000/box1
+account hotserve-backup: present
+a run would back up demo, under /var/lib/liveswap
+Storage key id (AWS_ACCESS_KEY_ID): BOXKEYID0000
+Storage secret key (AWS_SECRET_ACCESS_KEY): 
+looking for a repository at s3:https://s3.docs.test:9000/box1 (up to 10s)
+the repository exists; its password is needed
+Repository password: 
+repository ready: s3:https://s3.docs.test:9000/box1 (existing, id cff1d334)
+credentials: /etc/hotserve-backup/repository.env (root, 0600)
+next: the first backup runs within the hour and ten minutes (systemctl list-timers hotserve-backup.timer); to run one now, sudo systemctl start hotserve-backup.service; then hotserve-backup status
+[exit 0, 1.31771s, 2026-10-05T18:02:29Z]
+bob@box2:~$ sudo hotserve-backup restore demo
+demo: restore snapshot 4468dd01, made 2026-10-05 18:01 UTC, into /var/lib/liveswap/demo/shared?
+Its databases are replaced and its files overwritten, with no backup first; what the snapshot does not hold is left.
+Type the app's name, demo, to go on: demo
+demo: restored from snapshot 4468dd01 of 2026-10-05 18:01 UTC into /var/lib/liveswap/demo/shared: sqlite app.db, files uploads
+[exit 0, 3.05082s, 2026-10-05T18:02:33Z]
+bob@box2:~$ sudo ls -ln /var/lib/liveswap/demo/shared /var/lib/liveswap/demo/shared/uploads
+/var/lib/liveswap/demo/shared:
+total 12
+-rw------- 1 993 993 8192 Oct  5 18:01 app.db
+drwxrwxr-x 2 993 993 4096 Oct  5 18:02 uploads
+
+/var/lib/liveswap/demo/shared/uploads:
+total 4
+-rw-rw-r-- 1 993 993 4 Oct  5 18:00 a.png
+[exit 0, 0.0236621s, 2026-10-05T18:02:33Z]
+bob@box2:~$ sudo systemctl start hotserve-backup.service
+[exit 0, 4.59665s, 2026-10-05T18:02:37Z]
+bob@box2:~$ hotserve-backup status
+last run 2026-10-05 18:02 UTC
+the repository has not been checked yet: the weekly drill checks it
+demo: ok: last complete backup 2026-10-05 18:02 UTC, snapshot 4ed58945 (data at /var/lib/liveswap/demo/shared)
+demo: restore last proven: 2026-10-05 18:02 UTC, snapshot 4ed58945
+no unit of a run, a restore or a drill is running
+[exit 0, 0.0280211s, 2026-10-05T18:02:38Z]

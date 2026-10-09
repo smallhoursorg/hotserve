@@ -1,0 +1,55 @@
+### 1a: a bucket that does not exist (the key is limited to hs-lifecycle-test)
+bob@rcbox:~$ time sudo hotserve-backup setup b2:hs-rc-no-such-bucket-7f3a:
+account hotserve-backup: present
+a run would back up demo, under /var/lib/liveswap
+Storage key id (B2_ACCOUNT_ID): <keyID>
+Storage secret key (B2_ACCOUNT_KEY): 
+looking for a repository at b2:hs-rc-no-such-bucket-7f3a: (up to 10s)
+no repository answered within 10s: a bucket not made yet, a wrong key and a wrong host look alike here; a new repository will be made with the password shown next
+Repository password (new): <52 characters>
+Store it off the box now, with the repository URL, b2:hs-rc-no-such-bucket-7f3a:, and the storage key: with those three, `restic -r <url>` reads every backup from any machine; without the password nothing can.
+Type stored to go on: stored
+restic could not make or open the repository (exit 1): Fatal: create repository at b2:hs-rc-no-such-bucket-7f3a: failed: Fatal: unable to open repository at b2:hs-rc-no-such-bucket-7f3a:: NewBucket: b2_list_buckets: 401:
+the storage refused the key, or could not be reached: the key id and secret again (the password shown above still applies)
+Storage key id (B2_ACCOUNT_ID): <keyID>
+Storage secret key (B2_ACCOUNT_KEY): 
+looking for a repository at b2:hs-rc-no-such-bucket-7f3a: (up to 10s)
+no repository answered within 10s: a bucket not made yet, a wrong key and a wrong host look alike here; a new repository will be made, and the password shown above still applies
+restic could not make or open the repository (exit 1): Fatal: create repository at b2:hs-rc-no-such-bucket-7f3a: failed: Fatal: unable to open repository at b2:hs-rc-no-such-bucket-7f3a:: NewBucket: b2_list_buckets: 401:
+the storage refused the key, or could not be reached: the key id and secret again (the password shown above still applies)
+Storage key id (B2_ACCOUNT_ID): <keyID>
+Storage secret key (B2_ACCOUNT_KEY): 
+looking for a repository at b2:hs-rc-no-such-bucket-7f3a: (up to 10s)
+no repository answered within 10s: a bucket not made yet, a wrong key and a wrong host look alike here; a new repository will be made, and the password shown above still applies
+hotserve-backup: restic could not make or open the repository (exit 1): Fatal: create repository at b2:hs-rc-no-such-bucket-7f3a: failed: Fatal: unable to open repository at b2:hs-rc-no-such-bucket-7f3a:: NewBucket: b2_list_buckets: 401:; keep the password shown above: restic init ran with it, and may have made the repository; run setup again, which looks first and asks for it if the repository is there
+[exit 1, 7.5s]
+drwxr-xr-x 2 root root 4096 Oct  4 13:17 .
+drwxr-xr-x 1 root root 4096 Oct  4 13:17 ..
+
+### 1b: the real test bucket, the right key id, a wrong secret, three times
+bob@rcbox:~$ time sudo hotserve-backup setup b2:hs-lifecycle-test:rc-check1
+account hotserve-backup: present
+a run would back up demo, under /var/lib/liveswap
+Storage key id (B2_ACCOUNT_ID): <keyID>
+Storage secret key (B2_ACCOUNT_KEY): 
+looking for a repository at b2:hs-lifecycle-test:rc-check1 (up to 10s)
+no repository answered within 10s: a bucket not made yet, a wrong key and a wrong host look alike here; a new repository will be made with the password shown next
+Repository password (new): <52 characters>
+Store it off the box now, with the repository URL, b2:hs-lifecycle-test:rc-check1, and the storage key: with those three, `restic -r <url>` reads every backup from any machine; without the password nothing can.
+Type stored to go on: stored
+restic could not make or open the repository (exit 1): Fatal: create repository at b2:hs-lifecycle-test:rc-check1 failed: Fatal: unable to open repository at b2:hs-lifecycle-test:rc-check1: b2.NewClient: b2_authorize_account: 401:
+the storage refused the key, or could not be reached: the key id and secret again (the password shown above still applies)
+Storage key id (B2_ACCOUNT_ID): <keyID>
+Storage secret key (B2_ACCOUNT_KEY): 
+looking for a repository at b2:hs-lifecycle-test:rc-check1 (up to 10s)
+no repository answered within 10s: a bucket not made yet, a wrong key and a wrong host look alike here; a new repository will be made, and the password shown above still applies
+restic could not make or open the repository (exit 1): Fatal: create repository at b2:hs-lifecycle-test:rc-check1 failed: Fatal: unable to open repository at b2:hs-lifecycle-test:rc-check1: b2.NewClient: b2_authorize_account: 401:
+the storage refused the key, or could not be reached: the key id and secret again (the password shown above still applies)
+Storage key id (B2_ACCOUNT_ID): <keyID>
+Storage secret key (B2_ACCOUNT_KEY): 
+looking for a repository at b2:hs-lifecycle-test:rc-check1 (up to 10s)
+no repository answered within 10s: a bucket not made yet, a wrong key and a wrong host look alike here; a new repository will be made, and the password shown above still applies
+hotserve-backup: restic could not make or open the repository (exit 1): Fatal: create repository at b2:hs-lifecycle-test:rc-check1 failed: Fatal: unable to open repository at b2:hs-lifecycle-test:rc-check1: b2.NewClient: b2_authorize_account: 401:; keep the password shown above: restic init ran with it, and may have made the repository; run setup again, which looks first and asks for it if the repository is there
+[exit 1, 3.8s]
+drwxr-xr-x 2 root root 4096 Oct  4 13:17 .
+drwxr-xr-x 1 root root 4096 Oct  4 13:17 ..

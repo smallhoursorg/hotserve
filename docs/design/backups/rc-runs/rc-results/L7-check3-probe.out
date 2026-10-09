@@ -1,0 +1,17 @@
+bob@box1:~$ sudo systemctl stop hotserve-backup.timer hotserve-backup-drill.timer
+^@[exit 0, 0.0603693s, 2026-10-05T18:06:04Z]
+## as written in #168 (no RESTIC_PASSWORD; a 3 s sleep):
+Fatal: cannot read both password and data from stdin
+[exit 1]
+## with the password read into the environment, 1800 s:
+2026-10-05T18:06:08Z
+
+Files:           1 new,     0 changed,     0 unmodified
+Dirs:            0 new,     0 changed,     0 unmodified
+Added to the repository: 295 B (345 B stored)
+
+processed 1 files, 6 B in 30:00
+snapshot cbd455d6 saved
+[exit 0]
+0
+2026-10-05T18:36:09Z

@@ -1,0 +1,26 @@
+bob@rcbox:~$ sudo hotserve-backup setup b2:hs-lifecycle-test:rc-recovered-b
+account hotserve-backup: present
+a run would back up demo, under /var/lib/liveswap
+Storage key id (B2_ACCOUNT_ID): <keyID>
+Storage secret key (B2_ACCOUNT_KEY): 
+looking for a repository at b2:hs-lifecycle-test:rc-recovered-b (up to 10s)
+the repository exists; its password is needed
+Repository password: 
+repository ready: b2:hs-lifecycle-test:rc-recovered-b (existing, id 8e1caacb)
+credentials: /etc/hotserve-backup/repository.env (root, 0600)
+next: the first backup runs within the hour and ten minutes (systemctl list-timers hotserve-backup.timer); to run one now, sudo systemctl start hotserve-backup.service; then hotserve-backup status
+[exit 0]
+bob@rcbox:~$ sudo systemctl start hotserve-backup.service
+[exit 0, 14.2715s, 2026-10-04T13:26:19Z]
+bob@rcbox:~$ sudo hotserve-backup drill
+demo: restore proven: snapshot 2c372832, on 2026-10-04 13:26 UTC
+repository: its structure, and data group 41/52: clean
+[exit 0, 10.4125s, 2026-10-04T13:26:29Z]
+bob@rcbox:~$ hotserve-backup status
+last run 2026-10-04 13:26 UTC
+last drill 2026-10-04 13:26 UTC
+repository last checked 2026-10-04 13:26 UTC: its structure, and data group 41/52: clean
+demo: ok: last complete backup 2026-10-04 13:26 UTC, snapshot 2c372832 (data at /var/lib/liveswap/demo/shared)
+demo: restore last proven: 2026-10-04 13:26 UTC, snapshot 2c372832
+no unit of a run, a restore or a drill is running
+[exit 0, 0.0244803s, 2026-10-04T13:26:29Z]
