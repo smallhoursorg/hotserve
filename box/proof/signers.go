@@ -57,6 +57,12 @@ func ParseSigner(principal, keyType, b64 string) (Signer, error) {
 	if err != nil {
 		return Signer{}, fmt.Errorf("signer %s: the key is not base64", principal)
 	}
+	// The decoder ignores CR and LF, and a quoted Caddyfile token can
+	// span lines; what is written to allowed_signers is the text as
+	// given, so it must be the one canonical line for these bytes.
+	if base64.StdEncoding.EncodeToString(key) != b64 {
+		return Signer{}, fmt.Errorf("signer %s: the key is not one line of canonical base64", principal)
+	}
 	pub, err := ssh.ParsePublicKey(key)
 	if err != nil {
 		return Signer{}, fmt.Errorf("signer %s: the key does not parse as an SSH public key", principal)

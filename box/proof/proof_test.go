@@ -432,6 +432,10 @@ func TestParseSigner(t *testing.T) {
 		"not base64":             {"a", edType, "AAAA!"},
 		"base64 of junk":         {"a", edType, base64.StdEncoding.EncodeToString([]byte("junk"))},
 		"principal too long":     {strings.Repeat("a", MaxPrincipal+1), edType, edB64},
+		"newline inside the key": {"a", edType, edB64[:20] + "\n" + edB64[20:]},
+		"crlf inside the key":    {"a", edType, edB64[:20] + "\r\n" + edB64[20:]},
+		"trailing newline":       {"a", edType, edB64 + "\n"},
+		"unpadded key":           {"a", "sk-ssh-ed25519@openssh.com", strings.TrimRight(skB64, "=")}, // 74 bytes: padded when canonical
 		"empty key":              {"a", edType, ""},
 	} {
 		if _, err := ParseSigner(bad[0], bad[1], bad[2]); err == nil {
