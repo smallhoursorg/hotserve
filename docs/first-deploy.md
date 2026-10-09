@@ -248,7 +248,9 @@ Variables, add:
 
 - `HOTSERVE_URL`, set to `https://deploy.example.com/example`. A
   run without it stops at its first step, saying so, and publishes
-  nothing.
+  nothing. It must be `https://`: the deploy request carries the
+  run's token, so the deploy step refuses any other scheme before it
+  mints one.
 - On an amd64 box, `HOTSERVE_RUNS_ON`, set to `ubuntu-24.04`. The
   workflow builds on an arm64 runner otherwise, and the executable is
   the runner's own Node binary, so this has to match the box; a

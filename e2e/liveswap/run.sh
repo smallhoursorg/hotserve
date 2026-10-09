@@ -397,6 +397,11 @@ c=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TO
 # the first (the Run-workflow path), then a refused
 # deploy: deploy.sh exits non-zero and prints the reason, and the
 # running version is untouched.
+#
+# The e2e box's webhook is plain http on the compose network, and
+# deploy.sh refuses a non-https HOTSERVE_URL (it would send the token
+# in the clear) unless told this is a test box.
+export HOTSERVE_ALLOW_HTTP=1
 example_scenario() { # <app> <port> <deploy.sh path> <version prefix>
 	app=$1 hook="http://e2e-hotserve:8081/$1" proxy="http://e2e-hotserve:$2" script=$3 pre=$4
 	# The auth header is what the workflow sends for a release asset;
