@@ -200,6 +200,11 @@ func walk(input []byte) (*Shape, error) {
 				if len(stack) == 0 {
 					return nil, refuse("does not parse: a } with no block open")
 				}
+				// Caddy closes a nested block on a directive's line, but
+				// a top-level block only on a line of its own.
+				if i != 0 && len(stack) == 1 {
+					return nil, refuse("does not parse: a } that closes a top-level block on a directive's line")
+				}
 				stack = stack[:len(stack)-1]
 				if len(stack) == 0 && i != len(line)-1 {
 					return nil, refuse("does not parse: a token follows the } that closes a block")

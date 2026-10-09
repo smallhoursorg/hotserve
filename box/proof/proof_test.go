@@ -324,11 +324,16 @@ func TestChainHandMade(t *testing.T) {
 	}
 	_, err = Chain(m, all, cs[2].ID)
 	refusalContaining(t, err, "does not descend")
-	// The cap: a line longer than MaxChain.
+	// The cap: MaxChain commits above the baseline pass, one more does
+	// not. With head cs[N], the baseline cs[N-MaxChain] leaves exactly
+	// MaxChain above it.
 	cs, all = line(MaxChain + 2)
-	_, err = Chain(cs[len(cs)-1], all, cs[0].ID)
-	refusalContaining(t, err, "is longer than 500 commits; run hotserve box baseline "+cs[len(cs)-1].ID)
-	if chain, err := Chain(cs[len(cs)-1], all, cs[1].ID); err != nil || len(chain) != MaxChain+1 {
+	head := cs[len(cs)-1]
+	_, err = Chain(head, all, cs[0].ID)
+	refusalContaining(t, err, "the chain from "+cs[0].ID+" to "+head.ID+" is longer than 500 commits; run hotserve box baseline "+head.ID+" as root on the box")
+	_, err = Chain(head, all, cs[1].ID)
+	refusalContaining(t, err, "is longer than 500 commits")
+	if chain, err := Chain(head, all, cs[2].ID); err != nil || len(chain) != MaxChain {
 		t.Fatalf("%d %v", len(chain), err)
 	}
 }

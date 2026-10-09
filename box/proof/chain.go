@@ -18,7 +18,9 @@ const MaxChain = 500
 // a history that no longer contains the commit the box runs: a rewind,
 // a replay, or a rebase that rewrote the baseline itself, all refused
 // the same way, naming `hotserve box baseline` for the one case it is
-// for.
+// for. A chain of more than MaxChain commits above the baseline is
+// refused with the message that names the reset — the workflow checks
+// the same bound before it posts.
 func Chain(head *Commit, parents map[string]*Commit, baseline string) ([]*Commit, error) {
 	if head.ID == baseline {
 		return nil, nil
@@ -37,7 +39,7 @@ func Chain(head *Commit, parents map[string]*Commit, baseline string) ([]*Commit
 		if !ok || next.ID != p {
 			return nil, descendRefusal(head.ID, baseline)
 		}
-		if len(chain) > MaxChain { // a map of distinct ids cannot cycle; this bounds a walk over one that somehow does
+		if len(chain) == MaxChain {
 			return nil, refuse("the chain from %s to %s is longer than %d commits; run hotserve box baseline %s as root on the box", baseline, head.ID, MaxChain, head.ID)
 		}
 		chain = append(chain, next)

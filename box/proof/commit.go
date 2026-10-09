@@ -78,6 +78,9 @@ func ParseCommit(raw []byte) (*Commit, error) {
 		if len(key) == 0 || !printableASCII(key) {
 			return nil, refuse("bundle: commit: a header line is not `name value`")
 		}
+		if i == 0 && string(key) != "tree" {
+			return nil, refuse("bundle: commit: the first header is not tree")
+		}
 		switch string(key) {
 		case "tree":
 			if i != 0 {
@@ -110,9 +113,6 @@ func ParseCommit(raw []byte) (*Commit, error) {
 			continue // not part of the payload
 		case "gpgsig-sha256":
 			return nil, sha256RepoRefusal(c.ID)
-		}
-		if i == 0 && string(key) != "tree" {
-			return nil, refuse("bundle: commit: the first header is not tree")
 		}
 		payload = append(payload, line...)
 	}

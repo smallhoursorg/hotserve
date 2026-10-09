@@ -76,11 +76,15 @@ func (v *Verifier) Verify(ctx context.Context, c *Commit, signers Signers) (stri
 		return "", fmt.Errorf("verify: %w", err)
 	}
 	sigFile, allowedFile := filepath.Join(dir, "sig"), filepath.Join(dir, "allowed_signers")
-	if err := os.WriteFile(sigFile, c.Signature, 0o644); err != nil { //nolint:gosec // readable by the child's uid; nothing secret
-		return "", fmt.Errorf("verify: %w", err)
-	}
-	if err := os.WriteFile(allowedFile, allowed, 0o644); err != nil { //nolint:gosec // readable by the child's uid; nothing secret
-		return "", fmt.Errorf("verify: %w", err)
+	for name, data := range map[string][]byte{sigFile: c.Signature, allowedFile: allowed} {
+		if err := os.WriteFile(name, data, 0o644); err != nil { //nolint:gosec // readable by the child's uid; nothing secret
+			return "", fmt.Errorf("verify: %w", err)
+		}
+		// The mode is set after the write, so the process umask has
+		// no say: the child of another uid must be able to read it.
+		if err := os.Chmod(name, 0o644); err != nil { //nolint:gosec // as above
+			return "", fmt.Errorf("verify: %w", err)
+		}
 	}
 
 	// Which listed key, if any, made the signature. ssh-keygen prints
