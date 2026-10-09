@@ -1,0 +1,35 @@
+bob@box1:~$ sudo hotserve-backup setup s3:https://s3.docs.test/box1
+^@hotserve-backup: restic is not installed at /usr/bin/restic: apt install restic
+[exit 1, 0.0575538s, 2026-10-05T18:00:37Z]
+bob@box1:~$ hotserve-backup status
+hotserve-backup: backups are not set up: /etc/hotserve-backup/repository.env is not there
+[exit 3, 0.0248978s, 2026-10-05T18:00:37Z]
+bob@box1:~$ sudo systemctl start hotserve-backup.service
+[exit 0, 0.0318158s, 2026-10-05T18:00:37Z]
+bob@box1:~$ systemctl is-active hotserve-backup.timer hotserve-backup-drill.timer; systemctl show -p ConditionResult,Result hotserve-backup.service
+active
+active
+Result=success
+ConditionResult=no
+[exit 0, 0.0282331s, 2026-10-05T18:00:37Z]
+bob@box1:~$ sudo apt install -y restic sqlite3 2>&1 | grep -E "^Setting up|Recommended|^  "
+  libsqlite3-0
+  restic  sqlite3
+  libreadline8t64  readline-common
+  readline-doc  sqlite3-doc
+Recommended packages:
+  fuse  libjs-jquery  libjs-sphinxdoc  sphinx-rtd-theme-common
+  Upgrading: 1, Installing: 4, Removing: 0, Not Upgrading: 14
+  Download size: 8741 kB
+  Space needed: 24.8 MB / 33.9 GB available
+Setting up libsqlite3-0:arm64 (3.46.1-7+deb13u2) ...
+Setting up restic (0.18.0-1+b4) ...
+Setting up readline-common (8.2-6) ...
+Setting up libreadline8t64:arm64 (8.2-6) ...
+Setting up sqlite3 (3.46.1-7+deb13u2) ...
+[exit 0, 3.72718s, 2026-10-05T18:00:41Z]
+bob@box1:~$ command -v restic sqlite3; restic version; sqlite3 --version
+/usr/bin/restic
+restic 0.18.0 compiled with go1.24.4 on linux/arm64
+3.46.1 2024-08-13 09:16:08 c9c2ab54ba1f5f46360f1b4f35d849cd3f080e6fc2b6c60e91b16c63f69aalt1 (64-bit)
+[exit 0, 0.025207s, 2026-10-05T18:00:41Z]

@@ -1,0 +1,76 @@
+## box3, as root: Install-Recommends false; this branch's .deb (make package)
+Recommended packages:
+Setting up restic (0.18.0-1+b4) ...
+Setting up sqlite3 (3.46.1-7+deb13u2) ...
+Setting up hotserve (0.3.0~rc1) ...
+Depends: libpam-systemd, dbus, restic, sqlite3, ca-certificates
+bob@box3:~$ sudo tar -xzf etc-hotserve.tar.gz -C /etc
+^@[exit 0, 0.0312006s, 2026-10-05T18:44:19Z]
+bob@box3:~$ hotserve-backup validate /etc/hotserve/Caddyfile
+a run would back up demo, under /var/lib/liveswap
+[exit 0, 0.0585775s, 2026-10-05T18:44:19Z]
+bob@box3:~$ sudo systemctl reload hotserve
+[exit 0, 0.153528s, 2026-10-05T18:44:19Z]
+## a storage that refuses every write plainly (403)
+bob@box3:~$ sudo hotserve-backup setup s3:http://127.0.0.1:9100/box1
+account hotserve-backup: present
+a run would back up demo, under /var/lib/liveswap
+Storage key id (AWS_ACCESS_KEY_ID): BOXKEYID0000
+Storage secret key (AWS_SECRET_ACCESS_KEY): 
+looking for a repository at s3:http://127.0.0.1:9100/box1 (up to 10s)
+the repository exists; its password is needed
+Repository password: 
+checking that this key can write to it (up to 2m0s)
+hotserve-backup: this key read the repository and could not write a lock file to it (exit 1): a key that may only read cannot back up (restic said: Save(<lock/9b04fe1141>) failed: client.PutObject: Access Denied. unable to create lock in backend: client.PutObject: Access Denied.)
+[exit 1, 2.30926s, 2026-10-05T18:44:22Z]
+bob@box3:~$ hotserve-backup status
+hotserve-backup: backups are not set up: /etc/hotserve-backup/repository.env is not there
+[exit 3, 0.0249586s, 2026-10-05T18:44:22Z]
+## a storage whose refusal restic retries (500)
+bob@box3:~$ sudo hotserve-backup setup s3:http://127.0.0.1:9101/box1
+account hotserve-backup: present
+a run would back up demo, under /var/lib/liveswap
+Storage key id (AWS_ACCESS_KEY_ID): BOXKEYID0000
+Storage secret key (AWS_SECRET_ACCESS_KEY): 
+looking for a repository at s3:http://127.0.0.1:9101/box1 (up to 10s)
+the repository exists; its password is needed
+Repository password: 
+checking that this key can write to it (up to 2m0s)
+still waiting for s3:http://127.0.0.1:9101/box1 (Ctrl-C is safe: nothing has been written)
+hotserve-backup: this key read the repository and wrote no lock file to it within 2m0s: a key that may only read cannot back up (restic said: Save(<lock/0a11f6bb7c>) returned error, retrying after 1.494715917s: client.PutObject: 500 Internal Server Error Save(<lock/0a11f6bb7c>) returned error, retrying after 1.26362894s: client.PutObject: 500 Internal Server Error Save(<lock/0a11f6bb7c>) returned error, retrying after 2.281827736s: client…)
+[exit 1, 121.528s, 2026-10-05T18:46:23Z]
+bob@box3:~$ hotserve-backup status; sudo ls -la /etc/hotserve-backup
+hotserve-backup: backups are not set up: /etc/hotserve-backup/repository.env is not there
+^@total 12
+drwxr-xr-x 2 root root 4096 Oct  5 18:46 .
+drwxr-xr-x 1 root root 4096 Oct  5 18:44 ..
+[exit 0, 0.0380819s, 2026-10-05T18:46:23Z]
+## the storage itself: a rebuilt box
+bob@box3:~$ sudo hotserve-backup setup s3:https://s3.docs.test:9000/box1
+account hotserve-backup: present
+a run would back up demo, under /var/lib/liveswap
+Storage key id (AWS_ACCESS_KEY_ID): BOXKEYID0000
+Storage secret key (AWS_SECRET_ACCESS_KEY): 
+looking for a repository at s3:https://s3.docs.test:9000/box1 (up to 10s)
+the repository exists; its password is needed
+Repository password: 
+checking that this key can write to it (up to 2m0s)
+repository ready: s3:https://s3.docs.test:9000/box1 (existing, id cff1d334)
+credentials: /etc/hotserve-backup/repository.env (root, 0600)
+next: the first backup runs within the hour and ten minutes (systemctl list-timers hotserve-backup.timer); to run one now, sudo systemctl start hotserve-backup.service; then hotserve-backup status
+[exit 0, 2.33852s, 2026-10-05T18:46:26Z]
+bob@box3:~$ sudo hotserve-backup restore demo
+demo: restore snapshot 4ed58945, made 2026-10-05 18:02 UTC, into /var/lib/liveswap/demo/shared?
+Its databases are replaced and its files overwritten, with no backup first; what the snapshot does not hold is left.
+Type the app's name, demo, to go on: demo
+demo: restored from snapshot 4ed58945 of 2026-10-05 18:02 UTC into /var/lib/liveswap/demo/shared: sqlite app.db, files uploads
+[exit 0, 2.92329s, 2026-10-05T18:46:29Z]
+bob@box3:~$ sudo systemctl start hotserve-backup.service
+[exit 0, 4.61304s, 2026-10-05T18:46:34Z]
+bob@box3:~$ hotserve-backup status
+last run 2026-10-05 18:46 UTC
+the repository has not been checked yet: the weekly drill checks it
+demo: ok: last complete backup 2026-10-05 18:46 UTC, snapshot 7b7af160 (data at /var/lib/liveswap/demo/shared)
+demo: restore last proven: 2026-10-05 18:46 UTC, snapshot 7b7af160
+no unit of a run, a restore or a drill is running
+[exit 0, 0.023984s, 2026-10-05T18:46:34Z]

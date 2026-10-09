@@ -1,0 +1,348 @@
+docker build -t hotserve-install-test-debian-13 \
+		--build-arg BASE_IMAGE=debian:13 packaging/test
+#0 building with "desktop-linux" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 2.37kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/debian:13
+#2 DONE 0.0s
+
+#3 [internal] load metadata for docker.io/rclone/rclone:1.71@sha256:3103526c506266a9ecdf064efe99bf3677d92ef6407af124d8c56b4f49cbaa51
+#3 DONE 0.0s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [stage-1 1/5] FROM docker.io/library/debian:13
+#5 DONE 0.0s
+
+#6 [rclone 1/1] FROM docker.io/rclone/rclone:1.71@sha256:3103526c506266a9ecdf064efe99bf3677d92ef6407af124d8c56b4f49cbaa51
+#6 DONE 0.0s
+
+#7 [stage-1 2/5] RUN apt-get update 	&& apt-get install -y --no-install-recommends 		systemd systemd-sysv dbus ca-certificates curl sudo 	&& rm -rf /var/lib/apt/lists/*
+#7 CACHED
+
+#8 [stage-1 3/5] COPY --from=rclone /usr/local/bin/rclone /usr/local/bin/rclone
+#8 CACHED
+
+#9 [stage-1 4/5] RUN rm -f /usr/sbin/policy-rc.d
+#9 CACHED
+
+#10 [stage-1 5/5] RUN systemctl mask 	systemd-udevd.service 	systemd-udevd-kernel.socket 	systemd-udevd-control.socket 	systemd-modules-load.service 	getty.target 	console-getty.service 	|| true
+#10 CACHED
+
+#11 exporting to image
+#11 exporting layers done
+#11 writing image sha256:8481ad5848cb5361efef9f0d598d73538e67fd776780072061da8eb680917ddc done
+#11 naming to docker.io/library/hotserve-install-test-debian-13 done
+#11 DONE 0.0s
+docker rm -f hotserve-smoke >/dev/null 2>&1 || true
+docker run -d --name hotserve-smoke --privileged --cgroupns=host \
+		--tmpfs /run --tmpfs /run/lock \
+		-v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+		-v ~/Documents/GitHub/hotserve-backups-v2/dist:/dist:ro \
+		-v ~/Documents/GitHub/hotserve-backups-v2/packaging/test/smoke.sh:/smoke.sh:ro \
+		-v ~/Documents/GitHub/hotserve-backups-v2/liveswap/testdata/sandbox-view.sh:/sandbox-view.sh:ro \
+		-v ~/Documents/GitHub/hotserve-backups-v2/e2e/backup/tty.sh:/tty.sh:ro \
+		-v ~/Documents/GitHub/hotserve-backups-v2/docs/backups.md:/docs-backups.md:ro \
+		hotserve-install-test-debian-13
+54be60a88aa1ede52b13d1cc0f71810326d3d8af13c0590f440cf10132e2512f
+docker exec hotserve-smoke /bin/bash /smoke.sh; status=$?; \
+	if [ $status -ne 0 ]; then \
+		docker exec hotserve-smoke journalctl -u hotserve --no-pager || true; \
+	fi; \
+	docker rm -f hotserve-smoke >/dev/null; \
+	exit $status
+
+════ stage 0: wait for systemd, locate the package ════
+systemd is running after 1s
+package under test: /dist/hotserve_0.3.0~rc1_arm64.deb
+
+════ stage 1: install, service basics, reload ════
+Reading package lists...
+Building dependency tree...
+Reading state information...
+The following additional packages will be installed:
+  libpam-systemd libreadline8t64 libsqlite3-0 readline-common restic sqlite3
+Suggested packages:
+  libcryptsetup12 libtss2-rc0t64 readline-doc sqlite3-doc
+Recommended packages:
+  dbus-user-session fuse libjs-jquery libjs-sphinxdoc sphinx-rtd-theme-common
+The following NEW packages will be installed:
+  hotserve libpam-systemd libreadline8t64 readline-common restic sqlite3
+The following packages will be upgraded:
+  libsqlite3-0
+1 upgraded, 6 newly installed, 0 to remove and 14 not upgraded.
+Need to get 9016 kB/29.7 MB of archives.
+After this operation, 84.7 MB of additional disk space will be used.
+Get:1 /dist/hotserve_0.3.0~rc1_arm64.deb hotserve arm64 0.3.0~rc1 [20.7 MB]
+Get:2 http://deb.debian.org/debian trixie/main arm64 libsqlite3-0 arm64 3.46.1-7+deb13u2 [854 kB]
+Get:3 http://deb.debian.org/debian trixie/main arm64 readline-common all 8.2-6 [69.4 kB]
+Get:4 http://deb.debian.org/debian trixie/main arm64 libpam-systemd arm64 257.13-1~deb13u1 [276 kB]
+Get:5 http://deb.debian.org/debian trixie/main arm64 restic arm64 0.18.0-1+b4 [7285 kB]
+Get:6 http://deb.debian.org/debian trixie/main arm64 libreadline8t64 arm64 8.2-6 [159 kB]
+Get:7 http://deb.debian.org/debian trixie/main arm64 sqlite3 arm64 3.46.1-7+deb13u2 [373 kB]
+Fetched 9016 kB in 1s (8900 kB/s)
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 6929 files and directories currently installed.)
+Preparing to unpack .../libsqlite3-0_3.46.1-7+deb13u2_arm64.deb ...
+Unpacking libsqlite3-0:arm64 (3.46.1-7+deb13u2) over (3.46.1-7+deb13u1) ...
+Setting up libsqlite3-0:arm64 (3.46.1-7+deb13u2) ...
+Selecting previously unselected package readline-common.
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 6929 files and directories currently installed.)
+Preparing to unpack .../0-readline-common_8.2-6_all.deb ...
+Unpacking readline-common (8.2-6) ...
+Selecting previously unselected package libpam-systemd:arm64.
+Preparing to unpack .../1-libpam-systemd_257.13-1~deb13u1_arm64.deb ...
+Unpacking libpam-systemd:arm64 (257.13-1~deb13u1) ...
+Selecting previously unselected package restic.
+Preparing to unpack .../2-restic_0.18.0-1+b4_arm64.deb ...
+Unpacking restic (0.18.0-1+b4) ...
+Selecting previously unselected package libreadline8t64:arm64.
+Preparing to unpack .../3-libreadline8t64_8.2-6_arm64.deb ...
+Adding 'diversion of /lib/aarch64-linux-gnu/libhistory.so.8 to /lib/aarch64-linux-gnu/libhistory.so.8.usr-is-merged by libreadline8t64'
+Adding 'diversion of /lib/aarch64-linux-gnu/libhistory.so.8.2 to /lib/aarch64-linux-gnu/libhistory.so.8.2.usr-is-merged by libreadline8t64'
+Adding 'diversion of /lib/aarch64-linux-gnu/libreadline.so.8 to /lib/aarch64-linux-gnu/libreadline.so.8.usr-is-merged by libreadline8t64'
+Adding 'diversion of /lib/aarch64-linux-gnu/libreadline.so.8.2 to /lib/aarch64-linux-gnu/libreadline.so.8.2.usr-is-merged by libreadline8t64'
+Unpacking libreadline8t64:arm64 (8.2-6) ...
+Selecting previously unselected package sqlite3.
+Preparing to unpack .../4-sqlite3_3.46.1-7+deb13u2_arm64.deb ...
+Unpacking sqlite3 (3.46.1-7+deb13u2) ...
+Selecting previously unselected package hotserve.
+Preparing to unpack .../5-hotserve_0.3.0~rc1_arm64.deb ...
+Unpacking hotserve (0.3.0~rc1) ...
+Setting up restic (0.18.0-1+b4) ...
+Setting up libpam-systemd:arm64 (257.13-1~deb13u1) ...
+Setting up readline-common (8.2-6) ...
+Setting up libreadline8t64:arm64 (8.2-6) ...
+Setting up sqlite3 (3.46.1-7+deb13u2) ...
+Setting up hotserve (0.3.0~rc1) ...
+hotserve installed. Start it with:
+  sudo systemctl enable --now hotserve
+Created symlink '/etc/systemd/system/timers.target.wants/hotserve-backup.timer' → '/usr/lib/systemd/system/hotserve-backup.timer'.
+Created symlink '/etc/systemd/system/timers.target.wants/hotserve-backup-drill.timer' → '/usr/lib/systemd/system/hotserve-backup-drill.timer'.
+Backups: the hourly timer and the Sunday restore drill are enabled, and run nothing until:
+  sudo hotserve-backup setup <repository>
+Processing triggers for libc-bin (2.41-12+deb13u3) ...
+user/group and data dir ownership OK
+v2.11.6 h1:sWxeamdlCZvcH4qeDz8bB0mdxgfYTeqV7HxOjXyIRas=
+all product modules linked
+Created symlink '/etc/systemd/system/multi-user.target.wants/hotserve.service' → '/usr/lib/systemd/system/hotserve.service'.
+unit started and starter config answers on :80
+user manager user@996 active with lingering
+reload OK, journal clean
+
+════ stage 2: liveswap deploy under the systemd sandbox ════
+wrote private key /etc/hotserve/deploy.key (0600) and public key /etc/hotserve/deploy.key.pub
+in-unit view:
+  pid=1
+  uidmap=1
+  nprocs=4
+  root_listing=demo 
+  state=closed
+  apptmp=closed
+  current=closed
+  release=writable
+  root=readonly
+  hotserve_lib=closed
+  run_hotserve=closed
+  etc_hotserve=closed
+  admin_socket=closed
+  uid=996
+  mgr_socket=closed
+  mgr_root=closed
+  mgr_environ=closed
+  abs_opt=absent
+  abs_srv=absent
+  abs_home=absent
+  abs_root=absent
+  abs_mnt=absent
+  abs_media=absent
+  abs_varlib=present
+  abs_etcliveswap=absent
+  etc_listing=alternatives ca-certificates group hostname hosts ld.so.cache ld.so.conf ld.so.conf.d localtime nsswitch.conf passwd resolv.conf ssl 
+  varlib_listing=liveswap 
+  binsh=ok
+  usrbinenv=ok
+  hsbin=ok
+  etcssl=ok
+  sslprivate=absent
+  resolvconf=ok
+  dns=skipped
+  cgroup=readonly
+  tmp=writable
+  home=/var/lib/liveswap/demo/shared
+  xdg_runtime=unset
+  nofile_soft=1048576
+  nofile_hard=1048576
+  acme_token=absent
+  saw_mgr_pid=296
+  saw_uid=996
+  done=1
+app NOFILE 1048576 = user@996 DefaultLimitNOFILE = the drop-in's 1048576 (systemd 257)
+deployed as unit hotserve-demo.s1.25c9f4b00bb1e404.service under user@996; app output in the journal
+host: 7.0.12-linuxkit; apparmor_restrict_unprivileged_userns=absent; virt=docker
+in-unit routes closed: manager /proc root+environ, manager socket, admin socket, state.json, /etc/hotserve, /run/hotserve, the app's tmp and current
+in-unit base view: /bin/sh, /usr/bin/env, /usr/bin/hotserve, /etc/ssl/certs, /etc/resolv.conf; /etc=alternatives ca-certificates group hostname hosts ld.so.cache ld.so.conf ld.so.conf.d localtime nsswitch.conf passwd resolv.conf ssl  /var/lib=liveswap 
+sandbox (systemd 257): uid_map range 1, pid 1, 4 pids visible, /var/lib/hotserve closed
+validate (root and hotserve) left the running app alone
+journal is free of the deploy token
+
+════ stage 2b: a SIGKILLed hotserve is back within seconds, reattached ════
+SIGKILL: systemd restarted hotserve (NRestarts=1); app pid 567 reattached
+
+════ stage 2c: backups — the guide's 'Set it up' lines, as an administrator ════
+after install: timers enabled, active; credential file absent — as the table says
+the package's own: restic and sqlite3 by Depends, the account, the units, the timers enabled and waiting
+docs/backups.md: sudo hotserve-backup setup s3:http://127.0.0.1:9000/hotserve
+after setup: timers enabled, active; credential file 32977b8d3c5b54a556e68b121a68b9bd04fce432f25e9d0407edfcb7baca927c — as the table says
+docs/backups.md: hotserve-backup validate /etc/hotserve/Caddyfile
+docs/backups.md: sudo systemctl reload hotserve
+the timer fired (5s after the minute), and its run ended success under the unit's hardening
+docs/backups.md: sudo systemctl start hotserve-backup.service
+docs/backups.md: hotserve-backup status
+docs/backups.md: sudo hotserve-backup restore demo --to /root/demo-restored
+docs/backups.md: sudo hotserve-backup restore demo
+the guide's lines ran as written, as the administrator: validate, reload, setup, a run, status, a restore --to, a restore into place with its pre-restore snapshot
+
+════ stage 3: reinstall — upgrade path, conffile preservation, app survival ════
+(Reading database ... 7141 files and directories currently installed.)
+Preparing to unpack .../hotserve_0.3.0~rc1_arm64.deb ...
+Unpacking hotserve (0.3.0~rc1) over (0.3.0~rc1) ...
+Setting up hotserve (0.3.0~rc1) ...
+hotserve installed. Start it with:
+  sudo systemctl enable --now hotserve
+Backups: the hourly timer and the Sunday restore drill are enabled, and run nothing until:
+  sudo hotserve-backup setup <repository>
+reinstall preserved config and user; hotserve restarted and reattached to the running app (pid 567)
+after an upgrade: timers enabled, active; credential file 32977b8d3c5b54a556e68b121a68b9bd04fce432f25e9d0407edfcb7baca927c — as the table says
+Removed '/etc/systemd/system/timers.target.wants/hotserve-backup.timer'.
+Removed '/etc/systemd/system/timers.target.wants/hotserve-backup-drill.timer'.
+disabled by the administrator: timers disabled, inactive; credential file 32977b8d3c5b54a556e68b121a68b9bd04fce432f25e9d0407edfcb7baca927c — as the table says
+hotserve-backup.timer is a disabled or a static unit not running, not starting it.
+hotserve-backup-drill.timer is a disabled or a static unit not running, not starting it.
+after an upgrade, disabled before it: timers disabled, inactive; credential file 32977b8d3c5b54a556e68b121a68b9bd04fce432f25e9d0407edfcb7baca927c — as the table says
+Created symlink '/etc/systemd/system/timers.target.wants/hotserve-backup.timer' → '/usr/lib/systemd/system/hotserve-backup.timer'.
+Created symlink '/etc/systemd/system/timers.target.wants/hotserve-backup-drill.timer' → '/usr/lib/systemd/system/hotserve-backup-drill.timer'.
+after an upgrade, enabled before it: timers enabled, active; credential file 32977b8d3c5b54a556e68b121a68b9bd04fce432f25e9d0407edfcb7baca927c — as the table says
+Created symlink '/etc/systemd/system/hotserve-backup-drill.timer' → '/dev/null'.
+hotserve-backup-drill.timer is a disabled or a static unit not running, not starting it.
+Removed '/etc/systemd/system/hotserve-backup-drill.timer'.
+after an upgrade, one timer stopped and one masked, and the mask taken off: timers enabled, active; credential file 32977b8d3c5b54a556e68b121a68b9bd04fce432f25e9d0407edfcb7baca927c — as the table says
+a directory that does not answer: postinstall said so within 41s, made no account, and the configure completed
+after an upgrade from a release without the timers: timers enabled, active; credential file 32977b8d3c5b54a556e68b121a68b9bd04fce432f25e9d0407edfcb7baca927c — as the table says
+after an upgrade with a run under way: timers enabled, active; credential file 32977b8d3c5b54a556e68b121a68b9bd04fce432f25e9d0407edfcb7baca927c — as the table says
+an upgrade left the run under way alone: its upload finished, and it ended ok
+after an upgrade with a command under way from a shell: timers enabled, active; credential file 32977b8d3c5b54a556e68b121a68b9bd04fce432f25e9d0407edfcb7baca927c — as the table says
+a command from a shell, under way at the upgrade: left alone, and it ended ok
+after an upgrade under a policy-rc.d: timers enabled, active; credential file 32977b8d3c5b54a556e68b121a68b9bd04fce432f25e9d0407edfcb7baca927c — as the table says
+an upgrade under a policy-rc.d left the timers running
+Job for hotserve-backup.service failed because the control process exited with error code.
+See "systemctl status hotserve-backup.service" and "journalctl -xeu hotserve-backup.service" for details.
+an account hotserve did not make: warned of at the upgrade in setup's words, refused by a run, accepted once it is hotserve's
+
+════ stage 4: removal ════
+Reading package lists...
+Building dependency tree...
+Reading state information...
+The following packages were automatically installed and are no longer required:
+  libreadline8t64 readline-common restic sqlite3
+Use 'apt autoremove' to remove them.
+The following packages will be REMOVED:
+  hotserve
+0 upgraded, 0 newly installed, 1 to remove and 14 not upgraded.
+After this operation, 59.1 MB disk space will be freed.
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 7141 files and directories currently installed.)
+Removing hotserve (0.3.0~rc1) ...
+remove took the timers' stamps, and the engine's sweep a killed run's mount and its directory, and nothing of the app's
+removal stopped the service and the apps, kept the conffile
+after remove: timers masked, inactive; credential file 32977b8d3c5b54a556e68b121a68b9bd04fce432f25e9d0407edfcb7baca927c — as the table says
+
+════ stage 5: reinstall after remove, and purge ════
+reinstalled after remove: timers enabled, active; credential file 32977b8d3c5b54a556e68b121a68b9bd04fce432f25e9d0407edfcb7baca927c — as the table says
+reinstalled after remove: the stamps are new, and nothing caught up
+Created symlink '/etc/systemd/system/multi-user.target.wants/hotserve.service' → '/usr/lib/systemd/system/hotserve.service'.
+reinstalled after remove: the timers enabled and running again, the same credential file, a run works
+Reading package lists...
+Building dependency tree...
+Reading state information...
+The following packages were automatically installed and are no longer required:
+  libreadline8t64 readline-common restic sqlite3
+Use 'apt autoremove' to remove them.
+The following packages will be REMOVED:
+  hotserve*
+0 upgraded, 0 newly installed, 1 to remove and 14 not upgraded.
+After this operation, 59.1 MB disk space will be freed.
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 7141 files and directories currently installed.)
+Removing hotserve (0.3.0~rc1) ...
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 7134 files and directories currently installed.)
+Purging configuration files for hotserve (0.3.0~rc1) ...
+hotserve: /etc/hotserve-backup/repository.env is kept: it holds the repository password, the only way to read the backups already made. Remove it yourself once those backups are not needed: sudo rm -r /etc/hotserve-backup
+dpkg: warning: while removing hotserve, directory '/var/lib/liveswap' not empty so not removed
+dpkg: warning: while removing hotserve, directory '/var/lib/hotserve' not empty so not removed
+dpkg: warning: while removing hotserve, directory '/lib/systemd/system' not empty so not removed
+dpkg: warning: while removing hotserve, directory '/etc/hotserve' not empty so not removed
+purge kept the credential file and said why, removed the package's own state, the cache, the stamps and a killed run's mounts, kept the account
+
+════ stage 6: an account that cannot be made, a command under way at purge, and what purge keeps ════
+Created symlink '/etc/systemd/system/multi-user.target.wants/hotserve.service' → '/usr/lib/systemd/system/hotserve.service'.
+installed where the account cannot be made: timers enabled, active; credential file 32977b8d3c5b54a556e68b121a68b9bd04fce432f25e9d0407edfcb7baca927c — as the table says
+Job for hotserve-backup.service failed because the control process exited with error code.
+See "systemctl status hotserve-backup.service" and "journalctl -xeu hotserve-backup.service" for details.
+a group of the account's name: installed, and said; a run says the account is not there
+Reading package lists...
+Building dependency tree...
+Reading state information...
+The following packages were automatically installed and are no longer required:
+  libreadline8t64 readline-common restic sqlite3
+Use 'apt autoremove' to remove them.
+The following packages will be REMOVED:
+  hotserve*
+0 upgraded, 0 newly installed, 1 to remove and 14 not upgraded.
+After this operation, 59.1 MB disk space will be freed.
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 7141 files and directories currently installed.)
+Removing hotserve (0.3.0~rc1) ...
+hotserve: what a backup command left was not swept, and is left: another backup run is in progress: pid 5614, since 2026-09-27T00:00:00Z
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 7134 files and directories currently installed.)
+Purging configuration files for hotserve (0.3.0~rc1) ...
+hotserve: kept /var/lib/hotserve-backup/staging: not empty — copies of an app's data a backup run or a restore left there; look, then remove them yourself
+hotserve: kept /var/lib/hotserve-backup: it holds what this package did not make (notes.txt)
+hotserve: kept /run/hotserve-backup: something is mounted at or under it, or what is mounted cannot be read; nothing under it is removed — it is gone at the next boot, and is not to be rm -r'd before
+hotserve: /etc/hotserve-backup/repository.env is kept: it holds the repository password, the only way to read the backups already made. Remove it yourself once those backups are not needed: sudo rm -r /etc/hotserve-backup
+dpkg: warning: while removing hotserve, directory '/var/lib/liveswap' not empty so not removed
+dpkg: warning: while removing hotserve, directory '/var/lib/hotserve' not empty so not removed
+dpkg: warning: while removing hotserve, directory '/lib/systemd/system' not empty so not removed
+dpkg: warning: while removing hotserve, directory '/etc/hotserve' not empty so not removed
+purge under a command's lock: said, its mount left; what is kept is said for what it is
+Reading package lists...
+Building dependency tree...
+Reading state information...
+The following packages were automatically installed and are no longer required:
+  libreadline8t64 readline-common restic sqlite3
+Use 'apt autoremove' to remove them.
+The following packages will be REMOVED:
+  hotserve*
+0 upgraded, 0 newly installed, 1 to remove and 14 not upgraded.
+After this operation, 59.1 MB disk space will be freed.
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 7141 files and directories currently installed.)
+Removing hotserve (0.3.0~rc1) ...
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 7134 files and directories currently installed.)
+Purging configuration files for hotserve (0.3.0~rc1) ...
+hotserve: /etc/hotserve-backup/repository.env is kept: it holds the repository password, the only way to read the backups already made. Remove it yourself once those backups are not needed: sudo rm -r /etc/hotserve-backup
+dpkg: warning: while removing hotserve, directory '/var/lib/liveswap' not empty so not removed
+dpkg: warning: while removing hotserve, directory '/var/lib/hotserve' not empty so not removed
+dpkg: warning: while removing hotserve, directory '/lib/systemd/system' not empty so not removed
+dpkg: warning: while removing hotserve, directory '/etc/hotserve' not empty so not removed
+mounts of other names under the run directory: taken away by the engine's sweep, and nothing of the app's with them
+
+════ stage 7: purge where the mount table cannot be read ════
+no mount table: purge removed nothing under the run directory, and said why
+a mount on the run directory itself: purge removed nothing through it, and said why
+a command holding the run lock: purge left its files, and said why
+a killed command's units after a remove: stopped by purge, by their recorded names; its mount left, and said
+a unit that would not stop: said by name, and its record kept
+the manager unreachable: said, and the record kept
+
+ALL PACKAGE SMOKE STAGES PASSED (/dist/hotserve_0.3.0~rc1_arm64.deb on Debian GNU/Linux 13 (trixie))
