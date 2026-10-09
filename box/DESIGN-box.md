@@ -137,8 +137,15 @@ deploy.example.com {
   decode to a key of the declared type.
 - `box_webhook` takes no arguments. It handles exactly the path `/`
   (with or without `?result=`) and passes every other path to the next
-  handler; its directive order is registered *before*
-  `liveswap_webhook`, which is terminal on every path it sees. The site
+  handler. It must run before `liveswap_webhook`, which is terminal on
+  every path it sees, and Caddy's `RegisterDirectiveOrder` can only
+  anchor on a *standard* directive (it panics otherwise) and inserts
+  immediately before the anchor — so anchoring on `reverse_proxy`, as
+  liveswap does, would place `box_webhook` *after* `liveswap_webhook`
+  and the channel would be dead. `box_webhook` is therefore anchored
+  `Before, "redir"`, a standard directive earlier than `reverse_proxy`,
+  and a unit test adapts the example Caddyfile and asserts the route
+  order. The site
   that carries it has exactly one address, a bare hostname: no scheme,
   port, path, wildcard, placeholder or second name. That hostname is
   the address the workflow posts to and the box's identity (see "The
@@ -199,13 +206,14 @@ cross-references throughout.
    why in that order); then the admission lock is released. The
    handler logs `box push accepted` with `id`, `commit`, `by` and
    `remote`. Nothing about the caller is handed to root.
-8. **Answer.** The handler waits at most 30 s for the first result and
-   answers by its phase, per the Handler contract table: `refused` →
-   422, `no_change` → 200, `verified` or any later phase → 202 with
-   `{id, commit, phase, poll_token}`, nothing yet → 504 with `{id,
-   poll_token}`. A 202's `phase` is read exactly as a poll answer
-   would be. The handler never waits past the first result ("Why 202
-   and a poll").
+8. **Answer.** The handler polls `out/` every second for at most 30 s
+   and answers by the first phase it sees, per the Handler contract
+   table: `verified` → 202 `{id, commit, phase, poll_token}`;
+   `no_change` or `applied` → 200 with the result; `refused`, `failed`,
+   `rolled_back` or `unknown` → 422 with the result (a fast transaction
+   can be terminal before the first poll, and a red outcome is never
+   carried by a 2xx); nothing yet → 504 `{id, poll_token}`. The handler
+   never waits past the first result ("Why 202 and a poll").
 
 **In the applier (`hotserve box apply`, root, one shot, path-triggered):**
 
@@ -214,7 +222,10 @@ cross-references throughout.
    States table and the Failure-mode table), then renames every entry
    of `in/` into `work/` — whatever it is; `CAP_DAC_OVERRIDE` and
    `CAP_FOWNER` exist so that nothing the hotserve uid creates can
-   stay — and processes them in lexical order of id. Each bundle is
+   stay. An entry whose name is not an id, or which is not a regular
+   file, has no legal result name: it is removed with an error-level
+   journal line and no result. The rest are processed in lexical order
+   of id. Each bundle is
    opened `O_NOFOLLOW|O_NONBLOCK`, checked `S_ISREG`, read once through
    a reader that stops at the cap plus one byte, and never touched on
    disk again: a writer holding a descriptor from before the rename
@@ -298,10 +309,10 @@ by id.
 | Id | Invariant |
 |---|---|
 | **I1** | `/etc/hotserve/Caddyfile` exists at every instant and is always a file that either ran or is the one being confirmed by a reload in progress; a failed reload puts the previous bytes back. |
-| **I2** | `in/` and `work/` are empty on every applier exit, whatever happened; `in/` receives nothing but a complete bundle by one `rename`. |
-| **I3** | Every bundle the applier takes ends in exactly one terminal result, or — only when the result cannot be written — one error-level journal line carrying every field the result would have. |
-| **I4** | The baseline advances only from a transaction whose record says `applied` (reload confirmed) or `no_change` on an active box, from `init`, or from `baseline`; all four hold root's lock. |
-| **I5** | The record exists exactly while a transaction has no terminal result; it is written atomically before anything else changes and is the last thing removed. |
+| **I2** | Every entry the applier *listed* in `in/` leaves `in/` in that run (a bundle landing after the last listing is the next run's); `work/` is empty on every exit except the one named full-disk case in the Failure-mode table; `in/` receives nothing but a complete bundle by one `rename`. |
+| **I3** | Every bundle the applier takes ends in exactly one terminal result, or — only when the result cannot be written — one error-level journal line carrying every field the result would have; an entry that is not a bundle gets the journal line only. |
+| **I4** | The baseline advances only from a transaction whose durable record says `applied` (reload confirmed) or `no_change` on an active box, from `init`, or from `baseline`; all four hold root's lock; it never runs ahead of the record. |
+| **I5** | From the first write that changes `/etc/hotserve` or `applied.json` until the terminal result, the record exists; it is written atomically before that first write and is the last thing removed. Refusals and `verified` precede it and write none. |
 | **I6** | Root installs nothing a listed signer did not sign (every chain commit), nothing that fails the file proof, nothing that does not descend from the baseline, nothing for another host or path. |
 | **I7** | No pending outlives its bound: a marker ages out at fifteen minutes; a bundle in `in/` blocks admission until root takes it, with no age-out. |
 | **I8** | Every write that recovery reasons from is durable before the next step: the temporary is `fsync`ed, renamed, and the parent directory `fsync`ed. |
@@ -319,8 +330,29 @@ implies; it never infers state from digests alone.
 | `installing` | Record durable; swap not yet done. | `prev` | `failed` ("interrupted before the Caddyfile changed"). If `d == new`, the crash fell after the swap: act as `swapped`. |
 | `swapped` | New file on disk; reload unconfirmed. | `new` | Write the previous bytes back, phase → `rolling_back`, continue as that row. Exception: `origin: init` on a box that is not running → finish as `applied` (init's rule: a person is at the console). |
 | `applied` | Reload confirmed; `applied.json` may not be written yet. | `new` | Write `applied.json` (idempotent), result `applied`. **If `d ≠ new`, the file changed after the reload (a console edit): do not advance the baseline; result `unknown`.** |
-| `rolling_back` | Reload failed; previous bytes going back. | `prev` (write them back if not) | Reload if active → `rolled_back`; reload fails → `unknown`; not running → `failed` ("the previous Caddyfile is on disk; hotserve is not running"). |
+| `rolling_back` | Reload failed; previous bytes going back. | `prev`, or `new` (crash before the write-back: write them back) | Reload if active → `rolled_back`; reload fails → `unknown`; not running → `failed` ("the previous Caddyfile is on disk; hotserve is not running"). `d` neither: the `any` row. |
 | any | `d` matches neither `prev` nor `new`. | — | A console edit under the transaction: write nothing to `/etc/hotserve`, result `unknown` ("the Caddyfile changed during the transaction; it is left as found"), journal at warning level. |
+
+### Record and result fields
+
+| File | Field | Set by | Meaning |
+|---|---|---|---|
+| record, result | `id` | handler (result name), applier | the request id |
+| record, result | `commit` | applier | HEAD |
+| record, result | `path` | applier | the bundle's `path`, equal to `applied.json`'s |
+| record, result | `signer` | applier | the principal whose key verified HEAD; `init` in a record `init` wrote |
+| record | `origin` | applier, `init` | `applier` or `init`; recovery honours it (States table) |
+| record | `prev`, `prev_sha256` | applier | the installed file's bytes (base64) and digest at step 10 |
+| record | `new_sha256` | applier | the incoming file's digest |
+| record, result | `diff` | applier | unified diff, redacted (layers 3 and 4), capped per Caps |
+| record, result | `apps` | applier | app names from the incoming file's token walk |
+| record, result | `box_webhook` | applier | the host |
+| record, result | `caddyfile_edited_out_of_band` | applier | step 10's flag |
+| record | `phase` | applier | the state (States table) |
+| result | `phase` | applier | `verified` or a terminal phase |
+| result | `error` | applier | the catalogue message for a non-green phase, bounded per Caps |
+| `applied.json` | `sha`, `path`, `sha256`, `signer`, `when` | applier, `init`, `baseline` | the baseline, this box's path, the installed digest, who verified, when |
+| marker | `sha256`, `posted` | handler | digest of the poll secret; time of admission |
 
 ```mermaid
 stateDiagram-v2
@@ -350,14 +382,14 @@ stateDiagram-v2
 | From → to | Event | Durable write(s), in order | Guards |
 |---|---|---|---|
 | checking → refused | A check in 10–15 fails | result `refused` | I6 |
-| checking → not_running | `is-active` is not `active` after the `activating` wait (≤ 300 s elapsed) | result `refused` ("hotserve is not running") | I4: nothing advances |
-| checking → no_change | active; incoming buffer == installed buffer | record `no_change` → `applied.json` → result `no_change` → record removed | I4, I5 |
-| checking → verified | active; buffers differ | result `verified` (if this write fails: remove the `work/` entry, journal; nothing else changes) | I3 |
+| checking → not_running | `origin: applier` and `is-active` is not `active` after the `activating` wait (≤ 300 s elapsed) | result `refused` ("hotserve is not running") | I4: nothing advances |
+| checking → no_change | active (or `origin: init`); incoming buffer == installed buffer | record `no_change` → `applied.json` → result `no_change` → record removed | I4, I5 |
+| checking → verified | active (or `origin: init`); buffers differ | result `verified` (if this write fails: remove the `work/` entry, journal; nothing else changes) — `init` writes no result, it prints | I3 |
 | verified → installing | — | record `installing` (prev bytes embedded) | I5, I8 |
 | installing → failed | a temporary cannot be written | remove temporaries; result `failed` → record removed | I1 (file untouched) |
 | installing → swapped | new file written to a temp and renamed over `Caddyfile` | record `swapped` | I1 (file exists at every instant) |
 | swapped → rolling_back | record rewrite to `swapped` fails, or reload fails | record `rolling_back` (if writable) → previous bytes written back | I1 |
-| swapped → applied | `systemctl reload hotserve` exits 0 | record `applied` → `applied.json` | I4 (record before baseline) |
+| swapped → applied | `systemctl reload hotserve` exits 0 — or `origin: init` on a box that is not running, where the swap counts as applied with no reload (a person is at the console; the file loads at the next start) | record `applied` → `applied.json` | I4 (record before baseline) |
 | rolling_back → rolled_back | previous bytes back, reload exits 0 | result `rolled_back` → record removed | I1 |
 | rolling_back → unknown | second reload fails, or bytes cannot be written back | result `unknown` → record removed if a result was written | see ENOSPC row below |
 | applied → done | — | result `applied` → record removed → entry removed | I2, I3, I5 |
@@ -380,9 +412,9 @@ shows after recovery.
 | record `no_change` | result `failed`; nothing changed | phase `no_change` → `applied.json`, result | `no_change` | `no_change` |
 | record `installing` | result `failed`; nothing changed | phase `installing`, `d == prev` → `failed` | `failed` | `failed` |
 | new file temp + rename | remove temp; result `failed` | `d == new` with phase `installing` → treat as `swapped` | per `swapped` | per `swapped` |
-| record `swapped` | **post-swap failure**: write previous bytes back; if that also fails, leave the record (phase `installing`, `d == new`) and exit non-zero with an error-level line ("disk full; the previous Caddyfile could not be restored") — the path unit re-triggers until its limit; console frees space and `systemctl reset-failed hotserve-box-apply.path` | phase `swapped` → rollback path | `rolled_back` / `unknown` | per phase |
+| record `swapped` | **post-swap failure**: write previous bytes back; if that also fails, leave the record (phase `installing`, `d == new`) and exit non-zero with an error-level line ("disk full; the previous Caddyfile could not be restored") — the path unit re-triggers until its limit and fails; the console frees space, then `systemctl restart hotserve-box-apply.path` (`reset-failed` alone clears the state but does not start a unit that hit its trigger limit) | phase `swapped` → rollback path | `rolled_back` / `unknown` | per phase |
 | reload | non-zero exit → rollback path | — | `rolled_back` / `unknown` | per phase |
-| record `applied` | treat as a failed reload would be unsafe (the reload succeeded): write `applied.json` anyway, journal that the record could not be rewritten | phase `applied`, `d == new` → `applied.json`, result | `applied` | `applied` |
+| record `applied` | the reload succeeded but the record cannot say so, and the baseline must never run ahead of the record (I4): take the rollback path exactly as the `record swapped` row — previous bytes back, reload, result `rolled_back` ("the record could not be updated after a successful reload (disk full); rolled back to keep the file and the record consistent") or, if the write-back fails too, the full-disk end above | phase `applied`, `d == new` → `applied.json`, result | `rolled_back` / `unknown` | per phase |
 | `applied.json` | journal (error); result `unknown` ("applied but the baseline could not be recorded; `hotserve box baseline <sha>`") | phase `applied` → idempotent rewrite | `applied` / `unknown` | per phase |
 | previous bytes back | retry once; else result `unknown`, record kept as above | phase `rolling_back`, `d` checked, bytes written back if needed | `rolled_back` / `unknown` | per phase |
 | terminal result | **full disk**: error-level journal with every field; remove record and entry anyway (both `unlink`s). At a terminal phase the disk is settled and only the report is owed; a record kept would spin `PathExists=txn.json`. | result exists, record present → remove record and entry | as logged | `pending`, then 404 at the marker's bound, red naming the journal |
@@ -424,9 +456,10 @@ an empty cell means nobody, by design.
 | Path | Mode | Owner | Creates | Writes | Reads | Removes |
 |---|---|---|---|---|---|---|
 | `/etc/hotserve/Caddyfile` | 0644 | root:root | package | applier, `init`, console | hotserve, handler, applier | — |
+| `/etc/hotserve/.Caddyfile.box-<id>` | 0644 | root:root | applier, `init` | applier, `init` | — | applier, `init` (renamed over `Caddyfile`, or removed on failure) |
 | `/etc/hotserve/age/` | 0700 | root:root | `init` | (secrets PR) | — | — |
 | `/var/lib/hotserve-box/` | 2750 | root:hotserve | tmpfiles.d | — | — | — |
-| `…/stage/` | 0700 | hotserve:hotserve | tmpfiles.d | handler (temporaries) | handler, applier (sweep) | — |
+| `…/stage/` | 0700 | hotserve:hotserve | tmpfiles.d | handler (bundle temporaries), `init` (a 0644 copy of the Caddyfile for its validate child, since `<dir>` is usually under `/root`) | handler, applier (sweep), the validate child | handler, `init` (their own temporaries) |
 | `…/stage/lock` | 0600 | hotserve:hotserve | handler | — | handler (`flock`) | — |
 | `…/stage/<id>.auth` | 0600 | hotserve:hotserve | handler, after the rename into `in/` | — | handler (poll auth, pending), applier (sweep) | applier (sweep) |
 | `…/in/` | 0770 | root:hotserve | tmpfiles.d | handler (`rename` in) | handler (listing), applier | applier (`rename` out) |
@@ -444,9 +477,12 @@ Notes that the table cannot hold:
 - The base directory and `out/` are setgid so files root creates are
   born group `hotserve`; the unit has no `CAP_CHOWN`. `txn.json` is
   0600, so its group does not matter.
-- Nothing is at `/etc/hotserve/Caddyfile.prev`: `bin/push` and its
-  sudoers line write that name, and a path-unit trigger on it would
-  race a legacy push on a box whose template predates the applier.
+- Nothing is at `/etc/hotserve/Caddyfile.prev` or `Caddyfile.new`:
+  `bin/push` and its sudoers lines (`tee`, `mv -f`, `rm -f` on exactly
+  those names) write them, and on a box whose template predates the
+  applier an administrator could still `tee` over a temporary of that
+  name in the window before the rename. The applier's temporary is
+  `.Caddyfile.box-<id>`, a name no sudoers line grants.
 - `/var/lib/hotserve-box` joins `sandboxHotservePaths`
   (liveswap/sandbox.go): never a bind source for an app.
 - The applier reaches `stage/` and anything the hotserve uid created
@@ -489,7 +525,8 @@ Every numeric bound, in one place, with its reason.
 | `diff` in record and result | 64 KiB, cut with a note | the record is one atomic write |
 | results and markers kept | 32 ids, or a day | see "Retention" |
 | handler wait for the first result | 30 s | past it, 504 and the poll |
-| marker / pending / poll-secret life | 15 minutes | the workflow's own poll bound |
+| pending / poll-secret life | 15 minutes from the marker's `posted` | the workflow's own poll bound; the marker itself is retained longer (see "Retention") so that a `404` means swept, but the secret it holds is honoured only within this window |
+| handler poll interval for the first result | 1 s | bounds how long a reload's `Shutdown` waits for the in-flight POST ("Why 202 and a poll") |
 | workflow poll | 15 minutes, then red naming the journal | |
 | `activating` wait in step 16 | 300 s elapsed | hotserve's `TimeoutStartSec=240s` plus `RestartSec`; an elapsed bound, since `Restart=on-failure` can keep a unit activating across attempts |
 | reload | hotserve.service's own 240 s | the applier sets no shorter timeout |
@@ -559,9 +596,9 @@ console step; a host rename needs a certificate first in any case.
 
 | Request | Authorised by | Answer |
 |---|---|---|
-| `POST /` with a bundle | `deploy_trust` (step 1) | per step 8: 422 / 200 / 202 `{id, commit, phase, poll_token}` / 504 `{id, poll_token}`; 409, 413, 415 from admission |
+| `POST /` with a bundle | `deploy_trust` (step 1) | per step 8: 202 `{id, commit, phase: verified, poll_token}` / 200 with a `no_change` or `applied` result / 422 with a `refused`, `failed`, `rolled_back` or `unknown` result / 504 `{id, poll_token}`; 409, 413, 415 from admission |
 | `GET /` | `deploy_trust` | `{"commit", "box_webhook", "sha256"}` from `applied.json` and the installed file; the workflow reads `commit` to bundle `rev-list --first-parent <commit>..HEAD` |
-| `GET /?result=<id>` | the poll secret, checked first and never charged to the failure budget; else `deploy_trust` | `<id>` must match the id grammar (400). The result; 202 `{"phase":"pending"}` while a marker exists and no result does; 404 when neither exists (swept) |
+| `GET /?result=<id>` | **first** the poll secret — accepted for `<id>` alone while its marker is younger than fifteen minutes, never charged to the failure budget — else `deploy_trust`; authentication precedes everything below, so an unauthenticated caller gets the same flat 401 a deploy host gives and learns nothing | then `<id>` must match the id grammar (400). The result; 202 `{"phase":"pending"}` while a marker exists and no result does; 404 when neither exists (swept) |
 | another method on `/` | — | 405 |
 | another path | — | not this handler's; passed on |
 
@@ -571,8 +608,10 @@ layers) with the protocol's own fields on the safe list — `id`,
 32-hex id, a 40-hex commit, a 64-hex digest and a random secret are
 exactly what the entropy layer exists to catch. Only `diff` and
 `error` text, which carry bundle-derived bytes, go through every layer;
-the applier redacted the `diff` with those two layers before writing
-it (it has no service environment to prime the third).
+the applier redacted the `diff` with those same two layers before
+writing it — liveswap/redact.go's layers 3 (shape) and 4 (entropy);
+layer 1, known `env_file` values, is primed from a service environment
+the applier does not have, and layer 2 is the safe list.
 
 Why a poll secret and not the OIDC token: a push that changes
 `deploy_trust` would lock its own workflow out of the result the moment
@@ -594,7 +633,7 @@ says. The workflow's action is in the last column.
 | 400 | — | `result must be a 32-hex id` | handler | bug in the workflow |
 | 405 / 415 / 413 | — | `method not allowed` / `the bundle is a gzip tarball` / `the bundle is larger than 16 MiB` | handler | fail |
 | 409 | — | `a push is being admitted; retry in a moment` | handler | retry |
-| 409 | — | `a push is pending: <id>, <age> old` | handler | retry; after 15 min, `journalctl -u hotserve-box-apply -u hotserve-box-apply.path` |
+| 409 | — | `a push is pending: <id>, <age> old` | handler | retry; after 15 min, `journalctl -u hotserve-box-apply -u hotserve-box-apply.path`, and if the path unit is `failed`, `systemctl restart hotserve-box-apply.path` |
 | 422 | `refused` | `bundle: <what>` | handler or applier | fail |
 | 422 | `refused` | `the token names commit <a>; the bundle is <b>` | handler | fail |
 | 422 | `refused` | `box tokens must name the commit (sha claim)` | handler | fail |
@@ -612,12 +651,12 @@ says. The workflow's action is in the last column.
 | 422 | `refused` | `hotserve validate: <redacted>` / `hotserve-backup validate: <redacted>` / `could not ask whether backups are installed; nothing changed` | handler | fail |
 | 422 | `refused` | `hotserve is not running; nothing applied` / `hotserve is still starting after 300 s; nothing applied` | applier | fail |
 | 422 | `refused` | `the Caddyfile this box runs lists no signer; hotserve init is the way back` | applier | fail |
-| 200 | `no_change` | `the box already runs this Caddyfile` | applier | green |
+| 200 / poll | `no_change` | `the box already runs this Caddyfile` | applier | green |
 | 202 | `verified` | `verified; installing` | applier | poll |
-| 202 / poll | `applied` | `loaded; running apps are not restarted` | applier | green |
-| poll | `failed` | `the install failed before the Caddyfile changed: <error>; nothing changed` / `interrupted before the Caddyfile changed; nothing changed` / `interrupted; the previous Caddyfile is on disk; hotserve is not running` / `the box has no record of this push; push again` | applier | red |
-| poll | `rolled_back` | `the reload failed; the previous Caddyfile is back and running — journalctl -u hotserve -n 50 on the box says why` | applier | red |
-| poll | `unknown` | `the reload failed and so did the reload of the previous file; the previous file is on disk; journalctl -u hotserve` / `the Caddyfile changed during the transaction; it is left as found` / `applied but the baseline could not be recorded; hotserve box baseline <sha>` | applier | red |
+| 200 / poll | `applied` | `loaded; running apps are not restarted` | applier | green |
+| 422 / poll | `failed` | `the install failed before the Caddyfile changed: <error>; nothing changed` / `interrupted before the Caddyfile changed; nothing changed` / `interrupted; the previous Caddyfile is on disk; hotserve is not running` / `the box has no record of this push; push again` | applier | red |
+| 422 / poll | `rolled_back` | `the reload failed; the previous Caddyfile is back and running — journalctl -u hotserve -n 50 on the box says why` / `the record could not be updated after a successful reload (disk full); rolled back to keep the file and the record consistent` | applier | red |
+| 422 / poll | `unknown` | `the reload failed and so did the reload of the previous file; the previous file is on disk; journalctl -u hotserve` / `the Caddyfile changed during the transaction; it is left as found` / `applied but the baseline could not be recorded; hotserve box baseline <sha>` | applier | red |
 | 202 | `pending` | `{"phase":"pending"}` | handler | keep polling, 15 min bound |
 | 504 | — | `{id, poll_token}` | handler | poll from the start |
 
@@ -635,8 +674,10 @@ reads `<dir>/Caddyfile` with the walk of "Reading the signed file" and
 refuses, by name, each of that section's conditions plus no `box`
 block, no `signer`, zero or more than one `box_webhook` site; requires
 a 40-hex `<sha>`, the commit the operator is about to push, so no null
-baseline ever exists; runs `hotserve validate --adapter caddyfile` as
-the hotserve user with an environment it constructs to match
+baseline ever exists; copies the file to a 0644 temporary in `stage/`
+(the directory it was given is usually under `/root`, which the child
+cannot read) and runs `hotserve validate --adapter caddyfile` on that
+copy as the hotserve user with an environment it constructs to match
 `hotserve.service`'s (dropping the uid does not drop root's shell
 environment); then takes root's blocking lock and runs the state
 machine with `origin: init` — recovery first if a record is lying
