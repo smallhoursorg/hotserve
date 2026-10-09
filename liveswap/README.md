@@ -785,7 +785,11 @@ and refuses a mismatch with a `422` naming both digests, so a host
 that serves other bytes than CI built cannot deploy them. Without it,
 the download is trusted on the strength of the allowlist and the
 token alone. The example workflows send it; a push carries no pin,
-because its bytes are the request itself.
+because its bytes are the request itself. The pin is kept as `sha256`
+in the version's deploy record and in `last_deploy` (see
+[Deploy records](#deploy-records)), so "are the bytes serving the ones
+CI built?" can still be answered for as long as the record is kept,
+after the journal has rotated.
 
 **2. Push an uploaded tarball** — no artifact host needed. Stream the
 `.tar.gz` as the request body with a gzip content type; the version is
@@ -908,8 +912,9 @@ the unit runs an absolute resolved path with the placeholders already
 substituted. Compare it against the release it should be running, not
 against the directive. Anything you put in `command` is readable by
 anyone who can read status, so keep secrets in `env`, which status
-does not report. Then: last deploy result (including `deployed_by` and
-the artifact's `artifact_entries` / `artifact_bytes` against the caps),
+does not report. Then: last deploy result (including `deployed_by`,
+the `sha256` it was pinned to, and the artifact's `artifact_entries` /
+`artifact_bytes` against the caps),
 the watchdog's state (restart counts, last restart cause), and
 `available_versions` — the on-disk releases you can roll back to,
 newest-first.
@@ -960,8 +965,19 @@ replaces it; a request refused before any phase — the version already
 running, or already on disk — writes none); a version never deployed
 is a `404`. `GET /<app>` lists
 every recorded version's outcome in `deploys`, newest first:
-`version`, `status`, the failing `phase`, `deployed_by`, and the
-times. Records are kept for every version still on disk plus the
+`version`, `status`, the failing `phase`, `deployed_by`, the `sha256`
+the deploy was pinned to, and the times. `sha256` is what the
+deployer asserted and the download was checked against, absent when
+there was no pin (a push, an unpinned pull). A rollback copies the
+pin from the record it replaces: a version's release cannot be
+replaced while it is on disk, and its record is normally written
+with it. Not always — a version whose release GC pruned can be
+deployed again, and if that deploy left bytes on disk without
+rewriting the record (the record write failed, or a cleanup did),
+a rollback carries the old pin onto the new bytes. A pin equal to an
+`env_file` value is redacted like any other, and a rollback then
+records none. It is never a hash the box took of an unpinned
+download. Records are kept for every version still on disk plus the
 newest `keep` others (failed deploys, whose release is removed at
 once, and versions release GC has pruned), so the set is bounded by
 about twice `keep`. They are written as the response filter left them
@@ -970,7 +986,7 @@ when read, like every body. One consequence: a version name equal to
 an `env_file` value is that value wherever it appears —
 `current_version`, `available_versions`, `last_deploy`, `deploys`, a
 record — and shows as `[redacted:KEY]`, and such a version's record
-is only the envelope (version, outcome, times, and why); so do not
+is only the envelope (version, outcome, times, the pin, and why); so do not
 name versions (or apps) after `env_file` values; a release identifier
 an app needs belongs in inline `env`. The outcome words — `succeeded`, `failed`,
 the phase names — are never redacted where they stand as an outcome,

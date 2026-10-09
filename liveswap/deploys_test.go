@@ -2,6 +2,8 @@ package liveswap
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -712,5 +714,115 @@ func TestDeployRecordIsAnEnvelopeWhenTheEnvFileWillNotParseWhole(t *testing.T) {
 	must(t, rerr)
 	if s := string(rec); strings.Contains(s, secret) || !strings.Contains(s, "record withheld") || !strings.Contains(s, `"status":"failed"`) {
 		t.Fatalf("record = %s", s)
+	}
+}
+
+// With the env_file unread past a bad line, the values are not all
+// known, so an envelope cannot tell a pin from one of them: it names
+// none, even one that sits before the bad line.
+func TestDeployRecordEnvelopeDropsThePinWhenValuesAreUnknown(t *testing.T) {
+	rig := newTestRig(t)
+	sum := sha256.Sum256([]byte("a digest that is also a secret"))
+	pin := hex.EncodeToString(sum[:])
+	rig.spec.envFile = filepath.Join(t.TempDir(), "app.env")
+	must(t, os.WriteFile(rig.spec.envFile, []byte("TOKEN="+pin+"\nnot a line\n"), 0o600))
+	if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://example.test/v1.tgz", version: "v1", sha256: pin, by: "test"}); err == nil {
+		t.Fatal("v1 should have failed on the bad line")
+	}
+	rec, err := readDeployRecord(rig.spec.dirs, "v1")
+	must(t, err)
+	if s := string(rec); strings.Contains(s, pin) || !strings.Contains(s, "record withheld") {
+		t.Fatalf("record = %s", s)
+	}
+}
+
+// An envelope keeps the pin, so a withheld record still says what the
+// deploy was pinned to and a rollback can carry it — unless the pin
+// equals a known value, which no envelope names (redact.go, rule 1).
+func TestDeployRecordEnvelopeKeepsThePin(t *testing.T) {
+	sum := sha256.Sum256([]byte("what CI built"))
+	pin := hex.EncodeToString(sum[:])
+	for _, tc := range []struct {
+		name, env string
+		want      bool
+	}{{"no known value", "", true}, {"pin is a known value", "TOKEN=" + pin + "\n", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := newTestRig(t)
+			rig.spec.envFile = filepath.Join(t.TempDir(), "app.env")
+			must(t, os.WriteFile(rig.spec.envFile, []byte(tc.env), 0o600))
+			rig.runner.startErr = errors.New("boom: " + strings.Repeat("x", 2*deployRecordMaxBytes))
+			if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://example.test/v1.tgz", version: "v1", sha256: pin, by: "test"}); err == nil {
+				t.Fatal("v1 should have failed")
+			}
+			rec, err := readDeployRecord(rig.spec.dirs, "v1")
+			must(t, err)
+			if s := string(rec); !strings.Contains(s, "larger than a record can be") || strings.Contains(s, pin) != tc.want {
+				t.Fatalf("envelope names the pin = %v, want %v: %s", strings.Contains(s, pin), tc.want, s)
+			}
+			if got := recordedPin(rig.spec.dirs, "v1"); (got == pin) != tc.want {
+				t.Fatalf("recordedPin = %q, want the pin %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// A pin equal to an env_file value is no name (redact.go, rule 1): the
+// record and the status keep the value redacted, the record stays in
+// the list with the placeholder where the pin was, and a rollback,
+// which can read no digest there, records the version as unpinned.
+func TestAPinEqualToAKnownValueIsStillRedacted(t *testing.T) {
+	rig := newTestRig(t)
+	sum := sha256.Sum256([]byte("a digest that is also a secret"))
+	pin := hex.EncodeToString(sum[:])
+	rig.spec.envFile = filepath.Join(t.TempDir(), "app.env")
+	must(t, os.WriteFile(rig.spec.envFile, []byte("TOKEN="+pin+"\n"), 0o600))
+	if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://example.test/v1.tgz", version: "v1", sha256: pin, by: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := readDeployRecord(rig.spec.dirs, "v1")
+	must(t, err)
+	if s := string(rec); strings.Contains(s, pin) || !strings.Contains(s, `"sha256":"[redacted:TOKEN]"`) {
+		t.Fatalf("the record must redact a pin equal to a known value: %s", s)
+	}
+	s := rig.ma.status()
+	if len(s.Deploys) != 1 || string(s.Deploys[0].SHA256) != `"[redacted:TOKEN]"` {
+		t.Fatalf("the record must stay listed with its redacted pin: %+v", s.Deploys)
+	}
+	raw, err := json.Marshal(s)
+	must(t, err)
+	if body := rig.ma.redactorFor(s).redactJSON(raw); strings.Contains(body, pin) {
+		t.Fatalf("the known value leaked through a pin: %s", body)
+	}
+	if got := recordedPin(rig.spec.dirs, "v1"); got != "" {
+		t.Fatalf("recordedPin = %q, want none: the record's pin is a placeholder", got)
+	}
+}
+
+// A record is read off disk, so its sha256 field names nothing until
+// it is a digest: a planted string of another shape is not exempt from
+// the filter's heuristics, and is no pin for a rollback to carry; a
+// pin that is not a string at all is not a record.
+func TestARecordedPinMustBeADigest(t *testing.T) {
+	rig := newTestRig(t)
+	token := "Zq7Wm2xK9pL4vB8nR3tY6zH5cJ1dF0gS" // gitleaks:allow — a made-up value for this test
+	must(t, writeDeployRecord(rig.spec.dirs, "v8", []byte(`{"version":"v8","status":"succeeded","sha256":"`+token+`"}`)))
+	must(t, writeDeployRecord(rig.spec.dirs, "v9", []byte(`{"version":"v9","status":"succeeded","sha256":1}`)))
+	s := rig.ma.status()
+	if len(s.Deploys) != 1 || s.Deploys[0].Version != "v8" {
+		t.Fatalf("only v8 is a record: %+v", s.Deploys)
+	}
+	raw, err := json.Marshal(s)
+	must(t, err)
+	if body := rig.ma.redactorFor(s).redactJSON(raw); strings.Contains(body, token) {
+		t.Fatalf("a planted non-digest pin was exempted from the filter: %s", body)
+	}
+	if got := recordedPin(rig.spec.dirs, "v8"); got != "" {
+		t.Fatalf("recordedPin = %q, want none", got)
+	}
+	// The writer records lowercase; an upper-case digest is no pin.
+	upper := strings.Repeat("AB", 32)
+	must(t, writeDeployRecord(rig.spec.dirs, "v7", []byte(`{"version":"v7","status":"succeeded","sha256":"`+upper+`"}`)))
+	if got := recordedPin(rig.spec.dirs, "v7"); got != "" {
+		t.Fatalf("recordedPin = %q, want none", got)
 	}
 }

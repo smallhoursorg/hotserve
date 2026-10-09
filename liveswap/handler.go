@@ -319,13 +319,15 @@ func (h *Handler) deployRecord(w http.ResponseWriter, ma *managedApp, version st
 		return respondJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "app has no configuration loaded"}, ma.redactorFor(statusSnapshot{}))
 	}
 	rec, err := readDeployRecord(c.spec.dirs, version)
-	// The requested version is a name the filter should let through,
-	// whether or not the status still lists it by the time it is
-	// built (a prune, a reload between the read and the response): a
-	// safe string like the versions the status names, under the same
-	// rule (redactorFor).
+	// The requested version, and the record's own pin, are names the
+	// filter should let through whether or not the status still lists
+	// them by the time it is built (a prune, a reload between the read
+	// and the response): safe strings like the versions the status
+	// names, under the same rule (redactorFor).
 	s := ma.status()
-	s.Deploys = append(s.Deploys, deploySummary{Version: version})
+	head, _ := recordHead(rec, version+".json")
+	head.Version = version
+	s.Deploys = append(s.Deploys, head)
 	switch {
 	case errors.Is(err, errNoDeployRecord):
 		return respondJSON(w, http.StatusNotFound, map[string]string{"error": fmt.Sprintf("no deploy recorded for version %s", version)}, ma.redactorFor(s))

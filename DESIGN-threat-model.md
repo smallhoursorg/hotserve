@@ -453,7 +453,8 @@ scope for the runtime model, in scope for release signing (roadmap).
   pin. Controls status, redirect targets (any https host), timing —
   and the tarball bytes, unless the pull carries `sha256`, which the
   example workflows do: then other bytes are a 422, and what remains
-  is withholding. Faces `extract.go` and the first-hop SSRF gap.
+  is withholding. The pin is kept in the version's deploy record, for
+  as long as the record is. Faces `extract.go` and the first-hop SSRF gap.
 - **T4 — Unauthenticated network attacker** on the public webhook/proxy.
   Faces the token gate — forgery needs a private key, so there is no
   guessing oracle; the realer wins are log-amplification, the CPU cost of
