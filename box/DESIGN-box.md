@@ -312,7 +312,9 @@ disk is unchanged; the result names the step (messages in "Refusals").
    `txn.json` — `{id, commit, path, signer, origin (applier|init), prev
    (the previous Caddyfile's bytes, base64), prev_sha256, new_sha256,
    diff (redacted, at most 64 KiB, cut with a note), apps, box_webhook,
-   phase}` — written
+   caddyfile_edited_out_of_band (computed at step 10, before anything is
+   replaced — a `no_change` crash after `applied.json` is rewritten
+   would otherwise lose the digest it was computed from), phase}` — written
    atomically (temporary name, rename, `fsync`) before anything else
    changes and rewritten the same way at each phase change, so there is
    no partial marker: it exists with all its fields or not at all. Its
@@ -612,8 +614,13 @@ disk is unchanged; the result names the step (messages in "Refusals").
     ages out) `404`, fails red naming the journal, which has the
     outcome. Every
     `work/` entry leaves with its result, so `work/` is empty on every
-    exit as `in/` is. Only `out/` is swept by age (results older than a
-    day), by the applier; the handler sweeps its own `stage/`.
+    exit as `in/` is. Only `out/` is swept, by the applier, and by two
+    rules at once: results older than a day go, and at most 32 results
+    are kept, oldest first to go — a count, because an OIDC holder can
+    post the already-applied `HEAD` as often as it likes and each fast
+    `no_change` is a new result, and an age alone would let a day of
+    those fill the disk or the inode table. The handler sweeps its own
+    `stage/` by the same two rules (a day, or 32 markers).
 
 Running apps are never restarted by an apply, as with any reload
 (liveswap's "reload trap"): a changed `app` block applies at the app's
@@ -688,12 +695,12 @@ Written before the code, as liveswap's deploy-record store was.
 | Path | Mode | Owner | Rule |
 |---|---|---|---|
 | `/etc/hotserve/Caddyfile` | 0644 | root:root | Written only by root: `init`, the applier, the console. Read by hotserve (serving), by the handler (signers for the pre-check) and by the applier (the signer list and the rollback copy). The conffile the package ships. |
-| `/var/lib/hotserve-box/txn.json` | 0600 | root:hotserve (born in the setgid directory; 0600 keeps it root's alone) | The transaction record, one file written atomically: `{id, commit, path, signer, origin, prev (base64 of the previous Caddyfile), prev_sha256, new_sha256, diff, apps, box_webhook, phase}` — everything a terminal result needs, so recovery reads nothing else. Written before `Caddyfile` is replaced with `phase: installing`, rewritten at each phase change (`swapped`, `applied`, `rolling_back`), removed only after the terminal result is written (step 20), whichever way the transaction ended. Its presence at startup therefore means exactly "a transaction has no terminal result yet", which the applier (step 9) and `init` settle from its `phase` before anything else; there is no partial state, since one rename makes or unmakes it. Deliberately not `/etc/hotserve/Caddyfile.prev`: `bin/push` and its sudoers line write that name, and the path unit must never fire on a legacy push. |
+| `/var/lib/hotserve-box/txn.json` | 0600 | root:hotserve (born in the setgid directory; 0600 keeps it root's alone) | The transaction record, one file written atomically: `{id, commit, path, signer, origin, prev (base64 of the previous Caddyfile), prev_sha256, new_sha256, diff, apps, box_webhook, caddyfile_edited_out_of_band, phase}` — everything a terminal result needs, so recovery reads nothing else. Written before `Caddyfile` is replaced with `phase: installing`, rewritten at each phase change (`swapped`, `applied`, `rolling_back`), removed only after the terminal result is written (step 20), whichever way the transaction ended. Its presence at startup therefore means exactly "a transaction has no terminal result yet", which the applier (step 9) and `init` settle from its `phase` before anything else; there is no partial state, since one rename makes or unmakes it. Deliberately not `/etc/hotserve/Caddyfile.prev`: `bin/push` and its sudoers line write that name, and the path unit must never fire on a legacy push. |
 | `/etc/hotserve/age/` | 0700 | root:root | Reserved, empty, created by `init`; the secrets PR puts the box's age key here. |
 | `/var/lib/hotserve-box/` | 2750 | root:hotserve | Created by `tmpfiles.d`, not by either process. Setgid, so `applied.json` written here by root is born group `hotserve` without a `chown` (the unit has no `CAP_CHOWN`, and root is not in the group). Not under `/var/lib/hotserve`, which is 0750 hotserve:hotserve. Joins `sandboxHotservePaths` (liveswap/sandbox.go): never a bind source. |
 | `…/stage/` | 0700 | hotserve:hotserve | The handler assembles a bundle here. Not watched. |
 | `…/stage/lock` | 0600 | hotserve:hotserve | The admission lock (step 2): a non-blocking `flock` held from the pending check through the `.auth` write, so admission is atomic across concurrent requests and across the reload. Distinct from root's `lock`, which serialises applies. |
-| `…/stage/<id>.auth` | 0600 | hotserve:hotserve | `{sha256 of the poll secret issued for <id>, posted}`, written only after `in/<id>.tar` is in place (step 7). Two jobs: it is the *pending* marker (step 2) — a push is pending while this exists, is under fifteen minutes old, and no terminal `out/<id>.json` does; a bundle still in `in/` blocks admission on its own, with no age-out, whatever this marker says — and it authorises `GET /?result=<id>` for the bearer of that secret, for fifteen minutes from `posted`, whatever the running `deploy_trust` says ("Handler contract"). Not removed on a read, because a read is not a delivery: the response can fail after the file is gone, and the retry must still be authorised. Swept by the handler once `posted` is a day old and no `out/<id>.json` remains, the same age at which root sweeps results, so a `404` means swept, never "not yet". A digest, never the token; root has no use for it. |
+| `…/stage/<id>.auth` | 0600 | hotserve:hotserve | `{sha256 of the poll secret issued for <id>, posted}`, written only after `in/<id>.tar` is in place (step 7). Two jobs: it is the *pending* marker (step 2) — a push is pending while this exists, is under fifteen minutes old, and no terminal `out/<id>.json` does; a bundle still in `in/` blocks admission on its own, with no age-out, whatever this marker says — and it authorises `GET /?result=<id>` for the bearer of that secret, for fifteen minutes from `posted`, whatever the running `deploy_trust` says ("Handler contract"). Not removed on a read, because a read is not a delivery: the response can fail after the file is gone, and the retry must still be authorised. Swept by the handler once `posted` is a day old and no `out/<id>.json` remains, or when more than 32 exist (oldest first) — the same two rules root applies to results, so a `404` means swept, never "not yet", and a holder of a valid token who posts `HEAD` in a loop fills neither directory. A digest, never the token; root has no use for it. |
 | `…/in/` | 0770 | root:hotserve | The handler renames a complete bundle in; the applier renames everything out before reading anything. `DirectoryNotEmpty=` watches it, so it must be empty on every applier exit, or the path unit re-triggers until its start-rate limit fails it. |
 | `…/in/<id>.tar` | 0644 | hotserve:hotserve | `<id>` matches `^[0-9a-f]{32}$`: 16 hex of the handler's nanosecond clock, then 16 random (step 9); a name that does not match — or an entry that is not a regular file at all — is moved to `work/` and refused like any other, which the unit's `CAP_DAC_OVERRIDE`/`CAP_FOWNER` exist to guarantee. The content is a public commit; 0644. |
 | `…/work/` | 0700 | root:root | Bundles land here by rename and are read once. Never a source of truth after that read. |
