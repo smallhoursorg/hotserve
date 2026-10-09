@@ -100,7 +100,16 @@ type frame struct {
 	kind  blockKind
 	inBox bool  // every token inside the box block is held to the placeholder rule
 	site  *site // the site this block is inside, if any
+	// dispatch is whether Caddy reads this block's lines as directives:
+	// a site's body, and the bodies of the few directives that nest
+	// directives. Inside any other block — `header { … }`, a matcher,
+	// a handler's options — the first token of a line is a field, not
+	// a directive, and `box_webhook` there is not the webhook.
+	dispatch bool
 }
+
+// nesting are the directives whose block is more directives.
+var nesting = map[string]bool{"route": true, "handle": true, "handle_path": true, "handle_errors": true}
 
 type site struct {
 	addresses []string
@@ -161,7 +170,7 @@ func walk(input []byte) (*Shape, error) {
 			default:
 				s := &site{addresses: addrs}
 				sites = append(sites, s)
-				f.kind, f.site = kindSite, s
+				f.kind, f.site, f.dispatch = kindSite, s, true
 			}
 			stack = append(stack, f)
 			continue
@@ -218,7 +227,7 @@ func walk(input []byte) (*Shape, error) {
 		if isClose(first) {
 			continue
 		}
-		child := frame{kind: kindOther, inBox: top.inBox, site: top.site}
+		child := frame{kind: kindOther, inBox: top.inBox, site: top.site, dispatch: top.dispatch && nesting[first.Text]}
 		switch top.kind {
 		case kindGlobal:
 			if first.Text == "box" {
@@ -245,7 +254,7 @@ func walk(input []byte) (*Shape, error) {
 		case kindTrust:
 			hasTrust = true // a line inside the deploy_trust block
 		case kindSite, kindOther:
-			if first.Text == "box_webhook" && top.site != nil {
+			if first.Text == "box_webhook" && top.site != nil && top.dispatch {
 				top.site.webhook = true
 			}
 		}

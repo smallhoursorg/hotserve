@@ -86,7 +86,8 @@ FUZZ_MODULES = box liveswap penaltybox
 fuzz-list:
 	@for m in $(FUZZ_MODULES); do \
 		found=0; \
-		for p in $$($(COMPOSE) run --rm -T -w /src/$$m dev go list -f '{{.Dir}}' ./...); do \
+		pkgs=$$($(COMPOSE) run --rm -T -w /src/$$m dev go list -f '{{.Dir}}' ./...) || { echo "$$pkgs"; echo "go list failed in $$m"; exit 1; }; \
+		for p in $$pkgs; do \
 			rel=$${p#/src/}; \
 			listed=$$($(COMPOSE) run --rm -T -w $$p dev go test -list '^Fuzz' .) || { echo "$$listed"; echo "go test -list failed in $$rel"; exit 1; }; \
 			targets=$$(echo "$$listed" | grep '^Fuzz'); \
@@ -104,7 +105,8 @@ fuzz-list:
 
 fuzz:
 	for m in $(FUZZ_MODULES); do \
-		for p in $$($(COMPOSE) run --rm -T -w /src/$$m dev go list -f '{{.Dir}}' ./...); do \
+		pkgs=$$($(COMPOSE) run --rm -T -w /src/$$m dev go list -f '{{.Dir}}' ./...) || { echo "$$pkgs"; echo "go list failed in $$m"; exit 1; }; \
+		for p in $$pkgs; do \
 			listed=$$($(COMPOSE) run --rm -T -w $$p dev go test -list '^Fuzz' .) || { echo "$$listed"; echo "go test -list failed in $${p#/src/}"; exit 1; }; \
 			targets=$$(echo "$$listed" | grep '^Fuzz'); \
 			for t in $$targets; do \

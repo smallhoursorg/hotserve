@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"golang.org/x/crypto/ssh"
@@ -429,6 +430,7 @@ func TestParseSigner(t *testing.T) {
 		"sk type mismatch":       {"a", "ssh-ed25519", skB64},
 		"not base64":             {"a", edType, "AAAA!"},
 		"base64 of junk":         {"a", edType, base64.StdEncoding.EncodeToString([]byte("junk"))},
+		"principal too long":     {strings.Repeat("a", MaxPrincipal+1), edType, edB64},
 		"empty key":              {"a", edType, ""},
 	} {
 		if _, err := ParseSigner(bad[0], bad[1], bad[2]); err == nil {
@@ -454,6 +456,26 @@ func TestParseSigner(t *testing.T) {
 	}
 	if !(Signers{a, b}).Has("bob") || (Signers{a, b}).Has("carol") || !(Signers{a}).HasKey(a.Key) || (Signers{a}).HasKey(b.Key) {
 		t.Fatal("Has")
+	}
+	// A principal at the bound passes; the list check is linear, so a
+	// list as long as a 1 MiB Caddyfile could hold is quick.
+	if _, err := ParseSigner(strings.Repeat("a", MaxPrincipal), edType, edB64); err != nil {
+		t.Fatal(err)
+	}
+	many := make(Signers, 0, 10_000)
+	for i := range cap(many) {
+		many = append(many, Signer{Principal: "p" + strconv.Itoa(i), Type: edType, Key: []byte(strconv.Itoa(i)), B64: edB64})
+	}
+	start := time.Now()
+	if _, err := many.AllowedSigners(); err != nil {
+		t.Fatal(err)
+	}
+	many = append(many, Signer{Principal: "again", Type: edType, Key: []byte("7")})
+	if _, err := many.AllowedSigners(); err == nil || !strings.Contains(err.Error(), "signer p7 and signer again are the same key") {
+		t.Fatal(err)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatalf("duplicate detection took %s", time.Since(start))
 	}
 }
 

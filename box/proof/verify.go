@@ -60,6 +60,16 @@ const (
 // key that does not verify over the payload is refused too: the commit
 // was altered after it was signed.
 func (v *Verifier) Verify(ctx context.Context, c *Commit, signers Signers) (string, error) {
+	allowed, err := signers.AllowedSigners()
+	if err != nil {
+		return "", err
+	}
+	return v.verify(ctx, c, signers, allowed)
+}
+
+// verify is Verify with the allowed_signers file already rendered, so
+// a chain renders it once rather than once per commit.
+func (v *Verifier) verify(ctx context.Context, c *Commit, signers Signers, allowed []byte) (string, error) {
 	switch c.Kind {
 	case Unsigned:
 		return "", refuse("%s is not signed; the box applies only commits signed by a key in its signer list", c.ID)
@@ -68,10 +78,6 @@ func (v *Verifier) Verify(ctx context.Context, c *Commit, signers Signers) (stri
 	case OtherSig:
 		return "", refuse("%s is signed, but not by an SSH key in the Caddyfile this box runs", c.ID)
 	case SSHSig:
-	}
-	allowed, err := signers.AllowedSigners()
-	if err != nil {
-		return "", err
 	}
 	keygen, err := v.program()
 	if err != nil {

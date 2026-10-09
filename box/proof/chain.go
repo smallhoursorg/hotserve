@@ -79,16 +79,27 @@ func VerifyChain(ctx context.Context, v *Verifier, chain []*Commit, installed, i
 	}
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
+	// The allowed_signers files are rendered once for the chain.
+	allowedInstalled, err := installed.AllowedSigners()
+	if err != nil {
+		return "", err
+	}
+	var allowedIncoming []byte
 	principal := ""
 	for i, c := range chain {
-		p, err := v.Verify(ctx, c, installed)
+		p, err := v.verify(ctx, c, installed, allowedInstalled)
 		if err != nil {
 			var r *Refusal
 			if i == 0 || !errors.As(err, &r) {
 				return "", err
 			}
 			if c.Kind == SSHSig {
-				if name, err := v.Verify(ctx, c, incoming); err == nil {
+				if allowedIncoming == nil {
+					if allowedIncoming, err = incoming.AllowedSigners(); err != nil {
+						return "", err
+					}
+				}
+				if name, err := v.verify(ctx, c, incoming, allowedIncoming); err == nil {
 					return "", refuse("%s, between the commit this box runs and %s, is signed by a key this box did not list when it last applied (%s); the commit that adds the key must apply first — force main back to it, let the box apply it, then push the rest",
 						c.ID, chain[0].ID, name)
 				}

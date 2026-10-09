@@ -35,12 +35,20 @@ var keyTypes = map[string]bool{
 	"ssh-rsa":                            true,
 }
 
+// MaxPrincipal bounds a principal: ssh-keygen prints the matching
+// principal on stdout, which the verifier caps, and a name longer than
+// this would be cut there and never match its own line.
+const MaxPrincipal = 256
+
 // ParseSigner checks one signer line's three arguments: the principal's
-// charset, the key type against the list, and that the base64 decodes
-// to a public key whose wire type is the declared one.
+// charset and length, the key type against the list, and that the
+// base64 decodes to a public key whose wire type is the declared one.
 func ParseSigner(principal, keyType, b64 string) (Signer, error) {
 	if !principalRE.MatchString(principal) {
 		return Signer{}, fmt.Errorf("signer principal %q may only contain letters, digits and . _ @ + -", Bound(principal))
+	}
+	if len(principal) > MaxPrincipal {
+		return Signer{}, fmt.Errorf("signer principal %q is longer than %d bytes", Bound(principal), MaxPrincipal)
 	}
 	if !keyTypes[keyType] {
 		return Signer{}, fmt.Errorf("signer %s: key type %q is not one of ssh-ed25519, ecdsa-sha2-nistp256/384/521, sk-ssh-ed25519@openssh.com, sk-ecdsa-sha2-nistp256@openssh.com, ssh-rsa", principal, Bound(keyType))
@@ -68,12 +76,12 @@ type Signers []Signer
 // principal for one signature, and the box names exactly one.
 func (s Signers) AllowedSigners() ([]byte, error) {
 	var out bytes.Buffer
-	for i, a := range s {
-		for _, b := range s[:i] {
-			if bytes.Equal(a.Key, b.Key) {
-				return nil, fmt.Errorf("signer %s and signer %s are the same key", b.Principal, a.Principal)
-			}
+	seen := make(map[string]string, len(s)) // key bytes → principal; linear, since a file may list thousands and a chain asks per commit
+	for _, a := range s {
+		if first, dup := seen[string(a.Key)]; dup {
+			return nil, fmt.Errorf("signer %s and signer %s are the same key", first, a.Principal)
 		}
+		seen[string(a.Key)] = a.Principal
 		fmt.Fprintf(&out, "%s namespaces=\"git\" %s %s\n", a.Principal, a.Type, a.B64)
 	}
 	return out.Bytes(), nil
