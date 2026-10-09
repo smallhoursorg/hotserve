@@ -191,8 +191,15 @@ disk is unchanged; the result names the step (messages in "Refusals").
 **In the applier (`hotserve box apply`, root, one shot, path-triggered):**
 
 9. **Take.** Under an exclusive lock, every entry of `in/` is renamed
-   into `work/`, oldest first by id, so `in/` is empty before any work
-   starts and on every exit, whatever happens. Each bundle is opened
+   into `work/` and then processed in lexical order of id. An id is 32
+   lowercase hex characters: the first 16 are the handler's clock in
+   nanoseconds when it accepted the request, the last 16 random, so
+   lexical order is arrival order by the handler's clock. The order
+   matters only when more than one bundle is pending (a crash left
+   some behind; the handler admits one at a time) and only for which
+   is tried first — the descent check (step 14) decides each outcome
+   regardless. `in/` is empty before any work starts and on every
+   exit, whatever happens. Each bundle is opened
    `O_NOFOLLOW|O_NONBLOCK`, checked `S_ISREG` and under the cap, read
    once into memory, and never touched on disk again: a writer holding
    a descriptor from before the rename cannot change what was
@@ -218,8 +225,13 @@ disk is unchanged; the result names the step (messages in "Refusals").
     OpenPGP `gpgsig`, a `gpgsig-sha256`, or a key not listed is refused
     by name — the OpenPGP case tells the operator GitHub's merge button
     signed it.
-13. **The file is the committed file.** `sha1("commit <n>\0" + raw)`
-    must be the id the token and the bundle name; `sha1("tree <n>\0" +
+13. **The file is the committed file.** HEAD's id is computed, never
+    read: `sha1("commit <n>\0" + raw)` over the bundled `commit`
+    object. It is the id the result and `applied.json` carry, the id
+    the token's `sha` claim must equal when that claim is present
+    (step 4, in the handler), and the id the chain (step 14) starts
+    from; the bundle's own name is the 32-hex request id and names no
+    commit. `sha1("tree <n>\0" +
     raw)` of the root tree must be the commit's `tree`; the path's
     components (the bundle's `path`, a hint only — it carries no
     trust, and is checked to be safe components before use) are walked
@@ -285,15 +297,20 @@ disk is unchanged; the result names the step (messages in "Refusals").
     file stays readable through the reload, so the handler returns
     within one poll interval and a reload that has already begun waits
     that long for the request, not the handler's whole timeout. Every
-    refusal precedes `verified`; after it the only phases are
-    `applied`, `no_change`, `rolled_back` and `unknown`.
+    refusal precedes `verified`, as does `no_change` (step 16, which
+    writes its terminal result directly); after `verified` the only
+    phases are `applied`, `failed`, `rolled_back` and `unknown`, each
+    terminal, each saying what is on disk and what is running.
 18. **Install.** First the rollback copy: the buffer from step 10 is
     written to a temporary name and renamed to `Caddyfile.prev`, and
     only once that rename has returned is the new file written to a
     temporary name in `/etc/hotserve/` (mode 0644, root) and renamed
     over `Caddyfile`. A failure writing either temporary (`ENOSPC`,
-    say) leaves `Caddyfile` untouched and the result `refused`; the
-    live file never changes without its restore copy already in place.
+    say) leaves `Caddyfile` untouched, removes whatever temporary was
+    made, and ends the push as `failed` — "the install failed before
+    the Caddyfile changed; nothing changed" — a terminal phase after
+    `verified`, not a refusal; the live file never changes without
+    its restore copy already in place.
 19. **Reload.** `systemctl reload hotserve` — which runs the unit's
     `ExecReload` (`hotserve reload --config /etc/hotserve/Caddyfile
     --force`) as the hotserve user — with no applier-side timeout
@@ -358,7 +375,7 @@ Written before the code, as liveswap's deploy-record store was.
 | `/var/lib/hotserve-box/` | 0750 | root:hotserve | Created by `tmpfiles.d`, not by either process. Not under `/var/lib/hotserve`, which is 0750 hotserve:hotserve and which a root unit without `CAP_DAC_OVERRIDE` cannot traverse. Joins `sandboxHotservePaths` (liveswap/sandbox.go): never a bind source. |
 | `…/stage/` | 0700 | hotserve:hotserve | The handler assembles a bundle here. Not watched. |
 | `…/in/` | 0770 | root:hotserve | The handler renames a complete bundle in; the applier renames everything out before reading anything. `DirectoryNotEmpty=` watches it, so it must be empty on every applier exit, or the path unit re-triggers until its start-rate limit fails it. |
-| `…/in/<id>.tar` | 0644 | hotserve:hotserve | `<id>` matches `^[0-9a-f]{32}$`. The content is a public commit; 0644 so root reads it without DAC capabilities. |
+| `…/in/<id>.tar` | 0644 | hotserve:hotserve | `<id>` matches `^[0-9a-f]{32}$`: 16 hex of the handler's nanosecond clock, then 16 random (step 9); a name that does not match is moved to `work/` and refused like any other. The content is a public commit; 0644 so root reads it without DAC capabilities. |
 | `…/work/` | 0700 | root:root | Bundles land here by rename and are read once. Never a source of truth after that read. |
 | `/tmp/box-verify-<id>/` (the unit's `PrivateTmp`) | 0755 / files 0644 | root:root | The payload, the signature and the generated allowed_signers for `ssh-keygen` running as uid 65534, which cannot traverse `work/` (0700) or `/var/lib/hotserve-box` (0750 root:hotserve). The private `/tmp` is gone with the unit. |
 | `…/out/` | 0750 | root:hotserve | Results, written to a temporary name and renamed so the handler never reads a partial file. Root sweeps by age; hotserve only reads. |
@@ -555,11 +572,16 @@ nothing more than they do for a deploy.
   `hotserve init` is the way back.
 
 Non-refusal phases: `no_change` (`the box already runs this
-Caddyfile`), `verified`, `applied` (`loaded; running apps are not
-restarted`), `rolled_back` (`the reload failed; the previous Caddyfile
+Caddyfile`; terminal, no `verified` before it), `verified` (the one
+non-terminal phase), and the four terminal phases that follow it:
+`applied` (`loaded; running apps are not restarted`), `failed` (`the
+install failed before the Caddyfile changed: <error>; nothing
+changed`), `rolled_back` (`the reload failed; the previous Caddyfile
 is back and running — journalctl -u hotserve -n 50 on the box says
 why`), `unknown` (`the reload failed and so did the reload of the
 previous file; the previous file is on disk; journalctl -u hotserve`).
+The workflow polls until the phase is one of the terminal ones and
+exits non-zero for every terminal phase but `applied` and `no_change`.
 
 ## At 3am
 
