@@ -502,13 +502,22 @@ it) stays until secrets ride the same channel, so
 the administrator account itself remains until then. A leaked PAT, a
 stolen GitHub session or an OAuth app with `contents:write` can push
 to `main` and cannot produce the signature, so it cannot change the
-box: its commit is refused on its own push and, because every commit
-on the chain is checked, cannot be carried in by the next signed one
-(the merge button cannot either: a squash is GitHub-GPG-signed, a
-rebase unsigned). What such a push *can* do is stop every later push
-until it is rebased away — loud and recoverable. A compromised action
-holding the repository's OIDC token can present only commits a signer
-already signed, cannot replay an older one, and cannot land a sibling
+box with anything a signer did not sign: its own commit is refused on
+its own push and, because every commit on the chain is checked, cannot
+be carried in by the next signed one (the merge button cannot either:
+a squash is GitHub-GPG-signed, a rebase unsigned). What such a push
+*can* do is stop every later push until it is rebased away — loud and
+recoverable — and, the residual that remains, fast-forward onto `main`
+a branch every commit of which a signer already signed: a signer's
+own unmerged, signed configuration, which the box then applies because
+it is exactly what the rule asks for. The box repository's README
+therefore says that configuration not yet meant to run is committed
+unsigned or lives in a fork; an unsigned branch is one the chain rule
+refuses whoever lands it. A compromised action holding the
+repository's OIDC token can present only commits a signer already
+signed, cannot replay an older one — though replaying `HEAD` after a
+console edit reinstalls HEAD's file and so reverts that edit, which is
+the stated 3am contract — and cannot land a sibling
 box's file.
 
 What it changes for T5, honestly. The Caddyfile was root-owned before
@@ -594,11 +603,13 @@ scope for the runtime model, in scope for release signing (roadmap).
   GitHub App with `contents:write`); a compromised Action in that
   repository, holding its OIDC token; a compromised signer's laptop.
   The asset is the configuration at rest — asset 5, the one that
-  survives a restart. The first can push and cannot sign, and what it
-  pushes is refused on every later push too, until removed; the second
-  can present only what a signer signed, in order, for this box; the
-  third is the operator, bounded only by a hardware key's touch. Faces
-  `box/` ("Config webhook").
+  survives a restart. The first can push and cannot sign: what it
+  writes is refused on every later push too, until removed, and what it
+  can land is only a branch a signer fully signed already (the README's
+  rule against signed unmerged config is the answer); the second can
+  present only what a signer signed, in order, for this box, including
+  `HEAD` again after a console edit; the third is the operator, bounded
+  only by a hardware key's touch. Faces `box/` ("Config webhook").
 
 For **T2**: deploy-arbitrary-code (a push is contained by nothing but
 the claim scope; a pull additionally by the allowlist); deliberate
@@ -612,9 +623,10 @@ For **T5**: total, by definition — the containment question is
 root-vs-not-root, and `box` adds a root process fed by the supervisor
 to that question (the "Config webhook" section says what keeps it
 closed). For **T6**: a push credential gets a red run and a stalled
-`main` until its commit is removed; an OIDC holder gets a replay of
-`HEAD` (a `no_change`), one pending bundle at a time, and the
-handler's validate on a signer's file; a signer's software key gets
+`main` until its commit is removed, or a signer's own signed branch
+landed early; an OIDC holder gets a replay of `HEAD` (a `no_change`,
+or the undoing of a console edit), one pending bundle at a time, and
+the handler's validate on a signer's file; a signer's software key gets
 the box.
 
 ## The shared-UID rule
