@@ -1,0 +1,13 @@
+# box1, version 0
+{
+	box {
+		deploy_trust github {
+			audience hotserve
+		}
+		signer alice@example.com ssh-ed25519 AAAA
+	}
+}
+
+deploy.example.com {
+	box_webhook
+}

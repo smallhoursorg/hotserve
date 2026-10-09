@@ -1,0 +1,450 @@
+package proof
+
+// Hand-made inputs: what git would never write, which the parsers must
+// refuse by name, and the fixed ids that pin the hashing.
+
+import (
+	"bytes"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
+	"encoding/base64"
+	"encoding/hex"
+	"strings"
+	"testing"
+	"unicode/utf8"
+
+	"golang.org/x/crypto/ssh"
+)
+
+const (
+	emptyTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+	emptyBlob = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+	zeroID    = "0000000000000000000000000000000000000000"
+)
+
+// commitObject is a commit as git lays one out, with the headers given
+// after tree and parents, and the message.
+func commitObject(tree string, parents []string, headers []string, msg string) []byte {
+	var b strings.Builder
+	b.WriteString("tree " + tree + "\n")
+	for _, p := range parents {
+		b.WriteString("parent " + p + "\n")
+	}
+	b.WriteString("author Alice <alice@example.com> 1791000000 +0000\n")
+	b.WriteString("committer Alice <alice@example.com> 1791000000 +0000\n")
+	for _, h := range headers {
+		b.WriteString(h + "\n")
+	}
+	b.WriteString("\n" + msg)
+	return []byte(b.String())
+}
+
+// gpgsigHeader folds a signature into a gpgsig header.
+func gpgsigHeader(sig string) string {
+	lines := strings.Split(strings.TrimSuffix(sig, "\n"), "\n")
+	return "gpgsig " + strings.Join(lines, "\n ")
+}
+
+const sshArmor = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQ==\n-----END SSH SIGNATURE-----\n"
+const pgpArmor = "-----BEGIN PGP SIGNATURE-----\n\niQEzBAABCAAdFiEE\n=abcd\n-----END PGP SIGNATURE-----\n"
+
+func TestObjectIDPins(t *testing.T) {
+	if got := ObjectID("tree", nil); got != emptyTree {
+		t.Fatalf("empty tree: %s", got)
+	}
+	if got := ObjectID("blob", nil); got != emptyBlob {
+		t.Fatalf("empty blob: %s", got)
+	}
+	// `git hash-object` of "hello\n".
+	if got := ObjectID("blob", []byte("hello\n")); got != "ce013625030ba8dba906f756967f9e9ca394464a" {
+		t.Fatalf("hello blob: %s", got)
+	}
+}
+
+func TestParseCommit(t *testing.T) {
+	unsigned := commitObject(emptyTree, []string{zeroID}, nil, "msg\n")
+	c, err := ParseCommit(unsigned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ID != ObjectID("commit", unsigned) || c.Tree != emptyTree || len(c.Parents) != 1 || c.Parents[0] != zeroID || c.Kind != Unsigned || c.Signature != nil {
+		t.Fatalf("%+v", c)
+	}
+	if !bytes.Equal(c.Payload, unsigned) {
+		t.Fatal("an unsigned commit's payload is the object")
+	}
+
+	sshSigned := commitObject(emptyTree, nil, []string{gpgsigHeader(sshArmor)}, "msg\n")
+	c, err = ParseCommit(sshSigned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Kind != SSHSig || string(c.Signature) != sshArmor {
+		t.Fatalf("%v %q", c.Kind, c.Signature)
+	}
+	if !bytes.Equal(c.Payload, commitObject(emptyTree, nil, nil, "msg\n")) {
+		t.Fatalf("payload %q", c.Payload)
+	}
+	if !bytes.Equal(reassemble(c), sshSigned) {
+		t.Fatal("reassemble")
+	}
+	// A header after the signature stays in the payload, in place.
+	c, err = ParseCommit(commitObject(emptyTree, nil, []string{gpgsigHeader(sshArmor), "encoding UTF-8"}, "msg\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(c.Payload, commitObject(emptyTree, nil, []string{"encoding UTF-8"}, "msg\n")) {
+		t.Fatalf("payload %q", c.Payload)
+	}
+	// The PGP armor's blank line is a ` ` continuation, not the
+	// separator; the kind is OpenPGP.
+	c, err = ParseCommit(commitObject(emptyTree, nil, []string{gpgsigHeader(pgpArmor)}, "msg\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Kind != OpenPGPSig || string(c.Signature) != pgpArmor {
+		t.Fatalf("%v %q", c.Kind, c.Signature)
+	}
+	c, err = ParseCommit(commitObject(emptyTree, nil, []string{gpgsigHeader("-----BEGIN SIGNED MESSAGE-----\nMIIB\n-----END SIGNED MESSAGE-----\n")}, "msg\n"))
+	if err != nil || c.Kind != OtherSig {
+		t.Fatalf("%v %v", c, err)
+	}
+	// A mergetag header with continuation lines, kept whole.
+	merge := commitObject(emptyTree, []string{zeroID, zeroID}, []string{"mergetag object " + zeroID + "\n type commit\n tag v1", gpgsigHeader(sshArmor)}, "Merge tag 'v1'\n")
+	c, err = ParseCommit(merge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Parents) != 2 || c.Kind != SSHSig || !bytes.Equal(reassemble(c), merge) {
+		t.Fatalf("%+v", c)
+	}
+	// An empty message: the separator is the object's end.
+	if _, err := ParseCommit(commitObject(emptyTree, nil, nil, "")); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, in := range map[string][]byte{
+		"empty":                    {},
+		"no separator":             []byte("tree " + emptyTree + "\nauthor a\n"),
+		"first header not tree":    []byte("parent " + zeroID + "\ntree " + emptyTree + "\n\nm"),
+		"continuation first":       []byte(" tree " + emptyTree + "\n\nm"),
+		"second tree":              commitObject(emptyTree, nil, []string{"tree " + emptyTree}, "m"),
+		"tree id short":            []byte("tree abc\n\nm"),
+		"tree id upper":            []byte("tree " + strings.ToUpper(emptyTree) + "\n\nm"),
+		"parent id short":          commitObject(emptyTree, []string{"abc"}, nil, "m"),
+		"two gpgsig":               commitObject(emptyTree, nil, []string{gpgsigHeader(sshArmor), gpgsigHeader(sshArmor)}, "m"),
+		"header name with control": []byte("tree " + emptyTree + "\n\x01 x\n\nm"),
+		"empty header name":        []byte("tree " + emptyTree + "\n\x00\n\nm"),
+		"too large":                append(commitObject(emptyTree, nil, nil, ""), bytes.Repeat([]byte("x"), MaxCommit)...),
+	} {
+		_, err := ParseCommit(in)
+		refusalContaining(t, err, "bundle: commit")
+		if name == "too large" && !strings.Contains(err.Error(), "64 KiB") {
+			t.Fatal(err)
+		}
+	}
+	// SHA-256 repositories, three ways.
+	id64 := strings.Repeat("ab", 32)
+	for _, in := range [][]byte{
+		[]byte("tree " + id64 + "\n\nm"),
+		commitObject(emptyTree, []string{id64}, nil, "m"),
+		commitObject(emptyTree, nil, []string{"gpgsig-sha256 -----BEGIN SSH SIGNATURE-----\n x\n -----END SSH SIGNATURE-----"}, "m"),
+	} {
+		_, err := ParseCommit(in)
+		refusalContaining(t, err, ObjectID("commit", in)+" is in a SHA-256 repository, which the box does not read")
+	}
+}
+
+// treeObject is a tree as git lays one out.
+func treeObject(entries ...Entry) []byte {
+	var b bytes.Buffer
+	for _, e := range entries {
+		id, err := hex.DecodeString(e.ID)
+		if err != nil {
+			panic(err)
+		}
+		b.WriteString(e.Mode + " " + e.Name + "\x00")
+		b.Write(id)
+	}
+	return b.Bytes()
+}
+
+func TestParseTree(t *testing.T) {
+	tr, err := ParseTree(nil)
+	if err != nil || tr.ID != emptyTree || len(tr.Entries) != 0 {
+		t.Fatalf("%v %v", tr, err)
+	}
+	raw := treeObject(Entry{ModeFile, "Caddyfile", emptyBlob}, Entry{ModeDir, "dir", emptyTree}, Entry{ModeSymlink, "link", emptyBlob}, Entry{ModeSubmodule, "sub", zeroID}, Entry{ModeExecutable, "run", emptyBlob})
+	tr, err = ParseTree(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tr.Entries) != 5 || tr.Entries[0] != (Entry{ModeFile, "Caddyfile", emptyBlob}) || tr.Entries[3] != (Entry{ModeSubmodule, "sub", zeroID}) || tr.ID != ObjectID("tree", raw) {
+		t.Fatalf("%+v", tr)
+	}
+	for name, in := range map[string][]byte{
+		"no space":        []byte("100644"),
+		"no nul":          []byte("100644 x"),
+		"short id":        []byte("100644 x\x00abc"),
+		"zero-padded":     treeObject(Entry{"040000", "d", emptyTree}),
+		"unknown mode":    treeObject(Entry{"100664", "x", emptyBlob}),
+		"empty name":      treeObject(Entry{ModeFile, "", emptyBlob}),
+		"dot":             treeObject(Entry{ModeFile, ".", emptyBlob}),
+		"dotdot":          treeObject(Entry{ModeDir, "..", emptyTree}),
+		"slash":           treeObject(Entry{ModeFile, "a/b", emptyBlob}),
+		"twice":           treeObject(Entry{ModeFile, "x", emptyBlob}, Entry{ModeDir, "x", emptyTree}),
+		"trailing":        append(treeObject(Entry{ModeFile, "x", emptyBlob}), ' '),
+		"larger than cap": bytes.Repeat([]byte("x"), MaxTree+1),
+	} {
+		if _, err := ParseTree(in); err == nil {
+			t.Errorf("%s: parsed", name)
+		} else {
+			refusalContaining(t, err, "bundle: ")
+		}
+	}
+}
+
+func TestSplitPath(t *testing.T) {
+	for _, ok := range []string{"Caddyfile", "box1/Caddyfile", "a/b/c", "prod/box 1/Caddyfile", "x\\y", strings.Repeat("a/", MaxDepth-1) + "a", strings.Repeat("a", MaxPath)} {
+		if _, err := SplitPath(ok); err != nil {
+			t.Errorf("%q: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "/", "/box1/Caddyfile", "box1/", "box1//Caddyfile", "./Caddyfile", "box1/./Caddyfile", "../Caddyfile", "box1/../box2/Caddyfile", "a\x00b", "a\nb", "a\x7fb", "box1/Caddyfile\n", strings.Repeat("a/", MaxDepth) + "a", strings.Repeat("a", MaxPath+1)} {
+		_, err := SplitPath(bad)
+		refusalContaining(t, err, "bundle: path is not a relative path of safe components")
+	}
+}
+
+func TestProveFileHandMade(t *testing.T) {
+	file := []byte("content\n")
+	blob := ObjectID("blob", file)
+	inner := treeObject(Entry{ModeFile, "Caddyfile", blob})
+	innerID := ObjectID("tree", inner)
+	root := treeObject(Entry{ModeDir, "box1", innerID})
+	rootID := ObjectID("tree", root)
+	trees := map[string]*Tree{}
+	for _, raw := range [][]byte{inner, root} {
+		tr, err := ParseTree(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		trees[tr.ID] = tr
+	}
+	c, err := ParseCommit(commitObject(rootID, nil, nil, "m\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ProveFile(c, trees, "box1/Caddyfile", file); err != nil {
+		t.Fatal(err)
+	}
+	refusalContaining(t, ProveFile(c, trees, "box1/Caddyfile", []byte("content")), "the file sent is not box1/Caddyfile in "+c.ID)
+	refusalContaining(t, ProveFile(c, trees, "Caddyfile", file), "the file sent is not")
+	refusalContaining(t, ProveFile(c, trees, "box1", file), "box1 in "+c.ID+" is not a regular file")
+	refusalContaining(t, ProveFile(c, trees, "box1/Caddyfile/x", file), "the file sent is not")
+	refusalContaining(t, ProveFile(c, trees, "../x", file), "bundle: path is not a relative path of safe components")
+	// A path with a rune that is not printable (a soft hyphen) is
+	// quoted; a control byte never gets this far (SplitPath).
+	softHyphen := string(rune(0xad))
+	refusalContaining(t, ProveFile(c, trees, "box1/x"+softHyphen+"y", file), "the file sent is not \"box1/x\\"+"u00ady\" in")
+	long := strings.Repeat("a", 400)
+	err = ProveFile(c, trees, long, file)
+	refusalContaining(t, err, strings.Repeat("a", maxBound)+"...")
+	if strings.Contains(err.Error(), long) {
+		t.Fatal("not bounded")
+	}
+	// Deep enough to be legal, with every tree present.
+	deepTrees := map[string]*Tree{}
+	cur := blob
+	mode := ModeFile
+	var comps []string
+	for i := 0; i < MaxDepth; i++ {
+		name := "d" + itoa(i)
+		raw := treeObject(Entry{mode, name, cur})
+		tr, err := ParseTree(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		deepTrees[tr.ID] = tr
+		comps = append([]string{name}, comps...)
+		cur, mode = tr.ID, ModeDir
+	}
+	deep, err := ParseCommit(commitObject(cur, nil, nil, "m\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ProveFile(deep, deepTrees, strings.Join(comps, "/"), file); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestChainHandMade(t *testing.T) {
+	// A straight line of unsigned commits, c0 ← c1 ← … ← cN.
+	line := func(n int) ([]*Commit, map[string]*Commit) {
+		var cs []*Commit
+		all := map[string]*Commit{}
+		parent := ""
+		for i := 0; i <= n; i++ {
+			var parents []string
+			if parent != "" {
+				parents = []string{parent}
+			}
+			c, err := ParseCommit(commitObject(emptyTree, parents, nil, "c"+itoa(i)+"\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			cs = append(cs, c)
+			all[c.ID] = c
+			parent = c.ID
+		}
+		return cs, all
+	}
+	cs, all := line(3)
+	chain, err := Chain(cs[3], all, cs[0].ID)
+	if err != nil || len(chain) != 3 || chain[0] != cs[3] || chain[2] != cs[1] {
+		t.Fatalf("%v %v", chain, err)
+	}
+	if chain, err := Chain(cs[3], all, cs[3].ID); err != nil || chain != nil {
+		t.Fatalf("%v %v", chain, err)
+	}
+	// Root reached: a baseline that is not in the history.
+	_, err = Chain(cs[3], all, zeroID)
+	refusalContaining(t, err, cs[3].ID+" does not descend from the commit this box runs ("+zeroID+")")
+	// A merge: the second parent is not walked.
+	m, err := ParseCommit(commitObject(emptyTree, []string{cs[1].ID, cs[3].ID}, nil, "merge\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	all[m.ID] = m
+	if chain, err := Chain(m, all, cs[0].ID); err != nil || len(chain) != 2 {
+		t.Fatalf("%v %v", chain, err)
+	}
+	_, err = Chain(m, all, cs[2].ID)
+	refusalContaining(t, err, "does not descend")
+	// The cap: a line longer than MaxChain.
+	cs, all = line(MaxChain + 2)
+	_, err = Chain(cs[len(cs)-1], all, cs[0].ID)
+	refusalContaining(t, err, "is longer than 500 commits; run hotserve box baseline "+cs[len(cs)-1].ID)
+	if chain, err := Chain(cs[len(cs)-1], all, cs[1].ID); err != nil || len(chain) != MaxChain+1 {
+		t.Fatalf("%d %v", len(chain), err)
+	}
+}
+
+// pubLine is a public key as a signer line's two arguments.
+func pubLine(t *testing.T, key any) (string, string) {
+	t.Helper()
+	pub, err := ssh.NewPublicKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pub.Type(), base64.StdEncoding.EncodeToString(pub.Marshal())
+}
+
+func TestParseSigner(t *testing.T) {
+	edPub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ecKey, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edType, edB64 := pubLine(t, edPub)
+	ecType, ecB64 := pubLine(t, &ecKey.PublicKey)
+	rsaType, rsaB64 := pubLine(t, &rsaKey.PublicKey)
+	if edType != "ssh-ed25519" || ecType != "ecdsa-sha2-nistp384" || rsaType != "ssh-rsa" {
+		t.Fatal(edType, ecType, rsaType)
+	}
+	// An sk- key: the wire form is the ed25519 one plus an application string.
+	var sk bytes.Buffer
+	for _, s := range [][]byte{[]byte("sk-ssh-ed25519@openssh.com"), edPub, []byte("ssh:")} {
+		sk.Write([]byte{byte(len(s) >> 24), byte(len(s) >> 16), byte(len(s) >> 8), byte(len(s))})
+		sk.Write(s)
+	}
+	skB64 := base64.StdEncoding.EncodeToString(sk.Bytes())
+
+	for _, ok := range [][3]string{
+		{"alice@example.com", edType, edB64},
+		{"bob", ecType, ecB64},
+		{"c.d_e+f-g", rsaType, rsaB64},
+		{"alice-yubikey", "sk-ssh-ed25519@openssh.com", skB64},
+	} {
+		s, err := ParseSigner(ok[0], ok[1], ok[2])
+		if err != nil {
+			t.Errorf("%v: %v", ok, err)
+			continue
+		}
+		if s.Principal != ok[0] || s.Type != ok[1] || s.B64 != ok[2] || len(s.Key) == 0 {
+			t.Errorf("%+v", s)
+		}
+	}
+	for name, bad := range map[string][3]string{
+		"principal with a star":  {"*", edType, edB64},
+		"principal with a comma": {"a,b", edType, edB64},
+		"principal with a space": {"a b", edType, edB64},
+		"principal with a quote": {`a"b`, edType, edB64},
+		"principal with a bang":  {"!a", edType, edB64},
+		"empty principal":        {"", edType, edB64},
+		"unknown type":           {"a", "ssh-dss", edB64},
+		"type mismatch":          {"a", "ssh-rsa", edB64},
+		"sk type mismatch":       {"a", "ssh-ed25519", skB64},
+		"not base64":             {"a", edType, "AAAA!"},
+		"base64 of junk":         {"a", edType, base64.StdEncoding.EncodeToString([]byte("junk"))},
+		"empty key":              {"a", edType, ""},
+	} {
+		if _, err := ParseSigner(bad[0], bad[1], bad[2]); err == nil {
+			t.Errorf("%s: parsed", name)
+		} else if !strings.HasPrefix(err.Error(), "signer ") {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	// The file, and the same key twice.
+	a, _ := ParseSigner("alice", edType, edB64)
+	b, _ := ParseSigner("bob", ecType, ecB64)
+	out, err := Signers{a, b}.AllowedSigners()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "alice namespaces=\"git\" " + edType + " " + edB64 + "\nbob namespaces=\"git\" " + ecType + " " + ecB64 + "\n"
+	if string(out) != want {
+		t.Fatalf("%q", out)
+	}
+	a2, _ := ParseSigner("alice-laptop", edType, edB64)
+	if _, err := (Signers{a, b, a2}).AllowedSigners(); err == nil || !strings.Contains(err.Error(), "signer alice and signer alice-laptop are the same key") {
+		t.Fatal(err)
+	}
+	if !(Signers{a, b}).Has("bob") || (Signers{a, b}).Has("carol") || !(Signers{a}).HasKey(a.Key) || (Signers{a}).HasKey(b.Key) {
+		t.Fatal("Has")
+	}
+}
+
+func TestBound(t *testing.T) {
+	if got := Bound("box1/Caddyfile"); got != "box1/Caddyfile" {
+		t.Fatal(got)
+	}
+	if got := Bound("a\nb"); got != `"a\nb"` {
+		t.Fatal(got)
+	}
+	// (The expected text is assembled so that no tool rewrites its
+	// escapes into the runes they name.)
+	if got, want := Bound("é\x00"), "\"\\"+"u00e9\\"+"x00\""; got != want {
+		t.Fatalf("%q != %q", got, want)
+	}
+	// A cut never leaves a partial rune: after the leading `a`, every
+	// é straddles an even offset, so the cut at 300 backs off to 299.
+	got := Bound("a" + strings.Repeat("é", 200))
+	if !strings.HasSuffix(got, "...") || len(got) != 299+3 || !utf8.ValidString(got) {
+		t.Fatalf("%d %q", len(got), got)
+	}
+	// Exactly at the bound, nothing is cut.
+	if got := Bound(strings.Repeat("é", 150)); len(got) != 300 || strings.HasSuffix(got, "...") {
+		t.Fatalf("%d %q", len(got), got)
+	}
+}
