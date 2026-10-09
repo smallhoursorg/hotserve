@@ -30,8 +30,8 @@ func init() {
 		Short: "Generate an ed25519 keypair for local deploy tokens",
 		Long: `Writes an ed25519 private key to <out> (PKCS#8 PEM, mode 0600) and
 the matching public key to <out>.pub (PKIX PEM). Point a
-'deploy_trust local { public_key <out>.pub }' block at the public key,
-keep the private key on the machine that mints deploy tokens.`,
+'deploy_trust local { public_key <out>.pub; audience <a> }' block at the
+public key, keep the private key on the machine that mints deploy tokens.`,
 		Flags: func() *flag.FlagSet {
 			fs := flag.NewFlagSet("deploy-keygen", flag.ExitOnError)
 			fs.String("out", "deploy.key", "private key output path (public key is <out>.pub)")

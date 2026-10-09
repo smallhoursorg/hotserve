@@ -851,11 +851,25 @@ only public material:
 - **OIDC (CI, primary):** the box verifies a per-run token against the
   provider's public JWKS and a claim allowlist (`deploy_trust github |
   gitlab | oidc`). Nothing high-value on the box, nothing stored in CI;
-  the token is minted per run, short-lived, and scoped to
-  `repository`/`ref`/`environment` claims.
+  the token is minted per run, short-lived, and scoped to the claims
+  the block pins. An identity claim (`repository`, `project_path`,
+  `sub`, …) is required at config load; a branch binding (`ref` —
+  `ref_path` on GitLab — `sha`, `workflow_ref`, a `ref_protected` not
+  pinned false, or a default-form `subject`, which carries one) is the
+  operator's to add, and a `github` or `gitlab` block some app
+  inherits or names without one is warned about at load
+  (`warnUnboundTrust`, liveswap/deploytrust.go; an `environment` alone
+  is noted, since it binds only as far as the provider's
+  deployment-branch rule for it; the generic `oidc` preset requires
+  `sub` and is not read): any ref of the pinned identity — any branch a
+  collaborator can push, with its workflow edited to deploy — would
+  otherwise do.
 - **Local key (non-CI / fallback):** the box trusts a public key
   (`deploy_trust local`); the operator mints tokens with the private
-  half (`hotserve deploy-token`). The signing key never touches the box.
+  half (`hotserve deploy-token`). The signing key never touches the
+  box. The block's `audience` names the box a token is for; without
+  one — warned about at load — a token minted for any box that trusts
+  the same key is accepted.
 
 Implementation: `liveswap/deploytrust.go` (verification via the vetted
 `go-oidc`/`go-jose`, never hand-rolled). Effects on the model:
