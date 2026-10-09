@@ -156,11 +156,18 @@ disk is unchanged; the result names the step (messages in "Refusals").
    a time: a second `POST` while one is *pending* is 409. Pending is a
    fact on disk, not in memory — the handler is re-instantiated by the
    very reload a push causes — and it is defined as: a `stage/<id>.auth`
-   exists for which no terminal `out/<id>.json` exists. It begins when
-   the handler writes `.auth` (before the bundle is dropped) and ends
-   at the terminal result, so the T6 bound "one pending bundle" holds
-   through the reload, and a push that follows another within its
-   reload is told 409 and retries.
+   exists, younger than fifteen minutes (the workflow's own poll
+   bound), for which no terminal `out/<id>.json` exists. It begins when
+   the handler writes `.auth`, which it does only *after* the bundle is
+   in `in/` (step 7), and ends at the terminal result; so the T6 bound
+   "one pending bundle" holds through the reload, a push that follows
+   another within its reload is told 409 — naming the pending id and
+   its age, and `journalctl -u hotserve-box-apply.path` for one that
+   never ends — and retries, and no crash of the handler can leave a
+   marker with no work behind it. A pending older than fifteen minutes
+   no longer blocks: whatever stranded it (a failed path unit) is a
+   console matter the 409 has already named, and the channel is not
+   held hostage to it.
 3. **Bundle.** Parsed from memory under strict rules: regular files
    only; fixed names — `path` (the file's path in the repository, as
    the workflow knows it), `Caddyfile`, `commit`, `parents/NNNN`,
@@ -207,8 +214,15 @@ disk is unchanged; the result names the step (messages in "Refusals").
    expands `{$VAR}` from the caller's environment and runs each
    module's `UnmarshalCaddyfile` on the input.
 7. **Drop.** The bundle is written as one regular file in `stage/`,
-   then `rename`d into `in/` as `<id>.tar`. Nothing but a complete
-   bundle ever appears in `in/`. The handler writes the audit line for
+   then `rename`d into `in/` as `<id>.tar`, and only then is
+   `stage/<id>.auth` written — in that order, so that a crash between
+   the two leaves a bundle root will process and a result that ends
+   the pending state, never a pending marker with nothing behind it
+   (the other order would answer 409 to every push until the marker
+   aged out). The cost of the crash window is only that the posting
+   token's result fallback is lost for that one push, which a re-run
+   restores. Nothing but a complete bundle ever appears in `in/`. The
+   handler writes the audit line for
    the request — `box push accepted` with `id`, `commit`, `by` (the
    token's attribution, as a deploy's `deployed_by`) and `remote` — to
    the journal; nothing about the caller is handed to root, whose
@@ -545,7 +559,7 @@ Written before the code, as liveswap's deploy-record store was.
 | `/etc/hotserve/age/` | 0700 | root:root | Reserved, empty, created by `init`; the secrets PR puts the box's age key here. |
 | `/var/lib/hotserve-box/` | 2750 | root:hotserve | Created by `tmpfiles.d`, not by either process. Setgid, so `applied.json` written here by root is born group `hotserve` without a `chown` (the unit has no `CAP_CHOWN`, and root is not in the group). Not under `/var/lib/hotserve`, which is 0750 hotserve:hotserve. Joins `sandboxHotservePaths` (liveswap/sandbox.go): never a bind source. |
 | `…/stage/` | 0700 | hotserve:hotserve | The handler assembles a bundle here. Not watched. |
-| `…/stage/<id>.auth` | 0600 | hotserve:hotserve | `{sha256 of the bearer token that posted <id>, exp, posted}`. Two jobs: it is the *pending* marker (step 2) — a push is pending while this exists and no terminal `out/<id>.json` does — and it lets that token read `out/<id>.json` after a reload changed `deploy_trust` ("Handler contract"), until `exp`. Not removed on a read, because a read is not a delivery: the response can fail after the file is gone, and the retry must still be authorised. Swept by the handler once `posted` is a day old and no `out/<id>.json` remains, the same age at which root sweeps results, so a `404` means swept, never "not yet". A digest, never the token; root has no use for it. |
+| `…/stage/<id>.auth` | 0600 | hotserve:hotserve | `{sha256 of the bearer token that posted <id>, exp, posted}`, written only after `in/<id>.tar` is in place (step 7). Two jobs: it is the *pending* marker (step 2) — a push is pending while this exists, is under fifteen minutes old, and no terminal `out/<id>.json` does — and it lets that token read `out/<id>.json` after a reload changed `deploy_trust` ("Handler contract"), until `exp`. Not removed on a read, because a read is not a delivery: the response can fail after the file is gone, and the retry must still be authorised. Swept by the handler once `posted` is a day old and no `out/<id>.json` remains, the same age at which root sweeps results, so a `404` means swept, never "not yet". A digest, never the token; root has no use for it. |
 | `…/in/` | 0770 | root:hotserve | The handler renames a complete bundle in; the applier renames everything out before reading anything. `DirectoryNotEmpty=` watches it, so it must be empty on every applier exit, or the path unit re-triggers until its start-rate limit fails it. |
 | `…/in/<id>.tar` | 0644 | hotserve:hotserve | `<id>` matches `^[0-9a-f]{32}$`: 16 hex of the handler's nanosecond clock, then 16 random (step 9); a name that does not match — or an entry that is not a regular file at all — is moved to `work/` and refused like any other, which the unit's `CAP_DAC_OVERRIDE`/`CAP_FOWNER` exist to guarantee. The content is a public commit; 0644. |
 | `…/work/` | 0700 | root:root | Bundles land here by rename and are read once. Never a source of truth after that read. |
@@ -622,7 +636,9 @@ could not be a plain push in any case.
 - `GET /?result=<id>` — the result; 202 `{"phase": "pending"}` while
   `stage/<id>.auth` exists and no `out/<id>.json` does yet (the bundle
   is queued or the applier is on it); 404 only when neither exists,
-  which means swept, never "not yet". The workflow polls until a
+  which means swept — or the one crash window of step 7, where the
+  handler died after dropping the bundle and before writing `.auth`,
+  and so never answered the POST either; the workflow re-runs. The workflow polls until a
   terminal phase or fifteen minutes, then fails red naming
   `journalctl -u hotserve-box-apply` on the box. Authenticated like
   every request, with one addition that is checked *first*: a bearer
