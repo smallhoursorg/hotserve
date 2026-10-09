@@ -38,7 +38,8 @@ jobs:
           restore-keys: fuzz-${{ runner.os }}-
       - env:
           COMPOSE: docker compose -f docker-compose.yml -f docker-compose.ci.yml
-        run: make fuzz FUZZTIME="${{ inputs.fuzztime || '5m' }}" COMPOSE="$COMPOSE"
+          FUZZTIME: ${{ inputs.fuzztime || '5m' }}
+        run: make fuzz COMPOSE="$COMPOSE"
       - if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
