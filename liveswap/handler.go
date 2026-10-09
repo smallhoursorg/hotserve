@@ -20,6 +20,7 @@ import (
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 func init() {
@@ -58,6 +59,23 @@ func loggedAppName(name string) string {
 		return name
 	}
 	return name[:appNameMaxLen] + "..."
+}
+
+// boundScope is scope with every string in it bounded as a refusal is
+// (boundRefusal): one line of at most maxRefusalLen bytes. The field
+// is the caller's — this webhook's app name, already cut by
+// loggedAppName; whatever the box webhook names its request by — and
+// the limiter bounds how many lines a caller can write, not how long
+// each is, so the length is bounded here, at the mechanism, rather
+// than asked of each caller.
+func boundScope(scope []zap.Field) []zap.Field {
+	out := slices.Clone(scope)
+	for i, f := range out {
+		if f.Type == zapcore.StringType {
+			out[i].String = boundRefusal(f.String)
+		}
+	}
+	return out
 }
 
 // Handler implements the liveswap webhook endpoint. Mount it in its own
@@ -149,11 +167,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 // answered here — the flat 401 whatever the reason, or 429 once the
 // address's budget is spent — and ok is false, with the response
 // write's error. scope is what the journal lines carry besides the
-// address and the reason: this webhook names the app, bounded, since
-// the limiter bounds how many lines a caller can write and not how
-// long each is. The box webhook runs the same preamble through
-// Authenticate (export.go), on the limiter every mount shares.
+// address and the reason — this webhook names the app — and every
+// string in it is bounded here (boundScope), since the limiter bounds
+// how many lines a caller can write and not how long each is. The box
+// webhook runs the same preamble through Authenticate (export.go), on
+// the limiter every mount shares.
 func authenticate(w http.ResponseWriter, r *http.Request, verifiers []Verifier, logger *zap.Logger, limiter *authLimiter, scope ...zap.Field) (Identity, bool, error) {
+	scope = boundScope(scope)
 	who, down, refused := authorize(r.Context(), verifiers, bearerToken(r))
 	key := clientKey(r)
 	// A source the box could not consult is named here once per window
