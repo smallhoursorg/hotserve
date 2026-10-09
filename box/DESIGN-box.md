@@ -190,8 +190,19 @@ disk is unchanged; the result names the step (messages in "Refusals").
 
 **In the applier (`hotserve box apply`, root, one shot, path-triggered):**
 
-9. **Take.** Under an exclusive lock, every entry of `in/` is renamed
-   into `work/` and then processed in lexical order of id. An id is 32
+9. **Recover, then take.** Under an exclusive lock, the applier first
+   settles whatever a crash left behind, before it looks at `in/`. If
+   `/etc/hotserve/Caddyfile.prev` exists, an install was interrupted
+   between the swap and a successful reload: the previous file is
+   renamed back over `Caddyfile` and hotserve reloaded, exactly as a
+   failed reload is handled (step 19) — `applied.json` is written only
+   after a reload succeeds, so it still names the previous commit and
+   nothing disagrees. Every entry left in `work/` is then given a
+   terminal result, `failed` — "interrupted; the previous Caddyfile is
+   on disk and running" — and removed; a bundle is never resumed,
+   because it was read once and a crash is not a reason to read it
+   again (the workflow re-runs the push). Only then is every entry of
+   `in/` renamed into `work/` and processed in lexical order of id. An id is 32
    lowercase hex characters: the first 16 are the handler's clock in
    nanoseconds when it accepted the request, the last 16 random, so
    lexical order is arrival order by the handler's clock. The order
@@ -370,7 +381,7 @@ Written before the code, as liveswap's deploy-record store was.
 | Path | Mode | Owner | Rule |
 |---|---|---|---|
 | `/etc/hotserve/Caddyfile` | 0644 | root:root | Written only by root: `init`, the applier, the console. Read by hotserve (serving), by the handler (signers for the pre-check) and by the applier (the signer list and the rollback copy). The conffile the package ships. |
-| `/etc/hotserve/Caddyfile.prev` | 0644 | root:root | Written and renamed into place before `Caddyfile` is replaced (step 18); removed when the reload succeeds (step 19). Exists only between the two. |
+| `/etc/hotserve/Caddyfile.prev` | 0644 | root:root | Written and renamed into place before `Caddyfile` is replaced (step 18); removed when the reload succeeds (step 19). Exists only between the two — so its presence at startup is the marker of an interrupted install, and the applier (step 9) and `init` both restore it before anything else. |
 | `/etc/hotserve/age/` | 0700 | root:root | Reserved, empty, created by `init`; the secrets PR puts the box's age key here. |
 | `/var/lib/hotserve-box/` | 0750 | root:hotserve | Created by `tmpfiles.d`, not by either process. Not under `/var/lib/hotserve`, which is 0750 hotserve:hotserve and which a root unit without `CAP_DAC_OVERRIDE` cannot traverse. Joins `sandboxHotservePaths` (liveswap/sandbox.go): never a bind source. |
 | `…/stage/` | 0700 | hotserve:hotserve | The handler assembles a bundle here. Not watched. |
@@ -380,7 +391,7 @@ Written before the code, as liveswap's deploy-record store was.
 | `/tmp/box-verify-<id>/` (the unit's `PrivateTmp`) | 0755 / files 0644 | root:root | The payload, the signature and the generated allowed_signers for `ssh-keygen` running as uid 65534, which cannot traverse `work/` (0700) or `/var/lib/hotserve-box` (0750 root:hotserve). The private `/tmp` is gone with the unit. |
 | `…/out/` | 0750 | root:hotserve | Results, written to a temporary name and renamed so the handler never reads a partial file. Root sweeps by age; hotserve only reads. |
 | `…/out/<id>.json` | 0640 | root:hotserve | `{id, phase, commit, signer, path, diff, apps, box_webhook, error, caddyfile_edited_out_of_band}`. The `diff` passed the redactor. |
-| `…/applied.json` | 0640 | root:hotserve | `{sha, sha256, signer, when}`: the baseline, the installed file's digest (an out-of-band edit is visible, not refused — root's file is root's), the principal whose key root verified. Nothing the handler reported about the caller is in it; that is the handler's journal line. The box's host is read from the installed file, never recorded. |
+| `…/applied.json` | 0640 | root:hotserve | `{sha, sha256, signer, when}`, written to a temporary name and renamed, and only after a reload has succeeded (or, in `init`, after the file is installed on a box where hotserve is not running): the baseline, the installed file's digest (an out-of-band edit is visible, not refused — root's file is root's), the principal whose key root verified. Nothing the handler reported about the caller is in it; that is the handler's journal line. The box's host is read from the installed file, never recorded. |
 | `…/lock` | 0600 | root:root | `flock`; one apply at a time. |
 
 Caps: Caddyfile and blob ≤ 1 MiB; a tree object ≤ 1 MiB; a commit
@@ -448,12 +459,20 @@ so no null baseline ever exists; runs `hotserve validate` as the
 hotserve user, never as root (the same reasoning as step 6), with the
 environment `hotserve.service` gives the service and nothing of
 root's shell — dropping the uid does not drop the environment, and
-the adapter would expand `{$VAR}` from whatever it inherited; installs
-the file 0644
-root by temporary name and rename; creates `/etc/hotserve/age/`;
-writes `applied.json {sha, sha256}`; reloads hotserve if it is active,
-or says the file will be loaded at the next start; and prints what it
-found and did:
+the adapter would expand `{$VAR}` from whatever it inherited; then
+runs the applier's own install transaction (steps 18 and 19, and the
+recovery of step 9 first if a `Caddyfile.prev` is lying there): the
+existing file, when there is one, is renamed to `Caddyfile.prev`
+before the new file lands 0644 root by temporary name and rename;
+`/etc/hotserve/age/` is created; hotserve is reloaded if it is active,
+and on a failed reload the previous file is renamed back, reloaded
+again, `applied.json` left as it was, and `init` exits non-zero
+saying so — a re-run of `init` as the break-glass must not leave a
+box that cannot restart. Only after the reload succeeds is
+`applied.json {sha, sha256}` written; when hotserve is not running it
+is written on install and `init` says the file loads at the next
+start, since a person is at the console for `init` in a way nobody is
+for the applier. Then it prints what it found and did:
 
 ```
 init: box1/Caddyfile validates; 1 app (example); box_webhook on deploy.example.com; 1 signer (alice@example.com)
