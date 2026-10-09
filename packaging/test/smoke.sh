@@ -528,6 +528,25 @@ case "$status" in *'"running":true'*) : ;; *) die "reattached app not running: $
 curl -fsS --max-time 5 "$PROXY/" | grep -q "hello smoke" || die "reattached app not served"
 echo "reinstall preserved config and user; hotserve restarted and reattached to the running app (pid $pid_after)"
 
+stage "stage 3b: prerm deconfigure is not removal"
+# dpkg runs `prerm deconfigure` when a dependency (dbus, libpam-systemd)
+# is swapped out mid-dist-upgrade; the package stays installed and no
+# later maintainer script re-enables the service. Calling the installed
+# script directly is the only way to reach that path without a real
+# conflicting package.
+prerm=/var/lib/dpkg/info/hotserve.prerm
+[ -x "$prerm" ] || die "installed prerm not found at $prerm"
+"$prerm" deconfigure in-favour smoketest-dep 1.0 removing dbus 1.0 \
+	|| die "prerm deconfigure exited non-zero"
+systemctl is-active --quiet hotserve || die "prerm deconfigure stopped hotserve"
+systemctl is-enabled --quiet hotserve || die "prerm deconfigure disabled hotserve"
+systemctl is-active --quiet "user@$uid.service" || die "prerm deconfigure stopped the user manager (and every app)"
+[ -e /etc/systemd/system/hotserve.service.d/10-user-manager.conf ] || die "prerm deconfigure removed the user-manager drop-in"
+[ -e "/etc/systemd/system/user@$uid.service.d/10-hotserve.conf" ] || die "prerm deconfigure removed the user@ limits drop-in"
+[ -e /var/lib/systemd/linger/hotserve ] || die "prerm deconfigure disabled lingering"
+kill -0 "$pid_after" 2>/dev/null || die "deployed app (pid $pid_after) did not survive prerm deconfigure"
+echo "prerm deconfigure left the service, the user manager and the app (pid $pid_after) running"
+
 stage "stage 4: removal"
 apt-get remove -y hotserve
 systemctl is-active --quiet hotserve && die "service still active after remove (preremove did not stop it)" || true
