@@ -610,7 +610,10 @@ scope for the runtime model, in scope for release signing (roadmap).
   distinct holders, in descending likelihood: a credential that can
   push to the repository (a leaked PAT, a stolen session, an OAuth or
   GitHub App with `contents:write`); a compromised Action in that
-  repository, holding its OIDC token; a compromised signer's laptop.
+  repository, holding its OIDC token — or, where the `box` block trusts
+  a `deploy_trust local` key, whoever holds that key, who mints the
+  `sha` claim themselves and so needs no workflow and no `main`; a
+  compromised signer's laptop.
   The asset is the configuration at rest — asset 5, the one that
   survives a restart. The first can push and cannot sign: what it
   writes is refused on every later push too, until removed, and what it
