@@ -16,7 +16,7 @@ VERSION ?= $(shell (git describe --tags --exact-match 2>/dev/null || echo v0.0.0
 # Distro image for the package install smoke test (install-test).
 DISTRO ?= debian:13
 
-.PHONY: test test-integration vet tidy lint fuzz fuzz-list vulncheck secretscan build package install-test e2e soak e2e-logs clean
+.PHONY: test test-integration vet tidy lint fuzz fuzz-list vulncheck secretscan build package clean-debs install-test e2e soak e2e-logs clean
 
 test:
 	$(COMPOSE) run --rm dev go test -race -cover $(PKGS)
@@ -144,18 +144,10 @@ build:
 # /etc/hotserve/Caddyfile and the data dirs; postinstall creates the
 # hotserve system user.
 #
-# The rm clears every .deb an earlier run left behind, whatever its
-# version (a tagged build is hotserve_0.2.1_*, an untagged one
-# hotserve_0.0.0~dev_*, so a rebuild does not always overwrite).
-# install-test mounts dist/ as it finds it: a leftover beside the new
-# build fails smoke.sh's one-.deb-per-arch check, and a leftover with
-# no new build beside it (this run failed part-way) would be certified
-# in its place. One run writes both arches, so the rm loses nothing a
-# later step needs; the release's tarballs and checksums.txt land in
-# dist/ after this and do not match the glob.
-package: build
+# clean-debs runs before build, so a run that fails anywhere leaves no
+# .deb behind for install-test to certify in place of this one.
+package: clean-debs build
 	mkdir -p dist
-	rm -f dist/hotserve_*.deb
 	for a in amd64 arm64; do \
 		cp build/hotserve-linux-$$a build/hotserve; \
 		for f in deb; do \
@@ -164,6 +156,9 @@ package: build
 		done; \
 	done; \
 	rm -f build/hotserve
+
+clean-debs:
+	rm -f dist/hotserve_*.deb
 
 # Installs the freshly built .deb inside a systemd container (DISTRO
 # picks the base image) and runs the staged smoke test: install, unit
