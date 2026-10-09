@@ -155,6 +155,7 @@ type deployResult struct {
 	Error      string    `json:"error,omitempty"`
 	Phase      string    `json:"phase,omitempty"`       // phase reached when it failed
 	By         string    `json:"deployed_by,omitempty"` // the trust source that authorized it, and the token's attribution claims
+	SHA256     string    `json:"sha256,omitempty"`      // the pin the deployer asserted, or a rollback's carried from the record it replaces (recordedPin); never a hash of an unpinned download
 	StartedAt  time.Time `json:"started_at"`
 	FinishedAt time.Time `json:"finished_at"`
 	// What the artifact cost against max_artifact_entries and the
@@ -363,18 +364,19 @@ func (ma *managedApp) redactorFor(s statusSnapshot, names ...string) *redactor {
 	ma.secretsMu.Unlock()
 	// Safe strings are names: the app's, every version the status
 	// names — the running one, the last deploy's, the releases on
-	// disk, the recorded ones — the app's dirs, and any the caller's
-	// body names that the status does not (the digests a refused pin
-	// reports, deployOutcome). Whoever named one, it exempts nothing:
+	// disk, the recorded ones — the digests those deploys were pinned
+	// to, the app's dirs, and any the caller's body names that the
+	// status does not (the digests a refused pin reports,
+	// deployOutcome). Whoever named one, it exempts nothing:
 	// a safe string equal to a known value is dropped by newRedactor
 	// (redact.go, rule 1).
 	safe := append([]string{ma.name, s.CurrentVersion}, s.AvailableVersions...)
 	safe = append(safe, names...)
 	if s.LastDeploy != nil {
-		safe = append(safe, s.LastDeploy.Version)
+		safe = append(safe, s.LastDeploy.Version, s.LastDeploy.SHA256)
 	}
 	for _, d := range s.Deploys {
-		safe = append(safe, d.Version)
+		safe = append(safe, d.Version, d.pin())
 	}
 	if spec != nil {
 		safe = append(safe, spec.dirs.root, spec.dirs.app, spec.dirs.releases, spec.dirs.shared, spec.dirs.run)
@@ -648,6 +650,8 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	ma.phases = nil
 	ma.mu.Unlock()
 
+	pin := req.sha256 // a rollback's is read once it is accepted, below
+
 	var stats archiveStats
 	accepted := false        // the request passed its checks: from here on, what happens is the version's history
 	var detail *deployDetail // filled by the failure-detail defer below, which runs first
@@ -660,6 +664,7 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 			Version:         req.version,
 			Status:          "succeeded",
 			By:              req.by,
+			SHA256:          pin,
 			StartedAt:       started,
 			FinishedAt:      finished,
 			ArtifactEntries: stats.entries,
@@ -725,6 +730,11 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	}
 
 	accepted = true
+	// A rollback replaces the version's record, so it carries that
+	// record's pin forward; anything else names its own (or none).
+	if req.rollback {
+		pin = recordedPin(spec.dirs, req.version)
+	}
 
 	releaseDir, stats, err := c.fetch.fetch(ctx, spec, req, func(phase string) { ma.setPhase(c, phase) })
 	if err != nil {

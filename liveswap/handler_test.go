@@ -235,6 +235,91 @@ func TestWebhookDeployAuthorizedNamesThePin(t *testing.T) {
 	}
 }
 
+// A pinned deploy's digest is on record wherever the record is: the
+// response's last_deploy, the status's deploys list, the record read
+// back, and the done line of a stream — whole, though a real digest is
+// what the filter's entropy layer masks. An unpinned deploy has no
+// field, and a rollback carries the pin of the record it replaces.
+func TestWebhookDeployRecordNamesThePin(t *testing.T) {
+	h, _ := newTestHandler(t)
+	digest := func(s string) string { sum := sha256.Sum256([]byte(s)); return hex.EncodeToString(sum[:]) }
+	pin := digest("what CI built")
+	if body := newRedactor(nil, nil).redactJSON([]byte(`{"sha256":"` + pin + `"}`)); strings.Contains(body, pin) {
+		t.Fatalf("control: an unnamed digest must be masked, or this test proves nothing: %s", body)
+	}
+	pinOf := func(raw []byte) (any, bool) {
+		var m map[string]any
+		must(t, json.Unmarshal(raw, &m))
+		v, has := m["sha256"]
+		return v, has
+	}
+	lastDeploy := func(w *httptest.ResponseRecorder) json.RawMessage {
+		var m struct {
+			LastDeploy json.RawMessage `json:"last_deploy"`
+		}
+		must(t, json.Unmarshal(w.Body.Bytes(), &m))
+		return m.LastDeploy
+	}
+
+	// The upper-case pin is recorded as parseDeployPayload normalised it.
+	w := do(t, h, http.MethodPost, "/demo", appToken(t), `{"url":"https://x/a.tgz","version":"v1","sha256":"`+strings.ToUpper(pin)+`"}`)
+	if got, _ := pinOf(lastDeploy(w)); w.Code != 200 || got != pin {
+		t.Fatalf("pinned deploy: %d last_deploy.sha256 = %v, want %s: %s", w.Code, got, pin, w.Body.String())
+	}
+	w = do(t, h, http.MethodGet, "/demo", appToken(t), "")
+	var st struct {
+		Deploys []json.RawMessage `json:"deploys"`
+	}
+	must(t, json.Unmarshal(w.Body.Bytes(), &st))
+	if len(st.Deploys) != 1 {
+		t.Fatalf("status deploys = %s", w.Body.String())
+	}
+	if got, _ := pinOf(st.Deploys[0]); got != pin {
+		t.Fatalf("status deploys[0].sha256 = %v, want %s: %s", got, pin, w.Body.String())
+	}
+	if got, _ := pinOf(lastDeploy(w)); got != pin {
+		t.Fatalf("status last_deploy.sha256 = %v, want %s", got, pin)
+	}
+	w = do(t, h, http.MethodGet, "/demo?deploy=v1", appToken(t), "")
+	if got, _ := pinOf(w.Body.Bytes()); w.Code != 200 || got != pin {
+		t.Fatalf("record v1: %d sha256 = %v, want %s: %s", w.Code, got, pin, w.Body.String())
+	}
+
+	// Unpinned: absent, not a placeholder.
+	w = do(t, h, http.MethodPost, "/demo", appToken(t), `{"url":"https://x/a.tgz","version":"v2"}`)
+	if _, has := pinOf(lastDeploy(w)); w.Code != 200 || has {
+		t.Fatalf("unpinned deploy: %d, last_deploy has sha256: %s", w.Code, w.Body.String())
+	}
+	w = do(t, h, http.MethodGet, "/demo?deploy=v2", appToken(t), "")
+	if _, has := pinOf(w.Body.Bytes()); w.Code != 200 || has {
+		t.Fatalf("record v2: %d, has sha256: %s", w.Code, w.Body.String())
+	}
+
+	// A rollback to v1 replaces v1's record and keeps its pin; one to
+	// v2 has none to keep.
+	for _, tc := range []struct {
+		version string
+		want    any
+	}{{"v1", pin}, {"v2", nil}} {
+		w = do(t, h, http.MethodPost, "/demo?rollback="+tc.version, appToken(t), "")
+		if got, _ := pinOf(lastDeploy(w)); w.Code != 200 || got != tc.want {
+			t.Fatalf("rollback %s: %d last_deploy.sha256 = %v, want %v: %s", tc.version, w.Code, got, tc.want, w.Body.String())
+		}
+		w = do(t, h, http.MethodGet, "/demo?deploy="+tc.version, appToken(t), "")
+		if got, _ := pinOf(w.Body.Bytes()); got != tc.want {
+			t.Fatalf("record %s after rollback: sha256 = %v, want %v: %s", tc.version, got, tc.want, w.Body.String())
+		}
+	}
+
+	// The done line of a streamed deploy.
+	_, lines := streamLinesOf(t, h, `{"url":"https://x/a.tgz","version":"v3","sha256":"`+pin+`"}`)
+	last := lines[len(lines)-1]
+	ld, _ := last["last_deploy"].(map[string]any)
+	if last["event"] != "done" || ld == nil || ld["sha256"] != pin {
+		t.Fatalf("done line = %v", last)
+	}
+}
+
 func TestWebhookConflictWhileDeploying(t *testing.T) {
 	h, rig := newTestHandler(t)
 	rig.ma.deployMu.Lock()
@@ -672,7 +757,13 @@ func TestWebhookURLDeployForwardsWireFields(t *testing.T) {
 // and returns the response and its lines, each parsed.
 func streamLines(t *testing.T, h *Handler) (*httptest.ResponseRecorder, []map[string]any) {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/demo", strings.NewReader(`{"url":"https://example.test/v1.tgz","version":"v1"}`))
+	return streamLinesOf(t, h, `{"url":"https://example.test/v1.tgz","version":"v1"}`)
+}
+
+// streamLinesOf is streamLines for a deploy payload of the caller's.
+func streamLinesOf(t *testing.T, h *Handler, body string) (*httptest.ResponseRecorder, []map[string]any) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/demo", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+appToken(t))
 	req.Header.Set("Accept", "application/x-ndjson")
 	w := httptest.NewRecorder()
