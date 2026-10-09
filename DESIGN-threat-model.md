@@ -439,11 +439,14 @@ the filesystem routes are closed by absence.
 The second authenticated entry point, and the only one whose outcome
 is a root-owned file. [box/DESIGN-box.md](box/DESIGN-box.md) is
 authoritative for its behaviour; this section places it. Status:
-designed 2026-10-09 and being built in PRs; until the applier ships,
-config reaches the box as the Install-time section's neighbour
-describes it today — `examples/box/bin/push` over SSH as an
-administrator with the `HOTSERVE_CONFIG` sudoers grant — and this
-section describes what replaces that.
+designed 2026-10-09 and being built in PRs. Until the applier ships,
+config reaches the box the way `examples/box/README.md` describes:
+root hand-edits `/etc/hotserve/Caddyfile` on day 0, and afterwards a
+laptop script (`examples/box/bin/push`) stages, validates, swaps and
+reloads it over SSH as an administrator whose sudoers file
+(`examples/box/sudoers`) allows exactly those eight commands plus
+`sudoedit` of the per-app env files. This section describes what
+replaces the first eight.
 
 The operator's config repository is the only writer of
 `/etc/hotserve/Caddyfile`. Its workflow mints an OIDC token and POSTs
@@ -570,9 +573,12 @@ scope for the runtime model, in scope for release signing (roadmap).
   is withholding. Faces `extract.go` and the first-hop SSRF gap.
 - **T4 — Unauthenticated network attacker** on the public webhook/proxy.
   Faces the token gate — forgery needs a private key, so there is no
-  guessing oracle; the realer wins are log-amplification, the CPU cost of
-  JWT/JWKS verification (no rate limit), and any pre-auth proxy/Caddy
-  surface.
+  guessing oracle; the realer wins are log-amplification (bounded by
+  the auth-failure budgets: ten failures a minute per address, then
+  429, a hundred process-wide, then silence), the CPU cost of JWT/JWKS
+  verification (spent on every request before the budget answers —
+  the budget bounds the journal and the reply, not the work), and any
+  pre-auth proxy/Caddy surface.
 - **T5 — RCE in the supervisor itself** (a Caddy or liveswap bug). Low
   probability, catastrophic: it *is* the `hotserve` user, so it already
   holds every asset short of root. No app-isolation design prevents
