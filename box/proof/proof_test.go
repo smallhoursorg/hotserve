@@ -139,6 +139,7 @@ func TestParseCommit(t *testing.T) {
 		"parent id short":          commitObject(emptyTree, []string{"abc"}, nil, "m"),
 		"two gpgsig":               commitObject(emptyTree, nil, []string{gpgsigHeader(sshArmor), gpgsigHeader(sshArmor)}, "m"),
 		"header name with control": []byte("tree " + emptyTree + "\n\x01 x\n\nm"),
+		"header without a value":   []byte("tree " + emptyTree + "\nauthor\n\nm"),
 		"empty header name":        []byte("tree " + emptyTree + "\n\x00\n\nm"),
 		"too large":                append(commitObject(emptyTree, nil, nil, ""), bytes.Repeat([]byte("x"), MaxCommit)...),
 	} {

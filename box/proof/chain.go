@@ -61,18 +61,22 @@ func descendRefusal(head, baseline string) error {
 
 // VerifyChain is steps 12 and 14 together: every commit of the chain
 // (head first, as Chain returns it) must verify against the installed
-// signers. It returns the principal whose key signed head. Head's own
+// signers, within one deadline for the whole chain over and above each
+// child's. It returns the principal whose key signed head. Head's own
 // refusals are the named ones (not signed, OpenPGP, not a signer, a
-// signature that does not verify); a commit between the baseline and
-// head is refused with the message that says what to do about it: an
-// unsigned one is rebased away and force-pushed, no baseline change —
-// an unsigned commit a leaked credential pushed would otherwise ride
-// into the box under the next signed one; one signed by a key the box
-// did not list when it last applied is named by the principal the
-// incoming file gives that key, if it does, because the commit that
-// adds the key must apply before the commits it signs.
+// signature that does not verify). A commit between the baseline and
+// head is refused by what its verdict was: unsigned, or signed by
+// anything but an SSH key, gets the message that says to rebase it
+// away and force-push, no baseline change — an unsigned commit a
+// leaked credential pushed would otherwise ride into the box under the
+// next signed one; signed by a key the box did not list when it last
+// applied gets the message that names the principal the incoming file
+// gives that key, because the commit that adds the key must apply
+// before the commits it signs, or says the new file does not list it
+// either; a listed key whose signature does not verify keeps its own
+// message. An error that is not a verdict — ssh-keygen could not run,
+// the deadline passed — is returned as it is, never as a refusal.
 func VerifyChain(ctx context.Context, v *Verifier, chain []*Commit, installed, incoming Signers, baseline string) (string, error) {
-	// One deadline for the whole chain, over and above each child's.
 	budget := v.ChainTimeout
 	if budget == 0 {
 		budget = defaultChainTimeout
@@ -88,27 +92,41 @@ func VerifyChain(ctx context.Context, v *Verifier, chain []*Commit, installed, i
 	principal := ""
 	for i, c := range chain {
 		p, err := v.verify(ctx, c, installed, allowedInstalled)
-		if err != nil {
-			var r *Refusal
-			if i == 0 || !errors.As(err, &r) {
+		if err == nil {
+			if i == 0 {
+				principal = p
+			}
+			continue
+		}
+		var r *Refusal
+		if i == 0 || !errors.As(err, &r) {
+			return "", err
+		}
+		switch r.code {
+		case codeUnlisted:
+			if allowedIncoming == nil {
+				if allowedIncoming, err = incoming.AllowedSigners(); err != nil {
+					return "", err
+				}
+			}
+			name, err := v.verify(ctx, c, incoming, allowedIncoming)
+			var again *Refusal
+			switch {
+			case err == nil:
+			case errors.As(err, &again) && again.code == codeAltered:
+				return "", err
+			case errors.As(err, &again):
+				name = "not in the new Caddyfile either"
+			default:
 				return "", err
 			}
-			if c.Kind == SSHSig {
-				if allowedIncoming == nil {
-					if allowedIncoming, err = incoming.AllowedSigners(); err != nil {
-						return "", err
-					}
-				}
-				if name, err := v.verify(ctx, c, incoming, allowedIncoming); err == nil {
-					return "", refuse("%s, between the commit this box runs and %s, is signed by a key this box did not list when it last applied (%s); the commit that adds the key must apply first — force main back to it, let the box apply it, then push the rest",
-						c.ID, chain[0].ID, name)
-				}
-			}
+			return "", refuse("%s, between the commit this box runs and %s, is signed by a key this box did not list when it last applied (%s); the commit that adds the key must apply first — force main back to it, let the box apply it, then push the rest",
+				c.ID, chain[0].ID, name)
+		case codeAltered:
+			return "", err
+		default:
 			return "", refuse("%s, between the commit this box runs and %s, is not signed; every commit on main must be — rebase it out of the history and force-push; the box still runs %s, so no baseline change is needed",
 				c.ID, chain[0].ID, baseline)
-		}
-		if i == 0 {
-			principal = p
 		}
 	}
 	return principal, nil

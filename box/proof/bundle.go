@@ -124,6 +124,16 @@ func ReadBundle(gz []byte) (*Bundle, error) {
 			b.Trees[id] = t
 		}
 	}
+	// The tar's end markers are not the stream's end: what follows —
+	// a tar writer's padding, or anything else — is read through the
+	// same limit, so the cap holds for the whole decompressed stream
+	// and the gzip trailer (its checksum) is reached and checked.
+	if _, err := io.Copy(io.Discard, lr); err != nil {
+		return nil, refuse("bundle: not a gzip stream")
+	}
+	if lr.N == 0 {
+		return nil, refuse("bundle: larger than 16 MiB")
+	}
 	for _, want := range []string{"path", "Caddyfile", "commit"} {
 		if !seen[want] {
 			return nil, refuse("bundle: no %s file", want)

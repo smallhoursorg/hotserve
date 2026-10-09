@@ -74,8 +74,8 @@ func ParseCommit(raw []byte) (*Commit, error) {
 			continue
 		}
 		inSig = false
-		key, value, _ := bytes.Cut(bytes.TrimSuffix(line, []byte("\n")), []byte(" "))
-		if len(key) == 0 || !printableASCII(key) {
+		key, value, ok := bytes.Cut(bytes.TrimSuffix(line, []byte("\n")), []byte(" "))
+		if !ok || len(key) == 0 || !printableASCII(key) {
 			return nil, refuse("bundle: commit: a header line is not `name value`")
 		}
 		if i == 0 && string(key) != "tree" {

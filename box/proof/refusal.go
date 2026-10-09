@@ -26,13 +26,29 @@ import (
 // derived itself. An error that is not a Refusal is the box's own
 // trouble (ssh-keygen could not be run), not a verdict on the push.
 type Refusal struct {
-	Msg string
+	Msg  string
+	code refusalCode
 }
 
 func (r *Refusal) Error() string { return r.Msg }
 
+// refusalCode tells apart the signature verdicts a chain must treat
+// differently (VerifyChain); every other refusal is codeNone.
+type refusalCode int
+
+const (
+	codeNone     refusalCode = iota
+	codeUnsigned             // no gpgsig, or one that is not an SSH signature
+	codeUnlisted             // an SSH signature by a key the list does not carry
+	codeAltered              // a listed key's signature that does not verify over the payload
+)
+
 func refuse(format string, args ...any) error {
 	return &Refusal{Msg: fmt.Sprintf(format, args...)}
+}
+
+func refuseCode(code refusalCode, format string, args ...any) error {
+	return &Refusal{Msg: fmt.Sprintf(format, args...), code: code}
 }
 
 // maxBound is liveswap's maxRefusalLen: the most bytes of caller-chosen

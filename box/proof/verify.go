@@ -72,11 +72,11 @@ func (v *Verifier) Verify(ctx context.Context, c *Commit, signers Signers) (stri
 func (v *Verifier) verify(ctx context.Context, c *Commit, signers Signers, allowed []byte) (string, error) {
 	switch c.Kind {
 	case Unsigned:
-		return "", refuse("%s is not signed; the box applies only commits signed by a key in its signer list", c.ID)
+		return "", refuseCode(codeUnsigned, "%s is not signed; the box applies only commits signed by a key in its signer list", c.ID)
 	case OpenPGPSig:
-		return "", refuse("%s is signed by OpenPGP, not by an SSH key in the Caddyfile this box runs; GitHub's merge button cannot land config — merge on a laptop and push", c.ID)
+		return "", refuseCode(codeUnsigned, "%s is signed by OpenPGP, not by an SSH key in the Caddyfile this box runs; GitHub's merge button cannot land config — merge on a laptop and push", c.ID)
 	case OtherSig:
-		return "", refuse("%s is signed, but not by an SSH key in the Caddyfile this box runs", c.ID)
+		return "", refuseCode(codeUnsigned, "%s is signed, but not by an SSH key in the Caddyfile this box runs", c.ID)
 	case SSHSig:
 	}
 	keygen, err := v.program()
@@ -110,7 +110,7 @@ func (v *Verifier) verify(ctx context.Context, c *Commit, signers Signers, allow
 		return "", err
 	}
 	if !ok {
-		return "", refuse("%s is signed by a key that is not a signer in the Caddyfile this box runs", c.ID)
+		return "", refuseCode(codeUnlisted, "%s is signed by a key that is not a signer in the Caddyfile this box runs", c.ID)
 	}
 	principal, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
 	if !signers.Has(principal) {
@@ -123,7 +123,7 @@ func (v *Verifier) verify(ctx context.Context, c *Commit, signers Signers, allow
 		return "", err
 	}
 	if !ok {
-		return "", refuse("%s is signed by %s, but the signature does not verify: the commit was altered after it was signed", c.ID, principal)
+		return "", refuseCode(codeAltered, "%s is signed by %s, but the signature does not verify: the commit was altered after it was signed", c.ID, principal)
 	}
 	return principal, nil
 }

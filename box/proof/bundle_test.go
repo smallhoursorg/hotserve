@@ -218,6 +218,40 @@ func TestReadBundle(t *testing.T) {
 		_, err := ReadBundle(tgz(t, files))
 		refusalContaining(t, err, "bundle: larger than 16 MiB")
 	})
+	t.Run("the stream past the tar's end is read against the cap", func(t *testing.T) {
+		// A small valid tar, then a second gzip member of 17 MiB: the
+		// tar reader stops at the end markers, the drain does not.
+		var tail bytes.Buffer
+		zw := gzip.NewWriter(&tail)
+		if _, err := zw.Write(bytes.Repeat([]byte{0}, 17<<20)); err != nil {
+			t.Fatal(err)
+		}
+		if err := zw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		_, err := ReadBundle(append(tgz(t, h.files), tail.Bytes()...))
+		refusalContaining(t, err, "bundle: larger than 16 MiB")
+		// Padding after the end markers, as tar writers add, is fine.
+		var padded bytes.Buffer
+		zw = gzip.NewWriter(&padded)
+		if _, err := zw.Write(bytes.Repeat([]byte{0}, 10240)); err != nil {
+			t.Fatal(err)
+		}
+		if err := zw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ReadBundle(append(tgz(t, h.files), padded.Bytes()...)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("a corrupt gzip trailer is seen", func(t *testing.T) {
+		data := tgz(t, h.files)
+		data[len(data)-1] ^= 0xff // the last byte of the size trailer
+		_, err := ReadBundle(data)
+		refusalContaining(t, err, "bundle: not a gzip stream")
+		_, err = ReadBundle(data[:len(data)-4])
+		refusalContaining(t, err, "bundle: not a gzip stream")
+	})
 	t.Run("a name a refusal quotes is bounded", func(t *testing.T) {
 		_, err := ReadBundle(tgz(t, h.with("x\ny", []byte("x"))))
 		refusalContaining(t, err, `bundle: "x\ny" is not a bundle file`)

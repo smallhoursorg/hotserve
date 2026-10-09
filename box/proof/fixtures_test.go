@@ -421,10 +421,29 @@ func runFixtureTable(t *testing.T, fx *fixtures) {
 		_, err = VerifyChain(ctx, v, []*Commit{fx.commit(t, "head"), b}, alice, bob, baseline)
 		refusalContaining(t, err, b.ID+", between the commit this box runs and "+fx.commit(t, "head").ID+", is signed by a key this box did not list when it last applied ("+bob[1].Principal+"); the commit that adds the key must apply first — force main back to it, let the box apply it, then push the rest")
 		_, err = VerifyChain(ctx, v, []*Commit{fx.commit(t, "head"), b}, alice, alice, baseline)
-		refusalContaining(t, err, b.ID+", between the commit this box runs and ", ", is not signed; every commit on main must be")
+		refusalContaining(t, err, b.ID+", between the commit this box runs and ", ", is signed by a key this box did not list when it last applied (not in the new Caddyfile either);")
 		// The same key at HEAD is HEAD's own refusal.
 		_, err = VerifyChain(ctx, v, []*Commit{b}, alice, bob, baseline)
 		refusalContaining(t, err, b.ID+" is signed by a key that is not a signer in the Caddyfile this box runs")
+		// An altered intermediate signature keeps its own message: it
+		// is neither unsigned nor unlisted.
+		alteredMid := *fx.commit(t, "mid")
+		alteredMid.Payload = append([]byte{}, alteredMid.Payload...)
+		alteredMid.Payload[len(alteredMid.Payload)-1] ^= 1
+		_, err = VerifyChain(ctx, v, []*Commit{fx.commit(t, "head"), &alteredMid}, fx.signers, fx.signers, baseline)
+		refusalContaining(t, err, alteredMid.ID+" is signed by "+fx.signers[0].Principal+", but the signature does not verify")
+		// ssh-keygen that cannot run is the box's error, not a verdict
+		// (on a chain whose head is signed, so the verdict needs it).
+		broken := &Verifier{SSHKeygen: "/nonexistent/ssh-keygen", TempDir: t.TempDir()}
+		signed, err := Chain(fx.commit(t, "head"), fx.parentsFor(t, "head", baseline), baseline)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = VerifyChain(ctx, broken, signed, fx.signers, fx.signers, baseline)
+		var r *Refusal
+		if err == nil || errors.As(err, &r) {
+			t.Fatalf("want an error that is not a refusal, got %v", err)
+		}
 	})
 
 	t.Run("bundle round trip", func(t *testing.T) {
