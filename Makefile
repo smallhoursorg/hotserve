@@ -16,7 +16,7 @@ VERSION ?= $(shell (git describe --tags --exact-match 2>/dev/null || echo v0.0.0
 # Distro image for the package install smoke test (install-test).
 DISTRO ?= debian:13
 
-.PHONY: test test-integration vet tidy lint fuzz fuzz-list vulncheck secretscan build package install-test e2e soak e2e-logs clean
+.PHONY: test test-integration vet tidy lint fuzz fuzz-list vulncheck secretscan build package clean-debs install-test e2e soak e2e-logs clean
 
 test:
 	$(COMPOSE) run --rm dev go test -race -cover $(PKGS)
@@ -143,7 +143,10 @@ build:
 # packaging/nfpm.yaml. The packages carry the systemd unit, the starter
 # /etc/hotserve/Caddyfile and the data dirs; postinstall creates the
 # hotserve system user.
-package: build
+#
+# clean-debs runs before build, so a run that fails anywhere leaves no
+# .deb behind for install-test to certify in place of this one.
+package: clean-debs build
 	mkdir -p dist
 	for a in amd64 arm64; do \
 		cp build/hotserve-linux-$$a build/hotserve; \
@@ -153,6 +156,9 @@ package: build
 		done; \
 	done; \
 	rm -f build/hotserve
+
+clean-debs:
+	rm -f dist/hotserve_*.deb
 
 # Installs the freshly built .deb inside a systemd container (DISTRO
 # picks the base image) and runs the staged smoke test: install, unit
