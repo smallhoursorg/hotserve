@@ -57,7 +57,7 @@ func TestRedactorSafeList(t *testing.T) {
 	if out, _ := r.redact("current " + sha + " ok"); !strings.Contains(out, sha) {
 		t.Errorf("a safe-listed version was masked: %q", out)
 	}
-	if out, _ := (*redactor)(nil).redact("current " + sha + " ok"); strings.Contains(out, sha) {
+	if out, _ := (*Redactor)(nil).redact("current " + sha + " ok"); strings.Contains(out, sha) {
 		t.Errorf("without the safe list the same SHA must be masked: %q", out)
 	}
 	// A dotted version is tokenised the way layer 4 tokenises, so its
@@ -211,7 +211,7 @@ func TestRedactorBasicCredential(t *testing.T) {
 		{"Basic authentication is required", "Basic authentication is required"},
 		{"basic YWJjZGVmZ2hpams=", "basic YWJjZGVmZ2hpams="}, // decodes, but to no user:pass
 	} {
-		if got, _ := (*redactor)(nil).redact(tc.in); got != tc.want {
+		if got, _ := (*Redactor)(nil).redact(tc.in); got != tc.want {
 			t.Errorf("%q:\n got %q\nwant %q", tc.in, got, tc.want)
 		}
 	}
@@ -260,7 +260,7 @@ func TestRedactorSafeSpansSurviveShapes(t *testing.T) {
 	if out, _ := r.redact(in); out != in {
 		t.Errorf("a safe version was rewritten by a shape rule:\n got %s\nwant %s", out, in)
 	}
-	if out, _ := (*redactor)(nil).redact(in); !strings.Contains(out, "[redacted:github-token]") {
+	if out, _ := (*Redactor)(nil).redact(in); !strings.Contains(out, "[redacted:github-token]") {
 		t.Errorf("without the safe list the same shape must be caught: %s", out)
 	}
 }
@@ -323,7 +323,7 @@ func TestRedactorShapes(t *testing.T) {
 		{"prose is not an assignment", "secrets: the examples do not", "secrets: the examples do not"},
 		{"short assignment untouched", "password=short", "password=short"},
 	} {
-		if got, _ := (*redactor)(nil).redact(tc.in); got != tc.want {
+		if got, _ := (*Redactor)(nil).redact(tc.in); got != tc.want {
 			t.Errorf("%s:\n got %q\nwant %q", tc.name, got, tc.want)
 		}
 	}
@@ -346,7 +346,7 @@ func TestRedactorEntropy(t *testing.T) {
 		{"commit version", "0a1b2c3d4e5f", false},
 		{"lowercase plus digits only", "abcdefghijklmnopqrst1234567890", false},
 	} {
-		out, _ := (*redactor)(nil).redact("x " + tc.in + " y")
+		out, _ := (*Redactor)(nil).redact("x " + tc.in + " y")
 		if masked := strings.Contains(out, "[masked, "); masked != tc.masked {
 			t.Errorf("%s: masked=%v, want %v: %q", tc.name, masked, tc.masked, out)
 		}

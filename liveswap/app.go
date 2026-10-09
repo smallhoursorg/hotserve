@@ -254,7 +254,7 @@ type managedApp struct {
 	// readers take the snapshot accessors, never the fields.
 	specMu    sync.RWMutex
 	spec      *appSpec
-	verifiers []verifier // resolved deploy-auth trust sources; rewired every reload
+	verifiers []Verifier // resolved deploy-auth trust sources; rewired every reload
 	runner    runner
 	prober    prober
 	fetch     fetcher
@@ -341,7 +341,7 @@ func (ma *managedApp) rememberSecrets(path string, kvs []string) {
 // that cannot be read now (a rewrite mid-flight, a mode not yet fixed)
 // is not an error here — the next launch reports that — and the read
 // is retried on the next response until it succeeds.
-func (ma *managedApp) redactorFor(s statusSnapshot, names ...string) *redactor {
+func (ma *managedApp) redactorFor(s statusSnapshot, names ...string) *Redactor {
 	// The spec is read under secretsMu so the "which env_file is
 	// loaded" check and the spec it is checked against are one
 	// snapshot: a reload landing between the two could otherwise pair
@@ -417,7 +417,7 @@ func mergeSecrets(have, add []string) []string {
 // a rollback restores.
 type appConfigState struct {
 	spec      *appSpec
-	verifiers []verifier
+	verifiers []Verifier
 	logger    *zap.Logger
 	store     stateStore
 }
@@ -431,7 +431,7 @@ type appConfigState struct {
 // is read only when this managedApp has no runner yet, because a
 // pooled app keeps the runner — and so the connection — it was first
 // started with across every later reload.
-func (ma *managedApp) configure(owner any, spec *appSpec, verifiers []verifier, logger *zap.Logger, clients *fetchClients, manager systemdConn) {
+func (ma *managedApp) configure(owner any, spec *appSpec, verifiers []Verifier, logger *zap.Logger, clients *fetchClients, manager systemdConn) {
 	ma.specMu.Lock()
 	defer ma.specMu.Unlock()
 	changed := ma.spec != nil && !specEqual(ma.spec, spec)
@@ -471,7 +471,7 @@ func specEqual(a, b *appSpec) bool {
 }
 
 // currentVerifiers snapshots the app's deploy-auth trust sources.
-func (ma *managedApp) currentVerifiers() []verifier {
+func (ma *managedApp) currentVerifiers() []Verifier {
 	ma.specMu.RLock()
 	defer ma.specMu.RUnlock()
 	return ma.verifiers

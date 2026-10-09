@@ -89,7 +89,7 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			}
 			a.Root = d.Val()
 		case "deploy_trust":
-			tc, err := parseDeployTrust(d)
+			tc, err := ParseDeployTrust(d)
 			if err != nil {
 				return err
 			}
@@ -174,7 +174,7 @@ func (cfg *AppConfig) unmarshalBlock(d *caddyfile.Dispenser) error {
 			}
 			cfg.EnvFile = d.Val()
 		case "deploy_trust":
-			tc, err := parseDeployTrust(d)
+			tc, err := ParseDeployTrust(d)
 			if err != nil {
 				return err
 			}
@@ -323,7 +323,7 @@ func parseDurationArg(d *caddyfile.Dispenser, out *caddy.Duration) error {
 	return nil
 }
 
-// parseDeployTrust parses one `deploy_trust <preset> { ... }` block,
+// ParseDeployTrust parses one `deploy_trust <preset> { ... }` block,
 // at either the global or the per-app nesting level:
 //
 //	deploy_trust github {          # preset names the token issuer
@@ -335,7 +335,7 @@ func parseDurationArg(d *caddyfile.Dispenser, out *caddy.Duration) error {
 //	    public_key <path>
 //	}
 //	deploy_trust oidc  { issuer <url>; audience <aud>; ... }
-func parseDeployTrust(d *caddyfile.Dispenser) (TrustConfig, error) {
+func ParseDeployTrust(d *caddyfile.Dispenser) (TrustConfig, error) {
 	tc := TrustConfig{}
 	if !d.NextArg() {
 		return tc, d.Err("deploy_trust needs a preset: github, gitlab, oidc or local")

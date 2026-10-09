@@ -39,26 +39,26 @@ func TestLocalVerifier(t *testing.T) {
 
 	cases := []struct {
 		name  string
-		build func() (verifier, string)
+		build func() (Verifier, string)
 	}{
-		{"wrong key", func() (verifier, string) {
+		{"wrong key", func() (Verifier, string) {
 			v := base()
 			v.pub = otherPub
 			return v, mintTestToken(t, priv, "aud1", want)
 		}},
-		{"wrong audience", func() (verifier, string) {
+		{"wrong audience", func() (Verifier, string) {
 			return base(), mintTestToken(t, priv, "other", want)
 		}},
-		{"claim mismatch", func() (verifier, string) {
+		{"claim mismatch", func() (Verifier, string) {
 			return base(), mintTestToken(t, priv, "aud1", map[string]string{"repository": "evil/app"})
 		}},
-		{"missing claim", func() (verifier, string) {
+		{"missing claim", func() (Verifier, string) {
 			return base(), mintTestToken(t, priv, "aud1", nil)
 		}},
-		{"expired", func() (verifier, string) {
+		{"expired", func() (Verifier, string) {
 			return base(), mintExpiredToken(t, priv, "aud1", want)
 		}},
-		{"garbage", func() (verifier, string) {
+		{"garbage", func() (Verifier, string) {
 			return base(), "not-a-jwt"
 		}},
 	}
@@ -368,7 +368,7 @@ func TestAuthorizeNamesEverySourceItCouldNotConsult(t *testing.T) {
 		return strings.Join(out, " ")
 	}
 	bad := mintTestToken(t, priv, "other", nil) // the local source refuses it: wrong audience
-	for _, order := range [][]verifier{{local, down}, {down, local}} {
+	for _, order := range [][]Verifier{{local, down}, {down, local}} {
 		_, got, err := authorize(context.Background(), order, bad)
 		if err == nil || labels(got) != down.label() {
 			t.Fatalf("order %v: err = %v, down = %q, want a refusal naming %s", order, err, labels(got), down.label())
@@ -381,18 +381,18 @@ func TestAuthorizeNamesEverySourceItCouldNotConsult(t *testing.T) {
 	iss2 := newMockIssuer(t)
 	iss2.discoveryDown.Store(true)
 	down2 := &oidcVerifier{issuer: iss2.url, audience: "hotserve", client: iss2.client}
-	if _, got, err := authorize(context.Background(), []verifier{down, local, down2}, bad); err == nil || labels(got) != down.label()+" "+down2.label() {
+	if _, got, err := authorize(context.Background(), []Verifier{down, local, down2}, bad); err == nil || labels(got) != down.label()+" "+down2.label() {
 		t.Fatalf("two sources down: err = %v, down = %q, want both", err, labels(got))
 	}
 	// A source after the down one accepts the token: authorized, and
 	// the down one is still named.
 	good := mintTestToken(t, priv, "hotserve", nil)
-	if by, got, err := authorize(context.Background(), []verifier{down, local}, good); err != nil || by != local.label() || labels(got) != down.label() {
-		t.Fatalf("accepted past a down source: by = %q, down = %q, err = %v", by, labels(got), err)
+	if by, got, err := authorize(context.Background(), []Verifier{down, local}, good); err != nil || by.By != local.label() || labels(got) != down.label() {
+		t.Fatalf("accepted past a down source: by = %q, down = %q, err = %v", by.By, labels(got), err)
 	}
 	// Both up: nothing is down, and the bad token is a plain refusal.
 	iss.discoveryDown.Store(false)
-	if _, got, err := authorize(context.Background(), []verifier{local, down}, bad); err == nil || len(got) != 0 {
+	if _, got, err := authorize(context.Background(), []Verifier{local, down}, bad); err == nil || len(got) != 0 {
 		t.Fatalf("both sources up: err = %v, down = %q, want a plain refusal", err, labels(got))
 	}
 }
@@ -472,8 +472,8 @@ func TestAuthorizeAttributes(t *testing.T) {
 		{"without one", nil, "local:test-key"},
 	} {
 		by, _, err := authorize(ctx, local, mintTestToken(t, priv, "aud1", tc.claims))
-		if err != nil || by != tc.want {
-			t.Errorf("local %s: authorize = %q, %v; want %q", tc.name, by, err, tc.want)
+		if err != nil || by.By != tc.want {
+			t.Errorf("local %s: authorize = %q, %v; want %q", tc.name, by.By, err, tc.want)
 		}
 	}
 
@@ -487,8 +487,8 @@ func TestAuthorizeAttributes(t *testing.T) {
 		"sub": "repo:org/blog:ref:refs/heads/main",
 	}, time.Now().Add(5*time.Minute))
 	want := "oidc:" + iss.url + " repository=org/blog ref=refs/heads/main actor=alice"
-	if by, _, err := authorize(ctx, gh, tok); err != nil || by != want {
-		t.Errorf("github: authorize = %q, %v; want %q", by, err, want)
+	if by, _, err := authorize(ctx, gh, tok); err != nil || by.By != want {
+		t.Errorf("github: authorize = %q, %v; want %q", by.By, err, want)
 	}
 }
 
@@ -506,14 +506,14 @@ func TestAuthorizeSaysWhy(t *testing.T) {
 		kind: "oidc", issuer: iss.url, audience: "hotserve",
 		claims: map[string]string{"repository": "org/blog"}, attribution: attributionClaims["github"],
 	}}, iss.client)
-	both := append(append([]verifier{}, gh...), local...)
+	both := append(append([]Verifier{}, gh...), local...)
 	otherRSA, _ := rsa.GenerateKey(rand.Reader, 2048)
 	mint := func(aud string, claims map[string]string) string {
 		return iss.mint(t, iss.priv, aud, claims, time.Now().Add(5*time.Minute))
 	}
 	for _, tc := range []struct {
 		name string
-		vs   []verifier
+		vs   []Verifier
 		tok  string
 		want []string // each in the refusal, in this order
 	}{
@@ -532,7 +532,7 @@ func TestAuthorizeSaysWhy(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			by, _, err := authorize(ctx, tc.vs, tc.tok)
 			if err == nil {
-				t.Fatalf("authorized as %q", by)
+				t.Fatalf("authorized as %q", by.By)
 			}
 			got := err.Error()
 			at := 0
@@ -558,7 +558,7 @@ func TestAuthorizeSaysWhy(t *testing.T) {
 	} {
 		by, _, err := authorize(ctx, gh, tok)
 		if err == nil {
-			t.Fatalf("%s: authorized as %q", name, by)
+			t.Fatalf("%s: authorized as %q", name, by.By)
 		}
 		got := err.Error()
 		if len(got) > len(gh[0].label())+2+maxRefusalLen+len("...") {

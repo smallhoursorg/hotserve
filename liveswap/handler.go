@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -112,50 +113,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 	if ma != nil {
 		verifiers = ma.currentVerifiers()
 	}
-	who, down, refused := authorize(r.Context(), verifiers, bearerToken(r))
-	key := clientKey(r)
-	// A source the box could not consult is named here once per window
-	// per source, whatever the budgets and whether or not another
-	// source then accepted the token; a refusal is still charged below
-	// like any other — see unavailable for why both.
-	for _, u := range down {
-		if h.limiter.outage(u.label) {
-			h.logger.Warn("webhook auth could not consult a trust source",
-				zap.String("source", u.label), zap.String("app", loggedAppName(name)),
-				zap.String("remote", key), zap.String("reason", boundRefusal(u.Error())))
-		}
+	who, ok, err := authenticate(w, r, verifiers, h.logger, h.limiter, zap.String("app", loggedAppName(name)))
+	if !ok {
+		return err
 	}
-	if refused != nil {
-		// What a failure costs in the journal is the limiter's call
-		// (see authLimiter): the count of lines, and — the name and
-		// the refusal being request input, both logged bounded — the
-		// size of each. The refusal is for this journal only: the
-		// response below stays the same flat 401 for every reason, so
-		// a caller learns neither which apps exist nor what a source
-		// pins.
-		v := h.limiter.fail(key)
-		if v.log {
-			h.logger.Warn("webhook auth failed",
-				zap.String("app", loggedAppName(name)), zap.String("remote", key),
-				zap.String("refused", refused.Error()))
-		}
-		if v.trippedKey {
-			h.logger.Warn("webhook auth failures from this address throttled: further ones are answered 429 and not logged",
-				zap.String("remote", key), zap.Int("failures", authFailBudget), zap.Duration("window", authFailWindow))
-		}
-		if v.trippedGlobal {
-			h.logger.Warn("webhook auth failures throttled process-wide: further ones are not logged",
-				zap.Int("failures", authFailGlobalBudget), zap.Duration("window", authFailWindow))
-		}
-		if v.throttled {
-			w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(v.retryAfter.Seconds()))))
-			return respondJSON(w, http.StatusTooManyRequests, map[string]string{
-				"error": "too many failed deploy authentications from this address; retry later",
-			}, nil)
-		}
-		return unauthorized(w)
-	}
-	h.limiter.clear(key)
 	if ma == nil {
 		return respondJSON(w, http.StatusNotFound, map[string]string{"error": fmt.Sprintf("unknown app %q", name)}, nil)
 	}
@@ -174,11 +135,69 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 		s := ma.status()
 		return respondJSON(w, http.StatusOK, s, ma.redactorFor(s))
 	case http.MethodPost:
-		return h.deploy(w, r, ma, who)
+		return h.deploy(w, r, ma, who.By)
 	default:
 		w.Header().Set("Allow", "GET, POST")
 		return respondJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"}, ma.redactorFor(statusSnapshot{}))
 	}
+}
+
+// authenticate is the preamble every webhook request passes before
+// anything else is revealed, and the one place a deploy token is
+// judged: the bearer against verifiers (authorize), then what a
+// refusal costs the journal (authLimiter). A refused request is
+// answered here — the flat 401 whatever the reason, or 429 once the
+// address's budget is spent — and ok is false, with the response
+// write's error. scope is what the journal lines carry besides the
+// address and the reason: this webhook names the app, bounded, since
+// the limiter bounds how many lines a caller can write and not how
+// long each is. The box webhook runs the same preamble through
+// Authenticate (export.go), on the limiter every mount shares.
+func authenticate(w http.ResponseWriter, r *http.Request, verifiers []Verifier, logger *zap.Logger, limiter *authLimiter, scope ...zap.Field) (Identity, bool, error) {
+	who, down, refused := authorize(r.Context(), verifiers, bearerToken(r))
+	key := clientKey(r)
+	// A source the box could not consult is named here once per window
+	// per source, whatever the budgets and whether or not another
+	// source then accepted the token; a refusal is still charged below
+	// like any other — see unavailable for why both.
+	for _, u := range down {
+		if limiter.outage(u.label) {
+			logger.Warn("webhook auth could not consult a trust source", slices.Concat(
+				[]zap.Field{zap.String("source", u.label)}, scope,
+				[]zap.Field{zap.String("remote", key), zap.String("reason", boundRefusal(u.Error()))})...)
+		}
+	}
+	if refused != nil {
+		// What a failure costs in the journal is the limiter's call
+		// (see authLimiter): the count of lines, and — the name and
+		// the refusal being request input, both logged bounded — the
+		// size of each. The refusal is for this journal only: the
+		// response below stays the same flat 401 for every reason, so
+		// a caller learns neither which apps exist nor what a source
+		// pins.
+		v := limiter.fail(key)
+		if v.log {
+			logger.Warn("webhook auth failed", slices.Concat(scope,
+				[]zap.Field{zap.String("remote", key), zap.String("refused", refused.Error())})...)
+		}
+		if v.trippedKey {
+			logger.Warn("webhook auth failures from this address throttled: further ones are answered 429 and not logged",
+				zap.String("remote", key), zap.Int("failures", authFailBudget), zap.Duration("window", authFailWindow))
+		}
+		if v.trippedGlobal {
+			logger.Warn("webhook auth failures throttled process-wide: further ones are not logged",
+				zap.Int("failures", authFailGlobalBudget), zap.Duration("window", authFailWindow))
+		}
+		if v.throttled {
+			w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(v.retryAfter.Seconds()))))
+			return Identity{}, false, respondJSON(w, http.StatusTooManyRequests, map[string]string{
+				"error": "too many failed deploy authentications from this address; retry later",
+			}, nil)
+		}
+		return Identity{}, false, unauthorized(w)
+	}
+	limiter.clear(key)
+	return who, true, nil
 }
 
 // deploy dispatches on the request shape:
@@ -390,7 +409,7 @@ func (h *Handler) mapDeployResult(w http.ResponseWriter, ma *managedApp, err err
 // deployOutcome is the status code and body a pipeline outcome maps
 // to, with the app's filter for it; a nil body is a client that hung
 // up, which nothing is written for.
-func deployOutcome(ma *managedApp, err error) (int, any, *redactor) {
+func deployOutcome(ma *managedApp, err error) (int, any, *Redactor) {
 	status := ma.status()
 	// A refused pin names two digests, and a digest is the shape of a
 	// token the filter masks: told they are names — the deployer's own
@@ -610,7 +629,7 @@ func stageUpload(body io.Reader, tmpDir string, maxBytes int64) (string, error) 
 // and nil only for the bodies written before an app is known (401,
 // 429, 404), where the shape and entropy layers still apply. When a known secret was found
 // the object gains a `redacted_env` field naming the keys.
-func respondJSON(w http.ResponseWriter, code int, v any, r *redactor) error {
+func respondJSON(w http.ResponseWriter, code int, v any, r *Redactor) error {
 	raw, err := json.Marshal(v)
 	if err != nil {
 		return err

@@ -214,7 +214,7 @@ func releaseNames(releasesDir string) ([]string, error) {
 // values to know. Its safe strings are the names the response filter
 // exempts: the version and its pin, the app's dirs, the releases on
 // disk — and none equal to a known value (redact.go, rule 1).
-func (ma *managedApp) recordRedactor(c collaborators, result deployResult) (*redactor, string) {
+func (ma *managedApp) recordRedactor(c collaborators, result deployResult) (*Redactor, string) {
 	ma.secretsMu.Lock()
 	kvs := append([]string(nil), ma.secrets...)
 	ma.secretsMu.Unlock()

@@ -308,7 +308,7 @@ reason they were found at all was somebody building this map by hand.
 | 2 | `runner.go`, `sandbox.go`, `download.go`, `state.go` |
 | 3 | `runner_systemd.go`, `systemd_dbus.go` |
 | 4 | `app.go`, `watchdog.go`, `sweep.go` |
-| 5 | `liveswap.go`, `handler.go`, `upstreams.go`, `caddyfile.go`, `deploytoken_cmd.go` |
+| 5 | `liveswap.go`, `handler.go`, `upstreams.go`, `caddyfile.go`, `deploytoken_cmd.go`, `export.go` |
 
 A file may use a lower layer or its own. Sideways is fine: a layer is a
 concern, and a concern is sometimes split across files — `appdirs.go`
@@ -346,6 +346,7 @@ backwards edges reappearing *despite* this table.
 | `appdirs.go` | `appDirs`: the on-disk layout for one app. Pure path arithmetic — no state, no lock |
 | `caddyfile.go` | all Caddyfile parsing (global option, directive, upstreams); NO defaults here — Provision owns them |
 | `handler.go` | webhook auth, payload validation, status endpoint |
+| `export.go` | the box subsystem's names for what the webhook already does: `Authenticate` (the auth preamble, on the limiter every mount shares), `NewTrust` (Provision's trust wiring), `RespondJSON` and `NewEnvRedactor` (the response filter). Nothing of its own; `Verifier`, `Identity`, `Redactor` and `ParseDeployTrust` are exported where they live |
 | `authlimit.go` | what a failed webhook auth costs the journal: per-address and process-wide budgets, on the injected clock |
 | `upstreams.go` | dynamic upstream source (the cutover read side) |
 | `runner.go` / `runner_systemd.go` / `systemd_dbus.go` | runner interface + the systemd transient-unit implementation + its D-Bus client |
@@ -553,3 +554,7 @@ Dated one-liners; the full text of each is in git.
   down as the rule rather than the record growing a launch
   disposition, and status now reports the unit's own `ExecStart` so
   the drift is visible. `pid` left `state.json` with it.
+- 2026-10-09 (#PRNUM) — The webhook's auth preamble, trust wiring and
+  response filter gained exported names for the box subsystem
+  (`export.go`), and `authorize` hands back the token's claims beside
+  the attribution. No behaviour changed.

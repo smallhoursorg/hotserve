@@ -94,7 +94,11 @@ const (
 	entropyHex    = 3.0
 )
 
-type redactor struct {
+// Redactor is the filter: the layers above, over one app's known
+// values and safe strings. The name is exported for the box webhook
+// (export.go), which has bodies of its own to send; a nil *Redactor
+// is layers 3 and 4 alone.
+type Redactor struct {
 	// secrets holds every form of every known value, longest first so
 	// a value that contains another is replaced whole.
 	secrets []*secretForm
@@ -126,16 +130,16 @@ type secretForm struct {
 
 // newRedactor takes env_file KEY=VALUE pairs and the strings that must
 // survive the heuristics. A safe string equal to a value is dropped
-// (rule 1): whoever named it, it exempts nothing. A nil *redactor is
+// (rule 1): whoever named it, it exempts nothing. A nil *Redactor is
 // usable: layers 3 and 4 only.
-func newRedactor(envFile []string, safe []string) *redactor {
+func newRedactor(envFile []string, safe []string) *Redactor {
 	known := make(map[string]bool, len(envFile))
 	for _, kv := range envFile {
 		if _, value, ok := strings.Cut(kv, "="); ok {
 			known[value] = true
 		}
 	}
-	r := &redactor{safeExact: make(map[string]bool, len(safe)), safeTokens: make(map[string]bool, len(safe))}
+	r := &Redactor{safeExact: make(map[string]bool, len(safe)), safeTokens: make(map[string]bool, len(safe))}
 	for _, s := range safe {
 		if s == "" || known[s] {
 			continue
@@ -322,7 +326,7 @@ var entropyTokenRe = regexp.MustCompile(`[A-Za-z0-9+=_-]{20,}`)
 // word of the outcome vocabulary is replaced everywhere but where it
 // stands as an outcome (rule 3). Markers contain no form, so a second
 // pass over its own output changes nothing.
-func (r *redactor) replaceKnown(s string, seen map[string]bool) string {
+func (r *Redactor) replaceKnown(s string, seen map[string]bool) string {
 	if r == nil {
 		return s
 	}
@@ -381,7 +385,7 @@ func reportedKeys(seen map[string]bool) []string {
 // here as in a body: a value that is a word of the outcome vocabulary
 // stands where the text spells it as an outcome pair. Every body goes
 // through redactJSON; this is the text form, for tests.
-func (r *redactor) redact(s string) (string, []string) {
+func (r *Redactor) redact(s string) (string, []string) {
 	seen := map[string]bool{}
 	s = r.filter(s, seen)
 	s = r.replaceKnown(s, seen)
@@ -391,7 +395,7 @@ func (r *redactor) redact(s string) (string, []string) {
 // filter is layers 1 to 4 in order, with the safe strings held out of
 // the heuristic layers: a version shaped like a provider token, or a
 // path with a generated-looking segment, comes back as it went in.
-func (r *redactor) filter(s string, seen map[string]bool) string {
+func (r *Redactor) filter(s string, seen map[string]bool) string {
 	s = r.replaceKnown(s, seen)
 	s, restore := r.protectSafe(s)
 	s = r.heuristics(s)
@@ -409,7 +413,7 @@ const safeSpanMinLen = 12
 // placeholder no rule can match (control characters are in no rule's
 // alphabet) and returns the function that swaps them back. Longest
 // first, so a safe string containing another is protected whole.
-func (r *redactor) protectSafe(s string) (string, func(string) string) {
+func (r *Redactor) protectSafe(s string) (string, func(string) string) {
 	if r == nil || len(r.safeExact) == 0 {
 		return s, func(s string) string { return s }
 	}
@@ -438,7 +442,7 @@ func (r *redactor) protectSafe(s string) (string, func(string) string) {
 }
 
 // heuristics is layers 3 and 4.
-func (r *redactor) heuristics(s string) string {
+func (r *Redactor) heuristics(s string) string {
 	for _, rule := range shapeRules {
 		s = rule.re.ReplaceAllString(s, rule.repl)
 	}
@@ -489,7 +493,7 @@ func (r *redactor) heuristics(s string) string {
 // body that is still not JSON at the end — a value equal to the
 // response's own punctuation, twice over — becomes the one body that
 // can contain nothing: a marker under 8 characters.
-func (r *redactor) redactJSON(raw []byte) string {
+func (r *Redactor) redactJSON(raw []byte) string {
 	seen := map[string]bool{}
 	var body string
 	if r != nil && r.withhold != "" {
@@ -525,7 +529,7 @@ func (r *redactor) redactJSON(raw []byte) string {
 // pass; what it returns is the bytes written, or a withheld body when
 // a known value overlapped the body's structure or one of its
 // outcomes.
-func (r *redactor) filterBody(raw string, seen map[string]bool) string {
+func (r *Redactor) filterBody(raw string, seen map[string]bool) string {
 	outcomes := len(outcomePairRe.FindAllStringIndex(raw, -1))
 	body := r.filter(raw, seen)
 	if !json.Valid([]byte(body)) {

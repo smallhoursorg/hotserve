@@ -126,12 +126,12 @@ type App struct {
 	processManager  managerClient
 	allowlist       []artifactAllowEntry
 	globalTrust     []trustSource // resolved global DeployTrust, for the unknown-app path
-	globalVerifiers []verifier
+	globalVerifiers []Verifier
 	// appVerifiers is each app's resolved deploy_trust, built once in
 	// Provision and installed by Start. The OIDC discovery/JWKS cache
 	// lives on the verifier object, so the set Provision warms must be
 	// the set the handler is later handed — not a fresh resolution.
-	appVerifiers map[string][]verifier
+	appVerifiers map[string][]Verifier
 }
 
 // AppConfig defines one managed application.
@@ -342,8 +342,8 @@ func (a *App) Provision(ctx caddy.Context) error {
 	// known app is not slower (by JWKS-fetch latency) than an unknown one.
 	// The objects warmed here are the ones Start installs (appVerifiers):
 	// resolving again at Start would hand the handler a cold set.
-	a.appVerifiers = make(map[string][]verifier, len(specs))
-	sets := [][]verifier{a.globalVerifiers}
+	a.appVerifiers = make(map[string][]Verifier, len(specs))
+	sets := [][]Verifier{a.globalVerifiers}
 	for name, spec := range specs {
 		vs := resolveVerifiers(spec.trust, clients.jwks)
 		a.appVerifiers[name] = vs

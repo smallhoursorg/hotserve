@@ -247,26 +247,52 @@ func loadEd25519PublicKey(path string) (ed25519.PublicKey, error) {
 	return key, nil
 }
 
-// verifier authenticates a raw bearer JWT for one trust source.
-type verifier interface {
+// Verifier authenticates a raw bearer JWT for one trust source. The
+// name is exported for the box subsystem, which holds the verifiers
+// NewTrust builds and hands them to Authenticate (export.go); the
+// methods are not, so every implementation is this package's.
+type Verifier interface {
 	// verify returns a nil error iff the token's signature and standard
 	// claims are valid and every configured claim constraint matches,
-	// and with it who the deploy is recorded under (attribute). The
+	// and with it who the token is (Identity): who the deploy is
+	// recorded under (attribute), and the claims it carries. The
 	// error says what failed — signature, exp, audience, a claim — and
 	// is for the operator's journal, never a response. An error that
 	// is an unavailable (errors.As) says the source could not be
 	// consulted at all, which is the box's failure, not the token's.
-	verify(ctx context.Context, rawToken string) (by string, err error)
+	verify(ctx context.Context, rawToken string) (Identity, error)
 	// label names the source the way deployed_by and the journal do:
 	// oidc:<issuer> or local:<public key path>.
 	label() string
 }
 
+// Identity is who a verified token is, as the source that accepted it
+// saw it. By is the attribution a deploy is recorded under — the
+// source's label and the token's attribution claims (attribute) — and
+// the one thing liveswap's own webhook uses of it. The claims are the
+// token's whole verified claim set, for a caller whose check the
+// attribution does not carry: the box webhook binds the bundle it is
+// handed to the token's `sha` (box/DESIGN-box.md, "Token ↔ bundle").
+type Identity struct {
+	By     string
+	claims map[string]any
+}
+
+// Claim is the named claim rendered the way matchClaims compares one
+// against the config — a json.Number by its source digits, never %v
+// on a float64 (decodeClaims) — and ok=false for a claim that is
+// absent or not a scalar: an array or an object is never an identity
+// value, and a caller must not be handed an empty string it could
+// mistake for one.
+func (id Identity) Claim(name string) (value string, ok bool) {
+	return claimScalar(id.claims[name])
+}
+
 // resolveVerifiers turns validated trust sources into live verifiers.
 // It is infallible: key loading and preset validation already happened
 // in buildTrust, so a config reload can rewire auth without error.
-func resolveVerifiers(sources []trustSource, jwksClient *http.Client) []verifier {
-	out := make([]verifier, 0, len(sources))
+func resolveVerifiers(sources []trustSource, jwksClient *http.Client) []Verifier {
+	out := make([]Verifier, 0, len(sources))
 	for _, ts := range sources {
 		switch ts.kind {
 		case "oidc":
@@ -289,7 +315,7 @@ func resolveVerifiers(sources []trustSource, jwksClient *http.Client) []verifier
 // verification of a *known* app — does not pay the discovery latency
 // that would otherwise distinguish it (by timing) from an unknown app.
 // Errors are ignored; a real request retries.
-func warmVerifiers(verifierSets ...[]verifier) {
+func warmVerifiers(verifierSets ...[]Verifier) {
 	for _, set := range verifierSets {
 		for _, v := range set {
 			if ov, ok := v.(*oidcVerifier); ok {
@@ -329,26 +355,27 @@ func (u unavailable) Error() string { return u.err.Error() }
 func (u unavailable) Unwrap() error { return u.err }
 
 // authorize returns who the first verifier that accepts the token
-// records the deploy under — its label and the token's attribution
-// claims (attribute), for the deploy record and audit log. When none
+// says it is (Identity): the label and attribution claims the deploy
+// is recorded under, for the deploy record and audit log, and the
+// token's claims for a caller that needs one of them. When none
 // does, the error says why each source refused, one entry per source
 // in config order (or the one reason no source was tried), for the
 // operator's journal. down is every source that could not be
 // consulted before that point, accepted or not: the journal must say
 // so either way. The response stays a flat 401 whatever the reason
 // (see Handler.ServeHTTP), so nothing here reaches a caller.
-func authorize(ctx context.Context, verifiers []verifier, rawToken string) (by string, down []unavailable, err error) {
+func authorize(ctx context.Context, verifiers []Verifier, rawToken string) (who Identity, down []unavailable, err error) {
 	if rawToken == "" {
-		return "", nil, errors.New("no bearer token in Authorization header")
+		return Identity{}, nil, errors.New("no bearer token in Authorization header")
 	}
 	if len(verifiers) == 0 {
-		return "", nil, errors.New("no deploy_trust source resolves for this app")
+		return Identity{}, nil, errors.New("no deploy_trust source resolves for this app")
 	}
 	refused := make([]string, 0, len(verifiers))
 	for _, v := range verifiers {
-		by, err := v.verify(ctx, rawToken)
+		who, err := v.verify(ctx, rawToken)
 		if err == nil {
-			return by, down, nil
+			return who, down, nil
 		}
 		var u unavailable
 		if errors.As(err, &u) {
@@ -358,7 +385,7 @@ func authorize(ctx context.Context, verifiers []verifier, rawToken string) (by s
 		// config, and it must survive however long the reason is.
 		refused = append(refused, v.label()+": "+boundRefusal(err.Error()))
 	}
-	return "", down, errors.New(strings.Join(refused, "; "))
+	return Identity{}, down, errors.New(strings.Join(refused, "; "))
 }
 
 // maxRefusalLen bounds one source's reason in the journal. A reason
@@ -479,10 +506,10 @@ func (v *oidcVerifier) ensure(ctx context.Context) (*oidc.IDTokenVerifier, error
 // refusal, which would lose the journal line naming the source.
 const keyFetchFailed = "failed to verify signature: fetching keys"
 
-func (v *oidcVerifier) verify(ctx context.Context, rawToken string) (string, error) {
+func (v *oidcVerifier) verify(ctx context.Context, rawToken string) (Identity, error) {
 	idv, err := v.ensure(ctx)
 	if err != nil {
-		return "", err
+		return Identity{}, err
 	}
 	tok, err := idv.Verify(oidc.ClientContext(ctx, v.client), rawToken)
 	if err != nil {
@@ -493,25 +520,25 @@ func (v *oidcVerifier) verify(ctx context.Context, rawToken string) (string, err
 		// A caller that went away mid-fetch gets the same text (the
 		// fetch waits on its ctx) and is not an outage.
 		if ctx.Err() == nil && strings.HasPrefix(err.Error(), keyFetchFailed) {
-			return "", unavailable{v.label(), err}
+			return Identity{}, unavailable{v.label(), err}
 		}
-		return "", err
+		return Identity{}, err
 	}
 	// go-oidc unmarshals into json.RawMessage by copying the verified
 	// claim bytes; decodeClaims then re-parses them with numbers kept as
 	// json.Number (see decodeClaims for why %v on a float64 is unsafe).
 	var raw json.RawMessage
 	if err := tok.Claims(&raw); err != nil {
-		return "", err
+		return Identity{}, err
 	}
 	claims, err := decodeClaims(raw)
 	if err != nil {
-		return "", err
+		return Identity{}, err
 	}
 	if err := matchClaims(v.claims, claims); err != nil {
-		return "", presentedErr(v.attribution, claims, err)
+		return Identity{}, presentedErr(v.attribution, claims, err)
 	}
-	return attribute(v.label(), v.attribution, claims), nil
+	return Identity{By: attribute(v.label(), v.attribution, claims), claims: claims}, nil
 }
 
 // decodeClaims unmarshals a JWT claim set with numbers preserved as
@@ -545,41 +572,41 @@ type localVerifier struct {
 
 func (v *localVerifier) label() string { return "local:" + v.keyPath }
 
-func (v *localVerifier) verify(_ context.Context, rawToken string) (string, error) {
+func (v *localVerifier) verify(_ context.Context, rawToken string) (Identity, error) {
 	tok, err := jwt.ParseSigned(rawToken, []jose.SignatureAlgorithm{jose.EdDSA})
 	if err != nil {
-		return "", err
+		return Identity{}, err
 	}
 	var std jwt.Claims
 	var raw json.RawMessage
 	// Claims verifies the signature against v.pub, then unmarshals the
 	// payload into both the standard-claims struct and the raw bytes.
 	if err := tok.Claims(v.pub, &std, &raw); err != nil {
-		return "", err
+		return Identity{}, err
 	}
 	// Decode with numbers kept as json.Number, so a numeric claim in a
 	// hand-minted local token compares the same way as an OIDC one.
 	all, err := decodeClaims(raw)
 	if err != nil {
-		return "", err
+		return Identity{}, err
 	}
 	// ValidateWithLeeway only checks exp when present, so a local token
 	// with no expiry would be accepted forever. Require it — the
 	// short-lived-token guarantee depends on it.
 	if std.Expiry == nil {
-		return "", fmt.Errorf("local token has no exp claim")
+		return Identity{}, fmt.Errorf("local token has no exp claim")
 	}
 	expected := jwt.Expected{Time: time.Now()}
 	if v.audience != "" {
 		expected.AnyAudience = jwt.Audience{v.audience}
 	}
 	if err := std.ValidateWithLeeway(expected, oidcLeeway); err != nil {
-		return "", err
+		return Identity{}, err
 	}
 	if err := matchClaims(v.claims, all); err != nil {
-		return "", presentedErr(v.attribution, all, err)
+		return Identity{}, presentedErr(v.attribution, all, err)
 	}
-	return attribute(v.label(), v.attribution, all), nil
+	return Identity{By: attribute(v.label(), v.attribution, all), claims: all}, nil
 }
 
 // presentedErr is a claim refusal followed by the identity the token
