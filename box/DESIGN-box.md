@@ -153,13 +153,22 @@ disk is unchanged; the result names the step (messages in "Refusals").
    16 MiB, declared as `application/gzip`, `application/x-gzip` or
    `application/octet-stream`; another method is 405, another media
    type 415, a larger body 413, all after authentication. One push at
-   a time: a second `POST` while one is *pending* is 409. Pending is a
-   fact on disk, not in memory — the handler is re-instantiated by the
-   very reload a push causes — and it is defined as: a `stage/<id>.auth`
-   exists, younger than fifteen minutes (the workflow's own poll
-   bound), for which no terminal `out/<id>.json` exists. It begins when
-   the handler writes `.auth`, which it does only *after* the bundle is
-   in `in/` (step 7), and ends at the terminal result; so the T6 bound
+   a time: a second `POST` while one is *pending* is 409. Admission is
+   serialised by a non-blocking `flock` on `stage/lock`, taken before
+   the pending check and released only after step 7 has written
+   `.auth`: a `POST` that finds it held is 409 at once, before it reads
+   a body, so two concurrent authenticated pushes cannot both observe
+   "no marker" and both parse, validate and enqueue 16 MiB. The lock is
+   on a file, not in memory, and `flock` conflicts between distinct
+   open file descriptions within one process, so it holds across the
+   reload that re-instantiates the handler; a crash releases it with
+   the descriptor. Pending itself is a fact on disk — the handler is
+   re-instantiated by the very reload a push causes — and it is defined
+   as: a `stage/<id>.auth` exists, younger than fifteen minutes (the
+   workflow's own poll bound), for which no terminal `out/<id>.json`
+   exists. It begins when the handler writes `.auth`, which it does
+   only *after* the bundle is in `in/` (step 7) and while it still
+   holds the admission lock, and ends at the terminal result; so the T6 bound
    "one pending bundle" holds through the reload, a push that follows
    another within its reload is told 409 — naming the pending id and
    its age, and `journalctl -u hotserve-box-apply.path` for one that
@@ -251,6 +260,7 @@ disk is unchanged; the result names the step (messages in "Refusals").
    transaction removes, step 20). The record is one file,
    `txn.json` — `{id, commit, path, signer, origin (applier|init), prev
    (the previous Caddyfile's bytes, base64), prev_sha256, new_sha256,
+   diff (redacted, at most 64 KiB, cut with a note), apps, box_webhook,
    phase}` — written
    atomically (temporary name, rename, `fsync`) before anything else
    changes and rewritten the same way at each phase change, so there is
@@ -301,8 +311,12 @@ disk is unchanged; the result names the step (messages in "Refusals").
    changed" — rewriting the `verified` result so the workflow's poll
    ends. So "a result with no record" means done only when the result
    is terminal. Recovery fills a terminal result's `signer`, `diff`,
-   `apps` and `box_webhook` from the `verified` result already in
-   `out/<id>.json` and the record's `signer`; it re-reads no bundle. In every case the result is
+   `apps` and `box_webhook` from the record alone, which carries all
+   four (a `no_change` transaction has no `verified` result to take
+   them from, and an `init` transaction has no result at all); it
+   re-reads no bundle. A record with `origin: init` and no `work/`
+   entry writes no result — `init`'s caller saw its exit, or did not —
+   and only the journal line says how recovery finished it. In every case the result is
    written first and the record removed after it, so a crash inside
    recovery is recovered the same way. A bundle is never resumed, because it was read once and a
    crash is not a reason to read it again (the workflow re-runs the
@@ -555,10 +569,11 @@ Written before the code, as liveswap's deploy-record store was.
 | Path | Mode | Owner | Rule |
 |---|---|---|---|
 | `/etc/hotserve/Caddyfile` | 0644 | root:root | Written only by root: `init`, the applier, the console. Read by hotserve (serving), by the handler (signers for the pre-check) and by the applier (the signer list and the rollback copy). The conffile the package ships. |
-| `/var/lib/hotserve-box/txn.json` | 0600 | root:root | The transaction record, one file written atomically: `{id, commit, path, signer, origin, prev (base64 of the previous Caddyfile), prev_sha256, new_sha256, phase}`. Written before `Caddyfile` is replaced with `phase: installing`, rewritten at each phase change (`swapped`, `applied`, `rolling_back`), removed only after the terminal result is written (step 20), whichever way the transaction ended. Its presence at startup therefore means exactly "a transaction has no terminal result yet", which the applier (step 9) and `init` settle from its `phase` before anything else; there is no partial state, since one rename makes or unmakes it. Deliberately not `/etc/hotserve/Caddyfile.prev`: `bin/push` and its sudoers line write that name, and the path unit must never fire on a legacy push. |
+| `/var/lib/hotserve-box/txn.json` | 0600 | root:root | The transaction record, one file written atomically: `{id, commit, path, signer, origin, prev (base64 of the previous Caddyfile), prev_sha256, new_sha256, diff, apps, box_webhook, phase}` — everything a terminal result needs, so recovery reads nothing else. Written before `Caddyfile` is replaced with `phase: installing`, rewritten at each phase change (`swapped`, `applied`, `rolling_back`), removed only after the terminal result is written (step 20), whichever way the transaction ended. Its presence at startup therefore means exactly "a transaction has no terminal result yet", which the applier (step 9) and `init` settle from its `phase` before anything else; there is no partial state, since one rename makes or unmakes it. Deliberately not `/etc/hotserve/Caddyfile.prev`: `bin/push` and its sudoers line write that name, and the path unit must never fire on a legacy push. |
 | `/etc/hotserve/age/` | 0700 | root:root | Reserved, empty, created by `init`; the secrets PR puts the box's age key here. |
 | `/var/lib/hotserve-box/` | 2750 | root:hotserve | Created by `tmpfiles.d`, not by either process. Setgid, so `applied.json` written here by root is born group `hotserve` without a `chown` (the unit has no `CAP_CHOWN`, and root is not in the group). Not under `/var/lib/hotserve`, which is 0750 hotserve:hotserve. Joins `sandboxHotservePaths` (liveswap/sandbox.go): never a bind source. |
 | `…/stage/` | 0700 | hotserve:hotserve | The handler assembles a bundle here. Not watched. |
+| `…/stage/lock` | 0600 | hotserve:hotserve | The admission lock (step 2): a non-blocking `flock` held from the pending check through the `.auth` write, so admission is atomic across concurrent requests and across the reload. Distinct from root's `lock`, which serialises applies. |
 | `…/stage/<id>.auth` | 0600 | hotserve:hotserve | `{sha256 of the bearer token that posted <id>, exp, posted}`, written only after `in/<id>.tar` is in place (step 7). Two jobs: it is the *pending* marker (step 2) — a push is pending while this exists, is under fifteen minutes old, and no terminal `out/<id>.json` does — and it lets that token read `out/<id>.json` after a reload changed `deploy_trust` ("Handler contract"), until `exp`. Not removed on a read, because a read is not a delivery: the response can fail after the file is gone, and the retry must still be authorised. Swept by the handler once `posted` is a day old and no `out/<id>.json` remains, the same age at which root sweeps results, so a `404` means swept, never "not yet". A digest, never the token; root has no use for it. |
 | `…/in/` | 0770 | root:hotserve | The handler renames a complete bundle in; the applier renames everything out before reading anything. `DirectoryNotEmpty=` watches it, so it must be empty on every applier exit, or the path unit re-triggers until its start-rate limit fails it. |
 | `…/in/<id>.tar` | 0644 | hotserve:hotserve | `<id>` matches `^[0-9a-f]{32}$`: 16 hex of the handler's nanosecond clock, then 16 random (step 9); a name that does not match — or an entry that is not a regular file at all — is moved to `work/` and refused like any other, which the unit's `CAP_DAC_OVERRIDE`/`CAP_FOWNER` exist to guarantee. The content is a public commit; 0644. |
