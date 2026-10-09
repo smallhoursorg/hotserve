@@ -191,18 +191,27 @@ disk is unchanged; the result names the step (messages in "Refusals").
 **In the applier (`hotserve box apply`, root, one shot, path-triggered):**
 
 9. **Recover, then take.** Under an exclusive lock, the applier first
-   settles whatever a crash left behind, before it looks at `in/`. If
-   `/etc/hotserve/Caddyfile.prev` exists, an install was interrupted
-   between the swap and a successful reload: the previous file is
-   renamed back over `Caddyfile` and hotserve reloaded, exactly as a
-   failed reload is handled (step 19) — `applied.json` is written only
-   after a reload succeeds, so it still names the previous commit and
-   nothing disagrees. Every entry left in `work/` is then given a
-   terminal result, `failed` — "interrupted; the previous Caddyfile is
-   on disk and running" — and removed; a bundle is never resumed,
-   because it was read once and a crash is not a reason to read it
-   again (the workflow re-runs the push). Only then is every entry of
-   `in/` renamed into `work/` and processed in lexical order of id. An id is 32
+   settles whatever a crash left behind, before it looks at `in/`; the
+   path unit watches `work/` and the `.prev` marker as well as `in/`,
+   so a crash that left either behind starts the applier again, at
+   boot included. If `/etc/hotserve/Caddyfile.prev` exists, an install
+   was interrupted between the swap and a successful reload: the
+   previous file is renamed back over `Caddyfile` (which removes the
+   marker whatever happens next) and, if hotserve is active, reloaded
+   — the same handling as a failed reload (step 19). `applied.json` is
+   written only after a reload succeeds, so it still names the
+   previous commit and nothing disagrees. Every entry left in `work/`
+   is then given a terminal result that says what is true and removed:
+   with no `.prev` found, `failed` — "interrupted before the Caddyfile
+   changed; nothing changed"; with `.prev` restored and the reload
+   successful, `rolled_back` — "interrupted; the previous Caddyfile is
+   back and running"; restored but hotserve not running, `failed` —
+   "interrupted; the previous Caddyfile is on disk; hotserve is not
+   running"; restored and the reload failed, `unknown`, with its usual
+   message. A bundle is never resumed, because it was read once and a
+   crash is not a reason to read it again (the workflow re-runs the
+   push). Only then is every entry of `in/` renamed into `work/` and
+   processed in lexical order of id. An id is 32
    lowercase hex characters: the first 16 are the handler's clock in
    nanoseconds when it accepted the request, the last 16 random, so
    lexical order is arrival order by the handler's clock. The order
@@ -288,7 +297,12 @@ disk is unchanged; the result names the step (messages in "Refusals").
     two *applied* pushes — add the new key, let the box apply it, then
     remove the old one — because a single push carrying both commits
     has its second commit signed by a key the box does not list yet
-    (step 14). This guard checks presence, not reachability; a typo in
+    (step 14). `deploy_trust` may change freely: the token that posted
+    the bundle keeps reading that bundle's result after the reload
+    (see "Handler contract"), so a push that moves the repository or
+    narrows a claim still sees its own outcome, and the *next* run is
+    the one the new trust judges. This guard checks presence, not
+    reachability; a typo in
     a `claim` or a key that does not match any laptop passes it. The
     guarantee behind it is the console ("At 3am").
 16. **Change?** The incoming buffer is compared with the installed
@@ -318,8 +332,10 @@ disk is unchanged; the result names the step (messages in "Refusals").
     temporary name in `/etc/hotserve/` (mode 0644, root) and renamed
     over `Caddyfile`. A failure writing either temporary (`ENOSPC`,
     say) leaves `Caddyfile` untouched, removes whatever temporary was
-    made, and ends the push as `failed` — "the install failed before
-    the Caddyfile changed; nothing changed" — a terminal phase after
+    made **and `Caddyfile.prev` if it had already landed** — `.prev` is
+    the interrupted-swap marker (step 9), and no swap happened — and
+    ends the push as `failed` — "the install failed before the
+    Caddyfile changed; nothing changed" — a terminal phase after
     `verified`, not a refusal; the live file never changes without
     its restore copy already in place.
 19. **Reload.** `systemctl reload hotserve` — which runs the unit's
@@ -385,6 +401,7 @@ Written before the code, as liveswap's deploy-record store was.
 | `/etc/hotserve/age/` | 0700 | root:root | Reserved, empty, created by `init`; the secrets PR puts the box's age key here. |
 | `/var/lib/hotserve-box/` | 0750 | root:hotserve | Created by `tmpfiles.d`, not by either process. Not under `/var/lib/hotserve`, which is 0750 hotserve:hotserve and which a root unit without `CAP_DAC_OVERRIDE` cannot traverse. Joins `sandboxHotservePaths` (liveswap/sandbox.go): never a bind source. |
 | `…/stage/` | 0700 | hotserve:hotserve | The handler assembles a bundle here. Not watched. |
+| `…/stage/<id>.auth` | 0600 | hotserve:hotserve | `sha256` of the bearer token that posted `<id>`, with the token's `exp`; lets that token read `out/<id>.json` after a reload changed `deploy_trust` ("Handler contract"). Removed by the handler when the result is read or the `exp` has passed; a digest, never the token; root has no use for it. |
 | `…/in/` | 0770 | root:hotserve | The handler renames a complete bundle in; the applier renames everything out before reading anything. `DirectoryNotEmpty=` watches it, so it must be empty on every applier exit, or the path unit re-triggers until its start-rate limit fails it. |
 | `…/in/<id>.tar` | 0644 | hotserve:hotserve | `<id>` matches `^[0-9a-f]{32}$`: 16 hex of the handler's nanosecond clock, then 16 random (step 9); a name that does not match is moved to `work/` and refused like any other. The content is a public commit; 0644 so root reads it without DAC capabilities. |
 | `…/work/` | 0700 | root:root | Bundles land here by rename and are read once. Never a source of truth after that read. |
@@ -439,7 +456,14 @@ box serves it, so the rename could not be a plain push in any case.
   "<hex>"}` from `applied.json` and the installed file. The workflow
   reads `commit` to bundle exactly `git rev-list --first-parent
   <commit>..HEAD`.
-- `GET /?result=<id>` — the result, or 404 once swept.
+- `GET /?result=<id>` — the result, or 404 once swept. Authenticated
+  like every request, with one addition: a bearer whose `sha256`
+  matches `stage/<id>.auth` and whose recorded `exp` has not passed is
+  accepted for that `<id>` alone, even if the running `deploy_trust`
+  no longer accepts it. The same token was verified when it posted
+  the bundle; what it learns is the outcome of its own push. Without
+  this, a push that changes `deploy_trust` would lock its own workflow
+  out of the result with a 401 the moment the reload succeeded.
 - Anything else — 405. Every answer passes liveswap's response filter
   (the shape and entropy layers; a `diff` additionally passes the
   environment layer in the applier before it is written).
@@ -501,6 +525,10 @@ reads tokens, not the adapted config.
 ## The applier unit
 
 `hotserve-box-apply.path` (`DirectoryNotEmpty=/var/lib/hotserve-box/in`,
+`DirectoryNotEmpty=/var/lib/hotserve-box/work`,
+`PathExists=/etc/hotserve/Caddyfile.prev` — the second and third are
+what make step 9's recovery run after a crash, at boot included, since
+a bundle already moved out of `in/` would otherwise wait forever;
 `TriggerLimitIntervalSec=10s`, `TriggerLimitBurst=20`, enabled,
 `WantedBy=multi-user.target`) starts `hotserve-box-apply.service`
 (`Type=oneshot`, `ExecStart=/usr/bin/hotserve box apply`, root, not
@@ -528,9 +556,12 @@ one re-trigger per late arrival, not a loop. The loop the rate limit
 guards against is an entry the applier declines to take — a name it
 does not like, a file it cannot open — left in place: so every entry
 the applier sees is moved to `work/` whatever it is, and refused from
-there. Twenty re-triggers in ten seconds would fail the path unit
-until `systemctl reset-failed`; the invariant is what keeps the count
-at one.
+there. The same invariant covers the two recovery triggers: every
+`work/` entry leaves with a terminal result, and restoring `.prev` is
+a rename that removes the marker whether or not the reload after it
+succeeds, so neither can re-trigger the unit into a loop. Twenty
+re-triggers in ten seconds would fail the path unit until `systemctl
+reset-failed`; the invariants are what keep the count at one.
 
 The package depends on `openssh-client` (for `ssh-keygen`) and ships
 the `tmpfiles.d` file; `postinstall.sh` runs `systemd-tmpfiles
