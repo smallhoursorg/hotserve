@@ -1,0 +1,33 @@
+## writable, nothing else running
+[exit 0, 0.71s] restic cat config
+locks left: 0
+## an exclusive lock held (restic check, stopped mid-way)
+locks: 0
+{
+  "version": 2,
+  "id": "3b8ee4d64839b55fa8c1833e9abdd7d3993bbb0a0711085b6cf75f8d1a10dc58",
+  "chunker_polynomial": "362ce4bd5bba59"
+}
+[exit 0, 0.69s] restic cat config
+[exit 0, 0.50s] restic cat config --no-lock
+## a non-exclusive lock held (a backup waiting on stdin)
+locks: 1
+[exit 0, 0.70s] restic cat config
+locks left: 0
+## the locking read, killed -9 mid-way: what it leaves
+## an exclusive lock held (restic check --read-data, stopped mid-way)
+locks: 1 (try 3)
+repo already locked, waiting up to 0s for the lock
+unable to create lock in backend: repository is already locked exclusively by PID 5790 on 89ba5d780c05 by root (UID 0, GID 0)
+lock was created at 2026-10-05 18:18:50 (990.036542ms ago)
+storage ID b6e9bb71
+[exit 11, 0.50s] restic cat config
+[exit 0, 0.50s] restic cat config --no-lock
+## that check killed -9: a stale exclusive lock
+locks: 1
+repo already locked, waiting up to 0s for the lock
+unable to create lock in backend: repository is already locked exclusively by PID 5790 on 89ba5d780c05 by root (UID 0, GID 0)
+lock was created at 2026-10-05 18:18:50 (2.46905746s ago)
+storage ID b6e9bb71
+[exit 11, 0.48s] restic cat config
+after unlock: 0

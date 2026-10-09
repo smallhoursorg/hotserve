@@ -1,0 +1,41 @@
+bob@rcbox:~$ sudo hotserve-backup setup b2:hs-lifecycle-test:rc-attack
+account hotserve-backup: present
+a run would back up demo, under /var/lib/liveswap
+Storage key id (B2_ACCOUNT_ID): <keyID>
+Storage secret key (B2_ACCOUNT_KEY): 
+looking for a repository at b2:hs-lifecycle-test:rc-attack (up to 10s)
+Repository password (new): <52 characters>
+Store it off the box now, with the repository URL, b2:hs-lifecycle-test:rc-attack, and the storage key: with those three, `restic -r <url>` reads every backup from any machine; without the password nothing can.
+Type stored to go on: stored
+repository ready: b2:hs-lifecycle-test:rc-attack (new, id 8e1caacb)
+credentials: /etc/hotserve-backup/repository.env (root, 0600)
+next: the first backup runs within the hour and ten minutes (systemctl list-timers hotserve-backup.timer); to run one now, sudo systemctl start hotserve-backup.service; then hotserve-backup status
+[exit 0]
+(credential file kept: 4 lines, keys: RESTIC_REPOSITORY RESTIC_PASSWORD B2_ACCOUNT_ID B2_ACCOUNT_KEY )
+bob@rcbox:~$ sudo systemctl start hotserve-backup.service
+[exit 0, 17.3801s, 2026-10-04T13:19:04Z]
+bob@rcbox:~$ sudo hotserve-backup drill
+demo: restore proven: snapshot 66815c80, on 2026-10-04 13:19 UTC
+repository: its structure, and data group 40/52: clean
+[exit 0, 10.7559s, 2026-10-04T13:19:15Z]
+bob@rcbox:~$ hotserve-backup status
+last run 2026-10-04 13:18 UTC
+last drill 2026-10-04 13:19 UTC
+repository last checked 2026-10-04 13:19 UTC: its structure, and data group 40/52: clean
+demo: ok: last complete backup 2026-10-04 13:18 UTC, snapshot 66815c80 (data at /var/lib/liveswap/demo/shared)
+demo: restore last proven: 2026-10-04 13:19 UTC, snapshot 66815c80
+no unit of a run, a restore or a drill is running
+[exit 0, 0.0239131s, 2026-10-04T13:19:15Z]
+Error: in prepare, unrecognized token: "\"
+  insert into notes(body) values (\x27third, before the attack\x27)
+                    error here ---^
+bob@rcbox:~$ sudo systemctl start hotserve-backup.service
+^@[exit 0, 11.3789s, 2026-10-04T13:20:40Z]
+bob@rcbox:~$ hotserve-backup status
+last run 2026-10-04 13:20 UTC
+last drill 2026-10-04 13:19 UTC
+repository last checked 2026-10-04 13:19 UTC: its structure, and data group 40/52: clean
+demo: ok: last complete backup 2026-10-04 13:20 UTC, snapshot f7da9025 (data at /var/lib/liveswap/demo/shared)
+demo: restore last proven: 2026-10-04 13:19 UTC, snapshot 66815c80
+no unit of a run, a restore or a drill is running
+[exit 0, 0.0242877s, 2026-10-04T13:20:40Z]

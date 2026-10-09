@@ -1,0 +1,12 @@
+$ backblaze-b2 ls --long --versions -r b2://hs-lifecycle-test
+179
+4_z5c0ef9874aa50a64a41a0b1a_f4702dd4e2e8d5768_d20261004_m114700_c003_v7007000_t0000_u01791114420872    hide  2026-10-04  11:47:00          0  probe.txt
+4_z5c0ef9874aa50a64a41a0b1a_f4021912b21da582e_d20261004_m114700_c003_v0312045_t0056_u01791114420526  upload  2026-10-04  11:47:00         37  probe.txt
+$ (its lifecycle rules)
+    "lifecycleRules": [
+        {
+            "daysFromHidingToDeleting": 1,
+            "daysFromStartingToCancelingUnfinishedLargeFiles": null,
+            "daysFromUploadingToHiding": null,
+            "fileNamePrefix": ""
+        }
