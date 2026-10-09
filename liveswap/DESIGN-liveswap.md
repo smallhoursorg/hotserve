@@ -554,7 +554,7 @@ Dated one-liners; the full text of each is in git.
   down as the rule rather than the record growing a launch
   disposition, and status now reports the unit's own `ExecStart` so
   the drift is visible. `pid` left `state.json` with it.
-- 2026-10-09 (#PRNUM) — The webhook's auth preamble, trust wiring and
+- 2026-10-09 (#188) — The webhook's auth preamble, trust wiring and
   response filter gained exported names for the box subsystem
   (`export.go`), and `authorize` hands back the token's claims beside
   the attribution. No behaviour changed.
