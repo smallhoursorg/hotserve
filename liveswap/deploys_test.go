@@ -738,14 +738,19 @@ func TestDeployRecordEnvelopeDropsThePinWhenValuesAreUnknown(t *testing.T) {
 
 // An envelope keeps the pin, so a withheld record still says what the
 // deploy was pinned to and a rollback can carry it — unless the pin
-// equals a known value, which no envelope names (redact.go, rule 1).
+// equals a known value or holds one, which no envelope names
+// (redact.go, rule 1).
 func TestDeployRecordEnvelopeKeepsThePin(t *testing.T) {
 	sum := sha256.Sum256([]byte("what CI built"))
 	pin := hex.EncodeToString(sum[:])
 	for _, tc := range []struct {
 		name, env string
 		want      bool
-	}{{"no known value", "", true}, {"pin is a known value", "TOKEN=" + pin + "\n", false}} {
+	}{
+		{"no known value", "", true},
+		{"pin is a known value", "TOKEN=" + pin + "\n", false},
+		{"pin holds a known value", "TOKEN=" + pin[10:40] + "\n", false},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rig := newTestRig(t)
 			rig.spec.envFile = filepath.Join(t.TempDir(), "app.env")

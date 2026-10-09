@@ -49,8 +49,8 @@ import (
 //  3. Whatever the filter does to a body, the record on disk names
 //     its version and outcome, from values that cannot carry source
 //     data: the version the deployer named and the digest it was
-//     pinned to (unless it equals a value, or the values are not all
-//     known), vocabulary, timestamps.
+//     pinned to (unless the filter would change it, or the values
+//     are not all known), vocabulary, timestamps.
 //     The vocabulary (status, phase) stands outside the filter in
 //     every body (redact.go, rule 3), so a value equal to a word of
 //     it rewrites nothing; a record the filter leaves unreadable as
@@ -153,11 +153,12 @@ func (ma *managedApp) recordDeploy(c collaborators, result deployResult) {
 			envelope["phase"] = result.Phase
 		}
 		// The pin is digest-shaped (validated, or read back by
-		// recordedPin); kept unless it equals a known value, which the
-		// filter dropped from its safe list (rule 1) — and only when
-		// every value is known: with the env_file unread past a bad
-		// line, "not a known value" cannot be decided.
-		if unknown == "" && rd.safeExact[result.SHA256] {
+		// recordedPin); kept only as the filter would leave it whole —
+		// not equal to a known value, and none inside it (rule 1
+		// redacts a known value within a safe string too) — and only
+		// when every value is known: with the env_file unread past a
+		// bad line, that cannot be decided.
+		if filteredPin, _ := rd.redact(result.SHA256); unknown == "" && result.SHA256 != "" && filteredPin == result.SHA256 {
 			envelope["sha256"] = result.SHA256
 		}
 		env, err := json.Marshal(envelope)
