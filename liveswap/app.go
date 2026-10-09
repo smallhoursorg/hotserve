@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -776,7 +777,7 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		}()
 	}
 
-	l, err := spec.prepareLaunch(req.version)
+	l, err := spec.prepareLaunch(logger, req.version)
 	if err != nil {
 		return err
 	}
@@ -1191,7 +1192,7 @@ func (ma *managedApp) launchVersion(c collaborators, version string) (*instance,
 	if _, err := os.Stat(spec.dirs.release(version)); err != nil {
 		return nil, fmt.Errorf("release dir for version %s is missing: %w", version, err)
 	}
-	l, err := spec.prepareLaunch(version)
+	l, err := spec.prepareLaunch(c.logger, version)
 	if err != nil {
 		return nil, err
 	}
@@ -1225,13 +1226,18 @@ type launch struct {
 	// secrets is the env_file subset of env: what the response filter
 	// must never let out (redact.go).
 	secrets []string
+	// envFileMode is the mode of the env_file inode secrets came from,
+	// read off the same descriptor; 0 when the spec names none.
+	envFileMode os.FileMode
 }
 
 // prepareLaunch draws the instance's nonce and renders its environment
 // from the current spec, creating the dirs the unit binds first: the
 // runner resolves every bind source, and run/ holds nothing between
-// instances.
-func (spec *appSpec) prepareLaunch(version string) (launch, error) {
+// instances. logger is the caller's snapshot (collaborators.logger):
+// the one place both launch paths pass through is where the env_file
+// mode warning lives, so neither path can lose it.
+func (spec *appSpec) prepareLaunch(logger *zap.Logger, version string) (launch, error) {
 	if err := spec.dirs.ensure(); err != nil {
 		return launch{}, err
 	}
@@ -1246,9 +1252,12 @@ func (spec *appSpec) prepareLaunch(version string) (launch, error) {
 	}
 	l := launch{version: version, nonce: nonce, socket: spec.dirs.socket(nonce), releaseDir: spec.dirs.release(version)}
 	l.sock = spec.dirs.socketRef(nonce)
-	if l.env, l.secrets, err = buildEnvFull(spec, version, l.socket, l.releaseDir); err != nil {
+	if l.env, l.secrets, l.envFileMode, err = buildEnvFull(spec, version, l.socket, l.releaseDir); err != nil {
 		l.sock.retire()
 		return launch{}, err
+	}
+	if spec.envFile != "" {
+		warnEnvFileModeBits(logger, spec.name, spec.envFile, l.envFileMode)
 	}
 	return l, nil
 }
@@ -1550,7 +1559,7 @@ func inheritedEnv() []string {
 // shape a deny-by-default view fails in. Applied before env_file and
 // env, so an operator can still point it elsewhere.
 func buildEnv(spec *appSpec, version, socket, releaseDir string) ([]string, error) {
-	env, _, err := buildEnvFull(spec, version, socket, releaseDir)
+	env, _, _, err := buildEnvFull(spec, version, socket, releaseDir)
 	return env, err
 }
 
@@ -1559,21 +1568,21 @@ func buildEnv(spec *appSpec, version, socket, releaseDir string) ([]string, erro
 // among them — it lives in the Caddyfile, in a repo, and is not secret
 // by policy — and neither are HOME, SOCKET or the inherited PATH,
 // which a diagnostic has to be able to name.
-func buildEnvFull(spec *appSpec, version, socket, releaseDir string) (env, secrets []string, err error) {
+func buildEnvFull(spec *appSpec, version, socket, releaseDir string) (env, secrets []string, envFileMode os.FileMode, err error) {
 	env = append(inheritedEnv(), "HOME="+spec.dirs.shared)
 	if spec.envFile != "" {
-		fileVars, err := parseEnvFile(spec.envFile)
+		fileVars, perm, err := readEnvFile(spec.envFile)
 		if err != nil {
-			return nil, nil, fmt.Errorf("env_file: %w", err)
+			return nil, nil, 0, fmt.Errorf("env_file: %w", err)
 		}
 		env = append(env, fileVars...)
-		secrets = fileVars
+		secrets, envFileMode = fileVars, perm
 	}
 	for k, v := range spec.env {
 		env = append(env, k+"="+expandPlaceholders(v, spec, version, socket, releaseDir))
 	}
 	env = append(env, "SOCKET="+socket)
-	return env, secrets, nil
+	return env, secrets, envFileMode, nil
 }
 
 // envKeyRe is what systemd accepts in Environment=; the exec runner
@@ -1583,14 +1592,111 @@ var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func validEnvKey(key string) bool { return envKeyRe.MatchString(key) }
 
+// The env_file mode check. hotserve reads the file as the hotserve
+// user, so its mode is not hotserve's concern; the documented
+// `install -m 0640 -o root -g hotserve` is for everyone else on the
+// box — an account that can read the file holds every secret in it,
+// and one that can write it chooses the app's next environment. Apps
+// are not among those accounts whatever the mode: /etc/hotserve is
+// outside every view, validateEnvFileIsolation refuses an env_file
+// inside the base view or a sibling's dirs, and one inside the app's
+// own dirs is warnEnvFileInView's warning. A warning, never a refusal,
+// in two places: at config load, by a stat of the path (loading the
+// config does not open the file); and at each launch, from the
+// descriptor the environment was just read through, so the mode
+// reported is that of the inode whose values the unit got — a chmod
+// between loads must not take an app down on a 3am relaunch, so a
+// launch warns and goes on, and is not silent until a reload that may
+// never come. Not checked: the owner and group (the service's group
+// cannot be told from a stranger's when `validate` runs as another
+// account, and the documented install line sets both), and the
+// directories above the file, which is why the message says "any
+// account that can reach it".
+
+// warnEnvFileMode is the config-load half: warnEnvFileModeOf for every
+// app that names an env_file.
+func warnEnvFileMode(logger *zap.Logger, specs map[string]*appSpec) {
+	for name, spec := range specs {
+		warnEnvFileModeOf(logger, name, spec.envFile)
+	}
+}
+
+// warnEnvFileModeOf stats one app's env_file at config load. An absent
+// file is silent — the launch that needs it fails and says so. One
+// this account cannot reach is noted, not warned about: `validate`
+// runs unprivileged by design, and the launch checks the file as the
+// user that reads it. Any other stat failure is reported as such — a
+// line that reads "checked, and fine" over an error is worse than
+// none.
+func warnEnvFileModeOf(logger *zap.Logger, app, path string) {
+	if logger == nil || path == "" {
+		return
+	}
+	fi, err := os.Stat(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return
+	case errors.Is(err, os.ErrPermission):
+		logger.Info("env_file mode not checked: this account cannot reach the file; the launch, as the user that reads it, checks it",
+			zap.String("app", app), zap.String("env_file", path), zap.Error(err))
+		return
+	case err != nil:
+		logger.Warn("env_file mode could not be checked", zap.String("app", app), zap.String("env_file", path), zap.Error(err))
+		return
+	}
+	warnEnvFileModeBits(logger, app, path, fi.Mode().Perm())
+}
+
+// warnEnvFileModeBits is the check itself, on a mode already in hand:
+// world-readable, world-writable, each its own line.
+func warnEnvFileModeBits(logger *zap.Logger, app, path string, perm os.FileMode) {
+	if logger == nil || perm&0o006 == 0 {
+		return
+	}
+	mode := zap.String("mode", fmt.Sprintf("%04o", perm))
+	fix := zap.String("fix", "chmod 0640 and chown root:hotserve — the documented `install -m 0640 -o root -g hotserve`")
+	if perm&0o004 != 0 {
+		logger.Warn("env_file is world-readable: any account that can reach it holds every value in it",
+			zap.String("app", app), zap.String("env_file", path), mode, fix)
+	}
+	if perm&0o002 != 0 {
+		logger.Warn("env_file is world-writable: any account that can reach it chooses the app's next environment",
+			zap.String("app", app), zap.String("env_file", path), mode, fix)
+	}
+}
+
 // parseEnvFile reads simple KEY=VALUE lines: blank lines and #comments
 // skipped, an optional `export ` prefix tolerated, and single or
 // double quotes around the value stripped. Deliberately not a shell.
 func parseEnvFile(path string) ([]string, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // path is the operator's env_file config value, not request input
+	vars, _, err := readEnvFile(path)
+	return vars, err
+}
+
+// readEnvFile is parseEnvFile plus the mode of the inode it read, taken
+// from the open descriptor: a launch warns about the file it rendered,
+// not about whatever the path names a moment later.
+func readEnvFile(path string) (vars []string, perm os.FileMode, err error) {
+	f, err := os.Open(path) //nolint:gosec // path is the operator's env_file config value, not request input
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	defer f.Close() //nolint:errcheck // read-only
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, 0, err
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, 0, err
+	}
+	vars, err = parseEnvLines(path, data)
+	return vars, fi.Mode().Perm(), err
+}
+
+// parseEnvLines is parseEnvFile on bytes already read; path is for the
+// error messages.
+func parseEnvLines(path string, data []byte) ([]string, error) {
 	var vars []string
 	for i, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)

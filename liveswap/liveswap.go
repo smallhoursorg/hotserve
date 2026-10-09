@@ -326,6 +326,7 @@ func (a *App) Provision(ctx caddy.Context) error {
 		return err
 	}
 	warnEnvFileInView(a.logger, specs)
+	warnEnvFileMode(a.logger, specs)
 	// Take pool references now (so a reload never drops the refcount to
 	// zero) but install nothing on the pooled apps until Start: Caddy
 	// keeps the old config if any app's Start fails, and `validate`

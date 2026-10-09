@@ -34,7 +34,11 @@ Windows, and macOS-as-a-server are out of scope by product design.
    Gated on being the `hotserve` user, not on the network.
 4. **Per-app secrets** — an app's own env vars / `env_file`
    (`/etc/hotserve/*.env`). Legitimately reachable by that app; the
-   goal is to keep them from *siblings*.
+   goal is to keep them from *siblings*. From accounts beyond the
+   file's owner and group it is the file's mode that keeps them (0640
+   root:hotserve as documented; root reads anything); config load and
+   each launch warn when the mode admits everyone (`warnEnvFileModeOf`,
+   liveswap/app.go). Owner and group are not checked.
 5. **The box's configuration at rest** — `/etc/hotserve/Caddyfile`:
    which repository may deploy each app, each app's command and
    flags, which hosts are served, and who may change the file itself.
