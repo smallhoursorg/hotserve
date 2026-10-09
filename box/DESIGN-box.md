@@ -37,7 +37,7 @@ and T6.
 | **bundle** | One gzip tarball the workflow POSTs: `path`, `Caddyfile`, `commit`, `parents/NNNN`, `trees/<sha>`, nothing else. |
 | **HEAD** | The commit the bundle is for: `sha1("commit <n>\0" + raw)` of the bundled `commit` object, computed, never read. |
 | **baseline** | The commit the box runs: `sha` in `applied.json`. Advances only as the state machine says. |
-| **chain** | The first-parent commits from HEAD down to, not including, the baseline, each linked to the next by hash. |
+| **chain** | HEAD plus the bundled `parents/` commits, first-parent from HEAD down to, not including, the baseline, each linked to the next by hash. HEAD is always on it, so the chain is never empty; `parents/` is empty when HEAD's first parent is the baseline. The cap counts HEAD. |
 | **installed file** | `/etc/hotserve/Caddyfile` as root last wrote it. The source of the signer list and the rollback bytes. |
 | **record** | `txn.json`: the one durable marker of a transaction in flight, with a `phase`. Present means "no terminal result yet". |
 | **result** | `out/<id>.json`: what a push came to. Non-terminal: `verified`. Terminal: `refused`, `no_change`, `applied`, `failed`, `rolled_back`, `unknown`. |
@@ -308,7 +308,7 @@ by id.
 
 | Id | Invariant |
 |---|---|
-| **I1** | `/etc/hotserve/Caddyfile` exists at every instant and is always a file that either ran or is the one being confirmed by a reload in progress; a failed reload puts the previous bytes back. |
+| **I1** | `/etc/hotserve/Caddyfile` exists at every instant and is always a complete file root wrote whole: one that ran, one whose reload is pending or in progress under a record that says `swapped`, or — `origin: init` on a box that is not running — one that loads at the next start. A failed reload puts the previous bytes back; a crash leaves a record that says which of these it is. |
 | **I2** | Every entry the applier *listed* in `in/` leaves `in/` in that run (a bundle landing after the last listing is the next run's); `work/` is empty on every exit except the one named full-disk case in the Failure-mode table; `in/` receives nothing but a complete bundle by one `rename`. |
 | **I3** | Every bundle the applier takes ends in exactly one terminal result, or — only when the result cannot be written — one error-level journal line carrying every field the result would have; an entry that is not a bundle gets the journal line only. |
 | **I4** | The baseline advances only from a transaction whose durable record says `applied` (reload confirmed) or `no_change` on an active box, from `init`, or from `baseline`; all four hold root's lock; it never runs ahead of the record. |
@@ -438,11 +438,25 @@ re-instantiates the handler; a crash releases it with the descriptor.
 | a marker younger than fifteen minutes with no terminal result | 409, same message | root has taken the bundle and holds one at a time; the marker is the only trace the handler has |
 | a marker older than fifteen minutes, nothing in `in/` | admit | a marker past the workflow's own poll bound is a stranded result, not pending work; it is swept by root (see "Retention") |
 
-Order inside admission: bundle renamed into `in/` **first**, marker
-written **second**. A crash between them leaves a bundle root will
-process and a result that ends the pending state, never a marker with
-no work behind it. The one cost is that push's poll secret, which a
-re-run restores; the POST was never answered in that window anyway.
+Order inside admission: bundle renamed into `in/` **first**, with the
+bundle file and the `in/` directory `fsync`ed before anything else (I8
+covers this handoff as it covers the transaction), marker written and
+`fsync`ed **second**. A crash or power loss between them leaves a
+bundle root will process and a result that ends the pending state,
+never a marker with no work behind it. The one cost is that push's
+poll secret, which a re-run restores; the POST was never answered in
+that window anyway.
+
+**A lost POST response is a lost run.** The poll secret exists only in
+the response; the marker holds its digest. If the response is lost
+after a push that changed `deploy_trust`, the run holds neither the
+secret nor a token the new trust accepts, and cannot read its result.
+That run is red; the outcome is in the journal and in the next run's
+`GET /` under the new trust (if the new trust no longer names this
+repository at all, no run can reach the box, which is what moving a
+repository means). The alternative — a credential that survives the
+trust change — would be the old token, rejected for the reasons in
+"Handler contract". Stated, not solved.
 
 Together: at most one bundle in `in/`, at most one in root's hands,
 and a 409 that names which. A result or marker count is bounded
@@ -459,7 +473,8 @@ an empty cell means nobody, by design.
 | `/etc/hotserve/.Caddyfile.box-<id>` | 0644 | root:root | applier, `init` | applier, `init` | — | applier, `init` (renamed over `Caddyfile`, or removed on failure) |
 | `/etc/hotserve/age/` | 0700 | root:root | `init` | (secrets PR) | — | — |
 | `/var/lib/hotserve-box/` | 2750 | root:hotserve | tmpfiles.d | — | — | — |
-| `…/stage/` | 0700 | hotserve:hotserve | tmpfiles.d | handler (bundle temporaries), `init` (a 0644 copy of the Caddyfile for its validate child, since `<dir>` is usually under `/root`) | handler, applier (sweep), the validate child | handler, `init` (their own temporaries) |
+| `…/stage/` | 0700 | hotserve:hotserve | tmpfiles.d | handler (bundle temporaries) | handler, applier (sweep) | handler (its own temporaries) |
+| `…/init/` | 0755 | root:root | `init` | `init` (a 0644 copy of the Caddyfile for its validate child, since `<dir>` is usually under `/root`; root-owned so the hotserve uid cannot rename other bytes over it between validate and install) | the validate child | `init` |
 | `…/stage/lock` | 0600 | hotserve:hotserve | handler | — | handler (`flock`) | — |
 | `…/stage/<id>.auth` | 0600 | hotserve:hotserve | handler, after the rename into `in/` | — | handler (poll auth, pending), applier (sweep) | applier (sweep) |
 | `…/in/` | 0770 | root:hotserve | tmpfiles.d | handler (`rename` in) | handler (listing), applier | applier (`rename` out) |
@@ -674,10 +689,12 @@ reads `<dir>/Caddyfile` with the walk of "Reading the signed file" and
 refuses, by name, each of that section's conditions plus no `box`
 block, no `signer`, zero or more than one `box_webhook` site; requires
 a 40-hex `<sha>`, the commit the operator is about to push, so no null
-baseline ever exists; copies the file to a 0644 temporary in `stage/`
-(the directory it was given is usually under `/root`, which the child
-cannot read) and runs `hotserve validate --adapter caddyfile` on that
-copy as the hotserve user with an environment it constructs to match
+baseline ever exists; copies the file to a 0644 temporary in the
+root-owned `init/` directory (the directory it was given is usually
+under `/root`, which the child cannot read; `stage/` is hotserve's and
+the hotserve uid could rename other bytes over a copy there between
+validate and install) and runs `hotserve validate --adapter caddyfile`
+on that copy as the hotserve user with an environment it constructs to match
 `hotserve.service`'s (dropping the uid does not drop root's shell
 environment); then takes root's blocking lock and runs the state
 machine with `origin: init` — recovery first if a record is lying
@@ -803,8 +820,8 @@ sha256: 9f…, signer: alice@example.com}`. Alice commits `c6`
 
 1. The run mints a token with `sha = c6`, calls `GET /`, gets `c5`,
    bundles `c6`'s object, the root tree and `box1/` tree, the file, and
-   an empty `parents/` (one commit above `c5`: `c6` itself is HEAD, its
-   first parent is `c5`, so the chain ends immediately).
+   an empty `parents/` (`c6`'s first parent is `c5`, the baseline; the
+   chain is `c6` alone, one commit against the cap).
 2. `POST /`: lock taken; `in/` empty; no marker; body 3 KiB; `sha`
    matches; signature by Alice's key, which the installed file lists;
    tree and blob prove the file; host `deploy.example.com` matches;
@@ -814,8 +831,8 @@ sha256: 9f…, signer: alice@example.com}`. Alice commits `c6`
    by=repository=your-org/boxes ref=refs/heads/main actor=alice`.
 3. Path unit fires. Applier: no record, `in/` has one entry → `work/`.
    Installed file read; signers = {alice}; out-of-band flag false (digest
-   matches `applied.json`). Identity, signature, proof, chain (empty,
-   HEAD's parent is the baseline), guards all pass. hotserve active.
+   matches `applied.json`). Identity, signature, proof, chain (`c6`
+   alone; its first parent is the baseline), guards all pass. hotserve active.
    Buffers differ. Result `verified` written.
 4. Handler's next poll (within a second) sees `verified` → 202
    `{id, commit: c6, phase: verified, poll_token: …}`. The run prints
