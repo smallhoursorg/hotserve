@@ -12,6 +12,7 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/hex"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -262,7 +263,7 @@ func TestProveFileHandMade(t *testing.T) {
 	mode := ModeFile
 	var comps []string
 	for i := 0; i < MaxDepth; i++ {
-		name := "d" + itoa(i)
+		name := "d" + strconv.Itoa(i)
 		raw := treeObject(Entry{mode, name, cur})
 		tr, err := ParseTree(raw)
 		if err != nil {
@@ -291,7 +292,7 @@ func TestChainHandMade(t *testing.T) {
 			if parent != "" {
 				parents = []string{parent}
 			}
-			c, err := ParseCommit(commitObject(emptyTree, parents, nil, "c"+itoa(i)+"\n"))
+			c, err := ParseCommit(commitObject(emptyTree, parents, nil, "c"+strconv.Itoa(i)+"\n"))
 			if err != nil {
 				t.Fatal(err)
 			}

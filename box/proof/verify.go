@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -18,7 +19,7 @@ import (
 // stderr is bounded into the error of a run that could not answer.
 type Verifier struct {
 	// SSHKeygen is the program; empty looks `ssh-keygen` up on PATH
-	// once, at the first call.
+	// once, at the first call, and keeps what it found.
 	SSHKeygen string
 	// RunAs is the uid (and gid) the children run as; zero leaves the
 	// caller's. The applier passes 65534 (DESIGN-box.md, step 12), so
@@ -32,10 +33,22 @@ type Verifier struct {
 	TempDir string
 	// Timeout bounds each child; zero is 30 seconds.
 	Timeout time.Duration
+	// ChainTimeout bounds a whole VerifyChain, every child of every
+	// commit together; zero is 10 minutes. A chain is at most 500
+	// commits and a verification is milliseconds, so a legitimate push
+	// is minutes from this bound on the slowest box; without it, a
+	// child that stalls at each commit could hold the applier — and
+	// the admission lock — for the sum of its per-child deadlines.
+	ChainTimeout time.Duration
+
+	lookup   sync.Once
+	found    string
+	foundErr error
 }
 
 const (
 	defaultVerifyTimeout = 30 * time.Second
+	defaultChainTimeout  = 10 * time.Minute
 	maxChildOutput       = 4 << 10
 )
 
@@ -60,12 +73,9 @@ func (v *Verifier) Verify(ctx context.Context, c *Commit, signers Signers) (stri
 	if err != nil {
 		return "", err
 	}
-	keygen := v.SSHKeygen
-	if keygen == "" {
-		keygen, err = exec.LookPath("ssh-keygen")
-		if err != nil {
-			return "", fmt.Errorf("ssh-keygen is not installed: %w", err)
-		}
+	keygen, err := v.program()
+	if err != nil {
+		return "", err
 	}
 	dir, err := os.MkdirTemp(v.TempDir, "box-verify-"+c.ID+".")
 	if err != nil {
@@ -112,6 +122,22 @@ func (v *Verifier) Verify(ctx context.Context, c *Commit, signers Signers) (stri
 	return principal, nil
 }
 
+// program is the ssh-keygen to run: SSHKeygen as given, else the PATH
+// lookup done once and kept, so every commit of a chain runs the same
+// binary whatever PATH does meanwhile.
+func (v *Verifier) program() (string, error) {
+	if v.SSHKeygen != "" {
+		return v.SSHKeygen, nil
+	}
+	v.lookup.Do(func() {
+		v.found, v.foundErr = exec.LookPath("ssh-keygen")
+		if v.foundErr != nil {
+			v.foundErr = fmt.Errorf("ssh-keygen is not installed: %w", v.foundErr)
+		}
+	})
+	return v.found, v.foundErr
+}
+
 // run executes one bounded child with PATH alone in its environment
 // and the verifier's uid, with stdin as given. ok is the exit status
 // being zero; err is a run that gave no verdict (the program could not
@@ -127,7 +153,9 @@ func (v *Verifier) run(ctx context.Context, program, dir string, stdin []byte, a
 	cmd.Dir = dir
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH")}
 	if v.RunAs != 0 {
-		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: v.RunAs, Gid: v.RunAs, NoSetGroups: true}}
+		// Groups empty and NoSetGroups false: setgroups(0, NULL), so
+		// the child keeps none of the caller's supplementary groups.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: v.RunAs, Gid: v.RunAs, Groups: []uint32{}}}
 	}
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
@@ -151,15 +179,22 @@ func (v *Verifier) run(ctx context.Context, program, dir string, stdin []byte, a
 }
 
 // boundedBuffer keeps the first maxChildOutput bytes written to it and
-// drops the rest, so a child's output cannot grow the error text.
+// drops the rest, so a child's output cannot grow the error text. It
+// deliberately does not embed bytes.Buffer: os/exec copies a child's
+// output with io.Copy, which would take the embedded ReadFrom and
+// never call Write, and the cap would be dead.
 type boundedBuffer struct {
-	bytes.Buffer
+	b []byte
 }
 
 func (b *boundedBuffer) Write(p []byte) (int, error) {
-	if room := maxChildOutput - b.Len(); len(p) > room {
-		b.Buffer.Write(p[:room])
+	if room := maxChildOutput - len(b.b); len(p) > room {
+		b.b = append(b.b, p[:room]...)
 		return len(p), nil
 	}
-	return b.Buffer.Write(p)
+	b.b = append(b.b, p...)
+	return len(p), nil
 }
+
+func (b *boundedBuffer) Bytes() []byte  { return b.b }
+func (b *boundedBuffer) String() string { return string(b.b) }

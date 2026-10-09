@@ -13,6 +13,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -166,7 +167,7 @@ func (fx *fixtures) bundleFor(t *testing.T, name, baseline string) []byte {
 		"commit":    head.Raw,
 	}
 	for i, p := range fx.parentsFor(t, name, baseline) {
-		files["parents/"+pad4(i+1)] = p.Raw
+		files[fmt.Sprintf("parents/%04d", i+1)] = p.Raw
 	}
 	id := head.Tree
 	for _, comp := range strings.Split(fx.m.Path, "/") {
@@ -182,23 +183,6 @@ func (fx *fixtures) bundleFor(t *testing.T, name, baseline string) []byte {
 		id = e.ID
 	}
 	return tgz(t, files)
-}
-
-func pad4(n int) string {
-	s := "000" + itoa(n)
-	return s[len(s)-4:]
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var b []byte
-	for n > 0 {
-		b = append([]byte{byte('0' + n%10)}, b...)
-		n /= 10
-	}
-	return string(b)
 }
 
 // tgz is a gzip tarball of the files, in name order, as regular files.

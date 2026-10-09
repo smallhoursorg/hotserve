@@ -127,11 +127,10 @@ func walk(input []byte) (*Shape, error) {
 		if len(stack) == 0 {
 			// A block header: addresses, then `{` as the last token, or
 			// no block at all. `import` here is Caddy's top-level import.
-			first := line[0].Text
-			if first == "import" { // on a continued address line too: Caddy's addresses() checks every new line
+			if line[0].Text == "import" { // on a continued address line too: Caddy's addresses() checks every new line
 				return nil, importRefusal(line)
 			}
-			if first == "}" {
+			if isClose(line[0]) {
 				return nil, refuse("does not parse: a } with no block open")
 			}
 			addrs, opens, more, err := header(line, pending)
@@ -173,7 +172,7 @@ func walk(input []byte) (*Shape, error) {
 		// stand anywhere on one.
 		top := stack[len(stack)-1]
 		first := line[0]
-		if first.Text != "}" {
+		if !isClose(first) {
 			if first.Text == "import" {
 				return nil, importRefusal(line)
 			}
@@ -191,13 +190,13 @@ func walk(input []byte) (*Shape, error) {
 		opens := false
 		args := []string{}
 		for i, t := range line {
-			switch t.Text {
-			case "{":
-				if i != len(line)-1 || first.Text == "}" {
+			switch {
+			case isOpen(t):
+				if i != len(line)-1 || isClose(first) {
 					return nil, refuse("does not parse: a { that does not end a directive's line")
 				}
 				opens = true
-			case "}":
+			case isClose(t):
 				if len(stack) == 0 {
 					return nil, refuse("does not parse: a } with no block open")
 				}
@@ -216,7 +215,7 @@ func walk(input []byte) (*Shape, error) {
 				}
 			}
 		}
-		if first.Text == "}" {
+		if isClose(first) {
 			continue
 		}
 		child := frame{kind: kindOther, inBox: top.inBox, site: top.site}
@@ -299,7 +298,7 @@ func walk(input []byte) (*Shape, error) {
 func header(line []caddyfile.Token, pending []string) (addrs []string, opens, more bool, err error) {
 	addrs = pending
 	for i, t := range line {
-		if t.Text == "{" {
+		if isOpen(t) {
 			if i != len(line)-1 {
 				return nil, false, false, refuse("does not parse: a token follows { on its line")
 			}
@@ -326,6 +325,14 @@ func header(line []caddyfile.Token, pending []string) (addrs []string, opens, mo
 	}
 	return addrs, false, more, nil
 }
+
+// isOpen and isClose are Caddy's own tests for a structural brace
+// (caddyfile's isOpenCurlyBrace and isCloseCurlyBrace, v2.11.6): the
+// text, and not quoted — `respond "{"` is a value, and so is a heredoc
+// of one brace. `import`, by contrast, Caddy matches on the text alone,
+// quoted or not, and so does the walk.
+func isOpen(t caddyfile.Token) bool  { return t.Text == "{" && !t.Quoted() }
+func isClose(t caddyfile.Token) bool { return t.Text == "}" && !t.Quoted() }
 
 func importRefusal(line []caddyfile.Token) error {
 	what := ""

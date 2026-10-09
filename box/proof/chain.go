@@ -72,6 +72,13 @@ func descendRefusal(head, baseline string) error {
 // incoming file gives that key, if it does, because the commit that
 // adds the key must apply before the commits it signs.
 func VerifyChain(ctx context.Context, v *Verifier, chain []*Commit, installed, incoming Signers, baseline string) (string, error) {
+	// One deadline for the whole chain, over and above each child's.
+	budget := v.ChainTimeout
+	if budget == 0 {
+		budget = defaultChainTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
 	principal := ""
 	for i, c := range chain {
 		p, err := v.Verify(ctx, c, installed)

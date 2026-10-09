@@ -94,6 +94,7 @@ func TestWalkAccepts(t *testing.T) {
 		"single label host":        strings.Replace(good, "deploy.example.com {", "localhost {", 1),
 		"ip host":                  strings.Replace(good, "deploy.example.com {", "192.0.2.1 {", 1),
 		"braced empty site":        good + "\nother.example.com {\n}\n",
+		"quoted braces are values": strings.Replace(good, "\tbox_webhook\n", "\trespond \"{\"\n\trespond \"}\" 200\n\theader X \"{}\"\n\tbox_webhook\n", 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			s, err := Walk(file(in))
@@ -326,6 +327,7 @@ func FuzzWalk(f *testing.F) {
 	f.Add([]byte("{\n\tbox {\n\t\tsigner a b c\n\t}\n}\n"))
 	f.Add([]byte("a.com,\nb.com {\n\tbox_webhook\n}\n"))
 	f.Add([]byte("respond <<EOF\nx\nEOF\n"))
+	f.Add(file(strings.Replace(good, "example.com {\n", "example.com {\n\trespond \"{\"\n", 1)))
 	f.Fuzz(func(t *testing.T, in []byte) {
 		s, err := Walk(in)
 		if err != nil {

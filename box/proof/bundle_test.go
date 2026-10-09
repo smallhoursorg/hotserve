@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -134,8 +135,8 @@ func TestReadBundle(t *testing.T) {
 		"parents one digit":   {h.with("parents/1", h.parent.Raw), "bundle: parents/1 is not a bundle file"},
 		"parents five digits": {h.with("parents/00001", h.parent.Raw), "is not a bundle file"},
 		"parents letters":     {h.with("parents/abcd", h.parent.Raw), "is not a bundle file"},
-		"parents zero":        {h.with("parents/0000", h.parent.Raw), "bundle: parents/0000 is outside parents/0001 to parents/0500"},
-		"parents 501":         {h.with("parents/0501", h.parent.Raw), "is outside parents/0001 to parents/0500"},
+		"parents zero":        {h.with("parents/0000", h.parent.Raw), "bundle: parents/0000 is outside parents/0001 to parents/0499"},
+		"parents 500":         {h.with("parents/0500", h.parent.Raw), "is outside parents/0001 to parents/0499"},
 		"parents gap":         {h.moved("parents/0001", "parents/0003"), "bundle: parents/ is not a sequence from 0001"},
 		"parent malformed":    {h.with("parents/0001", []byte("junk")), "bundle: commit:"},
 		"trees short name":    {h.with("trees/abc", h.root.Raw), "bundle: trees/abc is not a bundle file"},
@@ -210,7 +211,7 @@ func TestReadBundle(t *testing.T) {
 		for i := 0; i < 17; i++ {
 			var raw bytes.Buffer
 			for n := 0; raw.Len() < MaxTree-64; n++ {
-				raw.Write(treeObject(Entry{ModeFile, "f" + itoa(i) + "-" + itoa(n), emptyBlob}))
+				raw.Write(treeObject(Entry{ModeFile, "f" + strconv.Itoa(i) + "-" + strconv.Itoa(n), emptyBlob}))
 			}
 			files["trees/"+ObjectID("tree", raw.Bytes())] = raw.Bytes()
 		}

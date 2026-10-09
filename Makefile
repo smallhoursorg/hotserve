@@ -87,8 +87,9 @@ fuzz-list:
 	@for m in $(FUZZ_MODULES); do \
 		found=0; \
 		for p in $$($(COMPOSE) run --rm -T -w /src/$$m dev go list -f '{{.Dir}}' ./...); do \
-			targets=$$($(COMPOSE) run --rm -T -w $$p dev go test -list '^Fuzz' . | grep '^Fuzz'); \
 			rel=$${p#/src/}; \
+			listed=$$($(COMPOSE) run --rm -T -w $$p dev go test -list '^Fuzz' .) || { echo "$$listed"; echo "go test -list failed in $$rel"; exit 1; }; \
+			targets=$$(echo "$$listed" | grep '^Fuzz'); \
 			for d in $$rel/testdata/fuzz/*/; do \
 				[ -d "$$d" ] || continue; \
 				n=$$(basename "$$d"); \
@@ -104,7 +105,8 @@ fuzz-list:
 fuzz:
 	for m in $(FUZZ_MODULES); do \
 		for p in $$($(COMPOSE) run --rm -T -w /src/$$m dev go list -f '{{.Dir}}' ./...); do \
-			targets=$$($(COMPOSE) run --rm -T -w $$p dev go test -list '^Fuzz' . | grep '^Fuzz'); \
+			listed=$$($(COMPOSE) run --rm -T -w $$p dev go test -list '^Fuzz' .) || { echo "$$listed"; echo "go test -list failed in $${p#/src/}"; exit 1; }; \
+			targets=$$(echo "$$listed" | grep '^Fuzz'); \
 			for t in $$targets; do \
 				$(COMPOSE) run --rm -w $$p dev \
 					go test -run '^$$' -fuzz "^$$t$$" -fuzztime "$${FUZZTIME:-2m}" . || exit 1; \

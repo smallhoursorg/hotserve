@@ -101,9 +101,11 @@ func ReadBundle(gz []byte) (*Bundle, error) {
 			}
 			b.Commit = c
 		case strings.HasPrefix(name, "parents/"):
+			// HEAD plus its bundled parents is the chain above the
+			// baseline, at most MaxChain commits: MaxChain-1 parents.
 			n, _ := strconv.Atoi(name[len("parents/"):]) // entryCap checked the four digits
-			if n == 0 || n > MaxChain {
-				return nil, refuse("bundle: %s is outside parents/0001 to parents/%04d", Bound(name), MaxChain)
+			if n == 0 || n > MaxChain-1 {
+				return nil, refuse("bundle: %s is outside parents/0001 to parents/%04d", Bound(name), MaxChain-1)
 			}
 			c, err := ParseCommit(data)
 			if err != nil {
