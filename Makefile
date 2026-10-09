@@ -70,6 +70,10 @@ lint:
 # -fuzz pattern per invocation. The corpus accumulates in the
 # gobuildcache volume across runs.
 FUZZTIME ?= 2m
+# Exported and read as "$$FUZZTIME" in the recipe, never pasted with
+# $(FUZZTIME): the value comes from a workflow_dispatch input, and make
+# pasting it into the shell line would run whatever it carries.
+export FUZZTIME
 FUZZ_MODULES = liveswap penaltybox
 
 # Fuzz targets are discovered (`go test -list '^Fuzz'`), never listed by
@@ -97,7 +101,7 @@ fuzz:
 		[ -n "$$targets" ] || { echo "no fuzz targets found in $$m"; exit 1; }; \
 		for t in $$targets; do \
 			$(COMPOSE) run --rm -w /src/$$m dev \
-				go test -run '^$$' -fuzz "^$$t$$" -fuzztime $(FUZZTIME) . || exit 1; \
+				go test -run '^$$' -fuzz "^$$t$$" -fuzztime "$$FUZZTIME" . || exit 1; \
 		done; \
 	done
 
