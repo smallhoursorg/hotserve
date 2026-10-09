@@ -549,8 +549,12 @@ straight into `in/` can have root install any configuration a signer
 signed that descends from the baseline and whose objects it holds —
 `HEAD` again, which undoes a console edit, or a signer's signed but
 unmerged branch. It cannot have root install anything a signer did not
-sign; dropping an unsigned or self-authored file, or skipping
-validation, gains a failed reload and a rollback. The box repository's
+sign; dropping an unsigned or self-authored file is refused outright.
+Skipping the handler's validation, which root never repeats, is a
+remaining T5 capability bounded by the signature, identity, proof and
+descent checks: a signer-signed file that fails to load is rolled back,
+one that loads but `hotserve-backup validate` would have refused is
+installed. The box repository's
 README rule that unmerged configuration stays unsigned is what keeps
 that set to `main`'s own history.
 
