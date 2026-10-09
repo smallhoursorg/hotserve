@@ -178,21 +178,24 @@ cross-references throughout.
 3. **Bundle.** Parsed from memory under the rules in the Caps table:
    regular files only, fixed names, per-type caps, the decompressed
    stream stopped at its cap. The same parser runs in the applier.
-   **Fast path:** if HEAD equals the baseline and the bundled file's
-   digest equals the installed file's, nothing on disk would change,
-   so the handler answers 200 `no_change` here, with no admission and
-   no root work — the only thing an OIDC holder can do by posting the
-   applied `HEAD` in a loop is read what `GET /` already tells it.
-   (After a console edit the digests differ and the push goes to root,
-   which reinstalls HEAD's file by design; the next replay then takes
-   the fast path again.)
 4. **Token ↔ bundle.** The token's `sha` claim must equal HEAD. This
    binds the bundle to the commit the run is for; without it any
    signed descendant of the baseline, a signer's unmerged branch tip
    included, would pass steps 11 to 13. This check is the handler's
    alone: the token is not in the bundle, and root cannot verify an
    OIDC token offline. Its absence from root's checks is T5's reach
-   through root; see "Threat-model deltas".
+   through root; see "Threat-model deltas". **Fast path, here and not
+   earlier:** once the token, the poll-secret header (step 2) and this
+   binding have passed, if HEAD equals the baseline and the bundled
+   file's digest equals the installed file's, nothing on disk would
+   change, so the handler answers 200 `no_change` with no admission
+   lock, no drop and no root work — it skips only the work that would
+   write. An OIDC holder posting the applied `HEAD` in a loop learns
+   what `GET /` already tells it; a token without the right `sha`, or
+   a POST without its secret, is refused as it would be on the slow
+   path. (After a console edit the digests differ and the push goes to
+   root, which reinstalls HEAD's file by design; the next replay takes
+   the fast path again.)
 5. **Pre-verification.** The handler runs the applier's proof code
    (steps 10 to 13) before anything touches the staged file, so a
    signed commit paired with other Caddyfile bytes fails here and
@@ -334,11 +337,11 @@ by id.
 
 | Id | Invariant |
 |---|---|
-| **I1** | `/etc/hotserve/Caddyfile` exists at every instant and is always a complete file root wrote whole: one that ran, one whose reload is pending or in progress under a record that says `swapped`, or — `origin: init` on a box that is not running — one that loads at the next start. A failed reload puts the previous bytes back; a crash leaves a record that says which of these it is. |
+| **I1** | For every write the applier or `init` makes: `/etc/hotserve/Caddyfile` exists at every instant and is a complete file written whole — one that ran, one whose reload is pending or in progress under a record that says `swapped`, or (`origin: init`, box not running) one that loads at the next start; a failed reload puts the previous bytes back, and a crash leaves a record saying which. The console is root and may write anything; the applier detects such a write by digest (steps 10, 17, 19) and reports it, never overwrites it knowingly, and never records a baseline for bytes it did not install. |
 | **I2** | Every entry the applier *listed* in `in/` leaves `in/` in that run (a bundle landing after the last listing is the next run's); `work/` is empty on every exit except the one named full-disk case in the Failure-mode table; `in/` receives nothing but a complete bundle by one `rename`. |
 | **I3** | Every bundle the applier takes ends in exactly one terminal result, or — only when the result cannot be written — one error-level journal line carrying every field the result would have; an entry that is not a bundle gets the journal line only. |
 | **I4** | The baseline advances only from a transaction whose durable record says `applied` (reload confirmed) or `no_change` on an active box, from `init`, or from `baseline`; all four hold root's lock; it never runs ahead of the record. |
-| **I5** | From the first write that changes `/etc/hotserve` or `applied.json` until the terminal result, the record exists; it is written atomically before that first write and is the last thing removed. Refusals and `verified` precede it and write none. |
+| **I5** | Within a transaction: from the first write that changes `/etc/hotserve` or `applied.json` until the terminal result, the record exists; it is written atomically before that first write and is the last thing removed. Refusals and `verified` precede it and write none. `hotserve box baseline` is not a transaction: one atomic write of `applied.json` under the lock, after recovery, with no record — a crash before its rename changed nothing, after it the reset is done; a retry is idempotent. |
 | **I6** | Root installs nothing a listed signer did not sign (every chain commit), nothing that fails the file proof, nothing that does not descend from the baseline, nothing for another host or path. |
 | **I7** | No pending outlives its bound: a marker ages out at fifteen minutes; a bundle in `in/` blocks admission until root takes it, with no age-out. |
 | **I8** | Every write that recovery reasons from is durable before the next step: the temporary is `fsync`ed, renamed, and the parent directory `fsync`ed. |
@@ -413,7 +416,7 @@ stateDiagram-v2
 | checking → verified | active (or `origin: init`); buffers differ | result `verified` (if this write fails: remove the `work/` entry, journal; nothing else changes) — `init` writes no result, it prints | I3 |
 | verified → installing | — | record `installing` (prev bytes embedded) | I5, I8 |
 | installing → failed | a temporary cannot be written | remove temporaries; result `failed` → record removed → entry removed | I1 (file untouched), I2 |
-| installing → swapped | the installed file's digest is re-read and still equals `prev_sha256` (a console edit since step 10 → `unknown`, "the Caddyfile changed during the transaction; it is left as found", record removed, entry removed); then the new file is written to a temp and renamed over `Caddyfile` | record `swapped` | I1 (file exists at every instant); console writers take no lock, the digest checks are the coordination |
+| installing → swapped | the installed file's digest is re-read and still equals `prev_sha256` (a console edit since step 10 → `unknown`, "the Caddyfile changed during the transaction; it is left as found", record removed, entry removed); then the new file is written to a temp and renamed over `Caddyfile` | record `swapped` | I1 (file exists at every instant). The reread and the rename are not atomic: a bare console edit landing in that window is overwritten, and one landing after the post-reload check is reported as out-of-band by the next push, not refused. `hotserve box edit` is the console tool that holds root's lock through an edit and reload, and the one "At 3am" names; a bare edit is root's right and races as stated. |
 | swapped → rolling_back | record rewrite to `swapped` fails, or reload fails | record `rolling_back` (if writable) → previous bytes written back | I1 |
 | swapped → applied | `systemctl reload hotserve` exits 0 — or `origin: init` on a box that is not running, where the swap counts as applied with no reload (a person is at the console; the file loads at the next start) — and the installed file's digest, re-read, still equals `new_sha256` (a console edit since the swap → `unknown`, baseline not advanced, as the States table's `applied` row) | record `applied` → `applied.json` | I4 (record before baseline; the digest check is why "applied" means these bytes) |
 | rolling_back → rolled_back | previous bytes back, reload exits 0 | result `rolled_back` → record removed → entry removed | I1, I2 |
@@ -460,8 +463,8 @@ re-instantiates the handler; a crash releases it with the descriptor.
 
 | Condition at the lock | Answer | Why |
 |---|---|---|
-| HEAD equals the baseline and the file's digest equals the installed file's | 200 `no_change`, before the lock | nothing would change; the fast path of step 3 |
-| no `X-Box-Poll-Secret` header, or not 32 bytes | 400 "X-Box-Poll-Secret: 32 random bytes, base64, required" | the id is derived from it |
+| no `X-Box-Poll-Secret` header, or not 32 bytes | 400 "X-Box-Poll-Secret: 32 random bytes, base64, required" | the id is derived from it; checked before the fast path, so every POST contract rule holds on both paths |
+| token, header and `sha` binding passed; HEAD equals the baseline and the file's digest equals the installed file's | 200 `no_change`, before the lock | nothing would change; the fast path of step 4 |
 | a marker or result already exists for this id | 409 "duplicate request id: poll /?result=<id>" | a retry after a lost response; honest ids never collide |
 | lock held by another request | 409 "a push is being admitted; retry in a moment" | another push is between its checks and its marker |
 | any entry in `in/` | 409 "a push is pending: <id>, <age> old" | the durable one-bundle bound: a stalled applier means one 16 MiB on disk and a loud 409, never a queue; no age-out |
@@ -513,7 +516,7 @@ an empty cell means nobody, by design.
 | `…/out/` | 2750 | root:hotserve | tmpfiles.d | applier | handler | — |
 | `…/out/<id>.json` | 0640 | root:hotserve | applier | applier | handler | applier (sweep) |
 | `…/applied.json` | 0640 | root:hotserve | `init` | applier, `init`, `baseline` (all under `lock`) | handler (`GET /`), applier | — |
-| `…/lock` | 0600 | root:root | applier | — | applier, `init`, `baseline` (blocking `flock`) | — |
+| `…/lock` | 0600 | root:root | applier | — | applier, `init`, `baseline`, `edit` (blocking `flock`) | — |
 
 Notes that the table cannot hold:
 
@@ -737,7 +740,12 @@ hotserve is not running it treats the swap as applied (phase
 recovery honours that through `origin`. `applied.json` is written as
 `{sha, path, sha256, signer: "init", when}` — `signer` is the literal
 `init` because the console verified no signature, and every reader
-accepts it. `/etc/hotserve/age/` is created. It prints:
+accepts it — which is also why the baseline commit must be signed like
+every other: `init` cannot check it (no objects on the box), and if it
+is not, the first replay of that `HEAD` after a console edit is refused
+at step 12 as unsigned, and the fix is a new signed commit. The
+template's `make signer` runs before the first commit, so on the
+documented path it always is. `/etc/hotserve/age/` is created. It prints:
 
 ```
 init: box1/Caddyfile validates; 1 app (example); box_webhook on deploy.example.com; 1 signer (alice@example.com)
@@ -747,12 +755,22 @@ init: reloaded. From here, config changes are pushes to your-org/boxes.
 
 **`box baseline <sha>`** (root) rewrites the baseline only: under
 root's blocking lock, after recovery has settled any record on disk,
-durably. It is a trust reset — the box will never examine `<sha>`'s
+as one atomic write of `applied.json` with no record of its own (I5
+says why that is sound). It is a trust reset — the box will never examine `<sha>`'s
 ancestors — for the one case where `main`'s history no longer contains
 the commit the box runs (a rewrite below it, a chain past the cap). It
 is not the recovery from an unsigned commit above the baseline; that is
 a rebase and a force-push, after which the unchanged baseline is still
 an ancestor.
+
+**`box edit`** (root) is the console editor: it takes root's blocking
+lock, runs recovery if a record is lying there, opens `$EDITOR` on
+`/etc/hotserve/Caddyfile`, validates the result (step 6's way, as the
+hotserve user on a copy in `init/`), reloads, and releases the lock —
+so an edit made with it cannot race an apply. It leaves `applied.json`
+alone: the edited file is out-of-band by definition and the next push
+reports it so. A bare `$EDITOR` on the file remains root's right and
+races as the Transitions table says.
 
 **`box webhook <Caddyfile>`** prints `https://<host>/` for the one site
 carrying `box_webhook`, with the same walk and the same refusals as
@@ -885,12 +903,15 @@ sha256: 9f…, signer: alice@example.com}`. Alice commits `c6`
 
 If a change broke the webhook site itself, the next push cannot reach
 the box. The remedy is the one that was always there: the provider's
-console as root, edit `/etc/hotserve/Caddyfile` by hand and `systemctl
-reload hotserve`, or `hotserve init` again from a directory copied
-over. The next signed push overwrites the hand edit, which is the
-point: the repository is the truth and the edit is a bridge back to it;
-so is a replay of `HEAD` by anyone holding a token (see "Threat-model
-deltas"), which is why a fix that must outlive the night is a commit.
+console as root — `hotserve box edit`, which holds the applier's lock
+through the edit and reload so nothing can race it, or a bare edit and
+`systemctl reload hotserve` — or `hotserve init` again from a directory
+copied over. The next signed push overwrites the hand edit, which is
+the point: the repository is the truth and the edit is a bridge back
+to it; so is a replay of `HEAD` by anyone holding a token (see
+"Threat-model deltas"), provided `HEAD` is signed as every commit from
+`make signer` on is, which is why a fix that must outlive the night is
+a commit.
 The out-of-band flag in the result is how the box reports that an edit
 happened; it is reported, not refused. A change that validates but
 misbehaves is reverted like any commit: `git revert`, push. A history
