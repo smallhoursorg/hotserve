@@ -155,6 +155,85 @@ func TestServeHTTPEmptyKeyFailsOpen(t *testing.T) {
 	}
 }
 
+func TestMaskKey(t *testing.T) {
+	cases := []struct {
+		name, in, want string
+	}{
+		{"ipv4 per address", "192.0.2.1", "192.0.2.1"},
+		{"ipv4 other address", "192.0.2.2", "192.0.2.2"},
+		{"ipv6 to its /64", "2001:db8:1:2:3:4:5:6", "2001:db8:1:2::/64"},
+		{"ipv6 other host same /64", "2001:db8:1:2:ffff:ffff:ffff:ffff", "2001:db8:1:2::/64"},
+		{"ipv6 uppercase canonicalised", "2001:DB8:1:2::1", "2001:db8:1:2::/64"},
+		{"ipv6 loopback", "::1", "::/64"},
+		{"ipv4-mapped ipv6 unmapped, per address", "::ffff:192.0.2.1", "192.0.2.1"},
+		{"ipv4-mapped hex form", "::ffff:c000:201", "192.0.2.1"},
+		{"ipv4-mapped with zone", "::ffff:192.0.2.1%eth0", "192.0.2.1"},
+		{"nat64 well-known prefix keys the embedded ipv4", "64:ff9b::192.0.2.1", "192.0.2.1"},
+		{"nat64 well-known hex form", "64:ff9b::c000:201", "192.0.2.1"},
+		{"nat64 well-known uppercase with zone", "64:FF9B::192.0.2.1%eth0", "192.0.2.1"},
+		{"nat64 /64 but outside the /96", "64:ff9b::1:c000:201", "64:ff9b::/64"},
+		{"nat64 local-use prefix is not recognised", "64:ff9b:1::c000:201", "64:ff9b:1::/64"},
+		{"teredo is not recognised", "2001:0:4136:e378:8000:63bf:3fff:fdd2", "2001:0:4136:e378::/64"},
+		{"zoned link-local drops the zone", "fe80::1%eth0", "fe80::/64"},
+		{"zoned link-local other zone, same key", "fe80::2%eth1", "fe80::/64"},
+		{"empty", "", ""},
+		{"header value", "Bearer abc", "Bearer abc"},
+		{"composite key stays per address", "2001:db8:1:2::1|example.com", "2001:db8:1:2::1|example.com"},
+		{"host:port is not an address", "192.0.2.1:8080", "192.0.2.1:8080"},
+		{"bracketed ipv6 is not an address", "[2001:db8::1]", "[2001:db8::1]"},
+		{"prefix string is not an address", "2001:db8:1:2::/64", "2001:db8:1:2::/64"},
+		{"leading zeros rejected", "192.000.2.1", "192.000.2.1"},
+		{"padded", " 2001:db8::1", " 2001:db8::1"},
+		{"garbage", "not-an-ip", "not-an-ip"},
+		{"nul byte", "\x00", "\x00"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := maskKey(c.in); got != c.want {
+				t.Errorf("maskKey(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// An IPv6 client owns its whole /64, so the budget is the prefix's:
+// a second address in the same /64 is boxed by the first one's
+// offences. A neighbouring /64, and IPv4 addresses, keep their own.
+func TestServeHTTPIPv6SharesPrefixBudget(t *testing.T) {
+	clk := newFakeClock()
+	h, _ := newTestHandler(clk, storeConfig{limit: 5, penaltyTTL: time.Minute})
+	h.Key = "{test.client}"
+	h.Status = http.StatusTooManyRequests
+
+	box := func(client string) {
+		t.Helper()
+		serveReq(t, h, client, levelNext("3"))
+		serveReq(t, h, client, levelNext("3")) // 6 units > limit 5
+	}
+	expect := func(client string, want int) {
+		t.Helper()
+		if rec := serveReq(t, h, client, levelNext("1")); rec.Code != want {
+			t.Fatalf("%s: got %d, want %d", client, rec.Code, want)
+		}
+	}
+
+	// Budget spread across a /64 still adds up: one level-3 response
+	// from each of two addresses is the same client's 6 units.
+	serveReq(t, h, "2001:db8:1:2::a", levelNext("3"))
+	serveReq(t, h, "2001:db8:1:2::b", levelNext("3"))
+	expect("2001:db8:1:2::a", http.StatusTooManyRequests)
+	expect("2001:db8:1:2:dead:beef:0:1", http.StatusTooManyRequests)
+	expect("2001:db8:1:3::a", http.StatusOK)
+
+	box("192.0.2.1")
+	expect("192.0.2.1", http.StatusTooManyRequests)
+	expect("::ffff:192.0.2.1", http.StatusTooManyRequests)   // the same IPv4 client, mapped
+	expect("64:ff9b::192.0.2.1", http.StatusTooManyRequests) // ... and through a NAT64 translator
+	expect("192.0.2.2", http.StatusOK)
+	expect("::ffff:192.0.2.2", http.StatusOK)
+	expect("64:ff9b::192.0.2.2", http.StatusOK)
+}
+
 func TestValidate(t *testing.T) {
 	valid := Handler{
 		Header:     "X-Rate-Limit-Level",

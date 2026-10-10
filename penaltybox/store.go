@@ -1,12 +1,13 @@
 package penaltybox
 
 import (
+	"hash/maphash"
 	"sync"
 	"time"
 )
 
 const (
-	numShards  = 64 // power of two; FNV hash masked onto this
+	numShards  = 64 // power of two; the seeded key hash is masked onto this
 	numBuckets = 16 // sliding-window resolution: window/16 per bucket
 	maxLevel   = 3  // wire contract: levels are 1..3
 )
@@ -58,6 +59,7 @@ type tierBudget struct {
 
 type store struct {
 	shards      [numShards]shard
+	seed        maphash.Seed      // random per store (see shardFor)
 	budgets     []tierBudget      // slot 0 = default; then explicit tiers
 	levelSlot   [maxLevel + 1]int // hint level -> budget slot
 	maxWindow   time.Duration     // longest window across budgets (sweep idle bound)
@@ -95,6 +97,7 @@ type tierCounter struct {
 
 func newStore(cfg storeConfig, clk clock) *store {
 	s := &store{
+		seed:        maphash.MakeSeed(),
 		maxPerShard: max(cfg.maxKeys/numShards, 1),
 		clk:         clk,
 		done:        make(chan struct{}),
@@ -154,19 +157,15 @@ func sweepInterval(window, ttl time.Duration) time.Duration {
 	return min(max(interval, time.Second), time.Minute)
 }
 
-// shardFor hashes key with inline FNV-1a (no []byte conversion, no
-// allocation — this sits on the per-request hot path).
+// shardFor hashes key under the store's random seed. With an unkeyed
+// hash a client can search offline for keys that share one shard and
+// fill it (about max_keys/64 of them), after which every new key there
+// evicts other clients' counters (makeRoomLocked); a seed drawn when
+// the store is built keeps a key's shard unknowable from outside.
+// maphash.String does not allocate — this sits on the per-request hot
+// path.
 func (s *store) shardFor(key string) *shard {
-	const (
-		offset64 = 14695981039346656037
-		prime64  = 1099511628211
-	)
-	var h uint64 = offset64
-	for i := 0; i < len(key); i++ {
-		h ^= uint64(key[i])
-		h *= prime64
-	}
-	return &s.shards[h&(numShards-1)]
+	return &s.shards[maphash.String(s.seed, key)&(numShards-1)]
 }
 
 func (s *store) boxedRemaining(key string) (time.Duration, bool) {
