@@ -34,9 +34,11 @@ type Handler struct {
 
 	// Key identifies the client. Default "{client_ip}", which respects
 	// the server's trusted_proxies configuration — XFF trust is the
-	// server config's job, not this module's. A key that resolves to ""
-	// fails open: the request passes to the next handler uncounted and
-	// is never boxed (see ServeHTTP). A key whose whole value
+	// server config's job, not this module's. "{client_ip}" is only a
+	// Caddyfile shorthand; in JSON it is an unknown placeholder. A key
+	// that resolves to "" fails open: the request passes to the next
+	// handler uncounted, never boxed, and with its hint header
+	// unstripped (see ServeHTTP). A key whose whole value
 	// resolves to a single IP address is masked (see maskKey): IPv4,
 	// IPv4-mapped IPv6 and NAT64 well-known (64:ff9b::/96) addresses
 	// count per IPv4 address, any other IPv6 address under its /64.
@@ -71,7 +73,8 @@ type Handler struct {
 	// evicted. Default 100000. The cap is split evenly across the
 	// store's 64 shards, rounded down, at least one each (see
 	// perShardKeys), so the store tracks 64*max(floor(MaxKeys/64), 1)
-	// clients. Values below 64 load, with a warning (warnSmallMaxKeys).
+	// clients. Values that leave one slot per shard (below 128) load,
+	// with a warning (warnSmallMaxKeys).
 	MaxKeys int `json:"max_keys,omitempty"`
 
 	// Tiers gives a level its own budget, separate from the default
@@ -179,26 +182,26 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	return nil
 }
 
-// warnSmallMaxKeys logs one warning when max_keys is below the shard
-// count. Such a value loads — refusing it would make Caddy refuse a
-// config that works today — but it does not do what it reads as: every
-// shard keeps at least one client, so the store tracks numShards
-// clients, more than asked, and with one slot per shard a client's
-// first counted response evicts whichever client its shard holds,
-// boxed or not (makeRoomLocked). Unrelated clients that land in one
-// shard then reset each other's counts, so an abuser among them may
-// never reach limit, and a box lasts only until another client is
-// counted in its shard.
-// Non-positive values are Validate's to refuse, so they are skipped.
+// warnSmallMaxKeys logs one warning when max_keys leaves one slot per
+// shard (below 2*numShards). Such a value loads — refusing it would
+// make Caddy refuse a config that works today — but it does not do
+// what it reads as. Every shard keeps at least one client, so below
+// numShards the store tracks more clients than asked; and with one
+// slot per shard a client's first counted response evicts whichever
+// client its shard holds, boxed or not (makeRoomLocked). Unrelated
+// clients that land in one shard then reset each other's counts, so an
+// abuser among them may never reach limit, and a box lasts only until
+// another client is counted in its shard. Non-positive values are
+// Validate's to refuse, so they are skipped.
 func warnSmallMaxKeys(logger *zap.Logger, maxKeys int) {
-	if logger == nil || maxKeys <= 0 || maxKeys >= numShards {
+	if logger == nil || maxKeys <= 0 || perShardKeys(maxKeys) >= 2 {
 		return
 	}
-	logger.Warn("max_keys is below the shard count, so each shard tracks one client: unrelated clients in one shard evict each other, resetting counts and lifting boxes early",
+	logger.Warn("max_keys leaves one slot per shard: unrelated clients in one shard evict each other, resetting counts and lifting boxes early",
 		zap.Int("max_keys", maxKeys),
 		zap.Int("effective_max_keys", numShards*perShardKeys(maxKeys)),
 		zap.Int("shards", numShards),
-		zap.String("fix", "set max_keys well above the number of clients that produce counted responses within one window (default 100000)"))
+		zap.String("fix", fmt.Sprintf("set max_keys to at least %d, and well above the number of clients that produce counted responses within one window (default 100000)", 2*numShards)))
 }
 
 // Validate enforces semantic invariants (runs for JSON and Caddyfile

@@ -306,7 +306,10 @@ func TestWarnSmallMaxKeys(t *testing.T) {
 		{1, numShards},
 		{50, numShards},
 		{numShards - 1, numShards},
-		{numShards, 0},
+		{numShards, numShards},
+		{100, numShards},
+		{2*numShards - 1, numShards},
+		{2 * numShards, 0},
 		{1000, 0},
 		{100_000, 0},
 		{0, 0},  // Validate refuses it; no warning on top

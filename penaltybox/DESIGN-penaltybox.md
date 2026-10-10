@@ -80,10 +80,14 @@ so users can cross-check without leaving the repo.
   a raw `X-Forwarded-For` read; XFF trust is the server config's job, same
   as the CMS refuses to own it. A key that resolves to an empty string
   fails open: the request passes to the next handler, uncounted and
-  never boxed, rather than every such request sharing one budget. With
-  a header-based key, a client that omits the header is never limited;
-  `{client_ip}` falls back to the connection's address, so it does not
-  go empty that way.
+  never boxed, rather than every such request sharing one budget. On
+  that path the hint header is not stripped either (a known gap
+  against the stripping rule above). With a header-based key, a client
+  that omits the header is never limited. The default key,
+  `{http.vars.client_ip}`, falls back to the connection's address, so
+  it does not go empty that way; `{client_ip}` is its Caddyfile
+  shorthand only, and in JSON config it is an unknown placeholder that
+  resolves to an empty string.
 - **Key masking.** When the whole resolved key parses as exactly one IP
   address, whatever placeholder produced it (`{client_ip}` or a header
   such as `CF-Connecting-IP`), it is masked: IPv4 is counted per
@@ -119,7 +123,7 @@ so users can cross-check without leaving the repo.
   in one shard reset each other and an abuser may never reach `limit`;
   with one slot, a box lasts only until another client is counted in
   that shard.
-  A value below 64 loads with a warning, not a refusal: refusing it
+  A value below 128 loads with a warning, not a refusal: refusing it
   would make Caddy reject a config that works today.
 - **Level-1 traffic** must cost near-zero: no counter allocation for keys
   that have only ever produced level-1 responses.
