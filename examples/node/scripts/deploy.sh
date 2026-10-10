@@ -9,15 +9,16 @@
 #                         https:// only, since the request carries the token)
 #   HOTSERVE_ALLOW_HTTP   1 (exactly) lets HOTSERVE_URL be http://, sending the
 #                         token in the clear: for a local test box only
-#   VERSION               the release's version: letters, digits, . _ - and not
-#                         starting with . (the box's alphabet). Defaults to
-#                         the commit (12 hex chars), and versions are
-#                         immutable on the box, so the default deploys once
-#                         per commit, and is refused while tracked files
-#                         have uncommitted changes (the build is not that
-#                         commit): set VERSION for an uncommitted build
-#                         (VERSION=wip-3, say). Not used by --rollback: that
-#                         names its version itself
+#   VERSION               the release's version: 1 to 64 letters, digits,
+#                         . _ -, not starting with . (the box's alphabet).
+#                         Defaults to the commit (12 hex chars), and
+#                         versions are immutable on the box, so the default
+#                         deploys once per commit. For a pushed file it is
+#                         refused while tracked files have uncommitted
+#                         changes when the script runs, rather than put the
+#                         commit's name on them: set VERSION for an
+#                         uncommitted build (VERSION=wip-3, say). Not used
+#                         by --rollback: that names its version itself
 #   HOTSERVE_TOKEN        a deploy token. Not needed in GitHub Actions: with
 #                         `permissions: id-token: write` one is minted per run.
 #   HOTSERVE_AUDIENCE     the audience the box's deploy_trust expects (default: hotserve)
@@ -115,22 +116,32 @@ if [ -z "$rollback" ]; then
 		version=$(git rev-parse --short=12 HEAD 2>/dev/null || true)
 		[ -n "$version" ] || { echo "deploy.sh: not in a git checkout; set VERSION" >&2; exit 1; }
 		# The default names the commit, and the box keeps that name for
-		# good: a build with uncommitted changes deployed under it would
-		# be what `--rollback <commit>` relaunches, and the commit's own
-		# build would then be refused as a version that already exists.
-		# So the default needs a clean checkout: every tracked file in
-		# the repository against HEAD, staged or not (the version names
-		# the repository's commit, not the app directory's). Untracked
-		# files do not count, since deploy.key or a .env may sit in the
-		# checkout. `git diff` refreshes the index first, so a file that
-		# was only touched is clean. Its 1 is caught, not left to set -e.
-		dirty=0
-		git diff --quiet HEAD -- 2>/dev/null || dirty=$?
-		case $dirty in
-		0) ;;
-		1) echo "deploy.sh: tracked files have uncommitted changes, so this build is not commit $version; commit them, or set VERSION (e.g. VERSION=wip-3) to deploy uncommitted changes" >&2; exit 1 ;;
-		*) echo "deploy.sh: git could not compare the checkout with commit $version; set VERSION" >&2; exit 1 ;;
-		esac
+		# good: uncommitted changes pushed under it would be what
+		# `--rollback <commit>` relaunches, and the commit's own build
+		# would then be refused as a version that already exists. So a
+		# pushed file (built here) is refused the default while the
+		# checkout has uncommitted changes: every tracked file in the
+		# repository against HEAD, staged or not (the version names the
+		# repository's commit, not the app directory's; --no-relative, so
+		# a diff.relative config cannot narrow it to the directory the
+		# script runs in). This looks at the checkout now, not at the
+		# build: it keeps the commit's name off uncommitted changes, and
+		# cannot prove the tarball was built from the commit. A URL's
+		# artifact was built elsewhere, and edits here say nothing about
+		# it, so it is not checked. Untracked files do not count, since
+		# deploy.key or a .env may sit in the checkout. `git diff`
+		# refreshes the index first, so a file that was only touched is
+		# clean. Its 1 is caught, not left to set -e; any other status is
+		# git failing, and its own stderr says why.
+		if [ -f "$artifact" ]; then
+			dirty=0
+			git diff --quiet --no-relative HEAD -- || dirty=$?
+			case $dirty in
+			0) ;;
+			1) echo "deploy.sh: tracked files have uncommitted changes, and the default version would label them commit $version; commit them, or set VERSION (e.g. VERSION=wip-3) to deploy uncommitted changes" >&2; exit 1 ;;
+			*) echo "deploy.sh: git could not compare the checkout with commit $version (above); set VERSION" >&2; exit 1 ;;
+			esac
+		fi
 	fi
 	valid_version "$version" || exit 1
 fi

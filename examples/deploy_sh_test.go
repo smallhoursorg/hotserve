@@ -147,7 +147,8 @@ func deployShArgs(t *testing.T, srv *httptest.Server, args []string, env ...stri
 }
 
 // deployShIn is deployShArgs run from dir (a checkout of its own, for
-// the version the script takes from git); "" is this directory.
+// the version the script takes from git); "" is this directory. An env
+// entry that is a bare name, with no =, unsets that variable.
 func deployShIn(t *testing.T, srv *httptest.Server, dir string, args []string, env ...string) (string, int) {
 	t.Helper()
 	script, err := filepath.Abs(filepath.Join("node", "scripts", "deploy.sh"))
@@ -164,13 +165,19 @@ func deployShIn(t *testing.T, srv *httptest.Server, dir string, args []string, e
 	// would point the script's git at another repository). The stand-in
 	// box is plain http, so HOTSERVE_ALLOW_HTTP=1 unless a case says
 	// otherwise.
-	var base []string
-	for _, kv := range os.Environ() {
-		if !strings.HasPrefix(kv, "ARTIFACT_SHA256=") && !strings.HasPrefix(kv, "GIT_") {
-			base = append(base, kv)
+	all := append(append(environ("ARTIFACT_SHA256=", "GIT_"),
+		"HOTSERVE_URL="+srv.URL+"/demo", "HOTSERVE_ALLOW_HTTP=1", "VERSION=v1", "HOTSERVE_AUDIENCE=", "GITHUB_STEP_SUMMARY="), env...)
+	var unset []string
+	for _, kv := range all {
+		if !strings.Contains(kv, "=") {
+			unset = append(unset, kv+"=")
 		}
 	}
-	cmd.Env = append(append(base, "HOTSERVE_URL="+srv.URL+"/demo", "HOTSERVE_ALLOW_HTTP=1", "VERSION=v1", "HOTSERVE_AUDIENCE=", "GITHUB_STEP_SUMMARY="), env...)
+	for _, kv := range all {
+		if strings.Contains(kv, "=") && !hasPrefix(kv, unset) {
+			cmd.Env = append(cmd.Env, kv)
+		}
+	}
 	out, err := cmd.CombinedOutput()
 	var ee *exec.ExitError
 	if errors.As(err, &ee) {
@@ -350,13 +357,15 @@ func TestDeployShRefusesAPlaintextURLBeforeTheMint(t *testing.T) {
 }
 
 // The version the script defaults to is the commit, and the box keeps
-// a version for good, so the default is refused while a tracked file
-// anywhere in the repository differs from HEAD, staged or not: the
-// build would carry the commit's name without being the commit. The
+// a version for good, so for a pushed file the default is refused while
+// a tracked file anywhere in the repository differs from HEAD, staged
+// or not, rather than put the commit's name on uncommitted changes. The
 // refusal names the way out (VERSION) and comes before the mint or any
-// request. Untracked files (the deploy key, a .env, the tarball
-// itself) and a file only touched leave the checkout clean, and an
-// explicit VERSION deploys whatever the checkout holds.
+// request; so does git failing to compare, with git's own reason.
+// Untracked files (the deploy key, a .env, the tarball itself) and a
+// file only touched leave the checkout clean, an explicit VERSION
+// deploys whatever the checkout holds, and a URL's artifact, built
+// elsewhere, is not judged by edits here.
 func TestDeployShRefusesADirtyCheckoutsDefaultVersion(t *testing.T) {
 	for _, tool := range []string{"curl", "git"} {
 		if _, err := exec.LookPath(tool); err != nil {
@@ -365,73 +374,102 @@ func TestDeployShRefusesADirtyCheckoutsDefaultVersion(t *testing.T) {
 	}
 	srv, seen := requestLog(t)
 	// In Actions, minting from the stand-in, so a refusal after the mint
-	// or the group line would show; git without the caller's config.
+	// or the group line would show; git without the caller's config, and
+	// in English.
 	env := []string{"GITHUB_ACTIONS=true", "HOTSERVE_TOKEN=",
 		"ACTIONS_ID_TOKEN_REQUEST_URL=" + srv.URL + "/token?api-version=1", "ACTIONS_ID_TOKEN_REQUEST_TOKEN=run",
-		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1"}
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "LC_ALL=C"}
 	write := func(t *testing.T, path, s string) {
 		t.Helper()
 		if err := os.WriteFile(path, []byte(s), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	const head = "HEAD" // the case deploys the commit's own version
+	modify := func(t *testing.T, repo string, _ func(...string) string) {
+		write(t, filepath.Join(repo, "app", "server.js"), "changed")
+	}
+	const (
+		head  = "HEAD" // the case deploys the commit's own version
+		dirty = "tracked files have uncommitted changes"
+	)
 	for _, tc := range []struct {
 		name    string
 		change  func(t *testing.T, repo string, git func(...string) string)
-		version string // VERSION; "" leaves it to the default
-		deploys string // the version deployed; "" when refused
+		version string // VERSION as the script gets it; a bare name unsets it
+		url     bool   // a URL deploy, not a pushed file
+		deploys string // the version deployed, or ""
+		refused string // when nothing is deployed, what the refusal says
+		gitSays string // and what git's own stderr says before it
 	}{
-		{"clean", func(*testing.T, string, func(...string) string) {}, "", head},
-		{"untracked files only", func(t *testing.T, repo string, _ func(...string) string) {
+		{name: "clean", version: "VERSION", deploys: head},
+		{name: "clean, VERSION empty", version: "VERSION=", deploys: head},
+		{name: "untracked files only", change: func(t *testing.T, repo string, _ func(...string) string) {
 			write(t, filepath.Join(repo, "app", "deploy.key"), "secret")
 			write(t, filepath.Join(repo, ".env"), "A=1")
-		}, "", head},
-		{"a tracked file only touched", func(t *testing.T, repo string, _ func(...string) string) {
+		}, version: "VERSION", deploys: head},
+		{name: "a tracked file only touched", change: func(t *testing.T, repo string, _ func(...string) string) {
 			later := time.Now().Add(time.Hour)
 			if err := os.Chtimes(filepath.Join(repo, "app", "server.js"), later, later); err != nil {
 				t.Fatal(err)
 			}
-		}, "", head},
-		{"modified in the app dir", func(t *testing.T, repo string, _ func(...string) string) {
-			write(t, filepath.Join(repo, "app", "server.js"), "changed")
-		}, "", ""},
-		{"modified outside the app dir", func(t *testing.T, repo string, _ func(...string) string) {
+		}, version: "VERSION", deploys: head},
+		{name: "modified in the app dir", change: modify, version: "VERSION", refused: dirty},
+		{name: "modified, VERSION empty", change: modify, version: "VERSION=", refused: dirty},
+		{name: "modified outside the app dir", change: func(t *testing.T, repo string, _ func(...string) string) {
 			write(t, filepath.Join(repo, "README.md"), "changed")
-		}, "", ""},
-		{"staged", func(t *testing.T, repo string, git func(...string) string) {
-			write(t, filepath.Join(repo, "app", "server.js"), "changed")
+		}, version: "VERSION", refused: dirty},
+		// diff.relative would narrow the diff to the app dir the script
+		// runs in; the check is the repository's whatever the config.
+		{name: "modified outside the app dir, diff.relative set", change: func(t *testing.T, repo string, git func(...string) string) {
+			git("config", "diff.relative", "true")
+			write(t, filepath.Join(repo, "README.md"), "changed")
+		}, version: "VERSION", refused: dirty},
+		{name: "staged", change: func(t *testing.T, repo string, git func(...string) string) {
+			modify(t, repo, git)
 			git("add", "app/server.js")
-		}, "", ""},
-		{"deleted", func(t *testing.T, repo string, _ func(...string) string) {
+		}, version: "VERSION", refused: dirty},
+		{name: "deleted", change: func(t *testing.T, repo string, _ func(...string) string) {
 			if err := os.Remove(filepath.Join(repo, "README.md")); err != nil {
 				t.Fatal(err)
 			}
-		}, "", ""},
-		{"modified, VERSION set", func(t *testing.T, repo string, _ func(...string) string) {
-			write(t, filepath.Join(repo, "app", "server.js"), "changed")
-		}, "wip-3", "wip-3"},
+		}, version: "VERSION", refused: dirty},
+		{name: "modified, VERSION set", change: modify, version: "VERSION=wip-3", deploys: "wip-3"},
+		{name: "modified, a URL deploy", change: modify, version: "VERSION", url: true, deploys: head},
+		// git's own reason comes through, ahead of the script's line.
+		{name: "index unreadable", change: func(t *testing.T, repo string, _ func(...string) string) {
+			write(t, filepath.Join(repo, ".git", "index"), "not an index")
+		}, version: "VERSION", refused: "git could not compare", gitSays: "fatal: "},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			repo, git := gitCheckout(t, map[string]string{"README.md": "readme", "app/server.js": "server"})
 			app := filepath.Join(repo, "app")
 			// The tarball sits in the checkout untracked, as a build leaves it.
 			write(t, filepath.Join(app, "app.tar.gz"), "not really gzip")
-			tc.change(t, repo, git)
+			if tc.change != nil {
+				tc.change(t, repo, git)
+			}
 			want := tc.deploys
 			if want == head {
 				want = git("rev-parse", "--short=12", "HEAD")
 			}
-			out, code := deployShIn(t, srv, app, []string{"app.tar.gz"}, append(env, "VERSION="+tc.version)...)
+			args := []string{"app.tar.gz"}
+			if tc.url {
+				args = []string{"https://example.test/a.tgz"}
+			}
+			out, code := deployShIn(t, srv, app, args, append(env, tc.version)...)
 			got := seen()
 			if want == "" {
-				if code != 1 || !strings.Contains(out, "tracked files have uncommitted changes") || !strings.Contains(out, "set VERSION (e.g. VERSION=wip-3)") ||
+				if code != 1 || !strings.Contains(out, tc.refused) || !strings.Contains(out, "set VERSION") || !strings.Contains(out, tc.gitSays) ||
 					strings.Contains(out, "::add-mask::") || strings.Contains(out, "::group::") || len(got) != 0 {
-					t.Fatalf("exit %d (want 1 before the mint or any request), requests %v\n%s", code, got, out)
+					t.Fatalf("exit %d (want 1 before the mint or any request, saying %q), requests %v\n%s", code, tc.refused, got, out)
 				}
 				return
 			}
-			if code != 0 || strings.Join(got, " ") != "/token /demo?version="+want {
+			deployed := "/demo?version=" + want
+			if tc.url {
+				deployed = `/demo? {"url":"https://example.test/a.tgz","version":"` + want + `"}`
+			}
+			if code != 0 || strings.Join(got, " ") != "/token "+deployed {
 				t.Fatalf("exit %d, requests %v (want the mint, then version %s)\n%s", code, got, want, out)
 			}
 		})
@@ -483,14 +521,14 @@ func TestDeployShRefusesAVersionOutsideTheBoxAlphabet(t *testing.T) {
 
 // requestLog is a stand-in box that mints at /token and answers every
 // other request with a single 200 status; seen returns each request's
-// path (and, past the mint, its query) since the last call, and
-// forgets them.
+// path (and, past the mint, its query, then a space and the body when
+// that is JSON) since the last call, and forgets them.
 func requestLog(t *testing.T) (*httptest.Server, func() []string) {
 	t.Helper()
 	var mu sync.Mutex
 	var reqs []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.Copy(io.Discard, r.Body)
+		b, _ := io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
 		mu.Lock()
 		defer mu.Unlock()
@@ -499,7 +537,11 @@ func requestLog(t *testing.T) (*httptest.Server, func() []string) {
 			_, _ = w.Write([]byte(`{"value":"minted"}` + "\n"))
 			return
 		}
-		reqs = append(reqs, r.URL.Path+"?"+r.URL.RawQuery)
+		req := r.URL.Path + "?" + r.URL.RawQuery
+		if r.Header.Get("Content-Type") == "application/json" {
+			req += " " + string(b)
+		}
+		reqs = append(reqs, req)
 		_, _ = w.Write([]byte(`{"app":"demo","current_version":"v1","running":true}` + "\n"))
 	}))
 	t.Cleanup(srv.Close)
@@ -512,19 +554,34 @@ func requestLog(t *testing.T) (*httptest.Server, func() []string) {
 	}
 }
 
+// environ is the process's environment without the entries that start
+// with any of drop.
+func environ(drop ...string) []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		if !hasPrefix(kv, drop) {
+			env = append(env, kv)
+		}
+	}
+	return env
+}
+
+func hasPrefix(s string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // gitCheckout makes a repository in a temporary directory with files
 // committed, and returns it with a function that runs git there and
 // returns its trimmed output, free of the caller's git configuration.
 func gitCheckout(t *testing.T, files map[string]string) (string, func(...string) string) {
 	t.Helper()
 	repo := t.TempDir()
-	var env []string
-	for _, kv := range os.Environ() {
-		if !strings.HasPrefix(kv, "GIT_") {
-			env = append(env, kv)
-		}
-	}
-	env = append(env, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+	env := append(environ("GIT_"), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
 	git := func(args ...string) string {
 		t.Helper()
 		cmd := exec.Command("git", append([]string{"-c", "user.name=test", "-c", "user.email=test@example.test", "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"}, args...)...)
