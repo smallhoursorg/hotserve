@@ -67,7 +67,7 @@ func get(t *testing.T, tester *caddytest.Tester, client, level string) *http.Res
 		t.Fatal(err)
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	return resp
 }
 

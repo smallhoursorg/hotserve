@@ -192,14 +192,16 @@ func postDeploy(t *testing.T, artifactURL, version string) (*http.Response, stri
 	return postDeployApp(t, "demo", artifactURL, version)
 }
 
-func getBody(t *testing.T, url string) (int, string) {
+// getBody GETs the proxy front door (:9080), the address every app is
+// served on.
+func getBody(t *testing.T) (int, string) {
 	t.Helper()
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(url)
+	resp, err := client.Get("http://localhost:9080/")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, string(data)
 }
@@ -242,7 +244,7 @@ func TestIntegrationDeployLifecycle(t *testing.T) {
 	tester.InitServer(integrationConfig(root, artifactURL.Port()), "caddyfile")
 
 	t.Run("proxy errors before first deploy", func(t *testing.T) {
-		code, _ := getBody(t, "http://localhost:9080/")
+		code, _ := getBody(t)
 		if code < 500 {
 			t.Fatalf("expected a 5xx before any deploy, got %d", code)
 		}
@@ -256,7 +258,7 @@ func TestIntegrationDeployLifecycle(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("expected 401, got %d", resp.StatusCode)
 		}
@@ -267,14 +269,14 @@ func TestIntegrationDeployLifecycle(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("deploy v1: %d %s", resp.StatusCode, body)
 		}
-		code, page := getBody(t, "http://localhost:9080/")
+		code, page := getBody(t)
 		if code != http.StatusOK || !strings.Contains(page, "hello v1") {
 			t.Fatalf("proxied response = %d %q", code, page)
 		}
 	})
 
 	t.Run("deploy v2 cuts over and stops v1", func(t *testing.T) {
-		_, prev := getBody(t, "http://localhost:9080/")
+		_, prev := getBody(t)
 		_, statusBefore := getStatus(t)
 		v1Socket := socketFromStatus(t, statusBefore)
 
@@ -282,7 +284,7 @@ func TestIntegrationDeployLifecycle(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("deploy v2: %d %s", resp.StatusCode, body)
 		}
-		code, page := getBody(t, "http://localhost:9080/")
+		code, page := getBody(t)
 		if code != http.StatusOK || !strings.Contains(page, "hello v2") {
 			t.Fatalf("proxied response = %d %q", code, page)
 		}
@@ -319,7 +321,7 @@ func TestIntegrationDeployLifecycle(t *testing.T) {
 		if !strings.Contains(body, "health gate") {
 			t.Fatalf("500 body should name the health gate: %s", body)
 		}
-		code, page := getBody(t, "http://localhost:9080/")
+		code, page := getBody(t)
 		if code != http.StatusOK || !strings.Contains(page, "hello v2") {
 			t.Fatalf("v2 must keep serving after failed v3: %d %q", code, page)
 		}
@@ -332,7 +334,7 @@ func TestIntegrationDeployLifecycle(t *testing.T) {
 		// must carry the running child across the reload untouched.
 		tester.InitServer(integrationConfig(root, artifactURL.Port()), "caddyfile")
 
-		code, after := getBody(t, "http://localhost:9080/")
+		code, after := getBody(t)
 		if code != http.StatusOK {
 			t.Fatalf("post-reload proxy = %d", code)
 		}
@@ -451,7 +453,7 @@ func postDeployApp(t *testing.T, app, artifactURL, version string) (*http.Respon
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, _ := io.ReadAll(resp.Body)
 	return resp, string(data)
 }
@@ -464,7 +466,7 @@ func getStatusApp(t *testing.T, app string) (int, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var buf bytes.Buffer
 	_, _ = buf.ReadFrom(resp.Body)
 	return resp.StatusCode, buf.String()
@@ -492,7 +494,7 @@ func tryBody() (int, string) {
 	if err != nil {
 		return 0, ""
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, string(data)
 }
@@ -522,7 +524,7 @@ func currentPID(t *testing.T) int { return currentPIDApp(t, "demo") }
 
 func currentPIDApp(t *testing.T, app string) int {
 	t.Helper()
-	code, page := getBody(t, "http://localhost:9080/")
+	code, page := getBody(t)
 	if code != http.StatusOK || !pidRe.MatchString(page) {
 		t.Fatalf("app not serving: %d %q", code, page)
 	}
@@ -738,7 +740,7 @@ func TestIntegrationOIDCDeploy(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		data, _ := io.ReadAll(resp.Body)
 		return resp.StatusCode, string(data)
 	}
@@ -749,7 +751,7 @@ func TestIntegrationOIDCDeploy(t *testing.T) {
 		if code, body := deploy(tok); code != http.StatusOK {
 			t.Fatalf("expected 200, got %d: %s", code, body)
 		}
-		code, b := getBody(t, "http://localhost:9080/")
+		code, b := getBody(t)
 		if code != http.StatusOK || !strings.HasPrefix(b, "hello v1") {
 			t.Fatalf("proxy did not serve v1: %d %q", code, b)
 		}
@@ -845,7 +847,7 @@ func TestIntegrationPushDeploy(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		data, _ := io.ReadAll(resp.Body)
 		return resp.StatusCode, string(data)
 	}
@@ -854,7 +856,7 @@ func TestIntegrationPushDeploy(t *testing.T) {
 		if code, body := push("v1", packRelease(t, bin, "v1", false)); code != http.StatusOK {
 			t.Fatalf("push v1: %d %s", code, body)
 		}
-		code, page := getBody(t, "http://localhost:9080/")
+		code, page := getBody(t)
 		if code != http.StatusOK || !strings.HasPrefix(page, "hello v1") {
 			t.Fatalf("proxy did not serve pushed v1: %d %q", code, page)
 		}
@@ -864,7 +866,7 @@ func TestIntegrationPushDeploy(t *testing.T) {
 		if code, _ := push("v2", []byte("not a tarball")); code < 500 {
 			t.Fatalf("garbage push should 5xx, got %d", code)
 		}
-		code, page := getBody(t, "http://localhost:9080/")
+		code, page := getBody(t)
 		if code != http.StatusOK || !strings.HasPrefix(page, "hello v1") {
 			t.Fatalf("v1 should still serve after a bad push: %d %q", code, page)
 		}
@@ -893,7 +895,7 @@ func TestIntegrationRollback(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		data, _ := io.ReadAll(resp.Body)
 		return resp.StatusCode, string(data)
 	}
@@ -905,7 +907,7 @@ func TestIntegrationRollback(t *testing.T) {
 	if resp, body := postDeployApp(t, "rollbackdemo", artifactSrv.URL+"/demo-v2.tar.gz", "v2"); resp.StatusCode != http.StatusOK {
 		t.Fatalf("deploy v2: %d %s", resp.StatusCode, body)
 	}
-	if _, page := getBody(t, "http://localhost:9080/"); !strings.HasPrefix(page, "hello v2") {
+	if _, page := getBody(t); !strings.HasPrefix(page, "hello v2") {
 		t.Fatalf("expected v2 serving, got %q", page)
 	}
 
@@ -913,7 +915,7 @@ func TestIntegrationRollback(t *testing.T) {
 		if code, body := rollback("v1"); code != http.StatusOK {
 			t.Fatalf("rollback v1: %d %s", code, body)
 		}
-		if _, page := getBody(t, "http://localhost:9080/"); !strings.HasPrefix(page, "hello v1") {
+		if _, page := getBody(t); !strings.HasPrefix(page, "hello v1") {
 			t.Fatalf("expected v1 after rollback, got %q", page)
 		}
 	})
