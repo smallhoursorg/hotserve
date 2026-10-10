@@ -1,9 +1,12 @@
 package box
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 
+	"github.com/caddyserver/caddy/v2"
 	caddycmd "github.com/caddyserver/caddy/v2/cmd"
 	"github.com/spf13/cobra"
 
@@ -11,7 +14,7 @@ import (
 )
 
 // `hotserve box …` is one command with subcommands, so the ones later
-// PRs add (apply, baseline, edit) sit beside webhook.
+// PRs add (baseline, edit) sit beside webhook and apply.
 func init() {
 	caddycmd.RegisterCommand(caddycmd.Command{
 		Name:  "box",
@@ -41,8 +44,34 @@ address a file names. The file may be a pipe:
 					return err
 				},
 			})
+			cmd.AddCommand(&cobra.Command{
+				Use:   "apply",
+				Short: "Apply the config pushes waiting on this box (root; hotserve-box-apply.service runs it)",
+				Long: `Settles anything a crash left, takes every bundle box_webhook dropped
+into /var/lib/hotserve-box/in, proves each against the Caddyfile this box
+runs and installs it with systemctl reload hotserve, rolling back on a
+failed reload; then writes each push's result for the workflow's poll
+and sweeps old results. One shot, as root: hotserve-box-apply.path starts
+it. It exits non-zero only when the previous Caddyfile could not be put
+back after a failed install (a full disk); the journal says so.`,
+				Args: cobra.NoArgs,
+				RunE: func(c *cobra.Command, _ []string) error {
+					return runApply(c.Context(), os.Geteuid(), newApplier(caddy.Log().Named("box.apply")))
+				},
+			})
 		},
 	})
+}
+
+// runApply is `hotserve box apply`: as root, one run.
+func runApply(ctx context.Context, euid int, a *Applier) error {
+	if euid != 0 {
+		return errors.New("hotserve box apply runs as root: it is hotserve-box-apply.service's command")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return a.Run(ctx)
 }
 
 // webhookURL is `hotserve box webhook`: the walk on the file at path,

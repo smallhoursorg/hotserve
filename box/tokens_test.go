@@ -71,6 +71,20 @@ deploy.example.com {
 }
 `
 
+// Apps are the global liveswap block's `app` lines in liveswap's
+// name grammar, in file order; nothing else named `app` counts.
+func TestWalkApps(t *testing.T) {
+	f := strings.Replace(good, "\t\tapp example {", "\t\tapp Bad_Name {\n\t\t}\n\t\tapp second {\n\t\t}\n\t\tapp example {", 1)
+	f = strings.Replace(f, "deploy.example.com {", "deploy.example.com {\n\trespond /app 200", 1)
+	s, err := Walk(file(f))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(s.Apps, ",") != "second,example" {
+		t.Errorf("apps %q", s.Apps)
+	}
+}
+
 func TestWalkGood(t *testing.T) {
 	s, err := Walk(file(good))
 	if err != nil {

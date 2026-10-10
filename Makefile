@@ -36,8 +36,9 @@ endef
 # Runs inside the dev-systemd container (systemd as PID 1, root's user
 # manager started by test/systemd/ready.sh): liveswap's runner creates
 # real transient units, and the caddytest scenarios deploy a real app
-# through them. -p 1: the modules' caddytest suites all pin admin :2999
-# / http :9080, so their test binaries must not run in parallel.
+# through them; the box applier asks the real systemctl. -p 1: the
+# modules' caddytest suites all pin admin :2999 / http :9080, so their
+# test binaries must not run in parallel.
 test-integration:
 	$(cgroup2_preflight)
 	$(COMPOSE) up --build -d dev-systemd
@@ -45,7 +46,7 @@ test-integration:
 	$(COMPOSE) exec -T dev-systemd /bin/sh /src/test/systemd/ready.sh || status=1; \
 	if [ $$status -eq 0 ]; then \
 		$(COMPOSE) exec -T -e XDG_RUNTIME_DIR=/run/user/0 dev-systemd \
-			go test -race -tags integration -v -run Integration -p 1 ./liveswap/... ./penaltybox/... || status=1; \
+			go test -race -tags integration -v -run Integration -p 1 ./liveswap/... ./penaltybox/... ./box/... || status=1; \
 	fi; \
 	if [ $$status -ne 0 ]; then $(COMPOSE) exec -T dev-systemd journalctl --no-pager -n 100 || true; fi; \
 	$(COMPOSE) rm -sf dev-systemd >/dev/null; \
