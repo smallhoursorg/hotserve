@@ -112,7 +112,10 @@ func (a *Applier) sweep() {
 			s.key = time.Time{}
 		}
 		if !s.result {
-			if !a.stranded(id, held, s.key, now) {
+			// An id this run settled whose result did not land is not
+			// stranded yet: its outcome is in the journal (I3), and the
+			// next run settles it by the table like any other.
+			if a.wrote[id] || !a.stranded(id, held, s.key, now) {
 				continue // pending, or still in root's hands: untouched
 			}
 			s.stranded = true

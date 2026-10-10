@@ -352,20 +352,24 @@ never starts `ssh-keygen`, and when more than one step would refuse,
 the first so found is the one named. Step 16 waits out `reloading` as
 it does `activating` — a reload in flight, the console's or one a
 killed applier started, ends in `active` or a failure — within one
-budget per run: 300 s from the run's first sight of either, so root's
-lock is held for waits at most that long in a run whatever hotserve
-does, and a later episode in the same run, once the budget is spent,
-gets no wait (its push is refused as still starting; the workflow
-pushes again). After the wait, one classification serves every caller:
+budget per run: 300 s from the run's first sight of either, so the
+waiting in a run is that long, plus one is-active question (bounded at
+30 s) per ask, whatever hotserve does. The accepted cost: a later
+episode in the same run, once the budget is spent — after recovery
+waited out a boot, say — gets no wait, so its push is refused as still
+starting and the workflow's run fails; a re-run pushes again. After the wait, one classification serves every caller:
 hotserve is *up* when it is `active` or still `reloading` (a reload
 then queues behind the one in flight); `activating` (a start, or a
 restart loop, which reads the file on disk when it gets there) and
 every other word is not running. A push is refused on anything but
 `active`, with the "still starting" text after a wait that timed out.
-`init` asks once, when it begins; the residual is a hotserve whose
-state changes between that question and the swap — a start in flight
-that read the old bytes and then succeeds serves them until the next
-reload, while `init` reports the swap applied for the next start. The installed file failing the
+`init` asks once, when it begins (after its recovery, whose wait may
+have spent the run's budget); the residual is a hotserve whose state
+is or becomes other than that answer says — a start in flight, already
+`activating` when `init` asks or begun since, that read the old bytes
+and then succeeds serves them until the next reload, while `init`
+reports the swap applied for the next start; a hotserve that stops
+after `init` found it up ends `unknown`, both reloads refused. The installed file failing the
 walk for a reason other than an empty signer list, `applied.json`
 missing or unreadable, `ssh-keygen` unable to answer and `is-active`
 unanswered are the box's errors: `failed`, never `refused`
@@ -1282,6 +1286,7 @@ Dated one-liners; the full text of each is in git.
   its residual stated; I2 names the stop-as-found as its
   second exception; `apps` holds liveswap-grammar names only; Retention
   ages a result by root's write and a lone marker by `posted` (one past
-  the clock: older than a day), counts the 32 over results, never
+  the clock: older than a day), counts the 32 over results and
+  stranded markers, never
   sweeps a result its own run wrote, states the clock-step residual,
   and writes a stranded marker's `failed` only for an id it keeps.

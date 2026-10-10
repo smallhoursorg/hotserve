@@ -142,8 +142,9 @@ func TestWritesThatLandedThenFailed(t *testing.T) {
 }
 
 // A reload in flight is waited out like `activating` (step 16); in
-// recovery, one still in flight after the wait leaves the record for
-// the next run rather than reporting a stopped hotserve.
+// recovery, one still in flight after the wait is up, and the rollback's
+// reload queues behind it, where a restart loop still activating is not
+// running and settles as such.
 func TestReloadingIsWaitedOut(t *testing.T) {
 	t.Run("push", func(t *testing.T) {
 		b := newTestBox(t)
@@ -341,7 +342,7 @@ func TestRetentionKeepsThisRunsResults(t *testing.T) {
 // waits at most activatingWait per run.
 func TestWaitBudgetIsPerRun(t *testing.T) {
 	b := newTestBox(t)
-	b.sd.states = []string{"activating", "active", "activating", "activating", "active"}
+	b.sd.states = []string{"activating", "active", "activating"}
 	c1 := b.repo.commit(boxFile(2, b.alice), &b.alice, b.base)
 	c2 := b.repo.commit(boxFile(3, b.alice), &b.alice, c1)
 	first := b.pushAt(b.repo.bundleFiles(c1, b.base), b.clock.Now().Add(-time.Minute))
@@ -351,14 +352,52 @@ func TestWaitBudgetIsPerRun(t *testing.T) {
 			b.clock.advance(2 * activatingWait) // a long verification, say
 		}
 	}
+	start := b.clock.Now()
 	if err := b.run(hooks{read: read}); err != nil {
 		t.Fatal(err)
+	}
+	if waited := b.clock.Now().Sub(start) - 2*activatingWait; waited > activatingPoll {
+		t.Errorf("waited %v beyond the verification's own time", waited)
+	}
+	if b.sd.asked != 3 {
+		t.Errorf("%d is-active questions, want 3 (activating, active; then one past the budget)", b.sd.asked)
 	}
 	if r := b.result(first); r == nil || r.Phase != phaseApplied {
 		t.Errorf("first: %+v", r)
 	}
 	if r := b.result(second); r == nil || r.Phase != phaseRefused || r.Error != msgStillStarting {
 		t.Errorf("second: %+v", r)
+	}
+}
+
+// init asks is-active once, when it begins, whatever follows.
+func TestInitAsksOnce(t *testing.T) {
+	b := newTestBox(t)
+	v2 := boxFile(2, b.alice)
+	sha := b.repo.commit(v2, &b.alice, b.base)
+	out, err := b.applier(hooks{}).runInit(context.Background(), record{ID: randomID(t), Commit: sha, Path: testPath, BoxWebhook: "deploy.example.com"}, v2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Phase != phaseApplied || b.sd.asked != 1 || b.sd.reloaded != 1 {
+		t.Fatalf("%+v; %d questions, %d reloads", out, b.sd.asked, b.sd.reloaded)
+	}
+}
+
+// A push this run settled whose result did not land is not settled
+// again as stranded in the same run: its outcome is in the journal.
+func TestUnwrittenResultNotStrandedSameRun(t *testing.T) {
+	b := newTestBox(t)
+	c1 := b.repo.commit(boxFile(2, b.alice), &b.alice, b.base)
+	id := b.pushAt(b.repo.bundleFiles(c1, b.base), b.clock.Now().Add(-time.Hour))
+	if err := b.run(hooks{fail: failAt(map[string]int{"result:applied": -1, "result:verified": -1, "result:failed": -1})}); err != nil {
+		t.Fatal(err)
+	}
+	if r := b.result(id); r != nil {
+		t.Fatalf("the sweep wrote %+v for a push this run settled", r)
+	}
+	if !b.errorLogged("box result could not be written") {
+		t.Error("no journal line")
 	}
 }
 

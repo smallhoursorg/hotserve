@@ -86,8 +86,9 @@ type txn struct {
 	// entry is work/<id>.tar, removed after the terminal result; ""
 	// for init, which has none.
 	entry string
-	// running is, for init, whether hotserve was up (running's
-	// classification) when it began: init asks once.
+	// running is whether hotserve was up when the transaction began —
+	// step 16's `active` for the applier, init's one question for init —
+	// and decides whether the swap, and a live rollback, reload.
 	running bool
 	// recorded is true once a record of this transaction may be on disk.
 	recorded bool
@@ -206,7 +207,9 @@ func (a *Applier) install(ctx context.Context, t *txn) error {
 			// not, any such `verified` goes, leaving a marker with no
 			// result for Retention to settle. The entry goes either way.
 			if a.writeResult(t.result(phaseFailed, installFailed(err))) != nil {
-				if r, rerr := a.readResult(t.rec.ID); rerr != nil || !terminal(r.Phase) {
+				// Only a file that reads as `verified` is removed: one
+				// the applier cannot identify is never deleted.
+				if r, rerr := a.readResult(t.rec.ID); rerr == nil && r.Phase == phaseVerified {
 					a.removeResult(t.rec.ID)
 				}
 			}
@@ -275,7 +278,7 @@ const (
 // at the next start) — then the installed file read back, then the
 // record, then the baseline.
 func (a *Applier) reloadSwapped(ctx context.Context, t *txn) error {
-	if t.rec.Origin != originInit || t.running {
+	if t.running {
 		if err := a.systemd.Reload(ctx); err != nil {
 			a.logger.Warn("box reload failed", zap.String("id", t.rec.ID), zap.String("error", proof.Bound(err.Error())))
 			return a.rollback(ctx, t, msgReloadFailed, false)
@@ -346,7 +349,7 @@ func (a *Applier) rollingBack(ctx context.Context, t *txn, recovering bool) erro
 	// bytes load at its next start. Recovery asks (a crash may have been
 	// a reboot); init asked once, when it began, and did not reload a
 	// hotserve that was not running then.
-	running := t.rec.Origin != originInit || t.running
+	running := t.running
 	if recovering {
 		state, err := a.running(ctx)
 		if err != nil {

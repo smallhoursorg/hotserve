@@ -363,6 +363,7 @@ func (a *Applier) process(ctx context.Context, id string) error {
 		return a.checked(t, err)
 	}
 	t.rec.Signer, t.rec.BoxWebhook, t.rec.Apps, t.rec.OutOfBand = vd.signer, vd.host, vd.apps, vd.outOfBand
+	t.running = true // step 16 below refuses anything but active
 	t.rec.Prev, t.rec.PrevSHA256, t.rec.NewSHA256 = installed, vd.prevSum, vd.newSum
 	// 16. Active? `activating` and `reloading` are waited out (running);
 	// anything but `active` then refuses.
