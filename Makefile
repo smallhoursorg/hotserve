@@ -62,8 +62,15 @@ vet:
 tidy:
 	for m in $(MODULES); do $(COMPOSE) run --rm -w /src/$$m dev go mod tidy || exit 1; done
 
+# Both tag sets, as for vet: a bare run never compiles the
+# integration-tagged files, so neither the linters nor gofmt see them.
+# A single `run.build-tags: [integration]` in .golangci.yml would not
+# do: it drops the `!integration` goleak TestMain files instead.
 lint:
-	for m in $(MODULES); do $(COMPOSE) run --rm -w /src/$$m lint golangci-lint run || exit 1; done
+	for m in $(MODULES); do \
+		$(COMPOSE) run --rm -w /src/$$m lint golangci-lint run || exit 1; \
+		$(COMPOSE) run --rm -w /src/$$m lint golangci-lint run --build-tags integration || exit 1; \
+	done
 
 # Real fuzzing of the untrusted-input surfaces (seed corpora already
 # run inside `make test`). One target at a time — Go allows a single

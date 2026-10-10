@@ -7,6 +7,9 @@
 #   unconvert  — redundant conversions
 #   unparam    — unused function parameters
 #   nolintlint — every //nolint must name its linter and carry a reason
+#
+# No run.build-tags here: each tag set leaves some test files out, so
+# `make lint` runs once bare and once with -tags integration instead.
 version: "2"
 
 linters:
