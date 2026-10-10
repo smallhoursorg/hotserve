@@ -84,8 +84,11 @@ AAAAQJAdqp0Lh8ioeESTHi9TvSCr7PV4b0ESrIKsJVkGzJgzjgeE3SszsHIcnWQL7WEq2A
 // signers do not list; the principal of the signer whose key verifies
 // otherwise. The payload is the commit object without its gpgsig
 // header, handed to ssh-keygen on stdin; the namespace is `git`, as git
-// signs. A signature by a listed key that does not verify over the
-// payload is refused too: the commit was altered after it was signed.
+// signs. A signature by a listed key that ssh-keygen does not verify
+// over the payload is refused too, as exactly that — "does not verify
+// over the commit" — since the verifier cannot tell a commit altered
+// after signing from a form of key or signature this ssh-keygen will
+// not take.
 func (v *Verifier) Verify(ctx context.Context, c *Commit, signers Signers) (string, error) {
 	allowed, err := signers.AllowedSigners()
 	if err != nil {
