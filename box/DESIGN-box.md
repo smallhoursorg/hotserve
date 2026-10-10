@@ -984,8 +984,8 @@ The remedy, `<sha>` filled in from the argument:
 ```
 the Caddyfile is accepted only by a running hotserve; from this directory:
   cp Caddyfile /etc/hotserve/Caddyfile
-  systemctl start hotserve   # exit 1 is final; journalctl -u hotserve says why
-  hotserve init <sha>        # the same bytes: no_change, which records the baseline
+  systemctl start hotserve  # exit 1 is final; journalctl -u hotserve says why
+  hotserve init <sha>  # the same bytes: no_change, which records the baseline
 ```
 
 Journal lines: the preamble's (`webhook auth failed`, `webhook auth

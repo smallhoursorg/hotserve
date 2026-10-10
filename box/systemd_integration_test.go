@@ -3,7 +3,9 @@
 package box
 
 import (
+	"bytes"
 	"context"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -101,6 +103,43 @@ func TestIntegrationSystemctl(t *testing.T) {
 				t.Fatalf("never activating: %q", got)
 			}
 			time.Sleep(100 * time.Millisecond)
+		}
+	})
+	// hotserve init against the real manager, a stand-in unit for
+	// hotserve.service: stopped, it refuses with nothing written; once
+	// started, the same command applies and reloads it.
+	t.Run("init: refused while stopped, applied once started", func(t *testing.T) {
+		reloads := "/run/box-it-init-reloads-" + randomID(t)[:8]
+		defer func() { _ = os.Remove(reloads) }()
+		unit := unitFile("init", "Type=oneshot\nRemainAfterExit=yes\nExecStart=/bin/true\nExecReload=/bin/sh -c 'echo >> "+reloads+"'\n")
+		b := newTestBox(t)
+		a := b.applier(hooks{})
+		a.systemd = systemctl{unit: unit}
+		file := boxFile(2, b.alice)
+		sha := b.repo.commit(file, &b.alice, b.base)
+		dir := initDir(t, file)
+		snap := b.snapshot()
+		var out strings.Builder
+		if err := runInitCmd(ctx, 0, a, dir, sha, &out); err == nil || !strings.HasPrefix(err.Error(), msgNotRunning+"\n") {
+			t.Fatalf("init on a stopped unit: %v", err)
+		}
+		if !maps.Equal(snap, b.snapshot()) {
+			t.Fatal("a refused init changed the box")
+		}
+		if err := ctl("start", unit); err != nil {
+			t.Fatal(err)
+		}
+		a = b.applier(hooks{}) // a new run, with a wait budget of its own
+		a.systemd = systemctl{unit: unit}
+		if err := runInitCmd(ctx, 0, a, dir, sha, &out); err != nil {
+			t.Fatalf("init on a started unit: %v\n%s", err, out.String())
+		}
+		b.settled()
+		if got, _ := os.ReadFile(reloads); string(got) != "\n" {
+			t.Errorf("reloads: %q, want one", got)
+		}
+		if !bytes.Equal(b.installed(), file) || b.applied().SHA != sha {
+			t.Error("init did not apply on a started unit")
 		}
 	})
 	t.Run("a deadline ends a systemctl stuck on its reload job", func(t *testing.T) {

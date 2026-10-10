@@ -1,0 +1,123 @@
+package box
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"path/filepath"
+	"strings"
+
+	"github.com/smallhoursorg/hotserve/box/proof"
+)
+
+// runInitCmd is `hotserve init <sha>` (DESIGN-box.md, "`hotserve
+// init`"), run as root inside the box's directory, dir: the Caddyfile
+// there read once, walked, its path derived from its host, then the
+// transaction with origin init, whose reload is the only check of the
+// file. Every refusal before the transaction writes nothing; the exit
+// status is 0 only when the box runs what was asked, applied or
+// no_change.
+func runInitCmd(ctx context.Context, euid int, a *Applier, dir, sha string, out io.Writer) error {
+	if euid != 0 {
+		return errors.New("hotserve init runs as root: it installs " + installedFile)
+	}
+	if err := commitArg(sha); err != nil {
+		return err
+	}
+	// One buffer from the read to the install. The directory is the
+	// operator's own, so a symlink at the name is followed.
+	file, err := readFile(filepath.Join(dir, "Caddyfile"), proof.MaxCaddyfile, true)
+	if errors.Is(err, fs.ErrNotExist) {
+		return errors.New("no Caddyfile here; run init from inside the box's directory")
+	}
+	if err != nil {
+		return err
+	}
+	shape, err := Walk(file)
+	if err != nil {
+		return err
+	}
+	path := shape.Host + "/Caddyfile"
+	if _, err := proof.SplitPath(path); err != nil {
+		return fmt.Errorf("the path derived from the host: %w", err) // a bare hostname always is one
+	}
+	if err := printf(out, "init: box_webhook on %s; %s; %s\n"+
+		"init: this box's file is %s in the repository\n",
+		shape.Host, counted(shape.Apps, "app"), counted(principals(shape.Signers), "signer"), path); err != nil {
+		return err
+	}
+	id, err := newRequestID()
+	if err != nil {
+		return err
+	}
+	run, err := a.runInit(ctx, record{ID: id, Commit: sha, Path: path, BoxWebhook: shape.Host, Apps: shape.Apps}, file)
+	var notUp *notUpError
+	if errors.As(err, &notUp) {
+		return fmt.Errorf("%s\n"+msgInitRemedy, notUp.msg, sha)
+	}
+	if err != nil {
+		return err
+	}
+	if was, err := Walk(run.prev); err == nil && was.Host != shape.Host {
+		if err := printf(out, "init: this box was %s; this file names %s\n", was.Host, shape.Host); err != nil {
+			return err
+		}
+	}
+	commits := "this box applies commits descending from " + shortSHA(sha)
+	if run.was != nil && run.was.SHA != sha {
+		commits = "this box ran " + shortSHA(run.was.SHA) + "; it now applies commits descending from " + shortSHA(sha)
+	}
+	switch run.Phase {
+	case phaseApplied:
+		return printf(out, "init: installed %s\ninit: %s\n"+
+			"init: reloaded. From here, this box takes config only as signed commits sent by your repository's workflow.\n",
+			installedFile, commits)
+	case phaseNoChange:
+		if run.was != nil && run.was.SHA != sha {
+			if err := printf(out, "init: %s\n", commits); err != nil {
+				return err
+			}
+		}
+		return printf(out, "init: unchanged; the baseline is now %s\n", shortSHA(sha))
+	}
+	return fmt.Errorf("%s: %s", run.Phase, run.Error)
+}
+
+// counted is "no apps", "1 app (example)", "2 apps (a, b)": names held
+// to a grammar (app names, principals), so they print as they are.
+func counted(names []string, noun string) string {
+	switch len(names) {
+	case 0:
+		return "no " + noun + "s"
+	case 1:
+		return "1 " + noun + " (" + names[0] + ")"
+	}
+	return fmt.Sprintf("%d %ss (%s)", len(names), noun, strings.Join(names, ", "))
+}
+
+func principals(s proof.Signers) []string {
+	out := make([]string, len(s))
+	for i, sg := range s {
+		out[i] = sg.Principal
+	}
+	return out
+}
+
+// newRequestID is an id for init's own transaction: the swap's
+// temporary and the record are named for it, as a push's are.
+func newRequestID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+func printf(w io.Writer, format string, args ...any) error {
+	_, err := fmt.Fprintf(w, format, args...)
+	return err
+}

@@ -114,3 +114,22 @@ func TestBoxCommand(t *testing.T) {
 		t.Error("baseline with two arguments accepted")
 	}
 }
+
+// `hotserve init` is a top-level command taking exactly the sha; what
+// it does with it is TestInitCmd's.
+func TestInitCommand(t *testing.T) {
+	cmd, ok := caddycmd.Commands()["init"]
+	if !ok || cmd.CobraFunc == nil {
+		t.Fatal("no init command")
+	}
+	for _, args := range [][]string{nil, {strings.Repeat("a", 40), "x"}} {
+		c := &cobra.Command{Use: "init"}
+		cmd.CobraFunc(c)
+		c.SetOut(&bytes.Buffer{})
+		c.SetErr(&bytes.Buffer{})
+		c.SetArgs(args)
+		if err := c.Execute(); err == nil {
+			t.Errorf("init %q accepted", args)
+		}
+	}
+}

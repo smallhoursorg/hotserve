@@ -80,6 +80,39 @@ hotserve init; it waits while the applier holds its lock.`,
 	})
 }
 
+// `hotserve init` stands alone: the console's one step in a box's life
+// on the normal path, beside run and reload rather than under box.
+func init() {
+	caddycmd.RegisterCommand(caddycmd.Command{
+		Name:  "init",
+		Usage: "<sha>",
+		Short: "Install this directory's Caddyfile as the box's, and its first baseline (root)",
+		Long: `Run as root inside the box's directory, copied over from the repository
+(deploy.example.com/ for the box at deploy.example.com), with the commit
+you are about to push. From the repository on your laptop, where the
+$(...) is expanded (the box has no git):
+
+    scp -r deploy.example.com root@box.example.com:
+    ssh root@box.example.com "cd deploy.example.com && hotserve init $(git rev-parse HEAD)"
+
+It reads ./Caddyfile the way the box reads every push, records its
+path in the repository (<host>/Caddyfile, from its box_webhook host),
+installs it as /etc/hotserve/Caddyfile and reloads hotserve. The reload
+is the check: a file hotserve will not load is rolled back, the old
+configuration serving throughout, and init exits non-zero. hotserve
+must be running; init says how to start it with this file if it is
+not. From then on the box applies only signed commits that descend
+from <sha>. Running it again re-seeds the box: a new host, a moved
+file, or the way back from a Caddyfile that lists no signer.`,
+		CobraFunc: func(cmd *cobra.Command) {
+			cmd.Args = cobra.ExactArgs(1)
+			cmd.RunE = func(c *cobra.Command, args []string) error {
+				return runInitCmd(commandContext(c), os.Geteuid(), newApplier(caddy.Log().Named("box.init")), ".", args[0], c.OutOrStdout())
+			}
+		},
+	})
+}
+
 // commandContext is the command's context, or a background one when it
 // was run without.
 func commandContext(c *cobra.Command) context.Context {

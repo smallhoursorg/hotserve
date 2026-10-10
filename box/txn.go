@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"path/filepath"
 	"unicode/utf8"
 
@@ -500,10 +499,9 @@ type initRun struct {
 	*result
 	// prev is the installed file as init read it, under the lock.
 	prev []byte
-	// was is the baseline the transaction began over: nil if there was
-	// none, or if one did not read, which wasErr then says.
-	was    *applied
-	wasErr error
+	// was is the baseline the transaction began over, nil if there was
+	// none.
+	was *applied
 }
 
 // notUpError is init's refusal on a hotserve that is not up once the
@@ -559,8 +557,10 @@ func (a *Applier) runInit(ctx context.Context, rec record, file []byte) (*initRu
 		return nil, err
 	}
 	run := &initRun{prev: installed}
-	if run.was, run.wasErr = readApplied(a.x("")); errors.Is(run.wasErr, fs.ErrNotExist) {
-		run.wasErr = nil
+	// One that does not read is replaced like a missing one: init is
+	// the way back, and only root writes it (Triage: occurrence 1).
+	if was, err := readApplied(a.x("")); err == nil {
+		run.was = was
 	}
 	rec.Origin, rec.Signer = originInit, "init"
 	rec.Prev, rec.PrevSHA256, rec.NewSHA256 = installed, digest(installed), digest(file)

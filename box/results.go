@@ -50,6 +50,12 @@ const (
 	msgBothReloads        = "the reload failed and so did the reload of the previous file; the previous file is on disk; journalctl -u hotserve"
 	msgChanged            = "the Caddyfile changed during the transaction; it is left as found"
 	msgDiskFull           = "disk full; the previous Caddyfile could not be restored"
+	// msgInitRemedy follows init's refusal on a hotserve that is not up
+	// ("Console commands"); %s is init's argument.
+	msgInitRemedy = `the Caddyfile is accepted only by a running hotserve; from this directory:
+  cp Caddyfile /etc/hotserve/Caddyfile
+  systemctl start hotserve  # exit 1 is final; journalctl -u hotserve says why
+  hotserve init %s  # the same bytes: no_change, which records the baseline`
 )
 
 // installFailed is `failed` for an install that stopped before the
