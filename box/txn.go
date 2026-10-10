@@ -272,17 +272,6 @@ func (a *Applier) install(ctx context.Context, t *txn) error {
 	return a.reloadSwapped(ctx, t)
 }
 
-// Rollbacks the catalogue has no words of their own for yet: the nearest
-// catalogued text. The PR that owns the catalogue gives them theirs.
-const (
-	// The swap happened but could not be recorded (disk full): nothing
-	// was reloaded, the previous bytes went back.
-	msgRolledBackUnrecorded = msgRecordAfterReload
-	// A crash fell after the swap; recovery rolled back, the reload's
-	// outcome unknown.
-	msgRolledBackInterrupted = msgReloadFailed
-)
-
 // reloadSwapped is swapped → applied: the reload — or, for init on a box
 // that was not running when it began (t.skipReload), none (a person is at the console; the file loads
 // at the next start) — then the installed file read back, then the
@@ -390,7 +379,7 @@ func (a *Applier) rollingBack(ctx context.Context, t *txn, recovering bool) erro
 	}
 	if err := a.systemd.Reload(ctx); err != nil {
 		a.logger.Warn("box reload of the previous Caddyfile failed", zap.String("id", t.rec.ID), zap.String("error", proof.Bound(err.Error())))
-		a.finish(t, phaseUnknown, msgBothReloads)
+		a.finish(t, phaseUnknown, bothFailed(t.rec.Error))
 		return nil
 	}
 	why := t.rec.Error
@@ -399,6 +388,18 @@ func (a *Applier) rollingBack(ctx context.Context, t *txn, recovering bool) erro
 	}
 	a.finish(t, phaseRolledBack, why)
 	return nil
+}
+
+// bothFailed is `unknown` for a rollback whose reload of the previous
+// file failed, by the reason it rolled back: "both reloads failed" only
+// when the first one did — not after a reload that succeeded (the record
+// `applied` unwritable), none (the swap unrecorded), or one a crash cut
+// short.
+func bothFailed(why string) string {
+	if why == "" || why == msgReloadFailed {
+		return msgBothReloads
+	}
+	return msgPrevReloadFailed
 }
 
 // restore writes the previous bytes back, retrying once (Failure-mode
@@ -434,7 +435,7 @@ func (a *Applier) recordUnwritten(t *txn, err error) {
 
 // unsettled stops the run with everything as found.
 func (a *Applier) unsettled(t *txn, err error) error {
-	a.logger.Error("box transaction left for the next run", zap.String("id", t.rec.ID), zap.String("phase", t.rec.Phase), zap.String("error", proof.Bound(err.Error())))
+	a.logger.Error("box transaction stopped with everything as found", zap.String("id", t.rec.ID), zap.String("phase", t.rec.Phase), zap.String("error", proof.Bound(err.Error())))
 	return errUnsettled
 }
 
