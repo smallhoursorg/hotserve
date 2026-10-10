@@ -636,7 +636,7 @@ Every numeric bound, in one place, with its reason.
 | reload | hotserve.service's own 240 s | the applier sets no shorter timeout |
 | quoted input in a refusal | 300 bytes, quote-to-ASCII then rune-boundary cut | liveswap's `boundRefusal`, in that order; applies to every input-derived value without exception |
 | child processes | a deadline and a `WaitDelay`, always | |
-| path-unit trigger limit | 20 in 10 s | the invariants keep the count at one per late arrival |
+| path-unit trigger limit | 20 in 10 s | the invariants keep the count at one per late arrival; the service has no start limit of its own (`StartLimitIntervalSec=0`), since the manager's default, 5 starts in 10 s, is lower and would end a failing loop first, as `unit-start-limit-hit` |
 
 ## Reading the signed file
 
@@ -879,7 +879,14 @@ address a file names.
 `DirectoryNotEmpty=…/work` and `PathExists=…/txn.json` — the last two
 are what make recovery run after a crash, at boot included —
 with `TriggerLimitIntervalSec=10s`, `TriggerLimitBurst=20`,
-`After=hotserve.service`, enabled, `WantedBy=multi-user.target`. It
+`After=hotserve.service`, enabled, `WantedBy=multi-user.target`, and
+`DefaultDependencies=no` with the defaults that matter written out
+(`Requires=` and `After=sysinit.target`, `Conflicts=` and `Before=
+shutdown.target`): a path unit's defaults order it before
+`paths.target`, which `basic.target`, and so `hotserve.service`, come
+after, and with them `After=hotserve.service` is an ordering cycle —
+measured on Debian 13, the manager broke it by deleting `paths.target`'s
+start job at boot and `hotserve.service`'s stop job at shutdown. It
 starts `hotserve-box-apply.service`: `Type=oneshot`,
 `ExecStart=/usr/bin/hotserve box apply`, root, not enabled on its own,
 `After=hotserve.service`, in the backups units' house style:
@@ -888,13 +895,20 @@ starts `hotserve-box-apply.service`: `Type=oneshot`,
 `RestrictAddressFamilies=AF_UNIX`, `SystemCallFilter=@system-service`,
 `TimeoutStartSec=infinity` (a run is bounded from inside: each reload
 by hotserve's own 240 s, each child by its deadline, the drain loop one
-bundle at a time), and `CapabilityBoundingSet=CAP_SETUID CAP_SETGID
-CAP_KILL CAP_DAC_OVERRIDE CAP_FOWNER` with a reason above each: the
+bundle at a time), `StartLimitIntervalSec=0` (the path unit's trigger
+limit is the one bound, see Caps), and `CapabilityBoundingSet=CAP_SETUID
+CAP_SETGID CAP_KILL CAP_DAC_OVERRIDE CAP_FOWNER`, one capability per
+line with a reason above each: the
 first two run `ssh-keygen` as 65534; `CAP_KILL` lets root stop a child
 of another uid, without which a deadline on the verifier is a deadline
 on nothing; the last two let the "Removes" column hold against a
-hostile creator. `box/units_test.go` parses both shipped units and
-holds them to this list.
+hostile creator. Measured in the unit as shipped: `systemctl reload
+hotserve` and `ssh-keygen -Y verify` as 65534 under its `PrivateTmp`
+work; without `CAP_KILL` a 65534 child outlives its deadline
+("operation not permitted"), and without `CAP_DAC_OVERRIDE` a `chmod
+000` directory the hotserve uid made in `in/` cannot be moved out.
+`box/units_test.go` parses both shipped units and holds them to this
+list, and the `tmpfiles.d` file to the Paths table.
 
 Why the path unit cannot loop: every entry the applier sees moves to
 `work/` (I2); every `work/` entry leaves with a result (I3); every
@@ -902,11 +916,27 @@ recovery ends by writing a result and removing the record (I5); a
 bundle landing between the last listing and the exit is one re-trigger,
 not a loop. The one exception, a full disk after a swap whose previous
 bytes cannot be written back, is in the Failure-mode table and ends at
-the start-rate limit by design, named in the journal.
+the path unit's trigger limit by design (`trigger-limit-hit`), named in
+the journal; a `systemctl restart` of the path unit inside the limit's
+ten seconds fails the same way, and after them starts it.
+
+No timer starts the service. Whatever adds an id to the tree starts a
+run or is written by one — a bundle renamed into `in/` ahead of its
+marker, a result root writes; step 4's fast path writes nothing — and
+every run holds Retention's count, so between pushes nothing
+accumulates for a timer to sweep. A marker left with no result stops
+blocking admission at fifteen minutes, and its poll ends at the
+workflow's own bound (the Failure-mode table's terminal-result row). A timer would be a second
+start beside the path unit, outside its trigger limit — measured, a
+direct start runs the applier while the path unit is failed — so the
+full-disk loop would come back on every tick instead of ending.
 
 The package depends on `openssh-client`, ships the `tmpfiles.d` file,
-runs `systemd-tmpfiles --create` and enables the path unit the
-`deb-systemd-helper` way in `postinstall.sh`; `preremove.sh` stops it.
+runs `systemd-tmpfiles --create hotserve-box.conf` and enables the path
+unit the `deb-systemd-helper` way in `postinstall.sh`; `preremove.sh`
+stops it at a removal, and neither disables it (a reinstall finds it
+enabled and starts it) nor stops the service (a run under way settles
+by its own tables).
 
 ## Sequences
 
@@ -1195,3 +1225,12 @@ Dated one-liners; the full text of each is in git.
   takes no matcher, refused by the directive and the walk, since one
   would leave `/` unserved. And for PR 3's push lines: the journal's
   attribution field is liveswap's `via`.
+- 2026-10-10 — PR 3b (the applier's units and packaging) held every
+  line of "The applier unit", and added three, each measured in a
+  Debian 13 systemd container: the path unit's default dependencies
+  are off (with them, `After=hotserve.service` is an ordering cycle
+  that cost `paths.target` its boot start and hotserve its shutdown
+  stop); the service has no start limit (the default, 5 in 10 s, ended
+  a failing loop before the trigger limit the full-disk row names); no
+  timer (a second start outside the trigger limit). `preremove.sh`
+  stops the path unit without disabling it.

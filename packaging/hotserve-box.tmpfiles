@@ -1,0 +1,15 @@
+# hotserve-box: the exchange tree between the box_webhook handler (the
+# hotserve uid) and the root applier — every row of box/DESIGN-box.md's
+# Paths table whose "Creates" column is tmpfiles.d, with its mode and
+# owner (box/units_test.go reads that table and holds this file to it).
+# Applied at every boot, and by the package's postinstall: `d` puts
+# back the mode and owner of a directory that drifted. No age: nothing
+# here is cleaned by time; the applier's retention sweeps.
+#
+# The base directory and out/ are setgid, so what root creates in them
+# is born group hotserve: the applier has no CAP_CHOWN.
+d /var/lib/hotserve-box       2750 root     hotserve -
+d /var/lib/hotserve-box/stage 0700 hotserve hotserve -
+d /var/lib/hotserve-box/in    0770 root     hotserve -
+d /var/lib/hotserve-box/work  0700 root     root     -
+d /var/lib/hotserve-box/out   2750 root     hotserve -

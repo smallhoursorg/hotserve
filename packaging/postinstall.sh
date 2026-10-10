@@ -32,6 +32,15 @@ if ! in_group; then
 	echo "hotserve: the hotserve user is not a member of the hotserve group; add it with \`usermod -aG hotserve hotserve\` if its state directories become unreadable" >&2
 fi
 chown hotserve:hotserve /var/lib/hotserve /var/lib/liveswap
+# The box applier's exchange tree, /var/lib/hotserve-box: made now that
+# the hotserve group exists, and again at every boot, each time with
+# the modes and owners box/DESIGN-box.md's Paths table gives, put back
+# where they drifted. Named, as debhelper does, so no other package's
+# tmpfiles.d entries run from here.
+if command -v systemd-tmpfiles >/dev/null 2>&1; then
+	systemd-tmpfiles --create hotserve-box.conf \
+		|| echo "hotserve: systemd-tmpfiles --create hotserve-box.conf failed; the box applier has no /var/lib/hotserve-box until it succeeds" >&2
+fi
 # Packages before the Debian-13-only matrix copied an AppArmor profile
 # into /etc/apparmor.d (which the package itself does not own, so dpkg
 # will not remove it on upgrade). Unload and delete it: apparmor.service
@@ -122,6 +131,34 @@ EOF
 	else
 		echo "hotserve installed. Start it with:"
 		echo "  sudo systemctl enable --now hotserve"
+	fi
+fi
+# The box applier's path unit, the way dh_installsystemd would have it:
+# enabled on first installation; an administrator's `disable` kept
+# across upgrades (was-enabled is false then, and update-state only
+# tidies the symlinks); started, or restarted on an upgrade ($2 is the
+# version upgraded from), by deb-systemd-invoke, which starts nothing
+# disabled or masked. The service it starts has no [Install]: the path
+# unit is its only start. Until a bundle reaches /var/lib/hotserve-box/in
+# — and only the box_webhook handler puts one there — it starts nothing.
+if [ -x /usr/bin/deb-systemd-helper ]; then
+	deb-systemd-helper unmask hotserve-box-apply.path >/dev/null || true
+	if deb-systemd-helper --quiet was-enabled hotserve-box-apply.path; then
+		deb-systemd-helper enable hotserve-box-apply.path >/dev/null || true
+	else
+		deb-systemd-helper update-state hotserve-box-apply.path >/dev/null || true
+	fi
+fi
+if [ -d /run/systemd/system ]; then
+	systemctl --system daemon-reload >/dev/null || true
+	if [ -n "${2:-}" ]; then action=restart; else action=start; fi
+	if [ -x /usr/bin/deb-systemd-invoke ]; then
+		deb-systemd-invoke "$action" hotserve-box-apply.path >/dev/null || true
+	else
+		# No helper (a systemd host that is not Debian): enabled here,
+		# and started, with no memory of an administrator's disable.
+		systemctl enable hotserve-box-apply.path 2>/dev/null || true
+		systemctl "$action" hotserve-box-apply.path 2>/dev/null || true
 	fi
 fi
 # Explicit, so no message above can decide the package's state.
