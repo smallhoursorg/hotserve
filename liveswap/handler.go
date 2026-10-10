@@ -12,7 +12,6 @@ import (
 	"net/url"
 	"os"
 	"path"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -20,7 +19,6 @@ import (
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 )
 
 func init() {
@@ -61,21 +59,19 @@ func loggedAppName(name string) string {
 	return name[:appNameMaxLen] + "..."
 }
 
-// boundScope is scope with every string in it bounded as a refusal is
-// (boundRefusal): one line of at most maxRefusalLen bytes. The field
-// is the caller's — this webhook's app name, already cut by
-// loggedAppName; whatever the box webhook names its request by — and
-// the limiter bounds how many lines a caller can write, not how long
-// each is, so the length is bounded here, at the mechanism, rather
-// than asked of each caller.
-func boundScope(scope []zap.Field) []zap.Field {
-	out := slices.Clone(scope)
-	for i, f := range out {
-		if f.Type == zapcore.StringType {
-			out[i].String = boundRefusal(f.String)
-		}
+// scopeField appends the caller's one journal field for the preamble's
+// lines — this webhook's app name; whatever the box webhook names its
+// request by — when there is one. The value is bounded as a refusal is
+// (boundRefusal: one line of at most maxRefusalLen bytes) whatever the
+// caller put in it: the limiter bounds how many lines a caller can
+// write, not how long each is, so the length is bounded here, at the
+// mechanism, rather than asked of each caller. The key is the caller's
+// own constant.
+func scopeField(fields []zap.Field, key, value string) []zap.Field {
+	if key == "" {
+		return fields
 	}
-	return out
+	return append(fields, zap.String(key, boundRefusal(value)))
 }
 
 // Handler implements the liveswap webhook endpoint. Mount it in its own
@@ -131,7 +127,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 	if ma != nil {
 		verifiers = ma.currentVerifiers()
 	}
-	who, ok, err := authenticate(w, r, verifiers, h.logger, h.limiter, zap.String("app", loggedAppName(name)))
+	who, ok, err := authenticate(w, r, verifiers, h.logger, h.limiter, "app", loggedAppName(name))
 	if !ok {
 		return err
 	}
@@ -166,14 +162,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 // refusal costs the journal (authLimiter). A refused request is
 // answered here — the flat 401 whatever the reason, or 429 once the
 // address's budget is spent — and ok is false, with the response
-// write's error. scope is what the journal lines carry besides the
-// address and the reason — this webhook names the app — and every
-// string in it is bounded here (boundScope), since the limiter bounds
-// how many lines a caller can write and not how long each is. The box
-// webhook runs the same preamble through Authenticate (export.go), on
-// the limiter every mount shares.
-func authenticate(w http.ResponseWriter, r *http.Request, verifiers []Verifier, logger *zap.Logger, limiter *authLimiter, scope ...zap.Field) (Identity, bool, error) {
-	scope = boundScope(scope)
+// write's error. scopeKey and scopeValue are the one field the journal
+// lines carry besides the address and the reason — this webhook names
+// the app — bounded where a line is written (scopeField); an empty key
+// is no field. The box webhook runs the same preamble through
+// Authenticate (export.go), on the limiter every mount shares.
+func authenticate(w http.ResponseWriter, r *http.Request, verifiers []Verifier, logger *zap.Logger, limiter *authLimiter, scopeKey, scopeValue string) (Identity, bool, error) {
 	who, down, refused := authorize(r.Context(), verifiers, bearerToken(r))
 	key := clientKey(r)
 	// A source the box could not consult is named here once per window
@@ -182,9 +176,9 @@ func authenticate(w http.ResponseWriter, r *http.Request, verifiers []Verifier, 
 	// like any other — see unavailable for why both.
 	for _, u := range down {
 		if limiter.outage(u.label) {
-			logger.Warn("webhook auth could not consult a trust source", slices.Concat(
-				[]zap.Field{zap.String("source", u.label)}, scope,
-				[]zap.Field{zap.String("remote", key), zap.String("reason", boundRefusal(u.Error()))})...)
+			fields := scopeField([]zap.Field{zap.String("source", u.label)}, scopeKey, scopeValue)
+			logger.Warn("webhook auth could not consult a trust source",
+				append(fields, zap.String("remote", key), zap.String("reason", boundRefusal(u.Error())))...)
 		}
 	}
 	if refused != nil {
@@ -197,8 +191,8 @@ func authenticate(w http.ResponseWriter, r *http.Request, verifiers []Verifier, 
 		// pins.
 		v := limiter.fail(key)
 		if v.log {
-			logger.Warn("webhook auth failed", slices.Concat(scope,
-				[]zap.Field{zap.String("remote", key), zap.String("refused", refused.Error())})...)
+			logger.Warn("webhook auth failed",
+				append(scopeField(nil, scopeKey, scopeValue), zap.String("remote", key), zap.String("refused", refused.Error()))...)
 		}
 		if v.trippedKey {
 			logger.Warn("webhook auth failures from this address throttled: further ones are answered 429 and not logged",

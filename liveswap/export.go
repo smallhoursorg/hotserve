@@ -28,29 +28,29 @@ import (
 // the bearer against verifiers, answers a refused request itself —
 // the flat 401 whatever the reason, or 429 once the address's budget
 // is spent — and returns ok=false with the response write's error; on
-// ok, who the token is, with its claims behind Identity.Claim. scope
-// is what the journal lines carry besides the address and the reason
-// — this webhook names the app — and a string in it is bounded as a
-// refusal is (boundScope: one line, maxRefusalLen bytes) whatever the
-// caller put there, because the limiter bounds how many lines a
-// caller can write and not how long each is.
-func Authenticate(w http.ResponseWriter, r *http.Request, verifiers []Verifier, logger *zap.Logger, scope ...zap.Field) (Identity, bool, error) {
-	return authenticate(w, r, verifiers, logger, webhookAuthLimiter, scope...)
+// ok, who the token is, with its claims behind Identity.Claim.
+// scopeKey and scopeValue are the one field the journal lines carry
+// besides the address and the reason — this webhook names the app —
+// and the value is bounded as a refusal is (one line, maxRefusalLen
+// bytes) whatever the caller put there, because the limiter bounds
+// how many lines a caller can write and not how long each is. An
+// empty key is no field.
+func Authenticate(w http.ResponseWriter, r *http.Request, verifiers []Verifier, logger *zap.Logger, scopeKey, scopeValue string) (Identity, bool, error) {
+	return authenticate(w, r, verifiers, logger, webhookAuthLimiter, scopeKey, scopeValue)
 }
 
 // NewTrust is the verifiers for a set of `deploy_trust` blocks, built
-// the way App.Provision builds liveswap's global set: {env.*}
-// placeholders resolved (resolveTrustPlaceholders), presets validated
-// and local keys loaded (buildTrust — a bad key path or an
-// unaudienced OIDC source is a config error, fail-closed), JWKS
-// fetched over https only unless allowInsecure (newJWKSClient), and
-// OIDC discovery warmed in the background (warmVerifiers) so the first
-// request does not pay for it. Two things Provision does not do,
-// because its caller is itself: the placeholders are resolved on a
-// copy, so configs still read as parsed — a caller that renders or
-// diffs its config later writes {env.NAME}, never the value — and no
-// source at all is refused here, at config load, rather than as a 401
-// for every token at request time.
+// by the wiring Provision uses for liveswap's global set
+// (trustVerifiers: {env.*} placeholders, buildTrust's validation and
+// key loading, resolveVerifiers) on a JWKS client that fetches over
+// https only unless allowInsecure (newJWKSClient), with OIDC discovery
+// warmed in the background (warmVerifiers) so the first request does
+// not pay for it. Two things Provision does not do, because its caller
+// is itself: the placeholders are resolved on a copy, so configs still
+// read as parsed — a caller that renders or diffs its config later
+// writes {env.NAME}, never the value — and no source at all is refused
+// here, at config load, rather than as a 401 for every token at
+// request time.
 func NewTrust(configs []TrustConfig, allowInsecure bool) ([]Verifier, error) {
 	if len(configs) == 0 {
 		return nil, errors.New("deploy_trust: no source configured; a webhook with none would refuse every token")
@@ -59,31 +59,33 @@ func NewTrust(configs []TrustConfig, allowInsecure bool) ([]Verifier, error) {
 	for i := range own {
 		own[i].Claims = maps.Clone(own[i].Claims)
 	}
-	resolveTrustPlaceholders(caddy.NewReplacer(), own)
-	sources, err := buildTrust(own, nil)
+	vs, err := trustVerifiers(caddy.NewReplacer(), own, newJWKSClient(allowInsecure))
 	if err != nil {
 		return nil, err
 	}
-	vs := resolveVerifiers(sources, newJWKSClient(allowInsecure))
 	warmVerifiers(vs)
 	return vs, nil
 }
 
-// NewEnvRedactor is the response filter with environ's values as its
-// known secrets — KEY=VALUE pairs as os.Environ gives them — for text
-// that may echo them: `caddy validate` quotes expanded values in its
-// errors, and the box webhook runs it in the service's environment.
-// The pairs are the caller's choice, as an app's are liveswap's: it
-// primes an app's filter with env_file alone and leaves SOCKET, HOME
-// and PATH readable, because a diagnostic needs its paths, and a
-// caller priming with a process environment will want the same for
-// the variables that are paths (PATH, HOME, XDG_*, RUNTIME_DIRECTORY).
-// Build it once, at Provision, not per response: every form of every
-// value is computed here, and a running process's environment does
-// not change. An empty environ gives the two heuristic layers alone,
-// as a nil *Redactor does.
-func NewEnvRedactor(environ []string) *Redactor {
-	return newRedactor(environ, nil)
+// NewRedactor is the response filter (newRedactor): environ's values
+// are its known secrets — KEY=VALUE pairs as os.Environ gives them —
+// and safe is what must survive its heuristics. The pairs are the
+// caller's choice, as an app's are liveswap's: it primes an app's
+// filter with env_file alone and leaves SOCKET, HOME and PATH
+// readable, because a diagnostic needs its paths, and a caller
+// priming with a process environment — the box webhook, whose
+// `caddy validate` quotes expanded values in its errors — will want
+// the same for the variables that are paths (PATH, HOME, XDG_*,
+// RUNTIME_DIRECTORY). safe is the ids a body names, which the entropy
+// layer would otherwise mask: a 40-hex commit sha, a 32-hex result id,
+// as liveswap lists an app's versions; a safe string equal to a known
+// value is dropped (rule 1, redact.go). Build one per set of safe
+// strings and keep it: every form of every value is computed here,
+// and a running process's environment does not change. No pairs and
+// no safe strings is the two heuristic layers alone, as a nil
+// *Redactor is.
+func NewRedactor(environ, safe []string) *Redactor {
+	return newRedactor(environ, safe)
 }
 
 // Redact is s through the filter — the known values, then the shape

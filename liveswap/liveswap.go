@@ -125,7 +125,6 @@ type App struct {
 	sandboxProbe    func(*zap.Logger) error
 	processManager  managerClient
 	allowlist       []artifactAllowEntry
-	globalTrust     []trustSource // resolved global DeployTrust, for the unknown-app path
 	globalVerifiers []Verifier
 	// appVerifiers is each app's resolved deploy_trust, built once in
 	// Provision and installed by Start. The OIDC discovery/JWKS cache
@@ -272,7 +271,6 @@ func (a *App) Provision(ctx caddy.Context) error {
 	for i, e := range a.ArtifactAllowlist {
 		a.ArtifactAllowlist[i] = repl.ReplaceKnown(e, "")
 	}
-	resolveTrustPlaceholders(repl, a.DeployTrust)
 	if a.Root == "" {
 		a.Root = "/var/lib/liveswap"
 	}
@@ -281,21 +279,20 @@ func (a *App) Provision(ctx caddy.Context) error {
 	if a.allowlist, err = parseAllowlist(a.ArtifactAllowlist); err != nil {
 		return err
 	}
-	// Global trust sources back the unknown-app path: a request for an
-	// app that does not exist is still authenticated (against the
-	// global sources) before its 404, so app names never leak to
-	// unauthenticated callers.
-	if a.globalTrust, err = buildTrust(a.DeployTrust, nil); err != nil {
-		return err
-	}
-
 	clients := &fetchClients{
 		download: newDownloadClient(a.AllowInsecureHTTP),
 		// The JWKS client fetches OIDC issuers' public keys over https
 		// only (unless allow_insecure_http), with a bounded timeout.
 		jwks: newJWKSClient(a.AllowInsecureHTTP),
 	}
-	a.globalVerifiers = resolveVerifiers(a.globalTrust, clients.jwks)
+	// Global trust sources back the unknown-app path: a request for an
+	// app that does not exist is still authenticated (against the
+	// global sources) before its 404, so app names never leak to
+	// unauthenticated callers. The same wiring serves the box webhook
+	// (NewTrust, export.go).
+	if a.globalVerifiers, err = trustVerifiers(repl, a.DeployTrust, clients.jwks); err != nil {
+		return err
+	}
 
 	// Build every spec first, then validate, and only then commit to the
 	// process-global pool. Caddy calls Validate *after* Provision, but a

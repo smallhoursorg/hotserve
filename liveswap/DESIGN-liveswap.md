@@ -346,7 +346,7 @@ backwards edges reappearing *despite* this table.
 | `appdirs.go` | `appDirs`: the on-disk layout for one app. Pure path arithmetic — no state, no lock |
 | `caddyfile.go` | all Caddyfile parsing (global option, directive, upstreams); NO defaults here — Provision owns them |
 | `handler.go` | webhook auth, payload validation, status endpoint |
-| `export.go` | the box subsystem's names for what the webhook already does: `Authenticate` (the auth preamble, on the limiter every mount shares), `NewTrust` (Provision's trust wiring), `RespondJSON` and `NewEnvRedactor` (the response filter). Nothing of its own; `Verifier`, `Identity`, `Redactor` and `ParseDeployTrust` are exported where they live |
+| `export.go` | the box subsystem's names for what the webhook already does: `Authenticate` (the auth preamble, on the limiter every mount shares), `NewTrust` (Provision's trust wiring), `RespondJSON` and `NewRedactor` (the response filter). Nothing of its own; `Verifier`, `Identity`, `Redactor` and `ParseDeployTrust` are exported where they live |
 | `authlimit.go` | what a failed webhook auth costs the journal: per-address and process-wide budgets, on the injected clock |
 | `upstreams.go` | dynamic upstream source (the cutover read side) |
 | `runner.go` / `runner_systemd.go` / `systemd_dbus.go` | runner interface + the systemd transient-unit implementation + its D-Bus client |
@@ -557,4 +557,6 @@ Dated one-liners; the full text of each is in git.
 - 2026-10-09 (#188) — The webhook's auth preamble, trust wiring and
   response filter gained exported names for the box subsystem
   (`export.go`), and `authorize` hands back the token's claims beside
-  the attribution. No behaviour changed.
+  the attribution. One visible change: an app name carrying a control
+  byte or invalid UTF-8 is Go-quoted in the two auth journal lines, as
+  a refusal already was. Nothing else changed.

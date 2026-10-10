@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -22,8 +23,8 @@ import (
 
 // forgetTestAddress is the cleanup for a test that charged the
 // process-wide limiter: the address, and the process window its
-// failures were counted in, so a repeated run (-count) starts as a
-// fresh process would.
+// failure was counted in, so a repeated run (-count) starts as a fresh
+// process would.
 func forgetTestAddress(key string) {
 	l := webhookAuthLimiter
 	l.mu.Lock()
@@ -32,22 +33,41 @@ func forgetTestAddress(key string) {
 	l.global = failWindow{}
 }
 
-// TestAuthenticateIsTheWebhookPreamble pins what the box webhook gets
-// from Authenticate against what handler_test pins for ServeHTTP: an
-// accepted token is who it is, with the claim the box binds a bundle
-// to; a refused one is the flat 401, the reason in the journal line
-// alone, under the scope the caller named and bounded whatever the
-// caller put there; the budget is the process-wide one, and a valid
-// token clears it.
+// charged reports whether the process-wide limiter holds a window for
+// the address.
+func charged(key string) bool {
+	l := webhookAuthLimiter
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_, ok := l.keys[key]
+	return ok
+}
+
+// oneAuthLine is the single `webhook auth failed` record the observer
+// holds, taken.
+func oneAuthLine(t *testing.T, logs *observer.ObservedLogs) observer.LoggedEntry {
+	t.Helper()
+	all := logs.TakeAll()
+	if len(all) != 1 || all[0].Message != "webhook auth failed" {
+		t.Fatalf("logged %d records, want the one auth-failed line: %+v", len(all), all)
+	}
+	return all[0]
+}
+
+// TestAuthenticateIsTheWebhookPreamble pins Authenticate to the
+// preamble on the process-wide limiter: one refusal through it is
+// charged there, answered with the flat 401 handler_test pins, and
+// logged under the caller's field; an accepted token is who it is,
+// with the claim the box binds a bundle to, and clears the address.
 func TestAuthenticateIsTheWebhookPreamble(t *testing.T) {
 	priv, pub := mustGenTestKey()
 	vs := resolveVerifiers([]trustSource{localTrust(pub, "box")}, nil)
 	core, logs := observer.New(zap.WarnLevel)
 	logger := zap.New(core)
-	// An address of this test's own: the budget it spends is the
-	// process-wide limiter's, which no other test touches.
-	const addr = "203.0.113.9:4242"
-	t.Cleanup(func() { forgetTestAddress("203.0.113.9") })
+	// An address of this test's own on the process-wide limiter, which
+	// no other test touches.
+	const addr, key = "203.0.113.9:4242", "203.0.113.9"
+	t.Cleanup(func() { forgetTestAddress(key) })
 	request := func(token string) *http.Request {
 		req := httptest.NewRequest(http.MethodPost, "/", nil)
 		req.RemoteAddr = addr
@@ -56,20 +76,28 @@ func TestAuthenticateIsTheWebhookPreamble(t *testing.T) {
 		}
 		return req
 	}
-	call := func(token string) (Identity, bool, *httptest.ResponseRecorder) {
-		t.Helper()
-		w := httptest.NewRecorder()
-		who, ok, err := Authenticate(w, request(token), vs, logger, zap.String("webhook", "box"))
-		if err != nil {
-			t.Fatalf("Authenticate: %v", err)
-		}
-		return who, ok, w
+
+	w := httptest.NewRecorder()
+	who, ok, err := Authenticate(w, request("not-a-jwt"), vs, logger, "webhook", "box")
+	if err != nil || ok || who.By != "" || w.Code != http.StatusUnauthorized || strings.TrimSpace(w.Body.String()) != flat401 {
+		t.Fatalf("refused token: ok = %v, By = %q, err = %v, response = %d %s; want the flat 401", ok, who.By, err, w.Code, w.Body.String())
+	}
+	if !charged(key) {
+		t.Fatalf("a refusal through Authenticate was not charged to the process-wide limiter")
+	}
+	fields := oneAuthLine(t, logs).ContextMap()
+	if fields["webhook"] != "box" || fields["remote"] != key {
+		t.Errorf("fields = %v; want the caller's field and the address", fields)
+	}
+	if refused, _ := fields["refused"].(string); !strings.HasPrefix(refused, "local:test-key: ") {
+		t.Errorf("refused = %q, want the source's reason", refused)
 	}
 
-	const sha = "4f1c2a9d0e8b7c6a5f4e3d2c1b0a9988776655443"
-	who, ok, w := call(mintTestToken(t, priv, "box", map[string]string{"sub": "ci", "sha": sha}))
-	if !ok || w.Code != http.StatusOK || w.Body.Len() != 0 {
-		t.Fatalf("accepted token: ok = %v, wrote %d %q; want ok and nothing written", ok, w.Code, w.Body.String())
+	const sha = "4f1c2a9d0e8b7c6a5f4e3d2c1b0a998877665544"
+	w = httptest.NewRecorder()
+	who, ok, err = Authenticate(w, request(mintTestToken(t, priv, "box", map[string]string{"sub": "ci", "sha": sha})), vs, logger, "webhook", "box")
+	if err != nil || !ok || w.Code != http.StatusOK || w.Body.Len() != 0 {
+		t.Fatalf("accepted token: ok = %v, err = %v, wrote %d %q; want ok and nothing written", ok, err, w.Code, w.Body.String())
 	}
 	if who.By != "local:test-key sub=ci" {
 		t.Errorf("By = %q, want the attribution a deploy record carries", who.By)
@@ -80,59 +108,88 @@ func TestAuthenticateIsTheWebhookPreamble(t *testing.T) {
 	if got, ok := who.Claim("nope"); ok || got != "" {
 		t.Errorf("Claim(nope) = %q, %v; want absent", got, ok)
 	}
+	if charged(key) {
+		t.Errorf("an accepted token did not clear the address")
+	}
 	if logs.Len() != 0 {
 		t.Errorf("an accepted token wrote %d journal lines, want none: %+v", logs.Len(), logs.All())
 	}
+}
 
-	// Refused: the flat 401; the journal line carries the scope, the
-	// address and the reason, and nothing else says why.
-	who, ok, w = call("not-a-jwt")
-	if ok || who.By != "" || w.Code != http.StatusUnauthorized || strings.TrimSpace(w.Body.String()) != flat401 {
-		t.Fatalf("refused token: ok = %v, By = %q, response = %d %s; want the flat 401", ok, who.By, w.Code, w.Body.String())
-	}
-	all := logs.TakeAll()
-	if len(all) != 1 || all[0].Message != "webhook auth failed" {
-		t.Fatalf("logged %d records, want the one auth-failed line: %+v", len(all), all)
-	}
-	fields := all[0].ContextMap()
-	if fields["webhook"] != "box" || fields["remote"] != "203.0.113.9" {
-		t.Errorf("fields = %v; want the caller's scope and the address", fields)
-	}
-	if refused, _ := fields["refused"].(string); !strings.HasPrefix(refused, "local:test-key: ") {
-		t.Errorf("refused = %q, want the source's reason", refused)
+// TestAuthenticateBudgetAndBound pins the preamble's budget on a
+// clocked limiter — ten failures logged, the eleventh 429 with a
+// Retry-After, the window draining it, a valid token clearing it —
+// and the bound on the caller's field: one line, the length of a
+// refusal, whatever the caller put in it; an app name with a control
+// byte reads Go-quoted (the one visible change #188 made); no key is
+// no field.
+func TestAuthenticateBudgetAndBound(t *testing.T) {
+	priv, pub := mustGenTestKey()
+	vs := resolveVerifiers([]trustSource{localTrust(pub, "box")}, nil)
+	core, logs := observer.New(zap.WarnLevel)
+	logger := zap.New(core)
+	clk := newFakeClock()
+	l := newAuthLimiter(clk)
+	call := func(token, key, value string) (bool, *httptest.ResponseRecorder) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/", nil)
+		req.RemoteAddr = "203.0.113.10:4242"
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		w := httptest.NewRecorder()
+		_, ok, err := authenticate(w, req, vs, logger, l, key, value)
+		if err != nil {
+			t.Fatalf("authenticate: %v", err)
+		}
+		return ok, w
 	}
 
-	// A scope field is bounded whatever the caller put in it — one
-	// line, the length of a refusal — so a request-chosen value cannot
-	// make each of the budgeted lines as long as it likes.
+	for i := range authFailBudget {
+		if ok, w := call("not-a-jwt", "webhook", "box"); ok || w.Code != http.StatusUnauthorized {
+			t.Fatalf("failure %d: ok = %v, code = %d; want 401", i+1, ok, w.Code)
+		}
+	}
+	if got := logs.TakeAll(); len(got) != authFailBudget+1 {
+		t.Fatalf("logged %d records for %d failures; want each, and the line saying the budget is spent", len(got), authFailBudget)
+	}
+	if ok, w := call("not-a-jwt", "webhook", "box"); ok || w.Code != http.StatusTooManyRequests || w.Header().Get("Retry-After") != strconv.Itoa(int(authFailWindow.Seconds())) {
+		t.Fatalf("past the budget: ok = %v, code = %d, Retry-After = %q; want 429 and the window", ok, w.Code, w.Header().Get("Retry-After"))
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("a throttled refusal was logged: %+v", logs.All())
+	}
+	clk.Advance(authFailWindow)
+	if ok, w := call("not-a-jwt", "webhook", "box"); ok || w.Code != http.StatusUnauthorized {
+		t.Fatalf("after the window: ok = %v, code = %d; want 401, the budget fresh", ok, w.Code)
+	}
+	if ok, w := call(mintTestToken(t, priv, "box", nil), "webhook", "box"); !ok || w.Code != http.StatusOK {
+		t.Fatalf("a valid token: ok = %v, code = %d; want admitted", ok, w.Code)
+	}
+	if l.size() != 0 {
+		t.Fatalf("a valid token left %d addresses charged, want none", l.size())
+	}
+	logs.TakeAll()
+
+	// The bound: whatever the caller put in the field, one line of at
+	// most a refusal's length.
 	long := strings.Repeat("r", 2*maxRefusalLen) + "\n"
-	if _, ok, err := Authenticate(httptest.NewRecorder(), request("not-a-jwt"), vs, logger, zap.String("ref", long)); ok || err != nil {
-		t.Fatalf("refused with a long scope: ok = %v, err = %v", ok, err)
-	}
-	all = logs.TakeAll()
-	if len(all) != 1 {
-		t.Fatalf("logged %d records, want one: %+v", len(all), all)
-	}
-	if ref, _ := all[0].ContextMap()["ref"].(string); len(ref) > maxRefusalLen+len("...") || strings.Contains(ref, "\n") || !strings.HasPrefix(ref, `"rrr`) {
+	call("not-a-jwt", "ref", long)
+	if ref, _ := oneAuthLine(t, logs).ContextMap()["ref"].(string); len(ref) > maxRefusalLen+len("...") || strings.Contains(ref, "\n") || !strings.HasPrefix(ref, `"rrr`) {
 		t.Errorf("ref = %d bytes %q; want one quoted line of at most %d bytes", len(ref), ref, maxRefusalLen)
 	}
 
-	// Charged on the shared budget: the address's eleventh failure in
-	// the window is 429 with a Retry-After, and a valid token from the
-	// throttled address is admitted and clears it.
-	for failures := 2; failures < authFailBudget; failures++ {
-		if _, ok, w := call("not-a-jwt"); ok || w.Code != http.StatusUnauthorized {
-			t.Fatalf("failure %d: ok = %v, code = %d; want 401", failures+1, ok, w.Code)
-		}
+	// This webhook's app name, as ServeHTTP passes it: cut by
+	// loggedAppName, and Go-quoted here when it carries a control byte.
+	call("not-a-jwt", "app", loggedAppName("demo\n"))
+	if app := oneAuthLine(t, logs).ContextMap()["app"]; app != strconv.QuoteToASCII("demo\n") {
+		t.Errorf("app = %q, want the name Go-quoted", app)
 	}
-	if _, ok, w := call("not-a-jwt"); ok || w.Code != http.StatusTooManyRequests || w.Header().Get("Retry-After") == "" {
-		t.Fatalf("past the budget: ok = %v, code = %d, Retry-After = %q; want 429 with a Retry-After", ok, w.Code, w.Header().Get("Retry-After"))
-	}
-	if _, ok, w := call(mintTestToken(t, priv, "box", nil)); !ok || w.Code != http.StatusOK {
-		t.Fatalf("a valid token from a throttled address: ok = %v, code = %d; want admitted", ok, w.Code)
-	}
-	if _, ok, w := call("not-a-jwt"); ok || w.Code != http.StatusUnauthorized {
-		t.Fatalf("after the clear: ok = %v, code = %d; want 401, the budget fresh", ok, w.Code)
+
+	// No key is no field: the line is the address and the reason.
+	call("not-a-jwt", "", "")
+	if fields := oneAuthLine(t, logs).ContextMap(); len(fields) != 2 || fields["remote"] == nil || fields["refused"] == nil {
+		t.Errorf("fields = %v; want remote and refused alone", fields)
 	}
 }
 
@@ -167,12 +224,12 @@ func TestIdentityClaimRendersAsMatchClaimsCompares(t *testing.T) {
 	}
 }
 
-// TestNewTrustIsProvisionsTrustWiring pins NewTrust to the functions
-// Provision calls — the placeholder resolution, the validation (the
-// same refusal, word for word), the https-only JWKS client unless
-// allowInsecure, verifiers that accept what the source accepts — and
-// to the two things it does on its own: the caller's config is left
-// as parsed, and no source is a config error.
+// TestNewTrustIsProvisionsTrustWiring pins NewTrust to the wiring
+// Provision calls (trustVerifiers): the placeholder resolution, the
+// validation (the same refusal, word for word), the https-only JWKS
+// client unless allowInsecure, verifiers that accept what the source
+// accepts — and to the two things it does on its own: the caller's
+// config is left as parsed, and no source is a config error.
 func TestNewTrustIsProvisionsTrustWiring(t *testing.T) {
 	ctx := context.Background()
 	priv, pub := mustGenTestKey()
@@ -250,10 +307,11 @@ func TestNewTrustIsProvisionsTrustWiring(t *testing.T) {
 }
 
 // TestExportedFilterIsTheResponseFilter pins RespondJSON to respondJSON
-// and NewEnvRedactor to the filter's own layers: a body through a nil
+// and NewRedactor to the filter's own layers: a body through a nil
 // filter loses a token-shaped string to the shape layer; a filter
 // primed with an environment loses that environment's values and
-// names the key; and both write what the handler writes.
+// names the key; an id a body names survives the entropy layer only
+// on the safe list, and never when it equals a known value.
 func TestExportedFilterIsTheResponseFilter(t *testing.T) {
 	const jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJyZXBvIn0.c2lnbmF0dXJlX2hlcmVfMTIz" // gitleaks:allow
 	body := map[string]string{"error": "validate: token " + jwt + " rejected"}
@@ -272,7 +330,7 @@ func TestExportedFilterIsTheResponseFilter(t *testing.T) {
 	}
 
 	const text = "dial postgres://app:hunter2hunter2@db/app: refused, password hunter2hunter2"
-	r := NewEnvRedactor([]string{"DATABASE_URL=postgres://app:hunter2hunter2@db/app", "PATH=/usr/bin"})
+	r := NewRedactor([]string{"DATABASE_URL=postgres://app:hunter2hunter2@db/app", "PATH=/usr/bin"}, nil)
 	out := r.Redact(text)
 	if strings.Contains(out, "hunter2hunter2") || !strings.Contains(out, "[redacted:DATABASE_URL]") {
 		t.Errorf("Redact = %q; want the value and its password replaced", out)
@@ -291,7 +349,28 @@ func TestExportedFilterIsTheResponseFilter(t *testing.T) {
 	if out := none.Redact("token " + jwt); strings.Contains(out, jwt) {
 		t.Errorf("a nil Redactor is the two layers: %q", out)
 	}
-	if out := NewEnvRedactor(nil).Redact("token " + jwt); strings.Contains(out, jwt) {
-		t.Errorf("an empty environment is the two layers: %q", out)
+	if out := NewRedactor(nil, nil).Redact("token " + jwt); strings.Contains(out, jwt) {
+		t.Errorf("an empty filter is the two layers: %q", out)
+	}
+
+	// The safe list: the sha a box body names survives the entropy
+	// layer only when the caller lists it, as liveswap lists an app's
+	// versions, and never when it equals a known value (rule 1).
+	const sha = "3f9a1c2b4d5e6f708192a3b4c5d6e7f8091a2b3c" // the SHA TestRedactorSafeList pins as masked
+	for name, tc := range map[string]struct {
+		r        *Redactor
+		survives bool
+	}{
+		"unlisted":         {NewRedactor(nil, nil), false},
+		"listed":           {NewRedactor(nil, []string{sha}), true},
+		"listed but known": {NewRedactor([]string{"TOKEN=" + sha}, []string{sha}), false},
+	} {
+		w := httptest.NewRecorder()
+		if err := RespondJSON(w, http.StatusOK, map[string]string{"commit": sha}, tc.r); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(w.Body.String(), sha) != tc.survives {
+			t.Errorf("%s: body = %s; want the sha to survive = %v", name, w.Body.String(), tc.survives)
+		}
 	}
 }

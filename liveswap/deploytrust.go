@@ -106,6 +106,23 @@ func buildTrust(global, perApp []TrustConfig) ([]trustSource, error) {
 	return out, nil
 }
 
+// trustVerifiers is the verifiers for a set of deploy_trust blocks on
+// one JWKS client: {env.*} placeholders resolved in place
+// (resolveTrustPlaceholders), presets validated and local keys loaded
+// (buildTrust — a bad key path or an unaudienced OIDC source is a
+// config error, fail-closed), then resolveVerifiers. Provision calls
+// it for liveswap's global set and NewTrust (export.go) for the box's,
+// so the two cannot drift; the per-app sets, which fall back to the
+// global blocks, go through buildTrust beside it.
+func trustVerifiers(repl *caddy.Replacer, configs []TrustConfig, jwks *http.Client) ([]Verifier, error) {
+	resolveTrustPlaceholders(repl, configs)
+	sources, err := buildTrust(configs, nil)
+	if err != nil {
+		return nil, err
+	}
+	return resolveVerifiers(sources, jwks), nil
+}
+
 func resolveTrustConfig(tc TrustConfig) (trustSource, error) {
 	claims := make(map[string]string, len(tc.Claims)+1)
 	for k, v := range tc.Claims {
@@ -207,7 +224,11 @@ func requireIdentityClaim(kind string, claims map[string]string) error {
 // verification keys and forge deploy tokens — unless allow_insecure_http
 // is set, the documented escape hatch for test rigs and LANs.
 func newJWKSClient(allowInsecure bool) *http.Client {
-	var rt http.RoundTripper = &http.Transport{Proxy: http.ProxyFromEnvironment}
+	// IdleConnTimeout as http.DefaultTransport has it: a transport is
+	// built per config load, and the one a reload retires must let go
+	// of its idle issuer connections rather than hold them until the
+	// issuer closes them.
+	var rt http.RoundTripper = &http.Transport{Proxy: http.ProxyFromEnvironment, IdleConnTimeout: 90 * time.Second}
 	if !allowInsecure {
 		rt = httpsOnlyTransport{base: rt}
 	}
