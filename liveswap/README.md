@@ -211,8 +211,13 @@ log.Fatal(http.Serve(ln, mux))
 
 Bun: `Bun.serve({ unix: process.env.SOCKET, fetch })`. Hono on Node:
 `createAdaptorServer(app).listen(process.env.SOCKET)`. Python:
-`gunicorn --bind unix:$SOCKET`, `uvicorn --uds $SOCKET`. Ruby: `puma
--b unix://$SOCKET`. Rust: axum/hyper on a `tokio::net::UnixListener`.
+`gunicorn --bind unix:{socket}`, `uvicorn --uds {socket}`. Ruby: `puma
+-b unix://{socket}`. Rust: axum/hyper on a `tokio::net::UnixListener`.
+Where the path goes on the command line, as in those three, write the
+`{socket}` placeholder (see [Placeholders](#placeholders)) in
+`command`, not `$SOCKET`: `command` runs without a shell, and systemd
+expands a bare `$SOCKET` only as a whole argument, never inside one
+like `unix:$SOCKET`.
 
 Framework CLIs that only bind TCP (`next start`, Astro's node adapter)
 need a small custom server that calls the framework's request handler
