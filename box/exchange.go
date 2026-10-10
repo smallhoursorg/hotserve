@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -136,18 +135,6 @@ func readCapped(r io.Reader, name string, limit int64) ([]byte, error) {
 		return nil, fmt.Errorf("%s: larger than %d bytes", name, limit)
 	}
 	return b, nil
-}
-
-// standing is whether a read's error found something at the name: the
-// open succeeded, or met a symlink it would not follow. An open that
-// failed otherwise (missing, a directory that is not one, a process
-// out of descriptors) found nothing — and fails so for every name.
-func standing(err error) bool {
-	var pe *fs.PathError
-	if errors.As(err, &pe) && pe.Op == "open" {
-		return errors.Is(err, syscall.ELOOP)
-	}
-	return true
 }
 
 // readJSON reads one of the exchange tree's files into v, refusing a

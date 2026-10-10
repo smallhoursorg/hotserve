@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/caddyserver/caddy/v2/caddyconfig"
-	"go.uber.org/zap"
 
 	"github.com/smallhoursorg/hotserve/liveswap/deploytrust"
 )
@@ -27,13 +26,13 @@ import (
 // Handler contract says what each request gets. A poll-shaped request —
 // one `result` parameter, the Box-Poll scheme in any case, a canonical
 // 32-byte standard base64 secret whose digest's first 32 hex are that
-// parameter — is 500 when a marker stands at its id and cannot be
-// read; admitted (202, never charged) when the marker holds the whole
-// digest, whatever its age; otherwise an unauthenticated request like
-// any other: the flat 401, charged. With a bearer (in place of the
-// poll's Authorization), a malformed query is 400, and a well-formed
-// one is 202 for a readable marker at its id, 500 for an unreadable
-// one, 404 for none. No line is written before authentication.
+// parameter — is admitted (202, never charged) when the marker holds
+// the whole digest, whatever its age; otherwise, a marker it cannot
+// read included, an unauthenticated request like any other: the flat
+// 401, charged. With a bearer (in place of the poll's Authorization),
+// a malformed query is 400, and a well-formed one is 202 for a
+// readable marker at its id, 500 for an unreadable one, 404 for none.
+// One request writes at most one line of the box's own.
 func FuzzResultPoll(f *testing.F) {
 	h, id, digest := secret(7)
 	posted := func(age time.Duration) []byte {
@@ -64,6 +63,7 @@ func FuzzResultPoll(f *testing.F) {
 			return // `GET /`, the status: not this target's
 		}
 		r.h.limiter = deploytrust.NewLimiter(r.clock)
+		r.h.stateLog = &stateLog{}
 		r.logs.TakeAll() // else every iteration's lines stay for the whole run
 		for _, d := range []string{"out", "stage"} {
 			if err := os.RemoveAll(filepath.Join(r.dir, d)); err != nil {
@@ -121,9 +121,7 @@ func FuzzResultPoll(f *testing.F) {
 		}
 		want, charged := http.StatusUnauthorized, 1
 		switch {
-		case shaped && present && !readable:
-			want, charged = http.StatusInternalServerError, 0
-		case shaped && present && m.SHA256 == derived:
+		case shaped && present && readable && m.SHA256 == derived:
 			want, charged = http.StatusAccepted, 0
 		case !bearer:
 		case !wellFormed:
@@ -138,8 +136,8 @@ func FuzzResultPoll(f *testing.F) {
 		if w.Code != want || r.h.limiter.Size() != charged {
 			t.Fatalf("got %d (%d charged), want %d (%d): %s", w.Code, r.h.limiter.Size(), want, charged, w.Body)
 		}
-		if !bearer && r.logs.FilterLevelExact(zap.ErrorLevel).Len() != 0 {
-			t.Fatalf("a line before authentication: %v", r.logs.All())
+		if n := r.logs.FilterMessage("box webhook could not read its state").Len(); n > 1 {
+			t.Fatalf("%d lines of the box's own for one request: %v", n, r.logs.All())
 		}
 	})
 }

@@ -58,6 +58,8 @@ func newRig(t testing.TB) *rig {
 		limiter:   deploytrust.NewLimiter(r.clock),
 		installed: r.installed,
 		dir:       r.dir,
+		now:       r.clock.Now,
+		stateLog:  &stateLog{},
 	}
 	for _, d := range []string{"out", "stage"} {
 		if err := os.MkdirAll(filepath.Join(r.dir, d), 0o755); err != nil {
@@ -386,7 +388,9 @@ func TestHandlerResultPollSecret(t *testing.T) {
 	urlHeader, urlID, urlDigest := digestOf(urlRaw, base64.URLEncoding)
 	shortHeader, shortID, shortDigest := digestOf(bytes.Repeat([]byte{7}, pollSecretLen-1), base64.StdEncoding)
 	fresh := func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now()) }
-	const admitted, refused, boxError = 202, 401, 500
+	// unreadable: refused as any unauthenticated request is, and the
+	// box's failure in the journal.
+	const admitted, refused, unreadable = 202, 401, -1
 	for name, c := range map[string]struct {
 		setup  func(t *testing.T, r *rig)
 		target string
@@ -419,22 +423,19 @@ func TestHandlerResultPollSecret(t *testing.T) {
 		"upper-case id":             {fresh, "/?result=" + strings.ToUpper(id), pollHeader(h), refused},
 		"another param":             {fresh, "/?result=" + id + "&x=1", pollHeader(h), refused},
 		"result twice":              {fresh, "/?result=" + id + "&result=" + id, pollHeader(h), refused},
-		// stage/ broken for every id: nothing a caller guessing can
-		// reach says more than the flat 401, nor writes a line.
+		// A marker the box cannot read authenticates nothing, as an
+		// issuer it cannot reach authenticates no token: the flat 401,
+		// charged, and the failure journaled (once a window).
 		"stage not a directory": {func(t *testing.T, r *rig) {
 			must(t, os.RemoveAll(filepath.Join(r.dir, "stage")))
 			r.write(t, filepath.Join(r.dir, "stage"), nil)
-		}, "/?result=" + id, pollHeader(h), refused},
-		// A marker standing at the secret's id that cannot be read is
-		// the box's error, said to the secret's holder — and only to
-		// it, with no journal line, since it may poll for as long as
-		// the marker is kept.
-		"marker symlink": {func(t *testing.T, r *rig) { symlinkMarker(t, r, id, digest) }, "/?result=" + id, pollHeader(h), boxError},
-		"marker a FIFO":  {func(t *testing.T, r *rig) { mkfifo(t, filepath.Join(r.dir, "stage", id+".auth")) }, "/?result=" + id, pollHeader(h), boxError},
+		}, "/?result=" + id, pollHeader(h), unreadable},
+		"marker symlink": {func(t *testing.T, r *rig) { symlinkMarker(t, r, id, digest) }, "/?result=" + id, pollHeader(h), unreadable},
+		"marker a FIFO":  {func(t *testing.T, r *rig) { mkfifo(t, filepath.Join(r.dir, "stage", id+".auth")) }, "/?result=" + id, pollHeader(h), unreadable},
 		"marker too big": {func(t *testing.T, r *rig) {
 			r.write(t, filepath.Join(r.dir, "stage", id+".auth"), bytes.Repeat([]byte(" "), maxMarker+1))
-		}, "/?result=" + id, pollHeader(h), boxError},
-		"marker for another id": {func(t *testing.T, r *rig) { r.marker(t, id, otherDigest, r.clock.Now()) }, "/?result=" + id, pollHeader(h), boxError},
+		}, "/?result=" + id, pollHeader(h), unreadable},
+		"marker for another id": {func(t *testing.T, r *rig) { r.marker(t, id, otherDigest, r.clock.Now()) }, "/?result=" + id, pollHeader(h), unreadable},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := newRig(t)
@@ -453,13 +454,52 @@ func TestHandlerResultPollSecret(t *testing.T) {
 				if r.h.limiter.Size() != 1 || errorLines != 0 {
 					t.Fatalf("%d charged, %d error lines: %v", r.h.limiter.Size(), errorLines, r.logs.All())
 				}
-			case boxError:
-				wantError(t, w, http.StatusInternalServerError, "could not read the push's marker")
-				if r.h.limiter.Size() != 0 || errorLines != 0 {
-					t.Fatalf("%d charged, %d error lines", r.h.limiter.Size(), errorLines)
+			case unreadable:
+				wantError(t, w, http.StatusUnauthorized, unauthorized)
+				lines := r.logs.FilterMessage("box webhook could not read its state").All()
+				if r.h.limiter.Size() != 1 || errorLines != 1 || len(lines) != 1 || lines[0].ContextMap()["reading"] != "the push's marker" {
+					t.Fatalf("%d charged, %d error lines: %v", r.h.limiter.Size(), errorLines, r.logs.All())
 				}
 			}
 		})
+	}
+}
+
+// TestHandlerStateErrorJournalWindow: a state file the handler cannot
+// read is journaled once a minute per file, whatever repeats the
+// request — a poll may for a day, before the preamble's budgets — and
+// every request is still answered.
+func TestHandlerStateErrorJournalWindow(t *testing.T) {
+	r := newRig(t)
+	h, id, digest := secret(7)
+	r.marker(t, id, digest, r.clock.Now())
+	mkfifo(t, filepath.Join(r.dir, "out", id+".json"))
+	lines := func() int { return r.logs.FilterMessage("box webhook could not read its state").Len() }
+	for range 5 {
+		wantError(t, r.do(t, req{target: "/?result=" + id, header: pollHeader(h)}), http.StatusInternalServerError, "could not read the result")
+	}
+	if lines() != 1 {
+		t.Fatalf("5 polls of one unreadable result: %d lines, want 1", lines())
+	}
+	// Another file is its own line.
+	wantError(t, r.do(t, req{target: "/", token: r.token(t)}), http.StatusConflict, msgNoBaseline)
+	must(t, os.Mkdir(filepath.Join(r.dir, "applied.json"), 0o755))
+	wantError(t, r.do(t, req{target: "/", token: r.token(t)}), http.StatusInternalServerError, "could not read the baseline")
+	if lines() != 2 {
+		t.Fatalf("a second file: %d lines, want 2", lines())
+	}
+	r.clock.Advance(stateLogWindow - time.Second)
+	r.do(t, req{target: "/?result=" + id, header: pollHeader(h)})
+	if lines() != 2 {
+		t.Fatalf("inside the window: %d lines, want 2", lines())
+	}
+	r.clock.Advance(time.Second)
+	r.do(t, req{target: "/?result=" + id, header: pollHeader(h)})
+	if lines() != 3 {
+		t.Fatalf("past the window: %d lines, want 3", lines())
+	}
+	if r.h.limiter.Size() != 0 {
+		t.Fatal("a poll was charged")
 	}
 }
 
