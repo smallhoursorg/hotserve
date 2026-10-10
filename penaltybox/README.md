@@ -151,7 +151,9 @@ Semantics:
   holds for levels a tier takes by fallback (below) too: with only
   `tier 2` configured, a level-3 response costs 1 there, where the
   default budget would charge 3.
-- **Budgets are independent.** Level-2 traffic never consumes tier 3's
+- **Budgets are independent.** Each counted response goes to exactly
+  one budget: its level's tier, else the fallback below. With tiers 2
+  and 3 both configured, level-2 traffic never consumes tier 3's
   budget, and vice versa — this is the point of the feature.
 - **Fallback:** a counted level without its own tier uses the nearest
   configured tier below it (a level-3 response is at least as sensitive

@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"os"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/caddyserver/caddy/v2/caddyconfig"
@@ -17,47 +19,37 @@ import (
 // order holds, which is why penaltybox/README.md and the starter
 // packaging/Caddyfile put hint_penaltybox first in a route.
 func TestPenaltyboxCacheOrder(t *testing.T) {
+	site := func(body string) string { return "example.com {" + body + "\n}\n" }
 	cases := []struct {
-		name string
-		site string
-		want []string // relative order of cache, hint_penaltybox, reverse_proxy
+		name  string
+		input string
+		want  []string // relative order of cache, hint_penaltybox, reverse_proxy
 	}{
-		{"site level", `
+		{"site level", site(`
 	hint_penaltybox
 	cache
-	reverse_proxy localhost:8000`,
+	reverse_proxy localhost:8000`),
 			[]string{"cache", "hint_penaltybox", "reverse_proxy"}},
-		{"inside handle", `
+		{"inside handle", site(`
 	handle {
 		hint_penaltybox
 		cache
 		reverse_proxy localhost:8000
-	}`,
+	}`),
 			[]string{"cache", "hint_penaltybox", "reverse_proxy"}},
-		{"inside route", `
+		{"inside route", site(`
 	route {
 		hint_penaltybox
 		cache
 		reverse_proxy localhost:8000
-	}`,
+	}`),
 			[]string{"hint_penaltybox", "cache", "reverse_proxy"}},
-		// The starter Caddyfile's example site, uncommented.
-		{"starter example", `
-	route {
-		hint_penaltybox
-		cache
-		reverse_proxy {
-			dynamic liveswap myapp
-		}
-	}
-	handle_errors 502 503 {
-		respond "myapp is not running" {http.error.status_code}
-	}`,
+		{"starter example", starterExampleSite(t),
 			[]string{"hint_penaltybox", "cache", "reverse_proxy"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			order := adaptedHandlerOrder(t, "example.com {"+c.site+"\n}\n")
+			order := adaptedHandlerOrder(t, c.input)
 			got := slices.DeleteFunc(order, func(h string) bool {
 				return h != "cache" && h != "hint_penaltybox" && h != "reverse_proxy"
 			})
@@ -66,6 +58,41 @@ func TestPenaltyboxCacheOrder(t *testing.T) {
 			}
 		})
 	}
+}
+
+// starterExampleSite returns the shipped starter Caddyfile's commented
+// example site (myapp.example.com) as a user gets it by uncommenting
+// it with its optional hint_penaltybox and cache lines switched on, so
+// the test checks the file itself rather than a copy of it.
+func starterExampleSite(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile("../../packaging/Caddyfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var site []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if len(site) == 0 && line != "# myapp.example.com {" {
+			continue
+		}
+		line = strings.TrimPrefix(strings.TrimPrefix(line, "#"), " ")
+		// The optional directives are commented once more in the block:
+		// "# cache", alone or before a trailing comment, but not prose
+		// that happens to start with the word.
+		body := strings.TrimLeft(line, "\t")
+		for _, d := range []string{"hint_penaltybox", "cache"} {
+			rest, ok := strings.CutPrefix(body, "# "+d)
+			if ok && (rest == "" || strings.HasPrefix(strings.TrimLeft(rest, " "), "#")) {
+				line = line[:len(line)-len(body)] + strings.TrimPrefix(body, "# ")
+			}
+		}
+		site = append(site, line)
+		if line == "}" {
+			return strings.Join(site, "\n") + "\n"
+		}
+	}
+	t.Fatal("packaging/Caddyfile has no commented-out myapp.example.com site ending in \"# }\"")
+	return ""
 }
 
 // adaptedRoute and adaptedHandler are the slice of Caddy's HTTP route
