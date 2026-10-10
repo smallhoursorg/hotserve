@@ -5,8 +5,12 @@
 #     is never a backlog to triage.
 #   - A 7-day cooldown on routine version bumps: compromised upstream
 #     releases are almost always yanked within days, so waiting is the
-#     cheapest supply-chain defense there is. Security updates BYPASS
-#     the cooldown and arrive immediately.
+#     cheapest supply-chain defense there is. The gomod clock starts at
+#     the module proxy's Time, the tagged commit's date, not the GitHub
+#     release's publication: a tag on an old commit gets a short
+#     cooldown or none, and no default-days can close that. Security
+#     updates BYPASS the cooldown and arrive immediately; gomod's are
+#     grouped across its directories too (go-security below).
 #   - Patch/minor updates auto-merge once the full CI graph (tests,
 #     e2e, package install matrix, govulncheck) passes; majors stay
 #     open for human review.
@@ -24,6 +28,15 @@ updates:
       default-days: 7
     groups:
       go-deps:
+        patterns: ["*"]
+      # Security updates are grouped across the same directories (a
+      # group takes one applies-to, hence two groups). Ungrouped, each
+      # would be a one-directory PR, and the root module replaces the
+      # other three modules with their local directories: a bump in only
+      # one of those can leave the root go.mod untidy, which ci.yml's
+      # tidy-check fails.
+      go-security:
+        applies-to: security-updates
         patterns: ["*"]
     # A Dependabot `ignore` here MUST have a matching watch declaring
     # its exit condition in .github/pin-watch.yml — the pin-watch

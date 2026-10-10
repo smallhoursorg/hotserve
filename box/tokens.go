@@ -2,6 +2,7 @@ package box
 
 import (
 	"bytes"
+	"regexp"
 	"strings"
 
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -23,7 +24,16 @@ type Shape struct {
 	Host string
 	// Signers are the box block's signer lines, in file order.
 	Signers proof.Signers
+	// Apps are the names of the global liveswap block's `app` lines, in
+	// file order, as a result reports them; a name outside liveswap's
+	// app-name grammar is left out, since liveswap refuses the file at
+	// load for it anyway. Read from the first reading only: nothing
+	// decides on them.
+	Apps []string
 }
+
+// appName is liveswap's app-name grammar (liveswap/names.go, appNameRe).
+var appName = regexp.MustCompile(`^[a-z0-9-]{1,63}$`)
 
 // Refusal is why a Caddyfile cannot be a box's: one line beginning
 // with a verb, which the caller prefixes with the file's name — "the
@@ -36,6 +46,11 @@ type Refusal struct {
 func (r *Refusal) Error() string { return "the Caddyfile " + r.Reason }
 
 func refuse(reason string) error { return &Refusal{Reason: reason} }
+
+// reasonNoSigner is the walk's refusal of a box block with no signer
+// line, which the applier tells apart for the installed file: there it
+// is a refusal of its own, "lists no signer" (check.go).
+const reasonNoSigner = "has no signer"
 
 // Walk reads a Caddyfile the way the box reads one (DESIGN-box.md,
 // "Reading the signed file"): caddyfile.Tokenize and a brace-depth
@@ -88,12 +103,13 @@ func sameSigners(a, b proof.Signers) bool {
 type blockKind int
 
 const (
-	kindOther   blockKind = iota // a nested block of a directive, or an option's
-	kindGlobal                   // the key-less top-level block
-	kindBox                      // the global block's `box` block
-	kindTrust                    // the box block's `deploy_trust` block
-	kindSite                     // a top-level block with addresses
-	kindSnippet                  // a top-level `(name)` block
+	kindOther    blockKind = iota // a nested block of a directive, or an option's
+	kindGlobal                    // the key-less top-level block
+	kindBox                       // the global block's `box` block
+	kindTrust                     // the box block's `deploy_trust` block
+	kindSite                      // a top-level block with addresses
+	kindSnippet                   // a top-level `(name)` block
+	kindLiveswap                  // the global block's `liveswap` block
 )
 
 // frame is one open brace.
@@ -272,6 +288,13 @@ func walk(input []byte) (*Shape, error) {
 				}
 				child.kind, child.inBox = kindBox, true
 			}
+			if first.Text == "liveswap" {
+				child.kind = kindLiveswap
+			}
+		case kindLiveswap:
+			if first.Text == "app" && len(args) > 0 && appName.MatchString(args[0]) {
+				shape.Apps = append(shape.Apps, args[0])
+			}
 		case kindBox:
 			switch first.Text {
 			case "signer":
@@ -303,7 +326,7 @@ func walk(input []byte) (*Shape, error) {
 		return nil, refuse("has no box block")
 	}
 	if len(shape.Signers) == 0 {
-		return nil, refuse("has no signer")
+		return nil, refuse(reasonNoSigner)
 	}
 	if _, err := shape.Signers.AllowedSigners(); err != nil {
 		return nil, refuse("has a bad " + err.Error())

@@ -2,7 +2,9 @@ package liveswap
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -31,15 +33,33 @@ type stateStore interface {
 	save(appState) error
 }
 
-// fileStateStore keeps state.json next to the app's releases.
+// fileStateStore keeps state.json next to the app's releases, written
+// and read by the functions the deploy records are (ownfile.go): the
+// app dir was the app's to write before sandboxing existed, and a link
+// planted then — at state.json, or at the temp name an earlier
+// hotserve wrote through — is not followed. The app dir itself is not
+// checked here (ownfile.go says why). A state.json that is a
+// link, a FIFO or anything but a regular file, or larger than any
+// state hotserve writes, is an error like a corrupt one, which
+// recovery never silently resets (ensureRunning).
 type fileStateStore struct {
 	path string
 }
 
+// stateMaxBytes bounds a state read with the margin a record's bound
+// has over a record (deployRecordMaxBytes: 1 MiB over an 8 KiB tail):
+// the largest state hotserve writes — a version, a nonce, a unit name
+// built from the two and the app's name, two timestamps — is under
+// 512 bytes, so the bound refuses nothing hotserve wrote.
+const stateMaxBytes = 64 << 10
+
+// stateTempPattern names save's temp file (writeOwnFile).
+const stateTempPattern = ".state-*.tmp"
+
 func (s *fileStateStore) load() (appState, bool, error) {
 	var st appState
-	data, err := os.ReadFile(s.path)
-	if os.IsNotExist(err) {
+	data, _, err := readOwnFile(s.path, stateMaxBytes, "a state file")
+	if errors.Is(err, fs.ErrNotExist) {
 		return st, false, nil
 	}
 	if err != nil {
@@ -52,7 +72,8 @@ func (s *fileStateStore) load() (appState, bool, error) {
 }
 
 // save writes atomically (temp file + rename) so a crash mid-write
-// never leaves a truncated state file.
+// never leaves a truncated state file, and never through a link
+// (writeOwnFile).
 func (s *fileStateStore) save(st appState) error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o750); err != nil {
 		return err
@@ -61,11 +82,33 @@ func (s *fileStateStore) save(st appState) error {
 	if err != nil {
 		return err
 	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
+	s.removeLeftovers()
+	return writeOwnFile(s.path, stateTempPattern, data)
+}
+
+// removeLeftovers removes the temp files an interrupted save leaves
+// behind: save's own, and state.json.tmp, the fixed name an earlier
+// hotserve wrote through — on a box upgraded from one it may still be
+// there, or be a link planted where it was. os.Remove unlinks the
+// name, never what a link points at. Only these names: the app dir
+// holds temp names that are not save's (persistState's current.tmp).
+// Saves are serialized per app — every caller of persistState holds
+// deployMu — so no save is in flight to lose its temp file here. Best
+// effort: a leftover that cannot be removed costs a little disk, never
+// a save.
+func (s *fileStateStore) removeLeftovers() {
+	_ = os.Remove(s.path + ".tmp") // absent is the usual case; best effort, as above
+	dir := filepath.Dir(s.path)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return // the write that follows reports a dir it cannot use
 	}
-	return os.Rename(tmp, s.path)
+	prefix, suffix, _ := strings.Cut(stateTempPattern, "*")
+	for _, e := range entries {
+		if n := e.Name(); !e.IsDir() && strings.HasPrefix(n, prefix) && strings.HasSuffix(n, suffix) {
+			_ = os.Remove(filepath.Join(dir, n)) // best effort, as above
+		}
+	}
 }
 
 var _ stateStore = (*fileStateStore)(nil)

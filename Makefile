@@ -16,7 +16,7 @@ VERSION ?= $(shell (git describe --tags --exact-match 2>/dev/null || echo v0.0.0
 # Distro image for the package install smoke test (install-test).
 DISTRO ?= debian:13
 
-.PHONY: test test-integration vet tidy lint fuzz fuzz-list vulncheck secretscan build package clean-debs install-test e2e soak e2e-logs clean
+.PHONY: test test-integration vet tidy tidy-check lint fuzz fuzz-list vulncheck secretscan build package clean-debs install-test e2e soak e2e-logs clean
 
 test:
 	$(COMPOSE) run --rm dev go test -race -cover $(PKGS)
@@ -36,8 +36,9 @@ endef
 # Runs inside the dev-systemd container (systemd as PID 1, root's user
 # manager started by test/systemd/ready.sh): liveswap's runner creates
 # real transient units, and the caddytest scenarios deploy a real app
-# through them. -p 1: the modules' caddytest suites all pin admin :2999
-# / http :9080, so their test binaries must not run in parallel.
+# through them; the box applier asks the real systemctl. -p 1: the
+# modules' caddytest suites all pin admin :2999 / http :9080, so their
+# test binaries must not run in parallel.
 test-integration:
 	$(cgroup2_preflight)
 	$(COMPOSE) up --build -d dev-systemd
@@ -45,7 +46,7 @@ test-integration:
 	$(COMPOSE) exec -T dev-systemd /bin/sh /src/test/systemd/ready.sh || status=1; \
 	if [ $$status -eq 0 ]; then \
 		$(COMPOSE) exec -T -e XDG_RUNTIME_DIR=/run/user/0 dev-systemd \
-			go test -race -tags integration -v -run Integration -p 1 ./liveswap/... ./penaltybox/... || status=1; \
+			go test -race -tags integration -v -run Integration -p 1 ./liveswap/... ./penaltybox/... ./box/... || status=1; \
 	fi; \
 	if [ $$status -ne 0 ]; then $(COMPOSE) exec -T dev-systemd journalctl --no-pager -n 100 || true; fi; \
 	$(COMPOSE) rm -sf dev-systemd >/dev/null; \
@@ -61,6 +62,14 @@ vet:
 
 tidy:
 	for m in $(MODULES); do $(COMPOSE) run --rm -w /src/$$m dev go mod tidy || exit 1; done
+
+# The PR-CI half of tidy: `go mod tidy -diff` writes nothing, prints
+# the diff tidy would make and exits non-zero when there is one, so a
+# missing go.sum line or a leftover require fails the PR that left it.
+# It checks each module's go.mod/go.sum only: go.work is ignored and
+# go.work.sum is not checked (that would be a separate check).
+tidy-check:
+	for m in $(MODULES); do $(COMPOSE) run --rm -T -w /src/$$m dev go mod tidy -diff || exit 1; done
 
 # Both tag sets, as for vet: a bare run never compiles the
 # integration-tagged files, so neither the linters nor gofmt see them.

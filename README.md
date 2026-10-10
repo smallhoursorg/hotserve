@@ -176,6 +176,7 @@ make test              # unit tests, all modules (race + coverage)
 make test-integration  # real deploys through caddytest, under a real systemd user manager
 make e2e               # full stack: both module suites against the shipped binary under systemd, then restart survival + crash recovery
 make lint vet tidy     # golangci-lint (gofmt-gated), go vet, go mod tidy
+make tidy-check        # fails if go mod tidy would change a module's go.mod/go.sum; CI runs it on every PR
 make vulncheck         # govulncheck, all modules (tool dep in go.mod — Dependabot-bumped)
 make secretscan        # gitleaks full-history secret scan (same image as the CI gate)
 make fuzz              # fuzz the untrusted-input surfaces (FUZZTIME=2m per target)
