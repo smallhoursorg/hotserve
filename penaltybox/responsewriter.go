@@ -9,7 +9,9 @@ import (
 // parseLevel applies the wire contract strictly: exactly one header
 // value that is exactly "1", "2", or "3". Anything else — absent,
 // garbage, out of range, padded, multi-valued — is level 1 (contract:
-// absence = 1; garbage must not crash or count).
+// absence = 1). Garbage must not crash, and it can never raise a
+// response's level: like an absent header, it counts only when
+// min_level is 1.
 func parseLevel(vals []string) int {
 	if len(vals) != 1 {
 		return 1

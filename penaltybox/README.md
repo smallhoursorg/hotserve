@@ -2,11 +2,12 @@
 
 A Caddy v2 module that turns an origin's **rate-limit hint header** into
 edge-side throttling using the classic **penalty box** pattern: every
-origin response labeled `X-Rate-Limit-Level: 2` or `3` adds weighted
-units to a per-client sliding-window budget; a client that exceeds the
-budget is put in a penalty box and gets `429` + `Retry-After` — before
-its requests reach the origin — until the box expires. The hint header
-is stripped before the response reaches the client.
+origin response labeled `X-Rate-Limit-Level: 2` or `3` counts against a
+per-client sliding-window budget (by default weighted, so a level-3
+response costs 3 units); a client that exceeds the budget is put in a
+penalty box and gets `429` + `Retry-After` — before its requests reach
+the origin — until the box expires. The hint header is stripped before
+the response reaches the client.
 
 If you know [Fastly's penalty boxes][fastly-concepts] or HAProxy's
 [stick tables][haproxy-docs], you already understand this module — it is
@@ -21,7 +22,7 @@ request-side only: they cannot see an **origin response** header.
 | ------------------ | -------------------------------------------- | --------------------------------------------- | ----------------------------------- |
 | Per-client counter | `ratecounter` declaration                    | stick-table `store gpc0,gpc0_rate(60s)`       | in-memory sliding-window counter    |
 | Count on response  | [`ratelimit.check_rate`][fastly-check-rate] in `vcl_fetch` | `http-response sc-inc-gpc0(0) if { ... }`     | ResponseWriter shim after `next`    |
-| Weighted increment | `delta` parameter = level                    | not supported (increments by 1)               | `delta = level` (Fastly-style)      |
+| Weighted increment | `delta` parameter = level                    | not supported (increments by 1)               | `delta = level` (Fastly-style) on the default budget; 1 per response in a `tier` |
 | Penalty box        | [`penaltybox` declaration][fastly-penaltybox] + TTL | modeled via rate threshold on the table       | boxed map with per-entry TTL        |
 | Enforce on request | [`ratelimit.penaltybox_has`][fastly-pb-has] in `vcl_recv` | `http-request deny if { sc0_gpc0_rate gt N }` | box check at top of `ServeHTTP`     |
 | Client key         | `client.ip` (or any entry string)            | `track-sc0 src`                               | `{client_ip}` placeholder (default) |
@@ -38,11 +39,14 @@ with the strict value set `"1"`, `"2"`, or `"3"` — the **recommended
 throttle strictness** of the response, never enforcement:
 
 - **Absent header, or any other value (garbage, `"0"`, `"4"`, padded,
-  multi-valued) = level 1.** Malformed input never counts and never
-  errors.
-- Levels at or above `min_level` (default 2) add `level` units to the
-  client's window — a level-3 login attempt costs 3 units, level-1
-  traffic costs nothing and allocates nothing.
+  multi-valued) = level 1.** Malformed input never errors, and it can
+  never raise a response's level: like an absent header, it counts
+  only when `min_level` is 1.
+- Levels at or above `min_level` (default 2) count against the
+  client's budget. On the default budget a response adds `level`
+  units, so a level-3 login attempt costs 3; in a
+  [`tier`](#per-tier-budgets) each response adds 1. Levels below
+  `min_level` (level 1 by default) cost nothing and allocate nothing.
 
 Any application can emit this header; the module is not specific to any
 CMS. It pairs with an app that labels sensitive routes (logins, presign
@@ -85,9 +89,24 @@ example.com {
 }
 ```
 
-Outside a `route` block the directive orders itself before
-`reverse_proxy` automatically; inside `route` ordering is positional, so
-place it before your proxy/file-server directive.
+Put `hint_penaltybox` first in a `route` block, as above. That is the
+one placement that always works: inside `route` Caddy keeps the
+written order, so the module sees every request before `cache` or the
+proxy can answer it. With `handle` blocks, put the `route` inside the
+`handle`.
+
+Anywhere else (inside a `handle` block too), Caddy sorts directives
+by its directive order. This one sorts just before `reverse_proxy`,
+which puts it after `cache` (Souin registers `cache` before
+`rewrite`) and after any `handle`, `handle_path` or `route` block:
+
+- Beside `cache`, a cache hit is answered before the module runs, so
+  hits are neither counted nor box-checked (see
+  [Compatibility with Souin](#compatibility-with-souin-http-cache)).
+- At site level beside `handle { reverse_proxy ... }`, a request that
+  block handles reaches its proxy first, and the proxy answers without
+  calling the next handler: the module never runs, nothing is counted
+  or boxed, and the hint reaches the client unstripped.
 
 All options and defaults:
 
@@ -127,11 +146,14 @@ hint_penaltybox {
 
 Semantics:
 
-- **Within a tier, one response costs 1** — `limit 5` means five
-  level-3 responses, not weighted units. (Weighting only matters when
-  levels share a budget; inside a single-level tier it would be a
-  constant multiplier.)
-- **Budgets are independent.** Level-2 traffic never consumes tier 3's
+- **Within a tier, one response costs 1**, whatever its level —
+  `limit 5` means five level-3 responses, not weighted units. That
+  holds for levels a tier takes by fallback (below) too: with only
+  `tier 2` configured, a level-3 response costs 1 there, where the
+  default budget would charge 3.
+- **Budgets are independent.** Each counted response goes to exactly
+  one budget: its level's tier, else the fallback below. With tiers 2
+  and 3 both configured, level-2 traffic never consumes tier 3's
   budget, and vice versa — this is the point of the feature.
 - **Fallback:** a counted level without its own tier uses the nearest
   configured tier below it (a level-3 response is at least as sensitive
@@ -179,8 +201,9 @@ configuration, which is where XFF trust belongs.
 - **`Retry-After` is honest**: the ceiling of the *remaining* box
   seconds, not the configured TTL.
 - **The box TTL is fixed** (Fastly semantics). Traffic during the box
-  neither counts nor extends the penalty; after expiry the budget
-  restarts from zero.
+  neither counts nor extends the penalty. The budget that boxed the
+  client restarts from zero; with `tier` blocks, the client's other
+  budgets keep their windows, which go on sliding through the box.
 - **State is per-instance and in-memory.** N Caddy instances ≈ N× the
   effective threshold. A config reload resets counters and boxes
   (fails open). Distributed state is a possible future addition — the
@@ -297,9 +320,11 @@ With that order (all verified by `make e2e`):
   it as a header of the final response, not as a trailer or on a 1xx;
   see `strip`).
 
-(If you instead put `cache` before `hint_penaltybox`, cache hits bypass
-the module entirely: stored responses are already stripped, but boxed
-clients can keep reading cached pages and hits never count.)
+(If `cache` runs before `hint_penaltybox`, cache hits bypass the
+module entirely: stored responses are already stripped, but boxed
+clients can keep reading cached pages and hits never count. Outside a
+`route` block that is the order Caddy picks, whatever the written
+order: see [Caddyfile](#caddyfile).)
 
 ## Development
 

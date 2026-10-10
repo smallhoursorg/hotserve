@@ -2,11 +2,12 @@
 // Limiting and HAProxy stick-table consumption recipes for the CMS
 // rate-limit hint header (X-Rate-Limit-Level: 1|2|3, absence = 1).
 //
-// Response phase: each origin response's hint level is added, weighted,
-// to a per-client sliding-window budget, and the header is stripped
-// before reaching the client. Crossing the budget puts the client in a
-// penalty box. Request phase: boxed clients get 429 + Retry-After
-// before the request reaches the origin.
+// Response phase: each origin response at or above min_level counts
+// against a per-client sliding-window budget (weighted by level on the
+// default budget, 1 per response in a tier), and the header is
+// stripped before reaching the client. Crossing the budget puts the
+// client in a penalty box. Request phase: boxed clients get 429 +
+// Retry-After before the request reaches the origin.
 package penaltybox
 
 import (
@@ -80,12 +81,11 @@ type Handler struct {
 
 	// Tiers gives a level its own budget, separate from the default
 	// window/limit/penalty_ttl. Keyed by hint level ("2", "3"). Within a
-	// tier each response costs 1 (not `level` units — weighting only
-	// matters when levels share a budget), so `limit` is a plain
-	// response count. A counted level without its own tier uses the
-	// nearest configured tier below it, else the default budget (which
-	// keeps the original weighted semantics). Omitted tier fields
-	// inherit the top-level window/limit/penalty_ttl.
+	// tier each response costs 1, not `level` units, so `limit` is a
+	// plain response count. A counted level without its own tier uses
+	// the nearest configured tier below it, at 1 per response too, else
+	// the default budget (which keeps the original weighted semantics).
+	// Omitted tier fields inherit the top-level window/limit/penalty_ttl.
 	Tiers map[int]TierConfig `json:"tiers,omitempty"`
 
 	store       boxStore

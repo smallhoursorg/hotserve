@@ -102,10 +102,16 @@
 # ── Example: the sites for the app above ──
 #
 # myapp.example.com {
-# 	# hint_penaltybox        # rate limiting driven by app hint headers
-# 	# cache                  # serve cached pages
-# 	reverse_proxy {
-# 		dynamic liveswap myapp
+# 	# A route keeps the written order, so hint_penaltybox checks every
+# 	# request before cache can answer it. Outside a route Caddy runs
+# 	# cache first, and cached pages skip the penalty box (hotserve's
+# 	# penaltybox/README.md, "Compatibility with Souin").
+# 	route {
+# 		# hint_penaltybox        # rate limiting driven by app hint headers
+# 		# cache                  # serve cached pages
+# 		reverse_proxy {
+# 			dynamic liveswap myapp
+# 		}
 # 	}
 # 	# Before the first deploy, and while the app is down, there is no
 # 	# upstream and visitors get a bare 503. Keep the status; add words.
