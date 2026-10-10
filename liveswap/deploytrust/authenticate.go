@@ -11,7 +11,7 @@ import (
 )
 
 // Refusal is what the preamble answers a refused request with, for the
-// caller to write through its own response filter: the status — 401
+// caller to write (Write) through its own response filter: the status — 401
 // for every reason, so a caller learns neither which apps exist nor
 // what a source pins, or 429 once the address's budget is spent — and
 // the fixed body, with Retry-After for the 429. Nothing in it comes
@@ -22,16 +22,16 @@ type Refusal struct {
 	RetryAfter time.Duration // the 429's; zero for the 401
 }
 
-// SetHeaders adds Retry-After to a 429's response headers, in whole
-// seconds rounded up.
-func (ref *Refusal) SetHeaders(h http.Header) {
+// Write answers the refused request: Retry-After on a 429, then the
+// fixed body through write — the caller's filtered writer, so every
+// body a webhook sends passes its filter. The one way to answer a
+// Refusal: the header and the body cannot be split.
+func (ref *Refusal) Write(w http.ResponseWriter, write func(code int, body any) error) error {
 	if ref.RetryAfter > 0 {
-		h.Set("Retry-After", strconv.Itoa(int(math.Ceil(ref.RetryAfter.Seconds()))))
+		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(ref.RetryAfter.Seconds()))))
 	}
+	return write(ref.Status, map[string]string{"error": ref.Message})
 }
-
-// Body is the response body: the one object every refusal sends.
-func (ref *Refusal) Body() map[string]string { return map[string]string{"error": ref.Message} }
 
 const (
 	// unauthorizedMessage is the flat 401: the same sentence whatever
@@ -91,7 +91,7 @@ func (l *Limiter) Authenticate(r *http.Request, verifiers []Verifier, logger *za
 	// source then accepted the token; a refusal is still charged below
 	// like any other — see unavailable for why both.
 	for _, u := range down {
-		if l.outage(u.label) {
+		if l.outage(u.label, scopeKey) {
 			fields := scopeField([]zap.Field{zap.String("source", u.label)}, scopeKey, scopeValue)
 			logger.Warn("webhook auth could not consult a trust source",
 				append(fields, zap.String("remote", key), zap.String("reason", boundRefusal(u.Error())))...)

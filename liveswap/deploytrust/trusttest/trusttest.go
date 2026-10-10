@@ -70,21 +70,25 @@ func Claims(issuer, audience string, iat, exp time.Time, custom map[string]strin
 	return m
 }
 
-// SignEdDSA signs the payload m with priv as a JWT.
-func SignEdDSA(tb testing.TB, priv ed25519.PrivateKey, m map[string]any) string {
+// sign serialises m as a JWT under key, the one signer every token
+// here goes through.
+func sign(tb testing.TB, key jose.SigningKey, m map[string]any) string {
 	tb.Helper()
-	sig, err := jose.NewSigner(
-		jose.SigningKey{Algorithm: jose.EdDSA, Key: priv},
-		(&jose.SignerOptions{}).WithType("JWT"),
-	)
+	signer, err := jose.NewSigner(key, (&jose.SignerOptions{}).WithType("JWT"))
 	if err != nil {
 		tb.Fatal(err)
 	}
-	tok, err := jwt.Signed(sig).Claims(m).Serialize()
+	tok, err := jwt.Signed(signer).Claims(m).Serialize()
 	if err != nil {
 		tb.Fatal(err)
 	}
 	return tok
+}
+
+// SignEdDSA signs the payload m with priv as a JWT.
+func SignEdDSA(tb testing.TB, priv ed25519.PrivateKey, m map[string]any) string {
+	tb.Helper()
+	return sign(tb, jose.SigningKey{Algorithm: jose.EdDSA, Key: priv}, m)
 }
 
 // Mint signs a valid (5-minute) deploy JWT with a local key — the
@@ -162,18 +166,7 @@ func NewIssuer(tb testing.TB) *Issuer {
 // exercise the unknown-signing-key path).
 func (iss *Issuer) Mint(tb testing.TB, priv *rsa.PrivateKey, audience string, claims map[string]string, exp time.Time) string {
 	tb.Helper()
-	signer, err := jose.NewSigner(
-		jose.SigningKey{Algorithm: jose.RS256, Key: jose.JSONWebKey{Key: priv, KeyID: iss.KID}},
-		(&jose.SignerOptions{}).WithType("JWT"),
-	)
-	if err != nil {
-		tb.Fatal(err)
-	}
-	tok, err := jwt.Signed(signer).Claims(Claims(iss.URL, audience, time.Now(), exp, claims)).Serialize()
-	if err != nil {
-		tb.Fatal(err)
-	}
-	return tok
+	return sign(tb, iss.key(priv), Claims(iss.URL, audience, time.Now(), exp, claims))
 }
 
 // MintClaims signs a token as this issuer with arbitrary custom claims,
@@ -181,27 +174,16 @@ func (iss *Issuer) Mint(tb testing.TB, priv *rsa.PrivateKey, audience string, cl
 // payload.
 func (iss *Issuer) MintClaims(tb testing.TB, audience string, exp time.Time, custom map[string]any) string {
 	tb.Helper()
-	signer, err := jose.NewSigner(
-		jose.SigningKey{Algorithm: jose.RS256, Key: jose.JSONWebKey{Key: iss.Priv, KeyID: iss.KID}},
-		(&jose.SignerOptions{}).WithType("JWT"),
-	)
-	if err != nil {
-		tb.Fatal(err)
-	}
-	m := map[string]any{
-		"iss": iss.URL,
-		"aud": audience,
-		"iat": jwt.NewNumericDate(time.Now()),
-		"exp": jwt.NewNumericDate(exp),
-	}
+	m := Claims(iss.URL, audience, time.Now(), exp, nil)
 	for k, v := range custom {
 		m[k] = v
 	}
-	tok, err := jwt.Signed(signer).Claims(m).Serialize()
-	if err != nil {
-		tb.Fatal(err)
-	}
-	return tok
+	return sign(tb, iss.key(iss.Priv), m)
+}
+
+// key is the issuer's signing key under its kid, for priv.
+func (iss *Issuer) key(priv *rsa.PrivateKey) jose.SigningKey {
+	return jose.SigningKey{Algorithm: jose.RS256, Key: jose.JSONWebKey{Key: priv, KeyID: iss.KID}}
 }
 
 // Clock is a clock a test advances by hand, for a limiter's window.

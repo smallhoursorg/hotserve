@@ -387,7 +387,7 @@ func Warm(verifierSets ...[]Verifier) {
 // source could not be consulted — its discovery or its key fetch
 // failed — so the token was never judged. label names the source.
 //
-// The handler charges it like any refusal. Whether a failure spends
+// Authenticate charges it like any refusal. Whether a failure spends
 // the budget is measurable from outside (ten tokens, then one more:
 // 401 or 429), so it must not depend on which sources an app names —
 // the same app-existence leak the flat 401 closes. Charging costs a
@@ -417,7 +417,7 @@ func (u unavailable) Unwrap() error { return u.err }
 // operator's journal. down is every source that could not be
 // consulted before that point, accepted or not: the journal must say
 // so either way. The response stays a flat 401 whatever the reason
-// (see Handler.ServeHTTP), so nothing here reaches a caller.
+// (see Limiter.Authenticate), so nothing here reaches a caller.
 func authorize(ctx context.Context, verifiers []Verifier, rawToken string) (who Identity, down []unavailable, err error) {
 	if rawToken == "" {
 		return Identity{}, nil, errors.New("no bearer token in Authorization header")
@@ -445,8 +445,8 @@ func authorize(ctx context.Context, verifiers []Verifier, rawToken string) (who 
 // MaxRefusalLen bounds one source's reason in the journal. A reason
 // can carry token-supplied text — an issuer library quotes the token's
 // audience or issuer in its error, and a claim mismatch names the
-// identity the token presented — so, like loggedAppName for the app
-// name, the size of a line an unauthenticated caller can write is
+// identity the token presented — so, like scopeField for the caller's
+// field, the size of a line an unauthenticated caller can write is
 // fixed; Limiter bounds how many. The source's label in front of
 // it is the operator's own config and is not cut.
 const MaxRefusalLen = 300
@@ -463,14 +463,15 @@ func boundRefusal(s string) string {
 		s = strconv.QuoteToASCII(s)
 	}
 	if len(s) > MaxRefusalLen {
-		s = cutRunes(s, MaxRefusalLen) + "..."
+		s = CutRunes(s, MaxRefusalLen) + "..."
 	}
 	return s
 }
 
-// cutRunes is s cut to at most n bytes at a rune boundary, so a cut
-// never turns valid UTF-8 into bytes that would have to be quoted.
-func cutRunes(s string, n int) string {
+// CutRunes is s cut to at most n bytes at a rune boundary, so a cut
+// never turns valid UTF-8 into bytes that would have to be quoted: the
+// rule every bound here cuts by, and liveswap's app name too.
+func CutRunes(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}

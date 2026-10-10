@@ -15,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
@@ -37,14 +36,10 @@ func loggedAppName(name string) string {
 	if len(name) <= appNameMaxLen {
 		return name
 	}
-	// At a rune boundary: a cut inside one would leave invalid UTF-8
-	// for the preamble's bound to quote, and the journal would carry
-	// the cut's artefact rather than the name.
-	n := appNameMaxLen
-	for n > 0 && !utf8.RuneStart(name[n]) {
-		n--
-	}
-	return name[:n] + "..."
+	// At a rune boundary, as every bound of the preamble's cuts: a cut
+	// inside one would leave invalid UTF-8 for that bound to quote, and
+	// the journal would carry the cut's artefact rather than the name.
+	return deploytrust.CutRunes(name, appNameMaxLen) + "..."
 }
 
 // Handler implements the liveswap webhook endpoint. Mount it in its own
@@ -102,8 +97,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 	}
 	who, refusal := h.limiter.Authenticate(r, verifiers, h.logger, "app", loggedAppName(name))
 	if refusal != nil {
-		refusal.SetHeaders(w.Header())
-		return RespondJSON(w, refusal.Status, refusal.Body(), nil)
+		return refusal.Write(w, func(code int, body any) error { return RespondJSON(w, code, body, nil) })
 	}
 	if ma == nil {
 		return RespondJSON(w, http.StatusNotFound, map[string]string{"error": fmt.Sprintf("unknown app %q", name)}, nil)

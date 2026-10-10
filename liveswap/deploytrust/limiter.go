@@ -86,9 +86,10 @@ type Limiter struct {
 	global    failWindow
 	lastSweep time.Time
 	// outages is when each source that could not be consulted was
-	// last logged, by label: config, so it cannot grow with traffic;
-	// labels a reload retired are dropped as their window drains.
-	outages map[string]time.Time
+	// last logged, by label and by the caller's scope key: both
+	// config, so it cannot grow with traffic; labels a reload retired
+	// are dropped as their window drains.
+	outages map[outageKey]time.Time
 }
 
 // failWindow is the failures logged inside the window, oldest first,
@@ -99,11 +100,14 @@ type failWindow struct {
 	tripped bool
 }
 
+// NewLimiter is a limiter on its own clock, with the production
+// budgets (FailBudget, FailGlobalBudget, FailWindow): for tests, which
+// advance the clock. Production authenticates on Shared.
 func NewLimiter(c Clock) *Limiter {
 	return &Limiter{
 		budget: FailBudget, globalBudget: FailGlobalBudget, maxKeys: keysMax,
 		window: FailWindow, clock: c, keys: map[string]*failWindow{},
-		outages: map[string]time.Time{},
+		outages: map[outageKey]time.Time{},
 	}
 }
 
@@ -167,16 +171,24 @@ func (l *Limiter) fail(key string) failVerdict {
 	return v
 }
 
+// outageKey is one source as one caller met it: the caller's scope
+// key (liveswap's "app", the box's "webhook") is a constant of the
+// caller, so the table stays config-sized.
+type outageKey struct{ label, scope string }
+
 // outage records that the source label could not be consulted and
-// says whether to log it: once per window per source, outside both
-// budgets. It touches no address; the request is charged by fail as
-// usual. The table is swept of drained labels on each write, which is
-// O(labels) — configured ones, not the caller's to grow.
-func (l *Limiter) outage(label string) bool {
+// says whether to log it: once per window per source per caller,
+// outside both budgets, so an operator reading one webhook's lines
+// sees the outage whichever webhook met it first. It touches no
+// address; the request is charged by fail as usual. The table is swept
+// of drained entries on each write, which is O(entries) — configured
+// ones, not the caller's to grow.
+func (l *Limiter) outage(label, scope string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.clock.Now()
-	if last, ok := l.outages[label]; ok && now.Sub(last) < l.window {
+	k := outageKey{label, scope}
+	if last, ok := l.outages[k]; ok && now.Sub(last) < l.window {
 		return false
 	}
 	for k, last := range l.outages {
@@ -184,7 +196,7 @@ func (l *Limiter) outage(label string) bool {
 			delete(l.outages, k)
 		}
 	}
-	l.outages[label] = now
+	l.outages[k] = now
 	return true
 }
 

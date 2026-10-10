@@ -2,6 +2,8 @@ package deploytrust
 
 import (
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
+
+	"github.com/smallhoursorg/hotserve/liveswap/internal/dispenser"
 )
 
 // Parse reads one `deploy_trust <preset> { ... }` block, at whatever
@@ -28,17 +30,8 @@ func Parse(d *caddyfile.Dispenser) (TrustConfig, error) {
 	}
 	seen := map[string]bool{}
 	for nesting := d.Nesting(); d.NextBlock(nesting); {
-		// A repeated subdirective is refused, as liveswap refuses one
-		// anywhere in its config: the earlier line would be silently
-		// overridden. The rule and its words are liveswap's refuseRepeat
-		// (liveswap/caddyfile.go), which this package cannot import;
-		// kept the same by hand. claim adds an entry per line and may
-		// repeat; a repeated claim name is refused below.
-		if key := d.Val(); key != "claim" {
-			if seen[key] {
-				return tc, d.Errf("duplicate %s: the earlier line would be silently overridden", key)
-			}
-			seen[key] = true
+		if err := dispenser.RefuseRepeat(d, seen, "claim"); err != nil {
+			return tc, err
 		}
 		switch d.Val() {
 		case "issuer":

@@ -55,6 +55,21 @@ func request(addr, token string) *http.Request {
 	return req
 }
 
+// answered is what a Refusal writes: the status and body it hands the
+// caller's writer, and the headers it set first.
+func answered(t *testing.T, ref *Refusal) (code int, body map[string]string, header http.Header) {
+	t.Helper()
+	w := httptest.NewRecorder()
+	if err := ref.Write(w, func(c int, b any) error {
+		code = c
+		body, _ = b.(map[string]string)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return code, body, w.Header()
+}
+
 // TestAuthenticateOnTheSharedLimiter pins the preamble on the limiter
 // both webhooks share: one refusal through it is charged there and
 // answered with the flat 401 under the caller's field; an accepted
@@ -71,16 +86,14 @@ func TestAuthenticateOnTheSharedLimiter(t *testing.T) {
 	t.Cleanup(func() { forgetTestAddress(key) })
 
 	who, ref := Shared().Authenticate(request(addr, "not-a-jwt"), vs, logger, "webhook", "box")
-	if ref == nil || who.By != "" || ref.Status != http.StatusUnauthorized || ref.Message != unauthorizedMessage || ref.RetryAfter != 0 {
-		t.Fatalf("refused token: who = %+v, refusal = %+v; want the flat 401", who, ref)
+	if ref == nil || who.By != "" {
+		t.Fatalf("refused token: who = %+v, refusal = %+v; want a refusal and nobody", who, ref)
+	}
+	if code, body, h := answered(t, ref); code != http.StatusUnauthorized || body["error"] != unauthorizedMessage || len(h) != 0 {
+		t.Fatalf("a refusal writes %d %v with headers %v; want the flat 401 and no header", code, body, h)
 	}
 	if !charged(key) {
 		t.Fatalf("a refusal through the shared limiter was not charged to it")
-	}
-	h := http.Header{}
-	ref.SetHeaders(h)
-	if len(h) != 0 || ref.Body()["error"] != unauthorizedMessage {
-		t.Errorf("a 401 sets headers %v and body %v; want none and the flat message", h, ref.Body())
 	}
 	fields := oneAuthLine(t, logs).ContextMap()
 	if fields["webhook"] != "box" || fields["remote"] != key {
@@ -144,10 +157,8 @@ func TestAuthenticateBudgetAndBound(t *testing.T) {
 	if ref == nil || ref.Status != http.StatusTooManyRequests || ref.RetryAfter != FailWindow || ref.Message != throttledMessage {
 		t.Fatalf("past the budget: refusal = %+v; want 429 for the window", ref)
 	}
-	h := http.Header{}
-	ref.SetHeaders(h)
-	if h.Get("Retry-After") != strconv.Itoa(int(FailWindow.Seconds())) {
-		t.Errorf("Retry-After = %q, want the window in seconds", h.Get("Retry-After"))
+	if code, body, h := answered(t, ref); code != http.StatusTooManyRequests || body["error"] != throttledMessage || h.Get("Retry-After") != strconv.Itoa(int(FailWindow.Seconds())) {
+		t.Errorf("a 429 writes %d %v with Retry-After %q; want the window in seconds", code, body, h.Get("Retry-After"))
 	}
 	if logs.Len() != 0 {
 		t.Fatalf("a throttled refusal was logged: %+v", logs.All())
@@ -184,6 +195,45 @@ func TestAuthenticateBudgetAndBound(t *testing.T) {
 	if fields := oneAuthLine(t, logs).ContextMap(); len(fields) != 2 || fields["remote"] == nil || fields["refused"] == nil {
 		t.Errorf("fields = %v; want remote and refused alone", fields)
 	}
+}
+
+// TestOutageLineIsPerCaller pins that the once-per-window line naming
+// a source the box could not consult is written for each webhook that
+// meets it, under that webhook's field: an operator reading one
+// webhook's lines sees the outage whichever webhook met it first.
+func TestOutageLineIsPerCaller(t *testing.T) {
+	iss := trusttest.NewIssuer(t)
+	iss.JWKSDown.Store(true)
+	vs := Verifiers([]Source{{kind: "oidc", issuer: iss.URL, audience: "hotserve", claims: map[string]string{"sub": "ci"}}}, iss.Client)
+	core, logs := observer.New(zap.WarnLevel)
+	logger := zap.New(core)
+	l := NewLimiter(trusttest.NewClock())
+	tok := iss.Mint(t, iss.Priv, "hotserve", map[string]string{"sub": "ci"}, time.Now().Add(5*time.Minute))
+	for _, c := range []struct{ key, value, addr string }{
+		{"app", "demo", "203.0.113.11:1"},
+		{"webhook", "box", "203.0.113.12:1"},
+		{"app", "demo", "203.0.113.11:1"},
+	} {
+		if _, ref := l.Authenticate(request(c.addr, tok), vs, logger, c.key, c.value); ref == nil || ref.Status != http.StatusUnauthorized {
+			t.Fatalf("%s=%s: refusal = %+v; want the flat 401 while the issuer is down", c.key, c.value, ref)
+		}
+	}
+	var outages []string
+	for _, e := range logs.All() {
+		if strings.Contains(e.Message, "could not consult") {
+			f := e.ContextMap()
+			outages = append(outages, strings.TrimSpace(strings.Join([]string{asString(f["app"]), asString(f["webhook"])}, " ")))
+		}
+	}
+	if strings.Join(outages, ",") != "demo,box" {
+		t.Fatalf("outage lines = %v; want one per caller, each under its own field, and none for the repeat", outages)
+	}
+}
+
+// asString is a context field's value, or empty when absent.
+func asString(v any) string {
+	s, _ := v.(string)
+	return s
 }
 
 // TestIdentityClaimRendersAsMatchClaimsCompares pins the one rendering

@@ -2,7 +2,6 @@ package liveswap
 
 import (
 	"math"
-	"slices"
 	"strconv"
 
 	"github.com/caddyserver/caddy/v2"
@@ -12,6 +11,8 @@ import (
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/dustin/go-humanize"
 	"github.com/smallhoursorg/hotserve/liveswap/deploytrust"
+
+	"github.com/smallhoursorg/hotserve/liveswap/internal/dispenser"
 )
 
 func init() {
@@ -80,7 +81,7 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	}
 	seen := map[string]bool{}
 	for d.NextBlock(0) {
-		if err := refuseRepeat(d, seen, "deploy_trust", "artifact_allowlist", "app"); err != nil {
+		if err := dispenser.RefuseRepeat(d, seen, "deploy_trust", "artifact_allowlist", "app"); err != nil {
 			return err
 		}
 		switch d.Val() {
@@ -136,7 +137,7 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 func (cfg *AppConfig) unmarshalBlock(d *caddyfile.Dispenser) error {
 	seen := map[string]bool{}
 	for d.NextBlock(1) {
-		if err := refuseRepeat(d, seen, "env", "deploy_trust", "artifact_allowlist"); err != nil {
+		if err := dispenser.RefuseRepeat(d, seen, "env", "deploy_trust", "artifact_allowlist"); err != nil {
 			return err
 		}
 		switch d.Val() {
@@ -276,26 +277,6 @@ func (cfg *AppConfig) unmarshalBlock(d *caddyfile.Dispenser) error {
 			return d.ArgErr() // no subdirective takes more args than consumed
 		}
 	}
-	return nil
-}
-
-// refuseRepeat records the subdirective the dispenser is on and
-// refuses it if the block already had one — every subdirective sets a
-// single value, so a repeat would silently override the earlier line
-// (a stale env_file left under a new one keeps loading; the second of
-// two command lines wins with no diagnostic). additive names the
-// subdirectives that add an entry per line instead and may repeat;
-// env refuses a repeated KEY itself. deploytrust.Parse keeps this rule
-// and its words by hand, since it cannot import this package.
-func refuseRepeat(d *caddyfile.Dispenser, seen map[string]bool, additive ...string) error {
-	key := d.Val()
-	if slices.Contains(additive, key) {
-		return nil
-	}
-	if seen[key] {
-		return d.Errf("duplicate %s: the earlier line would be silently overridden", key)
-	}
-	seen[key] = true
 	return nil
 }
 

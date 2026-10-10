@@ -164,26 +164,29 @@ func TestAuthLimiterOutageOncePerWindowPerSource(t *testing.T) {
 	clk := trusttest.NewClock()
 	l := NewLimiter(clk)
 	l.window = time.Minute
-	if !l.outage("oidc:a") {
+	if !l.outage("oidc:a", "app") {
 		t.Fatal("first outage of a source must be logged")
 	}
-	if l.outage("oidc:a") {
+	if l.outage("oidc:a", "app") {
 		t.Fatal("second outage of a source within the window must not be logged")
 	}
-	if !l.outage("oidc:b") {
+	if !l.outage("oidc:b", "app") {
 		t.Fatal("another source has its own line")
 	}
+	if !l.outage("oidc:a", "webhook") {
+		t.Fatal("another caller has its own line for the same source")
+	}
 	clk.Advance(30 * time.Second)
-	if l.outage("oidc:a") {
+	if l.outage("oidc:a", "app") {
 		t.Fatal("still within the window")
 	}
 	clk.Advance(30 * time.Second)
-	if !l.outage("oidc:a") {
+	if !l.outage("oidc:a", "app") {
 		t.Fatal("the window passed: logged again")
 	}
 	// A label whose window drained (b, a minute ago) is swept on that
 	// write: a reload's retired sources do not accumulate.
-	if _, kept := l.outages["oidc:b"]; kept || len(l.outages) != 1 {
+	if _, kept := l.outages[outageKey{"oidc:b", "app"}]; kept || len(l.outages) != 1 {
 		t.Fatalf("outages = %v, want the one live label", l.outages)
 	}
 	if l.Size() != 0 {
