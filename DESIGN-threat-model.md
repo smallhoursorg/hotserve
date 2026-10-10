@@ -35,9 +35,16 @@ Windows, and macOS-as-a-server are out of scope by product design.
 4. **Per-app secrets** — an app's own env vars / `env_file`
    (`/etc/hotserve/*.env`). Legitimately reachable by that app; the
    goal is to keep them from *siblings*.
-5. **Sibling app data** — `/var/lib/liveswap/<app>/{releases,shared,state.json}`.
-6. **System integrity** — root, persistence, other system services.
-7. **Availability** — serving traffic and the deploy pipeline.
+5. **The box's configuration at rest** — `/etc/hotserve/Caddyfile`:
+   which repository may deploy each app, each app's command and
+   flags, which hosts are served, and who may change the file itself.
+   Root-owned, 0644; written only by root — `hotserve init`, the `box`
+   applier, the console ([box/DESIGN-box.md](box/DESIGN-box.md)). A
+   writer here outlasts a restart, which is what makes it an asset
+   distinct from the admin socket (whose changes do not).
+6. **Sibling app data** — `/var/lib/liveswap/<app>/{releases,shared,state.json}`.
+7. **System integrity** — root, persistence, other system services.
+8. **Availability** — serving traffic and the deploy pipeline.
 
 There is no deploy secret on the box. Deploys are authenticated by a
 verified JWT (CI OIDC or a local public key); the verifier holds only
@@ -53,7 +60,8 @@ can be found by search.
 
 ### Webhook endpoint — `liveswap/handler.go`
 
-The only application-level authenticated entry point. Auth is a
+The first of two application-level authenticated entry points (the
+other is `box_webhook`, "Config webhook" below). Auth is a
 verified JWT in `Authorization: Bearer` (see "Reducing the asset"):
 `deploy_trust` sources verify the token's signature and standard claims
 against public material, then a claim allowlist. Auth happens **before**
@@ -426,6 +434,140 @@ inheritance of ACME tokens and any other supervisor secret
 closed twice over (non-dumpable supervisor; cross-namespace refusal);
 the filesystem routes are closed by absence.
 
+### Config webhook — `box/`
+
+The second authenticated entry point, and the only one whose outcome
+is a root-owned file. [box/DESIGN-box.md](box/DESIGN-box.md) is
+authoritative for its behaviour; this section places it. Status:
+designed 2026-10-09 and being built in PRs. Until the applier ships,
+config reaches the box the way `examples/box/README.md` describes:
+root hand-edits `/etc/hotserve/Caddyfile` on day 0, and afterwards a
+laptop script (`examples/box/bin/push`) stages, validates, swaps and
+reloads it over SSH as an administrator whose sudoers file
+(`examples/box/sudoers`) allows exactly those eight commands plus two
+for the per-app env files — a root `install -m 0640 -o root -g
+hotserve -T /dev/null /etc/hotserve/<app>.env` that creates one, and
+`sudoedit` of it. This section describes what replaces the first
+eight.
+
+The operator's config repository is the only writer of
+`/etc/hotserve/Caddyfile`. Its workflow mints an OIDC token and POSTs
+a bundle — the Caddyfile, the raw commit object of `HEAD`, the tree
+objects on the path to the file, and the first-parent chain back to
+the commit the box runs — to `box_webhook`, a site directive beside
+`liveswap_webhook`. Two processes stand between that request and the
+file, and the boundary between them is the one that matters.
+
+**The handler** (uid hotserve, in the serving process) verifies the
+token against the `box` global option's `deploy_trust` through the
+same entry point liveswap's handler uses — same 401, same budgets,
+same `refused` line — so an unauthenticated caller learns nothing it
+could not learn from a deploy webhook. It parses the bundle from
+memory under fixed names and caps, binds the bundle's commit to the
+token's `sha` claim, pre-checks the signature, runs `hotserve
+validate` (and `hotserve-backup validate` where installed) as bounded
+children with their output redacted, and drops the bundle as one
+regular file for root. It answers 202 as soon as root has published
+`verified`, which precedes the install; the outcome is polled, because
+a request held across the reload deadlocks on the HTTP server's
+shutdown.
+
+**The applier** (`hotserve-box-apply.service`, root, one shot, started
+by a path unit watching the drop directory) trusts nothing the
+handler did. It reads the bundle once into memory and never from disk
+again; takes the signer list from the installed file's raw tokens
+(never from the running configuration, which the hotserve uid
+authors); requires the incoming file's `box_webhook` host to equal the
+installed one and the bundle's path to equal the path `init` recorded
+(the box's identity and which file is its: another box's equally
+signed file, or another file for this host elsewhere in the same
+tree, is refused); verifies the SSH signature with `ssh-keygen -Y` as uid
+65534 against that list, on `HEAD` and on every first-parent commit
+above the recorded baseline (an unsigned commit would otherwise ride
+in under the next signed one); proves the file is the committed file
+(commit, tree and blob hashes); requires first-parent descent from the
+recorded baseline; refuses a file that drops the `box` block, every
+signer, the `box_webhook` site or the key that signed it; and only
+then writes, reloads through `systemctl reload hotserve`, and rolls
+back — reloading again — on failure. It never runs Caddy's validate or
+adapter: both execute module code on the input and expand `{$VAR}`
+from root's environment.
+
+What this closes, once shipped. The `HOTSERVE_CONFIG` half of the
+administrator's sudoers grant — the eight commands that moved and
+reloaded the Caddyfile — goes, and with it the only account that could
+change config; the `HOTSERVE_SECRETS` half (a root `install` that
+creates `/etc/hotserve/<app>.env` 0640 root:hotserve, and `sudoedit` of
+it) stays until secrets ride the same channel, so
+the administrator account itself remains until then. A leaked PAT, a
+stolen GitHub session or an OAuth app with `contents:write` can push
+to `main` and cannot produce the signature, so it cannot change the
+box with anything a signer did not sign: its own commit is refused on
+its own push and, because every commit on the chain is checked, cannot
+be carried in by the next signed one (the merge button cannot either:
+a squash is GitHub-GPG-signed, a rebase unsigned). What such a push
+*can* do is stop every later push until it is rebased away — loud and
+recoverable — and, the residual that remains, fast-forward onto `main`
+a branch every commit of which a signer already signed: a signer's
+own unmerged, signed configuration, which the box then applies because
+it is exactly what the rule asks for. The box repository's README
+therefore says that configuration not yet meant to run is committed
+unsigned or lives in a fork; an unsigned branch is one the chain rule
+refuses whoever lands it. A compromised action holding the
+repository's OIDC token can present only commits a signer already
+signed, cannot replay an older one — though replaying `HEAD` after a
+console edit reinstalls HEAD's file and so reverts that edit, which is
+the stated 3am contract — and cannot land a sibling
+box's file.
+
+What it changes for T5, honestly. The Caddyfile was root-owned before
+`box` and the hotserve uid never wrote it, so "a supervisor RCE cannot
+persist config" is not a gain — it held under `bin/push` too. The
+delta is the other way: `box` adds a root process that consumes input
+the supervisor controls — a tar reader, a commit and tree parser, a
+path walk, an `ssh-keygen` invocation, lock and rename handling — and
+what keeps T5 from reaching root through it is that the applier
+re-verifies everything from the bytes, reads them once into memory,
+parses under fixed names and small caps, runs `ssh-keygen` as uid
+65534, trusts the handler for nothing but a well-formed bundle, and
+refuses a Caddyfile with any `import` — an imported file is unsigned
+bytes, and one under a hotserve-writable path would be T5's way to
+make a change outlast a restart — including one spelled as a
+placeholder: Caddy expands `{$NAME:default}` before it tokenizes, so
+the applier refuses any `{$` at directive position, in a site address
+or in the `box` block, and checks the file again after expanding
+placeholders with an empty environment (box/DESIGN-box.md, "Reading
+the signed file"). What the workflow is *told* remains the serving
+process's word: the response and the result poll are served by
+hotserve, so a T5 can lie to CI; it cannot change root's record or
+root's file *itself*. What it can do through root is bounded by the
+signers, not closed: the token-to-commit binding is the handler's
+check, and root cannot repeat it (the token is not in the bundle, and
+verifying one offline would mean a root unit fetching issuer keys or
+trusting the handler's cache), so a supervisor RCE that drops a bundle
+straight into `in/` can have root install any configuration a signer
+signed that descends from the baseline and whose objects it holds —
+`HEAD` again, which undoes a console edit, or a signer's signed but
+unmerged branch. It cannot have root install anything a signer did not
+sign; dropping an unsigned or self-authored file is refused outright.
+Skipping the handler's validation, which root never repeats, is a
+remaining T5 capability bounded by the signature, identity, proof and
+descent checks: a signer-signed file that fails to load is rolled back,
+one that loads but `hotserve-backup validate` would have refused is
+installed. The box repository's
+README rule that unmerged configuration stays unsigned is what keeps
+that set to `main`'s own history.
+
+What it does not close. `systemctl reload`'s exit status is the
+hotserve uid's word; the `applied` phase trusts it, the file on disk
+does not depend on it, and `systemctl restart` is the remedy. The
+never-cut-the-branch guard checks presence, not reachability: a
+`claim` typo passes it and strands the box until the console. The
+handler's validate is a courtesy, not a boundary. Plain `crypto/sha1`
+on the proof, not sha1dc. A signer's laptop is the operator; a
+software-held signing key makes its compromise total for the box,
+which a hardware-held (`sk-`) key reduces to "cannot sign unattended".
+
 ### Install-time — `packaging/postinstall.sh`
 
 Runs as root at install; creates the `hotserve` user, chowns
@@ -459,15 +601,34 @@ scope for the runtime model, in scope for release signing (roadmap).
   read whole); liveswap/README.md, Deploy records, has the exceptions. Faces `extract.go` and the first-hop SSRF gap.
 - **T4 — Unauthenticated network attacker** on the public webhook/proxy.
   Faces the token gate — forgery needs a private key, so there is no
-  guessing oracle; the realer wins are log-amplification, the CPU cost of
-  JWT/JWKS verification (no rate limit), and any pre-auth proxy/Caddy
-  surface.
+  guessing oracle; the realer wins are log-amplification (bounded by
+  the auth-failure budgets: ten failures a minute per address, then
+  429, a hundred process-wide, then silence), the CPU cost of JWT/JWKS
+  verification (spent on every request before the budget answers —
+  the budget bounds the journal and the reply, not the work), and any
+  pre-auth proxy/Caddy surface.
 - **T5 — RCE in the supervisor itself** (a Caddy or liveswap bug). Low
   probability, catastrophic: it *is* the `hotserve` user, so it already
   holds every asset short of root. No app-isolation design prevents
   this; the design question is only how much *worse* it can get (does it
   reach root?) — which is why the supervisor holds no grant (see "The
   shipped mechanism").
+- **T6 — Compromised identity of the box's config repository.** Three
+  distinct holders, in descending likelihood: a credential that can
+  push to the repository (a leaked PAT, a stolen session, an OAuth or
+  GitHub App with `contents:write`); a compromised Action in that
+  repository, holding its OIDC token — or, where the `box` block trusts
+  a `deploy_trust local` key, whoever holds that key, who mints the
+  `sha` claim themselves and so needs no workflow and no `main`; a
+  compromised signer's laptop.
+  The asset is the configuration at rest — asset 5, the one that
+  survives a restart. The first can push and cannot sign: what it
+  writes is refused on every later push too, until removed, and what it
+  can land is only a branch a signer fully signed already (the README's
+  rule against signed unmerged config is the answer); the second can
+  present only what a signer signed, in order, for this box, including
+  `HEAD` again after a console edit; the third is the operator, bounded
+  only by a hardware key's touch. Faces `box/` ("Config webhook").
 
 For **T2**: deploy-arbitrary-code (a push is contained by nothing but
 the claim scope; a pull additionally by the allowlist); deliberate
@@ -478,7 +639,14 @@ post-write symlink resolution check); first-hop→any-https SSRF. For **T4**:
 log-amplification, bounded by the auth-failure throttle (online
 *token forgery* is infeasible).
 For **T5**: total, by definition — the containment question is
-root-vs-not-root.
+root-vs-not-root, and `box` adds a root process fed by the supervisor
+to that question (the "Config webhook" section says what keeps it
+closed). For **T6**: a push credential gets a red run and a stalled
+`main` until its commit is removed, or a signer's own signed branch
+landed early; an OIDC holder gets a replay of `HEAD` (a `no_change`,
+or the undoing of a console edit), one bundle in `in/` at a time with
+no age-out and one in root's hands, and the handler's validate on a
+signer's file; a signer's software key gets the box.
 
 ## The shared-UID rule
 
@@ -711,7 +879,29 @@ does not isolate the runtime.
   release signing is the roadmap answer, not a runtime control.
 - **T5 is contained, not prevented** — a supervisor RCE holds every
   asset short of root. It does not reach root because the supervisor
-  holds no grant; keep it that way.
+  holds no grant; keep it that way. The `box` applier is a root unit,
+  and the rule it holds is the same one from the other side: root
+  consumes nothing from the serving process except a bundle it
+  re-verifies from scratch, and the exit status of `systemctl reload`.
+- **The reload's exit status is the hotserve uid's word.** The `box`
+  applier marks a push `applied` on it. A compromised supervisor can
+  say "loaded" and keep serving the old configuration until a restart;
+  the file on disk is root's regardless, and `systemctl restart
+  hotserve` is the remedy. Reading the admin API from root to check
+  would be the same trust in another form, and was rejected.
+- **The never-cut-the-branch guard is presence, not reachability.** A
+  pushed Caddyfile that keeps a `box` block, a signer, the
+  `box_webhook` site and the signing key passes it, and can still
+  strand the box behind a mistyped `claim`, a host without a
+  certificate, or a key no laptop holds. The remedy is the console:
+  `hotserve init` again, or a hand edit the next signed push
+  overwrites.
+- **A signer's software-held key is the box.** Nothing on the box
+  distinguishes a signature made by the operator from one made by
+  whoever holds the operator's key file. A hardware-held key (`sk-`
+  types, which the `signer` grammar accepts) reduces a laptop
+  compromise to "cannot sign without a touch". Stated so operators
+  choose knowingly.
 - **Sibling localhost ports** — closed for the contract: nothing
   hotserve runs listens on a port. Each instance binds a unix socket
   in a directory of its own (`<root>/<app>/run/<nonce>/app.sock`, the
@@ -857,3 +1047,12 @@ Dated one-liners; the full text of each is in git.
   the download stream; T3 no longer chooses the bytes of a pinned
   pull. Actor and attribution claims in `deployed_by` (#111) landed
   the day before.
+- 2026-10-09 — `box` designed (box/DESIGN-box.md): the config
+  repository becomes the only writer of `/etc/hotserve/Caddyfile`,
+  through an OIDC-authenticated webhook and a root applier that
+  verifies an SSH commit signature, the file's membership in the
+  commit, and descent from the commit the box runs. The configuration
+  at rest joins the asset list (5); T6, the compromised config-repo
+  identity, joins the profiles; the `HOTSERVE_CONFIG` sudoers grant
+  leaves the model when the applier ships, the secrets grant when
+  secrets ride the same channel.
