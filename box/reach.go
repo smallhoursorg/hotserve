@@ -114,7 +114,7 @@ func reach(adapted []byte, host string) error {
 		}
 		for _, method := range []string{http.MethodGet, http.MethodPost} {
 			w := &reachWalk{req: reachRequest(method, host), groups: map[string]groupState{}}
-			switch end, b := w.routes(routes, matches, ""); end {
+			switch end, b := w.routes(routes, matches, "", true); end {
 			case reachedWebhook:
 			case blocked:
 				return &refusal{msg: msgUnreachable(b.text(host))}
@@ -161,28 +161,36 @@ const (
 )
 
 // reachBlock is what stood in the way: a handler by module name, or a
-// terminal route that ran out of handlers (name ""), under a match that
-// is certain or, when sure is mayMatch, hangs on matcher.
+// terminal route that ran out of handlers (name "": a site when it
+// stands at the server level), under a match that is certain or, when
+// may is set, hangs on matcher.
 type reachBlock struct {
 	name    string
+	site    bool
 	changes bool
-	sure    matchStatus
+	may     bool
 	matcher string
 }
 
 // text is the block's catalogue text, every input-derived value bounded.
 func (b *reachBlock) text(host string) string {
-	name := proof.Bound(b.name)
-	if b.name == "" {
-		name = "an earlier site for " + proof.Bound(host)
+	what := proof.Bound(b.name)
+	switch {
+	case b.name != "":
+	case b.site:
+		what = "an earlier site for " + proof.Bound(host)
+	default:
+		what = "a terminal route"
 	}
 	switch {
-	case b.sure == mayMatch:
-		return name + " may answer first (its " + proof.Bound(b.matcher) + " matcher is decided per request)"
+	case b.may && b.changes:
+		return what + " may change the request first (its " + proof.Bound(b.matcher) + " matcher is decided per request)"
+	case b.may:
+		return what + " may answer first (its " + proof.Bound(b.matcher) + " matcher is decided per request)"
 	case b.changes:
-		return name + " changes the request first"
+		return what + " changes the request first"
 	default:
-		return name + " answers first"
+		return what + " answers first"
 	}
 }
 
@@ -201,8 +209,9 @@ type reachWalk struct {
 
 // routes walks rs in Caddy's order, each route under the enclosing
 // match outer (hanging on matcher when outer is mayMatch), and ends at
-// the first handler that decides.
-func (w *reachWalk) routes(rs []adaptedRoute, outer matchStatus, matcher string) (reachEnd, *reachBlock) {
+// the first handler that decides. top is the server's own route list,
+// whose routes are sites.
+func (w *reachWalk) routes(rs []adaptedRoute, outer matchStatus, matcher string, top bool) (reachEnd, *reachBlock) {
 	for _, r := range rs {
 		st, m := w.match(r.Match)
 		if st == noMatch {
@@ -231,20 +240,20 @@ func (w *reachWalk) routes(rs []adaptedRoute, outer matchStatus, matcher string)
 			case classReached:
 				return reachedWebhook, nil
 			case classSubroute:
-				if end, b := w.routes(h.sub, st, m); end != fellThrough {
+				if end, b := w.routes(h.sub, st, m, false); end != fellThrough {
 					return end, b
 				}
 			case classPasses:
 			case classChanges:
-				return blocked, &reachBlock{name: h.Handler, changes: true, sure: st, matcher: m}
+				return blocked, &reachBlock{name: h.Handler, changes: true, may: st == mayMatch, matcher: m}
 			default:
-				return blocked, &reachBlock{name: h.Handler, sure: st, matcher: m}
+				return blocked, &reachBlock{name: h.Handler, may: st == mayMatch, matcher: m}
 			}
 		}
 		if r.Terminal {
 			// Caddy hands the rest of the chain an empty handler: the
 			// request ends here with whatever was written, or nothing.
-			return blocked, &reachBlock{sure: st, matcher: m}
+			return blocked, &reachBlock{site: top, may: st == mayMatch, matcher: m}
 		}
 	}
 	return fellThrough, nil
@@ -268,7 +277,7 @@ func classify(h adaptedHandler) handlerClass {
 	case "subroute":
 		return classSubroute
 	case "vars", "map", "log_append", "tracing", "request_body", "timeouts",
-		"encode", "push", "templates", "intercept", "hint_penaltybox":
+		"encode", "push", "templates", "hint_penaltybox":
 		return classPasses
 	case "headers":
 		if len(h.Request) > 0 && string(h.Request) != "null" {

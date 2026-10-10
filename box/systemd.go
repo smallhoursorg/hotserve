@@ -127,33 +127,6 @@ func runSystemctl(ctx context.Context, timeout time.Duration, args ...string) (s
 	return string(out.b), err
 }
 
-// cappedBuffer keeps the first limit bytes written to it and counts
-// the rest as written: a write refused would stall a child on its pipe
-// until its deadline. Not a bytes.Buffer: os/exec would use its
-// ReadFrom and skip Write.
-type cappedBuffer struct {
-	limit int
-	b     []byte
-	n     int64 // every byte written, kept or not
-}
-
-// newCappedBuffer keeps up to limit bytes; the zero value keeps none,
-// so every buffer is made here.
-func newCappedBuffer(limit int) *cappedBuffer {
-	return &cappedBuffer{limit: limit, b: make([]byte, 0, min(limit, 64<<10))}
-}
-
-func (c *cappedBuffer) Write(p []byte) (int, error) {
-	c.n += int64(len(p))
-	if room := c.limit - len(c.b); room > 0 {
-		c.b = append(c.b, p[:min(len(p), room)]...)
-	}
-	return len(p), nil
-}
-
-// over reports whether more than the limit was written.
-func (c *cappedBuffer) over() bool { return c.n > int64(c.limit) }
-
 // running is step 16's question (DESIGN-box.md, Glossary "active"):
 // `activating` is waited out, and so is `reloading` — a reload in
 // flight (the console's, or one a killed applier started) ends in

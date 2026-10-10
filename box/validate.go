@@ -1,12 +1,14 @@
 package box
 
 // Step 6 (DESIGN-box.md, "The trust chain"): the pushed file validated
-// as the serving process would load it — by `hotserve validate`, and
-// by `hotserve-backup validate` when backups are installed — as bounded
-// children with the service's own environment. Root never runs either:
-// validate provisions every module, and the adapter expands `{$VAR}`
-// from the caller's environment and runs each module's parser on the
-// input. A courtesy against a signer's mistake, not a boundary.
+// as the serving process would load it — by `hotserve validate`, then
+// its adaptation read by `hotserve adapt` for reachability
+// ("Reachability", reach.go), then `hotserve-backup validate` when
+// backups are installed — three bounded children with the service's
+// own environment. Root runs none of them: validate provisions every
+// module, and the adapter expands `{$VAR}` from the caller's
+// environment and runs each module's parser on the input. A courtesy
+// against a signer's mistake, not a boundary.
 
 import (
 	"context"
@@ -260,3 +262,30 @@ func (t *tailBuffer) Write(p []byte) (int, error) {
 	t.b = append(t.b, p...)
 	return n, nil
 }
+
+// cappedBuffer keeps the first limit bytes written to it and counts
+// the rest as written: a write refused would stall a child on its pipe
+// until its deadline. The adapt child's stdout and systemctl's output
+// are read this way. Not a bytes.Buffer, for tailBuffer's reason.
+type cappedBuffer struct {
+	limit int
+	b     []byte
+	n     int64 // every byte written, kept or not
+}
+
+// newCappedBuffer keeps up to limit bytes; the zero value keeps none,
+// so every buffer is made here.
+func newCappedBuffer(limit int) *cappedBuffer {
+	return &cappedBuffer{limit: limit, b: make([]byte, 0, min(limit, 64<<10))}
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	c.n += int64(len(p))
+	if room := c.limit - len(c.b); room > 0 {
+		c.b = append(c.b, p[:min(len(p), room)]...)
+	}
+	return len(p), nil
+}
+
+// over reports whether more than the limit was written.
+func (c *cappedBuffer) over() bool { return c.n > int64(c.limit) }

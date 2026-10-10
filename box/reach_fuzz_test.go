@@ -2,7 +2,7 @@ package box
 
 import (
 	"errors"
-	"strings"
+	"regexp"
 	"testing"
 )
 
@@ -37,8 +37,15 @@ func FuzzReach(f *testing.F) {
 			t.Fatalf("two answers: %v then %v", first, again)
 		}
 		var r *refusal
-		if errors.As(first, &r) && !strings.HasPrefix(r.msg, msgUnreachable("")) {
+		if errors.As(first, &r) && !catalogueReach.MatchString(r.msg) {
 			t.Fatalf("a refusal outside the catalogue: %q", r.msg)
 		}
 	})
 }
+
+// catalogueReach is the 422 row's reachability texts: what stands in
+// the way (a module name, an earlier site, a terminal route), then one
+// of the four verbs.
+var catalogueReach = regexp.MustCompile(`^the new Caddyfile does not reach box_webhook on /: ` +
+	`([^ ]+|an earlier site for [^ ]+|a terminal route) ` +
+	`(answers first|changes the request first|may (answer|change the request) first \(its [^ ]+ matcher is decided per request\))$`)

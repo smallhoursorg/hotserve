@@ -53,7 +53,7 @@ func TestValidateAdapt(t *testing.T) {
 			t.Fatalf("msg %q err %v", msg, err)
 		}
 	})
-	t.Run("past the cap refuses, without waiting for the child", func(t *testing.T) {
+	t.Run("past the cap refuses, and the child is not stalled on its pipe", func(t *testing.T) {
 		c, _ := stubAdapt(t, "head -c 17000000 /dev/zero | tr '\\0' 'x'; exit 0")
 		start := time.Now()
 		msg, err := c.validate(context.Background(), randomID(t), file, stubHost)

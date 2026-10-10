@@ -455,9 +455,9 @@ so does this walk.
 |---|---|---|
 | `box_webhook` | reached | |
 | `subroute` | recursed, its routes in order | a site, `handle`, `route` and `handle_path` adapt to one |
-| `vars`, `map`, `log_append`, `tracing`, `request_body`, `timeouts`, `encode`, `push`, `templates`, `intercept`, `headers` without a `request` section, `hint_penaltybox` | passes | the request reaches the next handler as sent: the first four set variables, `headers` here edits the response, the next six wrap the response; `hint_penaltybox` answers 429 only to a client in its box, which the catalogue's 429 row retries |
+| `vars`, `map`, `log_append`, `tracing`, `request_body`, `timeouts`, `encode`, `push`, `templates`, `headers` without a `request` section, `hint_penaltybox` | passes | the request reaches the next handler as sent and its answer comes back as written: the first four touch only variables, a log field or a trace span; `headers` here edits response headers; `request_body` and `timeouts` bound the read; `encode` compresses, `push` adds HTTP/2 pushes, `templates` renders only the text types it lists, never JSON; `hint_penaltybox` answers 429 only to a client in its box, which the catalogue's 429 row retries |
 | `rewrite`; `headers` with a `request` section | refused: `<handler> changes the request first` | `rewrite` (also `uri`, `try_files` and `handle_path`'s strip) moves `/` away before `box_webhook` sees it; `request_header -Authorization` turns every push into a 401 with nothing in the answer to say why |
-| anything else — `static_response`, `reverse_proxy`, `file_server`, `error`, `authentication`, `acme_server`, `metrics`, `invoke`, `liveswap_webhook`, a handler this table does not list | refused: `<handler> answers first` | fail-closed: a handler the table has not weighed is one that may answer; `invoke`'s named route is not followed |
+| anything else — `static_response`, `reverse_proxy`, `file_server`, `error`, `authentication`, `acme_server`, `metrics`, `invoke`, `intercept`, `liveswap_webhook`, a handler this table does not list | refused: `<handler> answers first` | fail-closed: a handler the table has not weighed is one that may answer; `invoke`'s named route is not followed; `intercept` lets `box_webhook` run and then replaces its answer with its own `handle_response`, so the workflow never sees the result it is told to poll |
 
 The standard directives Caddy orders before `box_webhook` (`tracing`,
 `map`, `vars`, `fs`, `root`, `log_append`, `log_skip`, `log_name`,
@@ -490,9 +490,10 @@ so a file `init` installs that serves `/` first is found by the first
 push, which meets the front handler's answer instead of this one's;
 the console is the way back ("At 3am"), and whether the workflow asks
 `GET /` for this handler's status before it posts is the template's
-call. A `request_body` cap below the bundle's 16 MiB ahead of
-`box_webhook` is not caught either: the push reaches the handler and
-fails its body read (400).
+call. A `request_body` cap below the bundle's 16 MiB, or a `timeouts`
+read deadline shorter than the upload, ahead of `box_webhook` is not
+caught either: the push reaches the handler and fails its body read
+(400), which names the bundle.
 
 ## The install transaction
 
@@ -1005,7 +1006,7 @@ says. The workflow's action is in the last column.
 | 422 | `refused` | `this file is for <host2>; this box is <host1>` | both | fail |
 | 422 | `refused` | `this box's file is <recorded path>; the bundle is <path> — hotserve init --path records a new one` | both | fail |
 | 422 | `refused` | `the new Caddyfile has no box block` / `… has no signer` / `… has no deploy_trust` / `… has no site with box_webhook` / `… has more than one site with box_webhook` / `… has a box_webhook site whose address is not one bare hostname (<address>)` / `… has a site without braces (<address>)` / `… has box_webhook inside a snippet or named route (<name>); write it in the site` / `… has box_webhook inside <block>; it must stand directly in the site block, where no matcher or nested route can leave / unserved` / `… has box_webhook with arguments (<args>); it takes none, and a matcher would leave / unserved` / `… imports <path>; inline the snippet` / `… has a placeholder where a directive name, a site address or a box line goes (<token>)` / `… reads differently once its placeholders are expanded` / `… is empty` / `… has a global options block that is not the first block` / `… has more than one box block` / `… has a signer line that is not \`signer <principal> <key-type> <base64>\`` / `… has a bad signer <principal>: <what>` / `… does not tokenize: <lexer error>` / `… does not parse: <what>` / `… drops the key that signed this commit (<principal>); add the new key in one push, let it apply, then remove the old one` | both | fail |
-| 422 | `refused` | `hotserve validate: <redacted>` / `hotserve-backup validate: <redacted>` / `the new Caddyfile does not reach box_webhook on /: <handler> answers first` / `… : <handler> changes the request first` / `… : <handler> may answer first (its <matcher> matcher is decided per request)` / `… : an earlier site for <host> answers first` / `the new Caddyfile's adaptation is larger than 16 MiB` | handler | fail |
+| 422 | `refused` | `hotserve validate: <redacted>` / `hotserve-backup validate: <redacted>` / `the new Caddyfile does not reach box_webhook on /: <what> answers first` / `… : <what> changes the request first` / `… : <what> may answer first (its <matcher> matcher is decided per request)` / `… : <what> may change the request first (its <matcher> matcher is decided per request)` — `<what>` is a handler's module name, `an earlier site for <host>`, or `a terminal route` (one below a site that ran out of handlers; no directive adapts to one) / `the new Caddyfile's adaptation is larger than 16 MiB` | handler | fail |
 | 422 | `refused` | `hotserve is not running; nothing applied` / `hotserve is still starting after 300 s; nothing applied` | applier | fail |
 | 422 | `refused` | `the Caddyfile this box runs lists no signer; hotserve init is the way back` | applier | fail |
 | 200 / poll | `no_change` | `the box already runs this Caddyfile` | applier | green |

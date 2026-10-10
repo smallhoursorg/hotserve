@@ -124,9 +124,10 @@ func TestReach(t *testing.T) {
 			inside: "\t@m header X-A b\n\thandle @m {\n\t\theader X-B c\n\t}\n\thandle {\n\t\trespond no\n\t}\n", want: mayHeader},
 
 		// Refused: the request changed before box_webhook sees it.
-		"a rewrite":        {order: []string{"rewrite first"}, inside: "\trewrite * /x\n", want: "rewrite changes the request first"},
-		"a uri rewrite":    {order: []string{"uri first"}, inside: "\turi strip_prefix /x\n", want: "rewrite changes the request first"},
-		"a request header": {order: []string{"request_header first"}, inside: "\trequest_header -Authorization\n", want: "headers changes the request first"},
+		"a rewrite":                        {order: []string{"rewrite first"}, inside: "\trewrite * /x\n", want: "rewrite changes the request first"},
+		"a uri rewrite":                    {order: []string{"uri first"}, inside: "\turi strip_prefix /x\n", want: "rewrite changes the request first"},
+		"a request header":                 {order: []string{"request_header first"}, inside: "\trequest_header -Authorization\n", want: "headers changes the request first"},
+		"a rewrite under a header matcher": {order: []string{"rewrite first"}, inside: "\t@m header X-A b\n\trewrite @m /x\n", want: "rewrite may change the request first (its header matcher is decided per request)"},
 
 		// Refused: a matcher decided per request.
 		"a header matcher":        {order: []string{"respond first"}, inside: "\t@m header X-A b\n\trespond @m ok\n", want: mayHeader},
@@ -161,7 +162,8 @@ func TestReachJSON(t *testing.T) {
 		want    string // "" reachable; "error" a plain error; else the refusal
 	}{
 		"the penaltybox hint ahead":                               {adapted: reachJSON(`{"handle":[{"handler":"hint_penaltybox"}]},`, ""), want: ""},
-		"vars, map, log and tracing ahead":                        {adapted: reachJSON(`{"handle":[{"handler":"vars"},{"handler":"map"},{"handler":"log_append"},{"handler":"tracing"},{"handler":"timeouts"},{"handler":"push"},{"handler":"intercept"},{"handler":"encode"},{"handler":"templates"},{"handler":"request_body"}]},`, ""), want: ""},
+		"vars, map, log and tracing ahead":                        {adapted: reachJSON(`{"handle":[{"handler":"vars"},{"handler":"map"},{"handler":"log_append"},{"handler":"tracing"},{"handler":"timeouts"},{"handler":"push"},{"handler":"encode"},{"handler":"templates"},{"handler":"request_body"}]},`, ""), want: ""},
+		"intercept ahead":                                         {adapted: reachJSON(`{"handle":[{"handler":"intercept","handle_response":[{"match":{"status_code":[2]},"routes":[{"handle":[{"handler":"static_response","body":"maintenance"}]}]}]}]},`, ""), want: "intercept answers first"},
 		"a response headers handler":                              {adapted: reachJSON(`{"handle":[{"handler":"headers","response":{"set":{"X-A":["b"]}}}]},`, ""), want: ""},
 		"a request headers handler":                               {adapted: reachJSON(`{"handle":[{"handler":"headers","request":{"delete":["Authorization"]}}]},`, ""), want: "headers changes the request first"},
 		"a handler the table does not name":                       {adapted: reachJSON(`{"handle":[{"handler":"cache"}]},`, ""), want: "cache answers first"},
@@ -171,7 +173,9 @@ func TestReachJSON(t *testing.T) {
 		"two sets, one decided no and one undecided":              {adapted: reachJSON(`{"match":[{"path":["/x"]},{"header":{"X-A":["b"]}}],"handle":[{"handler":"static_response"}]},`, ""), want: "static_response may answer first (its header matcher is decided per request)"},
 		"two sets, one decided yes":                               {adapted: reachJSON(`{"match":[{"header":{"X-A":["b"]}},{"path":["/"]}],"handle":[{"handler":"static_response"}]},`, ""), want: "static_response answers first"},
 		"an empty not":                                            {adapted: reachJSON(`{"match":[{"not":[]}],"handle":[{"handler":"static_response"}]},`, ""), want: "static_response answers first"},
-		"a terminal route inside the site that passes":            {adapted: reachJSON(`{"handle":[{"handler":"vars"}],"terminal":true},`, ""), want: "an earlier site for deploy.example.com answers first"},
+		"a terminal route inside the site that passes":            {adapted: reachJSON(`{"handle":[{"handler":"vars"}],"terminal":true},`, ""), want: "a terminal route answers first"},
+		"a terminal route under an undecided matcher":             {adapted: reachJSON(`{"match":[{"header":{"X-A":["b"]}}],"handle":[{"handler":"vars"}],"terminal":true},`, ""), want: "a terminal route may answer first (its header matcher is decided per request)"},
+		"an earlier site under an undecided matcher":              {adapted: reachJSON("", `{"match":[{"host":["deploy.example.com"],"header":{"X-A":["b"]}}],"handle":[],"terminal":true},`), want: "an earlier site for deploy.example.com may answer first (its header matcher is decided per request)"},
 		"an earlier site on another host":                         {adapted: reachJSON("", `{"match":[{"host":["other.example.com"]}],"handle":[{"handler":"static_response"}],"terminal":true},`), want: ""},
 		"an earlier site with a host placeholder":                 {adapted: reachJSON("", `{"match":[{"host":["{http.request.host}"]}],"handle":[{"handler":"static_response"}],"terminal":true},`), want: "static_response may answer first (its host matcher is decided per request)"},
 		"a responder in a server that does not carry the webhook": {adapted: []byte(`{"apps":{"http":{"servers":{"other":{"listen":[":8443"],"routes":[{"match":[{"host":["deploy.example.com"]}],"handle":[{"handler":"static_response"}],"terminal":true}]},"srv0":{"listen":[":443"],"routes":[{"match":[{"host":["deploy.example.com"]}],"handle":[{"handler":"subroute","routes":[{"handle":[{"handler":"box_webhook"}]}]}],"terminal":true}]}}}}}`), want: ""},
