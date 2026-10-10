@@ -424,7 +424,7 @@ t1=$(date +%s)
 journalctl --sync
 runs=$(real_journal | grep -c 'txn.json cannot be read' || true)
 [ "$runs" -ge 1 ] || die "the path unit hit its trigger limit, but no run journaled the unreadable record"
-real_journal | grep -q 'restart hotserve-box-apply.path' || die "the unreadable record's journal line does not name the restart the console needs"
+real_journal | grep -q 'ten seconds after this line, runs systemctl restart hotserve-box-apply.path' || die "the unreadable record's journal line does not name the restart the console needs, and when"
 echo "an unreadable record: $runs runs, then trigger-limit-hit, within $((t1 - t0 + 1))s"
 rm -f "$B/txn.json"
 sleep 2
