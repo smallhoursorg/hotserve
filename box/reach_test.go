@@ -82,6 +82,10 @@ func TestReach(t *testing.T) {
 		"path and method that both decide no":   {order: []string{"respond first"}, inside: "\t@m path /x\n\trespond @m ok\n\t@n method DELETE\n\trespond @n ok\n"},
 		"a handle group, the first member matched and passes": {order: []string{"handle first"},
 			inside: "\thandle /* {\n\t\theader X-A b\n\t}\n\thandle {\n\t\trespond no\n\t}\n"},
+		// Member 1 may match, member 2 matches for sure: either way the
+		// group is satisfied before member 3, which Caddy never runs.
+		"a handle group satisfied by its second member": {order: []string{"handle first"},
+			inside: "\t@m header X-A b\n\thandle @m {\n\t\theader X-B c\n\t}\n\thandle /* {\n\t\theader X-C d\n\t}\n\thandle {\n\t\trespond no\n\t}\n"},
 		"an ordered handle on another path": {order: []string{"handle first"}, inside: "\thandle /x {\n\t\trespond no\n\t}\n"},
 		"a header matcher on a handler that passes": {order: []string{"header first"},
 			inside: "\t@m header X-A b\n\theader @m X-B c\n"},
@@ -94,9 +98,17 @@ func TestReach(t *testing.T) {
 		"a site for host/ that only sets a header": {before: "deploy.example.com/ {\n\theader X-A b\n}\n", want: "an earlier site for deploy.example.com answers first"},
 
 		// Refused: an `order` option moved a responder ahead.
-		"an ordered responder":  {order: []string{"respond first"}, inside: "\trespond ok\n", want: respondFirst},
-		"method GET":            {order: []string{"respond first"}, inside: "\t@m method GET\n\trespond @m ok\n", want: respondFirst},
-		"method POST":           {order: []string{"respond first"}, inside: "\t@m method POST\n\trespond @m ok\n", want: respondFirst},
+		"an ordered responder": {order: []string{"respond first"}, inside: "\trespond ok\n", want: respondFirst},
+		"method GET":           {order: []string{"respond first"}, inside: "\t@m method GET\n\trespond @m ok\n", want: respondFirst},
+		"method POST":          {order: []string{"respond first"}, inside: "\t@m method POST\n\trespond @m ok\n", want: respondFirst},
+		"protocol http/2":      {order: []string{"respond first"}, inside: "\t@m protocol http/2\n\trespond @m ok\n", want: "static_response may answer first (its protocol matcher is decided per request)"},
+		"protocol http/1.1":    {order: []string{"respond first"}, inside: "\t@m protocol http/1.1\n\trespond @m ok\n", want: "static_response may answer first (its protocol matcher is decided per request)"},
+		// A second block naming the bare host is "ambiguous site
+		// definition" to the adapter (validate refuses it first); one
+		// naming it with the port is another address string, the same
+		// host matcher, and sorts by file order.
+		"a site naming the host with its port before": {before: "deploy.example.com:443 {\n\trespond x\n}\n", want: respondFirst},
+		"a site naming the host with its port after":  {after: "deploy.example.com:443 {\n\trespond x\n}\n"},
 		"protocol https":        {order: []string{"respond first"}, inside: "\t@m protocol https\n\trespond @m ok\n", want: respondFirst},
 		"path /*":               {order: []string{"respond first"}, inside: "\t@m path /*\n\trespond @m ok\n", want: respondFirst},
 		"not path /x":           {order: []string{"respond first"}, inside: "\t@m not path /x\n\trespond @m ok\n", want: respondFirst},
@@ -163,9 +175,11 @@ func TestReachJSON(t *testing.T) {
 		"an earlier site on another host":                         {adapted: reachJSON("", `{"match":[{"host":["other.example.com"]}],"handle":[{"handler":"static_response"}],"terminal":true},`), want: ""},
 		"an earlier site with a host placeholder":                 {adapted: reachJSON("", `{"match":[{"host":["{http.request.host}"]}],"handle":[{"handler":"static_response"}],"terminal":true},`), want: "static_response may answer first (its host matcher is decided per request)"},
 		"a responder in a server that does not carry the webhook": {adapted: []byte(`{"apps":{"http":{"servers":{"other":{"listen":[":8443"],"routes":[{"match":[{"host":["deploy.example.com"]}],"handle":[{"handler":"static_response"}],"terminal":true}]},"srv0":{"listen":[":443"],"routes":[{"match":[{"host":["deploy.example.com"]}],"handle":[{"handler":"subroute","routes":[{"handle":[{"handler":"box_webhook"}]}]}],"terminal":true}]}}}}}`), want: ""},
-		"not JSON":                    {adapted: []byte("{"), want: "error"},
-		"no box_webhook":              {adapted: []byte(`{"apps":{"http":{"servers":{"srv0":{"routes":[{"match":[{"host":["deploy.example.com"]}],"handle":[{"handler":"static_response"}]}]}}}}}`), want: "error"},
-		"the webhook on another host": {adapted: []byte(`{"apps":{"http":{"servers":{"srv0":{"routes":[{"match":[{"host":["other.example.com"]}],"handle":[{"handler":"subroute","routes":[{"handle":[{"handler":"box_webhook"}]}]}],"terminal":true}]}}}}}`), want: "error"},
+		"another handler's routes key, of another shape":          {adapted: reachJSON(`{"handle":[{"handler":"vars","routes":{"a":1}}]},`, ""), want: ""},
+		"a subroute whose routes do not read":                     {adapted: reachJSON(`{"handle":[{"handler":"subroute","routes":{"a":1}}]},`, ""), want: "error"},
+		"not JSON":                                                {adapted: []byte("{"), want: "error"},
+		"no box_webhook":                                          {adapted: []byte(`{"apps":{"http":{"servers":{"srv0":{"routes":[{"match":[{"host":["deploy.example.com"]}],"handle":[{"handler":"static_response"}]}]}}}}}`), want: "error"},
+		"the webhook on another host":                             {adapted: []byte(`{"apps":{"http":{"servers":{"srv0":{"routes":[{"match":[{"host":["other.example.com"]}],"handle":[{"handler":"subroute","routes":[{"handle":[{"handler":"box_webhook"}]}]}],"terminal":true}]}}}}}`), want: "error"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := reach(c.adapted, "deploy.example.com")

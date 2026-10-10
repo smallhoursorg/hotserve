@@ -117,8 +117,8 @@ func runSystemctl(ctx context.Context, timeout time.Duration, args ...string) (s
 	defer cancel()
 	cmd := exec.CommandContext(bounded, "systemctl", args...) //nolint:gosec // fixed verbs on a fixed unit
 	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "SYSTEMD_PAGER=", "SYSTEMD_COLORS=0"}
-	out := cappedBuffer{limit: maxSystemctlOutput}
-	cmd.Stdout, cmd.Stderr = &out, &out
+	out := newCappedBuffer(maxSystemctlOutput)
+	cmd.Stdout, cmd.Stderr = out, out
 	cmd.WaitDelay = childWaitDelay
 	err := cmd.Run()
 	if bounded.Err() != nil && err != nil {
@@ -135,6 +135,12 @@ type cappedBuffer struct {
 	limit int
 	b     []byte
 	n     int64 // every byte written, kept or not
+}
+
+// newCappedBuffer keeps up to limit bytes; the zero value keeps none,
+// so every buffer is made here.
+func newCappedBuffer(limit int) *cappedBuffer {
+	return &cappedBuffer{limit: limit, b: make([]byte, 0, min(limit, 64<<10))}
 }
 
 func (c *cappedBuffer) Write(p []byte) (int, error) {

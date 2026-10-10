@@ -111,7 +111,7 @@ func TestValidateAdapt(t *testing.T) {
 
 // TestCappedBuffer: the head kept to the limit, every byte counted.
 func TestCappedBuffer(t *testing.T) {
-	c := cappedBuffer{limit: 5}
+	c := newCappedBuffer(5)
 	for _, w := range []string{"ab", "cd", "ef", "gh"} {
 		if n, err := c.Write([]byte(w)); n != 2 || err != nil {
 			t.Fatalf("Write(%q) = %d, %v", w, n, err)
@@ -120,7 +120,7 @@ func TestCappedBuffer(t *testing.T) {
 	if string(c.b) != "abcde" || !c.over() || c.n != 8 {
 		t.Fatalf("kept %q over %v n %d", c.b, c.over(), c.n)
 	}
-	exact := cappedBuffer{limit: 2}
+	exact := newCappedBuffer(2)
 	_, _ = exact.Write([]byte("xy"))
 	if string(exact.b) != "xy" || exact.over() {
 		t.Fatalf("kept %q over %v", exact.b, exact.over())

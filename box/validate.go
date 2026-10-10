@@ -159,8 +159,8 @@ func (c *childValidator) run(ctx context.Context, what, program string, args ...
 // the cap and stderr dropped: the JSON holds every expanded value, and
 // nothing of it but the walk's verdict leaves this function.
 func (c *childValidator) adapt(ctx context.Context, staged, host string) (string, error) {
-	out := cappedBuffer{limit: maxAdaptation}
-	exit, timedOut, err := c.exec(ctx, c.hotserve, &out, nil, "adapt", "--adapter", "caddyfile", "--config", staged)
+	out := newCappedBuffer(maxAdaptation)
+	exit, timedOut, err := c.exec(ctx, c.hotserve, out, nil, "adapt", "--adapter", "caddyfile", "--config", staged)
 	switch {
 	case err != nil:
 		return "", fmt.Errorf("hotserve adapt: %w", err)

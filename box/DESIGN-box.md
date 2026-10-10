@@ -463,14 +463,18 @@ The standard directives Caddy orders before `box_webhook` (`tracing`,
 `map`, `vars`, `fs`, `root`, `log_append`, `log_skip`, `log_name`,
 `header`, `request_body`, `timeouts`) all adapt to the "passes" row, so
 a box site refuses nothing unless an `order` global option moves a
-directive ahead; and the sites Caddy sorts ahead of a bare hostname
+directive ahead. The sites Caddy sorts ahead of a bare hostname
 (longer host first, then longer path, wildcard hosts after exact ones)
-are those with the same host and a path, `host/*`.
+are those with the same host and a path, `host/*`; a second block
+naming the bare host is "ambiguous site definition" to the adapter,
+which validate refuses first, while one naming it with its port
+(`host:443`) is another address string for the same host matcher,
+sorted by file order — ahead of the box site when written before it.
 
 | Matcher on a route | Decided |
 |---|---|
 | none | matches |
-| `host`, `path`, `method`, `protocol`, and `not` over these, no placeholder in a pattern | statically, by Caddy's own matcher types, for the `GET` and for the `POST` |
+| `host`, `path`, `method`, `protocol` for `http`, `https` and `grpc`, and `not` over these, no placeholder in a pattern | statically, by Caddy's own matcher types, for the `GET` and for the `POST`: a request over TLS, no body, no header worth a matcher. A `protocol` naming an HTTP version (`http/2`, `http/1.1+`) is the connection's to decide, so "may" |
 | any other (`header`, `header_regexp`, `query`, `expression`, `remote_ip`, `client_ip`, `file`, `vars`, `vars_regexp`, `path_regexp`, `tls`, a third party's), or a pattern holding a placeholder | per request, so "may match": a refused handler behind it refuses the push as `<handler> may answer first (its <matcher> matcher is decided per request)`; a passing handler behind it passes |
 
 A matcher set matches when every matcher in it does, a route when any
