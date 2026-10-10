@@ -31,6 +31,10 @@ func runInitCmd(ctx context.Context, euid int, a *Applier, dir, sha string, out 
 	if err := commitArg(sha); err != nil {
 		return err
 	}
+	dir, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
 	// One buffer from the read to the install. The directory is the
 	// operator's own, so a symlink at the name is followed.
 	file, err := readFile(filepath.Join(dir, "Caddyfile"), proof.MaxCaddyfile, true)
@@ -43,6 +47,12 @@ func runInitCmd(ctx context.Context, euid int, a *Applier, dir, sha string, out 
 	shape, err := Walk(file)
 	if err != nil {
 		return err
+	}
+	// The path is derived, so the directory must be the one it names:
+	// the wrong box's directory, or one misnamed, is refused before
+	// anything is touched rather than at the first push.
+	if name := filepath.Base(dir); name != shape.Host {
+		return fmt.Errorf("this directory is %s, and the Caddyfile is for %s: a box's directory is named for its host, so run init from %s/ in a copy of the repository", proof.Bound(name), shape.Host, shape.Host)
 	}
 	path := shape.Host + "/Caddyfile" // a bare hostname: one safe component
 	if err := printf(out, "init: box_webhook on %s; %s; %s\n"+
@@ -66,11 +76,7 @@ func runInitCmd(ctx context.Context, euid int, a *Applier, dir, sha string, out 
 	run, err := a.runInit(ctx, record{ID: newRequestID(), Commit: sha, Path: path, BoxWebhook: shape.Host, Apps: shape.Apps}, file)
 	var notUp *notUpError
 	if errors.As(err, &notUp) {
-		abs, aerr := filepath.Abs(dir)
-		if aerr != nil {
-			abs = dir
-		}
-		return errors.New(notUp.msg + "\n" + fmt.Sprintf(msgInitRemedy, sha, shellWord(abs)))
+		return errors.New(notUp.msg + "\n" + fmt.Sprintf(msgInitRemedy, sha, shellWord(dir)))
 	}
 	if err != nil {
 		return err

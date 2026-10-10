@@ -91,8 +91,8 @@ func init() {
 		Usage: "<sha>",
 		Short: "Install this directory's Caddyfile as the box's, and its first baseline (root)",
 		Long: `Run as root inside the box's directory, copied over from the repository
-(deploy.example.com/ for the box at deploy.example.com), with the commit
-you are about to push. From the repository on your laptop, where the
+(deploy.example.com/ for the box at deploy.example.com; init refuses a
+directory with any other name), with the commit you are about to push. From the repository on your laptop, where the
 $(...) is expanded (the box has no git), copying the commit's files
 rather than the working tree's:
 

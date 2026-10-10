@@ -13,10 +13,18 @@ import (
 )
 
 // initDir is the box's directory as the operator copies it over: file
-// as its Caddyfile, in a directory of its own.
+// as its Caddyfile, in a directory named for its host (or "box" for a
+// file that walks as no box's).
 func initDir(t *testing.T, file []byte) string {
 	t.Helper()
-	dir := t.TempDir()
+	name := "box"
+	if shape, err := Walk(file); err == nil {
+		name = shape.Host
+	}
+	dir := filepath.Join(t.TempDir(), name)
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(dir, "Caddyfile"), file, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -264,6 +272,26 @@ func TestInitCmdRefusals(t *testing.T) {
 			mkfifo(t, filepath.Join(d, "Caddyfile"))
 			return d
 		}, want: "Caddyfile: not a regular file"},
+		{name: "a directory not named for the host", dir: func(t *testing.T, b *testBox) string {
+			d := filepath.Join(t.TempDir(), "box1")
+			if err := os.Mkdir(d, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(d, "Caddyfile"), b.v1, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return d
+		}, want: "this directory is box1, and the Caddyfile is for deploy.example.com: a box's directory is named for its host, so run init from deploy.example.com/ in a copy of the repository"},
+		{name: "a directory named for the host in another case", dir: func(t *testing.T, b *testBox) string {
+			d := filepath.Join(t.TempDir(), "Deploy.Example.com")
+			if err := os.Mkdir(d, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(d, "Caddyfile"), b.v1, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return d
+		}, want: "this directory is Deploy.Example.com, and the Caddyfile is for deploy.example.com"},
 		{name: "no box block", file: edit(boxBlock, ""), want: "the Caddyfile has no box block"},
 		{name: "no signer", file: edit(signers, ""), want: "the Caddyfile has no signer"},
 		{name: "no deploy_trust", file: edit(trust, ""), want: "the Caddyfile has no deploy_trust"},

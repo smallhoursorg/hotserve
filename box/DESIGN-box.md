@@ -880,8 +880,9 @@ another's. Two things are compared, both root-checked (step 11):
   may hold two files that name this host (a staging copy with relaxed
   trust, an old one under `archive/`), so `init` records the path of
   this box's file in `applied.json`, and the bundle's `path` must equal
-  it. Nobody types it: `init` derives it from the walked host, and
-  prints it.
+  it. Nobody types it: `init` derives it from the walked host, refuses
+  to run from a directory not named for that host (the wrong box's, or
+  one misnamed), and prints it.
 
 The rule behind the derivation — a box's directory sits at the
 repository's top level and is named for its `box_webhook` host, in
@@ -977,6 +978,7 @@ says.
 | 1 | both | `<sha> is not a commit id: 40 lowercase hex, as git rev-parse HEAD prints one` | the argument |
 | 1 | `init` | `no Caddyfile here; run init from inside the box's directory` / `Caddyfile: larger than 1048576 bytes` / `Caddyfile: not a regular file` | `./Caddyfile` |
 | 1 | `init` | `the Caddyfile <reason>`, each reason as the `the new Caddyfile …` row above words it | the walk |
+| 1 | `init` | `this directory is <name>, and the Caddyfile is for <host>: a box's directory is named for its host, so run init from <host>/ in a copy of the repository` | the directory's name is not the host |
 | 1 | `init` | `hotserve is not running; nothing applied` / `hotserve is still starting after 300 s; nothing applied`, each followed by the remedy below | hotserve not up after the wait |
 | 1 | `init` | `<phase>: <text>`, the phase and the catalogue text above of `failed`, `rolled_back` or `unknown` | the transaction's red ends |
 | 1 | both | `disk full; the previous Caddyfile could not be restored` | the full-disk end, in `init`'s transaction or in the recovery either runs first |
@@ -993,21 +995,16 @@ The remedy, `<sha>` filled in from the argument and `<dir>` with init's director
 
 ```
 the Caddyfile is accepted only by a running hotserve. Start it on the file it has, then run init again:
-  systemctl enable hotserve && systemctl restart hotserve  # exit 1 is final; journalctl -u hotserve says why
+  systemctl enable hotserve && systemctl restart hotserve
   cd <dir> && hotserve init <sha>
-If it will not start on that file, start it on this one, keeping the old:
-  cp --update=none /etc/hotserve/Caddyfile /root/Caddyfile.before-init
-  cp <dir>/Caddyfile /etc/hotserve/Caddyfile
-  systemctl restart hotserve
-  cd <dir> && hotserve init <sha>  # the same bytes: no_change, which records the baseline
+If it will not start, journalctl -u hotserve says why.
 ```
 
 Starting on the file the box has keeps `init`'s swap and rollback
-between the change and a box that will not start; only a box that will
-not start on its own file has its file replaced by hand, the old one
-kept — and kept once: `--update=none` leaves a copy from an earlier
-pass through the remedy as it is. A restart, not a start: a start joins one already in flight,
-which read the old file, and a `no_change` reloads nothing.
+between the change and the box, and never touches the old file by
+hand; a box that will not start on its own file is the console's to
+fix first. A restart, not a start: a start joins one already in
+flight, which read the old file.
 
 Journal lines: the preamble's (`webhook auth failed`, `webhook auth
 could not consult a trust source`) carry `box_request` — `status`,
@@ -1043,17 +1040,18 @@ step before the transaction a refusal by name that writes nothing
 4. The walk of "Reading the signed file": each of that section's
    conditions, plus no `box` block, no `signer`, no `deploy_trust`, zero
    or more than one `box_webhook` site.
-5. The path is derived: `<host>/Caddyfile`, the walked host's
-   ("The box's identity"). Nothing about it is typed.
-6. Root's blocking lock; recovery, if a record is lying there; then
+5. The directory is named for the walked host, exactly (lower case),
+   or refused: the wrong box's directory, or one misnamed, fails here,
+   before anything is touched, not at the first push.
+6. The path is derived: `<host>/Caddyfile` ("The box's identity").
+   Nothing about it is typed.
+7. Root's blocking lock; recovery, if a record is lying there; then
    step 16's question, once. `activating` is waited out within the
    run's budget, so `systemctl enable --now hotserve && hotserve init <sha>`
    needs no sleep. Anything but up is refused with nothing written: the
    catalogue's message, then the remedy: hotserve enabled and restarted
-   on the file it has, then `init` again; or, if it will not start on
-   that file, this one put in place by hand, the old one kept, and
-   `init` again, whose `no_change` records the baseline.
-7. The state machine with `origin: init` and an id of its own:
+   on the file it has, then `init` again.
+8. The state machine with `origin: init` and an id of its own:
    `no_change` when the bytes are the installed bytes, else
    `installing` → `swapped` → the reload, a failed reload rolled back,
    as the applier's.
@@ -1598,3 +1596,6 @@ Dated one-liners; the full text of each is in git.
   triage line; the console's way is a bare edit and a reload. The
   `init/` directory went with the validate, and `/etc/hotserve/age/` is
   left to the secrets PR. The console's messages got their own table.
+  After four review rounds reworked it, the stopped-box remedy is one
+  step (restart on the file the box has, then init again), and init
+  refuses a directory not named for the host.

@@ -52,20 +52,16 @@ const (
 	msgDiskFull           = "disk full; the previous Caddyfile could not be restored"
 	// msgInitRemedy follows init's refusal on a hotserve that is not up
 	// ("Console commands"); %[1]s is init's argument and %[2]s its
-	// directory, since the operator may read it after a one-shot ssh
-	// and follow it from another. hotserve starts on
-	// the file it has first, so init's own swap and rollback still guard
-	// the change; the file is replaced by hand only when that will not
-	// start, the old one kept. A restart, not a start: a start joins one
-	// already in flight, which read the old file.
+	// directory, absolute, since the operator may read it after a
+	// one-shot ssh and follow it from another. hotserve starts on the
+	// file it has, so init's own swap and rollback still stand between
+	// the change and the box; the old file is never touched by hand. A
+	// restart, not a start: a start joins one already in flight, which
+	// read the old file.
 	msgInitRemedy = `the Caddyfile is accepted only by a running hotserve. Start it on the file it has, then run init again:
-  systemctl enable hotserve && systemctl restart hotserve  # exit 1 is final; journalctl -u hotserve says why
+  systemctl enable hotserve && systemctl restart hotserve
   cd %[2]s && hotserve init %[1]s
-If it will not start on that file, start it on this one, keeping the old:
-  cp --update=none /etc/hotserve/Caddyfile /root/Caddyfile.before-init
-  cp %[2]s/Caddyfile /etc/hotserve/Caddyfile
-  systemctl restart hotserve
-  cd %[2]s && hotserve init %[1]s  # the same bytes: no_change, which records the baseline`
+If it will not start, journalctl -u hotserve says why.`
 )
 
 // installFailed is `failed` for an install that stopped before the
