@@ -12,6 +12,7 @@ package penaltybox
 import (
 	"fmt"
 	"net/http"
+	"net/netip"
 	"net/textproto"
 	"strconv"
 	"time"
@@ -33,7 +34,9 @@ type Handler struct {
 
 	// Key identifies the client. Default "{client_ip}", which respects
 	// the server's trusted_proxies configuration — XFF trust is the
-	// server config's job, not this module's.
+	// server config's job, not this module's. A key that resolves to a
+	// single IPv6 address is counted under its /64 (see maskKey);
+	// any other value is used verbatim.
 	Key string `json:"key,omitempty"`
 
 	// MinLevel is the lowest hint level that counts toward the budget.
@@ -229,6 +232,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		// No resolvable key — fail open rather than box the world.
 		return next.ServeHTTP(w, r)
 	}
+	key = maskKey(key)
 
 	if remaining, boxed := h.store.boxedRemaining(key); boxed {
 		// Strip here too: earlier middleware may already have set the
@@ -259,6 +263,37 @@ func retryAfterSeconds(remaining time.Duration) int {
 		secs = 1
 	}
 	return secs
+}
+
+// maskKey is the store key for a resolved key value. A value that is
+// exactly one IPv6 address becomes its /64 prefix ("2001:db8:1:2::/64"):
+// one host is routinely handed a whole /64, so per-address budgets would
+// let an IPv6 client walk past the box by changing its low 64 bits. A
+// link-local address's zone goes with the host bits. IPv4 and
+// IPv4-mapped IPv6 are keyed per address (unmapped first, so mapped
+// clients are not all folded into ::/64 together). Any other value — a
+// header, a composite such as "{client_ip}|{host}" — is returned
+// unchanged: only the operator knows its shape.
+//
+// The liveswap deploy throttle masks the same way (deploytrust's
+// clientKey); this is a copy, not an import, so penaltybox stays an
+// independent module.
+func maskKey(key string) string {
+	ip, err := netip.ParseAddr(key)
+	if err != nil {
+		return key
+	}
+	if ip.Is4() {
+		// ParseAddr accepts only canonical dotted-quad IPv4, so key
+		// already equals ip.String() — skip the allocation.
+		return key
+	}
+	ip = ip.Unmap()
+	if ip.Is4() {
+		return ip.String()
+	}
+	prefix, _ := ip.Prefix(64) // cannot fail: a valid IPv6 address, 64 ≤ 128
+	return prefix.String()
 }
 
 // Interface guards.

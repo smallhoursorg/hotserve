@@ -94,7 +94,7 @@ All options and defaults:
 | Option        | Default              | Meaning                                                              |
 | ------------- | -------------------- | -------------------------------------------------------------------- |
 | `header`      | `X-Rate-Limit-Level` | Origin response header carrying the hint level                       |
-| `key`         | `{client_ip}`        | Client identity; respects the server's `trusted_proxies` config      |
+| `key`         | `{client_ip}`        | Client identity; respects the server's `trusted_proxies` config. A key that resolves to one IPv6 address counts under its /64; IPv4 per address; anything else verbatim (see [Client keys](#client-keys-ipv6-by-64)) |
 | `min_level`   | `2`                  | Lowest level that counts toward the budget (1–3)                     |
 | `window`      | `60s`                | Sliding window; free-form duration (Fastly's 1s/10s/60s is the interoperability convention) |
 | `limit`       | `30`                 | Weighted units per window; *exceeding* (not reaching) it boxes       |
@@ -188,6 +188,35 @@ configuration, which is where XFF trust belongs.
 - **Memory is hard-bounded.** At most `max_keys` clients are tracked;
   an attacker rotating IPs exhausts the cap into evictions, not into
   unbounded memory. Actively boxed entries are the last to be evicted.
+  The cap is enforced per shard (64 of them), and the hash that picks a
+  key's shard is seeded at random each time the store is built (every
+  config load), so a client cannot choose keys that pile into one shard
+  and evict other clients' counters there.
+
+### Client keys: IPv6 by /64
+
+The resolved `key` is counted as follows:
+
+| Resolved value                         | Counted under                    |
+| -------------------------------------- | -------------------------------- |
+| One IPv6 address (`2001:db8:1:2::a`)   | its /64 (`2001:db8:1:2::/64`)    |
+| One IPv4 address (`192.0.2.1`)         | that address                     |
+| IPv4-mapped IPv6 (`::ffff:192.0.2.1`)  | the IPv4 address (`192.0.2.1`)   |
+| Link-local with a zone (`fe80::1%eth0`) | its /64, zone dropped (`fe80::/64`) |
+| Anything else — a header value, a composite such as `{client_ip}\|{host}`, `host:port` | the string, verbatim |
+
+A single IPv6 host is routinely handed a whole /64, so keying per
+address would let one client spread its traffic across addresses and
+never fill a budget. Keying the /64 means every address in it shares
+one budget and one box.
+
+The trade-off: a provider that hands each customer a /128 out of a
+*shared* /64 puts those customers behind one key, so one abusive
+neighbour boxes the others for `penalty_ttl`. The /64 is fixed; there
+is no option to change it. Only a key that resolves to exactly one
+address is masked, so a composite key such as `{client_ip}|{host}`
+stays per address — build such a key only if per-address IPv6 counting
+is what you want.
 
 ## Compatibility with Souin (HTTP cache)
 

@@ -79,9 +79,20 @@ so users can cross-check without leaving the repo.
   respects the server's `trusted_proxies` configuration. Do NOT default to
   a raw `X-Forwarded-For` read; XFF trust is the server config's job, same
   as the CMS refuses to own it.
+- **Key masking.** A resolved key that parses as exactly one IP address
+  is unmapped (IPv4-mapped IPv6 becomes IPv4) and then counted per
+  address for IPv4 and per /64 prefix for IPv6, zone dropped
+  (`2001:db8:1:2::/64`) — a host owns its whole /64, so per-address
+  IPv6 budgets would never close. Any other resolved value (a header,
+  a composite key) is counted verbatim. The /64 is fixed, not
+  configurable. The liveswap deploy throttle masks the same way; the
+  helper is copied, not imported, so this module stays independent.
 - **Memory bounds.** Hard cap on tracked keys (default e.g. 100k) with
   expiry sweep + oldest-first eviction. An attacker rotating IPs must
-  exhaust the cap into evictions, not into unbounded memory.
+  exhaust the cap into evictions, not into unbounded memory. The cap is
+  per shard, and the shard hash is seeded at random when the store is
+  built, so a client cannot aim keys at one shard to evict other
+  clients' counters.
 - **Level-1 traffic** must cost near-zero: no counter allocation for keys
   that have only ever produced level-1 responses.
 
