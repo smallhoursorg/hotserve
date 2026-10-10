@@ -392,11 +392,12 @@ func (a *Applier) rollingBack(ctx context.Context, t *txn, recovering bool) erro
 
 // bothFailed is `unknown` for a rollback whose reload of the previous
 // file failed, by the reason it rolled back: "both reloads failed" only
-// when the first one did — not after a reload that succeeded (the record
-// `applied` unwritable), none (the swap unrecorded), or one a crash cut
-// short.
+// when the record says the first one did — not after a reload that
+// succeeded (the record `applied` unwritable), none (the swap
+// unrecorded), one a crash cut short, or a reason the record does not
+// give.
 func bothFailed(why string) string {
-	if why == "" || why == msgReloadFailed {
+	if why == msgReloadFailed {
 		return msgBothReloads
 	}
 	return msgPrevReloadFailed

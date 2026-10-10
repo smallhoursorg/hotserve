@@ -43,13 +43,13 @@ const (
 	msgStillStarting      = "hotserve is still starting after 300 s; nothing applied"
 	msgNoSigner           = "the Caddyfile this box runs lists no signer; hotserve init is the way back"
 	msgInterrupted        = "interrupted before the Caddyfile changed; nothing changed"
-	msgInterruptedStopped = "interrupted; the previous Caddyfile is on disk; hotserve is not running"
+	msgInterruptedStopped = "interrupted; the previous Caddyfile is on disk; hotserve is not running — systemctl start hotserve loads it"
 	msgNoRecord           = "the box has no record of this push; push again"
 	msgReloadFailed       = "the reload failed; the previous Caddyfile is back and running — journalctl -u hotserve -n 50 on the box says why"
 	msgRecordAfterReload  = "the record could not be updated after a successful reload (disk full); rolled back to keep the file and the record consistent"
-	// The swap landed but the record of it (or the swap's own fsync)
+	// The swap landed, then the `swapped` record or the swap's own fsync
 	// failed: nothing was reloaded before the rollback.
-	msgRolledBackUnrecorded = "the Caddyfile was swapped but the record of it could not be written; rolled back: the previous Caddyfile is back and running"
+	msgRolledBackUnrecorded = "the Caddyfile was swapped, then a write after the swap failed; rolled back: the previous Caddyfile is back and running"
 	// A crash fell after the swap: recovery rolled back, the reload's
 	// outcome unknown.
 	msgRolledBackInterrupted = "interrupted after the Caddyfile changed; rolled back: the previous Caddyfile is back and running"

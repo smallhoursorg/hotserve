@@ -406,9 +406,9 @@ func (b *testBox) run(h hooks) error {
 		}
 	}
 	inBefore, _ := listNames(b.x("in"))
-	from := b.logs.Len()
+	linesBefore := len(b.logged(zapcore.ErrorLevel, msgLeftOnDisk))
 	err := b.applier(h).Run(context.Background())
-	b.checkLeftLine(inBefore, from)
+	b.checkLeftLine(inBefore, len(b.logged(zapcore.ErrorLevel, msgLeftOnDisk))-linesBefore)
 	return err
 }
 
@@ -416,8 +416,9 @@ func (b *testBox) run(h hooks) error {
 // with msgLeftOnDisk exactly once if it leaves the record, an entry in
 // work/, or an entry in/ held before it began, and never otherwise. An
 // entry a hook drops into in/ during the run is a late arrival, the next
-// run's work.
-func (b *testBox) checkLeftLine(inBefore []string, from int) {
+// run's work. The rule is restated from outside on purpose: an oracle
+// that called leftOnDisk would agree with any mistake in it.
+func (b *testBox) checkLeftLine(inBefore []string, lines int) {
 	b.t.Helper()
 	var left []string
 	if _, err := os.Lstat(b.x("txn.json")); !errors.Is(err, fs.ErrNotExist) {
@@ -435,17 +436,12 @@ func (b *testBox) checkLeftLine(inBefore []string, from int) {
 			left = append(left, "in/"+n)
 		}
 	}
-	lines := 0
-	for _, e := range b.logs.All()[from:] {
-		if e.Message == msgLeftOnDisk {
-			lines++
-		}
-	}
 	if want := min(len(left), 1); lines != want {
 		b.t.Errorf("the run leaves %v on disk and wrote the left-on-disk line %d times, want %d", left, lines, want)
 	}
 }
 
+// listNames is names for a directory a run may leave unlistable.
 func listNames(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	out := make([]string, 0, len(entries))

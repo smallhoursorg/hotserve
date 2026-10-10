@@ -78,7 +78,7 @@ func TestRecoveryStates(t *testing.T) {
 
 		{phase: phaseRollingBack, d: dPrev, state: "active", recError: msgRecordAfterReload, file: dPrev, result: phaseRolledBack, msg: msgRecordAfterReload, reloaded: 1},
 		{phase: phaseRollingBack, d: dNew, state: "active", recError: msgReloadFailed, file: dPrev, result: phaseRolledBack, msg: msgReloadFailed, reloaded: 1},
-		{phase: phaseRollingBack, d: dPrev, state: "active", reloads: []error{errReload}, file: dPrev, result: phaseUnknown, msg: msgBothReloads, reloaded: 1},
+		{phase: phaseRollingBack, d: dPrev, state: "active", reloads: []error{errReload}, file: dPrev, result: phaseUnknown, msg: msgPrevReloadFailed, reloaded: 1},
 		{phase: phaseRollingBack, d: dPrev, state: "active", recError: msgReloadFailed, reloads: []error{errReload}, file: dPrev, result: phaseUnknown, msg: msgBothReloads, reloaded: 1},
 		{phase: phaseRollingBack, d: dPrev, state: "active", recError: msgRecordAfterReload, reloads: []error{errReload}, file: dPrev, result: phaseUnknown, msg: msgPrevReloadFailed, reloaded: 1},
 		{phase: phaseRollingBack, d: dNew, state: "active", recError: msgRolledBackUnrecorded, reloads: []error{errReload}, file: dPrev, result: phaseUnknown, msg: msgPrevReloadFailed, reloaded: 1},
