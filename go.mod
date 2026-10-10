@@ -8,7 +8,7 @@ module github.com/smallhoursorg/hotserve
 go 1.26.1
 
 require (
-	github.com/caddyserver/caddy/v2 v2.11.6
+	github.com/caddyserver/caddy/v2 v2.11.7
 	github.com/darkweak/souin/plugins/caddy v1.7.9
 	github.com/darkweak/storages/otter/caddy v0.0.20
 	github.com/smallhoursorg/hotserve/liveswap v0.0.0-00010101000000-000000000000
@@ -57,6 +57,7 @@ require (
 	github.com/dlclark/regexp2/v2 v2.8.0 // indirect
 	github.com/dolthub/maphash v0.1.0 // indirect
 	github.com/dunglas/go-urlpattern v1.0.0 // indirect
+	github.com/dunglas/httpsfv v1.1.1 // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/felixge/httpsnoop v1.1.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.4 // indirect
