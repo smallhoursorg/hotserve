@@ -11,8 +11,8 @@
 // signer list and the ssh-keygen verdict — is the pure-Go subpackage
 // proof. The Caddyfile surface is the `box` global option (app.go,
 // caddyfile.go) and the `box_webhook` directive (handler.go), which
-// reads the box's state (exchange.go) and, until the root applier
-// ships, refuses every push; `hotserve box webhook` (cmd.go) prints
+// answers `GET /` from the box's state (exchange.go) and, until the
+// root applier ships, refuses every push and every result poll; `hotserve box webhook` (cmd.go) prints
 // the address a file names. The applier and `hotserve init` /
 // `hotserve box …`'s other commands follow in later PRs.
 package box

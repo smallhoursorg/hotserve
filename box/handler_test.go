@@ -57,10 +57,8 @@ func newRig(t testing.TB) *rig {
 		installed: r.installed,
 		dir:       r.dir,
 	}
-	for _, d := range []string{"out", "stage"} {
-		if err := os.MkdirAll(filepath.Join(r.dir, d), 0o755); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.MkdirAll(r.dir, 0o755); err != nil {
+		t.Fatal(err)
 	}
 	r.write(t, r.installed, file(good))
 	return r

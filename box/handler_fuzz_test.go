@@ -28,7 +28,6 @@ func FuzzHandlerRoute(f *testing.F) {
 	f.Add("GET", "/", "%ZZ", "", true)
 
 	r := newRig(f)
-	token := r.token(f)
 	f.Fuzz(func(t *testing.T, method, path, query, auth string, bearer bool) {
 		if method == "" || strings.ContainsAny(method, " \t\r\n") {
 			return // not a method net/http would hand a handler
@@ -41,7 +40,9 @@ func FuzzHandlerRoute(f *testing.F) {
 		hr.URL.RawQuery = query
 		hr.Header["Authorization"] = []string{auth}
 		if bearer {
-			hr.Header.Set("Authorization", "Bearer "+token)
+			// Minted per iteration: a token lives five minutes, a
+			// fuzz run longer.
+			hr.Header.Set("Authorization", "Bearer "+r.token(t))
 		}
 		passed := false
 		w := httptest.NewRecorder()
@@ -69,6 +70,12 @@ func FuzzHandlerRoute(f *testing.F) {
 		}
 		if passed || w.Code != want || r.h.limiter.Size() != charged || !json.Valid(w.Body.Bytes()) {
 			t.Fatalf("%s %q ?%q: %d (%d charged), want %d (%d): %s", method, path, query, w.Code, r.h.limiter.Size(), want, charged, w.Body)
+		}
+		if want == http.StatusUnauthorized {
+			var got map[string]string
+			if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || len(got) != 1 || got["error"] != unauthorized {
+				t.Fatalf("not the flat 401: %s", w.Body)
+			}
 		}
 	})
 }

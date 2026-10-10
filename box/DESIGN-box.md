@@ -595,7 +595,7 @@ appears in `out/` or `stage/*.auth`:
 | result and marker both present | kept while younger than a day and among the 32 newest ids; else both removed |
 | result present, marker absent | the marker was lost (crash before step 7's second write, or a previous sweep's first `unlink`): the result is kept by the same two rules, then removed |
 | marker present, no result, no `in/<id>.tar`, no `work/<id>`, no record for `<id>`, older than fifteen minutes | the push was lost before root saw it (handler crash) or its result could not be written (full disk): write `failed` ("the box has no record of this push; push again") if it can, then sweep by the two rules |
-| marker present, no result, younger than fifteen minutes | pending (Glossary; after recovery no non-terminal result remains); untouched |
+| marker present, no result, younger than fifteen minutes | pending; untouched |
 
 A count as well as an age, because a holder of a valid token can post
 the already-applied `HEAD` in a loop and each fast `no_change` is a new
@@ -723,7 +723,7 @@ console step; a host rename needs a certificate first in any case.
 |---|---|---|
 | `POST /` with a bundle and `X-Box-Poll-Digest` | `deploy_trust` (step 1) | per step 8: 202 `{id, commit, phase: verified}` / 200 with a `no_change` or `applied` result / 422 with a `refused`, `failed`, `rolled_back` or `unknown` result / 504 `{id}`; 400, 409, 413, 415 from admission. Until the applier ships: 501 once authenticated, the body unread |
 | `GET /` | `deploy_trust` | `{"commit", "box_webhook", "sha256"}`: `commit` is `applied.json`'s `sha`; `box_webhook` and `sha256` are the installed file's walked host and its digest as read now — what step 4's fast path compares, so a console edit since the last apply shows. The workflow reads `commit` to bundle `rev-list --first-parent <commit>..HEAD`. 409 before `init` (no `applied.json`); 500 when either file cannot be read or the installed file does not walk |
-| `GET /?result=<id>` | **first** the poll secret — one `Authorization: Box-Poll <secret>` header (the scheme matched without regard to case), the secret standard base64 with padding, of 32 bytes whose sha256 begins with `<id>` and equals the digest a marker holds; accepted for `<id>` alone, for as long as the marker is kept, never charged to the failure budget — else `deploy_trust`, where a missing or wrong secret is an unauthenticated request like any other; authentication precedes everything below, so an unauthenticated caller gets the same flat 401 a deploy host gives and learns nothing | then the query must be exactly one `result=<id>`, `<id>` in the id grammar (400). The result, with step 8's status for its phase: `verified` 202; `no_change`, `applied` 200; `refused`, `failed`, `rolled_back`, `unknown` 422. 202 `{"phase":"admitted"}` while a marker exists and no result does — admitted, no result yet, whatever the marker's age, since only root can tell a push it holds from one it lost, and its next run settles a lost one as `failed` (Retention); 404 when neither exists (swept, or never admitted); 500 when a file cannot be read; a poll whose marker the box cannot read: Open question 4. Until the applier ships: 501 once authenticated, no poll secret read |
+| `GET /?result=<id>` | **first** the poll secret — one `Authorization: Box-Poll <secret>` header (the scheme matched without regard to case), the secret standard base64 with padding, of 32 bytes whose sha256 begins with `<id>` and equals the digest a marker holds; accepted for `<id>` alone, for as long as the marker is kept, never charged to the failure budget — else `deploy_trust`, where a missing or wrong secret is an unauthenticated request like any other; authentication precedes everything below, so an unauthenticated caller gets the same flat 401 a deploy host gives and learns nothing | then the query must be exactly one `result=<id>`, `<id>` in the id grammar (400). The result, with step 8's status for its phase: `verified` 202; `no_change`, `applied` 200; `refused`, `failed`, `rolled_back`, `unknown` 422. 202 `{"phase":"admitted"}` while a marker exists and no result does — admitted, no result yet, whatever the marker's age, since only root can tell a push it holds from one it lost, and its next run settles a lost one as `failed` (Retention); 404 when neither exists (swept, or never admitted); 500 when a file cannot be read; a poll whose marker the box cannot read: Open question 4. Until the applier ships: 501 once authenticated for any query on `GET /`, no poll secret read |
 | another method on `/` | — | 405 |
 | another path | — | not this handler's; passed on |
 
@@ -767,7 +767,7 @@ says. The workflow's action is in the last column.
 | 400 | — | `result must be a 32-hex id` / `X-Box-Poll-Digest: 64 lowercase hex, the sha256 of the push's 32-byte poll secret, required` | handler | bug in the workflow |
 | 409 | — | `duplicate request id: poll /?result=<id>` | handler | poll instead of retrying the POST |
 | 409 | — | `this box has no baseline; hotserve init <dir> <sha> as root on the box sets one` | handler (`GET /`) | fail; run `init` on the box |
-| 501 | — | `config pushes are not applied by this hotserve version; nothing applied` | handler, until the applier ships (`POST /`, `GET /?result=`) | fail |
+| 501 | — | `config pushes are not applied by this hotserve version; nothing applied` | handler, until the applier ships (`POST /`, `GET /` with any query) | fail |
 | 404 | — | `no result and no marker for <id>: swept, or never admitted` | handler | fail |
 | 500 | — | `the Caddyfile this box runs <reason>` (a walk refusal's reason) / `could not read <what>: <error>` | handler | fail; `journalctl -u hotserve` on the box |
 | 405 / 415 / 413 | — | `method not allowed` / `the bundle is a gzip tarball` / `the bundle is larger than 16 MiB` | handler | fail |
@@ -1114,9 +1114,10 @@ anything; GitHub enforces nothing.
    or tell any guessing caller that the box is broken. A charged 401 —
    the marker authenticates nothing, as an unreachable issuer
    authenticates no token — sends the push's own workflow to the token
-   checklist and can 429 its address. Either way the journal line is
-   bounded per file, not per kind, on process-wide state that survives
-   a reload, and the fuzz oracle says exactly when a line is written.
+   checklist and can 429 its address. Either way PR 3 bounds the
+   journal line per file, not per kind, on process-wide state that
+   survives a reload, and its fuzz oracle says exactly when a line is
+   written.
    Lean: decide in PR 3, with the writer's modes and paths in hand.
 
 ## Review checklist
@@ -1182,7 +1183,8 @@ Dated one-liners; the full text of each is in git.
   authenticated — the poll moved to PR 3, whose admission and applier
   write what it reads, after five review rounds on a reader with no
   writer; `GET /` is 409 before `init` and 500 when the box's own
-  files fail it; the handler's read caps. Decided for PR 3 on the way:
+  files fail it; `applied.json`'s read cap. Decided for PR 3 on the
+  way, with the other read caps:
   a result poll answers with step 8's status for the phase, and 202
   `admitted` for a marker with no result yet (`pending` stays
   admission's word: a bundle in `in/` or a marker younger than fifteen
@@ -1191,5 +1193,5 @@ Dated one-liners; the full text of each is in git.
   digest, and is honoured for as long as its marker is kept;
   reachability on `/` is a handler check in step 6. `box_webhook`
   takes no matcher, refused by the directive and the walk, since one
-  would leave `/` unserved; the journal's attribution field is
-  liveswap's `via`.
+  would leave `/` unserved. And for PR 3's push lines: the journal's
+  attribution field is liveswap's `via`.

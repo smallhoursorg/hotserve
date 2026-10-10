@@ -14,10 +14,11 @@ import (
 )
 
 // Where the box keeps its state (DESIGN-box.md, "Paths, owners, and
-// who may touch what"). The handler reads applied.json, which `init`
-// and the applier write (PR 3, PR 4) with the type below, so that the
-// reader and the writers cannot disagree about a field. The markers
-// and results a result poll reads come with the applier.
+// who may touch what"). The handler reads applied.json, which the
+// applier (PR 3), `init` and `hotserve box baseline` (PR 4) write with
+// the type below, so that the reader and the writers cannot disagree
+// about a field. The markers and results a result poll reads come with
+// the applier.
 const (
 	installedFile = "/etc/hotserve/Caddyfile"
 	exchangeDir   = "/var/lib/hotserve-box"

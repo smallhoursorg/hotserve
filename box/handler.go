@@ -26,10 +26,12 @@ func init() {
 // path to the next handler:
 //
 //	GET  /              the baseline: {commit, box_webhook, sha256}
-//	GET  /?result=<id>  refused 501 until the applier ships
+//	GET  /?…            any query, the result poll's among them:
+//	                    refused 501 until the applier ships
 //	POST /              refused 501 until the applier ships
 //
-// Every request is authenticated first, on the limiter liveswap's
+// Another method on `/` is 405 before anything else. Every GET and
+// POST on `/` is authenticated first, on the limiter liveswap's
 // webhook uses, so an unauthenticated caller gets the same flat 401 a
 // deploy host gives. Every body passes liveswap's response filter.
 // The result poll and its poll secret come with the applier (PR 3),
@@ -161,9 +163,11 @@ func (h *Handler) boxError(w http.ResponseWriter, what string, err error) error 
 	return respond(w, http.StatusInternalServerError, errorBody("could not read "+what+": "+proof.Bound(err.Error())))
 }
 
-// logStateError journals a state file the handler cannot read. Only an
-// authenticated request reaches one, so the preamble's budgets already
-// bound who can make the line.
+// logStateError journals a state file the handler cannot read, bounded.
+// Only an authenticated request reaches one: the preamble decides who
+// can make the line, not how many — a token holder can repeat `GET /`
+// against a box whose own files fail, and each request is a line, as
+// each is an answer.
 func (h *Handler) logStateError(what string, err error) {
 	h.logger.Error("box webhook could not read its state", zap.String("reading", what), zap.String("error", proof.Bound(err.Error())))
 }
