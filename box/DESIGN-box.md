@@ -254,10 +254,11 @@ cross-references throughout.
    States table and the Failure-mode table), then renames every entry
    of `in/` into `work/` — whatever it is; `CAP_DAC_OVERRIDE` and
    `CAP_FOWNER` exist so that nothing the hotserve uid creates can
-   stay. An entry whose name is not an id, or which is not a regular
-   file, has no legal result name: it is removed with an error-level
-   journal line and no result. The rest are processed in order of their
-   markers' `posted` time (an entry with no marker goes last); the order
+   stay. An entry whose name is not `<id>.tar`, or which is not a
+   regular file, has no legal result name: it is removed with an
+   error-level journal line and no result. The rest are processed in
+   order of their markers' `posted` time (an entry with no readable
+   marker goes last); the order
    decides only which pending bundle is tried first, the descent check
    decides each outcome. Each bundle is
    opened `O_NOFOLLOW|O_NONBLOCK`, checked `S_ISREG`, read once through
@@ -342,6 +343,18 @@ cross-references throughout.
 16. **Install or not.** From here the state machine governs: active?
     changed? See "The install transaction".
 
+Steps 10 to 15 are one function the handler's pre-verification (step
+5) and the applier share, run cheapest first: the two files' readings
+and the identity (10, 11 and 15's presence rules), the file proof
+(13), the chain's linkage (14), then every signature on the chain,
+HEAD's first (12 and 14), then 15's key guard — so a malformed bundle
+never starts `ssh-keygen`, and when more than one step would refuse,
+the first so found is the one named. The installed file failing the
+walk for a reason other than an empty signer list, `applied.json`
+missing or unreadable, `ssh-keygen` unable to answer and `is-active`
+unanswered are the box's errors: `failed`, never `refused`
+(Transitions table, "checking → failed").
+
 **`init`'s path through the chain.** `init` is the console seeding or
 re-seeding the box's identity, baseline and signers, so steps 10 to 15
 — every comparison against the installed file and `applied.json` —
@@ -402,12 +415,14 @@ implies; it never infers state from digests alone.
 
 | Phase | Meaning | `d` must be | Recovery (crash found this phase) |
 |---|---|---|---|
-| *(no record)* | No transaction in flight. | — | A `work/` entry with a terminal result: remove the entry. With a `verified` result or none: write `failed` ("interrupted before the Caddyfile changed"), remove the entry. |
+| *(no record)* | No transaction in flight. | — | A `work/` entry with a terminal result: remove the entry. With a `verified` result or none: write `failed` ("interrupted before the Caddyfile changed"), remove the entry. The applier's own leftover temporaries (Transitions table) are removed. |
+| *(record unreadable)* | `txn.json` does not parse, or is not the shape only root writes (a phase above, ids, digests, `prev` hashing to `prev_sha256`). Root writes it whole by rename, so this is a fault no other row reasons about. | — | Write nothing anywhere; error-level journal line; take nothing from `in/`. The path unit re-runs until its trigger limit; the console reads and removes the record. Exit 0: the one non-zero exit is the full-disk end. |
+| *(any phase, terminal result present)* | The transaction ended; only its removals were owed. | — | Remove the record, then the entry (Failure-mode table, "terminal result"). |
 | `no_change` | Buffers identical; only the baseline advances. | `prev` | Write `applied.json` (idempotent), result `no_change`. |
 | `installing` | Record durable; swap not yet done. | `prev` | `failed` ("interrupted before the Caddyfile changed"). If `d == new`, the crash fell after the swap: act as `swapped`. |
-| `swapped` | New file on disk; reload unconfirmed. | `new` | Write the previous bytes back, phase → `rolling_back`, continue as that row. Exception: `origin: init` on a box that is not running → finish as `applied` (init's rule: a person is at the console). |
+| `swapped` | New file on disk; reload unconfirmed. | `new`, or `prev` (the bytes are already back: continue as `rolling_back`) | Write the previous bytes back, phase → `rolling_back`, continue as that row. Exception: `origin: init` with `d == new` on a box that is not running → finish as `applied` (init's rule: a person is at the console). |
 | `applied` | Reload confirmed; `applied.json` may not be written yet. | `new` | Write `applied.json` (idempotent), result `applied`. **If `d ≠ new`, the file changed after the reload (a console edit): do not advance the baseline; result `unknown`.** |
-| `rolling_back` | Reload failed; previous bytes going back. | `prev`, or `new` (crash before the write-back: write them back) | Reload if active → `rolled_back`; reload fails → `unknown`; not running → `failed` ("the previous Caddyfile is on disk; hotserve is not running"). `d` neither: the `any` row. |
+| `rolling_back` | Reload failed (or the record could not follow the swap); previous bytes going back. | `prev`, or `new` (crash before the write-back: write them back) | Reload if active → `rolled_back` with the record's `error`; reload fails → `unknown`; not running → `failed` ("the previous Caddyfile is on disk; hotserve is not running"). `d` neither: the `any` row. A write-back that fails ends as the full-disk end (Failure-mode table). |
 | any | `d` matches neither `prev` nor `new`. | — | A console edit under the transaction: write nothing to `/etc/hotserve`, result `unknown` ("the Caddyfile changed during the transaction; it is left as found"), journal at warning level. |
 
 ### Record and result fields
@@ -422,12 +437,20 @@ implies; it never infers state from digests alone.
 | record | `prev`, `prev_sha256` | applier | the installed file's bytes (base64) and digest at step 10 |
 | record | `new_sha256` | applier | the incoming file's digest |
 | record, result | `diff` | applier | unified diff, redacted (layers 3 and 4), capped per Caps |
-| record, result | `apps` | applier | app names from the incoming file's token walk |
+| record, result | `apps` | applier | app names from the incoming file's token walk: the global `liveswap` block's `app` lines whose name is in liveswap's app-name grammar (one outside it fails the load anyway), so a result's size stays under the handler's read cap |
 | record, result | `box_webhook` | applier | the host |
 | record, result | `caddyfile_edited_out_of_band` | applier | step 10's flag |
 | record | `phase` | applier | the state (States table) |
 | result | `phase` | applier | `verified` or a terminal phase |
 | result | `error` | applier | the catalogue message for a non-green phase, bounded per Caps |
+| record | `error` | applier | in a `rolling_back` record, the catalogue text its `rolled_back` result will carry, so recovery reports the reason the live run would have |
+
+A result carries what was established before its phase: a refusal at
+step 9 has `id`, `phase` and `error`; one past the bundle's parse adds
+`commit` and `path`; `signer`, `box_webhook`, `apps` and the out-of-band
+flag come once steps 10 to 15 pass, and `diff` once hotserve is found
+active. A transaction with `origin: init` writes no result file at any
+phase — its caller prints the outcome, and recovery journals it.
 | `applied.json` | `sha`, `path`, `sha256`, `signer`, `when` | applier, `init`, `baseline` | the baseline, this box's path, the installed digest, who verified, when |
 | marker | `sha256`, `posted` | handler | digest of the poll secret; time of admission |
 
@@ -458,7 +481,9 @@ stateDiagram-v2
 
 | From → to | Event | Durable write(s), in order | Guards |
 |---|---|---|---|
+| in/ → work/ | step 9 takes an entry | the entry renamed into `work/` → `work/` and `in/` fsynced | I2, I8 |
 | checking → refused | A check in 10–15 fails | result `refused` → entry removed | I2, I6 |
+| checking → failed | the box's own error in 9–16: the bundle unreadable, `applied.json` missing or unreadable, the installed file unreadable or failing the walk for any reason but an empty signer list, `ssh-keygen` unable to answer or the chain deadline passed, `is-active` unanswered | result `failed` ("the install failed before the Caddyfile changed: <error>; nothing changed", the catalogue's) → entry removed | I2, I3; never `refused` (step 12) |
 | checking → not_running | `origin: applier` and `is-active` is not `active`: `inactive`/`failed` at once, or still `activating` when the 300 s elapsed wait ends | result `refused` — "hotserve is not running; nothing applied" for `inactive`/`failed`, "hotserve is still starting after 300 s; nothing applied" for a timed-out `activating`, the catalogue's two messages → entry removed | I2; I4: nothing advances |
 | checking → no_change | active (or `origin: init`); incoming buffer == installed buffer | record `no_change` → `applied.json` → result `no_change` → record removed → entry removed | I2, I4, I5 |
 | checking → verified | active (or `origin: init`); buffers differ | result `verified` (if this write fails: remove the `work/` entry, journal; nothing else changes) — `init` writes no result, it prints | I3 |
@@ -468,13 +493,18 @@ stateDiagram-v2
 | swapped → rolling_back | record rewrite to `swapped` fails, or reload fails | record `rolling_back` (if writable) → previous bytes written back | I1 |
 | swapped → applied | `systemctl reload hotserve` exits 0 — or `origin: init` on a box that is not running, where the swap counts as applied with no reload (a person is at the console; the file loads at the next start) — and the installed file's digest, re-read, still equals `new_sha256` (a console edit since the swap → `unknown`, baseline not advanced, as the States table's `applied` row) | record `applied` → `applied.json` | I4 (record before baseline; the digest check is why "applied" means these bytes) |
 | rolling_back → rolled_back | previous bytes back, reload exits 0 | result `rolled_back` → record removed → entry removed | I1, I2 |
-| rolling_back → unknown | second reload fails, or bytes cannot be written back | result `unknown` → record removed if a result was written → entry removed | see ENOSPC row below |
+| rolling_back → unknown | second reload fails | result `unknown` → record removed → entry removed | I2, I3 (bytes that cannot be written back are the full-disk end: Failure-mode table, "previous bytes back") |
 | applied → done | — | result `applied` → record removed → entry removed | I2, I3, I5 |
 
 Order within a row is the order on disk. Every terminal result is
 followed by the record's removal (where one exists) and then the
 entry's (I2); "record removed" always follows "result written" (I5)
-with one exception, the full-disk row of the Failure-mode table.
+with one exception, the full-disk row of the Failure-mode table. Each
+write is a temporary in the same directory, renamed over the name
+(I8): `.Caddyfile.box-<id>` for the Caddyfile, `.txn.json.tmp`,
+`.applied.json.tmp` and `out/.<id>.json.tmp` for the rest — every one
+in a directory only root writes; recovery removes any it finds, and
+reads none.
 
 ### Failure-mode table
 
@@ -485,16 +515,17 @@ shows after recovery.
 
 | Write | Write fails → | Crash after → recovery | Terminal phase | Workflow sees |
 |---|---|---|---|---|
+| take (`in/` → `work/`) | remove the entry where it stands in `in/` (I2); an entry named `<id>.tar` gets `failed` ("the install failed before the Caddyfile changed: <error>; nothing changed") | no record, entry in `work/`, no result → `failed` ("interrupted before the Caddyfile changed") | `failed` | `failed` |
 | result `refused` | journal (error), remove entry | entry with terminal result → remove entry | `refused` | 422 or the result; if unwritten, `admitted` until the workflow's bound, then red naming the journal |
-| result `verified` | remove entry, journal; file untouched | no record, result `verified` → rewrite `failed`, remove entry | `failed` | `failed` |
+| result `verified` | remove entry, journal; file untouched | no record, result `verified` → rewrite `failed`, remove entry | `failed` | crash after: `failed`; write fails: `admitted`, then `failed` ("the box has no record of this push") from Retention at root's first run past fifteen minutes |
 | record `no_change` | result `failed`; nothing changed | phase `no_change` → `applied.json`, result | `no_change` | `no_change` |
 | record `installing` | result `failed`; nothing changed | phase `installing`, `d == prev` → `failed` | `failed` | `failed` |
-| new file temp + rename | remove temp; result `failed` | `d == new` with phase `installing` → treat as `swapped` | per `swapped` | per `swapped` |
-| record `swapped` | **post-swap failure**: write previous bytes back; if that also fails, leave the record (phase `installing`, `d == new`) and exit non-zero with an error-level line ("disk full; the previous Caddyfile could not be restored") — the path unit re-triggers until its limit and fails; the console frees space, then `systemctl restart hotserve-box-apply.path` (`reset-failed` alone clears the state but does not start a unit that hit its trigger limit) | phase `swapped` → rollback path | `rolled_back` / `unknown` | per phase |
-| reload | non-zero exit → rollback path | — | `rolled_back` / `unknown` | per phase |
+| new file temp + rename | remove temp; result `failed` — unless the installed file now reads as `new` (the rename landed and only the directory's `fsync` failed): the post-swap failure of the next row | `d == new` with phase `installing` → treat as `swapped` | per `swapped` | per `swapped` |
+| record `swapped` | **post-swap failure**: record `rolling_back` if it can be written, then the previous bytes back; if they cannot be written back, leave the record (phase `installing`, or `rolling_back` if that write landed; `d == new`) and the entry, and exit non-zero with an error-level line ("disk full; the previous Caddyfile could not be restored") — the path unit re-triggers until its limit and fails; the console frees space, then `systemctl restart hotserve-box-apply.path` (`reset-failed` alone clears the state but does not start a unit that hit its trigger limit) | phase `swapped` → rollback path | `rolled_back` / `unknown` | per phase |
+| reload | non-zero exit → rollback path | phase `swapped` (the reload's outcome unknown) → rollback path | `rolled_back` / `unknown` | per phase |
 | record `applied` | the reload succeeded but the record cannot say so, and the baseline must never run ahead of the record (I4): take the rollback path exactly as the `record swapped` row — previous bytes back, reload, result `rolled_back` ("the record could not be updated after a successful reload (disk full); rolled back to keep the file and the record consistent") or, if the write-back fails too, the full-disk end above | phase `applied`, `d == new` → `applied.json`, result | `rolled_back` / `unknown` | per phase |
 | `applied.json` | journal (error); result `unknown` ("applied but the baseline could not be recorded; `hotserve box baseline <sha>`") | phase `applied` → idempotent rewrite | `applied` / `unknown` | per phase |
-| previous bytes back | retry once; else result `unknown`, record kept as above | phase `rolling_back`, `d` checked, bytes written back if needed | `rolled_back` / `unknown` | per phase |
+| previous bytes back | retry once (a write whose rename landed counts); else the full-disk end of the `record swapped` row: no result, record and entry kept, exit non-zero — a result written here would make the next recovery drop the record (the `terminal result` row), and with it the only copy of the previous bytes | phase `rolling_back`, `d` checked, bytes written back if needed | `rolled_back` / `unknown` | per phase |
 | terminal result | **full disk**: error-level journal with every field; remove record and entry anyway (both `unlink`s). At a terminal phase the disk is settled and only the report is owed; a record kept would spin `PathExists=txn.json`. | result exists, record present → remove record and entry | as logged | the last result on disk — `verified` for a transaction past that phase, else `admitted` — until the workflow's bound, then red naming the journal |
 | record removed | retry; cannot fail for space | record gone, entry present → remove entry | — | — |
 | entry removed | retry; cannot fail for space | `work/` non-empty → path unit re-runs recovery once | — | — |
@@ -594,13 +625,24 @@ appears in `out/` or `stage/*.auth`:
 |---|---|
 | result and marker both present | kept while younger than a day and among the 32 newest ids; else both removed |
 | result present, marker absent | the marker was lost (crash before step 7's second write, or a previous sweep's first `unlink`): the result is kept by the same two rules, then removed |
-| marker present, no result, no `in/<id>.tar`, no `work/<id>`, no record for `<id>`, older than fifteen minutes | the push was lost before root saw it (handler crash) or its result could not be written (full disk): write `failed` ("the box has no record of this push; push again") if it can, then sweep by the two rules |
-| marker present, no result, younger than fifteen minutes | pending; untouched |
+| marker present, no result, nothing at `in/<id>.tar` or `work/<id>.tar`, no record for `<id>`, older than fifteen minutes — or dated more than fifteen minutes ahead of the clock (a clock step or a hostile writer; it would otherwise block admission until the clock caught up) | the push was lost before root saw it (handler crash) or its result could not be written (full disk): write `failed` ("the box has no record of this push; push again") if it can and the two rules keep the id, then sweep by them |
+| marker present, no result, younger than fifteen minutes | pending; untouched, and not counted among the 32 |
+
+An id's age is its marker's `posted`; with no marker, or one that does
+not read (not a regular file, over its cap, not the shape admission
+writes), the marker's or else the result's modification time, read
+without following a link. The 32 are counted over ids with a result,
+newest first. A pair is removed marker first, so a crash between the
+two `unlink`s leaves the table's second row. Only names `<id>.auth` in
+`stage/` are root's; the handler's lock and temporaries are its own.
 
 A count as well as an age, because a holder of a valid token can post
 the already-applied `HEAD` in a loop and each fast `no_change` is a new
 id; an age alone would let a day of those fill the disk or the inode
 table. The handler sweeps only its own unfinished `.tar` temporaries.
+Retention runs at the end of every applier run, whatever triggered it;
+a stranded marker therefore waits for root's next run, which a later
+push or a crash's leftovers start.
 
 ## Caps
 
@@ -1195,3 +1237,16 @@ Dated one-liners; the full text of each is in git.
   takes no matcher, refused by the directive and the walk, since one
   would leave `/` unserved. And for PR 3's push lines: the journal's
   attribution field is liveswap's `via`.
+- 2026-10-10 — PR 3a (the applier core, `hotserve box apply`) held
+  every line but these, changed here with it: `checking → failed` for
+  the box's own errors in 9–16, and `in/ → work/` with its
+  Failure-mode row; a write-back that fails twice is the full-disk end,
+  never `unknown` with the record kept (the `terminal result` row would
+  then drop the only rollback bytes); `swapped` with `d == prev`
+  continues as `rolling_back`; an unreadable record is kept untouched;
+  a record that finds its terminal result only removes; the record
+  carries the `error` its rollback will report; steps 10–15 run
+  cheapest first; `apps` holds liveswap-grammar names only; Retention
+  ages an id by its marker's `posted`, else an mtime, counts the 32
+  over results, settles a marker dated past the clock, and writes a
+  stranded marker's `failed` only for an id it keeps.
