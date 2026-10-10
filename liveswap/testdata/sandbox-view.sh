@@ -98,9 +98,10 @@ exists mgr_socket open closed "/run/user/$probe_uid/systemd/private"
 # its own (the kernel refuses ptrace-class access across user
 # namespaces), and the PID namespace closes them a second time over.
 # From in here the two cannot be told apart: PrivatePIDs= is always
-# on, so /proc/$MGR_PID does not exist in this /proc at all, and
-# `closed` is the PID namespace's answer whatever the user namespace
-# would have said. The user-namespace claim on its own rests on the
+# on, so this /proc lists only the unit's own processes, and
+# /proc/$MGR_PID is either absent or (for a small pid) one of them —
+# never the manager. `closed` is the PID namespace's answer whatever
+# the user namespace would have said. The user-namespace claim on its own rests on the
 # 2026-08-30 measurement (DESIGN-threat-model.md, "The shared-UID
 # rule"), not on this probe.
 if [ -n "$MGR_PID" ]; then
@@ -158,7 +159,11 @@ fi
 #             ProtectControlGroups= promise
 #   writable  the write went through
 #   absent    the unit's cgroup is not in the view at all
-#   denied:…  anything else, with the shell's own error text
+#   denied:…  anything else, with the shell's own error text. That
+#             names the errno only when the open failed (EACCES,
+#             ENOENT); one raised by the write itself (EBUSY, EINVAL)
+#             reaches the shell as a bare "I/O error". EROFS always
+#             fails the open, so `readonly` is never lost this way.
 # The target is cgroup.procs, not a controller file: it exists in every
 # cgroup v2 directory whatever is delegated, and it is the PID-migration
 # escape route as well as the limit-rewriting one. Writing 0 means "the
@@ -167,8 +172,10 @@ fi
 # it changes nothing. The write runs in a child shell with LC_ALL=C:
 # the unit's environment passes LANG/LC_* through, and the error text
 # is what tells EROFS from the rest.
-cg="/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)"
-if [ ! -e "$cg/cgroup.procs" ]; then
+cg="/sys/fs/cgroup$(cut -d: -f3- /proc/self/cgroup)"
+cg_seen=
+[ -e "$cg/cgroup.procs" ] && cg_seen=1
+if [ -z "$cg_seen" ]; then
 	emit cgroup absent
 elif cgerr=$(LC_ALL=C /bin/sh -c 'echo 0 >"$1"' sh "$cg/cgroup.procs" 2>&1); then
 	emit cgroup writable
@@ -180,8 +187,13 @@ else
 fi
 # Reported, not asserted: whether the memory controller reaches the
 # unit's cgroup at all. That is the question resource caps (#71) stand
-# on, not this sandbox's.
-exists cgroup_memory_max present absent "$cg/memory.max"
+# on, not this sandbox's. With no cgroup in the view there is nothing
+# to look in, and `absent` would read as "not delegated": skipped.
+if [ -n "$cg_seen" ]; then
+	exists cgroup_memory_max present absent "$cg/memory.max"
+else
+	emit cgroup_memory_max skipped
+fi
 writable tmp /tmp/.probe-w
 emit home "$HOME"
 [ -n "$XDG_RUNTIME_DIR" ] && emit xdg_runtime set || emit xdg_runtime unset
