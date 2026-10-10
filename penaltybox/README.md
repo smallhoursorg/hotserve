@@ -294,7 +294,8 @@ With that order (all verified by `make e2e`):
   cached level-3 URL still gets boxed.
 - The header is stripped from every client-facing response, cache hit
   or miss — it lives only inside the cache store (when the origin sends
-  it as a header, not a trailer; see `strip`).
+  it as a header of the final response, not as a trailer or on a 1xx;
+  see `strip`).
 
 (If you instead put `cache` before `hint_penaltybox`, cache hits bypass
 the module entirely: stored responses are already stripped, but boxed
