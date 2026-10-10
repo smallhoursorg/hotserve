@@ -2,11 +2,13 @@ package box
 
 // `POST /` and `GET /?result=<id>` (DESIGN-box.md, "The trust chain"
 // steps 1–8, "Admission", "Handler contract"). A push runs in this
-// order: the token (1); the request id (400) and the media type (415);
-// the body, read once into memory (413); the bundle (3); the token's
-// `sha` against HEAD (4); the fast path; only then the admission lock
-// and its 409s (2); the pre-verification (5); validate (6); the drop
-// (7); the lock released; the wait for root's first result (8).
+// order: the token (1); the request id (400) and whether the box
+// already holds it (409); the media type (415); the process's push slot
+// (409); the body, read once into memory under the upload deadline
+// (413); the bundle (3); the token's `sha` against HEAD (4); the fast
+// path; the admission lock and its 409s (2), the fast path asked again;
+// the pre-verification (5); validate (6); the drop (7); the lock and the
+// slot released; the wait for root's first result (8).
 //
 // The rules every function here keeps:
 //
@@ -114,28 +116,34 @@ func (h *Handler) push(w http.ResponseWriter, r *http.Request) error {
 		return p.respond(http.StatusConflict, errorBody(msgAdmitting))
 	}
 	defer release()
-	// A server that cannot set a deadline (HTTP/3) reads as it would
-	// have; Caddy's own read_body timeout, where set, applies there.
+	// The deadline replaces, for this body, any read_body timeout the
+	// operator set (DESIGN-box.md, Caps). HTTP/1.1, HTTP/2 and HTTP/3
+	// all take one; a writer in the chain that hides the method is said
+	// in the journal, since the slot then has no bound but the
+	// connection's.
 	rc := http.NewResponseController(w)
 	upload := h.upload
 	if upload == 0 {
 		upload = uploadTimeout
 	}
-	_ = rc.SetReadDeadline(time.Now().Add(upload))
-	body, err := readCapped(r.Body, "the bundle", maxBody)
-	if err == nil {
-		// Cleared only after a whole body: the server's background read
-		// would otherwise end the request's context when it passes. After
-		// a body that did not arrive whole the deadline stays, so the
-		// server's drain of what is left of it ends too.
-		_ = rc.SetReadDeadline(time.Time{})
+	if err := rc.SetReadDeadline(time.Now().Add(upload)); err != nil {
+		h.logger.Warn("box webhook: the upload has no deadline", zap.String("id", p.id), zap.String("error", proof.Bound(err.Error())))
 	}
+	// Never cleared here: once a body ends, net/http clears the deadline
+	// itself as it starts its background read (connReader.
+	// startBackgroundRead), so admission and the wait may outlast it; and
+	// after a body that did not arrive whole it must stay, so the
+	// server's drain of what is left of it ends too.
+	body, err := readCapped(r.Body, "the bundle", maxBody)
 	var big *tooLargeError
 	if errors.As(err, &big) {
 		return p.respond(http.StatusRequestEntityTooLarge, errorBody(msgTooLarge))
 	}
 	if err != nil {
-		// The caller's connection, not the box: nothing was admitted.
+		// The caller's connection, not the box: nothing was admitted. A
+		// line all the same, since the slot was held while it stalled.
+		h.logger.Warn("box push upload failed", zap.String("id", p.id), zap.String("error", proof.Bound(err.Error())),
+			zap.String("via", p.via), zap.String("remote", r.RemoteAddr))
 		return p.respond(http.StatusBadRequest, errorBody("could not read the bundle: "+proof.Bound(err.Error())))
 	}
 
@@ -281,10 +289,7 @@ var pushSlot = make(chan struct{}, 1)
 // takeSlot takes the push slot without waiting; release gives it back,
 // once however often it is called.
 func (h *Handler) takeSlot() (release func(), ok bool) {
-	slot := h.slot
-	if slot == nil { // a Handler Provision did not build: the process's
-		slot = pushSlot
-	}
+	slot := h.slot // Provision's pushSlot; a test's own
 	select {
 	case slot <- struct{}{}:
 		var once sync.Once
@@ -336,7 +341,7 @@ func (h *Handler) result(w http.ResponseWriter, r *http.Request) error {
 	}
 	// No result yet: a marker, of whatever age, or a bundle still in in/
 	// (its marker never written), is a push admitted.
-	for _, path := range []string{h.x("stage", id+".auth"), h.x("in", id+".tar")} {
+	for _, path := range h.admittedPaths(id) {
 		if found, err := present(path); err != nil {
 			h.logStateError("the push "+id, err)
 			return respond(w, http.StatusInternalServerError, errorBody("could not read the push "+id+": "+proof.Bound(err.Error())), id)

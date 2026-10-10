@@ -66,6 +66,7 @@ func (f *fakeValidator) validate(ctx context.Context, _ string, caddyfile []byte
 		select {
 		case <-block:
 		case <-ctx.Done():
+			return "", ctx.Err() // as the real children report a caller gone
 		}
 	}
 	return msg, err
@@ -905,6 +906,39 @@ func TestPushStalledUpload(t *testing.T) {
 		t.Fatal("the slot outlived the stalled upload")
 	}
 	release()
+}
+
+// TestPushDeadlineCleared: after a whole body the upload deadline no
+// longer applies (net/http clears it as it starts its background read),
+// so admission and the wait may outlast it — a deadline left standing
+// there would end the request's context mid-validate.
+func TestPushDeadlineCleared(t *testing.T) {
+	p := newPushRig(t)
+	p.h.upload = 300 * time.Millisecond
+	block := make(chan struct{})
+	p.val.block = block
+	time.AfterFunc(900*time.Millisecond, func() { close(block) })
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = p.h.ServeHTTP(w, r, nextFunc(func(http.ResponseWriter, *http.Request) error { return nil }))
+	}))
+	defer srv.Close()
+	c2, bundle := p.change()
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/", bytes.NewReader(bundle))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+p.token(t, c2))
+	req.Header.Set("Content-Type", "application/gzip")
+	req.Header.Set(headerRequestID, randomID(t))
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // a test response
+	if resp.StatusCode != http.StatusGatewayTimeout {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d: %s", resp.StatusCode, b)
+	}
 }
 
 // TestPushSlotFreeDuringTheWait: the slot is held from the body to the

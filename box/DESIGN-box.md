@@ -199,12 +199,15 @@ cross-references throughout.
    OIDC token offline. Its absence from root's checks is T5's reach
    through root; see "Threat-model deltas". **Fast path, here and not
    earlier:** once the token, the request-id header (step 2) and this
-   binding have passed, and the id is not one the box already holds
-   (a marker or a result: 409 "duplicate request id", so one id is
-   never answered two ways), if HEAD equals the baseline and the bundled
+   binding have passed — and the id is not one the box already holds,
+   which is asked before the body is read (a marker, a result, or a
+   bundle still in `in/`: 409 "duplicate request id", so one id is never
+   answered two ways) — if HEAD equals the baseline and the bundled
    file's digest equals the installed file's, nothing on disk would
    change, so the handler answers 200 `no_change` with no admission
-   lock, no drop and no root work — it skips only the work that would
+   lock, no drop and no root work (asked again under the lock, of what
+   was read there, so a push another one applied meanwhile is answered
+   the same way) — it skips only the work that would
    write. An OIDC holder posting the applied `HEAD` in a loop learns
    what `GET /` already tells it; a token without the right `sha`, or
    a POST without its id, is refused as it would be on the slow
@@ -628,16 +631,17 @@ refusing every push at admission — scores severity 1.
 Admission decides whether a POST may become a bundle in `in/`. The
 body is read and parsed, and the fast path answered, before any of it
 (step 2). It is serialised by a non-blocking `flock` on `stage/lock`,
-taken before the checks below and released after step 7, so two concurrent authenticated
-pushes cannot both see "nothing pending" and both enqueue. The lock
-is on a file and `flock` conflicts between distinct open file
-descriptions in one process, so it holds across the reload that
-re-instantiates the handler; a crash releases it with the descriptor.
+taken before the checks below and released after step 7, so two
+concurrent authenticated pushes cannot both see "nothing pending" and
+both enqueue. Within one process the push slot (Caps) already admits
+one push at a time, across reloads; the lock is the guard across
+processes — two hotserve processes on one tree, as an overlapping
+restart could make — and a crash releases it with the descriptor.
 
 | Condition at the lock | Answer | Why |
 |---|---|---|
 | no `X-Box-Request-Id` header, or not 32 lowercase hex | 400 "X-Box-Request-Id: 32 lowercase hex, chosen at random for each push, required" | the id names the push's bundle, marker and result; checked before the body is read and before the fast path, so every POST contract rule holds on both paths |
-| token, id and `sha` binding passed; HEAD equals the baseline and the file's digest equals the installed file's | 200 `no_change`, before the lock | nothing would change; the fast path of step 4 |
+| token, id and `sha` binding passed; HEAD equals the baseline and the file's digest equals the installed file's | 200 `no_change`, before the lock, and again under it | nothing would change; the fast path of step 4 |
 | a marker, result or `in/<id>.tar` already exists for this id | 409 "duplicate request id: poll /?result=<id>" | a retry after a lost response; honest ids never collide. Checked before the fast path too, so a retry of a push that has since applied is not answered `no_change` |
 | lock held by another request, or this process's push slot taken (before the body is read) | 409 "a push is being admitted; retry in a moment" | another push is between its body and its marker |
 | any entry in `in/` | 409 "a push is pending: <id>, <age> old" | the durable one-bundle bound: a stalled applier means one 16 MiB on disk and a loud 409, never a queue; no age-out |
@@ -692,7 +696,7 @@ an empty cell means nobody, by design.
 | `…/stage/lock` | 0600 | hotserve:hotserve | handler | — | handler (`flock`) | — |
 | `…/stage/<id>.auth` | 0600 | hotserve:hotserve | handler, after the rename into `in/` | — | handler (pending, a poll's `admitted`), applier (sweep) | applier (sweep) |
 | `…/in/` | 0770 | root:hotserve | tmpfiles.d | handler (`rename` in) | handler (listing), applier | applier (`rename` out) |
-| `…/in/<id>.tar` | 0644 | hotserve:hotserve | handler (by rename) | — | applier | applier (rename to `work/`) |
+| `…/in/<id>.tar` | 0644 | hotserve:hotserve | handler (by rename) | — | applier; handler (looked up: a known id, a poll's `admitted`) | applier (rename to `work/`) |
 | `…/work/` | 0700 | root:root | tmpfiles.d | applier | applier | applier |
 | `/tmp/box-verify-<sha>.<random>/` (`sig`, `allowed_signers`, `control.sig`, `control.allowed`; the payload goes on stdin) | 0755, files 0644 (chmod after the write, so the umask has no say) | root:root | applier (its `PrivateTmp`), handler (`hotserve.service`'s) | applier, handler | uid 65534 (applier), the hotserve uid (handler) | the verifier, after each run |
 | `…/txn.json` | 0600 | root:hotserve (born in the setgid dir) | applier, `init` | applier, `init` | applier, `init`, `baseline` | applier, `init`, `baseline` |
@@ -775,7 +779,7 @@ Every numeric bound, in one place, with its reason.
 |---|---|---|
 | bundle body | 16 MiB | a bundle is kilobytes; this is generous |
 | pushes in memory | one per hotserve process, from its body to its drop, shared across reloads; another push is 409 "a push is being admitted; retry in a moment", its body unread | the body is read before the admission lock (step 2), so without this nothing would bound how many authenticated requests hold 16 MiB each; honest runs are one at a time already (the workflow's `concurrency` group) |
-| bundle upload | 120 s, a read deadline on the connection while the push slot is held; past it 400 "could not read the bundle" | a stalled upload would otherwise hold the one slot until its connection ends; a bundle is kilobytes |
+| bundle upload | 120 s, a read deadline on the connection while the push slot is held, in place of any `read_body` timeout the operator set for this body; past it 400 "could not read the bundle" and a `box push upload failed` line | a stalled upload would otherwise hold the one slot until its connection ends; a bundle is kilobytes |
 | bundle decompressed | 16 MiB, reader stops at cap + 1 | the per-type caps below sum to more; this one wins, and a `stat` is not a bound |
 | Caddyfile / blob | 1 MiB | the record embeds it |
 | tree object | 1 MiB | |
@@ -960,7 +964,9 @@ authenticated request reaches one. The handler's refusals of a push
 (`box push refused`) carry `id`, `refused` and `remote`, as liveswap's
 refusal line does, and the attribution in `via`, liveswap's field for
 it; a push the handler could not check (`box push failed`) the same
-with `error`; `box push accepted` carries `id`, `commit`, `via`,
+with `error`; an upload that did not arrive whole (`box push upload
+failed`) carries `id`, `error`, `via`, `remote`; `box push accepted`
+carries `id`, `commit`, `via`,
 `remote`, and a push the fast path answered (`box push answered`) the
 same with `phase`; the applier logs
 with `id`, `commit`, `signer`, `box` (the host) and `phase`. Every
@@ -1290,7 +1296,7 @@ full placement is DESIGN-threat-model.md, "Config webhook" and T6.
 
 | Actor | Can | Cannot |
 |---|---|---|
-| Holder of a box-repo OIDC token (the repo's own CI, a compromised action) | Reach the handler; make it validate a Caddyfile a *signer* committed (pre-check first); replay `HEAD` — a `no_change`, or after a console edit the reinstall of HEAD's file, reverting the 3am fix; hold one bundle in `in/` and one in root's hands; fill at most 32 result slots; hold the process's one push slot for up to the upload deadline per request (every other push 409s meanwhile) | Install anything not signed by a listed key; replay an older signed commit (descent); land another box's file or another path (identity) |
+| Holder of a box-repo OIDC token (the repo's own CI, a compromised action) | Reach the handler; make it validate a Caddyfile a *signer* committed (pre-check first); replay `HEAD` — a `no_change`, or after a console edit the reinstall of HEAD's file, reverting the 3am fix; hold one bundle in `in/` and one in root's hands; fill at most 32 result slots; hold the process's one push slot through each push's upload and checks — up to the upload deadline, the chain's verification bound and two validate children, about sixteen minutes — while every other push 409s | Install anything not signed by a listed key; replay an older signed commit (descent); land another box's file or another path (identity) |
 | Holder of a `deploy_trust local` token, or of the key that mints one | The same as the OIDC holder, with `sha` chosen by the minter: any signed descendant of the baseline whose objects it has, without the repository workflow or its `main` claim | Anything a signer did not sign |
 | Leaked PAT, stolen session, OAuth/GitHub App with `contents:write` | Push to `main`; stop every later push until its commit is rebased away; **fast-forward onto `main` a branch every commit of which a signer already signed**, which the box applies, for as long as the box runs the commit it forked from | Produce an SSH signature by a listed key; ride an unsigned or self-authored change in under a later signed commit; change the box with anything a signer did not sign |
 | Compromised laptop, software signing key | Everything the operator can | Nothing the operator cannot; this is the operator |

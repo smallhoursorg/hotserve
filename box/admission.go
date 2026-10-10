@@ -293,12 +293,20 @@ func (h *Handler) crash(point string) {
 	}
 }
 
+// admittedPaths are the traces of a push the handler admitted and root
+// has not yet answered: its marker, or its bundle still in in/ (a marker
+// never written). The poll reads either as `admitted`; known adds the
+// result.
+func (h *Handler) admittedPaths(id string) []string {
+	return []string{h.x("stage", id+".auth"), h.x("in", id+".tar")}
+}
+
 // known reports whether the box already holds a push with this id: its
 // marker, its result, or its bundle still in in/ (a marker that was never
 // written). A name that cannot be looked up is the box's error, never a
 // yes or a no.
 func (h *Handler) known(id string) (bool, error) {
-	for _, path := range []string{h.x("stage", id+".auth"), h.x("out", id+".json"), h.x("in", id+".tar")} {
+	for _, path := range append(h.admittedPaths(id), h.x("out", id+".json")) {
 		if found, err := present(path); err != nil || found {
 			return found, err
 		}

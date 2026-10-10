@@ -1,8 +1,6 @@
 package box
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -148,15 +146,14 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		var ref *Refusal
 		if !errors.As(err, &ref) {
-			return h.boxError(w, "the Caddyfile this box runs", err)
+			return h.boxError(w, readingInstalled, err)
 		}
-		h.logStateError("the Caddyfile this box runs", err)
-		return respond(w, http.StatusInternalServerError, errorBody("the Caddyfile this box runs "+ref.Reason))
+		h.logStateError(readingInstalled, err)
+		return respond(w, http.StatusInternalServerError, errorBody(readingInstalled+" "+ref.Reason))
 	}
-	sum := sha256.Sum256(file)
-	digest := hex.EncodeToString(sum[:])
-	return respond(w, http.StatusOK, statusBody{Commit: base.SHA, BoxWebhook: shape.Host, SHA256: digest},
-		base.SHA, shape.Host, digest)
+	sum := digest(file) // what the fast path compares
+	return respond(w, http.StatusOK, statusBody{Commit: base.SHA, BoxWebhook: shape.Host, SHA256: sum},
+		base.SHA, shape.Host, sum)
 }
 
 // What readState names when a file fails it.

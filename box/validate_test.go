@@ -106,7 +106,7 @@ func TestValidateChild(t *testing.T) {
 		// The child says why and exits; a grandchild holds the output past
 		// the deadline. The answer is the child's line, not a timeout.
 		c, _ := stubValidator(t, "sleep 60 & echo 'Error: said why'; exit 1", "")
-		c.timeout = 300 * time.Millisecond
+		c.timeout = 800 * time.Millisecond // the shell's exit well inside it, WaitDelay (1 s) past it
 		if msg, err := c.validate(context.Background(), randomID(t), file); msg != "hotserve validate: said why" || err != nil {
 			t.Fatalf("msg %q err %v", msg, err)
 		}
