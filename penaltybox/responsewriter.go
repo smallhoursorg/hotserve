@@ -30,20 +30,23 @@ func parseLevel(vals []string) int {
 // the client. Bodies are never buffered — header-time interception only.
 type hintInterceptor struct {
 	http.ResponseWriter
-	handler     *Handler
+	handler *Handler
+	// key is the store key the hint counts against. With an empty key
+	// (a request that failed open in ServeHTTP) the hint is never
+	// counted, but stripping still follows strip.
 	key         string
 	intercepted bool
 }
 
 func (rw *hintInterceptor) WriteHeader(status int) {
 	// Interim 1xx responses (100 Continue, 102 Processing, 103 Early
-	// Hints) don't carry the final header set — the hint arrives with the
-	// final status — so pass them through untouched. 101 Switching
-	// Protocols is NOT interim: it is the final response of an upgrade
-	// (e.g. WebSocket), so it must be intercepted like any other final
-	// status or the hint would leak and never count.
-	switch status {
-	case http.StatusContinue, http.StatusProcessing, http.StatusEarlyHints:
+	// Hints, and any other 1xx, as net/http treats them) don't carry the
+	// final header set — the hint arrives with the final status — so
+	// pass them through untouched. 101 Switching Protocols is NOT
+	// interim: it is the final response of an upgrade (e.g. WebSocket),
+	// so it must be intercepted like any other final status or the hint
+	// would leak and never count.
+	if status >= 100 && status <= 199 && status != http.StatusSwitchingProtocols {
 		rw.ResponseWriter.WriteHeader(status)
 		return
 	}
@@ -55,6 +58,16 @@ func (rw *hintInterceptor) Write(b []byte) (int, error) {
 	// An implicit 200 flushes headers on the first Write; intercept first.
 	rw.intercept()
 	return rw.ResponseWriter.Write(b)
+}
+
+// FlushError intercepts before a flush can commit the headers: a
+// handler that flushes before its first WriteHeader or Write would
+// otherwise send the implicit 200 with the hint still set, unstripped
+// and uncounted. http.ResponseController tries FlushError before
+// Unwrap, so this is the path every Flush takes.
+func (rw *hintInterceptor) FlushError() error {
+	rw.intercept()
+	return http.NewResponseController(rw.ResponseWriter).Flush()
 }
 
 // finalize covers handlers that return without writing anything: headers
@@ -72,7 +85,7 @@ func (rw *hintInterceptor) intercept() {
 	if h.stripOn {
 		delete(rw.Header(), h.headerCanon)
 	}
-	if level >= h.MinLevel {
+	if rw.key != "" && level >= h.MinLevel {
 		if h.store.add(rw.key, level) {
 			h.logger.Debug("client boxed",
 				zap.String("key", rw.key),
@@ -81,6 +94,7 @@ func (rw *hintInterceptor) intercept() {
 	}
 }
 
-// Unwrap lets http.NewResponseController reach Flush/Hijack on the
-// underlying writer; no legacy interface shims needed on Caddy ≥2.7.
+// Unwrap lets http.NewResponseController reach Hijack and the other
+// optional methods on the underlying writer (Flush goes through
+// FlushError above); no legacy interface shims needed on Caddy ≥2.7.
 func (rw *hintInterceptor) Unwrap() http.ResponseWriter { return rw.ResponseWriter }

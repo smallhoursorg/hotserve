@@ -155,6 +155,7 @@ func TestIntegrationHeaderStripped(t *testing.T) {
 	assertNoHintHeader(t, get(t, tester, "carol", "1"), "ignored (level 1)")
 	assertNoHintHeader(t, get(t, tester, "carol", ""), "absent header")
 	assertNoHintHeader(t, get(t, tester, "carol", "banana"), "garbage level")
+	assertNoHintHeader(t, get(t, tester, "", "3"), "empty key (fails open)")
 
 	// Box carol and check the 429 too.
 	get(t, tester, "carol", "3")
@@ -179,6 +180,10 @@ func TestIntegrationStripDisabled(t *testing.T) {
 	resp := get(t, tester, "dave", "2")
 	if got := resp.Header.Get("X-Rate-Limit-Level"); got != "2" {
 		t.Fatalf("with strip false the header must pass through, got %q", got)
+	}
+	resp = get(t, tester, "", "2")
+	if got := resp.Header.Get("X-Rate-Limit-Level"); got != "2" {
+		t.Fatalf("with strip false the header must pass through on the empty-key path too, got %q", got)
 	}
 }
 

@@ -94,12 +94,12 @@ All options and defaults:
 | Option        | Default              | Meaning                                                              |
 | ------------- | -------------------- | -------------------------------------------------------------------- |
 | `header`      | `X-Rate-Limit-Level` | Origin response header carrying the hint level                       |
-| `key`         | `{client_ip}`        | Client identity; respects the server's `trusted_proxies` config. A key whose whole value is one IPv6 address counts under its /64; IPv4 (also mapped or NAT64 well-known) per address; anything else verbatim (see [Client keys](#client-keys-ipv6-by-64)). A key that resolves to an empty string fails open: the request is not counted and its hint header is not stripped (see [Semantics](#semantics-and-trade-offs-read-this)) |
+| `key`         | `{client_ip}`        | Client identity; respects the server's `trusted_proxies` config. A key whose whole value is one IPv6 address counts under its /64; IPv4 (also mapped or NAT64 well-known) per address; anything else verbatim (see [Client keys](#client-keys-ipv6-by-64)). A key that resolves to an empty string fails open: the request is not counted or boxed, but its hint header is still stripped when `strip` is on (see [Semantics](#semantics-and-trade-offs-read-this)) |
 | `min_level`   | `2`                  | Lowest level that counts toward the budget (1–3)                     |
 | `window`      | `60s`                | Sliding window; free-form duration (Fastly's 1s/10s/60s is the interoperability convention) |
 | `limit`       | `30`                 | Weighted units per window; *exceeding* (not reaching) it boxes       |
 | `penalty_ttl` | `5m`                 | Box duration; Fastly allows 1m–1h — mirror that range for doc parity |
-| `strip`       | `true`               | Remove the hint header before the client sees it (all responses)     |
+| `strip`       | `true`               | Remove the hint header from every final response before the client sees it. A hint sent as a trailer or on a 1xx interim response is neither stripped nor counted, so send it as a header |
 | `status`      | `429`                | Status for boxed clients (4xx/5xx)                                   |
 | `max_keys`    | `100000`             | Cap on tracked clients, split evenly across 64 shards (rounded down, at least 1 each); a full shard evicts its oldest-idle unboxed client, or its oldest-idle client outright when all are boxed. Below 128 (one slot per shard) it loads with a warning (see [Semantics](#semantics-and-trade-offs-read-this)) |
 
@@ -213,11 +213,11 @@ configuration, which is where XFF trust belongs.
   logs a warning. Size `max_keys` well above the number of clients
   that get counted responses within one window.
 - **An empty key fails open.** A `key` that resolves to an empty
-  string is not counted and never boxed: the request passes straight
-  to the next handler, and on that path the hint header is not
-  stripped either, even with `strip true` (a known gap). With a
-  header-based key such as `{http.request.header.CF-Connecting-IP}`,
-  a client that reaches Caddy without that header is never limited.
+  string is not counted and never boxed: the request passes to the
+  next handler, and with `strip true` its hint header is still
+  stripped from the response. With a header-based key such as
+  `{http.request.header.CF-Connecting-IP}`, a client that reaches
+  Caddy without that header is never limited.
   The default key is the connection's address unless a trusted proxy
   supplies one, so a client cannot empty it by leaving a header out.
   `{client_ip}` is a Caddyfile shorthand: in JSON config write
@@ -293,7 +293,9 @@ With that order (all verified by `make e2e`):
   the budget exactly like origin responses, and a client hammering a
   cached level-3 URL still gets boxed.
 - The header is stripped from every client-facing response, cache hit
-  or miss — it lives only inside the cache store.
+  or miss — it lives only inside the cache store (when the origin sends
+  it as a header of the final response, not as a trailer or on a 1xx;
+  see `strip`).
 
 (If you instead put `cache` before `hint_penaltybox`, cache hits bypass
 the module entirely: stored responses are already stripped, but boxed
