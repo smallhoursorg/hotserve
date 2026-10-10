@@ -408,6 +408,32 @@ func newStandIn(t *testing.T, baseline string, installed []byte) *standIn {
 	return s
 }
 
+// set changes the stand-in under its lock, and seen copies what it
+// observed: the script's requests arrive on the server's goroutines.
+func (s *standIn) set(f func(s *standIn)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f(s)
+}
+
+type seen struct {
+	baseline, audience string
+	bundles, mints     int
+	unused             []string // tokens minted and never sent
+}
+
+func (s *standIn) seen() seen {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v := seen{baseline: s.baseline, audience: s.audience, bundles: s.bundles, mints: s.mints}
+	for tok, used := range s.tokens {
+		if !used {
+			v.unused = append(v.unused, tok)
+		}
+	}
+	return v
+}
+
 func digest(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
 
 // reply answers as the box does (liveswap.RespondJSON): json.Marshal,
@@ -683,14 +709,13 @@ func TestBoxApply(t *testing.T) {
 	t.Run("the commit the box runs", func(t *testing.T) {
 		g := newApplyRig(t)
 		out, code := g.apply()
-		if code != 0 || !strings.Contains(out, "deploy.example.com at "+g.base[:7]+": the box already runs this Caddyfile") || g.box.bundles != 1 {
-			t.Fatalf("exit %d, %d bundles\n%s", code, g.box.bundles, out)
+		if code != 0 || !strings.Contains(out, "deploy.example.com at "+g.base[:7]+": the box already runs this Caddyfile") || g.box.seen().bundles != 1 {
+			t.Fatalf("exit %d, %d bundles\n%s", code, g.box.seen().bundles, out)
 		}
 		// Its 200 lost: the fast path left no result, so the push is sent
 		// again and answered the same way. By directory, as an operator
 		// might type it.
-		g.box.onPost = []string{"lost"}
-		g.box.bundles = 0
+		g.box.set(func(s *standIn) { s.onPost, s.bundles = []string{"lost"}, 0 })
 		if out, code = g.runArgs([]string{"./deploy.example.com/"}); code != 0 || !strings.Contains(out, "the box already runs this Caddyfile") {
 			t.Fatalf("a lost no_change: exit %d\n%s", code, out)
 		}
@@ -715,8 +740,8 @@ func TestBoxApply(t *testing.T) {
 				t.Errorf("no %q in the output", want)
 			}
 		}
-		if code != 0 || g.box.baseline != head {
-			t.Fatalf("exit %d, baseline %s\n%s", code, g.box.baseline, out)
+		if code != 0 || g.box.seen().baseline != head {
+			t.Fatalf("exit %d, baseline %s\n%s", code, g.box.seen().baseline, out)
 		}
 		if out, code := g.apply(); code != 0 || !strings.Contains(out, "the box already runs this Caddyfile") {
 			t.Fatalf("again: exit %d\n%s", code, out)
@@ -726,11 +751,12 @@ func TestBoxApply(t *testing.T) {
 	t.Run("a later run got there first", func(t *testing.T) {
 		g := newApplyRig(t)
 		g.change("one")
-		g.box.baseline = g.change("two")
+		two := g.change("two")
+		g.box.set(func(s *standIn) { s.baseline = two })
 		g.git("checkout", "-q", "HEAD~1")
 		out, code := g.apply()
-		if code != 0 || !strings.Contains(out, "superseded, nothing to send") || g.box.bundles != 0 {
-			t.Fatalf("exit %d, %d bundles\n%s", code, g.box.bundles, out)
+		if code != 0 || !strings.Contains(out, "superseded, nothing to send") || g.box.seen().bundles != 0 {
+			t.Fatalf("exit %d, %d bundles\n%s", code, g.box.seen().bundles, out)
 		}
 	})
 
@@ -739,7 +765,7 @@ func TestBoxApply(t *testing.T) {
 		wip := g.change("wip", "-c", "commit.gpgsign=false")
 		head := g.change("signed")
 		out, code := g.apply()
-		if code != 1 || !strings.Contains(out, wip+", between the commit this box runs and "+head+", is not signed") || g.box.baseline != g.base {
+		if code != 1 || !strings.Contains(out, wip+", between the commit this box runs and "+head+", is not signed") || g.box.seen().baseline != g.base {
 			t.Fatalf("exit %d\n%s", code, out)
 		}
 	})
@@ -761,10 +787,9 @@ func TestBoxApply(t *testing.T) {
 			t.Run(how, func(t *testing.T) {
 				g := newApplyRig(t)
 				head := g.change("one")
-				g.box.onPost = strings.Split(how, ",")
-				g.box.edited = true
+				g.box.set(func(s *standIn) { s.onPost, s.edited = strings.Split(how, ","), true })
 				out, code := g.apply()
-				if code != 0 || g.box.baseline != head || !strings.Contains(out, said) || !strings.Contains(out, ": loaded; running apps are not restarted") {
+				if code != 0 || g.box.seen().baseline != head || !strings.Contains(out, said) || !strings.Contains(out, ": loaded; running apps are not restarted") {
 					t.Fatalf("exit %d\n%s", code, out)
 				}
 				if !strings.Contains(out, "the Caddyfile on the box had been edited there since the last apply; this push replaced the edit") {
@@ -776,15 +801,15 @@ func TestBoxApply(t *testing.T) {
 
 	t.Run("refused before anything is sent", func(t *testing.T) {
 		g := newApplyRig(t)
-		g.box.onGet = "nobaseline"
+		g.box.set(func(s *standIn) { s.onGet = "nobaseline" })
 		if out, code := g.apply(); code != 1 || !strings.Contains(out, "HTTP 409: this box has no baseline; hotserve init <sha>, as root") {
 			t.Fatalf("no baseline: exit %d\n%s", code, out)
 		}
-		g.box.onGet = "401"
+		g.box.set(func(s *standIn) { s.onGet = "401" })
 		if out, code := g.apply(); code != 1 || !strings.Contains(out, "deploy_trust local { public_key") || strings.Contains(out, "claim repository") {
 			t.Fatalf("401 from a laptop: exit %d\n%s", code, out)
 		}
-		g.box.onGet = ""
+		g.box.set(func(s *standIn) { s.onGet = "" })
 		// A shallow clone: refused before asking the box anything, never
 		// read as a rewritten main.
 		shallow := filepath.Join(t.TempDir(), "shallow")
@@ -804,12 +829,12 @@ func TestBoxApply(t *testing.T) {
 			t.Fatalf("a shallow clone: %v\n%s", err, out)
 		}
 		g.git("reset", "-q", "--hard", "HEAD~1")
-		g.box.baseline = strings.Repeat("ab", 20)
+		g.box.set(func(s *standIn) { s.baseline = strings.Repeat("ab", 20) })
 		if out, code := g.apply(); code != 1 || !strings.Contains(out, "which this repository's history does not hold") {
 			t.Fatalf("a baseline this history lacks: exit %d\n%s", code, out)
 		}
 		// Past the chain's cap: 501 commits since the one the box runs.
-		g.box.baseline = g.base
+		g.box.set(func(s *standIn) { s.baseline = g.base })
 		var fi strings.Builder
 		for i := 1; i <= 501; i++ {
 			fmt.Fprintf(&fi, "commit refs/heads/main\ncommitter t <t@example.com> %d +0000\ndata 1\nc\n", i)
@@ -826,8 +851,8 @@ func TestBoxApply(t *testing.T) {
 		if out, code := g.apply(); code != 1 || !strings.Contains(out, "is longer than 500 commits; run hotserve box baseline") {
 			t.Fatalf("past the cap: exit %d\n%s", code, out)
 		}
-		if g.box.bundles != 0 {
-			t.Errorf("%d bundles sent", g.box.bundles)
+		if g.box.seen().bundles != 0 {
+			t.Errorf("%d bundles sent", g.box.seen().bundles)
 		}
 	})
 
@@ -843,21 +868,19 @@ func TestBoxApply(t *testing.T) {
 			// An audience with characters a query must encode.
 			"HOTSERVE_AUDIENCE=a&b c#d",
 		}
-		g.box.onPost = []string{"504"}
+		g.box.set(func(s *standIn) { s.onPost = []string{"504"} })
 		// A mint that fails is tried again; a throttled poll is "not yet".
-		g.box.mintFails, g.box.throttle = 1, 2
+		g.box.set(func(s *standIn) { s.mintFails, s.throttle = 1, 2 })
 		out, code := g.apply(actions...)
-		if code != 0 || !strings.Contains(out, "::add-mask::minted-1\n") || g.box.audience != "a&b c#d" || !strings.Contains(out, "::group::apply deploy.example.com\n") {
+		if code != 0 || !strings.Contains(out, "::add-mask::minted-1\n") || g.box.seen().audience != "a&b c#d" || !strings.Contains(out, "::group::apply deploy.example.com\n") {
 			t.Fatalf("exit %d\n%s", code, out)
 		}
 		// A fresh token for each request: the GET, the POST, each poll.
-		for tok, used := range g.box.tokens {
-			if !used {
-				t.Errorf("token %s minted and never sent", tok)
-			}
+		for _, tok := range g.box.seen().unused {
+			t.Errorf("token %s minted and never sent", tok)
 		}
-		if g.box.mints < 3 {
-			t.Errorf("%d tokens for a GET, a POST and a poll", g.box.mints)
+		if g.box.seen().mints < 3 {
+			t.Errorf("%d tokens for a GET, a POST and a poll", g.box.seen().mints)
 		}
 		if b, _ := os.ReadFile(summary); !strings.Contains(string(b), "**deploy.example.com:** "+head[:7]+" applied") {
 			t.Errorf("the job summary:\n%s", b)
@@ -866,7 +889,7 @@ func TestBoxApply(t *testing.T) {
 		if out, code := g.apply(append(actions, "GITHUB_SHA="+g.base)...); code != 1 || !strings.Contains(out, "but this run is for "+g.base) {
 			t.Fatalf("another commit: exit %d\n%s", code, out)
 		}
-		g.box.onGet = "401"
+		g.box.set(func(s *standIn) { s.onGet = "401" })
 		if out, code := g.apply(actions...); code != 1 || !strings.Contains(out, "claim repository  your-org/boxes") || !strings.Contains(out, "::error title=apply deploy.example.com failed::") {
 			t.Fatalf("401 in Actions: exit %d\n%s", code, out)
 		}
@@ -877,10 +900,10 @@ func TestBoxApply(t *testing.T) {
 		g.write("deploy2.example.com/Caddyfile", strings.Replace(g.read(boxFile), "deploy.example.com {", "deploy2.example.com {", 1))
 		head := g.change("both")
 		second := newStandIn(t, head, nil)
-		second.onGet = "nobaseline"
+		second.set(func(s *standIn) { s.onGet = "nobaseline" })
 		g.route(map[string]*standIn{"deploy.example.com": g.box, "deploy2.example.com": second})
 		out, code := g.apply()
-		if code != 1 || g.box.baseline != head || !strings.Contains(out, "https://deploy2.example.com/: HTTP 409") {
+		if code != 1 || g.box.seen().baseline != head || !strings.Contains(out, "https://deploy2.example.com/: HTTP 409") {
 			t.Fatalf("exit %d\n%s", code, out)
 		}
 	})
