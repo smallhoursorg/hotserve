@@ -247,6 +247,28 @@ func TestFlushReachesUnderlyingWriter(t *testing.T) {
 	}
 }
 
+// A handler that flushes before writing anything commits the implicit
+// 200 at the flush, so the hint must be read and stripped there.
+func TestFlushFirstIsIntercepted(t *testing.T) {
+	h, st := newTestHandler(newFakeClock(), storeConfig{})
+	rec := httptest.NewRecorder()
+	rw := interceptorFor(h, rec)
+
+	rw.Header().Set("X-Rate-Limit-Level", "3")
+	if err := http.NewResponseController(rw).Flush(); err != nil {
+		t.Fatalf("Flush through the shim failed: %v", err)
+	}
+	if !rec.Flushed {
+		t.Fatal("Flush did not reach the underlying writer")
+	}
+	if got := rec.Result().Header.Values("X-Rate-Limit-Level"); len(got) != 0 {
+		t.Errorf("hint must be stripped before a flush commits the headers, got %v", got)
+	}
+	if st.size() != 1 {
+		t.Error("level-3 hint on a flush-first response must count")
+	}
+}
+
 func TestBoxingHappensAtHeaderTime(t *testing.T) {
 	clk := newFakeClock()
 	h, st := newTestHandler(clk, storeConfig{limit: 5, penaltyTTL: time.Minute})

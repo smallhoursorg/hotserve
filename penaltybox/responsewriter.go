@@ -60,6 +60,16 @@ func (rw *hintInterceptor) Write(b []byte) (int, error) {
 	return rw.ResponseWriter.Write(b)
 }
 
+// FlushError intercepts before a flush can commit the headers: a
+// handler that flushes before its first WriteHeader or Write would
+// otherwise send the implicit 200 with the hint still set, unstripped
+// and uncounted. http.ResponseController tries FlushError before
+// Unwrap, so this is the path every Flush takes.
+func (rw *hintInterceptor) FlushError() error {
+	rw.intercept()
+	return http.NewResponseController(rw.ResponseWriter).Flush()
+}
+
 // finalize covers handlers that return without writing anything: headers
 // haven't flushed, so the hint can still be read and stripped before
 // Caddy's error handling (or an empty 200) takes over.
@@ -84,6 +94,7 @@ func (rw *hintInterceptor) intercept() {
 	}
 }
 
-// Unwrap lets http.NewResponseController reach Flush/Hijack on the
-// underlying writer; no legacy interface shims needed on Caddy ≥2.7.
+// Unwrap lets http.NewResponseController reach Hijack and the other
+// optional methods on the underlying writer (Flush goes through
+// FlushError above); no legacy interface shims needed on Caddy ≥2.7.
 func (rw *hintInterceptor) Unwrap() http.ResponseWriter { return rw.ResponseWriter }
