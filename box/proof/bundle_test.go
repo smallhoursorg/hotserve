@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"testing"
@@ -262,6 +263,49 @@ func TestReadBundle(t *testing.T) {
 		refusalContaining(t, err, "bundle: not a gzip stream")
 		_, err = ReadBundle(data[:len(data)-4])
 		refusalContaining(t, err, "bundle: not a gzip stream")
+	})
+	t.Run("corruption inside the deflate stream is named as gzip's", func(t *testing.T) {
+		// Every byte of the compressed body flipped in turn: whatever
+		// surfaces — a deflate error mid-archive, a checksum at the end,
+		// or junk the tar reader refuses — the refusal names the layer
+		// that saw it, and nothing panics or is accepted.
+		base := tgz(t, h.files)
+		inflate := func(data []byte) []byte {
+			zr, err := gzip.NewReader(bytes.NewReader(data))
+			if err != nil {
+				return nil
+			}
+			out, err := io.ReadAll(zr)
+			if err != nil {
+				return nil
+			}
+			return out
+		}
+		want := inflate(base)
+		gzipSaid, tarSaid := 0, 0
+		for i := 10; i < len(base)-8; i++ { // past the gzip header, before the trailer
+			data := append([]byte{}, base...)
+			data[i] ^= 0x55
+			_, err := ReadBundle(data)
+			if err == nil {
+				// A flip in a deflate block's padding bits changes no
+				// output byte; that bundle is the same bundle, and the
+				// checksum agrees. Anything else accepted is a bug.
+				if !bytes.Equal(inflate(data), want) {
+					t.Fatalf("flip at %d accepted with different content", i)
+				}
+				continue
+			}
+			switch {
+			case strings.Contains(err.Error(), "not a gzip stream"):
+				gzipSaid++
+			case strings.Contains(err.Error(), "not a tar stream"):
+				tarSaid++
+			}
+		}
+		if gzipSaid == 0 {
+			t.Fatalf("no flip was reported as gzip's (%d as tar's)", tarSaid)
+		}
 	})
 	t.Run("a name a refusal quotes is bounded", func(t *testing.T) {
 		_, err := ReadBundle(tgz(t, h.with("x\ny", []byte("x"))))

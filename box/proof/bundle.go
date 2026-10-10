@@ -3,6 +3,7 @@ package proof
 import (
 	"archive/tar"
 	"bytes"
+	"compress/flate"
 	"compress/gzip"
 	"errors"
 	"fmt"
@@ -56,10 +57,7 @@ func ReadBundle(gz []byte) (*Bundle, error) {
 			break
 		}
 		if err != nil {
-			if lr.N == 0 {
-				return nil, refuse("bundle: larger than 16 MiB")
-			}
-			return nil, refuse("bundle: not a tar stream")
+			return nil, streamRefusal(err, lr)
 		}
 		if hdr.Typeflag != tar.TypeReg {
 			return nil, refuse("bundle: %s is not a regular file", Bound(hdr.Name))
@@ -78,10 +76,7 @@ func ReadBundle(gz []byte) (*Bundle, error) {
 		}
 		data, err := io.ReadAll(tr)
 		if err != nil {
-			if lr.N == 0 {
-				return nil, refuse("bundle: larger than 16 MiB")
-			}
-			return nil, refuse("bundle: not a tar stream")
+			return nil, streamRefusal(err, lr)
 		}
 		switch {
 		case name == "path":
@@ -158,6 +153,22 @@ func ReadBundle(gz []byte) (*Bundle, error) {
 		b.Parents = append(b.Parents, c)
 	}
 	return b, nil
+}
+
+// streamRefusal names what went wrong with the stream: the cap, if the
+// limited reader was drained; else gzip or deflate, if the error is
+// theirs — those surface through the tar reader mid-archive — else the
+// tar itself.
+func streamRefusal(err error, lr *io.LimitedReader) error {
+	if lr.N == 0 {
+		return refuse("bundle: larger than 16 MiB")
+	}
+	var corrupt flate.CorruptInputError
+	var internal flate.InternalError
+	if errors.Is(err, gzip.ErrChecksum) || errors.Is(err, gzip.ErrHeader) || errors.As(err, &corrupt) || errors.As(err, &internal) {
+		return refuse("bundle: not a gzip stream")
+	}
+	return refuse("bundle: not a tar stream")
 }
 
 // entryCap is the size cap for a bundle file of that name, or false

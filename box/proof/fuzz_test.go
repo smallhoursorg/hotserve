@@ -213,7 +213,7 @@ func FuzzSignatureKey(f *testing.F) {
 	f.Add([]byte("-----END SSH SIGNATURE-----\n-----BEGIN SSH SIGNATURE-----\n"))
 	f.Add([]byte("U1NIU0lH"))
 	f.Fuzz(func(t *testing.T, armored []byte) {
-		key, err := SignatureKey(armored)
+		key, _, err := SignatureKey(armored)
 		if err != nil {
 			return
 		}

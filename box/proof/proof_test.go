@@ -13,6 +13,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"math/big"
 	"strconv"
 	"strings"
 	"testing"
@@ -214,12 +215,28 @@ func TestParseTree(t *testing.T) {
 	if _, err := ParseTree(treeObject(Entry{ModeDir, "a", emptyTree}, Entry{ModeFile, "a-b", emptyBlob})); err == nil {
 		t.Error("a/ before a-b accepted")
 	}
-	// A name twice — whatever the modes, as git's fsck has it — and
-	// entries out of order are refused at the parse.
+	// A name twice — whatever the modes, as git's fsck has it, and
+	// however many `x-…` names lie between the file `x` and the
+	// directory `x` — and entries out of order are refused at the parse.
 	_, err = ParseTree(treeObject(Entry{ModeFile, "x", emptyBlob}, Entry{ModeFile, "x", emptyTree}))
 	refusalContaining(t, err, "an entry name appears twice")
 	_, err = ParseTree(treeObject(Entry{ModeFile, "x", emptyBlob}, Entry{ModeDir, "x", emptyTree}))
 	refusalContaining(t, err, "an entry name appears twice")
+	_, err = ParseTree(treeObject(Entry{ModeFile, "a", emptyBlob}, Entry{ModeFile, "a-b", emptyBlob}, Entry{ModeDir, "a", emptyTree}))
+	refusalContaining(t, err, "an entry name appears twice")
+	_, err = ParseTree(treeObject(Entry{ModeFile, "a", emptyBlob}, Entry{ModeFile, "a-b", emptyBlob}, Entry{ModeFile, "a-c", emptyBlob}, Entry{ModeFile, "a.d", emptyBlob}, Entry{ModeDir, "a", emptyTree}))
+	refusalContaining(t, err, "an entry name appears twice")
+	// Not duplicates: the candidate retires once an entry sorts past
+	// where its directory twin would stand.
+	for _, ok := range [][]Entry{
+		{{ModeFile, "a", emptyBlob}, {ModeFile, "a-b", emptyBlob}, {ModeDir, "ab", emptyTree}},
+		{{ModeFile, "a", emptyBlob}, {ModeFile, "b", emptyBlob}, {ModeDir, "c", emptyTree}},
+		{{ModeFile, "a", emptyBlob}, {ModeDir, "a-b", emptyTree}, {ModeFile, "a0", emptyBlob}},
+	} {
+		if _, err := ParseTree(treeObject(ok...)); err != nil {
+			t.Errorf("%v: %v", ok, err)
+		}
+	}
 	_, err = ParseTree(treeObject(Entry{ModeFile, "b", emptyBlob}, Entry{ModeFile, "a", emptyBlob}))
 	refusalContaining(t, err, "entries are not in git's order")
 	// Nothing is allocated per entry: a 500-entry tree costs the same
@@ -386,8 +403,10 @@ func TestChainHandMade(t *testing.T) {
 	refusalContaining(t, err, "bundle: parents/0002 is past the end of the chain")
 	_, err = Chain(cs[3], []*Commit{cs[2]}, cs[3].ID)
 	refusalContaining(t, err, "bundle: parents/0001 is past the end of the chain")
+	// A root reached with a parent still bundled is not "past the end"
+	// (no baseline was met): it is a history off the box's.
 	_, err = Chain(cs[1], []*Commit{cs[0], cs[0]}, zeroID)
-	refusalContaining(t, err, "bundle: parents/0002 is past the end of the chain")
+	refusalContaining(t, err, "does not descend")
 	// A merge: the second parent is not walked.
 	m, err := ParseCommit(commitObject(emptyTree, []string{cs[1].ID, cs[3].ID}, nil, "merge\n"))
 	if err != nil {
@@ -458,6 +477,15 @@ func TestParseSigner(t *testing.T) {
 		sk.Write(s)
 	}
 	skB64 := base64.StdEncoding.EncodeToString(sk.Bytes())
+	// A 512-bit RSA key, which OpenSSH will not read from allowed_signers.
+	small, err := ssh.NewPublicKey(&rsa.PublicKey{N: new(big.Int).SetBit(new(big.Int).SetInt64(1), 511, 1), E: 65537})
+	if err != nil {
+		t.Fatal(err)
+	}
+	smallRSA := base64.StdEncoding.EncodeToString(small.Marshal())
+	if _, err := ParseSigner("a", "ssh-rsa", smallRSA); err == nil || !strings.Contains(err.Error(), "an RSA key of 512 bits") {
+		t.Fatal(err)
+	}
 
 	for _, ok := range [][3]string{
 		{"alice@example.com", edType, edB64},
@@ -491,6 +519,7 @@ func TestParseSigner(t *testing.T) {
 		"crlf inside the key":    {"a", edType, edB64[:20] + "\r\n" + edB64[20:]},
 		"trailing newline":       {"a", edType, edB64 + "\n"},
 		"unpadded key":           {"a", "sk-ssh-ed25519@openssh.com", strings.TrimRight(skB64, "=")}, // 74 bytes: padded when canonical
+		"rsa under the floor":    {"a", "ssh-rsa", smallRSA},
 		"empty key":              {"a", edType, ""},
 	} {
 		if _, err := ParseSigner(bad[0], bad[1], bad[2]); err == nil {

@@ -37,10 +37,13 @@ type Tree struct {
 // ParseTree reads a tree object: `<mode> <name>\0<20-byte id>`
 // repeated, at most MaxTree bytes. It refuses a mode git does not
 // write, a name that is empty, `.`, `..` or contains `/`, a truncated
-// entry, and entries out of git's order — names ascending, a
-// directory compared as if it ended in `/` — which is also what makes
-// a doubled name impossible, since equal names are not ascending. The
-// scan converts nothing: it compares byte slices.
+// entry, entries out of git's order — names ascending, a directory
+// compared as if it ended in `/` — and a name that appears twice,
+// which git's fsck finds two ways: adjacent equal names, and a file
+// `x` with a directory `x` later on, however many `x-…` names lie
+// between them (`x` < `x-y` < `x/`). The scan converts nothing: it
+// compares byte slices, and the stack it keeps for the second rule
+// holds slices of Raw.
 func ParseTree(raw []byte) (*Tree, error) {
 	if len(raw) > MaxTree {
 		return nil, refuse("bundle: a tree object is larger than 1 MiB")
@@ -49,12 +52,13 @@ func ParseTree(raw []byte) (*Tree, error) {
 	var prevName []byte
 	prevDir, first := false, true
 	var order error
+	// cands is git's df_dup_candidates: files whose directory twin
+	// could still follow. A file is pushed; it is popped once an entry
+	// sorts past where its twin would stand.
+	cands := make([][]byte, 0, 4)
 	err := t.scan(func(mode, name, _ []byte) bool {
 		dir := string(mode) == ModeDir
 		if !first {
-			// git's fsck rule: the same full name twice is a duplicate
-			// whatever the modes (a file `x` and a directory `x` cannot
-			// coexist); otherwise the names must ascend.
 			switch {
 			case bytes.Equal(prevName, name):
 				order = refuse("bundle: tree %s: an entry name appears twice", t.ID)
@@ -63,6 +67,16 @@ func ParseTree(raw []byte) (*Tree, error) {
 				order = refuse("bundle: tree %s: entries are not in git's order", t.ID)
 				return false
 			}
+		}
+		for len(cands) > 0 && compareTreeNames(cands[len(cands)-1], true, name, dir) < 0 {
+			cands = cands[:len(cands)-1]
+		}
+		if dir && len(cands) > 0 && bytes.Equal(cands[len(cands)-1], name) {
+			order = refuse("bundle: tree %s: an entry name appears twice", t.ID)
+			return false
+		}
+		if !dir {
+			cands = append(cands, name)
 		}
 		first, prevName, prevDir = false, name, dir
 		return true

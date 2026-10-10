@@ -31,8 +31,11 @@ func Chain(head *Commit, parents []*Commit, baseline string) ([]*Commit, error) 
 	chain := []*Commit{head}
 	cur := head
 	for i, p := range parents {
-		if cur.ID == baseline || len(cur.Parents) == 0 || cur.Parents[0] == baseline {
+		if cur.ID == baseline || (len(cur.Parents) > 0 && cur.Parents[0] == baseline) {
 			return nil, refuse("bundle: parents/%04d is past the end of the chain", i+1)
+		}
+		if len(cur.Parents) == 0 { // a root, and no baseline met: not past the end, but off the history
+			return nil, descendRefusal(head.ID, baseline)
 		}
 		if p.ID != cur.Parents[0] {
 			return nil, refuse("bundle: parents/%04d is not the first parent of %s", i+1, cur.ID)
@@ -113,20 +116,14 @@ func VerifyChain(ctx context.Context, v *Verifier, chain []*Commit, installed, i
 		}
 		switch r.code {
 		case codeUnlisted:
-			allowedIncoming, err := incoming.AllowedSigners()
-			if err != nil {
-				return "", err
-			}
-			name, err := v.verify(ctx, c, incoming, allowedIncoming)
-			var again *Refusal
-			switch {
-			case err == nil:
-			case errors.As(err, &again) && again.code == codeAltered:
-				return "", err
-			case errors.As(err, &again):
-				name = "not in the new Caddyfile either"
-			default:
-				return "", err
+			// Only a name is wanted, and the incoming list is not the
+			// authority, so no verifier runs against it: the key the
+			// signature carries is looked up, nothing more.
+			name := "not in the new Caddyfile either"
+			if key, _, err := SignatureKey(c.Signature); err == nil {
+				if p, ok := incoming.PrincipalFor(key); ok {
+					name = p
+				}
 			}
 			return "", refuse("%s, between the commit this box runs and %s, is signed by a key this box did not list when it last applied (%s); the commit that adds the key must apply first — force main back to it, let it apply, then push the rest",
 				c.ID, chain[0].ID, name)

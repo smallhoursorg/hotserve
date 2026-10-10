@@ -2,6 +2,7 @@ package proof
 
 import (
 	"bytes"
+	"crypto/rsa"
 	"encoding/base64"
 	"fmt"
 	"regexp"
@@ -70,8 +71,23 @@ func ParseSigner(principal, keyType, b64 string) (Signer, error) {
 	if pub.Type() != keyType {
 		return Signer{}, fmt.Errorf("signer %s: the key is %s, not %s", principal, pub.Type(), keyType)
 	}
+	// OpenSSH refuses RSA keys under its minimum when it reads an
+	// allowed_signers file; a line it would refuse must not be one the
+	// box accepts, or every push would read as "does not verify".
+	if keyType == "ssh-rsa" {
+		if cpk, ok := pub.(ssh.CryptoPublicKey); ok {
+			if r, ok := cpk.CryptoPublicKey().(*rsa.PublicKey); ok && r.N.BitLen() < MinRSABits {
+				return Signer{}, fmt.Errorf("signer %s: an RSA key of %d bits; ssh-keygen takes none under %d", principal, r.N.BitLen(), MinRSABits)
+			}
+		}
+	}
 	return Signer{Principal: principal, Type: keyType, Key: key, B64: b64}, nil
 }
+
+// MinRSABits is OpenSSH's floor for an RSA key it will read
+// (sshkey_check_rsa_length): a shorter one in allowed_signers makes
+// every verification fail.
+const MinRSABits = 1024
 
 // Signers is a box block's signer lines, in file order.
 type Signers []Signer

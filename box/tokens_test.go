@@ -102,6 +102,7 @@ func TestWalkAccepts(t *testing.T) {
 		"field named box_webhook":                 strings.Replace(good, "\tbox_webhook\n", "\theader {\n\t\tX-Hook box_webhook\n\t}\n\tbox_webhook\n", 1),
 		"webhook in handle_response":              strings.Replace(good, "\tbox_webhook\n", "\treverse_proxy x {\n\t\thandle_response {\n\t\t\tbox_webhook\n\t\t}\n\t}\n", 1),
 		"webhook in handle_response with matcher": strings.Replace(good, "\tbox_webhook\n", "\treverse_proxy x {\n\t\t@err status 500\n\t\thandle_response @err {\n\t\t\troute {\n\t\t\t\tbox_webhook\n\t\t\t}\n\t\t}\n\t}\n", 1),
+		"webhook in intercept's handle_response":  strings.Replace(good, "\tbox_webhook\n", "\tintercept {\n\t\thandle_response {\n\t\t\tbox_webhook\n\t\t}\n\t}\n", 1),
 		"field in another site":                   strings.Replace(good, "example.com {\n", "example.com {\n\theader {\n\t\tX-Hook box_webhook\n\t}\n", 1),
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -126,7 +127,7 @@ func TestWalkRefuses(t *testing.T) {
 		"global without box":         {"{\n\tadmin off\n}\ndeploy.example.com {\n\tbox_webhook\n}\n", "has no box block"},
 		"box in a site":              {"{\n}\ndeploy.example.com {\n\tbox {\n" + noKey + "\t}\n\tbox_webhook\n}\n", "has no box block"},
 		"two boxes":                  {strings.Replace(good, "\tbox {\n", "\tbox {\n\t}\n\tbox {\n", 1), "has more than one box block"},
-		"two global blocks":          {"{\n}\n" + good, "has more than one global options block"},
+		"two global blocks":          {"{\n}\n" + good, "has a global options block that is not the first block"},
 		"no signer":                  {strings.Replace(strings.Replace(good, "\t\tsigner alice@example.com ssh-ed25519 K1\n", "", 1), "\t\tsigner bob ssh-ed25519 K2\n", "", 1), "has no signer"},
 		"box empty":                  {strings.Replace(good, "\tbox {\n", "\tbox {\n\t}\n\tbox_ {\n", 1), "has no signer"},
 		"box without a block":        {strings.Replace(good, "\tbox {\n", "\tbox\n\tbox_ {\n", 1), "has no signer"},
@@ -185,6 +186,7 @@ func TestWalkRefuses(t *testing.T) {
 		"webhook deep in named route":                      {strings.Replace(good, "\tbox_webhook\n", "\tinvoke hook\n", 1) + "\n&(hook) {\n\troute {\n\t\thandle {\n\t\t\tbox_webhook\n\t\t}\n\t}\n}\n", "has box_webhook inside a snippet or named route (&(hook)); write it in the site"},
 		"webhook deep in snippet":                          {strings.Replace(good, "\tbox_webhook\n", "\trespond ok\n", 1) + "\n(s) {\n\treverse_proxy x {\n\t\thandle_response {\n\t\t\tbox_webhook\n\t\t}\n\t}\n}\n", "has box_webhook inside a snippet or named route ((s)); write it in the site"},
 		"two hosts via handle_response":                    {strings.Replace(good, "example.com {\n\treverse_proxy {\n\t\tdynamic liveswap example\n\t}\n}\n", "example.com {\n\treverse_proxy {\n\t\tdynamic liveswap example\n\t\thandle_response {\n\t\t\tbox_webhook\n\t\t}\n\t}\n}\n", 1), "has more than one site with box_webhook"},
+		"global block not first":                           {"other.example.com {\n\trespond ok\n}\n" + good, "has a global options block that is not the first block"},
 		"site closed on a line":                            {strings.Replace(good, "\tbox_webhook\n}\n", "\tbox_webhook }\n", 1), "does not parse: a } that closes a top-level block on a directive's line"},
 		"global closed on a line":                          {strings.Replace(good, "\t}\n}\n\nexample.com", "\t} }\n\nexample.com", 1), "does not parse: a } that closes a top-level block"},
 		"token after brace":                                {strings.Replace(good, "deploy.example.com {", "deploy.example.com { box_webhook", 1), "does not parse"},

@@ -120,8 +120,12 @@ type frame struct {
 	snippet *site
 }
 
-// nesting are the directives whose block is more directives.
-var nesting = map[string]bool{"route": true, "handle": true, "handle_path": true, "handle_errors": true}
+// nesting are the directives whose block is more directives, and
+// responseHandlers the ones whose `handle_response` block is.
+var (
+	nesting          = map[string]bool{"route": true, "handle": true, "handle_path": true, "handle_errors": true}
+	responseHandlers = map[string]bool{"reverse_proxy": true, "intercept": true}
+)
 
 type site struct {
 	addresses []string
@@ -140,7 +144,7 @@ func walk(input []byte) (*Shape, error) {
 		shape    Shape
 		stack    []frame
 		sites    []*site
-		globals  int
+		blocks   int // top-level blocks opened, in order
 		boxes    int
 		hasTrust bool
 		pending  []string // addresses of a header continued by a trailing comma
@@ -172,13 +176,15 @@ func walk(input []byte) (*Shape, error) {
 				return nil, refuse("has a site without braces (" + proof.Bound(strings.Join(addrs, ", ")) + ")")
 			}
 			f := frame{kind: kindOther}
+			blocks++
 			switch {
 			case len(addrs) == 0:
-				f.kind = kindGlobal
-				globals++
-				if globals > 1 {
-					return nil, refuse("has more than one global options block")
+				// Caddy reads only the first top-level block as the
+				// global options; a later key-less block it refuses.
+				if blocks > 1 { // which also means there is at most one
+					return nil, refuse("has a global options block that is not the first block")
 				}
+				f.kind = kindGlobal
 			case len(addrs) == 1 && isSnippetOrNamedRoute(addrs[0]):
 				f.kind, f.snippet = kindSnippet, &site{addresses: addrs}
 			default:
@@ -268,7 +274,7 @@ func walk(input []byte) (*Shape, error) {
 			kind: kindOther, inBox: top.inBox, site: top.site, snippet: top.snippet,
 			directive: first.Text, inDirective: top.dispatch,
 			dispatch: (top.dispatch && nesting[first.Text]) ||
-				(top.inDirective && top.directive == "reverse_proxy" && first.Text == "handle_response"),
+				(top.inDirective && responseHandlers[top.directive] && first.Text == "handle_response"),
 		}
 		switch top.kind {
 		case kindGlobal:

@@ -265,7 +265,8 @@ cross-references throughout.
     installed signers (`<principal> namespaces="git" <type> <base64>`).
     Which listed key signed is the box's own decision: the SSHSIG blob
     carries its public key, matched byte for byte against the list, so
-    "unlisted" never depends on ssh-keygen's exit status. Then
+    "unlisted" never depends on ssh-keygen's exit status; the blob's
+    namespace must be `git`, refused by name otherwise. Then
     `ssh-keygen -Y verify -n git -I <principal>` runs as uid 65534 with
     an environment of `PATH` alone, the payload on stdin; its exit
     status is the verdict — but that status is the same for "the
@@ -273,8 +274,13 @@ cross-references throughout.
     counts as a verdict only when a built-in control signature (a
     throwaway key's, over a fixed payload; public half and signature
     only) verifies in the same run, as the same uid, in the same
-    directory. Control verified, push not: the commit was altered after
-    it was signed. Neither verified: the box's error, never a refusal.
+    directory. Control verified, push not: the signature does not
+    verify over the commit — altered after signing, or made with a
+    form of key this ssh-keygen will not take — which is the push's
+    problem. Neither verified: the box's error, never a refusal. A
+    signer line ssh-keygen would refuse to read (an RSA key under its
+    1024-bit floor) is refused by `init` and the walk, so a list the
+    box accepts is one ssh-keygen accepts.
     No `gpgsig`, an OpenPGP `gpgsig`, a `gpgsig` of neither kind or one
     the box cannot read, a `gpgsig-sha256`, an unlisted key, and an
     altered commit each refuse by name.
@@ -594,7 +600,7 @@ Every numeric bound, in one place, with its reason.
 | `parents/` files | `0001` to `0499`, a sequence with no gap | HEAD plus 499 parents is the chain cap; a name outside the range is a malformed bundle |
 | tree depth (`path` components) | 32 | |
 | `trees/` files | 32 | the proof walks at most the depth; more is a malformed bundle, and a flood of tiny valid trees would otherwise cost a map entry each |
-| tree entries materialised | none | a tree is validated by one scan over byte slices that also holds it to git's order (names ascending, a directory read as if it ended in `/`), which is what rules out a doubled name; a lookup scans the same way and converts only its hit |
+| tree entries materialised | none | a tree is validated by one scan over byte slices that also holds it to git's order (names ascending, a directory read as if it ended in `/`) and to git's two duplicate rules (adjacent equal names; a file `x` with a directory `x` later, past any `x-…`), the way `fsck` does; a lookup scans the same way and converts only its hit |
 | `path` | 4096 bytes of safe components: none empty, `.` or `..`, no control byte (NUL, newline, DEL) | a control byte could only be a trick; the `path` file may end in one newline, which is forgiven, since `echo` adds one |
 | principal | 256 bytes | ssh-keygen prints the matching principal on stdout, which is capped; a longer one could never match its own line |
 | ssh-keygen output kept | 4 KiB | into the error text and nowhere else |
@@ -625,8 +631,10 @@ pushed input. Directive position is Caddy's: the first token on a
 line, at any depth — for `import` and for the placeholder rule below.
 `box_webhook` itself counts only where Caddy would dispatch it as a
 directive: a site's body and the bodies of `route`, `handle`,
-`handle_path`, `handle_errors` and `reverse_proxy`'s
-`handle_response`. A line that starts with `box_webhook` anywhere
+`handle_path`, `handle_errors`, and the `handle_response` of
+`reverse_proxy` and `intercept`. The key-less global options block
+must be the first top-level block, as Caddy reads only the first one
+as such. A line that starts with `box_webhook` anywhere
 else — inside `header { … }`, a matcher, a handler's options, the
 global block, or a container the walk does not know — is refused by
 name, never ignored, so that a webhook Caddy would serve can never go
@@ -743,7 +751,7 @@ says. The workflow's action is in the last column.
 | 422 | `refused` | `<sha> is not signed; the box applies only commits signed by a key in its signer list` | both | fail |
 | 422 | `refused` | `<sha> is signed by OpenPGP, not by an SSH key in the Caddyfile this box runs; GitHub's merge button cannot land config — merge on a laptop and push` | both | fail |
 | 422 | `refused` | `<sha> is signed by a key that is not a signer in the Caddyfile this box runs` | both | fail |
-| 422 | `refused` | `<sha> is signed by <principal>, but the signature does not verify: the commit was altered after it was signed` / `<sha> is signed, but not by an SSH key in the Caddyfile this box runs` / `<sha> is signed, but the signature is not one the box can read` | both | fail |
+| 422 | `refused` | `<sha> is signed by <principal>, but the signature does not verify over the commit` / `<sha> is signed, but not by an SSH key in the Caddyfile this box runs` / `<sha> is signed, but the signature is not one the box can read` / `<sha> is signed in the <namespace> namespace, not git; the box applies only commits git signed` | both | fail |
 | 422 | `refused` | `<sha2>, between the commit this box runs and <sha>, is not signed; every commit on main must be — rebase it out and force-push; the box still runs <baseline>` | both | fail |
 | 422 | `refused` | `<sha2>, between the commit this box runs and <sha>, is signed by a key this box did not list when it last applied (<principal>); the commit that adds the key must apply first — force main back to it, let it apply, then push the rest` | both | fail |
 | 422 | `refused` | `the file sent is not <path> in <sha>` / `<path> in <sha> is not a regular file` / `<sha> is in a SHA-256 repository, which the box does not read` | both | fail |
@@ -751,7 +759,7 @@ says. The workflow's action is in the last column.
 | 422 | `refused` | `the chain from <baseline> to <sha> is longer than 500 commits; run hotserve box baseline <sha> as root on the box` | both | fail |
 | 422 | `refused` | `this file is for <host2>; this box is <host1>` | both | fail |
 | 422 | `refused` | `this box's file is <recorded path>; the bundle is <path> — hotserve init --path records a new one` | both | fail |
-| 422 | `refused` | `the new Caddyfile has no box block` / `… has no signer` / `… has no deploy_trust` / `… has no site with box_webhook` / `… has more than one site with box_webhook` / `… has a box_webhook site whose address is not one bare hostname (<address>)` / `… has a site without braces (<address>)` / `… has box_webhook inside a snippet or named route (<name>); write it in the site` / `… has box_webhook where it is not a directive (inside <block>); it goes in a site, route, handle, handle_path, handle_errors or handle_response block` / `… imports <path>; inline the snippet` / `… has a placeholder where a directive name, a site address or a box line goes (<token>)` / `… reads differently once its placeholders are expanded` / `… is empty` / `… has more than one global options block` / `… has more than one box block` / `… has a signer line that is not \`signer <principal> <key-type> <base64>\`` / `… has a bad signer <principal>: <what>` / `… does not tokenize: <lexer error>` / `… does not parse: <what>` / `… drops the key that signed this commit (<principal>); add the new key in one push, let it apply, then remove the old one` | both | fail |
+| 422 | `refused` | `the new Caddyfile has no box block` / `… has no signer` / `… has no deploy_trust` / `… has no site with box_webhook` / `… has more than one site with box_webhook` / `… has a box_webhook site whose address is not one bare hostname (<address>)` / `… has a site without braces (<address>)` / `… has box_webhook inside a snippet or named route (<name>); write it in the site` / `… has box_webhook where it is not a directive (inside <block>); it goes in a site, route, handle, handle_path, handle_errors or handle_response block` / `… imports <path>; inline the snippet` / `… has a placeholder where a directive name, a site address or a box line goes (<token>)` / `… reads differently once its placeholders are expanded` / `… is empty` / `… has a global options block that is not the first block` / `… has more than one box block` / `… has a signer line that is not \`signer <principal> <key-type> <base64>\`` / `… has a bad signer <principal>: <what>` / `… does not tokenize: <lexer error>` / `… does not parse: <what>` / `… drops the key that signed this commit (<principal>); add the new key in one push, let it apply, then remove the old one` | both | fail |
 | 422 | `refused` | `hotserve validate: <redacted>` / `hotserve-backup validate: <redacted>` / `could not ask whether backups are installed; nothing changed` | handler | fail |
 | 422 | `refused` | `hotserve is not running; nothing applied` / `hotserve is still starting after 300 s; nothing applied` | applier | fail |
 | 422 | `refused` | `the Caddyfile this box runs lists no signer; hotserve init is the way back` | applier | fail |

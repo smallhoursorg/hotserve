@@ -106,10 +106,15 @@ func (v *Verifier) verify(ctx context.Context, c *Commit, signers Signers, allow
 		return "", refuseCode(codeUnsigned, "%s is signed, but not by an SSH key in the Caddyfile this box runs", c.ID)
 	case SSHSig:
 	}
-	// Which key signed: the signature says, and the list decides.
-	key, err := SignatureKey(c.Signature)
+	// Which key signed: the signature says, and the list decides. The
+	// namespace is checked here too, by name: ssh-keygen would refuse
+	// a `file` signature over the commit the same way as a wrong one.
+	key, namespace, err := SignatureKey(c.Signature)
 	if err != nil {
 		return "", refuseCode(codeUnsigned, "%s is signed, but the signature is not one the box can read", c.ID)
+	}
+	if namespace != "git" {
+		return "", refuseCode(codeUnsigned, "%s is signed in the %s namespace, not git; the box applies only commits git signed", c.ID, Bound(namespace))
 	}
 	principal, ok := signers.PrincipalFor(key)
 	if !ok {
@@ -128,20 +133,8 @@ func (v *Verifier) verify(ctx context.Context, c *Commit, signers Signers, allow
 	if err := os.Chmod(dir, 0o755); err != nil { //nolint:gosec // a child of another uid must traverse it; the files are a public key list and a signature
 		return "", fmt.Errorf("verify: %w", err)
 	}
-	files := map[string][]byte{
-		"sig": c.Signature, "allowed_signers": allowed,
-		"control.sig": []byte(controlSignature), "control.allowed": []byte(controlAllowed),
-	}
-	for name, data := range files {
-		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, data, 0o644); err != nil { //nolint:gosec // readable by the child's uid; nothing secret
-			return "", fmt.Errorf("verify: %w", err)
-		}
-		// The mode is set after the write, so the process umask has
-		// no say: the child of another uid must be able to read it.
-		if err := os.Chmod(path, 0o644); err != nil { //nolint:gosec // as above
-			return "", fmt.Errorf("verify: %w", err)
-		}
+	if err := writeReadable(dir, map[string][]byte{"sig": c.Signature, "allowed_signers": allowed}); err != nil {
+		return "", err
 	}
 
 	// The verdict: the signature, by that principal's key, over the
@@ -156,7 +149,11 @@ func (v *Verifier) verify(ctx context.Context, c *Commit, signers Signers, allow
 	// Not verified — but ssh-keygen says that the same way for a wrong
 	// signature and for a file it could not read. The control tells
 	// which: a known-good signature, verified the same way, as the
-	// same uid, in the same directory.
+	// same uid, in the same directory. Written only now, on the path
+	// that needs it.
+	if err := writeReadable(dir, map[string][]byte{"control.sig": []byte(controlSignature), "control.allowed": []byte(controlAllowed)}); err != nil {
+		return "", err
+	}
 	control, err := v.run(ctx, keygen, dir, []byte(controlPayload), "-Y", "verify", "-f", "control.allowed", "-I", controlPrincipal, "-n", "git", "-s", "control.sig")
 	if err != nil {
 		return "", err
@@ -164,27 +161,46 @@ func (v *Verifier) verify(ctx context.Context, c *Commit, signers Signers, allow
 	if !control.ok {
 		return "", fmt.Errorf("ssh-keygen could not verify a known-good signature, so it could not verify %s either: %s", c.ID, Bound(strings.TrimSpace(control.stderr)))
 	}
-	return "", refuseCode(codeAltered, "%s is signed by %s, but the signature does not verify: the commit was altered after it was signed", c.ID, principal)
+	// The environment is fine and the key is listed, so what remains
+	// is the signature itself: made over other bytes, or by a form of
+	// key this ssh-keygen will not take. Both are the push's problem.
+	return "", refuseCode(codeAltered, "%s is signed by %s, but the signature does not verify over the commit", c.ID, principal)
 }
 
-// SignatureKey is the public key an SSH signature carries: the SSHSIG
-// blob under the armor is `SSHSIG`, a version, the key in wire format,
-// the namespace, a reserved string, the hash algorithm and the
-// signature itself. The key is what the signer list is matched
-// against; everything else is ssh-keygen's to judge.
-func SignatureKey(armored []byte) ([]byte, error) {
+// writeReadable writes files a child of another uid can read: 0644,
+// set after the write so the process umask has no say.
+func writeReadable(dir string, files map[string][]byte) error {
+	for name, data := range files {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, data, 0o644); err != nil { //nolint:gosec // readable by the child's uid; nothing secret
+			return fmt.Errorf("verify: %w", err)
+		}
+		if err := os.Chmod(path, 0o644); err != nil { //nolint:gosec // as above
+			return fmt.Errorf("verify: %w", err)
+		}
+	}
+	return nil
+}
+
+// SignatureKey is the public key an SSH signature carries, and the
+// namespace it was made in: the SSHSIG blob under the armor is
+// `SSHSIG`, a version, the key in wire format, the namespace, a
+// reserved string, the hash algorithm and the signature itself. The
+// key is what the signer list is matched against, the namespace must
+// be git's; everything else is ssh-keygen's to judge.
+func SignatureKey(armored []byte) (key []byte, namespace string, err error) {
 	const begin, end = "-----BEGIN SSH SIGNATURE-----", "-----END SSH SIGNATURE-----"
 	text := string(armored)
 	i := strings.Index(text, begin)
 	if i < 0 {
-		return nil, errors.New("not an armored SSH signature")
+		return nil, "", errors.New("not an armored SSH signature")
 	}
 	body := text[i+len(begin):]
 	// END is looked for after BEGIN: the two markers share their
 	// dashes, so an END that overlaps BEGIN's tail is not an end.
 	j := strings.Index(body, end)
 	if j < 0 {
-		return nil, errors.New("not an armored SSH signature")
+		return nil, "", errors.New("not an armored SSH signature")
 	}
 	var b64 strings.Builder
 	for _, line := range strings.Split(body[:j], "\n") {
@@ -192,10 +208,10 @@ func SignatureKey(armored []byte) ([]byte, error) {
 	}
 	blob, err := base64.StdEncoding.DecodeString(b64.String())
 	if err != nil {
-		return nil, fmt.Errorf("signature armor: %w", err)
+		return nil, "", fmt.Errorf("signature armor: %w", err)
 	}
 	if !bytes.HasPrefix(blob, []byte("SSHSIG")) {
-		return nil, errors.New("signature blob has no SSHSIG magic")
+		return nil, "", errors.New("signature blob has no SSHSIG magic")
 	}
 	var sig struct {
 		Version   uint32
@@ -206,15 +222,15 @@ func SignatureKey(armored []byte) ([]byte, error) {
 		Signature []byte
 	}
 	if err := ssh.Unmarshal(blob[len("SSHSIG"):], &sig); err != nil {
-		return nil, fmt.Errorf("signature blob: %w", err)
+		return nil, "", fmt.Errorf("signature blob: %w", err)
 	}
 	if sig.Version != 1 {
-		return nil, fmt.Errorf("signature version %d", sig.Version)
+		return nil, "", fmt.Errorf("signature version %d", sig.Version)
 	}
 	if _, err := ssh.ParsePublicKey(sig.PublicKey); err != nil {
-		return nil, fmt.Errorf("signature's key: %w", err)
+		return nil, "", fmt.Errorf("signature's key: %w", err)
 	}
-	return sig.PublicKey, nil
+	return sig.PublicKey, sig.Namespace, nil
 }
 
 // program is the ssh-keygen to run: SSHKeygen as given, else the PATH

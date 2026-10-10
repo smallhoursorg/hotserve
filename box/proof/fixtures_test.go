@@ -373,7 +373,7 @@ func runFixtureTable(t *testing.T, fx *fixtures) {
 		altered.Payload = append([]byte{}, h.Payload...)
 		altered.Payload[len(altered.Payload)-1] ^= 1
 		_, err = v.Verify(ctx, &altered, fx.signers)
-		refusalContaining(t, err, h.ID+" is signed by "+fx.signers[0].Principal+", but the signature does not verify: the commit was altered after it was signed")
+		refusalContaining(t, err, h.ID+" is signed by "+fx.signers[0].Principal+", but the signature does not verify over the commit")
 		// The same key listed twice is the list's fault, not a verdict.
 		_, err = v.Verify(ctx, h, append(fx.signers, fx.signers[0]))
 		var r *Refusal

@@ -31,32 +31,42 @@ func TestLiveGit(t *testing.T) {
 	fx := loadFixtures(t, dir)
 	runFixtureTable(t, fx)
 	if *update {
-		// The new set lands beside the old and is renamed over it, so a
-		// failed copy leaves the committed fixtures where they were.
-		if err := os.RemoveAll("testdata.new"); err != nil {
+		// Only the generated set is replaced — objects/, the signer
+		// lines and the manifest — never testdata/fuzz/, which holds
+		// crashers kept as regression inputs. The objects land beside
+		// the old ones and are swapped by two renames, the old kept
+		// until the new are in place and put back if they are not.
+		if err := os.RemoveAll("testdata/objects.new"); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.CopyFS("testdata.new", os.DirFS(dir)); err != nil {
+		if err := os.CopyFS("testdata/objects.new", os.DirFS(filepath.Join(dir, "objects"))); err != nil {
 			t.Fatal(err)
 		}
-		// Two renames, the old set kept until the new one is in place
-		// and put back if it is not.
-		if err := os.RemoveAll("testdata.old"); err != nil {
+		if err := os.RemoveAll("testdata/objects.old"); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Rename("testdata", "testdata.old"); err != nil {
+		if err := os.Rename("testdata/objects", "testdata/objects.old"); err != nil && !os.IsNotExist(err) {
 			t.Fatal(err)
 		}
-		if err := os.Rename("testdata.new", "testdata"); err != nil {
-			if back := os.Rename("testdata.old", "testdata"); back != nil {
-				t.Fatalf("%v; and could not restore the old set: %v", err, back)
+		if err := os.Rename("testdata/objects.new", "testdata/objects"); err != nil {
+			if back := os.Rename("testdata/objects.old", "testdata/objects"); back != nil {
+				t.Fatalf("%v; and could not restore the old objects: %v", err, back)
 			}
 			t.Fatal(err)
 		}
-		if err := os.RemoveAll("testdata.old"); err != nil {
+		if err := os.RemoveAll("testdata/objects.old"); err != nil {
 			t.Fatal(err)
 		}
-		t.Log("testdata/ rewritten")
+		for _, name := range []string{"alice.signer", "bob.signer", "mallory.signer", "manifest.json"} {
+			data, err := os.ReadFile(filepath.Join(dir, name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join("testdata", name), data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		t.Log("testdata/ rewritten (fuzz/ kept)")
 	}
 }
 

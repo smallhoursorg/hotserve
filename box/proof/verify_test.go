@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -40,9 +42,9 @@ func TestBoundedBuffer(t *testing.T) {
 // failed verification be read as a verdict.
 func TestControlVector(t *testing.T) {
 	needTools(t, "ssh-keygen")
-	key, err := SignatureKey([]byte(controlSignature))
-	if err != nil {
-		t.Fatal(err)
+	key, namespace, err := SignatureKey([]byte(controlSignature))
+	if err != nil || namespace != "git" {
+		t.Fatal(namespace, err)
 	}
 	f := strings.Fields(controlAllowed)
 	ctl, err := ParseSigner(f[0], f[2], f[3])
@@ -70,7 +72,7 @@ func TestControlVector(t *testing.T) {
 	}
 	// And the key the signature names is what the list is matched on.
 	for _, bad := range []string{"", "-----BEGIN SSH SIGNATURE-----\nU1NIU0lH\n-----END SSH SIGNATURE-----\n", "-----BEGIN SSH SIGNATURE-----\n!!!!\n-----END SSH SIGNATURE-----\n", "-----BEGIN SSH SIGNATURE-----\nAAAA\n-----END SSH SIGNATURE-----\n"} {
-		if _, err := SignatureKey([]byte(bad)); err == nil {
+		if _, _, err := SignatureKey([]byte(bad)); err == nil {
 			t.Fatalf("%q parsed", bad)
 		}
 	}
@@ -78,6 +80,32 @@ func TestControlVector(t *testing.T) {
 	unreadable.Signature = []byte("-----BEGIN SSH SIGNATURE-----\nU1NIU0lH\n-----END SSH SIGNATURE-----\n")
 	_, err = v.Verify(context.Background(), &unreadable, Signers{ctl})
 	refusalContaining(t, err, zeroID+" is signed, but the signature is not one the box can read")
+
+	// A signature in another namespace is refused by name, not as a
+	// verification failure: made here with a fresh key over the same
+	// payload, in the `file` namespace.
+	d := t.TempDir()
+	run(t, d, nil, "ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", "k", "-C", "k")
+	if err := os.WriteFile(filepath.Join(d, "msg"), []byte(controlPayload), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, d, nil, "ssh-keygen", "-Y", "sign", "-f", "k", "-n", "file", "msg")
+	sig, err := os.ReadFile(filepath.Join(d, "msg.sig"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, err := os.ReadFile(filepath.Join(d, "k.pub"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f = strings.Fields(string(pub))
+	k, err := ParseSigner("k", f[0], f[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := &Commit{ID: zeroID, Kind: SSHSig, Signature: sig, Payload: []byte(controlPayload)}
+	_, err = v.Verify(context.Background(), other, Signers{k})
+	refusalContaining(t, err, zeroID+" is signed in the file namespace, not git")
 }
 
 // TestRunVerdicts: an exit status is a verdict, a deadline is not.
