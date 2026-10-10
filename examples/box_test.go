@@ -387,6 +387,7 @@ type standIn struct {
 	edited    bool     // results say the file was edited on the box
 	throttle  int      // polls answered 429 before the result
 	mintFails int      // token requests that fail before one succeeds
+	audience  string   // the last token request's audience, decoded
 }
 
 var boxID = regexp.MustCompile(`^[0-9a-f]{32}$`)
@@ -419,7 +420,8 @@ func (s *standIn) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.mints++
-		tok := fmt.Sprintf("minted-%d-%s", s.mints, r.URL.Query().Get("audience"))
+		s.audience = r.URL.Query().Get("audience")
+		tok := fmt.Sprintf("minted-%d", s.mints)
 		s.tokens[tok] = false
 		reply(w, 200, map[string]string{"value": tok})
 		return
@@ -745,11 +747,13 @@ func TestBoxApply(t *testing.T) {
 			// The box never saw it: every poll is 404, and the push is
 			// sent again under its id.
 			"never": "no answer from the box to the push; asking for its result",
+			// Sent again, and that upload breaks too: tried once more.
+			"never,unread": "no answer from the box to the push; asking for its result",
 		} {
 			t.Run(how, func(t *testing.T) {
 				g := newApplyRig(t)
 				head := g.change("one")
-				g.box.onPost = []string{how}
+				g.box.onPost = strings.Split(how, ",")
 				g.box.edited = true
 				out, code := g.apply()
 				if code != 0 || g.box.baseline != head || !strings.Contains(out, said) || !strings.Contains(out, ": loaded; running apps are not restarted") {
@@ -809,12 +813,14 @@ func TestBoxApply(t *testing.T) {
 			"GITHUB_REPOSITORY=your-org/boxes", "GITHUB_REF=refs/heads/main",
 			"ACTIONS_ID_TOKEN_REQUEST_URL=" + g.box.srv.URL + "/token?api-version=2.0", "ACTIONS_ID_TOKEN_REQUEST_TOKEN=req",
 			"HOTSERVE_TOKEN=",
+			// An audience with characters a query must encode.
+			"HOTSERVE_AUDIENCE=a&b c#d",
 		}
 		g.box.onPost = []string{"504"}
 		// A mint that fails is tried again; a throttled poll is "not yet".
 		g.box.mintFails, g.box.throttle = 1, 2
 		out, code := g.apply(actions...)
-		if code != 0 || !strings.Contains(out, "::add-mask::minted-1-hotserve\n") || !strings.Contains(out, "::group::apply deploy.example.com\n") {
+		if code != 0 || !strings.Contains(out, "::add-mask::minted-1\n") || g.box.audience != "a&b c#d" || !strings.Contains(out, "::group::apply deploy.example.com\n") {
 			t.Fatalf("exit %d\n%s", code, out)
 		}
 		// A fresh token for each request: the GET, the POST, each poll.

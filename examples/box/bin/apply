@@ -73,7 +73,8 @@ mint() {
 	if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
 		printf 'Authorization: Bearer %s\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" >"$tmpd/mint"
 		for try in 1 2 3; do
-			curl -fsS --max-time 30 -H "@$tmpd/mint" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" |
+			# -G appends the audience to the URL's own query, encoded.
+			curl -fsS --max-time 30 -H "@$tmpd/mint" -G --data-urlencode "audience=$audience" "$ACTIONS_ID_TOKEN_REQUEST_URL" |
 				sed -n 's/.*"value" *: *"\([^"]*\)".*/\1/p' >"$tmpd/token" || true
 			[ -s "$tmpd/token" ] && break
 			sleep "$try"
@@ -247,6 +248,12 @@ poll() {
 			post
 			case $code in
 			409|000|mint|502|503|504) ;;
+			400)
+				# A broken upload admits nothing: the next resend tries again.
+				case $(field error) in
+				'could not read the bundle'*) ;;
+				*) outcome; return 0 ;;
+				esac ;;
 			*) outcome && return 0; continue ;;
 			esac
 		fi
