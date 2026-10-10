@@ -66,7 +66,7 @@ func Walk(input []byte) (*Shape, error) {
 		return nil, err
 	}
 	if raw.Host != expanded.Host || !sameSigners(raw.Signers, expanded.Signers) {
-		return nil, refuse("reads differently once its placeholders are expanded; placeholders are for values")
+		return nil, refuse("reads differently once its placeholders are expanded")
 	}
 	return raw, nil
 }
@@ -155,7 +155,7 @@ func walk(input []byte) (*Shape, error) {
 				// Caddy allows one brace-less site, whose directives
 				// then sit at depth zero where this walk would read
 				// them as addresses; every site here is braced.
-				return nil, refuse("has a site written without braces (" + proof.Bound(strings.Join(addrs, ", ")) + "); every site block in the signed file must be braced")
+				return nil, refuse("has a site without braces (" + proof.Bound(strings.Join(addrs, ", ")) + ")")
 			}
 			f := frame{kind: kindOther}
 			switch {
@@ -278,7 +278,7 @@ func walk(input []byte) (*Shape, error) {
 		return nil, refuse("has a bad " + err.Error())
 	}
 	if !hasTrust {
-		return nil, refuse("has a box block with no deploy_trust")
+		return nil, refuse("has no deploy_trust")
 	}
 	var hooks []*site
 	for _, s := range sites {
@@ -295,7 +295,7 @@ func walk(input []byte) (*Shape, error) {
 	}
 	host, ok := BareHost(hooks[0].addresses)
 	if !ok {
-		return nil, refuse("has a box_webhook site whose address is not one bare hostname (" + proof.Bound(strings.Join(hooks[0].addresses, ", ")) + "); no scheme, port, path, wildcard, placeholder or second name")
+		return nil, refuse("has a box_webhook site whose address is not one bare hostname (" + proof.Bound(strings.Join(hooks[0].addresses, ", ")) + ")")
 	}
 	shape.Host = host
 	return &shape, nil
@@ -348,11 +348,11 @@ func importRefusal(line []caddyfile.Token) error {
 	if len(line) > 1 {
 		what = " " + proof.Bound(line[1].Text)
 	}
-	return refuse("imports" + what + "; the box applies only a self-contained Caddyfile — inline the snippet")
+	return refuse("imports" + what + "; inline the snippet")
 }
 
 func placeholderRefusal(token string) error {
-	return refuse("has a placeholder where a directive name, a site address or a box line goes (" + proof.Bound(token) + "); placeholders are for values")
+	return refuse("has a placeholder where a directive name, a site address or a box line goes (" + proof.Bound(token) + ")")
 }
 
 // splitLines groups tokens by line the way Caddy's parser does

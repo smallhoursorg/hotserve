@@ -16,21 +16,20 @@ const MaxChain = 500
 // header, and the walk ends when a first `parent` header equals the
 // baseline — whose object is not bundled. An entry past that point, or
 // one that is not the first parent of the commit before it, is a
-// malformed bundle. It returns the commits above the baseline, head
-// first — every one of which must then carry a signature the box
-// accepts (VerifyChain) — and an empty chain when head is the
-// baseline. A walk that runs out of parents, or of bundled objects,
-// before it reaches the baseline is a history that no longer contains
-// the commit the box runs on its first-parent line, refused with the
-// message that names the three ways that happens. A chain of more than
-// MaxChain commits above the baseline is refused with the message that
-// names the reset; the workflow checks the same bound before it posts.
+// malformed bundle. It returns the chain, head first — every commit on
+// it must then carry a signature the box accepts (VerifyChain). HEAD
+// is always on the chain, so it is never empty: when HEAD is the
+// baseline the chain is HEAD alone, its signature is still checked
+// against the installed list, and no parent may be bundled. A walk
+// that runs out of parents, or of bundled objects, before it reaches
+// the baseline is a history that no longer contains the commit the box
+// runs on its first-parent line, refused with the message that names
+// the three ways that happens. A chain of more than MaxChain commits,
+// HEAD counted, is refused with the message that names the reset; the
+// workflow checks the same bound before it posts.
 func Chain(head *Commit, parents []*Commit, baseline string) ([]*Commit, error) {
-	var chain []*Commit
+	chain := []*Commit{head}
 	cur := head
-	if head.ID != baseline {
-		chain = append(chain, head)
-	}
 	for i, p := range parents {
 		if cur.ID == baseline || len(cur.Parents) == 0 || cur.Parents[0] == baseline {
 			return nil, refuse("bundle: parents/%04d is past the end of the chain", i+1)
@@ -52,11 +51,10 @@ func Chain(head *Commit, parents []*Commit, baseline string) ([]*Commit, error) 
 
 func descendRefusal(head, baseline string) error {
 	return refuse("%s does not descend from the commit this box runs (%s) along main's first-parent line. "+
-		"If the box already runs a later commit than this run's, nothing is wrong: a newer push applied first. "+
-		"If a branch merged main into itself before it was fast-forwarded, %s is on the merge's other side — rebase the branch onto main instead and force-push; no box step. "+
-		"A rewind or a replay is refused on purpose. "+
-		"Only if main was rewritten below %s does hotserve box baseline %s, as root on the box, reset trust to %s — whose ancestors the box will then never examine",
-		head, baseline, baseline, baseline, head, head)
+		"If the box already runs a later commit, nothing is wrong. "+
+		"If a branch merged main into itself before it was fast-forwarded, rebase it onto main and force-push. "+
+		"Only if main was rewritten below %s does hotserve box baseline %s, as root on the box, reset trust to %s, whose ancestors the box will then never examine",
+		head, baseline, baseline, head, head)
 }
 
 // VerifyChain is steps 12 and 14 together: every commit of the chain
@@ -120,12 +118,12 @@ func VerifyChain(ctx context.Context, v *Verifier, chain []*Commit, installed, i
 			default:
 				return "", err
 			}
-			return "", refuse("%s, between the commit this box runs and %s, is signed by a key this box did not list when it last applied (%s); the commit that adds the key must apply first — force main back to it, let the box apply it, then push the rest",
+			return "", refuse("%s, between the commit this box runs and %s, is signed by a key this box did not list when it last applied (%s); the commit that adds the key must apply first — force main back to it, let it apply, then push the rest",
 				c.ID, chain[0].ID, name)
 		case codeAltered:
 			return "", err
 		default:
-			return "", refuse("%s, between the commit this box runs and %s, is not signed; every commit on main must be — rebase it out of the history and force-push; the box still runs %s, so no baseline change is needed",
+			return "", refuse("%s, between the commit this box runs and %s, is not signed; every commit on main must be — rebase it out and force-push; the box still runs %s",
 				c.ID, chain[0].ID, baseline)
 		}
 	}

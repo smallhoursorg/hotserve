@@ -316,7 +316,7 @@ func runFixtureTable(t *testing.T, fx *fixtures) {
 		if len(chain) != 2 || chain[0] != head || chain[1] != mid {
 			t.Fatalf("chain: %v", chain)
 		}
-		if chain, err := Chain(base, nil, baseline); err != nil || len(chain) != 0 {
+		if chain, err := Chain(base, nil, baseline); err != nil || len(chain) != 1 || chain[0] != base {
 			t.Fatalf("head == baseline: %v %v", chain, err)
 		}
 		// mid is the baseline: head's chain is head alone.
@@ -403,7 +403,7 @@ func runFixtureTable(t *testing.T, fx *fixtures) {
 		}
 		_, err = VerifyChain(ctx, v, chain, fx.signers, fx.signers, baseline)
 		u := fx.commit(t, "unsigned")
-		refusalContaining(t, err, u.ID+", between the commit this box runs and "+au.ID+", is not signed; every commit on main must be — rebase it out of the history and force-push; the box still runs "+baseline+", so no baseline change is needed")
+		refusalContaining(t, err, u.ID+", between the commit this box runs and "+au.ID+", is not signed; every commit on main must be — rebase it out and force-push; the box still runs "+baseline)
 		// HEAD itself unsigned: its own message, not the between one.
 		chain, err = Chain(u, fx.parentsFor(t, "unsigned", baseline), baseline)
 		if err != nil {
@@ -419,7 +419,7 @@ func runFixtureTable(t *testing.T, fx *fixtures) {
 		alice, bob := fx.signers[:1], fx.signers
 		b := fx.commit(t, "bob")
 		_, err = VerifyChain(ctx, v, []*Commit{fx.commit(t, "head"), b}, alice, bob, baseline)
-		refusalContaining(t, err, b.ID+", between the commit this box runs and "+fx.commit(t, "head").ID+", is signed by a key this box did not list when it last applied ("+bob[1].Principal+"); the commit that adds the key must apply first — force main back to it, let the box apply it, then push the rest")
+		refusalContaining(t, err, b.ID+", between the commit this box runs and "+fx.commit(t, "head").ID+", is signed by a key this box did not list when it last applied ("+bob[1].Principal+"); the commit that adds the key must apply first — force main back to it, let it apply, then push the rest")
 		_, err = VerifyChain(ctx, v, []*Commit{fx.commit(t, "head"), b}, alice, alice, baseline)
 		refusalContaining(t, err, b.ID+", between the commit this box runs and ", ", is signed by a key this box did not list when it last applied (not in the new Caddyfile either);")
 		// The same key at HEAD is HEAD's own refusal.
@@ -477,7 +477,7 @@ func runFixtureTable(t *testing.T, fx *fixtures) {
 		if err != nil || len(b.Parents) != 0 {
 			t.Fatalf("%v %v", b, err)
 		}
-		if chain, err := Chain(b.Commit, b.Parents, baseline); err != nil || len(chain) != 0 {
+		if chain, err := Chain(b.Commit, b.Parents, baseline); err != nil || len(chain) != 1 {
 			t.Fatalf("%v %v", chain, err)
 		}
 	})

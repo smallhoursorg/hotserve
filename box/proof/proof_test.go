@@ -317,7 +317,7 @@ func TestChainHandMade(t *testing.T) {
 	if err != nil || len(chain) != 3 || chain[0] != cs[3] || chain[2] != cs[1] {
 		t.Fatalf("%v %v", chain, err)
 	}
-	if chain, err := Chain(cs[3], nil, cs[3].ID); err != nil || chain != nil {
+	if chain, err := Chain(cs[3], nil, cs[3].ID); err != nil || len(chain) != 1 || chain[0] != cs[3] {
 		t.Fatalf("%v %v", chain, err)
 	}
 	if chain, err := Chain(cs[3], nil, cs[2].ID); err != nil || len(chain) != 1 {

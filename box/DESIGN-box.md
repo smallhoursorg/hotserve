@@ -37,7 +37,7 @@ and T6.
 | **bundle** | One gzip tarball the workflow POSTs: `path`, `Caddyfile`, `commit`, `parents/NNNN`, `trees/<sha>`, nothing else. |
 | **HEAD** | The commit the bundle is for: `sha1("commit <n>\0" + raw)` of the bundled `commit` object, computed, never read. |
 | **baseline** | The commit the box runs: `sha` in `applied.json`. Advances only as the state machine says. |
-| **chain** | HEAD plus the bundled `parents/` commits, first-parent from HEAD down to, not including, the baseline, each linked to the next by hash. HEAD is always on it, so the chain is never empty; `parents/` is empty when HEAD's first parent is the baseline. The cap counts HEAD. |
+| **chain** | HEAD plus the bundled `parents/` commits, first-parent from HEAD down to, not including, the baseline, each linked to the next by hash. HEAD is always on it, so the chain is never empty and HEAD's signature is always checked against the installed list — when HEAD *is* the baseline the chain is HEAD alone and `parents/` must be empty; `parents/` is also empty when HEAD's first parent is the baseline. The cap counts HEAD. |
 | **installed file** | `/etc/hotserve/Caddyfile` as root last wrote it. The source of the signer list and the rollback bytes. |
 | **record** | `txn.json`: the one durable marker of a transaction in flight, with a `phase`. Present means "no terminal result yet". |
 | **result** | `out/<id>.json`: what a push came to. Non-terminal: `verified`. Terminal: `refused`, `no_change`, `applied`, `failed`, `rolled_back`, `unknown`. |
@@ -134,7 +134,9 @@ deploy.example.com {
   none may appear). Key types: `ssh-ed25519`, `ecdsa-sha2-nistp256/
   384/521`, `sk-ssh-ed25519@openssh.com`,
   `sk-ecdsa-sha2-nistp256@openssh.com`, `ssh-rsa`. The base64 must
-  decode to a key of the declared type.
+  decode to a key of the declared type and be that key's one canonical
+  line (the decoder forgives a newline inside a quoted token; the
+  allowed_signers file would not). The principal is at most 256 bytes.
 - `box_webhook` takes no arguments. It handles exactly the path `/`
   (with or without `?result=`) and passes every other path to the next
   handler. It must run before `liveswap_webhook`, which is terminal on
@@ -264,7 +266,11 @@ cross-references throughout.
     and `ssh-keygen -Y find-principals` then `ssh-keygen -Y verify -n
     git -I <principal>` run as uid 65534 with an environment of `PATH`
     alone; the verdict is the exit status. No `gpgsig`, an OpenPGP
-    `gpgsig`, a `gpgsig-sha256` or an unlisted key each refuse by name.
+    `gpgsig`, a `gpgsig` of neither kind, a `gpgsig-sha256`, an
+    unlisted key, and a listed key whose signature does not verify over
+    the payload (the commit was altered after it was signed) each
+    refuse by name. The payload goes to `ssh-keygen` on stdin; the
+    signature and the allowed_signers file are the only files written.
 13. **The file is the committed file.** The root tree's id equals the
     commit's `tree`; the `path`'s components are walked through the
     bundled trees (depth per the Caps table); the last entry is a blob
@@ -281,9 +287,17 @@ cross-references throughout.
     reaches the baseline within the cap, and **every commit on it
     carries a signature step 12 accepts**: otherwise an unsigned commit
     pushed by a leaked credential would ride in under the next signed
-    one. HEAD equal to the baseline is an empty chain. What this rule
-    does and does not stop is in "The merge button" and
-    "Threat-model deltas".
+    one. HEAD equal to the baseline is a chain of HEAD alone (see the
+    Glossary): its signature is still checked, no parent may be
+    bundled, and step 16 decides whether anything changes. A commit
+    between the baseline and HEAD is refused by what its verdict was —
+    unsigned, listed-but-unverifiable (its own message), or signed by a
+    key the box did not list when it last applied, named by the
+    principal the *incoming* file gives that key, or "not in the new
+    Caddyfile either". A verifier that could not answer (ssh-keygen
+    could not run, the chain deadline passed) is the box's error, never
+    a refusal. What this rule does and does not stop is in "The merge
+    button" and "Threat-model deltas".
 15. **Never cut the branch you sit on.** The incoming file has a `box`
     block with at least one `signer` and a `deploy_trust` block with at
     least one line (token-level presence; root runs no directive
@@ -511,7 +525,7 @@ an empty cell means nobody, by design.
 | `…/in/` | 0770 | root:hotserve | tmpfiles.d | handler (`rename` in) | handler (listing), applier | applier (`rename` out) |
 | `…/in/<id>.tar` | 0644 | hotserve:hotserve | handler (by rename) | — | applier | applier (rename to `work/`) |
 | `…/work/` | 0700 | root:root | tmpfiles.d | applier | applier | applier |
-| `/tmp/box-verify-<id>/` | 0755, files 0644 | root:root | applier (its `PrivateTmp`) | applier | uid 65534 | gone with the unit |
+| `/tmp/box-verify-<sha>.<random>/` (`sig`, `allowed_signers`; the payload goes on stdin) | 0755, files 0644 (chmod after the write, so the umask has no say) | root:root | applier (its `PrivateTmp`), handler (`hotserve.service`'s) | applier, handler | uid 65534 (applier), the hotserve uid (handler) | the verifier, after each run |
 | `…/txn.json` | 0600 | root:hotserve (born in the setgid dir) | applier, `init` | applier, `init` | applier, `init`, `baseline` | applier, `init`, `baseline` |
 | `…/out/` | 2750 | root:hotserve | tmpfiles.d | applier | handler | — |
 | `…/out/<id>.json` | 0640 | root:hotserve | applier | applier | handler | applier (sweep) |
@@ -565,9 +579,14 @@ Every numeric bound, in one place, with its reason.
 | Caddyfile / blob | 1 MiB | the record embeds it |
 | tree object | 1 MiB | |
 | commit object | 64 KiB | real commits are kilobytes |
-| chain length | 500 commits | bounds verifier invocations; `baseline` is the recovery past it |
+| chain length | 500 commits, HEAD counted | bounds verifier invocations; `baseline` is the recovery past it |
+| `parents/` files | `0001` to `0499`, a sequence with no gap | HEAD plus 499 parents is the chain cap; a name outside the range is a malformed bundle |
 | tree depth (`path` components) | 32 | |
-| `path` | 4096 bytes of safe components | |
+| `path` | 4096 bytes of safe components: none empty, `.` or `..`, no control byte (NUL, newline, DEL) | a control byte could only be a trick; the `path` file may end in one newline, which is forgiven, since `echo` adds one |
+| principal | 256 bytes | ssh-keygen prints the matching principal on stdout, which is capped; a longer one could never match its own line |
+| ssh-keygen output kept | 4 KiB | into the error text and nowhere else |
+| one ssh-keygen child | 30 s and a `WaitDelay` | |
+| one whole chain's verification | 10 minutes | 500 commits × up to three children × 30 s would otherwise let a stalling child hold the applier, and the admission lock, for hours; a legitimate chain is seconds |
 | `diff` in record and result | 64 KiB, cut with a note | the record is one atomic write |
 | results and markers kept | 32 ids, or a day | see "Retention" |
 | handler wait for the first result | 30 s | past it, 504 and the poll |
@@ -590,9 +609,19 @@ top-level block, its `box` block, that block's `signer` and
 `box_webhook` stands at directive position. Tokenizing expands nothing
 and follows nothing, which is what makes it safe to run as root on
 pushed input. Directive position is Caddy's: the first token on a
-line, at any depth. A site without braces is refused (Caddy allows one
-brace-less site after the global options; its directives would sit at
-depth zero where a depth walk reads addresses).
+line, at any depth — for `import` and for the placeholder rule below.
+`box_webhook` itself counts only where Caddy would dispatch it as a
+directive: a site's body and the bodies of `route`, `handle`,
+`handle_path` and `handle_errors`; inside any other block (`header {
+box_webhook on }`, a matcher, a handler's options) the first token of
+a line is a field, and a file whose only `box_webhook` is one of those
+has no webhook site. Braces are structural only when unquoted, as
+Caddy's lexer flags them: `respond "{"` is a value. A site without
+braces is refused (Caddy allows one brace-less site after the global
+options; its directives would sit at depth zero where a depth walk
+reads addresses), as is a top-level block closed on a directive's line
+(Caddy's parser rejects it; a nested block may be), an empty file, and
+a file that lexes badly.
 
 Three refusals follow, and one honest limit:
 
@@ -609,7 +638,9 @@ Three refusals follow, and one honest limit:
   placeholder expansion with an *empty* environment, so a default that
   smuggles a newline and an `import` is seen as the tokens it would
   become. The expansion is reimplemented in `box` and pinned against
-  `caddyfile.Parse` on fixtures with the environment cleared.
+  `caddyfile.Parse` on fixtures with the environment cleared. The two
+  readings must agree on the host and the signers; a file that reads
+  differently once expanded is refused.
 - **The limit.** A placeholder in a *value* expands at reload under the
   service's real environment, which the walk cannot see. If root's own
   environment (`hotserve.service` and its drop-ins) sets a variable to
@@ -691,6 +722,7 @@ says. The workflow's action is in the last column.
 | 422 | `refused` | `<sha> is not signed; the box applies only commits signed by a key in its signer list` | both | fail |
 | 422 | `refused` | `<sha> is signed by OpenPGP, not by an SSH key in the Caddyfile this box runs; GitHub's merge button cannot land config — merge on a laptop and push` | both | fail |
 | 422 | `refused` | `<sha> is signed by a key that is not a signer in the Caddyfile this box runs` | both | fail |
+| 422 | `refused` | `<sha> is signed by <principal>, but the signature does not verify: the commit was altered after it was signed` / `<sha> is signed, but not by an SSH key in the Caddyfile this box runs` | both | fail |
 | 422 | `refused` | `<sha2>, between the commit this box runs and <sha>, is not signed; every commit on main must be — rebase it out and force-push; the box still runs <baseline>` | both | fail |
 | 422 | `refused` | `<sha2>, between the commit this box runs and <sha>, is signed by a key this box did not list when it last applied (<principal>); the commit that adds the key must apply first — force main back to it, let it apply, then push the rest` | both | fail |
 | 422 | `refused` | `the file sent is not <path> in <sha>` / `<path> in <sha> is not a regular file` / `<sha> is in a SHA-256 repository, which the box does not read` | both | fail |
@@ -698,7 +730,7 @@ says. The workflow's action is in the last column.
 | 422 | `refused` | `the chain from <baseline> to <sha> is longer than 500 commits; run hotserve box baseline <sha> as root on the box` | both | fail |
 | 422 | `refused` | `this file is for <host2>; this box is <host1>` | both | fail |
 | 422 | `refused` | `this box's file is <recorded path>; the bundle is <path> — hotserve init --path records a new one` | both | fail |
-| 422 | `refused` | `the new Caddyfile has no box block` / `… no signer` / `… no deploy_trust` / `… no site with box_webhook` / `… more than one site with box_webhook` / `… the box_webhook site's address is not one bare hostname (<address>)` / `… has a site without braces` / `… imports <path>; inline the snippet` / `… has a placeholder where a directive name, a site address or a box line goes (<token>)` / `… drops the key that signed this commit (<principal>); add the new key in one push, let it apply, then remove the old one` | both | fail |
+| 422 | `refused` | `the new Caddyfile has no box block` / `… has no signer` / `… has no deploy_trust` / `… has no site with box_webhook` / `… has more than one site with box_webhook` / `… has a box_webhook site whose address is not one bare hostname (<address>)` / `… has a site without braces (<address>)` / `… imports <path>; inline the snippet` / `… has a placeholder where a directive name, a site address or a box line goes (<token>)` / `… reads differently once its placeholders are expanded` / `… is empty` / `… has more than one global options block` / `… has more than one box block` / `… has a signer line that is not \`signer <principal> <key-type> <base64>\`` / `… has a bad signer <principal>: <what>` / `… does not tokenize: <lexer error>` / `… does not parse: <what>` / `… drops the key that signed this commit (<principal>); add the new key in one push, let it apply, then remove the old one` | both | fail |
 | 422 | `refused` | `hotserve validate: <redacted>` / `hotserve-backup validate: <redacted>` / `could not ask whether backups are installed; nothing changed` | handler | fail |
 | 422 | `refused` | `hotserve is not running; nothing applied` / `hotserve is still starting after 300 s; nothing applied` | applier | fail |
 | 422 | `refused` | `the Caddyfile this box runs lists no signer; hotserve init is the way back` | applier | fail |
@@ -1054,3 +1086,12 @@ Dated one-liners; the full text of each is in git.
   second-order effects of prose patches to those sections. T5's reach
   through root, the fast-forward residual and the local-token actor
   stated as such.
+- 2026-10-10 — PR 1 (the proof core and the reading of the signed
+  file) held every line but these, changed here with it: HEAD is always
+  on the chain, so its signature is always checked; a listed key whose
+  signature does not verify, and a `gpgsig` of neither kind, refuse by
+  name; `path` excludes control bytes; a signer's base64 must be its
+  canonical line and a principal at most 256 bytes; `box_webhook`
+  counts only where Caddy dispatches directives and braces only when
+  unquoted; the two readings must agree; one deadline over a whole
+  chain; `parents/` runs to `0499`.
