@@ -122,7 +122,7 @@ func ReadBundle(gz []byte) (*Bundle, error) {
 			if t.ID != id {
 				// The id, not the name: entryCap held it to the id
 				// grammar, and a refusal names its ids in IDs.
-				return nil, refuse("bundle: trees/%s does not hash to its name", id)
+				return nil, refuse("bundle: trees/%s does not hash to its name", oid(id))
 			}
 			b.Trees[id] = t
 		}

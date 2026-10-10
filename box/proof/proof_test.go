@@ -12,8 +12,10 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math/big"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -571,6 +573,28 @@ func TestParseSigner(t *testing.T) {
 	}
 	if time.Since(start) > 2*time.Second {
 		t.Fatalf("duplicate detection took %s", time.Since(start))
+	}
+}
+
+// A refusal names the ids its call site marked, and nothing that only
+// looks like one: a principal may be 40 lowercase hex (ParseSigner
+// allows it) and stays filtered.
+func TestRefusalNamesMarkedIDsOnly(t *testing.T) {
+	ids := func(err error) []string {
+		var r *Refusal
+		if !errors.As(err, &r) {
+			t.Fatalf("%v is not a Refusal", err)
+		}
+		return r.IDs
+	}
+	principal := strings.Repeat("ab", 20)
+	got := ids(refuseCode(codeAltered, "%s is signed by %s, but the signature does not verify over the commit", oid(emptyBlob), principal))
+	if !slices.Equal(got, []string{emptyBlob}) {
+		t.Fatalf("IDs = %v, want only the commit", got)
+	}
+	got = ids(refuse("%s and %s, and %s again", oid(emptyTree), oid(emptyBlob), oid(emptyTree)))
+	if !slices.Equal(got, []string{emptyTree, emptyBlob}) {
+		t.Fatalf("IDs = %v, want each id once, in order", got)
 	}
 }
 

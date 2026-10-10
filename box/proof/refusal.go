@@ -59,15 +59,18 @@ func refuseCode(code refusalCode, format string, args ...any) error {
 	return &Refusal{Msg: fmt.Sprintf(format, args...), IDs: idsIn(args), code: code}
 }
 
-// idsIn is every argument in the id grammar, once each. A message's
-// ids are ones the proof computed or read from an object it parsed;
-// one that is the bundle's own text (a quoted name) is the pusher's,
-// and naming it back to them reveals nothing of the box's.
+// oid marks a refusal's argument as an object id — one the proof
+// computed, or read from an object it parsed — and so one the refusal
+// names in IDs. Marked by type, not recognised by shape: a principal or
+// a quoted name may look like an id and is not one (it stays filtered).
+type oid string
+
+// idsIn is every oid argument in the id grammar, once each.
 func idsIn(args []any) []string {
 	var ids []string
 	for _, a := range args {
-		if s, ok := a.(string); ok && IsID(s) && !slices.Contains(ids, s) {
-			ids = append(ids, s)
+		if s, ok := a.(oid); ok && IsID(string(s)) && !slices.Contains(ids, string(s)) {
+			ids = append(ids, string(s))
 		}
 	}
 	return ids

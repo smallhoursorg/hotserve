@@ -38,10 +38,10 @@ func Chain(head *Commit, parents []*Commit, baseline string) ([]*Commit, error) 
 			return nil, descendRefusal(head.ID, baseline)
 		}
 		if p.ID != cur.Parents[0] {
-			return nil, refuse("bundle: parents/%04d is not the first parent of %s", i+1, cur.ID)
+			return nil, refuse("bundle: parents/%04d is not the first parent of %s", i+1, oid(cur.ID))
 		}
 		if len(chain) == MaxChain {
-			return nil, refuse("the chain from %s to %s is longer than %d commits; run hotserve box baseline %s as root on the box", baseline, head.ID, MaxChain, head.ID)
+			return nil, refuse("the chain from %s to %s is longer than %d commits; run hotserve box baseline %s as root on the box", oid(baseline), oid(head.ID), MaxChain, oid(head.ID))
 		}
 		chain = append(chain, p)
 		cur = p
@@ -53,7 +53,7 @@ func Chain(head *Commit, parents []*Commit, baseline string) ([]*Commit, error) 
 	// than the cap fills the chain exactly and ends here, still naming
 	// a parent: that is the cap, not a missing baseline.
 	if len(chain) == MaxChain && len(cur.Parents) > 0 {
-		return nil, refuse("the chain from %s to %s is longer than %d commits; run hotserve box baseline %s as root on the box", baseline, head.ID, MaxChain, head.ID)
+		return nil, refuse("the chain from %s to %s is longer than %d commits; run hotserve box baseline %s as root on the box", oid(baseline), oid(head.ID), MaxChain, oid(head.ID))
 	}
 	return nil, descendRefusal(head.ID, baseline)
 }
@@ -63,7 +63,7 @@ func descendRefusal(head, baseline string) error {
 		"If the box already runs a later commit, nothing is wrong. "+
 		"If a branch merged main into itself before it was fast-forwarded, rebase it onto main and force-push. "+
 		"Only if main was rewritten below %s does hotserve box baseline %s, as root on the box, reset trust to %s, whose ancestors the box will then never examine",
-		head, baseline, baseline, head, head)
+		oid(head), oid(baseline), oid(baseline), oid(head), oid(head))
 }
 
 // VerifyChain is steps 12 and 14 together: every commit of the chain
@@ -126,12 +126,12 @@ func VerifyChain(ctx context.Context, v *Verifier, chain []*Commit, installed, i
 				}
 			}
 			return "", refuse("%s, between the commit this box runs and %s, is signed by a key this box did not list when it last applied (%s); the commit that adds the key must apply first — force main back to it, let it apply, then push the rest",
-				c.ID, chain[0].ID, name)
+				oid(c.ID), oid(chain[0].ID), name)
 		case codeAltered:
 			return "", err
 		default:
 			return "", refuse("%s, between the commit this box runs and %s, is not signed; every commit on main must be — rebase it out and force-push; the box still runs %s",
-				c.ID, chain[0].ID, baseline)
+				oid(c.ID), oid(chain[0].ID), oid(baseline))
 		}
 	}
 	return principal, nil

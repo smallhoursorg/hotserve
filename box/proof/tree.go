@@ -61,10 +61,10 @@ func ParseTree(raw []byte) (*Tree, error) {
 		if !first {
 			switch {
 			case bytes.Equal(prevName, name):
-				order = refuse("bundle: tree %s: an entry name appears twice", t.ID)
+				order = refuse("bundle: tree %s: an entry name appears twice", oid(t.ID))
 				return false
 			case compareTreeNames(prevName, prevDir, name, dir) > 0:
-				order = refuse("bundle: tree %s: entries are not in git's order", t.ID)
+				order = refuse("bundle: tree %s: entries are not in git's order", oid(t.ID))
 				return false
 			}
 		}
@@ -72,7 +72,7 @@ func ParseTree(raw []byte) (*Tree, error) {
 			cands = cands[:len(cands)-1]
 		}
 		if dir && len(cands) > 0 && bytes.Equal(cands[len(cands)-1], name) {
-			order = refuse("bundle: tree %s: an entry name appears twice", t.ID)
+			order = refuse("bundle: tree %s: an entry name appears twice", oid(t.ID))
 			return false
 		}
 		if !dir {
@@ -119,19 +119,19 @@ func (t *Tree) scan(visit func(mode, name, id []byte) bool) error {
 	for len(rest) > 0 {
 		mode, after, ok := bytes.Cut(rest, []byte(" "))
 		if !ok {
-			return refuse("bundle: tree %s: a truncated entry", t.ID)
+			return refuse("bundle: tree %s: a truncated entry", oid(t.ID))
 		}
 		switch string(mode) { // a comparison, not a conversion: the compiler does not allocate for it
 		case ModeFile, ModeExecutable, ModeSymlink, ModeSubmodule, ModeDir:
 		default:
-			return refuse("bundle: tree %s: an entry mode git does not write", t.ID)
+			return refuse("bundle: tree %s: an entry mode git does not write", oid(t.ID))
 		}
 		name, after, ok := bytes.Cut(after, []byte{0})
 		if !ok || len(after) < 20 {
-			return refuse("bundle: tree %s: a truncated entry", t.ID)
+			return refuse("bundle: tree %s: a truncated entry", oid(t.ID))
 		}
 		if len(name) == 0 || string(name) == "." || string(name) == ".." || bytes.IndexByte(name, '/') >= 0 {
-			return refuse("bundle: tree %s: an entry name that is not one path component", t.ID)
+			return refuse("bundle: tree %s: an entry name that is not one path component", oid(t.ID))
 		}
 		rest = after[20:]
 		if !visit(mode, name, after[:20]) {
