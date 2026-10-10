@@ -238,6 +238,14 @@ func walk(input []byte) (*Shape, error) {
 				// or an `invoke`, which the walk does not follow.
 				return nil, refuse("has box_webhook inside a snippet or named route (" + proof.Bound(top.snippet.addresses[0]) + "); write it in the site")
 			case top.kind == kindSite:
+				// A matcher is an argument to Caddy: `box_webhook /x`
+				// adapts, and leaves / unserved. The directive refuses
+				// any argument too (caddyfile.go); the walk refuses it
+				// here so the box never counts a webhook Caddy would
+				// not serve on /.
+				if len(args) > 0 {
+					return nil, refuse("has box_webhook with arguments (" + proof.Bound(strings.Join(args, " ")) + "); it takes none, and a matcher would leave / unserved")
+				}
 				top.site.webhook = true
 			default:
 				// Only a direct child of the site block counts: under a
