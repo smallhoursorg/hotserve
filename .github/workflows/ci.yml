@@ -39,6 +39,9 @@ jobs:
           path: .cache
           key: lint-${{ matrix.module }}-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
           restore-keys: lint-${{ matrix.module }}-${{ runner.os }}-
+      # Here, not in test: per module and in parallel like lint, and
+      # once (test runs per arch; tidy considers every platform anyway).
+      - run: make tidy-check COMPOSE="$COMPOSE" MODULES="${{ matrix.module }}"
       - run: make lint COMPOSE="$COMPOSE" MODULES="${{ matrix.module }}"
 
   # Unit + integration on both architectures: arm64 is a first-class
