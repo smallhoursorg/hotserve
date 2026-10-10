@@ -147,13 +147,15 @@ func deployShArgs(t *testing.T, srv *httptest.Server, args []string, env ...stri
 	// job summary of an Actions run this test runs in, never reaches
 	// the script unless a case sets it. ARTIFACT_SHA256 is dropped
 	// rather than blanked: the script tells set-but-empty from unset.
+	// The stand-in box is plain http, so HOTSERVE_ALLOW_HTTP=1 unless a
+	// case says otherwise.
 	var base []string
 	for _, kv := range os.Environ() {
 		if !strings.HasPrefix(kv, "ARTIFACT_SHA256=") {
 			base = append(base, kv)
 		}
 	}
-	cmd.Env = append(append(base, "HOTSERVE_URL="+srv.URL+"/demo", "VERSION=v1", "HOTSERVE_AUDIENCE=", "GITHUB_STEP_SUMMARY="), env...)
+	cmd.Env = append(append(base, "HOTSERVE_URL="+srv.URL+"/demo", "HOTSERVE_ALLOW_HTTP=1", "VERSION=v1", "HOTSERVE_AUDIENCE=", "GITHUB_STEP_SUMMARY="), env...)
 	out, err := cmd.CombinedOutput()
 	var ee *exec.ExitError
 	if errors.As(err, &ee) {
@@ -258,5 +260,76 @@ func TestDeployShSaysWhatARefusedRunMustBeTrustedFor(t *testing.T) {
 	}
 	if !strings.Contains(string(got), "claim repository  org/blog") {
 		t.Errorf("job summary lacks the checklist:\n%s", got)
+	}
+}
+
+// HOTSERVE_URL is https:// or the run stops before the token is minted
+// and before any request: over http the deploy token (and, for a URL
+// deploy, the job's GITHUB_TOKEN in the body) would cross the wire in
+// the clear. The scheme is matched in any case; anything else —
+// http://, no scheme, a space in front — is refused unless
+// HOTSERVE_ALLOW_HTTP is exactly 1.
+func TestDeployShRefusesAPlaintextURLBeforeTheMint(t *testing.T) {
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Fatal("deploy.sh needs curl; install it to run this test")
+	}
+	// Every request the run makes, the mint's included, under a lock
+	// for the same reason as the digest test's body.
+	var mu sync.Mutex
+	var paths []string
+	seen := func() []string { mu.Lock(); defer mu.Unlock(); return append([]string(nil), paths...) }
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/token" {
+			_, _ = w.Write([]byte(`{"value":"minted"}` + "\n"))
+			return
+		}
+		_, _ = w.Write([]byte(`{"app":"demo","current_version":"v1","running":true}` + "\n"))
+	}))
+	defer srv.Close()
+	host := strings.TrimPrefix(srv.URL, "http://")
+	// In Actions, minting from the stand-in, so a refusal after the mint
+	// or the group line would show.
+	actions := []string{"GITHUB_ACTIONS=true", "HOTSERVE_TOKEN=",
+		"ACTIONS_ID_TOKEN_REQUEST_URL=" + srv.URL + "/token?api-version=1", "ACTIONS_ID_TOKEN_REQUEST_TOKEN=run"}
+	run := func(url, allow string) (string, int) {
+		mu.Lock()
+		paths = nil
+		mu.Unlock()
+		return deploySh(t, srv, append(actions, "HOTSERVE_URL="+url, "HOTSERVE_ALLOW_HTTP="+allow)...)
+	}
+
+	for _, tc := range []struct{ name, url, allow string }{
+		{"http", srv.URL + "/demo", ""},
+		{"HTTP", "HTTP://" + host + "/demo", ""},
+		{"schemeless", host + "/demo", ""},
+		{"space before https", " https://" + host + "/demo", ""},
+		{"https without its slashes", "https:" + host + "/demo", ""},
+		{"opt-out not exactly 1", srv.URL + "/demo", "true"},
+		{"opt-out padded", srv.URL + "/demo", " 1"},
+	} {
+		out, code := run(tc.url, tc.allow)
+		if code != 1 || !strings.Contains(out, "is not https://") || !strings.Contains(out, "HOTSERVE_ALLOW_HTTP=1") ||
+			strings.Contains(out, "::add-mask::") || strings.Contains(out, "::group::") || len(seen()) != 0 {
+			t.Fatalf("%s: exit %d (want 1 before the mint or any request), requests %v\n%s", tc.name, code, seen(), out)
+		}
+	}
+
+	// Past the check, the run mints. Nothing listens on port 1, so the
+	// deploy itself then fails: what is asserted is that the check let
+	// the run through to the mint.
+	for _, url := range []string{"https://127.0.0.1:1/demo", "HTTPS://127.0.0.1:1/demo", "HttpS://127.0.0.1:1/demo"} {
+		out, _ := run(url, "")
+		if got := seen(); len(got) != 1 || got[0] != "/token" || strings.Contains(out, "is not https://") {
+			t.Fatalf("%s: requests %v, want the mint alone\n%s", url, got, out)
+		}
+	}
+
+	// The opt-out: http deploys, the mint first.
+	if out, code := run(srv.URL+"/demo", "1"); code != 0 || strings.Join(seen(), " ") != "/token /demo" {
+		t.Fatalf("HOTSERVE_ALLOW_HTTP=1: exit %d, requests %v\n%s", code, seen(), out)
 	}
 }

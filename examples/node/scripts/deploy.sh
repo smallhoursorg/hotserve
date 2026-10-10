@@ -5,7 +5,10 @@
 #   scripts/deploy.sh <app.tar.gz>       a local file: pushed in the request body
 #   scripts/deploy.sh --rollback <ver>   relaunches a version still on the box's disk
 #
-#   HOTSERVE_URL          the app's webhook, e.g. https://deploy.example.com/example  (required)
+#   HOTSERVE_URL          the app's webhook, e.g. https://deploy.example.com/example  (required;
+#                         https:// only, since the request carries the token)
+#   HOTSERVE_ALLOW_HTTP   1 (exactly) lets HOTSERVE_URL be http://, sending the
+#                         token in the clear: for a local test box only
 #   VERSION               the release's version; defaults to the commit (12 hex
 #                         chars). Versions are immutable on the box, so the
 #                         default deploys once per commit: set VERSION for an
@@ -73,6 +76,20 @@ if [ -n "${ARTIFACT_SHA256+set}" ]; then
 	fi
 fi
 url=${HOTSERVE_URL:?set HOTSERVE_URL to the app webhook, e.g. https://deploy.example.com/example}
+# The request carries the deploy token, and from the workflow
+# ARTIFACT_AUTH_HEADER (the job's GITHUB_TOKEN) too: over http both
+# would cross the wire in the clear before anything in front of the
+# box could redirect it, and curl guesses a plaintext scheme (http,
+# mostly) for a schemeless URL. So https:// only — the scheme in any
+# case, nothing before it — refused before the mint; the one way past
+# is HOTSERVE_ALLOW_HTTP=1 exactly, for a test box. printf, not echo:
+# the URL is the caller's, and dash's echo would read its backslashes.
+case $url in
+[Hh][Tt][Tt][Pp][Ss]://*) ;;
+*)
+	[ "${HOTSERVE_ALLOW_HTTP:-}" = 1 ] || { printf "deploy.sh: HOTSERVE_URL '%s' is not https://, and the request carries the deploy token; set it to the app webhook, e.g. https://deploy.example.com/example (HOTSERVE_ALLOW_HTTP=1 sends it anyway, for local testing only)\n" "$url" >&2; exit 1; }
+	;;
+esac
 # The app is the URL's last path segment; the box accepts a trailing
 # slash there, so drop any before taking it.
 app=$url
