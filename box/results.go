@@ -43,13 +43,22 @@ const (
 	msgStillStarting      = "hotserve is still starting after 300 s; nothing applied"
 	msgNoSigner           = "the Caddyfile this box runs lists no signer; hotserve init is the way back"
 	msgInterrupted        = "interrupted before the Caddyfile changed; nothing changed"
-	msgInterruptedStopped = "interrupted; the previous Caddyfile is on disk; hotserve is not running"
+	msgInterruptedStopped = "interrupted; the previous Caddyfile is on disk; hotserve is not running — systemctl reset-failed hotserve, then systemctl start hotserve, loads it"
 	msgNoRecord           = "the box has no record of this push; push again"
 	msgReloadFailed       = "the reload failed; the previous Caddyfile is back and running — journalctl -u hotserve -n 50 on the box says why"
 	msgRecordAfterReload  = "the record could not be updated after a successful reload (disk full); rolled back to keep the file and the record consistent"
-	msgBothReloads        = "the reload failed and so did the reload of the previous file; the previous file is on disk; journalctl -u hotserve"
-	msgChanged            = "the Caddyfile changed during the transaction; it is left as found"
-	msgDiskFull           = "disk full; the previous Caddyfile could not be restored"
+	// The swap landed, then the `swapped` record or the swap's own fsync
+	// failed: nothing was reloaded before the rollback.
+	msgRolledBackUnrecorded = "the Caddyfile was swapped, then a write after the swap failed; rolled back: the previous Caddyfile is back and running"
+	// A crash fell after the swap: recovery rolled back, the reload's
+	// outcome unknown.
+	msgRolledBackInterrupted = "interrupted after the Caddyfile changed; rolled back: the previous Caddyfile is back and running"
+	msgBothReloads           = "the reload failed and so did the reload of the previous file; the previous file is on disk; journalctl -u hotserve"
+	// The reload of the previous file failed in a rollback whose first
+	// reload did not (bothFailed).
+	msgPrevReloadFailed = "rolled back, but the reload of the previous file failed; the previous file is on disk; journalctl -u hotserve"
+	msgChanged          = "the Caddyfile changed during the transaction; it is left as found"
+	msgDiskFull         = "disk full; the previous Caddyfile could not be restored"
 	// msgInitRemedy follows init's refusal on a hotserve that is not up
 	// ("Console commands"); %[1]s is init's argument and %[2]s its
 	// directory, absolute, since the operator may read it after a
@@ -57,9 +66,10 @@ const (
 	// file it has, so init's own swap and rollback still stand between
 	// the change and the box; the old file is never touched by hand. A
 	// restart, not a start: a start joins one already in flight, which
-	// read the old file.
+	// read the old file; reset-failed first, as msgInterruptedStopped
+	// says, since a unit at its start limit refuses a restart.
 	msgInitRemedy = `the Caddyfile is accepted only by a running hotserve. Start it on the file it has, then run init again:
-  systemctl enable hotserve && systemctl restart hotserve
+  systemctl enable hotserve && systemctl reset-failed hotserve && systemctl restart hotserve
   cd %[2]s && hotserve init %[1]s
 If it will not start, journalctl -u hotserve says why.`
 )
@@ -101,6 +111,9 @@ type result struct {
 	Apps       []string `json:"apps,omitempty"`
 	Diff       string   `json:"diff,omitempty"`
 	Error      string   `json:"error,omitempty"`
+	// Named is the object ids Error names, which an answer holds out of
+	// the response filter as it does Commit.
+	Named []string `json:"named,omitempty"`
 }
 
 // marshal is the result's bytes, never more than the handler reads: the
@@ -179,7 +192,7 @@ func resultFields(r result) []zap.Field {
 		zap.String("id", r.ID), zap.String("phase", r.Phase), zap.String("commit", r.Commit),
 		zap.String("path", proof.Bound(r.Path)), zap.String("signer", r.Signer), zap.String("box", r.BoxWebhook),
 		zap.Bool("caddyfile_edited_out_of_band", r.OutOfBand), zap.Strings("apps", r.Apps),
-		zap.String("diff", r.Diff), zap.String("error", r.Error),
+		zap.String("diff", r.Diff), zap.String("error", r.Error), zap.Strings("named", r.Named),
 	}
 }
 
@@ -202,10 +215,30 @@ func readResultFile(dir, id string) (*result, error) {
 	if err := json.Unmarshal(b, &r); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	if r.ID != id || (r.Phase != phaseVerified && !terminal(r.Phase)) {
+	if r.ID != id || (r.Phase != phaseVerified && !terminal(r.Phase)) || !namesIDs(r.Named) {
 		return nil, fmt.Errorf("%s: not a result", path)
 	}
 	return &r, nil
+}
+
+// maxNamed bounds a result's `named`: a refusal names at most a few
+// objects (the descent refusal: HEAD and the baseline).
+const maxNamed = 8
+
+// namesIDs reports whether named is what a refusal records: at most
+// maxNamed entries, each in the id grammar. Root writes out/, so
+// anything else is a disk fault or the console; the answer would hold
+// it out of the filter, so it is refused, not passed on.
+func namesIDs(named []string) bool {
+	if len(named) > maxNamed {
+		return false
+	}
+	for _, s := range named {
+		if !proof.IsID(s) {
+			return false
+		}
+	}
+	return true
 }
 
 // marker is stage/<id>.auth (DESIGN-box.md, "Record and result fields"),

@@ -24,6 +24,8 @@ package box
 //
 // The exit status is 0 for every run but the full-disk end, which
 // leaves the record for the next run by design (Failure-mode table).
+// Every run that leaves work on disk ends with one line saying so and
+// what the console does (msgLeftOnDisk).
 
 import (
 	"context"
@@ -32,6 +34,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -61,6 +64,8 @@ type Applier struct {
 	// unwritten), with its phase — the first terminal one, once there is
 	// one: Retention keeps them, and a terminal one is settled (step 9).
 	wrote map[string]string
+	// listed is the names take listed in in/; nil until in/ is listed.
+	listed map[string]bool
 }
 
 // nobody is the uid (and gid) ssh-keygen runs as (step 12).
@@ -138,26 +143,76 @@ func (a *Applier) lock() (func(), error) {
 }
 
 // Run is one applier run: recover, then take, then each bundle, then
-// Retention. It returns an error only for the full-disk end.
+// Retention. It returns an error only for the full-disk end. Whatever
+// ended it, the last thing it does is say whether it leaves work on disk
+// (leftOnDisk).
 func (a *Applier) Run(ctx context.Context) error {
 	unlock, err := a.lock()
 	if err != nil {
 		a.logger.Error("box apply could not take its lock", zap.String("error", proof.Bound(err.Error())))
+		a.leftOnDisk()
 		return nil
 	}
 	defer unlock()
+	err = a.run(ctx)
+	a.leftOnDisk()
+	return fullDiskOnly(err)
+}
+
+func (a *Applier) run(ctx context.Context) error {
 	if err := a.recoverAll(ctx); err != nil {
-		return fullDiskOnly(err)
+		return err
 	}
 	for _, id := range a.take() {
 		if err := a.process(ctx, id); err != nil {
-			// The record stays for the next run; what else was taken
-			// stays in work/ with it (I2's exceptions).
-			return fullDiskOnly(err)
+			// The record stays; what else was taken stays in work/ with
+			// it (I2's exceptions).
+			return err
 		}
 	}
 	a.sweep()
 	return nil
+}
+
+// msgLeftOnDisk is the line a run that leaves work on disk ends with
+// (I2's exceptions; DESIGN-box.md, "The applier unit"). The path unit
+// starts the next run at once, so a cause that does not clear by itself
+// loops it to its trigger limit, after which nothing runs until the
+// console restarts it.
+const msgLeftOnDisk = "box apply leaves work on disk: the path unit starts it again at once, and stops at its trigger limit (trigger-limit-hit) if the cause persists; once the console has cleared the cause, systemctl restart hotserve-box-apply.path, and again ten seconds later if that fails"
+
+// leftOnDisk journals msgLeftOnDisk, once, if the run leaves what starts
+// the next run at once: the record, an entry in work/, or an entry of
+// in/ the run listed — every entry of in/ if it listed none. An entry
+// that landed in in/ after the listing is the next run's work, not a
+// stop, and is not counted. The line carries counts, never the names,
+// which the hotserve uid chose.
+func (a *Applier) leftOnDisk() {
+	var left []string
+	if exists(a.x("txn.json")) {
+		left = append(left, "txn.json")
+	}
+	count := func(dir string, only map[string]bool) {
+		entries, err := os.ReadDir(a.x(dir))
+		if err != nil {
+			left = append(left, dir+"/: cannot be listed")
+			return
+		}
+		n := 0
+		for _, e := range entries {
+			if only == nil || only[e.Name()] {
+				n++
+			}
+		}
+		if n > 0 {
+			left = append(left, dir+"/: "+strconv.Itoa(n))
+		}
+	}
+	count("work", nil)
+	count("in", a.listed)
+	if len(left) > 0 {
+		a.logger.Error(msgLeftOnDisk, zap.Strings("left", left))
+	}
 }
 
 func fullDiskOnly(err error) error {
@@ -178,7 +233,7 @@ func (a *Applier) recoverAll(ctx context.Context) error {
 		// Only root writes the record, whole, by rename: one that does
 		// not read is a fault no table reasons about. It is kept, and
 		// nothing is touched (States table, "record unreadable").
-		a.logger.Error("box: txn.json cannot be read; nothing is applied until the console reads it (it may hold the previous Caddyfile), removes it, then runs systemctl restart hotserve-box-apply.path, and again ten seconds later if that fails", zap.String("error", proof.Bound(err.Error())))
+		a.logger.Error("box: txn.json cannot be read; nothing is applied until the console settles it by hand, as DESIGN-box.md's States table says for an unreadable record — it may hold the only copy of the previous Caddyfile, so it is read before it is removed", zap.String("error", proof.Bound(err.Error())))
 		return errUnsettled
 	default:
 		if err := a.recoverRecord(ctx, rec); err != nil {
@@ -298,9 +353,11 @@ func (a *Applier) take() []string {
 		a.logger.Error("box: in/ cannot be listed", zap.String("error", proof.Bound(err.Error())))
 		return nil
 	}
+	a.listed = make(map[string]bool, len(entries))
 	var ids []string
 	for _, e := range entries {
 		name := e.Name()
+		a.listed[name] = true
 		src := filepath.Join(in, name)
 		landed, err := a.takeOne(in, work, name)
 		if err != nil && landed {
@@ -461,6 +518,7 @@ func (a *Applier) process(ctx context.Context, id string) error {
 func (a *Applier) checked(t *txn, err error) error {
 	var ref *refusal
 	if errors.As(err, &ref) {
+		t.named = ref.ids
 		a.finish(t, phaseRefused, ref.msg)
 		return nil
 	}

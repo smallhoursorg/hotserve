@@ -46,5 +46,5 @@ func formOfID(s string) idForm {
 func IsID(s string) bool { return formOfID(s) == idSHA1 }
 
 func sha256RepoRefusal(id string) error {
-	return refuse("%s is in a SHA-256 repository, which the box does not read", id)
+	return refuse("%s is in a SHA-256 repository, which the box does not read", oid(id))
 }

@@ -52,13 +52,28 @@ func TestResultJournaledWhenUnwritable(t *testing.T) {
 		t.Fatalf("%d lines", len(lines))
 	}
 	fields := lines[0].ContextMap()
-	for _, k := range []string{"id", "phase", "commit", "path", "signer", "box", "caddyfile_edited_out_of_band", "apps", "diff", "error", "write_error"} {
+	for _, k := range []string{"id", "phase", "commit", "path", "signer", "box", "caddyfile_edited_out_of_band", "apps", "diff", "error", "named", "write_error"} {
 		if _, ok := fields[k]; !ok {
 			t.Errorf("the line has no %s", k)
 		}
 	}
 	if fields["id"] != id || fields["phase"] != phaseApplied || fields["commit"] != head {
 		t.Errorf("%v", fields)
+	}
+
+	// A refusal's named ids reach the line too.
+	b = newTestBox(t)
+	unsigned := b.repo.commit(boxFile(2, b.alice), nil, b.base)
+	b.push(b.repo.bundleFiles(unsigned, b.base))
+	if err := b.run(hooks{fail: failAt(map[string]int{"result:refused": -1})}); err != nil {
+		t.Fatal(err)
+	}
+	lines = b.logged(zapcore.ErrorLevel, "box result could not be written")
+	if len(lines) != 1 {
+		t.Fatalf("refused: %d lines", len(lines))
+	}
+	if named, _ := lines[0].ContextMap()["named"].([]any); len(named) != 1 || named[0] != unsigned {
+		t.Errorf("refused: named = %v", lines[0].ContextMap()["named"])
 	}
 }
 

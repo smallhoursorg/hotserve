@@ -14,7 +14,11 @@ import (
 // is `refused`. Any other error from check is the box's own (ssh-keygen
 // could not run, the chain deadline passed, the box's own files do not
 // read): never a refusal, and the result is `failed`.
-type refusal struct{ msg string }
+// ids are the object ids msg names (proof.Refusal's IDs).
+type refusal struct {
+	msg string
+	ids []string
+}
 
 func (r *refusal) Error() string { return r.msg }
 
@@ -121,7 +125,7 @@ func check(ctx context.Context, v *proof.Verifier, b *proof.Bundle, installed []
 func asRefusal(err error) error {
 	var r *proof.Refusal
 	if errors.As(err, &r) {
-		return &refusal{msg: r.Msg}
+		return &refusal{msg: r.Msg, ids: r.IDs}
 	}
 	return err
 }

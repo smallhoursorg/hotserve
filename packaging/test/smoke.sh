@@ -408,7 +408,8 @@ rm -f "$B/out/$bad_id.json"
 echo "the real applier, in the unit as shipped: three entries that are not bundles removed with no result, one bad bundle settled in out/ (640 root:hotserve), exit 0"
 
 # An unreadable record, with the real applier: each run journals it,
-# takes nothing and exits 0, so the path unit starts the next at once
+# takes nothing, ends with the left-on-disk line (the restart remedy)
+# and exits 0, so the path unit starts the next at once
 # and ends at its trigger limit; removing the record does not start it
 # again, and `systemctl restart hotserve-box-apply.path`, once the
 # limit's ten seconds have passed, does (DESIGN-box.md, "Why the path
@@ -427,7 +428,8 @@ t1=$(date +%s)
 journalctl --sync
 runs=$(real_journal | grep -c 'txn.json cannot be read' || true)
 [ "$runs" -ge 1 ] || die "the path unit hit its trigger limit, but no run journaled the unreadable record"
-real_journal | grep -q 'then runs systemctl restart hotserve-box-apply.path, and again ten seconds later if that fails' || die "the unreadable record's journal line does not name the restart the console needs, and when"
+real_journal | grep 'box apply leaves work on disk' | grep -qF '"left":["txn.json"]' || die "no run ended with the left-on-disk line counting the record"
+real_journal | grep -q 'once the console has cleared the cause, systemctl restart hotserve-box-apply.path, and again ten seconds later if that fails' || die "the left-on-disk line does not name the restart the console needs, and when"
 echo "an unreadable record: $runs runs, then trigger-limit-hit, within $((t1 - t0 + 1))s"
 rm -f "$B/txn.json"
 sleep 2
