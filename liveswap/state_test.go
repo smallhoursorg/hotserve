@@ -280,8 +280,31 @@ func TestRecoveryRefusesAPlantedStateFile(t *testing.T) {
 			must(t, os.MkdirAll(rig.spec.dirs.release("v7"), 0o755))
 			tc.plant(t, rig.spec.dirs.state)
 			core, logs := observer.New(zap.ErrorLevel)
+			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan struct{})
-			go func() { rig.ma.recover(context.Background(), zap.New(core)); close(done) }()
+			go func() { rig.ma.recover(ctx, zap.New(core)); close(done) }()
+			// Should a regression block on the FIFO or retry, the
+			// goroutine would outlive this test holding — or coming
+			// back for — ownerLock("demo"), every rig's, and hang some
+			// later test instead of failing this one. Release it here:
+			// cancel ends a retry loop, and a writer's open lets a
+			// reader blocked in its own open return, to the EOF of the
+			// writer's close.
+			t.Cleanup(func() {
+				cancel()
+				if fi, err := os.Lstat(rig.spec.dirs.state); err == nil && fi.Mode()&os.ModeNamedPipe != 0 {
+					if w, err := os.OpenFile(rig.spec.dirs.state, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+						if err := w.Close(); err != nil {
+							t.Error(err) // not Fatal: the wait below must still run
+						}
+					}
+				}
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+					t.Error("the recovery goroutine is still running after the test")
+				}
+			})
 			select {
 			case <-done:
 			case <-time.After(5 * time.Second):

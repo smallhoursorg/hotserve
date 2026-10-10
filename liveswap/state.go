@@ -34,10 +34,11 @@ type stateStore interface {
 }
 
 // fileStateStore keeps state.json next to the app's releases, written
-// and read under the rules the deploy records are (ownfile.go): the
+// and read by the functions the deploy records are (ownfile.go): the
 // app dir was the app's to write before sandboxing existed, and a link
 // planted then — at state.json, or at the temp name an earlier
-// hotserve wrote through — is not followed. A state.json that is a
+// hotserve wrote through — is not followed. The app dir itself is not
+// checked here (ownfile.go says why). A state.json that is a
 // link, a FIFO or anything but a regular file, or larger than any
 // state hotserve writes, is an error like a corrupt one, which
 // recovery never silently resets (ensureRunning).

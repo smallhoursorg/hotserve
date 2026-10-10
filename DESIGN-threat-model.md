@@ -1023,11 +1023,14 @@ does not isolate the runtime.
   (liveswap/state.go is read on relaunch for the version and the
   unit, and checked before either is used: a version that is not one,
   a unit that is not this app's, a nonce that is not one — refused,
-  never a path). It is written and read under the deploy records'
-  rules (liveswap/ownfile.go): a fresh temp file renamed over the
-  name, and a read that follows no link, does not block on a FIFO and
-  refuses anything but a regular file of a state file's size — at
-  recovery, a permanent error naming the file, never a reset.
+  never a path). It is written and read by the functions the deploy
+  records are (liveswap/ownfile.go): a fresh temp file renamed over
+  the name, and a read that follows no link at the name, does not
+  block on a FIFO and refuses anything but a regular file of a state
+  file's size — at recovery, a permanent error naming the file, never
+  a reset. Unlike the records' directory (recordsDir), the app dir
+  above it is not checked by the read; the launch path checks it
+  (resolveBindSources), and every save follows a launch.
   Normative and shipped: only the release
   being started, `shared/` and the OS base view are bound into the
   unit — the app dir root, `state.json`, `tmp/` (the upload staging
