@@ -122,7 +122,7 @@ func TestWebhookDirective(t *testing.T) {
 
 // adapt runs the Caddyfile adapter on a template (file's K1/K2), as
 // `hotserve validate` does before it provisions.
-func adapt(t *testing.T, in string) ([]byte, []caddyconfig.Warning, error) {
+func adapt(t testing.TB, in string) ([]byte, []caddyconfig.Warning, error) {
 	t.Helper()
 	return caddyconfig.GetAdapter("caddyfile").Adapt(file(in), map[string]any{"filename": "Caddyfile"})
 }
