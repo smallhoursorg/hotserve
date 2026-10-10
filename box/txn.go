@@ -108,6 +108,8 @@ type txn struct {
 	recorded bool
 	// outcome is the terminal result, for init's caller to print.
 	outcome *result
+	// named is a refusal's object ids, for its result's `named`.
+	named []string
 }
 
 var (
@@ -129,6 +131,7 @@ func (t *txn) result(phase, msg string) result {
 	return result{
 		ID: r.ID, Phase: phase, Commit: r.Commit, Path: r.Path, Signer: r.Signer,
 		BoxWebhook: r.BoxWebhook, OutOfBand: r.OutOfBand, Apps: r.Apps, Diff: r.Diff, Error: msg,
+		Named: t.named,
 	}
 }
 

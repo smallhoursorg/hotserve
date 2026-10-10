@@ -81,6 +81,9 @@ type result struct {
 	Apps       []string `json:"apps,omitempty"`
 	Diff       string   `json:"diff,omitempty"`
 	Error      string   `json:"error,omitempty"`
+	// Named is the object ids Error names, which an answer holds out of
+	// the response filter as it does Commit.
+	Named []string `json:"named,omitempty"`
 }
 
 // marshal is the result's bytes, never more than the handler reads: the
@@ -182,10 +185,30 @@ func readResultFile(dir, id string) (*result, error) {
 	if err := json.Unmarshal(b, &r); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	if r.ID != id || (r.Phase != phaseVerified && !terminal(r.Phase)) {
+	if r.ID != id || (r.Phase != phaseVerified && !terminal(r.Phase)) || !namesIDs(r.Named) {
 		return nil, fmt.Errorf("%s: not a result", path)
 	}
 	return &r, nil
+}
+
+// maxNamed bounds a result's `named`: a refusal names at most a few
+// objects (the descent refusal: HEAD and the baseline).
+const maxNamed = 8
+
+// namesIDs reports whether named is what a refusal records: at most
+// maxNamed entries, each in the id grammar. Root writes out/, so
+// anything else is a disk fault or the console; the answer would hold
+// it out of the filter, so it is refused, not passed on.
+func namesIDs(named []string) bool {
+	if len(named) > maxNamed {
+		return false
+	}
+	for _, s := range named {
+		if !proof.IsID(s) {
+			return false
+		}
+	}
+	return true
 }
 
 // marker is stage/<id>.auth (DESIGN-box.md, "Record and result fields"),

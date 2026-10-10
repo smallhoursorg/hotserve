@@ -14,6 +14,7 @@ package proof
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -25,8 +26,15 @@ import (
 // first; everything else a message carries (ids, principals) the proof
 // derived itself. An error that is not a Refusal is the box's own
 // trouble (ssh-keygen could not be run), not a verdict on the push.
+//
+// IDs are the object ids Msg names — HEAD, the baseline, a commit on
+// the chain, a tree — so that an answer can hold them out of liveswap's
+// response filter, whose entropy layer masks any 40-hex run: a refusal
+// that masked the commit it is about would name nothing (DESIGN-box.md,
+// "Handler contract").
 type Refusal struct {
 	Msg  string
+	IDs  []string
 	code refusalCode
 }
 
@@ -44,11 +52,25 @@ const (
 )
 
 func refuse(format string, args ...any) error {
-	return &Refusal{Msg: fmt.Sprintf(format, args...)}
+	return refuseCode(codeNone, format, args...)
 }
 
 func refuseCode(code refusalCode, format string, args ...any) error {
-	return &Refusal{Msg: fmt.Sprintf(format, args...), code: code}
+	return &Refusal{Msg: fmt.Sprintf(format, args...), IDs: idsIn(args), code: code}
+}
+
+// idsIn is every argument in the id grammar, once each. A message's
+// ids are ones the proof computed or read from an object it parsed;
+// one that is the bundle's own text (a quoted name) is the pusher's,
+// and naming it back to them reveals nothing of the box's.
+func idsIn(args []any) []string {
+	var ids []string
+	for _, a := range args {
+		if s, ok := a.(string); ok && IsID(s) && !slices.Contains(ids, s) {
+			ids = append(ids, s)
+		}
+	}
+	return ids
 }
 
 // maxBound is liveswap's maxRefusalLen: the most bytes of caller-chosen

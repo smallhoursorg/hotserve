@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -536,6 +537,11 @@ func TestPushPreVerification(t *testing.T) {
 	signed := p.repo.commit(v2, &p.alice, p.base)
 	tampered := p.repo.bundleFiles(signed, p.base)
 	tampered["Caddyfile"] = boxFile(3, p.alice)
+	// Refusals that name commits other than HEAD: each id must reach the
+	// workflow unmasked by the response filter.
+	mid := p.repo.commit(v2, nil, p.base)
+	above := p.repo.commit(boxFile(3, p.alice), &p.alice, mid)
+	elsewhere := p.repo.commit(v2, &p.alice, p.repo.commit(boxFile(7, p.alice), &p.alice))
 	for _, tc := range []struct {
 		name, head string
 		files      map[string][]byte
@@ -544,12 +550,15 @@ func TestPushPreVerification(t *testing.T) {
 		{"unsigned", unsigned, p.repo.bundleFiles(unsigned, p.base), unsigned + " is not signed; the box applies only commits signed by a key in its signer list"},
 		{"unlisted", byMallory, p.repo.bundleFiles(byMallory, p.base), byMallory + " is signed by a key that is not a signer in the Caddyfile this box runs"},
 		{"tampered", signed, tampered, "the file sent is not " + testPath + " in " + signed},
+		{"unsigned on the chain", above, p.repo.bundleFiles(above, p.base), mid + ", between the commit this box runs and " + above +
+			", is not signed; every commit on main must be — rebase it out and force-push; the box still runs " + p.base},
+		{"not a descendant", elsewhere, p.repo.bundleFiles(elsewhere, p.base), elsewhere + " does not descend from the commit this box runs (" + p.base + ")"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			id := randomID(t)
 			w := p.post(t, p.h, push{id: id, token: p.token(t, tc.head), body: bytes.NewReader(tgz(t, tc.files))})
 			m := wantResult(t, w, http.StatusUnprocessableEntity, id, phaseRefused)
-			if m["error"] != tc.msg || m["commit"] != tc.head {
+			if msg, _ := m["error"].(string); !strings.HasPrefix(msg, tc.msg) || m["commit"] != tc.head {
 				t.Fatalf("got %s, want error %q", w.Body, tc.msg)
 			}
 			p.untouched(t)
@@ -852,12 +861,22 @@ func TestResultPoll(t *testing.T) {
 			t.Fatalf("%s: the commit was masked: %v", phase, m)
 		}
 	}
+	// A refusal naming a commit other than its own: the ids in `named`
+	// are held out of the filter as `commit` is.
+	head := randomID(t) + randomID(t)[:8]
+	msg := head + " does not descend from the commit this box runs (" + p.base + ")"
+	p.writeResult(t, result{ID: id, Phase: phaseRefused, Commit: head, Error: msg, Named: []string{head, p.base}})
+	if m := wantResult(t, p.get(t, "/?result="+id, p.token(t, "")), http.StatusUnprocessableEntity, id, phaseRefused); m["error"] != msg {
+		t.Fatalf("a named commit was masked: %v", m)
+	}
 	for name, raw := range map[string][]byte{
-		"not JSON":     []byte("{"),
-		"another id":   result{ID: randomID(t), Phase: phaseApplied}.marshal(),
-		"not a phase":  result{ID: id, Phase: phaseInstalling}.marshal(),
-		"over the cap": bytes.Repeat([]byte(" "), maxResult+1),
-		"not a file":   nil,
+		"not JSON":        []byte("{"),
+		"another id":      result{ID: randomID(t), Phase: phaseApplied}.marshal(),
+		"not a phase":     result{ID: id, Phase: phaseInstalling}.marshal(),
+		"named not an id": result{ID: id, Phase: phaseRefused, Named: []string{"not-an-id"}}.marshal(),
+		"named too many":  result{ID: id, Phase: phaseRefused, Named: slices.Repeat([]string{p.base}, maxNamed+1)}.marshal(),
+		"over the cap":    bytes.Repeat([]byte(" "), maxResult+1),
+		"not a file":      nil,
 	} {
 		path := filepath.Join(p.x("out"), id+".json")
 		must(t, os.RemoveAll(path))
