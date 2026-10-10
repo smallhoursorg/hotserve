@@ -488,6 +488,7 @@ implies; it never infers state from digests alone.
 | record | `phase` | applier | the state (States table) |
 | result | `phase` | applier | `verified` or a terminal phase |
 | result | `error` | applier | the catalogue message for a non-green phase, bounded per Caps |
+| result | `named` | handler, applier | the object ids a refusal's `error` names — HEAD, the baseline, a commit on the chain, a tree — each in the id grammar, at most 8; a result that breaks either rule does not read. An id the bundle itself spelled (a `parent` header) is the pusher's own, so naming it back reveals nothing of the box's |
 | record | `error` | applier | in a `rolling_back` record, the catalogue text its `rolled_back` result will carry, so recovery reports the reason the live run would have |
 | `applied.json` | `sha`, `path`, `sha256`, `signer`, `when` | applier, `init`, `baseline` | the baseline, this box's path, the installed digest, who verified, when |
 | marker | `posted` | handler | time of admission |
@@ -910,9 +911,11 @@ console step; a host rename needs a certificate first in any case.
 
 Every answer passes liveswap's response filter (the shape and entropy
 layers) with the protocol's own fields on the safe list — `id`,
-`commit`, `sha256`, `box_webhook`, `phase` — since a 32-hex id, a
-40-hex commit and a 64-hex digest are exactly what the entropy layer
-exists to catch. Only `diff` and
+`commit`, `sha256`, `box_webhook`, `phase`, and each id in `named` —
+since a 32-hex id, a 40-hex commit and a 64-hex digest are exactly
+what the entropy layer exists to catch, and a refusal that masked the
+commit it names (the baseline, the unsigned commit on the chain) would
+name nothing. Only `diff` and
 `error` text, which carry bundle-derived bytes, go through every layer;
 the applier redacted the `diff` with those same two layers before
 writing it — liveswap/redact.go's layers 3 (shape) and 4 (entropy);
@@ -1514,6 +1517,9 @@ Dated one-liners; the full text of each is in git.
   body is read and parsed, and the fast path answered, before the
   admission lock; the fast path writes nothing; validate's children
   bounded at 120 s; step 6's reachability check moved to its own PR.
+- 2026-10-10 — PR 3d (the e2e lane) found every refusal naming a
+  commit other than HEAD answered with that id masked: results gain
+  `named`, the ids a refusal names, held out of the response filter.
 - 2026-10-10 — The applier's follow-ups: a run that leaves work on disk
   ends with one journal line carrying the restart remedy, and I2 names
   every such exit; each copy of the remedy has the second restart; a

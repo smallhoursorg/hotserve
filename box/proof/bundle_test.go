@@ -4,8 +4,10 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -159,6 +161,13 @@ func TestReadBundle(t *testing.T) {
 		})
 	}
 
+	t.Run("a tree under another id names that id", func(t *testing.T) {
+		_, err := ReadBundle(tgz(t, h.with("trees/"+h.root.ID, h.inner.Raw)))
+		var r *Refusal
+		if !errors.As(err, &r) || !slices.Equal(r.IDs, []string{h.root.ID}) {
+			t.Fatalf("got %v, IDs %v", err, r)
+		}
+	})
 	t.Run("not gzip", func(t *testing.T) {
 		_, err := ReadBundle([]byte("not gzip"))
 		refusalContaining(t, err, "bundle: not a gzip stream")

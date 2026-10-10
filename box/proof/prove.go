@@ -54,18 +54,18 @@ func ProveFile(c *Commit, trees map[string]*Tree, path string, file []byte) erro
 	for i, name := range parts {
 		t, ok := trees[cur]
 		if !ok || t.ID != cur {
-			return refuse("bundle: tree %s, needed for %s in %s, is not in the bundle", cur, shown, c.ID)
+			return refuse("bundle: tree %s, needed for %s in %s, is not in the bundle", oid(cur), shown, oid(c.ID))
 		}
 		e, ok, err := t.entry(name)
 		if err != nil {
 			return err
 		}
 		if !ok {
-			return refuse("the file sent is not %s in %s", shown, c.ID)
+			return refuse("the file sent is not %s in %s", shown, oid(c.ID))
 		}
 		if i < len(parts)-1 {
 			if e.Mode != ModeDir {
-				return refuse("the file sent is not %s in %s", shown, c.ID)
+				return refuse("the file sent is not %s in %s", shown, oid(c.ID))
 			}
 			cur = e.ID
 			continue
@@ -73,10 +73,10 @@ func ProveFile(c *Commit, trees map[string]*Tree, path string, file []byte) erro
 		switch e.Mode {
 		case ModeFile, ModeExecutable:
 		default:
-			return refuse("%s in %s is not a regular file", shown, c.ID)
+			return refuse("%s in %s is not a regular file", shown, oid(c.ID))
 		}
 		if ObjectID("blob", file) != e.ID {
-			return refuse("the file sent is not %s in %s", shown, c.ID)
+			return refuse("the file sent is not %s in %s", shown, oid(c.ID))
 		}
 	}
 	return nil

@@ -503,6 +503,7 @@ func (a *Applier) process(ctx context.Context, id string) error {
 func (a *Applier) checked(t *txn, err error) error {
 	var ref *refusal
 	if errors.As(err, &ref) {
+		t.named = ref.ids
 		a.finish(t, phaseRefused, ref.msg)
 		return nil
 	}
