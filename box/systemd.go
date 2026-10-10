@@ -140,8 +140,10 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 
 // running is step 16's question (DESIGN-box.md, Glossary "active"):
 // `activating` is waited out, at most activatingWait elapsed on the
-// applier's clock; the answer is the last word is-active gave. An error
-// is the box's: is-active could not be asked.
+// applier's clock, and so is `reloading` — a reload in flight (one a
+// killed applier started, or the console's) is not a stopped hotserve,
+// and it ends in `active` or a failure. The answer is the last word
+// is-active gave. An error is the box's: is-active could not be asked.
 func (a *Applier) running(ctx context.Context) (string, error) {
 	start := a.clock.Now()
 	for {
@@ -149,7 +151,7 @@ func (a *Applier) running(ctx context.Context) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if state != "activating" || a.clock.Now().Sub(start) >= activatingWait {
+		if !transient(state) || a.clock.Now().Sub(start) >= activatingWait {
 			return state, nil
 		}
 		if err := a.clock.Sleep(ctx, activatingPoll); err != nil {
@@ -157,3 +159,6 @@ func (a *Applier) running(ctx context.Context) (string, error) {
 		}
 	}
 }
+
+// transient is a state the wait sits out: hotserve on its way to active.
+func transient(state string) bool { return state == "activating" || state == "reloading" }

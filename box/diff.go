@@ -32,13 +32,15 @@ const (
 // service's, which root does not have), then cut at maxDiff on a line
 // end with a note.
 func caddyfileDiff(prev, next []byte) string {
-	d := unifiedDiff(prev, next)
+	d, cut := renderDiff(prev, next, maxDiffRedacted)
 	if d == "" {
 		return ""
 	}
-	d = cutAtLine(d, maxDiffRedacted)
+	if cut {
+		d = cutAtLine(d, maxDiffRedacted)
+	}
 	d, _ = liveswap.NewRedactor(nil, nil).Redact(d)
-	if len(d) > maxDiff {
+	if cut || len(d) > maxDiff {
 		d = cutAtLine(d, maxDiff-len(diffCutNote)) + diffCutNote
 	}
 	return d
@@ -79,8 +81,16 @@ type edit struct {
 // one differs from the same text with one and is marked as git marks
 // it.
 func unifiedDiff(a, b []byte) string {
+	d, _ := renderDiff(a, b, 0)
+	return d
+}
+
+// renderDiff is unifiedDiff, stopped once the text passes limit bytes
+// (no limit when it is 0): cut reports that it stopped, the text then
+// ending at a line end somewhere past the limit.
+func renderDiff(a, b []byte, limit int) (d string, cut bool) {
 	if bytes.Equal(a, b) {
-		return ""
+		return "", false
 	}
 	al, bl := splitKeepNL(a), splitKeepNL(b)
 	edits := diffLines(al, bl)
@@ -112,13 +122,17 @@ func unifiedDiff(a, b []byte) string {
 			}
 			end = run
 		}
-		writeHunk(&out, al, bl, edits[start:end])
+		if !writeHunk(&out, al, bl, edits[start:end], limit) {
+			return out.String(), true
+		}
 		i = end
 	}
-	return out.String()
+	return out.String(), false
 }
 
-func writeHunk(out *strings.Builder, al, bl []string, hunk []edit) {
+// writeHunk writes one hunk, or stops and says false once the text
+// passes limit.
+func writeHunk(out *strings.Builder, al, bl []string, hunk []edit, limit int) bool {
 	aStart, bStart := hunk[0].a, hunk[0].b
 	var aLen, bLen int
 	for _, e := range hunk {
@@ -146,7 +160,11 @@ func writeHunk(out *strings.Builder, al, bl []string, hunk []edit) {
 		if !strings.HasSuffix(line, "\n") {
 			out.WriteString("\n\\ No newline at end of file\n")
 		}
+		if limit > 0 && out.Len() > limit {
+			return false
+		}
 	}
+	return true
 }
 
 // hunkRange is a unified diff's "start,count", 1-based; an empty range

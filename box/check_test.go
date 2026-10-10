@@ -223,7 +223,8 @@ func TestApplyActive(t *testing.T) {
 		{"activating past 300 s", []string{"activating"}, nil, phaseRefused, msgStillStarting},
 		{"inactive", []string{"inactive"}, nil, phaseRefused, msgNotRunning},
 		{"failed", []string{"failed"}, nil, phaseRefused, msgNotRunning},
-		{"reloading is not active", []string{"reloading"}, nil, phaseRefused, msgNotRunning},
+		{"reloading past 300 s", []string{"reloading"}, nil, phaseRefused, msgStillStarting},
+		{"deactivating", []string{"deactivating"}, nil, phaseRefused, msgNotRunning},
 		{"is-active could not be asked", nil, errors.New("systemctl: not found"), phaseFailed, installFailed(errors.New("systemctl: not found"))},
 	} {
 		t.Run(c.name, func(t *testing.T) {

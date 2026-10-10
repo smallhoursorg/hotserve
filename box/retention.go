@@ -88,10 +88,22 @@ func (a *Applier) sweep() {
 		return
 	}
 
+	// The record's id, read once: a push under it is in root's hands.
+	held := ""
+	if rec, err := a.readRecord(); err == nil {
+		held = rec.ID
+	}
 	var candidates []string
 	for id, s := range ids {
+		// A date the clock has not reached cannot be aged: past
+		// pendingAge ahead it counts as older than keepAge, so that it
+		// neither sorts as newest nor holds a slot until the clock
+		// catches up (a clock step, or a hostile writer of markers).
+		if s.key.Sub(now) >= pendingAge {
+			s.key = time.Time{}
+		}
 		if !s.result {
-			if !a.stranded(id, s.key, now) {
+			if !a.stranded(id, held, s.key, now) {
 				continue // pending, or still in root's hands: untouched
 			}
 			s.stranded = true
@@ -137,11 +149,8 @@ func (a *Applier) sweep() {
 // marker dated more than pendingAge ahead of the clock counts as older
 // (a clock step, or a hostile writer): it could otherwise block
 // admission until the clock caught up.
-func (a *Applier) stranded(id string, posted, now time.Time) bool {
-	if exists(filepath.Join(a.x("in"), id+".tar")) || exists(filepath.Join(a.x("work"), id+".tar")) {
-		return false
-	}
-	if rec, err := a.readRecord(); err == nil && rec.ID == id {
+func (a *Applier) stranded(id, held string, posted, now time.Time) bool {
+	if id == held || exists(filepath.Join(a.x("in"), id+".tar")) || exists(filepath.Join(a.x("work"), id+".tar")) {
 		return false
 	}
 	age := now.Sub(posted)

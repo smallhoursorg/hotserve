@@ -47,6 +47,11 @@ func (r *Refusal) Error() string { return "the Caddyfile " + r.Reason }
 
 func refuse(reason string) error { return &Refusal{Reason: reason} }
 
+// reasonNoSigner is the walk's refusal of a box block with no signer
+// line, which the applier tells apart for the installed file: there it
+// is a refusal of its own, "lists no signer" (check.go).
+const reasonNoSigner = "has no signer"
+
 // Walk reads a Caddyfile the way the box reads one (DESIGN-box.md,
 // "Reading the signed file"): caddyfile.Tokenize and a brace-depth
 // walk, which expands nothing and follows nothing. It refuses the
@@ -321,7 +326,7 @@ func walk(input []byte) (*Shape, error) {
 		return nil, refuse("has no box block")
 	}
 	if len(shape.Signers) == 0 {
-		return nil, refuse("has no signer")
+		return nil, refuse(reasonNoSigner)
 	}
 	if _, err := shape.Signers.AllowedSigners(); err != nil {
 		return nil, refuse("has a bad " + err.Error())

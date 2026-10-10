@@ -199,8 +199,13 @@ func (a *Applier) install(ctx context.Context, t *txn) error {
 	if t.rec.Origin == originApplier {
 		if err := a.writeResult(t.result(phaseVerified, "")); err != nil {
 			// Nothing has changed; the entry goes and the journal has
-			// the result (Transitions table, "checking → verified").
+			// the result (Transitions table, "checking → verified"). A
+			// `verified` whose rename landed before the failure is
+			// removed too: with no entry behind it nothing would ever
+			// replace it, where a marker with no result is Retention's
+			// to settle as `failed`.
 			a.logger.Error("box apply stopped before installing: the verified result could not be written; nothing changed", zap.String("id", t.rec.ID))
+			a.removeResult(t.rec.ID)
 			a.removeEntry(t.entry)
 			return nil
 		}
@@ -224,10 +229,19 @@ func (a *Applier) install(ctx context.Context, t *txn) error {
 	}
 	if err := a.writeDurable("caddyfile:new", a.caddyfile(), a.caddyfileTmp(t.rec.ID), t.next, 0o644); err != nil {
 		// The rename may have happened with only the directory's fsync
-		// failing: what is on disk decides.
-		if d, derr := a.installedDigest(); derr == nil && d == t.rec.NewSHA256 {
+		// failing: what is on disk decides, and what cannot be read is
+		// left, with the record, for the next run's recovery.
+		d, derr := a.installedDigest()
+		switch {
+		case derr != nil:
+			return a.unsettled(t, derr)
+		case d == t.rec.NewSHA256:
 			return a.rollback(ctx, t, msgRolledBackUnrecorded, false)
+		case d != t.rec.PrevSHA256:
+			a.changed(t)
+			return nil
 		}
+		a.removeTemp(t.rec.ID)
 		a.finish(t, phaseFailed, installFailed(err))
 		return nil
 	}
@@ -321,15 +335,25 @@ func (a *Applier) rollingBack(ctx context.Context, t *txn, recovering bool) erro
 		a.changed(t)
 		return nil
 	}
-	if recovering {
+	switch {
+	case recovering:
 		state, err := a.running(ctx)
 		if err != nil {
 			return a.unsettled(t, err)
+		}
+		if transient(state) {
+			// Still on its way somewhere after the wait: the next run asks again.
+			return a.unsettled(t, fmt.Errorf("hotserve is still %s after %v", state, activatingWait))
 		}
 		if state != "active" {
 			a.finish(t, phaseFailed, msgInterruptedStopped)
 			return nil
 		}
+	case t.rec.Origin == originInit && !t.running:
+		// init on a box that is not running never reloaded, and has
+		// nothing to reload now: the previous bytes load at the next start.
+		a.finish(t, phaseFailed, msgInterruptedStopped)
+		return nil
 	}
 	if err := a.systemd.Reload(ctx); err != nil {
 		a.logger.Warn("box reload of the previous Caddyfile failed", zap.String("id", t.rec.ID), zap.String("error", proof.Bound(err.Error())))
@@ -441,6 +465,9 @@ func (a *Applier) recoverSwapped(ctx context.Context, t *txn, d string) error {
 		if err != nil {
 			return a.unsettled(t, err)
 		}
+		if transient(state) {
+			return a.unsettled(t, fmt.Errorf("hotserve is still %s after %v", state, activatingWait))
+		}
 		if state != "active" {
 			t.rec.Phase = phaseApplied
 			if err := a.writeRecord(&t.rec); err != nil {
@@ -458,6 +485,17 @@ func (a *Applier) recoverSwapped(ctx context.Context, t *txn, d string) error {
 // when hotserve is not running. The caller has walked and validated the
 // file; plan.rec carries the id, commit, path, host and apps.
 func (a *Applier) runInit(ctx context.Context, rec record, file []byte) (*result, error) {
+	// The record must be one recovery can read back (record.valid), and
+	// the id names the swap's temporary.
+	if !isRequestID(rec.ID) || !proof.IsID(rec.Commit) {
+		return nil, errors.New("init: the id must be 32 hex and the commit 40 hex")
+	}
+	if _, err := proof.SplitPath(rec.Path); err != nil {
+		return nil, fmt.Errorf("init: %w", err)
+	}
+	if len(file) > proof.MaxCaddyfile {
+		return nil, fmt.Errorf("init: the Caddyfile is larger than %d bytes", proof.MaxCaddyfile)
+	}
 	unlock, err := a.lock()
 	if err != nil {
 		return nil, err

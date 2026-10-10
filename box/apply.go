@@ -31,7 +31,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"syscall"
@@ -212,9 +211,12 @@ func (a *Applier) sweepTemporaries() {
 	}
 }
 
-// bundleName is what an entry of in/ or work/ must be called to be a
-// bundle: `<id>.tar`.
-var bundleName = regexp.MustCompile(`^[0-9a-f]{32}\.tar$`)
+// bundleID is the id an entry of in/ or work/ is named for, if it is
+// named as a bundle: `<id>.tar`.
+func bundleID(name string) (string, bool) {
+	id, ok := strings.CutSuffix(name, ".tar")
+	return id, ok && isRequestID(id)
+}
 
 // bundleEntry classifies an entry of in/'s or work/'s listing (dir is
 // "work"): a regular file named `<id>.tar` is a bundle, and its id is
@@ -223,8 +225,8 @@ var bundleName = regexp.MustCompile(`^[0-9a-f]{32}\.tar$`)
 func (a *Applier) bundleEntry(dir, name string) (string, bool) {
 	path := filepath.Join(a.x(dir), name)
 	fi, err := os.Lstat(path)
-	if err == nil && fi.Mode().IsRegular() && bundleName.MatchString(name) {
-		return strings.TrimSuffix(name, ".tar"), true
+	if id, named := bundleID(name); err == nil && fi.Mode().IsRegular() && named {
+		return id, true
 	}
 	kind := "missing"
 	if err == nil {
@@ -251,15 +253,20 @@ func (a *Applier) take() []string {
 	var ids []string
 	for _, e := range entries {
 		name := e.Name()
-		if err := a.takeOne(in, work, name); err != nil {
+		src := filepath.Join(in, name)
+		if err := a.takeOne(in, work, name); err != nil && (exists(src) || !exists(filepath.Join(work, name))) {
 			// It must leave in/ all the same (I2): removed where it
-			// stands, with a failed result if it was named as a bundle.
+			// stands, with a failed result if it is a regular file
+			// named as a bundle. (A rename that landed, its fsync
+			// failing, is taken: what follows reads it from work/.)
 			a.logger.Error("box: could not take an entry", zap.String("entry", proof.Bound(name)), zap.String("error", proof.Bound(err.Error())))
-			if rerr := a.removeDurable("entry:remove", filepath.Join(in, name)); rerr != nil {
+			fi, lerr := os.Lstat(src)
+			id, named := bundleID(name)
+			bundle := named && lerr == nil && fi.Mode().IsRegular()
+			if rerr := a.removeDurable("entry:remove", src); rerr != nil {
 				a.logger.Error("box: could not remove an entry from in/", zap.String("entry", proof.Bound(name)), zap.String("error", proof.Bound(rerr.Error())))
 			}
-			if bundleName.MatchString(name) {
-				id := strings.TrimSuffix(name, ".tar")
+			if bundle {
 				a.finish(&txn{rec: record{ID: id, Origin: originApplier}}, phaseFailed, installFailed(err))
 			}
 			continue
@@ -356,7 +363,7 @@ func (a *Applier) process(ctx context.Context, id string) error {
 	}
 	switch state {
 	case "active":
-	case "activating":
+	case "activating", "reloading": // still on its way after the wait
 		a.finish(t, phaseRefused, msgStillStarting)
 		return nil
 	default:

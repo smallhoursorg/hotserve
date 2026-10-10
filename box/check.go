@@ -57,7 +57,7 @@ func check(ctx context.Context, v *proof.Verifier, b *proof.Bundle, installed []
 	cur, err := Walk(installed)
 	if err != nil {
 		var ref *Refusal
-		if errors.As(err, &ref) && ref.Reason == "has no signer" {
+		if errors.As(err, &ref) && ref.Reason == reasonNoSigner {
 			return nil, refused("%s", msgNoSigner)
 		}
 		if ref != nil {

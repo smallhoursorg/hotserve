@@ -125,6 +125,13 @@ func (a *Applier) writeResult(r result) error {
 	return nil
 }
 
+// removeResult removes out/<id>.json, if there is one.
+func (a *Applier) removeResult(id string) {
+	if err := a.removeDurable("result:remove", filepath.Join(a.x("out"), id+".json")); err != nil {
+		a.logger.Error("box: could not remove a result", zap.String("id", id), zap.String("error", proof.Bound(err.Error())))
+	}
+}
+
 // logOutcome is the applier's journal line for a push (DESIGN-box.md,
 // "Journal lines"): id, commit, signer, box and phase, and the error
 // for a red one.

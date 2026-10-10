@@ -349,7 +349,12 @@ and the identity (10, 11 and 15's presence rules), the file proof
 (13), the chain's linkage (14), then every signature on the chain,
 HEAD's first (12 and 14), then 15's key guard — so a malformed bundle
 never starts `ssh-keygen`, and when more than one step would refuse,
-the first so found is the one named. The installed file failing the
+the first so found is the one named. Step 16 waits out `reloading` as
+it does `activating`, within the same bound: a reload in flight — the
+console's, or one a killed applier started — is not a stopped
+hotserve, and a push refused after the wait gets the "still starting"
+text; recovery that still finds either after the wait stops with
+everything as found (I2) and asks again on its next run. The installed file failing the
 walk for a reason other than an empty signer list, `applied.json`
 missing or unreadable, `ssh-keygen` unable to answer and `is-active`
 unanswered are the box's errors: `failed`, never `refused`
@@ -399,7 +404,7 @@ by id.
 | Id | Invariant |
 |---|---|
 | **I1** | For every write the applier or `init` makes: `/etc/hotserve/Caddyfile` exists at every instant and is a complete file written whole — one that ran, one whose reload is pending or in progress under a record that says `swapped`, or (`origin: init`, box not running) one that loads at the next start; a failed reload puts the previous bytes back, and a crash leaves a record saying which. The console is root and may write anything; the applier detects such a write by digest (steps 10, 17, 19) and reports it, never overwrites it knowingly, and never records a baseline for bytes it did not install. |
-| **I2** | Every entry the applier *listed* in `in/` leaves `in/` in that run (a bundle landing after the last listing is the next run's); `work/` is empty on every exit except the one named full-disk case in the Failure-mode table; `in/` receives nothing but a complete bundle by one `rename`. |
+| **I2** | Every entry the applier *listed* in `in/` leaves `in/` in that run (a bundle landing after the last listing is the next run's); `work/` is empty on every exit except two that leave the record on disk for the next run — the one named full-disk case in the Failure-mode table, and a stop with everything left as found (a record that does not read, the installed file unreadable mid-transaction, `is-active` unanswered or hotserve still `activating`/`reloading` after the wait in recovery) — where what was taken stays in `work/` with it and the next run's recovery settles it; `in/` receives nothing but a complete bundle by one `rename`. |
 | **I3** | Every bundle the applier takes ends in exactly one terminal result, or — only when the result cannot be written — one error-level journal line carrying every field the result would have; an entry that is not a bundle gets the journal line only. |
 | **I4** | The baseline advances only from a transaction whose durable record says `applied` (reload confirmed) or `no_change` on an active box, from `init`, or from `baseline`; all four hold root's lock; it never runs ahead of the record. |
 | **I5** | Within a transaction: from the first write that changes `/etc/hotserve` or `applied.json` until the terminal result, the record exists; it is written atomically before that first write and is the last thing removed. Refusals and `verified` precede it and write none. `hotserve box baseline` is not a transaction: one atomic write of `applied.json` under the lock, after recovery, with no record — a crash before its rename changed nothing, after it the reset is done; a retry is idempotent. |
@@ -444,6 +449,8 @@ implies; it never infers state from digests alone.
 | result | `phase` | applier | `verified` or a terminal phase |
 | result | `error` | applier | the catalogue message for a non-green phase, bounded per Caps |
 | record | `error` | applier | in a `rolling_back` record, the catalogue text its `rolled_back` result will carry, so recovery reports the reason the live run would have |
+| `applied.json` | `sha`, `path`, `sha256`, `signer`, `when` | applier, `init`, `baseline` | the baseline, this box's path, the installed digest, who verified, when |
+| marker | `sha256`, `posted` | handler | digest of the poll secret; time of admission |
 
 A result carries what was established before its phase: a refusal at
 step 9 has `id`, `phase` and `error`; one past the bundle's parse adds
@@ -451,8 +458,6 @@ step 9 has `id`, `phase` and `error`; one past the bundle's parse adds
 flag come once steps 10 to 15 pass, and `diff` once hotserve is found
 active. A transaction with `origin: init` writes no result file at any
 phase — its caller prints the outcome, and recovery journals it.
-| `applied.json` | `sha`, `path`, `sha256`, `signer`, `when` | applier, `init`, `baseline` | the baseline, this box's path, the installed digest, who verified, when |
-| marker | `sha256`, `posted` | handler | digest of the poll secret; time of admission |
 
 ```mermaid
 stateDiagram-v2
@@ -625,14 +630,18 @@ appears in `out/` or `stage/*.auth`:
 |---|---|
 | result and marker both present | kept while younger than a day and among the 32 newest ids; else both removed |
 | result present, marker absent | the marker was lost (crash before step 7's second write, or a previous sweep's first `unlink`): the result is kept by the same two rules, then removed |
-| marker present, no result, nothing at `in/<id>.tar` or `work/<id>.tar`, no record for `<id>`, older than fifteen minutes — or dated more than fifteen minutes ahead of the clock (a clock step or a hostile writer; it would otherwise block admission until the clock caught up) | the push was lost before root saw it (handler crash) or its result could not be written (full disk): write `failed` ("the box has no record of this push; push again") if it can and the two rules keep the id, then sweep by them |
+| marker present, no result, nothing at `in/<id>.tar` or `work/<id>.tar`, no record for `<id>`, older than fifteen minutes (a date more than fifteen minutes ahead of the clock counts as older than a day: see below) | the push was lost before root saw it (handler crash) or its result could not be written (full disk): write `failed` ("the box has no record of this push; push again") if it can and the two rules keep the id, then sweep by them |
 | marker present, no result, younger than fifteen minutes | pending; untouched, and not counted among the 32 |
 
 An id's age is its marker's `posted`; with no marker, or one that does
 not read (not a regular file, over its cap, not the shape admission
 writes), the marker's or else the result's modification time, read
-without following a link. The 32 are counted over ids with a result,
-newest first. A pair is removed marker first, so a crash between the
+without following a link. An age more than fifteen minutes ahead of the
+clock (a clock step, or a hostile writer of markers) cannot be aged and
+counts as older than a day: such an id is swept at once, with no result
+written, rather than sorting as newest and holding a slot — and, as a
+marker, blocking admission — until the clock catches up. The 32 are
+counted over ids with a result, newest first. A pair is removed marker first, so a crash between the
 two `unlink`s leaves the table's second row. Only names `<id>.auth` in
 `stage/` are root's; the handler's lock and temporaries are its own.
 
@@ -1246,7 +1255,9 @@ Dated one-liners; the full text of each is in git.
   continues as `rolling_back`; an unreadable record is kept untouched;
   a record that finds its terminal result only removes; the record
   carries the `error` its rollback will report; steps 10–15 run
-  cheapest first; `apps` holds liveswap-grammar names only; Retention
-  ages an id by its marker's `posted`, else an mtime, counts the 32
-  over results, settles a marker dated past the clock, and writes a
-  stranded marker's `failed` only for an id it keeps.
+  cheapest first; step 16 waits out `reloading` as it does
+  `activating`; I2 names the stop-as-found as its second exception;
+  `apps` holds liveswap-grammar names only; Retention ages an id by its
+  marker's `posted`, else an mtime, counts a date past the clock as
+  older than a day, counts the 32 over results, and writes a stranded
+  marker's `failed` only for an id it keeps.

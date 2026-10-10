@@ -113,8 +113,8 @@ func TestRetention(t *testing.T) {
 		if err := b.run(hooks{}); err != nil {
 			t.Fatal(err)
 		}
-		if r := b.result(far); r == nil || r.Phase != phaseFailed {
-			t.Errorf("a marker an hour ahead blocks admission until the clock catches up: %+v", r)
+		if b.hasMarker(far) || b.result(far) != nil {
+			t.Error("a marker an hour ahead would block admission and hold a slot until the clock caught up: it counts as older than a day")
 		}
 		if b.result(near) != nil {
 			t.Error("a marker minutes ahead is pending, as clocks differ")
@@ -181,7 +181,7 @@ func TestStrandedRespectsWorkInFlight(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(b.x(where), id+".tar"), nil, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if a.stranded(id, old, b.clock.Now()) {
+		if a.stranded(id, "", old, b.clock.Now()) {
 			t.Errorf("a marker whose bundle is in %s/ is stranded", where)
 		}
 		if err := os.Remove(filepath.Join(b.x(where), id+".tar")); err != nil {
@@ -189,11 +189,10 @@ func TestStrandedRespectsWorkInFlight(t *testing.T) {
 		}
 	}
 	id := randomID(t)
-	b.lyingRecord(record{ID: id, Origin: originInit, Phase: phaseInstalling, Commit: b.base, Prev: b.v1, PrevSHA256: digest(b.v1), NewSHA256: digest(b.v1)})
-	if a.stranded(id, old, b.clock.Now()) {
+	if a.stranded(id, id, old, b.clock.Now()) {
 		t.Error("a marker whose push holds the record is stranded")
 	}
-	if !a.stranded(randomID(t), old, b.clock.Now()) {
+	if !a.stranded(randomID(t), id, old, b.clock.Now()) {
 		t.Error("an old marker with nothing behind it is not stranded")
 	}
 }
