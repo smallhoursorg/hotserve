@@ -78,7 +78,12 @@ so users can cross-check without leaving the repo.
 - **Key resolution.** Default `{client_ip}` — Caddy's placeholder that
   respects the server's `trusted_proxies` configuration. Do NOT default to
   a raw `X-Forwarded-For` read; XFF trust is the server config's job, same
-  as the CMS refuses to own it.
+  as the CMS refuses to own it. A key that resolves to an empty string
+  fails open: the request passes to the next handler, uncounted and
+  never boxed, rather than every such request sharing one budget. With
+  a header-based key, a client that omits the header is never limited;
+  `{client_ip}` falls back to the connection's address, so it does not
+  go empty that way.
 - **Key masking.** When the whole resolved key parses as exactly one IP
   address, whatever placeholder produced it (`{client_ip}` or a header
   such as `CF-Connecting-IP`), it is masked: IPv4 is counted per
@@ -96,12 +101,26 @@ so users can cross-check without leaving the repo.
   rule (it also splits `host:port` and falls back to the peer
   address, which this module leaves to the placeholder); the helper
   is copied, not imported, so this module stays independent.
-- **Memory bounds.** Hard cap on tracked keys (default e.g. 100k) with
-  expiry sweep + oldest-first eviction. An attacker rotating IPs must
-  exhaust the cap into evictions, not into unbounded memory. The cap is
-  per shard, and the shard hash is seeded at random when the store is
-  built, so a client cannot aim keys at one shard to evict other
-  clients' counters.
+- **Memory bounds.** Hard cap on tracked keys (`max_keys`, default
+  100000) with expiry sweep + oldest-first eviction. An attacker
+  rotating IPs must exhaust the cap into evictions, not into unbounded
+  memory. Only a counted response (level ≥ `min_level`) creates an
+  entry. The cap is split evenly across 64 shards, rounded down with a
+  minimum of 1 each, so the store tracks at most
+  64 × max(⌊`max_keys`/64⌋, 1) keys: 99,968 for the default, 64 for any
+  value below 64. A full shard admits a new key by dropping unboxed
+  entries idle longer than the longest window, then its oldest-idle
+  unboxed entry; a boxed entry goes only when the whole shard is
+  boxed, which lifts that box. The shard hash is seeded at random when
+  the store is built, so a client cannot aim keys at one shard to
+  evict other clients' counters.
+- **Small `max_keys` fails open.** An evicted entry's count is lost, so
+  with few slots per shard (one below 128) unrelated clients counting
+  in one shard reset each other and an abuser may never reach `limit`;
+  with one slot, a box lasts only until another client is counted in
+  that shard.
+  A value below 64 loads with a warning, not a refusal: refusing it
+  would make Caddy reject a config that works today.
 - **Level-1 traffic** must cost near-zero: no counter allocation for keys
   that have only ever produced level-1 responses.
 
