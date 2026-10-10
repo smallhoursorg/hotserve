@@ -10,9 +10,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
-	"time"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
@@ -48,7 +46,6 @@ type Handler struct {
 	// Provision; a test's temporary files otherwise.
 	installed string
 	dir       string
-	now       func() time.Time
 }
 
 // CaddyModule returns the Caddy module information.
@@ -70,7 +67,7 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	}
 	h.app = app.(*App)
 	h.limiter = deploytrust.Shared()
-	h.installed, h.dir, h.now = installedFile, exchangeDir, time.Now
+	h.installed, h.dir = installedFile, exchangeDir
 	return nil
 }
 
@@ -80,6 +77,7 @@ const (
 	msgResultID   = "result must be a 32-hex id"
 	msgNoBaseline = "this box has no baseline; hotserve init <dir> <sha> as root on the box sets one"
 	msgNoApplier  = "config pushes are not applied by this hotserve version; nothing applied"
+	msgNoResult   = "no result and no marker for %s: swept, or never admitted"
 )
 
 // pollScheme is the Authorization scheme a result poll carries its
@@ -164,30 +162,34 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) error {
 
 // result is `GET /?result=<id>`. The poll secret is tried first and
 // never charged: it admits the request only for the id derived from
-// it, and only while that id's marker holds the secret's digest and is
-// younger than pendingLife. Anything else goes through the preamble —
-// a wrong or stale secret is then an unauthenticated request like any
-// other — and only once authenticated is the query's shape checked, so
-// an unauthenticated caller learns nothing from a 400. The query names
-// a file only after the id has passed its grammar, and the poll path
-// reaches the disk only with an id it derived itself.
+// it, and only while that id's marker holds the secret's digest — for
+// as long as the marker is kept (DESIGN-box.md, "Retention"), with no
+// age of its own, so a slow apply or a late poll never meets a 401.
+// Anything else goes through the preamble — a wrong secret is then an
+// unauthenticated request like any other — and only once
+// authenticated is the query's shape checked, so an unauthenticated
+// caller learns nothing from a 400. The query names a file only after
+// the id has passed its grammar, and the poll path reaches the disk
+// only with an id it derived itself.
 //
 // With no result, a marker says the push was admitted and is not yet
-// settled: 202 pending, whatever the marker's age. Only root can tell
-// a push it still holds from one that was lost, and its next run
-// settles a lost one as `failed` (DESIGN-box.md, "Retention").
+// settled: 202 `admitted`, whatever the marker's age. Only root can
+// tell a push it still holds from one that was lost, and its next run
+// settles a lost one as `failed` (Retention).
 func (h *Handler) result(w http.ResponseWriter, r *http.Request) error {
 	var id string
 	q, err := url.ParseQuery(r.URL.RawQuery)
 	single := err == nil && len(q) == 1 && len(q["result"]) == 1
-	var m *marker // the push's marker, as the poll secret read it
+	polled := false // admitted by the push's poll secret
 	if single {
 		id = q["result"][0]
-		if m, err = h.pollSecret(r, id); err != nil {
-			return h.boxError(w, "the push's marker", err)
+		if polled, err = h.pollSecret(r, id); err != nil {
+			// Said to the secret's holder alone, and not journaled: it
+			// may poll for as long as the marker is kept.
+			return respond(w, http.StatusInternalServerError, errorBody(boxErrorText("the push's marker", err)))
 		}
 	}
-	if m == nil {
+	if !polled {
 		if ok, err := h.authenticate(w, r, "result"); !ok {
 			return err
 		}
@@ -209,57 +211,53 @@ func (h *Handler) result(w http.ResponseWriter, r *http.Request) error {
 	if !errors.Is(err, fs.ErrNotExist) {
 		return h.boxError(w, "the result", err)
 	}
-	if m == nil {
+	if !polled {
 		if _, err := readMarker(h.dir, id); errors.Is(err, fs.ErrNotExist) {
-			return respond(w, http.StatusNotFound, errorBody("no result and no pending push for "+id+": swept, or never admitted"), id)
+			return respond(w, http.StatusNotFound, errorBody(fmt.Sprintf(msgNoResult, id)), id)
 		} else if err != nil {
 			return h.boxError(w, "the push's marker", err)
 		}
 	}
-	return respond(w, http.StatusAccepted, map[string]string{"phase": "pending"})
+	return respond(w, http.StatusAccepted, map[string]string{"phase": "admitted"})
 }
 
-// pollSecret is the poll secret's check, and the marker it admits on:
-// exactly one Authorization header, in the Box-Poll scheme (its case
-// ignored, as an auth scheme's is), exactly 32 bytes in standard padded
-// base64, whose sha256 begins with id and equals, in constant time,
-// the digest the marker holds; the marker younger than pendingLife (a
-// clock stepped back makes it younger, as it does for admission).
+// pollSecret is the poll secret's check: exactly one Authorization
+// header, in the Box-Poll scheme (its case ignored, as an auth
+// scheme's is), exactly 32 bytes in standard padded base64, whose
+// sha256 begins with id and equals, in constant time, the digest the
+// marker holds.
 //
-// nil, nil admits nothing and writes nothing to the journal: this runs
-// before the preamble, where a line per request would be outside the
-// limiter's budgets — a broken stage/ makes every id unreadable, and
-// is reported only to authenticated requests. An error says a marker
-// stands at the secret's id and cannot be read: the box's error,
-// answered as one, and reachable only with a secret a push was
-// admitted under, so only by its holder — the workflow, which has no
-// other way to learn why its polls fail.
-func (h *Handler) pollSecret(r *http.Request, id string) (*marker, error) {
+// false, nil admits nothing and writes nothing to the journal: this
+// runs before the preamble, where a line per request would be outside
+// the limiter's budgets. An error says a marker stands at the secret's
+// id and cannot be read (standing: the open found something there) —
+// the box's error, for the caller to answer as one. Only a secret a
+// push was admitted under reaches it; a missing marker, a broken
+// stage/ and an exhausted process all fail the open, for every id, and
+// say nothing.
+func (h *Handler) pollSecret(r *http.Request, id string) (bool, error) {
 	values := r.Header.Values("Authorization")
 	if len(values) != 1 || len(values[0]) != len(pollScheme)+base64.StdEncoding.EncodedLen(pollSecretLen) ||
 		!strings.EqualFold(values[0][:len(pollScheme)], pollScheme) {
-		return nil, nil
+		return false, nil
 	}
 	secret, err := base64.StdEncoding.Strict().DecodeString(values[0][len(pollScheme):])
 	if err != nil || len(secret) != pollSecretLen {
-		return nil, nil
+		return false, nil
 	}
 	sum := sha256.Sum256(secret)
 	if hex.EncodeToString(sum[:pollSecretLen/2]) != id {
-		return nil, nil
+		return false, nil
 	}
 	m, err := readMarker(h.dir, id)
 	if err != nil {
-		if _, serr := os.Lstat(markerPath(h.dir, id)); serr == nil {
-			return nil, err
+		if standing(err) {
+			return false, err
 		}
-		return nil, nil
+		return false, nil
 	}
 	want, err := hex.DecodeString(m.SHA256) // validDigest: cannot fail
-	if err != nil || subtle.ConstantTimeCompare(want, sum[:]) != 1 || h.now().Sub(m.Posted) >= pendingLife {
-		return nil, nil
-	}
-	return m, nil
+	return err == nil && subtle.ConstantTimeCompare(want, sum[:]) == 1, nil
 }
 
 // push is `POST /`: authenticated, then refused, until the applier
@@ -274,9 +272,12 @@ func (h *Handler) push(w http.ResponseWriter, r *http.Request) error {
 // boxError answers a failure that is the box's, never the caller's:
 // 500, the journal at error level, both bounded.
 func (h *Handler) boxError(w http.ResponseWriter, what string, err error) error {
-	msg := proof.Bound(err.Error())
-	h.logger.Error("box webhook could not read its state", zap.String("reading", what), zap.String("error", msg))
-	return respond(w, http.StatusInternalServerError, errorBody("could not read "+what+": "+msg))
+	h.logger.Error("box webhook could not read its state", zap.String("reading", what), zap.String("error", proof.Bound(err.Error())))
+	return respond(w, http.StatusInternalServerError, errorBody(boxErrorText(what, err)))
+}
+
+func boxErrorText(what string, err error) string {
+	return "could not read " + what + ": " + proof.Bound(err.Error())
 }
 
 func errorBody(msg string) map[string]string { return map[string]string{"error": msg} }

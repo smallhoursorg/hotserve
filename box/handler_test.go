@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -57,7 +58,6 @@ func newRig(t testing.TB) *rig {
 		limiter:   deploytrust.NewLimiter(r.clock),
 		installed: r.installed,
 		dir:       r.dir,
-		now:       r.clock.Now,
 	}
 	for _, d := range []string{"out", "stage"} {
 		if err := os.MkdirAll(filepath.Join(r.dir, d), 0o755); err != nil {
@@ -393,11 +393,12 @@ func TestHandlerResultPollSecret(t *testing.T) {
 		header http.Header
 		code   int
 	}{
-		"fresh":                {fresh, "/?result=" + id, pollHeader(h), admitted},
-		"a second before 15m":  {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now().Add(-pendingLife+time.Second)) }, "/?result=" + id, pollHeader(h), admitted},
-		"15m old":              {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now().Add(-pendingLife)) }, "/?result=" + id, pollHeader(h), refused},
-		"posted in the future": {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now().Add(time.Minute)) }, "/?result=" + id, pollHeader(h), admitted},
-		"no posted time":       {func(t *testing.T, r *rig) { r.marker(t, id, digest, time.Time{}) }, "/?result=" + id, pollHeader(h), refused},
+		"fresh": {fresh, "/?result=" + id, pollHeader(h), admitted},
+		// The secret has no age of its own: it is honoured for as long
+		// as its marker is kept, whatever the clocks say.
+		"a day old":            {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now().Add(-24*time.Hour)) }, "/?result=" + id, pollHeader(h), admitted},
+		"posted in the future": {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now().Add(time.Hour)) }, "/?result=" + id, pollHeader(h), admitted},
+		"no posted time":       {func(t *testing.T, r *rig) { r.marker(t, id, digest, time.Time{}) }, "/?result=" + id, pollHeader(h), admitted},
 		"no marker":            {func(*testing.T, *rig) {}, "/?result=" + id, pollHeader(h), refused},
 		"another push's secret": {func(t *testing.T, r *rig) {
 			fresh(t, r)
@@ -425,7 +426,9 @@ func TestHandlerResultPollSecret(t *testing.T) {
 			r.write(t, filepath.Join(r.dir, "stage"), nil)
 		}, "/?result=" + id, pollHeader(h), refused},
 		// A marker standing at the secret's id that cannot be read is
-		// the box's error, said to the secret's holder.
+		// the box's error, said to the secret's holder — and only to
+		// it, with no journal line, since it may poll for as long as
+		// the marker is kept.
 		"marker symlink": {func(t *testing.T, r *rig) { symlinkMarker(t, r, id, digest) }, "/?result=" + id, pollHeader(h), boxError},
 		"marker a FIFO":  {func(t *testing.T, r *rig) { mkfifo(t, filepath.Join(r.dir, "stage", id+".auth")) }, "/?result=" + id, pollHeader(h), boxError},
 		"marker too big": {func(t *testing.T, r *rig) {
@@ -440,7 +443,7 @@ func TestHandlerResultPollSecret(t *testing.T) {
 			errorLines := r.logs.FilterLevelExact(zap.ErrorLevel).Len()
 			switch c.code {
 			case admitted:
-				if w.Code != http.StatusAccepted || body(t, w)["phase"] != "pending" || r.h.limiter.Size() != 0 || errorLines != 0 {
+				if w.Code != http.StatusAccepted || body(t, w)["phase"] != "admitted" || r.h.limiter.Size() != 0 || errorLines != 0 {
 					t.Fatalf("not admitted: %d %s, %d charged, %d error lines", w.Code, w.Body, r.h.limiter.Size(), errorLines)
 				}
 			case refused:
@@ -452,7 +455,7 @@ func TestHandlerResultPollSecret(t *testing.T) {
 				}
 			case boxError:
 				wantError(t, w, http.StatusInternalServerError, "could not read the push's marker")
-				if r.h.limiter.Size() != 0 || errorLines != 1 {
+				if r.h.limiter.Size() != 0 || errorLines != 0 {
 					t.Fatalf("%d charged, %d error lines", r.h.limiter.Size(), errorLines)
 				}
 			}
@@ -481,22 +484,28 @@ func TestHandlerResultByToken(t *testing.T) {
 		code   int
 		want   string
 	}{
-		"pending": {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now()) }, "/?result=" + id, 202, ""},
+		"admitted": {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now()) }, "/?result=" + id, 202, ""},
 		// Admitted and not settled, whatever the marker's age: only
 		// root can tell a push it holds from one it lost.
 		"marker past fifteen minutes": {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now().Add(-time.Hour)) }, "/?result=" + id, 202, ""},
 		"marker dated ahead":          {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now().Add(time.Minute)) }, "/?result=" + id, 202, ""},
-		"swept":                       {func(*testing.T, *rig) {}, "/?result=" + id, 404, "no result and no pending push for " + id + ": swept, or never admitted"},
-		"31 hex":                      {func(*testing.T, *rig) {}, "/?result=" + id[:31], 400, msgResultID},
-		"33 hex":                      {func(*testing.T, *rig) {}, "/?result=" + id + "0", 400, msgResultID},
-		"upper case":                  {func(*testing.T, *rig) {}, "/?result=" + strings.ToUpper(id), 400, msgResultID},
-		"a path":                      {func(*testing.T, *rig) {}, "/?result=..%2F..%2Fapplied", 400, msgResultID},
-		"empty":                       {func(*testing.T, *rig) {}, "/?result=", 400, msgResultID},
-		"bare key":                    {func(*testing.T, *rig) {}, "/?result", 400, msgResultID},
-		"twice":                       {func(*testing.T, *rig) {}, "/?result=" + id + "&result=" + id, 400, msgResultID},
-		"another param":               {func(*testing.T, *rig) {}, "/?result=" + id + "&x=1", 400, msgResultID},
-		"only another param":          {func(*testing.T, *rig) {}, "/?x=1", 400, msgResultID},
-		"malformed":                   {func(*testing.T, *rig) {}, "/?result=%ZZ", 400, msgResultID},
+		"swept":                       {func(*testing.T, *rig) {}, "/?result=" + id, 404, fmt.Sprintf(msgNoResult, id)},
+		// stage/ broken for every id: reported, as the box's error, to
+		// an authenticated request.
+		"stage not a directory": {func(t *testing.T, r *rig) {
+			must(t, os.RemoveAll(filepath.Join(r.dir, "stage")))
+			r.write(t, filepath.Join(r.dir, "stage"), nil)
+		}, "/?result=" + id, 500, "could not read the push's marker"},
+		"31 hex":             {func(*testing.T, *rig) {}, "/?result=" + id[:31], 400, msgResultID},
+		"33 hex":             {func(*testing.T, *rig) {}, "/?result=" + id + "0", 400, msgResultID},
+		"upper case":         {func(*testing.T, *rig) {}, "/?result=" + strings.ToUpper(id), 400, msgResultID},
+		"a path":             {func(*testing.T, *rig) {}, "/?result=..%2F..%2Fapplied", 400, msgResultID},
+		"empty":              {func(*testing.T, *rig) {}, "/?result=", 400, msgResultID},
+		"bare key":           {func(*testing.T, *rig) {}, "/?result", 400, msgResultID},
+		"twice":              {func(*testing.T, *rig) {}, "/?result=" + id + "&result=" + id, 400, msgResultID},
+		"another param":      {func(*testing.T, *rig) {}, "/?result=" + id + "&x=1", 400, msgResultID},
+		"only another param": {func(*testing.T, *rig) {}, "/?x=1", 400, msgResultID},
+		"malformed":          {func(*testing.T, *rig) {}, "/?result=%ZZ", 400, msgResultID},
 		"result a symlink": {func(t *testing.T, r *rig) {
 			r.result(t, result{ID: id, Phase: "applied"})
 			must(t, os.Rename(filepath.Join(r.dir, "out", id+".json"), filepath.Join(r.dir, "out", "real.json")))
@@ -522,7 +531,7 @@ func TestHandlerResultByToken(t *testing.T) {
 			c.setup(t, r)
 			w := r.do(t, req{target: c.target, token: r.token(t)})
 			if c.code == 202 {
-				if got := body(t, w); w.Code != 202 || len(got) != 1 || got["phase"] != "pending" {
+				if got := body(t, w); w.Code != 202 || len(got) != 1 || got["phase"] != "admitted" {
 					t.Fatalf("%d %s", w.Code, w.Body)
 				}
 				return
