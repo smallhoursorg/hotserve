@@ -473,6 +473,13 @@ reboot); loading the config does not open it. So create it readable by
 that user and nobody else —
 `sudo install -m 0640 -o root -g hotserve blog.env /etc/hotserve/` —
 and keep it in place: a missing or unreadable file fails that launch.
+A world-readable or world-writable file is warned about — at config
+load (`hotserve validate` shows it when run as an account that can
+reach the file, and says so when it cannot) and again at each launch,
+from the file the launch actually read — never refused: the launch
+still runs, and a mode changed between loads is not what takes an app
+down on a relaunch. The owner and group are not checked; the
+`install` line above sets them.
 
 **The sandbox is not containment for what an app did before it had
 one.** It restricts what an app can *reach*; it cannot un-copy. An

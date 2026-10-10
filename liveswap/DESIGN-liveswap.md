@@ -48,6 +48,16 @@ Concept map from the Nomad-era stack:
   404). No shared secret is stored on the box.
 - Config load MUST fail if any app resolves to zero `deploy_trust`
   sources.
+- Config load and every launch MUST warn when an app's `env_file` is
+  world-readable or world-writable (the documented mode is 0640
+  root:hotserve; owner and group are not checked), and MUST NOT refuse
+  on it: a mode changed between loads is not a reason to fail a
+  relaunch. The launch reads the mode from the descriptor it rendered
+  the environment through, so it reports the file the unit got. At
+  load, an absent file is silent (the launch that needs it fails and
+  says so), one the loading account cannot reach is noted at info
+  level (`validate` runs unprivileged by design), and any other
+  failure to check is warned about as such — never reported as fine.
 - The deploy MUST be rejected (409) if one is already running for that
   app; other apps' deploys proceed independently.
 - Artifact downloads MUST enforce `max_artifact_size` both via
