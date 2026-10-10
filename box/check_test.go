@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -178,6 +180,13 @@ func TestApplyTrustChain(t *testing.T) {
 			if c.has != "" && !strings.Contains(r.Error, c.has) {
 				t.Errorf("error %q does not contain %q", r.Error, c.has)
 			}
+			// Every object id the error names is named, so a poll's
+			// answer holds it out of the response filter.
+			for _, id := range objectIDs.FindAllString(r.Error, -1) {
+				if !slices.Contains(r.Named, id) {
+					t.Errorf("error names %s, named = %v", id, r.Named)
+				}
+			}
 			if !bytes.Equal(b.installed(), b.v1) && c.name != "10: the installed file lists no signer" && c.name != "10: the installed file is not a box's" {
 				t.Error("installed file changed")
 			}
@@ -187,6 +196,9 @@ func TestApplyTrustChain(t *testing.T) {
 		})
 	}
 }
+
+// objectIDs finds the 40-hex runs in a message.
+var objectIDs = regexp.MustCompile(`\b[0-9a-f]{40}\b`)
 
 // foldSig is a signature as a gpgsig header carries it: continuation
 // lines begin with a space.

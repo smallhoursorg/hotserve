@@ -236,17 +236,17 @@ func (p *pushing) respond(code int, body any) error {
 // handler wrote no file for, and the refusal line. An error that is not
 // a verdict is the box's own (rule 2).
 func (p *pushing) refuse(b *proof.Bundle, err error) error {
-	msg, ok := refusalText(err)
+	msg, ids, ok := refusalText(err)
 	if !ok {
 		return p.fail(err)
 	}
-	res := result{ID: p.id, Phase: phaseRefused, Error: msg}
+	res := result{ID: p.id, Phase: phaseRefused, Error: msg, Named: ids}
 	if b != nil {
 		res.Commit, res.Path = b.Commit.ID, b.Path
 	}
 	p.h.logger.Warn("box push refused", zap.String("id", p.id), zap.String("commit", p.commit),
 		zap.String("refused", msg), zap.String("via", p.via), zap.String("remote", p.r.RemoteAddr))
-	return p.respond(http.StatusUnprocessableEntity, res)
+	return respond(p.w, http.StatusUnprocessableEntity, res, append([]string{p.id, p.commit, p.claim}, ids...)...)
 }
 
 // fail answers a push the box could not check: 500, nothing changed.
@@ -256,18 +256,19 @@ func (p *pushing) fail(err error) error {
 	return p.respond(http.StatusInternalServerError, errorBody(msgCheckFailed(err)))
 }
 
-// refusalText is the catalogue text of a verdict: the proof's, the
-// walk's (through check), the handler's own.
-func refusalText(err error) (string, bool) {
+// refusalText is the catalogue text of a verdict — the proof's, the
+// walk's (through check), the handler's own — and the object ids it
+// names.
+func refusalText(err error) (string, []string, bool) {
 	var pr *proof.Refusal
 	if errors.As(err, &pr) {
-		return pr.Msg, true
+		return pr.Msg, pr.IDs, true
 	}
 	var r *refusal
 	if errors.As(err, &r) {
-		return r.msg, true
+		return r.msg, r.ids, true
 	}
-	return "", false
+	return "", nil, false
 }
 
 // answer is step 8's answer, from the result waitResult read.
@@ -354,7 +355,7 @@ func (h *Handler) result(w http.ResponseWriter, r *http.Request) error {
 
 // respondResult answers with a result and step 8's status for its phase.
 func respondResult(w http.ResponseWriter, res *result) error {
-	return respond(w, phaseStatus(res.Phase), res, res.ID, res.Commit, res.BoxWebhook)
+	return respond(w, phaseStatus(res.Phase), res, append([]string{res.ID, res.Commit, res.BoxWebhook}, res.Named...)...)
 }
 
 // phaseStatus is step 8's status for a phase readResultFile accepted:

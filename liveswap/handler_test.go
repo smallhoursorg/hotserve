@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -974,12 +975,46 @@ func TestDeployRecordVersionsAreNamesNotSecrets(t *testing.T) {
 		t.Fatalf("second deploy: %d %s", w.Code, w.Body.String())
 	}
 	// The failed SHA's release is gone; it is in no field but deploys.
+	// The assertion reads the version fields alone: other fields may be
+	// masked by the entropy layer (deployed_by names the test's random
+	// t.TempDir() key path, which sometimes looks like a secret).
 	for _, path := range []string{"/demo", "/demo?deploy=" + sha} {
 		w := do(t, h, http.MethodGet, path, appToken(t), "")
-		if w.Code != 200 || !strings.Contains(w.Body.String(), sha) || strings.Contains(w.Body.String(), "[masked") {
+		if w.Code != 200 {
 			t.Fatalf("%s: %d %s", path, w.Code, w.Body.String())
 		}
+		var body any
+		must(t, json.Unmarshal(w.Body.Bytes(), &body))
+		versions := versionFields(body, "", nil)
+		if !slices.Contains(versions, sha) {
+			t.Fatalf("%s: version fields %q lack %s: %s", path, versions, sha, w.Body.String())
+		}
+		for _, v := range versions {
+			if strings.Contains(v, "[masked") || strings.Contains(v, "[redacted") {
+				t.Fatalf("%s: version field %q filtered: %s", path, v, w.Body.String())
+			}
+		}
 	}
+}
+
+// versionFields collects every string a JSON body holds under a key
+// that names a version: version, current_version, available_versions.
+func versionFields(v any, key string, out []string) []string {
+	switch v := v.(type) {
+	case map[string]any:
+		for k, child := range v {
+			out = versionFields(child, k, out)
+		}
+	case []any:
+		for _, child := range v {
+			out = versionFields(child, key, out)
+		}
+	case string:
+		if key == "version" || key == "current_version" || key == "available_versions" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // An app the pool holds without a loaded spec answers the record route

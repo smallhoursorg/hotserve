@@ -102,11 +102,11 @@ func (v *Verifier) Verify(ctx context.Context, c *Commit, signers Signers) (stri
 func (v *Verifier) verify(ctx context.Context, c *Commit, signers Signers, allowed []byte) (string, error) {
 	switch c.Kind {
 	case Unsigned:
-		return "", refuseCode(codeUnsigned, "%s is not signed; the box applies only commits signed by a key in its signer list", c.ID)
+		return "", refuseCode(codeUnsigned, "%s is not signed; the box applies only commits signed by a key in its signer list", oid(c.ID))
 	case OpenPGPSig:
-		return "", refuseCode(codeUnsigned, "%s is signed by OpenPGP, not by an SSH key in the Caddyfile this box runs; GitHub's merge button cannot land config — merge on a laptop and push", c.ID)
+		return "", refuseCode(codeUnsigned, "%s is signed by OpenPGP, not by an SSH key in the Caddyfile this box runs; GitHub's merge button cannot land config — merge on a laptop and push", oid(c.ID))
 	case OtherSig:
-		return "", refuseCode(codeUnsigned, "%s is signed, but not by an SSH key in the Caddyfile this box runs", c.ID)
+		return "", refuseCode(codeUnsigned, "%s is signed, but not by an SSH key in the Caddyfile this box runs", oid(c.ID))
 	case SSHSig:
 	}
 	// Which key signed: the signature says, and the list decides. The
@@ -114,14 +114,14 @@ func (v *Verifier) verify(ctx context.Context, c *Commit, signers Signers, allow
 	// a `file` signature over the commit the same way as a wrong one.
 	key, namespace, err := SignatureKey(c.Signature)
 	if err != nil {
-		return "", refuseCode(codeUnsigned, "%s is signed, but the signature is not one the box can read", c.ID)
+		return "", refuseCode(codeUnsigned, "%s is signed, but the signature is not one the box can read", oid(c.ID))
 	}
 	if namespace != "git" {
-		return "", refuseCode(codeUnsigned, "%s is signed in the %s namespace, not git; the box applies only commits git signed", c.ID, Bound(namespace))
+		return "", refuseCode(codeUnsigned, "%s is signed in the %s namespace, not git; the box applies only commits git signed", oid(c.ID), Bound(namespace))
 	}
 	principal, ok := signers.PrincipalFor(key)
 	if !ok {
-		return "", refuseCode(codeUnlisted, "%s is signed by a key that is not a signer in the Caddyfile this box runs", c.ID)
+		return "", refuseCode(codeUnlisted, "%s is signed by a key that is not a signer in the Caddyfile this box runs", oid(c.ID))
 	}
 
 	keygen, err := v.program()
@@ -167,7 +167,7 @@ func (v *Verifier) verify(ctx context.Context, c *Commit, signers Signers, allow
 	// The environment is fine and the key is listed, so what remains
 	// is the signature itself: made over other bytes, or by a form of
 	// key this ssh-keygen will not take. Both are the push's problem.
-	return "", refuseCode(codeAltered, "%s is signed by %s, but the signature does not verify over the commit", c.ID, principal)
+	return "", refuseCode(codeAltered, "%s is signed by %s, but the signature does not verify over the commit", oid(c.ID), principal)
 }
 
 // writeReadable writes files a child of another uid can read: 0644,
