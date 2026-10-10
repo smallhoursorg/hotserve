@@ -1,0 +1,362 @@
+#!/bin/sh
+# Sends HEAD to each box this repository holds and prints what each
+# box made of it. .github/workflows/apply.yml runs it on every push to
+# main, after make check. The protocol is box/DESIGN-box.md in the
+# hotserve repository ("The trust chain", "Handler contract").
+#
+#   bin/apply           every box: each <host>/Caddyfile at the top of the repository
+#   bin/apply <host>    that box alone
+#
+# For each box, from HEAD's own copy of its file:
+#
+#   1. GET / on the file's box_webhook host: the commit the box runs.
+#   2. HEAD is that commit or an ancestor of it: a later run got there
+#      first, and there is nothing to send ("superseded", green). HEAD
+#      is the commit itself: it is sent again, which changes nothing
+#      unless someone edited the file on the box.
+#   3. A bundle of what the box needs to check, without git, that a key
+#      it lists signed HEAD and every commit between the two along
+#      main's first-parent line, and that the file is HEAD's: the file,
+#      those commit objects, and the trees from the root down to the file.
+#   4. POST / under a request id chosen at random. The box answers at
+#      once (applied, nothing to change, refused), or 202 while it
+#      installs; then GET /?result=<id> until it says how the push
+#      ended, for 15 minutes at most. A response lost on the way is
+#      recovered the same way: the id was chosen here.
+#
+#   HOTSERVE_TOKEN     a token the box block's deploy_trust accepts, naming
+#                      HEAD in a sha claim: hotserve deploy-token --claims
+#                      sha=$(git rev-parse HEAD) --ttl 20m ... Not needed in
+#                      GitHub Actions: with `permissions: id-token: write` a
+#                      fresh one is minted for each request
+#   HOTSERVE_AUDIENCE  the audience the box block's deploy_trust expects
+#                      (default: hotserve)
+#   HOTSERVE           the hotserve command (default: hotserve); `hotserve
+#                      box webhook` names the address as the box reads the file
+#
+# In GitHub Actions the output is also dressed for the job page: each
+# box in a collapsible group, a failure as an error annotation, one
+# line per box in the job summary. Any box failing fails the run; the
+# others are still sent.
+set -eu
+cd "$(dirname "$0")/.."
+HOTSERVE=${HOTSERVE:-hotserve}
+audience=${HOTSERVE_AUDIENCE:-hotserve}
+actions=${GITHUB_ACTIONS:-}
+# A request's bound. A push's is longer: the box answers a POST within
+# 30 s once it has the bundle, but checking a long chain takes longer.
+maxtime=60
+
+tmpd=$(mktemp -d)
+trap 'rm -rf "$tmpd"' EXIT
+
+head=$(git rev-parse --verify HEAD)
+short=$(git rev-parse --short=7 HEAD)
+# The token Actions mints names the commit the run is for, and the box
+# refuses a bundle for another (the workflow checks out that commit).
+if [ -n "${GITHUB_SHA:-}" ] && [ "$GITHUB_SHA" != "$head" ]; then
+	echo "apply: the checkout is at $head, but this run is for $GITHUB_SHA: its token would name the wrong commit" >&2
+	exit 1
+fi
+if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] && [ -z "${HOTSERVE_TOKEN:-}" ]; then
+	echo "apply: set HOTSERVE_TOKEN (hotserve deploy-token --claims sha=$head ...), or run in GitHub Actions with id-token: write" >&2
+	exit 1
+fi
+
+# mint puts a token in $tmpd/token: a fresh one per request in Actions,
+# since a slow apply can outlive one. The token stays in files of this
+# process: an output of the step would print it in the job log.
+mint() {
+	if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+		printf 'Authorization: Bearer %s\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" >"$tmpd/mint"
+		curl -fsS -H "@$tmpd/mint" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" |
+			sed -n 's/.*"value" *: *"\([^"]*\)".*/\1/p' >"$tmpd/token" || true
+		[ -s "$tmpd/token" ] || { echo "apply: could not mint an OIDC token" >&2; return 1; }
+		printf '::add-mask::%s\n' "$(cat "$tmpd/token")"
+	else
+		printf '%s' "$HOTSERVE_TOKEN" >"$tmpd/token"
+	fi
+	# A header file, so no token is in a process's arguments.
+	printf 'Authorization: Bearer %s\n' "$(cat "$tmpd/token")" >"$tmpd/auth"
+}
+
+# req <curl args...>: one request with a token. The status goes in
+# $code — 000 when no answer came — and the body in $tmpd/resp.
+req() {
+	mint || exit 1
+	code=$(curl -sS -o "$tmpd/resp" -w '%{http_code}' --max-time "$maxtime" \
+		-H "@$tmpd/auth" "$@") || code=000
+}
+
+# field <key>: a string field of the response, JSON's escapes undone.
+# The box's answers are flat objects on one line, so the last match is
+# the field itself: inside a string a quote is escaped and cannot start
+# a key.
+field() {
+	sed -n 's/.*"'"$1"'":"\(\([^\\"]*\\.\)*[^\\"]*\)".*/\1/p' "$tmpd/resp" | unescape
+}
+unescape() {
+	awk '{
+		out = ""; s = $0
+		while ((i = index(s, "\\")) > 0) {
+			out = out substr(s, 1, i - 1); c = substr(s, i + 1, 1)
+			if (c == "n") out = out "\n"
+			else if (c == "t") out = out "\t"
+			else if (c == "r") out = out "\r"
+			else if (c == "\"" || c == "\\" || c == "/") out = out c
+			else out = out "\\" c
+			s = substr(s, i + 2)
+		}
+		printf "%s", out s
+	}'
+}
+# apps: the result's app names, comma separated.
+apps() {
+	sed -n 's/.*"apps":\[\([^]]*\)\].*/\1/p' "$tmpd/resp" | tr -d '"' | sed 's/,/, /g'
+}
+
+# The Actions dressing, as scripts/deploy.sh in hotserve's examples has
+# it: what a workflow command's message and property may not contain.
+msg() { printf '%s' "$1" | sed 's/%/%25/g' | tr '\r\n' '  '; }
+prop() { msg "$1" | sed 's/:/%3A/g; s/,/%2C/g'; }
+summary() { [ -z "${GITHUB_STEP_SUMMARY:-}" ] || printf '%s\n\n' "$1" >>"$GITHUB_STEP_SUMMARY"; }
+
+# red <message>: this box failed.
+red() {
+	printf 'apply: %s\n' "$1" >&2
+	[ -z "$actions" ] || printf '::error title=%s::%s\n' "$(prop "apply $box failed")" "$(msg "$1")"
+	summary "**$box:** failed: $1"
+	failed=1
+}
+
+# refused401 says what the box must trust for a token it turned away. Its
+# 401 is one flat sentence whatever the reason, so this side is built
+# from what the run has; the reason is in the box's journal.
+refused401() {
+	echo "the box refused this token. Most often the deploy_trust in its box block — the Caddyfile the box"
+	echo "runs, not the one being sent — does not accept:"
+	if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+		printf '  %-18s%s\n' 'audience' "$audience" 'claim repository' "${GITHUB_REPOSITORY:-?}" 'claim ref' "${GITHUB_REF:-?}"
+	else
+		echo "  the key this token was minted with (deploy_trust local { public_key ... })"
+		echo "  the audience, subject or claim it pins, against what hotserve deploy-token was given"
+		echo "A box token must also name the commit: hotserve deploy-token --claims sha=$head."
+	fi
+	echo "Or the box could not consult the token's issuer (an outage there): its journal says so, and a"
+	echo "re-run once the issuer is back goes through. On the box, journalctl -u hotserve ('webhook auth"
+	echo "failed') names the check that refused it."
+}
+
+# done_ok <phase>: a result the box answered green.
+done_ok() {
+	[ "$(sed -n 's/.*"caddyfile_edited_out_of_band":\(true\).*/\1/p' "$tmpd/resp")" != true ] || {
+		w="the Caddyfile on the box had been edited there since the last apply; this push replaced the edit with $path at $short"
+		printf 'apply: %s\n' "$w"
+		[ -z "$actions" ] || printf '::warning title=%s::%s\n' "$(prop "apply $box")" "$(msg "$w")"
+	}
+	case $1 in
+	no_change)
+		printf 'apply: %s at %s: the box already runs this Caddyfile\n' "$box" "$short"
+		summary "**$box:** $short, unchanged" ;;
+	applied)
+		d=$(field diff)
+		if [ -n "$d" ]; then
+			printf '%s\n' "$d"
+		fi
+		a=$(apps)
+		printf 'apply: %s at %s: loaded; running apps are not restarted%s\n' "$box" "$short" "${a:+; apps $a}"
+		summary "**$box:** $short applied" ;;
+	*)
+		# A 2xx that is not the box's: something in front of it.
+		red "HTTP 200 without a result the box gives (phase '$1')" ;;
+	esac
+}
+
+# outcome: what the last answer says about the push. Returns 0 when it
+# is settled (green or red), 1 when the result is still to come.
+outcome() {
+	case $code in
+	200)
+		done_ok "$(field phase)"
+		return 0 ;;
+	202)
+		ph=$(field phase)
+		if [ "$ph" = verified ] && [ -z "$said" ]; then
+			signer=$(field signer)
+			printf 'apply: %s at %s%s; verified; installing\n' "$box" "$short" "${signer:+, signed by $signer}"
+			said=1
+		fi
+		return 1 ;;
+	422)
+		e=$(field error) ph=$(field phase)
+		red "${ph:-refused}: ${e:-see the response}"
+		return 0 ;;
+	401)
+		refused401
+		red "the box refused the token (401); the log above says what it must trust"
+		return 0 ;;
+	429)
+		red "the box is turning away requests from this address after too many failed ones (429); re-run later"
+		return 0 ;;
+	*)
+		e=$(field error)
+		red "HTTP $code: ${e:-$(head -c 300 "$tmpd/resp" 2>/dev/null)}"
+		return 0 ;;
+	esac
+}
+
+# poll: GET /?result=<id> until the push settles, 15 minutes at most.
+# A 404 is "not yet" here: this is only asked after the box took the
+# push (202, 504) or after an answer was lost, and only root can tell a
+# push it holds from one it lost.
+poll() {
+	deadline=$(($(date +%s) + 900))
+	wait=1 last=
+	while [ "$(date +%s)" -lt "$deadline" ]; do
+		sleep "$wait"
+		[ "$wait" -ge 5 ] || wait=$((wait + 1))
+		req "$url?result=$id"
+		case $code in
+		200|202|422|429) outcome && return 0 ;;
+		401)
+			red "the box refused a token for the result poll (401). If this push changed the box block's deploy_trust, it may have applied and dropped this workflow: journalctl -u hotserve-box-apply on the box says"
+			return 0 ;;
+		404) last=404 ;;
+		000|502|503|504) ;;
+		*) outcome; return 0 ;;
+		esac
+	done
+	if [ "$last" = 404 ]; then
+		red "no result for push $id after 15 minutes, and no sign the box took it: journalctl -u hotserve -u hotserve-box-apply on the box"
+	else
+		red "no result for push $id after 15 minutes: journalctl -u hotserve-box-apply on the box"
+	fi
+}
+
+# send: one box, $box, from HEAD's $path.
+send() {
+	git cat-file blob "$head:$path" >"$tmpd/Caddyfile" || { red "$path is not in HEAD"; return 0; }
+	url=$("$HOTSERVE" box webhook "$tmpd/Caddyfile" 2>"$tmpd/err") || { red "$path: $(cat "$tmpd/err")"; return 0; }
+
+	req "$url"
+	case $code in
+	200) ;;
+	401) refused401; red "the box refused the token (401); the log above says what it must trust"; return 0 ;;
+	000) red "$url did not answer"; return 0 ;;
+	*) e=$(field error); red "$url: HTTP $code: ${e:-$(head -c 300 "$tmpd/resp" 2>/dev/null)}"; return 0 ;;
+	esac
+	base=$(field commit)
+	case $base in
+	*[!0-9a-f]*|'') red "$url did not name the commit it runs"; return 0 ;;
+	esac
+
+	parents=
+	if [ "$base" != "$head" ]; then
+		if ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+			red "the box runs $base, which this repository's history does not hold: if main was rewritten below it, hotserve box baseline $head, as root on the box, resets trust to $head, whose ancestors the box will then never examine"
+			return 0
+		fi
+		if git merge-base --is-ancestor "$head" "$base"; then
+			printf 'apply: %s already runs %s, a later commit than %s: superseded, nothing to send\n' "$box" "$(git rev-parse --short=7 "$base")" "$short"
+			summary "**$box:** superseded by $(git rev-parse --short=7 "$base")"
+			return 0
+		fi
+		# HEAD and the commits between, first parent by first parent,
+		# HEAD first. The box takes 500 counting HEAD; past that only
+		# a trust reset on the box moves it on.
+		n=$(git rev-list --first-parent --count "$base..$head")
+		if [ "$n" -gt 500 ]; then
+			red "the chain from $base to $head is longer than 500 commits; run hotserve box baseline $head as root on the box"
+			return 0
+		fi
+		parents=$(git rev-list --first-parent "$base..$head" | tail -n +2)
+	fi
+
+	# The bundle: exactly these names, regular files, no directories.
+	b=$tmpd/bundle
+	rm -rf "$b" "$tmpd/bundle.tgz"
+	mkdir -p "$b/parents" "$b/trees"
+	printf '%s\n' "$path" >"$b/path"
+	cp "$tmpd/Caddyfile" "$b/Caddyfile"
+	git cat-file commit "$head" >"$b/commit"
+	set -- path Caddyfile commit
+	i=0
+	for p in $parents; do
+		i=$((i + 1))
+		f=parents/$(printf '%04d' "$i")
+		git cat-file commit "$p" >"$b/$f"
+		set -- "$@" "$f"
+	done
+	# The root tree, then each directory's down to the file.
+	t=$(git rev-parse "$head^{tree}")
+	git cat-file tree "$t" >"$b/trees/$t"
+	set -- "$@" "trees/$t"
+	sub= rest=${path%/*}
+	while [ -n "$rest" ]; do
+		c=${rest%%/*}
+		sub=${sub:+$sub/}$c
+		t=$(git rev-parse "$head:$sub")
+		git cat-file tree "$t" >"$b/trees/$t"
+		set -- "$@" "trees/$t"
+		[ "$rest" = "${rest#*/}" ] && rest= || rest=${rest#*/}
+	done
+	# COPYFILE_DISABLE: macOS tar would add ._ files for extended
+	# attributes, which the box refuses as names it does not know.
+	COPYFILE_DISABLE=1 tar -czf "$tmpd/bundle.tgz" -C "$b" "$@"
+
+	id=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+	n=$(printf '%s\n' "$parents" | grep -c . || true)
+	printf 'apply: %s → %s: the box runs %s; sending %s (%s commit%s), push %s\n' \
+		"$path" "$url" "$(printf '%.7s' "$base")" "$short" "$((n + 1))" "$([ "$n" = 0 ] && echo || echo s)" "$id"
+	said=
+	deadline=$(($(date +%s) + 900))
+	while :; do
+		# No answer at all is polled for: the id was chosen here.
+		maxtime=600
+		req -X POST -H "X-Box-Request-Id: $id" -H "Content-Type: application/gzip" \
+			--data-binary "@$tmpd/bundle.tgz" "$url"
+		maxtime=60
+		[ "$code" = 409 ] || break
+		e=$(field error)
+		case $e in
+		'duplicate request id'*) break ;;
+		'a push is being admitted'*|'a push is pending'*)
+			if [ "$(date +%s)" -ge "$deadline" ]; then
+				red "$e: for 15 minutes. On the box: journalctl -u hotserve-box-apply -u hotserve-box-apply.path, and if the path unit is failed, systemctl restart hotserve-box-apply.path (again ten seconds later if it fails)"
+				return 0
+			fi
+			printf 'apply: %s; trying again\n' "$e"
+			# Another push's body is being read: a moment. One pending
+			# on the box: its apply, seconds.
+			case $e in 'a push is being admitted'*) sleep 2 ;; *) sleep 10 ;; esac ;;
+		*) red "$e"; return 0 ;;
+		esac
+	done
+	case $code in
+	000) echo "apply: no answer to the push; asking for its result"; poll ;;
+	409|504) echo "apply: the box has the push; asking for its result"; poll ;;
+	*) outcome || poll ;;
+	esac
+}
+
+if [ $# -gt 0 ]; then
+	boxes=${1%/}/Caddyfile
+	[ $# -eq 1 ] || { echo "apply: one box at most, by its directory" >&2; exit 1; }
+else
+	boxes=$(git ls-tree --name-only HEAD | while read -r d; do
+		[ "$(git cat-file -t "HEAD:$d/Caddyfile" 2>/dev/null)" = blob ] && echo "$d/Caddyfile"
+	done || true)
+fi
+[ -n "$boxes" ] || { echo "apply: no box in HEAD: a box is <host>/Caddyfile at the top of the repository" >&2; exit 1; }
+
+failed=
+IFS='
+'
+for path in $boxes; do
+	unset IFS
+	box=${path%/Caddyfile}
+	[ -z "$actions" ] || printf '::group::%s\n' "apply $box"
+	send
+	[ -z "$actions" ] || printf '::endgroup::\n'
+done
+[ -z "$failed" ]

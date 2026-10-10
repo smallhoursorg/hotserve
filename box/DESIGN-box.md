@@ -9,8 +9,7 @@ body once they settle.
 **Status: design, written before the code.** Normative for the PRs
 that build it (proof core, Caddyfile surface, applier, `init`,
 template, docs); a PR that cannot hold a line here changes the line in
-the same PR, with the reason. Until the template ships,
-`examples/box/bin/push` is how config reaches a box.
+the same PR, with the reason.
 
 **Two rules of this document.** Every fact lives in exactly one table;
 prose uses it and points to it, and never restates it, so a change
@@ -92,6 +91,7 @@ the box is one file:
 deploy.example.com/Caddyfile   # the whole config
 .github/workflows/apply.yml    # validates every push and PR; applies main to the box
 Makefile                       # make signer, make check, make wip
+bin/                           # what the Makefile and the workflow run
 ```
 
 The Caddyfile's global options carry a `box` block beside `admin`, and
@@ -896,8 +896,8 @@ Every numeric bound, in one place, with its reason.
 
 ## Reading the signed file
 
-The applier, `init` and `hotserve box webhook` read the Caddyfile the
-same way: `caddyfile.Tokenize` and a brace-depth walk — the key-less
+The applier, `init`, `hotserve box webhook` and `hotserve box describe`
+read the Caddyfile the same way: `caddyfile.Tokenize` and a brace-depth walk — the key-less
 top-level block, its `box` block, that block's `signer` and
 `deploy_trust` tokens; each site block's address tokens and whether
 `box_webhook` stands at directive position. Tokenizing expands nothing
@@ -1225,6 +1225,12 @@ carrying `box_webhook`, with the same walk and the same refusals as
 `init`, so the laptop, CI and the box cannot disagree about which
 address a file names.
 
+**`box describe <Caddyfile>`** prints the same walk's reading a fact a
+line — `host <host>`, then `app <name>` and `signer <principal>
+<key-type> <base64>` in file order — for the template's `make check`,
+which prints its line for each box from it and compares the boxes'
+signer keys. Same refusals; nothing on the box runs it.
+
 ## The applier unit
 
 Two units, in the backups units' house style:
@@ -1489,6 +1495,7 @@ the chain and descent checks:
 | Rebase a branch onto `main`; never merge `main` into a branch. | A merge puts the baseline on the second parent, off the first-parent line; the box refuses the fast-forward and names the case. |
 | Configuration not yet meant to run is committed unsigned (`make wip`, which passes `-c commit.gpgsign=false`) or kept in a fork. | A push credential cannot sign, but can fast-forward a fully signed branch onto `main`, and the box applies what `main` says. An unsigned branch is one the chain rule refuses whoever lands it. |
 | Rotate a signer in two applied pushes: add, let it apply, remove. | Step 15 requires the verifying key to remain listed. |
+| Every box in the repository lists the same signer keys (`make signer` adds to all; `make check` refuses lists that differ). | Every commit is on every box's chain (step 14), so a commit signed by a key one box lacks stops that box's pushes. |
 | Recommended rulesets: `required_signatures` (stops the rebase button and any unsigned push; not the squash button, whose web-flow signature satisfies GitHub and not the box) and block-force-pushes. | The second closes the only route to put a stale signed commit back under a `main` that has moved. |
 | After a credential leak: rotate it, then one applied push to `main`. | A fetched signed commit is the holder's for ever, but lands only while the box still runs the commit it forked from; one applied push puts every stale object below the baseline. |
 
@@ -1732,3 +1739,9 @@ Dated one-liners; the full text of each is in git.
   decided, are the Reachability tables — fail-closed on a handler or a
   matcher they do not weigh; `init`'s gap, `request_body`'s and
   `timeouts`' stated.
+- 2026-10-10 — PR 5 (the template): `examples/box` holds one
+  `<host>/Caddyfile` and `bin/signer`, `bin/check`, `bin/apply` behind
+  `make signer`, `make check` and the workflow; `bin/push` and its
+  sudoers lines are gone, the secrets lines stay until PR 7. Added
+  here: `hotserve box describe`, and the rule that every box in a
+  repository lists the same signer keys.

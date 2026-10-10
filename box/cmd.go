@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/caddyserver/caddy/v2"
 	caddycmd "github.com/caddyserver/caddy/v2/cmd"
@@ -45,6 +46,25 @@ address a file names. The file may be a pipe:
 					}
 					_, err = fmt.Fprintln(c.OutOrStdout(), url)
 					return err
+				},
+			})
+			cmd.AddCommand(&cobra.Command{
+				Use:   "describe <Caddyfile>",
+				Short: "Print a Caddyfile's box_webhook host, apps and signers, as the box reads them",
+				Long: `Reads the Caddyfile as "hotserve box webhook" does and prints one line
+per fact, in file order, for a script to read:
+
+    host deploy.example.com
+    app example
+    signer alice@example.com ssh-ed25519 AAAAC3Nz...
+
+It refuses the file's contents for every reason the box would. The box
+template's make check prints its line for each box from this, and
+compares the signer lists of a repository's boxes. The file may be a
+pipe, as for webhook.`,
+				Args: cobra.ExactArgs(1),
+				RunE: func(c *cobra.Command, args []string) error {
+					return describe(args[0], c.OutOrStdout())
 				},
 			})
 			cmd.AddCommand(&cobra.Command{
@@ -161,18 +181,49 @@ func runApply(ctx context.Context, euid int, a *Applier) error {
 // show HEAD:deploy.example.com/Caddyfile)`, /dev/stdin — and is read
 // until its end.
 func webhookURL(path string) (string, error) {
-	f, err := os.Open(path) //nolint:gosec // the operator's own CLI argument
+	shape, err := readShape(path)
 	if err != nil {
 		return "", err
+	}
+	return "https://" + shape.Host + "/", nil
+}
+
+// describe is `hotserve box describe`: the walk's reading of the file at
+// path, one line per fact. Every value is held to a grammar by the walk
+// (a lowercase hostname, liveswap's app names, a principal, a key type,
+// a canonical base64), so none can break a line.
+func describe(path string, w io.Writer) error {
+	shape, err := readShape(path)
+	if err != nil {
+		return err
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "host %s\n", shape.Host)
+	for _, app := range shape.Apps {
+		fmt.Fprintf(&b, "app %s\n", app)
+	}
+	for _, s := range shape.Signers {
+		fmt.Fprintf(&b, "signer %s %s %s\n", s.Principal, s.Type, s.B64)
+	}
+	_, err = io.WriteString(w, b.String())
+	return err
+}
+
+// readShape walks the file at path, read whole at most the Caddyfile
+// cap.
+func readShape(path string) (*Shape, error) {
+	f, err := os.Open(path) //nolint:gosec // the operator's own CLI argument
+	if err != nil {
+		return nil, err
 	}
 	defer f.Close() //nolint:errcheck // read-only
 	file, err := readCapped(f, path, proof.MaxCaddyfile)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	shape, err := Walk(file)
 	if err != nil {
-		return "", fmt.Errorf("%s: %w", path, err)
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	return "https://" + shape.Host + "/", nil
+	return shape, nil
 }

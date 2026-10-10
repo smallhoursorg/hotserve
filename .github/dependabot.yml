@@ -44,9 +44,9 @@ updates:
     # ignore without a watch.
 
   - package-ecosystem: github-actions
-    # The examples' deploy workflows are SHA-pinned like ours and are
+    # The examples' workflows are SHA-pinned like ours and are
     # copied into other people's repos, so their pins are kept fresh.
-    directories: ["/", "/examples/deno", "/examples/node"]
+    directories: ["/", "/examples/box", "/examples/deno", "/examples/node"]
     schedule:
       interval: weekly
     cooldown:

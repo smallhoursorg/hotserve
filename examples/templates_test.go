@@ -160,14 +160,14 @@ var (
 	refLink    = regexp.MustCompile(`(?m)^\s*\[[^\]]+\]:\s*(\S+)`)
 )
 
-// Each release publishes examples/node and examples/deno as template
-// repositories of their own (release.yml's templates job), and every
+// Each release publishes examples/node, examples/deno and examples/box
+// as template repositories of their own (release.yml's templates job), and every
 // repository made from one is its own root too: a relative link that
 // leaves the example's directory works here and is a 404 there. So a
 // link in an example's docs is absolute, or stays inside the example
 // and names something that exists.
 func TestTemplateLinksStayInside(t *testing.T) {
-	for _, ex := range []string{"node", "deno"} {
+	for _, ex := range []string{"node", "deno", "box"} {
 		err := filepath.WalkDir(ex, func(path string, d fs.DirEntry, err error) error {
 			if err != nil || d.IsDir() || !strings.HasSuffix(path, ".md") {
 				return err

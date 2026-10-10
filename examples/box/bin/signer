@@ -1,0 +1,94 @@
+#!/bin/sh
+# Adds your SSH key to every box's signer list and makes this checkout
+# sign every commit with it. A box applies a commit only if a key its
+# running Caddyfile lists signed it, and every commit before it back to
+# the one the box runs (README.md).
+#
+#   make signer                            ~/.ssh/id_ed25519.pub, as your git email
+#   make signer KEY=~/.ssh/id_ed25519_sk.pub PRINCIPAL=alice@example.com
+#
+#   KEY        your public key, the .pub file (default ~/.ssh/id_ed25519.pub).
+#              The private half is the file beside it, or held by
+#              ssh-agent (a hardware key, a password manager)
+#   PRINCIPAL  the name the boxes report your commits under: letters,
+#              digits and . _ @ + - (default: git config user.email)
+#
+# The line goes under the `# signers` marker in each box's Caddyfile,
+# every box alike: each commit is on every box's history, so a key one
+# box lacks would stop that box's pushes. A box that lists the key
+# already is left as it is, so running it again only sets up signing.
+# The checkout's own git config gains gpg.format ssh, user.signingkey
+# and commit.gpgsign true; nothing outside this repository changes.
+set -eu
+cd "$(dirname "$0")/.."
+
+key=${KEY:-$HOME/.ssh/id_ed25519.pub}
+# make passes KEY=~/... through unexpanded when the shell did not
+# expand it.
+case $key in "~/"*) key=$HOME/${key#"~/"} ;; esac
+principal=${PRINCIPAL:-$(git config user.email || true)}
+
+fail() { printf 'signer: %s\n' "$*" >&2; exit 1; }
+
+[ -f "$key" ] || fail "no key at $key: make one with ssh-keygen -t ed25519 (or -t ed25519-sk for a hardware key), or name yours with KEY=path/to/key.pub"
+case $key in
+*.pub) ;;
+*) fail "KEY is the public half, the .pub file beside $key" ;;
+esac
+# A public key file is one line: <type> <base64> [comment].
+read -r type b64 _ <"$key" || true
+case $type in
+ssh-ed25519|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|sk-ssh-ed25519@openssh.com|sk-ecdsa-sha2-nistp256@openssh.com|ssh-rsa) ;;
+*) fail "$key is not an SSH public key of a type a box takes (ssh-ed25519, ecdsa-sha2-nistp256/384/521, the sk- hardware forms, ssh-rsa)" ;;
+esac
+case $b64 in
+''|*[!A-Za-z0-9+/=]*) fail "$key: the key's base64 is malformed" ;;
+esac
+[ -n "$principal" ] || fail "no principal: set PRINCIPAL=you@example.com, or git config user.email"
+case $principal in
+*[!A-Za-z0-9._@+-]*) fail "principal '$principal': letters, digits and . _ @ + - only; set PRINCIPAL" ;;
+esac
+[ "${#principal}" -le 256 ] || fail "principal: at most 256 bytes"
+
+# Every box: <host>/Caddyfile at the top of the repository, tracked or
+# about to be (make check holds the layout).
+boxes=$(git ls-files --cached --others --exclude-standard | grep -E '^[^/]+/Caddyfile$' | LC_ALL=C sort || true)
+[ -n "$boxes" ] || fail "no box here: a box is <host>/Caddyfile at the top of the repository"
+# One path a line; a name never splits.
+IFS='
+'
+
+for f in $boxes; do
+	grep -q '^[[:space:]]*# signers[[:space:]]*$' "$f" ||
+		fail "$f has no '# signers' line: put one inside its box block, where the signer lines go"
+done
+for f in $boxes; do
+	# A signer line's third argument is the key; the same key twice
+	# would be one person under two names.
+	listed=$(awk -v k="$b64" '$1 == "signer" && $4 == k { print $2; exit }' "$f")
+	if [ -n "$listed" ]; then
+		printf 'signer: %s already lists this key, as %s\n' "$f" "$listed"
+		continue
+	fi
+	tmp=$f.signer-tmp
+	awk -v line="signer $principal $type $b64" '
+		{ print }
+		!done && /^[[:space:]]*# signers[[:space:]]*$/ {
+			indent = $0; sub(/#.*/, "", indent)
+			print indent line
+			done = 1
+		}' "$f" >"$tmp"
+	mv "$tmp" "$f"
+	printf 'signer: added %s (%s) to %s\n' "$principal" "$type" "$f"
+done
+
+# git signs with the private key file when there is one beside the .pub,
+# and with ssh-agent's copy of the .pub's key when there is not.
+signing=$key
+[ -f "${key%.pub}" ] && signing=${key%.pub}
+git config gpg.format ssh
+git config user.signingkey "$signing"
+git config commit.gpgsign true
+printf 'signer: commits from this checkout are signed with %s\n' "$signing"
+echo "signer: on a box that already runs, the commit that adds you must be signed by a signer it lists:"
+echo "signer: commit it with make wip and hand the branch to one (README.md, Adding a signer)"

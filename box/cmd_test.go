@@ -99,11 +99,23 @@ func TestBoxCommand(t *testing.T) {
 	if _, err := run("webhook", path, path); err == nil {
 		t.Error("two files accepted")
 	}
+	// describe: the host, the apps and the signers, a line each, in
+	// file order; the signer as its one canonical line.
+	want := "host deploy.example.com\napp example\nsigner alice@example.com ssh-ed25519 " + keys[0] + "\nsigner bob ssh-ed25519 " + keys[1] + "\n"
+	if out, err := run("describe", path); err != nil || out != want {
+		t.Fatalf("describe: %q, %v\nwant %q", out, err, want)
+	}
+	if _, err := run("describe"); err == nil {
+		t.Error("describe: no file accepted")
+	}
 	if err := os.WriteFile(path, []byte("{\n}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := run("webhook", path); err == nil || !strings.Contains(err.Error(), "has no box block") {
 		t.Errorf("a refused file: %v", err)
+	}
+	if out, err := run("describe", path); err == nil || !strings.Contains(err.Error(), "has no box block") {
+		t.Errorf("describe, a refused file: %q, %v", out, err)
 	}
 	// baseline takes exactly one argument; what it does with it is
 	// TestBaseline's.

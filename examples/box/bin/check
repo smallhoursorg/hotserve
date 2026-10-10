@@ -1,0 +1,83 @@
+#!/bin/sh
+# Checks that every box in this repository is one hotserve will take,
+# with the hotserve the boxes run (.github/workflows/apply.yml installs
+# it; there is no macOS build, so on a Mac the workflow is where this
+# runs). It reads the files as they are in the checkout.
+#
+# A box is a directory at the top of the repository named for the box's
+# deploy host, holding its whole config as Caddyfile:
+# deploy.example.com/Caddyfile. `hotserve init` on the box records
+# exactly that path, and the workflow posts the file to that host. So:
+#
+#   - every Caddyfile in the repository is <dir>/Caddyfile, one level down;
+#   - each reads as a box's file, as the box reads it (`hotserve box
+#     describe`: a box block with signers, one site with box_webhook),
+#     and its box_webhook host, in lower case, is <dir>;
+#   - each passes `hotserve validate`, the box's own check before it
+#     applies a push;
+#   - every box lists the same signers (keys): each commit is on every
+#     box's history, so a key one box lacks would stop that box's pushes.
+#
+# It prints a line for each box:
+#
+#   deploy.example.com/Caddyfile → https://deploy.example.com/ (1 app, 1 signer)
+#
+#   HOTSERVE  the hotserve command (default: hotserve)
+set -eu
+cd "$(dirname "$0")/.."
+HOTSERVE=${HOTSERVE:-hotserve}
+
+tmpd=$(mktemp -d)
+trap 'rm -rf "$tmpd"' EXIT
+status=0
+bad() { printf 'check: %s\n' "$*" >&2; status=1; }
+
+# Tracked files and new ones not ignored: a box added but not yet
+# committed is checked too.
+files=$(git ls-files --cached --others --exclude-standard | grep -E '(^|/)Caddyfile$' | LC_ALL=C sort || true)
+[ -n "$files" ] || { echo "check: no box here: a box is <host>/Caddyfile at the top of the repository" >&2; exit 1; }
+# One path a line; a name never splits.
+IFS='
+'
+first= firstkeys=
+for f in $files; do
+	# Tracked but deleted here: on its way out.
+	[ -e "$f" ] || continue
+	case $f in
+	*/*/*|Caddyfile)
+		bad "$f: a box's file is <host>/Caddyfile at the top of the repository, nothing deeper or shallower"
+		continue ;;
+	esac
+	dir=${f%/Caddyfile}
+	if ! "$HOTSERVE" box describe "$f" >"$tmpd/describe" 2>&1; then
+		hint=
+		grep -q 'has no signer' "$tmpd/describe" && hint=" (make signer adds yours)"
+		bad "$(cat "$tmpd/describe")$hint"
+		continue
+	fi
+	host=$(sed -n 's/^host //p' "$tmpd/describe")
+	if [ "$host" != "$dir" ]; then
+		bad "$f: its box_webhook host is $host, so it belongs at $host/Caddyfile (git mv $dir $host)"
+		continue
+	fi
+	if ! "$HOTSERVE" validate --adapter caddyfile --config "$f" >"$tmpd/validate" 2>&1; then
+		bad "$f does not validate:"
+		sed 's/^/  /' "$tmpd/validate" >&2
+		continue
+	fi
+	apps=$(grep -c '^app ' "$tmpd/describe" || true)
+	signers=$(grep -c '^signer ' "$tmpd/describe" || true)
+	# The keys alone, sorted: a principal is a name the boxes report,
+	# the key is what signs.
+	keys=$(sed -n 's/^signer [^ ]* //p' "$tmpd/describe" | LC_ALL=C sort)
+	if [ -z "$first" ]; then
+		first=$f firstkeys=$keys
+	elif [ "$keys" != "$firstkeys" ]; then
+		bad "$f lists other signer keys than $first: each commit is on every box's history, so a commit signed by a key one box lacks stops that box's pushes; list the same keys in every box (make signer adds to all)"
+		continue
+	fi
+	[ "$apps" = 1 ] && a=app || a=apps
+	[ "$signers" = 1 ] && s=signer || s=signers
+	printf '%s → https://%s/ (%s %s, %s %s)\n' "$f" "$host" "$apps" "$a" "$signers" "$s"
+done
+exit "$status"

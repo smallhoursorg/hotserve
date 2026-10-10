@@ -90,10 +90,10 @@ COPY examples/node/hotserve.caddy /etc/hotserve/node-example.caddy
 COPY e2e/mint-token.sh /usr/local/bin/mint-token.sh
 RUN chmod +x /usr/local/bin/mint-token.sh
 
-# An administrator who is not root: the box suite runs examples/box's
-# bin/push as this user, with exactly the sudoers file the example
-# ships and the adm group for the journal — the README's claim that
-# administering needs no root, tested.
+# An administrator who is not root: the box suite runs as this user,
+# with exactly the sudoers file examples/box ships and the adm group
+# for the journal — the README's claim that the apps' secrets and logs
+# need no root, and that the Caddyfile is not theirs, tested.
 COPY examples/box/sudoers /etc/sudoers.d/hotserve-admin
 RUN chmod 0440 /etc/sudoers.d/hotserve-admin && visudo -c -q \
 	&& groupadd hotserve-admin \

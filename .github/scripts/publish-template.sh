@@ -20,7 +20,7 @@
 # release older than one the mirror already has, leaves it alone.
 set -eu
 
-rt=${1:?runtime: node or deno}
+rt=${1:?the example: node, deno or box}
 tag=${2:?the release tag, e.g. v0.2.0}
 repo=${3:-smallhoursorg/hotserve-example-$rt}
 src=examples/$rt
