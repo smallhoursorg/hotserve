@@ -40,7 +40,7 @@ and T6.
 | **bundle** | One gzip tarball the workflow POSTs: `path`, `Caddyfile`, `commit`, `parents/NNNN`, `trees/<sha>`, nothing else. |
 | **HEAD** | The commit the bundle is for: `sha1("commit <n>\0" + raw)` of the bundled `commit` object, computed, never read. |
 | **baseline** | The commit the box runs: `sha` in `applied.json`. Advances only as the state machine says. |
-| **chain** | HEAD plus the bundled `parents/` commits, first-parent from HEAD down to, not including, the baseline, each linked to the next by hash. HEAD is always on it, so the chain is never empty: whatever would write — root, and the handler's pre-verification before validate — checks HEAD's signature against the installed list, HEAD equal to the baseline included (then the chain is HEAD alone and `parents/` must be empty). The one answer given without it is step 4's `no_change` fast path, which writes nothing: HEAD is the baseline, at the path `applied.json` records, and the bundled bytes are the installed bytes, verified when they applied. `parents/` is also empty when HEAD's first parent is the baseline. The cap counts HEAD. |
+| **chain** | HEAD plus the bundled `parents/` commits, first-parent from HEAD down to, not including, the baseline, each linked to the next by hash. HEAD is always on it, so the chain is never empty: whatever would write — root, and the handler's pre-verification before validate — checks HEAD's signature against the installed list, HEAD equal to the baseline included (then the chain is HEAD alone and `parents/` must be empty). The one answer given without it is step 4's `no_change` fast path, which writes nothing: HEAD is the baseline, the bundled bytes are the installed bytes, and the bundle passes the steps that need no signature (path, file proof, linkage). `parents/` is also empty when HEAD's first parent is the baseline. The cap counts HEAD. |
 | **installed file** | `/etc/hotserve/Caddyfile` as root last wrote it. The source of the signer list and the rollback bytes. |
 | **record** | `txn.json`: the one durable marker of a transaction in flight, with a `phase`. Present means "no terminal result yet". |
 | **result** | `out/<id>.json`: what a push came to. Non-terminal: `verified`. Terminal: `refused`, `no_change`, `applied`, `failed`, `rolled_back`, `unknown`. |
@@ -203,18 +203,24 @@ cross-references throughout.
    binding have passed — and the id is not one the box already holds,
    which is asked before the body is read (a marker, a result, or a
    bundle still in `in/`: 409 "duplicate request id", so one id is never
-   answered two ways) — if HEAD equals the baseline, the bundle's path
-   is the one `applied.json` records, and the bundled file's digest
-   equals the installed file's, nothing on disk would change, so the handler answers 200 `no_change` with no admission
-   lock, no drop and no root work (asked again under the lock, of what
-   was read there, so a push another one applied meanwhile is answered
-   the same way) — it skips only the work that would
-   write. An OIDC holder posting the applied `HEAD` in a loop learns
-   what `GET /` already tells it; a token without the right `sha`, or
-   a POST without its id, is refused as it would be on the slow
-   path, and a bundle at another path goes on to pre-verification,
-   which refuses it as step 11 does. The fast path writes nothing, not even a marker: a poll of its
-   id finds none (404), and the 200 is the whole answer. (After a console edit the digests differ and the push goes to
+   answered two ways) — if HEAD equals the baseline, the bundled
+   file's digest equals the installed file's, and the bundle passes the
+   steps that need no signature (11's path is the one `applied.json`
+   records, 13's file proof, 14's linkage with `parents/` empty),
+   nothing on disk would change, so the handler answers 200 `no_change`
+   with no admission lock, no drop and no root work (asked again under
+   the lock, of what was read there, so a push another one applied
+   meanwhile is answered the same way) — it skips only the work that
+   would write. No signature is checked: HEAD's id is the baseline's,
+   so its bytes are the commit the box already runs. A bundle that
+   fails any of those steps goes on to pre-verification, which refuses
+   it by the step's name, so a shape root refuses is never answered
+   `no_change`. An OIDC holder posting the applied `HEAD` in a loop
+   learns what `GET /` and the slow path's refusals already tell it; a
+   token without the right `sha`, or a POST without its id, is refused
+   as it would be on the slow path. The fast path writes nothing, not
+   even a marker: a poll of its id finds none (404), and the 200 is the
+   whole answer. (After a console edit the digests differ and the push goes to
    root, which reinstalls HEAD's file by design; the next replay takes
    the fast path again.)
 5. **Pre-verification.** The handler runs the applier's proof code
@@ -644,7 +650,7 @@ restart could make — and a crash releases it with the descriptor.
 | Condition at the lock | Answer | Why |
 |---|---|---|
 | no `X-Box-Request-Id` header, or not 32 lowercase hex | 400 "X-Box-Request-Id: 32 lowercase hex, chosen at random for each push, required" | the id names the push's bundle, marker and result; checked before the body is read and before the fast path, so every POST contract rule holds on both paths |
-| token, id and `sha` binding passed; HEAD equals the baseline and the file's digest equals the installed file's | 200 `no_change`, before the lock, and again under it | nothing would change; the fast path of step 4 |
+| token, id and `sha` binding passed; HEAD equals the baseline, the file's digest equals the installed file's, and the bundle passes steps 11's path, 13 and 14 | 200 `no_change`, before the lock, and again under it | nothing would change; the fast path of step 4 |
 | a marker, result or `in/<id>.tar` already exists for this id | 409 "duplicate request id: poll /?result=<id>" | a retry after a lost response; honest ids never collide. Checked before the fast path too, so a retry of a push that has since applied is not answered `no_change` |
 | lock held by another request, or this process's push slot taken (before the body is read) | 409 "a push is being admitted; retry in a moment" | another push is between its body and its marker |
 | any entry in `in/` | 409 "a push is pending: <id>, <age> old" | the durable one-bundle bound: a stalled applier means one 16 MiB on disk and a loud 409, never a queue; no age-out |
@@ -905,7 +911,7 @@ console step; a host rename needs a certificate first in any case.
 | Request | Authorised by | Answer |
 |---|---|---|
 | `POST /` with a bundle and `X-Box-Request-Id` | `deploy_trust` (step 1) | per step 8: 202 `{id, commit, phase: verified}` / 200 with a `no_change` or `applied` result / 422 with a `refused`, `failed`, `rolled_back` or `unknown` result / 504 `{id}`; 400, 409, 413, 415 from admission; 500 when the box cannot check the push |
-| `GET /` | `deploy_trust` | `{"commit", "box_webhook", "sha256"}`: `commit` is `applied.json`'s `sha`; `box_webhook` and `sha256` are the installed file's walked host and its digest as read now — what step 4's fast path compares, so a console edit since the last apply shows. The workflow reads `commit` to bundle `rev-list --first-parent <commit>..HEAD`. 409 before `init` (no `applied.json`); 500 when either file cannot be read or the installed file does not walk |
+| `GET /` | `deploy_trust` | `{"commit", "box_webhook", "sha256"}`: `commit` is `applied.json`'s `sha`; `box_webhook` and `sha256` are the installed file's walked host and its digest as read now — the digest step 4's fast path compares, so a console edit since the last apply shows. The workflow reads `commit` to bundle `rev-list --first-parent <commit>..HEAD`. 409 before `init` (no `applied.json`); 500 when either file cannot be read or the installed file does not walk |
 | `GET /?result=<id>` | `deploy_trust`, as every request on `/`: the workflow mints a fresh token for each poll | the query must be exactly one `result=<id>`, `<id>` in the id grammar (400). The result, with step 8's status for its phase: `verified` 202; `no_change`, `applied` 200; `refused`, `failed`, `rolled_back`, `unknown` 422. 202 `{"phase":"admitted"}` while a marker exists, or the push's bundle is still in `in/` (its marker never written), and no result does — admitted, no result yet, whatever the marker's age, since only root can tell a push it holds from one it lost, and its next run settles a lost one as `failed` (Retention); 404 when neither exists (swept, never admitted, or answered by the fast path); 500 when a file cannot be read |
 | another method on `/` | — | 405 |
 | another path | — | not this handler's; passed on |
@@ -1532,6 +1538,7 @@ Dated one-liners; the full text of each is in git.
   did; the Glossary, Caps and Paths tables caught up with 3a (`up`, one
   wait budget per run, the applier's deadlines and read caps, its three
   temporaries).
-- 2026-10-10 — The fast path asks for the recorded path too: a bundle
-  of the running commit and file at another path had been answered
-  `no_change`, though root refuses it at step 11.
+- 2026-10-10 — The fast path asks the steps that need no signature: a
+  bundle of the running commit and file at another path, with a parent
+  bundled, or without a tree the file proof needs, had been answered
+  `no_change`, though root refuses each (steps 11, 14, 13).

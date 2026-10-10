@@ -128,8 +128,8 @@ type statusBody struct {
 }
 
 // status is `GET /`: the commit the box runs, from applied.json, and
-// the host and digest of the file it runs, read now — what a push's
-// no_change fast path compares (step 4) — so a console edit since the
+// the host and digest of the file it runs, read now — the digest a
+// push's no_change fast path compares (step 4) — so a console edit since the
 // last apply shows.
 func (h *Handler) status(w http.ResponseWriter, r *http.Request) error {
 	if _, ok, err := h.authenticate(w, r, "status"); !ok {
