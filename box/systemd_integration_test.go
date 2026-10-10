@@ -116,5 +116,8 @@ func TestIntegrationSystemctl(t *testing.T) {
 		if took := time.Since(start); took > time.Second+childWaitDelay+2*time.Second {
 			t.Fatalf("returned after %v", took)
 		}
+		// The reload job runs on in PID 1: is-active says `reloading`,
+		// the word step 16 waits out and up() counts as up.
+		isActive(systemctl{unit: unit}, "reloading")
 	})
 }

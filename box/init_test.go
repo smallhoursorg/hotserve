@@ -65,6 +65,11 @@ func TestInitOrigin(t *testing.T) {
 			if n := b.names(b.x("out")); len(n) != 0 {
 				t.Errorf("init wrote results: %v", n)
 			}
+			// init asks once, when it begins, whatever follows: rollback
+			// included. (A wait asks again until it ends: activating.)
+			if c.state != "activating" && b.sd.asked != 1 {
+				t.Errorf("%d is-active questions, want 1", b.sd.asked)
+			}
 			if b.sd.reloaded != c.reloaded {
 				t.Errorf("%d reloads, want %d", b.sd.reloaded, c.reloaded)
 			}

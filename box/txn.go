@@ -86,10 +86,11 @@ type txn struct {
 	// entry is work/<id>.tar, removed after the terminal result; ""
 	// for init, which has none.
 	entry string
-	// running is whether hotserve was up when the transaction began —
-	// step 16's `active` for the applier, init's one question for init —
-	// and decides whether the swap, and a live rollback, reload.
-	running bool
+	// skipReload is init's answer that hotserve was not up when it began
+	// (its one question): the swap, and a live rollback, then reload
+	// nothing. The zero value reloads, as the applier always does —
+	// step 16 let it through only on `active`.
+	skipReload bool
 	// recorded is true once a record of this transaction may be on disk.
 	recorded bool
 	// outcome is the terminal result, for init's caller to print.
@@ -185,7 +186,7 @@ func (a *Applier) removeEntry(path string) {
 // install runs the transaction from the buffer comparison (Transitions
 // table, from "checking → no_change" and "checking → verified" on). The
 // caller has run steps 10–15 and, for the applier, found hotserve
-// active; for init it has set t.running. It returns errFullDisk or
+// active; for init it has set t.skipReload. It returns errFullDisk or
 // errUnsettled when the run must stop with the record on disk, nil
 // once a terminal result is written (or journaled).
 func (a *Applier) install(ctx context.Context, t *txn) error {
@@ -274,11 +275,11 @@ const (
 )
 
 // reloadSwapped is swapped → applied: the reload — or, for init on a box
-// that is not running, none (a person is at the console; the file loads
+// that was not running when it began (t.skipReload), none (a person is at the console; the file loads
 // at the next start) — then the installed file read back, then the
 // record, then the baseline.
 func (a *Applier) reloadSwapped(ctx context.Context, t *txn) error {
-	if t.running {
+	if !t.skipReload {
 		if err := a.systemd.Reload(ctx); err != nil {
 			a.logger.Warn("box reload failed", zap.String("id", t.rec.ID), zap.String("error", proof.Bound(err.Error())))
 			return a.rollback(ctx, t, msgReloadFailed, false)
@@ -349,7 +350,7 @@ func (a *Applier) rollingBack(ctx context.Context, t *txn, recovering bool) erro
 	// bytes load at its next start. Recovery asks (a crash may have been
 	// a reboot); init asked once, when it began, and did not reload a
 	// hotserve that was not running then.
-	running := t.running
+	running := !t.skipReload
 	if recovering {
 		state, err := a.running(ctx)
 		if err != nil {
@@ -528,7 +529,7 @@ func (a *Applier) runInit(ctx context.Context, rec record, file []byte) (*result
 	rec.Origin, rec.Signer = originInit, "init"
 	rec.Prev, rec.PrevSHA256, rec.NewSHA256 = installed, digest(installed), digest(file)
 	rec.Diff = caddyfileDiff(installed, file)
-	t := &txn{rec: rec, next: file, running: up(state)}
+	t := &txn{rec: rec, next: file, skipReload: !up(state)}
 	if err := a.install(ctx, t); err != nil {
 		return nil, err
 	}

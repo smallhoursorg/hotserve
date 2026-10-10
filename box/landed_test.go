@@ -55,7 +55,7 @@ func TestWritesThatLandedThenFailed(t *testing.T) {
 			t.Fatalf("%+v", r)
 		}
 	})
-	t.Run("verified landed: removed, so Retention settles the push", func(t *testing.T) {
+	t.Run("verified landed: failed written over it", func(t *testing.T) {
 		b := newTestBox(t)
 		id := b.push(b.repo.bundleFiles(b.repo.commit(boxFile(2, b.alice), &b.alice, b.base), b.base))
 		fail := func(p string) error {
@@ -338,8 +338,8 @@ func TestRetentionKeepsThisRunsResults(t *testing.T) {
 }
 
 // The run has one budget for waiting: once it is spent, a later
-// episode in the same run gets no wait, and root's lock is held for
-// waits at most activatingWait per run.
+// episode in the same run gets no wait — one is-active question, then
+// the refusal.
 func TestWaitBudgetIsPerRun(t *testing.T) {
 	b := newTestBox(t)
 	b.sd.states = []string{"activating", "active", "activating"}
@@ -390,7 +390,7 @@ func TestUnwrittenResultNotStrandedSameRun(t *testing.T) {
 	b := newTestBox(t)
 	c1 := b.repo.commit(boxFile(2, b.alice), &b.alice, b.base)
 	id := b.pushAt(b.repo.bundleFiles(c1, b.base), b.clock.Now().Add(-time.Hour))
-	if err := b.run(hooks{fail: failAt(map[string]int{"result:applied": -1, "result:verified": -1, "result:failed": -1})}); err != nil {
+	if err := b.run(hooks{fail: failAt(map[string]int{"result:verified": 1, "result:failed": 1})}); err != nil {
 		t.Fatal(err)
 	}
 	if r := b.result(id); r != nil {

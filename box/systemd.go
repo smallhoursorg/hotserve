@@ -147,9 +147,9 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 // whatever hotserve does — a later episode in the same run, once the
 // budget is spent, gets no wait (its push is refused as still starting,
 // and the workflow's run fails; a re-run pushes again). The answer is
-// the last word is-active gave; up classifies it,
-// the same way for every caller. An error is the box's: is-active could
-// not be asked.
+// the last word is-active gave: a push needs `active` (step 16), and
+// up classifies it for recovery and init alike. An error is the box's:
+// is-active could not be asked.
 func (a *Applier) running(ctx context.Context) (string, error) {
 	for {
 		state, err := a.systemd.IsActive(ctx)
