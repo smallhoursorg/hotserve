@@ -22,10 +22,13 @@ ENV DEBIAN_FRONTEND=noninteractive
 # libpam-systemd: pam_systemd gives user@<uid>.service its runtime dir;
 # dbus: logind; procps + curl: the in-container systemd suite;
 # libatomic1: what a Node single executable needs on arm64 (the one
-# package examples/node asks the box for).
+# package examples/node asks the box for); openssh-client: ssh-keygen,
+# which the box applier verifies signatures with (the package Depends
+# on it); git: the box suite makes and signs its commits on the box.
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends \
 		systemd systemd-sysv dbus libpam-systemd procps curl ca-certificates libatomic1 sudo \
+		openssh-client git \
 	&& rm -rf /var/lib/apt/lists/*
 RUN systemctl mask \
 	systemd-udevd.service \
@@ -61,13 +64,19 @@ RUN hotserve list-modules | grep -qx liveswap \
 # systemd is not running at build time; postinstall tolerates that
 # (linger-file fallback, daemon-reload/try-restart ignored).
 COPY packaging/hotserve.service /etc/systemd/system/hotserve.service
+# The box applier's units and exchange tree, where the package puts
+# them (packaging/nfpm.yaml); postinstall makes the tree.
+COPY packaging/hotserve-box-apply.path packaging/hotserve-box-apply.service /lib/systemd/system/
+COPY packaging/hotserve-box.tmpfiles /usr/lib/tmpfiles.d/hotserve-box.conf
 COPY packaging/postinstall.sh /tmp/postinstall.sh
 RUN mkdir -p /var/lib/hotserve /var/lib/liveswap \
 	&& chmod 750 /var/lib/hotserve /var/lib/liveswap \
 	&& sh /tmp/postinstall.sh && rm /tmp/postinstall.sh
 COPY e2e/systemd/e2e.conf /etc/systemd/system/hotserve.service.d/e2e.conf
 COPY e2e/systemd/e2e-token.service /etc/systemd/system/e2e-token.service
-RUN systemctl enable hotserve.service e2e-token.service
+# postinstall enables the path unit only through deb-systemd-helper,
+# which needs a dpkg install to remember; enabled here as it would be.
+RUN systemctl enable hotserve.service e2e-token.service hotserve-box-apply.path
 COPY e2e/Caddyfile /etc/hotserve/Caddyfile
 # The demo app's env file, as the box README says to make one: root
 # and the hotserve user can read it, nothing else. The crash scenario
