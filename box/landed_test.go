@@ -71,6 +71,29 @@ func TestWritesThatLandedThenFailed(t *testing.T) {
 			t.Fatal(err)
 		}
 		b.settled()
+		if r := b.result(id); r == nil || r.Phase != phaseFailed || !strings.Contains(r.Error, "nothing changed") {
+			t.Fatalf("a verified with nothing behind it was not settled: %+v", r)
+		}
+	})
+	t.Run("verified landed and failed cannot be written: removed, Retention settles it", func(t *testing.T) {
+		b := newTestBox(t)
+		id := b.push(b.repo.bundleFiles(b.repo.commit(boxFile(2, b.alice), &b.alice, b.base), b.base))
+		fail := func(p string) error {
+			switch p {
+			case "result:verified":
+				if err := os.WriteFile(filepath.Join(b.x("out"), id+".json"), encodeJSON(result{ID: id, Phase: phaseVerified}), 0o640); err != nil {
+					t.Fatal(err)
+				}
+				return errSync
+			case "result:failed":
+				return errNoSpace
+			}
+			return nil
+		}
+		if err := b.run(hooks{fail: fail}); err != nil {
+			t.Fatal(err)
+		}
+		b.settled()
 		if r := b.result(id); r != nil {
 			t.Fatalf("a verified with nothing behind it stayed: %+v", r)
 		}
@@ -130,34 +153,75 @@ func TestReloadingIsWaitedOut(t *testing.T) {
 			t.Fatalf("%+v", r)
 		}
 	})
-	t.Run("recovery, still reloading after the wait", func(t *testing.T) {
+	recovery := func(t *testing.T, states []string) (*testBox, string) {
 		b := newTestBox(t)
 		v2 := boxFile(2, b.alice)
 		head := b.repo.commit(v2, &b.alice, b.base)
 		b.writeInstalled(v2)
 		id := randomID(t)
-		rec := record{ID: id, Origin: originApplier, Phase: phaseSwapped, Commit: head, Path: testPath, Signer: "alice@example.com",
-			Prev: b.v1, PrevSHA256: digest(b.v1), NewSHA256: digest(v2)}
-		b.lyingRecord(rec)
-		b.sd.states = []string{"reloading"}
-		if err := b.run(hooks{}); err != nil {
-			t.Fatal(err)
-		}
-		if r := b.record(); r == nil || r.Phase != phaseRollingBack {
-			t.Fatalf("the record should stay for the next run: %+v", r)
-		}
-		if b.result(id) != nil || !b.errorLogged("left for the next run") {
-			t.Error("a result was written, or nothing said why")
-		}
-		b.sd.states = []string{"active"}
+		b.lyingRecord(record{ID: id, Origin: originApplier, Phase: phaseSwapped, Commit: head, Path: testPath, Signer: "alice@example.com",
+			Prev: b.v1, PrevSHA256: digest(b.v1), NewSHA256: digest(v2)})
+		b.sd.states = states
 		if err := b.run(hooks{}); err != nil {
 			t.Fatal(err)
 		}
 		b.settled()
-		if r := b.result(id); r == nil || r.Phase != phaseRolledBack {
-			t.Fatalf("%+v", r)
+		if !bytes.Equal(b.installed(), b.v1) {
+			t.Error("the previous bytes are not back")
+		}
+		return b, id
+	}
+	t.Run("recovery, still reloading after the wait: the reload queues behind it", func(t *testing.T) {
+		b, id := recovery(t, []string{"reloading"})
+		if r := b.result(id); r == nil || r.Phase != phaseRolledBack || b.sd.reloaded != 1 {
+			t.Fatalf("%+v, %d reloads", r, b.sd.reloaded)
 		}
 	})
+	t.Run("recovery, a restart loop still activating after the wait: settled as not running", func(t *testing.T) {
+		b, id := recovery(t, []string{"activating"})
+		if r := b.result(id); r == nil || r.Phase != phaseFailed || r.Error != msgInterruptedStopped || b.sd.reloaded != 0 {
+			t.Fatalf("%+v, %d reloads", r, b.sd.reloaded)
+		}
+	})
+}
+
+// Bundles queued behind a hotserve that never settles share one wait.
+func TestOneWaitPerRun(t *testing.T) {
+	b := newTestBox(t)
+	b.sd.states = []string{"activating"}
+	c1 := b.repo.commit(boxFile(2, b.alice), &b.alice, b.base)
+	first := b.pushAt(b.repo.bundleFiles(c1, b.base), b.clock.Now().Add(-time.Minute))
+	second := b.push(b.repo.bundleFiles(c1, b.base))
+	start := b.clock.Now()
+	if err := b.run(hooks{}); err != nil {
+		t.Fatal(err)
+	}
+	b.settled()
+	for _, id := range []string{first, second} {
+		if r := b.result(id); r == nil || r.Error != msgStillStarting {
+			t.Errorf("%+v", r)
+		}
+	}
+	if waited := b.clock.Now().Sub(start); waited > activatingWait+activatingPoll {
+		t.Errorf("waited %v for two bundles", waited)
+	}
+}
+
+// init on a hotserve still reloading after the wait reloads (the
+// reload queues behind the one in flight), never records `applied`
+// for bytes the running hotserve may not have read.
+func TestInitOnReloadingHotserveReloads(t *testing.T) {
+	b := newTestBox(t)
+	b.sd.states = []string{"reloading"}
+	v2 := boxFile(2, b.alice)
+	sha := b.repo.commit(v2, &b.alice, b.base)
+	out, err := b.applier(hooks{}).runInit(context.Background(), record{ID: randomID(t), Commit: sha, Path: testPath, BoxWebhook: "deploy.example.com"}, v2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Phase != phaseApplied || b.sd.reloaded != 1 {
+		t.Fatalf("%+v, %d reloads", out, b.sd.reloaded)
+	}
 }
 
 // init on a box that is not running never reloads, its rollback
@@ -201,14 +265,17 @@ func TestCaddyfileDiffLongLineNoted(t *testing.T) {
 	}
 }
 
-// Ids dated past the clock hold none of the 32 slots.
-func TestRetentionFutureIDsHoldNoSlots(t *testing.T) {
+// Markers dated past the clock with no result — a hostile writer's —
+// hold none of the 32 slots and get no result; a result whose marker is
+// from the future (a push settled just before the clock stepped back)
+// is aged by root's own write instead, and survives.
+func TestRetentionFutureDates(t *testing.T) {
 	b := newTestBox(t)
 	now := b.clock.Now()
-	var real []string
-	for i := 0; i < keepIDs; i++ {
+	var hostile, real []string
+	for i := 0; i < keepIDs+5; i++ {
 		id := randomID(t)
-		b.resultAt(id, phaseApplied, now.Add(time.Hour))
+		hostile = append(hostile, id)
 		b.markerAt(id, now.Add(time.Hour))
 	}
 	for i := 0; i < 3; i++ {
@@ -217,15 +284,33 @@ func TestRetentionFutureIDsHoldNoSlots(t *testing.T) {
 		b.resultAt(id, phaseApplied, now.Add(-time.Minute))
 		b.markerAt(id, now.Add(-time.Minute))
 	}
+	stepped := randomID(t)
+	b.resultAt(stepped, phaseApplied, now.Add(20*time.Minute))
+	b.markerAt(stepped, now.Add(20*time.Minute))
 	if err := b.run(hooks{}); err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range real {
-		if b.result(id) == nil {
-			t.Error("a real result was evicted by ids from the future")
+	for _, id := range append(real, stepped) {
+		if b.result(id) == nil || !b.hasMarker(id) {
+			t.Error("a real result was swept")
 		}
 	}
-	if n := len(b.names(b.x("out"))); n != len(real) {
-		t.Errorf("%d results kept", n)
+	for _, id := range hostile {
+		if b.hasMarker(id) || b.result(id) != nil {
+			t.Error("a marker from the future was kept or given a result")
+		}
+	}
+}
+
+// Retention leaves the push under the record alone, reading the record
+// itself.
+func TestSweepReadsTheRecord(t *testing.T) {
+	b := newTestBox(t)
+	id := randomID(t)
+	b.markerAt(id, b.clock.Now().Add(-time.Hour))
+	b.lyingRecord(record{ID: id, Origin: originInit, Phase: phaseInstalling, Commit: b.base, Path: testPath, Prev: b.v1, PrevSHA256: digest(b.v1), NewSHA256: digest(b.v1)})
+	b.applier(hooks{}).sweep()
+	if b.result(id) != nil || !b.hasMarker(id) {
+		t.Error("the push holding the record was settled as stranded")
 	}
 }

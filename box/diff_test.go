@@ -8,6 +8,12 @@ import (
 	"testing"
 )
 
+// unifiedDiff is renderDiff whole.
+func unifiedDiff(a, b []byte) string {
+	d, _ := renderDiff(a, b, 0)
+	return d
+}
+
 // applyUnified applies a unified diff as patch(1) would, checking every
 // context and deleted line: the oracle for unifiedDiff.
 func applyUnified(a []byte, d string) ([]byte, error) {

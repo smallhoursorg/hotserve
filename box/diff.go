@@ -76,18 +76,12 @@ type edit struct {
 	a, b int // line index in the old and the new file (the one this edit consumes)
 }
 
-// unifiedDiff is a unified diff of a against b, "" when they are equal.
-// Lines are compared whole, newline included, so a last line without
-// one differs from the same text with one and is marked as git marks
-// it.
-func unifiedDiff(a, b []byte) string {
-	d, _ := renderDiff(a, b, 0)
-	return d
-}
-
-// renderDiff is unifiedDiff, stopped once the text passes limit bytes
-// (no limit when it is 0): cut reports that it stopped, the text then
-// ending at a line end somewhere past the limit.
+// renderDiff is a unified diff of a against b, "" when they are equal,
+// stopped once the text passes limit bytes (no limit when it is 0): cut
+// reports that it stopped, the text then ending at a line end somewhere
+// past the limit. Lines are compared whole, newline included, so a last
+// line without one differs from the same text with one and is marked as
+// git marks it.
 func renderDiff(a, b []byte, limit int) (d string, cut bool) {
 	if bytes.Equal(a, b) {
 		return "", false

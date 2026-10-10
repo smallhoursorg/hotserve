@@ -51,6 +51,9 @@ type Applier struct {
 	verifier *proof.Verifier
 	logger   *zap.Logger
 	hooks    hooks
+	// waitUntil is the end of the run's one wait on a hotserve that is
+	// activating or reloading (running).
+	waitUntil time.Time
 }
 
 // nobody is the uid (and gid) ssh-keygen runs as (step 12).
@@ -254,7 +257,12 @@ func (a *Applier) take() []string {
 	for _, e := range entries {
 		name := e.Name()
 		src := filepath.Join(in, name)
-		if err := a.takeOne(in, work, name); err != nil && (exists(src) || !exists(filepath.Join(work, name))) {
+		err := a.takeOne(in, work, name)
+		if err != nil && !exists(src) && exists(filepath.Join(work, name)) {
+			a.logger.Warn("box: an entry was taken but the take is not known durable", zap.String("entry", proof.Bound(name)), zap.String("error", proof.Bound(err.Error())))
+			err = nil
+		}
+		if err != nil {
 			// It must leave in/ all the same (I2): removed where it
 			// stands, with a failed result if it is a regular file
 			// named as a bundle. (A rename that landed, its fsync
@@ -361,9 +369,9 @@ func (a *Applier) process(ctx context.Context, id string) error {
 		a.finish(t, phaseFailed, installFailed(err))
 		return nil
 	}
-	switch state {
-	case "active":
-	case "activating", "reloading": // still on its way after the wait
+	switch {
+	case state == "active":
+	case transient(state): // still on its way after the wait
 		a.finish(t, phaseRefused, msgStillStarting)
 		return nil
 	default:

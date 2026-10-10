@@ -198,14 +198,15 @@ func (a *Applier) install(ctx context.Context, t *txn) error {
 	}
 	if t.rec.Origin == originApplier {
 		if err := a.writeResult(t.result(phaseVerified, "")); err != nil {
-			// Nothing has changed; the entry goes and the journal has
-			// the result (Transitions table, "checking → verified"). A
-			// `verified` whose rename landed before the failure is
-			// removed too: with no entry behind it nothing would ever
-			// replace it, where a marker with no result is Retention's
-			// to settle as `failed`.
-			a.logger.Error("box apply stopped before installing: the verified result could not be written; nothing changed", zap.String("id", t.rec.ID))
-			a.removeResult(t.rec.ID)
+			// Nothing has changed (Transitions table, "checking →
+			// verified"): the push ends `failed` if that can be written
+			// — over a `verified` whose rename landed before the
+			// failure, which nothing else would ever replace — and if
+			// not, any such `verified` goes, leaving a marker with no
+			// result for Retention to settle. The entry goes either way.
+			if a.writeResult(t.result(phaseFailed, installFailed(err))) != nil {
+				a.removeResult(t.rec.ID)
+			}
 			a.removeEntry(t.entry)
 			return nil
 		}
@@ -236,6 +237,7 @@ func (a *Applier) install(ctx context.Context, t *txn) error {
 		case derr != nil:
 			return a.unsettled(t, derr)
 		case d == t.rec.NewSHA256:
+			a.recordUnwritten(t, err)
 			return a.rollback(ctx, t, msgRolledBackUnrecorded, false)
 		case d != t.rec.PrevSHA256:
 			a.changed(t)
@@ -248,6 +250,7 @@ func (a *Applier) install(ctx context.Context, t *txn) error {
 	t.rec.Phase = phaseSwapped
 	if err := a.writeRecord(&t.rec); err != nil {
 		// Post-swap failure (Failure-mode table, "record swapped").
+		a.recordUnwritten(t, err)
 		return a.rollback(ctx, t, msgRolledBackUnrecorded, false)
 	}
 	return a.reloadSwapped(ctx, t)
@@ -288,6 +291,7 @@ func (a *Applier) reloadSwapped(ctx context.Context, t *txn) error {
 	t.rec.Phase = phaseApplied
 	if err := a.writeRecord(&t.rec); err != nil {
 		// The baseline must never run ahead of the record (I4).
+		a.recordUnwritten(t, err)
 		return a.rollback(ctx, t, msgRecordAfterReload, false)
 	}
 	return a.advance(t, phaseApplied)
@@ -335,23 +339,21 @@ func (a *Applier) rollingBack(ctx context.Context, t *txn, recovering bool) erro
 		a.changed(t)
 		return nil
 	}
-	switch {
-	case recovering:
+	// Nothing to reload on a hotserve that is not running: the previous
+	// bytes load at its next start. Recovery asks (a crash may have been
+	// a reboot); init knows from when it began, and never reloaded.
+	running := t.rec.Origin != originInit || t.running
+	if recovering {
 		state, err := a.running(ctx)
 		if err != nil {
 			return a.unsettled(t, err)
 		}
-		if transient(state) {
-			// Still on its way somewhere after the wait: the next run asks again.
-			return a.unsettled(t, fmt.Errorf("hotserve is still %s after %v", state, activatingWait))
+		running = up(state)
+	}
+	if !running {
+		if t.rec.Error != "" {
+			a.logger.Warn("box rollback on a hotserve that is not running", zap.String("id", t.rec.ID), zap.String("why", t.rec.Error))
 		}
-		if state != "active" {
-			a.finish(t, phaseFailed, msgInterruptedStopped)
-			return nil
-		}
-	case t.rec.Origin == originInit && !t.running:
-		// init on a box that is not running never reloaded, and has
-		// nothing to reload now: the previous bytes load at the next start.
 		a.finish(t, phaseFailed, msgInterruptedStopped)
 		return nil
 	}
@@ -390,6 +392,13 @@ func (a *Applier) fullDisk(t *txn, err error) error {
 	r := t.result(t.rec.Phase, msgDiskFull)
 	a.logger.Error(msgDiskFull, append(resultFields(r), zap.String("write_error", proof.Bound(err.Error())))...)
 	return errFullDisk
+}
+
+// recordUnwritten journals the write that failed after the swap — the
+// record, or the swap's own fsync — whose rollback reports only the
+// catalogue's words for it.
+func (a *Applier) recordUnwritten(t *txn, err error) {
+	a.logger.Error("box: a write failed after the swap; rolling back", zap.String("id", t.rec.ID), zap.String("phase", t.rec.Phase), zap.String("error", proof.Bound(err.Error())))
 }
 
 // unsettled stops the run with everything as found.
@@ -465,10 +474,7 @@ func (a *Applier) recoverSwapped(ctx context.Context, t *txn, d string) error {
 		if err != nil {
 			return a.unsettled(t, err)
 		}
-		if transient(state) {
-			return a.unsettled(t, fmt.Errorf("hotserve is still %s after %v", state, activatingWait))
-		}
-		if state != "active" {
+		if !up(state) {
 			t.rec.Phase = phaseApplied
 			if err := a.writeRecord(&t.rec); err != nil {
 				return a.rollback(ctx, t, msgRecordAfterReload, true)
@@ -515,7 +521,7 @@ func (a *Applier) runInit(ctx context.Context, rec record, file []byte) (*result
 	rec.Origin, rec.Signer = originInit, "init"
 	rec.Prev, rec.PrevSHA256, rec.NewSHA256 = installed, digest(installed), digest(file)
 	rec.Diff = caddyfileDiff(installed, file)
-	t := &txn{rec: rec, next: file, running: state == "active"}
+	t := &txn{rec: rec, next: file, running: up(state)}
 	if err := a.install(ctx, t); err != nil {
 		return nil, err
 	}

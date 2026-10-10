@@ -139,19 +139,28 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 }
 
 // running is step 16's question (DESIGN-box.md, Glossary "active"):
-// `activating` is waited out, at most activatingWait elapsed on the
-// applier's clock, and so is `reloading` — a reload in flight (one a
-// killed applier started, or the console's) is not a stopped hotserve,
-// and it ends in `active` or a failure. The answer is the last word
-// is-active gave. An error is the box's: is-active could not be asked.
+// `activating` is waited out, and so is `reloading` — a reload in
+// flight (the console's, or one a killed applier started) ends in
+// `active` or a failure. The wait is one per run: it ends
+// activatingWait after the run first saw either word, so bundles queued
+// behind a hotserve that never settles share one wait rather than
+// holding root's lock for one each. The answer is the last word
+// is-active gave; up classifies it, the same way for every caller. An
+// error is the box's: is-active could not be asked.
 func (a *Applier) running(ctx context.Context) (string, error) {
-	start := a.clock.Now()
 	for {
 		state, err := a.systemd.IsActive(ctx)
 		if err != nil {
 			return "", err
 		}
-		if !transient(state) || a.clock.Now().Sub(start) >= activatingWait {
+		if !transient(state) {
+			return state, nil
+		}
+		now := a.clock.Now()
+		if a.waitUntil.IsZero() {
+			a.waitUntil = now.Add(activatingWait)
+		}
+		if !now.Before(a.waitUntil) {
 			return state, nil
 		}
 		if err := a.clock.Sleep(ctx, activatingPoll); err != nil {
@@ -162,3 +171,11 @@ func (a *Applier) running(ctx context.Context) (string, error) {
 
 // transient is a state the wait sits out: hotserve on its way to active.
 func transient(state string) bool { return state == "activating" || state == "reloading" }
+
+// up is running's answer classified, for every caller alike: hotserve
+// serves and a reload reaches it — `active`, or a reload still in
+// flight after the wait (a reload then queues behind it). Anything else
+// — `activating` after the wait (a start, or a restart loop, which
+// reads the file on disk when it gets there), inactive, failed — is not
+// running. A push is refused on anything but `active` (step 16).
+func up(state string) bool { return state == "active" || state == "reloading" }

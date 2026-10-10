@@ -43,7 +43,8 @@ func TestFailureModes(t *testing.T) {
 		{name: "result refused/write fails", holds: "I2 I3", scen: "unsigned", fail: map[string]int{"result:refused": -1}, journal: "box result could not be written", file: 1},
 		{name: "result refused/crash after", holds: "I2", scen: "unsigned", crash: "result:refused", file: 1, phase: phaseRefused, msg: "~is not signed"},
 		// result verified
-		{name: "result verified/write fails", holds: "I1 I2 I3", scen: "change", fail: map[string]int{"result:verified": -1}, journal: "the verified result could not be written", file: 1},
+		{name: "result verified/write fails", holds: "I1 I2 I3", scen: "change", fail: map[string]int{"result:verified": -1}, journal: "box result could not be written", file: 1, phase: phaseFailed, msg: failed + "result:verified: no space"},
+		{name: "result verified/write fails, failed too", holds: "I1 I2 I3", scen: "change", fail: map[string]int{"result:verified": -1, "result:failed": -1}, journal: "box result could not be written", file: 1},
 		{name: "result verified/crash after", holds: "I1 I2 I3", scen: "change", crash: "result:verified", file: 1, phase: phaseFailed, msg: msgInterrupted},
 		// record no_change
 		{name: "record no_change/write fails", holds: "I1 I4 I5", scen: "same", fail: map[string]int{"record:no_change": -1}, file: 1, phase: phaseFailed, msg: failed + "record:no_change: no space"},

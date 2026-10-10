@@ -350,11 +350,16 @@ and the identity (10, 11 and 15's presence rules), the file proof
 HEAD's first (12 and 14), then 15's key guard — so a malformed bundle
 never starts `ssh-keygen`, and when more than one step would refuse,
 the first so found is the one named. Step 16 waits out `reloading` as
-it does `activating`, within the same bound: a reload in flight — the
-console's, or one a killed applier started — is not a stopped
-hotserve, and a push refused after the wait gets the "still starting"
-text; recovery that still finds either after the wait stops with
-everything as found (I2) and asks again on its next run. The installed file failing the
+it does `activating` — a reload in flight, the console's or one a
+killed applier started, ends in `active` or a failure — with one wait
+per run, 300 s from the run's first sight of either, so bundles queued
+behind a hotserve that never settles share it. After the wait, one
+classification serves every caller: hotserve is *up* when it is
+`active` or still `reloading` (a reload then queues behind the one in
+flight); `activating` (a start, or a restart loop, which reads the file
+on disk when it gets there) and every other word is not running. A
+push is refused on anything but `active`, with the "still starting"
+text after a wait that timed out. The installed file failing the
 walk for a reason other than an empty signer list, `applied.json`
 missing or unreadable, `ssh-keygen` unable to answer and `is-active`
 unanswered are the box's errors: `failed`, never `refused`
@@ -404,7 +409,7 @@ by id.
 | Id | Invariant |
 |---|---|
 | **I1** | For every write the applier or `init` makes: `/etc/hotserve/Caddyfile` exists at every instant and is a complete file written whole — one that ran, one whose reload is pending or in progress under a record that says `swapped`, or (`origin: init`, box not running) one that loads at the next start; a failed reload puts the previous bytes back, and a crash leaves a record saying which. The console is root and may write anything; the applier detects such a write by digest (steps 10, 17, 19) and reports it, never overwrites it knowingly, and never records a baseline for bytes it did not install. |
-| **I2** | Every entry the applier *listed* in `in/` leaves `in/` in that run (a bundle landing after the last listing is the next run's); `work/` is empty on every exit except two that leave the record on disk for the next run — the one named full-disk case in the Failure-mode table, and a stop with everything left as found (a record that does not read, the installed file unreadable mid-transaction, `is-active` unanswered or hotserve still `activating`/`reloading` after the wait in recovery) — where what was taken stays in `work/` with it and the next run's recovery settles it; `in/` receives nothing but a complete bundle by one `rename`. |
+| **I2** | Every entry the applier *listed* in `in/` leaves `in/` in that run (a bundle landing after the last listing is the next run's); `work/` is empty on every exit except two that leave the record on disk for the next run — the one named full-disk case in the Failure-mode table, and a stop with everything left as found (a record that does not read, the installed file unreadable mid-transaction, `is-active` unanswered in recovery) — where what was taken stays in `work/` with it and the next run's recovery settles it; `in/` receives nothing but a complete bundle by one `rename`. |
 | **I3** | Every bundle the applier takes ends in exactly one terminal result, or — only when the result cannot be written — one error-level journal line carrying every field the result would have; an entry that is not a bundle gets the journal line only. |
 | **I4** | The baseline advances only from a transaction whose durable record says `applied` (reload confirmed) or `no_change` on an active box, from `init`, or from `baseline`; all four hold root's lock; it never runs ahead of the record. |
 | **I5** | Within a transaction: from the first write that changes `/etc/hotserve` or `applied.json` until the terminal result, the record exists; it is written atomically before that first write and is the last thing removed. Refusals and `verified` precede it and write none. `hotserve box baseline` is not a transaction: one atomic write of `applied.json` under the lock, after recovery, with no record — a crash before its rename changed nothing, after it the reset is done; a retry is idempotent. |
@@ -427,7 +432,7 @@ implies; it never infers state from digests alone.
 | `installing` | Record durable; swap not yet done. | `prev` | `failed` ("interrupted before the Caddyfile changed"). If `d == new`, the crash fell after the swap: act as `swapped`. |
 | `swapped` | New file on disk; reload unconfirmed. | `new`, or `prev` (the bytes are already back: continue as `rolling_back`) | Write the previous bytes back, phase → `rolling_back`, continue as that row. Exception: `origin: init` with `d == new` on a box that is not running → finish as `applied` (init's rule: a person is at the console). |
 | `applied` | Reload confirmed; `applied.json` may not be written yet. | `new` | Write `applied.json` (idempotent), result `applied`. **If `d ≠ new`, the file changed after the reload (a console edit): do not advance the baseline; result `unknown`.** |
-| `rolling_back` | Reload failed (or the record could not follow the swap); previous bytes going back. | `prev`, or `new` (crash before the write-back: write them back) | Reload if active → `rolled_back` with the record's `error`; reload fails → `unknown`; not running → `failed` ("the previous Caddyfile is on disk; hotserve is not running"). `d` neither: the `any` row. A write-back that fails ends as the full-disk end (Failure-mode table). |
+| `rolling_back` | Reload failed (or the record could not follow the swap); previous bytes going back. | `prev`, or `new` (crash before the write-back: write them back) | Reload if hotserve is up (step 16's classification: `active`, or still `reloading` after the wait) → `rolled_back` with the record's `error`; reload fails → `unknown`; not running (anything else, a restart loop still `activating` included) → `failed` ("the previous Caddyfile is on disk; hotserve is not running"), as for `origin: init` on a box that was not running when it began, which never reloads. `d` neither: the `any` row. A write-back that fails ends as the full-disk end (Failure-mode table). |
 | any | `d` matches neither `prev` nor `new`. | — | A console edit under the transaction: write nothing to `/etc/hotserve`, result `unknown` ("the Caddyfile changed during the transaction; it is left as found"), journal at warning level. |
 
 ### Record and result fields
@@ -489,9 +494,9 @@ stateDiagram-v2
 | in/ → work/ | step 9 takes an entry | the entry renamed into `work/` → `work/` and `in/` fsynced | I2, I8 |
 | checking → refused | A check in 10–15 fails | result `refused` → entry removed | I2, I6 |
 | checking → failed | the box's own error in 9–16: the bundle unreadable, `applied.json` missing or unreadable, the installed file unreadable or failing the walk for any reason but an empty signer list, `ssh-keygen` unable to answer or the chain deadline passed, `is-active` unanswered | result `failed` ("the install failed before the Caddyfile changed: <error>; nothing changed", the catalogue's) → entry removed | I2, I3; never `refused` (step 12) |
-| checking → not_running | `origin: applier` and `is-active` is not `active`: `inactive`/`failed` at once, or still `activating` when the 300 s elapsed wait ends | result `refused` — "hotserve is not running; nothing applied" for `inactive`/`failed`, "hotserve is still starting after 300 s; nothing applied" for a timed-out `activating`, the catalogue's two messages → entry removed | I2; I4: nothing advances |
+| checking → not_running | `origin: applier` and `is-active` is not `active`: `inactive`/`failed` at once, or still `activating` or `reloading` when the run's 300 s wait ends | result `refused` — "hotserve is not running; nothing applied" for `inactive`/`failed`, "hotserve is still starting after 300 s; nothing applied" after a wait that timed out, the catalogue's two messages → entry removed | I2; I4: nothing advances |
 | checking → no_change | active (or `origin: init`); incoming buffer == installed buffer | record `no_change` → `applied.json` → result `no_change` → record removed → entry removed | I2, I4, I5 |
-| checking → verified | active (or `origin: init`); buffers differ | result `verified` (if this write fails: remove the `work/` entry, journal; nothing else changes) — `init` writes no result, it prints | I3 |
+| checking → verified | active (or `origin: init`); buffers differ | result `verified` (if this write fails: result `failed` in its place if that can be written, else any `verified` whose rename landed removed; the `work/` entry removed; nothing else changes) — `init` writes no result, it prints | I3 |
 | verified → installing | — | record `installing` (prev bytes embedded) | I5, I8 |
 | installing → failed | a temporary cannot be written | remove temporaries; result `failed` → record removed → entry removed | I1 (file untouched), I2 |
 | installing → swapped | the installed file's digest is re-read and still equals `prev_sha256` (a console edit since step 10 → `unknown`, "the Caddyfile changed during the transaction; it is left as found", record removed, entry removed); then the new file is written to a temp and renamed over `Caddyfile` | record `swapped` | I1 (file exists at every instant). The reread and the rename are not atomic: a bare console edit landing in that window is overwritten, and one landing after the post-reload check is reported as out-of-band by the next push, not refused. `hotserve box edit` is the console tool that holds root's lock through an edit and reload, and the one "At 3am" names; a bare edit is root's right and races as stated. |
@@ -520,12 +525,12 @@ shows after recovery.
 
 | Write | Write fails → | Crash after → recovery | Terminal phase | Workflow sees |
 |---|---|---|---|---|
-| take (`in/` → `work/`) | remove the entry where it stands in `in/` (I2); an entry named `<id>.tar` gets `failed` ("the install failed before the Caddyfile changed: <error>; nothing changed") | no record, entry in `work/`, no result → `failed` ("interrupted before the Caddyfile changed") | `failed` | `failed` |
+| take (`in/` → `work/`) | remove the entry where it stands in `in/` (I2); a regular file named `<id>.tar` gets `failed` ("the install failed before the Caddyfile changed: <error>; nothing changed"). A rename that landed, only a directory's `fsync` failing, is a take (warning line) | no record, entry in `work/`, no result → `failed` ("interrupted before the Caddyfile changed") | `failed` | `failed` |
 | result `refused` | journal (error), remove entry | entry with terminal result → remove entry | `refused` | 422 or the result; if unwritten, `admitted` until the workflow's bound, then red naming the journal |
-| result `verified` | remove entry, journal; file untouched | no record, result `verified` → rewrite `failed`, remove entry | `failed` | crash after: `failed`; write fails: `admitted`, then `failed` ("the box has no record of this push") from Retention at root's first run past fifteen minutes |
+| result `verified` | result `failed` in its place (over a `verified` whose rename landed); if that fails too, remove any such `verified`; remove entry; file untouched | no record, result `verified` → rewrite `failed`, remove entry | `failed` | `failed`; if neither write lands, `admitted`, then `failed` ("the box has no record of this push") from Retention at root's first run past fifteen minutes |
 | record `no_change` | result `failed`; nothing changed | phase `no_change` → `applied.json`, result | `no_change` | `no_change` |
 | record `installing` | result `failed`; nothing changed | phase `installing`, `d == prev` → `failed` | `failed` | `failed` |
-| new file temp + rename | remove temp; result `failed` — unless the installed file now reads as `new` (the rename landed and only the directory's `fsync` failed): the post-swap failure of the next row | `d == new` with phase `installing` → treat as `swapped` | per `swapped` | per `swapped` |
+| new file temp + rename | remove temp; result `failed` — unless the installed file now reads otherwise: as `new` (the rename landed and only the directory's `fsync` failed), the post-swap failure of the next row; as neither, the `any` row; unreadable, the stop-as-found of I2, the record left for recovery | `d == new` with phase `installing` → treat as `swapped` | per `swapped` | per `swapped` |
 | record `swapped` | **post-swap failure**: record `rolling_back` if it can be written, then the previous bytes back; if they cannot be written back, leave the record (phase `installing`, or `rolling_back` if that write landed; `d == new`) and the entry, and exit non-zero with an error-level line ("disk full; the previous Caddyfile could not be restored") — the path unit re-triggers until its limit and fails; the console frees space, then `systemctl restart hotserve-box-apply.path` (`reset-failed` alone clears the state but does not start a unit that hit its trigger limit) | phase `swapped` → rollback path | `rolled_back` / `unknown` | per phase |
 | reload | non-zero exit → rollback path | phase `swapped` (the reload's outcome unknown) → rollback path | `rolled_back` / `unknown` | per phase |
 | record `applied` | the reload succeeded but the record cannot say so, and the baseline must never run ahead of the record (I4): take the rollback path exactly as the `record swapped` row — previous bytes back, reload, result `rolled_back` ("the record could not be updated after a successful reload (disk full); rolled back to keep the file and the record consistent") or, if the write-back fails too, the full-disk end above | phase `applied`, `d == new` → `applied.json`, result | `rolled_back` / `unknown` | per phase |
@@ -636,12 +641,14 @@ appears in `out/` or `stage/*.auth`:
 An id's age is its marker's `posted`; with no marker, or one that does
 not read (not a regular file, over its cap, not the shape admission
 writes), the marker's or else the result's modification time, read
-without following a link. An age more than fifteen minutes ahead of the
-clock (a clock step, or a hostile writer of markers) cannot be aged and
-counts as older than a day: such an id is swept at once, with no result
-written, rather than sorting as newest and holding a slot — and, as a
-marker, blocking admission — until the clock catches up. The 32 are
-counted over ids with a result, newest first. A pair is removed marker first, so a crash between the
+without following a link. A date more than fifteen minutes ahead of the
+clock cannot be aged. With a result — root's own write, which no
+hostile writer makes — the result's time stands in, never later than
+now, so a clock stepped back does not sweep a push it just settled.
+With none, the id counts as older than a day and is swept at once with
+no result written, rather than sorting as newest and holding a slot —
+and, as a marker, blocking admission — until the clock catches up. The
+32 are counted over ids with a result, newest first. A pair is removed marker first, so a crash between the
 two `unlink`s leaves the table's second row. Only names `<id>.auth` in
 `stage/` are root's; the handler's lock and temporaries are its own.
 
@@ -1256,8 +1263,10 @@ Dated one-liners; the full text of each is in git.
   a record that finds its terminal result only removes; the record
   carries the `error` its rollback will report; steps 10–15 run
   cheapest first; step 16 waits out `reloading` as it does
-  `activating`; I2 names the stop-as-found as its second exception;
+  `activating`, once per run, and one classification ("up") serves
+  every caller; I2 names the stop-as-found as its second exception;
   `apps` holds liveswap-grammar names only; Retention ages an id by its
-  marker's `posted`, else an mtime, counts a date past the clock as
-  older than a day, counts the 32 over results, and writes a stranded
-  marker's `failed` only for an id it keeps.
+  marker's `posted`, else an mtime, ages a date past the clock by the
+  result's write or else as older than a day, counts the 32 over
+  results, and writes a stranded marker's `failed` only for an id it
+  keeps.

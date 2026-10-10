@@ -32,6 +32,8 @@ type idState struct {
 	// key is the id's age: the marker's posted time, else the marker's
 	// or the result's modification time.
 	key time.Time
+	// written is the result's modification time: root's own clock.
+	written time.Time
 	// stranded is a marker the table's third row settles.
 	stranded bool
 }
@@ -59,8 +61,8 @@ func (a *Applier) sweep() {
 			}
 			s := get(id)
 			s.result = true
-			if fi, err := e.Info(); err == nil && s.key.IsZero() {
-				s.key = fi.ModTime()
+			if fi, err := e.Info(); err == nil {
+				s.key, s.written = fi.ModTime(), fi.ModTime()
 			}
 		}
 	} else {
@@ -95,12 +97,22 @@ func (a *Applier) sweep() {
 	}
 	var candidates []string
 	for id, s := range ids {
-		// A date the clock has not reached cannot be aged: past
-		// pendingAge ahead it counts as older than keepAge, so that it
-		// neither sorts as newest nor holds a slot until the clock
-		// catches up (a clock step, or a hostile writer of markers).
-		if s.key.Sub(now) >= pendingAge {
-			s.key = time.Time{}
+		// A date the clock has not reached cannot be aged. With a result
+		// — root's own write, so not a hostile writer's — the result's
+		// time stands in, never later than now: a clock stepped back
+		// does not sweep a push it just settled. With none, a marker
+		// past pendingAge ahead counts as older than keepAge, so that it
+		// neither sorts as newest nor holds a slot, nor blocks admission,
+		// until the clock catches up.
+		if s.key.Sub(now) > pendingAge {
+			switch {
+			case s.result && s.written.After(now):
+				s.key = now
+			case s.result:
+				s.key = s.written
+			default:
+				s.key = time.Time{}
+			}
 		}
 		if !s.result {
 			if !a.stranded(id, held, s.key, now) {
@@ -137,22 +149,17 @@ func (a *Applier) sweep() {
 			}
 		}
 		if s.result {
-			if err := a.removeDurable("result:remove", filepath.Join(a.x("out"), id+".json")); err != nil {
-				a.logger.Error("box: could not remove a result", zap.String("id", id), zap.String("error", proof.Bound(err.Error())))
-			}
+			a.removeResult(id)
 		}
 	}
 }
 
 // stranded is the table's third row: a marker with no result, nothing
-// in in/ or work/ and no record for its id, older than pendingAge. A
-// marker dated more than pendingAge ahead of the clock counts as older
-// (a clock step, or a hostile writer): it could otherwise block
-// admission until the clock caught up.
+// in in/ or work/ and no record for its id, older than pendingAge (a
+// date past the clock has already been made the oldest, by sweep).
 func (a *Applier) stranded(id, held string, posted, now time.Time) bool {
 	if id == held || exists(filepath.Join(a.x("in"), id+".tar")) || exists(filepath.Join(a.x("work"), id+".tar")) {
 		return false
 	}
-	age := now.Sub(posted)
-	return age >= pendingAge || age <= -pendingAge
+	return now.Sub(posted) >= pendingAge
 }
