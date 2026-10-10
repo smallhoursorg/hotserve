@@ -108,8 +108,9 @@ echo "$$ $w1 $w2" > pids.txt
 wait
 `
 
-// waitForPIDs blocks until the leader has written all three PIDs to
-// pids.txt, so the workers exist, and fails if any of them is not a pid.
+// waitForPIDs blocks until pids.txt holds the leader's line (two
+// spaces), so the workers are forked, and fails on a non-numeric field.
+// It does not count the fields: an empty $w1 still passes.
 func waitForPIDs(t *testing.T, dir string) {
 	t.Helper()
 	var data []byte
