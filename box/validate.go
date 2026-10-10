@@ -38,11 +38,9 @@ const (
 // xOK is access(2)'s X_OK: `test -x`'s question.
 const xOK = 0x1
 
-const msgBackupUnknown = "could not ask whether backups are installed; nothing changed"
-
 // validator is step 6. msg is a refusal's whole catalogue text; err is
 // the box's own trouble (the staged file could not be written, a child
-// could not start).
+// could not start, whether backups are installed could not be told).
 type validator interface {
 	validate(ctx context.Context, id string, caddyfile []byte) (msg string, err error)
 }
@@ -114,7 +112,7 @@ func (c *childValidator) validate(ctx context.Context, id string, caddyfile []by
 	case errors.Is(err, syscall.ENOENT), errors.Is(err, syscall.EACCES), errors.Is(err, syscall.ENOTDIR):
 		return "", nil
 	case err != nil:
-		return msgBackupUnknown, nil
+		return "", fmt.Errorf("could not ask whether backups are installed: %w", err)
 	}
 	return c.run(ctx, "hotserve-backup validate", c.backup, "validate", staged)
 }
@@ -139,29 +137,35 @@ func (c *childValidator) run(ctx context.Context, what, program string, args ...
 	// run, take whatever the child started with it: a grandchild left
 	// holding the output would otherwise outlive the request.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.Cancel = func() error {
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); !errors.Is(err, syscall.ESRCH) {
+			return err
+		}
+		return os.ErrProcessDone // it had exited: nothing was cancelled
+	}
 	err := cmd.Run()
 	if cmd.Process != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) // ESRCH when nothing is left
 	}
+	// An exit status decides first: a child that exited said why, even
+	// if the deadline passed while a grandchild held the output.
 	var exit *exec.ExitError
+	exited := errors.As(err, &exit) && exit.Exited()
 	switch {
 	case err == nil, errors.Is(err, exec.ErrWaitDelay):
 		return "", nil
-	case bounded.Err() != nil && ctx.Err() == nil:
-		return fmt.Sprintf("%s: did not finish within %s", what, c.timeout), nil
 	case ctx.Err() != nil:
 		return "", fmt.Errorf("%s: %w", what, ctx.Err())
-	case errors.As(err, &exit) && !exit.Exited():
+	case !exited && bounded.Err() != nil:
+		return fmt.Sprintf("%s: did not finish within %s", what, c.timeout), nil
+	case !exited:
 		return "", fmt.Errorf("%s: %w", what, err)
-	case errors.As(err, &exit):
+	default:
 		line, _ := c.redactor.Redact(errorLine(out.b))
 		if line == "" {
 			line = exit.String()
 		}
 		return what + ": " + proof.Bound(line), nil
-	default:
-		return "", fmt.Errorf("%s: %w", what, err)
 	}
 }
 

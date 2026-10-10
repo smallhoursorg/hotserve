@@ -1,12 +1,15 @@
 package box
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -33,6 +36,7 @@ type pushRig struct {
 	vs   []deploytrust.Verifier
 	val  *fakeValidator
 	clk  *sleepClock
+	slot chan struct{} // the process's push slot, which every handler of the rig shares
 }
 
 // fakeValidator answers step 6 as told and records what it was given.
@@ -99,7 +103,7 @@ func newPushRig(t testing.TB) *pushRig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := &pushRig{testBox: b, priv: priv, vs: vs, val: &fakeValidator{}, clk: &sleepClock{fakeClock: b.clock}}
+	p := &pushRig{testBox: b, priv: priv, vs: vs, val: &fakeValidator{}, clk: &sleepClock{fakeClock: b.clock}, slot: make(chan struct{}, 1)}
 	p.h = p.handler()
 	return p
 }
@@ -110,7 +114,7 @@ func (p *pushRig) handler() *Handler {
 	return &Handler{
 		app: &App{verifiers: p.vs}, logger: zap.New(p.core), limiter: deploytrust.NewLimiter(trusttest.NewClock()),
 		installed: filepath.Join(p.root, installedFile), dir: filepath.Join(p.root, exchangeDir),
-		verifier: p.verifier, validator: p.val, clock: p.clk,
+		verifier: p.verifier, validator: p.val, clock: p.clk, slot: p.slot,
 	}
 }
 
@@ -365,13 +369,13 @@ func TestPushKnownIDBeforeTheFastPath(t *testing.T) {
 // up is the box's trouble, a 500 — never "duplicate", never "admitted".
 func TestPushBoxFaults(t *testing.T) {
 	p := newPushRig(t)
-	c2, bundle := p.change()
+	c2, _ := p.change()
 	id := randomID(t)
 	// out/ replaced by a file: every lookup under it is ENOTDIR.
 	must(t, os.RemoveAll(p.x("out")))
 	p.write(t, p.x("out"), nil)
-	w := p.post(t, p.h, push{id: id, token: p.token(t, c2), body: bytes.NewReader(bundle)})
-	if w.Code != http.StatusInternalServerError || !strings.HasPrefix(decode(t, w)["error"].(string), "could not read the exchange directory: ") {
+	w := p.post(t, p.h, push{id: id, token: p.token(t, c2), body: failingReader{t}})
+	if w.Code != http.StatusInternalServerError || !strings.HasPrefix(decode(t, w)["error"].(string), "could not check the push: ") {
 		t.Fatalf("push: %d %s", w.Code, w.Body)
 	}
 	p.untouched(t)
@@ -381,7 +385,7 @@ func TestPushBoxFaults(t *testing.T) {
 	must(t, os.RemoveAll(p.x("stage")))
 	p.write(t, p.x("stage"), nil)
 	w = p.get(t, "/?result="+id, p.token(t, ""))
-	if w.Code != http.StatusInternalServerError || !strings.HasPrefix(decode(t, w)["error"].(string), "could not read the marker for "+id+": ") {
+	if w.Code != http.StatusInternalServerError || !strings.HasPrefix(decode(t, w)["error"].(string), "could not read the push "+id+": ") {
 		t.Fatalf("poll: %d %s", w.Code, w.Body)
 	}
 }
@@ -652,9 +656,10 @@ func TestPushWaitEnds(t *testing.T) {
 }
 
 // TestPushDrop: the bundle into in/ first, then the marker. A crash
-// between them leaves a bundle root processes and no marker, and the
-// push's poll finds root's result; a marker that cannot be written
-// does not undo a bundle root already holds.
+// between them leaves a bundle root processes and no marker: the push's
+// poll reads it as admitted while it is in in/, and finds root's result
+// after; a marker that cannot be written does not undo a bundle root
+// already holds.
 func TestPushDrop(t *testing.T) {
 	t.Run("crash after the bundle", func(t *testing.T) {
 		p := newPushRig(t)
@@ -669,7 +674,7 @@ func TestPushDrop(t *testing.T) {
 		if !exists(p.x("in/"+id+".tar")) || exists(p.x("stage/"+id+".auth")) {
 			t.Fatalf("in/ %v stage/ %v", p.names(p.x("in")), p.names(p.x("stage")))
 		}
-		if w := p.get(t, "/?result="+id, p.token(t, "")); w.Code != http.StatusNotFound {
+		if w := p.get(t, "/?result="+id, p.token(t, "")); w.Code != http.StatusAccepted || decode(t, w)["phase"] != "admitted" {
 			t.Fatalf("before root: %d %s", w.Code, w.Body)
 		}
 		must(t, p.run(hooks{}))
@@ -704,6 +709,40 @@ func TestPushDrop(t *testing.T) {
 		w := p.post(t, p.h, push{id: randomID(t), token: p.token(t, c2), body: bytes.NewReader(bundle)})
 		wantError(t, w, http.StatusInternalServerError, msgCheckFailed(syscall.ENOSPC))
 		p.untouched(t)
+	})
+	t.Run("in/ cannot be synced", func(t *testing.T) {
+		p := newPushRig(t)
+		c2, bundle := p.change()
+		id := randomID(t)
+		p.h.hooks.fail = func(point string) error {
+			if point == "in:sync" {
+				return syscall.EIO
+			}
+			return nil
+		}
+		var polled *httptest.ResponseRecorder
+		var retried *httptest.ResponseRecorder
+		first := true
+		p.clk.onSleep = func() {
+			if !first {
+				return
+			}
+			first = false
+			// Before root: the bundle alone says the push was admitted,
+			// and the id is known.
+			polled = p.get(t, "/?result="+id, p.token(t, ""))
+			retried = p.post(t, p.h, push{id: id, token: p.token(t, c2), body: failingReader{t}})
+			must(t, p.run(hooks{}))
+		}
+		w := p.post(t, p.h, push{id: id, token: p.token(t, c2), body: bytes.NewReader(bundle)})
+		wantResult(t, w, http.StatusOK, id, phaseApplied)
+		if exists(p.x("stage/" + id + ".auth")) {
+			t.Fatal("a marker was written beside a bundle whose in/ was not synced")
+		}
+		if m := decode(t, polled); polled.Code != http.StatusAccepted || m["phase"] != "admitted" {
+			t.Fatalf("poll before root: %d %s", polled.Code, polled.Body)
+		}
+		wantError(t, retried, http.StatusConflict, msgDuplicate(id))
 	})
 	t.Run("the marker cannot be written", func(t *testing.T) {
 		p := newPushRig(t)
@@ -750,8 +789,14 @@ func TestPushLockAcrossReload(t *testing.T) {
 		first <- p.post(t, p.h, push{id: randomID(t), token: p.token(t, c2), body: bytes.NewReader(bundle)})
 	}()
 	<-p.val.entered
+	// The handler a reload provisions shares the process's slot: refused
+	// before its body is read.
 	reloaded := p.handler()
-	wantError(t, p.post(t, reloaded, push{id: randomID(t), token: p.token(t, c2), body: bytes.NewReader(bundle)}), http.StatusConflict, msgAdmitting)
+	wantError(t, p.post(t, reloaded, push{id: randomID(t), token: p.token(t, c2), body: failingReader{t}}), http.StatusConflict, msgAdmitting)
+	// One in another process has its own slot and meets the flock.
+	other := p.handler()
+	other.slot = make(chan struct{}, 1)
+	wantError(t, p.post(t, other, push{id: randomID(t), token: p.token(t, c2), body: bytes.NewReader(bundle)}), http.StatusConflict, msgAdmitting)
 	close(block)
 	if w := <-first; w.Code != http.StatusGatewayTimeout {
 		t.Fatalf("the first push: %d %s", w.Code, w.Body)
@@ -825,4 +870,65 @@ func TestResultPoll(t *testing.T) {
 			t.Fatalf("%s: %d %s", name, w.Code, w.Body)
 		}
 	}
+}
+
+// TestPushStalledUpload: an upload that stops arriving does not hold
+// the push slot past its deadline — through a real server, since a
+// recorder has no connection to put a deadline on.
+func TestPushStalledUpload(t *testing.T) {
+	p := newPushRig(t)
+	p.h.upload = 300 * time.Millisecond
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = p.h.ServeHTTP(w, r, nextFunc(func(http.ResponseWriter, *http.Request) error { return nil }))
+	}))
+	defer srv.Close()
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close() //nolint:errcheck // a test connection
+	c2, _ := p.change()
+	if _, err := fmt.Fprintf(conn, "POST / HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer %s\r\n%s: %s\r\nContent-Type: application/gzip\r\nContent-Length: 1000\r\n\r\npartial",
+		p.token(t, c2), headerRequestID, randomID(t)); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("no answer to a stalled upload: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	release, ok := p.h.takeSlot()
+	if !ok {
+		t.Fatal("the slot outlived the stalled upload")
+	}
+	release()
+}
+
+// TestPushSlotFreeDuringTheWait: the slot is held from the body to the
+// drop and given back before step 8's wait, so the next push can begin
+// while this one waits on root.
+func TestPushSlotFreeDuringTheWait(t *testing.T) {
+	p := newPushRig(t)
+	c2, bundle := p.change()
+	free := false
+	p.clk.onSleep = func() {
+		if release, ok := p.h.takeSlot(); ok {
+			free = true
+			release()
+		}
+	}
+	if w := p.post(t, p.h, push{id: randomID(t), token: p.token(t, c2), body: bytes.NewReader(bundle)}); w.Code != http.StatusGatewayTimeout {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	if !free {
+		t.Fatal("the slot was held through the wait")
+	}
+	release, ok := p.h.takeSlot()
+	if !ok {
+		t.Fatal("the slot was not given back")
+	}
+	release()
 }

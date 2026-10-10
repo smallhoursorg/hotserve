@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -37,10 +38,13 @@ import (
 // headerRequestID carries the id the workflow chose for its push.
 const headerRequestID = "X-Box-Request-Id"
 
-// Step 8's bounds (DESIGN-box.md, Caps).
+// Step 8's bounds, and the upload's (DESIGN-box.md, Caps).
 const (
 	resultWait     = 30 * time.Second
 	resultInterval = time.Second
+	// uploadTimeout bounds the body's arrival while the push slot is
+	// held: a stalled upload would otherwise hold it for good.
+	uploadTimeout = 120 * time.Second
 )
 
 // The handler's push and poll messages (DESIGN-box.md, "Message
@@ -87,13 +91,45 @@ func (h *Handler) push(w http.ResponseWriter, r *http.Request) error {
 		return respond(w, http.StatusBadRequest, errorBody(msgRequestID))
 	}
 	p := &pushing{h: h, w: w, r: r, id: id, via: ident.By}
+	// An id the box already holds is a retry after a lost response: it
+	// polls, whatever its push came to (DESIGN-box.md, "Admission"). Asked
+	// before the body is read, and again under the lock.
+	if known, err := h.known(p.id); err != nil {
+		return p.fail(err)
+	} else if known {
+		return p.respond(http.StatusConflict, errorBody(msgDuplicate(p.id)))
+	}
 	if !isGzip(r.Header.Get("Content-Type")) {
 		return p.respond(http.StatusUnsupportedMediaType, errorBody(msgMediaType))
 	}
 	if r.ContentLength > maxBody {
 		return p.respond(http.StatusRequestEntityTooLarge, errorBody(msgTooLarge))
 	}
+	// One push at a time in this process, from its body to its drop: a
+	// body is up to 16 MiB in memory, and nothing else bounds how many
+	// authenticated requests could hold one (DESIGN-box.md, Caps). Not a
+	// queue: a second push is told to retry, its body unread.
+	release, ok := h.takeSlot()
+	if !ok {
+		return p.respond(http.StatusConflict, errorBody(msgAdmitting))
+	}
+	defer release()
+	// A server that cannot set a deadline (HTTP/3) reads as it would
+	// have; Caddy's own read_body timeout, where set, applies there.
+	rc := http.NewResponseController(w)
+	upload := h.upload
+	if upload == 0 {
+		upload = uploadTimeout
+	}
+	_ = rc.SetReadDeadline(time.Now().Add(upload))
 	body, err := readCapped(r.Body, "the bundle", maxBody)
+	if err == nil {
+		// Cleared only after a whole body: the server's background read
+		// would otherwise end the request's context when it passes. After
+		// a body that did not arrive whole the deadline stays, so the
+		// server's drain of what is left of it ends too.
+		_ = rc.SetReadDeadline(time.Time{})
+	}
 	var big *tooLargeError
 	if errors.As(err, &big) {
 		return p.respond(http.StatusRequestEntityTooLarge, errorBody(msgTooLarge))
@@ -122,50 +158,50 @@ func (h *Handler) push(w http.ResponseWriter, r *http.Request) error {
 		return p.refuse(b, &refusal{msg: msgTokenNames(claim, b.Commit.ID)})
 	}
 
-	// An id the box already holds is a retry after a lost response: it
-	// polls, whatever its push came to (DESIGN-box.md, "Admission").
-	if known, err := h.known(p.id); err != nil {
-		return h.boxError(w, "the exchange directory", err)
-	} else if known {
-		return p.respond(http.StatusConflict, errorBody(msgDuplicate(p.id)))
-	}
-
 	// The fast path: the box runs this commit and this file already.
 	base, installed, done, err := p.state()
 	if done {
 		return err
 	}
-	if b.Commit.ID == base.SHA && digest(b.Caddyfile) == digest(installed) {
-		res := result{ID: p.id, Phase: phaseNoChange, Commit: b.Commit.ID, Path: b.Path}
-		h.logger.Info("box push answered", zap.String("id", p.id), zap.String("commit", p.commit), zap.String("phase", phaseNoChange),
-			zap.String("via", p.via), zap.String("remote", r.RemoteAddr))
-		return p.respond(http.StatusOK, res)
+	if answered, err := p.noChange(b, base, installed); answered {
+		return err
 	}
 
 	// 2, 5, 6, 7: under the admission lock.
 	if done, err := p.admit(b, body); done {
 		return err
 	}
-	// 8. root's first result, read for at most resultWait.
+	// 8. root's first result, read for at most resultWait — with the slot
+	// given back: the body is in in/, and the next push may begin.
+	release()
 	return p.answer(h.waitResult(r.Context(), p.id))
 }
 
-// state reads the baseline and the installed file, each once: done=true
-// means the push was answered — 409 before `init`, 500 when either file
-// cannot be read.
+// state is readState for a push: done=true means the push was answered
+// — 409 before `init`, 500 when either file cannot be read.
 func (p *pushing) state() (base *applied, installed []byte, done bool, err error) {
-	base, err = readApplied(p.h.dir)
-	if errors.Is(err, fs.ErrNotExist) {
+	base, installed, what, err := p.h.readState()
+	switch {
+	case err == nil:
+		return base, installed, false, nil
+	case what == readingBaseline && errors.Is(err, fs.ErrNotExist):
 		return nil, nil, true, p.respond(http.StatusConflict, errorBody(msgNoBaseline))
+	default:
+		return nil, nil, true, p.h.boxError(p.w, what, err)
 	}
-	if err != nil {
-		return nil, nil, true, p.h.boxError(p.w, "the baseline", err)
+}
+
+// noChange is the fast path (step 4): when the box runs this commit and
+// this file already, 200 `no_change`, nothing written. Asked before the
+// lock and again under it, of what was read there: a push another one
+// applied meanwhile is answered so, not pre-verified against itself.
+func (p *pushing) noChange(b *proof.Bundle, base *applied, installed []byte) (bool, error) {
+	if b.Commit.ID != base.SHA || digest(b.Caddyfile) != digest(installed) {
+		return false, nil
 	}
-	installed, err = readFile(p.h.installed, proof.MaxCaddyfile, true)
-	if err != nil {
-		return nil, nil, true, p.h.boxError(p.w, "the Caddyfile this box runs", err)
-	}
-	return base, installed, false, nil
+	p.h.logger.Info("box push answered", zap.String("id", p.id), zap.String("commit", p.commit), zap.String("phase", phaseNoChange),
+		zap.String("via", p.via), zap.String("remote", p.r.RemoteAddr))
+	return true, p.respond(http.StatusOK, result{ID: p.id, Phase: phaseNoChange, Commit: b.Commit.ID, Path: b.Path})
 }
 
 // pushing is one push's state, so that its answers and journal lines
@@ -238,6 +274,26 @@ func (p *pushing) answer(res *result, err error) error {
 	return respondResult(p.w, res)
 }
 
+// pushSlot is the process's one push in memory, shared by every
+// box_webhook instance a reload provisions.
+var pushSlot = make(chan struct{}, 1)
+
+// takeSlot takes the push slot without waiting; release gives it back,
+// once however often it is called.
+func (h *Handler) takeSlot() (release func(), ok bool) {
+	slot := h.slot
+	if slot == nil { // a Handler Provision did not build: the process's
+		slot = pushSlot
+	}
+	select {
+	case slot <- struct{}{}:
+		var once sync.Once
+		return func() { once.Do(func() { <-slot }) }, true
+	default:
+		return nil, false
+	}
+}
+
 // waitResult reads out/<id>.json every resultInterval until it exists
 // or resultWait has passed (nil, nil), or the caller has gone. The
 // handler never waits past the first result ("Why 202 and a poll").
@@ -278,12 +334,15 @@ func (h *Handler) result(w http.ResponseWriter, r *http.Request) error {
 		h.logStateError("the result for "+id, err)
 		return respond(w, http.StatusInternalServerError, errorBody("could not read the result for "+id+": "+proof.Bound(err.Error())), id)
 	}
-	// No result yet: a marker, of whatever age, is a push admitted.
-	if found, err := present(h.x("stage", id+".auth")); err != nil {
-		h.logStateError("the marker for "+id, err)
-		return respond(w, http.StatusInternalServerError, errorBody("could not read the marker for "+id+": "+proof.Bound(err.Error())), id)
-	} else if found {
-		return respond(w, http.StatusAccepted, map[string]string{"phase": "admitted"})
+	// No result yet: a marker, of whatever age, or a bundle still in in/
+	// (its marker never written), is a push admitted.
+	for _, path := range []string{h.x("stage", id+".auth"), h.x("in", id+".tar")} {
+		if found, err := present(path); err != nil {
+			h.logStateError("the push "+id, err)
+			return respond(w, http.StatusInternalServerError, errorBody("could not read the push "+id+": "+proof.Bound(err.Error())), id)
+		} else if found {
+			return respond(w, http.StatusAccepted, map[string]string{"phase": "admitted"})
+		}
 	}
 	return respond(w, http.StatusNotFound, errorBody(msgNoResult(id)), id)
 }

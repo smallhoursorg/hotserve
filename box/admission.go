@@ -70,6 +70,9 @@ func (p *pushing) admit(b *proof.Bundle, body []byte) (done bool, err error) {
 	if done {
 		return true, err
 	}
+	if answered, err := p.noChange(b, base, installed); answered {
+		return true, err
+	}
 	// 5. The proof, as root will run it: a signed commit paired with
 	// other bytes fails here, so validate only ever sees bytes a listed
 	// signer committed.
@@ -133,10 +136,10 @@ func (h *Handler) sweepOwnTemporaries() {
 
 // pending reports the push that blocks admission, if any: any entry in
 // in/ (named by its id when it is `<id>.tar`, aged by its modification
-// time), or a marker younger than pendingFor with no terminal result
+// time), or a marker younger than pendingAge with no terminal result
 // (aged by its `posted`). A marker that does not read blocks nothing:
 // root ages it by its modification time and settles it (Retention). A
-// marker dated more than pendingFor past the clock is not pending, as
+// marker dated more than pendingAge past the clock is not pending, as
 // Retention counts it older than a day.
 func (h *Handler) pending() (what string, age time.Duration, pending bool, err error) {
 	now := h.clock.Now()
@@ -209,7 +212,7 @@ func (h *Handler) drop(id string, body []byte) error {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("handing the bundle to root: %w", err)
 	}
-	if err := syncDir(h.x("in")); err != nil {
+	if err := h.syncIn(); err != nil {
 		h.logger.Error("box webhook: the bundle is in in/, but in/ could not be synced; no marker is written", zap.String("id", id), zap.String("error", proof.Bound(err.Error())))
 		return nil
 	}
@@ -220,6 +223,13 @@ func (h *Handler) drop(id string, body []byte) error {
 	}
 	h.crash("marker")
 	return nil
+}
+
+func (h *Handler) syncIn() error {
+	if err := h.fail("in:sync"); err != nil {
+		return err
+	}
+	return syncDir(h.x("in"))
 }
 
 func (h *Handler) writeMarker(id string) error {
@@ -284,10 +294,11 @@ func (h *Handler) crash(point string) {
 }
 
 // known reports whether the box already holds a push with this id: its
-// marker or its result. A name that cannot be looked up is the box's
-// error, never a yes or a no.
+// marker, its result, or its bundle still in in/ (a marker that was never
+// written). A name that cannot be looked up is the box's error, never a
+// yes or a no.
 func (h *Handler) known(id string) (bool, error) {
-	for _, path := range []string{h.x("stage", id+".auth"), h.x("out", id+".json")} {
+	for _, path := range []string{h.x("stage", id+".auth"), h.x("out", id+".json"), h.x("in", id+".tar")} {
 		if found, err := present(path); err != nil || found {
 			return found, err
 		}

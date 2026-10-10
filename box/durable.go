@@ -1,8 +1,6 @@
 package box
 
 import (
-	"errors"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -125,6 +123,6 @@ func syncDir(dir string) error {
 // symlink there: an entry in in/ or work/ of any kind blocks the
 // stranded-marker rule (Retention).
 func exists(path string) bool {
-	_, err := os.Lstat(path)
-	return err == nil || !errors.Is(err, fs.ErrNotExist)
+	found, err := present(path)
+	return found || err != nil
 }

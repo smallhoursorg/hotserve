@@ -102,6 +102,15 @@ func TestValidateChild(t *testing.T) {
 			t.Fatalf("msg %q err %v", msg, err)
 		}
 	})
+	t.Run("an exit status decides over the deadline", func(t *testing.T) {
+		// The child says why and exits; a grandchild holds the output past
+		// the deadline. The answer is the child's line, not a timeout.
+		c, _ := stubValidator(t, "sleep 60 & echo 'Error: said why'; exit 1", "")
+		c.timeout = 300 * time.Millisecond
+		if msg, err := c.validate(context.Background(), randomID(t), file); msg != "hotserve validate: said why" || err != nil {
+			t.Fatalf("msg %q err %v", msg, err)
+		}
+	})
 	t.Run("a child that does not finish", func(t *testing.T) {
 		c, _ := stubValidator(t, "exec sleep 60", "")
 		c.timeout = 200 * time.Millisecond
@@ -191,11 +200,11 @@ func TestValidateBackup(t *testing.T) {
 			t.Fatalf("ENOTDIR: msg %q err %v", msg, err)
 		}
 	})
-	t.Run("could not tell", func(t *testing.T) {
+	t.Run("could not tell is the box's", func(t *testing.T) {
 		c, dir := stubValidator(t, "exit 0", "")
 		c.backup = filepath.Join(dir, "loop")
 		must(t, os.Symlink(c.backup, c.backup))
-		if msg, err := c.validate(context.Background(), randomID(t), file); msg != msgBackupUnknown || err != nil {
+		if msg, err := c.validate(context.Background(), randomID(t), file); msg != "" || err == nil || !strings.HasPrefix(err.Error(), "could not ask whether backups are installed: ") {
 			t.Fatalf("ELOOP: msg %q err %v", msg, err)
 		}
 	})
@@ -247,6 +256,9 @@ func TestSecretCandidates(t *testing.T) {
 // with it — after a deadline, and after a child that exited and left a
 // grandchild holding the output.
 func TestValidateTakesTheProcessGroup(t *testing.T) {
+	if _, err := os.ReadFile("/proc/self/stat"); err != nil {
+		t.Skip("needs /proc to see the grandchild: the dev container has it")
+	}
 	for name, tail := range map[string]string{"deadline": "exec sleep 60", "exited": "exit 1"} {
 		t.Run(name, func(t *testing.T) {
 			pidFile := filepath.Join(t.TempDir(), "pid")

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"time"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
@@ -50,6 +51,10 @@ type Handler struct {
 	validator validator
 	clock     Clock
 	hooks     handlerHooks
+	// slot is pushSlot, the one push in memory, shared across reloads;
+	// upload, when not zero, stands for uploadTimeout in a test.
+	slot   chan struct{}
+	upload time.Duration
 }
 
 // CaddyModule returns the Caddy module information.
@@ -75,6 +80,7 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	h.verifier = &proof.Verifier{} // RunAs 0: as the hotserve uid, in the service's PrivateTmp
 	h.validator = newChildValidator(h.x("stage"))
 	h.clock = realClock{}
+	h.slot = pushSlot
 	return nil
 }
 
@@ -131,16 +137,12 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) error {
 	if _, ok, err := h.authenticate(w, r, "status"); !ok {
 		return err
 	}
-	base, err := readApplied(h.dir)
-	if errors.Is(err, fs.ErrNotExist) {
+	base, file, what, err := h.readState()
+	switch {
+	case what == readingBaseline && errors.Is(err, fs.ErrNotExist):
 		return respond(w, http.StatusConflict, errorBody(msgNoBaseline))
-	}
-	if err != nil {
-		return h.boxError(w, "the baseline", err)
-	}
-	file, err := readFile(h.installed, proof.MaxCaddyfile, true)
-	if err != nil {
-		return h.boxError(w, "the Caddyfile this box runs", err)
+	case err != nil:
+		return h.boxError(w, what, err)
 	}
 	shape, err := Walk(file)
 	if err != nil {
@@ -155,6 +157,25 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) error {
 	digest := hex.EncodeToString(sum[:])
 	return respond(w, http.StatusOK, statusBody{Commit: base.SHA, BoxWebhook: shape.Host, SHA256: digest},
 		base.SHA, shape.Host, digest)
+}
+
+// What readState names when a file fails it.
+const (
+	readingBaseline  = "the baseline"
+	readingInstalled = "the Caddyfile this box runs"
+)
+
+// readState reads the baseline and the installed file, each once, as
+// `GET /` and a push both need them. On an error, what names the file;
+// a missing applied.json is fs.ErrNotExist, the box before `init`.
+func (h *Handler) readState() (base *applied, installed []byte, what string, err error) {
+	if base, err = readApplied(h.dir); err != nil {
+		return nil, nil, readingBaseline, err
+	}
+	if installed, err = readFile(h.installed, proof.MaxCaddyfile, true); err != nil {
+		return nil, nil, readingInstalled, err
+	}
+	return base, installed, "", nil
 }
 
 // boxError answers a failure that is the box's, never the caller's:

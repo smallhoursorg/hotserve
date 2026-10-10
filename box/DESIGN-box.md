@@ -183,7 +183,8 @@ cross-references throughout.
 2. **Admission.** See "Admission". The request id (400) and the media
    type (415) are checked before the body is read, the body's size
    (413) as it is read; then steps 3 and 4 and the fast path run on the
-   body in memory, before the lock, so a slow upload never holds it.
+   body in memory, before the lock, so a slow upload never holds it
+   — under the process's one push slot (Caps, "pushes in memory").
    Only then is the admission lock taken and the pending and `in/`
    checks run; a request that does not pass is 409 with nothing
    written.
@@ -223,8 +224,8 @@ cross-references throughout.
    the service's own environment, and `/usr/bin/hotserve-backup validate <file>` when
    that binary is executable — `test -x`'s question, `access(X_OK)`: no
    file, one this uid cannot run, or a path through a non-directory is
-   "not installed"; any other failure refuses as "could not tell". A
-   child that exits non-zero, or outlives its deadline, refuses the
+   "not installed"; any other failure is the box's error, a 500 ("could
+   not ask whether backups are installed"). A child that exits non-zero, or outlives its deadline, refuses the
    push; one that cannot start, or that another signal killed (the OOM
    killer), is the box's error, a 500. Output reaches the
    response and the journal only through liveswap's redactor primed
@@ -618,6 +619,7 @@ refusing every push at admission — scores severity 1.
 | A `work/` fsync error skips `in/`'s fsync, so a power loss before the next fsync can bring the entry back | Failure-mode table, take | 2 | 2 | 3 | 12; the returning bundle is removed by its terminal result (step 9) |
 | A bare console edit between the re-read before a write and the write itself: before the swap it is overwritten; before `applied.json` the baseline moves past it | Transitions, installing → swapped and checking → no_change | 2 | 2 | 3 | 12; the next push reports the file as edited out of band; `hotserve box edit` holds the lock and cannot race |
 | Recovery checks `d`, then waits on `activating`; a bare console edit during the wait is reloaded or reported as the previous file | States, `rolling_back` | 2 | 2 | 3 | 12; needs a crash and a concurrent bare edit |
+| A push whose marker was never written (a crash, a full disk, `in/` unsynced) and whose bundle root has taken into `work/` is not known to the handler: a retry under the same id is admitted again, and its poll reads 404 until root's result | "Admission" | 2 | 2 | 3 | 12; root settles both by the descent check, and the workflow keeps polling on 404 (catalogue) |
 | A handler refusal (steps 3–6) or a fast-path `no_change` whose response is lost leaves nothing to poll: the workflow polls 404 to its bound and goes red naming the journal, where the refusal line says why | "A lost response loses nothing" | 2 | 3 | 1 | 6; red and named; the handler writes nothing in `out/`, which is root's |
 | A rollback whose cause the catalogue has no words for reports the nearest catalogued text | "Rollbacks the catalogue has no words of their own for", box/txn.go | 2 | 3 | 3 | 18; the journal carries the real cause; catalogue lines are wanted |
 
@@ -636,8 +638,8 @@ re-instantiates the handler; a crash releases it with the descriptor.
 |---|---|---|
 | no `X-Box-Request-Id` header, or not 32 lowercase hex | 400 "X-Box-Request-Id: 32 lowercase hex, chosen at random for each push, required" | the id names the push's bundle, marker and result; checked before the body is read and before the fast path, so every POST contract rule holds on both paths |
 | token, id and `sha` binding passed; HEAD equals the baseline and the file's digest equals the installed file's | 200 `no_change`, before the lock | nothing would change; the fast path of step 4 |
-| a marker or result already exists for this id | 409 "duplicate request id: poll /?result=<id>" | a retry after a lost response; honest ids never collide. Checked before the fast path too, so a retry of a push that has since applied is not answered `no_change` |
-| lock held by another request | 409 "a push is being admitted; retry in a moment" | another push is between its checks and its marker |
+| a marker, result or `in/<id>.tar` already exists for this id | 409 "duplicate request id: poll /?result=<id>" | a retry after a lost response; honest ids never collide. Checked before the fast path too, so a retry of a push that has since applied is not answered `no_change` |
+| lock held by another request, or this process's push slot taken (before the body is read) | 409 "a push is being admitted; retry in a moment" | another push is between its body and its marker |
 | any entry in `in/` | 409 "a push is pending: <id>, <age> old" | the durable one-bundle bound: a stalled applier means one 16 MiB on disk and a loud 409, never a queue; no age-out |
 | a marker younger than fifteen minutes with no terminal result | 409, same message | root has taken the bundle and holds one at a time; the marker is the only trace the handler has |
 | a marker older than fifteen minutes, nothing in `in/` | admit | a marker past the workflow's own poll bound is a stranded result, not pending work; it is swept by root (see "Retention") |
@@ -769,6 +771,8 @@ Every numeric bound, in one place, with its reason.
 | What | Cap | Why |
 |---|---|---|
 | bundle body | 16 MiB | a bundle is kilobytes; this is generous |
+| pushes in memory | one per hotserve process, from its body to its drop, shared across reloads; another push is 409 "a push is being admitted; retry in a moment", its body unread | the body is read before the admission lock (step 2), so without this nothing would bound how many authenticated requests hold 16 MiB each; honest runs are one at a time already (the workflow's `concurrency` group) |
+| bundle upload | 120 s, a read deadline on the connection while the push slot is held; past it 400 "could not read the bundle" | a stalled upload would otherwise hold the one slot until its connection ends; a bundle is kilobytes |
 | bundle decompressed | 16 MiB, reader stops at cap + 1 | the per-type caps below sum to more; this one wins, and a `stat` is not a bound |
 | Caddyfile / blob | 1 MiB | the record embeds it |
 | tree object | 1 MiB | |
@@ -883,7 +887,7 @@ console step; a host rename needs a certificate first in any case.
 |---|---|---|
 | `POST /` with a bundle and `X-Box-Request-Id` | `deploy_trust` (step 1) | per step 8: 202 `{id, commit, phase: verified}` / 200 with a `no_change` or `applied` result / 422 with a `refused`, `failed`, `rolled_back` or `unknown` result / 504 `{id}`; 400, 409, 413, 415 from admission; 500 when the box cannot check the push |
 | `GET /` | `deploy_trust` | `{"commit", "box_webhook", "sha256"}`: `commit` is `applied.json`'s `sha`; `box_webhook` and `sha256` are the installed file's walked host and its digest as read now — what step 4's fast path compares, so a console edit since the last apply shows. The workflow reads `commit` to bundle `rev-list --first-parent <commit>..HEAD`. 409 before `init` (no `applied.json`); 500 when either file cannot be read or the installed file does not walk |
-| `GET /?result=<id>` | `deploy_trust`, as every request on `/`: the workflow mints a fresh token for each poll | the query must be exactly one `result=<id>`, `<id>` in the id grammar (400). The result, with step 8's status for its phase: `verified` 202; `no_change`, `applied` 200; `refused`, `failed`, `rolled_back`, `unknown` 422. 202 `{"phase":"admitted"}` while a marker exists and no result does — admitted, no result yet, whatever the marker's age, since only root can tell a push it holds from one it lost, and its next run settles a lost one as `failed` (Retention); 404 when neither exists (swept, never admitted, or answered by the fast path); 500 when a file cannot be read |
+| `GET /?result=<id>` | `deploy_trust`, as every request on `/`: the workflow mints a fresh token for each poll | the query must be exactly one `result=<id>`, `<id>` in the id grammar (400). The result, with step 8's status for its phase: `verified` 202; `no_change`, `applied` 200; `refused`, `failed`, `rolled_back`, `unknown` 422. 202 `{"phase":"admitted"}` while a marker exists, or the push's bundle is still in `in/` (its marker never written), and no result does — admitted, no result yet, whatever the marker's age, since only root can tell a push it holds from one it lost, and its next run settles a lost one as `failed` (Retention); 404 when neither exists (swept, never admitted, or answered by the fast path); 500 when a file cannot be read |
 | another method on `/` | — | 405 |
 | another path | — | not this handler's; passed on |
 
@@ -931,7 +935,7 @@ says. The workflow's action is in the last column.
 | 422 | `refused` | `this file is for <host2>; this box is <host1>` | both | fail |
 | 422 | `refused` | `this box's file is <recorded path>; the bundle is <path> — hotserve init --path records a new one` | both | fail |
 | 422 | `refused` | `the new Caddyfile has no box block` / `… has no signer` / `… has no deploy_trust` / `… has no site with box_webhook` / `… has more than one site with box_webhook` / `… has a box_webhook site whose address is not one bare hostname (<address>)` / `… has a site without braces (<address>)` / `… has box_webhook inside a snippet or named route (<name>); write it in the site` / `… has box_webhook inside <block>; it must stand directly in the site block, where no matcher or nested route can leave / unserved` / `… has box_webhook with arguments (<args>); it takes none, and a matcher would leave / unserved` / `… imports <path>; inline the snippet` / `… has a placeholder where a directive name, a site address or a box line goes (<token>)` / `… reads differently once its placeholders are expanded` / `… is empty` / `… has a global options block that is not the first block` / `… has more than one box block` / `… has a signer line that is not \`signer <principal> <key-type> <base64>\`` / `… has a bad signer <principal>: <what>` / `… does not tokenize: <lexer error>` / `… does not parse: <what>` / `… drops the key that signed this commit (<principal>); add the new key in one push, let it apply, then remove the old one` | both | fail |
-| 422 | `refused` | `hotserve validate: <redacted>` / `hotserve-backup validate: <redacted>` / `could not ask whether backups are installed; nothing changed` / `the new Caddyfile does not reach box_webhook on /: <handler> answers first` | handler | fail |
+| 422 | `refused` | `hotserve validate: <redacted>` / `hotserve-backup validate: <redacted>` / `the new Caddyfile does not reach box_webhook on /: <handler> answers first` | handler | fail |
 | 422 | `refused` | `hotserve is not running; nothing applied` / `hotserve is still starting after 300 s; nothing applied` | applier | fail |
 | 422 | `refused` | `the Caddyfile this box runs lists no signer; hotserve init is the way back` | applier | fail |
 | 200 / poll | `no_change` | `the box already runs this Caddyfile` | applier | green |
@@ -1193,7 +1197,7 @@ full placement is DESIGN-threat-model.md, "Config webhook" and T6.
 
 | Actor | Can | Cannot |
 |---|---|---|
-| Holder of a box-repo OIDC token (the repo's own CI, a compromised action) | Reach the handler; make it validate a Caddyfile a *signer* committed (pre-check first); replay `HEAD` — a `no_change`, or after a console edit the reinstall of HEAD's file, reverting the 3am fix; hold one bundle in `in/` and one in root's hands; fill at most 32 result slots | Install anything not signed by a listed key; replay an older signed commit (descent); land another box's file or another path (identity) |
+| Holder of a box-repo OIDC token (the repo's own CI, a compromised action) | Reach the handler; make it validate a Caddyfile a *signer* committed (pre-check first); replay `HEAD` — a `no_change`, or after a console edit the reinstall of HEAD's file, reverting the 3am fix; hold one bundle in `in/` and one in root's hands; fill at most 32 result slots; hold the process's one push slot for up to the upload deadline per request (every other push 409s meanwhile) | Install anything not signed by a listed key; replay an older signed commit (descent); land another box's file or another path (identity) |
 | Holder of a `deploy_trust local` token, or of the key that mints one | The same as the OIDC holder, with `sha` chosen by the minter: any signed descendant of the baseline whose objects it has, without the repository workflow or its `main` claim | Anything a signer did not sign |
 | Leaked PAT, stolen session, OAuth/GitHub App with `contents:write` | Push to `main`; stop every later push until its commit is rebased away; **fast-forward onto `main` a branch every commit of which a signer already signed**, which the box applies, for as long as the box runs the commit it forked from | Produce an SSH signature by a listed key; ride an unsigned or self-authored change in under a later signed commit; change the box with anything a signer did not sign |
 | Compromised laptop, software signing key | Everything the operator can | Nothing the operator cannot; this is the operator |
@@ -1219,7 +1223,7 @@ anything; GitHub enforces nothing.
 | `box_webhook` inside the hotserve process | A root-owned webhook | HTTP, gzip, tar and OIDC parsing as root. No. |
 | One atomic `txn.json` with a `phase` | `Caddyfile.prev` beside the file; a two-file marker; digests as state | `.prev` is `bin/push`'s name and a trigger on it would race legacy pushes; two files have partial states; digests cannot tell "before the swap" from "re-run after a console edit". |
 | A client-chosen random id per push; a result poll authenticated by `deploy_trust`, the workflow minting a fresh token for each | A per-push poll secret (its digest sent with the push, the secret to poll); a box-issued id in the response | The poll secret let a push that removed its own workflow from `deploy_trust` read its result, at the price of a second credential, its own header scheme, and a marker that authenticates — and with it a question no answer suited: what a poll gets when that marker cannot be read. A fresh token per poll outlives a slow apply; the rare self-locking push reads 401 and the catalogue names the journal. A box-issued id: a lost POST response left the run with nothing to poll. |
-| The body read and parsed, and the fast path answered, before the admission lock | The lock before the body | A slow upload would hold the lock, and a replay of the applied `HEAD` sent while a push is pending would be refused instead of answered `no_change`. The cost: a body of up to 16 MiB read before a 409, and that much memory for each concurrent authenticated push. |
+| The body read and parsed, and the fast path answered, before the admission lock | The lock before the body | A slow upload would hold the lock, and a replay of the applied `HEAD` sent while a push is pending would be refused instead of answered `no_change`. The cost: a body of up to 16 MiB read before a 409 for a pending push; memory is bounded by the one push slot (Caps), so a replay sent while another push is in memory is told to retry. |
 | A handler fast path for a replay of the applied `HEAD` | Rate-limiting successful admissions | Nothing would change on disk, so no root work is the right amount; a rate limit would also slow honest runs. |
 | Host and recorded path as identity | Host alone; a `path` line in the file; the directory name | Host alone cannot pick between two files naming the same host; a `path` line is a redundant line to keep in step; the directory name is outside the signed file. |
 | Every chain commit signed | HEAD's signature only | An unsigned commit would ride in under the next signed one. |
