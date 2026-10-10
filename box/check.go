@@ -83,7 +83,7 @@ func check(ctx context.Context, v *proof.Verifier, b *proof.Bundle, installed []
 		return nil, refused("this file is for %s; this box is %s", next.Host, cur.Host)
 	}
 	if b.Path != base.Path {
-		return nil, refused("this box's file is %s; the bundle is %s — hotserve init --path records a new one", proof.Bound(base.Path), proof.Bound(b.Path))
+		return nil, refused("this box's file is %s; the bundle is %s — a box's file is %s/Caddyfile at the top of the repository, and hotserve init, run again from that directory, records it", proof.Bound(base.Path), proof.Bound(b.Path), cur.Host)
 	}
 	vd.host, vd.apps = cur.Host, next.Apps
 

@@ -42,7 +42,7 @@ func TestWebhookURL(t *testing.T) {
 	if _, err := webhookURL(filepath.Join(dir, "none")); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("missing: %v", err)
 	}
-	// A pipe is read to its end, as `<(git show HEAD:box1/Caddyfile)`
+	// A pipe is read to its end, as `<(git show HEAD:deploy.example.com/Caddyfile)`
 	// hands one over.
 	fifo := filepath.Join(dir, "fifo")
 	mkfifo(t, fifo)
@@ -104,5 +104,13 @@ func TestBoxCommand(t *testing.T) {
 	}
 	if _, err := run("webhook", path); err == nil || !strings.Contains(err.Error(), "has no box block") {
 		t.Errorf("a refused file: %v", err)
+	}
+	// baseline takes exactly one argument; what it does with it is
+	// TestBaseline's.
+	if _, err := run("baseline"); err == nil {
+		t.Error("baseline with no sha accepted")
+	}
+	if _, err := run("baseline", strings.Repeat("a", 40), "x"); err == nil {
+		t.Error("baseline with two arguments accepted")
 	}
 }

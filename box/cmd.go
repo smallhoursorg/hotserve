@@ -13,8 +13,8 @@ import (
 	"github.com/smallhoursorg/hotserve/box/proof"
 )
 
-// `hotserve box …` is one command with subcommands, so the ones later
-// PRs add (baseline, edit) sit beside webhook and apply.
+// `hotserve box …` is one command with subcommands: webhook, apply and
+// baseline.
 func init() {
 	caddycmd.RegisterCommand(caddycmd.Command{
 		Name:  "box",
@@ -33,7 +33,7 @@ site carrying box_webhook. It refuses the file's contents for every
 reason the box would, so the laptop, CI and the box cannot disagree about which
 address a file names. The file may be a pipe:
 
-    hotserve box webhook <(git show HEAD:box1/Caddyfile)`,
+    hotserve box webhook <(git show HEAD:deploy.example.com/Caddyfile)`,
 				Args: cobra.ExactArgs(1),
 				RunE: func(c *cobra.Command, args []string) error {
 					url, err := webhookURL(args[0])
@@ -59,9 +59,47 @@ back after a failed install (a full disk); the journal says so.`,
 					return runApply(c.Context(), os.Geteuid(), newApplier(caddy.Log().Named("box.apply")))
 				},
 			})
+			cmd.AddCommand(&cobra.Command{
+				Use:   "baseline <sha>",
+				Short: "Reset the commit this box's pushes must descend from (root)",
+				Long: `A trust reset, for the one case where the repository's history no
+longer contains the commit this box runs: a rewrite below it, or a
+chain longer than 500 commits. Every later push must descend from
+<sha>, and the box never examines <sha>'s ancestors. The path and the
+digest of the installed file stay as they were, so an edit made on the
+box since the last apply is still reported as one. It is not the fix
+for an unsigned commit above the commit the box runs: that is a rebase
+and a force-push, with nothing to do on the box. As root, after
+hotserve init; it waits while the applier holds its lock.`,
+				Args: cobra.ExactArgs(1),
+				RunE: func(c *cobra.Command, args []string) error {
+					return runBaseline(commandContext(c), os.Geteuid(), newApplier(caddy.Log().Named("box.baseline")), args[0], c.OutOrStdout())
+				},
+			})
 		},
 	})
 }
+
+// commandContext is the command's context, or a background one when it
+// was run without.
+func commandContext(c *cobra.Command) context.Context {
+	if ctx := c.Context(); ctx != nil {
+		return ctx
+	}
+	return context.Background()
+}
+
+// commitArg holds init's and baseline's argument to a commit id as the
+// box records one: 40 lowercase hex.
+func commitArg(sha string) error {
+	if !proof.IsID(sha) {
+		return fmt.Errorf("%s is not a commit id: 40 lowercase hex, as git rev-parse HEAD prints one", proof.Bound(sha))
+	}
+	return nil
+}
+
+// shortSHA is a commit id as the console's lines print it.
+func shortSHA(sha string) string { return sha[:min(len(sha), 7)] }
 
 // runApply is `hotserve box apply`: as root, one run.
 func runApply(ctx context.Context, euid int, a *Applier) error {
@@ -77,7 +115,8 @@ func runApply(ctx context.Context, euid int, a *Applier) error {
 // webhookURL is `hotserve box webhook`: the walk on the file at path,
 // read whole at most the Caddyfile cap. The path is the operator's own
 // argument, so unlike the box's state files it may be a pipe — `<(git
-// show HEAD:box1/Caddyfile)`, /dev/stdin — and is read until its end.
+// show HEAD:deploy.example.com/Caddyfile)`, /dev/stdin — and is read
+// until its end.
 func webhookURL(path string) (string, error) {
 	f, err := os.Open(path) //nolint:gosec // the operator's own CLI argument
 	if err != nil {

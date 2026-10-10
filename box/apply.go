@@ -109,7 +109,7 @@ func (a *Applier) removeTemp(id string) {
 }
 
 // lock takes root's blocking lock (DESIGN-box.md, Paths: `lock`), shared
-// with init, baseline and edit. A crash releases it with the descriptor.
+// with init and baseline. A crash releases it with the descriptor.
 func (a *Applier) lock() (func(), error) {
 	f, err := os.OpenFile(a.x("lock"), os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
 	if err != nil {

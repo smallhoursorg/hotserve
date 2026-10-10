@@ -148,10 +148,15 @@ func (a *Applier) readRecord() (*record, error) {
 }
 
 // writeApplied advances the baseline to the record's commit (I4: only
-// from a record that says applied or no_change, or init's).
+// from a record that says applied or no_change, the applier's or init's).
 func (a *Applier) writeApplied(rec *record) error {
-	b := encodeJSON(applied{SHA: rec.Commit, Path: rec.Path, SHA256: rec.NewSHA256, Signer: rec.Signer, When: a.clock.Now().UTC()})
-	return a.writeDurable("applied.json", a.x("applied.json"), a.x(".applied.json.tmp"), b, 0o640)
+	return a.putApplied(applied{SHA: rec.Commit, Path: rec.Path, SHA256: rec.NewSHA256, Signer: rec.Signer, When: a.clock.Now().UTC()})
+}
+
+// putApplied writes applied.json whole (I8): writeApplied's write, and
+// `hotserve box baseline`'s.
+func (a *Applier) putApplied(v applied) error {
+	return a.writeDurable("applied.json", a.x("applied.json"), a.x(".applied.json.tmp"), encodeJSON(v), 0o640)
 }
 
 // finish ends a transaction at a terminal phase, in the order every
