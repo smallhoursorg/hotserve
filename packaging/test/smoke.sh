@@ -189,6 +189,7 @@ expect_show $svc ProtectSystem strict
 expect_show $svc ReadWritePaths "/etc/hotserve /var/lib/hotserve-box"
 expect_show $svc PrivateDevices yes
 expect_show $svc ProtectKernelTunables yes
+expect_show $svc ProtectControlGroups yes
 expect_show $svc DevicePolicy closed
 expect_show $svc PrivateTmp yes
 expect_show $svc NoNewPrivileges yes
@@ -365,7 +366,7 @@ systemctl is-active --quiet hotserve || die "hotserve is not active after the re
 rm -f /run/systemd/system/$svc.d/smoke.conf "$B/smoke-result" /run/hotserve-box-smoke.sh
 rmdir /run/systemd/system/$svc.d
 systemctl daemon-reload
-[ "$(show hotserve-box-apply.path SubState)" = waiting ] || die "the path unit is not waiting after the run: $(systemctl show -p ActiveState,SubState,Result hotserve-box-apply.path | tr '\n' ' ')"
+wait_path_waiting "the path unit, its stub removed"
 echo "box applier: path unit enabled and waiting; tree as tmpfiles.d says; the unit reloads hotserve, verifies as 65534, kills its child; every path the unit watches starts a run that clears it"
 # The real applier in the unit as shipped, no stub: what the hotserve
 # uid drops that is not a bundle — a hidden 000 directory, a sticky
@@ -424,7 +425,7 @@ t1=$(date +%s)
 journalctl --sync
 runs=$(real_journal | grep -c 'txn.json cannot be read' || true)
 [ "$runs" -ge 1 ] || die "the path unit hit its trigger limit, but no run journaled the unreadable record"
-real_journal | grep -q 'ten seconds after this line, runs systemctl restart hotserve-box-apply.path' || die "the unreadable record's journal line does not name the restart the console needs, and when"
+real_journal | grep -q 'once hotserve-box-apply.path shows failed and ten more seconds have passed, runs systemctl restart hotserve-box-apply.path' || die "the unreadable record's journal line does not name the restart the console needs, and when"
 echo "an unreadable record: $runs runs, then trigger-limit-hit, within $((t1 - t0 + 1))s"
 rm -f "$B/txn.json"
 sleep 2

@@ -38,6 +38,7 @@ ProtectSystem=strict
 ReadWritePaths=/etc/hotserve /var/lib/hotserve-box
 PrivateDevices=yes
 ProtectKernelTunables=yes
+ProtectControlGroups=yes
 PrivateTmp=yes
 NoNewPrivileges=yes
 RestrictAddressFamilies=AF_UNIX
