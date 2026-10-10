@@ -186,5 +186,9 @@ npm run deploy
 ```
 
 The version defaults to the commit, and versions are immutable on the
-box, so that deploys once per commit; for an uncommitted build set one
-(`VERSION=wip-3 npm run deploy`).
+box, so that deploys once per commit. While tracked files have
+uncommitted changes the script refuses the default rather than label
+them with the commit (it checks the checkout when it runs, not the
+build); set a version for an uncommitted build
+(`VERSION=wip-3 npm run deploy`). A version is 1 to 64 letters,
+digits, `.`, `_` and `-`, not starting with `.`.
