@@ -246,9 +246,9 @@ install_baseline() {
 
 # restore: the e2e config back, and no baseline.
 restore() {
-	cp "$work/original" "$LIVE.e2e-tmp" && chmod 0644 "$LIVE.e2e-tmp" && mv "$LIVE.e2e-tmp" "$LIVE"
-	rm -f "$BOX/applied.json"
-	systemctl reload hotserve || systemctl restart hotserve
+	cp "$work/original" "$LIVE.e2e-tmp" && chmod 0644 "$LIVE.e2e-tmp" && mv "$LIVE.e2e-tmp" "$LIVE" \
+		&& rm -f "$BOX/applied.json" \
+		&& { systemctl reload hotserve || systemctl restart hotserve; }
 }
 
 # ready: GET / answers 200 (the internal certificate is issued
@@ -291,8 +291,18 @@ AT=$C0
 render "$ALICE" "$(printf '\n:8180 {\n\trespond "v1"\n}\n')" >"$work/f1"
 C1=$(commit alice "$work/f1")
 before=$(status 8080)
-push "$C1"
+bundle "$C1" "$BASE"
+post "$C1"
 C1_ID=$ID
+# Step 8: the POST answers by the first phase the handler sees —
+# `verified` (202) unless the applier was already done within its
+# first poll interval (200 applied).
+case "$CODE:$(phase)" in
+202:verified | 200:applied) pass "the POST answers $CODE $(phase)" ;;
+*) fail "the POST answered $CODE $(resp | head -c 300)" ;;
+esac
+[ "$CODE" = 202 ] && poll
+PHASE=$(phase)
 [ "$PHASE" = applied ] && pass "the push ends applied" || fail "push of a signed descendant: $CODE $(resp | head -c 600)"
 cmp -s "$LIVE" "$work/f1" && pass "the live file is the pushed one" || fail "the live file differs from the pushed one"
 [ "$(served 8180)" = v1 ] && pass "the pushed config is running" || fail "the pushed site does not answer: '$(served 8180)'"
