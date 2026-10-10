@@ -1,0 +1,30 @@
+# hotserve-box-apply.path — starts hotserve-box-apply.service, the box
+# applier, whenever the exchange tree /var/lib/hotserve-box has work.
+# Every line here, and why it is here, is a row of the table in
+# box/DESIGN-box.md, "The applier unit"; box/units_test.go holds this
+# file to that table line for line.
+[Unit]
+Description=hotserve box applier trigger
+Documentation=https://github.com/smallhoursorg/hotserve/blob/main/box/DESIGN-box.md
+DefaultDependencies=no
+Requires=sysinit.target
+After=sysinit.target hotserve.service
+Before=shutdown.target
+Conflicts=shutdown.target
+StartLimitIntervalSec=0
+
+[Path]
+DirectoryNotEmpty=/var/lib/hotserve-box/in
+DirectoryNotEmpty=/var/lib/hotserve-box/work
+PathExists=/var/lib/hotserve-box/txn.json
+PathExistsGlob=/var/lib/hotserve-box/in/*
+PathExistsGlob=/var/lib/hotserve-box/in/.[!.]*
+PathExistsGlob=/var/lib/hotserve-box/in/..?*
+PathExistsGlob=/var/lib/hotserve-box/work/*
+PathExistsGlob=/var/lib/hotserve-box/work/.[!.]*
+PathExistsGlob=/var/lib/hotserve-box/work/..?*
+TriggerLimitIntervalSec=10s
+TriggerLimitBurst=20
+
+[Install]
+WantedBy=multi-user.target

@@ -13,7 +13,10 @@
 # the exact packaging interaction (ProtectSystem=full, User=hotserve,
 # lingering, the user@<uid> drop-in) no other test layer exercises.
 # Stage 3 then proves the app survives the upgrade restart, and stage
-# 3c that an upgrade restart the new binary refuses is reported.
+# 3c that an upgrade restart the new binary refuses is reported. Stage
+# 1b runs the box applier's units as shipped, with a stub for the
+# applier and then with the real one, and stages 3 to 5 follow its path
+# unit through upgrade, removal and an install after removal.
 set -eu
 
 # TOKEN is minted in stage 2 with a local deploy key (deploy_trust
@@ -143,6 +146,294 @@ journalctl -u hotserve --no-pager \
 	| grep -Ei 'panic|SIGSEGV|permission denied|read-only file system' \
 	&& die "crash or writability error in the journal (see lines above)" || true
 echo "reload OK, journal clean"
+
+stage "stage 1b: the box applier's units and exchange tree"
+# box/DESIGN-box.md, "The applier unit". box/units_test.go holds the
+# files to the design; this stage holds the manager's reading of them,
+# what postinstall did with them, and what the service may do inside
+# its sandbox — the one lane that runs the units as the package ships
+# them, first with a stub for the applier, then with `hotserve box
+# apply` itself; pushes that apply are the e2e lane's.
+B=/var/lib/hotserve-box
+[ "$(systemctl is-enabled hotserve-box-apply.path)" = enabled ] \
+	|| die "postinstall did not enable hotserve-box-apply.path ($(systemctl is-enabled hotserve-box-apply.path))"
+systemctl is-active --quiet hotserve-box-apply.path \
+	|| die "postinstall did not start hotserve-box-apply.path: $(systemctl show -p ActiveState,Result hotserve-box-apply.path | tr '\n' ' ')"
+[ "$(systemctl is-enabled hotserve-box-apply.service)" = static ] \
+	|| die "hotserve-box-apply.service is '$(systemctl is-enabled hotserve-box-apply.service)', want static: the path unit is its only start"
+[ "$(command -v ssh-keygen)" = /usr/bin/ssh-keygen ] || die "ssh-keygen is not installed: the openssh-client Depends did not resolve"
+# The tree as the shipped tmpfiles.d file says, read back off the disk
+# (the file itself is held to the Paths table by box/units_test.go).
+conf=/usr/lib/tmpfiles.d/hotserve-box.conf
+[ -f "$conf" ] || die "$conf is not installed"
+n=0
+while read -r typ path mode user group _; do
+	case "$typ" in '' | '#'*) continue ;; esac
+	want="$(printf '%o' "$((8#$mode))") $user:$group"
+	got=$(stat -c '%a %U:%G' "$path") || die "$path does not exist: postinstall's systemd-tmpfiles --create did not make it"
+	[ "$got" = "$want" ] || die "$path is '$got', want '$want' (from $conf)"
+	n=$((n + 1))
+done <"$conf"
+[ "$n" -eq 5 ] || die "$conf made $n directories, want the 5 of the Paths table"
+# The manager's own reading of the units: what box/units_test.go reads
+# from the files is what systemd took from them.
+show() { systemctl show -p "$2" --value "$1"; }
+expect_show() { # <unit> <property> <want>
+	got=$(show "$1" "$2")
+	[ "$got" = "$3" ] || die "$1 $2 is '$got', want '$3'"
+}
+svc=hotserve-box-apply.service
+expect_show $svc Type oneshot
+expect_show $svc CapabilityBoundingSet "cap_dac_override cap_fowner cap_kill cap_setgid cap_setuid"
+expect_show $svc ProtectSystem strict
+expect_show $svc ReadWritePaths "/etc/hotserve /var/lib/hotserve-box"
+expect_show $svc PrivateDevices yes
+expect_show $svc ProtectKernelTunables yes
+expect_show $svc DevicePolicy closed
+expect_show $svc PrivateTmp yes
+expect_show $svc NoNewPrivileges yes
+expect_show $svc RestrictAddressFamilies AF_UNIX
+expect_show $svc TimeoutStartUSec infinity
+expect_show $svc StartLimitIntervalUSec 0
+expect_show hotserve-box-apply.path StartLimitIntervalUSec 0
+expect_show $svc User ""
+expect_show hotserve-box-apply.path TriggerLimitIntervalUSec 10s
+expect_show hotserve-box-apply.path TriggerLimitBurst 20
+case " $(show hotserve-box-apply.path After) " in *" hotserve.service "*) : ;; *) die "the path unit is not After=hotserve.service" ;; esac
+# Every path the shipped file names, as the manager took it: one
+# "path (Type)" line each, so a spec the manager dropped shows here.
+want_paths=$(sed -n 's/^\(DirectoryNotEmpty\|PathExists\|PathExistsGlob\)=\(.*\)$/\2 (\1)/p' /lib/systemd/system/hotserve-box-apply.path | sort)
+[ "$(printf '%s\n' "$want_paths" | wc -l)" -eq 9 ] || die "the shipped path unit names $(printf '%s\n' "$want_paths" | wc -l) paths, want 9"
+got_paths=$(show hotserve-box-apply.path Paths | sort)
+[ "$got_paths" = "$want_paths" ] || die "the manager watches
+$got_paths
+and the unit file names
+$want_paths"
+# A path unit's default Before=paths.target, beside After=hotserve.service,
+# is an ordering cycle the manager breaks by deleting paths.target's
+# start job at boot and hotserve's stop job at shutdown.
+case " $(show hotserve-box-apply.path Before) " in *" paths.target "*) die "the path unit is Before=paths.target: with After=hotserve.service that is an ordering cycle" ;; esac
+cycle=$(systemd-analyze verify default.target 2>&1 | grep -i 'ordering cycle' || true)
+[ -z "$cycle" ] || die "the boot transaction has an ordering cycle: $cycle"
+# The hotserve uid's reach into the tree, path by path: its own stage/
+# and nothing else it can write but in/ (below); the base, work/ and
+# out/ are root's.
+as_hotserve() { su -s /bin/sh hotserve -c "$1" 2>/dev/null; }
+as_hotserve "touch $B/stage/smoke && rm $B/stage/smoke" || die "the hotserve uid cannot write $B/stage"
+for p in "$B/smoke" "$B/out/smoke" "$B/work/smoke"; do
+	as_hotserve "touch $p" && die "the hotserve uid could create $p"
+done
+as_hotserve "ls $B/work" && die "the hotserve uid can list $B/work"
+# The units run: the service's ExecStart swapped for a stub by a runtime
+# drop-in, everything else as shipped. In the first run the stub probes
+# the sandbox — reloads hotserve, verifies a signature as uid 65534
+# under its PrivateTmp, kills a child of that uid, writes where it may
+# and not elsewhere; in every run it moves whatever is in in/ to work/,
+# empties work/ and removes the record, as the applier does.
+sig=/root/box-smoke
+rm -rf "$sig"; mkdir -p "$sig"
+ssh-keygen -q -t ed25519 -N '' -C smoke -f "$sig/key"
+printf 'box smoke payload\n' >"$sig/payload"
+ssh-keygen -q -Y sign -f "$sig/key" -n git "$sig/payload" || die "could not sign the smoke payload"
+printf 'smoke namespaces="git" %s\n' "$(cut -d' ' -f1,2 "$sig/key.pub")" >"$sig/allowed"
+cat >/run/hotserve-box-smoke.sh <<'EOF'
+#!/bin/sh
+B=/var/lib/hotserve-box
+out=$B/smoke-result
+: >"$out"
+r() { echo "$1=$2" >>"$out"; }
+if [ -e /run/hotserve-box-smoke.probe ]; then
+	systemctl reload hotserve; r reload $?
+	d=$(mktemp -d /tmp/box-verify-smoke.XXXXXX)
+	cp /root/box-smoke/payload.sig /root/box-smoke/allowed "$d/" && chmod 755 "$d" && chmod 644 "$d"/*
+	setpriv --reuid=65534 --regid=65534 --clear-groups env -i PATH=/usr/bin:/bin \
+		ssh-keygen -Y verify -f "$d/allowed" -I smoke -n git -s "$d/payload.sig" </root/box-smoke/payload >/dev/null 2>&1
+	r verify $?
+	rm -rf "$d"
+	setpriv --reuid=65534 --regid=65534 --clear-groups sleep 30 &
+	child=$!
+	# Killed only once it is uid 65534: before setpriv's switch it is
+	# root's own, and the kill would pass without CAP_KILL. A kill that
+	# fails is not waited for: the manager ends the child with the unit.
+	i=0
+	until [ "$(awk '/^Uid:/ {print $2}' /proc/$child/status 2>/dev/null)" = 65534 ]; do
+		i=$((i + 1)); [ "$i" -ge 100 ] && break
+		sleep 0.05
+	done
+	r childuid "$(awk '/^Uid:/ {print $2}' /proc/$child/status 2>/dev/null)"
+	if kill "$child"; then r kill 0; wait "$child"; else r kill 1; fi
+	touch /etc/hotserve/.smoke-box && rm /etc/hotserve/.smoke-box; r etc $?
+	touch /var/lib/hotserve/.smoke-box 2>/dev/null; r varlibhotserve $?
+	r blockdevs "$(find /dev -type b 2>/dev/null | wc -l)"
+	v=$(cat /proc/sys/kernel/printk_ratelimit)
+	(echo "$v" >/proc/sys/kernel/printk_ratelimit) 2>/dev/null; r sysctl $?
+fi
+find "$B/in" -mindepth 1 -maxdepth 1 -exec mv -t "$B/work/" {} + || r move 1
+find "$B/work" -mindepth 1 -delete; r clear $?
+rm -f "$B/txn.json"
+r left "$(find "$B/in" "$B/work" -mindepth 1 | wc -l)"
+EOF
+mkdir -p /run/systemd/system/$svc.d
+printf '[Service]\nExecStart=\nExecStart=/bin/sh /run/hotserve-box-smoke.sh\n' >/run/systemd/system/$svc.d/smoke.conf
+systemctl daemon-reload
+res() { sed -n "s/^$1=//p" "$B/smoke-result"; }
+# One round: an entry made, a run that clears it — judged from inside
+# the unit and from outside — and the path unit waiting again. A round
+# "stopped" stops the path unit while the entry is made (it would fire
+# at the entry's first step) and starts it again, so it finds the entry
+# at once; any other round makes the entry while the path unit waits,
+# so its watch is what fires.
+box_round() { # <what> <maker: hotserve|root> <command> <stopped|waiting>
+	[ "$4" = stopped ] && systemctl stop hotserve-box-apply.path
+	rm -f "$B/smoke-result"
+	if [ "$2" = root ]; then sh -c "$3"; else as_hotserve "$3"; fi || die "could not make $1"
+	if [ "$4" = stopped ]; then
+		systemctl start hotserve-box-apply.path || die "$1: the path unit did not start: $(systemctl show -p ActiveState,Result hotserve-box-apply.path | tr '\n' ' ')"
+	fi
+	i=0
+	until [ -s "$B/smoke-result" ] && grep -q '^left=' "$B/smoke-result" && [ "$(show $svc ActiveState)" = inactive ]; do
+		i=$((i + 1))
+		[ "$i" -ge 90 ] && die "$1: no run of the service within 45s: path $(systemctl show -p ActiveState,Result hotserve-box-apply.path | tr '\n' ' '), service $(systemctl show -p ActiveState,Result $svc | tr '\n' ' ')"
+		sleep 0.5
+	done
+	[ -z "$(res move)" ] && [ "$(res clear)" = 0 ] && [ "$(res left)" = 0 ] \
+		&& [ -z "$(find "$B/in" "$B/work" -mindepth 1)" ] && [ ! -e "$B/txn.json" ] \
+		|| die "$1: the run did not clear it: $(tr '\n' ' ' <"$B/smoke-result") left: $(find "$B/in" "$B/work" "$B/txn.json" -mindepth 0 2>/dev/null | tr '\n' ' ')"
+	wait_path_waiting "$1"
+	echo "$1: started a run, which cleared it"
+}
+# The path unit back to waiting, its last trigger a success.
+wait_path_waiting() { # <what>
+	i=0
+	until [ "$(show hotserve-box-apply.path SubState)" = waiting ] && [ "$(show hotserve-box-apply.path Result)" = success ]; do
+		i=$((i + 1))
+		[ "$i" -ge 20 ] && die "$1: the path unit is not waiting after the run: $(systemctl show -p ActiveState,SubState,Result hotserve-box-apply.path | tr '\n' ' ')"
+		sleep 0.5
+	done
+}
+# The probe, and the two capabilities that let a run clear what the
+# hotserve uid makes: a 000 directory (CAP_DAC_OVERRIDE) and a sticky
+# directory holding its file (CAP_FOWNER).
+: >/run/hotserve-box-smoke.probe
+box_round "a 000 directory in in/" hotserve "mkdir $B/in/x000 && touch $B/in/x000/f && chmod 000 $B/in/x000" stopped
+rm -f /run/hotserve-box-smoke.probe
+echo "inside the unit:"; sed 's/^/  /' "$B/smoke-result"
+[ "$(res reload)" = 0 ] || die "systemctl reload hotserve failed inside the applier's unit"
+[ "$(res verify)" = 0 ] || die "ssh-keygen -Y verify as uid 65534 under the unit's PrivateTmp failed"
+[ "$(res childuid)" = 65534 ] || die "the child to kill was uid '$(res childuid)', not 65534: the kill check would prove nothing"
+[ "$(res kill)" = 0 ] || die "the unit could not kill a uid-65534 child (CAP_KILL)"
+[ "$(res etc)" = 0 ] || die "the unit cannot write /etc/hotserve"
+[ "$(res varlibhotserve)" != 0 ] || die "the unit could write /var/lib/hotserve: ProtectSystem=strict is not in force"
+# The host's block devices, which the unit must not see: without one
+# out here, "none in there" would prove nothing.
+[ -n "$(find /dev -type b 2>/dev/null | head -1)" ] || die "this host has no block device under /dev; the PrivateDevices check would prove nothing"
+[ "$(res blockdevs)" = 0 ] || die "the unit sees $(res blockdevs) block devices: PrivateDevices=yes is not in force, and root opens a device it owns with no capability"
+[ "$(res sysctl)" != 0 ] || die "the unit could write a sysctl: ProtectKernelTunables=yes is not in force"
+[ "$(stat -c %G "$B/smoke-result")" = hotserve ] || die "a file root made in $B is not group hotserve: the setgid bit is missing"
+box_round "a sticky directory in in/" hotserve "mkdir $B/in/sticky && chmod 1777 $B/in/sticky && touch $B/in/sticky/f" stopped
+# Then one round for every path the manager says the path unit watches,
+# its entry renamed into place while the path unit waits, as the
+# handler and the applier write: for each glob, a name no other line of
+# its directory counts (systemd's DirectoryNotEmpty= skips names it takes
+# for hidden or backup files); the record itself; and a plain name for
+# DirectoryNotEmpty= — which <dir>/* counts too, so those two rounds
+# show the pair, not the line alone. in/ is filled by the hotserve uid
+# through stage/, the rest by root.
+n=0
+while read -r spec kind; do
+	dir=$spec
+	case "$kind" in
+	"(DirectoryNotEmpty)") entry=$dir/plain ;;
+	"(PathExists)") entry=$spec dir=$(dirname "$spec") ;;
+	"(PathExistsGlob)")
+		dir=$(dirname "$spec")
+		case "$(basename "$spec")" in
+		'*') entry=$dir/stale~ ;;
+		'.[!.]*') entry=$dir/.hidden ;;
+		'..?*') entry=$dir/..hidden ;;
+		*) die "no sample name for the glob $spec: add one here" ;;
+		esac ;;
+	*) die "a path spec of a kind this stage has no round for: $spec $kind" ;;
+	esac
+	maker=root tmp=$B/.smoke-entry
+	[ "$dir" = "$B/in" ] && maker=hotserve tmp=$B/stage/smoke-entry
+	box_round "$spec $kind" "$maker" "touch '$tmp' && mv '$tmp' '$entry'" waiting
+	n=$((n + 1))
+done <<<"$got_paths"
+[ "$n" -eq 9 ] || die "$n rounds, want one for each of the path unit's 9 paths"
+systemctl is-active --quiet hotserve || die "hotserve is not active after the reload inside the applier's unit"
+rm -f /run/systemd/system/$svc.d/smoke.conf "$B/smoke-result" /run/hotserve-box-smoke.sh
+rmdir /run/systemd/system/$svc.d
+systemctl daemon-reload
+[ "$(show hotserve-box-apply.path SubState)" = waiting ] || die "the path unit is not waiting after the run: $(systemctl show -p ActiveState,SubState,Result hotserve-box-apply.path | tr '\n' ' ')"
+echo "box applier: path unit enabled and waiting; tree as tmpfiles.d says; the unit reloads hotserve, verifies as 65534, kills its child; every path the unit watches starts a run that clears it"
+# The real applier in the unit as shipped, no stub: what the hotserve
+# uid drops that is not a bundle — a hidden 000 directory, a sticky
+# directory holding its file, a plain file — is taken and removed with
+# an error line and no result; an empty file named as a bundle is
+# refused when its bundle is read, its result written in out/ as the
+# Paths table says. The run exits 0, and the path unit waits again.
+bad_id=0123456789abcdef0123456789abcdef
+real_journal() { journalctl -u $svc --since "$since" --no-pager -o cat; }
+systemctl stop hotserve-box-apply.path
+since=$(date '+%Y-%m-%d %H:%M:%S')
+as_hotserve "mkdir $B/in/.x000 && touch $B/in/.x000/f && chmod 000 $B/in/.x000 && mkdir $B/in/sticky && chmod 1777 $B/in/sticky && touch $B/in/sticky/f $B/in/junk $B/in/$bad_id.tar" \
+	|| die "could not drop the real applier's entries into $B/in"
+systemctl start hotserve-box-apply.path || die "the path unit did not start: $(systemctl show -p ActiveState,Result hotserve-box-apply.path | tr '\n' ' ')"
+# Done when the tree is clear and the service has stopped, either way:
+# a failed run is reported below, not as a timeout. The journal is
+# synced before it is counted, so a line still on its way is not missed.
+i=0
+until [ -z "$(find "$B/in" "$B/work" -mindepth 1)" ] && [ -e "$B/out/$bad_id.json" ] \
+	&& case "$(show $svc ActiveState)" in inactive | failed) true ;; *) false ;; esac; do
+	i=$((i + 1))
+	[ "$i" -ge 120 ] && die "the real applier did not clear in/ within 60s: in/work: $(find "$B/in" "$B/work" -mindepth 1 | tr '\n' ' ') service $(systemctl show -p ActiveState,Result,ExecMainStatus $svc | tr '\n' ' '); $(real_journal | tail -20)"
+	sleep 0.5
+done
+[ "$(show $svc Result)" = success ] && [ "$(show $svc ExecMainStatus)" = 0 ] \
+	|| die "the real applier's run did not end clean: $(systemctl show -p Result,ExecMainStatus $svc | tr '\n' ' '); $(real_journal | tail -20)"
+journalctl --sync
+removed=$(real_journal | grep -c 'removing an entry that is not a bundle' || true)
+[ "$removed" -eq 3 ] || die "the real applier named $removed entries that are not bundles, want 3: $(real_journal | tail -20)"
+[ "$(ls -A "$B/out")" = "$bad_id.json" ] || die "out/ holds $(ls -A "$B/out" | tr '\n' ' '), want only $bad_id.json: an entry that is not a bundle gets no result"
+got=$(stat -c '%a %U:%G' "$B/out/$bad_id.json")
+[ "$got" = "640 root:hotserve" ] || die "the real applier's result is '$got', want '640 root:hotserve' (Paths table)"
+grep -Eq '"phase": *"(failed|refused)"' "$B/out/$bad_id.json" || die "the result of a bundle that is not one is not terminal: $(cat "$B/out/$bad_id.json")"
+echo "  its result: $(cat "$B/out/$bad_id.json")"
+wait_path_waiting "the real applier's run"
+rm -f "$B/out/$bad_id.json"
+echo "the real applier, in the unit as shipped: three entries that are not bundles removed with no result, one bad bundle settled in out/ (640 root:hotserve), exit 0"
+
+# An unreadable record, with the real applier: each run journals it,
+# takes nothing and exits 0, so the path unit starts the next at once
+# and ends at its trigger limit; removing the record does not start it
+# again, and `systemctl restart hotserve-box-apply.path`, once the
+# limit's ten seconds have passed, does (DESIGN-box.md, "Why the path
+# unit cannot loop"). The record is written the way root writes one, by
+# rename.
+since=$(date '+%Y-%m-%d %H:%M:%S')
+t0=$(date +%s)
+printf 'not a record\n' >"$B/.smoke-txn" && mv "$B/.smoke-txn" "$B/txn.json"
+i=0
+until [ "$(show hotserve-box-apply.path Result)" = trigger-limit-hit ]; do
+	i=$((i + 1))
+	[ "$i" -ge 120 ] && die "an unreadable record did not end at the trigger limit within 60s: path $(systemctl show -p ActiveState,SubState,Result hotserve-box-apply.path | tr '\n' ' '); $(real_journal | tail -5)"
+	sleep 0.5
+done
+t1=$(date +%s)
+journalctl --sync
+runs=$(real_journal | grep -c 'txn.json cannot be read' || true)
+[ "$runs" -ge 1 ] || die "the path unit hit its trigger limit, but no run journaled the unreadable record"
+real_journal | grep -q 'ten seconds after this line, runs systemctl restart hotserve-box-apply.path' || die "the unreadable record's journal line does not name the restart the console needs, and when"
+echo "an unreadable record: $runs runs, then trigger-limit-hit, within $((t1 - t0 + 1))s"
+rm -f "$B/txn.json"
+sleep 2
+[ "$(show hotserve-box-apply.path ActiveState)" = failed ] \
+	|| die "the path unit left trigger-limit-hit with no restart: $(systemctl show -p ActiveState,SubState,Result hotserve-box-apply.path | tr '\n' ' ')"
+while [ "$(date +%s)" -le $((t1 + 11)) ]; do sleep 1; done
+systemctl restart hotserve-box-apply.path || die "systemctl restart hotserve-box-apply.path failed past the limit's ten seconds"
+wait_path_waiting "the path unit, restarted after the record was removed"
+echo "removing the record left the path unit failed; systemctl restart started it again"
 
 stage "stage 2: liveswap deploy under the systemd sandbox"
 # Generate a local deploy keypair; the app trusts the public half, and
@@ -508,6 +799,15 @@ usermod -g smoketest-other hotserve \
 	|| die "could not move the hotserve account off its primary group; the reinstall assertion below would be vacuous"
 id -nG hotserve | tr ' ' '\n' | grep -qx hotserve \
 	&& die "the hotserve account is still in the hotserve group; the reinstall assertion below would be vacuous"
+# The box applier across the upgrade: an administrator's disable is kept
+# (deb-systemd-helper's was-enabled), and a tree that drifted is put
+# back by postinstall's systemd-tmpfiles.
+systemctl disable --now hotserve-box-apply.path
+chmod 0777 "$B/in"
+# Five digits: GNU chmod keeps a directory's setgid bit for a
+# four-digit mode, and the bit is what tmpfiles.d must put back.
+chmod 00755 "$B"
+chown hotserve "$B/out"
 dpkg -i "$deb" >/tmp/reinstall.out 2>/tmp/reinstall.err \
 	|| { cat /tmp/reinstall.out /tmp/reinstall.err; die "reinstall (dpkg -i) failed"; }
 cat /tmp/reinstall.out /tmp/reinstall.err
@@ -523,6 +823,16 @@ id -nG hotserve | tr ' ' '\n' | grep -qx hotserve \
 	|| die "reinstall did not restore the hotserve user's group membership: the package's group-owned directories would be unreachable"
 grep -q liveswap_webhook /etc/hotserve/Caddyfile \
 	|| die "reinstall clobbered the modified /etc/hotserve/Caddyfile (config|noreplace broken)"
+[ "$(systemctl is-enabled hotserve-box-apply.path)" = disabled ] \
+	|| die "an upgrade re-enabled the box applier's path unit an administrator disabled"
+systemctl is-active --quiet hotserve-box-apply.path \
+	&& die "an upgrade started the box applier's path unit an administrator disabled"
+for d in "$B 2750 root:hotserve" "$B/in 770 root:hotserve" "$B/out 2750 root:hotserve"; do
+	read -r p want_mode want_owner <<<"$d"
+	got=$(stat -c '%a %U:%G' "$p")
+	[ "$got" = "$want_mode $want_owner" ] || die "$p is '$got' after the upgrade, want '$want_mode $want_owner': postinstall's systemd-tmpfiles did not put it back"
+done
+systemctl enable --now hotserve-box-apply.path
 systemctl is-active --quiet hotserve \
 	|| die "service not active after reinstall — an upgrade must not leave the server down (preremove stop / missing postinstall restart)"
 id hotserve >/dev/null || die "hotserve user gone after reinstall (postinstall not idempotent)"
@@ -592,6 +902,10 @@ grep -q 'enable --now' /tmp/refused.out /tmp/refused.err \
 grep -q 'restarted\.' /tmp/refused.out \
 	&& die "a failed upgrade restart claimed hotserve restarted"
 kill -0 "$pid_after" 2>/dev/null || die "deployed app (pid $pid_after) did not survive hotserve's refused start"
+# The box applier's path unit, enabled again after stage 3, is restarted
+# by the upgrade whatever became of hotserve.
+[ "$(systemctl is-enabled hotserve-box-apply.path)" = enabled ] && systemctl is-active --quiet hotserve-box-apply.path \
+	|| die "the box applier's path unit is not enabled and active after an upgrade: $(systemctl show -p ActiveState,Result hotserve-box-apply.path | tr '\n' ' ')"
 # Recover the way the hint says, so stage 4 starts from a serving box.
 # reset-failed first: stages 3 to 3c started the unit often enough in
 # a few seconds to reach systemd's start limit (5 in 10 s), which an
@@ -621,7 +935,21 @@ systemctl is-active --quiet "user@$uid.service" && die "user manager still runni
 [ ! -e "/etc/systemd/system/user@$uid.service.d/10-hotserve.conf" ] || die "user@ limits drop-in left behind"
 [ ! -e /var/lib/systemd/linger/hotserve ] || die "lingering left enabled"
 kill -0 "$pid_after" 2>/dev/null && die "deployed app (pid $pid_after) survived package removal" || true
-echo "removal stopped the service and the apps, kept the conffile"
+systemctl is-active --quiet hotserve-box-apply.path && die "the box applier's path unit is still active after remove (preremove did not stop it)" || true
+[ ! -e /lib/systemd/system/hotserve-box-apply.path ] && [ ! -e /lib/systemd/system/hotserve-box-apply.service ] \
+	|| die "the box applier's units are still installed after remove"
+echo "removal stopped the service, the apps and the box applier's path unit, kept the conffile"
+
+stage "stage 5: install again after removal"
+# preremove stops the path unit and does not disable it, so an install
+# after a removal finds it enabled and starts it; a disable there would
+# have left the applier off for good.
+apt-get install -y "$deb" >/tmp/again.out 2>&1 || { cat /tmp/again.out; die "install after removal failed"; }
+[ "$(systemctl is-enabled hotserve-box-apply.path)" = enabled ] && systemctl is-active --quiet hotserve-box-apply.path \
+	|| die "after remove and install, the box applier's path unit is '$(systemctl is-enabled hotserve-box-apply.path)', $(systemctl is-active hotserve-box-apply.path); want enabled and active"
+apt-get remove -y hotserve >/dev/null
+systemctl is-active --quiet hotserve-box-apply.path && die "the second remove left the path unit active" || true
+echo "install after removal: the path unit enabled and active again; removed again"
 
 echo ""
 echo "ALL PACKAGE SMOKE STAGES PASSED ($deb on $(. /etc/os-release && echo "$PRETTY_NAME"))"

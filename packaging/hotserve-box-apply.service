@@ -1,0 +1,44 @@
+# hotserve-box-apply.service — the box applier: one run of `hotserve
+# box apply`, as root, started by hotserve-box-apply.path and never
+# enabled on its own. Every line here, and why it is here, is a row of
+# the table in box/DESIGN-box.md, "The applier unit", and what is left
+# out, and why, is the paragraph after that table; box/units_test.go
+# holds this file to the table line for line, and each capability's
+# comment to its row's reason.
+[Unit]
+Description=hotserve box applier
+Documentation=https://github.com/smallhoursorg/hotserve/blob/main/box/DESIGN-box.md
+After=hotserve.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/hotserve box apply
+TimeoutStartSec=infinity
+
+# CAP_SETUID: ssh-keygen runs as uid 65534 (step 12)
+CapabilityBoundingSet=CAP_SETUID
+# CAP_SETGID: the same child's gid and its empty group list
+CapabilityBoundingSet=CAP_SETGID
+# CAP_KILL: root stopping a child of another uid: without it a deadline
+# on the verifier is a deadline on nothing. Measured: a 65534 child
+# outlived its deadline, "operation not permitted"
+CapabilityBoundingSet=CAP_KILL
+# CAP_DAC_OVERRIDE: the "Removes" column holds against a hostile
+# creator. Measured: without it a chmod 000 directory the hotserve uid
+# made in in/ could not be moved out
+CapabilityBoundingSet=CAP_DAC_OVERRIDE
+# CAP_FOWNER: the same, for a sticky directory, where root may unlink
+# another uid's file only as the file's owner, the directory's owner,
+# or with this. Measured: with CAP_DAC_OVERRIDE alone, the file in a
+# chmod 1777 directory the hotserve uid made in in/ stayed in work/
+CapabilityBoundingSet=CAP_FOWNER
+
+ProtectSystem=strict
+ReadWritePaths=/etc/hotserve /var/lib/hotserve-box
+PrivateDevices=yes
+ProtectKernelTunables=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallFilter=@system-service
