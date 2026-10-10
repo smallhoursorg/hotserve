@@ -54,8 +54,10 @@ type Applier struct {
 	// waitUntil is the end of the run's one budget for waiting on a hotserve that is
 	// activating or reloading (running).
 	waitUntil time.Time
-	// wrote is every id whose result this run wrote: Retention keeps them.
-	wrote map[string]bool
+	// wrote is every id whose result this run wrote (or journaled,
+	// unwritten), with its phase — the first terminal one, once there is
+	// one: Retention keeps them, and a terminal one is settled (step 9).
+	wrote map[string]string
 }
 
 // nobody is the uid (and gid) ssh-keygen runs as (step 12).
@@ -135,7 +137,7 @@ func (a *Applier) Run(ctx context.Context) error {
 	for _, id := range a.take() {
 		if err := a.process(ctx, id); err != nil {
 			// The record stays for the next run; what else was taken
-			// stays in work/ with it (I2's one exception).
+			// stays in work/ with it (I2's exceptions).
 			return fullDiskOnly(err)
 		}
 	}
@@ -180,20 +182,46 @@ func (a *Applier) recoverAll(ctx context.Context) error {
 			continue
 		}
 		path := filepath.Join(a.x("work"), e.Name())
-		prior, err := a.readResult(id)
-		if err == nil && terminal(prior.Phase) {
+		if a.settled(id) {
 			a.removeEntry(path)
 			continue
 		}
 		// Taken, or verified, and no record: nothing changed.
 		t := &txn{rec: record{ID: id, Origin: originApplier}, entry: path}
-		if err == nil { // a verified result: keep what it said
-			t.rec.Commit, t.rec.Path, t.rec.Signer, t.rec.BoxWebhook = prior.Commit, prior.Path, prior.Signer, prior.BoxWebhook
-			t.rec.OutOfBand, t.rec.Apps, t.rec.Diff = prior.OutOfBand, prior.Apps, prior.Diff
+		if v, err := a.readResult(id); err == nil && v.Phase == phaseVerified { // keep what it said
+			t.rec.Commit, t.rec.Path, t.rec.Signer, t.rec.BoxWebhook = v.Commit, v.Path, v.Signer, v.BoxWebhook
+			t.rec.OutOfBand, t.rec.Apps, t.rec.Diff = v.OutOfBand, v.Apps, v.Diff
 		}
 		a.finish(t, phaseFailed, msgInterrupted)
+		a.removeVerified(id) // if `failed` could not be written over it
 	}
 	return nil
+}
+
+// settled reports whether a push has already ended (step 9): a terminal
+// result on disk, or one this run journaled when it could not write it
+// (I3). An entry of a settled push is never run again; the guarantee
+// lasts while Retention keeps the result. A result that does not read,
+// or whose phase is not terminal, counts as none — no other field is
+// checked: out/ is root's alone and written whole by rename, so only a
+// disk fault or the console makes a bad one, and the push is then
+// judged afresh on its merits.
+func (a *Applier) settled(id string) bool {
+	if phase, ok := a.wrote[id]; ok && terminal(phase) {
+		return true
+	}
+	r, err := a.readResult(id)
+	return err == nil && terminal(r.Phase)
+}
+
+// removeVerified removes out/<id>.json if it reads as `verified`: the
+// stale answer of an attempt whose `failed` could not be written in its
+// place, which nothing else would ever replace — a marker with no result
+// is Retention's to settle. A file the applier cannot identify stays.
+func (a *Applier) removeVerified(id string) {
+	if r, err := a.readResult(id); err == nil && r.Phase == phaseVerified {
+		a.removeResult(id)
+	}
 }
 
 // sweepTemporaries removes the temporaries a crash can leave: the swap's
@@ -259,30 +287,49 @@ func (a *Applier) take() []string {
 	for _, e := range entries {
 		name := e.Name()
 		src := filepath.Join(in, name)
-		err := a.takeOne(in, work, name)
-		if err != nil && !exists(src) && exists(filepath.Join(work, name)) {
-			a.logger.Warn("box: an entry was taken but the take is not known durable", zap.String("entry", proof.Bound(name)), zap.String("error", proof.Bound(err.Error())))
+		landed, err := a.takeOne(in, work, name)
+		if err != nil && landed {
+			// The rename landed and a directory's fsync failed: the take
+			// stands, not known durable. Should in/'s unlink not persist,
+			// the entry comes back after its push has settled and is
+			// removed below while its result is kept.
+			a.logger.Error("box: an entry was taken but the take is not known durable", zap.String("entry", proof.Bound(name)), zap.String("error", proof.Bound(err.Error())))
 			err = nil
 		}
 		if err != nil {
 			// The rename did not land. The entry must leave in/ all the
 			// same (I2): removed where it stands, with a failed result
-			// if it is a regular file named as a bundle.
+			// if it is a regular file named as a bundle whose push has
+			// not already settled.
 			a.logger.Error("box: could not take an entry", zap.String("entry", proof.Bound(name)), zap.String("error", proof.Bound(err.Error())))
 			fi, lerr := os.Lstat(src)
 			id, named := bundleID(name)
 			bundle := named && lerr == nil && fi.Mode().IsRegular()
+			// The result before the entry's removal, as every row orders
+			// them: a crash between leaves the entry with its result, and
+			// the next run removes it as settled.
+			if bundle && !a.settled(id) {
+				a.finish(&txn{rec: record{ID: id, Origin: originApplier}}, phaseFailed, installFailed(err))
+			}
 			if rerr := a.removeDurable("entry:remove", src); rerr != nil {
 				a.logger.Error("box: could not remove an entry from in/", zap.String("entry", proof.Bound(name)), zap.String("error", proof.Bound(rerr.Error())))
 			}
-			if bundle {
-				a.finish(&txn{rec: record{ID: id, Origin: originApplier}}, phaseFailed, installFailed(err))
-			}
 			continue
 		}
-		if id, ok := a.bundleEntry("work", name); ok {
-			ids = append(ids, id)
+		id, ok := a.bundleEntry("work", name)
+		if !ok {
+			continue
 		}
+		// A push settles once (step 9): a bundle whose push already
+		// ended — back in in/ after a power loss beat its unlink's
+		// durability, or replayed by the hotserve uid — is removed and
+		// never run again.
+		if a.settled(id) {
+			a.logger.Warn("box: removed a bundle whose push has already settled", zap.String("id", id))
+			a.removeEntry(filepath.Join(work, name))
+			continue
+		}
+		ids = append(ids, id)
 	}
 	posted := make(map[string]time.Time, len(ids))
 	for _, id := range ids {
@@ -301,22 +348,31 @@ func (a *Applier) take() []string {
 	return ids
 }
 
-// takeOne is one rename from in/ into work/, durable in both directories.
-func (a *Applier) takeOne(in, work, name string) error {
+// takeOne is one rename from in/ into work/, durable in both
+// directories. landed says the rename happened, whatever came after it.
+func (a *Applier) takeOne(in, work, name string) (landed bool, err error) {
 	if err := a.fail("take"); err != nil {
-		return err
+		return false, err
 	}
 	if err := os.Rename(filepath.Join(in, name), filepath.Join(work, name)); err != nil {
+		return false, err
+	}
+	if err := a.syncTake(work, in); err != nil {
+		return true, err
+	}
+	a.crash("take")
+	return true, nil
+}
+
+// syncTake fsyncs both directories of a take, work/ first.
+func (a *Applier) syncTake(work, in string) error {
+	if err := a.fail("take:sync"); err != nil {
 		return err
 	}
 	if err := syncDir(work); err != nil {
 		return err
 	}
-	if err := syncDir(in); err != nil {
-		return err
-	}
-	a.crash("take")
-	return nil
+	return syncDir(in)
 }
 
 // process is one bundle through steps 9 to 16 and the transaction. It

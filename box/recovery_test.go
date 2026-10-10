@@ -170,6 +170,8 @@ func TestRecoveryUnreadableRecord(t *testing.T) {
 		"unknown phase":  `{"id":"0123456789abcdef0123456789abcdef","origin":"applier","phase":"verified"}`,
 		"prev mismatch":  `{"id":"0123456789abcdef0123456789abcdef","origin":"applier","phase":"swapped","commit":"` + strings.Repeat("a", 40) + `","prev":"eA==","prev_sha256":"` + strings.Repeat("0", 64) + `","new_sha256":"` + strings.Repeat("1", 64) + `"}`,
 		"unknown origin": `{"id":"0123456789abcdef0123456789abcdef","origin":"cron","phase":"swapped"}`,
+		"no_change whose digests differ": string(encodeJSON(record{ID: "0123456789abcdef0123456789abcdef", Origin: originApplier, Phase: phaseNoChange,
+			Commit: strings.Repeat("a", 40), Path: testPath, Prev: []byte("x"), PrevSHA256: digest([]byte("x")), NewSHA256: strings.Repeat("1", 64)})),
 	} {
 		t.Run(name, func(t *testing.T) {
 			b := newTestBox(t)
@@ -191,6 +193,36 @@ func TestRecoveryUnreadableRecord(t *testing.T) {
 				t.Error("no error-level line")
 			}
 		})
+	}
+}
+
+// record.valid holds each rule on its own: one bad field, one reason.
+func TestRecordValid(t *testing.T) {
+	good := record{ID: strings.Repeat("ab", 16), Origin: originApplier, Phase: phaseSwapped, Commit: strings.Repeat("c", 40),
+		Path: testPath, Prev: []byte("x"), PrevSHA256: digest([]byte("x")), NewSHA256: strings.Repeat("1", 64)}
+	if err := good.valid(); err != nil {
+		t.Fatal(err)
+	}
+	for want, edit := range map[string]func(r *record){
+		"origin":         func(r *record) { r.Origin = "cron" },
+		"id":             func(r *record) { r.ID = "x" },
+		"commit":         func(r *record) { r.Commit = strings.Repeat("c", 64) },
+		"digest":         func(r *record) { r.NewSHA256 = "x" },
+		"prev":           func(r *record) { r.Prev = []byte("y") },
+		"path":           func(r *record) { r.Path = "../x" },
+		"digests differ": func(r *record) { r.Phase = phaseNoChange },
+		"not a record's": func(r *record) { r.Phase = phaseVerified },
+	} {
+		r := good
+		edit(&r)
+		if err := r.valid(); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: %v", want, err)
+		}
+	}
+	same := good
+	same.Phase, same.NewSHA256 = phaseNoChange, same.PrevSHA256
+	if err := same.valid(); err != nil {
+		t.Errorf("a no_change record with equal digests: %v", err)
 	}
 }
 

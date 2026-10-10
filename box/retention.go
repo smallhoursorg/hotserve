@@ -115,7 +115,7 @@ func (a *Applier) sweep() {
 			// An id this run settled whose result did not land is not
 			// stranded yet: its outcome is in the journal (I3), and the
 			// next run settles it by the table like any other.
-			if a.wrote[id] || !a.stranded(id, held, s.key, now) {
+			if _, mine := a.wrote[id]; mine || !a.stranded(id, held, s.key, now) {
 				continue // pending, or still in root's hands: untouched
 			}
 			s.stranded = true
@@ -135,7 +135,8 @@ func (a *Applier) sweep() {
 		s := ids[id]
 		// A result this run wrote is never swept by it, so the push it
 		// settled can be polled at least until root's next run.
-		keep := a.wrote[id] || (n < keepIDs && now.Sub(s.key) < keepAge)
+		_, mine := a.wrote[id]
+		keep := mine || (n < keepIDs && now.Sub(s.key) < keepAge)
 		if keep {
 			if s.stranded {
 				// The push was lost before root saw it, or its result

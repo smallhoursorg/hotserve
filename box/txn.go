@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"unicode/utf8"
 
 	"go.uber.org/zap"
 
@@ -71,8 +72,20 @@ func (r *record) valid() error {
 	case len(r.Prev) > proof.MaxCaddyfile || digest(r.Prev) != r.PrevSHA256:
 		return errors.New("prev is not the bytes prev_sha256 names")
 	}
+	// Recovery writes applied.json from the record: its path must be one
+	// the next push can be checked against.
+	if _, err := proof.SplitPath(r.Path); err != nil {
+		return errors.New("path is not a repository path")
+	}
 	switch r.Phase {
-	case phaseNoChange, phaseInstalling, phaseSwapped, phaseApplied, phaseRollingBack:
+	case phaseNoChange:
+		// Buffers identical, by definition: recovery writes applied.json
+		// with new_sha256, which must then be the bytes that stand.
+		if r.NewSHA256 != r.PrevSHA256 {
+			return errors.New("a no_change record whose digests differ")
+		}
+		return nil
+	case phaseInstalling, phaseSwapped, phaseApplied, phaseRollingBack:
 		return nil
 	}
 	return errors.New("phase is not a record's")
@@ -208,11 +221,7 @@ func (a *Applier) install(ctx context.Context, t *txn) error {
 			// not, any such `verified` goes, leaving a marker with no
 			// result for Retention to settle. The entry goes either way.
 			if a.writeResult(t.result(phaseFailed, installFailed(err))) != nil {
-				// Only a file that reads as `verified` is removed: one
-				// the applier cannot identify is never deleted.
-				if r, rerr := a.readResult(t.rec.ID); rerr == nil && r.Phase == phaseVerified {
-					a.removeResult(t.rec.ID)
-				}
+				a.removeVerified(t.rec.ID)
 			}
 			a.removeEntry(t.entry)
 			return nil
@@ -432,7 +441,7 @@ func (a *Applier) recoverRecord(ctx context.Context, rec *record) error {
 	t := &txn{rec: *rec, recorded: true}
 	if rec.Origin == originApplier {
 		t.entry = filepath.Join(a.x("work"), rec.ID+".tar")
-		if r, err := a.readResult(rec.ID); err == nil && terminal(r.Phase) {
+		if a.settled(rec.ID) {
 			a.removeRecord()
 			a.removeEntry(t.entry)
 			return nil
@@ -506,6 +515,11 @@ func (a *Applier) runInit(ctx context.Context, rec record, file []byte) (*result
 	}
 	if _, err := proof.SplitPath(rec.Path); err != nil {
 		return nil, fmt.Errorf("init: %w", err)
+	}
+	if !utf8.ValidString(rec.Path) {
+		// JSON would write it back changed, and no bundle's path could
+		// ever equal the one applied.json then holds.
+		return nil, errors.New("init: the path is not UTF-8")
 	}
 	if len(file) > proof.MaxCaddyfile {
 		return nil, fmt.Errorf("init: the Caddyfile is larger than %d bytes", proof.MaxCaddyfile)

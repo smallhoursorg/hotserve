@@ -9,6 +9,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"go.uber.org/zap/zapcore"
+
+	"github.com/smallhoursorg/hotserve/box/proof"
 )
 
 // A write can land — its rename done — and still fail, at the
@@ -105,24 +109,163 @@ func TestWritesThatLandedThenFailed(t *testing.T) {
 			t.Fatalf("Retention: %+v", r)
 		}
 	})
-	t.Run("take landed: the entry is taken, not failed", func(t *testing.T) {
+	t.Run("take landed, its fsync failing: taken, with an error line", func(t *testing.T) {
 		b := newTestBox(t)
 		id := b.push(b.repo.bundleFiles(b.repo.commit(boxFile(2, b.alice), &b.alice, b.base), b.base))
-		fail := func(p string) error {
-			if p == "take" {
-				if err := os.Rename(filepath.Join(b.x("in"), id+".tar"), filepath.Join(b.x("work"), id+".tar")); err != nil {
-					t.Fatal(err)
-				}
-				return errSync
-			}
-			return nil
-		}
-		if err := b.run(hooks{fail: fail}); err != nil {
+		if err := b.run(hooks{fail: failAt(map[string]int{"take:sync": -1})}); err != nil {
 			t.Fatal(err)
 		}
 		b.settled()
-		if r := b.result(id); r.Phase != phaseApplied {
+		if r := b.result(id); r == nil || r.Phase != phaseApplied {
 			t.Fatalf("%+v", r)
+		}
+		if !b.errorLogged("not known durable") {
+			t.Error("no error-level line for the undurable take")
+		}
+	})
+	t.Run("a settled push that comes back in in/ is removed, never run again", func(t *testing.T) {
+		b := newTestBox(t)
+		files := b.repo.bundleFiles(b.repo.commit(boxFile(2, b.alice), &b.alice, b.base), b.base)
+		id := b.push(files)
+		if err := b.run(hooks{}); err != nil {
+			t.Fatal(err)
+		}
+		// A power loss before in/'s unlink was durable: the entry is back.
+		if err := os.WriteFile(filepath.Join(b.x("in"), id+".tar"), tgz(t, files), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		reloads := b.sd.reloaded
+		if err := b.run(hooks{}); err != nil {
+			t.Fatal(err)
+		}
+		b.settled()
+		if r := b.result(id); r == nil || r.Phase != phaseApplied || b.sd.reloaded != reloads {
+			t.Fatalf("the settled push was run again: %+v, %d reloads", r, b.sd.reloaded)
+		}
+		if len(b.logged(zapcore.WarnLevel, "already settled")) != 1 {
+			t.Error("no warning")
+		}
+	})
+	t.Run("a settled push back in in/ whose rename would fail keeps its result", func(t *testing.T) {
+		b := newTestBox(t)
+		files := b.repo.bundleFiles(b.repo.commit(boxFile(2, b.alice), &b.alice, b.base), b.base)
+		id := b.push(files)
+		if err := b.run(hooks{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(b.x("in"), id+".tar"), tgz(t, files), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.run(hooks{fail: failAt(map[string]int{"take": -1})}); err != nil {
+			t.Fatal(err)
+		}
+		b.settled()
+		if r := b.result(id); r == nil || r.Phase != phaseApplied {
+			t.Fatalf("a settled result was overwritten: %+v", r)
+		}
+	})
+	t.Run("a failed take writes its result before removing the entry", func(t *testing.T) {
+		b := newTestBox(t)
+		id := b.push(b.repo.bundleFiles(b.repo.commit(boxFile(2, b.alice), &b.alice, b.base), b.base))
+		b.runCrash(hooks{fail: failAt(map[string]int{"take": -1}), crash: crashAfter("result:failed", 1)})
+		if !exists(filepath.Join(b.x("in"), id+".tar")) {
+			t.Fatal("the entry was removed before its result")
+		}
+		if err := b.run(hooks{}); err != nil {
+			t.Fatal(err)
+		}
+		b.settled()
+		if r := b.result(id); r == nil || r.Phase != phaseFailed || b.sd.reloaded != 0 {
+			t.Fatalf("the next run did not remove the entry as settled: %+v, %d reloads", r, b.sd.reloaded)
+		}
+	})
+	t.Run("an attempt that reached only verified, back in in/: run afresh, the descent check decides", func(t *testing.T) {
+		b := newTestBox(t)
+		files := b.repo.bundleFiles(b.repo.commit(boxFile(2, b.alice), &b.alice, b.base), b.base)
+		id := b.push(files)
+		head := proof.ObjectID("commit", files["commit"])
+		if err := os.WriteFile(filepath.Join(b.x("out"), id+".json"), encodeJSON(result{ID: id, Phase: phaseVerified, Commit: head}), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.run(hooks{}); err != nil {
+			t.Fatal(err)
+		}
+		b.settled()
+		if r := b.result(id); r == nil || r.Phase != phaseApplied {
+			t.Fatalf("%+v", r)
+		}
+	})
+	t.Run("a result that is not one the applier writes counts as none", func(t *testing.T) {
+		for _, junk := range []string{"{", "null", `{"phase":"superseded"}`} {
+			b := newTestBox(t)
+			files := b.repo.bundleFiles(b.repo.commit(boxFile(2, b.alice), &b.alice, b.base), b.base)
+			id := b.push(files)
+			if err := os.WriteFile(filepath.Join(b.x("out"), id+".json"), []byte(junk), 0o640); err != nil {
+				t.Fatal(err)
+			}
+			if err := b.run(hooks{}); err != nil {
+				t.Fatal(err)
+			}
+			b.settled()
+			if r := b.result(id); r == nil || r.Phase != phaseApplied {
+				t.Fatalf("%s: the push was not judged afresh: %+v", junk, r)
+			}
+		}
+	})
+	t.Run("recovery's failed that cannot be written clears the stale verified", func(t *testing.T) {
+		b := newTestBox(t)
+		id := randomID(t)
+		if err := os.WriteFile(filepath.Join(b.x("work"), id+".tar"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(b.x("out"), id+".json"), encodeJSON(result{ID: id, Phase: phaseVerified}), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.run(hooks{fail: failAt(map[string]int{"result:failed": 1})}); err != nil {
+			t.Fatal(err)
+		}
+		b.settled()
+		if r := b.result(id); r != nil {
+			t.Fatalf("a stale verified stayed: %+v", r)
+		}
+	})
+	t.Run("what is not a bundle, named for a settled id, gets the not-a-bundle line", func(t *testing.T) {
+		b := newTestBox(t)
+		id := b.push(b.repo.bundleFiles(b.repo.commit(boxFile(2, b.alice), &b.alice, b.base), b.base))
+		if err := b.run(hooks{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(filepath.Join(b.x("in"), id+".tar"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.run(hooks{}); err != nil {
+			t.Fatal(err)
+		}
+		b.settled()
+		if !b.errorLogged("not a bundle") {
+			t.Error("no not-a-bundle line")
+		}
+	})
+	t.Run("a push recovery settled this run, its result journaled, is not run again from in/", func(t *testing.T) {
+		b := newTestBox(t)
+		v2 := boxFile(2, b.alice)
+		head := b.repo.commit(v2, &b.alice, b.base)
+		files := b.repo.bundleFiles(head, b.base)
+		id := randomID(t)
+		// The crash left the record, the swap and in/'s entry (its unlink
+		// never durable); recovery rolls back but cannot write the result.
+		b.writeInstalled(v2)
+		b.lyingRecord(record{ID: id, Origin: originApplier, Phase: phaseSwapped, Commit: head, Path: testPath, Signer: "alice@example.com",
+			Prev: b.v1, PrevSHA256: digest(b.v1), NewSHA256: digest(v2)})
+		if err := os.WriteFile(filepath.Join(b.x("in"), id+".tar"), tgz(t, files), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.run(hooks{fail: failAt(map[string]int{"result:rolled_back": -1})}); err != nil {
+			t.Fatal(err)
+		}
+		b.settled()
+		if !bytes.Equal(b.installed(), b.v1) || b.sd.reloaded != 1 || b.result(id) != nil {
+			t.Fatalf("the push was run again after its rollback: %d reloads, result %+v", b.sd.reloaded, b.result(id))
 		}
 	})
 	t.Run("a take that fails on what is not a regular file gives no result", func(t *testing.T) {

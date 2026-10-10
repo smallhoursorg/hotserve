@@ -121,9 +121,11 @@ func (a *Applier) writeResult(r result) error {
 	// whose rename landed before its fsync failed is the push's answer
 	// all the same, and one that never landed leaves nothing to keep.
 	if a.wrote == nil {
-		a.wrote = map[string]bool{}
+		a.wrote = map[string]string{}
 	}
-	a.wrote[r.ID] = true
+	if !terminal(a.wrote[r.ID]) { // an ended push stays ended
+		a.wrote[r.ID] = r.Phase
+	}
 	if err != nil {
 		a.logger.Error("box result could not be written", append(resultFields(r), zap.String("write_error", proof.Bound(err.Error())))...)
 		return err

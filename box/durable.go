@@ -12,8 +12,10 @@ import (
 // (DESIGN-box.md, "Failure-mode table"): fail runs before the write and,
 // returning an error, makes the write fail with it; crash runs once the
 // write is durable, and a test panics there to stand for a kill or a
-// power loss. Nothing the applier defers writes to disk, so a panic
-// unwinding the stack changes nothing a real crash would not have.
+// power loss. One point fails after its write has landed: take:sync,
+// the take's directory fsyncs, which come after the rename. Nothing the
+// applier defers writes to disk, so a panic unwinding the stack changes
+// nothing a real crash would not have.
 // Production leaves both nil.
 type hooks struct {
 	fail  func(point string) error

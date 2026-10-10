@@ -258,7 +258,16 @@ cross-references throughout.
    regular file, has no legal result name: it is removed with an
    error-level journal line and no result. The rest are processed in
    order of their markers' `posted` time (an entry with no readable
-   marker goes last); the order
+   marker goes last). A push settles once: a bundle whose id already
+   has a terminal result (on disk, or journaled by this run; a result
+   that does not read, or whose phase is not terminal, counts as none —
+   out/ is root's alone, so only a disk fault or the console makes a bad
+   one) — back in `in/` after a power loss beat
+   the durability of its unlink, or replayed by the hotserve uid — is
+   removed with a warning and never run again, for as long as Retention
+   keeps that result; a take that fails writes no `failed` over it. A
+   result journaled in an earlier run, never written, protects nothing
+   (I3's exception): its push may run again. The order
    decides only which pending bundle is tried first, the descent check
    decides each outcome. Each bundle is
    opened `O_NOFOLLOW|O_NONBLOCK`, checked `S_ISREG`, read once through
@@ -420,7 +429,7 @@ by id.
 |---|---|
 | **I1** | For every write the applier or `init` makes: `/etc/hotserve/Caddyfile` exists at every instant and is a complete file written whole — one that ran, one whose reload is pending or in progress under a record that says `swapped`, or (`origin: init`, box not running) one that loads at the next start; a failed reload puts the previous bytes back, and a crash leaves a record saying which. The console is root and may write anything; the applier detects such a write by digest (steps 10, 17, 19) and reports it, never overwrites it knowingly, and never records a baseline for bytes it did not install. |
 | **I2** | Every entry the applier *listed* in `in/` leaves `in/` in that run (a bundle landing after the last listing is the next run's); `work/` is empty on every exit except two that leave the record on disk for the next run — the one named full-disk case in the Failure-mode table, and a stop with everything left as found (a record that does not read, the installed file unreadable mid-transaction, `is-active` unanswered in recovery) — where what was taken stays in `work/` with it and the next run's recovery settles it; `in/` receives nothing but a complete bundle by one `rename`. |
-| **I3** | Every bundle the applier takes ends in exactly one terminal result, or — only when the result cannot be written — one error-level journal line carrying every field the result would have; an entry that is not a bundle gets the journal line only. |
+| **I3** | Every bundle the applier takes ends in exactly one terminal result, or — only when the result cannot be written — one error-level journal line carrying every field the result would have; an entry that is not a bundle gets the journal line only, and a bundle whose push already settled (step 9) a warning line only — or, if its take fails, the take's error line. |
 | **I4** | The baseline advances only from a transaction whose durable record says `applied` (reload confirmed) or `no_change` on an active box, from `init`, or from `baseline`; all four hold root's lock; it never runs ahead of the record. |
 | **I5** | Within a transaction: from the first write that changes `/etc/hotserve` or `applied.json` until the terminal result, the record exists; it is written atomically before that first write and is the last thing removed. Refusals and `verified` precede it and write none. `hotserve box baseline` is not a transaction: one atomic write of `applied.json` under the lock, after recovery, with no record — a crash before its rename changed nothing, after it the reset is done; a retry is idempotent. |
 | **I6** | Root installs nothing a listed signer did not sign (every chain commit), nothing that fails the file proof, nothing that does not descend from the baseline, nothing for another host or path. |
@@ -435,8 +444,8 @@ implies; it never infers state from digests alone.
 
 | Phase | Meaning | `d` must be | Recovery (crash found this phase) |
 |---|---|---|---|
-| *(no record)* | No transaction in flight. | — | A `work/` entry with a terminal result: remove the entry. With a `verified` result or none: write `failed` ("interrupted before the Caddyfile changed"), remove the entry. The applier's own leftover temporaries (Transitions table) are removed. |
-| *(record unreadable)* | `txn.json` does not parse, or is not the shape only root writes (a phase above, ids, digests, `prev` hashing to `prev_sha256`). Root writes it whole by rename, so this is a fault no other row reasons about. | — | Write nothing anywhere; error-level journal line; take nothing from `in/`. The path unit re-runs until its trigger limit; the console reads and removes the record. Exit 0: the one non-zero exit is the full-disk end. |
+| *(no record)* | No transaction in flight. | — | A `work/` entry with a terminal result (on disk, or journaled earlier in this run: step 9): remove the entry. With a `verified` result or none: write `failed` ("interrupted before the Caddyfile changed"), remove the entry — and if that `failed` cannot be written, remove the `verified`, so Retention settles the push. The applier's own leftover temporaries (Transitions table) are removed. |
+| *(record unreadable)* | `txn.json` does not parse, or is not the shape only root writes (a phase above, ids, digests, `prev` hashing to `prev_sha256`, a `no_change` record's two digests equal, a `path` of safe components). Root writes it whole by rename, so this is a fault no other row reasons about. | — | Write nothing anywhere; error-level journal line; take nothing from `in/`. The path unit re-runs until its trigger limit; the console reads and removes the record. Exit 0: the one non-zero exit is the full-disk end. |
 | *(any phase, terminal result present)* | The transaction ended; only its removals were owed. | — | Remove the record, then the entry (Failure-mode table, "terminal result"). |
 | `no_change` | Buffers identical; only the baseline advances. | `prev` | Write `applied.json` (idempotent), result `no_change`. |
 | `installing` | Record durable; swap not yet done. | `prev` | `failed` ("interrupted before the Caddyfile changed"). If `d == new`, the crash fell after the swap: act as `swapped`. |
@@ -535,7 +544,7 @@ shows after recovery.
 
 | Write | Write fails → | Crash after → recovery | Terminal phase | Workflow sees |
 |---|---|---|---|---|
-| take (`in/` → `work/`) | remove the entry where it stands in `in/` (I2); a regular file named `<id>.tar` gets `failed` ("the install failed before the Caddyfile changed: <error>; nothing changed"). A rename that landed, only a directory's `fsync` failing, is a take (warning line) | no record, entry in `work/`, no result → `failed` ("interrupted before the Caddyfile changed") | `failed` | `failed` |
+| take (`in/` → `work/`) | remove the entry where it stands in `in/` (I2); a regular file named `<id>.tar` gets `failed` ("the install failed before the Caddyfile changed: <error>; nothing changed"), written before the removal, unless its push already settled (step 9). A rename that landed, only a directory's `fsync` failing, is a take, not known durable (error line); should `in/`'s unlink not persist, the entry comes back after its push settled and step 9 removes it while its terminal result is on disk | no record, entry in `work/`, no result → `failed` ("interrupted before the Caddyfile changed") | `failed` | `failed` |
 | result `refused` | journal (error), remove entry | entry with terminal result → remove entry | `refused` | 422 or the result; if unwritten, `admitted` until the workflow's bound, then red naming the journal |
 | result `verified` | result `failed` in its place (over a `verified` whose rename landed); if that fails too, remove any such `verified`; remove entry; file untouched | no record, result `verified` → rewrite `failed`, remove entry | `failed` | `failed`; if neither write lands, `admitted`, then `failed` ("the box has no record of this push") from Retention at root's first later run past fifteen minutes |
 | record `no_change` | result `failed`; nothing changed | phase `no_change` → `applied.json`, result | `no_change` | `no_change` |
@@ -549,6 +558,54 @@ shows after recovery.
 | terminal result | **full disk**: error-level journal with every field; remove record and entry anyway (both `unlink`s). At a terminal phase the disk is settled and only the report is owed; a record kept would spin `PathExists=txn.json`. | result exists, record present → remove record and entry | as logged | the last result on disk — `verified` for a transaction past that phase, else `admitted` — until the workflow's bound, then red naming the journal |
 | record removed | retry; cannot fail for space | record gone, entry present → remove entry | — | — |
 | entry removed | retry; cannot fail for space | `work/` non-empty → path unit re-runs recovery once | — | — |
+
+### Triage: which failures to defend
+
+The tables above say what each failure does; this says which ones the
+code must handle and which are accepted. A finding — from a review, a
+test or the field — is scored on three axes (FMEA's), then the rule
+decides. Without it every edge case looks mandatory, and each guard
+added for a multi-fault case becomes a new branch for the next one.
+
+| Axis | 5 | 4 | 3 | 2 | 1 |
+|---|---|---|---|---|---|
+| **Severity** — the effect if it happens | installs bytes no listed signer signed, or advances the baseline wrongly (I6, I4) | the box wedged until the console | a wrong verdict the workflow trusts (green for a push that did not apply, or the reverse) | a wrong message; red where green was due | logging only |
+| **Occurrence** — what must go wrong | normal operation | one common fault: a crash, a failed reload, hotserve restarting | one rare fault: `EIO`, a full disk, a clock step | two independent faults | three or more, or root-only state (`txn.json`, `out/`, `applied.json`) corrupted |
+| **Detection** — how it surfaces | silently | — | a wrong but plausible answer | — | red, with a journal line naming it |
+
+The rule, in order:
+
+1. **Severity 5 is fixed**, whatever its occurrence.
+2. **Single faults are fixed** (occurrence 3 or more): the box must
+   end correct, or red and named, under any one fault — the
+   single-fault criterion of safety engineering.
+3. Anything else is fixed only if severity × occurrence × detection is
+   20 or more; otherwise it is **accepted** and recorded in the table
+   below, with its scores.
+4. **Stop** when the next guard costs more than it buys (ALARP): a
+   fix that adds a branch for a multi-fault case is itself a finding to
+   weigh, since every branch is one more state the next fault can
+   reach.
+
+A hostile hotserve uid (T5) is scored by what it gains: an effect it
+could already have by other means — answering every poll itself,
+refusing every push at admission — scores severity 1.
+
+**Accepted residuals** (each also stated where its behaviour lives):
+
+| Residual | Where stated | S | O | D | Why accepted |
+|---|---|---|---|---|---|
+| A clock stepped back by more than a few minutes makes earlier results count as new: kept past a day, and 32 or more of them crowd out later results | Retention | 2 | 3 | 3 | 18; this run's results are never swept, so every push can be polled at least until the next run |
+| The hotserve uid dates stranded markers recently and crowds real results out of the 32 | Retention | 1 | — | — | T5 already answers every poll itself |
+| A later `activating` episode in a run whose wait budget is spent is refused as still starting | step 16 | 2 | 3 | 1 | 6; the run goes red with the catalogue text and a re-run pushes again |
+| `init` finds hotserve up or not, and that changes before the swap: an in-flight start may serve the old bytes; a hotserve that stops ends `unknown` | step 16 | 3 | 2 | 3 | 18; `init` is the console, a person reading its output |
+| A push whose terminal result was only journaled in an earlier run (full disk) may run again if its bundle comes back in `in/` | step 9 | 3 | 1 | 3 | 9; needs an undurable take, a power loss and a full disk |
+| A bundle that reached only `verified` and survived a power loss in `in/` is judged afresh; the same push surviving in `work/` ends `failed` (interrupted) | step 9 | 2 | 1 | 1 | 2; both outcomes are safe and reported |
+| A result in `out/` that does not read, or is not the applier's shape, counts as none: the push may run again on its merits | step 9 | 3 | 1 | 3 | 9; `out/` is root's alone, written whole by rename |
+| A stale `verified` survives when a `failed` written over it cannot land and a second fault follows (a crash before its removal, or a failed take of a bundle back in `in/`) | step 9; States "(no record)" | 2 | 1 | 1 | 2; the workflow goes red at its bound, naming the journal |
+| `rename` reporting an error after it moved the entry leaves it untaken this run; the next run fails it as interrupted | step 9 | 2 | 1 | 1 | 2; red and named; not a failure a local filesystem's `rename` has |
+| A `work/` fsync error skips `in/`'s fsync, so a power loss before the next fsync can bring the entry back | Failure-mode table, take | 2 | 2 | 3 | 12; the returning bundle is removed by its terminal result (step 9) |
+| A rollback whose cause the catalogue has no words for reports the nearest catalogued text | "Rollbacks the catalogue has no words of their own for", box/txn.go | 2 | 3 | 3 | 18; the journal carries the real cause; catalogue lines are wanted |
 
 ## Admission
 
@@ -1277,8 +1334,12 @@ Dated one-liners; the full text of each is in git.
   Failure-mode row; a write-back that fails twice is the full-disk end,
   never `unknown` with the record kept (the `terminal result` row would
   then drop the only rollback bytes); `swapped` with `d == prev`
-  continues as `rolling_back`; an unreadable record is kept untouched;
-  a record that finds its terminal result only removes; the record
+  continues as `rolling_back`; an unreadable record (now also a
+  `no_change` one whose digests differ, or one whose path is not safe)
+  is kept untouched; a record that finds its terminal result only
+  removes; a push settles once, so a bundle whose id already holds a
+  terminal result is removed and not run again while Retention keeps
+  that result; the record
   carries the `error` its rollback will report; steps 10–15 run
   cheapest first; step 16 waits out `reloading` as it does
   `activating`, within one wait budget per run, and one classification
@@ -1290,4 +1351,8 @@ Dated one-liners; the full text of each is in git.
   stranded markers, never settles as stranded an id its own run
   settled, never
   sweeps a result its own run wrote, states the clock-step residual,
-  and writes a stranded marker's `failed` only for an id it keeps.
+  and writes a stranded marker's `failed` only for an id it keeps. The
+  same PR added "Triage: which failures to defend" (FMEA's three axes,
+  the single-fault criterion, ALARP as the stopping rule) and the table
+  of accepted residuals, after review passes kept reaching one fault
+  deeper into the same corner.
