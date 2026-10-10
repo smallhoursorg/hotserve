@@ -62,6 +62,9 @@ func (a *Applier) sweep() {
 			}
 			s := get(id)
 			s.result = true
+			// A result whose time cannot be read counts as written now:
+			// kept this run, never swept on a stat that failed.
+			s.written = now
 			if fi, err := e.Info(); err == nil {
 				s.written = fi.ModTime()
 			}

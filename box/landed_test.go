@@ -291,13 +291,13 @@ func TestNoChangeRechecksTheFile(t *testing.T) {
 	head := b.repo.commit(b.v1, &b.alice, b.base)
 	id := b.push(b.repo.bundleFiles(head, b.base))
 	edited := append(append([]byte{}, b.v1...), "# 3am\n"...)
-	edit := func(p string) error {
+	// The edit lands once the record is durable, before the baseline.
+	edit := func(p string) {
 		if p == "record:no_change" {
 			b.writeInstalled(edited)
 		}
-		return nil
 	}
-	if err := b.run(hooks{fail: edit}); err != nil {
+	if err := b.run(hooks{crash: edit}); err != nil {
 		t.Fatal(err)
 	}
 	b.settled()
@@ -306,6 +306,32 @@ func TestNoChangeRechecksTheFile(t *testing.T) {
 	}
 	if b.applied().SHA != b.base || !bytes.Equal(b.installed(), edited) {
 		t.Error("the baseline advanced, or the edit was overwritten")
+	}
+}
+
+// init's recovery, finding hotserve not running after its wait, records
+// the swap applied only if init's bytes still stand: every baseline
+// write re-reads the file (advance).
+func TestInitRecoveryRechecksTheFile(t *testing.T) {
+	b := newTestBox(t)
+	v2 := boxFile(2, b.alice)
+	sha := b.repo.commit(v2, &b.alice, b.base)
+	b.writeInstalled(v2)
+	b.lyingRecord(record{ID: randomID(t), Origin: originInit, Phase: phaseSwapped, Commit: sha, Path: testPath, Signer: "init",
+		Prev: b.v1, PrevSHA256: digest(b.v1), NewSHA256: digest(v2)})
+	edited := append(append([]byte{}, v2...), "# 3am\n"...)
+	b.sd.states = []string{"activating"}
+	edit := func(p string) {
+		if p == "record:applied" { // the console's edit during the wait, landing before the baseline
+			b.writeInstalled(edited)
+		}
+	}
+	if err := b.run(hooks{crash: edit}); err != nil {
+		t.Fatal(err)
+	}
+	b.settled()
+	if b.applied().SHA != b.base || !bytes.Equal(b.installed(), edited) {
+		t.Error("the baseline advanced past a console edit, or the edit was overwritten")
 	}
 }
 

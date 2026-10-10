@@ -210,18 +210,7 @@ func (a *Applier) install(ctx context.Context, t *txn) error {
 			a.finish(t, phaseFailed, installFailed(err))
 			return nil
 		}
-		// The baseline names these bytes only if they still stand: a
-		// console edit since step 10 is left as found, as on the swap
-		// path (I1, I4).
-		d, err := a.installedDigest()
-		if err != nil {
-			return a.unsettled(t, err)
-		}
-		if d != t.rec.PrevSHA256 {
-			a.changed(t)
-			return nil
-		}
-		return a.advance(t, phaseNoChange)
+		return a.advance(t, phaseNoChange) // which re-reads the file first
 	}
 	if t.rec.Origin == originApplier {
 		if err := a.writeResult(t.result(phaseVerified, "")); err != nil {
@@ -325,8 +314,22 @@ func (a *Applier) reloadSwapped(ctx context.Context, t *txn) error {
 }
 
 // advance writes applied.json from a record that says no_change or
-// applied, then ends the transaction at that phase.
+// applied, then ends the transaction at that phase. Every write of the
+// baseline comes through here, so here is where it is held to I1 and
+// I4: the baseline names the record's new bytes only if they still
+// stand — re-read now, after whatever wait came before — and a console
+// edit since is left as found, `unknown`, the baseline not advanced. A
+// file that cannot be read stops the run as found (I2); the record
+// stays for recovery, which reads it again.
 func (a *Applier) advance(t *txn, phase string) error {
+	d, err := a.installedDigest()
+	if err != nil {
+		return a.unsettled(t, err)
+	}
+	if d != t.rec.NewSHA256 {
+		a.changed(t)
+		return nil
+	}
 	if err := a.writeApplied(&t.rec); err != nil {
 		a.logger.Error("box baseline could not be recorded", zap.String("id", t.rec.ID), zap.String("commit", t.rec.Commit), zap.String("error", proof.Bound(err.Error())))
 		a.finish(t, phaseUnknown, baselineUnrecorded(t.rec.Commit))
