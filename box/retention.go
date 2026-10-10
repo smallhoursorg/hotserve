@@ -63,7 +63,7 @@ func (a *Applier) sweep() {
 			s := get(id)
 			s.result = true
 			if fi, err := e.Info(); err == nil {
-				s.key, s.written = fi.ModTime(), fi.ModTime()
+				s.written = fi.ModTime()
 			}
 		}
 	} else {

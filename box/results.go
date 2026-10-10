@@ -117,14 +117,17 @@ func (a *Applier) writeResult(r result) error {
 	path := filepath.Join(a.x("out"), r.ID+".json")
 	tmp := filepath.Join(a.x("out"), "."+r.ID+".json.tmp")
 	err := a.writeDurable("result:"+r.Phase, path, tmp, r.marshal(), 0o640)
-	if err != nil {
-		a.logger.Error("box result could not be written", append(resultFields(r), zap.String("write_error", proof.Bound(err.Error())))...)
-		return err
-	}
+	// Kept from this run's sweep whether or not the write succeeded: one
+	// whose rename landed before its fsync failed is the push's answer
+	// all the same, and one that never landed leaves nothing to keep.
 	if a.wrote == nil {
 		a.wrote = map[string]bool{}
 	}
 	a.wrote[r.ID] = true
+	if err != nil {
+		a.logger.Error("box result could not be written", append(resultFields(r), zap.String("write_error", proof.Bound(err.Error())))...)
+		return err
+	}
 	a.logOutcome(r)
 	return nil
 }

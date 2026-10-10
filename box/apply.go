@@ -51,7 +51,7 @@ type Applier struct {
 	verifier *proof.Verifier
 	logger   *zap.Logger
 	hooks    hooks
-	// waitUntil is the end of the run's one wait on a hotserve that is
+	// waitUntil is the end of the run's one budget for waiting on a hotserve that is
 	// activating or reloading (running).
 	waitUntil time.Time
 	// wrote is every id whose result this run wrote: Retention keeps them.

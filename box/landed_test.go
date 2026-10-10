@@ -316,9 +316,11 @@ func TestSweepReadsTheRecord(t *testing.T) {
 }
 
 // A result a run wrote survives that run's sweep, whatever else is kept:
-// here 32 results dated past the clock, as after a clock stepped back.
+// here 32 results dated past the clock, as after a clock stepped back,
+// which count as written now and so as newer than the push's own.
 func TestRetentionKeepsThisRunsResults(t *testing.T) {
 	b := newTestBox(t)
+	b.clock.advance(time.Minute) // the push's result is written before the fake now
 	now := b.clock.Now()
 	for i := 0; i < keepIDs; i++ {
 		id := randomID(t)
@@ -334,9 +336,10 @@ func TestRetentionKeepsThisRunsResults(t *testing.T) {
 	}
 }
 
-// A second activating episode in a run, after hotserve settled, gets a
-// wait of its own.
-func TestWaitResetsOnceSettled(t *testing.T) {
+// The run has one budget for waiting: once it is spent, a later
+// episode in the same run gets no wait, and root's lock is held for
+// waits at most activatingWait per run.
+func TestWaitBudgetIsPerRun(t *testing.T) {
 	b := newTestBox(t)
 	b.sd.states = []string{"activating", "active", "activating", "activating", "active"}
 	c1 := b.repo.commit(boxFile(2, b.alice), &b.alice, b.base)
@@ -351,26 +354,11 @@ func TestWaitResetsOnceSettled(t *testing.T) {
 	if err := b.run(hooks{read: read}); err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []string{first, second} {
-		if r := b.result(id); r == nil || r.Phase != phaseApplied {
-			t.Errorf("%+v", r)
-		}
+	if r := b.result(first); r == nil || r.Phase != phaseApplied {
+		t.Errorf("first: %+v", r)
 	}
-}
-
-// init decides on the reload with the new bytes on disk: a hotserve up
-// by then is reloaded, whatever it was when init began.
-func TestInitDecidesAtTheReload(t *testing.T) {
-	b := newTestBox(t)
-	b.sd.states = []string{"inactive", "active"}
-	v2 := boxFile(2, b.alice)
-	sha := b.repo.commit(v2, &b.alice, b.base)
-	out, err := b.applier(hooks{}).runInit(context.Background(), record{ID: randomID(t), Commit: sha, Path: testPath, BoxWebhook: "deploy.example.com"}, v2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if out.Phase != phaseApplied || b.sd.reloaded != 1 {
-		t.Fatalf("%+v, %d reloads", out, b.sd.reloaded)
+	if r := b.result(second); r == nil || r.Phase != phaseRefused || r.Error != msgStillStarting {
+		t.Errorf("second: %+v", r)
 	}
 }
 

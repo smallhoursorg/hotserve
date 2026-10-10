@@ -86,7 +86,8 @@ type txn struct {
 	// entry is work/<id>.tar, removed after the terminal result; ""
 	// for init, which has none.
 	entry string
-	// running is, for init, whether hotserve was active when it began.
+	// running is, for init, whether hotserve was up (running's
+	// classification) when it began: init asks once.
 	running bool
 	// recorded is true once a record of this transaction may be on disk.
 	recorded bool
@@ -205,7 +206,7 @@ func (a *Applier) install(ctx context.Context, t *txn) error {
 			// not, any such `verified` goes, leaving a marker with no
 			// result for Retention to settle. The entry goes either way.
 			if a.writeResult(t.result(phaseFailed, installFailed(err))) != nil {
-				if r, rerr := a.readResult(t.rec.ID); rerr == nil && r.Phase == phaseVerified {
+				if r, rerr := a.readResult(t.rec.ID); rerr != nil || !terminal(r.Phase) {
 					a.removeResult(t.rec.ID)
 				}
 			}
@@ -274,20 +275,6 @@ const (
 // at the next start) — then the installed file read back, then the
 // record, then the baseline.
 func (a *Applier) reloadSwapped(ctx context.Context, t *txn) error {
-	if t.rec.Origin == originInit {
-		// init decides at the moment of the reload, with the new bytes
-		// on disk (its earlier answer only steers a rollback before
-		// this point): a hotserve up now gets them by reload; one that
-		// is not reads them when it next starts (the States table's
-		// init rule). A start still in flight when the wait ends may
-		// have read the old bytes: the one residual, stated in the
-		// design.
-		state, err := a.running(ctx)
-		if err != nil {
-			return a.unsettled(t, err)
-		}
-		t.running = up(state)
-	}
 	if t.rec.Origin != originInit || t.running {
 		if err := a.systemd.Reload(ctx); err != nil {
 			a.logger.Warn("box reload failed", zap.String("id", t.rec.ID), zap.String("error", proof.Bound(err.Error())))
@@ -357,7 +344,8 @@ func (a *Applier) rollingBack(ctx context.Context, t *txn, recovering bool) erro
 	}
 	// Nothing to reload on a hotserve that is not running: the previous
 	// bytes load at its next start. Recovery asks (a crash may have been
-	// a reboot); init knows from when it began, and never reloaded.
+	// a reboot); init asked once, when it began, and did not reload a
+	// hotserve that was not running then.
 	running := t.rec.Origin != originInit || t.running
 	if recovering {
 		state, err := a.running(ctx)
