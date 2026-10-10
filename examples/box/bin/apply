@@ -53,6 +53,13 @@ expired=", or HOTSERVE_TOKEN expired (its --ttl)"
 tmpd=$(mktemp -d)
 trap 'rm -rf "$tmpd"' EXIT
 
+# A shallow clone lacks the commits between the box's and HEAD, and
+# would make a box's commit missing from it look like a rewritten main
+# — whose remedy is a trust reset. Full history or nothing.
+if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
+	echo "apply: this clone is shallow; the bundle needs every commit since the one each box runs: git fetch --unshallow (in a workflow, fetch-depth: 0)" >&2
+	exit 1
+fi
 head=$(git rev-parse --verify HEAD)
 short=$(git rev-parse --short=7 HEAD)
 # The token Actions mints names the commit the run is for, and the box

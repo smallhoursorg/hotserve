@@ -785,6 +785,25 @@ func TestBoxApply(t *testing.T) {
 			t.Fatalf("401 from a laptop: exit %d\n%s", code, out)
 		}
 		g.box.onGet = ""
+		// A shallow clone: refused before asking the box anything, never
+		// read as a rewritten main.
+		shallow := filepath.Join(t.TempDir(), "shallow")
+		g.git("commit", "-q", "--allow-empty", "-m", "on top")
+		g.git("clone", "-q", "--depth", "1", "file://"+g.dir, shallow)
+		if err := os.MkdirAll(filepath.Join(shallow, "bin"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		script := filepath.Join(shallow, "bin", "apply")
+		if err := os.WriteFile(script, []byte(g.read("bin/apply")), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		inShallow := exec.Command(script)
+		inShallow.Dir = shallow
+		inShallow.Env = append(append([]string{}, g.env...), "HOTSERVE="+g.bin, "CURL_HOME="+g.curlHome, "HOTSERVE_TOKEN=laptop")
+		if out, err := inShallow.CombinedOutput(); err == nil || !strings.Contains(string(out), "this clone is shallow") {
+			t.Fatalf("a shallow clone: %v\n%s", err, out)
+		}
+		g.git("reset", "-q", "--hard", "HEAD~1")
 		g.box.baseline = strings.Repeat("ab", 20)
 		if out, code := g.apply(); code != 1 || !strings.Contains(out, "which this repository's history does not hold") {
 			t.Fatalf("a baseline this history lacks: exit %d\n%s", code, out)
