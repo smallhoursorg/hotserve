@@ -59,10 +59,12 @@ IFS='
 '
 
 for f in $boxes; do
+	[ -e "$f" ] || continue # tracked but deleted here: on its way out
 	grep -q '^[[:space:]]*# signers[[:space:]]*$' "$f" ||
 		fail "$f has no '# signers' line: put one inside its box block, where the signer lines go"
 done
 for f in $boxes; do
+	[ -e "$f" ] || continue
 	# A signer line's third argument is the key; the same key twice
 	# would be one person under two names.
 	listed=$(awk -v k="$b64" '$1 == "signer" && $4 == k { print $2; exit }' "$f")
@@ -70,6 +72,10 @@ for f in $boxes; do
 		printf 'signer: %s already lists this key, as %s\n' "$f" "$listed"
 		continue
 	fi
+	# Staged afterwards only if nothing else in the file is unstaged:
+	# the commit that adds a signer carries that line and nothing more.
+	clean=0
+	git diff --quiet -- "$f" 2>/dev/null && clean=1
 	tmp=$f.signer-tmp
 	awk -v line="signer $principal $type $b64" '
 		{ print }
@@ -79,10 +85,12 @@ for f in $boxes; do
 			done = 1
 		}' "$f" >"$tmp"
 	mv "$tmp" "$f"
-	# Staged, so the commit that follows — make wip, or a plain commit —
-	# carries it.
-	git add -- "$f"
 	printf 'signer: added %s (%s) to %s\n' "$principal" "$type" "$f"
+	if [ "$clean" = 1 ]; then
+		git add -- "$f"
+	else
+		printf 'signer: %s has other unstaged edits, so it is not staged: git add -p it\n' "$f"
+	fi
 done
 
 # git signs with the private key file when there is one beside the .pub,
@@ -94,4 +102,4 @@ git config user.signingkey "$signing"
 git config commit.gpgsign true
 printf 'signer: commits from this checkout are signed with %s\n' "$signing"
 echo "signer: on a box that already runs, the commit that adds you must be signed by a signer it lists:"
-echo "signer: commit it (staged) with make wip and hand the branch to one (README.md, Adding a signer)"
+echo "signer: commit what this staged with make wip and hand the branch to one (README.md, Adding a signer)"

@@ -24,8 +24,9 @@ and signs.
 
 ## How a change reaches the box
 
-A push to `main` runs the workflow. It checks every box's file, then
-posts each box its file from that commit, with the commit and the
+A push to `main` runs the workflow. It checks every box's file (the
+same check runs on pull requests), and posts each box its file from
+that commit, with the commit and the
 commits before it back to the one the box runs. The box applies the
 file only if:
 
@@ -181,7 +182,7 @@ sit on `main`'s first-parent line.
 | Config not yet meant to run is committed unsigned (`make wip`) or kept in a fork. | A push credential cannot sign, but it can fast-forward a branch of signed commits onto `main`, and the box applies what `main` says. A branch with an unsigned commit in it is refused whoever lands it. |
 | Every box in this repo lists the same signers (`make signer` adds to all; `make check` holds it). | Every commit is on every box's history, so a key one box lacks stops that box's pushes. |
 | Change a signer in two pushes: add the new key, let it apply, then remove the old one. | The box refuses a file that drops the key that signed it. |
-| Recommended, in the repo's rulesets: require signed commits, and block force pushes to `main`. | The first stops the rebase button and unsigned pushes (not the squash button: GitHub's signature satisfies GitHub, not the box). The second keeps a stale signed commit from being put back under a `main` that has moved. The box depends on neither; they shorten red runs. |
+| Recommended, in the repo's rulesets: require signed commits, and block force pushes to `main`. | The first stops the rebase button and unsigned pushes (not the squash button: GitHub's signature satisfies GitHub, not the box); it needs each signer's key added to their GitHub account as a *signing* key, or GitHub refuses their pushes. The second keeps a stale signed commit from being put back under a `main` that has moved — and so blocks the force-push that undoes a bad commit (below): lift it for that push. The box depends on neither; they shorten red runs. |
 | After a credential leak: rotate it, then one applied push to `main`. | A signed commit someone fetched lands only while the box still runs the commit it forked from; one applied push puts it below. |
 
 ## Adding a signer
@@ -206,7 +207,8 @@ The run prints the box's reason; it changed nothing. The common ones:
 
 - **A commit is not signed**, or is signed by GitHub (the merge
   button): rebase it out of `main` — re-sign it, or squash it into a
-  signed one — and force-push. Nothing on the box.
+  signed one — and force-push (lifting the ruleset that blocks force
+  pushes, if you set one). Nothing on the box.
 - **Signed by a key the box did not list:** the commit that adds the
   key has to apply first. Put `main` back to that commit, let it apply,
   then push the rest.
@@ -265,6 +267,11 @@ Then, as alice:
 sudo install -m 0640 -o root -g hotserve -T /dev/null /etc/hotserve/example.env   # once: empty, root:hotserve
 sudoedit /etc/hotserve/example.env      # DATABASE_URL=postgres://…
 ```
+
+Whoever can get a signed commit onto `main` can read these files
+anyway: one site in the Caddyfile serves any file the `hotserve` user
+can read, env files included. A signer's key is the Caddyfile, and the
+Caddyfile is every app's secrets.
 
 The `adm` group reads the whole system journal — `journalctl -u
 hotserve`, an app's lines, `journalctl -u hotserve-box-apply` — not

@@ -59,8 +59,8 @@ per fact, in file order, for a script to read:
     signer alice@example.com ssh-ed25519 AAAAC3Nz...
 
 It refuses the file for every reason the box's reading of it would;
-what only hotserve validate refuses (a key listed twice, a module's
-own errors) it does not check. The box template's make check prints its line for each box from this, and
+what only hotserve validate refuses (a module's own errors) it does
+not check. The box template's make check prints its line for each box from this, and
 compares the signer lists of a repository's boxes. The file may be a
 pipe, as for webhook.`,
 				Args: cobra.ExactArgs(1),

@@ -39,7 +39,7 @@ files=$(git ls-files --cached --others --exclude-standard | grep -E '(^|/)Caddyf
 # One path a line; a name never splits.
 IFS='
 '
-first= firstkeys=
+first= firstkeys= checked=0
 for f in $files; do
 	# Tracked but deleted here: on its way out.
 	[ -e "$f" ] || continue
@@ -48,6 +48,13 @@ for f in $files; do
 		bad "$f: a box's file is <host>/Caddyfile at the top of the repository, nothing deeper or shallower"
 		continue ;;
 	esac
+	# git stores a symlink as its target's name, and that is what the
+	# workflow would send: the box refuses anything but a regular file.
+	if [ -L "$f" ] || [ ! -f "$f" ]; then
+		bad "$f: a box's file is a regular file, not a symlink or anything else (the box refuses one)"
+		continue
+	fi
+	checked=$((checked + 1))
 	dir=${f%/Caddyfile}
 	if ! "$HOTSERVE" box describe "$f" >"$tmpd/describe" 2>&1; then
 		hint=
@@ -80,4 +87,6 @@ for f in $files; do
 	[ "$signers" = 1 ] && s=signer || s=signers
 	printf '%s → https://%s/ (%s %s, %s %s)\n' "$f" "$host" "$apps" "$a" "$signers" "$s"
 done
+# Every file deleted here, or none of them a box's: nothing was checked.
+[ "$checked" -gt 0 ] || bad "no box here: a box is <host>/Caddyfile at the top of the repository"
 exit "$status"

@@ -85,18 +85,22 @@ else
 fi
 box rm -rf /etc/hotserve/e2e-dir.env
 # The Caddyfile is not the administrator's: the template's sudoers
-# file held bin/push's lines until the box took signed pushes.
+# file held bin/push's lines until the box took signed pushes. `sudo -l
+# <command>` asks the policy and runs nothing, so a regression cannot
+# empty the e2e box's config; it exits 0 only for an allowed command.
 for cmd in "/usr/bin/tee /etc/hotserve/Caddyfile.new" "/usr/bin/mv -f /etc/hotserve/Caddyfile.new /etc/hotserve/Caddyfile" \
 	"sudoedit /etc/hotserve/Caddyfile" "/usr/bin/systemctl reload hotserve"; do
 	# shellcheck disable=SC2086 # the command is meant to split
-	if admin sudo -n $cmd </dev/null >"$tmp/out" 2>&1; then
-		fail "the sudoers file let admin run: $cmd"
-	elif grep -q -E "a password is required|is not allowed to execute" "$tmp/out"; then
-		pass "sudo refused: $cmd"
+	if admin sudo -n -l $cmd </dev/null >"$tmp/out" 2>&1; then
+		fail "the sudoers file lets admin run: $cmd"
 	else
-		fail "$cmd failed, but not because sudo refused it: $(tail -1 "$tmp/out")"
+		pass "sudo's policy refuses: $cmd"
 	fi
 done
+# The control: the policy does admit the env-file line.
+admin sudo -n -l /usr/bin/install -m 0640 -o root -g hotserve -T /dev/null /etc/hotserve/e2e-secrets.env >/dev/null 2>&1 \
+	&& pass "sudo -l admits the env-file line (the refusals above are the policy's)" \
+	|| fail "sudo -l refuses even the env-file line: the refusals above prove nothing"
 
 echo "=== box 1: the example's Caddyfile, with a signer, is a valid config with this build ==="
 # It ships with no signer (make signer adds the operator's), and a box

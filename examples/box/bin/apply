@@ -1,7 +1,7 @@
 #!/bin/sh
 # Sends HEAD to each box this repository holds and prints what each
 # box made of it. .github/workflows/apply.yml runs it on every push to
-# main, after make check. The protocol is box/DESIGN-box.md in the
+# main, beside make check (each box validates what it is sent). The protocol is box/DESIGN-box.md in the
 # hotserve repository ("The trust chain", "Handler contract").
 #
 #   bin/apply           every box: each <host>/Caddyfile at the top of the repository
@@ -229,23 +229,34 @@ outcome() {
 	esac
 }
 
-# poll: GET /?result=<id> until the push settles, 15 minutes at most.
-# A 404 is "not yet" here: this is only asked after the box took the
-# push (202, 504) or after an answer was lost, and only root can tell a
-# push it holds from one it lost.
+# poll [resend]: GET /?result=<id> until the push settles, 15 minutes at
+# most. A 404 is "not yet" after the box took the push (202, 504): only
+# root can tell a push it holds from one it lost. After a POST that got
+# no answer from the box, a 404 may also be a push that never arrived,
+# or a fast-path no_change (which writes no result) whose 200 was lost:
+# with `resend`, every third 404 sends the POST again under the same
+# id, which the box answers 409 duplicate if it holds the push.
 poll() {
 	deadline=$(($(date +%s) + 900))
-	wait=1 last=
+	wait=1 last= misses=0
 	while [ "$(date +%s)" -lt "$deadline" ]; do
 		sleep "$wait"
 		[ "$wait" -ge 5 ] || wait=$((wait + 1))
+		if [ "${1:-}" = resend ] && [ "$misses" -ge 3 ]; then
+			misses=0
+			post
+			case $code in
+			409|000|mint|502|503|504) ;;
+			*) outcome && return 0; continue ;;
+			esac
+		fi
 		req "$url?result=$id"
 		case $code in
 		200|202|422) outcome && return 0 ;;
 		401)
 			red "the box refused a token for the result poll (401)$expired. If this push changed the box block's deploy_trust, it may have applied and dropped this workflow: journalctl -u hotserve-box-apply on the box says"
 			return 0 ;;
-		404) last=404 ;;
+		404) last=404 misses=$((misses + 1)) ;;
 		000|mint|429|502|503|504) ;;
 		*) outcome; return 0 ;;
 		esac
@@ -255,6 +266,14 @@ poll() {
 	else
 		red "no result for push $id after 15 minutes: journalctl -u hotserve-box-apply on the box"
 	fi
+}
+
+# post: the push, $tmpd/bundle.tgz under $id.
+post() {
+	maxtime=600
+	req -X POST -H "X-Box-Request-Id: $id" -H "Content-Type: application/gzip" \
+		--data-binary "@$tmpd/bundle.tgz" "$url"
+	maxtime=60
 }
 
 # send: one box, $box, from HEAD's $path.
@@ -337,10 +356,7 @@ send() {
 	deadline=$(($(date +%s) + 900))
 	while :; do
 		# No answer at all is polled for: the id was chosen here.
-		maxtime=600
-		req -X POST -H "X-Box-Request-Id: $id" -H "Content-Type: application/gzip" \
-			--data-binary "@$tmpd/bundle.tgz" "$url"
-		maxtime=60
+		post
 		case $code in
 		409|400) ;;
 		mint) red "could not mint an OIDC token"; return 0 ;;
@@ -372,15 +388,20 @@ send() {
 	case $code in
 	# No answer, or one from something in front of the box: the box may
 	# have the push, and the id is enough to ask.
-	000|502|503) echo "apply: no answer from the box to the push; asking for its result"; poll ;;
+	000|502|503) echo "apply: no answer from the box to the push; asking for its result"; poll resend ;;
 	409|504) echo "apply: the box has the push; asking for its result"; poll ;;
 	*) outcome || poll ;;
 	esac
 }
 
 if [ $# -gt 0 ]; then
-	boxes=${1%/}/Caddyfile
 	[ $# -eq 1 ] || { echo "apply: one box at most, by its directory" >&2; exit 1; }
+	d=${1%/}
+	d=${d#./}
+	case $d in
+	''|.|..|*/*) echo "apply: '$1' is not a box: name its directory, e.g. deploy.example.com" >&2; exit 1 ;;
+	esac
+	boxes=$d/Caddyfile
 else
 	boxes=$(git ls-tree --name-only HEAD | while read -r d; do
 		[ "$(git cat-file -t "HEAD:$d/Caddyfile" 2>/dev/null)" = blob ] && echo "$d/Caddyfile"

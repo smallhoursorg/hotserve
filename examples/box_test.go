@@ -252,6 +252,19 @@ func TestBoxSigner(t *testing.T) {
 			t.Errorf("git config %s = %q, want %q", k, got, want)
 		}
 	}
+	// A file with other unstaged edits gains the line but is not staged:
+	// the signer's commit carries nothing else.
+	r.git("reset", "-q")
+	r.write(boxFile, strings.Replace(after, "\t\t# signers\n"+line, "\t\t# signers\n", 1)+"# an edit of mine\n")
+	if out, code := r.run("signer"); code != 0 || !strings.Contains(out, "has other unstaged edits, so it is not staged") {
+		t.Fatalf("unstaged edits: exit %d\n%s", code, out)
+	}
+	if got := r.git("diff", "--cached", "--name-only"); got != "" {
+		t.Errorf("staged over unstaged edits: %q", got)
+	}
+	r.write(boxFile, after)
+	r.git("add", boxFile)
+
 	// Again: nothing added, signing still set up.
 	if got := r.git("diff", "--cached", "--name-only"); got != boxFile {
 		t.Errorf("staged after make signer: %q", got)
@@ -327,6 +340,22 @@ func TestBoxCheck(t *testing.T) {
 		t.Fatalf("another key: exit %d\n%s", code, out)
 	}
 	r.remove("deploy2.example.com")
+
+	// A symlink: git stores its target's name, which the box refuses.
+	r.write("real/Caddyfile", good)
+	r.remove(boxFile)
+	if err := os.Symlink("../real/Caddyfile", filepath.Join(r.dir, boxFile)); err != nil {
+		t.Fatal(err)
+	}
+	if out, code := check(); code != 1 || !strings.Contains(out, boxFile+": a box's file is a regular file, not a symlink") {
+		t.Fatalf("a symlinked file: exit %d\n%s", code, out)
+	}
+	r.remove("real")
+	r.remove(boxFile)
+	// Every box deleted here: nothing to check is not a pass.
+	if out, code := check(); code != 1 || !strings.Contains(out, "no box here") {
+		t.Fatalf("every box deleted: exit %d\n%s", code, out)
+	}
 
 	// What the box itself would refuse: validate's.
 	r.write(boxFile, strings.Replace(good, "\tliveswap_webhook\n", "\tliveswap_webhook\n\tno_such_directive\n", 1))
@@ -474,6 +503,12 @@ func (s *standIn) post(w http.ResponseWriter, r *http.Request) {
 		reply(w, 400, map[string]string{"error": "could not read the bundle: unexpected EOF"})
 		return
 	}
+	if how == "never" { // the connection broke before the box read a byte
+		if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+			_ = conn.Close()
+		}
+		return
+	}
 	if s.ids[id] {
 		reply(w, 409, map[string]string{"error": "duplicate request id: poll /?result=" + id})
 		return
@@ -498,6 +533,14 @@ func (s *standIn) post(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if b.Commit.ID == s.baseline && bytes.Equal(b.Caddyfile, s.installed) {
+		// The fast path writes nothing: no id held, no result to poll.
+		delete(s.ids, id)
+		if how == "lost" {
+			if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+				_ = conn.Close()
+			}
+			return
+		}
 		reply(w, 200, map[string]string{"id": id, "phase": "no_change", "commit": b.Commit.ID, "path": b.Path})
 		return
 	}
@@ -602,6 +645,23 @@ func (g *applyRig) apply(env ...string) (string, int) {
 	return g.run("apply", append([]string{"HOTSERVE=" + g.bin, "CURL_HOME=" + g.curlHome, "HOTSERVE_TOKEN=laptop"}, env...)...)
 }
 
+// runArgs runs bin/apply from a laptop with arguments.
+func (g *applyRig) runArgs(args []string) (string, int) {
+	g.t.Helper()
+	cmd := exec.Command(filepath.Join(g.dir, "bin", "apply"), args...)
+	cmd.Dir = g.dir
+	cmd.Env = append(append([]string{}, g.env...), "HOTSERVE="+g.bin, "CURL_HOME="+g.curlHome, "HOTSERVE_TOKEN=laptop")
+	out, err := cmd.CombinedOutput()
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		return string(out), exit.ExitCode()
+	}
+	if err != nil {
+		g.t.Fatalf("bin/apply: %v\n%s", err, out)
+	}
+	return string(out), 0
+}
+
 // change commits a change to the box's file and returns the commit.
 func (g *applyRig) change(msg string, extra ...string) string {
 	g.t.Helper()
@@ -615,6 +675,17 @@ func TestBoxApply(t *testing.T) {
 		out, code := g.apply()
 		if code != 0 || !strings.Contains(out, "deploy.example.com at "+g.base[:7]+": the box already runs this Caddyfile") || g.box.bundles != 1 {
 			t.Fatalf("exit %d, %d bundles\n%s", code, g.box.bundles, out)
+		}
+		// Its 200 lost: the fast path left no result, so the push is sent
+		// again and answered the same way. By directory, as an operator
+		// might type it.
+		g.box.onPost = []string{"lost"}
+		g.box.bundles = 0
+		if out, code = g.runArgs([]string{"./deploy.example.com/"}); code != 0 || !strings.Contains(out, "the box already runs this Caddyfile") {
+			t.Fatalf("a lost no_change: exit %d\n%s", code, out)
+		}
+		if out, code := g.runArgs([]string{"archive/deploy.example.com"}); code != 1 || !strings.Contains(out, "is not a box: name its directory") {
+			t.Fatalf("a nested name: exit %d\n%s", code, out)
 		}
 	})
 
@@ -671,6 +742,9 @@ func TestBoxApply(t *testing.T) {
 			"sync":      ": loaded; running apps are not restarted",
 			"unread":    "could not read the bundle: unexpected EOF; sending it again",
 			"502":       "no answer from the box to the push; asking for its result",
+			// The box never saw it: every poll is 404, and the push is
+			// sent again under its id.
+			"never": "no answer from the box to the push; asking for its result",
 		} {
 			t.Run(how, func(t *testing.T) {
 				g := newApplyRig(t)

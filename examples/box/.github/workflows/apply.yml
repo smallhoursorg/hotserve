@@ -35,9 +35,6 @@ jobs:
   apply:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    # bin/apply bounds each box (15 minutes of retries, then of polls);
-    # this bounds a step that hangs anyway.
-    timeout-minutes: 120
     permissions:
       contents: read
       id-token: write # the token each box's deploy_trust checks
