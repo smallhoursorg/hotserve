@@ -101,7 +101,7 @@ All options and defaults:
 | `penalty_ttl` | `5m`                 | Box duration; Fastly allows 1m–1h — mirror that range for doc parity |
 | `strip`       | `true`               | Remove the hint header before the client sees it (all responses)     |
 | `status`      | `429`                | Status for boxed clients (4xx/5xx)                                   |
-| `max_keys`    | `100000`             | Cap on tracked clients, split evenly across 64 shards (rounded down, at least 1 each); a full shard evicts its oldest-idle unboxed client. Below 128 (one slot per shard) it loads with a warning (see [Semantics](#semantics-and-trade-offs-read-this)) |
+| `max_keys`    | `100000`             | Cap on tracked clients, split evenly across 64 shards (rounded down, at least 1 each); a full shard evicts its oldest-idle unboxed client, or its oldest-idle client outright when all are boxed. Below 128 (one slot per shard) it loads with a warning (see [Semantics](#semantics-and-trade-offs-read-this)) |
 
 ### Per-tier budgets
 

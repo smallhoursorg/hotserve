@@ -69,11 +69,11 @@ type Handler struct {
 	// Status is the response code for boxed clients. Default 429.
 	Status int `json:"status,omitempty"`
 
-	// MaxKeys caps tracked clients; beyond it, oldest-idle entries are
-	// evicted. Default 100000. The cap is split evenly across the
-	// store's 64 shards, rounded down, at least one each (see
-	// perShardKeys), so the store tracks 64*max(floor(MaxKeys/64), 1)
-	// clients. Values that leave one slot per shard (below 128) load,
+	// MaxKeys is the target number of tracked clients. Default 100000.
+	// It is split evenly across the store's 64 shards, rounded down, at
+	// least one each (see perShardKeys), so the hard cap is
+	// 64*max(floor(MaxKeys/64), 1) clients; beyond it, oldest-idle
+	// entries are evicted. Values that leave one slot per shard (below 128) load,
 	// with a warning (warnSmallMaxKeys).
 	MaxKeys int `json:"max_keys,omitempty"`
 

@@ -105,8 +105,8 @@ so users can cross-check without leaving the repo.
   rule (it also splits `host:port` and falls back to the peer
   address, which this module leaves to the placeholder); the helper
   is copied, not imported, so this module stays independent.
-- **Memory bounds.** Hard cap on tracked keys (`max_keys`, default
-  100000) with expiry sweep + oldest-first eviction. An attacker
+- **Memory bounds.** Hard cap on tracked keys, derived from `max_keys`
+  (default 100000), with expiry sweep + oldest-first eviction. An attacker
   rotating IPs must exhaust the cap into evictions, not into unbounded
   memory. Only a counted response (level ≥ `min_level`) creates an
   entry. The cap is split evenly across 64 shards, rounded down with a

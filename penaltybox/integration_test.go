@@ -3,9 +3,9 @@
 package penaltybox
 
 import (
+	"errors"
 	"fmt"
 	"io"
-	"errors"
 	"io/fs"
 	"net/http"
 	"os"
