@@ -43,7 +43,7 @@ const (
 	msgStillStarting      = "hotserve is still starting after 300 s; nothing applied"
 	msgNoSigner           = "the Caddyfile this box runs lists no signer; hotserve init is the way back"
 	msgInterrupted        = "interrupted before the Caddyfile changed; nothing changed"
-	msgInterruptedStopped = "interrupted; the previous Caddyfile is on disk; hotserve is not running — systemctl start hotserve loads it"
+	msgInterruptedStopped = "interrupted; the previous Caddyfile is on disk; hotserve is not running — systemctl reset-failed hotserve, then systemctl start hotserve, loads it"
 	msgNoRecord           = "the box has no record of this push; push again"
 	msgReloadFailed       = "the reload failed; the previous Caddyfile is back and running — journalctl -u hotserve -n 50 on the box says why"
 	msgRecordAfterReload  = "the record could not be updated after a successful reload (disk full); rolled back to keep the file and the record consistent"

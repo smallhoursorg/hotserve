@@ -218,6 +218,22 @@ func TestFailureModes(t *testing.T) {
 	}
 }
 
+// Every result text the applier writes is the Message catalogue's, word
+// for word: the two copies are written by hand, so a reworded one would
+// otherwise drift from the table the workflow is built against.
+func TestApplierMessagesAreCatalogued(t *testing.T) {
+	doc := readDesign(t)
+	for _, msg := range []string{
+		msgNotRunning, msgStillStarting, msgNoSigner, msgInterrupted, msgInterruptedStopped,
+		msgNoRecord, msgReloadFailed, msgRecordAfterReload, msgRolledBackUnrecorded,
+		msgRolledBackInterrupted, msgBothReloads, msgPrevReloadFailed, msgChanged,
+	} {
+		if !strings.Contains(doc, "`"+msg+"`") {
+			t.Errorf("not in the Message catalogue: %q", msg)
+		}
+	}
+}
+
 // A run that leaves work on disk ends with one line naming the remedy and
 // counting what it leaves (I2's exceptions); a late arrival in in/ is
 // not a stop and gets none. The harness holds every run to the line's
