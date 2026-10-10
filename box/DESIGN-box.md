@@ -445,7 +445,7 @@ implies; it never infers state from digests alone.
 | Phase | Meaning | `d` must be | Recovery (crash found this phase) |
 |---|---|---|---|
 | *(no record)* | No transaction in flight. | — | A `work/` entry with a terminal result (on disk, or journaled earlier in this run: step 9): remove the entry. With a `verified` result or none: write `failed` ("interrupted before the Caddyfile changed"), remove the entry — and if that `failed` cannot be written, remove the `verified`, so Retention settles the push. The applier's own leftover temporaries (Transitions table) are removed. |
-| *(record unreadable)* | `txn.json` does not parse, or is not the shape only root writes (a phase above, ids, digests, `prev` hashing to `prev_sha256`, a `no_change` record's two digests equal, a `path` of safe components). Root writes it whole by rename, so this is a fault no other row reasons about. | — | Write nothing anywhere; error-level journal line; take nothing from `in/`. The path unit re-runs until its trigger limit; the console reads and removes the record. Exit 0: the one non-zero exit is the full-disk end. |
+| *(record unreadable)* | `txn.json` does not parse, or is not the shape only root writes (a phase above, ids, digests, `prev` hashing to `prev_sha256`, a `no_change` record's two digests equal, a `path` of safe components). Root writes it whole by rename, so this is a fault no other row reasons about. | — | Write nothing anywhere; error-level journal line; take nothing from `in/`. The path unit re-runs until its trigger limit; the console reads and removes the record, then runs `systemctl restart hotserve-box-apply.path` (a path unit at its limit stays failed whatever is on disk: "The applier unit"). Exit 0: the one non-zero exit is the full-disk end. |
 | *(any phase, terminal result present)* | The transaction ended; only its removals were owed. | — | Remove the record, then the entry (Failure-mode table, "terminal result"). |
 | `no_change` | Buffers identical; only the baseline advances. | `prev` | Write `applied.json` (idempotent), result `no_change`. |
 | `installing` | Record durable; swap not yet done. | `prev` | `failed` ("interrupted before the Caddyfile changed"). If `d == new`, the crash fell after the swap: act as `swapped`. |
@@ -1056,8 +1056,10 @@ table and holds both shipped files to it, line for line, and the
 | `.service` | `[Service]` | `CapabilityBoundingSet=CAP_KILL` | root stopping a child of another uid: without it a deadline on the verifier is a deadline on nothing. Measured: a 65534 child outlived its deadline, "operation not permitted" |
 | `.service` | `[Service]` | `CapabilityBoundingSet=CAP_DAC_OVERRIDE` | the "Removes" column holds against a hostile creator. Measured: without it a `chmod 000` directory the hotserve uid made in `in/` could not be moved out |
 | `.service` | `[Service]` | `CapabilityBoundingSet=CAP_FOWNER` | the same, for a sticky directory, where root may unlink another uid's file only as the file's owner, the directory's owner, or with this. Measured: with `CAP_DAC_OVERRIDE` alone, the file in a `chmod 1777` directory the hotserve uid made in `in/` stayed in `work/` |
-| `.service` | `[Service]` | `ProtectSystem=strict` | all but the next line's two trees read-only |
+| `.service` | `[Service]` | `ProtectSystem=strict` | all but the next line's two trees read-only — but not `/dev`, `/proc` and `/sys`, which the two lines after it cover |
 | `.service` | `[Service]` | `ReadWritePaths=/etc/hotserve /var/lib/hotserve-box` | the Caddyfile and its temporary; the record, results and `applied.json` |
+| `.service` | `[Service]` | `PrivateDevices=yes` | `ProtectSystem=strict` leaves `/dev` the host's, and root needs no capability to open a device node it owns. Measured without it: the unit opened a block device read-write; with it, `/dev` holds only the pseudo-devices (`null`, `urandom`, …) and the device policy is closed |
+| `.service` | `[Service]` | `ProtectKernelTunables=yes` | the same for `/proc/sys` and `/proc/sysrq-trigger`. Measured without it: the unit wrote a sysctl; with it, the write fails. `/sys` stayed writable in the Docker container the install test runs in; on a VM it is unmeasured |
 | `.service` | `[Service]` | `PrivateTmp=yes` | the verifier's files for its 65534 child, in a `/tmp` of the unit's own |
 | `.service` | `[Service]` | `NoNewPrivileges=yes` | |
 | `.service` | `[Service]` | `RestrictAddressFamilies=AF_UNIX` | the manager's socket (`systemctl reload`, `is-active`); no network |
@@ -1067,8 +1069,8 @@ Not in them, on purpose: `User=` (root writes root's file and asks the
 manager for the reload); `Restart=` (the path unit starts it again
 while there is work); `RemainAfterExit=` (a oneshot left active keeps
 the path unit `running`, and a running path unit starts nothing more:
-measured, a second entry stayed in `in/`); `SuccessExitStatus=` (exit 0 is a settled run, and the one
-non-zero exit, a full disk, must fail the unit); `Unit=` (the path
+measured, a second entry stayed in `in/`); `SuccessExitStatus=` (the
+one non-zero exit, a full disk, must fail the unit); `Unit=` (the path
 unit starts the service of its own name); `[Install]` in the service.
 Measured in the unit as shipped, with a drop-in replacing only
 `ExecStart=` by a test binary built from `box/proof`, in a Debian 13
@@ -1078,22 +1080,24 @@ unit's `PrivateTmp`, verifies and refuses as it does outside. The
 install test repeats the reload and the 65534 verification with
 `setpriv` and `ssh-keygen`.
 
-Why the path unit cannot loop: every entry the applier sees moves to
-`work/` (I2); every `work/` entry leaves it, with its result or its
-journal line (I3); every
-recovery ends by writing a result and removing the record (I5); an
-entry landing between the last listing and the exit, whatever its
-name, is one re-trigger, not a loop. I2's two exceptions keep the
-record, so the path unit starts the applier again at once: the
-full-disk end (Failure-mode table) and a stop with everything left as
-found (I2; the States table's "record unreadable" row). Each ends at
-the path unit's trigger limit by design (`trigger-limit-hit`), named
-in the journal — unless each run is slow, as when `is-active` goes
-unanswered until its deadline, and then the runs go on at that pace
-until the manager answers. Once the console has removed the cause,
-`systemctl restart hotserve-box-apply.path` starts it again: a path
-unit at its limit stays failed whatever is on disk, and a restart
-inside the limit's ten seconds fails the same way.
+Why the path unit cannot loop: every entry the applier lists leaves
+`in/` in that run, and `work/` is empty when it exits (I2), so a run
+leaves nothing that starts another; an entry landing between the last
+listing and the exit, whatever its name, is one re-trigger, not a
+loop. A run that exits with work still on disk does start the next at
+once: I2's two exceptions, which keep the record (the full-disk end of
+the Failure-mode table, and a stop with everything left as found), and
+the stops `box/apply.go` journals as errors and leaves for the console
+(its lock, a directory it cannot list, an entry it cannot remove).
+Such runs end at the path unit's trigger limit (`trigger-limit-hit`)
+once twenty triggers fall within ten seconds — measured by the install
+test with an unreadable record: eight runs, then `trigger-limit-hit`,
+within two seconds — and runs too slow for that, as when `is-active`
+goes unanswered until its deadline, go on at their own pace until the
+cause clears. Once the console has removed
+the cause, `systemctl restart hotserve-box-apply.path` starts the path
+unit again: one at its limit stays failed whatever is on disk, and a
+restart inside the limit's ten seconds fails the same way.
 
 No timer starts the service. Whatever adds an id to the tree starts a
 run or is written by one — a bundle renamed into `in/` ahead of its
@@ -1112,9 +1116,8 @@ runs `systemd-tmpfiles --create hotserve-box.conf` and enables the path
 unit the `deb-systemd-helper` way in `postinstall.sh`. `preremove.sh`
 stops it at a removal, after `hotserve.service`, so that no push is
 admitted once the path unit has stopped. A push admitted before that
-is taken by a run and
-settled — applied, rolled back or refused, as its race with the stop
-goes — except one admitted after the last listing of a run already
+is taken by a run and settled by its own tables, whatever its race
+with the stop makes of it — except one admitted after the last listing of a run already
 under way, which stays in `in/` for the first run after the next
 install, held to every check any push is. It neither disables the path
 unit (an install after the removal finds it enabled and starts it) nor
@@ -1436,16 +1439,20 @@ Dated one-liners; the full text of each is in git.
   of accepted residuals, after review passes kept reaching one fault
   deeper into the same corner.
 - 2026-10-10 — PR 3b (the applier's units and packaging) held every
-  line of "The applier unit", and added three, each measured in a
-  Debian 13 systemd container: the path unit's default dependencies
-  are off (with them, `After=hotserve.service` is an ordering cycle
-  that cost `paths.target` its boot start and hotserve its shutdown
-  stop); the service has no start limit (the default, 5 in 10 s, ended
-  a failing loop before the trigger limit the full-disk row names), nor
-  has the path unit (quick restarts of it, an operator retrying that
-  row's remedy, ended `start-limit-hit`); no timer (a second start outside the trigger limit); three
-  `PathExistsGlob=` lines per directory beside `DirectoryNotEmpty=`,
-  which does not count a hidden or backup-named entry. The unit list
-  became a table the test reads; `init/` and `lock` are born group
-  hotserve in the setgid base. `preremove.sh` stops the path unit,
-  after hotserve, without disabling it.
+  line of "The applier unit" and added, each measured in a Debian 13
+  systemd container: the path unit's default dependencies off (with
+  them, `After=hotserve.service` is an ordering cycle that cost
+  `paths.target` its boot start and hotserve its shutdown stop); no
+  start limit on either unit (the service's default ended a failing
+  loop before the trigger limit the full-disk row names; the path
+  unit's refused an operator's quick restarts); no timer (a second
+  start outside the trigger limit); three `PathExistsGlob=` lines per
+  directory beside `DirectoryNotEmpty=`, which does not count a hidden
+  or backup-named entry; `PrivateDevices=` and `ProtectKernelTunables=`
+  (`ProtectSystem=strict` left root able to open a block device and
+  write a sysctl). The unit list became a table the test reads;
+  `init/` and `lock` are born group hotserve in the setgid base;
+  `preremove.sh` stops the path unit, after hotserve, without disabling
+  it. Merged after 3a: the no-loop argument names 3a's stops that leave
+  work on disk, and the console's remedy for an unreadable record
+  restarts the path unit.

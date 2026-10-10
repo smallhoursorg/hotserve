@@ -14,9 +14,9 @@
 # lingering, the user@<uid> drop-in) no other test layer exercises.
 # Stage 3 then proves the app survives the upgrade restart, and stage
 # 3c that an upgrade restart the new binary refuses is reported. Stage
-# 1b runs the box applier's units as shipped (with a stub for the
-# applier), and stages 3 to 5 follow its path unit through upgrade,
-# removal and an install after removal.
+# 1b runs the box applier's units as shipped, with a stub for the
+# applier and then with the real one, and stages 3 to 5 follow its path
+# unit through upgrade, removal and an install after removal.
 set -eu
 
 # TOKEN is minted in stage 2 with a local deploy key (deploy_trust
@@ -152,7 +152,8 @@ stage "stage 1b: the box applier's units and exchange tree"
 # files to the design; this stage holds the manager's reading of them,
 # what postinstall did with them, and what the service may do inside
 # its sandbox — the one lane that runs the units as the package ships
-# them. `hotserve box apply` itself is the e2e lane's.
+# them, first with a stub for the applier, then with `hotserve box
+# apply` itself; pushes that apply are the e2e lane's.
 B=/var/lib/hotserve-box
 [ "$(systemctl is-enabled hotserve-box-apply.path)" = enabled ] \
 	|| die "postinstall did not enable hotserve-box-apply.path ($(systemctl is-enabled hotserve-box-apply.path))"
@@ -186,6 +187,9 @@ expect_show $svc Type oneshot
 expect_show $svc CapabilityBoundingSet "cap_dac_override cap_fowner cap_kill cap_setgid cap_setuid"
 expect_show $svc ProtectSystem strict
 expect_show $svc ReadWritePaths "/etc/hotserve /var/lib/hotserve-box"
+expect_show $svc PrivateDevices yes
+expect_show $svc ProtectKernelTunables yes
+expect_show $svc DevicePolicy closed
 expect_show $svc PrivateTmp yes
 expect_show $svc NoNewPrivileges yes
 expect_show $svc RestrictAddressFamilies AF_UNIX
@@ -260,6 +264,9 @@ if [ -e /run/hotserve-box-smoke.probe ]; then
 	if kill "$child"; then r kill 0; wait "$child"; else r kill 1; fi
 	touch /etc/hotserve/.smoke-box && rm /etc/hotserve/.smoke-box; r etc $?
 	touch /var/lib/hotserve/.smoke-box 2>/dev/null; r varlibhotserve $?
+	r blockdevs "$(find /dev -type b 2>/dev/null | wc -l)"
+	v=$(cat /proc/sys/kernel/printk_ratelimit)
+	(echo "$v" >/proc/sys/kernel/printk_ratelimit) 2>/dev/null; r sysctl $?
 fi
 find "$B/in" -mindepth 1 -maxdepth 1 -exec mv -t "$B/work/" {} + || r move 1
 find "$B/work" -mindepth 1 -delete; r clear $?
@@ -292,13 +299,17 @@ box_round() { # <what> <maker: hotserve|root> <command> <stopped|waiting>
 	[ -z "$(res move)" ] && [ "$(res clear)" = 0 ] && [ "$(res left)" = 0 ] \
 		&& [ -z "$(find "$B/in" "$B/work" -mindepth 1)" ] && [ ! -e "$B/txn.json" ] \
 		|| die "$1: the run did not clear it: $(tr '\n' ' ' <"$B/smoke-result") left: $(find "$B/in" "$B/work" "$B/txn.json" -mindepth 0 2>/dev/null | tr '\n' ' ')"
+	wait_path_waiting "$1"
+	echo "$1: started a run, which cleared it"
+}
+# The path unit back to waiting, its last trigger a success.
+wait_path_waiting() { # <what>
 	i=0
 	until [ "$(show hotserve-box-apply.path SubState)" = waiting ] && [ "$(show hotserve-box-apply.path Result)" = success ]; do
 		i=$((i + 1))
 		[ "$i" -ge 20 ] && die "$1: the path unit is not waiting after the run: $(systemctl show -p ActiveState,SubState,Result hotserve-box-apply.path | tr '\n' ' ')"
 		sleep 0.5
 	done
-	echo "$1: started a run, which cleared it"
 }
 # The probe, and the two capabilities that let a run clear what the
 # hotserve uid makes: a 000 directory (CAP_DAC_OVERRIDE) and a sticky
@@ -313,6 +324,11 @@ echo "inside the unit:"; sed 's/^/  /' "$B/smoke-result"
 [ "$(res kill)" = 0 ] || die "the unit could not kill a uid-65534 child (CAP_KILL)"
 [ "$(res etc)" = 0 ] || die "the unit cannot write /etc/hotserve"
 [ "$(res varlibhotserve)" != 0 ] || die "the unit could write /var/lib/hotserve: ProtectSystem=strict is not in force"
+# The host's block devices, which the unit must not see: without one
+# out here, "none in there" would prove nothing.
+[ -n "$(find /dev -type b 2>/dev/null | head -1)" ] || die "this host has no block device under /dev; the PrivateDevices check would prove nothing"
+[ "$(res blockdevs)" = 0 ] || die "the unit sees $(res blockdevs) block devices: PrivateDevices=yes is not in force, and root opens a device it owns with no capability"
+[ "$(res sysctl)" != 0 ] || die "the unit could write a sysctl: ProtectKernelTunables=yes is not in force"
 [ "$(stat -c %G "$B/smoke-result")" = hotserve ] || die "a file root made in $B is not group hotserve: the setgid bit is missing"
 box_round "a sticky directory in in/" hotserve "mkdir $B/in/sticky && chmod 1777 $B/in/sticky && touch $B/in/sticky/f" stopped
 # Then one round for every path the manager says the path unit watches,
@@ -354,38 +370,70 @@ echo "box applier: path unit enabled and waiting; tree as tmpfiles.d says; the u
 # The real applier in the unit as shipped, no stub: what the hotserve
 # uid drops that is not a bundle — a hidden 000 directory, a sticky
 # directory holding its file, a plain file — is taken and removed with
-# an error line and no result; a file named as a bundle that is not one
-# ends in a terminal result, written in out/ as the Paths table says
-# (this box has no applied.json: nothing was ever applied). The run
-# exits 0, and the path unit waits again.
+# an error line and no result; an empty file named as a bundle is
+# refused when its bundle is read, its result written in out/ as the
+# Paths table says. The run exits 0, and the path unit waits again.
 bad_id=0123456789abcdef0123456789abcdef
+real_journal() { journalctl -u $svc --since "$since" --no-pager -o cat; }
 systemctl stop hotserve-box-apply.path
 since=$(date '+%Y-%m-%d %H:%M:%S')
 as_hotserve "mkdir $B/in/.x000 && touch $B/in/.x000/f && chmod 000 $B/in/.x000 && mkdir $B/in/sticky && chmod 1777 $B/in/sticky && touch $B/in/sticky/f $B/in/junk $B/in/$bad_id.tar" \
 	|| die "could not drop the real applier's entries into $B/in"
 systemctl start hotserve-box-apply.path || die "the path unit did not start: $(systemctl show -p ActiveState,Result hotserve-box-apply.path | tr '\n' ' ')"
+# Done when the tree is clear and the service has stopped, either way:
+# a failed run is reported below, not as a timeout. The journal is
+# synced before it is counted, so a line still on its way is not missed.
 i=0
-until [ -z "$(find "$B/in" "$B/work" -mindepth 1)" ] && [ "$(show $svc ActiveState)" = inactive ] && [ -e "$B/out/$bad_id.json" ]; do
+until [ -z "$(find "$B/in" "$B/work" -mindepth 1)" ] && [ -e "$B/out/$bad_id.json" ] \
+	&& case "$(show $svc ActiveState)" in inactive | failed) true ;; *) false ;; esac; do
 	i=$((i + 1))
-	[ "$i" -ge 120 ] && die "the real applier did not clear in/ within 60s: in/work: $(find "$B/in" "$B/work" -mindepth 1 | tr '\n' ' ') service $(systemctl show -p ActiveState,Result,ExecMainStatus $svc | tr '\n' ' '); $(journalctl -u $svc --since "$since" --no-pager -o cat | tail -20)"
+	[ "$i" -ge 120 ] && die "the real applier did not clear in/ within 60s: in/work: $(find "$B/in" "$B/work" -mindepth 1 | tr '\n' ' ') service $(systemctl show -p ActiveState,Result,ExecMainStatus $svc | tr '\n' ' '); $(real_journal | tail -20)"
 	sleep 0.5
 done
 [ "$(show $svc Result)" = success ] && [ "$(show $svc ExecMainStatus)" = 0 ] \
-	|| die "the real applier's run did not end clean: $(systemctl show -p Result,ExecMainStatus $svc | tr '\n' ' '); $(journalctl -u $svc --since "$since" --no-pager -o cat | tail -20)"
-removed=$(journalctl -u $svc --since "$since" --no-pager -o cat | grep -c 'removing an entry that is not a bundle' || true)
-[ "$removed" -eq 3 ] || die "the real applier named $removed entries that are not bundles, want 3: $(journalctl -u $svc --since "$since" --no-pager -o cat | tail -20)"
+	|| die "the real applier's run did not end clean: $(systemctl show -p Result,ExecMainStatus $svc | tr '\n' ' '); $(real_journal | tail -20)"
+journalctl --sync
+removed=$(real_journal | grep -c 'removing an entry that is not a bundle' || true)
+[ "$removed" -eq 3 ] || die "the real applier named $removed entries that are not bundles, want 3: $(real_journal | tail -20)"
+[ "$(ls -A "$B/out")" = "$bad_id.json" ] || die "out/ holds $(ls -A "$B/out" | tr '\n' ' '), want only $bad_id.json: an entry that is not a bundle gets no result"
 got=$(stat -c '%a %U:%G' "$B/out/$bad_id.json")
 [ "$got" = "640 root:hotserve" ] || die "the real applier's result is '$got', want '640 root:hotserve' (Paths table)"
 grep -Eq '"phase": *"(failed|refused)"' "$B/out/$bad_id.json" || die "the result of a bundle that is not one is not terminal: $(cat "$B/out/$bad_id.json")"
 echo "  its result: $(cat "$B/out/$bad_id.json")"
+wait_path_waiting "the real applier's run"
+rm -f "$B/out/$bad_id.json"
+echo "the real applier, in the unit as shipped: three entries that are not bundles removed with no result, one bad bundle settled in out/ (640 root:hotserve), exit 0"
+
+# An unreadable record, with the real applier: each run journals it,
+# takes nothing and exits 0, so the path unit starts the next at once
+# and ends at its trigger limit; removing the record does not start it
+# again, and `systemctl restart hotserve-box-apply.path`, once the
+# limit's ten seconds have passed, does (DESIGN-box.md, "Why the path
+# unit cannot loop"). The record is written the way root writes one, by
+# rename.
+since=$(date '+%Y-%m-%d %H:%M:%S')
+t0=$(date +%s)
+printf 'not a record\n' >"$B/.smoke-txn" && mv "$B/.smoke-txn" "$B/txn.json"
 i=0
-until [ "$(show hotserve-box-apply.path SubState)" = waiting ]; do
+until [ "$(show hotserve-box-apply.path Result)" = trigger-limit-hit ]; do
 	i=$((i + 1))
-	[ "$i" -ge 20 ] && die "the path unit is not waiting after the real applier's run: $(systemctl show -p ActiveState,SubState,Result hotserve-box-apply.path | tr '\n' ' ')"
+	[ "$i" -ge 120 ] && die "an unreadable record did not end at the trigger limit within 60s: path $(systemctl show -p ActiveState,SubState,Result hotserve-box-apply.path | tr '\n' ' '); $(real_journal | tail -5)"
 	sleep 0.5
 done
-rm -f "$B/out/$bad_id.json"
-echo "the real applier, in the unit as shipped: three entries that are not bundles removed, one bad bundle settled in out/ (640 root:hotserve), exit 0"
+t1=$(date +%s)
+journalctl --sync
+runs=$(real_journal | grep -c 'txn.json cannot be read' || true)
+[ "$runs" -ge 1 ] || die "the path unit hit its trigger limit, but no run journaled the unreadable record"
+real_journal | grep -q 'restart hotserve-box-apply.path' || die "the unreadable record's journal line does not name the restart the console needs"
+echo "an unreadable record: $runs runs, then trigger-limit-hit, within $((t1 - t0 + 1))s"
+rm -f "$B/txn.json"
+sleep 2
+[ "$(show hotserve-box-apply.path ActiveState)" = failed ] \
+	|| die "the path unit left trigger-limit-hit with no restart: $(systemctl show -p ActiveState,SubState,Result hotserve-box-apply.path | tr '\n' ' ')"
+while [ "$(date +%s)" -le $((t1 + 11)) ]; do sleep 1; done
+systemctl restart hotserve-box-apply.path || die "systemctl restart hotserve-box-apply.path failed past the limit's ten seconds"
+wait_path_waiting "the path unit, restarted after the record was removed"
+echo "removing the record left the path unit failed; systemctl restart started it again"
 
 stage "stage 2: liveswap deploy under the systemd sandbox"
 # Generate a local deploy keypair; the app trusts the public half, and

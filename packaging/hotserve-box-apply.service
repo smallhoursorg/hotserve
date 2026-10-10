@@ -36,6 +36,8 @@ CapabilityBoundingSet=CAP_FOWNER
 
 ProtectSystem=strict
 ReadWritePaths=/etc/hotserve /var/lib/hotserve-box
+PrivateDevices=yes
+ProtectKernelTunables=yes
 PrivateTmp=yes
 NoNewPrivileges=yes
 RestrictAddressFamilies=AF_UNIX
