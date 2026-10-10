@@ -333,6 +333,7 @@ func parseDurationArg(d *caddyfile.Dispenser, out *caddy.Duration) error {
 //	}
 //	deploy_trust local {           # non-CI / manual / test fallback
 //	    public_key <path>
+//	    audience   <aud>           # this box's; `deploy-token --audience` to match
 //	}
 //	deploy_trust oidc  { issuer <url>; audience <aud>; ... }
 func parseDeployTrust(d *caddyfile.Dispenser) (TrustConfig, error) {
