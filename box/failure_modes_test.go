@@ -2,8 +2,12 @@ package box
 
 import (
 	"errors"
+	"fmt"
+	"os"
 	"strings"
 	"testing"
+
+	"go.uber.org/zap/zapcore"
 )
 
 var errReload = errors.New("job for hotserve.service failed")
@@ -57,6 +61,7 @@ func TestFailureModes(t *testing.T) {
 		{name: "new file/crash after", holds: "I1 I5", scen: "change", crash: "caddyfile:new", file: 1, phase: phaseRolledBack, msg: msgRolledBackInterrupted, reloads2: 1},
 		// record swapped
 		{name: "record swapped/write fails", holds: "I1 I4", scen: "change", fail: map[string]int{"record:swapped": -1}, file: 1, phase: phaseRolledBack, msg: msgRolledBackUnrecorded, reloads2: 1},
+		{name: "record swapped/write fails, the rollback's reload too", holds: "I1 I4", scen: "change", fail: map[string]int{"record:swapped": -1}, reloads: []error{errReload}, file: 1, phase: phaseUnknown, msg: msgPrevReloadFailed, reloads2: 1},
 		{name: "record swapped/write fails, write-back too: full disk", holds: "I1 I2 I5", scen: "change",
 			fail: map[string]int{"record:swapped": -1, "record:rolling_back": -1, "caddyfile:prev": -1}, fullDisk: true, fullPhase: phaseInstalling,
 			journal: msgDiskFull, file: 1, phase: phaseRolledBack, msg: msgRolledBackInterrupted, reloads2: 1},
@@ -67,6 +72,7 @@ func TestFailureModes(t *testing.T) {
 		{name: "reload/crash after", holds: "I1 I4 I5", scen: "change", crashReload: true, file: 1, phase: phaseRolledBack, msg: msgRolledBackInterrupted, reloads2: 2},
 		// record applied
 		{name: "record applied/write fails", holds: "I1 I4", scen: "change", fail: map[string]int{"record:applied": -1}, file: 1, phase: phaseRolledBack, msg: msgRecordAfterReload, reloads2: 2},
+		{name: "record applied/write fails, the rollback's reload too", holds: "I1 I4", scen: "change", fail: map[string]int{"record:applied": -1}, reloads: []error{nil, errReload}, file: 1, phase: phaseUnknown, msg: msgPrevReloadFailed, reloads2: 2},
 		{name: "record applied/write fails, write-back too: full disk", holds: "I1 I2 I4 I5", scen: "change",
 			fail: map[string]int{"record:applied": -1, "caddyfile:prev": -1}, fullDisk: true, fullPhase: phaseRollingBack,
 			journal: msgDiskFull, file: 1, phase: phaseRolledBack, msg: msgRecordAfterReload, reloads2: 2},
@@ -207,6 +213,83 @@ func TestFailureModes(t *testing.T) {
 			}
 			if b.sd.reloaded != row.reloads2 {
 				t.Errorf("%d reloads, want %d", b.sd.reloaded, row.reloads2)
+			}
+		})
+	}
+}
+
+// Every result text the applier writes is the Message catalogue's, word
+// for word: the two copies are written by hand, so a reworded one would
+// otherwise drift from the table the workflow is built against.
+func TestApplierMessagesAreCatalogued(t *testing.T) {
+	// The section alone: some texts are also quoted in the States and
+	// Transitions tables, which must not stand in for the catalogue.
+	_, section, ok := strings.Cut(readDesign(t), "\n## Message catalogue\n")
+	if !ok {
+		t.Fatal("DESIGN-box.md has no Message catalogue section")
+	}
+	catalogue, _, _ := strings.Cut(section, "\n## ")
+	for _, msg := range []string{
+		msgNotRunning, msgStillStarting, msgNoSigner, msgInterrupted, msgInterruptedStopped,
+		msgNoRecord, msgReloadFailed, msgRecordAfterReload, msgRolledBackUnrecorded,
+		msgRolledBackInterrupted, msgBothReloads, msgPrevReloadFailed, msgChanged,
+	} {
+		if !strings.Contains(catalogue, "`"+msg+"`") {
+			t.Errorf("not in the Message catalogue: %q", msg)
+		}
+	}
+}
+
+// A run that leaves work on disk ends with one line naming the remedy and
+// counting what it leaves (I2's exceptions); a late arrival in in/ is
+// not a stop and gets none. The harness holds every run to the line's
+// presence (checkLeftLine); these pin what it counts.
+func TestLeftOnDiskLine(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(b *testBox) hooks
+		left  string // the line's `left` field; "" for no line
+	}{
+		{"the lock cannot be taken", func(b *testBox) hooks {
+			if err := os.Mkdir(b.x("lock"), 0o700); err != nil {
+				b.t.Fatal(err)
+			}
+			return hooks{}
+		}, "[in/: 1]"},
+		{"the record does not read", func(b *testBox) hooks {
+			if err := os.WriteFile(b.x("txn.json"), []byte("{"), 0o600); err != nil {
+				b.t.Fatal(err)
+			}
+			return hooks{}
+		}, "[txn.json in/: 1]"},
+		{"an entry cannot be removed", func(b *testBox) hooks {
+			return hooks{fail: failAt(map[string]int{"entry:remove": -1})}
+		}, "[work/: 1]"},
+		{"a bundle lands after the listing", func(b *testBox) hooks {
+			late := b.repo.commit(boxFile(3, b.alice), &b.alice, b.base)
+			return hooks{read: func(string) { b.push(b.repo.bundleFiles(late, b.base)) }}
+		}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			b := newTestBox(t)
+			head := b.repo.commit(boxFile(2, b.alice), &b.alice, b.base)
+			b.push(b.repo.bundleFiles(head, b.base))
+			if err := b.run(c.setup(b)); err != nil {
+				t.Fatal(err)
+			}
+			lines := b.logged(zapcore.ErrorLevel, msgLeftOnDisk)
+			if c.left == "" {
+				if len(lines) != 0 {
+					t.Errorf("a late arrival got the left-on-disk line: %v", lines[0].ContextMap())
+				}
+				return
+			}
+			if len(lines) != 1 {
+				t.Fatalf("%d left-on-disk lines, want 1", len(lines))
+			}
+			if got := fmt.Sprint(lines[0].ContextMap()["left"]); got != c.left {
+				t.Errorf("left = %s, want %s", got, c.left)
 			}
 		})
 	}

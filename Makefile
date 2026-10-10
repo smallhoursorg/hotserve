@@ -223,9 +223,11 @@ install-test:
 # crashes (SIGKILL, exit 2, OOM) undone by the unit + reattach, a
 # refused start staying down, cgroup teardown of a worker tree, crash
 # cleanup, journal output. The recovery suite is the runner's view
-# after all that: still serving, deploys still work. Last, the box
+# after all that: still serving, deploys still work. Then the box
 # suite drives examples/box's bin/push from the host against the
-# container, and puts the e2e config back.
+# container, and puts the e2e config back. Last, the box apply suite
+# runs inside the container: signed commits pushed through box_webhook
+# to the root applier, and the e2e config put back again.
 e2e:
 	$(cgroup2_preflight)
 	$(COMPOSE) up --build -d e2e-hotserve e2e-upstream e2e-artifacts
@@ -237,6 +239,8 @@ e2e:
 	$(COMPOSE) run --rm --entrypoint "/bin/sh /suite-recovery.sh" e2e-runner || status=1; \
 	echo "════ box suite: examples/box's bin/push against the e2e box ════"; \
 	COMPOSE="$(COMPOSE)" sh e2e/box-push.sh || status=1; \
+	echo "════ box apply suite: signed pushes through box_webhook to the root applier ════"; \
+	$(COMPOSE) exec -T e2e-hotserve /bin/sh /suite-box.sh || status=1; \
 	if [ $$status -ne 0 ]; then \
 		$(COMPOSE) logs e2e-upstream e2e-artifacts; \
 		$(COMPOSE) exec -T e2e-hotserve journalctl --no-pager -n 300 || true; \

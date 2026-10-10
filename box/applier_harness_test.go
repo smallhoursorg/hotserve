@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -404,7 +405,50 @@ func (b *testBox) run(h hooks) error {
 			inner(p)
 		}
 	}
-	return b.applier(h).Run(context.Background())
+	inBefore, _ := listNames(b.x("in"))
+	linesBefore := len(b.logged(zapcore.ErrorLevel, msgLeftOnDisk))
+	err := b.applier(h).Run(context.Background())
+	b.checkLeftLine(inBefore, len(b.logged(zapcore.ErrorLevel, msgLeftOnDisk))-linesBefore)
+	return err
+}
+
+// checkLeftLine holds every run that finishes to I2's report: it ends
+// with msgLeftOnDisk exactly once if it leaves the record, an entry in
+// work/, or an entry in/ held before it began, and never otherwise. An
+// entry a hook drops into in/ during the run is a late arrival, the next
+// run's work. The rule is restated from outside on purpose: an oracle
+// that called leftOnDisk would agree with any mistake in it.
+func (b *testBox) checkLeftLine(inBefore []string, lines int) {
+	b.t.Helper()
+	var left []string
+	if _, err := os.Lstat(b.x("txn.json")); !errors.Is(err, fs.ErrNotExist) {
+		left = append(left, "txn.json")
+	}
+	if names, err := listNames(b.x("work")); err != nil || len(names) > 0 {
+		left = append(left, "work/")
+	}
+	names, err := listNames(b.x("in"))
+	if err != nil {
+		left = append(left, "in/")
+	}
+	for _, n := range names {
+		if slices.Contains(inBefore, n) {
+			left = append(left, "in/"+n)
+		}
+	}
+	if want := min(len(left), 1); lines != want {
+		b.t.Errorf("the run leaves %v on disk and wrote the left-on-disk line %d times, want %d", left, lines, want)
+	}
+}
+
+// listNames is names for a directory a run may leave unlistable.
+func listNames(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, e.Name())
+	}
+	return out, err
 }
 
 // runCrash runs with h and expects a crash: it returns the point.

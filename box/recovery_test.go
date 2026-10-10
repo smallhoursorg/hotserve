@@ -65,7 +65,8 @@ func TestRecoveryStates(t *testing.T) {
 
 		{phase: phaseSwapped, d: dNew, state: "active", file: dPrev, result: phaseRolledBack, msg: msgRolledBackInterrupted, reloaded: 1},
 		{phase: phaseSwapped, d: dNew, state: "failed", file: dPrev, result: phaseFailed, msg: msgInterruptedStopped},
-		{phase: phaseSwapped, d: dNew, state: "active", reloads: []error{errReload}, file: dPrev, result: phaseUnknown, msg: msgBothReloads, reloaded: 1},
+		// The first reload's outcome is unknown, so "both failed" would overclaim.
+		{phase: phaseSwapped, d: dNew, state: "active", reloads: []error{errReload}, file: dPrev, result: phaseUnknown, msg: msgPrevReloadFailed, reloaded: 1},
 		{phase: phaseSwapped, d: dPrev, state: "active", file: dPrev, result: phaseRolledBack, msg: msgRolledBackInterrupted, reloaded: 1},
 		{phase: phaseSwapped, d: dOther, file: dOther, result: phaseUnknown, msg: msgChanged},
 		{phase: phaseSwapped, origin: originInit, d: dNew, state: "inactive", file: dNew, advanced: true},
@@ -77,7 +78,10 @@ func TestRecoveryStates(t *testing.T) {
 
 		{phase: phaseRollingBack, d: dPrev, state: "active", recError: msgRecordAfterReload, file: dPrev, result: phaseRolledBack, msg: msgRecordAfterReload, reloaded: 1},
 		{phase: phaseRollingBack, d: dNew, state: "active", recError: msgReloadFailed, file: dPrev, result: phaseRolledBack, msg: msgReloadFailed, reloaded: 1},
-		{phase: phaseRollingBack, d: dPrev, state: "active", reloads: []error{errReload}, file: dPrev, result: phaseUnknown, msg: msgBothReloads, reloaded: 1},
+		{phase: phaseRollingBack, d: dPrev, state: "active", reloads: []error{errReload}, file: dPrev, result: phaseUnknown, msg: msgPrevReloadFailed, reloaded: 1},
+		{phase: phaseRollingBack, d: dPrev, state: "active", recError: msgReloadFailed, reloads: []error{errReload}, file: dPrev, result: phaseUnknown, msg: msgBothReloads, reloaded: 1},
+		{phase: phaseRollingBack, d: dPrev, state: "active", recError: msgRecordAfterReload, reloads: []error{errReload}, file: dPrev, result: phaseUnknown, msg: msgPrevReloadFailed, reloaded: 1},
+		{phase: phaseRollingBack, d: dNew, state: "active", recError: msgRolledBackUnrecorded, reloads: []error{errReload}, file: dPrev, result: phaseUnknown, msg: msgPrevReloadFailed, reloaded: 1},
 		{phase: phaseRollingBack, d: dPrev, state: "inactive", file: dPrev, result: phaseFailed, msg: msgInterruptedStopped},
 		{phase: phaseRollingBack, d: dNew, state: "inactive", file: dPrev, result: phaseFailed, msg: msgInterruptedStopped},
 		{phase: phaseRollingBack, d: dOther, file: dOther, result: phaseUnknown, msg: msgChanged},
