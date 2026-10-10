@@ -40,7 +40,7 @@ and T6.
 | **bundle** | One gzip tarball the workflow POSTs: `path`, `Caddyfile`, `commit`, `parents/NNNN`, `trees/<sha>`, nothing else. |
 | **HEAD** | The commit the bundle is for: `sha1("commit <n>\0" + raw)` of the bundled `commit` object, computed, never read. |
 | **baseline** | The commit the box runs: `sha` in `applied.json`. Advances only as the state machine says. |
-| **chain** | HEAD plus the bundled `parents/` commits, first-parent from HEAD down to, not including, the baseline, each linked to the next by hash. HEAD is always on it, so the chain is never empty: whatever would write — root, and the handler's pre-verification before validate — checks HEAD's signature against the installed list, HEAD equal to the baseline included (then the chain is HEAD alone and `parents/` must be empty). The one answer given without it is step 4's `no_change` fast path, which writes nothing: HEAD is the baseline and the bundled bytes are the installed bytes, verified when they applied. `parents/` is also empty when HEAD's first parent is the baseline. The cap counts HEAD. |
+| **chain** | HEAD plus the bundled `parents/` commits, first-parent from HEAD down to, not including, the baseline, each linked to the next by hash. HEAD is always on it, so the chain is never empty: whatever would write — root, and the handler's pre-verification before validate — checks HEAD's signature against the installed list, HEAD equal to the baseline included (then the chain is HEAD alone and `parents/` must be empty). The one answer given without it is step 4's `no_change` fast path, which writes nothing: HEAD is the baseline, at the path `applied.json` records, and the bundled bytes are the installed bytes, verified when they applied. `parents/` is also empty when HEAD's first parent is the baseline. The cap counts HEAD. |
 | **installed file** | `/etc/hotserve/Caddyfile` as root last wrote it. The source of the signer list and the rollback bytes. |
 | **record** | `txn.json`: the one durable marker of a transaction in flight, with a `phase`. Present means "no terminal result yet". |
 | **result** | `out/<id>.json`: what a push came to. Non-terminal: `verified`. Terminal: `refused`, `no_change`, `applied`, `failed`, `rolled_back`, `unknown`. |
@@ -203,16 +203,17 @@ cross-references throughout.
    binding have passed — and the id is not one the box already holds,
    which is asked before the body is read (a marker, a result, or a
    bundle still in `in/`: 409 "duplicate request id", so one id is never
-   answered two ways) — if HEAD equals the baseline and the bundled
-   file's digest equals the installed file's, nothing on disk would
-   change, so the handler answers 200 `no_change` with no admission
+   answered two ways) — if HEAD equals the baseline, the bundle's path
+   is the one `applied.json` records, and the bundled file's digest
+   equals the installed file's, nothing on disk would change, so the handler answers 200 `no_change` with no admission
    lock, no drop and no root work (asked again under the lock, of what
    was read there, so a push another one applied meanwhile is answered
    the same way) — it skips only the work that would
    write. An OIDC holder posting the applied `HEAD` in a loop learns
    what `GET /` already tells it; a token without the right `sha`, or
    a POST without its id, is refused as it would be on the slow
-   path. The fast path writes nothing, not even a marker: a poll of its
+   path, and a bundle at another path goes on to pre-verification,
+   which refuses it as step 11 does. The fast path writes nothing, not even a marker: a poll of its
    id finds none (404), and the 200 is the whole answer. (After a console edit the digests differ and the push goes to
    root, which reinstalls HEAD's file by design; the next replay takes
    the fast path again.)
@@ -1531,3 +1532,6 @@ Dated one-liners; the full text of each is in git.
   did; the Glossary, Caps and Paths tables caught up with 3a (`up`, one
   wait budget per run, the applier's deadlines and read caps, its three
   temporaries).
+- 2026-10-10 — The fast path asks for the recorded path too: a bundle
+  of the running commit and file at another path had been answered
+  `no_change`, though root refuses it at step 11.

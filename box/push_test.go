@@ -356,6 +356,28 @@ func TestPushFastPath(t *testing.T) {
 	}
 }
 
+// TestPushFastPathNeedsThePath: HEAD is the baseline and the file is the
+// installed one, but at a path the box did not record — refused as root
+// would refuse it, not answered no_change (a green run whose next real
+// change would be the first red).
+func TestPushFastPathNeedsThePath(t *testing.T) {
+	p := newPushRig(t)
+	a := p.applied()
+	a.Path = "box2/Caddyfile"
+	p.writeApplied(a)
+	bundle := tgz(t, p.repo.bundleFiles(p.base, p.base))
+	id := randomID(t)
+	w := p.post(t, p.h, push{id: id, token: p.token(t, p.base), body: bytes.NewReader(bundle)})
+	m := wantResult(t, w, http.StatusUnprocessableEntity, id, phaseRefused)
+	if want := "this box's file is box2/Caddyfile; the bundle is " + testPath + " — "; !strings.HasPrefix(m["error"].(string), want) {
+		t.Fatalf("error %q, want it to begin %q", m["error"], want)
+	}
+	p.untouched(t)
+	if p.val.calls != 0 {
+		t.Fatal("validated a bundle pre-verification refuses")
+	}
+}
+
 // TestPushKnownIDBeforeTheFastPath: a retry after a lost response is
 // told its push exists, even when the box now runs that push's commit —
 // the fast path would otherwise answer one id two ways.
