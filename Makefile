@@ -6,8 +6,8 @@ COMPOSE ?= docker compose
 # the root module — nested modules are excluded from a parent module's
 # pattern even in workspace mode — so test/vet name each module's tree
 # explicitly.
-MODULES ?= . liveswap penaltybox
-PKGS = ./... ./liveswap/... ./penaltybox/...
+MODULES ?= . box liveswap penaltybox
+PKGS = ./... ./box/... ./liveswap/... ./penaltybox/...
 
 # Release version: the tag when present (release.yml passes it in),
 # else a digit-leading dev placeholder that deb version rules accept.
@@ -72,34 +72,47 @@ lint:
 # FUZZTIME (default 2m) is read by the shell, never declared as a make
 # variable: fuzz.yml passes a workflow_dispatch input through the
 # environment, and a make variable would expand $(shell ...) in it.
-FUZZ_MODULES = liveswap penaltybox
+FUZZ_MODULES = box liveswap penaltybox
 
-# Fuzz targets are discovered (`go test -list '^Fuzz'`), never listed by
-# hand, so a new target cannot be left out of the weekly run. fuzz-list
-# is the deterministic half, run in every PR: it prints what fuzz will
-# run, fails if a module has no targets, and fails if a committed
-# testdata/fuzz/<Target> corpus (a crasher kept as a regression input)
-# no longer has a target to replay it — dead corpora test nothing.
-# The seed corpora themselves run in `make test`.
+# Fuzz targets are discovered (`go test -list '^Fuzz'` in every package
+# of the module — box keeps its proof core in a subpackage), never
+# listed by hand, so a new target cannot be left out of the weekly run.
+# fuzz-list is the deterministic half, run in every PR: it prints what
+# fuzz will run, fails if a module has no targets, and fails if a
+# committed testdata/fuzz/<Target> corpus (a crasher kept as a
+# regression input) no longer has a target in its package to replay it
+# — dead corpora test nothing. The seed corpora themselves run in
+# `make test`.
 fuzz-list:
 	@for m in $(FUZZ_MODULES); do \
-		targets=$$($(COMPOSE) run --rm -T -w /src/$$m dev go test -list '^Fuzz' . | grep '^Fuzz'); \
-		[ -n "$$targets" ] || { echo "no fuzz targets found in $$m"; exit 1; }; \
-		for t in $$targets; do echo "$$m $$t"; done; \
-		for d in $$m/testdata/fuzz/*/; do \
-			[ -d "$$d" ] || continue; \
-			n=$$(basename "$$d"); \
-			echo "$$targets" | grep -qx "$$n" || { echo "$$d has no matching Fuzz target"; exit 1; }; \
+		found=0; \
+		pkgs=$$($(COMPOSE) run --rm -T -w /src/$$m dev go list -f '{{.Dir}}' ./...) || { echo "$$pkgs"; echo "go list failed in $$m"; exit 1; }; \
+		for p in $$pkgs; do \
+			rel=$${p#/src/}; \
+			listed=$$($(COMPOSE) run --rm -T -w $$p dev go test -list '^Fuzz' .) || { echo "$$listed"; echo "go test -list failed in $$rel"; exit 1; }; \
+			targets=$$(echo "$$listed" | grep '^Fuzz'); \
+			for d in $$rel/testdata/fuzz/*/; do \
+				[ -d "$$d" ] || continue; \
+				n=$$(basename "$$d"); \
+				echo "$$targets" | grep -qx "$$n" || { echo "$$d has no matching Fuzz target"; exit 1; }; \
+			done; \
+			[ -n "$$targets" ] || continue; \
+			found=1; \
+			for t in $$targets; do echo "$$rel $$t"; done; \
 		done; \
+		[ $$found -eq 1 ] || { echo "no fuzz targets found in $$m"; exit 1; }; \
 	done
 
 fuzz:
 	for m in $(FUZZ_MODULES); do \
-		targets=$$($(COMPOSE) run --rm -T -w /src/$$m dev go test -list '^Fuzz' . | grep '^Fuzz'); \
-		[ -n "$$targets" ] || { echo "no fuzz targets found in $$m"; exit 1; }; \
-		for t in $$targets; do \
-			$(COMPOSE) run --rm -w /src/$$m dev \
-				go test -run '^$$' -fuzz "^$$t$$" -fuzztime "$${FUZZTIME:-2m}" . || exit 1; \
+		pkgs=$$($(COMPOSE) run --rm -T -w /src/$$m dev go list -f '{{.Dir}}' ./...) || { echo "$$pkgs"; echo "go list failed in $$m"; exit 1; }; \
+		for p in $$pkgs; do \
+			listed=$$($(COMPOSE) run --rm -T -w $$p dev go test -list '^Fuzz' .) || { echo "$$listed"; echo "go test -list failed in $${p#/src/}"; exit 1; }; \
+			targets=$$(echo "$$listed" | grep '^Fuzz'); \
+			for t in $$targets; do \
+				$(COMPOSE) run --rm -w $$p dev \
+					go test -run '^$$' -fuzz "^$$t$$" -fuzztime "$${FUZZTIME:-2m}" . || exit 1; \
+			done; \
 		done; \
 	done
 

@@ -1,0 +1,13 @@
+tree dc6fc0ea2bdfdaa46217900f28f1dee3ca2d939b
+parent 6081c22b49691d7bbac1f97062e8f33507ffabf1
+author Alice <alice@example.com> 1791547200 +0000
+committer Alice <alice@example.com> 1791547200 +0000
+gpgsig -----BEGIN SSH SIGNATURE-----
+ U1NIU0lHAAAAAQAAAGgAAAATZWNkc2Etc2hhMi1uaXN0cDI1NgAAAAhuaXN0cDI1NgAAAE
+ EEPbCOUut/4gSsi/FAPb2uhIWkMPl90kBSk+8eDBT7MhEM5HEcxbFz8P3cYzlmvEbOdKar
+ AA1OKOVTMgobnlWgRwAAAANnaXQAAAAAAAAABnNoYTUxMgAAAGUAAAATZWNkc2Etc2hhMi
+ 1uaXN0cDI1NgAAAEoAAAAhAOvA8gvCzwoJwQHivzs+KEWxohgSOdh/Nk5ruDnrjQW0AAAA
+ IQCtA5QW+D4/MEkb94k3IQKAz7rQQv4e9UmvBvgYth4ymw==
+ -----END SSH SIGNATURE-----
+
+a listed ecdsa key

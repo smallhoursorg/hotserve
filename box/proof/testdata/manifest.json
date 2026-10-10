@@ -1,0 +1,47 @@
+{
+  "path": "box1/Caddyfile",
+  "cases": {
+    "after_unsigned": {
+      "commit": "a288f4057eded166837dc093f981287d71f32090",
+      "file": "a1d1f34008a9fd89604b5e18256127c4b1c67343"
+    },
+    "base": {
+      "commit": "3531ba7157944e249799054035e2461bcb6908c3",
+      "file": "7711ba8a51e0a1af742a432f9969933a6c2ad7ed"
+    },
+    "bob": {
+      "commit": "64f1be95ba2750b96cecdf1f09639ecf1237ced5",
+      "file": "16f350b05a1651e6759cca07dac5aa52ad772538"
+    },
+    "head": {
+      "commit": "6081c22b49691d7bbac1f97062e8f33507ffabf1",
+      "file": "16d57aba41156e9819319744b657422f0d6819f7"
+    },
+    "mallory": {
+      "commit": "ca80182085d6eb0b44247f0098f1f96f728b9ed4",
+      "file": "16f350b05a1651e6759cca07dac5aa52ad772538"
+    },
+    "mid": {
+      "commit": "4b8d04c985ce053cf4f5cb89fffaee290495adcc",
+      "file": "87c59878d576c4cabf21aff5216834b17728bcd3"
+    },
+    "orphan": {
+      "commit": "8b1fb879c9c84bf8be38242b1fd1ed93995ba9b7",
+      "file": "7711ba8a51e0a1af742a432f9969933a6c2ad7ed"
+    },
+    "special": {
+      "commit": "395b9aeabc3a12a80bba236a0a871fe2475ba04c",
+      "file": "16d57aba41156e9819319744b657422f0d6819f7"
+    },
+    "unsigned": {
+      "commit": "f6e206a54adf0dedc6f580d6fba4f0cd03ff267a",
+      "file": "16f350b05a1651e6759cca07dac5aa52ad772538"
+    }
+  },
+  "signers": [
+    "alice@example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGnxX1/CzAt3ODKXeAoXzB55DjSp6gn/t9ePD/begkeA",
+    "bob@example.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBD2wjlLrf+IErIvxQD29roSFpDD5fdJAUpPvHgwU+zIRDORxHMWxc/D93GM5ZrxGznSmqwANTijlUzIKG55VoEc="
+  ],
+  "mallory": "mallory@example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINSYi1hsY5rafwddK1x29o0t3P6S2FvWVve5WeeLONa3",
+  "sha256": "sha256-commit"
+}
