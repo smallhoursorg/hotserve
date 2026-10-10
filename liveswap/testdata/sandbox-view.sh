@@ -94,10 +94,15 @@ emit uid "$probe_uid"
 exists mgr_socket open closed "/run/user/$probe_uid/systemd/private"
 
 # ── The manager's process, via /proc ──────────────────────────────
-# These are the acceptance paths: closed by the user namespace alone
-# (the kernel refuses ptrace-class access across user namespaces),
-# with the PID namespace closing them a second time over. Probing
-# them keeps the user-namespace claim tested in its own right.
+# These are the acceptance paths. The user namespace closes them on
+# its own (the kernel refuses ptrace-class access across user
+# namespaces), and the PID namespace closes them a second time over.
+# From in here the two cannot be told apart: PrivatePIDs= is always
+# on, so /proc/$MGR_PID does not exist in this /proc at all, and
+# `closed` is the PID namespace's answer whatever the user namespace
+# would have said. The user-namespace claim on its own rests on the
+# 2026-08-30 measurement (DESIGN-threat-model.md, "The shared-UID
+# rule"), not on this probe.
 if [ -n "$MGR_PID" ]; then
 	ls "/proc/$MGR_PID/root/" >/dev/null 2>&1 && emit mgr_root open || emit mgr_root closed
 	cat "/proc/$MGR_PID/environ" >/dev/null 2>&1 && emit mgr_environ open || emit mgr_environ closed
@@ -145,15 +150,38 @@ else
 fi
 
 # ── The runtime environment ───────────────────────────────────────
-# Writing the value BACK, not "max": inside a unit cgroupfs is
-# read-only and the write fails either way, but the key-set test runs
-# this probe outside any sandbox, and a developer running it where the
-# cgroup is delegated and writable must not have their own memory limit
-# cleared as a side effect. Writing what is already there proves
-# writability and changes nothing.
+# cgroup: is the unit's own cgroup read-only in here? Classified by
+# what the write actually hit, because "the write failed" is not the
+# claim: a missing cgroupfs, or an EACCES from the wrong owner, fails
+# the write too, and used to read as `readonly`.
+#   readonly  EROFS: cgroupfs is here and mounted read-only — the
+#             ProtectControlGroups= promise
+#   writable  the write went through
+#   absent    the unit's cgroup is not in the view at all
+#   denied:…  anything else, with the shell's own error text
+# The target is cgroup.procs, not a controller file: it exists in every
+# cgroup v2 directory whatever is delegated, and it is the PID-migration
+# escape route as well as the limit-rewriting one. Writing 0 means "the
+# writing process, into this cgroup" — it is already there, so where
+# the write is allowed (the key-set test runs this outside any sandbox)
+# it changes nothing. The write runs in a child shell with LC_ALL=C:
+# the unit's environment passes LANG/LC_* through, and the error text
+# is what tells EROFS from the rest.
 cg="/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)"
-cgcur=$(cat "$cg/memory.max" 2>/dev/null)
-(echo "$cgcur" >"$cg/memory.max") 2>/dev/null && emit cgroup writable || emit cgroup readonly
+if [ ! -e "$cg/cgroup.procs" ]; then
+	emit cgroup absent
+elif cgerr=$(LC_ALL=C /bin/sh -c 'echo 0 >"$1"' sh "$cg/cgroup.procs" 2>&1); then
+	emit cgroup writable
+else
+	case $cgerr in
+	*"Read-only file system"*) emit cgroup readonly ;;
+	*) emit cgroup "denied: $(printf '%s' "$cgerr" | tr '\n' ' ')" ;;
+	esac
+fi
+# Reported, not asserted: whether the memory controller reaches the
+# unit's cgroup at all. That is the question resource caps (#71) stand
+# on, not this sandbox's.
+exists cgroup_memory_max present absent "$cg/memory.max"
 writable tmp /tmp/.probe-w
 emit home "$HOME"
 [ -n "$XDG_RUNTIME_DIR" ] && emit xdg_runtime set || emit xdg_runtime unset

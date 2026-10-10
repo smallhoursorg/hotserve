@@ -284,6 +284,9 @@ expect_probe etc_hotserve closed
 expect_probe mgr_root skipped
 expect_probe mgr_environ skipped
 expect_probe cgroup readonly
+# Reported, not asserted: whether the memory controller reaches the
+# unit's cgroup — the question resource caps (#71) stand on.
+echo "INFO: inside the sandbox: cgroup_memory_max=$(probe_val cgroup_memory_max)"
 expect_probe tmp writable
 expect_probe home /var/lib/liveswap/demo/shared
 expect_probe xdg_runtime unset
