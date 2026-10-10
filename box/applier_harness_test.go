@@ -15,7 +15,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/base64"
 	"encoding/hex"
@@ -515,13 +514,7 @@ func (b *testBox) pushAt(files map[string][]byte, posted time.Time) string {
 
 func (b *testBox) drop(body []byte, posted time.Time) string {
 	b.t.Helper()
-	secret := make([]byte, 32)
-	if _, err := rand.Read(secret); err != nil {
-		b.t.Fatal(err)
-	}
-	sum := sha256.Sum256(secret)
-	digest := hex.EncodeToString(sum[:])
-	id := digest[:32]
+	id := randomID(b.t)
 	tmp := filepath.Join(b.x("stage"), "push-"+id+".tar")
 	if err := os.WriteFile(tmp, body, 0o644); err != nil {
 		b.t.Fatal(err)
@@ -529,7 +522,7 @@ func (b *testBox) drop(body []byte, posted time.Time) string {
 	if err := os.Rename(tmp, filepath.Join(b.x("in"), id+".tar")); err != nil {
 		b.t.Fatal(err)
 	}
-	b.writeMarker(id, marker{SHA256: digest, Posted: posted})
+	b.writeMarker(id, marker{Posted: posted})
 	return id
 }
 

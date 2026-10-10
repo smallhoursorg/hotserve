@@ -23,7 +23,7 @@ func (b *testBox) resultAt(id, phase string, when time.Time) {
 
 func (b *testBox) markerAt(id string, posted time.Time) {
 	b.t.Helper()
-	b.writeMarker(id, marker{SHA256: id + id, Posted: posted})
+	b.writeMarker(id, marker{Posted: posted})
 }
 
 func (b *testBox) hasMarker(id string) bool { return exists(filepath.Join(b.x("stage"), id+".auth")) }
@@ -219,7 +219,7 @@ func TestRetentionHostileStage(t *testing.T) {
 	mkfifo(t, filepath.Join(stage, fifo+".auth"))
 	must(os.MkdirAll(filepath.Join(stage, dir+".auth", "deep", "er"), 0o755))
 	must(os.Chmod(filepath.Join(stage, dir+".auth", "deep"), 0))
-	must(os.WriteFile(filepath.Join(stage, locked+".auth"), encodeJSON(marker{SHA256: strings.Repeat("a", 64), Posted: b.clock.Now()}), 0))
+	must(os.WriteFile(filepath.Join(stage, locked+".auth"), encodeJSON(marker{Posted: b.clock.Now()}), 0))
 	must(os.WriteFile(filepath.Join(stage, big+".auth"), make([]byte, maxMarker+1), 0o600))
 	others := []string{"lock", "x.auth", strings.ToUpper(randomID(t)) + ".auth", "push-tmp"}
 	for _, n := range others {
