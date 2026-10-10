@@ -292,6 +292,21 @@ func TestInitCmdRefusals(t *testing.T) {
 			}
 			return d
 		}, want: "this directory is Deploy.Example.com, and the Caddyfile is for deploy.example.com"},
+		{name: "a link named for the host, to a directory that is not", dir: func(t *testing.T, b *testBox) string {
+			parent := t.TempDir()
+			d := filepath.Join(parent, "box1")
+			if err := os.Mkdir(d, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(d, "Caddyfile"), b.v1, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			link := filepath.Join(parent, "deploy.example.com")
+			if err := os.Symlink(d, link); err != nil {
+				t.Fatal(err)
+			}
+			return link
+		}, want: "this directory is box1, and the Caddyfile is for deploy.example.com"},
 		{name: "no box block", file: edit(boxBlock, ""), want: "the Caddyfile has no box block"},
 		{name: "no signer", file: edit(signers, ""), want: "the Caddyfile has no signer"},
 		{name: "no deploy_trust", file: edit(trust, ""), want: "the Caddyfile has no deploy_trust"},
@@ -353,8 +368,8 @@ func TestInitCmdRefusals(t *testing.T) {
 }
 
 // An apply whose baseline cannot be recorded ends `unknown` with a
-// remedy that works: the same commit again ends no_change and records
-// it — init again for init, a push again for the applier.
+// remedy that works: init again for init, and `box baseline` for the
+// applier, since a push again is refused after a signer rotation.
 func TestBaselineUnrecordedRemedies(t *testing.T) {
 	t.Run("init", func(t *testing.T) {
 		b := newTestBox(t)
@@ -372,6 +387,22 @@ func TestBaselineUnrecordedRemedies(t *testing.T) {
 		}
 		if a := b.applied(); a.SHA != sha || a.SHA256 != digest(file) {
 			t.Errorf("applied.json %+v", a)
+		}
+	})
+	// The applier's no_change: nothing was installed, so the same push
+	// again is verified as this one was, and records it.
+	t.Run("applier, no_change", func(t *testing.T) {
+		b := newTestBox(t)
+		head := b.repo.commit(b.v1, &b.alice, b.base)
+		id := b.push(b.repo.bundleFiles(head, b.base))
+		if err := b.run(hooks{fail: failAt(map[string]int{"applied.json": -1})}); err != nil {
+			t.Fatal(err)
+		}
+		if r := b.result(id); r == nil || r.Phase != phaseUnknown || r.Error != "unchanged, but the baseline could not be recorded; push again, which records it" {
+			t.Fatalf("%+v", r)
+		}
+		if r := b.pushOne(b.repo.bundleFiles(head, b.base)); r.Phase != phaseNoChange || r.OutOfBand || b.applied().SHA != head {
+			t.Fatalf("push again: %+v", r)
 		}
 	})
 	// The applier's: a chain that rotated a signer on the way (alice
@@ -437,7 +468,7 @@ func TestInitSaysItWaitsForTheLock(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "init: waiting for root's lock: an applier run holds it\n") || !strings.HasSuffix(out.String(), fromHere) {
+	if !strings.Contains(out.String(), "init: waiting for root's lock: the applier, or another init or baseline, holds it\n") || !strings.HasSuffix(out.String(), fromHere) {
 		t.Errorf("printed %q", out.String())
 	}
 }

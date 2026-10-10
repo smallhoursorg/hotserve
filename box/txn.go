@@ -320,7 +320,7 @@ func (a *Applier) advance(t *txn, phase string) error {
 	}
 	if err := a.writeApplied(&t.rec); err != nil {
 		a.logger.Error("box baseline could not be recorded", zap.String("id", t.rec.ID), zap.String("commit", t.rec.Commit), zap.String("error", proof.Bound(err.Error())))
-		a.finish(t, phaseUnknown, baselineUnrecorded(t.rec.Origin, t.rec.Commit))
+		a.finish(t, phaseUnknown, baselineUnrecorded(t.rec.Origin, phase, t.rec.Commit))
 		return nil
 	}
 	a.finish(t, phase, "")

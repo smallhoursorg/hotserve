@@ -51,7 +51,11 @@ func runInitCmd(ctx context.Context, euid int, a *Applier, dir, sha string, out 
 	// The path is derived, so the directory must be the one it names:
 	// the wrong box's directory, or one misnamed, is refused before
 	// anything is touched rather than at the first push.
-	if name := filepath.Base(dir); name != shape.Host {
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return err
+	}
+	if name := filepath.Base(resolved); name != shape.Host {
 		return fmt.Errorf("this directory is %s, and the Caddyfile is for %s: a box's directory is named for its host, so run init from %s/ in a copy of the repository", proof.Bound(name), shape.Host, shape.Host)
 	}
 	path := shape.Host + "/Caddyfile" // a bare hostname: one safe component
@@ -61,7 +65,7 @@ func runInitCmd(ctx context.Context, euid int, a *Applier, dir, sha string, out 
 		return err
 	}
 	a.lockWait = func() {
-		_ = printf(out, "init: waiting for root's lock: an applier run holds it\n") // a notice; the outcome is what counts
+		_ = printf(out, "init: waiting for root's lock: the applier, or another init or baseline, holds it\n") // a notice; the outcome is what counts
 	}
 	// Before the swap, and advisory, so read outside the lock: a file
 	// that does not read, or walks as no box's (the packaged one), names

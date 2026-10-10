@@ -26,7 +26,7 @@ func runBaseline(ctx context.Context, euid int, a *Applier, sha string, out io.W
 		return err
 	}
 	a.lockWait = func() {
-		_ = printf(out, "baseline: waiting for root's lock: an applier run holds it\n") // a notice; the outcome is what counts
+		_ = printf(out, "baseline: waiting for root's lock: the applier, or another init or baseline, holds it\n") // a notice; the outcome is what counts
 	}
 	unlock, err := a.lock()
 	if err != nil {

@@ -570,7 +570,7 @@ shows after recovery.
 | record `swapped` | **post-swap failure**: record `rolling_back` if it can be written, then the previous bytes back; if they cannot be written back, leave the record (phase `installing`, or `rolling_back` if that write landed; `d == new`) and the entry, and exit non-zero with an error-level line ("disk full; the previous Caddyfile could not be restored") — the path unit re-triggers until its limit and fails; the console frees space, then restarts the path unit as "The applier unit" says, again ten seconds later if that fails (`reset-failed` alone clears the state but does not start a unit that hit its trigger limit) | phase `swapped` → rollback path | `rolled_back` / `unknown` | per phase |
 | reload | non-zero exit → rollback path | phase `swapped` (the reload's outcome unknown) → rollback path | `rolled_back` / `unknown` | per phase |
 | record `applied` | the reload succeeded but the record cannot say so, and the baseline must never run ahead of the record (I4): take the rollback path exactly as the `record swapped` row — previous bytes back, reload, result `rolled_back` ("the record could not be updated after a successful reload (disk full); rolled back to keep the file and the record consistent") or, if the write-back fails too, the full-disk end above | phase `applied`, `d == new` → `applied.json`, result | `rolled_back` / `unknown` | per phase |
-| `applied.json` | journal (error); result `unknown` ("applied but the baseline could not be recorded; hotserve box baseline <sha> on the box records it (the next push then reports the file as edited out of band; it was not)": `baseline` keeps the previous digest. Not a push again: a chain that rotated a signer on the way is verified again against the file now installed, and refused. For `init`, "`hotserve init <sha>` again, which ends no_change and records it") | phase `applied` → idempotent rewrite | `applied` / `unknown` | per phase |
+| `applied.json` | journal (error); result `unknown` ("applied but the baseline could not be recorded; hotserve box baseline <sha> on the box records it (the next push then reports the file as edited out of band; it was not)": `baseline` keeps the previous digest. Not a push again: a chain that rotated a signer on the way is verified again against the file now installed, and refused. After a `no_change`, "unchanged, but … push again, which records it": nothing changed, so the same chain verifies again. For `init`, "`hotserve init <sha>` again, which ends no_change and records it") | phase `applied` → idempotent rewrite | `applied` / `unknown` | per phase |
 | previous bytes back | retry once (a write whose rename landed counts); else the full-disk end of the `record swapped` row: no result, record and entry kept, exit non-zero — a result written here would make the next recovery drop the record (the `terminal result` row), and with it the only copy of the previous bytes | phase `rolling_back`, `d` checked, bytes written back if needed | `rolled_back` / `unknown` | per phase |
 | terminal result | **full disk**: error-level journal with every field; remove record and entry anyway (both `unlink`s). At a terminal phase the disk is settled and only the report is owed; a record kept would spin `PathExists=txn.json`. | result exists, record present → remove record and entry | as logged | the last result on disk — `verified` for a transaction past that phase, else `admitted` — until the workflow's bound, then red naming the journal |
 | record removed | retry; cannot fail for space | record gone, entry present → remove entry | — | — |
@@ -961,7 +961,7 @@ says. The workflow's action is in the last column.
 | 422 | `refused` | `<sha> does not descend from the commit this box runs (<baseline>) along main's first-parent line. If the box already runs a later commit, nothing is wrong. If a branch merged main into itself before it was fast-forwarded, rebase it onto main and force-push. Only if main was rewritten below <baseline> does hotserve box baseline <sha>, as root on the box, reset trust to <sha>, whose ancestors the box will then never examine` | both | fail (the workflow pre-checks `merge-base --is-ancestor HEAD <baseline>` and exits green as "superseded" — only for HEAD ≠ the baseline: HEAD equal to it is pushed, since after `box baseline` the baseline's file may not be the one installed; the fast path or root answers) |
 | 422 | `refused` | `the chain from <baseline> to <sha> is longer than 500 commits; run hotserve box baseline <sha> as root on the box` | both | fail |
 | 422 | `refused` | `this file is for <host2>; this box is <host1>` | both | fail |
-| 422 | `refused` | `this box's file is <recorded path>; the bundle is <path> — a box's file is <host>/Caddyfile at the top of the repository, and hotserve init, run again from that directory, records it` | both | fail |
+| 422 | `refused` | `this box's file is <recorded path>; the bundle is <path> — a box's file is <host>/Caddyfile at the top of the repository: move it there` (the recorded path is already `<host>/Caddyfile`) / `…: hotserve init, run again from that directory, records it` (it is not) | both | fail |
 | 422 | `refused` | `the new Caddyfile has no box block` / `… has no signer` / `… has no deploy_trust` / `… has no site with box_webhook` / `… has more than one site with box_webhook` / `… has a box_webhook site whose address is not one bare hostname (<address>)` / `… has a site without braces (<address>)` / `… has box_webhook inside a snippet or named route (<name>); write it in the site` / `… has box_webhook inside <block>; it must stand directly in the site block, where no matcher or nested route can leave / unserved` / `… has box_webhook with arguments (<args>); it takes none, and a matcher would leave / unserved` / `… imports <path>; inline the snippet` / `… has a placeholder where a directive name, a site address or a box line goes (<token>)` / `… reads differently once its placeholders are expanded` / `… is empty` / `… has a global options block that is not the first block` / `… has more than one box block` / `… has a signer line that is not \`signer <principal> <key-type> <base64>\`` / `… has a bad signer <principal>: <what>` / `… does not tokenize: <lexer error>` / `… does not parse: <what>` / `… drops the key that signed this commit (<principal>); add the new key in one push, let it apply, then remove the old one` | both | fail |
 | 422 | `refused` | `hotserve validate: <redacted>` / `hotserve-backup validate: <redacted>` / `the new Caddyfile does not reach box_webhook on /: <handler> answers first` | handler | fail |
 | 422 | `refused` | `hotserve is not running; nothing applied` / `hotserve is still starting after 300 s; nothing applied` | applier | fail |
@@ -971,7 +971,7 @@ says. The workflow's action is in the last column.
 | 200 / poll | `applied` | `loaded; running apps are not restarted` | applier | green |
 | 422 / poll | `failed` | `the install failed before the Caddyfile changed: <error>; nothing changed` / `interrupted before the Caddyfile changed; nothing changed` / `interrupted; the previous Caddyfile is on disk; hotserve is not running — systemctl reset-failed hotserve, then systemctl start hotserve, loads it` (the reset clears a `start-limit-hit`, which would refuse the start) / `the box has no record of this push; push again` | applier | red |
 | 422 / poll | `rolled_back` | `the reload failed; the previous Caddyfile is back and running — journalctl -u hotserve -n 50 on the box says why` / `the record could not be updated after a successful reload (disk full); rolled back to keep the file and the record consistent` / `the Caddyfile was swapped, then a write after the swap failed; rolled back: the previous Caddyfile is back and running` (the `swapped` record, or the swap's own `fsync`, failed; nothing was reloaded first) / `interrupted after the Caddyfile changed; rolled back: the previous Caddyfile is back and running` (recovery, after a crash past the swap) | applier | red |
-| 422 / poll | `unknown` | `the reload failed and so did the reload of the previous file; the previous file is on disk; journalctl -u hotserve` (the first reload failed) / `rolled back, but the reload of the previous file failed; the previous file is on disk; journalctl -u hotserve` (any other rollback) / `the Caddyfile changed during the transaction; it is left as found` / `applied but the baseline could not be recorded; hotserve box baseline <sha> on the box records it (the next push then reports the file as edited out of band; it was not)` | applier | red; the console runs `box baseline` |
+| 422 / poll | `unknown` | `the reload failed and so did the reload of the previous file; the previous file is on disk; journalctl -u hotserve` (the first reload failed) / `rolled back, but the reload of the previous file failed; the previous file is on disk; journalctl -u hotserve` (any other rollback) / `the Caddyfile changed during the transaction; it is left as found` / `applied but the baseline could not be recorded; hotserve box baseline <sha> on the box records it (the next push then reports the file as edited out of band; it was not)` / `unchanged, but the baseline could not be recorded; push again, which records it` (a `no_change`: nothing changed, so the same chain verifies again) | applier | red; `box baseline` on the console, or for `unchanged` a push again |
 | 202 | `admitted` | `{"phase":"admitted"}` | handler | keep polling, 15 min bound; then red naming `journalctl -u hotserve-box-apply` |
 | 504 | — | `{id}` | handler | poll from the start |
 
@@ -989,7 +989,7 @@ says.
 |---|---|---|---|
 | 1 | `init` / `baseline` | `hotserve init runs as root: it installs /etc/hotserve/Caddyfile` / `hotserve box baseline runs as root: it rewrites the box's baseline` | not root |
 | 1 | both | `<sha> is not a commit id: 40 lowercase hex, as git rev-parse HEAD prints one` | the argument |
-| 1 | `init` | `no Caddyfile here; run init from inside the box's directory` / `Caddyfile: larger than 1048576 bytes` / `Caddyfile: not a regular file` | `./Caddyfile` |
+| 1 | `init` | `no Caddyfile here; run init from inside the box's directory` / `<dir>/Caddyfile: larger than 1048576 bytes` / `<dir>/Caddyfile: not a regular file` (`<dir>` absolute) | `./Caddyfile` |
 | 1 | `init` | `the Caddyfile <reason>`, each reason as the `the new Caddyfile …` row above words it | the walk |
 | 1 | `init` | `this directory is <name>, and the Caddyfile is for <host>: a box's directory is named for its host, so run init from <host>/ in a copy of the repository` | the directory's name is not the host |
 | 1 | `init` | `hotserve is not running; nothing applied` / `hotserve is still starting after 300 s; nothing applied`, each followed by the remedy below | hotserve not up after the wait |
@@ -997,10 +997,10 @@ says.
 | 1 | both | `disk full; the previous Caddyfile could not be restored` | the full-disk end, in `init`'s transaction or in the recovery either runs first |
 | 1 | both | the box's own error as the system words it (a write of `applied.json` that fails, a state file that does not read) | anything else |
 | 1 | both | `the transaction could not be settled`, after the error-level line saying why | recovery, or `init`'s own transaction, stopped with everything left as found (I2); the record left starts the applier, whose recovery settles it by the States table — an `init` swap whose reload exited 0 but whose file could not be read back is rolled back there |
-| 1 | `init` | `unknown: applied but the baseline could not be recorded; hotserve init <sha> again, which ends no_change and records it` | `applied.json` could not be written |
+| 1 | `init` | `unknown: applied but the baseline could not be recorded; hotserve init <sha> again, which ends no_change and records it` (`unchanged, but …` after a `no_change`) | `applied.json` could not be written |
 | 1 | `baseline` | `this box has no baseline; hotserve init <sha>, as root inside the box's directory, sets one` | no `applied.json` |
 | 0 | `init` | the printout in "`hotserve init`" | `applied`, `no_change` |
-| — | both | `init: waiting for root's lock: an applier run holds it` / `baseline: …` (the same) | printed once, before a wait for the lock; the outcome follows |
+| — | both | `init: waiting for root's lock: the applier, or another init or baseline, holds it` / `baseline: …` (the same) | printed once, before a wait for the lock; the outcome follows |
 | 0 | `baseline` | `baseline: this box ran <old>; it now applies commits descending from <new>` | the reset |
 | 0 | `baseline` | `baseline: this box already runs <sha>; nothing changed` | `<sha>` is the baseline: nothing is written, so who verified it and when are kept |
 
@@ -1008,7 +1008,7 @@ The remedy, `<sha>` filled in from the argument and `<dir>` with init's director
 
 ```
 the Caddyfile is accepted only by a running hotserve. Start it on the file it has, then run init again:
-  systemctl enable hotserve && systemctl restart hotserve
+  systemctl enable hotserve && systemctl reset-failed hotserve && systemctl restart hotserve
   cd <dir> && hotserve init <sha>
 If it will not start, journalctl -u hotserve says why.
 ```
@@ -1017,7 +1017,9 @@ Starting on the file the box has keeps `init`'s swap and rollback
 between the change and the box, and never touches the old file by
 hand; a box that will not start on its own file is the console's to
 fix first. A restart, not a start: a start joins one already in
-flight, which read the old file.
+flight, which read the old file; `reset-failed` first, as the
+`failed` row's remedy says, since a unit at its start limit refuses a
+restart.
 
 Journal lines: the preamble's (`webhook auth failed`, `webhook auth
 could not consult a trust source`) carry `box_request` — `status`,
@@ -1058,8 +1060,8 @@ step before the transaction a refusal by name that writes nothing
 4. The walk of "Reading the signed file": each of that section's
    conditions, plus no `box` block, no `signer`, no `deploy_trust`, zero
    or more than one `box_webhook` site.
-5. The directory is named for the walked host, exactly (lower case),
-   or refused: the wrong box's directory, or one misnamed, fails here,
+5. The directory — as it is, links resolved — is named for the walked
+   host, exactly (lower case), or refused: the wrong box's directory, or one misnamed, fails here,
    before anything is touched, not at the first push.
 6. The path is derived: `<host>/Caddyfile` ("The box's identity").
    Nothing about it is typed.
