@@ -51,13 +51,19 @@ const (
 	msgChanged            = "the Caddyfile changed during the transaction; it is left as found"
 	msgDiskFull           = "disk full; the previous Caddyfile could not be restored"
 	// msgInitRemedy follows init's refusal on a hotserve that is not up
-	// ("Console commands"); %s is init's argument. A restart, not a
-	// start: a start joins one already in flight, which read the old
-	// file, and the second init's no_change reloads nothing.
-	msgInitRemedy = `the Caddyfile is accepted only by a running hotserve; from this directory:
-  cp Caddyfile /etc/hotserve/Caddyfile
+	// ("Console commands"); %[1]s is init's argument. hotserve starts on
+	// the file it has first, so init's own swap and rollback still guard
+	// the change; the file is replaced by hand only when that will not
+	// start, the old one kept. A restart, not a start: a start joins one
+	// already in flight, which read the old file.
+	msgInitRemedy = `the Caddyfile is accepted only by a running hotserve. Start it on the file it has, then run init again:
   systemctl enable hotserve && systemctl restart hotserve  # exit 1 is final; journalctl -u hotserve says why
-  hotserve init %s  # the same bytes: no_change, which records the baseline`
+  hotserve init %[1]s
+If it will not start on that file, start it on this one, keeping the old:
+  cp /etc/hotserve/Caddyfile /root/Caddyfile.before-init
+  cp Caddyfile /etc/hotserve/Caddyfile
+  systemctl restart hotserve
+  hotserve init %[1]s  # the same bytes: no_change, which records the baseline`
 )
 
 // installFailed is `failed` for an install that stopped before the
@@ -70,11 +76,12 @@ func installFailed(err error) string {
 // not be written: the file runs, and the same commit again — a push, or
 // init from the box's directory — ends no_change and records it.
 func baselineUnrecorded(o origin, commit string) string {
-	again := "push again"
 	if o == originInit {
-		again = "hotserve init " + commit + " again"
+		return "applied but the baseline could not be recorded; hotserve init " + commit + " again, which ends no_change and records it"
 	}
-	return "applied but the baseline could not be recorded; " + again + ", which ends no_change and records it"
+	// applied.json still holds the previous digest, so step 10 flags the
+	// file that push finds.
+	return "applied but the baseline could not be recorded; push again, which ends no_change and records it (that push reports the file as edited out of band; it was not)"
 }
 
 // result is out/<id>.json (DESIGN-box.md, "Record and result fields"):

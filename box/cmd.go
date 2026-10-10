@@ -66,8 +66,8 @@ back after a failed install (a full disk); the journal says so.`,
 longer contains the commit this box runs: a rewrite below it, or a
 chain longer than 500 commits. Every later push must descend from
 <sha>, and the box never examines <sha>'s ancestors. The path and the
-digest of the installed file stay as they were, so an edit made on the
-box since the last apply is still reported as one. It is not the fix
+digest recorded at the last apply stay as they were, so an edit made
+on the box since then is still reported as one. It is not the fix
 for an unsigned commit above the commit the box runs: that is a rebase
 and a force-push, with nothing to do on the box. As root, after
 hotserve init; it waits while the applier holds its lock.`,
@@ -102,8 +102,9 @@ is the check: a file hotserve will not load is rolled back, the old
 configuration serving throughout, and init exits non-zero. hotserve
 must be running (on a new box: systemctl enable --now hotserve); init
 says how to start it with this file if it is not. From then on the box applies only signed commits that descend
-from <sha>. Running it again re-seeds the box: a new host, a moved
-file, or the way back from a Caddyfile that lists no signer.`,
+from <sha>. Running it again re-seeds the box: a new host (its
+directory renamed with it), or the way back from a Caddyfile that
+lists no signer.`,
 		CobraFunc: func(cmd *cobra.Command) {
 			cmd.Args = cobra.ExactArgs(1)
 			cmd.RunE = func(c *cobra.Command, args []string) error {

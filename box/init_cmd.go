@@ -41,10 +41,7 @@ func runInitCmd(ctx context.Context, euid int, a *Applier, dir, sha string, out 
 	if err != nil {
 		return err
 	}
-	path := shape.Host + "/Caddyfile"
-	if _, err := proof.SplitPath(path); err != nil {
-		return fmt.Errorf("the path derived from the host: %w", err) // a bare hostname always is one
-	}
+	path := shape.Host + "/Caddyfile" // a bare hostname: one safe component
 	if err := printf(out, "init: box_webhook on %s; %s; %s\n"+
 		"init: this box's file is %s in the repository\n",
 		shape.Host, counted(shape.Apps, "app"), counted(principals(shape.Signers), "signer"), path); err != nil {
@@ -63,7 +60,7 @@ func runInitCmd(ctx context.Context, euid int, a *Applier, dir, sha string, out 
 	run, err := a.runInit(ctx, record{ID: newRequestID(), Commit: sha, Path: path, BoxWebhook: shape.Host, Apps: shape.Apps}, file)
 	var notUp *notUpError
 	if errors.As(err, &notUp) {
-		return fmt.Errorf("%s\n"+msgInitRemedy, notUp.msg, sha)
+		return errors.New(notUp.msg + "\n" + fmt.Sprintf(msgInitRemedy, sha))
 	}
 	if err != nil {
 		return err

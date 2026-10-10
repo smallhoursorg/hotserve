@@ -37,13 +37,17 @@ func TestBaseline(t *testing.T) {
 		t.Error("baseline touched the Caddyfile or reloaded")
 	}
 
-	// Run again: the same state.
+	// Run again: nothing to reset, nothing written.
 	out.Reset()
+	b.clock.advance(time.Hour)
 	if err := runBaseline(context.Background(), 0, b.applier(hooks{}), sha, &out); err != nil {
 		t.Fatal(err)
 	}
-	if again := b.applied(); !reset(again) {
-		t.Errorf("a second run left %+v", again)
+	if again := b.applied(); again.SHA != sha || again.When.Equal(b.clock.Now()) {
+		t.Errorf("a second run rewrote it: %+v", again)
+	}
+	if want := "baseline: this box already runs " + sha[:7] + "; nothing changed\n"; out.String() != want {
+		t.Errorf("printed %q, want %q", out.String(), want)
 	}
 }
 
@@ -153,6 +157,7 @@ func TestBaselineWaitsForTheLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(unlock) // a second close is harmless
 	sha := b.repo.commit(boxFile(7, b.alice), &b.alice)
 	done := make(chan error, 1)
 	go func() { done <- runBaseline(context.Background(), 0, b.applier(hooks{}), sha, &bytes.Buffer{}) }()

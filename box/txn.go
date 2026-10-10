@@ -368,20 +368,18 @@ func (a *Applier) rollingBack(ctx context.Context, t *txn, recovering bool) erro
 	// Nothing to reload on a hotserve that is not running: the previous
 	// bytes load at its next start. Recovery asks (a crash may have been
 	// a reboot); a live run found hotserve up before it swapped.
-	running := true
 	if recovering {
 		state, err := a.running(ctx)
 		if err != nil {
 			return a.unsettled(t, err)
 		}
-		running = up(state)
-	}
-	if !running {
-		if t.rec.Error != "" {
-			a.logger.Warn("box rollback on a hotserve that is not running", zap.String("id", t.rec.ID), zap.String("why", t.rec.Error))
+		if !up(state) {
+			if t.rec.Error != "" {
+				a.logger.Warn("box rollback on a hotserve that is not running", zap.String("id", t.rec.ID), zap.String("why", t.rec.Error))
+			}
+			a.finish(t, phaseFailed, msgInterruptedStopped)
+			return nil
 		}
-		a.finish(t, phaseFailed, msgInterruptedStopped)
-		return nil
 	}
 	if err := a.systemd.Reload(ctx); err != nil {
 		a.logger.Warn("box reload of the previous Caddyfile failed", zap.String("id", t.rec.ID), zap.String("error", proof.Bound(err.Error())))

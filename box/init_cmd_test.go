@@ -352,10 +352,10 @@ func TestBaselineUnrecordedRemedies(t *testing.T) {
 		if err := b.run(hooks{fail: failAt(map[string]int{"applied.json": -1})}); err != nil {
 			t.Fatal(err)
 		}
-		if r := b.result(id); r == nil || r.Phase != phaseUnknown || r.Error != "applied but the baseline could not be recorded; push again, which ends no_change and records it" {
+		if r := b.result(id); r == nil || r.Phase != phaseUnknown || r.Error != "applied but the baseline could not be recorded; push again, which ends no_change and records it (that push reports the file as edited out of band; it was not)" {
 			t.Fatalf("%+v", r)
 		}
-		if r := b.pushOne(b.repo.bundleFiles(head, b.base)); r.Phase != phaseNoChange || b.applied().SHA != head {
+		if r := b.pushOne(b.repo.bundleFiles(head, b.base)); r.Phase != phaseNoChange || !r.OutOfBand || b.applied().SHA != head {
 			t.Fatalf("push again: %+v", r)
 		}
 	})

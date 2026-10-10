@@ -38,6 +38,11 @@ func runBaseline(ctx context.Context, euid int, a *Applier, sha string, out io.W
 	if err != nil {
 		return err
 	}
+	if old.SHA == sha {
+		// Rewriting it would only lose who verified it, and when.
+		_, err = fmt.Fprintf(out, "baseline: this box already runs %s; nothing changed\n", shortSHA(sha))
+		return err
+	}
 	if err := a.putApplied(applied{SHA: sha, Path: old.Path, SHA256: old.SHA256, Signer: "baseline", When: a.clock.Now().UTC()}); err != nil {
 		return err
 	}
