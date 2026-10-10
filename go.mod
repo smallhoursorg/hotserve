@@ -11,6 +11,7 @@ require (
 	github.com/caddyserver/caddy/v2 v2.11.7
 	github.com/darkweak/souin/plugins/caddy v1.7.9
 	github.com/darkweak/storages/otter/caddy v0.0.20
+	github.com/smallhoursorg/hotserve/box v0.0.0-00010101000000-000000000000
 	github.com/smallhoursorg/hotserve/liveswap v0.0.0-00010101000000-000000000000
 	github.com/smallhoursorg/hotserve/penaltybox v0.0.0-00010101000000-000000000000
 )
@@ -196,6 +197,7 @@ require (
 )
 
 replace (
+	github.com/smallhoursorg/hotserve/box => ./box
 	github.com/smallhoursorg/hotserve/liveswap => ./liveswap
 	github.com/smallhoursorg/hotserve/penaltybox => ./penaltybox
 )

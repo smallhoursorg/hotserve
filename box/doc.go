@@ -9,7 +9,10 @@
 // its raw tokens, expanding nothing and following nothing (tokens.go).
 // The proof core — commit, tree and blob hashing, the chain, the
 // signer list and the ssh-keygen verdict — is the pure-Go subpackage
-// proof. The Caddyfile surface (the `box` global option and the
-// `box_webhook` directive), the root applier and the `hotserve init` /
-// `hotserve box …` commands follow in later PRs.
+// proof. The Caddyfile surface is the `box` global option (app.go,
+// caddyfile.go) and the `box_webhook` directive (handler.go), which
+// answers `GET /` from the box's state (exchange.go) and, until the
+// root applier ships, refuses every push and every result poll; `hotserve box webhook` (cmd.go) prints
+// the address a file names. The applier and `hotserve init` /
+// `hotserve box …`'s other commands follow in later PRs.
 package box

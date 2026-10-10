@@ -491,8 +491,12 @@ not a plan.
 The second authenticated entry point, and the only one whose outcome
 is a root-owned file. [box/DESIGN-box.md](box/DESIGN-box.md) is
 authoritative for its behaviour; this section places it. Status:
-designed 2026-10-09 and being built in PRs. Until the applier ships,
-config reaches the box the way `examples/box/README.md` describes:
+designed 2026-10-09 and being built in PRs. The handler ships first,
+with less reach than below: it answers only its authenticated
+`GET /`, the baseline, and refuses every other authenticated request
+on `/` — a push, a result poll — with 501, a push's body unread
+(`Handler.notYet`, box/handler.go). Until the applier ships, config
+reaches the box the way `examples/box/README.md` describes:
 root hand-edits `/etc/hotserve/Caddyfile` on day 0, and afterwards a
 laptop script (`examples/box/bin/push`) stages, validates, swaps and
 reloads it over SSH as an administrator whose sudoers file

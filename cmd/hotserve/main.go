@@ -1,6 +1,8 @@
 // Command hotserve is the smallhours app server: Caddy with
 // zero-downtime app deploys (liveswap), rate-limit hint enforcement
-// (penaltybox) and HTTP caching (Souin + Otter storage) compiled in.
+// (penaltybox), the config channel (box, being built: see
+// box/DESIGN-box.md) and HTTP caching (Souin + Otter storage)
+// compiled in.
 // It is distributed as its own binary and OS packages — see the repo
 // README — and behaves exactly like a custom Caddy build: same CLI,
 // same Caddyfile, same admin API.
@@ -16,6 +18,7 @@ import (
 
 	// hotserve modules. Importing liveswap also makes this process
 	// non-dumpable before main runs (see liveswap/harden).
+	_ "github.com/smallhoursorg/hotserve/box"
 	_ "github.com/smallhoursorg/hotserve/liveswap"
 	_ "github.com/smallhoursorg/hotserve/penaltybox"
 
