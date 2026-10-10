@@ -98,7 +98,7 @@ type tierCounter struct {
 func newStore(cfg storeConfig, clk clock) *store {
 	s := &store{
 		seed:        maphash.MakeSeed(),
-		maxPerShard: max(cfg.maxKeys/numShards, 1),
+		maxPerShard: perShardKeys(cfg.maxKeys),
 		clk:         clk,
 		done:        make(chan struct{}),
 	}
@@ -150,6 +150,16 @@ func newStore(cfg storeConfig, clk clock) *store {
 		s.shards[i].entries = make(map[string]*entry)
 	}
 	return s
+}
+
+// perShardKeys is how many clients one shard tracks: max_keys split
+// evenly across the shards, rounded down, never below one. The store
+// therefore tracks at most numShards*perShardKeys(max_keys) clients:
+// max_keys itself at a multiple of numShards, slightly fewer at any
+// other value above it (100000 -> 99968), and more than asked below it
+// (any value under numShards tracks numShards).
+func perShardKeys(maxKeys int) int {
+	return max(maxKeys/numShards, 1)
 }
 
 func sweepInterval(window, ttl time.Duration) time.Duration {

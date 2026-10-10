@@ -202,6 +202,78 @@ func TestEvictionUnderCapPressure(t *testing.T) {
 	}
 }
 
+// TestEffectiveKeyCap pins the per-shard split of max_keys: rounded
+// down, at least one per shard, so the store tracks more than a small
+// max_keys and slightly fewer than a large one. Where it is cheap, a
+// flood of distinct keys fills every shard to exactly that cap.
+func TestEffectiveKeyCap(t *testing.T) {
+	cases := []struct {
+		maxKeys, want int
+		flood         bool
+	}{
+		{50, 64, true},
+		{64, 64, true},
+		{127, 64, true},
+		{128, 128, true},
+		{1000, 960, true},
+		{100_000, 99_968, false},
+	}
+	for _, tc := range cases {
+		s := testStore(newFakeClock(), storeConfig{limit: 1 << 30, maxKeys: tc.maxKeys})
+		if got := numShards * s.maxPerShard; got != tc.want {
+			t.Errorf("max_keys %d: effective cap %d, want %d", tc.maxKeys, got, tc.want)
+		}
+		if !tc.flood {
+			continue
+		}
+		// 30 keys per slot leave a shard short of its cap with
+		// probability far below 1e-9 under any seed.
+		for i := 0; i < 30*tc.want; i++ {
+			s.add(fmt.Sprintf("flood-%d", i), 2)
+		}
+		if got := s.size(); got != tc.want {
+			t.Errorf("max_keys %d: %d keys tracked after a flood, want %d", tc.maxKeys, got, tc.want)
+		}
+	}
+}
+
+// TestOneSlotShardFailsOpen pins the documented cost of a small
+// max_keys: with one slot per shard, two clients whose counted
+// responses interleave in one shard keep evicting each other, so
+// neither is boxed however long it goes on, and a box lifts as soon as
+// another client is counted in its shard.
+func TestOneSlotShardFailsOpen(t *testing.T) {
+	clk := newFakeClock()
+	s := testStore(clk, storeConfig{limit: 4, maxKeys: 50, penaltyTTL: time.Hour})
+	a, b := "client-a", ""
+	for i := 0; b == ""; i++ {
+		if k := fmt.Sprintf("client-%d", i); s.shardFor(k) == s.shardFor(a) {
+			b = k
+		}
+	}
+
+	// Each level-2 response costs 2 units; alone, a would cross 4 on
+	// its third.
+	for i := 0; i < 20; i++ {
+		clk.Advance(time.Millisecond)
+		if s.add(a, 2) || s.add(b, 2) {
+			t.Fatal("interleaved clients in a one-slot shard must keep resetting each other")
+		}
+	}
+	if got := s.size(); got != 1 {
+		t.Fatalf("one-slot shard holds %d entries", got)
+	}
+
+	s.add(a, 2)
+	if !s.add(a, 3) {
+		t.Fatal("setup: a alone should be boxed at 5 units of 4")
+	}
+	s.add(b, 2)
+	if _, boxed := s.boxedRemaining(a); boxed {
+		t.Fatal("with one slot, another client's counted response must evict the boxed entry")
+	}
+}
+
 func TestSweepRemovesIdleAndExpired(t *testing.T) {
 	clk := newFakeClock()
 	s := testStore(clk, storeConfig{window: time.Minute, limit: 5, penaltyTTL: 30 * time.Second})

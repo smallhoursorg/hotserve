@@ -10,6 +10,8 @@ import (
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // serveReq runs one request through h.ServeHTTP with a Caddy replacer in
@@ -271,6 +273,69 @@ func TestValidate(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A max_keys below the shard count loads (a refusal would make Caddy
+// refuse a config that works today) and tracks one client per shard.
+func TestProvisionSmallMaxKeysLoads(t *testing.T) {
+	ctx, cancel := caddy.NewContext(caddy.Context{Context: t.Context()})
+	defer cancel()
+
+	h := Handler{MaxKeys: 50}
+	if err := h.Provision(ctx); err != nil {
+		t.Fatalf("max_keys 50 must provision: %v", err)
+	}
+	defer func() {
+		if err := h.Cleanup(); err != nil {
+			t.Errorf("Cleanup: %v", err)
+		}
+	}()
+	if err := h.Validate(); err != nil {
+		t.Fatalf("max_keys 50 must validate: %v", err)
+	}
+	if got := h.store.(*store).maxPerShard; got != 1 {
+		t.Errorf("max_keys 50: %d keys per shard, want 1", got)
+	}
+}
+
+func TestWarnSmallMaxKeys(t *testing.T) {
+	cases := []struct {
+		maxKeys   int
+		effective int // 0 = no warning
+	}{
+		{1, numShards},
+		{50, numShards},
+		{numShards - 1, numShards},
+		{numShards, numShards},
+		{100, numShards},
+		{2*numShards - 1, numShards},
+		{2 * numShards, 0},
+		{1000, 0},
+		{100_000, 0},
+		{0, 0},  // Validate refuses it; no warning on top
+		{-5, 0}, // likewise
+	}
+	for _, tc := range cases {
+		core, logs := observer.New(zap.WarnLevel)
+		warnSmallMaxKeys(zap.New(core), tc.maxKeys)
+		got := logs.All()
+		if tc.effective == 0 {
+			if len(got) != 0 {
+				t.Errorf("max_keys %d: want no warning, got %v", tc.maxKeys, got)
+			}
+			continue
+		}
+		if len(got) != 1 {
+			t.Fatalf("max_keys %d: want one warning, got %v", tc.maxKeys, got)
+		}
+		fields := got[0].ContextMap()
+		if got[0].Level != zap.WarnLevel || fields["max_keys"] != int64(tc.maxKeys) ||
+			fields["effective_max_keys"] != int64(tc.effective) || fields["shards"] != int64(numShards) {
+			t.Errorf("max_keys %d: warning = %q %v, want level warn, max_keys %d, effective_max_keys %d, shards %d",
+				tc.maxKeys, got[0].Message, fields, tc.maxKeys, tc.effective, numShards)
+		}
+	}
+	warnSmallMaxKeys(nil, 50) // a nil logger is skipped, not dereferenced
 }
 
 // BenchmarkUnboxedRequestPhase measures the hot path: an unboxed key's

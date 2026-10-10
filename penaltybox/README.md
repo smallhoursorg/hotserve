@@ -94,14 +94,14 @@ All options and defaults:
 | Option        | Default              | Meaning                                                              |
 | ------------- | -------------------- | -------------------------------------------------------------------- |
 | `header`      | `X-Rate-Limit-Level` | Origin response header carrying the hint level                       |
-| `key`         | `{client_ip}`        | Client identity; respects the server's `trusted_proxies` config. A key whose whole value is one IPv6 address counts under its /64; IPv4 (also mapped or NAT64 well-known) per address; anything else verbatim (see [Client keys](#client-keys-ipv6-by-64)) |
+| `key`         | `{client_ip}`        | Client identity; respects the server's `trusted_proxies` config. A key whose whole value is one IPv6 address counts under its /64; IPv4 (also mapped or NAT64 well-known) per address; anything else verbatim (see [Client keys](#client-keys-ipv6-by-64)). A key that resolves to an empty string fails open: the request is not counted and its hint header is not stripped (see [Semantics](#semantics-and-trade-offs-read-this)) |
 | `min_level`   | `2`                  | Lowest level that counts toward the budget (1–3)                     |
 | `window`      | `60s`                | Sliding window; free-form duration (Fastly's 1s/10s/60s is the interoperability convention) |
 | `limit`       | `30`                 | Weighted units per window; *exceeding* (not reaching) it boxes       |
 | `penalty_ttl` | `5m`                 | Box duration; Fastly allows 1m–1h — mirror that range for doc parity |
 | `strip`       | `true`               | Remove the hint header before the client sees it (all responses)     |
 | `status`      | `429`                | Status for boxed clients (4xx/5xx)                                   |
-| `max_keys`    | `100000`             | Hard cap on tracked clients; oldest-idle evicted beyond it           |
+| `max_keys`    | `100000`             | Cap on tracked clients, split evenly across 64 shards (rounded down, at least 1 each); a full shard evicts its oldest-idle unboxed client, or its oldest-idle client outright when all are boxed. Below 128 (one slot per shard) it loads with a warning (see [Semantics](#semantics-and-trade-offs-read-this)) |
 
 ### Per-tier budgets
 
@@ -185,13 +185,45 @@ configuration, which is where XFF trust belongs.
   effective threshold. A config reload resets counters and boxes
   (fails open). Distributed state is a possible future addition — the
   counter store sits behind a small interface for exactly that reason.
-- **Memory is hard-bounded.** At most `max_keys` clients are tracked;
-  an attacker rotating IPs exhausts the cap into evictions, not into
-  unbounded memory. Actively boxed entries are the last to be evicted.
-  The cap is enforced per shard (64 of them), and the hash that picks a
-  key's shard is seeded at random each time the store is built (every
-  config load), so a client cannot choose keys that pile into one shard
-  and evict other clients' counters there.
+- **Memory is hard-bounded.** `max_keys` is split evenly across 64
+  shards, rounded down with a minimum of 1 per shard, so at most
+  64 × max(⌊`max_keys`/64⌋, 1) clients are tracked: 99,968 for the
+  default `100000`, 960 for `1000`, and 64 for any value below 64. A
+  client takes a slot only when it gets a counted response
+  (level ≥ `min_level`); an attacker rotating IPs exhausts the cap
+  into evictions, not into unbounded memory. To admit a new client a
+  full shard first drops unboxed entries idle for longer than the
+  longest window, then evicts its oldest-idle unboxed client, whose
+  count is lost. An actively boxed client is evicted only when every
+  client in its shard is boxed, and that eviction lifts its box. The
+  hash that picks a key's shard is seeded at random each time the
+  store is built (every config load), so a client cannot choose keys
+  that pile into one shard and evict other clients' counters there:
+  flushing a given client's count takes on the order of `max_keys`
+  new keys, spread across all shards.
+- **A small `max_keys` fails open.** The cap is a memory bound, not a
+  promise that every client is tracked. Below 128 every shard holds
+  one client: when two clients' counted responses interleave in one
+  shard, each evicts the other and its count starts again, so an
+  abuser sharing a shard with any other active client may never reach
+  `limit`, and a box lasts only until another client is counted in
+  that shard. With 64 shards, a given client more likely than not
+  shares its shard once about 45 clients are counted at once. A value
+  below 128 loads (refusing it would fail a config that works) but
+  logs a warning. Size `max_keys` well above the number of clients
+  that get counted responses within one window.
+- **An empty key fails open.** A `key` that resolves to an empty
+  string is not counted and never boxed: the request passes straight
+  to the next handler, and on that path the hint header is not
+  stripped either, even with `strip true` (a known gap). With a
+  header-based key such as `{http.request.header.CF-Connecting-IP}`,
+  a client that reaches Caddy without that header is never limited.
+  The default key is the connection's address unless a trusted proxy
+  supplies one, so a client cannot empty it by leaving a header out.
+  `{client_ip}` is a Caddyfile shorthand: in JSON config write
+  `{http.vars.client_ip}` (the default when `key` is omitted), because
+  a JSON `"key": "{client_ip}"` is an unknown placeholder that
+  resolves to an empty string, and every request fails open.
 
 ### Client keys: IPv6 by /64
 
