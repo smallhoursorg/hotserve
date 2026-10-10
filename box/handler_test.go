@@ -147,7 +147,7 @@ type nextFunc func(http.ResponseWriter, *http.Request) error
 
 func (f nextFunc) ServeHTTP(w http.ResponseWriter, r *http.Request) error { return f(w, r) }
 
-func pollHeader(h string) http.Header { return http.Header{pollSecretHeader: {h}} }
+func pollHeader(h string) http.Header { return http.Header{"Authorization": {pollScheme + h}} }
 
 // body decodes a JSON response, failing on anything else.
 func body(t *testing.T, w *httptest.ResponseRecorder) map[string]any {
@@ -342,8 +342,8 @@ func (f failingReader) Read([]byte) (int, error) {
 
 func TestHandlerPushUntilTheApplier(t *testing.T) {
 	r := newRig(t)
-	h, _, _ := secret(1)
-	w := r.do(t, req{method: http.MethodPost, target: "/", token: r.token(t), body: failingReader{t}, header: pollHeader(h)})
+	_, _, digest := secret(1)
+	w := r.do(t, req{method: http.MethodPost, target: "/", token: r.token(t), body: failingReader{t}, header: http.Header{"X-Box-Poll-Digest": {digest}}})
 	wantError(t, w, http.StatusNotImplemented, msgNoApplier)
 	wantError(t, r.do(t, req{method: http.MethodPost, target: "/", body: failingReader{t}}), http.StatusUnauthorized, unauthorized)
 }
@@ -404,7 +404,12 @@ func TestHandlerResultPollSecret(t *testing.T) {
 		// The marker's digest begins with the id but is not the
 		// secret's: the comparison is of the whole digest.
 		"digest shares only the id": {func(t *testing.T, r *rig) { r.marker(t, id, id+strings.Repeat("0", 32), r.clock.Now()) }, "/?result=" + id, pollHeader(h), false},
-		"two headers":               {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now()) }, "/?result=" + id, http.Header{pollSecretHeader: {h, h}}, false},
+		"two headers":               {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now()) }, "/?result=" + id, http.Header{"Authorization": {pollScheme + h, pollScheme + h}}, false},
+		"scheme in another case":    {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now()) }, "/?result=" + id, http.Header{"Authorization": {"box-POLL " + h}}, true},
+		"the secret as a bearer":    {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now()) }, "/?result=" + id, http.Header{"Authorization": {"Bearer " + h}}, false},
+		"the secret bare":           {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now()) }, "/?result=" + id, http.Header{"Authorization": {h}}, false},
+		"the old header":            {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now()) }, "/?result=" + id, http.Header{"X-Box-Poll-Secret": {h}}, false},
+		"two spaces":                {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now()) }, "/?result=" + id, http.Header{"Authorization": {"Box-Poll  " + h[:43]}}, false},
 		"unpadded":                  {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now()) }, "/?result=" + id, pollHeader(strings.TrimRight(h, "=")), false},
 		"url alphabet":              {func(t *testing.T, r *rig) { r.marker(t, urlID, urlDigest, r.clock.Now()) }, "/?result=" + urlID, pollHeader(urlHeader), false},
 		"31 bytes":                  {func(t *testing.T, r *rig) { r.marker(t, shortID, shortDigest, r.clock.Now()) }, "/?result=" + shortID, pollHeader(shortHeader), false},

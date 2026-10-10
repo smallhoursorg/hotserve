@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
@@ -81,10 +82,13 @@ const (
 	msgNoResult   = "no result and no pending push for %s: swept, never admitted, or lost (journalctl -u hotserve-box-apply on the box)"
 )
 
-// pollSecretHeader carries a push's poll secret: 32 random bytes the
-// workflow chose, standard base64 with padding — what `head -c 32
-// /dev/urandom | base64` prints.
-const pollSecretHeader = "X-Box-Poll-Secret" //nolint:gosec // a header name, not a credential
+// pollScheme is the Authorization scheme a result poll carries its
+// push's poll secret in: 32 random bytes the workflow chose, standard
+// base64 with padding — what `head -c 32 /dev/urandom | base64`
+// prints. Authorization, because Caddy's access log redacts it and no
+// custom header (liveswap retired X-Liveswap-Secret for that leak);
+// the push itself carries only the secret's digest.
+const pollScheme = "Box-Poll "
 
 const pollSecretLen = 32
 
@@ -225,19 +229,21 @@ func pending(m *marker, now time.Time) bool {
 }
 
 // pollSecret is the poll secret's check, and the marker it admits on:
-// exactly one header, exactly 32 bytes in standard padded base64, whose
-// sha256 begins with id and equals, in constant time, the digest the
+// exactly one Authorization header, in the Box-Poll scheme (its case
+// ignored, as an auth scheme's is), exactly 32 bytes in standard padded
+// base64, whose sha256 begins with id and equals, in constant time, the digest the
 // marker holds; the push pending. nil admits nothing, and says nothing
 // in the journal: it runs before the preamble, so a line here would
 // be one per unauthenticated request, outside the limiter's budgets.
 // A marker that cannot be read is the box's error, reported by the
 // authenticated request that reads it next.
 func (h *Handler) pollSecret(r *http.Request, id string) *marker {
-	values := r.Header.Values(pollSecretHeader)
-	if len(values) != 1 || len(values[0]) != base64.StdEncoding.EncodedLen(pollSecretLen) {
+	values := r.Header.Values("Authorization")
+	if len(values) != 1 || len(values[0]) != len(pollScheme)+base64.StdEncoding.EncodedLen(pollSecretLen) ||
+		!strings.EqualFold(values[0][:len(pollScheme)], pollScheme) {
 		return nil
 	}
-	secret, err := base64.StdEncoding.Strict().DecodeString(values[0])
+	secret, err := base64.StdEncoding.Strict().DecodeString(values[0][len(pollScheme):])
 	if err != nil || len(secret) != pollSecretLen {
 		return nil
 	}

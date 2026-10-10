@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,34 +19,38 @@ import (
 	"github.com/smallhoursorg/hotserve/liveswap/deploytrust"
 )
 
-// FuzzResultPoll drives `GET /?result=` with any query, any poll
-// secret header and any marker bytes, filed under the id the header
-// would derive. The poll secret admits a request exactly when an
-// oracle written from the Handler contract says it should — one
-// `result` parameter, a canonical 32-byte standard base64 secret
-// whose digest's first 32 hex are that parameter and whose whole
-// digest the marker holds, posted within the last fifteen minutes —
-// and is never charged. Everything else is the flat 401 without a
-// bearer; with one, a malformed query is 400 and the rest never 401.
+// FuzzResultPoll drives `GET /?result=` with any query, any
+// Authorization scheme and secret, and any marker bytes, filed under
+// the id the secret would derive. The poll secret admits a request
+// exactly when an oracle written from the Handler contract says it
+// should — one `result` parameter, the Box-Poll scheme in any case, a
+// canonical 32-byte standard base64 secret whose digest's first 32 hex
+// are that parameter and whose whole digest the marker holds, posted
+// within the last fifteen minutes — and is never charged. Everything
+// else is the flat 401 without a bearer; with one (in place of the
+// poll's Authorization), a malformed query is 400 and the rest never
+// 401.
 func FuzzResultPoll(f *testing.F) {
 	h, id, digest := secret(7)
 	posted := func(age time.Duration) []byte {
 		b, _ := json.Marshal(marker{SHA256: digest, Posted: time.Unix(1_700_000_000, 0).Add(-age)})
 		return b
 	}
-	f.Add("result="+id, h, posted(0), false)
-	f.Add("result="+id, h, posted(pendingLife-time.Second), false)
-	f.Add("result="+id, h, posted(pendingLife), false)
-	f.Add("result="+id, h, posted(-time.Second), false)
-	f.Add("result="+id+"&result="+id, h, posted(0), false)
-	f.Add("result="+id, h[:43], posted(0), true)
-	f.Add("result=%ZZ", h, posted(0), true)
-	f.Add("x=1", "", []byte("{"), true)
-	f.Add("result="+id, h, []byte(`{"sha256":"`+id+`","posted":"2023-11-14T22:13:20Z"}`), false)
+	f.Add("result="+id, "Box-Poll ", h, posted(0), false)
+	f.Add("result="+id, "box-poll ", h, posted(0), false)
+	f.Add("result="+id, "Bearer ", h, posted(0), false)
+	f.Add("result="+id, "Box-Poll ", h, posted(pendingLife-time.Second), false)
+	f.Add("result="+id, "Box-Poll ", h, posted(pendingLife), false)
+	f.Add("result="+id, "Box-Poll ", h, posted(-time.Second), false)
+	f.Add("result="+id+"&result="+id, "Box-Poll ", h, posted(0), false)
+	f.Add("result="+id, "Box-Poll ", h[:43], posted(0), true)
+	f.Add("result=%ZZ", "Box-Poll ", h, posted(0), true)
+	f.Add("x=1", "", "", []byte("{"), true)
+	f.Add("result="+id, "Box-Poll ", h, []byte(`{"sha256":"`+id+`","posted":"2023-11-14T22:13:20Z"}`), false)
 
 	r := newRig(f)
 	token := r.token(f)
-	f.Fuzz(func(t *testing.T, query, header string, markerBytes []byte, bearer bool) {
+	f.Fuzz(func(t *testing.T, query, scheme, header string, markerBytes []byte, bearer bool) {
 		if query == "" {
 			return // `GET /`, the status: not this target's
 		}
@@ -75,12 +80,12 @@ func FuzzResultPoll(f *testing.F) {
 		var m marker
 		markerOK := len(markerBytes) <= maxMarker && json.Unmarshal(markerBytes, &m) == nil && m.SHA256 == derived
 		age := r.clock.Now().Sub(m.Posted)
-		admit := single && len(raw) == pollSecretLen && base64.StdEncoding.EncodeToString(raw) == header &&
+		admit := !bearer && single && strings.EqualFold(scheme, "Box-Poll ") && len(raw) == pollSecretLen && base64.StdEncoding.EncodeToString(raw) == header &&
 			q["result"][0] == derived[:32] && markerOK && age >= 0 && age < pendingLife
 
 		hr := httptest.NewRequest(http.MethodGet, "/", nil)
 		hr.URL.RawQuery = query
-		hr.Header[pollSecretHeader] = []string{header}
+		hr.Header["Authorization"] = []string{scheme + header}
 		if bearer {
 			hr.Header.Set("Authorization", "Bearer "+token)
 		}
