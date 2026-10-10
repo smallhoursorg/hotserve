@@ -26,7 +26,7 @@
 #
 #   HOTSERVE_TOKEN     a token the box block's deploy_trust accepts, naming
 #                      HEAD in a sha claim: hotserve deploy-token --claims
-#                      sha=$(git rev-parse HEAD) --ttl 20m ... Not needed in
+#                      sha=$(git rev-parse HEAD) --ttl 1h ... Not needed in
 #                      GitHub Actions: with `permissions: id-token: write` a
 #                      fresh one is minted for each request
 #   HOTSERVE_AUDIENCE  the audience the box block's deploy_trust expects
@@ -46,6 +46,9 @@ actions=${GITHUB_ACTIONS:-}
 # A request's bound. A push's is longer: the box answers a POST within
 # 30 s once it has the bundle, but checking a long chain takes longer.
 maxtime=60
+# A laptop's one token can outlive a long run; a minted one cannot.
+expired=", or HOTSERVE_TOKEN expired (its --ttl)"
+[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || expired=
 
 tmpd=$(mktemp -d)
 trap 'rm -rf "$tmpd"' EXIT
@@ -69,8 +72,12 @@ fi
 mint() {
 	if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
 		printf 'Authorization: Bearer %s\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" >"$tmpd/mint"
-		curl -fsS -H "@$tmpd/mint" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" |
-			sed -n 's/.*"value" *: *"\([^"]*\)".*/\1/p' >"$tmpd/token" || true
+		for try in 1 2 3; do
+			curl -fsS --max-time 30 -H "@$tmpd/mint" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" |
+				sed -n 's/.*"value" *: *"\([^"]*\)".*/\1/p' >"$tmpd/token" || true
+			[ -s "$tmpd/token" ] && break
+			sleep "$try"
+		done
 		[ -s "$tmpd/token" ] || { echo "apply: could not mint an OIDC token" >&2; return 1; }
 		printf '::add-mask::%s\n' "$(cat "$tmpd/token")"
 	else
@@ -81,9 +88,11 @@ mint() {
 }
 
 # req <curl args...>: one request with a token. The status goes in
-# $code — 000 when no answer came — and the body in $tmpd/resp.
+# $code — 000 when no answer came, `mint` when no token could be had
+# and nothing was sent — and the body in $tmpd/resp.
 req() {
-	mint || exit 1
+	: >"$tmpd/resp"
+	mint || { code=mint; return 0; }
 	code=$(curl -sS -o "$tmpd/resp" -w '%{http_code}' --max-time "$maxtime" \
 		-H "@$tmpd/auth" "$@") || code=000
 }
@@ -96,10 +105,22 @@ field() {
 	sed -n 's/.*"'"$1"'":"\(\([^\\"]*\\.\)*[^\\"]*\)".*/\1/p' "$tmpd/resp" | unescape
 }
 unescape() {
-	awk '{
+	awk '
+	function hex(h,   n, k) {
+		n = 0
+		for (k = 1; k <= 4; k++) n = n * 16 + index("0123456789abcdef", tolower(substr(h, k, 1))) - 1
+		return n
+	}
+	{
 		out = ""; s = $0
 		while ((i = index(s, "\\")) > 0) {
 			out = out substr(s, 1, i - 1); c = substr(s, i + 1, 1)
+			h = substr(s, i + 2, 4)
+			# An escaped ASCII character (json.Marshal writes <, > and &
+			# so) is that character; anything else stays escaped.
+			if (c == "u" && h ~ /^[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]$/ && (n = hex(h)) > 0 && n < 128) {
+				out = out sprintf("%c", n); s = substr(s, i + 6); continue
+			}
 			if (c == "n") out = out "\n"
 			else if (c == "t") out = out "\t"
 			else if (c == "r") out = out "\r"
@@ -198,6 +219,9 @@ outcome() {
 	429)
 		red "the box is turning away requests from this address after too many failed ones (429); re-run later"
 		return 0 ;;
+	mint)
+		red "could not mint an OIDC token for this request"
+		return 0 ;;
 	*)
 		e=$(field error)
 		red "HTTP $code: ${e:-$(head -c 300 "$tmpd/resp" 2>/dev/null)}"
@@ -217,12 +241,12 @@ poll() {
 		[ "$wait" -ge 5 ] || wait=$((wait + 1))
 		req "$url?result=$id"
 		case $code in
-		200|202|422|429) outcome && return 0 ;;
+		200|202|422) outcome && return 0 ;;
 		401)
-			red "the box refused a token for the result poll (401). If this push changed the box block's deploy_trust, it may have applied and dropped this workflow: journalctl -u hotserve-box-apply on the box says"
+			red "the box refused a token for the result poll (401)$expired. If this push changed the box block's deploy_trust, it may have applied and dropped this workflow: journalctl -u hotserve-box-apply on the box says"
 			return 0 ;;
 		404) last=404 ;;
-		000|502|503|504) ;;
+		000|mint|429|502|503|504) ;;
 		*) outcome; return 0 ;;
 		esac
 	done
@@ -241,6 +265,7 @@ send() {
 	req "$url"
 	case $code in
 	200) ;;
+	mint) red "could not mint an OIDC token"; return 0 ;;
 	401) refused401; red "the box refused the token (401); the log above says what it must trust"; return 0 ;;
 	000) red "$url did not answer"; return 0 ;;
 	*) e=$(field error); red "$url: HTTP $code: ${e:-$(head -c 300 "$tmpd/resp" 2>/dev/null)}"; return 0 ;;
@@ -316,10 +341,22 @@ send() {
 		req -X POST -H "X-Box-Request-Id: $id" -H "Content-Type: application/gzip" \
 			--data-binary "@$tmpd/bundle.tgz" "$url"
 		maxtime=60
-		[ "$code" = 409 ] || break
+		case $code in
+		409|400) ;;
+		mint) red "could not mint an OIDC token"; return 0 ;;
+		*) break ;;
+		esac
 		e=$(field error)
 		case $e in
 		'duplicate request id'*) break ;;
+		'could not read the bundle'*)
+			# The upload broke; nothing was admitted under this id.
+			if [ "$(date +%s)" -ge "$deadline" ]; then
+				red "$e"
+				return 0
+			fi
+			printf 'apply: %s; sending it again\n' "$e"
+			sleep 2 ;;
 		'a push is being admitted'*|'a push is pending'*)
 			if [ "$(date +%s)" -ge "$deadline" ]; then
 				red "$e: for 15 minutes. On the box: journalctl -u hotserve-box-apply -u hotserve-box-apply.path, and if the path unit is failed, systemctl restart hotserve-box-apply.path (again ten seconds later if it fails)"
@@ -333,7 +370,9 @@ send() {
 		esac
 	done
 	case $code in
-	000) echo "apply: no answer to the push; asking for its result"; poll ;;
+	# No answer, or one from something in front of the box: the box may
+	# have the push, and the id is enough to ask.
+	000|502|503) echo "apply: no answer from the box to the push; asking for its result"; poll ;;
 	409|504) echo "apply: the box has the push; asking for its result"; poll ;;
 	*) outcome || poll ;;
 	esac

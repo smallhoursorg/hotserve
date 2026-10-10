@@ -1,6 +1,6 @@
 # Checks every box's Caddyfile on every push and pull request, with the
-# hotserve version the boxes run; on a push to main, sends HEAD to each
-# box (bin/apply). A box applies it only if this workflow's token names
+# hotserve version the boxes run; on a push to main, also sends HEAD to
+# each box (bin/apply). A box applies it only if this workflow's token names
 # this repository's main, and a key the box lists signed every commit
 # since the one it runs. Nothing secret is stored here.
 name: apply
@@ -30,10 +30,14 @@ jobs:
           sudo install -m 0755 hotserve /usr/local/bin/hotserve
       - run: make check
 
+  # Not after check: each box validates what it is sent, and one box's
+  # broken file must not hold another box's fix back.
   apply:
-    needs: check
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    # bin/apply bounds each box (15 minutes of retries, then of polls);
+    # this bounds a step that hangs anyway.
+    timeout-minutes: 120
     permissions:
       contents: read
       id-token: write # the token each box's deploy_trust checks

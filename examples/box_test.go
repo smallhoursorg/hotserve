@@ -253,6 +253,9 @@ func TestBoxSigner(t *testing.T) {
 		}
 	}
 	// Again: nothing added, signing still set up.
+	if got := r.git("diff", "--cached", "--name-only"); got != boxFile {
+		t.Errorf("staged after make signer: %q", got)
+	}
 	if out, code := r.run("signer"); code != 0 || !strings.Contains(out, "already lists this key, as alice@example.com") || r.read(boxFile) != after {
 		t.Fatalf("a second run: exit %d\n%s", code, out)
 	}
@@ -351,8 +354,10 @@ type standIn struct {
 	mints     int
 	bundles   int
 	onGet     string   // "": the baseline; "401"; "nobaseline"
-	onPost    []string // a behaviour per POST, in order: "admitting", "504", "lost", "sync"; then "": 202
+	onPost    []string // a behaviour per POST, in order: "admitting", "unread", "504", "502", "lost", "sync"; then "": 202
 	edited    bool     // results say the file was edited on the box
+	throttle  int      // polls answered 429 before the result
+	mintFails int      // token requests that fail before one succeeds
 }
 
 var boxID = regexp.MustCompile(`^[0-9a-f]{32}$`)
@@ -367,20 +372,23 @@ func newStandIn(t *testing.T, baseline string, installed []byte) *standIn {
 
 func digest(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
 
+// reply answers as the box does (liveswap.RespondJSON): json.Marshal,
+// which escapes <, > and & — bin/apply must undo that.
 func reply(w http.ResponseWriter, code int, v any) {
-	var b bytes.Buffer
-	enc := json.NewEncoder(&b)
-	enc.SetEscapeHTML(false)
-	_ = enc.Encode(v)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	_, _ = w.Write(b.Bytes())
+	_, _ = w.Write(encode(v))
 }
 
 func (s *standIn) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if r.URL.Path == "/token" {
+		if s.mintFails > 0 {
+			s.mintFails--
+			http.Error(w, "busy", http.StatusServiceUnavailable)
+			return
+		}
 		s.mints++
 		tok := fmt.Sprintf("minted-%d-%s", s.mints, r.URL.Query().Get("audience"))
 		s.tokens[tok] = false
@@ -402,6 +410,11 @@ func (s *standIn) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		id := r.URL.Query().Get("result")
 		if !boxID.MatchString(id) || r.URL.RawQuery != "result="+id {
 			s.t.Errorf("a poll of %q", r.URL.RawQuery)
+		}
+		if s.throttle > 0 {
+			s.throttle--
+			reply(w, 429, map[string]string{"error": "too many failed requests"})
+			return
 		}
 		res, ok := s.results[id]
 		if !ok {
@@ -457,6 +470,10 @@ func (s *standIn) post(w http.ResponseWriter, r *http.Request) {
 		reply(w, 409, map[string]string{"error": "a push is being admitted; retry in a moment"})
 		return
 	}
+	if how == "unread" { // the upload broke: nothing admitted, the id not held
+		reply(w, 400, map[string]string{"error": "could not read the bundle: unexpected EOF"})
+		return
+	}
 	if s.ids[id] {
 		reply(w, 409, map[string]string{"error": "duplicate request id: poll /?result=" + id})
 		return
@@ -507,12 +524,14 @@ func (s *standIn) post(w http.ResponseWriter, r *http.Request) {
 	res := map[string]any{"id": id, "phase": "verified", "commit": b.Commit.ID, "path": b.Path, "signer": signer,
 		"box_webhook": "deploy.example.com", "caddyfile_edited_out_of_band": s.edited, "apps": next.Apps}
 	verified := encode(res)
-	res["phase"], res["diff"] = "applied", "--- installed\n+++ pushed\n@@ a hunk @@\n-\told \"line\"\n+\tnew\tline\n"
+	res["phase"], res["diff"] = "applied", "--- installed\n+++ pushed\n@@ a hunk @@\n-\told \"line\"\n+\tnew\tline <a & b>\n"
 	s.results[id] = encode(res)
 	s.baseline, s.installed = b.Commit.ID, b.Caddyfile
 	switch how {
 	case "504":
 		reply(w, 504, map[string]string{"id": id})
+	case "502": // a proxy in front of the box gave up on the answer
+		http.Error(w, "bad gateway", http.StatusBadGateway)
 	case "lost":
 		conn, _, err := w.(http.Hijacker).Hijack()
 		if err == nil {
@@ -530,11 +549,8 @@ func (s *standIn) post(w http.ResponseWriter, r *http.Request) {
 }
 
 func encode(v any) []byte {
-	var b bytes.Buffer
-	enc := json.NewEncoder(&b)
-	enc.SetEscapeHTML(false)
-	_ = enc.Encode(v)
-	return b.Bytes()
+	b, _ := json.Marshal(v)
+	return append(b, '\n')
 }
 
 // applyRig is a repository whose box runs its first signed commit — as
@@ -611,7 +627,7 @@ func TestBoxApply(t *testing.T) {
 		for _, want := range []string{
 			"the box runs " + g.base[:7] + "; sending " + head[:7] + " (2 commits)",
 			"deploy.example.com at " + head[:7] + ", signed by alice@example.com; verified; installing",
-			"--- installed\n+++ pushed\n@@ a hunk @@\n-\told \"line\"\n+\tnew\tline\n",
+			"--- installed\n+++ pushed\n@@ a hunk @@\n-\told \"line\"\n+\tnew\tline <a & b>\n",
 			"deploy.example.com at " + head[:7] + ": loaded; running apps are not restarted; apps example",
 		} {
 			if !strings.Contains(out, want) {
@@ -650,9 +666,11 @@ func TestBoxApply(t *testing.T) {
 	t.Run("an answer that comes late, or not at all", func(t *testing.T) {
 		for how, said := range map[string]string{
 			"504":       "the box has the push; asking for its result",
-			"lost":      "no answer to the push; asking for its result",
+			"lost":      "no answer from the box to the push; asking for its result",
 			"admitting": "a push is being admitted; retry in a moment; trying again",
 			"sync":      ": loaded; running apps are not restarted",
+			"unread":    "could not read the bundle: unexpected EOF; sending it again",
+			"502":       "no answer from the box to the push; asking for its result",
 		} {
 			t.Run(how, func(t *testing.T) {
 				g := newApplyRig(t)
@@ -673,7 +691,7 @@ func TestBoxApply(t *testing.T) {
 	t.Run("refused before anything is sent", func(t *testing.T) {
 		g := newApplyRig(t)
 		g.box.onGet = "nobaseline"
-		if out, code := g.apply(); code != 1 || !strings.Contains(out, "HTTP 409: this box has no baseline") {
+		if out, code := g.apply(); code != 1 || !strings.Contains(out, "HTTP 409: this box has no baseline; hotserve init <sha>, as root") {
 			t.Fatalf("no baseline: exit %d\n%s", code, out)
 		}
 		g.box.onGet = "401"
@@ -719,6 +737,8 @@ func TestBoxApply(t *testing.T) {
 			"HOTSERVE_TOKEN=",
 		}
 		g.box.onPost = []string{"504"}
+		// A mint that fails is tried again; a throttled poll is "not yet".
+		g.box.mintFails, g.box.throttle = 1, 2
 		out, code := g.apply(actions...)
 		if code != 0 || !strings.Contains(out, "::add-mask::minted-1-hotserve\n") || !strings.Contains(out, "::group::apply deploy.example.com\n") {
 			t.Fatalf("exit %d\n%s", code, out)

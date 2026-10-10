@@ -79,6 +79,9 @@ for f in $boxes; do
 			done = 1
 		}' "$f" >"$tmp"
 	mv "$tmp" "$f"
+	# Staged, so the commit that follows — make wip, or a plain commit —
+	# carries it.
+	git add -- "$f"
 	printf 'signer: added %s (%s) to %s\n' "$principal" "$type" "$f"
 done
 
@@ -91,4 +94,4 @@ git config user.signingkey "$signing"
 git config commit.gpgsign true
 printf 'signer: commits from this checkout are signed with %s\n' "$signing"
 echo "signer: on a box that already runs, the commit that adds you must be signed by a signer it lists:"
-echo "signer: commit it with make wip and hand the branch to one (README.md, Adding a signer)"
+echo "signer: commit it (staged) with make wip and hand the branch to one (README.md, Adding a signer)"

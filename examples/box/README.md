@@ -189,8 +189,9 @@ sit on `main`'s first-parent line.
 A box checks a commit against the signers it *runs*, so the commit that
 adds Bob is signed by someone already listed:
 
-1. Bob, in his clone: `make signer`, then `make wip` (the commit that
-   adds his line, unsigned), and pushes the branch.
+1. Bob, in his clone, on a branch: `make signer` (it stages the line
+   it adds), then `make wip` — that commit, unsigned — and pushes the
+   branch.
 2. Alice, a signer: `git merge --squash bob-signer && git commit` —
    one commit, signed by her — and pushes `main`.
 3. Once it applies, Bob's own signed commits go through.

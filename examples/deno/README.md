@@ -55,9 +55,10 @@ apt install -y unzip && unzip -o "$f" deno -d /usr/local/bin
 `hotserve.caddy` inside its `app` block. As root that is
 `/etc/hotserve/Caddyfile`: edit, `hotserve validate --config` it,
 `systemctl reload hotserve`. Once the box has a
-[box repo](https://github.com/smallhoursorg/hotserve/tree/main/examples/box#change-the-config), it is that repo's `Caddyfile`
-and `make push`. The box example ships this app's block already.
-Either way, the file is:
+[box repo](https://github.com/smallhoursorg/hotserve/tree/main/examples/box#change-the-config), it is that repo's `<host>/Caddyfile`,
+committed signed and pushed to `main`. The box example ships the Node
+app's block; this app's `command`, `pre_start` and `env` lines replace
+those. Either way, the file is:
 
 ```caddyfile
 {
