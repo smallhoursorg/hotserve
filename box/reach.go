@@ -5,9 +5,9 @@ package box
 // as `hotserve adapt` prints it — whether a GET and a POST for / on the
 // box_webhook host meet box_webhook before any handler that could
 // answer them. Pure: the JSON in, a verdict out, no module loaded but
-// the five matcher types it decides with. Fail-closed both ways: a
-// handler the table has not weighed answers, and a matcher the table
-// cannot decide may match.
+// the five matcher types it decides with. Fail-closed every way: a
+// handler the table has not weighed answers, a matcher the table
+// cannot decide may match, and one it does not know may fail.
 
 import (
 	"context"
@@ -35,52 +35,90 @@ func msgUnreachable(what string) string {
 	return "the new Caddyfile does not reach box_webhook on /: " + what
 }
 
-// The adaptation's shape, as far as the walk reads it: the http app's
-// servers, each a route list; a route's group, matcher sets, handlers
-// and terminal flag; a handler's module name, a subroute's routes and a
-// headers handler's request section. Everything else is left where it
-// is.
-type adaptedRoute struct {
-	Group    string                       `json:"group"`
-	Match    []map[string]json.RawMessage `json:"match"`
-	Handle   []adaptedHandler             `json:"handle"`
-	Terminal bool                         `json:"terminal"`
-}
-
-type adaptedHandler struct {
-	Handler string `json:"handler"`
-	// Routes and Request are read only for the handler they belong to
-	// (a subroute's, a headers handler's): another module's key of the
-	// same name, whatever its shape, is not this walk's to decode.
-	Routes  json.RawMessage `json:"routes"`
-	Request json.RawMessage `json:"request"`
-	// sub is a subroute's Routes, decoded once by resolve, so the walk
-	// reads a tree with no error path of its own.
-	sub []adaptedRoute
-}
-
-// resolve decodes every subroute's routes in the tree.
-func resolve(routes []adaptedRoute) error {
-	for i := range routes {
-		for j := range routes[i].Handle {
-			h := &routes[i].Handle[j]
-			if h.Handler != "subroute" || len(h.Routes) == 0 {
-				continue
-			}
-			if json.Unmarshal(h.Routes, &h.sub) != nil {
-				return errAdaptation
-			}
-			if err := resolve(h.sub); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
 // errAdaptation is the box's error for an adaptation the walk cannot
 // read: a fixed text, since a decoder's words quote the input.
 var errAdaptation = errors.New("the adaptation does not parse")
+
+// The adaptation is decoded as one JSON value and converted once, in a
+// single pass linear in its size, into the shape the walk reads: a
+// route's group, matcher sets, handlers and terminal flag; a handler's
+// module name, whether a headers handler has a request section, and a
+// subroute's routes. Another module's keys are never read, whatever
+// they hold; a value of the wrong shape where a route list, a set or a
+// handler must be is the adaptation's fault.
+type adaptedRoute struct {
+	group    string
+	match    []map[string]any
+	handle   []adaptedHandler
+	terminal bool
+}
+
+type adaptedHandler struct {
+	name    string
+	request bool
+	sub     []adaptedRoute
+}
+
+// routeList converts a decoded "routes" value.
+func routeList(v any) ([]adaptedRoute, error) {
+	if v == nil {
+		return nil, nil
+	}
+	list, ok := v.([]any)
+	if !ok {
+		return nil, errAdaptation
+	}
+	routes := make([]adaptedRoute, 0, len(list))
+	for _, item := range list {
+		m, ok := item.(map[string]any)
+		if !ok {
+			return nil, errAdaptation
+		}
+		var r adaptedRoute
+		r.group, _ = m["group"].(string)
+		r.terminal, _ = m["terminal"].(bool)
+		if sets := m["match"]; sets != nil {
+			l, ok := sets.([]any)
+			if !ok {
+				return nil, errAdaptation
+			}
+			for _, s := range l {
+				set, ok := s.(map[string]any)
+				if !ok {
+					return nil, errAdaptation
+				}
+				r.match = append(r.match, set)
+			}
+		}
+		if hs := m["handle"]; hs != nil {
+			l, ok := hs.([]any)
+			if !ok {
+				return nil, errAdaptation
+			}
+			for _, item := range l {
+				hm, ok := item.(map[string]any)
+				if !ok {
+					return nil, errAdaptation
+				}
+				var h adaptedHandler
+				h.name, _ = hm["handler"].(string)
+				switch h.name {
+				case "subroute":
+					sub, err := routeList(hm["routes"])
+					if err != nil {
+						return nil, err
+					}
+					h.sub = sub
+				case "headers":
+					h.request = hm["request"] != nil
+				}
+				r.handle = append(r.handle, h)
+			}
+		}
+		routes = append(routes, r)
+	}
+	return routes, nil
+}
 
 // reach asks the question of adapted for host, the box_webhook host
 // the walk found. nil: both requests meet box_webhook first. A
@@ -89,24 +127,17 @@ var errAdaptation = errors.New("the adaptation does not parse")
 // with no box_webhook routed for the host, which the walk of the same
 // bytes rules out.
 func reach(adapted []byte, host string) error {
-	var cfg struct {
-		Apps struct {
-			HTTP struct {
-				Servers map[string]struct {
-					Routes []adaptedRoute `json:"routes"`
-				} `json:"servers"`
-			} `json:"http"`
-		} `json:"apps"`
-	}
+	var cfg any
 	if json.Unmarshal(adapted, &cfg) != nil {
 		return errAdaptation
 	}
-	for _, name := range slices.Sorted(maps.Keys(cfg.Apps.HTTP.Servers)) {
+	servers, _ := dig(cfg, "apps", "http", "servers").(map[string]any)
+	for _, name := range slices.Sorted(maps.Keys(servers)) {
 		// The server that carries box_webhook is the one whose
 		// listener the workflow reaches; another server's routes for
 		// the same host answer on another port.
-		routes := cfg.Apps.HTTP.Servers[name].Routes
-		if err := resolve(routes); err != nil {
+		routes, err := routeList(dig(servers[name], "routes"))
+		if err != nil {
 			return err
 		}
 		if !carriesWebhook(routes) {
@@ -114,7 +145,7 @@ func reach(adapted []byte, host string) error {
 		}
 		for _, method := range []string{http.MethodGet, http.MethodPost} {
 			w := &reachWalk{req: reachRequest(method, host), groups: map[string]groupState{}}
-			switch end, b := w.routes(routes, matches, "", true); end {
+			switch end, b := w.routes(routes, matchVerdict{status: matches}, true); end {
 			case reachedWebhook:
 			case blocked:
 				return &refusal{msg: msgUnreachable(b.text(host))}
@@ -124,15 +155,28 @@ func reach(adapted []byte, host string) error {
 		}
 		return nil
 	}
-	return fmt.Errorf("the adaptation has no box_webhook")
+	return errors.New("the adaptation has no box_webhook")
+}
+
+// dig follows keys through decoded objects; nil when the path is not
+// there or runs through something else.
+func dig(v any, keys ...string) any {
+	for _, k := range keys {
+		m, ok := v.(map[string]any)
+		if !ok {
+			return nil
+		}
+		v = m[k]
+	}
+	return v
 }
 
 // carriesWebhook reports whether a box_webhook handler stands anywhere
 // in routes.
 func carriesWebhook(routes []adaptedRoute) bool {
 	for _, r := range routes {
-		for _, h := range r.Handle {
-			if h.Handler == "box_webhook" || (h.Handler == "subroute" && carriesWebhook(h.sub)) {
+		for _, h := range r.handle {
+			if h.name == "box_webhook" || (h.name == "subroute" && carriesWebhook(h.sub)) {
 				return true
 			}
 		}
@@ -150,6 +194,16 @@ const (
 	matches
 )
 
+// matchVerdict is a matcher's, a set's or a route's answer: its status,
+// the matcher it hangs on when that is mayMatch, and whether a matcher
+// may fail at request time — Caddy then answers its error and routes no
+// further, whatever stands behind.
+type matchVerdict struct {
+	status  matchStatus
+	matcher string
+	fails   bool
+}
+
 // reachEnd is how a walk of a route list ended: the routes ran out, the
 // request met box_webhook, or something stood in the way.
 type reachEnd int
@@ -160,17 +214,19 @@ const (
 	blocked
 )
 
-// reachBlock is what stood in the way: a handler by module name, or a
-// terminal route that ran out of handlers (name "": a site when it
-// stands at the server level), under a match that is certain or, when
-// may is set, hangs on matcher.
+// reachBlock is what stood in the way: a handler by module name, a
+// terminal route that ran out of handlers (name ""; a site when at the
+// server level), box_webhook itself behind a per-request matcher, or a
+// matcher that may fail — under a match that is certain or, when may is
+// set, hangs on matcher.
 type reachBlock struct {
 	name     string
-	terminal bool // a terminal route that ran out of handlers; site when at the server level
+	terminal bool
 	site     bool
 	changes  bool
 	may      bool
-	behind   bool // box_webhook itself, under a matcher decided per request
+	behind   bool
+	fails    bool
 	matcher  string
 }
 
@@ -179,6 +235,13 @@ type reachBlock struct {
 // empty from Caddy; from any other bytes they may be, and the text
 // still has to read.
 func (b *reachBlock) text(host string) string {
+	matcher := proof.Bound(b.matcher)
+	if matcher == "" {
+		matcher = "nameless"
+	}
+	if b.fails {
+		return "the " + matcher + " matcher ahead of it may fail (decided per request)"
+	}
 	what := proof.Bound(b.name)
 	switch {
 	case b.terminal && b.site:
@@ -187,10 +250,6 @@ func (b *reachBlock) text(host string) string {
 		what = "a terminal route"
 	case what == "":
 		what = "a nameless handler"
-	}
-	matcher := proof.Bound(b.matcher)
-	if matcher == "" {
-		matcher = "nameless"
 	}
 	switch {
 	case b.behind:
@@ -220,60 +279,66 @@ type reachWalk struct {
 }
 
 // routes walks rs in Caddy's order, each route under the enclosing
-// match outer (hanging on matcher when outer is mayMatch), and ends at
-// the first handler that decides. top is the server's own route list,
-// whose routes are sites.
-func (w *reachWalk) routes(rs []adaptedRoute, outer matchStatus, matcher string, top bool) (reachEnd, *reachBlock) {
+// verdict outer, and ends at the first handler that decides. top is the
+// server's own route list, whose routes are sites.
+func (w *reachWalk) routes(rs []adaptedRoute, outer matchVerdict, top bool) (reachEnd, *reachBlock) {
 	for _, r := range rs {
-		st, m := w.match(r.Match)
-		if st == noMatch {
+		// Caddy runs a route's matchers before its group check, so a
+		// matcher that may fail fails whether or not the group is
+		// already satisfied.
+		v := w.match(r.match)
+		if v.fails {
+			return blocked, &reachBlock{fails: true, matcher: v.matcher}
+		}
+		if v.status == noMatch {
 			continue
 		}
-		if r.Group != "" {
+		if r.group != "" {
 			// The group records the member's own match: a member that
 			// matches for sure satisfies the group whether or not an
 			// earlier one may have, and later members never run.
-			g := w.groups[r.Group]
+			g := w.groups[r.group]
 			if g.status == matches {
 				continue
 			}
-			if st > g.status {
-				w.groups[r.Group] = groupState{st, m}
+			if v.status > g.status {
+				w.groups[r.group] = groupState{v.status, v.matcher}
 			}
-			if g.status == mayMatch && st == matches {
-				st, m = mayMatch, g.matcher
+			if g.status == mayMatch && v.status == matches {
+				v = matchVerdict{status: mayMatch, matcher: g.matcher}
 			}
 		}
-		if outer < st {
-			st, m = outer, matcher
+		if outer.status < v.status {
+			v = outer
 		}
-		for _, h := range r.Handle {
+		may := v.status == mayMatch
+		for _, h := range r.handle {
 			switch classify(h) {
 			case classReached:
-				if st == mayMatch {
+				if may {
 					// Reached for the requests the matcher admits; the
 					// rest skip it, and whatever follows is not its
 					// answer. No directive the walk accepts adapts to
 					// this (box_webhook takes no matcher and its site
 					// is a bare host); the contract is kept anyway.
-					return blocked, &reachBlock{name: h.Handler, behind: true, matcher: m}
+					return blocked, &reachBlock{name: h.name, behind: true, matcher: v.matcher}
 				}
 				return reachedWebhook, nil
 			case classSubroute:
-				if end, b := w.routes(h.sub, st, m, false); end != fellThrough {
+				if end, b := w.routes(h.sub, v, false); end != fellThrough {
 					return end, b
 				}
 			case classPasses:
 			case classChanges:
-				return blocked, &reachBlock{name: h.Handler, changes: true, may: st == mayMatch, matcher: m}
+				return blocked, &reachBlock{name: h.name, changes: true, may: may, matcher: v.matcher}
 			default:
-				return blocked, &reachBlock{name: h.Handler, may: st == mayMatch, matcher: m}
+				return blocked, &reachBlock{name: h.name, may: may, matcher: v.matcher}
 			}
 		}
-		if r.Terminal {
+		if r.terminal {
 			// Caddy hands the rest of the chain an empty handler: the
 			// request ends here with whatever was written, or nothing.
-			return blocked, &reachBlock{terminal: true, site: top, may: st == mayMatch, matcher: m}
+			return blocked, &reachBlock{terminal: true, site: top, may: may, matcher: v.matcher}
 		}
 	}
 	return fellThrough, nil
@@ -291,7 +356,7 @@ const (
 
 // classify is the first Reachability table.
 func classify(h adaptedHandler) handlerClass {
-	switch h.Handler {
+	switch h.name {
 	case "box_webhook":
 		return classReached
 	case "subroute":
@@ -300,7 +365,7 @@ func classify(h adaptedHandler) handlerClass {
 		"encode", "push", "hint_penaltybox":
 		return classPasses
 	case "headers":
-		if len(h.Request) > 0 && string(h.Request) != "null" {
+		if h.request {
 			return classChanges
 		}
 		return classPasses
@@ -310,125 +375,148 @@ func classify(h adaptedHandler) handlerClass {
 	return classAnswers
 }
 
-// match is a route's matcher sets: any set that matches, else any that
-// may (named by its first undecided matcher), else none. No set is a
-// match.
-func (w *reachWalk) match(sets []map[string]json.RawMessage) (matchStatus, string) {
+// match is a route's matcher sets, tried in order as Caddy tries them,
+// until one matches: a set that matches for sure ends it (the sets
+// after it never run); one that may fail ends it the other way; one
+// that may match is remembered. No set is a match.
+func (w *reachWalk) match(sets []map[string]any) matchVerdict {
 	if len(sets) == 0 {
-		return matches, ""
+		return matchVerdict{status: matches}
 	}
-	best, name := noMatch, ""
+	best := matchVerdict{status: noMatch}
 	for _, set := range sets {
-		st, m := w.set(set)
-		if st > best {
-			best, name = st, m
-		}
-		if best == matches {
-			return matches, ""
+		v := w.set(set)
+		switch {
+		case v.fails, v.status == matches:
+			return v
+		case v.status == mayMatch && best.status == noMatch:
+			best = v
 		}
 	}
-	return best, name
+	return best
 }
 
-// set is one matcher set: every matcher must match; one that does not
-// decides; one that may, when none says no, leaves "may".
-func (w *reachWalk) set(set map[string]json.RawMessage) (matchStatus, string) {
-	st, name := matches, ""
+// set is one matcher set: every matcher must match. Caddy runs a set's
+// matchers in an order fixed only at load, so one that may fail counts
+// whatever the others say; otherwise one that does not match decides,
+// and one that may, when none says no, leaves "may".
+func (w *reachWalk) set(set map[string]any) matchVerdict {
+	best := matchVerdict{status: matches}
 	for _, k := range slices.Sorted(maps.Keys(set)) {
-		switch w.one(k, set[k]) {
-		case noMatch:
-			return noMatch, ""
-		case mayMatch:
-			if st == matches {
-				st, name = mayMatch, k
-			}
+		v := w.one(k, set[k])
+		switch {
+		case v.fails:
+			return v
+		case v.status == noMatch:
+			best = v
+		case v.status == mayMatch && best.status == matches:
+			best = v
 		}
 	}
-	return st, name
+	return best
 }
 
 // one is the second Reachability table: the five matchers decided
-// statically with Caddy's own types, and anything else, or a pattern
-// holding a placeholder, "may".
-func (w *reachWalk) one(key string, raw json.RawMessage) matchStatus {
+// statically with Caddy's own types; the matchers Caddy decides per
+// request but never fails on, "may"; and the rest — `expression`,
+// `file`, a matcher this walk does not know — may fail as well.
+func (w *reachWalk) one(key string, v any) matchVerdict {
+	may := matchVerdict{status: mayMatch, matcher: key}
 	switch key {
 	case "host":
-		list, ok := staticPatterns(raw)
+		list, ok := staticPatterns(v)
 		if !ok {
-			return mayMatch
+			return may
 		}
 		m := caddyhttp.MatchHost(list)
 		if m.Provision(caddy.Context{}) != nil {
-			return mayMatch
+			return may
 		}
 		return decided(m.Match(w.req))
 	case "path":
-		list, ok := staticPatterns(raw)
+		list, ok := staticPatterns(v)
 		if !ok {
-			return mayMatch
+			return may
 		}
 		m := caddyhttp.MatchPath(list)
 		if m.Provision(caddy.Context{}) != nil {
-			return mayMatch
+			return may
 		}
 		return decided(m.Match(w.req))
 	case "method":
-		list, ok := staticPatterns(raw)
+		list, ok := staticPatterns(v)
 		if !ok {
-			return mayMatch
+			return may
 		}
 		return decided(caddyhttp.MatchMethod(list).Match(w.req))
 	case "protocol":
 		// Only the scheme is the request's to know: http and https by
 		// TLS, grpc by a content type the workflow never sends. An HTTP
 		// version is the connection's, negotiated per request.
-		var proto string
-		if json.Unmarshal(raw, &proto) != nil {
-			return mayMatch
-		}
-		switch proto {
+		switch proto, _ := v.(string); proto {
 		case "http", "https", "grpc":
 			return decided(caddyhttp.MatchProtocol(proto).Match(w.req))
 		}
-		return mayMatch
+		return may
 	case "not":
-		var sets []map[string]json.RawMessage
-		if json.Unmarshal(raw, &sets) != nil {
-			return mayMatch
+		list, ok := v.([]any)
+		if !ok {
+			return may
 		}
-		if len(sets) == 0 {
-			return matches // as Caddy: nothing negated
+		if len(list) == 0 {
+			return matchVerdict{status: matches} // as Caddy: nothing negated
 		}
-		switch st, _ := w.match(sets); st {
-		case matches:
-			return noMatch
-		case noMatch:
-			return matches
+		sets := make([]map[string]any, 0, len(list))
+		for _, s := range list {
+			set, ok := s.(map[string]any)
+			if !ok {
+				return may
+			}
+			sets = append(sets, set)
 		}
+		inner := w.match(sets)
+		switch {
+		case inner.fails:
+			return matchVerdict{status: mayMatch, matcher: key, fails: true}
+		case inner.status == matches:
+			return matchVerdict{status: noMatch}
+		case inner.status == noMatch:
+			return matchVerdict{status: matches}
+		}
+		return may
+	case "header", "header_regexp", "query", "path_regexp", "vars", "vars_regexp", "tls",
+		// remote_ip and client_ip fail only while a TLS handshake is
+		// incomplete: 0-RTT early data, which a push never sends.
+		"remote_ip", "client_ip":
+		return may
 	}
-	return mayMatch
+	may.fails = true
+	return may
 }
 
 // staticPatterns reads a list of patterns none of which holds a
 // placeholder.
-func staticPatterns(raw json.RawMessage) ([]string, bool) {
-	var list []string
-	if json.Unmarshal(raw, &list) != nil {
+func staticPatterns(v any) ([]string, bool) {
+	items, ok := v.([]any)
+	if !ok {
 		return nil, false
 	}
-	for _, p := range list {
-		if strings.Contains(p, "{") {
+	list := make([]string, 0, len(items))
+	for _, item := range items {
+		p, ok := item.(string)
+		if !ok || strings.Contains(p, "{") {
 			return nil, false
 		}
+		list = append(list, p)
 	}
 	return list, true
 }
 
-func decided(matched bool) matchStatus {
+func decided(matched bool) matchVerdict {
 	if matched {
-		return matches
+		return matchVerdict{status: matches}
 	}
-	return noMatch
+	return matchVerdict{status: noMatch}
 }
 
 // reachRequest is the request the question is asked for: method on

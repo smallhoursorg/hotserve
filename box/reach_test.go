@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 // reachFile assembles a Caddyfile around the design's example box site
@@ -130,11 +131,15 @@ func TestReach(t *testing.T) {
 		"a rewrite under a header matcher": {order: []string{"rewrite first"}, inside: "\t@m header X-A b\n\trewrite @m /x\n", want: "rewrite may change the request first (its header matcher is decided per request)"},
 
 		// Refused: a matcher decided per request.
-		"a header matcher":        {order: []string{"respond first"}, inside: "\t@m header X-A b\n\trespond @m ok\n", want: mayHeader},
-		"an expression matcher":   {order: []string{"respond first"}, inside: "\t@m expression {method} == \"GET\"\n\trespond @m ok\n", want: "static_response may answer first (its expression matcher is decided per request)"},
-		"a query matcher":         {order: []string{"respond first"}, inside: "\t@m query x=1\n\trespond @m ok\n", want: "static_response may answer first (its query matcher is decided per request)"},
-		"a placeholder in a path": {order: []string{"respond first"}, inside: "\t@m path /{http.request.uri.query.x}\n\trespond @m ok\n", want: "static_response may answer first (its path matcher is decided per request)"},
-		"not over a header":       {order: []string{"respond first"}, inside: "\t@m not header X-A b\n\trespond @m ok\n", want: "static_response may answer first (its not matcher is decided per request)"},
+		"a header matcher":      {order: []string{"respond first"}, inside: "\t@m header X-A b\n\trespond @m ok\n", want: mayHeader},
+		"an expression matcher": {order: []string{"respond first"}, inside: "\t@m expression {method} == \"GET\"\n\trespond @m ok\n", want: "the expression matcher ahead of it may fail (decided per request)"},
+		// A matcher that may fail refuses whatever stands behind it:
+		// Caddy answers its error and routes no further.
+		"an expression matcher on a handler that passes": {order: []string{"header first"}, inside: "\t@m expression {method} == \"GET\"\n\theader @m X-B c\n", want: "the expression matcher ahead of it may fail (decided per request)"},
+		"not over an expression":                         {order: []string{"respond first"}, inside: "\t@m not expression {method} == \"GET\"\n\trespond @m ok\n", want: "the not matcher ahead of it may fail (decided per request)"},
+		"a query matcher":                                {order: []string{"respond first"}, inside: "\t@m query x=1\n\trespond @m ok\n", want: "static_response may answer first (its query matcher is decided per request)"},
+		"a placeholder in a path":                        {order: []string{"respond first"}, inside: "\t@m path /{http.request.uri.query.x}\n\trespond @m ok\n", want: "static_response may answer first (its path matcher is decided per request)"},
+		"not over a header":                              {order: []string{"respond first"}, inside: "\t@m not header X-A b\n\trespond @m ok\n", want: "static_response may answer first (its not matcher is decided per request)"},
 		"a decided path beside an undecided header": {order: []string{"respond first"},
 			inside: "\t@m path /x\n\t@n header X-A b\n\trespond @m ok\n\trespond @n ok\n", want: mayHeader},
 	} {
@@ -161,20 +166,29 @@ func TestReachJSON(t *testing.T) {
 		adapted []byte
 		want    string // "" reachable; "error" a plain error; else the refusal
 	}{
-		"the penaltybox hint ahead":                               {adapted: reachJSON(`{"handle":[{"handler":"hint_penaltybox"}]},`, ""), want: ""},
-		"vars, map, log and tracing ahead":                        {adapted: reachJSON(`{"handle":[{"handler":"vars"},{"handler":"map"},{"handler":"log_append"},{"handler":"tracing"},{"handler":"timeouts"},{"handler":"push"},{"handler":"encode"},{"handler":"request_body"}]},`, ""), want: ""},
-		"templates ahead":                                         {adapted: reachJSON(`{"handle":[{"handler":"templates","mime_types":["application/json"]}]},`, ""), want: "templates answers first"},
-		"templates ahead with its default types":                  {adapted: reachJSON(`{"handle":[{"handler":"templates"}]},`, ""), want: "templates answers first"},
-		"intercept ahead":                                         {adapted: reachJSON(`{"handle":[{"handler":"intercept","handle_response":[{"match":{"status_code":[2]},"routes":[{"handle":[{"handler":"static_response","body":"maintenance"}]}]}]}]},`, ""), want: "intercept answers first"},
-		"a response headers handler":                              {adapted: reachJSON(`{"handle":[{"handler":"headers","response":{"set":{"X-A":["b"]}}}]},`, ""), want: ""},
-		"a request headers handler":                               {adapted: reachJSON(`{"handle":[{"handler":"headers","request":{"delete":["Authorization"]}}]},`, ""), want: "headers changes the request first"},
-		"a handler the table does not name":                       {adapted: reachJSON(`{"handle":[{"handler":"cache"}]},`, ""), want: "cache answers first"},
-		"invoke":                                                  {adapted: reachJSON(`{"handle":[{"handler":"invoke","name":"r"}]},`, ""), want: "invoke answers first"},
-		"an undecided matcher on a handler that passes":           {adapted: reachJSON(`{"match":[{"remote_ip":{"ranges":["10.0.0.0/8"]}}],"handle":[{"handler":"encode"}]},`, ""), want: ""},
-		"an undecided matcher on a responder":                     {adapted: reachJSON(`{"match":[{"remote_ip":{"ranges":["10.0.0.0/8"]}}],"handle":[{"handler":"static_response"}]},`, ""), want: "static_response may answer first (its remote_ip matcher is decided per request)"},
-		"two sets, one decided no and one undecided":              {adapted: reachJSON(`{"match":[{"path":["/x"]},{"header":{"X-A":["b"]}}],"handle":[{"handler":"static_response"}]},`, ""), want: "static_response may answer first (its header matcher is decided per request)"},
-		"two sets, one decided yes":                               {adapted: reachJSON(`{"match":[{"header":{"X-A":["b"]}},{"path":["/"]}],"handle":[{"handler":"static_response"}]},`, ""), want: "static_response answers first"},
-		"an empty not":                                            {adapted: reachJSON(`{"match":[{"not":[]}],"handle":[{"handler":"static_response"}]},`, ""), want: "static_response answers first"},
+		"the penaltybox hint ahead":                     {adapted: reachJSON(`{"handle":[{"handler":"hint_penaltybox"}]},`, ""), want: ""},
+		"vars, map, log and tracing ahead":              {adapted: reachJSON(`{"handle":[{"handler":"vars"},{"handler":"map"},{"handler":"log_append"},{"handler":"tracing"},{"handler":"timeouts"},{"handler":"push"},{"handler":"encode"},{"handler":"request_body"}]},`, ""), want: ""},
+		"templates ahead":                               {adapted: reachJSON(`{"handle":[{"handler":"templates","mime_types":["application/json"]}]},`, ""), want: "templates answers first"},
+		"templates ahead with its default types":        {adapted: reachJSON(`{"handle":[{"handler":"templates"}]},`, ""), want: "templates answers first"},
+		"intercept ahead":                               {adapted: reachJSON(`{"handle":[{"handler":"intercept","handle_response":[{"match":{"status_code":[2]},"routes":[{"handle":[{"handler":"static_response","body":"maintenance"}]}]}]}]},`, ""), want: "intercept answers first"},
+		"a response headers handler":                    {adapted: reachJSON(`{"handle":[{"handler":"headers","response":{"set":{"X-A":["b"]}}}]},`, ""), want: ""},
+		"a request headers handler":                     {adapted: reachJSON(`{"handle":[{"handler":"headers","request":{"delete":["Authorization"]}}]},`, ""), want: "headers changes the request first"},
+		"a handler the table does not name":             {adapted: reachJSON(`{"handle":[{"handler":"cache"}]},`, ""), want: "cache answers first"},
+		"invoke":                                        {adapted: reachJSON(`{"handle":[{"handler":"invoke","name":"r"}]},`, ""), want: "invoke answers first"},
+		"an undecided matcher on a handler that passes": {adapted: reachJSON(`{"match":[{"remote_ip":{"ranges":["10.0.0.0/8"]}}],"handle":[{"handler":"encode"}]},`, ""), want: ""},
+		"an undecided matcher on a responder":           {adapted: reachJSON(`{"match":[{"remote_ip":{"ranges":["10.0.0.0/8"]}}],"handle":[{"handler":"static_response"}]},`, ""), want: "static_response may answer first (its remote_ip matcher is decided per request)"},
+		"two sets, one decided no and one undecided":    {adapted: reachJSON(`{"match":[{"path":["/x"]},{"header":{"X-A":["b"]}}],"handle":[{"handler":"static_response"}]},`, ""), want: "static_response may answer first (its header matcher is decided per request)"},
+		"two sets, one decided yes":                     {adapted: reachJSON(`{"match":[{"header":{"X-A":["b"]}},{"path":["/"]}],"handle":[{"handler":"static_response"}]},`, ""), want: "static_response answers first"},
+		// Sets run in order until one matches: a set that matches for
+		// sure shields the sets after it, not the ones before.
+		"a failing set after one that matches":                       {adapted: reachJSON(`{"match":[{"path":["/"]},{"expression":{"expr":"true"}}],"handle":[{"handler":"vars"}]},`, ""), want: ""},
+		"a failing set before one that matches":                      {adapted: reachJSON(`{"match":[{"expression":{"expr":"true"}},{"path":["/"]}],"handle":[{"handler":"vars"}]},`, ""), want: "the expression matcher ahead of it may fail (decided per request)"},
+		"a failing matcher beside a decided no in one set":           {adapted: reachJSON(`{"match":[{"path":["/x"],"expression":{"expr":"true"}}],"handle":[{"handler":"vars"}]},`, ""), want: "the expression matcher ahead of it may fail (decided per request)"},
+		"a file matcher on a handler that passes":                    {adapted: reachJSON(`{"match":[{"file":{"try_files":["{path}"]}}],"handle":[{"handler":"encode"}]},`, ""), want: "the file matcher ahead of it may fail (decided per request)"},
+		"a matcher the table does not know on a handler that passes": {adapted: reachJSON(`{"match":[{"geoip":{"country":["GB"]}}],"handle":[{"handler":"encode"}]},`, ""), want: "the geoip matcher ahead of it may fail (decided per request)"},
+		"a failing matcher on a route a group already skips":         {adapted: reachJSON(`{"group":"g","handle":[{"handler":"vars"}]},{"group":"g","match":[{"expression":{"expr":"true"}}],"handle":[{"handler":"vars"}]},`, ""), want: "the expression matcher ahead of it may fail (decided per request)"},
+		"a query matcher on a handler that passes":                   {adapted: reachJSON(`{"match":[{"query":{"x":["1"]}}],"handle":[{"handler":"encode"}]},`, ""), want: ""},
+		"an empty not": {adapted: reachJSON(`{"match":[{"not":[]}],"handle":[{"handler":"static_response"}]},`, ""), want: "static_response answers first"},
 		"a terminal route inside the site that passes":            {adapted: reachJSON(`{"handle":[{"handler":"vars"}],"terminal":true},`, ""), want: "a terminal route answers first"},
 		"a terminal route under an undecided matcher":             {adapted: reachJSON(`{"match":[{"header":{"X-A":["b"]}}],"handle":[{"handler":"vars"}],"terminal":true},`, ""), want: "a terminal route may answer first (its header matcher is decided per request)"},
 		"an earlier site under an undecided matcher":              {adapted: reachJSON("", `{"match":[{"host":["deploy.example.com"],"header":{"X-A":["b"]}}],"handle":[],"terminal":true},`), want: "an earlier site for deploy.example.com may answer first (its header matcher is decided per request)"},
@@ -212,4 +226,28 @@ func TestReachJSON(t *testing.T) {
 func TestReachHostCase(t *testing.T) {
 	in := strings.Replace(reachFile(nil, "Deploy.Example.com/* {\n\trespond x\n}\n", "", ""), "deploy.example.com {\n", "DEPLOY.example.com {\n", 1)
 	wantReach(t, reachOf(t, in), "static_response answers first")
+}
+
+// TestReachDeepNesting: the adaptation is converted in one pass, so a
+// chain of nested subroutes as deep as Go's JSON decoder allows is
+// walked without re-reading the subtree at every level.
+func TestReachDeepNesting(t *testing.T) {
+	const depth = 2000 // four JSON levels a step; encoding/json stops at 10000
+	var b strings.Builder
+	b.WriteString(`{"apps":{"http":{"servers":{"srv0":{"routes":[{"match":[{"host":["deploy.example.com"]}],"handle":[`)
+	for range depth {
+		b.WriteString(`{"handler":"subroute","routes":[{"handle":[`)
+	}
+	b.WriteString(`{"handler":"box_webhook"}`)
+	for range depth {
+		b.WriteString(`]}]}`)
+	}
+	b.WriteString(`],"terminal":true}]}}}}}`)
+	start := time.Now()
+	if err := reach([]byte(b.String()), "deploy.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatalf("took %s", time.Since(start))
+	}
 }

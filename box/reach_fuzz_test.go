@@ -47,4 +47,4 @@ func FuzzReach(f *testing.F) {
 // the way (a module name, an earlier site, a terminal route), then one
 // of the four verbs.
 var catalogueReach = regexp.MustCompile(`^the new Caddyfile does not reach box_webhook on /: ` +
-	`(.+) (answers first|changes the request first|may (answer|change the request) first \(its .+ matcher is decided per request\)|stands behind a .+ matcher decided per request)$`)
+	`(.+) (answers first|changes the request first|may (answer|change the request) first \(its .+ matcher is decided per request\)|stands behind a .+ matcher decided per request|may fail \(decided per request\))$`)
