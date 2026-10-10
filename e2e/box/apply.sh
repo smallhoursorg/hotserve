@@ -448,7 +448,47 @@ settled "stopped"
 systemctl start hotserve
 ready && pass "hotserve is back" || fail "hotserve did not come back: $CODE"
 
-echo "=== box apply 7: the path unit never spun ==="
+echo "=== box apply 7: the template's bin/apply, unchanged, against this box ==="
+# examples/box/bin/apply is what a box repository's workflow runs. It
+# posts to the address the committed file names, https://$HOST/ on
+# 443; curl's own config file routes that to 8443 and takes the
+# internal CA's certificate (the script has no test hooks). The
+# laptop's token: one, naming the commit, via HOTSERVE_TOKEN.
+mkdir -p "$repo/bin" "$work/curl"
+cp /template-apply "$repo/bin/apply"
+printf 'connect-to = %s:443:127.0.0.1:8443\ninsecure\nhttp1.1\n' "$HOST" >"$work/curl/.curlrc"
+template_apply() { # <sha> → its output in $work/tout, exit status returned
+	CURL_HOME=$work/curl HOTSERVE_TOKEN=$(tok "$1") "$repo/bin/apply" box1 >"$work/tout" 2>&1
+}
+AT=$C1
+C4=$(commit alice "$work/f2")
+if template_apply "$C4" && grep -qF "loaded; running apps are not restarted" "$work/tout"; then
+	pass "bin/apply applied a signed commit"
+else
+	fail "bin/apply: $(cat "$work/tout")"
+fi
+[ "$(baseline)" = "$C4" ] && pass "the baseline is bin/apply's commit" || fail "the baseline is $(baseline), not $C4"
+cmp -s "$LIVE" "$work/f2" && pass "the live file is the commit's" || fail "the live file is not the commit's"
+settled "template apply"
+template_apply "$C4" && grep -qF "the box already runs this Caddyfile" "$work/tout" \
+	&& pass "bin/apply again: no_change" || fail "bin/apply again: $(cat "$work/tout")"
+# An unsigned commit under a signed one: refused, naming the commit to
+# rebase out — the real handler's words, unmasked and unescaped.
+AT=$C4
+C5=$(commit none "$work/f1")
+AT=$C5
+C6=$(commit alice "$work/f2")
+if template_apply "$C6"; then
+	fail "bin/apply exited 0 for an unsigned commit under a signed one"
+elif grep -qF "$C5, between the commit this box runs and $C6, is not signed" "$work/tout"; then
+	pass "bin/apply reports the unsigned commit by name"
+else
+	fail "bin/apply on an unsigned commit: $(cat "$work/tout")"
+fi
+[ "$(baseline)" = "$C4" ] && pass "the baseline did not move" || fail "the baseline is $(baseline)"
+settled "template refused"
+
+echo "=== box apply 8: the path unit never spun ==="
 [ "$(systemctl is-active hotserve-box-apply.path)" = active ] \
 	&& pass "the path unit is still active" || fail "the path unit is $(systemctl is-active hotserve-box-apply.path)"
 if journalctl -u hotserve-box-apply.path -u hotserve-box-apply.service --no-pager | grep -qiE 'trigger limit|start request repeated|start-limit'; then
@@ -457,7 +497,7 @@ else
 	pass "no trigger or start limit was hit"
 fi
 
-echo "=== box apply 8: put the e2e config back ==="
+echo "=== box apply 9: put the e2e config back ==="
 restore && pass "restored the original config" || fail "could not load the original config"
 
 echo ""
