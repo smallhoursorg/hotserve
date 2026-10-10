@@ -39,10 +39,21 @@ func TestLiveGit(t *testing.T) {
 		if err := os.CopyFS("testdata.new", os.DirFS(dir)); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.RemoveAll("testdata"); err != nil {
+		// Two renames, the old set kept until the new one is in place
+		// and put back if it is not.
+		if err := os.RemoveAll("testdata.old"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename("testdata", "testdata.old"); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.Rename("testdata.new", "testdata"); err != nil {
+			if back := os.Rename("testdata.old", "testdata"); back != nil {
+				t.Fatalf("%v; and could not restore the old set: %v", err, back)
+			}
+			t.Fatal(err)
+		}
+		if err := os.RemoveAll("testdata.old"); err != nil {
 			t.Fatal(err)
 		}
 		t.Log("testdata/ rewritten")

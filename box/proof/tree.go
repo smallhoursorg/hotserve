@@ -77,8 +77,9 @@ func ParseTree(raw []byte) (*Tree, error) {
 }
 
 // compareTreeNames is git's base_name_compare: bytes in order, and a
-// directory's name read as though it ended in `/`, so that `a` the
-// file sorts before `a/` the directory before `a-b`.
+// directory's name read as though it ended in `/`, so that the file
+// `a`, then the file `a-b` ('-' is 0x2d), then the directory `a` (read
+// as `a/`, 0x2f), then the file `a0`.
 func compareTreeNames(a []byte, aDir bool, b []byte, bDir bool) int {
 	n := min(len(a), len(b))
 	if c := bytes.Compare(a[:n], b[:n]); c != 0 {

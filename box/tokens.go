@@ -102,10 +102,22 @@ type frame struct {
 	site  *site // the site this block is inside, if any
 	// dispatch is whether Caddy reads this block's lines as directives:
 	// a site's body, and the bodies of the few directives that nest
-	// directives. Inside any other block — `header { … }`, a matcher,
-	// a handler's options — the first token of a line is a field, not
-	// a directive, and `box_webhook` there is not the webhook.
+	// directives (route, handle, handle_path, handle_errors, and
+	// handle_response inside reverse_proxy). Inside any other block —
+	// `header { … }`, a matcher, a handler's options — the first token
+	// of a line is a field, not a directive. `box_webhook` counts where
+	// dispatch is set and is refused by name anywhere else, so the
+	// list above can only be too short, never unsafe: a container it
+	// misses refuses the file rather than hiding a live webhook.
 	dispatch bool
+	// directive is the first token of the line that opened this block,
+	// and inDirective whether that line was itself at a dispatching
+	// position — together they recognise reverse_proxy's handle_response.
+	directive   string
+	inDirective bool
+	// snippet is the `(name)` or `&(name)` block this frame is inside,
+	// at any depth, if any.
+	snippet *site
 }
 
 // nesting are the directives whose block is more directives.
@@ -168,7 +180,7 @@ func walk(input []byte) (*Shape, error) {
 					return nil, refuse("has more than one global options block")
 				}
 			case len(addrs) == 1 && isSnippetOrNamedRoute(addrs[0]):
-				f.kind, f.site = kindSnippet, &site{addresses: addrs}
+				f.kind, f.snippet = kindSnippet, &site{addresses: addrs}
 			default:
 				s := &site{addresses: addrs}
 				sites = append(sites, s)
@@ -229,7 +241,35 @@ func walk(input []byte) (*Shape, error) {
 		if isClose(first) {
 			continue
 		}
-		child := frame{kind: kindOther, inBox: top.inBox, site: top.site, dispatch: top.dispatch && nesting[first.Text]}
+		if first.Text == "box_webhook" {
+			switch {
+			case top.snippet != nil:
+				// A snippet's or a named route's body is directives to
+				// Caddy, but it is not a site: a `box_webhook` there, at
+				// any depth, would be the webhook only through an `import`
+				// or an `invoke`, which the walk does not follow.
+				return nil, refuse("has box_webhook inside a snippet or named route (" + proof.Bound(top.snippet.addresses[0]) + "); write it in the site")
+			case top.site != nil && top.dispatch:
+				top.site.webhook = true
+			default:
+				// A line that starts with box_webhook where Caddy reads
+				// fields, not directives — the global block, a handler's
+				// options, a matcher, or a container the walk does not
+				// know — is refused rather than ignored, so a live webhook
+				// can never go uncounted.
+				where := top.directive
+				if where == "" {
+					where = "the global options"
+				}
+				return nil, refuse("has box_webhook where it is not a directive (inside " + proof.Bound(where) + "); it goes in a site, route, handle, handle_path, handle_errors or handle_response block")
+			}
+		}
+		child := frame{
+			kind: kindOther, inBox: top.inBox, site: top.site, snippet: top.snippet,
+			directive: first.Text, inDirective: top.dispatch,
+			dispatch: (top.dispatch && nesting[first.Text]) ||
+				(top.inDirective && top.directive == "reverse_proxy" && first.Text == "handle_response"),
+		}
 		switch top.kind {
 		case kindGlobal:
 			if first.Text == "box" {
@@ -255,18 +295,6 @@ func walk(input []byte) (*Shape, error) {
 			}
 		case kindTrust:
 			hasTrust = true // a line inside the deploy_trust block
-		case kindSnippet:
-			// A snippet's or a named route's body is directives to Caddy,
-			// but it is not a site: a `box_webhook` there would be the
-			// webhook only through an `import` or an `invoke`, which the
-			// walk does not follow. Said by name, rather than "no site".
-			if first.Text == "box_webhook" {
-				return nil, refuse("has box_webhook inside a snippet or named route (" + proof.Bound(top.site.addresses[0]) + "); write it in the site")
-			}
-		case kindSite, kindOther:
-			if first.Text == "box_webhook" && top.site != nil && top.dispatch {
-				top.site.webhook = true
-			}
 		}
 		if opens {
 			stack = append(stack, child)

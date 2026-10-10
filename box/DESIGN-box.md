@@ -625,10 +625,13 @@ pushed input. Directive position is Caddy's: the first token on a
 line, at any depth — for `import` and for the placeholder rule below.
 `box_webhook` itself counts only where Caddy would dispatch it as a
 directive: a site's body and the bodies of `route`, `handle`,
-`handle_path` and `handle_errors`; inside any other block (`header {
-box_webhook on }`, a matcher, a handler's options) the first token of
-a line is a field, and a file whose only `box_webhook` is one of those
-has no webhook site. Braces are structural only when unquoted, as
+`handle_path`, `handle_errors` and `reverse_proxy`'s
+`handle_response`. A line that starts with `box_webhook` anywhere
+else — inside `header { … }`, a matcher, a handler's options, the
+global block, or a container the walk does not know — is refused by
+name, never ignored, so that a webhook Caddy would serve can never go
+uncounted: the list of containers can only be too short, which
+refuses a file, never unsafe. Braces are structural only when unquoted, as
 Caddy's lexer flags them: `respond "{"` is a value. A site without
 braces is refused (Caddy allows one brace-less site after the global
 options; its directives would sit at depth zero where a depth walk
@@ -748,7 +751,7 @@ says. The workflow's action is in the last column.
 | 422 | `refused` | `the chain from <baseline> to <sha> is longer than 500 commits; run hotserve box baseline <sha> as root on the box` | both | fail |
 | 422 | `refused` | `this file is for <host2>; this box is <host1>` | both | fail |
 | 422 | `refused` | `this box's file is <recorded path>; the bundle is <path> — hotserve init --path records a new one` | both | fail |
-| 422 | `refused` | `the new Caddyfile has no box block` / `… has no signer` / `… has no deploy_trust` / `… has no site with box_webhook` / `… has more than one site with box_webhook` / `… has a box_webhook site whose address is not one bare hostname (<address>)` / `… has a site without braces (<address>)` / `… has box_webhook inside a snippet or named route (<name>); write it in the site` / `… imports <path>; inline the snippet` / `… has a placeholder where a directive name, a site address or a box line goes (<token>)` / `… reads differently once its placeholders are expanded` / `… is empty` / `… has more than one global options block` / `… has more than one box block` / `… has a signer line that is not \`signer <principal> <key-type> <base64>\`` / `… has a bad signer <principal>: <what>` / `… does not tokenize: <lexer error>` / `… does not parse: <what>` / `… drops the key that signed this commit (<principal>); add the new key in one push, let it apply, then remove the old one` | both | fail |
+| 422 | `refused` | `the new Caddyfile has no box block` / `… has no signer` / `… has no deploy_trust` / `… has no site with box_webhook` / `… has more than one site with box_webhook` / `… has a box_webhook site whose address is not one bare hostname (<address>)` / `… has a site without braces (<address>)` / `… has box_webhook inside a snippet or named route (<name>); write it in the site` / `… has box_webhook where it is not a directive (inside <block>); it goes in a site, route, handle, handle_path, handle_errors or handle_response block` / `… imports <path>; inline the snippet` / `… has a placeholder where a directive name, a site address or a box line goes (<token>)` / `… reads differently once its placeholders are expanded` / `… is empty` / `… has more than one global options block` / `… has more than one box block` / `… has a signer line that is not \`signer <principal> <key-type> <base64>\`` / `… has a bad signer <principal>: <what>` / `… does not tokenize: <lexer error>` / `… does not parse: <what>` / `… drops the key that signed this commit (<principal>); add the new key in one push, let it apply, then remove the old one` | both | fail |
 | 422 | `refused` | `hotserve validate: <redacted>` / `hotserve-backup validate: <redacted>` / `could not ask whether backups are installed; nothing changed` | handler | fail |
 | 422 | `refused` | `hotserve is not running; nothing applied` / `hotserve is still starting after 300 s; nothing applied` | applier | fail |
 | 422 | `refused` | `the Caddyfile this box runs lists no signer; hotserve init is the way back` | applier | fail |
