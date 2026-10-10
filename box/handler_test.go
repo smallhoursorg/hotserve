@@ -241,8 +241,8 @@ func TestHandlerJournalNamesTheRoute(t *testing.T) {
 	r := newRig(t)
 	r.do(t, req{method: http.MethodPost, target: "/"})
 	got := r.logs.FilterMessage("webhook auth failed").All()
-	if len(got) != 1 || got[0].ContextMap()["box"] != "push" || got[0].ContextMap()["app"] != nil {
-		t.Fatalf("want one line scoped box=push: %v", r.logs.All())
+	if len(got) != 1 || got[0].ContextMap()["box_request"] != "push" || got[0].ContextMap()["app"] != nil {
+		t.Fatalf("want one line scoped box_request=push: %v", r.logs.All())
 	}
 }
 
@@ -385,64 +385,76 @@ func TestHandlerResultPollSecret(t *testing.T) {
 	urlRaw := bytes.Repeat([]byte{0xfb}, pollSecretLen)
 	urlHeader, urlID, urlDigest := digestOf(urlRaw, base64.URLEncoding)
 	shortHeader, shortID, shortDigest := digestOf(bytes.Repeat([]byte{7}, pollSecretLen-1), base64.StdEncoding)
+	fresh := func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now()) }
+	const admitted, refused, boxError = 202, 401, 500
 	for name, c := range map[string]struct {
 		setup  func(t *testing.T, r *rig)
 		target string
 		header http.Header
-		admit  bool
+		code   int
 	}{
-		"fresh":                {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now()) }, "/?result=" + id, pollHeader(h), true},
-		"a second before 15m":  {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now().Add(-pendingLife+time.Second)) }, "/?result=" + id, pollHeader(h), true},
-		"15m old":              {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now().Add(-pendingLife)) }, "/?result=" + id, pollHeader(h), false},
-		"posted in the future": {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now().Add(time.Second)) }, "/?result=" + id, pollHeader(h), false},
-		"no posted time":       {func(t *testing.T, r *rig) { r.marker(t, id, digest, time.Time{}) }, "/?result=" + id, pollHeader(h), false},
-		"no marker":            {func(*testing.T, *rig) {}, "/?result=" + id, pollHeader(h), false},
+		"fresh":                {fresh, "/?result=" + id, pollHeader(h), admitted},
+		"a second before 15m":  {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now().Add(-pendingLife+time.Second)) }, "/?result=" + id, pollHeader(h), admitted},
+		"15m old":              {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now().Add(-pendingLife)) }, "/?result=" + id, pollHeader(h), refused},
+		"posted in the future": {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now().Add(time.Minute)) }, "/?result=" + id, pollHeader(h), admitted},
+		"no posted time":       {func(t *testing.T, r *rig) { r.marker(t, id, digest, time.Time{}) }, "/?result=" + id, pollHeader(h), refused},
+		"no marker":            {func(*testing.T, *rig) {}, "/?result=" + id, pollHeader(h), refused},
 		"another push's secret": {func(t *testing.T, r *rig) {
-			r.marker(t, id, digest, r.clock.Now())
+			fresh(t, r)
 			r.marker(t, otherID, otherDigest, r.clock.Now())
-		}, "/?result=" + id, pollHeader(other), false},
+		}, "/?result=" + id, pollHeader(other), refused},
 		// The marker's digest begins with the id but is not the
 		// secret's: the comparison is of the whole digest.
-		"digest shares only the id": {func(t *testing.T, r *rig) { r.marker(t, id, id+strings.Repeat("0", 32), r.clock.Now()) }, "/?result=" + id, pollHeader(h), false},
-		"two headers":               {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now()) }, "/?result=" + id, http.Header{"Authorization": {pollScheme + h, pollScheme + h}}, false},
-		"scheme in another case":    {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now()) }, "/?result=" + id, http.Header{"Authorization": {"box-POLL " + h}}, true},
-		"the secret as a bearer":    {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now()) }, "/?result=" + id, http.Header{"Authorization": {"Bearer " + h}}, false},
-		"the secret bare":           {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now()) }, "/?result=" + id, http.Header{"Authorization": {h}}, false},
-		"the old header":            {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now()) }, "/?result=" + id, http.Header{"X-Box-Poll-Secret": {h}}, false},
-		"two spaces":                {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now()) }, "/?result=" + id, http.Header{"Authorization": {"Box-Poll  " + h[:43]}}, false},
-		"unpadded":                  {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now()) }, "/?result=" + id, pollHeader(strings.TrimRight(h, "=")), false},
-		"url alphabet":              {func(t *testing.T, r *rig) { r.marker(t, urlID, urlDigest, r.clock.Now()) }, "/?result=" + urlID, pollHeader(urlHeader), false},
-		"31 bytes":                  {func(t *testing.T, r *rig) { r.marker(t, shortID, shortDigest, r.clock.Now()) }, "/?result=" + shortID, pollHeader(shortHeader), false},
-		"upper-case id":             {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now()) }, "/?result=" + strings.ToUpper(id), pollHeader(h), false},
-		"another param":             {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now()) }, "/?result=" + id + "&x=1", pollHeader(h), false},
-		"result twice":              {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now()) }, "/?result=" + id + "&result=" + id, pollHeader(h), false},
-		"marker symlink":            {func(t *testing.T, r *rig) { symlinkMarker(t, r, id, digest) }, "/?result=" + id, pollHeader(h), false},
-		"marker a FIFO":             {func(t *testing.T, r *rig) { mkfifo(t, filepath.Join(r.dir, "stage", id+".auth")) }, "/?result=" + id, pollHeader(h), false},
+		"digest shares only the id": {func(t *testing.T, r *rig) { r.marker(t, id, id+strings.Repeat("0", 32), r.clock.Now()) }, "/?result=" + id, pollHeader(h), refused},
+		"two headers":               {fresh, "/?result=" + id, http.Header{"Authorization": {pollScheme + h, pollScheme + h}}, refused},
+		"scheme in another case":    {fresh, "/?result=" + id, http.Header{"Authorization": {"box-POLL " + h}}, admitted},
+		"the secret as a bearer":    {fresh, "/?result=" + id, http.Header{"Authorization": {"Bearer " + h}}, refused},
+		"the secret bare":           {fresh, "/?result=" + id, http.Header{"Authorization": {h}}, refused},
+		"the old header":            {fresh, "/?result=" + id, http.Header{"X-Box-Poll-Secret": {h}}, refused},
+		"two spaces":                {fresh, "/?result=" + id, http.Header{"Authorization": {"Box-Poll  " + h[:43]}}, refused},
+		"unpadded":                  {fresh, "/?result=" + id, pollHeader(strings.TrimRight(h, "=")), refused},
+		"url alphabet":              {func(t *testing.T, r *rig) { r.marker(t, urlID, urlDigest, r.clock.Now()) }, "/?result=" + urlID, pollHeader(urlHeader), refused},
+		"31 bytes":                  {func(t *testing.T, r *rig) { r.marker(t, shortID, shortDigest, r.clock.Now()) }, "/?result=" + shortID, pollHeader(shortHeader), refused},
+		"upper-case id":             {fresh, "/?result=" + strings.ToUpper(id), pollHeader(h), refused},
+		"another param":             {fresh, "/?result=" + id + "&x=1", pollHeader(h), refused},
+		"result twice":              {fresh, "/?result=" + id + "&result=" + id, pollHeader(h), refused},
+		// stage/ broken for every id: nothing a caller guessing can
+		// reach says more than the flat 401, nor writes a line.
+		"stage not a directory": {func(t *testing.T, r *rig) {
+			must(t, os.RemoveAll(filepath.Join(r.dir, "stage")))
+			r.write(t, filepath.Join(r.dir, "stage"), nil)
+		}, "/?result=" + id, pollHeader(h), refused},
+		// A marker standing at the secret's id that cannot be read is
+		// the box's error, said to the secret's holder.
+		"marker symlink": {func(t *testing.T, r *rig) { symlinkMarker(t, r, id, digest) }, "/?result=" + id, pollHeader(h), boxError},
+		"marker a FIFO":  {func(t *testing.T, r *rig) { mkfifo(t, filepath.Join(r.dir, "stage", id+".auth")) }, "/?result=" + id, pollHeader(h), boxError},
 		"marker too big": {func(t *testing.T, r *rig) {
 			r.write(t, filepath.Join(r.dir, "stage", id+".auth"), bytes.Repeat([]byte(" "), maxMarker+1))
-		}, "/?result=" + id, pollHeader(h), false},
-		"marker for another id": {func(t *testing.T, r *rig) { r.marker(t, id, otherDigest, r.clock.Now()) }, "/?result=" + id, pollHeader(h), false},
+		}, "/?result=" + id, pollHeader(h), boxError},
+		"marker for another id": {func(t *testing.T, r *rig) { r.marker(t, id, otherDigest, r.clock.Now()) }, "/?result=" + id, pollHeader(h), boxError},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := newRig(t)
 			c.setup(t, r)
 			w := r.do(t, req{target: c.target, header: c.header})
-			if c.admit {
-				if w.Code != http.StatusAccepted || body(t, w)["phase"] != "pending" || r.h.limiter.Size() != 0 {
-					t.Fatalf("not admitted: %d %s, %d charged", w.Code, w.Body, r.h.limiter.Size())
+			errorLines := r.logs.FilterLevelExact(zap.ErrorLevel).Len()
+			switch c.code {
+			case admitted:
+				if w.Code != http.StatusAccepted || body(t, w)["phase"] != "pending" || r.h.limiter.Size() != 0 || errorLines != 0 {
+					t.Fatalf("not admitted: %d %s, %d charged, %d error lines", w.Code, w.Body, r.h.limiter.Size(), errorLines)
 				}
-				return
-			}
-			// Not admitted: an unauthenticated request like any other,
-			// and nothing in the journal but the preamble's own line —
-			// a broken marker included, which would otherwise be a line
-			// per request outside the limiter's budgets.
-			wantError(t, w, http.StatusUnauthorized, unauthorized)
-			if r.h.limiter.Size() != 1 {
-				t.Fatal("a failed poll was not charged")
-			}
-			if n := r.logs.FilterLevelExact(zap.ErrorLevel).Len(); n != 0 {
-				t.Fatalf("%d error lines before authentication: %v", n, r.logs.All())
+			case refused:
+				// An unauthenticated request like any other, and nothing
+				// in the journal but the preamble's own line.
+				wantError(t, w, http.StatusUnauthorized, unauthorized)
+				if r.h.limiter.Size() != 1 || errorLines != 0 {
+					t.Fatalf("%d charged, %d error lines: %v", r.h.limiter.Size(), errorLines, r.logs.All())
+				}
+			case boxError:
+				wantError(t, w, http.StatusInternalServerError, "could not read the push's marker")
+				if r.h.limiter.Size() != 0 || errorLines != 1 {
+					t.Fatalf("%d charged, %d error lines", r.h.limiter.Size(), errorLines)
+				}
 			}
 		})
 	}
@@ -469,23 +481,22 @@ func TestHandlerResultByToken(t *testing.T) {
 		code   int
 		want   string
 	}{
-		"pending":                {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now()) }, "/?result=" + id, 202, ""},
-		"pending, a second left": {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now().Add(-pendingLife+time.Second)) }, "/?result=" + id, 202, ""},
-		// Past fifteen minutes with no result the push is not pending:
-		// the 404 the Failure-mode table gives at the marker's bound.
-		"marker past its bound": {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now().Add(-pendingLife)) }, "/?result=" + id, 404, "no result and no pending push for " + id + ": swept, never admitted, or lost"},
-		"marker dated ahead":    {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now().Add(time.Second)) }, "/?result=" + id, 404, "no result and no pending push for " + id},
-		"swept":                 {func(*testing.T, *rig) {}, "/?result=" + id, 404, "no result and no pending push for " + id + ": swept, never admitted, or lost (journalctl -u hotserve-box-apply on the box)"},
-		"31 hex":                {func(*testing.T, *rig) {}, "/?result=" + id[:31], 400, msgResultID},
-		"33 hex":                {func(*testing.T, *rig) {}, "/?result=" + id + "0", 400, msgResultID},
-		"upper case":            {func(*testing.T, *rig) {}, "/?result=" + strings.ToUpper(id), 400, msgResultID},
-		"a path":                {func(*testing.T, *rig) {}, "/?result=..%2F..%2Fapplied", 400, msgResultID},
-		"empty":                 {func(*testing.T, *rig) {}, "/?result=", 400, msgResultID},
-		"bare key":              {func(*testing.T, *rig) {}, "/?result", 400, msgResultID},
-		"twice":                 {func(*testing.T, *rig) {}, "/?result=" + id + "&result=" + id, 400, msgResultID},
-		"another param":         {func(*testing.T, *rig) {}, "/?result=" + id + "&x=1", 400, msgResultID},
-		"only another param":    {func(*testing.T, *rig) {}, "/?x=1", 400, msgResultID},
-		"malformed":             {func(*testing.T, *rig) {}, "/?result=%ZZ", 400, msgResultID},
+		"pending": {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now()) }, "/?result=" + id, 202, ""},
+		// Admitted and not settled, whatever the marker's age: only
+		// root can tell a push it holds from one it lost.
+		"marker past fifteen minutes": {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now().Add(-time.Hour)) }, "/?result=" + id, 202, ""},
+		"marker dated ahead":          {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now().Add(time.Minute)) }, "/?result=" + id, 202, ""},
+		"swept":                       {func(*testing.T, *rig) {}, "/?result=" + id, 404, "no result and no pending push for " + id + ": swept, or never admitted"},
+		"31 hex":                      {func(*testing.T, *rig) {}, "/?result=" + id[:31], 400, msgResultID},
+		"33 hex":                      {func(*testing.T, *rig) {}, "/?result=" + id + "0", 400, msgResultID},
+		"upper case":                  {func(*testing.T, *rig) {}, "/?result=" + strings.ToUpper(id), 400, msgResultID},
+		"a path":                      {func(*testing.T, *rig) {}, "/?result=..%2F..%2Fapplied", 400, msgResultID},
+		"empty":                       {func(*testing.T, *rig) {}, "/?result=", 400, msgResultID},
+		"bare key":                    {func(*testing.T, *rig) {}, "/?result", 400, msgResultID},
+		"twice":                       {func(*testing.T, *rig) {}, "/?result=" + id + "&result=" + id, 400, msgResultID},
+		"another param":               {func(*testing.T, *rig) {}, "/?result=" + id + "&x=1", 400, msgResultID},
+		"only another param":          {func(*testing.T, *rig) {}, "/?x=1", 400, msgResultID},
+		"malformed":                   {func(*testing.T, *rig) {}, "/?result=%ZZ", 400, msgResultID},
 		"result a symlink": {func(t *testing.T, r *rig) {
 			r.result(t, result{ID: id, Phase: "applied"})
 			must(t, os.Rename(filepath.Join(r.dir, "out", id+".json"), filepath.Join(r.dir, "out", "real.json")))

@@ -45,8 +45,8 @@ and T6.
 | **record** | `txn.json`: the one durable marker of a transaction in flight, with a `phase`. Present means "no terminal result yet". |
 | **result** | `out/<id>.json`: what a push came to. Non-terminal: `verified`. Terminal: `refused`, `no_change`, `applied`, `failed`, `rolled_back`, `unknown`. |
 | **marker** | `stage/<id>.auth`: the handler's note that a push with id `<id>` was admitted, holding the digest of its poll secret. |
-| **pending** | A marker younger than fifteen minutes with no terminal result. See "Admission". |
-| **poll secret** | 32 random bytes the *workflow* generates for each push. The push carries only its digest (`X-Box-Poll-Digest`); a result poll carries the secret itself as `Authorization: Box-Poll <base64>`, the one header Caddy's access log redacts, and needs no other credential. The box stores the digest and never receives the secret with a push. |
+| **pending** | A marker younger than fifteen minutes with no terminal result. See "Admission". A result poll's `{"phase":"pending"}` is wider — admitted, no result yet, whatever the marker's age (Handler contract). |
+| **poll secret** | 32 random bytes the *workflow* generates for each push. The push carries only its digest (`X-Box-Poll-Digest`); a result poll carries the secret itself as `Authorization: Box-Poll <base64>`, which Caddy's access log redacts as it never does a custom header, and needs no other credential. The box stores the digest and never receives the secret with a push. |
 | **id** | The first 32 hex characters of `sha256(poll secret)`, so the client knows it before it asks and a lost response loses nothing. Not an arrival order: the applier orders by the marker's `posted` time. |
 | **active** | `systemctl is-active hotserve` says `active`. `activating` is waited out (bounded); anything else is "not running". |
 
@@ -202,7 +202,7 @@ cross-references throughout.
    lock, no drop and no root work — it skips only the work that would
    write. An OIDC holder posting the applied `HEAD` in a loop learns
    what `GET /` already tells it; a token without the right `sha`, or
-   a POST without its secret, is refused as it would be on the slow
+   a POST without its digest, is refused as it would be on the slow
    path. (After a console edit the digests differ and the push goes to
    root, which reinstalls HEAD's file by design; the next replay takes
    the fast path again.)
@@ -485,7 +485,7 @@ shows after recovery.
 
 | Write | Write fails → | Crash after → recovery | Terminal phase | Workflow sees |
 |---|---|---|---|---|
-| result `refused` | journal (error), remove entry | entry with terminal result → remove entry | `refused` | 422 or the result; if unwritten, `pending` then 404 and red at its bound |
+| result `refused` | journal (error), remove entry | entry with terminal result → remove entry | `refused` | 422 or the result; if unwritten, `pending` until the workflow's bound, then red naming the journal |
 | result `verified` | remove entry, journal; file untouched | no record, result `verified` → rewrite `failed`, remove entry | `failed` | `failed` |
 | record `no_change` | result `failed`; nothing changed | phase `no_change` → `applied.json`, result | `no_change` | `no_change` |
 | record `installing` | result `failed`; nothing changed | phase `installing`, `d == prev` → `failed` | `failed` | `failed` |
@@ -495,7 +495,7 @@ shows after recovery.
 | record `applied` | the reload succeeded but the record cannot say so, and the baseline must never run ahead of the record (I4): take the rollback path exactly as the `record swapped` row — previous bytes back, reload, result `rolled_back` ("the record could not be updated after a successful reload (disk full); rolled back to keep the file and the record consistent") or, if the write-back fails too, the full-disk end above | phase `applied`, `d == new` → `applied.json`, result | `rolled_back` / `unknown` | per phase |
 | `applied.json` | journal (error); result `unknown` ("applied but the baseline could not be recorded; `hotserve box baseline <sha>`") | phase `applied` → idempotent rewrite | `applied` / `unknown` | per phase |
 | previous bytes back | retry once; else result `unknown`, record kept as above | phase `rolling_back`, `d` checked, bytes written back if needed | `rolled_back` / `unknown` | per phase |
-| terminal result | **full disk**: error-level journal with every field; remove record and entry anyway (both `unlink`s). At a terminal phase the disk is settled and only the report is owed; a record kept would spin `PathExists=txn.json`. | result exists, record present → remove record and entry | as logged | `pending`, then 404 at the marker's bound, red naming the journal |
+| terminal result | **full disk**: error-level journal with every field; remove record and entry anyway (both `unlink`s). At a terminal phase the disk is settled and only the report is owed; a record kept would spin `PathExists=txn.json`. | result exists, record present → remove record and entry | as logged | `pending` until the workflow's bound, then red naming the journal |
 | record removed | retry; cannot fail for space | record gone, entry present → remove entry | — | — |
 | entry removed | retry; cannot fail for space | `work/` non-empty → path unit re-runs recovery once | — | — |
 
@@ -511,7 +511,7 @@ re-instantiates the handler; a crash releases it with the descriptor.
 
 | Condition at the lock | Answer | Why |
 |---|---|---|
-| no `X-Box-Poll-Digest` header, or not 64 lowercase hex | 400 "X-Box-Poll-Digest: the sha256 of 32 random bytes, 64 lowercase hex, required" | the id is derived from it; checked before the fast path, so every POST contract rule holds on both paths |
+| no `X-Box-Poll-Digest` header, or not 64 lowercase hex | 400 "X-Box-Poll-Digest: 64 lowercase hex, the sha256 of the push's 32-byte poll secret, required" | the id is derived from it; checked before the fast path, so every POST contract rule holds on both paths |
 | token, header and `sha` binding passed; HEAD equals the baseline and the file's digest equals the installed file's | 200 `no_change`, before the lock | nothing would change; the fast path of step 4 |
 | a marker or result already exists for this id | 409 "duplicate request id: poll /?result=<id>" | a retry after a lost response; honest ids never collide |
 | lock held by another request | 409 "a push is being admitted; retry in a moment" | another push is between its checks and its marker |
@@ -625,10 +625,10 @@ Every numeric bound, in one place, with its reason.
 | one whole chain's verification | 10 minutes | 500 commits × up to three children × 30 s would otherwise let a stalling child hold the applier, and the admission lock, for hours; a legitimate chain is seconds |
 | `diff` in record and result | 64 KiB, cut with a note | the record is one atomic write |
 | results and markers kept | 32 ids, or a day | see "Retention" |
-| files the handler reads | `applied.json` 64 KiB, a marker 4 KiB, a result 2 MiB, the installed Caddyfile 1 MiB; each opened without blocking, held to a regular file, read to the cap plus one byte; in the exchange tree, a symlink at the file's own name is refused (its directories are root's, from tmpfiles.d) | `applied.json`'s `path` is up to 4 KiB, which JSON's `\u` escapes can grow sixfold; a result's `apps` is bounded only by the 1 MiB file it was read from |
+| files the handler reads | `applied.json` 64 KiB, a marker 4 KiB, a result 2 MiB, the installed Caddyfile 1 MiB; each opened without blocking, held to a regular file, read to the cap plus one byte; in the exchange tree, a symlink at the file's own name is refused (its directories come from tmpfiles.d, in a base directory the hotserve uid cannot write, and are followed as they stand) | `applied.json`'s `path` is up to 4 KiB, which JSON's `\u` escapes can grow sixfold; a result's `apps` is bounded only by the 1 MiB file it was read from |
 | handler wait for the first result | 30 s | past it, 504 and the poll |
-| pending / poll-secret life | 15 minutes from the marker's `posted` | the workflow's own poll bound; the marker itself is retained longer (see "Retention"), but its push is pending, and the secret it holds honoured, only within this window: past it a poll that finds no result is 404, the Failure-mode table's "pending, then 404 at the marker's bound" |
-| poll secret | exactly 32 random bytes; to poll, `Authorization: Box-Poll <standard base64 with padding>` (44 characters); with the push, its sha256 alone, 64 lowercase hex | 256 bits: the id derived from it cannot collide or be guessed; one encoding each, so each header has one spelling; in `Authorization`, so an access log never holds it |
+| pending / poll-secret life | 15 minutes from the marker's `posted` | the workflow's own poll bound; the marker itself is retained longer (see "Retention") so that a `404` means swept, but the secret it holds is honoured only within this window |
+| poll secret | exactly 32 random bytes; to poll, `Authorization: Box-Poll <standard base64 with padding>` (44 characters); with the push, its sha256 alone, 64 lowercase hex | 256 bits: the id derived from it cannot collide or be guessed; one encoding each, so each header has one spelling; in `Authorization`, so Caddy's access log redacts it, as it does the deploy token, unless an operator sets `log_credentials` |
 | handler poll interval for the first result | 1 s | bounds how long a reload's `Shutdown` waits for the in-flight POST ("Why 202 and a poll") |
 | workflow poll | 15 minutes, then red naming the journal | |
 | `activating` wait in step 16 | 300 s elapsed | hotserve's `TimeoutStartSec=240s` plus `RestartSec`; an elapsed bound, since `Restart=on-failure` can keep a unit activating across attempts |
@@ -722,7 +722,7 @@ console step; a host rename needs a certificate first in any case.
 |---|---|---|
 | `POST /` with a bundle and `X-Box-Poll-Digest` | `deploy_trust` (step 1) | per step 8: 202 `{id, commit, phase: verified}` / 200 with a `no_change` or `applied` result / 422 with a `refused`, `failed`, `rolled_back` or `unknown` result / 504 `{id}`; 400, 409, 413, 415 from admission. Until the applier ships: 501 once authenticated, the body unread |
 | `GET /` | `deploy_trust` | `{"commit", "box_webhook", "sha256"}`: `commit` is `applied.json`'s `sha`; `box_webhook` and `sha256` are the installed file's walked host and its digest as read now — what step 4's fast path compares, so a console edit since the last apply shows. The workflow reads `commit` to bundle `rev-list --first-parent <commit>..HEAD`. 409 before `init` (no `applied.json`); 500 when either file cannot be read or the installed file does not walk |
-| `GET /?result=<id>` | **first** the poll secret — one `Authorization: Box-Poll <secret>` header (the scheme matched without regard to case), the secret standard base64 with padding, of 32 bytes whose sha256 begins with `<id>` and equals the marker's digest, the marker posted less than fifteen minutes ago and not ahead of now; accepted for `<id>` alone, never charged to the failure budget — else `deploy_trust`, where a missing, malformed or stale secret is an unauthenticated request like any other; authentication precedes everything below, so an unauthenticated caller gets the same flat 401 a deploy host gives and learns nothing | then the query must be exactly one `result=<id>`, `<id>` in the id grammar (400). The result, with step 8's status for its phase: `verified` 202; `no_change`, `applied` 200; `refused`, `failed`, `rolled_back`, `unknown` 422. 202 `{"phase":"pending"}` while the push is pending (Glossary) and no result exists; 404 when there is no result and no pending push — swept, never admitted, or a marker past its fifteen minutes; 500 when a file cannot be read |
+| `GET /?result=<id>` | **first** the poll secret — one `Authorization: Box-Poll <secret>` header (the scheme matched without regard to case), the secret standard base64 with padding, of 32 bytes whose sha256 begins with `<id>` and equals the marker's digest, the marker posted less than fifteen minutes ago (a clock stepped back makes it younger, as for admission); accepted for `<id>` alone, never charged to the failure budget — else `deploy_trust`, where a missing, malformed or stale secret is an unauthenticated request like any other; authentication precedes everything below, so an unauthenticated caller gets the same flat 401 a deploy host gives and learns nothing | then the query must be exactly one `result=<id>`, `<id>` in the id grammar (400). The result, with step 8's status for its phase: `verified` 202; `no_change`, `applied` 200; `refused`, `failed`, `rolled_back`, `unknown` 422. 202 `{"phase":"pending"}` while a marker exists and no result does — admitted and not yet settled, whatever the marker's age, since only root can tell a push it holds from one it lost, and its next run settles a lost one as `failed` (Retention); 404 when neither exists (swept, or never admitted); 500 when a file cannot be read, on the poll-secret path too when a marker stands at the secret's id and cannot be read — which only the secret's holder can reach, so it is never a line per guessing caller |
 | another method on `/` | — | 405 |
 | another path | — | not this handler's; passed on |
 
@@ -761,11 +761,11 @@ says. The workflow's action is in the last column.
 |---|---|---|---|---|
 | 401 | auth | liveswap's flat 401 | handler | the 401 checklist, as deploy.sh |
 | 429 | auth | liveswap's | handler | retry later |
-| 400 | — | `result must be a 32-hex id` / `X-Box-Poll-Digest: the sha256 of 32 random bytes, 64 lowercase hex, required` | handler | bug in the workflow |
+| 400 | — | `result must be a 32-hex id` / `X-Box-Poll-Digest: 64 lowercase hex, the sha256 of the push's 32-byte poll secret, required` | handler | bug in the workflow |
 | 409 | — | `duplicate request id: poll /?result=<id>` | handler | poll instead of retrying the POST |
 | 409 | — | `this box has no baseline; hotserve init <dir> <sha> as root on the box sets one` | handler (`GET /`) | fail; run `init` on the box |
 | 501 | — | `config pushes are not applied by this hotserve version; nothing applied` | handler, until the applier ships | fail |
-| 404 | — | `no result and no pending push for <id>: swept, never admitted, or lost (journalctl -u hotserve-box-apply on the box)` | handler | fail |
+| 404 | — | `no result and no pending push for <id>: swept, or never admitted` | handler | fail |
 | 500 | — | `the Caddyfile this box runs <reason>` (a walk refusal's reason) / `could not read <what>: <error>` | handler | fail; `journalctl -u hotserve` on the box |
 | 405 / 415 / 413 | — | `method not allowed` / `the bundle is a gzip tarball` / `the bundle is larger than 16 MiB` | handler | fail |
 | 409 | — | `a push is being admitted; retry in a moment` | handler | retry |
@@ -798,7 +798,8 @@ says. The workflow's action is in the last column.
 | 504 | — | `{id}` | handler | poll from the start |
 
 Journal lines: the handler logs its own refusals with liveswap's fields
-(`refused`, `remote`, `by`) and `box push accepted` with `id`, `commit`,
+(`refused`, `remote`, `by`) and `box_request` (`status`, `result` or
+`push`; not `box`, which is the host), and `box push accepted` with `id`, `commit`,
 `by`, `remote`; the applier logs with `id`, `commit`, `signer`, `box`
 (the host) and `phase`. Every input-derived value in either is bounded
 per the Caps table.
@@ -1062,7 +1063,7 @@ anything; GitHub enforces nothing.
 | `box_webhook` inside the hotserve process | A root-owned webhook | HTTP, gzip, tar and OIDC parsing as root. No. |
 | One atomic `txn.json` with a `phase` | `Caddyfile.prev` beside the file; a two-file marker; digests as state | `.prev` is `bin/push`'s name and a trigger on it would race legacy pushes; two files have partial states; digests cannot tell "before the swap" from "re-run after a console edit". |
 | Client-chosen per-push poll secret, id derived from it | The OIDC token as the poll credential; a box-issued secret in the response | The token: a trust-changing push would lock itself out, and five minutes is shorter than a slow apply. A box-issued secret: a lost POST response after a trust change left the run with nothing to poll with. |
-| The push carries the poll secret's digest; a poll carries the secret as `Authorization: Box-Poll` | The secret in a custom header on both | Caddy's access log redacts `Authorization` alone: a custom header in a log would let its reader poll the result for fifteen minutes. |
+| The push carries the poll secret's digest; a poll carries the secret as `Authorization: Box-Poll` | The secret in a custom header on both | Caddy's access log redacts `Authorization` (and the cookie headers) but logs every custom header, and a logged secret would let its reader poll the result for fifteen minutes. The cost: the box cannot see that a digest is of 32 bytes, so a workflow that hashes the wrong bytes learns it from its first poll's 401, not from the push. |
 | A handler fast path for a replay of the applied `HEAD` | Rate-limiting successful admissions | Nothing would change on disk, so no root work is the right amount; a rate limit would also slow honest runs. |
 | Host and recorded path as identity | Host alone; a `path` line in the file; the directory name | Host alone cannot pick between two files naming the same host; a `path` line is a redundant line to keep in step; the directory name is outside the signed file. |
 | Every chain commit signed | HEAD's signature only | An unsigned commit would ride in under the next signed one. |
@@ -1158,8 +1159,9 @@ Dated one-liners; the full text of each is in git.
   routes, `hotserve box webhook`) added what the design left open
   before the applier: a `POST` is 501 once authenticated; `GET /` is
   409 before `init` and 500 when the box's own files fail it; a result
-  poll answers with step 8's status for the phase; a push with no result is
-  pending only while its marker is younger than fifteen minutes; the
+  poll answers with step 8's status for the phase, and its `pending`
+  is "admitted, not yet settled"; the Failure-mode table's workflow
+  column no longer promises a 404 its expired secret cannot reach; the
   handler's read caps. The poll secret now travels only to poll, as
   `Authorization: Box-Poll` (Caddy's access log redacts it), the push
   carrying its digest; reachability on `/` is a handler check in

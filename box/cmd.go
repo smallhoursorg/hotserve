@@ -2,7 +2,6 @@ package box
 
 import (
 	"fmt"
-	"io"
 	"os"
 
 	caddycmd "github.com/caddyserver/caddy/v2/cmd"
@@ -27,8 +26,8 @@ repository, and a signed push reaches the box through box_webhook.`,
 				Short: "Print the URL of the Caddyfile's box_webhook",
 				Long: `Reads the Caddyfile the way the box does — its raw tokens, expanding
 nothing and following nothing — and prints https://<host>/ for the one
-site carrying box_webhook. It refuses the file for every reason the box
-would, so the laptop, CI and the box cannot disagree about which
+site carrying box_webhook. It refuses the file's contents for every
+reason the box would, so the laptop, CI and the box cannot disagree about which
 address a file names. The file may be a pipe:
 
     hotserve box webhook <(git show HEAD:box1/Caddyfile)`,
@@ -56,12 +55,9 @@ func webhookURL(path string) (string, error) {
 		return "", err
 	}
 	defer f.Close() //nolint:errcheck // read-only
-	file, err := io.ReadAll(io.LimitReader(f, proof.MaxCaddyfile+1))
+	file, err := readCapped(f, path, proof.MaxCaddyfile)
 	if err != nil {
 		return "", err
-	}
-	if len(file) > proof.MaxCaddyfile {
-		return "", fmt.Errorf("%s: larger than %d bytes", path, proof.MaxCaddyfile)
 	}
 	shape, err := Walk(file)
 	if err != nil {

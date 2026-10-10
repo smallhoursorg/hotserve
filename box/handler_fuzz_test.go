@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -20,37 +21,40 @@ import (
 )
 
 // FuzzResultPoll drives `GET /?result=` with any query, any
-// Authorization scheme and secret, and any marker bytes, filed under
-// the id the secret would derive. The poll secret admits a request
-// exactly when an oracle written from the Handler contract says it
-// should — one `result` parameter, the Box-Poll scheme in any case, a
-// canonical 32-byte standard base64 secret whose digest's first 32 hex
-// are that parameter and whose whole digest the marker holds, posted
-// within the last fifteen minutes — and is never charged. Everything
-// else is the flat 401 without a bearer; with one (in place of the
-// poll's Authorization), a malformed query is 400 and the rest never
-// 401.
+// Authorization value and any marker bytes, filed under the id the
+// value's secret would derive. An oracle written from the Handler
+// contract says what each request gets: a poll-shaped request — one
+// `result` parameter, the Box-Poll scheme in any case, a canonical
+// 32-byte standard base64 secret whose digest's first 32 hex are that
+// parameter — is 500 when the marker standing at its id cannot be
+// read, admitted (202, never charged) when the marker holds the whole
+// digest and is younger than fifteen minutes, and otherwise an
+// unauthenticated request like any other: the flat 401, charged. With
+// a bearer (in place of the poll's Authorization), a malformed query
+// is 400 and the rest never 401.
 func FuzzResultPoll(f *testing.F) {
 	h, id, digest := secret(7)
 	posted := func(age time.Duration) []byte {
 		b, _ := json.Marshal(marker{SHA256: digest, Posted: time.Unix(1_700_000_000, 0).Add(-age)})
 		return b
 	}
-	f.Add("result="+id, "Box-Poll ", h, posted(0), false)
-	f.Add("result="+id, "box-poll ", h, posted(0), false)
-	f.Add("result="+id, "Bearer ", h, posted(0), false)
-	f.Add("result="+id, "Box-Poll ", h, posted(pendingLife-time.Second), false)
-	f.Add("result="+id, "Box-Poll ", h, posted(pendingLife), false)
-	f.Add("result="+id, "Box-Poll ", h, posted(-time.Second), false)
-	f.Add("result="+id+"&result="+id, "Box-Poll ", h, posted(0), false)
-	f.Add("result="+id, "Box-Poll ", h[:43], posted(0), true)
-	f.Add("result=%ZZ", "Box-Poll ", h, posted(0), true)
-	f.Add("x=1", "", "", []byte("{"), true)
-	f.Add("result="+id, "Box-Poll ", h, []byte(`{"sha256":"`+id+`","posted":"2023-11-14T22:13:20Z"}`), false)
+	f.Add("result="+id, "Box-Poll "+h, posted(0), false)
+	f.Add("result="+id, "box-poll "+h, posted(0), false)
+	f.Add("result="+id, "Bearer "+h, posted(0), false)
+	f.Add("result="+id, "Box-Poll "+h, posted(pendingLife-time.Second), false)
+	f.Add("result="+id, "Box-Poll "+h, posted(pendingLife), false)
+	f.Add("result="+id, "Box-Poll "+h, posted(-time.Hour), false)
+	f.Add("result="+id+"&result="+id, "Box-Poll "+h, posted(0), false)
+	f.Add("result="+id, "Box-Poll "+h[:43], posted(0), true)
+	f.Add("result=%ZZ", "Box-Poll "+h, posted(0), true)
+	f.Add("x=1", "", []byte("{"), true)
+	f.Add("result="+id, "Box-Poll "+h, []byte(`{"sha256":"`+id+`","posted":"2023-11-14T22:13:20Z"}`), false)
+	f.Add("result="+id, "Box-Poll "+h, []byte("{"), false)
 
+	idRE := regexp.MustCompile(`^[0-9a-f]{32}$`)
 	r := newRig(f)
 	token := r.token(f)
-	f.Fuzz(func(t *testing.T, query, scheme, header string, markerBytes []byte, bearer bool) {
+	f.Fuzz(func(t *testing.T, query, auth string, markerBytes []byte, bearer bool) {
 		if query == "" {
 			return // `GET /`, the status: not this target's
 		}
@@ -64,9 +68,13 @@ func FuzzResultPoll(f *testing.F) {
 				t.Fatal(err)
 			}
 		}
-		raw, err := base64.StdEncoding.DecodeString(header)
+		secretText := auth
+		if len(auth) >= len("Box-Poll ") {
+			secretText = auth[len("Box-Poll "):]
+		}
+		raw, err := base64.StdEncoding.DecodeString(secretText)
 		if err != nil {
-			raw = []byte(header)
+			raw = []byte(secretText)
 		}
 		sum := sha256.Sum256(raw)
 		derived := hex.EncodeToString(sum[:])
@@ -77,15 +85,19 @@ func FuzzResultPoll(f *testing.F) {
 		// The oracle.
 		q, qerr := url.ParseQuery(query)
 		single := qerr == nil && len(q) == 1 && len(q["result"]) == 1
+		shaped := !bearer && single && len(auth) == len("Box-Poll ")+44 && strings.EqualFold(auth[:len("Box-Poll ")], "Box-Poll ") &&
+			len(raw) == 32 && base64.StdEncoding.EncodeToString(raw) == secretText && q["result"][0] == derived[:32]
 		var m marker
-		markerOK := len(markerBytes) <= maxMarker && json.Unmarshal(markerBytes, &m) == nil && m.SHA256 == derived
-		age := r.clock.Now().Sub(m.Posted)
-		admit := !bearer && single && strings.EqualFold(scheme, "Box-Poll ") && len(raw) == pollSecretLen && base64.StdEncoding.EncodeToString(raw) == header &&
-			q["result"][0] == derived[:32] && markerOK && age >= 0 && age < pendingLife
+		readable := len(markerBytes) <= maxMarker && json.Unmarshal(markerBytes, &m) == nil
+		if readable {
+			_, hexErr := hex.DecodeString(m.SHA256)
+			readable = hexErr == nil && len(m.SHA256) == 64 && m.SHA256 == strings.ToLower(m.SHA256) && m.SHA256[:32] == derived[:32]
+		}
+		admit := shaped && readable && m.SHA256 == derived && r.clock.Now().Sub(m.Posted) < pendingLife
 
 		hr := httptest.NewRequest(http.MethodGet, "/", nil)
 		hr.URL.RawQuery = query
-		hr.Header["Authorization"] = []string{scheme + header}
+		hr.Header["Authorization"] = []string{auth}
 		if bearer {
 			hr.Header.Set("Authorization", "Bearer "+token)
 		}
@@ -100,6 +112,10 @@ func FuzzResultPoll(f *testing.F) {
 			t.Fatalf("not JSON: %s", w.Body)
 		}
 		switch {
+		case shaped && !readable:
+			if w.Code != http.StatusInternalServerError || r.h.limiter.Size() != 0 {
+				t.Fatalf("an unreadable marker at the secret's id, but %d %s, %d charged", w.Code, w.Body, r.h.limiter.Size())
+			}
 		case admit:
 			if w.Code != http.StatusAccepted || r.h.limiter.Size() != 0 {
 				t.Fatalf("admitted, but %d %s, %d charged", w.Code, w.Body, r.h.limiter.Size())
@@ -108,7 +124,7 @@ func FuzzResultPoll(f *testing.F) {
 			if w.Code != http.StatusUnauthorized || r.h.limiter.Size() != 1 {
 				t.Fatalf("not admitted, no bearer, but %d %s", w.Code, w.Body)
 			}
-		case !single || !validID(q["result"][0]):
+		case !single || !idRE.MatchString(q["result"][0]):
 			if w.Code != http.StatusBadRequest {
 				t.Fatalf("a malformed query with a bearer: %d %s", w.Code, w.Body)
 			}

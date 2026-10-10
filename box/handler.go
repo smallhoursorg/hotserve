@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -79,7 +80,6 @@ const (
 	msgResultID   = "result must be a 32-hex id"
 	msgNoBaseline = "this box has no baseline; hotserve init <dir> <sha> as root on the box sets one"
 	msgNoApplier  = "config pushes are not applied by this hotserve version; nothing applied"
-	msgNoResult   = "no result and no pending push for %s: swept, never admitted, or lost (journalctl -u hotserve-box-apply on the box)"
 )
 
 // pollScheme is the Authorization scheme a result poll carries its
@@ -115,7 +115,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 // refusal is written. route names the request in the preamble's
 // journal lines, beside the address.
 func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request, route string) (bool, error) {
-	_, refusal := h.limiter.Authenticate(r, h.app.verifiers, h.logger, "box", route)
+	_, refusal := h.limiter.Authenticate(r, h.app.verifiers, h.logger, "box_request", route)
 	if refusal != nil {
 		return false, refusal.Write(w, func(code int, body any) error { return respond(w, code, body) })
 	}
@@ -164,29 +164,28 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) error {
 
 // result is `GET /?result=<id>`. The poll secret is tried first and
 // never charged: it admits the request only for the id derived from
-// it, and only while that id's push is pending with the secret's
-// digest in its marker. Anything else goes through the preamble — a
-// wrong or stale secret is then an unauthenticated request like any
+// it, and only while that id's marker holds the secret's digest and is
+// younger than pendingLife. Anything else goes through the preamble —
+// a wrong or stale secret is then an unauthenticated request like any
 // other — and only once authenticated is the query's shape checked, so
 // an unauthenticated caller learns nothing from a 400. The query names
 // a file only after the id has passed its grammar, and the poll path
 // reaches the disk only with an id it derived itself.
 //
-// With no result, the push is pending only while its marker is
-// (pending): past fifteen minutes a marker with no result is a push
-// the box lost or has not settled, which the workflow has stopped
-// polling for, and the answer is the 404 the Failure-mode table gives
-// at the marker's bound.
+// With no result, a marker says the push was admitted and is not yet
+// settled: 202 pending, whatever the marker's age. Only root can tell
+// a push it still holds from one that was lost, and its next run
+// settles a lost one as `failed` (DESIGN-box.md, "Retention").
 func (h *Handler) result(w http.ResponseWriter, r *http.Request) error {
 	var id string
 	q, err := url.ParseQuery(r.URL.RawQuery)
 	single := err == nil && len(q) == 1 && len(q["result"]) == 1
+	var m *marker // the push's marker, as the poll secret read it
 	if single {
 		id = q["result"][0]
-	}
-	var m *marker // the push's marker, once read
-	if single {
-		m = h.pollSecret(r, id)
+		if m, err = h.pollSecret(r, id); err != nil {
+			return h.boxError(w, "the push's marker", err)
+		}
 	}
 	if m == nil {
 		if ok, err := h.authenticate(w, r, "result"); !ok {
@@ -211,55 +210,56 @@ func (h *Handler) result(w http.ResponseWriter, r *http.Request) error {
 		return h.boxError(w, "the result", err)
 	}
 	if m == nil {
-		if m, err = readMarker(h.dir, id); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if _, err := readMarker(h.dir, id); errors.Is(err, fs.ErrNotExist) {
+			return respond(w, http.StatusNotFound, errorBody("no result and no pending push for "+id+": swept, or never admitted"), id)
+		} else if err != nil {
 			return h.boxError(w, "the push's marker", err)
 		}
 	}
-	if m != nil && pending(m, h.now()) {
-		return respond(w, http.StatusAccepted, map[string]string{"phase": "pending"})
-	}
-	return respond(w, http.StatusNotFound, errorBody(fmt.Sprintf(msgNoResult, id)), id)
-}
-
-// pending is whether a marker's push is pending: posted less than
-// pendingLife ago, and not ahead of now.
-func pending(m *marker, now time.Time) bool {
-	age := now.Sub(m.Posted)
-	return age >= 0 && age < pendingLife
+	return respond(w, http.StatusAccepted, map[string]string{"phase": "pending"})
 }
 
 // pollSecret is the poll secret's check, and the marker it admits on:
 // exactly one Authorization header, in the Box-Poll scheme (its case
 // ignored, as an auth scheme's is), exactly 32 bytes in standard padded
-// base64, whose sha256 begins with id and equals, in constant time, the digest the
-// marker holds; the push pending. nil admits nothing, and says nothing
-// in the journal: it runs before the preamble, so a line here would
-// be one per unauthenticated request, outside the limiter's budgets.
-// A marker that cannot be read is the box's error, reported by the
-// authenticated request that reads it next.
-func (h *Handler) pollSecret(r *http.Request, id string) *marker {
+// base64, whose sha256 begins with id and equals, in constant time,
+// the digest the marker holds; the marker younger than pendingLife (a
+// clock stepped back makes it younger, as it does for admission).
+//
+// nil, nil admits nothing and writes nothing to the journal: this runs
+// before the preamble, where a line per request would be outside the
+// limiter's budgets — a broken stage/ makes every id unreadable, and
+// is reported only to authenticated requests. An error says a marker
+// stands at the secret's id and cannot be read: the box's error,
+// answered as one, and reachable only with a secret a push was
+// admitted under, so only by its holder — the workflow, which has no
+// other way to learn why its polls fail.
+func (h *Handler) pollSecret(r *http.Request, id string) (*marker, error) {
 	values := r.Header.Values("Authorization")
 	if len(values) != 1 || len(values[0]) != len(pollScheme)+base64.StdEncoding.EncodedLen(pollSecretLen) ||
 		!strings.EqualFold(values[0][:len(pollScheme)], pollScheme) {
-		return nil
+		return nil, nil
 	}
 	secret, err := base64.StdEncoding.Strict().DecodeString(values[0][len(pollScheme):])
 	if err != nil || len(secret) != pollSecretLen {
-		return nil
+		return nil, nil
 	}
 	sum := sha256.Sum256(secret)
 	if hex.EncodeToString(sum[:pollSecretLen/2]) != id {
-		return nil
+		return nil, nil
 	}
 	m, err := readMarker(h.dir, id)
 	if err != nil {
-		return nil
+		if _, serr := os.Lstat(markerPath(h.dir, id)); serr == nil {
+			return nil, err
+		}
+		return nil, nil
 	}
 	want, err := hex.DecodeString(m.SHA256) // validDigest: cannot fail
-	if err != nil || subtle.ConstantTimeCompare(want, sum[:]) != 1 || !pending(m, h.now()) {
-		return nil
+	if err != nil || subtle.ConstantTimeCompare(want, sum[:]) != 1 || h.now().Sub(m.Posted) >= pendingLife {
+		return nil, nil
 	}
-	return m
+	return m, nil
 }
 
 // push is `POST /`: authenticated, then refused, until the applier

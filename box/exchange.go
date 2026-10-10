@@ -113,7 +113,7 @@ func readFile(path string, limit int64, follow bool) ([]byte, error) {
 	if !follow {
 		flags |= syscall.O_NOFOLLOW
 	}
-	f, err := os.OpenFile(path, flags, 0) //nolint:gosec // a fixed path of the box's (an id only after validID), or the operator's CLI argument
+	f, err := os.OpenFile(path, flags, 0) //nolint:gosec // a fixed path of the box's; an id in it only after validID
 	if err != nil {
 		return nil, err
 	}
@@ -125,19 +125,26 @@ func readFile(path string, limit int64, follow bool) ([]byte, error) {
 	if !fi.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s: %w", path, errNotRegular)
 	}
-	b, err := io.ReadAll(io.LimitReader(f, limit+1))
+	return readCapped(f, path, limit)
+}
+
+// readCapped reads r to its end, at most limit bytes: through a reader
+// that stops one byte past the cap, so more is refused, never cut.
+func readCapped(r io.Reader, name string, limit int64) ([]byte, error) {
+	b, err := io.ReadAll(io.LimitReader(r, limit+1))
 	if err != nil {
 		return nil, err
 	}
 	if int64(len(b)) > limit {
-		return nil, fmt.Errorf("%s: larger than %d bytes", path, limit)
+		return nil, fmt.Errorf("%s: larger than %d bytes", name, limit)
 	}
 	return b, nil
 }
 
 // readJSON reads one of the exchange tree's files into v, refusing a
-// symlink at the file's own name. Its directories are root's
-// (tmpfiles.d) and followed as they stand.
+// symlink at the file's own name. Its directories come from
+// tmpfiles.d, in a base directory the hotserve uid cannot write, and
+// are followed as they stand.
 func readJSON(path string, limit int64, v any) error {
 	b, err := readFile(path, limit, false)
 	if err != nil {
@@ -161,10 +168,13 @@ func readApplied(dir string) (*applied, error) {
 	return &a, nil
 }
 
-// readMarker reads `stage/<id>.auth`; id must already be valid.
+// markerPath is `stage/<id>.auth`; id must already be valid.
+func markerPath(dir, id string) string { return filepath.Join(dir, "stage", id+".auth") }
+
+// readMarker reads the marker for id; id must already be valid.
 func readMarker(dir, id string) (*marker, error) {
 	var m marker
-	path := filepath.Join(dir, "stage", id+".auth")
+	path := markerPath(dir, id)
 	if err := readJSON(path, maxMarker, &m); err != nil {
 		return nil, err
 	}
