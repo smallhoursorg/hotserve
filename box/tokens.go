@@ -45,8 +45,9 @@ func refuse(reason string) error { return &Refusal{Reason: reason} }
 // the `box` block contains `{$`; if a site is written without braces
 // (Caddy allows one, whose directives would then sit at depth zero);
 // if there is no `box` block, no `signer`, no `deploy_trust` block
-// with a line in it; or if the sites carrying `box_webhook` are not
-// exactly one, with exactly one address that is a bare hostname.
+// with a line in it; if `box_webhook` stands anywhere but directly in
+// a site block; or if the sites carrying it are not exactly one, with
+// exactly one address that is a bare hostname.
 //
 // The walk runs twice: on the raw bytes, and on the bytes after
 // Caddy's own placeholder expansion with an empty environment, because
@@ -100,32 +101,13 @@ type frame struct {
 	kind  blockKind
 	inBox bool  // every token inside the box block is held to the placeholder rule
 	site  *site // the site this block is inside, if any
-	// dispatch is whether Caddy reads this block's lines as directives:
-	// a site's body, and the bodies of the few directives that nest
-	// directives (route, handle, handle_path, handle_errors, and
-	// handle_response inside reverse_proxy). Inside any other block —
-	// `header { … }`, a matcher, a handler's options — the first token
-	// of a line is a field, not a directive. `box_webhook` counts where
-	// dispatch is set and is refused by name anywhere else, so the
-	// list above can only be too short, never unsafe: a container it
-	// misses refuses the file rather than hiding a live webhook.
-	dispatch bool
-	// directive is the first token of the line that opened this block,
-	// and inDirective whether that line was itself at a dispatching
-	// position — together they recognise reverse_proxy's handle_response.
-	directive   string
-	inDirective bool
+	// directive is the first token of the line that opened this block:
+	// the name a refusal gives for where `box_webhook` was found.
+	directive string
 	// snippet is the `(name)` or `&(name)` block this frame is inside,
 	// at any depth, if any.
 	snippet *site
 }
-
-// nesting are the directives whose block is more directives, and
-// responseHandlers the ones whose `handle_response` block is.
-var (
-	nesting          = map[string]bool{"route": true, "handle": true, "handle_path": true, "handle_errors": true}
-	responseHandlers = map[string]bool{"reverse_proxy": true, "intercept": true}
-)
 
 type site struct {
 	addresses []string
@@ -190,7 +172,7 @@ func walk(input []byte) (*Shape, error) {
 			default:
 				s := &site{addresses: addrs}
 				sites = append(sites, s)
-				f.kind, f.site, f.dispatch = kindSite, s, true
+				f.kind, f.site = kindSite, s
 			}
 			stack = append(stack, f)
 			continue
@@ -255,27 +237,24 @@ func walk(input []byte) (*Shape, error) {
 				// any depth, would be the webhook only through an `import`
 				// or an `invoke`, which the walk does not follow.
 				return nil, refuse("has box_webhook inside a snippet or named route (" + proof.Bound(top.snippet.addresses[0]) + "); write it in the site")
-			case top.site != nil && top.dispatch:
+			case top.kind == kindSite:
 				top.site.webhook = true
 			default:
-				// A line that starts with box_webhook where Caddy reads
-				// fields, not directives — the global block, a handler's
-				// options, a matcher, or a container the walk does not
-				// know — is refused rather than ignored, so a live webhook
-				// can never go uncounted.
+				// Only a direct child of the site block counts: under a
+				// matched `handle /x`, a `route`, a `handle_response` that
+				// runs only on an upstream response, or in a block where
+				// the first token is a field, the webhook could not answer
+				// on `/` — and a file that passed with one there would cut
+				// the channel at its reload. Refused by name, never
+				// ignored, so a live webhook can never go uncounted.
 				where := top.directive
 				if where == "" {
 					where = "the global options"
 				}
-				return nil, refuse("has box_webhook where it is not a directive (inside " + proof.Bound(where) + "); it goes in a site, route, handle, handle_path, handle_errors or handle_response block")
+				return nil, refuse("has box_webhook inside " + proof.Bound(where) + "; it must stand directly in the site block, where no matcher or nested route can leave / unserved")
 			}
 		}
-		child := frame{
-			kind: kindOther, inBox: top.inBox, site: top.site, snippet: top.snippet,
-			directive: first.Text, inDirective: top.dispatch,
-			dispatch: (top.dispatch && nesting[first.Text]) ||
-				(top.inDirective && responseHandlers[top.directive] && first.Text == "handle_response"),
-		}
+		child := frame{kind: kindOther, inBox: top.inBox, site: top.site, snippet: top.snippet, directive: first.Text}
 		switch top.kind {
 		case kindGlobal:
 			if first.Text == "box" {
