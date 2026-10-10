@@ -38,6 +38,10 @@ depends:
   # (DESIGN-threat-model.md, "The shared-UID rule").
   - libpam-systemd
   - dbus
+  # The box applier and the box_webhook handler verify each commit's
+  # SSH signature with `ssh-keygen -Y verify` (box/DESIGN-box.md, step
+  # 12).
+  - openssh-client
 
 # Every entry pins its mode. Without file_info nfpm copies the mode of
 # the file on the build host, so the package would carry whatever the
@@ -53,6 +57,22 @@ contents:
       mode: 0755
   - src: packaging/hotserve.service
     dst: /lib/systemd/system/hotserve.service
+    file_info:
+      mode: 0644
+  # The box applier (box/DESIGN-box.md, "The applier unit"): the path
+  # unit postinstall enables, the service it starts, and the exchange
+  # tree they share with the handler, made by systemd-tmpfiles at boot
+  # and by postinstall.
+  - src: packaging/hotserve-box-apply.path
+    dst: /lib/systemd/system/hotserve-box-apply.path
+    file_info:
+      mode: 0644
+  - src: packaging/hotserve-box-apply.service
+    dst: /lib/systemd/system/hotserve-box-apply.service
+    file_info:
+      mode: 0644
+  - src: packaging/hotserve-box.tmpfiles
+    dst: /usr/lib/tmpfiles.d/hotserve-box.conf
     file_info:
       mode: 0644
   - src: packaging/Caddyfile

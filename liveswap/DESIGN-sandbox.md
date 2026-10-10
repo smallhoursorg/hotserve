@@ -113,7 +113,8 @@ below as a contract the sandbox path must keep.
 - The view therefore MUST NOT contain, without anything having to
   enumerate them: other apps' directories, `/var/lib` outside the
   liveswap root's path to this app's own dirs (hotserve's TLS keys
-  live there), `/run/hotserve` (admin socket), `/etc/hotserve` and
+  and the box applier's exchange tree live there), `/run/hotserve`
+  (admin socket), `/etc/hotserve` and
   `/etc/liveswap` (env files), `/home`, `/root`, `/opt`, `/srv`, or
   any operator `env_file` wherever it lives. `/run/user` MUST NOT be
   reachable by any route, read-only included: with `PrivateUsers=`

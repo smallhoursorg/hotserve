@@ -163,7 +163,7 @@ func (a *Applier) recoverAll(ctx context.Context) error {
 		// Only root writes the record, whole, by rename: one that does
 		// not read is a fault no table reasons about. It is kept, and
 		// nothing is touched (States table, "record unreadable").
-		a.logger.Error("box: txn.json cannot be read; nothing is applied until the console removes it", zap.String("error", proof.Bound(err.Error())))
+		a.logger.Error("box: txn.json cannot be read; nothing is applied until the console reads it (it may hold the previous Caddyfile), removes it, then runs systemctl restart hotserve-box-apply.path, and again ten seconds later if that fails", zap.String("error", proof.Bound(err.Error())))
 		return errUnsettled
 	default:
 		if err := a.recoverRecord(ctx, rec); err != nil {

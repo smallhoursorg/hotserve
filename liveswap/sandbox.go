@@ -129,10 +129,13 @@ var sandboxNeverReachable = []string{"/run/user", "/dev", "/sys", "/proc"}
 
 // sandboxHotservePaths is the supervisor's own state on a packaged
 // install: TLS keys and certificates, the admin socket's directory,
-// the documented env-file directories: a mistake to put the liveswap
-// *root* inside of, and never reachable as a bind source.
+// the documented env-file directories, the box applier's exchange tree
+// (box/DESIGN-box.md, "Paths, owners, and who may touch what"): a
+// mistake to put the liveswap *root* inside of, and never reachable as
+// a bind source.
 var sandboxHotservePaths = []string{
 	"/var/lib/hotserve", "/run/hotserve", "/etc/hotserve", "/etc/liveswap",
+	"/var/lib/hotserve-box",
 }
 
 // sandboxSpec is what the runner needs to render the sandbox
