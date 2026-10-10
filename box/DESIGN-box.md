@@ -890,8 +890,8 @@ table and holds both shipped files to it, line for line, and the
 | `.path` | `[Unit]` | `Description=hotserve box applier trigger` | |
 | `.path` | `[Unit]` | `Documentation=https://github.com/smallhoursorg/hotserve/blob/main/box/DESIGN-box.md` | |
 | `.path` | `[Unit]` | `DefaultDependencies=no` | a path unit's defaults order it `Before=paths.target`, which `basic.target`, and so `hotserve.service`, come after: with the `After=` below, an ordering cycle. Measured on Debian 13: the manager broke it by deleting `paths.target`'s start job at boot and `hotserve.service`'s stop job at shutdown. The defaults that matter are the next four lines |
-| `.path` | `[Unit]` | `Requires=sysinit.target` | after the local filesystems, `/var/lib` among them |
-| `.path` | `[Unit]` | `After=sysinit.target hotserve.service` | recovery at boot meets a hotserve that has started, or failed to |
+| `.path` | `[Unit]` | `Requires=sysinit.target` | pulled in with it, as the defaults would; the ordering is the next line's |
+| `.path` | `[Unit]` | `After=sysinit.target hotserve.service` | after `sysinit.target`: the local filesystems, `/var/lib` among them, and `systemd-tmpfiles-setup`'s tree; after hotserve, so recovery at boot meets a hotserve that has started, or failed to |
 | `.path` | `[Unit]` | `Before=shutdown.target` | stopped for shutdown |
 | `.path` | `[Unit]` | `Conflicts=shutdown.target` | stopped for shutdown |
 | `.path` | `[Path]` | `DirectoryNotEmpty=/var/lib/hotserve-box/in` | a bundle the handler renamed in |
@@ -917,7 +917,7 @@ table and holds both shipped files to it, line for line, and the
 | `.service` | `[Service]` | `CapabilityBoundingSet=CAP_SETGID` | the same child's gid and its empty group list |
 | `.service` | `[Service]` | `CapabilityBoundingSet=CAP_KILL` | root stopping a child of another uid: without it a deadline on the verifier is a deadline on nothing. Measured: a 65534 child outlived its deadline, "operation not permitted" |
 | `.service` | `[Service]` | `CapabilityBoundingSet=CAP_DAC_OVERRIDE` | the "Removes" column holds against a hostile creator. Measured: without it a `chmod 000` directory the hotserve uid made in `in/` could not be moved out |
-| `.service` | `[Service]` | `CapabilityBoundingSet=CAP_FOWNER` | the same, for what only its owner may change |
+| `.service` | `[Service]` | `CapabilityBoundingSet=CAP_FOWNER` | the same, for a sticky directory: root may unlink another uid's file in one only as its owner or with this. Measured: with `CAP_DAC_OVERRIDE` alone, the file in a `chmod 1777` directory the hotserve uid made in `in/` stayed in `work/` |
 | `.service` | `[Service]` | `ProtectSystem=strict` | all but the next line's two trees read-only |
 | `.service` | `[Service]` | `ReadWritePaths=/etc/hotserve /var/lib/hotserve-box` | the Caddyfile and its temporary; the record, results and `applied.json` |
 | `.service` | `[Service]` | `PrivateTmp=yes` | the verifier's files for its 65534 child, in a `/tmp` of the unit's own |
@@ -927,12 +927,18 @@ table and holds both shipped files to it, line for line, and the
 
 Not in them, on purpose: `User=` (root writes root's file and asks the
 manager for the reload); `Restart=` (the path unit starts it again
-while there is work); `SuccessExitStatus=` (exit 0 is a settled run,
-and the one non-zero exit, a full disk, must fail the unit);
-`[Install]` in the service. Measured in the unit as shipped (a
-drop-in replacing only `ExecStart=`): `systemctl reload hotserve` and
-`box/proof`'s verifier, running `ssh-keygen -Y verify` as 65534 under
-the unit's `PrivateTmp`, work.
+while there is work); `RemainAfterExit=` (a oneshot left active would
+make every later trigger a start of an active unit, which does
+nothing); `SuccessExitStatus=` (exit 0 is a settled run, and the one
+non-zero exit, a full disk, must fail the unit); `Unit=` (the path
+unit starts the service of its own name); `[Install]` in the service.
+Measured in the unit as shipped, with a drop-in replacing only
+`ExecStart=` by a test binary built from `box/proof`, in a Debian 13
+container: `systemctl reload hotserve` works, and the verifier,
+running `ssh-keygen -Y verify` as 65534 in a directory under the
+unit's `PrivateTmp`, verifies and refuses as it does outside. The
+install test repeats the reload and the 65534 verification with
+`setpriv` and `ssh-keygen`.
 
 Why the path unit cannot loop: every entry the applier sees moves to
 `work/` (I2); every `work/` entry leaves with a result (I3); every
@@ -943,7 +949,10 @@ after a swap whose previous bytes cannot be written back, is in the
 Failure-mode table and ends at the path unit's trigger limit by design
 (`trigger-limit-hit`), named in the journal; a `systemctl restart` of
 the path unit inside the limit's ten seconds fails the same way, and
-after them starts it.
+after them starts it. A few restarts in quick succession meet the path
+unit's own start limit as well (measured: the fourth start within ten
+seconds is `start-limit-hit`), which `systemctl reset-failed
+hotserve-box-apply.path` clears.
 
 No timer starts the service. Whatever adds an id to the tree starts a
 run or is written by one — a bundle renamed into `in/` ahead of its
@@ -961,8 +970,9 @@ The package depends on `openssh-client`, ships the `tmpfiles.d` file,
 runs `systemd-tmpfiles --create hotserve-box.conf` and enables the path
 unit the `deb-systemd-helper` way in `postinstall.sh`. `preremove.sh`
 stops it at a removal, after hotserve, so a push admitted before
-hotserve stopped is taken by a run (and refused: hotserve is not
-running) rather than left in `in/` for a later install to apply. It
+hotserve stopped is taken by a run and settled — applied, rolled back
+or refused, as its race with the stop goes — rather than left in
+`in/` for a later install to apply. It
 neither disables it (an install after the removal finds it enabled and
 starts it) nor stops the service (a run under way settles by its own
 tables).

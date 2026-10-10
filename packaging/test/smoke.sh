@@ -195,6 +195,15 @@ expect_show $svc User ""
 expect_show hotserve-box-apply.path TriggerLimitIntervalUSec 10s
 expect_show hotserve-box-apply.path TriggerLimitBurst 20
 case " $(show hotserve-box-apply.path After) " in *" hotserve.service "*) : ;; *) die "the path unit is not After=hotserve.service" ;; esac
+# Every path the shipped file names, as the manager took it: one
+# "path (Type)" line each, so a spec the manager dropped shows here.
+want_paths=$(sed -n 's/^\(DirectoryNotEmpty\|PathExists\|PathExistsGlob\)=\(.*\)$/\2 (\1)/p' /lib/systemd/system/hotserve-box-apply.path | sort)
+[ "$(printf '%s\n' "$want_paths" | wc -l)" -eq 9 ] || die "the shipped path unit names $(printf '%s\n' "$want_paths" | wc -l) paths, want 9"
+got_paths=$(show hotserve-box-apply.path Paths | sort)
+[ "$got_paths" = "$want_paths" ] || die "the manager watches
+$got_paths
+and the unit file names
+$want_paths"
 # A path unit's default Before=paths.target, beside After=hotserve.service,
 # is an ordering cycle the manager breaks by deleting paths.target's
 # start job at boot and hotserve's stop job at shutdown.
@@ -256,39 +265,53 @@ EOF
 mkdir -p /run/systemd/system/$svc.d
 printf '[Service]\nExecStart=\nExecStart=/bin/sh /run/hotserve-box-smoke.sh\n' >/run/systemd/system/$svc.d/smoke.conf
 systemctl daemon-reload
-# The path unit is stopped while the entries are made, or it would fire
-# at the first; started again, it finds them and fires at once. Their
-# names are ones DirectoryNotEmpty= does not count (systemd takes them
-# for hidden and backup files): only the unit's PathExistsGlob= lines
-# start a run for them.
-systemctl stop hotserve-box-apply.path
-as_hotserve "mkdir $B/in/.hostile && touch $B/in/.hostile/f && chmod 000 $B/in/.hostile && touch '$B/in/stale~'" \
-	|| die "the hotserve uid cannot drop an entry into $B/in"
-systemctl start hotserve-box-apply.path
-i=0
-until [ -s "$B/smoke-result" ] && grep -q '^inleft=' "$B/smoke-result" && [ "$(show $svc ActiveState)" = inactive ]; do
-	i=$((i + 1))
-	[ "$i" -ge 60 ] && die "the path unit did not run the service for an entry in in/ within 30s: path $(systemctl show -p ActiveState,Result hotserve-box-apply.path | tr '\n' ' '), service $(systemctl show -p ActiveState,Result $svc | tr '\n' ' ')"
-	sleep 0.5
-done
-echo "inside the unit:"; sed 's/^/  /' "$B/smoke-result"
 res() { sed -n "s/^$1=//p" "$B/smoke-result"; }
+# One round per shape of entry, each alone in the tree, so each line of
+# the path unit is shown to start a run on its own: a hidden 000
+# directory (in/.[!.]*, CAP_DAC_OVERRIDE), a name of two dots and more
+# (in/..?*), a backup name (in/*: DirectoryNotEmpty= counts none of
+# these three), a sticky directory holding a file of the hotserve uid
+# (CAP_FOWNER), and a hidden name root left in work/ (work/.[!.]*). The
+# path unit is stopped while the entry is made, or it would fire at its
+# first step; started again, it finds the entry and fires at once.
+box_round() { # <what> <maker: hotserve|root> <command>
+	systemctl stop hotserve-box-apply.path
+	rm -f "$B/smoke-result"
+	if [ "$2" = root ]; then sh -c "$3"; else as_hotserve "$3"; fi || die "could not make $1"
+	# The path unit has the manager's own start limit (measured: the
+	# fourth start within 10 s is start-limit-hit), which rounds this
+	# quick would meet; reset-failed clears its count.
+	systemctl reset-failed hotserve-box-apply.path
+	systemctl start hotserve-box-apply.path
+	i=0
+	until [ -s "$B/smoke-result" ] && grep -q '^inleft=' "$B/smoke-result" && [ "$(show $svc ActiveState)" = inactive ]; do
+		i=$((i + 1))
+		[ "$i" -ge 60 ] && die "$1: the path unit did not run the service within 30s: path $(systemctl show -p ActiveState,Result hotserve-box-apply.path | tr '\n' ' '), service $(systemctl show -p ActiveState,Result $svc | tr '\n' ' ')"
+		sleep 0.5
+	done
+	[ -z "$(res move)" ] && [ "$(res clear)" = 0 ] && [ "$(res inleft)" = 0 ] && [ -z "$(ls -A $B/work)" ] \
+		|| die "$1: the unit could not clear it: $(tr '\n' ' ' <"$B/smoke-result") work: $(ls -A $B/work)"
+	echo "$1: one run, cleared"
+}
+box_round "a hidden 000 directory in in/" hotserve "mkdir $B/in/.hostile && touch $B/in/.hostile/f && chmod 000 $B/in/.hostile"
+echo "inside the unit:"; sed 's/^/  /' "$B/smoke-result"
 [ "$(res reload)" = 0 ] || die "systemctl reload hotserve failed inside the applier's unit"
 [ "$(res verify)" = 0 ] || die "ssh-keygen -Y verify as uid 65534 under the unit's PrivateTmp failed"
 [ "$(res childuid)" = 65534 ] || die "the child to kill was uid '$(res childuid)', not 65534: the kill check would prove nothing"
 [ "$(res kill)" = 0 ] || die "the unit could not kill a uid-65534 child (CAP_KILL)"
 [ "$(res etc)" = 0 ] || die "the unit cannot write /etc/hotserve"
 [ "$(res varlibhotserve)" != 0 ] || die "the unit could write /var/lib/hotserve: ProtectSystem=strict is not in force"
-[ -z "$(res move)" ] && [ "$(res clear)" = 0 ] && [ "$(res inleft)" = 0 ] \
-	|| die "the unit could not clear the hostile entries from in/ (CAP_DAC_OVERRIDE, CAP_FOWNER)"
 [ "$(stat -c %G "$B/smoke-result")" = hotserve ] || die "a file root made in $B is not group hotserve: the setgid bit is missing"
-[ -z "$(ls -A $B/work)" ] || die "work/ is not empty after the run"
+box_round "a name of two dots and more in in/" hotserve "touch $B/in/..hostile"
+box_round "a backup name in in/" hotserve "touch '$B/in/stale~'"
+box_round "a sticky directory in in/" hotserve "mkdir $B/in/sticky && chmod 1777 $B/in/sticky && touch $B/in/sticky/f"
+box_round "a hidden name in work/" root "touch $B/work/.crash"
 systemctl is-active --quiet hotserve || die "hotserve is not active after the reload inside the applier's unit"
 rm -f /run/systemd/system/$svc.d/smoke.conf "$B/smoke-result" /run/hotserve-box-smoke.sh
 rmdir /run/systemd/system/$svc.d
 systemctl daemon-reload
 [ "$(show hotserve-box-apply.path SubState)" = waiting ] || die "the path unit is not waiting after the run: $(systemctl show -p ActiveState,SubState,Result hotserve-box-apply.path | tr '\n' ' ')"
-echo "box applier: path unit enabled and waiting; tree as tmpfiles.d says; the unit reloads hotserve, verifies as 65534, kills its child, clears hidden and backup-named hostile entries"
+echo "box applier: path unit enabled and waiting; tree as tmpfiles.d says; the unit reloads hotserve, verifies as 65534, kills its child, and every shape of entry starts a run that clears it"
 
 stage "stage 2: liveswap deploy under the systemd sandbox"
 # Generate a local deploy keypair; the app trusts the public half, and

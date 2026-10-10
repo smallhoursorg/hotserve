@@ -13,9 +13,10 @@ Documentation=https://github.com/smallhoursorg/hotserve/blob/main/box/DESIGN-box
 # Before=paths.target, which basic.target, and so hotserve.service,
 # come after: with them, After=hotserve.service is an ordering cycle at
 # boot, which the manager breaks by dropping a start job. So the
-# defaults are off, and the ones that matter are written out: after
-# sysinit.target (the local filesystems, /var/lib among them), and
-# stopped for shutdown.
+# defaults are off, and the ones that matter are written out: pulled
+# in with sysinit.target and ordered after it (the local filesystems,
+# /var/lib among them, and systemd-tmpfiles-setup's tree), and stopped
+# for shutdown.
 DefaultDependencies=no
 Requires=sysinit.target
 After=sysinit.target hotserve.service

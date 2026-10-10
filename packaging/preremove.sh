@@ -17,8 +17,9 @@ remove)
 		systemctl stop hotserve 2>/dev/null || true
 		# The box applier's path unit, after hotserve: a push the
 		# box_webhook handler admitted before hotserve stopped is still
-		# taken by a run, which refuses it (hotserve is not running),
-		# rather than left in in/ for a later install to apply. Stopped,
+		# taken by a run and settled — applied, rolled back or refused,
+		# as its race with the stop goes — rather than left in in/ for a
+		# later install to apply. Stopped,
 		# not disabled: an install after this removal finds it enabled
 		# and starts it again (postinstall's was-enabled), where a
 		# disable here would leave the applier off for good. The service

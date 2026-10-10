@@ -45,7 +45,9 @@ CapabilityBoundingSet=CAP_KILL
 # against a hostile creator (a `mkdir in/x && chmod 000 in/x` would
 # otherwise wedge the path unit at its trigger limit).
 CapabilityBoundingSet=CAP_DAC_OVERRIDE
-# CAP_FOWNER: the same, for what only its owner may change the mode of.
+# CAP_FOWNER: the same, for a sticky directory (`chmod 1777 in/x`),
+# where root may unlink another uid's file only as its owner or with
+# this.
 CapabilityBoundingSet=CAP_FOWNER
 
 # The whole filesystem read-only but the two trees it writes:
@@ -64,6 +66,8 @@ SystemCallFilter=@system-service
 
 # Not here, on purpose: User= (root writes root's file and asks the
 # manager for the reload); Restart= (the path unit starts it again
-# while there is work); SuccessExitStatus= (exit 0 is a settled run,
+# while there is work); RemainAfterExit= (left active, every later
+# trigger would start an active unit, which does nothing);
+# SuccessExitStatus= (exit 0 is a settled run,
 # and the one non-zero exit, a full disk, must fail the unit);
 # [Install] (the path unit is what starts it).

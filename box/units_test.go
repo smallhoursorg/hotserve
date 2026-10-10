@@ -29,10 +29,20 @@ const (
 // forbidden is what neither unit may say, whatever the design's table
 // says — the contract that would break if the two moved together: the
 // applier is root (no User=, Group=, DynamicUser=, and no capability
-// granted beyond its bounding set), the path unit is what starts it
-// again (no Restart=), and its one non-zero exit, a full disk, fails
-// the unit (no SuccessExitStatus=).
-var forbidden = []string{"User", "Group", "DynamicUser", "Restart", "SuccessExitStatus", "AmbientCapabilities"}
+// granted beyond its bounding set); the path unit is what starts it
+// again (no Restart=), every time (no RemainAfterExit=, which would
+// leave it active and every later trigger a no-op), and it starts the
+// service of its own name (no Unit=); the one non-zero exit, a full
+// disk, fails the unit (no SuccessExitStatus=).
+var forbidden = []string{"User", "Group", "DynamicUser", "Restart", "RemainAfterExit", "Unit", "SuccessExitStatus", "AmbientCapabilities"}
+
+// The contract with the applier (box PR 3a): what runs, and the paths
+// that start it — a bundle in in/, and what a killed run left, in work/
+// and as the record — whatever the design's table comes to say.
+const (
+	applierCommand = "/usr/bin/hotserve box apply"
+	exchangeTree   = "/var/lib/hotserve-box"
+)
 
 func TestTheShippedUnitsSayWhatTheDesignLists(t *testing.T) {
 	design := designUnits(t)
@@ -56,24 +66,39 @@ func TestTheShippedUnitsSayWhatTheDesignLists(t *testing.T) {
 					}
 				}
 			}
-			for _, u := range []map[string]map[string][]string{want, got} {
-				for s, keys := range u {
-					for _, k := range forbidden {
-						if v, ok := keys[k]; ok {
-							t.Errorf("[%s] %s=%q: never, whatever the table says", s, k, v)
-						}
+			// The design's table only: the file is held to it above.
+			for s, keys := range want {
+				for _, k := range forbidden {
+					if v, ok := keys[k]; ok {
+						t.Errorf("[%s] %s=%q: never, whatever the table says", s, k, v)
 					}
 				}
 			}
 		})
 	}
 	// The contract with the applier, which the table must keep.
-	svc := design[serviceUnit]
-	if got := svc["Service"]["ExecStart"]; !slices.Equal(got, []string{"/usr/bin/hotserve box apply"}) {
-		t.Errorf("ExecStart %q: the applier is `/usr/bin/hotserve box apply`", got)
+	svc, path := design[serviceUnit], design[pathUnit]
+	if got := svc["Service"]["ExecStart"]; !slices.Equal(got, []string{applierCommand}) {
+		t.Errorf("ExecStart %q: the applier is %s", got, applierCommand)
+	}
+	if got := svc["Service"]["Type"]; !slices.Equal(got, []string{"oneshot"}) {
+		t.Errorf("Type %q: one run per start is a oneshot", got)
 	}
 	if _, ok := svc["Install"]; ok {
 		t.Error("the service has an [Install] section: the path unit is its only start")
+	}
+	for key, want := range map[string][]string{
+		"DirectoryNotEmpty": {exchangeTree + "/in", exchangeTree + "/work"},
+		"PathExists":        {exchangeTree + "/txn.json"},
+	} {
+		for _, p := range want {
+			if !slices.Contains(path["Path"][key], p) {
+				t.Errorf("the path unit has no %s=%s: what starts the applier, or its recovery at boot, would not", key, p)
+			}
+		}
+	}
+	if !slices.Contains(path["Install"]["WantedBy"], "multi-user.target") {
+		t.Errorf("the path unit is not WantedBy=multi-user.target: %q", path["Install"]["WantedBy"])
 	}
 }
 
@@ -204,6 +229,8 @@ func TestThePathsTableReader(t *testing.T) {
 			"| `…/out/` | 2750 | root:hotserve | tmpfiles.d | applier | handler | — |\n",
 			map[string]string{"/var/lib/hotserve-box": "2750 root:hotserve", "/var/lib/hotserve-box/in": "0770 root:hotserve"}, ""},
 		{"no section", "## Caps\n", nil, "no section"},
+		{"a heading one level down", "#" + head + "| `/var/lib/hotserve-box/` | 2750 | root:hotserve | tmpfiles.d | — | — | — |\n", nil, "no section"},
+		{"no table", "## Paths, owners, and who may touch what\n\nprose\n", nil, "no table"},
 		{"no rows", head + "\n", nil, "no row"},
 		{"a pipe in a cell", head + "| `…/in/` | 0770 | root:hotserve | tmpfiles.d | a | b | c | d |\n", nil, "8 cells"},
 		{"a child before the base", head + "| `…/in/` | 0770 | root:hotserve | tmpfiles.d | — | — | — |\n", nil, "before the base"},
@@ -237,9 +264,12 @@ func TestTheUnitTableReader(t *testing.T) {
 		want      []unitRow
 		err       string
 	}{
-		{"both units, then another section", head + both + "| `.path` | `[Path]` | `PathExists=/y` | b |\n\n## Next\n| `.path` | `[Path]` | `PathExists=/z` | c |\n",
+		{"both units, then another section", head + both + "| `.path` | `[Path]` | `PathExists=/y` | b |\n## Next\n| `.path` | `[Path]` | `PathExists=/z` | c |\n",
 			[]unitRow{{pathUnit, "Path", "PathExists", "/x", "a"}, {serviceUnit, "Service", "Type", "oneshot", ""}, {pathUnit, "Path", "PathExists", "/y", "b"}}, ""},
 		{"no section", "## Caps\n", nil, "no section"},
+		{"a heading one level down", "#" + head + both, nil, "no section"},
+		{"the table ends at its first line that is not a row", head + both + "\nprose\n\n| `.path` | `[Path]` | `PathExists=/y` | b |\n",
+			[]unitRow{{pathUnit, "Path", "PathExists", "/x", "a"}, {serviceUnit, "Service", "Type", "oneshot", ""}}, ""},
 		{"one unit only", head + "| `.path` | `[Path]` | `PathExists=/x` | a |\n", nil, "both units"},
 		{"a pipe in a cell", head + both + "| `.path` | `[Path]` | `PathExists=/x` | a | b |\n", nil, "5 cells"},
 		{"an unknown unit", head + both + "| `.timer` | `[Timer]` | `OnCalendar=daily` | |\n", nil, "unknown unit"},
@@ -388,46 +418,76 @@ func designUnits(t *testing.T) map[string]map[string]map[string][]string {
 	return out
 }
 
-// parseUnitTable reads the table in "The applier unit": a row is a line
-// that opens with a backquoted unit suffix, then the section in
-// brackets, the line, and why. The section ends at the next
-// second-level heading.
+// parseUnitTable reads the table in "The applier unit": the unit by
+// its suffix, the section in brackets, the line, and why.
 func parseUnitTable(doc string) ([]unitRow, error) {
-	_, section, ok := strings.Cut(doc, "## The applier unit\n")
-	if !ok {
-		return nil, errors.New("no section \"The applier unit\"")
+	cells, err := tableRows(doc, "## The applier unit", "| Unit | Section | Line | Why |")
+	if err != nil {
+		return nil, err
 	}
-	section, _, _ = strings.Cut(section, "\n## ")
 	var rows []unitRow
 	seen := map[string]bool{}
-	for _, line := range strings.Split(section, "\n") {
-		if !strings.HasPrefix(line, "| `.") {
-			continue
-		}
-		cells := strings.Split(line, "|")
-		if len(cells) != 6 {
-			return nil, fmt.Errorf("%d cells, not the table's 4, in %q", len(cells)-2, line)
-		}
-		for i := range cells {
-			cells[i] = strings.TrimSpace(cells[i])
-		}
-		unit := "hotserve-box-apply" + strings.Trim(cells[1], "`")
+	for _, c := range cells {
+		unit := "hotserve-box-apply" + strings.Trim(c[0], "`")
 		if unit != pathUnit && unit != serviceUnit {
-			return nil, fmt.Errorf("an unknown unit %s in %q", cells[1], line)
+			return nil, fmt.Errorf("an unknown unit %s", c[0])
 		}
-		sec := strings.Trim(cells[2], "`")
-		if !strings.HasPrefix(sec, "[") || !strings.HasSuffix(sec, "]") {
-			return nil, fmt.Errorf("a section not written [Section] in %q", line)
+		sec := strings.Trim(c[1], "`")
+		if len(sec) < 2 || sec[0] != '[' || sec[len(sec)-1] != ']' {
+			return nil, fmt.Errorf("a section not written [Section]: %s", c[1])
 		}
-		k, v, ok := strings.Cut(strings.Trim(cells[3], "`"), "=")
+		k, v, ok := strings.Cut(strings.Trim(c[2], "`"), "=")
 		if !ok || k == "" {
-			return nil, fmt.Errorf("not a key: %q", cells[3])
+			return nil, fmt.Errorf("not a key: %s", c[2])
 		}
-		rows = append(rows, unitRow{unit, sec[1 : len(sec)-1], k, v, cells[4]})
+		rows = append(rows, unitRow{unit, sec[1 : len(sec)-1], k, v, c[3]})
 		seen[unit] = true
 	}
 	if !seen[pathUnit] || !seen[serviceUnit] {
 		return nil, errors.New("the table must have rows for both units")
+	}
+	return rows, nil
+}
+
+// tableRows is the cells of each row of the table a section of the
+// document holds under header: the section is the line equal to heading
+// up to the next heading of its level or above; the table, the first
+// line in it equal to header, then its separator, then every line that
+// is a row, up to the first that is not. A row with another number of
+// cells — a pipe inside a cell — is an error, never a short read.
+func tableRows(doc, heading, header string) ([][]string, error) {
+	lines := strings.Split(doc, "\n")
+	start := slices.Index(lines, heading)
+	if start < 0 {
+		return nil, fmt.Errorf("no section %q", strings.TrimLeft(heading, "# "))
+	}
+	level := heading[:strings.IndexByte(heading, ' ')]
+	section := lines[start+1:]
+	for i, l := range section {
+		if h, _, ok := strings.Cut(l, " "); ok && h != "" && strings.Trim(h, "#") == "" && len(h) <= len(level) {
+			section = section[:i]
+			break
+		}
+	}
+	h := slices.Index(section, header)
+	if h < 0 || h+1 >= len(section) || !strings.HasPrefix(section[h+1], "|---") {
+		return nil, fmt.Errorf("no table %q under %q", header, heading)
+	}
+	n := strings.Count(header, "|") - 1
+	var rows [][]string
+	for _, line := range section[h+2:] {
+		if !strings.HasPrefix(line, "|") {
+			break
+		}
+		cells := strings.Split(line, "|")
+		if len(cells) != n+2 {
+			return nil, fmt.Errorf("%d cells, not the table's %d, in %q", len(cells)-2, n, line)
+		}
+		row := make([]string, n)
+		for i := range row {
+			row[i] = strings.TrimSpace(cells[i+1])
+		}
+		rows = append(rows, row)
 	}
 	return rows, nil
 }
@@ -478,40 +538,27 @@ func designTmpfilesRows(t *testing.T) map[string]string {
 	return rows
 }
 
-// parseTmpfilesRows reads the Paths table out of the document: its
-// section ends at the next second-level heading; a row is a line that
-// opens with a backquoted path; "…/" in a path stands for the base
-// directory, the first row under /var/lib.
+// parseTmpfilesRows reads the Paths table: "…/" in a path stands for
+// the base directory, the first row under /var/lib.
 func parseTmpfilesRows(doc string) (map[string]string, error) {
-	_, section, ok := strings.Cut(doc, "## Paths, owners, and who may touch what\n")
-	if !ok {
-		return nil, errors.New("no section \"Paths, owners, and who may touch what\"")
+	cells, err := tableRows(doc, "## Paths, owners, and who may touch what", "| Path | Mode | Owner | Creates | Writes | Reads | Removes |")
+	if err != nil {
+		return nil, err
 	}
-	section, _, _ = strings.Cut(section, "\n## ")
 	rows := map[string]string{}
 	base := ""
-	for _, line := range strings.Split(section, "\n") {
-		if !strings.HasPrefix(line, "| `") {
-			continue
-		}
-		cells := strings.Split(line, "|")
-		if len(cells) != 9 {
-			return nil, fmt.Errorf("%d cells, not the table's 7, in %q", len(cells)-2, line)
-		}
-		for i := range cells {
-			cells[i] = strings.TrimSpace(cells[i])
-		}
-		path := strings.TrimSuffix(strings.Trim(cells[1], "`"), "/")
+	for _, c := range cells {
+		path := strings.TrimSuffix(strings.Trim(c[0], "`"), "/")
 		if rest, ok := strings.CutPrefix(path, "…/"); ok {
 			if base == "" {
-				return nil, fmt.Errorf("%q comes before the base directory it is under", cells[1])
+				return nil, fmt.Errorf("%q comes before the base directory it is under", c[0])
 			}
 			path = base + "/" + rest
 		} else if base == "" && strings.HasPrefix(path, "/var/lib/") {
 			base = path
 		}
-		if cells[4] == "tmpfiles.d" {
-			rows[path] = cells[2] + " " + cells[3]
+		if c[3] == "tmpfiles.d" {
+			rows[path] = c[1] + " " + c[2]
 		}
 	}
 	if len(rows) == 0 {
