@@ -6,7 +6,10 @@
 #   - A 7-day cooldown on routine version bumps: compromised upstream
 #     releases are almost always yanked within days, so waiting is the
 #     cheapest supply-chain defense there is. Security updates BYPASS
-#     the cooldown and arrive immediately.
+#     the cooldown and arrive immediately. The gomod clock starts at the
+#     module proxy's Time, the tagged commit's date, not the GitHub
+#     release's publication: a tag on an old commit gets a short
+#     cooldown or none, and no default-days can close that.
 #   - Patch/minor updates auto-merge once the full CI graph (tests,
 #     e2e, package install matrix, govulncheck) passes; majors stay
 #     open for human review.
