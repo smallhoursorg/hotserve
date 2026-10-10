@@ -390,8 +390,9 @@ func runFixtureTable(t *testing.T, fx *fixtures) {
 		if p, err := VerifyChain(ctx, v, chain, fx.signers, fx.signers, baseline); err != nil || p != fx.signers[0].Principal {
 			t.Fatalf("head chain: %q %v", p, err)
 		}
-		if p, err := VerifyChain(ctx, v, nil, fx.signers, fx.signers, baseline); err != nil || p != "" {
-			t.Fatalf("empty chain: %q %v", p, err)
+		// An empty chain is a caller's bug, refused as the box's error.
+		if _, err := VerifyChain(ctx, v, nil, fx.signers, fx.signers, baseline); err == nil || errors.As(err, new(*Refusal)) {
+			t.Fatalf("empty chain: %v", err)
 		}
 		// after_unsigned → unsigned → head → mid → base: the unsigned
 		// commit in the middle refuses the push, naming it, with HEAD

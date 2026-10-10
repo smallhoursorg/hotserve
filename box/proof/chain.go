@@ -46,6 +46,12 @@ func Chain(head *Commit, parents []*Commit, baseline string) ([]*Commit, error) 
 	if cur.ID == baseline || (len(cur.Parents) > 0 && cur.Parents[0] == baseline) {
 		return chain, nil
 	}
+	// A bundle holds at most MaxChain-1 parents, so a history longer
+	// than the cap fills the chain exactly and ends here, still naming
+	// a parent: that is the cap, not a missing baseline.
+	if len(chain) == MaxChain && len(cur.Parents) > 0 {
+		return nil, refuse("the chain from %s to %s is longer than %d commits; run hotserve box baseline %s as root on the box", baseline, head.ID, MaxChain, head.ID)
+	}
 	return nil, descendRefusal(head.ID, baseline)
 }
 
@@ -75,18 +81,23 @@ func descendRefusal(head, baseline string) error {
 // message. An error that is not a verdict — ssh-keygen could not run,
 // the deadline passed — is returned as it is, never as a refusal.
 func VerifyChain(ctx context.Context, v *Verifier, chain []*Commit, installed, incoming Signers, baseline string) (string, error) {
+	// Chain never returns an empty chain; a caller that hands one over
+	// would be skipping HEAD's signature, so this fails closed.
+	if len(chain) == 0 {
+		return "", errors.New("verify: an empty chain; HEAD is always on the chain")
+	}
 	budget := v.ChainTimeout
 	if budget == 0 {
 		budget = defaultChainTimeout
 	}
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
-	// The allowed_signers files are rendered once for the chain.
+	// The installed allowed_signers file is rendered once for the chain;
+	// the incoming one is needed at most once, on the way out.
 	allowedInstalled, err := installed.AllowedSigners()
 	if err != nil {
 		return "", err
 	}
-	var allowedIncoming []byte
 	principal := ""
 	for i, c := range chain {
 		p, err := v.verify(ctx, c, installed, allowedInstalled)
@@ -102,10 +113,9 @@ func VerifyChain(ctx context.Context, v *Verifier, chain []*Commit, installed, i
 		}
 		switch r.code {
 		case codeUnlisted:
-			if allowedIncoming == nil {
-				if allowedIncoming, err = incoming.AllowedSigners(); err != nil {
-					return "", err
-				}
+			allowedIncoming, err := incoming.AllowedSigners()
+			if err != nil {
+				return "", err
 			}
 			name, err := v.verify(ctx, c, incoming, allowedIncoming)
 			var again *Refusal

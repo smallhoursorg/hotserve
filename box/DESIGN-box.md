@@ -37,7 +37,7 @@ and T6.
 | **bundle** | One gzip tarball the workflow POSTs: `path`, `Caddyfile`, `commit`, `parents/NNNN`, `trees/<sha>`, nothing else. |
 | **HEAD** | The commit the bundle is for: `sha1("commit <n>\0" + raw)` of the bundled `commit` object, computed, never read. |
 | **baseline** | The commit the box runs: `sha` in `applied.json`. Advances only as the state machine says. |
-| **chain** | HEAD plus the bundled `parents/` commits, first-parent from HEAD down to, not including, the baseline, each linked to the next by hash. HEAD is always on it, so the chain is never empty and HEAD's signature is always checked against the installed list — when HEAD *is* the baseline the chain is HEAD alone and `parents/` must be empty; `parents/` is also empty when HEAD's first parent is the baseline. The cap counts HEAD. |
+| **chain** | HEAD plus the bundled `parents/` commits, first-parent from HEAD down to, not including, the baseline, each linked to the next by hash. HEAD is always on it, so the chain is never empty: whatever would write — root, and the handler's pre-verification before validate — checks HEAD's signature against the installed list, HEAD equal to the baseline included (then the chain is HEAD alone and `parents/` must be empty). The one answer given without it is step 4's `no_change` fast path, which writes nothing: HEAD is the baseline and the bundled bytes are the installed bytes, verified when they applied. `parents/` is also empty when HEAD's first parent is the baseline. The cap counts HEAD. |
 | **installed file** | `/etc/hotserve/Caddyfile` as root last wrote it. The source of the signer list and the rollback bytes. |
 | **record** | `txn.json`: the one durable marker of a transaction in flight, with a `phase`. Present means "no terminal result yet". |
 | **result** | `out/<id>.json`: what a push came to. Non-terminal: `verified`. Terminal: `refused`, `no_change`, `applied`, `failed`, `rolled_back`, `unknown`. |
@@ -288,8 +288,12 @@ cross-references throughout.
     carries a signature step 12 accepts**: otherwise an unsigned commit
     pushed by a leaked credential would ride in under the next signed
     one. HEAD equal to the baseline is a chain of HEAD alone (see the
-    Glossary): its signature is still checked, no parent may be
-    bundled, and step 16 decides whether anything changes. A commit
+    Glossary): root still checks its signature, no parent may be
+    bundled, and step 16 decides whether anything changes (the
+    handler's step-4 fast path has already answered the case where
+    nothing would). A history longer than the cap fills the chain
+    exactly and still names a parent: that is the cap's refusal, not
+    the descent one. A commit
     between the baseline and HEAD is refused by what its verdict was —
     unsigned, listed-but-unverifiable (its own message), or signed by a
     key the box did not list when it last applied, named by the

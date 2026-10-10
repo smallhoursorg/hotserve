@@ -365,6 +365,14 @@ func TestChainHandMade(t *testing.T) {
 	if chain, err := Chain(head, below(cs, len(cs)-1, 2), cs[2].ID); err != nil || len(chain) != MaxChain {
 		t.Fatalf("%d %v", len(chain), err)
 	}
+	// The bundle's own bound: 499 parents fill the chain exactly; a
+	// history that goes on past them is the cap, not a missing
+	// baseline — and a root reached at exactly the cap is descent.
+	_, err = Chain(head, below(cs, len(cs)-1, 2), cs[0].ID)
+	refusalContaining(t, err, "is longer than 500 commits")
+	short := line(MaxChain - 1) // cs[0] is a root; head cs[499] + 499 parents reach it
+	_, err = Chain(short[len(short)-1], below(short, len(short)-1, -1), zeroID)
+	refusalContaining(t, err, "does not descend")
 }
 
 // pubLine is a public key as a signer line's two arguments.
