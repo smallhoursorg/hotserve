@@ -113,6 +113,12 @@ func ReadBundle(gz []byte) (*Bundle, error) {
 			}
 			parents[n] = c
 		case strings.HasPrefix(name, "trees/"):
+			// The proof walks at most MaxDepth trees, so a bundle has no
+			// use for more; the cap keeps a flood of tiny valid trees
+			// from costing a map entry each.
+			if len(b.Trees) == MaxDepth {
+				return nil, refuse("bundle: more than %d trees", MaxDepth)
+			}
 			id := name[len("trees/"):]
 			t, err := ParseTree(data)
 			if err != nil {

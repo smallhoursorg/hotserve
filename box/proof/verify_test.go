@@ -3,6 +3,7 @@ package proof
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os/exec"
 	"strings"
@@ -28,10 +29,55 @@ func TestBoundedBuffer(t *testing.T) {
 		t.Skip("no cat")
 	}
 	v := &Verifier{Timeout: 10 * time.Second}
-	out, ok, err := v.run(context.Background(), cat, t.TempDir(), big)
-	if err != nil || !ok || len(out) != maxChildOutput {
-		t.Fatalf("%v %v %d", err, ok, len(out))
+	res, err := v.run(context.Background(), cat, t.TempDir(), big)
+	if err != nil || !res.ok || len(res.stdout) != maxChildOutput {
+		t.Fatalf("%v %v %d", err, res.ok, len(res.stdout))
 	}
+}
+
+// TestControlVector: the built-in signature verifies with the system's
+// ssh-keygen, and a wrong payload does not — which is what lets a
+// failed verification be read as a verdict.
+func TestControlVector(t *testing.T) {
+	needTools(t, "ssh-keygen")
+	key, err := SignatureKey([]byte(controlSignature))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := strings.Fields(controlAllowed)
+	ctl, err := ParseSigner(f[0], f[2], f[3])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, ok := (Signers{ctl}).PrincipalFor(key); !ok || p != controlPrincipal {
+		t.Fatalf("%q %v", p, ok)
+	}
+	v := &Verifier{TempDir: t.TempDir()}
+	c := &Commit{ID: zeroID, Kind: SSHSig, Signature: []byte(controlSignature), Payload: []byte(controlPayload)}
+	if p, err := v.Verify(context.Background(), c, Signers{ctl}); err != nil || p != controlPrincipal {
+		t.Fatalf("%q %v", p, err)
+	}
+	wrong := *c
+	wrong.Payload = []byte("something else\n")
+	_, err = v.Verify(context.Background(), &wrong, Signers{ctl})
+	refusalContaining(t, err, zeroID+" is signed by control, but the signature does not verify")
+	// With a broken verifier the same failure is the box's error.
+	broken := &Verifier{SSHKeygen: "/bin/false", TempDir: t.TempDir()}
+	_, err = broken.Verify(context.Background(), c, Signers{ctl})
+	var r *Refusal
+	if err == nil || errors.As(err, &r) || !strings.Contains(err.Error(), "could not verify a known-good signature") {
+		t.Fatalf("%v", err)
+	}
+	// And the key the signature names is what the list is matched on.
+	for _, bad := range []string{"", "-----BEGIN SSH SIGNATURE-----\nU1NIU0lH\n-----END SSH SIGNATURE-----\n", "-----BEGIN SSH SIGNATURE-----\n!!!!\n-----END SSH SIGNATURE-----\n", "-----BEGIN SSH SIGNATURE-----\nAAAA\n-----END SSH SIGNATURE-----\n"} {
+		if _, err := SignatureKey([]byte(bad)); err == nil {
+			t.Fatalf("%q parsed", bad)
+		}
+	}
+	unreadable := *c
+	unreadable.Signature = []byte("-----BEGIN SSH SIGNATURE-----\nU1NIU0lH\n-----END SSH SIGNATURE-----\n")
+	_, err = v.Verify(context.Background(), &unreadable, Signers{ctl})
+	refusalContaining(t, err, zeroID+" is signed, but the signature is not one the box can read")
 }
 
 // TestRunVerdicts: an exit status is a verdict, a deadline is not.
@@ -42,15 +88,20 @@ func TestRunVerdicts(t *testing.T) {
 	}
 	v := &Verifier{Timeout: 10 * time.Second}
 	ctx := context.Background()
-	if out, ok, err := v.run(ctx, sh, t.TempDir(), nil, "-c", "echo hi"); err != nil || !ok || strings.TrimSpace(string(out)) != "hi" {
-		t.Fatalf("%q %v %v", out, ok, err)
+	if res, err := v.run(ctx, sh, t.TempDir(), nil, "-c", "echo hi"); err != nil || !res.ok || strings.TrimSpace(res.stdout) != "hi" {
+		t.Fatalf("%+v %v", res, err)
 	}
-	if out, ok, err := v.run(ctx, sh, t.TempDir(), nil, "-c", "echo no >&2; exit 3"); err != nil || ok || len(out) != 0 {
-		t.Fatalf("%q %v %v", out, ok, err)
+	if res, err := v.run(ctx, sh, t.TempDir(), nil, "-c", "echo no >&2; exit 3"); err != nil || res.ok || res.stdout != "" || strings.TrimSpace(res.stderr) != "no" {
+		t.Fatalf("%+v %v", res, err)
+	}
+	// A run with no subcommand still names the program on the error path.
+	none := &Verifier{Timeout: 200 * time.Millisecond}
+	if _, err := none.run(ctx, sh, t.TempDir(), nil); err != nil {
+		t.Fatal(err)
 	}
 	slow := &Verifier{Timeout: 200 * time.Millisecond}
 	start := time.Now()
-	_, _, err = slow.run(ctx, sh, t.TempDir(), nil, "-c", "sleep 5")
+	_, err = slow.run(ctx, sh, t.TempDir(), nil, "-c", "sleep 5")
 	if err == nil || !strings.Contains(err.Error(), "deadline") || time.Since(start) > 3*time.Second {
 		t.Fatalf("%v after %s", err, time.Since(start))
 	}

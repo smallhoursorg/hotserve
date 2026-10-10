@@ -177,16 +177,36 @@ func treeObject(entries ...Entry) []byte {
 
 func TestParseTree(t *testing.T) {
 	tr, err := ParseTree(nil)
-	if err != nil || tr.ID != emptyTree || len(tr.Entries) != 0 {
+	if err != nil || tr.ID != emptyTree {
 		t.Fatalf("%v %v", tr, err)
+	}
+	if es, err := tr.Entries(); err != nil || len(es) != 0 {
+		t.Fatalf("%v %v", es, err)
 	}
 	raw := treeObject(Entry{ModeFile, "Caddyfile", emptyBlob}, Entry{ModeDir, "dir", emptyTree}, Entry{ModeSymlink, "link", emptyBlob}, Entry{ModeSubmodule, "sub", zeroID}, Entry{ModeExecutable, "run", emptyBlob})
 	tr, err = ParseTree(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tr.Entries) != 5 || tr.Entries[0] != (Entry{ModeFile, "Caddyfile", emptyBlob}) || tr.Entries[3] != (Entry{ModeSubmodule, "sub", zeroID}) || tr.ID != ObjectID("tree", raw) {
-		t.Fatalf("%+v", tr)
+	es, err := tr.Entries()
+	if err != nil || len(es) != 5 || es[0] != (Entry{ModeFile, "Caddyfile", emptyBlob}) || es[3] != (Entry{ModeSubmodule, "sub", zeroID}) || tr.ID != ObjectID("tree", raw) {
+		t.Fatalf("%+v %v", es, err)
+	}
+	if e, ok, err := tr.entry("sub"); err != nil || !ok || e.Mode != ModeSubmodule {
+		t.Fatal(e, ok, err)
+	}
+	if _, ok, err := tr.entry("nope"); err != nil || ok {
+		t.Fatal(ok, err)
+	}
+	// A name twice is refused at the lookup, not at the parse.
+	twice, err := ParseTree(treeObject(Entry{ModeFile, "x", emptyBlob}, Entry{ModeDir, "x", emptyTree}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = twice.entry("x")
+	refusalContaining(t, err, "bundle: tree "+twice.ID+": an entry name appears twice")
+	if _, ok, err := twice.entry("y"); err != nil || ok {
+		t.Fatal(ok, err)
 	}
 	for name, in := range map[string][]byte{
 		"no space":        []byte("100644"),
@@ -198,7 +218,6 @@ func TestParseTree(t *testing.T) {
 		"dot":             treeObject(Entry{ModeFile, ".", emptyBlob}),
 		"dotdot":          treeObject(Entry{ModeDir, "..", emptyTree}),
 		"slash":           treeObject(Entry{ModeFile, "a/b", emptyBlob}),
-		"twice":           treeObject(Entry{ModeFile, "x", emptyBlob}, Entry{ModeDir, "x", emptyTree}),
 		"trailing":        append(treeObject(Entry{ModeFile, "x", emptyBlob}), ' '),
 		"larger than cap": bytes.Repeat([]byte("x"), MaxTree+1),
 	} {
@@ -467,8 +486,14 @@ func TestParseSigner(t *testing.T) {
 	if _, err := (Signers{a, b, a2}).AllowedSigners(); err == nil || !strings.Contains(err.Error(), "signer alice and signer alice-laptop are the same key") {
 		t.Fatal(err)
 	}
-	if !(Signers{a, b}).Has("bob") || (Signers{a, b}).Has("carol") || !(Signers{a}).HasKey(a.Key) || (Signers{a}).HasKey(b.Key) {
+	if !(Signers{a, b}).Has("bob") || (Signers{a, b}).Has("carol") {
 		t.Fatal("Has")
+	}
+	if p, ok := (Signers{a, b}).PrincipalFor(b.Key); !ok || p != "bob" {
+		t.Fatal(p, ok)
+	}
+	if _, ok := (Signers{a}).PrincipalFor(b.Key); ok {
+		t.Fatal("PrincipalFor")
 	}
 	// A principal at the bound passes; the list check is linear, so a
 	// list as long as a 1 MiB Caddyfile could hold is quick.

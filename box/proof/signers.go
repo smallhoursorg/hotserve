@@ -103,12 +103,14 @@ func (s Signers) Has(principal string) bool {
 	return false
 }
 
-// HasKey reports whether a signer carries that wire-format key.
-func (s Signers) HasKey(key []byte) bool {
+// PrincipalFor is the principal listed for that wire-format key, byte
+// for byte — the box's own answer to "which signer made this
+// signature", taken from the key the signature carries.
+func (s Signers) PrincipalFor(key []byte) (string, bool) {
 	for _, a := range s {
 		if bytes.Equal(a.Key, key) {
-			return true
+			return a.Principal, true
 		}
 	}
-	return false
+	return "", false
 }

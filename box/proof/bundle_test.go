@@ -204,9 +204,19 @@ func TestReadBundle(t *testing.T) {
 		_, err := ReadBundle(buf.Bytes())
 		refusalContaining(t, err, "bundle: path appears twice")
 	})
+	t.Run("tree count cap", func(t *testing.T) {
+		files := h.with("", nil) // the two real trees, plus 31 tiny ones
+		for i := 0; i < 31; i++ {
+			raw := treeObject(Entry{ModeFile, "f" + strconv.Itoa(i), emptyBlob})
+			files["trees/"+ObjectID("tree", raw)] = raw
+		}
+		_, err := ReadBundle(tgz(t, files))
+		refusalContaining(t, err, "bundle: more than 32 trees")
+	})
 	t.Run("decompressed cap", func(t *testing.T) {
 		// Seventeen valid trees of a mebibyte each: every entry is
-		// within its own cap, and the stream is not.
+		// within its own cap, and the stream is not. (Seventeen is under
+		// the tree-count cap, so the stream's is the bound that fires.)
 		files := h.with("", nil)
 		for i := 0; i < 17; i++ {
 			var raw bytes.Buffer

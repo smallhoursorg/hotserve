@@ -56,7 +56,10 @@ func ProveFile(c *Commit, trees map[string]*Tree, path string, file []byte) erro
 		if !ok || t.ID != cur {
 			return refuse("bundle: tree %s, needed for %s in %s, is not in the bundle", cur, shown, c.ID)
 		}
-		e, ok := t.entry(name)
+		e, ok, err := t.entry(name)
+		if err != nil {
+			return err
+		}
 		if !ok {
 			return refuse("the file sent is not %s in %s", shown, c.ID)
 		}

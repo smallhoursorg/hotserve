@@ -120,7 +120,9 @@ type site struct {
 func walk(input []byte) (*Shape, error) {
 	tokens, err := caddyfile.Tokenize(input, "Caddyfile")
 	if err != nil {
-		return nil, refuse("does not tokenize: " + err.Error())
+		// The lexer quotes input in its errors (a heredoc marker, a
+		// body line), so the text is bounded like any other.
+		return nil, refuse("does not tokenize: " + proof.Bound(err.Error()))
 	}
 	var (
 		shape    Shape
@@ -165,8 +167,8 @@ func walk(input []byte) (*Shape, error) {
 				if globals > 1 {
 					return nil, refuse("has more than one global options block")
 				}
-			case len(addrs) == 1 && strings.HasPrefix(addrs[0], "(") && strings.HasSuffix(addrs[0], ")"):
-				f.kind = kindSnippet
+			case len(addrs) == 1 && isSnippetOrNamedRoute(addrs[0]):
+				f.kind, f.site = kindSnippet, &site{addresses: addrs}
 			default:
 				s := &site{addresses: addrs}
 				sites = append(sites, s)
@@ -253,6 +255,14 @@ func walk(input []byte) (*Shape, error) {
 			}
 		case kindTrust:
 			hasTrust = true // a line inside the deploy_trust block
+		case kindSnippet:
+			// A snippet's or a named route's body is directives to Caddy,
+			// but it is not a site: a `box_webhook` there would be the
+			// webhook only through an `import` or an `invoke`, which the
+			// walk does not follow. Said by name, rather than "no site".
+			if first.Text == "box_webhook" {
+				return nil, refuse("has box_webhook inside a snippet or named route (" + proof.Bound(top.site.addresses[0]) + "); write it in the site")
+			}
 		case kindSite, kindOther:
 			if first.Text == "box_webhook" && top.site != nil && top.dispatch {
 				top.site.webhook = true
@@ -301,11 +311,20 @@ func walk(input []byte) (*Shape, error) {
 	return &shape, nil
 }
 
+// isSnippetOrNamedRoute is Caddy's test for a top-level block that is
+// not a site: a single key `(name)` (a snippet) or `&(name)` (a named
+// route, invoked from a site with `invoke`).
+func isSnippetOrNamedRoute(key string) bool {
+	return strings.HasSuffix(key, ")") && (strings.HasPrefix(key, "(") || strings.HasPrefix(key, "&("))
+}
+
 // header reads a top-level block's addresses from one line: tokens up
 // to `{`, which must be the last; a trailing comma says the next line
-// continues the list. Every address is held to the placeholder rule.
+// continues the list, and Caddy then expects an address, not `{`.
+// Every address is held to the placeholder rule.
 func header(line []caddyfile.Token, pending []string) (addrs []string, opens, more bool, err error) {
 	addrs = pending
+	more = len(pending) > 0 // a comma carried over from the line above
 	for i, t := range line {
 		if isOpen(t) {
 			if i != len(line)-1 {
@@ -406,31 +425,35 @@ func BareHost(addresses []string) (string, bool) {
 // second reading sees the tokens Caddy would make of a default; the
 // test pins it against caddyfile.Parse.
 func expandEmptyEnv(input []byte) []byte {
-	out := append([]byte(nil), input...)
+	// One forward pass: Caddy splices each value into the buffer and
+	// resumes right after it, which is the same as resuming after the
+	// `}` in the input — and linear, where splicing is quadratic in
+	// the number of placeholders (a 1 MiB file of `{$A}` is 262,144).
 	spanOpen, spanClose := []byte("{$"), []byte("}")
-	var offset int
+	var out bytes.Buffer
+	out.Grow(len(input))
 	for {
-		begin := bytes.Index(out[offset:], spanOpen)
+		begin := bytes.Index(input, spanOpen)
 		if begin < 0 {
 			break
 		}
-		begin += offset
-		end := bytes.Index(out[begin+len(spanOpen):], spanClose)
+		end := bytes.Index(input[begin+len(spanOpen):], spanClose)
 		if end < 0 {
 			break
 		}
 		end += begin + len(spanOpen)
-		name := out[begin+len(spanOpen) : end]
-		if len(name) == 0 {
-			offset = end + len(spanClose)
+		name := input[begin+len(spanOpen) : end]
+		if len(name) == 0 { // `{$}` is left as it is
+			out.Write(input[:end+len(spanClose)])
+			input = input[end+len(spanClose):]
 			continue
 		}
-		var value []byte
+		out.Write(input[:begin])
 		if _, dflt, ok := bytes.Cut(name, []byte(":")); ok {
-			value = append([]byte(nil), dflt...)
+			out.Write(dflt) // unset, so the default; without one, nothing
 		}
-		out = append(out[:begin], append(value, out[end+len(spanClose):]...)...)
-		offset = begin + len(value)
+		input = input[end+len(spanClose):]
 	}
-	return out
+	out.Write(input)
+	return out.Bytes()
 }

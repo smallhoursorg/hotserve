@@ -31,10 +31,18 @@ func TestLiveGit(t *testing.T) {
 	fx := loadFixtures(t, dir)
 	runFixtureTable(t, fx)
 	if *update {
+		// The new set lands beside the old and is renamed over it, so a
+		// failed copy leaves the committed fixtures where they were.
+		if err := os.RemoveAll("testdata.new"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.CopyFS("testdata.new", os.DirFS(dir)); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.RemoveAll("testdata"); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.CopyFS("testdata", os.DirFS(dir)); err != nil {
+		if err := os.Rename("testdata.new", "testdata"); err != nil {
 			t.Fatal(err)
 		}
 		t.Log("testdata/ rewritten")

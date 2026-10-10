@@ -16,6 +16,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"golang.org/x/crypto/ssh"
 )
 
 var hex40 = regexp.MustCompile(`^[0-9a-f]{40}$`)
@@ -101,16 +103,22 @@ func FuzzParseTree(f *testing.F) {
 		if tr.ID != ObjectID("tree", raw) || len(raw) > MaxTree {
 			t.Fatal(tr.ID)
 		}
-		seen := map[string]bool{}
-		for _, e := range tr.Entries {
-			if e.Name == "" || e.Name == "." || e.Name == ".." || strings.ContainsAny(e.Name, "/\x00") || seen[e.Name] || !hex40.MatchString(e.ID) {
+		es, err := tr.Entries()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range es {
+			if e.Name == "" || e.Name == "." || e.Name == ".." || strings.ContainsAny(e.Name, "/\x00") || !hex40.MatchString(e.ID) {
 				t.Fatalf("%+v", e)
 			}
-			seen[e.Name] = true
+			// A lookup finds it, or refuses the name as doubled.
+			if _, ok, err := tr.entry(e.Name); err == nil && !ok {
+				t.Fatalf("%q not found", e.Name)
+			}
 		}
 		// Serialising the entries gives the bytes back: nothing was
 		// skipped and nothing invented.
-		if !bytes.Equal(treeObject(tr.Entries...), raw) {
+		if !bytes.Equal(treeObject(es...), raw) {
 			t.Fatal("round trip")
 		}
 	})
@@ -192,6 +200,24 @@ func FuzzReadBundle(f *testing.F) {
 			if tr.ID != id || ObjectID("tree", tr.Raw) != id {
 				t.Fatalf("tree %s filed as %s", tr.ID, id)
 			}
+		}
+	})
+}
+
+func FuzzSignatureKey(f *testing.F) {
+	f.Add([]byte(controlSignature))
+	f.Add([]byte(sshArmor))
+	f.Add([]byte("-----BEGIN SSH SIGNATURE-----\n-----END SSH SIGNATURE-----\n"))
+	f.Add([]byte("-----END SSH SIGNATURE-----\n-----BEGIN SSH SIGNATURE-----\n"))
+	f.Add([]byte("U1NIU0lH"))
+	f.Fuzz(func(t *testing.T, armored []byte) {
+		key, err := SignatureKey(armored)
+		if err != nil {
+			return
+		}
+		// A key that came back is one the signer list could carry.
+		if _, err := ssh.ParsePublicKey(key); err != nil {
+			t.Fatalf("unparseable key returned: %v", err)
 		}
 	})
 }

@@ -176,8 +176,8 @@ func (fx *fixtures) bundleFor(t *testing.T, name, baseline string) []byte {
 			break
 		}
 		files["trees/"+id] = tr.Raw
-		e, ok := tr.entry(comp)
-		if !ok {
+		e, ok, err := tr.entry(comp)
+		if err != nil || !ok {
 			break
 		}
 		id = e.ID

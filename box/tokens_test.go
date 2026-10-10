@@ -1,6 +1,7 @@
 package box
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 
@@ -136,7 +138,7 @@ func TestWalkRefuses(t *testing.T) {
 		"signer bad key":             {strings.Replace(good, "ssh-ed25519 K2", "ssh-ed25519 AAAA", 1), "has a bad signer bob: the key does not parse"},
 		"signer same key twice":      {strings.Replace(good, "ssh-ed25519 K2", "ssh-ed25519 K1", 1), "has a bad signer alice@example.com and signer bob are the same key"},
 		"no webhook":                 {strings.Replace(good, "\tbox_webhook\n", "", 1), "has no site with box_webhook"},
-		"webhook in snippet":         {strings.Replace(good, "\tbox_webhook\n", "", 1) + "(s) {\n\tbox_webhook\n}\n", "has no site with box_webhook"},
+		"webhook in snippet":         {strings.Replace(good, "\tbox_webhook\n", "", 1) + "(s) {\n\tbox_webhook\n}\n", "has box_webhook inside a snippet or named route ((s)); write it in the site"},
 		"two webhook sites":          {good + "\nother.example.com {\n\tbox_webhook\n}\n", "has more than one site with box_webhook"},
 		"two addresses":              {strings.Replace(good, "deploy.example.com {", "deploy.example.com, deploy2.example.com {", 1), "has a box_webhook site whose address is not one bare hostname (deploy.example.com, deploy2.example.com)"},
 		"continued addresses":        {strings.Replace(good, "deploy.example.com {", "deploy.example.com,\ndeploy2.example.com {", 1), "not one bare hostname (deploy.example.com, deploy2.example.com)"},
@@ -169,6 +171,10 @@ func TestWalkRefuses(t *testing.T) {
 		"braceless site":             {good + "\nother.example.com\n", "has a site without braces (other.example.com)"},
 		"braceless site body":        {strings.Replace(good, "deploy.example.com {\n\tliveswap_webhook\n\tbox_webhook\n}\n", "deploy.example.com\nliveswap_webhook\nbox_webhook\n", 1), "has a site without braces (deploy.example.com)"},
 		"braceless continued":        {good + "\na.com,\nb.com\n", "has a site without braces (a.com, b.com)"},
+		"comma then brace":           {strings.Replace(good, "deploy.example.com {", "deploy.example.com,\n{", 1), "does not parse: a site address list ends with a comma"},
+		"webhook in named route":     {strings.Replace(good, "\tbox_webhook\n", "\tinvoke hook\n", 1) + "\n&(hook) {\n\tbox_webhook\n}\n", "has box_webhook inside a snippet or named route (&(hook)); write it in the site"},
+		"webhook in snippet named":   {strings.Replace(good, "\tbox_webhook\n", "\trespond ok\n", 1) + "\n(s) {\n\tbox_webhook\n}\n", "has box_webhook inside a snippet or named route ((s)); write it in the site"},
+		"lexer error is bounded":     {strings.Replace(good, "\tbox_webhook\n", "\trespond <<"+strings.Repeat("\x1b[2J", 100_000)+"\n", 1), "does not tokenize: "},
 		"webhook as a header field":  {strings.Replace(good, "\tbox_webhook\n", "\theader {\n\t\tbox_webhook enabled\n\t}\n", 1), "has no site with box_webhook"},
 		"webhook in a matcher":       {strings.Replace(good, "\tbox_webhook\n", "\t@m {\n\t\tbox_webhook\n\t}\n", 1), "has no site with box_webhook"},
 		"webhook in an option block": {strings.Replace(good, "\tbox_webhook\n", "\treverse_proxy x {\n\t\tbox_webhook\n\t}\n", 1), "has no site with box_webhook"},
@@ -191,7 +197,33 @@ func TestWalkRefuses(t *testing.T) {
 			if !strings.HasPrefix(err.Error(), "the Caddyfile ") {
 				t.Fatal(err)
 			}
+			if len(err.Error()) > 400 {
+				t.Fatalf("a refusal of %d bytes is not bounded", len(err.Error()))
+			}
 		})
+	}
+	// A named route without the webhook is not a site either: the one
+	// real site still carries it.
+	s, err := Walk(file(good + "\n&(other) {\n\trespond ok\n}\n"))
+	if err != nil || s.Host != "deploy.example.com" {
+		t.Fatal(s, err)
+	}
+}
+
+// TestExpandEmptyEnvIsLinear: a megabyte of placeholders expands in
+// well under a second, where splicing in place would take minutes.
+func TestExpandEmptyEnvIsLinear(t *testing.T) {
+	in := bytes.Repeat([]byte("{$A}"), 262_144)
+	start := time.Now()
+	if out := expandEmptyEnv(in); len(out) != 0 {
+		t.Fatalf("%d bytes left", len(out))
+	}
+	in = bytes.Repeat([]byte("{$A:x}"), 174_762)
+	if out := expandEmptyEnv(in); len(out) != 174_762 || out[0] != 'x' {
+		t.Fatalf("%d bytes", len(out))
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatalf("took %s", time.Since(start))
 	}
 }
 
