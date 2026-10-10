@@ -594,7 +594,7 @@ Every numeric bound, in one place, with its reason.
 | `parents/` files | `0001` to `0499`, a sequence with no gap | HEAD plus 499 parents is the chain cap; a name outside the range is a malformed bundle |
 | tree depth (`path` components) | 32 | |
 | `trees/` files | 32 | the proof walks at most the depth; more is a malformed bundle, and a flood of tiny valid trees would otherwise cost a map entry each |
-| tree entries materialised | none | a tree is validated by one allocation-free scan and looked up by name the same way; a mebibyte of entries costs nothing until it is asked for |
+| tree entries materialised | none | a tree is validated by one scan over byte slices that also holds it to git's order (names ascending, a directory read as if it ended in `/`), which is what rules out a doubled name; a lookup scans the same way and converts only its hit |
 | `path` | 4096 bytes of safe components: none empty, `.` or `..`, no control byte (NUL, newline, DEL) | a control byte could only be a trick; the `path` file may end in one newline, which is forgiven, since `echo` adds one |
 | principal | 256 bytes | ssh-keygen prints the matching principal on stdout, which is capped; a longer one could never match its own line |
 | ssh-keygen output kept | 4 KiB | into the error text and nowhere else |

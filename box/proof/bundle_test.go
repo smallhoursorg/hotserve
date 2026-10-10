@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -221,7 +222,7 @@ func TestReadBundle(t *testing.T) {
 		for i := 0; i < 17; i++ {
 			var raw bytes.Buffer
 			for n := 0; raw.Len() < MaxTree-64; n++ {
-				raw.Write(treeObject(Entry{ModeFile, "f" + strconv.Itoa(i) + "-" + strconv.Itoa(n), emptyBlob}))
+				raw.Write(treeObject(Entry{ModeFile, fmt.Sprintf("f%02d-%06d", i, n), emptyBlob})) // zero-padded: git's order
 			}
 			files["trees/"+ObjectID("tree", raw.Bytes())] = raw.Bytes()
 		}

@@ -12,6 +12,7 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/hex"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -183,13 +184,14 @@ func TestParseTree(t *testing.T) {
 	if es, err := tr.Entries(); err != nil || len(es) != 0 {
 		t.Fatalf("%v %v", es, err)
 	}
-	raw := treeObject(Entry{ModeFile, "Caddyfile", emptyBlob}, Entry{ModeDir, "dir", emptyTree}, Entry{ModeSymlink, "link", emptyBlob}, Entry{ModeSubmodule, "sub", zeroID}, Entry{ModeExecutable, "run", emptyBlob})
+	// In git's order: `Caddyfile` < `dir/` < `link` < `run` < `sub`.
+	raw := treeObject(Entry{ModeFile, "Caddyfile", emptyBlob}, Entry{ModeDir, "dir", emptyTree}, Entry{ModeSymlink, "link", emptyBlob}, Entry{ModeExecutable, "run", emptyBlob}, Entry{ModeSubmodule, "sub", zeroID})
 	tr, err = ParseTree(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
 	es, err := tr.Entries()
-	if err != nil || len(es) != 5 || es[0] != (Entry{ModeFile, "Caddyfile", emptyBlob}) || es[3] != (Entry{ModeSubmodule, "sub", zeroID}) || tr.ID != ObjectID("tree", raw) {
+	if err != nil || len(es) != 5 || es[0] != (Entry{ModeFile, "Caddyfile", emptyBlob}) || es[4] != (Entry{ModeSubmodule, "sub", zeroID}) || tr.ID != ObjectID("tree", raw) {
 		t.Fatalf("%+v %v", es, err)
 	}
 	if e, ok, err := tr.entry("sub"); err != nil || !ok || e.Mode != ModeSubmodule {
@@ -198,15 +200,39 @@ func TestParseTree(t *testing.T) {
 	if _, ok, err := tr.entry("nope"); err != nil || ok {
 		t.Fatal(ok, err)
 	}
-	// A name twice is refused at the lookup, not at the parse.
-	twice, err := ParseTree(treeObject(Entry{ModeFile, "x", emptyBlob}, Entry{ModeDir, "x", emptyTree}))
-	if err != nil {
-		t.Fatal(err)
+	// git's directory rule: a directory `a` is read as `a/`, so it
+	// sorts after `a-b` ('-' < '/') and `a.b`, before `a0`.
+	for _, ok := range [][]Entry{
+		{{ModeFile, "a-b", emptyBlob}, {ModeDir, "a", emptyTree}},
+		{{ModeFile, "a.b", emptyBlob}, {ModeDir, "a", emptyTree}, {ModeFile, "a0", emptyBlob}},
+		{{ModeFile, "a", emptyBlob}, {ModeDir, "ab", emptyTree}},
+	} {
+		if _, err := ParseTree(treeObject(ok...)); err != nil {
+			t.Errorf("%v: %v", ok, err)
+		}
 	}
-	_, _, err = twice.entry("x")
-	refusalContaining(t, err, "bundle: tree "+twice.ID+": an entry name appears twice")
-	if _, ok, err := twice.entry("y"); err != nil || ok {
-		t.Fatal(ok, err)
+	if _, err := ParseTree(treeObject(Entry{ModeDir, "a", emptyTree}, Entry{ModeFile, "a-b", emptyBlob})); err == nil {
+		t.Error("a/ before a-b accepted")
+	}
+	// A name twice — whatever the modes, as git's fsck has it — and
+	// entries out of order are refused at the parse.
+	_, err = ParseTree(treeObject(Entry{ModeFile, "x", emptyBlob}, Entry{ModeFile, "x", emptyTree}))
+	refusalContaining(t, err, "an entry name appears twice")
+	_, err = ParseTree(treeObject(Entry{ModeFile, "x", emptyBlob}, Entry{ModeDir, "x", emptyTree}))
+	refusalContaining(t, err, "an entry name appears twice")
+	_, err = ParseTree(treeObject(Entry{ModeFile, "b", emptyBlob}, Entry{ModeFile, "a", emptyBlob}))
+	refusalContaining(t, err, "entries are not in git's order")
+	// Nothing is allocated per entry: a 500-entry tree costs the same
+	// fixed handful (the struct, the id, the hasher's prefix) as five.
+	var big []Entry
+	for i := 0; i < 500; i++ {
+		big = append(big, Entry{ModeFile, fmt.Sprintf("e%03d", i), emptyBlob})
+	}
+	bigRaw := treeObject(big...)
+	five := testing.AllocsPerRun(20, func() { _, _ = ParseTree(raw) })
+	hundreds := testing.AllocsPerRun(20, func() { _, _ = ParseTree(bigRaw) })
+	if hundreds > five {
+		t.Errorf("ParseTree allocates %v times for 500 entries, %v for five", hundreds, five)
 	}
 	for name, in := range map[string][]byte{
 		"no space":        []byte("100644"),
@@ -218,6 +244,8 @@ func TestParseTree(t *testing.T) {
 		"dot":             treeObject(Entry{ModeFile, ".", emptyBlob}),
 		"dotdot":          treeObject(Entry{ModeDir, "..", emptyTree}),
 		"slash":           treeObject(Entry{ModeFile, "a/b", emptyBlob}),
+		"twice":           treeObject(Entry{ModeFile, "x", emptyBlob}, Entry{ModeDir, "x", emptyTree}, Entry{ModeDir, "x", emptyTree}),
+		"unsorted":        treeObject(Entry{ModeFile, "b", emptyBlob}, Entry{ModeFile, "a", emptyBlob}),
 		"trailing":        append(treeObject(Entry{ModeFile, "x", emptyBlob}), ' '),
 		"larger than cap": bytes.Repeat([]byte("x"), MaxTree+1),
 	} {

@@ -107,13 +107,15 @@ func FuzzParseTree(f *testing.F) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		seen := map[string]bool{}
 		for _, e := range es {
-			if e.Name == "" || e.Name == "." || e.Name == ".." || strings.ContainsAny(e.Name, "/\x00") || !hex40.MatchString(e.ID) {
+			if e.Name == "" || e.Name == "." || e.Name == ".." || strings.ContainsAny(e.Name, "/\x00") || seen[e.Name] || !hex40.MatchString(e.ID) {
 				t.Fatalf("%+v", e)
 			}
-			// A lookup finds it, or refuses the name as doubled.
-			if _, ok, err := tr.entry(e.Name); err == nil && !ok {
-				t.Fatalf("%q not found", e.Name)
+			seen[e.Name] = true
+			// Every entry of a parsed tree is found by name, once.
+			if got, ok, err := tr.entry(e.Name); err != nil || !ok || got != e {
+				t.Fatalf("%q: %+v %v %v", e.Name, got, ok, err)
 			}
 		}
 		// Serialising the entries gives the bytes back: nothing was

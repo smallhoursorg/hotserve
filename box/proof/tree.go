@@ -27,8 +27,8 @@ type Entry struct {
 // Tree is a parsed tree object: the raw bytes, checked to be well
 // formed, and the id computed from them. Entries are not materialised
 // — a bundle may carry a mebibyte of them per tree, and the proof
-// looks up one name per tree on the path — so a lookup scans the bytes
-// and Entries builds the slice only when asked.
+// looks up one name per tree on the path — so validation and lookup
+// scan the bytes, and Entries builds the slice only when asked.
 type Tree struct {
 	Raw []byte
 	ID  string
@@ -36,33 +36,77 @@ type Tree struct {
 
 // ParseTree reads a tree object: `<mode> <name>\0<20-byte id>`
 // repeated, at most MaxTree bytes. It refuses a mode git does not
-// write, a name that is empty, `.`, `..` or contains `/`, and a
-// truncated entry. It allocates nothing per entry; a name that appears
-// twice is refused when it is looked up (entry), since the walk must
-// never choose between two entries of one name.
+// write, a name that is empty, `.`, `..` or contains `/`, a truncated
+// entry, and entries out of git's order — names ascending, a
+// directory compared as if it ended in `/` — which is also what makes
+// a doubled name impossible, since equal names are not ascending. The
+// scan converts nothing: it compares byte slices.
 func ParseTree(raw []byte) (*Tree, error) {
 	if len(raw) > MaxTree {
 		return nil, refuse("bundle: a tree object is larger than 1 MiB")
 	}
 	t := &Tree{Raw: raw, ID: ObjectID("tree", raw)}
-	err := t.scan(func(Entry) bool { return true })
+	var prevName []byte
+	prevDir, first := false, true
+	var order error
+	err := t.scan(func(mode, name, _ []byte) bool {
+		dir := string(mode) == ModeDir
+		if !first {
+			// git's fsck rule: the same full name twice is a duplicate
+			// whatever the modes (a file `x` and a directory `x` cannot
+			// coexist); otherwise the names must ascend.
+			switch {
+			case bytes.Equal(prevName, name):
+				order = refuse("bundle: tree %s: an entry name appears twice", t.ID)
+				return false
+			case compareTreeNames(prevName, prevDir, name, dir) > 0:
+				order = refuse("bundle: tree %s: entries are not in git's order", t.ID)
+				return false
+			}
+		}
+		first, prevName, prevDir = false, name, dir
+		return true
+	})
 	if err != nil {
 		return nil, err
+	}
+	if order != nil {
+		return nil, order
 	}
 	return t, nil
 }
 
-// scan walks the entries, calling visit for each (a false return stops
-// the walk), and refuses a malformed one. Entry values handed to visit
-// alias nothing: Mode and Name are converted, ID is hex-encoded.
-func (t *Tree) scan(visit func(Entry) bool) error {
+// compareTreeNames is git's base_name_compare: bytes in order, and a
+// directory's name read as though it ended in `/`, so that `a` the
+// file sorts before `a/` the directory before `a-b`.
+func compareTreeNames(a []byte, aDir bool, b []byte, bDir bool) int {
+	n := min(len(a), len(b))
+	if c := bytes.Compare(a[:n], b[:n]); c != 0 {
+		return c
+	}
+	next := func(s []byte, dir bool) int {
+		if len(s) > n {
+			return int(s[n])
+		}
+		if dir {
+			return '/'
+		}
+		return 0
+	}
+	return next(a, aDir) - next(b, bDir)
+}
+
+// scan walks the entries as byte slices, calling visit for each (a
+// false return stops the walk), and refuses a malformed one. Nothing
+// is allocated per entry; the slices alias Raw.
+func (t *Tree) scan(visit func(mode, name, id []byte) bool) error {
 	rest := t.Raw
 	for len(rest) > 0 {
 		mode, after, ok := bytes.Cut(rest, []byte(" "))
 		if !ok {
 			return refuse("bundle: tree %s: a truncated entry", t.ID)
 		}
-		switch string(mode) {
+		switch string(mode) { // a comparison, not a conversion: the compiler does not allocate for it
 		case ModeFile, ModeExecutable, ModeSymlink, ModeSubmodule, ModeDir:
 		default:
 			return refuse("bundle: tree %s: an entry mode git does not write", t.ID)
@@ -75,42 +119,34 @@ func (t *Tree) scan(visit func(Entry) bool) error {
 			return refuse("bundle: tree %s: an entry name that is not one path component", t.ID)
 		}
 		rest = after[20:]
-		if !visit(Entry{Mode: string(mode), Name: string(name), ID: hex.EncodeToString(after[:20])}) {
+		if !visit(mode, name, after[:20]) {
 			return nil
 		}
 	}
 	return nil
 }
 
-// entry is the tree's entry of that name, if any; a name that appears
-// twice is refused.
+// entry is the tree's entry of that name, if any — one at most, since
+// ParseTree held the tree to git's order.
 func (t *Tree) entry(name string) (Entry, bool, error) {
 	var found Entry
-	n := 0
-	err := t.scan(func(e Entry) bool {
-		if e.Name == name {
-			found = e
-			n++
+	ok := false
+	err := t.scan(func(mode, n, id []byte) bool {
+		if string(n) != name {
+			return true
 		}
-		return n < 2
+		found, ok = Entry{Mode: string(mode), Name: string(n), ID: hex.EncodeToString(id)}, true
+		return false
 	})
-	switch {
-	case err != nil:
-		return Entry{}, false, err
-	case n > 1:
-		return Entry{}, false, refuse("bundle: tree %s: an entry name appears twice", t.ID)
-	case n == 1:
-		return found, true, nil
-	}
-	return Entry{}, false, nil
+	return found, ok, err
 }
 
 // Entries materialises every entry, in order. For tests and tools; the
 // proof never needs them all.
 func (t *Tree) Entries() ([]Entry, error) {
 	var out []Entry
-	err := t.scan(func(e Entry) bool {
-		out = append(out, e)
+	err := t.scan(func(mode, name, id []byte) bool {
+		out = append(out, Entry{Mode: string(mode), Name: string(name), ID: hex.EncodeToString(id)})
 		return true
 	})
 	return out, err
