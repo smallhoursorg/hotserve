@@ -152,7 +152,7 @@ func (b *testBox) snapshot() map[string]string {
 		}
 		v := fi.Mode().String()
 		if fi.Mode().IsRegular() {
-			data, err := os.ReadFile(path) //nolint:gosec // the test's own tree
+			data, err := os.ReadFile(path)
 			if err != nil {
 				return err
 			}

@@ -62,6 +62,8 @@ func runInitCmd(ctx context.Context, euid int, a *Applier, dir, sha string, out 
 	if err != nil {
 		return err
 	}
+	// A file that walks as no box's (the packaged one) named no host:
+	// nothing to warn about.
 	if was, err := Walk(run.prev); err == nil && was.Host != shape.Host {
 		if err := printf(out, "init: this box was %s; this file names %s\n", was.Host, shape.Host); err != nil {
 			return err
