@@ -67,16 +67,36 @@ func newChildValidator(stage string) *childValidator {
 }
 
 // secretCandidates is the environment as the redactor's known values,
-// without the variables that hold paths: a diagnostic needs its paths,
-// as liveswap keeps an app's SOCKET, HOME and PATH readable (redact.go).
+// without the variables systemd and the login shell set for every
+// service (systemd.exec(5), "Environment Variables in Spawned
+// Processes"): they are the box's own words — `hotserve` as USER, the
+// state paths — and a diagnostic needs them readable, as liveswap keeps
+// an app's SOCKET, HOME and PATH. Everything else, the operator's
+// Environment= and EnvironmentFile= lines among it, is a value the
+// filter knows, whatever it looks like.
 func secretCandidates(env []string) []string {
 	var out []string
 	for _, kv := range env {
-		if _, v, ok := strings.Cut(kv, "="); ok && !strings.HasPrefix(v, "/") {
+		key, _, ok := strings.Cut(kv, "=")
+		if ok && !serviceVariable(key) {
 			out = append(out, kv)
 		}
 	}
 	return out
+}
+
+// serviceVariable reports whether key is one systemd or the shell sets.
+func serviceVariable(key string) bool {
+	switch key {
+	case "PATH", "LANG", "LANGUAGE", "USER", "LOGNAME", "HOME", "SHELL", "PWD", "TERM",
+		"INVOCATION_ID", "JOURNAL_STREAM", "NOTIFY_SOCKET", "MAINPID", "MANAGERPID", "SYSTEMD_EXEC_PID",
+		"LISTEN_FDS", "LISTEN_PID", "LISTEN_FDNAMES", "WATCHDOG_PID", "WATCHDOG_USEC",
+		"RUNTIME_DIRECTORY", "STATE_DIRECTORY", "CACHE_DIRECTORY", "LOGS_DIRECTORY",
+		"CONFIGURATION_DIRECTORY", "CREDENTIALS_DIRECTORY", "MEMORY_PRESSURE_WATCH",
+		"MEMORY_PRESSURE_WRITE", "FDSTORE", "LOG_NAMESPACE":
+		return true
+	}
+	return strings.HasPrefix(key, "LC_") || strings.HasPrefix(key, "XDG_")
 }
 
 func (c *childValidator) validate(ctx context.Context, id string, caddyfile []byte) (string, error) {
@@ -88,9 +108,11 @@ func (c *childValidator) validate(ctx context.Context, id string, caddyfile []by
 	if msg, err := c.run(ctx, "hotserve validate", c.hotserve, "validate", "--adapter", "caddyfile", "--config", staged); msg != "" || err != nil {
 		return msg, err
 	}
+	// `test -x`'s answer: no file, or one this uid cannot run, is "not
+	// installed"; a lookup that failed some other way is "could not tell".
 	switch err := syscall.Access(c.backup, xOK); {
-	case errors.Is(err, syscall.ENOENT):
-		return "", nil // backups are not installed
+	case errors.Is(err, syscall.ENOENT), errors.Is(err, syscall.EACCES), errors.Is(err, syscall.ENOTDIR):
+		return "", nil
 	case err != nil:
 		return msgBackupUnknown, nil
 	}
@@ -100,7 +122,9 @@ func (c *childValidator) validate(ctx context.Context, id string, caddyfile []by
 // run runs one child. A non-zero exit is a refusal quoting its error
 // line; a child that did not finish in time is one too, since a
 // configuration whose provisioning hangs is the push's; a child that
-// could not start is the box's.
+// could not start, or that a signal other than the deadline's killed
+// (the OOM killer, an operator), is the box's. A child that exited 0 and
+// left a grandchild holding the output passed.
 func (c *childValidator) run(ctx context.Context, what, program string, args ...string) (string, error) {
 	bounded, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
@@ -111,15 +135,25 @@ func (c *childValidator) run(ctx context.Context, what, program string, args ...
 	// ends the wait on it should a grandchild hold it.
 	cmd.Stdout, cmd.Stderr = &out, &out
 	cmd.WaitDelay = childWaitDelay
+	// Its own process group, so that the deadline, and the end of the
+	// run, take whatever the child started with it: a grandchild left
+	// holding the output would otherwise outlive the request.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	err := cmd.Run()
+	if cmd.Process != nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) // ESRCH when nothing is left
+	}
 	var exit *exec.ExitError
 	switch {
-	case err == nil:
+	case err == nil, errors.Is(err, exec.ErrWaitDelay):
 		return "", nil
 	case bounded.Err() != nil && ctx.Err() == nil:
 		return fmt.Sprintf("%s: did not finish within %s", what, c.timeout), nil
 	case ctx.Err() != nil:
 		return "", fmt.Errorf("%s: %w", what, ctx.Err())
+	case errors.As(err, &exit) && !exit.Exited():
+		return "", fmt.Errorf("%s: %w", what, err)
 	case errors.As(err, &exit):
 		line, _ := c.redactor.Redact(errorLine(out.b))
 		if line == "" {

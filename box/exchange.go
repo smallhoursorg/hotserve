@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -43,6 +45,39 @@ const (
 // workflow's random choice for one push (DESIGN-box.md, Glossary).
 func isRequestID(s string) bool {
 	return len(s) == 32 && isLowerHex(s)
+}
+
+// parseRequestID is s as the id the box uses, or ok=false if s is not
+// one (isRequestID). The id is rebuilt here, each character taken from a
+// constant alphabet by its value, so no byte of the caller's string —
+// a header, a query — reaches a path or a journal line: only its
+// meaning does. CodeQL's taint tracking sees the same break.
+func parseRequestID(s string) (string, bool) {
+	if !isRequestID(s) {
+		return "", false
+	}
+	const digits = "0123456789abcdef"
+	b := make([]byte, len(s))
+	for i := 0; i < len(s); i++ {
+		b[i] = digits[strings.IndexByte(digits, s[i])]
+	}
+	return string(b), true
+}
+
+// present reports whether something stands at path, without following a
+// symlink there. Unlike the applier's exists, a lookup that fails for
+// any reason but ENOENT is an error: the handler answers it as the box's
+// trouble, never as a yes.
+func present(path string) (bool, error) {
+	_, err := os.Lstat(path)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	default:
+		return false, err
+	}
 }
 
 // isDigest reports whether s is a sha256 digest as the box writes one:

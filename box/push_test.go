@@ -350,6 +350,54 @@ func TestPushFastPath(t *testing.T) {
 	}
 }
 
+// TestPushKnownIDBeforeTheFastPath: a retry after a lost response is
+// told its push exists, even when the box now runs that push's commit —
+// the fast path would otherwise answer one id two ways.
+func TestPushKnownIDBeforeTheFastPath(t *testing.T) {
+	p := newPushRig(t)
+	bundle := tgz(t, p.repo.bundleFiles(p.base, p.base))
+	id := randomID(t)
+	p.writeResult(t, result{ID: id, Phase: phaseApplied, Commit: p.base})
+	wantError(t, p.post(t, p.h, push{id: id, token: p.token(t, p.base), body: bytes.NewReader(bundle)}), http.StatusConflict, msgDuplicate(id))
+}
+
+// TestPushBoxFaults: a name in the exchange tree that cannot be looked
+// up is the box's trouble, a 500 — never "duplicate", never "admitted".
+func TestPushBoxFaults(t *testing.T) {
+	p := newPushRig(t)
+	c2, bundle := p.change()
+	id := randomID(t)
+	// out/ replaced by a file: every lookup under it is ENOTDIR.
+	must(t, os.RemoveAll(p.x("out")))
+	p.write(t, p.x("out"), nil)
+	w := p.post(t, p.h, push{id: id, token: p.token(t, c2), body: bytes.NewReader(bundle)})
+	if w.Code != http.StatusInternalServerError || !strings.HasPrefix(decode(t, w)["error"].(string), "could not read the exchange directory: ") {
+		t.Fatalf("push: %d %s", w.Code, w.Body)
+	}
+	p.untouched(t)
+	// stage/ replaced by a file: the poll cannot tell a marker.
+	must(t, os.RemoveAll(p.x("out")))
+	must(t, os.Mkdir(p.x("out"), 0o755))
+	must(t, os.RemoveAll(p.x("stage")))
+	p.write(t, p.x("stage"), nil)
+	w = p.get(t, "/?result="+id, p.token(t, ""))
+	if w.Code != http.StatusInternalServerError || !strings.HasPrefix(decode(t, w)["error"].(string), "could not read the marker for "+id+": ") {
+		t.Fatalf("poll: %d %s", w.Code, w.Body)
+	}
+}
+
+func TestParseRequestID(t *testing.T) {
+	id := randomID(t)
+	if got, ok := parseRequestID(id); !ok || got != id {
+		t.Fatalf("%q -> %q %v", id, got, ok)
+	}
+	for _, bad := range []string{"", id[:31], id + "0", strings.ToUpper(id), id[:31] + "g", id[:31] + "\x00"} {
+		if _, ok := parseRequestID(bad); ok {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}
+
 func TestPushNoBaseline(t *testing.T) {
 	p := newPushRig(t)
 	c2, bundle := p.change()
@@ -399,7 +447,7 @@ func TestPushAdmission(t *testing.T) {
 			return ""
 		}},
 		{"a marker past the bound", func(t *testing.T, p *pushRig, _ string) string {
-			p.markerAt(randomID(t), p.clock.Now().Add(-pendingFor))
+			p.markerAt(randomID(t), p.clock.Now().Add(-pendingAge))
 			return ""
 		}},
 		{"a marker slightly ahead", func(t *testing.T, p *pushRig, _ string) string {
@@ -408,7 +456,7 @@ func TestPushAdmission(t *testing.T) {
 			return msgPending(other, 0)
 		}},
 		{"a marker far ahead", func(t *testing.T, p *pushRig, _ string) string {
-			p.markerAt(randomID(t), p.clock.Now().Add(pendingFor+time.Second))
+			p.markerAt(randomID(t), p.clock.Now().Add(pendingAge+time.Second))
 			return ""
 		}},
 		{"a marker that does not read", func(t *testing.T, p *pushRig, _ string) string {

@@ -72,9 +72,12 @@ func TestValidateChild(t *testing.T) {
 		secret := "pg-pass-" + strings.Repeat("q7", 10)
 		// Quoted bare, as an expanded placeholder is: only the layer
 		// primed with the environment can know it.
-		c, _ := stubValidator(t, `echo "Error: parsing port: $DB_PASS is not a number"; exit 1`, "", "DB_PASS="+secret, "HOME=/var/lib/hotserve")
+		// The service's own words stay: USER is hotserve, and the staged
+		// file's path names it.
+		c, _ := stubValidator(t, `echo "Error: /var/lib/hotserve-box/stage/x.Caddyfile:2: parsing port: $DB_PASS is not a number"; exit 1`, "",
+			"DB_PASS="+secret, "HOME=/var/lib/hotserve", "USER=hotserve", "LOGNAME=hotserve")
 		msg, err := c.validate(context.Background(), randomID(t), file)
-		if err != nil || strings.Contains(msg, secret) || !strings.HasPrefix(msg, "hotserve validate: parsing port: ") {
+		if err != nil || strings.Contains(msg, secret) || !strings.HasPrefix(msg, "hotserve validate: /var/lib/hotserve-box/stage/x.Caddyfile:2: parsing port: ") {
 			t.Fatalf("msg %q err %v", msg, err)
 		}
 	})
@@ -116,6 +119,18 @@ func TestValidateChild(t *testing.T) {
 		msg, err := c.validate(context.Background(), randomID(t), file)
 		if err != nil || msg != "hotserve validate: gone" || time.Since(start) > 10*time.Second {
 			t.Fatalf("msg %q err %v after %s", msg, err, time.Since(start))
+		}
+	})
+	t.Run("a grandchild holding the output after a pass", func(t *testing.T) {
+		c, _ := stubValidator(t, "sleep 60 & exit 0", "")
+		if msg, err := c.validate(context.Background(), randomID(t), file); msg != "" || err != nil {
+			t.Fatalf("msg %q err %v", msg, err)
+		}
+	})
+	t.Run("a child a signal killed is the box's", func(t *testing.T) {
+		c, _ := stubValidator(t, "kill -9 $$", "")
+		if msg, err := c.validate(context.Background(), randomID(t), file); msg != "" || err == nil {
+			t.Fatalf("msg %q err %v", msg, err)
 		}
 	})
 	t.Run("a program that cannot start is the box's", func(t *testing.T) {
@@ -164,16 +179,24 @@ func TestValidateBackup(t *testing.T) {
 			t.Fatal("backup validate ran after hotserve's refusal")
 		}
 	})
-	t.Run("could not tell", func(t *testing.T) {
+	t.Run("not installed, as test -x reads it", func(t *testing.T) {
 		c, dir := stubValidator(t, "exit 0", "")
 		c.backup = filepath.Join(dir, "not-executable")
-		must(t, os.WriteFile(c.backup, []byte("#!/bin/sh\n"), 0o644))
-		if msg, err := c.validate(context.Background(), randomID(t), file); msg != msgBackupUnknown || err != nil {
-			t.Fatalf("msg %q err %v", msg, err)
+		must(t, os.WriteFile(c.backup, []byte("#!/bin/sh\nexit 1\n"), 0o644))
+		if msg, err := c.validate(context.Background(), randomID(t), file); msg != "" || err != nil {
+			t.Fatalf("EACCES: msg %q err %v", msg, err)
 		}
 		c.backup = filepath.Join(dir, "hotserve.args", "x") // a component that is not a directory
-		if msg, _ := c.validate(context.Background(), randomID(t), file); msg != msgBackupUnknown {
-			t.Fatalf("ENOTDIR: msg %q", msg)
+		if msg, err := c.validate(context.Background(), randomID(t), file); msg != "" || err != nil {
+			t.Fatalf("ENOTDIR: msg %q err %v", msg, err)
+		}
+	})
+	t.Run("could not tell", func(t *testing.T) {
+		c, dir := stubValidator(t, "exit 0", "")
+		c.backup = filepath.Join(dir, "loop")
+		must(t, os.Symlink(c.backup, c.backup))
+		if msg, err := c.validate(context.Background(), randomID(t), file); msg != msgBackupUnknown || err != nil {
+			t.Fatalf("ELOOP: msg %q err %v", msg, err)
 		}
 	})
 }
@@ -213,8 +236,42 @@ func TestTailBuffer(t *testing.T) {
 }
 
 func TestSecretCandidates(t *testing.T) {
-	got := secretCandidates([]string{"PATH=/usr/bin:/bin", "HOME=/var/lib/hotserve", "TOKEN=abc", "EMPTY=", "NOEQUALS"})
-	if strings.Join(got, ",") != "TOKEN=abc,EMPTY=" {
+	got := secretCandidates([]string{"PATH=/usr/bin:/bin", "HOME=/var/lib/hotserve", "USER=hotserve", "LOGNAME=hotserve",
+		"INVOCATION_ID=0123456789abcdef", "LC_ALL=C.UTF-8", "XDG_RUNTIME_DIR=/run/user/999", "TOKEN=abc", "SLASHED=/Zq3+secret", "EMPTY=", "NOEQUALS"})
+	if strings.Join(got, ",") != "TOKEN=abc,SLASHED=/Zq3+secret,EMPTY=" {
 		t.Fatalf("%v", got)
+	}
+}
+
+// TestValidateTakesTheProcessGroup: whatever the child started goes
+// with it — after a deadline, and after a child that exited and left a
+// grandchild holding the output.
+func TestValidateTakesTheProcessGroup(t *testing.T) {
+	for name, tail := range map[string]string{"deadline": "exec sleep 60", "exited": "exit 1"} {
+		t.Run(name, func(t *testing.T) {
+			pidFile := filepath.Join(t.TempDir(), "pid")
+			c, _ := stubValidator(t, "sleep 60 & echo $! > "+pidFile+"\n"+tail, "")
+			c.timeout = time.Second
+			if _, err := c.validate(context.Background(), randomID(t), []byte("x")); err != nil {
+				t.Fatal(err)
+			}
+			b, err := os.ReadFile(pidFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pid := strings.TrimSpace(string(b))
+			// Gone, or a zombie waiting for its new parent to reap it.
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				stat, err := os.ReadFile("/proc/" + pid + "/stat")
+				if err != nil || strings.Contains(string(stat), ") Z ") {
+					return
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("grandchild %s still running: %s", pid, stat)
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+		})
 	}
 }

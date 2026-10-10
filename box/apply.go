@@ -202,10 +202,10 @@ func (a *Applier) recoverAll(ctx context.Context) error {
 // result on disk, or one this run journaled when it could not write it
 // (I3). An entry of a settled push is never run again; the guarantee
 // lasts while Retention keeps the result. A result that does not read,
-// or whose phase is not terminal, counts as none — no other field is
-// checked: out/ is root's alone and written whole by rename, so only a
-// disk fault or the console makes a bad one, and the push is then
-// judged afresh on its merits.
+// is not filed under its own id, or whose phase is not terminal, counts
+// as none (readResultFile): out/ is root's alone and written whole by
+// rename, so only a disk fault or the console makes a bad one, and the
+// push is then judged afresh on its merits.
 func (a *Applier) settled(id string) bool {
 	if phase, ok := a.wrote[id]; ok && terminal(phase) {
 		return true

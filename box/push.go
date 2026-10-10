@@ -79,10 +79,14 @@ func (h *Handler) push(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	ids := r.Header.Values(headerRequestID)
-	if len(ids) != 1 || !isRequestID(ids[0]) {
+	if len(ids) != 1 {
 		return respond(w, http.StatusBadRequest, errorBody(msgRequestID))
 	}
-	p := &pushing{h: h, w: w, r: r, id: ids[0], via: ident.By}
+	id, ok := parseRequestID(ids[0])
+	if !ok {
+		return respond(w, http.StatusBadRequest, errorBody(msgRequestID))
+	}
+	p := &pushing{h: h, w: w, r: r, id: id, via: ident.By}
 	if !isGzip(r.Header.Get("Content-Type")) {
 		return p.respond(http.StatusUnsupportedMediaType, errorBody(msgMediaType))
 	}
@@ -118,17 +122,18 @@ func (h *Handler) push(w http.ResponseWriter, r *http.Request) error {
 		return p.refuse(b, &refusal{msg: msgTokenNames(claim, b.Commit.ID)})
 	}
 
+	// An id the box already holds is a retry after a lost response: it
+	// polls, whatever its push came to (DESIGN-box.md, "Admission").
+	if known, err := h.known(p.id); err != nil {
+		return h.boxError(w, "the exchange directory", err)
+	} else if known {
+		return p.respond(http.StatusConflict, errorBody(msgDuplicate(p.id)))
+	}
+
 	// The fast path: the box runs this commit and this file already.
-	base, err := readApplied(h.dir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return p.respond(http.StatusConflict, errorBody(msgNoBaseline))
-	}
-	if err != nil {
-		return h.boxError(w, "the baseline", err)
-	}
-	installed, err := readFile(h.installed, proof.MaxCaddyfile, true)
-	if err != nil {
-		return h.boxError(w, "the Caddyfile this box runs", err)
+	base, installed, done, err := p.state()
+	if done {
+		return err
 	}
 	if b.Commit.ID == base.SHA && digest(b.Caddyfile) == digest(installed) {
 		res := result{ID: p.id, Phase: phaseNoChange, Commit: b.Commit.ID, Path: b.Path}
@@ -138,11 +143,29 @@ func (h *Handler) push(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	// 2, 5, 6, 7: under the admission lock.
-	if done, err := p.admit(b, body, installed, base); done {
+	if done, err := p.admit(b, body); done {
 		return err
 	}
 	// 8. root's first result, read for at most resultWait.
 	return p.answer(h.waitResult(r.Context(), p.id))
+}
+
+// state reads the baseline and the installed file, each once: done=true
+// means the push was answered — 409 before `init`, 500 when either file
+// cannot be read.
+func (p *pushing) state() (base *applied, installed []byte, done bool, err error) {
+	base, err = readApplied(p.h.dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil, true, p.respond(http.StatusConflict, errorBody(msgNoBaseline))
+	}
+	if err != nil {
+		return nil, nil, true, p.h.boxError(p.w, "the baseline", err)
+	}
+	installed, err = readFile(p.h.installed, proof.MaxCaddyfile, true)
+	if err != nil {
+		return nil, nil, true, p.h.boxError(p.w, "the Caddyfile this box runs", err)
+	}
+	return base, installed, false, nil
 }
 
 // pushing is one push's state, so that its answers and journal lines
@@ -240,10 +263,13 @@ func (h *Handler) result(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	q, err := url.ParseQuery(r.URL.RawQuery)
-	if err != nil || len(q) != 1 || len(q["result"]) != 1 || !isRequestID(q["result"][0]) {
+	if err != nil || len(q) != 1 || len(q["result"]) != 1 {
 		return respond(w, http.StatusBadRequest, errorBody(msgResultID))
 	}
-	id := q["result"][0]
+	id, ok := parseRequestID(q["result"][0])
+	if !ok {
+		return respond(w, http.StatusBadRequest, errorBody(msgResultID))
+	}
 	res, err := readResultFile(h.dir, id)
 	switch {
 	case err == nil:
@@ -253,7 +279,10 @@ func (h *Handler) result(w http.ResponseWriter, r *http.Request) error {
 		return respond(w, http.StatusInternalServerError, errorBody("could not read the result for "+id+": "+proof.Bound(err.Error())), id)
 	}
 	// No result yet: a marker, of whatever age, is a push admitted.
-	if exists(h.x("stage", id+".auth")) {
+	if found, err := present(h.x("stage", id+".auth")); err != nil {
+		h.logStateError("the marker for "+id, err)
+		return respond(w, http.StatusInternalServerError, errorBody("could not read the marker for "+id+": "+proof.Bound(err.Error())), id)
+	} else if found {
 		return respond(w, http.StatusAccepted, map[string]string{"phase": "admitted"})
 	}
 	return respond(w, http.StatusNotFound, errorBody(msgNoResult(id)), id)

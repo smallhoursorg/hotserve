@@ -168,6 +168,26 @@ func (a *Applier) readResult(id string) (*result, error) {
 	return readResultFile(filepath.Join(a.root, exchangeDir), id)
 }
 
+// readResultFile reads out/<id>.json, which only root writes, held to
+// the shape root writes: the id it is filed under, and `verified` or a
+// terminal phase. The applier (settled, recovery) and the handler (step
+// 8, the poll, admission's pending check) read it the same way.
+func readResultFile(dir, id string) (*result, error) {
+	path := filepath.Join(dir, "out", id+".json")
+	b, err := readFile(path, maxResult, false)
+	if err != nil {
+		return nil, err
+	}
+	var r result
+	if err := json.Unmarshal(b, &r); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	if r.ID != id || (r.Phase != phaseVerified && !terminal(r.Phase)) {
+		return nil, fmt.Errorf("%s: not a result", path)
+	}
+	return &r, nil
+}
+
 // marker is stage/<id>.auth (DESIGN-box.md, "Record and result fields"),
 // written by the handler's admission after the bundle is in in/: the
 // time of admission. The applier reads it

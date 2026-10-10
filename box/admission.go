@@ -9,7 +9,6 @@ package box
 // descriptor.
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -24,10 +23,6 @@ import (
 	"github.com/smallhoursorg/hotserve/box/proof"
 )
 
-// pendingFor is how long a marker with no terminal result blocks
-// admission: the workflow's own poll bound (DESIGN-box.md, Caps).
-const pendingFor = 15 * time.Minute
-
 // x is a path in the exchange tree.
 func (h *Handler) x(elem ...string) string {
 	return filepath.Join(append([]string{h.dir}, elem...)...)
@@ -35,8 +30,11 @@ func (h *Handler) x(elem ...string) string {
 
 // admit is steps 2 and 5 to 7 under the admission lock. done=false
 // means the bundle is in in/ and the lock released: the caller waits for
-// root's result. done=true means the push was answered here.
-func (p *pushing) admit(b *proof.Bundle, body, installed []byte, base *applied) (done bool, err error) {
+// root's result. done=true means the push was answered here. The
+// baseline and the installed file are read again under the lock: a push
+// that waited on another one's apply is checked against what that apply
+// left, as root will check it.
+func (p *pushing) admit(b *proof.Bundle, body []byte) (done bool, err error) {
 	h := p.h
 	unlock, held, err := h.lockAdmission()
 	if err != nil {
@@ -49,8 +47,11 @@ func (p *pushing) admit(b *proof.Bundle, body, installed []byte, base *applied) 
 	h.sweepOwnTemporaries()
 
 	// 2. One push at a time: the id unknown, nothing in in/, no marker
-	// still pending.
-	if exists(h.x("stage", p.id+".auth")) || exists(h.x("out", p.id+".json")) {
+	// still pending. The id was checked before the fast path too; here it
+	// is checked where no other admission can race it.
+	if known, err := h.known(p.id); err != nil {
+		return true, p.fail(err)
+	} else if known {
 		return true, p.respond(http.StatusConflict, errorBody(msgDuplicate(p.id)))
 	}
 	if what, age, pending, err := h.pending(); err != nil {
@@ -65,6 +66,10 @@ func (p *pushing) admit(b *proof.Bundle, body, installed []byte, base *applied) 
 		return true, respond(p.w, http.StatusConflict, errorBody(msgPending(what, age)), safe...)
 	}
 
+	base, installed, done, err := p.state()
+	if done {
+		return true, err
+	}
 	// 5. The proof, as root will run it: a signed commit paired with
 	// other bytes fails here, so validate only ever sees bytes a listed
 	// signer committed.
@@ -165,7 +170,7 @@ func (h *Handler) pending() (what string, age time.Duration, pending bool, err e
 			continue
 		}
 		age := now.Sub(m.Posted)
-		if age >= pendingFor || -age > pendingFor {
+		if age >= pendingAge || -age > pendingAge {
 			continue
 		}
 		if res, err := readResultFile(h.dir, id); err == nil && terminal(res.Phase) {
@@ -188,7 +193,10 @@ func roundAge(d time.Duration) time.Duration {
 // fsynced after its rename (I8 covers this handoff). Once the bundle's
 // rename has landed the push is root's, whatever follows: a marker that
 // cannot be written is a journal line, and the push's poll finds root's
-// result in its place (DESIGN-box.md, "Admission").
+// result in its place (DESIGN-box.md, "Admission"). A bundle whose in/
+// could not be synced gets no marker at all: a power loss could keep the
+// marker and lose the bundle, and a marker with no work behind it is
+// what the order exists to prevent.
 func (h *Handler) drop(id string, body []byte) error {
 	if err := h.fail("bundle"); err != nil {
 		return err
@@ -202,7 +210,8 @@ func (h *Handler) drop(id string, body []byte) error {
 		return fmt.Errorf("handing the bundle to root: %w", err)
 	}
 	if err := syncDir(h.x("in")); err != nil {
-		h.logger.Error("box webhook: the bundle is in in/, but in/ could not be synced", zap.String("id", id), zap.String("error", proof.Bound(err.Error())))
+		h.logger.Error("box webhook: the bundle is in in/, but in/ could not be synced; no marker is written", zap.String("id", id), zap.String("error", proof.Bound(err.Error())))
+		return nil
 	}
 	h.crash("bundle")
 	if err := h.writeMarker(id); err != nil {
@@ -274,22 +283,14 @@ func (h *Handler) crash(point string) {
 	}
 }
 
-// readResultFile reads out/<id>.json, which only root writes, held to
-// the shape root writes: the id it is filed under, and `verified` or a
-// terminal phase. The handler (step 8, the poll) and the applier
-// (settled) read it the same way.
-func readResultFile(dir, id string) (*result, error) {
-	path := filepath.Join(dir, "out", id+".json")
-	b, err := readFile(path, maxResult, false)
-	if err != nil {
-		return nil, err
+// known reports whether the box already holds a push with this id: its
+// marker or its result. A name that cannot be looked up is the box's
+// error, never a yes or a no.
+func (h *Handler) known(id string) (bool, error) {
+	for _, path := range []string{h.x("stage", id+".auth"), h.x("out", id+".json")} {
+		if found, err := present(path); err != nil || found {
+			return found, err
+		}
 	}
-	var r result
-	if err := json.Unmarshal(b, &r); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
-	}
-	if r.ID != id || (r.Phase != phaseVerified && !terminal(r.Phase)) {
-		return nil, fmt.Errorf("%s: not a result", path)
-	}
-	return &r, nil
+	return false, nil
 }

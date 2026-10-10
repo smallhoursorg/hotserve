@@ -198,7 +198,9 @@ cross-references throughout.
    OIDC token offline. Its absence from root's checks is T5's reach
    through root; see "Threat-model deltas". **Fast path, here and not
    earlier:** once the token, the request-id header (step 2) and this
-   binding have passed, if HEAD equals the baseline and the bundled
+   binding have passed, and the id is not one the box already holds
+   (a marker or a result: 409 "duplicate request id", so one id is
+   never answered two ways), if HEAD equals the baseline and the bundled
    file's digest equals the installed file's, nothing on disk would
    change, so the handler answers 200 `no_change` with no admission
    lock, no drop and no root work — it skips only the work that would
@@ -219,10 +221,17 @@ cross-references throughout.
 6. **Validate.** `/usr/bin/hotserve validate --adapter caddyfile
    --config <staged file>` as a child bounded per the Caps table, with
    the service's own environment, and `/usr/bin/hotserve-backup validate <file>` when
-   that binary is executable (`test -x` exit 1 is "not installed"; any
-   other failure refuses as "could not tell"). Output reaches the
+   that binary is executable — `test -x`'s question, `access(X_OK)`: no
+   file, one this uid cannot run, or a path through a non-directory is
+   "not installed"; any other failure refuses as "could not tell". A
+   child that exits non-zero, or outlives its deadline, refuses the
+   push; one that cannot start, or that another signal killed (the OOM
+   killer), is the box's error, a 500. Output reaches the
    response and the journal only through liveswap's redactor primed
-   with that environment. Root never runs either: `caddy validate`
+   with that environment, less the variables systemd and the login
+   shell set for every service (`USER`, `HOME`, `PATH`, `LC_*`,
+   `XDG_*`, the `*_DIRECTORY` paths and the rest of systemd.exec(5)'s
+   list): those are the box's own words, which a diagnostic needs. Root never runs either: `caddy validate`
    provisions every module and the adapter expands `{$VAR}` from the
    caller's environment and runs each module's parser on the input.
    The same step reads the file's adaptation (`hotserve adapt
@@ -609,6 +618,7 @@ refusing every push at admission — scores severity 1.
 | A `work/` fsync error skips `in/`'s fsync, so a power loss before the next fsync can bring the entry back | Failure-mode table, take | 2 | 2 | 3 | 12; the returning bundle is removed by its terminal result (step 9) |
 | A bare console edit between the re-read before a write and the write itself: before the swap it is overwritten; before `applied.json` the baseline moves past it | Transitions, installing → swapped and checking → no_change | 2 | 2 | 3 | 12; the next push reports the file as edited out of band; `hotserve box edit` holds the lock and cannot race |
 | Recovery checks `d`, then waits on `activating`; a bare console edit during the wait is reloaded or reported as the previous file | States, `rolling_back` | 2 | 2 | 3 | 12; needs a crash and a concurrent bare edit |
+| A handler refusal (steps 3–6) or a fast-path `no_change` whose response is lost leaves nothing to poll: the workflow polls 404 to its bound and goes red naming the journal, where the refusal line says why | "A lost response loses nothing" | 2 | 3 | 1 | 6; red and named; the handler writes nothing in `out/`, which is root's |
 | A rollback whose cause the catalogue has no words for reports the nearest catalogued text | "Rollbacks the catalogue has no words of their own for", box/txn.go | 2 | 3 | 3 | 18; the journal carries the real cause; catalogue lines are wanted |
 
 ## Admission
@@ -626,7 +636,7 @@ re-instantiates the handler; a crash releases it with the descriptor.
 |---|---|---|
 | no `X-Box-Request-Id` header, or not 32 lowercase hex | 400 "X-Box-Request-Id: 32 lowercase hex, chosen at random for each push, required" | the id names the push's bundle, marker and result; checked before the body is read and before the fast path, so every POST contract rule holds on both paths |
 | token, id and `sha` binding passed; HEAD equals the baseline and the file's digest equals the installed file's | 200 `no_change`, before the lock | nothing would change; the fast path of step 4 |
-| a marker or result already exists for this id | 409 "duplicate request id: poll /?result=<id>" | a retry after a lost response; honest ids never collide |
+| a marker or result already exists for this id | 409 "duplicate request id: poll /?result=<id>" | a retry after a lost response; honest ids never collide. Checked before the fast path too, so a retry of a push that has since applied is not answered `no_change` |
 | lock held by another request | 409 "a push is being admitted; retry in a moment" | another push is between its checks and its marker |
 | any entry in `in/` | 409 "a push is pending: <id>, <age> old" | the durable one-bundle bound: a stalled applier means one 16 MiB on disk and a loud 409, never a queue; no age-out |
 | a marker younger than fifteen minutes with no terminal result | 409, same message | root has taken the bundle and holds one at a time; the marker is the only trace the handler has |
@@ -637,7 +647,9 @@ bundle file and the `in/` directory `fsync`ed before anything else (I8
 covers this handoff as it covers the transaction), marker written and
 `fsync`ed **second**. A crash or power loss between them leaves a
 bundle root will process and a result that ends the pending state,
-never a marker with no work behind it. The one cost: until root
+never a marker with no work behind it — which is also why a bundle
+whose `in/` could not be fsynced gets no marker at all (a power loss
+could keep the marker and lose the rename). The one cost: until root
 writes that push's result, its poll finds neither and answers 404; the
 POST was never answered in that window anyway.
 
@@ -649,7 +661,13 @@ request id"; two honest runs never collide on 128 random bits, and a
 run that retries after a lost response is told its push exists and
 polls instead. The one push that cannot read its own result is one
 that removed its own workflow from `deploy_trust`: its polls are 401
-once it applies (Message catalogue, 401).
+once it applies (Message catalogue, 401). An answer the handler gave
+without a drop — a refusal at steps 3 to 6, the fast path's
+`no_change` — leaves no file, so its loss reads 404; and a push whose
+marker a crash or a full disk kept from being written reads 404 until
+root writes its result. The workflow therefore reads 404 as "not yet"
+whenever its POST was not answered with a terminal phase (Message
+catalogue, 404).
 
 Together: at most one bundle in `in/`, at most one in root's hands,
 and a 409 that names which. A result or marker count is bounded
@@ -737,7 +755,9 @@ A count as well as an age, because a holder of a valid token can push
 in a loop — the fast path writes nothing, but a replay after a console
 edit, or a push of any signed descendant, reaches root and is a result
 — and an age alone would let a day of those fill the disk or the inode
-table. The handler sweeps only its own unfinished `.tar` temporaries.
+table. The handler sweeps only its own temporaries — the dot-names in
+`stage/`: a bundle or marker half written, a validate copy — under the
+admission lock, before its checks.
 Retention runs at the end of every applier run, whatever triggered it;
 a stranded marker therefore waits for root's next run, which a later
 push or a crash's leftovers start.
@@ -891,7 +911,7 @@ says. The workflow's action is in the last column.
 | 400 | — | `could not read the bundle: <error>` | handler | the connection broke during the upload; retry |
 | 409 | — | `duplicate request id: poll /?result=<id>` | handler | poll instead of retrying the POST |
 | 409 | — | `this box has no baseline; hotserve init <dir> <sha> as root on the box sets one` | handler (`GET /`) | fail; run `init` on the box |
-| 404 | — | `no result and no marker for <id>: swept, or never admitted` | handler | fail |
+| 404 | — | `no result and no marker for <id>: swept, or never admitted` | handler | after a POST answered 202 or 504, or not answered at all: not yet — keep polling to the 15-minute bound, then red naming `journalctl -u hotserve -u hotserve-box-apply`; otherwise fail |
 | 500 | — | `the Caddyfile this box runs <reason>` (a walk refusal's reason) / `could not read <what>: <error>` / `could not check the push: <error>; nothing changed` | handler | fail; `journalctl -u hotserve` on the box |
 | 405 / 415 / 413 | — | `method not allowed` / `the bundle is a gzip tarball` / `the bundle is larger than 16 MiB` | handler | fail |
 | 409 | — | `a push is being admitted; retry in a moment` | handler | retry |
