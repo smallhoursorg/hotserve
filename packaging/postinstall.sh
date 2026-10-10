@@ -149,8 +149,8 @@ if [ -x /usr/bin/deb-systemd-helper ]; then
 		deb-systemd-helper update-state hotserve-box-apply.path >/dev/null || true
 	fi
 fi
+# The daemon-reload above has loaded the unpacked units.
 if [ -d /run/systemd/system ]; then
-	systemctl --system daemon-reload >/dev/null || true
 	if [ -n "${2:-}" ]; then action=restart; else action=start; fi
 	if [ -x /usr/bin/deb-systemd-invoke ]; then
 		deb-systemd-invoke "$action" hotserve-box-apply.path >/dev/null || true

@@ -13,21 +13,24 @@
 # try-restarts — nothing would re-enable a torn-down box.
 case "${1:-}" in
 remove)
-	# The box applier's path unit first, so nothing starts an apply
-	# while hotserve stops. Stopped, not disabled: a reinstall finds it
-	# still enabled and starts it again (postinstall's was-enabled),
-	# where a disable here would leave the applier off for good. The
-	# service is left alone: a run under way settles by its own tables
-	# (box/DESIGN-box.md, "The install transaction") and exits.
-	if [ -d /run/systemd/system ]; then
-		if [ -x /usr/bin/deb-systemd-invoke ]; then
-			deb-systemd-invoke stop hotserve-box-apply.path >/dev/null || true
-		else
-			systemctl stop hotserve-box-apply.path 2>/dev/null || true
-		fi
-	fi
 	if command -v systemctl >/dev/null 2>&1; then
 		systemctl stop hotserve 2>/dev/null || true
+		# The box applier's path unit, after hotserve: a push the
+		# box_webhook handler admitted before hotserve stopped is still
+		# taken by a run, which refuses it (hotserve is not running),
+		# rather than left in in/ for a later install to apply. Stopped,
+		# not disabled: an install after this removal finds it enabled
+		# and starts it again (postinstall's was-enabled), where a
+		# disable here would leave the applier off for good. The service
+		# is left alone: a run under way settles by its own tables
+		# (box/DESIGN-box.md, "The install transaction") and exits.
+		if [ -d /run/systemd/system ]; then
+			if [ -x /usr/bin/deb-systemd-invoke ]; then
+				deb-systemd-invoke stop hotserve-box-apply.path >/dev/null || true
+			else
+				systemctl stop hotserve-box-apply.path 2>/dev/null || true
+			fi
+		fi
 		systemctl disable hotserve 2>/dev/null || true
 		# Removal is the one time the apps go too: stopping the user
 		# manager stops every unit under it (cgroup kill), and the

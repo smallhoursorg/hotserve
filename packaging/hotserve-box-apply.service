@@ -26,7 +26,9 @@ Type=oneshot
 ExecStart=/usr/bin/hotserve box apply
 # No time cap on a run: it is bounded from inside — each reload by
 # hotserve's own 240 s, each child by its deadline, one bundle at a
-# time.
+# time — but for root's lock, which it waits for without a bound while
+# the console holds it (`hotserve init`, `hotserve box edit`): that
+# wait is what the lock is for.
 TimeoutStartSec=infinity
 
 # Root, with five capabilities in its bounding set and no others.

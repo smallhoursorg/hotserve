@@ -211,11 +211,11 @@ for p in "$B/smoke" "$B/out/smoke" "$B/work/smoke"; do
 done
 as_hotserve "ls $B/work" && die "the hotserve uid can list $B/work"
 # The units run: the service's ExecStart swapped for a stub by a runtime
-# drop-in, everything else as shipped. The hotserve uid drops a
-# directory into in/ as hostile as it can make it; the stub, inside the
-# unit's sandbox, reloads hotserve, verifies a signature as uid 65534
-# under its PrivateTmp, kills a child of that uid, writes where it may
-# and not elsewhere, and moves and removes the hostile entry.
+# drop-in, everything else as shipped. The hotserve uid drops entries
+# into in/ as hostile as it can make them; the stub, inside the unit's
+# sandbox, reloads hotserve, verifies a signature as uid 65534 under its
+# PrivateTmp, kills a child of that uid, writes where it may and not
+# elsewhere, and moves and removes the hostile entries.
 sig=/root/box-smoke
 rm -rf "$sig"; mkdir -p "$sig"
 ssh-keygen -q -t ed25519 -N '' -C smoke -f "$sig/key"
@@ -237,22 +237,33 @@ r verify $?
 rm -rf "$d"
 setpriv --reuid=65534 --regid=65534 --clear-groups sleep 30 &
 child=$!
-sleep 0.2
+# Killed only once it is uid 65534: before setpriv's switch it is
+# root's own, and the kill would pass without CAP_KILL.
+i=0
+until [ "$(awk '/^Uid:/ {print $2}' /proc/$child/status 2>/dev/null)" = 65534 ]; do
+	i=$((i + 1)); [ "$i" -ge 100 ] && break
+	sleep 0.05
+done
+r childuid "$(awk '/^Uid:/ {print $2}' /proc/$child/status 2>/dev/null)"
 kill "$child"; r kill $?
 wait "$child"
 touch /etc/hotserve/.smoke-box && rm /etc/hotserve/.smoke-box; r etc $?
 touch /var/lib/hotserve/.smoke-box 2>/dev/null; r varlibhotserve $?
-for e in "$B"/in/*; do mv "$e" "$B/work/" || r move 1; done
-rm -rf "$B"/work/*; r clear $?
+find "$B/in" -mindepth 1 -maxdepth 1 -exec mv -t "$B/work/" {} + || r move 1
+find "$B/work" -mindepth 1 -delete; r clear $?
 r inleft "$(ls -A $B/in | wc -l)"
 EOF
 mkdir -p /run/systemd/system/$svc.d
 printf '[Service]\nExecStart=\nExecStart=/bin/sh /run/hotserve-box-smoke.sh\n' >/run/systemd/system/$svc.d/smoke.conf
 systemctl daemon-reload
-# The path unit is stopped while the entry is made, or it would fire at
-# the mkdir; started again, it finds in/ not empty and fires at once.
+# The path unit is stopped while the entries are made, or it would fire
+# at the first; started again, it finds them and fires at once. Their
+# names are ones DirectoryNotEmpty= does not count (systemd takes them
+# for hidden and backup files): only the unit's PathExistsGlob= lines
+# start a run for them.
 systemctl stop hotserve-box-apply.path
-as_hotserve "mkdir $B/in/hostile && touch $B/in/hostile/f && chmod 000 $B/in/hostile" || die "the hotserve uid cannot drop an entry into $B/in"
+as_hotserve "mkdir $B/in/.hostile && touch $B/in/.hostile/f && chmod 000 $B/in/.hostile && touch '$B/in/stale~'" \
+	|| die "the hotserve uid cannot drop an entry into $B/in"
 systemctl start hotserve-box-apply.path
 i=0
 until [ -s "$B/smoke-result" ] && grep -q '^inleft=' "$B/smoke-result" && [ "$(show $svc ActiveState)" = inactive ]; do
@@ -264,11 +275,12 @@ echo "inside the unit:"; sed 's/^/  /' "$B/smoke-result"
 res() { sed -n "s/^$1=//p" "$B/smoke-result"; }
 [ "$(res reload)" = 0 ] || die "systemctl reload hotserve failed inside the applier's unit"
 [ "$(res verify)" = 0 ] || die "ssh-keygen -Y verify as uid 65534 under the unit's PrivateTmp failed"
+[ "$(res childuid)" = 65534 ] || die "the child to kill was uid '$(res childuid)', not 65534: the kill check would prove nothing"
 [ "$(res kill)" = 0 ] || die "the unit could not kill a uid-65534 child (CAP_KILL)"
 [ "$(res etc)" = 0 ] || die "the unit cannot write /etc/hotserve"
 [ "$(res varlibhotserve)" != 0 ] || die "the unit could write /var/lib/hotserve: ProtectSystem=strict is not in force"
 [ -z "$(res move)" ] && [ "$(res clear)" = 0 ] && [ "$(res inleft)" = 0 ] \
-	|| die "the unit could not clear a hostile entry from in/ (CAP_DAC_OVERRIDE, CAP_FOWNER)"
+	|| die "the unit could not clear the hostile entries from in/ (CAP_DAC_OVERRIDE, CAP_FOWNER)"
 [ "$(stat -c %G "$B/smoke-result")" = hotserve ] || die "a file root made in $B is not group hotserve: the setgid bit is missing"
 [ -z "$(ls -A $B/work)" ] || die "work/ is not empty after the run"
 systemctl is-active --quiet hotserve || die "hotserve is not active after the reload inside the applier's unit"
@@ -276,7 +288,7 @@ rm -f /run/systemd/system/$svc.d/smoke.conf "$B/smoke-result" /run/hotserve-box-
 rmdir /run/systemd/system/$svc.d
 systemctl daemon-reload
 [ "$(show hotserve-box-apply.path SubState)" = waiting ] || die "the path unit is not waiting after the run: $(systemctl show -p ActiveState,SubState,Result hotserve-box-apply.path | tr '\n' ' ')"
-echo "box applier: path unit enabled and waiting; tree as tmpfiles.d says; the unit reloads hotserve, verifies as 65534, kills its child, clears a hostile entry"
+echo "box applier: path unit enabled and waiting; tree as tmpfiles.d says; the unit reloads hotserve, verifies as 65534, kills its child, clears hidden and backup-named hostile entries"
 
 stage "stage 2: liveswap deploy under the systemd sandbox"
 # Generate a local deploy keypair; the app trusts the public half, and
@@ -647,7 +659,9 @@ id -nG hotserve | tr ' ' '\n' | grep -qx hotserve \
 # back by postinstall's systemd-tmpfiles.
 systemctl disable --now hotserve-box-apply.path
 chmod 0777 "$B/in"
-chmod 0755 "$B"
+# Five digits: GNU chmod keeps a directory's setgid bit for a
+# four-digit mode, and the bit is what tmpfiles.d must put back.
+chmod 00755 "$B"
 chown hotserve "$B/out"
 dpkg -i "$deb" >/tmp/reinstall.out 2>/tmp/reinstall.err \
 	|| { cat /tmp/reinstall.out /tmp/reinstall.err; die "reinstall (dpkg -i) failed"; }
