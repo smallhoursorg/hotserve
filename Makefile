@@ -16,7 +16,7 @@ VERSION ?= $(shell (git describe --tags --exact-match 2>/dev/null || echo v0.0.0
 # Distro image for the package install smoke test (install-test).
 DISTRO ?= debian:13
 
-.PHONY: test test-integration vet tidy lint fuzz fuzz-list vulncheck secretscan build package clean-debs install-test e2e soak e2e-logs clean
+.PHONY: test test-integration vet tidy tidy-check lint fuzz fuzz-list vulncheck secretscan build package clean-debs install-test e2e soak e2e-logs clean
 
 test:
 	$(COMPOSE) run --rm dev go test -race -cover $(PKGS)
@@ -61,6 +61,14 @@ vet:
 
 tidy:
 	for m in $(MODULES); do $(COMPOSE) run --rm -w /src/$$m dev go mod tidy || exit 1; done
+
+# The PR-CI half of tidy: `go mod tidy -diff` writes nothing, prints
+# the diff tidy would make and exits non-zero when there is one, so a
+# missing go.sum line or a leftover require fails the PR that left it.
+# It checks each module's go.mod/go.sum only: go.work is ignored and
+# go.work.sum is not checked (that would be a separate check).
+tidy-check:
+	for m in $(MODULES); do $(COMPOSE) run --rm -T -w /src/$$m dev go mod tidy -diff || exit 1; done
 
 # Both tag sets, as for vet: a bare run never compiles the
 # integration-tagged files, so neither the linters nor gofmt see them.
