@@ -165,28 +165,40 @@ const (
 // stands at the server level), under a match that is certain or, when
 // may is set, hangs on matcher.
 type reachBlock struct {
-	name    string
-	site    bool
-	changes bool
-	may     bool
-	matcher string
+	name     string
+	terminal bool // a terminal route that ran out of handlers; site when at the server level
+	site     bool
+	changes  bool
+	may      bool
+	behind   bool // box_webhook itself, under a matcher decided per request
+	matcher  string
 }
 
-// text is the block's catalogue text, every input-derived value bounded.
+// text is the block's catalogue text, every input-derived value
+// bounded. A handler's and a matcher's name are module names, never
+// empty from Caddy; from any other bytes they may be, and the text
+// still has to read.
 func (b *reachBlock) text(host string) string {
 	what := proof.Bound(b.name)
 	switch {
-	case b.name != "":
-	case b.site:
+	case b.terminal && b.site:
 		what = "an earlier site for " + proof.Bound(host)
-	default:
+	case b.terminal:
 		what = "a terminal route"
+	case what == "":
+		what = "a nameless handler"
+	}
+	matcher := proof.Bound(b.matcher)
+	if matcher == "" {
+		matcher = "nameless"
 	}
 	switch {
+	case b.behind:
+		return what + " stands behind a " + matcher + " matcher decided per request"
 	case b.may && b.changes:
-		return what + " may change the request first (its " + proof.Bound(b.matcher) + " matcher is decided per request)"
+		return what + " may change the request first (its " + matcher + " matcher is decided per request)"
 	case b.may:
-		return what + " may answer first (its " + proof.Bound(b.matcher) + " matcher is decided per request)"
+		return what + " may answer first (its " + matcher + " matcher is decided per request)"
 	case b.changes:
 		return what + " changes the request first"
 	default:
@@ -238,6 +250,14 @@ func (w *reachWalk) routes(rs []adaptedRoute, outer matchStatus, matcher string,
 		for _, h := range r.Handle {
 			switch classify(h) {
 			case classReached:
+				if st == mayMatch {
+					// Reached for the requests the matcher admits; the
+					// rest skip it, and whatever follows is not its
+					// answer. No directive the walk accepts adapts to
+					// this (box_webhook takes no matcher and its site
+					// is a bare host); the contract is kept anyway.
+					return blocked, &reachBlock{name: h.Handler, behind: true, matcher: m}
+				}
 				return reachedWebhook, nil
 			case classSubroute:
 				if end, b := w.routes(h.sub, st, m, false); end != fellThrough {
@@ -253,7 +273,7 @@ func (w *reachWalk) routes(rs []adaptedRoute, outer matchStatus, matcher string,
 		if r.Terminal {
 			// Caddy hands the rest of the chain an empty handler: the
 			// request ends here with whatever was written, or nothing.
-			return blocked, &reachBlock{site: top, may: st == mayMatch, matcher: m}
+			return blocked, &reachBlock{terminal: true, site: top, may: st == mayMatch, matcher: m}
 		}
 	}
 	return fellThrough, nil

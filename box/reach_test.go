@@ -181,9 +181,14 @@ func TestReachJSON(t *testing.T) {
 		"a responder in a server that does not carry the webhook": {adapted: []byte(`{"apps":{"http":{"servers":{"other":{"listen":[":8443"],"routes":[{"match":[{"host":["deploy.example.com"]}],"handle":[{"handler":"static_response"}],"terminal":true}]},"srv0":{"listen":[":443"],"routes":[{"match":[{"host":["deploy.example.com"]}],"handle":[{"handler":"subroute","routes":[{"handle":[{"handler":"box_webhook"}]}]}],"terminal":true}]}}}}}`), want: ""},
 		"another handler's routes key, of another shape":          {adapted: reachJSON(`{"handle":[{"handler":"vars","routes":{"a":1}}]},`, ""), want: ""},
 		"a subroute whose routes do not read":                     {adapted: reachJSON(`{"handle":[{"handler":"subroute","routes":{"a":1}}]},`, ""), want: "error"},
-		"not JSON":                                                {adapted: []byte("{"), want: "error"},
-		"no box_webhook":                                          {adapted: []byte(`{"apps":{"http":{"servers":{"srv0":{"routes":[{"match":[{"host":["deploy.example.com"]}],"handle":[{"handler":"static_response"}]}]}}}}}`), want: "error"},
-		"the webhook on another host":                             {adapted: []byte(`{"apps":{"http":{"servers":{"srv0":{"routes":[{"match":[{"host":["other.example.com"]}],"handle":[{"handler":"subroute","routes":[{"handle":[{"handler":"box_webhook"}]}]}],"terminal":true}]}}}}}`), want: "error"},
+		// The webhook itself under a per-request matcher: reached for
+		// some requests only, so not reached. Nothing the walk accepts
+		// adapts to this; the contract is kept anyway.
+		"the webhook behind a header matcher":               {adapted: []byte(`{"apps":{"http":{"servers":{"srv0":{"routes":[{"match":[{"host":["deploy.example.com"]}],"handle":[{"handler":"subroute","routes":[{"match":[{"header":{"X-A":["b"]}}],"handle":[{"handler":"box_webhook"}]},{"handle":[{"handler":"static_response"}]}]}],"terminal":true}]}}}}}`), want: "box_webhook stands behind a header matcher decided per request"},
+		"the webhook in a subroute behind a header matcher": {adapted: []byte(`{"apps":{"http":{"servers":{"srv0":{"routes":[{"match":[{"host":["deploy.example.com"]}],"handle":[{"handler":"subroute","routes":[{"match":[{"header":{"X-A":["b"]}}],"handle":[{"handler":"subroute","routes":[{"handle":[{"handler":"box_webhook"}]}]}]}]}],"terminal":true}]}}}}}`), want: "box_webhook stands behind a header matcher decided per request"},
+		"not JSON":                    {adapted: []byte("{"), want: "error"},
+		"no box_webhook":              {adapted: []byte(`{"apps":{"http":{"servers":{"srv0":{"routes":[{"match":[{"host":["deploy.example.com"]}],"handle":[{"handler":"static_response"}]}]}}}}}`), want: "error"},
+		"the webhook on another host": {adapted: []byte(`{"apps":{"http":{"servers":{"srv0":{"routes":[{"match":[{"host":["other.example.com"]}],"handle":[{"handler":"subroute","routes":[{"handle":[{"handler":"box_webhook"}]}]}],"terminal":true}]}}}}}`), want: "error"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := reach(c.adapted, "deploy.example.com")
