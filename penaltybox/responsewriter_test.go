@@ -3,6 +3,7 @@ package penaltybox
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -99,27 +100,35 @@ func TestInterceptIdempotent(t *testing.T) {
 }
 
 func TestIntercept1xxPassthrough(t *testing.T) {
-	h, st := newTestHandler(newFakeClock(), storeConfig{})
-	rec := httptest.NewRecorder()
-	rw := interceptorFor(h, rec)
+	// Every 1xx but 101 is interim (net/http writes them as
+	// informational responses, and Caddy's reverse proxy forwards
+	// whichever the origin sends), not only the named ones.
+	for _, code := range []int{http.StatusContinue, http.StatusProcessing, http.StatusEarlyHints, 104, 199} {
+		t.Run(strconv.Itoa(code), func(t *testing.T) {
+			h, st := newTestHandler(newFakeClock(), storeConfig{})
+			rec := httptest.NewRecorder()
+			rw := interceptorFor(h, rec)
 
-	// An informational response before the final one must not trigger
-	// interception; the hint arrives with the final header set.
-	rw.WriteHeader(http.StatusEarlyHints)
-	if rw.intercepted {
-		t.Fatal("1xx must not trigger interception")
-	}
-	if st.size() != 0 {
-		t.Fatal("1xx must not count")
-	}
+			// An informational response before the final one must not
+			// trigger interception; the hint arrives with the final
+			// header set.
+			rw.WriteHeader(code)
+			if rw.intercepted {
+				t.Fatal("1xx must not trigger interception")
+			}
+			if st.size() != 0 {
+				t.Fatal("1xx must not count")
+			}
 
-	rw.Header().Set("X-Rate-Limit-Level", "3")
-	rw.WriteHeader(http.StatusOK)
-	if got := rec.Header().Get("X-Rate-Limit-Level"); got != "" {
-		t.Errorf("final response header should be stripped, got %q", got)
-	}
-	if st.size() != 1 {
-		t.Errorf("final response should have counted")
+			rw.Header().Set("X-Rate-Limit-Level", "3")
+			rw.WriteHeader(http.StatusOK)
+			if got := rec.Header().Get("X-Rate-Limit-Level"); got != "" {
+				t.Errorf("final response header should be stripped, got %q", got)
+			}
+			if st.size() != 1 {
+				t.Errorf("final response should have counted")
+			}
+		})
 	}
 }
 

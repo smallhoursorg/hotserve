@@ -94,7 +94,7 @@ All options and defaults:
 | Option        | Default              | Meaning                                                              |
 | ------------- | -------------------- | -------------------------------------------------------------------- |
 | `header`      | `X-Rate-Limit-Level` | Origin response header carrying the hint level                       |
-| `key`         | `{client_ip}`        | Client identity; respects the server's `trusted_proxies` config. A key whose whole value is one IPv6 address counts under its /64; IPv4 (also mapped or NAT64 well-known) per address; anything else verbatim (see [Client keys](#client-keys-ipv6-by-64)). A key that resolves to an empty string fails open: the request is not counted or boxed, but its hint header is still stripped (see [Semantics](#semantics-and-trade-offs-read-this)) |
+| `key`         | `{client_ip}`        | Client identity; respects the server's `trusted_proxies` config. A key whose whole value is one IPv6 address counts under its /64; IPv4 (also mapped or NAT64 well-known) per address; anything else verbatim (see [Client keys](#client-keys-ipv6-by-64)). A key that resolves to an empty string fails open: the request is not counted or boxed, but its hint header is still stripped when `strip` is on (see [Semantics](#semantics-and-trade-offs-read-this)) |
 | `min_level`   | `2`                  | Lowest level that counts toward the budget (1–3)                     |
 | `window`      | `60s`                | Sliding window; free-form duration (Fastly's 1s/10s/60s is the interoperability convention) |
 | `limit`       | `30`                 | Weighted units per window; *exceeding* (not reaching) it boxes       |

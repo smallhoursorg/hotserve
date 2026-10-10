@@ -40,13 +40,13 @@ type hintInterceptor struct {
 
 func (rw *hintInterceptor) WriteHeader(status int) {
 	// Interim 1xx responses (100 Continue, 102 Processing, 103 Early
-	// Hints) don't carry the final header set — the hint arrives with the
-	// final status — so pass them through untouched. 101 Switching
-	// Protocols is NOT interim: it is the final response of an upgrade
-	// (e.g. WebSocket), so it must be intercepted like any other final
-	// status or the hint would leak and never count.
-	switch status {
-	case http.StatusContinue, http.StatusProcessing, http.StatusEarlyHints:
+	// Hints, and any other 1xx, as net/http treats them) don't carry the
+	// final header set — the hint arrives with the final status — so
+	// pass them through untouched. 101 Switching Protocols is NOT
+	// interim: it is the final response of an upgrade (e.g. WebSocket),
+	// so it must be intercepted like any other final status or the hint
+	// would leak and never count.
+	if status >= 100 && status <= 199 && status != http.StatusSwitchingProtocols {
 		rw.ResponseWriter.WriteHeader(status)
 		return
 	}
