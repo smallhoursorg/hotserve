@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -58,8 +56,6 @@ func newRig(t testing.TB) *rig {
 		limiter:   deploytrust.NewLimiter(r.clock),
 		installed: r.installed,
 		dir:       r.dir,
-		now:       r.clock.Now,
-		stateLog:  &stateLog{},
 	}
 	for _, d := range []string{"out", "stage"} {
 		if err := os.MkdirAll(filepath.Join(r.dir, d), 0o755); err != nil {
@@ -90,20 +86,6 @@ func (r *rig) writeJSON(t testing.TB, path string, v any) {
 
 func (r *rig) applied(t *testing.T, commit string) {
 	r.writeJSON(t, filepath.Join(r.dir, "applied.json"), applied{SHA: commit, Path: "box1/Caddyfile", SHA256: strings.Repeat("0", 64), Signer: "alice", When: r.clock.Now()})
-}
-
-func (r *rig) marker(t *testing.T, id, digest string, posted time.Time) {
-	r.writeJSON(t, filepath.Join(r.dir, "stage", id+".auth"), marker{SHA256: digest, Posted: posted})
-}
-
-func (r *rig) result(t *testing.T, res result) {
-	r.writeJSON(t, filepath.Join(r.dir, "out", res.ID+".json"), res)
-}
-
-// secret is a poll secret made of one repeated byte: its header, its
-// id and its digest.
-func secret(seed byte) (header, id, digest string) {
-	return digestOf(bytes.Repeat([]byte{seed}, pollSecretLen), base64.StdEncoding)
 }
 
 type req struct {
@@ -149,9 +131,6 @@ type nextFunc func(http.ResponseWriter, *http.Request) error
 
 func (f nextFunc) ServeHTTP(w http.ResponseWriter, r *http.Request) error { return f(w, r) }
 
-func pollHeader(h string) http.Header { return http.Header{"Authorization": {pollScheme + h}} }
-
-// body decodes a JSON response, failing on anything else.
 func body(t *testing.T, w *httptest.ResponseRecorder) map[string]any {
 	t.Helper()
 	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
@@ -209,7 +188,7 @@ func TestHandlerMethodBeforeAuth(t *testing.T) {
 }
 
 func TestHandlerAuthenticates(t *testing.T) {
-	_, id, _ := secret(1)
+	const id = "0123456789abcdef0123456789abcdef"
 	for _, q := range []req{
 		{target: "/"},
 		{target: "/?result=" + id},
@@ -289,6 +268,9 @@ func TestHandlerStatusBoxErrors(t *testing.T) {
 		"installed refused with input": {func(t *testing.T, r *rig) {
 			r.write(t, r.installed, file(strings.Replace(good, "deploy.example.com {", strings.Repeat("a", 2000)+".com {", 1)))
 		}, "has a box_webhook site whose address is not one bare hostname"},
+		"installed refused, the address filtered": {func(t *testing.T, r *rig) {
+			r.write(t, r.installed, file(strings.Replace(good, "deploy.example.com {", "https://"+jwt+" {", 1)))
+		}, "[redacted:jwt]"},
 		"applied not JSON":      {func(t *testing.T, r *rig) { r.write(t, filepath.Join(r.dir, "applied.json"), []byte("{")) }, "could not read the baseline"},
 		"applied sha not an id": {func(t *testing.T, r *rig) { r.applied(t, "HEAD") }, "sha is not a 40-hex commit id"},
 		"applied too big": {func(t *testing.T, r *rig) {
@@ -310,6 +292,9 @@ func TestHandlerStatusBoxErrors(t *testing.T) {
 			c.setup(t, r)
 			w := r.do(t, req{target: "/", token: r.token(t)})
 			wantError(t, w, http.StatusInternalServerError, c.want)
+			if strings.Contains(w.Body.String(), jwt) {
+				t.Errorf("a token-shaped address in the answer: %s", w.Body)
+			}
 			if len(w.Body.String()) > 600 {
 				t.Errorf("an unbounded 500: %d bytes", w.Body.Len())
 			}
@@ -344,272 +329,23 @@ func (f failingReader) Read([]byte) (int, error) {
 
 func TestHandlerPushUntilTheApplier(t *testing.T) {
 	r := newRig(t)
-	_, _, digest := secret(1)
-	w := r.do(t, req{method: http.MethodPost, target: "/", token: r.token(t), body: failingReader{t}, header: http.Header{"X-Box-Poll-Digest": {digest}}})
+	w := r.do(t, req{method: http.MethodPost, target: "/", token: r.token(t), body: failingReader{t}})
 	wantError(t, w, http.StatusNotImplemented, msgNoApplier)
 	wantError(t, r.do(t, req{method: http.MethodPost, target: "/", body: failingReader{t}}), http.StatusUnauthorized, unauthorized)
 }
 
-func TestHandlerResultPhases(t *testing.T) {
-	for phase, code := range map[string]int{
-		"verified": 202, "no_change": 200, "applied": 200,
-		"refused": 422, "failed": 422, "rolled_back": 422, "unknown": 422,
-	} {
-		t.Run(phase, func(t *testing.T) {
-			r := newRig(t)
-			h, id, digest := secret(7)
-			r.marker(t, id, digest, r.clock.Now())
-			r.result(t, result{ID: id, Commit: sha, Path: "box1/Caddyfile", Signer: "alice@example.com", Phase: phase, BoxWebhook: "deploy.example.com", Apps: []string{"example"}})
-			w := r.do(t, req{target: "/?result=" + id, header: pollHeader(h)})
-			got := body(t, w)
-			if w.Code != code || got["id"] != id || got["commit"] != sha || got["phase"] != phase || got["signer"] != "alice@example.com" || got["box_webhook"] != "deploy.example.com" {
-				t.Fatalf("%d %v, want %d with the id and commit standing", w.Code, got, code)
-			}
-			if _, ok := got["caddyfile_edited_out_of_band"]; !ok {
-				t.Error("the out-of-band flag is not in the answer")
-			}
-			// The same answer to the bearer.
-			if w2 := r.do(t, req{target: "/?result=" + id, token: r.token(t)}); w2.Code != code || w2.Body.String() != w.Body.String() {
-				t.Fatalf("by token: %d %s", w2.Code, w2.Body)
-			}
-			if r.h.limiter.Size() != 0 {
-				t.Fatal("a poll was charged")
-			}
-		})
-	}
-}
-
-func TestHandlerResultPollSecret(t *testing.T) {
-	h, id, digest := secret(7)
-	other, otherID, otherDigest := secret(8)
-	// A secret whose standard base64 holds '+' and '/', sent in the URL
-	// alphabet; and one a byte short, in the right alphabet.
-	urlRaw := bytes.Repeat([]byte{0xfb}, pollSecretLen)
-	urlHeader, urlID, urlDigest := digestOf(urlRaw, base64.URLEncoding)
-	shortHeader, shortID, shortDigest := digestOf(bytes.Repeat([]byte{7}, pollSecretLen-1), base64.StdEncoding)
-	fresh := func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now()) }
-	// unreadable: refused as any unauthenticated request is, and the
-	// box's failure in the journal.
-	const admitted, refused, unreadable = 202, 401, -1
-	for name, c := range map[string]struct {
-		setup  func(t *testing.T, r *rig)
-		target string
-		header http.Header
-		code   int
-	}{
-		"fresh": {fresh, "/?result=" + id, pollHeader(h), admitted},
-		// The secret has no age of its own: it is honoured for as long
-		// as its marker is kept, whatever the clocks say.
-		"a day old":            {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now().Add(-24*time.Hour)) }, "/?result=" + id, pollHeader(h), admitted},
-		"posted in the future": {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now().Add(time.Hour)) }, "/?result=" + id, pollHeader(h), admitted},
-		"no posted time":       {func(t *testing.T, r *rig) { r.marker(t, id, digest, time.Time{}) }, "/?result=" + id, pollHeader(h), admitted},
-		"no marker":            {func(*testing.T, *rig) {}, "/?result=" + id, pollHeader(h), refused},
-		"another push's secret": {func(t *testing.T, r *rig) {
-			fresh(t, r)
-			r.marker(t, otherID, otherDigest, r.clock.Now())
-		}, "/?result=" + id, pollHeader(other), refused},
-		// The marker's digest begins with the id but is not the
-		// secret's: the comparison is of the whole digest.
-		"digest shares only the id": {func(t *testing.T, r *rig) { r.marker(t, id, id+strings.Repeat("0", 32), r.clock.Now()) }, "/?result=" + id, pollHeader(h), refused},
-		"two headers":               {fresh, "/?result=" + id, http.Header{"Authorization": {pollScheme + h, pollScheme + h}}, refused},
-		"scheme in another case":    {fresh, "/?result=" + id, http.Header{"Authorization": {"box-POLL " + h}}, admitted},
-		"the secret as a bearer":    {fresh, "/?result=" + id, http.Header{"Authorization": {"Bearer " + h}}, refused},
-		"the secret bare":           {fresh, "/?result=" + id, http.Header{"Authorization": {h}}, refused},
-		"the old header":            {fresh, "/?result=" + id, http.Header{"X-Box-Poll-Secret": {h}}, refused},
-		"two spaces":                {fresh, "/?result=" + id, http.Header{"Authorization": {"Box-Poll  " + h[:43]}}, refused},
-		"unpadded":                  {fresh, "/?result=" + id, pollHeader(strings.TrimRight(h, "=")), refused},
-		"url alphabet":              {func(t *testing.T, r *rig) { r.marker(t, urlID, urlDigest, r.clock.Now()) }, "/?result=" + urlID, pollHeader(urlHeader), refused},
-		"31 bytes":                  {func(t *testing.T, r *rig) { r.marker(t, shortID, shortDigest, r.clock.Now()) }, "/?result=" + shortID, pollHeader(shortHeader), refused},
-		"upper-case id":             {fresh, "/?result=" + strings.ToUpper(id), pollHeader(h), refused},
-		"another param":             {fresh, "/?result=" + id + "&x=1", pollHeader(h), refused},
-		"result twice":              {fresh, "/?result=" + id + "&result=" + id, pollHeader(h), refused},
-		// A marker the box cannot read authenticates nothing, as an
-		// issuer it cannot reach authenticates no token: the flat 401,
-		// charged, and the failure journaled (once a window).
-		"stage not a directory": {func(t *testing.T, r *rig) {
-			must(t, os.RemoveAll(filepath.Join(r.dir, "stage")))
-			r.write(t, filepath.Join(r.dir, "stage"), nil)
-		}, "/?result=" + id, pollHeader(h), unreadable},
-		"marker symlink": {func(t *testing.T, r *rig) { symlinkMarker(t, r, id, digest) }, "/?result=" + id, pollHeader(h), unreadable},
-		"marker a FIFO":  {func(t *testing.T, r *rig) { mkfifo(t, filepath.Join(r.dir, "stage", id+".auth")) }, "/?result=" + id, pollHeader(h), unreadable},
-		"marker too big": {func(t *testing.T, r *rig) {
-			r.write(t, filepath.Join(r.dir, "stage", id+".auth"), bytes.Repeat([]byte(" "), maxMarker+1))
-		}, "/?result=" + id, pollHeader(h), unreadable},
-		"marker for another id": {func(t *testing.T, r *rig) { r.marker(t, id, otherDigest, r.clock.Now()) }, "/?result=" + id, pollHeader(h), unreadable},
-	} {
-		t.Run(name, func(t *testing.T) {
-			r := newRig(t)
-			c.setup(t, r)
-			w := r.do(t, req{target: c.target, header: c.header})
-			errorLines := r.logs.FilterLevelExact(zap.ErrorLevel).Len()
-			switch c.code {
-			case admitted:
-				if w.Code != http.StatusAccepted || body(t, w)["phase"] != "admitted" || r.h.limiter.Size() != 0 || errorLines != 0 {
-					t.Fatalf("not admitted: %d %s, %d charged, %d error lines", w.Code, w.Body, r.h.limiter.Size(), errorLines)
-				}
-			case refused:
-				// An unauthenticated request like any other, and nothing
-				// in the journal but the preamble's own line.
-				wantError(t, w, http.StatusUnauthorized, unauthorized)
-				if r.h.limiter.Size() != 1 || errorLines != 0 {
-					t.Fatalf("%d charged, %d error lines: %v", r.h.limiter.Size(), errorLines, r.logs.All())
-				}
-			case unreadable:
-				wantError(t, w, http.StatusUnauthorized, unauthorized)
-				lines := r.logs.FilterMessage("box webhook could not read its state").All()
-				if r.h.limiter.Size() != 1 || errorLines != 1 || len(lines) != 1 || lines[0].ContextMap()["reading"] != "the push's marker" {
-					t.Fatalf("%d charged, %d error lines: %v", r.h.limiter.Size(), errorLines, r.logs.All())
-				}
-			}
-		})
-	}
-}
-
-// TestHandlerStateErrorJournalWindow: a state file the handler cannot
-// read is journaled once a minute per file, whatever repeats the
-// request — a poll may for a day, before the preamble's budgets — and
-// every request is still answered.
-func TestHandlerStateErrorJournalWindow(t *testing.T) {
+// TestHandlerResultUntilTheApplier: a result poll comes with the
+// applier, which writes what it reads; until then any query on `GET /`
+// is authenticated, then refused, and no poll secret is read — a
+// Box-Poll Authorization is a request without a bearer.
+func TestHandlerResultUntilTheApplier(t *testing.T) {
 	r := newRig(t)
-	h, id, digest := secret(7)
-	r.marker(t, id, digest, r.clock.Now())
-	mkfifo(t, filepath.Join(r.dir, "out", id+".json"))
-	lines := func() int { return r.logs.FilterMessage("box webhook could not read its state").Len() }
-	for range 5 {
-		wantError(t, r.do(t, req{target: "/?result=" + id, header: pollHeader(h)}), http.StatusInternalServerError, "could not read the result")
+	for _, target := range []string{"/?result=0123456789abcdef0123456789abcdef", "/?result=", "/?x=1", "/?%ZZ"} {
+		wantError(t, r.do(t, req{target: target, token: r.token(t)}), http.StatusNotImplemented, msgNoApplier)
 	}
-	if lines() != 1 {
-		t.Fatalf("5 polls of one unreadable result: %d lines, want 1", lines())
-	}
-	// Another file is its own line.
-	wantError(t, r.do(t, req{target: "/", token: r.token(t)}), http.StatusConflict, msgNoBaseline)
-	must(t, os.Mkdir(filepath.Join(r.dir, "applied.json"), 0o755))
-	wantError(t, r.do(t, req{target: "/", token: r.token(t)}), http.StatusInternalServerError, "could not read the baseline")
-	if lines() != 2 {
-		t.Fatalf("a second file: %d lines, want 2", lines())
-	}
-	r.clock.Advance(stateLogWindow - time.Second)
-	r.do(t, req{target: "/?result=" + id, header: pollHeader(h)})
-	if lines() != 2 {
-		t.Fatalf("inside the window: %d lines, want 2", lines())
-	}
-	r.clock.Advance(time.Second)
-	r.do(t, req{target: "/?result=" + id, header: pollHeader(h)})
-	if lines() != 3 {
-		t.Fatalf("past the window: %d lines, want 3", lines())
-	}
-	if r.h.limiter.Size() != 0 {
-		t.Fatal("a poll was charged")
-	}
-}
-
-// digestOf is raw as a header in enc, with the id and digest the box
-// would derive from it.
-func digestOf(raw []byte, enc *base64.Encoding) (header, id, digest string) {
-	sum := sha256.Sum256(raw)
-	d := hex.EncodeToString(sum[:])
-	return enc.EncodeToString(raw), d[:32], d
-}
-
-func symlinkMarker(t *testing.T, r *rig, id, digest string) {
-	r.marker(t, "real", digest, r.clock.Now())
-	must(t, os.Symlink("real.auth", filepath.Join(r.dir, "stage", id+".auth")))
-}
-
-func TestHandlerResultByToken(t *testing.T) {
-	_, id, digest := secret(7)
-	for name, c := range map[string]struct {
-		setup  func(t *testing.T, r *rig)
-		target string
-		code   int
-		want   string
-	}{
-		"admitted": {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now()) }, "/?result=" + id, 202, ""},
-		// Admitted and not settled, whatever the marker's age: only
-		// root can tell a push it holds from one it lost.
-		"marker past fifteen minutes": {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now().Add(-time.Hour)) }, "/?result=" + id, 202, ""},
-		"marker dated ahead":          {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now().Add(time.Minute)) }, "/?result=" + id, 202, ""},
-		"swept":                       {func(*testing.T, *rig) {}, "/?result=" + id, 404, fmt.Sprintf(msgNoResult, id)},
-		// stage/ broken for every id: reported, as the box's error, to
-		// an authenticated request.
-		"stage not a directory": {func(t *testing.T, r *rig) {
-			must(t, os.RemoveAll(filepath.Join(r.dir, "stage")))
-			r.write(t, filepath.Join(r.dir, "stage"), nil)
-		}, "/?result=" + id, 500, "could not read the push's marker"},
-		"31 hex":             {func(*testing.T, *rig) {}, "/?result=" + id[:31], 400, msgResultID},
-		"33 hex":             {func(*testing.T, *rig) {}, "/?result=" + id + "0", 400, msgResultID},
-		"upper case":         {func(*testing.T, *rig) {}, "/?result=" + strings.ToUpper(id), 400, msgResultID},
-		"a path":             {func(*testing.T, *rig) {}, "/?result=..%2F..%2Fapplied", 400, msgResultID},
-		"empty":              {func(*testing.T, *rig) {}, "/?result=", 400, msgResultID},
-		"bare key":           {func(*testing.T, *rig) {}, "/?result", 400, msgResultID},
-		"twice":              {func(*testing.T, *rig) {}, "/?result=" + id + "&result=" + id, 400, msgResultID},
-		"another param":      {func(*testing.T, *rig) {}, "/?result=" + id + "&x=1", 400, msgResultID},
-		"only another param": {func(*testing.T, *rig) {}, "/?x=1", 400, msgResultID},
-		"malformed":          {func(*testing.T, *rig) {}, "/?result=%ZZ", 400, msgResultID},
-		"result a symlink": {func(t *testing.T, r *rig) {
-			r.result(t, result{ID: id, Phase: "applied"})
-			must(t, os.Rename(filepath.Join(r.dir, "out", id+".json"), filepath.Join(r.dir, "out", "real.json")))
-			must(t, os.Symlink("real.json", filepath.Join(r.dir, "out", id+".json")))
-		}, "/?result=" + id, 500, "could not read the result"},
-		"result a FIFO": {func(t *testing.T, r *rig) { mkfifo(t, filepath.Join(r.dir, "out", id+".json")) }, "/?result=" + id, 500, "not a regular file"},
-		"result a dir":  {func(t *testing.T, r *rig) { must(t, os.Mkdir(filepath.Join(r.dir, "out", id+".json"), 0o755)) }, "/?result=" + id, 500, "not a regular file"},
-		"result too big": {func(t *testing.T, r *rig) {
-			r.result(t, result{ID: id, Phase: "applied", Diff: strings.Repeat("x", maxResult)})
-		}, "/?result=" + id, 500, "larger than"},
-		"result for another id": {func(t *testing.T, r *rig) {
-			r.writeJSON(t, filepath.Join(r.dir, "out", id+".json"), result{ID: strings.Repeat("0", 32), Phase: "applied"})
-		}, "/?result=" + id, 500, "names another id"},
-		"unknown phase": {func(t *testing.T, r *rig) {
-			r.result(t, result{ID: id, Phase: "installing\n" + strings.Repeat("x", 1000)})
-		}, "/?result=" + id, 500, `phase "installing\nxxx`},
-		"marker malformed": {func(t *testing.T, r *rig) {
-			r.write(t, filepath.Join(r.dir, "stage", id+".auth"), []byte(`{"sha256":"x"}`))
-		}, "/?result=" + id, 500, "could not read the push's marker"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			r := newRig(t)
-			c.setup(t, r)
-			w := r.do(t, req{target: c.target, token: r.token(t)})
-			if c.code == 202 {
-				if got := body(t, w); w.Code != 202 || len(got) != 1 || got["phase"] != "admitted" {
-					t.Fatalf("%d %s", w.Code, w.Body)
-				}
-				return
-			}
-			wantError(t, w, c.code, c.want)
-			if len(w.Body.String()) > 600 {
-				t.Errorf("unbounded: %d bytes", w.Body.Len())
-			}
-		})
-	}
-}
-
-// TestHandlerResultIsFiltered: a result is re-encoded from its known
-// fields and filtered — bundle-derived text loses what the shape and
-// entropy layers catch, a field root never meant to send is dropped,
-// and the protocol's own ids stand.
-func TestHandlerResultIsFiltered(t *testing.T) {
-	r := newRig(t)
-	h, id, digest := secret(9)
-	r.marker(t, id, digest, r.clock.Now())
-	const generated = "Zx81QmT0vLp4RkWc9NsJ2hYeAqUoBi7G" // gitleaks:allow
-	raw := map[string]any{
-		"id": id, "commit": sha, "phase": "refused", "box_webhook": "deploy.example.com",
-		"error": "hotserve validate: token " + jwt + " rejected",
-		"diff":  "-\tsecret " + generated + "\n+\tsecret none\n",
-		"prev":  "the previous file's bytes",
-	}
-	r.writeJSON(t, filepath.Join(r.dir, "out", id+".json"), raw)
-	w := r.do(t, req{target: "/?result=" + id, header: pollHeader(h)})
-	got := w.Body.String()
-	for _, leak := range []string{jwt, generated, "prev", "the previous file's bytes"} {
-		if strings.Contains(got, leak) {
-			t.Errorf("%q in the answer: %s", leak, got)
-		}
-	}
-	for _, stands := range []string{`"id":"` + id, `"commit":"` + sha, "[redacted:jwt]"} {
-		if !strings.Contains(got, stands) {
-			t.Errorf("%q not in the answer: %s", stands, got)
-		}
+	poll := http.Header{"Authorization": {"Box-Poll " + strings.Repeat("A", 43) + "="}}
+	wantError(t, r.do(t, req{target: "/?result=0123456789abcdef0123456789abcdef", header: poll}), http.StatusUnauthorized, unauthorized)
+	if r.h.limiter.Size() != 1 {
+		t.Fatal("a refused poll was not charged")
 	}
 }

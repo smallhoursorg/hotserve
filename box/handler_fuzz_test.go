@@ -1,143 +1,74 @@
 package box
 
 import (
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
-	"os"
-	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/caddyserver/caddy/v2/caddyconfig"
 
 	"github.com/smallhoursorg/hotserve/liveswap/deploytrust"
 )
 
-// FuzzResultPoll drives `GET /?result=` with any query, any
-// Authorization value and any marker bytes (or none), filed under the
-// id the value's secret would derive. An oracle written from the
-// Handler contract says what each request gets. A poll-shaped request —
-// one `result` parameter, the Box-Poll scheme in any case, a canonical
-// 32-byte standard base64 secret whose digest's first 32 hex are that
-// parameter — is admitted (202, never charged) when the marker holds
-// the whole digest, whatever its age; otherwise, a marker it cannot
-// read included, an unauthenticated request like any other: the flat
-// 401, charged. With a bearer (in place of the poll's Authorization),
-// a malformed query is 400, and a well-formed one is 202 for a
-// readable marker at its id, 500 for an unreadable one, 404 for none.
-// One request writes at most one line of the box's own.
-func FuzzResultPoll(f *testing.F) {
-	h, id, digest := secret(7)
-	posted := func(age time.Duration) []byte {
-		b, _ := json.Marshal(marker{SHA256: digest, Posted: time.Unix(1_700_000_000, 0).Add(-age)})
-		return b
-	}
-	f.Add("result="+id, "Box-Poll "+h, posted(0), true, false)
-	f.Add("result="+id, "box-poll "+h, posted(0), true, false)
-	f.Add("result="+id, "Bearer "+h, posted(0), true, false)
-	f.Add("result="+id, "Box-Poll "+h, posted(24*time.Hour), true, false)
-	f.Add("result="+id, "Box-Poll "+h, posted(-time.Hour), true, false)
-	f.Add("result="+id, "Box-Poll "+h, posted(0), false, false)
-	f.Add("result="+id+"&result="+id, "Box-Poll "+h, posted(0), true, false)
-	f.Add("result="+id, "Box-Poll "+h[:43], posted(0), true, true)
-	f.Add("result="+id, "", posted(0), true, true)
-	f.Add("result="+id, "", posted(0), false, true)
-	f.Add("result="+id, "", []byte("{"), true, true)
-	f.Add("result=%ZZ", "Box-Poll "+h, posted(0), true, true)
-	f.Add("x=1", "", []byte("{"), true, true)
-	f.Add("result="+id, "Box-Poll "+h, []byte(`{"sha256":"`+id+`","posted":"2023-11-14T22:13:20Z"}`), true, false)
-	f.Add("result="+id, "Box-Poll "+h, []byte("{"), true, false)
+// FuzzHandlerRoute drives box_webhook with any method, path, query and
+// Authorization: a path other than `/` is passed on untouched; on `/`
+// a method other than GET or POST is 405 before authentication; and
+// nothing without the bearer gets past the preamble — the flat 401,
+// charged, and never a body that says more. With the bearer, `GET /`
+// answers the baseline (409 here: none yet) and anything else is 501.
+func FuzzHandlerRoute(f *testing.F) {
+	f.Add("GET", "/", "", "", false)
+	f.Add("GET", "/", "result=0123456789abcdef0123456789abcdef", "Box-Poll "+strings.Repeat("A", 43)+"=", false)
+	f.Add("POST", "/", "", "", true)
+	f.Add("GET", "/x", "result=1", "", false)
+	f.Add("PUT", "/", "", "Bearer x", false)
+	f.Add("GET", "//", "", "", true)
+	f.Add("GET", "/", "%ZZ", "", true)
 
-	idRE := regexp.MustCompile(`^[0-9a-f]{32}$`)
 	r := newRig(f)
 	token := r.token(f)
-	f.Fuzz(func(t *testing.T, query, auth string, markerBytes []byte, present, bearer bool) {
-		if query == "" {
-			return // `GET /`, the status: not this target's
+	f.Fuzz(func(t *testing.T, method, path, query, auth string, bearer bool) {
+		if method == "" || strings.ContainsAny(method, " \t\r\n") {
+			return // not a method net/http would hand a handler
 		}
 		r.h.limiter = deploytrust.NewLimiter(r.clock)
-		r.h.stateLog = &stateLog{}
-		r.logs.TakeAll() // else every iteration's lines stay for the whole run
-		for _, d := range []string{"out", "stage"} {
-			if err := os.RemoveAll(filepath.Join(r.dir, d)); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.MkdirAll(filepath.Join(r.dir, d), 0o755); err != nil {
-				t.Fatal(err)
-			}
-		}
-		secretText := auth
-		if len(auth) >= len("Box-Poll ") {
-			secretText = auth[len("Box-Poll "):]
-		}
-		raw, err := base64.StdEncoding.DecodeString(secretText)
-		if err != nil {
-			raw = []byte(secretText)
-		}
-		sum := sha256.Sum256(raw)
-		derived := hex.EncodeToString(sum[:])
-		if present {
-			if err := os.WriteFile(filepath.Join(r.dir, "stage", derived[:32]+".auth"), markerBytes, 0o644); err != nil {
-				t.Fatal(err)
-			}
-		}
-
-		// The oracle.
-		q, qerr := url.ParseQuery(query)
-		single := qerr == nil && len(q) == 1 && len(q["result"]) == 1
-		wellFormed := single && idRE.MatchString(q["result"][0])
-		shaped := !bearer && single && len(auth) == len("Box-Poll ")+44 && strings.EqualFold(auth[:len("Box-Poll ")], "Box-Poll ") &&
-			len(raw) == 32 && base64.StdEncoding.EncodeToString(raw) == secretText && q["result"][0] == derived[:32]
-		var m marker
-		readable := len(markerBytes) <= maxMarker && json.Unmarshal(markerBytes, &m) == nil
-		if readable {
-			_, hexErr := hex.DecodeString(m.SHA256)
-			readable = hexErr == nil && len(m.SHA256) == 64 && m.SHA256 == strings.ToLower(m.SHA256) && m.SHA256[:32] == derived[:32]
-		}
-		atQuery := present && wellFormed && q["result"][0] == derived[:32] // a marker stands at the query's id
-
+		r.logs.TakeAll()
 		hr := httptest.NewRequest(http.MethodGet, "/", nil)
+		hr.Method = method
+		hr.URL.Path = path
 		hr.URL.RawQuery = query
 		hr.Header["Authorization"] = []string{auth}
 		if bearer {
 			hr.Header.Set("Authorization", "Bearer "+token)
 		}
+		passed := false
 		w := httptest.NewRecorder()
 		if err := r.h.ServeHTTP(w, hr, nextFunc(func(http.ResponseWriter, *http.Request) error {
-			t.Fatal("passed on")
+			passed = true
 			return nil
 		})); err != nil {
 			t.Fatal(err)
 		}
-		if !json.Valid(w.Body.Bytes()) {
-			t.Fatalf("not JSON: %s", w.Body)
-		}
-		want, charged := http.StatusUnauthorized, 1
+		want, charged := 0, 0
 		switch {
-		case shaped && present && readable && m.SHA256 == derived:
-			want, charged = http.StatusAccepted, 0
+		case path != "/":
+			if !passed || w.Body.Len() != 0 || r.h.limiter.Size() != 0 {
+				t.Fatalf("%s %q not passed on untouched: %d %s", method, path, w.Code, w.Body)
+			}
+			return
+		case method != http.MethodGet && method != http.MethodPost:
+			want = http.StatusMethodNotAllowed
 		case !bearer:
-		case !wellFormed:
-			want, charged = http.StatusBadRequest, 0
-		case atQuery && readable:
-			want, charged = http.StatusAccepted, 0
-		case atQuery:
-			want, charged = http.StatusInternalServerError, 0
+			want, charged = http.StatusUnauthorized, 1
+		case method == http.MethodGet && query == "":
+			want = http.StatusConflict
 		default:
-			want, charged = http.StatusNotFound, 0
+			want = http.StatusNotImplemented
 		}
-		if w.Code != want || r.h.limiter.Size() != charged {
-			t.Fatalf("got %d (%d charged), want %d (%d): %s", w.Code, r.h.limiter.Size(), want, charged, w.Body)
-		}
-		if n := r.logs.FilterMessage("box webhook could not read its state").Len(); n > 1 {
-			t.Fatalf("%d lines of the box's own for one request: %v", n, r.logs.All())
+		if passed || w.Code != want || r.h.limiter.Size() != charged || !json.Valid(w.Body.Bytes()) {
+			t.Fatalf("%s %q ?%q: %d (%d charged), want %d (%d): %s", method, path, query, w.Code, r.h.limiter.Size(), want, charged, w.Body)
 		}
 	})
 }

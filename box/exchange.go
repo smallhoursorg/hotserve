@@ -14,21 +14,18 @@ import (
 )
 
 // Where the box keeps its state (DESIGN-box.md, "Paths, owners, and
-// who may touch what"). The handler reads applied.json, `out/` and
-// `stage/*.auth`; the applier and `init` write them (PR 3, PR 4), with
-// the types below, so that the reader and the writers cannot disagree
-// about a field.
+// who may touch what"). The handler reads applied.json, which `init`
+// and the applier write (PR 3, PR 4) with the type below, so that the
+// reader and the writers cannot disagree about a field. The markers
+// and results a result poll reads come with the applier.
 const (
 	installedFile = "/etc/hotserve/Caddyfile"
 	exchangeDir   = "/var/lib/hotserve-box"
 )
 
-// Caps on the files the handler reads (DESIGN-box.md, "Caps").
-const (
-	maxApplied = 64 << 10 // its path is up to 4 KiB, which JSON's escapes can grow sixfold
-	maxMarker  = 4 << 10
-	maxResult  = 2 << 20 // a 64 KiB diff, and apps bounded only by the 1 MiB file they came from
-)
+// maxApplied caps applied.json (DESIGN-box.md, "Caps"): its path is up
+// to 4 KiB, which JSON's escapes can grow sixfold.
+const maxApplied = 64 << 10
 
 // applied is applied.json, the baseline: the commit the box runs.
 type applied struct {
@@ -37,62 +34,6 @@ type applied struct {
 	SHA256 string    `json:"sha256"`
 	Signer string    `json:"signer"`
 	When   time.Time `json:"when"`
-}
-
-// marker is `stage/<id>.auth`: the handler's note that the push with
-// that id was admitted, holding the digest of its poll secret.
-type marker struct {
-	SHA256 string    `json:"sha256"` // hex sha256 of the poll secret's 32 raw bytes
-	Posted time.Time `json:"posted"`
-}
-
-// result is `out/<id>.json`: what a push came to (DESIGN-box.md,
-// "Record and result fields").
-type result struct {
-	ID              string   `json:"id"`
-	Commit          string   `json:"commit,omitempty"`
-	Path            string   `json:"path,omitempty"`
-	Signer          string   `json:"signer,omitempty"`
-	Phase           string   `json:"phase"`
-	Error           string   `json:"error,omitempty"`
-	Diff            string   `json:"diff,omitempty"`
-	Apps            []string `json:"apps,omitempty"`
-	BoxWebhook      string   `json:"box_webhook,omitempty"`
-	EditedOutOfBand bool     `json:"caddyfile_edited_out_of_band"`
-}
-
-// phaseStatus is the status a result answers with, by its phase:
-// step 8's mapping, so a red outcome is never carried by a 2xx and
-// `verified` says "keep polling" (DESIGN-box.md, "Handler contract").
-var phaseStatus = map[string]int{
-	"verified":    202,
-	"no_change":   200,
-	"applied":     200,
-	"refused":     422,
-	"failed":      422,
-	"rolled_back": 422,
-	"unknown":     422,
-}
-
-// validID is the id grammar: the first 32 hex characters of the poll
-// secret's sha256.
-func validID(s string) bool { return lowerHex(s, 32) }
-
-// validDigest is a whole sha256.
-func validDigest(s string) bool { return lowerHex(s, 64) }
-
-// lowerHex is n hex characters in lower case, as hex.EncodeToString
-// writes them.
-func lowerHex(s string, n int) bool {
-	if len(s) != n {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		if c := s[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return false
-		}
-	}
-	return true
 }
 
 var errNotRegular = errors.New("not a regular file")
@@ -109,7 +50,7 @@ func readFile(path string, limit int64, follow bool) ([]byte, error) {
 	if !follow {
 		flags |= syscall.O_NOFOLLOW
 	}
-	f, err := os.OpenFile(path, flags, 0) //nolint:gosec // a fixed path of the box's; an id in it only after validID
+	f, err := os.OpenFile(path, flags, 0) //nolint:gosec // a fixed path of the box's
 	if err != nil {
 		return nil, err
 	}
@@ -137,61 +78,21 @@ func readCapped(r io.Reader, name string, limit int64) ([]byte, error) {
 	return b, nil
 }
 
-// readJSON reads one of the exchange tree's files into v, refusing a
-// symlink at the file's own name. Its directories come from
-// tmpfiles.d, in a base directory the hotserve uid cannot write, and
-// are followed as they stand.
-func readJSON(path string, limit int64, v any) error {
-	b, err := readFile(path, limit, false)
-	if err != nil {
-		return err
-	}
-	if err := json.Unmarshal(b, v); err != nil {
-		return fmt.Errorf("%s: %w", path, err)
-	}
-	return nil
-}
-
+// readApplied reads applied.json, refusing a symlink at its name (the
+// exchange tree's directories come from tmpfiles.d, in a base
+// directory the hotserve uid cannot write).
 func readApplied(dir string) (*applied, error) {
-	var a applied
 	path := filepath.Join(dir, "applied.json")
-	if err := readJSON(path, maxApplied, &a); err != nil {
+	b, err := readFile(path, maxApplied, false)
+	if err != nil {
 		return nil, err
+	}
+	var a applied
+	if err := json.Unmarshal(b, &a); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	if !proof.IsID(a.SHA) {
 		return nil, fmt.Errorf("%s: sha is not a 40-hex commit id", path)
 	}
 	return &a, nil
-}
-
-// markerPath is `stage/<id>.auth`; id must already be valid.
-func markerPath(dir, id string) string { return filepath.Join(dir, "stage", id+".auth") }
-
-// readMarker reads the marker for id; id must already be valid.
-func readMarker(dir, id string) (*marker, error) {
-	var m marker
-	path := markerPath(dir, id)
-	if err := readJSON(path, maxMarker, &m); err != nil {
-		return nil, err
-	}
-	if !validDigest(m.SHA256) || m.SHA256[:32] != id {
-		return nil, fmt.Errorf("%s: sha256 is not the digest of a poll secret for this id", path)
-	}
-	return &m, nil
-}
-
-// readResult reads `out/<id>.json`; id must already be valid.
-func readResult(dir, id string) (*result, error) {
-	var r result
-	path := filepath.Join(dir, "out", id+".json")
-	if err := readJSON(path, maxResult, &r); err != nil {
-		return nil, err
-	}
-	if r.ID != id {
-		return nil, fmt.Errorf("%s: names another id", path)
-	}
-	if _, ok := phaseStatus[r.Phase]; !ok {
-		return nil, fmt.Errorf("%s: phase %s is not a result's", path, proof.Bound(r.Phase))
-	}
-	return &r, nil
 }
