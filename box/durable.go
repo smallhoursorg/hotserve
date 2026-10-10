@@ -125,6 +125,6 @@ func syncDir(dir string) error {
 // symlink there: an entry in in/ or work/ of any kind blocks the
 // stranded-marker rule (Retention).
 func exists(path string) bool {
-	_, err := os.Lstat(path)
+	_, err := os.Lstat(path) //nolint:gosec // a name in the exchange tree; every caller's id is held to the id grammar first
 	return err == nil || !errors.Is(err, fs.ErrNotExist)
 }

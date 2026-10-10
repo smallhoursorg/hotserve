@@ -325,25 +325,12 @@ func (f failingReader) Read([]byte) (int, error) {
 	return 0, io.EOF
 }
 
-func TestHandlerPushUntilTheApplier(t *testing.T) {
+// TestHandlerPushAuthenticatesFirst: an unauthenticated push is the
+// flat 401, charged, its body unread.
+func TestHandlerPushAuthenticatesFirst(t *testing.T) {
 	r := newRig(t)
-	w := r.do(t, req{method: http.MethodPost, target: "/", token: r.token(t), body: failingReader{t}})
-	wantError(t, w, http.StatusNotImplemented, msgNoApplier)
 	wantError(t, r.do(t, req{method: http.MethodPost, target: "/", body: failingReader{t}}), http.StatusUnauthorized, unauthorized)
-}
-
-// TestHandlerResultUntilTheApplier: a result poll comes with the
-// applier, which writes what it reads; until then any query on `GET /`
-// is authenticated, then refused, and no poll secret is read — a
-// Box-Poll Authorization is a request without a bearer.
-func TestHandlerResultUntilTheApplier(t *testing.T) {
-	r := newRig(t)
-	for _, target := range []string{"/?result=0123456789abcdef0123456789abcdef", "/?result=", "/?x=1", "/?%ZZ", "/?"} {
-		wantError(t, r.do(t, req{target: target, token: r.token(t)}), http.StatusNotImplemented, msgNoApplier)
-	}
-	poll := http.Header{"Authorization": {"Box-Poll " + strings.Repeat("A", 43) + "="}}
-	wantError(t, r.do(t, req{target: "/?result=0123456789abcdef0123456789abcdef", header: poll}), http.StatusUnauthorized, unauthorized)
 	if r.h.limiter.Size() != 1 {
-		t.Fatal("a refused poll was not charged")
+		t.Fatal("a refused push was not charged")
 	}
 }

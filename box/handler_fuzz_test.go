@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -17,8 +18,10 @@ import (
 // a method other than GET or POST is 405 before authentication; and
 // nothing without the bearer gets past the preamble — the flat 401,
 // charged, and never a body that says more. With the bearer, `GET /`
-// answers the baseline (409 here: none yet) and anything else — `GET /?`
-// with an empty query among it — is 501.
+// answers the baseline (409 here: none yet); a query is a result poll —
+// 404 for an id in the grammar (none admitted here), 400 for anything
+// else, `GET /?` with an empty query among it; and a push without its
+// request id is 400, its body unread.
 func FuzzHandlerRoute(f *testing.F) {
 	f.Add("GET", "/", "", false, "", false)
 	f.Add("GET", "/", "", true, "", true)
@@ -68,8 +71,13 @@ func FuzzHandlerRoute(f *testing.F) {
 			want, charged = http.StatusUnauthorized, 1
 		case method == http.MethodGet && query == "" && !forceQuery:
 			want = http.StatusConflict
+		case method == http.MethodPost:
+			want = http.StatusBadRequest
 		default:
-			want = http.StatusNotImplemented
+			want = http.StatusBadRequest
+			if q, err := url.ParseQuery(query); err == nil && len(q) == 1 && len(q["result"]) == 1 && isRequestID(q["result"][0]) {
+				want = http.StatusNotFound
+			}
 		}
 		if passed || w.Code != want || r.h.limiter.Size() != charged || !json.Valid(w.Body.Bytes()) {
 			t.Fatalf("%s %q ?%q: %d (%d charged), want %d (%d): %s", method, path, query, w.Code, r.h.limiter.Size(), want, charged, w.Body)

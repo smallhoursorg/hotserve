@@ -888,6 +888,7 @@ says. The workflow's action is in the last column.
 | 401 | auth | liveswap's flat 401 | handler | the 401 checklist, as deploy.sh; on a result poll after a push that changed `deploy_trust`, the push may have applied and dropped this workflow: `journalctl -u hotserve-box-apply` on the box |
 | 429 | auth | liveswap's | handler | retry later |
 | 400 | — | `result must be a 32-hex id` / `X-Box-Request-Id: 32 lowercase hex, chosen at random for each push, required` | handler | bug in the workflow |
+| 400 | — | `could not read the bundle: <error>` | handler | the connection broke during the upload; retry |
 | 409 | — | `duplicate request id: poll /?result=<id>` | handler | poll instead of retrying the POST |
 | 409 | — | `this box has no baseline; hotserve init <dir> <sha> as root on the box sets one` | handler (`GET /`) | fail; run `init` on the box |
 | 404 | — | `no result and no marker for <id>: swept, or never admitted` | handler | fail |
@@ -933,7 +934,8 @@ authenticated request reaches one. The handler's refusals of a push
 refusal line does, and the attribution in `via`, liveswap's field for
 it; a push the handler could not check (`box push failed`) the same
 with `error`; `box push accepted` carries `id`, `commit`, `via`,
-`remote`; the applier logs
+`remote`, and a push the fast path answered (`box push answered`) the
+same with `phase`; the applier logs
 with `id`, `commit`, `signer`, `box` (the host) and `phase`. Every
 input-derived value in either is bounded per the Caps table.
 

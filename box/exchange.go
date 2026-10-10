@@ -40,7 +40,7 @@ const (
 )
 
 // isRequestID reports whether s is a request id: 32 lowercase hex, the
-// first half of the poll secret's digest (DESIGN-box.md, Glossary).
+// workflow's random choice for one push (DESIGN-box.md, Glossary).
 func isRequestID(s string) bool {
 	return len(s) == 32 && isLowerHex(s)
 }

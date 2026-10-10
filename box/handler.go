@@ -26,16 +26,13 @@ func init() {
 // path to the next handler:
 //
 //	GET  /              the baseline: {commit, box_webhook, sha256}
-//	GET  /?…            any query, the result poll's among them:
-//	                    refused 501 until the applier ships
-//	POST /              refused 501 until the applier ships
+//	GET  /?result=<id>  a push's result (push.go)
+//	POST /              a push (push.go, admission.go, validate.go)
 //
 // Another method on `/` is 405 before anything else. Every GET and
 // POST on `/` is authenticated first, on the limiter liveswap's
 // webhook uses, so an unauthenticated caller gets the same flat 401 a
 // deploy host gives. Every body passes liveswap's response filter.
-// The result poll and its poll secret come with the applier (PR 3),
-// which writes what a poll reads.
 type Handler struct {
 	app     *App
 	logger  *zap.Logger
@@ -45,6 +42,14 @@ type Handler struct {
 	// Provision; a test's temporary files otherwise.
 	installed string
 	dir       string
+
+	// A push's seams: the proof's verifier (ssh-keygen as the hotserve
+	// uid, step 5), step 6's children, the clock step 8 waits on, and
+	// the drop's test hooks.
+	verifier  *proof.Verifier
+	validator validator
+	clock     Clock
+	hooks     handlerHooks
 }
 
 // CaddyModule returns the Caddy module information.
@@ -67,6 +72,9 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	h.app = app.(*App)
 	h.limiter = deploytrust.Shared()
 	h.installed, h.dir = installedFile, exchangeDir
+	h.verifier = &proof.Verifier{} // RunAs 0: as the hotserve uid, in the service's PrivateTmp
+	h.validator = newChildValidator(h.x("stage"))
+	h.clock = realClock{}
 	return nil
 }
 
@@ -74,7 +82,6 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 const (
 	msgMethod     = "method not allowed"
 	msgNoBaseline = "this box has no baseline; hotserve init <dir> <sha> as root on the box sets one"
-	msgNoApplier  = "config pushes are not applied by this hotserve version; nothing applied"
 )
 
 // ServeHTTP answers on `/` and passes every other path on.
@@ -83,16 +90,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		return next.ServeHTTP(w, r)
 	}
 	// A query is present when the target has a `?`, an empty one
-	// included (ForceQuery): `GET /?` is a query on `/`, as PR 3's result
-	// route will read it, not the baseline.
+	// included (ForceQuery): `GET /?` is a result poll with no id, not
+	// the baseline.
 	queried := r.URL.RawQuery != "" || r.URL.ForceQuery
 	switch {
 	case r.Method == http.MethodGet && !queried:
 		return h.status(w, r)
 	case r.Method == http.MethodGet:
-		return h.notYet(w, r, "result")
+		return h.result(w, r)
 	case r.Method == http.MethodPost:
-		return h.notYet(w, r, "push")
+		return h.push(w, r)
 	default:
 		w.Header().Set("Allow", "GET, POST")
 		return respond(w, http.StatusMethodNotAllowed, errorBody(msgMethod))
@@ -102,12 +109,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 // authenticate is the preamble (deploytrust): ok=false means the
 // refusal is written. route names the request in the preamble's
 // journal lines, beside the address.
-func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request, route string) (bool, error) {
-	_, refusal := h.limiter.Authenticate(r, h.app.verifiers, h.logger, "box_request", route)
+func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request, route string) (deploytrust.Identity, bool, error) {
+	ident, refusal := h.limiter.Authenticate(r, h.app.verifiers, h.logger, "box_request", route)
 	if refusal != nil {
-		return false, refusal.Write(w, func(code int, body any) error { return respond(w, code, body) })
+		return ident, false, refusal.Write(w, func(code int, body any) error { return respond(w, code, body) })
 	}
-	return true, nil
+	return ident, true, nil
 }
 
 type statusBody struct {
@@ -121,7 +128,7 @@ type statusBody struct {
 // no_change fast path compares (step 4) — so a console edit since the
 // last apply shows.
 func (h *Handler) status(w http.ResponseWriter, r *http.Request) error {
-	if ok, err := h.authenticate(w, r, "status"); !ok {
+	if _, ok, err := h.authenticate(w, r, "status"); !ok {
 		return err
 	}
 	base, err := readApplied(h.dir)
@@ -148,16 +155,6 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) error {
 	digest := hex.EncodeToString(sum[:])
 	return respond(w, http.StatusOK, statusBody{Commit: base.SHA, BoxWebhook: shape.Host, SHA256: digest},
 		base.SHA, shape.Host, digest)
-}
-
-// notYet is a push (`POST /`) and a result poll (`GET /?…`) until the
-// applier ships (DESIGN-box.md, status): authenticated, then refused.
-// A push's body is never read.
-func (h *Handler) notYet(w http.ResponseWriter, r *http.Request, route string) error {
-	if ok, err := h.authenticate(w, r, route); !ok {
-		return err
-	}
-	return respond(w, http.StatusNotImplemented, errorBody(msgNoApplier))
 }
 
 // boxError answers a failure that is the box's, never the caller's:
