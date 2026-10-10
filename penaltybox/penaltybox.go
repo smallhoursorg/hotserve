@@ -35,8 +35,10 @@ type Handler struct {
 	// Key identifies the client. Default "{client_ip}", which respects
 	// the server's trusted_proxies configuration — XFF trust is the
 	// server config's job, not this module's. A key whose whole value
-	// resolves to a single IPv6 address is counted under its /64 (see
-	// maskKey); any other value is used verbatim.
+	// resolves to a single IP address is masked (see maskKey): IPv4,
+	// IPv4-mapped IPv6 and NAT64 well-known (64:ff9b::/96) addresses
+	// count per IPv4 address, any other IPv6 address under its /64.
+	// Any other value is used verbatim.
 	Key string `json:"key,omitempty"`
 
 	// MinLevel is the lowest hint level that counts toward the budget.
