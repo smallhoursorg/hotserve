@@ -76,11 +76,13 @@ func (p *pushing) admit(b *proof.Bundle, body []byte) (done bool, err error) {
 	// 5. The proof, as root will run it: a signed commit paired with
 	// other bytes fails here, so validate only ever sees bytes a listed
 	// signer committed.
-	if _, err := check(p.r.Context(), h.verifier, b, installed, base); err != nil {
+	vd, err := check(p.r.Context(), h.verifier, b, installed, base)
+	if err != nil {
 		return true, p.refuse(b, err)
 	}
-	// 6. Validate, as the serving process would load it.
-	if msg, err := h.validator.validate(p.r.Context(), p.id, b.Caddyfile); err != nil {
+	// 6. Validate, as the serving process would load it, and reach
+	// box_webhook on / for the host the walk found.
+	if msg, err := h.validator.validate(p.r.Context(), p.id, b.Caddyfile, vd.host); err != nil {
 		return true, p.fail(err)
 	} else if msg != "" {
 		return true, p.refuse(b, &refusal{msg: msg})

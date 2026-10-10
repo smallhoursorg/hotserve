@@ -46,16 +46,17 @@ type fakeValidator struct {
 	err   error
 	calls int
 	got   []byte
+	host  string // the host reachability was asked for
 	// block, when set, is waited on inside validate: the admission lock
 	// is held meanwhile.
 	block   chan struct{}
 	entered chan struct{}
 }
 
-func (f *fakeValidator) validate(ctx context.Context, _ string, caddyfile []byte) (string, error) {
+func (f *fakeValidator) validate(ctx context.Context, _ string, caddyfile []byte, host string) (string, error) {
 	f.mu.Lock()
 	f.calls++
-	f.got = caddyfile
+	f.got, f.host = caddyfile, host
 	block, entered := f.block, f.entered
 	msg, err := f.msg, f.err
 	f.mu.Unlock()
@@ -573,6 +574,19 @@ func TestPushValidate(t *testing.T) {
 	m := wantResult(t, p.post(t, p.h, push{id: id, token: p.token(t, c2), body: bytes.NewReader(bundle)}), http.StatusUnprocessableEntity, id, phaseRefused)
 	if m["error"] != p.val.msg || !bytes.Equal(p.val.got, boxFile(2, p.alice)) {
 		t.Fatalf("got %v, validated %q", m, p.val.got)
+	}
+	if shape, err := Walk(p.val.got); err != nil || p.val.host != shape.Host || shape.Host == "" {
+		t.Fatalf("reachability asked for %q; the file's host is %q (%v)", p.val.host, shape.Host, err)
+	}
+	p.untouched(t)
+
+	// An unreachable / is one of step 6's refusals: the same 422, the
+	// same untouched tree, and the next push admitted.
+	p.val.msg = msgUnreachable("static_response answers first")
+	id = randomID(t)
+	m = wantResult(t, p.post(t, p.h, push{id: id, token: p.token(t, c2), body: bytes.NewReader(bundle)}), http.StatusUnprocessableEntity, id, phaseRefused)
+	if m["error"] != p.val.msg {
+		t.Fatalf("got %v", m)
 	}
 	p.untouched(t)
 

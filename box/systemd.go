@@ -117,7 +117,7 @@ func runSystemctl(ctx context.Context, timeout time.Duration, args ...string) (s
 	defer cancel()
 	cmd := exec.CommandContext(bounded, "systemctl", args...) //nolint:gosec // fixed verbs on a fixed unit
 	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "SYSTEMD_PAGER=", "SYSTEMD_COLORS=0"}
-	var out cappedBuffer
+	out := cappedBuffer{limit: maxSystemctlOutput}
 	cmd.Stdout, cmd.Stderr = &out, &out
 	cmd.WaitDelay = childWaitDelay
 	err := cmd.Run()
@@ -127,16 +127,26 @@ func runSystemctl(ctx context.Context, timeout time.Duration, args ...string) (s
 	return string(out.b), err
 }
 
-// cappedBuffer keeps the first maxSystemctlOutput bytes written to it.
-// Not a bytes.Buffer: os/exec would use its ReadFrom and skip Write.
-type cappedBuffer struct{ b []byte }
+// cappedBuffer keeps the first limit bytes written to it and counts
+// the rest as written: a write refused would stall a child on its pipe
+// until its deadline. Not a bytes.Buffer: os/exec would use its
+// ReadFrom and skip Write.
+type cappedBuffer struct {
+	limit int
+	b     []byte
+	n     int64 // every byte written, kept or not
+}
 
 func (c *cappedBuffer) Write(p []byte) (int, error) {
-	if room := maxSystemctlOutput - len(c.b); room > 0 {
+	c.n += int64(len(p))
+	if room := c.limit - len(c.b); room > 0 {
 		c.b = append(c.b, p[:min(len(p), room)]...)
 	}
 	return len(p), nil
 }
+
+// over reports whether more than the limit was written.
+func (c *cappedBuffer) over() bool { return c.n > int64(c.limit) }
 
 // running is step 16's question (DESIGN-box.md, Glossary "active"):
 // `activating` is waited out, and so is `reloading` — a reload in
