@@ -122,8 +122,8 @@ deploy.example.com {
 ```
 
 - `deploy_trust` is liveswap's grammar and verifier, unchanged
-  (`parseDeployTrust`, liveswap/caddyfile.go; `authorize`,
-  liveswap/deploytrust.go): GitHub, GitLab, generic OIDC and the local
+  (`ParseDeployTrust`, liveswap/caddyfile.go; `Authenticate`,
+  liveswap/export.go): GitHub, GitLab, generic OIDC and the local
   key come for free, and the 401, the 429 and the `refused` journal
   line are the same shape as a deploy's. A `box` token must carry a
   `sha` claim (GitHub's does; `hotserve deploy-token --claims sha=…`
@@ -166,8 +166,9 @@ cross-references throughout.
 
 1. **Token.** `Authorization: Bearer <JWT>` is verified against the
    `box` block's `deploy_trust` sources through the one exported
-   liveswap entry point both handlers call, which returns the
-   attribution string and the verified claim map. The flat 401, the
+   liveswap entry point both handlers call, `Authenticate`, which
+   returns an `Identity`: the attribution string and, behind
+   `Identity.Claim`, the verified claims. The flat 401, the
    failure budgets and the 429, the `webhook auth failed` line with
    `refused` and the `could not consult a trust source` line are
    liveswap's; the budgets are shared across both webhooks.
