@@ -210,6 +210,17 @@ func (a *Applier) install(ctx context.Context, t *txn) error {
 			a.finish(t, phaseFailed, installFailed(err))
 			return nil
 		}
+		// The baseline names these bytes only if they still stand: a
+		// console edit since step 10 is left as found, as on the swap
+		// path (I1, I4).
+		d, err := a.installedDigest()
+		if err != nil {
+			return a.unsettled(t, err)
+		}
+		if d != t.rec.PrevSHA256 {
+			a.changed(t)
+			return nil
+		}
 		return a.advance(t, phaseNoChange)
 	}
 	if t.rec.Origin == originApplier {

@@ -284,6 +284,31 @@ func TestWritesThatLandedThenFailed(t *testing.T) {
 	})
 }
 
+// A console edit landing during a no_change push is left as found and
+// the baseline does not advance to bytes that are not on disk (I1, I4).
+func TestNoChangeRechecksTheFile(t *testing.T) {
+	b := newTestBox(t)
+	head := b.repo.commit(b.v1, &b.alice, b.base)
+	id := b.push(b.repo.bundleFiles(head, b.base))
+	edited := append(append([]byte{}, b.v1...), "# 3am\n"...)
+	edit := func(p string) error {
+		if p == "record:no_change" {
+			b.writeInstalled(edited)
+		}
+		return nil
+	}
+	if err := b.run(hooks{fail: edit}); err != nil {
+		t.Fatal(err)
+	}
+	b.settled()
+	if r := b.result(id); r == nil || r.Phase != phaseUnknown || r.Error != msgChanged {
+		t.Fatalf("%+v", r)
+	}
+	if b.applied().SHA != b.base || !bytes.Equal(b.installed(), edited) {
+		t.Error("the baseline advanced, or the edit was overwritten")
+	}
+}
+
 // A reload in flight is waited out like `activating` (step 16); in
 // recovery, one still in flight after the wait is up, and the rollback's
 // reload queues behind it, where a restart loop still activating is not
