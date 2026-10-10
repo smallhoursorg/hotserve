@@ -67,14 +67,12 @@ func runInitCmd(ctx context.Context, euid int, a *Applier, dir, sha string, out 
 	a.lockWait = func() {
 		_ = printf(out, "init: waiting for root's lock: the applier, or another init or baseline, holds it\n") // a notice; the outcome is what counts
 	}
-	// Before the swap, and advisory, so read outside the lock: a file
-	// that does not read, or walks as no box's (the packaged one), names
-	// no host to warn about.
-	if installed, err := readFile(a.caddyfile(), proof.MaxCaddyfile, true); err == nil {
-		if was, err := Walk(installed); err == nil && was.Host != shape.Host {
-			if err := printf(out, "init: this box was %s; this file names %s\n", was.Host, shape.Host); err != nil {
-				return err
-			}
+	// From the file the transaction replaces, before the swap: a file
+	// that walks as no box's (the packaged one) names no host to warn
+	// about.
+	a.initPrev = func(prev []byte) {
+		if was, err := Walk(prev); err == nil && was.Host != shape.Host {
+			_ = printf(out, "init: this box was %s; this file names %s\n", was.Host, shape.Host) // a warning; the outcome is what counts
 		}
 	}
 	run, err := a.runInit(ctx, record{ID: newRequestID(), Commit: sha, Path: path, BoxWebhook: shape.Host, Apps: shape.Apps}, file)

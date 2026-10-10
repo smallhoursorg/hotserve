@@ -555,6 +555,9 @@ func (a *Applier) runInit(ctx context.Context, rec record, file []byte) (*initRu
 	if err != nil {
 		return nil, err
 	}
+	if a.initPrev != nil {
+		a.initPrev(installed)
+	}
 	run := &initRun{}
 	// One that does not read is replaced like a missing one: init is
 	// the way back, and only root writes it (Triage: occurrence 1).

@@ -525,3 +525,26 @@ func TestShellWord(t *testing.T) {
 		}
 	}
 }
+
+// The host warning describes the file init replaces, as recovery left
+// it: an init to another host that crashed after its swap is rolled
+// back first, so its re-run warns about the rename it is about to make.
+func TestInitHostWarningAfterRecovery(t *testing.T) {
+	b := newTestBox(t)
+	other := bytes.Replace(boxFile(2, b.alice), []byte("deploy.example.com {"), []byte("other.example.com {"), 1)
+	sha := b.repo.commit(other, &b.alice, b.base)
+	b.writeInstalled(other) // the crashed init's swap
+	b.lyingRecord(record{ID: randomID(t), Origin: originInit, Phase: phaseSwapped, Commit: sha, Path: "other.example.com/Caddyfile", Signer: "init",
+		Prev: b.v1, PrevSHA256: digest(b.v1), NewSHA256: digest(other)})
+	out, err := b.initCmd(initDir(t, other), sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "init: this box was deploy.example.com; this file names other.example.com\n") {
+		t.Errorf("no rename warning after recovery rolled the swap back:\n%s", out)
+	}
+	b.settled()
+	if !bytes.Equal(b.installed(), other) || b.applied().SHA != sha {
+		t.Error("init did not apply after recovery")
+	}
+}

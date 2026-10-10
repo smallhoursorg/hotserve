@@ -60,6 +60,9 @@ type Applier struct {
 	// lockWait, when set, is called once if lock must wait for another
 	// holder: the console's commands say so rather than sit silent.
 	lockWait func()
+	// initPrev, when set, is shown the file runInit is about to replace,
+	// read under the lock after recovery: init's host warning.
+	initPrev func(prev []byte)
 	// wrote is every id whose result this run wrote (or journaled,
 	// unwritten), with its phase — the first terminal one, once there is
 	// one: Retention keeps them, and a terminal one is settled (step 9).

@@ -44,7 +44,12 @@ func runBaseline(ctx context.Context, euid int, a *Applier, sha string, out io.W
 		return err
 	}
 	if old.SHA == sha {
-		// Rewriting it would only lose who verified it, and when.
+		// Rewriting it would only lose who verified it, and when. A
+		// retry after a write whose rename landed but whose directory
+		// fsync failed comes here: the fsync is owed (I8).
+		if err := syncDir(a.x("")); err != nil {
+			return err
+		}
 		return printf(out, "baseline: this box already runs %s; nothing changed\n", shortSHA(sha))
 	}
 	if err := a.putApplied(applied{SHA: sha, Path: old.Path, SHA256: old.SHA256, Signer: "baseline", When: a.clock.Now().UTC()}); err != nil {
