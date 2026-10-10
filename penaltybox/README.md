@@ -99,7 +99,7 @@ All options and defaults:
 | `window`      | `60s`                | Sliding window; free-form duration (Fastly's 1s/10s/60s is the interoperability convention) |
 | `limit`       | `30`                 | Weighted units per window; *exceeding* (not reaching) it boxes       |
 | `penalty_ttl` | `5m`                 | Box duration; Fastly allows 1m–1h — mirror that range for doc parity |
-| `strip`       | `true`               | Remove the hint header before the client sees it (all responses)     |
+| `strip`       | `true`               | Remove the hint header from every final response before the client sees it. A hint sent as a trailer or on a 1xx interim response is neither stripped nor counted, so send it as a header |
 | `status`      | `429`                | Status for boxed clients (4xx/5xx)                                   |
 | `max_keys`    | `100000`             | Cap on tracked clients, split evenly across 64 shards (rounded down, at least 1 each); a full shard evicts its oldest-idle unboxed client, or its oldest-idle client outright when all are boxed. Below 128 (one slot per shard) it loads with a warning (see [Semantics](#semantics-and-trade-offs-read-this)) |
 
@@ -293,7 +293,8 @@ With that order (all verified by `make e2e`):
   the budget exactly like origin responses, and a client hammering a
   cached level-3 URL still gets boxed.
 - The header is stripped from every client-facing response, cache hit
-  or miss — it lives only inside the cache store.
+  or miss — it lives only inside the cache store (when the origin sends
+  it as a header, not a trailer; see `strip`).
 
 (If you instead put `cache` before `hint_penaltybox`, cache hits bypass
 the module entirely: stored responses are already stripped, but boxed

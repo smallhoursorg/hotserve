@@ -38,11 +38,11 @@ type Handler struct {
 	// Caddyfile shorthand; in JSON it is an unknown placeholder. A key
 	// that resolves to "" fails open: the request passes to the next
 	// handler uncounted and never boxed, though its hint header is
-	// still stripped (see ServeHTTP). A key whose whole value
-	// resolves to a single IP address is masked (see maskKey): IPv4,
-	// IPv4-mapped IPv6 and NAT64 well-known (64:ff9b::/96) addresses
-	// count per IPv4 address, any other IPv6 address under its /64.
-	// Any other value is used verbatim.
+	// still stripped when Strip is on (see ServeHTTP). A key whose
+	// whole value resolves to a single IP address is masked (see
+	// maskKey): IPv4, IPv4-mapped IPv6 and NAT64 well-known
+	// (64:ff9b::/96) addresses count per IPv4 address, any other IPv6
+	// address under its /64. Any other value is used verbatim.
 	Key string `json:"key,omitempty"`
 
 	// MinLevel is the lowest hint level that counts toward the budget.
@@ -62,8 +62,9 @@ type Handler struct {
 	// during the box does not extend it. Default 5m.
 	PenaltyTTL caddy.Duration `json:"penalty_ttl,omitempty"`
 
-	// Strip removes the hint header before the response reaches the
-	// client. Default true.
+	// Strip removes the hint header from the final response's headers
+	// before they reach the client. A hint sent as a trailer or on a 1xx
+	// interim response is not stripped (or counted). Default true.
 	Strip *bool `json:"strip,omitempty"`
 
 	// Status is the response code for boxed clients. Default 429.

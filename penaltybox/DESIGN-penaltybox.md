@@ -75,6 +75,11 @@ so users can cross-check without leaving the repo.
 - **Stripping.** When `strip` is on (default), remove the header before it
   is written to the client — including on counted, uncounted, 429, and
   empty-key (fail-open) responses. Note the Caddy-specific trap below.
+  Only the final response's headers are read and stripped. A hint sent
+  as an HTTP trailer (Caddy's reverse proxy copies trailer values after
+  the body, long after the headers were intercepted) or on a 1xx
+  interim response (passed through untouched) is neither counted nor
+  stripped, so the origin must send it as a header.
 - **Key resolution.** Default `{client_ip}` — Caddy's placeholder that
   respects the server's `trusted_proxies` configuration. Do NOT default to
   a raw `X-Forwarded-For` read; XFF trust is the server config's job, same
