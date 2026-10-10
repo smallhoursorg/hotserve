@@ -234,6 +234,14 @@ func TestBoxSigner(t *testing.T) {
 		t.Fatalf("a principal with a space: exit %d\n%s", code, out)
 	}
 	before := r.read(boxFile)
+	// A key whose blob is not a key: refused before any file changes.
+	bad := filepath.Join(r.home, ".ssh", "bad.pub")
+	if err := os.WriteFile(bad, []byte("ssh-ed25519 AAAAnotakey= bad\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, code := r.run("signer", "KEY="+bad); code != 1 || !strings.Contains(out, "ssh-keygen cannot read it as a public key") || r.read(boxFile) != before {
+		t.Fatalf("a malformed key: exit %d\n%s", code, out)
+	}
 	// The defaults: ~/.ssh/id_ed25519.pub, as the checkout's git email.
 	if out, code := r.run("signer"); code != 0 {
 		t.Fatalf("exit %d\n%s", code, out)

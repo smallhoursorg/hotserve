@@ -44,6 +44,9 @@ esac
 case $b64 in
 ''|*[!A-Za-z0-9+/=]*) fail "$key: the key's base64 is malformed" ;;
 esac
+# The key itself, read by what signs with it, before anything is
+# written: a malformed one would only be refused later, by make check.
+ssh-keygen -l -f "$key" >/dev/null 2>&1 || fail "$key: ssh-keygen cannot read it as a public key"
 [ -n "$principal" ] || fail "no principal: set PRINCIPAL=you@example.com, or git config user.email"
 case $principal in
 *[!A-Za-z0-9._@+-]*) fail "principal '$principal': letters, digits and . _ @ + - only; set PRINCIPAL" ;;
