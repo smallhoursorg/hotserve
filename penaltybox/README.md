@@ -2,11 +2,12 @@
 
 A Caddy v2 module that turns an origin's **rate-limit hint header** into
 edge-side throttling using the classic **penalty box** pattern: every
-origin response labeled `X-Rate-Limit-Level: 2` or `3` adds weighted
-units to a per-client sliding-window budget; a client that exceeds the
-budget is put in a penalty box and gets `429` + `Retry-After` — before
-its requests reach the origin — until the box expires. The hint header
-is stripped before the response reaches the client.
+origin response labeled `X-Rate-Limit-Level: 2` or `3` counts against a
+per-client sliding-window budget (by default weighted, so a level-3
+response costs 3 units); a client that exceeds the budget is put in a
+penalty box and gets `429` + `Retry-After` — before its requests reach
+the origin — until the box expires. The hint header is stripped before
+the response reaches the client.
 
 If you know [Fastly's penalty boxes][fastly-concepts] or HAProxy's
 [stick tables][haproxy-docs], you already understand this module — it is
@@ -21,7 +22,7 @@ request-side only: they cannot see an **origin response** header.
 | ------------------ | -------------------------------------------- | --------------------------------------------- | ----------------------------------- |
 | Per-client counter | `ratecounter` declaration                    | stick-table `store gpc0,gpc0_rate(60s)`       | in-memory sliding-window counter    |
 | Count on response  | [`ratelimit.check_rate`][fastly-check-rate] in `vcl_fetch` | `http-response sc-inc-gpc0(0) if { ... }`     | ResponseWriter shim after `next`    |
-| Weighted increment | `delta` parameter = level                    | not supported (increments by 1)               | `delta = level` (Fastly-style)      |
+| Weighted increment | `delta` parameter = level                    | not supported (increments by 1)               | `delta = level` (Fastly-style) on the default budget; 1 per response in a `tier` |
 | Penalty box        | [`penaltybox` declaration][fastly-penaltybox] + TTL | modeled via rate threshold on the table       | boxed map with per-entry TTL        |
 | Enforce on request | [`ratelimit.penaltybox_has`][fastly-pb-has] in `vcl_recv` | `http-request deny if { sc0_gpc0_rate gt N }` | box check at top of `ServeHTTP`     |
 | Client key         | `client.ip` (or any entry string)            | `track-sc0 src`                               | `{client_ip}` placeholder (default) |
@@ -40,9 +41,11 @@ throttle strictness** of the response, never enforcement:
 - **Absent header, or any other value (garbage, `"0"`, `"4"`, padded,
   multi-valued) = level 1.** Malformed input never counts and never
   errors.
-- Levels at or above `min_level` (default 2) add `level` units to the
-  client's window — a level-3 login attempt costs 3 units, level-1
-  traffic costs nothing and allocates nothing.
+- Levels at or above `min_level` (default 2) count against the
+  client's budget. On the default budget a response adds `level`
+  units, so a level-3 login attempt costs 3; in a
+  [`tier`](#per-tier-budgets) each response adds 1. Levels below
+  `min_level` (level 1 by default) cost nothing and allocate nothing.
 
 Any application can emit this header; the module is not specific to any
 CMS. It pairs with an app that labels sensitive routes (logins, presign
@@ -85,9 +88,17 @@ example.com {
 }
 ```
 
-Outside a `route` block the directive orders itself before
-`reverse_proxy` automatically; inside `route` ordering is positional, so
-place it before your proxy/file-server directive.
+Outside a `route` block Caddy sorts the directive just before
+`reverse_proxy`, but after any `handle`, `handle_path` or `route`
+block. So at site level beside `handle { reverse_proxy ... }`, a
+request that block handles reaches its proxy first, and the proxy
+answers without calling the next handler: the module never runs,
+nothing is counted or boxed, and the hint reaches the client
+unstripped. Put
+`hint_penaltybox` in the same `handle` block as the `reverse_proxy` it
+watches, where Caddy sorts it first, or in a `route` block, where
+ordering is positional: place it before your proxy/file-server
+directive.
 
 All options and defaults:
 
@@ -179,8 +190,9 @@ configuration, which is where XFF trust belongs.
 - **`Retry-After` is honest**: the ceiling of the *remaining* box
   seconds, not the configured TTL.
 - **The box TTL is fixed** (Fastly semantics). Traffic during the box
-  neither counts nor extends the penalty; after expiry the budget
-  restarts from zero.
+  neither counts nor extends the penalty. The budget that boxed the
+  client restarts from zero; with `tier` blocks, the client's other
+  budgets keep their windows, which go on sliding through the box.
 - **State is per-instance and in-memory.** N Caddy instances ≈ N× the
   effective threshold. A config reload resets counters and boxes
   (fails open). Distributed state is a possible future addition — the

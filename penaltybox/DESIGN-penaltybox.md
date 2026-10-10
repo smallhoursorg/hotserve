@@ -1,8 +1,9 @@
-# Handover: `penaltybox` Caddy module
+# `penaltybox` Caddy module: design
 
-Status: **handover — not started.** This document briefs the developer who
-will implement the module. It is the Caddy counterpart to the HAProxy and
-Fastly consumption recipes for the rate-limit hint header — read
+Status: **implemented**, and compiled into the hotserve product build.
+This document is the module's design and behaviour spec. The module is
+the Caddy counterpart to the HAProxy and Fastly consumption recipes for
+the rate-limit hint header — read
 [README.md → The wire contract](README.md#the-wire-contract) first; this
 doc assumes it. External vendor facts below were verified
 2026-07-25 (Fastly) or follow HAProxy's stable stick-table config surface.
@@ -30,7 +31,8 @@ their docs as conceptual references.
 1. **Response phase (counting):** read the hint level off each origin
    response; accumulate a _weighted_ budget per client (weight = level, so
    a level-3 login attempt costs 3 units, level-1 traffic costs nothing
-   worth tracking).
+   worth tracking). This module weights its default budget; a per-level
+   tier counts responses instead (see Tiers below).
 2. **Penalty (boxing):** when a client's budget over a sliding window
    crosses the limit, put the client in a penalty box for a TTL.
 3. **Request phase (enforcement):** requests from boxed clients are
@@ -48,13 +50,14 @@ threat, not first-hit).
 | ------------------ | ------------------------------------------ | --------------------------------------------- | ----------------------------------- |
 | Per-client counter | `ratecounter` declaration                  | stick-table `store gpc0,gpc0_rate(60s)`       | in-memory sliding-window counter    |
 | Count on response  | `ratelimit.check_rate(...)` in `vcl_fetch` | `http-response sc-inc-gpc0(0) if { ... }`     | ResponseWriter shim after `next`    |
-| Weighted increment | `delta` parameter = level                  | not supported (increments by 1)               | `delta = level` (Fastly-style)      |
+| Weighted increment | `delta` parameter = level                  | not supported (increments by 1)               | `delta = level` (Fastly-style) on the default budget; 1 per response in a tier |
 | Penalty box        | `penaltybox` declaration + TTL             | modeled via rate threshold on the table       | boxed map with per-entry TTL        |
 | Enforce on request | `ratelimit.penaltybox_has()` in `vcl_recv` | `http-request deny if { sc0_gpc0_rate gt N }` | box check at top of `ServeHTTP`     |
 | Client key         | `client.ip` (or any entry string)          | `track-sc0 src`                               | `{client_ip}` placeholder (default) |
 | Strip the header   | `unset resp.http.X-Rate-Limit-Level`       | `http-response del-header`                    | module strips by default            |
 | Window constraint  | 1, 10, or 60 seconds                       | arbitrary `gpc0_rate(period)`                 | configurable; default 60s           |
 | Penalty TTL        | 1m–1h, minute granularity                  | table `expire`                                | configurable; default 5m            |
+| Box re-offense     | TTL fixed once boxed                       | effectively extends while rate stays high     | TTL fixed once boxed (Fastly-style) |
 | Clustered state    | platform-global                            | stick-table peers protocol                    | **out of scope v1** (see Non-goals) |
 
 Reference implementations of the other two columns: the Fastly and
@@ -69,9 +72,24 @@ so users can cross-check without leaving the repo.
 - **Response phase.** After the upstream handler runs, read the configured
   header from the response. Parse strictly: `"1"`, `"2"`, `"3"`. Absent
   header, or any other value → treat as level 1 (contract: absence = 1;
-  garbage must not crash or count). If level ≥ `min_level`, add `level`
-  units to the client's sliding-window counter. If the window total
-  crosses `limit`, insert the key into the penalty box with `penalty_ttl`.
+  garbage must not crash or count). If level ≥ `min_level`, count the
+  response against its level's budget (see Tiers): the default budget
+  adds `level` units to the client's sliding-window counter, a tier
+  adds 1. If that budget's window total exceeds its `limit`, insert the
+  key into the penalty box for that budget's `penalty_ttl`, and restart
+  that budget from zero; the key's other budgets keep their windows.
+  The TTL is fixed: while the key is boxed, a response (from a request
+  already in flight when the box shut) neither counts nor extends it.
+- **Tiers.** `tier <level>` (JSON `tiers`, keyed by level) gives a level
+  its own `window`, `limit` and `penalty_ttl`, each inherited from the
+  top level when omitted. A tier counts 1 per response, so its `limit`
+  is a response count: within one level a weight would only be a
+  constant multiplier. A counted level without its own tier uses the
+  nearest configured tier below it (a level-3 response is at least as
+  sensitive as level 2), else the default budget. Budgets are
+  independent, but the box is whole-client: crossing any budget's limit
+  boxes the key for all traffic. A tier outside 1–3, or below
+  `min_level` (it would never count), is a config error.
 - **Stripping.** When `strip` is on (default), remove the header before it
   is written to the client — including on counted, uncounted, 429, and
   empty-key (fail-open) responses. Note the Caddy-specific trap below.
@@ -129,10 +147,11 @@ so users can cross-check without leaving the repo.
   that shard.
   A value below 128 loads with a warning, not a refusal: refusing it
   would make Caddy reject a config that works today.
-- **Level-1 traffic** must cost near-zero: no counter allocation for keys
-  that have only ever produced level-1 responses.
+- **Uncounted traffic** must cost near-zero: no counter allocation for
+  keys that have only ever produced responses below `min_level` (level-1
+  responses, by default).
 
-## Proposed Caddyfile surface
+## Caddyfile surface
 
 Parameter names deliberately echo Fastly's (`window`, `limit`,
 `penalty_ttl` ≈ `check_rate(entry, rc, delta, window, limit, pb, ttl)`):
@@ -156,6 +175,11 @@ example.com {
 ```
 
 JSON config mirrors the same fields under `http.handlers.hint_penaltybox`.
+The full option list, `max_keys` and `tier` included, is in
+[README.md → Caddyfile](README.md#caddyfile). The directive is
+registered before `reverse_proxy` in Caddy's directive order, which
+still sorts it after a `handle`, `handle_path` or `route` block at
+site level; the README says where to put it.
 
 ## Implementation guidance
 
@@ -177,12 +201,14 @@ JSON config mirrors the same fields under `http.handlers.hint_penaltybox`.
   stripping is impossible. Wrap the ResponseWriter and hook
   `WriteHeader`: read + strip the hint header there, then delegate. Do not
   buffer bodies (`_serve` streams files); header-time interception only.
-- **State:** per-instance, in-memory. Sharded `map[string]*counter` with
-  per-shard mutexes (or `sync.Map` if contention proves fine); ring-buffer
-  or bucketed sliding window like caddy-ratelimit's; monotonic clock via
-  `time.Since`. Penalty box is a `map[string]time.Time` (expiry) behind
-  the same shards. Background sweep on a ticker registered in `Provision`,
-  stopped in `Cleanup`.
+- **State:** per-instance, in-memory. 64 shards, each a
+  `map[string]*entry` behind its own `sync.RWMutex`, picked by a seeded
+  `maphash` of the key. An entry holds one lazily allocated 16-bucket
+  ring counter per budget (a bucket spans window/16) and the key's box
+  expiry, so the penalty box lives in the same entry. Times come from
+  `time.Now` behind an injectable clock, so window and box arithmetic
+  uses Go's monotonic reading. Background sweep on a ticker started in
+  `Provision`, stopped in `Cleanup`.
 - **`Retry-After`** = ceiling of remaining box TTL in seconds, not the
   configured TTL (a client probing mid-box gets an honest number).
 
@@ -253,10 +279,10 @@ code — the same seam reserved for the distributed store below.
 ## Non-goals (v1)
 
 - **No distributed state.** Multi-instance Caddy means per-instance
-  budgets (N instances ≈ N× the threshold). Future: sync via Caddy
-  storage the way caddy-ratelimit's distributed mode does — design the
-  counter store behind a small interface so this can be added without
-  breaking config.
+  budgets (N instances ≈ N× the threshold). A possible future addition
+  is sync via Caddy storage the way caddy-ratelimit's distributed mode
+  does; the counter store sits behind a small interface (`boxStore`)
+  so it can be added without breaking config.
 - **No request-side classification** (no path rules, no manifest reading).
   Pre-origin first-hit enforcement is the `forward_auth`/manifest path,
   a separate project.
@@ -264,16 +290,26 @@ code — the same seam reserved for the distributed store below.
 - **No config pushed from the app.** The app labels; the operator decides
   budgets.
 
-## Open questions for the implementer
+## Decisions
 
-1. Should `window` be clamped to Fastly's {1, 10, 60}s for doc parity, or
-   free-form with those as documented conventions? (Lean: free-form,
-   document the convention.)
-2. Box re-offense policy: does traffic during the box extend the TTL
-   (Fastly: no; HAProxy: effectively yes while the rate stays high)?
-   Pick one, document it in the concept map.
-3. Expose Prometheus metrics (`boxed_total`, `weighted_units_total`) via
-   Caddy's metrics registry in v1, or defer?
+1. **`window` is free-form**, not clamped to Fastly's {1, 10, 60}s: any
+   positive duration loads (Validate refuses only a non-positive one),
+   and Fastly's values are the documented interoperability convention.
+   A clamp would buy doc parity by refusing windows a real policy
+   needs, such as the README's 15-minute login tier.
+2. **The box TTL is fixed** (Fastly's policy, not HAProxy's): traffic
+   during the box neither counts nor extends it, as the concept map
+   records. Extension would have little to act on: a boxed client's
+   requests are refused before the origin, so the only hints that
+   arrive during a box come from requests already in flight when it
+   shut. A fixed TTL also keeps every `Retry-After` a client was given
+   true.
+3. **No metrics yet.** The module registers no Prometheus metrics;
+   `add` in store.go marks where a `boxed_total{tier}` counter would
+   increment. A box is visible without them: each refused request is a
+   `429` (or the configured `status`) in Caddy's access log when one is
+   enabled, and boxing logs `client boxed`, with the key and level, at
+   debug level.
 
 ## References
 
