@@ -185,5 +185,8 @@ deno task deploy
 ```
 
 The version defaults to the commit, and versions are immutable on the
-box, so that deploys once per commit; for an uncommitted build set one
-(`VERSION=wip-3 deno task deploy`).
+box, so that deploys once per commit. With uncommitted changes to
+tracked files the build is not that commit, so the script refuses the
+default; set a version for an uncommitted build
+(`VERSION=wip-3 deno task deploy`). A version is letters, digits, `.`,
+`_` and `-`, not starting with `.`.

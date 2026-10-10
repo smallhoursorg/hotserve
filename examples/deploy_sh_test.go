@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // A stand-in box. "single" answers the single response a box without
@@ -142,16 +143,30 @@ func deploySh(t *testing.T, srv *httptest.Server, env ...string) (string, int) {
 // version.
 func deployShArgs(t *testing.T, srv *httptest.Server, args []string, env ...string) (string, int) {
 	t.Helper()
-	cmd := exec.Command("sh", append([]string{filepath.Join("node", "scripts", "deploy.sh")}, args...)...)
+	return deployShIn(t, srv, "", args, env...)
+}
+
+// deployShIn is deployShArgs run from dir (a checkout of its own, for
+// the version the script takes from git); "" is this directory.
+func deployShIn(t *testing.T, srv *httptest.Server, dir string, args []string, env ...string) (string, int) {
+	t.Helper()
+	script, err := filepath.Abs(filepath.Join("node", "scripts", "deploy.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", append([]string{script}, args...)...)
+	cmd.Dir = dir
 	// Later entries win, so a developer's own HOTSERVE_AUDIENCE, or the
 	// job summary of an Actions run this test runs in, never reaches
 	// the script unless a case sets it. ARTIFACT_SHA256 is dropped
 	// rather than blanked: the script tells set-but-empty from unset.
-	// The stand-in box is plain http, so HOTSERVE_ALLOW_HTTP=1 unless a
-	// case says otherwise.
+	// GIT_* is dropped too (a GIT_DIR from a hook running the tests
+	// would point the script's git at another repository). The stand-in
+	// box is plain http, so HOTSERVE_ALLOW_HTTP=1 unless a case says
+	// otherwise.
 	var base []string
 	for _, kv := range os.Environ() {
-		if !strings.HasPrefix(kv, "ARTIFACT_SHA256=") {
+		if !strings.HasPrefix(kv, "ARTIFACT_SHA256=") && !strings.HasPrefix(kv, "GIT_") {
 			base = append(base, kv)
 		}
 	}
@@ -332,4 +347,206 @@ func TestDeployShRefusesAPlaintextURLBeforeTheMint(t *testing.T) {
 	if out, code := run(srv.URL+"/demo", "1"); code != 0 || strings.Join(seen(), " ") != "/token /demo" {
 		t.Fatalf("HOTSERVE_ALLOW_HTTP=1: exit %d, requests %v\n%s", code, seen(), out)
 	}
+}
+
+// The version the script defaults to is the commit, and the box keeps
+// a version for good, so the default is refused while a tracked file
+// anywhere in the repository differs from HEAD, staged or not: the
+// build would carry the commit's name without being the commit. The
+// refusal names the way out (VERSION) and comes before the mint or any
+// request. Untracked files (the deploy key, a .env, the tarball
+// itself) and a file only touched leave the checkout clean, and an
+// explicit VERSION deploys whatever the checkout holds.
+func TestDeployShRefusesADirtyCheckoutsDefaultVersion(t *testing.T) {
+	for _, tool := range []string{"curl", "git"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Fatalf("this test needs %s; install it to run it", tool)
+		}
+	}
+	srv, seen := requestLog(t)
+	// In Actions, minting from the stand-in, so a refusal after the mint
+	// or the group line would show; git without the caller's config.
+	env := []string{"GITHUB_ACTIONS=true", "HOTSERVE_TOKEN=",
+		"ACTIONS_ID_TOKEN_REQUEST_URL=" + srv.URL + "/token?api-version=1", "ACTIONS_ID_TOKEN_REQUEST_TOKEN=run",
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1"}
+	write := func(t *testing.T, path, s string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(s), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const head = "HEAD" // the case deploys the commit's own version
+	for _, tc := range []struct {
+		name    string
+		change  func(t *testing.T, repo string, git func(...string) string)
+		version string // VERSION; "" leaves it to the default
+		deploys string // the version deployed; "" when refused
+	}{
+		{"clean", func(*testing.T, string, func(...string) string) {}, "", head},
+		{"untracked files only", func(t *testing.T, repo string, _ func(...string) string) {
+			write(t, filepath.Join(repo, "app", "deploy.key"), "secret")
+			write(t, filepath.Join(repo, ".env"), "A=1")
+		}, "", head},
+		{"a tracked file only touched", func(t *testing.T, repo string, _ func(...string) string) {
+			later := time.Now().Add(time.Hour)
+			if err := os.Chtimes(filepath.Join(repo, "app", "server.js"), later, later); err != nil {
+				t.Fatal(err)
+			}
+		}, "", head},
+		{"modified in the app dir", func(t *testing.T, repo string, _ func(...string) string) {
+			write(t, filepath.Join(repo, "app", "server.js"), "changed")
+		}, "", ""},
+		{"modified outside the app dir", func(t *testing.T, repo string, _ func(...string) string) {
+			write(t, filepath.Join(repo, "README.md"), "changed")
+		}, "", ""},
+		{"staged", func(t *testing.T, repo string, git func(...string) string) {
+			write(t, filepath.Join(repo, "app", "server.js"), "changed")
+			git("add", "app/server.js")
+		}, "", ""},
+		{"deleted", func(t *testing.T, repo string, _ func(...string) string) {
+			if err := os.Remove(filepath.Join(repo, "README.md")); err != nil {
+				t.Fatal(err)
+			}
+		}, "", ""},
+		{"modified, VERSION set", func(t *testing.T, repo string, _ func(...string) string) {
+			write(t, filepath.Join(repo, "app", "server.js"), "changed")
+		}, "wip-3", "wip-3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, git := gitCheckout(t, map[string]string{"README.md": "readme", "app/server.js": "server"})
+			app := filepath.Join(repo, "app")
+			// The tarball sits in the checkout untracked, as a build leaves it.
+			write(t, filepath.Join(app, "app.tar.gz"), "not really gzip")
+			tc.change(t, repo, git)
+			want := tc.deploys
+			if want == head {
+				want = git("rev-parse", "--short=12", "HEAD")
+			}
+			out, code := deployShIn(t, srv, app, []string{"app.tar.gz"}, append(env, "VERSION="+tc.version)...)
+			got := seen()
+			if want == "" {
+				if code != 1 || !strings.Contains(out, "tracked files have uncommitted changes") || !strings.Contains(out, "set VERSION (e.g. VERSION=wip-3)") ||
+					strings.Contains(out, "::add-mask::") || strings.Contains(out, "::group::") || len(got) != 0 {
+					t.Fatalf("exit %d (want 1 before the mint or any request), requests %v\n%s", code, got, out)
+				}
+				return
+			}
+			if code != 0 || strings.Join(got, " ") != "/token /demo?version="+want {
+				t.Fatalf("exit %d, requests %v (want the mint, then version %s)\n%s", code, got, want, out)
+			}
+		})
+	}
+}
+
+// A version outside the box's alphabet is refused for a pushed file, a
+// URL deploy and a rollback alike, before the mint or any request: in
+// the query a `#` would cut the rest off and `%31` would arrive as `1`,
+// deploying under another version than the one printed. What the box
+// accepts goes through unchanged.
+func TestDeployShRefusesAVersionOutsideTheBoxAlphabet(t *testing.T) {
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Fatal("deploy.sh needs curl; install it to run this test")
+	}
+	srv, seen := requestLog(t)
+	actions := []string{"GITHUB_ACTIONS=true", "HOTSERVE_TOKEN=",
+		"ACTIONS_ID_TOKEN_REQUEST_URL=" + srv.URL + "/token?api-version=1", "ACTIONS_ID_TOKEN_REQUEST_TOKEN=run"}
+	tarball := filepath.Join(t.TempDir(), "app.tar.gz")
+	if err := os.WriteFile(tarball, []byte("not really gzip"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range []string{"v1#x", "v%31", "v1&rollback=v0", "a b", "../x", ".v1", "a/b", `v\1`, "v1\n"} {
+		for _, tc := range []struct {
+			name string
+			args []string
+			env  string
+		}{
+			{"push", []string{tarball}, "VERSION=" + v},
+			{"url", []string{"https://example.test/a.tgz"}, "VERSION=" + v},
+			{"rollback", []string{"--rollback", v}, "VERSION="},
+		} {
+			out, code := deployShArgs(t, srv, tc.args, append(actions, tc.env)...)
+			if got := seen(); code != 1 || !strings.Contains(out, "is not a version") ||
+				strings.Contains(out, "::add-mask::") || strings.Contains(out, "::group::") || len(got) != 0 {
+				t.Fatalf("%s %q: exit %d (want 1 before the mint or any request), requests %v\n%s", tc.name, v, code, got, out)
+			}
+		}
+	}
+	for _, v := range []string{"v1", "dx1", "0123456789ab", "v1.2.3", "wip-3", "_x", "-x"} {
+		if out, code := deployShArgs(t, srv, []string{tarball}, append(actions, "VERSION="+v)...); code != 0 || strings.Join(seen(), " ") != "/token /demo?version="+v {
+			t.Fatalf("push %q: exit %d, requests %v\n%s", v, code, seen(), out)
+		}
+		if out, code := deployShArgs(t, srv, []string{"--rollback", v}, actions...); code != 0 || strings.Join(seen(), " ") != "/token /demo?rollback="+v {
+			t.Fatalf("rollback %q: exit %d, requests %v\n%s", v, code, seen(), out)
+		}
+	}
+}
+
+// requestLog is a stand-in box that mints at /token and answers every
+// other request with a single 200 status; seen returns each request's
+// path (and, past the mint, its query) since the last call, and
+// forgets them.
+func requestLog(t *testing.T) (*httptest.Server, func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var reqs []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		mu.Lock()
+		defer mu.Unlock()
+		if r.URL.Path == "/token" {
+			reqs = append(reqs, r.URL.Path)
+			_, _ = w.Write([]byte(`{"value":"minted"}` + "\n"))
+			return
+		}
+		reqs = append(reqs, r.URL.Path+"?"+r.URL.RawQuery)
+		_, _ = w.Write([]byte(`{"app":"demo","current_version":"v1","running":true}` + "\n"))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		got := reqs
+		reqs = nil
+		return got
+	}
+}
+
+// gitCheckout makes a repository in a temporary directory with files
+// committed, and returns it with a function that runs git there and
+// returns its trimmed output, free of the caller's git configuration.
+func gitCheckout(t *testing.T, files map[string]string) (string, func(...string) string) {
+	t.Helper()
+	repo := t.TempDir()
+	var env []string
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "GIT_") {
+			env = append(env, kv)
+		}
+	}
+	env = append(env, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-c", "user.name=test", "-c", "user.email=test@example.test", "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"}, args...)...)
+		cmd.Dir = repo
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	git("init", "-q")
+	for name, s := range files {
+		path := filepath.Join(repo, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(s), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git("add", ".")
+	git("commit", "-q", "-m", "initial")
+	return repo, git
 }
