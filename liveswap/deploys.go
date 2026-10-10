@@ -158,7 +158,7 @@ func (ma *managedApp) recordDeploy(c collaborators, result deployResult) {
 		// redacts a known value within a safe string too) — and only
 		// when every value is known: with the env_file unread past a
 		// bad line, that cannot be decided.
-		if filteredPin, _ := rd.redact(result.SHA256); unknown == "" && result.SHA256 != "" && filteredPin == result.SHA256 {
+		if filteredPin, _ := rd.Redact(result.SHA256); unknown == "" && result.SHA256 != "" && filteredPin == result.SHA256 {
 			envelope["sha256"] = result.SHA256
 		}
 		env, err := json.Marshal(envelope)
@@ -237,7 +237,7 @@ func (ma *managedApp) recordRedactor(c collaborators, result deployResult) (*Red
 		safe = append(safe, c.spec.dirs.root, c.spec.dirs.app, c.spec.dirs.releases, c.spec.dirs.shared, c.spec.dirs.run)
 		safe = append(safe, listReleases(c.spec.dirs.releases)...)
 	}
-	return newRedactor(kvs, safe), unknown
+	return NewRedactor(kvs, safe), unknown
 }
 
 // recordsDir is the records directory as the directory it names

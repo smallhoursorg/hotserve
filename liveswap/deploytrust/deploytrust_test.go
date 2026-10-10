@@ -1,4 +1,4 @@
-package liveswap
+package deploytrust
 
 import (
 	"context"
@@ -14,18 +14,24 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
 
-	jose "github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+
+	"github.com/smallhoursorg/hotserve/liveswap/deploytrust/trusttest"
 )
 
+// localTrust is a local source for a test public key, built directly:
+// the label is the key's name, as an operator's is its path.
+func localTrust(pub ed25519.PublicKey, audience string) Source {
+	return Source{kind: "local", audience: audience, pubKey: pub, keyPath: "test-key", attribution: attributionClaims["local"]}
+}
+
 func TestLocalVerifier(t *testing.T) {
-	priv, pub := mustGenTestKey()
-	_, otherPub := mustGenTestKey()
+	priv, pub := trusttest.GenerateKey()
+	_, otherPub := trusttest.GenerateKey()
 	want := map[string]string{"repository": "org/app"}
 	base := func() *localVerifier {
 		return &localVerifier{audience: "aud1", pub: pub, claims: want}
@@ -33,7 +39,7 @@ func TestLocalVerifier(t *testing.T) {
 	ctx := context.Background()
 
 	// The happy path: right key, audience and claims.
-	if _, err := base().verify(ctx, mintTestToken(t, priv, "aud1", want)); err != nil {
+	if _, err := base().verify(ctx, trusttest.Mint(t, priv, "aud1", want)); err != nil {
 		t.Fatalf("valid token rejected: %v", err)
 	}
 
@@ -44,19 +50,19 @@ func TestLocalVerifier(t *testing.T) {
 		{"wrong key", func() (Verifier, string) {
 			v := base()
 			v.pub = otherPub
-			return v, mintTestToken(t, priv, "aud1", want)
+			return v, trusttest.Mint(t, priv, "aud1", want)
 		}},
 		{"wrong audience", func() (Verifier, string) {
-			return base(), mintTestToken(t, priv, "other", want)
+			return base(), trusttest.Mint(t, priv, "other", want)
 		}},
 		{"claim mismatch", func() (Verifier, string) {
-			return base(), mintTestToken(t, priv, "aud1", map[string]string{"repository": "evil/app"})
+			return base(), trusttest.Mint(t, priv, "aud1", map[string]string{"repository": "evil/app"})
 		}},
 		{"missing claim", func() (Verifier, string) {
-			return base(), mintTestToken(t, priv, "aud1", nil)
+			return base(), trusttest.Mint(t, priv, "aud1", nil)
 		}},
 		{"expired", func() (Verifier, string) {
-			return base(), mintExpiredToken(t, priv, "aud1", want)
+			return base(), trusttest.MintExpired(t, priv, "aud1", want)
 		}},
 		{"garbage", func() (Verifier, string) {
 			return base(), "not-a-jwt"
@@ -80,7 +86,7 @@ func TestOIDCPresetRequiresIdentityClaim(t *testing.T) {
 		{Kind: "gitlab", Audience: "hotserve"},
 		{Kind: "oidc", Issuer: "https://idp.example", Audience: "hotserve"},
 	} {
-		if _, err := buildTrust([]TrustConfig{tc}, nil); err == nil {
+		if _, err := Build([]TrustConfig{tc}, nil); err == nil {
 			t.Errorf("%s with only an audience must be rejected", tc.Kind)
 		}
 	}
@@ -91,15 +97,15 @@ func TestOIDCPresetRequiresIdentityClaim(t *testing.T) {
 		{Kind: "oidc", Issuer: "https://idp.example", Audience: "hotserve", Claims: map[string]string{"sub": "ci"}},
 	}
 	for _, tc := range ok {
-		if _, err := buildTrust([]TrustConfig{tc}, nil); err != nil {
+		if _, err := Build([]TrustConfig{tc}, nil); err != nil {
 			t.Errorf("%s with an identity claim rejected: %v", tc.Kind, err)
 		}
 	}
 }
 
 func TestLocalTokenRequiresExp(t *testing.T) {
-	priv, pub := mustGenTestKey()
-	noExp := signEdDSA(t, priv, map[string]any{
+	priv, pub := trusttest.GenerateKey()
+	noExp := trusttest.SignEdDSA(t, priv, map[string]any{
 		"aud": "a", "iat": jwt.NewNumericDate(time.Now()),
 	})
 	v := &localVerifier{audience: "a", pub: pub}
@@ -112,61 +118,26 @@ func TestNewJWKSClientEnforcesHTTPS(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
 	defer srv.Close() // plain http
 
-	if _, err := newJWKSClient(false).Get(srv.URL); err == nil {
-		t.Error("newJWKSClient(false) must refuse a plain-http request")
+	if _, err := NewJWKSClient(false).Get(srv.URL); err == nil {
+		t.Error("NewJWKSClient(false) must refuse a plain-http request")
 	}
-	resp, err := newJWKSClient(true).Get(srv.URL)
+	resp, err := NewJWKSClient(true).Get(srv.URL)
 	if err != nil {
-		t.Errorf("newJWKSClient(true) must allow http: %v", err)
+		t.Errorf("NewJWKSClient(true) must allow http: %v", err)
 	} else {
 		_ = resp.Body.Close()
 	}
 }
 
-// TestLocalKeyFileRoundtrip proves the on-disk PEM formats produced by
-// `deploy-keygen` load back through loadEd25519PublicKey /
-// loadEd25519PrivateKey and interoperate with the local verifier.
-func TestLocalKeyFileRoundtrip(t *testing.T) {
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir := t.TempDir()
-	privPath := dir + "/deploy.key"
-	pubPath := privPath + ".pub"
-	privDER, _ := x509.MarshalPKCS8PrivateKey(priv)
-	pubDER, _ := x509.MarshalPKIXPublicKey(pub)
-	if err := os.WriteFile(privPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privDER}), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(pubPath, pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER}), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	loadedPub, err := loadEd25519PublicKey(pubPath)
-	if err != nil {
-		t.Fatalf("load public key: %v", err)
-	}
-	loadedPriv, err := loadEd25519PrivateKey(privPath)
-	if err != nil {
-		t.Fatalf("load private key: %v", err)
-	}
-	v := &localVerifier{audience: "hotserve", pub: loadedPub, claims: map[string]string{"repository": "org/app"}}
-	tok := mintTestToken(t, loadedPriv, "hotserve", map[string]string{"repository": "org/app"})
-	if _, err := v.verify(context.Background(), tok); err != nil {
-		t.Fatalf("round-trip token rejected: %v", err)
-	}
-}
-
 func TestOIDCVerifier(t *testing.T) {
-	iss := newMockIssuer(t)
+	iss := trusttest.NewIssuer(t)
 	want := map[string]string{"repository": "org/app"}
 	base := func() *oidcVerifier {
-		return &oidcVerifier{issuer: iss.url, audience: "hotserve", claims: want, client: iss.client}
+		return &oidcVerifier{issuer: iss.URL, audience: "hotserve", claims: want, client: iss.Client}
 	}
 	ctx := context.Background()
 
-	if _, err := base().verify(ctx, iss.mint(t, iss.priv, "hotserve", want, time.Now().Add(5*time.Minute))); err != nil {
+	if _, err := base().verify(ctx, iss.Mint(t, iss.Priv, "hotserve", want, time.Now().Add(5*time.Minute))); err != nil {
 		t.Fatalf("valid token rejected: %v", err)
 	}
 
@@ -175,20 +146,20 @@ func TestOIDCVerifier(t *testing.T) {
 		tok  func() string
 	}{
 		{"wrong audience", func() string {
-			return iss.mint(t, iss.priv, "other", want, time.Now().Add(5*time.Minute))
+			return iss.Mint(t, iss.Priv, "other", want, time.Now().Add(5*time.Minute))
 		}},
 		{"claim mismatch", func() string {
-			return iss.mint(t, iss.priv, "hotserve", map[string]string{"repository": "evil/app"}, time.Now().Add(5*time.Minute))
+			return iss.Mint(t, iss.Priv, "hotserve", map[string]string{"repository": "evil/app"}, time.Now().Add(5*time.Minute))
 		}},
 		{"missing claim", func() string {
-			return iss.mint(t, iss.priv, "hotserve", nil, time.Now().Add(5*time.Minute))
+			return iss.Mint(t, iss.Priv, "hotserve", nil, time.Now().Add(5*time.Minute))
 		}},
 		{"expired", func() string {
-			return iss.mint(t, iss.priv, "hotserve", want, time.Now().Add(-time.Hour))
+			return iss.Mint(t, iss.Priv, "hotserve", want, time.Now().Add(-time.Hour))
 		}},
 		{"unknown signing key", func() string {
 			other, _ := rsa.GenerateKey(rand.Reader, 2048)
-			return iss.mint(t, other, "hotserve", want, time.Now().Add(5*time.Minute))
+			return iss.Mint(t, other, "hotserve", want, time.Now().Add(5*time.Minute))
 		}},
 	}
 	for _, tc := range cases {
@@ -207,19 +178,19 @@ func TestOIDCVerifier(t *testing.T) {
 // float64 would stringify as "1e+08" and never match — the S1 bug — so
 // this guards the json.Number decode path.
 func TestOIDCVerifierNumericClaim(t *testing.T) {
-	iss := newMockIssuer(t)
+	iss := trusttest.NewIssuer(t)
 	v := &oidcVerifier{
-		issuer: iss.url, audience: "hotserve",
+		issuer: iss.URL, audience: "hotserve",
 		claims: map[string]string{"repository_id": "100000000"},
-		client: iss.client,
+		client: iss.Client,
 	}
-	tok := iss.mintClaims(t, "hotserve", time.Now().Add(5*time.Minute),
+	tok := iss.MintClaims(t, "hotserve", time.Now().Add(5*time.Minute),
 		map[string]any{"repository_id": 100000000})
 	if _, err := v.verify(context.Background(), tok); err != nil {
 		t.Fatalf("token with numeric repository_id rejected: %v", err)
 	}
 	// A different numeric id must still be rejected.
-	bad := iss.mintClaims(t, "hotserve", time.Now().Add(5*time.Minute),
+	bad := iss.MintClaims(t, "hotserve", time.Now().Add(5*time.Minute),
 		map[string]any{"repository_id": 999})
 	if _, err := v.verify(context.Background(), bad); err == nil {
 		t.Fatal("wrong repository_id must be rejected")
@@ -231,11 +202,11 @@ func TestOIDCVerifierNumericClaim(t *testing.T) {
 	// reformatting (which would round 2^53+1 down to 2^53).
 	const big = int64(9007199254740993) // 2^53 + 1
 	bigV := &oidcVerifier{
-		issuer: iss.url, audience: "hotserve",
+		issuer: iss.URL, audience: "hotserve",
 		claims: map[string]string{"repository_id": "9007199254740993"},
-		client: iss.client,
+		client: iss.Client,
 	}
-	bigTok := iss.mintClaims(t, "hotserve", time.Now().Add(5*time.Minute),
+	bigTok := iss.MintClaims(t, "hotserve", time.Now().Add(5*time.Minute),
 		map[string]any{"repository_id": big})
 	if _, err := bigV.verify(context.Background(), bigTok); err != nil {
 		t.Fatalf("token with a >2^53 repository_id rejected: %v", err)
@@ -269,12 +240,12 @@ func eventually(t *testing.T, what string, check func() error) {
 // went away is its own failure, and an issuer answering as someone
 // else is the config's.
 func TestOIDCVerifierIssuerDown(t *testing.T) {
-	iss := newMockIssuer(t)
+	iss := trusttest.NewIssuer(t)
 	want := map[string]string{"repository": "org/app"}
 	fresh := func() *oidcVerifier {
-		return &oidcVerifier{issuer: iss.url, audience: "hotserve", claims: want, client: iss.client}
+		return &oidcVerifier{issuer: iss.URL, audience: "hotserve", claims: want, client: iss.Client}
 	}
-	valid := func() string { return iss.mint(t, iss.priv, "hotserve", want, time.Now().Add(5*time.Minute)) }
+	valid := func() string { return iss.Mint(t, iss.Priv, "hotserve", want, time.Now().Add(5*time.Minute)) }
 	ctx := context.Background()
 	wantDown := func(t *testing.T, err error, what string) unavailable {
 		t.Helper()
@@ -282,7 +253,7 @@ func TestOIDCVerifierIssuerDown(t *testing.T) {
 		if !errors.As(err, &u) {
 			t.Fatalf("%s: err = %v, want an unavailable", what, err)
 		}
-		if u.label != "oidc:"+iss.url {
+		if u.label != "oidc:"+iss.URL {
 			t.Fatalf("%s: label = %q, want the source's", what, u.label)
 		}
 		return u
@@ -296,7 +267,7 @@ func TestOIDCVerifierIssuerDown(t *testing.T) {
 	gone, cancel := context.WithCancel(ctx)
 	cancel()
 
-	iss.discoveryDown.Store(true)
+	iss.DiscoveryDown.Store(true)
 	_, err := fresh().verify(ctx, valid())
 	u := wantDown(t, err, "discovery 503")
 	if !strings.Contains(u.Error(), "oidc discovery for") {
@@ -304,17 +275,17 @@ func TestOIDCVerifierIssuerDown(t *testing.T) {
 	}
 	_, err = fresh().verify(gone, valid())
 	wantPlain(t, err, "discovery with the caller gone")
-	iss.discoveryDown.Store(false)
+	iss.DiscoveryDown.Store(false)
 
-	iss.discoveredAs.Store("https://someone-else.example")
+	iss.DiscoveredAs.Store("https://someone-else.example")
 	_, err = fresh().verify(ctx, valid())
 	wantPlain(t, err, "discovery naming another issuer")
 	if !strings.Contains(err.Error(), "someone-else.example") {
 		t.Fatalf("issuer mismatch: reason = %q, want it to name the issuer found", err.Error())
 	}
-	iss.discoveredAs.Store("")
+	iss.DiscoveredAs.Store("")
 
-	iss.jwksDown.Store(true)
+	iss.JWKSDown.Store(true)
 	v := fresh()
 	_, err = v.verify(ctx, valid())
 	u = wantDown(t, err, "JWKS 503 on first use")
@@ -326,7 +297,7 @@ func TestOIDCVerifierIssuerDown(t *testing.T) {
 
 	// Recovery needs no restart: the provider is cached, the key set
 	// fetches again.
-	iss.jwksDown.Store(false)
+	iss.JWKSDown.Store(false)
 	eventually(t, "issuer back: valid token rejected", func() error {
 		_, err := v.verify(ctx, valid())
 		return err
@@ -334,7 +305,7 @@ func TestOIDCVerifierIssuerDown(t *testing.T) {
 
 	// Down again, keys cached: a token those keys verify still deploys
 	// — an outage only reaches tokens the box has no key for.
-	iss.jwksDown.Store(true)
+	iss.JWKSDown.Store(true)
 	if _, err := v.verify(ctx, valid()); err != nil {
 		t.Fatalf("issuer down with keys cached: valid token rejected: %v", err)
 	}
@@ -345,7 +316,7 @@ func TestOIDCVerifierIssuerDown(t *testing.T) {
 	// strategy), so during an outage it cannot be told from a rotated
 	// key: unavailable, deliberately.
 	other, _ := rsa.GenerateKey(rand.Reader, 2048)
-	_, err = v.verify(ctx, iss.mint(t, other, "hotserve", want, time.Now().Add(5*time.Minute)))
+	_, err = v.verify(ctx, iss.Mint(t, other, "hotserve", want, time.Now().Add(5*time.Minute)))
 	_ = wantDown(t, err, "bad signature during an outage")
 }
 
@@ -355,11 +326,11 @@ func TestOIDCVerifierIssuerDown(t *testing.T) {
 // source's reason) or accepted by a source after them — a fallback
 // that keeps deploys going must not hide the outage.
 func TestAuthorizeNamesEverySourceItCouldNotConsult(t *testing.T) {
-	iss := newMockIssuer(t)
-	iss.discoveryDown.Store(true)
-	priv, pub := mustGenTestKey()
+	iss := trusttest.NewIssuer(t)
+	iss.DiscoveryDown.Store(true)
+	priv, pub := trusttest.GenerateKey()
 	local := &localVerifier{audience: "hotserve", pub: pub, keyPath: "/k.pem"}
-	down := &oidcVerifier{issuer: iss.url, audience: "hotserve", client: iss.client}
+	down := &oidcVerifier{issuer: iss.URL, audience: "hotserve", client: iss.Client}
 	labels := func(down []unavailable) string {
 		var out []string
 		for _, u := range down {
@@ -367,31 +338,31 @@ func TestAuthorizeNamesEverySourceItCouldNotConsult(t *testing.T) {
 		}
 		return strings.Join(out, " ")
 	}
-	bad := mintTestToken(t, priv, "other", nil) // the local source refuses it: wrong audience
+	bad := trusttest.Mint(t, priv, "other", nil) // the local source refuses it: wrong audience
 	for _, order := range [][]Verifier{{local, down}, {down, local}} {
 		_, got, err := authorize(context.Background(), order, bad)
-		if err == nil || labels(got) != down.label() {
-			t.Fatalf("order %v: err = %v, down = %q, want a refusal naming %s", order, err, labels(got), down.label())
+		if err == nil || labels(got) != down.Label() {
+			t.Fatalf("order %v: err = %v, down = %q, want a refusal naming %s", order, err, labels(got), down.Label())
 		}
-		if !strings.Contains(err.Error(), "local:/k.pem: ") || !strings.Contains(err.Error(), "oidc:"+iss.url+": ") {
+		if !strings.Contains(err.Error(), "local:/k.pem: ") || !strings.Contains(err.Error(), "oidc:"+iss.URL+": ") {
 			t.Fatalf("order %v: reasons = %q, want both sources named", order, err.Error())
 		}
 	}
 	// Two sources down: both named, in config order.
-	iss2 := newMockIssuer(t)
-	iss2.discoveryDown.Store(true)
-	down2 := &oidcVerifier{issuer: iss2.url, audience: "hotserve", client: iss2.client}
-	if _, got, err := authorize(context.Background(), []Verifier{down, local, down2}, bad); err == nil || labels(got) != down.label()+" "+down2.label() {
+	iss2 := trusttest.NewIssuer(t)
+	iss2.DiscoveryDown.Store(true)
+	down2 := &oidcVerifier{issuer: iss2.URL, audience: "hotserve", client: iss2.Client}
+	if _, got, err := authorize(context.Background(), []Verifier{down, local, down2}, bad); err == nil || labels(got) != down.Label()+" "+down2.Label() {
 		t.Fatalf("two sources down: err = %v, down = %q, want both", err, labels(got))
 	}
 	// A source after the down one accepts the token: authorized, and
 	// the down one is still named.
-	good := mintTestToken(t, priv, "hotserve", nil)
-	if by, got, err := authorize(context.Background(), []Verifier{down, local}, good); err != nil || by.By != local.label() || labels(got) != down.label() {
+	good := trusttest.Mint(t, priv, "hotserve", nil)
+	if by, got, err := authorize(context.Background(), []Verifier{down, local}, good); err != nil || by.By != local.Label() || labels(got) != down.Label() {
 		t.Fatalf("accepted past a down source: by = %q, down = %q, err = %v", by.By, labels(got), err)
 	}
 	// Both up: nothing is down, and the bad token is a plain refusal.
-	iss.discoveryDown.Store(false)
+	iss.DiscoveryDown.Store(false)
 	if _, got, err := authorize(context.Background(), []Verifier{local, down}, bad); err == nil || len(got) != 0 {
 		t.Fatalf("both sources up: err = %v, down = %q, want a plain refusal", err, labels(got))
 	}
@@ -431,7 +402,7 @@ func TestAttribute(t *testing.T) {
 // past the fold of github/gitlab into kind "oidc".
 func TestPresetAttribution(t *testing.T) {
 	dir := t.TempDir()
-	_, pub := mustGenTestKey()
+	_, pub := trusttest.GenerateKey()
 	pubDER, _ := x509.MarshalPKIXPublicKey(pub)
 	pubPath := dir + "/k.pub"
 	if err := os.WriteFile(pubPath, pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER}), 0o644); err != nil {
@@ -446,7 +417,7 @@ func TestPresetAttribution(t *testing.T) {
 		{TrustConfig{Kind: "oidc", Issuer: "https://idp.example", Audience: "a", Subject: "ci"}, "sub"},
 		{TrustConfig{Kind: "local", PublicKey: pubPath}, "sub"},
 	} {
-		srcs, err := buildTrust([]TrustConfig{tc.tc}, nil)
+		srcs, err := Build([]TrustConfig{tc.tc}, nil)
 		if err != nil {
 			t.Fatalf("%s: %v", tc.tc.Kind, err)
 		}
@@ -461,8 +432,8 @@ func TestPresetAttribution(t *testing.T) {
 // string deployed_by and the `deploy authorized` line carry.
 func TestAuthorizeAttributes(t *testing.T) {
 	ctx := context.Background()
-	priv, pub := mustGenTestKey()
-	local := resolveVerifiers([]trustSource{localTrust(pub, "aud1")}, nil)
+	priv, pub := trusttest.GenerateKey()
+	local := Verifiers([]Source{localTrust(pub, "aud1")}, nil)
 	for _, tc := range []struct {
 		name   string
 		claims map[string]string
@@ -471,22 +442,22 @@ func TestAuthorizeAttributes(t *testing.T) {
 		{"with a subject", map[string]string{"sub": "alice"}, "local:test-key sub=alice"},
 		{"without one", nil, "local:test-key"},
 	} {
-		by, _, err := authorize(ctx, local, mintTestToken(t, priv, "aud1", tc.claims))
+		by, _, err := authorize(ctx, local, trusttest.Mint(t, priv, "aud1", tc.claims))
 		if err != nil || by.By != tc.want {
 			t.Errorf("local %s: authorize = %q, %v; want %q", tc.name, by.By, err, tc.want)
 		}
 	}
 
-	iss := newMockIssuer(t)
-	gh := resolveVerifiers([]trustSource{{
-		kind: "oidc", issuer: iss.url, audience: "hotserve",
+	iss := trusttest.NewIssuer(t)
+	gh := Verifiers([]Source{{
+		kind: "oidc", issuer: iss.URL, audience: "hotserve",
 		claims: map[string]string{"repository": "org/blog"}, attribution: attributionClaims["github"],
-	}}, iss.client)
-	tok := iss.mint(t, iss.priv, "hotserve", map[string]string{
+	}}, iss.Client)
+	tok := iss.Mint(t, iss.Priv, "hotserve", map[string]string{
 		"repository": "org/blog", "ref": "refs/heads/main", "actor": "alice",
 		"sub": "repo:org/blog:ref:refs/heads/main",
 	}, time.Now().Add(5*time.Minute))
-	want := "oidc:" + iss.url + " repository=org/blog ref=refs/heads/main actor=alice"
+	want := "oidc:" + iss.URL + " repository=org/blog ref=refs/heads/main actor=alice"
 	if by, _, err := authorize(ctx, gh, tok); err != nil || by.By != want {
 		t.Errorf("github: authorize = %q, %v; want %q", by.By, err, want)
 	}
@@ -499,17 +470,17 @@ func TestAuthorizeAttributes(t *testing.T) {
 // pinned in handler_test (the flat 401, whatever the reason).
 func TestAuthorizeSaysWhy(t *testing.T) {
 	ctx := context.Background()
-	priv, pub := mustGenTestKey()
-	local := resolveVerifiers([]trustSource{localTrust(pub, "aud1")}, nil)
-	iss := newMockIssuer(t)
-	gh := resolveVerifiers([]trustSource{{
-		kind: "oidc", issuer: iss.url, audience: "hotserve",
+	priv, pub := trusttest.GenerateKey()
+	local := Verifiers([]Source{localTrust(pub, "aud1")}, nil)
+	iss := trusttest.NewIssuer(t)
+	gh := Verifiers([]Source{{
+		kind: "oidc", issuer: iss.URL, audience: "hotserve",
 		claims: map[string]string{"repository": "org/blog"}, attribution: attributionClaims["github"],
-	}}, iss.client)
+	}}, iss.Client)
 	both := append(append([]Verifier{}, gh...), local...)
 	otherRSA, _ := rsa.GenerateKey(rand.Reader, 2048)
 	mint := func(aud string, claims map[string]string) string {
-		return iss.mint(t, iss.priv, aud, claims, time.Now().Add(5*time.Minute))
+		return iss.Mint(t, iss.Priv, aud, claims, time.Now().Add(5*time.Minute))
 	}
 	for _, tc := range []struct {
 		name string
@@ -518,16 +489,16 @@ func TestAuthorizeSaysWhy(t *testing.T) {
 		want []string // each in the refusal, in this order
 	}{
 		{"no token", local, "", []string{"no bearer token"}},
-		{"no source", nil, mintTestToken(t, priv, "aud1", nil), []string{"no deploy_trust source"}},
+		{"no source", nil, trusttest.Mint(t, priv, "aud1", nil), []string{"no deploy_trust source"}},
 		{"garbage", local, "not-a-jwt", []string{"local:test-key: "}},
-		{"wrong audience", local, mintTestToken(t, priv, "other", nil), []string{"local:test-key: ", "aud"}},
-		{"expired", local, mintExpiredToken(t, priv, "aud1", nil), []string{"local:test-key: ", "exp"}},
-		{"unknown signer", gh, iss.mint(t, otherRSA, "hotserve", nil, time.Now().Add(time.Minute)), []string{"oidc:" + iss.url + ": "}},
+		{"wrong audience", local, trusttest.Mint(t, priv, "other", nil), []string{"local:test-key: ", "aud"}},
+		{"expired", local, trusttest.MintExpired(t, priv, "aud1", nil), []string{"local:test-key: ", "exp"}},
+		{"unknown signer", gh, iss.Mint(t, otherRSA, "hotserve", nil, time.Now().Add(time.Minute)), []string{"oidc:" + iss.URL + ": "}},
 		{"claim mismatch names who tried", gh,
 			mint("hotserve", map[string]string{"repository": "org/other", "ref": "refs/heads/main", "actor": "alice"}),
-			[]string{"oidc:" + iss.url + ": claim \"repository\" mismatch, presented repository=org/other ref=refs/heads/main actor=alice"}},
+			[]string{"oidc:" + iss.URL + ": claim \"repository\" mismatch, presented repository=org/other ref=refs/heads/main actor=alice"}},
 		{"claim absent, nothing presented", gh, mint("hotserve", nil), []string{"claim \"repository\" absent from token, presented nothing"}},
-		{"every source, config order", both, "not-a-jwt", []string{"oidc:" + iss.url + ": ", "; local:test-key: "}},
+		{"every source, config order", both, "not-a-jwt", []string{"oidc:" + iss.URL + ": ", "; local:test-key: "}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			by, _, err := authorize(ctx, tc.vs, tc.tok)
@@ -561,8 +532,8 @@ func TestAuthorizeSaysWhy(t *testing.T) {
 			t.Fatalf("%s: authorized as %q", name, by.By)
 		}
 		got := err.Error()
-		if len(got) > len(gh[0].label())+2+maxRefusalLen+len("...") {
-			t.Errorf("%s: refusal is %d bytes; the reason must be cut at %d", name, len(got), maxRefusalLen)
+		if len(got) > len(gh[0].Label())+2+MaxRefusalLen+len("...") {
+			t.Errorf("%s: refusal is %d bytes; the reason must be cut at %d", name, len(got), MaxRefusalLen)
 		}
 		if !utf8.ValidString(got) || strings.ContainsRune(got, '\n') {
 			t.Errorf("%s: refusal is not one line of UTF-8: %q", name, got)
@@ -575,7 +546,7 @@ func TestAuthorizeSaysWhy(t *testing.T) {
 
 // TestBoundRefusal pins what a journal line needs of a refusal that
 // may carry request text: one line, valid UTF-8, and at most
-// maxRefusalLen bytes plus the ellipsis — whatever the bytes.
+// MaxRefusalLen bytes plus the ellipsis — whatever the bytes.
 func TestBoundRefusal(t *testing.T) {
 	if got := boundRefusal("plain: claim \"repository\" mismatch"); got != "plain: claim \"repository\" mismatch" {
 		t.Errorf("a plain refusal must pass through, got %q", got)
@@ -586,19 +557,19 @@ func TestBoundRefusal(t *testing.T) {
 	if got := boundRefusal("a\xffb"); got != `"a\xffb"` {
 		t.Errorf("a byte that is not UTF-8 must leave the refusal Go-quoted, got %q", got)
 	}
-	long := strings.Repeat("x", maxRefusalLen+50)
-	if got := boundRefusal(long); got != long[:maxRefusalLen]+"..." {
+	long := strings.Repeat("x", MaxRefusalLen+50)
+	if got := boundRefusal(long); got != long[:MaxRefusalLen]+"..." {
 		t.Errorf("an overlong refusal must be cut, got %d bytes", len(got))
 	}
 	for name, in := range map[string]string{
-		"emoji":        strings.Repeat("😀", maxRefusalLen),
-		"emoji at cut": strings.Repeat("x", maxRefusalLen-1) + "😀😀",
-		"newlines":     strings.Repeat("\n", maxRefusalLen),
-		"bad bytes":    strings.Repeat("\xff", maxRefusalLen),
+		"emoji":        strings.Repeat("😀", MaxRefusalLen),
+		"emoji at cut": strings.Repeat("x", MaxRefusalLen-1) + "😀😀",
+		"newlines":     strings.Repeat("\n", MaxRefusalLen),
+		"bad bytes":    strings.Repeat("\xff", MaxRefusalLen),
 	} {
 		got := boundRefusal(in)
-		if len(got) > maxRefusalLen+len("...") {
-			t.Errorf("%s: %d bytes, must be at most %d", name, len(got), maxRefusalLen+3)
+		if len(got) > MaxRefusalLen+len("...") {
+			t.Errorf("%s: %d bytes, must be at most %d", name, len(got), MaxRefusalLen+3)
 		}
 		if !utf8.ValidString(got) || strings.ContainsFunc(got, func(r rune) bool { return !strconv.IsPrint(r) && r != ' ' }) {
 			t.Errorf("%s: not one printable line of UTF-8: %q", name, got)
@@ -633,104 +604,4 @@ func TestMatchClaimsNumeric(t *testing.T) {
 		map[string]any{"groups": []any{"admin"}}); err == nil {
 		t.Error("array-valued claim must not match a string constraint")
 	}
-}
-
-// mockIssuer is a minimal OIDC provider: a discovery document and a
-// JWKS, backed by an RSA key, so oidcVerifier can be exercised offline.
-type mockIssuer struct {
-	url    string
-	client *http.Client
-	priv   *rsa.PrivateKey
-	kid    string
-	// discoveryDown / jwksDown make that endpoint answer 503: the
-	// issuer is up but the box cannot get what it needs from it.
-	discoveryDown, jwksDown atomic.Bool
-	// discoveredAs, when set, is the issuer the discovery document
-	// claims — someone other than the URL it was fetched from.
-	discoveredAs atomic.Value
-}
-
-func newMockIssuer(t *testing.T) *mockIssuer {
-	t.Helper()
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
-	}
-	iss := &mockIssuer{priv: priv, kid: "test-key"}
-	pubJWK := jose.JSONWebKey{Key: priv.Public(), KeyID: iss.kid, Algorithm: "RS256", Use: "sig"}
-	jwks := jose.JSONWebKeySet{Keys: []jose.JSONWebKey{pubJWK}}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
-		if iss.discoveryDown.Load() {
-			http.Error(w, "upstream unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		issuer := iss.url
-		if as, ok := iss.discoveredAs.Load().(string); ok && as != "" {
-			issuer = as
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"issuer":   issuer,
-			"jwks_uri": iss.url + "/jwks",
-		})
-	})
-	mux.HandleFunc("/jwks", func(w http.ResponseWriter, _ *http.Request) {
-		if iss.jwksDown.Load() {
-			http.Error(w, "upstream unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		_ = json.NewEncoder(w).Encode(jwks)
-	})
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	iss.url = srv.URL
-	iss.client = srv.Client()
-	return iss
-}
-
-// mint signs a token as this issuer (or with an off-key private key, to
-// exercise the unknown-signing-key path).
-func (iss *mockIssuer) mint(t *testing.T, priv *rsa.PrivateKey, audience string, claims map[string]string, exp time.Time) string {
-	t.Helper()
-	signer, err := jose.NewSigner(
-		jose.SigningKey{Algorithm: jose.RS256, Key: jose.JSONWebKey{Key: priv, KeyID: iss.kid}},
-		(&jose.SignerOptions{}).WithType("JWT"),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tok, err := jwt.Signed(signer).Claims(claimMap(iss.url, audience, time.Now(), exp, claims)).Serialize()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return tok
-}
-
-// mintClaims signs a token as this issuer with arbitrary custom claims,
-// so a test can carry a JSON number (not just string claims) in the
-// payload.
-func (iss *mockIssuer) mintClaims(t *testing.T, audience string, exp time.Time, custom map[string]any) string {
-	t.Helper()
-	signer, err := jose.NewSigner(
-		jose.SigningKey{Algorithm: jose.RS256, Key: jose.JSONWebKey{Key: iss.priv, KeyID: iss.kid}},
-		(&jose.SignerOptions{}).WithType("JWT"),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	m := map[string]any{
-		"iss": iss.url,
-		"aud": audience,
-		"iat": jwt.NewNumericDate(time.Now()),
-		"exp": jwt.NewNumericDate(exp),
-	}
-	for k, v := range custom {
-		m[k] = v
-	}
-	tok, err := jwt.Signed(signer).Claims(m).Serialize()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return tok
 }

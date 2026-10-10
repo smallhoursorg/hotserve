@@ -40,7 +40,7 @@ func FuzzRedactor(f *testing.F) {
 		if len(value) < secretMinLen || strings.ContainsAny(value, "\x00\n=") || !utf8.ValidString(value) {
 			return
 		}
-		r := newRedactor([]string{"SECRET=" + value}, nil)
+		r := NewRedactor([]string{"SECRET=" + value}, nil)
 		forms := []string{value, string(mustQuote(t, value)), base64.StdEncoding.EncodeToString([]byte(value)),
 			base64.RawStdEncoding.EncodeToString([]byte(value)), base64.URLEncoding.EncodeToString([]byte(value)),
 			base64.RawURLEncoding.EncodeToString([]byte(value)), hex.EncodeToString([]byte(value)),
@@ -54,7 +54,7 @@ func FuzzRedactor(f *testing.F) {
 			if (outcomeStatuses[value] || outcomePhases[value]) && outcomePairRe.MatchString(prefix+form+suffix) {
 				continue
 			}
-			out, keys := r.redact(prefix + form + suffix)
+			out, keys := r.Redact(prefix + form + suffix)
 			if strings.Contains(out, form) {
 				t.Fatalf("form %q of %q survived in %q", form, value, out)
 			}

@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/caddyserver/caddy/v2/caddytest"
+	"github.com/smallhoursorg/hotserve/liveswap/deploytrust/trusttest"
 )
 
 // The integration suite authenticates deploys with a local trust key:
@@ -33,7 +34,7 @@ import (
 // half (audience "itest"). itestPriv/itestPub reuse the shared
 // authtest helpers.
 var (
-	itestPriv, itestPub = mustGenTestKey()
+	itestPriv, itestPub = trusttest.GenerateKey()
 	itestPubPath        string
 	itestPubOnce        sync.Once
 )
@@ -59,7 +60,7 @@ func itestPubKeyPath() string {
 	return itestPubPath
 }
 
-func itestToken(t *testing.T) string { return mintTestToken(t, itestPriv, "itest", nil) }
+func itestToken(t *testing.T) string { return trusttest.Mint(t, itestPriv, "itest", nil) }
 
 // The integration suite runs a real Caddy (in-process via caddytest)
 // with the module loaded, deploys a real compiled test app through the
@@ -723,10 +724,10 @@ func TestIntegrationOIDCDeploy(t *testing.T) {
 
 	// Our own OIDC provider, in-process: serves discovery + JWKS and
 	// signs tokens, standing in for GitHub/GitLab.
-	iss := newMockIssuer(t)
+	iss := trusttest.NewIssuer(t)
 
 	tester := caddytest.NewTester(t)
-	tester.InitServer(oidcConfig(root, artifactURL.Port(), iss.url), "caddyfile")
+	tester.InitServer(oidcConfig(root, artifactURL.Port(), iss.URL), "caddyfile")
 
 	hook := "http://localhost:9081/oidcdemo"
 	deploy := func(token string) (int, string) {
@@ -744,7 +745,7 @@ func TestIntegrationOIDCDeploy(t *testing.T) {
 	future := time.Now().Add(5 * time.Minute)
 
 	t.Run("valid OIDC token deploys and serves", func(t *testing.T) {
-		tok := iss.mint(t, iss.priv, "e2e", map[string]string{"sub": "ci"}, future)
+		tok := iss.Mint(t, iss.Priv, "e2e", map[string]string{"sub": "ci"}, future)
 		if code, body := deploy(tok); code != http.StatusOK {
 			t.Fatalf("expected 200, got %d: %s", code, body)
 		}
@@ -757,21 +758,21 @@ func TestIntegrationOIDCDeploy(t *testing.T) {
 	// Each negative case is a validly-signed token that must still be
 	// rejected — the whole point of the claim allowlist.
 	t.Run("wrong identity claim is rejected", func(t *testing.T) {
-		tok := iss.mint(t, iss.priv, "e2e", map[string]string{"sub": "attacker"}, future)
+		tok := iss.Mint(t, iss.Priv, "e2e", map[string]string{"sub": "attacker"}, future)
 		if code, _ := deploy(tok); code != http.StatusUnauthorized {
 			t.Fatalf("expected 401 for wrong sub, got %d", code)
 		}
 	})
 
 	t.Run("wrong audience is rejected", func(t *testing.T) {
-		tok := iss.mint(t, iss.priv, "other", map[string]string{"sub": "ci"}, future)
+		tok := iss.Mint(t, iss.Priv, "other", map[string]string{"sub": "ci"}, future)
 		if code, _ := deploy(tok); code != http.StatusUnauthorized {
 			t.Fatalf("expected 401 for wrong audience, got %d", code)
 		}
 	})
 
 	t.Run("expired token is rejected", func(t *testing.T) {
-		tok := iss.mint(t, iss.priv, "e2e", map[string]string{"sub": "ci"}, time.Now().Add(-time.Hour))
+		tok := iss.Mint(t, iss.Priv, "e2e", map[string]string{"sub": "ci"}, time.Now().Add(-time.Hour))
 		if code, _ := deploy(tok); code != http.StatusUnauthorized {
 			t.Fatalf("expected 401 for expired token, got %d", code)
 		}

@@ -1,4 +1,13 @@
-package liveswap
+// Package deploytrust is how a webhook decides who sent a request: the
+// `deploy_trust` grammar and its verifiers — an OIDC issuer's JWKS or a
+// local public key, never a shared secret an app could read out of the
+// supervisor's environment — the preamble every webhook request passes
+// (Limiter.Authenticate), and what a failed attempt costs the journal
+// (Limiter). liveswap's deploy webhook and the box's config webhook both
+// authenticate here, on the one limiter Shared returns, so the two
+// cannot drift and one address has one budget. The package imports
+// nothing of liveswap's; trusttest beside it mints tokens for tests.
+package deploytrust
 
 import (
 	"bytes"
@@ -9,8 +18,10 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -47,7 +58,7 @@ const oidcLeeway = 60 * time.Second
 // TrustConfig is one `deploy_trust` block in Caddyfile/JSON form. Kind
 // is the preset named on the block (`github`, `gitlab`, `oidc`,
 // `local`); the remaining fields are resolved and validated into a
-// trustSource by buildTrust.
+// Source by Build.
 type TrustConfig struct {
 	Kind      string            `json:"kind,omitempty"`
 	Issuer    string            `json:"issuer,omitempty"`     // oidc/gitlab override
@@ -57,10 +68,10 @@ type TrustConfig struct {
 	Claims    map[string]string `json:"claims,omitempty"`     // exact-match claim constraints
 }
 
-// trustSource is a validated, resolved trust declaration: presets
+// Source is a validated, resolved trust declaration: presets
 // mapped to issuers, local public keys loaded, claims folded. It holds
-// no network state — verifiers are built from it in resolveVerifiers.
-type trustSource struct {
+// no network state — verifiers are built from it in Verifiers.
+type Source struct {
 	kind        string // "oidc" | "local"
 	issuer      string // oidc
 	audience    string
@@ -70,10 +81,10 @@ type trustSource struct {
 	attribution []string // the preset's attributionClaims, kept past the fold to "oidc"
 }
 
-// resolveTrustPlaceholders expands {env.*} (and other known Caddy
+// ResolvePlaceholders expands {env.*} (and other known Caddy
 // placeholders) in a slice of trust configs, in place. Kind is a
 // literal block token and is never a placeholder.
-func resolveTrustPlaceholders(repl *caddy.Replacer, tcs []TrustConfig) {
+func ResolvePlaceholders(repl *caddy.Replacer, tcs []TrustConfig) {
 	for i := range tcs {
 		tcs[i].Issuer = repl.ReplaceKnown(tcs[i].Issuer, "")
 		tcs[i].Audience = repl.ReplaceKnown(tcs[i].Audience, "")
@@ -85,17 +96,17 @@ func resolveTrustPlaceholders(repl *caddy.Replacer, tcs []TrustConfig) {
 	}
 }
 
-// buildTrust resolves the effective trust sources for one app. Per-app
+// Build resolves the effective trust sources for one app. Per-app
 // sources override the global default wholesale (same semantics as
 // artifact_allowlist), never append. It loads local public keys and
 // validates presets here so a bad key path or missing audience fails
 // config load — fail-closed, like the rest of liveswap's config.
-func buildTrust(global, perApp []TrustConfig) ([]trustSource, error) {
+func Build(global, perApp []TrustConfig) ([]Source, error) {
 	src := global
 	if len(perApp) > 0 {
 		src = perApp
 	}
-	out := make([]trustSource, 0, len(src))
+	out := make([]Source, 0, len(src))
 	for i, tc := range src {
 		ts, err := resolveTrustConfig(tc)
 		if err != nil {
@@ -106,24 +117,50 @@ func buildTrust(global, perApp []TrustConfig) ([]trustSource, error) {
 	return out, nil
 }
 
-// trustVerifiers is the verifiers for a set of deploy_trust blocks on
+// Resolve is the verifiers for a set of deploy_trust blocks on
 // one JWKS client: {env.*} placeholders resolved in place
-// (resolveTrustPlaceholders), presets validated and local keys loaded
-// (buildTrust — a bad key path or an unaudienced OIDC source is a
-// config error, fail-closed), then resolveVerifiers. Provision calls
-// it for liveswap's global set and NewTrust (export.go) for the box's,
+// (ResolvePlaceholders), presets validated and local keys loaded
+// (Build — a bad key path or an unaudienced OIDC source is a
+// config error, fail-closed), then Verifiers. Provision calls
+// it for liveswap's global set and New for the box's,
 // so the two cannot drift; the per-app sets, which fall back to the
-// global blocks, go through buildTrust beside it.
-func trustVerifiers(repl *caddy.Replacer, configs []TrustConfig, jwks *http.Client) ([]Verifier, error) {
-	resolveTrustPlaceholders(repl, configs)
-	sources, err := buildTrust(configs, nil)
+// global blocks, go through Build beside it.
+func Resolve(repl *caddy.Replacer, configs []TrustConfig, jwks *http.Client) ([]Verifier, error) {
+	ResolvePlaceholders(repl, configs)
+	sources, err := Build(configs, nil)
 	if err != nil {
 		return nil, err
 	}
-	return resolveVerifiers(sources, jwks), nil
+	return Verifiers(sources, jwks), nil
 }
 
-func resolveTrustConfig(tc TrustConfig) (trustSource, error) {
+// New is the verifiers for a set of `deploy_trust` blocks, for a
+// webhook that is not liveswap's — the box's: Resolve, on a JWKS
+// client that fetches over https only unless allowInsecure, with OIDC
+// discovery warmed in the background so the first request does not
+// pay for it. Two things liveswap's Provision does not do, because its
+// caller is itself: the placeholders are resolved on a copy, so
+// configs still read as parsed — a caller that renders or diffs its
+// config later writes {env.NAME}, never the value — and no source at
+// all is refused here, at config load, rather than as a 401 for every
+// token at request time.
+func New(configs []TrustConfig, allowInsecure bool) ([]Verifier, error) {
+	if len(configs) == 0 {
+		return nil, errors.New("deploy_trust: no source configured; a webhook with none would refuse every token")
+	}
+	own := slices.Clone(configs)
+	for i := range own {
+		own[i].Claims = maps.Clone(own[i].Claims)
+	}
+	vs, err := Resolve(caddy.NewReplacer(), own, NewJWKSClient(allowInsecure))
+	if err != nil {
+		return nil, err
+	}
+	Warm(vs)
+	return vs, nil
+}
+
+func resolveTrustConfig(tc TrustConfig) (Source, error) {
 	claims := make(map[string]string, len(tc.Claims)+1)
 	for k, v := range tc.Claims {
 		claims[k] = v
@@ -138,7 +175,7 @@ func resolveTrustConfig(tc TrustConfig) (trustSource, error) {
 		switch tc.Kind {
 		case "github":
 			if issuer != "" {
-				return trustSource{}, fmt.Errorf("github preset does not take an issuer (it is %s)", githubIssuer)
+				return Source{}, fmt.Errorf("github preset does not take an issuer (it is %s)", githubIssuer)
 			}
 			issuer = githubIssuer
 		case "gitlab":
@@ -147,37 +184,37 @@ func resolveTrustConfig(tc TrustConfig) (trustSource, error) {
 			}
 		case "oidc":
 			if issuer == "" {
-				return trustSource{}, fmt.Errorf("oidc requires an issuer")
+				return Source{}, fmt.Errorf("oidc requires an issuer")
 			}
 		}
 		if tc.Audience == "" {
-			return trustSource{}, fmt.Errorf("%s requires an audience (never trust an unaudienced token)", tc.Kind)
+			return Source{}, fmt.Errorf("%s requires an audience (never trust an unaudienced token)", tc.Kind)
 		}
 		if tc.PublicKey != "" {
-			return trustSource{}, fmt.Errorf("%s does not take a public_key", tc.Kind)
+			return Source{}, fmt.Errorf("%s does not take a public_key", tc.Kind)
 		}
 		if err := requireIdentityClaim(tc.Kind, claims); err != nil {
-			return trustSource{}, err
+			return Source{}, err
 		}
-		return trustSource{kind: "oidc", issuer: issuer, audience: tc.Audience, claims: claims, attribution: attributionClaims[tc.Kind]}, nil
+		return Source{kind: "oidc", issuer: issuer, audience: tc.Audience, claims: claims, attribution: attributionClaims[tc.Kind]}, nil
 
 	case "local":
 		if tc.PublicKey == "" {
-			return trustSource{}, fmt.Errorf("local requires a public_key path")
+			return Source{}, fmt.Errorf("local requires a public_key path")
 		}
 		if tc.Issuer != "" {
-			return trustSource{}, fmt.Errorf("local does not take an issuer")
+			return Source{}, fmt.Errorf("local does not take an issuer")
 		}
 		key, err := loadEd25519PublicKey(tc.PublicKey)
 		if err != nil {
-			return trustSource{}, fmt.Errorf("local public_key: %w", err)
+			return Source{}, fmt.Errorf("local public_key: %w", err)
 		}
-		return trustSource{kind: "local", audience: tc.Audience, pubKey: key, keyPath: tc.PublicKey, claims: claims, attribution: attributionClaims["local"]}, nil
+		return Source{kind: "local", audience: tc.Audience, pubKey: key, keyPath: tc.PublicKey, claims: claims, attribution: attributionClaims["local"]}, nil
 
 	case "":
-		return trustSource{}, fmt.Errorf("missing preset (use `deploy_trust github|gitlab|oidc|local { ... }`)")
+		return Source{}, fmt.Errorf("missing preset (use `deploy_trust github|gitlab|oidc|local { ... }`)")
 	default:
-		return trustSource{}, fmt.Errorf("unknown preset %q (use github|gitlab|oidc|local)", tc.Kind)
+		return Source{}, fmt.Errorf("unknown preset %q (use github|gitlab|oidc|local)", tc.Kind)
 	}
 }
 
@@ -218,17 +255,13 @@ func requireIdentityClaim(kind string, claims map[string]string) error {
 	return fmt.Errorf("%s requires an identity claim (one of: %s) — an audience alone authorizes every %s project", kind, strings.Join(identityClaims[kind], ", "), kind)
 }
 
-// newJWKSClient builds the HTTP client the OIDC verifier uses for
+// NewJWKSClient builds the HTTP client the OIDC verifier uses for
 // discovery and JWKS fetches. It refuses plain-http requests (and
 // https→http redirects) so a network attacker cannot swap the
 // verification keys and forge deploy tokens — unless allow_insecure_http
 // is set, the documented escape hatch for test rigs and LANs.
-func newJWKSClient(allowInsecure bool) *http.Client {
-	// IdleConnTimeout as http.DefaultTransport has it: a transport is
-	// built per config load, and the one a reload retires must let go
-	// of its idle issuer connections rather than hold them until the
-	// issuer closes them.
-	var rt http.RoundTripper = &http.Transport{Proxy: http.ProxyFromEnvironment, IdleConnTimeout: 90 * time.Second}
+func NewJWKSClient(allowInsecure bool) *http.Client {
+	var rt http.RoundTripper = &http.Transport{Proxy: http.ProxyFromEnvironment}
 	if !allowInsecure {
 		rt = httpsOnlyTransport{base: rt}
 	}
@@ -270,7 +303,7 @@ func loadEd25519PublicKey(path string) (ed25519.PublicKey, error) {
 
 // Verifier authenticates a raw bearer JWT for one trust source. The
 // name is exported for the box subsystem, which holds the verifiers
-// NewTrust builds and hands them to Authenticate (export.go); the
+// New builds and hands them to Authenticate; the
 // methods are not, so every implementation is this package's.
 type Verifier interface {
 	// verify returns a nil error iff the token's signature and standard
@@ -282,9 +315,9 @@ type Verifier interface {
 	// is an unavailable (errors.As) says the source could not be
 	// consulted at all, which is the box's failure, not the token's.
 	verify(ctx context.Context, rawToken string) (Identity, error)
-	// label names the source the way deployed_by and the journal do:
+	// Label names the source the way deployed_by and the journal do:
 	// oidc:<issuer> or local:<public key path>.
-	label() string
+	Label() string
 }
 
 // Identity is who a verified token is, as the source that accepted it
@@ -309,10 +342,10 @@ func (id Identity) Claim(name string) (value string, ok bool) {
 	return claimScalar(id.claims[name])
 }
 
-// resolveVerifiers turns validated trust sources into live verifiers.
+// Verifiers turns validated trust sources into live verifiers.
 // It is infallible: key loading and preset validation already happened
-// in buildTrust, so a config reload can rewire auth without error.
-func resolveVerifiers(sources []trustSource, jwksClient *http.Client) []Verifier {
+// in Build, so a config reload can rewire auth without error.
+func Verifiers(sources []Source, jwksClient *http.Client) []Verifier {
 	out := make([]Verifier, 0, len(sources))
 	for _, ts := range sources {
 		switch ts.kind {
@@ -331,12 +364,12 @@ func resolveVerifiers(sources []trustSource, jwksClient *http.Client) []Verifier
 	return out
 }
 
-// warmVerifiers best-effort pre-fetches OIDC discovery/JWKS in the
+// Warm best-effort pre-fetches OIDC discovery/JWKS in the
 // background so the first real deploy — and, importantly, the first
 // verification of a *known* app — does not pay the discovery latency
 // that would otherwise distinguish it (by timing) from an unknown app.
 // Errors are ignored; a real request retries.
-func warmVerifiers(verifierSets ...[]Verifier) {
+func Warm(verifierSets ...[]Verifier) {
 	for _, set := range verifierSets {
 		for _, v := range set {
 			if ov, ok := v.(*oidcVerifier); ok {
@@ -361,7 +394,7 @@ func warmVerifiers(verifierSets ...[]Verifier) {
 // deployer nothing real: the first valid token after the outage is
 // admitted from a throttled address. What an unavailable changes is
 // the journal: one line per source per window naming it, written
-// however spent the budgets are (authLimiter.outage) and whether or
+// however spent the budgets are (Limiter.outage) and whether or
 // not another source then accepted the token, so a CI loop retrying
 // through an issuer outage never leaves the journal quiet about the
 // cause, and neither does a fallback source that keeps deploys going.
@@ -404,22 +437,22 @@ func authorize(ctx context.Context, verifiers []Verifier, rawToken string) (who 
 		}
 		// The bound is on the reason alone — the label is the operator's
 		// config, and it must survive however long the reason is.
-		refused = append(refused, v.label()+": "+boundRefusal(err.Error()))
+		refused = append(refused, v.Label()+": "+boundRefusal(err.Error()))
 	}
 	return Identity{}, down, errors.New(strings.Join(refused, "; "))
 }
 
-// maxRefusalLen bounds one source's reason in the journal. A reason
+// MaxRefusalLen bounds one source's reason in the journal. A reason
 // can carry token-supplied text — an issuer library quotes the token's
 // audience or issuer in its error, and a claim mismatch names the
 // identity the token presented — so, like loggedAppName for the app
 // name, the size of a line an unauthenticated caller can write is
-// fixed; authLimiter bounds how many. The source's label in front of
+// fixed; Limiter bounds how many. The source's label in front of
 // it is the operator's own config and is not cut.
-const maxRefusalLen = 300
+const MaxRefusalLen = 300
 
 // boundRefusal makes a refusal one journal line of at most
-// maxRefusalLen bytes plus an ellipsis. One line first: a refusal
+// MaxRefusalLen bytes plus an ellipsis. One line first: a refusal
 // holding a control rune (a newline in a library's error would split
 // the line) or bytes that are not UTF-8 is Go-quoted to ASCII — the
 // rule attribute applies to claim values — and only then cut, at a
@@ -429,8 +462,8 @@ func boundRefusal(s string) string {
 	if !utf8.ValidString(s) || strings.ContainsFunc(s, func(r rune) bool { return !strconv.IsPrint(r) && r != ' ' }) {
 		s = strconv.QuoteToASCII(s)
 	}
-	if len(s) > maxRefusalLen {
-		s = cutRunes(s, maxRefusalLen) + "..."
+	if len(s) > MaxRefusalLen {
+		s = cutRunes(s, MaxRefusalLen) + "..."
 	}
 	return s
 }
@@ -493,7 +526,7 @@ type oidcVerifier struct {
 	idv *oidc.IDTokenVerifier
 }
 
-func (v *oidcVerifier) label() string { return "oidc:" + v.issuer }
+func (v *oidcVerifier) Label() string { return "oidc:" + v.issuer }
 
 func (v *oidcVerifier) ensure(ctx context.Context) (*oidc.IDTokenVerifier, error) {
 	v.mu.Lock()
@@ -511,7 +544,7 @@ func (v *oidcVerifier) ensure(ctx context.Context) (*oidc.IDTokenVerifier, error
 		if ctx.Err() != nil || errors.As(err, &mismatch) {
 			return nil, err
 		}
-		return nil, unavailable{v.label(), err}
+		return nil, unavailable{v.Label(), err}
 	}
 	v.idv = provider.Verifier(&oidc.Config{ClientID: v.audience})
 	return v.idv, nil
@@ -541,7 +574,7 @@ func (v *oidcVerifier) verify(ctx context.Context, rawToken string) (Identity, e
 		// A caller that went away mid-fetch gets the same text (the
 		// fetch waits on its ctx) and is not an outage.
 		if ctx.Err() == nil && strings.HasPrefix(err.Error(), keyFetchFailed) {
-			return Identity{}, unavailable{v.label(), err}
+			return Identity{}, unavailable{v.Label(), err}
 		}
 		return Identity{}, err
 	}
@@ -559,7 +592,7 @@ func (v *oidcVerifier) verify(ctx context.Context, rawToken string) (Identity, e
 	if err := matchClaims(v.claims, claims); err != nil {
 		return Identity{}, presentedErr(v.attribution, claims, err)
 	}
-	return Identity{By: attribute(v.label(), v.attribution, claims), claims: claims}, nil
+	return Identity{By: attribute(v.Label(), v.attribution, claims), claims: claims}, nil
 }
 
 // decodeClaims unmarshals a JWT claim set with numbers preserved as
@@ -591,7 +624,7 @@ type localVerifier struct {
 	attribution []string
 }
 
-func (v *localVerifier) label() string { return "local:" + v.keyPath }
+func (v *localVerifier) Label() string { return "local:" + v.keyPath }
 
 func (v *localVerifier) verify(_ context.Context, rawToken string) (Identity, error) {
 	tok, err := jwt.ParseSigned(rawToken, []jose.SignatureAlgorithm{jose.EdDSA})
@@ -627,7 +660,7 @@ func (v *localVerifier) verify(_ context.Context, rawToken string) (Identity, er
 	if err := matchClaims(v.claims, all); err != nil {
 		return Identity{}, presentedErr(v.attribution, all, err)
 	}
-	return Identity{By: attribute(v.label(), v.attribution, all), claims: all}, nil
+	return Identity{By: attribute(v.Label(), v.attribution, all), claims: all}, nil
 }
 
 // presentedErr is a claim refusal followed by the identity the token

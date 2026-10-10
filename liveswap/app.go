@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/smallhoursorg/hotserve/liveswap/deploytrust"
 	"go.uber.org/zap"
 )
 
@@ -26,7 +27,7 @@ type appSpec struct {
 	preStart           []string
 	env                map[string]string
 	envFile            string
-	trust              []trustSource
+	trust              []deploytrust.Source
 	healthPath         string // "" = no HTTP check (health_path off)
 	healthInterval     time.Duration
 	healthTimeout      time.Duration
@@ -254,7 +255,7 @@ type managedApp struct {
 	// readers take the snapshot accessors, never the fields.
 	specMu    sync.RWMutex
 	spec      *appSpec
-	verifiers []Verifier // resolved deploy-auth trust sources; rewired every reload
+	verifiers []deploytrust.Verifier // resolved deploy-auth trust sources; rewired every reload
 	runner    runner
 	prober    prober
 	fetch     fetcher
@@ -368,7 +369,7 @@ func (ma *managedApp) redactorFor(s statusSnapshot, names ...string) *Redactor {
 	// to, the app's dirs, and any the caller's body names that the
 	// status does not (the digests a refused pin reports,
 	// deployOutcome). Whoever named one, it exempts nothing:
-	// a safe string equal to a known value is dropped by newRedactor
+	// a safe string equal to a known value is dropped by NewRedactor
 	// (redact.go, rule 1).
 	safe := append([]string{ma.name, s.CurrentVersion}, s.AvailableVersions...)
 	safe = append(safe, names...)
@@ -381,7 +382,7 @@ func (ma *managedApp) redactorFor(s statusSnapshot, names ...string) *Redactor {
 	if spec != nil {
 		safe = append(safe, spec.dirs.root, spec.dirs.app, spec.dirs.releases, spec.dirs.shared, spec.dirs.run)
 	}
-	r := newRedactor(kvs, safe)
+	r := NewRedactor(kvs, safe)
 	if unread != nil {
 		// The values the running app holds are unknown to the filter,
 		// and the heuristics alone are not the promise: no body until
@@ -417,7 +418,7 @@ func mergeSecrets(have, add []string) []string {
 // a rollback restores.
 type appConfigState struct {
 	spec      *appSpec
-	verifiers []Verifier
+	verifiers []deploytrust.Verifier
 	logger    *zap.Logger
 	store     stateStore
 }
@@ -431,7 +432,7 @@ type appConfigState struct {
 // is read only when this managedApp has no runner yet, because a
 // pooled app keeps the runner — and so the connection — it was first
 // started with across every later reload.
-func (ma *managedApp) configure(owner any, spec *appSpec, verifiers []Verifier, logger *zap.Logger, clients *fetchClients, manager systemdConn) {
+func (ma *managedApp) configure(owner any, spec *appSpec, verifiers []deploytrust.Verifier, logger *zap.Logger, clients *fetchClients, manager systemdConn) {
 	ma.specMu.Lock()
 	defer ma.specMu.Unlock()
 	changed := ma.spec != nil && !specEqual(ma.spec, spec)
@@ -471,7 +472,7 @@ func specEqual(a, b *appSpec) bool {
 }
 
 // currentVerifiers snapshots the app's deploy-auth trust sources.
-func (ma *managedApp) currentVerifiers() []Verifier {
+func (ma *managedApp) currentVerifiers() []deploytrust.Verifier {
 	ma.specMu.RLock()
 	defer ma.specMu.RUnlock()
 	return ma.verifiers

@@ -1,0 +1,293 @@
+package deploytrust
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
+
+	"github.com/smallhoursorg/hotserve/liveswap/deploytrust/trusttest"
+)
+
+// forgetTestAddress is the cleanup for a test that charged the shared
+// limiter: the address, and the process window its failure was
+// counted in, so a repeated run (-count) starts as a fresh process
+// would.
+func forgetTestAddress(key string) {
+	shared.mu.Lock()
+	defer shared.mu.Unlock()
+	delete(shared.keys, key)
+	shared.global = failWindow{}
+}
+
+// charged reports whether the shared limiter holds a window for the
+// address.
+func charged(key string) bool {
+	shared.mu.Lock()
+	defer shared.mu.Unlock()
+	_, ok := shared.keys[key]
+	return ok
+}
+
+// oneAuthLine is the single `webhook auth failed` record the observer
+// holds, taken.
+func oneAuthLine(t *testing.T, logs *observer.ObservedLogs) observer.LoggedEntry {
+	t.Helper()
+	all := logs.TakeAll()
+	if len(all) != 1 || all[0].Message != "webhook auth failed" {
+		t.Fatalf("logged %d records, want the one auth-failed line: %+v", len(all), all)
+	}
+	return all[0]
+}
+
+func request(addr, token string) *http.Request {
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req.RemoteAddr = addr
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	return req
+}
+
+// TestAuthenticateOnTheSharedLimiter pins the preamble on the limiter
+// both webhooks share: one refusal through it is charged there and
+// answered with the flat 401 under the caller's field; an accepted
+// token is who it is, with the claim the box binds a bundle to, and
+// clears the address.
+func TestAuthenticateOnTheSharedLimiter(t *testing.T) {
+	priv, pub := trusttest.GenerateKey()
+	vs := Verifiers([]Source{localTrust(pub, "box")}, nil)
+	core, logs := observer.New(zap.WarnLevel)
+	logger := zap.New(core)
+	// An address of this test's own on the shared limiter, which no
+	// other test touches.
+	const addr, key = "203.0.113.9:4242", "203.0.113.9"
+	t.Cleanup(func() { forgetTestAddress(key) })
+
+	who, ref := Shared().Authenticate(request(addr, "not-a-jwt"), vs, logger, "webhook", "box")
+	if ref == nil || who.By != "" || ref.Status != http.StatusUnauthorized || ref.Message != unauthorizedMessage || ref.RetryAfter != 0 {
+		t.Fatalf("refused token: who = %+v, refusal = %+v; want the flat 401", who, ref)
+	}
+	if !charged(key) {
+		t.Fatalf("a refusal through the shared limiter was not charged to it")
+	}
+	h := http.Header{}
+	ref.SetHeaders(h)
+	if len(h) != 0 || ref.Body()["error"] != unauthorizedMessage {
+		t.Errorf("a 401 sets headers %v and body %v; want none and the flat message", h, ref.Body())
+	}
+	fields := oneAuthLine(t, logs).ContextMap()
+	if fields["webhook"] != "box" || fields["remote"] != key {
+		t.Errorf("fields = %v; want the caller's field and the address", fields)
+	}
+	if refused, _ := fields["refused"].(string); !strings.HasPrefix(refused, "local:test-key: ") {
+		t.Errorf("refused = %q, want the source's reason", refused)
+	}
+
+	const sha = "4f1c2a9d0e8b7c6a5f4e3d2c1b0a998877665544"
+	who, ref = Shared().Authenticate(request(addr, trusttest.Mint(t, priv, "box", map[string]string{"sub": "ci", "sha": sha})), vs, logger, "webhook", "box")
+	if ref != nil {
+		t.Fatalf("accepted token refused: %+v", ref)
+	}
+	if who.By != "local:test-key sub=ci" {
+		t.Errorf("By = %q, want the attribution a deploy record carries", who.By)
+	}
+	if got, ok := who.Claim("sha"); !ok || got != sha {
+		t.Errorf("Claim(sha) = %q, %v; want the token's", got, ok)
+	}
+	if got, ok := who.Claim("nope"); ok || got != "" {
+		t.Errorf("Claim(nope) = %q, %v; want absent", got, ok)
+	}
+	if charged(key) {
+		t.Errorf("an accepted token did not clear the address")
+	}
+	if logs.Len() != 0 {
+		t.Errorf("an accepted token wrote %d journal lines, want none: %+v", logs.Len(), logs.All())
+	}
+}
+
+// TestAuthenticateBudgetAndBound pins the preamble's budget on a
+// clocked limiter — ten failures logged, the eleventh a 429 whose
+// Retry-After is the window, the window draining it, a valid token
+// clearing it — and the bound on the caller's field: one line, the
+// length of a refusal, whatever the caller put in it; a value with a
+// control byte reads Go-quoted; no key is no field.
+func TestAuthenticateBudgetAndBound(t *testing.T) {
+	priv, pub := trusttest.GenerateKey()
+	vs := Verifiers([]Source{localTrust(pub, "box")}, nil)
+	core, logs := observer.New(zap.WarnLevel)
+	logger := zap.New(core)
+	clk := trusttest.NewClock()
+	l := NewLimiter(clk)
+	const addr = "203.0.113.10:4242"
+	call := func(token, key, value string) *Refusal {
+		t.Helper()
+		_, ref := l.Authenticate(request(addr, token), vs, logger, key, value)
+		return ref
+	}
+
+	for i := range FailBudget {
+		if ref := call("not-a-jwt", "webhook", "box"); ref == nil || ref.Status != http.StatusUnauthorized {
+			t.Fatalf("failure %d: refusal = %+v; want 401", i+1, ref)
+		}
+	}
+	if got := logs.TakeAll(); len(got) != FailBudget+1 {
+		t.Fatalf("logged %d records for %d failures; want each, and the line saying the budget is spent", len(got), FailBudget)
+	}
+	ref := call("not-a-jwt", "webhook", "box")
+	if ref == nil || ref.Status != http.StatusTooManyRequests || ref.RetryAfter != FailWindow || ref.Message != throttledMessage {
+		t.Fatalf("past the budget: refusal = %+v; want 429 for the window", ref)
+	}
+	h := http.Header{}
+	ref.SetHeaders(h)
+	if h.Get("Retry-After") != strconv.Itoa(int(FailWindow.Seconds())) {
+		t.Errorf("Retry-After = %q, want the window in seconds", h.Get("Retry-After"))
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("a throttled refusal was logged: %+v", logs.All())
+	}
+	clk.Advance(FailWindow)
+	if ref := call("not-a-jwt", "webhook", "box"); ref == nil || ref.Status != http.StatusUnauthorized {
+		t.Fatalf("after the window: refusal = %+v; want 401, the budget fresh", ref)
+	}
+	if ref := call(trusttest.Mint(t, priv, "box", nil), "webhook", "box"); ref != nil {
+		t.Fatalf("a valid token: refusal = %+v; want admitted", ref)
+	}
+	if l.Size() != 0 {
+		t.Fatalf("a valid token left %d addresses charged, want none", l.Size())
+	}
+	logs.TakeAll()
+
+	// The bound: whatever the caller put in the field, one line of at
+	// most a refusal's length.
+	long := strings.Repeat("r", 2*MaxRefusalLen) + "\n"
+	call("not-a-jwt", "ref", long)
+	if ref, _ := oneAuthLine(t, logs).ContextMap()["ref"].(string); len(ref) > MaxRefusalLen+len("...") || strings.Contains(ref, "\n") || !strings.HasPrefix(ref, `"rrr`) {
+		t.Errorf("ref = %d bytes %q; want one quoted line of at most %d bytes", len(ref), ref, MaxRefusalLen)
+	}
+
+	// A value with a control byte — an app name liveswap took from the
+	// request path — reads Go-quoted.
+	call("not-a-jwt", "app", "demo\n")
+	if app := oneAuthLine(t, logs).ContextMap()["app"]; app != strconv.QuoteToASCII("demo\n") {
+		t.Errorf("app = %q, want the value Go-quoted", app)
+	}
+
+	// No key is no field: the line is the address and the reason.
+	call("not-a-jwt", "", "")
+	if fields := oneAuthLine(t, logs).ContextMap(); len(fields) != 2 || fields["remote"] == nil || fields["refused"] == nil {
+		t.Errorf("fields = %v; want remote and refused alone", fields)
+	}
+}
+
+// TestIdentityClaimRendersAsMatchClaimsCompares pins the one rendering
+// rule: a number claim by its source digits, a bool as its word, a
+// composite claim as no value at all.
+func TestIdentityClaimRendersAsMatchClaimsCompares(t *testing.T) {
+	priv, pub := trusttest.GenerateKey()
+	vs := Verifiers([]Source{localTrust(pub, "box")}, nil)
+	now := time.Now()
+	m := trusttest.Claims("", "box", now, now.Add(5*time.Minute), map[string]string{"sub": "ci"})
+	m["repository_id"] = 100000000
+	m["roles"] = []string{"admin"}
+	m["verified"] = true
+	who, _, err := authorize(context.Background(), vs, trusttest.SignEdDSA(t, priv, m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]struct {
+		value string
+		ok    bool
+	}{
+		"repository_id": {"100000000", true},
+		"verified":      {"true", true},
+		"sub":           {"ci", true},
+		"roles":         {"", false},
+		"absent":        {"", false},
+	} {
+		if got, ok := who.Claim(name); got != want.value || ok != want.ok {
+			t.Errorf("Claim(%s) = %q, %v; want %q, %v", name, got, ok, want.value, want.ok)
+		}
+	}
+}
+
+// TestNewIsResolveOnACopy pins New to Resolve — the placeholder
+// resolution, the validation (the same refusal, word for word), the
+// https-only JWKS client unless allowInsecure, verifiers that accept
+// what the source accepts — and to the two things it does on its own:
+// the caller's config is left as parsed, and no source is a config
+// error.
+func TestNewIsResolveOnACopy(t *testing.T) {
+	ctx := context.Background()
+	priv, pub := trusttest.GenerateKey()
+	keyPath := trusttest.KeyFile(t, pub)
+
+	// A local source whose audience and subject are placeholders:
+	// resolved, as liveswap's Provision resolves them, so a token for
+	// the values is accepted and one for the placeholders' own text is
+	// not — and resolved on a copy, so the config still says {env.NAME}.
+	t.Setenv("HOTSERVE_TEST_AUDIENCE", "box")
+	t.Setenv("HOTSERVE_TEST_SUBJECT", "ci")
+	cfgs := []TrustConfig{{Kind: "local", PublicKey: keyPath, Audience: "{env.HOTSERVE_TEST_AUDIENCE}", Claims: map[string]string{"sub": "{env.HOTSERVE_TEST_SUBJECT}"}}}
+	vs, err := New(cfgs, false)
+	if err != nil || len(vs) != 1 || vs[0].Label() != "local:"+keyPath {
+		t.Fatalf("New(local) = %v, %v; want one verifier labelled local:%s", vs, err, keyPath)
+	}
+	if who, _, err := authorize(ctx, vs, trusttest.Mint(t, priv, "box", map[string]string{"sub": "ci"})); err != nil || who.By != "local:"+keyPath+" sub=ci" {
+		t.Errorf("a token for the resolved values: By = %q, %v; want accepted", who.By, err)
+	}
+	if _, _, err := authorize(ctx, vs, trusttest.Mint(t, priv, "{env.HOTSERVE_TEST_AUDIENCE}", map[string]string{"sub": "ci"})); err == nil {
+		t.Errorf("a token for the placeholder's own text was accepted: the audience was not resolved")
+	}
+	if _, _, err := authorize(ctx, vs, trusttest.Mint(t, priv, "box", map[string]string{"sub": "{env.HOTSERVE_TEST_SUBJECT}"})); err == nil {
+		t.Errorf("a token presenting the placeholder's own text was accepted: the claim was not resolved")
+	}
+	if cfgs[0].Audience != "{env.HOTSERVE_TEST_AUDIENCE}" || cfgs[0].Claims["sub"] != "{env.HOTSERVE_TEST_SUBJECT}" {
+		t.Errorf("New resolved the caller's config in place: %+v", cfgs[0])
+	}
+
+	// No source is refused at config load, not as a 401 per token.
+	if _, err := New(nil, false); err == nil || !strings.Contains(err.Error(), "no source") {
+		t.Errorf("New(nil) = %v; want a refusal naming the missing source", err)
+	}
+
+	// A source Build refuses is refused in Build's words.
+	bad := []TrustConfig{{Kind: "github", Audience: "hotserve"}}
+	_, got := New(bad, false)
+	_, want := Build(bad, nil)
+	if got == nil || want == nil || got.Error() != want.Error() {
+		t.Errorf("New(bad) = %v; Build = %v; want the same refusal", got, want)
+	}
+
+	// An OIDC source: the JWKS client is https-only unless
+	// allowInsecure. The test issuer speaks plain http, so only the
+	// insecure client reaches it; the other names it as unreachable.
+	// The warm each one starts is a single bounded discovery fetch
+	// that the issuer answers, or the https-only client refuses, at
+	// once; nothing of it outlives the test.
+	iss := trusttest.NewIssuer(t)
+	cfg := func() []TrustConfig {
+		return []TrustConfig{{Kind: "oidc", Issuer: iss.URL, Audience: "hotserve", Subject: "ci"}}
+	}
+	tok := iss.Mint(t, iss.Priv, "hotserve", map[string]string{"sub": "ci"}, time.Now().Add(5*time.Minute))
+	insecure, err := New(cfg(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if who, _, err := authorize(ctx, insecure, tok); err != nil || who.By != "oidc:"+iss.URL+" sub=ci" {
+		t.Errorf("allow_insecure_http: By = %q, %v; want the token accepted over plain http", who.By, err)
+	}
+	secure, err := New(cfg(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, down, err := authorize(ctx, secure, tok); err == nil || len(down) != 1 || !strings.Contains(err.Error(), "refusing non-https") {
+		t.Errorf("https only: err = %v, down = %d; want the issuer refused as unreachable over http", err, len(down))
+	}
+}

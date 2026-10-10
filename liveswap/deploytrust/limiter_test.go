@@ -1,4 +1,4 @@
-package liveswap
+package deploytrust
 
 import (
 	"context"
@@ -9,11 +9,13 @@ import (
 	"time"
 
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
+
+	"github.com/smallhoursorg/hotserve/liveswap/deploytrust/trusttest"
 )
 
 func TestAuthLimiterWindow(t *testing.T) {
-	clk := newFakeClock()
-	l := newAuthLimiter(clk)
+	clk := trusttest.NewClock()
+	l := NewLimiter(clk)
 	l.budget, l.window = 3, time.Minute
 
 	// Failures at t=0, 10s, 20s: the third spends the budget.
@@ -61,8 +63,8 @@ func TestAuthLimiterWindow(t *testing.T) {
 	// A success clears the address entirely.
 	l.clear("a")
 	l.clear("b")
-	if l.size() != 0 {
-		t.Fatalf("clear left %d addresses", l.size())
+	if l.Size() != 0 {
+		t.Fatalf("clear left %d addresses", l.Size())
 	}
 }
 
@@ -70,8 +72,8 @@ func TestAuthLimiterWindow(t *testing.T) {
 // from: past it, failures are still counted per address (so a
 // throttled one still gets 429) but nothing is logged.
 func TestAuthLimiterGlobalBudget(t *testing.T) {
-	clk := newFakeClock()
-	l := newAuthLimiter(clk)
+	clk := trusttest.NewClock()
+	l := NewLimiter(clk)
 	l.budget, l.globalBudget, l.window = 3, 5, time.Minute
 
 	logged := 0
@@ -110,21 +112,21 @@ func TestAuthLimiterGlobalBudget(t *testing.T) {
 // drained addresses go first, then arbitrary ones, and a fresh address
 // is always admitted.
 func TestAuthLimiterBoundsTrackedAddresses(t *testing.T) {
-	clk := newFakeClock()
-	l := newAuthLimiter(clk)
+	clk := trusttest.NewClock()
+	l := NewLimiter(clk)
 	l.maxKeys = 8
 	for i := range 80 {
 		l.fail("addr-" + strconv.Itoa(i))
-		if l.size() > l.maxKeys {
-			t.Fatalf("tracking %d addresses, max %d", l.size(), l.maxKeys)
+		if l.Size() > l.maxKeys {
+			t.Fatalf("tracking %d addresses, max %d", l.Size(), l.maxKeys)
 		}
 	}
 	// With every tracked address drained, room is made by the sweep
 	// alone and the survivor is the fresh one.
 	clk.Advance(l.window + time.Second)
 	l.fail("fresh")
-	if l.size() != 1 {
-		t.Fatalf("drained addresses survived the sweep: %d tracked", l.size())
+	if l.Size() != 1 {
+		t.Fatalf("drained addresses survived the sweep: %d tracked", l.Size())
 	}
 }
 
@@ -159,8 +161,8 @@ func TestClientKey(t *testing.T) {
 // touches no address: the outage is the box's, and its bound is the
 // number of configured sources.
 func TestAuthLimiterOutageOncePerWindowPerSource(t *testing.T) {
-	clk := newFakeClock()
-	l := newAuthLimiter(clk)
+	clk := trusttest.NewClock()
+	l := NewLimiter(clk)
 	l.window = time.Minute
 	if !l.outage("oidc:a") {
 		t.Fatal("first outage of a source must be logged")
@@ -184,8 +186,8 @@ func TestAuthLimiterOutageOncePerWindowPerSource(t *testing.T) {
 	if _, kept := l.outages["oidc:b"]; kept || len(l.outages) != 1 {
 		t.Fatalf("outages = %v, want the one live label", l.outages)
 	}
-	if l.size() != 0 {
-		t.Fatalf("outages tracked %d addresses, want none", l.size())
+	if l.Size() != 0 {
+		t.Fatalf("outages tracked %d addresses, want none", l.Size())
 	}
 	// And the address budget is untouched by them.
 	if v := l.fail("203.0.113.9"); !v.log || v.throttled || len(l.keys["203.0.113.9"].times) != 1 {

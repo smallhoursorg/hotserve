@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
+	"github.com/smallhoursorg/hotserve/liveswap/deploytrust"
 	"go.uber.org/zap"
 )
 
@@ -63,7 +64,7 @@ type App struct {
 	// verifies it (OIDC against an issuer's public JWKS, or a local
 	// public key). No shared secret ever lives on the box. Every app
 	// must resolve to at least one source — config load fails otherwise.
-	DeployTrust []TrustConfig `json:"deploy_trust,omitempty"`
+	DeployTrust []deploytrust.TrustConfig `json:"deploy_trust,omitempty"`
 
 	// AllowInsecureHTTP permits artifact downloads over plain http.
 	// Default false (https only). Exists for test rigs and LAN setups.
@@ -125,12 +126,12 @@ type App struct {
 	sandboxProbe    func(*zap.Logger) error
 	processManager  managerClient
 	allowlist       []artifactAllowEntry
-	globalVerifiers []Verifier
+	globalVerifiers []deploytrust.Verifier
 	// appVerifiers is each app's resolved deploy_trust, built once in
 	// Provision and installed by Start. The OIDC discovery/JWKS cache
 	// lives on the verifier object, so the set Provision warms must be
 	// the set the handler is later handed — not a fresh resolution.
-	appVerifiers map[string][]Verifier
+	appVerifiers map[string][]deploytrust.Verifier
 }
 
 // AppConfig defines one managed application.
@@ -156,7 +157,7 @@ type AppConfig struct {
 
 	// DeployTrust overrides the global deploy-auth trust sources for
 	// this app (replaces, not appends).
-	DeployTrust []TrustConfig `json:"deploy_trust,omitempty"`
+	DeployTrust []deploytrust.TrustConfig `json:"deploy_trust,omitempty"`
 
 	// ArtifactAllowlist overrides the global allowlist for this app
 	// (same entry syntax; replaces, not appends).
@@ -283,14 +284,14 @@ func (a *App) Provision(ctx caddy.Context) error {
 		download: newDownloadClient(a.AllowInsecureHTTP),
 		// The JWKS client fetches OIDC issuers' public keys over https
 		// only (unless allow_insecure_http), with a bounded timeout.
-		jwks: newJWKSClient(a.AllowInsecureHTTP),
+		jwks: deploytrust.NewJWKSClient(a.AllowInsecureHTTP),
 	}
 	// Global trust sources back the unknown-app path: a request for an
 	// app that does not exist is still authenticated (against the
 	// global sources) before its 404, so app names never leak to
 	// unauthenticated callers. The same wiring serves the box webhook
-	// (NewTrust, export.go).
-	if a.globalVerifiers, err = trustVerifiers(repl, a.DeployTrust, clients.jwks); err != nil {
+	// (New).
+	if a.globalVerifiers, err = deploytrust.Resolve(repl, a.DeployTrust, clients.jwks); err != nil {
 		return err
 	}
 
@@ -339,14 +340,14 @@ func (a *App) Provision(ctx caddy.Context) error {
 	// known app is not slower (by JWKS-fetch latency) than an unknown one.
 	// The objects warmed here are the ones Start installs (appVerifiers):
 	// resolving again at Start would hand the handler a cold set.
-	a.appVerifiers = make(map[string][]Verifier, len(specs))
-	sets := [][]Verifier{a.globalVerifiers}
+	a.appVerifiers = make(map[string][]deploytrust.Verifier, len(specs))
+	sets := [][]deploytrust.Verifier{a.globalVerifiers}
 	for name, spec := range specs {
-		vs := resolveVerifiers(spec.trust, clients.jwks)
+		vs := deploytrust.Verifiers(spec.trust, clients.jwks)
 		a.appVerifiers[name] = vs
 		sets = append(sets, vs)
 	}
-	warmVerifiers(sets...)
+	deploytrust.Warm(sets...)
 	return nil
 }
 
@@ -376,7 +377,7 @@ func caddyExiting() bool {
 }
 
 func (cfg *AppConfig) applyDefaults(repl *caddy.Replacer) {
-	resolveTrustPlaceholders(repl, cfg.DeployTrust)
+	deploytrust.ResolvePlaceholders(repl, cfg.DeployTrust)
 	cfg.EnvFile = repl.ReplaceKnown(cfg.EnvFile, "")
 	for i, e := range cfg.ArtifactAllowlist {
 		cfg.ArtifactAllowlist[i] = repl.ReplaceKnown(e, "")
@@ -453,7 +454,7 @@ func (a *App) buildSpec(name string, cfg *AppConfig) (*appSpec, error) {
 			return nil, fmt.Errorf("app %s: %w", name, err)
 		}
 	}
-	trust, err := buildTrust(a.DeployTrust, cfg.DeployTrust)
+	trust, err := deploytrust.Build(a.DeployTrust, cfg.DeployTrust)
 	if err != nil {
 		return nil, fmt.Errorf("app %s: %w", name, err)
 	}

@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
+
+	"github.com/smallhoursorg/hotserve/liveswap/deploytrust"
 )
 
 // defaultedApp mirrors what Provision produces for an app with only a
@@ -87,7 +89,7 @@ func TestBuildSpecTranslatesConfig(t *testing.T) {
 	if spec.dirs.releases != "/var/lib/liveswap/blog/releases" {
 		t.Errorf("dirs wrong: %+v", spec.dirs)
 	}
-	if len(spec.trust) != 1 || spec.trust[0].kind != "oidc" {
+	if len(spec.trust) != 1 || deploytrust.Verifiers(spec.trust, nil)[0].Label() != "oidc:https://token.actions.githubusercontent.com" {
 		t.Errorf("trust not carried over: %+v", spec.trust)
 	}
 	if spec.soak != 15*time.Second || spec.keep != 5 {
