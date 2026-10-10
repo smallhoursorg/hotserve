@@ -82,8 +82,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	if r.URL.Path != "/" {
 		return next.ServeHTTP(w, r)
 	}
+	// A query is present when the target has a `?`, an empty one
+	// included (ForceQuery): `GET /?` is a query on `/`, as PR 3's result
+	// route will read it, not the baseline.
+	queried := r.URL.RawQuery != "" || r.URL.ForceQuery
 	switch {
-	case r.Method == http.MethodGet && r.URL.RawQuery == "":
+	case r.Method == http.MethodGet && !queried:
 		return h.status(w, r)
 	case r.Method == http.MethodGet:
 		return h.notYet(w, r, "result")

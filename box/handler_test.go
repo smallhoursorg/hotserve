@@ -338,7 +338,7 @@ func TestHandlerPushUntilTheApplier(t *testing.T) {
 // Box-Poll Authorization is a request without a bearer.
 func TestHandlerResultUntilTheApplier(t *testing.T) {
 	r := newRig(t)
-	for _, target := range []string{"/?result=0123456789abcdef0123456789abcdef", "/?result=", "/?x=1", "/?%ZZ"} {
+	for _, target := range []string{"/?result=0123456789abcdef0123456789abcdef", "/?result=", "/?x=1", "/?%ZZ", "/?"} {
 		wantError(t, r.do(t, req{target: target, token: r.token(t)}), http.StatusNotImplemented, msgNoApplier)
 	}
 	poll := http.Header{"Authorization": {"Box-Poll " + strings.Repeat("A", 43) + "="}}

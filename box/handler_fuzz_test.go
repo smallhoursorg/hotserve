@@ -17,18 +17,20 @@ import (
 // a method other than GET or POST is 405 before authentication; and
 // nothing without the bearer gets past the preamble — the flat 401,
 // charged, and never a body that says more. With the bearer, `GET /`
-// answers the baseline (409 here: none yet) and anything else is 501.
+// answers the baseline (409 here: none yet) and anything else — `GET /?`
+// with an empty query among it — is 501.
 func FuzzHandlerRoute(f *testing.F) {
-	f.Add("GET", "/", "", "", false)
-	f.Add("GET", "/", "result=0123456789abcdef0123456789abcdef", "Box-Poll "+strings.Repeat("A", 43)+"=", false)
-	f.Add("POST", "/", "", "", true)
-	f.Add("GET", "/x", "result=1", "", false)
-	f.Add("PUT", "/", "", "Bearer x", false)
-	f.Add("GET", "//", "", "", true)
-	f.Add("GET", "/", "%ZZ", "", true)
+	f.Add("GET", "/", "", false, "", false)
+	f.Add("GET", "/", "", true, "", true)
+	f.Add("GET", "/", "result=0123456789abcdef0123456789abcdef", false, "Box-Poll "+strings.Repeat("A", 43)+"=", false)
+	f.Add("POST", "/", "", false, "", true)
+	f.Add("GET", "/x", "result=1", false, "", false)
+	f.Add("PUT", "/", "", false, "Bearer x", false)
+	f.Add("GET", "//", "", false, "", true)
+	f.Add("GET", "/", "%ZZ", false, "", true)
 
 	r := newRig(f)
-	f.Fuzz(func(t *testing.T, method, path, query, auth string, bearer bool) {
+	f.Fuzz(func(t *testing.T, method, path, query string, forceQuery bool, auth string, bearer bool) {
 		if method == "" || strings.ContainsAny(method, " \t\r\n") {
 			return // not a method net/http would hand a handler
 		}
@@ -38,6 +40,7 @@ func FuzzHandlerRoute(f *testing.F) {
 		hr.Method = method
 		hr.URL.Path = path
 		hr.URL.RawQuery = query
+		hr.URL.ForceQuery = forceQuery
 		hr.Header["Authorization"] = []string{auth}
 		if bearer {
 			// Minted per iteration: a token lives five minutes, a
@@ -63,7 +66,7 @@ func FuzzHandlerRoute(f *testing.F) {
 			want = http.StatusMethodNotAllowed
 		case !bearer:
 			want, charged = http.StatusUnauthorized, 1
-		case method == http.MethodGet && query == "":
+		case method == http.MethodGet && query == "" && !forceQuery:
 			want = http.StatusConflict
 		default:
 			want = http.StatusNotImplemented
