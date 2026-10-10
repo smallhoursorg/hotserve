@@ -30,7 +30,10 @@ func parseLevel(vals []string) int {
 // the client. Bodies are never buffered — header-time interception only.
 type hintInterceptor struct {
 	http.ResponseWriter
-	handler     *Handler
+	handler *Handler
+	// key is the store key the hint counts against. With an empty key
+	// (a request that failed open in ServeHTTP) the hint is never
+	// counted, but stripping still follows strip.
 	key         string
 	intercepted bool
 }
@@ -72,7 +75,7 @@ func (rw *hintInterceptor) intercept() {
 	if h.stripOn {
 		delete(rw.Header(), h.headerCanon)
 	}
-	if level >= h.MinLevel {
+	if rw.key != "" && level >= h.MinLevel {
 		if h.store.add(rw.key, level) {
 			h.logger.Debug("client boxed",
 				zap.String("key", rw.key),

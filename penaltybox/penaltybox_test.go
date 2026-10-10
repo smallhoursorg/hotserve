@@ -147,13 +147,83 @@ func TestServeHTTPLevel1NeverAllocates(t *testing.T) {
 	}
 }
 
+// An unresolvable key fails open: never counted, never boxed. Its hint
+// header is handled exactly as on the counted path, though: stripped
+// with strip on, passed through with strip off.
 func TestServeHTTPEmptyKeyFailsOpen(t *testing.T) {
-	h, _ := newTestHandler(newFakeClock(), storeConfig{})
+	for _, strip := range []bool{true, false} {
+		t.Run("strip="+strconv.FormatBool(strip), func(t *testing.T) {
+			h, st := newTestHandler(newFakeClock(), storeConfig{limit: 5, penaltyTTL: time.Minute})
+			h.Key = "{test.missing}" // resolves to empty
+			h.stripOn = strip
+
+			// Three level-3 responses are 9 units: past limit 5, had
+			// they counted.
+			for i := 0; i < 3; i++ {
+				rec := serveReq(t, h, "unused", levelNext("3"))
+				if rec.Code != http.StatusOK || rec.Body.String() != "ok" {
+					t.Fatalf("request %d: unresolvable key must fail open, got %d %q", i, rec.Code, rec.Body.String())
+				}
+				got := rec.Result().Header.Values("X-Rate-Limit-Level")
+				if strip && len(got) != 0 {
+					t.Fatalf("request %d: with strip on the hint must be stripped on the empty-key path, got %v", i, got)
+				}
+				if !strip && (len(got) != 1 || got[0] != "3") {
+					t.Fatalf("request %d: with strip off the hint must pass through, got %v", i, got)
+				}
+			}
+			if got := st.size(); got != 0 {
+				t.Fatalf("an empty key must never be counted, got %d store entries", got)
+			}
+
+			// A keyed client starts from zero: its one level-3 response
+			// (3 units) stays under limit 5.
+			h.Key = "{test.client}"
+			if rec := serveReq(t, h, "client-a", levelNext("3")); rec.Code != http.StatusOK {
+				t.Fatalf("keyed client must pass, got %d", rec.Code)
+			}
+			if rec := serveReq(t, h, "client-a", levelNext("1")); rec.Code != http.StatusOK {
+				t.Fatalf("keyed client under its budget must not be boxed, got %d", rec.Code)
+			}
+		})
+	}
+}
+
+// The empty-key path keeps the interceptor's streaming guarantees: the
+// hint is stripped when the first Write flushes an implicit 200, and a
+// streaming handler can still flush through http.ResponseController.
+// (httptest.ResponseRecorder takes a 1xx for the final status, so the
+// 1xx case is TestInterceptEmptyKey1xxPassthrough.)
+func TestServeHTTPEmptyKeyStreams(t *testing.T) {
+	h, st := newTestHandler(newFakeClock(), storeConfig{})
 	h.Key = "{test.missing}" // resolves to empty
 
-	rec := serveReq(t, h, "unused", levelNext("3"))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("unresolvable key must fail open, got %d", rec.Code)
+	var flushErr error
+	next := caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+		w.Header().Set("X-Rate-Limit-Level", "3")
+		if _, err := w.Write([]byte("chunk")); err != nil {
+			return err
+		}
+		flushErr = http.NewResponseController(w).Flush()
+		_, err := w.Write([]byte(" more"))
+		return err
+	})
+	rec := serveReq(t, h, "unused", next)
+
+	if flushErr != nil {
+		t.Fatalf("Flush through the empty-key path failed: %v", flushErr)
+	}
+	if !rec.Flushed {
+		t.Fatal("Flush did not reach the underlying writer")
+	}
+	if rec.Code != http.StatusOK || rec.Body.String() != "chunk more" {
+		t.Fatalf("final response must be the implicit 200 with the whole body, got %d %q", rec.Code, rec.Body.String())
+	}
+	if got := rec.Result().Header.Values("X-Rate-Limit-Level"); len(got) != 0 {
+		t.Fatalf("hint must be stripped from the final response, got %v", got)
+	}
+	if got := st.size(); got != 0 {
+		t.Fatalf("an empty key must never be counted, got %d store entries", got)
 	}
 }
 

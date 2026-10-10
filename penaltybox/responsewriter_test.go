@@ -123,6 +123,32 @@ func TestIntercept1xxPassthrough(t *testing.T) {
 	}
 }
 
+// The empty key a fail-open request carries keeps the 1xx passthrough:
+// the interim response is not intercepted, the final one is stripped,
+// and nothing is counted.
+func TestInterceptEmptyKey1xxPassthrough(t *testing.T) {
+	h, st := newTestHandler(newFakeClock(), storeConfig{})
+	rec := httptest.NewRecorder()
+	rw := &hintInterceptor{ResponseWriter: rec, handler: h, key: ""}
+
+	rw.WriteHeader(http.StatusEarlyHints)
+	if rw.intercepted {
+		t.Fatal("1xx must not trigger interception")
+	}
+
+	rw.Header().Set("X-Rate-Limit-Level", "3")
+	rw.WriteHeader(http.StatusOK)
+	if !rw.intercepted {
+		t.Fatal("the final response must trigger interception")
+	}
+	if got := rec.Header().Get("X-Rate-Limit-Level"); got != "" {
+		t.Errorf("final response header should be stripped, got %q", got)
+	}
+	if got := st.size(); got != 0 {
+		t.Errorf("an empty key must never be counted, got %d store entries", got)
+	}
+}
+
 func TestIntercept101IsFinal(t *testing.T) {
 	// 101 Switching Protocols is the final response of an upgrade, not
 	// an interim 1xx: the hint must be counted and stripped.

@@ -73,17 +73,16 @@ so users can cross-check without leaving the repo.
   units to the client's sliding-window counter. If the window total
   crosses `limit`, insert the key into the penalty box with `penalty_ttl`.
 - **Stripping.** When `strip` is on (default), remove the header before it
-  is written to the client — including on counted, uncounted, and 429
-  responses. Note the Caddy-specific trap below.
+  is written to the client — including on counted, uncounted, 429, and
+  empty-key (fail-open) responses. Note the Caddy-specific trap below.
 - **Key resolution.** Default `{client_ip}` — Caddy's placeholder that
   respects the server's `trusted_proxies` configuration. Do NOT default to
   a raw `X-Forwarded-For` read; XFF trust is the server config's job, same
   as the CMS refuses to own it. A key that resolves to an empty string
   fails open: the request passes to the next handler, uncounted and
-  never boxed, rather than every such request sharing one budget. On
-  that path the hint header is not stripped either (a known gap
-  against the stripping rule above). With a header-based key, a client
-  that omits the header is never limited. The default key,
+  never boxed, rather than every such request sharing one budget; its
+  hint header is still stripped by the rule above. With a header-based
+  key, a client that omits the header is never limited. The default key,
   `{http.vars.client_ip}`, falls back to the connection's address, so
   it does not go empty that way; `{client_ip}` is its Caddyfile
   shorthand only, and in JSON config it is an unknown placeholder that

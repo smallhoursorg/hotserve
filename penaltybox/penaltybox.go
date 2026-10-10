@@ -37,8 +37,8 @@ type Handler struct {
 	// server config's job, not this module's. "{client_ip}" is only a
 	// Caddyfile shorthand; in JSON it is an unknown placeholder. A key
 	// that resolves to "" fails open: the request passes to the next
-	// handler uncounted, never boxed, and with its hint header
-	// unstripped (see ServeHTTP). A key whose whole value
+	// handler uncounted and never boxed, though its hint header is
+	// still stripped (see ServeHTTP). A key whose whole value
 	// resolves to a single IP address is masked (see maskKey): IPv4,
 	// IPv4-mapped IPv6 and NAT64 well-known (64:ff9b::/96) addresses
 	// count per IPv4 address, any other IPv6 address under its /64.
@@ -262,8 +262,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	repl := r.Context().Value(caddy.ReplacerCtxKey).(*caddy.Replacer)
 	key := repl.ReplaceAll(h.Key, "")
 	if key == "" {
-		// No resolvable key — fail open rather than box the world.
-		return next.ServeHTTP(w, r)
+		// No resolvable key — fail open rather than box the world: skip
+		// the box check and count nothing (the interceptor never counts
+		// an empty key), but still strip the hint when strip is on.
+		return h.serveNext(w, r, next, "")
 	}
 	key = maskKey(key)
 
@@ -281,6 +283,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		return nil
 	}
 
+	return h.serveNext(w, r, next, key)
+}
+
+// serveNext runs the next handler behind a hintInterceptor for key, then
+// finalizes it so that a handler which wrote nothing still has its hint
+// read and stripped before Caddy writes the response.
+func (h *Handler) serveNext(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler, key string) error {
 	rw := &hintInterceptor{ResponseWriter: w, handler: h, key: key}
 	err := next.ServeHTTP(rw, r)
 	rw.finalize()
