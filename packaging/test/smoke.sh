@@ -220,11 +220,11 @@ for p in "$B/smoke" "$B/out/smoke" "$B/work/smoke"; do
 done
 as_hotserve "ls $B/work" && die "the hotserve uid can list $B/work"
 # The units run: the service's ExecStart swapped for a stub by a runtime
-# drop-in, everything else as shipped. The hotserve uid drops entries
-# into in/ as hostile as it can make them; the stub, inside the unit's
-# sandbox, reloads hotserve, verifies a signature as uid 65534 under its
-# PrivateTmp, kills a child of that uid, writes where it may and not
-# elsewhere, and moves and removes the hostile entries.
+# drop-in, everything else as shipped. In the first run the stub probes
+# the sandbox — reloads hotserve, verifies a signature as uid 65534
+# under its PrivateTmp, kills a child of that uid, writes where it may
+# and not elsewhere; in every run it moves whatever is in in/ to work/,
+# empties work/ and removes the record, as the applier does.
 sig=/root/box-smoke
 rm -rf "$sig"; mkdir -p "$sig"
 ssh-keygen -q -t ed25519 -N '' -C smoke -f "$sig/key"
@@ -237,63 +237,65 @@ B=/var/lib/hotserve-box
 out=$B/smoke-result
 : >"$out"
 r() { echo "$1=$2" >>"$out"; }
-systemctl reload hotserve; r reload $?
-d=$(mktemp -d /tmp/box-verify-smoke.XXXXXX)
-cp /root/box-smoke/payload.sig /root/box-smoke/allowed "$d/" && chmod 755 "$d" && chmod 644 "$d"/*
-setpriv --reuid=65534 --regid=65534 --clear-groups env -i PATH=/usr/bin:/bin \
-	ssh-keygen -Y verify -f "$d/allowed" -I smoke -n git -s "$d/payload.sig" </root/box-smoke/payload >/dev/null 2>&1
-r verify $?
-rm -rf "$d"
-setpriv --reuid=65534 --regid=65534 --clear-groups sleep 30 &
-child=$!
-# Killed only once it is uid 65534: before setpriv's switch it is
-# root's own, and the kill would pass without CAP_KILL.
-i=0
-until [ "$(awk '/^Uid:/ {print $2}' /proc/$child/status 2>/dev/null)" = 65534 ]; do
-	i=$((i + 1)); [ "$i" -ge 100 ] && break
-	sleep 0.05
-done
-r childuid "$(awk '/^Uid:/ {print $2}' /proc/$child/status 2>/dev/null)"
-kill "$child"; r kill $?
-wait "$child"
-touch /etc/hotserve/.smoke-box && rm /etc/hotserve/.smoke-box; r etc $?
-touch /var/lib/hotserve/.smoke-box 2>/dev/null; r varlibhotserve $?
+if [ -e /run/hotserve-box-smoke.probe ]; then
+	systemctl reload hotserve; r reload $?
+	d=$(mktemp -d /tmp/box-verify-smoke.XXXXXX)
+	cp /root/box-smoke/payload.sig /root/box-smoke/allowed "$d/" && chmod 755 "$d" && chmod 644 "$d"/*
+	setpriv --reuid=65534 --regid=65534 --clear-groups env -i PATH=/usr/bin:/bin \
+		ssh-keygen -Y verify -f "$d/allowed" -I smoke -n git -s "$d/payload.sig" </root/box-smoke/payload >/dev/null 2>&1
+	r verify $?
+	rm -rf "$d"
+	setpriv --reuid=65534 --regid=65534 --clear-groups sleep 30 &
+	child=$!
+	# Killed only once it is uid 65534: before setpriv's switch it is
+	# root's own, and the kill would pass without CAP_KILL. A kill that
+	# fails is not waited for: the manager ends the child with the unit.
+	i=0
+	until [ "$(awk '/^Uid:/ {print $2}' /proc/$child/status 2>/dev/null)" = 65534 ]; do
+		i=$((i + 1)); [ "$i" -ge 100 ] && break
+		sleep 0.05
+	done
+	r childuid "$(awk '/^Uid:/ {print $2}' /proc/$child/status 2>/dev/null)"
+	if kill "$child"; then r kill 0; wait "$child"; else r kill 1; fi
+	touch /etc/hotserve/.smoke-box && rm /etc/hotserve/.smoke-box; r etc $?
+	touch /var/lib/hotserve/.smoke-box 2>/dev/null; r varlibhotserve $?
+fi
 find "$B/in" -mindepth 1 -maxdepth 1 -exec mv -t "$B/work/" {} + || r move 1
 find "$B/work" -mindepth 1 -delete; r clear $?
-r inleft "$(ls -A $B/in | wc -l)"
+rm -f "$B/txn.json"
+r left "$(ls -A $B/in $B/work | grep -cv -e '^$' -e ':$')"
 EOF
 mkdir -p /run/systemd/system/$svc.d
 printf '[Service]\nExecStart=\nExecStart=/bin/sh /run/hotserve-box-smoke.sh\n' >/run/systemd/system/$svc.d/smoke.conf
 systemctl daemon-reload
 res() { sed -n "s/^$1=//p" "$B/smoke-result"; }
-# One round per shape of entry, each alone in the tree, so each line of
-# the path unit is shown to start a run on its own: a hidden 000
-# directory (in/.[!.]*, CAP_DAC_OVERRIDE), a name of two dots and more
-# (in/..?*), a backup name (in/*: DirectoryNotEmpty= counts none of
-# these three), a sticky directory holding a file of the hotserve uid
-# (CAP_FOWNER), and a hidden name root left in work/ (work/.[!.]*). The
-# path unit is stopped while the entry is made, or it would fire at its
-# first step; started again, it finds the entry and fires at once.
+# One round: the path unit stopped while the entry is made (or it would
+# fire at the entry's first step), started again, and so finding it at
+# once; then a run that clears it, and the path unit waiting again.
 box_round() { # <what> <maker: hotserve|root> <command>
 	systemctl stop hotserve-box-apply.path
 	rm -f "$B/smoke-result"
 	if [ "$2" = root ]; then sh -c "$3"; else as_hotserve "$3"; fi || die "could not make $1"
-	# The path unit has the manager's own start limit (measured: the
-	# fourth start within 10 s is start-limit-hit), which rounds this
-	# quick would meet; reset-failed clears its count.
-	systemctl reset-failed hotserve-box-apply.path
-	systemctl start hotserve-box-apply.path
+	systemctl start hotserve-box-apply.path || die "$1: the path unit did not start: $(systemctl show -p ActiveState,Result hotserve-box-apply.path | tr '\n' ' ')"
 	i=0
-	until [ -s "$B/smoke-result" ] && grep -q '^inleft=' "$B/smoke-result" && [ "$(show $svc ActiveState)" = inactive ]; do
+	until [ -s "$B/smoke-result" ] && grep -q '^left=' "$B/smoke-result" && [ "$(show $svc ActiveState)" = inactive ]; do
 		i=$((i + 1))
-		[ "$i" -ge 60 ] && die "$1: the path unit did not run the service within 30s: path $(systemctl show -p ActiveState,Result hotserve-box-apply.path | tr '\n' ' '), service $(systemctl show -p ActiveState,Result $svc | tr '\n' ' ')"
+		[ "$i" -ge 90 ] && die "$1: no run of the service within 45s: path $(systemctl show -p ActiveState,Result hotserve-box-apply.path | tr '\n' ' '), service $(systemctl show -p ActiveState,Result $svc | tr '\n' ' ')"
 		sleep 0.5
 	done
-	[ -z "$(res move)" ] && [ "$(res clear)" = 0 ] && [ "$(res inleft)" = 0 ] && [ -z "$(ls -A $B/work)" ] \
-		|| die "$1: the unit could not clear it: $(tr '\n' ' ' <"$B/smoke-result") work: $(ls -A $B/work)"
-	echo "$1: one run, cleared"
+	[ -z "$(res move)" ] && [ "$(res clear)" = 0 ] && [ "$(res left)" = 0 ] && [ ! -e "$B/txn.json" ] \
+		|| die "$1: the run did not clear it: $(tr '\n' ' ' <"$B/smoke-result") in: $(ls -A $B/in) work: $(ls -A $B/work)"
+	sleep 0.5
+	[ "$(show hotserve-box-apply.path SubState)" = waiting ] && [ "$(show hotserve-box-apply.path Result)" = success ] \
+		|| die "$1: the path unit is not waiting after the run: $(systemctl show -p ActiveState,SubState,Result hotserve-box-apply.path | tr '\n' ' ')"
+	echo "$1: started a run, which cleared it"
 }
-box_round "a hidden 000 directory in in/" hotserve "mkdir $B/in/.hostile && touch $B/in/.hostile/f && chmod 000 $B/in/.hostile"
+# The probe, and the two capabilities that let a run clear what the
+# hotserve uid makes: a 000 directory (CAP_DAC_OVERRIDE) and a sticky
+# directory holding its file (CAP_FOWNER).
+: >/run/hotserve-box-smoke.probe
+box_round "a 000 directory in in/" hotserve "mkdir $B/in/x000 && touch $B/in/x000/f && chmod 000 $B/in/x000"
+rm -f /run/hotserve-box-smoke.probe
 echo "inside the unit:"; sed 's/^/  /' "$B/smoke-result"
 [ "$(res reload)" = 0 ] || die "systemctl reload hotserve failed inside the applier's unit"
 [ "$(res verify)" = 0 ] || die "ssh-keygen -Y verify as uid 65534 under the unit's PrivateTmp failed"
@@ -302,16 +304,40 @@ echo "inside the unit:"; sed 's/^/  /' "$B/smoke-result"
 [ "$(res etc)" = 0 ] || die "the unit cannot write /etc/hotserve"
 [ "$(res varlibhotserve)" != 0 ] || die "the unit could write /var/lib/hotserve: ProtectSystem=strict is not in force"
 [ "$(stat -c %G "$B/smoke-result")" = hotserve ] || die "a file root made in $B is not group hotserve: the setgid bit is missing"
-box_round "a name of two dots and more in in/" hotserve "touch $B/in/..hostile"
-box_round "a backup name in in/" hotserve "touch '$B/in/stale~'"
 box_round "a sticky directory in in/" hotserve "mkdir $B/in/sticky && chmod 1777 $B/in/sticky && touch $B/in/sticky/f"
-box_round "a hidden name in work/" root "touch $B/work/.crash"
+# Then one round for every path the manager says the path unit watches,
+# with an entry that line counts: for each glob, a name no other line of
+# its directory counts (systemd's DirectoryNotEmpty= skips names it takes
+# for hidden or backup files); the record itself; and a plain name for
+# DirectoryNotEmpty=. in/ is filled by the hotserve uid, the rest by root.
+n=0
+while read -r spec kind; do
+	dir=$spec
+	case "$kind" in
+	"(DirectoryNotEmpty)") entry=$dir/plain ;;
+	"(PathExists)") entry=$spec dir=$(dirname "$spec") ;;
+	"(PathExistsGlob)")
+		dir=$(dirname "$spec")
+		case "$(basename "$spec")" in
+		'*') entry=$dir/stale~ ;;
+		'.[!.]*') entry=$dir/.hidden ;;
+		'..?*') entry=$dir/..hidden ;;
+		*) die "no sample name for the glob $spec: add one here" ;;
+		esac ;;
+	*) die "a path spec of a kind this stage has no round for: $spec $kind" ;;
+	esac
+	maker=root
+	[ "$dir" = "$B/in" ] && maker=hotserve
+	box_round "$spec $kind" "$maker" "touch '$entry'"
+	n=$((n + 1))
+done <<<"$got_paths"
+[ "$n" -eq 9 ] || die "$n rounds, want one for each of the path unit's 9 paths"
 systemctl is-active --quiet hotserve || die "hotserve is not active after the reload inside the applier's unit"
 rm -f /run/systemd/system/$svc.d/smoke.conf "$B/smoke-result" /run/hotserve-box-smoke.sh
 rmdir /run/systemd/system/$svc.d
 systemctl daemon-reload
 [ "$(show hotserve-box-apply.path SubState)" = waiting ] || die "the path unit is not waiting after the run: $(systemctl show -p ActiveState,SubState,Result hotserve-box-apply.path | tr '\n' ' ')"
-echo "box applier: path unit enabled and waiting; tree as tmpfiles.d says; the unit reloads hotserve, verifies as 65534, kills its child, and every shape of entry starts a run that clears it"
+echo "box applier: path unit enabled and waiting; tree as tmpfiles.d says; the unit reloads hotserve, verifies as 65534, kills its child; every path the unit watches starts a run that clears it"
 
 stage "stage 2: liveswap deploy under the systemd sandbox"
 # Generate a local deploy keypair; the app trusts the public half, and

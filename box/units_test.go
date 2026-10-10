@@ -103,9 +103,10 @@ func TestTheShippedUnitsSayWhatTheDesignLists(t *testing.T) {
 }
 
 // Each capability on a line of its own, with a reason in the design's
-// table and in the comment directly above it in the unit (the manager
-// ORs the lines together): a capability added without a reason, or two
-// on one line sharing one, fails here.
+// table, and that reason, word for word, in the comment directly above
+// it in the unit (the manager ORs the lines together): a capability
+// added without a reason, two on one line sharing one, or a comment
+// that says other than the design, fails here.
 func TestEachCapabilityCarriesItsReason(t *testing.T) {
 	reasons := map[string]string{}
 	for _, r := range designRows(t) {
@@ -126,11 +127,10 @@ func TestEachCapabilityCarriesItsReason(t *testing.T) {
 			t.Errorf("CapabilityBoundingSet=%q: one capability per line, never a reset or a ~", l.Value)
 			continue
 		}
-		if !strings.Contains(l.Comment, f[0]+":") {
-			t.Errorf("%s has no reason of its own above it in the unit: %q", f[0], l.Comment)
-		}
 		if reasons[f[0]] == "" {
 			t.Errorf("%s has no reason in the design's table", f[0])
+		} else if got, want := plain(strings.TrimPrefix(l.Comment, f[0]+":")), plain(reasons[f[0]]); !strings.HasPrefix(l.Comment, f[0]+":") || got != want {
+			t.Errorf("the comment above %s is not its row's reason:\n  unit:   %s: %s\n  design: %s", f[0], f[0], got, want)
 		}
 		caps = append(caps, f[0])
 	}
@@ -173,12 +173,12 @@ func TestTheUnitsWatchAndWriteTheTree(t *testing.T) {
 		}
 	}
 	rw := strings.Fields(strings.Join(values(readUnit(t, serviceUnit))["Service"]["ReadWritePaths"], " "))
-	for _, need := range []string{"/etc/hotserve", "/var/lib/hotserve-box"} {
+	for _, need := range []string{"/etc/hotserve", exchangeTree} {
 		if !slices.Contains(rw, need) {
 			t.Errorf("ReadWritePaths %q lacks %s", rw, need)
 		}
 	}
-	if !dirs["/var/lib/hotserve-box"] {
+	if !dirs[exchangeTree] {
 		t.Error("tmpfiles.d does not make the base directory the service writes")
 	}
 }
@@ -254,8 +254,9 @@ func TestThePathsTableReader(t *testing.T) {
 }
 
 // The reader of the units' table, likewise: a row it cannot read
-// stops the test, and the section ends at the next second-level
-// heading.
+// stops the test, and so does a row after the table has ended; the
+// section ends at the next heading of any level, but not at a line of
+// a code fence.
 func TestTheUnitTableReader(t *testing.T) {
 	head := "## The applier unit\n\n| Unit | Section | Line | Why |\n|---|---|---|---|\n"
 	both := "| `.path` | `[Path]` | `PathExists=/x` | a |\n| `.service` | `[Service]` | `Type=oneshot` | |\n"
@@ -266,10 +267,15 @@ func TestTheUnitTableReader(t *testing.T) {
 	}{
 		{"both units, then another section", head + both + "| `.path` | `[Path]` | `PathExists=/y` | b |\n## Next\n| `.path` | `[Path]` | `PathExists=/z` | c |\n",
 			[]unitRow{{pathUnit, "Path", "PathExists", "/x", "a"}, {serviceUnit, "Service", "Type", "oneshot", ""}, {pathUnit, "Path", "PathExists", "/y", "b"}}, ""},
+		// Only the section's end keeps this row out: without it, the row
+		// would be one after the table's end, an error.
+		{"a subsection's table is not this one", head + both + "\n### Sub\n\n| `.path` | `[Path]` | `PathExists=/z` | c |\n",
+			[]unitRow{{pathUnit, "Path", "PathExists", "/x", "a"}, {serviceUnit, "Service", "Type", "oneshot", ""}}, ""},
+		{"a heading-like line in a code fence is no heading", "## The applier unit\n\n```sh\n# a comment\n```\n\n| Unit | Section | Line | Why |\n|---|---|---|---|\n" + both,
+			[]unitRow{{pathUnit, "Path", "PathExists", "/x", "a"}, {serviceUnit, "Service", "Type", "oneshot", ""}}, ""},
 		{"no section", "## Caps\n", nil, "no section"},
 		{"a heading one level down", "#" + head + both, nil, "no section"},
-		{"the table ends at its first line that is not a row", head + both + "\nprose\n\n| `.path` | `[Path]` | `PathExists=/y` | b |\n",
-			[]unitRow{{pathUnit, "Path", "PathExists", "/x", "a"}, {serviceUnit, "Service", "Type", "oneshot", ""}}, ""},
+		{"a row after the table has ended", head + both + "\n| `.path` | `[Path]` | `PathExists=/y` | b |\n", nil, "after the table"},
 		{"one unit only", head + "| `.path` | `[Path]` | `PathExists=/x` | a |\n", nil, "both units"},
 		{"a pipe in a cell", head + both + "| `.path` | `[Path]` | `PathExists=/x` | a | b |\n", nil, "5 cells"},
 		{"an unknown unit", head + both + "| `.timer` | `[Timer]` | `OnCalendar=daily` | |\n", nil, "unknown unit"},
@@ -377,6 +383,12 @@ func parseUnit(r io.Reader) ([]unitLine, error) {
 	return lines, sc.Err()
 }
 
+// plain is text as a comment carries it: no backquotes, and one space
+// wherever the design's line breaks or the comment's wrapping put any.
+func plain(s string) string {
+	return strings.Join(strings.Fields(strings.ReplaceAll(s, "`", "")), " ")
+}
+
 // values is section → key → each line's value, in file order.
 func values(lines []unitLine) map[string]map[string][]string {
 	out := map[string]map[string][]string{}
@@ -450,21 +462,26 @@ func parseUnitTable(doc string) ([]unitRow, error) {
 }
 
 // tableRows is the cells of each row of the table a section of the
-// document holds under header: the section is the line equal to heading
-// up to the next heading of its level or above; the table, the first
-// line in it equal to header, then its separator, then every line that
-// is a row, up to the first that is not. A row with another number of
-// cells — a pipe inside a cell — is an error, never a short read.
+// document holds under header. The section is the line equal to
+// heading up to the next heading of any level, a line in a code fence
+// being no heading; the table, the first line in it equal to header,
+// then its separator, then every line that is a row. Every row of the
+// section is the table's: one with another number of cells (a pipe
+// inside a cell), and one after a line that ended the table (a blank
+// line typed into it), are errors, never a short read.
 func tableRows(doc, heading, header string) ([][]string, error) {
 	lines := strings.Split(doc, "\n")
 	start := slices.Index(lines, heading)
 	if start < 0 {
 		return nil, fmt.Errorf("no section %q", strings.TrimLeft(heading, "# "))
 	}
-	level := heading[:strings.IndexByte(heading, ' ')]
 	section := lines[start+1:]
+	fenced := false
 	for i, l := range section {
-		if h, _, ok := strings.Cut(l, " "); ok && h != "" && strings.Trim(h, "#") == "" && len(h) <= len(level) {
+		if strings.HasPrefix(l, "```") {
+			fenced = !fenced
+		}
+		if h, _, ok := strings.Cut(l, " "); !fenced && ok && h != "" && strings.Trim(h, "#") == "" {
 			section = section[:i]
 			break
 		}
@@ -475,9 +492,14 @@ func tableRows(doc, heading, header string) ([][]string, error) {
 	}
 	n := strings.Count(header, "|") - 1
 	var rows [][]string
+	ended := false
 	for _, line := range section[h+2:] {
 		if !strings.HasPrefix(line, "|") {
-			break
+			ended = true
+			continue
+		}
+		if ended {
+			return nil, fmt.Errorf("a row after the table under %q has ended: %q", heading, line)
 		}
 		cells := strings.Split(line, "|")
 		if len(cells) != n+2 {

@@ -1,50 +1,28 @@
-# hotserve-box-apply.path — starts the box applier
-# (hotserve-box-apply.service) whenever the exchange tree has work: a
-# bundle the box_webhook handler renamed into in/, or what a run that
-# was killed left behind, an entry in work/ or the transaction record
-# txn.json. The last two are what make recovery run after a crash, at
-# boot included. box/DESIGN-box.md, "The applier unit", is the list
-# this file and the service say; box/units_test.go holds them to it.
+# hotserve-box-apply.path — starts hotserve-box-apply.service, the box
+# applier, whenever the exchange tree /var/lib/hotserve-box has work.
+# Every line here, and why it is here, is a row of the table in
+# box/DESIGN-box.md, "The applier unit"; box/units_test.go holds this
+# file to that table line for line.
 [Unit]
 Description=hotserve box applier trigger
 Documentation=https://github.com/smallhoursorg/hotserve/blob/main/box/DESIGN-box.md
-# After hotserve, so that recovery at boot meets a hotserve that has
-# started, or failed to. A path unit's default dependencies order it
-# Before=paths.target, which basic.target, and so hotserve.service,
-# come after: with them, After=hotserve.service is an ordering cycle at
-# boot, which the manager breaks by dropping a start job. So the
-# defaults are off, and the ones that matter are written out: pulled
-# in with sysinit.target and ordered after it (the local filesystems,
-# /var/lib among them, and systemd-tmpfiles-setup's tree), and stopped
-# for shutdown.
 DefaultDependencies=no
 Requires=sysinit.target
 After=sysinit.target hotserve.service
 Before=shutdown.target
 Conflicts=shutdown.target
+StartLimitIntervalSec=0
 
 [Path]
 DirectoryNotEmpty=/var/lib/hotserve-box/in
 DirectoryNotEmpty=/var/lib/hotserve-box/work
 PathExists=/var/lib/hotserve-box/txn.json
-# DirectoryNotEmpty= does not count a name systemd takes for a hidden
-# or backup file (.x, x~, x.bak, x.dpkg-new, lost+found, …), and an
-# entry it does not count never starts a run — while admission answers
-# 409 for as long as in/ holds anything. These count every name but .
-# and ..: no leading dot; a dot and a second character that is not
-# one; two dots and at least one more.
 PathExistsGlob=/var/lib/hotserve-box/in/*
 PathExistsGlob=/var/lib/hotserve-box/in/.[!.]*
 PathExistsGlob=/var/lib/hotserve-box/in/..?*
 PathExistsGlob=/var/lib/hotserve-box/work/*
 PathExistsGlob=/var/lib/hotserve-box/work/.[!.]*
 PathExistsGlob=/var/lib/hotserve-box/work/..?*
-# The one bound on how often the applier starts (DESIGN-box.md, Caps):
-# every run empties in/ and work/ and removes the record, so a run
-# re-triggers only for an entry that landed after its last listing.
-# The one exception, a full disk after a swap, ends here as
-# trigger-limit-hit, named in the journal; the service has no start
-# limit of its own, so that this is the limit it ends at.
 TriggerLimitIntervalSec=10s
 TriggerLimitBurst=20
 

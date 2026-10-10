@@ -638,7 +638,7 @@ Every numeric bound, in one place, with its reason.
 | reload | hotserve.service's own 240 s | the applier sets no shorter timeout |
 | quoted input in a refusal | 300 bytes, quote-to-ASCII then rune-boundary cut | liveswap's `boundRefusal`, in that order; applies to every input-derived value without exception |
 | child processes | a deadline and a `WaitDelay`, always | |
-| path-unit trigger limit | 20 in 10 s | the invariants keep the count at one per late arrival; the service has no start limit of its own (`StartLimitIntervalSec=0`), since the manager's default, 5 starts in 10 s, is lower and would end a failing loop first, as `unit-start-limit-hit` |
+| path-unit trigger limit | 20 in 10 s | the invariants keep the count at one per late arrival; the service has no start limit of its own (`StartLimitIntervalSec=0`), since the manager's default, 5 starts in 10 s, is lower and would end a failing loop first, as `unit-start-limit-hit`; nor has the path unit, whose own starts are boot's, postinstall's and the console's |
 
 ## Reading the signed file
 
@@ -894,6 +894,7 @@ table and holds both shipped files to it, line for line, and the
 | `.path` | `[Unit]` | `After=sysinit.target hotserve.service` | after `sysinit.target`: the local filesystems, `/var/lib` among them, and `systemd-tmpfiles-setup`'s tree; after hotserve, so recovery at boot meets a hotserve that has started, or failed to |
 | `.path` | `[Unit]` | `Before=shutdown.target` | stopped for shutdown |
 | `.path` | `[Unit]` | `Conflicts=shutdown.target` | stopped for shutdown |
+| `.path` | `[Unit]` | `StartLimitIntervalSec=0` | its own starts are boot's, postinstall's and the console's, and the manager's default limit (5 in 10 s) would refuse an operator retrying the full-disk remedy: measured, quick restarts of the path unit ended `start-limit-hit`. The trigger limit is its bound (Caps) |
 | `.path` | `[Path]` | `DirectoryNotEmpty=/var/lib/hotserve-box/in` | a bundle the handler renamed in |
 | `.path` | `[Path]` | `DirectoryNotEmpty=/var/lib/hotserve-box/work` | what a killed run left: with the record, what makes recovery run, at boot included |
 | `.path` | `[Path]` | `PathExists=/var/lib/hotserve-box/txn.json` | the record a killed run left |
@@ -917,7 +918,7 @@ table and holds both shipped files to it, line for line, and the
 | `.service` | `[Service]` | `CapabilityBoundingSet=CAP_SETGID` | the same child's gid and its empty group list |
 | `.service` | `[Service]` | `CapabilityBoundingSet=CAP_KILL` | root stopping a child of another uid: without it a deadline on the verifier is a deadline on nothing. Measured: a 65534 child outlived its deadline, "operation not permitted" |
 | `.service` | `[Service]` | `CapabilityBoundingSet=CAP_DAC_OVERRIDE` | the "Removes" column holds against a hostile creator. Measured: without it a `chmod 000` directory the hotserve uid made in `in/` could not be moved out |
-| `.service` | `[Service]` | `CapabilityBoundingSet=CAP_FOWNER` | the same, for a sticky directory: root may unlink another uid's file in one only as its owner or with this. Measured: with `CAP_DAC_OVERRIDE` alone, the file in a `chmod 1777` directory the hotserve uid made in `in/` stayed in `work/` |
+| `.service` | `[Service]` | `CapabilityBoundingSet=CAP_FOWNER` | the same, for a sticky directory, where root may unlink another uid's file only as the file's owner, the directory's owner, or with this. Measured: with `CAP_DAC_OVERRIDE` alone, the file in a `chmod 1777` directory the hotserve uid made in `in/` stayed in `work/` |
 | `.service` | `[Service]` | `ProtectSystem=strict` | all but the next line's two trees read-only |
 | `.service` | `[Service]` | `ReadWritePaths=/etc/hotserve /var/lib/hotserve-box` | the Caddyfile and its temporary; the record, results and `applied.json` |
 | `.service` | `[Service]` | `PrivateTmp=yes` | the verifier's files for its 65534 child, in a `/tmp` of the unit's own |
@@ -927,9 +928,9 @@ table and holds both shipped files to it, line for line, and the
 
 Not in them, on purpose: `User=` (root writes root's file and asks the
 manager for the reload); `Restart=` (the path unit starts it again
-while there is work); `RemainAfterExit=` (a oneshot left active would
-make every later trigger a start of an active unit, which does
-nothing); `SuccessExitStatus=` (exit 0 is a settled run, and the one
+while there is work); `RemainAfterExit=` (a oneshot left active keeps
+the path unit `running`, and a running path unit starts nothing more:
+measured, a second entry stayed in `in/`); `SuccessExitStatus=` (exit 0 is a settled run, and the one
 non-zero exit, a full disk, must fail the unit); `Unit=` (the path
 unit starts the service of its own name); `[Install]` in the service.
 Measured in the unit as shipped, with a drop-in replacing only
@@ -949,10 +950,7 @@ after a swap whose previous bytes cannot be written back, is in the
 Failure-mode table and ends at the path unit's trigger limit by design
 (`trigger-limit-hit`), named in the journal; a `systemctl restart` of
 the path unit inside the limit's ten seconds fails the same way, and
-after them starts it. A few restarts in quick succession meet the path
-unit's own start limit as well (measured: the fourth start within ten
-seconds is `start-limit-hit`), which `systemctl reset-failed
-hotserve-box-apply.path` clears.
+after them starts it.
 
 No timer starts the service. Whatever adds an id to the tree starts a
 run or is written by one — a bundle renamed into `in/` ahead of its
@@ -969,13 +967,15 @@ tick instead of ending.
 The package depends on `openssh-client`, ships the `tmpfiles.d` file,
 runs `systemd-tmpfiles --create hotserve-box.conf` and enables the path
 unit the `deb-systemd-helper` way in `postinstall.sh`. `preremove.sh`
-stops it at a removal, after hotserve, so a push admitted before
-hotserve stopped is taken by a run and settled — applied, rolled back
-or refused, as its race with the stop goes — rather than left in
-`in/` for a later install to apply. It
-neither disables it (an install after the removal finds it enabled and
-starts it) nor stops the service (a run under way settles by its own
-tables).
+stops it at a removal, after `hotserve.service`, so that no push is
+admitted once the path unit has stopped. A push admitted before that
+is taken by a run and
+settled — applied, rolled back or refused, as its race with the stop
+goes — except one admitted after the last listing of a run already
+under way, which stays in `in/` for the first run after the next
+install, held to every check any push is. It neither disables the path
+unit (an install after the removal finds it enabled and starts it) nor
+stops the service (a run under way settles by its own tables).
 
 ## Sequences
 

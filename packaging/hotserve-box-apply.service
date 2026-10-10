@@ -1,73 +1,41 @@
 # hotserve-box-apply.service — the box applier: one run of `hotserve
 # box apply`, as root, started by hotserve-box-apply.path and never
-# enabled on its own (no [Install]). Besides the console it is the one
-# writer of /etc/hotserve/Caddyfile: it re-verifies every bundle the
-# box_webhook handler took and installs it under the transaction
-# record (box/DESIGN-box.md, "The trust chain", steps 9 to 16). What it
-# is given is that document's "The applier unit" list and nothing
-# else; box/units_test.go holds this file to it.
+# enabled on its own. Every line here, and why it is here, is a row of
+# the table in box/DESIGN-box.md, "The applier unit", and so is what is
+# left out; box/units_test.go holds this file to that table line for
+# line, and each capability's comment to its row's reason.
 [Unit]
 Description=hotserve box applier
 Documentation=https://github.com/smallhoursorg/hotserve/blob/main/box/DESIGN-box.md
-# A start queued while hotserve.service is starting waits for that
-# start to end, so the applier meets hotserve active or not running;
-# a restart loop's `activating` it waits out itself (DESIGN-box.md,
-# Caps).
 After=hotserve.service
-# No start limit of its own: the path unit's trigger limit is the one
-# bound (Caps). The manager's default here, 5 starts in 10 s, is the
-# lower of the two, so with it a run that keeps failing would end as
-# the path unit's unit-start-limit-hit rather than the trigger-limit-hit
-# the full-disk row of the Failure-mode table and its remedy describe.
 StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/hotserve box apply
-# No time cap on a run: it is bounded from inside — each reload by
-# hotserve's own 240 s, each child by its deadline, one bundle at a
-# time — but for root's lock, which it waits for without a bound while
-# the console holds it (`hotserve init`, `hotserve box edit`): that
-# wait is what the lock is for.
 TimeoutStartSec=infinity
 
-# Root, with five capabilities in its bounding set and no others.
-# CAP_SETUID: ssh-keygen -Y verify runs as uid 65534 (step 12), and
-# setting the child's uid is this one.
+# CAP_SETUID: ssh-keygen runs as uid 65534 (step 12)
 CapabilityBoundingSet=CAP_SETUID
-# CAP_SETGID: the same child's gid and its empty group list.
+# CAP_SETGID: the same child's gid and its empty group list
 CapabilityBoundingSet=CAP_SETGID
-# CAP_KILL: root stopping a child of another uid — the verifier's
-# deadline ends that child, or it ends nothing.
+# CAP_KILL: root stopping a child of another uid: without it a deadline
+# on the verifier is a deadline on nothing. Measured: a 65534 child
+# outlived its deadline, "operation not permitted"
 CapabilityBoundingSet=CAP_KILL
-# CAP_DAC_OVERRIDE: whatever the hotserve uid made in the exchange tree
-# can still be removed, so the Paths table's "Removes" column holds
-# against a hostile creator (a `mkdir in/x && chmod 000 in/x` would
-# otherwise wedge the path unit at its trigger limit).
+# CAP_DAC_OVERRIDE: the "Removes" column holds against a hostile
+# creator. Measured: without it a chmod 000 directory the hotserve uid
+# made in in/ could not be moved out
 CapabilityBoundingSet=CAP_DAC_OVERRIDE
-# CAP_FOWNER: the same, for a sticky directory (`chmod 1777 in/x`),
-# where root may unlink another uid's file only as its owner or with
-# this.
+# CAP_FOWNER: the same, for a sticky directory, where root may unlink
+# another uid's file only as the file's owner, the directory's owner,
+# or with this. Measured: with CAP_DAC_OVERRIDE alone, the file in a
+# chmod 1777 directory the hotserve uid made in in/ stayed in work/
 CapabilityBoundingSet=CAP_FOWNER
 
-# The whole filesystem read-only but the two trees it writes:
-# /etc/hotserve for the Caddyfile and its temporary, and
-# /var/lib/hotserve-box for the record, the results and applied.json.
 ProtectSystem=strict
 ReadWritePaths=/etc/hotserve /var/lib/hotserve-box
-# The verifier writes the signature and the signer list under /tmp for
-# its uid-65534 child to read; this /tmp is the unit's own.
 PrivateTmp=yes
 NoNewPrivileges=yes
-# It reaches the manager (`systemctl reload hotserve`, is-active) over
-# its unix socket, and nothing over a network.
 RestrictAddressFamilies=AF_UNIX
 SystemCallFilter=@system-service
-
-# Not here, on purpose: User= (root writes root's file and asks the
-# manager for the reload); Restart= (the path unit starts it again
-# while there is work); RemainAfterExit= (left active, every later
-# trigger would start an active unit, which does nothing);
-# SuccessExitStatus= (exit 0 is a settled run,
-# and the one non-zero exit, a full disk, must fail the unit);
-# [Install] (the path unit is what starts it).

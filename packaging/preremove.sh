@@ -15,16 +15,10 @@ case "${1:-}" in
 remove)
 	if command -v systemctl >/dev/null 2>&1; then
 		systemctl stop hotserve 2>/dev/null || true
-		# The box applier's path unit, after hotserve: a push the
-		# box_webhook handler admitted before hotserve stopped is still
-		# taken by a run and settled — applied, rolled back or refused,
-		# as its race with the stop goes — rather than left in in/ for a
-		# later install to apply. Stopped,
-		# not disabled: an install after this removal finds it enabled
-		# and starts it again (postinstall's was-enabled), where a
-		# disable here would leave the applier off for good. The service
-		# is left alone: a run under way settles by its own tables
-		# (box/DESIGN-box.md, "The install transaction") and exits.
+		# The box applier's path unit: stopped after hotserve, not
+		# disabled, the service left to finish — box/DESIGN-box.md, "The
+		# applier unit", says why each, and what a removal can leave in
+		# in/.
 		if [ -d /run/systemd/system ]; then
 			if [ -x /usr/bin/deb-systemd-invoke ]; then
 				deb-systemd-invoke stop hotserve-box-apply.path >/dev/null || true

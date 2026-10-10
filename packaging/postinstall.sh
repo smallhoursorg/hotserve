@@ -139,8 +139,7 @@ fi
 # tidies the symlinks); started, or restarted on an upgrade ($2 is the
 # version upgraded from), by deb-systemd-invoke, which starts nothing
 # disabled or masked. The service it starts has no [Install]: the path
-# unit is its only start. Until a bundle reaches /var/lib/hotserve-box/in
-# — and only the box_webhook handler puts one there — it starts nothing.
+# unit is its only start (box/DESIGN-box.md, "The applier unit").
 if [ -x /usr/bin/deb-systemd-helper ]; then
 	deb-systemd-helper unmask hotserve-box-apply.path >/dev/null || true
 	if deb-systemd-helper --quiet was-enabled hotserve-box-apply.path; then
