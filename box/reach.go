@@ -297,7 +297,7 @@ func classify(h adaptedHandler) handlerClass {
 	case "subroute":
 		return classSubroute
 	case "vars", "map", "log_append", "tracing", "request_body", "timeouts",
-		"encode", "push", "templates", "hint_penaltybox":
+		"encode", "push", "hint_penaltybox":
 		return classPasses
 	case "headers":
 		if len(h.Request) > 0 && string(h.Request) != "null" {

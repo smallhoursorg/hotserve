@@ -162,7 +162,9 @@ func TestReachJSON(t *testing.T) {
 		want    string // "" reachable; "error" a plain error; else the refusal
 	}{
 		"the penaltybox hint ahead":                               {adapted: reachJSON(`{"handle":[{"handler":"hint_penaltybox"}]},`, ""), want: ""},
-		"vars, map, log and tracing ahead":                        {adapted: reachJSON(`{"handle":[{"handler":"vars"},{"handler":"map"},{"handler":"log_append"},{"handler":"tracing"},{"handler":"timeouts"},{"handler":"push"},{"handler":"encode"},{"handler":"templates"},{"handler":"request_body"}]},`, ""), want: ""},
+		"vars, map, log and tracing ahead":                        {adapted: reachJSON(`{"handle":[{"handler":"vars"},{"handler":"map"},{"handler":"log_append"},{"handler":"tracing"},{"handler":"timeouts"},{"handler":"push"},{"handler":"encode"},{"handler":"request_body"}]},`, ""), want: ""},
+		"templates ahead":                                         {adapted: reachJSON(`{"handle":[{"handler":"templates","mime_types":["application/json"]}]},`, ""), want: "templates answers first"},
+		"templates ahead with its default types":                  {adapted: reachJSON(`{"handle":[{"handler":"templates"}]},`, ""), want: "templates answers first"},
 		"intercept ahead":                                         {adapted: reachJSON(`{"handle":[{"handler":"intercept","handle_response":[{"match":{"status_code":[2]},"routes":[{"handle":[{"handler":"static_response","body":"maintenance"}]}]}]}]},`, ""), want: "intercept answers first"},
 		"a response headers handler":                              {adapted: reachJSON(`{"handle":[{"handler":"headers","response":{"set":{"X-A":["b"]}}}]},`, ""), want: ""},
 		"a request headers handler":                               {adapted: reachJSON(`{"handle":[{"handler":"headers","request":{"delete":["Authorization"]}}]},`, ""), want: "headers changes the request first"},
