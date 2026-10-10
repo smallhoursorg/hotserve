@@ -11,7 +11,7 @@
 // can pass unnoticed. decodeClaims never yielding a float64 is pinned too:
 // that is what makes claimScalar's float64 refusal unreachable from
 // production.
-package liveswap
+package deploytrust
 
 import (
 	"bytes"

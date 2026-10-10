@@ -84,7 +84,7 @@ Properties that matter to the model:
   authenticated — not public.
 - **What the webhook says back is filtered** (liveswap/redact.go,
   which states the filter's four rules; every body passes it —
-  through `respondJSON` in liveswap/handler.go, the record route's
+  through `RespondJSON` in liveswap/handler.go, the record route's
   `respondFiltered`, the stream's lines, the record store's write).
   The
   response's audience is wider than its caller: the paved road prints
@@ -176,7 +176,7 @@ Properties that matter to the model:
   — because a filter with only the first test drifts toward blanking
   everything.
 - **Auth failures are throttled in the journal**
-  (liveswap/authlimit.go). Token *forgery* is infeasible (no private
+  (liveswap/deploytrust/limiter.go). Token *forgery* is infeasible (no private
   key), so this is not a guessing oracle; what
   an unauthenticated caller can do with failures is make hotserve
   write a Warn per request. Two sliding windows bound that, in one
@@ -919,7 +919,7 @@ only public material:
   one — warned about at load — a token minted for any box that trusts
   the same key is accepted.
 
-Implementation: `liveswap/deploytrust.go` (verification via the vetted
+Implementation: `liveswap/deploytrust/` (verification via the vetted
 `go-oidc`/`go-jose`, never hand-rolled). Effects on the model:
 
 - **No deploy credential on the box.** `/proc/<supervisor>/environ`

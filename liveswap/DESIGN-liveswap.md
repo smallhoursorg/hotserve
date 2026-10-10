@@ -327,7 +327,7 @@ reason they were found at all was somebody building this map by hand.
 | Layer | Files |
 |---|---|
 | 0 | `clock.go`, `names.go` |
-| 1 | `appdirs.go`, `socket.go` (+`_linux`/`_other`), `extract.go`, `allowlist.go`, `authlimit.go`, `deploytrust.go`, `health.go` |
+| 1 | `appdirs.go`, `socket.go` (+`_linux`/`_other`), `extract.go`, `allowlist.go`, `health.go` |
 | 2 | `runner.go`, `sandbox.go`, `download.go`, `state.go` |
 | 3 | `runner_systemd.go`, `systemd_dbus.go` |
 | 4 | `app.go`, `watchdog.go`, `sweep.go` |
@@ -367,9 +367,10 @@ backwards edges reappearing *despite* this table.
 | `names.go` | the app-name and version alphabets, and the two helpers over them; shared by every layer |
 | `app.go` | `managedApp` state machine, Deploy pipeline, recovery, env building |
 | `appdirs.go` | `appDirs`: the on-disk layout for one app. Pure path arithmetic — no state, no lock |
-| `caddyfile.go` | all Caddyfile parsing (global option, directive, upstreams); NO defaults here — Provision owns them |
-| `handler.go` | webhook auth, payload validation, status endpoint |
-| `authlimit.go` | what a failed webhook auth costs the journal: per-address and process-wide budgets, on the injected clock |
+| `caddyfile.go` | all Caddyfile parsing (global option, directive, upstreams) but the `deploy_trust` block, which is `deploytrust.Parse`; NO defaults here — Provision owns them |
+| `handler.go` | the webhook: payload validation, deploy dispatch, the status endpoint, and every body's filter (`RespondJSON`); authentication is `deploytrust`'s |
+| `deploytrust/` | leaf package: deploy auth — the `deploy_trust` grammar (`Parse`), its sources and verifiers (OIDC + local-key JWT verification), the webhook preamble (`Limiter.Authenticate`) and what a failed attempt costs the journal (`Limiter`, on an injected clock). Imports nothing of liveswap's; the box webhook authenticates through it too. `trusttest/` beside it mints tokens and runs an issuer for tests |
+| `internal/dispenser/` | leaf package: the one Caddyfile rule the parsers here and `deploytrust.Parse` apply alike — a repeated subdirective is refused — in one place so the two cannot drift |
 | `upstreams.go` | dynamic upstream source (the cutover read side) |
 | `runner.go` / `runner_systemd.go` / `systemd_dbus.go` | runner interface + the systemd transient-unit implementation + its D-Bus client |
 | `sweep.go` | `App.Start`'s reconciliation against the manager: stop the units, and prune the dirs, of apps no loaded config names. Module-layer (the pool is the ledger), driving the runner |
@@ -382,7 +383,7 @@ backwards edges reappearing *despite* this table.
 | `health.go` | prober with soak/deadline arithmetic on an injected clock |
 | `watchdog.go` | continuous crash/health supervision: per-app loop, restart budget, backoff |
 | `state.go` | `state.json` atomic persistence, keep-N GC |
-| `deploytrust.go` / `deploytoken_cmd.go` | deploy-auth: OIDC + local-key JWT verification; the `hotserve deploy-keygen` / `deploy-token` subcommands |
+| `deploytoken_cmd.go` | the `hotserve deploy-keygen` / `deploy-token` subcommands |
 | `clock.go` | `Now()`/`Sleep()` clock seam |
 
 ## Security posture
@@ -576,3 +577,12 @@ Dated one-liners; the full text of each is in git.
   down as the rule rather than the record growing a launch
   disposition, and status now reports the unit's own `ExecStart` so
   the drift is visible. `pid` left `state.json` with it.
+- 2026-10-10 (#188) — Deploy auth became the leaf package
+  `deploytrust/`: the `deploy_trust` grammar, sources, verifiers, the
+  limiter and the webhook preamble, which now returns who the token is
+  (`Identity`, the claims included) or a `Refusal` the caller writes
+  through its own filter. The box webhook authenticates through it on
+  the same limiter. `NewRedactor` and `RespondJSON` give it the
+  response filter. One visible change: an app name carrying a control
+  byte or invalid UTF-8 is Go-quoted in the two auth journal lines, as
+  a refusal already was. Nothing else changed.

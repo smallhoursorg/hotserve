@@ -1,4 +1,4 @@
-package liveswap
+package deploytrust
 
 import (
 	"net"
@@ -15,9 +15,9 @@ import (
 // guessing oracle; what an unauthenticated caller can do with them is
 // make hotserve write a Warn per request, without bound — a
 // journal-fill primitive. The throttle bounds that: an address gets
-// authFailBudget failures per authFailWindow and is then answered 429
+// FailBudget failures per FailWindow and is then answered 429
 // until its oldest failure ages out, and the process as a whole logs
-// at most authFailGlobalBudget failures per window however many
+// at most FailGlobalBudget failures per window however many
 // addresses a flood comes from. The address budget counts failures
 // and decides the 429; the process budget decides what is logged —
 // every line, the once-per-window "budget spent" lines included, so
@@ -37,42 +37,59 @@ import (
 // both budgets: sources are operator config, so that line's bound is
 // not the caller's to grow.
 const (
-	authFailBudget       = 10
-	authFailGlobalBudget = 100
-	authFailWindow       = time.Minute
-	// authKeysMax bounds the table so a flood from many addresses
+	FailBudget       = 10
+	FailGlobalBudget = 100
+	FailWindow       = time.Minute
+	// keysMax bounds the table so a flood from many addresses
 	// cannot grow memory. Past it, addresses whose window has drained
 	// are swept (at most once per window — the sweep is O(table) and
 	// attacker-triggered) and then an arbitrary one is dropped. A
 	// dropped address is re-admitted with a fresh budget; the global
 	// budget is what holds above the table size.
-	authKeysMax = 4096
+	keysMax = 4096
 )
 
-// webhookAuthLimiter is the process-wide instance every webhook
+// shared is the process-wide instance every webhook
 // handler shares: a config reload must not hand a throttled address a
 // fresh budget, and two mounts must not double it. It has no goroutine
 // and so no lifecycle.
-var webhookAuthLimiter = newAuthLimiter(realClock{})
+var shared = NewLimiter(systemClock{})
 
-// authLimiter is a sliding window of logged authentication failures
+// Shared is the process-wide limiter: what liveswap's webhook and the
+// box's authenticate on (Limiter.Authenticate), so one address has one
+// budget whichever webhook a flood aims at. Tests build their own with
+// NewLimiter on a clock they advance.
+func Shared() *Limiter { return shared }
+
+// Clock is what the limiter reads time from: the system clock in
+// production, a hand-advanced one in tests.
+type Clock interface {
+	Now() time.Time
+}
+
+type systemClock struct{}
+
+func (systemClock) Now() time.Time { return time.Now() }
+
+// Limiter is a sliding window of logged authentication failures
 // per client address, plus one for the process. Expiry happens on the
 // touches themselves; there is nothing to clean up.
-type authLimiter struct {
+type Limiter struct {
 	budget       int
 	globalBudget int
 	maxKeys      int
 	window       time.Duration
-	clock        clock
+	clock        Clock
 
 	mu        sync.Mutex
 	keys      map[string]*failWindow
 	global    failWindow
 	lastSweep time.Time
 	// outages is when each source that could not be consulted was
-	// last logged, by label: config, so it cannot grow with traffic;
-	// labels a reload retired are dropped as their window drains.
-	outages map[string]time.Time
+	// last logged, by label and by the caller's scope key: both
+	// config, so it cannot grow with traffic; labels a reload retired
+	// are dropped as their window drains.
+	outages map[outageKey]time.Time
 }
 
 // failWindow is the failures logged inside the window, oldest first,
@@ -83,11 +100,14 @@ type failWindow struct {
 	tripped bool
 }
 
-func newAuthLimiter(c clock) *authLimiter {
-	return &authLimiter{
-		budget: authFailBudget, globalBudget: authFailGlobalBudget, maxKeys: authKeysMax,
-		window: authFailWindow, clock: c, keys: map[string]*failWindow{},
-		outages: map[string]time.Time{},
+// NewLimiter is a limiter on its own clock, with the production
+// budgets (FailBudget, FailGlobalBudget, FailWindow): for tests, which
+// advance the clock. Production authenticates on Shared.
+func NewLimiter(c Clock) *Limiter {
+	return &Limiter{
+		budget: FailBudget, globalBudget: FailGlobalBudget, maxKeys: keysMax,
+		window: FailWindow, clock: c, keys: map[string]*failWindow{},
+		outages: map[outageKey]time.Time{},
 	}
 }
 
@@ -108,7 +128,7 @@ type failVerdict struct {
 // fail records a failed authentication for key and says what to do
 // with it. One lock scope: concurrent failures from one address
 // cannot each see room and all be logged.
-func (l *authLimiter) fail(key string) failVerdict {
+func (l *Limiter) fail(key string) failVerdict {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.clock.Now()
@@ -151,16 +171,24 @@ func (l *authLimiter) fail(key string) failVerdict {
 	return v
 }
 
+// outageKey is one source as one caller met it: the caller's scope
+// key (liveswap's "app", the box's "webhook") is a constant of the
+// caller, so the table stays config-sized.
+type outageKey struct{ label, scope string }
+
 // outage records that the source label could not be consulted and
-// says whether to log it: once per window per source, outside both
-// budgets. It touches no address; the request is charged by fail as
-// usual. The table is swept of drained labels on each write, which is
-// O(labels) — configured ones, not the caller's to grow.
-func (l *authLimiter) outage(label string) bool {
+// says whether to log it: once per window per source per caller,
+// outside both budgets, so an operator reading one webhook's lines
+// sees the outage whichever webhook met it first. It touches no
+// address; the request is charged by fail as usual. The table is swept
+// of drained entries on each write, which is O(entries) — configured
+// ones, not the caller's to grow.
+func (l *Limiter) outage(label, scope string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.clock.Now()
-	if last, ok := l.outages[label]; ok && now.Sub(last) < l.window {
+	k := outageKey{label, scope}
+	if last, ok := l.outages[k]; ok && now.Sub(last) < l.window {
 		return false
 	}
 	for k, last := range l.outages {
@@ -168,19 +196,20 @@ func (l *authLimiter) outage(label string) bool {
 			delete(l.outages, k)
 		}
 	}
-	l.outages[label] = now
+	l.outages[k] = now
 	return true
 }
 
 // clear forgets key: an authentication that succeeded.
-func (l *authLimiter) clear(key string) {
+func (l *Limiter) clear(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	delete(l.keys, key)
 }
 
-// size is the number of addresses tracked, for the tests.
-func (l *authLimiter) size() int {
+// Size is the number of addresses holding failures in their window:
+// what a flood costs in memory, and what the tests read.
+func (l *Limiter) Size() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return len(l.keys)
@@ -189,7 +218,7 @@ func (l *authLimiter) size() int {
 // makeRoomLocked keeps the table under maxKeys before a new address is
 // added: a sweep of drained windows, at most once per window, then an
 // arbitrary address if the table is still full.
-func (l *authLimiter) makeRoomLocked(now time.Time) {
+func (l *Limiter) makeRoomLocked(now time.Time) {
 	if len(l.keys) < l.maxKeys {
 		return
 	}

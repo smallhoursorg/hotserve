@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/smallhoursorg/hotserve/liveswap/deploytrust"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -425,7 +426,7 @@ func testSpec(t *testing.T) *appSpec {
 		name:               "demo",
 		command:            []string{"./server", "--version", "{version}"},
 		env:                map[string]string{"DATA": "{shared_dir}/db"},
-		trust:              []trustSource{localTrust(appTestPub, "demo")},
+		trust:              []deploytrust.Source{localSource(t, appTestPub, "demo")},
 		healthPath:         "/health",
 		healthInterval:     5 * time.Second,
 		healthTimeout:      2 * time.Second,
@@ -545,7 +546,7 @@ func newTestRig(t *testing.T) *testRig {
 	}
 	ma := newManagedApp("demo")
 	ma.spec = rig.spec
-	ma.verifiers = resolveVerifiers(rig.spec.trust, nil)
+	ma.verifiers = deploytrust.Verifiers(rig.spec.trust, nil)
 	ma.runner = rig.runner
 	ma.prober = rig.prober
 	ma.fetch = rig.fetch
@@ -1693,8 +1694,8 @@ func TestConfigureInstallsTheVerifiersItIsGiven(t *testing.T) {
 	// same objects rather than resolving a cold set of its own.
 	rig := newTestRig(t)
 	spec := testSpec(t)
-	spec.trust = []trustSource{{kind: "oidc", issuer: "https://issuer.example", audience: "aud"}}
-	warmed := resolveVerifiers(spec.trust, nil)
+	spec.trust = []deploytrust.Source{oidcSource(t, "https://issuer.example")}
+	warmed := deploytrust.Verifiers(spec.trust, nil)
 	rig.ma.configure(new(int), spec, warmed, zap.NewNop(), &fetchClients{}, userManager)
 	got := rig.ma.currentVerifiers()
 	if len(got) != 1 || got[0] != warmed[0] {
@@ -1708,8 +1709,8 @@ func TestRollbackConfigRestoresTheServingDefinition(t *testing.T) {
 	specA, specB := testSpec(t), testSpec(t)
 	specB.grace = 99 * time.Second
 	ownerA, ownerB := new(int), new(int)
-	rig.ma.configure(ownerA, specA, resolveVerifiers(specA.trust, nil), zap.NewNop(), clients, userManager)
-	rig.ma.configure(ownerB, specB, resolveVerifiers(specB.trust, nil), zap.NewNop(), clients, userManager)
+	rig.ma.configure(ownerA, specA, deploytrust.Verifiers(specA.trust, nil), zap.NewNop(), clients, userManager)
+	rig.ma.configure(ownerB, specB, deploytrust.Verifiers(specB.trust, nil), zap.NewNop(), clients, userManager)
 	// A successful reload: A is cleaned up after B configured — not
 	// the last writer, nothing happens.
 	if rig.ma.rollbackConfig(ownerA) || rig.ma.snapshot().spec != specB {
@@ -1730,8 +1731,8 @@ func TestRollbackConfigWakesTheWatchdog(t *testing.T) {
 	on, off := testSpec(t), testSpec(t)
 	off.watchdogOn = false
 	ownerA, ownerB := new(int), new(int)
-	rig.ma.configure(ownerA, on, resolveVerifiers(on.trust, nil), zap.NewNop(), clients, userManager)
-	rig.ma.configure(ownerB, off, resolveVerifiers(off.trust, nil), zap.NewNop(), clients, userManager)
+	rig.ma.configure(ownerA, on, deploytrust.Verifiers(on.trust, nil), zap.NewNop(), clients, userManager)
+	rig.ma.configure(ownerB, off, deploytrust.Verifiers(off.trust, nil), zap.NewNop(), clients, userManager)
 	// Drain the pokes configure sent, then roll back: the rollback
 	// itself must poke, or a parked loop never re-reads watchdog=on.
 	for len(rig.ma.wdNotify) > 0 {
