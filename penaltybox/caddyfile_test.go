@@ -171,7 +171,9 @@ func TestProvisionAppliesDefaults(t *testing.T) {
 // hint_penaltybox sorts after such a block, and the reverse_proxy in
 // it answers without calling the next handler: the module never runs.
 // Inside a handle block it sorts before the proxy, whatever the source
-// order; inside a route block, order is positional.
+// order; inside a route block the written order holds. (Where it sorts
+// against Souin's cache is pinned by the hotserve build, which compiles
+// cache in: cmd/hotserve.)
 func TestCaddyfileDirectiveOrder(t *testing.T) {
 	cases := []struct {
 		name string
@@ -207,6 +209,13 @@ func TestCaddyfileDirectiveOrder(t *testing.T) {
 		hint_penaltybox
 		reverse_proxy localhost:8000
 	}`, true},
+		// The written order holds inside route even when sorting would
+		// put hint_penaltybox first: route is positional, not sorted.
+		{"inside route, proxy first", `
+	route {
+		reverse_proxy localhost:8000
+		hint_penaltybox
+	}`, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -237,7 +246,11 @@ type adaptedHandler struct {
 // adaptedHandlerOrder adapts a Caddyfile and lists its HTTP handlers in
 // the order Caddy chains them when every matcher matches: routes in
 // list order, a subroute's routes in place (a subroute compiles its
-// routes in front of the next handler).
+// routes in front of the next handler). It ignores matchers, route
+// groups (which make handle blocks mutually exclusive), terminal flags
+// and error routes, so it answers only "which handler comes first in
+// the chain for a request every matcher matches", for one-site
+// Caddyfiles.
 func adaptedHandlerOrder(t *testing.T, input string) []string {
 	t.Helper()
 	adapter := caddyconfig.GetAdapter("caddyfile")

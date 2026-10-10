@@ -46,9 +46,10 @@ type storeConfig struct {
 // tierBudget is a resolved budget the store enforces. Slot 0 is always
 // the default budget (the top-level window/limit/penalty_ttl), which
 // keeps the original weighted semantics: a level-N response costs N
-// units. Explicit tiers count responses instead (increment 1), because
-// within a single-level tier a weight is just a constant multiplier —
-// "limit 5" on tier 3 literally means five level-3 responses.
+// units. Explicit tiers count responses instead (increment 1), so
+// "limit 5" on tier 3 literally means five level-3 responses. That
+// includes levels a tier takes by fallback (levelSlot): with only tier
+// 2 configured, a level-3 response costs 1 there, not 3.
 type tierBudget struct {
 	window     time.Duration
 	limit      uint64
@@ -249,7 +250,8 @@ func (s *store) add(key string, level int) bool {
 		// This tier's budget restarts from zero once the box expires;
 		// other tiers keep their windows (which decay naturally).
 		*tc = tierCounter{headStart: now}
-		// metrics hook (v1.1): boxed_total{tier} would increment here.
+		// No metrics hook: the module registers no metrics
+		// (DESIGN-penaltybox.md, Decisions).
 		return true
 	}
 	return false

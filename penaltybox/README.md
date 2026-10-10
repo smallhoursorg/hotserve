@@ -39,8 +39,9 @@ with the strict value set `"1"`, `"2"`, or `"3"` — the **recommended
 throttle strictness** of the response, never enforcement:
 
 - **Absent header, or any other value (garbage, `"0"`, `"4"`, padded,
-  multi-valued) = level 1.** Malformed input never counts and never
-  errors.
+  multi-valued) = level 1.** Malformed input never errors, and it can
+  never raise a response's level: like an absent header, it counts
+  only when `min_level` is 1.
 - Levels at or above `min_level` (default 2) count against the
   client's budget. On the default budget a response adds `level`
   units, so a level-3 login attempt costs 3; in a
@@ -88,17 +89,24 @@ example.com {
 }
 ```
 
-Outside a `route` block Caddy sorts the directive just before
-`reverse_proxy`, but after any `handle`, `handle_path` or `route`
-block. So at site level beside `handle { reverse_proxy ... }`, a
-request that block handles reaches its proxy first, and the proxy
-answers without calling the next handler: the module never runs,
-nothing is counted or boxed, and the hint reaches the client
-unstripped. Put
-`hint_penaltybox` in the same `handle` block as the `reverse_proxy` it
-watches, where Caddy sorts it first, or in a `route` block, where
-ordering is positional: place it before your proxy/file-server
-directive.
+Put `hint_penaltybox` first in a `route` block, as above. That is the
+one placement that always works: inside `route` Caddy keeps the
+written order, so the module sees every request before `cache` or the
+proxy can answer it. With `handle` blocks, put the `route` inside the
+`handle`.
+
+Anywhere else (inside a `handle` block too), Caddy sorts directives
+by its directive order. This one sorts just before `reverse_proxy`,
+which puts it after `cache` (Souin registers `cache` before
+`rewrite`) and after any `handle`, `handle_path` or `route` block:
+
+- Beside `cache`, a cache hit is answered before the module runs, so
+  hits are neither counted nor box-checked (see
+  [Compatibility with Souin](#compatibility-with-souin-http-cache)).
+- At site level beside `handle { reverse_proxy ... }`, a request that
+  block handles reaches its proxy first, and the proxy answers without
+  calling the next handler: the module never runs, nothing is counted
+  or boxed, and the hint reaches the client unstripped.
 
 All options and defaults:
 
@@ -138,10 +146,11 @@ hint_penaltybox {
 
 Semantics:
 
-- **Within a tier, one response costs 1** — `limit 5` means five
-  level-3 responses, not weighted units. (Weighting only matters when
-  levels share a budget; inside a single-level tier it would be a
-  constant multiplier.)
+- **Within a tier, one response costs 1**, whatever its level —
+  `limit 5` means five level-3 responses, not weighted units. That
+  holds for levels a tier takes by fallback (below) too: with only
+  `tier 2` configured, a level-3 response costs 1 there, where the
+  default budget would charge 3.
 - **Budgets are independent.** Level-2 traffic never consumes tier 3's
   budget, and vice versa — this is the point of the feature.
 - **Fallback:** a counted level without its own tier uses the nearest
@@ -309,9 +318,11 @@ With that order (all verified by `make e2e`):
   it as a header of the final response, not as a trailer or on a 1xx;
   see `strip`).
 
-(If you instead put `cache` before `hint_penaltybox`, cache hits bypass
-the module entirely: stored responses are already stripped, but boxed
-clients can keep reading cached pages and hits never count.)
+(If `cache` runs before `hint_penaltybox`, cache hits bypass the
+module entirely: stored responses are already stripped, but boxed
+clients can keep reading cached pages and hits never count. Outside a
+`route` block that is the order Caddy picks, whatever the written
+order: see [Caddyfile](#caddyfile).)
 
 ## Development
 
