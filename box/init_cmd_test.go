@@ -66,7 +66,7 @@ func TestInitCmd(t *testing.T) {
 			setup: func(b *testBox) ([]byte, string) {
 				b.writeInstalled([]byte("example.com {\n\trespond \"hello\"\n}\n")) // the packaged file walks as no box's
 				if err := os.Remove(b.x("applied.json")); err != nil {
-					t.Fatal(err)
+					b.t.Fatal(err)
 				}
 				file := boxFile(2, b.alice)
 				return file, b.repo.commit(file, &b.alice)
@@ -223,9 +223,9 @@ func TestInitCmdRecoversFirst(t *testing.T) {
 // commands").
 func TestInitCmdRefusals(t *testing.T) {
 	edit := func(old, new string) func(*testBox) []byte {
-		return func(*testBox) []byte {
+		return func(b *testBox) []byte {
 			if !strings.Contains(good, old) {
-				t.Fatalf("the fixture has no %q", old)
+				b.t.Fatalf("the fixture has no %q", old)
 			}
 			return file(strings.Replace(good, old, new, 1))
 		}
@@ -321,4 +321,42 @@ func TestInitCmdRefusals(t *testing.T) {
 			}
 		})
 	}
+}
+
+// An apply whose baseline cannot be recorded ends `unknown` with a
+// remedy that works: the same commit again ends no_change and records
+// it — init again for init, a push again for the applier.
+func TestBaselineUnrecordedRemedies(t *testing.T) {
+	t.Run("init", func(t *testing.T) {
+		b := newTestBox(t)
+		file := boxFile(2, b.alice)
+		sha := b.repo.commit(file, &b.alice, b.base)
+		dir := initDir(t, file)
+		var out bytes.Buffer
+		err := runInitCmd(context.Background(), 0, b.applier(hooks{fail: failAt(map[string]int{"applied.json": -1})}), dir, sha, &out)
+		want := phaseUnknown + ": applied but the baseline could not be recorded; hotserve init " + sha + " again, which ends no_change and records it"
+		if err == nil || err.Error() != want {
+			t.Fatalf("%v, want %q", err, want)
+		}
+		if out, err := b.initCmd(dir, sha); err != nil || !strings.HasSuffix(out, "init: unchanged; the baseline is now "+sha[:7]+"\n") {
+			t.Fatalf("init again: %q, %v", out, err)
+		}
+		if a := b.applied(); a.SHA != sha || a.SHA256 != digest(file) {
+			t.Errorf("applied.json %+v", a)
+		}
+	})
+	t.Run("applier", func(t *testing.T) {
+		b := newTestBox(t)
+		head := b.repo.commit(boxFile(2, b.alice), &b.alice, b.base)
+		id := b.push(b.repo.bundleFiles(head, b.base))
+		if err := b.run(hooks{fail: failAt(map[string]int{"applied.json": -1})}); err != nil {
+			t.Fatal(err)
+		}
+		if r := b.result(id); r == nil || r.Phase != phaseUnknown || r.Error != "applied but the baseline could not be recorded; push again, which ends no_change and records it" {
+			t.Fatalf("%+v", r)
+		}
+		if r := b.pushOne(b.repo.bundleFiles(head, b.base)); r.Phase != phaseNoChange || b.applied().SHA != head {
+			t.Fatalf("push again: %+v", r)
+		}
+	})
 }

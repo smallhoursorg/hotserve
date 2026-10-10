@@ -122,7 +122,7 @@ func TestInitCommand(t *testing.T) {
 	if !ok || cmd.CobraFunc == nil {
 		t.Fatal("no init command")
 	}
-	for _, args := range [][]string{nil, {strings.Repeat("a", 40), "x"}} {
+	for _, args := range [][]string{{}, {strings.Repeat("a", 40), "x"}} {
 		c := &cobra.Command{Use: "init"}
 		cmd.CobraFunc(c)
 		c.SetOut(&bytes.Buffer{})

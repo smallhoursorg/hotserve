@@ -50,24 +50,23 @@ func runInitCmd(ctx context.Context, euid int, a *Applier, dir, sha string, out 
 		shape.Host, counted(shape.Apps, "app"), counted(principals(shape.Signers), "signer"), path); err != nil {
 		return err
 	}
-	id, err := newRequestID()
-	if err != nil {
-		return err
+	// Before the swap, and advisory, so read outside the lock: a file
+	// that does not read, or walks as no box's (the packaged one), names
+	// no host to warn about.
+	if installed, err := readFile(a.caddyfile(), proof.MaxCaddyfile, true); err == nil {
+		if was, err := Walk(installed); err == nil && was.Host != shape.Host {
+			if err := printf(out, "init: this box was %s; this file names %s\n", was.Host, shape.Host); err != nil {
+				return err
+			}
+		}
 	}
-	run, err := a.runInit(ctx, record{ID: id, Commit: sha, Path: path, BoxWebhook: shape.Host, Apps: shape.Apps}, file)
+	run, err := a.runInit(ctx, record{ID: newRequestID(), Commit: sha, Path: path, BoxWebhook: shape.Host, Apps: shape.Apps}, file)
 	var notUp *notUpError
 	if errors.As(err, &notUp) {
 		return fmt.Errorf("%s\n"+msgInitRemedy, notUp.msg, sha)
 	}
 	if err != nil {
 		return err
-	}
-	// A file that walks as no box's (the packaged one) named no host:
-	// nothing to warn about.
-	if was, err := Walk(run.prev); err == nil && was.Host != shape.Host {
-		if err := printf(out, "init: this box was %s; this file names %s\n", was.Host, shape.Host); err != nil {
-			return err
-		}
 	}
 	commits := "this box applies commits descending from " + shortSHA(sha)
 	if run.was != nil && run.was.SHA != sha {
@@ -111,12 +110,10 @@ func principals(s proof.Signers) []string {
 
 // newRequestID is an id for init's own transaction: the swap's
 // temporary and the record are named for it, as a push's are.
-func newRequestID() (string, error) {
+func newRequestID() string {
 	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
+	_, _ = rand.Read(b) // never fails: crypto/rand crashes the program instead (Go 1.24)
+	return hex.EncodeToString(b)
 }
 
 func printf(w io.Writer, format string, args ...any) error {

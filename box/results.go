@@ -51,10 +51,12 @@ const (
 	msgChanged            = "the Caddyfile changed during the transaction; it is left as found"
 	msgDiskFull           = "disk full; the previous Caddyfile could not be restored"
 	// msgInitRemedy follows init's refusal on a hotserve that is not up
-	// ("Console commands"); %s is init's argument.
+	// ("Console commands"); %s is init's argument. A restart, not a
+	// start: a start joins one already in flight, which read the old
+	// file, and the second init's no_change reloads nothing.
 	msgInitRemedy = `the Caddyfile is accepted only by a running hotserve; from this directory:
   cp Caddyfile /etc/hotserve/Caddyfile
-  systemctl start hotserve  # exit 1 is final; journalctl -u hotserve says why
+  systemctl enable hotserve && systemctl restart hotserve  # exit 1 is final; journalctl -u hotserve says why
   hotserve init %s  # the same bytes: no_change, which records the baseline`
 )
 
@@ -65,9 +67,14 @@ func installFailed(err error) string {
 }
 
 // baselineUnrecorded is `unknown` for an apply whose applied.json could
-// not be written.
-func baselineUnrecorded(commit string) string {
-	return "applied but the baseline could not be recorded; hotserve box baseline " + commit
+// not be written: the file runs, and the same commit again — a push, or
+// init from the box's directory — ends no_change and records it.
+func baselineUnrecorded(o origin, commit string) string {
+	again := "push again"
+	if o == originInit {
+		again = "hotserve init " + commit + " again"
+	}
+	return "applied but the baseline could not be recorded; " + again + ", which ends no_change and records it"
 }
 
 // result is out/<id>.json (DESIGN-box.md, "Record and result fields"):

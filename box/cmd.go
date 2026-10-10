@@ -73,7 +73,7 @@ and a force-push, with nothing to do on the box. As root, after
 hotserve init; it waits while the applier holds its lock.`,
 				Args: cobra.ExactArgs(1),
 				RunE: func(c *cobra.Command, args []string) error {
-					return runBaseline(commandContext(c), os.Geteuid(), newApplier(caddy.Log().Named("box.baseline")), args[0], c.OutOrStdout())
+					return runBaseline(c.Context(), os.Geteuid(), newApplier(caddy.Log().Named("box.baseline")), args[0], c.OutOrStdout())
 				},
 			})
 		},
@@ -100,26 +100,17 @@ path in the repository (<host>/Caddyfile, from its box_webhook host),
 installs it as /etc/hotserve/Caddyfile and reloads hotserve. The reload
 is the check: a file hotserve will not load is rolled back, the old
 configuration serving throughout, and init exits non-zero. hotserve
-must be running; init says how to start it with this file if it is
-not. From then on the box applies only signed commits that descend
+must be running (on a new box: systemctl enable --now hotserve); init
+says how to start it with this file if it is not. From then on the box applies only signed commits that descend
 from <sha>. Running it again re-seeds the box: a new host, a moved
 file, or the way back from a Caddyfile that lists no signer.`,
 		CobraFunc: func(cmd *cobra.Command) {
 			cmd.Args = cobra.ExactArgs(1)
 			cmd.RunE = func(c *cobra.Command, args []string) error {
-				return runInitCmd(commandContext(c), os.Geteuid(), newApplier(caddy.Log().Named("box.init")), ".", args[0], c.OutOrStdout())
+				return runInitCmd(c.Context(), os.Geteuid(), newApplier(caddy.Log().Named("box.init")), ".", args[0], c.OutOrStdout())
 			}
 		},
 	})
-}
-
-// commandContext is the command's context, or a background one when it
-// was run without.
-func commandContext(c *cobra.Command) context.Context {
-	if ctx := c.Context(); ctx != nil {
-		return ctx
-	}
-	return context.Background()
 }
 
 // commitArg holds init's and baseline's argument to a commit id as the

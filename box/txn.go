@@ -328,7 +328,7 @@ func (a *Applier) advance(t *txn, phase string) error {
 	}
 	if err := a.writeApplied(&t.rec); err != nil {
 		a.logger.Error("box baseline could not be recorded", zap.String("id", t.rec.ID), zap.String("commit", t.rec.Commit), zap.String("error", proof.Bound(err.Error())))
-		a.finish(t, phaseUnknown, baselineUnrecorded(t.rec.Commit))
+		a.finish(t, phaseUnknown, baselineUnrecorded(t.rec.Origin, t.rec.Commit))
 		return nil
 	}
 	a.finish(t, phase, "")
@@ -494,13 +494,9 @@ func (a *Applier) recoverRecord(ctx context.Context, rec *record) error {
 }
 
 // initRun is what runInit reports for init's printout: the outcome, and
-// what the box held when the transaction began.
+// the baseline the transaction began over (nil if there was none).
 type initRun struct {
 	*result
-	// prev is the installed file as init read it, under the lock.
-	prev []byte
-	// was is the baseline the transaction began over, nil if there was
-	// none.
 	was *applied
 }
 
@@ -556,15 +552,15 @@ func (a *Applier) runInit(ctx context.Context, rec record, file []byte) (*initRu
 	if err != nil {
 		return nil, err
 	}
-	run := &initRun{prev: installed}
+	run := &initRun{}
 	// One that does not read is replaced like a missing one: init is
 	// the way back, and only root writes it (Triage: occurrence 1).
 	if was, err := readApplied(a.x("")); err == nil {
 		run.was = was
 	}
 	rec.Origin, rec.Signer = originInit, "init"
+	// No diff: nobody reads one for init (it writes no result).
 	rec.Prev, rec.PrevSHA256, rec.NewSHA256 = installed, digest(installed), digest(file)
-	rec.Diff = caddyfileDiff(installed, file)
 	t := &txn{rec: rec, next: file}
 	if err := a.install(ctx, t); err != nil {
 		return nil, err
