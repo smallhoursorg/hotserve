@@ -309,29 +309,28 @@ func TestNoChangeRechecksTheFile(t *testing.T) {
 	}
 }
 
-// init's recovery, finding hotserve not running after its wait, records
-// the swap applied only if init's bytes still stand: every baseline
-// write re-reads the file (advance).
-func TestInitRecoveryRechecksTheFile(t *testing.T) {
+// An init record a crash left after its swap recovers as the applier's
+// does: on a hotserve still activating after the wait — not running —
+// the previous bytes go back and it ends failed, never counted applied
+// for the next start, and nothing is reloaded.
+func TestInitRecordRecoversLikeTheApplier(t *testing.T) {
 	b := newTestBox(t)
 	v2 := boxFile(2, b.alice)
 	sha := b.repo.commit(v2, &b.alice, b.base)
 	b.writeInstalled(v2)
-	b.lyingRecord(record{ID: randomID(t), Origin: originInit, Phase: phaseSwapped, Commit: sha, Path: testPath, Signer: "init",
+	id := randomID(t)
+	b.lyingRecord(record{ID: id, Origin: originInit, Phase: phaseSwapped, Commit: sha, Path: testPath, Signer: "init",
 		Prev: b.v1, PrevSHA256: digest(b.v1), NewSHA256: digest(v2)})
-	edited := append(append([]byte{}, v2...), "# 3am\n"...)
 	b.sd.states = []string{"activating"}
-	edit := func(p string) {
-		if p == "record:applied" { // the console's edit during the wait, landing before the baseline
-			b.writeInstalled(edited)
-		}
-	}
-	if err := b.run(hooks{crash: edit}); err != nil {
+	if err := b.run(hooks{}); err != nil {
 		t.Fatal(err)
 	}
 	b.settled()
-	if b.applied().SHA != b.base || !bytes.Equal(b.installed(), edited) {
-		t.Error("the baseline advanced past a console edit, or the edit was overwritten")
+	if b.applied().SHA != b.base || !bytes.Equal(b.installed(), b.v1) || b.sd.reloaded != 0 {
+		t.Errorf("baseline %s, %d reloads; the previous bytes are back: %v", b.applied().SHA, b.sd.reloaded, bytes.Equal(b.installed(), b.v1))
+	}
+	if phase, msg := b.outcomeLogged(id); phase != phaseFailed || msg != msgInterruptedStopped {
+		t.Errorf("journaled %s %q", phase, msg)
 	}
 }
 
@@ -419,11 +418,11 @@ func TestInitOnReloadingHotserveReloads(t *testing.T) {
 	}
 }
 
-// init on a box that is not running never reloads, its rollback
-// included.
-func TestInitRollbackOnStoppedBoxDoesNotReload(t *testing.T) {
+// init's rollback after a write that failed past the swap reloads the
+// previous bytes, as the applier's does: init found hotserve up before
+// it swapped.
+func TestInitRollbackReloads(t *testing.T) {
 	b := newTestBox(t)
-	b.sd.states = []string{"inactive"}
 	v2 := boxFile(2, b.alice)
 	sha := b.repo.commit(v2, &b.alice, b.base)
 	a := b.applier(hooks{fail: failAt(map[string]int{"record:swapped": -1})})
@@ -432,8 +431,8 @@ func TestInitRollbackOnStoppedBoxDoesNotReload(t *testing.T) {
 		t.Fatal(err)
 	}
 	b.settled()
-	if out.Phase != phaseFailed || out.Error != msgInterruptedStopped || b.sd.reloaded != 0 || !bytes.Equal(b.installed(), b.v1) {
-		t.Fatalf("%+v, %d reloads", out, b.sd.reloaded)
+	if out.Phase != phaseRolledBack || out.Error != msgRolledBackUnrecorded || b.sd.reloaded != 1 || !bytes.Equal(b.installed(), b.v1) {
+		t.Fatalf("%+v, %d reloads", out.result, b.sd.reloaded)
 	}
 }
 

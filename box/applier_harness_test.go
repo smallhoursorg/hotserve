@@ -616,6 +616,18 @@ func (b *testBox) errorLogged(msg string) bool {
 	return false
 }
 
+// outcomeLogged is the phase and error of id's last `box apply` line:
+// the outcome as the journal has it, the only record of an init's.
+func (b *testBox) outcomeLogged(id string) (phase, msg string) {
+	for _, e := range b.logs.All() {
+		if f := e.ContextMap(); e.Message == "box apply" && f["id"] == id {
+			phase, _ = f["phase"].(string)
+			msg, _ = f["error"].(string)
+		}
+	}
+	return phase, msg
+}
+
 func (b *testBox) logged(level zapcore.Level, msg string) []observer.LoggedEntry {
 	var out []observer.LoggedEntry
 	for _, e := range b.logs.All() {
