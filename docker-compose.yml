@@ -87,11 +87,14 @@ services:
   # transient unit under the hotserve user's systemd manager,
   # rate-limits and caches. Privileged + host cgroup namespace + the
   # cgroup mount is the systemd-in-docker recipe (cgroup-v2 hosts).
+  # The image is tagged by compose project (by default the checkout's
+  # directory), so two checkouts running `make e2e` at once each run
+  # the binary they built rather than whichever build tagged it last.
   e2e-hotserve:
     build:
       context: .
       dockerfile: e2e/Dockerfile
-    image: hotserve-e2e
+    image: hotserve-e2e:${COMPOSE_PROJECT_NAME}
     privileged: true
     cgroup: host
     stop_signal: SIGRTMIN+3
@@ -120,7 +123,7 @@ services:
     build:
       context: .
       dockerfile: e2e/Dockerfile
-    image: hotserve-e2e
+    image: hotserve-e2e:${COMPOSE_PROJECT_NAME}
     command: ["/usr/bin/hotserve", "run", "--config", "/etc/hotserve/Caddyfile"]
     # Plain `hotserve run`, not systemd: the image's SIGRTMIN+3 stop
     # signal would be ignored and cost a 10s SIGKILL wait on teardown.
