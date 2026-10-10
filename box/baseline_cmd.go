@@ -3,7 +3,6 @@ package box
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"io/fs"
 )
@@ -17,11 +16,17 @@ import (
 // push; signer "baseline"; when now. Before init there is nothing to
 // reset.
 func runBaseline(ctx context.Context, euid int, a *Applier, sha string, out io.Writer) error {
+	if ctx == nil { // as runApply: a RunE called without cobra's Execute
+		ctx = context.Background()
+	}
 	if euid != 0 {
 		return errors.New("hotserve box baseline runs as root: it rewrites the box's baseline")
 	}
 	if err := commitArg(sha); err != nil {
 		return err
+	}
+	a.lockWait = func() {
+		_ = printf(out, "baseline: waiting for root's lock: an applier run holds it\n") // a notice; the outcome is what counts
 	}
 	unlock, err := a.lock()
 	if err != nil {
@@ -40,12 +45,10 @@ func runBaseline(ctx context.Context, euid int, a *Applier, sha string, out io.W
 	}
 	if old.SHA == sha {
 		// Rewriting it would only lose who verified it, and when.
-		_, err = fmt.Fprintf(out, "baseline: this box already runs %s; nothing changed\n", shortSHA(sha))
-		return err
+		return printf(out, "baseline: this box already runs %s; nothing changed\n", shortSHA(sha))
 	}
 	if err := a.putApplied(applied{SHA: sha, Path: old.Path, SHA256: old.SHA256, Signer: "baseline", When: a.clock.Now().UTC()}); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(out, "baseline: this box ran %s; it now applies commits descending from %s\n", shortSHA(old.SHA), shortSHA(sha))
-	return err
+	return printf(out, "baseline: this box ran %s; it now applies commits descending from %s\n", shortSHA(old.SHA), shortSHA(sha))
 }

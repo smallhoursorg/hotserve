@@ -166,11 +166,13 @@ func TestBaselineWaitsForTheLock(t *testing.T) {
 		t.Fatalf("baseline ran while the lock was held: %v", err)
 	case <-time.After(200 * time.Millisecond):
 	}
-	if b.applied().SHA != b.base {
+	moved := b.applied().SHA != b.base
+	unlock()
+	err = <-done // drained before any failure: it writes in the test's tree
+	if moved {
 		t.Fatal("the baseline moved while the lock was held")
 	}
-	unlock()
-	if err := <-done; err != nil {
+	if err != nil {
 		t.Fatal(err)
 	}
 	if b.applied().SHA != sha {

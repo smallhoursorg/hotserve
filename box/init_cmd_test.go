@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // initDir is the box's directory as the operator copies it over: file
@@ -298,7 +299,7 @@ func TestInitCmdRefusals(t *testing.T) {
 			err := runInitCmd(context.Background(), c.euid, b.applier(hooks{}), dir, sha, &out)
 			want := c.want
 			if c.remedy {
-				want += "\n" + fmt.Sprintf(msgInitRemedy, sha)
+				want += "\n" + fmt.Sprintf(msgInitRemedy, sha, shellWord(dir))
 				if err == nil || err.Error() != want {
 					t.Fatalf("%v\nwant\n%s", err, want)
 				}
@@ -345,18 +346,123 @@ func TestBaselineUnrecordedRemedies(t *testing.T) {
 			t.Errorf("applied.json %+v", a)
 		}
 	})
+	// The applier's: a chain that rotated a signer on the way (alice
+	// signs c7, bob signs c8, which drops alice). Pushing it again is
+	// refused — c7 is verified against the file now installed — so the
+	// remedy is `box baseline`, after which the next push applies.
 	t.Run("applier", func(t *testing.T) {
 		b := newTestBox(t)
-		head := b.repo.commit(boxFile(2, b.alice), &b.alice, b.base)
-		id := b.push(b.repo.bundleFiles(head, b.base))
+		c6 := b.repo.commit(boxFile(2, b.alice, b.bob), &b.alice, b.base)
+		if r := b.pushOne(b.repo.bundleFiles(c6, b.base)); r.Phase != phaseApplied {
+			t.Fatalf("c6: %+v", r)
+		}
+		c7 := b.repo.commit(boxFile(3, b.alice, b.bob), &b.alice, c6)
+		c8 := b.repo.commit(boxFile(4, b.bob), &b.bob, c7)
+		id := b.push(b.repo.bundleFiles(c8, c6))
 		if err := b.run(hooks{fail: failAt(map[string]int{"applied.json": -1})}); err != nil {
 			t.Fatal(err)
 		}
-		if r := b.result(id); r == nil || r.Phase != phaseUnknown || r.Error != "applied but the baseline could not be recorded; push again, which ends no_change and records it (that push reports the file as edited out of band; it was not)" {
+		want := "applied but the baseline could not be recorded; hotserve box baseline " + c8 + " on the box records it (the next push then reports the file as edited out of band; it was not)"
+		if r := b.result(id); r == nil || r.Phase != phaseUnknown || r.Error != want {
 			t.Fatalf("%+v", r)
 		}
-		if r := b.pushOne(b.repo.bundleFiles(head, b.base)); r.Phase != phaseNoChange || !r.OutOfBand || b.applied().SHA != head {
-			t.Fatalf("push again: %+v", r)
+		if r := b.pushOne(b.repo.bundleFiles(c8, c6)); r.Phase != phaseRefused {
+			t.Fatalf("pushing the rotated chain again: %+v (why the remedy is not a push)", r)
+		}
+		if err := runBaseline(context.Background(), 0, b.applier(hooks{}), c8, &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
+		c9 := b.repo.commit(boxFile(5, b.bob), &b.bob, c8)
+		if r := b.pushOne(b.repo.bundleFiles(c9, c8)); r.Phase != phaseApplied || !r.OutOfBand || b.applied().SHA != c9 {
+			t.Fatalf("the next push: %+v", r)
 		}
 	})
+}
+
+// init says so while it waits for root's lock, then goes on.
+func TestInitSaysItWaitsForTheLock(t *testing.T) {
+	b := newTestBox(t)
+	unlock, err := b.applier(hooks{}).lock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(unlock) // a second close is harmless
+	file := boxFile(2, b.alice)
+	sha := b.repo.commit(file, &b.alice, b.base)
+	a := b.applier(hooks{})
+	waiting := make(chan struct{})
+	var out bytes.Buffer
+	dir := initDir(t, file)
+	done := make(chan error, 1)
+	go func() {
+		w := &notifyingWriter{w: &out, notify: waiting, on: "waiting for root's lock"}
+		done <- runInitCmd(context.Background(), 0, a, dir, sha, w)
+	}()
+	select {
+	case <-waiting:
+	case err := <-done:
+		t.Fatalf("init ran while the lock was held: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("init said nothing while it waited")
+	}
+	unlock()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "init: waiting for root's lock: an applier run holds it\n") || !strings.HasSuffix(out.String(), fromHere) {
+		t.Errorf("printed %q", out.String())
+	}
+}
+
+// notifyingWriter closes notify the first time a write contains on.
+type notifyingWriter struct {
+	w      *bytes.Buffer
+	notify chan struct{}
+	on     string
+	done   bool
+}
+
+func (n *notifyingWriter) Write(p []byte) (int, error) {
+	if !n.done && strings.Contains(string(p), n.on) {
+		n.done = true
+		close(n.notify)
+	}
+	return n.w.Write(p)
+}
+
+// "applied" means these bytes: a console edit landing after init's
+// reload and before its baseline leaves the baseline where it was (I1,
+// I4), init's own record as the applier's.
+func TestInitRechecksTheFileBeforeTheBaseline(t *testing.T) {
+	b := newTestBox(t)
+	file := boxFile(2, b.alice)
+	sha := b.repo.commit(file, &b.alice, b.base)
+	edited := append(append([]byte{}, file...), "# 3am\n"...)
+	edit := func(p string) {
+		if p == "record:applied" {
+			b.writeInstalled(edited)
+		}
+	}
+	var out bytes.Buffer
+	err := runInitCmd(context.Background(), 0, b.applier(hooks{crash: edit}), initDir(t, file), sha, &out)
+	if err == nil || err.Error() != phaseUnknown+": "+msgChanged {
+		t.Fatalf("%v", err)
+	}
+	b.settled()
+	if b.applied().SHA != b.base || !bytes.Equal(b.installed(), edited) {
+		t.Error("the baseline advanced past a console edit, or the edit was overwritten")
+	}
+}
+
+func TestShellWord(t *testing.T) {
+	for in, want := range map[string]string{
+		"/root/deploy.example.com": "/root/deploy.example.com",
+		"/root/my box":             "'/root/my box'",
+		"/root/it's":               `'/root/it'\''s'`,
+		"/tmp/a_b-c+d@e":           "/tmp/a_b-c+d@e",
+	} {
+		if got := shellWord(in); got != want {
+			t.Errorf("%q: %s, want %s", in, got, want)
+		}
+	}
 }

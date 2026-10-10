@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/caddyserver/caddy/v2"
 	caddycmd "github.com/caddyserver/caddy/v2/cmd"
 	"github.com/spf13/cobra"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
 	"github.com/smallhoursorg/hotserve/box/proof"
 )
@@ -73,7 +76,7 @@ and a force-push, with nothing to do on the box. As root, after
 hotserve init; it waits while the applier holds its lock.`,
 				Args: cobra.ExactArgs(1),
 				RunE: func(c *cobra.Command, args []string) error {
-					return runBaseline(c.Context(), os.Geteuid(), newApplier(caddy.Log().Named("box.baseline")), args[0], c.OutOrStdout())
+					return runBaseline(c.Context(), os.Geteuid(), newApplier(consoleLog("box.baseline")), args[0], c.OutOrStdout())
 				},
 			})
 		},
@@ -101,15 +104,15 @@ path in the repository (<host>/Caddyfile, from its box_webhook host),
 installs it as /etc/hotserve/Caddyfile and reloads hotserve. The reload
 is the check: a file hotserve will not load is rolled back, the old
 configuration serving throughout, and init exits non-zero. hotserve
-must be running (on a new box: systemctl enable --now hotserve); init
-says how to start it with this file if it is not. From then on the box applies only signed commits that descend
+must be running (on a new box: systemctl enable --now hotserve); if it
+is not, init refuses and says how to start it and run init again. From then on the box applies only signed commits that descend
 from <sha>. Running it again re-seeds the box: a new host (its
 directory renamed with it), or the way back from a Caddyfile that
 lists no signer.`,
 		CobraFunc: func(cmd *cobra.Command) {
 			cmd.Args = cobra.ExactArgs(1)
 			cmd.RunE = func(c *cobra.Command, args []string) error {
-				return runInitCmd(c.Context(), os.Geteuid(), newApplier(caddy.Log().Named("box.init")), ".", args[0], c.OutOrStdout())
+				return runInitCmd(c.Context(), os.Geteuid(), newApplier(consoleLog("box.init")), ".", args[0], c.OutOrStdout())
 			}
 		},
 	})
@@ -122,6 +125,20 @@ func commitArg(sha string) error {
 		return fmt.Errorf("%s is not a commit id: 40 lowercase hex, as git rev-parse HEAD prints one", proof.Bound(sha))
 	}
 	return nil
+}
+
+// consoleLog is the logger of a console command, which writes to the
+// terminal it runs in: warnings and errors (recovery's, a rollback's),
+// not the per-push info line the applier's journal carries — the
+// command prints its outcome itself.
+func consoleLog(name string) *zap.Logger {
+	return caddy.Log().Named(name).WithOptions(zap.IncreaseLevel(zapcore.WarnLevel))
+}
+
+// printf writes one of the console's lines.
+func printf(w io.Writer, format string, args ...any) error {
+	_, err := fmt.Fprintf(w, format, args...)
+	return err
 }
 
 // shortSHA is a commit id as the console's lines print it.

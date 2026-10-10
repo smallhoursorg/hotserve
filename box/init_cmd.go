@@ -22,6 +22,9 @@ import (
 // status is 0 only when the box runs what was asked, applied or
 // no_change.
 func runInitCmd(ctx context.Context, euid int, a *Applier, dir, sha string, out io.Writer) error {
+	if ctx == nil { // as runApply: a RunE called without cobra's Execute
+		ctx = context.Background()
+	}
 	if euid != 0 {
 		return errors.New("hotserve init runs as root: it installs " + installedFile)
 	}
@@ -47,6 +50,9 @@ func runInitCmd(ctx context.Context, euid int, a *Applier, dir, sha string, out 
 		shape.Host, counted(shape.Apps, "app"), counted(principals(shape.Signers), "signer"), path); err != nil {
 		return err
 	}
+	a.lockWait = func() {
+		_ = printf(out, "init: waiting for root's lock: an applier run holds it\n") // a notice; the outcome is what counts
+	}
 	// Before the swap, and advisory, so read outside the lock: a file
 	// that does not read, or walks as no box's (the packaged one), names
 	// no host to warn about.
@@ -60,10 +66,17 @@ func runInitCmd(ctx context.Context, euid int, a *Applier, dir, sha string, out 
 	run, err := a.runInit(ctx, record{ID: newRequestID(), Commit: sha, Path: path, BoxWebhook: shape.Host, Apps: shape.Apps}, file)
 	var notUp *notUpError
 	if errors.As(err, &notUp) {
-		return errors.New(notUp.msg + "\n" + fmt.Sprintf(msgInitRemedy, sha))
+		abs, aerr := filepath.Abs(dir)
+		if aerr != nil {
+			abs = dir
+		}
+		return errors.New(notUp.msg + "\n" + fmt.Sprintf(msgInitRemedy, sha, shellWord(abs)))
 	}
 	if err != nil {
 		return err
+	}
+	if run.result == nil { // every end of install sets one; a nil is a bug
+		return errors.New("init: the transaction ended with no outcome; journalctl says what it did")
 	}
 	commits := "this box applies commits descending from " + shortSHA(sha)
 	if run.was != nil && run.was.SHA != sha {
@@ -113,7 +126,14 @@ func newRequestID() string {
 	return hex.EncodeToString(b)
 }
 
-func printf(w io.Writer, format string, args ...any) error {
-	_, err := fmt.Fprintf(w, format, args...)
-	return err
+// shellWord is s as one word for the operator's shell: as it is when
+// every byte is one no shell treats specially, else single-quoted.
+func shellWord(s string) string {
+	const plain = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._-+@"
+	for i := 0; i < len(s); i++ {
+		if strings.IndexByte(plain, s[i]) < 0 {
+			return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+		}
+	}
+	return s
 }

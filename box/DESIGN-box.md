@@ -569,7 +569,7 @@ shows after recovery.
 | record `swapped` | **post-swap failure**: record `rolling_back` if it can be written, then the previous bytes back; if they cannot be written back, leave the record (phase `installing`, or `rolling_back` if that write landed; `d == new`) and the entry, and exit non-zero with an error-level line ("disk full; the previous Caddyfile could not be restored") — the path unit re-triggers until its limit and fails; the console frees space, then `systemctl restart hotserve-box-apply.path` (`reset-failed` alone clears the state but does not start a unit that hit its trigger limit) | phase `swapped` → rollback path | `rolled_back` / `unknown` | per phase |
 | reload | non-zero exit → rollback path | phase `swapped` (the reload's outcome unknown) → rollback path | `rolled_back` / `unknown` | per phase |
 | record `applied` | the reload succeeded but the record cannot say so, and the baseline must never run ahead of the record (I4): take the rollback path exactly as the `record swapped` row — previous bytes back, reload, result `rolled_back` ("the record could not be updated after a successful reload (disk full); rolled back to keep the file and the record consistent") or, if the write-back fails too, the full-disk end above | phase `applied`, `d == new` → `applied.json`, result | `rolled_back` / `unknown` | per phase |
-| `applied.json` | journal (error); result `unknown` ("applied but the baseline could not be recorded; push again, which ends no_change and records it (that push reports the file as edited out of band; it was not)": `applied.json` still names the previous digest — for `init`, "`hotserve init <sha>` again, which ends no_change and records it") | phase `applied` → idempotent rewrite | `applied` / `unknown` | per phase |
+| `applied.json` | journal (error); result `unknown` ("applied but the baseline could not be recorded; hotserve box baseline <sha> on the box records it (the next push then reports the file as edited out of band; it was not)": `baseline` keeps the previous digest. Not a push again: a chain that rotated a signer on the way is verified again against the file now installed, and refused. For `init`, "`hotserve init <sha>` again, which ends no_change and records it") | phase `applied` → idempotent rewrite | `applied` / `unknown` | per phase |
 | previous bytes back | retry once (a write whose rename landed counts); else the full-disk end of the `record swapped` row: no result, record and entry kept, exit non-zero — a result written here would make the next recovery drop the record (the `terminal result` row), and with it the only copy of the previous bytes | phase `rolling_back`, `d` checked, bytes written back if needed | `rolled_back` / `unknown` | per phase |
 | terminal result | **full disk**: error-level journal with every field; remove record and entry anyway (both `unlink`s). At a terminal phase the disk is settled and only the report is owed; a record kept would spin `PathExists=txn.json`. | result exists, record present → remove record and entry | as logged | the last result on disk — `verified` for a transaction past that phase, else `admitted` — until the workflow's bound, then red naming the journal |
 | record removed | retry; cannot fail for space | record gone, entry present → remove entry | — | — |
@@ -957,13 +957,15 @@ says. The workflow's action is in the last column.
 | 200 / poll | `applied` | `loaded; running apps are not restarted` | applier | green |
 | 422 / poll | `failed` | `the install failed before the Caddyfile changed: <error>; nothing changed` / `interrupted before the Caddyfile changed; nothing changed` / `interrupted; the previous Caddyfile is on disk; hotserve is not running` / `the box has no record of this push; push again` | applier | red |
 | 422 / poll | `rolled_back` | `the reload failed; the previous Caddyfile is back and running — journalctl -u hotserve -n 50 on the box says why` / `the record could not be updated after a successful reload (disk full); rolled back to keep the file and the record consistent` | applier | red |
-| 422 / poll | `unknown` | `the reload failed and so did the reload of the previous file; the previous file is on disk; journalctl -u hotserve` / `the Caddyfile changed during the transaction; it is left as found` / `applied but the baseline could not be recorded; push again, which ends no_change and records it (that push reports the file as edited out of band; it was not)` | applier | red; push again |
+| 422 / poll | `unknown` | `the reload failed and so did the reload of the previous file; the previous file is on disk; journalctl -u hotserve` / `the Caddyfile changed during the transaction; it is left as found` / `applied but the baseline could not be recorded; hotserve box baseline <sha> on the box records it (the next push then reports the file as edited out of band; it was not)` | applier | red; the console runs `box baseline` |
 | 202 | `admitted` | `{"phase":"admitted"}` | handler | keep polling, 15 min bound; then red naming `journalctl -u hotserve-box-apply` |
 | 504 | — | `{id}` | handler | poll from the start |
 
 **Console commands.** `hotserve init` and `hotserve box baseline`
-answer a person at the console, not the workflow. Every row but the
-last three exits 1, the text after Caddy's `Error:`. A refusal before
+answer a person at the console, not the workflow. Every row with exit
+1 is the text after Caddy's `Error:`; the log lines a command writes to
+the terminal are its warnings and errors only (recovery's, a
+rollback's), never the per-push info line of the applier's journal. A refusal before
 the transaction writes nothing of the command's own (a record a crash
 left is settled first by recovery, which reports as the applier does);
 a red end of `init`'s transaction leaves what its Transitions row
@@ -976,25 +978,28 @@ says.
 | 1 | `init` | `no Caddyfile here; run init from inside the box's directory` / `Caddyfile: larger than 1048576 bytes` / `Caddyfile: not a regular file` | `./Caddyfile` |
 | 1 | `init` | `the Caddyfile <reason>`, each reason as the `the new Caddyfile …` row above words it | the walk |
 | 1 | `init` | `hotserve is not running; nothing applied` / `hotserve is still starting after 300 s; nothing applied`, each followed by the remedy below | hotserve not up after the wait |
-| 1 | `init` | `<phase>: <text>`, the phase and the catalogue text above of `failed`, `rolled_back` or `unknown` / `disk full; the previous Caddyfile could not be restored` | the transaction's red ends |
+| 1 | `init` | `<phase>: <text>`, the phase and the catalogue text above of `failed`, `rolled_back` or `unknown` | the transaction's red ends |
+| 1 | both | `disk full; the previous Caddyfile could not be restored` | the full-disk end, in `init`'s transaction or in the recovery either runs first |
+| 1 | both | the box's own error as the system words it (a write of `applied.json` that fails, a state file that does not read) | anything else |
 | 1 | both | `the transaction could not be settled`, after the error-level line saying why | recovery, or `init`'s own transaction, stopped with everything left as found (I2); the record left starts the applier, whose recovery settles it by the States table — an `init` swap whose reload exited 0 but whose file could not be read back is rolled back there |
 | 1 | `init` | `unknown: applied but the baseline could not be recorded; hotserve init <sha> again, which ends no_change and records it` | `applied.json` could not be written |
 | 1 | `baseline` | `this box has no baseline; hotserve init <sha>, as root inside the box's directory, sets one` | no `applied.json` |
 | 0 | `init` | the printout in "`hotserve init`" | `applied`, `no_change` |
+| — | both | `init: waiting for root's lock: an applier run holds it` / `baseline: …` (the same) | printed once, before a wait for the lock; the outcome follows |
 | 0 | `baseline` | `baseline: this box ran <old>; it now applies commits descending from <new>` | the reset |
 | 0 | `baseline` | `baseline: this box already runs <sha>; nothing changed` | `<sha>` is the baseline: nothing is written, so who verified it and when are kept |
 
-The remedy, `<sha>` filled in from the argument:
+The remedy, `<sha>` filled in from the argument and `<dir>` with init's directory, absolute (the operator may read it after a one-shot `ssh … "cd … && hotserve init …"` and follow it from root's home):
 
 ```
 the Caddyfile is accepted only by a running hotserve. Start it on the file it has, then run init again:
   systemctl enable hotserve && systemctl restart hotserve  # exit 1 is final; journalctl -u hotserve says why
-  hotserve init <sha>
+  cd <dir> && hotserve init <sha>
 If it will not start on that file, start it on this one, keeping the old:
   cp --update=none /etc/hotserve/Caddyfile /root/Caddyfile.before-init
-  cp Caddyfile /etc/hotserve/Caddyfile
+  cp <dir>/Caddyfile /etc/hotserve/Caddyfile
   systemctl restart hotserve
-  hotserve init <sha>  # the same bytes: no_change, which records the baseline
+  cd <dir> && hotserve init <sha>  # the same bytes: no_change, which records the baseline
 ```
 
 Starting on the file the box has keeps `init`'s swap and rollback
