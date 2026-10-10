@@ -50,7 +50,7 @@ var sandboxViewKeys = []string{
 	// The base view.
 	"binsh", "usrbinenv", "hsbin", "etcssl", "sslprivate", "resolvconf", "dns",
 	// The runtime environment.
-	"cgroup", "tmp", "home", "xdg_runtime", "nofile_soft", "nofile_hard",
+	"cgroup", "cgroup_memory_max", "tmp", "home", "xdg_runtime", "nofile_soft", "nofile_hard",
 	"acme_token",
 	// Vacuity guards, and the sentinel.
 	"saw_mgr_pid", "saw_uid", "done",
