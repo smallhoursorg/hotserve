@@ -268,6 +268,7 @@ if [ -e /run/hotserve-box-smoke.probe ]; then
 	r blockdevs "$(find /dev -type b 2>/dev/null | wc -l)"
 	v=$(cat /proc/sys/kernel/printk_ratelimit)
 	(echo "$v" >/proc/sys/kernel/printk_ratelimit) 2>/dev/null; r sysctl $?
+	(: 1<>/sys/fs/cgroup/cgroup.procs) 2>/dev/null; r cgroup $?
 fi
 find "$B/in" -mindepth 1 -maxdepth 1 -exec mv -t "$B/work/" {} + || r move 1
 find "$B/work" -mindepth 1 -delete; r clear $?
@@ -330,6 +331,7 @@ echo "inside the unit:"; sed 's/^/  /' "$B/smoke-result"
 [ -n "$(find /dev -type b 2>/dev/null | head -1)" ] || die "this host has no block device under /dev; the PrivateDevices check would prove nothing"
 [ "$(res blockdevs)" = 0 ] || die "the unit sees $(res blockdevs) block devices: PrivateDevices=yes is not in force, and root opens a device it owns with no capability"
 [ "$(res sysctl)" != 0 ] || die "the unit could write a sysctl: ProtectKernelTunables=yes is not in force"
+[ "$(res cgroup)" != 0 ] || die "the unit could open the cgroup tree for writing: ProtectControlGroups=yes is not in force"
 [ "$(stat -c %G "$B/smoke-result")" = hotserve ] || die "a file root made in $B is not group hotserve: the setgid bit is missing"
 box_round "a sticky directory in in/" hotserve "mkdir $B/in/sticky && chmod 1777 $B/in/sticky && touch $B/in/sticky/f" stopped
 # Then one round for every path the manager says the path unit watches,
@@ -425,7 +427,7 @@ t1=$(date +%s)
 journalctl --sync
 runs=$(real_journal | grep -c 'txn.json cannot be read' || true)
 [ "$runs" -ge 1 ] || die "the path unit hit its trigger limit, but no run journaled the unreadable record"
-real_journal | grep -q 'once hotserve-box-apply.path shows failed and ten more seconds have passed, runs systemctl restart hotserve-box-apply.path' || die "the unreadable record's journal line does not name the restart the console needs, and when"
+real_journal | grep -q 'then runs systemctl restart hotserve-box-apply.path, and again ten seconds later if that fails' || die "the unreadable record's journal line does not name the restart the console needs, and when"
 echo "an unreadable record: $runs runs, then trigger-limit-hit, within $((t1 - t0 + 1))s"
 rm -f "$B/txn.json"
 sleep 2
