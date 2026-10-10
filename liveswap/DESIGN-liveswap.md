@@ -48,6 +48,29 @@ Concept map from the Nomad-era stack:
   404). No shared secret is stored on the box.
 - Config load MUST fail if any app resolves to zero `deploy_trust`
   sources.
+- Config load and every launch MUST warn when an app's `env_file` is
+  world-readable or world-writable (the documented mode is 0640
+  root:hotserve; owner and group are not checked), and MUST NOT refuse
+  on it: a mode changed between loads is not a reason to fail a
+  relaunch. The launch reads the mode from the descriptor it rendered
+  the environment through, so it reports the file the unit got. At
+  load, an absent file is silent (the launch that needs it fails and
+  says so), one the loading account cannot reach is noted at info
+  level (`validate` runs unprivileged by design), and any other
+  failure to check is warned about as such — never reported as fine.
+- Config load MUST warn, once per block, when a `github` or `gitlab`
+  `deploy_trust` that some app inherits or names pins an identity but
+  no branch (`ref` — on GitLab only beside `ref_type` — `ref_path`,
+  `sha`, `workflow_ref`, a `ref_protected` not pinned false, or a
+  default-form `subject`), and when a `local` one has no audience.
+  Both load — each is the documented minimum — and each is wider than
+  it reads: any ref of the identity deploys; a token minted for any
+  box trusting the key is accepted. An `environment` as the only
+  binding is noted at info level, since it binds only as far as the
+  provider's deployment-branch rule for it. A claim that resolved
+  empty admits no token and MUST be warned about as that, not as
+  width. The generic `oidc` preset is not read: it requires `sub`,
+  whose shape is the issuer's.
 - The deploy MUST be rejected (409) if one is already running for that
   app; other apps' deploys proceed independently.
 - Artifact downloads MUST enforce `max_artifact_size` both via

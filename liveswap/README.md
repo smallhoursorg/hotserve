@@ -135,6 +135,7 @@ most container hosts will not give you.
 			deploy_trust github {                 # its own repo, its own block
 				audience hotserve
 				claim repository your-org/api
+				claim ref        refs/heads/main
 			}
 		}
 	}
@@ -473,6 +474,13 @@ reboot); loading the config does not open it. So create it readable by
 that user and nobody else —
 `sudo install -m 0640 -o root -g hotserve blog.env /etc/hotserve/` —
 and keep it in place: a missing or unreadable file fails that launch.
+A world-readable or world-writable file is warned about — at config
+load (`hotserve validate` shows it when run as an account that can
+reach the file, and says so when it cannot) and again at each launch,
+from the file the launch actually read — never refused: the launch
+still runs, and a mode changed between loads is not what takes an app
+down on a relaunch. The owner and group are not checked; the
+`install` line above sets them.
 
 **The sandbox is not containment for what an app did before it had
 one.** It restricts what an app can *reach*; it cannot un-copy. An
@@ -658,14 +666,15 @@ Presets:
   `issuer https://gitlab.example.com` for self-hosted.
 - `deploy_trust oidc { issuer <url>; audience <a>; … }` — any OIDC
   provider (CircleCI, Buildkite, k8s, …).
-- `deploy_trust local { public_key <path> }` — a key you control, for
-  non-CI deploys. Generate it with `hotserve deploy-keygen`, mint
-  tokens with `hotserve deploy-token`.
+- `deploy_trust local { public_key <path>; audience <a> }` — a key you
+  control, for non-CI deploys. Generate it with `hotserve
+  deploy-keygen`, mint tokens with `hotserve deploy-token`.
 
 Sub-directives: `audience` (required for OIDC — never trust an
-unaudienced token), `claim <name> <value>` (exact-match, repeatable —
-pin `repository`, `ref`, `environment`, etc.), `subject` (sugar for
-`claim sub`), `issuer` (oidc/gitlab), `public_key` (local).
+unaudienced token; for `local`, the name of this box, see below),
+`claim <name> <value>` (exact-match, repeatable — pin `repository`,
+`ref`, `environment`, etc.), `subject` (sugar for `claim sub`),
+`issuer` (oidc/gitlab), `public_key` (local).
 
 The OIDC presets also **require an identity claim** — one of
 `repository`/`repository_id`/… (github), `project_path`/`project_id`/…
@@ -673,6 +682,33 @@ The OIDC presets also **require an identity claim** — one of
 repo/project on the issuer can mint a token for any audience, so a
 source with only an audience would authorize the whole issuer. Config
 load fails without one.
+
+Two shapes load but are wider than they read, and config load warns
+about each (`hotserve validate` shows it). A `github` or `gitlab`
+block that pins an identity but no branch accepts a token minted on
+**any** branch the identity admits — one repository's, or every
+repository's under a pinned owner or namespace — a workflow edited on
+a feature branch deploys as readily as `main` — so pin the branch: `claim ref
+refs/heads/main` on GitHub, `claim ref_path refs/heads/main` on
+GitLab, where a bare `ref` is a name a branch and a tag can share and
+so counts only beside a `claim ref_type` (`branch`, or `tag` to pin a
+tag). What else counts as
+that binding: `sha` (one commit), `workflow_ref` (GitHub, which
+embeds the caller's ref), a `ref_protected` not pinned `false`, or a
+`subject` in the provider's default form (which carries the ref). An
+`environment` on its own — or GitLab's `environment_protected`, which
+says who may deploy to one, not from where — is noted at info level
+rather than warned about: it binds only as far as that environment
+restricts its deployment branches on the provider side, which the box
+cannot read; a job on any branch may declare one otherwise. A claim whose
+placeholder resolved empty admits no token at all, and is warned
+about as that. The generic `oidc` preset is not read: it requires
+`sub`, whose shape is the issuer's. A global block that every app
+overrides is not read either: it then backs only the unknown-app
+path, through which nothing deploys. A `local` block without an
+`audience` accepts a token minted for any box that trusts the same
+key, so give each box its own audience and mint with `--audience` to
+match.
 
 `Authorization: Bearer` is the only accepted transport — Caddy redacts
 it from access logs automatically.
@@ -694,9 +730,12 @@ liveswap {
 	}
 	# Break-glass: each dev registers their own public key (they keep
 	# the private half on their laptop). Revoke one by deleting its
-	# block; no shared secret, no effect on the others.
-	deploy_trust local { public_key /etc/hotserve/alice.pub  subject alice }
-	deploy_trust local { public_key /etc/hotserve/bob.pub    subject bob }
+	# block; no shared secret, no effect on the others. The audience
+	# names this box (its deploy hostname), so a token minted for
+	# another box that trusts the same key is refused here; mint with
+	# `--audience blog.example.com`.
+	deploy_trust local { public_key /etc/hotserve/alice.pub  audience blog.example.com  subject alice }
+	deploy_trust local { public_key /etc/hotserve/bob.pub    audience blog.example.com  subject bob }
 
 	app blog { command node server.js }
 }
@@ -1082,7 +1121,7 @@ What's yours to handle:
 
 No deploy secret to store — the job mints an OIDC token per run
 (matching a `deploy_trust github { audience hotserve; claim repository
-your-org/blog }` block on the box):
+your-org/blog; claim ref refs/heads/main }` block on the box):
 
 ```yaml
 permissions:
@@ -1167,7 +1206,7 @@ a new version.
 deploy:
   stage: deploy
   id_tokens:
-    HOTSERVE_JWT:               # verified by `deploy_trust gitlab { audience hotserve; claim project_path your-org/blog }`
+    HOTSERVE_JWT:               # verified by `deploy_trust gitlab { audience hotserve; claim project_path your-org/blog; claim ref_path refs/heads/main }`
       aud: hotserve
   script:
     - tar -czf blog.tar.gz -C dist .

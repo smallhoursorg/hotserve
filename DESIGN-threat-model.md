@@ -34,7 +34,11 @@ Windows, and macOS-as-a-server are out of scope by product design.
    Gated on being the `hotserve` user, not on the network.
 4. **Per-app secrets** — an app's own env vars / `env_file`
    (`/etc/hotserve/*.env`). Legitimately reachable by that app; the
-   goal is to keep them from *siblings*.
+   goal is to keep them from *siblings*. From accounts beyond the
+   file's owner and group it is the file's mode that keeps them (0640
+   root:hotserve as documented; root reads anything); config load and
+   each launch warn when the mode admits everyone (`warnEnvFileModeOf`,
+   liveswap/app.go). Owner and group are not checked.
 5. **The box's configuration at rest** — `/etc/hotserve/Caddyfile`:
    which repository may deploy each app, each app's command and
    flags, which hosts are served, and who may change the file itself.
@@ -433,6 +437,54 @@ inheritance of ACME tokens and any other supervisor secret
 (`TestBuildEnvDoesNotLeakSupervisorSecrets`). The `/proc` route is
 closed twice over (non-dumpable supervisor; cross-namespace refusal);
 the filesystem routes are closed by absence.
+
+**Where `env_file` values sit once the app runs.** hotserve reads the
+file itself and hands the pairs to the manager as the transient unit's
+inline `Environment=` property (`unitProperties`,
+liveswap/systemd_dbus.go), never `EnvironmentFile=`. From then on the
+`hotserve` uid — the trust domain that read the file — holds them by
+four routes, with a host-dependent fifth, and nothing else holds them
+by any:
+
+- **The unit's property**, for as long as the unit exists:
+  `systemctl --user -M hotserve@ show -p Environment <unit>` (as that
+  uid or as root; a bare `--user` targets the caller's own manager). A
+  key that inline `env` or the injected `SOCKET` also sets is not
+  here: `buildEnvFull` (liveswap/app.go) emits both and the manager
+  keeps the last.
+- **The transient unit file** the manager writes under
+  `/run/user/<uid>/systemd/transient/`, which carries the un-merged
+  `Environment=` line — overridden values included — until the unit
+  is garbage-collected.
+- **The running app's `/proc/<pid>/environ`.** The user-namespace
+  closure measured on the spike ("The shared-UID rule", below) runs
+  the other way, app to supervisor; this direction follows from the
+  same `ptrace_may_access` rule, since the app's namespace is owned by
+  the hotserve uid, which holds `CAP_SYS_PTRACE` in it. Not measured.
+- **hotserve's own memory**, which keeps every value it has read — for
+  a launch, or for the response filter, which reads the file without
+  one (`managedApp.secrets` and `redactorFor`, liveswap/app.go) — for
+  as long as the app stays configured, behind the non-dumpable floor.
+- **A core dump, where the host writes one.** Nothing makes an app
+  non-dumpable (the floor under "A non-dumpable supervisor is the
+  floor" is the supervisor's own) and no unit sets `LimitCORE=`, so an
+  app crash can write its memory, values included, past the unit's
+  life: under the kernel's default pattern into the crashing process's
+  working directory — the release dir unless the app moved, anywhere
+  writable in its view if it did; under systemd-coredump into its
+  store, with an access entry for the uid. Same uid and root. Closing
+  it (`LimitCORE=0` on app units) is a code change, not made here.
+
+No account gains a read it did not already have: the file is
+root:hotserve 0640 by the tutorial's install line (nothing in hotserve
+enforces that), `/run/user` — the manager's socket and the transient
+file alike — is outside every view (`sandboxNeverReachable`,
+liveswap/sandbox.go), and the PID namespace hides the process from
+siblings. Stated because the manager's two copies are not obvious from
+the file's mode. `LoadCredential=` delivery would take the values out
+of the unit's properties and environment, not out of the uid's reach,
+and what it closes under this sandbox is unmeasured: an open question,
+not a plan.
 
 ### Config webhook — `box/`
 
@@ -847,11 +899,25 @@ only public material:
 - **OIDC (CI, primary):** the box verifies a per-run token against the
   provider's public JWKS and a claim allowlist (`deploy_trust github |
   gitlab | oidc`). Nothing high-value on the box, nothing stored in CI;
-  the token is minted per run, short-lived, and scoped to
-  `repository`/`ref`/`environment` claims.
+  the token is minted per run, short-lived, and scoped to the claims
+  the block pins. An identity claim (`repository`, `project_path`,
+  `sub`, …) is required at config load; a branch binding (`ref` —
+  `ref_path` on GitLab — `sha`, `workflow_ref`, a `ref_protected` not
+  pinned false, or a default-form `subject`, which carries one) is the
+  operator's to add, and a `github` or `gitlab` block some app
+  inherits or names without one is warned about at load
+  (`warnUnboundTrust`, liveswap/deploytrust.go; an `environment` alone
+  is noted, since it binds only as far as the provider's
+  deployment-branch rule for it; the generic `oidc` preset requires
+  `sub` and is not read): any ref of the pinned identity — any branch a
+  collaborator can push, with its workflow edited to deploy — would
+  otherwise do.
 - **Local key (non-CI / fallback):** the box trusts a public key
   (`deploy_trust local`); the operator mints tokens with the private
-  half (`hotserve deploy-token`). The signing key never touches the box.
+  half (`hotserve deploy-token`). The signing key never touches the
+  box. The block's `audience` names the box a token is for; without
+  one — warned about at load — a token minted for any box that trusts
+  the same key is accepted.
 
 Implementation: `liveswap/deploytrust/` (verification via the vetted
 `go-oidc`/`go-jose`, never hand-rolled). Effects on the model:

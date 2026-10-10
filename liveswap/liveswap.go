@@ -324,6 +324,8 @@ func (a *App) Provision(ctx caddy.Context) error {
 		return err
 	}
 	warnEnvFileInView(a.logger, specs)
+	warnEnvFileMode(a.logger, specs)
+	warnUnboundTrust(a.logger, a.DeployTrust, a.Apps)
 	// Take pool references now (so a reload never drops the refcount to
 	// zero) but install nothing on the pooled apps until Start: Caddy
 	// keeps the old config if any app's Start fails, and `validate`
@@ -519,7 +521,7 @@ func (a *App) Validate() error {
 			return fmt.Errorf("app %s: command is required", name)
 		}
 		if len(a.DeployTrust) == 0 && len(cfg.DeployTrust) == 0 {
-			return fmt.Errorf("app %s: no deploy_trust configured — declare who may deploy, e.g. a `deploy_trust github { audience ...; claim repository your-org/%s }` block or a `deploy_trust local { public_key ... }` fallback (globally or per app)", name, name)
+			return fmt.Errorf("app %s: no deploy_trust configured — declare who may deploy, e.g. a `deploy_trust github { audience ...; claim repository your-org/%s; claim ref refs/heads/main }` block or a `deploy_trust local { public_key ...; audience ... }` fallback (globally or per app)", name, name)
 		}
 		// Closed by default, deliberately without an "any origin"
 		// escape hatch: a deploy webhook that fetches from anywhere is

@@ -916,6 +916,102 @@ func TestParseEnvFileRejectsGarbage(t *testing.T) {
 	}
 }
 
+func TestWarnEnvFileMode(t *testing.T) {
+	cases := []struct {
+		name  string
+		mode  os.FileMode
+		warns []string // message substrings, in order
+	}{
+		{"the documented 0640 is quiet", 0o640, nil},
+		{"0600 is quiet", 0o600, nil},
+		{"group bits are not the check's business", 0o660, nil},
+		{"world-readable warns once", 0o644, []string{"world-readable"}},
+		{"world-writable without world-readable warns once, for the write", 0o622, []string{"world-writable"}},
+		{"world-readable and -writable warns for each", 0o666, []string{"world-readable", "world-writable"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "app.env")
+			must(t, os.WriteFile(p, []byte("KEY=value\n"), 0o600))
+			must(t, os.Chmod(p, tc.mode)) // WriteFile's mode is subject to the umask; Chmod is not
+			core, logs := observer.New(zap.WarnLevel)
+			warnEnvFileMode(zap.New(core), map[string]*appSpec{"blog": {envFile: p}})
+			got := logs.All()
+			if len(got) != len(tc.warns) {
+				t.Fatalf("warned %d times, want %d: %v", len(got), len(tc.warns), got)
+			}
+			for i, want := range tc.warns {
+				fields := got[i].ContextMap()
+				if !strings.Contains(got[i].Message, want) || fields["app"] != "blog" || fields["env_file"] != p || fields["mode"] != fmt.Sprintf("%04o", tc.mode) || fields["fix"] == nil {
+					t.Errorf("warning %d = %q %v, want message containing %q for app blog, env_file %s, mode %04o, with a fix", i, got[i].Message, fields, want, p, tc.mode)
+				}
+			}
+		})
+	}
+	t.Run("an absent file is silent: loading the config does not open it", func(t *testing.T) {
+		core, logs := observer.New(zap.WarnLevel)
+		warnEnvFileMode(zap.New(core), map[string]*appSpec{"blog": {envFile: filepath.Join(t.TempDir(), "missing.env")}})
+		if logs.Len() != 0 {
+			t.Fatalf("an absent env_file warned: %v", logs.All())
+		}
+	})
+	t.Run("a file that cannot be checked is reported as such, never as fine", func(t *testing.T) {
+		notADir := filepath.Join(t.TempDir(), "file")
+		must(t, os.WriteFile(notADir, nil, 0o600))
+		p := filepath.Join(notADir, "app.env")
+		core, logs := observer.New(zap.WarnLevel)
+		warnEnvFileMode(zap.New(core), map[string]*appSpec{"blog": {envFile: p}})
+		got := logs.All()
+		if len(got) != 1 || got[0].Level != zap.WarnLevel || !strings.Contains(got[0].Message, "could not be checked") || got[0].ContextMap()["app"] != "blog" || got[0].ContextMap()["env_file"] != p {
+			t.Fatalf("a stat that fails with ENOTDIR must warn, naming the app and the file, that the mode went unchecked, got %v", got)
+		}
+	})
+	t.Run("a file this account cannot reach is noted at info level, never reported as fine", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root reaches everything, so EACCES cannot be produced here")
+		}
+		dir := filepath.Join(t.TempDir(), "closed")
+		must(t, os.Mkdir(dir, 0o700))
+		p := filepath.Join(dir, "app.env")
+		must(t, os.WriteFile(p, []byte("KEY=value\n"), 0o600))
+		must(t, os.Chmod(dir, 0o000))
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+		core, logs := observer.New(zap.InfoLevel)
+		warnEnvFileMode(zap.New(core), map[string]*appSpec{"blog": {envFile: p}})
+		got := logs.All()
+		if len(got) != 1 || got[0].Level != zap.InfoLevel || !strings.Contains(got[0].Message, "not checked") || got[0].ContextMap()["app"] != "blog" || got[0].ContextMap()["env_file"] != p {
+			t.Fatalf("EACCES at load must be noted at info level, naming the app and the file, got %v", got)
+		}
+	})
+	t.Run("a launch warns from the descriptor it read, through the logger it was given", func(t *testing.T) {
+		rig := newTestRig(t)
+		p := filepath.Join(t.TempDir(), "app.env")
+		must(t, os.WriteFile(p, []byte("KEY=value\n"), 0o600))
+		must(t, os.Chmod(p, 0o644))
+		rig.spec.envFile = p
+		core, logs := observer.New(zap.WarnLevel)
+		l, err := rig.spec.prepareLaunch(zap.New(core), "v1")
+		must(t, err)
+		if l.envFileMode != 0o644 || logs.FilterMessageSnippet("world-readable").Len() != 1 {
+			t.Fatalf("prepareLaunch recorded mode %04o and warned %d times, want 0644 and 1: %v", l.envFileMode, logs.Len(), logs.All())
+		}
+	})
+	t.Run("a deploy warns too, so a chmod after load is not silent until the next reload", func(t *testing.T) {
+		rig := newTestRig(t)
+		p := filepath.Join(t.TempDir(), "app.env")
+		must(t, os.WriteFile(p, []byte("KEY=value\n"), 0o600))
+		must(t, os.Chmod(p, 0o644))
+		rig.spec.envFile = p
+		core, logs := observer.New(zap.WarnLevel)
+		rig.ma.logger = zap.New(core)
+		must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/a.tgz", version: "v1"}))
+		if n := logs.FilterMessageSnippet("world-readable").Len(); n != 1 {
+			t.Fatalf("the deploy warned %d times about a world-readable env_file, want 1: %v", n, logs.All())
+		}
+	})
+	warnEnvFileMode(nil, map[string]*appSpec{"blog": {envFile: "/x"}}) // a nil logger is skipped, not dereferenced
+}
+
 func TestHostOfStripsUserinfoCredentials(t *testing.T) {
 	cases := map[string]string{
 		"https://example.com/artifact.tar.gz":             "example.com",
@@ -1910,7 +2006,7 @@ func TestRetiredAddressesNeverResolveAgain(t *testing.T) {
 func TestPrepareLaunchFailureReservesNothing(t *testing.T) {
 	rig := newTestRig(t)
 	rig.spec.envFile = filepath.Join(t.TempDir(), "missing.env")
-	if _, err := rig.spec.prepareLaunch("v1"); err == nil {
+	if _, err := rig.spec.prepareLaunch(nil, "v1"); err == nil {
 		t.Fatal("a missing env_file must fail preparation")
 	}
 	if got := socketFiles(t, rig); len(got) != 0 {

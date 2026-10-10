@@ -33,6 +33,7 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+	"go.uber.org/zap"
 )
 
 // Deploy authentication is asymmetric: the box stores only PUBLIC
@@ -83,15 +84,29 @@ type Source struct {
 
 // ResolvePlaceholders expands {env.*} (and other known Caddy
 // placeholders) in a slice of trust configs, in place. Kind is a
-// literal block token and is never a placeholder.
+// literal block token and is never a placeholder. The JSON `subject`
+// becomes the `sub` claim here, resolved, as the Caddyfile parser
+// already makes it: a placeholder that resolves empty stays a
+// fail-closed sub="" constraint instead of vanishing, which would
+// broaden the block. With a `claims.sub` as well it is left as
+// written, for resolveTrustConfig to refuse the pair.
 func ResolvePlaceholders(repl *caddy.Replacer, tcs []TrustConfig) {
 	for i := range tcs {
-		tcs[i].Issuer = repl.ReplaceKnown(tcs[i].Issuer, "")
-		tcs[i].Audience = repl.ReplaceKnown(tcs[i].Audience, "")
-		tcs[i].PublicKey = repl.ReplaceKnown(tcs[i].PublicKey, "")
-		tcs[i].Subject = repl.ReplaceKnown(tcs[i].Subject, "")
-		for k, v := range tcs[i].Claims {
-			tcs[i].Claims[k] = repl.ReplaceKnown(v, "")
+		tc := &tcs[i]
+		tc.Issuer = repl.ReplaceKnown(tc.Issuer, "")
+		tc.Audience = repl.ReplaceKnown(tc.Audience, "")
+		tc.PublicKey = repl.ReplaceKnown(tc.PublicKey, "")
+		for k, v := range tc.Claims {
+			tc.Claims[k] = repl.ReplaceKnown(v, "")
+		}
+		if tc.Subject != "" {
+			if _, dup := tc.Claims["sub"]; !dup {
+				if tc.Claims == nil {
+					tc.Claims = make(map[string]string, 1)
+				}
+				tc.Claims["sub"] = repl.ReplaceKnown(tc.Subject, "")
+				tc.Subject = ""
+			}
 		}
 	}
 }
@@ -160,7 +175,13 @@ func New(configs []TrustConfig, allowInsecure bool) ([]Verifier, error) {
 	return vs, nil
 }
 
-func resolveTrustConfig(tc TrustConfig) (Source, error) {
+// effectiveClaims is a block's claim constraints as the verifier sees
+// them: the JSON `subject` field is the `sub` constraint. Setting both
+// is refused by resolveTrustConfig, as the Caddyfile parser refuses
+// it, so no reader has to pick one; resolveTrustConfig and
+// warnUnboundSource read the same map, so the warning cannot be quiet
+// about a subject the verifier enforces.
+func effectiveClaims(tc TrustConfig) map[string]string {
 	claims := make(map[string]string, len(tc.Claims)+1)
 	for k, v := range tc.Claims {
 		claims[k] = v
@@ -168,6 +189,14 @@ func resolveTrustConfig(tc TrustConfig) (Source, error) {
 	if tc.Subject != "" {
 		claims["sub"] = tc.Subject
 	}
+	return claims
+}
+
+func resolveTrustConfig(tc TrustConfig) (Source, error) {
+	if _, dup := tc.Claims["sub"]; dup && tc.Subject != "" {
+		return Source{}, fmt.Errorf("subject and `claim sub` are both set")
+	}
+	claims := effectiveClaims(tc)
 
 	switch tc.Kind {
 	case "github", "gitlab", "oidc":
@@ -253,6 +282,135 @@ func requireIdentityClaim(kind string, claims map[string]string) error {
 		}
 	}
 	return fmt.Errorf("%s requires an identity claim (one of: %s) — an audience alone authorizes every %s project", kind, strings.Join(identityClaims[kind], ", "), kind)
+}
+
+// bindingClaims lists, per OIDC preset, the claims that can tie a
+// token to a branch, tag or environment. An identity claim says which
+// repository may deploy; nothing in it says from where, and a token is
+// minted by whatever workflow ran — on any branch, edited by anyone
+// who can push one. Left out on purpose: `job_workflow_ref` names the
+// reusable workflow's ref, and a caller on any branch can invoke that;
+// GitLab's `ci_config_ref_uri` names the CI configuration's ref, which
+// an external configuration pins while the pipeline runs on any
+// branch. `environment` is listed but counts for less — see
+// claimBinds. The generic `oidc` preset requires `sub` already and
+// never warns.
+var bindingClaims = map[string][]string{
+	"github": {"sub", "ref", "sha", "ref_protected", "environment", "workflow_ref"},
+	"gitlab": {"sub", "ref", "ref_path", "sha", "ref_protected", "environment", "environment_protected"},
+}
+
+// binding is what one pinned claim buys: nothing; an environment,
+// which is as strong as the provider's deployment-branch rule for it
+// — a rule the box cannot read, so it is noted rather than counted;
+// or a branch or commit.
+type binding int
+
+const (
+	bindsNothing binding = iota
+	bindsEnvironment
+	bindsRef
+)
+
+// claimBinds reads one pinned claim against the whole block. Most
+// bind by being pinned at all. `ref_protected` pinned "false" admits
+// every unprotected ref; "true" admits protected refs only; any other
+// literal admits no token at all. `environment_protected` says the
+// environment is protected — a rule about who may deploy to it, not
+// from where — so "true" counts as an `environment` does, "false"
+// admits every unprotected one, and any other literal admits nothing.
+// A bare GitLab `ref` is a name a branch and a tag can share, so it
+// counts only beside a `ref_type`. `sub` binds only in the provider's
+// default form, which carries `:ref:` or `:environment:`
+// (`repo:o/r:ref:refs/heads/main`,
+// `project_path:o/r:ref_type:branch:ref:main`): GitHub lets an org
+// customise the template, and its pull_request form
+// (`repo:o/r:pull_request`) names no branch at all.
+func claimBinds(kind, name, value string, claims map[string]string) binding {
+	switch name {
+	case "sub":
+		switch {
+		case strings.Contains(value, ":ref:"):
+			return bindsRef
+		case strings.Contains(value, ":environment:"):
+			return bindsEnvironment
+		}
+		return bindsNothing
+	case "environment":
+		return bindsEnvironment
+	case "ref_protected":
+		if value == "false" {
+			return bindsNothing
+		}
+	case "environment_protected":
+		switch value {
+		case "false":
+			return bindsNothing
+		case "true":
+			return bindsEnvironment
+		}
+	case "ref":
+		if _, typed := claims["ref_type"]; kind == "gitlab" && !typed {
+			return bindsNothing
+		}
+	}
+	return bindsRef
+}
+
+// WarnUnboundSource logs the two shapes of one deploy_trust block
+// that load and are wider than they read: an OIDC block whose claims
+// pin an identity but no branch (any ref of that identity deploys),
+// and a local block without an audience (a token minted for any box
+// that trusts the same key is accepted here). Warnings, not refusals
+// — both are the documented minimum, and refusing them would fail
+// every box on it. where says which block: liveswap's warnUnboundTrust
+// calls this once per block it loads, and the box's option may for
+// its own. It reads the block as configured, after placeholder
+// resolution: an audience that resolved empty is no audience, and a
+// claim that resolved empty is a constraint no token meets —
+// fail-closed, nothing deploys, which is the opposite of "any ref
+// deploys", so it gets its own warning and not that one.
+func WarnUnboundSource(logger *zap.Logger, tc TrustConfig, where ...zap.Field) {
+	switch tc.Kind {
+	case "github", "gitlab":
+		claims := effectiveClaims(tc)
+		for _, name := range sortedKeys(claims) {
+			if claims[name] == "" {
+				logger.Warn("deploy_trust pins a claim that resolved empty: no token carries one, so nothing deploys through this block",
+					append(where, zap.String("preset", tc.Kind), zap.String("claim", name),
+						zap.String("fix", "set the placeholder the claim names, or drop the line"))...)
+				return
+			}
+		}
+		strongest := bindsNothing
+		for _, name := range bindingClaims[tc.Kind] {
+			if value, ok := claims[name]; ok {
+				strongest = max(strongest, claimBinds(tc.Kind, name, value, claims))
+			}
+		}
+		switch strongest {
+		case bindsRef:
+			return
+		case bindsEnvironment:
+			logger.Info("deploy_trust pins an environment, which binds a branch only as far as that environment restricts its deployment branches",
+				append(where, zap.String("preset", tc.Kind))...)
+			return
+		}
+		ref := "claim ref refs/heads/main"
+		if tc.Kind == "gitlab" {
+			ref = "claim ref_path refs/heads/main"
+		}
+		logger.Warn("deploy_trust pins no branch: a token minted on any ref of the pinned identity deploys",
+			append(where, zap.String("preset", tc.Kind),
+				zap.String("fix", "add `"+ref+"` so a token minted on another branch is refused"))...)
+	case "local":
+		if tc.Audience != "" {
+			return
+		}
+		logger.Warn("deploy_trust local has no audience: a token minted for any box that trusts this key is accepted here",
+			append(where, zap.String("public_key", tc.PublicKey),
+				zap.String("fix", "add `audience <a name for this box>` and mint with `hotserve deploy-token --audience <the same>`"))...)
+	}
 }
 
 // NewJWKSClient builds the HTTP client the OIDC verifier uses for

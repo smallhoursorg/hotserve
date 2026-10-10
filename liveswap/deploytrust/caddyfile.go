@@ -17,6 +17,7 @@ import (
 //	}
 //	deploy_trust local {           # non-CI / manual / test fallback
 //	    public_key <path>
+//	    audience   <aud>           # this box's; `deploy-token --audience` to match
 //	}
 //	deploy_trust oidc  { issuer <url>; audience <aud>; ... }
 func Parse(d *caddyfile.Dispenser) (TrustConfig, error) {

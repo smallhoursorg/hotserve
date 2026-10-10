@@ -18,6 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/caddyserver/caddy/v2"
 	"github.com/go-jose/go-jose/v4/jwt"
 
 	"github.com/smallhoursorg/hotserve/liveswap/deploytrust/trusttest"
@@ -100,6 +101,40 @@ func TestOIDCPresetRequiresIdentityClaim(t *testing.T) {
 		if _, err := Build([]TrustConfig{tc}, nil); err != nil {
 			t.Errorf("%s with an identity claim rejected: %v", tc.Kind, err)
 		}
+	}
+}
+
+func TestSubjectAndClaimSubAreRefusedTogether(t *testing.T) {
+	// The Caddyfile parser refuses the pair; the JSON form must too, or
+	// one reader would have to pick a winner and the other could
+	// disagree (the warning once did).
+	_, err := Build([]TrustConfig{{Kind: "github", Audience: "a", Subject: "repo:o/r:pull_request", Claims: map[string]string{"repository": "o/r", "sub": "repo:o/r:ref:refs/heads/main"}}}, nil)
+	if err == nil || !strings.Contains(err.Error(), "both set") {
+		t.Fatalf("subject and claim sub together must be refused at load, got %v", err)
+	}
+}
+
+func TestResolveTrustPlaceholdersFoldsTheJSONSubject(t *testing.T) {
+	// The JSON subject becomes the sub claim at resolution, as the
+	// Caddyfile parser already makes it, so an empty resolution is a
+	// fail-closed constraint rather than a vanished one.
+	t.Setenv("HOTSERVE_TEST_SUB", "repo:o/r:ref:refs/heads/main")
+	tcs := []TrustConfig{{Kind: "github", Audience: "a", Subject: "{env.HOTSERVE_TEST_SUB}", Claims: map[string]string{"repository": "o/r"}}}
+	ResolvePlaceholders(caddy.NewReplacer(), tcs)
+	if tcs[0].Subject != "" || tcs[0].Claims["sub"] != "repo:o/r:ref:refs/heads/main" {
+		t.Fatalf("subject must become the resolved sub claim, got %+v", tcs[0])
+	}
+	t.Setenv("HOTSERVE_TEST_SUB", "")
+	tcs = []TrustConfig{{Kind: "github", Audience: "a", Subject: "{env.HOTSERVE_TEST_SUB}", Claims: map[string]string{"repository": "o/r"}}}
+	ResolvePlaceholders(caddy.NewReplacer(), tcs)
+	if v, ok := tcs[0].Claims["sub"]; !ok || v != "" {
+		t.Fatalf("an empty subject must stay a sub=\"\" constraint, got %+v", tcs[0])
+	}
+	// Beside a claims.sub it is left as written, and the pair is refused.
+	tcs = []TrustConfig{{Kind: "github", Audience: "a", Subject: "{env.HOTSERVE_TEST_SUB}", Claims: map[string]string{"repository": "o/r", "sub": "x"}}}
+	ResolvePlaceholders(caddy.NewReplacer(), tcs)
+	if _, err := Build(tcs, nil); err == nil || !strings.Contains(err.Error(), "both set") {
+		t.Fatalf("subject beside claim sub must be refused after resolution, got %v", err)
 	}
 }
 
