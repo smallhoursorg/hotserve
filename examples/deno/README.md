@@ -100,7 +100,10 @@ set to `https://deploy.example.com/example` (Settings → Secrets and
 variables → Actions → Variables, or
 `gh variable set HOTSERVE_URL -R your-org/example --body https://deploy.example.com/example`).
 Then push to `main`. A run without `HOTSERVE_URL` stops at its first
-step, saying so, and publishes nothing. The workflow publishes the
+step, saying so, and publishes nothing. The URL must be `https://`:
+the request carries the run's token, so `scripts/deploy.sh` refuses
+any other scheme before it mints one (`HOTSERVE_ALLOW_HTTP=1` lifts
+that, for a local test box only). The workflow publishes the
 tarball as a GitHub release and the box fetches it — so every deployed
 version stays on GitHub. The box fetches the asset by its API URL with
 the job's own token, so a private repo deploys the same way as a

@@ -78,7 +78,51 @@ EOF
 	loginctl enable-linger hotserve 2>/dev/null || {
 		mkdir -p /var/lib/systemd/linger && touch /var/lib/systemd/linger/hotserve
 	}
-	systemctl try-restart hotserve 2>/dev/null || true
-	echo "hotserve installed. Start it with:"
-	echo "  sudo systemctl enable --now hotserve"
+	# An upgrade restarts a running hotserve onto the new binary;
+	# try-restart leaves a stopped one stopped. Only where systemd is
+	# PID 1: in a chroot or an image build systemctl fails for reasons
+	# that say nothing about hotserve, and there the start hint below is
+	# the whole story.
+	restart=skipped
+	if [ -d /run/systemd/system ]; then
+		if systemctl try-restart hotserve 2>/dev/null; then
+			restart=ok
+		else
+			restart=failed
+		fi
+	fi
+	if [ "$restart" = failed ]; then
+		# The new binary refused to start — most often a Caddyfile it
+		# rejects — and the old one is already stopped, so the site is
+		# down. Say so, on stderr. The script still exits 0: a non-zero
+		# postinst leaves the package half-configured and fails this
+		# apt run, and every later one that retries the configure,
+		# until it succeeds. The package is installed correctly; what
+		# needs fixing is the config, which dpkg cannot do.
+		state=$(systemctl is-active hotserve 2>/dev/null) || true
+		echo "hotserve: restarting onto the new version FAILED; hotserve.service is now ${state:-in an unknown state}." >&2
+		if [ "$state" != active ]; then
+			echo "  Nothing is served until it starts (deployed apps keep running, unreachable)." >&2
+		fi
+		echo "  The likely cause is something in /etc/hotserve/Caddyfile this version refuses. See why with:" >&2
+		echo "    journalctl -u hotserve -e" >&2
+		echo "    systemctl status hotserve" >&2
+		echo "  then fix it and run: sudo systemctl restart hotserve" >&2
+	elif [ "$restart" = ok ] && systemctl is-enabled --quiet hotserve 2>/dev/null; then
+		# Already set up: no start hint. If is-enabled itself fails,
+		# the hint below prints, which is harmless on an enabled unit.
+		if systemctl is-active --quiet hotserve 2>/dev/null; then
+			echo "hotserve restarted."
+		else
+			# try-restart does not start a stopped or failed unit — an
+			# upgrade that fixes an earlier failed start included.
+			echo "hotserve is enabled but not running. Start it with:"
+			echo "  sudo systemctl start hotserve"
+		fi
+	else
+		echo "hotserve installed. Start it with:"
+		echo "  sudo systemctl enable --now hotserve"
+	fi
 fi
+# Explicit, so no message above can decide the package's state.
+exit 0
