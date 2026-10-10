@@ -172,7 +172,7 @@ func (l *Limiter) fail(key string) failVerdict {
 }
 
 // outageKey is one source as one caller met it: the caller's scope
-// key (liveswap's "app", the box's "webhook") is a constant of the
+// key (liveswap's "app", the box's "box") is a constant of the
 // caller, so the table stays config-sized.
 type outageKey struct{ label, scope string }
 

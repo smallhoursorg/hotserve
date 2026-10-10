@@ -78,6 +78,7 @@ const (
 	msgResultID   = "result must be a 32-hex id"
 	msgNoBaseline = "this box has no baseline; hotserve init <dir> <sha> as root on the box sets one"
 	msgNoApplier  = "config pushes are not applied by this hotserve version; nothing applied"
+	msgNoResult   = "no result and no pending push for %s: swept, never admitted, or lost (journalctl -u hotserve-box-apply on the box)"
 )
 
 // pollSecretHeader carries a push's poll secret: 32 random bytes the
@@ -159,13 +160,19 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) error {
 
 // result is `GET /?result=<id>`. The poll secret is tried first and
 // never charged: it admits the request only for the id derived from
-// it, and only while that id's marker holds its digest and is younger
-// than pendingLife. Anything else goes through the preamble — a wrong
-// or stale secret is then an unauthenticated request like any other —
-// and only once authenticated is the query's shape checked, so an
-// unauthenticated caller learns nothing from a 400. The query names a
-// file only after the id has passed its grammar, and the poll path
+// it, and only while that id's push is pending with the secret's
+// digest in its marker. Anything else goes through the preamble — a
+// wrong or stale secret is then an unauthenticated request like any
+// other — and only once authenticated is the query's shape checked, so
+// an unauthenticated caller learns nothing from a 400. The query names
+// a file only after the id has passed its grammar, and the poll path
 // reaches the disk only with an id it derived itself.
+//
+// With no result, the push is pending only while its marker is
+// (pending): past fifteen minutes a marker with no result is a push
+// the box lost or has not settled, which the workflow has stopped
+// polling for, and the answer is the 404 the Failure-mode table gives
+// at the marker's bound.
 func (h *Handler) result(w http.ResponseWriter, r *http.Request) error {
 	var id string
 	q, err := url.ParseQuery(r.URL.RawQuery)
@@ -173,7 +180,11 @@ func (h *Handler) result(w http.ResponseWriter, r *http.Request) error {
 	if single {
 		id = q["result"][0]
 	}
-	if !single || !h.pollSecretAdmits(r, id) {
+	var m *marker // the push's marker, once read
+	if single {
+		m = h.pollSecret(r, id)
+	}
+	if m == nil {
 		if ok, err := h.authenticate(w, r, "result"); !ok {
 			return err
 		}
@@ -195,47 +206,54 @@ func (h *Handler) result(w http.ResponseWriter, r *http.Request) error {
 	if !errors.Is(err, fs.ErrNotExist) {
 		return h.boxError(w, "the result", err)
 	}
-	_, err = readMarker(h.dir, id)
-	switch {
-	case err == nil:
-		return respond(w, http.StatusAccepted, map[string]string{"phase": "pending"})
-	case errors.Is(err, fs.ErrNotExist):
-		return respond(w, http.StatusNotFound, errorBody("no result and no pending push for "+id+": swept, or never admitted"), id)
-	default:
-		return h.boxError(w, "the push's marker", err)
+	if m == nil {
+		if m, err = readMarker(h.dir, id); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return h.boxError(w, "the push's marker", err)
+		}
 	}
+	if m != nil && pending(m, h.now()) {
+		return respond(w, http.StatusAccepted, map[string]string{"phase": "pending"})
+	}
+	return respond(w, http.StatusNotFound, errorBody(fmt.Sprintf(msgNoResult, id)), id)
 }
 
-// pollSecretAdmits is the poll secret's check: exactly one header,
-// exactly 32 bytes in standard padded base64, whose sha256 begins with
-// id and equals, in constant time, the digest the marker holds; the
-// marker posted no more than pendingLife ago and not in the future.
-func (h *Handler) pollSecretAdmits(r *http.Request, id string) bool {
+// pending is whether a marker's push is pending: posted less than
+// pendingLife ago, and not ahead of now.
+func pending(m *marker, now time.Time) bool {
+	age := now.Sub(m.Posted)
+	return age >= 0 && age < pendingLife
+}
+
+// pollSecret is the poll secret's check, and the marker it admits on:
+// exactly one header, exactly 32 bytes in standard padded base64, whose
+// sha256 begins with id and equals, in constant time, the digest the
+// marker holds; the push pending. nil admits nothing, and says nothing
+// in the journal: it runs before the preamble, so a line here would
+// be one per unauthenticated request, outside the limiter's budgets.
+// A marker that cannot be read is the box's error, reported by the
+// authenticated request that reads it next.
+func (h *Handler) pollSecret(r *http.Request, id string) *marker {
 	values := r.Header.Values(pollSecretHeader)
 	if len(values) != 1 || len(values[0]) != base64.StdEncoding.EncodedLen(pollSecretLen) {
-		return false
+		return nil
 	}
 	secret, err := base64.StdEncoding.Strict().DecodeString(values[0])
 	if err != nil || len(secret) != pollSecretLen {
-		return false
+		return nil
 	}
 	sum := sha256.Sum256(secret)
 	if hex.EncodeToString(sum[:pollSecretLen/2]) != id {
-		return false
+		return nil
 	}
 	m, err := readMarker(h.dir, id)
 	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			h.logger.Error("box webhook could not read its state", zap.String("reading", "a push's marker"), zap.String("error", proof.Bound(err.Error())))
-		}
-		return false
+		return nil
 	}
 	want, err := hex.DecodeString(m.SHA256) // validDigest: cannot fail
-	if err != nil || subtle.ConstantTimeCompare(want, sum[:]) != 1 {
-		return false
+	if err != nil || subtle.ConstantTimeCompare(want, sum[:]) != 1 || !pending(m, h.now()) {
+		return nil
 	}
-	age := h.now().Sub(m.Posted)
-	return age >= 0 && age < pendingLife
+	return m
 }
 
 // push is `POST /`: authenticated, then refused, until the applier

@@ -2,6 +2,8 @@ package box
 
 import (
 	"fmt"
+	"io"
+	"os"
 
 	caddycmd "github.com/caddyserver/caddy/v2/cmd"
 	"github.com/spf13/cobra"
@@ -27,7 +29,9 @@ repository, and a signed push reaches the box through box_webhook.`,
 nothing and following nothing — and prints https://<host>/ for the one
 site carrying box_webhook. It refuses the file for every reason the box
 would, so the laptop, CI and the box cannot disagree about which
-address a file names.`,
+address a file names. The file may be a pipe:
+
+    hotserve box webhook <(git show HEAD:box1/Caddyfile)`,
 				Args: cobra.ExactArgs(1),
 				RunE: func(c *cobra.Command, args []string) error {
 					url, err := webhookURL(args[0])
@@ -43,11 +47,21 @@ address a file names.`,
 }
 
 // webhookURL is `hotserve box webhook`: the walk on the file at path,
-// read whole at most the Caddyfile cap.
+// read whole at most the Caddyfile cap. The path is the operator's own
+// argument, so unlike the box's state files it may be a pipe — `<(git
+// show HEAD:box1/Caddyfile)`, /dev/stdin — and is read until its end.
 func webhookURL(path string) (string, error) {
-	file, err := readFile(path, proof.MaxCaddyfile, true)
+	f, err := os.Open(path) //nolint:gosec // the operator's own CLI argument
 	if err != nil {
 		return "", err
+	}
+	defer f.Close() //nolint:errcheck // read-only
+	file, err := io.ReadAll(io.LimitReader(f, proof.MaxCaddyfile+1))
+	if err != nil {
+		return "", err
+	}
+	if len(file) > proof.MaxCaddyfile {
+		return "", fmt.Errorf("%s: larger than %d bytes", path, proof.MaxCaddyfile)
 	}
 	shape, err := Walk(file)
 	if err != nil {

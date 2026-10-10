@@ -50,6 +50,7 @@ func FuzzResultPoll(f *testing.F) {
 			return // `GET /`, the status: not this target's
 		}
 		r.h.limiter = deploytrust.NewLimiter(r.clock)
+		r.logs.TakeAll() // else every iteration's lines stay for the whole run
 		for _, d := range []string{"out", "stage"} {
 			if err := os.RemoveAll(filepath.Join(r.dir, d)); err != nil {
 				t.Fatal(err)

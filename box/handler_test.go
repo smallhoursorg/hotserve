@@ -258,6 +258,13 @@ func TestHandlerStatus(t *testing.T) {
 		t.Fatalf("%d %v, want %v", w.Code, got, want)
 	}
 
+	// applied.json's cap holds a 4 KiB path that JSON's escapes grow
+	// sixfold (each of these bytes is written \u0026).
+	r.writeJSON(t, filepath.Join(r.dir, "applied.json"), applied{SHA: sha, Path: strings.Repeat("&", 4096), SHA256: strings.Repeat("0", 64), Signer: strings.Repeat("&", 256)})
+	if w := r.do(t, req{target: "/", token: r.token(t)}); w.Code != http.StatusOK {
+		t.Fatalf("an escaped 4 KiB path: %d %s", w.Code, w.Body)
+	}
+
 	// A console edit since the last apply shows in the digest.
 	r.write(t, r.installed, append(file(good), "# edited\n"...))
 	if got := body(t, r.do(t, req{target: "/", token: r.token(t)})); got["sha256"] == want["sha256"] {
@@ -421,10 +428,16 @@ func TestHandlerResultPollSecret(t *testing.T) {
 				}
 				return
 			}
-			// Not admitted: an unauthenticated request like any other.
+			// Not admitted: an unauthenticated request like any other,
+			// and nothing in the journal but the preamble's own line —
+			// a broken marker included, which would otherwise be a line
+			// per request outside the limiter's budgets.
 			wantError(t, w, http.StatusUnauthorized, unauthorized)
 			if r.h.limiter.Size() != 1 {
 				t.Fatal("a failed poll was not charged")
+			}
+			if n := r.logs.FilterLevelExact(zap.ErrorLevel).Len(); n != 0 {
+				t.Fatalf("%d error lines before authentication: %v", n, r.logs.All())
 			}
 		})
 	}
@@ -451,19 +464,23 @@ func TestHandlerResultByToken(t *testing.T) {
 		code   int
 		want   string
 	}{
-		"pending":            {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now()) }, "/?result=" + id, 202, ""},
-		"pending, stale":     {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now().Add(-time.Hour)) }, "/?result=" + id, 202, ""},
-		"swept":              {func(*testing.T, *rig) {}, "/?result=" + id, 404, "no result and no pending push for " + id + ": swept, or never admitted"},
-		"31 hex":             {func(*testing.T, *rig) {}, "/?result=" + id[:31], 400, msgResultID},
-		"33 hex":             {func(*testing.T, *rig) {}, "/?result=" + id + "0", 400, msgResultID},
-		"upper case":         {func(*testing.T, *rig) {}, "/?result=" + strings.ToUpper(id), 400, msgResultID},
-		"a path":             {func(*testing.T, *rig) {}, "/?result=..%2F..%2Fapplied", 400, msgResultID},
-		"empty":              {func(*testing.T, *rig) {}, "/?result=", 400, msgResultID},
-		"bare key":           {func(*testing.T, *rig) {}, "/?result", 400, msgResultID},
-		"twice":              {func(*testing.T, *rig) {}, "/?result=" + id + "&result=" + id, 400, msgResultID},
-		"another param":      {func(*testing.T, *rig) {}, "/?result=" + id + "&x=1", 400, msgResultID},
-		"only another param": {func(*testing.T, *rig) {}, "/?x=1", 400, msgResultID},
-		"malformed":          {func(*testing.T, *rig) {}, "/?result=%ZZ", 400, msgResultID},
+		"pending":                {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now()) }, "/?result=" + id, 202, ""},
+		"pending, a second left": {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now().Add(-pendingLife+time.Second)) }, "/?result=" + id, 202, ""},
+		// Past fifteen minutes with no result the push is not pending:
+		// the 404 the Failure-mode table gives at the marker's bound.
+		"marker past its bound": {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now().Add(-pendingLife)) }, "/?result=" + id, 404, "no result and no pending push for " + id + ": swept, never admitted, or lost"},
+		"marker dated ahead":    {func(t *testing.T, r *rig) { r.marker(t, id, digest, r.clock.Now().Add(time.Second)) }, "/?result=" + id, 404, "no result and no pending push for " + id},
+		"swept":                 {func(*testing.T, *rig) {}, "/?result=" + id, 404, "no result and no pending push for " + id + ": swept, never admitted, or lost (journalctl -u hotserve-box-apply on the box)"},
+		"31 hex":                {func(*testing.T, *rig) {}, "/?result=" + id[:31], 400, msgResultID},
+		"33 hex":                {func(*testing.T, *rig) {}, "/?result=" + id + "0", 400, msgResultID},
+		"upper case":            {func(*testing.T, *rig) {}, "/?result=" + strings.ToUpper(id), 400, msgResultID},
+		"a path":                {func(*testing.T, *rig) {}, "/?result=..%2F..%2Fapplied", 400, msgResultID},
+		"empty":                 {func(*testing.T, *rig) {}, "/?result=", 400, msgResultID},
+		"bare key":              {func(*testing.T, *rig) {}, "/?result", 400, msgResultID},
+		"twice":                 {func(*testing.T, *rig) {}, "/?result=" + id + "&result=" + id, 400, msgResultID},
+		"another param":         {func(*testing.T, *rig) {}, "/?result=" + id + "&x=1", 400, msgResultID},
+		"only another param":    {func(*testing.T, *rig) {}, "/?x=1", 400, msgResultID},
+		"malformed":             {func(*testing.T, *rig) {}, "/?result=%ZZ", 400, msgResultID},
 		"result a symlink": {func(t *testing.T, r *rig) {
 			r.result(t, result{ID: id, Phase: "applied"})
 			must(t, os.Rename(filepath.Join(r.dir, "out", id+".json"), filepath.Join(r.dir, "out", "real.json")))

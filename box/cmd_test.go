@@ -42,10 +42,21 @@ func TestWebhookURL(t *testing.T) {
 	if _, err := webhookURL(filepath.Join(dir, "none")); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("missing: %v", err)
 	}
+	// A pipe is read to its end, as `<(git show HEAD:box1/Caddyfile)`
+	// hands one over.
 	fifo := filepath.Join(dir, "fifo")
 	mkfifo(t, fifo)
-	if _, err := webhookURL(fifo); !errors.Is(err, errNotRegular) {
-		t.Errorf("a FIFO: %v", err)
+	go func() {
+		f, err := os.OpenFile(fifo, os.O_WRONLY, 0)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		_, _ = f.Write(file(good))
+		_ = f.Close()
+	}()
+	if got, err := webhookURL(fifo); err != nil || got != "https://deploy.example.com/" {
+		t.Errorf("a pipe: %q, %v", got, err)
 	}
 	// A symlink to a file is followed: this is the operator's own
 	// path, not the exchange tree.

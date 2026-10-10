@@ -25,7 +25,7 @@ const (
 
 // Caps on the files the handler reads (DESIGN-box.md, "Caps").
 const (
-	maxApplied = 16 << 10 // its path is up to 4 KiB
+	maxApplied = 64 << 10 // its path is up to 4 KiB, which JSON's escapes can grow sixfold
 	maxMarker  = 4 << 10
 	maxResult  = 2 << 20 // a 64 KiB diff, and apps bounded only by the 1 MiB file they came from
 )
@@ -79,9 +79,16 @@ var phaseStatus = map[string]int{
 }
 
 // validID is the id grammar: the first 32 hex characters of the poll
-// secret's sha256, lower case, as hex.EncodeToString writes them.
-func validID(s string) bool {
-	if len(s) != 32 {
+// secret's sha256.
+func validID(s string) bool { return lowerHex(s, 32) }
+
+// validDigest is a whole sha256.
+func validDigest(s string) bool { return lowerHex(s, 64) }
+
+// lowerHex is n hex characters in lower case, as hex.EncodeToString
+// writes them.
+func lowerHex(s string, n int) bool {
+	if len(s) != n {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
@@ -90,11 +97,6 @@ func validID(s string) bool {
 		}
 	}
 	return true
-}
-
-// validDigest is a hex sha256 as hex.EncodeToString writes it.
-func validDigest(s string) bool {
-	return len(s) == 64 && validID(s[:32]) && validID(s[32:])
 }
 
 var errNotRegular = errors.New("not a regular file")
@@ -133,8 +135,9 @@ func readFile(path string, limit int64, follow bool) ([]byte, error) {
 	return b, nil
 }
 
-// readJSON reads one of the exchange tree's files into v. The tree is
-// written by root and by the hotserve uid, never through a symlink.
+// readJSON reads one of the exchange tree's files into v, refusing a
+// symlink at the file's own name. Its directories are root's
+// (tmpfiles.d) and followed as they stand.
 func readJSON(path string, limit int64, v any) error {
 	b, err := readFile(path, limit, false)
 	if err != nil {
