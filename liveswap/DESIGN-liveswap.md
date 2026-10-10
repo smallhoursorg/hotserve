@@ -327,7 +327,7 @@ reason they were found at all was somebody building this map by hand.
 | Layer | Files |
 |---|---|
 | 0 | `clock.go`, `names.go` |
-| 1 | `appdirs.go`, `socket.go` (+`_linux`/`_other`), `extract.go`, `allowlist.go`, `health.go` |
+| 1 | `appdirs.go`, `ownfile.go`, `socket.go` (+`_linux`/`_other`), `extract.go`, `allowlist.go`, `health.go` |
 | 2 | `runner.go`, `sandbox.go`, `download.go`, `state.go` |
 | 3 | `runner_systemd.go`, `systemd_dbus.go` |
 | 4 | `app.go`, `watchdog.go`, `sweep.go` |
@@ -367,6 +367,7 @@ backwards edges reappearing *despite* this table.
 | `names.go` | the app-name and version alphabets, and the two helpers over them; shared by every layer |
 | `app.go` | `managedApp` state machine, Deploy pipeline, recovery, env building |
 | `appdirs.go` | `appDirs`: the on-disk layout for one app. Pure path arithmetic — no state, no lock |
+| `ownfile.go` | how a file hotserve keeps in an app dir is written and read — temp file + rename; no link followed, no FIFO held, size-bounded — shared by the deploy records and `state.json` |
 | `caddyfile.go` | all Caddyfile parsing (global option, directive, upstreams) but the `deploy_trust` block, which is `deploytrust.Parse`; NO defaults here — Provision owns them |
 | `handler.go` | the webhook: payload validation, deploy dispatch, the status endpoint, and every body's filter (`RespondJSON`); authentication is `deploytrust`'s |
 | `deploytrust/` | leaf package: deploy auth — the `deploy_trust` grammar (`Parse`), its sources and verifiers (OIDC + local-key JWT verification), the webhook preamble (`Limiter.Authenticate`) and what a failed attempt costs the journal (`Limiter`, on an injected clock). Imports nothing of liveswap's; the box webhook authenticates through it too. `trusttest/` beside it mints tokens and runs an issuer for tests |

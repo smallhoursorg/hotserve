@@ -1023,7 +1023,12 @@ does not isolate the runtime.
   (liveswap/state.go is read on relaunch for the version and the
   unit, and checked before either is used: a version that is not one,
   a unit that is not this app's, a nonce that is not one — refused,
-  never a path). Normative and shipped: only the release
+  never a path). It is written and read under the deploy records'
+  rules (liveswap/ownfile.go): a fresh temp file renamed over the
+  name, and a read that follows no link, does not block on a FIFO and
+  refuses anything but a regular file of a state file's size — at
+  recovery, a permanent error naming the file, never a reset.
+  Normative and shipped: only the release
   being started, `shared/` and the OS base view are bound into the
   unit — the app dir root, `state.json`, `tmp/` (the upload staging
   dir: a running instance must not be able to rewrite the next

@@ -4,13 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"go.uber.org/zap"
@@ -306,70 +304,32 @@ func recordHead(b []byte, name string) (deploySummary, bool) {
 	return s, true
 }
 
-// writeDeployRecord writes the record atomically: a fresh temp file
+// writeDeployRecord writes the record atomically, under the write rule
+// every store in the app dir shares (writeOwnFile): a fresh temp file
 // under a random name (O_EXCL, never a path something could have
 // planted), then a rename over the record's name. Mode 0600 like
 // state.json: a record carries the app's own lines, filtered but
 // still the app's, and nothing but hotserve reads records — the
 // webhook is the interface.
-func writeDeployRecord(d appDirs, version string, filtered []byte) (err error) {
+func writeDeployRecord(d appDirs, version string, filtered []byte) error {
 	dir, err := recordsDir(d, true)
 	if err != nil {
 		return err
 	}
-	f, err := os.CreateTemp(dir, ".record-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	defer func() {
-		if err != nil {
-			_ = os.Remove(tmp)
-		}
-	}()
-	if _, err = f.Write(append(filtered, '\n')); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if err = f.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp, deployRecordPath(dir, version))
+	return writeOwnFile(deployRecordPath(dir, version), ".record-*.tmp", append(filtered, '\n'))
 }
 
 // deployRecordMaxBytes bounds a record read: one holds a bounded
 // result (an 8 KiB tail at most); anything larger is not one.
 const deployRecordMaxBytes = 1 << 20
 
-// openRecord opens a record without following a link (rule 4) and
-// reads it whole, refusing anything that is not a regular file of a
-// record's size; the modification time comes from the same open file
-// as the bytes, so a record replaced between two lookups cannot pair
-// one outcome with another's time.
+// openRecord reads a record under the read rule every store in the app
+// dir shares (readOwnFile): no link followed (rule 4), no FIFO held,
+// nothing but a regular file of a record's size; the modification time
+// comes from the same open file as the bytes, so a record replaced
+// between two lookups cannot pair one outcome with another's time.
 func openRecord(path string) ([]byte, time.Time, error) {
-	// O_NONBLOCK as elf.go opens the command: a FIFO where a record
-	// should be would otherwise hold the open — and the status, and
-	// the deploy lock — for good.
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0) //nolint:gosec // a path under the app's own deploys dir, built here
-	if err != nil {
-		return nil, time.Time{}, err
-	}
-	defer f.Close() //nolint:errcheck // read-only
-	fi, err := f.Stat()
-	if err != nil {
-		return nil, time.Time{}, err
-	}
-	if !fi.Mode().IsRegular() {
-		return nil, time.Time{}, fmt.Errorf("%s is not a regular file", path)
-	}
-	b, err := io.ReadAll(io.LimitReader(f, deployRecordMaxBytes+1))
-	if err != nil {
-		return nil, time.Time{}, err
-	}
-	if len(b) > deployRecordMaxBytes {
-		return nil, time.Time{}, fmt.Errorf("%s is larger than a record can be", path)
-	}
-	return b, fi.ModTime(), nil
+	return readOwnFile(path, deployRecordMaxBytes, "a record")
 }
 
 func deployRecordPath(dir, version string) string {
