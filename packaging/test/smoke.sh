@@ -191,6 +191,7 @@ expect_show $svc NoNewPrivileges yes
 expect_show $svc RestrictAddressFamilies AF_UNIX
 expect_show $svc TimeoutStartUSec infinity
 expect_show $svc StartLimitIntervalUSec 0
+expect_show hotserve-box-apply.path StartLimitIntervalUSec 0
 expect_show $svc User ""
 expect_show hotserve-box-apply.path TriggerLimitIntervalUSec 10s
 expect_show hotserve-box-apply.path TriggerLimitBurst 20
@@ -263,38 +264,47 @@ fi
 find "$B/in" -mindepth 1 -maxdepth 1 -exec mv -t "$B/work/" {} + || r move 1
 find "$B/work" -mindepth 1 -delete; r clear $?
 rm -f "$B/txn.json"
-r left "$(ls -A $B/in $B/work | grep -cv -e '^$' -e ':$')"
+r left "$(find "$B/in" "$B/work" -mindepth 1 | wc -l)"
 EOF
 mkdir -p /run/systemd/system/$svc.d
 printf '[Service]\nExecStart=\nExecStart=/bin/sh /run/hotserve-box-smoke.sh\n' >/run/systemd/system/$svc.d/smoke.conf
 systemctl daemon-reload
 res() { sed -n "s/^$1=//p" "$B/smoke-result"; }
-# One round: the path unit stopped while the entry is made (or it would
-# fire at the entry's first step), started again, and so finding it at
-# once; then a run that clears it, and the path unit waiting again.
-box_round() { # <what> <maker: hotserve|root> <command>
-	systemctl stop hotserve-box-apply.path
+# One round: an entry made, a run that clears it — judged from inside
+# the unit and from outside — and the path unit waiting again. A round
+# "stopped" stops the path unit while the entry is made (it would fire
+# at the entry's first step) and starts it again, so it finds the entry
+# at once; any other round makes the entry while the path unit waits,
+# so its watch is what fires.
+box_round() { # <what> <maker: hotserve|root> <command> <stopped|waiting>
+	[ "$4" = stopped ] && systemctl stop hotserve-box-apply.path
 	rm -f "$B/smoke-result"
 	if [ "$2" = root ]; then sh -c "$3"; else as_hotserve "$3"; fi || die "could not make $1"
-	systemctl start hotserve-box-apply.path || die "$1: the path unit did not start: $(systemctl show -p ActiveState,Result hotserve-box-apply.path | tr '\n' ' ')"
+	if [ "$4" = stopped ]; then
+		systemctl start hotserve-box-apply.path || die "$1: the path unit did not start: $(systemctl show -p ActiveState,Result hotserve-box-apply.path | tr '\n' ' ')"
+	fi
 	i=0
 	until [ -s "$B/smoke-result" ] && grep -q '^left=' "$B/smoke-result" && [ "$(show $svc ActiveState)" = inactive ]; do
 		i=$((i + 1))
 		[ "$i" -ge 90 ] && die "$1: no run of the service within 45s: path $(systemctl show -p ActiveState,Result hotserve-box-apply.path | tr '\n' ' '), service $(systemctl show -p ActiveState,Result $svc | tr '\n' ' ')"
 		sleep 0.5
 	done
-	[ -z "$(res move)" ] && [ "$(res clear)" = 0 ] && [ "$(res left)" = 0 ] && [ ! -e "$B/txn.json" ] \
-		|| die "$1: the run did not clear it: $(tr '\n' ' ' <"$B/smoke-result") in: $(ls -A $B/in) work: $(ls -A $B/work)"
-	sleep 0.5
-	[ "$(show hotserve-box-apply.path SubState)" = waiting ] && [ "$(show hotserve-box-apply.path Result)" = success ] \
-		|| die "$1: the path unit is not waiting after the run: $(systemctl show -p ActiveState,SubState,Result hotserve-box-apply.path | tr '\n' ' ')"
+	[ -z "$(res move)" ] && [ "$(res clear)" = 0 ] && [ "$(res left)" = 0 ] \
+		&& [ -z "$(find "$B/in" "$B/work" -mindepth 1)" ] && [ ! -e "$B/txn.json" ] \
+		|| die "$1: the run did not clear it: $(tr '\n' ' ' <"$B/smoke-result") left: $(find "$B/in" "$B/work" "$B/txn.json" -mindepth 0 2>/dev/null | tr '\n' ' ')"
+	i=0
+	until [ "$(show hotserve-box-apply.path SubState)" = waiting ] && [ "$(show hotserve-box-apply.path Result)" = success ]; do
+		i=$((i + 1))
+		[ "$i" -ge 20 ] && die "$1: the path unit is not waiting after the run: $(systemctl show -p ActiveState,SubState,Result hotserve-box-apply.path | tr '\n' ' ')"
+		sleep 0.5
+	done
 	echo "$1: started a run, which cleared it"
 }
 # The probe, and the two capabilities that let a run clear what the
 # hotserve uid makes: a 000 directory (CAP_DAC_OVERRIDE) and a sticky
 # directory holding its file (CAP_FOWNER).
 : >/run/hotserve-box-smoke.probe
-box_round "a 000 directory in in/" hotserve "mkdir $B/in/x000 && touch $B/in/x000/f && chmod 000 $B/in/x000"
+box_round "a 000 directory in in/" hotserve "mkdir $B/in/x000 && touch $B/in/x000/f && chmod 000 $B/in/x000" stopped
 rm -f /run/hotserve-box-smoke.probe
 echo "inside the unit:"; sed 's/^/  /' "$B/smoke-result"
 [ "$(res reload)" = 0 ] || die "systemctl reload hotserve failed inside the applier's unit"
@@ -304,12 +314,15 @@ echo "inside the unit:"; sed 's/^/  /' "$B/smoke-result"
 [ "$(res etc)" = 0 ] || die "the unit cannot write /etc/hotserve"
 [ "$(res varlibhotserve)" != 0 ] || die "the unit could write /var/lib/hotserve: ProtectSystem=strict is not in force"
 [ "$(stat -c %G "$B/smoke-result")" = hotserve ] || die "a file root made in $B is not group hotserve: the setgid bit is missing"
-box_round "a sticky directory in in/" hotserve "mkdir $B/in/sticky && chmod 1777 $B/in/sticky && touch $B/in/sticky/f"
+box_round "a sticky directory in in/" hotserve "mkdir $B/in/sticky && chmod 1777 $B/in/sticky && touch $B/in/sticky/f" stopped
 # Then one round for every path the manager says the path unit watches,
-# with an entry that line counts: for each glob, a name no other line of
+# its entry renamed into place while the path unit waits, as the
+# handler and the applier write: for each glob, a name no other line of
 # its directory counts (systemd's DirectoryNotEmpty= skips names it takes
 # for hidden or backup files); the record itself; and a plain name for
-# DirectoryNotEmpty=. in/ is filled by the hotserve uid, the rest by root.
+# DirectoryNotEmpty= — which <dir>/* counts too, so those two rounds
+# show the pair, not the line alone. in/ is filled by the hotserve uid
+# through stage/, the rest by root.
 n=0
 while read -r spec kind; do
 	dir=$spec
@@ -326,9 +339,9 @@ while read -r spec kind; do
 		esac ;;
 	*) die "a path spec of a kind this stage has no round for: $spec $kind" ;;
 	esac
-	maker=root
-	[ "$dir" = "$B/in" ] && maker=hotserve
-	box_round "$spec $kind" "$maker" "touch '$entry'"
+	maker=root tmp=$B/.smoke-entry
+	[ "$dir" = "$B/in" ] && maker=hotserve tmp=$B/stage/smoke-entry
+	box_round "$spec $kind" "$maker" "touch '$tmp' && mv '$tmp' '$entry'" waiting
 	n=$((n + 1))
 done <<<"$got_paths"
 [ "$n" -eq 9 ] || die "$n rounds, want one for each of the path unit's 9 paths"

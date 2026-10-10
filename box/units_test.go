@@ -27,13 +27,10 @@ const (
 )
 
 // forbidden is what neither unit may say, whatever the design's table
-// says — the contract that would break if the two moved together: the
-// applier is root (no User=, Group=, DynamicUser=, and no capability
-// granted beyond its bounding set); the path unit is what starts it
-// again (no Restart=), every time (no RemainAfterExit=, which would
-// leave it active and every later trigger a no-op), and it starts the
-// service of its own name (no Unit=); the one non-zero exit, a full
-// disk, fails the unit (no SuccessExitStatus=).
+// says: the lines whose absence the applier's contract rests on (root;
+// started again by the path unit, every time, and by its own name; the
+// one non-zero exit failing the unit). Why each is left out is the
+// design's, under the table in "The applier unit".
 var forbidden = []string{"User", "Group", "DynamicUser", "Restart", "RemainAfterExit", "Unit", "SuccessExitStatus", "AmbientCapabilities"}
 
 // The contract with the applier (box PR 3a): what runs, and the paths
@@ -127,10 +124,13 @@ func TestEachCapabilityCarriesItsReason(t *testing.T) {
 			t.Errorf("CapabilityBoundingSet=%q: one capability per line, never a reset or a ~", l.Value)
 			continue
 		}
-		if reasons[f[0]] == "" {
+		switch rest, ok := strings.CutPrefix(l.Comment, f[0]+":"); {
+		case reasons[f[0]] == "":
 			t.Errorf("%s has no reason in the design's table", f[0])
-		} else if got, want := plain(strings.TrimPrefix(l.Comment, f[0]+":")), plain(reasons[f[0]]); !strings.HasPrefix(l.Comment, f[0]+":") || got != want {
-			t.Errorf("the comment above %s is not its row's reason:\n  unit:   %s: %s\n  design: %s", f[0], f[0], got, want)
+		case !ok:
+			t.Errorf("the comment above %s does not open with %q: %q", f[0], f[0]+":", l.Comment)
+		case plain(rest) != plain(reasons[f[0]]):
+			t.Errorf("the comment above %s is not its row's reason:\n  unit:   %s\n  design: %s", f[0], plain(rest), plain(reasons[f[0]]))
 		}
 		caps = append(caps, f[0])
 	}
@@ -216,21 +216,21 @@ func TestTmpfilesIsThePathsTable(t *testing.T) {
 // one: a cell with a pipe in it is a row of another shape, and stops
 // the test rather than being read short.
 func TestThePathsTableReader(t *testing.T) {
-	head := "## Paths, owners, and who may touch what\n\n| Path | Mode | Owner | Creates | Writes | Reads | Removes |\n|---|---|---|---|---|---|---|\n"
+	head := pathsMarker + "\n| Path | Mode | Owner | Creates | Writes | Reads | Removes |\n|---|---|---|---|---|---|---|\n"
 	for _, tc := range []struct {
 		name, doc string
 		want      map[string]string
 		err       string
 	}{
-		{"the base and a child", head +
+		{"the base and a child, to the first line that is not a row", head +
 			"| `/var/lib/hotserve-box/` | 2750 | root:hotserve | tmpfiles.d | — | — | — |\n" +
 			"| `…/in/` | 0770 | root:hotserve | tmpfiles.d | handler | applier | applier |\n" +
-			"| `…/txn.json` | 0600 | root:hotserve | applier | applier | applier | applier |\n\n## Next\n" +
+			"| `…/txn.json` | 0600 | root:hotserve | applier | applier | applier | applier |\n\n" +
 			"| `…/out/` | 2750 | root:hotserve | tmpfiles.d | applier | handler | — |\n",
 			map[string]string{"/var/lib/hotserve-box": "2750 root:hotserve", "/var/lib/hotserve-box/in": "0770 root:hotserve"}, ""},
-		{"no section", "## Caps\n", nil, "no section"},
-		{"a heading one level down", "#" + head + "| `/var/lib/hotserve-box/` | 2750 | root:hotserve | tmpfiles.d | — | — | — |\n", nil, "no section"},
-		{"no table", "## Paths, owners, and who may touch what\n\nprose\n", nil, "no table"},
+		{"no marker", "| Path | Mode | Owner | Creates | Writes | Reads | Removes |\n|---|---|---|---|---|---|---|\n", nil, "no line"},
+		{"the marker twice", head + "\n" + head, nil, "twice"},
+		{"the marker, but another table", pathsMarker + "\n| Situation | Action |\n|---|---|\n", nil, "no table"},
 		{"no rows", head + "\n", nil, "no row"},
 		{"a pipe in a cell", head + "| `…/in/` | 0770 | root:hotserve | tmpfiles.d | a | b | c | d |\n", nil, "8 cells"},
 		{"a child before the base", head + "| `…/in/` | 0770 | root:hotserve | tmpfiles.d | — | — | — |\n", nil, "before the base"},
@@ -253,29 +253,18 @@ func TestThePathsTableReader(t *testing.T) {
 	}
 }
 
-// The reader of the units' table, likewise: a row it cannot read
-// stops the test, and so does a row after the table has ended; the
-// section ends at the next heading of any level, but not at a line of
-// a code fence.
+// The reader of the units' table, likewise.
 func TestTheUnitTableReader(t *testing.T) {
-	head := "## The applier unit\n\n| Unit | Section | Line | Why |\n|---|---|---|---|\n"
+	head := unitsMarker + "\n| Unit | Section | Line | Why |\n|---|---|---|---|\n"
 	both := "| `.path` | `[Path]` | `PathExists=/x` | a |\n| `.service` | `[Service]` | `Type=oneshot` | |\n"
 	for _, tc := range []struct {
 		name, doc string
 		want      []unitRow
 		err       string
 	}{
-		{"both units, then another section", head + both + "| `.path` | `[Path]` | `PathExists=/y` | b |\n## Next\n| `.path` | `[Path]` | `PathExists=/z` | c |\n",
-			[]unitRow{{pathUnit, "Path", "PathExists", "/x", "a"}, {serviceUnit, "Service", "Type", "oneshot", ""}, {pathUnit, "Path", "PathExists", "/y", "b"}}, ""},
-		// Only the section's end keeps this row out: without it, the row
-		// would be one after the table's end, an error.
-		{"a subsection's table is not this one", head + both + "\n### Sub\n\n| `.path` | `[Path]` | `PathExists=/z` | c |\n",
+		{"both units, to the first line that is not a row", "## The applier unit\n\n```sh\n# a comment\n```\n\n" + head + both + "\n| `.path` | `[Path]` | `PathExists=/z` | c |\n",
 			[]unitRow{{pathUnit, "Path", "PathExists", "/x", "a"}, {serviceUnit, "Service", "Type", "oneshot", ""}}, ""},
-		{"a heading-like line in a code fence is no heading", "## The applier unit\n\n```sh\n# a comment\n```\n\n| Unit | Section | Line | Why |\n|---|---|---|---|\n" + both,
-			[]unitRow{{pathUnit, "Path", "PathExists", "/x", "a"}, {serviceUnit, "Service", "Type", "oneshot", ""}}, ""},
-		{"no section", "## Caps\n", nil, "no section"},
-		{"a heading one level down", "#" + head + both, nil, "no section"},
-		{"a row after the table has ended", head + both + "\n| `.path` | `[Path]` | `PathExists=/y` | b |\n", nil, "after the table"},
+		{"no marker", "## The applier unit\n\n| Unit | Section | Line | Why |\n|---|---|---|---|\n" + both, nil, "no line"},
 		{"one unit only", head + "| `.path` | `[Path]` | `PathExists=/x` | a |\n", nil, "both units"},
 		{"a pipe in a cell", head + both + "| `.path` | `[Path]` | `PathExists=/x` | a | b |\n", nil, "5 cells"},
 		{"an unknown unit", head + both + "| `.timer` | `[Timer]` | `OnCalendar=daily` | |\n", nil, "unknown unit"},
@@ -433,7 +422,7 @@ func designUnits(t *testing.T) map[string]map[string]map[string][]string {
 // parseUnitTable reads the table in "The applier unit": the unit by
 // its suffix, the section in brackets, the line, and why.
 func parseUnitTable(doc string) ([]unitRow, error) {
-	cells, err := tableRows(doc, "## The applier unit", "| Unit | Section | Line | Why |")
+	cells, err := tableRows(doc, unitsMarker, "| Unit | Section | Line | Why |")
 	if err != nil {
 		return nil, err
 	}
@@ -461,45 +450,36 @@ func parseUnitTable(doc string) ([]unitRow, error) {
 	return rows, nil
 }
 
-// tableRows is the cells of each row of the table a section of the
-// document holds under header. The section is the line equal to
-// heading up to the next heading of any level, a line in a code fence
-// being no heading; the table, the first line in it equal to header,
-// then its separator, then every line that is a row. Every row of the
-// section is the table's: one with another number of cells (a pipe
-// inside a cell), and one after a line that ended the table (a blank
-// line typed into it), are errors, never a short read.
-func tableRows(doc, heading, header string) ([][]string, error) {
+// The two tables this file reads are marked in the document, each by
+// a comment on the line before its header, so the reader needs to know
+// nothing of markdown's headings or fences.
+const (
+	pathsMarker = "<!-- table: paths (box/units_test.go reads it) -->"
+	unitsMarker = "<!-- table: applier units (box/units_test.go reads it) -->"
+)
+
+// tableRows is the cells of each row of the table on the lines after
+// the marker: the header, its separator, then every line that is a
+// row, up to the first that is not. The marker appears once; a row
+// with another number of cells — a pipe inside a cell — is an error,
+// never a short read.
+func tableRows(doc, marker, header string) ([][]string, error) {
 	lines := strings.Split(doc, "\n")
-	start := slices.Index(lines, heading)
-	if start < 0 {
-		return nil, fmt.Errorf("no section %q", strings.TrimLeft(heading, "# "))
+	at := slices.Index(lines, marker)
+	if at < 0 {
+		return nil, fmt.Errorf("no line %q", marker)
 	}
-	section := lines[start+1:]
-	fenced := false
-	for i, l := range section {
-		if strings.HasPrefix(l, "```") {
-			fenced = !fenced
-		}
-		if h, _, ok := strings.Cut(l, " "); !fenced && ok && h != "" && strings.Trim(h, "#") == "" {
-			section = section[:i]
-			break
-		}
+	if slices.Index(lines[at+1:], marker) >= 0 {
+		return nil, fmt.Errorf("%q twice", marker)
 	}
-	h := slices.Index(section, header)
-	if h < 0 || h+1 >= len(section) || !strings.HasPrefix(section[h+1], "|---") {
-		return nil, fmt.Errorf("no table %q under %q", header, heading)
+	if at+2 >= len(lines) || lines[at+1] != header || !strings.HasPrefix(lines[at+2], "|---") {
+		return nil, fmt.Errorf("no table %q on the lines after %q", header, marker)
 	}
 	n := strings.Count(header, "|") - 1
 	var rows [][]string
-	ended := false
-	for _, line := range section[h+2:] {
+	for _, line := range lines[at+3:] {
 		if !strings.HasPrefix(line, "|") {
-			ended = true
-			continue
-		}
-		if ended {
-			return nil, fmt.Errorf("a row after the table under %q has ended: %q", heading, line)
+			break
 		}
 		cells := strings.Split(line, "|")
 		if len(cells) != n+2 {
@@ -563,7 +543,7 @@ func designTmpfilesRows(t *testing.T) map[string]string {
 // parseTmpfilesRows reads the Paths table: "…/" in a path stands for
 // the base directory, the first row under /var/lib.
 func parseTmpfilesRows(doc string) (map[string]string, error) {
-	cells, err := tableRows(doc, "## Paths, owners, and who may touch what", "| Path | Mode | Owner | Creates | Writes | Reads | Removes |")
+	cells, err := tableRows(doc, pathsMarker, "| Path | Mode | Owner | Creates | Writes | Reads | Removes |")
 	if err != nil {
 		return nil, err
 	}

@@ -1,9 +1,10 @@
 # hotserve-box-apply.service — the box applier: one run of `hotserve
 # box apply`, as root, started by hotserve-box-apply.path and never
 # enabled on its own. Every line here, and why it is here, is a row of
-# the table in box/DESIGN-box.md, "The applier unit", and so is what is
-# left out; box/units_test.go holds this file to that table line for
-# line, and each capability's comment to its row's reason.
+# the table in box/DESIGN-box.md, "The applier unit", and what is left
+# out, and why, is the paragraph after that table; box/units_test.go
+# holds this file to the table line for line, and each capability's
+# comment to its row's reason.
 [Unit]
 Description=hotserve box applier
 Documentation=https://github.com/smallhoursorg/hotserve/blob/main/box/DESIGN-box.md

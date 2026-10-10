@@ -546,6 +546,7 @@ separately by "Retention".
 One row per path. "Removes" is the only process that may delete it;
 an empty cell means nobody, by design.
 
+<!-- table: paths (box/units_test.go reads it) -->
 | Path | Mode | Owner | Creates | Writes | Reads | Removes |
 |---|---|---|---|---|---|---|
 | `/etc/hotserve/Caddyfile` | 0644 | root:root | package | applier, `init`, console | hotserve, handler, applier | — |
@@ -638,7 +639,7 @@ Every numeric bound, in one place, with its reason.
 | reload | hotserve.service's own 240 s | the applier sets no shorter timeout |
 | quoted input in a refusal | 300 bytes, quote-to-ASCII then rune-boundary cut | liveswap's `boundRefusal`, in that order; applies to every input-derived value without exception |
 | child processes | a deadline and a `WaitDelay`, always | |
-| path-unit trigger limit | 20 in 10 s | the invariants keep the count at one per late arrival; the service has no start limit of its own (`StartLimitIntervalSec=0`), since the manager's default, 5 starts in 10 s, is lower and would end a failing loop first, as `unit-start-limit-hit`; nor has the path unit, whose own starts are boot's, postinstall's and the console's |
+| path-unit trigger limit | 20 in 10 s | the invariants keep the count at one per late arrival; the service has no start limit of its own (`StartLimitIntervalSec=0`), since the manager's default, 5 starts in 10 s, is lower and would end a failing loop first, as `unit-start-limit-hit`; nor has the path unit ("The applier unit") |
 
 ## Reading the signed file
 
@@ -885,6 +886,7 @@ below, and nothing else is in them; `box/units_test.go` reads this
 table and holds both shipped files to it, line for line, and the
 `tmpfiles.d` file to the Paths table.
 
+<!-- table: applier units (box/units_test.go reads it) -->
 | Unit | Section | Line | Why |
 |---|---|---|---|
 | `.path` | `[Unit]` | `Description=hotserve box applier trigger` | |
@@ -1270,8 +1272,9 @@ Dated one-liners; the full text of each is in git.
   are off (with them, `After=hotserve.service` is an ordering cycle
   that cost `paths.target` its boot start and hotserve its shutdown
   stop); the service has no start limit (the default, 5 in 10 s, ended
-  a failing loop before the trigger limit the full-disk row names); no
-  timer (a second start outside the trigger limit); three
+  a failing loop before the trigger limit the full-disk row names), nor
+  has the path unit (quick restarts of it, an operator retrying that
+  row's remedy, ended `start-limit-hit`); no timer (a second start outside the trigger limit); three
   `PathExistsGlob=` lines per directory beside `DirectoryNotEmpty=`,
   which does not count a hidden or backup-named entry. The unit list
   became a table the test reads; `init/` and `lock` are born group
