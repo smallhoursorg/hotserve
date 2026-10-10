@@ -10,10 +10,7 @@ body once they settle.
 that build it (proof core, Caddyfile surface, applier, `init`,
 template, docs); a PR that cannot hold a line here changes the line in
 the same PR, with the reason. Until the template ships,
-`examples/box/bin/push` is how config reaches a box. Step 6's
-reachability check is not built yet (its own PR): until it is, a
-signed file that serves `/` before `box_webhook` is caught by nothing
-before it applies, and the console is the way back ("At 3am").
+`examples/box/bin/push` is how config reaches a box.
 
 **Two rules of this document.** Every fact lives in exactly one table;
 prose uses it and points to it, and never restates it, so a change
@@ -239,13 +236,16 @@ cross-references throughout.
    provisions every module and the adapter expands `{$VAR}` from the
    caller's environment and runs each module's parser on the input.
    The same step reads the file's adaptation (`hotserve adapt
-   --adapter caddyfile`, a child bounded the same way) for
-   **reachability**: a `GET` and a `POST` for `/` on the `box_webhook`
-   host must meet `box_webhook` before any handler that can answer
-   them — no `order` option, second site for that host (`host/*`, which
-   Caddy sorts ahead) or anything else may serve `/` first. Like the
-   rest of this step it is a courtesy against a signer's mistake, not a
-   boundary: root never adapts, so step 15 checks presence alone.
+   --adapter caddyfile --config <staged file>`, a third child bounded
+   per the Caps table, whose JSON leaves the handler as nothing but a
+   verdict) for **reachability**: a `GET` and a `POST` for `/` on the
+   `box_webhook` host must meet `box_webhook` before any handler that
+   can answer them — not an `order` option, not a second site for that
+   host (`host/*`, which Caddy sorts ahead), not anything else. What may
+   stand in front, and how a matcher is decided, are the "Reachability"
+   tables; a push that fails them is refused by the handler's name. Like
+   the rest of this step it is a courtesy against a signer's mistake,
+   not a boundary: root never adapts, so step 15 checks presence alone.
 7. **Drop.** The bundle, assembled in `stage/`, is renamed into `in/`
    as `<id>.tar`; only then is the marker written with the time (see
    "Admission" for why in that order); then the admission lock is released. The handler logs `box
@@ -432,6 +432,63 @@ within one poll interval and answers; the workflow asks `GET
 runs — until the phase is terminal. A push that changes nothing is
 answered 200 synchronously. liveswap never met this: a deploy does
 not reload Caddy.
+
+### Reachability: what may stand before `box_webhook`
+
+The question step 6 asks of the adaptation: for a `GET` and for a
+`POST` of `https://<host>/` — the host the walk found, no query, no
+header a matcher could read — does the request meet `box_webhook`
+before anything that could answer it. The handler takes the server
+that holds the box site's route, walks that server's routes in order
+and, inside each route that may match, its handlers in order,
+recursing into a `subroute` (a site, `handle`, `route` and
+`handle_path` all adapt to one). The first handler met decides, per
+the first table: `box_webhook` is reached; a handler that passes is
+stepped over; any other refuses the push. A route marked `terminal`
+that may match and runs out of handlers answers too (Caddy hands the
+rest of the chain an empty handler), so an empty `host/` site is "an
+earlier site for `<host>` answers first". `handle` blocks share a
+group: once one member has matched, Caddy skips the later members, and
+so does this walk.
+
+| Handler (module) | Treated as | Why |
+|---|---|---|
+| `box_webhook` | reached | |
+| `subroute` | recursed, its routes in order | a site, `handle`, `route` and `handle_path` adapt to one |
+| `vars`, `map`, `log_append`, `tracing`, `request_body`, `timeouts`, `encode`, `push`, `templates`, `intercept`, `headers` without a `request` section, `hint_penaltybox` | passes | the request reaches the next handler as sent: the first four set variables, `headers` here edits the response, the next six wrap the response; `hint_penaltybox` answers 429 only to a client in its box, which the catalogue's 429 row retries |
+| `rewrite`; `headers` with a `request` section | refused: `<handler> changes the request first` | `rewrite` (also `uri`, `try_files` and `handle_path`'s strip) moves `/` away before `box_webhook` sees it; `request_header -Authorization` turns every push into a 401 with nothing in the answer to say why |
+| anything else — `static_response`, `reverse_proxy`, `file_server`, `error`, `authentication`, `acme_server`, `metrics`, `invoke`, `liveswap_webhook`, a handler this table does not list | refused: `<handler> answers first` | fail-closed: a handler the table has not weighed is one that may answer; `invoke`'s named route is not followed |
+
+The standard directives Caddy orders before `box_webhook` (`tracing`,
+`map`, `vars`, `fs`, `root`, `log_append`, `log_skip`, `log_name`,
+`header`, `request_body`, `timeouts`) all adapt to the "passes" row, so
+a box site refuses nothing unless an `order` global option moves a
+directive ahead; and the sites Caddy sorts ahead of a bare hostname
+(longer host first, then longer path, wildcard hosts after exact ones)
+are those with the same host and a path, `host/*`.
+
+| Matcher on a route | Decided |
+|---|---|
+| none | matches |
+| `host`, `path`, `method`, `protocol`, and `not` over these, no placeholder in a pattern | statically, by Caddy's own matcher types, for the `GET` and for the `POST` |
+| any other (`header`, `header_regexp`, `query`, `expression`, `remote_ip`, `client_ip`, `file`, `vars`, `vars_regexp`, `path_regexp`, `tls`, a third party's), or a pattern holding a placeholder | per request, so "may match": a refused handler behind it refuses the push as `<handler> may answer first (its <matcher> matcher is decided per request)`; a passing handler behind it passes |
+
+A matcher set matches when every matcher in it does, a route when any
+of its sets does, and "may" sits between the two. The cost of "may": a
+`header`- or `expression`-matched responder ahead of `box_webhook` on
+`/` is refused even when it would never fire for the workflow; the
+remedy is to move it behind `box_webhook`, where the default order
+already puts every responder, or to give it a path.
+
+Not caught here, by design. `init` runs no pre-check (the reload is the
+check, and a reload loads an unreachable `/` as happily as any other),
+so a file `init` installs that serves `/` first is found by the first
+push, which meets the front handler's answer instead of this one's;
+the console is the way back ("At 3am"), and whether the workflow asks
+`GET /` for this handler's status before it posts is the template's
+call. A `request_body` cap below the bundle's 16 MiB ahead of
+`box_webhook` is not caught either: the push reaches the handler and
+fails its body read (400).
 
 ## The install transaction
 
@@ -801,6 +858,8 @@ Every numeric bound, in one place, with its reason.
 | pending (admission) | 15 minutes from the marker's `posted` | the workflow's own poll bound; past it a marker no longer blocks a push (see "Admission") |
 | request id | 32 lowercase hex, random for each push | 128 bits: two honest runs never collide; one spelling, so one id names one push |
 | validate children (`hotserve validate`, `hotserve-backup validate`) | 120 s each and a 1 s `WaitDelay`; output kept: the last 4 KiB, of which the refusal quotes the `Error:` line (else the last line), redacted, then bounded as quoted input | validate provisions every module; a legitimate run is about a second, and a loaded box or a slow issuer discovery must not refuse a good push |
+| the adapt child (`hotserve adapt`) | 120 s and a 1 s `WaitDelay`, as validate's; run after `hotserve validate` passed, so a non-zero exit is the box's error (500), never a refusal | the adapter validate just ran; a loaded box must not refuse a good push |
+| the adaptation | 16 MiB of stdout kept, bytes past it counted and dropped (never an error to the pipe: a child blocked on a full pipe would run to its deadline), stderr discarded; past the cap the push is refused `the new Caddyfile's adaptation is larger than 16 MiB`; the JSON reaches nothing but the reachability walk, since it holds every expanded `{$VAR}` | a 1 MiB Caddyfile adapts to a few MiB; the bundle's own figure |
 | handler poll interval for the first result | 1 s | bounds how long a reload's `Shutdown` waits for the in-flight POST ("Why 202 and a poll") |
 | workflow poll | 15 minutes, then red naming the journal | |
 | `activating` wait in step 16 | 300 s elapsed | hotserve's `TimeoutStartSec=240s` plus `RestartSec`; an elapsed bound, since `Restart=on-failure` can keep a unit activating across attempts |
@@ -942,7 +1001,7 @@ says. The workflow's action is in the last column.
 | 422 | `refused` | `this file is for <host2>; this box is <host1>` | both | fail |
 | 422 | `refused` | `this box's file is <recorded path>; the bundle is <path> — hotserve init --path records a new one` | both | fail |
 | 422 | `refused` | `the new Caddyfile has no box block` / `… has no signer` / `… has no deploy_trust` / `… has no site with box_webhook` / `… has more than one site with box_webhook` / `… has a box_webhook site whose address is not one bare hostname (<address>)` / `… has a site without braces (<address>)` / `… has box_webhook inside a snippet or named route (<name>); write it in the site` / `… has box_webhook inside <block>; it must stand directly in the site block, where no matcher or nested route can leave / unserved` / `… has box_webhook with arguments (<args>); it takes none, and a matcher would leave / unserved` / `… imports <path>; inline the snippet` / `… has a placeholder where a directive name, a site address or a box line goes (<token>)` / `… reads differently once its placeholders are expanded` / `… is empty` / `… has a global options block that is not the first block` / `… has more than one box block` / `… has a signer line that is not \`signer <principal> <key-type> <base64>\`` / `… has a bad signer <principal>: <what>` / `… does not tokenize: <lexer error>` / `… does not parse: <what>` / `… drops the key that signed this commit (<principal>); add the new key in one push, let it apply, then remove the old one` | both | fail |
-| 422 | `refused` | `hotserve validate: <redacted>` / `hotserve-backup validate: <redacted>` / `the new Caddyfile does not reach box_webhook on /: <handler> answers first` | handler | fail |
+| 422 | `refused` | `hotserve validate: <redacted>` / `hotserve-backup validate: <redacted>` / `the new Caddyfile does not reach box_webhook on /: <handler> answers first` / `… : <handler> changes the request first` / `… : <handler> may answer first (its <matcher> matcher is decided per request)` / `… : an earlier site for <host> answers first` / `the new Caddyfile's adaptation is larger than 16 MiB` | handler | fail |
 | 422 | `refused` | `hotserve is not running; nothing applied` / `hotserve is still starting after 300 s; nothing applied` | applier | fail |
 | 422 | `refused` | `the Caddyfile this box runs lists no signer; hotserve init is the way back` | applier | fail |
 | 200 / poll | `no_change` | `the box already runs this Caddyfile` | applier | green |
@@ -1296,7 +1355,7 @@ full placement is DESIGN-threat-model.md, "Config webhook" and T6.
 
 | Actor | Can | Cannot |
 |---|---|---|
-| Holder of a box-repo OIDC token (the repo's own CI, a compromised action) | Reach the handler; make it validate a Caddyfile a *signer* committed (pre-check first); replay `HEAD` — a `no_change`, or after a console edit the reinstall of HEAD's file, reverting the 3am fix; hold one bundle in `in/` and one in root's hands; fill at most 32 result slots; hold the process's one push slot through each push's upload and checks — up to the upload deadline, the chain's verification bound and two validate children, about sixteen minutes — while every other push 409s | Install anything not signed by a listed key; replay an older signed commit (descent); land another box's file or another path (identity) |
+| Holder of a box-repo OIDC token (the repo's own CI, a compromised action) | Reach the handler; make it validate a Caddyfile a *signer* committed (pre-check first); replay `HEAD` — a `no_change`, or after a console edit the reinstall of HEAD's file, reverting the 3am fix; hold one bundle in `in/` and one in root's hands; fill at most 32 result slots; hold the process's one push slot through each push's upload and checks — up to the upload deadline, the chain's verification bound and three children, about eighteen minutes — while every other push 409s | Install anything not signed by a listed key; replay an older signed commit (descent); land another box's file or another path (identity) |
 | Holder of a `deploy_trust local` token, or of the key that mints one | The same as the OIDC holder, with `sha` chosen by the minter: any signed descendant of the baseline whose objects it has, without the repository workflow or its `main` claim | Anything a signer did not sign |
 | Leaked PAT, stolen session, OAuth/GitHub App with `contents:write` | Push to `main`; stop every later push until its commit is rebased away; **fast-forward onto `main` a branch every commit of which a signer already signed**, which the box applies, for as long as the box runs the commit it forked from | Produce an SSH signature by a listed key; ride an unsigned or self-authored change in under a later signed commit; change the box with anything a signer did not sign |
 | Compromised laptop, software signing key | Everything the operator can | Nothing the operator cannot; this is the operator |
@@ -1486,3 +1545,8 @@ Dated one-liners; the full text of each is in git.
   body is read and parsed, and the fast path answered, before the
   admission lock; the fast path writes nothing; validate's children
   bounded at 120 s; step 6's reachability check moved to its own PR.
+- 2026-10-10 — PR 3c-r (step 6's reachability check): the adaptation
+  is read by a third child, bounded as the others and its output capped;
+  what may stand before `box_webhook` on `/`, and how a matcher is
+  decided, are the Reachability tables — fail-closed on a handler or a
+  matcher they do not weigh; `init`'s gap and `request_body`'s stated.
