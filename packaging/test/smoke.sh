@@ -351,6 +351,41 @@ rmdir /run/systemd/system/$svc.d
 systemctl daemon-reload
 [ "$(show hotserve-box-apply.path SubState)" = waiting ] || die "the path unit is not waiting after the run: $(systemctl show -p ActiveState,SubState,Result hotserve-box-apply.path | tr '\n' ' ')"
 echo "box applier: path unit enabled and waiting; tree as tmpfiles.d says; the unit reloads hotserve, verifies as 65534, kills its child; every path the unit watches starts a run that clears it"
+# The real applier in the unit as shipped, no stub: what the hotserve
+# uid drops that is not a bundle — a hidden 000 directory, a sticky
+# directory holding its file, a plain file — is taken and removed with
+# an error line and no result; a file named as a bundle that is not one
+# ends in a terminal result, written in out/ as the Paths table says
+# (this box has no applied.json: nothing was ever applied). The run
+# exits 0, and the path unit waits again.
+bad_id=0123456789abcdef0123456789abcdef
+systemctl stop hotserve-box-apply.path
+since=$(date '+%Y-%m-%d %H:%M:%S')
+as_hotserve "mkdir $B/in/.x000 && touch $B/in/.x000/f && chmod 000 $B/in/.x000 && mkdir $B/in/sticky && chmod 1777 $B/in/sticky && touch $B/in/sticky/f $B/in/junk $B/in/$bad_id.tar" \
+	|| die "could not drop the real applier's entries into $B/in"
+systemctl start hotserve-box-apply.path || die "the path unit did not start: $(systemctl show -p ActiveState,Result hotserve-box-apply.path | tr '\n' ' ')"
+i=0
+until [ -z "$(find "$B/in" "$B/work" -mindepth 1)" ] && [ "$(show $svc ActiveState)" = inactive ] && [ -e "$B/out/$bad_id.json" ]; do
+	i=$((i + 1))
+	[ "$i" -ge 120 ] && die "the real applier did not clear in/ within 60s: in/work: $(find "$B/in" "$B/work" -mindepth 1 | tr '\n' ' ') service $(systemctl show -p ActiveState,Result,ExecMainStatus $svc | tr '\n' ' '); $(journalctl -u $svc --since "$since" --no-pager -o cat | tail -20)"
+	sleep 0.5
+done
+[ "$(show $svc Result)" = success ] && [ "$(show $svc ExecMainStatus)" = 0 ] \
+	|| die "the real applier's run did not end clean: $(systemctl show -p Result,ExecMainStatus $svc | tr '\n' ' '); $(journalctl -u $svc --since "$since" --no-pager -o cat | tail -20)"
+removed=$(journalctl -u $svc --since "$since" --no-pager -o cat | grep -c 'removing an entry that is not a bundle' || true)
+[ "$removed" -eq 3 ] || die "the real applier named $removed entries that are not bundles, want 3: $(journalctl -u $svc --since "$since" --no-pager -o cat | tail -20)"
+got=$(stat -c '%a %U:%G' "$B/out/$bad_id.json")
+[ "$got" = "640 root:hotserve" ] || die "the real applier's result is '$got', want '640 root:hotserve' (Paths table)"
+grep -Eq '"phase": *"(failed|refused)"' "$B/out/$bad_id.json" || die "the result of a bundle that is not one is not terminal: $(cat "$B/out/$bad_id.json")"
+echo "  its result: $(cat "$B/out/$bad_id.json")"
+i=0
+until [ "$(show hotserve-box-apply.path SubState)" = waiting ]; do
+	i=$((i + 1))
+	[ "$i" -ge 20 ] && die "the path unit is not waiting after the real applier's run: $(systemctl show -p ActiveState,SubState,Result hotserve-box-apply.path | tr '\n' ' ')"
+	sleep 0.5
+done
+rm -f "$B/out/$bad_id.json"
+echo "the real applier, in the unit as shipped: three entries that are not bundles removed, one bad bundle settled in out/ (640 root:hotserve), exit 0"
 
 stage "stage 2: liveswap deploy under the systemd sandbox"
 # Generate a local deploy keypair; the app trusts the public half, and
