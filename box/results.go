@@ -162,7 +162,7 @@ func resultFields(r result) []zap.Field {
 		zap.String("id", r.ID), zap.String("phase", r.Phase), zap.String("commit", r.Commit),
 		zap.String("path", proof.Bound(r.Path)), zap.String("signer", r.Signer), zap.String("box", r.BoxWebhook),
 		zap.Bool("caddyfile_edited_out_of_band", r.OutOfBand), zap.Strings("apps", r.Apps),
-		zap.String("diff", r.Diff), zap.String("error", r.Error),
+		zap.String("diff", r.Diff), zap.String("error", r.Error), zap.Strings("named", r.Named),
 	}
 }
 

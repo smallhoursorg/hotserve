@@ -552,13 +552,16 @@ func TestPushPreVerification(t *testing.T) {
 		{"tampered", signed, tampered, "the file sent is not " + testPath + " in " + signed},
 		{"unsigned on the chain", above, p.repo.bundleFiles(above, p.base), mid + ", between the commit this box runs and " + above +
 			", is not signed; every commit on main must be — rebase it out and force-push; the box still runs " + p.base},
-		{"not a descendant", elsewhere, p.repo.bundleFiles(elsewhere, p.base), elsewhere + " does not descend from the commit this box runs (" + p.base + ")"},
+		{"not a descendant", elsewhere, p.repo.bundleFiles(elsewhere, p.base), elsewhere + " does not descend from the commit this box runs (" + p.base + ") along main's first-parent line. " +
+			"If the box already runs a later commit, nothing is wrong. " +
+			"If a branch merged main into itself before it was fast-forwarded, rebase it onto main and force-push. " +
+			"Only if main was rewritten below " + p.base + " does hotserve box baseline " + elsewhere + ", as root on the box, reset trust to " + elsewhere + ", whose ancestors the box will then never examine"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			id := randomID(t)
 			w := p.post(t, p.h, push{id: id, token: p.token(t, tc.head), body: bytes.NewReader(tgz(t, tc.files))})
 			m := wantResult(t, w, http.StatusUnprocessableEntity, id, phaseRefused)
-			if msg, _ := m["error"].(string); !strings.HasPrefix(msg, tc.msg) || m["commit"] != tc.head {
+			if m["error"] != tc.msg || m["commit"] != tc.head {
 				t.Fatalf("got %s, want error %q", w.Body, tc.msg)
 			}
 			p.untouched(t)
