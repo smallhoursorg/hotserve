@@ -944,7 +944,7 @@ says. The workflow's action is in the last column.
 | 422 | `refused` | `<sha2>, between the commit this box runs and <sha>, is not signed; every commit on main must be — rebase it out and force-push; the box still runs <baseline>` | both | fail |
 | 422 | `refused` | `<sha2>, between the commit this box runs and <sha>, is signed by a key this box did not list when it last applied (<principal>); the commit that adds the key must apply first — force main back to it, let it apply, then push the rest` | both | fail |
 | 422 | `refused` | `the file sent is not <path> in <sha>` / `<path> in <sha> is not a regular file` / `<sha> is in a SHA-256 repository, which the box does not read` | both | fail |
-| 422 | `refused` | `<sha> does not descend from the commit this box runs (<baseline>) along main's first-parent line. If the box already runs a later commit, nothing is wrong. If a branch merged main into itself before it was fast-forwarded, rebase it onto main and force-push. Only if main was rewritten below <baseline> does hotserve box baseline <sha>, as root on the box, reset trust to <sha>, whose ancestors the box will then never examine` | both | fail (the workflow pre-checks `merge-base --is-ancestor HEAD <baseline>` and exits green as "superseded") |
+| 422 | `refused` | `<sha> does not descend from the commit this box runs (<baseline>) along main's first-parent line. If the box already runs a later commit, nothing is wrong. If a branch merged main into itself before it was fast-forwarded, rebase it onto main and force-push. Only if main was rewritten below <baseline> does hotserve box baseline <sha>, as root on the box, reset trust to <sha>, whose ancestors the box will then never examine` | both | fail (the workflow pre-checks `merge-base --is-ancestor HEAD <baseline>` and exits green as "superseded" — only for HEAD ≠ the baseline: HEAD equal to it is pushed, since after `box baseline` the baseline's file may not be the one installed; the fast path or root answers) |
 | 422 | `refused` | `the chain from <baseline> to <sha> is longer than 500 commits; run hotserve box baseline <sha> as root on the box` | both | fail |
 | 422 | `refused` | `this file is for <host2>; this box is <host1>` | both | fail |
 | 422 | `refused` | `this box's file is <recorded path>; the bundle is <path> — a box's file is <host>/Caddyfile at the top of the repository, and hotserve init, run again from that directory, records it` | both | fail |
@@ -991,7 +991,7 @@ the Caddyfile is accepted only by a running hotserve. Start it on the file it ha
   systemctl enable hotserve && systemctl restart hotserve  # exit 1 is final; journalctl -u hotserve says why
   hotserve init <sha>
 If it will not start on that file, start it on this one, keeping the old:
-  cp /etc/hotserve/Caddyfile /root/Caddyfile.before-init
+  cp --update=none /etc/hotserve/Caddyfile /root/Caddyfile.before-init
   cp Caddyfile /etc/hotserve/Caddyfile
   systemctl restart hotserve
   hotserve init <sha>  # the same bytes: no_change, which records the baseline
@@ -1000,7 +1000,8 @@ If it will not start on that file, start it on this one, keeping the old:
 Starting on the file the box has keeps `init`'s swap and rollback
 between the change and a box that will not start; only a box that will
 not start on its own file has its file replaced by hand, the old one
-kept. A restart, not a start: a start joins one already in flight,
+kept — and kept once: `--update=none` leaves a copy from an earlier
+pass through the remedy as it is. A restart, not a start: a start joins one already in flight,
 which read the old file, and a `no_change` reloads nothing.
 
 Journal lines: the preamble's (`webhook auth failed`, `webhook auth
@@ -1041,7 +1042,7 @@ step before the transaction a refusal by name that writes nothing
    ("The box's identity"). Nothing about it is typed.
 6. Root's blocking lock; recovery, if a record is lying there; then
    step 16's question, once. `activating` is waited out within the
-   run's budget, so `systemctl start hotserve && hotserve init <sha>`
+   run's budget, so `systemctl enable --now hotserve && hotserve init <sha>`
    needs no sleep. Anything but up is refused with nothing written: the
    catalogue's message, then the remedy: hotserve enabled and restarted
    on the file it has, then `init` again; or, if it will not start on

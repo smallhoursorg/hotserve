@@ -60,7 +60,7 @@ const (
   systemctl enable hotserve && systemctl restart hotserve  # exit 1 is final; journalctl -u hotserve says why
   hotserve init %[1]s
 If it will not start on that file, start it on this one, keeping the old:
-  cp /etc/hotserve/Caddyfile /root/Caddyfile.before-init
+  cp --update=none /etc/hotserve/Caddyfile /root/Caddyfile.before-init
   cp Caddyfile /etc/hotserve/Caddyfile
   systemctl restart hotserve
   hotserve init %[1]s  # the same bytes: no_change, which records the baseline`

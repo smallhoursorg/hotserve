@@ -90,9 +90,10 @@ func init() {
 		Long: `Run as root inside the box's directory, copied over from the repository
 (deploy.example.com/ for the box at deploy.example.com), with the commit
 you are about to push. From the repository on your laptop, where the
-$(...) is expanded (the box has no git):
+$(...) is expanded (the box has no git), copying the commit's files
+rather than the working tree's:
 
-    scp -r deploy.example.com root@box.example.com:
+    git archive HEAD deploy.example.com | ssh root@box.example.com tar -xf -
     ssh root@box.example.com "cd deploy.example.com && hotserve init $(git rev-parse HEAD)"
 
 It reads ./Caddyfile the way the box reads every push, records its
