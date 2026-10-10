@@ -222,13 +222,19 @@ func TestFailureModes(t *testing.T) {
 // for word: the two copies are written by hand, so a reworded one would
 // otherwise drift from the table the workflow is built against.
 func TestApplierMessagesAreCatalogued(t *testing.T) {
-	doc := readDesign(t)
+	// The section alone: some texts are also quoted in the States and
+	// Transitions tables, which must not stand in for the catalogue.
+	_, section, ok := strings.Cut(readDesign(t), "\n## Message catalogue\n")
+	if !ok {
+		t.Fatal("DESIGN-box.md has no Message catalogue section")
+	}
+	catalogue, _, _ := strings.Cut(section, "\n## ")
 	for _, msg := range []string{
 		msgNotRunning, msgStillStarting, msgNoSigner, msgInterrupted, msgInterruptedStopped,
 		msgNoRecord, msgReloadFailed, msgRecordAfterReload, msgRolledBackUnrecorded,
 		msgRolledBackInterrupted, msgBothReloads, msgPrevReloadFailed, msgChanged,
 	} {
-		if !strings.Contains(doc, "`"+msg+"`") {
+		if !strings.Contains(catalogue, "`"+msg+"`") {
 			t.Errorf("not in the Message catalogue: %q", msg)
 		}
 	}
