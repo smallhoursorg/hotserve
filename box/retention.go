@@ -29,8 +29,9 @@ const (
 // idState is what the sweep knows of one id.
 type idState struct {
 	result, marker bool
-	// key is the id's age: the marker's posted time, else the marker's
-	// or the result's modification time.
+	// key is the id's age: the result's modification time when there
+	// is a result, else the marker's posted time, else the marker's
+	// modification time.
 	key time.Time
 	// written is the result's modification time: root's own clock.
 	written time.Time
@@ -97,22 +98,18 @@ func (a *Applier) sweep() {
 	}
 	var candidates []string
 	for id, s := range ids {
-		// A date the clock has not reached cannot be aged. With a result
-		// — root's own write, so not a hostile writer's — the result's
-		// time stands in, never later than now: a clock stepped back
-		// does not sweep a push it just settled. With none, a marker
-		// past pendingAge ahead counts as older than keepAge, so that it
-		// neither sorts as newest nor holds a slot, nor blocks admission,
-		// until the clock catches up.
-		if s.key.Sub(now) > pendingAge {
-			switch {
-			case s.result && s.written.After(now):
-				s.key = now
-			case s.result:
-				s.key = s.written
-			default:
-				s.key = time.Time{}
-			}
+		switch {
+		case s.result:
+			// A result is aged by root's own write, which the hotserve
+			// uid cannot touch; one dated past the clock (the clock
+			// stepped back since) counts as written now.
+			s.key = minTime(s.written, now)
+		case s.key.Sub(now) > pendingAge:
+			// A marker with no result dated past the clock cannot be
+			// aged: it counts as older than keepAge, so it neither
+			// blocks admission nor holds a slot until the clock catches
+			// up.
+			s.key = time.Time{}
 		}
 		if !s.result {
 			if !a.stranded(id, held, s.key, now) {
@@ -133,7 +130,9 @@ func (a *Applier) sweep() {
 	})
 	for n, id := range candidates {
 		s := ids[id]
-		keep := n < keepIDs && now.Sub(s.key) < keepAge
+		// A result this run wrote is never swept by it, so the push it
+		// settled can be polled at least until root's next run.
+		keep := a.wrote[id] || (n < keepIDs && now.Sub(s.key) < keepAge)
 		if keep {
 			if s.stranded {
 				// The push was lost before root saw it, or its result
@@ -155,11 +154,19 @@ func (a *Applier) sweep() {
 }
 
 // stranded is the table's third row: a marker with no result, nothing
-// in in/ or work/ and no record for its id, older than pendingAge (a
-// date past the clock has already been made the oldest, by sweep).
+// in in/ or work/ and no record for its id, at least pendingAge old. A
+// marker up to pendingAge ahead of the clock is pending, as clocks
+// differ; one further ahead reaches here already made the oldest.
 func (a *Applier) stranded(id, held string, posted, now time.Time) bool {
 	if id == held || exists(filepath.Join(a.x("in"), id+".tar")) || exists(filepath.Join(a.x("work"), id+".tar")) {
 		return false
 	}
 	return now.Sub(posted) >= pendingAge
+}
+
+func minTime(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
 }

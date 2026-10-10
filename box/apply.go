@@ -54,6 +54,8 @@ type Applier struct {
 	// waitUntil is the end of the run's one wait on a hotserve that is
 	// activating or reloading (running).
 	waitUntil time.Time
+	// wrote is every id whose result this run wrote: Retention keeps them.
+	wrote map[string]bool
 }
 
 // nobody is the uid (and gid) ssh-keygen runs as (step 12).
@@ -263,10 +265,9 @@ func (a *Applier) take() []string {
 			err = nil
 		}
 		if err != nil {
-			// It must leave in/ all the same (I2): removed where it
-			// stands, with a failed result if it is a regular file
-			// named as a bundle. (A rename that landed, its fsync
-			// failing, is taken: what follows reads it from work/.)
+			// The rename did not land. The entry must leave in/ all the
+			// same (I2): removed where it stands, with a failed result
+			// if it is a regular file named as a bundle.
 			a.logger.Error("box: could not take an entry", zap.String("entry", proof.Bound(name)), zap.String("error", proof.Bound(err.Error())))
 			fi, lerr := os.Lstat(src)
 			id, named := bundleID(name)
@@ -363,7 +364,8 @@ func (a *Applier) process(ctx context.Context, id string) error {
 	}
 	t.rec.Signer, t.rec.BoxWebhook, t.rec.Apps, t.rec.OutOfBand = vd.signer, vd.host, vd.apps, vd.outOfBand
 	t.rec.Prev, t.rec.PrevSHA256, t.rec.NewSHA256 = installed, vd.prevSum, vd.newSum
-	// 16. Active? `activating` is waited out; anything else refuses.
+	// 16. Active? `activating` and `reloading` are waited out (running);
+	// anything but `active` then refuses.
 	state, err := a.running(ctx)
 	if err != nil {
 		a.finish(t, phaseFailed, installFailed(err))

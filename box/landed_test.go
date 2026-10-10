@@ -314,3 +314,87 @@ func TestSweepReadsTheRecord(t *testing.T) {
 		t.Error("the push holding the record was settled as stranded")
 	}
 }
+
+// A result a run wrote survives that run's sweep, whatever else is kept:
+// here 32 results dated past the clock, as after a clock stepped back.
+func TestRetentionKeepsThisRunsResults(t *testing.T) {
+	b := newTestBox(t)
+	now := b.clock.Now()
+	for i := 0; i < keepIDs; i++ {
+		id := randomID(t)
+		b.resultAt(id, phaseApplied, now.Add(time.Hour))
+		b.markerAt(id, now.Add(time.Hour))
+	}
+	id := b.push(b.repo.bundleFiles(b.repo.commit(boxFile(2, b.alice), &b.alice, b.base), b.base))
+	if err := b.run(hooks{}); err != nil {
+		t.Fatal(err)
+	}
+	if r := b.result(id); r == nil || r.Phase != phaseApplied || !b.hasMarker(id) {
+		t.Fatalf("this run's result was swept: %+v", r)
+	}
+}
+
+// A second activating episode in a run, after hotserve settled, gets a
+// wait of its own.
+func TestWaitResetsOnceSettled(t *testing.T) {
+	b := newTestBox(t)
+	b.sd.states = []string{"activating", "active", "activating", "activating", "active"}
+	c1 := b.repo.commit(boxFile(2, b.alice), &b.alice, b.base)
+	c2 := b.repo.commit(boxFile(3, b.alice), &b.alice, c1)
+	first := b.pushAt(b.repo.bundleFiles(c1, b.base), b.clock.Now().Add(-time.Minute))
+	second := b.push(b.repo.bundleFiles(c2, c1))
+	read := func(id string) {
+		if id == second {
+			b.clock.advance(2 * activatingWait) // a long verification, say
+		}
+	}
+	if err := b.run(hooks{read: read}); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{first, second} {
+		if r := b.result(id); r == nil || r.Phase != phaseApplied {
+			t.Errorf("%+v", r)
+		}
+	}
+}
+
+// init decides on the reload with the new bytes on disk: a hotserve up
+// by then is reloaded, whatever it was when init began.
+func TestInitDecidesAtTheReload(t *testing.T) {
+	b := newTestBox(t)
+	b.sd.states = []string{"inactive", "active"}
+	v2 := boxFile(2, b.alice)
+	sha := b.repo.commit(v2, &b.alice, b.base)
+	out, err := b.applier(hooks{}).runInit(context.Background(), record{ID: randomID(t), Commit: sha, Path: testPath, BoxWebhook: "deploy.example.com"}, v2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Phase != phaseApplied || b.sd.reloaded != 1 {
+		t.Fatalf("%+v, %d reloads", out, b.sd.reloaded)
+	}
+}
+
+// A `failed` that landed in place of a failed `verified` is kept.
+func TestLandedFailedIsKept(t *testing.T) {
+	b := newTestBox(t)
+	id := b.push(b.repo.bundleFiles(b.repo.commit(boxFile(2, b.alice), &b.alice, b.base), b.base))
+	errSync := errors.New("fsync: input/output error")
+	fail := func(p string) error {
+		switch p {
+		case "result:verified":
+			return errNoSpace
+		case "result:failed":
+			if err := os.WriteFile(filepath.Join(b.x("out"), id+".json"), encodeJSON(result{ID: id, Phase: phaseFailed, Error: "x"}), 0o640); err != nil {
+				t.Fatal(err)
+			}
+			return errSync
+		}
+		return nil
+	}
+	if err := b.run(hooks{fail: fail}); err != nil {
+		t.Fatal(err)
+	}
+	if r := b.result(id); r == nil || r.Phase != phaseFailed {
+		t.Fatalf("%+v", r)
+	}
+}

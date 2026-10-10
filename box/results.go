@@ -121,6 +121,10 @@ func (a *Applier) writeResult(r result) error {
 		a.logger.Error("box result could not be written", append(resultFields(r), zap.String("write_error", proof.Bound(err.Error())))...)
 		return err
 	}
+	if a.wrote == nil {
+		a.wrote = map[string]bool{}
+	}
+	a.wrote[r.ID] = true
 	a.logOutcome(r)
 	return nil
 }

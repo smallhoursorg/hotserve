@@ -141,10 +141,11 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 // running is step 16's question (DESIGN-box.md, Glossary "active"):
 // `activating` is waited out, and so is `reloading` — a reload in
 // flight (the console's, or one a killed applier started) ends in
-// `active` or a failure. The wait is one per run: it ends
-// activatingWait after the run first saw either word, so bundles queued
+// `active` or a failure. A wait ends activatingWait after the run first
+// saw either word and lasts until hotserve settles: bundles queued
 // behind a hotserve that never settles share one wait rather than
-// holding root's lock for one each. The answer is the last word
+// holding root's lock for one each, and a later episode, once it has
+// settled, gets a wait of its own. The answer is the last word
 // is-active gave; up classifies it, the same way for every caller. An
 // error is the box's: is-active could not be asked.
 func (a *Applier) running(ctx context.Context) (string, error) {
@@ -154,6 +155,7 @@ func (a *Applier) running(ctx context.Context) (string, error) {
 			return "", err
 		}
 		if !transient(state) {
+			a.waitUntil = time.Time{}
 			return state, nil
 		}
 		now := a.clock.Now()

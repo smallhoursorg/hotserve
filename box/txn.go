@@ -205,7 +205,9 @@ func (a *Applier) install(ctx context.Context, t *txn) error {
 			// not, any such `verified` goes, leaving a marker with no
 			// result for Retention to settle. The entry goes either way.
 			if a.writeResult(t.result(phaseFailed, installFailed(err))) != nil {
-				a.removeResult(t.rec.ID)
+				if r, rerr := a.readResult(t.rec.ID); rerr == nil && r.Phase == phaseVerified {
+					a.removeResult(t.rec.ID)
+				}
 			}
 			a.removeEntry(t.entry)
 			return nil
@@ -272,6 +274,20 @@ const (
 // at the next start) — then the installed file read back, then the
 // record, then the baseline.
 func (a *Applier) reloadSwapped(ctx context.Context, t *txn) error {
+	if t.rec.Origin == originInit {
+		// init decides at the moment of the reload, with the new bytes
+		// on disk (its earlier answer only steers a rollback before
+		// this point): a hotserve up now gets them by reload; one that
+		// is not reads them when it next starts (the States table's
+		// init rule). A start still in flight when the wait ends may
+		// have read the old bytes: the one residual, stated in the
+		// design.
+		state, err := a.running(ctx)
+		if err != nil {
+			return a.unsettled(t, err)
+		}
+		t.running = up(state)
+	}
 	if t.rec.Origin != originInit || t.running {
 		if err := a.systemd.Reload(ctx); err != nil {
 			a.logger.Warn("box reload failed", zap.String("id", t.rec.ID), zap.String("error", proof.Bound(err.Error())))
@@ -398,7 +414,7 @@ func (a *Applier) fullDisk(t *txn, err error) error {
 // record, or the swap's own fsync — whose rollback reports only the
 // catalogue's words for it.
 func (a *Applier) recordUnwritten(t *txn, err error) {
-	a.logger.Error("box: a write failed after the swap; rolling back", zap.String("id", t.rec.ID), zap.String("phase", t.rec.Phase), zap.String("error", proof.Bound(err.Error())))
+	a.logger.Error("box: a write failed after the swap; rolling back", zap.String("id", t.rec.ID), zap.String("writing", t.rec.Phase), zap.String("error", proof.Bound(err.Error())))
 }
 
 // unsettled stops the run with everything as found.

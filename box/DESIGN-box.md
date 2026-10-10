@@ -351,15 +351,20 @@ HEAD's first (12 and 14), then 15's key guard — so a malformed bundle
 never starts `ssh-keygen`, and when more than one step would refuse,
 the first so found is the one named. Step 16 waits out `reloading` as
 it does `activating` — a reload in flight, the console's or one a
-killed applier started, ends in `active` or a failure — with one wait
-per run, 300 s from the run's first sight of either, so bundles queued
-behind a hotserve that never settles share it. After the wait, one
+killed applier started, ends in `active` or a failure — 300 s from the
+run's first sight of either, the wait lasting until hotserve settles,
+so bundles queued behind a hotserve that never settles share one wait
+and a later episode, once it has settled, gets its own. After the wait, one
 classification serves every caller: hotserve is *up* when it is
 `active` or still `reloading` (a reload then queues behind the one in
 flight); `activating` (a start, or a restart loop, which reads the file
 on disk when it gets there) and every other word is not running. A
 push is refused on anything but `active`, with the "still starting"
-text after a wait that timed out. The installed file failing the
+text after a wait that timed out. `init` asks at the moment of the
+reload, with the new bytes on disk (`swapped → applied`); the one
+residual is a start still `activating` when the wait ends that read the
+old bytes and then succeeds — it serves them until the next reload,
+while `init` reports the swap applied for the next start. The installed file failing the
 walk for a reason other than an empty signer list, `applied.json`
 missing or unreadable, `ssh-keygen` unable to answer and `is-active`
 unanswered are the box's errors: `failed`, never `refused`
@@ -638,17 +643,21 @@ appears in `out/` or `stage/*.auth`:
 | marker present, no result, nothing at `in/<id>.tar` or `work/<id>.tar`, no record for `<id>`, older than fifteen minutes (a date more than fifteen minutes ahead of the clock counts as older than a day: see below) | the push was lost before root saw it (handler crash) or its result could not be written (full disk): write `failed` ("the box has no record of this push; push again") if it can and the two rules keep the id, then sweep by them |
 | marker present, no result, younger than fifteen minutes | pending; untouched, and not counted among the 32 |
 
-An id's age is its marker's `posted`; with no marker, or one that does
-not read (not a regular file, over its cap, not the shape admission
-writes), the marker's or else the result's modification time, read
-without following a link. A date more than fifteen minutes ahead of the
-clock cannot be aged. With a result — root's own write, which no
-hostile writer makes — the result's time stands in, never later than
-now, so a clock stepped back does not sweep a push it just settled.
-With none, the id counts as older than a day and is swept at once with
-no result written, rather than sorting as newest and holding a slot —
-and, as a marker, blocking admission — until the clock catches up. The
-32 are counted over ids with a result, newest first. A pair is removed marker first, so a crash between the
+An id with a result is aged by the result's modification time — root's
+own write, which the hotserve uid cannot touch — counted as now if it
+is past the clock. A marker with no result is aged by its `posted`, or
+by its modification time (read without following a link) if it does not
+read (not a regular file, over its cap, not the shape admission
+writes); one dated more than fifteen minutes past the clock counts as
+older than a day and is swept at once with no result written, rather
+than blocking admission and holding a slot until the clock catches up.
+The 32 are counted over ids with a result, newest first, and a result a
+run wrote is never swept by that run, so the push it settled can be
+polled at least until root's next run. The accepted residual: a clock
+stepped back by more than a few minutes makes the results written
+before the step count as new until the clock passes them — kept beyond
+a day, and, thirty-two or more of them, crowding out results written
+after the step from the second run on. A pair is removed marker first, so a crash between the
 two `unlink`s leaves the table's second row. Only names `<id>.auth` in
 `stage/` are root's; the handler's lock and temporaries are its own.
 
@@ -1263,10 +1272,11 @@ Dated one-liners; the full text of each is in git.
   a record that finds its terminal result only removes; the record
   carries the `error` its rollback will report; steps 10–15 run
   cheapest first; step 16 waits out `reloading` as it does
-  `activating`, once per run, and one classification ("up") serves
-  every caller; I2 names the stop-as-found as its second exception;
-  `apps` holds liveswap-grammar names only; Retention ages an id by its
-  marker's `posted`, else an mtime, ages a date past the clock by the
-  result's write or else as older than a day, counts the 32 over
-  results, and writes a stranded marker's `failed` only for an id it
-  keeps.
+  `activating`, one wait shared until hotserve settles, and one
+  classification ("up") serves every caller; `init` decides on the
+  reload with the new bytes on disk; I2 names the stop-as-found as its
+  second exception; `apps` holds liveswap-grammar names only; Retention
+  ages a result by root's write and a lone marker by `posted` (one past
+  the clock: older than a day), counts the 32 over results, never
+  sweeps a result its own run wrote, states the clock-step residual,
+  and writes a stranded marker's `failed` only for an id it keeps.
