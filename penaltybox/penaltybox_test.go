@@ -168,6 +168,12 @@ func TestMaskKey(t *testing.T) {
 		{"ipv4-mapped ipv6 unmapped, per address", "::ffff:192.0.2.1", "192.0.2.1"},
 		{"ipv4-mapped hex form", "::ffff:c000:201", "192.0.2.1"},
 		{"ipv4-mapped with zone", "::ffff:192.0.2.1%eth0", "192.0.2.1"},
+		{"nat64 well-known prefix keys the embedded ipv4", "64:ff9b::192.0.2.1", "192.0.2.1"},
+		{"nat64 well-known hex form", "64:ff9b::c000:201", "192.0.2.1"},
+		{"nat64 well-known uppercase with zone", "64:FF9B::192.0.2.1%eth0", "192.0.2.1"},
+		{"nat64 /64 but outside the /96", "64:ff9b::1:c000:201", "64:ff9b::/64"},
+		{"nat64 local-use prefix is not recognised", "64:ff9b:1::c000:201", "64:ff9b:1::/64"},
+		{"teredo is not recognised", "2001:0:4136:e378:8000:63bf:3fff:fdd2", "2001:0:4136:e378::/64"},
 		{"zoned link-local drops the zone", "fe80::1%eth0", "fe80::/64"},
 		{"zoned link-local other zone, same key", "fe80::2%eth1", "fe80::/64"},
 		{"empty", "", ""},
@@ -221,9 +227,11 @@ func TestServeHTTPIPv6SharesPrefixBudget(t *testing.T) {
 
 	box("192.0.2.1")
 	expect("192.0.2.1", http.StatusTooManyRequests)
-	expect("::ffff:192.0.2.1", http.StatusTooManyRequests) // the same IPv4 client, mapped
+	expect("::ffff:192.0.2.1", http.StatusTooManyRequests)   // the same IPv4 client, mapped
+	expect("64:ff9b::192.0.2.1", http.StatusTooManyRequests) // ... and through a NAT64 translator
 	expect("192.0.2.2", http.StatusOK)
 	expect("::ffff:192.0.2.2", http.StatusOK)
+	expect("64:ff9b::192.0.2.2", http.StatusOK)
 }
 
 func TestValidate(t *testing.T) {

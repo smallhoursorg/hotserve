@@ -94,7 +94,7 @@ All options and defaults:
 | Option        | Default              | Meaning                                                              |
 | ------------- | -------------------- | -------------------------------------------------------------------- |
 | `header`      | `X-Rate-Limit-Level` | Origin response header carrying the hint level                       |
-| `key`         | `{client_ip}`        | Client identity; respects the server's `trusted_proxies` config. A key that resolves to one IPv6 address counts under its /64; IPv4 per address; anything else verbatim (see [Client keys](#client-keys-ipv6-by-64)) |
+| `key`         | `{client_ip}`        | Client identity; respects the server's `trusted_proxies` config. A key whose whole value is one IPv6 address counts under its /64; IPv4 (also mapped or NAT64 well-known) per address; anything else verbatim (see [Client keys](#client-keys-ipv6-by-64)) |
 | `min_level`   | `2`                  | Lowest level that counts toward the budget (1–3)                     |
 | `window`      | `60s`                | Sliding window; free-form duration (Fastly's 1s/10s/60s is the interoperability convention) |
 | `limit`       | `30`                 | Weighted units per window; *exceeding* (not reaching) it boxes       |
@@ -195,28 +195,47 @@ configuration, which is where XFF trust belongs.
 
 ### Client keys: IPv6 by /64
 
-The resolved `key` is counted as follows:
+The whole resolved `key` value is looked at, whatever placeholder
+produced it: `{client_ip}`, or a header such as
+`{http.request.header.CF-Connecting-IP}`. If it parses as exactly one
+IP address it is masked; otherwise it is counted verbatim:
 
 | Resolved value                         | Counted under                    |
 | -------------------------------------- | -------------------------------- |
 | One IPv6 address (`2001:db8:1:2::a`)   | its /64 (`2001:db8:1:2::/64`)    |
 | One IPv4 address (`192.0.2.1`)         | that address                     |
 | IPv4-mapped IPv6 (`::ffff:192.0.2.1`)  | the IPv4 address (`192.0.2.1`)   |
+| NAT64 well-known prefix (`64:ff9b::192.0.2.1`) | the IPv4 address (`192.0.2.1`) |
 | Link-local with a zone (`fe80::1%eth0`) | its /64, zone dropped (`fe80::/64`) |
-| Anything else — a header value, a composite such as `{client_ip}\|{host}`, `host:port` | the string, verbatim |
+| Anything else: a composite such as `{client_ip}\|{host}`, a `host:port` such as `{remote}` gives, any other header value | the string, verbatim |
 
 A single IPv6 host is routinely handed a whole /64, so keying per
 address would let one client spread its traffic across addresses and
 never fill a budget. Keying the /64 means every address in it shares
-one budget and one box.
+one budget and one box. An IPv4 client keeps one key whether it
+arrives natively or through a translator using the well-known NAT64
+prefix (RFC 6052, `64:ff9b::/96`).
 
-The trade-off: a provider that hands each customer a /128 out of a
-*shared* /64 puts those customers behind one key, so one abusive
-neighbour boxes the others for `penalty_ttl`. The /64 is fixed; there
-is no option to change it. Only a key that resolves to exactly one
-address is masked, so a composite key such as `{client_ip}|{host}`
-stays per address — build such a key only if per-address IPv6 counting
-is what you want.
+The trade-offs:
+
+- **A shared /64 is one client.** A LAN with SLAAC (an office, a home
+  network) shares one /64 the way the same LAN behind NAT shares one
+  IPv4 address, and a provider that hands each customer a /128 out of
+  a shared /64 puts those customers behind one key: one abusive
+  neighbour boxes the others for `penalty_ttl`.
+- **Many IPv4 clients can share one /64.** A NAT64 translator using a
+  network-specific prefix (anything other than `64:ff9b::/96`,
+  including the local-use `64:ff9b:1::/48`) and Teredo
+  (`2001::/32`) cannot be told apart from ordinary IPv6, so every
+  IPv4 client behind them lands in the translator's /64.
+- **A bigger allocation still buys more budgets.** A client holding a
+  /56 has 256 /64s, so 256 budgets; a /48 has 65,536. Per /64 closes
+  the per-address hole, not this one, and `max_keys` bounds the memory
+  either way.
+- **The /64 is fixed**; there is no option to change it. Only a key
+  that resolves to exactly one address is masked, so a composite key
+  such as `{client_ip}|{host}` stays per address — build such a key
+  only if per-address IPv6 counting is what you want.
 
 ## Compatibility with Souin (HTTP cache)
 

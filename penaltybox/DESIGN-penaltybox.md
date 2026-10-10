@@ -79,14 +79,23 @@ so users can cross-check without leaving the repo.
   respects the server's `trusted_proxies` configuration. Do NOT default to
   a raw `X-Forwarded-For` read; XFF trust is the server config's job, same
   as the CMS refuses to own it.
-- **Key masking.** A resolved key that parses as exactly one IP address
-  is unmapped (IPv4-mapped IPv6 becomes IPv4) and then counted per
-  address for IPv4 and per /64 prefix for IPv6, zone dropped
-  (`2001:db8:1:2::/64`) — a host owns its whole /64, so per-address
-  IPv6 budgets would never close. Any other resolved value (a header,
-  a composite key) is counted verbatim. The /64 is fixed, not
-  configurable. The liveswap deploy throttle masks the same way; the
-  helper is copied, not imported, so this module stays independent.
+- **Key masking.** When the whole resolved key parses as exactly one IP
+  address, whatever placeholder produced it (`{client_ip}` or a header
+  such as `CF-Connecting-IP`), it is masked: IPv4 is counted per
+  address, and so are IPv4-mapped IPv6 and the RFC 6052 well-known
+  NAT64 prefix `64:ff9b::/96` (both keyed as the embedded IPv4, so a
+  client has one key native or translated); any other IPv6 address is
+  counted per /64 prefix, zone dropped (`2001:db8:1:2::/64`) — a host
+  owns its whole /64, so per-address IPv6 budgets would never close.
+  Any other resolved value (a composite key, a `host:port` such as
+  `{remote}` gives) is counted verbatim. The /64 is fixed, not
+  configurable. Known residue: a /56 holder still has 256 budgets and
+  a /48 holder 65,536; a SLAAC LAN, a provider's shared /64, a
+  network-specific NAT64 prefix and Teredo each put many clients
+  behind one key. The liveswap deploy throttle applies the same /64
+  rule (it also splits `host:port` and falls back to the peer
+  address, which this module leaves to the placeholder); the helper
+  is copied, not imported, so this module stays independent.
 - **Memory bounds.** Hard cap on tracked keys (default e.g. 100k) with
   expiry sweep + oldest-first eviction. An attacker rotating IPs must
   exhaust the cap into evictions, not into unbounded memory. The cap is

@@ -34,9 +34,9 @@ type Handler struct {
 
 	// Key identifies the client. Default "{client_ip}", which respects
 	// the server's trusted_proxies configuration — XFF trust is the
-	// server config's job, not this module's. A key that resolves to a
-	// single IPv6 address is counted under its /64 (see maskKey);
-	// any other value is used verbatim.
+	// server config's job, not this module's. A key whose whole value
+	// resolves to a single IPv6 address is counted under its /64 (see
+	// maskKey); any other value is used verbatim.
 	Key string `json:"key,omitempty"`
 
 	// MinLevel is the lowest hint level that counts toward the budget.
@@ -265,18 +265,32 @@ func retryAfterSeconds(remaining time.Duration) int {
 	return secs
 }
 
-// maskKey is the store key for a resolved key value. A value that is
-// exactly one IPv6 address becomes its /64 prefix ("2001:db8:1:2::/64"):
-// one host is routinely handed a whole /64, so per-address budgets would
-// let an IPv6 client walk past the box by changing its low 64 bits. A
-// link-local address's zone goes with the host bits. IPv4 and
-// IPv4-mapped IPv6 are keyed per address (unmapped first, so mapped
-// clients are not all folded into ::/64 together). Any other value — a
-// header, a composite such as "{client_ip}|{host}" — is returned
-// unchanged: only the operator knows its shape.
+// nat64WellKnown is the RFC 6052 well-known NAT64 prefix: an address in
+// it is an IPv4 client seen through a translator, with the IPv4 address
+// in the last four bytes.
+var nat64WellKnown = netip.MustParsePrefix("64:ff9b::/96")
+
+// maskKey is the store key for a resolved key value. It looks only at
+// the whole resolved value, whatever placeholder produced it
+// ({client_ip}, or a header such as CF-Connecting-IP): if that value
+// parses as exactly one IP address it is masked, and anything else — a
+// composite such as "{client_ip}|{host}", a host:port such as {remote}
+// gives — is returned unchanged, since only the operator knows its
+// shape.
 //
-// The liveswap deploy throttle masks the same way (deploytrust's
-// clientKey); this is a copy, not an import, so penaltybox stays an
+// An IPv6 address becomes its /64 prefix ("2001:db8:1:2::/64"): one
+// host is routinely handed a whole /64, so per-address budgets would let
+// an IPv6 client walk past the box by changing its low 64 bits. A
+// link-local address's zone goes with the host bits. IPv4 is keyed per
+// address, and so are the IPv6 forms that carry one IPv4 client:
+// IPv4-mapped (::ffff:a.b.c.d) and the well-known NAT64 prefix
+// (64:ff9b::a.b.c.d) both key as the embedded IPv4 address, so a client
+// gets the same key native or translated, and a translator's clients
+// are not all folded into one /64. A network-specific NAT64 prefix and
+// Teredo cannot be recognised and do fold their IPv4 clients together.
+//
+// The liveswap deploy throttle (deploytrust's clientKey) applies the
+// same /64 rule; this is a copy, not an import, so penaltybox stays an
 // independent module.
 func maskKey(key string) string {
 	ip, err := netip.ParseAddr(key)
@@ -291,6 +305,10 @@ func maskKey(key string) string {
 	ip = ip.Unmap()
 	if ip.Is4() {
 		return ip.String()
+	}
+	if nat64WellKnown.Contains(ip.WithZone("")) {
+		b := ip.As16()
+		return netip.AddrFrom4([4]byte(b[12:])).String()
 	}
 	prefix, _ := ip.Prefix(64) // cannot fail: a valid IPv6 address, 64 ≤ 128
 	return prefix.String()
