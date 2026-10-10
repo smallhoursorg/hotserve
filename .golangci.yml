@@ -7,6 +7,9 @@
 #   unconvert  — redundant conversions
 #   unparam    — unused function parameters
 #   nolintlint — every //nolint must name its linter and carry a reason
+#
+# No run.build-tags here: each tag set leaves some test files out, so
+# `make lint` runs once bare and once with -tags integration instead.
 version: "2"
 
 linters:
@@ -31,9 +34,8 @@ linters:
       require-explanation: true
       require-specific: true
 
-# Formatting was the one structural check CI left to a human to
-# remember: neither `make lint` nor `make vet` ran gofmt, so drift was
-# caught only before a push, or not at all.
+# gofmt runs as part of `make lint`, in both of its passes, so a
+# formatting drift fails CI rather than waiting for a reviewer to spot it.
 formatters:
   enable:
     - gofmt
