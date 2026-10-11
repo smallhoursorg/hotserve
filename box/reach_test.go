@@ -187,7 +187,15 @@ func TestReachJSON(t *testing.T) {
 		"a file matcher on a handler that passes":                    {adapted: reachJSON(`{"match":[{"file":{"try_files":["{path}"]}}],"handle":[{"handler":"encode"}]},`, ""), want: "the file matcher ahead of it may fail (decided per request)"},
 		"a matcher the table does not know on a handler that passes": {adapted: reachJSON(`{"match":[{"geoip":{"country":["GB"]}}],"handle":[{"handler":"encode"}]},`, ""), want: "the geoip matcher ahead of it may fail (decided per request)"},
 		"a failing matcher on a route a group already skips":         {adapted: reachJSON(`{"group":"g","handle":[{"handler":"vars"}]},{"group":"g","match":[{"expression":{"expr":"true"}}],"handle":[{"handler":"vars"}]},`, ""), want: "the expression matcher ahead of it may fail (decided per request)"},
-		"a query matcher on a handler that passes":                   {adapted: reachJSON(`{"match":[{"query":{"x":["1"]}}],"handle":[{"handler":"encode"}]},`, ""), want: ""},
+		// Caddy's group map is one per request across nesting: a member
+		// under a per-request outer route satisfies its group only for
+		// the requests that outer route admits, so a sibling of the
+		// group outside it still runs for the rest. (Caddy's adapter
+		// never shares a group across levels; the contract is kept for
+		// any bytes.)
+		"a group member under an undecided outer route": {adapted: reachJSON(`{"match":[{"header":{"X-A":["b"]}}],"handle":[{"handler":"subroute","routes":[{"group":"g","handle":[{"handler":"vars"}]}]}]},{"group":"g","handle":[{"handler":"static_response"}]},`, ""), want: "static_response may answer first (its header matcher is decided per request)"},
+		"a group member under a decided outer route":    {adapted: reachJSON(`{"match":[{"path":["/"]}],"handle":[{"handler":"subroute","routes":[{"group":"g","handle":[{"handler":"vars"}]}]}]},{"group":"g","handle":[{"handler":"static_response"}]},`, ""), want: ""},
+		"a query matcher on a handler that passes":      {adapted: reachJSON(`{"match":[{"query":{"x":["1"]}}],"handle":[{"handler":"encode"}]},`, ""), want: ""},
 		"an empty not": {adapted: reachJSON(`{"match":[{"not":[]}],"handle":[{"handler":"static_response"}]},`, ""), want: "static_response answers first"},
 		"a terminal route inside the site that passes":            {adapted: reachJSON(`{"handle":[{"handler":"vars"}],"terminal":true},`, ""), want: "a terminal route answers first"},
 		"a terminal route under an undecided matcher":             {adapted: reachJSON(`{"match":[{"header":{"X-A":["b"]}}],"handle":[{"handler":"vars"}],"terminal":true},`, ""), want: "a terminal route may answer first (its header matcher is decided per request)"},

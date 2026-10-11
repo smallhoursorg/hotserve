@@ -450,7 +450,9 @@ that may match and runs out of handlers answers too (Caddy hands the
 rest of the chain an empty handler), so an empty `host/` site is "an
 earlier site for `<host>` answers first". `handle` blocks share a
 group: once one member has matched, Caddy skips the later members, and
-so does this walk.
+so does this walk — a member under a route decided per request
+satisfies its group only as far as that route does, since Caddy's
+group map is one per request across nesting.
 
 | Handler (module) | Treated as | Why |
 |---|---|---|

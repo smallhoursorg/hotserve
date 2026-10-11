@@ -293,10 +293,19 @@ func (w *reachWalk) routes(rs []adaptedRoute, outer matchVerdict, top bool) (rea
 		if v.status == noMatch {
 			continue
 		}
+		// The enclosing condition first: a member runs only when every
+		// route around it matched, and satisfies its group only as far
+		// as they did (Caddy's group map is one per request, across
+		// nesting).
+		if outer.status < v.status {
+			v = outer
+		}
 		if r.group != "" {
-			// The group records the member's own match: a member that
-			// matches for sure satisfies the group whether or not an
-			// earlier one may have, and later members never run.
+			// The group records the member's own match under the
+			// enclosing condition, not the downgrade an earlier "may"
+			// member imposes on it: a member that matches for sure
+			// satisfies the group whether or not an earlier one may
+			// have, and later members never run.
 			g := w.groups[r.group]
 			if g.status == matches {
 				continue
@@ -307,9 +316,6 @@ func (w *reachWalk) routes(rs []adaptedRoute, outer matchVerdict, top bool) (rea
 			if g.status == mayMatch && v.status == matches {
 				v = matchVerdict{status: mayMatch, matcher: g.matcher}
 			}
-		}
-		if outer.status < v.status {
-			v = outer
 		}
 		may := v.status == mayMatch
 		for _, h := range r.handle {
