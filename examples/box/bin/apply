@@ -255,7 +255,7 @@ poll() {
 			misses=0
 			post
 			case $code in
-			409|000|mint|429|502|503|504) ;;
+			409|000|mint|429|502|503|504|524) ;;
 			400)
 				# A broken upload admits nothing: the next resend tries again.
 				case $(field error) in
@@ -272,7 +272,7 @@ poll() {
 			red "the box refused a token for the result poll (401)$expired. If this push changed the box block's deploy_trust, it may have applied and dropped this workflow: journalctl -u hotserve-box-apply on the box says"
 			return 0 ;;
 		404) last=404 misses=$((misses + 1)) ;;
-		000|mint|429|502|503|504) ;;
+		000|mint|429|502|503|504|524) ;;
 		*) outcome; return 0 ;;
 		esac
 	done
@@ -402,9 +402,9 @@ send() {
 	done
 	case $code in
 	# No answer, or one from something in front of the box (a 504
-	# without the push's id): the box may have the push, and the id is
-	# enough to ask.
-	000|502|503) echo "apply: no answer from the box to the push; asking for its result"; poll resend ;;
+	# without the push's id, Cloudflare's 524 when the box is slow to
+	# answer): the box may have the push, and the id is enough to ask.
+	000|502|503|524) echo "apply: no answer from the box to the push; asking for its result"; poll resend ;;
 	504)
 		if [ "$(field id)" = "$id" ]; then
 			echo "apply: the box has the push; asking for its result"; poll

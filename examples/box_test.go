@@ -401,7 +401,7 @@ type standIn struct {
 	mints     int
 	bundles   int
 	onGet     string   // "": the baseline; "401"; "nobaseline"
-	onPost    []string // a behaviour per POST, in order: "admitting", "unread", "never", "proxy504", "throttled", "html409", "504", "502", "lost", "sync"; then "": 202
+	onPost    []string // a behaviour per POST, in order: "admitting", "unread", "never", "proxy504", "throttled", "html409", "504", "502", "524", "lost", "sync"; then "": 202
 	edited    bool     // results say the file was edited on the box
 	throttle  int      // polls answered 429 before the result
 	mintFails int      // token requests that fail before one succeeds
@@ -633,6 +633,10 @@ func (s *standIn) post(w http.ResponseWriter, r *http.Request) {
 		reply(w, 504, map[string]string{"id": id})
 	case "502": // a proxy in front of the box gave up on the answer
 		http.Error(w, "bad gateway", http.StatusBadGateway)
+	case "524": // Cloudflare's origin timeout: the box had the push
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(524)
+		_, _ = io.WriteString(w, "<html>Error 524: A timeout occurred</html>")
 	case "lost":
 		conn, _, err := w.(http.Hijacker).Hijack()
 		if err == nil {
@@ -801,6 +805,8 @@ func TestBoxApply(t *testing.T) {
 			"sync":      ": loaded; running apps are not restarted",
 			"unread":    "could not read the bundle: unexpected EOF; sending it again",
 			"502":       "no answer from the box to the push; asking for its result",
+			// Cloudflare's origin timeout, the push admitted behind it.
+			"524": "no answer from the box to the push; asking for its result",
 			// The box never saw it: every poll is 404, and the push is
 			// sent again under its id.
 			"never": "no answer from the box to the push; asking for its result",
