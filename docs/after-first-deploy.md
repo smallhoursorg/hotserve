@@ -33,8 +33,16 @@ changes nothing, and the run says why.
 
 A reload never restarts a running app: a changed `app` block applies
 at the app's next launch — its next deploy or rollback, or a relaunch
-after a crash. Widen a Deno app's permissions *before* deploying code
-that needs them; narrow after the code that needed them is gone.
+after a crash.
+
+<details>
+<summary><b>If the app is a Deno app</b></summary>
+
+Its permission flags live in this file, and a deploy launches with the
+flags the box has. So widen them *before* deploying code that needs
+them, and narrow them only after the code that needed them is gone.
+
+</details>
 
 A change someone else should read first goes on a branch and a pull
 request, where the workflow checks it, and lands from a signer's
