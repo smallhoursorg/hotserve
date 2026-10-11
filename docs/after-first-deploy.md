@@ -104,8 +104,17 @@ printf 'PermitRootLogin prohibit-password\nPasswordAuthentication no\n' > /etc/s
 sshd -t && systemctl reload ssh      # -t checks the config first: a bad one would lock you out
 ```
 
-Then, from a second terminal and before you close the first, check
-that `ssh root@box.example.com true` still gets in.
+Keep that session open. In a second terminal on your laptop, log in
+again — a new login is the only real test of the change:
+
+```sh
+ssh root@box.example.com echo ok     # prints ok: root's key still gets in
+```
+
+If it prints `ok`, you are done. If it says `Permission denied`, close
+nothing: undo the change in the first terminal with `rm
+/etc/ssh/sshd_config.d/10-hardening.conf && systemctl reload ssh`, and
+find out why before trying again.
 
 Nobody logs in with a password from here on: Debian allows one for
 every account but root. Root
