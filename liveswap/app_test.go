@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -1669,6 +1670,21 @@ func TestCleanupJoinsRecoveryBeforeReleasing(t *testing.T) {
 	}
 	if rig.runner.startCount() != 0 {
 		t.Fatal("nothing may be launched by a cancelled recovery")
+	}
+}
+
+// closeRecorder is a RoundTripper that only counts CloseIdleConnections.
+type closeRecorder struct{ closes atomic.Int32 }
+
+func (*closeRecorder) RoundTrip(*http.Request) (*http.Response, error) { return nil, errTest }
+func (c *closeRecorder) CloseIdleConnections()                         { c.closes.Add(1) }
+
+func TestCleanupClosesTheRetiredJWKSClient(t *testing.T) {
+	rt := &closeRecorder{}
+	a := &App{logger: zap.NewNop(), clients: &fetchClients{jwks: &http.Client{Transport: rt}}}
+	must(t, a.Cleanup())
+	if n := rt.closes.Load(); n != 1 {
+		t.Fatalf("Cleanup closed the JWKS client's idle connections %d times, want 1", n)
 	}
 }
 
