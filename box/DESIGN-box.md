@@ -429,7 +429,7 @@ next launch.
 ### Why 202 and a poll
 
 Root's part of a push (its chain's verification, hotserve's reload,
-the wait for a hotserve found `activating`) can run for minutes at
+its wait when it finds hotserve `activating`) can run for minutes at
 worst (Caps), and a request held open that long is one a proxy in
 front of the box may cut. So the handler waits for the first result
 only as long as Caps allows and answers by it (step 8), the applier
@@ -900,7 +900,7 @@ Every numeric bound, in one place, with its reason.
 | validate children (`hotserve validate`, `hotserve-backup validate`) | 120 s each and a 1 s `WaitDelay`; output kept: the last 4 KiB, of which the refusal quotes the `Error:` line (else the last line), redacted, then bounded as quoted input | validate provisions every module; a legitimate run is about a second, and a loaded box or a slow issuer discovery must not refuse a good push |
 | the adapt child (`hotserve adapt`) | 120 s and a 1 s `WaitDelay`, as validate's; run after `hotserve validate` passed, so a non-zero exit is the box's error (500), never a refusal | the adapter validate just ran; a loaded box must not refuse a good push |
 | the adaptation | 16 MiB of stdout kept, bytes past it counted and dropped (never an error to the pipe: a child blocked on a full pipe would run to its deadline), stderr discarded; past the cap the push is refused `the new Caddyfile's adaptation is larger than 16 MiB`; the JSON reaches nothing but the reachability walk, since it holds every expanded `{$VAR}`; the walk decodes it once and converts it in one pass, linear in its size however deep its routes nest | a 1 MiB Caddyfile adapts to a few MiB; the bundle's own figure |
-| handler poll interval for the first result | 1 s | how soon the workflow hears `verified` ("Why 202 and a poll") |
+| handler poll interval for the first result | 1 s | how long a result root has written can wait before the handler reads it and answers the POST: `verified`, or a final result if root was that quick ("Why 202 and a poll") |
 | workflow poll | 15 minutes, then red naming the journal | |
 | `activating` / `reloading` wait (step 16, recovery, `init`) | 300 s elapsed, one budget per run from its first sight of either state, never reset | hotserve's `TimeoutStartSec=240s` plus `RestartSec`; an elapsed bound, since `Restart=on-failure` can keep a unit activating across attempts; one budget, so a hotserve that flaps cannot hold root's lock for 300 s per bundle |
 | that wait's poll | 1 s | |
