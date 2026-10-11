@@ -428,19 +428,38 @@ next launch.
 
 ### Why 202 and a poll
 
-A request that waits for the apply to finish while the applier runs
-`systemctl reload` never completes. `hotserve reload` posts to the
-admin API, which provisions the new configuration and then stops the
-old one; stopping the HTTP app calls `http.Server.Shutdown` with no
-deadline (no `grace_period` is set, and one would cut the connection
-instead), and `Shutdown` waits for every in-flight request — including
-the one waiting for the reload. So the applier publishes `verified`
-before it reloads and does not wait to be read; the handler sees it
-within one poll interval and answers; the workflow asks `GET
-/?result=<id>` — a fresh request, served by whichever configuration
-runs — until the phase is terminal. A push that changes nothing is
-answered 200 synchronously. liveswap never met this: a deploy does
-not reload Caddy.
+Root's part of a push can outlast any request worth holding open: its
+chain's verification may take 10 minutes, hotserve's reload 240 s,
+and a hotserve found `activating` is waited on for 300 s (Caps).
+A proxy or load balancer in front of the box may cut a request held
+that long (Cloudflare's proxy answers 524 after 100 s), and a request
+cut short must not leave the workflow unable to learn the outcome. So the handler waits at most 30 s for the first
+result and answers by it (step 8), the applier publishes `verified`
+before it installs and does not wait to be read, and the workflow asks
+`GET /?result=<id>` — a fresh request with a fresh token, served by
+whichever configuration runs — until the phase is terminal. The same
+poll recovers a response lost for any other reason, which is why the
+workflow, not the box, chooses the id. A push that changes nothing is
+answered 200 synchronously.
+
+The protocol does not depend on what a reload does to a request in
+flight, though one can be: the POST may still be in step 8's wait
+when the applier reloads. On Caddy v2.11.7 the reload leaves it alone.
+`hotserve reload` posts to the admin API, which provisions the new
+configuration and stops the old one; `caddyhttp.App.stop` starts each
+old server's `Shutdown` and waits for it to finish only `if exiting`,
+which a reload is not. The request's context comes from the
+`http.Server`, not from the configuration being unloaded, and
+`box_webhook` has no `Cleanup`, so the old handler goes on polling
+`out/` and answers. Measured in the e2e box, over HTTP/1.1 and HTTP/2
+(2026-10-11): with a POST waiting in step 8 (the path unit stopped, so
+its bundle stayed in `in/`), `systemctl reload hotserve` returned in
+67–68 ms; the reloaded configuration answered a fresh request; then,
+with the path unit started, the applier ran and reloaded again, and
+the same POST was answered `200 applied`, having outlived both
+reloads. Were a reload ever to wait for in-flight requests, it would
+wait at most one poll interval: `verified` is written before the
+reload, and the handler reads it within a second.
 
 ### Reachability: what may stand before `box_webhook`
 
@@ -880,7 +899,7 @@ Every numeric bound, in one place, with its reason.
 | validate children (`hotserve validate`, `hotserve-backup validate`) | 120 s each and a 1 s `WaitDelay`; output kept: the last 4 KiB, of which the refusal quotes the `Error:` line (else the last line), redacted, then bounded as quoted input | validate provisions every module; a legitimate run is about a second, and a loaded box or a slow issuer discovery must not refuse a good push |
 | the adapt child (`hotserve adapt`) | 120 s and a 1 s `WaitDelay`, as validate's; run after `hotserve validate` passed, so a non-zero exit is the box's error (500), never a refusal | the adapter validate just ran; a loaded box must not refuse a good push |
 | the adaptation | 16 MiB of stdout kept, bytes past it counted and dropped (never an error to the pipe: a child blocked on a full pipe would run to its deadline), stderr discarded; past the cap the push is refused `the new Caddyfile's adaptation is larger than 16 MiB`; the JSON reaches nothing but the reachability walk, since it holds every expanded `{$VAR}`; the walk decodes it once and converts it in one pass, linear in its size however deep its routes nest | a 1 MiB Caddyfile adapts to a few MiB; the bundle's own figure |
-| handler poll interval for the first result | 1 s | bounds how long a reload's `Shutdown` waits for the in-flight POST ("Why 202 and a poll") |
+| handler poll interval for the first result | 1 s | how soon the workflow hears `verified`; and the most a reload would wait for the POST, were a reload to wait for in-flight requests (on Caddy v2.11.7 it does not: "Why 202 and a poll") |
 | workflow poll | 15 minutes, then red naming the journal | |
 | `activating` / `reloading` wait (step 16, recovery, `init`) | 300 s elapsed, one budget per run from its first sight of either state, never reset | hotserve's `TimeoutStartSec=240s` plus `RestartSec`; an elapsed bound, since `Restart=on-failure` can keep a unit activating across attempts; one budget, so a hotserve that flaps cannot hold root's lock for 300 s per bundle |
 | that wait's poll | 1 s | |
@@ -1539,7 +1558,7 @@ anything; GitHub enforces nothing.
 | Host and recorded path as identity, the path `<host>/Caddyfile` derived by `init` | Host alone; a path typed at `init` (a directory argument, `--path`); a `path` line in the file | Host alone cannot pick between two files naming the same host; a typed path is free text checked only at the first push, and a directory argument a wrong-directory risk; a `path` line states the location a second time, in the signed file. The cost: one top-level directory per box, named for its host — no single `Caddyfile` at the root, no grouping, and a host rename moves the directory. |
 | Every chain commit signed | HEAD's signature only | An unsigned commit would ride in under the next signed one. |
 | Bundle rename before marker | Marker before bundle | A crash between them would answer 409 to every push until the marker aged out. |
-| 202 and a poll | Hold the POST until the apply finishes | Caddy's eternal-grace-period `Shutdown` waits for the in-flight request, which waits for the reload. |
+| 202 and a poll | Hold the POST until the apply finishes | Root's part can take minutes (a 10-minute chain, a 240 s reload, a 300 s wait for an activating hotserve); a proxy in front of the box may cut a request that long, and a lost answer needs the poll anyway. Not because a reload waits for the request: on Caddy v2.11.7 it does not (measured). |
 | `required_signatures` recommended, not relied on | A "landing act" (signed tag or trailer) to close the fast-forward residual | Doubles every push's ritual to defend against an attacker who already holds a GitHub credential; the README rule is cheaper. |
 
 ## Non-goals
@@ -1745,3 +1764,9 @@ Dated one-liners; the full text of each is in git.
   sudoers lines are gone, the secrets lines stay until PR 7. Added
   here: `hotserve box describe`, and the rule that every box in a
   repository lists the same signer keys.
+- 2026-10-11 — "Why 202 and a poll" gave a false reason: that a
+  reload's `Shutdown` waits for the POST, which waits for the reload.
+  PR 3d's lane found a reload does not wait (Caddy v2.11.7); a POST
+  waiting in step 8 was then measured to outlive two reloads and be
+  answered. The protocol is unchanged; the section, its Caps row and
+  its Alternatives row now give the reasons that hold.
