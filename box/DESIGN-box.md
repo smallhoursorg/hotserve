@@ -790,10 +790,10 @@ Notes that the table cannot hold:
   born group `hotserve`; the unit has no `CAP_CHOWN`. `txn.json` and
   `lock` are 0600, so their group does not matter.
 - Nothing is at `/etc/hotserve/Caddyfile.prev` or `Caddyfile.new`:
-  `bin/push` and its sudoers lines (`tee`, `mv -f`, `rm -f` on exactly
-  those names) write them, and on a box whose template predates the
-  applier an administrator could still `tee` over a temporary of that
-  name in the window before the rename. The applier's temporary is
+  an earlier template's `bin/push` and its sudoers lines (`tee`,
+  `mv -f`, `rm -f` on exactly those names) wrote them, and on a box
+  that still has those lines an administrator could `tee` over a
+  temporary of that name in the window before the rename. The applier's temporary is
   `.Caddyfile.box-<id>`, a name no sudoers line grants.
 - `/var/lib/hotserve-box` joins `sandboxHotservePaths`
   (liveswap/sandbox.go): never a bind source for an app.
