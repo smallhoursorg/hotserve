@@ -83,9 +83,12 @@ grant in its own right. The e2e suite administers its box that way.
 ## Getting started
 
 [Your first deploy](docs/first-deploy.md) takes a fresh Debian 13
-server to an app that deploys on every push to `main`, in four steps.
-[After the first deploy](docs/after-first-deploy.md) then creates the
-administrator, closes root login, and puts the box's config in git.
+server to an app that deploys on every push to `main`, in four steps,
+with the box's config in a repository of its own that the box applies
+on each signed push.
+[After the first deploy](docs/after-first-deploy.md) then creates an
+administrator who is not root, closes root login, and shuts the port
+you do not use.
 Both use the three directories below, which the e2e suite builds and
 deploys on every change, so what they say works:
 
@@ -102,7 +105,8 @@ deploys on every change, so what they say works:
   may deploy it, where the deploy webhook answers, who may sign a
   change), applied by the workflow on each signed push to `main`; the
   box checks the signatures and keeps the file it had if the new one
-  does not load. And the sudoers file above.
+  does not load. And the sudoers file above. Its template is
+  [hotserve-example-box](https://github.com/smallhoursorg/hotserve-example-box).
 
 Both apps serve on the socket hotserve hands them, answer `/health`,
 migrate before each version starts, stop cleanly, and deploy from

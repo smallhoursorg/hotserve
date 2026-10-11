@@ -54,10 +54,12 @@ which repo and branch, and the commit's signature says which person.
 
 ## Set it up
 
-The box comes from
-[Your first deploy](https://github.com/smallhoursorg/hotserve/blob/main/docs/first-deploy.md):
-installed, serving an app from a Caddyfile written by hand, still
-administered as root. This repo takes over from there.
+These steps start from a box with hotserve installed and running, and
+root still able to log in: step 2 of
+[Your first deploy](https://github.com/smallhoursorg/hotserve/blob/main/docs/first-deploy.md),
+whose step 3 walks a fresh box through them. A box that already serves
+a Caddyfile written by hand takes them too; step 3 says how to keep
+what it runs.
 
 1. Make a private repo from this template ("Use this template" on
    [smallhoursorg/hotserve-example-box](https://github.com/smallhoursorg/hotserve-example-box)),
@@ -76,8 +78,8 @@ administered as root. This repo takes over from there.
    that only signs: if the key you push to GitHub with also signs, the
    two checks a box makes (the push came from `main`, a signer made the
    commit) fall to one stolen key.
-3. Make the Caddyfile your box's. Start from the one the box runs, so
-   nothing edited there is lost:
+3. Make the Caddyfile your box's. On a box that already serves its
+   own Caddyfile, start from that one, so nothing edited there is lost:
 
    ```sh
    scp root@box.example.com:/etc/hotserve/Caddyfile deploy.example.com/Caddyfile.live
@@ -85,7 +87,8 @@ administered as root. This repo takes over from there.
 
    Then bring over its sites and apps into `deploy.example.com/Caddyfile`,
    keeping the `box` block and the deploy host's `box_webhook`, and
-   delete `Caddyfile.live`. Replace `your-org/boxes`, in the `box`
+   delete `Caddyfile.live`. On a fresh box there is nothing to bring
+   over. Either way, replace `your-org/boxes`, in the `box`
    block's `claim repository`, with this repo's `owner/name`: the box
    takes pushes from that repository's workflow alone, so a placeholder
    left there refuses the first one. Replace `example.com`,
@@ -131,12 +134,29 @@ administered as root. This repo takes over from there.
    ```
 
    The workflow's first run answers that the box already runs this
-   Caddyfile. From here on, config changes are pushes to `main`.
+   Caddyfile. From here on, config changes are pushes to `main`. With
+   nothing deployed yet, a correct box looks like this:
+
+   - `https://example.com` answers 503 with the sentence from the
+     Caddyfile's `handle_errors` block — once the certificate is
+     issued, which takes a few seconds after the reload with 80 and
+     443 open.
+   - `https://deploy.example.com/example` answers 401 with
+     `{"error":"invalid or missing deploy token …"}`, in a browser or
+     with `curl -i`. That is the webhook working: a deploy carries a
+     token, and nothing without one gets further than this.
 
 The secrets of the apps are still a file on the box each, edited over
-SSH by an administrator — see [Secrets](#secrets). Closing root login
-and the rest of the hardening is on
+SSH by an administrator — see [Secrets](#secrets). Creating that
+administrator, closing root login and the rest of the hardening is on
 [After the first deploy](https://github.com/smallhoursorg/hotserve/blob/main/docs/after-first-deploy.md).
+
+**A repo from an earlier version of this template** — a top-level
+`Caddyfile` pushed by `make push` — is simplest replaced: make a new
+repo from this template and take the steps above, starting step 3 from
+the file the box runs. Then put this directory's `sudoers` on the
+box in place of the old one ([Secrets](#secrets)), and archive the old
+repo.
 
 ## Change the config
 
@@ -149,17 +169,6 @@ git switch main && git pull --ff-only
 git merge --ff-only the-branch     # a branch of signed commits, rebased onto main
 git push origin main
 ```
-
-After the first push, with nothing deployed yet, a correct box looks
-like this:
-
-- `https://example.com` answers 503 with the sentence from the
-  Caddyfile's `handle_errors` block — once the certificate is issued,
-  which takes a few seconds after the reload with 80 and 443 open.
-- `https://deploy.example.com/example` answers 401 with
-  `{"error":"invalid or missing deploy token …"}`, in a browser or
-  with `curl -i`. That is the webhook working: a deploy carries a
-  token, and nothing without one gets further than this.
 
 A reload never restarts a running app. A changed `app` block applies
 at the app's next launch: its next deploy, or a relaunch after a crash

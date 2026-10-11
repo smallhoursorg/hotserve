@@ -491,20 +491,11 @@ not a plan.
 The second authenticated entry point, and the only one whose outcome
 is a root-owned file. [box/DESIGN-box.md](box/DESIGN-box.md) is
 authoritative for its behaviour; this section places it. Status:
-designed 2026-10-09 and being built in PRs. The handler admits pushes
-and answers result polls, and the applier applies them; step 6's
-reachability check is not built yet, so a signed file that serves `/`
-before `box_webhook` is caught only at the console. Until the template
-ships, config reaches the box the way `examples/box/README.md`
-describes:
-root hand-edits `/etc/hotserve/Caddyfile` on day 0, and afterwards a
-laptop script (`examples/box/bin/push`) stages, validates, swaps and
-reloads it over SSH as an administrator whose sudoers file
-(`examples/box/sudoers`) allows exactly those eight commands plus two
-for the per-app env files — a root `install -m 0640 -o root -g
-hotserve -T /dev/null /etc/hotserve/<app>.env` that creates one, and
-`sudoedit` of it. This section describes what replaces the first
-eight.
+built on main, not yet in a release. On a box set up from the
+template (`examples/box`; docs/first-deploy.md, step 3) root writes
+the file once, with `hotserve init`, and the config repository's
+signed pushes write it after that. A box with no `box` block has no
+config webhook, and its file is root's to edit at the console.
 
 The operator's config repository is the only writer of
 `/etc/hotserve/Caddyfile`. Its workflow mints an OIDC token and POSTs
@@ -552,13 +543,13 @@ back — reloading again — on failure. It never runs Caddy's validate or
 adapter: both execute module code on the input and expand `{$VAR}`
 from root's environment.
 
-What this closes, once shipped. The `HOTSERVE_CONFIG` half of the
-administrator's sudoers grant — the eight commands that moved and
-reloaded the Caddyfile — goes, and with it the only account that could
-change config; the `HOTSERVE_SECRETS` half (a root `install` that
-creates `/etc/hotserve/<app>.env` 0640 root:hotserve, and `sudoedit` of
-it) stays until secrets ride the same channel, so
-the administrator account itself remains until then. A leaked PAT, a
+What this closes. The `HOTSERVE_CONFIG` half of the administrator's
+sudoers grant — the eight commands with which the template's former
+laptop script moved and reloaded the Caddyfile over SSH — is gone, and
+with it the only account that could change config. The
+`HOTSERVE_SECRETS` half (a root `install` that creates
+`/etc/hotserve/<app>.env` 0640 root:hotserve, and `sudoedit` of it)
+stays, and so does the administrator account that holds it. A leaked PAT, a
 stolen GitHub session or an OAuth app with `contents:write` can push
 to `main` and cannot produce the signature, so it cannot change the
 box with anything a signer did not sign: its own commit is refused on
@@ -619,9 +610,11 @@ that set to `main`'s own history.
 
 What it does not close. `systemctl reload`'s exit status is the
 hotserve uid's word; the `applied` phase trusts it, the file on disk
-does not depend on it, and `systemctl restart` is the remedy. The
-never-cut-the-branch guard checks presence, not reachability: a
-`claim` typo passes it and strands the box until the console. The
+does not depend on it, and `systemctl restart` is the remedy. Root's
+never-cut-the-branch guard checks presence, and the handler's
+reachability check covers only what stands before `box_webhook` on
+`/`: a `claim` typo passes both and strands the box until the console.
+The
 handler's validate is a courtesy, not a boundary. Plain `crypto/sha1`
 on the proof, not sha1dc. A signer's laptop is the operator; a
 software-held signing key makes its compromise total for the box,
@@ -962,13 +955,16 @@ does not isolate the runtime.
   the file on disk is root's regardless, and `systemctl restart
   hotserve` is the remedy. Reading the admin API from root to check
   would be the same trust in another form, and was rejected.
-- **The never-cut-the-branch guard is presence, not reachability.** A
-  pushed Caddyfile that keeps a `box` block, a signer, the
-  `box_webhook` site and the signing key passes it, and can still
-  strand the box behind a mistyped `claim`, a host without a
-  certificate, or a key no laptop holds. The remedy is the console:
-  `hotserve init` again, or a hand edit the next signed push
-  overwrites.
+- **Root's never-cut-the-branch guard is presence; reachability is the
+  handler's.** A pushed Caddyfile that keeps a `box` block, a signer,
+  the `box_webhook` site and the signing key passes root's guard. The
+  handler also refuses one whose adaptation would answer a push to `/`
+  before `box_webhook` (box/DESIGN-box.md, step 6) — a check a
+  supervisor RCE skips with the rest of the handler, and one `hotserve
+  init` does not run. Neither catches a mistyped `claim`, a host
+  without a certificate, or a key no laptop holds, any of which strands
+  the box. The remedy is the console: `hotserve init` again, or a hand
+  edit the next signed push overwrites.
 - **A signer's software-held key is the box.** Nothing on the box
   distinguishes a signature made by the operator from one made by
   whoever holds the operator's key file. A hardware-held key (`sk-`
@@ -1137,3 +1133,8 @@ Dated one-liners; the full text of each is in git.
   identity, joins the profiles; the `HOTSERVE_CONFIG` sudoers grant
   leaves the model when the applier ships, the secrets grant when
   secrets ride the same channel.
+- 2026-10-11 — `box` built: the handler (step 6 reachability
+  included), the root applier, `hotserve init` and the template that
+  applies by signed push (box/DESIGN-box.md, History). `bin/push` and the
+  `HOTSERVE_CONFIG` grant are gone; the tutorial sets up the config
+  repository on day 0, and the administrator keeps the secrets grant.

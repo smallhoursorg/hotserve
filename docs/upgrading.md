@@ -22,8 +22,9 @@ no relaunch, no redeploy.
 for about a tenth of a second, or longer while a slow request finishes:
 the old process gets up to 5 seconds to stop before the new one starts.
 So upgrade at a quiet moment. A
-config change does not need a restart: `sudo systemctl reload hotserve`
-swaps the config inside the running process, drops no requests, and
+config change does not need a restart: a reload — what an applied push
+from the box's repository does, or `systemctl reload hotserve` at the
+console — swaps the config inside the running process, drops no requests, and
 never restarts a running app (an edited app definition applies the
 next time the app starts: its next deploy or rollback, or a relaunch
 after a crash, a sustained health failure, or a reboot).
@@ -63,7 +64,8 @@ shutdown is Caddy's own. The 503s are the one part that is hotserve's —
 the moment before liveswap has picked your apps back up.
 
 To check for a quiet moment, add `metrics` to the Caddyfile's global
-options, reload, and read how many requests are in flight:
+options (a push from the box's repository, which reloads), and read
+how many requests are in flight:
 
 ```sh
 sudo curl -fsS --unix-socket /run/hotserve/admin.sock http://localhost/metrics \

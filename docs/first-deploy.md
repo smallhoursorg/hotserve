@@ -1,23 +1,33 @@
 # Your first deploy
 
 From a fresh server to an app you deploy by pushing to `main`, in four
-steps. At the end you have hotserve serving one app over HTTPS, a
-GitHub Actions workflow that deploys every push with no stored secret,
-and the shape you copy for every app after it.
+steps. At the end you have hotserve serving one app over HTTPS, the
+box's config in a repository of its own that the box applies when you
+push a signed commit, a GitHub Actions workflow that deploys every
+push of the app with no stored secret, and the shape you copy for
+every app after it.
 
-Everything here runs as root on the box, on purpose: it is the
-shortest path to a working deploy. [After the first deploy](after-first-deploy.md)
-is where you create the administrator, close root login, and put the
-box's config in git. Do those next; none of them is needed to get
-here.
+Root on the box installs the package (step 2) and tells the box which
+repository its config comes from (step 3); everything else happens on
+your laptop and on GitHub.
+[After the first deploy](after-first-deploy.md) is where you create an
+administrator who is not root, close root login, and shut the port you
+do not use. Do those next; none of them is needed to get here.
+
+On the laptop you need git 2.34 or later (it signs commits with an SSH
+key), `make`, the SSH key the box is created with, and the
+[GitHub CLI](https://cli.github.com/), logged in (`gh auth login`).
+Each `gh` command here has a web equivalent, named where it comes up.
 
 Names used throughout — replace them with yours as you go:
 
 | Name | What it is |
 |---|---|
 | `example.com` | The app's address |
-| `deploy.example.com` | The deploy webhook's address, on the same box |
+| `deploy.example.com` | The deploy webhook's address, on the same box: the app's deploys and the box's config both arrive there |
+| `box.example.com` | The box's own name, for SSH: any name that resolves to it, `example.com` included, or its address |
 | `your-org/example` | The GitHub repository the app deploys from |
+| `your-org/boxes` | The private GitHub repository that holds the box's config |
 | `example` | The app's name on the box |
 
 ## 1. A box, two names, two ports
@@ -68,108 +78,103 @@ Check it:
 
 ```sh
 systemctl status hotserve          # active (running)
-curl -s localhost                  # "hotserve is running. Edit /etc/hotserve/Caddyfile …"
+curl -s localhost                  # "hotserve is running. To serve your apps: hotserve init …"
 ```
 
 (The deploy side, liveswap, is not running yet: the starter config
 leaves it commented out. It starts, and says so in the journal, in
-step 3.)
+step 3, when the box's own config replaces the starter.)
 
 If it is not running, `journalctl -u hotserve -n 50` says why. A host
 that cannot deliver the sandbox is refused here, with the missing piece
 named; that is the step 1 check, and the fix is a different host, not
 a setting.
 
-## 3. Tell hotserve about the app
+## 3. The box's config, in git
 
-The package installed a starter config at `/etc/hotserve/Caddyfile`:
-the placeholder site you curled in step 2, and the rest as comments.
-Replace its contents with this, then change
-`example.com`, `deploy.example.com` and `your-org` — the last one
-twice: `artifact_allowlist` pins the organization, `deploy_trust` the
-repository:
+The box's config is one file, `/etc/hotserve/Caddyfile`, and it is
+where the box's policy lives: which repository may deploy each app,
+each Deno app's permission flags, and who may change the file itself.
+You write it in a private repository of its own, separate from the
+app's, and it reaches the box one way only: you push a signed commit
+to that repository's `main`, its workflow sends the commit to the box,
+and the box applies the file only if a key on its own list signed the
+commit. Nothing on the box is edited by hand.
+
+**Make the repository** from the box template,
+[hotserve-example-box](https://github.com/smallhoursorg/hotserve-example-box)
+(on the web: **Use this template** → **Create a new repository**,
+private, then clone it):
+
+```sh
+gh repo create your-org/boxes --template smallhoursorg/hotserve-example-box --private --clone
+cd boxes
+```
+
+Its workflow runs as soon as the repository exists, and that run is
+red: the template lists no signer, and a file without one is refused.
+Nothing reached any box.
+
+**Add your key as the first signer:**
+
+```sh
+make signer        # ~/.ssh/id_ed25519.pub; or KEY=path/to/key.pub
+```
+
+```
+signer: added alice@example.com (ssh-ed25519) to deploy.example.com/Caddyfile
+signer: commits from this checkout are signed with /home/alice/.ssh/id_ed25519
+```
+
+It adds a `signer` line to the `box` block, named for your git email,
+and makes this checkout — this one only — sign every commit with that
+key. The two lines it prints after these are for adding a person to a
+box that already runs; ignore them today. The box README's
+[Set it up](../examples/box/README.md#set-it-up) says why a key that
+only signs is better than the one you push to GitHub with, and how to
+use a hardware key.
+
+**Make the file yours.** `deploy.example.com/Caddyfile` is the box's
+whole config: who may change it, the Node app from step 4 and who may
+deploy it, the app's site, and the deploy host. Its comments say what
+each line does. Replace `example.com`, `deploy.example.com` and
+`your-org` — the last one three times: the `box` block's `claim
+repository your-org/boxes` names this repository (the box takes config
+from its workflow alone, so a placeholder left there refuses the first
+push), `artifact_allowlist` pins the organization, and the app's
+`deploy_trust` its repository. What is new beside the app is at the
+top and the bottom:
 
 ```caddyfile
 {
-	# Keep: the admin API off TCP (every app can reach localhost), and
-	# `systemctl reload` finds the socket here.
 	admin unix//run/hotserve/admin.sock
 
-	liveswap {
-		# Where a deploy may fetch from. The example's workflow sends its
-		# release asset's API URL, and hosts match exactly, so it is
-		# api.github.com here, not github.com.
-		artifact_allowlist api.github.com/repos/your-org/
-
-		app example {
-			# From examples/node/hotserve.caddy: both commands are
-			# executables inside the tarball.
-			command ./server
-			pre_start ./migrate
-			env APP_VERSION {version}
-			env DATA_DIR {shared_dir}
-
-			# Who may deploy it: the repo's main branch, by the OIDC token
-			# its workflow mints. Nothing secret is stored here.
-			deploy_trust github {
-				audience hotserve
-				claim repository your-org/example
-				claim ref refs/heads/main
-			}
+	box {
+		deploy_trust github {
+			audience hotserve
+			claim repository your-org/boxes
+			claim ref refs/heads/main
 		}
+		# signers
+		signer alice@example.com ssh-ed25519 AAAAC3Nz…
+	}
+
+	liveswap {
+		# … the app, from examples/node/hotserve.caddy, and who may deploy it
 	}
 }
 
-example.com {
-	reverse_proxy {
-		dynamic liveswap example
-	}
-	# Before the first deploy, and while the app is down, the proxy has
-	# no upstream and answers 503. Keep the status; add words.
-	handle_errors 502 503 {
-		respond "example is not running: nothing has been deployed yet, or it is down and being restarted." {http.error.status_code}
-	}
-}
+# … example.com's site
 
 deploy.example.com {
 	liveswap_webhook
+	box_webhook
 }
 ```
 
-Do not add an `env_file` line yet: hotserve reads that file each time
-the app launches, and a missing one fails the launch. Secrets come
-later, in [After the first deploy](after-first-deploy.md#3-secrets-if-the-app-has-any).
-
-Then check the file and load it:
-
-```sh
-hotserve validate --config /etc/hotserve/Caddyfile
-systemctl reload hotserve
-```
-
-A file that fails to validate never loads, and the running config
-stays; but it would stop the next restart from starting, so fix it
-before moving on. With nothing deployed yet, a correct box looks like
-this:
-
-- `https://example.com` answers 503 with the sentence from the
-  `handle_errors` block — once the certificate is issued, which takes
-  a few seconds after the reload with 80 and 443 open.
-- `https://deploy.example.com/example` answers 401 with
-  `{"error":"invalid or missing deploy token …"}`, in a browser or with
-  `curl -i`. That is the webhook working: a deploy carries a token, and
-  nothing without one gets further than this.
-- `journalctl -u hotserve | grep 'liveswap started'` gains a line with
-  `"apps":1,"app_names":["example"]`.
-
-**On an arm64 box, one more command.** The Node example's executable is
-a copy of Node, and Node's arm64 build links one library a stock Debian
-13 does not ship; without it the app fails to start with exit status
-127. amd64 needs nothing.
-
-```sh
-apt install libatomic1
-```
+`box_webhook` is where the workflow sends the box its config. The
+workflow asks hotserve which site carries it, so there is no address
+to copy anywhere.
 
 <details>
 <summary><b>If you would rather deploy the Deno example</b></summary>
@@ -180,10 +185,10 @@ compromised build cannot widen them. That is what it buys over the
 single executable; the cost is one runtime to install. Two changes to
 the above:
 
-1. Install Deno under `/usr/local`, as root. The app's sandbox contains
-   `/usr` and nothing else of the host's software, so a Deno anywhere
-   else would not exist for it. Use the version in the example's
-   `.deno-version`, which is what its workflow builds with:
+1. Install Deno under `/usr/local`, as root on the box. The app's
+   sandbox contains `/usr` and nothing else of the host's software, so
+   a Deno anywhere else would not exist for it. Use the version in the
+   example's `.deno-version`, which is what its workflow builds with:
 
    ```sh
    v=v$(cat .deno-version)               # from a checkout; on the box, type what the file says
@@ -223,6 +228,88 @@ native code, so any runner builds it.
 
 </details>
 
+Name the directory for the deploy host — the box records
+`<host>/Caddyfile` as its file — and keep the name in `host` for the
+commands below:
+
+```sh
+host=deploy.yourdomain.com           # your deploy host: the site that carries box_webhook
+git mv deploy.example.com $host
+```
+
+Set `HOTSERVE_VERSION` in `.github/workflows/apply.yml` to step 2's
+`v`, the release tag without its `v`: the workflow checks every change
+with the binary the box runs. Then commit. The commit is signed, and
+it is the one the box starts from:
+
+```sh
+git add -A && git commit -m "$host: the box's config"
+```
+
+**Tell the box which repository it belongs to.** Copy the box's
+directory to it, as the commit has it, and run `hotserve init` there
+as root with that commit:
+
+```sh
+git archive HEAD $host | ssh root@box.example.com tar -xf -
+ssh root@box.example.com "cd $host && hotserve init $(git rev-parse HEAD)"
+```
+
+```
+init: box_webhook on deploy.example.com; 1 app (example); 1 signer (alice@example.com)
+init: this box's file is deploy.example.com/Caddyfile in the repository
+init: installed /etc/hotserve/Caddyfile
+init: this box applies commits descending from 4f1c2a9
+init: reloaded. From here, this box takes config only as signed commits sent by your repository's workflow.
+```
+
+It refuses, writing nothing, a file with no `box` block, no signer or
+no site carrying `box_webhook` — any of them would leave the box
+unreachable by its own channel — and a directory not named for that
+site. Otherwise it installs the file over the starter config and
+reloads hotserve. A file that does not load is put back, the starter
+keeps serving, and `init` says so; `journalctl -u hotserve -n 50` on
+the box says why. Fix it, commit, and run both lines again.
+
+**Push:**
+
+```sh
+git push origin main
+```
+
+The workflow checks the file with the release you set, and sends the
+commit to the box, which checks the run's token and that the file is
+the one in that commit, and answers that it already runs it:
+
+```
+apply: deploy.example.com/Caddyfile → https://deploy.example.com/: the box runs 4f1c2a9; sending 4f1c2a9 (1 commit), push 7d3e…
+apply: deploy.example.com at 4f1c2a9: the box already runs this Caddyfile
+```
+
+From here on, a change to the box's config is a signed commit pushed
+to `main`: [After the first deploy](after-first-deploy.md#1-change-the-config)
+has how. With nothing deployed yet, a correct box looks like this:
+
+- `https://example.com` answers 503 with the sentence from the
+  `handle_errors` block — once the certificate is issued, which takes
+  a few seconds after `init`'s reload with 80 and 443 open.
+- `https://deploy.example.com/example` answers 401 with
+  `{"error":"invalid or missing deploy token …"}`, in a browser or with
+  `curl -i`. That is the webhook working: a deploy carries a token, and
+  nothing without one gets further than this.
+- `journalctl -u hotserve | grep 'liveswap started'`, on the box, gains
+  a line with `"apps":1,"app_names":["example"]`.
+- The workflow run is green.
+
+**On an arm64 box, one more command as root.** The Node example's
+executable is a copy of Node, and Node's arm64 build links one library
+a stock Debian 13 does not ship; without it the app fails to start
+with exit status 127. amd64 needs nothing.
+
+```sh
+ssh root@box.example.com apt install -y libatomic1
+```
+
 ## 4. The app
 
 The Node app is published as a template repository,
@@ -231,7 +318,7 @@ this repo, as of its latest stable release. Open it, press **Use this
 template** → **Create a new repository**, and name it
 `your-org/example`. Private is fine: the box fetches the release asset
 by its API URL with the workflow's own token, and the
-`artifact_allowlist` above admits it. From a laptop with the GitHub
+`artifact_allowlist` in the box's Caddyfile admits it. With the GitHub
 CLI that is:
 
 ```sh
@@ -312,18 +399,21 @@ a new commit to deploy again.
 
 ## What you have
 
-An app at `example.com` that deploys on every push to `main`, with no
-SSH key or password anywhere in CI. Rollback is a button:
+An app at `example.com` that deploys on every push to its `main`, and
+a box whose config changes on every signed push to `your-org/boxes`'
+`main` — with no SSH key, password or token stored anywhere in CI.
+Rollback is a button:
 Actions → deploy → **Run workflow**, with the version to go back to. A
 version is the first 12 characters of a commit on `main`, as the
 releases page lists them; the box keeps the newest five, so those are
 the ones it can relaunch. Leave "Use workflow from" on `main`: the
 workflow runs from there whichever version it relaunches. The
 example's README says [more](../examples/node/README.md#rolling-back).
-The next app is the same four steps minus the first two: another
-`app` block and site in the Caddyfile, another repository from the
-template with its own `HOTSERVE_URL`.
+The next app is a commit to the box's repository — another `app`
+block and site in its Caddyfile, signed and pushed — then step 4
+again: another repository from the template, with its own
+`HOTSERVE_URL`.
 
-Now do [After the first deploy](after-first-deploy.md): it turns this
-box from something root set up into something a person administers,
-and it takes less time than this did.
+Now do [After the first deploy](after-first-deploy.md): it gives the
+box an administrator who is not root, closes root login, and takes
+less time than this did.

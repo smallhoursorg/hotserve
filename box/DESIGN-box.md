@@ -6,10 +6,10 @@ promises. History lives in git (`git log -- box/DESIGN-box.md`); the
 are for decisions still fresh or contested and get folded into the
 body once they settle.
 
-**Status: design, written before the code.** Normative for the PRs
-that build it (proof core, Caddyfile surface, applier, `init`,
-template, docs); a PR that cannot hold a line here changes the line in
-the same PR, with the reason.
+**Status: built, on main and not yet in a release** (History lists
+the PRs); secrets are not built (Non-goals). Normative: a change that
+cannot hold a line here changes the line in the same PR, with the
+reason.
 
 **Two rules of this document.** Every fact lives in exactly one table;
 prose uses it and points to it, and never restates it, so a change
@@ -1775,3 +1775,8 @@ Dated one-liners; the full text of each is in git.
 - 2026-10-11 — A push's time budget: the workflow waits 30 minutes
   (was 15), past root's worst case, and the pending bound with it; no
   whole-POST deadline, since the workflow resends or polls after a cut.
+- 2026-10-11 — PR 6 (docs): the tutorial sets up the box's repository
+  on day 0 (docs/first-deploy.md, step 3: template, `make signer`,
+  `hotserve init`, first push), and page 2 keeps the administrator for
+  logs and secrets only; the README, the examples' READMEs, the
+  starter Caddyfile and the threat model follow.

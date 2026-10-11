@@ -4,6 +4,12 @@
 # the built-in modules: liveswap (zero-downtime deploys), penaltybox
 # (rate-limit hint enforcement) and cache (Souin + Otter).
 #
+# A box whose config lives in a repository of its own (hotserve's
+# docs/first-deploy.md, step 3) never has this file edited by hand:
+# `hotserve init` replaces it, and signed pushes change it after that.
+# Edit it here on a box without one, or at the console when a push
+# cannot reach the box.
+#
 # Check before reloading: a file that fails to load leaves the old config
 # running, but it also stops the next restart or upgrade from starting.
 #   hotserve validate --config /etc/hotserve/Caddyfile
@@ -96,7 +102,7 @@
 # ── Replace with your domain once DNS points here — hotserve then
 #    provisions TLS automatically. ──
 :80 {
-	respond "hotserve is running. Edit /etc/hotserve/Caddyfile to serve your apps."
+	respond "hotserve is running. To serve your apps: hotserve init from your box's repository, or edit /etc/hotserve/Caddyfile."
 }
 
 # ── Example: the sites for the app above ──
