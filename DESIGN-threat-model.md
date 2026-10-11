@@ -545,11 +545,13 @@ from root's environment.
 
 What this closes. The `HOTSERVE_CONFIG` half of the administrator's
 sudoers grant — the eight commands with which the template's former
-laptop script moved and reloaded the Caddyfile over SSH — is gone, and
-with it the only account that could change config. The
-`HOTSERVE_SECRETS` half (a root `install` that creates
-`/etc/hotserve/<app>.env` 0640 root:hotserve, and `sudoedit` of it)
-stays, and so does the administrator account that holds it. A leaked PAT, a
+laptop script moved and reloaded the Caddyfile over SSH — is gone from
+the template, and with it the only account that could change config
+(a box that installed the earlier file keeps those lines until it is
+replaced, as the template's README says). The `HOTSERVE_SECRETS` half
+(a root `install` that creates `/etc/hotserve/<app>.env` 0640
+root:hotserve, and `sudoedit` of it) stays, for an administrator where
+one is set up. A leaked PAT, a
 stolen GitHub session or an OAuth app with `contents:write` can push
 to `main` and cannot produce the signature, so it cannot change the
 box with anything a signer did not sign: its own commit is refused on
@@ -1136,5 +1138,7 @@ Dated one-liners; the full text of each is in git.
 - 2026-10-11 — `box` built: the handler (step 6 reachability
   included), the root applier, `hotserve init` and the template that
   applies by signed push (box/DESIGN-box.md, History). `bin/push` and the
-  `HOTSERVE_CONFIG` grant are gone; the tutorial sets up the config
-  repository on day 0, and the administrator keeps the secrets grant.
+  `HOTSERVE_CONFIG` grant are gone from the template; the tutorial sets
+  up the config repository on day 0, an administrator is optional and
+  holds only the secrets grant, and root keeps key-only SSH as the way
+  back.

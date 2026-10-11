@@ -1,7 +1,8 @@
 # Upgrading hotserve
 
 A release is a new `.deb`; installing it over the old one is the
-upgrade:
+upgrade. Everything on this page runs as root on the box
+(`ssh root@box.example.com`):
 
 ```sh
 # from the release page: the .deb for your architecture, and checksums.txt
@@ -9,11 +10,16 @@ cd /var/local/hotserve              # next to the release you are upgrading from
 v=0.2.0                             # the version in the .deb's file name
 arch=$(dpkg --print-architecture)   # amd64 or arm64
 sha256sum -c --ignore-missing checksums.txt
-sudo apt install ./hotserve_${v}_${arch}.deb
+apt install ./hotserve_${v}_${arch}.deb
 ```
 
 The package keeps your `/etc/hotserve/Caddyfile` and restarts hotserve
-into the new binary. Your apps are not restarted: they run under
+into the new binary. When a release has changed the starter config the
+package ships, dpkg asks what to do about that file ("Install the
+package maintainer's version?"): answer **N**, the default. The
+packaged file is the starter, and installing it would replace your
+box's config — every app and, on a box set up from the box template,
+the `box` block, so no push could reach the box afterwards. Your apps are not restarted: they run under
 hotserve's user manager rather than inside hotserve, so the new process
 finds each one in `state.json` and picks it up as it is — same process,
 no relaunch, no redeploy.
@@ -23,8 +29,8 @@ for about a tenth of a second, or longer while a slow request finishes:
 the old process gets up to 5 seconds to stop before the new one starts.
 So upgrade at a quiet moment. A
 config change does not need a restart: a reload — what an applied push
-from the box's repository does, or `systemctl reload hotserve` at the
-console — swaps the config inside the running process, drops no requests, and
+from the box's repository does, or `systemctl reload hotserve` after a
+hand edit — swaps the config inside the running process, drops no requests, and
 never restarts a running app (an edited app definition applies the
 next time the app starts: its next deploy or rollback, or a relaunch
 after a crash, a sustained health failure, or a reboot).
@@ -68,7 +74,7 @@ options (a push from the box's repository, which reloads), and read
 how many requests are in flight:
 
 ```sh
-sudo curl -fsS --unix-socket /run/hotserve/admin.sock http://localhost/metrics \
+curl -fsS --unix-socket /run/hotserve/admin.sock http://localhost/metrics \
   | grep '^caddy_http_requests_in_flight'
 ```
 
@@ -84,13 +90,13 @@ Before you upgrade:
 
 - **Check the new version accepts your config.** The `.tar.gz` on the
   release page holds the bare binary, and
-  `sudo ./hotserve validate --config /etc/hotserve/Caddyfile` runs its
+  `./hotserve validate --config /etc/hotserve/Caddyfile` runs its
   config check without touching anything that is running. A config it
   rejects would stop the upgraded hotserve from starting, and the site
   would stay down until you fixed the config or went back (systemd
   retries a crash, not a refusal).
 - **The `.deb` you are upgrading from is still in `/var/local/hotserve`.**
-  `sudo apt install --allow-downgrades ./hotserve_<old>_$(dpkg --print-architecture).deb`
+  `apt install --allow-downgrades ./hotserve_<old>_$(dpkg --print-architecture).deb`
   puts it back — the same restart, in reverse, and nothing to download
   first. On a VPS, a snapshot taken first is the fuller way back.
 - **Upgrade hotserve and the host separately.** hotserve measures what
@@ -98,6 +104,11 @@ Before you upgrade:
   that cannot deliver it ([liveswap/README.md](../liveswap/README.md#sandbox)),
   so a kernel update or reboot bundled with an upgrade leaves you
   guessing which change did it.
+
+After the upgrade, set `HOTSERVE_VERSION` in the box repository's
+`.github/workflows/apply.yml` to the new release and push: its workflow
+checks every change with that binary, and should check with the one
+the box runs.
 
 There is no APT repository yet, so nothing upgrades hotserve behind
 your back; the hosted repository on the [roadmap](../README.md#roadmap) is what

@@ -1485,9 +1485,10 @@ Alice commits `c6` (signed) changing a Deno flag and pushes.
 ## At 3am
 
 If a change broke the webhook site itself, the next push cannot reach
-the box. The remedy is the one that was always there: the provider's
-console as root — a bare edit of `/etc/hotserve/Caddyfile` and
-`systemctl reload hotserve`, or `hotserve init` again from the box's
+the box. The remedy is the one that was always there: root on the box,
+over SSH or the provider's console — a bare edit of
+`/etc/hotserve/Caddyfile` and `systemctl reload hotserve`, or
+`hotserve init` again from the box's
 directory copied over. The next signed push overwrites the hand edit, which is
 the point: the repository is the truth and the edit is a bridge back
 to it; so is a replay of `HEAD` by anyone holding a token (see
@@ -1777,6 +1778,9 @@ Dated one-liners; the full text of each is in git.
   whole-POST deadline, since the workflow resends or polls after a cut.
 - 2026-10-11 — PR 6 (docs): the tutorial sets up the box's repository
   on day 0 (docs/first-deploy.md, step 3: template, `make signer`,
-  `hotserve init`, first push), and page 2 keeps the administrator for
-  logs and secrets only; the README, the examples' READMEs, the
-  starter Caddyfile and the threat model follow.
+  `hotserve init`, first push); page 2 runs the box (config, secrets as
+  root) and then hardens it (SSH by key only, the port, an optional
+  administrator for logs and secrets). Root keeps its key login: root
+  over SSH is the way back at 3am, the provider's console only if SSH
+  is down. The README, the examples' READMEs, the starter Caddyfile and
+  the threat model follow.

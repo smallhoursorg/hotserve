@@ -7,12 +7,12 @@ push a signed commit, a GitHub Actions workflow that deploys every
 push of the app with no stored secret, and the shape you copy for
 every app after it.
 
-Root on the box installs the package (step 2) and tells the box which
-repository its config comes from (step 3); everything else happens on
-your laptop and on GitHub.
-[After the first deploy](after-first-deploy.md) is where you create an
-administrator who is not root, close root login, and shut the port you
-do not use. Do those next; none of them is needed to get here.
+You work as root on the box only to install software and, once, to
+tell the box which repository its config comes from (step 3);
+everything else happens on your laptop and on GitHub.
+[After the first deploy](after-first-deploy.md) covers what comes
+next — changing the config, secrets — and hardening the box, which is
+recommended and none of it needed to get here.
 
 On the laptop you need git 2.34 or later (it signs commits with an SSH
 key), `make`, the SSH key the box is created with, and the
@@ -414,6 +414,6 @@ block and site in its Caddyfile, signed and pushed — then step 4
 again: another repository from the template, with its own
 `HOTSERVE_URL`.
 
-Now do [After the first deploy](after-first-deploy.md): it gives the
-box an administrator who is not root, closes root login, and takes
-less time than this did.
+[After the first deploy](after-first-deploy.md) is next: changing the
+config, adding secrets, and hardening the box when you are ready to.
+It takes less time than this did.

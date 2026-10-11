@@ -37,11 +37,9 @@ pointing at it. [Your first deploy](https://github.com/smallhoursorg/hotserve/bl
 whole path from a fresh server, with this app as its example; the
 three steps below are its second half.
 
-**1. On an arm64 box, install `libatomic1`** — as root, while you
-still have it: the administrator
-[After the first deploy](https://github.com/smallhoursorg/hotserve/blob/main/docs/after-first-deploy.md)
-creates cannot install packages. The tarball carries its own Node, and Node's arm64
-build links one library a stock Debian 13 does not ship; without it
+**1. On an arm64 box, install `libatomic1`**, as root. The tarball
+carries its own Node, and Node's arm64 build links one library a
+stock Debian 13 does not ship; without it
 the app fails to start with exit status 127 (`error while loading
 shared libraries: libatomic.so.1`). amd64 needs nothing.
 
@@ -55,7 +53,9 @@ apt install libatomic1
 that is `<host>/Caddyfile`, committed signed and pushed to `main`; the
 box template ships this app's block already. On a box without one, it
 is `/etc/hotserve/Caddyfile`, as root: edit, `hotserve validate
---config` it, `systemctl reload hotserve`. Either way, the file is:
+--config` it, `systemctl reload hotserve`. Either way the app's part is the
+same, and a box repo's file keeps its `box` block and the deploy
+host's `box_webhook` line as they are. Without those two, the file is:
 
 ```caddyfile
 {

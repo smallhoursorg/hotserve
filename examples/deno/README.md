@@ -35,11 +35,9 @@ pointing at it. [Your first deploy](https://github.com/smallhoursorg/hotserve/bl
 whole path from a fresh server, with this app as its one fork; the
 three steps below are its second half.
 
-**1. Install Deno on the box, under `/usr/local`** — as root, while
-you still have it: the administrator
-[After the first deploy](https://github.com/smallhoursorg/hotserve/blob/main/docs/after-first-deploy.md)
-creates cannot install packages. The app's sandbox contains `/usr` and nothing else
-of the host's software, so a Deno in a home directory would not exist
+**1. Install Deno on the box, under `/usr/local`**, as root. The app's
+sandbox contains `/usr` and nothing else of the host's software, so a
+Deno in a home directory would not exist
 for it. Use the version in `.deno-version`, which is what the workflow
 builds with:
 
@@ -59,7 +57,9 @@ that is `<host>/Caddyfile`, committed signed and pushed to `main`; the
 box template ships the Node app's block, and this app's `command`,
 `pre_start` and `env` lines replace those. On a box without one, it is
 `/etc/hotserve/Caddyfile`, as root: edit, `hotserve validate --config`
-it, `systemctl reload hotserve`. Either way, the file is:
+it, `systemctl reload hotserve`. Either way the app's part is the
+same, and a box repo's file keeps its `box` block and the deploy
+host's `box_webhook` line as they are. Without those two, the file is:
 
 ```caddyfile
 {

@@ -147,15 +147,19 @@ what it runs.
      token, and nothing without one gets further than this.
 
 The secrets of the apps are still a file on the box each, edited over
-SSH by an administrator — see [Secrets](#secrets). Creating that
-administrator, closing root login and the rest of the hardening is on
+SSH — see [Secrets](#secrets). Hardening the box — SSH by key only, the
+SSH port shut, an optional administrator who is not root — is on
 [After the first deploy](https://github.com/smallhoursorg/hotserve/blob/main/docs/after-first-deploy.md).
 
 **A repo from an earlier version of this template** — a top-level
-`Caddyfile` pushed by `make push` — is simplest replaced: make a new
-repo from this template and take the steps above, starting step 3 from
-the file the box runs. Then put this directory's `sudoers` on the
-box in place of the old one ([Secrets](#secrets)), and archive the old
+`Caddyfile` pushed by `make push` — is simplest replaced. Upgrade the
+box to a release that has `hotserve init` first. Then make a new repo
+from this template and take the steps above, starting step 3 from the
+file the box runs; steps 3 and 7 need root on the box over SSH, which
+an earlier version of the hardening steps closed: reopen root's key
+login where you ran the upgrade ([After the first deploy](https://github.com/smallhoursorg/hotserve/blob/main/docs/after-first-deploy.md),
+step 4, says how). Then put this directory's `sudoers` on the box in
+place of the old one ([Secrets](#secrets)), and archive the old
 repo.
 
 ## Change the config
@@ -240,9 +244,10 @@ The run prints the box's reason; it changed nothing. The common ones:
 ## At 3am
 
 If a change broke the deploy host itself, the next push cannot reach
-the box. The way back is the provider's console as root: edit
-`/etc/hotserve/Caddyfile` and `systemctl reload hotserve`, or copy the
-box's directory over and `hotserve init` again from it. The next
+the box. The way back is root on the box, over SSH (the provider's
+console only if SSH itself is down): edit `/etc/hotserve/Caddyfile`
+and `systemctl reload hotserve`, or copy the box's directory over as
+step 7 did and `hotserve init` again from it. The next
 signed push overwrites a hand edit — the run warns that it did — which
 is the point: the repo is the truth and the edit is a bridge back to
 it, so a fix that must outlive the night is a commit.
@@ -259,11 +264,18 @@ directory.
 
 They never go in this repo. Put each app's in a file on the box that
 only root and the `hotserve` user can read, and name it with
-`env_file` in the app's block. The `sudoers` file in this directory
-lets an administrator who is not root create the file and edit it;
-both are its exact lines, so nothing about the mode, the owner or the
-directory is theirs to choose. As root on the box, once (from the
-laptop: `scp sudoers root@box.example.com:/etc/sudoers.d/hotserve-admin`):
+`env_file` in the app's block. As root on the box:
+
+```sh
+install -m 0640 -o root -g hotserve -T /dev/null /etc/hotserve/example.env   # once: empty, root:hotserve
+editor /etc/hotserve/example.env      # DATABASE_URL=postgres://…
+```
+
+The `sudoers` file in this directory lets an administrator who is not
+root do those two things and nothing else; both are its exact lines,
+so nothing about the mode, the owner or the directory is theirs to
+choose. To set one up, as root on the box, once (from the laptop:
+`scp sudoers root@box.example.com:/etc/sudoers.d/hotserve-admin`):
 
 ```sh
 chmod 0440 /etc/sudoers.d/hotserve-admin && visudo -c
@@ -272,16 +284,12 @@ install -d -m 0700 -o alice -g alice /home/alice/.ssh && cp ~/.ssh/authorized_ke
 groupadd hotserve-admin && usermod -aG adm,hotserve-admin alice
 ```
 
+`alice` then runs the two lines above with `sudo` in front of
+`install`, and `sudoedit` in place of `editor`.
+
 A box set up from an earlier version of this template has `bin/push`'s
 lines in that file too, which let an administrator write the Caddyfile
 around the signed pushes: copy this one over it, as above.
-
-Then, as alice:
-
-```sh
-sudo install -m 0640 -o root -g hotserve -T /dev/null /etc/hotserve/example.env   # once: empty, root:hotserve
-sudoedit /etc/hotserve/example.env      # DATABASE_URL=postgres://…
-```
 
 Whoever can get a signed commit onto `main` can read these files
 anyway: one site in the Caddyfile serves any file the `hotserve` user
