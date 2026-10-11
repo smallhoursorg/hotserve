@@ -798,6 +798,11 @@ func (a *App) Cleanup() error {
 			}
 		}
 	}
+	if a.clients != nil && a.clients.jwks != nil {
+		// This config is being discarded. Only idle connections close,
+		// so anything still holding the client keeps a working one.
+		a.clients.jwks.CloseIdleConnections()
+	}
 	var firstErr error
 	for _, key := range a.pooled {
 		if _, err := appPool.Delete(key); err != nil && firstErr == nil {

@@ -419,7 +419,16 @@ func WarnUnboundSource(logger *zap.Logger, tc TrustConfig, where ...zap.Field) {
 // verification keys and forge deploy tokens — unless allow_insecure_http
 // is set, the documented escape hatch for test rigs and LANs.
 func NewJWKSClient(allowInsecure bool) *http.Client {
-	var rt http.RoundTripper = &http.Transport{Proxy: http.ProxyFromEnvironment}
+	var rt http.RoundTripper = &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		// Each config load builds a new client and drops the old one,
+		// but a kept-alive connection holds its transport's goroutines
+		// until the issuer hangs up. This bounds what a retired client
+		// keeps, including one nobody closes (the box's) and one a
+		// request was still using when its config was cleaned up.
+		// DefaultTransport's value.
+		IdleConnTimeout: 90 * time.Second,
+	}
 	if !allowInsecure {
 		rt = httpsOnlyTransport{base: rt}
 	}
@@ -429,6 +438,16 @@ func NewJWKSClient(allowInsecure bool) *http.Client {
 }
 
 type httpsOnlyTransport struct{ base http.RoundTripper }
+
+// CloseIdleConnections passes through to the base transport:
+// http.Client.CloseIdleConnections reaches only a transport that has
+// the method, so without it the call does nothing on every client
+// that refuses plain http.
+func (t httpsOnlyTransport) CloseIdleConnections() {
+	if c, ok := t.base.(interface{ CloseIdleConnections() }); ok {
+		c.CloseIdleConnections()
+	}
+}
 
 func (t httpsOnlyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	if r.URL.Scheme != "https" {

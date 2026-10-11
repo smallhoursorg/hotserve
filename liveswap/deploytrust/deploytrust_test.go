@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -161,6 +163,48 @@ func TestNewJWKSClientEnforcesHTTPS(t *testing.T) {
 		t.Errorf("NewJWKSClient(true) must allow http: %v", err)
 	} else {
 		_ = resp.Body.Close()
+	}
+}
+
+// liveswap's Cleanup closes a retired JWKS client's idle connections;
+// on the https-only client that call must get through the wrapper.
+func TestJWKSClientCloseIdleConnectionsReachesTheConnection(t *testing.T) {
+	closed := make(chan struct{})
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateClosed {
+			close(closed)
+		}
+	}
+	srv.StartTLS()
+	defer srv.Close()
+
+	// NewJWKSClient(false)'s shape, on a base that trusts the test certificate.
+	c := &http.Client{Transport: httpsOnlyTransport{base: srv.Client().Transport}}
+	resp, err := c.Get(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close() // the connection goes back to the idle pool
+
+	c.CloseIdleConnections()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("CloseIdleConnections on the https-only client left the idle connection open")
+	}
+}
+
+func TestNewJWKSClientBoundsIdleConnections(t *testing.T) {
+	for _, allowInsecure := range []bool{false, true} {
+		rt := NewJWKSClient(allowInsecure).Transport
+		if w, ok := rt.(httpsOnlyTransport); ok {
+			rt = w.base
+		}
+		if tr, ok := rt.(*http.Transport); !ok || tr.IdleConnTimeout <= 0 {
+			t.Errorf("NewJWKSClient(%v): idle connections are not bounded (%T)", allowInsecure, rt)
+		}
 	}
 }
 
