@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -401,9 +402,10 @@ type standIn struct {
 	mints     int
 	bundles   int
 	onGet     string   // "": the baseline; "401"; "nobaseline"
-	onPost    []string // a behaviour per POST, in order: "admitting", "unread", "never", "proxy504", "throttled", "html409", "504", "502", "524", "lost", "sync"; then "": 202
+	onPost    []string // a behaviour per POST, in order: "admitting", "unread", "never", "proxy504", "front<code>", "throttled", "html409", "504", "502", "524", "lost", "sync"; then "": 202
 	edited    bool     // results say the file was edited on the box
 	throttle  int      // polls answered 429 before the result
+	pollGaps  []int    // polls answered, in order, by something in front of the box
 	mintFails int      // token requests that fail before one succeeds
 	audience  string   // the last token request's audience, decoded
 }
@@ -491,6 +493,12 @@ func (s *standIn) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			reply(w, 429, map[string]string{"error": "too many failed requests"})
 			return
 		}
+		if len(s.pollGaps) > 0 {
+			code := s.pollGaps[0]
+			s.pollGaps = s.pollGaps[1:]
+			proxied(w, code)
+			return
+		}
 		res, ok := s.results[id]
 		if !ok {
 			reply(w, 404, map[string]string{"error": "no result and no marker for " + id + ": swept, or never admitted"})
@@ -551,6 +559,14 @@ func (s *standIn) post(w http.ResponseWriter, r *http.Request) {
 	}
 	if how == "proxy504" { // a proxy in front gave up before the box had it
 		http.Error(w, "gateway timeout", http.StatusGatewayTimeout)
+		return
+	}
+	if front, ok := strings.CutPrefix(how, "front"); ok { // the same, in a CDN's code
+		code, err := strconv.Atoi(front)
+		if err != nil {
+			s.t.Fatalf("onPost %q", how)
+		}
+		proxied(w, code)
 		return
 	}
 	if how == "throttled" {
@@ -634,9 +650,7 @@ func (s *standIn) post(w http.ResponseWriter, r *http.Request) {
 	case "502": // a proxy in front of the box gave up on the answer
 		http.Error(w, "bad gateway", http.StatusBadGateway)
 	case "524": // Cloudflare's origin timeout: the box had the push
-		w.Header().Set("Content-Type", "text/html")
-		w.WriteHeader(524)
-		_, _ = io.WriteString(w, "<html>Error 524: A timeout occurred</html>")
+		proxied(w, 524)
 	case "lost":
 		conn, _, err := w.(http.Hijacker).Hijack()
 		if err == nil {
@@ -651,6 +665,14 @@ func (s *standIn) post(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(202)
 		_, _ = w.Write(verified)
 	}
+}
+
+// proxied answers as a proxy in front of the box does: its own status
+// and an HTML page, never the box's JSON.
+func proxied(w http.ResponseWriter, code int) {
+	w.Header().Set("Content-Type", "text/html")
+	w.WriteHeader(code)
+	_, _ = fmt.Fprintf(w, "<html>Error %d</html>", code)
 }
 
 func encode(v any) []byte {
@@ -807,6 +829,12 @@ func TestBoxApply(t *testing.T) {
 			"502":       "no answer from the box to the push; asking for its result",
 			// Cloudflare's origin timeout, the push admitted behind it.
 			"524": "no answer from the box to the push; asking for its result",
+			// Cloudflare could not reach the box: never seen, sent again.
+			"front520": "no answer from the box to the push; asking for its result",
+			// Sent again, and Cloudflare answers that: not yet.
+			"never,front522": "no answer from the box to the push; asking for its result",
+			// Sent again, admitted, and its answer timed out in front.
+			"never,524": "no answer from the box to the push; asking for its result",
 			// The box never saw it: every poll is 404, and the push is
 			// sent again under its id.
 			"never": "no answer from the box to the push; asking for its result",
@@ -830,6 +858,27 @@ func TestBoxApply(t *testing.T) {
 					t.Errorf("no warning for an edit on the box:\n%s", out)
 				}
 			})
+		}
+	})
+
+	t.Run("a poll answered by something in front of the box", func(t *testing.T) {
+		t.Parallel()
+		g := newApplyRig(t)
+		head := g.change("one")
+		g.box.set(func(s *standIn) { s.pollGaps = []int{522, 530} })
+		out, code := g.apply()
+		if code != 0 || g.box.seen().baseline != head || !strings.Contains(out, ": loaded; running apps are not restarted") {
+			t.Fatalf("exit %d\n%s", code, out)
+		}
+	})
+
+	t.Run("a TLS failure in front of the box is red at once", func(t *testing.T) {
+		t.Parallel()
+		g := newApplyRig(t)
+		g.change("one")
+		g.box.set(func(s *standIn) { s.onPost = []string{"front525"} })
+		if out, code := g.apply(); code != 1 || !strings.Contains(out, "HTTP 525: <html>Error 525</html>") {
+			t.Fatalf("exit %d\n%s", code, out)
 		}
 	})
 
