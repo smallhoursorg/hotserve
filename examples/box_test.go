@@ -564,7 +564,8 @@ func (s *standIn) post(w http.ResponseWriter, r *http.Request) {
 	if front, ok := strings.CutPrefix(how, "front"); ok { // the same, in a CDN's code
 		code, err := strconv.Atoi(front)
 		if err != nil {
-			s.t.Fatalf("onPost %q", how)
+			fault("onPost %q", how)
+			return
 		}
 		proxied(w, code)
 		return
