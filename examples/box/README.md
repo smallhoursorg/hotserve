@@ -85,11 +85,13 @@ administered as root. This repo takes over from there.
 
    Then bring over its sites and apps into `deploy.example.com/Caddyfile`,
    keeping the `box` block and the deploy host's `box_webhook`, and
-   delete `Caddyfile.live`. In the `box` block, `claim repository` names
-   this repo. Replace `example.com`, `deploy.example.com` and
-   `your-org/example` with yours — `your-org` twice: the
-   `artifact_allowlist` entry pins the organization alone, and the app's
-   `deploy_trust` its repo. The `app example` block is hotserve's
+   delete `Caddyfile.live`. Replace `your-org/boxes`, in the `box`
+   block's `claim repository`, with this repo's `owner/name`: the box
+   takes pushes from that repository's workflow alone, so a placeholder
+   left there refuses the first one. Replace `example.com`,
+   `deploy.example.com` and `your-org/example` with yours — `your-org`
+   twice more: the `artifact_allowlist` entry pins the organization
+   alone, and the app's `deploy_trust` its repo. The `app example` block is hotserve's
    examples/node; a Deno app's lines are in its examples/deno.
 4. Name the directory for the box's deploy host, the site that carries
    `box_webhook`:
