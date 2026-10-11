@@ -15,9 +15,9 @@ next — changing the config, secrets — and hardening the box, which is
 recommended and none of it needed to get here.
 
 On the laptop you need git 2.34 or later (it signs commits with an SSH
-key), `make`, the SSH key the box is created with, and the
-[GitHub CLI](https://cli.github.com/), logged in (`gh auth login`).
-Each `gh` command here has a web equivalent, named where it comes up.
+key), `make`, and the SSH key the box is created with. Where a step
+shows a [GitHub CLI](https://cli.github.com/) (`gh`) command, GitHub's
+web pages do the same, and the step says where.
 
 Names used throughout — replace them with yours as you go:
 
@@ -102,18 +102,28 @@ and the box applies the file only if a key on its own list signed the
 commit. Nothing on the box is edited by hand.
 
 **Make the repository** from the box template,
-[hotserve-example-box](https://github.com/smallhoursorg/hotserve-example-box)
-(on the web: **Use this template** → **Create a new repository**,
-private, then clone it):
+[hotserve-example-box](https://github.com/smallhoursorg/hotserve-example-box):
+press **Use this template** → **Create a new repository**, make it
+private, and clone it. With the GitHub CLI that is one line:
 
 ```sh
 gh repo create your-org/boxes --template smallhoursorg/hotserve-example-box --private --clone
 cd boxes
 ```
 
-Its workflow runs as soon as the repository exists, and that run is
-red: the template lists no signer, and a file without one is refused.
-Nothing reached any box.
+A repository made from the template runs its workflow as soon as it
+exists, and that run is red: the template lists no signer, and a file
+without one is refused. Nothing reached any box.
+
+Or copy the template's files yourself, into a new private repository
+anywhere — another GitHub account or organisation, or a host that is
+not GitHub: the template's **Code** → **Download ZIP**, unpacked into
+an empty directory, then `git init -b main` and `git remote add origin
+<the new repository's address>` there. The workflow that sends the
+config to the box is GitHub Actions; on another host, the box README's
+[Outside GitHub](../examples/box/README.md#outside-github) says what a
+CI job of your own needs, and the rest of this page reads as if the
+repository is on GitHub.
 
 **Add your key as the first signer:**
 
@@ -128,8 +138,9 @@ signer: commits from this checkout are signed with /home/alice/.ssh/id_ed25519
 
 It adds a `signer` line to the `box` block, named for your git email,
 and makes this checkout — this one only — sign every commit with that
-key. The two lines it prints after these are for adding a person to a
-box that already runs; ignore them today. The box README's
+key. The other lines it prints are about staging the file and about
+adding a person to a box that already runs; ignore them today, since
+the commit below takes the file as it stands. The box README's
 [Set it up](../examples/box/README.md#set-it-up) says why a key that
 only signs is better than the one you push to GitHub with, and how to
 use a hardware key.

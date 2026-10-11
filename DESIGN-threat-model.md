@@ -495,7 +495,7 @@ built on main, not yet in a release. On a box set up from the
 template (`examples/box`; docs/first-deploy.md, step 3) root writes
 the file once, with `hotserve init`, and the config repository's
 signed pushes write it after that. A box with no `box` block has no
-config webhook, and its file is root's to edit at the console.
+config webhook, and its file is root's to edit.
 
 The operator's config repository is the only writer of
 `/etc/hotserve/Caddyfile`. Its workflow mints an OIDC token and POSTs
@@ -615,7 +615,8 @@ hotserve uid's word; the `applied` phase trusts it, the file on disk
 does not depend on it, and `systemctl restart` is the remedy. Root's
 never-cut-the-branch guard checks presence, and the handler's
 reachability check covers only what stands before `box_webhook` on
-`/`: a `claim` typo passes both and strands the box until the console.
+`/`: a `claim` typo passes both and strands the box until root fixes
+it on the box.
 The
 handler's validate is a courtesy, not a boundary. Plain `crypto/sha1`
 on the proof, not sha1dc. A signer's laptop is the operator; a

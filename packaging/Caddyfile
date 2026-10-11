@@ -7,8 +7,8 @@
 # A box whose config lives in a repository of its own (hotserve's
 # docs/first-deploy.md, step 3) never has this file edited by hand:
 # `hotserve init` replaces it, and signed pushes change it after that.
-# Edit it here on a box without one, or at the console when a push
-# cannot reach the box.
+# Edit it here on a box without one, or, as root on the box, when a
+# push cannot reach it.
 #
 # Check before reloading: a file that fails to load leaves the old config
 # running, but it also stops the next restart or upgrade from starting.

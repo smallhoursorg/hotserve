@@ -100,7 +100,7 @@ Then, from a second terminal and before you close the first, check
 that `ssh root@box.example.com true` still gets in.
 
 Nobody logs in with a password from here on: Debian allows one for
-every account but root, the administrator's of step 6 included. Root
+every account but root. Root
 keeps logging in with its key — Debian's default; the line says so in
 case the provider's image changed it — because root over SSH is the
 way back at 3am, and a provider's web console is a poor substitute.
@@ -124,18 +124,21 @@ group, and the two secrets commands of step 2 through the `sudoers`
 file in the box's repository. Read the file: it is short, and it says
 what it grants.
 
-From the laptop, in the box's repository, put it on the box:
+From the laptop, in the box's repository, put it on the box, with the
+administrator's SSH public key — yours, or the second person's:
 
 ```sh
 scp sudoers root@box.example.com:/etc/sudoers.d/hotserve-admin
+scp alice.pub root@box.example.com:      # the administrator's public key
 ```
 
 Then as root on the box:
 
 ```sh
 chmod 0440 /etc/sudoers.d/hotserve-admin && visudo -c
-adduser alice
-install -d -m 0700 -o alice -g alice /home/alice/.ssh && cp ~/.ssh/authorized_keys /home/alice/.ssh/
+adduser --disabled-password --comment "" alice      # no password: SSH keys only, and the sudoers lines ask for none
+install -d -m 0700 -o alice -g alice /home/alice/.ssh
+install -m 0600 -o alice -g alice alice.pub /home/alice/.ssh/authorized_keys
 groupadd hotserve-admin && usermod -aG adm,hotserve-admin alice
 ```
 

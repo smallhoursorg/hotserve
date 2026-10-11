@@ -63,7 +63,10 @@ what it runs.
 
 1. Make a private repo from this template ("Use this template" on
    [smallhoursorg/hotserve-example-box](https://github.com/smallhoursorg/hotserve-example-box)),
-   and clone it.
+   and clone it. Or copy its files into a new private repo anywhere —
+   another account, or a host that is not GitHub (see
+   [Outside GitHub](#outside-github)) — with `git init -b main` and the
+   new repo as `origin`.
 2. Add your SSH key as the first signer:
 
    ```sh
@@ -248,6 +251,26 @@ signed push overwrites a hand edit — the run warns that it did — which
 is the point: the repo is the truth and the edit is a bridge back to
 it, so a fix that must outlive the night is a commit.
 
+## Outside GitHub
+
+Only the workflow file is GitHub's. `bin/apply` is what talks to the
+boxes, and any CI that gives it what the Actions job does can run it.
+This is not tested outside GitHub; what it needs:
+
+- a checkout of the commit being pushed, with its full history;
+- a `hotserve` on `PATH` (`bin/install-hotserve` installs one, with
+  `sudo`; `make check` needs it too);
+- `HOTSERVE_TOKEN`: an OIDC token that the `box` block's `deploy_trust`
+  accepts and whose `sha` claim names that commit. On GitLab, that is
+  an `id_tokens:` entry with `aud: hotserve`, and a box block trusting
+  `deploy_trust gitlab { audience hotserve; claim project_path your-org/boxes; claim ref_path refs/heads/main }`.
+  `bin/apply` sends that one token with every request, polls included,
+  so it must outlive the run.
+
+The rules above hold on any host: a merge button that squashes,
+rebases or writes its own merge commit lands a commit no listed key
+signed.
+
 ## More than one box
 
 One directory per box, each named for its deploy host. Every push goes
@@ -270,13 +293,16 @@ editor /etc/hotserve/example.env      # DATABASE_URL=postgres://…
 The `sudoers` file in this directory lets an administrator who is not
 root do those two things and nothing else; both are its exact lines,
 so nothing about the mode, the owner or the directory is theirs to
-choose. To set one up, as root on the box, once (from the laptop:
-`scp sudoers root@box.example.com:/etc/sudoers.d/hotserve-admin`):
+choose. To set one up, put the file and the administrator's SSH public
+key on the box from the laptop (`scp sudoers
+root@box.example.com:/etc/sudoers.d/hotserve-admin`, `scp alice.pub
+root@box.example.com:`), then as root on the box, once:
 
 ```sh
 chmod 0440 /etc/sudoers.d/hotserve-admin && visudo -c
-adduser alice
-install -d -m 0700 -o alice -g alice /home/alice/.ssh && cp ~/.ssh/authorized_keys /home/alice/.ssh/
+adduser --disabled-password --comment "" alice      # no password: SSH keys only, and the sudoers lines ask for none
+install -d -m 0700 -o alice -g alice /home/alice/.ssh
+install -m 0600 -o alice -g alice alice.pub /home/alice/.ssh/authorized_keys
 groupadd hotserve-admin && usermod -aG adm,hotserve-admin alice
 ```
 
