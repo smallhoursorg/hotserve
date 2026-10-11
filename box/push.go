@@ -200,11 +200,12 @@ func (p *pushing) state() (base *applied, installed []byte, done bool, err error
 }
 
 // noChange is the fast path (step 4): when the box runs this commit and
-// this file already, 200 `no_change`, nothing written. Asked before the
-// lock and again under it, of what was read there: a push another one
-// applied meanwhile is answered so, not pre-verified against itself.
+// this file already, in a shape root would accept (unchanged), 200
+// `no_change`, nothing written. Asked before the lock and again under
+// it, of what was read there: a push another one applied meanwhile is
+// answered so, not pre-verified against itself.
 func (p *pushing) noChange(b *proof.Bundle, base *applied, installed []byte) (bool, error) {
-	if b.Commit.ID != base.SHA || digest(b.Caddyfile) != digest(installed) {
+	if !unchanged(b, installed, base) {
 		return false, nil
 	}
 	p.h.logger.Info("box push answered", zap.String("id", p.id), zap.String("commit", p.commit), zap.String("phase", phaseNoChange),

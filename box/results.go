@@ -59,6 +59,19 @@ const (
 	msgPrevReloadFailed = "rolled back, but the reload of the previous file failed; the previous file is on disk; journalctl -u hotserve"
 	msgChanged          = "the Caddyfile changed during the transaction; it is left as found"
 	msgDiskFull         = "disk full; the previous Caddyfile could not be restored"
+	// msgInitRemedy follows init's refusal on a hotserve that is not up
+	// ("Console commands"); %[1]s is init's argument and %[2]s its
+	// directory, absolute, since the operator may read it after a
+	// one-shot ssh and follow it from another. hotserve starts on the
+	// file it has, so init's own swap and rollback still stand between
+	// the change and the box; the old file is never touched by hand. A
+	// restart, not a start: a start joins one already in flight, which
+	// read the old file; reset-failed first, as msgInterruptedStopped
+	// says, since a unit at its start limit refuses a restart.
+	msgInitRemedy = `the Caddyfile is accepted only by a running hotserve. Start it on the file it has, then run init again:
+  systemctl enable hotserve && systemctl reset-failed hotserve && systemctl restart hotserve
+  cd %[2]s && hotserve init %[1]s
+If it will not start, journalctl -u hotserve says why.`
 )
 
 // installFailed is `failed` for an install that stopped before the
@@ -67,10 +80,27 @@ func installFailed(err error) string {
 	return "the install failed before the Caddyfile changed: " + proof.Bound(err.Error()) + "; nothing changed"
 }
 
-// baselineUnrecorded is `unknown` for an apply whose applied.json could
-// not be written.
-func baselineUnrecorded(commit string) string {
-	return "applied but the baseline could not be recorded; hotserve box baseline " + commit
+// baselineUnrecorded is `unknown` for a transaction whose applied.json
+// could not be written, by who ran it and how it ended: the file stands
+// (applied, or unchanged), and the remedy records it.
+func baselineUnrecorded(o origin, phase, commit string) string {
+	what := "applied but"
+	if phase == phaseNoChange {
+		what = "unchanged, but"
+	}
+	switch {
+	case o == originInit:
+		return what + " the baseline could not be recorded; hotserve init " + commit + " again, which ends no_change and records it"
+	case phase == phaseNoChange:
+		// The file did not change, so a push of the same chain is
+		// verified as this one was.
+		return what + " the baseline could not be recorded; push again, which records it"
+	}
+	// Not "push again": a chain whose signer list changed on the way
+	// is verified again against the file now installed, and refused.
+	// applied.json keeps the previous digest (D1), so step 10 flags the
+	// file the next push finds.
+	return what + " the baseline could not be recorded; hotserve box baseline " + commit + " on the box records it (the next push then reports the file as edited out of band; it was not)"
 }
 
 // result is out/<id>.json (DESIGN-box.md, "Record and result fields"):

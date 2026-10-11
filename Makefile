@@ -274,5 +274,7 @@ e2e-logs:
 	$(COMPOSE) logs e2e-upstream e2e-artifacts
 	$(COMPOSE) exec -T e2e-hotserve journalctl --no-pager -n 300
 
+# --rmi local: the images this checkout built (no custom tag), one set
+# per compose project; pulled images are kept.
 clean:
-	$(COMPOSE) down -v --remove-orphans
+	$(COMPOSE) down -v --remove-orphans --rmi local

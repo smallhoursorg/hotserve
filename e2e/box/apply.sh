@@ -12,9 +12,9 @@
 # The box's file is the e2e config itself, made into one a box applies:
 # imports inlined (a signed file has none), a `box` block, and a
 # box_webhook site on a bare hostname (served with an internal-CA
-# certificate on 8443: the address rules allow no scheme or port). Its
-# baseline is installed by hand, as `hotserve init` would; when init
-# lands, it replaces install_baseline.
+# certificate on 8443: the address rules allow no scheme or port), at
+# <host>/Caddyfile in the repository. Its baseline is set by `hotserve
+# init`, run inside that directory as the operator runs it.
 #
 # Runs last in `make e2e` (`docker compose exec`); puts the e2e config
 # back at the end.
@@ -25,7 +25,7 @@ HOST=box.e2e.test
 URL=https://$HOST:8443/
 BOX=/var/lib/hotserve-box
 LIVE=/etc/hotserve/Caddyfile
-FILE=box1/Caddyfile
+FILE=$HOST/Caddyfile
 
 work=$(mktemp -d)
 repo=$work/repo
@@ -226,22 +226,18 @@ BOB=$(signer bob)
 
 # The root commit: the box's file before any push.
 render "$ALICE" >"$work/f0"
-mkdir -p "$repo/box1" && cp "$work/f0" "$repo/$FILE"
+mkdir -p "$repo/$HOST" && cp "$work/f0" "$repo/$FILE"
 git -C "$repo" add -A
-git -C "$repo" -c user.signingkey="$work/alice" commit -q -S -m "box1: the first file"
+git -C "$repo" -c user.signingkey="$work/alice" commit -q -S -m "$HOST: the first file"
 C0=$(git -C "$repo" rev-parse HEAD)
 
-# install_baseline <sha>: what `hotserve init box1 <sha>` does on a box
-# where hotserve runs, by hand: the file at <sha> installed 0644 root,
-# applied.json naming it, a reload.
+# install_baseline <sha>: `hotserve init <sha>`, as root inside the
+# box's directory copied from the commit (git archive, as init's help
+# copies it), on a box where hotserve runs; its output in $work/init.out.
 install_baseline() {
-	git -C "$repo" cat-file blob "$1:$FILE" >"$LIVE.e2e-tmp"
-	chmod 0644 "$LIVE.e2e-tmp" && mv "$LIVE.e2e-tmp" "$LIVE"
-	printf '{"sha":"%s","path":"%s","sha256":"%s","signer":"init","when":"%s"}\n' \
-		"$1" "$FILE" "$(sha256sum "$LIVE" | cut -d' ' -f1)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$BOX/applied.json.tmp"
-	chgrp hotserve "$BOX/applied.json.tmp" && chmod 0640 "$BOX/applied.json.tmp"
-	mv "$BOX/applied.json.tmp" "$BOX/applied.json"
-	systemctl reload hotserve
+	rm -rf "$work/init" && mkdir -p "$work/init" \
+		&& git -C "$repo" archive "$1" "$HOST" | tar -xf - -C "$work/init" \
+		&& (cd "$work/init/$HOST" && hotserve init "$1") >"$work/init.out" 2>&1
 }
 
 # restore: the e2e config back, and no baseline.
@@ -270,10 +266,14 @@ echo "=== box apply 0: the units are in place and the box answers ==="
 [ "$(stat -c '%a %U %G' "$BOX" "$BOX/in" "$BOX/out" | tr '\n' ' ')" = "2750 root hotserve 770 root hotserve 2750 root hotserve " ] \
 	&& pass "the exchange tree has the Paths table's modes" || fail "exchange tree: $(stat -c '%n %a %U %G' "$BOX" "$BOX/in" "$BOX/out" | tr '\n' ' ')"
 if ! install_baseline "$C0"; then
-	fail "the baseline file does not load: $(journalctl -u hotserve --no-pager -n 5 | grep -o '"msg":"[^"]*"' | tail -1)"
+	fail "hotserve init failed: $(cat "$work/init.out"); $(journalctl -u hotserve --no-pager -n 5 | grep -o '"msg":"[^"]*"' | tail -1)"
 	restore
 	exit 1
 fi
+grep -qx "init: reloaded. From here, this box takes config only as signed commits sent by your repository's workflow." "$work/init.out" \
+	&& pass "hotserve init installed the baseline and reloaded" || fail "hotserve init printed: $(cat "$work/init.out")"
+[ "$(json_str "$(cat "$BOX/applied.json")" path)" = "$FILE" ] && [ "$(json_str "$(cat "$BOX/applied.json")" signer)" = init ] \
+	&& pass "applied.json records $FILE, derived from the host, signed by init" || fail "applied.json: $(cat "$BOX/applied.json")"
 BASE=$C0
 if ready; then
 	pass "GET / answers once the baseline is installed"

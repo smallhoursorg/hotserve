@@ -17,7 +17,7 @@ import (
 
 // Where the box keeps its state (DESIGN-box.md, "Paths, owners, and
 // who may touch what"). The handler reads applied.json, which the
-// applier (apply.go), `init` and `hotserve box baseline` (PR 4) write
+// applier (apply.go), `init` and `hotserve box baseline` write
 // with the type below, so that the reader and the writers cannot
 // disagree about a field. The applier writes the results and the
 // transaction record too (results.go, txn.go); the markers are the

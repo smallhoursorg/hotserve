@@ -357,6 +357,48 @@ func TestPushFastPath(t *testing.T) {
 	}
 }
 
+// TestPushFastPathNeedsTheShape: HEAD is the baseline and the file is
+// the installed one, but the bundle is in a shape root refuses — at a
+// path the box did not record, with a parent past the end of the chain,
+// without a tree the file proof needs. Each is refused as root would
+// refuse it, never answered no_change (a green run whose next real
+// change would be the first red).
+func TestPushFastPathNeedsTheShape(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		edit  func(p *pushRig, files map[string][]byte)
+		error string // what the refusal begins with or holds
+	}{
+		{"another path", func(p *pushRig, _ map[string][]byte) {
+			a := p.applied()
+			a.Path = "box2/Caddyfile"
+			p.writeApplied(a)
+		}, "this box's file is box2/Caddyfile; the bundle is " + testPath + " — "},
+		{"a parent bundled", func(p *pushRig, files map[string][]byte) {
+			files["parents/0001"] = p.repo.objects[p.base]
+		}, "parents/0001 is past the end of the chain"},
+		{"a tree missing", func(p *pushRig, files map[string][]byte) {
+			delete(files, "trees/"+p.repo.trees[p.base][1])
+		}, "is not in the bundle"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newPushRig(t)
+			files := p.repo.bundleFiles(p.base, p.base)
+			tc.edit(p, files)
+			id := randomID(t)
+			w := p.post(t, p.h, push{id: id, token: p.token(t, p.base), body: bytes.NewReader(tgz(t, files))})
+			m := wantResult(t, w, http.StatusUnprocessableEntity, id, phaseRefused)
+			if msg := m["error"].(string); !strings.HasPrefix(msg, tc.error) && !strings.Contains(msg, tc.error) {
+				t.Fatalf("error %q, want %q in it", msg, tc.error)
+			}
+			p.untouched(t)
+			if p.val.calls != 0 {
+				t.Fatal("validated a bundle pre-verification refuses")
+			}
+		})
+	}
+}
+
 // TestPushKnownIDBeforeTheFastPath: a retry after a lost response is
 // told its push exists, even when the box now runs that push's commit —
 // the fast path would otherwise answer one id two ways.

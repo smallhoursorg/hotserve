@@ -57,6 +57,12 @@ type Applier struct {
 	// waitUntil is the end of the run's one budget for waiting on a hotserve that is
 	// activating or reloading (running).
 	waitUntil time.Time
+	// lockWait, when set, is called once if lock must wait for another
+	// holder: the console's commands say so rather than sit silent.
+	lockWait func()
+	// initPrev, when set, is shown the file runInit is about to replace,
+	// read under the lock after recovery: init's host warning.
+	initPrev func(prev []byte)
 	// wrote is every id whose result this run wrote (or journaled,
 	// unwritten), with its phase — the first terminal one, once there is
 	// one: Retention keeps them, and a terminal one is settled (step 9).
@@ -114,11 +120,23 @@ func (a *Applier) removeTemp(id string) {
 }
 
 // lock takes root's blocking lock (DESIGN-box.md, Paths: `lock`), shared
-// with init, baseline and edit. A crash releases it with the descriptor.
+// with init and baseline. A crash releases it with the descriptor. When
+// another holds it, lockWait (the console's) is told before the wait.
 func (a *Applier) lock() (func(), error) {
 	f, err := os.OpenFile(a.x("lock"), os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
 	if err != nil {
 		return nil, err
+	}
+	if a.lockWait != nil {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return func() { _ = f.Close() }, nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			_ = f.Close()
+			return nil, err
+		}
+		a.lockWait()
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
 		_ = f.Close()

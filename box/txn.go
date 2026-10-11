@@ -99,11 +99,6 @@ type txn struct {
 	// entry is work/<id>.tar, removed after the terminal result; ""
 	// for init, which has none.
 	entry string
-	// skipReload is init's answer that hotserve was not up when it began
-	// (its one question): the swap, and a live rollback, then reload
-	// nothing. The zero value reloads, as the applier always does —
-	// step 16 let it through only on `active`.
-	skipReload bool
 	// recorded is true once a record of this transaction may be on disk.
 	recorded bool
 	// outcome is the terminal result, for init's caller to print.
@@ -155,10 +150,15 @@ func (a *Applier) readRecord() (*record, error) {
 }
 
 // writeApplied advances the baseline to the record's commit (I4: only
-// from a record that says applied or no_change, or init's).
+// from a record that says applied or no_change, the applier's or init's).
 func (a *Applier) writeApplied(rec *record) error {
-	b := encodeJSON(applied{SHA: rec.Commit, Path: rec.Path, SHA256: rec.NewSHA256, Signer: rec.Signer, When: a.clock.Now().UTC()})
-	return a.writeDurable("applied.json", a.x("applied.json"), a.x(".applied.json.tmp"), b, 0o640)
+	return a.putApplied(applied{SHA: rec.Commit, Path: rec.Path, SHA256: rec.NewSHA256, Signer: rec.Signer, When: a.clock.Now().UTC()})
+}
+
+// putApplied writes applied.json whole (I8): writeApplied's write, and
+// `hotserve box baseline`'s.
+func (a *Applier) putApplied(v applied) error {
+	return a.writeDurable("applied.json", a.x("applied.json"), a.x(".applied.json.tmp"), encodeJSON(v), 0o640)
 }
 
 // finish ends a transaction at a terminal phase, in the order every
@@ -201,8 +201,8 @@ func (a *Applier) removeEntry(path string) {
 
 // install runs the transaction from the buffer comparison (Transitions
 // table, from "checking → no_change" and "checking → verified" on). The
-// caller has run steps 10–15 and, for the applier, found hotserve
-// active; for init it has set t.skipReload. It returns errFullDisk or
+// caller has run steps 10–15 (init: the walk) and found hotserve
+// active (init: up), so a live run always reloads. It returns errFullDisk or
 // errUnsettled when the run must stop with the record on disk, nil
 // once a terminal result is written (or journaled).
 func (a *Applier) install(ctx context.Context, t *txn) error {
@@ -275,16 +275,12 @@ func (a *Applier) install(ctx context.Context, t *txn) error {
 	return a.reloadSwapped(ctx, t)
 }
 
-// reloadSwapped is swapped → applied: the reload — or, for init on a box
-// that was not running when it began (t.skipReload), none (a person is at the console; the file loads
-// at the next start) — then the installed file read back, then the
-// record, then the baseline.
+// reloadSwapped is swapped → applied: the reload, then the installed
+// file read back, then the record, then the baseline.
 func (a *Applier) reloadSwapped(ctx context.Context, t *txn) error {
-	if !t.skipReload {
-		if err := a.systemd.Reload(ctx); err != nil {
-			a.logger.Warn("box reload failed", zap.String("id", t.rec.ID), zap.String("error", proof.Bound(err.Error())))
-			return a.rollback(ctx, t, msgReloadFailed, false)
-		}
+	if err := a.systemd.Reload(ctx); err != nil {
+		a.logger.Warn("box reload failed", zap.String("id", t.rec.ID), zap.String("error", proof.Bound(err.Error())))
+		return a.rollback(ctx, t, msgReloadFailed, false)
 	}
 	// "applied" means these bytes: a console edit since the swap is
 	// left as found and the baseline does not advance.
@@ -324,7 +320,7 @@ func (a *Applier) advance(t *txn, phase string) error {
 	}
 	if err := a.writeApplied(&t.rec); err != nil {
 		a.logger.Error("box baseline could not be recorded", zap.String("id", t.rec.ID), zap.String("commit", t.rec.Commit), zap.String("error", proof.Bound(err.Error())))
-		a.finish(t, phaseUnknown, baselineUnrecorded(t.rec.Commit))
+		a.finish(t, phaseUnknown, baselineUnrecorded(t.rec.Origin, phase, t.rec.Commit))
 		return nil
 	}
 	a.finish(t, phase, "")
@@ -363,22 +359,19 @@ func (a *Applier) rollingBack(ctx context.Context, t *txn, recovering bool) erro
 	}
 	// Nothing to reload on a hotserve that is not running: the previous
 	// bytes load at its next start. Recovery asks (a crash may have been
-	// a reboot); init asked once, when it began, and did not reload a
-	// hotserve that was not running then.
-	running := !t.skipReload
+	// a reboot); a live run found hotserve up before it swapped.
 	if recovering {
 		state, err := a.running(ctx)
 		if err != nil {
 			return a.unsettled(t, err)
 		}
-		running = up(state)
-	}
-	if !running {
-		if t.rec.Error != "" {
-			a.logger.Warn("box rollback on a hotserve that is not running", zap.String("id", t.rec.ID), zap.String("why", t.rec.Error))
+		if !up(state) {
+			if t.rec.Error != "" {
+				a.logger.Warn("box rollback on a hotserve that is not running", zap.String("id", t.rec.ID), zap.String("why", t.rec.Error))
+			}
+			a.finish(t, phaseFailed, msgInterruptedStopped)
+			return nil
 		}
-		a.finish(t, phaseFailed, msgInterruptedStopped)
-		return nil
 	}
 	if err := a.systemd.Reload(ctx); err != nil {
 		a.logger.Warn("box reload of the previous Caddyfile failed", zap.String("id", t.rec.ID), zap.String("error", proof.Bound(err.Error())))
@@ -482,12 +475,13 @@ func (a *Applier) recoverRecord(ctx context.Context, rec *record) error {
 		case prev:
 			a.finish(t, phaseFailed, msgInterrupted)
 			return nil
-		case next: // the crash fell after the swap
-			return a.recoverSwapped(ctx, t, d)
+		case next: // the crash fell after the swap: as swapped
+			return a.rollback(ctx, t, msgRolledBackInterrupted, true)
 		}
 	case phaseSwapped:
+		// The reload's outcome is unknown, whoever began it: roll back.
 		if d == next || d == prev {
-			return a.recoverSwapped(ctx, t, d)
+			return a.rollback(ctx, t, msgRolledBackInterrupted, true)
 		}
 	case phaseApplied:
 		if d == next {
@@ -502,31 +496,27 @@ func (a *Applier) recoverRecord(ctx context.Context, rec *record) error {
 	return nil
 }
 
-// recoverSwapped is the swapped row: roll back, except init on a box
-// that is not running, whose swap counts as applied.
-func (a *Applier) recoverSwapped(ctx context.Context, t *txn, d string) error {
-	if t.rec.Origin == originInit && d == t.rec.NewSHA256 {
-		state, err := a.running(ctx)
-		if err != nil {
-			return a.unsettled(t, err)
-		}
-		if !up(state) {
-			t.rec.Phase = phaseApplied
-			if err := a.writeRecord(&t.rec); err != nil {
-				return a.rollback(ctx, t, msgRecordAfterReload, true)
-			}
-			return a.advance(t, phaseApplied)
-		}
-	}
-	return a.rollback(ctx, t, msgRolledBackInterrupted, true)
+// initRun is what runInit reports for init's printout: the outcome, and
+// the baseline the transaction began over (nil if there was none).
+type initRun struct {
+	*result
+	was *applied
 }
 
-// runInit is `hotserve init`'s way into the transaction (PR 4): under
-// root's lock, after recovery, the same state machine with origin init —
-// no `is-active` refusal, no result files, the swap counting as applied
-// when hotserve is not running. The caller has walked and validated the
-// file; plan.rec carries the id, commit, path, host and apps.
-func (a *Applier) runInit(ctx context.Context, rec record, file []byte) (*result, error) {
+// notUpError is init's refusal on a hotserve that is not up once the
+// wait is over. Nothing is written, and the message is the applier's for
+// the same state (DESIGN-box.md, "Console commands").
+type notUpError struct{ msg string }
+
+func (e *notUpError) Error() string { return e.msg }
+
+// runInit is `hotserve init`'s way into the transaction (DESIGN-box.md,
+// "`hotserve init`"): under root's lock, after recovery, step 16's
+// question once — anything but up refuses before anything is written,
+// since the reload is the only check init makes of the file — then the
+// same state machine with origin init and no result files. The caller
+// has walked the file; rec carries the id, commit, path, host and apps.
+func (a *Applier) runInit(ctx context.Context, rec record, file []byte) (*initRun, error) {
 	// The record must be one recovery can read back (record.valid), and
 	// the id names the swap's temporary.
 	if !isRequestID(rec.ID) || !proof.IsID(rec.Commit) {
@@ -551,20 +541,36 @@ func (a *Applier) runInit(ctx context.Context, rec record, file []byte) (*result
 	if err := a.recoverAll(ctx); err != nil {
 		return nil, err
 	}
-	installed, err := readFile(a.caddyfile(), proof.MaxCaddyfile, true)
-	if err != nil {
-		return nil, err
-	}
 	state, err := a.running(ctx)
 	if err != nil {
 		return nil, err
 	}
+	if !up(state) {
+		if transient(state) { // activating still, after the wait
+			return nil, &notUpError{msg: msgStillStarting}
+		}
+		return nil, &notUpError{msg: msgNotRunning}
+	}
+	installed, err := readFile(a.caddyfile(), proof.MaxCaddyfile, true)
+	if err != nil {
+		return nil, err
+	}
+	if a.initPrev != nil {
+		a.initPrev(installed)
+	}
+	run := &initRun{}
+	// One that does not read is replaced like a missing one: init is
+	// the way back, and only root writes it (Triage: occurrence 1).
+	if was, err := readApplied(a.x("")); err == nil {
+		run.was = was
+	}
 	rec.Origin, rec.Signer = originInit, "init"
+	// No diff: nobody reads one for init (it writes no result).
 	rec.Prev, rec.PrevSHA256, rec.NewSHA256 = installed, digest(installed), digest(file)
-	rec.Diff = caddyfileDiff(installed, file)
-	t := &txn{rec: rec, next: file, skipReload: !up(state)}
+	t := &txn{rec: rec, next: file}
 	if err := a.install(ctx, t); err != nil {
 		return nil, err
 	}
-	return t.outcome, nil
+	run.result = t.outcome
+	return run, nil
 }
