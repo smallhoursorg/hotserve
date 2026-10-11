@@ -17,7 +17,7 @@ and signs.
 | File | What it is |
 |---|---|
 | `deploy.example.com/Caddyfile` | One box's whole config; becomes `/etc/hotserve/Caddyfile` on the box whose deploy host names the directory |
-| `.github/workflows/apply.yml` | `make check` on every push and pull request; on `main`, sends the commit to each box (`bin/apply`) |
+| `.github/workflows/apply.yml` | `make check` on every push and pull request, with the latest stable hotserve (a `HOTSERVE_VERSION` repository variable pins another, such as a prerelease); on `main`, sends the commit to each box (`bin/apply`) |
 | `Makefile` | `make signer`, `make check`, `make wip` |
 | `bin/` | What the Makefile and the workflow run |
 | `sudoers` | Creating and editing the apps' env files on the box, and nothing else |
@@ -105,17 +105,13 @@ what it runs.
 
    The box records `<host>/Caddyfile` as its file, and `make check`
    refuses any other layout.
-5. Set `HOTSERVE_VERSION` in `.github/workflows/apply.yml` to the
-   release the box runs: the tag without its `v`. `dpkg -s hotserve`
-   shows it, except that dpkg writes a prerelease as `0.3.0~rc1` where
-   the tag is `0.3.0-rc1`.
-6. Commit. It is signed, and it is the commit the box starts from:
+5. Commit. It is signed, and it is the commit the box starts from:
 
    ```sh
    git add -A && git commit -m "deploy.yourdomain.com: the box's config"
    ```
 
-7. Tell the box which repo it belongs to. Copy the box's directory to
+6. Tell the box which repo it belongs to. Copy the box's directory to
    it, as the commit has it rather than as your checkout does, and run
    `hotserve init` there, as root, with this commit:
 
@@ -127,7 +123,7 @@ what it runs.
    It installs the file, reloads hotserve, and records the commit; the
    box then applies only commits that descend from it. It refuses when
    hotserve is not running, and says how to start it.
-8. Push:
+7. Push:
 
    ```sh
    git push origin main
@@ -155,7 +151,7 @@ SSH port shut, an optional administrator who is not root — is on
 `Caddyfile` pushed by `make push` — is simplest replaced. Upgrade the
 box to a release that has `hotserve init` first. Then make a new repo
 from this template and take the steps above, starting step 3 from the
-file the box runs; steps 3 and 7 need root on the box over SSH, which
+file the box runs; steps 3 and 6 need root on the box over SSH, which
 an earlier version of the hardening steps closed: reopen root's key
 login where you ran the upgrade ([After the first deploy](https://github.com/smallhoursorg/hotserve/blob/main/docs/after-first-deploy.md),
 step 4, says how). Then put this directory's `sudoers` on the box in
@@ -247,7 +243,7 @@ If a change broke the deploy host itself, the next push cannot reach
 the box. The way back is root on the box, over SSH (the provider's
 console only if SSH itself is down): edit `/etc/hotserve/Caddyfile`
 and `systemctl reload hotserve`, or copy the box's directory over as
-step 7 did and `hotserve init` again from it. The next
+step 6 did and `hotserve init` again from it. The next
 signed push overwrites a hand edit — the run warns that it did — which
 is the point: the repo is the truth and the edit is a bridge back to
 it, so a fix that must outlive the night is a commit.

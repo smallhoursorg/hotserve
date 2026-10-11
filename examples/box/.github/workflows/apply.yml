@@ -1,5 +1,5 @@
 # Checks every box's Caddyfile on every push and pull request, with the
-# hotserve version the boxes run; on a push to main, also sends HEAD to
+# latest stable hotserve release; on a push to main, also sends HEAD to
 # each box (bin/apply). A box applies it only if this workflow's token names
 # this repository's main, and a key the box lists signed every commit
 # since the one it runs. Nothing secret is stored here.
@@ -10,7 +10,11 @@ permissions:
   contents: read
 
 env:
-  HOTSERVE_VERSION: 0.2.0 # the version the boxes run
+  # Empty: the latest stable release. The repository variable pins one
+  # instead (0.3.0, 0.3.0-rc1), for a box held on an older release or a
+  # prerelease being tried. Each box validates what it is sent with its
+  # own binary whatever this says; this is only the early check.
+  HOTSERVE_VERSION: ${{ vars.HOTSERVE_VERSION }}
 
 jobs:
   check:
@@ -21,13 +25,23 @@ jobs:
           persist-credentials: false
       - name: Install hotserve (the release's bare binary)
         run: |
-          base=https://github.com/smallhoursorg/hotserve/releases/download/v$HOTSERVE_VERSION
-          f=hotserve_${HOTSERVE_VERSION}_linux_amd64.tar.gz
+          v=${HOTSERVE_VERSION#v}
+          if [ -z "$v" ]; then
+            # Where the latest release's page redirects to: no API call,
+            # so no rate limit shared with other jobs on the runner's IP.
+            v=$(curl -fsSL -o /dev/null -w '%{url_effective}' https://github.com/smallhoursorg/hotserve/releases/latest)
+            v=${v##*/v}
+          fi
+          [[ $v =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] ||
+            { echo "not a hotserve release: '$v' (from HOTSERVE_VERSION, or the latest release's tag)" >&2; exit 1; }
+          base=https://github.com/smallhoursorg/hotserve/releases/download/v$v
+          f=hotserve_${v}_linux_amd64.tar.gz
           curl -fsSLO "$base/$f"
           curl -fsSLO "$base/checksums.txt"
           sha256sum -c --ignore-missing checksums.txt
           tar -xzf "$f" hotserve
           sudo install -m 0755 hotserve /usr/local/bin/hotserve
+          echo "hotserve $v"
       - run: make check
 
   # Not after check: each box validates what it is sent, and one box's
@@ -50,13 +64,24 @@ jobs:
           # its bundle.
           fetch-depth: 0
           persist-credentials: false
+      # The same step as check's: bin/apply needs it only to read each
+      # box's address from its Caddyfile, which any release with `box`
+      # reads alike.
       - name: Install hotserve (the release's bare binary)
         run: |
-          base=https://github.com/smallhoursorg/hotserve/releases/download/v$HOTSERVE_VERSION
-          f=hotserve_${HOTSERVE_VERSION}_linux_amd64.tar.gz
+          v=${HOTSERVE_VERSION#v}
+          if [ -z "$v" ]; then
+            v=$(curl -fsSL -o /dev/null -w '%{url_effective}' https://github.com/smallhoursorg/hotserve/releases/latest)
+            v=${v##*/v}
+          fi
+          [[ $v =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] ||
+            { echo "not a hotserve release: '$v' (from HOTSERVE_VERSION, or the latest release's tag)" >&2; exit 1; }
+          base=https://github.com/smallhoursorg/hotserve/releases/download/v$v
+          f=hotserve_${v}_linux_amd64.tar.gz
           curl -fsSLO "$base/$f"
           curl -fsSLO "$base/checksums.txt"
           sha256sum -c --ignore-missing checksums.txt
           tar -xzf "$f" hotserve
           sudo install -m 0755 hotserve /usr/local/bin/hotserve
+          echo "hotserve $v"
       - run: bin/apply

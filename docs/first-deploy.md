@@ -237,10 +237,8 @@ host=deploy.yourdomain.com           # your deploy host: the site that carries b
 git mv deploy.example.com $host
 ```
 
-Set `HOTSERVE_VERSION` in `.github/workflows/apply.yml` to step 2's
-`v`, the release tag without its `v`: the workflow checks every change
-with the binary the box runs. Then commit. The commit is signed, and
-it is the one the box starts from:
+Then commit. The commit is signed, and it is the one the box starts
+from:
 
 ```sh
 git add -A && git commit -m "$host: the box's config"
@@ -277,8 +275,8 @@ the box says why. Fix it, commit, and run both lines again.
 git push origin main
 ```
 
-The workflow checks the file with the release you set, and sends the
-commit to the box, which checks the run's token and that the file is
+The workflow checks the file with the latest hotserve release, and
+sends the commit to the box, which checks the run's token and that the file is
 the one in that commit, and answers that it already runs it:
 
 ```

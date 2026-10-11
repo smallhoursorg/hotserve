@@ -105,10 +105,10 @@ Before you upgrade:
   so a kernel update or reboot bundled with an upgrade leaves you
   guessing which change did it.
 
-After the upgrade, set `HOTSERVE_VERSION` in the box repository's
-`.github/workflows/apply.yml` to the new release and push: its workflow
-checks every change with that binary, and should check with the one
-the box runs.
+The box repository's workflow checks config with the latest stable
+release, so it needs nothing after an upgrade — unless its
+`HOTSERVE_VERSION` repository variable pins a release, which then
+wants the new one.
 
 There is no APT repository yet, so nothing upgrades hotserve behind
 your back; the hosted repository on the [roadmap](../README.md#roadmap) is what
