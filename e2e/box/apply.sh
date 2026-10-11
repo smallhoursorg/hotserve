@@ -458,7 +458,7 @@ mkdir -p "$repo/bin" "$work/curl"
 cp /template-apply "$repo/bin/apply"
 printf 'connect-to = %s:443:127.0.0.1:8443\ninsecure\nhttp1.1\n' "$HOST" >"$work/curl/.curlrc"
 template_apply() { # <sha> → its output in $work/tout, exit status returned
-	CURL_HOME=$work/curl HOTSERVE_TOKEN=$(tok "$1") "$repo/bin/apply" box1 >"$work/tout" 2>&1
+	CURL_HOME=$work/curl HOTSERVE_TOKEN=$(tok "$1") "$repo/bin/apply" "$HOST" >"$work/tout" 2>&1
 }
 AT=$C1
 C4=$(commit alice "$work/f2")
