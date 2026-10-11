@@ -524,9 +524,10 @@ token's `sha` claim, pre-checks the signature, runs `hotserve
 validate` (and `hotserve-backup validate` where installed) as bounded
 children with their output redacted, and drops the bundle as one
 regular file for root. It answers 202 as soon as root has published
-`verified`, which precedes the install; the outcome is polled, because
-root's part can take minutes, and a proxy in front of the box may cut
-a request held that long.
+`verified`, which precedes the install, or 504 once it has waited as
+long as it may; either way the outcome is polled, because root's part
+can take minutes, and a proxy in front of the box may cut a request
+held that long.
 
 **The applier** (`hotserve-box-apply.service`, root, one shot, started
 by a path unit watching the drop directory) trusts nothing the
