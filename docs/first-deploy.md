@@ -58,7 +58,7 @@ Logged in as root, fetch the `.deb` for the box's architecture from
 it, and install it:
 
 ```sh
-v=0.2.0                             # the release you are installing
+v=0.3.0                             # the release you are installing
 arch=$(dpkg --print-architecture)   # amd64 or arm64
 base=https://github.com/smallhoursorg/hotserve/releases/download/v$v
 mkdir -p /var/local/hotserve && cd /var/local/hotserve
