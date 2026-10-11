@@ -26,6 +26,7 @@ Names used throughout — replace them with yours as you go:
 | `example.com` | The app's address |
 | `deploy.example.com` | The deploy webhook's address, on the same box: the app's deploys and the box's config both arrive there |
 | `box.example.com` | The box's own name, for SSH: any name that resolves to it, `example.com` included, or its address |
+| `your-org` | Your GitHub organization, or your username if the repositories are in your own account |
 | `your-org/example` | The GitHub repository the app deploys from |
 | `your-org/boxes` | The private GitHub repository that holds the box's config |
 | `example` | The app's name on the box |
@@ -169,14 +170,18 @@ only signs is better than the one you push to GitHub with, and how to
 use a hardware key.
 
 **Make the file yours.** `deploy.example.com/Caddyfile` is the box's
-whole config: who may change it, the Node app from step 4 and who may
-deploy it, the app's site, and the deploy host. Its comments say what
-each line does. Replace `example.com`, `deploy.example.com` and
-`your-org` — the last one three times: the `box` block's `claim
-repository your-org/boxes` names this repository (the box takes config
-from its workflow alone, so a placeholder left there refuses the first
-push), `artifact_allowlist` pins the organization, and the app's
-`deploy_trust` its repository. What is new beside the app is at the
+whole config: who may change it, the app it will run and who may
+deploy that app, the app's site, and the deploy host. The app is
+hotserve's example Node app, named `example`. A box runs only the apps
+its config names, so the app is named here, before anything deploys
+it; step 4 makes its repository and deploys it. The file's comments
+say what each line does. Replace `example.com`, `deploy.example.com`
+and `your-org` (your organization, or your username) — the last one
+three times: the `box` block's `claim repository your-org/boxes` names
+this repository (the box takes config from its workflow alone, so a
+placeholder left there refuses the first push), `artifact_allowlist`
+pins the organization or account, and the app's `deploy_trust` its
+repository. What is new beside the app is at the
 top and the bottom:
 
 ```caddyfile
@@ -255,10 +260,11 @@ the above:
    env DATA_DIR {shared_dir}
    ```
 
-Then in step 4, start from
+When you reach step 4, make the app's repository from
 [hotserve-example-deno](https://github.com/smallhoursorg/hotserve-example-deno) instead — the same **Use this
-template** — and leave `HOTSERVE_RUNS_ON` unset: the tarball has no
-native code, so any runner builds it.
+template** — and leave out the `HOTSERVE_RUNS_ON` variable that step
+asks an amd64 box for: the tarball has no native code, so any runner
+builds it.
 
 </details>
 
@@ -333,15 +339,6 @@ has how. With nothing deployed yet, a correct box looks like this:
   a line with `"apps":1,"app_names":["example"]`.
 - The workflow run is green.
 
-**On an arm64 box, one more command as root.** The Node example's
-executable is a copy of Node, and Node's arm64 build links one library
-a stock Debian 13 does not ship; without it the app fails to start
-with exit status 127. amd64 needs nothing.
-
-```sh
-ssh root@box.example.com apt install -y libatomic1
-```
-
 ## 4. The app
 
 The Node app is published as a template repository,
@@ -378,6 +375,16 @@ Variables, add:
 
 Or from a laptop:
 `gh variable set HOTSERVE_URL -R your-org/example --body https://deploy.example.com/example`.
+
+**On an arm64 box, one more command as root.** The Node example's
+executable is a copy of Node, and Node's arm64 build links one library
+a stock Debian 13 does not ship; without it the app fails to start
+with exit status 127. amd64 needs nothing, and nor does the Deno
+example.
+
+```sh
+ssh root@box.example.com apt install -y libatomic1
+```
 
 Then re-run the red run — Actions → the failed run → **Re-run jobs** —
 which picks up the variable you just set. (A push does the same, and
