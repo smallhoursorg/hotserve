@@ -101,7 +101,7 @@ func TestWritesThatLandedThenFailed(t *testing.T) {
 		if r := b.result(id); r != nil {
 			t.Fatalf("a verified with nothing behind it stayed: %+v", r)
 		}
-		b.clock.advance(16 * time.Minute)
+		b.clock.advance(pendingAge + time.Minute)
 		if err := b.run(hooks{}); err != nil {
 			t.Fatal(err)
 		}

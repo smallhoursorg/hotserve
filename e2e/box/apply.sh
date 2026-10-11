@@ -103,7 +103,7 @@ phase() { json_str "$(resp)" phase; }
 # poll: GET /?result=$ID with a fresh token each time until the phase
 # is terminal; 404 is "not yet" after a POST that was not answered
 # terminally (Message catalogue). Bounded at 120 s, the e2e stand-in
-# for the workflow's fifteen minutes.
+# for the workflow's twenty-five minutes.
 poll() {
 	i=0
 	while [ "$i" -lt 120 ]; do

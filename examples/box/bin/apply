@@ -21,7 +21,7 @@
 #   4. POST / under a request id chosen at random. The box answers at
 #      once (applied, nothing to change, refused), or 202 while it
 #      installs; then GET /?result=<id> until it says how the push
-#      ended, for 15 minutes at most. A response lost on the way is
+#      ended, for 25 minutes at most. A response lost on the way is
 #      recovered the same way: the id was chosen here.
 #
 #   HOTSERVE_TOKEN     a token the box block's deploy_trust accepts, naming
@@ -46,6 +46,9 @@ actions=${GITHUB_ACTIONS:-}
 # A request's bound. A push's is longer: the box answers a POST within
 # 30 s once it has the bundle, but checking a long chain takes longer.
 maxtime=60
+# How long a push is waited for, polled or held off by another pending
+# one: past root's worst case (box/DESIGN-box.md, Caps, "workflow poll").
+patience=1500
 # A laptop's one token can outlive a long run; a minted one cannot.
 expired=", or HOTSERVE_TOKEN expired (its --ttl)"
 [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || expired=
@@ -238,7 +241,7 @@ outcome() {
 	esac
 }
 
-# poll [resend]: GET /?result=<id> until the push settles, 15 minutes at
+# poll [resend]: GET /?result=<id> until the push settles, 25 minutes at
 # most. A 404 is "not yet" after the box took the push (202, 504): only
 # root can tell a push it holds from one it lost. After a POST that got
 # no answer from the box, a 404 may also be a push that never arrived,
@@ -246,7 +249,7 @@ outcome() {
 # with `resend`, every third 404 sends the POST again under the same
 # id, which the box answers 409 duplicate if it holds the push.
 poll() {
-	deadline=$(($(date +%s) + 900))
+	deadline=$(($(date +%s) + patience))
 	wait=1 last= misses=0
 	while [ "$(date +%s)" -lt "$deadline" ]; do
 		sleep "$wait"
@@ -277,9 +280,9 @@ poll() {
 		esac
 	done
 	if [ "$last" = 404 ] && [ "${1:-}" = resend ]; then
-		red "no result for push $id after 15 minutes, and no sign the box took it: journalctl -u hotserve -u hotserve-box-apply on the box"
+		red "no result for push $id after 25 minutes, and no sign the box took it: journalctl -u hotserve -u hotserve-box-apply on the box"
 	else
-		red "no result for push $id after 15 minutes: journalctl -u hotserve-box-apply on the box"
+		red "no result for push $id after 25 minutes: journalctl -u hotserve-box-apply on the box"
 	fi
 }
 
@@ -368,7 +371,7 @@ send() {
 	printf 'apply: %s → %s: the box runs %s; sending %s (%s commit%s), push %s\n' \
 		"$path" "$url" "$(printf '%.7s' "$base")" "$short" "$((n + 1))" "$([ "$n" = 0 ] && echo || echo s)" "$id"
 	said=
-	deadline=$(($(date +%s) + 900))
+	deadline=$(($(date +%s) + patience))
 	while :; do
 		# No answer at all is polled for: the id was chosen here.
 		post
@@ -390,7 +393,7 @@ send() {
 			sleep 2 ;;
 		'a push is being admitted'*|'a push is pending'*)
 			if [ "$(date +%s)" -ge "$deadline" ]; then
-				red "$e: for 15 minutes. On the box: journalctl -u hotserve-box-apply -u hotserve-box-apply.path, and if the path unit is failed, systemctl restart hotserve-box-apply.path (again ten seconds later if it fails)"
+				red "$e: for 25 minutes. On the box: journalctl -u hotserve-box-apply -u hotserve-box-apply.path, and if the path unit is failed, systemctl restart hotserve-box-apply.path (again ten seconds later if it fails)"
 				return 0
 			fi
 			printf 'apply: %s; trying again\n' "$e"

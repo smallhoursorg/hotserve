@@ -66,10 +66,10 @@ func TestRetention(t *testing.T) {
 			t.Error("wrong sweep")
 		}
 	})
-	t.Run("marker, no result, older than fifteen minutes: stranded, failed written", func(t *testing.T) {
+	t.Run("marker, no result, older than pendingAge: stranded, failed written", func(t *testing.T) {
 		b := newTestBox(t)
 		id := randomID(t)
-		b.markerAt(id, b.clock.Now().Add(-16*time.Minute))
+		b.markerAt(id, b.clock.Now().Add(-pendingAge-time.Minute))
 		if err := b.run(hooks{}); err != nil {
 			t.Fatal(err)
 		}
@@ -80,10 +80,10 @@ func TestRetention(t *testing.T) {
 			t.Error("a kept id lost its marker")
 		}
 	})
-	t.Run("marker, no result, younger than fifteen minutes: pending, untouched", func(t *testing.T) {
+	t.Run("marker, no result, younger than pendingAge: pending, untouched", func(t *testing.T) {
 		b := newTestBox(t)
 		id := randomID(t)
-		b.markerAt(id, b.clock.Now().Add(-14*time.Minute))
+		b.markerAt(id, b.clock.Now().Add(-pendingAge+time.Minute))
 		if err := b.run(hooks{}); err != nil {
 			t.Fatal(err)
 		}

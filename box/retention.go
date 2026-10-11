@@ -23,7 +23,7 @@ const (
 	// pendingAge is how long a marker with no result blocks admission;
 	// past it, with nothing in in/ or work/ and no record, root settles
 	// it as stranded.
-	pendingAge = 15 * time.Minute
+	pendingAge = 25 * time.Minute
 )
 
 // idState is what the sweep knows of one id.
