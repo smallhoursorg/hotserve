@@ -124,14 +124,15 @@ unescape() {
 		while ((i = index(s, "\\")) > 0) {
 			out = out substr(s, 1, i - 1); c = substr(s, i + 1, 1)
 			h = substr(s, i + 2, 4)
-			# An escaped ASCII character (json.Marshal writes <, > and &
-			# so) is that character; anything else stays escaped.
-			if (c == "u" && h ~ /^[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]$/ && (n = hex(h)) > 0 && n < 128) {
+			# An escaped printable ASCII character (json.Marshal writes
+			# <, > and & so) is that character; anything else, a control
+			# character or \r included, stays escaped: the text reaches
+			# a terminal and the Actions log.
+			if (c == "u" && h ~ /^[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]$/ && (n = hex(h)) >= 32 && n < 127) {
 				out = out sprintf("%c", n); s = substr(s, i + 6); continue
 			}
 			if (c == "n") out = out "\n"
 			else if (c == "t") out = out "\t"
-			else if (c == "r") out = out "\r"
 			else if (c == "\"" || c == "\\" || c == "/") out = out c
 			else out = out "\\" c
 			s = substr(s, i + 2)
@@ -254,7 +255,7 @@ poll() {
 			misses=0
 			post
 			case $code in
-			409|000|mint|502|503|504) ;;
+			409|000|mint|429|502|503|504) ;;
 			400)
 				# A broken upload admits nothing: the next resend tries again.
 				case $(field error) in
@@ -275,7 +276,7 @@ poll() {
 		*) outcome; return 0 ;;
 		esac
 	done
-	if [ "$last" = 404 ]; then
+	if [ "$last" = 404 ] && [ "${1:-}" = resend ]; then
 		red "no result for push $id after 15 minutes, and no sign the box took it: journalctl -u hotserve -u hotserve-box-apply on the box"
 	else
 		red "no result for push $id after 15 minutes: journalctl -u hotserve-box-apply on the box"
@@ -396,14 +397,21 @@ send() {
 			# Another push's body is being read: a moment. One pending
 			# on the box: its apply, seconds.
 			case $e in 'a push is being admitted'*) sleep 2 ;; *) sleep 10 ;; esac ;;
-		*) red "$e"; return 0 ;;
+		*) red "${e:-HTTP $code: $(head -c 300 "$tmpd/resp" 2>/dev/null)}"; return 0 ;;
 		esac
 	done
 	case $code in
-	# No answer, or one from something in front of the box: the box may
-	# have the push, and the id is enough to ask.
+	# No answer, or one from something in front of the box (a 504
+	# without the push's id): the box may have the push, and the id is
+	# enough to ask.
 	000|502|503) echo "apply: no answer from the box to the push; asking for its result"; poll resend ;;
-	409|504) echo "apply: the box has the push; asking for its result"; poll ;;
+	504)
+		if [ "$(field id)" = "$id" ]; then
+			echo "apply: the box has the push; asking for its result"; poll
+		else
+			echo "apply: no answer from the box to the push; asking for its result"; poll resend
+		fi ;;
+	409) echo "apply: the box has the push; asking for its result"; poll ;;
 	*) outcome || poll ;;
 	esac
 }

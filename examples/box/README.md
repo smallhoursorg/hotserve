@@ -72,7 +72,10 @@ administered as root. This repo takes over from there.
    and makes this checkout sign every commit with that key (its own git
    config: `gpg.format ssh`, `user.signingkey`, `commit.gpgsign`). No
    key yet: `ssh-keygen -t ed25519`, or `-t ed25519-sk` for one held by
-   a hardware key, which signs only with a touch.
+   a hardware key, which signs only with a touch. Better still, a key
+   that only signs: if the key you push to GitHub with also signs, the
+   two checks a box makes (the push came from `main`, a signer made the
+   commit) fall to one stolen key.
 3. Make the Caddyfile your box's. Start from the one the box runs, so
    nothing edited there is lost:
 
@@ -108,10 +111,11 @@ administered as root. This repo takes over from there.
    ```
 
 7. Tell the box which repo it belongs to. Copy the box's directory to
-   it and run `hotserve init` there, as root, with this commit:
+   it, as the commit has it rather than as your checkout does, and run
+   `hotserve init` there, as root, with this commit:
 
    ```sh
-   scp -r deploy.yourdomain.com root@box.example.com:
+   git archive HEAD deploy.yourdomain.com | ssh root@box.example.com tar -xf -
    ssh root@box.example.com "cd deploy.yourdomain.com && hotserve init $(git rev-parse HEAD)"
    ```
 

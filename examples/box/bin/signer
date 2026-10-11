@@ -75,10 +75,12 @@ for f in $boxes; do
 		printf 'signer: %s already lists this key, as %s\n' "$f" "$listed"
 		continue
 	fi
-	# Staged afterwards only if nothing else in the file is unstaged:
-	# the commit that adds a signer carries that line and nothing more.
+	# Staged afterwards only if the file is committed and has no other
+	# edits, staged or not: the commit that adds a signer carries that
+	# line and nothing more.
 	clean=0
-	git diff --quiet -- "$f" 2>/dev/null && clean=1
+	git ls-files --error-unmatch -- "$f" >/dev/null 2>&1 &&
+		git diff --quiet -- "$f" && git diff --cached --quiet -- "$f" && clean=1
 	tmp=$f.signer-tmp
 	awk -v line="signer $principal $type $b64" '
 		{ print }
@@ -92,7 +94,7 @@ for f in $boxes; do
 	if [ "$clean" = 1 ]; then
 		git add -- "$f"
 	else
-		printf 'signer: %s has other unstaged edits, so it is not staged: git add -p it\n' "$f"
+		printf 'signer: %s has other edits, or is not committed yet, so it is not staged: git add -p it\n' "$f"
 	fi
 done
 

@@ -264,12 +264,22 @@ func TestBoxSigner(t *testing.T) {
 	// the signer's commit carries nothing else.
 	r.git("reset", "-q")
 	r.write(boxFile, strings.Replace(after, "\t\t# signers\n"+line, "\t\t# signers\n", 1)+"# an edit of mine\n")
-	if out, code := r.run("signer"); code != 0 || !strings.Contains(out, "has other unstaged edits, so it is not staged") {
+	if out, code := r.run("signer"); code != 0 || !strings.Contains(out, "has other edits, or is not committed yet, so it is not staged") {
 		t.Fatalf("unstaged edits: exit %d\n%s", code, out)
 	}
 	if got := r.git("diff", "--cached", "--name-only"); got != "" {
 		t.Errorf("staged over unstaged edits: %q", got)
 	}
+	// Nor over edits already staged.
+	r.write(boxFile, strings.Replace(after, "\t\t# signers\n"+line, "\t\t# signers\n", 1)+"# an edit of mine\n")
+	r.git("add", boxFile)
+	if out, code := r.run("signer"); code != 0 || !strings.Contains(out, "has other edits, or is not committed yet, so it is not staged") {
+		t.Fatalf("staged edits: exit %d\n%s", code, out)
+	}
+	if got := r.git("diff", "--name-only"); got != boxFile {
+		t.Errorf("the signer line was staged over staged edits: unstaged %q", got)
+	}
+	r.git("reset", "-q")
 	r.write(boxFile, after)
 	r.git("add", boxFile)
 
@@ -391,7 +401,7 @@ type standIn struct {
 	mints     int
 	bundles   int
 	onGet     string   // "": the baseline; "401"; "nobaseline"
-	onPost    []string // a behaviour per POST, in order: "admitting", "unread", "504", "502", "lost", "sync"; then "": 202
+	onPost    []string // a behaviour per POST, in order: "admitting", "unread", "never", "proxy504", "throttled", "html409", "504", "502", "lost", "sync"; then "": 202
 	edited    bool     // results say the file was edited on the box
 	throttle  int      // polls answered 429 before the result
 	mintFails int      // token requests that fail before one succeeds
@@ -539,6 +549,18 @@ func (s *standIn) post(w http.ResponseWriter, r *http.Request) {
 		reply(w, 400, map[string]string{"error": "could not read the bundle: unexpected EOF"})
 		return
 	}
+	if how == "proxy504" { // a proxy in front gave up before the box had it
+		http.Error(w, "gateway timeout", http.StatusGatewayTimeout)
+		return
+	}
+	if how == "throttled" {
+		reply(w, 429, map[string]string{"error": "too many failed requests"})
+		return
+	}
+	if how == "html409" { // something in front of the box, in its own words
+		http.Error(w, "<html>conflict</html>", http.StatusConflict)
+		return
+	}
 	if how == "never" { // the connection broke before the box read a byte
 		if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
 			_ = conn.Close()
@@ -603,7 +625,7 @@ func (s *standIn) post(w http.ResponseWriter, r *http.Request) {
 	res := map[string]any{"id": id, "phase": "verified", "commit": b.Commit.ID, "path": b.Path, "signer": signer,
 		"box_webhook": "deploy.example.com", "caddyfile_edited_out_of_band": s.edited, "apps": next.Apps}
 	verified := encode(res)
-	res["phase"], res["diff"] = "applied", "--- installed\n+++ pushed\n@@ a hunk @@\n-\told \"line\"\n+\tnew\tline <a & b>\n"
+	res["phase"], res["diff"] = "applied", "--- installed\n+++ pushed\n@@ a hunk @@\n-\told \"line\"\n+\tnew\tline <a & b>\x1b[2J\r\n"
 	s.results[id] = encode(res)
 	s.baseline, s.installed = b.Commit.ID, b.Caddyfile
 	switch how {
@@ -733,15 +755,16 @@ func TestBoxApply(t *testing.T) {
 		for _, want := range []string{
 			"the box runs " + g.base[:7] + "; sending " + head[:7] + " (2 commits)",
 			"deploy.example.com at " + head[:7] + ", signed by alice@example.com; verified; installing",
-			"--- installed\n+++ pushed\n@@ a hunk @@\n-\told \"line\"\n+\tnew\tline <a & b>\n",
+			// A control character, and a carriage return, stay escaped.
+			"--- installed\n+++ pushed\n@@ a hunk @@\n-\told \"line\"\n+\tnew\tline <a & b>\\u001b[2J\\r\n",
 			"deploy.example.com at " + head[:7] + ": loaded; running apps are not restarted; apps example",
 		} {
 			if !strings.Contains(out, want) {
 				t.Errorf("no %q in the output", want)
 			}
 		}
-		if code != 0 || g.box.seen().baseline != head {
-			t.Fatalf("exit %d, baseline %s\n%s", code, g.box.seen().baseline, out)
+		if code != 0 || g.box.seen().baseline != head || strings.ContainsAny(out, "\x1b\r") {
+			t.Fatalf("exit %d, baseline %s\n%q", code, g.box.seen().baseline, out)
 		}
 		if out, code := g.apply(); code != 0 || !strings.Contains(out, "the box already runs this Caddyfile") {
 			t.Fatalf("again: exit %d\n%s", code, out)
@@ -783,8 +806,13 @@ func TestBoxApply(t *testing.T) {
 			"never": "no answer from the box to the push; asking for its result",
 			// Sent again, and that upload breaks too: tried once more.
 			"never,unread": "no answer from the box to the push; asking for its result",
+			// A 504 without the push's id is not the box's: sent again.
+			"proxy504": "no answer from the box to the push; asking for its result",
+			// Sent again, and throttled: not yet, as a throttled poll is.
+			"never,throttled": "no answer from the box to the push; asking for its result",
 		} {
 			t.Run(how, func(t *testing.T) {
+				t.Parallel()
 				g := newApplyRig(t)
 				head := g.change("one")
 				g.box.set(func(s *standIn) { s.onPost, s.edited = strings.Split(how, ","), true })
@@ -796,6 +824,16 @@ func TestBoxApply(t *testing.T) {
 					t.Errorf("no warning for an edit on the box:\n%s", out)
 				}
 			})
+		}
+	})
+
+	t.Run("a refusal in something else's words", func(t *testing.T) {
+		t.Parallel()
+		g := newApplyRig(t)
+		g.change("one")
+		g.box.set(func(s *standIn) { s.onPost = []string{"html409"} })
+		if out, code := g.apply(); code != 1 || !strings.Contains(out, "HTTP 409: <html>conflict</html>") {
+			t.Fatalf("exit %d\n%s", code, out)
 		}
 	})
 

@@ -98,10 +98,11 @@ deploys on every change, so what they say works:
   the box's Caddyfile, where a compromised build cannot widen them.
   Its template is [hotserve-example-deno](https://github.com/smallhoursorg/hotserve-example-deno).
 - **[examples/box](examples/box)** — the box's config, kept in a
-  private repo of its own: the `Caddyfile` (which app, which repo may
-  deploy it, where the deploy webhook answers), a `make push` that
-  validates it on the box and never leaves an invalid file there, and
-  the sudoers file above.
+  private repo of its own: a Caddyfile per box (which app, which repo
+  may deploy it, where the deploy webhook answers, who may sign a
+  change), applied by the workflow on each signed push to `main`; the
+  box checks the signatures and keeps the file it had if the new one
+  does not load. And the sudoers file above.
 
 Both apps serve on the socket hotserve hands them, answer `/health`,
 migrate before each version starts, stop cleanly, and deploy from

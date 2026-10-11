@@ -1227,7 +1227,7 @@ address a file names.
 
 **`box describe <Caddyfile>`** prints the same walk's reading a fact a
 line — `host <host>`, then `app <name>` and `signer <principal>
-<key-type> <base64>` in file order — for the template's `make check`,
+<key-type> <base64>`, each kind in file order — for the template's `make check`,
 which prints its line for each box from it and compares the boxes'
 signer keys. Same refusals; nothing on the box runs it.
 

@@ -52,7 +52,8 @@ address a file names. The file may be a pipe:
 				Use:   "describe <Caddyfile>",
 				Short: "Print a Caddyfile's box_webhook host, apps and signers, as the box reads them",
 				Long: `Reads the Caddyfile as "hotserve box webhook" does and prints one line
-per fact, in file order, for a script to read:
+per fact, for a script to read: the host, then the apps, then the
+signers, each in file order:
 
     host deploy.example.com
     app example
