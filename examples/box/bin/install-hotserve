@@ -1,7 +1,8 @@
 #!/bin/sh
 # Installs the hotserve the workflow checks with, as
-# /usr/local/bin/hotserve: the release's bare binary for linux/amd64,
-# verified against the release's checksums.txt. Which release:
+# /usr/local/bin/hotserve: the release's bare binary for this Linux
+# machine's architecture (amd64 or arm64), verified against the
+# release's checksums.txt. Which release:
 # HOTSERVE_VERSION (the repository variable, e.g. 0.3.0 or 0.3.0-rc1)
 # when it is set, else the latest stable one. Each box validates what it
 # is sent with its own binary whatever this installs, so this is only
@@ -10,6 +11,14 @@
 # For the workflow: it installs with sudo. On a laptop, take the
 # release's tarball from its page.
 set -eu
+
+# The releases ship linux/amd64 and linux/arm64 binaries only.
+[ "$(uname -s)" = Linux ] || { echo "install-hotserve: hotserve releases are Linux binaries; this is $(uname -s)" >&2; exit 1; }
+case $(uname -m) in
+x86_64 | amd64) arch=amd64 ;;
+aarch64 | arm64) arch=arm64 ;;
+*) echo "install-hotserve: no hotserve release for $(uname -m): amd64 and arm64 only" >&2; exit 1 ;;
+esac
 
 v=${HOTSERVE_VERSION:-}
 v=${v#v}
@@ -32,10 +41,10 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 cd "$tmp"
 base=https://github.com/smallhoursorg/hotserve/releases/download/v$v
-f=hotserve_${v}_linux_amd64.tar.gz
+f=hotserve_${v}_linux_${arch}.tar.gz
 curl -fsSLO "$base/$f"
 curl -fsSLO "$base/checksums.txt"
 sha256sum -c --ignore-missing checksums.txt
 tar -xzf "$f" hotserve
 sudo install -m 0755 hotserve /usr/local/bin/hotserve
-echo "install-hotserve: hotserve $v"
+echo "install-hotserve: hotserve $v ($arch)"

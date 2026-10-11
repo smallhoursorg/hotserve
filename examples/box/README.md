@@ -82,23 +82,29 @@ what it runs.
    two checks a box makes (the push came from `main`, a signer made the
    commit) fall to one stolen key.
 3. Make the Caddyfile your box's. On a box that already serves its
-   own Caddyfile, start from that one, so nothing edited there is lost:
+   own Caddyfile, start from that file whole — its global options,
+   sites and apps — so nothing edited there is lost, and keep the
+   template's beside it:
 
    ```sh
-   scp root@box.example.com:/etc/hotserve/Caddyfile deploy.example.com/Caddyfile.live
+   mv deploy.example.com/Caddyfile template.caddy
+   scp root@box.example.com:/etc/hotserve/Caddyfile deploy.example.com/Caddyfile
    ```
 
-   Then bring over its sites and apps into `deploy.example.com/Caddyfile`,
-   keeping the `box` block and the deploy host's `box_webhook`, and
-   delete `Caddyfile.live`. On a fresh box there is nothing to bring
+   Then copy the template's two box pieces into it: the `box { … }`
+   block, with the signer line `make signer` added, into the global
+   options, and `box_webhook` into the deploy host's site. Inline
+   anything it `import`s, since a box refuses a file that imports, and
+   delete `template.caddy`. On a fresh box there is nothing to bring
    over. Either way, replace `your-org/boxes`, in the `box`
    block's `claim repository`, with this repo's `owner/name`: the box
    takes pushes from that repository's workflow alone, so a placeholder
-   left there refuses the first one. Replace `example.com`,
-   `deploy.example.com` and `your-org/example` with yours — `your-org`
-   twice more: the `artifact_allowlist` entry pins the organization
-   alone, and the app's `deploy_trust` its repo. The `app example` block is hotserve's
-   examples/node; a Deno app's lines are in its examples/deno.
+   left there refuses the first one. On a fresh box, also replace
+   `example.com`, `deploy.example.com` and `your-org/example`
+   with yours — `your-org` twice more: the `artifact_allowlist` entry
+   pins the organization alone, and the app's `deploy_trust` its repo.
+   The `app example` block is hotserve's examples/node; a Deno app's
+   lines are in its examples/deno.
 4. Name the directory for the box's deploy host, the site that carries
    `box_webhook`:
 
@@ -254,18 +260,26 @@ it, so a fix that must outlive the night is a commit.
 ## Outside GitHub
 
 Only the workflow file is GitHub's. `bin/apply` is what talks to the
-boxes, and any CI that gives it what the Actions job does can run it.
-This is not tested outside GitHub; what it needs:
+boxes, and any CI that gives it what the Actions job does can run it:
 
 - a checkout of the commit being pushed, with its full history;
 - a `hotserve` on `PATH` (`bin/install-hotserve` installs one, with
   `sudo`; `make check` needs it too);
-- `HOTSERVE_TOKEN`: an OIDC token that the `box` block's `deploy_trust`
-  accepts and whose `sha` claim names that commit. On GitLab, that is
-  an `id_tokens:` entry with `aud: hotserve`, and a box block trusting
-  `deploy_trust gitlab { audience hotserve; claim project_path your-org/boxes; claim ref_path refs/heads/main }`.
-  `bin/apply` sends that one token with every request, polls included,
-  so it must outlive the run.
+- `HOTSERVE_TOKEN`: a token that the `box` block's `deploy_trust`
+  accepts and whose `sha` claim names that commit. `bin/apply` sends
+  that one token with every request, polls included, so it must
+  outlive the run.
+  - From a CI's OIDC: on GitLab, an `id_tokens:` entry with
+    `aud: hotserve`, and a box block trusting
+    `deploy_trust gitlab { audience hotserve; claim project_path your-org/boxes; claim ref_path refs/heads/main }`.
+    Not tested.
+  - From a runner without OIDC: a key the box block trusts as
+    `deploy_trust local { public_key …; audience hotserve }`
+    (`hotserve deploy-keygen` makes the pair), and a token minted each
+    run with `hotserve deploy-token --key … --audience hotserve --claims sha=<commit>`.
+    hotserve's own end-to-end tests run `bin/apply` this way. The
+    private key is then a stored secret, which OIDC avoids; the
+    signatures still bound what it can push.
 
 The rules above hold on any host: a merge button that squashes,
 rebases or writes its own merge commit lands a commit no listed key
