@@ -964,9 +964,11 @@ does not isolate the runtime.
   before `box_webhook` (box/DESIGN-box.md, step 6) — a check a
   supervisor RCE skips with the rest of the handler, and one `hotserve
   init` does not run. Neither catches a mistyped `claim`, a host
-  without a certificate, or a key no laptop holds, any of which strands
-  the box. The remedy is the console: `hotserve init` again, or a hand
-  edit the next signed push overwrites.
+  without a certificate, a key no laptop holds, or a server-level
+  setting that refuses the connection before any route runs (a
+  required client certificate, a listener wrapper, `protocols`), any of
+  which strands the box. The remedy is root on the box: `hotserve init`
+  again, or a hand edit the next signed push overwrites.
 - **A signer's software-held key is the box.** Nothing on the box
   distinguishes a signature made by the operator from one made by
   whoever holds the operator's key file. A hardware-held key (`sk-`

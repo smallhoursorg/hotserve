@@ -1,8 +1,9 @@
 #!/bin/sh
 # Checks that every box in this repository is one hotserve will take,
-# with the hotserve the boxes run (.github/workflows/apply.yml installs
-# it; there is no macOS build, so on a Mac the workflow is where this
-# runs). It reads the files as they are in the checkout.
+# with the hotserve on PATH (bin/install-hotserve puts the latest stable
+# release there in the workflow; there is no macOS build, so on a Mac the
+# workflow is where this runs). It reads the files as they are in the
+# checkout.
 #
 # A box is a directory at the top of the repository named for the box's
 # deploy host, holding its whole config as Caddyfile:

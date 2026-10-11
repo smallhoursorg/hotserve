@@ -531,7 +531,12 @@ the console is the way back ("At 3am"), and whether the workflow asks
 call. A `request_body` cap below the bundle's 16 MiB, or a `timeouts`
 read deadline shorter than the upload, ahead of `box_webhook` is not
 caught either: the push reaches the handler and fails its body read
-(400), which names the bundle.
+(400), which names the bundle. Nor is anything that refuses the
+connection before a route runs: the walk reads each server's routes,
+not its TLS connection policies (a required client certificate), its
+listener wrappers (`proxy_protocol`) or its `protocols`, so a signed
+push that sets one the workflow's connection cannot pass strands the
+box until root undoes it ("At 3am").
 
 ## The install transaction
 
