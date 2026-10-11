@@ -100,7 +100,7 @@ upgrade is on the box already; `/tmp` would not survive a reboot.
 Check it:
 
 ```sh
-systemctl status hotserve          # active (running)
+systemctl status hotserve          # active (running); type q to exit
 curl -s localhost                  # "hotserve is running. To serve your apps: hotserve init …"
 ```
 
