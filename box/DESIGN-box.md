@@ -430,20 +430,17 @@ next launch.
 
 Root's part of a push (its chain's verification, hotserve's reload,
 the wait for a hotserve found `activating`) can run for minutes at
-worst (Caps): longer than a request is worth holding open, since a
-proxy or load balancer in front of the box may cut it (Cloudflare's
-proxy answers 524 after 100 s). So the handler waits for the first
-result only as long as Caps allows and answers by it (step 8), the
-applier publishes `verified` before it installs and does not wait to
-be read, and the workflow asks `GET /?result=<id>` — a fresh request
-with a fresh token, served by whichever configuration runs — until
-the phase is terminal. The same poll recovers a response lost for any
-other reason, which is why the workflow, not the box, chooses the id.
-A push that changes nothing is answered 200 synchronously. The
-handler's own steps before the drop are still held in the POST, each
-bounded by its Caps row and seconds for a legitimate push; a POST cut
-before the drop may never be admitted, and then its poll answers 404
-to the workflow's bound (Message catalogue).
+worst (Caps), and a request held open that long is one a proxy in
+front of the box may cut. So the handler waits for the first result
+only as long as Caps allows and answers by it (step 8), the applier
+publishes `verified` before it installs and does not wait to be read,
+and the workflow asks `GET /?result=<id>` — a fresh request with a
+fresh token, served by whichever configuration runs — until the phase
+is terminal. The poll is also how the workflow asks after a POST whose
+answer it did not get, which is why the workflow, not the box, chooses
+the id. A push of the commit the box already runs is answered 200
+`no_change` by the handler's fast path. The handler's own steps before
+the drop are held in the POST, each bounded by its Caps row.
 
 The protocol does not depend on what a reload does to a request in
 flight, though one can be: the POST may still be in step 8's wait when
@@ -1563,7 +1560,7 @@ anything; GitHub enforces nothing.
 | Host and recorded path as identity, the path `<host>/Caddyfile` derived by `init` | Host alone; a path typed at `init` (a directory argument, `--path`); a `path` line in the file | Host alone cannot pick between two files naming the same host; a typed path is free text checked only at the first push, and a directory argument a wrong-directory risk; a `path` line states the location a second time, in the signed file. The cost: one top-level directory per box, named for its host — no single `Caddyfile` at the root, no grouping, and a host rename moves the directory. |
 | Every chain commit signed | HEAD's signature only | An unsigned commit would ride in under the next signed one. |
 | Bundle rename before marker | Marker before bundle | A crash between them would answer 409 to every push until the marker aged out. |
-| 202 and a poll | Hold the POST until the apply finishes | Root's part can take minutes (Caps), longer than a proxy in front of the box may hold a request, and a lost answer needs the poll anyway; not because a reload waits for the request ("Why 202 and a poll"). |
+| 202 and a poll | Hold the POST until the apply finishes | Root's part can take minutes, longer than a proxy in front of the box may hold a request, and an answer the workflow did not get needs the poll anyway ("Why 202 and a poll"). |
 | `required_signatures` recommended, not relied on | A "landing act" (signed tag or trailer) to close the fast-forward residual | Doubles every push's ritual to defend against an attacker who already holds a GitHub credential; the README rule is cheaper. |
 
 ## Non-goals
