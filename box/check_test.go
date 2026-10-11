@@ -74,11 +74,20 @@ func TestApplyTrustChain(t *testing.T) {
 				return b.repo.bundleFiles(b.repo.commit(f, &b.alice, b.base), b.base)
 			}},
 		{name: "11: another path", phase: phaseRefused, msg: func(*testBox, map[string][]byte) string {
-			return "this box's file is box2/Caddyfile; the bundle is box1/Caddyfile — hotserve init --path records a new one"
+			return "this box's file is box2/Caddyfile; the bundle is box1/Caddyfile — a box's file is deploy.example.com/Caddyfile at the top of the repository: hotserve init, run again from that directory, records it"
 		},
 			setup: func(b *testBox) map[string][]byte {
 				a := b.applied()
 				a.Path = "box2/Caddyfile"
+				b.writeApplied(a)
+				return b.repo.bundleFiles(b.repo.commit(boxFile(2, b.alice), &b.alice, b.base), b.base)
+			}},
+		{name: "11: the bundle's file is out of place", phase: phaseRefused, msg: func(*testBox, map[string][]byte) string {
+			return "this box's file is deploy.example.com/Caddyfile; the bundle is box1/Caddyfile — a box's file is deploy.example.com/Caddyfile at the top of the repository: move it there"
+		},
+			setup: func(b *testBox) map[string][]byte {
+				a := b.applied()
+				a.Path = "deploy.example.com/Caddyfile"
 				b.writeApplied(a)
 				return b.repo.bundleFiles(b.repo.commit(boxFile(2, b.alice), &b.alice, b.base), b.base)
 			}},

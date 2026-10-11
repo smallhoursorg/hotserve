@@ -85,7 +85,7 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 // The handler's own messages (DESIGN-box.md, "Message catalogue").
 const (
 	msgMethod     = "method not allowed"
-	msgNoBaseline = "this box has no baseline; hotserve init <dir> <sha> as root on the box sets one"
+	msgNoBaseline = "this box has no baseline; hotserve init <sha>, as root inside the box's directory, sets one"
 )
 
 // ServeHTTP answers on `/` and passes every other path on.

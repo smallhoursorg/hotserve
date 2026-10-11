@@ -50,7 +50,7 @@ func TestRecoveryStates(t *testing.T) {
 		recError string  // a rolling_back record's error
 		file     string  // the installed file at the end: prev, new, other
 		advanced bool
-		result   string // result phase ("" none: init writes none)
+		result   string // the terminal phase: a result file, or for init the journal's (it writes none)
 		msg      string
 		reloaded int
 	}
@@ -69,8 +69,12 @@ func TestRecoveryStates(t *testing.T) {
 		{phase: phaseSwapped, d: dNew, state: "active", reloads: []error{errReload}, file: dPrev, result: phaseUnknown, msg: msgPrevReloadFailed, reloaded: 1},
 		{phase: phaseSwapped, d: dPrev, state: "active", file: dPrev, result: phaseRolledBack, msg: msgRolledBackInterrupted, reloaded: 1},
 		{phase: phaseSwapped, d: dOther, file: dOther, result: phaseUnknown, msg: msgChanged},
-		{phase: phaseSwapped, origin: originInit, d: dNew, state: "inactive", file: dNew, advanced: true},
-		{phase: phaseSwapped, origin: originInit, d: dNew, state: "active", file: dPrev, reloaded: 1},
+		// init's records recover as the applier's: a swap whose reload
+		// was never confirmed rolls back, whether or not hotserve runs.
+		{phase: phaseSwapped, origin: originInit, d: dNew, state: "inactive", file: dPrev, result: phaseFailed, msg: msgInterruptedStopped},
+		{phase: phaseSwapped, origin: originInit, d: dNew, state: "active", file: dPrev, result: phaseRolledBack, msg: msgRolledBackInterrupted, reloaded: 1},
+		{phase: phaseNoChange, origin: originInit, d: dPrev, file: dPrev, advanced: true, result: phaseNoChange},
+		{phase: phaseApplied, origin: originInit, d: dNew, file: dNew, advanced: true, result: phaseApplied},
 
 		{phase: phaseApplied, d: dNew, file: dNew, advanced: true, result: phaseApplied},
 		{phase: phaseApplied, d: dPrev, file: dPrev, result: phaseUnknown, msg: msgChanged},
@@ -132,9 +136,13 @@ func TestRecoveryStates(t *testing.T) {
 			}
 			res := b.result(id)
 			switch {
-			case r.result == "" && res != nil:
-				t.Errorf("a result was written for %s: %+v", r.origin, res)
-			case r.result != "" && (res == nil || res.Phase != r.result || res.Error != r.msg):
+			case r.origin == originInit && res != nil:
+				t.Errorf("a result was written for init: %+v", res)
+			case r.origin == originInit:
+				if phase, msg := b.outcomeLogged(id); phase != r.result || msg != r.msg {
+					t.Errorf("journaled %s %q, want %s %q", phase, msg, r.result, r.msg)
+				}
+			case res == nil || res.Phase != r.result || res.Error != r.msg:
 				t.Errorf("result %+v, want %s %q", res, r.result, r.msg)
 			}
 			if b.sd.reloaded != r.reloaded {
