@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"filippo.io/age"
+
+	"github.com/smallhoursorg/hotserve/box/proof"
 )
 
 // `GET /`'s recipient is age.pub's one line: omitted when there is none,
@@ -346,5 +348,44 @@ func TestValueLength(t *testing.T) {
 	var two age.Recipient = newIdentity(t).Recipient()
 	if got, err := valueLength(encrypt(t, []byte("abc"), id.Recipient(), two)); err != nil || got != 3 {
 		t.Errorf("two recipients: %d %v", got, err)
+	}
+	// A file cut inside its last frame — 1 to 16 bytes past a full one,
+	// so no room for a tag and a byte — is refused, as root's decrypt
+	// would be; one cut at a frame's end reads as the shorter value it
+	// then is (which root's decrypt also refuses: the last chunk is not
+	// marked final — describe reads sizes, not frames).
+	whole := encrypt(t, bytes.Repeat([]byte("a"), 70000), id.Recipient())
+	header, err := age.ExtractHeader(bytes.NewReader(whole))
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterFull := len(header) + 16 + 64<<10 + 16
+	for cut := 1; cut <= 16; cut++ {
+		if _, err := valueLength(whole[:afterFull+cut]); err == nil {
+			t.Errorf("cut %d bytes into the last frame: accepted", cut)
+		}
+	}
+	if _, err := valueLength(whole[:len(header)+15]); err == nil {
+		t.Error("a payload shorter than a nonce and a tag: accepted")
+	}
+}
+
+// describe refuses a count past its cap before it reads a secret's file:
+// the commit's proof refuses as early.
+func TestDescribeSecretsCapsBeforeReading(t *testing.T) {
+	files := map[string][]byte{}
+	for i := 0; i <= proof.MaxSecretVars; i++ {
+		files["example/K"+itoa(i)+".age"] = []byte("not read") // a read would refuse it as not an age file
+	}
+	path := writeTree(t, secretsFile("\t\t\tenv_file /etc/hotserve/secrets/example.env\n", ""), files)
+	if err := describe(path, &bytes.Buffer{}); err == nil || err.Error() != "app example has 257 secrets; the cap is 256" {
+		t.Errorf("%v", err)
+	}
+	files = map[string][]byte{}
+	for i := 0; i <= proof.MaxSecretApps; i++ {
+		files["app"+itoa(i)+"/KEY.age"] = []byte("not read")
+	}
+	if err := describe(writeTree(t, secretsFile("", ""), files), &bytes.Buffer{}); err == nil || err.Error() != "33 apps have secrets; the cap is 32" {
+		t.Errorf("%v", err)
 	}
 }

@@ -74,6 +74,24 @@ func readTreeSecrets(caddyfile string) (*treeSecrets, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The count of apps before any secret's file is read: a listing of
+	// each directory, none of whose files is opened.
+	apps := 0
+	for _, e := range entries {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		inner, err := os.ReadDir(filepath.Join(dir, e.Name()))
+		if err != nil {
+			return nil, err
+		}
+		if slices.ContainsFunc(inner, func(f fs.DirEntry) bool { return !strings.HasPrefix(f.Name(), ".") }) {
+			apps++ // git tracks no empty directory, nor usually a dot-name
+		}
+	}
+	if apps > proof.MaxSecretApps {
+		return nil, refused("%d apps have secrets; the cap is %d", apps, proof.MaxSecretApps)
+	}
 	var ciphertext int64
 	for _, e := range entries {
 		name := e.Name()
@@ -108,9 +126,7 @@ func readTreeSecrets(caddyfile string) (*treeSecrets, error) {
 		}
 		ts.secrets.Apps = append(ts.secrets.Apps, app)
 	}
-	if n := len(ts.secrets.Apps); n > proof.MaxSecretApps {
-		return nil, refused("%d apps have secrets; the cap is %d", n, proof.MaxSecretApps)
-	} else if n >= warnSecretApps {
+	if n := len(ts.secrets.Apps); n >= warnSecretApps {
 		ts.warnings = append(ts.warnings, fmt.Sprintf("%d apps have secrets; the cap is %d", n, proof.MaxSecretApps))
 	}
 	if ciphertext >= warnCiphertext {
@@ -126,6 +142,10 @@ func readTreeApp(dir, shown string, ts *treeSecrets) (proof.SecretApp, int64, er
 	entries, err := gitOrder(dir)
 	if err != nil {
 		return app, 0, err
+	}
+	// The count before any file is read: past the cap nothing is.
+	if n := len(slices.DeleteFunc(slices.Clone(entries), func(e fs.DirEntry) bool { return strings.HasPrefix(e.Name(), ".") })); n > proof.MaxSecretVars {
+		return app, 0, refused("app %s has %d secrets; the cap is %d", app.Name, n, proof.MaxSecretVars)
 	}
 	var ciphertext, rendered int64
 	for _, e := range entries {
@@ -161,9 +181,7 @@ func readTreeApp(dir, shown string, ts *treeSecrets) (proof.SecretApp, int64, er
 		ciphertext += size
 		rendered += int64(len(v)) + n + 4 // KEY="value"\n
 	}
-	if n := len(app.Vars); n > proof.MaxSecretVars {
-		return app, 0, refused("app %s has %d secrets; the cap is %d", app.Name, n, proof.MaxSecretVars)
-	} else if n >= warnSecretVars {
+	if n := len(app.Vars); n >= warnSecretVars {
 		ts.warnings = append(ts.warnings, fmt.Sprintf("app %s has %d secrets; the cap is %d", app.Name, n, proof.MaxSecretVars))
 	}
 	switch {
@@ -269,13 +287,23 @@ func valueLengthOf(r io.ReaderAt, size int64) (int64, error) {
 	if err != nil {
 		return 0, notAge("its header is not one age reads")
 	}
+	// Every chunk but the last is full; the last is never empty unless
+	// it is the only one (age's STREAM). So after the full frames comes
+	// either nothing, or a frame with a tag and at least one byte: a
+	// remainder of 1 to 16 bytes is a frame cut short.
 	const nonce, chunk, tag = 16, 64 << 10, 16
+	const frame = chunk + tag
 	q := size - int64(len(header)) - nonce
-	if q < tag {
+	full, rest := q/frame, q%frame
+	switch {
+	case q == tag: // the empty value: one empty chunk
+		return 0, nil
+	case q < tag, rest > 0 && rest <= tag:
 		return 0, notAge("its payload is cut short")
+	case rest == 0:
+		return full * chunk, nil
 	}
-	chunks := (q + chunk + tag - 1) / (chunk + tag)
-	return q - chunks*tag, nil
+	return full*chunk + rest - tag, nil
 }
 
 // agePluginLine is a plugin's age recipient, age1<name>1<data>
