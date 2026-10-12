@@ -457,7 +457,7 @@ func TestApplySecretsNeedNoKeyWithout(t *testing.T) {
 	old := rendered(t, "KEY=old")
 	b.putEnv("example", old, 0o640)
 	a := b.applied()
-	a.Secrets = map[string]string{"example": digest(old)}
+	a.SecretsTree, a.Secrets = strings.Repeat("e", 40), map[string]string{"example": digest(old)}
 	b.writeApplied(a)
 	head = b.repo.commitSecrets(b.v1, nil, &b.alice, b.base)
 	r := b.pushOne(b.repo.bundleFiles(head, b.base))
@@ -485,7 +485,7 @@ func TestApplySecretsRollBack(t *testing.T) {
 	old := rendered(t, "KEY=old")
 	b.putEnv("example", old, 0o640)
 	a := b.applied()
-	a.Secrets = map[string]string{"example": digest(old)}
+	a.SecretsTree, a.Secrets = strings.Repeat("e", 40), map[string]string{"example": digest(old)}
 	b.writeApplied(a)
 	head := b.repo.commitSecrets(boxFile(2, b.alice), secrets{"example": {"KEY": enc("new")}, "api": {"TOKEN": enc("t")}}, &b.alice, b.base)
 	b.sd.reloads = []error{errReload}
@@ -963,6 +963,7 @@ func TestRecordSecretsValid(t *testing.T) {
 		"a written file listed at another digest": func(r *record) { r.SecretsInstalled["api"] = digest([]byte("other")) },
 		"a written file not listed":               func(r *record) { delete(r.SecretsInstalled, "api") },
 		"a removed file still listed":             func(r *record) { r.SecretsInstalled["example"] = digest([]byte("old")) },
+		"env files listed with no tree":           func(r *record) { r.SecretsTree = "" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := ok
@@ -973,6 +974,24 @@ func TestRecordSecretsValid(t *testing.T) {
 				t.Error("accepted")
 			}
 		})
+	}
+}
+
+// applied.json listing env files with no secrets tree is no state a
+// write makes: it does not read, and a push is the box's error, never a
+// removal of what the list names.
+func TestAppliedSecretsNeedATree(t *testing.T) {
+	b, _ := newSecretsBox(t)
+	b.putEnv("example", rendered(t, "KEY=v"), 0o640)
+	a := b.applied()
+	a.Secrets = map[string]string{"example": digest(rendered(t, "KEY=v"))}
+	b.writeApplied(a)
+	if _, err := readApplied(b.x("")); err == nil || !strings.Contains(err.Error(), "secrets listed with no secrets_tree") {
+		t.Fatalf("%v", err)
+	}
+	head := b.repo.commitSecrets(b.v1, nil, &b.alice, b.base)
+	if r := b.pushOne(b.repo.bundleFiles(head, b.base)); r.Phase != phaseFailed || b.env("example") == nil {
+		t.Fatalf("%+v; env %q", r, b.env("example"))
 	}
 }
 

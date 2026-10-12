@@ -186,5 +186,11 @@ func readApplied(dir string) (*applied, error) {
 	if err := validInstalled(a.Secrets); err != nil {
 		return nil, fmt.Errorf("%s: secrets: %w", path, err)
 	}
+	// Env files are listed only from a commit with a secrets tree: a
+	// list with none is no state a write makes, and the list decides
+	// what root may remove.
+	if len(a.Secrets) > 0 && a.SecretsTree == "" {
+		return nil, fmt.Errorf("%s: secrets listed with no secrets_tree", path)
+	}
 	return &a, nil
 }
