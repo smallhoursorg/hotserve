@@ -396,6 +396,10 @@ func TestApplySecretsFailures(t *testing.T) {
 		{name: "a secret not encrypted to this box", phase: phaseRefused, setup: func(b *testBox, _ *age.X25519Identity) secrets {
 			return one(newIdentity(b.t.(*testing.T)), b.t)
 		}},
+		{name: "is-active unanswered after 15a", phase: phaseFailed, msg: "~the install failed before the box's files changed: ", setup: func(b *testBox, id *age.X25519Identity) secrets {
+			b.sd.stateErr = errors.New("dbus: no reply")
+			return one(id, b.t)
+		}},
 		{name: "a directory at the env file's name", phase: phaseFailed, msg: fill(msgEnvNotRegular, "example"), setup: func(b *testBox, id *age.X25519Identity) secrets {
 			if err := os.Mkdir(b.envPath("example"), 0o750); err != nil {
 				b.t.Fatal(err)
@@ -536,6 +540,7 @@ func TestFailureModesSecrets(t *testing.T) {
 	}
 	failed := "~the install failed before the box's files changed: "
 	rows := []row{
+		{name: "result verified/crash after", holds: "I1 I2 I3", scen: "change", crash: "result:verified", crashN: 1, state: 1, phase: phaseFailed, msg: msgInterruptedFiles},
 		{name: "first env file/write fails", holds: "I1", scen: "change", fail: failNth("envfile:new", 1), state: 1, phase: phaseFailed, msg: failed + "envfile:new: no space"},
 		{name: "first env file/crash after", holds: "I1 I5", scen: "change", crash: "envfile:new", crashN: 1, state: 1, phase: phaseRolledBack, msg: msgRolledBackInterruptedFiles, reloads2: 1},
 		{name: "second env file/write fails", holds: "I1", scen: "change", fail: failNth("envfile:new", 2), state: 1, phase: phaseRolledBack, msg: msgRolledBackUnrecordedFiles, reloads2: 1},
