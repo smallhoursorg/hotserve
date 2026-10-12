@@ -335,9 +335,12 @@ still decides. There is no profile to install.
 ## Availability dependency
 
 The sandbox is an availability dependency of the whole server: on a
-host that cannot sandbox, hotserve does not come up at all — admin
-socket and proxy included. There is no graceful degrade for host
-incapability (a container, an LXC VPS, a locked-down kernel), because
+host that cannot sandbox, a config that defines an app does not load,
+so hotserve does not come up on one at all — admin socket and proxy
+included — and a reload to one is refused. Only a config with no app,
+such as the starter, skips the probe and serves. There is no graceful
+degrade for host incapability (a container, an LXC VPS, a locked-down
+kernel), because
 the setting that would run apps without one hands a bare app every
 sibling's data and hotserve's keys on the shared uid. The refusal
 message names where the probe's output is and says that no setting
@@ -554,3 +557,8 @@ Dated one-liners; the full text of each is in git.
 - 2026-09-06 — App contract moved from `127.0.0.1:$PORT` to a
   per-instance unix socket under a third writable bind, `run/<nonce>/`; the
   socket and the unit share a nonce.
+- 2026-10-12 (#225) — The `.deb` depends on `systemd (>= 257)`. Since
+  the starter config left liveswap off (#85), the probe first ran at
+  the box's first config, so an older release installed and failed
+  there. The probe still decides; the floor moves the commonest refusal
+  to install.

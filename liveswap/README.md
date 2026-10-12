@@ -341,7 +341,7 @@ deploy gate alike.
 
 Every instance runs inside systemd's own per-unit sandbox. There is
 one sandbox, no setting that turns it off or widens it, and a host
-either delivers it or hotserve does not start:
+either delivers it or hotserve does not start with an app configured:
 
 | What every unit gets |
 |---|

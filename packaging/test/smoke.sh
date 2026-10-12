@@ -162,6 +162,11 @@ systemctl is-active --quiet hotserve-box-apply.path \
 [ "$(systemctl is-enabled hotserve-box-apply.service)" = static ] \
 	|| die "hotserve-box-apply.service is '$(systemctl is-enabled hotserve-box-apply.service)', want static: the path unit is its only start"
 [ "$(command -v ssh-keygen)" = /usr/bin/ssh-keygen ] || die "ssh-keygen is not installed: the openssh-client Depends did not resolve"
+# The floor that makes apt refuse an older release at install, as
+# docs/first-deploy.md step 2 quotes it. Debian 13 meets it, so this
+# image cannot show the refusal; this is what keeps the quote true.
+dpkg-deb -f "$deb" Depends | grep -qF 'systemd (>= 257)' \
+	|| die "the package does not depend on systemd (>= 257): apt would install it where no app can run"
 # The tree as the shipped tmpfiles.d file says, read back off the disk
 # (the file itself is held to the Paths table by box/units_test.go).
 conf=/usr/lib/tmpfiles.d/hotserve-box.conf
@@ -632,8 +637,8 @@ app_nofile=$app_soft
 sd_version=$(systemctl --version | awk 'NR==1 {print $2}')
 # The user@<uid> drop-in only reaches the manager from systemd 256 (#37);
 # the package requires 257, so this is unconditional.
-[ "${sd_version%%[!0-9]*}" -ge 257 ] \
-	|| die "systemd $sd_version is below the package's floor of 257 (Debian 13 ships 257)"
+[ "${sd_version%%[!0-9]*}" -ge 256 ] \
+	|| die "systemd $sd_version is below 256, where the user@ drop-in does not reach the manager (#37)"
 [ "$mgr_nofile" = "1048576" ] \
 	|| die "systemd $sd_version: user@$uid DefaultLimitNOFILE is $mgr_nofile, not the drop-in's 1048576"
 echo "app NOFILE $app_nofile = user@$uid DefaultLimitNOFILE = the drop-in's 1048576 (systemd $sd_version)"
