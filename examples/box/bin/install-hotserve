@@ -21,21 +21,22 @@ aarch64 | arm64) arch=arm64 ;;
 esac
 
 v=${HOTSERVE_VERSION:-}
-v=${v#v}
 if [ -z "$v" ]; then
 	# Where the latest release's page redirects to: no API call, so no
 	# rate limit shared with other jobs on the runner's address.
 	v=$(curl -fsSL -o /dev/null -w '%{url_effective}' https://github.com/smallhoursorg/hotserve/releases/latest)
-	v=${v##*/v}
+	v=${v##*/}
 fi
 bad() {
 	echo "install-hotserve: not a hotserve release: '$v' (from HOTSERVE_VERSION, or the latest release's tag)" >&2
 	exit 1
 }
 # Nothing outside the set (a newline included) before the shape check,
-# which grep makes per line.
+# which grep makes per line. The leading v comes off after the check, so
+# a pin of just "v" is refused rather than read as no pin.
 case $v in '' | *[!0-9A-Za-z.-]*) bad ;; esac
-printf '%s\n' "$v" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?' || bad
+printf '%s\n' "$v" | grep -Eqx 'v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?' || bad
+v=${v#v}
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT

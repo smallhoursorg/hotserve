@@ -54,11 +54,13 @@ minute. At the provider:
 ## 2. Install hotserve
 
 Logged in as root, fetch the `.deb` for the box's architecture from
-[releases](https://github.com/smallhoursorg/hotserve/releases), check
-it, and install it:
+the latest of the [releases](https://github.com/smallhoursorg/hotserve/releases),
+check it, and install it:
 
 ```sh
-v=0.3.0                             # the release you are installing
+v=$(curl -fsSL -o /dev/null -w '%{url_effective}' \
+  https://github.com/smallhoursorg/hotserve/releases/latest)
+v=${v##*/v}                         # the latest release's tag, without the v
 arch=$(dpkg --print-architecture)   # amd64 or arm64
 base=https://github.com/smallhoursorg/hotserve/releases/download/v$v
 mkdir -p /var/local/hotserve && cd /var/local/hotserve
