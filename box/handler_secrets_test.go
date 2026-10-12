@@ -287,6 +287,17 @@ func TestDescribeSecretsFirstRefusal(t *testing.T) {
 		t.Errorf("%v", err)
 	}
 
+	// Past the 256th secret a directory is still refused as one, as the
+	// proof checks every entry's type before the cap.
+	files = map[string][]byte{"example/zz/KEY.age": []byte("x")} // a directory, last in git's order
+	for i := 0; i < proof.MaxSecretVars; i++ {
+		files["example/K"+itoa(i)+".age"] = []byte("x")
+	}
+	err = describe(writeTree(t, secretsFile("\t\t\tenv_file /etc/hotserve/secrets/example.env\n", ""), files), &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "secrets/example/zz is not a secret: a directory") {
+		t.Errorf("%v", err)
+	}
+
 	// 65,529 bytes and a LF: describe counts KEY="…"\n as 3+65530+4 =
 	// 65,537, but once 15a strips the LF it renders 65,536 bytes, at the
 	// cap, which the box accepts.

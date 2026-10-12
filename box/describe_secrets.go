@@ -178,6 +178,11 @@ func readTreeApp(dir, shown string, ts *treeSecrets) (proof.SecretApp, int64, er
 		if strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
+		// Every entry's type, as the proof checks it before the cap;
+		// its name only up to the cap.
+		if !e.Type().IsRegular() {
+			return app, 0, refused("%s/%s is not a secret: %s", shown, proof.Bound(e.Name()), entryWhat(e))
+		}
 		if count++; count > proof.MaxSecretVars {
 			continue
 		}
