@@ -66,7 +66,11 @@ what it runs.
    and clone it. Or copy its files into a new private repo anywhere —
    another account, or a host that is not GitHub (see
    [Outside GitHub](#outside-github)) — with `git init -b main` and the
-   new repo as `origin`.
+   new repo as `origin`. Copy the hidden `.github/` directory too: it
+   holds the workflow, and a repo without it starts no run when pushed
+   and reports no error. Download ZIP and `git archive` keep it;
+   Finder hides it, `cp dir/*` skips it, and GitHub's upload page
+   leaves it out.
 2. Add your SSH key as the first signer:
 
    ```sh
@@ -81,6 +85,19 @@ what it runs.
    that only signs: if the key you push to GitHub with also signs, the
    two checks a box makes (the push came from `main`, a signer made the
    commit) fall to one stolen key.
+
+   Then add the same public key to your GitHub account as a **Signing
+   Key** (Settings → SSH and GPG keys → New SSH key, Key type: Signing
+   Key), so GitHub shows your commits as Verified. Use the web page:
+   `gh ssh-key add --type signing` needs a permission `gh` is not given
+   by default. That badge is GitHub's check, and a box does not read
+   it: a box checks each commit against the `signer` lines in the
+   Caddyfile it runs. So a commit GitHub calls Unverified still applies
+   when a listed key signed it — the key is not on GitHub, or the
+   commit's email is not one GitHub has verified for the account — and
+   one GitHub calls Verified is still refused unless a listed key
+   signed it: a squash from the merge button, which GitHub signs with
+   its own key.
 3. Make the Caddyfile your box's. On a box that already serves its
    own Caddyfile, start from that file whole — its global options,
    sites and apps — so nothing edited there is lost, and keep the
@@ -101,8 +118,16 @@ what it runs.
    takes pushes from that repository's workflow alone, so a placeholder
    left there refuses the first one. On a fresh box, also replace
    `example.com`, `deploy.example.com` and `your-org/example`
-   with yours — `your-org` twice more: the `artifact_allowlist` entry
-   pins the organization alone, and the app's `deploy_trust` its repo.
+   with yours — `your-org` (your organization, or your username if the
+   repos are in your own account) twice more: the `artifact_allowlist`
+   entry pins the organization or account alone, and the app's
+   `deploy_trust` its repo. This lists the lines left to change,
+   comments aside, and prints nothing once all are changed:
+
+   ```sh
+   grep -n '^[^#]*\(your-org\|example\.com\)' */Caddyfile
+   ```
+
    The `app example` block is hotserve's examples/node; a Deno app's
    lines are in its examples/deno.
 4. Name the directory for the box's deploy host, the site that carries
@@ -142,10 +167,10 @@ what it runs.
    Caddyfile. From here on, config changes are pushes to `main`. With
    nothing deployed yet, a correct box looks like this:
 
-   - `https://example.com` answers 503 with the sentence from the
-     Caddyfile's `handle_errors` block — once the certificate is
-     issued, which takes a few seconds after the reload with 80 and
-     443 open.
+   - `https://example.com` answers 503 with `example is not running:
+     nothing has been deployed yet, …`, in a browser or with
+     `curl -i`, once the certificate is issued, which takes a few
+     seconds after the reload with 80 and 443 open.
    - `https://deploy.example.com/example` answers 401 with
      `{"error":"invalid or missing deploy token …"}`, in a browser or
      with `curl -i`. That is the webhook working: a deploy carries a
@@ -154,7 +179,7 @@ what it runs.
 The secrets of the apps are still a file on the box each, edited over
 SSH — see [Secrets](#secrets). Hardening the box — SSH by key only, the
 SSH port shut, an optional administrator who is not root — is on
-[After the first deploy](https://github.com/smallhoursorg/hotserve/blob/main/docs/after-first-deploy.md).
+[Hardening the box](https://github.com/smallhoursorg/hotserve/blob/main/docs/hardening.md).
 
 **A repo from an earlier version of this template** — a top-level
 `Caddyfile` pushed by `make push` — is simplest replaced. Upgrade the
@@ -162,8 +187,8 @@ box to a release that has `hotserve init` first. Then make a new repo
 from this template and take the steps above, starting step 3 from the
 file the box runs; steps 3 and 6 need root on the box over SSH, which
 an earlier version of the hardening steps closed: reopen root's key
-login where you ran the upgrade ([After the first deploy](https://github.com/smallhoursorg/hotserve/blob/main/docs/after-first-deploy.md),
-step 4, says how). Then put this directory's `sudoers` on the box in
+login where you ran the upgrade ([Hardening the box](https://github.com/smallhoursorg/hotserve/blob/main/docs/hardening.md),
+step 1, says how). Then put this directory's `sudoers` on the box in
 place of the old one ([Secrets](#secrets)), and archive the old
 repo.
 

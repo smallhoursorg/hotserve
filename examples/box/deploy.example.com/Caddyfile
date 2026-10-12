@@ -62,6 +62,9 @@ example.com {
 	# no upstream and answers 503. Keep that status — monitors and CI
 	# should see it — but give a person a sentence instead of a blank
 	# page. `journalctl -u hotserve` says which of the two it is.
+	# The template's sentence is quoted, as a new box's answer, in
+	# README.md and hotserve's docs/first-deploy.md (step 3): a change
+	# to it in the template goes there too.
 	handle_errors 502 503 {
 		respond "example is not running: nothing has been deployed yet, or it is down and being restarted." {http.error.status_code}
 	}

@@ -11,8 +11,9 @@ You work as root on the box only to install software and, once, to
 tell the box which repository its config comes from (step 3);
 everything else happens on your laptop and on GitHub.
 [After the first deploy](after-first-deploy.md) covers what comes
-next — changing the config, secrets — and hardening the box, which is
-recommended and none of it needed to get here.
+next — changing the config, secrets — and
+[Hardening the box](hardening.md) is recommended, none of it needed to
+get here.
 
 On the laptop you need git 2.34 or later (it signs commits with an SSH
 key), `make`, and the SSH key the box is created with. Where a step
@@ -103,7 +104,7 @@ upgrade is on the box already; `/tmp` would not survive a reboot.
 Check it:
 
 ```sh
-systemctl status hotserve          # active (running); type q to exit
+systemctl status hotserve          # active (running); press q to exit
 curl -s localhost                  # "hotserve is running. To serve your apps: hotserve init …"
 ```
 
@@ -111,10 +112,10 @@ curl -s localhost                  # "hotserve is running. To serve your apps: h
 leaves it commented out. It starts, and says so in the journal, in
 step 3, when the box's own config replaces the starter.)
 
-If it is not running, `journalctl -u hotserve -n 50` says why. A host
-that cannot deliver the sandbox is refused here, with the missing piece
-named; that is the step 1 check, and the fix is a different host, not
-a setting.
+If it is not running, `journalctl -u hotserve -n 50 --no-pager` says
+why. A host that cannot deliver the sandbox is refused here, with the
+missing piece named; that is the step 1 check, and the fix is a
+different host, not a setting.
 
 ## 3. The box's config, in git
 
@@ -145,7 +146,11 @@ Or copy the template's files yourself, into a new private repository
 anywhere — another GitHub account or organisation, or a host that is
 not GitHub: the template's **Code** → **Download ZIP**, unpacked into
 an empty directory, then `git init -b main` and `git remote add origin
-<the new repository's address>` there. The workflow that sends the
+<the new repository's address>` there. Keep the hidden `.github/`
+directory: it holds the workflow that sends the config to the box, and
+a repository without it starts no run when pushed and reports no
+error. The ZIP has it, but Finder hides it, `cp dir/*` skips it, and
+GitHub's upload page leaves it out. The workflow that sends the
 config to the box is GitHub Actions; on another host, the box README's
 [Outside GitHub](../examples/box/README.md#outside-github) says what a
 CI job of your own needs, and the rest of this page reads as if the
@@ -171,6 +176,14 @@ the commit below takes the file as it stands. The box README's
 only signs is better than the one you push to GitHub with, and how to
 use a hardware key.
 
+**Give GitHub the same key**, so it shows your commits as Verified
+rather than Unverified: on GitHub, Settings → SSH and GPG keys →
+**New SSH key**, Key type **Signing Key**, and paste the public key
+`make signer` used. Use the web page: the GitHub CLI's `gh ssh-key add
+--type signing` needs a permission `gh` is not given by default.
+GitHub shows Verified only when the commit's email, your git email, is
+one it has verified for your account.
+
 **Make the file yours.** `deploy.example.com/Caddyfile` is the box's
 whole config: who may change it, the app it will run and who may
 deploy that app, the app's site, and the deploy host. The app is
@@ -183,8 +196,14 @@ three times: the `box` block's `claim repository your-org/boxes` names
 this repository (the box takes config from its workflow alone, so a
 placeholder left there refuses the first push), `artifact_allowlist`
 pins the organization or account, and the app's `deploy_trust` its
-repository. What is new beside the app is at the
-top and the bottom:
+repository. This lists the five lines, comments aside, and prints
+nothing once all five are changed:
+
+```sh
+grep -n '^[^#]*\(your-org\|example\.com\)' */Caddyfile
+```
+
+What is new beside the app is at the top and the bottom:
 
 ```caddyfile
 {
@@ -308,8 +327,8 @@ no site carrying `box_webhook` — any of them would leave the box
 unreachable by its own channel — and a directory not named for that
 site. Otherwise it installs the file over the starter config and
 reloads hotserve. A file that does not load is put back, the starter
-keeps serving, and `init` says so; `journalctl -u hotserve -n 50` on
-the box says why. Fix it, commit, and run both lines again.
+keeps serving, and `init` says so; `journalctl -u hotserve -n 50
+--no-pager` on the box says why. Fix it, commit, and run both lines again.
 
 **Push:**
 
@@ -326,13 +345,18 @@ apply: deploy.example.com/Caddyfile → https://deploy.example.com/: the box run
 apply: deploy.example.com at 4f1c2a9: the box already runs this Caddyfile
 ```
 
+No run for this push on the repository's **Actions** tab means it has
+no `.github/workflows/apply.yml`: a copy that missed the hidden
+directory. Copy it in from the template, commit, and push.
+
 From here on, a change to the box's config is a signed commit pushed
 to `main`: [After the first deploy](after-first-deploy.md#1-change-the-config)
 has how. With nothing deployed yet, a correct box looks like this:
 
-- `https://example.com` answers 503 with the sentence from the
-  `handle_errors` block — once the certificate is issued, which takes
-  a few seconds after `init`'s reload with 80 and 443 open.
+- `https://example.com` answers 503 with `example is not running:
+  nothing has been deployed yet, …`, in a browser or with `curl -i`,
+  once the certificate is issued, which takes a few seconds after
+  `init`'s reload with 80 and 443 open.
 - `https://deploy.example.com/example` answers 401 with
   `{"error":"invalid or missing deploy token …"}`, in a browser or with
   `curl -i`. That is the webhook working: a deploy carries a token, and
@@ -456,5 +480,5 @@ again: another repository from the template, with its own
 `HOTSERVE_URL`.
 
 [After the first deploy](after-first-deploy.md) is next: changing the
-config, adding secrets, and hardening the box when you are ready to.
-It takes less time than this did.
+config and adding secrets. [Hardening the box](hardening.md) is for
+when you are ready to. Each takes less time than this did.
