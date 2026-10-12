@@ -149,9 +149,10 @@ an empty directory, then `git init -b main` and `git remote add origin
 <the new repository's address>` there. Keep the hidden `.github/`
 directory: it holds the workflow that sends the config to the box, and
 a repository without it starts no run when pushed and reports no
-error. The ZIP has it, but Finder hides it, `cp dir/*` skips it, and
-GitHub's upload page leaves it out. The workflow that sends the
-config to the box is GitHub Actions; on another host, the box README's
+error. The ZIP and `git archive` keep it; Finder hides it, `cp dir/*`
+skips it, and GitHub's upload page leaves it out. The workflow that
+sends the config to the box is GitHub Actions; on another host, the
+box README's
 [Outside GitHub](../examples/box/README.md#outside-github) says what a
 CI job of your own needs, and the rest of this page reads as if the
 repository is on GitHub.
@@ -345,9 +346,12 @@ apply: deploy.example.com/Caddyfile → https://deploy.example.com/: the box run
 apply: deploy.example.com at 4f1c2a9: the box already runs this Caddyfile
 ```
 
-No run for this push on the repository's **Actions** tab means it has
-no `.github/workflows/apply.yml`: a copy that missed the hidden
-directory. Copy it in from the template, commit, and push.
+No run for this push on the repository's **Actions** tab? First check
+that the repository has `.github/workflows/apply.yml`: a copy that
+missed the hidden directory has none, so copy it in from the template,
+commit, and push. If the file is there, Actions is turned off: the
+repository's Settings → Actions → General, or its organization's,
+turns it on.
 
 From here on, a change to the box's config is a signed commit pushed
 to `main`: [After the first deploy](after-first-deploy.md#1-change-the-config)
