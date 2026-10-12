@@ -87,6 +87,17 @@ func (p *pushing) admit(b *proof.Bundle, body []byte) (done bool, err error) {
 	} else if msg != "" {
 		return true, p.refuse(b, &refusal{msg: msg})
 	}
+	// 6, last: the secrets' consistency checks, on the token walk of the
+	// file and the proved secrets tree, never on the adaptation ("Which
+	// checks run where"). A courtesy against a signer's mistake: root
+	// does not repeat them.
+	next, err := Walk(b.Caddyfile)
+	if err != nil {
+		return true, p.fail(err) // check walked this file already: unreachable
+	}
+	if err := secretsFit(next, vd.secrets, b.Path); err != nil {
+		return true, p.refuse(b, err)
+	}
 	// 7. The drop.
 	if err := h.drop(p.id, body); err != nil {
 		return true, p.fail(err)
