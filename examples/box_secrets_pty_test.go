@@ -107,7 +107,18 @@ func (r *boxRepo) typeAtPrompt(t *testing.T, keys string, env ...string) (string
 		t.Fatal(err)
 	}
 	code := 0
-	if err := cmd.Wait(); err != nil {
+	waited := make(chan error, 1)
+	go func() { waited <- cmd.Wait() }()
+	var err error
+	select {
+	case err = <-waited:
+	case <-time.After(30 * time.Second):
+		// Stopped (^Z) or waiting for more: either way, not done.
+		_ = cmd.Process.Kill()
+		<-waited
+		t.Fatalf("still running 30 s after the keys %q", keys)
+	}
+	if err != nil {
 		var exit *exec.ExitError
 		if !errors.As(err, &exit) {
 			t.Fatal(err)
@@ -170,6 +181,16 @@ func TestBoxSecretPrompt(t *testing.T) {
 		{"ARROW", "ab\x1b[Dc\r"},
 		{"NUL", "ab\x00c\r"},
 		{"TAB", "a\tb\r"},
+		// Keys the terminal would act on itself, unseen: flow control,
+		// ^V's literal next, ^O's discard, and quit and suspend, which
+		// would kill or stop this with echo off.
+		{"XOFF", "a\x13b\r"},
+		{"XON", "a\x11b\r"},
+		{"LNEXT", "a\x16b\r"},
+		{"DISCARD", "a\x0fb\r"},
+		{"QUIT", "a\x1cb\r"},
+		{"SUSP", "a\x1ab\r"},
+		{"EOF", "a\x04b\r"},
 	} {
 		out, code := r.typeAtPrompt(t, c.keys, "APP=example", "VAR="+c.name)
 		if code != 1 || !strings.Contains(out, c.name+" has a control character in it: typing is not shown, so the prompt takes no edits") || r.exists(at(c.name)) {
