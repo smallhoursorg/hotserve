@@ -626,13 +626,18 @@ func TestBoxSecretsRefuseLinks(t *testing.T) {
 	rec := r.read(recipientsFile)
 	appDir := "deploy.example.com/secrets/example"
 
-	// The recipients file a link: make signer would append through it.
+	// The recipients file a link: make signer would append through it,
+	// and make secrets would print parts of whatever it names.
 	link(recipientsFile, victim)
 	lee := r.key("lee")
+	caddy := r.read(boxFile)
 	if out, code := r.run("signer", "KEY="+lee, "PRINCIPAL=lee"); code == 0 || !strings.Contains(out, recipientsFile+" is a symbolic link") {
 		t.Errorf("make signer over a linked recipients file: exit %d\n%s", code, out)
 	}
-	for _, cmd := range []string{"set", "rekey", "import"} {
+	if r.read(boxFile) != caddy {
+		t.Error("a refused make signer still changed the Caddyfile")
+	}
+	for _, cmd := range []string{"set", "rekey", "import", "list"} {
 		if out, code := r.secrets("", "B=1\n", cmd, "APP=example", "VAR=B"); code != 1 || !strings.Contains(out, recipientsFile+" is a symbolic link") {
 			t.Errorf("%s over a linked recipients file: exit %d\n%s", cmd, code, out)
 		}
@@ -711,6 +716,56 @@ func TestBoxSecretsRefuseLinks(t *testing.T) {
 	}
 	if out, code := r.secrets("", "v", "set", "APP=example", "VAR=C"); code != 0 {
 		t.Errorf("the layout put back: exit %d\n%s", code, out)
+	}
+
+	// The box's own Caddyfile a link: its signer lines would be copied
+	// out of whatever it names.
+	caddy = r.read(boxFile)
+	outsideCaddy := filepath.Join(outside, "Caddyfile")
+	if err := os.WriteFile(outsideCaddy, []byte(caddy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link(boxFile, outsideCaddy)
+	for _, cmd := range []string{"set", "list"} {
+		if out, code := r.secrets("", "v", cmd, "APP=example", "VAR=D"); code != 1 || !strings.Contains(out, boxFile+" is a symbolic link") {
+			t.Errorf("%s with a linked Caddyfile: exit %d\n%s", cmd, code, out)
+		}
+	}
+	if err := os.Remove(filepath.Join(r.dir, boxFile)); err != nil {
+		t.Fatal(err)
+	}
+	r.write(boxFile, caddy)
+}
+
+// make signer with more than one box: a box whose secrets the box
+// would refuse stops it before any box is written, the good one too.
+func TestBoxSignerChecksEveryBoxFirst(t *testing.T) {
+	r := secretsRepo(t)
+	r.key("id_ed25519")
+	if out, code := r.run("signer"); code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	two := strings.Replace(r.read(boxFile), "deploy.example.com {", "deploy2.example.com {", 1)
+	r.write("deploy2.example.com/Caddyfile", two)
+	_, box := r.boxKey("box")
+	for _, b := range []string{"deploy.example.com", "deploy2.example.com"} {
+		if out, code := r.secrets("", "v", "set", "APP=example", "VAR=A", "BOX="+b, "BOX_KEY="+box); code != 0 {
+			t.Fatalf("%s: exit %d\n%s", b, code, out)
+		}
+	}
+	r.write("deploy2.example.com/secrets/example/notes.txt", "")
+	before := map[string]string{}
+	for _, f := range []string{boxFile, recipientsFile, "deploy2.example.com/Caddyfile", "deploy2.example.com/secrets/recipients"} {
+		before[f] = r.read(f)
+	}
+	mo := r.key("mo")
+	if out, code := r.run("signer", "KEY="+mo, "PRINCIPAL=mo"); code == 0 || !strings.Contains(out, "deploy2.example.com/secrets/example/notes.txt: an app's secrets directory holds only <VAR>.age files") {
+		t.Fatalf("a bad second box: exit %d\n%s", code, out)
+	}
+	for f, b := range before {
+		if r.read(f) != b {
+			t.Errorf("%s changed in a refused make signer", f)
+		}
 	}
 }
 
