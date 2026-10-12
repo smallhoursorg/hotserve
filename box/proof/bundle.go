@@ -12,20 +12,27 @@ import (
 	"strings"
 )
 
-// Caps on a bundle (DESIGN-box.md, "Store rules").
+// Caps on a bundle (DESIGN-box.md, "Caps").
 const (
 	MaxBundle    = 16 << 20 // decompressed; the gzip reader stops here
 	MaxCaddyfile = 1 << 20
+	// MaxTrees is the most trees a bundle has a use for: the path to
+	// the Caddyfile (at most MaxDepth), the secrets tree, and one per
+	// app with secrets (ProveSecrets).
+	MaxTrees = MaxDepth + 1 + MaxSecretApps
+	// MaxBlobs is one blob per variable of every app with secrets.
+	MaxBlobs = MaxSecretApps * MaxSecretVars
 )
 
 // Bundle is one push, parsed from memory under strict rules: regular
 // files only, fixed names — `path`, `Caddyfile`, `commit`,
-// `parents/NNNN`, `trees/<sha>` — and nothing else. Parents are in
-// the workflow's order, `parents/0001` first, a sequence with no gap;
-// Chain checks that each is the first parent of the one before. Trees
-// are keyed by the id they are filed under, which the object must hash
-// to. The same parser runs in the handler (step 3) and in the applier
-// (step 9).
+// `parents/NNNN`, `trees/<sha>`, `blobs/<sha>` — and nothing else.
+// Parents are in the workflow's order, `parents/0001` first, a sequence
+// with no gap; Chain checks that each is the first parent of the one
+// before. Trees and blobs are keyed by the id they are filed under,
+// which the object must hash to; the blobs are the secrets' files
+// (ProveSecrets). The same parser runs in the handler (step 3) and in
+// the applier (step 9).
 type Bundle struct {
 	// Path is the file's path in the repository, as the workflow knows
 	// it: a relative path of safe components (SplitPath).
@@ -35,6 +42,9 @@ type Bundle struct {
 	Commit  *Commit
 	Parents []*Commit
 	Trees   map[string]*Tree
+	// Blobs are file contents by blob id: an encrypted value each
+	// (DESIGN-box.md, "Proving the secrets").
+	Blobs map[string][]byte
 }
 
 // ReadBundle parses a gzip tarball. The decompressed stream is read
@@ -48,7 +58,7 @@ func ReadBundle(gz []byte) (*Bundle, error) {
 	}
 	lr := &io.LimitedReader{R: zr, N: MaxBundle + 1}
 	tr := tar.NewReader(lr)
-	b := &Bundle{Trees: map[string]*Tree{}}
+	b := &Bundle{Trees: map[string]*Tree{}, Blobs: map[string][]byte{}}
 	seen := map[string]bool{}
 	parents := map[int]*Commit{}
 	for {
@@ -108,11 +118,11 @@ func ReadBundle(gz []byte) (*Bundle, error) {
 			}
 			parents[n] = c
 		case strings.HasPrefix(name, "trees/"):
-			// The proof walks at most MaxDepth trees, so a bundle has no
+			// The proofs walk at most MaxTrees trees, so a bundle has no
 			// use for more; the cap keeps a flood of tiny valid trees
 			// from costing a map entry each.
-			if len(b.Trees) == MaxDepth {
-				return nil, refuse("bundle: more than %d trees", MaxDepth)
+			if len(b.Trees) == MaxTrees {
+				return nil, refuse("bundle: more than %d trees", MaxTrees)
 			}
 			id := name[len("trees/"):]
 			t, err := ParseTree(data)
@@ -125,6 +135,15 @@ func ReadBundle(gz []byte) (*Bundle, error) {
 				return nil, refuse("bundle: trees/%s does not hash to its name", oid(id))
 			}
 			b.Trees[id] = t
+		case strings.HasPrefix(name, "blobs/"):
+			if len(b.Blobs) == MaxBlobs {
+				return nil, refuse("bundle: more than %d blobs", MaxBlobs)
+			}
+			id := name[len("blobs/"):]
+			if ObjectID("blob", data) != id {
+				return nil, refuse("bundle: blobs/%s does not hash to its name", oid(id))
+			}
+			b.Blobs[id] = data
 		}
 	}
 	// The tar's end markers are not the stream's end: what follows —
@@ -175,7 +194,7 @@ func streamRefusal(err error, lr *io.LimitedReader) error {
 
 // entryCap is the size cap for a bundle file of that name, or false
 // for a name the format does not allow. Names are exact: no leading
-// `./`, no directory entries, no fifth file.
+// `./`, no directory entries, no other file.
 func entryCap(name string) (int, bool) {
 	switch {
 	case name == "path":
@@ -200,6 +219,11 @@ func entryCap(name string) (int, bool) {
 			return 0, false
 		}
 		return MaxTree, true
+	case strings.HasPrefix(name, "blobs/"):
+		if !IsID(name[len("blobs/"):]) {
+			return 0, false
+		}
+		return MaxSecretFile, true
 	}
 	return 0, false
 }
@@ -207,5 +231,5 @@ func entryCap(name string) (int, bool) {
 // String is a one-line description for logs: the commit, the path and
 // what was bundled.
 func (b *Bundle) String() string {
-	return fmt.Sprintf("commit %s, %s, %d parents, %d trees", b.Commit.ID, Bound(b.Path), len(b.Parents), len(b.Trees))
+	return fmt.Sprintf("commit %s, %s, %d parents, %d trees, %d blobs", b.Commit.ID, Bound(b.Path), len(b.Parents), len(b.Trees), len(b.Blobs))
 }

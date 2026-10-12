@@ -216,13 +216,59 @@ func TestReadBundle(t *testing.T) {
 		refusalContaining(t, err, "bundle: path appears twice")
 	})
 	t.Run("tree count cap", func(t *testing.T) {
-		files := h.with("", nil) // the two real trees, plus 31 tiny ones
-		for i := 0; i < 31; i++ {
+		files := h.with("", nil) // the two real trees, plus tiny ones up to the cap
+		for i := 0; i < MaxTrees-2; i++ {
 			raw := treeObject(Entry{ModeFile, "f" + strconv.Itoa(i), emptyBlob})
 			files["trees/"+ObjectID("tree", raw)] = raw
 		}
+		if _, err := ReadBundle(tgz(t, files)); err != nil {
+			t.Fatal(err)
+		}
+		raw := treeObject(Entry{ModeFile, "one-more", emptyBlob})
+		files["trees/"+ObjectID("tree", raw)] = raw
 		_, err := ReadBundle(tgz(t, files))
-		refusalContaining(t, err, "bundle: more than 32 trees")
+		refusalContaining(t, err, "bundle: more than 65 trees")
+	})
+	t.Run("blobs", func(t *testing.T) {
+		data := []byte("age-encryption.org/v1\n-> X25519 stand-in\n")
+		id := ObjectID("blob", data)
+		b, err := ReadBundle(tgz(t, h.with("blobs/"+id, data)))
+		if err != nil || !bytes.Equal(b.Blobs[id], data) || len(b.Blobs) != 1 {
+			t.Fatal(b, err)
+		}
+		// An empty file is a blob too (git's e69de29…).
+		if b, err := ReadBundle(tgz(t, h.with("blobs/"+emptyBlob, []byte{}))); err != nil || b.Blobs[emptyBlob] == nil {
+			t.Fatal(b, err)
+		}
+		for name, c := range map[string]struct {
+			files map[string][]byte
+			want  string
+		}{
+			"under the wrong id": {h.with("blobs/"+emptyBlob, data), "bundle: blobs/" + emptyBlob + " does not hash to its name"},
+			"short name":         {h.with("blobs/abc", data), "bundle: blobs/abc is not a bundle file"},
+			"upper name":         {h.with("blobs/"+strings.ToUpper(id), data), "is not a bundle file"},
+			"a bare prefix":      {h.with("blobs", data), "bundle: blobs is not a bundle file"},
+			"over cap":           {h.with("blobs/"+id, bytes.Repeat([]byte("x"), MaxSecretFile+1)), "bundle: blobs/" + id + " is larger than its cap of 131072 bytes"},
+		} {
+			t.Run(name, func(t *testing.T) {
+				_, err := ReadBundle(tgz(t, c.files))
+				refusalContaining(t, err, c.want)
+			})
+		}
+	})
+	t.Run("blob count cap", func(t *testing.T) {
+		files := h.with("", nil)
+		for i := 0; i < MaxBlobs; i++ {
+			data := []byte(strconv.Itoa(i))
+			files["blobs/"+ObjectID("blob", data)] = data
+		}
+		if b, err := ReadBundle(tgz(t, files)); err != nil || len(b.Blobs) != MaxBlobs {
+			t.Fatal(err)
+		}
+		data := []byte("one more")
+		files["blobs/"+ObjectID("blob", data)] = data
+		_, err := ReadBundle(tgz(t, files))
+		refusalContaining(t, err, "bundle: more than 8192 blobs")
 	})
 	t.Run("decompressed cap", func(t *testing.T) {
 		// Seventeen valid trees of a mebibyte each: every entry is
