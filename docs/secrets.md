@@ -73,12 +73,17 @@ After that, `BOX_KEY` is not needed:
 make secret APP=example VAR=STRIPE_KEY
 ```
 
-It asks for the value without showing it as you type, and takes one
-line. A terminal cuts a long line short (at 1024 bytes on a Mac), so a
-line of 1023 bytes or more is refused at the prompt rather than taken
-cut. A value that long, a private key say, comes in through a pipe
-instead, as can any value from a password manager's command line or
-the clipboard, without touching the disk or your shell's history:
+It asks for the value without showing it as you type, and takes the
+line you type or paste exactly as it is, however long, up to the box's
+cap. It reads the keys itself, since a terminal's own line editing
+holds at most 1024 bytes on a Mac and drops the rest, so it takes no
+edits either: a Backspace or an arrow key refuses the value (`… has a
+control character in it: typing is not shown, so the prompt takes no
+edits (Backspace, an arrow key); type or paste it again, or pipe it
+in`), and you type or paste it again. A pipe works too, and is the way
+to bring a value from a password manager's command line or the
+clipboard without typing it, never via the disk or your shell's
+history:
 
 ```sh
 pbpaste | make secret APP=example VAR=STRIPE_KEY     # on Linux: xclip -o, or wl-paste
