@@ -380,19 +380,21 @@ to name each variable it reads.
 
 **Who can read a value.** The box, and every key in its `recipients`
 file. `make signer` adds a signer's key there when age can encrypt to
-it: `ssh-ed25519`, or `ssh-rsa` of 2048 bits or more. So the people
-who sign are the people who read, which they could do anyway: one site
-in the Caddyfile serves any file the `hotserve` user can read, env
-files included. A signer's key is the Caddyfile, and the Caddyfile is
-every app's secrets. A signing key age cannot use, such as a hardware
-`sk-` key or one an agent holds with no file beside it, reads with an
-age key of its own instead: make one (`age-keygen -o
+it: `ssh-ed25519`, or `ssh-rsa` of 2048 bits or more, so the people
+who sign are the people who read. A signing key age cannot use, such
+as a hardware `sk-` key or one an agent holds with no file beside it,
+reads with an age key of its own instead: make one (`age-keygen -o
 ~/.config/age/hotserve.txt`, or `age-plugin-yubikey` or
 `age-plugin-se` for one held in hardware), put its `age1…` line in
 `recipients` under a `#` line naming you, have a reader run `make
 rekey`, and read with `make secret-show APP=… VAR=…
 IDENTITY=~/.config/age/hotserve.txt`. A plugin's key needs that plugin
 installed wherever someone encrypts to it.
+
+Whoever can get a signed commit onto `main` can read these files
+anyway: one site in the Caddyfile serves any file the `hotserve` user
+can read, env files included. A signer's key is the Caddyfile, and the
+Caddyfile is every app's secrets.
 
 **Removing a person** is their `signer` line out of each Caddyfile
 (see [Adding a signer](#adding-a-signer)), their key out of each
