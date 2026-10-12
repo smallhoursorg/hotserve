@@ -160,6 +160,9 @@ func (r *record) validSecrets() error {
 	if r.SecretsTree != "" && !proof.IsID(r.SecretsTree) {
 		return errors.New("secrets_tree is not 40 hex")
 	}
+	if len(r.SecretsInstalled) > 0 && r.SecretsTree == "" {
+		return errors.New("env files listed with no secrets_tree")
+	}
 	if err := validInstalled(r.SecretsInstalled); err != nil {
 		return err
 	}
