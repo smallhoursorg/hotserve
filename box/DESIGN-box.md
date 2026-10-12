@@ -10,7 +10,10 @@ body once they settle.
 **except secrets**: the "Secrets" section, and every step, row and
 message that names a secret, the box's key, an env file the box
 writes or the set, is the design box PRs 7b to 7f build, and the
-released box applies the Caddyfile alone. Normative: a change that
+released box applies the Caddyfile alone. Between 7b and 7c, a bundle
+whose commit has a `<host>/secrets/` is refused by the handler and root
+alike as `this box does not install secrets yet`; 7c removes the
+refusal and this sentence. Normative: a change that
 cannot hold a line here changes the line in the same PR, with the
 reason.
 
@@ -1242,7 +1245,7 @@ rules, in this order:
 | Rule | Past it |
 |---|---|
 | encrypted to this box's key | refused: `<path> is not encrypted to this box's key (<recipient>): put that key first in <host>/secrets/recipients and run make rekey` |
-| an age file that decrypts whole | refused: `<path> does not decrypt: <age's error>` |
+| an age file that decrypts whole | refused: `<path> does not decrypt: <reason>`, the reason the box's own words — `it is not an age file` / `it is ASCII-armored (age -a); the box reads age's binary form` / `its header is not one age reads, or was changed after it was encrypted` / `its payload was changed or cut short after it was encrypted` — never age's error text, which can quote a value committed unencrypted (I9) |
 | one trailing `\n` or `\r\n` stripped (an `echo` adds one), and then no `\n`, no `\r`, no NUL, valid UTF-8 | refused: `<app>/<VAR>: the value has a line break` / `… has a NUL byte` / `… is not UTF-8`. The env file holds one variable per line (`parseEnvLines`, liveswap/app.go), and the values go to the manager as D-Bus strings, which are UTF-8; systemd 257's own check (`env_value_is_valid`) admits other control characters, and so does this |
 | the Caps table's counts and sizes | refused, with the figures |
 
@@ -1313,6 +1316,7 @@ as a token and never quoted back: it may hold a `{$VAR}`.
 | an app with secrets and no `env_file` | `app <app> has secrets and no env_file: add env_file /etc/hotserve/secrets/<app>.env to its block` |
 | an app with secrets whose `env_file` is another path | `app <app> has secrets, and its env_file is not /etc/hotserve/secrets/<app>.env: set it` |
 | an app whose `env_file` is another app's | `app <b>'s env_file is app <a>'s secrets file` |
+| an app whose `env_file` is anywhere else in `/etc/hotserve/secrets` — the directory itself, or a name outside the app grammar | `app <app>'s env_file is in /etc/hotserve/secrets, where the box keeps each app's own file: use /etc/hotserve/secrets/<app>.env` |
 | an app whose `env_file` is its own, with no secret | `app <app>'s env_file is /etc/hotserve/secrets/<app>.env, and <host>/secrets/<app>/ holds no secret: add one, or remove the env_file line` |
 | a secret an inline `env` line also sets | `app <app> sets <VAR> with env and as a secret; env wins over env_file, so the secret would never reach it` (`buildEnvFull`, liveswap/app.go, appends inline `env` after the file's lines, and the manager keeps the last) |
 | a secret named `SOCKET` | `secret SOCKET for app <app>: hotserve sets SOCKET last, so it would never reach the app` |
@@ -1379,7 +1383,7 @@ says. The workflow's action is in the last column.
 | 422 | `refused` | `hotserve validate: <redacted>` / `hotserve-backup validate: <redacted>` / `the new Caddyfile does not reach box_webhook on /: <what> answers first` / `… : <what> changes the request first` / `… : <what> may answer first (its <matcher> matcher is decided per request)` / `… : <what> may change the request first (its <matcher> matcher is decided per request)` — `<what>` is a handler's module name, `an earlier site for <host>`, or `a terminal route` (one below a site that ran out of handlers; no directive adapts to one) / `… : box_webhook stands behind a <matcher> matcher decided per request` (the webhook itself under a per-request matcher; nothing the walk accepts adapts to one, the contract is kept anyway) / `… : the <matcher> matcher ahead of it may fail (decided per request)` / `the new Caddyfile's adaptation is larger than 16 MiB` / `hotserve adapt: did not finish within 2m0s` (the deadline, as validate's; any other end of the adapt child is the box's 500) | handler | fail |
 | 422 | `refused` | the consistency checks of "Which checks run where", each text as that table gives it | handler | fail |
 | 422 | `refused` | `hotserve is not running; nothing applied` / `hotserve is still starting after 300 s; nothing applied` | applier | fail |
-| 422 | `refused` | `<path> is not encrypted to this box's key (<recipient>): put that key first in <host>/secrets/recipients and run make rekey` / `<path> does not decrypt: <age's error>` / `<app>/<VAR>: the value has a line break` / `<app>/<VAR>: the value has a NUL byte` / `<app>/<VAR>: the value is not UTF-8` / `app <app>'s env file would be <n> bytes; the cap is 65536` (step 15a) | applier | fail |
+| 422 | `refused` | `<path> is not encrypted to this box's key (<recipient>): put that key first in <host>/secrets/recipients and run make rekey` / `<path> does not decrypt: <reason>` (one of the four reasons in "Values and the env file") / `<app>/<VAR>: the value has a line break` / `<app>/<VAR>: the value has a NUL byte` / `<app>/<VAR>: the value is not UTF-8` / `app <app>'s env file would be <n> bytes; the cap is 65536` (step 15a) | applier | fail |
 | 422 / poll | `failed` | `this box has no key for secrets (/etc/hotserve/age/identity): hotserve box key, as root, makes one; then make rekey BOX_KEY=<the key it prints> in the repository, and push; nothing changed` / `/etc/hotserve/secrets is not the setgid root:hotserve directory tmpfiles.d makes: systemd-tmpfiles --create hotserve-box.conf, as root, puts it back; nothing changed` / `/etc/hotserve/secrets/<app>.env is larger than 66560 bytes, which no push writes: move it aside, as root, and push again; nothing changed` (step 15a) | applier | red |
 | 422 | `refused` | `the Caddyfile this box runs lists no signer; hotserve init is the way back` | applier | fail |
 | 200 / poll | `no_change` | `the box already runs this Caddyfile` | applier | green |
