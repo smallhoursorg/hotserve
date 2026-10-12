@@ -163,6 +163,10 @@ func TestBoxSecretPrompt(t *testing.T) {
 		r.mustDecrypt(boxID, at(c.name), c.want)
 	}
 
+	// A NUL typed (^@) is refused, not dropped on the way.
+	if out, code := r.typeAtPrompt(t, "ab\x00c\r", "APP=example", "VAR=NUL"); code != 1 || !strings.Contains(out, "NUL has a control character in it") || r.exists(at("NUL")) {
+		t.Errorf("a typed NUL: exit %d\n%s", code, out)
+	}
 	// An arrow key is a control sequence, not part of a value.
 	if out, code := r.typeAtPrompt(t, "ab\x1b[Dc\r", "APP=example", "VAR=ARROW"); code != 1 || !strings.Contains(out, "ARROW has a control character in it (an arrow key, say)") || r.exists(at("ARROW")) {
 		t.Errorf("an arrow key: exit %d\n%s", code, out)
