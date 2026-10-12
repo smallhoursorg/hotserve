@@ -92,11 +92,11 @@ server to an app that deploys on every push to `main`, in four steps,
 with the box's config in a repository of its own that the box applies
 on each signed push.
 [After the first deploy](docs/after-first-deploy.md) then covers
-changing the config, secrets and the way back, and hardening the box:
-SSH by key only, the SSH port shut, and an optional administrator who
-is not root.
-Both use the three directories below, which the e2e suite builds and
-deploys on every change, so what they say works:
+changing the config, secrets and the way back, and
+[Hardening the box](docs/hardening.md) covers SSH by key only, the SSH
+port shut, and an optional administrator who is not root.
+The first two use the three directories below, which the e2e suite
+builds and deploys on every change, so what they say works:
 
 - **[examples/node](examples/node)** — a single executable (Node's own
   build), so nothing is installed on the box. Largest tarball;
