@@ -103,12 +103,8 @@ func check(ctx context.Context, v *proof.Verifier, b *proof.Bundle, installed []
 	if err := proof.ProveFile(b.Commit, b.Trees, b.Path, b.Caddyfile); err != nil {
 		return nil, asRefusal(err)
 	}
-	secrets, err := proof.ProveSecrets(b.Commit, b.Trees, b.Blobs, b.Path, secretNames)
-	if err != nil {
-		return nil, asRefusal(err)
-	}
-	if len(secrets.Apps) > 0 {
-		return nil, refused("%s", msgNoSecretsYet)
+	if err := provedSecrets(b); err != nil {
+		return nil, err
 	}
 	// 14, the linkage: HEAD down to the baseline, by hash, within the cap.
 	chain, err := proof.Chain(b.Commit, b.Parents, base.SHA)
@@ -140,6 +136,21 @@ func check(ctx context.Context, v *proof.Verifier, b *proof.Bundle, installed []
 // cannot install them must not answer as though it had.
 const msgNoSecretsYet = "this box does not install secrets yet"
 
+// provedSecrets is step 13's proof of the secrets beside the bundle's
+// file, as a refusal if it fails. Until the applier installs secrets it
+// also refuses any it finds: check and the fast path both ask here, so
+// the two cannot disagree about a commit with secrets.
+func provedSecrets(b *proof.Bundle) error {
+	s, err := proof.ProveSecrets(b.Commit, b.Trees, b.Blobs, b.Path, secretNames)
+	if err != nil {
+		return asRefusal(err)
+	}
+	if len(s.Apps) > 0 {
+		return refused("%s", msgNoSecretsYet)
+	}
+	return nil
+}
+
 // unchanged is the fast path's question (step 4): is the bundle the
 // commit and file the box runs, in a shape root would accept? HEAD is
 // the baseline and its file the installed bytes, and the steps of check
@@ -155,7 +166,7 @@ func unchanged(b *proof.Bundle, installed []byte, base *applied) bool {
 	if proof.ProveFile(b.Commit, b.Trees, b.Path, b.Caddyfile) != nil {
 		return false
 	}
-	if s, err := proof.ProveSecrets(b.Commit, b.Trees, b.Blobs, b.Path, secretNames); err != nil || len(s.Apps) > 0 {
+	if provedSecrets(b) != nil {
 		return false
 	}
 	_, err := proof.Chain(b.Commit, b.Parents, base.SHA)

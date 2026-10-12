@@ -126,35 +126,43 @@ func TestProveSecrets(t *testing.T) {
 		"bundle: tree "+ObjectID("tree", other)+", needed for deploy.example.com/secrets/api in <c>, is not in the bundle",
 		app, db, stripe)
 	c("a file in secrets/", treeObject(Entry{ModeFile, "README", ObjectID("blob", db)}),
-		"deploy.example.com/secrets/README in <c>: secrets/ holds the recipients file and one directory per app, nothing else")
+		"deploy.example.com/secrets/README in <c> is not an app's directory: it is a file")
 	c("a symlink in secrets/", treeObject(Entry{ModeSymlink, "example", ObjectID("blob", db)}),
-		"deploy.example.com/secrets/example in <c>: secrets/ holds the recipients file and one directory per app")
+		"deploy.example.com/secrets/example in <c> is not an app's directory: it is a symlink")
+	c("a submodule in secrets/", treeObject(Entry{ModeSubmodule, "example", ObjectID("commit", db)}),
+		"deploy.example.com/secrets/example in <c> is not an app's directory: it is a submodule")
 	c("recipients as a directory", treeObject(Entry{ModeDir, "recipients", ObjectID("tree", app)}),
-		"deploy.example.com/secrets/recipients in <c> is not a regular file", app, db, stripe)
+		"deploy.example.com/secrets/recipients in <c> is not an app's directory: recipients is the name of the recipients file, which is a regular file", app, db, stripe)
 	c("recipients as a symlink", treeObject(Entry{ModeSymlink, "recipients", ObjectID("blob", db)}),
-		"deploy.example.com/secrets/recipients in <c> is not a regular file")
+		"deploy.example.com/secrets/recipients in <c> is not an app's directory: recipients is the name of the recipients file")
 	c("an app name outside the grammar", treeObject(Entry{ModeDir, "Example", ObjectID("tree", app)}),
-		"deploy.example.com/secrets/Example in <c>: a directory in secrets/ is named for an app, and Example is not an app name", app, db, stripe)
+		"deploy.example.com/secrets/Example in <c> is not an app's directory: Example is not an app name", app, db, stripe)
+	c("_backup, held for later", treeObject(Entry{ModeDir, "_backup", ObjectID("tree", app)}),
+		"deploy.example.com/secrets/_backup in <c> is not an app's directory: _backup is not an app name", app, db, stripe)
 	nested := treeObject(Entry{ModeDir, "deeper", ObjectID("tree", app)})
 	c("a directory in an app's", treeObject(Entry{ModeDir, "example", ObjectID("tree", nested)}),
-		"deploy.example.com/secrets/example/deeper in <c> is not a regular file", nested, app, db, stripe)
+		"deploy.example.com/secrets/example/deeper in <c> is not a secret: it is a directory", nested, app, db, stripe)
 	linked := treeObject(Entry{ModeSymlink, "K.age", ObjectID("blob", db)})
 	c("a symlinked value", treeObject(Entry{ModeDir, "example", ObjectID("tree", linked)}),
-		"deploy.example.com/secrets/example/K.age in <c> is not a regular file", linked, db)
+		"deploy.example.com/secrets/example/K.age in <c> is not a secret: it is a symlink", linked, db)
 	sub := treeObject(Entry{ModeSubmodule, "K.age", ObjectID("commit", db)})
 	c("a submodule", treeObject(Entry{ModeDir, "example", ObjectID("tree", sub)}),
-		"deploy.example.com/secrets/example/K.age in <c> is not a regular file", sub)
+		"deploy.example.com/secrets/example/K.age in <c> is not a secret: it is a submodule", sub)
 	plain := treeObject(Entry{ModeFile, "DATABASE_URL", ObjectID("blob", db)})
 	c("a value without .age", treeObject(Entry{ModeDir, "example", ObjectID("tree", plain)}),
-		"deploy.example.com/secrets/example/DATABASE_URL in <c>: an app's directory in secrets/ holds only <VAR>.age files", plain, db)
-	for _, bad := range []string{"1X.age", "my-var.age", ".age", "A B.age", strings.Repeat("A", MaxVarName+1) + ".age"} {
+		"deploy.example.com/secrets/example/DATABASE_URL in <c> is not a secret: only <VAR>.age files are", plain, db)
+	for _, bad := range []string{"1X.age", "my-var.age", ".age", "A B.age"} {
 		named := treeObject(Entry{ModeFile, bad, ObjectID("blob", db)})
-		c("a bad variable name "+bad[:min(len(bad), 12)], treeObject(Entry{ModeDir, "example", ObjectID("tree", named)}),
-			"is not a variable name an env file can carry", named, db)
+		c("a bad variable name "+bad, treeObject(Entry{ModeDir, "example", ObjectID("tree", named)}),
+			"deploy.example.com/secrets/example/"+bad+" in <c> is not a secret: "+strings.TrimSuffix(bad, ".age")+" is not a variable name an env file can carry", named, db)
 	}
+	long := strings.Repeat("A", MaxVarName+1) + ".age"
+	longTree := treeObject(Entry{ModeFile, long, ObjectID("blob", db)})
+	c("a variable name over its cap", treeObject(Entry{ModeDir, "example", ObjectID("tree", longTree)}),
+		"is not a secret: its name is over 128 bytes", longTree, db)
 	empty := treeObject()
 	c("an app with no values", treeObject(Entry{ModeDir, "example", ObjectID("tree", empty)}),
-		"deploy.example.com/secrets/example in <c> holds no <VAR>.age file", empty)
+		"deploy.example.com/secrets/example in <c> is not an app's directory: it holds no secret", empty)
 
 	t.Run("secrets as a file", func(t *testing.T) {
 		r := newSecretsRepo(t, &Entry{ModeFile, "secrets", ObjectID("blob", db)})
@@ -201,7 +209,7 @@ func TestProveSecrets(t *testing.T) {
 		r := newSecretsRepo(t, secretsEntry(treeObject(Entry{ModeDir, "example", ObjectID("tree", many)})),
 			append([][]byte{treeObject(Entry{ModeDir, "example", ObjectID("tree", many)}), many}, blobs...)...)
 		_, err := r.prove()
-		refusalContaining(t, err, "deploy.example.com/secrets/example in "+r.commit.ID+": more than 256 variables")
+		refusalContaining(t, err, "app example has 257 secrets; the cap is 256")
 
 		one := treeObject(Entry{ModeFile, "K.age", ObjectID("blob", db)})
 		var apps []Entry
@@ -211,7 +219,27 @@ func TestProveSecrets(t *testing.T) {
 		top := treeObject(apps...)
 		r = newSecretsRepo(t, secretsEntry(top), top, one, db)
 		_, err = r.prove()
-		refusalContaining(t, err, "deploy.example.com/secrets in "+r.commit.ID+": more than 32 apps have secrets")
+		refusalContaining(t, err, "33 apps have secrets; the cap is 32")
+
+		// Past the cap the scan only counts: a bad name it reaches there
+		// is not looked at, and the count is the refusal.
+		apps = apps[:0]
+		for i := 0; i < 39; i++ {
+			apps = append(apps, Entry{ModeDir, "app" + string(rune('a'+i/26)) + string(rune('a'+i%26)), ObjectID("tree", one)})
+		}
+		apps = append(apps, Entry{ModeDir, "zz_bad", ObjectID("tree", one)}) // sorts last
+		top = treeObject(apps...)
+		r = newSecretsRepo(t, secretsEntry(top), top, one, db)
+		_, err = r.prove()
+		refusalContaining(t, err, "40 apps have secrets; the cap is 32")
+	})
+	t.Run("a blob over its cap", func(t *testing.T) {
+		big := make([]byte, MaxSecretFile+1)
+		one := treeObject(Entry{ModeFile, "K.age", ObjectID("blob", big)})
+		top := treeObject(Entry{ModeDir, "example", ObjectID("tree", one)})
+		r := newSecretsRepo(t, secretsEntry(top), top, one, big)
+		_, err := r.prove()
+		refusalContaining(t, err, "deploy.example.com/secrets/example/K.age is 131073 bytes; the cap is 131072")
 	})
 	t.Run("a Caddyfile at the top of the repository", func(t *testing.T) {
 		r := secretsRepo{trees: map[string]*Tree{}, blobs: map[string][]byte{}}

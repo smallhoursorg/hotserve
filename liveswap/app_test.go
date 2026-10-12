@@ -933,9 +933,9 @@ func TestRenderEnvFileRoundTrips(t *testing.T) {
 		if err != nil {
 			t.Fatalf("RenderEnvFile(%q): %v", vars, err)
 		}
-		got, err := ParseEnvFile("rendered", out)
+		got, err := ParseEnvLines("rendered", out)
 		if err != nil {
-			t.Fatalf("ParseEnvFile(%q): %v", out, err)
+			t.Fatalf("ParseEnvLines(%q): %v", out, err)
 		}
 		want := []string{"A=a", fmt.Sprintf("K%d=%s", i, v), "Z_LAST=z"}
 		if !slices.Equal(got, want) {

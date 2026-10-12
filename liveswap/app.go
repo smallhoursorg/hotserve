@@ -1728,10 +1728,12 @@ func parseEnvLines(path string, data []byte) ([]string, error) {
 	return vars, nil
 }
 
-// ParseEnvFile is the env-file reading every launch makes (parseEnvLines),
-// for a caller that holds the bytes: the box, comparing the file it is
-// about to replace with the one it renders. name is for the messages.
-func ParseEnvFile(name string, data []byte) ([]string, error) {
+// ParseEnvLines is parseEnvLines, the reading every launch makes, for a
+// caller that holds the bytes: the box, which reads the env file a push
+// replaces to tell which variables it adds, changes or removes
+// (box/DESIGN-box.md, "Record and result fields"). name is for the
+// messages.
+func ParseEnvLines(name string, data []byte) ([]string, error) {
 	return parseEnvLines(name, data)
 }
 

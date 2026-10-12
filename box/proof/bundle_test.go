@@ -244,7 +244,7 @@ func TestReadBundle(t *testing.T) {
 			files map[string][]byte
 			want  string
 		}{
-			"under the wrong id": {h.with("blobs/"+emptyBlob, data), "bundle: blobs/" + emptyBlob + " does not hash to its name"},
+			"under the wrong id": {h.with("blobs/"+emptyBlob, data), "bundle: blob " + emptyBlob + " does not hash to its name"},
 			"short name":         {h.with("blobs/abc", data), "bundle: blobs/abc is not a bundle file"},
 			"upper name":         {h.with("blobs/"+strings.ToUpper(id), data), "is not a bundle file"},
 			"a bare prefix":      {h.with("blobs", data), "bundle: blobs is not a bundle file"},

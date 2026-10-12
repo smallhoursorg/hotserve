@@ -1,6 +1,7 @@
 package proof
 
 import (
+	"encoding/hex"
 	"slices"
 	"strings"
 )
@@ -194,28 +195,47 @@ func ProveSecrets(c *Commit, trees map[string]*Tree, blobs map[string][]byte, pa
 	if !ok || st.ID != e.ID {
 		return nil, refuse("bundle: tree %s, needed for %s in %s, is not in the bundle; a bin/apply from before secrets sends only the Caddyfile's trees: update it from the template", oid(e.ID), shownDir, oid(c.ID))
 	}
-	entries, err := st.Entries()
-	if err != nil {
+	// One scan over the tree's bytes, as everywhere in the proof: an
+	// entry's name becomes a string only once it is held to the layout,
+	// and only up to the cap, past which the scan just counts.
+	type ref struct{ name, id string }
+	var apps []ref
+	n := 0
+	var bad error
+	err = st.scan(func(mode, name, id []byte) bool {
+		if string(name) == "recipients" {
+			if m := string(mode); m != ModeFile && m != ModeExecutable {
+				bad = refuse("%s/recipients in %s is not an app's directory: recipients is the name of the recipients file, which is a regular file", shownDir, oid(c.ID))
+				return false
+			}
+			return true
+		}
+		if string(mode) != ModeDir {
+			bad = refuse("%s/%s in %s is not an app's directory: %s", shownDir, Bound(string(name)), oid(c.ID), modeWhat(string(mode)))
+			return false
+		}
+		if n++; n > MaxSecretApps {
+			return true
+		}
+		a := string(name)
+		if !names.App(a) {
+			bad = refuse("%s/%s in %s is not an app's directory: %s is not an app name", shownDir, Bound(a), oid(c.ID), Bound(a))
+			return false
+		}
+		apps = append(apps, ref{a, hex.EncodeToString(id)})
+		return true
+	})
+	switch {
+	case err != nil:
 		return nil, err
+	case bad != nil:
+		return nil, bad
+	case n > MaxSecretApps:
+		return nil, refuse("%d apps have secrets; the cap is %d", n, MaxSecretApps)
 	}
 	out := &Secrets{Tree: st.ID}
-	for _, a := range entries {
-		shown := shownDir + "/" + Bound(a.Name)
-		switch {
-		case a.Name == "recipients":
-			if a.Mode != ModeFile && a.Mode != ModeExecutable {
-				return nil, refuse("%s in %s is not a regular file", shown, oid(c.ID))
-			}
-			continue
-		case a.Mode != ModeDir:
-			return nil, refuse("%s in %s: secrets/ holds the recipients file and one directory per app, nothing else", shown, oid(c.ID))
-		case !names.App(a.Name):
-			return nil, refuse("%s in %s: a directory in secrets/ is named for an app, and %s is not an app name", shown, oid(c.ID), Bound(a.Name))
-		}
-		if len(out.Apps) == MaxSecretApps {
-			return nil, refuse("%s in %s: more than %d apps have secrets", shownDir, oid(c.ID), MaxSecretApps)
-		}
-		app, err := proveSecretApp(c, trees, blobs, a, shown, names)
+	for _, a := range apps {
+		app, err := proveSecretApp(c, trees, blobs, a.name, a.id, shownDir+"/"+a.name, names)
 		if err != nil {
 			return nil, err
 		}
@@ -226,39 +246,72 @@ func ProveSecrets(c *Commit, trees map[string]*Tree, blobs map[string][]byte, pa
 
 // proveSecretApp is one app's directory: its <VAR>.age files, each a
 // bundled blob.
-func proveSecretApp(c *Commit, trees map[string]*Tree, blobs map[string][]byte, dir Entry, shownDir string, names Names) (*SecretApp, error) {
-	t, err := bundledTree(c, trees, dir.ID, shownDir)
+func proveSecretApp(c *Commit, trees map[string]*Tree, blobs map[string][]byte, name, id, shown string, names Names) (*SecretApp, error) {
+	t, err := bundledTree(c, trees, id, shown)
 	if err != nil {
 		return nil, err
 	}
-	entries, err := t.Entries()
-	if err != nil {
+	type ref struct{ name, id, shown string }
+	var vars []ref
+	n := 0
+	var bad error
+	err = t.scan(func(mode, file, id []byte) bool {
+		if m := string(mode); m != ModeFile && m != ModeExecutable {
+			bad = refuse("%s/%s in %s is not a secret: %s", shown, Bound(string(file)), oid(c.ID), modeWhat(m))
+			return false
+		}
+		if n++; n > MaxSecretVars {
+			return true
+		}
+		f := string(file)
+		where := shown + "/" + Bound(f)
+		v, ok := strings.CutSuffix(f, ".age")
+		switch {
+		case !ok:
+			bad = refuse("%s in %s is not a secret: only <VAR>.age files are", where, oid(c.ID))
+		case len(v) > MaxVarName:
+			bad = refuse("%s in %s is not a secret: its name is over %d bytes", where, oid(c.ID), MaxVarName)
+		case !names.Var(v):
+			bad = refuse("%s in %s is not a secret: %s is not a variable name an env file can carry", where, oid(c.ID), Bound(v))
+		default:
+			vars = append(vars, ref{v, hex.EncodeToString(id), where})
+			return true
+		}
+		return false
+	})
+	switch {
+	case err != nil:
 		return nil, err
+	case bad != nil:
+		return nil, bad
+	case n > MaxSecretVars:
+		return nil, refuse("app %s has %d secrets; the cap is %d", name, n, MaxSecretVars)
+	case n == 0:
+		return nil, refuse("%s in %s is not an app's directory: it holds no secret", shown, oid(c.ID))
 	}
-	app := &SecretApp{Name: dir.Name}
-	for _, f := range entries {
-		shown := shownDir + "/" + Bound(f.Name)
-		if f.Mode != ModeFile && f.Mode != ModeExecutable {
-			return nil, refuse("%s in %s is not a regular file", shown, oid(c.ID))
+	app := &SecretApp{Name: name}
+	for _, v := range vars {
+		data, ok := blobs[v.id]
+		if !ok || ObjectID("blob", data) != v.id {
+			return nil, refuse("bundle: blob %s, needed for %s in %s, is not in the bundle", oid(v.id), v.shown, oid(c.ID))
 		}
-		v, ok := strings.CutSuffix(f.Name, ".age")
-		if !ok {
-			return nil, refuse("%s in %s: an app's directory in secrets/ holds only <VAR>.age files", shown, oid(c.ID))
+		if len(data) > MaxSecretFile {
+			return nil, refuse("%s is %d bytes; the cap is %d", v.shown, len(data), MaxSecretFile)
 		}
-		if len(v) > MaxVarName || !names.Var(v) {
-			return nil, refuse("%s in %s: %s is not a variable name an env file can carry (letters, digits and _, not starting with a digit, at most %d bytes)", shown, oid(c.ID), Bound(v), MaxVarName)
-		}
-		if len(app.Vars) == MaxSecretVars {
-			return nil, refuse("%s in %s: more than %d variables", shownDir, oid(c.ID), MaxSecretVars)
-		}
-		data, ok := blobs[f.ID]
-		if !ok || ObjectID("blob", data) != f.ID {
-			return nil, refuse("bundle: blob %s, needed for %s in %s, is not in the bundle", oid(f.ID), shown, oid(c.ID))
-		}
-		app.Vars = append(app.Vars, SecretVar{Name: v, Blob: f.ID, Data: data})
-	}
-	if len(app.Vars) == 0 {
-		return nil, refuse("%s in %s holds no <VAR>.age file", shownDir, oid(c.ID))
+		app.Vars = append(app.Vars, SecretVar{Name: v.name, Blob: v.id, Data: data})
 	}
 	return app, nil
+}
+
+// modeWhat names what an entry is that the layout did not expect there.
+func modeWhat(mode string) string {
+	switch mode {
+	case ModeFile, ModeExecutable:
+		return "it is a file"
+	case ModeSymlink:
+		return "it is a symlink"
+	case ModeSubmodule:
+		return "it is a submodule"
+	}
+	return "it is a directory"
 }

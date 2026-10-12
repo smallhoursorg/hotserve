@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"filippo.io/age"
+	"filippo.io/age/armor"
 
 	"github.com/smallhoursorg/hotserve/box/proof"
 	"github.com/smallhoursorg/hotserve/liveswap"
@@ -117,6 +118,39 @@ func TestEnsureIdentity(t *testing.T) {
 			t.Fatal("read through a symlink")
 		}
 	})
+	t.Run("a crashed run's temporaries are removed", func(t *testing.T) {
+		// One stands for a crash before the link (a key nobody uses), one
+		// for a crash after it (a second name for the box's key).
+		d := t.TempDir()
+		file := filepath.Join(d, "identity")
+		if err := os.WriteFile(filepath.Join(d, ".identity-1"), []byte(newIdentity(t).String()+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		id, _, err := ensureIdentity(file, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Link(file, filepath.Join(d, ".identity-2")); err != nil {
+			t.Fatal(err)
+		}
+		again, created, err := ensureIdentity(file, now)
+		if err != nil || created || again.String() != id.String() {
+			t.Fatal(created, err)
+		}
+		if left, _ := filepath.Glob(filepath.Join(d, ".identity-*")); len(left) != 0 {
+			t.Fatalf("left %q", left)
+		}
+	})
+	t.Run("the message for a key that does not read is the catalogue's", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "identity")
+		if err := os.WriteFile(file, []byte("junk\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, _, err := ensureIdentity(file, now)
+		if err == nil || err.Error() != file+" is not an age identity: move it aside, run hotserve box key again, then make rekey BOX_KEY=<the new key> in the repository" {
+			t.Fatal(err)
+		}
+	})
 	t.Run("no directory is no key, not a made one", func(t *testing.T) {
 		_, _, err := ensureIdentity(filepath.Join(t.TempDir(), "absent", "identity"), now)
 		if !errors.Is(err, fs.ErrNotExist) {
@@ -170,7 +204,7 @@ func TestOpenSecrets(t *testing.T) {
 		if len(got) != 1 || got[0].name != "example" || !slices.Equal(got[0].vars, []string{"CRLF", "DATABASE_URL", "EMPTY", "QUOTED"}) {
 			t.Fatalf("%+v", got)
 		}
-		vars, err := liveswap.ParseEnvFile("example.env", got[0].file)
+		vars, err := liveswap.ParseEnvLines("example.env", got[0].file)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -193,7 +227,7 @@ func TestOpenSecrets(t *testing.T) {
 		data []byte
 		want string
 	}{
-		"not to the box": {encrypt(t, []byte("v"), other.Recipient()), "deploy.example.com/secrets/example/K.age is not encrypted to this box's key (" + box.Recipient().String() + ")"},
+		"not to the box": {encrypt(t, []byte("v"), other.Recipient()), "deploy.example.com/secrets/example/K.age is not encrypted to this box's key (" + box.Recipient().String() + "): put that key first in deploy.example.com/secrets/recipients and run make rekey"},
 		"a passphrase file": {func() []byte {
 			r, err := age.NewScryptRecipient("pass")
 			if err != nil {
@@ -202,17 +236,41 @@ func TestOpenSecrets(t *testing.T) {
 			r.SetWorkFactor(10)
 			return encrypt(t, []byte("v"), r)
 		}(), "is not encrypted to this box's key"},
-		"not an age file": {[]byte("DATABASE_URL=plaintext\n"), "deploy.example.com/secrets/example/K.age is not an age file"},
-		"two lines":       {encrypt(t, []byte("a\nb"), box.Recipient()), "deploy.example.com/secrets/example/K.age holds more than one line; a value is one line"},
-		"two newlines":    {encrypt(t, []byte("a\n\n"), box.Recipient()), "holds more than one line"},
-		"a lone CR":       {encrypt(t, []byte("a\rb"), box.Recipient()), "holds more than one line"},
-		"a NUL":           {encrypt(t, []byte("a\x00b"), box.Recipient()), "holds a NUL byte"},
-		"not UTF-8":       {encrypt(t, []byte("\xff\xfe"), box.Recipient()), "is not UTF-8 text"},
+		"not an age file": {[]byte("DATABASE_URL=plaintext\n"), "deploy.example.com/secrets/example/K.age does not decrypt: it is not an age file"},
+		"two lines":       {encrypt(t, []byte("a\nb"), box.Recipient()), "example/K: the value has a line break"},
+		"two newlines":    {encrypt(t, []byte("a\n\n"), box.Recipient()), "example/K: the value has a line break"},
+		"a lone CR":       {encrypt(t, []byte("a\rb"), box.Recipient()), "example/K: the value has a line break"},
+		"a NUL":           {encrypt(t, []byte("a\x00b"), box.Recipient()), "example/K: the value has a NUL byte"},
+		"not UTF-8":       {encrypt(t, []byte("\xff\xfe"), box.Recipient()), "example/K: the value is not UTF-8"},
 		"tampered": {func() []byte {
 			d := encrypt(t, []byte("value"), box.Recipient())
 			d[len(d)-1] ^= 1
 			return d
-		}(), "does not decrypt whole"},
+		}(), "deploy.example.com/secrets/example/K.age does not decrypt: its payload was changed or cut short after it was encrypted"},
+		"a changed header": {func() []byte {
+			d := encrypt(t, []byte("value"), box.Recipient())
+			i := bytes.Index(d, []byte("\n--- ")) + len("\n--- ")
+			d[i] ^= 1 // the header's MAC
+			return d
+		}(), "deploy.example.com/secrets/example/K.age does not decrypt: its header is not one age reads, or was changed after it was encrypted"},
+		"armored": {func() []byte {
+			var out bytes.Buffer
+			aw := armor.NewWriter(&out)
+			w, err := age.Encrypt(aw, box.Recipient())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := w.Write([]byte("v")); err != nil {
+				t.Fatal(err)
+			}
+			if err := w.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := aw.Close(); err != nil {
+				t.Fatal(err)
+			}
+			return out.Bytes()
+		}(), "deploy.example.com/secrets/example/K.age does not decrypt: it is ASCII-armored (age -a); the box reads age's binary form"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := openSecrets(box, sec(map[string][]byte{"K": c.data}), "deploy.example.com/Caddyfile")
@@ -232,7 +290,7 @@ func TestOpenSecrets(t *testing.T) {
 			"B": encrypt(t, []byte(big), box.Recipient()),
 		}), "deploy.example.com/Caddyfile")
 		var r *refusal
-		if !errors.As(err, &r) || !strings.Contains(r.msg, "deploy.example.com/secrets/example comes to 82") || !strings.Contains(r.msg, "over the cap of 65536") {
+		if !errors.As(err, &r) || r.msg != "app example's env file would be 81930 bytes; the cap is 65536" {
 			t.Fatalf("got %v", err)
 		}
 	})
@@ -356,15 +414,16 @@ func TestSecretsFit(t *testing.T) {
 		"secrets read by their app":      {managed + "\t\t\tenv MODE x\n", "", secrets("example:DATABASE_URL,STRIPE_KEY"), ""},
 		"a spelling that cleans to it":   {"\t\t\tenv_file /etc/hotserve//secrets/./example.env\n", "", secrets("example:K"), ""},
 		"secrets for no app":             {managed, "", secrets("example:K", "billing:K"), "deploy.example.com/secrets/billing/ names no app in the new Caddyfile: add the app, or remove the directory"},
-		"secrets, no env_file":           {"", "", secrets("example:K"), "app example has secrets, and no env_file: add `env_file /etc/hotserve/secrets/example.env` to its block"},
+		"secrets, no env_file":           {"", "", secrets("example:K"), "app example has secrets and no env_file: add env_file /etc/hotserve/secrets/example.env to its block"},
 		"secrets, the old file":          {"\t\t\tenv_file /etc/hotserve/example.env\n", "", secrets("example:K"), "app example has secrets, and its env_file is not /etc/hotserve/secrets/example.env: set it"},
 		"secrets, a placeholder":         {"\t\t\tenv_file {env.SECRET_PATH}\n", "", secrets("example:K"), "its env_file is not /etc/hotserve/secrets/example.env: set it"},
 		"an env line shadows a secret":   {managed + "\t\t\tenv STRIPE_KEY sk_test\n", "", secrets("example:DATABASE_URL,STRIPE_KEY"), "app example sets STRIPE_KEY with env and as a secret; env wins over env_file, so the secret would never reach it"},
-		"a SOCKET secret":                {managed, "", secrets("example:SOCKET"), "deploy.example.com/secrets/example/SOCKET.age: hotserve sets SOCKET last, so app example would never see this value"},
+		"a SOCKET secret":                {managed, "", secrets("example:SOCKET"), "secret SOCKET for app example: hotserve sets SOCKET last, so it would never reach the app"},
 		"another app's file":             {managed, "\t\t\tenv_file /etc/hotserve/secrets/example.env\n", secrets("example:K"), "app api's env_file is app example's secrets file"},
 		"the managed file, no secrets":   {managed, "", secrets(), "app example's env_file is /etc/hotserve/secrets/example.env, and deploy.example.com/secrets/example/ holds no secret: add one, or remove the env_file line"},
 		"something else in secrets/":     {"", "\t\t\tenv_file /etc/hotserve/secrets/shared.conf\n", secrets(), "app api's env_file is in /etc/hotserve/secrets, where the box keeps each app's own file: use /etc/hotserve/secrets/api.env"},
 		"a name outside the app grammar": {"", "\t\t\tenv_file /etc/hotserve/secrets/Bad.env\n", secrets(), "app api's env_file is in /etc/hotserve/secrets, where the box keeps each app's own file"},
+		"the directory itself":           {"", "\t\t\tenv_file /etc/hotserve/secrets/\n", secrets(), "app api's env_file is in /etc/hotserve/secrets, where the box keeps each app's own file: use /etc/hotserve/secrets/api.env"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			shape, err := Walk(secretsFile(c.example, c.api))

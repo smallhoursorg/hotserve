@@ -28,13 +28,17 @@ type Shape struct {
 	// Apps are the names of the global liveswap block's `app` lines, in
 	// file order, as a result reports them; a name outside liveswap's
 	// app-name grammar is left out, since liveswap refuses the file at
-	// load for it anyway. Read from the first reading only: nothing
-	// decides on them.
+	// load for it anyway. Read from the first reading only: no proof
+	// decides on them, only secretsFit's checks for mistakes.
 	Apps []string
 	// AppEnv is what each app's block says about its environment, by
 	// app name, for every name in Apps: what secretsFit checks against
-	// the secrets beside the file. Read like Apps, and as raw tokens:
-	// an env_file written with a placeholder is that text, not a path.
+	// the secrets beside the file. Read like Apps, as raw tokens: an
+	// env_file written with a placeholder is that text, not a path, and
+	// a placeholder's default that re-shapes the file once expanded is
+	// read as written — secretsFit catches mistakes and guards nothing,
+	// so it does not hold the two readings to agree, as Walk does for
+	// the host and the signers.
 	AppEnv map[string]AppEnv
 }
 

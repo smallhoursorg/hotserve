@@ -141,7 +141,7 @@ func ReadBundle(gz []byte) (*Bundle, error) {
 			}
 			id := name[len("blobs/"):]
 			if ObjectID("blob", data) != id {
-				return nil, refuse("bundle: blobs/%s does not hash to its name", oid(id))
+				return nil, refuse("bundle: blob %s does not hash to its name", oid(id))
 			}
 			b.Blobs[id] = data
 		}
