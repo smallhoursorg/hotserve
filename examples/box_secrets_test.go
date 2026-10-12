@@ -334,7 +334,42 @@ func TestBoxSecretSet(t *testing.T) {
 	if out, code := r.secrets("", "V999=1\n", "import", "APP=many"); code != 1 || !strings.Contains(out, "many would have more than 256 variables") {
 		t.Errorf("an import past the cap: exit %d\n%s", code, out)
 	}
+	// Past the cap already (made by hand): refused whatever runs.
+	r.write("deploy.example.com/secrets/many/V256.age", "x")
+	if out, code := r.secrets("", "", "list"); code != 1 || !strings.Contains(out, "deploy.example.com/secrets/many holds 257 variables; the box's cap for an app is 256") {
+		t.Errorf("257 variables: exit %d\n%s", code, out)
+	}
 	r.remove("deploy.example.com/secrets/many")
+
+	// At most 32 apps of a box have secrets.
+	have, err := os.ReadDir(filepath.Join(r.dir, "deploy.example.com/secrets"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	apps := 0
+	for _, e := range have {
+		if e.IsDir() {
+			apps++
+		}
+	}
+	for i := 1; i <= 32-apps; i++ {
+		r.write(fmt.Sprintf("deploy.example.com/secrets/app%02d/A.age", i), "x")
+	}
+	if out, code := r.secrets("", "v", "set", "APP=one-more", "VAR=A"); code != 1 || !strings.Contains(out, "deploy.example.com has secrets for 32 apps, the box's cap") {
+		t.Errorf("the 33rd app: exit %d\n%s", code, out)
+	}
+	if out, code := r.secrets("", "v", "set", "APP=example", "VAR=MORE"); code != 0 {
+		t.Errorf("an app already there, at the cap: exit %d\n%s", code, out)
+	}
+	r.remove("deploy.example.com/secrets/example/MORE.age")
+	r.write("deploy.example.com/secrets/app99/A.age", "x")
+	if out, code := r.secrets("", "", "list"); code != 1 || !strings.Contains(out, "deploy.example.com/secrets holds 33 apps' secrets; the box's cap is 32") {
+		t.Errorf("33 apps: exit %d\n%s", code, out)
+	}
+	for i := 1; i <= 32-apps; i++ {
+		r.remove(fmt.Sprintf("deploy.example.com/secrets/app%02d", i))
+	}
+	r.remove("deploy.example.com/secrets/app99")
 
 	// The recipients file's first key is the box's, or nothing is
 	// encrypted to it.
@@ -701,6 +736,14 @@ func TestBoxSecretsRefuseLinks(t *testing.T) {
 			"deploy.example.com/secrets/Example: a box's secrets directory holds the recipients file and one directory per app"},
 		{func() { r.write("deploy.example.com/secrets/blog", "") }, "deploy.example.com/secrets/blog",
 			"deploy.example.com/secrets/blog is not a directory"},
+		{func() { r.write("deploy.example.com/secrets/"+strings.Repeat("a", 64)+"/A.age", "") }, "deploy.example.com/secrets/" + strings.Repeat("a", 64),
+			"an app's name is at most 63 characters"},
+		{func() { r.write(appDir+"/"+strings.Repeat("V", 129)+".age", "") }, appDir + "/" + strings.Repeat("V", 129) + ".age",
+			"a variable's name is at most 128 bytes"},
+		// Values with no recipients file: nothing could encrypt another
+		// to the same keys.
+		{func() { r.remove(recipientsFile) }, recipientsFile,
+			"deploy.example.com/secrets has apps' secrets but no recipients file"},
 	} {
 		c.make()
 		if out, code := r.secrets("", "v", "set", "APP=example", "VAR=C"); code != 1 || !strings.Contains(out, c.want) {
