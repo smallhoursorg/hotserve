@@ -79,6 +79,8 @@ func readTreeSecrets(caddyfile string) (*treeSecrets, error) {
 	// apps counted — past the cap only counted — and the cap refused
 	// last, so the first refusal is the one root would name.
 	apps := 0
+	counted := map[string]bool{}
+	dotOnly := map[string][]string{}
 	for _, e := range entries {
 		name := e.Name()
 		switch {
@@ -97,8 +99,13 @@ func readTreeSecrets(caddyfile string) (*treeSecrets, error) {
 			return nil, err
 		}
 		if !slices.ContainsFunc(inner, func(f fs.DirEntry) bool { return !strings.HasPrefix(f.Name(), ".") }) {
-			continue // git tracks no empty directory, nor usually a dot-name
+			// git tracks no empty directory, nor usually a dot-name
+			for _, f := range inner {
+				dotOnly[name] = append(dotOnly[name], f.Name())
+			}
+			continue
 		}
+		counted[name] = true
 		if apps++; apps > proof.MaxSecretApps {
 			continue
 		}
@@ -127,11 +134,14 @@ func readTreeSecrets(caddyfile string) (*treeSecrets, error) {
 			ts.recipients = n
 			continue
 		}
-		if !e.IsDir() || e.Type()&fs.ModeSymlink != 0 {
-			return nil, refused("%s/%s is not an app's directory: %s", shown, proof.Bound(name), entryWhat(e))
-		}
-		if !appName.MatchString(name) {
-			return nil, refused("%s/%s is not an app's directory: %s is not an app name", shown, proof.Bound(name), proof.Bound(name))
+		// The pass above held every entry to the layout; a directory it
+		// did not count (empty, or dot-names alone) is no commit's, and
+		// its dot-names are warned about, whatever the directory's name.
+		if !counted[name] {
+			for _, dot := range dotOnly[name] {
+				ts.warnings = append(ts.warnings, notCommitted(shown+"/"+proof.Bound(name)+"/"+proof.Bound(dot)))
+			}
+			continue
 		}
 		app, n, err := readTreeApp(filepath.Join(dir, name), shown+"/"+name, ts)
 		if err != nil {

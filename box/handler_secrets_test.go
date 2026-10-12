@@ -258,6 +258,14 @@ func TestDescribeSecrets(t *testing.T) {
 		t.Errorf("dot-names: %v\n%s", err, out.String())
 	}
 
+	// A directory of dot-names alone is no commit's either, whatever its
+	// name: its dot-names are warned about, and it is not refused.
+	path = writeTree(t, secretsFile("", ""), map[string][]byte{"Example/.DS_Store": []byte("x")})
+	out.Reset()
+	if err := describe(path, &out); err != nil || !strings.Contains(out.String(), "secrets/Example/.DS_Store is not a secret, and is not read here") {
+		t.Errorf("a dot-only directory: %v\n%s", err, out.String())
+	}
+
 	// A directory with no secret is not a commit's: git keeps none.
 	path = writeTree(t, secretsFile("", ""), map[string][]byte{"example": nil})
 	if err := describe(path, &bytes.Buffer{}); err != nil {
