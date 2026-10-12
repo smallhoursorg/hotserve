@@ -6,8 +6,11 @@ promises. History lives in git (`git log -- box/DESIGN-box.md`); the
 are for decisions still fresh or contested and get folded into the
 body once they settle.
 
-**Status: built, on main and not yet in a release** (History lists
-the PRs); secrets are not built (Non-goals). Normative: a change that
+**Status: built, and released in v0.3.0** (History lists the PRs),
+**except secrets**: the "Secrets" section, and every step, row and
+message that names a secret, the box's key, an env file the box
+writes or the set, is the design box PRs 7b to 7f build, and the
+released box applies the Caddyfile alone. Normative: a change that
 cannot hold a line here changes the line in the same PR, with the
 reason.
 
@@ -19,13 +22,14 @@ table-driven tests, which cite the invariants by id. The "Review
 checklist" at the end is the set of questions a change to this file
 must answer before it is pushed.
 
-`box` is the subsystem that writes `/etc/hotserve/Caddyfile`. It is
+`box` is the subsystem that writes `/etc/hotserve/Caddyfile`, and the
+apps' env files under `/etc/hotserve/secrets/` ("Secrets"). It is
 not liveswap's: applying the whole file covers Caddy sites, the cache,
 penaltybox and liveswap alike. It sits beside liveswap and penaltybox,
-imports liveswap's deploy-trust verifier (the allowed direction), and
-owns three things: the `box` global option and `box_webhook` site
-directive, the root applier unit, and `hotserve init` / `hotserve box
-…`. The wider attack surface it changes is in
+imports liveswap's deploy-trust verifier and env-file format (the
+allowed direction), and owns four things: the `box` global option and
+`box_webhook` site directive, the root applier unit, the box's key for
+secrets, and `hotserve init` / `hotserve box …`. The wider attack surface it changes is in
 [DESIGN-threat-model.md](../DESIGN-threat-model.md), "Config webhook"
 and T6.
 
@@ -33,10 +37,15 @@ and T6.
 
 | Term | Means exactly |
 |---|---|
-| **bundle** | One gzip tarball the workflow POSTs: `path`, `Caddyfile`, `commit`, `parents/NNNN`, `trees/<sha>`, nothing else. |
+| **bundle** | One gzip tarball the workflow POSTs: `path`, `Caddyfile`, `commit`, `parents/NNNN`, `trees/<sha>`, `blobs/<sha>` (the secrets' files, "Proving the secrets"), nothing else. |
+| **secret** | One variable of one app: the file `<host>/secrets/<app>/<VAR>.age` in the repository, whose plaintext is exactly the value ("Layout in the repository"). |
+| **box key** | The box's own age identity, `/etc/hotserve/age/identity`, and its recipient, `/etc/hotserve/age.pub` ("The box's key"). |
+| **reader** | A key other than the box's that a secret is encrypted to, so a person can read it back and re-encrypt it: a recipient line of `recipients` after the box's. |
+| **env file** | `/etc/hotserve/secrets/<app>.env`, rendered by root from an app's secrets (step 15a). "Env file" in this document means only these; one a person makes elsewhere is the operator's, and `box` never touches it. |
+| **the set** | What one push writes: the Caddyfile, and each env file the push changes — written, rewritten or removed. A set with nothing in it is `no_change`. |
 | **HEAD** | The commit the bundle is for: `sha1("commit <n>\0" + raw)` of the bundled `commit` object, computed, never read. |
 | **baseline** | The commit the box runs: `sha` in `applied.json`. Advances only as the state machine says. |
-| **chain** | HEAD plus the bundled `parents/` commits, first-parent from HEAD down to, not including, the baseline, each linked to the next by hash. HEAD is always on it, so the chain is never empty: whatever would write — root, and the handler's pre-verification before validate — checks HEAD's signature against the installed list, HEAD equal to the baseline included (then the chain is HEAD alone and `parents/` must be empty). The one answer given without it is step 4's `no_change` fast path, which writes nothing: HEAD is the baseline, the bundled bytes are the installed bytes, and the bundle passes the steps that need no signature (path, file proof, linkage). `parents/` is also empty when HEAD's first parent is the baseline. The cap counts HEAD. |
+| **chain** | HEAD plus the bundled `parents/` commits, first-parent from HEAD down to, not including, the baseline, each linked to the next by hash. HEAD is always on it, so the chain is never empty: whatever would write — root, and the handler's pre-verification before validate — checks HEAD's signature against the installed list, HEAD equal to the baseline included (then the chain is HEAD alone and `parents/` must be empty). The one answer given without it is step 4's `no_change` fast path, which writes nothing: HEAD is the baseline, the bundled bytes are the installed bytes, the secrets tree and the env files are as `applied.json` records them, and the bundle passes the steps that need no signature (path, file and secrets proofs, linkage). `parents/` is also empty when HEAD's first parent is the baseline. The cap counts HEAD. |
 | **installed file** | `/etc/hotserve/Caddyfile` as root last wrote it. The source of the signer list and the rollback bytes. |
 | **record** | `txn.json`: the one durable marker of a transaction in flight, with a `phase`. Present means "no terminal result yet". |
 | **result** | `out/<id>.json`: what a push came to. Non-terminal: `verified`. Terminal: `refused`, `no_change`, `applied`, `failed`, `rolled_back`, `unknown`. |
@@ -74,7 +83,10 @@ repository of the operator's — and the box applies a commit only if
 (a) a token proves it came from that repository's `main` workflow,
 (b) an SSH key the box lists signed the commit and every commit on the
 chain, (c) the file sent is the file in that commit, and (d) the
-commit descends from the one the box runs. On the normal path root is
+commit descends from the one the box runs. The apps' secrets ride the
+same commits, encrypted on a laptop to the box's own key and checked
+by the same chain ("Secrets"), so no account on the box is needed to
+edit them either. On the normal path root is
 used twice in a box's life: to install the package and start it, and to tell the
 box which repository it belongs to. The console stays the way back —
 a rewritten history (`hotserve box baseline`), a renamed deploy host
@@ -85,12 +97,13 @@ again.
 ## The shape
 
 The repository holds one directory per box, named for its deploy host;
-the box is one file:
+the box is one file, and its apps' secrets beside it:
 
 ```
 deploy.example.com/Caddyfile   # the whole config
+deploy.example.com/secrets/    # the apps' secrets, encrypted: "Secrets"
 .github/workflows/apply.yml    # validates every push and PR; applies main to the box
-Makefile                       # make signer, make check, make wip
+Makefile                       # make signer, make check, make wip, make secret …
 bin/                           # what the Makefile and the workflow run
 ```
 
@@ -202,10 +215,13 @@ cross-references throughout.
    which is asked before the body is read (a marker, a result, or a
    bundle still in `in/`: 409 "duplicate request id", so one id is never
    answered two ways) — if HEAD equals the baseline, the bundled
-   file's digest equals the installed file's, and the bundle passes the
+   file's digest equals the installed file's, the bundle's secrets tree
+   is the one `applied.json` records and every env file `applied.json`
+   lists reads back with its recorded digest (one that cannot be read
+   counts as changed, never as an error), and the bundle passes the
    steps that need no signature (11's path is the one `applied.json`
-   records, 13's file proof, 14's linkage with `parents/` empty),
-   nothing on disk would change, so the handler answers 200 `no_change`
+   records, 13's file and secrets proofs, 14's linkage with `parents/`
+   empty), nothing on disk would change, so the handler answers 200 `no_change`
    with no admission lock, no drop and no root work (asked again under
    the lock, of what was read there, so a push another one applied
    meanwhile is answered the same way) — it skips only the work that
@@ -218,8 +234,9 @@ cross-references throughout.
    token without the right `sha`, or a POST without its id, is refused
    as it would be on the slow path. The fast path writes nothing, not
    even a marker: a poll of its id finds none (404), and the 200 is the
-   whole answer. (After a console edit the digests differ and the push goes to
-   root, which reinstalls HEAD's file by design; the next replay takes
+   whole answer. (After a console edit of the Caddyfile or an env file,
+   or the loss of an env file, the digests differ and the push goes to
+   root, which reinstalls HEAD's files by design; the next replay takes
    the fast path again.)
 5. **Pre-verification.** The handler runs the applier's proof code
    (steps 10 to 13) before anything touches the staged file, so a
@@ -255,6 +272,10 @@ cross-references throughout.
    tables; a push that fails them is refused by the handler's name. Like
    the rest of this step it is a courtesy against a signer's mistake,
    not a boundary: root never adapts, so step 15 checks presence alone.
+   Last, the secrets' consistency checks, on the token walk of the
+   staged file and the bundle's secrets tree, never on the adaptation:
+   an app's secrets and its `env_file` line must agree ("Which checks
+   run where"). Also a courtesy; root does not repeat them.
 7. **Drop.** The bundle, assembled in `stage/`, is renamed into `in/`
    as `<id>.tar`; only then is the marker written with the time (see
    "Admission" for why in that order); then the admission lock is released. The handler logs `box
@@ -340,7 +361,10 @@ cross-references throughout.
     (`100644`/`100755`) whose id is `sha1("blob <n>\0" + file)`. A
     symlink, submodule or tree at the path refuses; a SHA-256
     repository refuses. Plain `crypto/sha1`, not sha1dc, is an accepted
-    residual.
+    residual. **And the secrets are the committed secrets:** from the
+    file's directory the walk looks up `secrets`, and every entry under
+    it is held to the layout and proved, every `.age` file's blob
+    bundled and hashed ("Proving the secrets").
 14. **Descent, every step signed.** The chain is walked first-parent
     from HEAD, linked by hash: `parents/0001`'s id equals HEAD's first
     `parent` header, each next entry's id equals the previous entry's
@@ -373,8 +397,20 @@ cross-references throughout.
     pushes. This guard checks presence, not reachability: reachability
     is the handler's (step 6), which root cannot repeat; the console is
     the guarantee behind both.
+
+    15a. **Decrypt (root only).** Only now, every proof and every
+    signature on the chain passed, root reads the box key and decrypts
+    each secret, holds the values to the rules of "Values and the env
+    file", and renders each app's env file in memory. A secret not
+    encrypted to this box's key, a value the env-file format cannot
+    hold, or a cap exceeded refuses; a missing key or a directory not
+    as tmpfiles.d makes it is the box's error, `failed`. A HEAD with no
+    secret reads no key, so a box without one applies every push that
+    carries none, removals of listed env files included. The handler
+    never runs this step: it cannot read the key (I6, I9).
 16. **Install or not.** From here the state machine governs: active?
-    changed? See "The install transaction".
+    changed — the Caddyfile, or any env file? See "The install
+    transaction".
 
 Steps 10 to 15 are one function the handler's pre-verification (step
 5) and the applier share, run cheapest first: the two files' readings
@@ -382,7 +418,9 @@ and the identity (10, 11 and 15's presence rules), the file proof
 (13), the chain's linkage (14), then every signature on the chain,
 HEAD's first (12 and 14), then 15's key guard — so a malformed bundle
 never starts `ssh-keygen`, and when more than one step would refuse,
-the first so found is the one named. Step 16 waits out `reloading` as
+the first so found is the one named. Step 15a follows, in the applier
+alone, so no secret is decrypted for a bundle any of them refuses.
+Step 16 waits out `reloading` as
 it does `activating` — a reload in flight, the console's or one a
 killed applier started, ends in `active` or a failure — within one
 budget per run: 300 s from the run's first sight of either, so the
@@ -420,11 +458,21 @@ machine at the buffer comparison with `origin: init`, writing
 `applied.json` from its argument, the path it derives from the host
 ("The box's identity") and the bytes it installed. Its authority is
 root at the console; the file it installs is the new "installed file"
-every later push is checked against.
+every later push is checked against. `init` installs no secrets: it
+has no objects to prove them against, so steps 13's secrets proof and
+15a do not run, its set is the Caddyfile alone, and `applied.json`'s
+`secrets_tree` and `secrets` are kept from the file it replaces (none
+on a fresh box), so the first push decides the env files by the full
+chain.
 
 Running apps are never restarted by an apply, as with any reload
-(liveswap's "reload trap"): a changed `app` block applies at the app's
-next launch.
+(liveswap's "reload trap"): a changed `app` block, and a changed env
+file, apply at the app's next launch. A push that changes env files
+and not the Caddyfile reloads nothing: an app's environment comes from
+its env file only when hotserve launches it (`readEnvFile` in
+`buildEnvFull`, liveswap/app.go), and loading a configuration only
+checks the file's mode (`warnEnvFileMode`, a `stat`), so a reload
+would change nothing an app sees.
 
 ### Why 202 and a poll
 
@@ -547,14 +595,15 @@ by id.
 
 | Id | Invariant |
 |---|---|
-| **I1** | For every write the applier or `init` makes: `/etc/hotserve/Caddyfile` exists at every instant and is a complete file written whole — one that ran, or one whose reload is pending or in progress under a record that says `swapped`; a failed reload puts the previous bytes back, and a crash leaves a record saying which. The console is root and may write anything; the applier detects such a write by digest (step 10, and the re-reads the Transitions table gives) and reports it, and never overwrites it knowingly. A baseline names bytes that stand on disk when it is written: ones the transaction installed, or — for `no_change` — ones already there, which a console may have put there (Accepted residuals). |
+| **I1** | For every write the applier or `init` makes: `/etc/hotserve/Caddyfile` exists at every instant and is a complete file written whole — one that ran, or one whose reload is pending or in progress under a record that says `swapped`; a failed reload puts the previous bytes back, and a crash leaves a record saying which. The console is root and may write anything; the applier detects such a write by digest (step 10, and the re-reads the Transitions table gives) and reports it, and never overwrites it knowingly. A baseline names bytes that stand on disk when it is written: ones the transaction installed, or — for `no_change` — ones already there, which a console may have put there (Accepted residuals). Every env file in the set is likewise, at every instant, either absent or a complete file written whole — its previous bytes or its new ones — and the record says which each should be. |
 | **I2** | Every entry the applier *listed* in `in/` leaves `in/` in that run (a bundle landing after the last listing is the next run's), and `work/` is empty and no record remains on every exit, except a run that stops with work on disk: the full-disk end of the Failure-mode table; a stop with everything left as found (a record that does not read, the installed file unreadable mid-transaction, `is-active` unanswered in recovery); and a filesystem error the run cannot work around (root's lock, a listing of `in/` or `work/`, an entry that can be neither taken nor removed, an entry or the record that cannot be removed). What such a run took stays in `work/`, and it ends with the line `box apply leaves work on disk` and the console's remedy ("The applier unit"). `in/` receives nothing but a complete bundle by one `rename`. |
 | **I3** | Every bundle the applier takes ends in exactly one terminal result, or — only when the result cannot be written — one error-level journal line carrying every field the result would have; an entry that is not a bundle gets the journal line only, and a bundle whose push already settled (step 9) a warning line only — or, if its take fails, the take's error line. |
 | **I4** | The baseline advances only from a transaction — the applier's or `init`'s — whose durable record says `applied` (reload confirmed) or `no_change` (hotserve found active; for `init`, up), or from `baseline`; each holds root's lock; it never runs ahead of the record. |
 | **I5** | Within a transaction: from the first write that changes `/etc/hotserve` or `applied.json` until the terminal result, the record exists; it is written atomically before that first write and is the last thing removed. Refusals and `verified` precede it and write none. `hotserve box baseline` is not a transaction: one atomic write of `applied.json` under the lock, after recovery, with no record — a crash before its rename changed nothing, after it the reset is done; a retry is idempotent. |
-| **I6** | Root installs nothing a listed signer did not sign (every chain commit), nothing that fails the file proof, nothing that does not descend from the baseline, nothing for another host or path. |
+| **I6** | Root installs nothing a listed signer did not sign (every chain commit), nothing that fails the file proof, nothing that does not descend from the baseline, nothing for another host or path. It decrypts nothing whose blob a proved tree does not name, and nothing before every signature on the chain has verified (step 15a). |
 | **I7** | No pending outlives its bound: a marker stops blocking admission at thirty minutes (the file is kept by Retention); a bundle in `in/` blocks admission until root takes it, with no age-out. |
 | **I8** | Every write that recovery reasons from is durable before the next step: the temporary is `fsync`ed, renamed, and the parent directory `fsync`ed. |
+| **I9** | A secret's plaintext is only in its env file and, while a transaction is in flight, in the record (root's alone, 0600): never in a result, a journal line, the `diff`, or the arguments or environment of a child the applier starts. Results and the journal name a secret as `<app>/<VAR>`. |
 
 ### States
 
@@ -562,17 +611,26 @@ The record's `phase` is the state. Recovery acts on the phase, after
 checking the installed file's digest `d` against what the phase
 implies; it never infers state from digests alone.
 
+With env files in the set, `d` is read for every file of the set the
+record lists — the Caddyfile and each env file, an absent file's
+digest being `""`, a state of its own — each against its own `prev`
+and `new`. "`d == prev`" then means every file is at its `prev`,
+"`d == new`" every file at its `new`, and **mixed** means each file is
+at one of the two and they are not all at the same one: a crash
+inside the swap, which writes the env files first and the Caddyfile
+last. A set of the Caddyfile alone reads exactly as before.
+
 | Phase | Meaning | `d` must be | Recovery (crash found this phase) |
 |---|---|---|---|
 | *(no record)* | No transaction in flight. | — | A `work/` entry with a terminal result (on disk, or journaled earlier in this run: step 9): remove the entry. With a `verified` result or none: write `failed` ("interrupted before the Caddyfile changed"), remove the entry — and if that `failed` cannot be written, remove the `verified`, so Retention settles the push. The applier's own leftover temporaries (Transitions table) are removed. |
-| *(record unreadable)* | `txn.json` does not parse, or is not the shape only root writes (a phase above, ids, digests, `prev` hashing to `prev_sha256`, a `no_change` record's two digests equal, a `path` of safe components). Root writes it whole by rename, so this is a fault no other row reasons about. | — | Write nothing anywhere; error-level journal line; take nothing from `in/`. The path unit re-runs until its trigger limit. The console, in this order: reads the record — the push is the one whose entry is in `work/` (`<id>.tar`). If that push has a terminal result in `out/<id>.json`, only the removal was owed; nothing else proves it ended (a replay of the baseline's own commit starts with `applied.json` already naming it). Otherwise it puts back the bytes that ran before the push, if the installed file is not them: the record's `prev` (base64, possibly their only copy), or, if `prev` does not decode, the last file the box recorded as applied — `applied.json`'s commit's, at its `path`, in the box's repository, signed and run before. It runs `systemctl reload hotserve` if hotserve is running. Then it removes the record and restarts the path unit ("The applier unit"). The next run ends the push `failed` ("interrupted before the Caddyfile changed"), which the write-back made true; a baseline the push had already advanced is reported as edited out of band by the next push, which applies over it. Exit 0: the one non-zero exit is the full-disk end. |
+| *(record unreadable)* | `txn.json` does not parse, or is not the shape only root writes (a phase above, ids, digests, `prev` hashing to `prev_sha256`, a `no_change` record's two digests equal, a `path` of safe components, each `secrets` entry's app in the app grammar and its `prev` hashing to its `prev_sha256`). Root writes it whole by rename, so this is a fault no other row reasons about. | — | Write nothing anywhere; error-level journal line; take nothing from `in/`. The path unit re-runs until its trigger limit. The console, in this order: reads the record — the push is the one whose entry is in `work/` (`<id>.tar`). If that push has a terminal result in `out/<id>.json`, only the removal was owed; nothing else proves it ended (a replay of the baseline's own commit starts with `applied.json` already naming it). Otherwise it puts back the bytes that ran before the push, if the installed file is not them: the record's `prev` (base64, possibly their only copy), or, if `prev` does not decode, the last file the box recorded as applied — `applied.json`'s commit's, at its `path`, in the box's repository, signed and run before. It does the same for each env file the record lists: the entry's `prev`, or the file removed where `prev` is absent (where an entry's `prev` does not decode, it leaves that file as it is: old or new, its values are ones a signer committed, and the next push rewrites it). It runs `systemctl reload hotserve` if hotserve is running. Then it removes the record and restarts the path unit ("The applier unit"). The next run ends the push `failed` ("interrupted before the Caddyfile changed"), which the write-back made true; a baseline the push had already advanced is reported as edited out of band by the next push, which applies over it. Exit 0: the one non-zero exit is the full-disk end. |
 | *(any phase, terminal result present)* | The transaction ended; only its removals were owed. | — | Remove the record, then the entry (Failure-mode table, "terminal result"). |
 | `no_change` | Buffers identical; only the baseline advances. | `prev` | Write `applied.json` (idempotent), result `no_change`. |
-| `installing` | Record durable; swap not yet done. | `prev` | `failed` ("interrupted before the Caddyfile changed"). If `d == new`, the crash fell after the swap: act as `swapped`. |
-| `swapped` | New file on disk; reload unconfirmed. | `new`, or `prev` (the bytes are already back: continue as `rolling_back`) | Write the previous bytes back, phase → `rolling_back`, continue as that row, whatever the origin. |
-| `applied` | Reload confirmed; `applied.json` may not be written yet. | `new` | Write `applied.json` (idempotent), result `applied`. **If `d ≠ new`, the file changed after the reload (a console edit): do not advance the baseline; result `unknown`.** |
-| `rolling_back` | Reload failed (or the record could not follow the swap); previous bytes going back. | `prev`, or `new` (crash before the write-back: write them back) | Reload if hotserve is up (Glossary) → `rolled_back` with the record's `error`; reload fails → `unknown`, worded by the record's `error` (Message catalogue: "both" reloads failed only when the first one did); not running (anything else, a restart loop still `activating` included) → `failed` ("the previous Caddyfile is on disk; hotserve is not running"). `d` neither: the `any` row. A write-back that fails ends as the full-disk end (Failure-mode table). |
-| any | `d` matches neither `prev` nor `new`. | — | A console edit under the transaction: write nothing to `/etc/hotserve`, result `unknown` ("the Caddyfile changed during the transaction; it is left as found"), journal at warning level. |
+| `installing` | Record durable; swap not yet done. | `prev` | `failed` ("interrupted before the Caddyfile changed", or with env files in the set "interrupted before the box's files changed"). If `d == new` or mixed, the crash fell in or after the swap: act as `swapped`. |
+| `swapped` | New files on disk; reload, if the Caddyfile changed, unconfirmed. | `new`, mixed, or `prev` (the bytes are already back: continue as `rolling_back`) | Write the previous bytes back to every file at `new` (an env file that was absent before is removed), phase → `rolling_back`, continue as that row, whatever the origin. |
+| `applied` | Reload confirmed (or none was needed); `applied.json` may not be written yet. | `new` | Write `applied.json` (idempotent), result `applied`. **If `d ≠ new`, a file changed after the reload (a console edit): do not advance the baseline; result `unknown`.** |
+| `rolling_back` | Reload failed (or the record could not follow the swap, or a write after the first one failed); previous bytes going back. | `prev`, `new` or mixed (crash before the write-back: write back each file at `new`) | Reload if the Caddyfile was in the set and hotserve is up (Glossary) → `rolled_back` with the record's `error`; with env files alone in the set, no reload: `rolled_back` once they are back; reload fails → `unknown`, worded by the record's `error` (Message catalogue: "both" reloads failed only when the first one did); not running (anything else, a restart loop still `activating` included) → `failed` ("the previous Caddyfile is on disk; hotserve is not running"). A file at neither: the `any` row. A write-back that fails ends as the full-disk end (Failure-mode table). |
+| any | A file of the set matches neither its `prev` nor its `new`. | — | A console edit under the transaction: write nothing to `/etc/hotserve`, result `unknown` ("the Caddyfile changed during the transaction; it is left as found", or "the env file for <app> changed during the transaction; it is left as found"), journal at warning level. |
 
 ### Record and result fields
 
@@ -585,6 +643,10 @@ implies; it never infers state from digests alone.
 | record | `origin` | applier, `init` | `applier` or `init`; recovery honours it (States table) |
 | record | `prev`, `prev_sha256` | applier | the installed file's bytes (base64) and digest at step 10 |
 | record | `new_sha256` | applier | the incoming file's digest |
+| record | `secrets` | applier | one entry per env file in the set: `{app, prev, prev_sha256, new_sha256}` — `prev` the file's bytes before the push (base64; absent when there was no file), `prev_sha256` their digest (`""` when absent), `new_sha256` the rendered file's digest (`""` when the push removes it). The plaintext of I9's exception |
+| record | `secrets_tree`, `secrets_installed` | applier | HEAD's secrets tree id (`""` for none) and the `app → sha256` map of every env file the box manages once the push applies: what `applied.json` gets |
+| result | `secrets_added`, `secrets_changed`, `secrets_removed` | applier | the secrets the push adds, changes or removes, as `<app>/<VAR>`, sorted; never a value. A secret is changed when its value is, so a rekey that keeps the values lists none |
+| record, result | `secrets_edited_out_of_band` | applier | the apps whose env file root wrote or removed over bytes it had not installed — a digest differing from `applied.json`'s, a listed file gone, or a file it never installed for an app this push installs ("Values and the env file") |
 | record, result | `diff` | applier | unified diff, redacted (layers 3 and 4), capped per Caps |
 | record, result | `apps` | applier | app names from the incoming file's token walk: the global `liveswap` block's `app` lines whose name is in liveswap's app-name grammar (one outside it fails the load anyway), so a result's size stays under the handler's read cap |
 | record, result | `box_webhook` | applier | the host |
@@ -595,28 +657,29 @@ implies; it never infers state from digests alone.
 | result | `named` | handler, applier | the object ids a refusal's `error` names — HEAD, the baseline, a commit on the chain, a tree — each in the id grammar, at most 8; a result that breaks either rule does not read. An id the bundle itself spelled (a `parent` header) is the pusher's own, so naming it back reveals nothing of the box's |
 | record | `error` | applier | in a `rolling_back` record, the catalogue text its `rolled_back` result will carry, so recovery reports the reason the live run would have |
 | `applied.json` | `sha`, `path`, `sha256`, `signer`, `when` | applier, `init`, `baseline` | the baseline; this box's path (`<host>/Caddyfile`, as `init` derived it); the digest of the file the last apply installed (`baseline` keeps `path` and `sha256` as it finds them); who verified — a principal, or `init` or `baseline` for the console; when |
+| `applied.json` | `secrets_tree`, `secrets` | applier; `init` and `baseline` keep them as they find them | the baseline's secrets tree id (`""`, or the field absent, for none) and the `app → sha256` map of the env files the box manages: the only ones it may remove, and the digests step 4's fast path and the out-of-band flag compare. Every write from a transaction, `no_change` included, sets both from HEAD — its secrets tree, and the digest of every env file of HEAD's apps as it stands once the transaction ends — so a rekey records its new tree, and a console-made file whose bytes are HEAD's becomes listed. Absent in a file a box without secrets wrote, which reads as none |
 | marker | `posted` | handler | time of admission |
 
 A result carries what was established before its phase: a refusal at
 step 9 has `id`, `phase` and `error`; one past the bundle's parse adds
 `commit` and `path`; `signer`, `box_webhook`, `apps` and the out-of-band
-flag come once steps 10 to 15 pass, and `diff` once hotserve is found
-active. A transaction with `origin: init` writes no result file at any
+flag come once steps 10 to 15 pass, and `diff` and the `secrets_*`
+fields once hotserve is found active. A transaction with `origin: init` writes no result file at any
 phase — its caller prints the outcome, and recovery journals it.
 
 ```mermaid
 stateDiagram-v2
     [*] --> checking : bundle taken (9)
-    checking --> refused : any of 10–15 fails
+    checking --> refused : any of 10–15a fails
     checking --> not_running : hotserve not active after the wait
-    checking --> no_change : active, buffers identical
-    checking --> verified : active, buffers differ
+    checking --> no_change : active, the set empty
+    checking --> verified : active, the set not empty
     no_change --> [*] : applied.json, result, record removed
     verified --> installing : record written (phase installing)
     installing --> failed : temp write fails (nothing changed)
-    installing --> swapped : new file renamed over Caddyfile
-    swapped --> applied : systemctl reload exit 0
-    swapped --> rolling_back : reload failed, or record rewrite failed
+    installing --> swapped : env files, then the Caddyfile, renamed over
+    swapped --> applied : systemctl reload exit 0, or no reload needed
+    swapped --> rolling_back : reload failed, record rewrite failed, or a later file write failed
     applied --> [*] : applied.json, result, record removed
     rolling_back --> rolled_back : previous bytes back, reload exit 0
     rolling_back --> unknown : second reload failed
@@ -632,17 +695,17 @@ stateDiagram-v2
 | From → to | Event | Durable write(s), in order | Guards |
 |---|---|---|---|
 | in/ → work/ | step 9 takes an entry | the entry renamed into `work/` → `work/` and `in/` fsynced | I2, I8 |
-| checking → refused | A check in 10–15 fails | result `refused` → entry removed | I2, I6 |
-| checking → failed | the box's own error in 9–16: the bundle unreadable, `applied.json` missing or unreadable, the installed file unreadable or failing the walk for any reason but an empty signer list, `ssh-keygen` unable to answer or the chain deadline passed, `is-active` unanswered | result `failed` ("the install failed before the Caddyfile changed: <error>; nothing changed", the catalogue's) → entry removed | I2, I3; never `refused` (step 12) |
+| checking → refused | A check in 10–15a fails | result `refused` → entry removed | I2, I6 |
+| checking → failed | the box's own error in 9–16: the bundle unreadable, `applied.json` missing or unreadable, the installed file unreadable or failing the walk for any reason but an empty signer list, `ssh-keygen` unable to answer or the chain deadline passed, `is-active` unanswered; in 15a, the box key missing or unreadable, an installed env file unreadable, `/etc/hotserve/secrets/` not the setgid `root:hotserve` directory tmpfiles.d makes | result `failed` ("the install failed before the Caddyfile changed: <error>; nothing changed", the catalogue's; the key and the directory have texts of their own) → entry removed | I2, I3; never `refused` (step 12) |
 | checking → not_running | `origin: applier`: `is-active` is not `active` — `inactive`/`failed` at once, or still `activating` or `reloading` when the run's 300 s wait ends. `origin: init`: not up (step 16) — `inactive`/`failed` at once, or still `activating` when the wait ends; a `reloading` the wait outlasted is up, and `init` goes on (its reload queues behind) | result `refused` — "hotserve is not running; nothing applied" for `inactive`/`failed`, "hotserve is still starting after 300 s; nothing applied" after a wait that timed out, the catalogue's two messages → entry removed. `init` writes nothing: it prints the same message with its remedy and exits non-zero ("Console commands") | I2; I4: nothing advances |
-| checking → no_change | active (`origin: init`: up); incoming buffer == installed buffer | record `no_change` → the installed file's digest re-read, still `prev_sha256` (a console edit since step 10 → `unknown`, "the Caddyfile changed during the transaction; it is left as found", baseline not advanced, record removed, entry removed; unreadable → the stop-as-found of I2) → `applied.json` → result `no_change` → record removed → entry removed | I1, I2, I4, I5. Every write of `applied.json` — this one, `swapped → applied`'s, and recovery's — is preceded by that re-read, after any wait before it |
-| checking → verified | active (`origin: init`: up); buffers differ | result `verified` (if this write fails: result `failed` in its place if that can be written, else any `verified` whose rename landed removed; the `work/` entry removed; nothing else changes) — `init` writes no result, it prints | I3 |
-| verified → installing | — | record `installing` (prev bytes embedded) | I5, I8 |
-| installing → failed | a temporary cannot be written | remove temporaries; result `failed` → record removed → entry removed | I1 (file untouched), I2 |
-| installing → swapped | the installed file's digest is re-read and still equals `prev_sha256` (a console edit since step 10 → `unknown`, "the Caddyfile changed during the transaction; it is left as found", record removed, entry removed); then the new file is written to a temp and renamed over `Caddyfile` | record `swapped` | I1 (file exists at every instant). The reread and the rename are not atomic: a bare console edit landing in that window is overwritten, and one landing after the post-reload check is reported as out-of-band by the next push, not refused (Accepted residuals). |
-| swapped → rolling_back | record rewrite to `swapped` fails, or reload fails | record `rolling_back` (if writable) → previous bytes written back | I1 |
-| swapped → applied | `systemctl reload hotserve` exits 0, and the installed file's digest, re-read, still equals `new_sha256` (a console edit since the swap → `unknown`, baseline not advanced, as the States table's `applied` row) | record `applied` → `applied.json` | I4 (record before baseline; the digest check is why "applied" means these bytes) |
-| rolling_back → rolled_back | previous bytes back, reload exits 0 | result `rolled_back` → record removed → entry removed | I1, I2 |
+| checking → no_change | active (`origin: init`: up); the set is empty: incoming buffer == installed buffer, and every env file 15a rendered equals the installed one byte for byte, none to be removed | record `no_change` → the installed file's digest re-read, still `prev_sha256`, and each env file's, still what 15a read (a console edit since step 10 or 15a → `unknown`, the catalogue's "changed during the transaction" text for that file, baseline not advanced, record removed, entry removed; unreadable → the stop-as-found of I2) → `applied.json` (HEAD's `secrets_tree` and `secrets`, the fields table's rule) → result `no_change` → record removed → entry removed | I1, I2, I4, I5. Every write of `applied.json` — this one, `swapped → applied`'s, and recovery's — is preceded by that re-read, after any wait before it |
+| checking → verified | active (`origin: init`: up); the set is not empty | result `verified` (if this write fails: result `failed` in its place if that can be written, else any `verified` whose rename landed removed; the `work/` entry removed; nothing else changes) — `init` writes no result, it prints | I3 |
+| verified → installing | — | record `installing` (the previous bytes of every file in the set embedded) | I5, I8, I9 |
+| installing → failed | a temporary cannot be written before any file of the set has changed | remove temporaries; result `failed` → record removed → entry removed | I1 (files untouched), I2 |
+| installing → swapped | every file of the set is re-read and still at its `prev` (a console edit since step 10 or 15a → `unknown`, the catalogue's "changed during the transaction" text for that file, record removed, entry removed); then each env file, in app-name order, is written to a temp and renamed over its name (one the push removes is unlinked), and last the Caddyfile, if it is in the set, the same way. A write that fails once a file has changed is the post-swap failure (Failure-mode table, "each file of the set") | record `swapped` | I1 (each file exists whole, or is absent, at every instant). Env files first, so a reload of a Caddyfile that names a new `env_file` finds it in place. The reread and the rename are not atomic: a bare console edit landing in that window is overwritten, and one landing after the post-reload check is reported as out-of-band by the next push, not refused (Accepted residuals). |
+| swapped → rolling_back | record rewrite to `swapped` fails, a write after the first file changed fails, or reload fails | record `rolling_back` (if writable) → previous bytes written back to every file at its `new` (an env file absent before is unlinked) | I1 |
+| swapped → applied | `systemctl reload hotserve` exits 0 — asked only if the Caddyfile is in the set; a set of env files alone reloads nothing — and every file of the set, re-read, is at its `new` (a console edit since the swap → `unknown`, baseline not advanced, as the States table's `applied` row) | record `applied` → `applied.json` | I4 (record before baseline; the digest check is why "applied" means these bytes) |
+| rolling_back → rolled_back | previous bytes back, and — if the Caddyfile was in the set — a reload that exits 0 | result `rolled_back` → record removed → entry removed | I1, I2 |
 | rolling_back → unknown | second reload fails | result `unknown` → record removed → entry removed | I2, I3 (bytes that cannot be written back are the full-disk end: Failure-mode table, "previous bytes back") |
 | applied → done | — | result `applied` → record removed → entry removed | I2, I3, I5 |
 
@@ -669,8 +732,8 @@ shows after recovery.
 | result `verified` | result `failed` in its place (over a `verified` whose rename landed); if that fails too, remove any such `verified`; remove entry; file untouched | no record, result `verified` → rewrite `failed`, remove entry | `failed` | `failed`; if neither write lands, `admitted`, then `failed` ("the box has no record of this push") from Retention at root's first later run past thirty minutes |
 | record `no_change` | result `failed`; nothing changed | phase `no_change` → `applied.json`, result | `no_change` / `unknown` (a console edit since step 10) | per phase |
 | record `installing` | result `failed`; nothing changed | phase `installing`, `d == prev` → `failed` | `failed` | `failed` |
-| new file temp + rename | remove temp; result `failed` — unless the installed file now reads otherwise: as `new` (the rename landed and only the directory's `fsync` failed), the post-swap failure of the next row; as neither, the `any` row; unreadable, the stop-as-found of I2, the record left for recovery | `d == new` with phase `installing` → treat as `swapped` | per `swapped` | per `swapped` |
-| record `swapped` | **post-swap failure**: record `rolling_back` if it can be written, then the previous bytes back; if they cannot be written back, leave the record (phase `installing`, or `rolling_back` if that write landed; `d == new`) and the entry, and exit non-zero with an error-level line ("disk full; the previous Caddyfile could not be restored") — the path unit re-triggers until its limit and fails; the console frees space, then restarts the path unit as "The applier unit" says, again ten seconds later if that fails (`reset-failed` alone clears the state but does not start a unit that hit its trigger limit) | phase `swapped` → rollback path | `rolled_back` / `unknown` | per phase |
+| each file of the set, temp + rename (an env file the push removes: unlink) | the first: remove temp; result `failed` — unless that file now reads otherwise: as `new` (the rename landed and only the directory's `fsync` failed), the post-swap failure of the next row; as neither, the `any` row; unreadable, the stop-as-found of I2, the record left for recovery. Any later one, a file having changed already: the post-swap failure of the next row, which puts back every file at its `new` | `d == new` or mixed with phase `installing` → treat as `swapped` | per `swapped` | per `swapped` |
+| record `swapped` | **post-swap failure**: record `rolling_back` if it can be written, then the previous bytes back; if they cannot be written back, leave the record (phase `installing`, or `rolling_back` if that write landed; `d == new` or mixed) and the entry, and exit non-zero with an error-level line ("disk full; the previous Caddyfile could not be restored", or for an env file "disk full; the previous env file for <app> could not be restored") — the path unit re-triggers until its limit and fails; the console frees space, then restarts the path unit as "The applier unit" says, again ten seconds later if that fails (`reset-failed` alone clears the state but does not start a unit that hit its trigger limit) | phase `swapped` → rollback path | `rolled_back` / `unknown` | per phase |
 | reload | non-zero exit → rollback path | phase `swapped` (the reload's outcome unknown) → rollback path | `rolled_back` / `unknown` | per phase |
 | record `applied` | the reload succeeded but the record cannot say so, and the baseline must never run ahead of the record (I4): take the rollback path exactly as the `record swapped` row — previous bytes back, reload, result `rolled_back` ("the record could not be updated after a successful reload (disk full); rolled back to keep the file and the record consistent") or, if the write-back fails too, the full-disk end above | phase `applied`, `d == new` → `applied.json`, result | `rolled_back` / `unknown` | per phase |
 | `applied.json` | journal (error); result `unknown` ("applied but the baseline could not be recorded; hotserve box baseline <sha> on the box records it (the next push then reports the file as edited out of band; it was not)": `baseline` keeps the previous digest. Not a push again: a chain that rotated a signer on the way is verified again against the file now installed, and refused. After a `no_change`, "unchanged, but … push again, which records it": nothing changed, so the same chain verifies again. For `init`, "`hotserve init <sha>` again, which ends no_change and records it") | phase `applied` → idempotent rewrite | `applied` / `unknown` | per phase |
@@ -725,13 +788,14 @@ refusing every push at admission — scores severity 1.
 | A stale `verified` survives when a `failed` written over it cannot land and a second fault follows (a crash before its removal, or a failed take of a bundle back in `in/`) | step 9; States "(no record)" | 2 | 1 | 1 | 2; the workflow goes red at its bound, naming the journal |
 | `rename` reporting an error after it moved the entry leaves it untaken this run; the next run fails it as interrupted | step 9 | 2 | 1 | 1 | 2; red and named; not a failure a local filesystem's `rename` has |
 | A `work/` fsync error skips `in/`'s fsync, so a power loss before the next fsync can bring the entry back | Failure-mode table, take | 2 | 2 | 3 | 12; the returning bundle is removed by its terminal result (step 9) |
-| A bare console edit between the re-read before a write and the write itself: before the swap it is overwritten; before `applied.json` the baseline moves past it | Transitions, installing → swapped and checking → no_change | 2 | 2 | 3 | 12; the next push reports the file as edited out of band |
+| A bare console edit, of the Caddyfile or an env file, between the re-read before a write and the write itself: before the swap it is overwritten; before `applied.json` the baseline moves past it | Transitions, installing → swapped and checking → no_change | 2 | 2 | 3 | 12; the next push reports the file as edited out of band |
 | Recovery checks `d`, then waits on `activating`; a bare console edit during the wait is reloaded or reported as the previous file | States, `rolling_back` | 2 | 2 | 3 | 12; needs a crash and a concurrent bare edit |
 | A push whose marker was never written (a crash, a full disk, `in/` unsynced) and whose bundle root has taken into `work/` is not known to the handler: a retry under the same id is admitted again, and its poll reads 404 until root's result | "Admission" | 2 | 2 | 3 | 12; root settles both by the descent check, and the workflow keeps polling on 404 (catalogue) |
 | A handler refusal (steps 3–6) or a fast-path `no_change` whose response is lost leaves nothing to poll: the workflow polls 404 to its bound and goes red naming the journal, where the refusal line says why | "A lost response loses nothing" | 2 | 3 | 1 | 6; red and named; the handler writes nothing in `out/`, which is root's |
 | A `no_change` reloads nothing, so it records as the baseline bytes the running hotserve may not have loaded: a console that copied a file in without a reload, then pushes or runs `init` with the same bytes | `hotserve init`; Transitions, checking → no_change | 3 | 1 | 3 | 9; two console acts, the copy without its reload first; the next reload loads the recorded bytes |
 | A record that does not read, from a transaction past its swap, removed by a console that skips the write-back: the push ends `failed` ("interrupted before the Caddyfile changed") with the new file on disk, and the next push reports an out-of-band edit | States, "(record unreadable)" | 3 | 1 | 3 | 9; root-only state corrupted, then the console skipping the step its journal line names |
 | A crash or shutdown between the swap and the reload's outcome, for a file that validates but does not load: hotserve starts on it at boot and fails, and recovery puts the previous bytes back on a hotserve that stays down (`failed`, "hotserve is not running") | States, `swapped` and `rolling_back` | 4 | 2 | 1 | 8; red, and the result names the commands that start hotserve on the previous file |
+| An app launched (a deploy, a crash's relaunch) while a push's env files stand at `new` — between their swap and the Caddyfile's, or before a rollback puts them back — runs with those values, beside the Caddyfile it had, until its next launch | Transitions, installing → swapped | 2 | 2 | 3 | 12; the values are ones a signer committed, the push is red and named when it rolls back, and the app's next launch reads what is on disk |
 
 ## Admission
 
@@ -748,7 +812,7 @@ restart could make — and a crash releases it with the descriptor.
 | Condition at the lock | Answer | Why |
 |---|---|---|
 | no `X-Box-Request-Id` header, or not 32 lowercase hex | 400 "X-Box-Request-Id: 32 lowercase hex, chosen at random for each push, required" | the id names the push's bundle, marker and result; checked before the body is read and before the fast path, so every POST contract rule holds on both paths |
-| token, id and `sha` binding passed; HEAD equals the baseline, the file's digest equals the installed file's, and the bundle passes steps 11's path, 13 and 14 | 200 `no_change`, before the lock, and again under it | nothing would change; the fast path of step 4 |
+| token, id and `sha` binding passed; HEAD equals the baseline, the file's digest equals the installed file's, the secrets tree and every listed env file's digest are as `applied.json` records them, and the bundle passes steps 11's path, 13 and 14 | 200 `no_change`, before the lock, and again under it | nothing would change; the fast path of step 4 |
 | a marker, result or `in/<id>.tar` already exists for this id | 409 "duplicate request id: poll /?result=<id>" | a retry after a lost response; honest ids never collide. Checked before the fast path too, so a retry of a push that has since applied is not answered `no_change` |
 | lock held by another request, or this process's push slot taken (before the body is read) | 409 "a push is being admitted; retry in a moment" | another push is between its body and its marker |
 | any entry in `in/` | 409 "a push is pending: <id>, <age> old" | the durable one-bundle bound: a stalled applier means one 16 MiB on disk and a loud 409, never a queue; no age-out |
@@ -796,6 +860,14 @@ an empty cell means nobody, by design.
 |---|---|---|---|---|---|---|
 | `/etc/hotserve/Caddyfile` | 0644 | root:root | package | applier, `init`, console | hotserve, handler, applier | — |
 | `/etc/hotserve/.Caddyfile.box-<id>` | 0644 | root:root | applier, `init` | applier, `init` | — | applier, `init` (renamed over `Caddyfile`, or removed on failure) |
+| `/etc/hotserve/age/` | 0700 | root:root | tmpfiles.d, from box PR 7c | `box key` | applier, `box key` | — |
+| `/etc/hotserve/age/identity` | 0600 | root:root | `box key` (run by postinstall, `init` and the console) | — (never rewritten) | applier (step 15a), `box key` | — (a console moves it aside) |
+| `/etc/hotserve/age/.identity.box-<random>` | 0600 | root:root | `box key` | `box key` | — | `box key` (linked to `identity`, then removed; or removed on failure; the next run removes a crash's) |
+| `/etc/hotserve/age.pub` | 0644 | root:root | `box key` | `box key` (only when missing or not the identity's) | handler (`GET /`) | — |
+| `/etc/hotserve/.age.pub.box-<random>` | 0644 | root:root | `box key` | `box key` | — | `box key` (renamed over `age.pub`, or removed on failure; the next run removes a crash's) |
+| `/etc/hotserve/secrets/` | 2750 | root:hotserve | tmpfiles.d, from box PR 7c | applier | hotserve, handler, applier | — |
+| `/etc/hotserve/secrets/<app>.env` | 0640 | root:hotserve (born in the setgid dir) | applier | applier | hotserve (each launch of `<app>`, and its response filter), handler (step 4's digest), applier | applier (when `applied.json` lists the app and HEAD has no `secrets/<app>/`) |
+| `/etc/hotserve/secrets/.<app>.env.box-<id>` | 0640 | root:hotserve (born in the setgid dir) | applier | applier | — | applier (renamed over `<app>.env`, or removed on failure; recovery removes a crash's) |
 | `/var/lib/hotserve-box/` | 2750 | root:hotserve | tmpfiles.d | — | — | — |
 | `…/stage/` | 0700 | hotserve:hotserve | tmpfiles.d | handler (bundle temporaries) | handler, applier (sweep) | handler (its own temporaries) |
 | `…/stage/lock` | 0600 | hotserve:hotserve | handler | — | handler (`flock`) | — |
@@ -817,7 +889,15 @@ Notes that the table cannot hold:
 
 - The base directory and `out/` are setgid so files root creates are
   born group `hotserve`; the unit has no `CAP_CHOWN`. `txn.json` and
-  `lock` are 0600, so their group does not matter.
+  `lock` are 0600, so their group does not matter. `/etc/hotserve/secrets/`
+  is setgid for the same reason, and `/etc/hotserve` itself is the
+  package's directory, 0755 root, not setgid.
+- `/etc/hotserve/age/` is 0700 so that the identity is root's alone
+  whatever mode a console writes it with: the hotserve uid is every
+  app's uid too ("The box's key"). The two `Creates` cells that say
+  "from box PR 7c" become `tmpfiles.d` when that PR adds their lines
+  to the tmpfiles.d file; until then the test that holds the file to
+  this table does not count them.
 - Nothing is at `/etc/hotserve/Caddyfile.prev` or `Caddyfile.new`:
   an earlier template's `bin/push` and its sudoers lines (`tee`,
   `mv -f`, `rm -f` on exactly those names) wrote them, and on a box
@@ -883,7 +963,7 @@ Every numeric bound, in one place, with its reason.
 
 | What | Cap | Why |
 |---|---|---|
-| bundle body | 16 MiB | a bundle is kilobytes; this is generous |
+| bundle body | 16 MiB | a bundle without secrets is kilobytes. With them it carries their ciphertext too: about the values' length plus some 200 bytes per reader per secret, which does not compress. The secrets caps below would allow more, so this cap is the one that binds, and `hotserve box describe` warns when a box's secrets pass 12 MiB (75%) of ciphertext, in the pull request's check run, before a push meets the 413 |
 | pushes in memory | one per hotserve process, from its body to its drop, shared across reloads; another push is 409 "a push is being admitted; retry in a moment", its body unread | the body is read before the admission lock (step 2), so without this nothing would bound how many authenticated requests hold 16 MiB each; honest runs are one at a time already (the workflow's `concurrency` group) |
 | bundle upload | 120 s, a read deadline on the connection while the push slot is held, in place of any `read_body` timeout the operator set for this body; past it 400 "could not read the bundle" and a `box push upload failed` line | a stalled upload would otherwise hold the one slot until its connection ends; a bundle is kilobytes |
 | bundle decompressed | 16 MiB, reader stops at cap + 1 | the per-type caps below sum to more; this one wins, and a `stat` is not a bound |
@@ -893,7 +973,15 @@ Every numeric bound, in one place, with its reason.
 | chain length | 500 commits, HEAD counted | bounds verifier invocations; `baseline` is the recovery past it |
 | `parents/` files | `0001` to `0499`, a sequence with no gap | HEAD plus 499 parents is the chain cap; a name outside the range is a malformed bundle |
 | tree depth (`path` components) | 32 | |
-| `trees/` files | 32 | the proof walks at most the depth; more is a malformed bundle, and a flood of tiny valid trees would otherwise cost a map entry each |
+| `trees/` files | 32 today; 65 with secrets *(proposed)* | the proof walks at most the depth, plus the secrets tree and one tree per app with secrets (the next rows' 32); more is a malformed bundle, and a flood of tiny valid trees would otherwise cost a map entry each |
+| `blobs/` files | 8192 *(proposed)* | one per secret: 32 apps × 256; a blob no tree names is ignored, as a tree is, and a larger count is a malformed bundle |
+| apps with secrets | 32 *(proposed)* | past it, the push is refused and nothing changes. Typical boxes hold 1 to 10 apps. `hotserve box describe` warns from 24 (75%), in the pull request's check run, before anything reaches the box |
+| secrets per app | 256 *(proposed)* | past it, refused, nothing changes. A typical app has 5 to 50 variables. Warned from 192 |
+| an app's env file, rendered | 64 KiB *(proposed)* | past it, refused, nothing changes, and the app keeps the environment it has. Sizing: Heroku caps an app's config at 32 KB and Vercel an environment at 64 KB; an RSA-4096 private key in PEM is 3.3 KiB; one value stays under Linux's 128 KiB per environment string (`MAX_ARG_STRLEN`) and the whole well under `ARG_MAX`. Warned from 48 KiB: a value's length is the age payload's, less its 16-byte nonce and a 16-byte tag per 64 KiB chunk, so `describe` computes it with no key, to within the line break 15a strips (2 bytes at most a value) |
+| one `.age` file | 128 KiB *(proposed)* | a value at the env-file cap plus its header: one stanza per recipient, about 200 bytes for an X25519 or `ssh-ed25519` reader and about 700 for `ssh-rsa` 4096 (estimated, not measured); bounds root's work per blob. Refused past it |
+| a variable's name | 128 bytes *(proposed)* | bounds the names results and the journal carry; refused past it |
+| the box key, read by root | 4 KiB | an identity is one 74-byte line, and age-keygen's comments |
+| `age.pub`, read by the handler | 1 KiB | one 62-byte recipient |
 | tree entries materialised | none | a tree is validated by one scan over byte slices that also holds it to git's order (names ascending, a directory read as if it ended in `/`) and to git's two duplicate rules (adjacent equal names; a file `x` with a directory `x` later, past any `x-…`), the way `fsck` does; a lookup scans the same way and converts only its hit |
 | `path` | 4096 bytes of safe components: none empty, `.` or `..`, no control byte (NUL, newline, DEL) | a control byte could only be a trick; the `path` file may end in one newline, which is forgiven, since `echo` adds one |
 | principal | 256 bytes | ssh-keygen prints the matching principal on stdout, which is capped; a longer one could never match its own line |
@@ -902,7 +990,7 @@ Every numeric bound, in one place, with its reason.
 | one whole chain's verification | 10 minutes | 500 commits × up to three children × 30 s would otherwise let a stalling child hold the applier, and the admission lock, for hours; a legitimate chain is seconds |
 | `diff` in record and result | 64 KiB, cut with a note | the record is one atomic write |
 | results and markers kept | 32 ids, or a day | see "Retention" |
-| files the handler reads | `applied.json` 64 KiB, a marker 4 KiB, a result 2 MiB, the installed Caddyfile 1 MiB; each opened without blocking, held to a regular file, read to the cap plus one byte; in the exchange tree, a symlink at the file's own name is refused (its directories come from tmpfiles.d, in a base directory the hotserve uid cannot write, and are followed as they stand) | `applied.json`'s `path` is up to 4 KiB, which JSON's `\u` escapes can grow sixfold; a result's `apps` is bounded only by the 1 MiB file it was read from |
+| files the handler reads | `applied.json` 64 KiB, a marker 4 KiB, a result 2 MiB (4 MiB with secrets, *proposed*: the `secrets_*` names, up to 8192 of some 200 bytes each), the installed Caddyfile 1 MiB, an env file 65 KiB (the rendered cap and its header; one larger is not unchanged); each opened without blocking, held to a regular file, read to the cap plus one byte; in the exchange tree, a symlink at the file's own name is refused (its directories come from tmpfiles.d, in a base directory the hotserve uid cannot write, and are followed as they stand) | `applied.json`'s `path` is up to 4 KiB, which JSON's `\u` escapes can grow sixfold; a result's `apps` is bounded only by the 1 MiB file it was read from |
 | handler wait for the first result | 30 s | long enough that a push is usually answered `verified`, or its final result, by the POST itself (a legitimate chain is seconds); short enough to sit well inside common proxy timeouts (Cloudflare's is 100 s); past it, 504 and the poll |
 | pending (admission) | 30 minutes from the marker's `posted` | the workflow's own poll bound; past it a marker no longer blocks a push (see "Admission") |
 | request id | 32 lowercase hex, random for each push | 128 bits: two honest runs never collide; one spelling, so one id names one push |
@@ -916,7 +1004,7 @@ Every numeric bound, in one place, with its reason.
 | one `systemctl is-active` | 30 s | PID 1 answers it from memory; past it the question is unanswered, never a state |
 | reload | hotserve.service's own 240 s; the applier's deadline on its `systemctl reload` is 300 s | the applier sets no shorter timeout: its own deadline only ends a `systemctl` that outlives the job it waits for |
 | `systemctl` output kept | 4 KiB | into the error text and nowhere else |
-| `txn.json` read back | 4 MiB | `prev`'s 1 MiB is 1.4 MiB of base64, the diff's 64 KiB at most 384 KiB of JSON escapes; only root writes it, so this is a bound, not a defence |
+| `txn.json` read back | 4 MiB today; 8 MiB with secrets *(proposed)* | `prev`'s 1 MiB is 1.4 MiB of base64, the diff's 64 KiB at most 384 KiB of JSON escapes, and the env files' previous bytes — a set holds at most 64 (32 apps written, 32 the previous push listed removed), each at most 65 KiB as root reads it, so 5.5 MiB of base64 — come to 7.3 MiB; only root writes it, so this is a bound, not a defence |
 | diff handed to the redactor | 256 KiB (four times the diff's cap), cut at a line end | the cut after redaction never lands inside a token the redactor saw only half of |
 | line diff's edit distance | 512 | its memory is quadratic in the distance; past it the changed middle is one hunk, still a correct diff |
 | quoted input in a refusal | 300 bytes, quote-to-ASCII then rune-boundary cut | liveswap's `boundRefusal`, in that order; applies to every input-derived value without exception |
@@ -1012,21 +1100,235 @@ certificate first in any case. A repository whose box file sits
 elsewhere (`examples/box` before this rule kept one `Caddyfile` at the
 top) moves it once.
 
+## Secrets
+
+An app's secrets — the variables its `env_file` holds — are commits,
+like the Caddyfile. Each value is a file in the box's directory,
+encrypted on a laptop with [age](https://age-encryption.org) to the
+box's own key and to the people who may read it back. The workflow
+carries the ciphertext in the bundle beside the Caddyfile; the
+handler and root prove it against the signed commit (step 13); root
+alone decrypts it, after every proof (step 15a), and writes one env
+file per app, which hotserve reads at the app's next launch as it
+reads any `env_file`. GitHub, the workflow and the handler only ever
+hold ciphertext. One push's Caddyfile and env files are one
+transaction: the set (Glossary).
+
+A repository with no `<host>/secrets/` installs none. An env file a
+person made by hand anywhere else — `/etc/hotserve/<app>.env`, the
+layout before this section — is left alone and keeps working:
+`env_file` is a path, and only `/etc/hotserve/secrets/` is the box's.
+
+### Layout in the repository
+
+```
+deploy.example.com/
+  Caddyfile
+  secrets/
+    recipients            # age recipients: the box's key first, then each reader
+    example/
+      DATABASE_URL.age    # one variable of the app example: its value, encrypted
+      STRIPE_KEY.age
+```
+
+| Entry | Rule | Bundled |
+|---|---|---|
+| `<host>/secrets` | a tree (`40000`), or absent: none | its tree, under `trees/` |
+| `<host>/secrets/recipients` | a regular file (`100644`/`100755`), optional | no: root never reads it |
+| `<host>/secrets/<app>/` | a tree whose name is in liveswap's app grammar, `^[a-z0-9-]{1,63}$` (`appName`, box/tokens.go) | its tree, under `trees/` |
+| `<host>/secrets/<app>/<VAR>.age` | a regular file; `<VAR>` matches liveswap's `envKeyRe`, `^[A-Za-z_][A-Za-z0-9_]*$` (liveswap/app.go), within the Caps table's length | its blob, under `blobs/<sha>` |
+| anything else: another file in `secrets/` or in an app's directory, a directory in an app's, a symlink (`120000`), a submodule (`160000`), a name outside the grammars | refused by name | — |
+
+`_backup`, outside the app grammar, is held for Open question 5 and
+refused today like any other name.
+
+`recipients` is age's own recipients-file format, read by the
+template's `make` targets and its workflow, never by the box. Its first
+recipient is the box's key (an X25519 `age1…`, "The box's key"); each
+one after it is a **reader**: a signer's `ssh-ed25519` key, or
+`ssh-rsa` of 2048 bits or more — the only SSH keys age encrypts to
+(filippo.io/age/agessh) — or an age recipient for a person whose
+signing key age cannot use, an `sk-` or ECDSA key or one held only by
+an agent (from `age-keygen`, `age-plugin-yubikey` or
+`age-plugin-se`). `#` lines name them. The template makes each signer
+whose key age can use a reader of every box — its first `make secret`
+writes `recipients` from the box's key and the signer lines, and `make
+signer` adds the next — so on the documented path the readers are the
+signers. Readers are per box: unlike the
+signers, which every box in a repository lists alike ("The merge
+button, and the README's rules"), a person may read one box's secrets
+and not another's.
+
+What anyone who can read the repository learns: which apps have
+secrets, each variable's name, each value's length to within a trailing
+line break (age pads nothing: a payload is a 16-byte nonce, then the value in 64 KiB
+chunks with a 16-byte tag each), and when each changed. Never a value.
+That is the price of names in the clear ("Decisions and rejected
+alternatives").
+
+### The box's key
+
+| Path | What |
+|---|---|
+| `/etc/hotserve/age/identity` | an X25519 identity in age-keygen's format, 0600 root, in a 0700 root directory. Out of the hotserve uid's reach whatever the file's mode: that uid is every app's uid too, and the sandbox, not the uid, is what keeps the apps from each other (DESIGN-threat-model.md, "The shared-UID rule") |
+| `/etc/hotserve/age.pub` | 0644 root, one line: the recipient. The handler reads it for `GET /`'s `recipient`. `/etc/hotserve` is never bound into an app's view (`sandboxHotservePaths`, liveswap/sandbox.go) |
+
+**`hotserve box key`** (root) makes the pair when there is none and
+prints the recipient: on standard output the `age1…` line alone, so
+`$(ssh root@box hotserve box key)` is the key; what it did, on
+standard error. It holds an exclusive `flock` on `/etc/hotserve/age/`
+for its run, so two runs (postinstall and the console) never meet,
+and first removes any temporary a crashed run left — one may hold a
+private key nobody uses. It never overwrites: a new identity is
+written to a temporary in the same directory and linked to `identity`
+with `link(2)`, which fails if the name exists, then the temporary is
+removed and the directory fsynced. Over an existing identity it derives the recipient and
+rewrites `age.pub` only if it is missing or another key's. An identity
+that does not parse is refused and nothing is written ("Console
+commands").
+
+It is run by postinstall on a running system (`[ -d
+/run/systemd/system ]`, the check postinstall.sh already makes for
+its other live-system steps), so a
+box upgraded from a release without secrets has its key with no step,
+and an image built without systemd running bakes none in; by `init`,
+after its transaction ends `applied` or `no_change` (a failure there
+is a warning: init's refusals write nothing, and this comes after the
+install); and by the console.
+
+A rebuilt box has a new key. The workflow compares `GET /`'s
+`recipient` with the first recipient of `recipients` before it posts
+and goes red on a difference, naming the box's key and the remedy:
+confirm it over SSH (`hotserve box key`), then `make rekey
+BOX_KEY=age1…`, in which a reader re-encrypts every value to the new
+key with no plaintext on disk. The comparison is the workflow's
+courtesy, never trust: the key is taken from root over SSH, not from
+the answer of the serving process (Threat-model deltas). A virtual
+machine cloned from a snapshot shares its original's key until the
+identity is moved aside and remade. Losing the key loses nothing a
+reader cannot encrypt again.
+
+### Proving the secrets
+
+Step 13, after the Caddyfile's proof: the walk is already at the
+tree of the file's directory, `<host>`, and looks up `secrets` there.
+Absent, the bundle has no secrets: its secrets tree is `""`, and the
+push removes every env file `applied.json` lists. Present, it must be
+a tree, and every entry under it is held to the layout table; each
+app's tree comes from `trees/`, and each `.age` entry's blob from
+`blobs/<sha>`, whose bytes hash to `sha1("blob <n>\0" + bytes)`. **Every
+`.age` entry's blob must be in the bundle:** an omitted one is
+refused, never read as a deletion, so a variable leaves an app's env
+file only when the signed tree no longer names it. A blob no tree
+names is ignored, as a tree is. The `secrets` tree's id is what
+`applied.json` records as `secrets_tree`, and what step 4's fast path
+compares.
+
+The proof runs in the handler's pre-verification and in root, as all
+of step 13 does; only root decrypts (15a).
+
+### Values and the env file
+
+Step 15a, when the proof returned at least one secret, reads the box
+key (no link followed, within its cap, exactly one X25519 identity)
+and decrypts every secret the proof returned; with none, it reads no
+key. It reads each installed env file the set may touch the same way
+(no link followed, within the handler's cap for one, Caps): one that
+is larger is the box's error, `failed`, since its bytes could not be
+kept in the record for a rollback. Then each value is held to these
+rules, in this order:
+
+| Rule | Past it |
+|---|---|
+| encrypted to this box's key | refused: `<path> is not encrypted to this box's key (<recipient>): put that key first in <host>/secrets/recipients and run make rekey` |
+| an age file that decrypts whole | refused: `<path> does not decrypt: <age's error>` |
+| one trailing `\n` or `\r\n` stripped (an `echo` adds one), and then no `\n`, no `\r`, no NUL, valid UTF-8 | refused: `<app>/<VAR>: the value has a line break` / `… has a NUL byte` / `… is not UTF-8`. The env file holds one variable per line (`parseEnvLines`, liveswap/app.go), and the values go to the manager as D-Bus strings, which are UTF-8; systemd 257's own check (`env_value_is_valid`) admits other control characters, and so does this |
+| the Caps table's counts and sizes | refused, with the figures |
+
+A missing or unreadable key is the box's error, `failed`, and so is a
+`/etc/hotserve/secrets/` that is not the setgid `root:hotserve`
+directory tmpfiles.d makes (the catalogue gives both texts): either
+would otherwise surface at the app's next launch, not at the push.
+
+**The env file** is `/etc/hotserve/secrets/<app>.env`, rendered in
+memory by liveswap's `RenderEnvFile`, which sits beside the parser
+that reads it at launch so that one place owns the format: a constant
+comment line, then one `KEY="value"` line per variable, sorted by
+name. The parser trims the line and the value, then strips exactly
+one matching pair of outer quotes, with no escapes (`parseEnvLines`),
+so any value the rules above admit reads back exactly — inner quotes,
+spaces at either end, `#` and `=` included — which a fuzz test holds
+(`parse(render(v)) == v`). The same values always render the same
+bytes, so a rekey, new ciphertext over the same values, ends
+`no_change`. Root writes it 0640 into the setgid directory, so it is
+born group hotserve (Paths). An app's env file is in the set when its
+rendered bytes differ from the installed file's, or HEAD has no
+secrets for an app `applied.json` lists, which removes its file.
+
+What root does with what is already there, per app:
+
+| On disk | HEAD has secrets for the app | HEAD has none for it |
+|---|---|---|
+| `<app>.env`, listed in `applied.json` at the digest it records | rewritten if the rendered bytes differ | removed |
+| `<app>.env` listed in `applied.json`, at another digest (a console edit, a disk fault) or absent | HEAD's bytes written, the app named in `secrets_edited_out_of_band`, as step 10's flag reports a Caddyfile edit | removed if present, named the same way |
+| `<app>.env`, not listed in `applied.json` (a console made it) | overwritten with HEAD's bytes if they differ, named the same way; listed from then on | left alone, never listed |
+| no file, none listed | written | — |
+
+Any other name in `/etc/hotserve/secrets/` is left alone and never
+listed.
+
+The app reads its env file at its next launch. A push of secrets
+alone reloads nothing ("Running apps are never restarted", after the trust chain), and it
+does not relaunch the app: liveswap refuses a deploy, and a rollback,
+to the version that is already running (`version … is already
+running; bump the version to redeploy`, `managedApp.deployLocked`, liveswap/app.go),
+and root asking the serving process for a relaunch would be root
+consuming its word. So the workflow's line says what launches the app
+now: a deploy of a new version. Open question 4.
+
+### Which checks run where
+
+| Check | Handler (steps 5 and 6) | `hotserve box describe` (CI, `make check`) | Root |
+|---|---|---|---|
+| the layout and the proof (step 13) | yes | the layout, read from the directory | yes |
+| decryption and the value rules (15a) | no: it cannot read the key | sizes and counts only, from the ciphertext: a value's length to within 2 bytes | yes |
+| the consistency checks below | yes, a 422 | yes, exit 1, and each 75% warning as a `warning` line | no |
+| `recipients` parses, and its first recipient is an X25519 `age1…` | — | yes | — (never read) |
+| the box's key is `recipients`' first | — | — | — (the workflow, against `GET /`) |
+
+The consistency checks read the token walk of the new file (it already
+sees each `app` block, box/tokens.go) and the secrets tree. They catch
+a signer's mistakes and guard nothing — root installs what a signer
+signed — so root does not repeat them. `env_file`'s value is compared
+as a token and never quoted back: it may hold a `{$VAR}`.
+
+| Condition | Refused as |
+|---|---|
+| `<host>/secrets/<app>/` for an app the file does not declare | `<host>/secrets/<app>/ names no app in the new Caddyfile: add the app, or remove the directory` |
+| an app with secrets and no `env_file` | `app <app> has secrets and no env_file: add env_file /etc/hotserve/secrets/<app>.env to its block` |
+| an app with secrets whose `env_file` is another path | `app <app> has secrets, and its env_file is not /etc/hotserve/secrets/<app>.env: set it` |
+| an app whose `env_file` is another app's | `app <b>'s env_file is app <a>'s secrets file` |
+| an app whose `env_file` is its own, with no secret | `app <app>'s env_file is /etc/hotserve/secrets/<app>.env, and <host>/secrets/<app>/ holds no secret: add one, or remove the env_file line` |
+| a secret an inline `env` line also sets | `app <app> sets <VAR> with env and as a secret; env wins over env_file, so the secret would never reach it` (`buildEnvFull`, liveswap/app.go, appends inline `env` after the file's lines, and the manager keeps the last) |
+| a secret named `SOCKET` | `secret SOCKET for app <app>: hotserve sets SOCKET last, so it would never reach the app` |
+
 ## Handler contract
 
 | Request | Authorised by | Answer |
 |---|---|---|
 | `POST /` with a bundle and `X-Box-Request-Id` | `deploy_trust` (step 1) | per step 8: 202 `{id, commit, phase: verified}` / 200 with a `no_change` or `applied` result / 422 with a `refused`, `failed`, `rolled_back` or `unknown` result / 504 `{id}`; 400, 409, 413, 415 from admission; 500 when the box cannot check the push |
-| `GET /` | `deploy_trust` | `{"commit", "box_webhook", "sha256"}`: `commit` is `applied.json`'s `sha`; `box_webhook` and `sha256` are the installed file's walked host and its digest as read now — the digest step 4's fast path compares, so a console edit since the last apply shows. The workflow reads `commit` to bundle `rev-list --first-parent <commit>..HEAD`. 409 before `init` (no `applied.json`); 500 when either file cannot be read or the installed file does not walk |
+| `GET /` | `deploy_trust` | `{"commit", "box_webhook", "sha256", "recipient"}`: `commit` is `applied.json`'s `sha`; `box_webhook` and `sha256` are the installed file's walked host and its digest as read now — the digest step 4's fast path compares, so a console edit since the last apply shows; `recipient` is `/etc/hotserve/age.pub`'s one line, omitted when that file is absent (a box that has not run `hotserve box key`), unreadable, or not exactly one X25519 recipient — the last two journaled as `box webhook could not read its state` with `reading` — so a damaged key file never blocks a push of the Caddyfile, and the workflow reads the omission as "this box has no key" (`hotserve box key` rewrites `age.pub` from the identity). The workflow reads `commit` to bundle `rev-list --first-parent <commit>..HEAD`, and `recipient` to compare with `recipients` ("The box's key"). 409 before `init` (no `applied.json`); 500 when `applied.json` or the installed file cannot be read, or the installed file does not walk |
 | `GET /?result=<id>` | `deploy_trust`, as every request on `/`: the workflow mints a fresh token for each poll | the query must be exactly one `result=<id>`, `<id>` in the id grammar (400). The result, with step 8's status for its phase: `verified` 202; `no_change`, `applied` 200; `refused`, `failed`, `rolled_back`, `unknown` 422. 202 `{"phase":"admitted"}` while a marker exists, or the push's bundle is still in `in/` (its marker never written), and no result does — admitted, no result yet, whatever the marker's age, since only root can tell a push it holds from one it lost, and its next run settles a lost one as `failed` (Retention); 404 when neither exists (swept, never admitted, or answered by the fast path); 500 when a file cannot be read |
 | another method on `/` | — | 405 |
 | another path | — | not this handler's; passed on |
 
 Every answer passes liveswap's response filter (the shape and entropy
 layers) with the protocol's own fields on the safe list — `id`,
-`commit`, `sha256`, `box_webhook`, `phase`, and each id in `named` —
-since a 32-hex id, a 40-hex commit and a 64-hex digest are exactly
-what the entropy layer exists to catch, and a refusal that masked the
+`commit`, `sha256`, `box_webhook`, `phase`, `recipient`, each id in
+`named`, and each `<app>/<VAR>` in the `secrets_*` fields, names in
+their grammars, never a value — since a 32-hex id, a 40-hex commit, a
+64-hex digest and a bech32 key are exactly what the entropy layer
+exists to catch, and a refusal that masked the
 commit it names (the baseline, the unsigned commit on the chain) would
 name nothing. Only `diff` and
 `error` text, which carry bundle-derived bytes, go through every layer;
@@ -1063,25 +1365,34 @@ says. The workflow's action is in the last column.
 | 422 | `refused` | `<sha2>, between the commit this box runs and <sha>, is not signed; every commit on main must be — rebase it out and force-push; the box still runs <baseline>` | both | fail |
 | 422 | `refused` | `<sha2>, between the commit this box runs and <sha>, is signed by a key this box did not list when it last applied (<principal>); the commit that adds the key must apply first — force main back to it, let it apply, then push the rest` | both | fail |
 | 422 | `refused` | `the file sent is not <path> in <sha>` / `<path> in <sha> is not a regular file` / `<sha> is in a SHA-256 repository, which the box does not read` | both | fail |
+| 422 | `refused` | `<host>/secrets in <sha> is not a directory` / `<host>/secrets/<name> in <sha> is not an app's directory: <what>` (a file, a link, a submodule, a name outside the app grammar) / `<host>/secrets/<app>/<name> in <sha> is not a secret: <what>` (not `<VAR>.age`, a name outside the grammar or over its cap, a directory, a link, a submodule) / `bundle: blob <id>, needed for <path> in <sha>, is not in the bundle` / `bundle: blob <id> does not hash to its name` / `<n> apps have secrets; the cap is 32` / `app <app> has <n> secrets; the cap is 256` / `<path> is <n> bytes; the cap is 131072` | both | fail |
 | 422 | `refused` | `<sha> does not descend from the commit this box runs (<baseline>) along main's first-parent line. If the box already runs a later commit, nothing is wrong. If a branch merged main into itself before it was fast-forwarded, rebase it onto main and force-push. Only if main was rewritten below <baseline> does hotserve box baseline <sha>, as root on the box, reset trust to <sha>, whose ancestors the box will then never examine` | both | fail (the workflow pre-checks `merge-base --is-ancestor HEAD <baseline>` and exits green as "superseded" — only for HEAD ≠ the baseline: HEAD equal to it is pushed, since after `box baseline` the baseline's file may not be the one installed; the fast path or root answers) |
 | 422 | `refused` | `the chain from <baseline> to <sha> is longer than 500 commits; run hotserve box baseline <sha> as root on the box` | both | fail |
 | 422 | `refused` | `this file is for <host2>; this box is <host1>` | both | fail |
 | 422 | `refused` | `this box's file is <recorded path>; the bundle is <path> — a box's file is <host>/Caddyfile at the top of the repository: move it there` (the recorded path is already `<host>/Caddyfile`) / `…: hotserve init, run again from that directory, records it` (it is not) | both | fail |
 | 422 | `refused` | `the new Caddyfile has no box block` / `… has no signer` / `… has no deploy_trust` / `… has no site with box_webhook` / `… has more than one site with box_webhook` / `… has a box_webhook site whose address is not one bare hostname (<address>)` / `… has a site without braces (<address>)` / `… has box_webhook inside a snippet or named route (<name>); write it in the site` / `… has box_webhook inside <block>; it must stand directly in the site block, where no matcher or nested route can leave / unserved` / `… has box_webhook with arguments (<args>); it takes none, and a matcher would leave / unserved` / `… imports <path>; inline the snippet` / `… has a placeholder where a directive name, a site address or a box line goes (<token>)` / `… reads differently once its placeholders are expanded` / `… is empty` / `… has a global options block that is not the first block` / `… has more than one box block` / `… has a signer line that is not \`signer <principal> <key-type> <base64>\`` / `… has a bad signer <principal>: <what>` / `… does not tokenize: <lexer error>` / `… does not parse: <what>` / `… drops the key that signed this commit (<principal>); add the new key in one push, let it apply, then remove the old one` | both | fail |
 | 422 | `refused` | `hotserve validate: <redacted>` / `hotserve-backup validate: <redacted>` / `the new Caddyfile does not reach box_webhook on /: <what> answers first` / `… : <what> changes the request first` / `… : <what> may answer first (its <matcher> matcher is decided per request)` / `… : <what> may change the request first (its <matcher> matcher is decided per request)` — `<what>` is a handler's module name, `an earlier site for <host>`, or `a terminal route` (one below a site that ran out of handlers; no directive adapts to one) / `… : box_webhook stands behind a <matcher> matcher decided per request` (the webhook itself under a per-request matcher; nothing the walk accepts adapts to one, the contract is kept anyway) / `… : the <matcher> matcher ahead of it may fail (decided per request)` / `the new Caddyfile's adaptation is larger than 16 MiB` / `hotserve adapt: did not finish within 2m0s` (the deadline, as validate's; any other end of the adapt child is the box's 500) | handler | fail |
+| 422 | `refused` | the consistency checks of "Which checks run where", each text as that table gives it | handler | fail |
 | 422 | `refused` | `hotserve is not running; nothing applied` / `hotserve is still starting after 300 s; nothing applied` | applier | fail |
+| 422 | `refused` | `<path> is not encrypted to this box's key (<recipient>): put that key first in <host>/secrets/recipients and run make rekey` / `<path> does not decrypt: <age's error>` / `<app>/<VAR>: the value has a line break` / `<app>/<VAR>: the value has a NUL byte` / `<app>/<VAR>: the value is not UTF-8` / `app <app>'s env file would be <n> bytes; the cap is 65536` (step 15a) | applier | fail |
+| 422 / poll | `failed` | `this box has no key for secrets (/etc/hotserve/age/identity): hotserve box key, as root, makes one; then make rekey BOX_KEY=<the key it prints> in the repository, and push; nothing changed` / `/etc/hotserve/secrets is not the setgid root:hotserve directory tmpfiles.d makes: systemd-tmpfiles --create hotserve-box.conf, as root, puts it back; nothing changed` / `/etc/hotserve/secrets/<app>.env is larger than 66560 bytes, which no push writes: move it aside, as root, and push again; nothing changed` (step 15a) | applier | red |
 | 422 | `refused` | `the Caddyfile this box runs lists no signer; hotserve init is the way back` | applier | fail |
 | 200 / poll | `no_change` | `the box already runs this Caddyfile` | applier | green |
 | 202 | `verified` | `verified; installing` | applier | poll, 30 min bound; then red naming `journalctl -u hotserve-box-apply` |
-| 200 / poll | `applied` | `loaded; running apps are not restarted` | applier | green |
-| 422 / poll | `failed` | `the install failed before the Caddyfile changed: <error>; nothing changed` / `interrupted before the Caddyfile changed; nothing changed` / `interrupted; the previous Caddyfile is on disk; hotserve is not running — systemctl reset-failed hotserve, then systemctl start hotserve, loads it` (the reset clears a `start-limit-hit`, which would refuse the start) / `the box has no record of this push; push again` | applier | red |
-| 422 / poll | `rolled_back` | `the reload failed; the previous Caddyfile is back and running — journalctl -u hotserve -n 50 on the box says why` / `the record could not be updated after a successful reload (disk full); rolled back to keep the file and the record consistent` / `the Caddyfile was swapped, then a write after the swap failed; rolled back: the previous Caddyfile is back and running` (the `swapped` record, or the swap's own `fsync`, failed; nothing was reloaded first) / `interrupted after the Caddyfile changed; rolled back: the previous Caddyfile is back and running` (recovery, after a crash past the swap) | applier | red |
-| 422 / poll | `unknown` | `the reload failed and so did the reload of the previous file; the previous file is on disk; journalctl -u hotserve` (the first reload failed) / `rolled back, but the reload of the previous file failed; the previous file is on disk; journalctl -u hotserve` (any other rollback) / `the Caddyfile changed during the transaction; it is left as found` / `applied but the baseline could not be recorded; hotserve box baseline <sha> on the box records it (the next push then reports the file as edited out of band; it was not)` / `unchanged, but the baseline could not be recorded; push again, which records it` (a `no_change`: nothing changed, so the same chain verifies again) | applier | red; `box baseline` on the console, or for `unchanged` a push again |
+| 200 / poll | `applied` | `loaded; running apps are not restarted` / `secrets installed; the Caddyfile is unchanged, nothing reloaded` (a set of env files alone) | applier | green |
+| 422 / poll | `failed` | `the install failed before the Caddyfile changed: <error>; nothing changed` / `interrupted before the Caddyfile changed; nothing changed` / `the install failed before the box's files changed: <error>; nothing changed` / `interrupted before the box's files changed; nothing changed` (env files in the set) / `interrupted; the previous Caddyfile is on disk; hotserve is not running — systemctl reset-failed hotserve, then systemctl start hotserve, loads it` (the reset clears a `start-limit-hit`, which would refuse the start) / `the box has no record of this push; push again` | applier | red |
+| 422 / poll | `rolled_back` | `the reload failed; the previous Caddyfile is back and running — journalctl -u hotserve -n 50 on the box says why` / `a write after the first file changed failed; rolled back: the previous Caddyfile and env files are back` / `interrupted after the box's files changed; rolled back: the previous files are back` (env files in the set) / `the record could not be updated after a successful reload (disk full); rolled back to keep the file and the record consistent` / `the Caddyfile was swapped, then a write after the swap failed; rolled back: the previous Caddyfile is back and running` (the `swapped` record, or the swap's own `fsync`, failed; nothing was reloaded first) / `interrupted after the Caddyfile changed; rolled back: the previous Caddyfile is back and running` (recovery, after a crash past the swap) | applier | red |
+| 422 / poll | `unknown` | `the reload failed and so did the reload of the previous file; the previous file is on disk; journalctl -u hotserve` (the first reload failed) / `rolled back, but the reload of the previous file failed; the previous file is on disk; journalctl -u hotserve` (any other rollback) / `the Caddyfile changed during the transaction; it is left as found` / `the env file for <app> changed during the transaction; it is left as found` / `applied but the baseline could not be recorded; hotserve box baseline <sha> on the box records it (the next push then reports the file as edited out of band; it was not)` / `unchanged, but the baseline could not be recorded; push again, which records it` (a `no_change`: nothing changed, so the same chain verifies again) | applier | red; `box baseline` on the console, or for `unchanged` a push again |
 | 202 | `admitted` | `{"phase":"admitted"}` | handler | keep polling, 30 min bound; then red naming `journalctl -u hotserve-box-apply` |
 | 504 | — | `{id}` | handler | poll from the start |
 
-**Console commands.** `hotserve init` and `hotserve box baseline`
-answer a person at the console, not the workflow. Every row with exit
+Where a row gives a text that names the Caddyfile and one that names
+"the box's files", the first is said when the set is the Caddyfile
+alone, as it was before secrets, and the second when env files are in
+it.
+
+**Console commands.** `hotserve init`, `hotserve box baseline` and
+`hotserve box key` answer a person at the console, not the workflow. Every row with exit
 1 is the text after Caddy's `Error:`; the log lines a command writes to
 the terminal are its warnings and errors only (recovery's, a
 rollback's), never the per-push info line of the applier's journal. A refusal before
@@ -1108,6 +1419,11 @@ says.
 | — | both | `init: waiting for root's lock: the applier, or another init or baseline, holds it` / `baseline: …` (the same) | printed once, before a wait for the lock; the outcome follows |
 | 0 | `baseline` | `baseline: this box ran <old>; it now applies commits descending from <new>` | the reset |
 | 0 | `baseline` | `baseline: this box already runs <sha>; nothing changed` | `<sha>` is the baseline: nothing is written, so who verified it and when are kept |
+| 1 | `box key` | `hotserve box key runs as root: it reads the box's key for secrets` | not root |
+| 1 | `box key` | `/etc/hotserve/age/identity is not an age identity: move it aside, run hotserve box key again, then make rekey BOX_KEY=<the new key> in the repository` | the identity does not parse, or holds other than one X25519 identity |
+| 1 | `box key` | the box's own error as the system words it | anything else; nothing is written over an identity that exists |
+| 0 | `box key` | stdout: `age1…`; stderr: `box key: made /etc/hotserve/age/identity; its key above is the first line of <host>/secrets/recipients` / `box key: this box's key for secrets` | made, or already there (`age.pub` rewritten if it was missing or another key's) |
+| 0 | `init` | `init: secrets for this box encrypt to age1…; hotserve box key prints it again` / the warning `init: could not make the box's key for secrets: <error>; hotserve box key, as root, makes it` | after `applied` or `no_change` (a warning, not a red end: the install stands) |
 
 The remedy, `<sha>` filled in from the argument and `<dir>` with init's directory, absolute (the operator may read it after a one-shot `ssh … "cd … && hotserve init …"` and follow it from root's home):
 
@@ -1201,7 +1517,8 @@ validate` (the merge of backups into main decides how backup
 configuration is checked on every path).
 
 `applied.json` is written as `{sha, path, sha256, signer: "init",
-when}` — `signer` is the literal `init` because the console verified no
+when}`, with `secrets_tree` and `secrets` kept from the file it
+replaces ("`init`'s path through the chain") — `signer` is the literal `init` because the console verified no
 signature, and every reader accepts it — which is also why the baseline
 commit must be signed like every other: `init` cannot check it (no
 objects on the box), and if it is not, the first replay of that `HEAD`
@@ -1219,10 +1536,11 @@ init: this box's file is deploy.example.com/Caddyfile in the repository
 init: installed /etc/hotserve/Caddyfile
 init: this box applies commits descending from 4f1c2a9
 init: reloaded. From here, this box takes config only as signed commits sent by your repository's workflow.
+init: secrets for this box encrypt to age1qpzr…7k2d; hotserve box key prints it again
 ```
 
 A `no_change` prints `init: unchanged; the baseline is now 4f1c2a9`
-in place of the last three lines. Over an earlier baseline at another
+in place of the three lines before the last. Over an earlier baseline at another
 commit, the commit line is `init: this box ran 1a2b3c4; it now applies
 commits descending from 4f1c2a9`, and a `no_change` prints it too. When
 the installed file's host is not the new one, `init: this box was
@@ -1258,7 +1576,15 @@ address a file names.
 line — `host <host>`, then `app <name>` and `signer <principal>
 <key-type> <base64>`, each kind in file order — for the template's `make check`,
 which prints its line for each box from it and compares the boxes'
-signer keys. Same refusals; nothing on the box runs it.
+signer keys. Same refusals; nothing on the box runs it. With a
+`secrets/` beside the file it also reads that directory, as the
+working tree has it: `secret <app> <VAR> <bytes>` for each secret (the
+value's length, from the ciphertext alone), `recipients <n>`, and a
+`warning <text>` line for each cap past 75%; it refuses what the
+layout table and the consistency checks refuse ("Which checks run
+where").
+
+**`box key`** is in "The box's key".
 
 ## The applier unit
 
@@ -1306,7 +1632,7 @@ table and holds both shipped files to it, line for line, and the
 | `.service` | `[Service]` | `CapabilityBoundingSet=CAP_DAC_OVERRIDE` | the "Removes" column holds against a hostile creator. Measured: without it a `chmod 000` directory the hotserve uid made in `in/` could not be moved out |
 | `.service` | `[Service]` | `CapabilityBoundingSet=CAP_FOWNER` | the same, for a sticky directory, where root may unlink another uid's file only as the file's owner, the directory's owner, or with this. Measured: with `CAP_DAC_OVERRIDE` alone, the file in a `chmod 1777` directory the hotserve uid made in `in/` stayed in `work/` |
 | `.service` | `[Service]` | `ProtectSystem=strict` | all but the next line's two trees read-only — but not the API filesystems `/dev`, `/proc` and `/sys`, of which `PrivateDevices=`, `ProtectKernelTunables=` and `ProtectControlGroups=` close `/dev`, `/proc/sys` and the cgroup tree; the rest of `/sys` stayed writable in the Docker container the install test runs in, and on a VM is unmeasured |
-| `.service` | `[Service]` | `ReadWritePaths=/etc/hotserve /var/lib/hotserve-box` | the Caddyfile and its temporary; the record, results and `applied.json` |
+| `.service` | `[Service]` | `ReadWritePaths=/etc/hotserve /var/lib/hotserve-box` | the Caddyfile and its temporary, and the env files and theirs under `secrets/`; the record, results and `applied.json` |
 | `.service` | `[Service]` | `PrivateDevices=yes` | `ProtectSystem=strict` leaves `/dev` the host's, and root needs no capability to open a device node it owns. Measured without it: the unit opened a block device read-write; with it, `/dev` holds only the pseudo-devices (`null`, `urandom`, …) and the device policy is closed |
 | `.service` | `[Service]` | `ProtectKernelTunables=yes` | the same for `/proc/sys` and `/proc/sysrq-trigger`. Measured without it: the unit wrote a sysctl; with it, the write fails |
 | `.service` | `[Service]` | `ProtectControlGroups=yes` | the same for the cgroup tree, which `ProtectKernelTunables=` leaves writable. Measured without it: the unit opened `/sys/fs/cgroup/cgroup.procs` for writing; with it, "read-only file system" |
@@ -1387,8 +1713,12 @@ path unit is failed — so the full-disk loop would come back on every
 tick instead of ending.
 
 The package depends on `openssh-client`, ships the `tmpfiles.d` file,
-runs `systemd-tmpfiles --create hotserve-box.conf` and enables the path
-unit the `deb-systemd-helper` way in `postinstall.sh`. `preremove.sh`
+runs `systemd-tmpfiles --create hotserve-box.conf`, enables the path
+unit the `deb-systemd-helper` way, and, on a running system, runs
+`hotserve box key` ("The box's key") in `postinstall.sh`. The unit
+needs no line for secrets: it reads the key and writes the env files
+inside `/etc/hotserve`, which it may already write, and decrypting
+needs no capability. `preremove.sh`
 stops it at a removal, after `hotserve.service`, so that no push is
 admitted once the path unit has stopped. A push admitted before that
 is taken by a run and settled by its own tables, whatever its race
@@ -1446,6 +1776,27 @@ sequenceDiagram
     A->>A: result rolled_back, remove record and entry
 ```
 
+A push of secrets alone (one value rotated; the Caddyfile unchanged):
+
+```mermaid
+sequenceDiagram
+    participant A as applier (root)
+    participant K as /etc/hotserve/age/identity
+    participant E as /etc/hotserve/secrets/example.env
+    A->>A: proof, chain, guards (10 to 15), the secrets tree proved
+    A->>K: read the box key
+    A->>A: decrypt each secret, the value rules, render example.env (15a)
+    A->>A: active? the Caddyfile equal, example.env differs: result verified
+    A->>A: record installing (the env file's previous bytes embedded)
+    A->>E: temp + rename (new)
+    A->>A: record swapped, no reload, every file re-read at new
+    A->>A: record applied, applied.json (secrets_tree, secrets), result applied, remove record and entry
+```
+
+The run prints `secrets installed; the Caddyfile is unchanged, nothing
+reloaded`, the variable that changed, and that the app reads it at its
+next launch.
+
 The trust-changing push: identical to the happy push. A POST still
 waiting when the reload lands is answered by the old configuration's
 handler; a poll after it is answered under the new `deploy_trust`, so
@@ -1501,7 +1852,13 @@ to it; so is a replay of `HEAD` by anyone holding a token (see
 `make signer` on is, which is why a fix that must outlive the night is
 a commit.
 The out-of-band flag in the result is how the box reports that an edit
-happened; it is reported, not refused. A change that validates but
+happened; it is reported, not refused. An env file edited or lost on
+the box is the same: the next push, a replay of `HEAD` included, puts
+HEAD's bytes back and names the app in `secrets_edited_out_of_band`,
+so a value that must change at 3am is a commit too (the template's
+`make secret`) — and it reaches the running app only at its next
+launch, so a rotated key is live once a new version of the app is
+deployed, not when the push goes green. A change that validates but
 misbehaves is reverted like any commit: `git revert`, push. A history
 rewritten *below* the commit the box runs is `hotserve box baseline`;
 one rewritten above it (an unsigned commit rebased away) needs nothing
@@ -1518,7 +1875,7 @@ push after it until it is rebased away and force-pushed; the baseline
 is below it and stays valid, so no console step.
 
 The rules the box repository's README states, each a consequence of
-the chain and descent checks:
+the chain and descent checks, or of what a repository keeps:
 
 | Rule | Because |
 |---|---|
@@ -1529,6 +1886,7 @@ the chain and descent checks:
 | Every box in the repository lists the same signer keys (`make signer` adds to all; `make check` refuses lists that differ). | Every commit is on every box's chain (step 14), so a commit signed by a key one box lacks stops that box's pushes. |
 | Recommended rulesets: `required_signatures` (stops the rebase button and any unsigned push; not the squash button, whose web-flow signature satisfies GitHub and not the box) and block-force-pushes. | The second closes the only route to put a stale signed commit back under a `main` that has moved. |
 | After a credential leak: rotate it, then one applied push to `main`. | A fetched signed commit is the holder's for ever, but lands only while the box still runs the commit it forked from; one applied push puts every stale object below the baseline. |
+| When a reader leaves, or their key leaks, change the values, not only the recipients. | Every ciphertext stays in the repository's history, and age has no revocation: a `make rekey` without the reader stops new ciphertext reaching them, and nothing more. |
 
 The box depends on none of the rulesets; they shorten red runs.
 
@@ -1539,12 +1897,15 @@ full placement is DESIGN-threat-model.md, "Config webhook" and T6.
 
 | Actor | Can | Cannot |
 |---|---|---|
-| Holder of a box-repo OIDC token (the repo's own CI, a compromised action) | Reach the handler; make it validate a Caddyfile a *signer* committed (pre-check first); replay `HEAD` — a `no_change`, or after a console edit the reinstall of HEAD's file, reverting the 3am fix; hold one bundle in `in/` and one in root's hands; fill at most 32 result slots; hold the process's one push slot through each push's upload and checks — up to the upload deadline, the chain's verification bound and three children, about eighteen minutes — while every other push 409s | Install anything not signed by a listed key; replay an older signed commit (descent); land another box's file or another path (identity) |
+| Holder of a box-repo OIDC token (the repo's own CI, a compromised action) | Reach the handler; make it validate a Caddyfile a *signer* committed (pre-check first); replay `HEAD` — a `no_change`, or after a console edit the reinstall of HEAD's files, reverting the 3am fix; hold one bundle in `in/` and one in root's hands; fill at most 32 result slots; hold the process's one push slot through each push's upload and checks — up to the upload deadline, the chain's verification bound and three children, about eighteen minutes — while every other push 409s | Install anything not signed by a listed key; replay an older signed commit (descent); land another box's file or another path (identity) |
 | Holder of a `deploy_trust local` token, or of the key that mints one | The same as the OIDC holder, with `sha` chosen by the minter: any signed descendant of the baseline whose objects it has, without the repository workflow or its `main` claim | Anything a signer did not sign |
 | Leaked PAT, stolen session, OAuth/GitHub App with `contents:write` | Push to `main`; stop every later push until its commit is rebased away; **fast-forward onto `main` a branch every commit of which a signer already signed**, which the box applies, for as long as the box runs the commit it forked from | Produce an SSH signature by a listed key; ride an unsigned or self-authored change in under a later signed commit; change the box with anything a signer did not sign |
 | Compromised laptop, software signing key | Everything the operator can | Nothing the operator cannot; this is the operator |
 | Compromised laptop, hardware-held key (`sk-` types) | Push unsigned or GPG-signed commits (refused) | Sign without a touch |
-| Supervisor RCE (T5, the hotserve uid) | Drop any bundle into `in/` without the handler, and so **make root install any configuration a signer signed that descends from the baseline and whose objects it holds** — `HEAD` again over a console edit, or a signer's signed unmerged branch — because the token-to-commit binding (step 4) is the handler's and root cannot repeat it; **skip the handler's validation**, which root never repeats — a file that fails to load is rolled back, but a signer-signed file that loads and only `hotserve-backup validate` would have refused is installed, bounded only by the signature, identity, proof and descent checks; report "loaded" for a reload that did nothing; read `out/` and `applied.json`; tell the workflow anything (the response and the poll are hotserve's) | Write `/etc/hotserve/Caddyfile`, `applied.json` or a result itself; make root install anything a signer did not sign (unsigned, non-descendant, other-host, other-path, placeholder-smuggled); persist its *own* configuration across a restart |
+| Holder of a reader's private key — a signer's SSH key, or a reader's age identity — with read access to the repository | Decrypt every value encrypted to that key in any copy of the repository's history, offline: nothing on the box or at GitHub sees it beyond the clone | Change anything on the box with the reader's key alone (a signer's key also signs: the laptop rows) |
+| Reader of the repository (a token or app with `contents:read`, a fork, GitHub itself) | Learn which apps have secrets, every variable's name, each value's length, and when each changed | Read a value |
+| Holder of the box key (root; a copy of `/etc/hotserve/age`, an image cloned from the box) | Decrypt every value ever encrypted to it, in every copy of the history | — (root reads the env files anyway) |
+| Supervisor RCE (T5, the hotserve uid) | Read every env file, as it always could (they are hotserve's to read at launch); answer `GET /` with any `recipient`, which the workflow only compares — the remedy it names is a person's `make rekey` after reading the key from root over SSH, and the gain would be values the hotserve uid already reads; drop any bundle into `in/` without the handler, and so **make root install any configuration a signer signed that descends from the baseline and whose objects it holds** — `HEAD` again over a console edit, or a signer's signed unmerged branch — because the token-to-commit binding (step 4) is the handler's and root cannot repeat it; **skip the handler's validation**, which root never repeats — a file that fails to load is rolled back, but a signer-signed file that loads and only `hotserve-backup validate` would have refused is installed, bounded only by the signature, identity, proof and descent checks; report "loaded" for a reload that did nothing; read `out/` and `applied.json`; tell the workflow anything (the response and the poll are hotserve's) | Write `/etc/hotserve/Caddyfile`, an env file, `applied.json` or a result itself; make root install anything a signer did not sign (unsigned, non-descendant, other-host, other-path, placeholder-smuggled), a secret included; read the box key (0600, in a 0700 root directory); persist its *own* configuration across a restart |
 | Root on the box | Everything, by definition | — |
 
 Residuals accepted here and listed in the threat model: `systemctl
@@ -1552,7 +1913,9 @@ reload`'s exit status is trusted for the `applied` phase (the file on
 disk is root's regardless); plain `crypto/sha1`; the guard of step 15
 checks presence, and reachability is the handler's alone; validate is a courtesy; a
 root-controlled environment can expand a value placeholder into
-anything; GitHub enforces nothing.
+anything; GitHub enforces nothing; a secret's name and length are
+the repository's to read; the box key is X25519, so ciphertext kept
+for ever is open to a future quantum computer (Open question 6).
 
 ## Decisions and rejected alternatives
 
@@ -1572,6 +1935,17 @@ anything; GitHub enforces nothing.
 | Bundle rename before marker | Marker before bundle | A crash between them would answer 409 to every push until the marker aged out. |
 | 202 and a poll | Hold the POST until the apply finishes | Root's part can take minutes, longer than a proxy in front of the box may hold a request, and an answer the workflow did not get needs the poll anyway ("Why 202 and a poll"). |
 | `required_signatures` recommended, not relied on | A "landing act" (signed tag or trailer) to close the fast-forward residual | Doubles every push's ritual to defend against an attacker who already holds a GitHub credential; the README rule is cheaper. |
+| Secrets as age files in the box repository, decrypted by root | GitHub Actions secrets sent with a push; a hosted secrets manager or cloud KMS the box reaches at apply time; a laptop command with its own token | Plaintext in CI breaks "no stored secret in CI"; a service is one more thing to host, pay for and reach at 3am; the laptop has no hotserve binary. The repository is already the box's one channel, and the root applier is already the one writer. |
+| age, through `filippo.io/age` | SOPS's Go library; SOPS's file format read by code of our own | Measured 2026-10-12 against `./cmd/hotserve`'s 176 modules: age adds 2 (`filippo.io/age` v1.3.2, `filippo.io/hpke` v0.4.0; `x/crypto` and `x/sys` are already linked), 16 packages. SOPS's library adds 80 (the AWS SDK's twenty, Vault, Google Cloud and Azure KMS, a Postgres and a MongoDB driver, PGP) to a binary root runs; its narrowest decrypt path, 79. A reader of SOPS's format of our own keeps the graph small but is a format we would track and do not control, and Debian 13 packages `age` (1.2.1), not `sops`. |
+| One age file per variable, names in the clear | One age file per app, names hidden | A pull request shows which variable was added, changed or removed; CI checks names and sizes before merge with no key; the template takes one value at a prompt that does not echo and pipes it to age, so plaintext never touches the laptop's disk, where a whole file would be edited as a plaintext temporary. Two branches that change different variables merge. The cost: names and lengths are the repository's to read. |
+| A classic X25519 box key | A post-quantum hybrid key (ML-KEM-768 + X25519, age v1.3's `age1pq`) | age refuses to mix a post-quantum recipient with SSH-key recipients in one file, and the readers are the signers' SSH keys. Open question 6. |
+| The previous bytes of each env file in the record | Hard-link each previous file aside in `secrets/` | One durable artifact recovery reasons from (I8), as the Caddyfile's `prev` already is; a second artifact would need crash rows of its own. The cost: the record's read cap, 8 MiB. |
+| A set of env files alone reloads nothing | Reload anyway | hotserve reads an env file at an app's launch, never at a load ("Running apps are never restarted", after the trust chain). |
+| No relaunch after a secrets change | Relaunch each app whose secrets changed | liveswap refuses a deploy, and a rollback, to the running version, so it would be a liveswap feature of its own, and root asking the serving process for it would be root consuming its word (backups' D10). Open question 4. |
+| Readers per box, in each box's `recipients` | One list of readers for the repository | A person may read one box's secrets and not another's; signers must match across boxes because every commit is on every box's chain, and readers have no such cause. |
+| The consistency checks in the handler and CI, not in root | In root | They catch mistakes and guard nothing; root installs what a signer signed and reads no more of an app block than the walk does. |
+| `init` installs no secrets | `init` decrypts the copied directory's secrets | `init` has no objects to prove them against and, on a fresh box, no key until it ends; the first push installs them by the whole chain. |
+| The box key made by postinstall, `init` and `hotserve box key` | By `init` alone | A box upgraded from a release without secrets has its key with no step, and every box answers `GET /` with one. |
 
 ## Non-goals
 
@@ -1580,9 +1954,13 @@ anything; GitHub enforces nothing.
 - `import` or value-smuggled syntax in the box's Caddyfile. The signed
   file is the whole configuration.
 - Enforcing the merge-button rule on GitHub.
-- Secrets: a later PR, after the backups branch lands.
+- Secrets from anywhere but the box's repository: GitHub Actions
+  secrets, a hosted secrets manager, a key service the box would reach
+  at apply time.
 - A second config channel (admin API, SSH, laptop CLI).
-- Applying anything but the Caddyfile.
+- Applying anything but the Caddyfile and the apps' env files. The
+  backup credential stays `hotserve-backup setup`, a person's step at
+  the console (Open question 5).
 
 ## Open questions (with leans)
 
@@ -1599,6 +1977,25 @@ anything; GitHub enforces nothing.
 3. **Host rename ergonomics.** Moving the directory in the commit that
    changes the host, then `init` again, is a console step. Lean: leave
    it; a rename needs a certificate first anyway.
+4. **A relaunch after a secrets change.** Today a changed value
+   reaches an app at its next launch, and a deploy of a new version is
+   the way to launch it now. A relaunch of the running version would be
+   liveswap's to add, through its health check, with two instances of
+   one release sharing its directory during the overlap. Lean: not
+   until someone needs it.
+5. **The backup credential through this channel.** It could ride as
+   the reserved `secrets/_backup/`, rendered to
+   `/etc/hotserve-backup/repository.env`, 0600 root:root, outside the
+   app grammar so that no app's name collides. Lean: no, while
+   `hotserve-backup setup` is a person's step by its own rule; and when
+   backups land, they include or exclude `/etc/hotserve/age` and
+   `/etc/hotserve/secrets` deliberately.
+6. **Post-quantum.** The box key is X25519, so ciphertext the
+   repository keeps for ever is open to a future quantum computer.
+   age's hybrid keys cannot share a file with SSH-key readers, and
+   Debian 13's age (1.2.1) cannot encrypt to them. Lean: when readers
+   can move to `age1pq` keys, the box key moves with them in one
+   `make rekey`.
 
 ## Review checklist
 
@@ -1614,6 +2011,8 @@ tables, not in prose.
 - For every message the prose mentions: is it in the Message catalogue,
   with its status and the workflow's action?
 - For every number: is it in the Caps table with a reason?
+- For every file of the set: does each States row say what recovery
+  does with it at its `prev`, at its `new`, and at neither?
 - For every term: is it in the Glossary, and used nowhere in a second
   sense?
 - For every actor in the Threat-model deltas: does "Can" include what
@@ -1789,3 +2188,10 @@ Dated one-liners; the full text of each is in git.
   over SSH is the way back at 3am, the provider's console only if SSH
   is down. The README, the examples' READMEs, the starter Caddyfile and
   the threat model follow.
+- 2026-10-12 — Secrets designed (box PR 7a; built by 7b to 7f): one age
+  file per variable in `<host>/secrets/`, proved with the Caddyfile and
+  decrypted by root after every proof (step 15a) into
+  `/etc/hotserve/secrets/<app>.env`; one transaction for the set; a
+  push of secrets alone reloads nothing; the box key made by
+  postinstall, `init` and `hotserve box key`; age, not SOPS (measured);
+  readers are the signers' SSH keys, per box.
