@@ -3,7 +3,7 @@
 HOTSERVE ?= hotserve
 export HOTSERVE
 
-.PHONY: check signer wip
+.PHONY: check signer wip secret secrets secret-show rekey secrets-import
 
 # Every box here is one hotserve will take, and a line for each. Needs a
 # hotserve binary: Linux only (the release tarball's, as
@@ -23,3 +23,26 @@ signer:
 # main (README.md, "The rules").
 wip:
 	git -c commit.gpgsign=false commit
+
+# The apps' secrets, encrypted here with age to the box and its readers
+# (README.md, Secrets; bin/secrets says more). Needs age.
+#   make secret APP=example VAR=DATABASE_URL [BOX=deploy.example.com]
+#     a box's first secret also takes BOX_KEY=$(ssh root@<your box> hotserve box key)
+#   make secrets [BOX=…]
+#   make secret-show APP=example VAR=DATABASE_URL [IDENTITY=~/.ssh/id_ed25519]
+#   make rekey [BOX=…] [BOX_KEY=…]
+#   make secrets-import APP=example [BOX=…] < example.env
+secret:
+	APP="$(APP)" VAR="$(VAR)" BOX="$(BOX)" BOX_KEY="$(BOX_KEY)" bin/secrets set
+
+secrets:
+	BOX="$(BOX)" bin/secrets list
+
+secret-show:
+	APP="$(APP)" VAR="$(VAR)" BOX="$(BOX)" IDENTITY="$(IDENTITY)" bin/secrets show
+
+rekey:
+	BOX="$(BOX)" BOX_KEY="$(BOX_KEY)" IDENTITY="$(IDENTITY)" bin/secrets rekey
+
+secrets-import:
+	APP="$(APP)" BOX="$(BOX)" BOX_KEY="$(BOX_KEY)" bin/secrets import

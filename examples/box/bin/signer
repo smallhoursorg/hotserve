@@ -17,6 +17,9 @@
 # every box alike: each commit is on every box's history, so a key one
 # box lacks would stop that box's pushes. A box that lists the key
 # already is left as it is, so running it again only sets up signing.
+# A box that has secrets gains the key as a reader too (README.md,
+# Secrets), when age can encrypt to it: ssh-ed25519, or ssh-rsa of 2048
+# bits or more.
 # The checkout's own git config gains gpg.format ssh, user.signingkey
 # and commit.gpgsign true; nothing outside this repository changes.
 set -eu
@@ -97,6 +100,11 @@ for f in $boxes; do
 		printf 'signer: %s has other edits, or is not committed yet, so it is not staged: git add -p it\n' "$f"
 	fi
 done
+
+# The same key as a reader of each box's secrets, where a box has
+# some: into <host>/secrets/recipients when age can encrypt to it, and
+# what to do instead when it cannot (bin/secrets).
+bin/secrets add-reader "$principal" "$type" "$b64"
 
 # git signs with the private key file when there is one beside the .pub,
 # and with ssh-agent's copy of the .pub's key when there is not.

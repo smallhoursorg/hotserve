@@ -1,0 +1,4 @@
+# An encrypted value: no text diff, no line-ending conversion. A pull
+# request shows which file changed, and so which variable; never what
+# it holds.
+*.age binary
