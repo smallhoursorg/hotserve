@@ -263,13 +263,19 @@ func (a *Applier) recoverAll(ctx context.Context) error {
 		}
 		// Taken, or verified, and no record: nothing changed.
 		t := &txn{rec: record{ID: id, Origin: originApplier}, entry: path}
+		msg := msgInterrupted
 		if v, err := a.readResult(id); err == nil && v.Phase == phaseVerified { // keep what it said
 			t.rec.Commit, t.rec.Path, t.rec.Signer, t.rec.BoxWebhook = v.Commit, v.Path, v.Signer, v.BoxWebhook
 			t.rec.OutOfBand, t.rec.Apps, t.rec.Diff = v.OutOfBand, v.Apps, v.Diff
 			t.rec.SecretsAdded, t.rec.SecretsChanged, t.rec.SecretsRemoved = v.SecretsAdded, v.SecretsChanged, v.SecretsRemoved
 			t.rec.SecretsOutOfBand = v.SecretsOutOfBand
+			// A `verified` that named secrets was a push with env files
+			// in its set: the catalogue's text names the box's files.
+			if len(v.SecretsAdded)+len(v.SecretsChanged)+len(v.SecretsRemoved)+len(v.SecretsOutOfBand) > 0 {
+				msg = msgInterruptedFiles
+			}
 		}
-		a.finish(t, phaseFailed, msgInterrupted)
+		a.finish(t, phaseFailed, msg)
 		a.removeVerified(id) // if `failed` could not be written over it
 	}
 	return nil
@@ -518,7 +524,13 @@ func (a *Applier) process(ctx context.Context, id string) error {
 	// anything but `active` then refuses.
 	state, err := a.running(ctx)
 	if err != nil {
-		a.finish(t, phaseFailed, installFailed(err))
+		// The set is known from 15a: with env files in it, the
+		// catalogue's text names the box's files.
+		msg := installFailed(err)
+		if len(plan.entries) > 0 {
+			msg = installFailedFiles(err)
+		}
+		a.finish(t, phaseFailed, msg)
 		return nil
 	}
 	switch {
