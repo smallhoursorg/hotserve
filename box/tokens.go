@@ -3,6 +3,7 @@ package box
 import (
 	"bytes"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -27,10 +28,29 @@ type Shape struct {
 	// Apps are the names of the global liveswap block's `app` lines, in
 	// file order, as a result reports them; a name outside liveswap's
 	// app-name grammar is left out, since liveswap refuses the file at
-	// load for it anyway. Read from the first reading only: nothing
-	// decides on them.
+	// load for it anyway. Read from the first reading only: no proof
+	// decides on them, only secretsFit's checks for mistakes.
 	Apps []string
+	// AppEnv is what each app's block says about its environment, by
+	// app name, for every name in Apps: what secretsFit checks against
+	// the secrets beside the file. Read like Apps, as raw tokens: an
+	// env_file written with a placeholder is that text, not a path, and
+	// a placeholder's default that re-shapes the file once expanded is
+	// read as written — secretsFit catches mistakes and guards nothing,
+	// so it does not hold the two readings to agree, as Walk does for
+	// the host and the signers.
+	AppEnv map[string]AppEnv
 }
+
+// AppEnv is an app block's env_file and env lines.
+type AppEnv struct {
+	// EnvFile is the env_file line's argument, "" for none.
+	EnvFile string
+	// Env are the env lines' keys, in file order.
+	Env []string
+}
+
+func (e AppEnv) hasEnv(key string) bool { return slices.Contains(e.Env, key) }
 
 // appName is liveswap's app-name grammar (liveswap/names.go, appNameRe).
 var appName = regexp.MustCompile(`^[a-z0-9-]{1,63}$`)
@@ -110,6 +130,7 @@ const (
 	kindSite                      // a top-level block with addresses
 	kindSnippet                   // a top-level `(name)` block
 	kindLiveswap                  // the global block's `liveswap` block
+	kindApp                       // an `app <name>` block in the liveswap block
 )
 
 // frame is one open brace.
@@ -123,6 +144,8 @@ type frame struct {
 	// snippet is the `(name)` or `&(name)` block this frame is inside,
 	// at any depth, if any.
 	snippet *site
+	// app is the app a kindApp block is for.
+	app string
 }
 
 type site struct {
@@ -294,7 +317,23 @@ func walk(input []byte) (*Shape, error) {
 		case kindLiveswap:
 			if first.Text == "app" && len(args) > 0 && appName.MatchString(args[0]) {
 				shape.Apps = append(shape.Apps, args[0])
+				if shape.AppEnv == nil {
+					shape.AppEnv = map[string]AppEnv{}
+				}
+				if _, seen := shape.AppEnv[args[0]]; !seen { // liveswap refuses a second block of the same name
+					shape.AppEnv[args[0]] = AppEnv{}
+				}
+				child.kind, child.app = kindApp, args[0]
 			}
+		case kindApp:
+			e := shape.AppEnv[top.app]
+			switch {
+			case first.Text == "env_file" && len(args) > 0:
+				e.EnvFile = args[0]
+			case first.Text == "env" && len(args) > 0:
+				e.Env = append(e.Env, args[0])
+			}
+			shape.AppEnv[top.app] = e
 		case kindBox:
 			switch first.Text {
 			case "signer":

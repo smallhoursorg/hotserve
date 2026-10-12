@@ -917,6 +917,65 @@ func TestParseEnvFileRejectsGarbage(t *testing.T) {
 	}
 }
 
+// The box writes env files with RenderEnvFile; every launch reads them
+// with parseEnvLines. A value must come back byte for byte, whatever
+// the quoting, spacing or punctuation in it; what the format cannot
+// carry is refused, never altered.
+func TestRenderEnvFileRoundTrips(t *testing.T) {
+	values := []string{
+		"plain", "", `"x"`, `"`, `'`, `''`, `a"b`, " lead", "trail ", "  both  ",
+		"\xc2\xa0nbsp\xc2\xa0", "\xe2\x80\xa8", "\t", "# not a comment", "a=b=c",
+		"export X=1", "$HOME", "`cmd`", "\\n", "emoji \xf0\x9f\x94\x91",
+	}
+	for i, v := range values {
+		vars := []string{"Z_LAST=z", fmt.Sprintf("K%d=%s", i, v), "A=a"}
+		out, err := RenderEnvFile(vars)
+		if err != nil {
+			t.Fatalf("RenderEnvFile(%q): %v", vars, err)
+		}
+		got, err := ParseEnvLines("rendered", out)
+		if err != nil {
+			t.Fatalf("ParseEnvLines(%q): %v", out, err)
+		}
+		want := []string{"A=a", fmt.Sprintf("K%d=%s", i, v), "Z_LAST=z"}
+		if !slices.Equal(got, want) {
+			t.Fatalf("value %q: rendered %q, read back %q", v, out, got)
+		}
+	}
+}
+
+func TestRenderEnvFileSortsByKeyNotByLine(t *testing.T) {
+	out, err := RenderEnvFile([]string{"A9=x", "A=y", "A_B=z"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "A=\"y\"\nA9=\"x\"\nA_B=\"z\"\n"; string(out) != want {
+		t.Fatalf("rendered %q, want %q", out, want)
+	}
+}
+
+func TestRenderEnvFileRefusesWhatTheFormatCannotCarry(t *testing.T) {
+	for _, c := range []struct {
+		vars []string
+		want string
+	}{
+		{[]string{"K=a\nb"}, "line break"},
+		{[]string{"K=a\r"}, "line break"},
+		{[]string{"K=a\x00"}, "NUL"},
+		{[]string{"K=\xff"}, "not UTF-8"},
+		{[]string{"1K=v"}, "not a valid environment variable name"},
+		{[]string{"my-var=v"}, "not a valid environment variable name"},
+		{[]string{"=v"}, "not a valid environment variable name"},
+		{[]string{"novalue"}, "not a valid environment variable name"},
+		{[]string{"K=a", "L=b", "K=c"}, "K is given twice"},
+	} {
+		_, err := RenderEnvFile(c.vars)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Fatalf("RenderEnvFile(%q) = %v, want an error naming %q", c.vars, err, c.want)
+		}
+	}
+}
+
 func TestWarnEnvFileMode(t *testing.T) {
 	cases := []struct {
 		name  string

@@ -15,6 +15,7 @@ go 1.26.1
 replace github.com/smallhoursorg/hotserve/liveswap => ../liveswap
 
 require (
+	filippo.io/age v1.3.2
 	github.com/caddyserver/caddy/v2 v2.11.7
 	github.com/smallhoursorg/hotserve/liveswap v0.0.0-00010101000000-000000000000
 	github.com/spf13/cobra v1.10.2
@@ -31,6 +32,7 @@ require (
 	dario.cat/mergo v1.0.2 // indirect
 	filippo.io/bigmod v0.1.0 // indirect
 	filippo.io/edwards25519 v1.2.0 // indirect
+	filippo.io/hpke v0.4.0 // indirect
 	github.com/AndreasBriese/bbloom v0.0.0-20190825152654-46b345b51c96 // indirect
 	github.com/KimMachineGun/automemlimit v1.0.0 // indirect
 	github.com/Masterminds/goutils v1.1.1 // indirect

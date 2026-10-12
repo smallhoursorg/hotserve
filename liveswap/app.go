@@ -1,6 +1,7 @@
 package liveswap
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -9,10 +10,12 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/smallhoursorg/hotserve/liveswap/deploytrust"
 	"go.uber.org/zap"
@@ -1723,6 +1726,65 @@ func parseEnvLines(path string, data []byte) ([]string, error) {
 		vars = append(vars, key+"="+value)
 	}
 	return vars, nil
+}
+
+// ParseEnvLines is parseEnvLines, the reading every launch makes, for a
+// caller that holds the bytes: the box, which reads the env file a push
+// replaces to tell which variables it adds, changes or removes
+// (box/DESIGN-box.md, "Record and result fields"). name is for the
+// messages.
+func ParseEnvLines(name string, data []byte) ([]string, error) {
+	return parseEnvLines(name, data)
+}
+
+// ValidEnvKey reports whether key is a name an env file may carry: what
+// systemd accepts in Environment= (envKeyRe).
+func ValidEnvKey(key string) bool { return validEnvKey(key) }
+
+// RenderEnvFile is the inverse of the reading above, for the files the box
+// writes from a repository's secrets (box/DESIGN-box.md, "Values and the
+// env file"): one `KEY="value"` line per pair, sorted by key, so the
+// bytes depend only on the pairs. parseEnvLines trims the line and the
+// value, then strips one pair of matching quotes and does nothing else —
+// no escapes — so every value inside double quotes reads back exactly:
+// inner quotes, edge spaces, `#` and `=` included. What it cannot carry
+// is refused rather than altered: a value with a line break (the reading
+// is line by line, and a CR at a line's end is trimmed), a NUL, or bytes
+// that are not UTF-8 (the unit's Environment= travels over D-Bus, whose
+// strings are UTF-8); a key systemd would reject; a key given twice.
+func RenderEnvFile(vars []string) ([]byte, error) {
+	type pair struct{ key, value string }
+	pairs := make([]pair, 0, len(vars))
+	for _, kv := range vars {
+		key, value, found := strings.Cut(kv, "=")
+		if !found || !validEnvKey(key) {
+			return nil, fmt.Errorf("%q is not a valid environment variable name (systemd requires %s)", key, envKeyRe)
+		}
+		pairs = append(pairs, pair{key, value})
+	}
+	// By key, not by line: '=' sorts after the digits, so "A9=…" would
+	// come before "A=…" in a sort of the lines.
+	slices.SortFunc(pairs, func(a, b pair) int { return strings.Compare(a.key, b.key) })
+	var b bytes.Buffer
+	for i, p := range pairs {
+		key, value := p.key, p.value
+		if i > 0 && key == pairs[i-1].key {
+			return nil, fmt.Errorf("%s is given twice", key)
+		}
+		switch {
+		case strings.ContainsAny(value, "\n\r"):
+			return nil, fmt.Errorf("the value of %s has a line break, which an env file cannot carry", key)
+		case strings.ContainsRune(value, 0):
+			return nil, fmt.Errorf("the value of %s has a NUL byte, which an environment cannot carry", key)
+		case !utf8.ValidString(value):
+			return nil, fmt.Errorf("the value of %s is not UTF-8", key)
+		}
+		b.WriteString(key)
+		b.WriteString(`="`)
+		b.WriteString(value)
+		b.WriteString("\"\n")
+	}
+	return b.Bytes(), nil
 }
 
 // expandPlaceholders substitutes the deploy-time placeholders that are

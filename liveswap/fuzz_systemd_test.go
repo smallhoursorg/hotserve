@@ -13,9 +13,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // systemdUnitNameRe is what systemd itself accepts for a unit name
@@ -96,6 +98,50 @@ func FuzzParseEnvFile(f *testing.F) {
 			if !found || !validEnvKey(key) {
 				t.Fatalf("parseEnvFile returned %q, which systemd would reject", kv)
 			}
+		}
+	})
+}
+
+// FuzzRenderEnvFile holds the box's env files to the reading every
+// launch makes: whatever RenderEnvFile writes, parseEnvLines reads back
+// as exactly the pairs it was given, sorted by key; and what it refuses
+// is something the format cannot carry, never a value it merely finds
+// odd.
+func FuzzRenderEnvFile(f *testing.F) {
+	for _, c := range [][4]string{
+		{"A", "1", "B", "2"}, {"K", `"x"`, "L", "'y'"}, {"K", " lead", "L", "trail "},
+		{"K", "\xc2\xa0nbsp\xc2\xa0", "L", "\xe2\x80\xa8"}, {"K", "# not a comment", "L", "a=b=c"},
+		{"K", "", "L", `"`}, {"A9", "x", "A", "y"}, {"K", "a\nb", "L", "c"}, {"K", "a\rb", "L", "c"},
+		{"K", "nul\x00", "L", "c"}, {"K", "\xff", "L", "c"}, {"K", "v", "K", "w"}, {"1K", "v", "L", "w"},
+		{"export", "v", "L", "  "}, {"K", "'", "L", "''"},
+	} {
+		f.Add(c[0], c[1], c[2], c[3])
+	}
+	f.Fuzz(func(t *testing.T, k1, v1, k2, v2 string) {
+		if strings.Contains(k1, "=") || strings.Contains(k2, "=") {
+			return // the pair's key is what precedes its first "="
+		}
+		vars := []string{k1 + "=" + v1, k2 + "=" + v2}
+		out, err := RenderEnvFile(vars)
+		if err != nil {
+			carriable := func(k, v string) bool {
+				return validEnvKey(k) && !strings.ContainsAny(v, "\n\r\x00") && utf8.ValidString(v)
+			}
+			if carriable(k1, v1) && carriable(k2, v2) && k1 != k2 {
+				t.Fatalf("RenderEnvFile(%q) refused pairs the format carries: %v", vars, err)
+			}
+			return
+		}
+		got, err := parseEnvLines("rendered", out)
+		if err != nil {
+			t.Fatalf("parseEnvLines refused what RenderEnvFile wrote (%q): %v", out, err)
+		}
+		want := vars
+		if k2 < k1 {
+			want = []string{vars[1], vars[0]}
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("round trip of %q: rendered %q, read back %q", want, out, got)
 		}
 	})
 }

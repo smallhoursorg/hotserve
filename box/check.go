@@ -98,9 +98,13 @@ func check(ctx context.Context, v *proof.Verifier, b *proof.Bundle, installed []
 	}
 	vd.host, vd.apps = cur.Host, next.Apps
 
-	// 13. The file is the committed file.
+	// 13. The file is the committed file, and the secrets beside it the
+	// committed secrets ("Proving the secrets").
 	if err := proof.ProveFile(b.Commit, b.Trees, b.Path, b.Caddyfile); err != nil {
 		return nil, asRefusal(err)
+	}
+	if err := provedSecrets(b); err != nil {
+		return nil, err
 	}
 	// 14, the linkage: HEAD down to the baseline, by hash, within the cap.
 	chain, err := proof.Chain(b.Commit, b.Parents, base.SHA)
@@ -127,19 +131,42 @@ func check(ctx context.Context, v *proof.Verifier, b *proof.Bundle, installed []
 	return vd, nil
 }
 
+// msgNoSecretsYet refuses a commit whose secrets/ holds an app's
+// directory, until the applier installs secrets (box PR 7c): a box that
+// cannot install them must not answer as though it had.
+const msgNoSecretsYet = "this box does not install secrets yet"
+
+// provedSecrets is step 13's proof of the secrets beside the bundle's
+// file, as a refusal if it fails. Until the applier installs secrets it
+// also refuses any it finds: check and the fast path both ask here, so
+// the two cannot disagree about a commit with secrets.
+func provedSecrets(b *proof.Bundle) error {
+	s, err := proof.ProveSecrets(b.Commit, b.Trees, b.Blobs, b.Path, secretNames)
+	if err != nil {
+		return asRefusal(err)
+	}
+	if len(s.Apps) > 0 {
+		return refused("%s", msgNoSecretsYet)
+	}
+	return nil
+}
+
 // unchanged is the fast path's question (step 4): is the bundle the
 // commit and file the box runs, in a shape root would accept? HEAD is
 // the baseline and its file the installed bytes, and the steps of check
-// that need no signature hold — 11's path, 13's file proof, 14's linkage
-// (HEAD alone, parents/ empty). No signature: HEAD's id is the
-// baseline's, so its bytes are the commit the box already runs. A bundle
-// it does not answer goes on to check, which names the step that
+// that need no signature hold — 11's path, 13's file and secrets proofs,
+// 14's linkage (HEAD alone, parents/ empty). No signature: HEAD's id is
+// the baseline's, so its bytes are the commit the box already runs. A
+// bundle it does not answer goes on to check, which names the step that
 // refuses: a bundle in a shape root refuses is never answered no_change.
 func unchanged(b *proof.Bundle, installed []byte, base *applied) bool {
 	if b.Commit.ID != base.SHA || b.Path != base.Path || digest(b.Caddyfile) != digest(installed) {
 		return false
 	}
 	if proof.ProveFile(b.Commit, b.Trees, b.Path, b.Caddyfile) != nil {
+		return false
+	}
+	if provedSecrets(b) != nil {
 		return false
 	}
 	_, err := proof.Chain(b.Commit, b.Parents, base.SHA)
