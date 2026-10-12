@@ -165,7 +165,9 @@ systemctl is-active --quiet hotserve-box-apply.path \
 # The floor that makes apt refuse an older release at install, as
 # docs/first-deploy.md step 2 quotes it. Debian 13 meets it, so this
 # image cannot show the refusal; this is what keeps the quote true.
-dpkg-deb -f "$deb" Depends | grep -qF 'systemd (>= 257)' \
+# One entry per line, matched whole: a substring match would also
+# accept `libpam-systemd (>= 257)`.
+dpkg-deb -f "$deb" Depends | tr ',' '\n' | sed 's/^ *//; s/ *$//' | grep -qxF 'systemd (>= 257)' \
 	|| die "the package does not depend on systemd (>= 257): apt would install it where no app can run"
 # The tree as the shipped tmpfiles.d file says, read back off the disk
 # (the file itself is held to the Paths table by box/units_test.go).
