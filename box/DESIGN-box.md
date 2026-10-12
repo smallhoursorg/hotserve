@@ -217,8 +217,9 @@ cross-references throughout.
    answered two ways) — if HEAD equals the baseline, the bundled
    file's digest equals the installed file's, the bundle's secrets tree
    is the one `applied.json` records and every env file `applied.json`
-   lists reads back with its recorded digest (one that cannot be read
-   counts as changed, never as an error), and the bundle passes the
+   lists reads back with its recorded digest, at the mode and owner root
+   writes (one that cannot be read, or whose mode or owner drifted,
+   counts as changed, never as an error: root writes it again), and the bundle passes the
    steps that need no signature (11's path is the one `applied.json`
    records, 13's file and secrets proofs, 14's linkage with `parents/`
    empty), nothing on disk would change, so the handler answers 200 `no_change`

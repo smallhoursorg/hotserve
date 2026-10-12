@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
@@ -180,9 +182,27 @@ func (h *Handler) readState() (base *applied, installed []byte, what string, err
 // envDigest is an installed env file's digest as the fast path compares
 // it (step 4): read as root reads it — no link followed, held to a
 // regular file, to maxEnvRead — by the hotserve group, whose files these
-// are. Any error is the caller's "not unchanged".
+// are; and only for a file that is still as root wrote it, 0640 and
+// owned as the exchange tree is, so that a file whose mode or owner
+// drifted goes to root, which writes it again ("Values and the env
+// file"), rather than staying readable or writable on every replay. Any
+// error is the caller's "not unchanged".
 func (h *Handler) envDigest(app string) (string, error) {
-	b, err := readFile(filepath.Join(h.secrets, app+".env"), maxEnvRead, false)
+	path := filepath.Join(h.secrets, app+".env")
+	base, err := os.Lstat(h.dir)
+	if err != nil {
+		return "", err
+	}
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	want, okBase := base.Sys().(*syscall.Stat_t)
+	got, okFile := fi.Sys().(*syscall.Stat_t)
+	if !okBase || !okFile || fi.Mode() != 0o640 || got.Uid != want.Uid || got.Gid != want.Gid {
+		return "", errors.New("not as root writes it")
+	}
+	b, err := readFile(path, maxEnvRead, false)
 	if err != nil {
 		return "", err
 	}

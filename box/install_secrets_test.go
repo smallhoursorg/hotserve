@@ -944,6 +944,36 @@ func TestInitAndBaselineKeepSecrets(t *testing.T) {
 	}
 }
 
+// The handler reads an env file for the fast path only while it is as
+// root wrote it: one whose mode drifted is not unchanged, so a replay
+// goes to root, which writes it again.
+func TestHandlerEnvDigestNeedsRootsMode(t *testing.T) {
+	p := newPushRig(t)
+	p.secretsDirAs(0o750 | os.ModeSetgid)
+	body := rendered(t, "KEY=v")
+	p.putEnv("example", body, 0o640)
+	if d, err := p.h.envDigest("example"); err != nil || d != digest(body) {
+		t.Fatalf("as root writes it: %q %v", d, err)
+	}
+	for _, mode := range []os.FileMode{0o644, 0o660, 0o600} {
+		if err := os.Chmod(p.envPath("example"), mode); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := p.h.envDigest("example"); err == nil {
+			t.Errorf("mode %v answered unchanged", mode)
+		}
+	}
+	if err := os.Chmod(p.envPath("example"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(p.envPath("example"), p.envPath("other")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.h.envDigest("other"); err == nil {
+		t.Error("a link answered unchanged")
+	}
+}
+
 // The fast path (step 4) holds the env files too: the secrets tree
 // applied.json records, and each listed file at its digest; one that is
 // gone or cannot be read is not unchanged, so root reinstalls it.
