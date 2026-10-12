@@ -73,12 +73,15 @@ After that, `BOX_KEY` is not needed:
 make secret APP=example VAR=STRIPE_KEY
 ```
 
-It asks for the value without showing it as you type. A pipe works too,
-and is the way to bring a value from a password manager's command line
-or the clipboard without it touching your shell's history:
+It asks for the value without showing it as you type, and takes one
+line. A terminal cuts a long line short (at 1024 bytes on a Mac), so a
+line of 1023 bytes or more is refused at the prompt rather than taken
+cut. A value that long, a private key say, comes in through a pipe
+instead, as can any value from a password manager's command line or
+the clipboard, without touching the disk or your shell's history:
 
 ```sh
-pbpaste | make secret APP=example VAR=STRIPE_KEY
+pbpaste | make secret APP=example VAR=STRIPE_KEY     # on Linux: xclip -o, or wl-paste
 ```
 
 Either way the value goes straight into `age`; it is never written to

@@ -84,7 +84,10 @@ secret:     env_file /etc/hotserve/secrets/example.env
 ```
 
 The value goes from the prompt straight into age, so it is never
-written to the laptop's disk or your shell's history. Add that
+written to the laptop's disk or your shell's history. The prompt takes
+a line of up to 1022 bytes; a longer value, a private key say, comes in
+through a pipe instead: `pbpaste | make secret APP=example VAR=…` (on
+Linux, `xclip -o` or `wl-paste`). Add that
 `env_file` line to the app's block (the template's Caddyfile has it
 ready, commented out: uncomment it), then commit and push:
 
