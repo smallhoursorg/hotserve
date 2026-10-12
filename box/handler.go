@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"path/filepath"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
@@ -37,10 +38,11 @@ type Handler struct {
 	logger  *zap.Logger
 	limiter *deploytrust.Limiter
 
-	// Where the handler reads: installedFile and exchangeDir, set in
-	// Provision; a test's temporary files otherwise.
+	// Where the handler reads: installedFile, exchangeDir and
+	// secretsDir, set in Provision; a test's temporary files otherwise.
 	installed string
 	dir       string
+	secrets   string
 
 	// A push's seams: the proof's verifier (ssh-keygen as the hotserve
 	// uid, step 5), step 6's children, the clock step 8 waits on, and
@@ -74,7 +76,7 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	}
 	h.app = app.(*App)
 	h.limiter = deploytrust.Shared()
-	h.installed, h.dir = installedFile, exchangeDir
+	h.installed, h.dir, h.secrets = installedFile, exchangeDir, secretsDir
 	h.verifier = &proof.Verifier{} // RunAs 0: as the hotserve uid, in the service's PrivateTmp
 	h.validator = newChildValidator(h.x("stage"))
 	h.clock = realClock{}
@@ -173,6 +175,18 @@ func (h *Handler) readState() (base *applied, installed []byte, what string, err
 		return nil, nil, readingInstalled, err
 	}
 	return base, installed, "", nil
+}
+
+// envDigest is an installed env file's digest as the fast path compares
+// it (step 4): read as root reads it — no link followed, held to a
+// regular file, to maxEnvRead — by the hotserve group, whose files these
+// are. Any error is the caller's "not unchanged".
+func (h *Handler) envDigest(app string) (string, error) {
+	b, err := readFile(filepath.Join(h.secrets, app+".env"), maxEnvRead, false)
+	if err != nil {
+		return "", err
+	}
+	return digest(b), nil
 }
 
 // boxError answers a failure that is the box's, never the caller's:

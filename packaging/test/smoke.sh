@@ -181,7 +181,19 @@ while read -r typ path mode user group _; do
 	[ "$got" = "$want" ] || die "$path is '$got', want '$want' (from $conf)"
 	n=$((n + 1))
 done <"$conf"
-[ "$n" -eq 5 ] || die "$conf made $n directories, want the 5 of the Paths table"
+[ "$n" -eq 7 ] || die "$conf made $n directories, want the 7 of the Paths table"
+# The box's key for secrets, made by postinstall on this running system
+# (box/DESIGN-box.md, "The box's key"): the identity root's alone, its
+# recipient in age.pub, and `hotserve box key` printing that recipient
+# alone on stdout.
+[ "$(stat -c '%a %U:%G' /etc/hotserve/age/identity)" = "600 root:root" ] \
+	|| die "postinstall did not make /etc/hotserve/age/identity 0600 root:root: $(stat -c '%a %U:%G' /etc/hotserve/age/identity 2>&1)"
+[ "$(stat -c '%a %U:%G' /etc/hotserve/age.pub)" = "644 root:root" ] \
+	|| die "/etc/hotserve/age.pub is not 0644 root:root: $(stat -c '%a %U:%G' /etc/hotserve/age.pub 2>&1)"
+box_key=$(hotserve box key 2>/dev/null) || die "hotserve box key failed"
+case "$box_key" in age1*) : ;; *) die "hotserve box key printed '$box_key', want the age1… recipient alone" ;; esac
+[ "$box_key" = "$(cat /etc/hotserve/age.pub)" ] || die "age.pub is not the key hotserve box key prints"
+grep -qx "# public key: $box_key" /etc/hotserve/age/identity || die "the identity does not hold the key age.pub names"
 # The manager's own reading of the units: what box/units_test.go reads
 # from the files is what systemd took from them.
 show() { systemctl show -p "$2" --value "$1"; }
@@ -845,6 +857,10 @@ for d in "$B 2750 root:hotserve" "$B/in 770 root:hotserve" "$B/out 2750 root:hot
 	[ "$got" = "$want_mode $want_owner" ] || die "$p is '$got' after the upgrade, want '$want_mode $want_owner': postinstall's systemd-tmpfiles did not put it back"
 done
 systemctl enable --now hotserve-box-apply.path
+# The upgrade's postinstall ran hotserve box key again: the key is the
+# one the install made, never replaced.
+[ "$(hotserve box key 2>/dev/null)" = "$box_key" ] || die "an upgrade replaced the box's key for secrets"
+[ "$(cat /etc/hotserve/age.pub)" = "$box_key" ] || die "an upgrade rewrote age.pub with another key"
 systemctl is-active --quiet hotserve \
 	|| die "service not active after reinstall — an upgrade must not leave the server down (preremove stop / missing postinstall restart)"
 id hotserve >/dev/null || die "hotserve user gone after reinstall (postinstall not idempotent)"

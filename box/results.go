@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"go.uber.org/zap"
@@ -59,6 +60,15 @@ const (
 	msgPrevReloadFailed = "rolled back, but the reload of the previous file failed; the previous file is on disk; journalctl -u hotserve"
 	msgChanged          = "the Caddyfile changed during the transaction; it is left as found"
 	msgDiskFull         = "disk full; the previous Caddyfile could not be restored"
+	// The texts for a set with env files in it, where the catalogue
+	// names "the box's files" (DESIGN-box.md, Message catalogue: the
+	// first text of a row for the Caddyfile alone, the second with env
+	// files); <app> is filled in by fill.
+	msgInterruptedFiles           = "interrupted before the box's files changed; nothing changed"
+	msgRolledBackUnrecordedFiles  = "a write after the first file changed failed; rolled back: the previous Caddyfile and env files are back"
+	msgRolledBackInterruptedFiles = "interrupted after the box's files changed; rolled back: the previous files are back"
+	msgEnvChanged                 = "the env file for <app> changed during the transaction; it is left as found"
+	msgEnvDiskFull                = "disk full; the previous env file for <app> could not be restored"
 	// msgInitRemedy follows init's refusal on a hotserve that is not up
 	// ("Console commands"); %[1]s is init's argument and %[2]s its
 	// directory, absolute, since the operator may read it after a
@@ -78,6 +88,12 @@ If it will not start, journalctl -u hotserve says why.`
 // Caddyfile changed, the box's own error named.
 func installFailed(err error) string {
 	return "the install failed before the Caddyfile changed: " + proof.Bound(err.Error()) + "; nothing changed"
+}
+
+// installFailedFiles is installFailed with env files in the set, or
+// step 15a's own error.
+func installFailedFiles(err error) string {
+	return "the install failed before the box's files changed: " + proof.Bound(err.Error()) + "; nothing changed"
 }
 
 // baselineUnrecorded is `unknown` for a transaction whose applied.json
@@ -123,17 +139,29 @@ type result struct {
 	// Named is the object ids Error names, which an answer holds out of
 	// the response filter as it does Commit.
 	Named []string `json:"named,omitempty"`
+	// The secrets the push adds, changes and removes, as <app>/<VAR>,
+	// and the apps whose env file root wrote or removed over bytes it
+	// had not installed: names, never a value (I9).
+	SecretsAdded     []string `json:"secrets_added,omitempty"`
+	SecretsChanged   []string `json:"secrets_changed,omitempty"`
+	SecretsRemoved   []string `json:"secrets_removed,omitempty"`
+	SecretsOutOfBand []string `json:"secrets_edited_out_of_band,omitempty"`
 }
 
 // marshal is the result's bytes, never more than the handler reads: the
 // caps on its fields keep a result well under maxResult (a 64 KiB diff
-// whose every byte JSON escapes is 384 KiB; app names are plain ASCII),
-// and should that arithmetic ever be wrong the diff and the app list
-// give way, never the verdict.
+// whose every byte JSON escapes is 384 KiB; app names are plain ASCII;
+// 16384 secrets' names of at most some 200 bytes), and should that
+// arithmetic ever be wrong the diff and the app list give way, then the
+// secrets' names, never the verdict.
 func (r result) marshal() []byte {
 	b := encodeJSON(r)
 	if len(b) > maxResult {
 		r.Diff, r.Apps = "(diff and apps omitted: the result would be larger than the handler reads)", nil
+		b = encodeJSON(r)
+	}
+	if len(b) > maxResult {
+		r.SecretsAdded, r.SecretsChanged, r.SecretsRemoved = nil, nil, nil
 		b = encodeJSON(r)
 	}
 	return b
@@ -202,6 +230,8 @@ func resultFields(r result) []zap.Field {
 		zap.String("path", proof.Bound(r.Path)), zap.String("signer", r.Signer), zap.String("box", r.BoxWebhook),
 		zap.Bool("caddyfile_edited_out_of_band", r.OutOfBand), zap.Strings("apps", r.Apps),
 		zap.String("diff", r.Diff), zap.String("error", r.Error), zap.Strings("named", r.Named),
+		zap.Strings("secrets_added", r.SecretsAdded), zap.Strings("secrets_changed", r.SecretsChanged),
+		zap.Strings("secrets_removed", r.SecretsRemoved), zap.Strings("secrets_edited_out_of_band", r.SecretsOutOfBand),
 	}
 }
 
@@ -224,10 +254,22 @@ func readResultFile(dir, id string) (*result, error) {
 	if err := json.Unmarshal(b, &r); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	if r.ID != id || (r.Phase != phaseVerified && !terminal(r.Phase)) || !namesIDs(r.Named) {
+	if r.ID != id || (r.Phase != phaseVerified && !terminal(r.Phase)) || !namesIDs(r.Named) || !namesSecrets(&r) {
 		return nil, fmt.Errorf("%s: not a result", path)
 	}
 	return &r, nil
+}
+
+// namesSecrets reports whether a result's secrets fields are what root
+// writes: names in their grammars, within their caps. As for named, an
+// answer passes them on, so anything else is refused, not forwarded.
+func namesSecrets(r *result) bool {
+	for _, names := range [][]string{r.SecretsAdded, r.SecretsChanged, r.SecretsRemoved} {
+		if !validSecretNames(names) {
+			return false
+		}
+	}
+	return len(r.SecretsOutOfBand) <= 2*proof.MaxSecretApps && !slices.ContainsFunc(r.SecretsOutOfBand, func(s string) bool { return !appName.MatchString(s) })
 }
 
 // maxNamed bounds a result's `named`: a refusal names at most a few

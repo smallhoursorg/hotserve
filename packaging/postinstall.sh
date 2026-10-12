@@ -41,6 +41,16 @@ if command -v systemd-tmpfiles >/dev/null 2>&1; then
 	systemd-tmpfiles --create hotserve-box.conf \
 		|| echo "hotserve: systemd-tmpfiles --create hotserve-box.conf failed; the box applier has no /var/lib/hotserve-box until it succeeds" >&2
 fi
+# The box's key for secrets (box/DESIGN-box.md, "The box's key"), made
+# once and never replaced, so that a box upgraded from a release without
+# secrets has one with no step. Only on a running system: an image built
+# without systemd as PID 1 would otherwise bake one key into every box
+# made from it. A failure never fails the install; init, or the
+# console, makes it later.
+if [ -d /run/systemd/system ]; then
+	/usr/bin/hotserve box key >/dev/null 2>&1 \
+		|| echo "hotserve: could not make the box's key for secrets; run hotserve box key as root" >&2
+fi
 # Packages before the Debian-13-only matrix copied an AppArmor profile
 # into /etc/apparmor.d (which the package itself does not own, so dpkg
 # will not remove it on upgrade). Unload and delete it: apparmor.service

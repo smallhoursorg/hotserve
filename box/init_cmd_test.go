@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +41,17 @@ func (b *testBox) initCmd(dir, sha string) (string, error) {
 }
 
 const fromHere = "init: reloaded. From here, this box takes config only as signed commits sent by your repository's workflow.\n"
+
+// keyLine is init's last line on a green end: the box's key for
+// secrets, as age.pub holds it.
+func keyLine(b *testBox) string {
+	b.t.Helper()
+	pub, err := os.ReadFile(b.path(agePubFile))
+	if err != nil {
+		b.t.Fatalf("init made no age.pub: %v", err)
+	}
+	return "init: secrets for this box encrypt to " + strings.TrimSuffix(string(pub), "\n") + "; hotserve box key prints it again\n"
+}
 
 // summary is init's first two lines for a boxFile on host.
 func summary(host string) string {
@@ -179,7 +191,11 @@ func TestInitCmd(t *testing.T) {
 			case c.err != "" && (err == nil || err.Error() != c.err):
 				t.Fatalf("%v, want %q", err, c.err)
 			}
-			if want := c.want(check{b: b, file: file, sha: sha}); out != want {
+			want := c.want(check{b: b, file: file, sha: sha})
+			if c.err == "" { // a green end makes the box's key last
+				want += keyLine(b)
+			}
+			if out != want {
 				t.Errorf("printed\n%s\nwant\n%s", out, want)
 			}
 			b.settled()
@@ -191,7 +207,7 @@ func TestInitCmd(t *testing.T) {
 			}
 			a := b.applied()
 			if c.path == "" {
-				if a != was || !bytes.Equal(b.installed(), b.v1) {
+				if !reflect.DeepEqual(a, was) || !bytes.Equal(b.installed(), b.v1) {
 					t.Errorf("a red init changed the box: %+v", a)
 				}
 				return
@@ -382,7 +398,7 @@ func TestBaselineUnrecordedRemedies(t *testing.T) {
 		if err == nil || err.Error() != want {
 			t.Fatalf("%v, want %q", err, want)
 		}
-		if out, err := b.initCmd(dir, sha); err != nil || !strings.HasSuffix(out, "init: unchanged; the baseline is now "+sha[:7]+"\n") {
+		if out, err := b.initCmd(dir, sha); err != nil || !strings.HasSuffix(out, "init: unchanged; the baseline is now "+sha[:7]+"\n"+keyLine(b)) {
 			t.Fatalf("init again: %q, %v", out, err)
 		}
 		if a := b.applied(); a.SHA != sha || a.SHA256 != digest(file) {
@@ -468,7 +484,7 @@ func TestInitSaysItWaitsForTheLock(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "init: waiting for root's lock: the applier, or another init or baseline, holds it\n") || !strings.HasSuffix(out.String(), fromHere) {
+	if !strings.Contains(out.String(), "init: waiting for root's lock: the applier, or another init or baseline, holds it\n") || !strings.HasSuffix(out.String(), fromHere+keyLine(b)) {
 		t.Errorf("printed %q", out.String())
 	}
 }

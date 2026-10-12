@@ -92,18 +92,36 @@ func runInitCmd(ctx context.Context, euid int, a *Applier, dir, sha string, out 
 	}
 	switch run.Phase {
 	case phaseApplied:
-		return printf(out, "init: installed %s\ninit: %s\n"+
+		if err := printf(out, "init: installed %s\ninit: %s\n"+
 			"init: reloaded. From here, this box takes config only as signed commits sent by your repository's workflow.\n",
-			installedFile, commits)
+			installedFile, commits); err != nil {
+			return err
+		}
 	case phaseNoChange:
 		if run.was != nil && run.was.SHA != sha {
 			if err := printf(out, "init: %s\n", commits); err != nil {
 				return err
 			}
 		}
-		return printf(out, "init: unchanged; the baseline is now %s\n", shortSHA(sha))
+		if err := printf(out, "init: unchanged; the baseline is now %s\n", shortSHA(sha)); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("%s: %s", run.Phase, run.Error)
 	}
-	return fmt.Errorf("%s: %s", run.Phase, run.Error)
+	return initKey(a, out)
+}
+
+// initKey is init's last step (DESIGN-box.md, "The box's key"): the
+// box's key for secrets, made if there is none, and its line. The
+// install stands whatever happens here, so a failure is a warning and
+// the exit status stays 0.
+func initKey(a *Applier, out io.Writer) error {
+	recipient, _, err := a.boxKey()
+	if err != nil {
+		return printf(out, "init: could not make the box's key for secrets: %s; hotserve box key, as root, makes it\n", proof.Bound(err.Error()))
+	}
+	return printf(out, "init: secrets for this box encrypt to %s; hotserve box key prints it again\n", recipient)
 }
 
 // counted is "no apps", "1 app (example)", "2 apps (a, b)": names held

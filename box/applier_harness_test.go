@@ -376,6 +376,11 @@ func newTestBox(t testing.TB) *testBox {
 			t.Fatal(err)
 		}
 	}
+	// The key's directory, as tmpfiles.d makes it: init makes the key
+	// there. No secrets directory: newSecretsBox adds it.
+	if err := os.Mkdir(filepath.Join(b.root, "etc/hotserve/age"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	b.v1 = boxFile(1, b.alice)
 	b.base = b.repo.commit(b.v1, &b.alice)
 	b.writeInstalled(b.v1)
@@ -653,8 +658,17 @@ func (b *testBox) settled() {
 		b.t.Errorf("work/ not empty: %v", n)
 	}
 	for _, n := range b.names(b.path("etc/hotserve")) {
-		if n != "Caddyfile" {
+		switch n {
+		case "Caddyfile", "age", "age.pub", "secrets":
+		default:
 			b.t.Errorf("/etc/hotserve holds %s", n)
+		}
+	}
+	if _, err := os.Lstat(b.path(secretsDir)); err == nil {
+		for _, n := range b.names(b.path(secretsDir)) {
+			if strings.HasPrefix(n, ".") {
+				b.t.Errorf("/etc/hotserve/secrets holds a temporary: %s", n)
+			}
 		}
 	}
 }

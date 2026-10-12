@@ -17,8 +17,8 @@ import (
 	"github.com/smallhoursorg/hotserve/box/proof"
 )
 
-// `hotserve box …` is one command with subcommands: webhook, apply and
-// baseline.
+// `hotserve box …` is one command with subcommands: webhook, describe,
+// apply, baseline and key.
 func init() {
 	caddycmd.RegisterCommand(caddycmd.Command{
 		Name:  "box",
@@ -99,6 +99,26 @@ hotserve init; it waits while the applier holds its lock.`,
 				Args: cobra.ExactArgs(1),
 				RunE: func(c *cobra.Command, args []string) error {
 					return runBaseline(c.Context(), os.Geteuid(), newApplier(consoleLog("box.baseline")), args[0], c.OutOrStdout())
+				},
+			})
+			cmd.AddCommand(&cobra.Command{
+				Use:   "key",
+				Short: "Print this box's key for secrets, making it if there is none (root)",
+				Long: `Prints the box's key for secrets: the age recipient a repository's
+secrets are encrypted to, the first line of <host>/secrets/recipients.
+The box has one key, made by the first run (the package's postinstall
+runs this on a running system, and init after its install), kept in
+/etc/hotserve/age/identity, root's alone; it is never replaced. On
+standard output the key alone, so that from the laptop
+
+    make secret APP=example VAR=DATABASE_URL BOX_KEY=$(ssh root@box.example.com hotserve box key)
+
+passes it; on standard error what it did. An identity that does not
+read is refused and left as it is: move it aside, run this again, then
+make rekey BOX_KEY=<the new key> in the repository.`,
+				Args: cobra.NoArgs,
+				RunE: func(c *cobra.Command, _ []string) error {
+					return runKey(os.Geteuid(), newApplier(consoleLog("box.key")), c.OutOrStdout(), c.ErrOrStderr())
 				},
 			})
 		},

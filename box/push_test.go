@@ -116,7 +116,7 @@ func newPushRig(t testing.TB) *pushRig {
 func (p *pushRig) handler() *Handler {
 	return &Handler{
 		app: &App{verifiers: p.vs}, logger: zap.New(p.core), limiter: deploytrust.NewLimiter(trusttest.NewClock()),
-		installed: filepath.Join(p.root, installedFile), dir: filepath.Join(p.root, exchangeDir),
+		installed: filepath.Join(p.root, installedFile), dir: filepath.Join(p.root, exchangeDir), secrets: filepath.Join(p.root, secretsDir),
 		verifier: p.verifier, validator: p.val, clock: p.clk, slot: p.slot,
 	}
 }

@@ -111,12 +111,14 @@ func (a *Applier) installedDigest() (string, error) {
 	return digest(b), nil
 }
 
-// removeTemp removes the swap's temporary for id if a crash left it.
-// Not a write recovery reasons from: its bytes are never read.
+// removeTemp removes the swap's temporaries for id if a crash left
+// them: the Caddyfile's and each env file's. Not writes recovery
+// reasons from: their bytes are never read.
 func (a *Applier) removeTemp(id string) {
 	if err := os.Remove(a.caddyfileTmp(id)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		a.logger.Warn("box: could not remove a temporary", zap.String("error", proof.Bound(err.Error())))
 	}
+	a.removeEnvTemps(".*.env.box-" + id)
 }
 
 // lock takes root's blocking lock (DESIGN-box.md, Paths: `lock`), shared
@@ -264,6 +266,8 @@ func (a *Applier) recoverAll(ctx context.Context) error {
 		if v, err := a.readResult(id); err == nil && v.Phase == phaseVerified { // keep what it said
 			t.rec.Commit, t.rec.Path, t.rec.Signer, t.rec.BoxWebhook = v.Commit, v.Path, v.Signer, v.BoxWebhook
 			t.rec.OutOfBand, t.rec.Apps, t.rec.Diff = v.OutOfBand, v.Apps, v.Diff
+			t.rec.SecretsAdded, t.rec.SecretsChanged, t.rec.SecretsRemoved = v.SecretsAdded, v.SecretsChanged, v.SecretsRemoved
+			t.rec.SecretsOutOfBand = v.SecretsOutOfBand
 		}
 		a.finish(t, phaseFailed, msgInterrupted)
 		a.removeVerified(id) // if `failed` could not be written over it
@@ -298,9 +302,11 @@ func (a *Applier) removeVerified(id string) {
 }
 
 // sweepTemporaries removes the temporaries a crash can leave: the swap's
-// in /etc/hotserve, and writeDurable's beside txn.json, applied.json and
-// the results. Every one is in a directory only root writes.
+// in /etc/hotserve and /etc/hotserve/secrets, and writeDurable's beside
+// txn.json, applied.json and the results. Every one is in a directory
+// only root writes.
 func (a *Applier) sweepTemporaries() {
+	a.removeEnvTemps(".*.env.box-*")
 	etc := filepath.Dir(a.caddyfile())
 	var stale []string
 	if names, err := filepath.Glob(filepath.Join(etc, ".Caddyfile.box-*")); err == nil {
@@ -495,6 +501,19 @@ func (a *Applier) process(ctx context.Context, id string) error {
 	}
 	t.rec.Signer, t.rec.BoxWebhook, t.rec.Apps, t.rec.OutOfBand = vd.signer, vd.host, vd.apps, vd.outOfBand
 	t.rec.Prev, t.rec.PrevSHA256, t.rec.NewSHA256 = installed, vd.prevSum, vd.newSum
+	// 15a. Only now, every proof and every signature passed: the box's
+	// key opens the secrets, and what stands in secretsDir decides which
+	// env files are in the set. The box's errors here name the box's
+	// files.
+	plan, err := a.planSecrets(vd.secrets, base, b.Path)
+	if err != nil {
+		var f *failure
+		var ref *refusal
+		if !errors.As(err, &f) && !errors.As(err, &ref) {
+			err = &failure{msg: installFailedFiles(err)}
+		}
+		return a.checked(t, err)
+	}
 	// 16. Active? `activating` and `reloading` are waited out (running);
 	// anything but `active` then refuses.
 	state, err := a.running(ctx)
@@ -513,18 +532,24 @@ func (a *Applier) process(ctx context.Context, id string) error {
 	}
 	t.rec.Diff = caddyfileDiff(installed, b.Caddyfile)
 	t.next = b.Caddyfile
+	plan.into(t)
 	return a.install(ctx, t)
 }
 
 // checked ends a bundle that did not pass a check: refused for a verdict
-// on the push, failed for the box's own error (checking → failed).
+// on the push, failed for the box's own error (checking → failed), in
+// the catalogue's text for it where it has one of its own.
 func (a *Applier) checked(t *txn, err error) error {
 	var ref *refusal
-	if errors.As(err, &ref) {
+	var f *failure
+	switch {
+	case errors.As(err, &ref):
 		t.named = ref.ids
 		a.finish(t, phaseRefused, ref.msg)
-		return nil
+	case errors.As(err, &f):
+		a.finish(t, phaseFailed, f.msg)
+	default:
+		a.finish(t, phaseFailed, installFailed(err))
 	}
-	a.finish(t, phaseFailed, installFailed(err))
 	return nil
 }

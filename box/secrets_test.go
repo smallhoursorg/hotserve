@@ -332,44 +332,6 @@ func (r *repo) commitSecrets(file []byte, apps map[string]map[string][]byte, key
 	return id
 }
 
-// Until the applier installs secrets, a commit with an app's secrets is
-// refused by name, before any signature is checked, and never answered
-// no_change; a recipients file alone installs nothing and passes; a
-// secrets directory the bundle does not carry whole is refused as the
-// proof says.
-func TestApplySecretsNotYet(t *testing.T) {
-	b := newTestBox(t)
-	val := encrypt(t, []byte("v"), newIdentity(t).Recipient())
-	c1 := b.repo.commitSecrets(boxFile(2, b.alice), map[string]map[string][]byte{"example": {"DATABASE_URL": val}}, &b.alice, b.base)
-	r := b.pushOne(b.repo.bundleFiles(c1, b.base))
-	if r.Phase != phaseRefused || r.Error != msgNoSecretsYet {
-		t.Fatalf("%+v", r)
-	}
-	b.unchanged()
-
-	files := b.repo.bundleFiles(c1, b.base)
-	delete(files, "blobs/"+proof.ObjectID("blob", val))
-	r = b.pushOne(files)
-	if r.Phase != phaseRefused || !strings.Contains(r.Error, "bundle: blob "+proof.ObjectID("blob", val)+", needed for box1/secrets/example/DATABASE_URL.age in "+c1+", is not in the bundle") {
-		t.Fatalf("%+v", r)
-	}
-	b.unchanged()
-
-	c2 := b.repo.commitSecrets(boxFile(3, b.alice), nil, &b.alice, b.base)
-	if r := b.pushOne(b.repo.bundleFiles(c2, b.base)); r.Phase != phaseApplied {
-		t.Fatalf("recipients alone: %+v", r)
-	}
-	// The fast path holds a commit with secrets to the same rule: were
-	// one ever the baseline, its replay is not answered no_change.
-	bundle, err := proof.ReadBundle(tgz(t, b.repo.bundleFiles(c1, b.base)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if unchanged(bundle, bundle.Caddyfile, &applied{SHA: c1, Path: testPath}) {
-		t.Fatal("a commit with secrets answered no_change")
-	}
-}
-
 // secretsFile is good's app block with lines added, and a second app.
 func secretsFile(exampleLines, apiLines string) []byte {
 	f := strings.Replace(good, "\t\t\tcommand node server.js\n", "\t\t\tcommand node server.js\n"+exampleLines, 1)

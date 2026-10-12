@@ -56,6 +56,7 @@ func newRig(t testing.TB) *rig {
 		limiter:   deploytrust.NewLimiter(r.clock),
 		installed: r.installed,
 		dir:       r.dir,
+		secrets:   filepath.Join(tmp, "secrets"),
 		slot:      make(chan struct{}, 1),
 	}
 	if err := os.MkdirAll(r.dir, 0o755); err != nil {

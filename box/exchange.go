@@ -37,8 +37,10 @@ const (
 	// maxMarker caps a marker, stage/<id>.auth.
 	maxMarker = 4 << 10
 	// maxResult caps a result, out/<id>.json, as the handler reads it;
-	// the applier never writes a larger one (results.go).
-	maxResult = 2 << 20
+	// the applier never writes a larger one (results.go). One push may
+	// remove 8192 secrets and add 8192 others: 16384 names of some 200
+	// bytes, beside apps under 1 MiB and the diff's 384 KiB.
+	maxResult = 6 << 20
 )
 
 // isRequestID reports whether s is a request id: 32 lowercase hex, the
@@ -95,13 +97,18 @@ func isLowerHex(s string) bool {
 	return true
 }
 
-// applied is applied.json, the baseline: the commit the box runs.
+// applied is applied.json, the baseline: the commit the box runs, and
+// the env files it manages — the only ones it may remove, at the digests
+// the fast path and the out-of-band flag compare. Both secrets fields
+// are absent in a file a box without secrets wrote, which reads as none.
 type applied struct {
-	SHA    string    `json:"sha"`
-	Path   string    `json:"path"`
-	SHA256 string    `json:"sha256"`
-	Signer string    `json:"signer"`
-	When   time.Time `json:"when"`
+	SHA         string            `json:"sha"`
+	Path        string            `json:"path"`
+	SHA256      string            `json:"sha256"`
+	Signer      string            `json:"signer"`
+	When        time.Time         `json:"when"`
+	SecretsTree string            `json:"secrets_tree,omitempty"`
+	Secrets     map[string]string `json:"secrets,omitempty"`
 }
 
 var errNotRegular = errors.New("not a regular file")
@@ -172,6 +179,12 @@ func readApplied(dir string) (*applied, error) {
 	}
 	if !proof.IsID(a.SHA) {
 		return nil, fmt.Errorf("%s: sha is not a 40-hex commit id", path)
+	}
+	if a.SecretsTree != "" && !proof.IsID(a.SecretsTree) {
+		return nil, fmt.Errorf("%s: secrets_tree is not a 40-hex tree id", path)
+	}
+	if err := validInstalled(a.Secrets); err != nil {
+		return nil, fmt.Errorf("%s: secrets: %w", path, err)
 	}
 	return &a, nil
 }

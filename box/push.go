@@ -205,7 +205,7 @@ func (p *pushing) state() (base *applied, installed []byte, done bool, err error
 // it, of what was read there: a push another one applied meanwhile is
 // answered so, not pre-verified against itself.
 func (p *pushing) noChange(b *proof.Bundle, base *applied, installed []byte) (bool, error) {
-	if !unchanged(b, installed, base) {
+	if !unchanged(b, installed, base, p.h.envDigest) {
 		return false, nil
 	}
 	p.h.logger.Info("box push answered", zap.String("id", p.id), zap.String("commit", p.commit), zap.String("phase", phaseNoChange),

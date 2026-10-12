@@ -52,7 +52,10 @@ func runBaseline(ctx context.Context, euid int, a *Applier, sha string, out io.W
 		}
 		return printf(out, "baseline: this box already runs %s; nothing changed\n", shortSHA(sha))
 	}
-	if err := a.putApplied(applied{SHA: sha, Path: old.Path, SHA256: old.SHA256, Signer: "baseline", When: a.clock.Now().UTC()}); err != nil {
+	// The env files it manages are kept as found, as the digest is: the
+	// next push decides them by the full chain.
+	if err := a.putApplied(applied{SHA: sha, Path: old.Path, SHA256: old.SHA256, Signer: "baseline", When: a.clock.Now().UTC(),
+		SecretsTree: old.SecretsTree, Secrets: old.Secrets}); err != nil {
 		return err
 	}
 	return printf(out, "baseline: this box ran %s; it now applies commits descending from %s\n", shortSHA(old.SHA), shortSHA(sha))

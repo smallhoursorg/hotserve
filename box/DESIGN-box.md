@@ -10,10 +10,7 @@ body once they settle.
 **except secrets**: the "Secrets" section, and every step, row and
 message that names a secret, the box's key, an env file the box
 writes or the set, is the design box PRs 7b to 7f build, and the
-released box applies the Caddyfile alone. Between 7b and 7c, a bundle
-whose commit has a `<host>/secrets/` is refused by the handler and root
-alike as `this box does not install secrets yet`; 7c removes the
-refusal and this sentence. Normative: a change that
+released box applies the Caddyfile alone. Normative: a change that
 cannot hold a line here changes the line in the same PR, with the
 reason.
 
@@ -738,7 +735,7 @@ shows after recovery.
 | each file of the set, temp + rename (an env file the push removes: unlink) | the first: remove temp; result `failed` — unless that file now reads otherwise: as `new` (the rename landed and only the directory's `fsync` failed), the post-swap failure of the next row; as neither, the `any` row; unreadable, the stop-as-found of I2, the record left for recovery. Any later one, a file having changed already: the post-swap failure of the next row, which puts back every file at its `new` | `d == new` or mixed with phase `installing` → treat as `swapped` | per `swapped` | per `swapped` |
 | record `swapped` | **post-swap failure**: record `rolling_back` if it can be written, then the previous bytes back; if they cannot be written back, leave the record (phase `installing`, or `rolling_back` if that write landed; `d == new` or mixed) and the entry, and exit non-zero with an error-level line ("disk full; the previous Caddyfile could not be restored", or for an env file "disk full; the previous env file for <app> could not be restored") — the path unit re-triggers until its limit and fails; the console frees space, then restarts the path unit as "The applier unit" says, again ten seconds later if that fails (`reset-failed` alone clears the state but does not start a unit that hit its trigger limit) | phase `swapped` → rollback path | `rolled_back` / `unknown` | per phase |
 | reload | non-zero exit → rollback path | phase `swapped` (the reload's outcome unknown) → rollback path | `rolled_back` / `unknown` | per phase |
-| record `applied` | the reload succeeded but the record cannot say so, and the baseline must never run ahead of the record (I4): take the rollback path exactly as the `record swapped` row — previous bytes back, reload, result `rolled_back` ("the record could not be updated after a successful reload (disk full); rolled back to keep the file and the record consistent") or, if the write-back fails too, the full-disk end above | phase `applied`, `d == new` → `applied.json`, result | `rolled_back` / `unknown` | per phase |
+| record `applied` | the reload succeeded but the record cannot say so, and the baseline must never run ahead of the record (I4): take the rollback path exactly as the `record swapped` row — previous bytes back, reload, result `rolled_back` ("the record could not be updated after a successful reload (disk full); rolled back to keep the file and the record consistent"; with env files alone in the set no reload was asked, so none follows the write-back either, and the text is "a write after the first file changed failed; rolled back: the previous Caddyfile and env files are back") or, if the write-back fails too, the full-disk end above | phase `applied`, `d == new` → `applied.json`, result | `rolled_back` / `unknown` | per phase |
 | `applied.json` | journal (error); result `unknown` ("applied but the baseline could not be recorded; hotserve box baseline <sha> on the box records it (the next push then reports the file as edited out of band; it was not)": `baseline` keeps the previous digest. Not a push again: a chain that rotated a signer on the way is verified again against the file now installed, and refused. After a `no_change`, "unchanged, but … push again, which records it": nothing changed, so the same chain verifies again. For `init`, "`hotserve init <sha>` again, which ends no_change and records it") | phase `applied` → idempotent rewrite | `applied` / `unknown` | per phase |
 | previous bytes back | retry once (a write whose rename landed counts); else the full-disk end of the `record swapped` row: no result, record and entry kept, exit non-zero — a result written here would make the next recovery drop the record (the `terminal result` row), and with it the only copy of the previous bytes | phase `rolling_back`, `d` checked, bytes written back if needed | `rolled_back` / `unknown` | per phase |
 | terminal result | **full disk**: error-level journal with every field; remove record and entry anyway (both `unlink`s). At a terminal phase the disk is settled and only the report is owed; a record kept would spin `PathExists=txn.json`. | result exists, record present → remove record and entry | as logged | the last result on disk — `verified` for a transaction past that phase, else `admitted` — until the workflow's bound, then red naming the journal |
@@ -798,6 +795,7 @@ refusing every push at admission — scores severity 1.
 | A `no_change` reloads nothing, so it records as the baseline bytes the running hotserve may not have loaded: a console that copied a file in without a reload, then pushes or runs `init` with the same bytes | `hotserve init`; Transitions, checking → no_change | 3 | 1 | 3 | 9; two console acts, the copy without its reload first; the next reload loads the recorded bytes |
 | A record that does not read, from a transaction past its swap, removed by a console that skips the write-back: the push ends `failed` ("interrupted before the Caddyfile changed") with the new file on disk, and the next push reports an out-of-band edit | States, "(record unreadable)" | 3 | 1 | 3 | 9; root-only state corrupted, then the console skipping the step its journal line names |
 | A crash or shutdown between the swap and the reload's outcome, for a file that validates but does not load: hotserve starts on it at boot and fails, and recovery puts the previous bytes back on a hotserve that stays down (`failed`, "hotserve is not running") | States, `swapped` and `rolling_back` | 4 | 2 | 1 | 8; red, and the result names the commands that start hotserve on the previous file |
+| A link, or anything but a regular file, that a console put at an env file's name reads as no file: a push for that app replaces it, and should the push then roll back, the rollback removes the push's file and does not put the link back | "Values and the env file" | 2 | 2 | 3 | 12; two independent faults (a console's link in root's own directory, then a failed push), and the push is red and named |
 | An app launched (a deploy, a crash's relaunch) while a push's env files stand at `new` — between their swap and the Caddyfile's, or before a rollback puts them back — runs with those values, beside the Caddyfile it had, until its next launch | Transitions, installing → swapped | 2 | 2 | 3 | 12; the values are ones a signer committed, the push is red and named when it rolls back, and the app's next launch reads what is on disk |
 
 ## Admission
@@ -863,12 +861,12 @@ an empty cell means nobody, by design.
 |---|---|---|---|---|---|---|
 | `/etc/hotserve/Caddyfile` | 0644 | root:root | package | applier, `init`, console | hotserve, handler, applier | — |
 | `/etc/hotserve/.Caddyfile.box-<id>` | 0644 | root:root | applier, `init` | applier, `init` | — | applier, `init` (renamed over `Caddyfile`, or removed on failure) |
-| `/etc/hotserve/age/` | 0700 | root:root | tmpfiles.d, from box PR 7c | `box key` | applier, `box key` | — |
+| `/etc/hotserve/age/` | 0700 | root:root | tmpfiles.d | `box key` | applier, `box key` | — |
 | `/etc/hotserve/age/identity` | 0600 | root:root | `box key` (run by postinstall, `init` and the console) | — (never rewritten) | applier (step 15a), `box key` | — (a console moves it aside) |
 | `/etc/hotserve/age/.identity.box-<random>` | 0600 | root:root | `box key` | `box key` | — | `box key` (linked to `identity`, then removed; or removed on failure; the next run removes a crash's) |
 | `/etc/hotserve/age.pub` | 0644 | root:root | `box key` | `box key` (only when missing or not the identity's) | handler (`GET /`) | — |
 | `/etc/hotserve/.age.pub.box-<random>` | 0644 | root:root | `box key` | `box key` | — | `box key` (renamed over `age.pub`, or removed on failure; the next run removes a crash's) |
-| `/etc/hotserve/secrets/` | 2750 | root:hotserve | tmpfiles.d, from box PR 7c | applier | hotserve, handler, applier | — |
+| `/etc/hotserve/secrets/` | 2750 | root:hotserve | tmpfiles.d | applier | hotserve, handler, applier | — |
 | `/etc/hotserve/secrets/<app>.env` | 0640 | root:hotserve (born in the setgid dir) | applier | applier | hotserve (each launch of `<app>`, and its response filter), handler (step 4's digest), applier | applier (when `applied.json` lists the app and HEAD has no `secrets/<app>/`) |
 | `/etc/hotserve/secrets/.<app>.env.box-<id>` | 0640 | root:hotserve (born in the setgid dir) | applier | applier | — | applier (renamed over `<app>.env`, or removed on failure; recovery removes a crash's) |
 | `/var/lib/hotserve-box/` | 2750 | root:hotserve | tmpfiles.d | — | — | — |
@@ -897,10 +895,7 @@ Notes that the table cannot hold:
   package's directory, 0755 root, not setgid.
 - `/etc/hotserve/age/` is 0700 so that the identity is root's alone
   whatever mode a console writes it with: the hotserve uid is every
-  app's uid too ("The box's key"). The two `Creates` cells that say
-  "from box PR 7c" become `tmpfiles.d` when that PR adds their lines
-  to the tmpfiles.d file; until then the test that holds the file to
-  this table does not count them.
+  app's uid too ("The box's key").
 - Nothing is at `/etc/hotserve/Caddyfile.prev` or `Caddyfile.new`:
   an earlier template's `bin/push` and its sudoers lines (`tee`,
   `mv -f`, `rm -f` on exactly those names) wrote them, and on a box
@@ -1278,7 +1273,7 @@ What root does with what is already there, per app:
 | On disk | HEAD has secrets for the app | HEAD has none for it |
 |---|---|---|
 | `<app>.env`, listed in `applied.json` at the digest it records | rewritten if the rendered bytes differ, or if its mode or owner is not the applier's (then named out of band too) | removed |
-| `<app>.env` listed in `applied.json`, at another digest (a console edit, a disk fault) or absent | HEAD's bytes written, the app named in `secrets_edited_out_of_band`, as step 10's flag reports a Caddyfile edit | removed if present, named the same way |
+| `<app>.env` listed in `applied.json`, at another digest (a console edit, a disk fault) or absent | HEAD's bytes written, the app named in `secrets_edited_out_of_band`, as step 10's flag reports a Caddyfile edit | removed if a regular file, named the same way; a link or other kind at the name is not the box's and is left alone, named |
 | `<app>.env`, not listed in `applied.json` (a console made it) | overwritten with HEAD's bytes if they differ or its mode or owner is not the applier's, named the same way; listed from then on | left alone, never listed |
 | no file, none listed | written | — |
 
@@ -1419,7 +1414,7 @@ says.
 | 1 | `init` | `this directory is <name>, and the Caddyfile is for <host>: a box's directory is named for its host, so run init from <host>/ in a copy of the repository` | the directory's name is not the host |
 | 1 | `init` | `hotserve is not running; nothing applied` / `hotserve is still starting after 300 s; nothing applied`, each followed by the remedy below | hotserve not up after the wait |
 | 1 | `init` | `<phase>: <text>`, the phase and the catalogue text above of `failed`, `rolled_back` or `unknown` | the transaction's red ends |
-| 1 | both | `disk full; the previous Caddyfile could not be restored` | the full-disk end, in `init`'s transaction or in the recovery either runs first |
+| 1 | both | `disk full; the previous Caddyfile could not be restored` / `disk full; the previous env file for <app> could not be restored` | the full-disk end, in `init`'s transaction or in the recovery either runs first (the second, for a push's env file, only in recovery) |
 | 1 | both | the box's own error as the system words it (a write of `applied.json` that fails, a state file that does not read) | anything else |
 | 1 | both | `the transaction could not be settled`, after the error-level line saying why | recovery, or `init`'s own transaction, stopped with everything left as found (I2); the record left starts the applier, whose recovery settles it by the States table — an `init` swap whose reload exited 0 but whose file could not be read back is rolled back there |
 | 1 | `init` | `unknown: applied but the baseline could not be recorded; hotserve init <sha> again, which ends no_change and records it` (`unchanged, but …` after a `no_change`) | `applied.json` could not be written |
