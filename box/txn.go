@@ -163,6 +163,15 @@ func (r *record) validSecrets() error {
 	if err := validInstalled(r.SecretsInstalled); err != nil {
 		return err
 	}
+	// What applied.json will list agrees with the set: an env file the
+	// push writes is listed at its new digest, one it removes is not.
+	// Recovery writes applied.json from secrets_installed, so a record
+	// in which they disagree never reaches the baseline.
+	for _, e := range r.Secrets {
+		if d, listed := r.SecretsInstalled[e.App]; listed != (e.NewSHA256 != "") || (listed && d != e.NewSHA256) {
+			return errors.New("secrets_installed disagrees with the set's env files")
+		}
+	}
 	if !validNameLists(r.SecretsAdded, r.SecretsChanged, r.SecretsRemoved, r.SecretsOutOfBand) {
 		return errors.New("the secrets' names are not <app>/<VAR>, or the apps out of band not app names")
 	}
