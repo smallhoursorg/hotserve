@@ -33,8 +33,8 @@ user that stays up without anyone logging in — the thing your apps
 will run under.
 
 **Supported: Debian 13, on a real virtual machine.** The package
-refuses to install where systemd is older than 257 (Debian 12, Ubuntu
-24.04): each app's sandbox needs it. It installs on other Debian-based
+refuses to install where systemd is older than 257 (Debian 12 and
+earlier, Ubuntu 24.04): each app's sandbox needs it. It installs on other Debian-based
 distributions with systemd 257 or newer, but nothing else is tested.
 On a host that cannot deliver the per-app sandbox — many LXC-based and
 other container-style servers — hotserve refuses a config that runs
@@ -59,7 +59,8 @@ does for you, namely a dedicated `hotserve` user, a `Type=notify`
 unit, `loginctl enable-linger hotserve` (with `libpam-systemd`
 installed) so the user manager exists for your apps, and the config at
 `/etc/hotserve/Caddyfile`. The sandbox applies here too, so the host
-has to deliver both namespaces — many container and LXC hosts cannot,
+needs systemd 257 or newer and has to deliver both namespaces — many
+container and LXC hosts cannot,
 and hotserve refuses to start rather than run your apps unprotected.
 
 **systemd is not optional.** liveswap runs your apps as transient

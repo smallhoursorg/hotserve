@@ -29,8 +29,8 @@ license: Apache-2.0
 depends:
   # Every app unit gets PrivatePIDs=, which systemd 257 added
   # (systemd.exec(5)), and no setting runs an app without it. The floor
-  # lets apt refuse an older release (Debian 11 and 12, Ubuntu 24.04)
-  # at install. Without it such a box installs and serves the starter
+  # lets apt refuse an older release (Debian 12 and earlier, Ubuntu
+  # 24.04) at install. Without it such a box installs and serves the starter
   # page, which leaves liveswap off. The failure would then come only
   # when the box's own config first turns liveswap on, as `hotserve
   # init`'s reload fails. A version is all apt can see. Whether the

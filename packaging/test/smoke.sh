@@ -631,9 +631,9 @@ app_hard=$(probe_val nofile_hard)
 app_nofile=$app_soft
 sd_version=$(systemctl --version | awk 'NR==1 {print $2}')
 # The user@<uid> drop-in only reaches the manager from systemd 256 (#37);
-# the support matrix is Debian 13 (257), so this is unconditional.
-[ "${sd_version%%[!0-9]*}" -ge 256 ] \
-	|| die "systemd $sd_version is below the supported floor of 256 (Debian 13 ships 257)"
+# the package requires 257, so this is unconditional.
+[ "${sd_version%%[!0-9]*}" -ge 257 ] \
+	|| die "systemd $sd_version is below the package's floor of 257 (Debian 13 ships 257)"
 [ "$mgr_nofile" = "1048576" ] \
 	|| die "systemd $sd_version: user@$uid DefaultLimitNOFILE is $mgr_nofile, not the drop-in's 1048576"
 echo "app NOFILE $app_nofile = user@$uid DefaultLimitNOFILE = the drop-in's 1048576 (systemd $sd_version)"

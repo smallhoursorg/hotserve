@@ -37,9 +37,9 @@ You need a real virtual machine, not a container. Providers call the
 kind you want **KVM**; at Hetzner, say, the cheapest KVM tier is enough
 for a few small apps. Offers described as LXC or "container VPS" will
 not work: each app runs in its own sandbox, which those hosts cannot
-provide, and hotserve refuses to start rather than run your apps
-without it. If you are unsure what you have, step 2 tells you within a
-minute. At the provider:
+provide, and hotserve refuses to run your apps without it. If you are
+unsure what you have, step 2 tells you within a minute. At the
+provider:
 
 1. Create a server with **Debian 13** as the image and your SSH public
    key. Architecture is your choice; note it, since the release `.deb`
@@ -100,6 +100,12 @@ release candidate is never that.
 upgrade is on the box already; `/tmp` would not survive a reboot.
 `enable --now` prints only `Created symlink …`; that is success.)
 
+On a release older than Debian 13, `apt install` stops with
+`hotserve : Depends: systemd (>= 257)`, and the `systemctl` line after
+it finds no hotserve unit. Each app's sandbox is built on systemd 257,
+so the fix is a Debian 13 image, not a setting. That is the first half
+of the step 1 check.
+
 Check it:
 
 ```sh
@@ -108,15 +114,11 @@ curl -s localhost                  # "hotserve is running. To serve your apps: h
 systemd-detect-virt --container    # none
 ```
 
-If it is not running, `journalctl -u hotserve -n 50` says why.
-
-The step 1 check happens here, in two parts. On a release older than
-Debian 13, `apt install` refuses: hotserve depends on
-`systemd (>= 257)`, the version each app's sandbox is built on. apt
-cannot see a container, so the last line checks for one: `none` means
-a virtual machine; `lxc`, `openvz` or any other name is a container,
-the kind of host step 1 warns about. Either way the fix is a different
-host, not a setting.
+If it is not running, `journalctl -u hotserve -n 50` says why. The
+last line is the other half of the step 1 check, the part apt cannot
+see: `none` means no container, while `lxc`, `openvz` or any other
+name is the kind of host step 1 warns about, and the fix is a
+different host.
 
 (The deploy side, liveswap, is not running yet: the starter config
 leaves it commented out. It starts, and says so in the journal, in
